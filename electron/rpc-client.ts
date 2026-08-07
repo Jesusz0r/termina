@@ -25,13 +25,18 @@ export class PiRpcClient {
   private buffer = "";
   private pending = new Map<string, { resolve: (m: RpcResponse) => void; reject: (e: Error) => void }>();
   private seq = 0;
+  private intentionalStop = false;
 
   constructor(private opts: PiRpcOptions) {}
 
   /** Every non-response message pi emits (agent events, extension UI requests). */
   onEvent: (event: RpcEvent) => void = () => {};
-  /** The child process exited. code is null on spawn failure. */
-  onExit: (code: number | null, signal: NodeJS.Signals | null, error?: Error) => void = () => {};
+  /**
+   * The child process exited. code is null on spawn failure.
+   * `intentional` is true when stop() was called (restart/quit) rather than an
+   * unexpected crash — callers can suppress spurious error messages.
+   */
+  onExit: (code: number | null, signal: NodeJS.Signals | null, error?: Error, intentional?: boolean) => void = () => {};
   /** Raw stderr lines (diagnostics). */
   onStderr: (line: string) => void = () => {};
 
@@ -64,11 +69,13 @@ export class PiRpcClient {
       // Reject anything still pending so callers don't hang forever.
       for (const [, p] of this.pending) p.reject(new Error("pi exited"));
       this.pending.clear();
-      this.onExit(code, signal);
+      this.onExit(code, signal, undefined, this.intentionalStop);
     });
   }
 
   stop(): void {
+    // Mark the exit as intentional so onExit callers don't report a crash.
+    this.intentionalStop = true;
     if (!this.proc) return;
     try {
       this.proc.kill("SIGTERM");

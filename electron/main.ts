@@ -142,14 +142,14 @@ class PiEditorApp {
     });
 
     this.rpc.onEvent = (event) => this.handlePiEvent(event);
-    this.rpc.onExit = (code, _signal, err) => {
+    this.rpc.onExit = (code, _signal, err, intentional) => {
       this.isStreaming = false;
       this.pushState();
       if (err) {
         this.send("pi:error", {
           message: `Could not start pi: ${err.message}\n\nInstall the pi coding agent with:\n  npm install -g @earendil-works/pi-coding-agent\nor point PI_EDITOR_PI_BIN at the pi binary.`,
         });
-      } else if (code !== 0) {
+      } else if (code !== 0 && !intentional) {
         this.send("pi:error", { message: `pi exited unexpectedly (code ${code}). Use Session → New Session to restart.` });
       }
     };
