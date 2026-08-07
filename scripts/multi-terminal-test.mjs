@@ -98,7 +98,7 @@ const pane1Text = await activeTerminalText();
 check("pane 1 chat is isolated (no pane-2 content)", !pane1Text.includes("PANE-TWO-MARKER") && !pane1Text.includes("Reply with exactly"));
 
 // 4. model isolation: change model on pane 1, pane 2 must keep its own
-const modelBefore = await evalJs(`document.getElementById('status-model').textContent`);
+const modelBefore = await evalJs(`document.getElementById('model-select').selectedOptions[0]?.textContent ?? ''`);
 await evalJs(`
   (() => {
     const sel = document.getElementById('model-select');
@@ -109,11 +109,11 @@ await evalJs(`
   })()
 `);
 await sleep(3500);
-const pane1Model = await evalJs(`document.getElementById('status-model').textContent`);
+const pane1Model = await evalJs(`document.getElementById('model-select').selectedOptions[0]?.textContent ?? ''`);
 // switch to pane 2 and check its model is unchanged
 await evalJs(`document.querySelectorAll('.terminal-tab')[1].click()`);
 await sleep(500);
-const pane2Model = await evalJs(`document.getElementById('status-model').textContent`);
+const pane2Model = await evalJs(`document.getElementById('model-select').selectedOptions[0]?.textContent ?? ''`);
 check("model change isolated per instance", pane1Model !== modelBefore && pane2Model === modelBefore, `pane1=${pane1Model} pane2=${pane2Model} was=${modelBefore}`);
 
 // 5. close pane 2

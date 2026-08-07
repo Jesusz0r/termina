@@ -12,16 +12,6 @@
     <div id="app">
       <header id="toolbar">
         <span id="cwd-label" class="muted" title="Project folder (Cmd+O to change)"></span>
-        <div class="spacer"></div>
-        <label class="toolbar-field">
-          <span class="muted">model</span>
-          <select id="model-select" title="Agent model"></select>
-        </label>
-        <label class="toolbar-field">
-          <span class="muted">thinking</span>
-          <select id="thinking-select" title="Thinking level"></select>
-        </label>
-        <button id="btn-abort" class="toolbar-btn danger" disabled title="Abort the running agent (Cmd+.)">■ Abort</button>
       </header>
 
       <main id="main">
@@ -70,11 +60,19 @@
       </main>
 
       <footer id="statusbar">
-        <span id="status-model" class="muted"></span>
+        <label class="status-field">
+          <span class="muted">model</span>
+          <select id="model-select" title="Agent model"></select>
+        </label>
+        <label class="status-field">
+          <span class="muted">thinking</span>
+          <select id="thinking-select" title="Thinking level"></select>
+        </label>
         <span id="status-state" class="muted">idle</span>
         <span id="status-session" class="muted"></span>
         <div class="spacer"></div>
         <span id="status-cwd" class="muted"></span>
+        <button id="btn-abort" class="statusbar-abort" disabled title="Abort the running agent (Cmd+.)">■ Abort</button>
       </footer>
 
       <div id="prompt-bar">

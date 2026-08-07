@@ -10,7 +10,6 @@ export class Panels {
   private thinkingSelect = document.getElementById("thinking-select") as HTMLSelectElement;
   private btnAbort = document.getElementById("btn-abort") as HTMLButtonElement;
   private btnSend = document.getElementById("btn-send") as HTMLButtonElement;
-  private statusModel = document.getElementById("status-model")!;
   private statusState = document.getElementById("status-state")!;
   private statusCwd = document.getElementById("status-cwd")!;
   private statusSession = document.getElementById("status-session")!;
@@ -53,7 +52,6 @@ export class Panels {
 
   setState(s: PiState | null): void {
     if (!s) {
-      this.statusModel.textContent = "no terminal";
       this.statusState.textContent = "idle";
       this.statusState.classList.remove("busy");
       this.statusCwd.textContent = "";
@@ -64,7 +62,6 @@ export class Panels {
       this.thinkingSelect.replaceChildren();
       return;
     }
-    this.statusModel.textContent = s.model ? `${s.model.name}` : "no model";
     this.statusState.textContent = s.isStreaming ? "● agent working" : "idle";
     this.statusState.classList.toggle("busy", s.isStreaming);
     this.statusCwd.textContent = s.cwd ?? "";

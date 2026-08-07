@@ -38,7 +38,7 @@ const evalJs = async (expression) => {
 };
 
 // 1. capture the model before
-const before = await evalJs(`document.getElementById('status-model').textContent`);
+const before = await evalJs(`document.getElementById('model-select').selectedOptions[0]?.textContent ?? ''`);
 console.log("model before:", before);
 
 // 2. change the model via the dropdown
@@ -69,7 +69,7 @@ const after = await evalJs(`
     }
     return JSON.stringify({
       lines,
-      statusModel: document.getElementById('status-model').textContent,
+      statusModel: document.getElementById('model-select').selectedOptions[0]?.textContent ?? '',
       selectValue: document.getElementById('model-select').value,
     });
   })()
