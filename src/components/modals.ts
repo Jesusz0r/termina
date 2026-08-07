@@ -66,27 +66,28 @@ export function showEditor(title: string, prefill: string): Promise<ModalResult>
 }
 
 /** Handle any extension_ui_request and send the response back via window.pi. */
-export async function handleExtensionUiRequest(req: ExtensionUiRequest): Promise<void> {
+export async function handleExtensionUiRequest(req: ExtensionUiRequest & { instanceId?: string }): Promise<void> {
   const { id, method } = req;
+  const respond = (payload: Record<string, unknown>) => window.pi.respondUi(req.instanceId ?? "", id, payload);
   switch (method) {
     case "confirm": {
       const res = await showConfirm(req.title ?? "Confirm", req.message ?? "");
-      window.pi.respondUi(id, res.cancelled ? { cancelled: true } : { confirmed: res.confirmed });
+      respond(res.cancelled ? { cancelled: true } : { confirmed: res.confirmed });
       break;
     }
     case "select": {
       const res = await showSelect(req.title ?? "Select", req.options ?? []);
-      window.pi.respondUi(id, res.cancelled ? { cancelled: true } : { value: res.value });
+      respond(res.cancelled ? { cancelled: true } : { value: res.value });
       break;
     }
     case "input": {
       const res = await showInput(req.title ?? "Input", req.placeholder ?? "", req.prefill ?? "");
-      window.pi.respondUi(id, res.cancelled ? { cancelled: true } : { value: res.value });
+      respond(res.cancelled ? { cancelled: true } : { value: res.value });
       break;
     }
     case "editor": {
       const res = await showEditor(req.title ?? "Editor", req.prefill ?? "");
-      window.pi.respondUi(id, res.cancelled ? { cancelled: true } : { value: res.value });
+      respond(res.cancelled ? { cancelled: true } : { value: res.value });
       break;
     }
     case "notify":

@@ -118,6 +118,11 @@ export class TerminalManager {
     });
   }
 
+  /** Expose the raw xterm instance (dev hooks/tests). */
+  getTerminal(): Terminal {
+    return this.term;
+  }
+
   dispose(): void {
     this.disposed = true;
     if (this.watchdog) clearInterval(this.watchdog);

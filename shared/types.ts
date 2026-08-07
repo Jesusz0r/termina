@@ -15,6 +15,7 @@ export interface ModelInfo {
 }
 
 export interface PiState {
+  instanceId: string;
   isStreaming: boolean;
   model: ModelInfo | null;
   thinkingLevel: string | null;
@@ -24,6 +25,14 @@ export interface PiState {
   levels: string[];
   /** True once a real project folder is opened (not the home-dir placeholder). */
   hasProject: boolean;
+}
+
+export interface InstanceSummary {
+  id: string;
+  cwd: string;
+  model: string | null;
+  isStreaming: boolean;
+  modifiedCount: number;
 }
 
 export interface FileChangedPayload {
@@ -40,6 +49,7 @@ export interface ToolTargetPayload {
 }
 
 export interface SettledPayload {
+  instanceId: string;
   /** Files modified in this run (for the terminal summary). */
   runFiles: ModifiedFile[];
   /** All files modified in this session (for the panel). */
@@ -51,33 +61,45 @@ export interface FileDeletedPayload {
   path: string;
 }
 
+export interface ModifiedListPayload {
+  instanceId: string;
+  files: ModifiedFile[];
+}
+
 export interface PiBridge {
   // push events (main → renderer)
-  onEvent(cb: (event: Record<string, unknown>) => void): void;
+  onEvent(cb: (event: { instanceId: string } & Record<string, unknown>) => void): void;
   onFileChanged(cb: (p: FileChangedPayload) => void): void;
   onToolTarget(cb: (p: ToolTargetPayload) => void): void;
   onSettled(cb: (p: SettledPayload) => void): void;
   onFileDeleted(cb: (p: FileDeletedPayload) => void): void;
-  onModifiedList(cb: (files: ModifiedFile[]) => void): void;
+  onModifiedList(cb: (p: ModifiedListPayload) => void): void;
   onState(cb: (s: PiState) => void): void;
-  onError(cb: (e: { message: string }) => void): void;
+  onError(cb: (e: { instanceId: string; message: string }) => void): void;
   onFolderOpened(cb: (e: { cwd: string }) => void): void;
-  onStderr(cb: (e: { line: string }) => void): void;
+  onStderr(cb: (e: { instanceId: string; line: string }) => void): void;
+  onInstances(cb: (list: InstanceSummary[]) => void): void;
 
-  // commands (renderer → main)
-  prompt(text: string, opts?: { streamingBehavior?: "steer" | "followUp" }): Promise<{ ok: boolean; error?: string }>;
-  abort(): Promise<unknown>;
-  newSession(): Promise<unknown>;
-  setModel(provider: string, modelId: string): Promise<unknown>;
-  setThinking(level: string): Promise<unknown>;
-  getState(): Promise<PiState>;
+  // instance management
+  createInstance(): Promise<{ id: string }>;
+  closeInstance(id: string): Promise<void>;
+  getInstances(): Promise<InstanceSummary[]>;
+
+  // commands (renderer → main) — all scoped to an instance
+  prompt(instanceId: string, text: string, opts?: { streamingBehavior?: "steer" | "followUp" }): Promise<{ ok: boolean; error?: string }>;
+  abort(instanceId: string): Promise<unknown>;
+  newSession(instanceId: string): Promise<unknown>;
+  setModel(instanceId: string, provider: string, modelId: string): Promise<unknown>;
+  setThinking(instanceId: string, level: string): Promise<unknown>;
+  getState(instanceId: string): Promise<PiState>;
+  getModifiedFiles(instanceId: string): Promise<ModifiedFile[]>;
+  clearModified(instanceId: string): Promise<void>;
+
+  // shared (project-level)
   openFolder(): Promise<{ cwd: string } | { cancelled: true }>;
   openFile(path: string): Promise<{ path: string; content: string } | { path: string; error: string }>;
   saveFile(path: string, content: string): Promise<{ ok: boolean; error?: string }>;
-  getModifiedFiles(): Promise<ModifiedFile[]>;
-  clearModified(): Promise<void>;
-  respondUi(id: string, payload: Record<string, unknown>): void;
-  getModels(): Promise<ModelInfo[]>;
+  respondUi(instanceId: string, id: string, payload: Record<string, unknown>): void;
 }
 
 export interface ToolCallInfo {

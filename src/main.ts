@@ -1,7 +1,9 @@
 /**
- * Renderer entry: wires Monaco, xterm and the panels to the pi agent via the
- * preload bridge. Handles the pi event stream and renders it in the terminal,
- * keeps the editor synced with disk, and manages the prompt input.
+ * Renderer entry: wires Monaco, multiple isolated xterm panes and the panels
+ * to pi agent instances via the preload bridge.
+ *
+ * Each terminal pane = one agent instance (own pi process, chat, model and
+ * modified files). The editor (Monaco) is shared across panes.
  */
 import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/editor/editor.worker?worker";
@@ -40,58 +42,196 @@ import "@xterm/xterm/css/xterm.css";
 import { TerminalManager, formatMarkdown } from "./terminal";
 import { Panels } from "./components/panels";
 import { handleExtensionUiRequest, toast } from "./components/modals";
-import type { PiState, ModifiedFile } from "../shared/types";
+import type { PiState, ModifiedFile, ModelInfo, InstanceSummary, ExtensionUiRequest } from "../shared/types";
 
 const editorMgr = new EditorManager(document.getElementById("editor-container")!);
-const terminal = new TerminalManager(document.getElementById("terminal-container")!, (path) => void openFileSmart(path));
 const panels = new Panels();
 
 const promptInput = document.getElementById("prompt-input") as HTMLTextAreaElement;
 const btnSend = document.getElementById("btn-send") as HTMLButtonElement;
 const leftPane = document.getElementById("left-pane")!;
+const termTabsList = document.getElementById("terminal-tabs-list")!;
+const termContainer = document.getElementById("terminal-container")!;
+const btnNewTerminal = document.getElementById("btn-new-terminal") as HTMLButtonElement;
 
-let streaming = false;
-let cwd: string | null = null;
-let booted = false;
-let lastModelKey: string | null = null;
-let lastThinking: string | null = null;
+// ---------------------------------------------------------------- panes -----
 
-// Deferred assistant text: deltas are buffered and rendered only when the
-// next assistant message starts (previous message's text) or when the run
-// settles — AFTER the session-complete summary. Responses therefore always
-// appear after all tool output and after the summary.
-let textBuffer = "";
+interface Pane {
+  instanceId: string;
+  terminal: TerminalManager;
+  container: HTMLElement;
+  tabEl: HTMLElement;
+  nameEl: HTMLElement;
+  statusEl: HTMLElement;
+  closeEl: HTMLElement;
+  isStreaming: boolean;
+  model: ModelInfo | null;
+  thinkingLevel: string | null;
+  models: ModelInfo[];
+  levels: string[];
+  cwd: string | null;
+  modified: ModifiedFile[];
+  booted: boolean;
+  lastModelKey: string | null;
+  lastThinking: string | null;
+  textBuffer: string;
+}
 
-function flushBufferedText(): void {
-  if (!textBuffer) return;
-  terminal.streamText(formatMarkdown(textBuffer));
-  textBuffer = "";
+const panes = new Map<string, Pane>();
+const closingPanes = new Set<string>();
+let activeId: string | null = null;
+let projectCwd: string | null = null;
+
+function paneById(id: string): Pane | undefined {
+  return panes.get(id);
+}
+
+function flushBufferedText(pane: Pane): void {
+  if (!pane.textBuffer) return;
+  pane.terminal.streamText(formatMarkdown(pane.textBuffer));
+  pane.textBuffer = "";
+}
+
+function createPaneShell(instanceId: string): Pane {
+  const container = document.createElement("div");
+  container.className = "term-pane";
+  termContainer.appendChild(container);
+
+  const tabEl = document.createElement("div");
+  tabEl.className = "terminal-tab";
+  const statusEl = document.createElement("span");
+  statusEl.className = "tab-status";
+  const nameEl = document.createElement("span");
+  nameEl.className = "tab-name";
+  nameEl.textContent = "terminal";
+  const closeEl = document.createElement("span");
+  closeEl.className = "tab-close";
+  closeEl.textContent = "×";
+  closeEl.title = "Close terminal";
+  closeEl.addEventListener("click", (e) => {
+    e.stopPropagation();
+    void closePane(instanceId);
+  });
+  tabEl.append(statusEl, nameEl, closeEl);
+  tabEl.addEventListener("click", () => activatePane(instanceId));
+  termTabsList.appendChild(tabEl);
+
+  const terminal = new TerminalManager(container, (path) => void openFileSmart(path));
+  const pane: Pane = {
+    instanceId,
+    terminal,
+    container,
+    tabEl,
+    nameEl,
+    statusEl,
+    closeEl,
+    isStreaming: false,
+    model: null,
+    thinkingLevel: null,
+    models: [],
+    levels: [],
+    cwd: null,
+    modified: [],
+    booted: false,
+    lastModelKey: null,
+    lastThinking: null,
+    textBuffer: "",
+  };
+  panes.set(instanceId, pane);
+  return pane;
+}
+
+function activatePane(instanceId: string): void {
+  const pane = panes.get(instanceId);
+  if (!pane) return;
+  activeId = instanceId;
+  for (const p of panes.values()) {
+    p.container.classList.toggle("active", p.instanceId === instanceId);
+    p.tabEl.classList.toggle("active", p.instanceId === instanceId);
+  }
+  (window as unknown as Record<string, unknown>).__piTerminal = pane.terminal.getTerminal();
+  pane.terminal.fit();
+  renderActiveChrome(pane);
+}
+
+async function closePane(instanceId: string): Promise<void> {
+  const pane = panes.get(instanceId);
+  if (!pane) return;
+  closingPanes.add(instanceId);
+  panes.delete(instanceId);
+  pane.terminal.dispose();
+  pane.container.remove();
+  pane.tabEl.remove();
+  await window.pi.closeInstance(instanceId);
+  // The dying instance pushes a final state; ignore it (and late events).
+  setTimeout(() => closingPanes.delete(instanceId), 5000);
+  if (activeId === instanceId) {
+    const next = [...panes.values()].at(-1);
+    if (next) activatePane(next.instanceId);
+    else {
+      activeId = null;
+      renderActiveChrome(null);
+    }
+  }
+}
+
+function renderActiveChrome(pane: Pane | null): void {
+  if (!pane) {
+    panels.setState(null);
+    panels.setModified([]);
+    return;
+  }
+  const s: PiState = {
+    instanceId: pane.instanceId,
+    isStreaming: pane.isStreaming,
+    model: pane.model,
+    thinkingLevel: pane.thinkingLevel,
+    cwd: pane.cwd,
+    sessionId: null,
+    models: pane.models,
+    levels: pane.levels,
+    hasProject: !!projectCwd,
+  };
+  panels.setState(s);
+  panels.setModified(pane.modified);
+}
+
+function updatePaneTab(pane: Pane): void {
+  pane.nameEl.textContent = pane.cwd ? basenameOf(pane.cwd) : "terminal";
+  pane.tabEl.title = `${pane.cwd ?? "?"} · ${pane.model ? pane.model.name : "no model"}`;
+  pane.statusEl.classList.toggle("busy", pane.isStreaming);
+}
+
+function basenameOf(p: string): string {
+  return p.split(/[\\/]/).pop() || p;
 }
 
 // ---------------------------------------------------------------- commands --
 
 async function openFileSmart(path: string): Promise<void> {
-  const abs = path.startsWith("/") ? path : cwd ? `${cwd}/${path}` : path;
+  const abs = path.startsWith("/") ? path : projectCwd ? `${projectCwd}/${path}` : path;
   await editorMgr.openFile(abs);
 }
 
 async function sendPrompt(steer = false): Promise<void> {
+  if (!activeId) return;
+  const pane = panes.get(activeId);
   const text = promptInput.value.trim();
   if (!text) return;
   promptInput.value = "";
   autoResizePrompt();
-  terminal.userPrompt(text);
+  pane?.terminal.userPrompt(text);
   try {
-    const res = await window.pi.prompt(text, {
-      streamingBehavior: steer ? "steer" : streaming ? "followUp" : undefined,
+    const res = await window.pi.prompt(activeId, text, {
+      streamingBehavior: steer ? "steer" : pane?.isStreaming ? "followUp" : undefined,
     });
     if (!res.ok) {
       promptInput.value = text; // don't lose the user's words
-      terminal.error(res.error ?? "failed to send prompt");
+      pane?.terminal.error(res.error ?? "failed to send prompt");
     }
   } catch (err) {
     promptInput.value = text;
-    terminal.error(`failed to send prompt: ${(err as Error).message}`);
+    pane?.terminal.error(`failed to send prompt: ${(err as Error).message}`);
   }
 }
 
@@ -105,17 +245,32 @@ function autoResizePrompt(): void {
 panels.bind({
   onOpenFolder: () => void window.pi.openFolder(),
   onNewSession: () => {
-    terminal.system("… starting a new session");
-    void window.pi.newSession();
+    const pane = activeId ? panes.get(activeId) : undefined;
+    pane?.terminal.system("… starting a new session");
+    if (activeId) void window.pi.newSession(activeId);
   },
   onAbort: () => {
-    terminal.system("… aborting");
-    void window.pi.abort();
+    const pane = activeId ? panes.get(activeId) : undefined;
+    pane?.terminal.system("… aborting");
+    if (activeId) void window.pi.abort(activeId);
   },
-  onModelChange: (provider, id) => void window.pi.setModel(provider, id),
-  onThinkingChange: (level) => void window.pi.setThinking(level),
+  onModelChange: (provider, id) => {
+    if (activeId) void window.pi.setModel(activeId, provider, id);
+  },
+  onThinkingChange: (level) => {
+    if (activeId) void window.pi.setThinking(activeId, level);
+  },
   onOpenFile: (path) => void openFileSmart(path),
-  onClearModified: () => void window.pi.clearModified(),
+  onClearModified: () => {
+    if (activeId) void window.pi.clearModified(activeId);
+  },
+});
+
+btnNewTerminal.addEventListener("click", () => {
+  void window.pi.createInstance().then(({ id }) => {
+    // The state push usually creates+activates the pane first; be safe.
+    if (panes.has(id)) activatePane(id);
+  });
 });
 
 promptInput.addEventListener("keydown", (e) => {
@@ -148,39 +303,51 @@ window.addEventListener("mouseup", () => {
   document.body.style.cursor = "";
 });
 
-new ResizeObserver(() => terminal.fit()).observe(document.getElementById("main")!);
-
 // ------------------------------------------------------------ pi events ----
 
-window.pi.onState((s: PiState) => {
-  streaming = s.isStreaming;
-  cwd = s.cwd;
-  panels.setState(s);
-  editorMgr.setStreaming(s.isStreaming);
-  editorMgr.setProjectOpen(s.hasProject);
+function handlePaneState(s: PiState): void {
+  if (closingPanes.has(s.instanceId)) return;
+  let pane = panes.get(s.instanceId);
+  if (!pane) {
+    // State for an instance we don't have yet (e.g. created from the menu).
+    pane = createPaneShell(s.instanceId);
+    activatePane(s.instanceId); // a brand-new terminal becomes active
+  }
+  pane.isStreaming = s.isStreaming;
+  pane.model = s.model;
+  pane.thinkingLevel = s.thinkingLevel;
+  pane.models = s.models;
+  pane.levels = s.levels;
+  pane.cwd = s.cwd;
+  if (!projectCwd && s.cwd) projectCwd = s.cwd;
+  updatePaneTab(pane);
+
   // Show model / thinking changes in the terminal (skip the initial state).
   const modelKey = s.model ? `${s.model.name} (${s.model.provider})` : null;
-  if (lastModelKey !== null && modelKey !== null && modelKey !== lastModelKey) {
-    terminal.system(`model: ${lastModelKey} → ${modelKey}`);
+  if (pane.lastModelKey !== null && modelKey !== null && modelKey !== pane.lastModelKey) {
+    pane.terminal.system(`model: ${pane.lastModelKey} → ${modelKey}`);
   }
-  if (modelKey !== null) lastModelKey = modelKey;
+  if (modelKey !== null) pane.lastModelKey = modelKey;
   const thinking = s.thinkingLevel;
-  if (lastThinking !== null && thinking !== null && thinking !== lastThinking) {
-    terminal.system(`thinking: ${lastThinking} → ${thinking}`);
+  if (pane.lastThinking !== null && thinking !== null && thinking !== pane.lastThinking) {
+    pane.terminal.system(`thinking: ${pane.lastThinking} → ${thinking}`);
   }
-  if (thinking !== null) lastThinking = thinking;
+  if (thinking !== null) pane.lastThinking = thinking;
+
   // Print the banner only once we know the real folder + model.
-  if (!booted && s.cwd) {
-    booted = true;
-    terminal.banner([
+  if (!pane.booted && s.cwd) {
+    pane.booted = true;
+    pane.terminal.banner([
       `agent ready · model: ${s.model ? `${s.model.name} (${s.model.provider})` : "—"}`,
       `cwd: ${s.cwd}`,
       "— files the agent touches appear in the editor live · click any path to open it —",
     ]);
   }
-});
 
-window.pi.onEvent((event) => {
+  if (activeId === pane.instanceId) renderActiveChrome(pane);
+}
+
+function handleAgentEvent(pane: Pane, event: { instanceId: string } & Record<string, unknown>): void {
   const type = event.type as string;
   switch (type) {
     case "message_update": {
@@ -190,18 +357,18 @@ window.pi.onEvent((event) => {
       if (!d) break;
       switch (d.type) {
         case "text_start":
-          terminal.startAssistant();
+          pane.terminal.startAssistant();
           break;
         case "text_delta":
           // Deferred: assistant text is buffered and rendered only after the
           // run's tool output (and the session summary) — never in the middle.
-          textBuffer += d.delta ?? "";
+          pane.textBuffer += d.delta ?? "";
           break;
         case "thinking_start":
-          terminal.startThinking();
+          pane.terminal.startThinking();
           break;
         case "thinking_delta":
-          terminal.thinkingDelta(d.delta ?? "");
+          pane.terminal.thinkingDelta(d.delta ?? "");
           break;
       }
       break;
@@ -209,20 +376,20 @@ window.pi.onEvent((event) => {
     case "message_start": {
       const msg = event.message as { role?: string } | undefined;
       if (msg?.role === "assistant") {
-        terminal.startAssistant();
+        pane.terminal.startAssistant();
         // Render the previous message's deferred text now that its tools
         // (if any) have finished — before this message's own content.
-        flushBufferedText();
+        flushBufferedText(pane);
       }
       break;
     }
     case "message_end": {
       const msg = event.message as { role?: string } | undefined;
-      if (msg?.role === "assistant") terminal.endAssistant();
+      if (msg?.role === "assistant") pane.terminal.endAssistant();
       break;
     }
     case "tool_execution_start": {
-      terminal.startToolCall(
+      pane.terminal.startToolCall(
         String(event.toolCallId ?? ""),
         String(event.toolName ?? ""),
         (event.args as Record<string, unknown>) ?? {},
@@ -231,32 +398,45 @@ window.pi.onEvent((event) => {
     }
     case "tool_execution_update": {
       const text = contentText(event.partialResult);
-      terminal.updateToolCall(String(event.toolCallId ?? ""), text);
+      pane.terminal.updateToolCall(String(event.toolCallId ?? ""), text);
       break;
     }
     case "tool_execution_end": {
       const text = contentText(event.result);
-      terminal.endToolCall(String(event.toolCallId ?? ""), text, Boolean(event.isError));
+      pane.terminal.endToolCall(String(event.toolCallId ?? ""), text, Boolean(event.isError));
       break;
     }
     case "queue_update": {
       const n = ((event.steering as unknown[])?.length ?? 0) + ((event.followUp as unknown[])?.length ?? 0);
-      if (n > 0) terminal.queued(`${n} queued message${n > 1 ? "s" : ""} pending`);
+      if (n > 0) pane.terminal.queued(`${n} queued message${n > 1 ? "s" : ""} pending`);
       break;
     }
     case "compaction_start":
-      terminal.system("… compacting context…");
+      pane.terminal.system("… compacting context…");
       break;
     case "auto_retry_start":
-      terminal.system(`… transient error, retrying (${String(event.attempt)}/${String(event.maxAttempts)})…`);
+      pane.terminal.system(`… transient error, retrying (${String(event.attempt)}/${String(event.maxAttempts)})…`);
       break;
     case "extension_error":
-      terminal.error(`extension error: ${String(event.error ?? "")}`);
+      pane.terminal.error(`extension error: ${String(event.error ?? "")}`);
       break;
-    case "extension_ui_request":
-      void handleExtensionUiRequest(event as never);
+    case "extension_ui_request": {
+      const req = {
+        ...(event as object),
+        instanceId: pane.instanceId,
+      } as ExtensionUiRequest & { instanceId: string };
+      void handleExtensionUiRequest(req);
       break;
+    }
   }
+}
+
+window.pi.onState((s: PiState) => handlePaneState(s));
+
+window.pi.onEvent((event) => {
+  const pane = panes.get(event.instanceId);
+  if (!pane) return;
+  handleAgentEvent(pane, event);
 });
 
 window.pi.onFileChanged((p) => {
@@ -270,36 +450,56 @@ window.pi.onToolTarget((p) => {
 });
 
 window.pi.onSettled((p) => {
+  const pane = panes.get(p.instanceId);
+  if (!pane) return;
   // Summary first, response last: the final text renders after the
   // session-complete block, so it reads as the deliverable at the end.
-  terminal.settled(p.runFiles, p.durationMs);
-  panels.setModified(p.allFiles);
+  pane.terminal.settled(p.runFiles, p.durationMs);
+  pane.modified = p.allFiles;
   for (const f of p.runFiles) editorMgr.markTouched(f.path);
-  flushBufferedText();
+  flushBufferedText(pane);
+  if (activeId === pane.instanceId) {
+    panels.setModified(pane.modified);
+  }
 });
 
 window.pi.onFileDeleted((p) => {
   editorMgr.closeIfOpen(p.path);
 });
 
-window.pi.onModifiedList((files) => {
-  panels.setModified(files);
+window.pi.onModifiedList((p) => {
+  const pane = panes.get(p.instanceId);
+  if (!pane) return;
+  pane.modified = p.files;
+  if (activeId === pane.instanceId) panels.setModified(p.files);
 });
 
 window.pi.onError((e) => {
-  terminal.error(e.message);
+  const pane = panes.get(e.instanceId);
+  if (pane) pane.terminal.error(e.message);
   toast(e.message.split("\n")[0], "error");
 });
 
 window.pi.onStderr((e) => {
+  const pane = panes.get(e.instanceId);
+  if (!pane) return;
   // pi diagnostics — keep quiet unless it looks important
-  if (/error|warn/i.test(e.line)) terminal.system(`[pi] ${e.line}`);
+  if (/error|warn/i.test(e.line)) pane.terminal.system(`[pi] ${e.line}`);
 });
 
 window.pi.onFolderOpened((e) => {
-  cwd = e.cwd;
-  terminal.system(`working directory: ${e.cwd}`);
-  void window.pi.getModifiedFiles().then((files) => panels.setModified(files));
+  projectCwd = e.cwd;
+  for (const pane of panes.values()) {
+    pane.terminal.system(`project folder: ${e.cwd}`);
+  }
+});
+
+window.pi.onInstances((list: InstanceSummary[]) => {
+  // Tabs are created by the renderer; this keeps names/summaries in sync.
+  for (const summary of list) {
+    const pane = panes.get(summary.id);
+    if (pane) updatePaneTab(pane);
+  }
 });
 
 // ---------------------------------------------------------------- helpers --
@@ -315,12 +515,27 @@ function contentText(res: unknown): string {
 
 // ---------------------------------------------------------------- startup --
 
-// Snapshot the initial state for the toolbar/status bar and the modified list.
-void window.pi.getState().then((s: PiState) => {
-  panels.setState(s);
-  streaming = s.isStreaming;
-  cwd = s.cwd;
-  editorMgr.setStreaming(s.isStreaming);
-}).then(() => window.pi.getModifiedFiles()).then((files: ModifiedFile[]) => {
-  panels.setModified(files);
-});
+async function boot(): Promise<void> {
+  const instances = await window.pi.getInstances();
+  for (const inst of instances) {
+    if (!panes.has(inst.id)) {
+      createPaneShell(inst.id);
+    }
+  }
+  if (!activeId && instances.length > 0) {
+    activatePane(instances[0].id);
+  }
+  // Refresh states + modified lists for all instances.
+  for (const inst of instances) {
+    const state = await window.pi.getState(inst.id);
+    if (state) handlePaneState(state);
+    const files = await window.pi.getModifiedFiles(inst.id);
+    const pane = panes.get(inst.id);
+    if (pane) {
+      pane.modified = files;
+      if (activeId === pane.instanceId) panels.setModified(files);
+    }
+  }
+}
+
+void boot();

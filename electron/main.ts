@@ -2,9 +2,9 @@
  * Electron main process.
  *
  * Owns:
- *  - the pi agent child process (RPC mode, JSONL over stdio)
- *  - the project file watcher that feeds the live editor
- *  - the "modified files" tracker shown when the agent settles
+ *  - multiple isolated pi agent instances (RPC mode, JSONL over stdio), each
+ *    with its own model, session and modified-files tracking
+ *  - the project file watcher that feeds the shared live editor
  *  - IPC to the renderer (Monaco + xterm UI)
  */
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell } from "electron";
@@ -15,33 +15,56 @@ import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PiRpcClient, type ToolExecutionStartEvent } from "./rpc-client.js";
 import { ProjectWatcher } from "./watcher.js";
-import type { ModifiedFile, ModelInfo, PiState } from "../shared/types.js";
+import type { InstanceSummary, ModifiedFile, ModelInfo, PiState } from "../shared/types.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MAX_OPEN_FILE_SIZE = 2 * 1024 * 1024;
 
 const FILE_TOOLS = new Set(["write", "edit", "apply_patch", "create_file", "insert"]);
 
+let instanceSeq = 0;
+
+/** One isolated agent: its own pi process, model and modified-files tracking. */
+class AgentInstance {
+  id = `inst-${++instanceSeq}`;
+  rpc: PiRpcClient;
+  cwd: string;
+  modified = new Map<string, ModifiedFile>();
+  runModified = new Map<string, ModifiedFile>();
+  isStreaming = false;
+  models: ModelInfo[] = [];
+  levels: string[] = [];
+  currentModel: ModelInfo | null = null;
+  thinkingLevel: string | null = null;
+  sessionId: string | null = null;
+  sessionStart = 0;
+
+  constructor(cwd: string, bin: string) {
+    this.cwd = cwd;
+    this.rpc = new PiRpcClient({ bin, args: ["--mode", "rpc"], cwd });
+  }
+
+  get state(): PiState {
+    return {
+      instanceId: this.id,
+      isStreaming: this.isStreaming,
+      model: this.currentModel,
+      thinkingLevel: this.thinkingLevel,
+      cwd: this.cwd,
+      sessionId: this.sessionId,
+      models: this.models,
+      levels: this.levels,
+      hasProject: this.cwd !== homedir(),
+    };
+  }
+}
+
 class PiEditorApp {
   private win: BrowserWindow | null = null;
-  private rpc = new PiRpcClient({ bin: "pi", args: ["--mode", "rpc"], cwd: homedir() });
+  private instances = new Map<string, AgentInstance>();
   private watcher: ProjectWatcher | null = null;
-  private cwd: string | null = null;
-  private cwdReal: string | null = null;
-
-  private modified = new Map<string, ModifiedFile>();
-  /** Files modified during the current agent run (reset on each agent_start). */
-  private runModified = new Map<string, ModifiedFile>();
-  private sessionStart = 0;
-  private isStreaming = false;
-  private models: ModelInfo[] = [];
-  private levels: string[] = [];
-  private currentModel: ModelInfo | null = null;
-  private thinkingLevel: string | null = null;
-  private sessionId: string | null = null;
+  private projectCwd: string | null = null;
   private paintWatchdog: ReturnType<typeof setInterval> | null = null;
-  /** True once a real project folder is opened (not the home-dir placeholder). */
-  private hasProject = false;
 
   // ---------------------------------------------------------------- window --
 
@@ -106,12 +129,13 @@ class PiEditorApp {
         ],
       },
       {
-        label: "Session",
+        label: "Terminal",
         submenu: [
-          { label: "New Session", accelerator: "CmdOrCtrl+N", click: () => void this.newSession() },
-          { label: "Abort Agent", accelerator: "CmdOrCtrl+.", click: () => void this.abort() },
+          { label: "New Terminal", accelerator: "CmdOrCtrl+Shift+T", click: () => void this.createInstance() },
+          { label: "New Session", accelerator: "CmdOrCtrl+N", click: () => void this.newSessionForActive() },
+          { label: "Abort Agent", accelerator: "CmdOrCtrl+.", click: () => void this.abortActive() },
           { type: "separator" },
-          { label: "Clear Modified List", click: () => this.clearModified() },
+          { label: "Clear Modified List", click: () => this.clearModifiedForActive() },
         ],
       },
       {
@@ -129,69 +153,92 @@ class PiEditorApp {
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
   }
 
-  // ------------------------------------------------------------------- pi ----
+  // ------------------------------------------------------------- instances --
 
   private resolvePiBin(): string {
     return process.env.PI_EDITOR_PI_BIN ?? "pi";
   }
 
-  private async startPi(cwd: string): Promise<void> {
-    this.stopPi();
-    this.rpc = new PiRpcClient({
-      bin: this.resolvePiBin(),
-      args: ["--mode", "rpc"],
-      cwd,
-    });
+  private instanceCwd(): string {
+    return this.projectCwd ?? homedir();
+  }
 
-    this.rpc.onEvent = (event) => this.handlePiEvent(event);
-    this.rpc.onExit = (code, _signal, err, intentional) => {
-      this.isStreaming = false;
-      this.pushState();
+  /** Spawn a new isolated agent instance; lands on the current project folder. */
+  async createInstance(cwd?: string): Promise<AgentInstance> {
+    const inst = new AgentInstance(cwd ?? this.instanceCwd(), this.resolvePiBin());
+
+    inst.rpc.onEvent = (event) => this.handlePiEvent(inst, event);
+    inst.rpc.onExit = (code, _signal, err, intentional) => {
+      inst.isStreaming = false;
+      this.pushState(inst);
       if (err) {
         this.send("pi:error", {
+          instanceId: inst.id,
           message: `Could not start pi: ${err.message}\n\nInstall the pi coding agent with:\n  npm install -g @earendil-works/pi-coding-agent\nor point PI_EDITOR_PI_BIN at the pi binary.`,
         });
       } else if (code !== 0 && !intentional) {
-        this.send("pi:error", { message: `pi exited unexpectedly (code ${code}). Use Session → New Session to restart.` });
+        this.send("pi:error", { instanceId: inst.id, message: `pi exited unexpectedly (code ${code}). Use Session → New Session to restart.` });
       }
     };
-    this.rpc.onStderr = (line) => this.send("pi:stderr", { line });
+    inst.rpc.onStderr = (line) => this.send("pi:stderr", { instanceId: inst.id, line });
 
+    this.instances.set(inst.id, inst);
     try {
-      await this.rpc.start();
-      await this.refreshState();
+      await inst.rpc.start();
+      await this.refreshState(inst);
     } catch (err) {
-      this.send("pi:error", { message: `Failed to start pi: ${(err as Error).message}` });
+      this.send("pi:error", { instanceId: inst.id, message: `Failed to start pi: ${(err as Error).message}` });
     }
+    this.sendInstances();
+    return inst;
   }
 
-  private stopPi(): void {
-    this.rpc.stop();
+  async closeInstance(id: string): Promise<void> {
+    const inst = this.instances.get(id);
+    if (!inst) return;
+    inst.rpc.stop();
+    this.instances.delete(id);
+    this.sendInstances();
   }
 
-  private async refreshState(): Promise<void> {
+  private instanceOf(id: string): AgentInstance | undefined {
+    return this.instances.get(id);
+  }
+
+  private sendInstances(): void {
+    const list: InstanceSummary[] = [...this.instances.values()].map((i) => ({
+      id: i.id,
+      cwd: i.cwd,
+      model: i.currentModel ? `${i.currentModel.name} (${i.currentModel.provider})` : null,
+      isStreaming: i.isStreaming,
+      modifiedCount: i.modified.size,
+    }));
+    this.send("instances:list", list);
+  }
+
+  private async refreshState(inst: AgentInstance): Promise<void> {
     try {
       const [state, modelsResp, levelsResp] = await Promise.all([
-        this.rpc.getState(),
-        this.rpc.getAvailableModels(),
-        this.rpc.getAvailableThinkingLevels(),
+        inst.rpc.getState(),
+        inst.rpc.getAvailableModels(),
+        inst.rpc.getAvailableThinkingLevels(),
       ]);
       if (state.success && state.data) {
         const s = state.data as { model?: Record<string, unknown> | null; thinkingLevel?: string; sessionId?: string };
-        this.currentModel = s.model ? this.toModelInfo(s.model) : null;
-        this.thinkingLevel = s.thinkingLevel ?? null;
-        this.sessionId = s.sessionId ?? null;
+        inst.currentModel = s.model ? this.toModelInfo(s.model) : null;
+        inst.thinkingLevel = s.thinkingLevel ?? null;
+        inst.sessionId = s.sessionId ?? null;
       }
       if (modelsResp.success && modelsResp.data) {
-        this.models = modelsResp.data.models.map((m) => this.toModelInfo(m as unknown as Record<string, unknown>));
+        inst.models = modelsResp.data.models.map((m) => this.toModelInfo(m as unknown as Record<string, unknown>));
       }
       if (levelsResp.success && levelsResp.data) {
-        this.levels = (levelsResp.data as { levels: string[] }).levels;
+        inst.levels = (levelsResp.data as { levels: string[] }).levels;
       }
     } catch {
       /* pi may be mid-restart */
     }
-    this.pushState();
+    this.pushState(inst);
   }
 
   private toModelInfo(m: Record<string, unknown>): ModelInfo {
@@ -202,40 +249,33 @@ class PiEditorApp {
     };
   }
 
-  private pushState(): void {
-    const state: PiState = {
-      isStreaming: this.isStreaming,
-      model: this.currentModel,
-      thinkingLevel: this.thinkingLevel,
-      cwd: this.cwd,
-      sessionId: this.sessionId,
-      models: this.models,
-      levels: this.levels,
-      hasProject: this.hasProject,
-    };
-    this.send("pi:state", state);
+  private pushState(inst: AgentInstance): void {
+    this.send("pi:state", inst.state);
   }
 
   // ------------------------------------------------------------ pi events ---
 
-  private handlePiEvent(event: Record<string, unknown>): void {
+  private handlePiEvent(inst: AgentInstance, event: Record<string, unknown>): void {
     const type = event.type as string;
     switch (type) {
       case "agent_start":
-        this.isStreaming = true;
-        this.sessionStart = this.sessionStart || Date.now();
-        this.runModified.clear();
-        this.pushState();
+        inst.isStreaming = true;
+        inst.sessionStart = inst.sessionStart || Date.now();
+        inst.runModified.clear();
+        this.pushState(inst);
+        this.sendInstances();
         break;
       case "agent_settled":
-        this.isStreaming = false;
-        this.pushState();
+        inst.isStreaming = false;
+        this.pushState(inst);
         this.send("agent:settled", {
-          runFiles: [...this.runModified.values()],
-          allFiles: [...this.modified.values()],
-          durationMs: this.sessionStart ? Date.now() - this.sessionStart : 0,
+          instanceId: inst.id,
+          runFiles: [...inst.runModified.values()],
+          allFiles: [...inst.modified.values()],
+          durationMs: inst.sessionStart ? Date.now() - inst.sessionStart : 0,
         });
-        this.sessionStart = 0;
+        inst.sessionStart = 0;
+        this.sendInstances();
         break;
       case "tool_execution_start": {
         const e = event as unknown as ToolExecutionStartEvent;
@@ -250,13 +290,13 @@ class PiEditorApp {
       }
       case "agent_end": {
         const e = event as { willRetry?: boolean };
-        if (e.willRetry) this.isStreaming = true;
+        if (e.willRetry) inst.isStreaming = true;
         break;
       }
     }
     // Forward a slimmed-down event: the renderer only needs roles, tool names,
     // args and deltas — not the full message history or tool results.
-    this.send("pi:event", this.slimEvent(event));
+    this.send("pi:event", { instanceId: inst.id, ...this.slimEvent(event) });
   }
 
   /** Strip heavy fields (full messages, tool results) from forwarded events. */
@@ -278,7 +318,7 @@ class PiEditorApp {
   /** Resolve possibly-relative tool paths against the project cwd. */
   private resolvePath(p: string): string {
     if (!p) return "";
-    const abs = isAbsolute(p) ? p : this.cwd ? join(this.cwd, p) : p;
+    const abs = isAbsolute(p) ? p : this.projectCwd ? join(this.projectCwd, p) : p;
     return this.canonicalPath(abs);
   }
 
@@ -304,36 +344,36 @@ class PiEditorApp {
     }
   }
 
-  private recordModified(absPath: string, status: "created" | "modified"): void {
+  private recordModified(inst: AgentInstance, absPath: string, status: "created" | "modified"): void {
     const p = this.canonicalPath(absPath);
     // Session list (panel): first observed status wins.
-    if (!this.modified.has(p)) {
-      this.modified.set(p, { path: p, relPath: this.rel(p), status });
+    if (!inst.modified.has(p)) {
+      inst.modified.set(p, { path: p, relPath: this.rel(p), status });
     }
     // Run list (settled summary): only agent-driven changes count, and only
     // while the agent is actually working (user saves happen when idle).
-    if (this.isStreaming && !this.runModified.has(p)) {
-      this.runModified.set(p, { path: p, relPath: this.rel(p), status });
+    if (inst.isStreaming && !inst.runModified.has(p)) {
+      inst.runModified.set(p, { path: p, relPath: this.rel(p), status });
     }
   }
 
-  private recordDeleted(absPath: string): void {
+  private recordDeleted(inst: AgentInstance, absPath: string): void {
     const p = this.canonicalPath(absPath);
-    this.modified.delete(p);
-    this.runModified.delete(p);
+    inst.modified.delete(p);
+    inst.runModified.delete(p);
     this.send("file:deleted", { path: p });
-    this.send("modified:list", [...this.modified.values()]);
+    this.send("modified:list", { instanceId: inst.id, files: [...inst.modified.values()] });
   }
 
   private withinProject(absPath: string): boolean {
-    if (!this.cwdReal) return false;
-    const rel = relative(this.cwdReal, this.canonicalPath(absPath));
+    if (!this.projectCwd) return false;
+    const rel = relative(this.canonicalPath(this.projectCwd), this.canonicalPath(absPath));
     return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
   }
 
   private rel(absPath: string): string {
     const p = this.canonicalPath(absPath);
-    return this.cwdReal ? relative(this.cwdReal, p) : p;
+    return this.projectCwd ? relative(this.canonicalPath(this.projectCwd), p) : p;
   }
 
   // -------------------------------------------------------------- watcher ---
@@ -343,11 +383,22 @@ class PiEditorApp {
     this.watcher = new ProjectWatcher(cwd);
     this.watcher.onChange = (change) => {
       const path = this.canonicalPath(change.path);
-      this.recordModified(path, change.status);
+      // Attribute disk changes to every instance that is currently working.
+      for (const inst of this.instances.values()) {
+        this.recordModified(inst, path, change.status);
+      }
       this.send("file:changed", { ...change, path, relPath: this.rel(path) });
     };
-    this.watcher.onFileTouched = (path, status) => this.recordModified(path, status);
-    this.watcher.onFileDeleted = (path) => this.recordDeleted(path);
+    this.watcher.onFileTouched = (path, status) => {
+      for (const inst of this.instances.values()) {
+        this.recordModified(inst, path, status);
+      }
+    };
+    this.watcher.onFileDeleted = (path) => {
+      for (const inst of this.instances.values()) {
+        this.recordDeleted(inst, path);
+      }
+    };
     this.watcher.start();
   }
 
@@ -361,52 +412,61 @@ class PiEditorApp {
     });
     if (result.canceled || result.filePaths.length === 0) return { cancelled: true };
     const cwd = result.filePaths[0];
-    await this.setProject(cwd, { watch: true });
+    this.projectCwd = cwd;
+    this.startWatcher(cwd);
+    this.send("folder:opened", { cwd });
     return { cwd };
   }
 
-  private async setProject(cwd: string, opts: { watch?: boolean } = {}): Promise<void> {
-    this.cwd = cwd;
-    this.cwdReal = this.canonicalPath(cwd);
-    this.hasProject = opts.watch !== false;
-    this.modified.clear();
-    this.runModified.clear();
-    this.sessionStart = 0;
-    // Only watch real project folders: watching ~ (the pre-open default)
-    // would walk and FSEvents-watch the entire home directory.
-    if (opts.watch !== false) this.startWatcher(cwd);
-    await this.startPi(cwd);
-    this.send("folder:opened", { cwd });
-    this.pushState();
+  private async newSessionForActive(): Promise<void> {
+    // The renderer drives the active instance; here we act on the most recent.
+    const inst = [...this.instances.values()].at(-1);
+    if (inst) await this.newSession(inst.id);
   }
 
-  private async newSession(): Promise<void> {
-    if (!this.rpc.isRunning) {
-      if (this.cwd) await this.startPi(this.cwd);
+  private async newSession(id: string): Promise<void> {
+    const inst = this.instanceOf(id);
+    if (!inst) return;
+    if (!inst.rpc.isRunning) {
+      await this.createInstance(inst.cwd);
       return;
     }
     // Clear optimistically; failures surface via pi:error.
-    this.modified.clear();
-    this.runModified.clear();
-    this.send("modified:list", []);
+    inst.modified.clear();
+    inst.runModified.clear();
+    this.send("modified:list", { instanceId: inst.id, files: [] });
     try {
-      await this.rpc.newSession();
+      await inst.rpc.newSession();
     } catch (err) {
-      this.send("pi:error", { message: `Failed to start a new session: ${(err as Error).message}` });
+      this.send("pi:error", { instanceId: inst.id, message: `Failed to start a new session: ${(err as Error).message}` });
     }
   }
 
-  private async abort(): Promise<void> {
+  private async abortActive(): Promise<void> {
+    const inst = [...this.instances.values()].at(-1);
+    if (inst) await this.abort(inst.id);
+  }
+
+  private async abort(id: string): Promise<void> {
+    const inst = this.instanceOf(id);
+    if (!inst) return;
     try {
-      await this.rpc.abort();
+      await inst.rpc.abort();
     } catch {
       /* ignore */
     }
   }
 
-  private clearModified(): void {
-    this.modified.clear();
-    this.send("modified:list", []);
+  private clearModifiedForActive(): void {
+    const inst = [...this.instances.values()].at(-1);
+    if (inst) this.clearModified(inst.id);
+  }
+
+  private clearModified(id: string): void {
+    const inst = this.instanceOf(id);
+    if (!inst) return;
+    inst.modified.clear();
+    this.send("modified:list", { instanceId: inst.id, files: [] });
   }
 
   private async openFileInEditor(absPath: string): Promise<{ path: string; content: string } | { path: string; error: string }> {
@@ -435,44 +495,67 @@ class PiEditorApp {
 
   private registerIpc(): void {
     ipcMain.handle("folder:open", () => this.openFolder());
-    ipcMain.handle("pi:prompt", (_e, text: string, opts?: { streamingBehavior?: "steer" | "followUp" }) => {
+    ipcMain.handle("instances:create", () => this.createInstance().then((i) => ({ id: i.id })));
+    ipcMain.handle("instances:close", (_e, id: string) => this.closeInstance(id));
+    ipcMain.handle("instances:list", () => {
+      this.sendInstances();
+      return [...this.instances.values()].map((i) => ({
+        id: i.id,
+        cwd: i.cwd,
+        model: i.currentModel ? `${i.currentModel.name} (${i.currentModel.provider})` : null,
+        isStreaming: i.isStreaming,
+        modifiedCount: i.modified.size,
+      }));
+    });
+
+    ipcMain.handle("pi:prompt", (_e, instanceId: string, text: string, opts?: { streamingBehavior?: "steer" | "followUp" }) => {
+      const inst = this.instanceOf(instanceId);
+      if (!inst) return { ok: false, error: "instance not found" };
       if (!text.trim()) return { ok: false, error: "empty prompt" };
-      if (!this.rpc.isRunning) return { ok: false, error: "pi is not running" };
+      if (!inst.rpc.isRunning) return { ok: false, error: "pi is not running" };
       // Accept the prompt optimistically; report async failures through pi:error.
-      this.rpc.prompt(text, opts).catch((err) => {
-        this.send("pi:error", { message: `Failed to send prompt: ${(err as Error).message}` });
+      inst.rpc.prompt(text, opts).catch((err) => {
+        this.send("pi:error", { instanceId: inst.id, message: `Failed to send prompt: ${(err as Error).message}` });
       });
       return { ok: true };
     });
-    ipcMain.handle("pi:abort", () => this.abort());
-    ipcMain.handle("pi:new-session", () => this.newSession());
-    ipcMain.handle("pi:set-model", async (_e, provider: string, modelId: string) => {
-      if (!this.rpc.isRunning) return { ok: false, error: "pi is not running" };
+    ipcMain.handle("pi:abort", (_e, instanceId: string) => this.abort(instanceId));
+    ipcMain.handle("pi:new-session", (_e, instanceId: string) => this.newSession(instanceId));
+    ipcMain.handle("pi:set-model", async (_e, instanceId: string, provider: string, modelId: string) => {
+      const inst = this.instanceOf(instanceId);
+      if (!inst) return { ok: false, error: "instance not found" };
+      if (!inst.rpc.isRunning) return { ok: false, error: "pi is not running" };
       try {
-        const r = await this.rpc.setModel(provider, modelId);
-        if (r.success) void this.refreshState();
+        const r = await inst.rpc.setModel(provider, modelId);
+        if (r.success) void this.refreshState(inst);
         return { ok: r.success, error: r.error };
       } catch (err) {
         return { ok: false, error: (err as Error).message };
       }
     });
-    ipcMain.handle("pi:set-thinking", async (_e, level: string) => {
-      if (!this.rpc.isRunning) return { ok: false, error: "pi is not running" };
+    ipcMain.handle("pi:set-thinking", async (_e, instanceId: string, level: string) => {
+      const inst = this.instanceOf(instanceId);
+      if (!inst) return { ok: false, error: "instance not found" };
+      if (!inst.rpc.isRunning) return { ok: false, error: "pi is not running" };
       try {
-        const r = await this.rpc.setThinkingLevel(level);
-        if (r.success) void this.refreshState();
+        const r = await inst.rpc.setThinkingLevel(level);
+        if (r.success) void this.refreshState(inst);
         return { ok: r.success, error: r.error };
       } catch (err) {
         return { ok: false, error: (err as Error).message };
       }
     });
-    ipcMain.handle("pi:get-state", () => {
-      void this.refreshState();
-      return this.currentState();
+    ipcMain.handle("pi:get-state", (_e, instanceId: string) => {
+      const inst = this.instanceOf(instanceId);
+      if (!inst) return null;
+      void this.refreshState(inst);
+      return inst.state;
     });
-    ipcMain.handle("pi:ui-response", (_e, id: string, payload: Record<string, unknown>) => {
+    ipcMain.handle("pi:ui-response", (_e, instanceId: string, id: string, payload: Record<string, unknown>) => {
+      const inst = this.instanceOf(instanceId);
+      if (!inst) return;
       try {
-        this.rpc.writeRaw({ type: "extension_ui_response", id, ...payload });
+        inst.rpc.writeRaw({ type: "extension_ui_response", id, ...payload });
       } catch {
         /* ignore */
       }
@@ -486,22 +569,12 @@ class PiEditorApp {
         return { ok: false, error: (err as Error).message };
       }
     });
-    ipcMain.handle("modified:get", () => [...this.modified.values()]);
-    ipcMain.handle("modified:clear", () => this.clearModified());
+    ipcMain.handle("modified:get", (_e, instanceId: string) => {
+      const inst = this.instanceOf(instanceId);
+      return inst ? [...inst.modified.values()] : [];
+    });
+    ipcMain.handle("modified:clear", (_e, instanceId: string) => this.clearModified(instanceId));
     ipcMain.handle("app:open-external", (_e, url: string) => void shell.openExternal(url));
-  }
-
-  private currentState(): PiState {
-    return {
-      isStreaming: this.isStreaming,
-      model: this.currentModel,
-      thinkingLevel: this.thinkingLevel,
-      cwd: this.cwd,
-      sessionId: this.sessionId,
-      models: this.models,
-      levels: this.levels,
-      hasProject: this.hasProject,
-    };
   }
 
   // ---------------------------------------------------------------- boot ----
@@ -510,15 +583,30 @@ class PiEditorApp {
     this.registerIpc();
     await this.createWindow();
     // Start with a project folder if provided (dev/testing), else home dir.
-    // The home dir is NOT watched; an explicit INITIAL_CWD is a real project.
     const initial = process.env.PI_EDITOR_INITIAL_CWD;
-    await this.setProject(initial && existsSync(initial) ? initial : homedir(), { watch: !!initial });
+    this.projectCwd = initial && existsSync(initial) ? initial : null;
+    if (this.projectCwd) this.startWatcher(this.projectCwd);
+    await this.createInstance();
   }
 
   dispose(): void {
     this.watcher?.stop();
-    this.stopPi();
+    for (const inst of this.instances.values()) inst.rpc.stop();
+    this.instances.clear();
     this.stopPaintWatchdog();
+  }
+
+  focusWindow(): void {
+    if (this.win && !this.win.isDestroyed()) {
+      if (this.win.isMinimized()) this.win.restore();
+      this.win.focus();
+    }
+  }
+
+  reloadWindow(): void {
+    if (this.win && !this.win.isDestroyed()) {
+      this.win.webContents.reload();
+    }
   }
 
   /**
@@ -580,19 +668,6 @@ class PiEditorApp {
     if (this.paintWatchdog) {
       clearInterval(this.paintWatchdog);
       this.paintWatchdog = null;
-    }
-  }
-
-  focusWindow(): void {
-    if (this.win && !this.win.isDestroyed()) {
-      if (this.win.isMinimized()) this.win.restore();
-      this.win.focus();
-    }
-  }
-
-  reloadWindow(): void {
-    if (this.win && !this.win.isDestroyed()) {
-      this.win.webContents.reload();
     }
   }
 }

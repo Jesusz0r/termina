@@ -24,10 +24,17 @@ A **hybrid terminal/editor** for working with the [pi coding agent](https://gith
 | Component | Technology | Role |
 |---|---|---|
 | Desktop shell | Electron | window, menus, IPC, file dialogs |
-| Agent | **pi in `--mode rpc`** (child process) | JSONL protocol over stdio — no Node-version coupling, uses your existing pi install + `~/.pi/agent` auth |
-| Editor | Monaco editor | live file viewer, tabs, read-only while the agent streams |
-| Terminal | xterm.js | renders the agent session: prompts, streaming text, tool cards, clickable paths |
+| Agent instances | **pi in `--mode rpc`** (one child process per terminal) | JSONL protocol over stdio — no Node-version coupling, uses your existing pi install + `~/.pi/agent` auth |
+| Editor | Monaco editor | shared live file viewer, tabs, read-only while any agent streams |
+| Terminal panes | xterm.js | multiple isolated terminals — each with its own chat, model and modified files |
 | Live sync | `fs.watch` (recursive) + tool events | every disk change pushes new content into the open Monaco model |
+
+### Multiple terminals
+
+- **＋** in the terminal tab bar (or `Cmd+Shift+T`) opens a new terminal — a fully isolated agent instance with its own pi process, chat history, model/thinking selection and modified-files list.
+- New terminals land on the currently-open project folder.
+- The toolbar's model/thinking dropdowns and the modified-files panel follow the **active** terminal.
+- The editor is shared: files any terminal touches open and update live in the same Monaco instance.
 
 ### The agent loop
 

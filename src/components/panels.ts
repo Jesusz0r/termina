@@ -59,7 +59,19 @@ export class Panels {
     });
   }
 
-  setState(s: PiState): void {
+  setState(s: PiState | null): void {
+    if (!s) {
+      this.statusModel.textContent = "no terminal";
+      this.statusState.textContent = "idle";
+      this.statusState.classList.remove("busy");
+      this.statusCwd.textContent = "";
+      this.cwdLabel.textContent = "";
+      this.statusSession.textContent = "";
+      this.btnAbort.disabled = true;
+      this.modelSelect.replaceChildren();
+      this.thinkingSelect.replaceChildren();
+      return;
+    }
     this.statusModel.textContent = s.model ? `${s.model.name}` : "no model";
     this.statusState.textContent = s.isStreaming ? "● agent working" : "idle";
     this.statusState.classList.toggle("busy", s.isStreaming);
