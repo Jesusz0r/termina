@@ -80,9 +80,16 @@ const tabs = async () => JSON.parse(await evalJs(`JSON.stringify([...document.qu
 const modifiedItems = async () => JSON.parse(await evalJs(`JSON.stringify([...document.querySelectorAll('#modified-list li')].map(li => li.textContent))`));
 
 // ---------------------------------------------------------------------------
-// 0. Reset: fresh session + fresh panel (makes the test self-contained)
+// 0. Reset: fresh session + fresh panel + no open tabs (self-contained test)
 // ---------------------------------------------------------------------------
-await evalJs(`document.getElementById('btn-new-session').click()`);
+await evalJs(`
+  (() => {
+    document.getElementById('btn-new-session').click();
+    while (document.querySelector('.editor-tab .tab-close')) {
+      document.querySelector('.editor-tab .tab-close').click();
+    }
+  })()
+`);
 await sleep(2500);
 const itemsBefore = await modifiedItems();
 check("fresh start has empty panel", itemsBefore.length === 0, itemsBefore.join(", "));
