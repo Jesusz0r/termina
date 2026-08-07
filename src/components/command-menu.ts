@@ -36,9 +36,14 @@ export class CommandMenu {
       try {
         const commands = await this.provider();
         this.fetched = true;
-        this.items = commands;
-      } finally {
+        this.items = commands ?? [];
         this.loading = false;
+      } catch (err) {
+        // Don't cache failures: show an error and retry on the next keystroke.
+        this.loading = false;
+        this.fetched = false;
+        this.renderError((err as Error).message);
+        return;
       }
       // The user may have typed more while we fetched; re-evaluate.
       await this.update(this.input.value);
@@ -132,6 +137,16 @@ export class CommandMenu {
     const row = document.createElement("div");
     row.className = "cmd-item cmd-loading";
     row.textContent = "… loading commands";
+    this.dropdown.appendChild(row);
+  }
+
+  private renderError(message: string): void {
+    this.visible = true;
+    this.dropdown.style.display = "block";
+    this.dropdown.replaceChildren();
+    const row = document.createElement("div");
+    row.className = "cmd-item cmd-loading";
+    row.textContent = `✗ couldn't load commands (${message}) — keep typing to retry`;
     this.dropdown.appendChild(row);
   }
 

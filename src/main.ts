@@ -368,6 +368,22 @@ function handlePaneState(s: PiState): void {
   pane.models = s.models;
   pane.levels = s.levels;
   pane.cwd = s.cwd;
+  // Prefetch slash-commands so the first "/" is instant and never fails
+  // while pi is busy.
+  if (!pane.commands && !pane.commandsLoading) {
+    pane.commandsLoading = true;
+    window.pi
+      .getCommands(pane.instanceId)
+      .then((res) => {
+        pane.commands = res.commands ?? [];
+      })
+      .catch(() => {
+        pane.commands = null; // keep null → lazy path retries
+      })
+      .finally(() => {
+        pane.commandsLoading = false;
+      });
+  }
   // The explorer follows the real project folder only (not the home-dir
   // placeholder): its create/rename/delete ops require a real project.
   if (s.hasProject && !projectCwd && s.cwd) {
