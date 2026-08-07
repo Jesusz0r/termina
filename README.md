@@ -64,15 +64,15 @@ npm run build      # esbuild (main/preload) + vite (renderer)
 npm start          # electron .
 ```
 
-### End-to-end test
+### End-to-end tests
 
 With the app running and `--remote-debugging-port=9222`:
 
 ```bash
-npm run test:e2e
+npm run test:e2e    # drives a real agent prompt through the UI (CDP)
+node scripts/edge-test.mjs   # edge cases: run-scoped summaries, deletions,
+                             # new-session clearing, new-subdir paths, links
 ```
-
-drives a real agent prompt through the UI (CDP) and verifies files, modified list, and editor tabs.
 
 ## Project layout
 
