@@ -48,7 +48,7 @@ import type { PiState, ModifiedFile, ModelInfo, InstanceSummary, ExtensionUiRequ
 const editorMgr = new EditorManager(document.getElementById("editor-container")!);
 const panels = new Panels();
 const explorer = new Explorer(document.getElementById("explorer")!);
-explorer.bind({ onOpenFile: (path) => void openFileSmart(path) });
+explorer.bind({ onOpenFile: (path, preview) => void openFileSmart(path, preview ?? true) });
 
 const promptInput = document.getElementById("prompt-input") as HTMLTextAreaElement;
 const btnSend = document.getElementById("btn-send") as HTMLButtonElement;
@@ -214,9 +214,9 @@ function basenameOf(p: string): string {
 
 // ---------------------------------------------------------------- commands --
 
-async function openFileSmart(path: string): Promise<void> {
+async function openFileSmart(path: string, preview = true): Promise<void> {
   const abs = path.startsWith("/") ? path : projectCwd ? `${projectCwd}/${path}` : path;
-  await editorMgr.openFile(abs);
+  await editorMgr.openFile(abs, { preview });
 }
 
 async function sendPrompt(steer = false): Promise<void> {
@@ -475,7 +475,8 @@ window.pi.onFileChanged((p) => {
 
 window.pi.onToolTarget((p) => {
   editorMgr.markTouched(p.path);
-  void editorMgr.openFile(p.path);
+  // Files the agent is actively writing stay open (permanent), not preview.
+  void editorMgr.openFile(p.path, { preview: false });
 });
 
 window.pi.onSettled((p) => {

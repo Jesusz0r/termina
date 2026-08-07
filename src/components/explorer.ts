@@ -19,7 +19,7 @@ export class Explorer {
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private selected: ExplorerEntry | null = null;
 
-  private onOpenFile: (absPath: string) => void = () => {};
+  private onOpenFile: (absPath: string, preview?: boolean) => void = () => {};
 
   constructor(container: HTMLElement) {
     this.rootEl = container;
@@ -27,7 +27,7 @@ export class Explorer {
     void this.renderRoot(); // show the empty state before any project is opened
   }
 
-  bind(handlers: { onOpenFile: (absPath: string) => void }): void {
+  bind(handlers: { onOpenFile: (absPath: string, preview?: boolean) => void }): void {
     this.onOpenFile = handlers.onOpenFile;
   }
 
@@ -179,7 +179,12 @@ export class Explorer {
     row.addEventListener("click", (e) => {
       if ((e.target as HTMLElement).closest(".explorer-actions")) return;
       this.select(entry, row);
-      this.onOpenFile(entry.path);
+      this.onOpenFile(entry.path, true); // preview
+    });
+    row.addEventListener("dblclick", (e) => {
+      if ((e.target as HTMLElement).closest(".explorer-actions")) return;
+      this.select(entry, row);
+      this.onOpenFile(entry.path, false); // pin as a permanent tab
     });
     return row;
   }

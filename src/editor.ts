@@ -24,6 +24,8 @@ export class EditorManager {
   private emptyEl: HTMLElement;
   private streaming = false;
   private projectOpen = false;
+  /** The single replaceable preview tab (VS Code style). */
+  private previewKey: string | null = null;
 
   constructor(container: HTMLElement) {
     this.tabsEl = document.getElementById("editor-tabs")!;
@@ -70,26 +72,58 @@ export class EditorManager {
     this.emptyEl.style.display = !this.projectOpen && this.order.length === 0 ? "flex" : "none";
   }
 
-  /** Open (or focus) a file. Content is fetched from main if we don't have it. */
-  async openFile(path: string): Promise<void> {
+  /**
+   * Open (or focus) a file. Content is fetched from main if we don't have it.
+   * With preview: true the tab is a replaceable preview (VS Code style) — a
+   * new preview replaces the previous one; editing or preview: false pins it.
+   */
+  async openFile(path: string, opts: { preview?: boolean } = {}): Promise<void> {
+    const preview = opts.preview ?? true;
     const key = path;
-    let tab = this.tabs.get(key);
-    if (!tab) {
-      const model = monaco.editor.createModel("", languageForPath(path), monaco.Uri.file(path));
-      tab = this.makeTab(key, model);
-      this.tabs.set(key, tab);
-      this.order.push(key);
-      this.renderTabs();
-      this.syncEmptyState();
+    const existing = this.tabs.get(key);
+    if (existing) {
+      // Pin the preview when explicitly requested (e.g. double-click).
+      if (!preview && this.previewKey === key) this.pinPreview();
+      this.activate(key);
+      return;
+    }
+    // A new preview replaces the previous preview (if it wasn't edited).
+    if (preview && this.previewKey && this.tabs.has(this.previewKey)) {
+      this.closeTab(this.previewKey);
+    }
+    const model = monaco.editor.createModel("", languageForPath(path), monaco.Uri.file(path));
+    const tab = this.makeTab(key, model);
+    if (preview) {
+      this.previewKey = key;
+      tab.dom.classList.add("preview");
+    }
+    // User edits pin the preview into a permanent tab. Programmatic content
+    // replacements (watcher/agent live updates) come through as isFlush and
+    // do NOT pin.
+    model.onDidChangeContent((e) => {
+      if (e.isFlush) return;
+      if (this.previewKey === key) this.pinPreview();
+    });
+    this.tabs.set(key, tab);
+    this.order.push(key);
+    this.renderTabs();
+    this.syncEmptyState();
 
-      const res = await window.pi.openFile(path);
-      if ("content" in res) {
-        if (this.tabs.has(key)) model.setValue(res.content);
-      } else {
-        model.setValue(`// ${res.error}`);
-      }
+    const res = await window.pi.openFile(path);
+    if ("content" in res) {
+      if (this.tabs.has(key)) model.setValue(res.content);
+    } else {
+      model.setValue(`// ${res.error}`);
     }
     this.activate(key);
+  }
+
+  /** Promote the preview tab to a permanent tab. */
+  private pinPreview(): void {
+    if (!this.previewKey) return;
+    const tab = this.tabs.get(this.previewKey);
+    if (tab) tab.dom.classList.remove("preview");
+    this.previewKey = null;
   }
 
   /** Update model content from the watcher (live edits). */
@@ -168,6 +202,7 @@ export class EditorManager {
     tab.model.dispose();
     this.tabs.delete(key);
     this.order = this.order.filter((k) => k !== key);
+    if (this.previewKey === key) this.previewKey = null;
     this.renderTabs();
     if (this.activeKey === key) {
       this.activeKey = this.order.length ? this.order[this.order.length - 1] : null;

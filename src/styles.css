@@ -502,6 +502,12 @@ body {
   border-top: 1px solid var(--accent);
 }
 
+/* Preview tabs (VS Code style): italic name, replaced by the next click */
+.editor-tab.preview .tab-name {
+  font-style: italic;
+  color: var(--text-dim);
+}
+
 .editor-tab .tab-close {
   font-size: 14px;
   line-height: 1;
