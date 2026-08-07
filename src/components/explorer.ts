@@ -17,6 +17,7 @@ export class Explorer {
   private dirs = new Map<string, DirState>(); // keyed by abs path
   private projectCwd: string | null = null;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private selected: ExplorerEntry | null = null;
 
   private onOpenFile: (absPath: string) => void = () => {};
 
@@ -28,18 +29,36 @@ export class Explorer {
 
   bind(handlers: { onOpenFile: (absPath: string) => void }): void {
     this.onOpenFile = handlers.onOpenFile;
-    const refreshBtn = this.rootEl.querySelector("#btn-explorer-refresh") as HTMLButtonElement;
-    const newFileBtn = this.rootEl.querySelector("#btn-explorer-new-file") as HTMLButtonElement;
-    const newDirBtn = this.rootEl.querySelector("#btn-explorer-new-dir") as HTMLButtonElement;
-    refreshBtn.addEventListener("click", () => void this.refresh());
-    newFileBtn.addEventListener("click", () => void this.createAt("", "file"));
-    newDirBtn.addEventListener("click", () => void this.createAt("", "dir"));
+  }
+
+  /** File-menu commands (File → New File / New Folder / Rename / Delete…). */
+  handleCommand(command: "new-file" | "new-folder" | "rename" | "delete" | "refresh"): void {
+    switch (command) {
+      case "new-file":
+        void this.createAt("", "file");
+        break;
+      case "new-folder":
+        void this.createAt("", "dir");
+        break;
+      case "rename":
+        if (this.selected) void this.renameAt(this.selected);
+        else toast("Select a file or folder in the explorer first", "warning");
+        break;
+      case "delete":
+        if (this.selected) void this.deleteAt(this.selected);
+        else toast("Select a file or folder in the explorer first", "warning");
+        break;
+      case "refresh":
+        void this.refresh();
+        break;
+    }
   }
 
   /** Called when the project folder changes. */
   setProject(cwd: string): void {
     this.projectCwd = cwd;
     this.dirs.clear();
+    this.selected = null;
     void this.renderRoot();
   }
 
@@ -113,6 +132,7 @@ export class Explorer {
     row.append(arrow, icon, name, actions);
     row.addEventListener("click", (e) => {
       if ((e.target as HTMLElement).closest(".explorer-actions")) return;
+      this.select(entry, row);
       state.expanded = !state.expanded;
       arrow.textContent = state.expanded ? "▾" : "▸";
       void this.renderChildren(children, entry, state);
@@ -158,9 +178,19 @@ export class Explorer {
     row.append(icon, name, actions);
     row.addEventListener("click", (e) => {
       if ((e.target as HTMLElement).closest(".explorer-actions")) return;
+      this.select(entry, row);
       this.onOpenFile(entry.path);
     });
     return row;
+  }
+
+  /** Highlight the selected row; keeps it as the rename/delete target. */
+  private select(entry: ExplorerEntry, row: HTMLElement): void {
+    this.selected = entry;
+    for (const r of this.treeEl.querySelectorAll(".explorer-row.selected")) {
+      r.classList.remove("selected");
+    }
+    row.classList.add("selected");
   }
 
   private makeActions(entry: ExplorerEntry): HTMLElement {

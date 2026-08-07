@@ -75,9 +75,12 @@ export interface ModifiedListPayload {
   files: ModifiedFile[];
 }
 
+export type MenuCommand = "new-file" | "new-folder" | "rename" | "delete" | "refresh";
+
 export interface PiBridge {
   // push events (main → renderer)
   onEvent(cb: (event: { instanceId: string } & Record<string, unknown>) => void): void;
+  onMenuCommand(cb: (cmd: { command: MenuCommand }) => void): void;
   onFileChanged(cb: (p: FileChangedPayload) => void): void;
   onToolTarget(cb: (p: ToolTargetPayload) => void): void;
   onSettled(cb: (p: SettledPayload) => void): void;

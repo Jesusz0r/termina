@@ -10,7 +10,6 @@ export class Panels {
   private thinkingSelect = document.getElementById("thinking-select") as HTMLSelectElement;
   private btnAbort = document.getElementById("btn-abort") as HTMLButtonElement;
   private btnNewSession = document.getElementById("btn-new-session") as HTMLButtonElement;
-  private btnOpenFolder = document.getElementById("btn-open-folder") as HTMLButtonElement;
   private btnSend = document.getElementById("btn-send") as HTMLButtonElement;
   private statusModel = document.getElementById("status-model")!;
   private statusState = document.getElementById("status-state")!;
@@ -21,7 +20,6 @@ export class Panels {
   private modifiedCount = document.getElementById("modified-count")!;
   private btnClearModified = document.getElementById("btn-clear-modified") as HTMLButtonElement;
 
-  private onOpenFolder: () => void = () => {};
   private onNewSession: () => void = () => {};
   private onAbort: () => void = () => {};
   private onModelChange: (provider: string, id: string) => void = () => {};
@@ -31,7 +29,6 @@ export class Panels {
   private modified: ModifiedFile[] = [];
 
   bind(handlers: {
-    onOpenFolder: () => void;
     onNewSession: () => void;
     onAbort: () => void;
     onModelChange: (provider: string, id: string) => void;
@@ -40,7 +37,6 @@ export class Panels {
     onClearModified: () => void;
   }): void {
     Object.assign(this, handlers);
-    this.btnOpenFolder.addEventListener("click", () => this.onOpenFolder());
     this.btnNewSession.addEventListener("click", () => this.onNewSession());
     this.btnAbort.addEventListener("click", () => this.onAbort());
     // btn-send is wired directly in the renderer entry (sendPrompt); do not

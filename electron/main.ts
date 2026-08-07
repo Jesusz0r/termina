@@ -119,11 +119,20 @@ class PiEditorApp {
   }
 
   private buildMenu(): void {
+    const send = (command: string) => () => this.send("menu:command", { command });
     const template: Electron.MenuItemConstructorOptions[] = [
+      { role: "appMenu" }, // About/Hide/Quit — keeps File as the second menu
       {
         label: "File",
         submenu: [
           { label: "Open Folder…", accelerator: "CmdOrCtrl+O", click: () => void this.openFolder() },
+          { type: "separator" },
+          { label: "New File…", accelerator: "CmdOrCtrl+Alt+N", click: send("new-file") },
+          { label: "New Folder…", accelerator: "CmdOrCtrl+Alt+Shift+N", click: send("new-folder") },
+          { label: "Rename…", accelerator: "F2", click: send("rename") },
+          { label: "Delete…", click: send("delete") },
+          { type: "separator" },
+          { label: "Refresh Explorer", click: send("refresh") },
           { type: "separator" },
           { label: "Close Window", accelerator: "CmdOrCtrl+W", role: "close" },
         ],

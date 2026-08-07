@@ -249,7 +249,6 @@ function autoResizePrompt(): void {
 // ---------------------------------------------------------------- panels ----
 
 panels.bind({
-  onOpenFolder: () => void window.pi.openFolder(),
   onNewSession: () => {
     const pane = activeId ? panes.get(activeId) : undefined;
     pane?.terminal.system("… starting a new session");
@@ -278,6 +277,9 @@ btnNewTerminal.addEventListener("click", () => {
     if (panes.has(id)) activatePane(id);
   });
 });
+
+// File-menu commands (Open Folder, New File/Folder, Rename, Delete, Refresh)
+window.pi.onMenuCommand((cmd) => explorer.handleCommand(cmd.command));
 
 promptInput.addEventListener("keydown", (e) => {
   // Enter sends unless composing (IME) or shift (newline)

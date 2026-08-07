@@ -11,8 +11,7 @@
   <body>
     <div id="app">
       <header id="toolbar">
-        <button id="btn-open-folder" class="toolbar-btn" title="Open a project folder (Cmd+O)">Open Folder</button>
-        <span id="cwd-label" class="muted" title="Agent working directory"></span>
+        <span id="cwd-label" class="muted" title="Project folder (Cmd+O to change)"></span>
         <div class="spacer"></div>
         <label class="toolbar-field">
           <span class="muted">model</span>
@@ -50,11 +49,6 @@
           <div id="explorer">
             <div class="explorer-header">
               <span>Explorer</span>
-              <div class="explorer-header-actions">
-                <button id="btn-explorer-refresh" class="mini-btn" title="Refresh">⟳</button>
-                <button id="btn-explorer-new-file" class="mini-btn" title="New file">＋f</button>
-                <button id="btn-explorer-new-dir" class="mini-btn" title="New folder">＋d</button>
-              </div>
             </div>
             <div id="explorer-tree"></div>
           </div>

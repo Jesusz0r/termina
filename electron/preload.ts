@@ -14,12 +14,16 @@ import type {
   ModifiedListPayload,
   InstanceSummary,
   ExplorerEntry,
+  MenuCommand,
 } from "../shared/types.js";
 
 const bridge: PiBridge = {
   // ---- push events ----
   onEvent: (cb) => {
     ipcRenderer.on("pi:event", (_e, event: { instanceId: string } & Record<string, unknown>) => cb(event));
+  },
+  onMenuCommand: (cb) => {
+    ipcRenderer.on("menu:command", (_e, cmd: { command: MenuCommand }) => cb(cmd));
   },
   onFileChanged: (cb) => {
     ipcRenderer.on("file:changed", (_e, p: FileChangedPayload) => cb(p));
