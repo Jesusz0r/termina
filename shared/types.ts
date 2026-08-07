@@ -22,6 +22,8 @@ export interface PiState {
   sessionId: string | null;
   models: ModelInfo[];
   levels: string[];
+  /** True once a real project folder is opened (not the home-dir placeholder). */
+  hasProject: boolean;
 }
 
 export interface FileChangedPayload {

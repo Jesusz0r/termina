@@ -40,6 +40,8 @@ class PiEditorApp {
   private thinkingLevel: string | null = null;
   private sessionId: string | null = null;
   private paintWatchdog: ReturnType<typeof setInterval> | null = null;
+  /** True once a real project folder is opened (not the home-dir placeholder). */
+  private hasProject = false;
 
   // ---------------------------------------------------------------- window --
 
@@ -209,6 +211,7 @@ class PiEditorApp {
       sessionId: this.sessionId,
       models: this.models,
       levels: this.levels,
+      hasProject: this.hasProject,
     };
     this.send("pi:state", state);
   }
@@ -365,6 +368,7 @@ class PiEditorApp {
   private async setProject(cwd: string, opts: { watch?: boolean } = {}): Promise<void> {
     this.cwd = cwd;
     this.cwdReal = this.canonicalPath(cwd);
+    this.hasProject = opts.watch !== false;
     this.modified.clear();
     this.runModified.clear();
     this.sessionStart = 0;
@@ -496,6 +500,7 @@ class PiEditorApp {
       sessionId: this.sessionId,
       models: this.models,
       levels: this.levels,
+      hasProject: this.hasProject,
     };
   }
 

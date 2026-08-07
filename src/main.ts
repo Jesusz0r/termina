@@ -157,6 +157,7 @@ window.pi.onState((s: PiState) => {
   cwd = s.cwd;
   panels.setState(s);
   editorMgr.setStreaming(s.isStreaming);
+  editorMgr.setProjectOpen(s.hasProject);
   // Show model / thinking changes in the terminal (skip the initial state).
   const modelKey = s.model ? `${s.model.name} (${s.model.provider})` : null;
   if (lastModelKey !== null && modelKey !== null && modelKey !== lastModelKey) {

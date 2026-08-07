@@ -140,6 +140,8 @@ body {
   flex: 1;
   min-width: 360px;
   background: var(--bg);
+  /* anchors #editor-empty (position: absolute; inset: 0) to this pane */
+  position: relative;
 }
 
 #divider {

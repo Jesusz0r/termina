@@ -23,6 +23,7 @@ export class EditorManager {
   private tabsEl: HTMLElement;
   private emptyEl: HTMLElement;
   private streaming = false;
+  private projectOpen = false;
 
   constructor(container: HTMLElement) {
     this.tabsEl = document.getElementById("editor-tabs")!;
@@ -57,8 +58,16 @@ export class EditorManager {
     return this.streaming;
   }
 
+  /** Called when a project folder is opened/closed; hides the welcome hint. */
+  setProjectOpen(open: boolean): void {
+    this.projectOpen = open;
+    this.syncEmptyState();
+  }
+
   private syncEmptyState(): void {
-    this.emptyEl.style.display = this.order.length === 0 ? "flex" : "none";
+    // The hint only makes sense before a folder is opened: once a project is
+    // open (even with no tabs yet) the pane stays clean.
+    this.emptyEl.style.display = !this.projectOpen && this.order.length === 0 ? "flex" : "none";
   }
 
   /** Open (or focus) a file. Content is fetched from main if we don't have it. */
