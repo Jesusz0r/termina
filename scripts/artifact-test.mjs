@@ -108,7 +108,7 @@ const prompt = async (text) => {
 };
 
 // 1. fresh state
-await evalJs(`document.getElementById('btn-new-session').click()`);
+await evalJs(`(async () => { const insts = await window.pi.getInstances(); if (insts[0]) await window.pi.newSession(insts[0].id); })()`);
 await sleep(2500);
 
 // 2. create a file so the modified panel expands (terminal shrinks)

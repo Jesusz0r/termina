@@ -249,11 +249,6 @@ function autoResizePrompt(): void {
 // ---------------------------------------------------------------- panels ----
 
 panels.bind({
-  onNewSession: () => {
-    const pane = activeId ? panes.get(activeId) : undefined;
-    pane?.terminal.system("… starting a new session");
-    if (activeId) void window.pi.newSession(activeId);
-  },
   onAbort: () => {
     const pane = activeId ? panes.get(activeId) : undefined;
     pane?.terminal.system("… aborting");

@@ -82,9 +82,10 @@ const modifiedItems = async () => JSON.parse(await evalJs(`JSON.stringify([...do
 // ---------------------------------------------------------------------------
 // 0. Reset: fresh session + fresh panel + no open tabs (self-contained test)
 // ---------------------------------------------------------------------------
+const resetIds = JSON.parse(await evalJs(`(async () => JSON.stringify((await window.pi.getInstances()).map(i => i.id)))()`));
+if (resetIds[0]) await evalJs(`window.pi.newSession(${JSON.stringify(resetIds[0])})`);
 await evalJs(`
   (() => {
-    document.getElementById('btn-new-session').click();
     while (document.querySelector('.editor-tab .tab-close')) {
       document.querySelector('.editor-tab .tab-close').click();
     }
@@ -123,7 +124,9 @@ check("deleted file removed from panel", !itemsAfterDelete.some((i) => i.include
 // ---------------------------------------------------------------------------
 // 3. New Session clears the panel
 // ---------------------------------------------------------------------------
-await evalJs(`document.getElementById('btn-new-session').click()`);
+const activeId2 = await evalJs(`(async () => JSON.stringify((await window.pi.getInstances()).map(i => i.id)))()`);
+const ids2 = JSON.parse(activeId2);
+if (ids2[0]) await evalJs(`window.pi.newSession(${JSON.stringify(ids2[0])})`);
 await sleep(1500);
 const itemsAfterNewSession = await modifiedItems();
 check("new session clears panel", itemsAfterNewSession.length === 0, itemsAfterNewSession.join(", "));

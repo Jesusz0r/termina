@@ -9,7 +9,6 @@ export class Panels {
   private modelSelect = document.getElementById("model-select") as HTMLSelectElement;
   private thinkingSelect = document.getElementById("thinking-select") as HTMLSelectElement;
   private btnAbort = document.getElementById("btn-abort") as HTMLButtonElement;
-  private btnNewSession = document.getElementById("btn-new-session") as HTMLButtonElement;
   private btnSend = document.getElementById("btn-send") as HTMLButtonElement;
   private statusModel = document.getElementById("status-model")!;
   private statusState = document.getElementById("status-state")!;
@@ -20,7 +19,6 @@ export class Panels {
   private modifiedCount = document.getElementById("modified-count")!;
   private btnClearModified = document.getElementById("btn-clear-modified") as HTMLButtonElement;
 
-  private onNewSession: () => void = () => {};
   private onAbort: () => void = () => {};
   private onModelChange: (provider: string, id: string) => void = () => {};
   private onThinkingChange: (level: string) => void = () => {};
@@ -29,7 +27,6 @@ export class Panels {
   private modified: ModifiedFile[] = [];
 
   bind(handlers: {
-    onNewSession: () => void;
     onAbort: () => void;
     onModelChange: (provider: string, id: string) => void;
     onThinkingChange: (level: string) => void;
@@ -37,7 +34,6 @@ export class Panels {
     onClearModified: () => void;
   }): void {
     Object.assign(this, handlers);
-    this.btnNewSession.addEventListener("click", () => this.onNewSession());
     this.btnAbort.addEventListener("click", () => this.onAbort());
     // btn-send is wired directly in the renderer entry (sendPrompt); do not
     // duplicate it here or clicks would send twice.
