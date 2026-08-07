@@ -787,6 +787,84 @@ body {
   font-weight: 600;
 }
 
+/* --------------------------------------------------------- command menu ---- */
+
+#command-menu {
+  position: fixed;
+  bottom: 52px;
+  left: 24px;
+  width: min(620px, calc(100vw - 48px));
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  z-index: 90;
+  display: none;
+  font-size: 12px;
+}
+
+.cmd-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  border-bottom: 1px solid rgba(60, 60, 60, 0.4);
+}
+
+.cmd-item:last-child {
+  border-bottom: none;
+}
+
+.cmd-item.selected {
+  background: var(--bg-hover);
+}
+
+.cmd-name {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--accent);
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+
+.cmd-desc {
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.cmd-source {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  flex: 0 0 auto;
+  background: var(--bg);
+  color: var(--text-dim);
+}
+
+.cmd-source.skill {
+  color: var(--green);
+}
+
+.cmd-source.prompt {
+  color: var(--purple);
+}
+
+.cmd-source.extension {
+  color: var(--yellow);
+}
+
+.cmd-loading {
+  color: var(--text-dim);
+  cursor: default;
+}
+
 /* scrollbars */
 ::-webkit-scrollbar {
   width: 10px;

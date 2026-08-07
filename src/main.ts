@@ -42,8 +42,9 @@ import "@xterm/xterm/css/xterm.css";
 import { TerminalManager, formatMarkdown } from "./terminal";
 import { Panels } from "./components/panels";
 import { Explorer } from "./components/explorer";
+import { CommandMenu } from "./components/command-menu";
 import { handleExtensionUiRequest, toast } from "./components/modals";
-import type { PiState, ModifiedFile, ModelInfo, InstanceSummary, ExtensionUiRequest } from "../shared/types";
+import type { PiState, ModifiedFile, ModelInfo, InstanceSummary, ExtensionUiRequest, PiCommand } from "../shared/types";
 
 const editorMgr = new EditorManager(document.getElementById("editor-container")!);
 const panels = new Panels();
@@ -78,6 +79,8 @@ interface Pane {
   lastModelKey: string | null;
   lastThinking: string | null;
   textBuffer: string;
+  commands: PiCommand[] | null;
+  commandsLoading: boolean;
 }
 
 const panes = new Map<string, Pane>();
@@ -139,6 +142,8 @@ function createPaneShell(instanceId: string): Pane {
     lastModelKey: null,
     lastThinking: null,
     textBuffer: "",
+    commands: null,
+    commandsLoading: false,
   };
   panes.set(instanceId, pane);
   return pane;
@@ -154,6 +159,7 @@ function activatePane(instanceId: string): void {
   }
   (window as unknown as Record<string, unknown>).__piTerminal = pane.terminal.getTerminal();
   pane.terminal.fit();
+  commandMenu.reset(); // commands differ per instance
   renderActiveChrome(pane);
 }
 
@@ -276,14 +282,34 @@ btnNewTerminal.addEventListener("click", () => {
 // File-menu commands (Open Folder, New File/Folder, Rename, Delete, Refresh)
 window.pi.onMenuCommand((cmd) => explorer.handleCommand(cmd.command));
 
+// Slash-command autocomplete: skills, prompt templates and extension commands
+// come from pi's get_commands (per active instance, fetched lazily).
+const commandMenu = new CommandMenu(promptInput, async () => {
+  if (!activeId) return [];
+  const pane = panes.get(activeId);
+  if (!pane) return [];
+  if (pane.commands) return pane.commands;
+  const res = await window.pi.getCommands(activeId);
+  pane.commands = res.commands ?? [];
+  return pane.commands;
+});
+
+promptInput.addEventListener("input", () => {
+  autoResizePrompt();
+  void commandMenu.update(promptInput.value);
+});
 promptInput.addEventListener("keydown", (e) => {
+  if (commandMenu.handleKey(e)) return;
   // Enter sends unless composing (IME) or shift (newline)
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     void sendPrompt(e.metaKey || e.ctrlKey);
   }
 });
-promptInput.addEventListener("input", autoResizePrompt);
+promptInput.addEventListener("blur", () => {
+  // Let clicks on the dropdown register before closing.
+  setTimeout(() => commandMenu.close(), 150);
+});
 btnSend.addEventListener("click", () => void sendPrompt(false));
 
 // ------------------------------------------------------------ split pane ----

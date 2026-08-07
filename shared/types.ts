@@ -77,6 +77,12 @@ export interface ModifiedListPayload {
 
 export type MenuCommand = "new-file" | "new-folder" | "rename" | "delete" | "refresh";
 
+export interface PiCommand {
+  name: string;
+  description: string;
+  source: string;
+}
+
 export interface PiBridge {
   // push events (main → renderer)
   onEvent(cb: (event: { instanceId: string } & Record<string, unknown>) => void): void;
@@ -104,6 +110,7 @@ export interface PiBridge {
   setModel(instanceId: string, provider: string, modelId: string): Promise<unknown>;
   setThinking(instanceId: string, level: string): Promise<unknown>;
   getState(instanceId: string): Promise<PiState>;
+  getCommands(instanceId: string): Promise<{ commands: PiCommand[]; error?: string }>;
   getModifiedFiles(instanceId: string): Promise<ModifiedFile[]>;
   clearModified(instanceId: string): Promise<void>;
 

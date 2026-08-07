@@ -595,6 +595,25 @@ class PiEditorApp {
       void this.refreshState(inst);
       return inst.state;
     });
+    ipcMain.handle("pi:get-commands", async (_e, instanceId: string) => {
+      const inst = this.instanceOf(instanceId);
+      if (!inst) return { commands: [], error: "instance not found" };
+      try {
+        const r = await inst.rpc.getCommands();
+        if (r.success && r.data) {
+          return {
+            commands: r.data.commands.map((c) => ({
+              name: String(c.name ?? ""),
+              description: String(c.description ?? ""),
+              source: String(c.source ?? ""),
+            })),
+          };
+        }
+        return { commands: [], error: r.error };
+      } catch (err) {
+        return { commands: [], error: (err as Error).message };
+      }
+    });
     ipcMain.handle("pi:ui-response", (_e, instanceId: string, id: string, payload: Record<string, unknown>) => {
       const inst = this.instanceOf(instanceId);
       if (!inst) return;

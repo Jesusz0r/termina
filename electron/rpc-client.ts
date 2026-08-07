@@ -142,6 +142,10 @@ export class PiRpcClient {
     return this.send({ type: "get_available_thinking_levels" });
   }
 
+  getCommands(): Promise<RpcResponse<{ commands: PiCommand[] }>> {
+    return this.send({ type: "get_commands" });
+  }
+
   setModel(provider: string, modelId: string): Promise<RpcResponse> {
     return this.send({ type: "set_model", provider, modelId });
   }
@@ -190,6 +194,12 @@ export interface PiModel {
   maxTokens?: number;
   reasoning?: boolean;
   cost?: Record<string, number>;
+}
+
+export interface PiCommand {
+  name: string;
+  description: string;
+  source: string;
 }
 
 export interface RpcResponse<T = unknown> {
