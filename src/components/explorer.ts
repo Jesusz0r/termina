@@ -87,6 +87,11 @@ export class Explorer {
       state.expanded = true;
       state.loaded = false; // root always re-lists
     }
+
+    // VS Code style: a node is a row, with the children indented BELOW it.
+    const node = document.createElement("div");
+    node.className = "explorer-node";
+
     const row = document.createElement("div");
     row.className = "explorer-row dir";
     row.dataset.path = entry.path;
@@ -109,20 +114,19 @@ export class Explorer {
       if ((e.target as HTMLElement).closest(".explorer-actions")) return;
       state.expanded = !state.expanded;
       arrow.textContent = state.expanded ? "▾" : "▸";
-      void this.renderChildren(row, entry, state);
+      void this.renderChildren(children, entry, state);
     });
 
     const children = document.createElement("div");
     children.className = "explorer-children";
-    row.appendChild(children);
+    node.append(row, children);
     if (state.expanded) {
-      void this.renderChildren(row, entry, state);
+      void this.renderChildren(children, entry, state);
     }
-    return row;
+    return node;
   }
 
-  private async renderChildren(row: HTMLElement, entry: ExplorerEntry, state: DirState): Promise<void> {
-    const children = row.querySelector(".explorer-children") as HTMLElement;
+  private async renderChildren(children: HTMLElement, entry: ExplorerEntry, state: DirState): Promise<void> {
     if (!state.expanded) {
       children.replaceChildren();
       return;

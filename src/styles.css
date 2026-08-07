@@ -188,6 +188,11 @@ body {
   font-size: 12px;
 }
 
+.explorer-node {
+  /* a node = row + indented children block below it (VS Code style) */
+  display: block;
+}
+
 .explorer-row {
   display: flex;
   align-items: center;
@@ -257,7 +262,8 @@ body {
 }
 
 .explorer-children {
-  margin-left: 14px;
+  display: block;
+  margin-left: 12px;
 }
 
 #explorer-divider {

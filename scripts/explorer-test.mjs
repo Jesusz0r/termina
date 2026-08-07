@@ -25,9 +25,8 @@ const boot = JSON.parse(await evalJs(`
 `));
 check("explorer shows project root", boot.explorer && boot.rootName === "pi-editor-test-project", JSON.stringify(boot));
 
-// 2. expand the root → see files + src dir
-await evalJs(`document.querySelector('#explorer-tree .explorer-row')?.click()`);
-await sleep(800);
+// 2. root is expanded by default → see files + src dir
+await sleep(300);
 const rootChildren = JSON.parse(await evalJs(`
   (() => JSON.stringify([...document.querySelectorAll('#explorer-tree .explorer-children .explorer-row .explorer-name')].map(n => n.textContent)))()
 `));
