@@ -37,7 +37,7 @@ import "./styles.css";
 // xterm's own stylesheet — hides the helper textarea (a visible white input box
 // at the terminal's top-left otherwise), styles the viewport/scrollbar, etc.
 import "@xterm/xterm/css/xterm.css";
-import { TerminalManager } from "./terminal";
+import { TerminalManager, formatMarkdown } from "./terminal";
 import { Panels } from "./components/panels";
 import { handleExtensionUiRequest, toast } from "./components/modals";
 import type { PiState, ModifiedFile } from "../shared/types";
@@ -64,7 +64,7 @@ let textBuffer = "";
 
 function flushBufferedText(): void {
   if (!textBuffer) return;
-  terminal.streamText(textBuffer);
+  terminal.streamText(formatMarkdown(textBuffer));
   textBuffer = "";
 }
 

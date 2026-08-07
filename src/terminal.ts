@@ -28,6 +28,9 @@ export class TerminalManager {
     this.term = new Terminal({
       fontSize: 13,
       fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
+      // Treat bare \n as CRLF so multi-line text (responses) always starts at
+      // column 0 — otherwise lines after a wrap keep the previous column.
+      convertEol: true,
       theme: {
         background: "#141414",
         foreground: "#d4d4d4",
@@ -296,6 +299,37 @@ export class TerminalManager {
 }
 
 // ---------------------------------------------------------------- helpers --
+
+/**
+ * Lightweight inline markdown → ANSI for assistant responses:
+ *  - `` `code` `` → blue
+ *  - `**bold**`   → bold
+ *  - `*italic*`   → italic
+ *  - `# heading`  → bold
+ *  - `[text](url)`→ text (link target dropped)
+ * Code spans are processed first so their content is never re-styled.
+ */
+export function formatMarkdown(text: string): string {
+  const code = (s: string) => `\x1b[34m${s}\x1b[0m`; // blue (theme cyan == green)
+  const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
+  const italic = (s: string) => `\x1b[3m${s}\x1b[0m`;
+
+  const lines = text.split("\n");
+  const out = lines.map((line) => {
+    let l = line;
+    // headings: # text
+    l = l.replace(/^(#{1,6})\s+(.*)$/, (_m, _h, content) => bold(content));
+    // inline code first
+    l = l.replace(/`([^`\n]+)`/g, (_m, c) => code(c));
+    // bold before italic so **x** isn't eaten by *x*
+    l = l.replace(/\*\*([^*\n]+)\*\*/g, (_m, c) => bold(c));
+    l = l.replace(/\*([^*\n]+)\*/g, (_m, c) => italic(c));
+    // links: [text](url) → text
+    l = l.replace(/\[([^\[\]]+)\]\([^)]*\)/g, (_m, t) => t);
+    return l;
+  });
+  return out.join("\n");
+}
 
 function summarizeToolArgs(toolName: string, args: Record<string, unknown>): { text: string; time: string } {
   const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
