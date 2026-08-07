@@ -41,11 +41,14 @@ import "./styles.css";
 import "@xterm/xterm/css/xterm.css";
 import { TerminalManager, formatMarkdown } from "./terminal";
 import { Panels } from "./components/panels";
+import { Explorer } from "./components/explorer";
 import { handleExtensionUiRequest, toast } from "./components/modals";
 import type { PiState, ModifiedFile, ModelInfo, InstanceSummary, ExtensionUiRequest } from "../shared/types";
 
 const editorMgr = new EditorManager(document.getElementById("editor-container")!);
 const panels = new Panels();
+const explorer = new Explorer(document.getElementById("explorer")!);
+explorer.bind({ onOpenFile: (path) => void openFileSmart(path) });
 
 const promptInput = document.getElementById("prompt-input") as HTMLTextAreaElement;
 const btnSend = document.getElementById("btn-send") as HTMLButtonElement;
@@ -303,6 +306,26 @@ window.addEventListener("mouseup", () => {
   document.body.style.cursor = "";
 });
 
+// explorer ↔ editor divider
+const explorerDivider = document.getElementById("explorer-divider")!;
+const explorerEl = document.getElementById("explorer")!;
+let exploring = false;
+explorerDivider.addEventListener("mousedown", () => {
+  exploring = true;
+  document.body.style.cursor = "col-resize";
+});
+window.addEventListener("mousemove", (e) => {
+  if (!exploring) return;
+  const pane = document.getElementById("right-pane")!;
+  const rect = pane.getBoundingClientRect();
+  const w = Math.min(420, Math.max(140, e.clientX - rect.left));
+  explorerEl.style.width = `${w}px`;
+});
+window.addEventListener("mouseup", () => {
+  exploring = false;
+  document.body.style.cursor = "";
+});
+
 // ------------------------------------------------------------ pi events ----
 
 function handlePaneState(s: PiState): void {
@@ -319,7 +342,10 @@ function handlePaneState(s: PiState): void {
   pane.models = s.models;
   pane.levels = s.levels;
   pane.cwd = s.cwd;
-  if (!projectCwd && s.cwd) projectCwd = s.cwd;
+  if (!projectCwd && s.cwd) {
+    projectCwd = s.cwd;
+    explorer.setProject(s.cwd);
+  }
   updatePaneTab(pane);
 
   // Show model / thinking changes in the terminal (skip the initial state).
@@ -442,6 +468,7 @@ window.pi.onEvent((event) => {
 window.pi.onFileChanged((p) => {
   editorMgr.markTouched(p.path);
   editorMgr.updateContent(p.path, p.content);
+  explorer.handleDiskChange();
 });
 
 window.pi.onToolTarget((p) => {
@@ -465,6 +492,7 @@ window.pi.onSettled((p) => {
 
 window.pi.onFileDeleted((p) => {
   editorMgr.closeIfOpen(p.path);
+  explorer.handleDiskChange();
 });
 
 window.pi.onModifiedList((p) => {
@@ -489,6 +517,7 @@ window.pi.onStderr((e) => {
 
 window.pi.onFolderOpened((e) => {
   projectCwd = e.cwd;
+  explorer.setProject(e.cwd);
   for (const pane of panes.values()) {
     pane.terminal.system(`project folder: ${e.cwd}`);
   }
@@ -524,6 +553,12 @@ async function boot(): Promise<void> {
   }
   if (!activeId && instances.length > 0) {
     activatePane(instances[0].id);
+  }
+  // The project folder for the explorer comes from the first instance's cwd.
+  const first = await window.pi.getState(instances[0]?.id ?? "");
+  if (first?.cwd) {
+    projectCwd = first.cwd;
+    explorer.setProject(first.cwd);
   }
   // Refresh states + modified lists for all instances.
   for (const inst of instances) {

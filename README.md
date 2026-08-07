@@ -36,6 +36,12 @@ A **hybrid terminal/editor** for working with the [pi coding agent](https://gith
 - The toolbar's model/thinking dropdowns and the modified-files panel follow the **active** terminal.
 - The editor is shared: files any terminal touches open and update live in the same Monaco instance.
 
+### File explorer
+
+- The editor pane has a **file explorer** sidebar showing the project folder structure (directories lazy-load on expand; dotfiles and noise dirs are hidden).
+- Click a file to open it in the editor; hover a row for actions: **new file / new folder** (directories), **rename**, **delete** (with confirmation).
+- The tree stays in sync with the watcher: files the agents create/delete appear/disappear live; the editor itself supports manual edits with `Cmd+S` (locked while an agent streams).
+
 ### The agent loop
 
 1. You type a prompt in the terminal (Enter sends, Shift+Enter newline, **Cmd+Enter steers mid-task**).

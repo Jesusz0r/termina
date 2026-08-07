@@ -52,6 +52,8 @@ const IGNORED_SEGMENTS = new Set([
 const MAX_FILE_SIZE = 2 * 1024 * 1024; // don't read huge files into Monaco
 const DEBOUNCE_MS = 120;
 
+export { IGNORED_SEGMENTS };
+
 export class ProjectWatcher {
   private watcher: FSWatcher | null = null;
   private timers = new Map<string, NodeJS.Timeout>();

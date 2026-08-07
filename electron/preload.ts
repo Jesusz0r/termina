@@ -13,6 +13,7 @@ import type {
   FileDeletedPayload,
   ModifiedListPayload,
   InstanceSummary,
+  ExplorerEntry,
 } from "../shared/types.js";
 
 const bridge: PiBridge = {
@@ -73,6 +74,12 @@ const bridge: PiBridge = {
   respondUi: (instanceId, id, payload) => {
     void ipcRenderer.invoke("pi:ui-response", instanceId, id, payload);
   },
+
+  // ---- file explorer ----
+  listDir: (absPath): Promise<{ entries: ExplorerEntry[]; error?: string }> => ipcRenderer.invoke("explorer:list-dir", absPath),
+  createEntry: (relPath, kind) => ipcRenderer.invoke("explorer:create", relPath, kind),
+  renameEntry: (relPath, newName) => ipcRenderer.invoke("explorer:rename", relPath, newName),
+  deleteEntry: (relPath) => ipcRenderer.invoke("explorer:delete", relPath),
 };
 
 contextBridge.exposeInMainWorld("pi", bridge);

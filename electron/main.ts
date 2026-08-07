@@ -9,13 +9,13 @@
  */
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell } from "electron";
 import { existsSync, realpathSync } from "node:fs";
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PiRpcClient, type ToolExecutionStartEvent } from "./rpc-client.js";
-import { ProjectWatcher } from "./watcher.js";
-import type { InstanceSummary, ModifiedFile, ModelInfo, PiState } from "../shared/types.js";
+import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
+import type { ExplorerEntry, InstanceSummary, ModifiedFile, ModelInfo, PiState } from "../shared/types.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MAX_OPEN_FILE_SIZE = 2 * 1024 * 1024;
@@ -485,6 +485,41 @@ class PiEditorApp {
     }
   }
 
+  // -------------------------------------------------------------- explorer --
+
+  /** Resolve a project-relative path, rejecting anything outside the project. */
+  private projectAbs(relPath: string): string {
+    const cwd = this.projectCwd;
+    if (!cwd) throw new Error("open a project folder first");
+    const abs = isAbsolute(relPath) ? relPath : join(cwd, relPath);
+    if (!this.withinProject(abs)) throw new Error(`path outside project: ${relPath}`);
+    return abs;
+  }
+
+  private async listDir(absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string }> {
+    try {
+      const dirents = await readdir(absPath, { withFileTypes: true });
+      const entries: ExplorerEntry[] = [];
+      for (const ent of dirents) {
+        if (IGNORED_SEGMENTS.has(ent.name) || ent.name.startsWith(".")) continue;
+        const full = join(absPath, ent.name);
+        entries.push({
+          name: ent.name,
+          path: full,
+          relPath: this.projectCwd ? relative(this.projectCwd, full) : full,
+          type: ent.isDirectory() ? "dir" : "file",
+        });
+      }
+      entries.sort((a, b) => {
+        if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
+        return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+      });
+      return { entries };
+    } catch (err) {
+      return { entries: [], error: (err as Error).message };
+    }
+  }
+
   // ------------------------------------------------------------------ IPC ---
 
   private send(channel: string, payload: unknown): void {
@@ -575,6 +610,46 @@ class PiEditorApp {
     });
     ipcMain.handle("modified:clear", (_e, instanceId: string) => this.clearModified(instanceId));
     ipcMain.handle("app:open-external", (_e, url: string) => void shell.openExternal(url));
+
+    // ---- file explorer ----
+    ipcMain.handle("explorer:list-dir", (_e, absPath: string) => this.listDir(absPath));
+    ipcMain.handle("explorer:create", async (_e, relPath: string, kind: "file" | "dir") => {
+      try {
+        const abs = this.projectAbs(relPath);
+        if (kind === "dir") {
+          await mkdir(abs, { recursive: true });
+        } else {
+          await mkdir(dirname(abs), { recursive: true });
+          await writeFile(abs, "", "utf8");
+        }
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    });
+    ipcMain.handle("explorer:rename", async (_e, relPath: string, newName: string) => {
+      try {
+        if (!newName || newName.includes("/") || newName === "." || newName === "..") {
+          return { ok: false, error: "invalid name" };
+        }
+        const abs = this.projectAbs(relPath);
+        await fsRename(abs, join(dirname(abs), newName));
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    });
+    ipcMain.handle("explorer:delete", async (_e, relPath: string) => {
+      try {
+        const abs = this.projectAbs(relPath);
+        const st = await stat(abs);
+        await rm(abs, { recursive: true, force: true });
+        void st;
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    });
   }
 
   // ---------------------------------------------------------------- boot ----

@@ -47,16 +47,30 @@
         <div id="divider" title="Drag to resize"></div>
 
         <section id="right-pane">
-          <div id="editor-tabs"></div>
-          <div id="editor-container"></div>
-          <div id="editor-empty">
-            <div class="empty-title">pi-editor</div>
-            <div class="empty-sub">
-              Open a project folder, then prompt the agent in the terminal.
-              <br />
-              Files the agent writes or edits will appear here <b>live</b>.
-              <br />
-              When the agent finishes, click a modified file below the terminal to inspect it.
+          <div id="explorer">
+            <div class="explorer-header">
+              <span>Explorer</span>
+              <div class="explorer-header-actions">
+                <button id="btn-explorer-refresh" class="mini-btn" title="Refresh">⟳</button>
+                <button id="btn-explorer-new-file" class="mini-btn" title="New file">＋f</button>
+                <button id="btn-explorer-new-dir" class="mini-btn" title="New folder">＋d</button>
+              </div>
+            </div>
+            <div id="explorer-tree"></div>
+          </div>
+          <div id="explorer-divider" title="Drag to resize"></div>
+          <div id="editor-area">
+            <div id="editor-tabs"></div>
+            <div id="editor-container"></div>
+            <div id="editor-empty">
+              <div class="empty-title">pi-editor</div>
+              <div class="empty-sub">
+                Open a project folder, then prompt the agent in the terminal.
+                <br />
+                Files the agent writes or edits will appear here <b>live</b>.
+                <br />
+                When the agent finishes, click a modified file below the terminal to inspect it.
+              </div>
             </div>
           </div>
         </section>

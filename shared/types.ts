@@ -35,6 +35,15 @@ export interface InstanceSummary {
   modifiedCount: number;
 }
 
+export interface ExplorerEntry {
+  name: string;
+  /** Absolute path. */
+  path: string;
+  /** Path relative to the project root. */
+  relPath: string;
+  type: "file" | "dir";
+}
+
 export interface FileChangedPayload {
   path: string;
   relPath: string;
@@ -100,6 +109,12 @@ export interface PiBridge {
   openFile(path: string): Promise<{ path: string; content: string } | { path: string; error: string }>;
   saveFile(path: string, content: string): Promise<{ ok: boolean; error?: string }>;
   respondUi(instanceId: string, id: string, payload: Record<string, unknown>): void;
+
+  // file explorer
+  listDir(absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string }>;
+  createEntry(relPath: string, kind: "file" | "dir"): Promise<{ ok: boolean; error?: string }>;
+  renameEntry(relPath: string, newName: string): Promise<{ ok: boolean; error?: string }>;
+  deleteEntry(relPath: string): Promise<{ ok: boolean; error?: string }>;
 }
 
 export interface ToolCallInfo {
