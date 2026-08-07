@@ -38,8 +38,15 @@ export interface ToolTargetPayload {
 }
 
 export interface SettledPayload {
-  modifiedFiles: ModifiedFile[];
+  /** Files modified in this run (for the terminal summary). */
+  runFiles: ModifiedFile[];
+  /** All files modified in this session (for the panel). */
+  allFiles: ModifiedFile[];
   durationMs: number;
+}
+
+export interface FileDeletedPayload {
+  path: string;
 }
 
 export interface PiBridge {
@@ -48,6 +55,8 @@ export interface PiBridge {
   onFileChanged(cb: (p: FileChangedPayload) => void): void;
   onToolTarget(cb: (p: ToolTargetPayload) => void): void;
   onSettled(cb: (p: SettledPayload) => void): void;
+  onFileDeleted(cb: (p: FileDeletedPayload) => void): void;
+  onModifiedList(cb: (files: ModifiedFile[]) => void): void;
   onState(cb: (s: PiState) => void): void;
   onError(cb: (e: { message: string }) => void): void;
   onFolderOpened(cb: (e: { cwd: string }) => void): void;

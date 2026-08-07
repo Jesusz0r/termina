@@ -9,11 +9,11 @@
  */
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
 import { existsSync, realpathSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PiRpcClient, type ToolExecutionEndEvent, type ToolExecutionStartEvent } from "./rpc-client.js";
+import { PiRpcClient, type ToolExecutionStartEvent } from "./rpc-client.js";
 import { ProjectWatcher } from "./watcher.js";
 import type { ModifiedFile, ModelInfo, PiState } from "../shared/types.js";
 
@@ -30,6 +30,8 @@ class PiEditorApp {
   private cwdReal: string | null = null;
 
   private modified = new Map<string, ModifiedFile>();
+  /** Files modified during the current agent run (reset on each agent_start). */
+  private runModified = new Map<string, ModifiedFile>();
   private sessionStart = 0;
   private isStreaming = false;
   private models: ModelInfo[] = [];
@@ -205,13 +207,15 @@ class PiEditorApp {
       case "agent_start":
         this.isStreaming = true;
         this.sessionStart = this.sessionStart || Date.now();
+        this.runModified.clear();
         this.pushState();
         break;
       case "agent_settled":
         this.isStreaming = false;
         this.pushState();
         this.send("agent:settled", {
-          modifiedFiles: [...this.modified.values()],
+          runFiles: [...this.runModified.values()],
+          allFiles: [...this.modified.values()],
           durationMs: this.sessionStart ? Date.now() - this.sessionStart : 0,
         });
         this.sessionStart = 0;
@@ -227,27 +231,31 @@ class PiEditorApp {
         }
         break;
       }
-      case "tool_execution_end": {
-        const e = event as unknown as ToolExecutionEndEvent;
-        if (FILE_TOOLS.has(e.toolName)) {
-          // The file watcher records the disk change (and its created/modified status).
-          void e;
-        }
-        break;
-      }
       case "agent_end": {
         const e = event as { willRetry?: boolean };
         if (e.willRetry) this.isStreaming = true;
         break;
       }
-      case "response": {
-        // set_model / set_thinking_level responses refresh the banner
-        const cmd = (event as { command?: string }).command;
-        if (cmd === "set_model" || cmd === "set_thinking_level") void this.refreshState();
-        break;
-      }
     }
-    this.send("pi:event", event);
+    // Forward a slimmed-down event: the renderer only needs roles, tool names,
+    // args and deltas — not the full message history or tool results.
+    this.send("pi:event", this.slimEvent(event));
+  }
+
+  /** Strip heavy fields (full messages, tool results) from forwarded events. */
+  private slimEvent(event: Record<string, unknown>): Record<string, unknown> {
+    const type = event.type as string;
+    if (type === "agent_end" || type === "turn_end") {
+      const { messages, toolResults, ...rest } = event;
+      void messages;
+      void toolResults;
+      return rest;
+    }
+    if (type === "message_start" || type === "message_end") {
+      const msg = event.message as { role?: string } | undefined;
+      return { ...event, message: msg ? { role: msg.role } : undefined };
+    }
+    return event;
   }
 
   /** Resolve possibly-relative tool paths against the project cwd. */
@@ -258,29 +266,46 @@ class PiEditorApp {
   }
 
   /**
-   * Canonical absolute path: resolve symlinks of the parent directory so that
-   * /tmp/… and /private/tmp/… compare equal — even when the file itself does
-   * not exist yet (write tool creating a new file).
+   * Canonical absolute path: resolve symlinks of the deepest *existing*
+   * ancestor, re-appending the unresolved tail. This makes /tmp/… and
+   * /private/tmp/… compare equal even for brand-new files in brand-new
+   * directories (e.g. a write tool creating src/newdir/file.ts).
    */
   private canonicalPath(p: string): string {
-    try {
-      const real = realpathSync(p);
-      return real;
-    } catch {
+    let tail = "";
+    let cur = p;
+    while (true) {
       try {
-        return join(realpathSync(dirname(p)), basename(p));
+        const real = realpathSync(cur);
+        return tail ? join(real, tail) : real;
       } catch {
-        return p;
+        const parent = dirname(cur);
+        if (parent === cur) return p; // hit the root without resolving
+        tail = tail ? join(basename(cur), tail) : basename(cur);
+        cur = parent;
       }
     }
   }
 
   private recordModified(absPath: string, status: "created" | "modified"): void {
     const p = this.canonicalPath(absPath);
-    const existing = this.modified.get(p);
-    // Keep the first observed status; never downgrade created → modified.
-    if (existing) return;
-    this.modified.set(p, { path: p, relPath: this.rel(p), status });
+    // Session list (panel): first observed status wins.
+    if (!this.modified.has(p)) {
+      this.modified.set(p, { path: p, relPath: this.rel(p), status });
+    }
+    // Run list (settled summary): only agent-driven changes count, and only
+    // while the agent is actually working (user saves happen when idle).
+    if (this.isStreaming && !this.runModified.has(p)) {
+      this.runModified.set(p, { path: p, relPath: this.rel(p), status });
+    }
+  }
+
+  private recordDeleted(absPath: string): void {
+    const p = this.canonicalPath(absPath);
+    this.modified.delete(p);
+    this.runModified.delete(p);
+    this.send("file:deleted", { path: p });
+    this.send("modified:list", [...this.modified.values()]);
   }
 
   private withinProject(absPath: string): boolean {
@@ -305,13 +330,15 @@ class PiEditorApp {
       this.send("file:changed", { ...change, path, relPath: this.rel(path) });
     };
     this.watcher.onFileTouched = (path, status) => this.recordModified(path, status);
+    this.watcher.onFileDeleted = (path) => this.recordDeleted(path);
     this.watcher.start();
   }
 
   // -------------------------------------------------------------- actions ---
 
   private async openFolder(): Promise<{ cwd: string } | { cancelled: true }> {
-    const result = await dialog.showOpenDialog(this.win!, {
+    if (!this.win || this.win.isDestroyed()) return { cancelled: true };
+    const result = await dialog.showOpenDialog(this.win, {
       title: "Open a project folder",
       properties: ["openDirectory", "createDirectory"],
     });
@@ -325,6 +352,7 @@ class PiEditorApp {
     this.cwd = cwd;
     this.cwdReal = this.canonicalPath(cwd);
     this.modified.clear();
+    this.runModified.clear();
     this.sessionStart = 0;
     this.startWatcher(cwd);
     await this.startPi(cwd);
@@ -337,12 +365,14 @@ class PiEditorApp {
       if (this.cwd) await this.startPi(this.cwd);
       return;
     }
+    // Clear optimistically; failures surface via pi:error.
+    this.modified.clear();
+    this.runModified.clear();
+    this.send("modified:list", []);
     try {
       await this.rpc.newSession();
-      this.modified.clear();
-      this.send("modified:list", []);
-    } catch {
-      /* ignore */
+    } catch (err) {
+      this.send("pi:error", { message: `Failed to start a new session: ${(err as Error).message}` });
     }
   }
 
@@ -361,9 +391,12 @@ class PiEditorApp {
 
   private async openFileInEditor(absPath: string): Promise<{ path: string; content: string } | { path: string; error: string }> {
     try {
-      const stat = await import("node:fs/promises").then((m) => m.stat(absPath));
-      if (stat.size > MAX_OPEN_FILE_SIZE) {
-        return { path: absPath, error: `File is too large to open (${stat.size} bytes)` };
+      const st = await stat(absPath);
+      if (!st.isFile()) {
+        return { path: absPath, error: "Not a file" };
+      }
+      if (st.size > MAX_OPEN_FILE_SIZE) {
+        return { path: absPath, error: `File is too large to open (${st.size} bytes)` };
       }
       const content = await readFile(absPath, "utf8");
       return { path: absPath, content };
@@ -385,22 +418,33 @@ class PiEditorApp {
     ipcMain.handle("pi:prompt", (_e, text: string, opts?: { streamingBehavior?: "steer" | "followUp" }) => {
       if (!text.trim()) return { ok: false, error: "empty prompt" };
       if (!this.rpc.isRunning) return { ok: false, error: "pi is not running" };
+      // Accept the prompt optimistically; report async failures through pi:error.
+      this.rpc.prompt(text, opts).catch((err) => {
+        this.send("pi:error", { message: `Failed to send prompt: ${(err as Error).message}` });
+      });
+      return { ok: true };
+    });
+    ipcMain.handle("pi:abort", () => this.abort());
+    ipcMain.handle("pi:new-session", () => this.newSession());
+    ipcMain.handle("pi:set-model", async (_e, provider: string, modelId: string) => {
+      if (!this.rpc.isRunning) return { ok: false, error: "pi is not running" };
       try {
-        void this.rpc.prompt(text, opts);
-        return { ok: true };
+        const r = await this.rpc.setModel(provider, modelId);
+        if (r.success) void this.refreshState();
+        return { ok: r.success, error: r.error };
       } catch (err) {
         return { ok: false, error: (err as Error).message };
       }
     });
-    ipcMain.handle("pi:abort", () => this.abort());
-    ipcMain.handle("pi:new-session", () => this.newSession());
-    ipcMain.handle("pi:set-model", (_e, provider: string, modelId: string) => {
-      if (!this.rpc.isRunning) return { error: "pi is not running" };
-      return this.rpc.setModel(provider, modelId).then((r) => ({ ok: r.success, error: r.error }));
-    });
-    ipcMain.handle("pi:set-thinking", (_e, level: string) => {
-      if (!this.rpc.isRunning) return { error: "pi is not running" };
-      return this.rpc.setThinkingLevel(level).then((r) => ({ ok: r.success, error: r.error }));
+    ipcMain.handle("pi:set-thinking", async (_e, level: string) => {
+      if (!this.rpc.isRunning) return { ok: false, error: "pi is not running" };
+      try {
+        const r = await this.rpc.setThinkingLevel(level);
+        if (r.success) void this.refreshState();
+        return { ok: r.success, error: r.error };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
     });
     ipcMain.handle("pi:get-state", () => {
       void this.refreshState();
@@ -453,11 +497,24 @@ class PiEditorApp {
     this.watcher?.stop();
     this.stopPi();
   }
+
+  focusWindow(): void {
+    if (this.win && !this.win.isDestroyed()) {
+      if (this.win.isMinimized()) this.win.restore();
+      this.win.focus();
+    }
+  }
 }
 
 const appState = new PiEditorApp();
 
-app.whenReady().then(() => void appState.start());
+// Only one instance: a second launch focuses the existing window.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on("second-instance", () => appState.focusWindow());
+  app.whenReady().then(() => void appState.start());
+}
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();

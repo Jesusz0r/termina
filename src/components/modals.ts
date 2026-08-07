@@ -108,6 +108,15 @@ interface ModalButton {
 function makeModal(title: string, message: string, buttons: ModalButton[], bodyEl?: HTMLElement): HTMLElement {
   const backdrop = document.createElement("div");
   backdrop.className = "modal-backdrop";
+  backdrop.tabIndex = -1;
+
+  // Esc cancels: click the first Cancel button if present.
+  backdrop.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      const cancel = [...modal.querySelectorAll(".modal-btn")].find((b) => b.textContent === "Cancel") as HTMLElement | undefined;
+      if (cancel) cancel.click();
+    }
+  });
 
   const modal = document.createElement("div");
   modal.className = "modal";
@@ -143,6 +152,7 @@ function makeModal(title: string, message: string, buttons: ModalButton[], bodyE
 
   backdrop.appendChild(modal);
   root.appendChild(backdrop);
+  backdrop.focus();
   return modal;
 }
 

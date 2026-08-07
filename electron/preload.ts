@@ -3,7 +3,7 @@
  * Runs in an isolated context; only explicit channels are exposed.
  */
 import { contextBridge, ipcRenderer } from "electron";
-import type { PiBridge, PiState, ModifiedFile, FileChangedPayload, ToolTargetPayload, SettledPayload, ModelInfo } from "../shared/types.js";
+import type { PiBridge, PiState, ModifiedFile, FileChangedPayload, ToolTargetPayload, SettledPayload, FileDeletedPayload, ModelInfo } from "../shared/types.js";
 
 const bridge: PiBridge = {
   // ---- push events ----
@@ -18,6 +18,12 @@ const bridge: PiBridge = {
   },
   onSettled: (cb) => {
     ipcRenderer.on("agent:settled", (_e, p: SettledPayload) => cb(p));
+  },
+  onFileDeleted: (cb) => {
+    ipcRenderer.on("file:deleted", (_e, p: FileDeletedPayload) => cb(p));
+  },
+  onModifiedList: (cb) => {
+    ipcRenderer.on("modified:list", (_e, files: ModifiedFile[]) => cb(files));
   },
   onState: (cb) => {
     ipcRenderer.on("pi:state", (_e, s: PiState) => cb(s));

@@ -61,6 +61,8 @@ export class ProjectWatcher {
   onChange: (change: FileChange) => void = () => {};
   /** Fired with just the path (used for the modified-files list). */
   onFileTouched: (path: string, status: "created" | "modified") => void = () => {};
+  /** Fired when a previously-seen file disappears (so tabs/list entries can be cleaned up). */
+  onFileDeleted: (path: string) => void = () => {};
 
   constructor(private root: string) {}
 
@@ -113,16 +115,28 @@ export class ProjectWatcher {
 
   private async emit(relPath: string): Promise<void> {
     const abs = this.root.endsWith(sep) ? this.root + relPath : `${this.root}${sep}${relPath}`;
+
+    // Stat first so a vanished file is reported as a deletion (not a read error).
+    let st;
+    try {
+      st = await stat(abs);
+    } catch {
+      if (this.seen.has(relPath)) {
+        this.seen.delete(relPath);
+        this.onFileDeleted(abs);
+      }
+      return;
+    }
+    if (!st.isFile() || st.size > MAX_FILE_SIZE) return;
+
     let content: string;
     try {
-      const stat = await import("node:fs/promises").then((m) => m.stat(abs));
-      if (!stat.isFile() || stat.size > MAX_FILE_SIZE) return;
       const buf = await readFile(abs);
       content = buf.toString("utf8");
       // Cheap binary sniff: common replacement char in binary garbage.
       if (content.includes("\uFFFD")) return;
     } catch {
-      return; // deleted or unreadable — ignore for now
+      return; // transient read error — leave as-is
     }
 
     const status: "created" | "modified" = this.seen.has(relPath) ? "modified" : "created";

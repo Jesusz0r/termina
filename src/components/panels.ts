@@ -24,7 +24,6 @@ export class Panels {
   private onOpenFolder: () => void = () => {};
   private onNewSession: () => void = () => {};
   private onAbort: () => void = () => {};
-  private onSend: () => void = () => {};
   private onModelChange: (provider: string, id: string) => void = () => {};
   private onThinkingChange: (level: string) => void = () => {};
   private onOpenFile: (path: string) => void = () => {};
@@ -35,7 +34,6 @@ export class Panels {
     onOpenFolder: () => void;
     onNewSession: () => void;
     onAbort: () => void;
-    onSend: () => void;
     onModelChange: (provider: string, id: string) => void;
     onThinkingChange: (level: string) => void;
     onOpenFile: (path: string) => void;
@@ -45,13 +43,17 @@ export class Panels {
     this.btnOpenFolder.addEventListener("click", () => this.onOpenFolder());
     this.btnNewSession.addEventListener("click", () => this.onNewSession());
     this.btnAbort.addEventListener("click", () => this.onAbort());
-    this.btnSend.addEventListener("click", () => this.onSend());
+    // btn-send is wired directly in the renderer entry (sendPrompt); do not
+    // duplicate it here or clicks would send twice.
     this.modelSelect.addEventListener("change", () => {
       const [provider, id] = this.modelSelect.value.split("/");
       this.onModelChange(provider, id);
     });
     this.thinkingSelect.addEventListener("change", () => this.onThinkingChange(this.thinkingSelect.value));
-    this.btnClearModified.addEventListener("click", () => this.onClearModified());
+    this.btnClearModified.addEventListener("click", (e) => {
+      e.stopPropagation(); // don't toggle the panel collapse
+      this.onClearModified();
+    });
     this.modifiedPanel.querySelector(".panel-header")?.addEventListener("click", () => {
       this.modifiedPanel.classList.toggle("collapsed");
     });
@@ -84,7 +86,12 @@ export class Panels {
       opt.textContent = "no models available";
       this.modelSelect.appendChild(opt);
     }
-    this.modelSelect.value = current || prev || this.modelSelect.options[0]?.value || "";
+    this.modelSelect.value = current || prev || "";
+    // If the value didn't stick (e.g. the active model isn't in the list),
+    // fall back to the first available option instead of a blank select.
+    if (!this.modelSelect.value && this.modelSelect.options.length) {
+      this.modelSelect.value = this.modelSelect.options[0].value;
+    }
 
     // thinking selector
     const prevLevel = this.thinkingSelect.value;
@@ -95,7 +102,10 @@ export class Panels {
       opt.textContent = l;
       this.thinkingSelect.appendChild(opt);
     }
-    this.thinkingSelect.value = s.thinkingLevel ?? prevLevel ?? this.thinkingSelect.options[0]?.value ?? "";
+    this.thinkingSelect.value = s.thinkingLevel ?? prevLevel ?? "";
+    if (!this.thinkingSelect.value && this.thinkingSelect.options.length) {
+      this.thinkingSelect.value = this.thinkingSelect.options[0].value;
+    }
   }
 
   setModified(files: ModifiedFile[]): void {

@@ -20,6 +20,7 @@ export class TerminalManager {
   private onOpenFile: (path: string) => void;
   private disposed = false;
   private lastRender = 0;
+  private watchdog: ReturnType<typeof setInterval> | null = null;
 
   constructor(container: HTMLElement, onOpenFile: (path: string) => void) {
     this.onOpenFile = onOpenFile;
@@ -58,7 +59,7 @@ export class TerminalManager {
     this.term.onRender(() => {
       this.lastRender = Date.now();
     });
-    setInterval(() => {
+    this.watchdog = setInterval(() => {
       if (this.disposed) return;
       if (Date.now() - this.lastRender > 1500 && this.term.buffer.active.length > 0) {
         try {
@@ -69,7 +70,7 @@ export class TerminalManager {
         }
       }
     }, 1500);
-    requestAnimationFrame(() => this.fitAddon.fit());
+    requestAnimationFrame(() => this.fit());
     try {
       new ResizeObserver(() => this.fitAddon.fit()).observe(container);
     } catch {
@@ -88,6 +89,8 @@ export class TerminalManager {
 
   dispose(): void {
     this.disposed = true;
+    if (this.watchdog) clearInterval(this.watchdog);
+    this.watchdog = null;
     this.term.dispose();
   }
 
@@ -218,6 +221,13 @@ export class TerminalManager {
   // ---- clickable paths -----------------------------------------------------
 
   private setupLinkProvider(): void {
+    // Known file extensions: bare filenames ("hello.txt") and relative paths
+    // ("src/a.ts", "./b.md") are clickable, but version strings ("v1.2.3")
+    // and URL hosts are not. Absolute paths match via the leading slash.
+    const EXT =
+      "(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|json|jsonc|html?|css|scss|less|md|markdown|py|rb|go|rs|java|c|h|cpp|hpp|cc|cs|php|sh|bash|zsh|ya?ml|toml|ini|conf|config|env|sql|xml|svg|vue|svelte|swift|kt|kts|dart|txt|log|lock|db|sqlite|pdf|zip|tar|gz|png|jpe?g|gif|ico|woff2?|ttf|otf)";
+    const absRe = new RegExp(`(?<![\\w:.\\/])\\/[\\w@.\\-]+(?:\\/[\\w@.\\-]+)+\\.${EXT}(?![\\w])`, "g");
+    const relRe = new RegExp(`(?<![\\w./])(?:\\.\\/)?(?:[\\w@.\\-]+\\/)*[\\w@.\\-]+\\.${EXT}(?![\\w])`, "g");
     this.term.registerLinkProvider({
       provideLinks: (bufferLineNumber, callback) => {
         const line = this.term.buffer.active.getLine(bufferLineNumber);
@@ -227,12 +237,9 @@ export class TerminalManager {
         }
         const text = line.translateToString(true);
         const links: ILink[] = [];
-        // absolute paths: /a/b/c.ext (not preceded by ':' or a word char)
-        const absRe = /(?<![\w:/])\/[\w@.\-]+(?:\/[\w@.\-]+)+\.[A-Za-z0-9]{1,8}(?![\w])/g;
-        // relative paths: src/a/b.ext
-        const relRe = /(?<![\w./])(?:[\w@.\-]+\/)+[\w@.\-]+\.[A-Za-z0-9]{1,8}(?![\w])/g;
         const matches: Array<{ index: number; len: number; text: string }> = [];
         for (const re of [absRe, relRe]) {
+          re.lastIndex = 0;
           let m: RegExpExecArray | null;
           while ((m = re.exec(text)) !== null) {
             matches.push({ index: m.index, len: m[0].length, text: m[0] });

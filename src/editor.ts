@@ -66,7 +66,7 @@ export class EditorManager {
     const key = path;
     let tab = this.tabs.get(key);
     if (!tab) {
-      const model = monaco.editor.createModel("", undefined, monaco.Uri.file(path));
+      const model = monaco.editor.createModel("", languageForPath(path), monaco.Uri.file(path));
       tab = this.makeTab(key, model);
       this.tabs.set(key, tab);
       this.order.push(key);
@@ -178,6 +178,11 @@ export class EditorManager {
     if (res.ok) {
       tab.dirtyDot.style.display = "none";
     }
+  }
+
+  /** Close a tab if it is open (e.g. the file was deleted on disk). */
+  closeIfOpen(path: string): void {
+    if (this.tabs.has(path)) this.closeTab(path);
   }
 
   dispose(): void {

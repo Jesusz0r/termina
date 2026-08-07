@@ -42,13 +42,20 @@ const run = async () => {
   console.log(`✓ vite dev server at ${url}`);
 
   const launch = () => {
+    const startedAt = Date.now();
     const child = spawn(electronPath, ["."], {
       stdio: "inherit",
       env: { ...process.env, VITE_DEV_SERVER_URL: url },
     });
     child.on("exit", (code) => {
-      console.log(`electron exited (${code}) — relaunching, Ctrl+C to stop`);
-      setTimeout(launch, 500);
+      console.log(`electron exited (${code})`);
+      // Only auto-relaunch if it actually ran for a bit; avoids a crash-loop
+      // when Electron can't start at all (missing binary, bad config).
+      if (Date.now() - startedAt > 3000) {
+        setTimeout(launch, 500);
+      } else {
+        console.log("electron exited too quickly — not relaunching. Ctrl+C to stop.");
+      }
     });
   };
   launch();

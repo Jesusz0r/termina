@@ -64,10 +64,18 @@ async function sendPrompt(steer = false): Promise<void> {
   promptInput.value = "";
   autoResizePrompt();
   terminal.userPrompt(text);
-  const res = await window.pi.prompt(text, {
-    streamingBehavior: steer ? "steer" : streaming ? "followUp" : undefined,
-  });
-  if (!res.ok) terminal.error(res.error ?? "failed to send prompt");
+  try {
+    const res = await window.pi.prompt(text, {
+      streamingBehavior: steer ? "steer" : streaming ? "followUp" : undefined,
+    });
+    if (!res.ok) {
+      promptInput.value = text; // don't lose the user's words
+      terminal.error(res.error ?? "failed to send prompt");
+    }
+  } catch (err) {
+    promptInput.value = text;
+    terminal.error(`failed to send prompt: ${(err as Error).message}`);
+  }
 }
 
 function autoResizePrompt(): void {
@@ -79,9 +87,14 @@ function autoResizePrompt(): void {
 
 panels.bind({
   onOpenFolder: () => void window.pi.openFolder(),
-  onNewSession: () => void window.pi.newSession(),
-  onAbort: () => void window.pi.abort(),
-  onSend: () => void sendPrompt(false),
+  onNewSession: () => {
+    terminal.system("… starting a new session");
+    void window.pi.newSession();
+  },
+  onAbort: () => {
+    terminal.system("… aborting");
+    void window.pi.abort();
+  },
   onModelChange: (provider, id) => void window.pi.setModel(provider, id),
   onThinkingChange: (level) => void window.pi.setThinking(level),
   onOpenFile: (path) => void openFileSmart(path),
@@ -89,7 +102,8 @@ panels.bind({
 });
 
 promptInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) {
+  // Enter sends unless composing (IME) or shift (newline)
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     void sendPrompt(e.metaKey || e.ctrlKey);
   }
@@ -215,9 +229,17 @@ window.pi.onToolTarget((p) => {
 });
 
 window.pi.onSettled((p) => {
-  terminal.settled(p.modifiedFiles, p.durationMs);
-  panels.setModified(p.modifiedFiles);
-  for (const f of p.modifiedFiles) editorMgr.markTouched(f.path);
+  terminal.settled(p.runFiles, p.durationMs);
+  panels.setModified(p.allFiles);
+  for (const f of p.runFiles) editorMgr.markTouched(f.path);
+});
+
+window.pi.onFileDeleted((p) => {
+  editorMgr.closeIfOpen(p.path);
+});
+
+window.pi.onModifiedList((files) => {
+  panels.setModified(files);
 });
 
 window.pi.onError((e) => {
