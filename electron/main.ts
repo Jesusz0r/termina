@@ -39,6 +39,7 @@ class PiEditorApp {
   private currentModel: ModelInfo | null = null;
   private thinkingLevel: string | null = null;
   private sessionId: string | null = null;
+  private paintWatchdog: ReturnType<typeof setInterval> | null = null;
 
   // ---------------------------------------------------------------- window --
 
@@ -72,6 +73,7 @@ class PiEditorApp {
     }
     this.win.on("closed", () => {
       this.win = null;
+      this.stopPaintWatchdog();
     });
     // If the renderer crashes (GPU hiccup etc.), bring the UI back.
     this.win.webContents.on("render-process-gone", (_e, details) => {
@@ -80,6 +82,7 @@ class PiEditorApp {
         this.win.reload();
       }
     });
+    this.startPaintWatchdog();
     this.buildMenu();
   }
 
@@ -348,17 +351,19 @@ class PiEditorApp {
     });
     if (result.canceled || result.filePaths.length === 0) return { cancelled: true };
     const cwd = result.filePaths[0];
-    await this.setProject(cwd);
+    await this.setProject(cwd, { watch: true });
     return { cwd };
   }
 
-  private async setProject(cwd: string): Promise<void> {
+  private async setProject(cwd: string, opts: { watch?: boolean } = {}): Promise<void> {
     this.cwd = cwd;
     this.cwdReal = this.canonicalPath(cwd);
     this.modified.clear();
     this.runModified.clear();
     this.sessionStart = 0;
-    this.startWatcher(cwd);
+    // Only watch real project folders: watching ~ (the pre-open default)
+    // would walk and FSEvents-watch the entire home directory.
+    if (opts.watch !== false) this.startWatcher(cwd);
     await this.startPi(cwd);
     this.send("folder:opened", { cwd });
     this.pushState();
@@ -493,13 +498,77 @@ class PiEditorApp {
     this.registerIpc();
     await this.createWindow();
     // Start with a project folder if provided (dev/testing), else home dir.
+    // The home dir is NOT watched (no watcher until a real folder is opened).
     const initial = process.env.PI_EDITOR_INITIAL_CWD;
-    await this.setProject(initial && existsSync(initial) ? initial : homedir());
+    await this.setProject(initial && existsSync(initial) ? initial : homedir(), { watch: false });
   }
 
   dispose(): void {
     this.watcher?.stop();
     this.stopPi();
+    this.stopPaintWatchdog();
+  }
+
+  /**
+   * Paint watchdog: if the window ever stops compositing (a wedged renderer or
+   * GPU process turns it into a solid-color rectangle), detect it and reload.
+   * The app's chrome (toolbar/statusbar/prompt bar) means a healthy frame is
+   * never more than ~98% one color, so a uniform capture = not painting.
+   */
+  private startPaintWatchdog(): void {
+    this.stopPaintWatchdog();
+    let blankCount = 0;
+    this.paintWatchdog = setInterval(() => {
+      const win = this.win;
+      if (!win || win.isDestroyed() || win.isMinimized() || !win.isVisible()) return;
+      void (async () => {
+        let img: Electron.NativeImage | null = null;
+        try {
+          img = await Promise.race([
+            win.webContents.capturePage(),
+            new Promise<never>((_, rej) => setTimeout(() => rej(new Error("capture timeout")), 2500)),
+          ]);
+        } catch {
+          img = null; // capture hung/failed — treat as not painting
+        }
+        let uniform = img === null;
+        if (img && !img.isEmpty()) {
+          const { width: w, height: h } = img.getSize();
+          if (w > 0 && h > 0) {
+            const bitmap = img.toBitmap();
+            const stride = Math.max(1, Math.floor(h / 16));
+            const first = bitmap.readUInt32LE(0);
+            let same = 0;
+            let total = 0;
+            for (let y = 0; y < h; y += stride) {
+              for (let x = 0; x < w; x += stride) {
+                const off = (y * w + x) * 4;
+                if (bitmap.readUInt32LE(off) === first) same++;
+                total++;
+              }
+            }
+            uniform = same / total > 0.98;
+          }
+        }
+        if (uniform) {
+          blankCount++;
+          if (blankCount >= 4) {
+            console.warn("[main] paint watchdog: window not painting — reloading");
+            win.webContents.reload();
+            blankCount = 0;
+          }
+        } else {
+          blankCount = 0;
+        }
+      })();
+    }, 3000);
+  }
+
+  private stopPaintWatchdog(): void {
+    if (this.paintWatchdog) {
+      clearInterval(this.paintWatchdog);
+      this.paintWatchdog = null;
+    }
   }
 
   focusWindow(): void {
@@ -508,9 +577,28 @@ class PiEditorApp {
       this.win.focus();
     }
   }
+
+  reloadWindow(): void {
+    if (this.win && !this.win.isDestroyed()) {
+      this.win.webContents.reload();
+    }
+  }
 }
 
 const appState = new PiEditorApp();
+
+// Text editor + terminal = 2D content; hardware acceleration has caused GPU
+// process crashes and compositor wedges (solid-color windows) on some Macs.
+// Software rendering is rock solid for this app's workload.
+app.disableHardwareAcceleration();
+
+// If the GPU process still dies, bring the compositor back via a reload.
+app.on("child-process-gone", (_e, details) => {
+  if (details.type === "GPU") {
+    console.warn(`[main] GPU process gone (${details.reason}) — reloading window`);
+    appState.reloadWindow();
+  }
+});
 
 // Only one instance: a second launch focuses the existing window.
 if (!app.requestSingleInstanceLock()) {
