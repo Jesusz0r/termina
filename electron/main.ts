@@ -7,7 +7,7 @@
  *  - the "modified files" tracker shown when the agent settles
  *  - IPC to the renderer (Monaco + xterm UI)
  */
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell } from "electron";
 import { existsSync, realpathSync } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -44,6 +44,9 @@ class PiEditorApp {
   // ---------------------------------------------------------------- window --
 
   async createWindow(): Promise<void> {
+    // The app is dark-themed; force dark mode so the native title bar, dialogs
+    // and scrollbars match instead of rendering a white strip in Light Mode.
+    nativeTheme.themeSource = "dark";
     this.win = new BrowserWindow({
       width: 1440,
       height: 900,
@@ -51,6 +54,10 @@ class PiEditorApp {
       minHeight: 600,
       title: "pi-editor",
       backgroundColor: "#1e1e1e",
+      // Inset title bar: traffic lights overlay the toolbar (VS Code style)
+      // instead of a separate light band above the app content.
+      titleBarStyle: "hiddenInset",
+      trafficLightPosition: { x: 12, y: 12 },
       webPreferences: {
         preload: join(__dirname, "preload.cjs"),
         contextIsolation: true,

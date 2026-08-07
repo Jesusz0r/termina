@@ -54,10 +54,17 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px;
+  padding: 6px 10px 6px 78px; /* left padding clears the inset traffic lights */
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
+  -webkit-app-region: drag; /* let the toolbar drag the window */
+}
+
+.toolbar-btn,
+.toolbar-field,
+.mini-btn {
+  -webkit-app-region: no-drag; /* buttons stay clickable */
 }
 
 .toolbar-btn,
