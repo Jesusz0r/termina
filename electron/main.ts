@@ -62,7 +62,11 @@ class PiEditorApp {
     const devUrl = process.env.VITE_DEV_SERVER_URL;
     if (devUrl) {
       await this.win.loadURL(devUrl);
-      this.win.webContents.openDevTools({ mode: "detach" });
+      // DevTools only open when explicitly requested (PI_EDITOR_DEVTOOLS=1);
+      // otherwise the View menu (Alt+Cmd+I) opens them on demand.
+      if (process.env.PI_EDITOR_DEVTOOLS) {
+        this.win.webContents.openDevTools({ mode: "detach" });
+      }
     } else {
       await this.win.loadFile(join(__dirname, "..", "dist-renderer", "index.html"));
     }
