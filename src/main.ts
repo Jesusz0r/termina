@@ -56,6 +56,18 @@ let booted = false;
 let lastModelKey: string | null = null;
 let lastThinking: string | null = null;
 
+// Deferred assistant text: deltas are buffered and rendered only when the
+// next assistant message starts (previous message's text) or when the run
+// settles — AFTER the session-complete summary. Responses therefore always
+// appear after all tool output and after the summary.
+let textBuffer = "";
+
+function flushBufferedText(): void {
+  if (!textBuffer) return;
+  terminal.streamText(textBuffer);
+  textBuffer = "";
+}
+
 // ---------------------------------------------------------------- commands --
 
 async function openFileSmart(path: string): Promise<void> {
@@ -180,7 +192,9 @@ window.pi.onEvent((event) => {
           terminal.startAssistant();
           break;
         case "text_delta":
-          terminal.streamText(d.delta ?? "");
+          // Deferred: assistant text is buffered and rendered only after the
+          // run's tool output (and the session summary) — never in the middle.
+          textBuffer += d.delta ?? "";
           break;
         case "thinking_start":
           terminal.startThinking();
@@ -193,7 +207,12 @@ window.pi.onEvent((event) => {
     }
     case "message_start": {
       const msg = event.message as { role?: string } | undefined;
-      if (msg?.role === "assistant") terminal.startAssistant();
+      if (msg?.role === "assistant") {
+        terminal.startAssistant();
+        // Render the previous message's deferred text now that its tools
+        // (if any) have finished — before this message's own content.
+        flushBufferedText();
+      }
       break;
     }
     case "message_end": {
@@ -250,9 +269,12 @@ window.pi.onToolTarget((p) => {
 });
 
 window.pi.onSettled((p) => {
+  // Summary first, response last: the final text renders after the
+  // session-complete block, so it reads as the deliverable at the end.
   terminal.settled(p.runFiles, p.durationMs);
   panels.setModified(p.allFiles);
   for (const f of p.runFiles) editorMgr.markTouched(f.path);
+  flushBufferedText();
 });
 
 window.pi.onFileDeleted((p) => {

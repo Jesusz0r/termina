@@ -505,9 +505,9 @@ class PiEditorApp {
     this.registerIpc();
     await this.createWindow();
     // Start with a project folder if provided (dev/testing), else home dir.
-    // The home dir is NOT watched (no watcher until a real folder is opened).
+    // The home dir is NOT watched; an explicit INITIAL_CWD is a real project.
     const initial = process.env.PI_EDITOR_INITIAL_CWD;
-    await this.setProject(initial && existsSync(initial) ? initial : homedir(), { watch: false });
+    await this.setProject(initial && existsSync(initial) ? initial : homedir(), { watch: !!initial });
   }
 
   dispose(): void {
