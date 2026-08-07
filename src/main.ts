@@ -53,6 +53,8 @@ const leftPane = document.getElementById("left-pane")!;
 let streaming = false;
 let cwd: string | null = null;
 let booted = false;
+let lastModelKey: string | null = null;
+let lastThinking: string | null = null;
 
 // ---------------------------------------------------------------- commands --
 
@@ -143,6 +145,17 @@ window.pi.onState((s: PiState) => {
   cwd = s.cwd;
   panels.setState(s);
   editorMgr.setStreaming(s.isStreaming);
+  // Show model / thinking changes in the terminal (skip the initial state).
+  const modelKey = s.model ? `${s.model.name} (${s.model.provider})` : null;
+  if (lastModelKey !== null && modelKey !== null && modelKey !== lastModelKey) {
+    terminal.system(`model: ${lastModelKey} → ${modelKey}`);
+  }
+  if (modelKey !== null) lastModelKey = modelKey;
+  const thinking = s.thinkingLevel;
+  if (lastThinking !== null && thinking !== null && thinking !== lastThinking) {
+    terminal.system(`thinking: ${lastThinking} → ${thinking}`);
+  }
+  if (thinking !== null) lastThinking = thinking;
   // Print the banner only once we know the real folder + model.
   if (!booted && s.cwd) {
     booted = true;
