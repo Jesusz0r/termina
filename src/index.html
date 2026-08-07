@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; img-src 'self' data:; connect-src 'self' ws: http://localhost:*"
+    />
+    <title>pi-editor</title>
+  </head>
+  <body>
+    <div id="app">
+      <header id="toolbar">
+        <button id="btn-open-folder" class="toolbar-btn" title="Open a project folder (Cmd+O)">Open Folder</button>
+        <span id="cwd-label" class="muted" title="Agent working directory"></span>
+        <div class="spacer"></div>
+        <label class="toolbar-field">
+          <span class="muted">model</span>
+          <select id="model-select" title="Agent model"></select>
+        </label>
+        <label class="toolbar-field">
+          <span class="muted">thinking</span>
+          <select id="thinking-select" title="Thinking level"></select>
+        </label>
+        <button id="btn-new-session" class="toolbar-btn" title="Start a fresh session (Cmd+N)">New Session</button>
+        <button id="btn-abort" class="toolbar-btn danger" disabled title="Abort the running agent (Cmd+.)">■ Abort</button>
+      </header>
+
+      <main id="main">
+        <section id="left-pane">
+          <div id="terminal-container"></div>
+          <div id="modified-panel" class="collapsed">
+            <div class="panel-header">
+              <span>Modified files</span>
+              <span id="modified-count" class="muted"></span>
+              <div class="spacer"></div>
+              <button id="btn-clear-modified" class="mini-btn" title="Clear the list">clear</button>
+            </div>
+            <ul id="modified-list"></ul>
+          </div>
+        </section>
+
+        <div id="divider" title="Drag to resize"></div>
+
+        <section id="right-pane">
+          <div id="editor-tabs"></div>
+          <div id="editor-container"></div>
+          <div id="editor-empty">
+            <div class="empty-title">pi-editor</div>
+            <div class="empty-sub">
+              Open a project folder, then prompt the agent in the terminal.
+              <br />
+              Files the agent writes or edits will appear here <b>live</b>.
+              <br />
+              When the agent finishes, click a modified file below the terminal to inspect it.
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer id="statusbar">
+        <span id="status-model" class="muted"></span>
+        <span id="status-state" class="muted">idle</span>
+        <span id="status-session" class="muted"></span>
+        <div class="spacer"></div>
+        <span id="status-cwd" class="muted"></span>
+      </footer>
+
+      <div id="prompt-bar">
+        <span id="prompt-glyph">❯</span>
+        <textarea
+          id="prompt-input"
+          rows="1"
+          placeholder="Ask the agent to do something…  (Enter send · Shift+Enter newline · Cmd+Enter steer mid-task)"
+          spellcheck="false"
+        ></textarea>
+        <button id="btn-send" title="Send (Enter)">Send</button>
+      </div>
+    </div>
+
+    <div id="modal-root"></div>
+    <script type="module" src="/main.ts"></script>
+  </body>
+</html>

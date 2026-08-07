@@ -1,0 +1,170 @@
+/**
+ * Recursive project watcher.
+ *
+ * Feeds the live editor: whenever a file the agent touches changes on disk
+ * (via write/edit/bash...), the watcher reads it and pushes the new content to
+ * the renderer so Monaco updates in real time. It also feeds the "modified
+ * files" panel for files changed outside of explicit write/edit tool calls.
+ */
+import { watch, type FSWatcher } from "node:fs";
+import { readFile, readdir, stat } from "node:fs/promises";
+import { join, relative, sep } from "node:path";
+
+export interface FileChange {
+  /** Absolute path. */
+  path: string;
+  /** Path relative to the watched root. */
+  relPath: string;
+  content: string;
+  status: "created" | "modified";
+}
+
+const IGNORED_SEGMENTS = new Set([
+  "node_modules",
+  ".git",
+  ".pi",
+  ".agents",
+  ".next",
+  ".nuxt",
+  ".cache",
+  ".parcel-cache",
+  ".turbo",
+  ".yarn",
+  ".venv",
+  "venv",
+  "dist",
+  "out",
+  "build",
+  "coverage",
+  ".DS_Store",
+  "vendor",
+  ".idea",
+  ".vscode",
+  ".hg",
+  ".svn",
+  ".terraform",
+  ".serverless",
+  ".expo",
+  ".android",
+  ".ios",
+]);
+
+const MAX_FILE_SIZE = 2 * 1024 * 1024; // don't read huge files into Monaco
+const DEBOUNCE_MS = 120;
+
+export class ProjectWatcher {
+  private watcher: FSWatcher | null = null;
+  private timers = new Map<string, NodeJS.Timeout>();
+  private seen = new Set<string>();
+
+  /** Fired with the new file content whenever a watched text file changes. */
+  onChange: (change: FileChange) => void = () => {};
+  /** Fired with just the path (used for the modified-files list). */
+  onFileTouched: (path: string, status: "created" | "modified") => void = () => {};
+
+  constructor(private root: string) {}
+
+  start(): void {
+    this.stop();
+    this.seen.clear();
+    // macOS/Windows support recursive watching; on Linux this throws and we degrade.
+    try {
+      this.watcher = watch(this.root, { recursive: true }, (_event, filename) => {
+        if (filename) this.schedule(filename.toString());
+      });
+    } catch (err) {
+      console.warn(`[watcher] recursive watch unavailable: ${(err as Error).message}`);
+    }
+    // Seed the seen-set with existing files so the first real edit reads as
+    // "modified" rather than "created" (files the agent creates are new to us).
+    void this.seedExisting();
+  }
+
+  stop(): void {
+    for (const t of this.timers.values()) clearTimeout(t);
+    this.timers.clear();
+    if (this.watcher) {
+      try {
+        this.watcher.close();
+      } catch {
+        /* ignore */
+      }
+      this.watcher = null;
+    }
+  }
+
+  private schedule(relPath: string): void {
+    if (this.isIgnored(relPath)) return;
+    const existing = this.timers.get(relPath);
+    if (existing) clearTimeout(existing);
+    this.timers.set(
+      relPath,
+      setTimeout(() => {
+        this.timers.delete(relPath);
+        void this.emit(relPath);
+      }, DEBOUNCE_MS),
+    );
+  }
+
+  private isIgnored(relPath: string): boolean {
+    const segments = relPath.split(sep);
+    return segments.some((s) => IGNORED_SEGMENTS.has(s));
+  }
+
+  private async emit(relPath: string): Promise<void> {
+    const abs = this.root.endsWith(sep) ? this.root + relPath : `${this.root}${sep}${relPath}`;
+    let content: string;
+    try {
+      const stat = await import("node:fs/promises").then((m) => m.stat(abs));
+      if (!stat.isFile() || stat.size > MAX_FILE_SIZE) return;
+      const buf = await readFile(abs);
+      content = buf.toString("utf8");
+      // Cheap binary sniff: common replacement char in binary garbage.
+      if (content.includes("\uFFFD")) return;
+    } catch {
+      return; // deleted or unreadable — ignore for now
+    }
+
+    const status: "created" | "modified" = this.seen.has(relPath) ? "modified" : "created";
+    this.seen.add(relPath);
+    const change: FileChange = { path: abs, relPath, content, status };
+    this.onChange(change);
+    this.onFileTouched(abs, status);
+  }
+
+  /** Pre-seed the seen-set so already-existing files read as "modified", not "created". */
+  seed(relPaths: string[]): void {
+    for (const p of relPaths) this.seen.add(p);
+  }
+
+  /** Walk the project (ignoring noise) and mark existing files as seen. */
+  private async seedExisting(): Promise<void> {
+    const walk = async (dir: string): Promise<void> => {
+      let entries;
+      try {
+        entries = await readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const ent of entries) {
+        if (this.seen.size > 100_000) return;
+        if (IGNORED_SEGMENTS.has(ent.name)) continue;
+        const full = join(dir, ent.name);
+        if (ent.isDirectory()) {
+          await walk(full);
+        } else if (ent.isFile()) {
+          this.seen.add(relative(this.root, full));
+        }
+      }
+    };
+    try {
+      await walk(this.root);
+    } catch {
+      /* non-fatal */
+    }
+  }
+}
+
+export function relPathOf(root: string, abs: string): string {
+  return relative(root, abs);
+}
