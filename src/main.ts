@@ -34,6 +34,9 @@ import htmlWorker from "monaco-editor/language/html/html.worker?worker";
 
 import { EditorManager } from "./editor";
 import "./styles.css";
+// xterm's own stylesheet — hides the helper textarea (a visible white input box
+// at the terminal's top-left otherwise), styles the viewport/scrollbar, etc.
+import "@xterm/xterm/css/xterm.css";
 import { TerminalManager } from "./terminal";
 import { Panels } from "./components/panels";
 import { handleExtensionUiRequest, toast } from "./components/modals";
