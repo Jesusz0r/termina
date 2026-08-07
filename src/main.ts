@@ -196,6 +196,11 @@ window.pi.onEvent((event) => {
       if (msg?.role === "assistant") terminal.startAssistant();
       break;
     }
+    case "message_end": {
+      const msg = event.message as { role?: string } | undefined;
+      if (msg?.role === "assistant") terminal.endAssistant();
+      break;
+    }
     case "tool_execution_start": {
       terminal.startToolCall(
         String(event.toolCallId ?? ""),

@@ -161,6 +161,11 @@ export class TerminalManager {
     }
   }
 
+  /** Called when an assistant message completes: the next one starts fresh. */
+  endAssistant(): void {
+    this.assistantOpen = false;
+  }
+
   streamText(delta: string): void {
     this.endThinking();
     this.startAssistant();
