@@ -5,7 +5,7 @@
  *
  * File paths in the buffer are clickable via a custom LinkProvider.
  */
-import { Terminal, type ILink } from "xterm";
+import { Terminal, type ILink } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import type { ModifiedFile } from "../shared/types";
@@ -21,6 +21,7 @@ export class TerminalManager {
   private disposed = false;
   private lastRender = 0;
   private watchdog: ReturnType<typeof setInterval> | null = null;
+  private fitScheduled = false;
 
   constructor(container: HTMLElement, onOpenFile: (path: string) => void) {
     this.onOpenFile = onOpenFile;
@@ -79,12 +80,39 @@ export class TerminalManager {
     this.setupLinkProvider();
   }
 
+  /**
+   * Fit the terminal to its container, safely:
+   *  - coalesces bursts of resize notifications into one fit per animation frame
+   *  - skips when the container has no size (mid-layout, hidden)
+   *  - skips when nothing would change
+   *  - after a real resize, drops the glyph atlas and repaints every row, so the
+   *    canvas/DOM renderers can't smear stale glyphs (the classic "WWWWWW" artifact)
+   */
   fit(): void {
-    try {
-      this.fitAddon.fit();
-    } catch {
-      /* hidden/zero-size */
-    }
+    if (this.fitScheduled || this.disposed) return;
+    this.fitScheduled = true;
+    requestAnimationFrame(() => {
+      this.fitScheduled = false;
+      if (this.disposed) return;
+      const container = this.term.element?.parentElement;
+      if (!container || container.clientWidth === 0 || container.clientHeight === 0) return;
+      const prevCols = this.term.cols;
+      const prevRows = this.term.rows;
+      try {
+        this.fitAddon.fit();
+      } catch {
+        return;
+      }
+      if (this.term.cols !== prevCols || this.term.rows !== prevRows) {
+        try {
+          this.term.clearTextureAtlas();
+          this.term.refresh(0, this.term.rows - 1);
+          this.lastRender = Date.now();
+        } catch {
+          /* ignore */
+        }
+      }
+    });
   }
 
   dispose(): void {
