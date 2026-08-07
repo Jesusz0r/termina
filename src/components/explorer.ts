@@ -23,6 +23,7 @@ export class Explorer {
   constructor(container: HTMLElement) {
     this.rootEl = container;
     this.treeEl = container.querySelector("#explorer-tree") as HTMLElement;
+    void this.renderRoot(); // show the empty state before any project is opened
   }
 
   bind(handlers: { onOpenFile: (absPath: string) => void }): void {

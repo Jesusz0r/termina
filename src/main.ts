@@ -182,6 +182,7 @@ function renderActiveChrome(pane: Pane | null): void {
   if (!pane) {
     panels.setState(null);
     panels.setModified([]);
+    editorMgr.setStreaming(false);
     return;
   }
   const s: PiState = {
@@ -197,6 +198,8 @@ function renderActiveChrome(pane: Pane | null): void {
   };
   panels.setState(s);
   panels.setModified(pane.modified);
+  // The shared editor locks only while the ACTIVE terminal's agent streams.
+  editorMgr.setStreaming(pane.isStreaming);
 }
 
 function updatePaneTab(pane: Pane): void {
@@ -342,7 +345,9 @@ function handlePaneState(s: PiState): void {
   pane.models = s.models;
   pane.levels = s.levels;
   pane.cwd = s.cwd;
-  if (!projectCwd && s.cwd) {
+  // The explorer follows the real project folder only (not the home-dir
+  // placeholder): its create/rename/delete ops require a real project.
+  if (s.hasProject && !projectCwd && s.cwd) {
     projectCwd = s.cwd;
     explorer.setProject(s.cwd);
   }
@@ -554,9 +559,10 @@ async function boot(): Promise<void> {
   if (!activeId && instances.length > 0) {
     activatePane(instances[0].id);
   }
-  // The project folder for the explorer comes from the first instance's cwd.
+  // The project folder for the explorer comes from the first instance's cwd
+  // (only when it's a real project, not the home-dir placeholder).
   const first = await window.pi.getState(instances[0]?.id ?? "");
-  if (first?.cwd) {
+  if (first?.hasProject && first.cwd) {
     projectCwd = first.cwd;
     explorer.setProject(first.cwd);
   }
