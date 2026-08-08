@@ -111,6 +111,8 @@ export interface PiBridge {
   setThinking(instanceId: string, level: string): Promise<unknown>;
   getState(instanceId: string): Promise<PiState>;
   getCommands(instanceId: string): Promise<{ commands: PiCommand[]; error?: string }>;
+  builtin(instanceId: string, cmd: string, arg: string): Promise<{ ok: boolean; text?: string; error?: string }>;
+  configPaths(): Promise<{ settingsPath: string; authPath: string }>;
   getModifiedFiles(instanceId: string): Promise<ModifiedFile[]>;
   clearModified(instanceId: string): Promise<void>;
 

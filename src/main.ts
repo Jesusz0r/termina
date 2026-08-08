@@ -43,6 +43,7 @@ import { TerminalManager, formatMarkdown } from "./terminal";
 import { Panels } from "./components/panels";
 import { Explorer } from "./components/explorer";
 import { CommandMenu } from "./components/command-menu";
+import { BUILTINS, builtinCommandEntries, matchBuiltin } from "./components/builtin-commands";
 import { handleExtensionUiRequest, toast } from "./components/modals";
 import type { PiState, ModifiedFile, ModelInfo, InstanceSummary, ExtensionUiRequest, PiCommand } from "../shared/types";
 
@@ -233,6 +234,24 @@ async function sendPrompt(steer = false): Promise<void> {
   promptInput.value = "";
   autoResizePrompt();
   pane?.terminal.userPrompt(text);
+
+  // Built-in commands (/help, /compact, /stats, /settings…) run locally and
+  // never reach pi as prompts.
+  const builtin = matchBuiltin(text);
+  if (builtin && pane) {
+    try {
+      await builtin.builtin.run(builtin.args, {
+        instanceId: activeId,
+        terminal: pane.terminal,
+        pane,
+        openFile: (p) => openFileSmart(p, false),
+      });
+    } catch (err) {
+      pane.terminal.error(`/${builtin.builtin.name}: ${(err as Error).message}`);
+    }
+    return;
+  }
+
   try {
     const res = await window.pi.prompt(activeId, text, {
       streamingBehavior: steer ? "steer" : pane?.isStreaming ? "followUp" : undefined,
@@ -288,10 +307,12 @@ const commandMenu = new CommandMenu(promptInput, async () => {
   if (!activeId) return [];
   const pane = panes.get(activeId);
   if (!pane) return [];
-  if (pane.commands) return pane.commands;
-  const res = await window.pi.getCommands(activeId);
-  pane.commands = res.commands ?? [];
-  return pane.commands;
+  if (!pane.commands) {
+    const res = await window.pi.getCommands(activeId);
+    pane.commands = res.commands ?? [];
+  }
+  // Merge our built-ins (help, compact, stats…) with pi's commands.
+  return builtinCommandEntries(pane.commands);
 });
 
 promptInput.addEventListener("input", () => {

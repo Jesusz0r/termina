@@ -860,6 +860,10 @@ body {
   color: var(--yellow);
 }
 
+.cmd-source.builtin {
+  color: var(--accent);
+}
+
 .cmd-loading {
   color: var(--text-dim);
   cursor: default;

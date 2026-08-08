@@ -154,6 +154,30 @@ export class PiRpcClient {
     return this.send({ type: "set_thinking_level", level });
   }
 
+  compact(customInstructions?: string): Promise<RpcResponse> {
+    return this.send({ type: "compact", ...(customInstructions ? { customInstructions } : {}) });
+  }
+
+  getSessionStats(): Promise<RpcResponse> {
+    return this.send({ type: "get_session_stats" });
+  }
+
+  exportHtml(): Promise<RpcResponse<{ path: string }>> {
+    return this.send({ type: "export_html" });
+  }
+
+  setSessionName(name: string): Promise<RpcResponse> {
+    return this.send({ type: "set_session_name", name });
+  }
+
+  setAutoCompaction(enabled: boolean): Promise<RpcResponse> {
+    return this.send({ type: "set_auto_compaction", enabled });
+  }
+
+  setAutoRetry(enabled: boolean): Promise<RpcResponse> {
+    return this.send({ type: "set_auto_retry", enabled });
+  }
+
   // ---- Internals ------------------------------------------------------------
 
   private handleChunk(chunk: Buffer): void {

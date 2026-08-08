@@ -614,6 +614,75 @@ class PiEditorApp {
         return { commands: [], error: (err as Error).message };
       }
     });
+
+    // Built-in commands that pi's RPC supports directly (the TUI-only ones
+    // like /settings and /login are implemented in the renderer instead).
+    ipcMain.handle("pi:builtin", async (_e, instanceId: string, cmd: string, arg: string) => {
+      const inst = this.instanceOf(instanceId);
+      if (!inst) return { ok: false, error: "instance not found" };
+      const rpc = inst.rpc;
+      try {
+        switch (cmd) {
+          case "compact": {
+            const r = await rpc.compact(arg || undefined);
+            if (!r.success) return { ok: false, error: r.error };
+            const d = (r.data ?? {}) as { summary?: string; estimatedTokensAfter?: number | null };
+            return { ok: true, text: `context compacted — ${d.estimatedTokensAfter ?? "?"} tokens after${d.summary ? `\nsummary: ${d.summary.slice(0, 300)}` : ""}` };
+          }
+          case "stats": {
+            const r = await rpc.getSessionStats();
+            if (!r.success) return { ok: false, error: r.error };
+            const d = r.data as Record<string, unknown>;
+            const tokens = (d.tokens ?? {}) as Record<string, number>;
+            const cost = d.cost as number | undefined;
+            const ctx = (d.contextUsage ?? {}) as { tokens?: number | null; contextWindow?: number | null; percent?: number | null };
+            return {
+              ok: true,
+              text: [
+                `messages: ${String(d.totalMessages ?? d.messageCount ?? "?")}`,
+                `tokens: ${String(tokens.total ?? "?")} (in ${String(tokens.input ?? "?")} / out ${String(tokens.output ?? "?")} / cache ${String(tokens.cacheRead ?? "?")})`,
+                `cost: $${(cost ?? 0).toFixed(4)}`,
+                `context: ${String(ctx.tokens ?? "?")} / ${String(ctx.contextWindow ?? "?")} (${String(ctx.percent ?? "?")}%)`,
+              ].join("\n"),
+            };
+          }
+          case "export": {
+            const r = await rpc.exportHtml();
+            if (!r.success) return { ok: false, error: r.error };
+            const path = (r.data as { path?: string } | undefined)?.path ?? "";
+            return { ok: true, text: `session exported to ${path}` };
+          }
+          case "session-name": {
+            if (!arg) return { ok: false, error: "usage: /session-name <name>" };
+            const r = await rpc.setSessionName(arg);
+            if (!r.success) return { ok: false, error: r.error };
+            return { ok: true, text: `session renamed to “${arg}”` };
+          }
+          case "auto-compaction": {
+            const enabled = arg === "on" ? true : arg === "off" ? false : null;
+            if (enabled === null) return { ok: false, error: "usage: /auto-compaction on|off" };
+            const r = await rpc.setAutoCompaction(enabled);
+            if (!r.success) return { ok: false, error: r.error };
+            return { ok: true, text: `auto-compaction ${enabled ? "enabled" : "disabled"}` };
+          }
+          case "auto-retry": {
+            const enabled = arg === "on" ? true : arg === "off" ? false : null;
+            if (enabled === null) return { ok: false, error: "usage: /auto-retry on|off" };
+            const r = await rpc.setAutoRetry(enabled);
+            if (!r.success) return { ok: false, error: r.error };
+            return { ok: true, text: `auto-retry ${enabled ? "enabled" : "disabled"}` };
+          }
+          default:
+            return { ok: false, error: `unknown builtin ${cmd}` };
+        }
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    });
+    ipcMain.handle("app:config-paths", () => {
+      const agentDir = process.env.PI_EDITOR_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+      return { settingsPath: join(agentDir, "settings.json"), authPath: join(agentDir, "auth.json") };
+    });
     ipcMain.handle("pi:ui-response", (_e, instanceId: string, id: string, payload: Record<string, unknown>) => {
       const inst = this.instanceOf(instanceId);
       if (!inst) return;

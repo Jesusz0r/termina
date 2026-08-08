@@ -69,6 +69,8 @@ const bridge: PiBridge = {
   setThinking: (instanceId, level) => ipcRenderer.invoke("pi:set-thinking", instanceId, level),
   getState: (instanceId): Promise<PiState> => ipcRenderer.invoke("pi:get-state", instanceId),
   getCommands: (instanceId) => ipcRenderer.invoke("pi:get-commands", instanceId),
+  builtin: (instanceId, cmd, arg) => ipcRenderer.invoke("pi:builtin", instanceId, cmd, arg),
+  configPaths: () => ipcRenderer.invoke("app:config-paths"),
   getModifiedFiles: (instanceId): Promise<ModifiedFile[]> => ipcRenderer.invoke("modified:get", instanceId),
   clearModified: (instanceId) => ipcRenderer.invoke("modified:clear", instanceId),
 
