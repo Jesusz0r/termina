@@ -139,6 +139,11 @@ export interface PiBridge {
 
   // Session Timeline
   getTimeline(terminalId: string): Promise<TimelineEvent[]>;
+  /** Fetch a snapshot's content on demand (only when a dot is clicked). */
+  getTimelineContent(
+    terminalId: string,
+    seq: number,
+  ): Promise<{ ok: boolean; seq: number; path?: string; relPath?: string; content?: string; ts?: number; toolName?: string }>;
   reviewBaseline(terminalId: string, path: string): Promise<{ status: "created" | "modified"; baseline: string | null }>;
   reviewRevert(terminalId: string, path: string): Promise<{ ok: boolean; error?: string }>;
 

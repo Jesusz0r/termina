@@ -83,6 +83,7 @@ const modifiedPanel = document.getElementById("modified-panel")!;
 const modifiedCount = document.getElementById("modified-count")!;
 const btnClearModified = document.getElementById("btn-clear-modified") as HTMLButtonElement;
 const timelineView = new TimelineView(document.getElementById("timeline-strip")!);
+(window as unknown as Record<string, unknown>).__timelineView = timelineView;
 
 // ---------------------------------------------------------------- panes -----
 
@@ -233,16 +234,20 @@ function renderTimeline(): void {
 }
 
 timelineView.bind({
-  onJump: (ev) => {
+  onJump: async (ev) => {
     // Reveal the editor (a snapshot tab) without leaving fullscreen perma-hidden.
     if (splitEl.classList.contains("layout-terminal-fullscreen")) applyLayout("terminal-left");
     const pane = activeId ? panes.get(activeId) : undefined;
-    const label = `${new Date(ev.ts).toLocaleTimeString()} · ${ev.toolName ?? "on disk"}`;
-    editorMgr.openSnapshot(pane?.instanceId ?? "", String(ev.seq), ev.relPath ?? ev.path ?? "", ev.content ?? "", label);
-  },
-  onNoSnapshot: (ev) => {
-    const what = ev.t === "change" ? "change" : ev.toolName ?? "event";
-    toast(`${what} ${ev.relPath ?? ev.path ?? ""} — snapshot too large to open`, "info");
+    if (!pane) return;
+    // Snapshots are fetched on demand — the strip/IPC never carries content.
+    const res = await window.pi.getTimelineContent(pane.instanceId, ev.seq);
+    if (!res.ok) {
+      const what = ev.t === "change" ? "change" : ev.toolName ?? "event";
+      toast(`${what} ${res.relPath ?? ev.relPath ?? ""} — no snapshot for this moment`, "info");
+      return;
+    }
+    const label = `${new Date(res.ts ?? ev.ts).toLocaleTimeString()} · ${res.toolName ?? ev.toolName ?? "on disk"}`;
+    editorMgr.openSnapshot(pane.instanceId, String(ev.seq), res.relPath ?? res.path ?? "", res.content ?? "", label);
   },
 });
 
@@ -658,7 +663,10 @@ window.pi.onVerifyState(({ terminalId, verify }) => {
 window.pi.onTimelineEvent(({ terminalId, event }) => {
   const pane = panes.get(terminalId);
   if (!pane) return;
-  pane.timeline.push(event);
+  // Updates from main re-use the seq — replace in place, never duplicate.
+  const idx = pane.timeline.findIndex((e) => e.seq === event.seq);
+  if (idx === -1) pane.timeline.push(event);
+  else pane.timeline[idx] = event;
   if (activeId === terminalId) timelineView.push(event);
 });
 

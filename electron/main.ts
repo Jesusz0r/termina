@@ -32,6 +32,8 @@ const MAX_OPEN_FILE_SIZE = 2 * 1024 * 1024;
 const MAX_SNAPSHOT_SIZE = 100_000;
 /** Cap the per-terminal timeline so memory stays bounded. */
 const MAX_TIMELINE_EVENTS = 400;
+/** Total snapshot bytes kept per terminal — oldest content is dropped first. */
+const MAX_TIMELINE_CONTENT_BYTES = 4 * 1024 * 1024;
 /** A watcher change within this window after a tool event is the same action. */
 const TOOL_CHANGE_DEDUP_MS = 1500;
 const FILE_TOOLS = new Set(["write", "edit", "apply_patch", "create_file", "insert"]);
@@ -558,7 +560,8 @@ class PiEditorApp {
       return cached.length > MAX_SNAPSHOT_SIZE ? { status } : { content: cached, status };
     }
     // The write may not have landed in the watcher cache yet — retry shortly,
-    // addressing the event by reference (the tail may have moved on).
+    // addressing the event by reference (the tail may have moved on). Content
+    // stays main-side; the renderer fetches it on click.
     setTimeout(() => {
       const fresh = this.watcher?.lastContents.get(path);
       if (fresh === undefined) return;
@@ -568,7 +571,6 @@ class PiEditorApp {
       target.content = fresh.length > MAX_SNAPSHOT_SIZE ? undefined : fresh;
       target.status = status;
       inst.runSnapshots.set(path, fresh);
-      this.send("timeline:event", { terminalId: inst.id, event: target });
     }, 400);
     return { status };
   }
@@ -594,12 +596,31 @@ class PiEditorApp {
     return out;
   }
 
-  /** Append a timeline point, keep the cap, push to the renderer. */
+  /** Append a timeline point, keep caps, push a CONTENT-FREE event to the
+   *  renderer (snapshots are fetched on demand when a dot is clicked, so the
+   *  strip and IPC stay light). */
   private pushTimeline(inst: PiTerminalInstance, ev: Omit<TimelineEvent, "seq" | "ts">): void {
     const event: TimelineEvent = { seq: ++inst.timelineSeq, ...ev, ts: Date.now() };
     inst.timeline.push(event);
     if (inst.timeline.length > MAX_TIMELINE_EVENTS) inst.timeline.splice(0, inst.timeline.length - MAX_TIMELINE_EVENTS);
-    this.send("timeline:event", { terminalId: inst.id, event });
+    this.trimTimelineContent(inst);
+    const { content: _content, ...pub } = event;
+    this.send("timeline:event", { terminalId: inst.id, event: pub });
+  }
+
+  /** Keep snapshot memory bounded per terminal: drop content from the OLDEST
+   *  events first (the dots remain; clicking them explains why). */
+  private trimTimelineContent(inst: PiTerminalInstance): void {
+    let bytes = 0;
+    for (const e of inst.timeline) bytes += e.content?.length ?? 0;
+    if (bytes <= MAX_TIMELINE_CONTENT_BYTES) return;
+    for (const e of inst.timeline) {
+      if (bytes <= MAX_TIMELINE_CONTENT_BYTES) break;
+      if (e.content !== undefined) {
+        bytes -= e.content.length;
+        e.content = undefined;
+      }
+    }
   }
 
   private contentSizeOk(content: string | undefined): boolean {
@@ -719,7 +740,6 @@ class PiEditorApp {
           if (last && last.t === "tool" && last.path === path && this.contentSizeOk(change.content)) {
             last.content = change.content;
             inst.runSnapshots.set(path, change.content);
-            this.send("timeline:event", { terminalId: inst.id, event: last });
           }
         }
       } else {
@@ -734,7 +754,6 @@ class PiEditorApp {
           if (last && last.t === "change" && last.path === path && now - (last.ts ?? 0) < 800) {
             if (content !== undefined) last.content = content;
             last.ts = now;
-            this.send("timeline:event", { terminalId: inst.id, event: last });
           } else {
             this.pushTimeline(inst, { t: "change", path, relPath, content, status: change.status });
           }
@@ -863,7 +882,17 @@ class PiEditorApp {
     ipcMain.handle("verify:run", (_e, terminalId: string) => this.runVerify(terminalId));
 
     // ---- Session Timeline ----
-    ipcMain.handle("timeline:get", (_e, terminalId: string) => this.terminals.get(terminalId)?.timeline ?? []);
+    ipcMain.handle("timeline:get", (_e, terminalId: string) => {
+      const tl = this.terminals.get(terminalId)?.timeline ?? [];
+      return tl.map(({ content: _content, ...pub }) => pub);
+    });
+    ipcMain.handle("timeline:content", (_e, terminalId: string, seq: number) => {
+      const inst = this.terminals.get(terminalId);
+      const ev = inst?.timeline.find((e) => e.seq === seq);
+      if (!ev) return { ok: false, seq };
+      if (ev.content === undefined) return { ok: false, seq, path: ev.path, relPath: ev.relPath };
+      return { ok: true, seq, path: ev.path, relPath: ev.relPath, content: ev.content, ts: ev.ts, toolName: ev.toolName };
+    });
 
     // ---- Change Review ----
     ipcMain.handle("review:baseline", (_e, terminalId: string, path: string) => {

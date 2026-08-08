@@ -61,11 +61,14 @@ const types = (tl ?? []).map((e) => e.t);
 check("timeline has run markers", types.includes("agent_start") && types.includes("agent_settled"), types.join(","));
 const tools = (tl ?? []).filter((e) => e.t === "tool" && e.path?.includes("greeting.ts"));
 check("timeline has tool events for greeting.ts", tools.length > 0, JSON.stringify(tools[0] ?? null));
-const withContent = tools.find((e) => e.content !== undefined);
+// Content is fetched on demand — the strip events must NOT carry it.
+const hasInlineContent = (tl ?? []).some((e) => e.content !== undefined);
+check("strip events carry no content (lazy fetch)", hasInlineContent === false, "");
+const snap = await evalJs(`window.pi.getTimelineContent('term-1', ${tools[0]?.seq ?? -1})`);
 check(
-  "a tool point carries a snapshot with the new content",
-  !!withContent && withContent.content.includes("hi there"),
-  JSON.stringify(withContent ?? null).slice(0, 150),
+  "a tool point's snapshot has the new content (on demand)",
+  snap.ok === true && String(snap.content ?? "").includes("hi there"),
+  JSON.stringify(snap).slice(0, 150),
 );
 
 // ---- 3. DOM strip ----

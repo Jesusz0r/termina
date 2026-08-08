@@ -11,12 +11,13 @@ export class TimelineView {
   private countEl: HTMLElement;
   private btnPlay: HTMLElement;
   private events: TimelineEvent[] = [];
+  /** seq → dot element, for O(1) updates (defensive; main rarely re-sends). */
+  private dots = new Map<number, HTMLElement>();
   private activeSeq: number | null = null;
   private replayTimer: ReturnType<typeof setInterval> | null = null;
   private replayIdx = 0;
 
   private onJump: (ev: TimelineEvent) => void = () => {};
-  private onNoSnapshot: (ev: TimelineEvent) => void = () => {};
 
   constructor(container: HTMLElement) {
     this.root = container;
@@ -29,9 +30,8 @@ export class TimelineView {
     });
   }
 
-  bind(handlers: { onJump: (ev: TimelineEvent) => void; onNoSnapshot?: (ev: TimelineEvent) => void }): void {
+  bind(handlers: { onJump: (ev: TimelineEvent) => void }): void {
     this.onJump = handlers.onJump;
-    if (handlers.onNoSnapshot) this.onNoSnapshot = handlers.onNoSnapshot;
   }
 
   setEvents(events: TimelineEvent[]): void {
@@ -41,18 +41,47 @@ export class TimelineView {
     this.render();
   }
 
+  /** Append a new point (or refresh an existing one by seq — updates from
+   *  main re-use the same seq). O(1) — no full re-render per event. */
   push(event: TimelineEvent): void {
-    this.events.push(event);
-    this.render();
+    const idx = this.events.findIndex((e) => e.seq === event.seq);
+    if (idx !== -1) this.events[idx] = event;
+    else this.events.push(event);
+    const existing = this.dots.get(event.seq);
+    if (existing) {
+      existing.className = this.dotClass(event);
+      existing.title = this.tooltip(event);
+      return;
+    }
+    const dot = this.makeDot(event);
+    this.dots.set(event.seq, dot);
+    this.dotsEl.appendChild(dot);
+    this.countEl.textContent = `(${this.events.length})`;
+    this.btnPlay.hidden = this.events.length === 0;
+    // Keep the newest dot in view — but only when the user is already near
+    // the end, so examining an old moment isn't yanked away by new events.
+    const nearEnd = this.dotsEl.scrollLeft + this.dotsEl.clientWidth >= this.dotsEl.scrollWidth - 24;
+    if (nearEnd) this.dotsEl.scrollLeft = this.dotsEl.scrollWidth;
   }
 
   /** Highlight a dot (used while replaying). */
   private highlight(seq: number): void {
     this.activeSeq = seq;
-    for (const dot of this.dotsEl.children) {
-      const el = dot as HTMLElement;
-      el.classList.toggle("active", el.dataset.seq === String(seq));
-    }
+    for (const [s, el] of this.dots) el.classList.toggle("active", s === seq);
+  }
+
+  private dotClass(ev: TimelineEvent): string {
+    return `timeline-dot t-${ev.t}${ev.toolName ? ` tool-${ev.toolName}` : ""}`;
+  }
+
+  private makeDot(ev: TimelineEvent): HTMLElement {
+    const dot = document.createElement("span");
+    dot.className = this.dotClass(ev);
+    dot.dataset.seq = String(ev.seq);
+    dot.title = this.tooltip(ev);
+    dot.addEventListener("click", () => this.jumpTo(ev));
+    if (ev.seq === this.activeSeq) dot.classList.add("active");
+    return dot;
   }
 
   private render(): void {
@@ -60,12 +89,10 @@ export class TimelineView {
     this.countEl.textContent = n ? `(${n})` : "";
     this.btnPlay.hidden = n === 0;
     this.dotsEl.replaceChildren();
+    this.dots.clear();
     for (const ev of this.events) {
-      const dot = document.createElement("span");
-      dot.className = `timeline-dot t-${ev.t}${ev.toolName ? ` tool-${ev.toolName}` : ""}`;
-      dot.dataset.seq = String(ev.seq);
-      dot.title = this.tooltip(ev);
-      dot.addEventListener("click", () => this.jumpTo(ev));
+      const dot = this.makeDot(ev);
+      this.dots.set(ev.seq, dot);
       if (ev.seq === this.activeSeq) dot.classList.add("active");
       this.dotsEl.appendChild(dot);
     }
@@ -89,17 +116,13 @@ export class TimelineView {
     }
   }
 
-  /** Jump to a moment: open its snapshot via the bound handler. */
+  /** Jump to a moment: open its snapshot via the bound handler. Content is
+   *  fetched on demand by the handler, so every tool/change point jumps. */
   jumpTo(ev: TimelineEvent): void {
     this.stopReplay();
     this.highlight(ev.seq);
-    if (ev.content !== undefined && ev.path) {
-      this.onJump(ev);
-      return;
-    }
-    // Run markers (start/settled) are silent; content-less tool/change points
-    // (snapshot too large) explain themselves.
-    if (ev.t === "tool" || ev.t === "change") this.onNoSnapshot(ev);
+    if (ev.t === "tool" || ev.t === "change") this.onJump(ev);
+    // Run markers (start/settled) are silent moments.
   }
 
   toggleReplay(): void {
