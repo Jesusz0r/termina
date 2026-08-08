@@ -147,6 +147,18 @@ class PiEditorApp {
       {
         label: "View",
         submenu: [
+          {
+            label: "Layout",
+            submenu: [
+              { label: "Terminal Left", click: send("layout-terminal-left") },
+              { label: "Terminal Right", click: send("layout-terminal-right") },
+              { label: "Terminal Top", click: send("layout-terminal-top") },
+              { label: "Terminal Bottom", click: send("layout-terminal-bottom") },
+            ],
+          },
+          { label: "Toggle Explorer", accelerator: "CmdOrCtrl+B", click: send("toggle-explorer") },
+          { label: "Toggle Modified Panel", click: send("toggle-modified") },
+          { type: "separator" },
           { label: "Toggle DevTools", accelerator: "Alt+Cmd+I", role: "toggleDevTools" },
           { label: "Reload", accelerator: "CmdOrCtrl+R", role: "reload" },
           { type: "separator" },

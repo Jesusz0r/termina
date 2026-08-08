@@ -50,7 +50,18 @@ export interface ExplorerEntry {
   type: "file" | "dir";
 }
 
-export type MenuCommand = "new-file" | "new-folder" | "rename" | "delete" | "refresh";
+export type MenuCommand =
+  | "new-file"
+  | "new-folder"
+  | "rename"
+  | "delete"
+  | "refresh"
+  | "layout-terminal-left"
+  | "layout-terminal-right"
+  | "layout-terminal-top"
+  | "layout-terminal-bottom"
+  | "toggle-explorer"
+  | "toggle-modified";
 
 export interface PiBridge {
   // push events (main → renderer)

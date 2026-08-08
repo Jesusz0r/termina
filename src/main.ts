@@ -44,6 +44,7 @@ import type { ModifiedFile, InstanceSummary } from "../shared/types";
 
 const editorMgr = new EditorManager(document.getElementById("editor-container")!);
 const explorer = new Explorer(document.getElementById("explorer")!);
+const explorerEl = document.getElementById("explorer")!;
 explorer.bind({ onOpenFile: (path, preview) => void openFileSmart(path, preview ?? true) });
 
 const leftPane = document.getElementById("left-pane")!;
@@ -99,6 +100,7 @@ function createPaneShell(instanceId: string): Pane {
   });
   tabEl.append(statusEl, nameEl, closeEl);
   tabEl.addEventListener("click", () => activatePane(instanceId));
+  setupTabDrag(tabEl);
   termTabsList.appendChild(tabEl);
 
   const view = new PtyView(
@@ -229,8 +231,71 @@ modifiedPanel.querySelector(".panel-header")?.addEventListener("click", () => {
   modifiedPanel.classList.toggle("collapsed");
 });
 
-// File-menu commands (Open Folder, New File/Folder, Rename, Delete, Refresh)
-window.pi.onMenuCommand?.((cmd) => explorer.handleCommand(cmd.command));
+// ---------------------------------------------------------------- layout ---
+
+type Layout = "terminal-left" | "terminal-right" | "terminal-top" | "terminal-bottom";
+const LAYOUT_KEY = "pi-editor.layout";
+const EXPLORER_KEY = "pi-editor.explorer";
+const MODIFIED_KEY = "pi-editor.modified";
+
+const mainEl = document.getElementById("main")!;
+const modifiedPanelEl = document.getElementById("modified-panel")!;
+const explorerDividerEl = document.getElementById("explorer-divider")!;
+
+function applyLayout(layout: Layout): void {
+  for (const l of ["terminal-left", "terminal-right", "terminal-top", "terminal-bottom"] as const) {
+    mainEl.classList.toggle(`layout-${l}`, l === layout);
+  }
+  // Drop inline size overrides from previous drags so the flex layout applies.
+  leftPane.style.width = "";
+  leftPane.style.height = "";
+  localStorage.setItem(LAYOUT_KEY, layout);
+  requestAnimationFrame(() => {
+    for (const p of panes.values()) p.view.fit();
+  });
+}
+
+function setExplorerVisible(visible: boolean): void {
+  explorerEl.style.display = visible ? "" : "none";
+  explorerDividerEl.style.display = visible ? "" : "none";
+  localStorage.setItem(EXPLORER_KEY, visible ? "1" : "0");
+}
+
+function setModifiedVisible(visible: boolean): void {
+  modifiedPanelEl.style.display = visible ? "" : "none";
+  localStorage.setItem(MODIFIED_KEY, visible ? "1" : "0");
+}
+
+function isColumnLayout(): boolean {
+  return mainEl.classList.contains("layout-terminal-top") || mainEl.classList.contains("layout-terminal-bottom");
+}
+
+// File-menu commands + layout/toggle commands
+window.pi.onMenuCommand((cmd) => {
+  switch (cmd.command) {
+    case "layout-terminal-left":
+      applyLayout("terminal-left");
+      break;
+    case "layout-terminal-right":
+      applyLayout("terminal-right");
+      break;
+    case "layout-terminal-top":
+      applyLayout("terminal-top");
+      break;
+    case "layout-terminal-bottom":
+      applyLayout("terminal-bottom");
+      break;
+    case "toggle-explorer":
+      // currently hidden → show; currently visible → hide
+      setExplorerVisible(explorerEl.style.display === "none");
+      break;
+    case "toggle-modified":
+      setModifiedVisible(modifiedPanelEl.style.display === "none");
+      break;
+    default:
+      explorer.handleCommand(cmd.command);
+  }
+});
 
 // ------------------------------------------------------------ split pane ----
 
@@ -238,14 +303,18 @@ const divider = document.getElementById("divider")!;
 let dragging = false;
 divider.addEventListener("mousedown", () => {
   dragging = true;
-  document.body.style.cursor = "col-resize";
+  document.body.style.cursor = isColumnLayout() ? "row-resize" : "col-resize";
 });
 window.addEventListener("mousemove", (e) => {
   if (!dragging) return;
-  const main = document.getElementById("main")!;
-  const rect = main.getBoundingClientRect();
-  const pct = ((e.clientX - rect.left) / rect.width) * 100;
-  leftPane.style.width = `${Math.min(70, Math.max(30, pct))}%`;
+  const rect = mainEl.getBoundingClientRect();
+  if (isColumnLayout()) {
+    const pct = ((e.clientY - rect.top) / rect.height) * 100;
+    leftPane.style.height = `${Math.min(75, Math.max(25, pct))}%`;
+  } else {
+    const pct = ((e.clientX - rect.left) / rect.width) * 100;
+    leftPane.style.width = `${Math.min(70, Math.max(30, pct))}%`;
+  }
 });
 window.addEventListener("mouseup", () => {
   dragging = false;
@@ -253,10 +322,8 @@ window.addEventListener("mouseup", () => {
 });
 
 // explorer ↔ editor divider
-const explorerDivider = document.getElementById("explorer-divider")!;
-const explorerEl = document.getElementById("explorer")!;
 let exploring = false;
-explorerDivider.addEventListener("mousedown", () => {
+explorerDividerEl.addEventListener("mousedown", () => {
   exploring = true;
   document.body.style.cursor = "col-resize";
 });
@@ -271,6 +338,28 @@ window.addEventListener("mouseup", () => {
   exploring = false;
   document.body.style.cursor = "";
 });
+
+// drag to reorder terminal tabs
+let dragTabEl: HTMLElement | null = null;
+function setupTabDrag(tabEl: HTMLElement): void {
+  tabEl.draggable = true;
+  tabEl.addEventListener("dragstart", () => {
+    dragTabEl = tabEl;
+    tabEl.classList.add("dragging");
+  });
+  tabEl.addEventListener("dragend", () => {
+    dragTabEl = null;
+    tabEl.classList.remove("dragging");
+  });
+  tabEl.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    if (!dragTabEl || dragTabEl === tabEl) return;
+    const list = termTabsList;
+    const rect = tabEl.getBoundingClientRect();
+    const before = e.clientX < rect.left + rect.width / 2;
+    list.insertBefore(dragTabEl, before ? tabEl : tabEl.nextSibling);
+  });
+}
 
 // ------------------------------------------------------------ pi events ----
 
@@ -339,6 +428,12 @@ window.pi.onInstances((list: InstanceSummary[]) => {
 // ---------------------------------------------------------------- startup --
 
 async function boot(): Promise<void> {
+  // Restore layout + panel visibility preferences.
+  const layout = localStorage.getItem(LAYOUT_KEY) as Layout | null;
+  if (layout) applyLayout(layout);
+  if (localStorage.getItem(EXPLORER_KEY) === "0") setExplorerVisible(false);
+  if (localStorage.getItem(MODIFIED_KEY) === "0") setModifiedVisible(false);
+
   const instances = await window.pi.getInstances();
   for (const inst of instances) {
     if (!panes.has(inst.id)) createPaneShell(inst.id);
