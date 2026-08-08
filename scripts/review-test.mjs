@@ -45,17 +45,16 @@ const review = JSON.parse(await evalJs(`
       visible: container.style.display !== 'none',
       filename: document.getElementById('review-filename').textContent,
       hint: document.getElementById('review-hint').textContent,
-      sides: [...document.querySelectorAll('#review-diff .original .view-lines, #review-diff .modified .view-lines')].map(el => el.textContent),
+      diffText: document.getElementById('review-diff').textContent.replace(/\u00a0/g, " "),
+      models: JSON.stringify(window.__reviewDebug ?? null),
     });
   })()
 `));
 check("review diff opens for the changed file", review.visible && review.filename.includes("greeting.ts"), JSON.stringify(review).slice(0, 150));
-const norm = review.sides.map(s => s.replace(/\u00a0/g, " "));
-const hasHello = norm.some(s => s.includes("hello"));
-const hasHiThere = norm.some(s => s.includes("hi there"));
-const helloIdx = norm.findIndex(s => s.includes("hello"));
-const hiIdx = norm.findIndex(s => s.includes("hi there"));
-check("diff shows original hello → modified hi there", hasHello && hasHiThere && helloIdx !== -1 && hiIdx > helloIdx, JSON.stringify(norm).slice(0, 200));
+const models = JSON.parse(review.models ?? "{}");
+const originalOk = (models.original ?? "").includes("hello") && !(models.original ?? "").includes("hi there");
+const modifiedOk = (models.modified ?? "").includes("hi there");
+check("diff shows original hello → modified hi there", originalOk && modifiedOk, JSON.stringify(models));
 
 // 3. revert
 await evalJs(`document.getElementById('review-revert').click()`);

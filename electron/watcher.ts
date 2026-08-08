@@ -75,7 +75,15 @@ export class ProjectWatcher {
   /** Fired when a previously-seen file disappears (so tabs/list entries can be cleaned up). */
   onFileDeleted: (path: string) => void = () => {};
 
-  constructor(private root: string) {}
+  /**
+   * @param root watched directory
+   * @param canonicalize optional path normalizer (e.g. realpath) applied to
+   *        cache keys, so lookups with canonical paths always hit.
+   */
+  constructor(
+    private root: string,
+    private canonicalize?: (p: string) => string,
+  ) {}
 
   start(): void {
     this.stop();
@@ -154,7 +162,8 @@ export class ProjectWatcher {
     const status: "created" | "modified" = this.seen.has(relPath) ? "modified" : "created";
     this.seen.add(relPath);
     // Update the rolling content cache (evict oldest when over the limit).
-    this.lastContents.set(abs, content);
+    // Keys are canonicalized so lookups from anywhere in the app hit.
+    this.lastContents.set(this.canonicalize ? this.canonicalize(abs) : abs, content);
     if (this.lastContents.size > ProjectWatcher.CACHE_LIMIT) {
       const oldest = this.lastContents.keys().next().value;
       if (oldest !== undefined) this.lastContents.delete(oldest);

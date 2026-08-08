@@ -69,6 +69,12 @@ export class ReviewView {
     this.originalModel = monaco.editor.createModel(this.baseline ?? "", undefined, monaco.Uri.parse(`file:///review/original/${encodeURIComponent(path)}`));
     this.modifiedModel = monaco.editor.createModel(currentText, undefined, monaco.Uri.parse(`file:///review/modified/${encodeURIComponent(path)}`));
     this.diffEditor.setModel({ original: this.originalModel, modified: this.modifiedModel });
+    (window as unknown as Record<string, unknown>).__reviewDebug = {
+      baseline: this.baseline,
+      currentText,
+      original: this.originalModel.getValue(),
+      modified: this.modifiedModel.getValue(),
+    };
 
     const revertBtn = document.getElementById("review-revert") as HTMLButtonElement;
     const acceptBtn = document.getElementById("review-accept") as HTMLButtonElement;

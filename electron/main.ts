@@ -334,7 +334,10 @@ class PiEditorApp {
               inst.baselines.set(path, this.reconstructBaseline(path, event.edits));
             }
           } else {
-            inst.baselines.set(path, null); // write/create → treated as created
+            // A write to an EXISTING file is a modification: baseline from the
+            // cache if known; only genuinely new files get null (created).
+            const cached = this.watcher?.lastContents.get(path);
+            inst.baselines.set(path, cached !== undefined ? cached : null);
           }
         }
         this.recordModified(inst, path, toolName === "write" ? this.classifyWrite(path) : "modified");
@@ -414,7 +417,7 @@ class PiEditorApp {
 
   private startWatcher(cwd: string): void {
     this.watcher?.stop();
-    this.watcher = new ProjectWatcher(cwd);
+    this.watcher = new ProjectWatcher(cwd, (p) => this.canonicalPath(p));
     this.watcher.onChange = (change) => {
       const path = this.canonicalPath(change.path);
       for (const inst of this.terminals.values()) {
