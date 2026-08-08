@@ -57,7 +57,6 @@ const modifiedList = document.getElementById("modified-list")!;
 const modifiedPanel = document.getElementById("modified-panel")!;
 const modifiedCount = document.getElementById("modified-count")!;
 const btnClearModified = document.getElementById("btn-clear-modified") as HTMLButtonElement;
-const cwdLabel = document.getElementById("cwd-label")!;
 
 // ---------------------------------------------------------------- panes -----
 
@@ -171,7 +170,6 @@ function renderChrome(): void {
   if (!pane) {
     statusState.textContent = "no terminal";
     statusCwd.textContent = "";
-    cwdLabel.textContent = "";
     btnAbort.disabled = true;
     modifiedList.replaceChildren();
     return;
@@ -179,8 +177,6 @@ function renderChrome(): void {
   statusState.textContent = pane.busy ? "● agent working" : "idle";
   statusState.classList.toggle("busy", pane.busy);
   statusCwd.textContent = pane.cwd ?? "";
-  cwdLabel.textContent = pane.cwd ?? "";
-  cwdLabel.title = pane.cwd ?? "";
   btnAbort.disabled = !pane.busy;
   renderModified(pane);
 }

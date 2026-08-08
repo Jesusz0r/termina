@@ -50,27 +50,7 @@ body {
 
 /* ---------------------------------------------------------------- toolbar */
 
-#toolbar {
-  display: flex;
-  align-items: center;
-  padding: 4px 12px 4px 78px; /* left padding clears the inset traffic lights */
-  background: var(--bg-panel);
-  border-bottom: 1px solid var(--border);
-  flex: 0 0 auto;
-  -webkit-app-region: drag; /* let the toolbar drag the window */
-  min-height: 26px;
-}
 
-.toolbar-btn,
-.mini-btn {
-  background: var(--bg-raised);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 4px 10px;
-  font-size: 12px;
-  cursor: pointer;
-}
 
 .toolbar-btn:hover,
 .mini-btn:hover {
@@ -276,10 +256,17 @@ body {
   align-items: center;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
-  min-height: 32px;
+  min-height: 34px;
   flex: 0 0 auto;
-  padding: 3px 6px;
+  padding: 4px 8px 4px 78px; /* left padding clears the inset traffic lights */
   gap: 4px;
+  -webkit-app-region: drag; /* drag the window from here */
+}
+
+.terminal-tab,
+#btn-new-terminal,
+#terminal-tabs-list {
+  -webkit-app-region: no-drag;
 }
 
 #terminal-tabs-list {
