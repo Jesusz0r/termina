@@ -91,6 +91,8 @@ export interface PiBridge {
   resizeTerminal(id: string, cols: number, rows: number): Promise<void>;
   getInstances(): Promise<InstanceSummary[]>;
   abortTerminal(id: string): Promise<void>; // sends Ctrl+C into the pty
+  reviewBaseline(terminalId: string, path: string): Promise<{ status: "created" | "modified"; baseline: string | null }>;
+  reviewRevert(terminalId: string, path: string): Promise<{ ok: boolean; error?: string }>;
 
   // project / files
   openFolder(): Promise<{ cwd: string } | { cancelled: true }>;

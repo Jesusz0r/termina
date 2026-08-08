@@ -19,9 +19,11 @@ working code together.
 
 ## The feature menu
 
-### 1. Change Review — *the big one*
+### 1. Change Review — *the big one* ✅ implemented
 
-The modified-files list becomes a real review surface.
+The modified-files list becomes a real review surface (click a file → Monaco
+diff of the pre-run baseline vs current; Revert restores the original or
+deletes created files; Accept marks it reviewed; ↩/✓ markers in the list).
 
 | Capability | Detail |
 |---|---|

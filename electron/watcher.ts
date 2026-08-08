@@ -59,6 +59,15 @@ export class ProjectWatcher {
   private timers = new Map<string, NodeJS.Timeout>();
   private seen = new Set<string>();
 
+  /**
+   * Rolling cache of the last known content for every watched text file.
+   * Used as the pre-run baseline for the Change Review feature: at
+   * agent_start we snapshot this map, so diffs compare the run's start
+   * state against the current file.
+   */
+  lastContents = new Map<string, string>();
+  private static readonly CACHE_LIMIT = 5000;
+
   /** Fired with the new file content whenever a watched text file changes. */
   onChange: (change: FileChange) => void = () => {};
   /** Fired with just the path (used for the modified-files list). */
@@ -85,6 +94,7 @@ export class ProjectWatcher {
   }
 
   stop(): void {
+    this.lastContents.clear();
     for (const t of this.timers.values()) clearTimeout(t);
     this.timers.clear();
     if (this.watcher) {
@@ -143,6 +153,12 @@ export class ProjectWatcher {
 
     const status: "created" | "modified" = this.seen.has(relPath) ? "modified" : "created";
     this.seen.add(relPath);
+    // Update the rolling content cache (evict oldest when over the limit).
+    this.lastContents.set(abs, content);
+    if (this.lastContents.size > ProjectWatcher.CACHE_LIMIT) {
+      const oldest = this.lastContents.keys().next().value;
+      if (oldest !== undefined) this.lastContents.delete(oldest);
+    }
     const change: FileChange = { path: abs, relPath, content, status };
     this.onChange(change);
     this.onFileTouched(abs, status);

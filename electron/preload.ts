@@ -56,6 +56,8 @@ const bridge: PiBridge = {
   resizeTerminal: (id, cols, rows) => ipcRenderer.invoke("terminals:resize", id, cols, rows),
   getInstances: (): Promise<InstanceSummary[]> => ipcRenderer.invoke("terminals:list"),
   abortTerminal: (id) => ipcRenderer.invoke("terminals:abort", id),
+  reviewBaseline: (terminalId, path) => ipcRenderer.invoke("review:baseline", terminalId, path),
+  reviewRevert: (terminalId, path) => ipcRenderer.invoke("review:revert", terminalId, path),
 
   // ---- project / files ----
   openFolder: () => ipcRenderer.invoke("folder:open"),

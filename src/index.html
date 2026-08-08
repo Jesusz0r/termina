@@ -96,6 +96,18 @@
           <section id="right-pane">
             <div id="editor-tabs"></div>
             <div id="editor-container"></div>
+            <div id="review-container" style="display:none">
+              <div class="review-header">
+                <button id="review-back" class="review-btn" title="Back to the editor">←</button>
+                <span id="review-filename" class="review-filename"></span>
+                <span id="review-hint" class="muted"></span>
+                <div class="spacer"></div>
+                <button id="review-open" class="review-btn" title="Open the current file as a tab">Open file</button>
+                <button id="review-accept" class="review-btn primary" title="Mark this change as accepted">Accept</button>
+                <button id="review-revert" class="review-btn danger" title="Restore the pre-run version">Revert</button>
+              </div>
+              <div id="review-diff"></div>
+            </div>
             <div id="editor-empty">
               <div class="empty-title">pi-editor</div>
               <div class="empty-sub">

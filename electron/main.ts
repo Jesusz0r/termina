@@ -9,7 +9,7 @@
  */
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell } from "electron";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
@@ -46,8 +46,15 @@ export default function (pi: ExtensionAPI): void {
   pi.on("agent_settled", () => log({ t: "agent_settled" }));
   pi.on("tool_execution_start", async (event) => {
     if (!FILE_TOOLS.has(event.toolName)) return;
-    const path = (event.args as { path?: unknown } | undefined)?.path;
-    if (typeof path === "string" && path) log({ t: "tool", toolName: event.toolName, path });
+    const args = (event.args ?? {}) as { path?: unknown; edits?: unknown };
+    if (typeof args.path === "string" && args.path) {
+      log({
+        t: "tool",
+        toolName: event.toolName,
+        path: args.path,
+        edits: event.toolName === "edit" || event.toolName === "apply_patch" ? args.edits : undefined,
+      });
+    }
   });
 }
 `;
@@ -78,6 +85,8 @@ class PiTerminalInstance {
   shellName?: string;
   busy = false;
   modified = new Map<string, ModifiedFile>();
+  /** Pre-run content per path (Change Review): string = baseline, null = created. */
+  baselines = new Map<string, string | null>();
 
   constructor(id: string, cwd: string, type: "agent" | "shell", shellName: string | undefined, cmd: string, env: Record<string, string | undefined>, cols: number, rows: number) {
     this.id = id;
@@ -292,12 +301,15 @@ class PiEditorApp {
 
   // -------------------------------------------------------------- sidecar ---
 
-  private handleSidecarEvent(terminalId: string, event: { t: string; toolName?: string; path?: string }): void {
+  private handleSidecarEvent(terminalId: string, event: { t: string; toolName?: string; path?: string; edits?: unknown }): void {
     const inst = this.terminals.get(terminalId);
     if (!inst) return;
     switch (event.t) {
       case "agent_start":
         inst.busy = true;
+        // Baseline for Change Review: snapshot the watcher's content cache so
+        // diffs compare the run's start state against the current files.
+        inst.baselines = new Map(this.watcher?.lastContents ?? []);
         this.send("busy", { instanceId: inst.id, busy: true });
         this.sendInstances();
         break;
@@ -311,8 +323,22 @@ class PiEditorApp {
         const rawPath = String(event.path ?? "");
         const path = this.resolvePath(rawPath);
         if (!path || !this.withinProject(path)) return;
-        this.recordModified(inst, path, event.toolName === "write" ? this.classifyWrite(path) : "modified");
-        this.send("tool:target", { path, relPath: this.rel(path), toolName: event.toolName ?? "" });
+        const toolName = String(event.toolName ?? "");
+        // Capture the pre-run content for files the agent edits.
+        if (!inst.baselines.has(path)) {
+          if (toolName === "edit" || toolName === "apply_patch") {
+            const cached = this.watcher?.lastContents.get(path);
+            if (cached !== undefined) {
+              inst.baselines.set(path, cached);
+            } else {
+              inst.baselines.set(path, this.reconstructBaseline(path, event.edits));
+            }
+          } else {
+            inst.baselines.set(path, null); // write/create → treated as created
+          }
+        }
+        this.recordModified(inst, path, toolName === "write" ? this.classifyWrite(path) : "modified");
+        this.send("tool:target", { path, relPath: this.rel(path), toolName });
         break;
       }
     }
@@ -320,6 +346,28 @@ class PiEditorApp {
 
   private classifyWrite(path: string): "created" | "modified" {
     return existsSync(path) ? "modified" : "created";
+  }
+
+  /**
+   * Best-effort pre-edit baseline: read the file and undo the edit regions
+   * (oldText/newText from the tool call) in reverse order. Falls back to null
+   * (no baseline) when the file can't be read.
+   */
+  private reconstructBaseline(path: string, edits: unknown): string | null {
+    try {
+      const content = readFileSync(path, "utf8");
+      const list = Array.isArray(edits) ? (edits as Array<{ oldText?: string; newText?: string }>) : [];
+      let base = content;
+      for (let i = list.length - 1; i >= 0; i--) {
+        const oldText = list[i]?.oldText ?? "";
+        const newText = list[i]?.newText ?? "";
+        if (!oldText && !newText) continue;
+        base = base.split(newText).join(oldText);
+      }
+      return base;
+    } catch {
+      return null;
+    }
   }
 
   private recordModified(inst: PiTerminalInstance, absPath: string, status: "created" | "modified"): void {
@@ -488,6 +536,34 @@ class PiEditorApp {
     });
     ipcMain.handle("terminals:abort", (_e, id: string) => {
       this.terminals.get(id)?.pty.write("\x03");
+    });
+
+    // ---- Change Review ----
+    ipcMain.handle("review:baseline", (_e, terminalId: string, path: string) => {
+      const inst = this.terminals.get(terminalId);
+      const p = this.canonicalPath(path);
+      const b = inst?.baselines.get(p);
+      if (b === undefined) return { status: "modified", baseline: null }; // not captured
+      if (b === null) return { status: "created", baseline: null };
+      return { status: "modified", baseline: b };
+    });
+    ipcMain.handle("review:revert", async (_e, terminalId: string, path: string) => {
+      const inst = this.terminals.get(terminalId);
+      if (!inst) return { ok: false, error: "terminal not found" };
+      const p = this.canonicalPath(path);
+      const b = inst.baselines.get(p);
+      if (b === undefined) return { ok: false, error: "no baseline captured for this file" };
+      try {
+        if (b === null) {
+          await rm(p, { force: true }); // the agent created it → delete
+        } else {
+          await writeFile(p, b, "utf8");
+        }
+        inst.baselines.delete(p);
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
     });
 
     ipcMain.handle("file:open", (_e, absPath: string) => this.openFileInEditor(absPath));

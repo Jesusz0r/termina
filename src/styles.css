@@ -810,6 +810,85 @@ body {
   font-weight: 600;
 }
 
+/* ---- change review ---- */
+
+#review-container {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.review-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.review-filename {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.review-hint {
+  font-size: 11px;
+}
+
+.review-btn {
+  background: var(--bg-raised);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.review-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.review-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.review-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0d1117;
+  font-weight: 600;
+}
+
+.review-btn.danger {
+  color: var(--red);
+}
+
+#review-diff {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.review-mark {
+  font-size: 12px;
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+
+.review-mark.accepted {
+  color: var(--green);
+}
+
+.review-mark.reverted {
+  color: var(--yellow);
+}
+
 /* scrollbars */
 ::-webkit-scrollbar {
   width: 10px;

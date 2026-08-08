@@ -38,11 +38,33 @@ import { EditorManager } from "./editor";
 import "./styles.css";
 import "@xterm/xterm/css/xterm.css";
 import { PtyView } from "./pty-view";
+import { ReviewView } from "./review";
 import { Explorer } from "./components/explorer";
 import { toast } from "./components/modals";
 import type { ModifiedFile, InstanceSummary } from "../shared/types";
 
 const editorMgr = new EditorManager(document.getElementById("editor-container")!);
+const reviewView = new ReviewView();
+reviewView.bind({
+  onOpenFile: (path) => {
+    reviewView.hide();
+    void openFileSmart(path, false);
+  },
+  onAccepted: (path) => {
+    const pane = activeId ? panes.get(activeId) : undefined;
+    if (!pane) return;
+    pane.accepted.add(path);
+    pane.reverted.delete(path);
+    renderModified(pane);
+  },
+  onReverted: (path) => {
+    const pane = activeId ? panes.get(activeId) : undefined;
+    if (!pane) return;
+    pane.reverted.add(path);
+    pane.accepted.delete(path);
+    renderModified(pane);
+  },
+});
 const explorer = new Explorer(document.getElementById("explorer")!);
 const explorerEl = document.getElementById("explorer")!;
 explorer.bind({ onOpenFile: (path, preview) => void openFileSmart(path, preview ?? true) });
@@ -74,6 +96,8 @@ interface Pane {
   shellName: string | undefined;
   error: boolean;
   modified: ModifiedFile[];
+  accepted: Set<string>;
+  reverted: Set<string>;
 }
 
 const panes = new Map<string, Pane>();
@@ -127,6 +151,8 @@ function createPaneShell(instanceId: string): Pane {
     shellName: undefined,
     error: false,
     modified: [],
+    accepted: new Set(),
+    reverted: new Set(),
   };
   panes.set(instanceId, pane);
   pane.tabEl.prepend(typeEl);
@@ -222,6 +248,7 @@ function renderModified(pane: Pane): void {
   modifiedCount.textContent = pane.modified.length ? `(${pane.modified.length})` : "";
   modifiedList.replaceChildren();
   for (const f of pane.modified) {
+    void pane;
     const li = document.createElement("li");
     const badge = document.createElement("span");
     badge.className = `status-badge ${f.status}`;
@@ -231,7 +258,22 @@ function renderModified(pane: Pane): void {
     path.textContent = f.relPath;
     path.title = f.path;
     li.append(badge, path);
-    li.addEventListener("click", () => void openFileSmart(f.path, false));
+    li.addEventListener("click", () => {
+      // The modified list is the review surface: clicking opens the diff.
+      if (reviewView.isVisible) reviewView.hide();
+      void reviewView.show(activeId ?? "", f.path, f.relPath);
+    });
+    if (pane.accepted.has(f.path)) {
+      const mark = document.createElement("span");
+      mark.className = "review-mark accepted";
+      mark.textContent = "✓";
+      li.appendChild(mark);
+    } else if (pane.reverted.has(f.path)) {
+      const mark = document.createElement("span");
+      mark.className = "review-mark reverted";
+      mark.textContent = "↩";
+      li.appendChild(mark);
+    }
     modifiedList.appendChild(li);
   }
   modifiedPanel.classList.toggle("collapsed", pane.modified.length === 0);
