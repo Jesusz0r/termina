@@ -1099,17 +1099,23 @@ class PiEditorApp {
       // recent). A duplicate that lands after the run settled must not appear
       // as a fresh user edit.
       const cappedContent = change.content.length > 4000 ? change.content.slice(0, 4000) : change.content;
+      // macOS can deliver a duplicate fs event seconds late (under load). The
+      // window must outlive that delay, or the duplicate re-records an edit
+      // the run already consumed.
       const lastWatch = this.lastWatchChange.get(path);
-      const isDupWatch = lastWatch !== undefined && lastWatch.content === cappedContent && now - lastWatch.at < 2000;
+      const isDupWatch = lastWatch !== undefined && lastWatch.content === cappedContent && now - lastWatch.at < 5000;
       // Cap the stored content: the dedupe only compares equality within 2 s.
       this.lastWatchChange.set(path, { content: cappedContent, at: now });
       if (this.lastWatchChange.size > PiEditorApp.LAST_WATCH_MAX) {
         const oldest = this.lastWatchChange.keys().next().value;
         if (oldest !== undefined) this.lastWatchChange.delete(oldest);
       }
-      // A change with no busy agent terminal belongs to the user. The agent
-      // receives it on its next turn (see the edits-<id>.md context file).
-      if (!isDupWatch && ![...this.terminals.values()].some((t) => t.busy)) {
+      // A change with no busy agent terminal belongs to the user — unless a
+      // verify run is in flight: test outputs (snapshots, coverage,
+      // fixtures) are automated writes, not user edits. The agent receives
+      // user edits on its next turn (see the edits-<id>.md context file).
+      const agentBusy = [...this.terminals.values()].some((t) => t.busy);
+      if (!isDupWatch && !agentBusy && this.verifyRuns.size === 0) {
         this.recordUserEdit({ path, relPath, status: change.status, prev: change.prev, content: change.content, at: now });
       }
       // The watcher change event is the baseline authority for writes: it

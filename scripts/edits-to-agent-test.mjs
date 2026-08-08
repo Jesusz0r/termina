@@ -28,6 +28,12 @@ const check = (name, ok, detail = "") => {
 const eventsDir = "/tmp/pi-editor-events-test";
 const editsFile = join(eventsDir, "edits-term-1.md");
 const greeting = "/tmp/pi-editor-test-project/greeting.ts";
+// The fixture project gains a test script whose run writes a file (test
+// output). The write must NOT be recorded as a user edit.
+writeFileSync(
+  "/tmp/pi-editor-test-project/package.json",
+  JSON.stringify({ name: "edits-fixture", scripts: { test: "node -e \"require('fs').writeFileSync('from-test.txt','x');setTimeout(()=>{},5000)\"" } }),
+);
 
 const pages = await fetch("http://127.0.0.1:9222/json").then((r) => r.json());
 const page = pages.find((t) => t.type === "page");
@@ -89,8 +95,17 @@ const session = sessionFile ? readFileSync(sessionFile, "utf8") : "";
 check("session record contains the injected edits context", session.includes("Your edits") && session.includes("greeting.ts"), session.slice(0, 80));
 
 // ---- 3. the run consumed the context ----
-await sleep(400);
-check("context file cleared after the run", !existsSync(editsFile), "");
+// The clear happens at agent_start; the run can start a few seconds after
+// the prompt (model latency), so poll instead of sampling once.
+let cleared = false;
+for (let i = 0; i < 30; i++) {
+  await sleep(300);
+  if (!existsSync(editsFile)) {
+    cleared = true;
+    break;
+  }
+}
+check("context file cleared after the run", cleared, "");
 
 // ---- 4. a user edit during a busy run is not recorded ----
 // Mark the terminal busy deterministically with a synthetic agent_start
@@ -104,6 +119,16 @@ await sleep(1200); // watcher debounce + edit debounce + context write
 appendFileSync(sidecar, '{"t":"agent_settled"}\n');
 await sleep(600);
 check("mid-run user edit is not recorded", !existsSync(editsFile), "");
+
+// ---- 5. verify-run outputs are not user edits ----
+const run = await evalJs(`window.pi.runVerify('term-1')`);
+check("verify starts ok", run?.ok === true, JSON.stringify(run));
+await sleep(2500); // the worker writes from-test.txt mid-run
+await sleep(1200);
+const ctx5 = existsSync(editsFile) ? readFileSync(editsFile, "utf8") : "";
+check("verify-run outputs are not recorded as user edits", !ctx5.includes("from-test.txt"), ctx5.slice(0, 120));
+// Wait for the worker to finish so the fixture state is clean.
+await sleep(8000);
 
 const passed = results.filter(Boolean).length;
 console.log(`\n${passed}/${results.length} passed`);
