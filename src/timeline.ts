@@ -16,6 +16,7 @@ export class TimelineView {
   private replayIdx = 0;
 
   private onJump: (ev: TimelineEvent) => void = () => {};
+  private onNoSnapshot: (ev: TimelineEvent) => void = () => {};
 
   constructor(container: HTMLElement) {
     this.root = container;
@@ -28,8 +29,9 @@ export class TimelineView {
     });
   }
 
-  bind(handlers: { onJump: (ev: TimelineEvent) => void }): void {
+  bind(handlers: { onJump: (ev: TimelineEvent) => void; onNoSnapshot?: (ev: TimelineEvent) => void }): void {
     this.onJump = handlers.onJump;
+    if (handlers.onNoSnapshot) this.onNoSnapshot = handlers.onNoSnapshot;
   }
 
   setEvents(events: TimelineEvent[]): void {
@@ -67,8 +69,10 @@ export class TimelineView {
       if (ev.seq === this.activeSeq) dot.classList.add("active");
       this.dotsEl.appendChild(dot);
     }
-    // Keep the newest dot in view.
-    if (n > 0) this.dotsEl.scrollLeft = this.dotsEl.scrollWidth;
+    // Keep the newest dot in view — but only when the user is already near
+    // the end, so examining an old moment isn't yanked away by new events.
+    const nearEnd = this.dotsEl.scrollLeft + this.dotsEl.clientWidth >= this.dotsEl.scrollWidth - 24;
+    if (n > 0 && nearEnd) this.dotsEl.scrollLeft = this.dotsEl.scrollWidth;
   }
 
   private tooltip(ev: TimelineEvent): string {
@@ -89,7 +93,13 @@ export class TimelineView {
   jumpTo(ev: TimelineEvent): void {
     this.stopReplay();
     this.highlight(ev.seq);
-    if (ev.content !== undefined && ev.path) this.onJump(ev);
+    if (ev.content !== undefined && ev.path) {
+      this.onJump(ev);
+      return;
+    }
+    // Run markers (start/settled) are silent; content-less tool/change points
+    // (snapshot too large) explain themselves.
+    if (ev.t === "tool" || ev.t === "change") this.onNoSnapshot(ev);
   }
 
   toggleReplay(): void {

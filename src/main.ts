@@ -221,8 +221,11 @@ function renderTimeline(): void {
     void window.pi.getTimeline(pane.instanceId).then((events) => {
       const p = panes.get(pane.instanceId);
       if (!p) return;
-      p.timeline = events;
-      if (activeId === pane.instanceId) timelineView.setEvents(events);
+      // Events may have been pushed locally while the fetch was in flight —
+      // merge them in by seq (monotonic per terminal) instead of losing them.
+      const maxSeq = events.length ? Math.max(...events.map((e) => e.seq)) : 0;
+      p.timeline = events.concat(p.timeline.filter((e) => e.seq > maxSeq));
+      if (activeId === pane.instanceId) timelineView.setEvents(p.timeline);
     });
     return;
   }
@@ -236,6 +239,10 @@ timelineView.bind({
     const pane = activeId ? panes.get(activeId) : undefined;
     const label = `${new Date(ev.ts).toLocaleTimeString()} · ${ev.toolName ?? "on disk"}`;
     editorMgr.openSnapshot(pane?.instanceId ?? "", String(ev.seq), ev.relPath ?? ev.path ?? "", ev.content ?? "", label);
+  },
+  onNoSnapshot: (ev) => {
+    const what = ev.t === "change" ? "change" : ev.toolName ?? "event";
+    toast(`${what} ${ev.relPath ?? ev.path ?? ""} — snapshot too large to open`, "info");
   },
 });
 

@@ -514,9 +514,13 @@ class PiEditorApp {
         }
         this.recordModified(inst, path, toolName === "write" ? this.classifyWrite(path) : "modified");
         this.send("tool:target", { path, relPath: this.rel(path), toolName });
-        // Session Timeline: snapshot the file as of this tool call.
-        const snapshot = this.toolSnapshot(inst, path, toolName, event.edits);
-        this.pushTimeline(inst, { t: "tool", toolName, path, relPath: this.rel(path), content: snapshot?.content, status: snapshot?.status });
+        // Session Timeline: snapshot the file as of this tool call. The event
+        // object is created first so a delayed content fill can find it later.
+        const ev: Omit<TimelineEvent, "seq" | "ts"> = { t: "tool", toolName, path, relPath: this.rel(path) };
+        const snapshot = this.toolSnapshot(inst, path, toolName, event.edits, ev);
+        if (snapshot?.content !== undefined) ev.content = snapshot.content;
+        if (snapshot?.status) ev.status = snapshot.status;
+        this.pushTimeline(inst, ev);
         break;
       }
     }
@@ -527,34 +531,44 @@ class PiEditorApp {
    * - edit/apply_patch: apply the edit regions to the previously known content
    * - write/create_file: the watcher cache (the change event usually lands
    *   around the same poll; if not, a delayed fill attaches it later)
+   * The event object is passed so the delayed fill can locate it by reference
+   * even if newer events arrive in between.
    */
-  private toolSnapshot(inst: PiTerminalInstance, path: string, toolName: string, edits: unknown): { content?: string; status?: "created" | "modified" } {
+  private toolSnapshot(
+    inst: PiTerminalInstance,
+    path: string,
+    toolName: string,
+    edits: unknown,
+    ev: Omit<TimelineEvent, "seq" | "ts">,
+  ): { content?: string; status?: "created" | "modified" } {
     const status = toolName === "write" ? this.classifyWrite(path) : "modified";
+    // Dedupe with the imminent watcher change — set in EVERY branch so the
+    // write-without-cache path also claims the change event.
+    inst.lastToolPath = { path, at: Date.now() };
     if (toolName === "edit" || toolName === "apply_patch") {
       const base = inst.runSnapshots.get(path) ?? this.preRunContent(inst, path) ?? "";
       const content = this.applyEdits(base, edits);
       inst.runSnapshots.set(path, content);
-      inst.lastToolPath = { path, at: Date.now() };
       return content.length > MAX_SNAPSHOT_SIZE ? { status } : { content, status };
     }
     // write / create_file: prefer the watcher cache, else fill in shortly after.
     const cached = this.watcher?.lastContents.get(path);
     if (cached !== undefined) {
       inst.runSnapshots.set(path, cached);
-      inst.lastToolPath = { path, at: Date.now() };
       return cached.length > MAX_SNAPSHOT_SIZE ? { status } : { content: cached, status };
     }
-    // The write may not have landed in the watcher cache yet — retry shortly.
-    const at = Date.now();
+    // The write may not have landed in the watcher cache yet — retry shortly,
+    // addressing the event by reference (the tail may have moved on).
     setTimeout(() => {
       const fresh = this.watcher?.lastContents.get(path);
-      const last = inst.timeline.at(-1);
-      if (fresh !== undefined && last && last.t === "tool" && last.path === path && Math.abs((last.ts ?? 0) - at) < TOOL_CHANGE_DEDUP_MS) {
-        last.content = fresh.length > MAX_SNAPSHOT_SIZE ? undefined : fresh;
-        last.status = status;
-        inst.runSnapshots.set(path, fresh);
-        this.send("timeline:event", { terminalId: inst.id, event: last });
-      }
+      if (fresh === undefined) return;
+      const idx = inst.timeline.indexOf(ev as TimelineEvent);
+      if (idx === -1) return; // dropped by the cap or terminal gone
+      const target = inst.timeline[idx];
+      target.content = fresh.length > MAX_SNAPSHOT_SIZE ? undefined : fresh;
+      target.status = status;
+      inst.runSnapshots.set(path, fresh);
+      this.send("timeline:event", { terminalId: inst.id, event: target });
     }, 400);
     return { status };
   }
@@ -598,8 +612,11 @@ class PiEditorApp {
 
   /**
    * Best-effort pre-edit baseline: read the file and undo the edit regions
-   * (oldText/newText from the tool call) in reverse order. Falls back to null
-   * (no baseline) when the file can't be read.
+   * (oldText/newText from the tool call) in reverse order. Only edits that
+   * have ACTUALLY landed on disk are reversed — the sidecar event fires at
+   * tool start, and if the write hasn't happened yet the disk content IS the
+   * pre-run content (reversing it would double-reverse and corrupt the
+   * baseline). Falls back to null (no baseline) when the file can't be read.
    */
   private reconstructBaseline(path: string, edits: unknown): string | null {
     try {
@@ -610,6 +627,7 @@ class PiEditorApp {
         const oldText = list[i]?.oldText ?? "";
         const newText = list[i]?.newText ?? "";
         if (!oldText && !newText) continue;
+        if (newText && !base.includes(newText)) continue; // not landed yet — keep as-is
         base = base.split(newText).join(oldText);
       }
       return base;
@@ -682,23 +700,43 @@ class PiEditorApp {
     this.watcher.onChange = (change) => {
       const path = this.canonicalPath(change.path);
       const relPath = this.rel(path);
+      const now = Date.now();
+      // Attribute the change: the terminal whose recent tool event touched
+      // this path owns it (attach the authoritative disk content to its tool
+      // point — no extra dot). If nobody claims it (bash-driven or external),
+      // broadcast a change point to every busy terminal.
+      const owners: PiTerminalInstance[] = [];
+      const unowned: PiTerminalInstance[] = [];
       for (const inst of this.terminals.values()) {
         if (!inst.busy) continue;
-        this.recordModified(inst, path, change.status);
-        // Session Timeline: a watcher change while busy is a moment in time.
-        // Dedupe with the tool event that just caused it (same path, recent).
-        const dup =
-          inst.lastToolPath && inst.lastToolPath.path === path && Date.now() - inst.lastToolPath.at < TOOL_CHANGE_DEDUP_MS;
-        if (!dup) {
-          const content = change.content && change.content.length <= MAX_SNAPSHOT_SIZE ? change.content : undefined;
-          this.pushTimeline(inst, { t: "change", path, relPath, content, status: change.status });
-        } else if (this.contentSizeOk(change.content)) {
-          // Attach the authoritative disk content to the tool event.
+        const mine = inst.lastToolPath && inst.lastToolPath.path === path && now - inst.lastToolPath.at < TOOL_CHANGE_DEDUP_MS;
+        (mine ? owners : unowned).push(inst);
+      }
+      if (owners.length > 0) {
+        for (const inst of owners) {
+          this.recordModified(inst, path, change.status);
           const last = inst.timeline.at(-1);
-          if (last && last.t === "tool" && last.path === path) {
+          if (last && last.t === "tool" && last.path === path && this.contentSizeOk(change.content)) {
             last.content = change.content;
             inst.runSnapshots.set(path, change.content);
             this.send("timeline:event", { terminalId: inst.id, event: last });
+          }
+        }
+      } else {
+        for (const inst of unowned) {
+          this.recordModified(inst, path, change.status);
+          const content = this.contentSizeOk(change.content) ? change.content : undefined;
+          // Bash-driven changes are the ground truth for later edit math.
+          if (content !== undefined) inst.runSnapshots.set(path, content);
+          // Burst throttle: a build writing the same file repeatedly is one
+          // moment — refresh the last change point instead of adding dots.
+          const last = inst.timeline.at(-1);
+          if (last && last.t === "change" && last.path === path && now - (last.ts ?? 0) < 800) {
+            if (content !== undefined) last.content = content;
+            last.ts = now;
+            this.send("timeline:event", { terminalId: inst.id, event: last });
+          } else {
+            this.pushTimeline(inst, { t: "change", path, relPath, content, status: change.status });
           }
         }
       }
