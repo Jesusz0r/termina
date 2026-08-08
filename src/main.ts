@@ -203,7 +203,6 @@ function activatePane(instanceId: string): void {
     p.container.classList.toggle("active", p.instanceId === instanceId);
     p.tabEl.classList.toggle("active", p.instanceId === instanceId);
   }
-  (window as unknown as Record<string, unknown>).__piTerminal = pane.view.getTerminal();
   pane.view.fit();
   renderChrome();
   renderTimeline();

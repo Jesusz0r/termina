@@ -8,13 +8,11 @@ export interface ModifiedFile {
   status: "created" | "modified";
 }
 
-export type TerminalType = "agent" | "shell";
-
 export interface InstanceSummary {
   id: string;
   cwd: string;
   busy: boolean;
-  type: TerminalType;
+  type: "agent" | "shell";
   shellName?: string;
 }
 
@@ -76,7 +74,7 @@ export interface InstanceSummary {
   id: string;
   cwd: string;
   busy: boolean;
-  type: TerminalType;
+  type: "agent" | "shell";
   shellName?: string;
   /** True when this terminal is a verify worker running tests. */
   verifyWorker?: boolean;
@@ -124,7 +122,7 @@ export interface PiBridge {
   onInstances(cb: (list: InstanceSummary[]) => void): void;
 
   // terminals (agent = pi TUI, shell = a real shell like zsh)
-  createTerminal(opts?: { type?: TerminalType; shell?: string }): Promise<{ id?: string; error?: string }>;
+  createTerminal(opts?: { type?: "agent" | "shell"; shell?: string }): Promise<{ id?: string; error?: string }>;
   getShells(): Promise<{ name: string; path: string }[]>;
   getPiStatus(): Promise<{ available: boolean; bin: string; message?: string }>;
   closeTerminal(id: string): Promise<void>;
