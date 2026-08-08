@@ -73,7 +73,6 @@ const leftPane = document.getElementById("left-pane")!;
 const termTabsList = document.getElementById("terminal-tabs-list")!;
 const termContainer = document.getElementById("terminal-container")!;
 const btnNewTerminal = document.getElementById("btn-new-terminal") as HTMLButtonElement;
-const btnAbort = document.getElementById("btn-abort") as HTMLButtonElement;
 const btnVerify = document.getElementById("btn-verify") as HTMLButtonElement;
 const verifyBadge = document.getElementById("verify-badge")!;
 const statusCwd = document.getElementById("status-cwd")!;
@@ -241,7 +240,6 @@ function renderChrome(): void {
   if (!pane) {
     statusState.textContent = "no terminal";
     statusCwd.textContent = "";
-    btnAbort.disabled = true;
     btnVerify.disabled = true;
     verifyBadge.textContent = "";
     verifyBadge.hidden = true;
@@ -251,7 +249,6 @@ function renderChrome(): void {
   statusState.textContent = pane.busy ? "● agent working" : "idle";
   statusState.classList.toggle("busy", pane.busy);
   statusCwd.textContent = pane.cwd ?? "";
-  btnAbort.disabled = !pane.busy;
   renderVerify(pane);
   renderModified(pane);
 }
@@ -275,8 +272,17 @@ function renderVerify(pane: Pane): void {
   }
   verifyBadge.hidden = false;
   verifyBadge.className = `verify-badge state-${v.state}`;
-  verifyBadge.textContent =
-    v.state === "running" ? `⟳ verifying · ${v.command ?? ""}` : v.state === "pass" ? `✓ ${v.summary ?? "green"}` : v.state === "timeout" ? `⏰ ${v.summary ?? "timed out"}` : `✗ ${v.summary ?? "failing"}`;
+  verifyBadge.replaceChildren();
+  if (v.state === "running") {
+    // Loader: spinner + label, so it's obvious the run is in flight.
+    const spin = document.createElement("span");
+    spin.className = "verify-spinner";
+    verifyBadge.appendChild(spin);
+    verifyBadge.appendChild(document.createTextNode(` verifying · ${v.command ?? ""}`));
+  } else {
+    verifyBadge.textContent =
+      v.state === "pass" ? `✓ ${v.summary ?? "green"}` : v.state === "timeout" ? `⏰ ${v.summary ?? "timed out"}` : `✗ ${v.summary ?? "failing"}`;
+  }
   verifyBadge.title = v.command ?? "";
 }
 
@@ -389,9 +395,6 @@ btnNewTerminal.addEventListener("click", (e) => {
 });
 window.addEventListener("click", () => closeTerminalMenu());
 window.addEventListener("blur", () => closeTerminalMenu());
-btnAbort.addEventListener("click", () => {
-  if (activeId) void window.pi.abortTerminal(activeId);
-});
 btnVerify.addEventListener("click", () => {
   const id = activeId;
   if (!id) return;

@@ -694,15 +694,6 @@ body {
   cursor: pointer;
 }
 
-#btn-verify:hover:not(:disabled) {
-  background: rgba(0, 0, 0, 0.18);
-}
-
-#btn-verify:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
 #verify-badge {
   cursor: pointer;
   border-radius: 3px;
@@ -728,19 +719,35 @@ body {
   background: rgba(0, 0, 0, 0.22);
 }
 
-
-
-.statusbar-abort:hover:not(:disabled) {
-  background: rgba(0, 0, 0, 0.4);
+.verify-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid rgba(13, 17, 23, 0.3);
+  border-top-color: #0d1117;
+  border-radius: 50%;
+  animation: verify-spin 0.8s linear infinite;
+  vertical-align: -1px;
+  margin-right: 5px;
 }
 
-.statusbar-abort:disabled {
-  opacity: 0.35;
-  cursor: default;
+@keyframes verify-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 #status-state.busy {
   font-weight: 700;
+}
+
+.statusbar-verify:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.statusbar-verify:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 /* ------------------------------------------------------------------ modals */
