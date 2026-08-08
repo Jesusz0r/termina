@@ -237,7 +237,7 @@ modifiedPanel.querySelector(".panel-header")?.addEventListener("click", () => {
 // ---------------------------------------------------------------- layout ---
 
 type Layout = "terminal-left" | "terminal-right" | "terminal-top" | "terminal-bottom" | "terminal-fullscreen";
-const DEFAULT_LAYOUT: Layout = "terminal-fullscreen";
+const DEFAULT_LAYOUT: Layout = "terminal-left";
 const LAYOUT_KEY = "pi-editor.layout";
 const EXPLORER_KEY = "pi-editor.explorer";
 const MODIFIED_KEY = "pi-editor.modified";
@@ -461,7 +461,7 @@ function removeSplash(): void {
 setTimeout(removeSplash, 10000);
 
 async function boot(): Promise<void> {
-  // Restore layout + panel visibility preferences (default: TUI fullscreen).
+  // Restore layout + panel visibility preferences (default: terminal-left split).
   const layout = (localStorage.getItem(LAYOUT_KEY) as Layout | null) ?? DEFAULT_LAYOUT;
   applyLayout(layout);
   if (localStorage.getItem(EXPLORER_KEY) === "0") setExplorerVisible(false);
