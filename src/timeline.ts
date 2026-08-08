@@ -16,7 +16,7 @@ export class TimelineView {
   private replayTimer: ReturnType<typeof setInterval> | null = null;
   private replayIdx = 0;
 
-  private onJump: (ev: TimelineEvent) => void = () => {};
+  private onJump: (ev: TimelineEvent, opts?: { replay?: boolean }) => void = () => {};
 
   constructor(container: HTMLElement) {
     this.dotsEl = container.querySelector("#timeline-dots")!;
@@ -28,7 +28,7 @@ export class TimelineView {
     });
   }
 
-  bind(handlers: { onJump: (ev: TimelineEvent) => void }): void {
+  bind(handlers: { onJump: (ev: TimelineEvent, opts?: { replay?: boolean }) => void }): void {
     this.onJump = handlers.onJump;
   }
 
@@ -65,7 +65,17 @@ export class TimelineView {
   /** Highlight a dot (used while replaying). */
   private highlight(seq: number): void {
     this.activeSeq = seq;
-    for (const [s, el] of this.dots) el.classList.toggle("active", s === seq);
+    let activeEl: HTMLElement | null = null;
+    for (const [s, el] of this.dots) {
+      const on = s === seq;
+      el.classList.toggle("active", on);
+      if (on) activeEl = el;
+    }
+    // Center the active dot: replay steps beyond the visible strip width.
+    if (activeEl) {
+      const left = activeEl.offsetLeft - this.dotsEl.clientWidth / 2;
+      this.dotsEl.scrollLeft = Math.max(0, left);
+    }
   }
 
   private dotClass(ev: TimelineEvent): string {
@@ -138,7 +148,8 @@ export class TimelineView {
       }
       const ev = this.events[this.replayIdx++];
       this.highlight(ev.seq);
-      if (ev.content !== undefined && ev.path) this.onJump(ev);
+      // Fetch content on demand: the strip events carry none (lazy content).
+      if (ev.t === "tool" || ev.t === "change") this.onJump(ev, { replay: true });
     };
     step();
     this.replayTimer = setInterval(step, 650);

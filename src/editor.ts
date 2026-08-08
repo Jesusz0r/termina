@@ -229,12 +229,19 @@ export class EditorManager {
    * is namespaced so it never collides with the real file and watcher updates
    * never touch it.
    */
-  openSnapshot(terminalId: string, eventKey: string, relPath: string, content: string, label: string): void {
+  private lastTimelineKey: string | null = null;
+
+  openSnapshot(terminalId: string, eventKey: string, relPath: string, content: string, label: string, replay = false): void {
     const key = `timeline:${terminalId}:${eventKey}`;
+    const prevKey = this.lastTimelineKey;
+    // Replay shows one tab: close the previous snapshot tab. Clicks keep one
+    // tab per dot, so comparing moments stays easy.
+    if (replay && prevKey && prevKey !== key && this.tabs.has(prevKey)) this.closeTab(prevKey);
     const existing = this.tabs.get(key);
     if (existing) {
       existing.model.setValue(content);
       this.activate(key);
+      this.lastTimelineKey = key;
       return;
     }
     if (this.previewKey && this.tabs.has(this.previewKey)) this.closeTab(this.previewKey);
@@ -247,6 +254,7 @@ export class EditorManager {
     this.renderTabs();
     this.syncEmptyState();
     this.activate(key);
+    this.lastTimelineKey = key;
     // The test suites read the snapshot from the model, not the DOM render.
     (window as unknown as Record<string, unknown>).__timelineTab = { key, content };
   }

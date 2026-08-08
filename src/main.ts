@@ -242,7 +242,7 @@ function renderTimeline(): void {
 }
 
 timelineView.bind({
-  onJump: async (ev) => {
+  onJump: async (ev, opts) => {
     // Reveal the editor (a snapshot tab) without leaving fullscreen perma-hidden.
     if (splitEl.classList.contains("layout-terminal-fullscreen")) applyLayout("terminal-left");
     const pane = activeId ? panes.get(activeId) : undefined;
@@ -261,7 +261,7 @@ timelineView.bind({
       return;
     }
     const label = `${new Date(res.ts ?? ev.ts).toLocaleTimeString()} · ${res.toolName ?? ev.toolName ?? "on disk"}`;
-    editorMgr.openSnapshot(pane.instanceId, String(ev.seq), res.relPath ?? res.path ?? "", res.content ?? "", label);
+    editorMgr.openSnapshot(pane.instanceId, String(ev.seq), res.relPath ?? res.path ?? "", res.content ?? "", label, opts?.replay ?? false);
   },
 });
 
