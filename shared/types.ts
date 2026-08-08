@@ -45,6 +45,20 @@ export interface BusyPayload {
   busy: boolean;
 }
 
+/** One point on the Session Timeline (the "time machine" strip). */
+export interface TimelineEvent {
+  seq: number;
+  t: "agent_start" | "agent_settled" | "tool" | "change";
+  ts: number;
+  toolName?: string;
+  /** Canonical absolute path (tool/change events). */
+  path?: string;
+  relPath?: string;
+  /** File content snapshot right after this event (capped; may be absent). */
+  content?: string;
+  status?: "created" | "modified";
+}
+
 export type VerifyState = "untested" | "running" | "pass" | "fail" | "timeout";
 
 /** Verify & Iterate: the last test run attached to a terminal. */
@@ -104,6 +118,7 @@ export interface PiBridge {
   onFileDeleted(cb: (p: FileDeletedPayload) => void): void;
   onModifiedList(cb: (p: ModifiedListPayload) => void): void;
   onBusy(cb: (p: BusyPayload) => void): void;
+  onTimelineEvent(cb: (p: { terminalId: string; event: TimelineEvent }) => void): void;
   onVerifyState(cb: (p: { terminalId: string; verify: VerifyInfo }) => void): void;
   onFolderOpened(cb: (e: { cwd: string }) => void): void;
   onInstances(cb: (list: InstanceSummary[]) => void): void;
@@ -121,6 +136,9 @@ export interface PiBridge {
   // Verify & Iterate
   detectTest(): Promise<{ command: string; label: string } | null>;
   runVerify(terminalId: string): Promise<{ ok: boolean; error?: string }>;
+
+  // Session Timeline
+  getTimeline(terminalId: string): Promise<TimelineEvent[]>;
   reviewBaseline(terminalId: string, path: string): Promise<{ status: "created" | "modified"; baseline: string | null }>;
   reviewRevert(terminalId: string, path: string): Promise<{ ok: boolean; error?: string }>;
 

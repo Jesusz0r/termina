@@ -491,6 +491,107 @@ body {
   background: var(--bg-panel);
 }
 
+/* -------------------------------------------------------- timeline strip */
+
+#timeline-strip {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+  padding: 4px 8px 6px;
+  user-select: none;
+}
+
+.timeline-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.timeline-header .muted {
+  color: var(--text-muted);
+  opacity: 0.7;
+  text-transform: none;
+}
+
+#btn-timeline-play {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+#btn-timeline-play:hover,
+#btn-timeline-play.playing {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+#timeline-dots {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 2px 0;
+}
+
+#timeline-dots::-webkit-scrollbar {
+  display: none;
+}
+
+.timeline-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  cursor: pointer;
+  transition: transform 0.1s ease;
+  background: var(--text-muted);
+}
+
+.timeline-dot:hover {
+  transform: scale(1.5);
+}
+
+.timeline-dot.active {
+  outline: 2px solid rgba(255, 255, 255, 0.85);
+  outline-offset: 1px;
+}
+
+.timeline-dot.t-agent_start {
+  background: #4ade80;
+}
+
+.timeline-dot.t-agent_settled {
+  background: #9ca3af;
+}
+
+.timeline-dot.tool-write,
+.timeline-dot.tool-create_file {
+  background: #60a5fa;
+}
+
+.timeline-dot.tool-edit,
+.timeline-dot.tool-apply_patch {
+  background: #fbbf24;
+}
+
+.timeline-dot.tool-insert {
+  background: #c084fc;
+}
+
+.timeline-dot.t-change {
+  background: #c084fc;
+}
+
 /* -------------------------------------------------------- modified panel */
 
 #modified-panel {

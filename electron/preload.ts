@@ -13,6 +13,7 @@ import type {
   InstanceSummary,
   ExplorerEntry,
   VerifyInfo,
+  TimelineEvent,
 } from "../shared/types.js";
 
 const bridge: PiBridge = {
@@ -44,6 +45,9 @@ const bridge: PiBridge = {
   onVerifyState: (cb) => {
     ipcRenderer.on("verify:state", (_e, p: { terminalId: string; verify: VerifyInfo }) => cb(p));
   },
+  onTimelineEvent: (cb) => {
+    ipcRenderer.on("timeline:event", (_e, p: { terminalId: string; event: TimelineEvent }) => cb(p));
+  },
   onFolderOpened: (cb) => {
     ipcRenderer.on("folder:opened", (_e, e: { cwd: string }) => cb(e));
   },
@@ -62,6 +66,7 @@ const bridge: PiBridge = {
   abortTerminal: (id) => ipcRenderer.invoke("terminals:abort", id),
   detectTest: () => ipcRenderer.invoke("verify:detect"),
   runVerify: (terminalId) => ipcRenderer.invoke("verify:run", terminalId),
+  getTimeline: (terminalId) => ipcRenderer.invoke("timeline:get", terminalId),
   reviewBaseline: (terminalId, path) => ipcRenderer.invoke("review:baseline", terminalId, path),
   reviewRevert: (terminalId, path) => ipcRenderer.invoke("review:revert", terminalId, path),
 

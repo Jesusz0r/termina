@@ -44,18 +44,13 @@ workflow — *what did you change, and do I want it?*
 | Auto-feedback | The result (status + tail of output) is written to a context file the bridge extension injects on the agent's next turn via `before_agent_start` → the agent fixes failures itself (verified in the session record) |
 | Loop state | Badge on the status bar: running / ✗ failing / ✓ green / ⏰ timed out (10 min watchdog); clicking it jumps to the worker terminal |
 
-### 3. Session Timeline ("time machine")
-
-The session JSONL is an ordered record of every action.
+### 3. Session Timeline ("time machine") ✅ implemented
 
 | Capability | Detail |
 |---|---|
-| Scrubbable timeline | Every tool call with a timestamp, rendered as a strip beside the terminal |
-| Jump to any moment | Snapshots of file contents taken on each write event; clicking a point restores that version in the editor |
-| Replay | Step through the run to understand *why* a decision was made |
-
-**Why it matters:** the wow feature — "show me what `src/auth.ts`
-looked like mid-refactor".
+| Scrubbable timeline | A strip under the terminal: every agent action is a colored dot (green = run start, blue = write, amber = edit, purple = disk change, gray = settled) with tooltips |
+| Jump to any moment | Clicking a dot opens the file as it looked at that moment in a read-only snapshot tab (snapshots come from the tool's edit regions, or the watcher cache for writes/bash changes) |
+| Replay | ▶ steps through the run every 650ms, opening each snapshot — watch the code evolve like a movie |
 
 ### 4. Plan Board
 

@@ -17,10 +17,23 @@ import { fileURLToPath } from "node:url";
 import { PtyTerminal } from "./pty-terminal.js";
 import { SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
-import type { ExplorerEntry, InstanceSummary, ModifiedFile, VerifyInfo, VerifyState } from "../shared/types.js";
+import type {
+  ExplorerEntry,
+  InstanceSummary,
+  ModifiedFile,
+  TimelineEvent,
+  VerifyInfo,
+  VerifyState,
+} from "../shared/types.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MAX_OPEN_FILE_SIZE = 2 * 1024 * 1024;
+/** Timeline snapshots bigger than this are dropped (dot stays, no content). */
+const MAX_SNAPSHOT_SIZE = 100_000;
+/** Cap the per-terminal timeline so memory stays bounded. */
+const MAX_TIMELINE_EVENTS = 400;
+/** A watcher change within this window after a tool event is the same action. */
+const TOOL_CHANGE_DEDUP_MS = 1500;
 const FILE_TOOLS = new Set(["write", "edit", "apply_patch", "create_file", "insert"]);
 const BRIDGE_EXTENSION = `
 /**
@@ -100,6 +113,13 @@ class PiTerminalInstance {
   baselines = new Map<string, string | null>();
   /** Verify & Iterate: last test run attached to this terminal. */
   verify: VerifyInfo = { state: "untested", command: null, summary: null };
+  /** Session Timeline: ordered points with file snapshots. */
+  timeline: TimelineEvent[] = [];
+  /** Per-path content as of the last snapshot in this run (for edit math). */
+  runSnapshots = new Map<string, string>();
+  /** Last tool event per path (dedupe with watcher changes). */
+  lastToolPath: { path: string; at: number } | null = null;
+  timelineSeq = 0;
 
   constructor(
     id: string,
@@ -458,11 +478,15 @@ class PiEditorApp {
         // Baseline for Change Review: snapshot the watcher's content cache so
         // diffs compare the run's start state against the current files.
         inst.baselines = new Map(this.watcher?.lastContents ?? []);
+        inst.runSnapshots = new Map();
+        inst.lastToolPath = null;
+        this.pushTimeline(inst, { t: "agent_start" });
         this.send("busy", { instanceId: inst.id, busy: true });
         this.sendInstances();
         break;
       case "agent_settled":
         inst.busy = false;
+        this.pushTimeline(inst, { t: "agent_settled" });
         this.send("busy", { instanceId: inst.id, busy: false });
         this.send("modified:list", { instanceId: inst.id, files: [...inst.modified.values()] });
         this.sendInstances();
@@ -490,9 +514,82 @@ class PiEditorApp {
         }
         this.recordModified(inst, path, toolName === "write" ? this.classifyWrite(path) : "modified");
         this.send("tool:target", { path, relPath: this.rel(path), toolName });
+        // Session Timeline: snapshot the file as of this tool call.
+        const snapshot = this.toolSnapshot(inst, path, toolName, event.edits);
+        this.pushTimeline(inst, { t: "tool", toolName, path, relPath: this.rel(path), content: snapshot?.content, status: snapshot?.status });
         break;
       }
     }
+  }
+
+  /**
+   * Compute the file's content right after a tool call:
+   * - edit/apply_patch: apply the edit regions to the previously known content
+   * - write/create_file: the watcher cache (the change event usually lands
+   *   around the same poll; if not, a delayed fill attaches it later)
+   */
+  private toolSnapshot(inst: PiTerminalInstance, path: string, toolName: string, edits: unknown): { content?: string; status?: "created" | "modified" } {
+    const status = toolName === "write" ? this.classifyWrite(path) : "modified";
+    if (toolName === "edit" || toolName === "apply_patch") {
+      const base = inst.runSnapshots.get(path) ?? this.preRunContent(inst, path) ?? "";
+      const content = this.applyEdits(base, edits);
+      inst.runSnapshots.set(path, content);
+      inst.lastToolPath = { path, at: Date.now() };
+      return content.length > MAX_SNAPSHOT_SIZE ? { status } : { content, status };
+    }
+    // write / create_file: prefer the watcher cache, else fill in shortly after.
+    const cached = this.watcher?.lastContents.get(path);
+    if (cached !== undefined) {
+      inst.runSnapshots.set(path, cached);
+      inst.lastToolPath = { path, at: Date.now() };
+      return cached.length > MAX_SNAPSHOT_SIZE ? { status } : { content: cached, status };
+    }
+    // The write may not have landed in the watcher cache yet — retry shortly.
+    const at = Date.now();
+    setTimeout(() => {
+      const fresh = this.watcher?.lastContents.get(path);
+      const last = inst.timeline.at(-1);
+      if (fresh !== undefined && last && last.t === "tool" && last.path === path && Math.abs((last.ts ?? 0) - at) < TOOL_CHANGE_DEDUP_MS) {
+        last.content = fresh.length > MAX_SNAPSHOT_SIZE ? undefined : fresh;
+        last.status = status;
+        inst.runSnapshots.set(path, fresh);
+        this.send("timeline:event", { terminalId: inst.id, event: last });
+      }
+    }, 400);
+    return { status };
+  }
+
+  /** Content of a path before this run's first touch (baseline or cache). */
+  private preRunContent(inst: PiTerminalInstance, path: string): string | null | undefined {
+    const b = inst.baselines.get(path);
+    if (b !== undefined) return b;
+    return this.watcher?.lastContents.get(path);
+  }
+
+  /** Apply edit regions forward (first occurrence, matching the edit tool). */
+  private applyEdits(base: string, edits: unknown): string {
+    let out = base;
+    const list = Array.isArray(edits) ? (edits as Array<{ oldText?: string; newText?: string }>) : [];
+    for (const e of list) {
+      const oldText = e.oldText ?? "";
+      if (!oldText) continue;
+      const idx = out.indexOf(oldText);
+      if (idx === -1) continue;
+      out = out.slice(0, idx) + (e.newText ?? "") + out.slice(idx + oldText.length);
+    }
+    return out;
+  }
+
+  /** Append a timeline point, keep the cap, push to the renderer. */
+  private pushTimeline(inst: PiTerminalInstance, ev: Omit<TimelineEvent, "seq" | "ts">): void {
+    const event: TimelineEvent = { seq: ++inst.timelineSeq, ...ev, ts: Date.now() };
+    inst.timeline.push(event);
+    if (inst.timeline.length > MAX_TIMELINE_EVENTS) inst.timeline.splice(0, inst.timeline.length - MAX_TIMELINE_EVENTS);
+    this.send("timeline:event", { terminalId: inst.id, event });
+  }
+
+  private contentSizeOk(content: string | undefined): boolean {
+    return content !== undefined && content.length <= MAX_SNAPSHOT_SIZE;
   }
 
   private classifyWrite(path: string): "created" | "modified" {
@@ -572,10 +669,28 @@ class PiEditorApp {
     this.watcher = new ProjectWatcher(cwd, (p) => this.canonicalPath(p));
     this.watcher.onChange = (change) => {
       const path = this.canonicalPath(change.path);
+      const relPath = this.rel(path);
       for (const inst of this.terminals.values()) {
-        if (inst.busy) this.recordModified(inst, path, change.status);
+        if (!inst.busy) continue;
+        this.recordModified(inst, path, change.status);
+        // Session Timeline: a watcher change while busy is a moment in time.
+        // Dedupe with the tool event that just caused it (same path, recent).
+        const dup =
+          inst.lastToolPath && inst.lastToolPath.path === path && Date.now() - inst.lastToolPath.at < TOOL_CHANGE_DEDUP_MS;
+        if (!dup) {
+          const content = change.content && change.content.length <= MAX_SNAPSHOT_SIZE ? change.content : undefined;
+          this.pushTimeline(inst, { t: "change", path, relPath, content, status: change.status });
+        } else if (this.contentSizeOk(change.content)) {
+          // Attach the authoritative disk content to the tool event.
+          const last = inst.timeline.at(-1);
+          if (last && last.t === "tool" && last.path === path) {
+            last.content = change.content;
+            inst.runSnapshots.set(path, change.content);
+            this.send("timeline:event", { terminalId: inst.id, event: last });
+          }
+        }
       }
-      this.send("file:changed", { ...change, path, relPath: this.rel(path) });
+      this.send("file:changed", { ...change, path, relPath });
     };
     this.watcher.onFileTouched = (path, status) => {
       for (const inst of this.terminals.values()) {
@@ -696,6 +811,9 @@ class PiEditorApp {
     // ---- Verify & Iterate ----
     ipcMain.handle("verify:detect", () => this.detectTestCommand(this.terminalCwd()));
     ipcMain.handle("verify:run", (_e, terminalId: string) => this.runVerify(terminalId));
+
+    // ---- Session Timeline ----
+    ipcMain.handle("timeline:get", (_e, terminalId: string) => this.terminals.get(terminalId)?.timeline ?? []);
 
     // ---- Change Review ----
     ipcMain.handle("review:baseline", (_e, terminalId: string, path: string) => {

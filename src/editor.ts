@@ -46,7 +46,11 @@ export class EditorManager {
     });
 
     this.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => void this.saveActive());
-    this.editor.onDidChangeModel(() => this.syncEmptyState());
+    this.editor.onDidChangeModel(() => {
+      this.syncEmptyState();
+      // Timeline snapshots are read-only views of the past.
+      this.editor.updateOptions({ readOnly: this.isTimelineActive() });
+    });
     this.syncEmptyState();
   }
 
@@ -205,7 +209,7 @@ export class EditorManager {
   }
 
   private async saveActive(): Promise<void> {
-    if (!this.activeKey) return;
+    if (!this.activeKey || this.activeKey.startsWith("timeline:")) return;
     const tab = this.tabs.get(this.activeKey);
     if (!tab) return;
     const res = await window.pi.saveFile(tab.key, tab.model.getValue());
@@ -217,6 +221,37 @@ export class EditorManager {
   /** Close a tab if it is open (e.g. the file was deleted on disk). */
   closeIfOpen(path: string): void {
     if (this.tabs.has(path)) this.closeTab(path);
+  }
+
+  /**
+   * Session Timeline: open a read-only tab showing a file snapshot taken at
+   * a past moment (the content lives in the event, not on disk). The tab key
+   * is namespaced so it never collides with the real file and watcher updates
+   * never touch it.
+   */
+  openSnapshot(terminalId: string, eventKey: string, relPath: string, content: string, label: string): void {
+    const key = `timeline:${terminalId}:${eventKey}`;
+    const existing = this.tabs.get(key);
+    if (existing) {
+      existing.model.setValue(content);
+      this.activate(key);
+      return;
+    }
+    if (this.previewKey && this.tabs.has(this.previewKey)) this.closeTab(this.previewKey);
+    const model = monaco.editor.createModel(content, languageForPath(relPath), monaco.Uri.parse(`timeline://${terminalId}/${encodeURIComponent(eventKey)}`));
+    const tab = this.makeTab(key, model);
+    tab.dom.classList.add("timeline-tab");
+    tab.dom.title = `${relPath} — ${label}`;
+    this.tabs.set(key, tab);
+    this.order.push(key);
+    this.renderTabs();
+    this.syncEmptyState();
+    this.activate(key);
+  }
+
+  /** True when the active model is a timeline snapshot (read-only view). */
+  isTimelineActive(): boolean {
+    return this.activeKey !== null && this.activeKey.startsWith("timeline:");
   }
 
   dispose(): void {

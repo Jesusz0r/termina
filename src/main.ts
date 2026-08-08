@@ -39,9 +39,10 @@ import "./styles.css";
 import "@xterm/xterm/css/xterm.css";
 import { PtyView } from "./pty-view";
 import { ReviewView } from "./review";
+import { TimelineView } from "./timeline";
 import { Explorer } from "./components/explorer";
 import { toast } from "./components/modals";
-import type { ModifiedFile, InstanceSummary, VerifyInfo } from "../shared/types";
+import type { ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent } from "../shared/types";
 
 const editorMgr = new EditorManager(document.getElementById("editor-container")!);
 const reviewView = new ReviewView();
@@ -81,6 +82,7 @@ const modifiedList = document.getElementById("modified-list")!;
 const modifiedPanel = document.getElementById("modified-panel")!;
 const modifiedCount = document.getElementById("modified-count")!;
 const btnClearModified = document.getElementById("btn-clear-modified") as HTMLButtonElement;
+const timelineView = new TimelineView(document.getElementById("timeline-strip")!);
 
 // ---------------------------------------------------------------- panes -----
 
@@ -101,6 +103,8 @@ interface Pane {
   reverted: Set<string>;
   verify: VerifyInfo;
   verifyWorker: boolean;
+  timeline: TimelineEvent[];
+  timelineLoaded: boolean;
 }
 
 const panes = new Map<string, Pane>();
@@ -158,6 +162,8 @@ function createPaneShell(instanceId: string): Pane {
     reverted: new Set(),
     verify: { state: "untested", command: null, summary: null },
     verifyWorker: false,
+    timeline: [],
+    timelineLoaded: false,
   };
   panes.set(instanceId, pane);
   pane.tabEl.prepend(typeEl);
@@ -200,7 +206,38 @@ function activatePane(instanceId: string): void {
   (window as unknown as Record<string, unknown>).__piTerminal = pane.view.getTerminal();
   pane.view.fit();
   renderChrome();
+  renderTimeline();
 }
+
+/** Session Timeline: show the active pane's points, fetch once per pane. */
+function renderTimeline(): void {
+  const pane = activeId ? panes.get(activeId) : undefined;
+  if (!pane) {
+    timelineView.setEvents([]);
+    return;
+  }
+  if (!pane.timelineLoaded) {
+    pane.timelineLoaded = true;
+    void window.pi.getTimeline(pane.instanceId).then((events) => {
+      const p = panes.get(pane.instanceId);
+      if (!p) return;
+      p.timeline = events;
+      if (activeId === pane.instanceId) timelineView.setEvents(events);
+    });
+    return;
+  }
+  timelineView.setEvents(pane.timeline);
+}
+
+timelineView.bind({
+  onJump: (ev) => {
+    // Reveal the editor (a snapshot tab) without leaving fullscreen perma-hidden.
+    if (splitEl.classList.contains("layout-terminal-fullscreen")) applyLayout("terminal-left");
+    const pane = activeId ? panes.get(activeId) : undefined;
+    const label = `${new Date(ev.ts).toLocaleTimeString()} · ${ev.toolName ?? "on disk"}`;
+    editorMgr.openSnapshot(pane?.instanceId ?? "", String(ev.seq), ev.relPath ?? ev.path ?? "", ev.content ?? "", label);
+  },
+});
 
 async function closePane(instanceId: string): Promise<void> {
   const pane = panes.get(instanceId);
@@ -609,6 +646,13 @@ window.pi.onVerifyState(({ terminalId, verify }) => {
     // Run finished → return focus to the owner so the result badge is visible.
     activatePane(terminalId);
   }
+});
+
+window.pi.onTimelineEvent(({ terminalId, event }) => {
+  const pane = panes.get(terminalId);
+  if (!pane) return;
+  pane.timeline.push(event);
+  if (activeId === terminalId) timelineView.push(event);
 });
 
 window.pi.onToolTarget((p) => {
