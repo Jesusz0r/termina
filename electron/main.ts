@@ -147,7 +147,7 @@ class PiEditorApp {
   private terminals = new Map<string, PiTerminalInstance>();
   private watcher: ProjectWatcher | null = null;
   private projectCwd: string | null = null;
-  private eventsDir = join(app.getPath("temp"), "pi-editor-events");
+  private eventsDir = process.env.PI_EDITOR_EVENTS_DIR ?? join(app.getPath("temp"), "pi-editor-events");
   private tailer = new SidecarTailer(this.eventsDir);
   private paintWatchdog: ReturnType<typeof setInterval> | null = null;
   /** In-flight verify runs: owner terminal id → worker id. */

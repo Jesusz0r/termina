@@ -130,6 +130,9 @@ The renderer never talks to the agent. It only renders what main pushes.
   the second one fail on stale state.
 - The events directory persists across app launches. A fresh instance
   tails from the current file size, so it never replays phantom history.
+- `PI_EDITOR_EVENTS_DIR` overrides the events directory. Use it for
+  deterministic tests; do NOT set it to an empty string — the bridge
+  extension then refuses to log anything.
 - Test pollution persists on disk. Reset the fixture after a suite that
   modifies it, or the next suite fails on stale state.
 - Renderer state is lost on reload. The modified list and the timeline
