@@ -162,6 +162,11 @@ The renderer never talks to the agent. It only renders what main pushes.
   `pi-editor.modified`.
 - The bridge extension is installed when a folder opens. A template change
   in main.ts requires a fresh folder open to reach the project.
+- The app sanitizes the env for pi processes: host session variables
+  (PI_SESSION_FILE, PI_MODEL, PI_CODING_AGENT, ...) make the TUI crash or
+  hang at startup. Do not remove the sanitization.
+- pi --version runs a flaky update check (measured up to 8 s). The check is
+  async on purpose; do not make it synchronous again.
 - The paint watchdog reloads the window when it stays blank. A reload
   rebuilds renderer state from pushes.
 - The pty package has no synchronous open. Give the app time to boot

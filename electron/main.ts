@@ -551,15 +551,19 @@ class PiEditorApp {
 
   /** Record a change the user made. Keep the FIRST prev so the context file
    *  shows the net change, not the last step. A later prev replaces an
-   *  undefined one (the first change of a file has no cached prev). */
+   *  undefined one (the first change of a file has no cached prev). The
+   *  stored content is capped: the context file never shows more than 4 KB. */
   private recordUserEdit(edit: UserEdit): void {
-    const existing = this.userEdits.get(edit.path);
+    // Keep prev undefined when absent: an empty string would render an empty
+    // "before" block instead of no block at all.
+    const capped = { ...edit, prev: edit.prev === undefined ? undefined : this.snippet(edit.prev), content: this.snippet(edit.content) };
+    const existing = this.userEdits.get(capped.path);
     if (existing) {
-      if (existing.prev === undefined && edit.prev !== undefined) existing.prev = edit.prev;
-      existing.content = edit.content;
-      existing.at = edit.at;
+      if (existing.prev === undefined && capped.prev !== undefined) existing.prev = capped.prev;
+      existing.content = capped.content;
+      existing.at = capped.at;
     } else {
-      this.userEdits.set(edit.path, edit);
+      this.userEdits.set(capped.path, capped);
       if (this.userEdits.size > PiEditorApp.USER_EDITS_MAX) {
         // Evict the oldest known edit (map order is insertion order).
         const oldest = this.userEdits.keys().next().value;
@@ -942,9 +946,11 @@ class PiEditorApp {
       // Dedupe duplicate fs events for the same physical write (same content,
       // recent). A duplicate that lands after the run settled must not appear
       // as a fresh user edit.
+      const cappedContent = change.content.length > 4000 ? change.content.slice(0, 4000) : change.content;
       const lastWatch = this.lastWatchChange.get(path);
-      const isDupWatch = lastWatch !== undefined && lastWatch.content === change.content && now - lastWatch.at < 2000;
-      this.lastWatchChange.set(path, { content: change.content, at: now });
+      const isDupWatch = lastWatch !== undefined && lastWatch.content === cappedContent && now - lastWatch.at < 2000;
+      // Cap the stored content: the dedupe only compares equality within 2 s.
+      this.lastWatchChange.set(path, { content: cappedContent, at: now });
       if (this.lastWatchChange.size > PiEditorApp.LAST_WATCH_MAX) {
         const oldest = this.lastWatchChange.keys().next().value;
         if (oldest !== undefined) this.lastWatchChange.delete(oldest);
