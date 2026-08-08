@@ -43,6 +43,20 @@ export interface BusyPayload {
   busy: boolean;
 }
 
+/** One task on the Plan Board (parsed from the agent's plan message). */
+export interface PlanTask {
+  /** The task line text. */
+  text: string;
+  /** File paths mentioned in the task (relative to the project). */
+  paths: string[];
+  state: "pending" | "active" | "done";
+}
+
+export interface PlanPayload {
+  instanceId: string;
+  tasks: PlanTask[];
+}
+
 /** One point on the Session Timeline (the "time machine" strip). */
 export interface TimelineEvent {
   seq: number;
@@ -116,6 +130,7 @@ export interface PiBridge {
   onFileDeleted(cb: (p: FileDeletedPayload) => void): void;
   onModifiedList(cb: (p: ModifiedListPayload) => void): void;
   onBusy(cb: (p: BusyPayload) => void): void;
+  onPlanUpdate(cb: (p: PlanPayload) => void): void;
   onTimelineEvent(cb: (p: { terminalId: string; event: TimelineEvent }) => void): void;
   onVerifyState(cb: (p: { terminalId: string; verify: VerifyInfo }) => void): void;
   onFolderOpened(cb: (e: { cwd: string }) => void): void;

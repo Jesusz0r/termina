@@ -52,15 +52,13 @@ workflow — *what did you change, and do I want it?*
 | Jump to any moment | Clicking a dot opens the file as it looked at that moment in a read-only snapshot tab (snapshots come from the tool's edit regions, or the watcher cache for writes/bash changes) |
 | Replay | ▶ steps through the run every 650ms, opening each snapshot — watch the code evolve like a movie |
 
-### 4. Plan Board
+### 4. Plan Board ✅ implemented
 
 | Capability | Detail |
 |---|---|
-| Plan → checklist | Parse the agent's plan (markdown) and render it as tasks beside the editor |
-| Live progress | Tool events map to tasks and tick them off automatically |
-| Click to jump | A task links to the file/region it touches |
-
-**Why it matters:** plans stop being prose and become a progress UI.
+| Plan → checklist | The bridge extension captures the first assistant message of a run that contains a task list (bullet or numbered lines; text parts of the message content) and logs it to the sidecar. Main parses the lines into tasks (max 20) and extracts the file paths they mention |
+| Live progress | Tool events mark tasks "active" when they touch a mentioned path; when the run settles, a task is "done" if every path it mentions was touched (○ pending / ◐ active / ✓ done) |
+| Click to jump | Clicking a task opens its first mentioned file in the editor (preview) |
 
 ### 5. Your edits reach the agent ✅ implemented
 

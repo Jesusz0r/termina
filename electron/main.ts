@@ -57,8 +57,33 @@ export default function (pi: ExtensionAPI): void {
       appendFileSync(join(dir, id + ".jsonl"), JSON.stringify(event) + "\\n");
     } catch {}
   };
-  pi.on("agent_start", () => log({ t: "agent_start" }));
+  let planLogged = false;
+  pi.on("agent_start", () => {
+    planLogged = false;
+    log({ t: "agent_start" });
+  });
   pi.on("agent_settled", () => log({ t: "agent_settled" }));
+  // Plan Board: capture the first assistant message of a run that contains
+  // a task list (bullet or numbered lines).
+  pi.on("message_end", (event) => {
+    if (planLogged) return;
+    const message = (event as { message?: { role?: string; content?: unknown } }).message;
+    if (message?.role !== "assistant") return;
+    // Message content is an array of parts (thinking, text) or a plain string.
+    let text = "";
+    const content = message.content;
+    if (typeof content === "string") {
+      text = content;
+    } else if (Array.isArray(content)) {
+      text = content
+        .map((part) => (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : ""))
+        .join("\\n");
+    }
+    if (!text.trim()) return;
+    if (!/^\\s*(?:[-*]|\\d+[.)])\\s/m.test(text)) return;
+    planLogged = true;
+    log({ t: "plan", text: text.slice(0, 4000) });
+  });
   // Feed the latest context files (test results, user edits) into the
   // agent's next turn.
   pi.on("before_agent_start", async () => {
@@ -125,6 +150,13 @@ interface UserEdit {
   at: number;
 }
 
+/** One task on the Plan Board. */
+interface PlanTask {
+  text: string;
+  paths: string[];
+  state: "pending" | "active" | "done";
+}
+
 function detectShells(): { name: string; path: string }[] {
   const candidates: Array<[string, string]> = [
     ["zsh", "/bin/zsh"],
@@ -153,6 +185,10 @@ class PiTerminalInstance {
   baselines = new Map<string, string | null>();
   /** Verify & Iterate: last test run attached to this terminal. */
   verify: VerifyInfo = { state: "untested", command: null, summary: null };
+  /** Plan Board: the tasks of the current run. */
+  plan: PlanTask[] = [];
+  /** Paths this run touched, relative to the project (for task progress). */
+  touched = new Set<string>();
   /** Session Timeline: ordered points with file snapshots. */
   timeline: TimelineEvent[] = [];
   /** Per-path content as of the last snapshot in this run (for edit math). */
@@ -547,6 +583,66 @@ class PiEditorApp {
     }
   }
 
+  // ------------------------------------------------------------ plan board --
+
+  /** Send the current plan to the renderer. */
+  private sendPlan(inst: PiTerminalInstance): void {
+    this.send("plan:update", { instanceId: inst.id, tasks: inst.plan });
+  }
+
+  /** Parse markdown task lines from the plan text. At most 20 tasks. */
+  private parsePlanTasks(text: string): PlanTask[] {
+    const tasks: PlanTask[] = [];
+    for (const raw of text.split("\n")) {
+      const line = raw.trim();
+      const match = line.match(/^(?:[-*]|\d+[.)])\s+(?:\[[ xX]\]\s+)?(.+)$/);
+      if (!match) continue;
+      const body = match[1].trim();
+      if (!body) continue;
+      const paths: string[] = [];
+      for (const token of body.split(/\s+/)) {
+        const clean = token.replace(/[`.,;:!?)"']+$/g, "").replace(/^[`("']+/g, "");
+        if (this.looksLikePath(clean)) paths.push(clean);
+      }
+      tasks.push({ text: body, paths: [...new Set(paths)].slice(0, 5), state: "pending" });
+      if (tasks.length >= 20) break;
+    }
+    return tasks;
+  }
+
+  /** A token is a file path when it has a slash or a code extension. */
+  private looksLikePath(token: string): boolean {
+    if (!token || token.length > 200) return false;
+    return token.includes("/") || /\.[a-zA-Z0-9]{1,5}$/.test(token);
+  }
+
+  /** A tool touched a path: mark every task that mentions it as active. */
+  private updatePlanProgress(inst: PiTerminalInstance, path: string): void {
+    if (inst.plan.length === 0) return;
+    const rel = this.rel(path);
+    let changed = false;
+    for (const task of inst.plan) {
+      if (task.state === "done") continue;
+      const matched = task.paths.some((p) => rel === p || rel.endsWith("/" + p));
+      if (matched && task.state !== "active") {
+        task.state = "active";
+        changed = true;
+      }
+    }
+    if (changed) this.sendPlan(inst);
+  }
+
+  /** The run ended: a task is done when every path it mentions was touched. */
+  private finalizePlan(inst: PiTerminalInstance): void {
+    if (inst.plan.length === 0) return;
+    for (const task of inst.plan) {
+      if (task.paths.length > 0 && task.paths.every((p) => inst.touched.has(p))) {
+        task.state = "done";
+      }
+    }
+    this.sendPlan(inst);
+  }
+
   // --------------------------------------------------------- user edits ----
 
   /** Record a change the user made. Keep the FIRST prev so the context file
@@ -689,6 +785,10 @@ class PiEditorApp {
         // The run consumes the user-edits context (the extension already read
         // it in before_agent_start). Clear it so the next run stays fresh.
         this.clearUserEdits();
+        // The old run's plan is stale until the new plan message arrives.
+        inst.plan = [];
+        inst.touched = new Set();
+        this.sendPlan(inst);
         // Baseline for Change Review: snapshot the watcher's content cache so
         // diffs compare the run's start state against the current files.
         inst.baselines = new Map(this.watcher?.lastContents ?? []);
@@ -700,11 +800,19 @@ class PiEditorApp {
         break;
       case "agent_settled":
         inst.busy = false;
+        this.finalizePlan(inst);
         this.pushTimeline(inst, { t: "agent_settled" });
         this.send("busy", { instanceId: inst.id, busy: false });
         this.send("modified:list", { instanceId: inst.id, files: [...inst.modified.values()] });
         this.sendInstances();
         break;
+      case "plan": {
+        const text = String(event.text ?? "");
+        inst.plan = this.parsePlanTasks(text);
+        inst.touched = new Set();
+        this.sendPlan(inst);
+        break;
+      }
       case "tool": {
         const rawPath = String(event.path ?? "");
         const path = this.resolvePath(rawPath);
@@ -730,6 +838,8 @@ class PiEditorApp {
           }
         }
         this.recordModified(inst, path, toolName === "write" ? this.classifyWrite(path) : "modified");
+        inst.touched.add(this.rel(path));
+        this.updatePlanProgress(inst, path);
         this.send("tool:target", { path, relPath: this.rel(path), toolName });
         // Session Timeline: snapshot the file as of this tool call. The event
         // object is created first so a delayed content fill can find it later.
@@ -916,6 +1026,8 @@ class PiEditorApp {
       inst.modified = new Map();
       inst.lastToolPath = null;
       inst.verify = { state: "untested", command: null, summary: null };
+      inst.plan = [];
+      inst.touched = new Set();
     }
     this.clearUserEdits();
     this.sendInstances();

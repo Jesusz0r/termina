@@ -14,6 +14,7 @@ import type {
   ExplorerEntry,
   VerifyInfo,
   TimelineEvent,
+  PlanPayload,
 } from "../shared/types.js";
 
 const bridge: PiBridge = {
@@ -41,6 +42,9 @@ const bridge: PiBridge = {
   },
   onBusy: (cb) => {
     ipcRenderer.on("busy", (_e, p: BusyPayload) => cb(p));
+  },
+  onPlanUpdate: (cb) => {
+    ipcRenderer.on("plan:update", (_e, p: PlanPayload) => cb(p));
   },
   onVerifyState: (cb) => {
     ipcRenderer.on("verify:state", (_e, p: { terminalId: string; verify: VerifyInfo }) => cb(p));

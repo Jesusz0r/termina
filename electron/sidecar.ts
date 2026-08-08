@@ -8,11 +8,13 @@ import { closeSync, openSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 export interface SidecarEvent {
-  t: "agent_start" | "agent_settled" | "tool";
+  t: "agent_start" | "agent_settled" | "tool" | "plan";
   toolName?: string;
   path?: string;
   /** The edit regions of edit/apply_patch tool calls (for baselines). */
   edits?: Array<{ oldText?: string; newText?: string }>;
+  /** The plan text (the first assistant message of a run). */
+  text?: string;
 }
 
 export class SidecarTailer {

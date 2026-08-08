@@ -41,7 +41,7 @@ import { ReviewView } from "./review";
 import { TimelineView } from "./timeline";
 import { Explorer } from "./components/explorer";
 import { toast } from "./components/modals";
-import type { ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent } from "../shared/types";
+import type { ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, PlanTask } from "../shared/types";
 
 const editorMgr = new EditorManager(document.getElementById("editor-container")!);
 const reviewView = new ReviewView();
@@ -81,6 +81,9 @@ const modifiedList = document.getElementById("modified-list")!;
 const modifiedPanel = document.getElementById("modified-panel")!;
 const modifiedCount = document.getElementById("modified-count")!;
 const btnClearModified = document.getElementById("btn-clear-modified") as HTMLButtonElement;
+const planPanel = document.getElementById("plan-panel")!;
+const planList = document.getElementById("plan-list")!;
+const planCount = document.getElementById("plan-count")!;
 const timelineView = new TimelineView(document.getElementById("timeline-strip")!);
 (window as unknown as Record<string, unknown>).__timelineView = timelineView;
 
@@ -105,6 +108,7 @@ interface Pane {
   verifyWorker: boolean;
   timeline: TimelineEvent[];
   timelineLoaded: boolean;
+  plan: PlanTask[];
 }
 
 const panes = new Map<string, Pane>();
@@ -164,6 +168,7 @@ function createPaneShell(instanceId: string): Pane {
     verifyWorker: false,
     timeline: [],
     timelineLoaded: false,
+    plan: [],
   };
   panes.set(instanceId, pane);
   pane.tabEl.prepend(typeEl);
@@ -296,6 +301,8 @@ function renderChrome(): void {
     btnVerify.disabled = true;
     verifyBadge.textContent = "";
     verifyBadge.hidden = true;
+    planList.replaceChildren();
+    planPanel.classList.add("collapsed");
     modifiedList.replaceChildren();
     return;
   }
@@ -303,7 +310,31 @@ function renderChrome(): void {
   statusState.classList.toggle("busy", pane.busy);
   statusCwd.textContent = pane.cwd ?? "";
   renderVerify(pane);
+  renderPlan(pane);
   renderModified(pane);
+}
+
+/** Plan Board: the current run's tasks with live progress. */
+function renderPlan(pane: Pane): void {
+  planCount.textContent = pane.plan.length ? `(${pane.plan.length})` : "";
+  planList.replaceChildren();
+  for (const task of pane.plan) {
+    const li = document.createElement("li");
+    li.className = `plan-task state-${task.state}`;
+    const mark = document.createElement("span");
+    mark.className = "plan-mark";
+    mark.textContent = task.state === "done" ? "✓" : task.state === "active" ? "◐" : "○";
+    const text = document.createElement("span");
+    text.className = "plan-text";
+    text.textContent = task.text;
+    li.append(mark, text);
+    if (task.paths.length > 0) {
+      li.title = task.paths.join(", ");
+      li.addEventListener("click", () => void openFileSmart(task.paths[0], true));
+    }
+    planList.appendChild(li);
+  }
+  planPanel.classList.toggle("collapsed", pane.plan.length === 0);
 }
 
 /** Verify & Iterate: badge + button for the active terminal. */
@@ -484,6 +515,9 @@ btnClearModified.addEventListener("click", (e) => {
 });
 modifiedPanel.querySelector(".panel-header")?.addEventListener("click", () => {
   modifiedPanel.classList.toggle("collapsed");
+});
+planPanel.querySelector(".panel-header")?.addEventListener("click", () => {
+  planPanel.classList.toggle("collapsed");
 });
 
 // ---------------------------------------------------------------- layout ---
@@ -684,6 +718,13 @@ window.pi.onTimelineEvent(({ terminalId, event }) => {
   if (idx === -1) pane.timeline.push(event);
   else pane.timeline[idx] = event;
   if (activeId === terminalId) timelineView.push(event);
+});
+
+window.pi.onPlanUpdate(({ instanceId, tasks }) => {
+  const pane = panes.get(instanceId);
+  if (!pane) return;
+  pane.plan = tasks;
+  if (activeId === instanceId) renderPlan(pane);
 });
 
 window.pi.onToolTarget((p) => {
