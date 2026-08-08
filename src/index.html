@@ -7,8 +7,63 @@
       content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; img-src 'self' data:; connect-src 'self' ws: http://localhost:*"
     />
     <title>pi-editor</title>
+    <style>
+      /* Critical first-paint styles: prevents the unstyled flash before
+         vite injects the real stylesheet. */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #1e1e1e;
+        color: #d4d4d4;
+      }
+      #splash {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        background: #1e1e1e;
+        color: #d4d4d4;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      }
+      #splash .logo {
+        font-size: 26px;
+        font-weight: 300;
+        letter-spacing: 0.04em;
+      }
+      #splash .pulse {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #4fc1ff;
+        animation: splash-pulse 1.2s ease-in-out infinite;
+      }
+      @keyframes splash-pulse {
+        0%,
+        100% {
+          opacity: 0.3;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
+      #splash .hint {
+        font-size: 12px;
+        color: #8a8a8a;
+      }
+    </style>
   </head>
   <body>
+    <div id="splash">
+      <div class="logo">pi-editor</div>
+      <div class="pulse"></div>
+      <div class="hint">starting pi…</div>
+    </div>
     <div id="app">
       <main id="main">
         <div id="explorer">

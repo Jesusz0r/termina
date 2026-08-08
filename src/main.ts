@@ -127,6 +127,7 @@ function createPaneShell(instanceId: string): Pane {
 function activatePane(instanceId: string): void {
   const pane = panes.get(instanceId);
   if (!pane) return;
+  removeSplash();
   activeId = instanceId;
   for (const p of panes.values()) {
     p.container.classList.toggle("active", p.instanceId === instanceId);
@@ -426,6 +427,13 @@ window.pi.onInstances((list: InstanceSummary[]) => {
 });
 
 // ---------------------------------------------------------------- startup --
+
+function removeSplash(): void {
+  document.getElementById("splash")?.remove();
+}
+
+// Safety: never trap the user on the splash if the terminal never appears.
+setTimeout(removeSplash, 10000);
 
 async function boot(): Promise<void> {
   // Restore layout + panel visibility preferences.
