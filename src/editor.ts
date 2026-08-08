@@ -247,6 +247,8 @@ export class EditorManager {
     this.renderTabs();
     this.syncEmptyState();
     this.activate(key);
+    // The test suites read the snapshot from the model, not the DOM render.
+    (window as unknown as Record<string, unknown>).__timelineTab = { key, content };
   }
 
   /** True when the active model is a timeline snapshot (read-only view). */

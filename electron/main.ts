@@ -8,8 +8,8 @@
  * of files mid-run and the modified-files panel.
  */
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme } from "electron";
-import { spawnSync } from "node:child_process";
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
@@ -59,15 +59,19 @@ export default function (pi: ExtensionAPI): void {
   };
   pi.on("agent_start", () => log({ t: "agent_start" }));
   pi.on("agent_settled", () => log({ t: "agent_settled" }));
-  // Verify & Iterate: feed the latest test result into the agent's next turn.
+  // Feed the latest context files (test results, user edits) into the
+  // agent's next turn.
   pi.on("before_agent_start", async () => {
-    let verify: string | null = null;
-    try {
-      verify = readFileSync(join(dir, \`verify-\${id}.md\`), "utf8");
-    } catch {}
-    if (!verify) return;
+    let context = "";
+    for (const name of [\`verify-\${id}.md\`, \`edits-\${id}.md\`]) {
+      try {
+        const text = readFileSync(join(dir, name), "utf8");
+        if (text) context += (context ? "\\n\\n---\\n\\n" : "") + text;
+      } catch {}
+    }
+    if (!context) return;
     return {
-      message: { customType: "pi-editor-verify", content: verify, display: false },
+      message: { customType: "pi-editor-context", content: context, display: false },
     };
   });
   pi.on("tool_execution_start", async (event) => {
@@ -86,6 +90,40 @@ export default function (pi: ExtensionAPI): void {
 `;
 
 let terminalSeq = 0;
+
+/**
+ * Host agent session variables. The app's pi TUI must start clean — a pinned
+ * session file or model makes the TUI crash or hang at startup.
+ */
+const AGENT_ENV_BLOCKLIST = new Set([
+  "PI_SESSION_FILE",
+  "PI_SESSION_ID",
+  "PI_MODEL",
+  "PI_PROVIDER",
+  "PI_REASONING_LEVEL",
+  "PI_CODING_AGENT",
+]);
+
+/** The environment for a pi process: the host env minus session pins. */
+function cleanEnv(): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!AGENT_ENV_BLOCKLIST.has(key)) env[key] = value;
+  }
+  return env;
+}
+
+/** A file the user changed while no agent terminal was busy. */
+interface UserEdit {
+  path: string;
+  relPath: string;
+  status: "created" | "modified";
+  /** The content before the first user change. */
+  prev?: string;
+  /** The latest content. */
+  content: string;
+  at: number;
+}
 
 function detectShells(): { name: string; path: string }[] {
   const candidates: Array<[string, string]> = [
@@ -154,6 +192,19 @@ class PiEditorApp {
   private verifyRuns = new Map<string, string>();
   /** Worker terminal ids (kept after the run so tabs can be labeled). */
   private verifyWorkers = new Set<string>();
+  /**
+   * Files the user changed while no agent terminal was busy. The agent
+   * receives them on its next turn. It adapts instead of overwriting them.
+   */
+  private userEdits = new Map<string, UserEdit>();
+  private userEditsWriteTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly USER_EDITS_MAX = 50;
+  /**
+   * The last watcher change per path. A single physical write can produce
+   * several fs events; the duplicates must not count as fresh user edits.
+   */
+  private lastWatchChange = new Map<string, { content: string; at: number }>();
+  private static readonly LAST_WATCH_MAX = 500;
 
   // ---------------------------------------------------------------- window --
 
@@ -266,41 +317,56 @@ class PiEditorApp {
   /**
    * Whether the pi binary exists and runs. Success is cached; a FAILURE is
    * only trusted for a few seconds — a transient spawn error must not brick
-   * the app for its whole lifetime. Falls back to scanning PATH for a
-   * matching executable when plain resolution fails.
+   * the app for its whole lifetime. Async: the check can take seconds (pi's
+   * CLI runs an update check) and must not block the main process.
    */
-  private checkPiAvailable(): boolean {
+  private async checkPiAvailable(): Promise<boolean> {
     const now = Date.now();
     if (this.piAvailable === true) return true;
     if (this.piAvailable === false && now - this.piCheckedAt < 5000) return false;
     this.piCheckedAt = now;
     const bin = this.resolvePiBin();
-    try {
-      const r = spawnSync(bin, ["--version"], { stdio: "ignore", timeout: 5000 });
-      if (r.error === undefined && r.status === 0) {
-        this.piAvailable = true;
-        return true;
-      }
-      if (r.error) console.warn(`[main] pi check failed: ${(r.error as NodeJS.ErrnoException).code ?? "?"} ${r.error.message ?? ""}`);
-      else console.warn(`[main] pi check failed: exit ${r.status}`);
-    } catch (err) {
-      console.warn(`[main] pi check threw: ${(err as Error).message}`);
+    if (await this.spawnPiVersionCheck(bin)) {
+      this.piAvailable = true;
+      return true;
     }
-    // Fallback: manual PATH scan (spawnSync can miss it when PATH is odd).
+    // Fallback: manual PATH scan (spawn can miss it when PATH is odd).
     const found = this.findOnPath(bin);
-    if (found && found !== bin) {
-      try {
-        const r = spawnSync(found, ["--version"], { stdio: "ignore", timeout: 5000 });
-        if (r.error === undefined && r.status === 0) {
-          this.piAvailable = true;
-          return true;
-        }
-      } catch {
-        /* keep false */
-      }
+    if (found && found !== bin && (await this.spawnPiVersionCheck(found))) {
+      this.piAvailable = true;
+      return true;
     }
     this.piAvailable = false;
     return false;
+  }
+
+  /** Run `bin --version` without blocking. True when it exits with code 0. */
+  private spawnPiVersionCheck(bin: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      let child: ReturnType<typeof spawn> | null = null;
+      try {
+        child = spawn(bin, ["--version"], { stdio: "ignore", env: cleanEnv() });
+      } catch (err) {
+        console.warn(`[main] pi check threw: ${(err as Error).message}`);
+        resolve(false);
+        return;
+      }
+      // The CLI runs an update check that can stall for many seconds.
+      const timer = setTimeout(() => {
+        child?.kill();
+        console.warn("[main] pi check timed out after 15 s");
+        resolve(false);
+      }, 15000);
+      child.on("error", (err) => {
+        clearTimeout(timer);
+        console.warn(`[main] pi check failed: ${(err as NodeJS.ErrnoException).code ?? "?"} ${err.message}`);
+        resolve(false);
+      });
+      child.on("exit", (code) => {
+        clearTimeout(timer);
+        resolve(code === 0);
+      });
+    });
   }
 
   private findOnPath(name: string): string | null {
@@ -331,7 +397,7 @@ class PiEditorApp {
 
   private async createTerminal(cwd?: string, opts?: { type?: "agent" | "shell"; shell?: string }): Promise<PiTerminalInstance> {
     const type = opts?.type ?? "agent";
-    if (type === "agent" && !this.checkPiAvailable()) {
+    if (type === "agent" && !(await this.checkPiAvailable())) {
       throw new Error(this.piMissingMessage());
     }
     const id = `term-${++terminalSeq}`;
@@ -346,7 +412,7 @@ class PiEditorApp {
       env = { ...process.env };
     } else {
       cmd = this.resolvePiBin();
-      env = { ...process.env, PI_EDITOR_TERMINAL_ID: id, PI_EDITOR_EVENTS_DIR: this.eventsDir };
+      env = { ...cleanEnv(), PI_EDITOR_TERMINAL_ID: id, PI_EDITOR_EVENTS_DIR: this.eventsDir };
     }
     const inst = new PiTerminalInstance(id, cwd ?? this.terminalCwd(), type, shellName, cmd, [], env, 80, 24);
     this.terminals.set(inst.id, inst);
@@ -481,6 +547,100 @@ class PiEditorApp {
     }
   }
 
+  // --------------------------------------------------------- user edits ----
+
+  /** Record a change the user made. Keep the FIRST prev so the context file
+   *  shows the net change, not the last step. A later prev replaces an
+   *  undefined one (the first change of a file has no cached prev). */
+  private recordUserEdit(edit: UserEdit): void {
+    const existing = this.userEdits.get(edit.path);
+    if (existing) {
+      if (existing.prev === undefined && edit.prev !== undefined) existing.prev = edit.prev;
+      existing.content = edit.content;
+      existing.at = edit.at;
+    } else {
+      this.userEdits.set(edit.path, edit);
+      if (this.userEdits.size > PiEditorApp.USER_EDITS_MAX) {
+        // Evict the oldest known edit (map order is insertion order).
+        const oldest = this.userEdits.keys().next().value;
+        if (oldest !== undefined) this.userEdits.delete(oldest);
+      }
+    }
+    this.scheduleUserEditsWrite();
+  }
+
+  /** Debounce the context write so a burst of edits writes once. */
+  private scheduleUserEditsWrite(): void {
+    if (this.userEditsWriteTimer) clearTimeout(this.userEditsWriteTimer);
+    this.userEditsWriteTimer = setTimeout(() => {
+      this.userEditsWriteTimer = null;
+      this.writeUserEditsContext();
+    }, 300);
+  }
+
+  /** Write the edits context file for every agent terminal. */
+  private writeUserEditsContext(): void {
+    if (this.userEdits.size === 0) return;
+    try {
+      mkdirSync(this.eventsDir, { recursive: true });
+    } catch {
+      return;
+    }
+    const md = this.buildUserEditsMarkdown();
+    for (const inst of this.terminals.values()) {
+      if (inst.type !== "agent") continue;
+      try {
+        writeFileSync(join(this.eventsDir, `edits-${inst.id}.md`), md, "utf8");
+      } catch (err) {
+        console.warn(`[main] could not write edits context: ${(err as Error).message}`);
+      }
+    }
+  }
+
+  /** Build the context markdown: one section per file with before/after. */
+  private buildUserEditsMarkdown(): string {
+    const out: string[] = [];
+    out.push("## Your edits");
+    out.push("");
+    out.push("You changed these files after the last agent run. Read them before you change them.");
+    for (const edit of this.userEdits.values()) {
+      out.push("");
+      out.push(`- \`${edit.relPath}\` (${edit.status})`);
+      if (edit.status === "modified" && edit.prev !== undefined) {
+        out.push("", "  before:", "  ```text");
+        for (const line of this.snippet(edit.prev).split("\n")) out.push("  " + line);
+        out.push("  ```");
+      }
+      out.push("", "  after:", "  ```text");
+      for (const line of this.snippet(edit.content).split("\n")) out.push("  " + line);
+      out.push("  ```");
+    }
+    return out.join("\n");
+  }
+
+  /** Cap the snippet: 30 lines and 4000 chars keep the context file small. */
+  private snippet(content: string): string {
+    const out = content.split("\n").slice(0, 30).join("\n");
+    return out.length > 4000 ? out.slice(0, 4000) + "\n…" : out;
+  }
+
+  /** The run consumes the edits context. Clear it and the files. */
+  private clearUserEdits(): void {
+    this.userEdits.clear();
+    if (this.userEditsWriteTimer) {
+      clearTimeout(this.userEditsWriteTimer);
+      this.userEditsWriteTimer = null;
+    }
+    for (const inst of this.terminals.values()) {
+      if (inst.type !== "agent") continue;
+      try {
+        rmSync(join(this.eventsDir, `edits-${inst.id}.md`), { force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
   private closeTerminal(id: string): void {
     const inst = this.terminals.get(id);
     if (!inst) return;
@@ -522,6 +682,9 @@ class PiEditorApp {
     switch (event.t) {
       case "agent_start":
         inst.busy = true;
+        // The run consumes the user-edits context (the extension already read
+        // it in before_agent_start). Clear it so the next run stays fresh.
+        this.clearUserEdits();
         // Baseline for Change Review: snapshot the watcher's content cache so
         // diffs compare the run's start state against the current files.
         inst.baselines = new Map(this.watcher?.lastContents ?? []);
@@ -750,6 +913,7 @@ class PiEditorApp {
       inst.lastToolPath = null;
       inst.verify = { state: "untested", command: null, summary: null };
     }
+    this.clearUserEdits();
     this.sendInstances();
     this.send("folder:opened", { cwd });
     return { cwd };
@@ -775,6 +939,21 @@ class PiEditorApp {
       const path = this.canonicalPath(change.path);
       const relPath = this.rel(path);
       const now = Date.now();
+      // Dedupe duplicate fs events for the same physical write (same content,
+      // recent). A duplicate that lands after the run settled must not appear
+      // as a fresh user edit.
+      const lastWatch = this.lastWatchChange.get(path);
+      const isDupWatch = lastWatch !== undefined && lastWatch.content === change.content && now - lastWatch.at < 2000;
+      this.lastWatchChange.set(path, { content: change.content, at: now });
+      if (this.lastWatchChange.size > PiEditorApp.LAST_WATCH_MAX) {
+        const oldest = this.lastWatchChange.keys().next().value;
+        if (oldest !== undefined) this.lastWatchChange.delete(oldest);
+      }
+      // A change with no busy agent terminal belongs to the user. The agent
+      // receives it on its next turn (see the edits-<id>.md context file).
+      if (!isDupWatch && ![...this.terminals.values()].some((t) => t.busy)) {
+        this.recordUserEdit({ path, relPath, status: change.status, prev: change.prev, content: change.content, at: now });
+      }
       // The watcher change event is the baseline authority for writes: it
       // carries the pre-change content, captured atomically before the cache
       // update. This is correct no matter which poll (sidecar vs watcher)
@@ -925,8 +1104,8 @@ class PiEditorApp {
       }
     });
     ipcMain.handle("terminals:shells", () => detectShells());
-    ipcMain.handle("app:pi-status", () => {
-      const available = this.checkPiAvailable();
+    ipcMain.handle("app:pi-status", async () => {
+      const available = await this.checkPiAvailable();
       return { available, bin: this.resolvePiBin(), message: available ? undefined : this.piMissingMessage() };
     });
     ipcMain.handle("terminals:close", (_e, id: string) => this.closeTerminal(id));
@@ -1066,7 +1245,18 @@ class PiEditorApp {
       this.installBridgeExtension(this.projectCwd);
       this.startWatcher(this.projectCwd);
     }
-    await this.createTerminal();
+    // Create the agent terminal. A transient pi failure (slow start, update
+    // check) must not kill the app: retry with backoff. The renderer shows
+    // the friendly install message when every attempt fails.
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await this.createTerminal();
+        break;
+      } catch (err) {
+        console.warn(`[main] terminal creation failed (attempt ${attempt}/3): ${(err as Error).message}`);
+        if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 4000));
+      }
+    }
   }
 
   dispose(): void {

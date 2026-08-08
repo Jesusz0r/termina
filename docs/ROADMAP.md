@@ -62,16 +62,14 @@ workflow — *what did you change, and do I want it?*
 
 **Why it matters:** plans stop being prose and become a progress UI.
 
-### 5. Your edits reach the agent
+### 5. Your edits reach the agent ✅ implemented
 
 | Capability | Detail |
 |---|---|
-| Edit → context | When you save a file while the agent is idle, the app writes your diff into a context file |
-| Bridge injection | The bridge extension feeds it into the agent's next turn |
-| Ownership | Files you mark "mine" are surfaced to the agent as off-limits (or as context) |
-
-**Why it matters:** the agent *knows* you changed `config.ts` and adapts
-instead of overwriting it.
+| Edit → context | A file change with no busy agent terminal belongs to the user. Main records it (first prev + latest content) and writes an `edits-<id>.md` context file with before/after snippets (30 lines / 4 KB caps, 50 files max) |
+| Bridge injection | `before_agent_start` merges the edits file with the verify file into one injected session message (display: false) |
+| Run consumption | The run clears the context at `agent_start`, so the next run never sees stale edits. Mid-run user changes stay out (busy gate + duplicate-fs-event dedupe) |
+| Ownership | Not implemented — "mark files as mine" remains a possible follow-up (the roadmap lists it as "or as context") |
 
 ### 6. Dispatch (parallel agents)
 

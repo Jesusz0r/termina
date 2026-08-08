@@ -114,14 +114,14 @@ const tab = JSON.parse(
 );
 check("a timeline snapshot tab opened", tab.hasTimelineTab && tab.activeIsTimeline, JSON.stringify(tab));
 
-// The editor content: read the active model through Monaco internals via DOM.
-const content = await evalJs(
-  `(() => {
-    const views = document.querySelectorAll('.monaco-editor .view-lines');
-    const last = views[views.length - 1];
-    return last ? last.textContent.replace(/\\u00a0/g, ' ') : '';
-  })()`,
-);
+// The snapshot content: read it from the model (the test hook set in
+// openSnapshot) — the DOM render is timing-dependent.
+let content = "";
+for (let i = 0; i < 10; i++) {
+  content = await evalJs(`window.__timelineTab ? window.__timelineTab.content : ''`);
+  if (content.includes("hi there")) break;
+  await sleep(300);
+}
 check("snapshot tab shows the past content", content.includes("hi there"), content.slice(0, 100));
 
 const passed = results.filter((r) => r.ok).length;

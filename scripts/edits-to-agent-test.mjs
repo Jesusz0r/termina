@@ -1,0 +1,111 @@
+/**
+ * Feature #5 e2e test: your edits reach the agent.
+ *
+ * Launch requirement:
+ *   PI_EDITOR_EVENTS_DIR=/tmp/pi-editor-events-test
+ *   PI_EDITOR_INITIAL_CWD=<fresh fixture: greeting.ts "hello", hello.txt, src/>
+ *   --remote-debugging-port=9222
+ *
+ * Steps:
+ *   1. A user edit while idle writes the edits-<id>.md context file with
+ *      before/after content.
+ *   2. The agent's next run receives the context (session record contains
+ *      "Your edits").
+ *   3. The run consumes the context: the file is cleared after settle.
+ *   4. A user edit DURING a busy run is not recorded (no file after settle).
+ */
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { execSync } from "node:child_process";
+import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+
+const results = [];
+const check = (name, ok, detail = "") => {
+  results.push(ok);
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + String(detail).slice(0, 200) : ""}`);
+};
+
+const eventsDir = "/tmp/pi-editor-events-test";
+const editsFile = join(eventsDir, "edits-term-1.md");
+const greeting = "/tmp/pi-editor-test-project/greeting.ts";
+
+const pages = await fetch("http://127.0.0.1:9222/json").then((r) => r.json());
+const page = pages.find((t) => t.type === "page");
+const ws = new WebSocket(page.webSocketDebuggerUrl);
+await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+let id = 0;
+const pending = new Map();
+ws.onmessage = (m) => { const msg = JSON.parse(m.data); if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id); } };
+const send = (method, params = {}) => new Promise((res) => { const i = ++id; pending.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });
+const evalJs = async (expr) => { const r = await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true }); return r.result?.result?.value; };
+const waitIdle = async () => {
+  for (let i = 0; i < 120; i++) {
+    await sleep(1000);
+    const busy = await evalJs(`document.getElementById('status-state').textContent`);
+    if (busy && !busy.includes("working") && i > 3) return;
+  }
+};
+const promptAgent = async (text) => {
+  await evalJs(`document.querySelector('.xterm-helper-textarea')?.focus()`);
+  await send("Input.insertText", { text });
+  await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+  await waitIdle();
+  await sleep(1200);
+};
+
+// ---- 1. user edit while idle → context file ----
+writeFileSync(greeting, 'export const greeting = "hi there";\n');
+let ctx1 = "";
+for (let i = 0; i < 20; i++) {
+  await sleep(200);
+  if (existsSync(editsFile)) {
+    ctx1 = readFileSync(editsFile, "utf8");
+    break;
+  }
+}
+check("user edit writes the context file", ctx1.includes("## Your edits") && ctx1.includes("greeting.ts"), ctx1.slice(0, 120));
+// A second edit gives the watcher a cached prev → the context shows before/after.
+writeFileSync(greeting, 'export const greeting = "hi again";\n');
+let ctx2 = "";
+for (let i = 0; i < 20; i++) {
+  await sleep(200);
+  const current = existsSync(editsFile) ? readFileSync(editsFile, "utf8") : "";
+  if (current.includes("hi again")) {
+    ctx2 = current;
+    break;
+  }
+}
+check(
+  "context has before/after content",
+  ctx2.includes('export const greeting = "hi there";') && ctx2.includes('export const greeting = "hi again";'),
+  ctx2.slice(0, 200),
+);
+
+// ---- 2. the agent receives the context ----
+await promptAgent("Read greeting.ts and report what it says.");
+const sessionDir = execSync(`ls -td ${process.env.HOME}/.pi/agent/sessions/--private-tmp-pi-editor-test-project--/ 2>/dev/null | head -1`).toString().trim();
+const sessionFile = execSync(`ls -t "${sessionDir}"*.jsonl 2>/dev/null | head -1`).toString().trim();
+const session = sessionFile ? readFileSync(sessionFile, "utf8") : "";
+check("session record contains the injected edits context", session.includes("Your edits") && session.includes("greeting.ts"), session.slice(0, 80));
+
+// ---- 3. the run consumed the context ----
+await sleep(400);
+check("context file cleared after the run", !existsSync(editsFile), "");
+
+// ---- 4. a user edit during a busy run is not recorded ----
+// Mark the terminal busy deterministically with a synthetic agent_start
+// (same shape the bridge extension writes), then write mid-run.
+const { appendFileSync } = await import("node:fs");
+const sidecar = join(eventsDir, "term-1.jsonl");
+appendFileSync(sidecar, '{"t":"agent_start"}\n');
+await sleep(600);
+writeFileSync("/tmp/pi-editor-test-project/hello.txt", "user edit mid-run\n");
+await sleep(1200); // watcher debounce + edit debounce + context write
+appendFileSync(sidecar, '{"t":"agent_settled"}\n');
+await sleep(600);
+check("mid-run user edit is not recorded", !existsSync(editsFile), "");
+
+const passed = results.filter(Boolean).length;
+console.log(`\n${passed}/${results.length} passed`);
+ws.close();
+process.exit(passed === results.length ? 0 : 1);

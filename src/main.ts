@@ -238,7 +238,13 @@ timelineView.bind({
     const pane = activeId ? panes.get(activeId) : undefined;
     if (!pane) return;
     // Snapshots are fetched on demand — the strip/IPC never carries content.
-    const res = await window.pi.getTimelineContent(pane.instanceId, ev.seq);
+    let res = await window.pi.getTimelineContent(pane.instanceId, ev.seq);
+    // A write snapshot may still be filling in (400 ms delayed fill) — retry
+    // briefly before giving up.
+    for (let i = 0; i < 5 && !res.ok; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      res = await window.pi.getTimelineContent(pane.instanceId, ev.seq);
+    }
     if (!res.ok) {
       const what = ev.t === "change" ? "change" : ev.toolName ?? "event";
       toast(`${what} ${res.relPath ?? ev.relPath ?? ""} — no snapshot for this moment`, "info");
