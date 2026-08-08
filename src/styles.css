@@ -824,7 +824,9 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px;
+  /* exactly matches the 34px top strip (explorer/terminal/editor headers) */
+  min-height: 34px;
+  padding: 0 10px;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
@@ -832,7 +834,7 @@ body {
 
 .review-filename {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text);
 }
 
@@ -845,8 +847,9 @@ body {
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 4px;
-  padding: 4px 10px;
-  font-size: 12px;
+  padding: 3px 10px;
+  font-size: 11px;
+  line-height: 1.4;
   cursor: pointer;
 }
 
