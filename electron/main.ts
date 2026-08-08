@@ -643,8 +643,20 @@ class PiEditorApp {
     this.projectCwd = cwd;
     this.installBridgeExtension(cwd);
     this.startWatcher(cwd);
+    // A folder switch starts a fresh context: agent terminals move to the new
+    // folder and ALL per-run state is reset (timeline, review baselines,
+    // snapshots, modified list, verify). Shell terminals keep their cwd —
+    // they are real shells still running in their original directory.
     for (const inst of this.terminals.values()) {
-      if (inst.type === "agent") inst.verify = { state: "untested", command: null, summary: null };
+      if (inst.type !== "agent") continue;
+      inst.cwd = cwd;
+      inst.timeline = [];
+      inst.timelineSeq = 0;
+      inst.runSnapshots = new Map();
+      inst.baselines = new Map();
+      inst.modified = new Map();
+      inst.lastToolPath = null;
+      inst.verify = { state: "untested", command: null, summary: null };
     }
     this.sendInstances();
     this.send("folder:opened", { cwd });

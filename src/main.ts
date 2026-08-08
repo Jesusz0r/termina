@@ -681,6 +681,13 @@ window.pi.onModifiedList((p) => {
 window.pi.onFolderOpened((e) => {
   projectCwd = e.cwd;
   explorer.setProject(e.cwd);
+  // New folder = fresh context: drop every pane's cached timeline; main has
+  // already reset the per-terminal state.
+  for (const p of panes.values()) {
+    p.timeline = [];
+    p.timelineLoaded = true;
+  }
+  renderTimeline();
 });
 
 window.pi.onInstances((list: InstanceSummary[]) => {
