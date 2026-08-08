@@ -109,6 +109,9 @@ interface Pane {
   timeline: TimelineEvent[];
   timelineLoaded: boolean;
   plan: PlanTask[];
+  planLoaded: boolean;
+  /** Bumped on every plan:update push (fetch race guard). */
+  planVersion: number;
 }
 
 const panes = new Map<string, Pane>();
@@ -169,6 +172,8 @@ function createPaneShell(instanceId: string): Pane {
     timeline: [],
     timelineLoaded: false,
     plan: [],
+    planLoaded: false,
+    planVersion: 0,
   };
   panes.set(instanceId, pane);
   pane.tabEl.prepend(typeEl);
@@ -316,6 +321,17 @@ function renderChrome(): void {
 
 /** Plan Board: the current run's tasks with live progress. */
 function renderPlan(pane: Pane): void {
+  if (!pane.planLoaded) {
+    pane.planLoaded = true;
+    const versionAtStart = pane.planVersion;
+    void window.pi.getPlan(pane.instanceId).then((tasks) => {
+      const p = panes.get(pane.instanceId);
+      if (!p) return;
+      if (p.planVersion !== versionAtStart) return; // a push won the race
+      p.plan = tasks;
+      if (activeId === pane.instanceId) renderPlan(p);
+    });
+  }
   planCount.textContent = pane.plan.length ? `(${pane.plan.length})` : "";
   planList.replaceChildren();
   for (const task of pane.plan) {
@@ -723,6 +739,7 @@ window.pi.onTimelineEvent(({ terminalId, event }) => {
 window.pi.onPlanUpdate(({ instanceId, tasks }) => {
   const pane = panes.get(instanceId);
   if (!pane) return;
+  pane.planVersion++;
   pane.plan = tasks;
   if (activeId === instanceId) renderPlan(pane);
 });

@@ -152,6 +152,8 @@ export interface PiBridge {
 
   // Session Timeline
   getTimeline(terminalId: string): Promise<TimelineEvent[]>;
+  /** The current run's plan tasks (Plan Board). */
+  getPlan(terminalId: string): Promise<PlanTask[]>;
   /** Fetch a snapshot's content on demand (only when a dot is clicked). */
   getTimelineContent(
     terminalId: string,

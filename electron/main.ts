@@ -601,7 +601,7 @@ class PiEditorApp {
       if (!body) continue;
       const paths: string[] = [];
       for (const token of body.split(/\s+/)) {
-        const clean = token.replace(/[`.,;:!?)"']+$/g, "").replace(/^[`("']+/g, "");
+        const clean = token.replace(/[`.,;:!?)"']+$/g, "").replace(/^[`("']+/g, "").replace(/\/+$/, "");
         if (this.looksLikePath(clean)) paths.push(clean);
       }
       tasks.push({ text: body, paths: [...new Set(paths)].slice(0, 5), state: "pending" });
@@ -809,7 +809,9 @@ class PiEditorApp {
       case "plan": {
         const text = String(event.text ?? "");
         inst.plan = this.parsePlanTasks(text);
-        inst.touched = new Set();
+        // touched was reset at agent_start. Do not reset it here: the plan
+        // message can arrive after the first tool events, and their progress
+        // must count.
         this.sendPlan(inst);
         break;
       }
@@ -1244,6 +1246,9 @@ class PiEditorApp {
     // ---- Verify & Iterate ----
     ipcMain.handle("verify:detect", () => this.detectTestCommand(this.terminalCwd()));
     ipcMain.handle("verify:run", (_e, terminalId: string) => this.runVerify(terminalId));
+
+    // ---- Plan Board ----
+    ipcMain.handle("plan:get", (_e, terminalId: string) => this.terminals.get(terminalId)?.plan ?? []);
 
     // ---- Session Timeline ----
     ipcMain.handle("timeline:get", (_e, terminalId: string) => {
