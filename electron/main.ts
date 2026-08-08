@@ -1091,9 +1091,18 @@ class PiEditorApp {
   private startPaintWatchdog(): void {
     this.stopPaintWatchdog();
     let blankCount = 0;
+    let healthy = false;
+    let lastCheck = 0;
     this.paintWatchdog = setInterval(() => {
       const win = this.win;
       if (!win || win.isDestroyed() || win.isMinimized() || !win.isVisible()) return;
+      // The FOUC risk is a startup problem: check every 3 s until the window
+      // paints real content once. After that, only check every 15 s as a net
+      // for a stalled renderer.
+      const cadence = healthy ? 15000 : 3000;
+      const now = Date.now();
+      if (now - lastCheck < cadence) return;
+      lastCheck = now;
       void (async () => {
         let img: Electron.NativeImage | null = null;
         try {
@@ -1106,21 +1115,19 @@ class PiEditorApp {
         }
         let uniform = img === null;
         if (img && !img.isEmpty()) {
-          const { width: w, height: h } = img.getSize();
+          // Downscale before sampling: a full-window bitmap is megabytes; a
+          // 64x40 sample (2560 pixels) carries the same uniform-vs-content
+          // signal for a fraction of the allocation cost.
+          const small = img.resize({ width: 64, height: 40 });
+          const { width: w, height: h } = small.getSize();
           if (w > 0 && h > 0) {
-            const bitmap = img.toBitmap();
-            const stride = Math.max(1, Math.floor(h / 16));
+            const bitmap = small.toBitmap();
             const first = bitmap.readUInt32LE(0);
             let same = 0;
-            let total = 0;
-            for (let y = 0; y < h; y += stride) {
-              for (let x = 0; x < w; x += stride) {
-                const off = (y * w + x) * 4;
-                if (bitmap.readUInt32LE(off) === first) same++;
-                total++;
-              }
+            for (let off = 0; off < bitmap.length; off += 4) {
+              if (bitmap.readUInt32LE(off) === first) same++;
             }
-            uniform = same / total > 0.98;
+            uniform = same / (bitmap.length / 4) > 0.98;
           }
         }
         if (uniform) {
@@ -1132,6 +1139,7 @@ class PiEditorApp {
           }
         } else {
           blankCount = 0;
+          healthy = true;
         }
       })();
     }, 3000);
