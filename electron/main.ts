@@ -9,7 +9,7 @@
  */
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell } from "electron";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
@@ -261,17 +261,62 @@ class PiEditorApp {
   }
 
   private piAvailable: boolean | null = null;
+  private piCheckedAt = 0;
 
-  /** Whether the pi binary exists and runs. Cached; shells never need this. */
+  /**
+   * Whether the pi binary exists and runs. Success is cached; a FAILURE is
+   * only trusted for a few seconds — a transient spawn error must not brick
+   * the app for its whole lifetime. Falls back to scanning PATH for a
+   * matching executable when plain resolution fails.
+   */
   private checkPiAvailable(): boolean {
-    if (this.piAvailable !== null) return this.piAvailable;
+    const now = Date.now();
+    if (this.piAvailable === true) return true;
+    if (this.piAvailable === false && now - this.piCheckedAt < 5000) return false;
+    this.piCheckedAt = now;
+    const bin = this.resolvePiBin();
     try {
-      const r = spawnSync(this.resolvePiBin(), ["--version"], { stdio: "ignore", timeout: 5000 });
-      this.piAvailable = r.error === undefined && r.status === 0;
-    } catch {
-      this.piAvailable = false;
+      const r = spawnSync(bin, ["--version"], { stdio: "ignore", timeout: 5000 });
+      if (r.error === undefined && r.status === 0) {
+        this.piAvailable = true;
+        return true;
+      }
+      if (r.error) console.warn(`[main] pi check failed: ${(r.error as NodeJS.ErrnoException).code ?? "?"} ${r.error.message ?? ""}`);
+      else console.warn(`[main] pi check failed: exit ${r.status}`);
+    } catch (err) {
+      console.warn(`[main] pi check threw: ${(err as Error).message}`);
     }
-    return this.piAvailable;
+    // Fallback: manual PATH scan (spawnSync can miss it when PATH is odd).
+    const found = this.findOnPath(bin);
+    if (found && found !== bin) {
+      try {
+        const r = spawnSync(found, ["--version"], { stdio: "ignore", timeout: 5000 });
+        if (r.error === undefined && r.status === 0) {
+          this.piAvailable = true;
+          return true;
+        }
+      } catch {
+        /* keep false */
+      }
+    }
+    this.piAvailable = false;
+    return false;
+  }
+
+  private findOnPath(name: string): string | null {
+    for (const dir of (process.env.PATH ?? "").split(":")) {
+      if (!dir) continue;
+      try {
+        const candidate = join(dir, name);
+        if (existsSync(candidate)) {
+          accessSync(candidate, constants.X_OK);
+          return candidate;
+        }
+      } catch {
+        /* keep scanning */
+      }
+    }
+    return null;
   }
 
   private piMissingMessage(): string {
@@ -986,11 +1031,15 @@ class PiEditorApp {
 
   async start(): Promise<void> {
     this.registerIpc();
+    // Set the project BEFORE the window loads: the renderer queries the
+    // project (test detection, cwd) as soon as it boots, and terminalCwd()
+    // must already point at the real folder — otherwise it answers with the
+    // home directory and the Verify button stays disabled forever.
+    const initial = process.env.PI_EDITOR_INITIAL_CWD;
+    this.projectCwd = initial && existsSync(initial) ? initial : null;
     this.tailer.onEvent = (id, event) => this.handleSidecarEvent(id, event);
     this.tailer.start();
     await this.createWindow();
-    const initial = process.env.PI_EDITOR_INITIAL_CWD;
-    this.projectCwd = initial && existsSync(initial) ? initial : null;
     if (this.projectCwd) {
       this.installBridgeExtension(this.projectCwd);
       this.startWatcher(this.projectCwd);

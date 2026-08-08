@@ -67,6 +67,9 @@ export class ProjectWatcher {
    */
   lastContents = new Map<string, string>();
   private static readonly CACHE_LIMIT = 5000;
+  /** Byte budget for the cache — count alone can reach gigabytes with big files. */
+  private static readonly CACHE_BYTES = 64 * 1024 * 1024;
+  private cacheBytes = 0;
 
   /** Fired with the new file content whenever a watched text file changes. */
   onChange: (change: FileChange) => void = () => {};
@@ -103,6 +106,7 @@ export class ProjectWatcher {
 
   stop(): void {
     this.lastContents.clear();
+    this.cacheBytes = 0;
     for (const t of this.timers.values()) clearTimeout(t);
     this.timers.clear();
     if (this.watcher) {
@@ -163,10 +167,16 @@ export class ProjectWatcher {
     this.seen.add(relPath);
     // Update the rolling content cache (evict oldest when over the limit).
     // Keys are canonicalized so lookups from anywhere in the app hit.
-    this.lastContents.set(this.canonicalize ? this.canonicalize(abs) : abs, content);
-    if (this.lastContents.size > ProjectWatcher.CACHE_LIMIT) {
+    const key = this.canonicalize ? this.canonicalize(abs) : abs;
+    const prev = this.lastContents.get(key);
+    this.cacheBytes += content.length - (prev?.length ?? 0);
+    this.lastContents.set(key, content);
+    while (this.lastContents.size > 1 && (this.lastContents.size > ProjectWatcher.CACHE_LIMIT || this.cacheBytes > ProjectWatcher.CACHE_BYTES)) {
       const oldest = this.lastContents.keys().next().value;
-      if (oldest !== undefined) this.lastContents.delete(oldest);
+      if (oldest === undefined) break;
+      const evicted = this.lastContents.get(oldest);
+      this.cacheBytes -= evicted?.length ?? 0;
+      this.lastContents.delete(oldest);
     }
     const change: FileChange = { path: abs, relPath, content, status };
     this.onChange(change);

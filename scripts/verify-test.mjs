@@ -62,6 +62,14 @@ const contextFile = (termId) => join(findEventsDir(), `verify-${termId}.md`);
 const detected = await evalJs(`window.pi.detectTest()`);
 check("detectTest finds the npm test script", detected?.label === "npm run test", JSON.stringify(detected));
 
+// The UI button must be ENABLED at boot when tests exist (it used to stay
+// disabled forever because the renderer never asked for the command).
+await sleep(400);
+const btn = await evalJs(
+  `(() => { const b = document.getElementById('btn-verify'); return { disabled: b.disabled, title: b.title }; })()`,
+);
+check("Verify button enabled at boot", btn.disabled === false && btn.title.includes("npm run test"), JSON.stringify(btn));
+
 // Restore the failing state (earlier runs may have fixed it).
 writeFileSync("/tmp/pi-editor-verify-project/math.js", "exports.add = (a, b) => a + b + 1; // BUG\n");
 

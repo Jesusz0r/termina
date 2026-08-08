@@ -303,6 +303,18 @@ function renderChrome(): void {
 }
 
 /** Verify & Iterate: badge + button for the active terminal. */
+let testCommand: string | null = null;
+
+async function refreshTestCommand(): Promise<void> {
+  try {
+    const t = await window.pi.detectTest();
+    testCommand = t?.label ?? null;
+  } catch {
+    testCommand = null;
+  }
+  renderChrome();
+}
+
 function renderVerify(pane: Pane): void {
   const v = pane.verify;
   const isAgent = pane.type === "agent" && !pane.error;
@@ -312,8 +324,8 @@ function renderVerify(pane: Pane): void {
     verifyBadge.hidden = true;
     return;
   }
-  btnVerify.disabled = v.state === "running" || !v.command;
-  btnVerify.title = v.command ? `Run ${v.command}` : "No test command detected (package.json, pytest, cargo, go)";
+  btnVerify.disabled = v.state === "running" || !testCommand;
+  btnVerify.title = testCommand ? `Run ${testCommand}` : "No test command detected (package.json, pytest, cargo, go)";
   if (v.state === "untested") {
     verifyBadge.textContent = "";
     verifyBadge.hidden = true;
@@ -696,6 +708,7 @@ window.pi.onModifiedList((p) => {
 window.pi.onFolderOpened((e) => {
   projectCwd = e.cwd;
   explorer.setProject(e.cwd);
+  void refreshTestCommand();
   // New folder = fresh context: drop every pane's cached timeline; main has
   // already reset the per-terminal state.
   for (const p of panes.values()) {
@@ -739,6 +752,7 @@ async function boot(): Promise<void> {
   applyLayout(layout);
   if (localStorage.getItem(EXPLORER_KEY) === "0") setExplorerVisible(false);
   if (localStorage.getItem(MODIFIED_KEY) === "0") setModifiedVisible(false);
+  void refreshTestCommand();
 
   const instances = await window.pi.getInstances();
   // No terminals could be created (e.g. pi is missing) — explain instead of
@@ -767,6 +781,9 @@ async function boot(): Promise<void> {
     projectCwd = instances[0].cwd;
     explorer.setProject(instances[0].cwd);
   }
+  // The project may only be known after the instance list arrives — re-query
+  // the test command now that it is (belt for the boot race).
+  void refreshTestCommand();
 }
 
 void boot();
