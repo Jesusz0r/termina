@@ -74,43 +74,52 @@ body {
   display: flex;
   flex: 1 1 auto;
   min-height: 0;
+  flex-direction: row; /* explorer | divider | main-split */
+}
+
+#main-split {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
   flex-direction: row;
 }
 
-/* ---- layout presets: terminal position ---- */
+/* ---- layout presets: terminal position (applied to #main-split) ---- */
 
-#main.layout-terminal-right {
+#main-split.layout-terminal-right {
   flex-direction: row-reverse;
 }
 
-#main.layout-terminal-top,
-#main.layout-terminal-bottom {
+#main-split.layout-terminal-top,
+#main-split.layout-terminal-bottom {
   flex-direction: column;
 }
 
-#main.layout-terminal-bottom {
+#main-split.layout-terminal-bottom {
   flex-direction: column-reverse;
 }
 
-/* In column layouts the left pane (terminal) becomes a top/bottom band. */
-#main.layout-terminal-top #left-pane,
-#main.layout-terminal-bottom #left-pane {
-  width: auto !important;
-  height: 50%;
-  min-height: 160px;
+/* In column layouts the left pane (terminal) becomes a top/bottom band.
+   No !important: the divider drag sets flex-basis inline and must win. */
+#main-split.layout-terminal-top #left-pane,
+#main-split.layout-terminal-bottom #left-pane {
+  width: auto;
+  flex: 0 1 50%; /* flex-basis drives the split; the divider sets it inline */
+  min-height: 120px;
   border-right: none;
   border-bottom: 1px solid var(--border);
 }
 
-#main.layout-terminal-top #divider,
-#main.layout-terminal-bottom #divider {
+#main-split.layout-terminal-top #divider,
+#main-split.layout-terminal-bottom #divider {
   width: auto;
   height: 5px;
   cursor: row-resize;
   flex: 0 0 5px;
 }
 
-#main.layout-terminal-bottom #left-pane {
+#main-split.layout-terminal-bottom #left-pane {
   border-bottom: none;
   border-top: 1px solid var(--border);
 }
@@ -126,10 +135,12 @@ body {
 
 #right-pane {
   display: flex;
-  flex-direction: row;
+  flex-direction: column;
   flex: 1;
   min-width: 360px;
+  min-height: 0;
   background: var(--bg);
+  position: relative; /* anchors #editor-empty */
 }
 
 /* ---- explorer sidebar ---- */
@@ -269,13 +280,7 @@ body {
 
 /* ---- editor area ---- */
 
-#editor-area {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-width: 0;
-  position: relative; /* anchors #editor-empty */
-}
+
 
 #divider {
   width: 5px;

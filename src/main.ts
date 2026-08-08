@@ -238,17 +238,18 @@ const LAYOUT_KEY = "pi-editor.layout";
 const EXPLORER_KEY = "pi-editor.explorer";
 const MODIFIED_KEY = "pi-editor.modified";
 
-const mainEl = document.getElementById("main")!;
+const splitEl = document.getElementById("main-split")!;
 const modifiedPanelEl = document.getElementById("modified-panel")!;
 const explorerDividerEl = document.getElementById("explorer-divider")!;
 
 function applyLayout(layout: Layout): void {
   for (const l of ["terminal-left", "terminal-right", "terminal-top", "terminal-bottom"] as const) {
-    mainEl.classList.toggle(`layout-${l}`, l === layout);
+    splitEl.classList.toggle(`layout-${l}`, l === layout);
   }
   // Drop inline size overrides from previous drags so the flex layout applies.
   leftPane.style.width = "";
   leftPane.style.height = "";
+  leftPane.style.flexBasis = "";
   localStorage.setItem(LAYOUT_KEY, layout);
   requestAnimationFrame(() => {
     for (const p of panes.values()) p.view.fit();
@@ -267,7 +268,7 @@ function setModifiedVisible(visible: boolean): void {
 }
 
 function isColumnLayout(): boolean {
-  return mainEl.classList.contains("layout-terminal-top") || mainEl.classList.contains("layout-terminal-bottom");
+  return splitEl.classList.contains("layout-terminal-top") || splitEl.classList.contains("layout-terminal-bottom");
 }
 
 // File-menu commands + layout/toggle commands
@@ -307,10 +308,10 @@ divider.addEventListener("mousedown", () => {
 });
 window.addEventListener("mousemove", (e) => {
   if (!dragging) return;
-  const rect = mainEl.getBoundingClientRect();
+  const rect = splitEl.getBoundingClientRect();
   if (isColumnLayout()) {
     const pct = ((e.clientY - rect.top) / rect.height) * 100;
-    leftPane.style.height = `${Math.min(75, Math.max(25, pct))}%`;
+    leftPane.style.flexBasis = `${Math.min(75, Math.max(25, pct))}%`;
   } else {
     const pct = ((e.clientX - rect.left) / rect.width) * 100;
     leftPane.style.width = `${Math.min(70, Math.max(30, pct))}%`;
@@ -329,8 +330,7 @@ explorerDividerEl.addEventListener("mousedown", () => {
 });
 window.addEventListener("mousemove", (e) => {
   if (!exploring) return;
-  const pane = document.getElementById("right-pane")!;
-  const rect = pane.getBoundingClientRect();
+  const rect = document.getElementById("main")!.getBoundingClientRect();
   const w = Math.min(420, Math.max(140, e.clientX - rect.left));
   explorerEl.style.width = `${w}px`;
 });

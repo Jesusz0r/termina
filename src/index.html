@@ -11,34 +11,34 @@
   <body>
     <div id="app">
       <main id="main">
-        <section id="left-pane">
-          <div id="terminal-tabs">
-            <div id="terminal-tabs-list"></div>
-            <button id="btn-new-terminal" class="toolbar-btn" title="New terminal (Cmd+Shift+T)">＋</button>
+        <div id="explorer">
+          <div class="explorer-header">
+            <span>Explorer</span>
           </div>
-          <div id="terminal-container"></div>
-          <div id="modified-panel" class="collapsed">
-            <div class="panel-header">
-              <span>Modified files</span>
-              <span id="modified-count" class="muted"></span>
-              <div class="spacer"></div>
-              <button id="btn-clear-modified" class="mini-btn" title="Clear the list">clear</button>
+          <div id="explorer-tree"></div>
+        </div>
+        <div id="explorer-divider" title="Drag to resize"></div>
+        <div id="main-split">
+          <section id="left-pane">
+            <div id="terminal-tabs">
+              <div id="terminal-tabs-list"></div>
+              <button id="btn-new-terminal" class="toolbar-btn" title="New terminal (Cmd+Shift+T)">＋</button>
             </div>
-            <ul id="modified-list"></ul>
-          </div>
-        </section>
-
-        <div id="divider" title="Drag to resize"></div>
-
-        <section id="right-pane">
-          <div id="explorer">
-            <div class="explorer-header">
-              <span>Explorer</span>
+            <div id="terminal-container"></div>
+            <div id="modified-panel" class="collapsed">
+              <div class="panel-header">
+                <span>Modified files</span>
+                <span id="modified-count" class="muted"></span>
+                <div class="spacer"></div>
+                <button id="btn-clear-modified" class="mini-btn" title="Clear the list">clear</button>
+              </div>
+              <ul id="modified-list"></ul>
             </div>
-            <div id="explorer-tree"></div>
-          </div>
-          <div id="explorer-divider" title="Drag to resize"></div>
-          <div id="editor-area">
+          </section>
+
+          <div id="divider" title="Drag to resize"></div>
+
+          <section id="right-pane">
             <div id="editor-tabs"></div>
             <div id="editor-container"></div>
             <div id="editor-empty">
@@ -49,8 +49,8 @@
                 Files the agent writes or edits will appear here <b>live</b>.
               </div>
             </div>
-          </div>
-        </section>
+          </section>
+        </div>
       </main>
 
       <footer id="statusbar">
