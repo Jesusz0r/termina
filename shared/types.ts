@@ -8,40 +8,10 @@ export interface ModifiedFile {
   status: "created" | "modified";
 }
 
-export interface ModelInfo {
-  id: string;
-  name: string;
-  provider: string;
-}
-
-export interface PiState {
-  instanceId: string;
-  isStreaming: boolean;
-  model: ModelInfo | null;
-  thinkingLevel: string | null;
-  cwd: string | null;
-  sessionId: string | null;
-  models: ModelInfo[];
-  levels: string[];
-  /** True once a real project folder is opened (not the home-dir placeholder). */
-  hasProject: boolean;
-}
-
 export interface InstanceSummary {
   id: string;
   cwd: string;
-  model: string | null;
-  isStreaming: boolean;
-  modifiedCount: number;
-}
-
-export interface ExplorerEntry {
-  name: string;
-  /** Absolute path. */
-  path: string;
-  /** Path relative to the project root. */
-  relPath: string;
-  type: "file" | "dir";
+  busy: boolean;
 }
 
 export interface FileChangedPayload {
@@ -57,15 +27,6 @@ export interface ToolTargetPayload {
   toolName: string;
 }
 
-export interface SettledPayload {
-  instanceId: string;
-  /** Files modified in this run (for the terminal summary). */
-  runFiles: ModifiedFile[];
-  /** All files modified in this session (for the panel). */
-  allFiles: ModifiedFile[];
-  durationMs: number;
-}
-
 export interface FileDeletedPayload {
   path: string;
 }
@@ -75,76 +36,51 @@ export interface ModifiedListPayload {
   files: ModifiedFile[];
 }
 
-export type MenuCommand = "new-file" | "new-folder" | "rename" | "delete" | "refresh";
-
-export interface PiCommand {
-  name: string;
-  description: string;
-  source: string;
+export interface BusyPayload {
+  instanceId: string;
+  busy: boolean;
 }
+
+export interface ExplorerEntry {
+  name: string;
+  /** Absolute path. */
+  path: string;
+  /** Path relative to the project root. */
+  relPath: string;
+  type: "file" | "dir";
+}
+
+export type MenuCommand = "new-file" | "new-folder" | "rename" | "delete" | "refresh";
 
 export interface PiBridge {
   // push events (main → renderer)
-  onEvent(cb: (event: { instanceId: string } & Record<string, unknown>) => void): void;
+  onPtyData(cb: (e: { id: string; data: string }) => void): void;
+  onPtyExit(cb: (e: { id: string; code: number }) => void): void;
   onMenuCommand(cb: (cmd: { command: MenuCommand }) => void): void;
-  onFileChanged(cb: (p: FileChangedPayload) => void): void;
   onToolTarget(cb: (p: ToolTargetPayload) => void): void;
-  onSettled(cb: (p: SettledPayload) => void): void;
+  onFileChanged(cb: (p: FileChangedPayload) => void): void;
   onFileDeleted(cb: (p: FileDeletedPayload) => void): void;
   onModifiedList(cb: (p: ModifiedListPayload) => void): void;
-  onState(cb: (s: PiState) => void): void;
-  onError(cb: (e: { instanceId: string; message: string }) => void): void;
+  onBusy(cb: (p: BusyPayload) => void): void;
   onFolderOpened(cb: (e: { cwd: string }) => void): void;
-  onStderr(cb: (e: { instanceId: string; line: string }) => void): void;
   onInstances(cb: (list: InstanceSummary[]) => void): void;
 
-  // instance management
-  createInstance(): Promise<{ id: string }>;
-  closeInstance(id: string): Promise<void>;
+  // terminals (each is a real pi TUI in a pty)
+  createTerminal(): Promise<{ id: string }>;
+  closeTerminal(id: string): Promise<void>;
+  writeTerminal(id: string, data: string): Promise<void>;
+  resizeTerminal(id: string, cols: number, rows: number): Promise<void>;
   getInstances(): Promise<InstanceSummary[]>;
+  abortTerminal(id: string): Promise<void>; // sends Ctrl+C into the pty
 
-  // commands (renderer → main) — all scoped to an instance
-  prompt(instanceId: string, text: string, opts?: { streamingBehavior?: "steer" | "followUp" }): Promise<{ ok: boolean; error?: string }>;
-  abort(instanceId: string): Promise<unknown>;
-  newSession(instanceId: string): Promise<unknown>;
-  setModel(instanceId: string, provider: string, modelId: string): Promise<unknown>;
-  setThinking(instanceId: string, level: string): Promise<unknown>;
-  getState(instanceId: string): Promise<PiState>;
-  getCommands(instanceId: string): Promise<{ commands: PiCommand[]; error?: string }>;
-  builtin(instanceId: string, cmd: string, arg: string): Promise<{ ok: boolean; text?: string; error?: string }>;
-  configPaths(): Promise<{ settingsPath: string; authPath: string }>;
-  getModifiedFiles(instanceId: string): Promise<ModifiedFile[]>;
-  clearModified(instanceId: string): Promise<void>;
-
-  // shared (project-level)
+  // project / files
   openFolder(): Promise<{ cwd: string } | { cancelled: true }>;
   openFile(path: string): Promise<{ path: string; content: string } | { path: string; error: string }>;
   saveFile(path: string, content: string): Promise<{ ok: boolean; error?: string }>;
-  respondUi(instanceId: string, id: string, payload: Record<string, unknown>): void;
 
   // file explorer
   listDir(absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string }>;
   createEntry(relPath: string, kind: "file" | "dir"): Promise<{ ok: boolean; error?: string }>;
   renameEntry(relPath: string, newName: string): Promise<{ ok: boolean; error?: string }>;
   deleteEntry(relPath: string): Promise<{ ok: boolean; error?: string }>;
-}
-
-export interface ToolCallInfo {
-  toolCallId: string;
-  toolName: string;
-  args: Record<string, unknown>;
-}
-
-/** Extension UI request (dialog/notification) from the agent. */
-export interface ExtensionUiRequest {
-  type: "extension_ui_request";
-  id: string;
-  method: "select" | "confirm" | "input" | "editor" | "notify" | "setStatus" | "setWidget" | "setTitle" | "set_editor_text";
-  title?: string;
-  message?: string;
-  options?: string[];
-  placeholder?: string;
-  prefill?: string;
-  timeout?: number;
-  notifyType?: string;
 }

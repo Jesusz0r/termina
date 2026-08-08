@@ -2,7 +2,6 @@
  * Modal dialogs for pi's extension UI protocol (select/confirm/input/editor)
  * and generic toasts for notifications.
  */
-import type { ExtensionUiRequest } from "../../shared/types";
 
 export interface ModalResult {
   cancelled?: boolean;
@@ -66,38 +65,6 @@ export function showEditor(title: string, prefill: string): Promise<ModalResult>
 }
 
 /** Handle any extension_ui_request and send the response back via window.pi. */
-export async function handleExtensionUiRequest(req: ExtensionUiRequest & { instanceId?: string }): Promise<void> {
-  const { id, method } = req;
-  const respond = (payload: Record<string, unknown>) => window.pi.respondUi(req.instanceId ?? "", id, payload);
-  switch (method) {
-    case "confirm": {
-      const res = await showConfirm(req.title ?? "Confirm", req.message ?? "");
-      respond(res.cancelled ? { cancelled: true } : { confirmed: res.confirmed });
-      break;
-    }
-    case "select": {
-      const res = await showSelect(req.title ?? "Select", req.options ?? []);
-      respond(res.cancelled ? { cancelled: true } : { value: res.value });
-      break;
-    }
-    case "input": {
-      const res = await showInput(req.title ?? "Input", req.placeholder ?? "", req.prefill ?? "");
-      respond(res.cancelled ? { cancelled: true } : { value: res.value });
-      break;
-    }
-    case "editor": {
-      const res = await showEditor(req.title ?? "Editor", req.prefill ?? "");
-      respond(res.cancelled ? { cancelled: true } : { value: res.value });
-      break;
-    }
-    case "notify":
-      toast(req.message ?? "", (req.notifyType as "info" | "warning" | "error") ?? "info");
-      break;
-    default:
-      break; // setStatus / setWidget / setTitle / set_editor_text: no-op in v1
-  }
-}
-
 // --------------------------------------------------------------- modal core --
 
 interface ModalButton {

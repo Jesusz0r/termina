@@ -48,11 +48,9 @@
             <div id="editor-empty">
               <div class="empty-title">pi-editor</div>
               <div class="empty-sub">
-                Open a project folder, then prompt the agent in the terminal.
+                Open a project folder, then run <b>pi</b> in the terminal.
                 <br />
                 Files the agent writes or edits will appear here <b>live</b>.
-                <br />
-                When the agent finishes, click a modified file below the terminal to inspect it.
               </div>
             </div>
           </div>
@@ -60,32 +58,11 @@
       </main>
 
       <footer id="statusbar">
-        <label class="status-field">
-          <span class="muted">model</span>
-          <select id="model-select" title="Agent model"></select>
-        </label>
-        <label class="status-field">
-          <span class="muted">thinking</span>
-          <select id="thinking-select" title="Thinking level"></select>
-        </label>
         <span id="status-state" class="muted">idle</span>
-        <span id="status-session" class="muted"></span>
         <div class="spacer"></div>
         <span id="status-cwd" class="muted"></span>
-        <button id="btn-abort" class="statusbar-abort" disabled title="Abort the running agent (Cmd+.)">■ Abort</button>
+        <button id="btn-abort" class="statusbar-abort" disabled title="Send Ctrl+C to the active terminal (Cmd+.)">■ Abort</button>
       </footer>
-
-      <div id="prompt-bar">
-        <span id="prompt-glyph">❯</span>
-        <textarea
-          id="prompt-input"
-          rows="1"
-          placeholder="Ask the agent… or type / for commands, skills and templates  (Enter send · Shift+Enter newline · Cmd+Enter steer)"
-          spellcheck="false"
-        ></textarea>
-        <button id="btn-send" title="Send (Enter)">Send</button>
-      </div>
-      <div id="command-menu"></div>
     </div>
 
     <div id="modal-root"></div>

@@ -22,7 +22,6 @@ export class EditorManager {
   private activeKey: string | null = null;
   private tabsEl: HTMLElement;
   private emptyEl: HTMLElement;
-  private streaming = false;
   private projectOpen = false;
   /** The single replaceable preview tab (VS Code style). */
   private previewKey: string | null = null;
@@ -38,7 +37,7 @@ export class EditorManager {
       minimap: { enabled: true },
       scrollBeyondLastLine: false,
       automaticLayout: true,
-      readOnly: true,
+      readOnly: false,
       tabSize: 2,
       wordWrap: "off",
       renderWhitespace: "selection",
@@ -49,15 +48,6 @@ export class EditorManager {
     this.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => void this.saveActive());
     this.editor.onDidChangeModel(() => this.syncEmptyState());
     this.syncEmptyState();
-  }
-
-  setStreaming(streaming: boolean): void {
-    this.streaming = streaming;
-    this.editor.updateOptions({ readOnly: this.readOnly(), domReadOnly: this.readOnly() });
-  }
-
-  private readOnly(): boolean {
-    return this.streaming;
   }
 
   /** Called when a project folder is opened/closed; hides the welcome hint. */
@@ -215,7 +205,7 @@ export class EditorManager {
   }
 
   private async saveActive(): Promise<void> {
-    if (!this.activeKey || this.readOnly()) return;
+    if (!this.activeKey) return;
     const tab = this.tabs.get(this.activeKey);
     if (!tab) return;
     const res = await window.pi.saveFile(tab.key, tab.model.getValue());
