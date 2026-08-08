@@ -380,9 +380,33 @@ body {
 }
 
 #btn-new-terminal {
-  padding: 2px 10px;
-  font-size: 13px;
+  /* bare icon button: no chrome, just the ＋ in a whiteish tone */
+  background: none;
+  border: none;
+  color: #d4d4d4;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 8px;
+  cursor: pointer;
   flex: 0 0 auto;
+}
+
+#btn-new-terminal:hover {
+  color: #ffffff;
+}
+
+#btn-clear-modified {
+  /* bare text button: same whiteish tone as the new-terminal button */
+  background: none;
+  border: none;
+  color: #d4d4d4;
+  font-size: 11px;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+
+#btn-clear-modified:hover {
+  color: #ffffff;
 }
 
 .term-pane {
