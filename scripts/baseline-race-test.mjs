@@ -104,6 +104,30 @@ const helloBadge = statuses.find((s) => s.cls.includes("modified"));
 check("new-file.txt shows A (created)", !!newFileBadge && newFileBadge.text === "A", JSON.stringify(statuses));
 check("hello.txt shows M (modified)", !!helloBadge && helloBadge.text === "M", JSON.stringify(statuses));
 
+// ---- 5. a deleted file with a baseline stays restorable ----
+// Establish a fresh baseline for greeting.ts (each agent_start re-baselines),
+// then delete the file on disk: the watcher reports the deletion; the entry
+// must stay with a D badge and revert must restore the file.
+const greetingPath = "/tmp/pi-editor-test-project/greeting.ts";
+const { rmSync } = await import("node:fs");
+emit({ t: "agent_start" });
+await sleep(500);
+emit({ t: "tool", toolName: "edit", path: "greeting.ts", edits: [{ oldText: 'export const greeting = "hello";', newText: 'export const greeting = "hi there";' }] });
+await sleep(600);
+rmSync(greetingPath);
+await sleep(800);
+const statuses5 = JSON.parse(await evalJs(`(() => JSON.stringify(
+  [...document.querySelectorAll('#modified-list .status-badge')].map(b => ({ text: b.textContent, cls: b.className }))
+))()`));
+const delBadge = statuses5.find((s) => s.cls.includes("deleted"));
+check("deleted file stays in the list with a D badge", !!delBadge && delBadge.text === "D", JSON.stringify(statuses5));
+const b5 = await evalJs(`window.pi.reviewBaseline('term-1', '${greetingPath}')`);
+check("deleted file keeps its baseline", b5?.baseline === 'export const greeting = "hello";\n', JSON.stringify(b5));
+const rev5 = await evalJs(`window.pi.reviewRevert('term-1', '${greetingPath}')`);
+await sleep(800);
+const restored = existsSync(greetingPath) ? readFileSync(greetingPath, "utf8") : "";
+check("revert restores the deleted file", restored === 'export const greeting = "hello";\n', restored.slice(0, 60));
+
 const passed = results.filter(Boolean).length;
 console.log(`\n${passed}/${results.length} passed`);
 ws.close();

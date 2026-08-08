@@ -709,6 +709,11 @@ body {
   color: var(--yellow);
 }
 
+.status-badge.deleted {
+  background: #3b1b1b;
+  color: #f14c4c;
+}
+
 #modified-list .path {
   overflow: hidden;
   text-overflow: ellipsis;

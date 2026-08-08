@@ -406,7 +406,7 @@ function renderModified(pane: Pane): void {
     const li = document.createElement("li");
     const badge = document.createElement("span");
     badge.className = `status-badge ${f.status}`;
-    badge.textContent = f.status === "created" ? "A" : "M";
+    badge.textContent = f.status === "created" ? "A" : f.status === "deleted" ? "D" : "M";
     const path = document.createElement("span");
     path.className = "path";
     path.textContent = f.relPath;
@@ -753,6 +753,8 @@ window.pi.onFileChanged((p) => {
   editorMgr.markTouched(p.path);
   editorMgr.updateContent(p.path, p.content);
   explorer.handleDiskChange();
+  // The open review stays in sync with the agent's writes.
+  if (reviewView.isVisible && reviewView.matchesPath(p.path)) void reviewView.refreshCurrent();
 });
 
 window.pi.onFileDeleted((p) => {

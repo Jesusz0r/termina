@@ -997,7 +997,21 @@ class PiEditorApp {
   }
 
   private recordDeleted(inst: PiTerminalInstance, absPath: string): void {
-    inst.modified.delete(this.canonicalPath(absPath));
+    const p = this.canonicalPath(absPath);
+    const baseline = inst.baselines.get(p);
+    if (baseline !== undefined && baseline !== null) {
+      // A pre-existing file was deleted and a baseline can restore it: keep
+      // the entry so the user can revert.
+      const entry = inst.modified.get(p);
+      if (entry) {
+        entry.status = "deleted";
+      } else {
+        inst.modified.set(p, { path: p, relPath: this.rel(p), status: "deleted" });
+      }
+    } else {
+      // Nothing to restore (created this run, or no baseline): drop the entry.
+      inst.modified.delete(p);
+    }
     this.send("modified:list", { instanceId: inst.id, files: [...inst.modified.values()] });
   }
 

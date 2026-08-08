@@ -5,7 +5,7 @@
 export interface ModifiedFile {
   path: string;
   relPath: string;
-  status: "created" | "modified";
+  status: "created" | "modified" | "deleted";
 }
 
 export interface InstanceSummary {

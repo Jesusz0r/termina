@@ -53,6 +53,11 @@ export class ReviewView {
     return this.container.style.display !== "none";
   }
 
+  /** True when the review shows the given path. */
+  matchesPath(path: string): boolean {
+    return this.path === path;
+  }
+
   /** Show the diff for a file the agent changed in the given terminal. */
   async show(terminalId: string, path: string, relPath: string): Promise<void> {
     this.terminalId = terminalId;
