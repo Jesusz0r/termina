@@ -58,6 +58,18 @@ Examples:
 - A new feature must not regress the hot paths.
 - When in doubt, make the fast path the only path.
 
+### No over-engineering
+
+- Build the simplest thing that works.
+- Do not add abstractions before the code needs them.
+- Do not design for hypothetical future features.
+- Do not create configuration options nobody uses.
+- Prefer direct code over clever code.
+- Solve the problem in front of you. Do not solve the problems you imagine.
+- Delete complexity when a simpler path appears.
+- The performance rule does not excuse over-engineering. Measure first,
+  then optimize the measured problem only.
+
 ## Architecture notes
 
 - The terminal stays the source of truth. The app never replaces the TUI.
