@@ -70,6 +70,9 @@ interface Pane {
   statusEl: HTMLElement;
   cwd: string | null;
   busy: boolean;
+  type: "agent" | "shell";
+  shellName: string | undefined;
+  error: boolean;
   modified: ModifiedFile[];
 }
 
@@ -87,6 +90,8 @@ function createPaneShell(instanceId: string): Pane {
   tabEl.className = "terminal-tab";
   const statusEl = document.createElement("span");
   statusEl.className = "tab-status";
+  const typeEl = document.createElement("span");
+  typeEl.className = "tab-type";
   const nameEl = document.createElement("span");
   nameEl.className = "tab-name";
   nameEl.textContent = "terminal";
@@ -118,10 +123,38 @@ function createPaneShell(instanceId: string): Pane {
     statusEl,
     cwd: null,
     busy: false,
+    type: "agent",
+    shellName: undefined,
+    error: false,
     modified: [],
   };
   panes.set(instanceId, pane);
+  pane.tabEl.prepend(typeEl);
   return pane;
+}
+
+/** A terminal tab that shows a message instead of a live pty (e.g. pi missing). */
+let errorSeq = 0;
+function createErrorPane(message: string): void {
+  const id = `term-error-${++errorSeq}`;
+  const pane = createPaneShell(id);
+  pane.error = true;
+  pane.nameEl.textContent = "error";
+  pane.tabEl.title = "terminal failed to start";
+  pane.statusEl.style.display = "none";
+  pane.view.write(`\r\n\x1b[1;31m✗ ${message.split("\n").join("\r\n  ")}${"\r\n"}\x1b[0m\r\n`);
+  activatePane(id);
+}
+
+function applyTypeBadge(pane: Pane): void {
+  const badge = pane.tabEl.querySelector(".tab-type") as HTMLElement;
+  if (pane.type === "shell" && pane.shellName) {
+    badge.textContent = pane.shellName;
+    badge.style.display = "";
+  } else {
+    badge.textContent = "";
+    badge.style.display = "none";
+  }
 }
 
 function activatePane(instanceId: string): void {
@@ -160,8 +193,9 @@ async function closePane(instanceId: string): Promise<void> {
 
 function updatePaneTab(pane: Pane): void {
   pane.nameEl.textContent = pane.cwd ? basenameOf(pane.cwd) : "terminal";
-  pane.tabEl.title = pane.cwd ?? "?";
+  pane.tabEl.title = `${pane.cwd ?? "?"}${pane.type === "shell" && pane.shellName ? ` · ${pane.shellName} shell` : " · pi agent"}`;
   pane.statusEl.classList.toggle("busy", pane.busy);
+  applyTypeBadge(pane);
 }
 
 function basenameOf(p: string): string {
@@ -214,11 +248,69 @@ async function openFileSmart(path: string, preview = true): Promise<void> {
 
 // ---------------------------------------------------------------- panels ----
 
-btnNewTerminal.addEventListener("click", () => {
-  void window.pi.createTerminal().then(({ id }) => {
-    if (panes.has(id)) activatePane(id);
-  });
+// Terminal-type chooser: ＋ opens a menu (agent vs shells).
+let terminalMenu: HTMLElement | null = null;
+let shellsCache: { name: string; path: string }[] | null = null;
+
+async function openTerminalMenu(): Promise<void> {
+  closeTerminalMenu();
+  if (!shellsCache) {
+    try {
+      shellsCache = await window.pi.getShells();
+    } catch {
+      shellsCache = [];
+    }
+  }
+  const menu = document.createElement("div");
+  menu.className = "terminal-menu";
+  const item = (label: string, desc: string, onClick: () => void) => {
+    const row = document.createElement("div");
+    row.className = "terminal-menu-item";
+    const name = document.createElement("span");
+    name.className = "terminal-menu-name";
+    name.textContent = label;
+    const d = document.createElement("span");
+    d.className = "terminal-menu-desc";
+    d.textContent = desc;
+    row.append(name, d);
+    row.addEventListener("click", () => {
+      closeTerminalMenu();
+      onClick();
+    });
+    menu.appendChild(row);
+  };
+  const makeTerminal = (opts?: { type?: "agent" | "shell"; shell?: string }) => {
+    void window.pi.createTerminal(opts).then((res) => {
+      if (res.error) {
+        createErrorPane(res.error);
+        return;
+      }
+      if (res.id && panes.has(res.id)) activatePane(res.id);
+    });
+  };
+  item("Agent (pi)", "the pi coding agent terminal", () => makeTerminal({ type: "agent" }));
+  for (const shell of shellsCache) {
+    item(shell.name, `interactive ${shell.name} shell`, () => makeTerminal({ type: "shell", shell: shell.path }));
+  }
+  document.body.appendChild(menu);
+  const rect = btnNewTerminal.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 220))}px`;
+  menu.style.top = `${rect.bottom + 6}px`;
+  terminalMenu = menu;
+}
+
+function closeTerminalMenu(): void {
+  terminalMenu?.remove();
+  terminalMenu = null;
+}
+
+btnNewTerminal.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (terminalMenu) closeTerminalMenu();
+  else void openTerminalMenu();
 });
+window.addEventListener("click", () => closeTerminalMenu());
+window.addEventListener("blur", () => closeTerminalMenu());
 btnAbort.addEventListener("click", () => {
   if (activeId) void window.pi.abortTerminal(activeId);
 });
@@ -442,6 +534,8 @@ window.pi.onInstances((list: InstanceSummary[]) => {
     if (!pane) pane = createPaneShell(summary.id); // terminal spawned after boot
     pane.cwd = summary.cwd;
     pane.busy = summary.busy;
+    pane.type = summary.type;
+    pane.shellName = summary.shellName;
     updatePaneTab(pane);
     if (!projectCwd && summary.cwd) {
       projectCwd = summary.cwd;
@@ -468,11 +562,22 @@ async function boot(): Promise<void> {
   if (localStorage.getItem(MODIFIED_KEY) === "0") setModifiedVisible(false);
 
   const instances = await window.pi.getInstances();
+  // No terminals could be created (e.g. pi is missing) — explain instead of
+  // leaving an empty window behind the splash.
+  if (instances.length === 0) {
+    const status = await window.pi.getPiStatus();
+    if (!status.available) {
+      createErrorPane(status.message ?? "pi is not installed.");
+      return;
+    }
+  }
   for (const inst of instances) {
     if (!panes.has(inst.id)) createPaneShell(inst.id);
     const pane = panes.get(inst.id);
     if (pane) {
       pane.cwd = inst.cwd;
+      pane.type = inst.type;
+      pane.shellName = inst.shellName;
       updatePaneTab(pane);
     }
   }

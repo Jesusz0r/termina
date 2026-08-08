@@ -8,6 +8,7 @@
  * of files mid-run and the modified-files panel.
  */
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell } from "electron";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -53,16 +54,37 @@ export default function (pi: ExtensionAPI): void {
 
 let terminalSeq = 0;
 
+function detectShells(): { name: string; path: string }[] {
+  const candidates: Array<[string, string]> = [
+    ["zsh", "/bin/zsh"],
+    ["bash", "/bin/bash"],
+    ["sh", "/bin/sh"],
+    ["fish", "/opt/homebrew/bin/fish"],
+    ["fish", "/usr/local/bin/fish"],
+    ["fish", "/usr/bin/fish"],
+  ];
+  const out: { name: string; path: string }[] = [];
+  for (const [name, path] of candidates) {
+    if (existsSync(path) && !out.some((s) => s.name === name)) out.push({ name, path });
+  }
+  return out;
+}
+
 class PiTerminalInstance {
-  id = `term-${++terminalSeq}`;
+  readonly id: string;
   pty: PtyTerminal;
   cwd: string;
+  type: "agent" | "shell";
+  shellName?: string;
   busy = false;
   modified = new Map<string, ModifiedFile>();
 
-  constructor(cwd: string, bin: string, eventsDir: string, cols: number, rows: number) {
+  constructor(id: string, cwd: string, type: "agent" | "shell", shellName: string | undefined, cmd: string, env: Record<string, string | undefined>, cols: number, rows: number) {
+    this.id = id;
     this.cwd = cwd;
-    this.pty = new PtyTerminal({ id: this.id, cwd, bin, eventsDir, cols, rows });
+    this.type = type;
+    this.shellName = shellName;
+    this.pty = new PtyTerminal({ id, cwd, cmd, args: [], env, cols, rows });
   }
 }
 
@@ -180,16 +202,55 @@ class PiEditorApp {
     return process.env.PI_EDITOR_PI_BIN ?? "pi";
   }
 
+  private piAvailable: boolean | null = null;
+
+  /** Whether the pi binary exists and runs. Cached; shells never need this. */
+  private checkPiAvailable(): boolean {
+    if (this.piAvailable !== null) return this.piAvailable;
+    try {
+      const r = spawnSync(this.resolvePiBin(), ["--version"], { stdio: "ignore", timeout: 5000 });
+      this.piAvailable = r.error === undefined && r.status === 0;
+    } catch {
+      this.piAvailable = false;
+    }
+    return this.piAvailable;
+  }
+
+  private piMissingMessage(): string {
+    return (
+      "pi is not installed.\n\nInstall it with:\n  npm install -g @earendil-works/pi-coding-agent\n\nor set PI_EDITOR_PI_BIN to the pi binary path."
+    );
+  }
+
   private terminalCwd(): string {
     return this.projectCwd ?? homedir();
   }
 
-  private async createTerminal(cwd?: string): Promise<PiTerminalInstance> {
-    const inst = new PiTerminalInstance(cwd ?? this.terminalCwd(), this.resolvePiBin(), this.eventsDir, 80, 24);
+  private async createTerminal(cwd?: string, opts?: { type?: "agent" | "shell"; shell?: string }): Promise<PiTerminalInstance> {
+    const type = opts?.type ?? "agent";
+    if (type === "agent" && !this.checkPiAvailable()) {
+      throw new Error(this.piMissingMessage());
+    }
+    const id = `term-${++terminalSeq}`;
+    let cmd: string;
+    let shellName: string | undefined;
+    let env: Record<string, string | undefined>;
+    if (type === "shell") {
+      const shells = detectShells();
+      const chosen = opts?.shell && existsSync(opts.shell) ? { path: opts.shell, name: basename(opts.shell) } : shells[0] ?? { path: "/bin/zsh", name: "zsh" };
+      cmd = chosen.path;
+      shellName = chosen.name;
+      env = { ...process.env };
+    } else {
+      cmd = this.resolvePiBin();
+      env = { ...process.env, PI_EDITOR_TERMINAL_ID: id, PI_EDITOR_EVENTS_DIR: this.eventsDir };
+    }
+    const inst = new PiTerminalInstance(id, cwd ?? this.terminalCwd(), type, shellName, cmd, env, 80, 24);
     this.terminals.set(inst.id, inst);
 
     inst.pty.onData = (data) => this.send("pty:data", { id: inst.id, data });
     inst.pty.onExit = (code) => {
+      console.log(`[main] terminal ${inst.id} (${inst.type}) exited code=${code}`);
       this.send("pty:exit", { id: inst.id, code });
       this.terminals.delete(inst.id);
       this.tailer.stopWatching(inst.id);
@@ -223,6 +284,8 @@ class PiEditorApp {
       id: t.id,
       cwd: t.cwd,
       busy: t.busy,
+      type: t.type,
+      shellName: t.shellName,
     }));
     this.send("instances:list", list);
   }
@@ -399,7 +462,19 @@ class PiEditorApp {
   private registerIpc(): void {
     ipcMain.handle("folder:open", () => this.openFolder());
 
-    ipcMain.handle("terminals:create", () => this.createTerminal().then((t) => ({ id: t.id })));
+    ipcMain.handle("terminals:create", async (_e, opts?: { type?: "agent" | "shell"; shell?: string }) => {
+      try {
+        const t = await this.createTerminal(undefined, opts);
+        return { id: t.id };
+      } catch (err) {
+        return { error: (err as Error).message };
+      }
+    });
+    ipcMain.handle("terminals:shells", () => detectShells());
+    ipcMain.handle("app:pi-status", () => {
+      const available = this.checkPiAvailable();
+      return { available, bin: this.resolvePiBin(), message: available ? undefined : this.piMissingMessage() };
+    });
     ipcMain.handle("terminals:close", (_e, id: string) => this.closeTerminal(id));
     ipcMain.handle("terminals:write", (_e, id: string, data: string) => {
       this.terminals.get(id)?.pty.write(String(data));
@@ -409,7 +484,7 @@ class PiEditorApp {
     });
     ipcMain.handle("terminals:list", () => {
       this.sendInstances();
-      return [...this.terminals.values()].map((t) => ({ id: t.id, cwd: t.cwd, busy: t.busy }));
+      return [...this.terminals.values()].map((t) => ({ id: t.id, cwd: t.cwd, busy: t.busy, type: t.type, shellName: t.shellName }));
     });
     ipcMain.handle("terminals:abort", (_e, id: string) => {
       this.terminals.get(id)?.pty.write("\x03");

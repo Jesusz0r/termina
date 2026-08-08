@@ -48,7 +48,9 @@ const bridge: PiBridge = {
   },
 
   // ---- terminals ----
-  createTerminal: () => ipcRenderer.invoke("terminals:create"),
+  createTerminal: (opts) => ipcRenderer.invoke("terminals:create", opts),
+  getShells: () => ipcRenderer.invoke("terminals:shells"),
+  getPiStatus: () => ipcRenderer.invoke("app:pi-status"),
   closeTerminal: (id) => ipcRenderer.invoke("terminals:close", id),
   writeTerminal: (id, data) => ipcRenderer.invoke("terminals:write", id, data),
   resizeTerminal: (id, cols, rows) => ipcRenderer.invoke("terminals:resize", id, cols, rows),

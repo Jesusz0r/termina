@@ -8,10 +8,14 @@ export interface ModifiedFile {
   status: "created" | "modified";
 }
 
+export type TerminalType = "agent" | "shell";
+
 export interface InstanceSummary {
   id: string;
   cwd: string;
   busy: boolean;
+  type: TerminalType;
+  shellName?: string;
 }
 
 export interface FileChangedPayload {
@@ -78,8 +82,10 @@ export interface PiBridge {
   onFolderOpened(cb: (e: { cwd: string }) => void): void;
   onInstances(cb: (list: InstanceSummary[]) => void): void;
 
-  // terminals (each is a real pi TUI in a pty)
-  createTerminal(): Promise<{ id: string }>;
+  // terminals (agent = pi TUI, shell = a real shell like zsh)
+  createTerminal(opts?: { type?: TerminalType; shell?: string }): Promise<{ id?: string; error?: string }>;
+  getShells(): Promise<{ name: string; path: string }[]>;
+  getPiStatus(): Promise<{ available: boolean; bin: string; message?: string }>;
   closeTerminal(id: string): Promise<void>;
   writeTerminal(id: string, data: string): Promise<void>;
   resizeTerminal(id: string, cols: number, rows: number): Promise<void>;

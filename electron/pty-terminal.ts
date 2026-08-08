@@ -7,8 +7,9 @@ import { spawn, type IPty } from "@lydell/node-pty";
 export interface PtyOptions {
   id: string;
   cwd: string;
-  bin: string;
-  eventsDir: string;
+  cmd: string;
+  args: string[];
+  env: Record<string, string | undefined>;
   cols: number;
   rows: number;
 }
@@ -25,16 +26,12 @@ export class PtyTerminal {
   constructor(opts: PtyOptions) {
     this.id = opts.id;
     this.cwd = opts.cwd;
-    this.pty = spawn(opts.bin, [], {
+    this.pty = spawn(opts.cmd, opts.args, {
       name: "xterm-256color",
       cols: opts.cols,
       rows: opts.rows,
       cwd: opts.cwd,
-      env: {
-        ...process.env,
-        PI_EDITOR_TERMINAL_ID: opts.id,
-        PI_EDITOR_EVENTS_DIR: opts.eventsDir,
-      },
+      env: opts.env,
     });
     this.pty.onData((data) => this.onData(data));
     this.pty.onExit(({ exitCode }) => {
