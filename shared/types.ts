@@ -71,7 +71,7 @@ export interface TimelineEvent {
   status?: "created" | "modified";
 }
 
-export type VerifyState = "untested" | "running" | "pass" | "fail" | "timeout";
+export type VerifyState = "untested" | "running" | "pass" | "fail" | "timeout" | "cancelled";
 
 /** Verify & Iterate: the last test run attached to a terminal. */
 export interface VerifyInfo {

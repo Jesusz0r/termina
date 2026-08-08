@@ -863,7 +863,8 @@ body {
 }
 
 #verify-badge.state-fail,
-#verify-badge.state-timeout {
+#verify-badge.state-timeout,
+#verify-badge.state-cancelled {
   background: rgba(180, 40, 40, 0.75);
   color: #fff;
 }

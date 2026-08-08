@@ -393,7 +393,7 @@ function renderVerify(pane: Pane): void {
     verifyBadge.appendChild(document.createTextNode(` verifying · ${v.command ?? ""}`));
   } else {
     verifyBadge.textContent =
-      v.state === "pass" ? `✓ ${v.summary ?? "green"}` : v.state === "timeout" ? `⏰ ${v.summary ?? "timed out"}` : `✗ ${v.summary ?? "failing"}`;
+      v.state === "pass" ? `✓ ${v.summary ?? "green"}` : v.state === "timeout" ? `⏰ ${v.summary ?? "timed out"}` : v.state === "cancelled" ? `⏸ ${v.summary ?? "cancelled"}` : `✗ ${v.summary ?? "failing"}`;
   }
   verifyBadge.title = v.command ?? "";
 }

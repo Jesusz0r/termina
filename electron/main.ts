@@ -189,6 +189,8 @@ class PiTerminalInstance {
   plan: PlanTask[] = [];
   /** Paths this run touched, relative to the project (for task progress). */
   touched = new Set<string>();
+  /** When the user sent an interrupt (\x03) into this terminal. */
+  interruptedAt?: number;
   /** Session Timeline: ordered points with file snapshots. */
   timeline: TimelineEvent[] = [];
   /** Per-path content as of the last snapshot in this run (for edit math). */
@@ -503,20 +505,27 @@ class PiEditorApp {
     if (!tc) return { ok: false, error: "no test command detected (looked for package.json scripts, pytest, cargo, go)" };
 
     // Spawn a worker shell terminal that runs the tests, visible in the UI.
+    // The env is sanitized: the host session variables must not reach the
+    // tests (they could spawn the pi CLI and crash it, like the agent TUI).
     const shells = detectShells();
     const shell = shells[0] ?? { path: "/bin/zsh", name: "zsh" };
     const id = `term-${++terminalSeq}`;
-    const inst = new PiTerminalInstance(
-      id,
-      this.terminalCwd(),
-      "shell",
-      shell.name,
-      shell.path,
-      ["-c", `${tc.command} ${tc.args.join(" ")}`],
-      { ...process.env },
-      80,
-      24,
-    );
+    let inst: PiTerminalInstance;
+    try {
+      inst = new PiTerminalInstance(
+        id,
+        this.terminalCwd(),
+        "shell",
+        shell.name,
+        shell.path,
+        ["-c", `${tc.command} ${tc.args.join(" ")}`],
+        { ...cleanEnv() },
+        80,
+        24,
+      );
+    } catch (err) {
+      return { ok: false, error: `could not start the test worker: ${(err as Error).message}` };
+    }
     this.terminals.set(inst.id, inst);
     this.verifyWorkers.add(inst.id);
     let output = "";
@@ -528,14 +537,20 @@ class PiEditorApp {
       const timer = verifyTimer;
       if (timer) clearTimeout(timer);
       this.verifyRuns.delete(ownerId);
-      const summary = how === "pass" ? "tests green" : how === "timeout" ? "tests timed out" : "tests failing";
+      let summary: string;
+      if (how === "pass") summary = "tests green";
+      else if (how === "timeout") summary = "tests timed out";
+      else if (how === "cancelled") summary = "cancelled";
+      else summary = "tests failing";
       owner.verify = {
         state: how,
         command: tc.label,
         summary,
         workerId: inst.id,
       };
-      this.writeVerifyContext(ownerId, tc.label, how, code, output);
+      // A cancelled run is not a test result: the previous context file stays
+      // and the agent keeps the last real outcome.
+      if (how !== "cancelled") this.writeVerifyContext(ownerId, tc.label, how, code, output);
       this.send("verify:state", { terminalId: ownerId, verify: owner.verify });
       this.sendInstances();
     };
@@ -555,14 +570,23 @@ class PiEditorApp {
       this.terminals.delete(inst.id);
       this.verifyWorkers.delete(inst.id);
       this.tailer.stopWatching(inst.id);
-      if (!finished) finish(code, code === 0 ? "pass" : "fail");
-      else this.sendInstances();
+      if (!finished) {
+        // A shell -c process exits 0 when the pty delivers an interrupt: the
+        // app's own interrupt mark is the reliable cancellation signal.
+        const how: VerifyState =
+          code === 0 && inst.interruptedAt !== undefined ? "cancelled" : code === 0 ? "pass" : "fail";
+        finish(code, how);
+      } else {
+        this.sendInstances();
+      }
     };
 
     this.verifyRuns.set(ownerId, inst.id);
     owner.verify = { state: "running", command: tc.label, summary: "running…", workerId: inst.id };
-    this.send("verify:state", { terminalId: ownerId, verify: owner.verify });
+    // Instances first: the renderer must know the worker pane before the
+    // running push arrives, so it can auto-activate the worker.
     this.sendInstances();
+    this.send("verify:state", { terminalId: ownerId, verify: owner.verify });
     return { ok: true };
   }
 
@@ -1244,7 +1268,10 @@ class PiEditorApp {
     });
     ipcMain.handle("terminals:close", (_e, id: string) => this.closeTerminal(id));
     ipcMain.handle("terminals:write", (_e, id: string, data: string) => {
-      this.terminals.get(id)?.pty.write(String(data));
+      const inst = this.terminals.get(id);
+      if (!inst) return;
+      if (String(data).includes("\x03")) inst.interruptedAt = Date.now();
+      inst.pty.write(String(data));
     });
     ipcMain.handle("terminals:resize", (_e, id: string, cols: number, rows: number) => {
       this.terminals.get(id)?.pty.resize(Math.max(2, Math.floor(cols)), Math.max(2, Math.floor(rows)));
@@ -1254,7 +1281,10 @@ class PiEditorApp {
       return this.instanceList();
     });
     ipcMain.handle("terminals:abort", (_e, id: string) => {
-      this.terminals.get(id)?.pty.write("\x03");
+      const inst = this.terminals.get(id);
+      if (!inst) return;
+      inst.interruptedAt = Date.now();
+      inst.pty.write("\x03");
     });
 
     // ---- Verify & Iterate ----
