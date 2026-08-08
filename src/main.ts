@@ -5,7 +5,6 @@
  * Right: shared Monaco editor + file explorer, live-synced via the watcher.
  * The bridge extension's sidecar events drive auto-open and the modified list.
  */
-import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/editor/editor.worker?worker";
 import tsWorker from "monaco-editor/language/typescript/ts.worker?worker";
 import jsonWorker from "monaco-editor/language/json/json.worker?worker";
@@ -335,7 +334,7 @@ function renderVerify(pane: Pane): void {
   verifyBadge.className = `verify-badge state-${v.state}`;
   verifyBadge.replaceChildren();
   if (v.state === "running") {
-    // Loader: spinner + label, so it's obvious the run is in flight.
+    // Loader: a spinner and a label show that the run is in flight.
     const spin = document.createElement("span");
     spin.className = "verify-spinner";
     verifyBadge.appendChild(spin);
@@ -743,7 +742,7 @@ function removeSplash(): void {
   document.getElementById("splash")?.remove();
 }
 
-// Safety: never trap the user on the splash if the terminal never appears.
+// Remove the splash. Do not leave the user on it when the terminal never appears.
 setTimeout(removeSplash, 10000);
 
 async function boot(): Promise<void> {
@@ -782,7 +781,7 @@ async function boot(): Promise<void> {
     explorer.setProject(instances[0].cwd);
   }
   // The project may only be known after the instance list arrives — re-query
-  // the test command now that it is (belt for the boot race).
+  // Query the test command again. The project is now known (the boot query ran too early).
   void refreshTestCommand();
 }
 

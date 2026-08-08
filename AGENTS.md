@@ -125,6 +125,11 @@ The renderer never talks to the agent. It only renders what main pushes.
   - `timeline-test.mjs`: the same greeting.ts fixture
   - `verify-test.mjs`: package.json with a `test` script and a buggy
     math.js (`a + b + 1`); the suite restores the bug itself
+- Run every suite against a FRESH instance. Suites share the app instance
+  and the events directory; running two suites against one instance makes
+  the second one fail on stale state.
+- The events directory persists across app launches. A fresh instance
+  tails from the current file size, so it never replays phantom history.
 - Test pollution persists on disk. Reset the fixture after a suite that
   modifies it, or the next suite fails on stale state.
 - Renderer state is lost on reload. The modified list and the timeline

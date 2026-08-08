@@ -12,7 +12,6 @@ interface DirState {
 }
 
 export class Explorer {
-  private rootEl: HTMLElement;
   private treeEl: HTMLElement;
   private dirs = new Map<string, DirState>(); // keyed by abs path
   private projectCwd: string | null = null;
@@ -22,7 +21,6 @@ export class Explorer {
   private onOpenFile: (absPath: string, preview?: boolean) => void = () => {};
 
   constructor(container: HTMLElement) {
-    this.rootEl = container;
     this.treeEl = container.querySelector("#explorer-tree") as HTMLElement;
     void this.renderRoot(); // show the empty state before any project is opened
   }

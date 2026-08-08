@@ -7,7 +7,7 @@
  * (tool calls, busy state) to sidecar files we tail — that powers auto-open
  * of files mid-run and the modified-files panel.
  */
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme } from "electron";
 import { spawnSync } from "node:child_process";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, readdir, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
@@ -15,7 +15,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PtyTerminal } from "./pty-terminal.js";
-import { SidecarTailer } from "./sidecar.js";
+import { SidecarEvent, SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
 import type {
   ExplorerEntry,
@@ -36,7 +36,6 @@ const MAX_TIMELINE_EVENTS = 400;
 const MAX_TIMELINE_CONTENT_BYTES = 4 * 1024 * 1024;
 /** A watcher change within this window after a tool event is the same action. */
 const TOOL_CHANGE_DEDUP_MS = 1500;
-const FILE_TOOLS = new Set(["write", "edit", "apply_patch", "create_file", "insert"]);
 const BRIDGE_EXTENSION = `
 /**
  * pi-editor bridge extension — auto-generated, do not edit.
@@ -46,6 +45,7 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const FILE_TOOLS = new Set(["write", "edit", "apply_patch", "create_file", "insert"]);
+
 
 export default function (pi: ExtensionAPI): void {
   const dir = process.env.PI_EDITOR_EVENTS_DIR;
@@ -516,7 +516,7 @@ class PiEditorApp {
 
   // -------------------------------------------------------------- sidecar ---
 
-  private handleSidecarEvent(terminalId: string, event: { t: string; toolName?: string; path?: string; edits?: unknown }): void {
+  private handleSidecarEvent(terminalId: string, event: SidecarEvent): void {
     const inst = this.terminals.get(terminalId);
     if (!inst) return;
     switch (event.t) {
@@ -543,20 +543,23 @@ class PiEditorApp {
         const path = this.resolvePath(rawPath);
         if (!path || !this.withinProject(path)) return;
         const toolName = String(event.toolName ?? "");
-        // Capture the pre-run content for files the agent edits.
-        if (!inst.baselines.has(path)) {
-          if (toolName === "edit" || toolName === "apply_patch") {
-            const cached = this.watcher?.lastContents.get(path);
-            if (cached !== undefined) {
-              inst.baselines.set(path, cached);
-            } else {
-              inst.baselines.set(path, this.reconstructBaseline(path, event.edits));
+        // Pre-run baseline capture. The rules:
+        // - agent_start snapshots the watcher cache (best source when present).
+        // - edit/apply_patch reconstruct from the edit args — correct in both
+        //   poll orderings (landed or not). They also recover a null baseline
+        //   poisoned by a first-touch write that had no cached prev.
+        // - write/create_file defer to the watcher change event, which knows
+        //   the authoritative status and carries prev when available.
+        if (toolName === "edit" || toolName === "apply_patch") {
+          const current = inst.baselines.get(path);
+          if (current === undefined) {
+            const status = inst.modified.get(path)?.status;
+            if (status !== "created") {
+              inst.baselines.set(path, this.reconstructBaseline(path, event.edits) ?? this.watcher?.lastContents.get(path) ?? null);
             }
-          } else {
-            // A write to an EXISTING file is a modification: baseline from the
-            // cache if known; only genuinely new files get null (created).
-            const cached = this.watcher?.lastContents.get(path);
-            inst.baselines.set(path, cached !== undefined ? cached : null);
+            // A file created this run stays undefined; the change event sets null.
+          } else if (current === null && inst.modified.get(path)?.status === "modified") {
+            inst.baselines.set(path, this.reconstructBaseline(path, event.edits) ?? null);
           }
         }
         this.recordModified(inst, path, toolName === "write" ? this.classifyWrite(path) : "modified");
@@ -704,7 +707,12 @@ class PiEditorApp {
 
   private recordModified(inst: PiTerminalInstance, absPath: string, status: "created" | "modified"): void {
     const p = this.canonicalPath(absPath);
-    if (!inst.modified.has(p)) {
+    const existing = inst.modified.get(p);
+    if (existing) {
+      // The watcher status is authoritative: it knows whether the file
+      // existed before the first change it ever saw for this path.
+      existing.status = status;
+    } else {
       inst.modified.set(p, { path: p, relPath: this.rel(p), status });
     }
   }
@@ -767,6 +775,20 @@ class PiEditorApp {
       const path = this.canonicalPath(change.path);
       const relPath = this.rel(path);
       const now = Date.now();
+      // The watcher change event is the baseline authority for writes: it
+      // carries the pre-change content, captured atomically before the cache
+      // update. This is correct no matter which poll (sidecar vs watcher)
+      // processed first — the tool event itself never sets write baselines.
+      // A modified file without prev (first touch) stays UNDEFINED: reverting
+      // refuses instead of deleting a file that existed pre-run.
+      for (const inst of this.terminals.values()) {
+        if (!inst.busy || inst.baselines.has(path)) continue;
+        if (change.status === "created") {
+          inst.baselines.set(path, null);
+        } else if (change.prev !== undefined) {
+          inst.baselines.set(path, change.prev);
+        }
+      }
       // Attribute the change: the terminal whose recent tool event touched
       // this path owns it (attach the authoritative disk content to its tool
       // point — no extra dot). If nobody claims it (bash-driven or external),

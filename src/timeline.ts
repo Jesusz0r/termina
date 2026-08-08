@@ -6,7 +6,6 @@
 import type { TimelineEvent } from "../shared/types";
 
 export class TimelineView {
-  private root: HTMLElement;
   private dotsEl: HTMLElement;
   private countEl: HTMLElement;
   private btnPlay: HTMLElement;
@@ -20,7 +19,6 @@ export class TimelineView {
   private onJump: (ev: TimelineEvent) => void = () => {};
 
   constructor(container: HTMLElement) {
-    this.root = container;
     this.dotsEl = container.querySelector("#timeline-dots")!;
     this.countEl = container.querySelector("#timeline-count")!;
     this.btnPlay = container.querySelector("#btn-timeline-play")!;
@@ -59,7 +57,7 @@ export class TimelineView {
     this.countEl.textContent = `(${this.events.length})`;
     this.btnPlay.hidden = this.events.length === 0;
     // Keep the newest dot in view — but only when the user is already near
-    // the end, so examining an old moment isn't yanked away by new events.
+    // the end, so new events do not pull the view away from an old moment.
     const nearEnd = this.dotsEl.scrollLeft + this.dotsEl.clientWidth >= this.dotsEl.scrollWidth - 24;
     if (nearEnd) this.dotsEl.scrollLeft = this.dotsEl.scrollWidth;
   }
@@ -97,7 +95,7 @@ export class TimelineView {
       this.dotsEl.appendChild(dot);
     }
     // Keep the newest dot in view — but only when the user is already near
-    // the end, so examining an old moment isn't yanked away by new events.
+    // the end, so new events do not pull the view away from an old moment.
     const nearEnd = this.dotsEl.scrollLeft + this.dotsEl.clientWidth >= this.dotsEl.scrollWidth - 24;
     if (n > 0 && nearEnd) this.dotsEl.scrollLeft = this.dotsEl.scrollWidth;
   }

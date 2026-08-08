@@ -48,7 +48,7 @@ export class PtyView {
     this.term.onData((data) => onInput(data));
     this.term.onResize(({ cols, rows }) => onResize(cols, rows));
 
-    // Watchdog: force a repaint if the renderer stalls (canvas renderer hiccup).
+    // Watchdog: force a repaint when the renderer stalls (canvas renderer failure).
     this.term.onRender(() => {
       this.lastRender = Date.now();
     });

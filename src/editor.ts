@@ -93,7 +93,7 @@ export class EditorManager {
     }
     // User edits pin the preview into a permanent tab. Programmatic content
     // replacements (watcher/agent live updates) come through as isFlush and
-    // do NOT pin.
+    // do not pin.
     model.onDidChangeContent((e) => {
       if (e.isFlush) return;
       if (this.previewKey === key) this.pinPreview();

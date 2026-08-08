@@ -88,7 +88,9 @@ check("replay button visible", strip.playVisible === true, "");
 const clicked = await evalJs(
   `(() => {
     const dots = [...document.querySelectorAll('#timeline-dots .timeline-dot')];
-    const target = dots.find(d => d.className.includes('t-tool') && d.title.includes('greeting.ts'));
+    // The LAST tool touch of greeting.ts — earlier suites may have left older
+    // dots whose snapshots show an earlier state.
+    const target = dots.filter(d => d.className.includes('t-tool') && d.title.includes('greeting.ts')).at(-1);
     if (!target) return false;
     target.click();
     return true;

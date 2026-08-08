@@ -50,7 +50,7 @@ const run = async () => {
     child.on("exit", (code) => {
       console.log(`electron exited (${code})`);
       // Only auto-relaunch if it actually ran for a bit; avoids a crash-loop
-      // when Electron can't start at all (missing binary, bad config).
+      // when Electron does not start (missing binary, bad config).
       if (Date.now() - startedAt > 3000) {
         setTimeout(launch, 500);
       } else {

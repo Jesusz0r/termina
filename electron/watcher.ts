@@ -17,6 +17,8 @@ export interface FileChange {
   relPath: string;
   content: string;
   status: "created" | "modified";
+  /** The cached content BEFORE this change (absent on the first touch). */
+  prev?: string;
 }
 
 const IGNORED_SEGMENTS = new Set([
@@ -49,7 +51,7 @@ const IGNORED_SEGMENTS = new Set([
   ".ios",
 ]);
 
-const MAX_FILE_SIZE = 2 * 1024 * 1024; // don't read huge files into Monaco
+const MAX_FILE_SIZE = 2 * 1024 * 1024; // do not read huge files into Monaco
 const DEBOUNCE_MS = 120;
 
 export { IGNORED_SEGMENTS };
@@ -157,7 +159,7 @@ export class ProjectWatcher {
     try {
       const buf = await readFile(abs);
       content = buf.toString("utf8");
-      // Cheap binary sniff: common replacement char in binary garbage.
+      // Detect binary files by the replacement character.
       if (content.includes("\uFFFD")) return;
     } catch {
       return; // transient read error — leave as-is
@@ -168,7 +170,7 @@ export class ProjectWatcher {
     // Update the rolling content cache (evict oldest when over the limit).
     // Keys are canonicalized so lookups from anywhere in the app hit.
     const key = this.canonicalize ? this.canonicalize(abs) : abs;
-    const prev = this.lastContents.get(key);
+    const prev = this.lastContents.get(key); // pre-change content, for baselines
     this.cacheBytes += content.length - (prev?.length ?? 0);
     this.lastContents.set(key, content);
     while (this.lastContents.size > 1 && (this.lastContents.size > ProjectWatcher.CACHE_LIMIT || this.cacheBytes > ProjectWatcher.CACHE_BYTES)) {
@@ -178,14 +180,9 @@ export class ProjectWatcher {
       this.cacheBytes -= evicted?.length ?? 0;
       this.lastContents.delete(oldest);
     }
-    const change: FileChange = { path: abs, relPath, content, status };
+    const change: FileChange = { path: abs, relPath, content, status, prev };
     this.onChange(change);
     this.onFileTouched(abs, status);
-  }
-
-  /** Pre-seed the seen-set so already-existing files read as "modified", not "created". */
-  seed(relPaths: string[]): void {
-    for (const p of relPaths) this.seen.add(p);
   }
 
   /** Walk the project (ignoring noise) and mark existing files as seen. */
@@ -214,8 +211,4 @@ export class ProjectWatcher {
       /* non-fatal */
     }
   }
-}
-
-export function relPathOf(root: string, abs: string): string {
-  return relative(root, abs);
 }
