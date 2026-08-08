@@ -160,13 +160,17 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 8px;
+  /* same size as the terminal/editor tab bars; left padding clears the
+     inset traffic lights, which now sit over the explorer column */
+  min-height: 34px;
+  padding: 0 8px 0 78px;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-dim);
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
+  -webkit-app-region: drag;
 }
 
 .explorer-header-actions {
@@ -302,7 +306,7 @@ body {
   border-bottom: 1px solid var(--border);
   min-height: 34px;
   flex: 0 0 auto;
-  padding: 4px 8px 4px 78px; /* left padding clears the inset traffic lights */
+  padding: 0 8px;
   gap: 4px;
   -webkit-app-region: drag; /* drag the window from here */
 }
@@ -512,6 +516,11 @@ body {
   min-height: 34px;
   overflow-x: auto;
   flex: 0 0 auto;
+  -webkit-app-region: drag; /* unify the top strip across all columns */
+}
+
+.editor-tab {
+  -webkit-app-region: no-drag;
 }
 
 .editor-tab {
