@@ -820,6 +820,85 @@ body {
 
 /* --------------------------------------------------------------- statusbar */
 
+/* ------------------------------------------------------------ search modal */
+
+.search-modal .modal {
+  width: 640px;
+  max-width: 90vw;
+}
+
+.search-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+  outline: none;
+}
+
+.search-input:focus {
+  border-color: var(--accent);
+}
+
+.search-results {
+  margin-top: 8px;
+  max-height: 340px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.search-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 8px 2px;
+}
+
+.search-hit {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+}
+
+.search-hit.clickable:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: var(--border);
+  cursor: pointer;
+}
+
+.search-when {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 10px;
+  width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-text {
+  flex: 1 1 auto;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.search-path {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+}
+
 #statusbar {
   display: flex;
   align-items: center;

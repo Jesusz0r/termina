@@ -57,6 +57,24 @@ export interface PlanPayload {
   tasks: PlanTask[];
 }
 
+/** One search hit inside a past session file. */
+export interface SessionHit {
+  /** The session file name (its timestamp is embedded in it). */
+  sessionFile: string;
+  /** 1-based line number in the session file. */
+  line: number;
+  /** The matching line, capped. */
+  text: string;
+  /** One line of context before the hit. */
+  before: string;
+  /** One line of context after the hit. */
+  after: string;
+  /** The session start time (from the file name). */
+  ts: number;
+  /** A project file the hit mentions, resolved against disk (when any). */
+  filePath?: string;
+}
+
 /** One point on the Session Timeline (the "time machine" strip). */
 export interface TimelineEvent {
   seq: number;
@@ -118,7 +136,8 @@ export type MenuCommand =
   | "layout-terminal-fullscreen"
   | "toggle-explorer"
   | "toggle-modified"
-  | "toggle-editor";
+  | "toggle-editor"
+  | "session-search";
 
 export interface PiBridge {
   // push events (main → renderer)
@@ -154,6 +173,8 @@ export interface PiBridge {
   getTimeline(terminalId: string): Promise<TimelineEvent[]>;
   /** The current run's plan tasks (Plan Board). */
   getPlan(terminalId: string): Promise<PlanTask[]>;
+  /** Full-text search over the project's past sessions. */
+  searchSessions(query: string): Promise<SessionHit[]>;
   /** Fetch a snapshot's content on demand (only when a dot is clicked). */
   getTimelineContent(
     terminalId: string,

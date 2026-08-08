@@ -21,6 +21,7 @@ import type {
   ExplorerEntry,
   InstanceSummary,
   ModifiedFile,
+  SessionHit,
   TimelineEvent,
   VerifyInfo,
   VerifyState,
@@ -330,6 +331,7 @@ class PiEditorApp {
           { label: "Toggle Explorer", accelerator: "CmdOrCtrl+B", click: send("toggle-explorer") },
           { label: "Toggle Editor", accelerator: "CmdOrCtrl+E", click: send("toggle-editor") },
           { label: "Toggle Modified Panel", click: send("toggle-modified") },
+          { label: "Search Sessions…", accelerator: "CmdOrCtrl+Shift+F", click: send("session-search") },
           { type: "separator" },
           { label: "Toggle DevTools", accelerator: "Alt+Cmd+I", role: "toggleDevTools" },
           { label: "Reload", accelerator: "CmdOrCtrl+R", role: "reload" },
@@ -665,6 +667,87 @@ class PiEditorApp {
       }
     }
     this.sendPlan(inst);
+  }
+
+  // ------------------------------------------------------ session search ----
+
+  /** The sessions directory name for a project path: "--" + the path with
+   *  slashes replaced by dashes + "--" (pi's convention, canonical path). */
+  private sanitizeSessionDir(absPath: string): string {
+    const p = absPath.replace(/^\/+|\/+$/g, "");
+    return "--" + p.replace(/\//g, "-") + "--";
+  }
+
+  /** Full-text search over the project's past session files. Bounded: the
+   *  50 newest sessions, 2 MB per file, 50 hits, 400 chars per line. */
+  private async searchSessions(query: string): Promise<SessionHit[]> {
+    const cwd = this.projectCwd;
+    const needle = query.trim().toLowerCase();
+    if (!cwd || needle.length < 2) return [];
+    const dir = join(homedir(), ".pi", "agent", "sessions", this.sanitizeSessionDir(this.canonicalPath(cwd)));
+    let files: string[];
+    try {
+      files = (await readdir(dir)).filter((f) => f.endsWith(".jsonl")).sort().reverse();
+    } catch {
+      return []; // no sessions for this project yet
+    }
+    const hits: SessionHit[] = [];
+    for (const file of files.slice(0, 50)) {
+      let content: string;
+      try {
+        const st = await stat(join(dir, file));
+        if (st.size > 2 * 1024 * 1024) continue;
+        content = await readFile(join(dir, file), "utf8");
+      } catch {
+        continue; // unreadable session — skip
+      }
+      const lines = content.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        if (!lines[i].toLowerCase().includes(needle)) continue;
+        hits.push({
+          sessionFile: file,
+          line: i + 1,
+          text: this.snippetLine(lines[i]),
+          before: i > 0 ? this.snippetLine(lines[i - 1]) : "",
+          after: i + 1 < lines.length ? this.snippetLine(lines[i + 1]) : "",
+          ts: this.sessionTimestamp(file),
+          filePath: this.resolveHitPath(lines[i]) ?? undefined,
+        });
+        if (hits.length >= 50) break;
+      }
+      if (hits.length >= 50) break;
+    }
+    return hits;
+  }
+
+  /** Cap a hit line so the result list stays small. */
+  private snippetLine(line: string): string {
+    return line.length > 400 ? line.slice(0, 400) + "…" : line;
+  }
+
+  /** The session start time from the file name (ISO prefix). */
+  private sessionTimestamp(file: string): number {
+    const m = file.match(/^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})/);
+    if (!m) return 0;
+    return new Date(`${m[1]}T${m[2]}:${m[3]}:${m[4]}`).getTime();
+  }
+
+  /** The first token in a line that resolves to a file inside the project. */
+  private resolveHitPath(line: string): string | null {
+    if (!this.projectCwd) return null;
+    const tokens = line.match(/`[^`]+`|"[^"]*"|'[^']*'|\S+/g) ?? [];
+    for (const raw of tokens) {
+      const token = raw.replace(/^[`"']+|[`"']+$/g, "");
+      if (!token.includes("/") && !/\.[a-zA-Z0-9]{1,5}$/.test(token)) continue;
+      const abs = join(this.projectCwd, token);
+      if (!this.withinProject(abs)) continue;
+      try {
+        if (existsSync(abs)) return token;
+      } catch {
+        /* keep scanning */
+      }
+    }
+    return null;
   }
 
   // --------------------------------------------------------- user edits ----
@@ -1296,6 +1379,9 @@ class PiEditorApp {
     // ---- Verify & Iterate ----
     ipcMain.handle("verify:detect", () => this.detectTestCommand(this.terminalCwd()));
     ipcMain.handle("verify:run", (_e, terminalId: string) => this.runVerify(terminalId));
+
+    // ---- Session Search ----
+    ipcMain.handle("session:search", (_e, query: string) => this.searchSessions(query));
 
     // ---- Plan Board ----
     ipcMain.handle("plan:get", (_e, terminalId: string) => this.terminals.get(terminalId)?.plan ?? []);

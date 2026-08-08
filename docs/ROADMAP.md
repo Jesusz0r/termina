@@ -80,16 +80,15 @@ workflow — *what did you change, and do I want it?*
 
 **Why it matters:** turns N idle terminals into an N-worker swarm.
 
-### 7. Session Search
+### 7. Session Search ✅ implemented
 
 | Capability | Detail |
 |---|---|
-| Full-text | Search every past session JSONL in the project |
-| Context | Results shown with surrounding conversation |
-| Jump | Click a hit → open the file it touched |
+| Full-text | Search over the project's past session files (`~/.pi/agent/sessions/<sanitized project>/`), newest 50 sessions, case-insensitive, bounded (2 MB/file, 50 hits, 400 chars/line) |
+| Context | Each hit shows its session time plus the matching line with one line of context before/after |
+| Jump | The first token that resolves to a file inside the project becomes the hit's target; clicking opens it in the editor |
 
-**Why it matters:** "when did we touch the auth flow?" — the project's
-agent memory becomes searchable.
+Triggered by View → Search Sessions (Cmd+Shift+F): a modal with a debounced input and a clickable result list.
 
 ---
 

@@ -39,6 +39,7 @@ import "@xterm/xterm/css/xterm.css";
 import { PtyView } from "./pty-view";
 import { ReviewView } from "./review";
 import { TimelineView } from "./timeline";
+import { SessionSearch } from "./session-search";
 import { Explorer } from "./components/explorer";
 import { toast } from "./components/modals";
 import type { ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, PlanTask } from "../shared/types";
@@ -66,6 +67,9 @@ reviewView.bind({
   },
 });
 const explorer = new Explorer(document.getElementById("explorer")!);
+const sessionSearch = new SessionSearch();
+sessionSearch.bind({ onOpenFile: (path) => void openFileSmart(path, true) });
+(window as unknown as Record<string, unknown>).__sessionSearch = sessionSearch;
 const explorerEl = document.getElementById("explorer")!;
 explorer.bind({ onOpenFile: (path, preview) => void openFileSmart(path, preview ?? true) });
 
@@ -620,6 +624,9 @@ window.pi.onMenuCommand((cmd) => {
       // Toggle Editor = switch between fullscreen and the split view.
       if (splitEl.classList.contains("layout-terminal-fullscreen")) applyLayout("terminal-left");
       else applyLayout("terminal-fullscreen");
+      break;
+    case "session-search":
+      sessionSearch.open();
       break;
     default:
       explorer.handleCommand(cmd.command);
