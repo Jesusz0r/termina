@@ -35,17 +35,14 @@ deletes created files; Accept marks it reviewed; ↩/✓ markers in the list).
 **Why it matters:** this is the single most missing piece in the agent
 workflow — *what did you change, and do I want it?*
 
-### 2. Verify & Iterate — *the loop closer*
+### 2. Verify & Iterate — *the loop closer* ✅ implemented
 
 | Capability | Detail |
 |---|---|
-| Test detection | Read `package.json` scripts, pytest, cargo test, etc. from the project |
-| One-click verify | Opens a worker shell terminal, runs the tests, captures pass/fail + output |
-| Auto-feedback | The result is written to a context file that the bridge extension injects on the agent's next turn → the agent fixes failures itself |
-| Loop state | A "verify" badge on the run: untested / failing / green |
-
-**Why it matters:** *agent works → you verify → it fixes → re-verify* —
-hands-off iteration to green.
+| Test detection | Reads `package.json` scripts (prefer `test`, then first `test:*`), pytest (pytest.ini / `[tool.pytest` in pyproject.toml), `cargo test`, `go test ./...` |
+| One-click verify | `✓ Verify` in the status bar spawns a labeled worker shell terminal, runs the tests, captures pass/fail + output live |
+| Auto-feedback | The result (status + tail of output) is written to a context file the bridge extension injects on the agent's next turn via `before_agent_start` → the agent fixes failures itself (verified in the session record) |
+| Loop state | Badge on the status bar: running / ✗ failing / ✓ green / ⏰ timed out (10 min watchdog); clicking it jumps to the worker terminal |
 
 ### 3. Session Timeline ("time machine")
 

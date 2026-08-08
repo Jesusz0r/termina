@@ -683,6 +683,51 @@ body {
   opacity: 0.75;
 }
 
+#btn-verify {
+  background: transparent;
+  border: none;
+  color: #0d1117;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+#btn-verify:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.18);
+}
+
+#btn-verify:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+#verify-badge {
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 2px 6px;
+  background: rgba(0, 0, 0, 0.15);
+}
+
+#verify-badge:hover {
+  background: rgba(0, 0, 0, 0.28);
+}
+
+#verify-badge.state-pass {
+  color: #0d1117;
+}
+
+#verify-badge.state-fail,
+#verify-badge.state-timeout {
+  background: rgba(180, 40, 40, 0.75);
+  color: #fff;
+}
+
+#verify-badge.state-running {
+  background: rgba(0, 0, 0, 0.22);
+}
+
 
 
 .statusbar-abort:hover:not(:disabled) {

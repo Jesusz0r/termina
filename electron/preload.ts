@@ -12,6 +12,7 @@ import type {
   BusyPayload,
   InstanceSummary,
   ExplorerEntry,
+  VerifyInfo,
 } from "../shared/types.js";
 
 const bridge: PiBridge = {
@@ -40,6 +41,9 @@ const bridge: PiBridge = {
   onBusy: (cb) => {
     ipcRenderer.on("busy", (_e, p: BusyPayload) => cb(p));
   },
+  onVerifyState: (cb) => {
+    ipcRenderer.on("verify:state", (_e, p: { terminalId: string; verify: VerifyInfo }) => cb(p));
+  },
   onFolderOpened: (cb) => {
     ipcRenderer.on("folder:opened", (_e, e: { cwd: string }) => cb(e));
   },
@@ -56,6 +60,8 @@ const bridge: PiBridge = {
   resizeTerminal: (id, cols, rows) => ipcRenderer.invoke("terminals:resize", id, cols, rows),
   getInstances: (): Promise<InstanceSummary[]> => ipcRenderer.invoke("terminals:list"),
   abortTerminal: (id) => ipcRenderer.invoke("terminals:abort", id),
+  detectTest: () => ipcRenderer.invoke("verify:detect"),
+  runVerify: (terminalId) => ipcRenderer.invoke("verify:run", terminalId),
   reviewBaseline: (terminalId, path) => ipcRenderer.invoke("review:baseline", terminalId, path),
   reviewRevert: (terminalId, path) => ipcRenderer.invoke("review:revert", terminalId, path),
 

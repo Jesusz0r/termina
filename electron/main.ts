@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { PtyTerminal } from "./pty-terminal.js";
 import { SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
-import type { ExplorerEntry, InstanceSummary, ModifiedFile } from "../shared/types.js";
+import type { ExplorerEntry, InstanceSummary, ModifiedFile, VerifyInfo, VerifyState } from "../shared/types.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MAX_OPEN_FILE_SIZE = 2 * 1024 * 1024;
@@ -26,7 +26,7 @@ const BRIDGE_EXTENSION = `
 /**
  * pi-editor bridge extension — auto-generated, do not edit.
  */
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -44,6 +44,17 @@ export default function (pi: ExtensionAPI): void {
   };
   pi.on("agent_start", () => log({ t: "agent_start" }));
   pi.on("agent_settled", () => log({ t: "agent_settled" }));
+  // Verify & Iterate: feed the latest test result into the agent's next turn.
+  pi.on("before_agent_start", async () => {
+    let verify: string | null = null;
+    try {
+      verify = readFileSync(join(dir, \`verify-\${id}.md\`), "utf8");
+    } catch {}
+    if (!verify) return;
+    return {
+      message: { customType: "pi-editor-verify", content: verify, display: false },
+    };
+  });
   pi.on("tool_execution_start", async (event) => {
     if (!FILE_TOOLS.has(event.toolName)) return;
     const args = (event.args ?? {}) as { path?: unknown; edits?: unknown };
@@ -87,13 +98,25 @@ class PiTerminalInstance {
   modified = new Map<string, ModifiedFile>();
   /** Pre-run content per path (Change Review): string = baseline, null = created. */
   baselines = new Map<string, string | null>();
+  /** Verify & Iterate: last test run attached to this terminal. */
+  verify: VerifyInfo = { state: "untested", command: null, summary: null };
 
-  constructor(id: string, cwd: string, type: "agent" | "shell", shellName: string | undefined, cmd: string, env: Record<string, string | undefined>, cols: number, rows: number) {
+  constructor(
+    id: string,
+    cwd: string,
+    type: "agent" | "shell",
+    shellName: string | undefined,
+    cmd: string,
+    args: string[],
+    env: Record<string, string | undefined>,
+    cols: number,
+    rows: number,
+  ) {
     this.id = id;
     this.cwd = cwd;
     this.type = type;
     this.shellName = shellName;
-    this.pty = new PtyTerminal({ id, cwd, cmd, args: [], env, cols, rows });
+    this.pty = new PtyTerminal({ id, cwd, cmd, args, env, cols, rows });
   }
 }
 
@@ -105,6 +128,10 @@ class PiEditorApp {
   private eventsDir = join(app.getPath("temp"), "pi-editor-events");
   private tailer = new SidecarTailer(this.eventsDir);
   private paintWatchdog: ReturnType<typeof setInterval> | null = null;
+  /** In-flight verify runs: owner terminal id → worker id. */
+  private verifyRuns = new Map<string, string>();
+  /** Worker terminal ids (kept after the run so tabs can be labeled). */
+  private verifyWorkers = new Set<string>();
 
   // ---------------------------------------------------------------- window --
 
@@ -254,7 +281,7 @@ class PiEditorApp {
       cmd = this.resolvePiBin();
       env = { ...process.env, PI_EDITOR_TERMINAL_ID: id, PI_EDITOR_EVENTS_DIR: this.eventsDir };
     }
-    const inst = new PiTerminalInstance(id, cwd ?? this.terminalCwd(), type, shellName, cmd, env, 80, 24);
+    const inst = new PiTerminalInstance(id, cwd ?? this.terminalCwd(), type, shellName, cmd, [], env, 80, 24);
     this.terminals.set(inst.id, inst);
 
     inst.pty.onData = (data) => this.send("pty:data", { id: inst.id, data });
@@ -269,6 +296,122 @@ class PiEditorApp {
     this.tailer.watch(inst.id);
     this.sendInstances();
     return inst;
+  }
+
+  // ------------------------------------------------------------- verify ----
+
+  /**
+   * Detect the project's test command: package.json scripts (prefer `test`,
+   * then the first `test:*` script), pytest, cargo test, go test.
+   */
+  private detectTestCommand(cwd: string): { command: string; args: string[]; label: string } | null {
+    try {
+      const pkg = JSON.parse(readFileSync(join(cwd, "package.json"), "utf8")) as { scripts?: Record<string, string> };
+      const scripts = pkg.scripts ?? {};
+      const names = Object.keys(scripts);
+      const pick = names.includes("test") ? "test" : names.find((n) => n.startsWith("test:"));
+      if (pick) return { command: "npm", args: ["run", pick], label: `npm run ${pick}` };
+    } catch {
+      /* no package.json */
+    }
+    try {
+      if (existsSync(join(cwd, "pytest.ini")) || (existsSync(join(cwd, "pyproject.toml")) && readFileSync(join(cwd, "pyproject.toml"), "utf8").includes("[tool.pytest"))) {
+        return { command: "pytest", args: [], label: "pytest" };
+      }
+    } catch {
+      /* unreadable */
+    }
+    if (existsSync(join(cwd, "cargo.toml"))) return { command: "cargo", args: ["test"], label: "cargo test" };
+    if (existsSync(join(cwd, "go.mod"))) return { command: "go", args: ["test", "./..."], label: "go test ./..." };
+    return null;
+  }
+
+  private async runVerify(ownerId: string): Promise<{ ok: boolean; error?: string }> {
+    const owner = this.terminals.get(ownerId);
+    if (!owner) return { ok: false, error: "terminal not found" };
+    if (this.verifyRuns.has(ownerId)) return { ok: false, error: "a verify run is already in progress" };
+    const tc = this.detectTestCommand(this.terminalCwd());
+    if (!tc) return { ok: false, error: "no test command detected (looked for package.json scripts, pytest, cargo, go)" };
+
+    // Spawn a worker shell terminal that runs the tests, visible in the UI.
+    const shells = detectShells();
+    const shell = shells[0] ?? { path: "/bin/zsh", name: "zsh" };
+    const id = `term-${++terminalSeq}`;
+    const inst = new PiTerminalInstance(
+      id,
+      this.terminalCwd(),
+      "shell",
+      shell.name,
+      shell.path,
+      ["-c", `${tc.command} ${tc.args.join(" ")}`],
+      { ...process.env },
+      80,
+      24,
+    );
+    this.terminals.set(inst.id, inst);
+    this.verifyWorkers.add(inst.id);
+    let output = "";
+    let finished = false;
+    const MAX_VERIFY_MS = 10 * 60 * 1000;
+    const finish = (code: number | null, how: VerifyState): void => {
+      if (finished) return;
+      finished = true;
+      const timer = verifyTimer;
+      if (timer) clearTimeout(timer);
+      this.verifyRuns.delete(ownerId);
+      const summary = how === "pass" ? "tests green" : how === "timeout" ? "tests timed out" : "tests failing";
+      owner.verify = {
+        state: how,
+        command: tc.label,
+        summary,
+        workerId: inst.id,
+      };
+      this.writeVerifyContext(ownerId, tc.label, how, code, output);
+      this.send("verify:state", { terminalId: ownerId, verify: owner.verify });
+      this.sendInstances();
+    };
+    const verifyTimer = setTimeout(() => {
+      console.warn(`[main] verify worker ${inst.id} timed out after ${MAX_VERIFY_MS / 1000}s`);
+      finish(null, "timeout");
+      inst.pty.kill(); // onExit still fires; finish() already ran
+    }, MAX_VERIFY_MS);
+
+    inst.pty.onData = (data) => {
+      this.send("pty:data", { id: inst.id, data });
+      if (output.length < 200_000) output += data;
+    };
+    inst.pty.onExit = (code) => {
+      console.log(`[main] verify worker ${inst.id} exited code=${code}`);
+      this.send("pty:exit", { id: inst.id, code });
+      this.terminals.delete(inst.id);
+      this.verifyWorkers.delete(inst.id);
+      this.tailer.stopWatching(inst.id);
+      if (!finished) finish(code, code === 0 ? "pass" : "fail");
+      else this.sendInstances();
+    };
+
+    this.verifyRuns.set(ownerId, inst.id);
+    owner.verify = { state: "running", command: tc.label, summary: "running…", workerId: inst.id };
+    this.send("verify:state", { terminalId: ownerId, verify: owner.verify });
+    this.sendInstances();
+    return { ok: true };
+  }
+
+  /** Write the verify result to the context file the bridge extension reads. */
+  private writeVerifyContext(ownerId: string, label: string, state: VerifyState, code: number | null, output: string): void {
+    try {
+      mkdirSync(this.eventsDir, { recursive: true });
+      const stamp = new Date().toLocaleTimeString();
+      const status = state === "pass" ? "✅ PASSED" : state === "timeout" ? "⏰ TIMED OUT" : "❌ FAILED";
+      const body = output.trim().slice(-6000);
+      const md =
+        `## Test run — \`${label}\` — ${stamp}\n\n` +
+        `**Status:** ${status}${code !== null ? ` (exit code ${code})` : ""}\n\n` +
+        (body ? `<details>\n<summary>Output</summary>\n\n\`\`\`text\n${body}\n\`\`\`\n</details>\n` : "");
+      writeFileSync(join(this.eventsDir, `verify-${ownerId}.md`), md, "utf8");
+    } catch (err) {
+      console.warn(`[main] could not write verify context: ${(err as Error).message}`);
+    }
   }
 
   private closeTerminal(id: string): void {
@@ -288,15 +431,20 @@ class PiEditorApp {
     if (inst) inst.pty.write("\x03");
   }
 
-  private sendInstances(): void {
-    const list: InstanceSummary[] = [...this.terminals.values()].map((t) => ({
+  private instanceList(): InstanceSummary[] {
+    return [...this.terminals.values()].map((t) => ({
       id: t.id,
       cwd: t.cwd,
       busy: t.busy,
       type: t.type,
       shellName: t.shellName,
+      verifyWorker: this.verifyWorkers.has(t.id),
+      verify: t.type === "agent" ? t.verify : null,
     }));
-    this.send("instances:list", list);
+  }
+
+  private sendInstances(): void {
+    this.send("instances:list", this.instanceList());
   }
 
   // -------------------------------------------------------------- sidecar ---
@@ -398,6 +546,10 @@ class PiEditorApp {
     this.projectCwd = cwd;
     this.installBridgeExtension(cwd);
     this.startWatcher(cwd);
+    for (const inst of this.terminals.values()) {
+      if (inst.type === "agent") inst.verify = { state: "untested", command: null, summary: null };
+    }
+    this.sendInstances();
     this.send("folder:opened", { cwd });
     return { cwd };
   }
@@ -535,11 +687,15 @@ class PiEditorApp {
     });
     ipcMain.handle("terminals:list", () => {
       this.sendInstances();
-      return [...this.terminals.values()].map((t) => ({ id: t.id, cwd: t.cwd, busy: t.busy, type: t.type, shellName: t.shellName }));
+      return this.instanceList();
     });
     ipcMain.handle("terminals:abort", (_e, id: string) => {
       this.terminals.get(id)?.pty.write("\x03");
     });
+
+    // ---- Verify & Iterate ----
+    ipcMain.handle("verify:detect", () => this.detectTestCommand(this.terminalCwd()));
+    ipcMain.handle("verify:run", (_e, terminalId: string) => this.runVerify(terminalId));
 
     // ---- Change Review ----
     ipcMain.handle("review:baseline", (_e, terminalId: string, path: string) => {

@@ -41,7 +41,7 @@ import { PtyView } from "./pty-view";
 import { ReviewView } from "./review";
 import { Explorer } from "./components/explorer";
 import { toast } from "./components/modals";
-import type { ModifiedFile, InstanceSummary } from "../shared/types";
+import type { ModifiedFile, InstanceSummary, VerifyInfo } from "../shared/types";
 
 const editorMgr = new EditorManager(document.getElementById("editor-container")!);
 const reviewView = new ReviewView();
@@ -74,6 +74,8 @@ const termTabsList = document.getElementById("terminal-tabs-list")!;
 const termContainer = document.getElementById("terminal-container")!;
 const btnNewTerminal = document.getElementById("btn-new-terminal") as HTMLButtonElement;
 const btnAbort = document.getElementById("btn-abort") as HTMLButtonElement;
+const btnVerify = document.getElementById("btn-verify") as HTMLButtonElement;
+const verifyBadge = document.getElementById("verify-badge")!;
 const statusCwd = document.getElementById("status-cwd")!;
 const statusState = document.getElementById("status-state")!;
 const modifiedList = document.getElementById("modified-list")!;
@@ -98,6 +100,8 @@ interface Pane {
   modified: ModifiedFile[];
   accepted: Set<string>;
   reverted: Set<string>;
+  verify: VerifyInfo;
+  verifyWorker: boolean;
 }
 
 const panes = new Map<string, Pane>();
@@ -153,6 +157,8 @@ function createPaneShell(instanceId: string): Pane {
     modified: [],
     accepted: new Set(),
     reverted: new Set(),
+    verify: { state: "untested", command: null, summary: null },
+    verifyWorker: false,
   };
   panes.set(instanceId, pane);
   pane.tabEl.prepend(typeEl);
@@ -218,8 +224,10 @@ async function closePane(instanceId: string): Promise<void> {
 }
 
 function updatePaneTab(pane: Pane): void {
-  pane.nameEl.textContent = pane.cwd ? basenameOf(pane.cwd) : "terminal";
-  pane.tabEl.title = `${pane.cwd ?? "?"}${pane.type === "shell" && pane.shellName ? ` · ${pane.shellName} shell` : " · pi agent"}`;
+  pane.nameEl.textContent = pane.verifyWorker ? "verify" : pane.cwd ? basenameOf(pane.cwd) : "terminal";
+  pane.tabEl.title = pane.verifyWorker
+    ? `verify worker — runs tests for ${pane.cwd ?? "this project"}`
+    : `${pane.cwd ?? "?"}${pane.type === "shell" && pane.shellName ? ` · ${pane.shellName} shell` : " · pi agent"}`;
   pane.statusEl.classList.toggle("busy", pane.busy);
   applyTypeBadge(pane);
 }
@@ -234,6 +242,9 @@ function renderChrome(): void {
     statusState.textContent = "no terminal";
     statusCwd.textContent = "";
     btnAbort.disabled = true;
+    btnVerify.disabled = true;
+    verifyBadge.textContent = "";
+    verifyBadge.hidden = true;
     modifiedList.replaceChildren();
     return;
   }
@@ -241,7 +252,32 @@ function renderChrome(): void {
   statusState.classList.toggle("busy", pane.busy);
   statusCwd.textContent = pane.cwd ?? "";
   btnAbort.disabled = !pane.busy;
+  renderVerify(pane);
   renderModified(pane);
+}
+
+/** Verify & Iterate: badge + button for the active terminal. */
+function renderVerify(pane: Pane): void {
+  const v = pane.verify;
+  const isAgent = pane.type === "agent" && !pane.error;
+  if (!isAgent) {
+    btnVerify.disabled = true;
+    verifyBadge.textContent = "";
+    verifyBadge.hidden = true;
+    return;
+  }
+  btnVerify.disabled = v.state === "running" || !v.command;
+  btnVerify.title = v.command ? `Run ${v.command}` : "No test command detected (package.json, pytest, cargo, go)";
+  if (v.state === "untested") {
+    verifyBadge.textContent = "";
+    verifyBadge.hidden = true;
+    return;
+  }
+  verifyBadge.hidden = false;
+  verifyBadge.className = `verify-badge state-${v.state}`;
+  verifyBadge.textContent =
+    v.state === "running" ? `⟳ verifying · ${v.command ?? ""}` : v.state === "pass" ? `✓ ${v.summary ?? "green"}` : v.state === "timeout" ? `⏰ ${v.summary ?? "timed out"}` : `✗ ${v.summary ?? "failing"}`;
+  verifyBadge.title = v.command ?? "";
 }
 
 function renderModified(pane: Pane): void {
@@ -355,6 +391,20 @@ window.addEventListener("click", () => closeTerminalMenu());
 window.addEventListener("blur", () => closeTerminalMenu());
 btnAbort.addEventListener("click", () => {
   if (activeId) void window.pi.abortTerminal(activeId);
+});
+btnVerify.addEventListener("click", () => {
+  const id = activeId;
+  if (!id) return;
+  void window.pi.runVerify(id).then((res) => {
+    if (!res.ok) toast(res.error ?? "verify failed to start", "warning");
+  });
+});
+verifyBadge.addEventListener("click", () => {
+  const pane = activeId ? panes.get(activeId) : undefined;
+  if (!pane || !pane.verify.workerId) return;
+  const worker = panes.get(pane.verify.workerId);
+  if (worker) activatePane(worker.instanceId);
+  else toast(pane.verify.summary ?? "", "info");
 });
 btnClearModified.addEventListener("click", (e) => {
   e.stopPropagation();
@@ -542,6 +592,22 @@ window.pi.onBusy(({ instanceId, busy }) => {
   if (activeId === instanceId) renderChrome();
 });
 
+window.pi.onVerifyState(({ terminalId, verify }) => {
+  const pane = panes.get(terminalId);
+  if (!pane) return;
+  const wasRunning = pane.verify.state === "running";
+  pane.verify = verify;
+  if (activeId === terminalId) renderChrome();
+  if (verify.state === "running" && verify.workerId && panes.has(verify.workerId)) {
+    // The worker terminal appears via onInstances; activate it so the user
+    // sees the tests running.
+    activatePane(verify.workerId);
+  } else if (wasRunning && verify.state !== "running" && !pane.verifyWorker) {
+    // Run finished → return focus to the owner so the result badge is visible.
+    activatePane(terminalId);
+  }
+});
+
 window.pi.onToolTarget((p) => {
   editorMgr.markTouched(p.path);
   void editorMgr.openFile(p.path, { preview: false });
@@ -578,6 +644,8 @@ window.pi.onInstances((list: InstanceSummary[]) => {
     pane.busy = summary.busy;
     pane.type = summary.type;
     pane.shellName = summary.shellName;
+    pane.verifyWorker = summary.verifyWorker ?? false;
+    if (summary.verify) pane.verify = summary.verify;
     updatePaneTab(pane);
     if (!projectCwd && summary.cwd) {
       projectCwd = summary.cwd;
@@ -620,6 +688,8 @@ async function boot(): Promise<void> {
       pane.cwd = inst.cwd;
       pane.type = inst.type;
       pane.shellName = inst.shellName;
+      pane.verifyWorker = inst.verifyWorker ?? false;
+      if (inst.verify) pane.verify = inst.verify;
       updatePaneTab(pane);
     }
   }

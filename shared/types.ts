@@ -45,6 +45,31 @@ export interface BusyPayload {
   busy: boolean;
 }
 
+export type VerifyState = "untested" | "running" | "pass" | "fail" | "timeout";
+
+/** Verify & Iterate: the last test run attached to a terminal. */
+export interface VerifyInfo {
+  state: VerifyState;
+  /** Human label of the detected test command, e.g. "npm run test". */
+  command: string | null;
+  /** One-line result summary for the badge. */
+  summary: string | null;
+  /** Id of the worker shell terminal that ran the tests (when running/done). */
+  workerId?: string;
+}
+
+export interface InstanceSummary {
+  id: string;
+  cwd: string;
+  busy: boolean;
+  type: TerminalType;
+  shellName?: string;
+  /** True when this terminal is a verify worker running tests. */
+  verifyWorker?: boolean;
+  /** Verify state for agent terminals; null for plain shells. */
+  verify?: VerifyInfo | null;
+}
+
 export interface ExplorerEntry {
   name: string;
   /** Absolute path. */
@@ -79,6 +104,7 @@ export interface PiBridge {
   onFileDeleted(cb: (p: FileDeletedPayload) => void): void;
   onModifiedList(cb: (p: ModifiedListPayload) => void): void;
   onBusy(cb: (p: BusyPayload) => void): void;
+  onVerifyState(cb: (p: { terminalId: string; verify: VerifyInfo }) => void): void;
   onFolderOpened(cb: (e: { cwd: string }) => void): void;
   onInstances(cb: (list: InstanceSummary[]) => void): void;
 
@@ -91,6 +117,10 @@ export interface PiBridge {
   resizeTerminal(id: string, cols: number, rows: number): Promise<void>;
   getInstances(): Promise<InstanceSummary[]>;
   abortTerminal(id: string): Promise<void>; // sends Ctrl+C into the pty
+
+  // Verify & Iterate
+  detectTest(): Promise<{ command: string; label: string } | null>;
+  runVerify(terminalId: string): Promise<{ ok: boolean; error?: string }>;
   reviewBaseline(terminalId: string, path: string): Promise<{ status: "created" | "modified"; baseline: string | null }>;
   reviewRevert(terminalId: string, path: string): Promise<{ ok: boolean; error?: string }>;
 
