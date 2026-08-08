@@ -124,6 +124,17 @@ body {
   border-top: 1px solid var(--border);
 }
 
+/* TUI fullscreen: the terminal owns the whole window */
+#main-split.layout-terminal-fullscreen #left-pane {
+  width: auto;
+  flex: 1 1 100%;
+  border: none;
+}
+
+#main-split.layout-terminal-fullscreen #divider {
+  display: none;
+}
+
 #left-pane {
   display: flex;
   flex-direction: column;

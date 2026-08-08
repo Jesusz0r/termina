@@ -60,8 +60,10 @@ export type MenuCommand =
   | "layout-terminal-right"
   | "layout-terminal-top"
   | "layout-terminal-bottom"
+  | "layout-terminal-fullscreen"
   | "toggle-explorer"
-  | "toggle-modified";
+  | "toggle-modified"
+  | "toggle-editor";
 
 export interface PiBridge {
   // push events (main → renderer)

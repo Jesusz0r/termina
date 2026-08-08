@@ -206,6 +206,8 @@ function renderModified(pane: Pane): void {
 // ---------------------------------------------------------------- commands --
 
 async function openFileSmart(path: string, preview = true): Promise<void> {
+  // Opening a file from the explorer/modified list reveals the editor.
+  if (splitEl.classList.contains("layout-terminal-fullscreen")) applyLayout("terminal-left");
   const abs = path.startsWith("/") ? path : projectCwd ? `${projectCwd}/${path}` : path;
   await editorMgr.openFile(abs, { preview });
 }
@@ -234,7 +236,8 @@ modifiedPanel.querySelector(".panel-header")?.addEventListener("click", () => {
 
 // ---------------------------------------------------------------- layout ---
 
-type Layout = "terminal-left" | "terminal-right" | "terminal-top" | "terminal-bottom";
+type Layout = "terminal-left" | "terminal-right" | "terminal-top" | "terminal-bottom" | "terminal-fullscreen";
+const DEFAULT_LAYOUT: Layout = "terminal-fullscreen";
 const LAYOUT_KEY = "pi-editor.layout";
 const EXPLORER_KEY = "pi-editor.explorer";
 const MODIFIED_KEY = "pi-editor.modified";
@@ -242,10 +245,20 @@ const MODIFIED_KEY = "pi-editor.modified";
 const splitEl = document.getElementById("main-split")!;
 const modifiedPanelEl = document.getElementById("modified-panel")!;
 const explorerDividerEl = document.getElementById("explorer-divider")!;
+const rightPaneEl = document.getElementById("right-pane")!;
 
 function applyLayout(layout: Layout): void {
-  for (const l of ["terminal-left", "terminal-right", "terminal-top", "terminal-bottom"] as const) {
+  for (const l of ["terminal-left", "terminal-right", "terminal-top", "terminal-bottom", "terminal-fullscreen"] as const) {
     splitEl.classList.toggle(`layout-${l}`, l === layout);
+  }
+  // Fullscreen hides the editor (and explorer) so the TUI owns the window.
+  if (layout === "terminal-fullscreen") {
+    // Hide without persisting: the user's own toggle preference is respected
+    // when they exit fullscreen.
+    setExplorerVisible(false, false);
+    setEditorVisible(false);
+  } else {
+    setEditorVisible(true);
   }
   // Drop inline size overrides from previous drags so the flex layout applies.
   leftPane.style.width = "";
@@ -257,15 +270,19 @@ function applyLayout(layout: Layout): void {
   });
 }
 
-function setExplorerVisible(visible: boolean): void {
+function setExplorerVisible(visible: boolean, persist = true): void {
   explorerEl.style.display = visible ? "" : "none";
   explorerDividerEl.style.display = visible ? "" : "none";
-  localStorage.setItem(EXPLORER_KEY, visible ? "1" : "0");
+  if (persist) localStorage.setItem(EXPLORER_KEY, visible ? "1" : "0");
 }
 
 function setModifiedVisible(visible: boolean): void {
   modifiedPanelEl.style.display = visible ? "" : "none";
   localStorage.setItem(MODIFIED_KEY, visible ? "1" : "0");
+}
+
+function setEditorVisible(visible: boolean): void {
+  rightPaneEl.style.display = visible ? "" : "none";
 }
 
 function isColumnLayout(): boolean {
@@ -293,6 +310,14 @@ window.pi.onMenuCommand((cmd) => {
       break;
     case "toggle-modified":
       setModifiedVisible(modifiedPanelEl.style.display === "none");
+      break;
+    case "layout-terminal-fullscreen":
+      applyLayout("terminal-fullscreen");
+      break;
+    case "toggle-editor":
+      // Toggle Editor = switch between fullscreen and the split view.
+      if (splitEl.classList.contains("layout-terminal-fullscreen")) applyLayout("terminal-left");
+      else applyLayout("terminal-fullscreen");
       break;
     default:
       explorer.handleCommand(cmd.command);
@@ -436,9 +461,9 @@ function removeSplash(): void {
 setTimeout(removeSplash, 10000);
 
 async function boot(): Promise<void> {
-  // Restore layout + panel visibility preferences.
-  const layout = localStorage.getItem(LAYOUT_KEY) as Layout | null;
-  if (layout) applyLayout(layout);
+  // Restore layout + panel visibility preferences (default: TUI fullscreen).
+  const layout = (localStorage.getItem(LAYOUT_KEY) as Layout | null) ?? DEFAULT_LAYOUT;
+  applyLayout(layout);
   if (localStorage.getItem(EXPLORER_KEY) === "0") setExplorerVisible(false);
   if (localStorage.getItem(MODIFIED_KEY) === "0") setModifiedVisible(false);
 
