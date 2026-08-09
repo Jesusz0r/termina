@@ -1,10 +1,10 @@
-# AGENTS.md — Pi-ditor
+# AGENTS.md — Pi/ditor
 
 This file defines the rules for agents that work in this repository.
 
 ## Project
 
-Pi-ditor is a hybrid coding tool. The left side runs the real pi interactive
+Pi/ditor is a hybrid coding tool. The left side runs the real pi interactive
 TUI in a pty. The right side is a Monaco IDE with a file explorer. The two
 sides stay synchronized. The project is a desktop app built with Electron,
 Vite, TypeScript, and node-pty.

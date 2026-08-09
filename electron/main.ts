@@ -39,7 +39,7 @@ const MAX_TIMELINE_CONTENT_BYTES = 4 * 1024 * 1024;
 const TOOL_CHANGE_DEDUP_MS = 1500;
 const BRIDGE_EXTENSION = `
 /**
- * Pi-ditor bridge extension — auto-generated, do not edit.
+ * Pi/ditor bridge extension — auto-generated, do not edit.
  */
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -261,7 +261,7 @@ class PiEditorApp {
       height: 900,
       minWidth: 960,
       minHeight: 600,
-      title: "Pi-ditor",
+      title: "Pi/ditor",
       backgroundColor: "#1e1e1e",
       titleBarStyle: "hiddenInset",
       trafficLightPosition: { x: 12, y: 12 },

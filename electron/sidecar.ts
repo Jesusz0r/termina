@@ -1,5 +1,5 @@
 /**
- * Tails the per-terminal sidecar files written by the Pi-ditor bridge
+ * Tails the per-terminal sidecar files written by the Pi/ditor bridge
  * extension (tool calls, busy state) and emits structured events.
  * Reads only the new bytes since the last poll — a session file grows
  * without bound, and reading it whole every 150 ms would cost O(n^2).

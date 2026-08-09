@@ -1,4 +1,4 @@
-# Pi-ditor
+# Pi/ditor
 
 A **hybrid terminal + IDE**: the left side runs **real pi** — the actual
 interactive TUI — in a pty. The right side is a Monaco IDE that watches the
