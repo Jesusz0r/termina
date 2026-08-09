@@ -72,7 +72,7 @@ const bridge: PiBridge = {
   resizeTerminal: (id, cols, rows) => ipcRenderer.invoke("terminals:resize", id, cols, rows),
   getInstances: (): Promise<InstanceSummary[]> => ipcRenderer.invoke("terminals:list"),
   abortTerminal: (id) => ipcRenderer.invoke("terminals:abort", id),
-  detectTest: () => ipcRenderer.invoke("verify:detect"),
+  detectTest: (terminalId) => ipcRenderer.invoke("verify:detect", terminalId),
   runVerify: (terminalId) => ipcRenderer.invoke("verify:run", terminalId),
   getTimeline: (terminalId) => ipcRenderer.invoke("timeline:get", terminalId),
   getPlan: (terminalId) => ipcRenderer.invoke("plan:get", terminalId),
@@ -82,6 +82,9 @@ const bridge: PiBridge = {
   reportFlush: (requestId, result) => ipcRenderer.invoke("editor:flush-report", requestId, result),
   flushSave: (path, content, writerId) => ipcRenderer.invoke("file:flush-save", path, content, writerId),
   getWorldlines: () => ipcRenderer.invoke("worldline:list"),
+  getWorldlineDetails: (comparisonId, label) => ipcRenderer.invoke("worldline:details", comparisonId, label),
+  getWorldlineFile: (comparisonId, label, relPath) => ipcRenderer.invoke("worldline:file", comparisonId, label, relPath),
+  getWorldlineBaseFile: (comparisonId, relPath) => ipcRenderer.invoke("worldline:base-file", comparisonId, relPath),
   forkRun: (runId) => ipcRenderer.invoke("worldline:fork-run", runId),
   cancelWorldline: (comparisonId) => ipcRenderer.invoke("worldline:cancel", comparisonId),
   discardWorldline: (comparisonId) => ipcRenderer.invoke("worldline:discard", comparisonId),
@@ -91,6 +94,9 @@ const bridge: PiBridge = {
   },
   onWorldlineRemoved: (cb) => {
     ipcRenderer.on("worldline:removed", (_e, e: { comparisonId: string }) => cb(e));
+  },
+  onWorldlineRunsChanged: (cb) => {
+    ipcRenderer.on("worldline:runs-changed", (_e, e: { terminalId: string }) => cb(e));
   },
   dispatchRun: (terminalId) => ipcRenderer.invoke("dispatch:run", terminalId),
   setMineFile: (path, mine) => ipcRenderer.invoke("mine:set", path, mine),

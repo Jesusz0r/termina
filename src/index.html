@@ -96,6 +96,7 @@
                 <span class="timeline-label">⏱ Timeline</span>
                 <span id="timeline-count" class="muted"></span>
                 <div class="spacer"></div>
+                <button id="btn-fork-run" title="Fork the last completed run into two isolated candidates" hidden>⇉ Fork Run</button>
                 <button id="btn-timeline-play" title="Replay this run" hidden>▶</button>
               </div>
               <div id="timeline-dots"></div>
@@ -108,6 +109,14 @@
                 <button id="btn-dispatch" title="Dispatch the plan tasks to parallel agents" hidden>⇉</button>
               </div>
               <ul id="plan-list"></ul>
+            </section>
+            <section id="worldline-panel" class="collapsed">
+              <div class="panel-header">
+                <span>Worldlines</span>
+                <span id="worldline-count" class="muted"></span>
+                <div class="spacer"></div>
+              </div>
+              <div id="worldline-list"></div>
             </section>
             <div id="modified-panel" class="collapsed">
               <div class="panel-header">

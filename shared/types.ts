@@ -210,6 +210,52 @@ export interface WorldlineSummary {
   error: string | null;
   root: string;
   sessionFile: string | null;
+  /** The model of the source run (Candidate B replays it). */
+  model: string | null;
+  /** The thinking level of the source run. */
+  thinkingLevel: string | null;
+  /** When the comparison pair was created (ms epoch). */
+  createdAt: number;
+}
+
+/** One file a candidate changed against its comparison base. */
+export interface WorldlineChangedFile {
+  /** Path relative to the candidate root. */
+  relPath: string;
+  status: "created" | "modified" | "deleted";
+}
+
+/** A declared dependency difference between base and candidate head. */
+export interface DependencyChange {
+  file: string;
+  added: string[];
+  removed: string[];
+  changed: string[];
+}
+
+/** Candidate details, computed on demand (WORLDLINES §6.9). */
+export interface WorldlineDetails {
+  id: string;
+  comparisonId: string;
+  label: "A" | "B";
+  state: WorldlineSummary["state"];
+  error: string | null;
+  /** Provenance: the source run and the states it compares. */
+  sourceRunId: string;
+  comparisonBaseStateId: string;
+  headStateId: string;
+  model: string | null;
+  thinkingLevel: string | null;
+  createdAt: number;
+  /** Source statistics of the candidate head tree. */
+  sourceFiles: number;
+  sourceBytes: number;
+  /** Files differing from the comparison base. */
+  changedFiles: WorldlineChangedFile[];
+  /** Declared dependency changes (base vs head). */
+  dependencies: DependencyChange[];
+  /** Age of the candidate pair in ms. */
+  ageMs: number;
 }
 
 export interface PiBridge {
@@ -241,7 +287,6 @@ export interface PiBridge {
   abortTerminal(id: string): Promise<void>; // sends Ctrl+C into the pty
 
   // Verify & Iterate
-  detectTest(): Promise<{ command: string; label: string } | null>;
   runVerify(terminalId: string): Promise<{ ok: boolean; error?: string }>;
 
   // Session Timeline
@@ -254,6 +299,14 @@ export interface PiBridge {
   // Worldlines: run records
   /** The recorded runs of a terminal (or every terminal). */
   getRuns(terminalId?: string): Promise<RunSummary[]>;
+  /** Detect the test command of a terminal (its own cwd when given). */
+  detectTest(terminalId?: string): Promise<{ command: string; label: string } | null>;
+  /** Candidate details for one card, computed on demand. */
+  getWorldlineDetails(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; details?: WorldlineDetails; error?: string }>;
+  /** Read one candidate file from its isolated tree. */
+  getWorldlineFile(comparisonId: string, label: "A" | "B", relPath: string): Promise<{ ok: boolean; content?: string; error?: string }>;
+  /** Read one file from the comparison base (shared by A and B). */
+  getWorldlineBaseFile(comparisonId: string, relPath: string): Promise<{ ok: boolean; content?: string; error?: string }>;
   /** Materialize a run's start or settled source state for inspection. */
   exportState(runId: string, kind: "start" | "settled"): Promise<{ ok: boolean; dir?: string; error?: string }>;
   /** The renderer's answer to a flush request. */
@@ -276,6 +329,8 @@ export interface PiBridge {
   onWorldlineUpdate(cb: (summary: WorldlineSummary) => void): void;
   /** Push: a comparison was removed. */
   onWorldlineRemoved(cb: (e: { comparisonId: string }) => void): void;
+  /** Push: a terminal's run records changed (Fork Run refresh). */
+  onWorldlineRunsChanged(cb: (e: { terminalId: string }) => void): void;
 
   // Dispatch (parallel agents)
   /** Dispatch the plan board tasks of the terminal to parallel workers. */

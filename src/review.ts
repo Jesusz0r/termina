@@ -69,20 +69,12 @@ export class ReviewView {
     const current = await window.pi.openFile(path);
     const currentText = "content" in current ? current.content : "";
 
-    this.originalModel?.dispose();
-    this.modifiedModel?.dispose();
-    this.originalModel = monaco.editor.createModel(this.baseline ?? "", undefined, monaco.Uri.parse(`file:///review/original/${encodeURIComponent(path)}`));
-    this.modifiedModel = monaco.editor.createModel(currentText, undefined, monaco.Uri.parse(`file:///review/modified/${encodeURIComponent(path)}`));
-    this.diffEditor.setModel({ original: this.originalModel, modified: this.modifiedModel });
-    (window as unknown as Record<string, unknown>).__reviewDebug = {
-      baseline: this.baseline,
-      currentText,
-      original: this.originalModel.getValue(),
-      modified: this.modifiedModel.getValue(),
-    };
+    this.setDiff(this.baseline ?? "", currentText);
 
     const revertBtn = document.getElementById("review-revert") as HTMLButtonElement;
     const acceptBtn = document.getElementById("review-accept") as HTMLButtonElement;
+    revertBtn.style.display = "";
+    acceptBtn.style.display = "";
     revertBtn.disabled = res.baseline === undefined;
     acceptBtn.disabled = false;
 
@@ -96,6 +88,63 @@ export class ReviewView {
     } else {
       document.getElementById("review-hint")!.textContent = "";
     }
+  }
+
+  /** Show the base-to-candidate diff for a worldline file. */
+  async showCandidateDiff(comparisonId: string, label: "A" | "B", relPath: string, absPath: string): Promise<void> {
+    this.terminalId = null;
+    this.path = absPath;
+    this.nameEl.textContent = `${relPath}  ·  ${label}`;
+    const [base, cand] = await Promise.all([
+      window.pi.getWorldlineBaseFile(comparisonId, relPath),
+      window.pi.getWorldlineFile(comparisonId, label, relPath),
+    ]);
+    this.setDiff(base.ok && base.content !== undefined ? base.content : "", cand.ok && cand.content !== undefined ? cand.content : "");
+    const revertBtn = document.getElementById("review-revert") as HTMLButtonElement;
+    const acceptBtn = document.getElementById("review-accept") as HTMLButtonElement;
+    revertBtn.style.display = "none";
+    acceptBtn.style.display = "none";
+    document.getElementById("editor-container")!.style.display = "none";
+    document.getElementById("editor-tabs")!.style.display = "none";
+    this.container.style.display = "flex";
+    const hint = document.getElementById("review-hint")!;
+    hint.textContent = `shared base → candidate ${label}`;
+    if (!base.ok || !cand.ok) hint.textContent = `shared base → candidate ${label} — ${base.error ?? cand.error ?? ""}`;
+  }
+
+  /** Show the A-to-B diff for a worldline file. */
+  async showABDiff(comparisonId: string, relPath: string, aRoot: string | null): Promise<void> {
+    this.terminalId = null;
+    this.path = aRoot ? `${aRoot}/${relPath}` : null;
+    this.nameEl.textContent = `${relPath}  ·  A ⇄ B`;
+    const [a, b] = await Promise.all([
+      window.pi.getWorldlineFile(comparisonId, "A", relPath),
+      window.pi.getWorldlineFile(comparisonId, "B", relPath),
+    ]);
+    this.setDiff(a.ok && a.content !== undefined ? a.content : "", b.ok && b.content !== undefined ? b.content : "");
+    const revertBtn = document.getElementById("review-revert") as HTMLButtonElement;
+    const acceptBtn = document.getElementById("review-accept") as HTMLButtonElement;
+    revertBtn.style.display = "none";
+    acceptBtn.style.display = "none";
+    document.getElementById("editor-container")!.style.display = "none";
+    document.getElementById("editor-tabs")!.style.display = "none";
+    this.container.style.display = "flex";
+    const hint = document.getElementById("review-hint")!;
+    hint.textContent = "candidate A (reference) → candidate B (alternative)";
+  }
+
+  /** Build the diff models from two texts. */
+  private setDiff(originalText: string, modifiedText: string): void {
+    const path = this.path ?? "";
+    this.originalModel?.dispose();
+    this.modifiedModel?.dispose();
+    this.originalModel = monaco.editor.createModel(originalText, undefined, monaco.Uri.parse(`file:///review/original/${encodeURIComponent(path)}`));
+    this.modifiedModel = monaco.editor.createModel(modifiedText, undefined, monaco.Uri.parse(`file:///review/modified/${encodeURIComponent(path)}`));
+    this.diffEditor.setModel({ original: this.originalModel, modified: this.modifiedModel });
+    (window as unknown as Record<string, unknown>).__reviewDebug = {
+      original: this.originalModel.getValue(),
+      modified: this.modifiedModel.getValue(),
+    };
   }
 
   /** Refresh the modified side (for example after a revert changed the file). */

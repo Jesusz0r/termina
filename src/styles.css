@@ -534,9 +534,27 @@ body {
 
 #btn-timeline-play:hover,
 #btn-timeline-play.playing,
-#btn-dispatch:hover {
+#btn-dispatch:hover,
+#btn-fork-run:hover:not(:disabled) {
   color: #fff;
   background: rgba(255, 255, 255, 0.12);
+}
+
+#btn-fork-run {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--yellow);
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+#btn-fork-run:disabled {
+  color: var(--text-dim);
+  border-color: transparent;
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 #btn-dispatch {
@@ -731,6 +749,341 @@ body {
 }
 
 #modified-list .path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------- worldline panel */
+
+#worldline-panel {
+  flex: 0 0 auto;
+  max-height: 45%;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+}
+
+#worldline-panel.collapsed #worldline-list {
+  display: none;
+}
+
+#worldline-list {
+  overflow-y: auto;
+  padding: 0 8px 8px;
+}
+
+.comparison {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 6px 0;
+  background: var(--bg-raised);
+}
+
+.comparison-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.cmp-id {
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.cmp-run {
+  color: var(--text-dim);
+}
+
+.cmp-ab,
+.cmp-discard {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.cmp-ab:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.cmp-discard:hover {
+  color: var(--red);
+  border-color: var(--red);
+}
+
+.candidate-row {
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+}
+
+.candidate-card {
+  flex: 1 1 0;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.candidate-card.has-error {
+  border-color: var(--red);
+}
+
+.cand-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cand-badge {
+  font-size: 10px;
+  font-weight: 700;
+  width: 16px;
+  height: 16px;
+  line-height: 16px;
+  text-align: center;
+  border-radius: 4px;
+  flex: 0 0 auto;
+}
+
+.cand-badge.a {
+  background: #1b3a2b;
+  color: var(--green);
+}
+
+.cand-badge.b {
+  background: #3a311b;
+  color: var(--yellow);
+}
+
+.cand-role {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.cand-state {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--bg-panel);
+  color: var(--text-dim);
+  margin-left: auto;
+}
+
+.cand-state.state-ready,
+.cand-state.state-settled {
+  color: var(--green);
+}
+
+.cand-state.state-running,
+.cand-state.state-verifying,
+.cand-state.state-creating {
+  color: var(--accent);
+}
+
+.cand-state.state-error,
+.cand-state.state-conflict {
+  color: var(--red);
+}
+
+.cand-state.state-cancelled,
+.cand-state.state-discarded {
+  color: var(--text-dim);
+}
+
+.cand-state.state-promoted {
+  color: var(--yellow);
+}
+
+.cand-details {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0 3px;
+  border-radius: 3px;
+}
+
+.cand-details:hover {
+  color: #fff;
+}
+
+.cand-meta {
+  font-size: 10px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cand-details-body {
+  border-top: 1px dashed var(--border);
+  padding-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.cand-stats {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.cand-deps {
+  font-size: 10px;
+  color: var(--yellow);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cand-changed-title {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-top: 2px;
+}
+
+.cand-changed {
+  list-style: none;
+  max-height: 96px;
+  overflow-y: auto;
+}
+
+.cand-changed li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.cand-changed li:hover {
+  background: var(--bg-hover);
+}
+
+.cand-changed .path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cand-loading {
+  color: var(--text-dim);
+  font-style: italic;
+  cursor: default !important;
+}
+
+.cand-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: auto;
+}
+
+.cand-actions button {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  flex: 1 1 0;
+}
+
+.cand-actions button:hover:not(:disabled) {
+  color: #fff;
+  border-color: var(--text-dim);
+}
+
+.cand-actions .cand-verify:hover:not(:disabled) {
+  color: var(--green);
+  border-color: var(--green);
+}
+
+.cand-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* The A/B badge on terminal and editor tabs */
+.terminal-tab .tab-worldline,
+.editor-tab .tab-worldline {
+  font-size: 9px;
+  font-weight: 700;
+  width: 14px;
+  height: 14px;
+  line-height: 14px;
+  text-align: center;
+  border-radius: 3px;
+  flex: 0 0 auto;
+}
+
+.terminal-tab .tab-worldline {
+  background: var(--bg);
+}
+
+.editor-tab .tab-worldline {
+  font-size: 10px;
+  width: 16px;
+  height: 16px;
+  line-height: 16px;
+}
+
+.tab-worldline.a {
+  background: #1b3a2b;
+  color: var(--green);
+}
+
+.tab-worldline.b {
+  background: #3a311b;
+  color: var(--yellow);
+}
+
+/* The A ⇄ B file list modal */
+.worldline-list-modal .modal-body {
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.worldline-list {
+  list-style: none;
+}
+
+.worldline-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.worldline-list li:hover {
+  background: var(--bg-hover);
+}
+
+.worldline-list .path {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

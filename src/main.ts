@@ -40,9 +40,10 @@ import { PtyView } from "./pty-view";
 import { ReviewView } from "./review";
 import { TimelineView } from "./timeline";
 import { SessionSearch } from "./session-search";
+import { WorldlinesView } from "./worldlines";
 import { Explorer } from "./components/explorer";
 import { toast } from "./components/modals";
-import type { ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, PlanTask } from "../shared/types";
+import type { ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, PlanTask, RunSummary } from "../shared/types";
 
 const editorMgr = new EditorManager(document.getElementById("editor-container")!);
 (window as unknown as Record<string, unknown>).__editorMgr = editorMgr;
@@ -113,6 +114,17 @@ const planCount = document.getElementById("plan-count")!;
 const btnDispatch = document.getElementById("btn-dispatch") as HTMLButtonElement;
 const timelineView = new TimelineView(document.getElementById("timeline-strip")!);
 (window as unknown as Record<string, unknown>).__timelineView = timelineView;
+const worldlinesView = new WorldlinesView(document.getElementById("worldline-panel")!);
+(window as unknown as Record<string, unknown>).__worldlinesView = worldlinesView;
+worldlinesView.bind({
+  onCompareBase: (comparisonId, label, relPath, absPath) => void reviewView.showCandidateDiff(comparisonId, label, relPath, absPath),
+  onCompareAB: (comparisonId, relPath) =>
+    void reviewView.showABDiff(comparisonId, relPath, worldlinesView.rootOf(comparisonId, "A")),
+  onOpenFile: (absPath) => void openFileSmart(absPath, false),
+});
+// Editor tabs under a candidate root carry the A/B badge.
+editorMgr.tabBadge = (path) => worldlinesView.labelOfPath(path);
+const btnForkRun = document.getElementById("btn-fork-run") as HTMLButtonElement;
 
 // ---------------------------------------------------------------- panes -----
 
@@ -142,6 +154,10 @@ interface Pane {
   planVersion: number;
   dispatchWorker: boolean;
   dispatchTask: string | undefined;
+  /** The recorded runs of this terminal (Fork Run button). */
+  runs: RunSummary[] | null;
+  /** The candidate-local test command label, when this is a candidate. */
+  testCommand: string | null;
 }
 
 const panes = new Map<string, Pane>();
@@ -160,6 +176,9 @@ function createPaneShell(instanceId: string): Pane {
   statusEl.className = "tab-status";
   const typeEl = document.createElement("span");
   typeEl.className = "tab-type";
+  const wlineEl = document.createElement("span");
+  wlineEl.className = "tab-worldline";
+  wlineEl.style.display = "none";
   const nameEl = document.createElement("span");
   nameEl.className = "tab-name";
   nameEl.textContent = "terminal";
@@ -171,7 +190,7 @@ function createPaneShell(instanceId: string): Pane {
     e.stopPropagation();
     void closePane(instanceId);
   });
-  tabEl.append(statusEl, nameEl, closeEl);
+  tabEl.append(statusEl, nameEl, wlineEl, closeEl);
   tabEl.addEventListener("click", () => activatePane(instanceId));
   setupTabDrag(tabEl);
   termTabsList.appendChild(tabEl);
@@ -207,6 +226,8 @@ function createPaneShell(instanceId: string): Pane {
     planVersion: 0,
     dispatchWorker: false,
     dispatchTask: undefined,
+    runs: null,
+    testCommand: null,
   };
   panes.set(instanceId, pane);
   pane.tabEl.prepend(typeEl);
@@ -249,6 +270,71 @@ function activatePane(instanceId: string): void {
   pane.view.fit();
   renderChrome();
   renderTimeline();
+  loadRuns(pane);
+  refreshCandidateTestCommand(pane);
+}
+
+// ------------------------------------------------------------ fork run -----
+
+/** Fetch the recorded runs of a pane once, then keep them fresh. */
+function loadRuns(pane: Pane): void {
+  if (pane.runs) {
+    updateForkRunButton(pane);
+    return;
+  }
+  void window.pi.getRuns(pane.instanceId).then((runs) => {
+    const p = panes.get(pane.instanceId);
+    if (!p) return;
+    p.runs = runs;
+    if (activeId === pane.instanceId) updateForkRunButton(p);
+  });
+}
+
+/** The newest completed run of the pane, or null. */
+function lastCompletedRun(pane: Pane): RunSummary | null {
+  if (!pane.runs) return null;
+  const settled = pane.runs.filter((r) => r.settledAt !== null);
+  return settled.length ? settled[settled.length - 1] : null;
+}
+
+/** Fork Run is enabled only for an eligible completed run; otherwise the
+ *  button shows the exact ineligibility reason. */
+function updateForkRunButton(pane: Pane): void {
+  const run = lastCompletedRun(pane);
+  if (!run) {
+    btnForkRun.hidden = true;
+    return;
+  }
+  btnForkRun.hidden = false;
+  btnForkRun.disabled = !run.replayable;
+  btnForkRun.title = run.replayable
+    ? `Fork ${run.id} into candidates A (settled) and B (start) — ${run.promptText ?? ""}`.slice(0, 140)
+    : `Fork Run unavailable: ${run.reason ?? "the run is not replayable"}`;
+}
+
+btnForkRun.addEventListener("click", () => {
+  const pane = activeId ? panes.get(activeId) : undefined;
+  const run = pane ? lastCompletedRun(pane) : null;
+  if (!run) return;
+  if (!run.replayable) {
+    toast(`Fork Run unavailable: ${run.reason ?? "the run is not replayable"}`, "warning");
+    return;
+  }
+  void window.pi.forkRun(run.id).then((res) => {
+    if (!res.ok) toast(`Fork Run failed: ${res.error ?? "unknown error"}`, "warning");
+    else toast(`forked ${run.id} — candidates ${res.comparisonId ?? ""} are starting`, "info");
+  });
+});
+
+/** Candidate terminals detect tests from their own isolated tree. */
+function refreshCandidateTestCommand(pane: Pane): void {
+  if (!worldlinesView.labelOfTerminal(pane.instanceId)) return;
+  void window.pi.detectTest(pane.instanceId).then((t) => {
+    const p = panes.get(pane.instanceId);
+    if (!p) return;
+    p.testCommand = t?.label ?? null;
+    if (activeId === pane.instanceId) renderChrome();
+  });
 }
 
 /** Session Timeline: show the active pane's points, fetch once per pane. */
@@ -328,6 +414,16 @@ function updatePaneTab(pane: Pane): void {
       : `${pane.cwd ?? "?"}${pane.type === "shell" && pane.shellName ? ` · ${pane.shellName} shell` : " · pi agent"}`;
   pane.statusEl.classList.toggle("busy", pane.busy);
   applyTypeBadge(pane);
+  // Worldline candidates carry the A/B badge on their tab.
+  const label = worldlinesView.labelOfTerminal(pane.instanceId);
+  const wlineEl = pane.tabEl.querySelector(".tab-worldline") as HTMLElement;
+  if (wlineEl) {
+    wlineEl.textContent = label ?? "";
+    wlineEl.style.display = label ? "" : "none";
+    wlineEl.title = label ? `worldline candidate ${label}` : "";
+    wlineEl.classList.toggle("a", label === "A");
+    wlineEl.classList.toggle("b", label === "B");
+  }
 }
 
 function basenameOf(p: string): string {
@@ -414,8 +510,10 @@ function renderVerify(pane: Pane): void {
     verifyBadge.hidden = true;
     return;
   }
-  btnVerify.disabled = v.state === "running" || !testCommand;
-  btnVerify.title = testCommand ? `Run ${testCommand}` : "No test command detected (package.json, pytest, cargo, go)";
+  // Candidate terminals use their own tree's test command.
+  const command = pane.testCommand ?? testCommand;
+  btnVerify.disabled = v.state === "running" || !command;
+  btnVerify.title = command ? `Run ${command}` : "No test command detected (package.json, pytest, cargo, go)";
   if (v.state === "untested") {
     verifyBadge.textContent = "";
     verifyBadge.hidden = true;
@@ -799,9 +897,12 @@ window.pi.onPtyExit(({ id }) => {
   pane.view.write("\r\n\x1b[90m[pi exited]\x1b[0m\r\n");
 });
 
-/** Lock the editor while any agent terminal of the workspace is busy. */
+/** Lock the editor while a primary agent terminal of the workspace is busy.
+ *  Candidate agents stay isolated: their writes cannot reach the primary. */
 function updateEditorLock(): void {
-  const busy = [...panes.values()].some((p) => p.busy && p.type === "agent" && !p.error);
+  const busy = [...panes.values()].some(
+    (p) => p.busy && p.type === "agent" && !p.error && worldlinesView.labelOfTerminal(p.instanceId) === null,
+  );
   editorMgr.setLocked(busy);
 }
 
@@ -842,6 +943,11 @@ window.pi.onTimelineEvent(({ terminalId, event }) => {
   if (idx === -1) pane.timeline.push(event);
   else pane.timeline[idx] = event;
   if (activeId === terminalId) timelineView.push(event);
+  // A settled run may have become forkable: refresh the Fork Run button.
+  if (event.t === "agent_settled") {
+    pane.runs = null;
+    loadRuns(pane);
+  }
 });
 
 window.pi.onPlanUpdate(({ instanceId, tasks }) => {
@@ -883,9 +989,38 @@ window.pi.onFolderOpened((e) => {
   refreshMine();
   void refreshTestCommand();
   // Fresh context: close every old pane. The new agent terminal arrives on
-  // the next instances:list push.
+  // the next instances:list push. Worldlines are workspace-bound too.
   for (const p of [...panes.values()]) void closePane(p.instanceId);
   renderTimeline();
+});
+
+// ---------------------------------------------------------- worldlines ----
+
+window.pi.onWorldlineRunsChanged(({ terminalId }) => {
+  const pane = panes.get(terminalId);
+  if (!pane) return;
+  pane.runs = null;
+  loadRuns(pane);
+});
+
+window.pi.onWorldlineUpdate((summary) => {
+  worldlinesView.upsert(summary);
+  // Badges: the terminal tab and every editor tab under the candidate root.
+  if (summary.terminalId) {
+    const pane = panes.get(summary.terminalId);
+    if (pane) updatePaneTab(pane);
+  }
+  editorMgr.refreshBadges();
+});
+
+window.pi.onWorldlineRemoved(({ comparisonId }) => {
+  worldlinesView.remove(comparisonId);
+  for (const p of panes.values()) updatePaneTab(p);
+  editorMgr.refreshBadges();
+  if (activeId) {
+    const pane = panes.get(activeId);
+    if (pane) refreshCandidateTestCommand(pane);
+  }
 });
 
 window.pi.onInstances((list: InstanceSummary[]) => {
@@ -960,6 +1095,11 @@ async function boot(): Promise<void> {
   // The project may only be known after the instance list arrives — re-query
   // Query the test command again. The project is now known (the boot query ran too early).
   void refreshTestCommand();
+
+  // Worldlines: rebuild the panel from the live list (push events keep it
+  // current after this).
+  const worldlines = await window.pi.getWorldlines();
+  for (const summary of worldlines) worldlinesView.upsert(summary);
 }
 
 void boot();

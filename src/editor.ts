@@ -31,6 +31,8 @@ export class EditorManager {
   private locked = false;
   /** Fired when a disk write reaches a model with unsaved user edits. */
   onConflict: (path: string) => void = () => {};
+  /** The candidate label of a path ("A"/"B"), or null (worldline badge). */
+  tabBadge: (path: string) => "A" | "B" | null = () => null;
 
   constructor(container: HTMLElement) {
     this.tabsEl = document.getElementById("editor-tabs")!;
@@ -198,6 +200,20 @@ export class EditorManager {
     if (tab) tab.dom.classList.toggle("mine", mine);
   }
 
+  /** Re-apply the worldline badges on every open tab (worldline pushes). */
+  refreshBadges(): void {
+    for (const [key, tab] of this.tabs) {
+      const badge = tab.dom.querySelector(".tab-worldline") as HTMLElement;
+      if (!badge) continue;
+      const label = this.tabBadge(key);
+      badge.textContent = label ?? "";
+      badge.style.display = label ? "" : "none";
+      badge.title = label ? `worldline candidate ${label}` : "";
+      badge.classList.toggle("a", label === "A");
+      badge.classList.toggle("b", label === "B");
+    }
+  }
+
   /** Forget every mine mark (folder switch resets ownership). */
   clearMine(): void {
     this.mineKeys.clear();
@@ -222,6 +238,9 @@ export class EditorManager {
       e.stopPropagation();
       this.onToggleMine(key);
     });
+    const wline = document.createElement("span");
+    wline.className = "tab-worldline";
+    wline.style.display = "none";
     const close = document.createElement("span");
     close.className = "tab-close";
     close.textContent = "×";
@@ -229,7 +248,7 @@ export class EditorManager {
       e.stopPropagation();
       this.closeTab(key);
     });
-    dom.append(dirty, name, mine, close);
+    dom.append(dirty, name, mine, wline, close);
     if (this.mineKeys.has(key)) dom.classList.add("mine");
     dom.addEventListener("click", () => this.activate(key));
     return { key, model, dom, dirtyDot: dirty };

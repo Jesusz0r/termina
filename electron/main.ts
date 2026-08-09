@@ -1186,7 +1186,11 @@ class PiEditorApp {
     const owner = this.terminals.get(ownerId);
     if (!owner) return { ok: false, error: "terminal not found" };
     if (this.verifyRuns.has(ownerId)) return { ok: false, error: "a verify run is already in progress" };
-    const tc = this.detectTestCommand(this.terminalCwd());
+    // A worldline candidate verifies inside its own isolated tree under its
+    // sandbox profile: the tests cannot write the primary project.
+    const candidate = this.worldlines?.candidateSandboxOf(ownerId) ?? null;
+    const cwd = candidate?.root ?? this.terminalCwd();
+    const tc = this.detectTestCommand(cwd);
     if (!tc) return { ok: false, error: "no test command detected (looked for package.json scripts, pytest, cargo, go)" };
 
     // Spawn a worker shell terminal that runs the tests, visible in the UI.
@@ -1196,19 +1200,35 @@ class PiEditorApp {
     const shell = shells[0] ?? { path: "/bin/zsh", name: "zsh" };
     const id = `term-${++terminalSeq}`;
     let inst: PiTerminalInstance;
+    const cmdline = `${tc.command} ${tc.args.join(" ")}`;
     try {
-      inst = new PiTerminalInstance(
-        id,
-        this.terminalCwd(),
-        owner.workspaceId, // the worker inherits the owner's workspace
-        "shell",
-        shell.name,
-        shell.path,
-        ["-c", `${tc.command} ${tc.args.join(" ")}`],
-        { ...cleanEnv() },
-        80,
-        24,
-      );
+      if (candidate) {
+        inst = new PiTerminalInstance(
+          id,
+          candidate.root,
+          owner.workspaceId, // the worker inherits the owner's workspace
+          "shell",
+          shell.name,
+          "sandbox-exec",
+          ["-f", candidate.profilePath, shell.path, "-c", cmdline],
+          { ...cleanEnv(), HOME: candidate.homeDir, TMPDIR: candidate.tmpDir, PI_EDITOR_EVENTS_DIR: candidate.eventsDir },
+          80,
+          24,
+        );
+      } else {
+        inst = new PiTerminalInstance(
+          id,
+          this.terminalCwd(),
+          owner.workspaceId, // the worker inherits the owner's workspace
+          "shell",
+          shell.name,
+          shell.path,
+          ["-c", cmdline],
+          { ...cleanEnv() },
+          80,
+          24,
+        );
+      }
     } catch (err) {
       return { ok: false, error: `could not start the test worker: ${(err as Error).message}` };
     }
@@ -2207,6 +2227,9 @@ class PiEditorApp {
       }
     }
     inst.currentRun = null;
+    // The run record is complete now: the renderer refreshes its Fork Run
+    // button from this push (the settle timeline event arrives earlier).
+    this.send("worldline:runs-changed", { terminalId: inst.id });
   }
 
   /**
@@ -2741,6 +2764,9 @@ class PiEditorApp {
 
     // ---- Worldlines: candidates (WORLDLINES §6.5, §6.6) ----
     ipcMain.handle("worldline:list", () => this.worldlines?.list() ?? []);
+    ipcMain.handle("worldline:details", (_e, comparisonId: string, label: "A" | "B") => this.worldlines?.details(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" });
+    ipcMain.handle("worldline:file", (_e, comparisonId: string, label: "A" | "B", relPath: string) => this.worldlines?.fileOf(comparisonId, label, relPath) ?? { ok: false, error: "worldlines unavailable" });
+    ipcMain.handle("worldline:base-file", (_e, comparisonId: string, relPath: string) => this.worldlines?.baseFileOf(comparisonId, relPath) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:fork-run", async (_e, runId: string) => {
       const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === runId);
       if (!run) return { ok: false, error: "run not found" };
@@ -2812,7 +2838,14 @@ class PiEditorApp {
     });
 
     // ---- Verify & Iterate ----
-    ipcMain.handle("verify:detect", () => this.detectTestCommand(this.terminalCwd()));
+    ipcMain.handle("verify:detect", (_e, terminalId?: string) => {
+      // A candidate terminal detects from its own isolated tree.
+      if (terminalId && this.terminals.has(terminalId)) {
+        const inst = this.terminals.get(terminalId)!;
+        return this.detectTestCommand(inst.cwd);
+      }
+      return this.detectTestCommand(this.terminalCwd());
+    });
     ipcMain.handle("verify:run", (_e, terminalId: string) => this.runVerify(terminalId));
 
     // ---- Mine ----

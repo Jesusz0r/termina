@@ -12,7 +12,9 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statS
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { writeSandboxProfile, type SandboxPaths } from "./sandbox.js";
+import { runGitIn } from "./worldline-git.js";
 import type { SnapshotStore } from "./worldline-git.js";
+import type { DependencyChange, WorldlineChangedFile, WorldlineDetails } from "../shared/types.js";
 
 /** The lifecycle of one candidate (WORLDLINES §6.1). */
 export type WorldlineState =
@@ -44,6 +46,9 @@ export interface WorldlineSummary {
   error: string | null;
   root: string;
   sessionFile: string | null;
+  model: string | null;
+  thinkingLevel: string | null;
+  createdAt: number;
 }
 
 interface CandidateState {
@@ -76,6 +81,13 @@ interface ComparisonState {
   sourceGitDir: string;
   /** The primary project root, resolved at fork time. */
   primaryRoot: string;
+  /** The shared comparison base commit inside the candidate repos. */
+  baseCommit: string | null;
+  /** The model and thinking level of the source run. */
+  model: string | null;
+  thinkingLevel: string | null;
+  /** When the pair was created (ms epoch). */
+  createdAt: number;
   candidates: Map<"A" | "B", CandidateState>;
   phase: "creating" | "running" | "error";
   error: string | null;
@@ -187,6 +199,9 @@ export class WorldlineManager {
       error: cand.error,
       root: cand.dir,
       sessionFile: cand.sessionFile,
+      model: cmp.model,
+      thinkingLevel: cmp.thinkingLevel,
+      createdAt: cmp.createdAt,
     };
   }
 
@@ -200,6 +215,183 @@ export class WorldlineManager {
   /** True when the terminal belongs to a worldline candidate. */
   isCandidateTerminal(terminalId: string): boolean {
     return this.terminalToComparison.has(terminalId);
+  }
+
+  /** The sandbox launch facts of a candidate terminal, or null. */
+  candidateSandboxOf(terminalId: string): {
+    root: string;
+    profilePath: string;
+    homeDir: string;
+    tmpDir: string;
+    eventsDir: string;
+  } | null {
+    const hit = this.terminalToComparison.get(terminalId);
+    if (!hit) return null;
+    const cand = this.comparisons.get(hit.comparisonId)?.candidates.get(hit.label);
+    if (!cand) return null;
+    return { root: cand.dir, profilePath: cand.profilePath, homeDir: cand.homeDir, tmpDir: cand.tmpDir, eventsDir: cand.eventsDir };
+  }
+
+  // ------------------------------------------------------ details on demand ----
+
+  /** Compute one candidate's comparison details (WORLDLINES §6.9). */
+  async details(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; details?: WorldlineDetails; error?: string }> {
+    const cmp = this.comparisons.get(comparisonId);
+    const cand = cmp?.candidates.get(label);
+    if (!cmp || !cand) return { ok: false, error: "candidate not found" };
+    if (!cmp.baseCommit) return { ok: false, error: "the comparison base is missing" };
+    try {
+      const changedFiles = await this.changedFiles(cmp, cand);
+      return {
+        ok: true,
+        details: {
+          id: `${cmp.id}-${label.toLowerCase()}`,
+          comparisonId: cmp.id,
+          label,
+          state: cand.state,
+          error: cand.error,
+          sourceRunId: cmp.sourceRunId,
+          comparisonBaseStateId: cmp.sourceRunId,
+          headStateId: cmp.sourceRunId,
+          model: cmp.model,
+          thinkingLevel: cmp.thinkingLevel,
+          createdAt: cmp.createdAt,
+          sourceFiles: changedFiles.sourceFiles,
+          sourceBytes: changedFiles.sourceBytes,
+          changedFiles: changedFiles.files,
+          dependencies: await this.dependencyChanges(cmp, cand),
+          ageMs: Date.now() - cmp.createdAt,
+        },
+      };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /** Read one file from a candidate tree (no path traversal). */
+  async fileOf(comparisonId: string, label: "A" | "B", relPath: string): Promise<{ ok: boolean; content?: string; error?: string }> {
+    const cmp = this.comparisons.get(comparisonId);
+    const cand = cmp?.candidates.get(label);
+    if (!cmp || !cand) return { ok: false, error: "candidate not found" };
+    const target = resolve(cand.dir, relPath);
+    if (!isInside(resolve(cand.dir), target)) return { ok: false, error: "path escapes the candidate tree" };
+    try {
+      const content = readFileSync(target, "utf8");
+      return { ok: true, content };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /** Read one file from the shared comparison base commit. */
+  async baseFileOf(comparisonId: string, relPath: string): Promise<{ ok: boolean; content?: string; error?: string }> {
+    const cmp = this.comparisons.get(comparisonId);
+    if (!cmp || !cmp.baseCommit) return { ok: false, error: "the comparison base is missing" };
+    const anyCand = cmp.candidates.get("A") ?? cmp.candidates.get("B");
+    if (!anyCand) return { ok: false, error: "candidate not found" };
+    const res = await runGitIn(anyCand.dir, ["show", `${cmp.baseCommit}:${relPath}`]);
+    if (res.code !== 0) return { ok: false, error: res.stderr.trim() || "file not in the base" };
+    return { ok: true, content: res.stdout.toString() };
+  }
+
+  /** Files differing from the base plus head-tree source statistics. */
+  private async changedFiles(cmp: ComparisonState, cand: CandidateState): Promise<{ files: WorldlineChangedFile[]; sourceFiles: number; sourceBytes: number }> {
+    // Working tree vs HEAD: staged, unstaged, and untracked changes.
+    const status = await runGitIn(cand.dir, ["status", "--porcelain"]);
+    // Committed changes since the shared base (A's settled apply and any
+    // agent commits; B usually has none).
+    const committed = await runGitIn(cand.dir, ["diff", "--name-status", cmp.baseCommit!, "HEAD"]);
+    const tree = await runGitIn(cand.dir, ["ls-tree", "-r", "--long", "HEAD"]);
+    const byPath = new Map<string, WorldlineChangedFile>();
+    const set = (relPath: string, status: "created" | "modified" | "deleted"): void => {
+      const prev = byPath.get(relPath);
+      // A later state wins: deleted beats modified, created beats deleted.
+      if (!prev || (status === "deleted" && prev.status !== "deleted") || (status === "created" && prev.status !== "deleted")) {
+        byPath.set(relPath, { relPath, status });
+      }
+    };
+    for (const line of status.stdout.toString().split("\n")) {
+      if (!line) continue;
+      const x = line[0];
+      const y = line[1];
+      const path = line.slice(3);
+      if (x === "?" && y === "?") set(path, "created");
+      else if (x === "D" || y === "D") set(path, "deleted");
+      else if (x === "A") set(path, "created");
+      else set(path, "modified");
+    }
+    for (const line of committed.stdout.toString().split("\n")) {
+      if (!line) continue;
+      const [kind, ...rest] = line.split("\t");
+      const path = rest.join("\t");
+      if (!path) continue;
+      if (kind.startsWith("D")) set(path, "deleted");
+      else if (kind.startsWith("A")) set(path, "created");
+      else if (kind.startsWith("R")) {
+        // Rename: the new name is created, the old one gone.
+        const [oldPath, newPath] = path.split("\t");
+        if (newPath) {
+          set(newPath, "created");
+          set(oldPath, "deleted");
+        } else set(path, "modified");
+      } else set(path, "modified");
+    }
+    let sourceFiles = 0;
+    let sourceBytes = 0;
+    for (const line of tree.stdout.toString().split("\n")) {
+      if (!line) continue;
+      // <mode> <type> <sha> <size>\t<path> — the size is right-padded.
+      const match = /^\S+ \S+ \S+ +(\d+)\t/.exec(line);
+      if (!match) continue;
+      sourceFiles++;
+      sourceBytes += Number(match[1]);
+    }
+    const files = [...byPath.values()].sort((a, b) => a.relPath.localeCompare(b.relPath));
+    return { files, sourceFiles, sourceBytes };
+  }
+
+  /** Declared dependency differences between base and head. */
+  private async dependencyChanges(cmp: ComparisonState, cand: CandidateState): Promise<DependencyChange[]> {
+    const out: DependencyChange[] = [];
+    for (const file of ["package.json", "pyproject.toml"]) {
+      try {
+        const base = await runGitIn(cand.dir, ["show", `${cmp.baseCommit}:${file}`]);
+        const head = readFileSync(join(cand.dir, file), "utf8");
+        if (base.code !== 0) continue;
+        const diff = this.dependencyDiff(file, base.stdout.toString(), head);
+        if (diff) out.push(diff);
+      } catch {
+        /* the file is not comparable */
+      }
+    }
+    return out;
+  }
+
+  /** One dependency difference record, or null when nothing changed. */
+  private dependencyDiff(file: string, baseText: string, headText: string): DependencyChange | null {
+    try {
+      const base = JSON.parse(baseText) as Record<string, Record<string, string> | undefined>;
+      const head = JSON.parse(headText) as Record<string, Record<string, string> | undefined>;
+      const sections = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] as const;
+      const added: string[] = [];
+      const removed: string[] = [];
+      const changed: string[] = [];
+      for (const section of sections) {
+        const b = base[section] ?? {};
+        const h = head[section] ?? {};
+        for (const name of Object.keys(h)) {
+          if (!(name in b)) added.push(name);
+          else if (b[name] !== h[name]) changed.push(name);
+        }
+        for (const name of Object.keys(b)) {
+          if (!(name in h)) removed.push(name);
+        }
+      }
+      if (added.length === 0 && removed.length === 0 && changed.length === 0) return null;
+      return { file, added, removed, changed };
+    } catch {
+      return null;
+    }
   }
 
   // ------------------------------------------------------------ fork-run ----
@@ -261,6 +453,10 @@ export class WorldlineManager {
       sourceRunId: run.id,
       sourceGitDir: "",
       primaryRoot: this.deps.primaryRoot,
+      baseCommit: null,
+      model: run.model,
+      thinkingLevel: run.thinkingLevel,
+      createdAt: Date.now(),
       candidates: new Map(),
       phase: "creating",
       error: null,
@@ -300,6 +496,10 @@ export class WorldlineManager {
       targetDir: cmp.templateDir,
       sourceObjectsDir: join(cmp.sourceGitDir, "objects"),
     });
+    // The template repo has exactly one commit ("pi-ditor base"). Its SHA
+    // is the shared comparison base for both candidates.
+    const head = await runGitIn(cmp.templateDir, ["rev-parse", "HEAD"]);
+    cmp.baseCommit = head.code === 0 ? head.stdout.toString().trim() : null;
     // Copy the fixed runtime allowlist with copy-on-write clones.
     for (const name of RUNTIME_ALLOWLIST) {
       const src = join(this.deps.primaryRoot, name);
@@ -474,6 +674,9 @@ export class WorldlineManager {
       cand.lstart = readProcessStart(pid);
       this.terminalToComparison.set(terminalId, { comparisonId: cmp.id, label: cand.label });
       this.updateManifest(cmp, cand);
+      // The renderer needs the terminal id to badge the tab and to offer
+      // Verify for this candidate.
+      this.pushUpdate(cmp, cand);
     }
   }
 
