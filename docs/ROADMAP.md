@@ -69,16 +69,16 @@ workflow — *what did you change, and do I want it?*
 | Run consumption | The run clears the context at `agent_start`, so the next run never sees stale edits. Mid-run user changes stay out (busy gate + duplicate-fs-event dedupe) |
 | Ownership | Not implemented — "mark files as mine" remains a possible follow-up (the roadmap lists it as "or as context") |
 
-### 6. Dispatch (parallel agents)
+### 6. Dispatch (parallel agents) ✅ implemented
 
 | Capability | Detail |
 |---|---|
-| Split the work | One prompt → independent sub-tasks distributed across idle terminals |
-| Reuse infra | Multi-terminal + busy state already exist; each worker is its own pi session |
-| Collect | All modified files land in one Change Review |
-| Risk guard | Sub-tasks scoped to separate areas / checked for overlap before dispatch |
+| Split the work | The Plan Board's tasks are the units: ⇉ Dispatch sends each task to its own agent worker (new terminal, own pi session, task typed as its prompt) |
+| Reuse infra | Multi-terminal + busy state + per-terminal sidecar events all reused; at most 3 workers per dispatch, owner's partial run interrupted first |
+| Collect | Each worker's modified files and baselines merge into the owner's Change Review when it settles — one review surface |
+| Risk guard | Tasks must mention files; tasks whose paths overlap an earlier pick stay behind (they would fight over the same files); path-less tasks are never dispatched |
 
-**Why it matters:** turns N idle terminals into an N-worker swarm.
+Task states on the owner's Plan Board track the workers live: pending → active (worker starts) → done (worker settles); a worker closed early reverts its task to pending.
 
 ### 7. Session Search ✅ implemented
 

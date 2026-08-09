@@ -231,6 +231,10 @@ class PiEditorApp {
   private verifyRuns = new Map<string, string>();
   /** Worker terminal ids (kept after the run so tabs can be labeled). */
   private verifyWorkers = new Set<string>();
+  /** Dispatch workers: worker terminal id → its task text. */
+  private dispatchWorkers = new Map<string, string>();
+  /** Dispatch runs: worker terminal id → owner + task index. */
+  private dispatchRuns = new Map<string, { ownerId: string; taskIdx: number }>();
   /**
    * Files the user changed while no agent terminal was busy. The agent
    * receives them on its next turn. It adapts instead of overwriting them.
@@ -463,6 +467,18 @@ class PiEditorApp {
       this.send("pty:exit", { id: inst.id, code });
       this.terminals.delete(inst.id);
       this.tailer.stopWatching(inst.id);
+      // A dispatch worker closed before settling: its task goes back to
+      // pending so the board stays honest.
+      const dispatchExit = this.dispatchRuns.get(inst.id);
+      if (dispatchExit) {
+        this.dispatchRuns.delete(inst.id);
+        this.dispatchWorkers.delete(inst.id);
+        const ownerInst = this.terminals.get(dispatchExit.ownerId);
+        if (ownerInst && ownerInst.plan[dispatchExit.taskIdx]) {
+          ownerInst.plan[dispatchExit.taskIdx].state = "pending";
+          this.sendPlan(ownerInst);
+        }
+      }
       this.sendInstances();
     };
 
@@ -750,6 +766,64 @@ class PiEditorApp {
     return null;
   }
 
+  // ------------------------------------------------------------- dispatch --
+
+  /**
+   * Dispatch the plan tasks of a terminal to parallel agent workers. Each
+   * task must mention files; tasks whose files overlap another task stay
+   * behind (they would fight over the same files). At most 3 workers run at
+   * once. The owner's partial run is interrupted first.
+   */
+  private async dispatchRun(ownerId: string): Promise<{ ok: boolean; error?: string; dispatched?: number }> {
+    const owner = this.terminals.get(ownerId);
+    if (!owner || owner.type !== "agent") return { ok: false, error: "terminal not found" };
+    if (owner.plan.length === 0) return { ok: false, error: "the plan board is empty — ask the agent for a plan first" };
+    if (this.dispatchRuns.size > 0) return { ok: false, error: "a dispatch is already running" };
+    if (owner.busy) owner.pty.write("\x03"); // the workers replace the owner's run
+    // Pick tasks with paths, no overlapping files, at most 3.
+    const chosen: Array<{ task: PlanTask; idx: number }> = [];
+    const used = new Set<string>();
+    for (let i = 0; i < owner.plan.length && chosen.length < 3; i++) {
+      const task = owner.plan[i];
+      if (task.paths.length === 0) continue;
+      if (task.paths.some((p) => used.has(p))) continue;
+      task.paths.forEach((p) => used.add(p));
+      chosen.push({ task, idx: i });
+    }
+    if (chosen.length === 0) return { ok: false, error: "no task mentions a file to scope it" };
+    let dispatched = 0;
+    for (const c of chosen) {
+      try {
+        const worker = await this.createTerminal(undefined, { type: "agent" });
+        this.dispatchWorkers.set(worker.id, c.task.text);
+        this.dispatchRuns.set(worker.id, { ownerId, taskIdx: c.idx });
+        // The pi TUI needs a moment to boot before it accepts the prompt.
+        setTimeout(() => {
+          if (this.terminals.has(worker.id)) worker.pty.write(c.task.text + "\r");
+        }, 1500);
+        dispatched++;
+      } catch (err) {
+        console.warn(`[main] dispatch worker failed: ${(err as Error).message}`);
+      }
+    }
+    return { ok: true, dispatched };
+  }
+
+  /** Copy a finished worker's files and baselines into the owner's review. */
+  private collectWorker(worker: PiTerminalInstance, owner: PiTerminalInstance): void {
+    let changed = false;
+    for (const [p, f] of worker.modified) {
+      if (!owner.modified.has(p)) {
+        owner.modified.set(p, f);
+        changed = true;
+      }
+    }
+    for (const [p, b] of worker.baselines) {
+      if (!owner.baselines.has(p)) owner.baselines.set(p, b);
+    }
+    if (changed) this.send("modified:list", { instanceId: owner.id, files: [...owner.modified.values()] });
+  }
+
   // --------------------------------------------------------- user edits ----
 
   /** Record a change the user made. Keep the FIRST prev so the context file
@@ -887,6 +961,8 @@ class PiEditorApp {
       type: t.type,
       shellName: t.shellName,
       verifyWorker: this.verifyWorkers.has(t.id),
+      dispatchWorker: this.dispatchWorkers.has(t.id),
+      dispatchTask: this.dispatchWorkers.get(t.id),
       verify: t.type === "agent" ? t.verify : null,
     }));
   }
@@ -916,12 +992,34 @@ class PiEditorApp {
         inst.runSnapshots = new Map();
         inst.lastToolPath = null;
         this.pushTimeline(inst, { t: "agent_start" });
+        // A dispatch worker started: mark its task active on the owner board.
+        const dispatchStart = this.dispatchRuns.get(inst.id);
+        if (dispatchStart) {
+          const ownerInst = this.terminals.get(dispatchStart.ownerId);
+          if (ownerInst && ownerInst.plan[dispatchStart.taskIdx]) {
+            ownerInst.plan[dispatchStart.taskIdx].state = "active";
+            this.sendPlan(ownerInst);
+          }
+        }
         this.send("busy", { instanceId: inst.id, busy: true });
         this.sendInstances();
         break;
       case "agent_settled":
         inst.busy = false;
         this.finalizePlan(inst);
+        // A dispatch worker finished: mark its task done and collect its
+        // files into the owner's Change Review.
+        const dispatchEnd = this.dispatchRuns.get(inst.id);
+        if (dispatchEnd) {
+          const ownerInst = this.terminals.get(dispatchEnd.ownerId);
+          if (ownerInst) {
+            if (ownerInst.plan[dispatchEnd.taskIdx]) ownerInst.plan[dispatchEnd.taskIdx].state = "done";
+            this.sendPlan(ownerInst);
+            this.collectWorker(inst, ownerInst);
+          }
+          // The run entry goes; the tab label stays until the terminal exits.
+          this.dispatchRuns.delete(inst.id);
+        }
         this.pushTimeline(inst, { t: "agent_settled" });
         this.send("busy", { instanceId: inst.id, busy: false });
         this.send("modified:list", { instanceId: inst.id, files: [...inst.modified.values()] });
@@ -1166,6 +1264,8 @@ class PiEditorApp {
       inst.plan = [];
       inst.touched = new Set();
     }
+    this.dispatchWorkers.clear();
+    this.dispatchRuns.clear();
     this.clearUserEdits();
     this.sendInstances();
     this.send("folder:opened", { cwd });
@@ -1402,6 +1502,9 @@ class PiEditorApp {
     // ---- Verify & Iterate ----
     ipcMain.handle("verify:detect", () => this.detectTestCommand(this.terminalCwd()));
     ipcMain.handle("verify:run", (_e, terminalId: string) => this.runVerify(terminalId));
+
+    // ---- Dispatch ----
+    ipcMain.handle("dispatch:run", (_e, terminalId: string) => this.dispatchRun(terminalId));
 
     // ---- Session Search ----
     ipcMain.handle("session:search", (_e, query: string) => this.searchSessions(query));

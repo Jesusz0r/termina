@@ -88,6 +88,7 @@ const btnClearModified = document.getElementById("btn-clear-modified") as HTMLBu
 const planPanel = document.getElementById("plan-panel")!;
 const planList = document.getElementById("plan-list")!;
 const planCount = document.getElementById("plan-count")!;
+const btnDispatch = document.getElementById("btn-dispatch") as HTMLButtonElement;
 const timelineView = new TimelineView(document.getElementById("timeline-strip")!);
 (window as unknown as Record<string, unknown>).__timelineView = timelineView;
 
@@ -116,6 +117,8 @@ interface Pane {
   planLoaded: boolean;
   /** Bumped on every plan:update push (fetch race guard). */
   planVersion: number;
+  dispatchWorker: boolean;
+  dispatchTask: string | undefined;
 }
 
 const panes = new Map<string, Pane>();
@@ -178,6 +181,8 @@ function createPaneShell(instanceId: string): Pane {
     plan: [],
     planLoaded: false,
     planVersion: 0,
+    dispatchWorker: false,
+    dispatchTask: undefined,
   };
   panes.set(instanceId, pane);
   pane.tabEl.prepend(typeEl);
@@ -290,10 +295,12 @@ async function closePane(instanceId: string): Promise<void> {
 }
 
 function updatePaneTab(pane: Pane): void {
-  pane.nameEl.textContent = pane.verifyWorker ? "verify" : pane.cwd ? basenameOf(pane.cwd) : "terminal";
+  pane.nameEl.textContent = pane.verifyWorker ? "verify" : pane.dispatchWorker ? "dispatch" : pane.cwd ? basenameOf(pane.cwd) : "terminal";
   pane.tabEl.title = pane.verifyWorker
     ? `verify worker — runs tests for ${pane.cwd ?? "this project"}`
-    : `${pane.cwd ?? "?"}${pane.type === "shell" && pane.shellName ? ` · ${pane.shellName} shell` : " · pi agent"}`;
+    : pane.dispatchWorker
+      ? `dispatch worker — ${pane.dispatchTask ?? "plan task"}`
+      : `${pane.cwd ?? "?"}${pane.type === "shell" && pane.shellName ? ` · ${pane.shellName} shell` : " · pi agent"}`;
   pane.statusEl.classList.toggle("busy", pane.busy);
   applyTypeBadge(pane);
 }
@@ -355,6 +362,9 @@ function renderPlan(pane: Pane): void {
     planList.appendChild(li);
   }
   planPanel.classList.toggle("collapsed", pane.plan.length === 0);
+  // Dispatch is possible when the plan has tasks. The button label shows
+  // whether a dispatch is in flight (main re-sends the plan on settle).
+  btnDispatch.hidden = pane.plan.length === 0;
 }
 
 /** Verify & Iterate: badge + button for the active terminal. */
@@ -536,8 +546,17 @@ btnClearModified.addEventListener("click", (e) => {
 modifiedPanel.querySelector(".panel-header")?.addEventListener("click", () => {
   modifiedPanel.classList.toggle("collapsed");
 });
-planPanel.querySelector(".panel-header")?.addEventListener("click", () => {
+planPanel.querySelector(".panel-header")?.addEventListener("click", (e) => {
+  if ((e.target as HTMLElement).closest("#btn-dispatch")) return;
   planPanel.classList.toggle("collapsed");
+});
+btnDispatch.addEventListener("click", () => {
+  const id = activeId;
+  if (!id) return;
+  void window.pi.dispatchRun(id).then((res) => {
+    if (!res.ok) toast(res.error ?? "dispatch failed", "warning");
+    else toast(`dispatched ${res.dispatched ?? 0} task(s) to parallel agents`, "info");
+  });
 });
 
 // ---------------------------------------------------------------- layout ---
@@ -798,6 +817,8 @@ window.pi.onInstances((list: InstanceSummary[]) => {
     pane.type = summary.type;
     pane.shellName = summary.shellName;
     pane.verifyWorker = summary.verifyWorker ?? false;
+    pane.dispatchWorker = summary.dispatchWorker ?? false;
+    pane.dispatchTask = summary.dispatchTask;
     if (summary.verify) pane.verify = summary.verify;
     updatePaneTab(pane);
     if (!projectCwd && summary.cwd) {

@@ -73,6 +73,7 @@ const bridge: PiBridge = {
   getTimeline: (terminalId) => ipcRenderer.invoke("timeline:get", terminalId),
   getPlan: (terminalId) => ipcRenderer.invoke("plan:get", terminalId),
   searchSessions: (query) => ipcRenderer.invoke("session:search", query),
+  dispatchRun: (terminalId) => ipcRenderer.invoke("dispatch:run", terminalId),
   getTimelineContent: (terminalId, seq) => ipcRenderer.invoke("timeline:content", terminalId, seq),
   reviewBaseline: (terminalId, path) => ipcRenderer.invoke("review:baseline", terminalId, path),
   reviewRevert: (terminalId, path) => ipcRenderer.invoke("review:revert", terminalId, path),

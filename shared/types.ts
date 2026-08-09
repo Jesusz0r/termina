@@ -110,6 +110,10 @@ export interface InstanceSummary {
   shellName?: string;
   /** True when this terminal is a verify worker running tests. */
   verifyWorker?: boolean;
+  /** True when this terminal runs a dispatched plan task. */
+  dispatchWorker?: boolean;
+  /** The dispatched task text (for the tab title). */
+  dispatchTask?: string;
   /** Verify state for agent terminals; null for plain shells. */
   verify?: VerifyInfo | null;
 }
@@ -175,6 +179,10 @@ export interface PiBridge {
   getPlan(terminalId: string): Promise<PlanTask[]>;
   /** Full-text search over the project's past sessions. */
   searchSessions(query: string): Promise<SessionHit[]>;
+
+  // Dispatch (parallel agents)
+  /** Dispatch the plan board tasks of the terminal to parallel workers. */
+  dispatchRun(terminalId: string): Promise<{ ok: boolean; error?: string; dispatched?: number }>;
   /** Fetch a snapshot's content on demand (only when a dot is clicked). */
   getTimelineContent(
     terminalId: string,
