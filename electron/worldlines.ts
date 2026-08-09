@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import { writeSandboxProfile, type SandboxPaths } from "./sandbox.js";
 import { runGitIn } from "./worldline-git.js";
 import type { SnapshotStore } from "./worldline-git.js";
+import { dependencyDiff } from "./evidence.js";
 import type { DependencyChange, WorldlineChangedFile, WorldlineDetails } from "../shared/types.js";
 
 /** The lifecycle of one candidate (WORLDLINES §6.1). */
@@ -358,7 +359,7 @@ export class WorldlineManager {
         const base = await runGitIn(cand.dir, ["show", `${cmp.baseCommit}:${file}`]);
         const head = readFileSync(join(cand.dir, file), "utf8");
         if (base.code !== 0) continue;
-        const diff = this.dependencyDiff(file, base.stdout.toString(), head);
+        const diff = this.dependencyChangeOf(file, base.stdout.toString(), head);
         if (diff) out.push(diff);
       } catch {
         /* the file is not comparable */
@@ -368,35 +369,33 @@ export class WorldlineManager {
   }
 
   /** One dependency difference record, or null when nothing changed. */
-  private dependencyDiff(file: string, baseText: string, headText: string): DependencyChange | null {
+  private dependencyChangeOf(file: string, baseText: string, headText: string): DependencyChange | null {
     try {
-      const base = JSON.parse(baseText) as Record<string, Record<string, string> | undefined>;
-      const head = JSON.parse(headText) as Record<string, Record<string, string> | undefined>;
-      const sections = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] as const;
-      const added: string[] = [];
-      const removed: string[] = [];
-      const changed: string[] = [];
-      for (const section of sections) {
-        const b = base[section] ?? {};
-        const h = head[section] ?? {};
-        for (const name of Object.keys(h)) {
-          if (!(name in b)) added.push(name);
-          else if (b[name] !== h[name]) changed.push(name);
-        }
-        for (const name of Object.keys(b)) {
-          if (!(name in h)) removed.push(name);
-        }
-      }
-      if (added.length === 0 && removed.length === 0 && changed.length === 0) return null;
-      return { file, added, removed, changed };
+      const diff = dependencyDiff(baseText, headText);
+      if (diff.added.length === 0 && diff.removed.length === 0 && diff.changed.length === 0) return null;
+      return { file, added: diff.added, removed: diff.removed, changed: diff.changed };
     } catch {
       return null;
     }
   }
 
+  /** The sandbox facts the evidence engine needs for one candidate. */
+  evidenceTarget(comparisonId: string, label: "A" | "B"): {
+    root: string;
+    profilePath: string;
+    homeDir: string;
+    tmpDir: string;
+    state: WorldlineState;
+  } | null {
+    const cmp = this.comparisons.get(comparisonId);
+    const cand = cmp?.candidates.get(label);
+    if (!cmp || !cand) return null;
+    return { root: cand.dir, profilePath: cand.profilePath, homeDir: cand.homeDir, tmpDir: cand.tmpDir, state: cand.state };
+  }
+
   // ------------------------------------------------------------ fork-run ----
 
-  async forkRun(run: ForkableRun): Promise<{ ok: boolean; comparisonId?: string; error?: string }> {
+  async forkRun(run: ForkableRun, opts: { challenge?: boolean } = {}): Promise<{ ok: boolean; comparisonId?: string; error?: string }> {
     // Eligibility (WORLDLINES §6.5): replayable run with complete states.
     if (!run.replayable) return { ok: false, error: run.reason ?? "the run is not replayable" };
     if (!run.startStateId || !run.settledStateId) return { ok: false, error: "the run has no complete source checkpoints" };
@@ -418,7 +417,7 @@ export class WorldlineManager {
       await this.forkSessions(cmp, run);
       this.createSupportDirs(cmp);
       this.copyPiResources(cmp);
-      this.writeStartupControls(cmp, run);
+      this.writeStartupControls(cmp, run, opts.challenge ?? false);
       await this.launchCandidates(cmp, run);
       cmp.phase = "running";
       // Readiness arrives through the bridge session_ready events.
@@ -631,12 +630,14 @@ export class WorldlineManager {
   }
 
   /** The startup control files: what the bridge does on session start. */
-  private writeStartupControls(cmp: ComparisonState, run: ForkableRun): void {
+  private writeStartupControls(cmp: ComparisonState, run: ForkableRun, challenge: boolean): void {
     const payload = this.readPromptPayload(run);
     const a = cmp.candidates.get("A")!;
     const b = cmp.candidates.get("B")!;
     this.writeControl(a, { opId: randomUUID(), action: "none" });
-    if (payload.images.length > 0) {
+    // A challenge replays the original task unchanged with one click; a
+    // plain fork prefills it as editable text.
+    if (payload.images.length > 0 || challenge) {
       // Structured prompt: replay the original content blocks unchanged.
       this.writeControl(b, {
         opId: randomUUID(),

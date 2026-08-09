@@ -1058,6 +1058,10 @@ window.pi.onWorldlineRemoved(({ comparisonId }) => {
   }
 });
 
+window.pi.onEvidenceUpdate((summary) => {
+  worldlinesView.upsertEvidence(summary);
+});
+
 window.pi.onInstances((list: InstanceSummary[]) => {
   for (const summary of list) {
     let pane = panes.get(summary.id);

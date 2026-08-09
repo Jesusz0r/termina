@@ -247,6 +247,33 @@ export interface DependencyChange {
 }
 
 /** Candidate details, computed on demand (WORLDLINES §6.9). */
+/** One measured evidence record for one candidate (WORLDLINES §6.8). */
+export interface EvidenceRecord {
+  kind: "verify" | "dependencies" | "api" | "footprint" | "benchmark";
+  stateId: string;
+  baseStateId: string;
+  status: "pass" | "fail" | "unavailable";
+  result: Record<string, unknown>;
+  reason: string | null;
+}
+
+/** The verdict of one fixed challenge profile. */
+export interface ProfileVerdict {
+  profile: "fewer-dependencies" | "preserve-api" | "simpler-implementation" | "performance-first";
+  winner: "A" | "B" | "tie" | "unavailable";
+  reason: string;
+  eligibility: Record<string, string>;
+}
+
+/** The evidence summary of one comparison (pushed after each run). */
+export interface EvidenceSummary {
+  comparisonId: string;
+  ts: number;
+  byCandidate: Record<"A" | "B", EvidenceRecord[]>;
+  profiles: ProfileVerdict[];
+  error: string | null;
+}
+
 export interface WorldlineDetails {
   id: string;
   comparisonId: string;
@@ -344,6 +371,12 @@ export interface PiBridge {
   openWorldlineTerminal(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; error?: string }>;
   /** Fork one candidate from a timeline moment (WORLDLINES §6). */
   forkPoint(terminalId: string, seq: number): Promise<{ ok: boolean; comparisonId?: string; error?: string }>;
+  /** Launch the challenger of a completed run (WORLDLINES §6.9). */
+  challengeRun(runId: string): Promise<{ ok: boolean; comparisonId?: string; error?: string }>;
+  /** Compute evidence for both candidates of a comparison. */
+  runEvidence(comparisonId: string): Promise<{ ok: boolean; error?: string }>;
+  /** Push: the evidence summary of a comparison changed. */
+  onEvidenceUpdate(cb: (e: EvidenceSummary) => void): void;
   /** Promote a candidate into the primary project (WORLDLINES §6.10). */
   promoteWorldline(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; error?: string; terminalId?: string }>;
   /** Push: one worldline changed. */

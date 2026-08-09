@@ -14,6 +14,7 @@ import type {
   ExplorerEntry,
   RecorderState,
   VerifyInfo,
+  EvidenceSummary,
   TimelineEvent,
   PlanPayload,
   WorldlineSummary,
@@ -97,6 +98,8 @@ const bridge: PiBridge = {
   discardWorldline: (comparisonId) => ipcRenderer.invoke("worldline:discard", comparisonId),
   openWorldlineTerminal: (comparisonId, label) => ipcRenderer.invoke("worldline:open-terminal", comparisonId, label),
   forkPoint: (terminalId, seq) => ipcRenderer.invoke("worldline:fork-point", terminalId, seq),
+  challengeRun: (runId) => ipcRenderer.invoke("worldline:challenge", runId),
+  runEvidence: (comparisonId) => ipcRenderer.invoke("worldline:evidence", comparisonId),
   promoteWorldline: (comparisonId, label) => ipcRenderer.invoke("worldline:promote", comparisonId, label),
   onWorldlineUpdate: (cb) => {
     ipcRenderer.on("worldline:update", (_e, summary: WorldlineSummary) => cb(summary));
@@ -106,6 +109,9 @@ const bridge: PiBridge = {
   },
   onWorldlineRunsChanged: (cb) => {
     ipcRenderer.on("worldline:runs-changed", (_e, e: { terminalId: string }) => cb(e));
+  },
+  onEvidenceUpdate: (cb) => {
+    ipcRenderer.on("worldline:evidence-update", (_e, e: EvidenceSummary) => cb(e));
   },
   onPromotionOpened: (cb) => {
     ipcRenderer.on("promotion:opened", (_e, e: { terminalId: string }) => cb(e));

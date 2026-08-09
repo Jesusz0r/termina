@@ -850,6 +850,33 @@ body {
   cursor: pointer;
 }
 
+.cmp-challenge,
+.cmp-evidence {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.cmp-challenge:hover:not(:disabled) {
+  color: var(--purple);
+  border-color: var(--purple);
+}
+
+.cmp-evidence:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.cmp-challenge:disabled,
+.cmp-evidence:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .cmp-ab:hover {
   color: var(--accent);
   border-color: var(--accent);
@@ -1027,10 +1054,73 @@ body {
   white-space: nowrap;
 }
 
+/* Challenge evidence: verdict chips, evidence lines, winner label */
 .cand-loading {
   color: var(--text-dim);
   font-style: italic;
   cursor: default !important;
+}
+
+.cmp-verdicts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.verdict {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+}
+
+.verdict-verdict-tie {
+  color: var(--yellow);
+  border-color: var(--yellow);
+}
+
+.verdict-verdict-unavailable {
+  color: var(--text-dim);
+}
+
+.verdict-verdict-A,
+.verdict-verdict-B {
+  color: var(--green);
+  border-color: var(--green);
+}
+
+.cand-evidence {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.evidence-line {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.evidence-line.evidence-pass {
+  color: var(--green);
+}
+
+.evidence-line.evidence-fail {
+  color: var(--red);
+}
+
+.evidence-winner {
+  font-size: 10px;
+  color: var(--purple);
+  border: 1px solid var(--purple);
+  border-radius: 3px;
+  padding: 1px 6px;
+  align-self: flex-start;
 }
 
 .cand-actions {

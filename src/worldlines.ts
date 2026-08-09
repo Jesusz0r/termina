@@ -6,7 +6,7 @@
  *
  * DOM updates are incremental: an update push touches only its card.
  */
-import type { WorldlineSummary, WorldlineDetails, WorldlineChangedFile } from "../shared/types";
+import type { WorldlineSummary, WorldlineDetails, WorldlineChangedFile, EvidenceSummary } from "../shared/types";
 import { showConfirm, toast } from "./components/modals";
 
 interface ViewHandlers {
@@ -48,7 +48,9 @@ interface PairView {
   comparisonId: string;
   block: HTMLElement;
   runEl: HTMLElement;
+  verdictsEl: HTMLElement;
   cards: Map<"A" | "B", CandidateCard>;
+  evidence: EvidenceSummary | null;
 }
 
 export class WorldlinesView {
@@ -60,6 +62,9 @@ export class WorldlinesView {
   private byTerminal = new Map<string, "A" | "B">();
   /** candidate root → label, for editor tab badges. */
   private byRoot = new Map<string, "A" | "B">();
+
+  /** Evidence summaries keyed by comparison. */
+  private evidenceByCmp = new Map<string, EvidenceSummary>();
 
   private handlers: ViewHandlers = {
     onCompareBase: () => {},
@@ -101,6 +106,82 @@ export class WorldlinesView {
     this.panel.classList.toggle("collapsed", this.pairs.size === 0);
   }
 
+  /** One evidence summary arrived (challenge ranking). */
+  upsertEvidence(summary: EvidenceSummary): void {
+    this.evidenceByCmp.set(summary.comparisonId, summary);
+    const pair = this.pairs.get(summary.comparisonId);
+    if (!pair) return;
+    pair.evidence = summary;
+    this.renderVerdicts(pair);
+    for (const card of pair.cards.values()) this.renderCard(card);
+  }
+
+  /** The profile verdicts strip of a comparison. */
+  private renderVerdicts(pair: PairView): void {
+    pair.verdictsEl.replaceChildren();
+    const summary = pair.evidence;
+    if (!summary) return;
+    for (const v of summary.profiles) {
+      const chip = document.createElement("span");
+      chip.className = `verdict verdict-${v.winner}`;
+      const label: Record<string, string> = {
+        "fewer-dependencies": "fewer deps",
+        "preserve-api": "api",
+        "simpler-implementation": "footprint",
+        "performance-first": "perf",
+      };
+      chip.textContent = `${label[v.profile]}: ${v.winner}`;
+      chip.title = v.reason;
+      pair.verdictsEl.appendChild(chip);
+    }
+  }
+
+  /** The evidence lines inside a candidate card's details. */
+  private renderEvidence(card: CandidateCard): void {
+    const evidenceEl = card.el.querySelector(".cand-evidence");
+    if (!evidenceEl) return;
+    evidenceEl.replaceChildren();
+    const summary = this.evidenceByCmp.get(card.summary.comparisonId);
+    const records = summary?.byCandidate[card.summary.label];
+    if (!records || records.length === 0) return;
+    for (const rec of records) {
+      const line = document.createElement("div");
+      line.className = `evidence-line evidence-${rec.status}`;
+      const label: Record<string, string> = {
+        verify: "verify",
+        dependencies: "deps",
+        api: "api",
+        footprint: "footprint",
+        benchmark: "benchmark",
+      };
+      const detail =
+        rec.kind === "verify"
+          ? String(rec.result.command ?? "")
+          : rec.kind === "dependencies"
+            ? `+${(rec.result.added as string[] | undefined)?.length ?? 0}`
+            : rec.kind === "footprint"
+              ? `${rec.result.changedFiles ?? "?"} files · ${rec.result.changedLines ?? "?"} lines`
+              : rec.kind === "benchmark"
+                ? `${rec.result.median ?? "?"} ${rec.result.unit ?? ""}`
+                : rec.status === "fail"
+                  ? (rec.result.changed as string[] | undefined)?.join(",") ?? ""
+                  : "";
+      line.textContent = `${label[rec.kind]}: ${rec.status}${detail ? ` (${detail})` : ""}`;
+      line.title = rec.reason ?? "";
+      evidenceEl.appendChild(line);
+    }
+    const verdicts = summary?.profiles;
+    if (verdicts) {
+      for (const v of verdicts) {
+        if (v.winner !== card.summary.label) continue;
+        const win = document.createElement("span");
+        win.className = "evidence-winner";
+        win.textContent = `evidence winner — ${v.profile}`;
+        win.title = v.reason;
+        evidenceEl.appendChild(win);
+      }
+    }
+  }
   /** One candidate summary changed (push or initial list). */
   upsert(summary: WorldlineSummary): void {
     let pair = this.pairs.get(summary.comparisonId);
@@ -128,6 +209,7 @@ export class WorldlinesView {
     }
     pair.block.remove();
     this.pairs.delete(comparisonId);
+    this.evidenceByCmp.delete(comparisonId);
     this.refreshCount();
   }
 
@@ -146,6 +228,16 @@ export class WorldlinesView {
     runEl.textContent = "…";
     const spacer = document.createElement("div");
     spacer.className = "spacer";
+    const challengeBtn = document.createElement("button");
+    challengeBtn.className = "cmp-challenge";
+    challengeBtn.textContent = "⚔ Challenge";
+    challengeBtn.title = "Launch the challenger: B replays the original task automatically";
+    challengeBtn.addEventListener("click", () => void this.challenge(comparisonId));
+    const evidenceBtn = document.createElement("button");
+    evidenceBtn.className = "cmp-evidence";
+    evidenceBtn.textContent = "⚖ Evidence";
+    evidenceBtn.title = "Run the evidence contract for both candidates and rank the profiles";
+    evidenceBtn.addEventListener("click", () => void this.evidence(comparisonId));
     const abBtn = document.createElement("button");
     abBtn.className = "cmp-ab";
     abBtn.textContent = "A ⇄ B";
@@ -156,12 +248,16 @@ export class WorldlinesView {
     discardBtn.textContent = "Discard";
     discardBtn.title = "Discard this comparison and remove every app-owned resource";
     discardBtn.addEventListener("click", () => void this.confirmDiscard(comparisonId));
-    head.append(idEl, runEl, spacer, abBtn, discardBtn);
+    head.append(idEl, runEl, spacer, challengeBtn, evidenceBtn, abBtn, discardBtn);
+
+    const verdictsEl = document.createElement("div");
+    verdictsEl.className = "cmp-verdicts";
+    block.appendChild(verdictsEl);
 
     const row = document.createElement("div");
     row.className = "candidate-row";
 
-    const pair: PairView = { comparisonId, block, runEl, cards: new Map() };
+    const pair: PairView = { comparisonId, block, runEl, verdictsEl, cards: new Map(), evidence: null };
     for (const label of ["A", "B"] as const) {
       const card = this.makeCard(comparisonId, label);
       pair.cards.set(label, card);
@@ -213,7 +309,12 @@ export class WorldlinesView {
     changedTitle.textContent = "Changed vs base";
     const changedList = document.createElement("ul");
     changedList.className = "cand-changed";
-    detailsBody.append(stats, deps, changedTitle, changedList);
+    const evidenceTitle = document.createElement("div");
+    evidenceTitle.className = "cand-changed-title";
+    evidenceTitle.textContent = "Evidence";
+    const evidenceEl = document.createElement("div");
+    evidenceEl.className = "cand-evidence";
+    detailsBody.append(stats, deps, changedTitle, changedList, evidenceTitle, evidenceEl);
 
     const actions = document.createElement("div");
     actions.className = "cand-actions";
@@ -275,9 +376,50 @@ export class WorldlinesView {
     // The details stay valid while the card lives; refresh them on state
     // changes only when the user already opened them.
     if (!card.detailsBody.hidden && card.details) this.fillDetails(card, card.details);
+    this.renderEvidence(card);
+    // The pair header reflects the pair shape (challenge needs both sides).
+    const pair = this.pairs.get(card.summary.comparisonId);
+    if (pair) this.renderPairActions(pair);
+  }
+
+  /** Enable or disable the pair actions from the candidate shapes. */
+  private renderPairActions(pair: PairView): void {
+    const challengeBtn = pair.block.querySelector(".cmp-challenge") as HTMLButtonElement;
+    const evidenceBtn = pair.block.querySelector(".cmp-evidence") as HTMLButtonElement;
+    const a = pair.cards.get("A");
+    const b = pair.cards.get("B");
+    const abBtn = pair.block.querySelector(".cmp-ab") as HTMLButtonElement;
+    const bothReady = a !== undefined && b !== undefined;
+    abBtn.style.display = bothReady ? "" : "none";
+    challengeBtn.style.display = bothReady ? "" : "none";
+    const aSettled = a !== undefined && ["ready", "running", "settled"].includes(a.summary.state);
+    const bSettled = b !== undefined && ["ready", "running", "settled"].includes(b.summary.state);
+    evidenceBtn.disabled = !(aSettled && bSettled);
+    evidenceBtn.title = evidenceBtn.disabled ? "evidence needs both candidates settled" : "Run the evidence contract for both candidates and rank the profiles";
   }
 
   // ------------------------------------------------------------ actions ----
+
+  private async challenge(comparisonId: string): Promise<void> {
+    const pair = this.pairs.get(comparisonId);
+    const a = pair?.cards.get("A");
+    if (!pair || !a) return;
+    const runId = a.summary.sourceRunId;
+    void showConfirm(
+      "Launch challenge",
+      `Candidate B replays the original task of ${runId} unchanged against the run start. The settled candidate A stays the reference.`,
+    ).then(async (r) => {
+      if (!r.confirmed) return;
+      const res = await window.pi.challengeRun(runId);
+      if (!res.ok) toast(`challenge failed: ${res.error ?? "unknown error"}`, "warning");
+      else toast(`challenger launched — ${res.comparisonId ?? ""}`, "info");
+    });
+  }
+
+  private async evidence(comparisonId: string): Promise<void> {
+    const res = await window.pi.runEvidence(comparisonId);
+    if (!res.ok) toast(`evidence failed: ${res.error ?? "unknown error"}`, "warning");
+  }
 
   private async promote(comparisonId: string, label: "A" | "B"): Promise<void> {
     const card = this.pairs.get(comparisonId)?.cards.get(label);

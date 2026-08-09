@@ -22,6 +22,7 @@ import { SidecarEvent, SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
 import { SnapshotStore, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, type SourceState } from "./worldline-git.js";
 import { WorldlineManager, type ForkableRun } from "./worldlines.js";
+import { EvidenceEngine, mineChangeReason, rankProfiles, type EvidenceDeps, type EvidenceRecord, type EvidenceSummary as EngineSummary } from "./evidence.js";
 import type {
   ExplorerEntry,
   InstanceSummary,
@@ -679,6 +680,10 @@ class PiEditorApp {
   private promoteSeq = 0;
   /** Paths the promotion is applying right now (suppress user-edit records). */
   private promotionPaths: Set<string> | null = null;
+  /** Evidence summaries per comparison (WORLDLINES §6.9). */
+  private evidenceByComparison = new Map<string, EngineSummary>();
+  /** Evidence runs serialize: one challenger and one evidence run at a time. */
+  private evidenceQueue: Promise<unknown> = Promise.resolve();
   private static readonly USER_EDITS_MAX = 50;
   /**
    * The last watcher change per path. A single physical write can produce
@@ -1362,6 +1367,102 @@ class PiEditorApp {
    * before the primary watcher starts (WORLDLINES §6.10 step 10-11).
    * Restore a path only when its bytes still equal the app-written value.
    */
+  // ------------------------------------------------- evidence (WORLDLINES §6.8) ----
+
+  /** One sandboxed command run with bounded output and time. */
+  private runSandboxedEvidence(
+    cand: { root: string; profilePath: string; homeDir: string; tmpDir: string },
+    command: string[],
+    timeoutMs: number,
+  ): Promise<{ code: number; stdout: string; timedOut: boolean }> {
+    return new Promise((resolvePromise) => {
+      const shells = detectShells();
+      const shell = shells[0] ?? { path: "/bin/zsh", name: "zsh" };
+      const child = spawn("sandbox-exec", ["-f", cand.profilePath, shell.path, "-c", command.join(" ")], {
+        cwd: cand.root,
+        env: { ...cleanEnv(), HOME: cand.homeDir, TMPDIR: cand.tmpDir },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let timedOut = false;
+      child.stdout.on("data", (d: Buffer) => {
+        if (stdout.length < 200_000) stdout += d.toString("utf8");
+      });
+      child.stderr.on("data", () => undefined);
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGKILL");
+      }, timeoutMs);
+      child.on("error", (err) => {
+        clearTimeout(timer);
+        resolvePromise({ code: -1, stdout: String(err.message), timedOut: false });
+      });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        resolvePromise({ code: code ?? -1, stdout, timedOut });
+      });
+    });
+  }
+
+  /** The base state of a comparison (its source run's start state). */
+  private baseStateOf(comparisonId: string): string | null {
+    const target = this.worldlines?.promotionTarget(comparisonId, "A");
+    if (!target) return null;
+    const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === target.sourceRunId);
+    return run?.startStateId ?? null;
+  }
+
+  /**
+   * Compute evidence for both candidates serially and rank the profiles
+   * (WORLDLINES §6.8: run required evidence for A and B serially).
+   */
+  private runEvidence(comparisonId: string): Promise<{ ok: boolean; error?: string }> {
+    const run = this.evidenceQueue.then(async (): Promise<{ ok: boolean; error?: string }> => {
+      const store = await this.storePromise;
+      const baseStateId = this.baseStateOf(comparisonId);
+      if (!store || !baseStateId) return { ok: false, error: "recording is not available" };
+      // The base test command and benchmark harness come from the base state.
+      const tc = await this.detectTestFromState(store, baseStateId);
+      const bm = await this.benchmarkConfigFrom(store, baseStateId);
+      const deps: EvidenceDeps = {
+        store,
+        baseStateId,
+        primaryRoot: this.primaryWorkspace()?.root ?? "",
+        mineFiles: this.mineFiles,
+        captureHead: async (root, gitDir, parent) => {
+          const state = await this.snapshotWorker.capture(store, await gitHead(root), parent, { root, gitDir });
+          return { commit: state.commit, tree: state.tree };
+        },
+        runSandboxed: (cand, command, timeoutMs) => this.runSandboxedEvidence(cand, command, timeoutMs),
+        baseTestCommand: () => tc,
+        benchmarkConfig: () => bm,
+      };
+      const engine = new EvidenceEngine(deps);
+      const byCandidate: Record<"A" | "B", EvidenceRecord[]> = { A: [], B: [] };
+      const mineReason: Record<"A" | "B", string | null> = { A: null, B: null };
+      for (const label of ["A", "B"] as const) {
+        const target = this.worldlines?.evidenceTarget(comparisonId, label);
+        if (!target) return { ok: false, error: "candidate not found" };
+        const cand = { root: target.root, profilePath: target.profilePath, homeDir: target.homeDir, tmpDir: target.tmpDir, shell: "" };
+        byCandidate[label] = await engine.measure(label, cand);
+        const head = byCandidate[label].find((r) => r.kind === "verify") ?? byCandidate[label][0];
+        if (head) mineReason[label] = await mineChangeReason(store, baseStateId, head.stateId, deps.primaryRoot, this.mineFiles, (p) => realpathSync(p));
+      }
+      const summary: EngineSummary = {
+        comparisonId,
+        ts: Date.now(),
+        byCandidate,
+        profiles: rankProfiles(byCandidate, mineReason),
+        error: null,
+      };
+      this.evidenceByComparison.set(comparisonId, summary);
+      this.send("worldline:evidence-update", summary);
+      return { ok: true };
+    });
+    this.evidenceQueue = run.catch(() => undefined);
+    return run;
+  }
+
   private async recoverPromotions(): Promise<void> {
     const root = join(this.worldsRoot, "promotion-journal");
     let names: string[] = [];
@@ -1598,7 +1699,18 @@ class PiEditorApp {
    */
   private detectTestCommand(cwd: string): { command: string; args: string[]; label: string } | null {
     try {
-      const pkg = JSON.parse(readFileSync(join(cwd, "package.json"), "utf8")) as { scripts?: Record<string, string> };
+      const fromPkg = this.detectTestFromPkg(readFileSync(join(cwd, "package.json"), "utf8"));
+      if (fromPkg) return fromPkg;
+    } catch {
+      /* no package.json */
+    }
+    return this.detectTestFromFiles(cwd);
+  }
+
+  /** The npm test script of a package text (the immutable base command). */
+  private detectTestFromPkg(pkgText: string): { command: string; args: string[]; label: string } | null {
+    try {
+      const pkg = JSON.parse(pkgText) as { scripts?: Record<string, string> };
       const scripts = pkg.scripts ?? {};
       const names = Object.keys(scripts);
       const pick = names.includes("test") ? "test" : names.find((n) => n.startsWith("test:"));
@@ -1606,6 +1718,11 @@ class PiEditorApp {
     } catch {
       /* no package.json */
     }
+    return null;
+  }
+
+  /** The pytest/cargo/go detection of a workspace. */
+  private detectTestFromFiles(cwd: string): { command: string; args: string[]; label: string } | null {
     try {
       if (existsSync(join(cwd, "pytest.ini")) || (existsSync(join(cwd, "pyproject.toml")) && readFileSync(join(cwd, "pyproject.toml"), "utf8").includes("[tool.pytest"))) {
         return { command: "pytest", args: [], label: "pytest" };
@@ -1616,6 +1733,35 @@ class PiEditorApp {
     if (existsSync(join(cwd, "cargo.toml"))) return { command: "cargo", args: ["test"], label: "cargo test" };
     if (existsSync(join(cwd, "go.mod"))) return { command: "go", args: ["test", "./..."], label: "go test ./..." };
     return null;
+  }
+
+  /** The test command of a captured state (the shared base). */
+  private async detectTestFromState(store: SnapshotStore, stateId: string): Promise<{ command: string; args: string[]; label: string } | null> {
+    const pkg = await store.readBlob(stateId, "package.json");
+    if (pkg) {
+      const fromPkg = this.detectTestFromPkg(pkg.toString("utf8"));
+      if (fromPkg) return fromPkg;
+    }
+    return null;
+  }
+
+  /** The benchmark harness config of a captured state, or null. */
+  private async benchmarkConfigFrom(store: SnapshotStore, stateId: string): Promise<{ command: string[]; unit: string; direction: "lower" | "higher"; samples: number; thresholdPct: number } | null> {
+    const pkg = await store.readBlob(stateId, "package.json");
+    if (!pkg) return null;
+    try {
+      const cfg = (JSON.parse(pkg.toString("utf8")) as { "pi-ditor"?: { benchmark?: { command?: string; unit?: string; direction?: string; samples?: number; thresholdPct?: number } } })["pi-ditor"]?.benchmark;
+      if (!cfg?.command) return null;
+      return {
+        command: cfg.command.split(/\s+/),
+        unit: cfg.unit ?? "ms",
+        direction: cfg.direction === "higher" ? "higher" : "lower",
+        samples: Math.min(10, Math.max(3, cfg.samples ?? 5)),
+        thresholdPct: Math.max(1, cfg.thresholdPct ?? 5) / 100,
+      };
+    } catch {
+      return null;
+    }
   }
 
   private async runVerify(ownerId: string): Promise<{ ok: boolean; error?: string }> {
@@ -3344,6 +3490,30 @@ class PiEditorApp {
     // ---- Worldlines: candidates (WORLDLINES §6.5, §6.6) ----
     ipcMain.handle("worldline:list", () => this.worldlines?.list() ?? []);
     ipcMain.handle("worldline:promote", (_e, comparisonId: string, label: "A" | "B") => this.promoteCandidate(comparisonId, label));
+    ipcMain.handle("worldline:challenge", async (_e, runId: string) => {
+      const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === runId);
+      if (!run) return { ok: false, error: "run not found" };
+      if (!run.promptPayloadFile) return { ok: false, error: "the run has no captured task to replay" };
+      this.initWorldlines();
+      const forkable: ForkableRun = {
+        id: run.id,
+        terminalId: run.terminalId,
+        startStateId: run.startStateId,
+        settledStateId: run.settledStateId,
+        promptPayloadFile: run.promptPayloadFile,
+        promptEntryId: run.promptEntryId,
+        promptParentEntryId: run.promptParentEntryId,
+        settledEntryId: run.settledEntryId,
+        sessionBranchFile: run.sessionBranchFile,
+        replayable: run.replayable,
+        reason: run.reason,
+        model: run.model,
+        thinkingLevel: run.thinkingLevel,
+        startedAt: run.startedAt,
+      };
+      return this.worldlines!.forkRun(forkable, { challenge: true });
+    });
+    ipcMain.handle("worldline:evidence", (_e, comparisonId: string) => this.runEvidence(comparisonId));
     ipcMain.handle("worldline:fork-point", async (_e, terminalId: string, seq: number) => {
       const inst = this.terminals.get(terminalId);
       if (!inst) return { ok: false, error: "terminal not found" };
