@@ -649,7 +649,7 @@ class PiEditorApp {
       for (const token of body.split(/\s+/)) {
         // Strip punctuation AND markdown emphasis (bold/italic markers often
         // wrap the path: **`utils.ts`**). A LEADING underscore is a filename
-        // (e.g. _test.py), not italic markup — unless the token also ends
+        // (for example _test.py), not italic markup — unless the token also ends
         // with one (markdown italic pairs _text_).
         const isItalicPair = /_$/.test(token);
         let clean = token.replace(/[`.,;:!?)"'*_]+$/g, "").replace(/^[`("'*]+/g, "");
@@ -1420,7 +1420,7 @@ class PiEditorApp {
       // the run already consumed.
       const lastWatch = this.lastWatchChange.get(path);
       const isDupWatch = lastWatch !== undefined && lastWatch.content === cappedContent && now - lastWatch.at < 5000;
-      // Cap the stored content: the dedupe only compares equality within 2 s.
+      // Cap the stored content: the dedupe only compares equality within 2 seconds.
       this.lastWatchChange.set(path, { content: cappedContent, at: now });
       if (this.lastWatchChange.size > PiEditorApp.LAST_WATCH_MAX) {
         const oldest = this.lastWatchChange.keys().next().value;
@@ -1796,7 +1796,7 @@ class PiEditorApp {
       const win = this.win;
       if (!win || win.isDestroyed() || win.isMinimized() || !win.isVisible()) return;
       // The FOUC risk is a startup problem: check every 3 s until the window
-      // paints real content once. After that, only check every 15 s as a net
+      // paints real content once. After that, only check every 15 seconds as a net
       // for a stalled renderer.
       const cadence = healthy ? 15000 : 3000;
       const now = Date.now();

@@ -10,7 +10,7 @@ import { watch, type FSWatcher } from "node:fs";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 
-export interface FileChange {
+interface FileChange {
   /** Absolute path. */
   path: string;
   /** Path relative to the watched root. */

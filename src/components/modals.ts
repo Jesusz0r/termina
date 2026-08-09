@@ -3,7 +3,7 @@
  * and generic toasts for notifications.
  */
 
-export interface ModalResult {
+interface ModalResult {
   cancelled?: boolean;
   value?: string;
   confirmed?: boolean;
@@ -17,25 +17,6 @@ export function showConfirm(title: string, message: string): Promise<ModalResult
       { label: "Cancel", primary: false, onClick: () => resolve({ cancelled: true }) },
       { label: "OK", primary: true, onClick: () => resolve({ confirmed: true }) },
     ]);
-  });
-}
-
-export function showSelect(title: string, options: string[]): Promise<ModalResult> {
-  return new Promise((resolve) => {
-    const body = document.createElement("div");
-    const list = document.createElement("div");
-    list.className = "modal-options";
-    for (const opt of options) {
-      const btn = document.createElement("button");
-      btn.className = "modal-option";
-      btn.textContent = opt;
-      btn.addEventListener("click", () => resolve({ cancelled: false, value: opt }));
-      list.appendChild(btn);
-    }
-    body.appendChild(list);
-    makeModal(title, "", [
-      { label: "Cancel", primary: false, onClick: () => resolve({ cancelled: true }) },
-    ], body);
   });
 }
 
@@ -53,18 +34,6 @@ export function showInput(title: string, placeholder: string, prefill: string): 
   });
 }
 
-export function showEditor(title: string, prefill: string): Promise<ModalResult> {
-  return new Promise((resolve) => {
-    const ta = document.createElement("textarea");
-    ta.value = prefill ?? "";
-    makeModal(title, "", [
-      { label: "Cancel", primary: false, onClick: () => resolve({ cancelled: true }) },
-      { label: "OK", primary: true, onClick: () => resolve({ cancelled: false, value: ta.value }) },
-    ], ta);
-  });
-}
-
-/** Handle any extension_ui_request and send the response back via window.pi. */
 // --------------------------------------------------------------- modal core --
 
 interface ModalButton {

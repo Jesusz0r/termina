@@ -275,7 +275,8 @@ timelineView.bind({
     if (!pane) return;
     // Snapshots are fetched on demand — the strip/IPC never carries content.
     let res = await window.pi.getTimelineContent(pane.instanceId, ev.seq);
-    // A write snapshot may still be filling in (400 ms delayed fill) — retry
+    // A write snapshot may still be filling in (the delayed fill takes
+    // 400 milliseconds) — retry
     // briefly before giving up.
     for (let i = 0; i < 5 && !res.ok; i++) {
       await new Promise((resolve) => setTimeout(resolve, 250));

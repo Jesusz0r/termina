@@ -4,7 +4,7 @@
  */
 import { spawn, type IPty } from "@lydell/node-pty";
 
-export interface PtyOptions {
+interface PtyOptions {
   id: string;
   cwd: string;
   cmd: string;

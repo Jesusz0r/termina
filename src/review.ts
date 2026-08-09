@@ -98,7 +98,7 @@ export class ReviewView {
     }
   }
 
-  /** Refresh the modified side (e.g. after a revert changed the file on disk). */
+  /** Refresh the modified side (for example after a revert changed the file). */
   async refreshCurrent(): Promise<void> {
     if (!this.path || !this.terminalId) return;
     const current = await window.pi.openFile(this.path);

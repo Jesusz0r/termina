@@ -76,7 +76,7 @@ export class EditorManager {
     const key = path;
     const existing = this.tabs.get(key);
     if (existing) {
-      // Pin the preview when explicitly requested (e.g. double-click).
+      // Pin the preview when explicitly requested (for example double-click).
       if (!preview && this.previewKey === key) this.pinPreview();
       this.activate(key);
       return;
@@ -308,7 +308,7 @@ function basename(p: string): string {
 }
 
 /** Language detection for Monaco models. */
-export function languageForPath(path: string): string {
+function languageForPath(path: string): string {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   const map: Record<string, string> = {
     ts: "typescript", tsx: "typescript", mts: "typescript", cts: "typescript",
