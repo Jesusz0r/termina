@@ -17,8 +17,9 @@ interface ForkRequest {
   requestId: string;
   /** The complete source session file. */
   sourceSessionFile: string;
-  /** The entry to branch at (the leaf of the forked path). */
-  entryId: string;
+  /** The entry to branch at (the leaf of the forked path); null forks the
+   *  whole leaf (promotion). */
+  entryId: string | null;
   /** The app-private session workspace for intermediate copies. */
   sessionWorkspaceDir: string;
   candidateRoot: string;
@@ -41,14 +42,20 @@ parentPort?.on("message", (msg: ForkRequest) => {
       mkdirSync(msg.sessionWorkspaceDir, { recursive: true });
       const copyPath = join(msg.sessionWorkspaceDir, `fork-${msg.requestId}.jsonl`);
       copyFileSync(msg.sourceSessionFile, copyPath);
-      const opened = SessionManager.open(copyPath);
-      const entry = opened.getEntry(msg.entryId);
-      if (!entry) throw new Error(`entry ${msg.entryId} not found in the session branch`);
-      // Extract the path root → entry. pi writes the branched file only
-      // when the path contains an assistant message; otherwise the file is
-      // deferred to the first append. The doc's root-prompt case uses an
-      // empty candidate session, so check the file really exists.
-      const branchPath = opened.createBranchedSession(msg.entryId);
+      let branchPath: string | null = null;
+      if (msg.entryId) {
+        const opened = SessionManager.open(copyPath);
+        const entry = opened.getEntry(msg.entryId);
+        if (!entry) throw new Error(`entry ${msg.entryId} not found in the session branch`);
+        // Extract the path root → entry. pi writes the branched file only
+        // when the path contains an assistant message; otherwise the file is
+        // deferred to the first append. The doc's root-prompt case uses an
+        // empty candidate session, so check the file really exists.
+        branchPath = opened.createBranchedSession(msg.entryId) ?? null;
+      } else {
+        // Promotion: fork the whole current leaf of the candidate session.
+        branchPath = copyPath;
+      }
       let forked: SessionManager;
       if (branchPath && existsSync(branchPath)) {
         forked = SessionManager.forkFrom(branchPath, msg.candidateRoot, msg.candidateSessionDir);

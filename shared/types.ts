@@ -325,12 +325,16 @@ export interface PiBridge {
   discardWorldline(comparisonId: string): Promise<{ ok: boolean; error?: string }>;
   /** Reopen a candidate's Pi terminal. */
   openWorldlineTerminal(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; error?: string }>;
+  /** Promote a candidate into the primary project (WORLDLINES §6.10). */
+  promoteWorldline(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; error?: string; terminalId?: string }>;
   /** Push: one worldline changed. */
   onWorldlineUpdate(cb: (summary: WorldlineSummary) => void): void;
   /** Push: a comparison was removed. */
   onWorldlineRemoved(cb: (e: { comparisonId: string }) => void): void;
   /** Push: a terminal's run records changed (Fork Run refresh). */
   onWorldlineRunsChanged(cb: (e: { terminalId: string }) => void): void;
+  /** Push: a promotion opened its primary terminal. */
+  onPromotionOpened(cb: (e: { terminalId: string }) => void): void;
 
   // Dispatch (parallel agents)
   /** Dispatch the plan board tasks of the terminal to parallel workers. */

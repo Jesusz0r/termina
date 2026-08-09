@@ -1020,6 +1020,16 @@ body {
   border-color: var(--green);
 }
 
+.cand-actions .cand-promote {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.cand-actions .cand-promote:hover:not(:disabled) {
+  color: #fff;
+  background: rgba(79, 193, 255, 0.15);
+}
+
 .cand-actions button:disabled {
   opacity: 0.4;
   cursor: not-allowed;

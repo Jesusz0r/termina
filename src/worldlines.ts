@@ -217,6 +217,11 @@ export class WorldlinesView {
 
     const actions = document.createElement("div");
     actions.className = "cand-actions";
+    const promoteBtn = document.createElement("button");
+    promoteBtn.className = "cand-promote";
+    promoteBtn.textContent = "⇧ Promote";
+    promoteBtn.title = "Merge this candidate into the primary project";
+    promoteBtn.addEventListener("click", () => void this.promote(comparisonId, label));
     const verifyBtn = document.createElement("button");
     verifyBtn.className = "cand-verify";
     verifyBtn.textContent = "✓ Verify";
@@ -232,7 +237,7 @@ export class WorldlinesView {
     openBtn.textContent = "Open";
     openBtn.title = "Reopen the candidate Pi terminal";
     openBtn.addEventListener("click", () => void this.reopen(comparisonId, label));
-    actions.append(verifyBtn, compareBtn, openBtn);
+    actions.append(promoteBtn, verifyBtn, compareBtn, openBtn);
 
     el.append(head, meta, detailsBody, actions);
 
@@ -260,16 +265,34 @@ export class WorldlinesView {
     card.el.classList.toggle("has-error", s.state === "error" || s.state === "conflict");
     const verifyBtn = card.el.querySelector(".cand-verify") as HTMLButtonElement;
     const openBtn = card.el.querySelector(".cand-open") as HTMLButtonElement;
+    const promoteBtn = card.el.querySelector(".cand-promote") as HTMLButtonElement;
     const usable =
       s.terminalId !== null && !["creating", "discarding", "discarded", "promoted", "cancelled", "error"].includes(s.state);
     verifyBtn.disabled = !usable;
     openBtn.disabled = !s.sessionFile;
+    promoteBtn.disabled = !usable || !s.sessionFile;
+    promoteBtn.textContent = s.state === "promoting" ? "⇧ promoting…" : "⇧ Promote";
     // The details stay valid while the card lives; refresh them on state
     // changes only when the user already opened them.
     if (!card.detailsBody.hidden && card.details) this.fillDetails(card, card.details);
   }
 
   // ------------------------------------------------------------ actions ----
+
+  private async promote(comparisonId: string, label: "A" | "B"): Promise<void> {
+    const card = this.pairs.get(comparisonId)?.cards.get(label);
+    if (!card) return;
+    const s = card.summary;
+    void showConfirm(
+      "Promote candidate",
+      `Merge candidate ${label} (${s.role}) into the primary project? The three-way merge uses the run start as the base.`,
+    ).then(async (r) => {
+      if (!r.confirmed) return;
+      const res = await window.pi.promoteWorldline(comparisonId, label);
+      if (!res.ok) toast(`promotion failed: ${res.error ?? "unknown error"}`, "warning");
+      else toast(`candidate ${label} promoted — opening the result in a new terminal`, "info");
+    });
+  }
 
   private async verify(comparisonId: string, label: "A" | "B"): Promise<void> {
     const card = this.pairs.get(comparisonId)?.cards.get(label);

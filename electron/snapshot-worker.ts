@@ -20,6 +20,9 @@ interface CaptureRequest {
   head: string | null;
   parentCommit: string | null;
   budget?: CaptureBudget;
+  /** A capture from another tree (a worldline candidate head). */
+  captureRoot?: string;
+  captureGitDir?: string;
 }
 
 interface TemplateRequest {
@@ -76,7 +79,10 @@ parentPort?.on("message", (msg: WorkerRequest) => {
     try {
       if (msg.op === "capture") {
         const store = SnapshotStore.open(msg.storeDir, msg.sourceRoot, msg.sourceGitDir, msg.objectFormat);
-        const state: SourceState = await store.capture(msg.head, msg.parentCommit, msg.budget ?? {});
+        const source = msg.captureRoot
+          ? { root: msg.captureRoot, gitDir: msg.captureGitDir ?? msg.captureRoot }
+          : undefined;
+        const state: SourceState = await store.capture(msg.head, msg.parentCommit, msg.budget ?? {}, {}, source);
         post({ op: "capture-result", requestId: msg.requestId, ok: true, state });
         return;
       }

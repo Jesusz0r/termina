@@ -727,6 +727,57 @@ export class WorldlineManager {
     }
   }
 
+  /** The comparison and candidate behind one terminal, or null. */
+  promotionTarget(comparisonId: string, label: "A" | "B"): {
+    root: string;
+    sessionFile: string | null;
+    terminalId: string | null;
+    eventsDir: string;
+    sourceRunId: string;
+    state: WorldlineState;
+  } | null {
+    const cmp = this.comparisons.get(comparisonId);
+    const cand = cmp?.candidates.get(label);
+    if (!cmp || !cand) return null;
+    return {
+      root: cand.dir,
+      sessionFile: cand.sessionFile,
+      terminalId: cand.terminalId,
+      eventsDir: cand.eventsDir,
+      sourceRunId: cmp.sourceRunId,
+      state: cand.state,
+    };
+  }
+
+  /** The pair enters the promoting lifecycle state. */
+  markPromoting(comparisonId: string, label: "A" | "B"): void {
+    const cmp = this.comparisons.get(comparisonId);
+    const cand = cmp?.candidates.get(label);
+    if (!cmp || !cand) return;
+    cand.state = "promoting";
+    cand.version++;
+    this.pushUpdate(cmp, cand);
+  }
+
+  /** Promotion finished: tear the pair down ("promoted") or release. */
+  async finishPromotion(comparisonId: string, ok: boolean, error: string | null): Promise<void> {
+    if (ok) {
+      await this.teardown(comparisonId, "promoted", null);
+    } else {
+      // A rejected promotion leaves the pair usable (promote the other
+      // candidate, verify, or discard); the error shows on the card.
+      const cmp = this.comparisons.get(comparisonId);
+      if (!cmp) return;
+      for (const cand of cmp.candidates.values()) {
+        if (cand.state !== "promoting") continue;
+        cand.state = "ready";
+        cand.error = error;
+        cand.version++;
+        this.pushUpdate(cmp, cand);
+      }
+    }
+  }
+
   // ------------------------------------------------------- session ready ----
 
   /** The bridge consumed its startup control. */
@@ -820,7 +871,7 @@ export class WorldlineManager {
     // 1. Mark both candidates and push the final update.
     for (const cand of cmp.candidates.values()) {
       if (cand.state === "discarded") continue;
-      cand.state = state === "discarded" ? "discarded" : state === "cancelled" ? "cancelled" : "error";
+      cand.state = state;
       cand.error = error;
       cand.version++;
       this.pushUpdate(cmp, cand);

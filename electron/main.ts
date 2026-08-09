@@ -10,10 +10,11 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme } from "electron";
 import { execFileSync, spawn } from "node:child_process";
 import { accessSync, constants, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { openSync, closeSync, fsyncSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { PtyTerminal } from "./pty-terminal.js";
@@ -473,7 +474,7 @@ class SnapshotWorkerClient {
   }
 
   /** Capture one source state off the main thread. */
-  capture(store: SnapshotStore, head: string | null, parentCommit: string | null): Promise<SourceState> {
+  capture(store: SnapshotStore, head: string | null, parentCommit: string | null, source?: { root: string; gitDir: string }): Promise<SourceState> {
     return this.request({
       op: "capture",
       storeDir: store.dir,
@@ -482,6 +483,8 @@ class SnapshotWorkerClient {
       objectFormat: store.objectFormat,
       head,
       parentCommit,
+      captureRoot: source?.root,
+      captureGitDir: source?.gitDir,
     }) as Promise<SourceState>;
   }
 
@@ -635,6 +638,10 @@ class PiEditorApp {
   private flushWaiters = new Map<string, { resolve: (r: { ok: boolean; failed: string[] }) => void; timer: ReturnType<typeof setTimeout> }>();
   private flushSeq = 0;
   private userEditsWriteTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Promotion operation sequence (op ids). */
+  private promoteSeq = 0;
+  /** Paths the promotion is applying right now (suppress user-edit records). */
+  private promotionPaths: Set<string> | null = null;
   private static readonly USER_EDITS_MAX = 50;
   /**
    * The last watcher change per path. A single physical write can produce
@@ -989,6 +996,387 @@ class PiEditorApp {
   private terminalCwd(): string {
     return this.primaryWorkspace()?.root ?? homedir();
   }
+
+  // ------------------------------------------------- promotion (WORLDLINES §6.10) ----
+
+  /** The journal of one promotion operation. */
+  private journalOf(opId: string): string {
+    return join(this.worldsRoot, "promotion-journal", opId);
+  }
+
+  private writeJournal(journalDir: string, journal: Record<string, unknown>): void {
+    mkdirSync(journalDir, { recursive: true, mode: 0o700 });
+    const file = join(journalDir, "journal.json");
+    const fd = openSync(file, "w", 0o600);
+    try {
+      writeFileSync(fd, JSON.stringify(journal, null, 2));
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  }
+
+  /** The promoted session installs into the primary session directory. */
+  private primarySessionDir(cwd: string): string {
+    // pi canonicalizes the cwd for its session dir (realpath); the install
+    // must land in the same directory the session picker reads.
+    const canonical = realpathSync(cwd);
+    const safePath = `--${canonical.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+    return join(homedir(), ".pi", "agent", "sessions", safePath);
+  }
+
+  /**
+   * Promote one candidate into the primary project (WORLDLINES §6.10).
+   * The merge runs with R (the run start) as the shared base; P and W are
+   * captured fresh under the write leases. Every output lands through a
+   * durable journal so a crash can roll back or recover.
+   */
+  private async promoteCandidate(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; error?: string; terminalId?: string }> {
+    const target = this.worldlines?.promotionTarget(comparisonId, label);
+    if (!target) return { ok: false, error: "candidate not found" };
+    if (!target.sessionFile) return { ok: false, error: "the candidate has no session" };
+    if (!["ready", "running", "settled"].includes(target.state)) {
+      return { ok: false, error: `cannot promote from state ${target.state}` };
+    }
+    const candTerm = target.terminalId ? this.terminals.get(target.terminalId) : undefined;
+    if (candTerm?.busy) return { ok: false, error: "the candidate agent is busy" };
+    if (target.terminalId && this.verifyRuns.has(target.terminalId)) {
+      return { ok: false, error: "the candidate is verifying" };
+    }
+    const store = await this.storePromise;
+    if (!store) return { ok: false, error: "recording is not available" };
+    const primary = this.primaryWorkspace();
+    if (!primary) return { ok: false, error: "no primary workspace" };
+    const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === target.sourceRunId);
+    if (!run?.startStateId) return { ok: false, error: "the source run base is missing" };
+    const baseState = run.startStateId; // R
+    const candWs = candTerm ? this.workspaces.get(candTerm.workspaceId) : undefined;
+    const candGen = candWs?.generation ?? 0;
+
+    const opId = `promote-${++this.promoteSeq}`;
+    const requester = `promote:${opId}`;
+    const journalDir = this.journalOf(opId);
+    const journal: Record<string, unknown> = {
+      opId,
+      comparisonId,
+      label,
+      stateR: baseState,
+      primaryRoot: primary.root,
+      phase: "prepared",
+      createdAt: Date.now(),
+      paths: [],
+      stagedSession: null,
+      installedSession: null,
+    };
+
+    // The write leases serialize the promotion against every other writer.
+    const leaseP = await this.acquireWriteLease(primary.id, requester, 12000);
+    if (!leaseP.ok) return { ok: false, error: leaseP.error ?? "the primary workspace is busy" };
+    let candLease = true;
+    if (candWs) {
+      const l = await this.acquireWriteLease(candWs.id, requester, 8000);
+      candLease = l.ok;
+    }
+    if (!candLease) {
+      this.releaseWriteLease(primary.id, requester);
+      return { ok: false, error: "the candidate workspace is busy" };
+    }
+    const releaseLeases = (): void => {
+      this.releaseWriteLease(primary.id, requester);
+      if (candWs) this.releaseWriteLease(candWs.id, requester);
+    };
+    // A rejected promotion releases the leases and returns the pair to its
+    // previous lifecycle state.
+    const fail = async (message: string): Promise<{ ok: false; error: string }> => {
+      releaseLeases();
+      await this.worldlines?.finishPromotion(comparisonId, false, message);
+      return { ok: false, error: message };
+    };
+
+    try {
+      // Flush the dirty editor models (both leases cover every save path).
+      const flush = await this.flushDirtyModels(requester, 8000);
+      if (!flush.ok) return fail("could not save editor changes");
+
+      this.worldlines?.markPromoting(comparisonId, label);
+
+      // Capture W (candidate head, chained from R) and P (current primary).
+      const candGitDir = await gitCommonDir(target.root);
+      const [wState, pState] = await Promise.all([
+        this.snapshotWorker.capture(store, await gitHead(target.root), baseState, { root: target.root, gitDir: candGitDir ?? target.root }),
+        this.snapshotWorker.capture(store, await gitHead(primary.root), primary.lastStateCommit ?? null),
+      ]);
+      primary.lastStateCommit = pState.commit;
+      // Expected versions: nothing moved during the captures.
+      if (primary.generation !== leaseP.generation) return fail("the primary changed during promotion preflight");
+      if (candWs && candWs.generation !== candGen) return fail("the candidate changed during promotion preflight");
+      const top = await gitTopLevel(primary.root);
+      if (!top || resolve(top) !== resolve(store.sourceRoot)) return fail("the source repository identity changed");
+
+      // Mine enforcement: a changed path that is Mine (or a symlink that
+      // aliases a Mine path) rejects the promotion.
+      const changed = await store.diffTree(baseState, wState.commit);
+      for (const c of changed) {
+        const abs = join(primary.root, c.relPath);
+        if (this.mineFiles.has(this.canonicalPath(abs))) {
+          return fail(`the candidate changes a file you own: ${c.relPath}`);
+        }
+        const link = await store.symlinkTarget(wState.commit, c.relPath);
+        if (link) {
+          const resolved = realpathSync(join(dirname(abs), link));
+          if (this.mineFiles.has(resolved)) {
+            return fail(`the candidate aliases a file you own through a symlink: ${c.relPath}`);
+          }
+        }
+      }
+
+      // The three-way merge with R as the shared base (WORLDLINES §6.10).
+      const merge = await store.merge3(wState.commit, pState.commit);
+      if (!merge.ok || !merge.tree) {
+        const reason = merge.reason ?? `the merge conflicts on: ${merge.conflicts.join(", ")}`;
+        return fail(reason);
+      }
+
+      // Stage: merged bytes, before-bytes, and the promoted session.
+      const mergedDir = join(journalDir, "merged");
+      await store.materialize(merge.tree, mergedDir);
+      const pPaths = await store.treePaths(pState.commit);
+      const mergedPaths = await store.treePaths(merge.tree);
+      const beforeDir = join(journalDir, "before");
+      const paths: Array<{ rel: string; kind: "write" | "delete"; beforeHash: string; afterHash: string; beforeExists: boolean }> = [];
+      const sha = (buf: Buffer): string => createHash("sha256").update(buf).digest("hex");
+      for (const rel of [...mergedPaths].sort()) {
+        const abs = join(primary.root, rel);
+        const beforeExists = existsSync(abs);
+        const before = beforeExists ? await readFile(abs) : Buffer.alloc(0);
+        const after = await readFile(join(mergedDir, rel));
+        paths.push({ rel, kind: "write", beforeHash: sha(before), afterHash: sha(after), beforeExists });
+        if (beforeExists) {
+          const target = join(beforeDir, rel);
+          await mkdir(dirname(target), { recursive: true });
+          await writeFile(target, before);
+        }
+      }
+      for (const rel of [...pPaths].filter((p) => !mergedPaths.has(p)).sort()) {
+        const abs = join(primary.root, rel);
+        const beforeExists = existsSync(abs);
+        const before = beforeExists ? await readFile(abs) : Buffer.alloc(0);
+        paths.push({ rel, kind: "delete", beforeHash: sha(before), afterHash: sha(Buffer.alloc(0)), beforeExists });
+        if (beforeExists) {
+          const target = join(beforeDir, rel);
+          await mkdir(dirname(target), { recursive: true });
+          await writeFile(target, before);
+        }
+      }
+      if (paths.length > 2000) throw new Error("the promotion touches too many paths");
+      journal.paths = paths;
+
+      // Fork the candidate leaf into a primary-cwd session (staged).
+      const sessionDir = join(journalDir, "session");
+      const fork = await this.sessionWorker.fork({
+        sourceSessionFile: target.sessionFile,
+        entryId: null,
+        sessionWorkspaceDir: sessionDir,
+        candidateRoot: primary.root,
+        candidateSessionDir: sessionDir,
+        relocationNote: `The candidate project lived at ${target.root}. In this promoted session, that path maps to ${primary.root}.`,
+      });
+      if (!fork.sessionFile) throw new Error("the promoted session fork produced no file");
+      journal.stagedSession = fork.sessionFile;
+      this.writeJournal(journalDir, journal);
+
+      // Recheck expected P: every target path still matches the preflight.
+      for (const p of paths) {
+        const abs = join(primary.root, p.rel);
+        const now = existsSync(abs) ? await readFile(abs) : Buffer.alloc(0);
+        if (sha(now) !== p.beforeHash) return fail(`the primary changed at ${p.rel} during promotion`);
+      }
+      if (primary.generation !== leaseP.generation) return fail("the primary changed during promotion apply");
+
+      // Apply: atomic per-path renames; the watcher events land after.
+      this.promotionPaths = new Set(paths.map((p) => p.rel));
+      try {
+        for (const p of paths) {
+          const abs = join(primary.root, p.rel);
+          if (p.kind === "delete") {
+            await rm(abs, { force: true });
+          } else {
+            await mkdir(dirname(abs), { recursive: true });
+            await fsRename(join(mergedDir, p.rel), abs);
+          }
+        }
+      } finally {
+        this.promotionPaths = null;
+      }
+      journal.phase = "applied";
+      this.writeJournal(journalDir, journal);
+
+      // Install the session atomically in the primary session directory.
+      const installDir = this.primarySessionDir(primary.root);
+      await mkdir(installDir, { recursive: true });
+      const sessionName = `${new Date().toISOString().replace(/[:.]/g, "-")}_${randomUUID()}.jsonl`;
+      const installed = join(installDir, sessionName);
+      const tmp = join(installDir, `.${sessionName}.tmp`);
+      await writeFile(tmp, await readFile(fork.sessionFile));
+      await fsRename(tmp, installed);
+      journal.installedSession = installed;
+      journal.phase = "done";
+      this.writeJournal(journalDir, journal);
+
+      // Open the promoted primary terminal on the installed session.
+      const inst = await this.createTerminal(primary.root, {
+        type: "agent",
+        workspaceId: primary.id,
+        launch: {
+          cmd: this.resolvePiBin(),
+          args: ["-e", this.bridgePath(), "--session", installed],
+          env: { ...cleanEnv(), PI_EDITOR_EVENTS_DIR: this.eventsDir },
+        },
+      });
+      // Seed Change Review: the promotion is the run's own change set.
+      for (const p of paths) {
+        const abs = this.canonicalPath(join(primary.root, p.rel));
+        const before = p.beforeExists ? await readFile(join(beforeDir, p.rel)) : null;
+        inst.baselines.set(abs, before === null ? null : before.toString("utf8"));
+        if (p.kind === "delete") this.recordDeleted(inst, abs);
+        else this.recordModified(inst, abs, p.beforeExists ? "modified" : "created");
+      }
+      this.send("modified:list", { instanceId: inst.id, files: [...inst.modified.values()] });
+
+      // Mark the older primary terminals out of date with a context file.
+      const changedList = paths.map((p) => `- \`${p.rel}\``).join("\n");
+      for (const other of this.terminals.values()) {
+        if (other.id === inst.id || other.workspaceId !== primary.id || other.type !== "agent") continue;
+        try {
+          mkdirSync(this.eventsDirOf(other), { recursive: true, mode: 0o700 });
+          writeFileSync(
+            join(this.eventsDirOf(other), `edits-${other.id}.md`),
+            `## Source changed by promotion (${comparisonId}, candidate ${label})\n\n${changedList}\n`,
+            "utf8",
+          );
+        } catch {
+          /* the context is best-effort */
+        }
+      }
+
+      // The comparison is consumed: tear it down and release everything.
+      await this.worldlines?.finishPromotion(comparisonId, true, null);
+      releaseLeases();
+      // The promotion is complete: the journal has no recovery duty.
+      await rm(journalDir, { recursive: true, force: true });
+      this.sendInstances();
+      this.send("promotion:opened", { terminalId: inst.id });
+      return { ok: true, terminalId: inst.id };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.rollbackPromotion(journalDir, journal, primary.root);
+      // A session installed before the failure is an orphan: remove it.
+      if (journal.installedSession) await rm(String(journal.installedSession), { force: true });
+      releaseLeases();
+      await this.worldlines?.finishPromotion(comparisonId, false, message);
+      return { ok: false, error: message };
+    }
+  }
+
+  /** Roll back every applied path of a failed promotion. */
+  private async rollbackPromotion(journalDir: string, journal: Record<string, unknown>, primaryRoot: string): Promise<void> {
+    const phase = String(journal.phase ?? "prepared");
+    // "done" means the promotion completed: the journal has no duty.
+    if (phase !== "applied") {
+      await rm(journalDir, { recursive: true, force: true });
+      return;
+    }
+    const sha = (buf: Buffer): string => createHash("sha256").update(buf).digest("hex");
+    let conflicted = false;
+    for (const p of (journal.paths ?? []) as Array<{ rel: string; beforeHash: string; afterHash: string; beforeExists: boolean }>) {
+      const abs = join(primaryRoot, p.rel);
+      const now = existsSync(abs) ? await readFile(abs) : Buffer.alloc(0);
+      if (sha(now) !== p.afterHash) {
+        // The app did not write this path (or someone wrote after us).
+        if (sha(now) !== p.beforeHash) conflicted = true;
+        continue;
+      }
+      const before = join(journalDir, "before", p.rel);
+      if (p.beforeExists && existsSync(before)) {
+        await mkdir(dirname(abs), { recursive: true });
+        await writeFile(abs, await readFile(before));
+      } else {
+        await rm(abs, { force: true });
+      }
+    }
+    journal.phase = conflicted ? "conflict" : "rolled-back";
+    this.writeJournal(journalDir, journal);
+    if (!conflicted) await rm(journalDir, { recursive: true, force: true });
+  }
+
+  /**
+   * Startup recovery: finish or roll back every pending promotion journal
+   * before the primary watcher starts (WORLDLINES §6.10 step 10-11).
+   * Restore a path only when its bytes still equal the app-written value.
+   */
+  private async recoverPromotions(): Promise<void> {
+    const root = join(this.worldsRoot, "promotion-journal");
+    let names: string[] = [];
+    try {
+      names = await readdir(root);
+    } catch {
+      return; // no journal dir yet
+    }
+    const sha = (buf: Buffer): string => createHash("sha256").update(buf).digest("hex");
+    for (const name of names) {
+      const dir = join(root, name);
+      let journal: Record<string, unknown> | null = null;
+      try {
+        journal = JSON.parse(await readFile(join(dir, "journal.json"), "utf8")) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const phase = String(journal.phase ?? "prepared");
+      const primaryRoot = String(journal.primaryRoot ?? "");
+      const paths = (journal.paths ?? []) as Array<{ rel: string; beforeHash: string; afterHash: string; beforeExists: boolean }>;
+      // "done" means the promotion completed: keep the source as it is.
+      if (phase === "done") {
+        await rm(dir, { recursive: true, force: true });
+        continue;
+      }
+      if (phase !== "applied") {
+        // Nothing reached the primary: drop the staged resources.
+        await rm(dir, { recursive: true, force: true });
+        continue;
+      }
+      // Restore every path the app wrote. An external change keeps all
+      // versions and stops automatic recovery (a recovery conflict).
+      for (const p of paths) {
+        const abs = join(primaryRoot, p.rel);
+        const now = existsSync(abs) ? await readFile(abs) : Buffer.alloc(0);
+        if (sha(now) !== p.afterHash) continue;
+        const before = join(dir, "before", p.rel);
+        if (p.beforeExists && existsSync(before)) {
+          await mkdir(dirname(abs), { recursive: true });
+          await writeFile(abs, await readFile(before));
+        } else {
+          await rm(abs, { force: true });
+        }
+      }
+      let conflicted = false;
+      for (const p of paths) {
+        const abs = join(primaryRoot, p.rel);
+        const now = existsSync(abs) ? await readFile(abs) : Buffer.alloc(0);
+        const h = sha(now);
+        if (h !== p.beforeHash && h !== p.afterHash) {
+          conflicted = true;
+          break;
+        }
+      }
+      if (!conflicted) {
+        await rm(dir, { recursive: true, force: true });
+      } else {
+        await writeFile(join(dir, "conflict.json"), JSON.stringify({ at: Date.now(), paths: paths.map((p) => p.rel) }));
+        console.warn(`[main] promotion recovery conflict: ${dir} — kept every version`);
+      }
+    }
+  }
+
 
   private resolvePiBin(): string {
     if (process.env.PI_EDITOR_PI_BIN) return process.env.PI_EDITOR_PI_BIN;
@@ -1953,7 +2341,7 @@ class PiEditorApp {
   }
 
   /** Ask the renderer to save every dirty model. Bounded wait. */
-  private flushDirtyModels(timeoutMs = 5000): Promise<{ ok: boolean; failed: string[] }> {
+  private flushDirtyModels(writerId: string, timeoutMs = 5000): Promise<{ ok: boolean; failed: string[] }> {
     return new Promise((resolve) => {
       const requestId = `flush-${++this.flushSeq}`;
       this.flushWaiters.set(requestId, {
@@ -1963,7 +2351,7 @@ class PiEditorApp {
           resolve({ ok: false, failed: ["renderer did not answer the flush request"] });
         }, timeoutMs),
       });
-      this.send("editor:flush-request", { requestId, writerId: this.primaryWorkspace()?.writerId ?? "" });
+      this.send("editor:flush-request", { requestId, writerId });
     });
   }
 
@@ -1991,7 +2379,7 @@ class PiEditorApp {
       this.writeAck(inst.id, requestId, { ok: false, error: lease.error ?? "the workspace is busy" });
       return;
     }
-    const flush = await this.flushDirtyModels();
+    const flush = await this.flushDirtyModels(leaseRequester);
     if (!flush.ok) {
       this.releaseWriteLease(ws.id, leaseRequester);
       this.writeAck(inst.id, requestId, { ok: false, error: "could not save editor changes" });
@@ -2546,7 +2934,7 @@ class PiEditorApp {
       // fixtures) are automated writes, not user edits. The agent receives
       // user edits on its next turn (see the edits-<id>.md context file).
       const busy = workspaceTerminals().filter((t) => t.busy);
-      if (!isDupWatch && busy.length === 0 && this.verifyRuns.size === 0) {
+      if (!isDupWatch && busy.length === 0 && this.verifyRuns.size === 0 && !this.promotionPaths?.has(relPath)) {
         this.recordUserEdit(ws, { path, relPath, status: change.status, prev: change.prev, content: change.content, at: now });
       }
       // The watcher change event is the baseline authority for writes: it
@@ -2764,6 +3152,7 @@ class PiEditorApp {
 
     // ---- Worldlines: candidates (WORLDLINES §6.5, §6.6) ----
     ipcMain.handle("worldline:list", () => this.worldlines?.list() ?? []);
+    ipcMain.handle("worldline:promote", (_e, comparisonId: string, label: "A" | "B") => this.promoteCandidate(comparisonId, label));
     ipcMain.handle("worldline:details", (_e, comparisonId: string, label: "A" | "B") => this.worldlines?.details(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:file", (_e, comparisonId: string, label: "A" | "B", relPath: string) => this.worldlines?.fileOf(comparisonId, label, relPath) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:base-file", (_e, comparisonId: string, relPath: string) => this.worldlines?.baseFileOf(comparisonId, relPath) ?? { ok: false, error: "worldlines unavailable" });
@@ -2987,6 +3376,9 @@ class PiEditorApp {
     this.tailer.start();
     await this.createWindow();
     if (this.projectCwd) {
+      // Finish or roll back any pending promotion journal BEFORE the primary
+      // watcher starts: the restored bytes must not attribute to a user edit.
+      await this.recoverPromotions();
       this.ensureAppBridge();
       this.removeLegacyProjectBridge(this.projectCwd);
       this.createWorkspace(this.projectCwd, true);

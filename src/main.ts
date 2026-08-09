@@ -1003,6 +1003,12 @@ window.pi.onWorldlineRunsChanged(({ terminalId }) => {
   loadRuns(pane);
 });
 
+// A promotion opens its primary terminal: bring it to the front.
+window.pi.onPromotionOpened(({ terminalId }) => {
+  const pane = panes.get(terminalId);
+  if (pane) activatePane(terminalId);
+});
+
 window.pi.onWorldlineUpdate((summary) => {
   worldlinesView.upsert(summary);
   // Badges: the terminal tab and every editor tab under the candidate root.

@@ -89,6 +89,7 @@ const bridge: PiBridge = {
   cancelWorldline: (comparisonId) => ipcRenderer.invoke("worldline:cancel", comparisonId),
   discardWorldline: (comparisonId) => ipcRenderer.invoke("worldline:discard", comparisonId),
   openWorldlineTerminal: (comparisonId, label) => ipcRenderer.invoke("worldline:open-terminal", comparisonId, label),
+  promoteWorldline: (comparisonId, label) => ipcRenderer.invoke("worldline:promote", comparisonId, label),
   onWorldlineUpdate: (cb) => {
     ipcRenderer.on("worldline:update", (_e, summary: WorldlineSummary) => cb(summary));
   },
@@ -97,6 +98,9 @@ const bridge: PiBridge = {
   },
   onWorldlineRunsChanged: (cb) => {
     ipcRenderer.on("worldline:runs-changed", (_e, e: { terminalId: string }) => cb(e));
+  },
+  onPromotionOpened: (cb) => {
+    ipcRenderer.on("promotion:opened", (_e, e: { terminalId: string }) => cb(e));
   },
   dispatchRun: (terminalId) => ipcRenderer.invoke("dispatch:run", terminalId),
   setMineFile: (path, mine) => ipcRenderer.invoke("mine:set", path, mine),

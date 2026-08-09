@@ -385,16 +385,22 @@ export class SnapshotStore {
     parentCommit: string | null,
     budget: CaptureBudget = {},
     hooks: CaptureHooks = {},
+    source?: { root: string; gitDir: string },
   ): Promise<SourceState> {
     const maxPaths = budget.maxPaths ?? BUDGETS.maxPaths;
     const maxFileBytes = budget.maxFileBytes ?? BUDGETS.maxFileBytes;
     const maxNewBlobBytes = budget.maxNewBlobBytes ?? BUDGETS.maxNewBlobBytes;
-    const cwd = this.sourceRoot;
+    // A promotion captures the candidate head from the candidate tree; the
+    // store still owns the synthetic commits. The default is the primary.
+    const cwd = source?.root ?? this.sourceRoot;
+    const gitCmd = source
+      ? (args: string[]) => runGitIn(cwd, args)
+      : (args: string[]) => this.sourceGit(args);
 
     // Enumerate the capture domain: tracked paths plus non-ignored untracked.
     const [tracked, untracked] = await Promise.all([
-      this.sourceGit(["ls-files", "-z"]),
-      this.sourceGit(["ls-files", "-z", "--others", "--exclude-standard"]),
+      gitCmd(["ls-files", "-z"]),
+      gitCmd(["ls-files", "-z", "--others", "--exclude-standard"]),
     ]);
     if (tracked.code !== 0 || untracked.code !== 0) {
       throw new Error(`source enumeration failed: ${tracked.stderr || untracked.stderr}`);
@@ -665,6 +671,68 @@ export class SnapshotStore {
   /** Remove a store-local state ref (eviction). */
   async unref(commit: string): Promise<void> {
     await this.git(["update-ref", "-d", `refs/pi-ditor/state/${commit}`]);
+  }
+
+  /** The changed paths between two store states (name-status). */
+  async diffTree(stateA: string, stateB: string): Promise<Array<{ relPath: string; status: "created" | "modified" | "deleted" }>> {
+    const r = await this.git(["diff-tree", "-r", "--name-status", "-z", stateA, stateB]);
+    if (r.code !== 0) throw new Error(`diff-tree failed: ${r.stderr}`);
+    const out: Array<{ relPath: string; status: "created" | "modified" | "deleted" }> = [];
+    const tokens = r.stdout.toString("utf8").split("\0").filter((t) => t.length > 0);
+    for (let i = 0; i + 1 < tokens.length; i += 2) {
+      const kind = tokens[i];
+      const path = tokens[i + 1];
+      if (kind.startsWith("D")) out.push({ relPath: path, status: "deleted" });
+      else if (kind.startsWith("A")) out.push({ relPath: path, status: "created" });
+      else if (kind.startsWith("R")) {
+        const [oldPath, newPath] = path.split("\t");
+        if (newPath) {
+          out.push({ relPath: newPath, status: "created" });
+          out.push({ relPath: oldPath, status: "deleted" });
+        } else out.push({ relPath: path, status: "modified" });
+      } else out.push({ relPath: path, status: "modified" });
+    }
+    return out;
+  }
+
+  /** The tree paths of a state (for deletion detection). */
+  async treePaths(state: string): Promise<Set<string>> {
+    const tree = await this.resolveTree(state);
+    const r = await this.git(["ls-tree", "-r", "-z", tree]);
+    if (r.code !== 0) throw new Error(`ls-tree failed: ${r.stderr}`);
+    const out = new Set<string>();
+    for (const rec of r.stdout.toString("utf8").split("\0")) {
+      if (!rec) continue;
+      const tab = rec.indexOf("\t");
+      if (tab === -1) continue;
+      if (rec.slice(0, tab).split(" ")[1] === "tree") continue;
+      out.add(rec.slice(tab + 1));
+    }
+    return out;
+  }
+
+  /** The target of a symlink at a state path, or null when not a link. */
+  async symlinkTarget(state: string, relPath: string): Promise<string | null> {
+    const tree = await this.resolveTree(state);
+    const r = await this.git(["ls-tree", tree, "--", relPath]);
+    if (r.code !== 0) return null;
+    const line = r.stdout.toString("utf8").trim();
+    if (!line) return null;
+    const parts = line.split(/\s+/);
+    if (parts[1] !== "blob" || parts[0] !== "120000") return null;
+    const map = await this.catFileBatch([parts[2]]);
+    return map.get(parts[2])?.toString("utf8") ?? null;
+  }
+
+  /** Read one blob from a state (for example a symlink target). */
+  async readBlob(state: string, relPath: string): Promise<Buffer | null> {
+    const tree = await this.resolveTree(state);
+    const r = await this.git(["ls-tree", tree, "--", relPath]);
+    if (r.code !== 0 || !r.stdout.toString("utf8").trim()) return null;
+    const meta = r.stdout.toString("utf8").trim().split(/\s+/);
+    if (meta[1] !== "blob") return null;
+    const map = await this.catFileBatch([meta[2]]);
+    return map.get(meta[2]) ?? null;
   }
 
   /** Delete the whole store. Idempotent. */
