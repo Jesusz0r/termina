@@ -233,8 +233,8 @@ class PiEditorApp {
   private verifyWorkers = new Set<string>();
   /** Dispatch workers: worker terminal id → its task text. */
   private dispatchWorkers = new Map<string, string>();
-  /** Dispatch runs: worker terminal id → owner + task index. */
-  private dispatchRuns = new Map<string, { ownerId: string; taskIdx: number }>();
+  /** Dispatch runs: worker terminal id → owner + the dispatched task text. */
+  private dispatchRuns = new Map<string, { ownerId: string; taskText: string }>();
   /**
    * Files the user changed while no agent terminal was busy. The agent
    * receives them on its next turn. It adapts instead of overwriting them.
@@ -474,8 +474,9 @@ class PiEditorApp {
         this.dispatchRuns.delete(inst.id);
         this.dispatchWorkers.delete(inst.id);
         const ownerInst = this.terminals.get(dispatchExit.ownerId);
-        if (ownerInst && ownerInst.plan[dispatchExit.taskIdx]) {
-          ownerInst.plan[dispatchExit.taskIdx].state = "pending";
+        const task = ownerInst ? this.findDispatchedTask(ownerInst, dispatchExit.taskText) : undefined;
+        if (ownerInst && task) {
+          task.state = "pending";
           this.sendPlan(ownerInst);
         }
       }
@@ -774,32 +775,47 @@ class PiEditorApp {
    * behind (they would fight over the same files). At most 3 workers run at
    * once. The owner's partial run is interrupted first.
    */
+  /** Normalize a task path to a comparable key (canonical absolute path). */
+  private taskPathKey(p: string): string {
+    return this.canonicalPath(join(this.terminalCwd(), p));
+  }
+
+  /** The owner's task that matches a dispatched text. The plan can be
+   *  replaced mid-dispatch (an auto-retry posts a new plan), so tasks are
+   *  matched by text, never by position. */
+  private findDispatchedTask(owner: PiTerminalInstance, taskText: string): PlanTask | undefined {
+    return owner.plan.find((t) => t.text === taskText);
+  }
+
   private async dispatchRun(ownerId: string): Promise<{ ok: boolean; error?: string; dispatched?: number }> {
     const owner = this.terminals.get(ownerId);
     if (!owner || owner.type !== "agent") return { ok: false, error: "terminal not found" };
     if (owner.plan.length === 0) return { ok: false, error: "the plan board is empty — ask the agent for a plan first" };
     if (this.dispatchRuns.size > 0) return { ok: false, error: "a dispatch is already running" };
     if (owner.busy) owner.pty.write("\x03"); // the workers replace the owner's run
-    // Pick tasks with paths, no overlapping files, at most 3.
-    const chosen: Array<{ task: PlanTask; idx: number }> = [];
+    // Pick tasks with paths, no overlapping files, at most 3. The overlap
+    // check compares canonical paths: "utils.ts" and "./utils.ts" are the
+    // same file, "src/utils.ts" is a different one.
+    const chosen: PlanTask[] = [];
     const used = new Set<string>();
-    for (let i = 0; i < owner.plan.length && chosen.length < 3; i++) {
-      const task = owner.plan[i];
+    for (const task of owner.plan) {
+      if (chosen.length >= 3) break;
       if (task.paths.length === 0) continue;
-      if (task.paths.some((p) => used.has(p))) continue;
-      task.paths.forEach((p) => used.add(p));
-      chosen.push({ task, idx: i });
+      const keys = task.paths.map((p) => this.taskPathKey(p));
+      if (keys.some((k) => used.has(k))) continue;
+      keys.forEach((k) => used.add(k));
+      chosen.push(task);
     }
     if (chosen.length === 0) return { ok: false, error: "no task mentions a file to scope it" };
     let dispatched = 0;
-    for (const c of chosen) {
+    for (const task of chosen) {
       try {
         const worker = await this.createTerminal(undefined, { type: "agent" });
-        this.dispatchWorkers.set(worker.id, c.task.text);
-        this.dispatchRuns.set(worker.id, { ownerId, taskIdx: c.idx });
+        this.dispatchWorkers.set(worker.id, task.text);
+        this.dispatchRuns.set(worker.id, { ownerId, taskText: task.text });
         // The pi TUI needs a moment to boot before it accepts the prompt.
         setTimeout(() => {
-          if (this.terminals.has(worker.id)) worker.pty.write(c.task.text + "\r");
+          if (this.terminals.has(worker.id)) worker.pty.write(task.text + "\r");
         }, 1500);
         dispatched++;
       } catch (err) {
@@ -996,8 +1012,9 @@ class PiEditorApp {
         const dispatchStart = this.dispatchRuns.get(inst.id);
         if (dispatchStart) {
           const ownerInst = this.terminals.get(dispatchStart.ownerId);
-          if (ownerInst && ownerInst.plan[dispatchStart.taskIdx]) {
-            ownerInst.plan[dispatchStart.taskIdx].state = "active";
+          const task = ownerInst ? this.findDispatchedTask(ownerInst, dispatchStart.taskText) : undefined;
+          if (ownerInst && task) {
+            task.state = "active";
             this.sendPlan(ownerInst);
           }
         }
@@ -1012,8 +1029,9 @@ class PiEditorApp {
         const dispatchEnd = this.dispatchRuns.get(inst.id);
         if (dispatchEnd) {
           const ownerInst = this.terminals.get(dispatchEnd.ownerId);
+          const task = ownerInst ? this.findDispatchedTask(ownerInst, dispatchEnd.taskText) : undefined;
           if (ownerInst) {
-            if (ownerInst.plan[dispatchEnd.taskIdx]) ownerInst.plan[dispatchEnd.taskIdx].state = "done";
+            if (task) task.state = "done";
             this.sendPlan(ownerInst);
             this.collectWorker(inst, ownerInst);
           }
