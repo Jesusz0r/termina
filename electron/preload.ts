@@ -12,6 +12,7 @@ import type {
   BusyPayload,
   InstanceSummary,
   ExplorerEntry,
+  RecorderState,
   VerifyInfo,
   TimelineEvent,
   PlanPayload,
@@ -53,6 +54,12 @@ const bridge: PiBridge = {
   onTimelineEvent: (cb) => {
     ipcRenderer.on("timeline:event", (_e, p: { terminalId: string; event: TimelineEvent }) => cb(p));
   },
+  onTimelineEvict: (cb) => {
+    ipcRenderer.on("timeline:evict", (_e, p: { terminalId: string; seqs: number[] }) => cb(p));
+  },
+  onRecorderState: (cb) => {
+    ipcRenderer.on("timeline:recorder-state", (_e, p: { terminalId: string; state: RecorderState }) => cb(p));
+  },
   onFolderOpened: (cb) => {
     ipcRenderer.on("folder:opened", (_e, e: { cwd: string }) => cb(e));
   },
@@ -89,6 +96,7 @@ const bridge: PiBridge = {
   cancelWorldline: (comparisonId) => ipcRenderer.invoke("worldline:cancel", comparisonId),
   discardWorldline: (comparisonId) => ipcRenderer.invoke("worldline:discard", comparisonId),
   openWorldlineTerminal: (comparisonId, label) => ipcRenderer.invoke("worldline:open-terminal", comparisonId, label),
+  forkPoint: (terminalId, seq) => ipcRenderer.invoke("worldline:fork-point", terminalId, seq),
   promoteWorldline: (comparisonId, label) => ipcRenderer.invoke("worldline:promote", comparisonId, label),
   onWorldlineUpdate: (cb) => {
     ipcRenderer.on("worldline:update", (_e, summary: WorldlineSummary) => cb(summary));

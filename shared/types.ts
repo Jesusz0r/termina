@@ -87,7 +87,20 @@ export interface TimelineEvent {
   /** File content snapshot right after this event (capped; may be absent). */
   content?: string;
   status?: "created" | "modified";
+  /** The captured source state of this moment (forkable when set). */
+  stateId?: string | null;
+  /** The session entry of the tool call (the fork context anchor). */
+  entryId?: string | null;
+  /** The bridge tool call id (correlates the tool result). */
+  toolCallId?: string | null;
+  /** The model of the run that produced this moment. */
+  model?: string | null;
+  /** True when the dot's source state was evicted (no longer forkable). */
+  evicted?: boolean;
 }
+
+/** The recording state shown outside the dot strip (WORLDLINES §6). */
+export type RecorderState = "indexing" | "ready" | "paused" | "degraded" | "budget";
 
 export type VerifyState = "untested" | "running" | "pass" | "fail" | "timeout" | "cancelled";
 /** Verify & Iterate: the last test run attached to a terminal. */
@@ -187,7 +200,7 @@ export interface WorldlineSummary {
   id: string;
   comparisonId: string;
   label: "A" | "B";
-  role: "reference" | "alternative" | "challenge";
+  role: "reference" | "alternative" | "challenge" | "moment";
   comparisonBaseStateId: string;
   promotionBaseStateId: string;
   headStateId: string;
@@ -270,6 +283,10 @@ export interface PiBridge {
   onBusy(cb: (p: BusyPayload) => void): void;
   onPlanUpdate(cb: (p: PlanPayload) => void): void;
   onTimelineEvent(cb: (p: { terminalId: string; event: TimelineEvent }) => void): void;
+  /** Push: dots whose source states were evicted (budget). */
+  onTimelineEvict(cb: (p: { terminalId: string; seqs: number[] }) => void): void;
+  /** Push: the recorder state of a terminal's timeline. */
+  onRecorderState(cb: (p: { terminalId: string; state: RecorderState }) => void): void;
   onVerifyState(cb: (p: { terminalId: string; verify: VerifyInfo }) => void): void;
   onFolderOpened(cb: (e: { cwd: string }) => void): void;
   onInstances(cb: (list: InstanceSummary[]) => void): void;
@@ -325,6 +342,8 @@ export interface PiBridge {
   discardWorldline(comparisonId: string): Promise<{ ok: boolean; error?: string }>;
   /** Reopen a candidate's Pi terminal. */
   openWorldlineTerminal(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; error?: string }>;
+  /** Fork one candidate from a timeline moment (WORLDLINES §6). */
+  forkPoint(terminalId: string, seq: number): Promise<{ ok: boolean; comparisonId?: string; error?: string }>;
   /** Promote a candidate into the primary project (WORLDLINES §6.10). */
   promoteWorldline(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; error?: string; terminalId?: string }>;
   /** Push: one worldline changed. */

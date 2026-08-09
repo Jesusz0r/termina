@@ -26,6 +26,7 @@ import type {
   ExplorerEntry,
   InstanceSummary,
   ModifiedFile,
+  RecorderState,
   RunSummary,
   SessionHit,
   TimelineEvent,
@@ -230,7 +231,7 @@ export default function (pi: ExtensionAPI): void {
       message: { customType: "pi-ditor-context", content: context, display: false },
     };
   });
-  pi.on("tool_execution_start", async (event) => {
+  pi.on("tool_execution_start", async (event, ctx) => {
     if (!FILE_TOOLS.has(event.toolName)) return;
     const args = (event.args ?? {}) as { path?: unknown; edits?: unknown };
     if (typeof args.path === "string" && args.path) {
@@ -239,8 +240,17 @@ export default function (pi: ExtensionAPI): void {
         toolName: event.toolName,
         path: args.path,
         edits: event.toolName === "edit" || event.toolName === "apply_patch" ? args.edits : undefined,
+        // The tool call id correlates the result; the leaf id is the
+        // session entry of this moment (parallel siblings share it).
+        toolCallId: event.toolCallId,
+        entryId: ctx?.sessionManager?.getLeafId?.() ?? null,
       });
     }
+  });
+  pi.on("tool_execution_end", async (event) => {
+    // The tool finished: its disk effects are done (the watcher confirms
+    // them); this is the moment-capture scheduling signal.
+    log({ t: "tool_end", toolCallId: event.toolCallId, isError: !!event.isError });
   });
 }
 `;
@@ -396,6 +406,14 @@ class PiTerminalInstance {
   /** Last tool event per path (dedupe with watcher changes). */
   lastToolPath: { path: string; at: number } | null = null;
   timelineSeq = 0;
+  /** Watcher hint paths since the last moment capture (Phase 6). */
+  pendingHints = new Set<string>();
+  /** Debounced moment-capture timer. */
+  captureTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Dots waiting for their captured source state. */
+  momentDots: TimelineEvent[] = [];
+  /** The recorder state of this terminal's timeline. */
+  recorderState: RecorderState = "paused";
   /** The prompt payload reported by before_agent_start. */
   pendingPrompt: { file: string; text: string; images: number } | null = null;
   /** The open run record of this terminal, or null. */
@@ -485,6 +503,25 @@ class SnapshotWorkerClient {
       parentCommit,
       captureRoot: source?.root,
       captureGitDir: source?.gitDir,
+    }) as Promise<SourceState>;
+  }
+
+  /** Capture one incremental state (watcher hints + reconcile) off-thread. */
+  captureIncremental(
+    store: SnapshotStore,
+    parentCommit: string,
+    hints: string[],
+    reconcile: Array<{ relPath: string; content: string }>,
+  ): Promise<SourceState> {
+    return this.request({
+      op: "capture-incremental",
+      storeDir: store.dir,
+      sourceRoot: store.sourceRoot,
+      sourceGitDir: store.sourceGitDir,
+      objectFormat: store.objectFormat,
+      parentCommit,
+      hints,
+      reconcile,
     }) as Promise<SourceState>;
   }
 
@@ -831,24 +868,35 @@ class PiEditorApp {
       const top = await gitTopLevel(ws.root);
       if (!top) {
         ws.recordError = "the opened folder is not inside a Git repository";
+        this.pushRecorderForWorkspace(ws, "paused");
         return null;
       }
       const gitDir = await gitCommonDir(ws.root);
       const fmt = await gitObjectFormat(ws.root);
       if (!gitDir) {
         ws.recordError = "the opened folder has no Git directory";
+        this.pushRecorderForWorkspace(ws, "paused");
         return null;
       }
       // The store pins the canonical root (gitTopLevel resolves symlinks).
       const store = await SnapshotStore.create(this.storeDir!, top, gitDir, fmt);
       const state = await this.snapshotWorker.capture(store, await gitHead(ws.root), null);
       ws.lastStateCommit = state.commit;
+      this.pushRecorderForWorkspace(ws, "ready");
       return store;
     })();
     ws.indexReady = promise.then(() => undefined, (err) => {
       ws.recordError = err instanceof Error ? err.message : String(err);
     });
     this.storePromise = promise;
+  }
+
+  /** Recorder state for every agent terminal of a workspace. */
+  private pushRecorderForWorkspace(ws: WorkspaceState, state: RecorderState): void {
+    for (const id of ws.terminalIds) {
+      const inst = this.terminals.get(id);
+      if (inst && inst.type === "agent") this.setRecorderState(inst, state);
+    }
   }
 
   /**
@@ -2233,7 +2281,15 @@ class PiEditorApp {
         inst.baselines = new Map(startWs?.watcher?.lastContents ?? []);
         inst.runSnapshots = new Map();
         inst.lastToolPath = null;
+        inst.pendingHints = new Set();
+        inst.momentDots = [];
+        inst.captureTimer = null;
         this.pushTimeline(inst, { t: "agent_start" });
+        // The run records moments: the recorder state follows the store.
+        const startWs2 = this.workspaceOfTerminal(inst);
+        void this.storePromise?.then((s) => {
+          this.setRecorderState(inst, !s ? "paused" : startWs2?.indexReady ? "indexing" : "ready");
+        });
         // Couple the run to its start preflight when the token matches.
         this.coupleRunStart(inst, event);
         // A dispatch worker started: mark its task active on the owner board.
@@ -2310,11 +2366,26 @@ class PiEditorApp {
         this.send("tool:target", { path, relPath: this.rel(path), toolName });
         // Session Timeline: snapshot the file as of this tool call. The event
         // object is created first so a delayed content fill can find it later.
-        const ev: Omit<TimelineEvent, "seq" | "ts"> = { t: "tool", toolName, path, relPath: this.rel(path) };
+        // The tool call and entry ids make the dot a forkable moment.
+        const ev: Omit<TimelineEvent, "seq" | "ts"> = {
+          t: "tool",
+          toolName,
+          path,
+          relPath: this.rel(path),
+          toolCallId: event.toolCallId ?? null,
+          entryId: event.entryId ?? null,
+          model: inst.currentRun?.model ?? null,
+        };
         const snapshot = this.toolSnapshot(inst, path, toolName, event.edits, ev);
         if (snapshot?.content !== undefined) ev.content = snapshot.content;
         if (snapshot?.status) ev.status = snapshot.status;
         this.pushTimeline(inst, ev);
+        break;
+      }
+      case "tool_end": {
+        // The tool finished: schedule the moment capture for its dots.
+        const inst2 = this.terminals.get(terminalId);
+        if (inst2 && inst2.currentRun) this.scheduleMomentCapture(inst2);
         break;
       }
     }
@@ -2559,6 +2630,10 @@ class PiEditorApp {
       if (kind === "settled" && inst.currentRun && !inst.currentRun.settledAt) {
         this.finalizeRun(inst, state, entryId);
       }
+      // Fork Any Moment: the settled state is the last moment of the run.
+      if (kind === "settled" && inst.momentDots.length > 0) {
+        this.attachMomentState(inst, state.commit);
+      }
     } catch (err) {
       this.writeAck(inst.id, requestId, { ok: false, error: err instanceof Error ? err.message : String(err) });
     } finally {
@@ -2579,6 +2654,115 @@ class PiEditorApp {
       if (ws.generation === gen) return state;
     }
     throw new Error("the source changed during capture");
+  }
+
+  // -------------------------------------------------- fork any moment ----
+
+  private static readonly MAX_FORK_POINTS = 100;
+
+  /** Debounce a moment capture: sibling tools coalesce into one state. */
+  private scheduleMomentCapture(inst: PiTerminalInstance): void {
+    if (!inst.currentRun) return;
+    const ws = this.workspaceOfTerminal(inst);
+    if (!ws || !ws.primary) return;
+    if (inst.captureTimer) clearTimeout(inst.captureTimer);
+    inst.captureTimer = setTimeout(() => {
+      inst.captureTimer = null;
+      void this.runMomentCapture(inst, ws);
+    }, 200);
+  }
+
+  /**
+   * One incremental capture for the dots since the last one. The watcher
+   * hints are the delta; the watcher cache reconciles missed events.
+   */
+  private async runMomentCapture(inst: PiTerminalInstance, ws: WorkspaceState): Promise<void> {
+    if (inst.momentDots.length === 0 && inst.pendingHints.size === 0) return;
+    const store = await this.storePromise;
+    if (!store || !ws.lastStateCommit) {
+      this.setRecorderState(inst, "paused");
+      return;
+    }
+    const hints = [...inst.pendingHints];
+    inst.pendingHints.clear();
+    // Reconcile: the watcher cache catches changes the hints missed. Bound
+    // the reconcile walk so a huge cache cannot stall the capture.
+    const cache = ws.watcher?.lastContents ?? new Map<string, string>();
+    const reconcile: Array<{ relPath: string; content: string }> = [];
+    const hinted = new Set(hints);
+    let walked = 0;
+    for (const [path, content] of cache) {
+      if (walked++ > 2000) break;
+      const rel = this.rel(path, ws.root);
+      if (hinted.has(rel)) continue;
+      if (this.ignoredSegmentIn(rel)) continue;
+      reconcile.push({ relPath: rel, content });
+    }
+    try {
+      const state = await this.snapshotWorker.captureIncremental(store, ws.lastStateCommit, hints, reconcile);
+      ws.lastStateCommit = state.commit;
+      this.attachMomentState(inst, state.commit);
+      this.setRecorderState(inst, "ready");
+      this.evictForkPoints(inst);
+    } catch (err) {
+      console.warn(`[main] moment capture failed: ${(err as Error).message}`);
+      // The dots stay visible but not forkable; the recorder degrades.
+      this.setRecorderState(inst, "degraded");
+      inst.momentDots = [];
+    }
+  }
+
+  /** Attach the captured state to every dot of the batch and push it. */
+  private attachMomentState(inst: PiTerminalInstance, stateId: string): void {
+    const batch = inst.momentDots;
+    inst.momentDots = [];
+    for (const ev of batch) {
+      ev.stateId = stateId;
+      const pub = { ...ev };
+      delete (pub as Partial<TimelineEvent>).content;
+      this.send("timeline:event", { terminalId: inst.id, event: pub });
+    }
+  }
+
+  /**
+   * Budget: keep at most 100 forkable points per terminal. Evicted dots
+   * lose their dots and their store states together.
+   */
+  private evictForkPoints(inst: PiTerminalInstance): void {
+    const forkable = inst.timeline.filter((e) => e.stateId);
+    if (forkable.length <= PiEditorApp.MAX_FORK_POINTS) return;
+    let excess = forkable.length - PiEditorApp.MAX_FORK_POINTS;
+    const evicted: number[] = [];
+    for (const e of inst.timeline) {
+      if (excess <= 0) break;
+      if (!e.stateId) continue;
+      excess--;
+      evicted.push(e.seq);
+      const evictedState = e.stateId;
+      void this.storePromise?.then((store) => {
+        if (store && evictedState) void store.unref(evictedState).catch(() => undefined);
+      });
+      e.stateId = null;
+      e.evicted = true;
+      const pub = { ...e };
+      delete (pub as Partial<TimelineEvent>).content;
+      this.send("timeline:event", { terminalId: inst.id, event: pub });
+    }
+    if (evicted.length > 0) {
+      this.send("timeline:evict", { terminalId: inst.id, seqs: evicted });
+      this.setRecorderState(inst, "budget");
+    }
+  }
+
+  /** Push the recorder state label (WORLDLINES §6). */
+  private setRecorderState(inst: PiTerminalInstance, state: RecorderState): void {
+    if (inst.recorderState === state) return;
+    inst.recorderState = state;
+    this.send("timeline:recorder-state", { terminalId: inst.id, state });
+  }
+
+  private ignoredSegmentIn(rel: string): boolean {
+    return rel.split(/[\\/]/).some((seg) => IGNORED_SEGMENTS.has(seg) || seg === ".git");
   }
 
   /** Attach the settled state, copy the session branch, mark eligibility. */
@@ -2695,12 +2879,14 @@ class PiEditorApp {
 
   /** Append a timeline point, keep caps, push a CONTENT-FREE event to the
    *  renderer (snapshots are fetched on demand when a dot is clicked, so the
-   *  strip and IPC stay light). */
+   *  strip and IPC stay light). Tool and change dots join the open batch and
+   *  receive their captured source state with the next moment capture. */
   private pushTimeline(inst: PiTerminalInstance, ev: Omit<TimelineEvent, "seq" | "ts">): void {
     const event: TimelineEvent = { seq: ++inst.timelineSeq, ...ev, ts: Date.now() };
     inst.timeline.push(event);
     if (inst.timeline.length > MAX_TIMELINE_EVENTS) inst.timeline.splice(0, inst.timeline.length - MAX_TIMELINE_EVENTS);
     this.trimTimelineContent(inst);
+    if (inst.currentRun && (event.t === "tool" || event.t === "change")) inst.momentDots.push(event);
     const { content: _content, ...pub } = event;
     this.send("timeline:event", { terminalId: inst.id, event: pub });
   }
@@ -2964,6 +3150,9 @@ class PiEditorApp {
       if (owners.length > 0) {
         for (const inst of owners) {
           this.recordModified(inst, path, change.status);
+          // Fork Any Moment: the path joins the terminal's next capture.
+          inst.pendingHints.add(relPath);
+          this.scheduleMomentCapture(inst);
           const last = inst.timeline.at(-1);
           if (last && last.t === "tool" && last.path === path && this.contentSizeOk(change.content)) {
             last.content = change.content;
@@ -2973,6 +3162,8 @@ class PiEditorApp {
       } else {
         for (const inst of unowned) {
           this.recordModified(inst, path, change.status);
+          inst.pendingHints.add(relPath);
+          this.scheduleMomentCapture(inst);
           // An unowned change during a run is manual provenance: it marks
           // the run collaborative (WORLDLINES §6.5).
           if (inst.currentRun) inst.currentRun.unownedEdits++;
@@ -3153,6 +3344,38 @@ class PiEditorApp {
     // ---- Worldlines: candidates (WORLDLINES §6.5, §6.6) ----
     ipcMain.handle("worldline:list", () => this.worldlines?.list() ?? []);
     ipcMain.handle("worldline:promote", (_e, comparisonId: string, label: "A" | "B") => this.promoteCandidate(comparisonId, label));
+    ipcMain.handle("worldline:fork-point", async (_e, terminalId: string, seq: number) => {
+      const inst = this.terminals.get(terminalId);
+      if (!inst) return { ok: false, error: "terminal not found" };
+      // Nested worldlines stay disabled until attribution and cleanup tests
+      // pass (WORLDLINES §6); the root promotion base stays unchanged.
+      if (this.worldlines?.isCandidateTerminal(terminalId)) {
+        return { ok: false, error: "nested worldlines are not supported yet" };
+      }
+      const ev = inst.timeline.find((e) => e.seq === seq);
+      // Expected-version checks: the dot must exist with its state and
+      // entry, and the state must not have been evicted.
+      if (!ev) return { ok: false, error: "timeline moment not found" };
+      if (!ev.stateId || !ev.entryId || ev.evicted) {
+        return { ok: false, error: ev.evicted ? "this moment's source state was evicted" : "this moment is not forkable" };
+      }
+      // The dot's run: the run that was open at the moment's timestamp.
+      const run = [...this.runsByTerminal.values()]
+        .flat()
+        .find((r) => r.startedAt <= ev.ts && (r.settledAt === null || r.settledAt >= ev.ts));
+      const sessionFile = run?.sessionFile;
+      if (!sessionFile) return { ok: false, error: "the run session is unavailable" };
+      this.initWorldlines();
+      return this.worldlines!.forkPoint({
+        terminalId,
+        stateId: ev.stateId,
+        entryId: ev.entryId,
+        model: ev.model ?? run?.model ?? null,
+        thinkingLevel: run?.thinkingLevel ?? null,
+        sessionFile,
+        sourceRunId: run?.id ?? "",
+      });
+    });
     ipcMain.handle("worldline:details", (_e, comparisonId: string, label: "A" | "B") => this.worldlines?.details(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:file", (_e, comparisonId: string, label: "A" | "B", relPath: string) => this.worldlines?.fileOf(comparisonId, label, relPath) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:base-file", (_e, comparisonId: string, relPath: string) => this.worldlines?.baseFileOf(comparisonId, relPath) ?? { ok: false, error: "worldlines unavailable" });

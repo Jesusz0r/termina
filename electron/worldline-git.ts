@@ -483,6 +483,145 @@ export class SnapshotStore {
   }
 
   /**
+   * Incremental capture (WORLDLINES §6.4): reuse the parent tree and update
+   * only the hinted paths. The watcher hints are the delta; the optional
+   * reconcile map (watcher cache entries, path → content) catches missed
+   * events by comparing git blob hashes against the parent tree.
+   */
+  async captureIncremental(
+    parentCommit: string,
+    hints: string[],
+    reconcile: Array<{ relPath: string; content: string }>,
+    budget: CaptureBudget = {},
+    hooks: CaptureHooks = {},
+    source?: { root: string; gitDir: string },
+  ): Promise<SourceState> {
+    const maxFileBytes = budget.maxFileBytes ?? BUDGETS.maxFileBytes;
+    const maxNewBlobBytes = budget.maxNewBlobBytes ?? BUDGETS.maxNewBlobBytes;
+    const cwd = source?.root ?? this.sourceRoot;
+    const parentTree = await this.resolveTree(parentCommit);
+
+    // The capture set: hints plus reconciled cache entries whose git blob
+    // differs from the parent tree (missed watcher events).
+    const changed = new Map<string, "created" | "modified" | "deleted">();
+    for (const h of hints) changed.set(h, changed.has(h) ? changed.get(h)! : "modified");
+    if (reconcile.length > 0) {
+      // One path-limited ls-tree answers every cached path at once.
+      const args = ["ls-tree", parentTree, "-z", "--", ...reconcile.map((r) => r.relPath)];
+      const r = await this.git(args);
+      const parentBlobs = new Map<string, string>();
+      for (const rec of r.stdout.toString("utf8").split("\0")) {
+        if (!rec) continue;
+        const tab = rec.indexOf("\t");
+        if (tab === -1) continue;
+        const meta = rec.slice(0, tab).split(" ");
+        if (meta[1] === "blob") parentBlobs.set(rec.slice(tab + 1), meta[2]);
+      }
+      let newBlobBytes = 0;
+      for (const { relPath, content } of reconcile) {
+        const parentOid = parentBlobs.get(relPath);
+        if (parentOid === undefined) continue; // not in the capture domain
+        const oid = await this.hashBytes(content);
+        if (oid !== parentOid) {
+          changed.set(relPath, "modified");
+          newBlobBytes += Buffer.byteLength(content, "utf8");
+        }
+      }
+      if (newBlobBytes > maxNewBlobBytes) {
+        throw new Error(`capture exceeds the ${maxNewBlobBytes} new-blob byte budget (${newBlobBytes} bytes)`);
+      }
+    }
+    if (changed.size === 0) return { commit: parentCommit, tree: parentTree, head: null, pathCount: 0, newBlobBytes: 0, parentCommit, ts: Date.now() };
+
+    // Seed the temp index from the parent tree, then apply the delta.
+    const indexPath = join(this.dir, "tmp", `index-${Math.random().toString(36).slice(2)}`);
+    const env = { GIT_DIR: this.gitDir, GIT_INDEX_FILE: indexPath };
+    const expected = new Map<string, { mode: string; oid: string }>();
+    let newBlobBytes = 0;
+    try {
+      await mkdir(dirname(indexPath), { recursive: true });
+      const rt = await runGit(["read-tree", parentTree], { env });
+      if (rt.code !== 0) throw new Error(`read-tree failed: ${rt.stderr}`);
+      const entries: string[] = [];
+      for (const relPath of changed.keys()) {
+        const abs = join(cwd, relPath);
+        let st;
+        try {
+          st = lstatSync(abs);
+        } catch {
+          changed.set(relPath, "deleted");
+        }
+        if (st) {
+          if (st.isSymbolicLink()) {
+            const target = readlinkSync(abs);
+            const oid = await this.hashBytes(target);
+            newBlobBytes += Buffer.byteLength(target, "utf8");
+            entries.push(`120000 blob ${oid}\t${relPath}`);
+            expected.set(relPath, { mode: "120000", oid });
+            continue;
+          }
+          if (!st.isFile()) throw new Error(`unsupported file type in capture domain: ${relPath}`);
+          if (st.size > maxFileBytes) throw new Error(`file exceeds the ${maxFileBytes} byte budget: ${relPath}`);
+          let fd: number;
+          try {
+            fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
+          } catch {
+            changed.set(relPath, "deleted");
+            continue;
+          }
+          const mode = st.mode & 0o111 ? "100755" : "100644";
+          const oid = await this.hashFileWithCheck(fd, abs, hooks.onBeforeRead);
+          newBlobBytes += st.size;
+          entries.push(`${mode} blob ${oid}\t${relPath}`);
+          expected.set(relPath, { mode, oid });
+          hooks.onFileRead?.(abs);
+        }
+      }
+      if (newBlobBytes > maxNewBlobBytes) {
+        throw new Error(`capture exceeds the ${maxNewBlobBytes} new-blob byte budget (${newBlobBytes} bytes)`);
+      }
+      // Apply the delta to the temp index: writes via index-info, removals
+      // via force-remove.
+      if (entries.length > 0) {
+        const up = await runGit(["update-index", "--index-info"], { env, input: entries.join("\n") + "\n" });
+        if (up.code !== 0) throw new Error(`update-index failed: ${up.stderr}`);
+      }
+      const removes = [...changed.keys()].filter((p) => !expected.has(p));
+      for (const relPath of removes) {
+        const rmRes = await runGit(["update-index", "--force-remove", "--", relPath], { env });
+        if (rmRes.code !== 0) throw new Error(`update-index --force-remove failed: ${rmRes.stderr}`);
+      }
+      const tree = await runGit(["write-tree"], { env });
+      if (tree.code !== 0) throw new Error(`write-tree failed: ${tree.stderr}`);
+      const treeOid = tree.stdout.toString("utf8").trim();
+      const commit = await this.commitTree(treeOid, parentCommit);
+      await this.updateRef(commit);
+
+      // Verify every changed entry against the new tree.
+      if (expected.size > 0) {
+        const verify = await this.git(["ls-tree", "-z", treeOid, "--", ...expected.keys()]);
+        if (verify.code !== 0) throw new Error(`tree verification failed: ${verify.stderr}`);
+        const seen = new Map<string, { mode: string; oid: string }>();
+        for (const rec of verify.stdout.toString("utf8").split("\0")) {
+          if (!rec) continue;
+          const tab = rec.indexOf("\t");
+          if (tab === -1) continue;
+          const meta = rec.slice(0, tab).split(" ");
+          seen.set(rec.slice(tab + 1), { mode: meta[0] ?? "", oid: meta[2] ?? "" });
+        }
+        if (seen.size !== expected.size) throw new Error(`tree verification size mismatch: ${seen.size} vs ${expected.size}`);
+        for (const [p, exp] of expected) {
+          const got = seen.get(p);
+          if (!got || got.mode !== exp.mode || got.oid !== exp.oid) throw new Error(`tree verification mismatch for ${p}`);
+        }
+      }
+      return { commit, tree: treeOid, head: null, pathCount: entries.length, newBlobBytes, parentCommit, ts: Date.now() };
+    } finally {
+      await rm(indexPath, { force: true });
+    }
+  }
+
+  /**
    * Write raw bytes as a loose blob object in the store.
    * The loose format is zlib(header + bytes); the oid is the hash of
    * header + bytes. Writing objects directly avoids one git spawn per

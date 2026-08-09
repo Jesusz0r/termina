@@ -12,11 +12,14 @@ import { closeSync, openSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 export interface SidecarEvent {
-  t: "agent_start" | "agent_settled" | "tool" | "plan" | "preflight_request" | "prompt" | "steer_input" | "checkpoint_request" | "checkpoint_result" | "session_ready";
+  t: "agent_start" | "agent_settled" | "tool" | "tool_end" | "plan" | "preflight_request" | "prompt" | "steer_input" | "checkpoint_request" | "checkpoint_result" | "session_ready";
   toolName?: string;
   path?: string;
   /** The edit regions of edit/apply_patch tool calls (for baselines). */
   edits?: Array<{ oldText?: string; newText?: string }>;
+  /** The tool call id (correlates the tool result). */
+  toolCallId?: string;
+  isError?: boolean;
   /** The plan text (the first assistant message of a run). */
   text?: string;
   /** Bridge instance id (monotonic sequence resets with it). */

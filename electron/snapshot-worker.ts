@@ -51,7 +51,22 @@ interface ApplyRequest {
   targetDir: string;
 }
 
-type WorkerRequest = CaptureRequest | TemplateRequest | ApplyRequest;
+interface CaptureIncrementalRequest {
+  op: "capture-incremental";
+  requestId: string;
+  storeDir: string;
+  sourceRoot: string;
+  sourceGitDir: string;
+  objectFormat: "sha1" | "sha256";
+  parentCommit: string;
+  hints: string[];
+  reconcile: Array<{ relPath: string; content: string }>;
+  /** A capture from another tree (a worldline candidate head). */
+  captureRoot?: string;
+  captureGitDir?: string;
+}
+
+type WorkerRequest = CaptureRequest | CaptureIncrementalRequest | TemplateRequest | ApplyRequest;
 
 function post(msg: Record<string, unknown>): void {
   parentPort?.postMessage(msg);
@@ -84,6 +99,13 @@ parentPort?.on("message", (msg: WorkerRequest) => {
           : undefined;
         const state: SourceState = await store.capture(msg.head, msg.parentCommit, msg.budget ?? {}, {}, source);
         post({ op: "capture-result", requestId: msg.requestId, ok: true, state });
+        return;
+      }
+      if (msg.op === "capture-incremental") {
+        const store = SnapshotStore.open(msg.storeDir, msg.sourceRoot, msg.sourceGitDir, msg.objectFormat);
+        const source = msg.captureRoot ? { root: msg.captureRoot, gitDir: msg.captureGitDir ?? msg.captureRoot } : undefined;
+        const state: SourceState = await store.captureIncremental(msg.parentCommit, msg.hints, msg.reconcile, {}, {}, source);
+        post({ op: "capture-incremental-result", requestId: msg.requestId, ok: true, state });
         return;
       }
       if (msg.op === "template") {

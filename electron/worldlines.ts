@@ -35,7 +35,7 @@ export interface WorldlineSummary {
   id: string;
   comparisonId: string;
   label: "A" | "B";
-  role: "reference" | "alternative" | "challenge";
+  role: "reference" | "alternative" | "challenge" | "moment";
   comparisonBaseStateId: string;
   promotionBaseStateId: string;
   headStateId: string;
@@ -53,7 +53,7 @@ export interface WorldlineSummary {
 
 interface CandidateState {
   label: "A" | "B";
-  role: "reference" | "alternative";
+  role: "reference" | "alternative" | "moment";
   dir: string;
   supportDir: string;
   homeDir: string;
@@ -662,21 +662,7 @@ export class WorldlineManager {
       const extra: string[] = [];
       if (cand.label === "B" && run.model && run.model.includes("/")) extra.push("--model", run.model);
       if (cand.label === "B" && run.thinkingLevel) extra.push("--thinking", run.thinkingLevel);
-      const { cmd, args, env } = this.candidateLaunch(cmp, cand, extra);
-      const workspaceId = this.deps.createCandidateWorkspace(cand.dir);
-      const { terminalId, pid } = await this.deps.createCandidate({
-        root: cand.dir,
-        workspaceId,
-        launch: { cmd, args, env },
-      });
-      cand.terminalId = terminalId;
-      cand.pid = pid;
-      cand.lstart = readProcessStart(pid);
-      this.terminalToComparison.set(terminalId, { comparisonId: cmp.id, label: cand.label });
-      this.updateManifest(cmp, cand);
-      // The renderer needs the terminal id to badge the tab and to offer
-      // Verify for this candidate.
-      this.pushUpdate(cmp, cand);
+      await this.launchCandidate(cmp, cand, extra);
     }
   }
 
@@ -686,11 +672,13 @@ export class WorldlineManager {
     cand: CandidateState,
     extraPiArgs: string[],
   ): { cmd: string; args: string[]; env: Record<string, string | undefined> } {
-    const sibling = cmp.candidates.get(cand.label === "A" ? "B" : "A")!;
+    // A moment comparison has a single candidate: no sibling to deny (the
+    // worlds-root deny covers its tree anyway).
+    const sibling = cmp.candidates.get(cand.label === "A" ? "B" : "A");
     const paths: SandboxPaths = {
       candidateRoot: cand.dir,
       candidateSupport: cand.supportDir,
-      siblingDir: sibling.dir,
+      siblingDir: sibling?.dir ?? join(this.deps.worldsRoot, "__none__"),
       templateDir: cmp.templateDir,
       worldsRoot: this.deps.worldsRoot,
       primaryRoot: cmp.primaryRoot,
@@ -778,6 +766,144 @@ export class WorldlineManager {
     }
   }
 
+  // ------------------------------------------------------- fork any moment ----
+
+  /**
+   * Fork ONE candidate from a timeline moment (WORLDLINES §6): the exact
+   * captured source state and the session branched at the dot's entry.
+   * Nested worldlines (forking inside a candidate) stay disabled until the
+   * attribution and cleanup tests pass.
+   */
+  async forkPoint(opts: {
+    terminalId: string;
+    stateId: string;
+    entryId: string;
+    model: string | null;
+    thinkingLevel: string | null;
+    sessionFile: string;
+    sourceRunId: string;
+  }): Promise<{ ok: boolean; comparisonId?: string; error?: string }> {
+    if (this.terminalToComparison.has(opts.terminalId)) {
+      return { ok: false, error: "nested worldlines are not supported yet" };
+    }
+    if (this.liveWorldlineCount() + 1 > 3) return { ok: false, error: "the live worldline budget is exhausted" };
+    const store = await this.deps.getStore();
+    if (!store) return { ok: false, error: "recording is not available" };
+    const id = `cmp-${++this.seq}`;
+    const dir = join(this.deps.worldsRoot, id);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, MARKER), randomUUID(), "utf8");
+    writeFileSync(
+      join(dir, "manifest.json"),
+      JSON.stringify({ id, sourceRunId: opts.sourceRunId, createdAt: Date.now(), candidates: {} }),
+      "utf8",
+    );
+    const cmp: ComparisonState = {
+      id,
+      dir,
+      templateDir: join(dir, "template"),
+      sessionWorkspaceDir: join(dir, "session-workspace"),
+      sourceRunId: opts.sourceRunId,
+      sourceGitDir: store.sourceGitDir,
+      primaryRoot: this.deps.primaryRoot,
+      baseCommit: null,
+      model: opts.model,
+      thinkingLevel: opts.thinkingLevel,
+      createdAt: Date.now(),
+      candidates: new Map(),
+      phase: "creating",
+      error: null,
+      readyTimer: null,
+    };
+    const cand: CandidateState = {
+      label: "A",
+      role: "moment",
+      dir: join(dir, "A"),
+      supportDir: join(dir, "A-support"),
+      homeDir: join(dir, "A-support", "home"),
+      sessionDir: join(dir, "A-support", "sessions"),
+      eventsDir: join(dir, "A-support", "events"),
+      tmpDir: join(dir, "A-support", "tmp"),
+      cacheDir: join(dir, "A-support", "cache"),
+      profilePath: join(dir, "A-support", "sandbox.sb"),
+      sessionFile: null,
+      terminalId: null,
+      pid: null,
+      lstart: null,
+      state: "creating",
+      version: 1,
+      error: null,
+    };
+    cmp.candidates.set("A", cand);
+    this.comparisons.set(id, cmp);
+    try {
+      // The template IS the moment state: build it, then clone one candidate.
+      mkdirSync(cmp.templateDir, { recursive: true });
+      await this.deps.snapshot.template({
+        store,
+        stateId: opts.stateId,
+        targetDir: cmp.templateDir,
+        sourceObjectsDir: join(cmp.sourceGitDir, "objects"),
+      });
+      const head = await runGitIn(cmp.templateDir, ["rev-parse", "HEAD"]);
+      cmp.baseCommit = head.code === 0 ? head.stdout.toString().trim() : null;
+      for (const name of RUNTIME_ALLOWLIST) {
+        const src = join(this.deps.primaryRoot, name);
+        if (!existsSync(src)) continue;
+        await this.cloneTree(src, join(cmp.templateDir, name));
+      }
+      await this.cloneTree(cmp.templateDir, cand.dir);
+      // The session branches at the dot's entry: later entries stay out.
+      const fork = await this.deps.session.fork({
+        sourceSessionFile: opts.sessionFile,
+        entryId: opts.entryId,
+        sessionWorkspaceDir: cmp.sessionWorkspaceDir,
+        candidateRoot: cand.dir,
+        candidateSessionDir: cand.sessionDir,
+        relocationNote: `The source project lived at ${this.deps.primaryRoot}. In this candidate, that path maps to ${cand.dir}.`,
+      });
+      if (!fork.ok || !fork.sessionFile) throw new Error("could not fork the moment session");
+      cand.sessionFile = fork.sessionFile;
+      this.createSupportDirs(cmp);
+      this.copyPiResources(cmp);
+      // A moment candidate starts with no prompt: the user continues it.
+      // Replay the captured model and thinking level of that moment.
+      this.writeControl(cand, { opId: randomUUID(), action: "none" });
+      const extra: string[] = [];
+      if (opts.model && opts.model.includes("/")) extra.push("--model", opts.model);
+      if (opts.thinkingLevel) extra.push("--thinking", opts.thinkingLevel);
+      await this.launchCandidate(cmp, cand, extra);
+      cmp.phase = "running";
+      cmp.readyTimer = setTimeout(() => {
+        if (cmp.phase !== "running") return;
+        void this.teardown(cmp.id, "error", "the candidate did not become ready in time");
+      }, READY_TIMEOUT_MS);
+      return { ok: true, comparisonId: id };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[worldlines] fork-point pipeline failed: ${(err as Error).stack ?? message}`);
+      await this.teardown(cmp.id, "error", message);
+      return { ok: false, error: message };
+    }
+  }
+
+  /** Launch one candidate inside its sandbox (A or a moment candidate). */
+  private async launchCandidate(cmp: ComparisonState, cand: CandidateState, extraPiArgs: string[]): Promise<void> {
+    const { cmd, args, env } = this.candidateLaunch(cmp, cand, extraPiArgs);
+    const workspaceId = this.deps.createCandidateWorkspace(cand.dir);
+    const { terminalId, pid } = await this.deps.createCandidate({
+      root: cand.dir,
+      workspaceId,
+      launch: { cmd, args, env },
+    });
+    cand.terminalId = terminalId;
+    cand.pid = pid;
+    cand.lstart = readProcessStart(pid);
+    this.terminalToComparison.set(terminalId, { comparisonId: cmp.id, label: cand.label });
+    this.updateManifest(cmp, cand);
+    this.pushUpdate(cmp, cand);
+  }
+
   // ------------------------------------------------------- session ready ----
 
   /** The bridge consumed its startup control. */
@@ -820,8 +946,7 @@ export class WorldlineManager {
   // ------------------------------------------------------------- control ----
 
   /** Abort pair creation; all-or-nothing cleanup. */
-  async cancel(comparisonId: string): Promise<{ ok: boolean; error?: string }> {
-    const cmp = this.comparisons.get(comparisonId);
+  async cancel(comparisonId: string): Promise<{ ok: boolean; error?: string }> {    const cmp = this.comparisons.get(comparisonId);
     if (!cmp) return { ok: false, error: "comparison not found" };
     await this.teardown(comparisonId, "cancelled", null);
     return { ok: true };

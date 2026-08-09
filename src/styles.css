@@ -557,6 +557,46 @@ body {
   opacity: 0.6;
 }
 
+/* Fork Any Moment: the recorder state and forkable dots */
+.timeline-recorder {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+}
+
+.timeline-recorder.rec-indexing {
+  color: var(--yellow);
+  border-color: var(--yellow);
+}
+
+.timeline-recorder.rec-degraded {
+  color: var(--red);
+  border-color: var(--red);
+}
+
+.timeline-recorder.rec-paused {
+  color: var(--text-dim);
+}
+
+.timeline-recorder.rec-budget {
+  color: var(--orange);
+  border-color: var(--orange);
+}
+
+.timeline-dot.forkable {
+  box-shadow: 0 0 0 1.5px var(--bg-panel);
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.timeline-dot.evicted {
+  opacity: 0.4;
+}
+
 #btn-dispatch {
   background: none;
   border: none;

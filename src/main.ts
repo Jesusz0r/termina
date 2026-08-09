@@ -148,6 +148,7 @@ interface Pane {
   verifyWorker: boolean;
   timeline: TimelineEvent[];
   timelineLoaded: boolean;
+  recorderState: string;
   plan: PlanTask[];
   planLoaded: boolean;
   /** Bumped on every plan:update push (fetch race guard). */
@@ -221,6 +222,7 @@ function createPaneShell(instanceId: string): Pane {
     verifyWorker: false,
     timeline: [],
     timelineLoaded: false,
+    recorderState: "paused",
     plan: [],
     planLoaded: false,
     planVersion: 0,
@@ -344,6 +346,7 @@ function renderTimeline(): void {
     timelineView.setEvents([]);
     return;
   }
+  timelineView.setRecorder(pane.recorderState as Parameters<typeof timelineView.setRecorder>[0]);
   if (!pane.timelineLoaded) {
     pane.timelineLoaded = true;
     void window.pi.getTimeline(pane.instanceId).then((events) => {
@@ -382,6 +385,18 @@ timelineView.bind({
     }
     const label = `${new Date(res.ts ?? ev.ts).toLocaleTimeString()} · ${res.toolName ?? ev.toolName ?? "on disk"}`;
     editorMgr.openSnapshot(pane.instanceId, String(ev.seq), res.relPath ?? res.path ?? "", res.content ?? "", label, opts?.replay ?? false);
+  },
+  onFork: (ev) => {
+    const pane = activeId ? panes.get(activeId) : undefined;
+    if (!pane) return;
+    if (!ev.stateId) {
+      toast("this moment is not forkable yet", "warning");
+      return;
+    }
+    void window.pi.forkPoint(pane.instanceId, ev.seq).then((res) => {
+      if (!res.ok) toast(`fork at this moment failed: ${res.error ?? "unknown error"}`, "warning");
+      else toast(`forked this moment — candidate ${res.comparisonId ?? ""} is starting`, "info");
+    });
   },
 });
 
@@ -948,6 +963,20 @@ window.pi.onTimelineEvent(({ terminalId, event }) => {
     pane.runs = null;
     loadRuns(pane);
   }
+});
+
+window.pi.onTimelineEvict(({ terminalId, seqs }) => {
+  const pane = panes.get(terminalId);
+  if (!pane) return;
+  pane.timeline = pane.timeline.filter((e) => !seqs.includes(e.seq));
+  if (activeId === terminalId) timelineView.evict(seqs);
+});
+
+window.pi.onRecorderState(({ terminalId, state }) => {
+  const pane = panes.get(terminalId);
+  if (!pane) return;
+  pane.recorderState = state;
+  if (activeId === terminalId) timelineView.setRecorder(state);
 });
 
 window.pi.onPlanUpdate(({ instanceId, tasks }) => {
