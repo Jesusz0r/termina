@@ -18,6 +18,26 @@ await build({
   outfile: "dist-electron/main.mjs",
 });
 
+// The snapshot worker runs captures off the main thread.
+await build({
+  ...shared,
+  entryPoints: ["electron/snapshot-worker.ts"],
+  platform: "node",
+  format: "esm",
+  outfile: "dist-electron/snapshot-worker.mjs",
+});
+
+// The session worker runs SessionManager work off the main thread.
+// The pi package stays external: it resolves from node_modules at runtime.
+await build({
+  ...shared,
+  entryPoints: ["electron/session-worker.ts"],
+  platform: "node",
+  format: "esm",
+  outfile: "dist-electron/session-worker.mjs",
+  external: ["@earendil-works/pi-coding-agent"],
+});
+
 // Preload must be CommonJS: sandboxed preloads cannot load ESM.
 await build({
   ...shared,

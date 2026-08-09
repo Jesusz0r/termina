@@ -1,0 +1,23 @@
+PASS  preflight passes on a clean repo
+PASS  capture returns a commit and tree
+PASS  capture reports the expected path count — got 9
+PASS  tree has exactly the expected paths — got 9
+PASS  every captured file is byte-exact with mode
+PASS  deleted, renamed-away, and ignored paths are absent
+PASS  HEAD unchanged
+PASS  git status unchanged
+PASS  index bytes unchanged
+PASS  refs unchanged
+PASS  object count unchanged
+PASS  materialize round-trips bytes, modes, and symlinks
+PASS  identical blobs deduplicate to one object — a=c735202fb0d3c35e7fa4675a376d62142f607ef2 b=c735202fb0d3c35e7fa4675a376d62142f607ef2
+PASS  second capture chains from the first
+PASS  unborn repo captures untracked files — ["100644 blob 4a58007052a65fbc2fc3f910f2855f45a4058e74\ta.txt"]
+PASS  empty repo captures the empty tree — 4b825dc642cb6eb9a060e54bf8d69288fbee4904
+PASS  core.autocrlf=true fails preflight — core.autocrlf is not false
+PASS  transform .gitattributes fails preflight — a .gitattributes file contains content-transforming entries
+PASS  submodule fails preflight — the project contains a submodule
+PASS  path budget aborts the capture
+PASS  a file changed during read aborts the capture — Error: file changed while captured: /var/folders/jv/qzg250fn0hdbgfp2j_n_50r40000gn/T/wline-capture-uUq7TC/race/target.txt
+
+capture spike: 21/21 passed

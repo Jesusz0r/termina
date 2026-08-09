@@ -90,7 +90,6 @@ export interface TimelineEvent {
 }
 
 export type VerifyState = "untested" | "running" | "pass" | "fail" | "timeout" | "cancelled";
-
 /** Verify & Iterate: the last test run attached to a terminal. */
 export interface VerifyInfo {
   state: VerifyState;
@@ -108,6 +107,8 @@ export interface InstanceSummary {
   busy: boolean;
   type: "agent" | "shell";
   shellName?: string;
+  /** The workspace this terminal works in ("" when no folder is open). */
+  workspaceId: string;
   /** True when this terminal is a verify worker running tests. */
   verifyWorker?: boolean;
   /** True when this terminal runs a dispatched plan task. */
@@ -141,7 +142,75 @@ export type MenuCommand =
   | "toggle-explorer"
   | "toggle-modified"
   | "toggle-editor"
-  | "session-search";
+  | "session-search"
+  | "save-all"
+  | "edit:undo"
+  | "edit:redo"
+  | "edit:select-all";
+
+/** One recorded run (WORLDLINES §6.5) — metadata only, no blobs. */
+export interface RunSummary {
+  id: string;
+  terminalId: string;
+  workspaceId: string;
+  /** The app-owned snapshot commit of the run start. */
+  startStateId: string | null;
+  /** The app-owned snapshot commit of the settled state. */
+  settledStateId: string | null;
+  /** The effective prompt text, capped. */
+  promptText: string | null;
+  promptEntryId: string | null;
+  promptParentEntryId: string | null;
+  settledEntryId: string | null;
+  /** The source session file of the run. */
+  sessionFile: string | null;
+  /** The app-private copy of the session branch. */
+  sessionBranchFile: string | null;
+  /** True when Fork Run may offer this run. */
+  replayable: boolean;
+  /** Why the run is not replayable, when it is not. */
+  reason: string | null;
+  interrupted: boolean;
+  steering: boolean;
+  overlap: boolean;
+  unownedEdits: number;
+  trusted: boolean | null;
+  /** The selected model and thinking level of the run. */
+  model: string | null;
+  thinkingLevel: string | null;
+  startedAt: number;
+  settledAt: number | null;
+}
+
+/** One worldline candidate (WORLDLINES §6.1) — metadata only. */
+export interface WorldlineSummary {
+  id: string;
+  comparisonId: string;
+  label: "A" | "B";
+  role: "reference" | "alternative" | "challenge";
+  comparisonBaseStateId: string;
+  promotionBaseStateId: string;
+  headStateId: string;
+  sourceRunId: string;
+  terminalId: string | null;
+  version: number;
+  state:
+    | "creating"
+    | "ready"
+    | "running"
+    | "settled"
+    | "verifying"
+    | "promoting"
+    | "conflict"
+    | "cancelled"
+    | "error"
+    | "discarding"
+    | "discarded"
+    | "promoted";
+  error: string | null;
+  root: string;
+  sessionFile: string | null;
+}
 
 export interface PiBridge {
   // push events (main → renderer)
@@ -158,6 +227,8 @@ export interface PiBridge {
   onVerifyState(cb: (p: { terminalId: string; verify: VerifyInfo }) => void): void;
   onFolderOpened(cb: (e: { cwd: string }) => void): void;
   onInstances(cb: (list: InstanceSummary[]) => void): void;
+  /** Main asks the renderer to save every dirty model (run-start preflight). */
+  onFlushRequest(cb: (p: { requestId: string; writerId: string }) => void): void;
 
   // terminals (agent = pi TUI, shell = a real shell like zsh)
   createTerminal(opts?: { type?: "agent" | "shell"; shell?: string }): Promise<{ id?: string; error?: string }>;
@@ -179,6 +250,32 @@ export interface PiBridge {
   getPlan(terminalId: string): Promise<PlanTask[]>;
   /** Full-text search over the project's past sessions. */
   searchSessions(query: string): Promise<SessionHit[]>;
+
+  // Worldlines: run records
+  /** The recorded runs of a terminal (or every terminal). */
+  getRuns(terminalId?: string): Promise<RunSummary[]>;
+  /** Materialize a run's start or settled source state for inspection. */
+  exportState(runId: string, kind: "start" | "settled"): Promise<{ ok: boolean; dir?: string; error?: string }>;
+  /** The renderer's answer to a flush request. */
+  reportFlush(requestId: string, result: { ok: boolean; failed: string[] }): Promise<void>;
+  /** Save a dirty model on behalf of the write-lease holder (the flush). */
+  flushSave(path: string, content: string, writerId: string): Promise<{ ok: boolean; error?: string }>;
+
+  // Worldlines: candidates
+  /** The live worldline candidates. */
+  getWorldlines(): Promise<WorldlineSummary[]>;
+  /** Fork a completed run into Candidate A and Candidate B. */
+  forkRun(runId: string): Promise<{ ok: boolean; comparisonId?: string; error?: string }>;
+  /** Cancel pair creation (all-or-nothing cleanup). */
+  cancelWorldline(comparisonId: string): Promise<{ ok: boolean; error?: string }>;
+  /** Discard a live comparison. */
+  discardWorldline(comparisonId: string): Promise<{ ok: boolean; error?: string }>;
+  /** Reopen a candidate's Pi terminal. */
+  openWorldlineTerminal(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; error?: string }>;
+  /** Push: one worldline changed. */
+  onWorldlineUpdate(cb: (summary: WorldlineSummary) => void): void;
+  /** Push: a comparison was removed. */
+  onWorldlineRemoved(cb: (e: { comparisonId: string }) => void): void;
 
   // Dispatch (parallel agents)
   /** Dispatch the plan board tasks of the terminal to parallel workers. */

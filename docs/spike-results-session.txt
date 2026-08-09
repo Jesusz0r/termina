@@ -1,0 +1,21 @@
+PASS  source session persists
+PASS  source session file written
+PASS  opened copy exposes every entry
+PASS  createBranchedSession extracts the path
+PASS  branched session has only the path root→entry — got 2 entries
+PASS  branched session leaf is the selected entry
+PASS  settled branch has all four entries
+PASS  forkFrom creates a persisted candidate session
+PASS  forked session cwd is the candidate root
+PASS  forked session dir is the candidate session dir
+PASS  forked session file lives in the candidate dir — /var/folders/jv/qzg250fn0hdbgfp2j_n_50r40000gn/T/wline-session-hmMnDq/candidate-sessions/2026-08-09T06-02-55-620Z_019fe51d-fd04-7ebd-b8d7-6b2791b1fde4.jsonl
+PASS  forked session keeps the branched path
+PASS  forked session leaf matches
+PASS  forked session file is a copy, not the source
+PASS  forked session appends after the branch point
+PASS  root-only branch is refused (empty candidate session is the path) — Error: Cannot fork: source session file is empty or invalid: /var/folders/jv/qzg250fn0hdbgfp2j_n_50r40000gn/T/wline-session-hmMnDq/candidate-sessions/2026-08-09T06-02-55-621Z_019fe51d-fd05-702a-b600-7534c630764a.jsonl
+PASS  empty candidate session created for a root prompt
+PASS  source session file untouched by forking
+PASS  candidate session dir contains only app-owned files
+
+session-fork spike: 19/19 passed

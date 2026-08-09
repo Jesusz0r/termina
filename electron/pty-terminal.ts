@@ -23,6 +23,25 @@ export class PtyTerminal {
   onData: (data: string) => void = () => {};
   onExit: (code: number) => void = () => {};
 
+  /** The pty child pid (the process-group leader). */
+  get pid(): number {
+    return this.pty?.pid ?? -1;
+  }
+
+  /**
+   * Signal the whole pty process group. The pty child is a session
+   * leader, so its pid is the group id; descendants inherit the group.
+   */
+  killGroup(signal: string = "SIGTERM"): void {
+    const pid = this.pid;
+    if (pid <= 0) return;
+    try {
+      process.kill(-pid, signal);
+    } catch {
+      /* the group is already gone */
+    }
+  }
+
   constructor(opts: PtyOptions) {
     this.id = opts.id;
     this.cwd = opts.cwd;
@@ -58,10 +77,10 @@ export class PtyTerminal {
     }
   }
 
-  kill(): void {
+  kill(signal?: string): void {
     if (this.exited || !this.pty) return;
     try {
-      this.pty.kill();
+      this.pty.kill(signal);
     } catch {
       /* ignore */
     }

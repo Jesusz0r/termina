@@ -33,6 +33,29 @@ const run = async () => {
     outfile: "dist-electron/preload.cjs",
   });
 
+  await build({
+    bundle: true,
+    sourcemap: true,
+    target: "node22",
+    external: ["electron", "@lydell/node-pty", "@lydell/node-pty-darwin-arm64", "@lydell/node-pty-win32-x64", "@lydell/node-pty-linux-x64"],
+    logLevel: "info",
+    entryPoints: ["electron/snapshot-worker.ts"],
+    platform: "node",
+    format: "esm",
+    outfile: "dist-electron/snapshot-worker.mjs",
+  });
+  await build({
+    bundle: true,
+    sourcemap: true,
+    target: "node22",
+    external: ["electron", "@lydell/node-pty", "@lydell/node-pty-darwin-arm64", "@lydell/node-pty-win32-x64", "@lydell/node-pty-linux-x64", "@earendil-works/pi-coding-agent"],
+    logLevel: "info",
+    entryPoints: ["electron/session-worker.ts"],
+    platform: "node",
+    format: "esm",
+    outfile: "dist-electron/session-worker.mjs",
+  });
+
   const server = await createServer({
     configFile: "vite.config.ts",
   });

@@ -8,19 +8,24 @@
  * of files mid-run and the modified-files panel.
  */
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme } from "electron";
-import { spawn } from "node:child_process";
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { mkdir, readFile, readdir, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
+import { execFileSync, spawn } from "node:child_process";
+import { accessSync, constants, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, readdir, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
 import { PtyTerminal } from "./pty-terminal.js";
 import { SidecarEvent, SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
+import { SnapshotStore, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, type SourceState } from "./worldline-git.js";
+import { WorldlineManager, type ForkableRun } from "./worldlines.js";
 import type {
   ExplorerEntry,
   InstanceSummary,
   ModifiedFile,
+  RunSummary,
   SessionHit,
   TimelineEvent,
   VerifyInfo,
@@ -41,8 +46,9 @@ const BRIDGE_EXTENSION = `
 /**
  * Pi/ditor bridge extension — auto-generated, do not edit.
  */
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const FILE_TOOLS = new Set(["write", "edit", "apply_patch", "create_file", "insert"]);
@@ -52,18 +58,135 @@ export default function (pi: ExtensionAPI): void {
   const dir = process.env.PI_EDITOR_EVENTS_DIR;
   const id = process.env.PI_EDITOR_TERMINAL_ID;
   if (!dir || !id) return;
+  // One random bridge instance id per extension load. Main accepts a
+  // sequence reset only after a new instance id (WORLDLINES §6.3).
+  const bridgeId = randomUUID();
+  let seq = 0;
   const log = (event: Record<string, unknown>): void => {
     try {
-      mkdirSync(dir, { recursive: true });
-      appendFileSync(join(dir, id + ".jsonl"), JSON.stringify(event) + "\\n");
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      seq++;
+      appendFileSync(join(dir, id + ".jsonl"), JSON.stringify({ bridgeId, seq, ...event }) + "\\n", { mode: 0o600 });
     } catch {}
   };
+  /** Poll for the app's acknowledgement file, consume it exactly once. */
+  const waitForAck = (requestId: string, timeoutMs: number): Promise<Record<string, unknown> | null> => {
+    const ackPath = join(dir, \`ack-\${id}-\${requestId}.json\`);
+    const deadline = Date.now() + timeoutMs;
+    return new Promise((resolve) => {
+      const poll = (): void => {
+        try {
+          const raw = readFileSync(ackPath, "utf8");
+          rmSync(ackPath, { force: true });
+          resolve(JSON.parse(raw) as Record<string, unknown>);
+          return;
+        } catch {
+          /* not written yet */
+        }
+        if (Date.now() > deadline) {
+          resolve(null);
+          return;
+        }
+        setTimeout(poll, 50);
+      };
+      poll();
+    });
+  };
+  /** One-use preflight state carried from input to agent_start. */
+  let preflight: { requestId: string; token: string | null } | null = null;
   let planLogged = false;
-  pi.on("agent_start", () => {
-    planLogged = false;
-    log({ t: "agent_start" });
+
+  // ---- startup control (WORLDLINES §6.7) ----
+  // The candidate terminal starts with a one-shot control file: prefill
+  // text, send a structured prompt, or start with no prompt. The bridge
+  // consumes the file exactly once before applying it.
+  pi.on("session_start", (_event, ctx) => {
+    let control: { opId?: unknown; action?: unknown; text?: unknown; content?: unknown } | null = null;
+    try {
+      const controlPath = join(dir, "startup-control.json");
+      const raw = readFileSync(controlPath, "utf8");
+      rmSync(controlPath, { force: true });
+      control = JSON.parse(raw) as { opId?: unknown; action?: unknown; text?: unknown; content?: unknown };
+    } catch {
+      /* no control: a reload after application */
+    }
+    const opId = String(control?.opId ?? "");
+    if (!control) {
+      log({ t: "session_ready", opId, ok: true, reload: true });
+      return;
+    }
+    try {
+      if (control.action === "prefill" && typeof control.text === "string") {
+        // Editable text: the user can change it before submitting.
+        ctx.ui.setEditorText(control.text);
+      } else if (control.action === "structured") {
+        // One-shot marker: a reload cannot submit the prompt twice.
+        pi.appendEntry("pi-ditor-control", { opId });
+        const content = Array.isArray(control.content) ? control.content : [String(control.text ?? "")];
+        pi.sendUserMessage(content);
+      }
+      log({ t: "session_ready", opId, ok: true });
+    } catch (err) {
+      log({ t: "session_ready", opId, ok: false, error: String(err) });
+    }
   });
-  pi.on("agent_settled", () => log({ t: "agent_settled" }));
+
+  // ---- run-start preflight (WORLDLINES §6.3) ----
+  pi.on("input", async (event, ctx) => {
+    if (event.source !== "interactive") return { action: "continue" };
+    const text = String(event.text ?? "").trim();
+    const images = (event.images ?? []) as unknown[];
+    if (!ctx.isIdle()) {
+      // A steering interrupt or queued follow-up: the open run cannot be
+      // replayed as one task.
+      log({ t: "steer_input", behavior: String(event.streamingBehavior ?? "steer") });
+      return { action: "continue" };
+    }
+    if (!text && images.length === 0) return { action: "continue" };
+    const requestId = randomUUID();
+    log({ t: "preflight_request", requestId, hasImages: images.length > 0 });
+    const ack = await waitForAck(requestId, 15000);
+    if (!ack || ack.ok !== true) {
+      const err = String((ack as { error?: unknown })?.error ?? "preflight timed out");
+      // Keep the draft editable: restore the raw text and do not start.
+      if (text) ctx.ui.setEditorText(String(event.text ?? ""));
+      ctx.ui.notify("pi/ditor: the run did not start (" + err + "). Your text is still in the editor.", "warning");
+      return { action: "handled" };
+    }
+    preflight = { requestId, token: (ack as { token?: string | null }).token ?? null };
+    return { action: "continue" };
+  });
+
+  pi.on("agent_start", (event, ctx) => {
+    planLogged = false;
+    const sessionFile = ctx.sessionManager.getSessionFile() ?? null;
+    const leafId = ctx.sessionManager.getLeafId();
+    const parentId = leafId ? (ctx.sessionManager.getEntry(leafId)?.parentId ?? null) : null;
+    log({
+      t: "agent_start",
+      preflightRequestId: preflight?.requestId ?? null,
+      preflightToken: preflight?.token ?? null,
+      sessionFile,
+      sessionId: ctx.sessionManager.getSessionId(),
+      entryId: leafId,
+      parentEntryId: parentId,
+      trusted: ctx.isProjectTrusted(),
+      model: ctx.model?.id ?? null,
+      thinkingLevel: ctx.thinkingLevel ?? null,
+    });
+    preflight = null;
+  });
+
+  // The settled boundary: report the settle, then ask for a checkpoint
+  // and wait for the outcome.
+  pi.on("agent_settled", async (event, ctx) => {
+    log({ t: "agent_settled" });
+    const requestId = randomUUID();
+    log({ t: "checkpoint_request", requestId, kind: "settled", entryId: ctx.sessionManager.getLeafId() });
+    const ack = await waitForAck(requestId, 20000);
+    log({ t: "checkpoint_result", requestId, ok: ack?.ok === true, error: (ack as { error?: unknown })?.error ?? null });
+  });
+
   // Plan Board: capture the first assistant message of a run that contains
   // a task list (bullet or numbered lines).
   pi.on("message_end", (event) => {
@@ -86,8 +209,9 @@ export default function (pi: ExtensionAPI): void {
     log({ t: "plan", text: text.slice(0, 4000) });
   });
   // Feed the latest context files (test results, user edits) into the
-  // agent's next turn.
-  pi.on("before_agent_start", async () => {
+  // agent's next turn. Capture the effective expanded prompt and images in
+  // an app-private payload file first.
+  pi.on("before_agent_start", async (event) => {
     let context = "";
     for (const name of [\`verify-\${id}.md\`, \`edits-\${id}.md\`, \`mine-\${id}.md\`]) {
       try {
@@ -95,6 +219,11 @@ export default function (pi: ExtensionAPI): void {
         if (text) context += (context ? "\\n\\n---\\n\\n" : "") + text;
       } catch {}
     }
+    try {
+      const file = \`prompt-\${id}-\${bridgeId.slice(0, 8)}-\${seq}.json\`;
+      writeFileSync(join(dir, file), JSON.stringify({ prompt: event.prompt, images: event.images ?? [], context }), { mode: 0o600 });
+      log({ t: "prompt", file, hasPreflight: preflight !== null });
+    } catch {}
     if (!context) return;
     return {
       message: { customType: "pi-ditor-context", content: context, display: false },
@@ -116,6 +245,71 @@ export default function (pi: ExtensionAPI): void {
 `;
 
 let terminalSeq = 0;
+let workspaceSeq = 0;
+
+/** One source tree the app controls (WORLDLINES §6.2). */
+interface WorkspaceState {
+  id: string;
+  root: string;
+  /** True for the opened project; false for worldline candidates. */
+  primary: boolean;
+  /** Bumped on every watcher-observed content change. */
+  generation: number;
+  /** The id of the current write-lease holder, or null. */
+  writerId: string | null;
+  watcher: ProjectWatcher | null;
+  terminalIds: Set<string>;
+  /** The last captured state commit (the lineage parent). */
+  lastStateCommit: string | null;
+  /** Resolves when the initial index capture finished. */
+  indexReady: Promise<void> | null;
+  /** Why recording is unavailable, when it is. */
+  recordError: string | null;
+}
+
+/** One recorded run (WORLDLINES §6.5). */
+interface RunRecord {
+  id: string;
+  terminalId: string;
+  workspaceId: string;
+  startStateId: string | null;
+  settledStateId: string | null;
+  /** The app-private prompt payload file (text + images). */
+  promptPayloadFile: string | null;
+  /** The effective prompt text, capped for IPC. */
+  promptText: string | null;
+  promptEntryId: string | null;
+  promptParentEntryId: string | null;
+  settledEntryId: string | null;
+  sessionFile: string | null;
+  /** The app-private copy of the session branch. */
+  sessionBranchFile: string | null;
+  trusted: boolean | null;
+  /** The selected model and thinking level of the run. */
+  model: string | null;
+  thinkingLevel: string | null;
+  replayable: boolean;
+  reason: string | null;
+  interrupted: boolean;
+  steering: boolean;
+  overlap: boolean;
+  unownedEdits: number;
+  startedAt: number;
+  settledAt: number | null;
+}
+
+/** A start preflight waiting for agent_start to consume its token. */
+interface PendingPreflight {
+  requestId: string;
+  token: string;
+  terminalId: string;
+  workspaceId: string;
+  startState: SourceState | null;
+  generation: number;
+  leaseRequester: string;
+  expiresAt: number;
+  timer: ReturnType<typeof setTimeout>;
+}
 
 /**
  * Host agent session variables. The app's pi TUI must start clean — a pinned
@@ -178,6 +372,8 @@ class PiTerminalInstance {
   readonly id: string;
   pty: PtyTerminal;
   cwd: string;
+  /** The workspace this terminal works in (empty when no folder is open). */
+  workspaceId: string;
   type: "agent" | "shell";
   shellName?: string;
   busy = false;
@@ -199,10 +395,15 @@ class PiTerminalInstance {
   /** Last tool event per path (dedupe with watcher changes). */
   lastToolPath: { path: string; at: number } | null = null;
   timelineSeq = 0;
+  /** The prompt payload reported by before_agent_start. */
+  pendingPrompt: { file: string; text: string; images: number } | null = null;
+  /** The open run record of this terminal, or null. */
+  currentRun: RunRecord | null = null;
 
   constructor(
     id: string,
     cwd: string,
+    workspaceId: string,
     type: "agent" | "shell",
     shellName: string | undefined,
     cmd: string,
@@ -213,18 +414,187 @@ class PiTerminalInstance {
   ) {
     this.id = id;
     this.cwd = cwd;
+    this.workspaceId = workspaceId;
     this.type = type;
     this.shellName = shellName;
     this.pty = new PtyTerminal({ id, cwd, cmd, args, env, cols, rows });
   }
 }
 
+/**
+ * Runs captures on a worker thread. Requests are serialized: the store
+ * writes one capture at a time.
+ */
+class SnapshotWorkerClient {
+  private worker: Worker | null = null;
+  private pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  private queue: Promise<unknown> = Promise.resolve();
+  private seq = 0;
+
+  private ensure(): Worker {
+    if (this.worker) return this.worker;
+    this.worker = new Worker(join(__dirname, "snapshot-worker.mjs"));
+    this.worker.on("message", (msg: { op?: string; requestId?: string; ok?: boolean; error?: string; state?: SourceState }) => {
+      // The worker answers every op with <op>-result.
+      if (!msg.requestId) return;
+      const p = this.pending.get(msg.requestId);
+      if (!p) return;
+      this.pending.delete(msg.requestId);
+      if (msg.ok) p.resolve(msg.state ?? msg);
+      else p.reject(new Error(msg.error ?? "snapshot worker op failed"));
+    });
+    this.worker.on("error", (err) => {
+      for (const p of this.pending.values()) p.reject(err);
+      this.pending.clear();
+      this.worker = null;
+    });
+    return this.worker;
+  }
+
+  /** Serialize captures; a failing capture does not poison the queue. */
+  request(payload: Record<string, unknown>): Promise<unknown> {
+    const run = this.queue.then(() => this.dispatch(payload));
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  private dispatch(payload: Record<string, unknown>): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const requestId = `cap-${++this.seq}`;
+      this.pending.set(requestId, { resolve, reject });
+      try {
+        // The payload carries its own op (capture, template, apply-state).
+        this.ensure().postMessage({ ...payload, requestId });
+      } catch (err) {
+        this.pending.delete(requestId);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  /** Capture one source state off the main thread. */
+  capture(store: SnapshotStore, head: string | null, parentCommit: string | null): Promise<SourceState> {
+    return this.request({
+      op: "capture",
+      storeDir: store.dir,
+      sourceRoot: store.sourceRoot,
+      sourceGitDir: store.sourceGitDir,
+      objectFormat: store.objectFormat,
+      head,
+      parentCommit,
+    }) as Promise<SourceState>;
+  }
+
+  /** Create the comparison template (git init, base bytes, commit). */
+  template(opts: { store: SnapshotStore; stateId: string; targetDir: string; sourceObjectsDir: string }): Promise<void> {
+    return this.request({
+      op: "template",
+      storeDir: opts.store.dir,
+      sourceRoot: opts.store.sourceRoot,
+      sourceGitDir: opts.store.sourceGitDir,
+      objectFormat: opts.store.objectFormat,
+      stateId: opts.stateId,
+      targetDir: opts.targetDir,
+      sourceObjectsDir: opts.sourceObjectsDir,
+    }) as Promise<void>;
+  }
+
+  /** Apply a state over a candidate directory and commit it. */
+  applyState(opts: { store: SnapshotStore; stateId: string; targetDir: string }): Promise<void> {
+    return this.request({
+      op: "apply-state",
+      storeDir: opts.store.dir,
+      sourceRoot: opts.store.sourceRoot,
+      sourceGitDir: opts.store.sourceGitDir,
+      objectFormat: opts.store.objectFormat,
+      stateId: opts.stateId,
+      targetDir: opts.targetDir,
+    }) as Promise<void>;
+  }
+
+  dispose(): void {
+    this.worker?.terminate();
+    this.worker = null;
+  }
+}
+
+/**
+ * Runs SessionManager work (session forking) on a worker thread.
+ * Requests are serialized.
+ */
+class SessionWorkerClient {
+  private worker: Worker | null = null;
+  private pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+  private queue: Promise<unknown> = Promise.resolve();
+  private seq = 0;
+
+  private ensure(): Worker {
+    if (this.worker) return this.worker;
+    this.worker = new Worker(join(__dirname, "session-worker.mjs"));
+    this.worker.on("message", (msg: { op?: string; requestId?: string; ok?: boolean; error?: string }) => {
+      if (msg.op !== "fork-result" || !msg.requestId) return;
+      const p = this.pending.get(msg.requestId);
+      if (!p) return;
+      this.pending.delete(msg.requestId);
+      if (msg.ok) p.resolve(msg);
+      else p.reject(new Error(msg.error ?? "session fork failed"));
+    });
+    this.worker.on("error", (err) => {
+      for (const p of this.pending.values()) p.reject(err);
+      this.pending.clear();
+      this.worker = null;
+    });
+    return this.worker;
+  }
+
+  request(payload: Record<string, unknown>): Promise<unknown> {
+    const run = this.queue.then(() => this.dispatch(payload));
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  private dispatch(payload: Record<string, unknown>): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const requestId = `fork-${++this.seq}`;
+      this.pending.set(requestId, { resolve, reject });
+      try {
+        this.ensure().postMessage({ ...payload, op: "fork", requestId });
+      } catch (err) {
+        this.pending.delete(requestId);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  /** Fork a candidate session: branch at the entry, fork into the dir. */
+  fork(opts: {
+    sourceSessionFile: string;
+    entryId: string | null;
+    sessionWorkspaceDir: string;
+    candidateRoot: string;
+    candidateSessionDir: string;
+    relocationNote?: string;
+    contextText?: string;
+  }): Promise<{ ok: boolean; sessionFile: string | null; entryCount: number; leafId: string | null }> {
+    return this.request(opts) as Promise<{ ok: boolean; sessionFile: string | null; entryCount: number; leafId: string | null }>;
+  }
+
+  dispose(): void {
+    this.worker?.terminate();
+    this.worker = null;
+  }
+}
+
 class PiEditorApp {
   private win: BrowserWindow | null = null;
   private terminals = new Map<string, PiTerminalInstance>();
-  private watcher: ProjectWatcher | null = null;
+  /** One workspace per source tree (WORLDLINES §6.2). */
+  private workspaces = new Map<string, WorkspaceState>();
+  /** The cwd of the primary workspace (kept for renderer-facing APIs). */
   private projectCwd: string | null = null;
   private eventsDir = process.env.PI_EDITOR_EVENTS_DIR ?? join(app.getPath("temp"), "pi-ditor-events");
+  /** The app-private session branch workspace. */
+  private sessionWorkspaceDir = join(this.eventsDir, "session-workspace");
   private tailer = new SidecarTailer(this.eventsDir);
   private paintWatchdog: ReturnType<typeof setInterval> | null = null;
   /** In-flight verify runs: owner terminal id → worker id. */
@@ -238,11 +608,32 @@ class PiEditorApp {
   /** Files the user marked as theirs (canonical paths). The agent is told
    *  not to modify them without asking. */
   private mineFiles = new Set<string>();
-  /**
-   * Files the user changed while no agent terminal was busy. The agent
-   * receives them on its next turn. It adapts instead of overwriting them.
-   */
-  private userEdits = new Map<string, UserEdit>();
+  /** Files the user changed while no agent terminal was busy. The agent
+   *  receives them on its next turn. It adapts instead of overwriting them.
+   *  One map per workspace. */
+  private userEditsByWorkspace = new Map<string, Map<string, UserEdit>>();
+  /** The app-owned snapshot store of the current project, or null. */
+  private storePromise: Promise<SnapshotStore | null> | null = null;
+  /** The store directory (app-owned, outside the project). */
+  private storeDir: string | null = null;
+  /** The snapshot worker (captures off the main thread). */
+  private snapshotWorker = new SnapshotWorkerClient();
+  /** The session worker (session forking off the main thread). */
+  private sessionWorker = new SessionWorkerClient();
+  /** The worldline manager (Fork Run candidates). */
+  private worldlines: WorldlineManager | null = null;
+  /** The app-owned worlds root. */
+  private worldsRoot = process.env.PI_EDITOR_WORLDS_DIR ?? join(app.getPath("userData"), "worlds");
+  /** Tailers for candidate events directories. */
+  private worldlineTailers = new Map<string, SidecarTailer>();
+  /** One-use start preflights by token. */
+  private pendingPreflights = new Map<string, PendingPreflight>();
+  /** Run records per terminal (WORLDLINES §6.5). */
+  private runsByTerminal = new Map<string, RunRecord[]>();
+  private runSeq = 0;
+  /** Renderer flush requests awaiting their report. */
+  private flushWaiters = new Map<string, { resolve: (r: { ok: boolean; failed: string[] }) => void; timer: ReturnType<typeof setTimeout> }>();
+  private flushSeq = 0;
   private userEditsWriteTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly USER_EDITS_MAX = 50;
   /**
@@ -309,7 +700,30 @@ class PiEditorApp {
           { type: "separator" },
           { label: "Refresh Explorer", click: send("refresh") },
           { type: "separator" },
+          { label: "Save All", accelerator: "CmdOrCtrl+Alt+S", click: send("save-all") },
+          { type: "separator" },
           { label: "Close Window", accelerator: "CmdOrCtrl+W", role: "close" },
+        ],
+      },
+      {
+        label: "Edit",
+        submenu: [
+          // Undo, Redo, and Select All dispatch to the renderer. The focused
+          // surface (Monaco or terminal) runs its own handler. Role items
+          // would run the browser undo and select on the hidden input only.
+          { label: "Undo", accelerator: "CmdOrCtrl+Z", click: send("edit:undo") },
+          { label: "Redo", accelerator: "Shift+CmdOrCtrl+Z", click: send("edit:redo") },
+          { type: "separator" },
+          // The roles fire the cut, copy, and paste events. Monaco and xterm
+          // listen for these events, so the native shortcuts work in both
+          // the editor and the terminal.
+          { role: "cut", label: "Cut" },
+          { role: "copy", label: "Copy" },
+          { role: "paste", label: "Paste" },
+          { role: "pasteAndMatchStyle", label: "Paste and Match Style" },
+          { role: "delete", label: "Delete" },
+          { type: "separator" },
+          { label: "Select All", accelerator: "CmdOrCtrl+A", click: send("edit:select-all") },
         ],
       },
       {
@@ -354,8 +768,241 @@ class PiEditorApp {
 
   // ------------------------------------------------------------- terminals --
 
+  // ---------------------------------------------------------- workspaces ---
+
+  /** The opened project's workspace, or null when no folder is open. */
+  private primaryWorkspace(): WorkspaceState | null {
+    for (const ws of this.workspaces.values()) if (ws.primary) return ws;
+    return null;
+  }
+
+  /** The workspace a terminal works in (falls back to the primary). */
+  private workspaceOfTerminal(inst: PiTerminalInstance): WorkspaceState | null {
+    return this.workspaces.get(inst.workspaceId) ?? this.primaryWorkspace();
+  }
+
+  /** The user-edit map of a workspace (WORLDLINES §6.2: one per workspace). */
+  private userEditsOf(ws: WorkspaceState): Map<string, UserEdit> {
+    let m = this.userEditsByWorkspace.get(ws.id);
+    if (!m) {
+      m = new Map();
+      this.userEditsByWorkspace.set(ws.id, m);
+    }
+    return m;
+  }
+
+  /** Create a workspace and start its watcher. The primary workspace sets
+   *  the project cwd used by the renderer-facing APIs. */
+  private createWorkspace(root: string, primary: boolean): WorkspaceState {
+    const ws: WorkspaceState = {
+      id: `ws-${++workspaceSeq}`,
+      root,
+      primary,
+      generation: 0,
+      writerId: null,
+      watcher: null,
+      terminalIds: new Set(),
+      lastStateCommit: null,
+      indexReady: null,
+      recordError: null,
+    };
+    this.workspaces.set(ws.id, ws);
+    if (primary) this.projectCwd = root;
+    ws.watcher = this.startWatcher(ws);
+    if (primary) this.initRecording(ws);
+    return ws;
+  }
+
+  /**
+   * Create the app-owned snapshot store and run the initial index capture
+   * (WORLDLINES §6.4). Runs do not record until the index finishes.
+   */
+  private initRecording(ws: WorkspaceState): void {
+    if (this.storePromise) return; // already initializing
+    this.storeDir = join(app.getPath("userData"), "worldlines", createHash("sha256").update(ws.root).digest("hex").slice(0, 16));
+    const promise = (async (): Promise<SnapshotStore | null> => {
+      const top = await gitTopLevel(ws.root);
+      if (!top) {
+        ws.recordError = "the opened folder is not inside a Git repository";
+        return null;
+      }
+      const gitDir = await gitCommonDir(ws.root);
+      const fmt = await gitObjectFormat(ws.root);
+      if (!gitDir) {
+        ws.recordError = "the opened folder has no Git directory";
+        return null;
+      }
+      // The store pins the canonical root (gitTopLevel resolves symlinks).
+      const store = await SnapshotStore.create(this.storeDir!, top, gitDir, fmt);
+      const state = await this.snapshotWorker.capture(store, await gitHead(ws.root), null);
+      ws.lastStateCommit = state.commit;
+      return store;
+    })();
+    ws.indexReady = promise.then(() => undefined, (err) => {
+      ws.recordError = err instanceof Error ? err.message : String(err);
+    });
+    this.storePromise = promise;
+  }
+
+  /**
+   * Create the worldline manager. Depends on app paths that exist only
+   * after the window is created.
+   */
+  private initWorldlines(): void {
+    if (this.worldlines) return;
+    this.worldlines = new WorldlineManager({
+      worldsRoot: this.worldsRoot,
+      // The canonical primary root: the sandbox compares canonical paths.
+      primaryRoot: realpathSync(this.primaryWorkspace()?.root ?? this.projectCwd ?? homedir()),
+      realHome: homedir(),
+      userData: app.getPath("userData"),
+      primaryEventsDir: this.eventsDir,
+      bridgePath: this.bridgePath(),
+      piBin: this.resolvePiBin(),
+      baseEnv: cleanEnv(),
+      getStore: async () => {
+        const store = await this.storePromise;
+        return store;
+      },
+      // The sandboxed pi loads the pinned package and the node binary.
+      appReadPaths: () => {
+        const out: string[] = [];
+        out.push(dirname(dirname(dirname(dirname(this.resolvePiBin()))))); // app root
+        try {
+          const nodeBin = execFileSync("which", ["node"], { encoding: "utf8" }).trim();
+          if (nodeBin) {
+            out.push(nodeBin);
+            out.push(dirname(dirname(nodeBin))); // the node version dir (bin + lib)
+          }
+        } catch {
+          /* keep only the app root */
+        }
+        return out;
+      },
+      snapshot: {
+        template: (opts) => this.snapshotWorker.template(opts),
+        applyState: (opts) => this.snapshotWorker.applyState(opts),
+      },
+      session: {
+        fork: (opts) => this.sessionWorker.fork(opts),
+      },
+      createCandidate: (opts) => this.createCandidate(opts),
+      createCandidateWorkspace: (root) => this.createCandidateWorkspace(root),
+      onUpdate: (summary) => this.send("worldline:update", summary),
+      onRemoved: (comparisonId) => {
+        this.removeCandidateWorkspaces(comparisonId);
+        this.send("worldline:removed", { comparisonId });
+      },
+    });
+  }
+
+  /** The events dir a terminal's bridge reads (candidates have their own). */
+  private eventsDirOf(inst: PiTerminalInstance): string {
+    return this.worldlines?.eventsDirOf(inst.id) ?? this.eventsDir;
+  }
+
+  /** Create a candidate terminal inside its sandbox. */
+  private async createCandidate(opts: {
+    root: string;
+    workspaceId: string;
+    launch: { cmd: string; args: string[]; env: Record<string, string | undefined> };
+  }): Promise<{ terminalId: string; pid: number }> {
+    const inst = await this.createTerminal(opts.root, { type: "agent", workspaceId: opts.workspaceId, launch: opts.launch });
+    // The candidate's bridge writes to its own events dir: tail it.
+    const eventsDir = opts.launch.env.PI_EDITOR_EVENTS_DIR;
+    if (eventsDir && eventsDir !== this.eventsDir) {
+      const tailer = new SidecarTailer(eventsDir);
+      tailer.onEvent = (id, event) => this.handleSidecarEvent(id, event);
+      tailer.start();
+      tailer.watch(inst.id);
+      this.worldlineTailers.set(inst.id, tailer);
+    }
+    return { terminalId: inst.id, pid: inst.pty.pid };
+  }
+
+  /** A candidate source tree workspace (no recording, own watcher). */
+  private createCandidateWorkspace(root: string): string {
+    const ws = this.createWorkspace(root, false);
+    return ws.id;
+  }
+
+  /** Remove candidate workspaces after a comparison is torn down. */
+  private removeCandidateWorkspaces(comparisonId: string): void {
+    for (const [id, ws] of [...this.workspaces]) {
+      if (ws.primary) continue;
+      if (!this.worldlines || !ws.root.startsWith(this.worldsRoot)) continue;
+      ws.watcher?.stop();
+      this.workspaces.delete(id);
+      this.userEditsByWorkspace.delete(id);
+    }
+    void comparisonId;
+  }
+
+  /** Release a workspace write lease. Only the holder can release it. */
+  private releaseWriteLease(wsId: string, requesterId: string): void {
+    const ws = this.workspaces.get(wsId);
+    if (ws && ws.writerId === requesterId) ws.writerId = null;
+  }
+
+  /**
+   * Acquire the workspace write lease, waiting up to `timeoutMs` when
+   * another writer holds it. Serializing keeps concurrent captures and
+   * run starts from corrupting each other.
+   */
+  private async acquireWriteLease(wsId: string, requesterId: string, timeoutMs = 5000): Promise<{ ok: boolean; generation: number; error?: string }> {
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      const ws = this.workspaces.get(wsId);
+      if (!ws) return { ok: false, generation: 0, error: "workspace not found" };
+      if (ws.writerId === null || ws.writerId === requesterId) {
+        ws.writerId = requesterId;
+        return { ok: true, generation: ws.generation };
+      }
+      if (Date.now() >= deadline) return { ok: false, generation: ws.generation, error: `another writer holds the lease: ${ws.writerId}` };
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+
+  /** The workspace whose root contains the path, or null. */
+  private workspaceContaining(absPath: string): WorkspaceState | null {
+    const p = this.canonicalPath(absPath);
+    for (const ws of this.workspaces.values()) {
+      const rel = relative(this.canonicalPath(ws.root), p);
+      if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) return ws;
+    }
+    return null;
+  }
+
+  /**
+   * Error text when a write lease blocks user file operations in a
+   * workspace. A held lease means a capture or promotion is in progress.
+   * The run-start preflight (Phase 2) acquires the lease; the renderer
+   * never acquires it directly.
+   */
+  private assertWorkspaceWritable(wsId: string): string | null {
+    const ws = this.workspaces.get(wsId);
+    if (ws && ws.writerId !== null) return `the workspace is busy (${ws.writerId} holds the write lease)`;
+    return null;
+  }
+
+  /** The root directory used by terminals that have no explicit cwd. */
+  private terminalCwd(): string {
+    return this.primaryWorkspace()?.root ?? homedir();
+  }
+
   private resolvePiBin(): string {
-    return process.env.PI_EDITOR_PI_BIN ?? "pi";
+    if (process.env.PI_EDITOR_PI_BIN) return process.env.PI_EDITOR_PI_BIN;
+    // Launch the pi binary shipped with the pinned package (WORLDLINES
+    // §6.7). The package entry resolves to dist/index.js; the CLI sits
+    // next to it. The exports map has only an import condition, so use
+    // import.meta.resolve, not require.resolve.
+    try {
+      const entry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
+      return join(dirname(entry), "cli.js");
+    } catch (err) {
+      console.warn(`[main] pinned pi package not found: ${(err as Error).message}`);
+      return "pi";
+    }
   }
 
   private piAvailable: boolean | null = null;
@@ -438,37 +1085,53 @@ class PiEditorApp {
     );
   }
 
-  private terminalCwd(): string {
-    return this.projectCwd ?? homedir();
-  }
-
-  private async createTerminal(cwd?: string, opts?: { type?: "agent" | "shell"; shell?: string }): Promise<PiTerminalInstance> {
+  private async createTerminal(
+    cwd?: string,
+    opts?: { type?: "agent" | "shell"; shell?: string; workspaceId?: string; launch?: { cmd: string; args: string[]; env: Record<string, string | undefined> } },
+  ): Promise<PiTerminalInstance> {
     const type = opts?.type ?? "agent";
     if (type === "agent" && !(await this.checkPiAvailable())) {
       throw new Error(this.piMissingMessage());
     }
     const id = `term-${++terminalSeq}`;
+    const workspaceId = opts?.workspaceId ?? this.primaryWorkspace()?.id ?? "";
     let cmd: string;
+    let args: string[];
     let shellName: string | undefined;
     let env: Record<string, string | undefined>;
-    if (type === "shell") {
+    if (opts?.launch) {
+      // A worldline candidate: the sandbox wraps the pinned pi binary.
+      cmd = opts.launch.cmd;
+      args = opts.launch.args;
+      env = { ...opts.launch.env, PI_EDITOR_TERMINAL_ID: id };
+    } else if (type === "shell") {
       const shells = detectShells();
       const chosen = opts?.shell && existsSync(opts.shell) ? { path: opts.shell, name: basename(opts.shell) } : shells[0] ?? { path: "/bin/zsh", name: "zsh" };
       cmd = chosen.path;
+      args = [];
       shellName = chosen.name;
       env = { ...process.env };
     } else {
       cmd = this.resolvePiBin();
+      // The app-owned bridge loads through the CLI option, not project
+      // trust (WORLDLINES §6.3).
+      args = ["-e", this.bridgePath()];
       env = { ...cleanEnv(), PI_EDITOR_TERMINAL_ID: id, PI_EDITOR_EVENTS_DIR: this.eventsDir };
     }
-    const inst = new PiTerminalInstance(id, cwd ?? this.terminalCwd(), type, shellName, cmd, [], env, 80, 24);
+    const inst = new PiTerminalInstance(id, cwd ?? this.terminalCwd(), workspaceId, type, shellName, cmd, args, env, 80, 24);
     this.terminals.set(inst.id, inst);
+    this.workspaces.get(workspaceId)?.terminalIds.add(id);
 
     inst.pty.onData = (data) => this.send("pty:data", { id: inst.id, data });
     inst.pty.onExit = (code) => {
       console.log(`[main] terminal ${inst.id} (${inst.type}) exited code=${code}`);
       this.send("pty:exit", { id: inst.id, code });
+      this.closeRunOnExit(inst);
       this.terminals.delete(inst.id);
+      this.workspaces.get(inst.workspaceId)?.terminalIds.delete(inst.id);
+      this.worldlines?.terminalExited(inst.id);
+      this.worldlineTailers.get(inst.id)?.stop();
+      this.worldlineTailers.delete(inst.id);
       this.tailer.stopWatching(inst.id);
       // A dispatch worker closed before settling: its task goes back to
       // pending so the board stays honest.
@@ -537,6 +1200,7 @@ class PiEditorApp {
       inst = new PiTerminalInstance(
         id,
         this.terminalCwd(),
+        owner.workspaceId, // the worker inherits the owner's workspace
         "shell",
         shell.name,
         shell.path,
@@ -549,6 +1213,7 @@ class PiEditorApp {
       return { ok: false, error: `could not start the test worker: ${(err as Error).message}` };
     }
     this.terminals.set(inst.id, inst);
+    this.workspaces.get(owner.workspaceId)?.terminalIds.add(id);
     this.verifyWorkers.add(inst.id);
     let output = "";
     let finished = false;
@@ -590,6 +1255,7 @@ class PiEditorApp {
       console.log(`[main] verify worker ${inst.id} exited code=${code}`);
       this.send("pty:exit", { id: inst.id, code });
       this.terminals.delete(inst.id);
+      this.workspaces.get(inst.workspaceId)?.terminalIds.delete(inst.id);
       this.verifyWorkers.delete(inst.id);
       this.tailer.stopWatching(inst.id);
       if (!finished) {
@@ -614,8 +1280,10 @@ class PiEditorApp {
 
   /** Write the verify result to the context file the bridge extension reads. */
   private writeVerifyContext(ownerId: string, label: string, state: VerifyState, code: number | null, output: string): void {
+    const owner = this.terminals.get(ownerId);
+    const eventsDir = owner ? this.eventsDirOf(owner) : this.eventsDir;
     try {
-      mkdirSync(this.eventsDir, { recursive: true });
+      mkdirSync(eventsDir, { recursive: true, mode: 0o700 });
       const stamp = new Date().toLocaleTimeString();
       const status = state === "pass" ? "✅ PASSED" : state === "timeout" ? "⏰ TIMED OUT" : "❌ FAILED";
       const body = output.trim().slice(-6000);
@@ -623,7 +1291,7 @@ class PiEditorApp {
         `## Test run — \`${label}\` — ${stamp}\n\n` +
         `**Status:** ${status}${code !== null ? ` (exit code ${code})` : ""}\n\n` +
         (body ? `<details>\n<summary>Output</summary>\n\n\`\`\`text\n${body}\n\`\`\`\n</details>\n` : "");
-      writeFileSync(join(this.eventsDir, `verify-${ownerId}.md`), md, "utf8");
+      writeFileSync(join(eventsDir, `verify-${ownerId}.md`), md, "utf8");
     } catch (err) {
       console.warn(`[main] could not write verify context: ${(err as Error).message}`);
     }
@@ -826,7 +1494,7 @@ class PiEditorApp {
     let dispatched = 0;
     for (const task of chosen) {
       try {
-        const worker = await this.createTerminal(undefined, { type: "agent" });
+        const worker = await this.createTerminal(undefined, { type: "agent", workspaceId: owner.workspaceId });
         this.dispatchWorkers.set(worker.id, task.text);
         this.dispatchRuns.set(worker.id, { ownerId, taskText: task.text });
         // The pi TUI needs a moment to boot before it accepts the prompt.
@@ -877,8 +1545,9 @@ class PiEditorApp {
     const md = this.buildMineMarkdown();
     for (const inst of this.terminals.values()) {
       if (inst.type !== "agent") continue;
+      const eventsDir = this.eventsDirOf(inst);
       try {
-        writeFileSync(join(this.eventsDir, `mine-${inst.id}.md`), md, "utf8");
+        writeFileSync(join(eventsDir, `mine-${inst.id}.md`), md, "utf8");
       } catch (err) {
         console.warn(`[main] could not write mine context: ${(err as Error).message}`);
       }
@@ -945,21 +1614,22 @@ class PiEditorApp {
    *  shows the net change, not the last step. A later prev replaces an
    *  undefined one (the first change of a file has no cached prev). The
    *  stored content is capped: the context file never shows more than 4 KB. */
-  private recordUserEdit(edit: UserEdit): void {
+  private recordUserEdit(ws: WorkspaceState, edit: UserEdit): void {
+    const edits = this.userEditsOf(ws);
     // Keep prev undefined when absent: an empty string would render an empty
     // "before" block instead of no block at all.
     const capped = { ...edit, prev: edit.prev === undefined ? undefined : this.snippet(edit.prev), content: this.snippet(edit.content) };
-    const existing = this.userEdits.get(capped.path);
+    const existing = edits.get(capped.path);
     if (existing) {
       if (existing.prev === undefined && capped.prev !== undefined) existing.prev = capped.prev;
       existing.content = capped.content;
       existing.at = capped.at;
     } else {
-      this.userEdits.set(capped.path, capped);
-      if (this.userEdits.size > PiEditorApp.USER_EDITS_MAX) {
+      edits.set(capped.path, capped);
+      if (edits.size > PiEditorApp.USER_EDITS_MAX) {
         // Evict the oldest known edit (map order is insertion order).
-        const oldest = this.userEdits.keys().next().value;
-        if (oldest !== undefined) this.userEdits.delete(oldest);
+        const oldest = edits.keys().next().value;
+        if (oldest !== undefined) edits.delete(oldest);
       }
     }
     this.scheduleUserEditsWrite();
@@ -976,17 +1646,22 @@ class PiEditorApp {
 
   /** Write the edits context file for every agent terminal. */
   private writeUserEditsContext(): void {
-    if (this.userEdits.size === 0) return;
+    if (this.userEditsByWorkspace.size === 0) return;
     try {
       mkdirSync(this.eventsDir, { recursive: true });
     } catch {
       return;
     }
-    const md = this.buildUserEditsMarkdown();
     for (const inst of this.terminals.values()) {
       if (inst.type !== "agent") continue;
+      const ws = this.workspaceOfTerminal(inst);
+      if (!ws) continue;
+      const edits = this.userEditsOf(ws);
+      if (edits.size === 0) continue;
+      const md = this.buildUserEditsMarkdown(edits);
+      const eventsDir = this.eventsDirOf(inst);
       try {
-        writeFileSync(join(this.eventsDir, `edits-${inst.id}.md`), md, "utf8");
+        writeFileSync(join(eventsDir, `edits-${inst.id}.md`), md, "utf8");
       } catch (err) {
         console.warn(`[main] could not write edits context: ${(err as Error).message}`);
       }
@@ -994,7 +1669,7 @@ class PiEditorApp {
   }
 
   /** Build the context markdown: one section per file with before/after. */
-  private buildUserEditsMarkdown(): string {
+  private buildUserEditsMarkdown(edits: Map<string, UserEdit>): string {
     // The whole context must stay small: it is injected into the model's
     // context on every turn. Drop the OLDEST edits beyond the cap (the map
     // iterates in insertion order).
@@ -1004,7 +1679,7 @@ class PiEditorApp {
     out.push("");
     out.push("You changed these files after the last agent run. Read them before you change them.");
     let size = out.join("\n").length;
-    for (const edit of this.userEdits.values()) {
+    for (const edit of edits.values()) {
       const block: string[] = [];
       block.push("", `- \`${edit.relPath}\` (${edit.status})`);
       if (edit.status === "modified" && edit.prev !== undefined) {
@@ -1029,22 +1704,20 @@ class PiEditorApp {
     return out.length > 4000 ? out.slice(0, 4000) + "\n…" : out;
   }
 
-  /** The run consumes the edits context. Clear it and the files. */
-  private clearUserEdits(): void {
-    this.userEdits.clear();
-    if (this.userEditsWriteTimer) {
-      clearTimeout(this.userEditsWriteTimer);
-      this.userEditsWriteTimer = null;
-    }
-    this.removeUserEditsFiles();
+  /** The run consumes the edits context of its workspace. Clear the map and
+   *  the context files of that workspace. */
+  private clearUserEdits(ws: WorkspaceState): void {
+    this.userEditsOf(ws).clear();
+    this.removeUserEditsFiles(ws);
   }
 
-  /** Remove the edits context files for every agent terminal. */
-  private removeUserEditsFiles(): void {
-    for (const inst of this.terminals.values()) {
-      if (inst.type !== "agent") continue;
+  /** Remove the edits context files of a workspace's agent terminals. */
+  private removeUserEditsFiles(ws: WorkspaceState): void {
+    for (const id of ws.terminalIds) {
+      const inst = this.terminals.get(id);
+      if (inst?.type !== "agent") continue;
       try {
-        rmSync(join(this.eventsDir, `edits-${inst.id}.md`), { force: true });
+        rmSync(join(this.eventsDir, `edits-${id}.md`), { force: true });
       } catch {
         /* ignore */
       }
@@ -1075,6 +1748,7 @@ class PiEditorApp {
       busy: t.busy,
       type: t.type,
       shellName: t.shellName,
+      workspaceId: t.workspaceId,
       verifyWorker: this.verifyWorkers.has(t.id),
       dispatchWorker: this.dispatchWorkers.has(t.id),
       dispatchTask: this.dispatchWorkers.get(t.id),
@@ -1092,21 +1766,68 @@ class PiEditorApp {
     const inst = this.terminals.get(terminalId);
     if (!inst) return;
     switch (event.t) {
+      // ---- run-boundary events (WORLDLINES §6.3) ----
+      case "preflight_request":
+        this.handlePreflightRequest(inst, String(event.requestId ?? ""));
+        break;
+      case "prompt": {
+        const file = String(event.file ?? "");
+        // The payload file must be a plain name inside the events dir.
+        if (!file || file.includes("/") || file.includes("\\")) break;
+        try {
+          // Read synchronously: agent_start couples the run right after the
+          // prompt event, and the payload must be attached in order.
+          const raw = readFileSync(join(this.eventsDir, file), "utf8");
+          const payload = JSON.parse(raw) as { prompt?: unknown; images?: unknown };
+          inst.pendingPrompt = {
+            file,
+            text: String(payload.prompt ?? "").slice(0, 64000),
+            images: Array.isArray(payload.images) ? payload.images.length : 0,
+          };
+        } catch {
+          inst.pendingPrompt = null;
+        }
+        break;
+      }
+      case "steer_input":
+        // A steering or queued follow-up message: the open run cannot be
+        // replayed as one task.
+        if (inst.currentRun && inst.currentRun.replayable) {
+          inst.currentRun.replayable = false;
+          inst.currentRun.reason = "a steering message interrupted the run";
+          inst.currentRun.steering = true;
+        }
+        break;
+      case "checkpoint_request":
+        this.handleCheckpointRequest(inst, String(event.requestId ?? ""), String(event.kind ?? "settled"), String(event.entryId ?? ""));
+        break;
+      case "checkpoint_result":
+        // Informational; the run record carries the result already.
+        break;
+      case "session_ready": {
+        // The bridge consumed the candidate startup control.
+        const readyOk = event.ok === true;
+        this.worldlines?.onSessionReady(terminalId, readyOk, String(event.error ?? null) || null);
+        break;
+      }
       case "agent_start":
         inst.busy = true;
         // The run consumes the user-edits context (the extension already read
         // it in before_agent_start). Clear it so the next run stays fresh.
-        this.clearUserEdits();
+        const startWs = this.workspaceOfTerminal(inst);
+        if (startWs) this.clearUserEdits(startWs);
         // The old run's plan is stale until the new plan message arrives.
         inst.plan = [];
         inst.touched = new Set();
         this.sendPlan(inst);
         // Baseline for Change Review: snapshot the watcher's content cache so
         // diffs compare the run's start state against the current files.
-        inst.baselines = new Map(this.watcher?.lastContents ?? []);
+        inst.baselines = new Map(startWs?.watcher?.lastContents ?? []);
         inst.runSnapshots = new Map();
         inst.lastToolPath = null;
         this.pushTimeline(inst, { t: "agent_start" });
+        // Couple the run to its start preflight when the token matches.
+        this.coupleRunStart(inst, event);
         // A dispatch worker started: mark its task active on the owner board.
         const dispatchStart = this.dispatchRuns.get(inst.id);
         if (dispatchStart) {
@@ -1168,7 +1889,7 @@ class PiEditorApp {
           if (current === undefined) {
             const status = inst.modified.get(path)?.status;
             if (status !== "created") {
-              inst.baselines.set(path, this.reconstructBaseline(path, event.edits) ?? this.watcher?.lastContents.get(path) ?? null);
+              inst.baselines.set(path, this.reconstructBaseline(path, event.edits) ?? this.workspaceOfTerminal(inst)?.watcher?.lastContents.get(path) ?? null);
             }
             // A file created this run stays undefined; the change event sets null.
           } else if (current === null && inst.modified.get(path)?.status === "modified") {
@@ -1199,6 +1920,308 @@ class PiEditorApp {
    * The event object is passed so the delayed fill can locate it by reference
    * even if newer events arrive in between.
    */
+  // ---------------------------------------------------- run boundaries ----
+
+  /** Write an acknowledgement file for the bridge to consume exactly once. */
+  private writeAck(terminalId: string, requestId: string, payload: Record<string, unknown>): void {
+    try {
+      mkdirSync(this.eventsDir, { recursive: true, mode: 0o700 });
+      writeFileSync(join(this.eventsDir, `ack-${terminalId}-${requestId}.json`), JSON.stringify(payload), { mode: 0o600 });
+    } catch (err) {
+      console.warn(`[main] could not write ack: ${(err as Error).message}`);
+    }
+  }
+
+  /** Ask the renderer to save every dirty model. Bounded wait. */
+  private flushDirtyModels(timeoutMs = 5000): Promise<{ ok: boolean; failed: string[] }> {
+    return new Promise((resolve) => {
+      const requestId = `flush-${++this.flushSeq}`;
+      this.flushWaiters.set(requestId, {
+        resolve,
+        timer: setTimeout(() => {
+          this.flushWaiters.delete(requestId);
+          resolve({ ok: false, failed: ["renderer did not answer the flush request"] });
+        }, timeoutMs),
+      });
+      this.send("editor:flush-request", { requestId, writerId: this.primaryWorkspace()?.writerId ?? "" });
+    });
+  }
+
+  /**
+   * The start preflight (WORLDLINES §6.3 steps 2-5): lease, flush, capture
+   * the start state, then answer the bridge with a one-use token. The lease
+   * stays held until agent_start consumes the token.
+   */
+  private async handlePreflightRequest(inst: PiTerminalInstance, requestId: string): Promise<void> {
+    if (!requestId) return;
+    const ws = this.workspaceOfTerminal(inst);
+    if (!ws) {
+      // No workspace: nothing to record. The run proceeds without a token.
+      this.writeAck(inst.id, requestId, { ok: true, token: null });
+      return;
+    }
+    if (!ws.primary) {
+      // A candidate run: Release 1 records primary runs only.
+      this.writeAck(inst.id, requestId, { ok: true, token: null });
+      return;
+    }
+    const leaseRequester = `preflight:${inst.id}:${requestId}`;
+    const lease = await this.acquireWriteLease(ws.id, leaseRequester, 12000);
+    if (!lease.ok) {
+      this.writeAck(inst.id, requestId, { ok: false, error: lease.error ?? "the workspace is busy" });
+      return;
+    }
+    const flush = await this.flushDirtyModels();
+    if (!flush.ok) {
+      this.releaseWriteLease(ws.id, leaseRequester);
+      this.writeAck(inst.id, requestId, { ok: false, error: "could not save editor changes" });
+      return;
+    }
+    const store = await this.storePromise;
+    await ws.indexReady;
+    if (!store) {
+      // Recording unavailable (no Git): the run proceeds without a token.
+      this.releaseWriteLease(ws.id, leaseRequester);
+      this.writeAck(inst.id, requestId, { ok: true, token: null });
+      return;
+    }
+    try {
+      const state = await this.snapshotWorker.capture(store, await gitHead(ws.root), ws.lastStateCommit ?? null);
+      ws.lastStateCommit = state.commit;
+      const token = randomUUID();
+      const pending: PendingPreflight = {
+        requestId,
+        token,
+        terminalId: inst.id,
+        workspaceId: ws.id,
+        startState: state,
+        // The generation baseline is taken AFTER the capture: the flush
+        // that precedes it bumps the generation, and the captured state
+        // already includes the flushed bytes.
+        generation: ws.generation,
+        leaseRequester,
+        expiresAt: Date.now() + 60000,
+        timer: setTimeout(() => this.expirePreflight(token), 60000),
+      };
+      this.pendingPreflights.set(token, pending);
+      this.writeAck(inst.id, requestId, { ok: true, token });
+    } catch (err) {
+      this.releaseWriteLease(ws.id, leaseRequester);
+      this.writeAck(inst.id, requestId, { ok: false, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  /** A preflight that never reached agent_start releases its lease. */
+  private expirePreflight(token: string): void {
+    const pending = this.pendingPreflights.get(token);
+    if (!pending) return;
+    this.pendingPreflights.delete(token);
+    this.releaseWriteLease(pending.workspaceId, pending.leaseRequester);
+  }
+
+  /**
+   * agent_start: consume the preflight token and open the run record.
+   * A token-less agent_start is a retry or compaction of the open run.
+   */
+  private coupleRunStart(inst: PiTerminalInstance, event: SidecarEvent): void {
+    const token = String(event.preflightToken ?? "");
+    const pending = token ? this.pendingPreflights.get(token) : undefined;
+    const ws = this.workspaceOfTerminal(inst);
+    if (pending && pending.terminalId === inst.id) {
+      this.pendingPreflights.delete(token);
+      clearTimeout(pending.timer);
+      this.releaseWriteLease(pending.workspaceId, pending.leaseRequester);
+      const run: RunRecord = {
+        id: `run-${++this.runSeq}`,
+        terminalId: inst.id,
+        workspaceId: inst.workspaceId,
+        startStateId: pending.startState?.commit ?? null,
+        settledStateId: null,
+        promptPayloadFile: inst.pendingPrompt?.file ?? null,
+        promptText: inst.pendingPrompt?.text ?? null,
+        promptEntryId: String(event.entryId ?? null) || null,
+        promptParentEntryId: String(event.parentEntryId ?? null) || null,
+        settledEntryId: null,
+        sessionFile: String(event.sessionFile ?? null) || null,
+        sessionBranchFile: null,
+        trusted: typeof event.trusted === "boolean" ? event.trusted : null,
+        model: String(event.model ?? null) || null,
+        thinkingLevel: String(event.thinkingLevel ?? null) || null,
+        replayable: true,
+        reason: null,
+        interrupted: false,
+        steering: false,
+        overlap: this.verifyRuns.size > 0 || this.dispatchRuns.size > 0,
+        unownedEdits: 0,
+        startedAt: Date.now(),
+        settledAt: null,
+      };
+      // The source must not have changed between preflight and start.
+      if (ws && ws.generation !== pending.generation) {
+        run.replayable = false;
+        run.reason = "the source changed while the run started";
+      }
+      if (!run.sessionFile) {
+        run.replayable = false;
+        run.reason = "the Pi session is not persisted";
+      }
+      this.pushRun(inst, run);
+    } else if (inst.currentRun && !inst.currentRun.settledAt) {
+      // A retry or compaction of the open run. Keep its start state.
+    } else {
+      // No preflight (for example a queued follow-up): the run still runs
+      // but cannot be forked.
+      const run: RunRecord = {
+        id: `run-${++this.runSeq}`,
+        terminalId: inst.id,
+        workspaceId: inst.workspaceId,
+        startStateId: null,
+        settledStateId: null,
+        promptPayloadFile: inst.pendingPrompt?.file ?? null,
+        promptText: inst.pendingPrompt?.text ?? null,
+        promptEntryId: String(event.entryId ?? null) || null,
+        promptParentEntryId: String(event.parentEntryId ?? null) || null,
+        settledEntryId: null,
+        sessionFile: String(event.sessionFile ?? null) || null,
+        sessionBranchFile: null,
+        trusted: typeof event.trusted === "boolean" ? event.trusted : null,
+        model: String(event.model ?? null) || null,
+        thinkingLevel: String(event.thinkingLevel ?? null) || null,
+        replayable: false,
+        reason: "the run started without a start preflight",
+        interrupted: false,
+        steering: false,
+        overlap: false,
+        unownedEdits: 0,
+        startedAt: Date.now(),
+        settledAt: null,
+      };
+      this.pushRun(inst, run);
+    }
+  }
+
+  /** Store a run record, keep the per-terminal cap. */
+  private pushRun(inst: PiTerminalInstance, run: RunRecord): void {
+    inst.currentRun = run;
+    let list = this.runsByTerminal.get(inst.id);
+    if (!list) {
+      list = [];
+      this.runsByTerminal.set(inst.id, list);
+    }
+    list.push(run);
+    if (list.length > 20) {
+      const evicted = list.shift();
+      if (evicted?.promptPayloadFile) {
+        try {
+          rmSync(join(this.eventsDir, evicted.promptPayloadFile), { force: true });
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+
+  /**
+   * The settled checkpoint (WORLDLINES §6.3): quiet window, capture,
+   * generation check, atomic acknowledgement. Attaches the settled state
+   * to the open run.
+   */
+  private async handleCheckpointRequest(inst: PiTerminalInstance, requestId: string, kind: string, entryId: string): Promise<void> {
+    if (!requestId) return;
+    const ws = this.workspaceOfTerminal(inst);
+    if (!ws || !ws.lastStateCommit) {
+      this.writeAck(inst.id, requestId, { ok: false, error: "recording is not available" });
+      return;
+    }
+    const store = await this.storePromise;
+    if (!store) {
+      this.writeAck(inst.id, requestId, { ok: false, error: "recording is not available" });
+      return;
+    }
+    const leaseRequester = `checkpoint:${inst.id}:${requestId}`;
+    const lease = await this.acquireWriteLease(ws.id, leaseRequester, 8000);
+    if (!lease.ok) {
+      this.writeAck(inst.id, requestId, { ok: false, error: lease.error ?? "the workspace is busy" });
+      return;
+    }
+    try {
+      const state = await this.captureStable(store, ws);
+      ws.lastStateCommit = state.commit;
+      this.writeAck(inst.id, requestId, { ok: true, stateId: state.commit });
+      if (kind === "settled" && inst.currentRun && !inst.currentRun.settledAt) {
+        this.finalizeRun(inst, state, entryId);
+      }
+    } catch (err) {
+      this.writeAck(inst.id, requestId, { ok: false, error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      this.releaseWriteLease(ws.id, leaseRequester);
+    }
+  }
+
+  /**
+   * Capture only when the source is quiet: a short quiet window before and
+   * a generation check after. One bounded retry on a concurrent change.
+   */
+  private async captureStable(store: SnapshotStore, ws: WorkspaceState): Promise<SourceState> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const gen = ws.generation;
+      await new Promise((r) => setTimeout(r, 100)); // quiet window
+      if (ws.generation !== gen) continue;
+      const state = await this.snapshotWorker.capture(store, await gitHead(ws.root), ws.lastStateCommit ?? null);
+      if (ws.generation === gen) return state;
+    }
+    throw new Error("the source changed during capture");
+  }
+
+  /** Attach the settled state, copy the session branch, mark eligibility. */
+  private finalizeRun(inst: PiTerminalInstance, state: SourceState, entryId: string): void {
+    const run = inst.currentRun;
+    if (!run) return;
+    run.settledStateId = state.commit;
+    run.settledEntryId = entryId || null;
+    run.settledAt = Date.now();
+    run.interrupted = inst.interruptedAt !== undefined && inst.interruptedAt > run.startedAt;
+    if (run.overlap || this.verifyRuns.size > 0 || this.dispatchRuns.size > 0) {
+      run.overlap = true;
+      run.replayable = false;
+      run.reason = "another writer overlapped the same workspace";
+    }
+    if (run.interrupted) {
+      run.replayable = false;
+      run.reason = "the run was interrupted";
+    }
+    if (!run.settledStateId || !run.startStateId) {
+      run.replayable = false;
+      run.reason = run.reason ?? "the run has no complete source checkpoints";
+    }
+    // Copy the session branch into app-private storage.
+    if (run.sessionFile) {
+      try {
+        mkdirSync(this.sessionWorkspaceDir, { recursive: true, mode: 0o700 });
+        const target = join(this.sessionWorkspaceDir, `${run.id}.jsonl`);
+        copyFileSync(run.sessionFile, target, constants.COPYFILE_EXCL);
+        run.sessionBranchFile = target;
+      } catch (err) {
+        run.replayable = false;
+        run.reason = `could not copy the session branch: ${err instanceof Error ? err.message : String(err)}`;
+      }
+    }
+    inst.currentRun = null;
+  }
+
+  /**
+   * A terminal that exits mid-run never settles. Mark the open run.
+   */
+  private closeRunOnExit(inst: PiTerminalInstance): void {
+    const run = inst.currentRun;
+    if (run && !run.settledAt) {
+      run.replayable = false;
+      run.reason = "the terminal exited mid-run";
+      run.settledAt = Date.now();
+      inst.currentRun = null;
+    }
+  }
+
   private toolSnapshot(
     inst: PiTerminalInstance,
     path: string,
@@ -1217,7 +2240,7 @@ class PiEditorApp {
       return content.length > MAX_SNAPSHOT_SIZE ? { status } : { content, status };
     }
     // write / create_file: prefer the watcher cache, else fill in shortly after.
-    const cached = this.watcher?.lastContents.get(path);
+    const cached = this.workspaceOfTerminal(inst)?.watcher?.lastContents.get(path);
     if (cached !== undefined) {
       inst.runSnapshots.set(path, cached);
       return cached.length > MAX_SNAPSHOT_SIZE ? { status } : { content: cached, status };
@@ -1226,7 +2249,7 @@ class PiEditorApp {
     // addressing the event by reference (the tail may have moved on). Content
     // stays main-side; the renderer fetches it on click.
     setTimeout(() => {
-      const fresh = this.watcher?.lastContents.get(path);
+      const fresh = this.workspaceOfTerminal(inst)?.watcher?.lastContents.get(path);
       if (fresh === undefined) return;
       const idx = inst.timeline.indexOf(ev as TimelineEvent);
       if (idx === -1) return; // dropped by the cap or terminal gone
@@ -1242,7 +2265,7 @@ class PiEditorApp {
   private preRunContent(inst: PiTerminalInstance, path: string): string | null | undefined {
     const b = inst.baselines.get(path);
     if (b !== undefined) return b;
-    return this.watcher?.lastContents.get(path);
+    return this.workspaceOfTerminal(inst)?.watcher?.lastContents.get(path);
   }
 
   /** Apply edit regions forward (first occurrence, matching the edit tool). */
@@ -1361,55 +2384,124 @@ class PiEditorApp {
     });
     if (result.canceled || result.filePaths.length === 0) return { cancelled: true };
     const cwd = result.filePaths[0];
-    this.projectCwd = cwd;
-    this.installBridgeExtension(cwd);
-    this.startWatcher(cwd);
-    // A folder switch starts a fresh context: agent terminals move to the new
-    // folder and ALL per-run state is reset (timeline, review baselines,
-    // snapshots, modified list, verify). Shell terminals keep their cwd —
-    // they are real shells still running in their original directory.
-    for (const inst of this.terminals.values()) {
-      if (inst.type !== "agent") continue;
-      inst.cwd = cwd;
-      inst.timeline = [];
-      inst.timelineSeq = 0;
-      inst.runSnapshots = new Map();
-      inst.baselines = new Map();
-      inst.modified = new Map();
-      inst.lastToolPath = null;
-      inst.verify = { state: "untested", command: null, summary: null };
-      inst.plan = [];
-      inst.touched = new Set();
+    // A folder switch tears down the previous primary workspace and its
+    // per-workspace state (watcher, user edits, write lease, run records,
+    // snapshot store).
+    const old = this.primaryWorkspace();
+    if (old) {
+      old.watcher?.stop();
+      this.workspaces.delete(old.id);
+      this.userEditsByWorkspace.delete(old.id);
     }
+    this.teardownRecording();
+    this.runsByTerminal.clear();
+    this.projectCwd = cwd;
+    this.ensureAppBridge();
+    this.removeLegacyProjectBridge(cwd);
+    this.createWorkspace(cwd, true);
+    // A folder switch starts a fresh context. Kill every terminal: the old
+    // pty processes still run in the previous directory, so they cannot
+    // follow the new folder. One agent terminal starts in the new folder.
+    for (const id of [...this.terminals.keys()]) this.closeTerminal(id);
+    await this.drainTerminals();
+    this.verifyRuns.clear();
+    this.verifyWorkers.clear();
     this.dispatchWorkers.clear();
     this.dispatchRuns.clear();
     this.clearMineFiles();
     this.loadMineFiles();
-    this.clearUserEdits();
-    this.sendInstances();
     this.send("folder:opened", { cwd });
+    try {
+      await this.createTerminal(cwd);
+    } catch {
+      /* pi unavailable; the folder still opens */
+    }
     return { cwd };
   }
 
-  /** Install (or refresh) the bridge extension in the project. */
-  private installBridgeExtension(cwd: string): void {
+  /**
+   * Tear down the snapshot store and worker of the previous project.
+   * The store is app-owned and deleted with its project session.
+   */
+  private async teardownRecording(): Promise<void> {
+    for (const pending of this.pendingPreflights.values()) {
+      clearTimeout(pending.timer);
+      this.releaseWriteLease(pending.workspaceId, pending.leaseRequester);
+    }
+    this.pendingPreflights.clear();
+    const store = await this.storePromise;
+    this.storePromise = null;
+    this.snapshotWorker.dispose();
+    if (store && this.storeDir) await store.destroy();
+    this.storeDir = null;
+    // Remove stale bridge acknowledgement files.
     try {
-      const dir = join(cwd, ".pi", "extensions");
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, "pi-ditor-bridge.ts"), BRIDGE_EXTENSION, "utf8");
+      for (const f of await readdir(this.eventsDir)) {
+        if (f.startsWith("ack-")) rmSync(join(this.eventsDir, f), { force: true });
+      }
+    } catch {
+      /* events dir absent */
+    }
+  }
+
+  /** Wait until every killed terminal has exited. A terminal that survives
+   *  the deadline receives SIGKILL. */
+  private async drainTerminals(timeoutMs = 2000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.terminals.size > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    for (const inst of [...this.terminals.values()]) inst.pty.kill("SIGKILL");
+  }
+
+  // ---------------------------------------------------------- app bridge ----
+
+  /** The app-owned bridge file, passed to pi with the CLI extension option. */
+  private bridgePath(): string {
+    return join(app.getPath("userData"), "pi-ditor-bridge.ts");
+  }
+
+  /** Write the bridge to the app user-data directory when it changed. */
+  private ensureAppBridge(): void {
+    try {
+      const p = this.bridgePath();
+      try {
+        if (readFileSync(p, "utf8") === BRIDGE_EXTENSION) return; // already current
+      } catch {
+        /* missing — write it */
+      }
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, BRIDGE_EXTENSION, "utf8");
     } catch (err) {
-      console.warn(`[main] could not install bridge extension: ${(err as Error).message}`);
+      console.warn(`[main] could not write the app bridge: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Remove the legacy generated bridge from a project. A user file that
+   * only shares the name stays untouched (the marker check is the proof).
+   */
+  private removeLegacyProjectBridge(cwd: string): void {
+    const p = join(cwd, ".pi", "extensions", "pi-ditor-bridge.ts");
+    try {
+      const content = readFileSync(p, "utf8");
+      if (content.includes("Pi/ditor bridge extension — auto-generated")) rmSync(p, { force: true });
+    } catch {
+      /* absent or unreadable — nothing to remove */
     }
   }
 
   // -------------------------------------------------------------- watcher ---
 
-  private startWatcher(cwd: string): void {
-    this.watcher?.stop();
-    this.watcher = new ProjectWatcher(cwd, (p) => this.canonicalPath(p));
-    this.watcher.onChange = (change) => {
+  /** Start the watcher of one workspace. Returns the watcher. */
+  private startWatcher(ws: WorkspaceState): ProjectWatcher {
+    const watcher = new ProjectWatcher(ws.root, (p) => this.canonicalPath(p));
+    const workspaceTerminals = (): PiTerminalInstance[] =>
+      [...ws.terminalIds].map((id) => this.terminals.get(id)).filter((t): t is PiTerminalInstance => t !== undefined);
+    watcher.onChange = (change) => {
+      ws.generation++;
       const path = this.canonicalPath(change.path);
-      const relPath = this.rel(path);
+      const relPath = this.rel(path, ws.root);
       const now = Date.now();
       // Dedupe duplicate fs events for the same physical write (same content,
       // recent). A duplicate that lands after the run settled must not appear
@@ -1430,9 +2522,9 @@ class PiEditorApp {
       // verify run is in flight: test outputs (snapshots, coverage,
       // fixtures) are automated writes, not user edits. The agent receives
       // user edits on its next turn (see the edits-<id>.md context file).
-      const agentBusy = [...this.terminals.values()].some((t) => t.busy);
-      if (!isDupWatch && !agentBusy && this.verifyRuns.size === 0) {
-        this.recordUserEdit({ path, relPath, status: change.status, prev: change.prev, content: change.content, at: now });
+      const busy = workspaceTerminals().filter((t) => t.busy);
+      if (!isDupWatch && busy.length === 0 && this.verifyRuns.size === 0) {
+        this.recordUserEdit(ws, { path, relPath, status: change.status, prev: change.prev, content: change.content, at: now });
       }
       // The watcher change event is the baseline authority for writes: it
       // carries the pre-change content, captured atomically before the cache
@@ -1440,8 +2532,8 @@ class PiEditorApp {
       // processed first — the tool event itself never sets write baselines.
       // A modified file without prev (first touch) stays UNDEFINED: reverting
       // refuses instead of deleting a file that existed pre-run.
-      for (const inst of this.terminals.values()) {
-        if (!inst.busy || inst.baselines.has(path)) continue;
+      for (const inst of busy) {
+        if (inst.baselines.has(path)) continue;
         if (change.status === "created") {
           inst.baselines.set(path, null);
         } else if (change.prev !== undefined) {
@@ -1454,8 +2546,7 @@ class PiEditorApp {
       // broadcast a change point to every busy terminal.
       const owners: PiTerminalInstance[] = [];
       const unowned: PiTerminalInstance[] = [];
-      for (const inst of this.terminals.values()) {
-        if (!inst.busy) continue;
+      for (const inst of busy) {
         const mine = inst.lastToolPath && inst.lastToolPath.path === path && now - inst.lastToolPath.at < TOOL_CHANGE_DEDUP_MS;
         (mine ? owners : unowned).push(inst);
       }
@@ -1471,6 +2562,9 @@ class PiEditorApp {
       } else {
         for (const inst of unowned) {
           this.recordModified(inst, path, change.status);
+          // An unowned change during a run is manual provenance: it marks
+          // the run collaborative (WORLDLINES §6.5).
+          if (inst.currentRun) inst.currentRun.unownedEdits++;
           const content = this.contentSizeOk(change.content) ? change.content : undefined;
           // Bash-driven changes are the ground truth for later edit math.
           if (content !== undefined) inst.runSnapshots.set(path, content);
@@ -1487,25 +2581,29 @@ class PiEditorApp {
       }
       this.send("file:changed", { ...change, path, relPath });
     };
-    this.watcher.onFileTouched = (path, status) => {
-      for (const inst of this.terminals.values()) {
+    watcher.onFileTouched = (path, status) => {
+      ws.generation++;
+      for (const inst of workspaceTerminals()) {
         if (inst.busy) this.recordModified(inst, path, status);
       }
     };
-    this.watcher.onFileDeleted = (path) => {
+    watcher.onFileDeleted = (path) => {
+      ws.generation++;
       const p = this.canonicalPath(path);
       this.send("file:deleted", { path: p });
-      for (const inst of this.terminals.values()) this.recordDeleted(inst, path);
+      for (const inst of workspaceTerminals()) this.recordDeleted(inst, path);
       // A user-side deletion makes the recorded edit moot: drop the entry so
       // the context never points at a file that no longer exists. An empty
       // map must remove the file itself — the writer skips empty maps.
-      const agentBusy = [...this.terminals.values()].some((t) => t.busy);
-      if (!agentBusy && this.userEdits.delete(p)) {
-        if (this.userEdits.size === 0) this.removeUserEditsFiles();
+      const busy = workspaceTerminals().some((t) => t.busy);
+      const edits = this.userEditsOf(ws);
+      if (!busy && edits.delete(p)) {
+        if (edits.size === 0) this.removeUserEditsFiles(ws);
         else this.scheduleUserEditsWrite();
       }
     };
-    this.watcher.start();
+    watcher.start();
+    return watcher;
   }
 
   // ---------------------------------------------------------------- paths ---
@@ -1538,9 +2636,9 @@ class PiEditorApp {
     return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
   }
 
-  private rel(absPath: string): string {
+  private rel(absPath: string, root: string | null = this.projectCwd): string {
     const p = this.canonicalPath(absPath);
-    return this.projectCwd ? relative(this.canonicalPath(this.projectCwd), p) : p;
+    return root ? relative(this.canonicalPath(root), p) : p;
   }
 
   private projectAbs(relPath: string): string {
@@ -1611,6 +2709,101 @@ class PiEditorApp {
       this.sendInstances();
       return this.instanceList();
     });
+
+    // ---- Worldlines: run records (WORLDLINES §6.5) ----
+    ipcMain.handle("worldline:runs", (_e, terminalId?: string) => {
+      const runs = terminalId ? (this.runsByTerminal.get(terminalId) ?? []) : [...this.runsByTerminal.values()].flat();
+      return runs.map((r): RunSummary => ({
+        id: r.id,
+        terminalId: r.terminalId,
+        workspaceId: r.workspaceId,
+        startStateId: r.startStateId,
+        settledStateId: r.settledStateId,
+        promptText: r.promptText,
+        promptEntryId: r.promptEntryId,
+        promptParentEntryId: r.promptParentEntryId,
+        settledEntryId: r.settledEntryId,
+        sessionFile: r.sessionFile,
+        sessionBranchFile: r.sessionBranchFile,
+        replayable: r.replayable,
+        reason: r.reason,
+        interrupted: r.interrupted,
+        steering: r.steering,
+        overlap: r.overlap,
+        unownedEdits: r.unownedEdits,
+        trusted: r.trusted,
+        model: r.model,
+        thinkingLevel: r.thinkingLevel,
+        startedAt: r.startedAt,
+        settledAt: r.settledAt,
+      }));
+    });
+
+    // ---- Worldlines: candidates (WORLDLINES §6.5, §6.6) ----
+    ipcMain.handle("worldline:list", () => this.worldlines?.list() ?? []);
+    ipcMain.handle("worldline:fork-run", async (_e, runId: string) => {
+      const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === runId);
+      if (!run) return { ok: false, error: "run not found" };
+      this.initWorldlines();
+      const forkable: ForkableRun = {
+        id: run.id,
+        terminalId: run.terminalId,
+        startStateId: run.startStateId,
+        settledStateId: run.settledStateId,
+        promptPayloadFile: run.promptPayloadFile,
+        promptEntryId: run.promptEntryId,
+        promptParentEntryId: run.promptParentEntryId,
+        settledEntryId: run.settledEntryId,
+        sessionBranchFile: run.sessionBranchFile,
+        replayable: run.replayable,
+        reason: run.reason,
+        model: run.model,
+        thinkingLevel: run.thinkingLevel,
+        startedAt: run.startedAt,
+      };
+      return this.worldlines!.forkRun(forkable);
+    });
+    ipcMain.handle("worldline:cancel", (_e, comparisonId: string) => this.worldlines?.cancel(comparisonId) ?? { ok: false, error: "worldlines unavailable" });
+    ipcMain.handle("worldline:discard", (_e, comparisonId: string) => this.worldlines?.discard(comparisonId) ?? { ok: false, error: "worldlines unavailable" });
+    ipcMain.handle("worldline:open-terminal", (_e, comparisonId: string, label: "A" | "B") =>
+      this.worldlines?.openTerminal(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" },
+    );
+    /** Materialize a run's start or settled state for inspection. */
+    ipcMain.handle("worldline:export-state", async (_e, runId: string, kind: "start" | "settled") => {
+      const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === runId);
+      if (!run) return { ok: false, error: "run not found" };
+      const stateId = kind === "start" ? run.startStateId : run.settledStateId;
+      if (!stateId) return { ok: false, error: `no ${kind} state` };
+      const store = await this.storePromise;
+      if (!store) return { ok: false, error: "recording is not available" };
+      try {
+        const dir = await mkdtemp(join(app.getPath("temp"), "pi-ditor-state-"));
+        await store.materialize(stateId, dir);
+        return { ok: true, dir };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    });
+
+    // ---- Editor flush (run-start preflight) ----
+    ipcMain.handle("editor:flush-report", (_e, requestId: string, result: { ok: boolean; failed: string[] }) => {
+      const waiter = this.flushWaiters.get(requestId);
+      if (!waiter) return;
+      clearTimeout(waiter.timer);
+      this.flushWaiters.delete(requestId);
+      waiter.resolve(result);
+    });
+    /** The flush saves go through the lease holder (the preflight). */
+    ipcMain.handle("file:flush-save", async (_e, absPath: string, content: string, writerId: string) => {
+      const ws = this.workspaceContaining(absPath);
+      if (ws && ws.writerId !== writerId) return { ok: false, error: "the flush does not hold the write lease" };
+      try {
+        await writeFile(absPath, content, "utf8");
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    });
     ipcMain.handle("terminals:abort", (_e, id: string) => {
       const inst = this.terminals.get(id);
       if (!inst) return;
@@ -1660,6 +2853,8 @@ class PiEditorApp {
     ipcMain.handle("review:revert", async (_e, terminalId: string, path: string) => {
       const inst = this.terminals.get(terminalId);
       if (!inst) return { ok: false, error: "terminal not found" };
+      const blocked = this.assertWorkspaceWritable(inst.workspaceId);
+      if (blocked) return { ok: false, error: blocked };
       const p = this.canonicalPath(path);
       const b = inst.baselines.get(p);
       if (b === undefined) return { ok: false, error: "no baseline captured for this file" };
@@ -1678,6 +2873,9 @@ class PiEditorApp {
 
     ipcMain.handle("file:open", (_e, absPath: string) => this.openFileInEditor(absPath));
     ipcMain.handle("file:save", async (_e, absPath: string, content: string) => {
+      const ws = this.workspaceContaining(absPath);
+      const blocked = this.assertWorkspaceWritable(ws?.id ?? "");
+      if (blocked) return { ok: false, error: blocked };
       try {
         await writeFile(absPath, content, "utf8");
         return { ok: true };
@@ -1688,6 +2886,8 @@ class PiEditorApp {
 
     ipcMain.handle("explorer:list-dir", (_e, absPath: string) => this.listDir(absPath));
     ipcMain.handle("explorer:create", async (_e, relPath: string, kind: "file" | "dir") => {
+      const blocked = this.assertWorkspaceWritable(this.primaryWorkspace()?.id ?? "");
+      if (blocked) return { ok: false, error: blocked };
       try {
         const abs = this.projectAbs(relPath);
         if (kind === "dir") {
@@ -1702,6 +2902,8 @@ class PiEditorApp {
       }
     });
     ipcMain.handle("explorer:rename", async (_e, relPath: string, newName: string) => {
+      const blocked = this.assertWorkspaceWritable(this.primaryWorkspace()?.id ?? "");
+      if (blocked) return { ok: false, error: blocked };
       try {
         if (!newName || newName.includes("/") || newName === "." || newName === "..") {
           return { ok: false, error: "invalid name" };
@@ -1714,6 +2916,8 @@ class PiEditorApp {
       }
     });
     ipcMain.handle("explorer:delete", async (_e, relPath: string) => {
+      const blocked = this.assertWorkspaceWritable(this.primaryWorkspace()?.id ?? "");
+      if (blocked) return { ok: false, error: blocked };
       try {
         const abs = this.projectAbs(relPath);
         await rm(abs, { recursive: true, force: true });
@@ -1750,10 +2954,12 @@ class PiEditorApp {
     this.tailer.start();
     await this.createWindow();
     if (this.projectCwd) {
-      this.installBridgeExtension(this.projectCwd);
-      this.startWatcher(this.projectCwd);
+      this.ensureAppBridge();
+      this.removeLegacyProjectBridge(this.projectCwd);
+      this.createWorkspace(this.projectCwd, true);
       this.loadMineFiles();
     }
+    this.initWorldlines();
     // Create the agent terminal. A transient pi failure (slow start, update
     // check) must not kill the app: retry with backoff. The renderer shows
     // the friendly install message when every attempt fails.
@@ -1770,9 +2976,16 @@ class PiEditorApp {
 
   dispose(): void {
     this.tailer.stop();
-    this.watcher?.stop();
+    for (const ws of this.workspaces.values()) ws.watcher?.stop();
+    this.workspaces.clear();
+    this.worldlines?.dispose();
+    for (const tailer of this.worldlineTailers.values()) tailer.stop();
+    this.worldlineTailers.clear();
     for (const inst of this.terminals.values()) inst.pty.kill();
     this.terminals.clear();
+    this.snapshotWorker?.dispose();
+    this.sessionWorker.dispose();
+    void this.teardownRecording();
     this.stopPaintWatchdog();
   }
 

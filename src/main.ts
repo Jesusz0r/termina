@@ -45,6 +45,11 @@ import { toast } from "./components/modals";
 import type { ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, PlanTask } from "../shared/types";
 
 const editorMgr = new EditorManager(document.getElementById("editor-container")!);
+(window as unknown as Record<string, unknown>).__editorMgr = editorMgr;
+// A disk write reached a model with unsaved edits: never replace silently.
+editorMgr.onConflict = (path) => {
+  toast(`${path.split("/").pop()} changed on disk — you have unsaved edits`, "warning");
+};
 const reviewView = new ReviewView();
 reviewView.bind({
   onOpenFile: (path) => {
@@ -113,6 +118,7 @@ const timelineView = new TimelineView(document.getElementById("timeline-strip")!
 
 interface Pane {
   instanceId: string;
+  workspaceId: string;
   view: PtyView;
   container: HTMLElement;
   tabEl: HTMLElement;
@@ -178,6 +184,7 @@ function createPaneShell(instanceId: string): Pane {
 
   const pane: Pane = {
     instanceId,
+    workspaceId: "",
     view,
     container,
     tabEl,
@@ -645,8 +652,42 @@ function isColumnLayout(): boolean {
 }
 
 // File-menu commands + layout/toggle commands
+/**
+ * Route a menu edit command to the focused surface. The editor runs its own
+ * action. A focused terminal selects its whole buffer. Any other input uses
+ * the browser command.
+ */
+function runMenuEdit(kind: "undo" | "redo" | "select-all"): void {
+  if (editorMgr.runMenuEdit(kind)) return;
+  const pane = activeId ? panes.get(activeId) : undefined;
+  if (pane && !pane.error) {
+    const term = pane.view.getTerminal();
+    if (term.textarea && document.activeElement === term.textarea) {
+      if (kind === "select-all") term.selectAll();
+      else document.execCommand(kind); // browser undo and redo affect only the transient input
+      return;
+    }
+  }
+  if (kind === "select-all") document.execCommand("selectAll");
+  else document.execCommand(kind);
+}
+
 window.pi.onMenuCommand((cmd) => {
   switch (cmd.command) {
+    case "save-all":
+      void editorMgr.flushAll().then((res) => {
+        if (!res.ok) toast(`could not save: ${res.failed.map((p) => p.split("/").pop()).join(", ")}`, "warning");
+      });
+      break;
+    case "edit:undo":
+      runMenuEdit("undo");
+      break;
+    case "edit:redo":
+      runMenuEdit("redo");
+      break;
+    case "edit:select-all":
+      runMenuEdit("select-all");
+      break;
     case "layout-terminal-left":
       applyLayout("terminal-left");
       break;
@@ -758,11 +799,22 @@ window.pi.onPtyExit(({ id }) => {
   pane.view.write("\r\n\x1b[90m[pi exited]\x1b[0m\r\n");
 });
 
+/** Lock the editor while any agent terminal of the workspace is busy. */
+function updateEditorLock(): void {
+  const busy = [...panes.values()].some((p) => p.busy && p.type === "agent" && !p.error);
+  editorMgr.setLocked(busy);
+}
+
+window.pi.onFlushRequest(({ requestId, writerId }) => {
+  void editorMgr.flushAll(writerId).then((result) => void window.pi.reportFlush(requestId, result));
+});
+
 window.pi.onBusy(({ instanceId, busy }) => {
   const pane = panes.get(instanceId);
   if (!pane) return;
   pane.busy = busy;
   updatePaneTab(pane);
+  updateEditorLock();
   if (activeId === instanceId) renderChrome();
 });
 
@@ -830,12 +882,9 @@ window.pi.onFolderOpened((e) => {
   explorer.setProject(e.cwd);
   refreshMine();
   void refreshTestCommand();
-  // New folder = fresh context: drop every pane's cached timeline; main has
-  // already reset the per-terminal state.
-  for (const p of panes.values()) {
-    p.timeline = [];
-    p.timelineLoaded = true;
-  }
+  // Fresh context: close every old pane. The new agent terminal arrives on
+  // the next instances:list push.
+  for (const p of [...panes.values()]) void closePane(p.instanceId);
   renderTimeline();
 });
 
@@ -844,6 +893,7 @@ window.pi.onInstances((list: InstanceSummary[]) => {
     let pane = panes.get(summary.id);
     if (!pane) pane = createPaneShell(summary.id); // terminal spawned after boot
     pane.cwd = summary.cwd;
+    pane.workspaceId = summary.workspaceId ?? "";
     pane.busy = summary.busy;
     pane.type = summary.type;
     pane.shellName = summary.shellName;
@@ -858,6 +908,7 @@ window.pi.onInstances((list: InstanceSummary[]) => {
     }
   }
   if (!activeId && list.length > 0) activatePane(list[0].id);
+  updateEditorLock();
 });
 
 // ---------------------------------------------------------------- startup --
@@ -892,6 +943,7 @@ async function boot(): Promise<void> {
     const pane = panes.get(inst.id);
     if (pane) {
       pane.cwd = inst.cwd;
+      pane.workspaceId = inst.workspaceId ?? "";
       pane.type = inst.type;
       pane.shellName = inst.shellName;
       pane.verifyWorker = inst.verifyWorker ?? false;
@@ -900,6 +952,7 @@ async function boot(): Promise<void> {
     }
   }
   if (!activeId && instances.length > 0) activatePane(instances[0].id);
+  updateEditorLock();
   if (instances[0]?.cwd && !projectCwd) {
     projectCwd = instances[0].cwd;
     explorer.setProject(instances[0].cwd);

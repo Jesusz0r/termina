@@ -25,6 +25,12 @@ export class EditorManager {
   private projectOpen = false;
   /** The single replaceable preview tab (VS Code style). */
   private previewKey: string | null = null;
+  /** Tab keys with unsaved user edits. */
+  private userDirty = new Set<string>();
+  /** True while a workspace agent is running (models stay read-only). */
+  private locked = false;
+  /** Fired when a disk write reaches a model with unsaved user edits. */
+  onConflict: (path: string) => void = () => {};
 
   constructor(container: HTMLElement) {
     this.tabsEl = document.getElementById("editor-tabs")!;
@@ -49,9 +55,20 @@ export class EditorManager {
     this.editor.onDidChangeModel(() => {
       this.syncEmptyState();
       // Timeline snapshots are read-only views of the past.
-      this.editor.updateOptions({ readOnly: this.isTimelineActive() });
+      this.updateReadOnly();
     });
     this.syncEmptyState();
+  }
+
+  /** Lock or unlock the editor while a workspace agent writes. */
+  setLocked(locked: boolean): void {
+    this.locked = locked;
+    this.updateReadOnly();
+  }
+
+  /** Read-only when locked by a busy agent or when a snapshot is active. */
+  private updateReadOnly(): void {
+    this.editor.updateOptions({ readOnly: this.locked || this.isTimelineActive() });
   }
 
   /** Called when a project folder is opened/closed; hides the welcome hint. */
@@ -93,9 +110,10 @@ export class EditorManager {
     }
     // User edits pin the preview into a permanent tab. Programmatic content
     // replacements (watcher/agent live updates) come through as isFlush and
-    // do not pin.
+    // do not pin. The same event marks the model dirty.
     model.onDidChangeContent((e) => {
       if (e.isFlush) return;
+      this.userDirty.add(key);
       if (this.previewKey === key) this.pinPreview();
     });
     this.tabs.set(key, tab);
@@ -120,17 +138,29 @@ export class EditorManager {
     this.previewKey = null;
   }
 
-  /** Update model content from the watcher (live edits). */
+  /** Update model content from the watcher (live edits). A model with
+   *  unsaved user edits is never replaced silently: the tab shows a conflict
+   *  and the user decides (save overwrites the disk, or revert the model). */
   updateContent(path: string, content: string): void {
     const tab = this.tabs.get(path);
     if (!tab) return;
+    if (this.userDirty.has(path)) {
+      if (!tab.dom.classList.contains("conflict")) {
+        tab.dom.classList.add("conflict");
+        tab.dom.title = `${path} — changed on disk while you have unsaved edits`;
+        this.onConflict(path);
+      }
+      return;
+    }
     const model = tab.model;
     if (model.getValue() === content) return;
+    // setValue fires with isFlush=true; the model's change handler uses that
+    // to tell programmatic pushes from user edits.
+    model.setValue(content);
     const editor = this.editor;
     const isActive = editor.getModel() === model;
     const scrollTop = editor.getScrollTop();
     const sel = editor.getSelection();
-    model.setValue(content);
     if (isActive) {
       const layout = editor.getLayoutInfo();
       const maxScroll = Math.max(0, editor.getScrollHeight() - layout.height);
@@ -229,6 +259,7 @@ export class EditorManager {
     tab.model.dispose();
     this.tabs.delete(key);
     this.order = this.order.filter((k) => k !== key);
+    this.userDirty.delete(key);
     if (this.previewKey === key) this.previewKey = null;
     this.renderTabs();
     if (this.activeKey === key) {
@@ -247,8 +278,35 @@ export class EditorManager {
     if (!tab) return;
     const res = await window.pi.saveFile(tab.key, tab.model.getValue());
     if (res.ok) {
+      this.userDirty.delete(tab.key);
       tab.dirtyDot.style.display = "none";
+      tab.dom.classList.remove("conflict");
     }
+  }
+
+  /** Save every model with unsaved user edits. Returns the failed paths.
+   *  With `writerId` (the write-lease holder) the saves bypass the lease
+   *  block — the flush IS the holder's operation. */
+  async flushAll(writerId?: string): Promise<{ ok: boolean; failed: string[] }> {
+    const failed: string[] = [];
+    for (const key of [...this.userDirty]) {
+      const tab = this.tabs.get(key);
+      if (!tab) continue;
+      const res = writerId ? await window.pi.flushSave(tab.key, tab.model.getValue(), writerId) : await window.pi.saveFile(tab.key, tab.model.getValue());
+      if (res.ok) {
+        this.userDirty.delete(key);
+        tab.dirtyDot.style.display = "none";
+        tab.dom.classList.remove("conflict");
+      } else {
+        failed.push(key);
+      }
+    }
+    return { ok: failed.length === 0, failed };
+  }
+
+  /** True when any model has unsaved user edits. */
+  hasDirtyModels(): boolean {
+    return this.userDirty.size > 0;
   }
 
   /** Close a tab if it is open (e.g. the file was deleted on disk). */
@@ -295,6 +353,28 @@ export class EditorManager {
   /** True when the active model is a timeline snapshot (read-only view). */
   isTimelineActive(): boolean {
     return this.activeKey !== null && this.activeKey.startsWith("timeline:");
+  }
+
+  /** True when the editor (not the terminal) owns keyboard focus. */
+  hasTextFocus(): boolean {
+    return this.editor.hasTextFocus();
+  }
+
+  /** True when the workspace lock is engaged (test hook). */
+  isLocked(): boolean {
+    return this.locked;
+  }
+
+  /**
+   * Run a menu edit command on the editor. Return false when the editor is
+   * not focused. The caller can then use the terminal or the browser.
+   */
+  runMenuEdit(kind: "undo" | "redo" | "select-all"): boolean {
+    if (!this.editor.hasTextFocus()) return false;
+    const action =
+      kind === "undo" ? "editor.action.undo" : kind === "redo" ? "editor.action.redo" : "editor.action.selectAll";
+    this.editor.trigger("menu", action, null);
+    return true;
   }
 
   dispose(): void {

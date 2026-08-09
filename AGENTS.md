@@ -92,12 +92,28 @@ Use these terms exactly. Do not invent synonyms.
 - **Dot**: one point on the timeline strip.
 - **Worker**: a shell terminal that runs the tests for Verify & Iterate.
 - **Modified list**: the panel that shows the files a run changed.
+- **Fork point**: one visible timeline event coupled to a Pi session entry and
+  an immutable source state.
+- **Worldline**: one isolated candidate source tree and matching Pi session.
+- **Candidate**: a worldline that participates in one comparison.
+- **Reference**: Candidate A, which preserves the original future.
+- **Alternative**: Candidate B, which starts from the shared base.
+- **Challenge**: an automatically launched alternative with one fixed
+  constraint profile.
+- **Evidence contract**: immutable deterministic checks and measurements used
+  to compare candidates.
+- **Write lease**: main-process ownership that prevents two app-controlled
+  writers from changing one source tree during a critical operation.
+- **Workspace**: one source tree the app controls, with its own watcher,
+  user-edit state, and write lease. The primary workspace is the opened
+  project; worldline candidates get their own workspaces.
 
 ## File map
 
-- `electron/main.ts`: the main process. It owns the terminals, the watcher,
-  all state, and the IPC handlers. The bridge extension template is a string
-  in this file.
+- `electron/main.ts`: the main process. It owns the terminals, the
+  workspaces, the watchers, all state, and the IPC handlers. The bridge
+  extension template is a string in this file; the materialized bridge file
+  lives in the app user-data directory.
 - `electron/pty-terminal.ts`: a thin wrapper around node-pty.
 - `electron/sidecar.ts`: tails the sidecar files and emits events.
 - `electron/watcher.ts`: watches the project, keeps a content cache, and
@@ -160,8 +176,11 @@ The renderer never talks to the agent. It only renders what main pushes.
   (`/var/folders/.../T/`), not `/tmp`.
 - localStorage keys: `pi-ditor.layout`, `pi-ditor.explorer`,
   `pi-ditor.modified`.
-- The bridge extension is installed when a folder opens. A template change
-  in main.ts requires a fresh folder open to reach the project.
+- The bridge extension is app-owned: the app writes it once to the user-data
+  directory and passes it to pi with the CLI extension option. A template
+  change in main.ts takes effect on the next app start. The app removes the
+  legacy generated bridge from a project when it carries the Pi/ditor marker;
+  a user file that only shares the name stays untouched.
 - The app sanitizes the env for pi processes: host session variables
   (PI_SESSION_FILE, PI_MODEL, PI_CODING_AGENT, ...) make the TUI crash or
   hang at startup. Do not remove the sanitization.

@@ -1,0 +1,26 @@
+PASS  git version parses — 2.53.0
+PASS  git meets the merge-tree minimum — 2.53.0
+PASS  sandbox-exec exists — required: macOS
+PASS  sandbox allows candidate writes — candidate=0
+forbidden=1
+child=1
+child-ok=0
+PASS  sandbox blocks forbidden writes — candidate=0
+forbidden=1
+child=1
+child-ok=0
+PASS  sandbox children inherit the write boundary — candidate=0
+forbidden=1
+child=1
+child-ok=0
+PASS  sandbox denied file absent
+PASS  copy-on-write clone reported available — required: macOS APFS
+PASS  cp -c clones a directory tree
+PASS  clone is a separate inode (copy, not hardlink)
+PASS  mutating the clone leaves the source intact
+PASS  recursive watcher reported available
+PASS  recursive watcher sees nested writes — ["sub/deep.txt"]
+PASS  free disk space reports a number — 104938 MB
+PASS  free space meets the pair-creation reserve (4 GB) — 102 GB
+
+platform spike: 15/15 passed

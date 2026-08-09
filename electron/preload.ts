@@ -15,6 +15,7 @@ import type {
   VerifyInfo,
   TimelineEvent,
   PlanPayload,
+  WorldlineSummary,
 } from "../shared/types.js";
 
 const bridge: PiBridge = {
@@ -55,6 +56,9 @@ const bridge: PiBridge = {
   onFolderOpened: (cb) => {
     ipcRenderer.on("folder:opened", (_e, e: { cwd: string }) => cb(e));
   },
+  onFlushRequest: (cb) => {
+    ipcRenderer.on("editor:flush-request", (_e, p: { requestId: string; writerId: string }) => cb(p));
+  },
   onInstances: (cb) => {
     ipcRenderer.on("instances:list", (_e, list: InstanceSummary[]) => cb(list));
   },
@@ -73,6 +77,21 @@ const bridge: PiBridge = {
   getTimeline: (terminalId) => ipcRenderer.invoke("timeline:get", terminalId),
   getPlan: (terminalId) => ipcRenderer.invoke("plan:get", terminalId),
   searchSessions: (query) => ipcRenderer.invoke("session:search", query),
+  getRuns: (terminalId) => ipcRenderer.invoke("worldline:runs", terminalId),
+  exportState: (runId, kind) => ipcRenderer.invoke("worldline:export-state", runId, kind),
+  reportFlush: (requestId, result) => ipcRenderer.invoke("editor:flush-report", requestId, result),
+  flushSave: (path, content, writerId) => ipcRenderer.invoke("file:flush-save", path, content, writerId),
+  getWorldlines: () => ipcRenderer.invoke("worldline:list"),
+  forkRun: (runId) => ipcRenderer.invoke("worldline:fork-run", runId),
+  cancelWorldline: (comparisonId) => ipcRenderer.invoke("worldline:cancel", comparisonId),
+  discardWorldline: (comparisonId) => ipcRenderer.invoke("worldline:discard", comparisonId),
+  openWorldlineTerminal: (comparisonId, label) => ipcRenderer.invoke("worldline:open-terminal", comparisonId, label),
+  onWorldlineUpdate: (cb) => {
+    ipcRenderer.on("worldline:update", (_e, summary: WorldlineSummary) => cb(summary));
+  },
+  onWorldlineRemoved: (cb) => {
+    ipcRenderer.on("worldline:removed", (_e, e: { comparisonId: string }) => cb(e));
+  },
   dispatchRun: (terminalId) => ipcRenderer.invoke("dispatch:run", terminalId),
   setMineFile: (path, mine) => ipcRenderer.invoke("mine:set", path, mine),
   getMineFiles: () => ipcRenderer.invoke("mine:list"),

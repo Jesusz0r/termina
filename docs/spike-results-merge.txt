@@ -1,0 +1,19 @@
+PASS  clean merge reports ok
+PASS  clean merge returns a tree
+PASS  clean merge reports no conflicts — []
+PASS  merged keeps both disjoint edits
+PASS  merged keeps ours addition
+PASS  merged keeps theirs addition
+PASS  merged keeps ours deletion
+PASS  merged takes ours binary
+PASS  merged takes theirs nested edit
+PASS  text conflict detected — ["shared.txt"]
+PASS  binary conflict detected — ["blob.bin"]
+PASS  type (file vs symlink) conflict detected — ["shared.txt","shared.txt~7492c22cf0bf0103c4fd788aee56aa4ba2f598cc"]
+PASS  file-directory conflict detected — ["sub/nested.txt","sub~3138cfca324ea4bc92fb843040a091b1c63f997c"]
+PASS  rename+edit conflict reported — ["shared.txt"]
+PASS  status unchanged after merges — {"before":"?? a.txt","after":"?? a.txt"}
+PASS  no refs created in the user repo
+PASS  HEAD unchanged after merges
+
+merge spike: 17/17 passed

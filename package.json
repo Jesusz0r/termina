@@ -9,9 +9,11 @@
     "build": "node scripts/build.mjs",
     "start": "electron .",
     "typecheck": "tsc --noEmit",
-    "test:loop": "node scripts/tui-loop-test.mjs"
+    "test:loop": "node scripts/tui-loop-test.mjs",
+    "spike": "node scripts/spike.mjs"
   },
   "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.1",
     "@lydell/node-pty": "^1.2.0-beta.14",
     "@xterm/addon-canvas": "^0.7.0",
     "@xterm/addon-fit": "^0.10.0",

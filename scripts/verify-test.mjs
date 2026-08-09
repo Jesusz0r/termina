@@ -51,11 +51,11 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// The events dir is app.getPath("temp")/pi-editor-events — locate it by globbing.
+// The events dir is app.getPath("temp")/pi-ditor-events — locate it by globbing.
 // Re-glob every time: the dir may only be created mid-test by the app.
 import { execSync } from "node:child_process";
 const findEventsDir = () =>
-  execSync(`find /var/folders -name "pi-editor-events" -type d 2>/dev/null | head -1`).toString().trim();
+  execSync(`find /var/folders -name "pi-ditor-events" -type d 2>/dev/null | head -1`).toString().trim();
 const contextFile = (termId) => join(findEventsDir(), `verify-${termId}.md`);
 
 // ---- 1. detection ----
