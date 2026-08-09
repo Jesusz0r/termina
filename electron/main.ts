@@ -644,7 +644,15 @@ class PiEditorApp {
       if (!body) continue;
       const paths: string[] = [];
       for (const token of body.split(/\s+/)) {
-        const clean = token.replace(/[`.,;:!?)"']+$/g, "").replace(/^[`("']+/g, "").replace(/\/+$/, "");
+        // Strip punctuation AND markdown emphasis (bold/italic markers often
+        // wrap the path: **`utils.ts`**).
+        let clean = token.replace(/[`.,;:!?)"'*_]+$/g, "").replace(/^[`("'*_]+/g, "").replace(/\/+$/, "");
+        // Normalize absolute paths to project-relative (canonical: /tmp and
+        // /private/tmp are the same directory) so progress matching hits.
+        if (isAbsolute(clean) && this.projectCwd) {
+          const rel = relative(this.canonicalPath(this.projectCwd), this.canonicalPath(clean));
+          if (rel && !rel.startsWith("..")) clean = rel;
+        }
         if (this.looksLikePath(clean)) paths.push(clean);
       }
       tasks.push({ text: body, paths: [...new Set(paths)].slice(0, 5), state: "pending" });

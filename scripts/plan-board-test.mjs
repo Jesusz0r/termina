@@ -58,15 +58,29 @@ check("plan mentions utils.ts", taskTexts.some((t) => t.includes("utils.ts")), t
 check("plan mentions greeting.ts", taskTexts.some((t) => t.includes("greeting.ts")), taskTexts.join(" | "));
 
 // ---- 3. done after the run settles ----
-const utilsTask = (panel.tasks ?? []).find((t) => (t.text ?? "").includes("utils.ts"));
-const greetingTask = (panel.tasks ?? []).find((t) => (t.text ?? "").includes("greeting.ts"));
-check("utils.ts task is done", !!utilsTask && utilsTask.cls.includes("state-done"), JSON.stringify(utilsTask));
-check("greeting.ts task is done", !!greetingTask && greetingTask.cls.includes("state-done"), JSON.stringify(greetingTask));
+// The agent can auto-retry and re-plan mid-test (the plan text may change).
+// Poll until both tasks reach done instead of sampling once.
+let utilsDone = false;
+let greetingDone = false;
+let lastUtils = null;
+let lastGreeting = null;
+for (let i = 0; i < 90; i++) {
+  await sleep(1000);
+  const tasks = await evalJs(`[...document.querySelectorAll('#plan-list .plan-task')].map(t => ({ text: t.querySelector('.plan-text')?.textContent ?? '', cls: t.className }))`);
+  lastUtils = tasks.find((t) => t.text.includes("utils.ts")) ?? null;
+  lastGreeting = tasks.find((t) => t.text.includes("greeting.ts")) ?? null;
+  utilsDone = !!lastUtils && lastUtils.cls.includes("state-done");
+  greetingDone = !!lastGreeting && lastGreeting.cls.includes("state-done");
+  if (utilsDone && greetingDone) break;
+}
+check("utils.ts task is done", utilsDone, JSON.stringify(lastUtils));
+check("greeting.ts task is done", greetingDone, JSON.stringify(lastGreeting));
 
 // ---- 4. click a task opens its file ----
-if (utilsTask) {
-  const idx = panel.tasks.indexOf(utilsTask);
-  await evalJs(`(() => { const items = [...document.querySelectorAll('#plan-list .plan-task')]; items[${idx}]?.click(); })()`);
+// Re-query the live list (the plan may have been re-posted by a retry).
+const utilsTask = await evalJs(`(() => { const t = [...document.querySelectorAll('#plan-list .plan-task')].find(t => t.querySelector('.plan-text')?.textContent.includes('utils.ts')); return t ? [...document.querySelectorAll('#plan-list .plan-task')].indexOf(t) : -1; })()`);
+if (utilsTask !== -1) {
+  await evalJs(`(() => { const items = [...document.querySelectorAll('#plan-list .plan-task')]; items[${utilsTask}]?.click(); })()`);
   await sleep(900);
   const tabs = await evalJs(`[...document.querySelectorAll('.editor-tab .tab-name')].map(t => t.textContent)`);
   check("clicking a task opens its file", tabs.includes("utils.ts"), JSON.stringify(tabs));
