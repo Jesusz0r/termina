@@ -645,8 +645,13 @@ class PiEditorApp {
       const paths: string[] = [];
       for (const token of body.split(/\s+/)) {
         // Strip punctuation AND markdown emphasis (bold/italic markers often
-        // wrap the path: **`utils.ts`**).
-        let clean = token.replace(/[`.,;:!?)"'*_]+$/g, "").replace(/^[`("'*_]+/g, "").replace(/\/+$/, "");
+        // wrap the path: **`utils.ts`**). A LEADING underscore is a filename
+        // (e.g. _test.py), not italic markup — unless the token also ends
+        // with one (markdown italic pairs _text_).
+        const isItalicPair = /_$/.test(token);
+        let clean = token.replace(/[`.,;:!?)"'*_]+$/g, "").replace(/^[`("'*]+/g, "");
+        if (isItalicPair) clean = clean.replace(/^_+/, "");
+        clean = clean.replace(/\/+$/, "");
         // Normalize absolute paths to project-relative (canonical: /tmp and
         // /private/tmp are the same directory) so progress matching hits.
         if (isAbsolute(clean) && this.projectCwd) {
