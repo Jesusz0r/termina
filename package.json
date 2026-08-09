@@ -1,5 +1,5 @@
 {
-  "name": "pi-editor",
+  "name": "pi-ditor",
   "version": "0.1.0",
   "description": "Hybrid terminal/editor: prompt a pi coding agent in a terminal, watch it edit files live in a Monaco (VS Code) editor, click modified files to inspect them.",
   "type": "module",

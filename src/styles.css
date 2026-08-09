@@ -31,7 +31,8 @@ body,
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  /* Pi's typography: the whole chrome uses the monospace family. */
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   user-select: none;
 }
 
@@ -171,6 +172,7 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
+  font-weight: 500;
   /* same size as the terminal/editor tab bars; left padding clears the
      inset traffic lights, which now sit over the explorer column */
   min-height: 34px;
@@ -673,6 +675,7 @@ body {
   gap: 8px;
   padding: 6px 10px;
   font-size: 11px;
+  font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   cursor: pointer;
@@ -793,6 +796,26 @@ body {
   color: var(--text);
 }
 
+.tab-mine {
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.5;
+  padding: 0 3px;
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.tab-mine:hover {
+  opacity: 1;
+  color: #fff;
+}
+
+.editor-tab.mine .tab-mine {
+  opacity: 1;
+  color: var(--accent);
+  font-weight: 700;
+}
+
 .editor-tab .tab-dirty {
   width: 8px;
   height: 8px;
@@ -817,6 +840,11 @@ body {
   text-align: center;
   color: var(--text-dim);
   pointer-events: none;
+}
+
+#editor-empty .empty-logo {
+  color: var(--text-dim);
+  margin-bottom: 4px;
 }
 
 #editor-empty .empty-title {

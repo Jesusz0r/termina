@@ -183,6 +183,12 @@ export interface PiBridge {
   // Dispatch (parallel agents)
   /** Dispatch the plan board tasks of the terminal to parallel workers. */
   dispatchRun(terminalId: string): Promise<{ ok: boolean; error?: string; dispatched?: number }>;
+
+  // Mine (file ownership)
+  /** Mark a file as the user's own (the agent is told not to modify it). */
+  setMineFile(path: string, mine: boolean): Promise<void>;
+  /** The absolute paths of the files marked as the user's own. */
+  getMineFiles(): Promise<string[]>;
   /** Fetch a snapshot's content on demand (only when a dot is clicked). */
   getTimelineContent(
     terminalId: string,

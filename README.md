@@ -1,4 +1,4 @@
-# pi-editor
+# Pi-ditor
 
 A **hybrid terminal + IDE**: the left side runs **real pi** — the actual
 interactive TUI — in a pty. The right side is a Monaco IDE that watches the
@@ -38,7 +38,7 @@ update live.
 
 ## Notes
 
-- The bridge extension is written to `.pi/extensions/pi-editor-bridge.ts`
+- The bridge extension is written to `.pi/extensions/pi-ditor-bridge.ts`
   when a folder opens — pi picks it up on the next terminal spawn.
 - pi owns authentication (`~/.pi/agent/auth.json`); use `/login` inside
   the terminal.

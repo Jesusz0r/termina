@@ -150,6 +150,24 @@ export class EditorManager {
     if (tab) tab.dirtyDot.style.display = "inline-block";
   }
 
+  /** Paths marked as the user's own (agent off-limits). */
+  private mineKeys = new Set<string>();
+  /** Fired when the user clicks the mine toggle on a tab. */
+  onToggleMine: (path: string) => void = () => {};
+
+  /** True when the path is marked as the user's own. */
+  isMine(path: string): boolean {
+    return this.mineKeys.has(path);
+  }
+
+  /** Mark a path (or clear the mark); updates the open tab. */
+  setMine(path: string, mine: boolean): void {
+    if (mine) this.mineKeys.add(path);
+    else this.mineKeys.delete(path);
+    const tab = this.tabs.get(path);
+    if (tab) tab.dom.classList.toggle("mine", mine);
+  }
+
   private makeTab(key: string, model: monaco.editor.ITextModel): OpenTab {
     const dom = document.createElement("div");
     dom.className = "editor-tab";
@@ -160,6 +178,14 @@ export class EditorManager {
     const dirty = document.createElement("span");
     dirty.className = "tab-dirty";
     dirty.style.display = "none";
+    const mine = document.createElement("span");
+    mine.className = "tab-mine";
+    mine.textContent = "M";
+    mine.title = "Mark as yours — the agent must not modify it";
+    mine.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.onToggleMine(key);
+    });
     const close = document.createElement("span");
     close.className = "tab-close";
     close.textContent = "×";
@@ -167,7 +193,8 @@ export class EditorManager {
       e.stopPropagation();
       this.closeTab(key);
     });
-    dom.append(dirty, name, close);
+    dom.append(dirty, name, mine, close);
+    if (this.mineKeys.has(key)) dom.classList.add("mine");
     dom.addEventListener("click", () => this.activate(key));
     return { key, model, dom, dirtyDot: dirty };
   }

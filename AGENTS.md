@@ -1,10 +1,10 @@
-# AGENTS.md — pi-editor
+# AGENTS.md — Pi-ditor
 
 This file defines the rules for agents that work in this repository.
 
 ## Project
 
-pi-editor is a hybrid coding tool. The left side runs the real pi interactive
+Pi-ditor is a hybrid coding tool. The left side runs the real pi interactive
 TUI in a pty. The right side is a Monaco IDE with a file explorer. The two
 sides stay synchronized. The project is a desktop app built with Electron,
 Vite, TypeScript, and node-pty.
@@ -73,7 +73,7 @@ Examples:
 ## Architecture notes
 
 - The terminal stays the source of truth. The app never replaces the TUI.
-- The bridge extension lives in the project `.pi/extensions` folder.
+- The bridge extension lives in the project `.pi/extensions` folder (pi-ditor-bridge.ts).
 - A folder switch resets every per-terminal state: timeline, baselines,
   snapshots, modified list, and verify state.
 
@@ -156,10 +156,10 @@ The renderer never talks to the agent. It only renders what main pushes.
   Bundling it breaks with a dynamic-require error.
 - Paths on macOS are canonical: `/tmp` is `/private/tmp`. The watcher
   canonicalizes its cache keys; lookups must use canonical paths too.
-- The events directory is `app.getPath("temp")/pi-editor-events`
+- The events directory is `app.getPath("temp")/pi-ditor-events`
   (`/var/folders/.../T/`), not `/tmp`.
-- localStorage keys: `pi-editor.layout`, `pi-editor.explorer`,
-  `pi-editor.modified`.
+- localStorage keys: `pi-ditor.layout`, `pi-ditor.explorer`,
+  `pi-ditor.modified`.
 - The bridge extension is installed when a folder opens. A template change
   in main.ts requires a fresh folder open to reach the project.
 - The app sanitizes the env for pi processes: host session variables
@@ -177,7 +177,7 @@ The renderer never talks to the agent. It only renders what main pushes.
 - IPC channels use the `area:action` pattern: `verify:run`, `timeline:get`,
   `file:open`, `review:baseline`.
 - Terminal ids use the `term-N` pattern.
-- Commits use the identity `pi-editor <dev@pi-editor.local>`.
+- Commits use the identity `pi-ditor <dev@pi-ditor.local>`.
 - Test suites live in `scripts/` and end with `-test.mjs`.
 - The main process is the source of truth. The renderer caches nothing
   that main does not push.

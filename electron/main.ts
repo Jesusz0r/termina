@@ -39,7 +39,7 @@ const MAX_TIMELINE_CONTENT_BYTES = 4 * 1024 * 1024;
 const TOOL_CHANGE_DEDUP_MS = 1500;
 const BRIDGE_EXTENSION = `
 /**
- * pi-editor bridge extension — auto-generated, do not edit.
+ * Pi-ditor bridge extension — auto-generated, do not edit.
  */
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -89,7 +89,7 @@ export default function (pi: ExtensionAPI): void {
   // agent's next turn.
   pi.on("before_agent_start", async () => {
     let context = "";
-    for (const name of [\`verify-\${id}.md\`, \`edits-\${id}.md\`]) {
+    for (const name of [\`verify-\${id}.md\`, \`edits-\${id}.md\`, \`mine-\${id}.md\`]) {
       try {
         const text = readFileSync(join(dir, name), "utf8");
         if (text) context += (context ? "\\n\\n---\\n\\n" : "") + text;
@@ -97,7 +97,7 @@ export default function (pi: ExtensionAPI): void {
     }
     if (!context) return;
     return {
-      message: { customType: "pi-editor-context", content: context, display: false },
+      message: { customType: "pi-ditor-context", content: context, display: false },
     };
   });
   pi.on("tool_execution_start", async (event) => {
@@ -224,7 +224,7 @@ class PiEditorApp {
   private terminals = new Map<string, PiTerminalInstance>();
   private watcher: ProjectWatcher | null = null;
   private projectCwd: string | null = null;
-  private eventsDir = process.env.PI_EDITOR_EVENTS_DIR ?? join(app.getPath("temp"), "pi-editor-events");
+  private eventsDir = process.env.PI_EDITOR_EVENTS_DIR ?? join(app.getPath("temp"), "pi-ditor-events");
   private tailer = new SidecarTailer(this.eventsDir);
   private paintWatchdog: ReturnType<typeof setInterval> | null = null;
   /** In-flight verify runs: owner terminal id → worker id. */
@@ -235,6 +235,9 @@ class PiEditorApp {
   private dispatchWorkers = new Map<string, string>();
   /** Dispatch runs: worker terminal id → owner + the dispatched task text. */
   private dispatchRuns = new Map<string, { ownerId: string; taskText: string }>();
+  /** Files the user marked as theirs (canonical paths). The agent is told
+   *  not to modify them without asking. */
+  private mineFiles = new Set<string>();
   /**
    * Files the user changed while no agent terminal was busy. The agent
    * receives them on its next turn. It adapts instead of overwriting them.
@@ -258,7 +261,7 @@ class PiEditorApp {
       height: 900,
       minWidth: 960,
       minHeight: 600,
-      title: "pi-editor",
+      title: "Pi-ditor",
       backgroundColor: "#1e1e1e",
       titleBarStyle: "hiddenInset",
       trafficLightPosition: { x: 12, y: 12 },
@@ -853,6 +856,54 @@ class PiEditorApp {
     if (changed) this.send("modified:list", { instanceId: owner.id, files: [...owner.modified.values()] });
   }
 
+  // ----------------------------------------------------------------- mine ----
+
+  /** Mark a file as the user's own (or clear the mark). */
+  private setMineFile(path: string, mine: boolean): void {
+    const p = this.canonicalPath(path);
+    if (mine) this.mineFiles.add(p);
+    else this.mineFiles.delete(p);
+    this.writeMineContext();
+  }
+
+  /** Write the mine context file for every agent terminal. */
+  private writeMineContext(): void {
+    try {
+      mkdirSync(this.eventsDir, { recursive: true });
+    } catch {
+      return;
+    }
+    const md = this.buildMineMarkdown();
+    for (const inst of this.terminals.values()) {
+      if (inst.type !== "agent") continue;
+      try {
+        writeFileSync(join(this.eventsDir, `mine-${inst.id}.md`), md, "utf8");
+      } catch (err) {
+        console.warn(`[main] could not write mine context: ${(err as Error).message}`);
+      }
+    }
+  }
+
+  /** Build the mine context markdown: one file per line. */
+  private buildMineMarkdown(): string {
+    const out: string[] = ["## Your files", "", "These files belong to the user. Do not modify them without asking first.", ""];
+    for (const p of this.mineFiles) out.push(`- \`${this.rel(p)}\``);
+    return out.join("\n");
+  }
+
+  /** Clear the marks and their context files (folder switch). */
+  private clearMineFiles(): void {
+    this.mineFiles.clear();
+    for (const inst of this.terminals.values()) {
+      if (inst.type !== "agent") continue;
+      try {
+        rmSync(join(this.eventsDir, `mine-${inst.id}.md`), { force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
   // --------------------------------------------------------- user edits ----
 
   /** Record a change the user made. Keep the FIRST prev so the context file
@@ -1297,6 +1348,7 @@ class PiEditorApp {
     }
     this.dispatchWorkers.clear();
     this.dispatchRuns.clear();
+    this.clearMineFiles();
     this.clearUserEdits();
     this.sendInstances();
     this.send("folder:opened", { cwd });
@@ -1308,7 +1360,7 @@ class PiEditorApp {
     try {
       const dir = join(cwd, ".pi", "extensions");
       mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, "pi-editor-bridge.ts"), BRIDGE_EXTENSION, "utf8");
+      writeFileSync(join(dir, "pi-ditor-bridge.ts"), BRIDGE_EXTENSION, "utf8");
     } catch (err) {
       console.warn(`[main] could not install bridge extension: ${(err as Error).message}`);
     }
@@ -1533,6 +1585,10 @@ class PiEditorApp {
     // ---- Verify & Iterate ----
     ipcMain.handle("verify:detect", () => this.detectTestCommand(this.terminalCwd()));
     ipcMain.handle("verify:run", (_e, terminalId: string) => this.runVerify(terminalId));
+
+    // ---- Mine ----
+    ipcMain.handle("mine:set", (_e, path: string, mine: boolean) => this.setMineFile(path, mine));
+    ipcMain.handle("mine:list", () => [...this.mineFiles]);
 
     // ---- Dispatch ----
     ipcMain.handle("dispatch:run", (_e, terminalId: string) => this.dispatchRun(terminalId));

@@ -70,6 +70,18 @@ const explorer = new Explorer(document.getElementById("explorer")!);
 const sessionSearch = new SessionSearch();
 sessionSearch.bind({ onOpenFile: (path) => void openFileSmart(path, true) });
 (window as unknown as Record<string, unknown>).__sessionSearch = sessionSearch;
+
+// ---- Mine (file ownership) ----
+editorMgr.onToggleMine = (path) => {
+  const mine = !editorMgr.isMine(path);
+  editorMgr.setMine(path, mine);
+  void window.pi.setMineFile(path, mine).catch(() => {
+    editorMgr.setMine(path, !mine); // the main side failed: revert the mark
+  });
+};
+void window.pi.getMineFiles().then((paths) => {
+  for (const p of paths) editorMgr.setMine(p, true);
+});
 const explorerEl = document.getElementById("explorer")!;
 explorer.bind({ onOpenFile: (path, preview) => void openFileSmart(path, preview ?? true) });
 
@@ -576,9 +588,9 @@ btnDispatch.addEventListener("click", () => {
 
 type Layout = "terminal-left" | "terminal-right" | "terminal-top" | "terminal-bottom" | "terminal-fullscreen";
 const DEFAULT_LAYOUT: Layout = "terminal-left";
-const LAYOUT_KEY = "pi-editor.layout";
-const EXPLORER_KEY = "pi-editor.explorer";
-const MODIFIED_KEY = "pi-editor.modified";
+const LAYOUT_KEY = "pi-ditor.layout";
+const EXPLORER_KEY = "pi-ditor.explorer";
+const MODIFIED_KEY = "pi-ditor.modified";
 
 const splitEl = document.getElementById("main-split")!;
 const modifiedPanelEl = document.getElementById("modified-panel")!;

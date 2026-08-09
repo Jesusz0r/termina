@@ -6,7 +6,7 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; img-src 'self' data:; connect-src 'self' ws: http://localhost:*"
     />
-    <title>pi-editor</title>
+    <title>Pi-ditor</title>
     <style>
       /* Critical first-paint styles: prevents the unstyled flash before
          vite injects the real stylesheet. */
@@ -32,6 +32,9 @@
         font-family: ui-monospace, "SF Mono", Menlo, monospace;
       }
       #splash .logo {
+        color: #d4d4d4;
+      }
+      #splash .logo-text {
         font-size: 26px;
         font-weight: 300;
         letter-spacing: 0.04em;
@@ -60,7 +63,11 @@
   </head>
   <body>
     <div id="splash">
-      <div class="logo">pi-editor</div>
+      <svg class="logo" viewBox="0 0 800 800" width="72" height="72" aria-hidden="true">
+        <path fill="currentColor" fill-rule="evenodd" d="M165.29 165.29 H517.36 V400 H400 V517.36 H282.65 V634.72 H165.29 Z M282.65 282.65 V400 H400 V282.65 Z"/>
+        <path fill="currentColor" d="M517.36 400 H634.72 V634.72 H517.36 Z"/>
+      </svg>
+      <div class="logo-text">Pi-ditor</div>
       <div class="pulse"></div>
       <div class="hint">starting pi…</div>
     </div>
@@ -68,6 +75,10 @@
       <main id="main">
         <div id="explorer">
           <div class="explorer-header">
+            <svg class="header-logo" viewBox="0 0 800 800" width="12" height="12" aria-hidden="true">
+              <path fill="currentColor" fill-rule="evenodd" d="M165.29 165.29 H517.36 V400 H400 V517.36 H282.65 V634.72 H165.29 Z M282.65 282.65 V400 H400 V282.65 Z"/>
+              <path fill="currentColor" d="M517.36 400 H634.72 V634.72 H517.36 Z"/>
+            </svg>
             <span>Explorer</span>
           </div>
           <div id="explorer-tree"></div>
@@ -128,7 +139,11 @@
               <div id="review-diff"></div>
             </div>
             <div id="editor-empty">
-              <div class="empty-title">pi-editor</div>
+              <svg class="empty-logo" viewBox="0 0 800 800" width="56" height="56" aria-hidden="true">
+                <path fill="currentColor" fill-rule="evenodd" d="M165.29 165.29 H517.36 V400 H400 V517.36 H282.65 V634.72 H165.29 Z M282.65 282.65 V400 H400 V282.65 Z"/>
+                <path fill="currentColor" d="M517.36 400 H634.72 V634.72 H517.36 Z"/>
+              </svg>
+              <div class="empty-title">Pi-ditor</div>
               <div class="empty-sub">
                 Open a project folder, then run <b>pi</b> in the terminal.
                 <br />
