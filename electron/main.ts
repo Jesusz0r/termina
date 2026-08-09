@@ -806,21 +806,30 @@ class PiEditorApp {
 
   /** Build the context markdown: one section per file with before/after. */
   private buildUserEditsMarkdown(): string {
+    // The whole context must stay small: it is injected into the model's
+    // context on every turn. Drop the OLDEST edits beyond the cap (the map
+    // iterates in insertion order).
+    const MAX_CONTEXT_BYTES = 16 * 1024;
     const out: string[] = [];
     out.push("## Your edits");
     out.push("");
     out.push("You changed these files after the last agent run. Read them before you change them.");
+    let size = out.join("\n").length;
     for (const edit of this.userEdits.values()) {
-      out.push("");
-      out.push(`- \`${edit.relPath}\` (${edit.status})`);
+      const block: string[] = [];
+      block.push("", `- \`${edit.relPath}\` (${edit.status})`);
       if (edit.status === "modified" && edit.prev !== undefined) {
-        out.push("", "  before:", "  ```text");
-        for (const line of this.snippet(edit.prev).split("\n")) out.push("  " + line);
-        out.push("  ```");
+        block.push("", "  before:", "  ```text");
+        for (const line of this.snippet(edit.prev).split("\n")) block.push("  " + line);
+        block.push("  ```");
       }
-      out.push("", "  after:", "  ```text");
-      for (const line of this.snippet(edit.content).split("\n")) out.push("  " + line);
-      out.push("  ```");
+      block.push("", "  after:", "  ```text");
+      for (const line of this.snippet(edit.content).split("\n")) block.push("  " + line);
+      block.push("  ```");
+      const blockText = block.join("\n");
+      if (size + blockText.length > MAX_CONTEXT_BYTES) break;
+      size += blockText.length;
+      out.push(blockText);
     }
     return out.join("\n");
   }
@@ -838,6 +847,11 @@ class PiEditorApp {
       clearTimeout(this.userEditsWriteTimer);
       this.userEditsWriteTimer = null;
     }
+    this.removeUserEditsFiles();
+  }
+
+  /** Remove the edits context files for every agent terminal. */
+  private removeUserEditsFiles(): void {
     for (const inst of this.terminals.values()) {
       if (inst.type !== "agent") continue;
       try {
@@ -1260,8 +1274,17 @@ class PiEditorApp {
       }
     };
     this.watcher.onFileDeleted = (path) => {
-      this.send("file:deleted", { path: this.canonicalPath(path) });
+      const p = this.canonicalPath(path);
+      this.send("file:deleted", { path: p });
       for (const inst of this.terminals.values()) this.recordDeleted(inst, path);
+      // A user-side deletion makes the recorded edit moot: drop the entry so
+      // the context never points at a file that no longer exists. An empty
+      // map must remove the file itself — the writer skips empty maps.
+      const agentBusy = [...this.terminals.values()].some((t) => t.busy);
+      if (!agentBusy && this.userEdits.delete(p)) {
+        if (this.userEdits.size === 0) this.removeUserEditsFiles();
+        else this.scheduleUserEditsWrite();
+      }
     };
     this.watcher.start();
   }

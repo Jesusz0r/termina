@@ -130,6 +130,31 @@ check("verify-run outputs are not recorded as user edits", !ctx5.includes("from-
 // Wait for the worker to finish so the fixture state is clean.
 await sleep(8000);
 
+// ---- 6. a user deletion removes the stale edit entry ----
+const { rmSync } = await import("node:fs");
+writeFileSync(greeting, 'export const greeting = "hi three";\n');
+let ctx6 = "";
+for (let i = 0; i < 20; i++) {
+  await sleep(250);
+  const current = existsSync(editsFile) ? readFileSync(editsFile, "utf8") : "";
+  if (current.includes("hi three")) {
+    ctx6 = current;
+    break;
+  }
+}
+check("the edit is recorded before the deletion", ctx6.includes("greeting.ts"), ctx6.slice(0, 80));
+rmSync(greeting);
+let ctx6b = "";
+for (let i = 0; i < 20; i++) {
+  await sleep(250);
+  const current = existsSync(editsFile) ? readFileSync(editsFile, "utf8") : "";
+  if (!current.includes("greeting.ts")) {
+    ctx6b = current;
+    break;
+  }
+}
+check("a user deletion removes the stale edit entry", ctx6b !== "" || !existsSync(editsFile), ctx6b.slice(0, 80));
+
 const passed = results.filter(Boolean).length;
 console.log(`\n${passed}/${results.length} passed`);
 ws.close();
