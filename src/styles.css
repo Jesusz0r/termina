@@ -460,7 +460,8 @@ body {
   color: #ffffff;
 }
 
-#btn-clear-modified {
+#btn-clear-modified,
+#btn-accept-all {
   /* bare text button: same whiteish tone as the new-terminal button */
   background: none;
   border: none;
@@ -470,7 +471,8 @@ body {
   cursor: pointer;
 }
 
-#btn-clear-modified:hover {
+#btn-clear-modified:hover,
+#btn-accept-all:hover {
   color: #ffffff;
 }
 

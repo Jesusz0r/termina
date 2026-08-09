@@ -85,6 +85,7 @@ const modifiedList = document.getElementById("modified-list")!;
 const modifiedPanel = document.getElementById("modified-panel")!;
 const modifiedCount = document.getElementById("modified-count")!;
 const btnClearModified = document.getElementById("btn-clear-modified") as HTMLButtonElement;
+const btnAcceptAll = document.getElementById("btn-accept-all") as HTMLButtonElement;
 const planPanel = document.getElementById("plan-panel")!;
 const planList = document.getElementById("plan-list")!;
 const planCount = document.getElementById("plan-count")!;
@@ -542,6 +543,18 @@ btnClearModified.addEventListener("click", (e) => {
     pane.modified = [];
     renderModified(pane);
   }
+});
+btnAcceptAll.addEventListener("click", (e) => {
+  e.stopPropagation();
+  const pane = activeId ? panes.get(activeId) : undefined;
+  if (!pane || pane.modified.length === 0) return;
+  // Accept every file: the list becomes the approved changes for a commit.
+  for (const f of pane.modified) {
+    pane.accepted.add(f.path);
+    pane.reverted.delete(f.path);
+  }
+  renderModified(pane);
+  toast(`${pane.modified.length} file(s) accepted`, "info");
 });
 modifiedPanel.querySelector(".panel-header")?.addEventListener("click", () => {
   modifiedPanel.classList.toggle("collapsed");
