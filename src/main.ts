@@ -79,9 +79,13 @@ editorMgr.onToggleMine = (path) => {
     editorMgr.setMine(path, !mine); // the main side failed: revert the mark
   });
 };
-void window.pi.getMineFiles().then((paths) => {
-  for (const p of paths) editorMgr.setMine(p, true);
-});
+function refreshMine(): void {
+  editorMgr.clearMine();
+  void window.pi.getMineFiles().then((paths) => {
+    for (const p of paths) editorMgr.setMine(p, true);
+  });
+}
+void refreshMine();
 const explorerEl = document.getElementById("explorer")!;
 explorer.bind({ onOpenFile: (path, preview) => void openFileSmart(path, preview ?? true) });
 
@@ -823,6 +827,7 @@ window.pi.onModifiedList((p) => {
 window.pi.onFolderOpened((e) => {
   projectCwd = e.cwd;
   explorer.setProject(e.cwd);
+  refreshMine();
   void refreshTestCommand();
   // New folder = fresh context: drop every pane's cached timeline; main has
   // already reset the per-terminal state.

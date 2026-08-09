@@ -863,6 +863,7 @@ class PiEditorApp {
     const p = this.canonicalPath(path);
     if (mine) this.mineFiles.add(p);
     else this.mineFiles.delete(p);
+    this.saveMineFiles();
     this.writeMineContext();
   }
 
@@ -891,7 +892,8 @@ class PiEditorApp {
     return out.join("\n");
   }
 
-  /** Clear the marks and their context files (folder switch). */
+  /** Clear the marks and their context files (folder switch). The saved
+   *  marks stay in their file: revisiting the project restores them. */
   private clearMineFiles(): void {
     this.mineFiles.clear();
     for (const inst of this.terminals.values()) {
@@ -901,6 +903,39 @@ class PiEditorApp {
       } catch {
         /* ignore */
       }
+    }
+  }
+
+  /** The persisted marks file for the current project. */
+  private mineFilePath(): string {
+    const cwd = this.canonicalPath(this.projectCwd ?? "");
+    return join(this.eventsDir, `mine-${this.sanitizeSessionDir(cwd)}.json`);
+  }
+
+  /** Load the marks saved for the current project (restart persistence). */
+  private loadMineFiles(): void {
+    if (!this.projectCwd) return;
+    try {
+      const raw = readFileSync(this.mineFilePath(), "utf8");
+      const list = JSON.parse(raw) as string[];
+      if (Array.isArray(list)) {
+        for (const p of list) {
+          if (typeof p === "string") this.mineFiles.add(p);
+        }
+      }
+    } catch {
+      /* no marks saved yet */
+    }
+  }
+
+  /** Save the marks so a restart restores the ownership. */
+  private saveMineFiles(): void {
+    if (!this.projectCwd) return;
+    try {
+      mkdirSync(this.eventsDir, { recursive: true });
+      writeFileSync(this.mineFilePath(), JSON.stringify([...this.mineFiles]), "utf8");
+    } catch (err) {
+      console.warn(`[main] could not save mine marks: ${(err as Error).message}`);
     }
   }
 
@@ -1349,6 +1384,7 @@ class PiEditorApp {
     this.dispatchWorkers.clear();
     this.dispatchRuns.clear();
     this.clearMineFiles();
+    this.loadMineFiles();
     this.clearUserEdits();
     this.sendInstances();
     this.send("folder:opened", { cwd });
@@ -1524,7 +1560,7 @@ class PiEditorApp {
         const full = join(absPath, ent.name);
         entries.push({
           name: ent.name,
-          path: full,
+          path: this.canonicalPath(full),
           relPath: this.projectCwd ? relative(this.projectCwd, full) : full,
           type: ent.isDirectory() ? "dir" : "file",
         });
@@ -1716,6 +1752,7 @@ class PiEditorApp {
     if (this.projectCwd) {
       this.installBridgeExtension(this.projectCwd);
       this.startWatcher(this.projectCwd);
+      this.loadMineFiles();
     }
     // Create the agent terminal. A transient pi failure (slow start, update
     // check) must not kill the app: retry with backoff. The renderer shows

@@ -168,6 +168,12 @@ export class EditorManager {
     if (tab) tab.dom.classList.toggle("mine", mine);
   }
 
+  /** Forget every mine mark (folder switch resets ownership). */
+  clearMine(): void {
+    this.mineKeys.clear();
+    for (const tab of this.tabs.values()) tab.dom.classList.remove("mine");
+  }
+
   private makeTab(key: string, model: monaco.editor.ITextModel): OpenTab {
     const dom = document.createElement("div");
     dom.className = "editor-tab";
