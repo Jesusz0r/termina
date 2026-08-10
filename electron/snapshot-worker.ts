@@ -6,7 +6,8 @@
  * walk, or hashing on the main thread (WORLDLINES §9).
  */
 import { parentPort } from "node:worker_threads";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SnapshotStore, runGitIn, type CaptureBudget, type SourceState } from "./worldline-git.js";
 
@@ -52,8 +53,7 @@ interface ApplyRequest {
 }
 
 interface CaptureIncrementalRequest {
-  op: "capture-incremental";
-  requestId: string;
+  op: "capture-incremental";  requestId: string;
   storeDir: string;
   sourceRoot: string;
   sourceGitDir: string;
@@ -66,7 +66,14 @@ interface CaptureIncrementalRequest {
   captureGitDir?: string;
 }
 
-type WorkerRequest = CaptureRequest | CaptureIncrementalRequest | TemplateRequest | ApplyRequest;
+interface TrustHashesRequest {
+  op: "trust-hashes";
+  requestId: string;
+  agentDir: string;
+  projectRoot: string | null;
+}
+
+type WorkerRequest = CaptureRequest | CaptureIncrementalRequest | TemplateRequest | ApplyRequest | TrustHashesRequest;
 
 function post(msg: Record<string, unknown>): void {
   parentPort?.postMessage(msg);
@@ -92,6 +99,11 @@ async function applyState(req: ApplyRequest): Promise<void> {
 parentPort?.on("message", (msg: WorkerRequest) => {
   void (async () => {
     try {
+      if (msg.op === "trust-hashes") {
+        const out = trustHashes(msg.agentDir, msg.projectRoot);
+        post({ op: "trust-hashes-result", requestId: msg.requestId, ok: true, state: out });
+        return;
+      }
       if (msg.op === "capture") {
         const store = SnapshotStore.open(msg.storeDir, msg.sourceRoot, msg.sourceGitDir, msg.objectFormat);
         const source = msg.captureRoot
@@ -139,3 +151,60 @@ parentPort?.on("message", (msg: WorkerRequest) => {
     }
   })();
 });
+
+/**
+ * The trust-sensitive resource hashes (WORLDLINES §6.7): project
+ * settings, extensions, skills, prompts, themes, and the pi agent dir.
+ * Bounded walk: at most 10k files and 64 MB of content.
+ */
+function trustHashes(agentDir: string, projectRoot: string | null): Record<string, string> {
+  const out: Record<string, string> = {};
+  let files = 0;
+  let bytes = 0;
+  const walk = (absRoot: string, prefix: string): void => {
+    let names: string[] = [];
+    try {
+      names = readdirSync(absRoot);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      if (files > 10000 || bytes > 64 * 1024 * 1024) return;
+      const full = join(absRoot, name);
+      try {
+        const st = statSync(full);
+        if (st.isDirectory()) walk(full, `${prefix}/${name}`);
+        else if (st.isFile()) {
+          if (st.size > 4 * 1024 * 1024) continue;
+          const content = readFileSync(full);
+          files++;
+          bytes += content.length;
+          out[`${prefix}/${name}`] = createHash("sha256").update(content).digest("hex");
+        }
+      } catch {
+        /* a transient file — skip */
+      }
+    }
+  };
+  for (const name of ["settings.json", "models-store.json", "prompts", "skills", "themes", "extensions"]) {
+    const full = join(agentDir, name);
+    try {
+      const st = statSync(full);
+      if (st.isDirectory()) walk(full, `agent/${name}`);
+      else if (st.isFile()) {
+        const content = readFileSync(full);
+        files++;
+        bytes += content.length;
+        out[`agent/${name}`] = createHash("sha256").update(content).digest("hex");
+      }
+    } catch {
+      /* absent */
+    }
+  }
+  if (projectRoot) {
+    for (const rel of [".pi", ".agents/skills"]) {
+      walk(join(projectRoot, rel), `project/${rel}`);
+    }
+  }
+  return out;
+}

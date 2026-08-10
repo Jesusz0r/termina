@@ -439,7 +439,9 @@ export class WorldlineManager {
     }
   }
 
-  /** The ignored/generated writes a promotion would exclude (metadata). */
+  /** The ignored/generated writes a promotion would exclude (metadata).
+   *  The runtime allowlist (node_modules, .venv, venv) is a template input,
+   *  not a candidate write: it never counts. */
   async ignoredWrites(comparisonId: string, label: "A" | "B"): Promise<{ count: number; bytes: number }> {
     const cmp = this.comparisons.get(comparisonId);
     const cand = cmp?.candidates.get(label);
@@ -450,6 +452,7 @@ export class WorldlineManager {
       let bytes = 0;
       for (const p of res.stdout.toString("utf8").split("\0")) {
         if (!p || count > 5000) continue;
+        if (RUNTIME_ALLOWLIST.includes(p.split(/[\\/]/)[0])) continue;
         count++;
         try {
           bytes += statSync(join(cand.dir, p)).size;
@@ -1442,10 +1445,9 @@ export class WorldlineManager {
     }
   }
 
-  dispose(): void {
-    for (const cmp of [...this.comparisons.values()]) {
-      void this.teardown(cmp.id, "discarded", null);
-    }
+  /** Discard every live comparison (confirmed close, folder switch, quit). */
+  async dispose(): Promise<void> {
+    await Promise.all([...this.comparisons.values()].map((cmp) => this.teardown(cmp.id, "discarded", null)));
   }
 }
 

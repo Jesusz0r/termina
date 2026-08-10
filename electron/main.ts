@@ -548,6 +548,11 @@ class SnapshotWorkerClient {
     }) as Promise<SourceState>;
   }
 
+  /** The trust-sensitive resource hashes, off the main thread (§6.7). */
+  trustHashes(agentDir: string, projectRoot: string | null): Promise<Record<string, string>> {
+    return this.request({ op: "trust-hashes", agentDir, projectRoot }) as Promise<Record<string, string>>;
+  }
+
   /** Create the comparison template (git init, base bytes, commit). */
   template(opts: { store: SnapshotStore; stateId: string; targetDir: string; sourceObjectsDir: string }): Promise<void> {
     return this.request({
@@ -664,6 +669,8 @@ class PiEditorApp {
   private verifyRuns = new Map<string, string>();
   /** Worker terminal ids (kept after the run so tabs can be labeled). */
   private verifyWorkers = new Set<string>();
+  /** Busy agent terminal ids: concurrent runs in one workspace overlap. */
+  private busyAgents = new Set<string>();
   /** Dispatch workers: worker terminal id → its task text. */
   private dispatchWorkers = new Map<string, string>();
   /** Dispatch runs: worker terminal id → owner + the dispatched task text. */
@@ -929,64 +936,11 @@ class PiEditorApp {
 
   // ------------------------------------------------- trust (WORLDLINES §6.7) ----
 
-  /**
-   * The trust-sensitive resource hashes of the project and the pi agent
-   * dir (WORLDLINES §6.7: project settings, extensions, skills, prompts,
-   * themes, system prompt files, project .agents/skills). Bounded walk:
-   * at most 10k files and 64 MB of content.
-   */
+  /** The trust-sensitive resource hashes, computed off the main thread. */
   private async computeTrustHashes(): Promise<Record<string, string>> {
-    const out: Record<string, string> = {};
-    let files = 0;
-    let bytes = 0;
-    const walk = (absRoot: string, prefix: string): void => {
-      let names: string[] = [];
-      try {
-        names = readdirSync(absRoot);
-      } catch {
-        return;
-      }
-      for (const name of names) {
-        if (files > 10000 || bytes > 64 * 1024 * 1024) return;
-        const full = join(absRoot, name);
-        try {
-          const st = statSync(full);
-          if (st.isDirectory()) walk(full, `${prefix}/${name}`);
-          else if (st.isFile()) {
-            if (st.size > 4 * 1024 * 1024) continue;
-            const content = readFileSync(full);
-            files++;
-            bytes += content.length;
-            out[`${prefix}/${name}`] = createHash("sha256").update(content).digest("hex");
-          }
-        } catch {
-          /* a transient file — skip */
-        }
-      }
-    };
     const agentDir = join(homedir(), ".pi", "agent");
-    for (const name of ["settings.json", "models-store.json", "prompts", "skills", "themes", "extensions"]) {
-      const full = join(agentDir, name);
-      try {
-        const st = statSync(full);
-        if (st.isDirectory()) walk(full, `agent/${name}`);
-        else if (st.isFile()) {
-          const content = readFileSync(full);
-          files++;
-          bytes += content.length;
-          out[`agent/${name}`] = createHash("sha256").update(content).digest("hex");
-        }
-      } catch {
-        /* absent */
-      }
-    }
     const project = this.projectCwd ? resolve(this.projectCwd) : null;
-    if (project) {
-      for (const rel of [".pi", ".agents/skills"]) {
-        walk(join(project, rel), `project/${rel}`);
-      }
-    }
-    return out;
+    return this.snapshotWorker.trustHashes(agentDir, project);
   }
 
   /**
@@ -1061,6 +1015,18 @@ class PiEditorApp {
         if (!platformHasSandboxExec()) reasons.push("the platform has no sandbox-exec");
         if (!platformHasCopyOnWrite()) reasons.push("the platform has no copy-on-write clone support");
         if (!platformHasRecursiveWatcher()) reasons.push("the platform has no reliable recursive watcher");
+        // A custom PI_EDITOR_PI_BIN must match the pinned pi version
+        // (WORLDLINES §5): a mismatched session format disables Worldlines.
+        if (process.env.PI_EDITOR_PI_BIN) {
+          const override = realpathSync(process.env.PI_EDITOR_PI_BIN);
+          const pinned = realpathSync(this.pinnedPiBin());
+          if (override !== pinned) {
+            const [overrideV, pinnedV] = await Promise.all([this.piVersionOf(override), this.piVersionOf(pinned)]);
+            if (overrideV !== pinnedV) {
+              reasons.push(`PI_EDITOR_PI_BIN is a different pi version (${overrideV ?? "unknown"} vs ${pinnedV ?? "unknown"})`);
+            }
+          }
+        }
         const free = await freeDiskBytes(this.worldsRoot);
         if (free !== null && free < 4 * 1024 * 1024 * 1024) {
           reasons.push(`free disk space is below the 4 GB minimum (${(free / 1e9).toFixed(1)} GB)`);
@@ -1575,6 +1541,31 @@ class PiEditorApp {
     });
   }
 
+  /** The logical size of a directory (bounded walk, for copy budgets). */
+  private dirBytesOf(dir: string): number {
+    let total = 0;
+    const walk = (d: string): void => {
+      let names: string[] = [];
+      try {
+        names = readdirSync(d);
+      } catch {
+        return;
+      }
+      for (const name of names) {
+        if (total > 200 * 1024 * 1024) return;
+        try {
+          const st = statSync(join(d, name));
+          if (st.isDirectory()) walk(join(d, name));
+          else if (st.isFile()) total += st.size;
+        } catch {
+          /* transient */
+        }
+      }
+    };
+    walk(dir);
+    return total;
+  }
+
   /** The tracked source files of a candidate (bounded, for package checks). */
   private sourceFilesOf(root: string): Array<{ relPath: string; content: string }> {
     const out: Array<{ relPath: string; content: string }> = [];
@@ -1598,7 +1589,8 @@ class PiEditorApp {
     return out;
   }
 
-  /** A fresh evidence home: the real pi resources, unmodified by agents. */
+  /** A fresh evidence home: the real pi resources, unmodified by agents.
+   *  Bounded like the candidate resource copy (WORLDLINES §9). */
   private createEvidenceHome(): string {
     const dir = mkdtempSync(join(this.eventsDir, "evidence-home-"));
     const agentDst = join(dir, ".pi", "agent");
@@ -1613,9 +1605,12 @@ class PiEditorApp {
     }
     for (const name of ["skills", "prompts", "themes", "extensions"]) {
       try {
-        cpSync(join(agentSrc, name), join(agentDst, name), { recursive: true });
+        const src = join(agentSrc, name);
+        if (statSync(src).isDirectory() && this.dirBytesOf(src) <= 200 * 1024 * 1024) {
+          cpSync(src, join(agentDst, name), { recursive: true });
+        }
       } catch {
-        /* optional */
+        /* optional or oversized — keep the evidence home without it */
       }
     }
     mkdirSync(join(dir, "tmp"), { recursive: true, mode: 0o700 });
@@ -1756,6 +1751,11 @@ class PiEditorApp {
 
   private resolvePiBin(): string {
     if (process.env.PI_EDITOR_PI_BIN) return process.env.PI_EDITOR_PI_BIN;
+    return this.pinnedPiBin();
+  }
+
+  /** The pi binary of the pinned package (ignores PI_EDITOR_PI_BIN). */
+  private pinnedPiBin(): string {
     // Launch the pi binary shipped with the pinned package (WORLDLINES
     // §6.7). The package entry resolves to dist/index.js; the CLI sits
     // next to it. The exports map has only an import condition, so use
@@ -1766,6 +1766,31 @@ class PiEditorApp {
     } catch (err) {
       console.warn(`[main] pinned pi package not found: ${(err as Error).message}`);
       return "pi";
+    }
+  }
+
+  /** The version of a pi binary, bounded (pi --version can update-check). */
+  private async piVersionOf(bin: string): Promise<string | null> {
+    try {
+      const out = await new Promise<string>((resolvePromise) => {
+        const child = spawn(bin, ["--version"], { stdio: ["ignore", "pipe", "ignore"] });
+        let text = "";
+        child.stdout.on("data", (d: Buffer) => {
+          if (text.length < 256) text += d.toString("utf8");
+        });
+        const timer = setTimeout(() => child.kill("SIGKILL"), 4000);
+        child.on("error", () => {
+          clearTimeout(timer);
+          resolvePromise("");
+        });
+        child.on("close", () => {
+          clearTimeout(timer);
+          resolvePromise(text.trim());
+        });
+      });
+      return out ? out : null;
+    } catch {
+      return null;
     }
   }
 
@@ -2641,6 +2666,9 @@ class PiEditorApp {
       }
       case "agent_start":
         inst.busy = true;
+        // Track busy agents: a second agent starting in the same workspace
+        // overlaps this run (marked in coupleRunStart, WORLDLINES §5).
+        if (inst.type === "agent") this.busyAgents.add(inst.id);
         // A candidate run invalidates its comparison's evidence: the head
         // moved (WORLDLINES §6.8 — results are bound to the measured state).
         const candHit = (this.worldlines?.list() ?? []).find((w) => w.terminalId === inst.id);
@@ -2690,6 +2718,7 @@ class PiEditorApp {
         break;
       case "agent_settled":
         inst.busy = false;
+        this.busyAgents.delete(inst.id);
         this.finalizePlan(inst);
         // A dispatch worker finished: mark its task done and collect its
         // files into the owner's Change Review.
@@ -2727,7 +2756,16 @@ class PiEditorApp {
         const toolBase = toolWs?.root ?? this.projectCwd;
         const path = this.canonicalPath(isAbsolute(rawPath) ? rawPath : toolBase ? join(toolBase, rawPath) : rawPath);
         if (!path) return;
-        if (!this.worldlines?.eventsDirOf(inst.id) && !this.withinProject(path)) return;
+        const isCandidateTerminal = !!this.worldlines?.eventsDirOf(inst.id);
+        if (isCandidateTerminal) {
+          // Reject file-tool paths that resolve outside the candidate root
+          // (WORLDLINES §5): the sandbox blocks the write, the guard keeps
+          // the timeline and baselines truthful.
+          const root = toolWs?.root ? this.canonicalPath(toolWs.root) : null;
+          if (!root || !(path === root || path.startsWith(root + "/"))) return;
+        } else if (!this.withinProject(path)) {
+          return;
+        }
         const toolName = String(event.toolName ?? "");
         // Pre-run baseline capture. The rules:
         // - agent_start snapshots the watcher cache (best source when present).
@@ -2857,6 +2895,13 @@ class PiEditorApp {
       return;
     }
     try {
+      // The retained-blob budget (WORLDLINES §9): no new states past it.
+      if ((ws.retainedBlobBytes ?? 0) > 256 * 1024 * 1024) {
+        this.releaseWriteLease(ws.id, leaseRequester);
+        this.setRecorderState(inst, "budget");
+        this.writeAck(inst.id, requestId, { ok: true, token: null });
+        return;
+      }
       const state = await this.snapshotWorker.capture(store, await gitHead(ws.root), ws.lastStateCommit ?? null);
       ws.lastStateCommit = state.commit;
       ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
@@ -2939,6 +2984,23 @@ class PiEditorApp {
         run.replayable = false;
         run.reason = "the Pi session is not persisted";
       }
+      // A second agent running in the same workspace overlaps this run and
+      // the other open run (WORLDLINES §5): both become ineligible.
+      if (ws && inst.type === "agent") {
+        for (const otherId of this.busyAgents) {
+          if (otherId === inst.id) continue;
+          const other = this.terminals.get(otherId);
+          if (!other || other.workspaceId !== inst.workspaceId) continue;
+          run.overlap = true;
+          run.replayable = false;
+          run.reason = "another agent ran in the same workspace";
+          if (other.currentRun && other.currentRun.replayable) {
+            other.currentRun.overlap = true;
+            other.currentRun.replayable = false;
+            other.currentRun.reason = "another agent ran in the same workspace";
+          }
+        }
+      }
       this.pushRun(inst, run);
     } else if (inst.currentRun && !inst.currentRun.settledAt) {
       // A retry or compaction of the open run. Keep its start state.
@@ -2989,6 +3051,14 @@ class PiEditorApp {
       if (evicted?.promptPayloadFile) {
         try {
           rmSync(join(this.eventsDir, evicted.promptPayloadFile), { force: true });
+        } catch {
+          /* ignore */
+        }
+      }
+      // The app-private session branch copy dies with the run record.
+      if (evicted?.sessionBranchFile) {
+        try {
+          rmSync(evicted.sessionBranchFile, { force: true });
         } catch {
           /* ignore */
         }
@@ -3212,10 +3282,46 @@ class PiEditorApp {
         run.reason = `could not copy the session branch: ${err instanceof Error ? err.message : String(err)}`;
       }
     }
+    // The run must not leave a live mutating descendant process behind
+    // (WORLDLINES §6.5): a background bash would keep writing after the
+    // captured settle state.
+    if (run.replayable && this.descendantPids(inst.pty.pid).length > 0) {
+      run.replayable = false;
+      run.reason = "the run left a live descendant process";
+    }
     inst.currentRun = null;
     // The run record is complete now: the renderer refreshes its Fork Run
     // button from this push (the settle timeline event arrives earlier).
     this.send("worldline:runs-changed", { terminalId: inst.id });
+  }
+
+  /** The descendant pids of a process, from one ps snapshot. */
+  private descendantPids(pid: number): number[] {
+    try {
+      const out = execFileSync("ps", ["-axo", "pid=,ppid="], { encoding: "utf8" });
+      const children = new Map<number, number[]>();
+      for (const line of out.split("\n")) {
+        const m = /^\s*(\d+)\s+(\d+)/.exec(line);
+        if (!m) continue;
+        const p = Number(m[1]);
+        const pp = Number(m[2]);
+        const list = children.get(pp) ?? [];
+        list.push(p);
+        children.set(pp, list);
+      }
+      const outPids: number[] = [];
+      const stack = [pid];
+      while (stack.length > 0) {
+        const cur = stack.pop()!;
+        for (const child of children.get(cur) ?? []) {
+          outPids.push(child);
+          stack.push(child);
+        }
+      }
+      return outPids;
+    } catch {
+      return [];
+    }
   }
 
   /**
@@ -3416,8 +3522,11 @@ class PiEditorApp {
     if (result.canceled || result.filePaths.length === 0) return { cancelled: true };
     const cwd = result.filePaths[0];
     // Live candidates with activity need a confirmation before the switch
-    // discards them (WORLDLINES §6.11).
+    // discards them (WORLDLINES §6.11). A confirmed switch discards every
+    // live candidate and releases the manager.
     if (!(await this.confirmDiscardActiveCandidates())) return { cancelled: true };
+    await this.worldlines?.dispose().catch(() => undefined);
+    this.worldlines = null;
     // A folder switch tears down the previous primary workspace and its
     // per-workspace state (watcher, user edits, write lease, run records,
     // snapshot store).
@@ -4206,7 +4315,7 @@ app.on("activate", () => {
 let quitConfirmed = false;
 app.on("before-quit", (event) => {
   if (quitConfirmed) {
-    appState.dispose();
+    void appState.dispose();
     return;
   }
   // Live candidates with activity need a confirmation before the quit

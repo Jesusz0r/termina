@@ -151,11 +151,6 @@ export function writeEvidenceProfile(cand: { profilePath: string; root: string }
   return path;
 }
 
-/** The launcher command that wraps the pi binary in the sandbox. */
-export function sandboxLaunchArgs(profilePath: string, piBin: string, piArgs: string[]): { cmd: string; args: string[] } {
-  return { cmd: "sandbox-exec", args: ["-f", profilePath, piBin, ...piArgs] };
-}
-
 /** The canonical real home directory. */
 export function realHome(): string {
   return process.env.HOME ?? dirname(process.cwd());

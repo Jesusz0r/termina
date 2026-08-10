@@ -130,3 +130,28 @@
   process groups bound candidates instead.
 - The API adapter measures normalized declaration content, not a parsed
   signature surface; routes, commands, and wire formats stay unmeasured.
+
+## Review fixes (plan validation pass)
+
+A code review against WORLDLINES §5-§6 surfaced and fixed eleven gaps:
+
+1. Folder switch now discards every live candidate after the confirmation
+   (`dispose()` is async and awaited; the manager is released).
+2. Concurrent plain-agent runs in one workspace mark both runs
+   overlapping and ineligible (previously only Verify/dispatch counted).
+3. Candidate file-tool paths that resolve outside the candidate root are
+   rejected (canonical root comparison) instead of polluting the timeline.
+4. A custom `PI_EDITOR_PI_BIN` must match the pinned pi version; the fork
+   preflight disables Worldlines on a mismatch (bounded version check).
+5. The promotion confirmation no longer counts the CoW-cloned runtime
+   allowlist (node_modules/.venv/venv) as ignored/generated writes.
+6. The run-start capture honors the retained-blob budget (the run
+   proceeds unrecorded past it).
+7. Run eviction deletes the app-private session branch copy with the
+   record.
+8. Dead `sandboxLaunchArgs` removed.
+9. The fresh evidence home copy is bounded by the same 200 MB budget as
+   the candidate resources.
+10. Trust-sensitive hashes compute in the snapshot worker, not on the
+    main thread.
+11. A run that leaves a live descendant process is not replayable.
