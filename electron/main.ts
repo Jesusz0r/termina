@@ -1960,13 +1960,23 @@ class PiEditorApp {
   }
 
   /** The npm test script of a package text (the immutable base command). */
+  /** The npm test script of a package text, resolved to its immutable base
+   *  command body (WORLDLINES §6.8): a candidate's changed test config
+   *  never changes what the evidence runs. */
   private detectTestFromPkg(pkgText: string): { command: string; args: string[]; label: string } | null {
     try {
       const pkg = JSON.parse(pkgText) as { scripts?: Record<string, string> };
       const scripts = pkg.scripts ?? {};
       const names = Object.keys(scripts);
       const pick = names.includes("test") ? "test" : names.find((n) => n.startsWith("test:"));
-      if (pick) return { command: "npm", args: ["run", pick], label: `npm run ${pick}` };
+      if (pick) {
+        const body = (scripts[pick] ?? "").trim();
+        if (!body) return null;
+        // A simple invocation runs directly; a shell body runs under sh.
+        const tokens = body.split(/\s+/);
+        if (tokens.some((t) => /[|&;<>()]/.test(t))) return { command: "sh", args: ["-c", body], label: `npm run ${pick}` };
+        return { command: tokens[0] ?? "true", args: tokens.slice(1), label: `npm run ${pick}` };
+      }
     } catch {
       /* no package.json */
     }
