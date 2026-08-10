@@ -1,6 +1,13 @@
 # pi-editor — Breakthrough Feature Vision
 
-> **Status:** brainstorm / roadmap · **Scope:** beyond the current terminal+IDE baseline
+> **Status:** implemented — the full plan is delivered and verified.
+>
+> The detailed executable plan lives in `WORLDLINES.md` (phases 0–8, three
+> release gates) with per-phase records in `PHASE0.md` … `PHASE8.md`.
+>
+> **Scope:** the review-iterate cockpit is the product: Change Review,
+> Verify & Iterate, the Session Timeline, Plan Board + Dispatch, Session
+> Search, Fork Run, Fork Any Moment, and Challenge Mode.
 
 ## The core insight
 

@@ -383,6 +383,13 @@ interface PlanTask {
   state: "pending" | "active" | "done";
 }
 
+
+/** Quote one shell argument: the resolved base commands carry scripts that
+ * must survive as one argument through the wrapper shell. */
+function quoteShellArg(a: string): string {
+  return "'" + a.replace(/'/g, "'\\''") + "'";
+}
+
 function detectShells(): { name: string; path: string }[] {
   const candidates: Array<[string, string]> = [
     ["zsh", "/bin/zsh"],
@@ -1515,7 +1522,7 @@ class PiEditorApp {
       // Evidence workers run fully offline under the same deny-list profile
       // with the resource limits applied by the wrapper (WORLDLINES §6.8).
       const profilePath = writeEvidenceProfile(cand);
-      const child = spawn("sandbox-exec", ["-f", profilePath, shell.path, "-c", `${sandboxShellPreamble()} ${command.join(" ")}`], {
+      const child = spawn("sandbox-exec", ["-f", profilePath, shell.path, "-c", `${sandboxShellPreamble()} ${command.map(quoteShellArg).join(" ")}`], {
         cwd: cand.root,
         env: { ...cleanEnv(), HOME: cand.homeDir, TMPDIR: cand.tmpDir },
         stdio: ["ignore", "pipe", "pipe"],
@@ -2044,7 +2051,7 @@ class PiEditorApp {
     const shell = shells[0] ?? { path: "/bin/zsh", name: "zsh" };
     const id = `term-${++terminalSeq}`;
     let inst: PiTerminalInstance;
-    const cmdline = `${tc.command} ${tc.args.join(" ")}`;
+    const cmdline = `${tc.command} ${tc.args.map(quoteShellArg).join(" ")}`;
     try {
       if (candidate) {
         inst = new PiTerminalInstance(
@@ -2125,8 +2132,9 @@ class PiEditorApp {
       if (!finished) {
         // A shell -c process exits 0 when the pty delivers an interrupt: the
         // app's own interrupt mark is the reliable cancellation signal.
-        const how: VerifyState =
-          code === 0 && inst.interruptedAt !== undefined ? "cancelled" : code === 0 ? "pass" : "fail";
+        // The app's interrupt mark is the reliable cancellation signal: the
+        // shell wrappers report varying codes (0, 130, 1) after SIGINT.
+        const how: VerifyState = inst.interruptedAt !== undefined ? "cancelled" : code === 0 ? "pass" : "fail";
         finish(code, how);
       } else {
         this.sendInstances();
