@@ -8,13 +8,12 @@
  *   --remote-debugging-port=9222
  *
  * Steps:
- *   1. runVerify spawns a worker; the worker pane auto-activates (instances
- *      arrive before the running push).
- *   2. Ctrl+C into the worker interrupts the run.
+ *   1. runVerify starts a background process without a worker pane.
+ *   2. Cancel the background process.
  *   3. The state becomes "cancelled"; the badge shows it; no context file is
  *      written (a cancelled run is not a test result).
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -37,30 +36,24 @@ ws.onmessage = (m) => { const msg = JSON.parse(m.data); if (msg.id && pending.ha
 const send = (method, params = {}) => new Promise((res) => { const i = ++id; pending.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });
 const evalJs = async (expr) => { const r = await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true }); return r.result?.result?.value; };
 
-// ---- 1. run verify; the worker pane auto-activates ----
+// ---- 1. run verify in the background ----
 const run = await evalJs(`window.pi.runVerify('term-1')`);
 check("runVerify starts ok", run?.ok === true, JSON.stringify(run));
-let workerId = null;
-let activated = false;
+let hasWorkerPane = null;
 for (let i = 0; i < 30; i++) {
   await sleep(300);
   const insts = await evalJs(`window.pi.getInstances()`);
-  const worker = (insts ?? []).find((t) => t.verifyWorker);
-  if (worker) workerId = worker.id;
-  const active = await evalJs(`document.querySelector('.terminal-tab.active .tab-name')?.textContent`);
-  if (workerId && active === "verify") {
-    activated = true;
+  const owner = (insts ?? []).find((t) => t.id === "term-1");
+  const tabs = await evalJs(`[...document.querySelectorAll('.terminal-tab .tab-name')].map((el) => el.textContent)`);
+  if (owner?.verify?.state === "running") {
+    hasWorkerPane = tabs.some((t) => t === "verify");
     break;
   }
 }
-check("worker pane auto-activates", activated === true, `worker=${workerId}`);
+check("verification has no worker pane", hasWorkerPane === false, JSON.stringify(hasWorkerPane));
 
-// ---- 2. interrupt the run ----
-if (workerId) {
-  await evalJs(`window.pi.writeTerminal('${workerId}', '\\x03')`);
-} else {
-  check("worker exists", false, "no worker found");
-}
+// ---- 2. cancel the run ----
+await evalJs(`window.pi.cancelVerify('term-1')`);
 let verify = null;
 for (let i = 0; i < 30; i++) {
   await sleep(500);

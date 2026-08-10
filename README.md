@@ -22,7 +22,7 @@ agent work live.
 | Bridge extension | app-owned, loaded with pi's CLI `-e` option from the app user-data directory (never installed into the project); streams agent events to sidecar files |
 | Live editor | the file watcher pushes every disk change into open Monaco models; `tool:target` events auto-open files the agent is editing, mid-run |
 | Change Review | per-terminal modified-files panel with pre-run baselines: side-by-side diffs, Accept / Revert, Accept all |
-| Verify & Iterate | `✓ Verify` runs the detected tests in a worker terminal and feeds the result back to the agent on its next turn |
+| Verify & Iterate | `✓ Verify` runs the detected tests in a background process and feeds the result back to the agent on its next turn |
 | Session Timeline | a dot strip of every agent action with on-demand snapshots, replay, and the recorder state (indexing / ready / paused / degraded / budget) |
 | Plan Board | the agent's task list with live progress and one-click parallel Dispatch |
 | Session Search | full-text over past sessions with click-to-jump |
@@ -37,7 +37,7 @@ state; and Challenge Mode ranks candidates with deterministic evidence.
 | Feature | What it does |
 |---|---|
 | Fork Run | an eligible run forks Candidate A (the settled result) and Candidate B (the start + the original task) into sandboxed, app-owned trees |
-| Candidate sandbox | macOS `sandbox-exec` deny-list profiles: candidates cannot write the primary, the real home, the sibling, or the snapshot store; evidence and Verify workers run fully offline |
+| Candidate sandbox | macOS `sandbox-exec` deny-list profiles: candidates cannot write the primary, the real home, the sibling, or the snapshot store; evidence and background Verify processes run fully offline |
 | Verify in candidates | each candidate runs the detected tests inside its own sandbox (A green, B red is a common first look) |
 | Compare | base → A, base → B, and A ⇄ B diffs in Change Review, with source statistics, provenance, dependency changes, and conflict status vs the primary |
 | Promote | a three-way merge with the run start as the base, Mine-path enforcement, durable journaling, crash recovery, and a promoted terminal that continues the candidate's session |

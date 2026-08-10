@@ -47,9 +47,9 @@ workflow — *what did you change, and do I want it?*
 | Capability | Detail |
 |---|---|
 | Test detection | Reads `package.json` scripts (prefer `test`, then first `test:*`), pytest (pytest.ini / `[tool.pytest` in pyproject.toml), `cargo test`, `go test ./...` |
-| One-click verify | `✓ Verify` in the status bar spawns a labeled worker shell terminal, runs the tests, captures pass/fail + output live |
+| One-click verify | `✓ Verify` in the status bar starts a background test process, captures pass/fail + output, and keeps the terminal list unchanged |
 | Auto-feedback | The result (status + tail of output) is written to a context file the bridge extension injects on the agent's next turn via `before_agent_start` → the agent fixes failures itself (verified in the session record) |
-| Loop state | Badge on the status bar: running / ✗ failing / ✓ green / ⏰ timed out (10 min watchdog); clicking it jumps to the worker terminal |
+| Loop state | Badge on the status bar: running / ✗ failing / ✓ green / ⏰ timed out (10 min watchdog); clicking a running badge cancels the background process |
 
 ### 3. Session Timeline (source history) ✅ implemented
 
@@ -112,7 +112,7 @@ Triggered by View → Search Sessions (Cmd+Shift+F): a modal with a debounced in
 | Idea | Data source (already available) | Effort |
 |---|---|---|
 | Change Review | session JSONL (old/new text), watcher snapshots | Medium |
-| Verify & Iterate | shell terminals (pty infra), bridge extension context file | Medium |
+| Verify & Iterate | background test processes, bridge extension context file | Medium |
 | Session Timeline | session JSONL events + per-write snapshots | Medium-High |
 | Plan Board | conversation text + tool events | Medium |
 | Edits to agent | watcher + bridge extension | Low |

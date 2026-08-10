@@ -145,7 +145,6 @@ interface Pane {
   accepted: Set<string>;
   reverted: Set<string>;
   verify: VerifyInfo;
-  verifyWorker: boolean;
   timeline: TimelineEvent[];
   timelineLoaded: boolean;
   recorderState: string;
@@ -219,7 +218,6 @@ function createPaneShell(instanceId: string): Pane {
     accepted: new Set(),
     reverted: new Set(),
     verify: { state: "untested", command: null, summary: null },
-    verifyWorker: false,
     timeline: [],
     timelineLoaded: false,
     recorderState: "paused",
@@ -421,12 +419,10 @@ async function closePane(instanceId: string): Promise<void> {
 }
 
 function updatePaneTab(pane: Pane): void {
-  pane.nameEl.textContent = pane.verifyWorker ? "verify" : pane.dispatchWorker ? "dispatch" : pane.cwd ? basenameOf(pane.cwd) : "terminal";
-  pane.tabEl.title = pane.verifyWorker
-    ? `verify worker — runs tests for ${pane.cwd ?? "this project"}`
-    : pane.dispatchWorker
-      ? `dispatch worker — ${pane.dispatchTask ?? "plan task"}`
-      : `${pane.cwd ?? "?"}${pane.type === "shell" && pane.shellName ? ` · ${pane.shellName} shell` : " · pi agent"}`;
+  pane.nameEl.textContent = pane.dispatchWorker ? "dispatch" : pane.cwd ? basenameOf(pane.cwd) : "terminal";
+  pane.tabEl.title = pane.dispatchWorker
+    ? `dispatch worker — ${pane.dispatchTask ?? "plan task"}`
+    : `${pane.cwd ?? "?"}${pane.type === "shell" && pane.shellName ? ` · ${pane.shellName} shell` : " · pi agent"}`;
   pane.statusEl.classList.toggle("busy", pane.busy);
   applyTypeBadge(pane);
   // Worldline candidates carry the A/B badge on their tab.
@@ -547,7 +543,7 @@ function renderVerify(pane: Pane): void {
     verifyBadge.textContent =
       v.state === "pass" ? `✓ ${v.summary ?? "green"}` : v.state === "timeout" ? `⏰ ${v.summary ?? "timed out"}` : v.state === "cancelled" ? `⏸ ${v.summary ?? "cancelled"}` : `✗ ${v.summary ?? "failing"}`;
   }
-  verifyBadge.title = v.command ?? "";
+  verifyBadge.title = v.state === "running" ? "Click to cancel verification" : v.command ?? "";
 }
 
 function renderModified(pane: Pane): void {
@@ -668,10 +664,14 @@ btnVerify.addEventListener("click", () => {
 });
 verifyBadge.addEventListener("click", () => {
   const pane = activeId ? panes.get(activeId) : undefined;
-  if (!pane || !pane.verify.workerId) return;
-  const worker = panes.get(pane.verify.workerId);
-  if (worker) activatePane(worker.instanceId);
-  else toast(pane.verify.summary ?? "", "info");
+  if (!pane) return;
+  if (pane.verify.state === "running") {
+    void window.pi.cancelVerify(pane.instanceId).then((res) => {
+      if (!res.ok) toast(res.error ?? "verify could not be cancelled", "warning");
+    });
+    return;
+  }
+  toast(pane.verify.summary ?? "", "info");
 });
 btnClearModified.addEventListener("click", (e) => {
   e.stopPropagation();
@@ -938,17 +938,8 @@ window.pi.onBusy(({ instanceId, busy }) => {
 window.pi.onVerifyState(({ terminalId, verify }) => {
   const pane = panes.get(terminalId);
   if (!pane) return;
-  const wasRunning = pane.verify.state === "running";
   pane.verify = verify;
   if (activeId === terminalId) renderChrome();
-  if (verify.state === "running" && verify.workerId && panes.has(verify.workerId)) {
-    // The worker terminal appears via onInstances; activate it so the user
-    // sees the tests running.
-    activatePane(verify.workerId);
-  } else if (wasRunning && verify.state !== "running" && !pane.verifyWorker) {
-    // Run finished → return focus to the owner so the result badge is visible.
-    activatePane(terminalId);
-  }
 });
 
 window.pi.onTimelineEvent(({ terminalId, event }) => {
@@ -1075,7 +1066,6 @@ window.pi.onInstances((list: InstanceSummary[]) => {
     pane.busy = summary.busy;
     pane.type = summary.type;
     pane.shellName = summary.shellName;
-    pane.verifyWorker = summary.verifyWorker ?? false;
     pane.dispatchWorker = summary.dispatchWorker ?? false;
     pane.dispatchTask = summary.dispatchTask;
     if (summary.verify) pane.verify = summary.verify;
@@ -1124,7 +1114,6 @@ async function boot(): Promise<void> {
       pane.workspaceId = inst.workspaceId ?? "";
       pane.type = inst.type;
       pane.shellName = inst.shellName;
-      pane.verifyWorker = inst.verifyWorker ?? false;
       if (inst.verify) pane.verify = inst.verify;
       updatePaneTab(pane);
     }

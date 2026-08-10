@@ -82,6 +82,7 @@ const bridge: PiBridge = {
   abortTerminal: (id) => ipcRenderer.invoke("terminals:abort", id),
   detectTest: (terminalId) => ipcRenderer.invoke("verify:detect", terminalId),
   runVerify: (terminalId) => ipcRenderer.invoke("verify:run", terminalId),
+  cancelVerify: (terminalId) => ipcRenderer.invoke("verify:cancel", terminalId),
   getTimeline: (terminalId) => ipcRenderer.invoke("timeline:get", terminalId),
   getPlan: (terminalId) => ipcRenderer.invoke("plan:get", terminalId),
   searchSessions: (query) => ipcRenderer.invoke("session:search", query),

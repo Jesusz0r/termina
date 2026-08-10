@@ -102,8 +102,6 @@ export interface VerifyInfo {
   command: string | null;
   /** One-line result summary for the badge. */
   summary: string | null;
-  /** Id of the worker shell terminal that ran the tests (when running/done). */
-  workerId?: string;
 }
 
 export interface InstanceSummary {
@@ -114,8 +112,6 @@ export interface InstanceSummary {
   shellName?: string;
   /** The workspace this terminal works in ("" when no folder is open). */
   workspaceId: string;
-  /** True when this terminal is a verify worker running tests. */
-  verifyWorker?: boolean;
   /** True when this terminal runs a dispatched plan task. */
   dispatchWorker?: boolean;
   /** The dispatched task text (for the tab title). */
@@ -334,6 +330,7 @@ export interface PiBridge {
 
   // Verify & Iterate
   runVerify(terminalId: string): Promise<{ ok: boolean; error?: string }>;
+  cancelVerify(terminalId: string): Promise<{ ok: boolean; error?: string }>;
 
   // Session Timeline
   getTimeline(terminalId: string): Promise<TimelineEvent[]>;

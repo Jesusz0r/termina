@@ -46,9 +46,9 @@
 ### Candidate Verify without primary writes (WORLDLINES §6.8)
 
 - `runVerify` detects the test command from the owner terminal's own tree
-  (the candidate root) and spawns the worker shell **under the candidate's
+  (the candidate root) and starts a background process **under the candidate's
   sandbox profile** with the candidate HOME, TMPDIR, and events dir.
-  The worker inherits the candidate workspace, so its writes stay inside
+  The process inherits the candidate workspace, so its writes stay inside
   the candidate tree and cannot reach the primary project.
 - The result context file lands in the candidate's events dir, so the
   candidate agent reads it on its next turn.
@@ -93,7 +93,7 @@
   timeline-replay 3/3, explorer 7/7, review 5/5, mine-ownership 6/6,
   edits-to-agent 9/9, baseline-race 11/11, plan-board 6/6, dispatch 8/8,
   preview 4/4, tui-loop 3/3, session-search 6/6.
-- Manual smoke: candidate Verify workers run under `sandbox-exec`; the
+- Manual smoke: candidate Verify processes run under `sandbox-exec`; the
   worker tabs label as verify; editor stays editable while a candidate
   agent works.
 

@@ -30,7 +30,7 @@
   terminalIds. The primary workspace is created on folder open and at boot;
   a folder switch tears it down (watcher, user-edit map, lease).
 - Every terminal carries a `workspaceId` (`InstanceSummary.workspaceId`).
-  Verify workers and dispatch workers inherit the owner's workspace.
+  Background Verify processes and dispatch workers inherit the owner's workspace.
 - The watcher belongs to a workspace; every change bumps its generation.
   Watcher attribution, baselines, and user-edit recording are scoped to the
   workspace's terminals.

@@ -5,7 +5,7 @@
  * project with a failing `npm run test` script (see the test project setup
  * in the README/commits). Steps:
  *   1. detectTest() reports the npm test script
- *   2. runVerify() spawns a worker terminal, state goes running → fail
+ *   2. runVerify() starts a background test process, state goes running → fail
  *   3. the verify context file is written with FAILED + output
  *   4. after fixing the test on disk, verify again → pass + PASSED context
  *   5. the badge reflects the state in the DOM
@@ -90,9 +90,9 @@ for (let i = 0; i < 40; i++) {
 }
 check("verify state becomes fail", verifyState?.state === "fail", JSON.stringify(verifyState));
 
-// The worker exits fast; its tab stays in the renderer though.
+// Verification must not create a terminal tab.
 const tabs = await evalJs(`[...document.querySelectorAll('.terminal-tab .tab-name')].map((el) => el.textContent)`);
-check("a worker terminal ran the tests", tabs.some((t) => t === "verify"), JSON.stringify(tabs));
+check("verification runs without a worker terminal", !tabs.some((t) => t === "verify"), JSON.stringify(tabs));
 
 // ---- 3. context file ----
 await sleep(300);

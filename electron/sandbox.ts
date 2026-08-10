@@ -15,7 +15,7 @@
  * Network: the sandbox language only accepts `*` or `localhost` as the
  * remote host, so a per-provider allowlist is not expressible. Candidates
  * keep network (the model provider must be reachable); evidence and
- * Verify workers get a full network deny.
+ * Verify processes get a full network deny.
  *
  * Resource limits (WORLDLINES §6.6: bounded memory, CPU time, file size,
  * process count, open files) are not expressible in the profile language
@@ -53,7 +53,7 @@ export interface SandboxPaths {
   appReadPaths: string[];
   /** The candidate home's .pi/agent dir (the copied Pi resources). */
   agentHomeDir: string;
-  /** True for evidence and Verify workers: network fully denied. */
+  /** True for evidence and Verify processes: network fully denied. */
   denyNetwork: boolean;
 }
 
@@ -121,7 +121,7 @@ export function buildSandboxProfile(p: SandboxPaths): string {
     deny("file-write*", join(p.agentHomeDir, "themes")),
     deny("file-write*", join(p.agentHomeDir, "extensions")),
     allow("file-write*", join(p.agentHomeDir, "auth.json")),
-    // Evidence and Verify workers run fully offline (WORLDLINES §6.8).
+    // Evidence and Verify processes run fully offline (WORLDLINES §6.8).
     ...(p.denyNetwork ? ["(deny network*)"] : []),
     allow("file-write*", p.candidateRoot),
     allow("file-write*", p.candidateSupport),

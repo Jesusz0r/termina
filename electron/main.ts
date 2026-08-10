@@ -41,6 +41,7 @@ const MAX_OPEN_FILE_SIZE = 2 * 1024 * 1024;
 const MAX_PROMPT_BYTES = 20 * 1024 * 1024;
 const MAX_PI_RESOURCE_BYTES = 200 * 1024 * 1024;
 const MAX_PTY_IPC_CHUNK = 64 * 1024;
+const MAX_VERIFY_OUTPUT = 200_000;
 /** Timeline snapshots bigger than this are dropped (dot stays, no content). */
 const MAX_SNAPSHOT_SIZE = 100_000;
 /** Cap the per-terminal timeline so memory stays bounded. */
@@ -382,6 +383,12 @@ function cleanEnv(): Record<string, string | undefined> {
   return env;
 }
 
+/** One background process that runs a test command. */
+interface VerifyJob {
+  child: ReturnType<typeof spawn>;
+  interrupted: boolean;
+}
+
 /** A file the user changed while no agent terminal was busy. */
 interface UserEdit {
   path: string;
@@ -694,10 +701,10 @@ class PiEditorApp {
   private sessionWorkspaceDir = join(this.eventsDir, "session-workspace");
   private tailer = new SidecarTailer(this.eventsDir);
   private paintWatchdog: ReturnType<typeof setInterval> | null = null;
-  /** In-flight verify runs: owner terminal id → worker id. */
-  private verifyRuns = new Map<string, string>();
-  /** Worker terminal ids (kept after the run so tabs can be labeled). */
-  private verifyWorkers = new Set<string>();
+  /** In-flight background verify runs by owner terminal id. */
+  private verifyRuns = new Set<string>();
+  /** Background test processes by owner terminal id. */
+  private verifyJobs = new Map<string, VerifyJob>();
   /** Busy agent terminal ids: concurrent runs in one workspace overlap. */
   private busyAgents = new Set<string>();
   /** Dispatch workers: worker terminal id → its task text. */
@@ -1038,6 +1045,7 @@ class PiEditorApp {
         if (workspace && !workspace.primary) this.setWorkspaceState(workspace, stateId);
       },
       onRemoved: (comparisonId) => {
+        this.cancelVerifyForComparison(comparisonId);
         const summary = this.evidenceByComparison.get(comparisonId);
         this.evidenceByComparison.delete(comparisonId);
         if (summary) void this.releaseEvidenceStates(summary);
@@ -2313,118 +2321,142 @@ class PiEditorApp {
   private async runVerify(ownerId: string): Promise<{ ok: boolean; error?: string }> {
     const owner = this.terminals.get(ownerId);
     if (!owner) return { ok: false, error: "terminal not found" };
+    if (this.disposed || this.switchingProject) return { ok: false, error: "the project is changing" };
     if (this.verifyRuns.has(ownerId)) return { ok: false, error: "a verify run is already in progress" };
-    // A worldline candidate verifies inside its own isolated tree under its
-    // sandbox profile: the tests cannot write the primary project.
+    this.verifyRuns.add(ownerId);
+    // Run candidate tests inside the candidate sandbox. The tests cannot write
+    // the primary project.
     const candidate = this.worldlines?.candidateSandboxOf(ownerId) ?? null;
     const cwd = candidate?.root ?? this.terminalCwd();
-    const tc = await this.detectTestCommand(cwd);
-    if (!tc) return { ok: false, error: "no test command detected (looked for package.json scripts, pytest, cargo, go)" };
-
-    // Spawn a worker shell terminal that runs the tests, visible in the UI.
-    // The env is sanitized: the host session variables must not reach the
-    // tests (they could spawn the pi CLI and crash it, like the agent TUI).
-    const shells = detectShells();
-    const shell = shells[0] ?? { path: "/bin/zsh", name: "zsh" };
-    const id = `term-${++terminalSeq}`;
-    let inst: PiTerminalInstance;
-    const cmdline = `${tc.command} ${tc.args.map(quoteShellArg).join(" ")}`;
+    let tc: { command: string; args: string[]; label: string } | null;
     try {
-      if (candidate) {
-        inst = new PiTerminalInstance(
-          id,
-          candidate.root,
-          owner.workspaceId, // the worker inherits the owner's workspace
-          "shell",
-          shell.name,
-          "sandbox-exec",
-          ["-f", writeEvidenceProfile(candidate), shell.path, "-c", `${sandboxShellPreamble()} ${cmdline}`],
-          { ...cleanEnv(), HOME: candidate.homeDir, TMPDIR: candidate.tmpDir, PI_EDITOR_EVENTS_DIR: candidate.eventsDir },
-          80,
-          24,
-        );
-      } else {
-        inst = new PiTerminalInstance(
-          id,
-          this.terminalCwd(),
-          owner.workspaceId, // the worker inherits the owner's workspace
-          "shell",
-          shell.name,
-          shell.path,
-          ["-c", cmdline],
-          { ...cleanEnv() },
-          80,
-          24,
-        );
-      }
+      tc = await this.detectTestCommand(cwd);
     } catch (err) {
-      return { ok: false, error: `could not start the test worker: ${(err as Error).message}` };
+      this.verifyRuns.delete(ownerId);
+      return { ok: false, error: `could not detect the test command: ${(err as Error).message}` };
     }
-    this.terminals.set(inst.id, inst);
-    this.workspaces.get(owner.workspaceId)?.terminalIds.add(id);
-    this.verifyWorkers.add(inst.id);
+    if (!tc) {
+      this.verifyRuns.delete(ownerId);
+      return { ok: false, error: "no test command detected (looked for package.json scripts, pytest, cargo, go)" };
+    }
+    if (
+      this.disposed ||
+      this.switchingProject ||
+      this.terminals.get(ownerId) !== owner ||
+      (candidate && (!this.worldlines?.candidateSandboxOf(ownerId) || !existsSync(candidate.root)))
+    ) {
+      this.verifyRuns.delete(ownerId);
+      return { ok: false, error: "the project is changing" };
+    }
+
+    let child: ReturnType<typeof spawn>;
+    try {
+      const shells = detectShells();
+      const shell = shells[0] ?? { path: "/bin/zsh", name: "zsh" };
+      const cmdline = `${tc.command} ${tc.args.map(quoteShellArg).join(" ")}`;
+      const command = candidate ? "sandbox-exec" : shell.path;
+      const args = candidate
+        ? ["-f", writeEvidenceProfile(candidate), shell.path, "-c", `${sandboxShellPreamble()} ${cmdline}`]
+        : ["-c", cmdline];
+      const env = candidate
+        ? { ...cleanEnv(), HOME: candidate.homeDir, TMPDIR: candidate.tmpDir, PI_EDITOR_EVENTS_DIR: candidate.eventsDir }
+        : { ...cleanEnv() };
+      child = spawn(command, args, {
+        cwd,
+        detached: process.platform !== "win32",
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      });
+    } catch (err) {
+      this.verifyRuns.delete(ownerId);
+      return { ok: false, error: `could not start the background test: ${(err as Error).message}` };
+    }
+
+    const job: VerifyJob = { child, interrupted: false };
+    this.verifyJobs.set(ownerId, job);
     let output = "";
     let finished = false;
-    const MAX_VERIFY_MS = 10 * 60 * 1000;
+    const appendOutput = (data: Buffer | string): void => {
+      if (output.length >= MAX_VERIFY_OUTPUT) return;
+      output += data.toString().slice(0, MAX_VERIFY_OUTPUT - output.length);
+    };
     const finish = (code: number | null, how: VerifyState): void => {
       if (finished) return;
       finished = true;
-      const timer = verifyTimer;
-      if (timer) clearTimeout(timer);
+      clearTimeout(verifyTimer);
       this.verifyRuns.delete(ownerId);
-      let summary: string;
-      if (how === "pass") summary = "tests green";
-      else if (how === "timeout") summary = "tests timed out";
-      else if (how === "cancelled") summary = "cancelled";
-      else summary = "tests failing";
-      owner.verify = {
-        state: how,
-        command: tc.label,
-        summary,
-        workerId: inst.id,
-      };
-      // A cancelled run is not a test result: the previous context file stays
-      // and the agent keeps the last real outcome.
+      this.verifyJobs.delete(ownerId);
+      if (this.terminals.get(ownerId) !== owner || this.switchingProject || this.disposed) return;
+      const summary = how === "pass" ? "tests green" : how === "timeout" ? "tests timed out" : how === "cancelled" ? "cancelled" : "tests failing";
+      owner.verify = { state: how, command: tc.label, summary };
+      // Do not write a result for a cancelled run. The previous context stays.
       if (how !== "cancelled") this.writeVerifyContext(ownerId, tc.label, how, code, output);
       this.send("verify:state", { terminalId: ownerId, verify: owner.verify });
-      this.sendInstances();
     };
     const verifyTimer = setTimeout(() => {
-      console.warn(`[main] verify worker ${inst.id} timed out after ${MAX_VERIFY_MS / 1000}s`);
+      console.warn(`[main] background verify timed out after 600s for ${ownerId}`);
       finish(null, "timeout");
-      inst.pty.kill(); // onExit still fires; finish() already ran
-    }, MAX_VERIFY_MS);
+      this.killVerifyChild(child, "SIGTERM");
+    }, 10 * 60 * 1000);
 
-    inst.pty.onData = (data) => {
-      this.sendPtyData(inst.id, data);
-      if (output.length < 200_000) output += data;
-    };
-    inst.pty.onExit = (code) => {
-      console.log(`[main] verify worker ${inst.id} exited code=${code}`);
-      this.send("pty:exit", { id: inst.id, code });
-      this.terminals.delete(inst.id);
-      this.workspaces.get(inst.workspaceId)?.terminalIds.delete(inst.id);
-      this.verifyWorkers.delete(inst.id);
-      this.tailer.stopWatching(inst.id);
-      if (!finished) {
-        // A shell -c process exits 0 when the pty delivers an interrupt: the
-        // app's own interrupt mark is the reliable cancellation signal.
-        // The app's interrupt mark is the reliable cancellation signal: the
-        // shell wrappers report varying codes (0, 130, 1) after SIGINT.
-        const how: VerifyState = inst.interruptedAt !== undefined ? "cancelled" : code === 0 ? "pass" : "fail";
-        finish(code, how);
-      } else {
-        this.sendInstances();
-      }
-    };
+    child.stdout?.on("data", appendOutput);
+    child.stderr?.on("data", appendOutput);
+    child.once("error", (err) => {
+      appendOutput(err.message);
+      if (!finished) finish(null, job.interrupted ? "cancelled" : "fail");
+    });
+    child.once("close", (code) => {
+      if (!finished) finish(code, job.interrupted ? "cancelled" : code === 0 ? "pass" : "fail");
+    });
 
-    this.verifyRuns.set(ownerId, inst.id);
-    owner.verify = { state: "running", command: tc.label, summary: "running…", workerId: inst.id };
-    // Instances first: the renderer must know the worker pane before the
-    // running push arrives, so it can auto-activate the worker.
-    this.sendInstances();
+    owner.verify = { state: "running", command: tc.label, summary: "running…" };
     this.send("verify:state", { terminalId: ownerId, verify: owner.verify });
     return { ok: true };
+  }
+
+  private killVerifyChild(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
+    const pid = child.pid;
+    try {
+      if (process.platform !== "win32" && pid && pid > 0) process.kill(-pid, signal);
+      else child.kill(signal);
+    } catch {
+      try {
+        child.kill(signal);
+      } catch {
+        /* The process already exited. */
+      }
+    }
+  }
+
+  private cancelVerifyForComparison(comparisonId: string): void {
+    for (const ownerId of [...this.verifyRuns]) {
+      const owner = this.terminals.get(ownerId);
+      const workspace = owner ? this.workspaces.get(owner.workspaceId) : undefined;
+      if (workspace?.comparisonId !== comparisonId) continue;
+      if (this.verifyJobs.has(ownerId)) this.cancelVerify(ownerId);
+      else this.verifyRuns.delete(ownerId);
+    }
+  }
+
+  private cancelVerify(ownerId: string): { ok: boolean; error?: string } {
+    if (!this.terminals.has(ownerId)) return { ok: false, error: "terminal not found" };
+    const job = this.verifyJobs.get(ownerId);
+    if (!job || !this.verifyRuns.has(ownerId)) return { ok: false, error: "no verify run is in progress" };
+    job.interrupted = true;
+    this.killVerifyChild(job.child, "SIGINT");
+    return { ok: true };
+  }
+
+  private async drainVerifyJobs(timeoutMs = 2000): Promise<void> {
+    for (const job of this.verifyJobs.values()) this.killVerifyChild(job.child, "SIGTERM");
+    const deadline = Date.now() + timeoutMs;
+    while (this.verifyJobs.size > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    for (const job of this.verifyJobs.values()) this.killVerifyChild(job.child, "SIGKILL");
+    this.verifyJobs.clear();
+    this.verifyRuns.clear();
   }
 
   /** Write the verify result to the context file the bridge extension reads. */
@@ -2885,6 +2917,7 @@ class PiEditorApp {
   private closeTerminal(id: string): void {
     const inst = this.terminals.get(id);
     if (!inst) return;
+    if (this.verifyRuns.has(id)) this.cancelVerify(id);
     inst.pty.kill();
     // pty.onExit removes it from the map
   }
@@ -2907,7 +2940,6 @@ class PiEditorApp {
       type: t.type,
       shellName: t.shellName,
       workspaceId: t.workspaceId,
-      verifyWorker: this.verifyWorkers.has(t.id),
       dispatchWorker: this.dispatchWorkers.has(t.id),
       dispatchTask: this.dispatchWorkers.get(t.id),
       verify: t.type === "agent" ? t.verify : null,
@@ -4025,6 +4057,7 @@ class PiEditorApp {
     if (!(await this.confirmDiscardActiveCandidates())) return { cancelled: true };
     this.switchingProject = true;
     try {
+      await this.drainVerifyJobs();
       await this.drainSidecarQueues();
       await this.evidenceQueue.catch(() => undefined);
       await this.worldlines?.dispose().catch(() => undefined);
@@ -4053,8 +4086,6 @@ class PiEditorApp {
       this.evidenceByComparison.clear();
       this.lastWatchChange.clear();
       this.busyAgents.clear();
-      this.verifyRuns.clear();
-      this.verifyWorkers.clear();
       this.dispatchWorkers.clear();
       this.dispatchRuns.clear();
       await this.teardownRecording();
@@ -4599,6 +4630,7 @@ class PiEditorApp {
       return this.detectTestCommand(this.terminalCwd());
     });
     ipcMain.handle("verify:run", (_e, terminalId: string) => this.runVerify(terminalId));
+    ipcMain.handle("verify:cancel", (_e, terminalId: string) => this.cancelVerify(terminalId));
 
     // ---- Mine ----
     ipcMain.handle("mine:set", (_e, path: string, mine: boolean) => this.setMineFile(path, mine));
@@ -4774,6 +4806,7 @@ class PiEditorApp {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    await this.drainVerifyJobs();
     this.tailer.stop();
     await this.drainSidecarQueues();
     this.sidecarQueues.clear();
