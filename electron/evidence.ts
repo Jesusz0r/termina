@@ -44,6 +44,8 @@ export interface EvidenceSummary {
   profiles: ProfileVerdict[];
   /** Why the whole computation is unavailable, when it is. */
   error: string | null;
+  /** True when a candidate ran again after the evidence (stale). */
+  stale?: boolean;
 }
 
 interface CandidateFacts {
@@ -67,6 +69,8 @@ export interface EvidenceDeps {
   baseTestCommand(): { command: string; args: string[]; label: string } | null;
   /** The benchmark harness config of the shared base, or null. */
   benchmarkConfig(): { command: string[]; unit: string; direction: "lower" | "higher"; samples: number; thresholdPct: number } | null;
+  /** The candidate's source files (tracked, bounded) for package checks. */
+  sourceFilesOf(root: string): Array<{ relPath: string; content: string }>;
 }
 
 /** The four fixed profiles (WORLDLINES §6.9). */
@@ -148,17 +152,43 @@ export function declaredNames(pkgText: string): Set<string> {
   return names;
 }
 
+/** The npm test script of a package text, or null. */
+function testScriptOf(pkgText: string): string | null {
+  try {
+    const pkg = JSON.parse(pkgText) as { scripts?: Record<string, string> };
+    const scripts = pkg.scripts ?? {};
+    const names = Object.keys(scripts);
+    const pick = names.includes("test") ? "test" : names.find((n) => n.startsWith("test:"));
+    return pick ? scripts[pick] ?? null : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Every external package reference in candidate source (import/require). */
+/** Node built-in module names: not external packages. */
+const NODE_BUILTINS = new Set([
+  "assert", "async_hooks", "buffer", "child_process", "cluster", "console", "constants", "crypto", "dgram", "diagnostics_channel",
+  "dns", "domain", "events", "fs", "http", "http2", "https", "inspector", "module", "net", "os", "path", "perf_hooks", "process",
+  "punycode", "querystring", "readline", "repl", "stream", "string_decoder", "sys", "timers", "tls", "trace_events", "tty", "url",
+  "util", "v8", "vm", "wasi", "worker_threads", "zlib", "node:fs", "node:path", "node:os", "node:url", "node:util", "node:stream",
+  "node:crypto", "node:child_process", "node:events", "node:buffer", "node:http", "node:https", "node:net", "node:timers",
+  "node:readline", "node:zlib", "node:string_decoder", "node:querystring", "node:punycode", "node:repl", "node:vm", "node:v8",
+  "node:worker_threads", "node:assert", "node:async_hooks", "node:cluster", "node:constants", "node:dgram", "node:dns",
+  "node:domain", "node:http2", "node:inspector", "node:module", "node:perf_hooks", "node:process", "node:sys", "node:tls",
+  "node:trace_events", "node:tty", "node:wasi", "node:diagnostics_channel", "node:test", "node:sea", "node:sqlite",
+]);
+
 export function referencedPackages(sourceFiles: Array<{ relPath: string; content: string }>): Set<string> {
   const refs = new Set<string>();
   for (const f of sourceFiles) {
     if (!/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(f.relPath)) continue;
     for (const m of f.content.matchAll(/(?:from\s+["']|require\(\s*["'])([^"'./][^"']*)/g)) {
       const first = (m[1] ?? "").split("/")[0];
-      if (first && !first.startsWith(".") && !first.startsWith("@")) refs.add(first);
+      if (first && !first.startsWith(".") && !first.startsWith("@") && !NODE_BUILTINS.has(first)) refs.add(first);
     }
     for (const m of f.content.matchAll(/from\s+["'](@[^"'/]+\/[^"'/]+)/g)) {
-      refs.add(m[1]);
+      if (!NODE_BUILTINS.has(m[1])) refs.add(m[1]);
     }
   }
   return refs;
@@ -224,13 +254,30 @@ export class EvidenceEngine {
       return { kind: "dependencies", stateId, baseStateId: this.deps.baseStateId, status: "unavailable", result: {}, reason: "the base or head has no package manifest" };
     }
     const diff = dependencyDiff(basePkg.toString("utf8"), headPkg);
+    // Reject an external package used by candidate source when it is
+    // undeclared, even when it exists in the cloned runtime (§6.9).
+    const declared = declaredNames(basePkg.toString("utf8"));
+    for (const name of declaredNames(headPkg)) declared.add(name);
+    const sourceFiles = this.deps.sourceFilesOf(cand.root);
+    const referenced = referencedPackages(sourceFiles);
+    const undeclared = [...referenced].filter((name) => !declared.has(name)).sort();
+    // Show when a candidate changes the test configuration (§6.8): the
+    // evidence still runs the captured base command.
+    const baseScript = testScriptOf(basePkg.toString("utf8"));
+    const headScript = testScriptOf(headPkg);
+    const testScriptChanged = baseScript !== headScript;
     return {
       kind: "dependencies",
       stateId,
       baseStateId: this.deps.baseStateId,
-      status: "pass",
-      result: diff,
-      reason: diff.added.length === 0 && diff.removed.length === 0 && diff.changed.length === 0 ? null : "declaration changes measured",
+      status: undeclared.length > 0 ? "fail" : "pass",
+      result: { ...diff, undeclared, testScriptChanged },
+      reason:
+        undeclared.length > 0
+          ? `candidate source uses undeclared packages: ${undeclared.join(", ")}`
+          : diff.added.length === 0 && diff.removed.length === 0 && diff.changed.length === 0
+            ? null
+            : "declaration changes measured",
     };
   }
 
@@ -383,6 +430,13 @@ export function rankProfiles(summary: Record<"A" | "B", EvidenceRecord[]>, mineR
   // Fewer dependencies: fewer added declarations wins; zero beats one.
   {
     const el = { A: eligible("A", true), B: eligible("B", true) };
+    // An undeclared external package in candidate source is ineligible
+    // (WORLDLINES §6.9), even when it exists in the cloned runtime.
+    for (const l of ["A", "B"] as const) {
+      if (el[l]) continue;
+      const d = rec(l, "dependencies");
+      if (d?.status === "fail" && (d.result.undeclared as string[] | undefined)?.length) el[l] = `ineligible: ${d.reason}`;
+    }
     const added = { A: Number((rec("A", "dependencies")?.result.added as string[] | undefined)?.length ?? 0), B: Number((rec("B", "dependencies")?.result.added as string[] | undefined)?.length ?? 0) };
     let winner: ProfileVerdict["winner"] = "tie";
     let reason = "both candidates add the same number of declarations";

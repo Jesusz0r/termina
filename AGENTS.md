@@ -118,6 +118,14 @@ Use these terms exactly. Do not invent synonyms.
 - `electron/sidecar.ts`: tails the sidecar files and emits events.
 - `electron/watcher.ts`: watches the project, keeps a content cache, and
   emits change events.
+- `electron/worldline-git.ts`: the app-owned snapshot store, captures
+  (full and incremental), materialization, and three-way merges.
+- `electron/worldlines.ts`: the WorldlineManager (fork-run pairs, moment
+  candidates, promotion, challenges, compare).
+- `electron/evidence.ts`: the evidence engine and the four challenge
+  profiles.
+- `electron/sandbox.ts`: the candidate sandbox profiles, the evidence
+  (offline) profile variant, and the ulimit preamble.
 - `electron/preload.ts`: exposes the typed `window.pi` bridge.
 - `shared/types.ts`: the types shared between main, preload, and renderer.
 - `src/main.ts`: the renderer entry. It manages panes, layout, and events.

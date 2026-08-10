@@ -437,6 +437,7 @@ export class SnapshotStore {
         expected.set(relPath, { mode: "120000", oid });
         continue;
       }
+      if (st.isDirectory()) continue; // a submodule gitlink: the fork preflight rejects it
       if (!st.isFile()) throw new Error(`unsupported file type in capture domain: ${relPath}`);
       if (st.size > maxFileBytes) throw new Error(`file exceeds the ${maxFileBytes} byte budget: ${relPath}`);
 
@@ -558,6 +559,10 @@ export class SnapshotStore {
             newBlobBytes += Buffer.byteLength(target, "utf8");
             entries.push(`120000 blob ${oid}\t${relPath}`);
             expected.set(relPath, { mode: "120000", oid });
+            continue;
+          }
+          if (st.isDirectory()) {
+            changed.set(relPath, "deleted");
             continue;
           }
           if (!st.isFile()) throw new Error(`unsupported file type in capture domain: ${relPath}`);

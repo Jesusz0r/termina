@@ -99,8 +99,10 @@ const bridge: PiBridge = {
   openWorldlineTerminal: (comparisonId, label) => ipcRenderer.invoke("worldline:open-terminal", comparisonId, label),
   forkPoint: (terminalId, seq) => ipcRenderer.invoke("worldline:fork-point", terminalId, seq),
   challengeRun: (runId) => ipcRenderer.invoke("worldline:challenge", runId),
+  challengeCandidate: (comparisonId, label) => ipcRenderer.invoke("worldline:challenge-candidate", comparisonId, label),
+  compareWorldline: (comparisonId) => ipcRenderer.invoke("worldline:compare", comparisonId),
   runEvidence: (comparisonId) => ipcRenderer.invoke("worldline:evidence", comparisonId),
-  promoteWorldline: (comparisonId, label) => ipcRenderer.invoke("worldline:promote", comparisonId, label),
+  promoteWorldline: (comparisonId, label, force) => ipcRenderer.invoke("worldline:promote", comparisonId, label, force),
   onWorldlineUpdate: (cb) => {
     ipcRenderer.on("worldline:update", (_e, summary: WorldlineSummary) => cb(summary));
   },

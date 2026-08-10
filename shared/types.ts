@@ -272,6 +272,8 @@ export interface EvidenceSummary {
   byCandidate: Record<"A" | "B", EvidenceRecord[]>;
   profiles: ProfileVerdict[];
   error: string | null;
+  /** True when a candidate ran again after the evidence (stale). */
+  stale?: boolean;
 }
 
 export interface WorldlineDetails {
@@ -296,6 +298,13 @@ export interface WorldlineDetails {
   dependencies: DependencyChange[];
   /** Age of the candidate pair in ms. */
   ageMs: number;
+  /** Unowned edits of the source run (collaborative provenance). */
+  unownedEdits: number;
+  /** Ignored/generated writes (metadata only). */
+  ignoredFiles: number;
+  ignoredBytes: number;
+  /** Merge conflicts against the current primary source. */
+  primaryConflicts: string[];
 }
 
 export interface PiBridge {
@@ -373,12 +382,16 @@ export interface PiBridge {
   forkPoint(terminalId: string, seq: number): Promise<{ ok: boolean; comparisonId?: string; error?: string }>;
   /** Launch the challenger of a completed run (WORLDLINES §6.9). */
   challengeRun(runId: string): Promise<{ ok: boolean; comparisonId?: string; error?: string }>;
+  /** Challenge an existing candidate (snapshot as reference + challenger). */
+  challengeCandidate(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; comparisonId?: string; error?: string; requiresDiscard?: boolean }>;
+  /** The three comparison diffs (metadata only). */
+  compareWorldline(comparisonId: string): Promise<{ ok: boolean; baseToA?: WorldlineChangedFile[]; baseToB?: WorldlineChangedFile[]; aToB?: WorldlineChangedFile[]; error?: string }>;
   /** Compute evidence for both candidates of a comparison. */
   runEvidence(comparisonId: string): Promise<{ ok: boolean; error?: string }>;
   /** Push: the evidence summary of a comparison changed. */
   onEvidenceUpdate(cb: (e: EvidenceSummary) => void): void;
   /** Promote a candidate into the primary project (WORLDLINES §6.10). */
-  promoteWorldline(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; error?: string; terminalId?: string }>;
+  promoteWorldline(comparisonId: string, label: "A" | "B", force?: boolean): Promise<{ ok: boolean; error?: string; terminalId?: string; confirm?: string }>;
   /** Push: one worldline changed. */
   onWorldlineUpdate(cb: (summary: WorldlineSummary) => void): void;
   /** Push: a comparison was removed. */

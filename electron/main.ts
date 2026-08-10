@@ -9,9 +9,10 @@
  */
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme } from "electron";
 import { execFileSync, spawn } from "node:child_process";
-import { accessSync, constants, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, constants, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { openSync, closeSync, fsyncSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
+import { cpSync, mkdtempSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -20,8 +21,9 @@ import { Worker } from "node:worker_threads";
 import { PtyTerminal } from "./pty-terminal.js";
 import { SidecarEvent, SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
-import { SnapshotStore, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, type SourceState } from "./worldline-git.js";
+import { SnapshotStore, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, platformHasCopyOnWrite, platformHasRecursiveWatcher, platformHasSandboxExec, type SourceState } from "./worldline-git.js";
 import { WorldlineManager, type ForkableRun } from "./worldlines.js";
+import { sandboxShellPreamble, writeEvidenceProfile } from "./sandbox.js";
 import { EvidenceEngine, mineChangeReason, rankProfiles, type EvidenceDeps, type EvidenceRecord, type EvidenceSummary as EngineSummary } from "./evidence.js";
 import type {
   ExplorerEntry,
@@ -98,6 +100,17 @@ export default function (pi: ExtensionAPI): void {
   /** One-use preflight state carried from input to agent_start. */
   let preflight: { requestId: string; token: string | null } | null = null;
   let planLogged = false;
+
+  // ---- project trust (WORLDLINES §6.7) ----
+  // A candidate inherits one-process trust only when the app granted it:
+  // the run was trusted and its trust-sensitive resources still match.
+  // The grant never persists the candidate path (remember: false).
+  pi.on("project_trust", async () => {
+    if (process.env.PI_EDITOR_INHERIT_TRUST === "1") {
+      return { trusted: "yes" as const, remember: false };
+    }
+    return { trusted: "undecided" as const };
+  });
 
   // ---- startup control (WORLDLINES §6.7) ----
   // The candidate terminal starts with a one-shot control file: prefill
@@ -186,7 +199,7 @@ export default function (pi: ExtensionAPI): void {
     log({ t: "agent_settled" });
     const requestId = randomUUID();
     log({ t: "checkpoint_request", requestId, kind: "settled", entryId: ctx.sessionManager.getLeafId() });
-    const ack = await waitForAck(requestId, 20000);
+    const ack = await waitForAck(requestId, 5000);
     log({ t: "checkpoint_result", requestId, ok: ack?.ok === true, error: (ack as { error?: unknown })?.error ?? null });
   });
 
@@ -273,6 +286,8 @@ interface WorkspaceState {
   terminalIds: Set<string>;
   /** The last captured state commit (the lineage parent). */
   lastStateCommit: string | null;
+  /** New retained blob bytes since the index (WORLDLINES §9). */
+  retainedBlobBytes: number;
   /** Resolves when the initial index capture finished. */
   indexReady: Promise<void> | null;
   /** Why recording is unavailable, when it is. */
@@ -308,6 +323,8 @@ interface RunRecord {
   unownedEdits: number;
   startedAt: number;
   settledAt: number | null;
+  /** The trust-sensitive resource hashes captured at run start (§6.7). */
+  trustHashes: Record<string, string> | null;
 }
 
 /** A start preflight waiting for agent_start to consume its token. */
@@ -321,6 +338,8 @@ interface PendingPreflight {
   leaseRequester: string;
   expiresAt: number;
   timer: ReturnType<typeof setTimeout>;
+  /** The trust-sensitive resource hashes at preflight time (§6.7). */
+  trustHashes: Record<string, string> | null;
 }
 
 /**
@@ -513,6 +532,7 @@ class SnapshotWorkerClient {
     parentCommit: string,
     hints: string[],
     reconcile: Array<{ relPath: string; content: string }>,
+    source?: { root: string; gitDir: string },
   ): Promise<SourceState> {
     return this.request({
       op: "capture-incremental",
@@ -523,6 +543,8 @@ class SnapshotWorkerClient {
       parentCommit,
       hints,
       reconcile,
+      captureRoot: source?.root,
+      captureGitDir: source?.gitDir,
     }) as Promise<SourceState>;
   }
 
@@ -852,6 +874,7 @@ class PiEditorApp {
       watcher: null,
       terminalIds: new Set(),
       lastStateCommit: null,
+      retainedBlobBytes: 0,
       indexReady: null,
       recordError: null,
     };
@@ -904,6 +927,68 @@ class PiEditorApp {
     }
   }
 
+  // ------------------------------------------------- trust (WORLDLINES §6.7) ----
+
+  /**
+   * The trust-sensitive resource hashes of the project and the pi agent
+   * dir (WORLDLINES §6.7: project settings, extensions, skills, prompts,
+   * themes, system prompt files, project .agents/skills). Bounded walk:
+   * at most 10k files and 64 MB of content.
+   */
+  private async computeTrustHashes(): Promise<Record<string, string>> {
+    const out: Record<string, string> = {};
+    let files = 0;
+    let bytes = 0;
+    const walk = (absRoot: string, prefix: string): void => {
+      let names: string[] = [];
+      try {
+        names = readdirSync(absRoot);
+      } catch {
+        return;
+      }
+      for (const name of names) {
+        if (files > 10000 || bytes > 64 * 1024 * 1024) return;
+        const full = join(absRoot, name);
+        try {
+          const st = statSync(full);
+          if (st.isDirectory()) walk(full, `${prefix}/${name}`);
+          else if (st.isFile()) {
+            if (st.size > 4 * 1024 * 1024) continue;
+            const content = readFileSync(full);
+            files++;
+            bytes += content.length;
+            out[`${prefix}/${name}`] = createHash("sha256").update(content).digest("hex");
+          }
+        } catch {
+          /* a transient file — skip */
+        }
+      }
+    };
+    const agentDir = join(homedir(), ".pi", "agent");
+    for (const name of ["settings.json", "models-store.json", "prompts", "skills", "themes", "extensions"]) {
+      const full = join(agentDir, name);
+      try {
+        const st = statSync(full);
+        if (st.isDirectory()) walk(full, `agent/${name}`);
+        else if (st.isFile()) {
+          const content = readFileSync(full);
+          files++;
+          bytes += content.length;
+          out[`agent/${name}`] = createHash("sha256").update(content).digest("hex");
+        }
+      } catch {
+        /* absent */
+      }
+    }
+    const project = this.projectCwd ? resolve(this.projectCwd) : null;
+    if (project) {
+      for (const rel of [".pi", ".agents/skills"]) {
+        walk(join(project, rel), `project/${rel}`);
+      }
+    }
+    return out;
+  }
+
   /**
    * Create the worldline manager. Depends on app paths that exist only
    * after the window is created.
@@ -947,11 +1032,68 @@ class PiEditorApp {
         fork: (opts) => this.sessionWorker.fork(opts),
       },
       createCandidate: (opts) => this.createCandidate(opts),
-      createCandidateWorkspace: (root) => this.createCandidateWorkspace(root),
+      createCandidateWorkspace: (root, baseStateId) => this.createCandidateWorkspace(root, baseStateId),
       onUpdate: (summary) => this.send("worldline:update", summary),
       onRemoved: (comparisonId) => {
         this.removeCandidateWorkspaces(comparisonId);
         this.send("worldline:removed", { comparisonId });
+      },
+      // The fork preflight (WORLDLINES §4): repository, platform, disk.
+      preflight: async () => {
+        const reasons: string[] = [];
+        const store = await this.storePromise;
+        const primaryRoot = this.primaryWorkspace()?.root ?? this.projectCwd ?? "";
+        if (store) {
+          const repo = await store.preflightRepo({ worldsRoot: this.worldsRoot });
+          reasons.push(...repo.reasons);
+          // The opened folder must BE the top level (WORLDLINES §4: a Git
+          // subdirectory is not a recordable project).
+          const top = await gitTopLevel(primaryRoot).catch(() => null);
+          const canonicalRoot = realpathSync(primaryRoot);
+          if (top && resolve(top) !== resolve(canonicalRoot)) {
+            reasons.push("the opened folder is not the Git top-level directory");
+          }
+        } else {
+          // No store: the folder is not a recordable repository.
+          const top = primaryRoot ? await gitTopLevel(primaryRoot).catch(() => null) : null;
+          if (!top) reasons.push("the opened folder is not inside a Git repository");
+        }
+        if (!platformHasSandboxExec()) reasons.push("the platform has no sandbox-exec");
+        if (!platformHasCopyOnWrite()) reasons.push("the platform has no copy-on-write clone support");
+        if (!platformHasRecursiveWatcher()) reasons.push("the platform has no reliable recursive watcher");
+        const free = await freeDiskBytes(this.worldsRoot);
+        if (free !== null && free < 4 * 1024 * 1024 * 1024) {
+          reasons.push(`free disk space is below the 4 GB minimum (${(free / 1e9).toFixed(1)} GB)`);
+        }
+        return { ok: reasons.length === 0, reasons };
+      },
+      trustHashes: async () => this.computeTrustHashes(),
+      unownedEditsOf: (runId) => {
+        const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === runId);
+        return run?.unownedEdits ?? 0;
+      },
+      captureHead: async (root, gitDir, parent) => {
+        const store = await this.storePromise;
+        if (!store) throw new Error("recording is not available");
+        const state = await this.snapshotWorker.capture(store, await gitHead(root), parent, { root, gitDir });
+        return { commit: state.commit, tree: state.tree };
+      },
+      sourceRunOf: (runId) => {
+        const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === runId);
+        return run
+          ? { promptPayloadFile: run.promptPayloadFile, promptParentEntryId: run.promptParentEntryId, sessionFile: run.sessionFile }
+          : null;
+      },
+      capturePrimary: async () => {
+        const ws = this.primaryWorkspace();
+        const store = await this.storePromise;
+        if (!ws || !store || !ws.lastStateCommit) return null;
+        try {
+          const state = await this.snapshotWorker.capture(store, await gitHead(ws.root), ws.lastStateCommit);
+          return state.commit;
+        } catch {
+          return null;
+        }
       },
     });
   }
@@ -980,9 +1122,12 @@ class PiEditorApp {
     return { terminalId: inst.id, pid: inst.pty.pid };
   }
 
-  /** A candidate source tree workspace (no recording, own watcher). */
-  private createCandidateWorkspace(root: string): string {
+  /** A candidate source tree workspace (no recording, own watcher). The
+   *  lineage base seeds its moment-capture chain (nested worldlines keep
+   *  the root promotion base). */
+  private createCandidateWorkspace(root: string, baseStateId: string | null): string {
     const ws = this.createWorkspace(root, false);
+    ws.lastStateCommit = baseStateId;
     return ws.id;
   }
 
@@ -1084,7 +1229,7 @@ class PiEditorApp {
    * captured fresh under the write leases. Every output lands through a
    * durable journal so a crash can roll back or recover.
    */
-  private async promoteCandidate(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; error?: string; terminalId?: string }> {
+  private async promoteCandidate(comparisonId: string, label: "A" | "B", force = false): Promise<{ ok: boolean; error?: string; terminalId?: string; confirm?: string }> {
     const target = this.worldlines?.promotionTarget(comparisonId, label);
     if (!target) return { ok: false, error: "candidate not found" };
     if (!target.sessionFile) return { ok: false, error: "the candidate has no session" };
@@ -1145,6 +1290,12 @@ class PiEditorApp {
       await this.worldlines?.finishPromotion(comparisonId, false, message);
       return { ok: false, error: message };
     };
+    // A confirmation request releases the leases and keeps the pair usable.
+    const askConfirm = async (message: string): Promise<{ ok: false; confirm: string }> => {
+      releaseLeases();
+      await this.worldlines?.finishPromotion(comparisonId, false, null);
+      return { ok: false, confirm: message };
+    };
 
     try {
       // Flush the dirty editor models (both leases cover every save path).
@@ -1188,6 +1339,23 @@ class PiEditorApp {
       if (!merge.ok || !merge.tree) {
         const reason = merge.reason ?? `the merge conflicts on: ${merge.conflicts.join(", ")}`;
         return fail(reason);
+      }
+      // Confirmations (WORLDLINES §6.10): after the hard checks, absent /
+      // stale / failed evidence and ignored/generated writes require an
+      // explicit confirmation once.
+      if (!force) {
+        const summary = this.evidenceByComparison.get(comparisonId);
+        const recs = summary?.byCandidate[label] ?? [];
+        const verify = recs.find((r) => r.kind === "verify");
+        const evidenceOk = verify?.status === "pass" && summary?.stale !== true;
+        const ignored = await this.worldlines?.ignoredWrites(comparisonId, label);
+        if (!evidenceOk) {
+          const why = !verify ? "no evidence has been computed for this candidate" : summary?.stale ? "the evidence is stale (the candidate ran again)" : `the evidence is ${verify?.status}`;
+          return askConfirm(`promote without current passing evidence? (${why})`);
+        }
+        if ((ignored?.count ?? 0) > 0) {
+          return askConfirm(`${ignored!.count} ignored/generated file(s) (${((ignored!.bytes ?? 0) / 1024).toFixed(0)} kB) will be excluded from the promotion`);
+        }
       }
 
       // Stage: merged bytes, before-bytes, and the promoted session.
@@ -1378,7 +1546,10 @@ class PiEditorApp {
     return new Promise((resolvePromise) => {
       const shells = detectShells();
       const shell = shells[0] ?? { path: "/bin/zsh", name: "zsh" };
-      const child = spawn("sandbox-exec", ["-f", cand.profilePath, shell.path, "-c", command.join(" ")], {
+      // Evidence workers run fully offline under the same deny-list profile
+      // with the resource limits applied by the wrapper (WORLDLINES §6.8).
+      const profilePath = writeEvidenceProfile(cand);
+      const child = spawn("sandbox-exec", ["-f", profilePath, shell.path, "-c", `${sandboxShellPreamble()} ${command.join(" ")}`], {
         cwd: cand.root,
         env: { ...cleanEnv(), HOME: cand.homeDir, TMPDIR: cand.tmpDir },
         stdio: ["ignore", "pipe", "pipe"],
@@ -1404,6 +1575,53 @@ class PiEditorApp {
     });
   }
 
+  /** The tracked source files of a candidate (bounded, for package checks). */
+  private sourceFilesOf(root: string): Array<{ relPath: string; content: string }> {
+    const out: Array<{ relPath: string; content: string }> = [];
+    try {
+      const res = execFileSync("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8" });
+      let bytes = 0;
+      for (const rel of res.split("\0")) {
+        if (!rel || out.length >= 2000 || bytes > 8 * 1024 * 1024) continue;
+        try {
+          const abs = join(root, rel);
+          const content = readFileSync(abs, "utf8");
+          bytes += content.length;
+          out.push({ relPath: rel, content });
+        } catch {
+          /* unreadable or deleted */
+        }
+      }
+    } catch {
+      /* not a repo */
+    }
+    return out;
+  }
+
+  /** A fresh evidence home: the real pi resources, unmodified by agents. */
+  private createEvidenceHome(): string {
+    const dir = mkdtempSync(join(this.eventsDir, "evidence-home-"));
+    const agentDst = join(dir, ".pi", "agent");
+    mkdirSync(agentDst, { recursive: true, mode: 0o700 });
+    const agentSrc = join(homedir(), ".pi", "agent");
+    for (const name of ["auth.json", "settings.json", "models-store.json"]) {
+      try {
+        copyFileSync(join(agentSrc, name), join(agentDst, name));
+      } catch {
+        /* optional */
+      }
+    }
+    for (const name of ["skills", "prompts", "themes", "extensions"]) {
+      try {
+        cpSync(join(agentSrc, name), join(agentDst, name), { recursive: true });
+      } catch {
+        /* optional */
+      }
+    }
+    mkdirSync(join(dir, "tmp"), { recursive: true, mode: 0o700 });
+    return dir;
+  }
+
   /** The base state of a comparison (its source run's start state). */
   private baseStateOf(comparisonId: string): string | null {
     const target = this.worldlines?.promotionTarget(comparisonId, "A");
@@ -1424,6 +1642,9 @@ class PiEditorApp {
       // The base test command and benchmark harness come from the base state.
       const tc = await this.detectTestFromState(store, baseStateId);
       const bm = await this.benchmarkConfigFrom(store, baseStateId);
+      // A fresh evidence home from the real pi resources: the ranking never
+      // uses agent-modified home or tool configuration (§6.8).
+      const evidenceHome = this.createEvidenceHome();
       const deps: EvidenceDeps = {
         store,
         baseStateId,
@@ -1436,17 +1657,22 @@ class PiEditorApp {
         runSandboxed: (cand, command, timeoutMs) => this.runSandboxedEvidence(cand, command, timeoutMs),
         baseTestCommand: () => tc,
         benchmarkConfig: () => bm,
+        sourceFilesOf: (root) => this.sourceFilesOf(root),
       };
       const engine = new EvidenceEngine(deps);
       const byCandidate: Record<"A" | "B", EvidenceRecord[]> = { A: [], B: [] };
       const mineReason: Record<"A" | "B", string | null> = { A: null, B: null };
-      for (const label of ["A", "B"] as const) {
-        const target = this.worldlines?.evidenceTarget(comparisonId, label);
-        if (!target) return { ok: false, error: "candidate not found" };
-        const cand = { root: target.root, profilePath: target.profilePath, homeDir: target.homeDir, tmpDir: target.tmpDir, shell: "" };
-        byCandidate[label] = await engine.measure(label, cand);
-        const head = byCandidate[label].find((r) => r.kind === "verify") ?? byCandidate[label][0];
-        if (head) mineReason[label] = await mineChangeReason(store, baseStateId, head.stateId, deps.primaryRoot, this.mineFiles, (p) => realpathSync(p));
+      try {
+        for (const label of ["A", "B"] as const) {
+          const target = this.worldlines?.evidenceTarget(comparisonId, label);
+          if (!target) return { ok: false, error: "candidate not found" };
+          const cand = { root: target.root, profilePath: target.profilePath, homeDir: evidenceHome, tmpDir: join(evidenceHome, "tmp"), shell: "" };
+          byCandidate[label] = await engine.measure(label, cand);
+          const head = byCandidate[label].find((r) => r.kind === "verify") ?? byCandidate[label][0];
+          if (head) mineReason[label] = await mineChangeReason(store, baseStateId, head.stateId, deps.primaryRoot, this.mineFiles, (p) => realpathSync(p));
+        }
+      } finally {
+        rmSync(evidenceHome, { recursive: true, force: true });
       }
       const summary: EngineSummary = {
         comparisonId,
@@ -1454,6 +1680,7 @@ class PiEditorApp {
         byCandidate,
         profiles: rankProfiles(byCandidate, mineReason),
         error: null,
+        stale: false,
       };
       this.evidenceByComparison.set(comparisonId, summary);
       this.send("worldline:evidence-update", summary);
@@ -1792,7 +2019,7 @@ class PiEditorApp {
           "shell",
           shell.name,
           "sandbox-exec",
-          ["-f", candidate.profilePath, shell.path, "-c", cmdline],
+          ["-f", writeEvidenceProfile(candidate), shell.path, "-c", `${sandboxShellPreamble()} ${cmdline}`],
           { ...cleanEnv(), HOME: candidate.homeDir, TMPDIR: candidate.tmpDir, PI_EDITOR_EVENTS_DIR: candidate.eventsDir },
           80,
           24,
@@ -2414,6 +2641,16 @@ class PiEditorApp {
       }
       case "agent_start":
         inst.busy = true;
+        // A candidate run invalidates its comparison's evidence: the head
+        // moved (WORLDLINES §6.8 — results are bound to the measured state).
+        const candHit = (this.worldlines?.list() ?? []).find((w) => w.terminalId === inst.id);
+        if (candHit) {
+          const summary = this.evidenceByComparison.get(candHit.comparisonId);
+          if (summary && !summary.stale) {
+            summary.stale = true;
+            this.send("worldline:evidence-update", summary);
+          }
+        }
         // The run consumes the user-edits context (the extension already read
         // it in before_agent_start). Clear it so the next run stays fresh.
         const startWs = this.workspaceOfTerminal(inst);
@@ -2484,8 +2721,13 @@ class PiEditorApp {
       }
       case "tool": {
         const rawPath = String(event.path ?? "");
-        const path = this.resolvePath(rawPath);
-        if (!path || !this.withinProject(path)) return;
+        // Candidate tool paths resolve against the candidate root; the
+        // within-project guard applies to the primary only (nested moments).
+        const toolWs = this.workspaceOfTerminal(inst);
+        const toolBase = toolWs?.root ?? this.projectCwd;
+        const path = this.canonicalPath(isAbsolute(rawPath) ? rawPath : toolBase ? join(toolBase, rawPath) : rawPath);
+        if (!path) return;
+        if (!this.worldlines?.eventsDirOf(inst.id) && !this.withinProject(path)) return;
         const toolName = String(event.toolName ?? "");
         // Pre-run baseline capture. The rules:
         // - agent_start snapshots the watcher cache (best source when present).
@@ -2517,7 +2759,7 @@ class PiEditorApp {
           t: "tool",
           toolName,
           path,
-          relPath: this.rel(path),
+          relPath: this.rel(path, toolWs?.root ?? null),
           toolCallId: event.toolCallId ?? null,
           entryId: event.entryId ?? null,
           model: inst.currentRun?.model ?? null,
@@ -2550,8 +2792,12 @@ class PiEditorApp {
   /** Write an acknowledgement file for the bridge to consume exactly once. */
   private writeAck(terminalId: string, requestId: string, payload: Record<string, unknown>): void {
     try {
-      mkdirSync(this.eventsDir, { recursive: true, mode: 0o700 });
-      writeFileSync(join(this.eventsDir, `ack-${terminalId}-${requestId}.json`), JSON.stringify(payload), { mode: 0o600 });
+      // The ack must land in the terminal's OWN events dir: a candidate's
+      // bridge polls its candidate events dir, not the primary's.
+      const inst = this.terminals.get(terminalId);
+      const dir = inst ? this.eventsDirOf(inst) : this.eventsDir;
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      writeFileSync(join(dir, `ack-${terminalId}-${requestId}.json`), JSON.stringify(payload), { mode: 0o600 });
     } catch (err) {
       console.warn(`[main] could not write ack: ${(err as Error).message}`);
     }
@@ -2613,6 +2859,7 @@ class PiEditorApp {
     try {
       const state = await this.snapshotWorker.capture(store, await gitHead(ws.root), ws.lastStateCommit ?? null);
       ws.lastStateCommit = state.commit;
+      ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
       const token = randomUUID();
       const pending: PendingPreflight = {
         requestId,
@@ -2627,6 +2874,7 @@ class PiEditorApp {
         leaseRequester,
         expiresAt: Date.now() + 60000,
         timer: setTimeout(() => this.expirePreflight(token), 60000),
+        trustHashes: await this.computeTrustHashes(),
       };
       this.pendingPreflights.set(token, pending);
       this.writeAck(inst.id, requestId, { ok: true, token });
@@ -2670,6 +2918,7 @@ class PiEditorApp {
         sessionFile: String(event.sessionFile ?? null) || null,
         sessionBranchFile: null,
         trusted: typeof event.trusted === "boolean" ? event.trusted : null,
+        trustHashes: pending ? pending.trustHashes : null,
         model: String(event.model ?? null) || null,
         thinkingLevel: String(event.thinkingLevel ?? null) || null,
         replayable: true,
@@ -2710,6 +2959,7 @@ class PiEditorApp {
         sessionFile: String(event.sessionFile ?? null) || null,
         sessionBranchFile: null,
         trusted: typeof event.trusted === "boolean" ? event.trusted : null,
+        trustHashes: pending ? pending.trustHashes : null,
         model: String(event.model ?? null) || null,
         thinkingLevel: String(event.thinkingLevel ?? null) || null,
         replayable: false,
@@ -2796,7 +3046,11 @@ class PiEditorApp {
       const gen = ws.generation;
       await new Promise((r) => setTimeout(r, 100)); // quiet window
       if (ws.generation !== gen) continue;
+      if ((ws.retainedBlobBytes ?? 0) > 256 * 1024 * 1024) {
+        throw new Error("the retained-blob budget is exhausted");
+      }
       const state = await this.snapshotWorker.capture(store, await gitHead(ws.root), ws.lastStateCommit ?? null);
+      ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
       if (ws.generation === gen) return state;
     }
     throw new Error("the source changed during capture");
@@ -2806,11 +3060,15 @@ class PiEditorApp {
 
   private static readonly MAX_FORK_POINTS = 100;
 
+
+
   /** Debounce a moment capture: sibling tools coalesce into one state. */
   private scheduleMomentCapture(inst: PiTerminalInstance): void {
     if (!inst.currentRun) return;
     const ws = this.workspaceOfTerminal(inst);
-    if (!ws || !ws.primary) return;
+    // Candidate workspaces record moments too (nested worldlines): their
+    // chain was seeded with the root base at creation.
+    if (!ws || (!ws.primary && !ws.lastStateCommit)) return;
     if (inst.captureTimer) clearTimeout(inst.captureTimer);
     inst.captureTimer = setTimeout(() => {
       inst.captureTimer = null;
@@ -2829,6 +3087,13 @@ class PiEditorApp {
       this.setRecorderState(inst, "paused");
       return;
     }
+    // The retained-blob budget (WORLDLINES §9): pause recording beyond it.
+    if ((ws.retainedBlobBytes ?? 0) > 256 * 1024 * 1024) {
+      this.setRecorderState(inst, "budget");
+      inst.momentDots = [];
+      inst.pendingHints.clear();
+      return;
+    }
     const hints = [...inst.pendingHints];
     inst.pendingHints.clear();
     // Reconcile: the watcher cache catches changes the hints missed. Bound
@@ -2845,8 +3110,11 @@ class PiEditorApp {
       reconcile.push({ relPath: rel, content });
     }
     try {
-      const state = await this.snapshotWorker.captureIncremental(store, ws.lastStateCommit, hints, reconcile);
+      // A candidate workspace captures its OWN tree (the source override).
+      const source = ws.primary ? undefined : { root: ws.root, gitDir: (await gitCommonDir(ws.root)) ?? ws.root };
+      const state = await this.snapshotWorker.captureIncremental(store, ws.lastStateCommit, hints, reconcile, source);
       ws.lastStateCommit = state.commit;
+      ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
       this.attachMomentState(inst, state.commit);
       this.setRecorderState(inst, "ready");
       this.evictForkPoints(inst);
@@ -3119,6 +3387,26 @@ class PiEditorApp {
 
   // ------------------------------------------------------------- project -----
 
+  /**
+   * Confirmation for live candidates with activity (§6.11): a folder
+   * switch or app quit discards them; ask first.
+   */
+  async confirmDiscardActiveCandidates(): Promise<boolean> {
+    const active = await this.worldlines?.activeCandidates().catch(() => 0) ?? 0;
+    if (active === 0) return true;
+    const win = this.win;
+    if (!win) return true;
+    const res = await dialog.showMessageBox(win, {
+      type: "warning",
+      message: `${active} worldline candidate(s) have source changes or session activity`,
+      detail: "Closing the project or quitting discards them. Discard and continue?",
+      buttons: ["Discard and continue", "Cancel"],
+      defaultId: 1,
+      cancelId: 1,
+    });
+    return res.response === 0;
+  }
+
   private async openFolder(): Promise<{ cwd: string } | { cancelled: true }> {
     if (!this.win || this.win.isDestroyed()) return { cancelled: true };
     const result = await dialog.showOpenDialog(this.win, {
@@ -3127,6 +3415,9 @@ class PiEditorApp {
     });
     if (result.canceled || result.filePaths.length === 0) return { cancelled: true };
     const cwd = result.filePaths[0];
+    // Live candidates with activity need a confirmation before the switch
+    // discards them (WORLDLINES §6.11).
+    if (!(await this.confirmDiscardActiveCandidates())) return { cancelled: true };
     // A folder switch tears down the previous primary workspace and its
     // per-workspace state (watcher, user edits, write lease, run records,
     // snapshot store).
@@ -3356,12 +3647,6 @@ class PiEditorApp {
 
   // ---------------------------------------------------------------- paths ---
 
-  private resolvePath(p: string): string {
-    if (!p) return "";
-    const abs = isAbsolute(p) ? p : this.projectCwd ? join(this.projectCwd, p) : p;
-    return this.canonicalPath(abs);
-  }
-
   private canonicalPath(p: string): string {
     let tail = "";
     let cur = p;
@@ -3489,7 +3774,7 @@ class PiEditorApp {
 
     // ---- Worldlines: candidates (WORLDLINES §6.5, §6.6) ----
     ipcMain.handle("worldline:list", () => this.worldlines?.list() ?? []);
-    ipcMain.handle("worldline:promote", (_e, comparisonId: string, label: "A" | "B") => this.promoteCandidate(comparisonId, label));
+    ipcMain.handle("worldline:promote", (_e, comparisonId: string, label: "A" | "B", force?: boolean) => this.promoteCandidate(comparisonId, label, force ?? false));
     ipcMain.handle("worldline:challenge", async (_e, runId: string) => {
       const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === runId);
       if (!run) return { ok: false, error: "run not found" };
@@ -3510,6 +3795,8 @@ class PiEditorApp {
         model: run.model,
         thinkingLevel: run.thinkingLevel,
         startedAt: run.startedAt,
+        trustHashes: run.trustHashes,
+        trusted: run.trusted,
       };
       return this.worldlines!.forkRun(forkable, { challenge: true });
     });
@@ -3517,11 +3804,6 @@ class PiEditorApp {
     ipcMain.handle("worldline:fork-point", async (_e, terminalId: string, seq: number) => {
       const inst = this.terminals.get(terminalId);
       if (!inst) return { ok: false, error: "terminal not found" };
-      // Nested worldlines stay disabled until attribution and cleanup tests
-      // pass (WORLDLINES §6); the root promotion base stays unchanged.
-      if (this.worldlines?.isCandidateTerminal(terminalId)) {
-        return { ok: false, error: "nested worldlines are not supported yet" };
-      }
       const ev = inst.timeline.find((e) => e.seq === seq);
       // Expected-version checks: the dot must exist with its state and
       // entry, and the state must not have been evicted.
@@ -3529,24 +3811,34 @@ class PiEditorApp {
       if (!ev.stateId || !ev.entryId || ev.evicted) {
         return { ok: false, error: ev.evicted ? "this moment's source state was evicted" : "this moment is not forkable" };
       }
-      // The dot's run: the run that was open at the moment's timestamp.
+      // A nested moment lives inside a candidate: its session is the
+      // candidate's live session and its lineage base is the ROOT run
+      // start (R) — promotion then includes every ancestor change.
+      const nested = this.worldlines?.candidateContextOf(terminalId) ?? null;
       const run = [...this.runsByTerminal.values()]
         .flat()
         .find((r) => r.startedAt <= ev.ts && (r.settledAt === null || r.settledAt >= ev.ts));
-      const sessionFile = run?.sessionFile;
+      const rootRun = nested
+        ? [...this.runsByTerminal.values()].flat().find((r) => r.id === nested.sourceRunId) ?? run
+        : run;
+      const sessionFile = nested?.sessionFile ?? run?.sessionFile;
       if (!sessionFile) return { ok: false, error: "the run session is unavailable" };
       this.initWorldlines();
       return this.worldlines!.forkPoint({
         terminalId,
         stateId: ev.stateId,
         entryId: ev.entryId,
-        model: ev.model ?? run?.model ?? null,
-        thinkingLevel: run?.thinkingLevel ?? null,
+        model: ev.model ?? rootRun?.model ?? null,
+        thinkingLevel: rootRun?.thinkingLevel ?? null,
         sessionFile,
-        sourceRunId: run?.id ?? "",
+        sourceRunId: rootRun?.id ?? "",
+        baseStateId: rootRun?.startStateId ?? null,
+        inheritTrust: rootRun?.trusted === true ? true : null,
       });
     });
     ipcMain.handle("worldline:details", (_e, comparisonId: string, label: "A" | "B") => this.worldlines?.details(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" });
+    ipcMain.handle("worldline:compare", (_e, comparisonId: string) => this.worldlines?.compare(comparisonId) ?? { ok: false, error: "worldlines unavailable" });
+    ipcMain.handle("worldline:challenge-candidate", (_e, comparisonId: string, label: "A" | "B") => this.worldlines?.challengeFromCandidate(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:file", (_e, comparisonId: string, label: "A" | "B", relPath: string) => this.worldlines?.fileOf(comparisonId, label, relPath) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:base-file", (_e, comparisonId: string, relPath: string) => this.worldlines?.baseFileOf(comparisonId, relPath) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:fork-run", async (_e, runId: string) => {
@@ -3568,6 +3860,8 @@ class PiEditorApp {
         model: run.model,
         thinkingLevel: run.thinkingLevel,
         startedAt: run.startedAt,
+        trustHashes: run.trustHashes,
+        trusted: run.trusted,
       };
       return this.worldlines!.forkRun(forkable);
     });
@@ -3909,6 +4203,19 @@ app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) void appState.createWindow();
 });
 
-app.on("before-quit", () => {
-  appState.dispose();
+let quitConfirmed = false;
+app.on("before-quit", (event) => {
+  if (quitConfirmed) {
+    appState.dispose();
+    return;
+  }
+  // Live candidates with activity need a confirmation before the quit
+  // discards them (WORLDLINES §6.11). Cancel the quit, ask once, and
+  // re-issue it after the confirmation.
+  event.preventDefault();
+  void appState.confirmDiscardActiveCandidates().then((ok) => {
+    if (!ok) return; // the user cancelled: the app stays open
+    quitConfirmed = true;
+    app.quit();
+  });
 });

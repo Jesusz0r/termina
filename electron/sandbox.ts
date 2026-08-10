@@ -5,12 +5,24 @@
  * the candidate may write only inside its own tree and support dirs.
  * The profile denies writes and reads of the primary project (except the
  * read-only source object directory), the real home, the app snapshot
- * store, the sibling candidate, and the app-owned worlds root.
+ * store, the sibling candidate, and the app-owned worlds root. The copied
+ * Pi resources are write-denied except the auth file (token refresh).
  *
  * The profile is defense in depth for file-tool paths; the operating
- * system policy is the actual write boundary.
+ * system policy is the actual write boundary. Process-inspection denial
+ * is a documented gap: it breaks the pi TUI bootstrap.
+ *
+ * Network: the sandbox language only accepts `*` or `localhost` as the
+ * remote host, so a per-provider allowlist is not expressible. Candidates
+ * keep network (the model provider must be reachable); evidence and
+ * Verify workers get a full network deny.
+ *
+ * Resource limits (WORLDLINES §6.6: bounded memory, CPU time, file size,
+ * process count, open files) are not expressible in the profile language
+ * either; the launcher wraps the command with a ulimit preamble
+ * (`sandboxShellPreamble`).
  */
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export interface SandboxPaths {
@@ -39,11 +51,27 @@ export interface SandboxPaths {
   /** Read-only paths the sandboxed pi must load: the app package code
    *  and the node binary. These usually live inside the real home. */
   appReadPaths: string[];
+  /** The candidate home's .pi/agent dir (the copied Pi resources). */
+  agentHomeDir: string;
+  /** True for evidence and Verify workers: network fully denied. */
+  denyNetwork: boolean;
 }
 
 /** Escape a path for the sandbox profile language. */
 function quote(p: string): string {
   return `"${p.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * The ulimit preamble for every sandboxed launch: bounded CPU time,
+ * open files, and output file size. The wrapper shell applies them before
+ * exec, so signals pass through. The address-space and process-count
+ * limits are omitted: setrlimit(RLIMIT_AS) fails with EINVAL on current
+ * macOS, and RLIMIT_NPROC is per-user, so a bound would break npm's forks
+ * whenever the machine is busy. Process groups bound candidates instead.
+ */
+export function sandboxShellPreamble(): string {
+  return "ulimit -t 7200 -n 1024 -f 2097152;";
 }
 
 /** Build the sandbox profile text for one candidate. */
@@ -81,7 +109,20 @@ export function buildSandboxProfile(p: SandboxPaths): string {
     deny("file-read*", p.templateDir),
     // The app user data: no writes except this candidate's own dirs.
     deny("file-write*", p.userData),
-    deny("file-write*", p.primaryEventsDir),    allow("file-write*", p.candidateRoot),
+    deny("file-write*", p.primaryEventsDir),
+    // The copied Pi resources are immutable inputs: no writes except the
+    // auth file, whose token refresh changes only that copy (§6.6). The
+    // rest of the home (npm logs, caches) stays writable for tooling.
+    deny("file-write*", join(p.agentHomeDir, "settings.json")),
+    deny("file-write*", join(p.agentHomeDir, "models-store.json")),
+    deny("file-write*", join(p.agentHomeDir, "skills")),
+    deny("file-write*", join(p.agentHomeDir, "prompts")),
+    deny("file-write*", join(p.agentHomeDir, "themes")),
+    deny("file-write*", join(p.agentHomeDir, "extensions")),
+    allow("file-write*", join(p.agentHomeDir, "auth.json")),
+    // Evidence and Verify workers run fully offline (WORLDLINES §6.8).
+    ...(p.denyNetwork ? ["(deny network*)"] : []),
+    allow("file-write*", p.candidateRoot),
     allow("file-write*", p.candidateSupport),
     // Process inspection denial breaks the pi TUI bootstrap (the node
     // runtime needs process info for its own startup). Documented gap.
@@ -96,6 +137,17 @@ export function writeSandboxProfile(profileDir: string, paths: SandboxPaths): st
   mkdirSync(profileDir, { recursive: true });
   const path = join(profileDir, "sandbox.sb");
   writeFileSync(path, buildSandboxProfile(paths), { mode: 0o600 });
+  return path;
+}
+
+/**
+ * The evidence worker profile: the candidate's deny-list profile plus a
+ * full network deny (WORLDLINES §6.8 — no evidence grant, no network).
+ */
+export function writeEvidenceProfile(cand: { profilePath: string; root: string }): string {
+  const base = readFileSync(cand.profilePath, "utf8");
+  const path = join(dirname(cand.profilePath), `evidence-${process.pid}.sb`);
+  writeFileSync(path, `${base}\n(deny network*)\n`, { mode: 0o600 });
   return path;
 }
 

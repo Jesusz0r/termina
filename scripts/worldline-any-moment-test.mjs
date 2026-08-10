@@ -152,9 +152,11 @@ if (!moment2) process.exit(1);
 check("second moment includes the earlier edit", readFileSync(join(moment2.root, "greeting.ts"), "utf8").includes("hi there"), readFileSync(join(moment2.root, "greeting.ts"), "utf8").slice(0, 40));
 check("second moment has its own edit", readFileSync(join(moment2.root, "hello.txt"), "utf8").includes("second"), readFileSync(join(moment2.root, "hello.txt"), "utf8").slice(0, 40));
 
-// ------------------------------------------- nested forking is rejected ----
+// A candidate terminal with no recorded moments has nothing to fork; the
+// full nested flow (moments inside candidates) is covered by the isolation
+// suite.
 const nested = await evalJs(`window.pi.forkPoint(${JSON.stringify(moment1.terminalId)}, 1)`);
-check("a candidate terminal rejects nested forking", nested?.ok === false && String(nested?.error ?? "").includes("nested"), JSON.stringify(nested));
+check("a candidate terminal with no moments has no forkable dots", nested?.ok === false && String(nested?.error ?? "").includes("moment"), JSON.stringify(nested));
 
 // ------------------------------------------------------------ cleanup ----
 const d1 = await evalJs(`window.pi.discardWorldline(${JSON.stringify(cmp1)})`);

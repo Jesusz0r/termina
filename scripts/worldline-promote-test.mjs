@@ -139,7 +139,12 @@ writeFileSync(join(PROJ, "greeting.ts"), 'export const greeting = "hello";\n');
 await sleep(1200);
 
 // ------------------------------------------------------- clean promotion ----
-const promote = await evalJs(`window.pi.promoteWorldline(${JSON.stringify(comparisonId)}, "A")`);
+// The confirmation contract (WORLDLINES §6.10): no evidence has been
+// computed yet, so the first call asks for explicit confirmation and the
+// forced call proceeds.
+const promoteAsk = await evalJs(`window.pi.promoteWorldline(${JSON.stringify(comparisonId)}, "A")`);
+check("promotion asks for confirmation without evidence", promoteAsk?.ok === false && typeof promoteAsk?.confirm === "string" && String(promoteAsk.confirm).includes("evidence"), JSON.stringify(promoteAsk));
+const promote = await evalJs(`window.pi.promoteWorldline(${JSON.stringify(comparisonId)}, "A", true)`);
 check("promotion succeeds", promote?.ok === true, JSON.stringify(promote));
 if (!promote?.ok) process.exit(1);
 const promotedId = promote.terminalId;
