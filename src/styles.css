@@ -447,7 +447,7 @@ body {
 }
 
 #btn-new-terminal {
-  /* bare icon button: no chrome, just the ＋ in a whiteish tone */
+  /* Use a light plus sign without a button background. */
   background: none;
   border: none;
   color: #d4d4d4;
@@ -464,7 +464,7 @@ body {
 
 #btn-clear-modified,
 #btn-accept-all {
-  /* bare text button: same whiteish tone as the new-terminal button */
+  /* Use the same light text color as the new-terminal button. */
   background: none;
   border: none;
   color: #d4d4d4;

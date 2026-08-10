@@ -11,8 +11,8 @@
 ### Isolation (§6.6)
 
 - The sandbox profile now write-denies the copied Pi resources
-  (settings, models-store, skills, prompts, themes, extensions) while the
-  auth file stays writable (token refresh changes only that copy). The
+  (settings, models, models-store, skills, prompts, themes, extensions) while
+  the auth file stays writable (token refresh changes only that copy). The
   rest of the candidate home stays writable so npm and tooling work.
 - Resource limits apply through a `ulimit` preamble in the wrapper shell:
   CPU time, open files, and output file size. The address-space and
@@ -33,7 +33,7 @@
 ### Trust hashes (§6.7)
 
 - The trust-sensitive resource set (project `.pi` + `.agents/skills` +
-  the pi agent dir's settings, models-store, prompts, skills, themes,
+  the pi agent dir's settings, models, models-store, prompts, skills, themes,
   extensions) is hashed at every preflight and recorded on the run.
 - Fork eligibility rejects a run whose trust-sensitive resources changed
   since the run.
@@ -73,7 +73,7 @@
   256 MB retained-blob budget pauses recording with the budget recorder
   state; the checkpoint acknowledgement timeout is 5 s per the plan.
 - `scripts/perf-baseline.mjs` records the §9 latency baselines: full
-  capture p95 ≈ 38 ms (target 200 ms) and incremental p95 ≈ 38 ms
+  capture p95 ≈ 76 ms (target 200 ms) and incremental p95 ≈ 39 ms
   (target 100 ms) on the 200-file fixture.
 
 ### Nested worldlines (§6)
@@ -110,16 +110,16 @@
 
 ## Verification
 
-- `npx tsc --noEmit`, `node scripts/build.mjs`, `npx vite build` — clean.
+- `npm run typecheck`, `npm run build` — clean.
 - Full matrix (fresh instance per suite): fork-run 27/27, compare 29/29,
   promote 21/21, any-moment 18/18, challenge 19/19, isolation 25/25,
-  capture 14/14, recovery 7/7, preflight 7/7, timeline 9/9,
-  timeline-replay 3/3, explorer 7/7, review 5/5, mine-ownership 6/6,
-  edits-to-agent 9/9, baseline-race 11/11, dispatch 8/8, plan-board 6/6,
-  preview 4/4, session-search 6/6, tui-loop 3/3, verify 11/11,
-  verify-cancel 5/5.
-- `scripts/perf-baseline.mjs`: full capture p95 ≈ 38 ms, incremental
-  p95 ≈ 38 ms on the 200-file fixture.
+  capture 14/14, evidence 16/16, trust 8/8, cleanup 18/18, recovery 7/7,
+  preflight 7/7, timeline 9/9, timeline-replay 3/3, explorer 7/7,
+  review 5/5, mine-ownership 6/6, edits-to-agent 9/9, baseline-race 11/11,
+  dispatch 8/8, plan-board 6/6, preview 4/4, session-search 6/6,
+  tui-loop 3/3, verify 11/11, verify-cancel 5/5.
+- `scripts/perf-baseline.mjs`: full capture p95 ≈ 76 ms, incremental
+  p95 ≈ 39 ms on the 200-file fixture.
 
 ## Known limits (documented in the plan or code)
 

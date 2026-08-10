@@ -1,11 +1,13 @@
 /**
- * Session Timeline ("time machine"): a compact strip under the terminal
+ * Session Timeline: a compact strip under the terminal
  * showing every agent action with a dot. Clicking a dot opens the file as it
  * looked at that exact moment (read-only snapshot tab); ▶ replays the run.
  * A forkable dot (captured source state) forks a candidate at that moment
  * with Cmd/Ctrl+Click.
  */
 import type { TimelineEvent, RecorderState } from "../shared/types";
+
+const MAX_TIMELINE_EVENTS = 400;
 
 export class TimelineView {
   private dotsEl: HTMLElement;
@@ -38,6 +40,12 @@ export class TimelineView {
     this.onFork = handlers.onFork;
   }
 
+  /** Clear timeline state when the project changes. */
+  resetForProject(): void {
+    this.setEvents([]);
+    this.setRecorder("paused");
+  }
+
   /** The recorder state label (indexing / ready / paused / degraded / budget). */
   setRecorder(state: RecorderState): void {
     this.recorderEl.textContent = state === "ready" ? "" : state;
@@ -67,9 +75,7 @@ export class TimelineView {
 
   setEvents(events: TimelineEvent[]): void {
     this.stopReplay();
-    // Copy: the renderer's pane.timeline aliased this array, so its pushes
-    // mutated the view's events and push() never created the dots.
-    this.events = [...events];
+    this.events = events.slice(-MAX_TIMELINE_EVENTS);
     this.activeSeq = null;
     this.render();
   }
@@ -88,6 +94,13 @@ export class TimelineView {
       return;
     }
     this.events.push(event);
+    while (this.events.length > MAX_TIMELINE_EVENTS) {
+      const removed = this.events.shift();
+      if (removed) {
+        this.dots.get(removed.seq)?.remove();
+        this.dots.delete(removed.seq);
+      }
+    }
     const dot = this.makeDot(event);
     this.dots.set(event.seq, dot);
     this.dotsEl.appendChild(dot);
@@ -175,7 +188,7 @@ export class TimelineView {
     this.stopReplay();
     this.highlight(ev.seq);
     if (ev.t === "tool" || ev.t === "change") this.onJump(ev);
-    // Run markers (start/settled) are silent moments.
+    // Run markers do not open file snapshots.
   }
 
   /** Cmd/Ctrl+Click on a forkable dot: fork a candidate at this moment. */

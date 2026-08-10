@@ -58,13 +58,17 @@ npm run dev          # build main + preload, start Vite, launch Electron
 ```
 
 - `npx tsc --noEmit` — typecheck
-- `node scripts/build.mjs && npx vite build` — production build
+- `npm run build` — production build for Electron and the renderer
 - `node scripts/perf-baseline.mjs` — capture latency baselines (§9 targets)
-- e2e suites in `scripts/` (each against a fresh instance on :9222, with
-  `PI_EDITOR_INITIAL_CWD`, `PI_EDITOR_EVENTS_DIR`, and `PI_EDITOR_WORLDS_DIR`
-  set per suite): `worldline-*-test.mjs`, plus timeline, explorer, review,
-  mine-ownership, edits-to-agent, baseline-race, plan-board, dispatch,
-  preview, session-search, tui-loop, verify, verify-cancel
+- `npm run test:e2e` — build and run the complete Electron e2e matrix. The
+  launcher resets the fixture, events, worlds, and app-data directories for
+  every suite and starts a fresh instance on port 9222. Run one suite with
+  `npm run test:e2e -- --skip-build worldline-capture-test.mjs`.
+
+Pi/ditor uses the Pi configuration in `~/.pi/agent`. Host `PI_*` session
+variables are removed before launch so a host session file cannot attach to a
+terminal. Run `/login` and set the default provider and model in the Pi/ditor
+terminal before running model-driven e2e suites.
 
 ## Layout
 

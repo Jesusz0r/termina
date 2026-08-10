@@ -2,7 +2,7 @@
  * Phase 8 e2e: fork preflight rejections (WORLDLINES §10
  * worldline-preflight-test).
  *
- * The launcher sets PI_EDITOR_INITIAL_CWD to one of the poisoned fixtures;
+ * The launcher sets PI_EDITOR_INITIAL_CWD to one of the invalid fixtures;
  * the suite types one prompt, waits for the settled run, then asserts the
  * fork-run rejection with the exact stable reason. Fresh instance per case.
  *
@@ -74,7 +74,7 @@ async function waitFor(predicate, timeoutMs = 240000) {
 }
 
 // A settled run of any kind (recorded or not) is enough to exercise the
-// fork gate. The run may not record in poisoned fixtures; the fork call
+// fork gate. The run may not record in invalid fixtures; the fork call
 // still reaches the preflight checks. In a non-Git folder the run settles
 // without recording at all — wait for the idle cycle instead.
 if (CASE === "nogit") {

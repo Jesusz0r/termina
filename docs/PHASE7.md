@@ -104,6 +104,5 @@ promotion, Fork Any Moment, and Challenge Mode.
 - The benchmark adapter requires the declared `pi-ditor.benchmark`
   harness; projects without one get the unavailable verdict with the
   reason.
-- Nested worldlines remain disabled; challenge-from-candidate (snapshot
-  the head as reference) is not implemented — the run-level challenge is
-  the supported path.
+- Nested worldlines and challenge-from-candidate use the candidate head as
+  the reference. Both challenge paths are supported.

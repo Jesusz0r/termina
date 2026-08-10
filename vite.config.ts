@@ -1,8 +1,8 @@
 import { defineConfig } from "vite";
 import { resolve } from "node:path";
 
-// Renderer is a plain (no-framework) TypeScript app. Monaco and xterm are
-// bundled from node_modules; Monaco workers are wired via ?worker imports in src/main.ts.
+// Renderer is a plain (no-framework) TypeScript app. Monaco and xterm load
+// from separate chunks; Monaco workers use ?worker imports in src/main.ts.
 export default defineConfig({
   root: resolve(__dirname, "src"),
   base: "./",
@@ -14,6 +14,15 @@ export default defineConfig({
     outDir: resolve(__dirname, "dist-renderer"),
     emptyOutDir: true,
     target: "es2022",
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules/monaco-editor")) return "monaco";
+          if (id.includes("node_modules/@xterm")) return "xterm";
+          return undefined;
+        },
+      },
+    },
   },
   optimizeDeps: {
     include: ["monaco-editor"],

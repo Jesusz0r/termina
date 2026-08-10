@@ -130,7 +130,8 @@ const discard = await evalJs(`window.pi.discardWorldline(${JSON.stringify(fork.c
 check("discard ok", discard?.ok === true, JSON.stringify(discard));
 await sleep(1500);
 
-const stores = execFileSync("find", [join(process.env.HOME, "Library", "Application Support", "pi-ditor", "worldlines"), "-path", "*/git/objects", "-type", "d"], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
+const storeRoot = process.env.PI_EDITOR_USER_DATA_DIR ?? join(process.env.HOME, "Library", "Application Support", "pi-ditor");
+const stores = execFileSync("find", [join(storeRoot, "worldlines"), "-path", "*/git/objects", "-type", "d"], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
 const storeObjects = stores.sort().pop();
 check("the snapshot store exists", !!storeObjects, String(storeObjects));
 if (!storeObjects) process.exit(1);

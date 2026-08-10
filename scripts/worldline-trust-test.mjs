@@ -117,7 +117,7 @@ const fork2 = await evalJs(`window.pi.forkRun(${JSON.stringify(run.id)})`);
 check("changed trust resources reject the fork", fork2?.ok === false && String(fork2?.error ?? "").includes("trust-sensitive resources changed"), JSON.stringify(fork2));
 
 // Restore: the fork works again.
-writeFileSync(join(PROJ, ".pi", "settings.json"), '{"theme": "dark"}\n');
+writeFileSync(join(PROJ, ".pi", "settings.json"), '{"theme":"dark"}\n');
 await sleep(1200);
 const fork3 = await evalJs(`window.pi.forkRun(${JSON.stringify(run.id)})`);
 check("restored trust resources fork again", fork3?.ok === true, JSON.stringify(fork3));

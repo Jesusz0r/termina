@@ -112,11 +112,14 @@ check("context file cleared after the run", cleared, "");
 // (same shape the bridge extension writes), then write mid-run.
 const { appendFileSync } = await import("node:fs");
 const sidecar = join(eventsDir, "term-1.jsonl");
-appendFileSync(sidecar, '{"t":"agent_start"}\n');
+const bridgeId = "synthetic-edits";
+let sequence = 0;
+const emit = (event) => appendFileSync(sidecar, JSON.stringify({ bridgeId, seq: ++sequence, ...event }) + "\n");
+emit({ t: "agent_start" });
 await sleep(600);
 writeFileSync("/tmp/pi-editor-test-project/hello.txt", "user edit mid-run\n");
 await sleep(1200); // watcher debounce + edit debounce + context write
-appendFileSync(sidecar, '{"t":"agent_settled"}\n');
+emit({ t: "agent_settled" });
 await sleep(600);
 check("mid-run user edit is not recorded", !existsSync(editsFile), "");
 

@@ -9,7 +9,7 @@ import { parentPort } from "node:worker_threads";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { SnapshotStore, runGitIn, type CaptureBudget, type SourceState } from "./worldline-git.js";
+import { SnapshotStore, runGitIn, type CaptureBudget, type MaterializeOptions, type SourceState } from "./worldline-git.js";
 
 interface CaptureRequest {
   op: "capture";
@@ -41,6 +41,8 @@ interface TemplateRequest {
   sourceObjectsDir: string;
 }
 
+const RUNTIME_ALLOWLIST = ["node_modules", ".venv", "venv"];
+
 interface ApplyRequest {
   op: "apply-state";
   requestId: string;
@@ -50,6 +52,7 @@ interface ApplyRequest {
   objectFormat: "sha1" | "sha256";
   stateId: string;
   targetDir: string;
+  preserveTopLevel?: string[];
 }
 
 interface CaptureIncrementalRequest {
@@ -89,11 +92,17 @@ async function applyState(req: ApplyRequest): Promise<void> {
   const store = SnapshotStore.open(req.storeDir, req.sourceRoot, req.sourceGitDir, req.objectFormat);
   // Overwrite the candidate bytes with the state; git add -A also stages
   // deletions, so the commit tree equals the disk state.
-  await store.materialize(req.stateId, req.targetDir);
-  const add = await runGitIn(req.targetDir, ["add", "-A"]);
+  const options: MaterializeOptions = { preserveTopLevel: req.preserveTopLevel };
+  await store.materialize(req.stateId, req.targetDir, options);
+  const add = await runGitIn(req.targetDir, ["add", "-A", "--", ".", ...RUNTIME_ALLOWLIST.map((path) => `:(exclude)${path}`)]);
   if (add.code !== 0) throw new Error(`apply git add failed: ${add.stderr}`);
-  const commit = await runGitIn(req.targetDir, ["commit", "-q", "-m", "pi-ditor state"]);
-  if (commit.code !== 0) throw new Error(`apply git commit failed: ${commit.stderr}`);
+  const changed = await runGitIn(req.targetDir, ["diff", "--cached", "--quiet"]);
+  if (changed.code === 1) {
+    const commit = await runGitIn(req.targetDir, ["commit", "-q", "-m", "pi-ditor state"]);
+    if (commit.code !== 0) throw new Error(`apply git commit failed: ${commit.stderr}`);
+  } else if (changed.code !== 0) {
+    throw new Error(`apply git diff failed: ${changed.stderr}`);
+  }
 }
 
 parentPort?.on("message", (msg: WorkerRequest) => {
@@ -186,7 +195,7 @@ function trustHashes(agentDir: string, projectRoot: string | null): Record<strin
       }
     }
   };
-  for (const name of ["settings.json", "models-store.json", "prompts", "skills", "themes", "extensions"]) {
+  for (const name of ["settings.json", "models.json", "models-store.json", "prompts", "skills", "themes", "extensions"]) {
     const full = join(agentDir, name);
     try {
       const st = statSync(full);

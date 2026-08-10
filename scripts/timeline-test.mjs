@@ -1,5 +1,5 @@
 /**
- * Session Timeline ("time machine") e2e test.
+ * Session Timeline end-to-end test.
  *
  * Expects Electron on :9222 with PI_EDITOR_INITIAL_CWD pointing at a fresh
  * project containing greeting.ts ("export const greeting = \"hello\";").

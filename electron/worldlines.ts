@@ -7,9 +7,10 @@
  * creation is all-or-nothing: any failure cancels both candidates and
  * removes every app-owned resource.
  */
-import { execFileSync, spawn } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { execFile, spawn } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmod, cp, lstat as lstatPath, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { writeSandboxProfile, sandboxShellPreamble, type SandboxPaths } from "./sandbox.js";
 import { runGitIn } from "./worldline-git.js";
@@ -42,9 +43,9 @@ export interface WorldlineSummary {
   comparisonId: string;
   label: "A" | "B";
   role: "reference" | "alternative" | "challenge" | "moment";
-  comparisonBaseStateId: string;
-  promotionBaseStateId: string;
-  headStateId: string;
+  comparisonBaseStateId: string | null;
+  promotionBaseStateId: string | null;
+  headStateId: string | null;
   sourceRunId: string;
   terminalId: string | null;
   version: number;
@@ -69,6 +70,12 @@ interface CandidateState {
   cacheDir: string;
   profilePath: string;
   sessionFile: string | null;
+  /** The shared base state for this comparison. */
+  comparisonBaseStateId: string | null;
+  /** The root state used for promotion. */
+  promotionBaseStateId: string | null;
+  /** The latest captured state of this candidate. */
+  headStateId: string | null;
   terminalId: string | null;
   pid: number | null;
   lstart: string | null;
@@ -111,6 +118,7 @@ export interface ForkableRun {
   startStateId: string | null;
   settledStateId: string | null;
   promptPayloadFile: string | null;
+  promptEventsDir: string | null;
   promptEntryId: string | null;
   promptParentEntryId: string | null;
   settledEntryId: string | null;
@@ -140,7 +148,7 @@ export interface WorldlineDeps {
   appReadPaths(): string[];
   snapshot: {
     template(opts: { store: SnapshotStore; stateId: string; targetDir: string; sourceObjectsDir: string }): Promise<void>;
-    applyState(opts: { store: SnapshotStore; stateId: string; targetDir: string }): Promise<void>;
+    applyState(opts: { store: SnapshotStore; stateId: string; targetDir: string; preserveTopLevel?: string[] }): Promise<void>;
   };
   session: {
     fork(opts: {
@@ -158,8 +166,9 @@ export interface WorldlineDeps {
     workspaceId: string;
     launch: { cmd: string; args: string[]; env: Record<string, string | undefined> };
   }): Promise<{ terminalId: string; pid: number }>;
-  createCandidateWorkspace(root: string, baseStateId: string | null): string;
+  createCandidateWorkspace(root: string, baseStateId: string | null, comparisonId: string): string;
   onUpdate(summary: WorldlineSummary): void;
+  onCandidateState(root: string, stateId: string): void;
   onRemoved(comparisonId: string): void;
   /** The fork preflight (WORLDLINES §4): repo, platform, disk. */
   preflight(): Promise<{ ok: boolean; reasons: string[] }>;
@@ -170,9 +179,16 @@ export interface WorldlineDeps {
   /** The unowned-edit count of a run (comparison provenance). */
   unownedEditsOf(runId: string): number;
   /** The source run of a comparison (challenge anchors). */
-  sourceRunOf(runId: string): { promptPayloadFile: string | null; promptParentEntryId: string | null; sessionFile: string | null } | null;
+  sourceRunOf(runId: string): {
+    promptPayloadFile: string | null;
+    promptEventsDir: string | null;
+    promptParentEntryId: string | null;
+    sessionFile: string | null;
+  } | null;
   /** Capture the current primary state (details conflict status). */
   capturePrimary(): Promise<string | null>;
+  /** Release a temporary state reference after a comparison operation. */
+  releaseState(stateId: string): Promise<void>;
 }
 
 const RUNTIME_ALLOWLIST = ["node_modules", ".venv", "venv"];
@@ -182,6 +198,9 @@ const MAX_TEMPLATE_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_CANDIDATE_BYTES = 1024 * 1024 * 1024;
 const READY_TIMEOUT_MS = 90000;
 const MAX_PI_RESOURCE_BYTES = 200 * 1024 * 1024;
+const MAX_WORLDLINE_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_IGNORED_FILES = 5000;
+const MAX_IGNORED_BYTES = 200 * 1024 * 1024;
 
 /** The app-owned marker that proves a worlds dir belongs to the app. */
 const MARKER = ".pi-ditor-world";
@@ -191,11 +210,15 @@ async function dirBytes(dir: string): Promise<number> {
   return new Promise((resolvePromise) => {
     const child = spawn("du", ["-sk", dir], { stdio: ["ignore", "pipe", "ignore"] });
     let out = "";
-    child.stdout.on("data", (d: Buffer) => (out += d.toString("utf8")));
-    child.on("error", () => resolvePromise(0));
-    child.on("close", () => {
+    let overflow = false;
+    child.stdout.on("data", (data: Buffer) => {
+      if (out.length < 128) out += data.toString("utf8").slice(0, 128 - out.length);
+      else overflow = true;
+    });
+    child.on("error", () => resolvePromise(Number.POSITIVE_INFINITY));
+    child.on("close", (code) => {
       const m = /^(\d+)/.exec(out.trim());
-      resolvePromise(m ? Number(m[1]) * 1024 : 0);
+      resolvePromise(code === 0 && !overflow && m ? Number(m[1]) * 1024 : Number.POSITIVE_INFINITY);
     });
   });
 }
@@ -208,11 +231,12 @@ function isInside(parent: string, child: string): boolean {
 export class WorldlineManager {
   private comparisons = new Map<string, ComparisonState>();
   private seq = 0;
+  private ready: Promise<void>;
   private terminalToComparison = new Map<string, { comparisonId: string; label: "A" | "B" }>();
 
   constructor(private deps: WorldlineDeps) {
     mkdirSync(this.deps.worldsRoot, { recursive: true });
-    this.sweepStale();
+    this.ready = this.sweepStale();
   }
 
   // ------------------------------------------------------------ listing ----
@@ -233,9 +257,9 @@ export class WorldlineManager {
       comparisonId: cmp.id,
       label: cand.label,
       role: cand.role,
-      comparisonBaseStateId: cmp.sourceRunId,
-      promotionBaseStateId: cmp.sourceRunId,
-      headStateId: cmp.sourceRunId,
+      comparisonBaseStateId: cand.comparisonBaseStateId,
+      promotionBaseStateId: cand.promotionBaseStateId,
+      headStateId: cand.headStateId,
       sourceRunId: cmp.sourceRunId,
       terminalId: cand.terminalId,
       version: cand.version,
@@ -256,8 +280,34 @@ export class WorldlineManager {
     return this.comparisons.get(hit.comparisonId)?.candidates.get(hit.label)?.eventsDir ?? null;
   }
 
+  /** Update the latest captured state of a candidate. */
+  updateHeadState(terminalId: string, stateId: string): void {
+    const hit = this.terminalToComparison.get(terminalId);
+    if (hit) this.setCandidateHead(hit.comparisonId, hit.label, stateId);
+  }
+
+  /** Record a captured candidate state from an on-demand operation. */
+  setCandidateHead(comparisonId: string, label: "A" | "B", stateId: string): void {
+    const cmp = this.comparisons.get(comparisonId);
+    const cand = cmp?.candidates.get(label);
+    if (!cmp || !cand || cand.headStateId === stateId) return;
+    const previousStateId = cand.headStateId;
+    cand.headStateId = stateId;
+    this.deps.onCandidateState(cand.dir, stateId);
+    if (previousStateId) void this.deps.releaseState(previousStateId);
+    cand.version++;
+    this.pushUpdate(cmp, cand);
+  }
+
   /**
-   * The three comparison diffs (WORLDLINES §8 `worldline:compare`):
+   * Return the candidate version and head state used to validate evidence.
+   */
+  evidenceVersion(comparisonId: string, label: "A" | "B"): { version: number; headStateId: string | null } | null {
+    const cand = this.comparisons.get(comparisonId)?.candidates.get(label);
+    return cand ? { version: cand.version, headStateId: cand.headStateId } : null;
+  }
+
+  /** The three comparison diffs (WORLDLINES §8 `worldline:compare`):
    * metadata only — base→A, base→B, and A→B changed paths.
    */
   async compare(comparisonId: string): Promise<{
@@ -279,6 +329,8 @@ export class WorldlineManager {
         this.deps.captureHead(a.dir, join(a.dir, ".git"), cmp.baseStateId),
         this.deps.captureHead(b.dir, join(b.dir, ".git"), cmp.baseStateId),
       ]);
+      this.setCandidateHead(cmp.id, "A", wA.commit);
+      this.setCandidateHead(cmp.id, "B", wB.commit);
       const [baseToA, baseToB, aToB] = await Promise.all([
         store.diffTree(cmp.baseStateId, wA.commit),
         store.diffTree(cmp.baseStateId, wB.commit),
@@ -302,6 +354,7 @@ export class WorldlineManager {
    * original task. The root promotion base stays unchanged.
    */
   async challengeFromCandidate(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; comparisonId?: string; error?: string; requiresDiscard?: boolean }> {
+    await this.ready;
     const cmp = this.comparisons.get(comparisonId);
     const cand = cmp?.candidates.get(label);
     if (!cmp || !cand) return { ok: false, error: "candidate not found" };
@@ -357,6 +410,9 @@ export class WorldlineManager {
       cacheDir: join(dir, `${l}-support`, "cache"),
       profilePath: join(dir, `${l}-support`, "sandbox.sb"),
       sessionFile: null,
+      comparisonBaseStateId: null,
+      promotionBaseStateId: null,
+      headStateId: null,
       terminalId: null,
       pid: null,
       lstart: null,
@@ -368,8 +424,15 @@ export class WorldlineManager {
     const nB = mk("B", "alternative");
     ncmp.candidates.set("A", nA);
     ncmp.candidates.set("B", nB);
+    for (const candidate of ncmp.candidates.values()) {
+      candidate.comparisonBaseStateId = ncmp.baseStateId;
+      candidate.promotionBaseStateId = ncmp.baseStateId;
+    }
+    nA.headStateId = wHead.commit;
+    nB.headStateId = ncmp.baseStateId;
     this.comparisons.set(id, ncmp);
     try {
+      const payload = await this.readPromptPayload(run);
       // The template is the SHARED BASE (R), not the reference head: the
       // challenger starts from the recorded base.
       mkdirSync(ncmp.templateDir, { recursive: true });
@@ -389,7 +452,7 @@ export class WorldlineManager {
       await this.cloneTree(ncmp.templateDir, nA.dir);
       await this.cloneTree(ncmp.templateDir, nB.dir);
       // The reference A receives the candidate head state.
-      await this.deps.snapshot.applyState({ store, stateId: wHead.commit, targetDir: nA.dir });
+      await this.deps.snapshot.applyState({ store, stateId: wHead.commit, targetDir: nA.dir, preserveTopLevel: RUNTIME_ALLOWLIST });
       // A's session continues from the candidate leaf; B's session branches
       // at the pre-task anchor (the original run's prompt parent).
       const [forkA, forkB] = await Promise.all([
@@ -407,7 +470,7 @@ export class WorldlineManager {
           sessionWorkspaceDir: ncmp.sessionWorkspaceDir,
           candidateRoot: nB.dir,
           candidateSessionDir: nB.sessionDir,
-          contextText: this.readPromptPayload(run).context || undefined,
+          contextText: payload.context || undefined,
         }),
       ]);
       if (!forkA.ok || !forkA.sessionFile) throw new Error("could not fork the reference session");
@@ -415,11 +478,10 @@ export class WorldlineManager {
       nA.sessionFile = forkA.sessionFile;
       nB.sessionFile = forkB.sessionFile;
       this.createSupportDirs(ncmp);
-      this.copyPiResources(ncmp);
+      await this.copyPiResources(ncmp);
       // B replays the original task automatically (structured control).
-      this.writeControl(nA, { opId: randomUUID(), action: "none" });
-      const payload = this.readPromptPayload(run);
-      this.writeControl(nB, {
+      await this.writeControl(nA, { opId: randomUUID(), action: "none" });
+      await this.writeControl(nB, {
         opId: randomUUID(),
         action: "structured",
         content: [{ type: "text", text: payload.text }, ...payload.images],
@@ -435,6 +497,7 @@ export class WorldlineManager {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       await this.teardown(ncmp.id, "error", message);
+      await this.deps.releaseState(wHead.commit);
       return { ok: false, error: message };
     }
   }
@@ -451,13 +514,13 @@ export class WorldlineManager {
       let count = 0;
       let bytes = 0;
       for (const p of res.stdout.toString("utf8").split("\0")) {
-        if (!p || count > 5000) continue;
+        if (!p || count >= MAX_IGNORED_FILES || bytes >= MAX_IGNORED_BYTES) continue;
         if (RUNTIME_ALLOWLIST.includes(p.split(/[\\/]/)[0])) continue;
         count++;
         try {
-          bytes += statSync(join(cand.dir, p)).size;
+          bytes = Math.min(MAX_IGNORED_BYTES, bytes + (await lstatPath(join(cand.dir, p))).size);
         } catch {
-          /* deleted between list and stat */
+          /* The file can disappear before it is measured. */
         }
       }
       return { count, bytes };
@@ -485,7 +548,11 @@ export class WorldlineManager {
         }
         // Session activity beyond the fork: the session file has entries
         // past the initial control marker.
-        if (cand.sessionFile && statSync(cand.sessionFile).size > 1024) active++;
+        try {
+          if (cand.sessionFile && (await stat(cand.sessionFile)).size > 1024) active++;
+        } catch {
+          active++;
+        }
       }
     }
     return active;
@@ -524,6 +591,7 @@ export class WorldlineManager {
     const cand = cmp?.candidates.get(label);
     if (!cmp || !cand) return { ok: false, error: "candidate not found" };
     if (!cmp.baseCommit) return { ok: false, error: "the comparison base is missing" };
+    let primaryCommit: string | null = null;
     try {
       const changedFiles = await this.changedFiles(cmp, cand);
       // Provenance: the unowned edits of the source run (§6.9).
@@ -533,18 +601,19 @@ export class WorldlineManager {
       // Conflict status against the current primary source: capture P and
       // merge the candidate head against it (on demand, WORLDLINES §6.9).
       let conflicts: string[] = [];
-      const primaryCommit = await this.deps.capturePrimary();
+      primaryCommit = await this.deps.capturePrimary();
       if (primaryCommit && cmp.baseStateId) {
         try {
           const store = await this.deps.getStore();
           if (store) {
             const wHead = await this.deps.captureHead(cand.dir, join(cand.dir, ".git"), cmp.baseStateId);
+            this.setCandidateHead(cmp.id, label, wHead.commit);
             const merged = await store.merge3(wHead.commit, primaryCommit);
             if (!merged.ok && merged.tree) conflicts = merged.conflicts;
             else if (!merged.ok && !merged.tree) conflicts = [merged.reason ?? "merge failed"];
           }
         } catch {
-          /* conflict status is best-effort */
+          /* Conflict status can be incomplete. */
         }
       }
       return {
@@ -556,8 +625,9 @@ export class WorldlineManager {
           state: cand.state,
           error: cand.error,
           sourceRunId: cmp.sourceRunId,
-          comparisonBaseStateId: cmp.sourceRunId,
-          headStateId: cmp.sourceRunId,
+          comparisonBaseStateId: cand.comparisonBaseStateId,
+          promotionBaseStateId: cand.promotionBaseStateId,
+          headStateId: cand.headStateId,
           model: cmp.model,
           thinkingLevel: cmp.thinkingLevel,
           createdAt: cmp.createdAt,
@@ -574,19 +644,27 @@ export class WorldlineManager {
       };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    } finally {
+      if (primaryCommit) await this.deps.releaseState(primaryCommit);
     }
   }
 
-  /** Read one file from a candidate tree (no path traversal). */
+  /** Read one file from a candidate tree. */
   async fileOf(comparisonId: string, label: "A" | "B", relPath: string): Promise<{ ok: boolean; content?: string; error?: string }> {
     const cmp = this.comparisons.get(comparisonId);
     const cand = cmp?.candidates.get(label);
     if (!cmp || !cand) return { ok: false, error: "candidate not found" };
-    const target = resolve(cand.dir, relPath);
-    if (!isInside(resolve(cand.dir), target)) return { ok: false, error: "path escapes the candidate tree" };
+    if (!this.isSafeRelativePath(relPath)) return { ok: false, error: "invalid candidate path" };
+    const root = resolve(cand.dir);
+    const target = resolve(root, relPath);
+    if (!isInside(root, target)) return { ok: false, error: "path escapes the candidate tree" };
     try {
-      const content = readFileSync(target, "utf8");
-      return { ok: true, content };
+      const [canonicalRoot, canonicalTarget] = await Promise.all([realpath(root), realpath(target)]);
+      if (!isInside(canonicalRoot, canonicalTarget)) return { ok: false, error: "path escapes the candidate tree" };
+      const info = await stat(canonicalTarget);
+      if (!info.isFile()) return { ok: false, error: "the candidate path is not a file" };
+      if (info.size > MAX_WORLDLINE_FILE_BYTES) return { ok: false, error: "the candidate file is too large" };
+      return { ok: true, content: await readFile(canonicalTarget, "utf8") };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -596,11 +674,17 @@ export class WorldlineManager {
   async baseFileOf(comparisonId: string, relPath: string): Promise<{ ok: boolean; content?: string; error?: string }> {
     const cmp = this.comparisons.get(comparisonId);
     if (!cmp || !cmp.baseCommit) return { ok: false, error: "the comparison base is missing" };
+    if (!this.isSafeRelativePath(relPath)) return { ok: false, error: "invalid base path" };
     const anyCand = cmp.candidates.get("A") ?? cmp.candidates.get("B");
     if (!anyCand) return { ok: false, error: "candidate not found" };
     const res = await runGitIn(anyCand.dir, ["show", `${cmp.baseCommit}:${relPath}`]);
     if (res.code !== 0) return { ok: false, error: res.stderr.trim() || "file not in the base" };
+    if (res.stdout.byteLength > MAX_WORLDLINE_FILE_BYTES) return { ok: false, error: "the base file is too large" };
     return { ok: true, content: res.stdout.toString() };
+  }
+
+  private isSafeRelativePath(relPath: string): boolean {
+    return relPath.length > 0 && relPath !== "." && relPath.indexOf("\0") === -1 && !isAbsolute(relPath) && !relPath.startsWith("/") && !relPath.split(/[\\/]/).includes("..");
   }
 
   /** Files differing from the base plus head-tree source statistics. */
@@ -665,9 +749,9 @@ export class WorldlineManager {
     for (const file of ["package.json", "pyproject.toml"]) {
       try {
         const base = await runGitIn(cand.dir, ["show", `${cmp.baseCommit}:${file}`]);
-        const head = readFileSync(join(cand.dir, file), "utf8");
-        if (base.code !== 0) continue;
-        const diff = this.dependencyChangeOf(file, base.stdout.toString(), head);
+        const head = await this.fileOf(cmp.id, cand.label, file);
+        if (base.code !== 0 || !head.ok || head.content === undefined) continue;
+        const diff = this.dependencyChangeOf(file, base.stdout.toString(), head.content);
         if (diff) out.push(diff);
       } catch {
         /* the file is not comparable */
@@ -694,16 +778,29 @@ export class WorldlineManager {
     homeDir: string;
     tmpDir: string;
     state: WorldlineState;
+    terminalId: string | null;
+    version: number;
+    headStateId: string | null;
   } | null {
     const cmp = this.comparisons.get(comparisonId);
     const cand = cmp?.candidates.get(label);
     if (!cmp || !cand) return null;
-    return { root: cand.dir, profilePath: cand.profilePath, homeDir: cand.homeDir, tmpDir: cand.tmpDir, state: cand.state };
+    return {
+      root: cand.dir,
+      profilePath: cand.profilePath,
+      homeDir: cand.homeDir,
+      tmpDir: cand.tmpDir,
+      state: cand.state,
+      terminalId: cand.terminalId,
+      version: cand.version,
+      headStateId: cand.headStateId,
+    };
   }
 
   // ------------------------------------------------------------ fork-run ----
 
   async forkRun(run: ForkableRun, opts: { challenge?: boolean } = {}): Promise<{ ok: boolean; comparisonId?: string; error?: string }> {
+    await this.ready;
     // Eligibility (WORLDLINES §6.5): replayable run with complete states.
     if (!run.replayable) return { ok: false, error: run.reason ?? "the run is not replayable" };
     if (!run.startStateId || !run.settledStateId) return { ok: false, error: "the run has no complete source checkpoints" };
@@ -728,7 +825,7 @@ export class WorldlineManager {
     // Budgets (WORLDLINES §9): session and prompt payload caps.
     if (run.sessionBranchFile) {
       try {
-        if (statSync(run.sessionBranchFile).size > MAX_SESSION_BYTES) {
+        if ((await stat(run.sessionBranchFile)).size > MAX_SESSION_BYTES) {
           return { ok: false, error: "the session branch exceeds the 64 MB budget" };
         }
       } catch {
@@ -736,13 +833,17 @@ export class WorldlineManager {
       }
     }
     if (run.promptPayloadFile) {
+      if (run.promptPayloadFile.includes("/") || run.promptPayloadFile.includes("\\")) {
+        return { ok: false, error: "the prompt payload path is invalid" };
+      }
+      const payloadPath = await this.safePromptPayloadPath(run);
+      if (!payloadPath) return { ok: false, error: "the prompt payload is unavailable" };
       try {
-        const payloadPath = join(this.deps.primaryEventsDir, run.promptPayloadFile);
-        if (statSync(payloadPath).size > MAX_PROMPT_BYTES) {
+        if ((await stat(payloadPath)).size > MAX_PROMPT_BYTES) {
           return { ok: false, error: "the prompt payload exceeds the 20 MB budget" };
         }
       } catch {
-        /* the payload file is gone — the prefill path handles it */
+        return { ok: false, error: "the prompt payload is unavailable" };
       }
     }
 
@@ -763,8 +864,8 @@ export class WorldlineManager {
       }
       await this.forkSessions(cmp, run);
       this.createSupportDirs(cmp);
-      this.copyPiResources(cmp);
-      this.writeStartupControls(cmp, run, opts.challenge ?? false);
+      await this.copyPiResources(cmp);
+      await this.writeStartupControls(cmp, run, opts.challenge ?? false);
       await this.launchCandidates(cmp, run);
       cmp.phase = "running";
       // Readiness arrives through the bridge session_ready events.
@@ -823,6 +924,9 @@ export class WorldlineManager {
         cacheDir: join(dir, `${label}-support`, "cache"),
         profilePath: join(dir, `${label}-support`, "sandbox.sb"),
         sessionFile: null,
+        comparisonBaseStateId: null,
+        promotionBaseStateId: null,
+        headStateId: null,
         terminalId: null,
         pid: null,
         lstart: null,
@@ -830,6 +934,11 @@ export class WorldlineManager {
         version: 1,
         error: null,
       });
+    }
+    for (const cand of cmp.candidates.values()) {
+      cand.comparisonBaseStateId = cmp.baseStateId;
+      cand.promotionBaseStateId = cmp.baseStateId;
+      cand.headStateId = cand.label === "A" ? run.settledStateId : run.startStateId;
     }
     this.comparisons.set(id, cmp);
     return cmp;
@@ -876,12 +985,12 @@ export class WorldlineManager {
   /** Candidate A receives the settled source state. */
   private async applySettledToA(cmp: ComparisonState, store: SnapshotStore, run: ForkableRun): Promise<void> {
     const a = cmp.candidates.get("A")!;
-    await this.deps.snapshot.applyState({ store, stateId: run.settledStateId!, targetDir: a.dir });
+    await this.deps.snapshot.applyState({ store, stateId: run.settledStateId!, targetDir: a.dir, preserveTopLevel: RUNTIME_ALLOWLIST });
   }
 
   /** Fork both Pi sessions in the session worker. */
   private async forkSessions(cmp: ComparisonState, run: ForkableRun): Promise<void> {
-    const payload = this.readPromptPayload(run);
+    const payload = await this.readPromptPayload(run);
     const a = cmp.candidates.get("A")!;
     const b = cmp.candidates.get("B")!;
     const [forkA, forkB] = await Promise.all([
@@ -908,16 +1017,32 @@ export class WorldlineManager {
     b.sessionFile = forkB.sessionFile;
   }
 
-  /** Read the prompt payload file (text, images, injected context). */
-  private readPromptPayload(run: { promptPayloadFile: string | null }): { text: string; images: unknown[]; context: string } {
-    if (!run.promptPayloadFile) return { text: "", images: [], context: "" };
+  private async safePromptPayloadPath(run: { promptPayloadFile: string | null; promptEventsDir?: string | null }): Promise<string | null> {
+    const file = run.promptPayloadFile;
+    if (!file || file.includes("/") || file.includes("\\")) return null;
     try {
-      const raw = readFileSync(join(this.deps.primaryEventsDir, run.promptPayloadFile), "utf8");
+      const dir = run.promptEventsDir ?? this.deps.primaryEventsDir;
+      const [canonicalDir, canonicalFile] = await Promise.all([realpath(dir), realpath(join(dir, file))]);
+      const rel = relative(canonicalDir, canonicalFile);
+      return rel && !rel.startsWith("..") && !isAbsolute(rel) ? canonicalFile : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Read the prompt payload file (text, images, injected context). */
+  private async readPromptPayload(run: { promptPayloadFile: string | null; promptEventsDir?: string | null }): Promise<{ text: string; images: unknown[]; context: string }> {
+    const path = await this.safePromptPayloadPath(run);
+    if (!path) return { text: "", images: [], context: "" };
+    try {
+      const info = await stat(path);
+      if (info.size > MAX_PROMPT_BYTES) return { text: "", images: [], context: "" };
+      const raw = await readFile(path, "utf8");
       const payload = JSON.parse(raw) as { prompt?: unknown; images?: unknown; context?: unknown };
       return {
-        text: String(payload.prompt ?? ""),
+        text: String(payload.prompt ?? "").slice(0, 64000),
         images: Array.isArray(payload.images) ? payload.images : [],
-        context: String(payload.context ?? ""),
+        context: String(payload.context ?? "").slice(0, 16000),
       };
     } catch {
       return { text: "", images: [], context: "" };
@@ -934,73 +1059,68 @@ export class WorldlineManager {
   }
 
   /** Copy the resolved Pi resources into each candidate home. */
-  private copyPiResources(cmp: ComparisonState): void {
+  private async copyPiResources(cmp: ComparisonState): Promise<void> {
     const agentSrc = join(this.deps.realHome, ".pi", "agent");
     for (const cand of cmp.candidates.values()) {
       const agentDst = join(cand.homeDir, ".pi", "agent");
-      mkdirSync(agentDst, { recursive: true });
-      for (const name of ["auth.json", "settings.json", "models-store.json"]) {
+      await mkdir(agentDst, { recursive: true, mode: 0o700 });
+      for (const name of ["auth.json", "settings.json", "models.json", "models-store.json"]) {
         const src = join(agentSrc, name);
-        if (existsSync(src)) {
-          try {
-            writeFileSync(join(agentDst, name), readFileSync(src), { mode: 0o600 });
-          } catch {
-            /* keep the candidate without this file */
-          }
+        if (!existsSync(src)) continue;
+        try {
+          const info = await stat(src);
+          if (!info.isFile() || info.size > MAX_PI_RESOURCE_BYTES) continue;
+          const target = join(agentDst, name);
+          await cp(src, target, { force: true });
+          await chmod(target, 0o600);
+        } catch {
+          /* Keep the candidate without this file. */
         }
       }
       for (const name of ["skills", "prompts", "themes", "extensions"]) {
         const src = join(agentSrc, name);
-        if (existsSync(src)) {
-          try {
-            this.copyResourceTree(src, join(agentDst, name));
-          } catch {
-            /* keep the candidate without this resource */
-          }
+        if (!existsSync(src)) continue;
+        try {
+          await this.copyResourceTree(src, join(agentDst, name));
+        } catch {
+          /* Keep the candidate without this resource. */
         }
       }
     }
   }
 
   /** Copy a Pi resource tree with a byte budget. */
-  private copyResourceTree(src: string, dst: string): void {
-    let total = 0;
-    const walk = (dir: string): void => {
-      for (const name of readdirSync(dir)) {
-        const full = join(dir, name);
-        const st = statSync(full);
-        if (st.isDirectory()) walk(full);
-        else total += st.size;
-      }
-    };
-    walk(src);
-    if (total > MAX_PI_RESOURCE_BYTES) return;
-    cpSync(src, dst, { recursive: true, mode: 0o600 });
+  private async copyResourceTree(src: string, dst: string): Promise<void> {
+    if ((await dirBytes(src)) > MAX_PI_RESOURCE_BYTES) return;
+    await cp(src, dst, { recursive: true, force: true });
   }
 
   /** The startup control files: what the bridge does on session start. */
-  private writeStartupControls(cmp: ComparisonState, run: ForkableRun, challenge: boolean): void {
-    const payload = this.readPromptPayload(run);
+  private async writeStartupControls(cmp: ComparisonState, run: ForkableRun, challenge: boolean): Promise<void> {
+    const payload = await this.readPromptPayload(run);
     const a = cmp.candidates.get("A")!;
     const b = cmp.candidates.get("B")!;
-    this.writeControl(a, { opId: randomUUID(), action: "none" });
-    // A challenge replays the original task unchanged with one click; a
+    await this.writeControl(a, { opId: randomUUID(), action: "none" });
+    // A challenge replays the original task with one action; a
     // plain fork prefills it as editable text.
     if (payload.images.length > 0 || challenge) {
       // Structured prompt: replay the original content blocks unchanged.
-      this.writeControl(b, {
+      await this.writeControl(b, {
         opId: randomUUID(),
         action: "structured",
         content: [{ type: "text", text: payload.text }, ...payload.images],
       });
     } else {
       // Text-only prompt: prefilled and editable in the Pi editor.
-      this.writeControl(b, { opId: randomUUID(), action: "prefill", text: payload.text });
+      await this.writeControl(b, { opId: randomUUID(), action: "prefill", text: payload.text });
     }
   }
 
-  private writeControl(cand: CandidateState, control: Record<string, unknown>): void {
-    writeFileSync(join(cand.eventsDir, "startup-control.json"), JSON.stringify(control), { mode: 0o600 });
+  private async writeControl(cand: CandidateState, control: Record<string, unknown>): Promise<void> {
+    const target = join(cand.eventsDir, "startup-control.json");
+    const temporary = `${target}.tmp-${randomUUID()}`;
+    await writeFile(temporary, JSON.stringify(control), { mode: 0o600 });
+    await rename(temporary, target);
   }
 
   /** Launch both candidate Pi terminals inside their sandboxes. */
@@ -1048,7 +1168,7 @@ export class WorldlineManager {
     const piArgs = ["--session", cand.sessionFile!, "-e", this.deps.bridgePath, ...extraPiArgs];
     return {
       cmd: "sandbox-exec",
-      args: ["-f", cand.profilePath, "/bin/zsh", "-c", `${sandboxShellPreamble()} exec ${this.deps.piBin} ${piArgs.map(quoteArg).join(" ")}`],
+      args: ["-f", cand.profilePath, "/bin/zsh", "-c", `${sandboxShellPreamble()} exec ${quoteArg(this.deps.piBin)} ${piArgs.map(quoteArg).join(" ")}`],
       env: {
         ...this.deps.baseEnv,
         HOME: cand.homeDir,
@@ -1067,7 +1187,7 @@ export class WorldlineManager {
       manifest.candidates[cand.label] = { pid: cand.pid, lstart: cand.lstart, paths: [cand.dir, cand.supportDir] };
       writeFileSync(join(cmp.dir, "manifest.json"), JSON.stringify(manifest), "utf8");
     } catch {
-      /* manifest is best-effort */
+      /* The manifest update is optional. */
     }
   }
 
@@ -1143,6 +1263,7 @@ export class WorldlineManager {
     /** Inherit one-process trust (run trusted + hashes matched). */
     inheritTrust: boolean | null;
   }): Promise<{ ok: boolean; comparisonId?: string; error?: string }> {
+    await this.ready;
     if (this.liveWorldlineCount() + 1 > 3) return { ok: false, error: "the live worldline budget is exhausted" };
     const store = await this.deps.getStore();
     if (!store) return { ok: false, error: "recording is not available" };
@@ -1186,6 +1307,9 @@ export class WorldlineManager {
       cacheDir: join(dir, "A-support", "cache"),
       profilePath: join(dir, "A-support", "sandbox.sb"),
       sessionFile: null,
+      comparisonBaseStateId: null,
+      promotionBaseStateId: null,
+      headStateId: null,
       terminalId: null,
       pid: null,
       lstart: null,
@@ -1194,6 +1318,9 @@ export class WorldlineManager {
       error: null,
     };
     cmp.candidates.set("A", cand);
+    cand.comparisonBaseStateId = cmp.baseStateId;
+    cand.promotionBaseStateId = cmp.baseStateId;
+    cand.headStateId = opts.stateId;
     this.comparisons.set(id, cmp);
     try {
       // The template IS the moment state: build it, then clone one candidate.
@@ -1224,10 +1351,10 @@ export class WorldlineManager {
       if (!fork.ok || !fork.sessionFile) throw new Error("could not fork the moment session");
       cand.sessionFile = fork.sessionFile;
       this.createSupportDirs(cmp);
-      this.copyPiResources(cmp);
+      await this.copyPiResources(cmp);
       // A moment candidate starts with no prompt: the user continues it.
       // Replay the captured model and thinking level of that moment.
-      this.writeControl(cand, { opId: randomUUID(), action: "none" });
+      await this.writeControl(cand, { opId: randomUUID(), action: "none" });
       const extra: string[] = [];
       if (opts.model && opts.model.includes("/")) extra.push("--model", opts.model);
       if (opts.thinkingLevel) extra.push("--thinking", opts.thinkingLevel);
@@ -1249,7 +1376,8 @@ export class WorldlineManager {
   /** Launch one candidate inside its sandbox (A or a moment candidate). */
   private async launchCandidate(cmp: ComparisonState, cand: CandidateState, extraPiArgs: string[], headStateId: string | null): Promise<void> {
     const { cmd, args, env } = this.candidateLaunch(cmp, cand, extraPiArgs);
-    const workspaceId = this.deps.createCandidateWorkspace(cand.dir, headStateId ?? cmp.baseStateId ?? null);
+    cand.headStateId = headStateId ?? cand.headStateId ?? cmp.baseStateId;
+    const workspaceId = this.deps.createCandidateWorkspace(cand.dir, cand.headStateId, cmp.id);
     const { terminalId, pid } = await this.deps.createCandidate({
       root: cand.dir,
       workspaceId,
@@ -1257,7 +1385,7 @@ export class WorldlineManager {
     });
     cand.terminalId = terminalId;
     cand.pid = pid;
-    cand.lstart = readProcessStart(pid);
+    cand.lstart = await readProcessStart(pid);
     this.terminalToComparison.set(terminalId, { comparisonId: cmp.id, label: cand.label });
     this.updateManifest(cmp, cand);
     this.pushUpdate(cmp, cand);
@@ -1282,8 +1410,7 @@ export class WorldlineManager {
     // Both ready: the pair is complete.
     if ([...cmp.candidates.values()].every((c) => c.state === "ready")) {
       if (cmp.readyTimer) clearTimeout(cmp.readyTimer);
-      // The template is no longer needed.
-      rmSync(cmp.templateDir, { recursive: true, force: true });
+      void rm(cmp.templateDir, { recursive: true, force: true }).catch(() => undefined);
       cmp.phase = "running";
     }
   }
@@ -1305,7 +1432,8 @@ export class WorldlineManager {
   // ------------------------------------------------------------- control ----
 
   /** Abort pair creation; all-or-nothing cleanup. */
-  async cancel(comparisonId: string): Promise<{ ok: boolean; error?: string }> {    const cmp = this.comparisons.get(comparisonId);
+  async cancel(comparisonId: string): Promise<{ ok: boolean; error?: string }> {
+    const cmp = this.comparisons.get(comparisonId);
     if (!cmp) return { ok: false, error: "comparison not found" };
     await this.teardown(comparisonId, "cancelled", null);
     return { ok: true };
@@ -1326,7 +1454,7 @@ export class WorldlineManager {
     if (!cmp || !cand) return { ok: false, error: "candidate not found" };
     if (!cand.sessionFile) return { ok: false, error: "the candidate has no session" };
     const { cmd, args, env } = this.candidateLaunch(cmp, cand, []);
-    const workspaceId = this.deps.createCandidateWorkspace(cand.dir, cmp.baseStateId ?? null);
+    const workspaceId = this.deps.createCandidateWorkspace(cand.dir, cand.headStateId ?? cmp.baseStateId ?? null, cmp.id);
     try {
       const { terminalId, pid } = await this.deps.createCandidate({
         root: cand.dir,
@@ -1335,7 +1463,7 @@ export class WorldlineManager {
       });
       cand.terminalId = terminalId;
       cand.pid = pid;
-      cand.lstart = readProcessStart(pid);
+      cand.lstart = await readProcessStart(pid);
       cand.state = "ready";
       cand.version++;
       this.terminalToComparison.set(terminalId, { comparisonId: cmp.id, label });
@@ -1362,26 +1490,26 @@ export class WorldlineManager {
     }
     // 2. Terminate the candidate process groups (verified by identity).
     for (const cand of cmp.candidates.values()) {
-      if (cand.pid && cand.lstart && processStartMatches(cand.pid, cand.lstart)) {
+      if (cand.pid && cand.lstart && (await processStartMatches(cand.pid, cand.lstart))) {
         try {
           process.kill(-cand.pid, "SIGTERM");
         } catch {
-          /* already gone */
+          /* The process can exit before the signal. */
         }
       }
     }
     await new Promise((r) => setTimeout(r, 500));
     for (const cand of cmp.candidates.values()) {
-      if (cand.pid && cand.lstart && processStartMatches(cand.pid, cand.lstart)) {
+      if (cand.pid && cand.lstart && (await processStartMatches(cand.pid, cand.lstart))) {
         try {
           process.kill(-cand.pid, "SIGKILL");
         } catch {
-          /* already gone */
+          /* The process can exit before the signal. */
         }
       }
     }
     // 3. Remove the app-owned files (marker + canonical path required).
-    this.removeOwnedDir(cmp.dir);
+    await this.removeOwnedDir(cmp.dir).catch(() => undefined);
     // 4. Release the bookkeeping.
     for (const [terminalId, hit] of [...this.terminalToComparison]) {
       if (hit.comparisonId === comparisonId) this.terminalToComparison.delete(terminalId);
@@ -1391,12 +1519,19 @@ export class WorldlineManager {
   }
 
   /** Remove a worlds dir only when it is app-owned and canonical. */
-  private removeOwnedDir(dir: string): void {
+  private async removeOwnedDir(dir: string): Promise<void> {
     const worldsRoot = resolve(this.deps.worldsRoot);
     const target = resolve(dir);
-    if (!isInside(worldsRoot, target)) return;
-    if (!existsSync(join(target, MARKER))) return;
-    rmSync(target, { recursive: true, force: true });
+    let canonicalRoot: string;
+    let canonicalTarget: string;
+    try {
+      [canonicalRoot, canonicalTarget] = await Promise.all([realpath(worldsRoot), realpath(target)]);
+    } catch {
+      return;
+    }
+    if (!isInside(canonicalRoot, canonicalTarget)) return;
+    if (!existsSync(join(canonicalTarget, MARKER))) return;
+    await rm(canonicalTarget, { recursive: true, force: true });
   }
 
   private pushUpdate(cmp: ComparisonState, cand: CandidateState): void {
@@ -1413,56 +1548,68 @@ export class WorldlineManager {
 
   // ------------------------------------------------------- stale sweep ----
 
-  /** After a crash: kill stale candidate groups, remove their dirs. */
-  private sweepStale(): void {
+  /** After a crash, terminate stale candidate groups and remove their dirs. */
+  private async sweepStale(): Promise<void> {
     const worldsRoot = resolve(this.deps.worldsRoot);
-    let entries: string[] = [];
+    let canonicalRoot: string;
     try {
-      entries = readdirSync(worldsRoot);
+      canonicalRoot = await realpath(worldsRoot);
+    } catch {
+      return;
+    }
+    let entries: string[];
+    try {
+      entries = await readdir(worldsRoot);
     } catch {
       return;
     }
     for (const name of entries) {
       const dir = join(worldsRoot, name);
-      if (!existsSync(join(dir, MARKER))) continue;
+      let canonicalDir: string;
       try {
-        const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")) as {
+        canonicalDir = await realpath(dir);
+      } catch {
+        continue;
+      }
+      if (!isInside(canonicalRoot, canonicalDir) || !existsSync(join(canonicalDir, MARKER))) continue;
+      try {
+        const manifest = JSON.parse(await readFile(join(canonicalDir, "manifest.json"), "utf8")) as {
           candidates?: Record<string, { pid?: number; lstart?: string }>;
         };
-        for (const cand of Object.values(manifest.candidates ?? {})) {
-          if (cand.pid && cand.lstart && processStartMatches(cand.pid, cand.lstart)) {
+        for (const candidate of Object.values(manifest.candidates ?? {})) {
+          if (candidate.pid && candidate.lstart && (await processStartMatches(candidate.pid, candidate.lstart))) {
             try {
-              process.kill(-cand.pid, "SIGKILL");
+              process.kill(-candidate.pid, "SIGKILL");
             } catch {
-              /* already gone */
+              /* The process can exit before the signal. */
             }
           }
         }
       } catch {
-        /* no manifest — still remove the owned dir */
+        /* Remove an owned directory when its manifest is unreadable. */
       }
-      this.removeOwnedDir(dir);
+      await this.removeOwnedDir(canonicalDir).catch(() => undefined);
     }
   }
 
-  /** Discard every live comparison (confirmed close, folder switch, quit). */
+  /** Discard every live comparison. */
   async dispose(): Promise<void> {
+    await this.ready;
     await Promise.all([...this.comparisons.values()].map((cmp) => this.teardown(cmp.id, "discarded", null)));
   }
 }
 
-/** Read the process start time as reported by ps. */
-function readProcessStart(pid: number): string | null {
-  try {
-    const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
-    return out.trim() || null;
-  } catch {
-    return null;
-  }
+/** Read the process start time without blocking the main process. */
+function readProcessStart(pid: number): Promise<string | null> {
+  return new Promise((resolvePromise) => {
+    execFile("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", maxBuffer: 1024 * 1024 }, (error, stdout) => {
+      resolvePromise(error ? null : stdout.trim() || null);
+    });
+  });
 }
 
-/** True when a pid still names the same process start time. */
-function processStartMatches(pid: number, lstart: string): boolean {
-  const now = readProcessStart(pid);
-  return now !== null && now === lstart;
+/** Check that a pid still names the same process start time. */
+async function processStartMatches(pid: number, lstart: string): Promise<boolean> {
+  const current = await readProcessStart(pid);
+  return current !== null && current === lstart;
 }

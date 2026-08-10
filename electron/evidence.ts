@@ -6,8 +6,8 @@
  * dependency declarations, the public API manifest, the source footprint,
  * and the benchmark harness. Ranking consumes only current evidence.
  */
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFile, realpath as fsRealpath } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import type { SnapshotStore } from "./worldline-git.js";
 
 export type EvidenceKind = "verify" | "dependencies" | "api" | "footprint" | "benchmark";
@@ -70,7 +70,7 @@ export interface EvidenceDeps {
   /** The benchmark harness config of the shared base, or null. */
   benchmarkConfig(): { command: string[]; unit: string; direction: "lower" | "higher"; samples: number; thresholdPct: number } | null;
   /** The candidate's source files (tracked, bounded) for package checks. */
-  sourceFilesOf(root: string): Array<{ relPath: string; content: string }>;
+  sourceFilesOf(root: string): Promise<Array<{ relPath: string; content: string }>>;
 }
 
 /** The four fixed profiles (WORLDLINES §6.9). */
@@ -78,6 +78,32 @@ export const PROFILES: ProfileName[] = ["fewer-dependencies", "preserve-api", "s
 
 /** The package declaration sections the dependency adapter measures. */
 const DEP_SECTIONS = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] as const;
+
+async function readText(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+async function candidatePath(root: string, relPath: string): Promise<string | null> {
+  const absolute = resolve(root, relPath);
+  const rel = relative(resolve(root), absolute);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null;
+  try {
+    const [canonicalRoot, canonicalPath] = await Promise.all([fsRealpath(root), fsRealpath(absolute)]);
+    const canonicalRel = relative(canonicalRoot, canonicalPath);
+    return canonicalRel && !canonicalRel.startsWith("..") && !isAbsolute(canonicalRel) ? canonicalPath : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readCandidateText(root: string, relPath: string): Promise<string | null> {
+  const path = await candidatePath(root, relPath);
+  return path ? readText(path) : null;
+}
 
 /** Parse a package.json text into its declaration sections. */
 function parseDeps(text: string): Record<string, Record<string, string>> {
@@ -249,7 +275,7 @@ export class EvidenceEngine {
   /** Dependencies: added/removed/changed declarations vs the shared base. */
   private async dependencyEvidence(cand: CandidateFacts, stateId: string): Promise<EvidenceRecord | null> {
     const basePkg = await this.deps.store.readBlob(this.deps.baseStateId, "package.json");
-    const headPkg = existsSync(join(cand.root, "package.json")) ? readFileSync(join(cand.root, "package.json"), "utf8") : null;
+    const headPkg = await readCandidateText(cand.root, "package.json");
     if (!basePkg || headPkg === null) {
       return { kind: "dependencies", stateId, baseStateId: this.deps.baseStateId, status: "unavailable", result: {}, reason: "the base or head has no package manifest" };
     }
@@ -258,7 +284,7 @@ export class EvidenceEngine {
     // undeclared, even when it exists in the cloned runtime (§6.9).
     const declared = declaredNames(basePkg.toString("utf8"));
     for (const name of declaredNames(headPkg)) declared.add(name);
-    const sourceFiles = this.deps.sourceFilesOf(cand.root);
+    const sourceFiles = await this.deps.sourceFilesOf(cand.root);
     const referenced = referencedPackages(sourceFiles);
     const undeclared = [...referenced].filter((name) => !declared.has(name)).sort();
     // Show when a candidate changes the test configuration (§6.8): the
@@ -309,13 +335,8 @@ export class EvidenceEngine {
       return buf === null ? null : buf.toString("utf8");
     });
     const headManifest = await manifest(async (rel) => {
-      const abs = join(cand.root, rel);
-      if (!existsSync(abs)) return null;
-      try {
-        return readFileSync(abs, "utf8");
-      } catch {
-        return null;
-      }
+      const path = await candidatePath(cand.root, rel);
+      return path ? readText(path) : null;
     });
     if (Object.keys(baseManifest).length === 0) {
       return { kind: "api", stateId, baseStateId: this.deps.baseStateId, status: "unavailable", result: {}, reason: "no public root resolves to a measurable file" };
@@ -413,7 +434,11 @@ export function parseBenchmarkValue(stdout: string, unit: string): number | null
  * The four fixed profile verdicts from measured evidence. Ranking uses
  * only current evidence: verify pass, no Mine-path change, state fresh.
  */
-export function rankProfiles(summary: Record<"A" | "B", EvidenceRecord[]>, mineReason: Record<"A" | "B", string | null>): ProfileVerdict[] {
+export function rankProfiles(
+  summary: Record<"A" | "B", EvidenceRecord[]>,
+  mineReason: Record<"A" | "B", string | null>,
+  thresholdFraction = 0.05,
+): ProfileVerdict[] {
   const rec = (label: "A" | "B", kind: EvidenceKind): EvidenceRecord | undefined => summary[label].find((r) => r.kind === kind);
   const verifyOk = (label: "A" | "B"): boolean => rec(label, "verify")?.status === "pass";
   const eligible = (label: "A" | "B", requireVerify: boolean): string => {
@@ -523,7 +548,7 @@ export function rankProfiles(summary: Record<"A" | "B", EvidenceRecord[]>, mineR
       } else {
         const direction = bm.A.result.direction === "higher" ? 1 : -1;
         const effect = (med.B - med.A) / Math.max(med.A, med.B, 1e-9) * direction;
-        const threshold = 0.05;
+        const threshold = thresholdFraction;
         if (Math.abs(effect) <= threshold) {
           winner = "tie";
           reason = `the effect (${(Math.abs(effect) * 100).toFixed(1)}%) does not exceed the ${threshold * 100}% threshold`;
@@ -556,12 +581,16 @@ export async function mineChangeReason(
   headStateId: string,
   primaryRoot: string,
   mineFiles: Set<string>,
-  realpath: (p: string) => string,
+  realpath: (p: string) => Promise<string>,
 ): Promise<string | null> {
   const changed = await store.diffTree(baseStateId, headStateId);
   for (const c of changed) {
     const abs = join(primaryRoot, c.relPath);
-    if (mineFiles.has(realpath(abs))) return `the candidate changes a file you own: ${c.relPath}`;
+    try {
+      if (mineFiles.has(await realpath(abs))) return `the candidate changes a file you own: ${c.relPath}`;
+    } catch {
+      /* A deleted path cannot match a Mine path. */
+    }
   }
   return null;
 }

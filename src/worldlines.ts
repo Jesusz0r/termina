@@ -199,6 +199,14 @@ export class WorldlinesView {
     this.renderCard(card);
   }
 
+  /** Remove every comparison when the project changes. */
+  resetForProject(): void {
+    for (const comparisonId of [...this.pairs.keys()]) this.remove(comparisonId);
+    this.byTerminal.clear();
+    this.byRoot.clear();
+    this.evidenceByCmp.clear();
+  }
+
   /** A whole comparison was removed. */
   remove(comparisonId: string): void {
     const pair = this.pairs.get(comparisonId);

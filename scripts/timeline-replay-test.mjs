@@ -24,7 +24,9 @@ const check = (name, ok, detail = "") => {
 const eventsDir = "/tmp/pi-editor-events-test";
 mkdirSync(eventsDir, { recursive: true });
 const sidecar = join(eventsDir, "term-1.jsonl");
-const emit = (obj) => appendFileSync(sidecar, JSON.stringify(obj) + "\n");
+const bridgeId = "synthetic-timeline";
+let sequence = 0;
+const emit = (obj) => appendFileSync(sidecar, JSON.stringify({ bridgeId, seq: ++sequence, ...obj }) + "\n");
 
 const pages = await fetch("http://127.0.0.1:9222/json").then((r) => r.json());
 const page = pages.find((t) => t.type === "page");

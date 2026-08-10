@@ -11,7 +11,7 @@
  */
 import { execFile, spawn } from "node:child_process";
 import { constants, closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
-import { mkdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, readlink, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { deflateSync } from "node:zlib";
@@ -22,6 +22,8 @@ export const MIN_GIT_VERSION = [2, 38, 0];
 /** The app identity used for synthetic commits. */
 const APP_AUTHOR = "pi-ditor";
 const APP_EMAIL = "dev@pi-ditor.local";
+const MAX_GIT_STDOUT_BYTES = 64 * 1024 * 1024;
+const MAX_GIT_STDERR_BYTES = 4 * 1024 * 1024;
 
 /** The empty tree oid (unborn HEAD base). */
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -55,6 +57,15 @@ export interface CaptureBudget {
   maxPaths?: number;
   maxFileBytes?: number;
   maxNewBlobBytes?: number;
+}
+
+interface BlobWrite {
+  oid: string;
+  newBytes: number;
+}
+
+export interface MaterializeOptions {
+  preserveTopLevel?: string[];
 }
 
 /** Test seams for capture. The hooks fire only in the spike suites. */
@@ -130,13 +141,34 @@ function runGit(args: string[], opts: { cwd?: string; env?: Record<string, strin
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
-    child.stdout.on("data", (d: Buffer) => stdout.push(d));
-    child.stderr.on("data", (d: Buffer) => stderr.push(d));
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let overflow = false;
+    child.stdout.on("data", (d: Buffer) => {
+      if (stdoutBytes + d.length > MAX_GIT_STDOUT_BYTES) {
+        overflow = true;
+        child.kill("SIGKILL");
+        return;
+      }
+      stdout.push(d);
+      stdoutBytes += d.length;
+    });
+    child.stderr.on("data", (d: Buffer) => {
+      if (stderrBytes < MAX_GIT_STDERR_BYTES) {
+        const keep = d.subarray(0, MAX_GIT_STDERR_BYTES - stderrBytes);
+        stderr.push(keep);
+        stderrBytes += keep.length;
+      }
+    });
     if (opts.input !== undefined) child.stdin.write(opts.input);
     child.stdin.end();
     child.on("error", (err) => resolvePromise({ code: -1, stdout: Buffer.alloc(0), stderr: err.message }));
     child.on("close", (code) =>
-      resolvePromise({ code: code ?? -1, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr).toString("utf8") }),
+      resolvePromise({
+        code: overflow ? -1 : code ?? -1,
+        stdout: Buffer.concat(stdout),
+        stderr: overflow ? "git output exceeded the 64 MB limit" : Buffer.concat(stderr).toString("utf8"),
+      }),
     );
   });
 }
@@ -243,7 +275,16 @@ export class SnapshotStore {
     const init = await runGit(["init", "--bare", "--object-format", objectFormat, store.gitDir]);
     if (init.code !== 0) throw new Error(`snapshot store init failed: ${init.stderr}`);
     // Disable gc: the store keeps objects that a gc run would prune.
-    await runGit(["config", "gc.auto", "0"], { env: { GIT_DIR: store.gitDir } });
+    const env = { GIT_DIR: store.gitDir };
+    await runGit(["config", "gc.auto", "0"], { env });
+    // A new app session has no in-memory run records. Remove refs left by a
+    // crashed session before the first capture.
+    const oldRefs = await runGit(["for-each-ref", "--format=%(refname)", "refs/pi-ditor/state"], { env });
+    if (oldRefs.code === 0) {
+      for (const ref of oldRefs.stdout.toString("utf8").split("\n")) {
+        if (ref) await runGit(["update-ref", "-d", ref], { env });
+      }
+    }
     // Read-only object access to the source repository.
     const altDir = join(store.gitDir, "objects", "info");
     await mkdir(altDir, { recursive: true });
@@ -431,10 +472,10 @@ export class SnapshotStore {
       }
       if (st.isSymbolicLink()) {
         const target = readlinkSync(abs);
-        const oid = await this.hashBytes(target);
-        newBlobBytes += Buffer.byteLength(target, "utf8");
-        entries.push(`120000 blob ${oid}\t${relPath}`);
-        expected.set(relPath, { mode: "120000", oid });
+        const blob = await this.hashBytes(target);
+        newBlobBytes += blob.newBytes;
+        entries.push(`120000 blob ${blob.oid}\t${relPath}`);
+        expected.set(relPath, { mode: "120000", oid: blob.oid });
         continue;
       }
       if (st.isDirectory()) continue; // a submodule gitlink: the fork preflight rejects it
@@ -450,10 +491,10 @@ export class SnapshotStore {
         continue; // vanished — not in the tree
       }
       const mode = st.mode & 0o111 ? "100755" : "100644";
-      const oid = await this.hashFileWithCheck(fd, abs, hooks.onBeforeRead);
-      newBlobBytes += st.size;
-      entries.push(`${mode} blob ${oid}\t${relPath}`);
-      expected.set(relPath, { mode, oid });
+      const blob = await this.hashFileWithCheck(fd, abs, hooks.onBeforeRead);
+      newBlobBytes += blob.newBytes;
+      entries.push(`${mode} blob ${blob.oid}\t${relPath}`);
+      expected.set(relPath, { mode, oid: blob.oid });
       hooks.onFileRead?.(abs);
     }
     if (newBlobBytes > maxNewBlobBytes) throw new Error(`capture exceeds the ${maxNewBlobBytes} new-blob byte budget (${newBlobBytes} bytes)`);
@@ -504,11 +545,15 @@ export class SnapshotStore {
 
     // The capture set: hints plus reconciled cache entries whose git blob
     // differs from the parent tree (missed watcher events).
+    const isSafeRelative = (path: string): boolean => path.length > 0 && path !== "." && !isAbsolute(path) && !path.split(/[\\/]/).includes("..");
     const changed = new Map<string, "created" | "modified" | "deleted">();
-    for (const h of hints) changed.set(h, changed.has(h) ? changed.get(h)! : "modified");
-    if (reconcile.length > 0) {
+    for (const h of hints) {
+      if (isSafeRelative(h)) changed.set(h, changed.has(h) ? changed.get(h)! : "modified");
+    }
+    const safeReconcile = reconcile.filter((entry) => isSafeRelative(entry.relPath));
+    if (safeReconcile.length > 0) {
       // One path-limited ls-tree answers every cached path at once.
-      const args = ["ls-tree", parentTree, "-z", "--", ...reconcile.map((r) => r.relPath)];
+      const args = ["ls-tree", parentTree, "-z", "--", ...safeReconcile.map((r) => r.relPath)];
       const r = await this.git(args);
       const parentBlobs = new Map<string, string>();
       for (const rec of r.stdout.toString("utf8").split("\0")) {
@@ -518,18 +563,13 @@ export class SnapshotStore {
         const meta = rec.slice(0, tab).split(" ");
         if (meta[1] === "blob") parentBlobs.set(rec.slice(tab + 1), meta[2]);
       }
-      let newBlobBytes = 0;
-      for (const { relPath, content } of reconcile) {
+      for (const { relPath, content } of safeReconcile) {
         const parentOid = parentBlobs.get(relPath);
         if (parentOid === undefined) continue; // not in the capture domain
-        const oid = await this.hashBytes(content);
+        const oid = this.blobOid(Buffer.from(content, "utf8"));
         if (oid !== parentOid) {
           changed.set(relPath, "modified");
-          newBlobBytes += Buffer.byteLength(content, "utf8");
         }
-      }
-      if (newBlobBytes > maxNewBlobBytes) {
-        throw new Error(`capture exceeds the ${maxNewBlobBytes} new-blob byte budget (${newBlobBytes} bytes)`);
       }
     }
     if (changed.size === 0) return { commit: parentCommit, tree: parentTree, head: null, pathCount: 0, newBlobBytes: 0, parentCommit, ts: Date.now() };
@@ -555,10 +595,10 @@ export class SnapshotStore {
         if (st) {
           if (st.isSymbolicLink()) {
             const target = readlinkSync(abs);
-            const oid = await this.hashBytes(target);
-            newBlobBytes += Buffer.byteLength(target, "utf8");
-            entries.push(`120000 blob ${oid}\t${relPath}`);
-            expected.set(relPath, { mode: "120000", oid });
+            const blob = await this.hashBytes(target);
+            newBlobBytes += blob.newBytes;
+            entries.push(`120000 blob ${blob.oid}\t${relPath}`);
+            expected.set(relPath, { mode: "120000", oid: blob.oid });
             continue;
           }
           if (st.isDirectory()) {
@@ -575,10 +615,10 @@ export class SnapshotStore {
             continue;
           }
           const mode = st.mode & 0o111 ? "100755" : "100644";
-          const oid = await this.hashFileWithCheck(fd, abs, hooks.onBeforeRead);
-          newBlobBytes += st.size;
-          entries.push(`${mode} blob ${oid}\t${relPath}`);
-          expected.set(relPath, { mode, oid });
+          const blob = await this.hashFileWithCheck(fd, abs, hooks.onBeforeRead);
+          newBlobBytes += blob.newBytes;
+          entries.push(`${mode} blob ${blob.oid}\t${relPath}`);
+          expected.set(relPath, { mode, oid: blob.oid });
           hooks.onFileRead?.(abs);
         }
       }
@@ -632,32 +672,42 @@ export class SnapshotStore {
    * header + bytes. Writing objects directly avoids one git spawn per
    * file; the capture spike verifies the format byte-for-byte.
    */
-  private async writeBlob(bytes: Buffer): Promise<string> {
+  private blobOid(bytes: Buffer): string {
     const header = Buffer.from(`blob ${bytes.length}\0`, "utf8");
     const hash = createHash(this.objectFormat === "sha256" ? "sha256" : "sha1");
     hash.update(header);
     hash.update(bytes);
-    const oid = hash.digest("hex");
-    const loose = join(this.gitDir, "objects", oid.slice(0, 2), oid.slice(2));
-    if (!existsSync(loose)) {
-      await mkdir(dirname(loose), { recursive: true });
-      const tmp = `${loose}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
-      await writeFile(tmp, deflateSync(Buffer.concat([header, bytes])), { mode: 0o600 });
-      await rename(tmp, loose);
-    }
-    return oid;
+    return hash.digest("hex");
   }
 
-  /** Hash a byte string into a new store blob. */
-  private async hashBytes(content: string): Promise<string> {
+  private async writeBlob(bytes: Buffer): Promise<BlobWrite> {
+    const oid = this.blobOid(bytes);
+    const loose = join(this.gitDir, "objects", oid.slice(0, 2), oid.slice(2));
+    if (existsSync(loose)) return { oid, newBytes: 0 };
+    const header = Buffer.from(`blob ${bytes.length}\0`, "utf8");
+    await mkdir(dirname(loose), { recursive: true });
+    const tmp = `${loose}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
+    await writeFile(tmp, deflateSync(Buffer.concat([header, bytes])), { mode: 0o600 });
+    try {
+      await rename(tmp, loose);
+      return { oid, newBytes: bytes.length };
+    } catch (err) {
+      await rm(tmp, { force: true });
+      if (existsSync(loose)) return { oid, newBytes: 0 };
+      throw err;
+    }
+  }
+
+  /** Hash and store a byte string. */
+  private async hashBytes(content: string): Promise<BlobWrite> {
     return this.writeBlob(Buffer.from(content, "utf8"));
   }
 
   /**
    * Read an open file descriptor, verify it with fstat before and after,
-   * and hash the bytes into the store. Returns the blob oid.
+   * and hash the bytes into the store. Returns the blob result.
    */
-  private async hashFileWithCheck(fd: number, abs: string, onBeforeRead?: (path: string) => void): Promise<string> {
+  private async hashFileWithCheck(fd: number, abs: string, onBeforeRead?: (path: string) => void): Promise<BlobWrite> {
     try {
       const before = fstatSync(fd);
       onBeforeRead?.(abs);
@@ -720,10 +770,10 @@ export class SnapshotStore {
   }
 
   /**
-   * Materialize a captured state into an empty target directory.
-   * Writes raw bytes, symlinks, and the executable bit. No filters run.
+   * Materialize a captured state into a directory.
+   * Remove stale source paths and preserve only the requested runtime paths.
    */
-  async materialize(stateCommit: string, targetDir: string): Promise<void> {
+  async materialize(stateCommit: string, targetDir: string, options: MaterializeOptions = {}): Promise<void> {
     const tree = await this.resolveTree(stateCommit);
     const list = await this.git(["ls-tree", "-r", "-z", tree]);
     if (list.code !== 0) throw new Error(`ls-tree failed: ${list.stderr}`);
@@ -737,7 +787,11 @@ export class SnapshotStore {
       records.push({ mode: meta[0] ?? "", type: meta[1] ?? "", oid: meta[2] ?? "", path: rec.slice(tab + 1) });
     }
     await mkdir(targetDir, { recursive: true });
-    // Read every blob through one batch process.
+    const desired = new Set(records.map((record) => record.path));
+    const desiredDirectories = this.desiredDirectories(desired);
+    const preserve = new Set([".git", ...(options.preserveTopLevel ?? [])]);
+    await this.removeStalePaths(targetDir, "", desired, desiredDirectories, preserve);
+
     const blobs = new Map<string, Buffer>();
     const want = records.filter((r) => r.type === "blob").map((r) => r.oid);
     if (want.length > 0) {
@@ -746,16 +800,103 @@ export class SnapshotStore {
     }
     for (const rec of records) {
       const full = join(targetDir, rec.path);
-      await mkdir(dirname(full), { recursive: true });
+      await this.ensureParentDirectories(targetDir, rec.path);
       if (rec.mode === "120000") {
         const target = blobs.get(rec.oid)?.toString("utf8") ?? "";
-        await symlink(target, full);
+        const current = await this.linkTarget(full);
+        if (current !== target) {
+          await this.removePath(full);
+          await symlink(target, full);
+        }
         continue;
       }
       const content = blobs.get(rec.oid);
       if (content === undefined) throw new Error(`missing blob ${rec.oid} while materializing ${rec.path}`);
-      await writeFile(full, content, { mode: rec.mode === "100755" ? 0o755 : 0o644 });
+      await this.replaceFile(full, content, rec.mode === "100755" ? 0o755 : 0o644);
     }
+  }
+
+  private desiredDirectories(desired: Set<string>): Set<string> {
+    const directories = new Set<string>();
+    for (const path of desired) {
+      const parts = path.split("/");
+      parts.pop();
+      let current = "";
+      for (const part of parts) {
+        current = current ? `${current}/${part}` : part;
+        directories.add(current);
+      }
+    }
+    return directories;
+  }
+
+  private async removeStalePaths(
+    dir: string,
+    relDir: string,
+    desired: Set<string>,
+    desiredDirectories: Set<string>,
+    preserve: Set<string>,
+  ): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const relPath = relDir ? `${relDir}/${entry.name}` : entry.name;
+      if (!relDir && preserve.has(entry.name)) continue;
+      const full = join(dir, entry.name);
+      if (entry.isDirectory() && !entry.isSymbolicLink()) {
+        if (desiredDirectories.has(relPath)) await this.removeStalePaths(full, relPath, desired, desiredDirectories, preserve);
+        else await rm(full, { recursive: true, force: true });
+      } else if (!desired.has(relPath)) {
+        await rm(full, { recursive: true, force: true });
+      }
+    }
+  }
+
+  private async ensureParentDirectories(root: string, relPath: string): Promise<void> {
+    const parts = relPath.split("/");
+    parts.pop();
+    let current = root;
+    for (const part of parts) {
+      current = join(current, part);
+      try {
+        const entry = await lstat(current);
+        if (!entry.isDirectory()) {
+          await rm(current, { recursive: true, force: true });
+          await mkdir(current);
+        }
+      } catch {
+        await mkdir(current, { recursive: true });
+      }
+    }
+  }
+
+  private async linkTarget(path: string): Promise<string | null> {
+    try {
+      const entry = await lstat(path);
+      if (!entry.isSymbolicLink()) return null;
+      return await readlink(path);
+    } catch {
+      return null;
+    }
+  }
+
+  private async removePath(path: string): Promise<void> {
+    await rm(path, { recursive: true, force: true });
+  }
+
+  private async replaceFile(path: string, content: Buffer, mode: number): Promise<void> {
+    try {
+      const entry = await lstat(path);
+      if (!entry.isFile()) await this.removePath(path);
+    } catch {
+      /* the file does not exist */
+    }
+    await writeFile(path, content, { mode });
+    await chmod(path, mode);
   }
 
   /** Resolve a state commit to its tree oid. */

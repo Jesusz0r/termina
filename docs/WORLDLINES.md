@@ -1,6 +1,6 @@
 # Worldlines — Executable Timeline plan
 
-> **Status:** approved direction, not implemented
+> **Status:** implemented and maintained
 >
 > **Product promise:** Fork a recorded agent moment into isolated, runnable
 > projects with matching Pi conversations. Compare the futures with measured
@@ -449,9 +449,9 @@ interface WorldlineSummary {
   label: "A" | "B";
   role: "reference" | "alternative" | "challenge";
   parentWorldlineId?: string;
-  comparisonBaseStateId: string;
-  promotionBaseStateId: string;
-  headStateId: string;
+  comparisonBaseStateId: string | null;
+  promotionBaseStateId: string | null;
+  headStateId: string | null;
   sourceRunId: string;
   terminalId?: string;
   version: number;
@@ -1559,7 +1559,7 @@ a dedicated `PI_EDITOR_WORLDS_DIR` on the fixture's filesystem for every suite.
 Also run:
 
 - `npx tsc --noEmit`
-- `node scripts/build.mjs`
+- `npm run build`
 - every existing E2E suite against a fresh instance
 
 ## 11. Release gates

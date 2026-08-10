@@ -51,7 +51,7 @@ workflow — *what did you change, and do I want it?*
 | Auto-feedback | The result (status + tail of output) is written to a context file the bridge extension injects on the agent's next turn via `before_agent_start` → the agent fixes failures itself (verified in the session record) |
 | Loop state | Badge on the status bar: running / ✗ failing / ✓ green / ⏰ timed out (10 min watchdog); clicking it jumps to the worker terminal |
 
-### 3. Session Timeline ("time machine") ✅ implemented
+### 3. Session Timeline (source history) ✅ implemented
 
 | Capability | Detail |
 |---|---|
@@ -74,7 +74,7 @@ workflow — *what did you change, and do I want it?*
 | Edit → context | A file change with no busy agent terminal belongs to the user. Main records it (first prev + latest content) and writes an `edits-<id>.md` context file with before/after snippets (30 lines / 4 KB caps, 50 files max) |
 | Bridge injection | `before_agent_start` merges the edits file with the verify file into one injected session message (display: false) |
 | Run consumption | The run clears the context at `agent_start`, so the next run never sees stale edits. Mid-run user changes stay out (busy gate + duplicate-fs-event dedupe) |
-| Ownership | Not implemented — "mark files as mine" remains a possible follow-up (the roadmap lists it as "or as context") |
+| Ownership | The Mine control marks files as user-owned and injects the ownership context into the next agent turn |
 
 ### 6. Dispatch (parallel agents) ✅ implemented
 
@@ -83,7 +83,7 @@ workflow — *what did you change, and do I want it?*
 | Split the work | The Plan Board's tasks are the units: ⇉ Dispatch sends each task to its own agent worker (new terminal, own pi session, task typed as its prompt) |
 | Reuse infra | Multi-terminal + busy state + per-terminal sidecar events all reused; at most 3 workers per dispatch, owner's partial run interrupted first |
 | Collect | Each worker's modified files and baselines merge into the owner's Change Review when it settles — one review surface |
-| Risk guard | Tasks must mention files; tasks whose paths overlap an earlier pick stay behind (they would fight over the same files); path-less tasks are never dispatched |
+| Risk guard | Tasks must mention files; tasks whose paths overlap an earlier pick stay behind (they would modify the same files); path-less tasks are never dispatched |
 
 Task states on the owner's Plan Board track the workers live: pending → active (worker starts) → done (worker settles); a worker closed early reverts its task to pending.
 

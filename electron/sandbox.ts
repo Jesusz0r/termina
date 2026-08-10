@@ -114,6 +114,7 @@ export function buildSandboxProfile(p: SandboxPaths): string {
     // auth file, whose token refresh changes only that copy (§6.6). The
     // rest of the home (npm logs, caches) stays writable for tooling.
     deny("file-write*", join(p.agentHomeDir, "settings.json")),
+    deny("file-write*", join(p.agentHomeDir, "models.json")),
     deny("file-write*", join(p.agentHomeDir, "models-store.json")),
     deny("file-write*", join(p.agentHomeDir, "skills")),
     deny("file-write*", join(p.agentHomeDir, "prompts")),

@@ -86,7 +86,7 @@ export class EditorManager {
   }
 
   /**
-   * Open (or focus) a file. Content is fetched from main if we don't have it.
+   * Open or focus a file. Fetch content from main when the model has none.
    * With preview: true the tab is a replaceable preview (VS Code style) — a
    * new preview replaces the previous one; editing or preview: false pins it.
    */
@@ -100,7 +100,7 @@ export class EditorManager {
       this.activate(key);
       return;
     }
-    // A new preview replaces the previous preview (if it wasn't edited).
+    // A new preview replaces the previous preview when the previous preview is not edited.
     if (preview && this.previewKey && this.tabs.has(this.previewKey)) {
       this.closeTab(this.previewKey);
     }
@@ -212,6 +212,15 @@ export class EditorManager {
       badge.classList.toggle("a", label === "A");
       badge.classList.toggle("b", label === "B");
     }
+  }
+
+  /** Reset tabs and editor state when the project changes. */
+  resetForProject(): void {
+    for (const key of [...this.order]) this.closeTab(key);
+    this.previewKey = null;
+    this.lastTimelineKey = null;
+    this.clearMine();
+    this.setProjectOpen(true);
   }
 
   /** Forget every mine mark (folder switch resets ownership). */

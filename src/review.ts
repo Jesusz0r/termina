@@ -12,7 +12,7 @@ export class ReviewView {
   private nameEl: HTMLElement;
   private terminalId: string | null = null;
   private path: string | null = null;
-  private baseline: string | null = null;
+  private baseline: string | null | undefined = null;
   private originalModel: monaco.editor.ITextModel | null = null;
   private modifiedModel: monaco.editor.ITextModel | null = null;
   private onOpenFile: (path: string) => void = () => {};
@@ -180,8 +180,17 @@ export class ReviewView {
     document.getElementById("editor-container")!.style.display = "";
     document.getElementById("editor-tabs")!.style.display = "";
     this.diffEditor.setModel(null);
+    this.originalModel?.dispose();
+    this.modifiedModel?.dispose();
+    this.originalModel = null;
+    this.modifiedModel = null;
     this.path = null;
     this.terminalId = null;
+    this.baseline = null;
+  }
+
+  resetForProject(): void {
+    this.hide();
   }
 
   dispose(): void {

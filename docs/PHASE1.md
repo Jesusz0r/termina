@@ -63,7 +63,7 @@
 
 - `npx tsc --noEmit` — clean.
 - `node scripts/build.mjs` + `npx vite build` — clean.
-- Phase 0 spikes: 72/72 (re-run after the refactor).
+- Phase 0 spikes: 73/73 (re-run after the refactor).
 - E2E suites on fresh instances (bridge now loads via `-e`):
   explorer 7/7, timeline 9/9, edits-to-agent 9/9, verify 11/11,
   mine-ownership 6/6, review 5/5, baseline-race 11/11, tui-loop 3/3.

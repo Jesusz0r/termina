@@ -1,6 +1,6 @@
 # Phase 0 — Proven primitives (Worldlines Release 1)
 
-> **Status:** complete — all four spikes green (71/71 checks).
+> **Status:** complete — all four spikes green (73/73 checks).
 >
 > This is the recorded evidence for the Phase 0 gate (WORLDLINES §7). It
 > proves or rejects the risky primitives before any UI work starts. The
@@ -23,7 +23,7 @@ it under plain Node. Each spike exits non-zero when any check fails.
 
 | Spike | Checks | Result |
 |---|---|---|
-| `capture` | 20/20 | byte-exact working-tree capture |
+| `capture` | 22/22 | byte-exact working-tree capture |
 | `merge` | 17/17 | three-way merge semantics |
 | `session-fork` | 19/19 | Pi session branching + forkFrom |
 | `platform` | 15/15 | sandbox, CoW clone, watcher, disk |

@@ -33,11 +33,9 @@ import htmlWorker from "monaco-editor/language/html/html.worker?worker";
   },
 };
 
-import { EditorManager } from "./editor";
 import "./styles.css";
 import "@xterm/xterm/css/xterm.css";
 import { PtyView } from "./pty-view";
-import { ReviewView } from "./review";
 import { TimelineView } from "./timeline";
 import { SessionSearch } from "./session-search";
 import { WorldlinesView } from "./worldlines";
@@ -45,6 +43,8 @@ import { Explorer } from "./components/explorer";
 import { toast } from "./components/modals";
 import type { ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, PlanTask, RunSummary } from "../shared/types";
 
+const { EditorManager } = await import("./editor");
+const { ReviewView } = await import("./review");
 const editorMgr = new EditorManager(document.getElementById("editor-container")!);
 (window as unknown as Record<string, unknown>).__editorMgr = editorMgr;
 // A disk write reached a model with unsaved edits: never replace silently.
@@ -355,7 +355,7 @@ function renderTimeline(): void {
       // Events may have been pushed locally while the fetch was in flight —
       // merge them in by seq (monotonic per terminal) instead of losing them.
       const maxSeq = events.length ? Math.max(...events.map((e) => e.seq)) : 0;
-      p.timeline = events.concat(p.timeline.filter((e) => e.seq > maxSeq));
+      p.timeline = events.concat(p.timeline.filter((e) => e.seq > maxSeq)).slice(-MAX_TIMELINE_EVENTS);
       if (activeId === pane.instanceId) timelineView.setEvents(p.timeline);
     });
     return;
@@ -716,6 +716,7 @@ const DEFAULT_LAYOUT: Layout = "terminal-left";
 const LAYOUT_KEY = "pi-ditor.layout";
 const EXPLORER_KEY = "pi-ditor.explorer";
 const MODIFIED_KEY = "pi-ditor.modified";
+const MAX_TIMELINE_EVENTS = 400;
 
 const splitEl = document.getElementById("main-split")!;
 const modifiedPanelEl = document.getElementById("modified-panel")!;
@@ -957,6 +958,7 @@ window.pi.onTimelineEvent(({ terminalId, event }) => {
   const idx = pane.timeline.findIndex((e) => e.seq === event.seq);
   if (idx === -1) pane.timeline.push(event);
   else pane.timeline[idx] = event;
+  if (pane.timeline.length > MAX_TIMELINE_EVENTS) pane.timeline.splice(0, pane.timeline.length - MAX_TIMELINE_EVENTS);
   if (activeId === terminalId) timelineView.push(event);
   // A settled run may have become forkable: refresh the Fork Run button.
   if (event.t === "agent_settled") {
@@ -1015,11 +1017,13 @@ window.pi.onModifiedList((p) => {
 window.pi.onFolderOpened((e) => {
   projectCwd = e.cwd;
   explorer.setProject(e.cwd);
+  reviewView.resetForProject();
+  editorMgr.resetForProject();
+  worldlinesView.resetForProject();
   refreshMine();
   void refreshTestCommand();
-  // Fresh context: close every old pane. The new agent terminal arrives on
-  // the next instances:list push. Worldlines are workspace-bound too.
   for (const p of [...panes.values()]) void closePane(p.instanceId);
+  timelineView.resetForProject();
   renderTimeline();
 });
 

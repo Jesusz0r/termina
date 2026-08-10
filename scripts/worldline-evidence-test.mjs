@@ -160,6 +160,20 @@ const staleSummary = await waitFor(async () => {
   return s && s.comparisonId === comparisonId && s.stale === true ? s : null;
 }, 300000);
 check("a candidate run marks the evidence stale", staleSummary !== null, JSON.stringify(staleSummary?.stale));
+// Wait for the candidate run before starting evidence. A file change can
+// invalidate evidence before the bridge reports agent_start.
+const candidateSettled = await waitFor(async () => {
+  const insts = (await evalJs(`window.pi.getInstances()`)) ?? [];
+  const aInst = insts.find((i) => i.id === a.terminalId);
+  const timeline = (await evalJs(`window.pi.getTimeline(${JSON.stringify(a.terminalId)})`)) ?? [];
+  const started = timeline.some((event) => event.t === "agent_start");
+  const settled = timeline.some((event) => event.t === "agent_settled");
+  return aInst && !aInst.busy && started && settled ? aInst : null;
+}, 120000);
+check("the candidate run settles before evidence", candidateSettled !== null, JSON.stringify(candidateSettled));
+if (!candidateSettled) process.exit(1);
+await sleep(1500);
+
 // A fresh run refreshes it.
 const ev3 = await evalJs(`window.pi.runEvidence(${JSON.stringify(comparisonId)})`);
 check("evidence re-runs after the candidate run", ev3?.ok === true, JSON.stringify(ev3));
@@ -169,12 +183,6 @@ const summary3 = await waitFor(async () => {
 }, 120000);
 check("the refreshed evidence is current", summary3 !== null && summary3?.stale === false, JSON.stringify(summary3?.stale));
 
-// The candidate's run must finish before the promotion (busy gate).
-await waitFor(async () => {
-  const insts = (await evalJs(`window.pi.getInstances()`)) ?? [];
-  const aInst = insts.find((i) => i.id === a.terminalId);
-  return aInst && !aInst.busy ? true : null;
-}, 120000);
 await sleep(1500);
 
 // --------------------- manual promotion with current evidence ----

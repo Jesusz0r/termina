@@ -12,7 +12,7 @@
 /**
  * Targeted verification of the three pre-existing bugs fixed in the audit:
  *
- * 1. Phantom-history replay: a fresh instance must NOT replay events written
+ * 1. Old-history replay: a fresh instance must NOT replay events written
  *    before it launched (timeline empty at boot, status idle).
  * 2. Baseline race: an edit reconstructs the pre-run content in BOTH poll
  *    orderings; a first-touch write to an existing file leaves the baseline
@@ -35,7 +35,9 @@ const eventsDir = "/tmp/pi-editor-events-test";
 const { mkdirSync } = await import("node:fs");
 mkdirSync(eventsDir, { recursive: true });
 const sidecar = join(eventsDir, "term-1.jsonl");
-const emit = (obj) => appendFileSync(sidecar, JSON.stringify(obj) + "\n");
+const bridgeId = "synthetic-baseline";
+let sequence = 0;
+const emit = (obj) => appendFileSync(sidecar, JSON.stringify({ bridgeId, seq: ++sequence, ...obj }) + "\n");
 
 const pages = await fetch("http://127.0.0.1:9222/json").then((r) => r.json());
 const page = pages.find((t) => t.type === "page");
@@ -47,13 +49,13 @@ ws.onmessage = (m) => { const msg = JSON.parse(m.data); if (msg.id && pending.ha
 const send = (method, params = {}) => new Promise((res) => { const i = ++id; pending.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });
 const evalJs = async (expr) => { const r = await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true }); return r.result?.result?.value; };
 
-// ---- 1. no phantom replay at boot ----
+// ---- 1. no old-history replay at boot ----
 const boot = JSON.parse(await evalJs(`(() => JSON.stringify({
   tl: window.__timelineView ? document.querySelectorAll('#timeline-dots .timeline-dot').length : -1,
   state: document.getElementById('status-state').textContent,
 }))()`));
-check("no phantom timeline dots at boot", boot.tl === 0, JSON.stringify(boot));
-check("no phantom busy state at boot", String(boot.state).includes("idle"), boot.state);
+check("no old-history timeline dots at boot", boot.tl === 0, JSON.stringify(boot));
+check("no old-history busy state at boot", String(boot.state).includes("idle"), boot.state);
 const tl0 = await evalJs(`window.pi.getTimeline('term-1')`);
 check("getTimeline empty at boot", Array.isArray(tl0) && tl0.length === 0, JSON.stringify(tl0));
 
@@ -78,7 +80,7 @@ const helloBefore = readFileSync(helloPath, "utf8");
 writeFileSync(helloPath, helloBefore + "extra line\n");
 await sleep(700);
 const b2 = await evalJs(`window.pi.reviewBaseline('term-1', '${helloPath}')`);
-check("write to existing file: baseline undefined (revert refuses, no delete)", b2?.baseline === null && b2?.status === "modified", JSON.stringify(b2));
+check("write to existing file: baseline unavailable (revert refuses, no delete)", b2?.baseline === undefined && b2?.status === "modified", JSON.stringify(b2));
 emit({ t: "agent_settled" });
 await sleep(400);
 

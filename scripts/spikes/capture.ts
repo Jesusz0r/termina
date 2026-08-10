@@ -152,6 +152,13 @@ export default async function run(log: (msg: string) => void) {
 
   // ------------------------------------------------------------ materialize
   const restored = join(work, "restored");
+  mkdirSync(restored, { recursive: true });
+  writeFileSync(join(restored, "stale.txt"), "stale\n");
+  writeFileSync(join(restored, "exec.sh"), "wrong\n");
+  mkdirSync(join(restored, "stale-dir"));
+  writeFileSync(join(restored, "stale-dir", "nested.txt"), "stale\n");
+  symlinkSync("wrong-target", join(restored, "tracked.txt"));
+  chmodSync(join(restored, "exec.sh"), 0o644);
   await store.materialize(state.commit, restored);
   let roundTrip = true;
   for (const [rel, exp] of Object.entries(expected)) {
@@ -185,6 +192,13 @@ export default async function run(log: (msg: string) => void) {
     }
   }
   check("materialize round-trips bytes, modes, and symlinks", roundTrip);
+  check(
+    "materialize removes stale paths and replaces wrong types",
+    !existsSync(join(restored, "stale.txt")) &&
+      !existsSync(join(restored, "stale-dir")) &&
+      lstatSync(join(restored, "tracked.txt")).isFile() &&
+      (lstatSync(join(restored, "exec.sh")).mode & 0o111) !== 0,
+  );
 
   // ------------------------------------------------------------ blob dedupe
   writeFileSync(join(repo, "dup-a.txt"), "same bytes\n");

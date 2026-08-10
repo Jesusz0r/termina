@@ -8,14 +8,6 @@ export interface ModifiedFile {
   status: "created" | "modified" | "deleted";
 }
 
-export interface InstanceSummary {
-  id: string;
-  cwd: string;
-  busy: boolean;
-  type: "agent" | "shell";
-  shellName?: string;
-}
-
 export interface FileChangedPayload {
   path: string;
   relPath: string;
@@ -75,7 +67,7 @@ export interface SessionHit {
   filePath?: string;
 }
 
-/** One point on the Session Timeline (the "time machine" strip). */
+/** One point on the Session Timeline strip. */
 export interface TimelineEvent {
   seq: number;
   t: "agent_start" | "agent_settled" | "tool" | "change";
@@ -201,9 +193,9 @@ export interface WorldlineSummary {
   comparisonId: string;
   label: "A" | "B";
   role: "reference" | "alternative" | "challenge" | "moment";
-  comparisonBaseStateId: string;
-  promotionBaseStateId: string;
-  headStateId: string;
+  comparisonBaseStateId: string | null;
+  promotionBaseStateId: string | null;
+  headStateId: string | null;
   sourceRunId: string;
   terminalId: string | null;
   version: number;
@@ -284,8 +276,9 @@ export interface WorldlineDetails {
   error: string | null;
   /** Provenance: the source run and the states it compares. */
   sourceRunId: string;
-  comparisonBaseStateId: string;
-  headStateId: string;
+  comparisonBaseStateId: string | null;
+  promotionBaseStateId: string | null;
+  headStateId: string | null;
   model: string | null;
   thinkingLevel: string | null;
   createdAt: number;
@@ -415,7 +408,7 @@ export interface PiBridge {
     terminalId: string,
     seq: number,
   ): Promise<{ ok: boolean; seq: number; path?: string; relPath?: string; content?: string; ts?: number; toolName?: string }>;
-  reviewBaseline(terminalId: string, path: string): Promise<{ status: "created" | "modified"; baseline: string | null }>;
+  reviewBaseline(terminalId: string, path: string): Promise<{ status: "created" | "modified"; baseline: string | null | undefined }>;
   reviewRevert(terminalId: string, path: string): Promise<{ ok: boolean; error?: string }>;
 
   // project / files

@@ -171,13 +171,13 @@ export class ProjectWatcher {
     // Keys are canonicalized so lookups from anywhere in the app hit.
     const key = this.canonicalize ? this.canonicalize(abs) : abs;
     const prev = this.lastContents.get(key); // pre-change content, for baselines
-    this.cacheBytes += content.length - (prev?.length ?? 0);
+    this.cacheBytes += Buffer.byteLength(content, "utf8") - (prev ? Buffer.byteLength(prev, "utf8") : 0);
     this.lastContents.set(key, content);
     while (this.lastContents.size > 1 && (this.lastContents.size > ProjectWatcher.CACHE_LIMIT || this.cacheBytes > ProjectWatcher.CACHE_BYTES)) {
       const oldest = this.lastContents.keys().next().value;
       if (oldest === undefined) break;
       const evicted = this.lastContents.get(oldest);
-      this.cacheBytes -= evicted?.length ?? 0;
+      this.cacheBytes -= evicted ? Buffer.byteLength(evicted, "utf8") : 0;
       this.lastContents.delete(oldest);
     }
     const change: FileChange = { path: abs, relPath, content, status, prev };

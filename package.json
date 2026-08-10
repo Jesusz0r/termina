@@ -6,10 +6,13 @@
   "main": "dist-electron/main.mjs",
   "scripts": {
     "dev": "node scripts/dev.mjs",
-    "build": "node scripts/build.mjs",
+    "build": "node scripts/build.mjs && vite build",
     "start": "electron .",
     "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck && npm run build && npm run test:spikes",
+    "test:spikes": "npm run spike -- capture && npm run spike -- merge && npm run spike -- session-fork && npm run spike -- platform",
     "test:loop": "node scripts/tui-loop-test.mjs",
+    "test:e2e": "node scripts/e2e.mjs",
     "spike": "node scripts/spike.mjs"
   },
   "dependencies": {
