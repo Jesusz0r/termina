@@ -7,6 +7,7 @@
  * when idle you can edit and save with Cmd+S.
  */
 import * as monaco from "monaco-editor";
+import type { ThemeId } from "../shared/types";
 
 interface OpenTab {
   key: string; // absolute path
@@ -66,6 +67,18 @@ export class EditorManager {
   setLocked(locked: boolean): void {
     this.locked = locked;
     this.updateReadOnly();
+  }
+
+  setTheme(theme: ThemeId): void {
+    monaco.editor.setTheme(theme === "light" ? "vs" : theme === "high-contrast" ? "hc-black" : "vs-dark");
+  }
+
+  setFontSize(size: number): void {
+    this.editor.updateOptions({ fontSize: size });
+  }
+
+  setMinimap(enabled: boolean): void {
+    this.editor.updateOptions({ minimap: { enabled } });
   }
 
   /** Read-only when locked by a busy agent or when a snapshot is active. */
@@ -399,9 +412,12 @@ export class EditorManager {
    */
   runMenuEdit(kind: "undo" | "redo" | "select-all"): boolean {
     if (!this.editor.hasTextFocus()) return false;
-    const action =
-      kind === "undo" ? "editor.action.undo" : kind === "redo" ? "editor.action.redo" : "editor.action.selectAll";
-    this.editor.trigger("menu", action, null);
+    const actions = {
+      undo: "editor.action.undo",
+      redo: "editor.action.redo",
+      "select-all": "editor.action.selectAll",
+    } as const;
+    this.editor.trigger("menu", actions[kind], null);
     return true;
   }
 

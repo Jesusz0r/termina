@@ -30,6 +30,8 @@ const BASIC_SUITES = [
   "tui-loop-test.mjs",
   "verify-test.mjs",
   "verify-cancel-test.mjs",
+  "settings-test.mjs",
+  "terminal-clipboard-test.mjs",
 ];
 const WORLDLINE_SUITES = [
   "worldline-run-boundary-test.mjs",

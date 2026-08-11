@@ -4,6 +4,7 @@
  */
 import * as monaco from "monaco-editor";
 import { toast } from "./components/modals";
+import type { ThemeId } from "../shared/types";
 
 export class ReviewView {
   private container: HTMLElement;
@@ -47,6 +48,14 @@ export class ReviewView {
     this.onOpenFile = handlers.onOpenFile;
     this.onAccepted = handlers.onAccepted;
     this.onReverted = handlers.onReverted;
+  }
+
+  setTheme(theme: ThemeId): void {
+    monaco.editor.setTheme(theme === "light" ? "vs" : theme === "high-contrast" ? "hc-black" : "vs-dark");
+  }
+
+  setFontSize(size: number): void {
+    this.diffEditor.updateOptions({ fontSize: size });
   }
 
   get isVisible(): boolean {

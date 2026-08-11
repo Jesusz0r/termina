@@ -7,7 +7,7 @@
  * (tool calls, busy state) to sidecar files we tail — that powers auto-open
  * of files mid-run and the modified-files panel.
  */
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme } from "electron";
 import { execFile, spawn } from "node:child_process";
 import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { openSync, closeSync, fsyncSync } from "node:fs";
@@ -24,16 +24,22 @@ import { SnapshotStore, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, g
 import { WorldlineManager, type ForkableRun } from "./worldlines.js";
 import { sandboxShellPreamble, writeEvidenceProfile } from "./sandbox.js";
 import { EvidenceEngine, mineChangeReason, rankProfiles, type EvidenceDeps, type EvidenceRecord, type EvidenceSummary as EngineSummary } from "./evidence.js";
-import type {
-  ExplorerEntry,
-  InstanceSummary,
-  ModifiedFile,
-  RecorderState,
-  RunSummary,
-  SessionHit,
-  TimelineEvent,
-  VerifyInfo,
-  VerifyState,
+import { AppPreferencesStore, normalizeAppPreferences, sanitizeShortcutMap } from "./preferences.js";
+import {
+  DEFAULT_SHORTCUTS,
+  defaultAppPreferences,
+  type AppPreferences,
+  type ExplorerEntry,
+  type InstanceSummary,
+  type ModifiedFile,
+  type RecorderState,
+  type RunSummary,
+  type SessionHit,
+  type ShortcutCommand,
+  type ShortcutMap,
+  type TimelineEvent,
+  type VerifyInfo,
+  type VerifyState,
 } from "../shared/types.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -41,6 +47,7 @@ const MAX_OPEN_FILE_SIZE = 2 * 1024 * 1024;
 const MAX_PROMPT_BYTES = 20 * 1024 * 1024;
 const MAX_PI_RESOURCE_BYTES = 200 * 1024 * 1024;
 const MAX_PTY_IPC_CHUNK = 64 * 1024;
+const MAX_CLIPBOARD_BYTES = 4 * 1024 * 1024;
 const MAX_VERIFY_OUTPUT = 200_000;
 /** Timeline snapshots bigger than this are dropped (dot stays, no content). */
 const MAX_SNAPSHOT_SIZE = 100_000;
@@ -415,6 +422,11 @@ function quoteShellArg(a: string): string {
   return "'" + a.replace(/'/g, "'\\''") + "'";
 }
 
+function capUtf8(text: string, maxBytes: number): string {
+  const bytes = Buffer.from(text, "utf8");
+  return bytes.length <= maxBytes ? text : bytes.subarray(0, maxBytes).toString("utf8");
+}
+
 function detectShells(): { name: string; path: string }[] {
   const candidates: Array<[string, string]> = [
     ["zsh", "/bin/zsh"],
@@ -730,6 +742,9 @@ class PiEditorApp {
   private worldlines: WorldlineManager | null = null;
   /** The app-owned worlds root. */
   private userDataDir = process.env.PI_EDITOR_USER_DATA_DIR ?? app.getPath("userData");
+  private preferencesStore = new AppPreferencesStore(join(this.userDataDir, "preferences.json"));
+  private preferences: AppPreferences = defaultAppPreferences();
+  private shortcutMap: ShortcutMap = { ...DEFAULT_SHORTCUTS };
   private worldsRoot = process.env.PI_EDITOR_WORLDS_DIR ?? join(this.userDataDir, "worlds");
   /** Tailers for candidate events directories. */
   private worldlineTailers = new Map<string, SidecarTailer>();
@@ -776,14 +791,15 @@ class PiEditorApp {
   // ---------------------------------------------------------------- window --
 
   async createWindow(): Promise<void> {
-    nativeTheme.themeSource = "dark";
+    nativeTheme.themeSource = this.preferences.theme === "light" ? "light" : "dark";
+    const backgroundColor = this.preferences.theme === "light" ? "#f6f8fa" : this.preferences.theme === "high-contrast" ? "#000000" : "#1e1e1e";
     this.win = new BrowserWindow({
       width: 1440,
       height: 900,
       minWidth: 960,
       minHeight: 600,
       title: "Pi/ditor",
-      backgroundColor: "#1e1e1e",
+      backgroundColor,
       titleBarStyle: "hiddenInset",
       trafficLightPosition: { x: 12, y: 12 },
       webPreferences: {
@@ -816,53 +832,68 @@ class PiEditorApp {
 
   private buildMenu(): void {
     const send = (command: string) => () => this.send("menu:command", { command });
+    const shortcut = (command: ShortcutCommand): string | undefined => this.shortcutMap[command] || undefined;
     const template: Electron.MenuItemConstructorOptions[] = [
-      { role: "appMenu" },
+      {
+        label: "Pi/ditor",
+        submenu: [
+          { role: "about" },
+          { type: "separator" },
+          { label: "Settings…", accelerator: shortcut("open-settings"), click: send("open-settings") },
+          { type: "separator" },
+          { role: "services", submenu: [] },
+          { type: "separator" },
+          { role: "hide" },
+          { role: "hideOthers" },
+          { role: "unhide" },
+          { type: "separator" },
+          { role: "quit" },
+        ],
+      },
       {
         label: "File",
         submenu: [
-          { label: "Open Folder…", accelerator: "CmdOrCtrl+O", click: () => void this.openFolder() },
+          { label: "Open Folder…", accelerator: shortcut("open-folder"), click: () => void this.openFolder() },
           { type: "separator" },
-          { label: "New File…", accelerator: "CmdOrCtrl+Alt+N", click: send("new-file") },
-          { label: "New Folder…", accelerator: "CmdOrCtrl+Alt+Shift+N", click: send("new-folder") },
-          { label: "Rename…", accelerator: "F2", click: send("rename") },
-          { label: "Delete…", click: send("delete") },
+          { label: "New File…", accelerator: shortcut("new-file"), click: send("new-file") },
+          { label: "New Folder…", accelerator: shortcut("new-folder"), click: send("new-folder") },
+          { label: "Rename…", accelerator: shortcut("rename"), click: send("rename") },
+          { label: "Delete…", accelerator: shortcut("delete"), click: send("delete") },
           { type: "separator" },
-          { label: "Refresh Explorer", click: send("refresh") },
+          { label: "Refresh Explorer", accelerator: shortcut("refresh"), click: send("refresh") },
           { type: "separator" },
-          { label: "Save All", accelerator: "CmdOrCtrl+Alt+S", click: send("save-all") },
+          { label: "Save All", accelerator: shortcut("save-all"), click: send("save-all") },
           { type: "separator" },
-          { label: "Close Window", accelerator: "CmdOrCtrl+W", role: "close" },
+          { label: "Close Window", accelerator: shortcut("close-window"), role: "close" },
         ],
       },
       {
         label: "Edit",
         submenu: [
-          // Undo, Redo, and Select All dispatch to the renderer. The focused
-          // surface (Monaco or terminal) runs its own handler. Role items
-          // would run the browser undo and select on the hidden input only.
-          { label: "Undo", accelerator: "CmdOrCtrl+Z", click: send("edit:undo") },
-          { label: "Redo", accelerator: "Shift+CmdOrCtrl+Z", click: send("edit:redo") },
+          // Cut, Copy, Paste, and Delete use system roles. The browser
+          // routes the edit command to the focused surface, and the role
+          // inherits the standard accelerator. Undo, Redo, and Select All
+          // dispatch to the renderer instead: the user can rebind them, and
+          // each surface keeps its own undo stack and selection.
+          { label: "Undo", accelerator: shortcut("undo"), click: send("edit:undo") },
+          { label: "Redo", accelerator: shortcut("redo"), click: send("edit:redo") },
           { type: "separator" },
-          // The roles fire the cut, copy, and paste events. Monaco and xterm
-          // listen for these events, so the native shortcuts work in both
-          // the editor and the terminal.
-          { role: "cut", label: "Cut" },
-          { role: "copy", label: "Copy" },
-          { role: "paste", label: "Paste" },
-          { role: "pasteAndMatchStyle", label: "Paste and Match Style" },
-          { role: "delete", label: "Delete" },
+          { role: "cut" },
+          { role: "copy" },
+          { role: "paste" },
+          { role: "pasteAndMatchStyle" },
+          { role: "delete" },
           { type: "separator" },
-          { label: "Select All", accelerator: "CmdOrCtrl+A", click: send("edit:select-all") },
+          { label: "Select All", accelerator: shortcut("select-all"), click: send("edit:select-all") },
         ],
       },
       {
         label: "Terminal",
         submenu: [
-          { label: "New Terminal", accelerator: "CmdOrCtrl+Shift+T", click: () => void this.createTerminal() },
-          { label: "Close Terminal", accelerator: "CmdOrCtrl+Shift+W", click: () => void this.closeActiveTerminal() },
+          { label: "New Terminal", accelerator: shortcut("new-terminal"), click: () => void this.createTerminal() },
+          { label: "Close Terminal", accelerator: shortcut("close-terminal"), click: () => void this.closeActiveTerminal() },
           { type: "separator" },
-          { label: "Send Ctrl+C (abort)", accelerator: "CmdOrCtrl+.", click: () => void this.abortActive() },
+          { label: "Send Ctrl+C (abort)", accelerator: shortcut("abort-terminal"), click: () => void this.abortActive() },
         ],
       },
       {
@@ -876,13 +907,13 @@ class PiEditorApp {
               { label: "Terminal Top", click: send("layout-terminal-top") },
               { label: "Terminal Bottom", click: send("layout-terminal-bottom") },
               { type: "separator" },
-              { label: "Terminal Fullscreen", accelerator: "CmdOrCtrl+Shift+F", click: send("layout-terminal-fullscreen") },
+              { label: "Terminal Fullscreen", accelerator: shortcut("fullscreen"), click: send("layout-terminal-fullscreen") },
             ],
           },
-          { label: "Toggle Explorer", accelerator: "CmdOrCtrl+B", click: send("toggle-explorer") },
-          { label: "Toggle Editor", accelerator: "CmdOrCtrl+E", click: send("toggle-editor") },
-          { label: "Toggle Modified Panel", click: send("toggle-modified") },
-          { label: "Search Sessions…", accelerator: "CmdOrCtrl+Shift+F", click: send("session-search") },
+          { label: "Toggle Explorer", accelerator: shortcut("toggle-explorer"), click: send("toggle-explorer") },
+          { label: "Toggle Editor", accelerator: shortcut("toggle-editor"), click: send("toggle-editor") },
+          { label: "Toggle Modified Panel", accelerator: shortcut("toggle-modified"), click: send("toggle-modified") },
+          { label: "Search Sessions…", accelerator: shortcut("session-search"), click: send("session-search") },
           { type: "separator" },
           { label: "Toggle DevTools", accelerator: "Alt+Cmd+I", role: "toggleDevTools" },
           { label: "Reload", accelerator: "CmdOrCtrl+R", role: "reload" },
@@ -894,6 +925,29 @@ class PiEditorApp {
       },
     ];
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  }
+
+  private setKeyboardShortcuts(raw: unknown): ShortcutMap {
+    this.shortcutMap = sanitizeShortcutMap(raw, {} as ShortcutMap);
+    this.buildMenu();
+    return { ...this.shortcutMap };
+  }
+
+  private async updatePreferences(raw: unknown, activateShortcuts: boolean): Promise<AppPreferences> {
+    const next = normalizeAppPreferences(raw);
+    this.preferences = next;
+    nativeTheme.themeSource = next.theme === "light" ? "light" : "dark";
+    if (activateShortcuts) {
+      this.shortcutMap = { ...next.shortcuts };
+      this.buildMenu();
+    }
+    try {
+      await this.preferencesStore.save(next);
+    } catch (err) {
+      console.warn(`[main] preferences save failed: ${(err as Error).message}`);
+      throw err;
+    }
+    return { ...next, shortcuts: { ...next.shortcuts } };
   }
 
   // ------------------------------------------------------------- terminals --
@@ -4415,6 +4469,18 @@ class PiEditorApp {
 
   private registerIpc(): void {
     ipcMain.handle("folder:open", () => this.openFolder());
+    ipcMain.handle("clipboard:write", (_e, text: unknown) => {
+      if (typeof text !== "string") return { ok: false, error: "clipboard text is invalid" };
+      if (Buffer.byteLength(text, "utf8") > MAX_CLIPBOARD_BYTES) return { ok: false, error: "clipboard text is too large" };
+      clipboard.writeText(text);
+      return { ok: true };
+    });
+    ipcMain.handle("clipboard:read", () => capUtf8(clipboard.readText(), MAX_CLIPBOARD_BYTES));
+    ipcMain.handle("settings:get", () => ({ ...this.preferences, shortcuts: { ...this.preferences.shortcuts } }));
+    ipcMain.handle("settings:update", (_e, preferences: unknown, activateShortcuts?: boolean) =>
+      this.updatePreferences(preferences, activateShortcuts === true),
+    );
+    ipcMain.handle("settings:shortcuts", (_e, shortcuts: unknown) => this.setKeyboardShortcuts(shortcuts));
 
     ipcMain.handle("terminals:create", async (_e, opts?: { type?: "agent" | "shell"; shell?: string }) => {
       try {
@@ -4769,6 +4835,8 @@ class PiEditorApp {
   // ---------------------------------------------------------------- boot ----
 
   async start(): Promise<void> {
+    this.preferences = await this.preferencesStore.load();
+    this.shortcutMap = { ...this.preferences.shortcuts };
     this.registerIpc();
     // Set the project BEFORE the window loads: the renderer queries the
     // project (test detection, cwd) as soon as it boots, and terminalCwd()
@@ -4806,6 +4874,7 @@ class PiEditorApp {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    await this.preferencesStore.flush();
     await this.drainVerifyJobs();
     this.tailer.stop();
     await this.drainSidecarQueues();

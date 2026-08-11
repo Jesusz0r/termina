@@ -127,6 +127,7 @@ Use these terms exactly. Do not invent synonyms.
 - `electron/sandbox.ts`: the candidate sandbox profiles, the evidence
   (offline) profile variant, and the ulimit preamble.
 - `electron/preload.ts`: exposes the typed `window.pi` bridge.
+- `electron/preferences.ts`: validates and persists app-owned preferences.
 - `shared/types.ts`: the types shared between main, preload, and renderer.
 - `src/main.ts`: the renderer entry. It manages panes, layout, and events.
 - `src/pty-view.ts`: the xterm view for one terminal.

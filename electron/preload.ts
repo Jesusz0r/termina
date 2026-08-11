@@ -18,6 +18,8 @@ import type {
   TimelineEvent,
   PlanPayload,
   WorldlineSummary,
+  AppPreferences,
+  ShortcutMap,
 } from "../shared/types.js";
 
 const bridge: PiBridge = {
@@ -80,9 +82,15 @@ const bridge: PiBridge = {
   resizeTerminal: (id, cols, rows) => ipcRenderer.invoke("terminals:resize", id, cols, rows),
   getInstances: (): Promise<InstanceSummary[]> => ipcRenderer.invoke("terminals:list"),
   abortTerminal: (id) => ipcRenderer.invoke("terminals:abort", id),
+  writeClipboard: (text) => ipcRenderer.invoke("clipboard:write", text),
+  readClipboard: () => ipcRenderer.invoke("clipboard:read"),
   detectTest: (terminalId) => ipcRenderer.invoke("verify:detect", terminalId),
   runVerify: (terminalId) => ipcRenderer.invoke("verify:run", terminalId),
   cancelVerify: (terminalId) => ipcRenderer.invoke("verify:cancel", terminalId),
+  getPreferences: (): Promise<AppPreferences> => ipcRenderer.invoke("settings:get"),
+  updatePreferences: (preferences: AppPreferences, activateShortcuts: boolean): Promise<AppPreferences> =>
+    ipcRenderer.invoke("settings:update", preferences, activateShortcuts),
+  setKeyboardShortcuts: (shortcuts: ShortcutMap) => ipcRenderer.invoke("settings:shortcuts", shortcuts),
   getTimeline: (terminalId) => ipcRenderer.invoke("timeline:get", terminalId),
   getPlan: (terminalId) => ipcRenderer.invoke("plan:get", terminalId),
   searchSessions: (query) => ipcRenderer.invoke("session:search", query),

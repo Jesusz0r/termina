@@ -41,7 +41,9 @@ import { SessionSearch } from "./session-search";
 import { WorldlinesView } from "./worldlines";
 import { Explorer } from "./components/explorer";
 import { toast } from "./components/modals";
-import type { ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, PlanTask, RunSummary } from "../shared/types";
+import { SettingsView, emptyShortcuts } from "./settings";
+import { defaultAppPreferences } from "../shared/types";
+import type { AppPreferences, ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, PlanTask, RunSummary } from "../shared/types";
 
 const { EditorManager } = await import("./editor");
 const { ReviewView } = await import("./review");
@@ -99,6 +101,7 @@ const leftPane = document.getElementById("left-pane")!;
 const termTabsList = document.getElementById("terminal-tabs-list")!;
 const termContainer = document.getElementById("terminal-container")!;
 const btnNewTerminal = document.getElementById("btn-new-terminal") as HTMLButtonElement;
+const btnSettings = document.getElementById("btn-settings") as HTMLButtonElement;
 const btnVerify = document.getElementById("btn-verify") as HTMLButtonElement;
 const verifyBadge = document.getElementById("verify-badge")!;
 const statusCwd = document.getElementById("status-cwd")!;
@@ -161,9 +164,35 @@ interface Pane {
 }
 
 const panes = new Map<string, Pane>();
+(window as unknown as Record<string, unknown>).__panes = panes;
 const closingPanes = new Set<string>();
 let activeId: string | null = null;
 let projectCwd: string | null = null;
+let preferences: AppPreferences = await window.pi.getPreferences().catch(() => defaultAppPreferences());
+
+function applyPreferences(next: AppPreferences, persist: boolean, activateShortcuts: boolean): void {
+  preferences = next;
+  document.documentElement.dataset.theme = next.theme;
+  editorMgr.setTheme(next.theme);
+  editorMgr.setFontSize(next.editorFontSize);
+  editorMgr.setMinimap(next.minimap);
+  reviewView.setTheme(next.theme);
+  reviewView.setFontSize(next.editorFontSize);
+  for (const pane of panes.values()) pane.view.setTheme(next.theme);
+  if (persist) {
+    void window.pi.updatePreferences(next, activateShortcuts).catch(() => toast("Could not save settings", "error"));
+  } else if (activateShortcuts) {
+    void window.pi.setKeyboardShortcuts(next.shortcuts).catch(() => undefined);
+  }
+}
+
+const settingsView = new SettingsView({
+  onChange: (next) => applyPreferences(next, true, false),
+  onOpen: () => void window.pi.setKeyboardShortcuts(emptyShortcuts()),
+  onClose: (next) => applyPreferences(next, true, true),
+});
+
+applyPreferences(preferences, false, true);
 
 function createPaneShell(instanceId: string): Pane {
   const container = document.createElement("div");
@@ -199,6 +228,8 @@ function createPaneShell(instanceId: string): Pane {
     container,
     (data) => void window.pi.writeTerminal(instanceId, data),
     (cols, rows) => void window.pi.resizeTerminal(instanceId, cols, rows),
+    (text) => void window.pi.writeClipboard(text).catch(() => undefined),
+    () => window.pi.readClipboard(),
   );
 
   const pane: Pane = {
@@ -230,6 +261,7 @@ function createPaneShell(instanceId: string): Pane {
     testCommand: null,
   };
   panes.set(instanceId, pane);
+  view.setTheme(preferences.theme);
   pane.tabEl.prepend(typeEl);
   return pane;
 }
@@ -268,6 +300,7 @@ function activatePane(instanceId: string): void {
     p.tabEl.classList.toggle("active", p.instanceId === instanceId);
   }
   pane.view.fit();
+  pane.view.focus();
   renderChrome();
   renderTimeline();
   loadRuns(pane);
@@ -653,6 +686,7 @@ btnNewTerminal.addEventListener("click", (e) => {
   if (terminalMenu) closeTerminalMenu();
   else void openTerminalMenu();
 });
+btnSettings.addEventListener("click", () => settingsView.open(preferences));
 window.addEventListener("click", () => closeTerminalMenu());
 window.addEventListener("blur", () => closeTerminalMenu());
 btnVerify.addEventListener("click", () => {
@@ -778,7 +812,7 @@ function runMenuEdit(kind: "undo" | "redo" | "select-all"): void {
     const term = pane.view.getTerminal();
     if (term.textarea && document.activeElement === term.textarea) {
       if (kind === "select-all") term.selectAll();
-      else document.execCommand(kind); // browser undo and redo affect only the transient input
+      else document.execCommand(kind);
       return;
     }
   }
@@ -831,6 +865,9 @@ window.pi.onMenuCommand((cmd) => {
       break;
     case "session-search":
       sessionSearch.open();
+      break;
+    case "open-settings":
+      settingsView.open(preferences);
       break;
     default:
       explorer.handleCommand(cmd.command);

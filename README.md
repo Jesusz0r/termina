@@ -27,6 +27,7 @@ agent work live.
 | Plan Board | the agent's task list with live progress and one-click parallel Dispatch |
 | Session Search | full-text over past sessions with click-to-jump |
 | File explorer | project tree, create/rename/delete, preview tabs |
+| Settings | themes, editor font and minimap options, and remappable keyboard shortcuts |
 
 ## Worldlines (Fork Run, Fork Any Moment, Challenge)
 
@@ -48,7 +49,8 @@ state; and Challenge Mode ranks candidates with deterministic evidence.
 
 Everything is local. The terminal stays the source of truth; the app records
 byte-exact source states in an app-owned snapshot store and never writes the
-user's Git repository.
+user's Git repository. Pi/ditor preferences are stored in the app user-data
+directory, separate from Pi `/settings` and project files.
 
 ## Getting started
 

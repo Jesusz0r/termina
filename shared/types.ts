@@ -129,6 +129,71 @@ export interface ExplorerEntry {
   type: "file" | "dir";
 }
 
+export type ThemeId = "dark" | "light" | "high-contrast";
+
+export interface AppPreferences {
+  theme: ThemeId;
+  editorFontSize: number;
+  minimap: boolean;
+  shortcuts: ShortcutMap;
+}
+
+export type ShortcutCommand =
+  | "open-folder"
+  | "new-file"
+  | "new-folder"
+  | "rename"
+  | "delete"
+  | "refresh"
+  | "save-all"
+  | "close-window"
+  | "undo"
+  | "redo"
+  | "select-all"
+  | "new-terminal"
+  | "close-terminal"
+  | "abort-terminal"
+  | "fullscreen"
+  | "toggle-explorer"
+  | "toggle-editor"
+  | "toggle-modified"
+  | "session-search"
+  | "open-settings";
+
+export type ShortcutMap = Record<ShortcutCommand, string>;
+
+export const DEFAULT_SHORTCUTS: ShortcutMap = {
+  "open-folder": "CmdOrCtrl+O",
+  "new-file": "CmdOrCtrl+Alt+N",
+  "new-folder": "CmdOrCtrl+Alt+Shift+N",
+  rename: "F2",
+  delete: "",
+  refresh: "",
+  "save-all": "CmdOrCtrl+Alt+S",
+  "close-window": "CmdOrCtrl+W",
+  undo: "CmdOrCtrl+Z",
+  redo: "Shift+CmdOrCtrl+Z",
+  "select-all": "CmdOrCtrl+A",
+  "new-terminal": "CmdOrCtrl+Shift+T",
+  "close-terminal": "CmdOrCtrl+Shift+W",
+  "abort-terminal": "CmdOrCtrl+.",
+  fullscreen: "CmdOrCtrl+Shift+F",
+  "toggle-explorer": "CmdOrCtrl+B",
+  "toggle-editor": "CmdOrCtrl+E",
+  "toggle-modified": "",
+  "session-search": "CmdOrCtrl+Shift+P",
+  "open-settings": "CmdOrCtrl+,",
+};
+
+export function defaultAppPreferences(): AppPreferences {
+  return {
+    theme: "dark",
+    editorFontSize: 13,
+    minimap: true,
+    shortcuts: { ...DEFAULT_SHORTCUTS },
+  };
+}
+
 export type MenuCommand =
   | "new-file"
   | "new-folder"
@@ -147,7 +212,8 @@ export type MenuCommand =
   | "save-all"
   | "edit:undo"
   | "edit:redo"
-  | "edit:select-all";
+  | "edit:select-all"
+  | "open-settings";
 
 /** One recorded run (WORLDLINES §6.5) — metadata only, no blobs. */
 export interface RunSummary {
@@ -327,10 +393,17 @@ export interface PiBridge {
   resizeTerminal(id: string, cols: number, rows: number): Promise<void>;
   getInstances(): Promise<InstanceSummary[]>;
   abortTerminal(id: string): Promise<void>; // sends Ctrl+C into the pty
+  writeClipboard(text: string): Promise<{ ok: boolean; error?: string }>;
+  readClipboard(): Promise<string>;
 
   // Verify & Iterate
   runVerify(terminalId: string): Promise<{ ok: boolean; error?: string }>;
   cancelVerify(terminalId: string): Promise<{ ok: boolean; error?: string }>;
+
+  // Settings
+  getPreferences(): Promise<AppPreferences>;
+  updatePreferences(preferences: AppPreferences, activateShortcuts: boolean): Promise<AppPreferences>;
+  setKeyboardShortcuts(shortcuts: ShortcutMap): Promise<ShortcutMap>;
 
   // Session Timeline
   getTimeline(terminalId: string): Promise<TimelineEvent[]>;
