@@ -56,8 +56,10 @@ directory, separate from Pi `/settings` and project files.
 
 ```bash
 npm install          # includes @lydell/node-pty (native, prebuilt for Electron)
-npm run dev          # build main + preload, start Vite, launch Electron
+npm run dev          # builds the Rust core + main + preload, starts Vite, launches Electron
 ```
+
+Builds need the Rust toolchain (cargo) for the snapshot core in `core/`.
 
 - `npx tsc --noEmit` — typecheck
 - `npm run build` — production build for Electron and the renderer
@@ -75,8 +77,11 @@ terminal before running model-driven e2e suites.
 ## Layout
 
 `electron/` holds the main process, the pty wrapper, the sidecar tailer, the
-watcher, the snapshot store (`worldline-git.ts`), the worldline manager
-(`worldlines.ts`), the evidence engine (`evidence.ts`), and the sandbox
-profiles (`sandbox.ts`). `src/` holds the renderer (panes, editor, timeline,
+watcher, the snapshot store client (`worldline-git.ts`), the worldline
+manager (`worldlines.ts`), the evidence engine (`evidence.ts`), and the
+sandbox profiles (`sandbox.ts`). `core/` holds the Rust snapshot core
+(`termina-core`): captures, materialization, template creation, state
+application, and trust hashes run in that binary, never on the Electron
+main thread. `src/` holds the renderer (panes, editor, timeline,
 review, explorer, worldlines panel). The detailed plan lives in
 `docs/WORLDLINES.md` with per-phase records in `docs/PHASE0.md` … `PHASE8.md`.

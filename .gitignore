@@ -3,3 +3,4 @@ dist-electron/
 dist-renderer/
 *.log
 .DS_Store
+core/target/

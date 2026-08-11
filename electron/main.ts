@@ -511,33 +511,56 @@ class PiTerminalInstance {
 }
 
 /**
- * Runs captures on a worker thread. Requests are serialized: the store
- * writes one capture at a time.
+ * The Rust snapshot core: one child process, JSON-lines over stdio.
+ * Requests are serialized: the store writes one capture at a time.
+ * A failed op does not block later ops.
  */
-class SnapshotWorkerClient {
-  private worker: Worker | null = null;
+class CoreClient {
+  private child: ReturnType<typeof spawn> | null = null;
   private pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private queue: Promise<unknown> = Promise.resolve();
   private seq = 0;
+  private buffer = "";
 
-  private ensure(): Worker {
-    if (this.worker) return this.worker;
-    this.worker = new Worker(join(__dirname, "snapshot-worker.mjs"));
-    this.worker.on("message", (msg: { op?: string; requestId?: string; ok?: boolean; error?: string; state?: SourceState }) => {
-      // The worker answers every op with <op>-result.
-      if (!msg.requestId) return;
-      const p = this.pending.get(msg.requestId);
-      if (!p) return;
-      this.pending.delete(msg.requestId);
-      if (msg.ok) p.resolve(msg.state ?? msg);
-      else p.reject(new Error(msg.error ?? "snapshot worker op failed"));
+  private ensure(): ReturnType<typeof spawn> {
+    if (this.child) return this.child;
+    const bin = process.env.TERMINA_CORE_BIN ?? join(__dirname, "termina-core");
+    this.child = spawn(bin, [], { stdio: ["pipe", "pipe", "pipe"] });
+    this.child.stdout?.setEncoding("utf8");
+    this.child.stdout?.on("data", (chunk: string) => {
+      this.buffer += chunk;
+      let nl = this.buffer.indexOf("\n");
+      while (nl !== -1) {
+        const line = this.buffer.slice(0, nl);
+        this.buffer = this.buffer.slice(nl + 1);
+        if (line.trim()) {
+          try {
+            this.handleMessage(JSON.parse(line));
+          } catch {
+            /* malformed line — skip */
+          }
+        }
+        nl = this.buffer.indexOf("\n");
+      }
     });
-    this.worker.on("error", (err) => {
-      for (const p of this.pending.values()) p.reject(err);
+    const failAll = (err: Error) => {
+      for (const pending of this.pending.values()) pending.reject(err);
       this.pending.clear();
-      this.worker = null;
-    });
-    return this.worker;
+      this.child = null;
+    };
+    this.child.on("error", failAll);
+    this.child.on("exit", () => failAll(new Error("snapshot core exited")));
+    return this.child;
+  }
+
+  /** The core answers every op with <op>-result. */
+  private handleMessage(msg: { op?: string; requestId?: string; ok?: boolean; error?: string; state?: unknown }): void {
+    if (!msg.requestId) return;
+    const pending = this.pending.get(msg.requestId);
+    if (!pending) return;
+    this.pending.delete(msg.requestId);
+    if (msg.ok) pending.resolve(msg.state ?? msg);
+    else pending.reject(new Error(msg.error ?? "snapshot core op failed"));
   }
 
   /** Serialize captures. A failed capture does not block later captures. */
@@ -553,7 +576,7 @@ class SnapshotWorkerClient {
       this.pending.set(requestId, { resolve, reject });
       try {
         // The payload carries its own op (capture, template, apply-state).
-        this.ensure().postMessage({ ...payload, requestId });
+        this.ensure().stdin?.write(JSON.stringify({ ...payload, requestId }) + "\n");
       } catch (err) {
         this.pending.delete(requestId);
         reject(err instanceof Error ? err : new Error(String(err)));
@@ -598,12 +621,12 @@ class SnapshotWorkerClient {
     }) as Promise<SourceState>;
   }
 
-  /** The trust-sensitive resource hashes, off the main thread (§6.7). */
+  /** The trust-sensitive resource hashes, off the main thread (section 6.7). */
   trustHashes(agentDir: string, projectRoot: string | null): Promise<Record<string, string>> {
     return this.request({ op: "trust-hashes", agentDir, projectRoot }) as Promise<Record<string, string>>;
   }
 
-  /** Create the comparison template (git init, base bytes, commit). */
+  /** Create the comparison template (init, base bytes, commit, pack). */
   template(opts: { store: SnapshotStore; stateId: string; targetDir: string; sourceObjectsDir: string }): Promise<void> {
     return this.request({
       op: "template",
@@ -632,8 +655,8 @@ class SnapshotWorkerClient {
   }
 
   dispose(): void {
-    this.worker?.terminate();
-    this.worker = null;
+    this.child?.kill();
+    this.child = null;
   }
 }
 
@@ -738,7 +761,7 @@ class PiEditorApp {
   /** The store directory (app-owned, outside the project). */
   private storeDir: string | null = null;
   /** The snapshot worker (captures off the main thread). */
-  private snapshotWorker = new SnapshotWorkerClient();
+  private snapshotWorker = new CoreClient();
   /** The session worker (session forking off the main thread). */
   private sessionWorker = new SessionWorkerClient();
   /** The worldline manager (Fork Run candidates). */

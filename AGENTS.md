@@ -123,8 +123,15 @@ Use these terms exactly. Do not invent synonyms.
 - `electron/sidecar.ts`: tails the sidecar files and emits events.
 - `electron/watcher.ts`: watches the project, keeps a content cache, and
   emits change events.
-- `electron/worldline-git.ts`: the app-owned snapshot store, captures
-  (full and incremental), materialization, and three-way merges.
+- `electron/worldline-git.ts`: the snapshot store client (capture,
+  materialization, three-way merges). Every operation runs in the Rust
+  snapshot core; the class keeps only the paths, the object format, and
+  the request plumbing.
+- `core/`: the Rust snapshot core (`termina-core`). It owns the
+  app-owned Git store: full and incremental captures, materialization,
+  template creation, state application, and trust hashes. It speaks a
+  JSON-lines protocol over stdio; the built binary lives next to the main
+  bundle and is rebuilt by `scripts/build-core.mjs`.
 - `electron/worldlines.ts`: the WorldlineManager (fork-run pairs, moment
   candidates, promotion, challenges, compare).
 - `electron/evidence.ts`: the evidence engine and the four challenge
@@ -141,7 +148,7 @@ Use these terms exactly. Do not invent synonyms.
 - `src/timeline.ts`: the Session Timeline strip.
 - `src/components/explorer.ts`: the file explorer.
 - `src/components/modals.ts`: dialogs and toasts.
-- `scripts/*.mjs`: the e2e test suites.
+- `scripts/*.mjs`: the e2e test suites, the launcher, and the build steps.
 
 ## Event flow
 
@@ -185,6 +192,9 @@ The renderer never talks to the agent. It only renders what main pushes.
 
 - `@lydell/node-pty` must stay external in esbuild (build.mjs and dev.mjs).
   Bundling it breaks with a dynamic-require error.
+- The Rust core needs cargo on the build machine. `scripts/build-core.mjs`
+  builds it in release mode and copies the binary next to the main bundle;
+  `TERMINA_CORE_BIN` overrides the binary path at runtime.
 - Paths on macOS are canonical: `/tmp` is `/private/tmp`. The watcher
   canonicalizes its cache keys; lookups must use canonical paths too.
 - The events directory is `app.getPath("temp")/termina-events`

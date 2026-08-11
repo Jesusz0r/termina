@@ -5,12 +5,14 @@ import { createRequire } from "node:module";
 import { build } from "esbuild";
 import { createServer } from "vite";
 import { patchBundleName } from "./patch-bundle-name.mjs";
+import { buildCore } from "./build-core.mjs";
 
 const require = createRequire(import.meta.url);
 // Under plain Node, `require("electron")` resolves to the path of the Electron binary.
 const electronPath = require("electron");
 
 patchBundleName();
+buildCore();
 
 const run = async () => {
   await build({
@@ -36,17 +38,6 @@ const run = async () => {
     outfile: "dist-electron/preload.cjs",
   });
 
-  await build({
-    bundle: true,
-    sourcemap: true,
-    target: "node22",
-    external: ["electron", "@lydell/node-pty", "@lydell/node-pty-darwin-arm64", "@lydell/node-pty-win32-x64", "@lydell/node-pty-linux-x64"],
-    logLevel: "info",
-    entryPoints: ["electron/snapshot-worker.ts"],
-    platform: "node",
-    format: "esm",
-    outfile: "dist-electron/snapshot-worker.mjs",
-  });
   await build({
     bundle: true,
     sourcemap: true,

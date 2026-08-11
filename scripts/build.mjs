@@ -1,6 +1,7 @@
 // Build the Electron main process and preload script with esbuild.
 // Renderer is built separately by Vite (vite build).
 import { build } from "esbuild";
+import { buildCore } from "./build-core.mjs";
 
 const shared = {
   bundle: true,
@@ -18,14 +19,8 @@ await build({
   outfile: "dist-electron/main.mjs",
 });
 
-// The snapshot worker runs captures off the main thread.
-await build({
-  ...shared,
-  entryPoints: ["electron/snapshot-worker.ts"],
-  platform: "node",
-  format: "esm",
-  outfile: "dist-electron/snapshot-worker.mjs",
-});
+// The Rust snapshot core replaces the old snapshot worker thread.
+buildCore();
 
 // The session worker runs SessionManager work off the main thread.
 // The pi package stays external: it resolves from node_modules at runtime.
