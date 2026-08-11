@@ -24,6 +24,9 @@ jobs:
             artifact: linux-x64
             core-asset: termina-core-linux-x64
     runs-on: ${{ matrix.os }}
+    env:
+      # The Vite renderer build needs more than the default runner heap.
+      NODE_OPTIONS: --max-old-space-size=4096
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -38,7 +41,12 @@ jobs:
       # Stages the bundled node runtime and the core binary.
       - run: node scripts/prepare-resources.mjs
       - name: Package
-        run: npx electron-builder ${{ startsWith(github.ref, 'refs/tags/') && '--publish always' || '--publish never' }}
+        # Retry once: the electron download on fresh runners is flaky.
+        run: |
+          npx electron-builder ${{ startsWith(github.ref, 'refs/tags/') && '--publish always' || '--publish never' }} || {
+            sleep 15
+            npx electron-builder ${{ startsWith(github.ref, 'refs/tags/') && '--publish always' || '--publish never' }}
+          }
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/upload-artifact@v4
@@ -53,5 +61,10 @@ jobs:
         run: |
           cp "core/target/release/termina-core" "/tmp/${{ matrix.core-asset }}"
           gh release upload "${GITHUB_REF_NAME}" "/tmp/${{ matrix.core-asset }}" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        run: gh release edit "${GITHUB_REF_NAME}" --draft=false
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
