@@ -16,13 +16,6 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { coreClient } from "./core-client.js";
 
-/** Default capture budgets (WORLDLINES section 9). */
-export const BUDGETS = {
-  maxPaths: 100_000,
-  maxFileBytes: 64 * 1024 * 1024,
-  maxNewBlobBytes: 256 * 1024 * 1024,
-} as const;
-
 /** One captured source state in the store. */
 export interface SourceState {
   /** The synthetic commit oid in the store. */
@@ -41,24 +34,24 @@ export interface SourceState {
   ts: number;
 }
 
-export interface CaptureBudget {
+interface CaptureBudget {
   maxPaths?: number;
   maxFileBytes?: number;
   maxNewBlobBytes?: number;
 }
 
-export interface MaterializeOptions {
+interface MaterializeOptions {
   preserveTopLevel?: string[];
 }
 
 /** Test seams for capture. The seams fire only in the spike suites. */
-export interface CaptureHooks {
+interface CaptureHooks {
   /** Rewrite a file after the core opens it, before the core reads it. */
   beforeRead?: Array<{ path: string; content: string }>;
 }
 
 /** The result of a three-way merge (WORLDLINES section 6.10). */
-export interface MergeResult {
+interface MergeResult {
   ok: boolean;
   /** The merged tree oid (valid only when ok). */
   tree: string | null;
@@ -69,7 +62,7 @@ export interface MergeResult {
 }
 
 /** The result of a repository preflight (WORLDLINES section 4). */
-export interface PreflightResult {
+interface PreflightResult {
   ok: boolean;
   reasons: string[];
 }

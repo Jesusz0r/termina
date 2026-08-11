@@ -10,7 +10,6 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
-import type { SnapshotStore, SourceState } from "./worldline-git.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -42,6 +41,11 @@ class CoreClient {
     this.child.stdout?.setEncoding("utf8");
     this.child.stdout?.on("data", (chunk: string) => {
       this.buffer += chunk;
+      // A runaway core must not grow the buffer without bound.
+      if (this.buffer.length > 64 * 1024 * 1024) {
+        this.child?.kill();
+        return;
+      }
       let nl = this.buffer.indexOf("\n");
       while (nl !== -1) {
         const line = this.buffer.slice(0, nl);
@@ -59,6 +63,7 @@ class CoreClient {
     const failAll = (err: Error) => {
       for (const pending of this.pending.values()) pending.reject(err);
       this.pending.clear();
+      this.buffer = "";
       this.child = null;
     };
     this.child.on("error", failAll);
@@ -97,43 +102,6 @@ class CoreClient {
     });
   }
 
-  /** Capture one source state off the main thread. */
-  capture(store: SnapshotStore, head: string | null, parentCommit: string | null, source?: { root: string; gitDir: string }): Promise<SourceState> {
-    return this.request({
-      op: "capture",
-      storeDir: store.dir,
-      sourceRoot: store.sourceRoot,
-      sourceGitDir: store.sourceGitDir,
-      objectFormat: store.objectFormat,
-      head,
-      parentCommit,
-      captureRoot: source?.root,
-      captureGitDir: source?.gitDir,
-    }) as Promise<SourceState>;
-  }
-
-  /** Capture one incremental state (watcher hints + reconcile) off-thread. */
-  captureIncremental(
-    store: SnapshotStore,
-    parentCommit: string,
-    hints: string[],
-    reconcile: Array<{ relPath: string; content: string }>,
-    source?: { root: string; gitDir: string },
-  ): Promise<SourceState> {
-    return this.request({
-      op: "capture-incremental",
-      storeDir: store.dir,
-      sourceRoot: store.sourceRoot,
-      sourceGitDir: store.sourceGitDir,
-      objectFormat: store.objectFormat,
-      parentCommit,
-      hints,
-      reconcile,
-      captureRoot: source?.root,
-      captureGitDir: source?.gitDir,
-    }) as Promise<SourceState>;
-  }
-
   /** The trust-sensitive resource hashes, off the main thread (section 6.7). */
   trustHashes(agentDir: string, projectRoot: string | null): Promise<Record<string, string>> {
     return this.request({ op: "trust-hashes", agentDir, projectRoot }) as Promise<Record<string, string>>;
@@ -149,7 +117,7 @@ class CoreClient {
     return this.request({ op: "ls-ignored", root }) as Promise<string[]>;
   }
 
-  /** The workdir changes of a candidate repo (staged, unstaged, untracked). */
+  /** The working-directory changes of a candidate repo (staged, unstaged, untracked). */
   repoStatus(root: string): Promise<Array<{ relPath: string; status: "created" | "modified" | "deleted" }>> {
     return this.request({ op: "repo-status", root }).then((res) => (res as { changes: Array<{ relPath: string; status: "created" | "modified" | "deleted" }> }).changes);
   }
@@ -170,34 +138,6 @@ class CoreClient {
       const content = (res as { content: string | null }).content;
       return content === null ? null : Buffer.from(content, "base64");
     });
-  }
-
-  /** Create the comparison template (init, base bytes, commit, pack). */
-  template(opts: { store: SnapshotStore; stateId: string; targetDir: string; sourceObjectsDir: string }): Promise<void> {
-    return this.request({
-      op: "template",
-      storeDir: opts.store.dir,
-      sourceRoot: opts.store.sourceRoot,
-      sourceGitDir: opts.store.sourceGitDir,
-      objectFormat: opts.store.objectFormat,
-      stateId: opts.stateId,
-      targetDir: opts.targetDir,
-      sourceObjectsDir: opts.sourceObjectsDir,
-    }) as Promise<void>;
-  }
-
-  /** Apply a state over a candidate directory and commit it. */
-  applyState(opts: { store: SnapshotStore; stateId: string; targetDir: string; preserveTopLevel?: string[] }): Promise<void> {
-    return this.request({
-      op: "apply-state",
-      storeDir: opts.store.dir,
-      sourceRoot: opts.store.sourceRoot,
-      sourceGitDir: opts.store.sourceGitDir,
-      objectFormat: opts.store.objectFormat,
-      stateId: opts.stateId,
-      targetDir: opts.targetDir,
-      preserveTopLevel: opts.preserveTopLevel,
-    }) as Promise<void>;
   }
 
   dispose(): void {

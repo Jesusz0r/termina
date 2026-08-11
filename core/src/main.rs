@@ -366,8 +366,8 @@ fn update_state_ref(repo: &Repository, commit: Oid) -> Result<(), String> {
 /// Enumerate the capture domain: tracked files plus untracked non-ignored
 /// files. Matches `git ls-files -z` plus `ls-files --others
 /// --exclude-standard` run in the capture root. Repo paths are relative to
-/// the workdir; the capture root can be a subdirectory, so strip the
-/// workdir prefix and keep only paths under the root.
+/// the working directory; the capture root can be a subdirectory, so strip
+/// the working-directory prefix and keep only paths under the root.
 fn enumerate_domain(repo: &Repository, capture_root: &Path) -> Result<Vec<String>, String> {
     let workdir = repo
         .workdir()
@@ -1011,6 +1011,26 @@ fn open_store(store_dir: &Path, req: &Value) -> Result<Repository, String> {
     Ok(repo)
 }
 
+/// Look up one path in a tree by walking its components. O(depth).
+fn tree_lookup(repo: &Repository, tree_oid: Oid, rel: &str) -> Result<Option<FlatEntry>, String> {
+    let parts: Vec<&str> = rel.split('/').collect();
+    let mut current = repo.find_tree(tree_oid).map_err(|e| e.to_string())?;
+    for (i, part) in parts.iter().enumerate() {
+        let found = {
+            let entry = match current.get_name(part) {
+                Some(entry) => entry,
+                None => return Ok(None),
+            };
+            (entry.id(), entry.filemode() as u32)
+        };
+        if i == parts.len() - 1 {
+            return Ok(Some((found.1, found.0)));
+        }
+        current = repo.find_tree(found.0).map_err(|e| e.to_string())?;
+    }
+    Ok(None)
+}
+
 // ---------------------------------------------------------- trust hash ----
 
 fn op_trust_hashes(req: &Value) -> Result<Value, String> {
@@ -1415,11 +1435,12 @@ fn op_tree_paths(req: &Value) -> Result<Value, String> {
 
 fn op_symlink_target(req: &Value) -> Result<Value, String> {
     let store = open_store(&PathBuf::from(s(req, "storeDir")?), req)?;
-    let flat = state_entries(&store, &s(req, "stateId")?)?;
+    let state_commit = s(req, "stateId")?;
     let rel = s(req, "relPath")?;
-    let target = match flat.get(&rel) {
-        Some((mode, oid)) if *mode == 0o120000 => {
-            let blob = store.find_blob(*oid).map_err(|e| e.to_string())?;
+    let tree = resolve_tree(&store, oid_ext(&store, &state_commit)?)?;
+    let target = match tree_lookup(&store, tree, &rel)? {
+        Some((0o120000, oid)) => {
+            let blob = store.find_blob(oid).map_err(|e| e.to_string())?;
             Some(String::from_utf8_lossy(blob.content()).into_owned())
         }
         _ => None,
@@ -1429,11 +1450,12 @@ fn op_symlink_target(req: &Value) -> Result<Value, String> {
 
 fn op_read_blob(req: &Value) -> Result<Value, String> {
     let store = open_store(&PathBuf::from(s(req, "storeDir")?), req)?;
-    let flat = state_entries(&store, &s(req, "stateId")?)?;
+    let state_commit = s(req, "stateId")?;
     let rel = s(req, "relPath")?;
-    let content = match flat.get(&rel) {
+    let tree = resolve_tree(&store, oid_ext(&store, &state_commit)?)?;
+    let content = match tree_lookup(&store, tree, &rel)? {
         Some((_, oid)) => {
-            let blob = store.find_blob(*oid).map_err(|e| e.to_string())?;
+            let blob = store.find_blob(oid).map_err(|e| e.to_string())?;
             Some(base64::engine::general_purpose::STANDARD.encode(blob.content()))
         }
         None => None,
@@ -1505,8 +1527,8 @@ fn op_ls_tracked(req: &Value) -> Result<Value, String> {
 
 // ------------------------------------------------- candidate repo queries --
 
-/// The workdir status of a candidate repo: staged, unstaged, and
-/// untracked changes as porcelain would report them.
+/// The working-directory status of a candidate repo: staged, unstaged,
+/// and untracked changes as porcelain would report them.
 fn op_repo_status(req: &Value) -> Result<Value, String> {
     let root = PathBuf::from(s(req, "root")?);
     let repo = open_repo(&root)?;
@@ -1627,11 +1649,9 @@ fn op_repo_file(req: &Value) -> Result<Value, String> {
         .map_err(|e| e.to_string())?;
     let tree = commit.peel_to_tree().map_err(|e| e.to_string())?;
     let rel = s(req, "path")?;
-    let mut flat = HashMap::new();
-    collect_tree_map_at(&repo, tree.id(), "", &mut flat)?;
-    let content = match flat.get(&rel) {
+    let content = match tree_lookup(&repo, tree.id(), &rel)? {
         Some((_, oid)) => {
-            let blob = repo.find_blob(*oid).map_err(|e| e.to_string())?;
+            let blob = repo.find_blob(oid).map_err(|e| e.to_string())?;
             Some(base64::engine::general_purpose::STANDARD.encode(blob.content()))
         }
         None => None,
