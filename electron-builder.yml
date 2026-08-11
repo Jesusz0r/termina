@@ -35,3 +35,8 @@ linux:
 npmRebuild: false
 electronLanguages:
   - en
+# Multi-job publishes must all target the same release type; a draft
+# publish skips when a release already exists.
+publish:
+  provider: github
+  releaseType: release
