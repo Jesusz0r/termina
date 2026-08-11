@@ -4849,12 +4849,15 @@ class PiEditorApp {
     this.projectCwd = initial && existsSync(initial) ? initial : null;
     this.tailer.onEvent = (id, event) => this.enqueueSidecarEvent(id, event);
     this.tailer.start();
+    // Write the bridge before the first terminal starts: pi loads it with
+    // the CLI extension option on every agent launch, with or without a
+    // project folder.
+    this.ensureAppBridge();
     await this.createWindow();
     if (this.projectCwd) {
       // Finish or roll back any pending promotion journal BEFORE the primary
       // watcher starts: the restored bytes must not attribute to a user edit.
       await this.recoverPromotions();
-      this.ensureAppBridge();
       this.removeLegacyProjectBridge(this.projectCwd);
       this.createWorkspace(this.projectCwd, true);
       this.loadMineFiles();
