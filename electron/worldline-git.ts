@@ -20,8 +20,8 @@ import { deflateSync } from "node:zlib";
 export const MIN_GIT_VERSION = [2, 38, 0];
 
 /** The app identity used for synthetic commits. */
-const APP_AUTHOR = "pi-ditor";
-const APP_EMAIL = "dev@pi-ditor.local";
+const APP_AUTHOR = "termina";
+const APP_EMAIL = "dev@termina.local";
 const MAX_GIT_STDOUT_BYTES = 64 * 1024 * 1024;
 const MAX_GIT_STDERR_BYTES = 4 * 1024 * 1024;
 
@@ -279,7 +279,7 @@ export class SnapshotStore {
     await runGit(["config", "gc.auto", "0"], { env });
     // A new app session has no in-memory run records. Remove refs left by a
     // crashed session before the first capture.
-    const oldRefs = await runGit(["for-each-ref", "--format=%(refname)", "refs/pi-ditor/state"], { env });
+    const oldRefs = await runGit(["for-each-ref", "--format=%(refname)", "refs/termina/state"], { env });
     if (oldRefs.code === 0) {
       for (const ref of oldRefs.stdout.toString("utf8").split("\n")) {
         if (ref) await runGit(["update-ref", "-d", ref], { env });
@@ -756,7 +756,7 @@ export class SnapshotStore {
 
   /** Create the synthetic state commit. */
   private async commitTree(tree: string, parent: string | null): Promise<string> {
-    const args = ["commit-tree", tree, "-m", "pi-ditor source state"];
+    const args = ["commit-tree", tree, "-m", "termina source state"];
     if (parent) args.push("-p", parent);
     const r = await this.git(args);
     if (r.code !== 0) throw new Error(`commit-tree failed: ${r.stderr}`);
@@ -765,7 +765,7 @@ export class SnapshotStore {
 
   /** Pin a state commit with a store-local ref so gc never prunes it. */
   private async updateRef(commit: string): Promise<void> {
-    const r = await this.git(["update-ref", `refs/pi-ditor/state/${commit}`, commit]);
+    const r = await this.git(["update-ref", `refs/termina/state/${commit}`, commit]);
     if (r.code !== 0) throw new Error(`update-ref failed: ${r.stderr}`);
   }
 
@@ -955,7 +955,7 @@ export class SnapshotStore {
 
   /** Remove a store-local state ref (eviction). */
   async unref(commit: string): Promise<void> {
-    await this.git(["update-ref", "-d", `refs/pi-ditor/state/${commit}`]);
+    await this.git(["update-ref", "-d", `refs/termina/state/${commit}`]);
   }
 
   /** The changed paths between two store states (name-status). */

@@ -29,7 +29,7 @@
   removed once both candidates are ready. Runtime allowlists
   (`node_modules`, `.venv`, `venv`) ride along as copy-on-write clones.
 - Cleanup is ownership-checked: a worlds dir is removed only when it sits
-  inside the worlds root and carries the `.pi-ditor-world` marker.
+  inside the worlds root and carries the `.termina-world` marker.
   Process kills verify identity via `ps lstart` before SIGTERM/SIGKILL.
 - `sweepStale` runs at boot: after a crash it kills surviving candidate
   process groups (manifest pids + lstart) and removes the owned dirs.
@@ -56,12 +56,12 @@
   app-private workspace, opens the copy, verifies the entry chain,
   branches at the given entry, and forks into the candidate session dir.
 - Candidate A branches at the settled entry and carries a hidden
-  relocation note (`pi-ditor-relocation`, display false) that maps the
+  relocation note (`termina-relocation`, display false) that maps the
   primary path to the candidate tree.
 - Candidate B branches at the prompt parent; when the branch has no
   assistant message the session file is deferred to the first append
   (root-prompt case). B also carries the run's injected context as a
-  hidden one-shot message (`pi-ditor-context`).
+  hidden one-shot message (`termina-context`).
 - B's launch replays the run's model and thinking level (provider-
   qualified model ids only; a bare id is ambiguous across providers).
 

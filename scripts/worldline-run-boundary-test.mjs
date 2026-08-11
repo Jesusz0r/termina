@@ -1,9 +1,9 @@
 /**
  * Phase 2 e2e: run-boundary recording.
  *
- * Expects Electron on :9222 with PI_EDITOR_INITIAL_CWD set to a Git repo
+ * Expects Electron on :9222 with TERMINA_INITIAL_CWD set to a Git repo
  * containing greeting.ts ("export const greeting = \"hello\";") and
- * PI_EDITOR_EVENTS_DIR set to a clean dedicated directory.
+ * TERMINA_EVENTS_DIR set to a clean dedicated directory.
  *
  * Proves the Phase 2 acceptance (WORLDLINES §7): every run offered by Fork
  * Run reconstructs start and settled source bytes and session branches
@@ -55,8 +55,8 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PROJ = "/tmp/pi-editor-wline-project";
-const EVENTS = "/tmp/pi-editor-wline-events";
+const PROJ = "/tmp/termina-wline-project";
+const EVENTS = "/tmp/termina-wline-events";
 const greeting = join(PROJ, "greeting.ts");
 const git = (args) => execFileSync("git", args, { cwd: PROJ, encoding: "utf8" }).trim();
 const sha256 = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");

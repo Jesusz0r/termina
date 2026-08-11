@@ -2,9 +2,9 @@
  * Phase 9 e2e: cleanup and lifecycle (WORLDLINES §10 worldline-cleanup-test).
  *
  * Expects Electron on :9222 with:
- *   PI_EDITOR_INITIAL_CWD=<Git repo: greeting.ts "hello">
- *   PI_EDITOR_EVENTS_DIR=<clean dedicated dir>
- *   PI_EDITOR_WORLDS_DIR=<worlds root pre-seeded by the launcher with:
+ *   TERMINA_INITIAL_CWD=<Git repo: greeting.ts "hello">
+ *   TERMINA_EVENTS_DIR=<clean dedicated dir>
+ *   TERMINA_WORLDS_DIR=<worlds root pre-seeded by the launcher with:
  *     foreign-dir/  (no ownership marker — cleanup must refuse it)
  *     stale-cmp/    (marker + manifest with a dead pid — boot sweep removes
  *                    it)>
@@ -56,8 +56,8 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PROJ = "/tmp/pi-editor-wline11-project";
-const WORLDS = "/tmp/pi-editor-wline11-worlds";
+const PROJ = "/tmp/termina-wline11-project";
+const WORLDS = "/tmp/termina-wline11-worlds";
 
 async function typePrompt(text) {
   await evalJs(`document.querySelector('.xterm-helper-textarea')?.focus()`);

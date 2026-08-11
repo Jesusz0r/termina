@@ -18,7 +18,7 @@ if (!name || !/^[a-z0-9-]+$/.test(name)) {
   process.exit(2);
 }
 
-const outfile = join(mkdtempSync(join(tmpdir(), "pi-ditor-spike-")), `${name}.mjs`);
+const outfile = join(mkdtempSync(join(tmpdir(), "termina-spike-")), `${name}.mjs`);
 const lines = [];
 const log = (msg) => {
   lines.push(String(msg));

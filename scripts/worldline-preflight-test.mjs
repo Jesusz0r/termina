@@ -2,7 +2,7 @@
  * Phase 8 e2e: fork preflight rejections (WORLDLINES §10
  * worldline-preflight-test).
  *
- * The launcher sets PI_EDITOR_INITIAL_CWD to one of the invalid fixtures;
+ * The launcher sets TERMINA_INITIAL_CWD to one of the invalid fixtures;
  * the suite types one prompt, waits for the settled run, then asserts the
  * fork-run rejection with the exact stable reason. Fresh instance per case.
  *
@@ -97,7 +97,7 @@ if (CASE === "nogit") {
   // unmerged entries it sees in git status). Re-create the state after the
   // run settles, before the fork gate runs.
   if (CASE === "conflict") {
-    const proj = process.env.PI_EDITOR_INITIAL_CWD ?? "/tmp/pi-editor-preflight/repo";
+    const proj = process.env.TERMINA_INITIAL_CWD ?? "/tmp/termina-preflight/repo";
     const headSha = execFileSync("git", ["rev-parse", "HEAD:conflict-file.txt"], { cwd: proj, encoding: "utf8" }).trim();
     const blobSha = execFileSync("git", ["hash-object", "conflict-file.txt"], { cwd: proj, encoding: "utf8" }).trim();
     execFileSync("git", ["update-index", "--force-remove", "--", "conflict-file.txt"], { cwd: proj });

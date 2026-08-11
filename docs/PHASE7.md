@@ -1,7 +1,7 @@
 # Phase 7 — Challenge Mode (Worldlines Release 3)
 
 > **Status:** complete — one click launches the challenger (B replays the
-> original task automatically) and Pi/ditor ranks only current measured
+> original task automatically) and Termina ranks only current measured
 > evidence without a model judging another model's work (the Release 3
 > gate, proven by `scripts/worldline-challenge-test.mjs`, 19/19).
 
@@ -38,7 +38,7 @@
   - **Footprint**: changed source files, changed executable lines, and
     changed bytes vs the base.
   - **Benchmark**: an immutable harness declared as
-    `pi-ditor.benchmark` in the base package (command, unit, direction,
+    `termina.benchmark` in the base package (command, unit, direction,
     samples, threshold). Warm-up, then interleaved samples parsed from
     `name value unit` lines; the profile reports medians and quartiles.
     Disabled with the exact reason when the base declares no harness.
@@ -90,7 +90,7 @@
 
 ## Release 3 gate
 
-One click launches the selected adversarial alternative, and Pi/ditor
+One click launches the selected adversarial alternative, and Termina
 ranks only current measured evidence without a model judging another
 model's work. With this phase, the Worldlines plan (WORLDLINES §7,
 phases 0-7) is complete: Fork Run, Verify, comparison, recoverable
@@ -101,7 +101,7 @@ promotion, Fork Any Moment, and Challenge Mode.
 - The API adapter measures normalized declaration content, not a parsed
   signature surface; routes, commands, and wire formats stay unmeasured
   until a dedicated adapter exists.
-- The benchmark adapter requires the declared `pi-ditor.benchmark`
+- The benchmark adapter requires the declared `termina.benchmark`
   harness; projects without one get the unavailable verdict with the
   reason.
 - Nested worldlines and challenge-from-candidate use the candidate head as

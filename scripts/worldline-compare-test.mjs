@@ -2,10 +2,10 @@
  * Phase 4 e2e: comparison and Verify for Fork Run candidates.
  *
  * Expects Electron on :9222 with:
- *   PI_EDITOR_INITIAL_CWD=<Git repo with greeting.ts "hello", package.json
+ *   TERMINA_INITIAL_CWD=<Git repo with greeting.ts "hello", package.json
  *     with a test script, and test.js that requires "hi there">
- *   PI_EDITOR_EVENTS_DIR=<clean dedicated dir>
- *   PI_EDITOR_WORLDS_DIR=<clean dedicated worlds root>
+ *   TERMINA_EVENTS_DIR=<clean dedicated dir>
+ *   TERMINA_WORLDS_DIR=<clean dedicated worlds root>
  *
  * Proves the Phase 4 acceptance (WORLDLINES §7): both candidates can Verify
  * and compare without primary writes.
@@ -58,9 +58,9 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PROJ = "/tmp/pi-editor-wline2-project";
-const EVENTS = "/tmp/pi-editor-wline2-events";
-const WORLDS = "/tmp/pi-editor-wline2-worlds";
+const PROJ = "/tmp/termina-wline2-project";
+const EVENTS = "/tmp/termina-wline2-events";
+const WORLDS = "/tmp/termina-wline2-worlds";
 const git = (args) => execFileSync("git", args, { cwd: PROJ, encoding: "utf8" }).trim();
 const sha256 = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
 const repoState = () => ({ head: git(["rev-parse", "HEAD"]), refs: git(["for-each-ref"]), indexSha: sha256(join(PROJ, ".git", "index")) });

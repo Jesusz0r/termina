@@ -23,7 +23,7 @@ const boot = JSON.parse(await evalJs(`
     rows: document.querySelectorAll('#explorer-tree .explorer-row').length,
   }))()
 `));
-check("explorer shows project root", boot.explorer && boot.rootName === "pi-editor-test-project", JSON.stringify(boot));
+check("explorer shows project root", boot.explorer && boot.rootName === "termina-test-project", JSON.stringify(boot));
 
 // 2. root is expanded by default → see files + src dir
 await sleep(300);
@@ -35,24 +35,24 @@ check("root lists files", rootChildren.includes("greeting.ts") && rootChildren.i
 // 3. create a file via the API
 const created = await evalJs(`(async () => JSON.stringify(await window.pi.createEntry('manual-new.txt', 'file')))()`);
 await sleep(600);
-const hasNew = JSON.parse(await evalJs(`(async () => JSON.stringify(await window.pi.listDir('/tmp/pi-editor-test-project')))()`)).entries.some(e => e.name === "manual-new.txt");
+const hasNew = JSON.parse(await evalJs(`(async () => JSON.stringify(await window.pi.listDir('/tmp/termina-test-project')))()`)).entries.some(e => e.name === "manual-new.txt");
 check("create file works", created.includes('"ok":true') && hasNew);
 
 // 4. rename it
 const renamed = await evalJs(`(async () => JSON.stringify(await window.pi.renameEntry('manual-new.txt', 'renamed.txt')))()`);
-const hasRenamed = JSON.parse(await evalJs(`(async () => JSON.stringify(await window.pi.listDir('/tmp/pi-editor-test-project')))()`)).entries.some(e => e.name === "renamed.txt");
+const hasRenamed = JSON.parse(await evalJs(`(async () => JSON.stringify(await window.pi.listDir('/tmp/termina-test-project')))()`)).entries.some(e => e.name === "renamed.txt");
 check("rename works", renamed.includes('"ok":true') && hasRenamed);
 
 // 5. delete it
 const deleted = await evalJs(`(async () => JSON.stringify(await window.pi.deleteEntry('renamed.txt')))()`);
-const stillThere = JSON.parse(await evalJs(`(async () => JSON.stringify(await window.pi.listDir('/tmp/pi-editor-test-project')))()`)).entries.some(e => e.name === "renamed.txt");
+const stillThere = JSON.parse(await evalJs(`(async () => JSON.stringify(await window.pi.listDir('/tmp/termina-test-project')))()`)).entries.some(e => e.name === "renamed.txt");
 check("delete works", deleted.includes('"ok":true') && !stillThere);
 
 // 6. create a folder + file inside it
 await evalJs(`(async () => window.pi.createEntry('my-folder', 'dir'))()`);
 await evalJs(`(async () => window.pi.createEntry('my-folder/inner.txt', 'file'))()`);
 await sleep(600);
-const inner = JSON.parse(await evalJs(`(async () => JSON.stringify(await window.pi.listDir('/tmp/pi-editor-test-project/my-folder')))()`)).entries;
+const inner = JSON.parse(await evalJs(`(async () => JSON.stringify(await window.pi.listDir('/tmp/termina-test-project/my-folder')))()`)).entries;
 check("create folder + nested file works", inner.length === 1 && inner[0].name === "inner.txt");
 
 // 7. clicking a file row opens it in the editor (root is expanded by default)

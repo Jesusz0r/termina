@@ -8,7 +8,7 @@
 
 ## 1. Product invariants
 
-A fork point is valid only when Pi/ditor has both:
+A fork point is valid only when Termina has both:
 
 1. the exact persisted Pi session entry for that point; and
 2. the exact captured project source state for that point.
@@ -20,12 +20,12 @@ root. It does not include ignored runtime data, the user's staging metadata,
 empty directories, hard-link topology, timestamps, ownership, access control
 lists, extended attributes, process memory, databases, or remote services.
 
-Pi/ditor must never show a point as forkable when either half is missing or a
+Termina must never show a point as forkable when either half is missing or a
 capture changed while it was in progress. Every visible Release 2 timeline dot
 must be forkable. Evict the dot and its source state together.
 
 Candidate processes must not be able to write to the primary project or the
-user's real home directory. Disable Worldlines when Pi/ditor cannot establish
+user's real home directory. Disable Worldlines when Termina cannot establish
 an operating-system write boundary. A detached directory alone is not an
 isolation boundary.
 
@@ -47,7 +47,7 @@ Fork a completed run into two isolated candidates:
 - **Candidate B — Alternative:** the run-start source state and the Pi session
   immediately before the original effective prompt.
 
-For a text-only prompt, Pi/ditor puts the effective prompt in Candidate B's Pi
+For a text-only prompt, Termina puts the effective prompt in Candidate B's Pi
 editor without submitting it. The user can change it or submit it unchanged.
 For a structured prompt with images, Release 1 offers **Run unchanged** and
 preserves the original content blocks. It does not pretend that the TUI can edit
@@ -104,7 +104,7 @@ shows four direct actions:
 
 One click creates a sibling candidate from the same base, injects the selected
 constraint, submits the original effective task, and runs the same captured
-provider, model, and thinking level by default. Pi/ditor then runs a deterministic evidence
+provider, model, and thinking level by default. Termina then runs a deterministic evidence
 contract created before the challenger starts.
 
 Do not ask a model to choose the winner. Rank only with measured evidence:
@@ -125,14 +125,14 @@ correct or objectively better.
 1. Run one agent in the primary project.
 2. Select its completed run in the timeline.
 3. Click **Fork Run**.
-4. Pi/ditor creates Candidate A from the settled run and Candidate B from the
+4. Termina creates Candidate A from the settled run and Candidate B from the
    run start.
 5. Two real Pi terminals open in two isolated candidates.
 6. Candidate B receives the original effective prompt through the app bridge.
 7. Run Verify in both candidates.
 8. Compare evidence and diffs.
 9. Click **Promote** on the preferred candidate.
-10. Pi/ditor performs a three-way merge against the current primary project.
+10. Termina performs a three-way merge against the current primary project.
 
 The 60-second demo records the primary state immediately before step 3 and shows
 that candidate creation and work do not change primary source, Git index, Git
@@ -174,7 +174,7 @@ refs, or real home before step 9.
 - Build an immutable evidence contract before the challenger starts.
 - Show eligibility, constraint results, raw measurements, freshness, and
   ranking reasons.
-- Disable a profile when Pi/ditor cannot measure its required evidence.
+- Disable a profile when Termina cannot measure its required evidence.
 
 ### Preflight failures
 
@@ -201,7 +201,7 @@ fails. Do not add a weaker fallback.
 - The platform cannot enforce filesystem writes, process signaling, inherited
   descriptors, and child-process containment for the required sandbox.
 - Available disk space is below the pair-creation reserve.
-- The running Pi binary does not exactly match Pi/ditor's pinned Pi package.
+- The running Pi binary does not exactly match Termina's pinned Pi package.
 
 Phase 0 can remove a restriction only after a byte-exact, isolation, cleanup,
 and performance test proves support. Do not add compatibility branches based on
@@ -226,7 +226,7 @@ assumptions.
 
 ### What exactly can be reconstructed?
 
-Pi/ditor reconstructs the captured source domain and the persisted Pi session
+Termina reconstructs the captured source domain and the persisted Pi session
 branch. It does not claim to reconstruct ignored caches, operating-system state,
 shell state, clocks, random seeds, services, or network responses. The UI must
 say **source state** instead of the broader **workspace state**.
@@ -292,7 +292,7 @@ cannot be replayed fairly.
 ### Can the original prompt be replayed exactly?
 
 Capture the effective prompt and image content from `before_agent_start`, after
-skill and prompt-template expansion. Capture the one-shot Pi/ditor context that
+skill and prompt-template expansion. Capture the one-shot Termina context that
 the bridge injected. Store both in app-private files, not renderer state.
 Text-only Fork Run prompts can be edited in Pi. Structured prompts can run
 unchanged. Steering messages and follow-ups make Release 1 replay ineligible.
@@ -315,12 +315,12 @@ conversation after promoting its source.
 
 No. Launch the Pi binary shipped with the same pinned
 `@earendil-works/pi-coding-agent` package used by the session worker. A custom
-`PI_EDITOR_PI_BIN` disables Worldlines unless its exact version matches. Do not
+`TERMINA_PI_BIN` disables Worldlines unless its exact version matches. Do not
 maintain a session-format compatibility layer.
 
 ### Will candidate project extensions trigger a new trust prompt or run unreviewed code?
 
-Load the Pi/ditor bridge as an app-owned CLI extension. It is available before
+Load the Termina bridge as an app-owned CLI extension. It is available before
 project trust. Inherit project trust for one process only when the source Pi
 session was trusted and every trust-sensitive project resource still matches
 the trusted base hash. Never persist candidate paths in `trust.json`. If a run
@@ -355,7 +355,7 @@ implementation surface. Hash the required command, configuration, discovered
 test and benchmark roots, and dependencies that remain inside the evaluation
 asset set. Imports from the harness into the declared implementation surface
 stay mutable. A candidate that changes an immutable evaluation asset is
-ineligible for ranking. If Pi/ditor cannot make that separation or bound the
+ineligible for ranking. If Termina cannot make that separation or bound the
 asset set, ranking is unavailable. Added tests can appear as candidate changes,
 but they do not replace the immutable required checks.
 
@@ -509,7 +509,7 @@ only after the same canonical repository identity returns.
 
 ### 6.3 App bridge and coupled timeline events
 
-Move the generated Pi/ditor bridge out of project `.pi/extensions`. Keep one
+Move the generated Termina bridge out of project `.pi/extensions`. Keep one
 app-owned bridge file and pass it with Pi's CLI extension option for primary and
 candidate terminals. This removes the generated bridge from source capture and
 makes bridge startup independent of project trust.
@@ -616,7 +616,7 @@ timeline states are gone.
 
 Give the snapshot store read-only object access to the source repository through
 Git alternates. Keep every temporary index, blob, tree, commit, and ref in the
-app store. Never create `refs/pi-ditor`, objects, index locks, or worktree records
+app store. Never create `refs/termina`, objects, index locks, or worktree records
 in the user's Git directory.
 
 Run Git as argument arrays without a shell and with a fixed `C` locale. Disable
@@ -736,7 +736,7 @@ or refs.
 Create one immutable comparison template:
 
 1. Create an app-private directory outside the Git root but on the same volume
-   as the primary project. Fail preflight when Pi/ditor cannot create one.
+   as the primary project. Fail preflight when Termina cannot create one.
 2. Create an independent local Git repository with read-only object alternates
    to the source repository.
 3. Fetch the base synthetic commit from the app snapshot store.
@@ -795,7 +795,7 @@ dependency directories and local environment inputs read-only inside the
 candidate sandbox. Give build output,
 temporary data, and caches separate disposable writable paths. Reset those
 paths before deterministic evidence runs and validate runtime fingerprints.
-Disable ranking when the harness depends on mutable ignored state that Pi/ditor
+Disable ranking when the harness depends on mutable ignored state that Termina
 cannot reset or measure.
 
 Record runtime creation time and fingerprints for diagnostics, but never store
@@ -834,7 +834,7 @@ fixed startup delay or raw terminal paste for prompt delivery.
 
 Candidate A receives a hidden relocation note that maps historical absolute
 source paths to the candidate cwd. Candidate B receives the captured one-shot
-Pi/ditor context before its effective prompt. Keep prompt content, images, and
+Termina context before its effective prompt. Keep prompt content, images, and
 context out of renderer list payloads and delete startup controls after use.
 
 The CLI bridge handles `project_trust` before candidate project resources load.
@@ -914,7 +914,7 @@ Starting a Challenge on an existing candidate first snapshots that candidate as
 the new reference. The challenger still starts from that candidate's recorded
 comparison base and pre-task session anchor, not from the implemented head.
 If either anchor is missing, or the candidate head includes additional manual
-prompts that Pi/ditor cannot replay as one task, Challenge is unavailable. If
+prompts that Termina cannot replay as one task, Challenge is unavailable. If
 another alternative occupies B, require discard confirmation before the
 one-click launch can continue. Challenge ranking uses these fixed profiles.
 
@@ -1165,7 +1165,7 @@ Work:
 
 - Launch the pinned app Pi binary.
 - Move the bridge to an app-owned CLI extension.
-- Remove the old project bridge when it has Pi/ditor's generated marker. Never
+- Remove the old project bridge when it has Termina's generated marker. Never
   delete a user-owned file that only shares the name.
 - Add workspace ids, generations, versions, and write leases.
 - Replace global path helpers with workspace-root helpers.
@@ -1342,7 +1342,7 @@ Work:
 - Run one challenger and one evidence worker at a time.
 
 **Release 3 gate:** One click launches the selected adversarial alternative, and
-Pi/ditor ranks only current measured evidence without a model judging another
+Termina ranks only current measured evidence without a model judging another
 model's work.
 
 ## 8. IPC additions
@@ -1415,7 +1415,7 @@ fallback.
 ## 10. Test plan
 
 Use fresh Electron instances, clean fixtures, dedicated event directories, and
-a dedicated `PI_EDITOR_WORLDS_DIR` on the fixture's filesystem for every suite.
+a dedicated `TERMINA_WORLDS_DIR` on the fixture's filesystem for every suite.
 
 ### `scripts/worldline-preflight-test.mjs`
 

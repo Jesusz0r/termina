@@ -2,13 +2,13 @@
  * Phase 7 e2e: Challenge Mode.
  *
  * Expects Electron on :9222 with:
- *   PI_EDITOR_INITIAL_CWD=<Git repo: greeting.ts "hello", package.json with
+ *   TERMINA_INITIAL_CWD=<Git repo: greeting.ts "hello", package.json with
  *     a test script that requires "hi there">
- *   PI_EDITOR_EVENTS_DIR=<clean dedicated dir>
- *   PI_EDITOR_WORLDS_DIR=<clean dedicated worlds root>
+ *   TERMINA_EVENTS_DIR=<clean dedicated dir>
+ *   TERMINA_WORLDS_DIR=<clean dedicated worlds root>
  *
  * Proves the Release 3 gate (WORLDLINES §7): one click launches the
- * challenger (B replays the original task automatically) and Pi/ditor ranks
+ * challenger (B replays the original task automatically) and Termina ranks
  * only current measured evidence without a model judging another model.
  *   1. a completed run challenges: B auto-submits the task and settles
  *   2. evidence runs for both candidates serially: verify passes on both
@@ -57,8 +57,8 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PROJ = "/tmp/pi-editor-wline6-project";
-const WORLDS = "/tmp/pi-editor-wline6-worlds";
+const PROJ = "/tmp/termina-wline6-project";
+const WORLDS = "/tmp/termina-wline6-worlds";
 const git = (args) => execFileSync("git", args, { cwd: PROJ, encoding: "utf8" }).trim();
 const sha256 = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
 const repoState = () => ({ head: git(["rev-parse", "HEAD"]), refs: git(["for-each-ref"]), indexSha: sha256(join(PROJ, ".git", "index")) });

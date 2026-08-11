@@ -2,9 +2,9 @@
  * Phase 5 e2e: promotion journal recovery at startup.
  *
  * Expects Electron on :9222 with:
- *   PI_EDITOR_INITIAL_CWD=<Git repo: greeting.ts "hello", other.txt "other">
- *   PI_EDITOR_EVENTS_DIR=<clean dedicated dir>
- *   PI_EDITOR_WORLDS_DIR=<worlds root pre-seeded by the launcher with:
+ *   TERMINA_INITIAL_CWD=<Git repo: greeting.ts "hello", other.txt "other">
+ *   TERMINA_EVENTS_DIR=<clean dedicated dir>
+ *   TERMINA_WORLDS_DIR=<worlds root pre-seeded by the launcher with:
  *     promotion-journal/recovery-1/  (phase applied, greeting.ts applied)
  *     promotion-journal/recovery-2/  (phase done — must not roll back)
  *     promotion-journal/recovery-3/  (phase applied with an external
@@ -54,8 +54,8 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PROJ = "/tmp/pi-editor-wline4-project";
-const WORLDS = "/tmp/pi-editor-wline4-worlds";
+const PROJ = "/tmp/termina-wline4-project";
+const WORLDS = "/tmp/termina-wline4-worlds";
 const sha = (s) => createHash("sha256").update(s).digest("hex");
 const greetingPath = join(PROJ, "greeting.ts");
 const journalRoot = join(WORLDS, "promotion-journal");

@@ -2,9 +2,9 @@
  * Phase 3 e2e: Fork Run pair creation.
  *
  * Expects Electron on :9222 with:
- *   PI_EDITOR_INITIAL_CWD=<Git repo with greeting.ts "hello">
- *   PI_EDITOR_EVENTS_DIR=<clean dedicated dir>
- *   PI_EDITOR_WORLDS_DIR=<clean dedicated worlds root>
+ *   TERMINA_INITIAL_CWD=<Git repo with greeting.ts "hello">
+ *   TERMINA_EVENTS_DIR=<clean dedicated dir>
+ *   TERMINA_WORLDS_DIR=<clean dedicated worlds root>
  *
  * Proves the Phase 3 acceptance (WORLDLINES §7): candidate, sibling,
  * primary, real home, and user Git metadata remain isolated from candidate
@@ -59,9 +59,9 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PROJ = "/tmp/pi-editor-wline-project";
-const EVENTS = "/tmp/pi-editor-wline-events";
-const WORLDS = "/tmp/pi-editor-wline-worlds";
+const PROJ = "/tmp/termina-wline-project";
+const EVENTS = "/tmp/termina-wline-events";
+const WORLDS = "/tmp/termina-wline-worlds";
 const git = (args) => execFileSync("git", args, { cwd: PROJ, encoding: "utf8" }).trim();
 const sha256 = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
 const repoState = () => ({ head: git(["rev-parse", "HEAD"]), refs: git(["for-each-ref"]), indexSha: sha256(join(PROJ, ".git", "index")) });
@@ -131,7 +131,7 @@ check("session files exist on disk", aSessionExists, `A=${aSessionExists} B(empt
 
 // A's session carries the hidden relocation note.
 const aSession = readFileSync(a.sessionFile, "utf8");
-check("A session carries the relocation note", aSession.includes("pi-ditor-relocation"), aSession.includes("maps to") ? "relocation text present" : "no relocation");
+check("A session carries the relocation note", aSession.includes("termina-relocation"), aSession.includes("maps to") ? "relocation text present" : "no relocation");
 
 // B's startup control was consumed exactly once; session_ready was emitted.
 const bEvents = join(WORLDS, comparisonId, "B-support", "events");

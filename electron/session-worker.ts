@@ -63,10 +63,10 @@ parentPort?.on("message", (msg: ForkRequest) => {
         forked = SessionManager.create(msg.candidateRoot, msg.candidateSessionDir);
       }
       if (msg.relocationNote) {
-        forked.appendCustomMessageEntry("pi-ditor-relocation", msg.relocationNote, false);
+        forked.appendCustomMessageEntry("termina-relocation", msg.relocationNote, false);
       }
       if (msg.contextText) {
-        forked.appendCustomMessageEntry("pi-ditor-context", msg.contextText, false);
+        forked.appendCustomMessageEntry("termina-context", msg.contextText, false);
       }
       post({
         op: "fork-result",

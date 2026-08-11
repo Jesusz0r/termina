@@ -11,16 +11,16 @@
   dependency.
 - Agent terminals launch `dist/cli.js` from that package, resolved through
   `import.meta.resolve` (the exports map has only an import condition, so
-  `require.resolve` fails). `PI_EDITOR_PI_BIN` still overrides.
+  `require.resolve` fails). `TERMINA_PI_BIN` still overrides.
 
 ### App-owned bridge (WORLDLINES §6.3)
 
 - The bridge template stays in `electron/main.ts`; the materialized file is
-  written to `app.getPath("userData")/pi-ditor-bridge.ts` and passed to pi
+  written to `app.getPath("userData")/termina-bridge.ts` and passed to pi
   with `-e <path>` — never into the project.
 - The bridge loads before project trust and never appears in source capture.
 - On folder open, the app removes the legacy generated project bridge
-  (`.pi/extensions/pi-ditor-bridge.ts`) only when it carries the Pi/ditor
+  (`.pi/extensions/termina-bridge.ts`) only when it carries the Termina
   generated marker. A user file that shares the name stays untouched.
 - A template change takes effect on the next app start (content compare).
 
@@ -55,8 +55,8 @@
 
 ## Fixed in passing
 
-- `scripts/verify-test.mjs` searched for the events dir as
-  `pi-editor-events`; the app's dir is `pi-ditor-events`. The suite's
+- `scripts/verify-test.mjs` searched for the events dir under the old
+  spelling while the app used the current one. The suite's
   context-file checks could never pass. One-character fix in the suite.
 
 ## Verification

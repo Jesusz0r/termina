@@ -59,7 +59,7 @@ const MAX_TIMELINE_CONTENT_BYTES = 4 * 1024 * 1024;
 const TOOL_CHANGE_DEDUP_MS = 1500;
 const BRIDGE_EXTENSION = `
 /**
- * Pi/ditor bridge extension — auto-generated, do not edit.
+ * Termina bridge extension — auto-generated, do not edit.
  */
 import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -70,8 +70,8 @@ const FILE_TOOLS = new Set(["write", "edit", "apply_patch", "create_file", "inse
 
 
 export default function (pi: ExtensionAPI): void {
-  const dir = process.env.PI_EDITOR_EVENTS_DIR;
-  const id = process.env.PI_EDITOR_TERMINAL_ID;
+  const dir = process.env.TERMINA_EVENTS_DIR;
+  const id = process.env.TERMINA_TERMINAL_ID;
   if (!dir || !id) return;
   // One random bridge instance id per extension load. Main accepts a
   // sequence reset only after a new instance id (WORLDLINES §6.3).
@@ -121,7 +121,7 @@ export default function (pi: ExtensionAPI): void {
   // the run was trusted and its trust-sensitive resources still match.
   // The grant never persists the candidate path (remember: false).
   pi.on("project_trust", async () => {
-    if (process.env.PI_EDITOR_INHERIT_TRUST === "1") {
+    if (process.env.TERMINA_INHERIT_TRUST === "1") {
       return { trusted: "yes" as const, remember: false };
     }
     return { trusted: "undecided" as const };
@@ -157,7 +157,7 @@ export default function (pi: ExtensionAPI): void {
         ctx.ui.setEditorText(control.text);
       } else if (control.action === "structured") {
         // One-shot marker: a reload cannot submit the prompt twice.
-        pi.appendEntry("pi-ditor-control", { opId });
+        pi.appendEntry("termina-control", { opId });
         const content = Array.isArray(control.content) ? control.content : [String(control.text ?? "")];
         pi.sendUserMessage(content);
       }
@@ -186,7 +186,7 @@ export default function (pi: ExtensionAPI): void {
       const err = String((ack as { error?: unknown })?.error ?? "preflight timed out");
       // Keep the draft editable: restore the raw text and do not start.
       if (text) ctx.ui.setEditorText(String(event.text ?? ""));
-      ctx.ui.notify("pi/ditor: the run did not start (" + err + "). Your text is still in the editor.", "warning");
+      ctx.ui.notify("termina: the run did not start (" + err + "). Your text is still in the editor.", "warning");
       return { action: "handled" };
     }
     preflight = { requestId, token: (ack as { token?: string | null }).token ?? null };
@@ -262,7 +262,7 @@ export default function (pi: ExtensionAPI): void {
     } catch {}
     if (!context) return;
     return {
-      message: { customType: "pi-ditor-context", content: context, display: false },
+      message: { customType: "termina-context", content: context, display: false },
     };
   });
   pi.on("tool_execution_start", async (event, ctx) => {
@@ -708,7 +708,7 @@ class PiEditorApp {
   private workspaces = new Map<string, WorkspaceState>();
   /** The cwd of the primary workspace (kept for renderer-facing APIs). */
   private projectCwd: string | null = null;
-  private eventsDir = process.env.PI_EDITOR_EVENTS_DIR ?? join(app.getPath("temp"), "pi-ditor-events");
+  private eventsDir = process.env.TERMINA_EVENTS_DIR ?? join(app.getPath("temp"), "termina-events");
   /** The app-private session branch workspace. */
   private sessionWorkspaceDir = join(this.eventsDir, "session-workspace");
   private tailer = new SidecarTailer(this.eventsDir);
@@ -741,11 +741,11 @@ class PiEditorApp {
   /** The worldline manager (Fork Run candidates). */
   private worldlines: WorldlineManager | null = null;
   /** The app-owned worlds root. */
-  private userDataDir = process.env.PI_EDITOR_USER_DATA_DIR ?? app.getPath("userData");
+  private userDataDir = process.env.TERMINA_USER_DATA_DIR ?? app.getPath("userData");
   private preferencesStore = new AppPreferencesStore(join(this.userDataDir, "preferences.json"));
   private preferences: AppPreferences = defaultAppPreferences();
   private shortcutMap: ShortcutMap = { ...DEFAULT_SHORTCUTS };
-  private worldsRoot = process.env.PI_EDITOR_WORLDS_DIR ?? join(this.userDataDir, "worlds");
+  private worldsRoot = process.env.TERMINA_WORLDS_DIR ?? join(this.userDataDir, "worlds");
   /** Tailers for candidate events directories. */
   private worldlineTailers = new Map<string, SidecarTailer>();
   /** Preserve event order while prompt payloads load asynchronously. */
@@ -798,7 +798,7 @@ class PiEditorApp {
       height: 900,
       minWidth: 960,
       minHeight: 600,
-      title: "Pi/ditor",
+      title: "Termina",
       backgroundColor,
       titleBarStyle: "hiddenInset",
       trafficLightPosition: { x: 12, y: 12 },
@@ -814,7 +814,7 @@ class PiEditorApp {
     const devUrl = process.env.VITE_DEV_SERVER_URL;
     if (devUrl) {
       await this.win.loadURL(devUrl);
-      if (process.env.PI_EDITOR_DEVTOOLS) this.win.webContents.openDevTools({ mode: "detach" });
+      if (process.env.TERMINA_DEVTOOLS) this.win.webContents.openDevTools({ mode: "detach" });
     } else {
       await this.win.loadFile(join(__dirname, "..", "dist-renderer", "index.html"));
     }
@@ -835,7 +835,7 @@ class PiEditorApp {
     const shortcut = (command: ShortcutCommand): string | undefined => this.shortcutMap[command] || undefined;
     const template: Electron.MenuItemConstructorOptions[] = [
       {
-        label: "Pi/ditor",
+        label: "Termina",
         submenu: [
           { role: "about" },
           { type: "separator" },
@@ -1129,15 +1129,15 @@ class PiEditorApp {
         if (!platformHasSandboxExec()) reasons.push("the platform has no sandbox-exec");
         if (!platformHasCopyOnWrite()) reasons.push("the platform has no copy-on-write clone support");
         if (!platformHasRecursiveWatcher()) reasons.push("the platform has no reliable recursive watcher");
-        // A custom PI_EDITOR_PI_BIN must match the pinned pi version
+        // A custom TERMINA_PI_BIN must match the pinned pi version
         // (WORLDLINES §5): a mismatched session format disables Worldlines.
-        if (process.env.PI_EDITOR_PI_BIN) {
-          const override = realpathSync(process.env.PI_EDITOR_PI_BIN);
+        if (process.env.TERMINA_PI_BIN) {
+          const override = realpathSync(process.env.TERMINA_PI_BIN);
           const pinned = realpathSync(this.pinnedPiBin());
           if (override !== pinned) {
             const [overrideV, pinnedV] = await Promise.all([this.piVersionOf(override), this.piVersionOf(pinned)]);
             if (overrideV !== pinnedV) {
-              reasons.push(`PI_EDITOR_PI_BIN is a different pi version (${overrideV ?? "unknown"} vs ${pinnedV ?? "unknown"})`);
+              reasons.push(`TERMINA_PI_BIN is a different pi version (${overrideV ?? "unknown"} vs ${pinnedV ?? "unknown"})`);
             }
           }
         }
@@ -1210,7 +1210,7 @@ class PiEditorApp {
   }): Promise<{ terminalId: string; pid: number }> {
     const inst = await this.createTerminal(opts.root, { type: "agent", workspaceId: opts.workspaceId, launch: opts.launch });
     // The candidate's bridge writes to its own events dir: tail it.
-    const eventsDir = opts.launch.env.PI_EDITOR_EVENTS_DIR;
+    const eventsDir = opts.launch.env.TERMINA_EVENTS_DIR;
     if (eventsDir && eventsDir !== this.eventsDir) {
       const tailer = new SidecarTailer(eventsDir);
       tailer.onEvent = (id, event) => this.enqueueSidecarEvent(id, event);
@@ -1580,7 +1580,7 @@ class PiEditorApp {
         launch: {
           cmd: this.resolvePiBin(),
           args: ["-e", this.bridgePath(), "--session", installed],
-          env: { ...cleanEnv(), PI_EDITOR_EVENTS_DIR: this.eventsDir },
+          env: { ...cleanEnv(), TERMINA_EVENTS_DIR: this.eventsDir },
         },
       });
       // Seed Change Review: the promotion is the run's own change set.
@@ -2073,11 +2073,11 @@ class PiEditorApp {
 
 
   private resolvePiBin(): string {
-    if (process.env.PI_EDITOR_PI_BIN) return process.env.PI_EDITOR_PI_BIN;
+    if (process.env.TERMINA_PI_BIN) return process.env.TERMINA_PI_BIN;
     return this.pinnedPiBin();
   }
 
-  /** The pi binary of the pinned package (ignores PI_EDITOR_PI_BIN). */
+  /** The pi binary of the pinned package (ignores TERMINA_PI_BIN). */
   private pinnedPiBin(): string {
     // Launch the pi binary shipped with the pinned package (WORLDLINES
     // §6.7). The package entry resolves to dist/index.js; the CLI sits
@@ -2193,7 +2193,7 @@ class PiEditorApp {
 
   private piMissingMessage(): string {
     return (
-      "pi is not installed.\n\nInstall it with:\n  npm install -g @earendil-works/pi-coding-agent\n\nor set PI_EDITOR_PI_BIN to the pi binary path."
+      "pi is not installed.\n\nInstall it with:\n  npm install -g @earendil-works/pi-coding-agent\n\nor set TERMINA_PI_BIN to the pi binary path."
     );
   }
 
@@ -2215,7 +2215,7 @@ class PiEditorApp {
       // A worldline candidate: the sandbox wraps the pinned pi binary.
       cmd = opts.launch.cmd;
       args = opts.launch.args;
-      env = { ...opts.launch.env, PI_EDITOR_TERMINAL_ID: id };
+      env = { ...opts.launch.env, TERMINA_TERMINAL_ID: id };
     } else if (type === "shell") {
       const shells = detectShells();
       const chosen = opts?.shell && existsSync(opts.shell) ? { path: opts.shell, name: basename(opts.shell) } : shells[0] ?? { path: "/bin/zsh", name: "zsh" };
@@ -2228,7 +2228,7 @@ class PiEditorApp {
       // The app-owned bridge loads through the CLI option, not project
       // trust (WORLDLINES §6.3).
       args = ["-e", this.bridgePath()];
-      env = { ...cleanEnv(), PI_EDITOR_TERMINAL_ID: id, PI_EDITOR_EVENTS_DIR: this.eventsDir };
+      env = { ...cleanEnv(), TERMINA_TERMINAL_ID: id, TERMINA_EVENTS_DIR: this.eventsDir };
     }
     const inst = new PiTerminalInstance(id, cwd ?? this.terminalCwd(), workspaceId, type, shellName, cmd, args, env, 80, 24);
     this.terminals.set(inst.id, inst);
@@ -2358,7 +2358,7 @@ class PiEditorApp {
     const pkg = await store.readBlob(stateId, "package.json");
     if (!pkg) return null;
     try {
-      const cfg = (JSON.parse(pkg.toString("utf8")) as { "pi-ditor"?: { benchmark?: { command?: string; unit?: string; direction?: string; samples?: number; thresholdPct?: number } } })["pi-ditor"]?.benchmark;
+      const cfg = (JSON.parse(pkg.toString("utf8")) as { "termina"?: { benchmark?: { command?: string; unit?: string; direction?: string; samples?: number; thresholdPct?: number } } })["termina"]?.benchmark;
       if (!cfg?.command) return null;
       return {
         command: cfg.command.split(/\s+/),
@@ -2413,7 +2413,7 @@ class PiEditorApp {
         ? ["-f", writeEvidenceProfile(candidate), shell.path, "-c", `${sandboxShellPreamble()} ${cmdline}`]
         : ["-c", cmdline];
       const env = candidate
-        ? { ...cleanEnv(), HOME: candidate.homeDir, TMPDIR: candidate.tmpDir, PI_EDITOR_EVENTS_DIR: candidate.eventsDir }
+        ? { ...cleanEnv(), HOME: candidate.homeDir, TMPDIR: candidate.tmpDir, TERMINA_EVENTS_DIR: candidate.eventsDir }
         : { ...cleanEnv() };
       child = spawn(command, args, {
         cwd,
@@ -4217,7 +4217,7 @@ class PiEditorApp {
 
   /** The app-owned bridge file, passed to pi with the CLI extension option. */
   private bridgePath(): string {
-    return join(this.userDataDir, "pi-ditor-bridge.ts");
+    return join(this.userDataDir, "termina-bridge.ts");
   }
 
   /** Write the bridge to the app user-data directory when it changed. */
@@ -4241,10 +4241,10 @@ class PiEditorApp {
    * only shares the name stays untouched (the marker check is the proof).
    */
   private removeLegacyProjectBridge(cwd: string): void {
-    const p = join(cwd, ".pi", "extensions", "pi-ditor-bridge.ts");
+    const p = join(cwd, ".pi", "extensions", "termina-bridge.ts");
     try {
       const content = readFileSync(p, "utf8");
-      if (content.includes("Pi/ditor bridge extension — auto-generated")) rmSync(p, { force: true });
+      if (content.includes("Termina bridge extension — auto-generated")) rmSync(p, { force: true });
     } catch {
       /* absent or unreadable — nothing to remove */
     }
@@ -4648,7 +4648,7 @@ class PiEditorApp {
       const store = await this.storePromise;
       if (!store) return { ok: false, error: "recording is not available" };
       try {
-        const dir = await mkdtemp(join(app.getPath("temp"), "pi-ditor-state-"));
+        const dir = await mkdtemp(join(app.getPath("temp"), "termina-state-"));
         await store.materialize(stateId, dir);
         return { ok: true, dir };
       } catch (err) {
@@ -4842,7 +4842,7 @@ class PiEditorApp {
     // project (test detection, cwd) as soon as it boots, and terminalCwd()
     // must already point at the real folder — otherwise it answers with the
     // home directory and the Verify button stays disabled forever.
-    const initial = process.env.PI_EDITOR_INITIAL_CWD;
+    const initial = process.env.TERMINA_INITIAL_CWD;
     this.projectCwd = initial && existsSync(initial) ? initial : null;
     this.tailer.onEvent = (id, event) => this.enqueueSidecarEvent(id, event);
     this.tailer.start();

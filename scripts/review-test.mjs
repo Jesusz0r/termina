@@ -26,7 +26,7 @@ for (let i = 0; i < 150; i++) {
   if (busy && !busy.includes('working') && i > 3) break;
 }
 await sleep(1500);
-const diskAfter = await evalJs(`window.pi.openFile('/tmp/pi-editor-test-project/greeting.ts')`);
+const diskAfter = await evalJs(`window.pi.openFile('/tmp/termina-test-project/greeting.ts')`);
 check("agent changed the file on disk", diskAfter.content.includes("hi there"), JSON.stringify(diskAfter.content));
 
 // 2. the modified list has greeting.ts — click it → review diff opens
@@ -59,7 +59,7 @@ check("diff shows original hello → modified hi there", originalOk && modifiedO
 // 3. revert
 await evalJs(`document.getElementById('review-revert').click()`);
 await sleep(1000);
-const afterRevert = await evalJs(`window.pi.openFile('/tmp/pi-editor-test-project/greeting.ts')`);
+const afterRevert = await evalJs(`window.pi.openFile('/tmp/termina-test-project/greeting.ts')`);
 check("revert restores the original content", afterRevert.content.includes('"hello"') && !afterRevert.content.includes("hi there"), JSON.stringify(afterRevert.content));
 const mark = await evalJs(`JSON.stringify([...document.querySelectorAll('#modified-list li .review-mark')].map(m => m.textContent))`);
 check("reverted marker shows", mark.includes("↩"), JSON.stringify(mark));

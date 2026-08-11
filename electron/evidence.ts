@@ -388,7 +388,7 @@ export class EvidenceEngine {
   private async benchmarkEvidence(cand: CandidateFacts, stateId: string): Promise<EvidenceRecord | null> {
     const cfg = this.deps.benchmarkConfig();
     if (!cfg) {
-      return { kind: "benchmark", stateId, baseStateId: this.deps.baseStateId, status: "unavailable", result: {}, reason: "the base declares no benchmark harness (pi-ditor.benchmark)" };
+      return { kind: "benchmark", stateId, baseStateId: this.deps.baseStateId, status: "unavailable", result: {}, reason: "the base declares no benchmark harness (termina.benchmark)" };
     }
     const samples: number[] = [];
     const warm = await this.deps.runSandboxed(cand, cfg.command, 120_000);

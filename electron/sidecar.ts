@@ -1,5 +1,5 @@
 /**
- * Tails the per-terminal sidecar files written by the Pi/ditor bridge
+ * Tails the per-terminal sidecar files written by the Termina bridge
  * extension (tool calls, busy state, run-boundary events) and emits
  * structured events.
  * Delivery is event-driven: an fs.watch on the events directory triggers

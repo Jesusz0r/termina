@@ -2,9 +2,9 @@
  * Phase 9 e2e: trust handling (WORLDLINES §10 worldline-trust-test).
  *
  * Expects Electron on :9222 with:
- *   PI_EDITOR_INITIAL_CWD=<Git repo: greeting.ts "hello", .pi/settings.json>
- *   PI_EDITOR_EVENTS_DIR=<clean dedicated dir>
- *   PI_EDITOR_WORLDS_DIR=<clean dedicated worlds root>
+ *   TERMINA_INITIAL_CWD=<Git repo: greeting.ts "hello", .pi/settings.json>
+ *   TERMINA_EVENTS_DIR=<clean dedicated dir>
+ *   TERMINA_WORLDS_DIR=<clean dedicated worlds root>
  *
  * Proves WORLDLINES §6.7:
  *   1. a run forks while its trust-sensitive resources match
@@ -53,8 +53,8 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PROJ = "/tmp/pi-editor-wline10-project";
-const WORLDS = "/tmp/pi-editor-wline10-worlds";
+const PROJ = "/tmp/termina-wline10-project";
+const WORLDS = "/tmp/termina-wline10-worlds";
 const trustJson = join(homedir(), ".pi", "agent", "trust.json");
 const readTrust = () => {
   try {

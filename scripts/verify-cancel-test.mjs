@@ -2,8 +2,8 @@
  * Verify & Iterate cancellation e2e test.
  *
  * Launch requirement:
- *   PI_EDITOR_EVENTS_DIR=/tmp/pi-editor-events-test
- *   PI_EDITOR_INITIAL_CWD=<project with a SLOW test script:
+ *   TERMINA_EVENTS_DIR=/tmp/termina-events-test
+ *   TERMINA_INITIAL_CWD=<project with a SLOW test script:
  *     package.json: { "scripts": { "test": "node -e 'setTimeout(()=>{},30000)'" } }>
  *   --remote-debugging-port=9222
  *
@@ -23,7 +23,7 @@ const check = (name, ok, detail = "") => {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + String(detail).slice(0, 200) : ""}`);
 };
 
-const eventsDir = "/tmp/pi-editor-events-test";
+const eventsDir = "/tmp/termina-events-test";
 const ctxFile = join(eventsDir, "verify-term-1.md");
 
 const pages = await fetch("http://127.0.0.1:9222/json").then((r) => r.json());

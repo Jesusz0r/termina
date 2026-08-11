@@ -141,7 +141,7 @@ A code review against WORLDLINES §5-§6 surfaced and fixed eleven gaps:
    overlapping and ineligible (previously only Verify/dispatch counted).
 3. Candidate file-tool paths that resolve outside the candidate root are
    rejected (canonical root comparison) instead of polluting the timeline.
-4. A custom `PI_EDITOR_PI_BIN` must match the pinned pi version; the fork
+4. A custom `TERMINA_PI_BIN` must match the pinned pi version; the fork
    preflight disables Worldlines on a mismatch (bounded version check).
 5. The promotion confirmation no longer counts the CoW-cloned runtime
    allowlist (node_modules/.venv/venv) as ignored/generated writes.

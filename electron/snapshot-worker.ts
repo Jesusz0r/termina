@@ -98,7 +98,7 @@ async function applyState(req: ApplyRequest): Promise<void> {
   if (add.code !== 0) throw new Error(`apply git add failed: ${add.stderr}`);
   const changed = await runGitIn(req.targetDir, ["diff", "--cached", "--quiet"]);
   if (changed.code === 1) {
-    const commit = await runGitIn(req.targetDir, ["commit", "-q", "-m", "pi-ditor state"]);
+    const commit = await runGitIn(req.targetDir, ["commit", "-q", "-m", "termina state"]);
     if (commit.code !== 0) throw new Error(`apply git commit failed: ${commit.stderr}`);
   } else if (changed.code !== 0) {
     throw new Error(`apply git diff failed: ${changed.stderr}`);
@@ -141,7 +141,7 @@ parentPort?.on("message", (msg: WorkerRequest) => {
         await store.materialize(msg.stateId, msg.targetDir);
         const add = await runGitIn(msg.targetDir, ["add", "-A"]);
         if (add.code !== 0) throw new Error(`template git add failed: ${add.stderr}`);
-        const commit = await runGitIn(msg.targetDir, ["commit", "-q", "-m", "pi-ditor base"]);
+        const commit = await runGitIn(msg.targetDir, ["commit", "-q", "-m", "termina base"]);
         if (commit.code !== 0) throw new Error(`template git commit failed: ${commit.stderr}`);
         // Pull the store objects into a local pack, then drop the store.
         const repack = await runGitIn(msg.targetDir, ["repack", "-a", "-d"]);

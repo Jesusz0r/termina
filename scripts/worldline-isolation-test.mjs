@@ -2,9 +2,9 @@
  * Phase 8 e2e: candidate isolation (WORLDLINES §10 worldline-isolation-test).
  *
  * Expects Electron on :9222 with:
- *   PI_EDITOR_INITIAL_CWD=<Git repo: greeting.ts "hello", hello.txt "first">
- *   PI_EDITOR_EVENTS_DIR=<clean dedicated dir>
- *   PI_EDITOR_WORLDS_DIR=<clean dedicated worlds root>
+ *   TERMINA_INITIAL_CWD=<Git repo: greeting.ts "hello", hello.txt "first">
+ *   TERMINA_EVENTS_DIR=<clean dedicated dir>
+ *   TERMINA_WORLDS_DIR=<clean dedicated worlds root>
  *
  * Proves WORLDLINES §6.6: the operating system policy is the actual write
  * boundary.
@@ -60,8 +60,8 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PROJ = "/tmp/pi-editor-wline7-project";
-const WORLDS = "/tmp/pi-editor-wline7-worlds";
+const PROJ = "/tmp/termina-wline7-project";
+const WORLDS = "/tmp/termina-wline7-worlds";
 const git = (args) => execFileSync("git", args, { cwd: PROJ, encoding: "utf8" }).trim();
 const sha256 = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
 const repoState = () => ({ head: git(["rev-parse", "HEAD"]), refs: git(["for-each-ref"]), indexSha: sha256(join(PROJ, ".git", "index")) });

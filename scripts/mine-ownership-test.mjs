@@ -2,8 +2,8 @@
  * "Mine" file ownership e2e test.
  *
  * Launch requirement:
- *   PI_EDITOR_EVENTS_DIR=/tmp/pi-editor-events-test
- *   PI_EDITOR_INITIAL_CWD=<fresh fixture: greeting.ts, hello.txt, src/>
+ *   TERMINA_EVENTS_DIR=/tmp/termina-events-test
+ *   TERMINA_INITIAL_CWD=<fresh fixture: greeting.ts, hello.txt, src/>
  *   --remote-debugging-port=9222
  *
  * Steps:
@@ -24,8 +24,8 @@ const check = (name, ok, detail = "") => {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + String(detail).slice(0, 200) : ""}`);
 };
 
-const mineFile = join("/tmp/pi-editor-events-test", "mine-term-1.md");
-const greetingAbs = "/tmp/pi-editor-test-project/greeting.ts";
+const mineFile = join("/tmp/termina-events-test", "mine-term-1.md");
+const greetingAbs = "/tmp/termina-test-project/greeting.ts";
 
 const pages = await fetch("http://127.0.0.1:9222/json").then((r) => r.json());
 const page = pages.find((t) => t.type === "page");
@@ -63,7 +63,7 @@ for (let i = 0; i < 180; i++) {
   if (busy && !busy.includes("working") && i > 5) break;
 }
 await sleep(1500);
-const sessionDir = execSync(`ls -td ${process.env.HOME}/.pi/agent/sessions/--private-tmp-pi-editor-test-project--/ 2>/dev/null | head -1`).toString().trim();
+const sessionDir = execSync(`ls -td ${process.env.HOME}/.pi/agent/sessions/--private-tmp-termina-test-project--/ 2>/dev/null | head -1`).toString().trim();
 const sessionFile = execSync(`ls -t "${sessionDir}"*.jsonl 2>/dev/null | head -1`).toString().trim();
 const session = sessionFile ? readFileSync(sessionFile, "utf8") : "";
 check("the agent receives the 'Your files' context", session.includes("Your files") && session.includes("greeting.ts"), session.slice(0, 80));

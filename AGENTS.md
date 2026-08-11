@@ -1,10 +1,10 @@
-# AGENTS.md — Pi/ditor
+# AGENTS.md — Termina
 
 This file defines the rules for agents that work in this repository.
 
 ## Project
 
-Pi/ditor is a hybrid coding tool. The left side runs the real pi interactive
+Termina is a hybrid coding tool. The left side runs the real pi interactive
 TUI in a pty. The right side is a Monaco IDE with a file explorer. The two
 sides stay synchronized. The project is a desktop app built with Electron,
 Vite, TypeScript, and node-pty.
@@ -73,7 +73,7 @@ Examples:
 ## Architecture notes
 
 - The terminal stays the source of truth. The app never replaces the TUI.
-- The bridge extension lives in the project `.pi/extensions` folder (pi-ditor-bridge.ts).
+- The bridge extension lives in the project `.pi/extensions` folder (termina-bridge.ts).
 - A folder switch resets every per-terminal state: timeline, baselines,
   snapshots, modified list, and verify state.
 
@@ -167,7 +167,7 @@ The renderer never talks to the agent. It only renders what main pushes.
   the second one fail on stale state.
 - The events directory persists across app launches. A fresh instance
   tails from the current file size, so it never replays phantom history.
-- `PI_EDITOR_EVENTS_DIR` overrides the events directory. Use it for
+- `TERMINA_EVENTS_DIR` overrides the events directory. Use it for
   deterministic tests; do NOT set it to an empty string — the bridge
   extension then refuses to log anything.
 - Test pollution persists on disk. Reset the fixture after a suite that
@@ -181,14 +181,14 @@ The renderer never talks to the agent. It only renders what main pushes.
   Bundling it breaks with a dynamic-require error.
 - Paths on macOS are canonical: `/tmp` is `/private/tmp`. The watcher
   canonicalizes its cache keys; lookups must use canonical paths too.
-- The events directory is `app.getPath("temp")/pi-ditor-events`
+- The events directory is `app.getPath("temp")/termina-events`
   (`/var/folders/.../T/`), not `/tmp`.
-- localStorage keys: `pi-ditor.layout`, `pi-ditor.explorer`,
-  `pi-ditor.modified`.
+- localStorage keys: `termina.layout`, `termina.explorer`,
+  `termina.modified`.
 - The bridge extension is app-owned: the app writes it once to the user-data
   directory and passes it to pi with the CLI extension option. A template
   change in main.ts takes effect on the next app start. The app removes the
-  legacy generated bridge from a project when it carries the Pi/ditor marker;
+  legacy generated bridge from a project when it carries the Termina marker;
   a user file that only shares the name stays untouched.
 - The app sanitizes the env for pi processes: host session variables
   (PI_SESSION_FILE, PI_MODEL, PI_CODING_AGENT, ...) make the TUI crash or
@@ -205,7 +205,7 @@ The renderer never talks to the agent. It only renders what main pushes.
 - IPC channels use the `area:action` pattern: `verify:run`, `timeline:get`,
   `file:open`, `review:baseline`.
 - Terminal ids use the `term-N` pattern.
-- Commits use the identity `pi-ditor <dev@pi-ditor.local>`.
+- Commits use the identity `termina <dev@termina.local>`.
 - Test suites live in `scripts/` and end with `-test.mjs`.
 - The main process is the source of truth. The renderer caches nothing
   that main does not push.

@@ -1,7 +1,7 @@
 /**
  * Verify & Iterate e2e test.
  *
- * Expects an Electron instance on :9222 with PI_EDITOR_INITIAL_CWD set to a
+ * Expects an Electron instance on :9222 with TERMINA_INITIAL_CWD set to a
  * project with a failing `npm run test` script (see the test project setup
  * in the README/commits). Steps:
  *   1. detectTest() reports the npm test script
@@ -51,11 +51,11 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// The events dir is app.getPath("temp")/pi-ditor-events — locate it by globbing.
+// The events dir is app.getPath("temp")/termina-events — locate it by globbing.
 // Re-glob every time: the dir may only be created mid-test by the app.
 import { execSync } from "node:child_process";
 const findEventsDir = () =>
-  process.env.PI_EDITOR_EVENTS_DIR ?? execSync(`find /var/folders -name "pi-ditor-events" -type d 2>/dev/null | head -1`).toString().trim();
+  process.env.TERMINA_EVENTS_DIR ?? execSync(`find /var/folders -name "termina-events" -type d 2>/dev/null | head -1`).toString().trim();
 const contextFile = (termId) => join(findEventsDir(), `verify-${termId}.md`);
 
 // ---- 1. detection ----
@@ -71,7 +71,7 @@ const btn = await evalJs(
 check("Verify button enabled at boot", btn.disabled === false && btn.title.includes("npm run test"), JSON.stringify(btn));
 
 // Restore the failing state (earlier runs may have fixed it).
-writeFileSync("/tmp/pi-editor-verify-project/math.js", "exports.add = (a, b) => a + b + 1; // BUG\n");
+writeFileSync("/tmp/termina-verify-project/math.js", "exports.add = (a, b) => a + b + 1; // BUG\n");
 
 // ---- 2. run verify → failing ----
 const run1 = await evalJs(`window.pi.runVerify("term-1")`);
@@ -102,7 +102,7 @@ check("context contains the failure output", ctx1.includes("FAIL: add"), ctx1.sl
 
 // ---- 4. fix + verify again → green ----
 // Simulate the agent fixing the bug (a real agent run does this via tools).
-writeFileSync("/tmp/pi-editor-verify-project/math.js", "exports.add = (a, b) => a + b;\n");
+writeFileSync("/tmp/termina-verify-project/math.js", "exports.add = (a, b) => a + b;\n");
 
 const run2 = await evalJs(`window.pi.runVerify("term-1")`);
 check("second runVerify starts ok", run2?.ok === true, JSON.stringify(run2));

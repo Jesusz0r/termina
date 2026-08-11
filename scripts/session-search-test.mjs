@@ -2,7 +2,7 @@
  * Session Search e2e test.
  *
  * Launch requirement:
- *   PI_EDITOR_INITIAL_CWD=<fresh fixture: greeting.ts "hello", hello.txt, src/>
+ *   TERMINA_INITIAL_CWD=<fresh fixture: greeting.ts "hello", hello.txt, src/>
  *   --remote-debugging-port=9222
  *
  * Steps:

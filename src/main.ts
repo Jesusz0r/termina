@@ -747,9 +747,9 @@ btnDispatch.addEventListener("click", () => {
 
 type Layout = "terminal-left" | "terminal-right" | "terminal-top" | "terminal-bottom" | "terminal-fullscreen";
 const DEFAULT_LAYOUT: Layout = "terminal-left";
-const LAYOUT_KEY = "pi-ditor.layout";
-const EXPLORER_KEY = "pi-ditor.explorer";
-const MODIFIED_KEY = "pi-ditor.modified";
+const LAYOUT_KEY = "termina.layout";
+const EXPLORER_KEY = "termina.explorer";
+const MODIFIED_KEY = "termina.modified";
 const MAX_TIMELINE_EVENTS = 400;
 
 const splitEl = document.getElementById("main-split")!;

@@ -1,4 +1,4 @@
-# pi-editor — Breakthrough Feature Vision
+# termina — Breakthrough Feature Vision
 
 > **Status:** implemented — the full plan is delivered and verified.
 >

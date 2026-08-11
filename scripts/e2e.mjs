@@ -9,11 +9,11 @@ const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
 const electronPath = require("electron");
 const PORT = 9222;
-const BASE_ROOT = "/tmp/pi-editor-test-project";
-const BASE_EVENTS = "/tmp/pi-editor-events-test";
-const BASE_WORLDS = "/tmp/pi-editor-worlds-test";
-const PREFLIGHT_ROOT = "/tmp/pi-editor-preflight";
-const USER_DATA_ROOT = "/tmp/pi-editor-e2e-user-data";
+const BASE_ROOT = "/tmp/termina-test-project";
+const BASE_EVENTS = "/tmp/termina-events-test";
+const BASE_WORLDS = "/tmp/termina-worlds-test";
+const PREFLIGHT_ROOT = "/tmp/termina-preflight";
+const USER_DATA_ROOT = "/tmp/termina-e2e-user-data";
 
 const BASIC_SUITES = [
   "explorer-test.mjs",
@@ -88,8 +88,8 @@ async function createGitRepo(root, files) {
   await reset(root);
   for (const [path, content] of Object.entries(files)) await put(root, path, content);
   await git(root, ["init", "-q"]);
-  await git(root, ["config", "user.email", "e2e@pi-ditor.local"]);
-  await git(root, ["config", "user.name", "pi-ditor e2e"]);
+  await git(root, ["config", "user.email", "e2e@termina.local"]);
+  await git(root, ["config", "user.name", "termina e2e"]);
   await git(root, ["add", "."]);
   await git(root, ["commit", "-qm", "fixture"]);
 }
@@ -111,12 +111,12 @@ function baseFiles({ hello = false, other = false, tests = false, trust = false 
 
 async function prepareBasic(name) {
   if (name === "verify-test.mjs") {
-    const root = "/tmp/pi-editor-verify-project";
+    const root = "/tmp/termina-verify-project";
     await reset(root);
     await put(root, "package.json", JSON.stringify({ name: "verify-fixture", scripts: { test: "node test.js" } }) + "\n");
     await put(root, "math.js", "exports.add = (a, b) => a + b + 1; // BUG\n");
     await put(root, "test.js", "const { add } = require('./math');\nif (add(2, 3) !== 5) { console.error('FAIL: add'); process.exit(1); }\n");
-    return { root, events: "/tmp/pi-editor-verify-events", worlds: BASE_WORLDS };
+    return { root, events: "/tmp/termina-verify-events", worlds: BASE_WORLDS };
   }
   if (name === "verify-cancel-test.mjs") {
     await reset(BASE_ROOT);
@@ -149,9 +149,9 @@ function worldlinePaths(name) {
   }[stem];
   const label = suffix === "" ? "" : suffix;
   return {
-    root: `/tmp/pi-editor-wline${label}-project`,
-    events: `/tmp/pi-editor-wline${label}-events`,
-    worlds: `/tmp/pi-editor-wline${label}-worlds`,
+    root: `/tmp/termina-wline${label}-project`,
+    events: `/tmp/termina-wline${label}-events`,
+    worlds: `/tmp/termina-wline${label}-worlds`,
   };
 }
 
@@ -198,7 +198,7 @@ async function seedRecovery(root, worlds) {
 
 async function seedCleanup(worlds) {
   const stale = join(worlds, "stale-cmp");
-  await put(stale, ".pi-ditor-world", "owned\n");
+  await put(stale, ".termina-world", "owned\n");
   await put(stale, "manifest.json", JSON.stringify({ candidates: { A: { pid: 999999, lstart: "0" } } }));
   await put(worlds, "foreign-dir/keep.txt", "keep\n");
 }
@@ -301,10 +301,10 @@ async function runSuite(name, testCase) {
 
   const env = {
     ...process.env,
-    PI_EDITOR_INITIAL_CWD: fixture.root,
-    PI_EDITOR_EVENTS_DIR: fixture.events,
-    PI_EDITOR_WORLDS_DIR: fixture.worlds,
-    PI_EDITOR_USER_DATA_DIR: userData,
+    TERMINA_INITIAL_CWD: fixture.root,
+    TERMINA_EVENTS_DIR: fixture.events,
+    TERMINA_WORLDS_DIR: fixture.worlds,
+    TERMINA_USER_DATA_DIR: userData,
   };
   if (testCase) env.PREFLIGHT_CASE = testCase;
   const app = spawn(electronPath, [".", `--remote-debugging-port=${PORT}`], { env, detached: true, stdio: "inherit" });

@@ -32,7 +32,7 @@ const evaluate = async (expression) => {
 };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-await evaluate(`localStorage.removeItem("pi-ditor.preferences"); document.getElementById("btn-settings").click()`);
+await evaluate(`localStorage.removeItem("termina.preferences"); document.getElementById("btn-settings").click()`);
 await sleep(100);
 check("settings opens from the explorer header", await evaluate(`Boolean(document.querySelector(".settings-modal"))`));
 check("appearance section is selected", await evaluate(`document.querySelector(".settings-nav-item.active")?.textContent === "Appearance"`));
@@ -47,7 +47,7 @@ check("keyboard section lists shortcuts", await evaluate(`document.querySelector
 await evaluate(`(() => { const button = document.querySelector('[data-shortcut="open-settings"]'); button.click(); button.dispatchEvent(new KeyboardEvent("keydown", { key: "K", code: "KeyK", metaKey: true, bubbles: true, cancelable: true })); })()`);
 check("shortcut recording accepts a new key", await evaluate(`document.querySelector('[data-shortcut="open-settings"]')?.textContent === "⌘K" || document.querySelector('[data-shortcut="open-settings"]')?.textContent === "Ctrl+K"`));
 check("preferences persist through the main process", await evaluate(`window.pi.getPreferences().then((value) => value.shortcuts["open-settings"] === "CmdOrCtrl+K")`));
-check("preferences do not use renderer storage", await evaluate(`localStorage.getItem("pi-ditor.preferences") === null`));
+check("preferences do not use renderer storage", await evaluate(`localStorage.getItem("termina.preferences") === null`));
 
 await evaluate(`document.querySelector(".settings-close").click()`);
 await evaluate(`document.getElementById("btn-settings").click()`);

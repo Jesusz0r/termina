@@ -2,10 +2,10 @@
  * Phase 9 e2e: evidence contract (WORLDLINES §10 worldline-evidence-test).
  *
  * Expects Electron on :9222 with:
- *   PI_EDITOR_INITIAL_CWD=<Git repo: greeting.ts "hello", package.json with
+ *   TERMINA_INITIAL_CWD=<Git repo: greeting.ts "hello", package.json with
  *     a test script that requires "hi there", a .pi/settings.json>
- *   PI_EDITOR_EVENTS_DIR=<clean dedicated dir>
- *   PI_EDITOR_WORLDS_DIR=<clean dedicated worlds root>
+ *   TERMINA_EVENTS_DIR=<clean dedicated dir>
+ *   TERMINA_WORLDS_DIR=<clean dedicated worlds root>
  *
  * Proves WORLDLINES §6.8:
  *   1. the base Verify command runs for both candidates
@@ -56,8 +56,8 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PROJ = "/tmp/pi-editor-wline9-project";
-const WORLDS = "/tmp/pi-editor-wline9-worlds";
+const PROJ = "/tmp/termina-wline9-project";
+const WORLDS = "/tmp/termina-wline9-worlds";
 const git = (args) => execFileSync("git", args, { cwd: PROJ, encoding: "utf8" }).trim();
 const sha256 = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
 const repoState = () => ({ head: git(["rev-parse", "HEAD"]), refs: git(["for-each-ref"]), indexSha: sha256(join(PROJ, ".git", "index")) });

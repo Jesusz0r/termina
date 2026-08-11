@@ -2,7 +2,7 @@
  * Dispatch (parallel agents) e2e test.
  *
  * Launch requirement:
- *   PI_EDITOR_INITIAL_CWD=<fresh fixture: greeting.ts "hello", hello.txt, src/>
+ *   TERMINA_INITIAL_CWD=<fresh fixture: greeting.ts "hello", hello.txt, src/>
  *   --remote-debugging-port=9222
  *
  * Steps:
@@ -66,9 +66,9 @@ const files = await evalJs(`[...document.querySelectorAll('#modified-list .path'
 check("worker files land in the owner's review", files.some((f) => f.includes("utils.ts")) && files.some((f) => f.includes("math.ts")), JSON.stringify(files));
 
 const { existsSync, readFileSync } = await import("node:fs");
-check("utils.ts exists on disk", existsSync("/tmp/pi-editor-test-project/utils.ts"), "");
-check("math.ts exists on disk", existsSync("/tmp/pi-editor-test-project/math.ts"), "");
-const greeting = existsSync("/tmp/pi-editor-test-project/greeting.ts") ? readFileSync("/tmp/pi-editor-test-project/greeting.ts", "utf8") : "";
+check("utils.ts exists on disk", existsSync("/tmp/termina-test-project/utils.ts"), "");
+check("math.ts exists on disk", existsSync("/tmp/termina-test-project/math.ts"), "");
+const greeting = existsSync("/tmp/termina-test-project/greeting.ts") ? readFileSync("/tmp/termina-test-project/greeting.ts", "utf8") : "";
 check("greeting.ts was edited by its worker", greeting.includes("hi there"), greeting.slice(0, 60));
 
 const passed = results.filter(Boolean).length;

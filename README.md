@@ -1,4 +1,4 @@
-# Pi/ditor
+# Termina
 
 A **hybrid terminal + IDE**: the left side runs **real pi** — the actual
 interactive TUI — in a pty. The right side is a Monaco IDE that watches the
@@ -49,7 +49,7 @@ state; and Challenge Mode ranks candidates with deterministic evidence.
 
 Everything is local. The terminal stays the source of truth; the app records
 byte-exact source states in an app-owned snapshot store and never writes the
-user's Git repository. Pi/ditor preferences are stored in the app user-data
+user's Git repository. Termina preferences are stored in the app user-data
 directory, separate from Pi `/settings` and project files.
 
 ## Getting started
@@ -67,9 +67,9 @@ npm run dev          # build main + preload, start Vite, launch Electron
   every suite and starts a fresh instance on port 9222. Run one suite with
   `npm run test:e2e -- --skip-build worldline-capture-test.mjs`.
 
-Pi/ditor uses the Pi configuration in `~/.pi/agent`. Host `PI_*` session
+Termina uses the Pi configuration in `~/.pi/agent`. Host `PI_*` session
 variables are removed before launch so a host session file cannot attach to a
-terminal. Run `/login` and set the default provider and model in the Pi/ditor
+terminal. Run `/login` and set the default provider and model in the Termina
 terminal before running model-driven e2e suites.
 
 ## Layout

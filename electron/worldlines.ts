@@ -203,7 +203,7 @@ const MAX_IGNORED_FILES = 5000;
 const MAX_IGNORED_BYTES = 200 * 1024 * 1024;
 
 /** The app-owned marker that proves a worlds dir belongs to the app. */
-const MARKER = ".pi-ditor-world";
+const MARKER = ".termina-world";
 
 /** The logical size of a directory tree (du, off the main-thread sync path). */
 async function dirBytes(dir: string): Promise<number> {
@@ -953,7 +953,7 @@ export class WorldlineManager {
       targetDir: cmp.templateDir,
       sourceObjectsDir: join(cmp.sourceGitDir, "objects"),
     });
-    // The template repo has exactly one commit ("pi-ditor base"). Its SHA
+    // The template repo has exactly one commit ("termina base"). Its SHA
     // is the shared comparison base for both candidates.
     const head = await runGitIn(cmp.templateDir, ["rev-parse", "HEAD"]);
     cmp.baseCommit = head.code === 0 ? head.stdout.toString().trim() : null;
@@ -1173,8 +1173,8 @@ export class WorldlineManager {
         ...this.deps.baseEnv,
         HOME: cand.homeDir,
         TMPDIR: cand.tmpDir,
-        PI_EDITOR_EVENTS_DIR: cand.eventsDir,
-        ...(cmp.inheritTrust ? { PI_EDITOR_INHERIT_TRUST: "1" } : {}),
+        TERMINA_EVENTS_DIR: cand.eventsDir,
+        ...(cmp.inheritTrust ? { TERMINA_INHERIT_TRUST: "1" } : {}),
       },
     };
   }

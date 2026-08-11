@@ -42,7 +42,7 @@ check("modified panel has the file", modified.some(m => m.includes("tui-test.txt
 
 // file on disk?
 const fs = await import("node:fs");
-const disk = fs.existsSync("/tmp/pi-editor-test-project/tui-test.txt") ? fs.readFileSync("/tmp/pi-editor-test-project/tui-test.txt", "utf8") : null;
+const disk = fs.existsSync("/tmp/termina-test-project/tui-test.txt") ? fs.readFileSync("/tmp/termina-test-project/tui-test.txt", "utf8") : null;
 check("file created on disk", disk?.includes("hello from the tui"), JSON.stringify(disk));
 
 console.log(`\n${results.filter(Boolean).length}/${results.length} passed`);

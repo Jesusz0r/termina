@@ -2,9 +2,9 @@
  * Phase 5 e2e: promotion with rollback-ready journaling.
  *
  * Expects Electron on :9222 with:
- *   PI_EDITOR_INITIAL_CWD=<Git repo: greeting.ts "hello", other.txt "other">
- *   PI_EDITOR_EVENTS_DIR=<clean dedicated dir>
- *   PI_EDITOR_WORLDS_DIR=<clean dedicated worlds root>
+ *   TERMINA_INITIAL_CWD=<Git repo: greeting.ts "hello", other.txt "other">
+ *   TERMINA_EVENTS_DIR=<clean dedicated dir>
+ *   TERMINA_WORLDS_DIR=<clean dedicated worlds root>
  *
  * Proves the Phase 5 acceptance (WORLDLINES §7): a candidate promotes into
  * the primary through a recoverable three-way merge without touching user
@@ -63,9 +63,9 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PROJ = "/tmp/pi-editor-wline3-project";
-const EVENTS = "/tmp/pi-editor-wline3-events";
-const WORLDS = "/tmp/pi-editor-wline3-worlds";
+const PROJ = "/tmp/termina-wline3-project";
+const EVENTS = "/tmp/termina-wline3-events";
+const WORLDS = "/tmp/termina-wline3-worlds";
 const git = (args) => execFileSync("git", args, { cwd: PROJ, encoding: "utf8" }).trim();
 const sha256 = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
 const repoState = () => ({ head: git(["rev-parse", "HEAD"]), refs: git(["for-each-ref"]), indexSha: sha256(join(PROJ, ".git", "index")) });
@@ -175,7 +175,7 @@ const promotedSession = await waitFor(() => {
     for (const f of readdirSync(sessionsDir).filter((x) => x.endsWith(".jsonl"))) {
       try {
         const text = readFileSync(join(sessionsDir, f), "utf8");
-        if (text.includes("pi-ditor-relocation") && text.includes("In this promoted session")) return join(sessionsDir, f);
+        if (text.includes("termina-relocation") && text.includes("In this promoted session")) return join(sessionsDir, f);
       } catch {
         /* a session mid-write: retry */
       }
@@ -186,7 +186,7 @@ const promotedSession = await waitFor(() => {
 check("promoted session installed", promotedSession !== null, "");
 if (promotedSession) {
   const text = readFileSync(promotedSession, "utf8");
-  check("promoted session carries the relocation note", text.includes("pi-ditor-relocation"), "relocation present");
+  check("promoted session carries the relocation note", text.includes("termina-relocation"), "relocation present");
   check("promoted session points at the primary cwd", text.includes(PROJ), "primary cwd present");
 }
 

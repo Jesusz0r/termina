@@ -2,9 +2,9 @@
  * Phase 8 e2e: capture correctness (WORLDLINES §10 worldline-capture-test).
  *
  * Expects Electron on :9222 with:
- *   PI_EDITOR_INITIAL_CWD=<Git repo: greeting.ts "hello", hello.txt "first">
- *   PI_EDITOR_EVENTS_DIR=<clean dedicated dir>
- *   PI_EDITOR_WORLDS_DIR=<clean dedicated worlds root>
+ *   TERMINA_INITIAL_CWD=<Git repo: greeting.ts "hello", hello.txt "first">
+ *   TERMINA_EVENTS_DIR=<clean dedicated dir>
+ *   TERMINA_WORLDS_DIR=<clean dedicated worlds root>
  *
  * Proves WORLDLINES §6.4:
  *   1. every tool dot captures its exact source state (byte-exact: the
@@ -54,8 +54,8 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PROJ = "/tmp/pi-editor-wline8-project";
-const WORLDS = "/tmp/pi-editor-wline8-worlds";
+const PROJ = "/tmp/termina-wline8-project";
+const WORLDS = "/tmp/termina-wline8-worlds";
 const git = (args) => execFileSync("git", args, { cwd: PROJ, encoding: "utf8" }).trim();
 const sha256 = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
 const repoState = () => ({ head: git(["rev-parse", "HEAD"]), refs: git(["for-each-ref"]), indexSha: sha256(join(PROJ, ".git", "index")) });
@@ -130,7 +130,7 @@ const discard = await evalJs(`window.pi.discardWorldline(${JSON.stringify(fork.c
 check("discard ok", discard?.ok === true, JSON.stringify(discard));
 await sleep(1500);
 
-const storeRoot = process.env.PI_EDITOR_USER_DATA_DIR ?? join(process.env.HOME, "Library", "Application Support", "pi-ditor");
+const storeRoot = process.env.TERMINA_USER_DATA_DIR ?? join(process.env.HOME, "Library", "Application Support", "termina");
 const stores = execFileSync("find", [join(storeRoot, "worldlines"), "-path", "*/git/objects", "-type", "d"], { encoding: "utf8" }).trim().split("\n").filter(Boolean);
 const storeObjects = stores.sort().pop();
 check("the snapshot store exists", !!storeObjects, String(storeObjects));

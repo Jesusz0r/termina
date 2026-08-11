@@ -2,9 +2,9 @@
  * Phase 6 e2e: Fork Any Moment.
  *
  * Expects Electron on :9222 with:
- *   PI_EDITOR_INITIAL_CWD=<Git repo: greeting.ts "hello", hello.txt "first">
- *   PI_EDITOR_EVENTS_DIR=<clean dedicated dir>
- *   PI_EDITOR_WORLDS_DIR=<clean dedicated worlds root>
+ *   TERMINA_INITIAL_CWD=<Git repo: greeting.ts "hello", hello.txt "first">
+ *   TERMINA_EVENTS_DIR=<clean dedicated dir>
+ *   TERMINA_WORLDS_DIR=<clean dedicated worlds root>
  *
  * Proves the Release 2 gate (WORLDLINES §7): every visible tool dot becomes
  * a forkable moment with that exact captured source state and the persisted
@@ -60,8 +60,8 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PROJ = "/tmp/pi-editor-wline5-project";
-const WORLDS = "/tmp/pi-editor-wline5-worlds";
+const PROJ = "/tmp/termina-wline5-project";
+const WORLDS = "/tmp/termina-wline5-worlds";
 const git = (args) => execFileSync("git", args, { cwd: PROJ, encoding: "utf8" }).trim();
 
 async function typePrompt(text) {

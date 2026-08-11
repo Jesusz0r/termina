@@ -1,7 +1,7 @@
 /**
  * Session Timeline end-to-end test.
  *
- * Expects Electron on :9222 with PI_EDITOR_INITIAL_CWD pointing at a fresh
+ * Expects Electron on :9222 with TERMINA_INITIAL_CWD pointing at a fresh
  * project containing greeting.ts ("export const greeting = \"hello\";").
  * The agent is prompted to change it; we then assert:
  *   1. getTimeline() returns agent_start → tool → agent_settled points
