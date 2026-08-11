@@ -50,6 +50,8 @@ jobs:
             release/*.AppImage
       - name: Attach the raw core binary
         if: startsWith(github.ref, 'refs/tags/')
-        run: gh release upload "${GITHUB_REF_NAME}" "core/target/release/termina-core" --clobber --rename "${{ matrix.core-asset }}"
+        run: |
+          cp "core/target/release/termina-core" "/tmp/${{ matrix.core-asset }}"
+          gh release upload "${GITHUB_REF_NAME}" "/tmp/${{ matrix.core-asset }}" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
