@@ -4,10 +4,13 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { build } from "esbuild";
 import { createServer } from "vite";
+import { patchBundleName } from "./patch-bundle-name.mjs";
 
 const require = createRequire(import.meta.url);
 // Under plain Node, `require("electron")` resolves to the path of the Electron binary.
 const electronPath = require("electron");
+
+patchBundleName();
 
 const run = async () => {
   await build({

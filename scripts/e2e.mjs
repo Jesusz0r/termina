@@ -4,6 +4,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
+import { patchBundleName } from "./patch-bundle-name.mjs";
 
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
@@ -307,6 +308,7 @@ async function runSuite(name, testCase) {
     TERMINA_USER_DATA_DIR: userData,
   };
   if (testCase) env.PREFLIGHT_CASE = testCase;
+  patchBundleName();
   const app = spawn(electronPath, [".", `--remote-debugging-port=${PORT}`], { env, detached: true, stdio: "inherit" });
   try {
     await waitForRemoteDebugging();

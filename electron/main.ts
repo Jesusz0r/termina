@@ -8,6 +8,9 @@
  * of files mid-run and the modified-files panel.
  */
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme } from "electron";
+
+// Name the app for the macOS menu bar and user-data paths. Unpackaged runs default to "Electron".
+app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
 import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { openSync, closeSync, fsyncSync } from "node:fs";

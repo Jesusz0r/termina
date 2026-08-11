@@ -200,11 +200,13 @@ body {
   overflow: hidden;
 }
 
-.explorer-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 500;
+.explorer-header .header-logo {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0;
+  text-transform: none;
+}
   /* same size as the terminal/editor tab bars; left padding clears the
      inset traffic lights, which now sit over the explorer column */
   min-height: 34px;
@@ -1389,7 +1391,9 @@ body {
 }
 
 #editor-empty .empty-logo {
-  color: var(--text-dim);
+  font-size: 44px;
+  font-weight: 700;
+  color: var(--accent);
   margin-bottom: 4px;
 }
 
