@@ -19,6 +19,9 @@ Everything runs locally. The terminal stays the source of truth; the app
 records byte-exact source states in an app-owned snapshot store and never
 writes your Git repository.
 
+![Termina — the pi TUI on the left, the live Monaco editor with the
+modified list and session timeline on the right](docs/screenshot.png)
+
 ## Features
 
 | Feature | What it does |
