@@ -2,9 +2,9 @@
 //!
 //! Performs every app-owned Git store operation off the Electron main
 //! thread: captures, incremental captures, state application, template
-//! creation, merges, and trust hashes. The store is a bare Git repository
-//! that reads source objects through a read-only alternate. It never
-//! writes the user's Git directory.
+//! creation, and trust hashes. The store is a bare Git repository that
+//! reads source objects through a read-only alternate. It never writes
+//! the user's Git directory.
 //!
 //! Protocol: JSON-lines over stdin/stdout. The main process writes one
 //! request per line and reads one response per line. Every request carries
@@ -14,12 +14,15 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, Write};
-use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use git2::{ErrorCode, IndexAddOption, IndexEntry, ObjectFormat, Oid, Repository, RepositoryInitOptions, Signature, StatusOptions};
-use serde_json::{json, Value};
+use git2::{
+    ErrorCode, IndexAddOption, IndexEntry, ObjectFormat, Oid, Repository, RepositoryInitOptions,
+    Signature, StatusOptions,
+};
+use serde_json::{Value, json};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 
@@ -35,11 +38,17 @@ const BUDGET_MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const BUDGET_MAX_NEW_BLOB_BYTES: u64 = 256 * 1024 * 1024;
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn s(v: &Value, key: &str) -> Result<String, String> {
-    v.get(key).and_then(|x| x.as_str()).map(String::from).ok_or_else(|| format!("missing field {key}"))
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .map(String::from)
+        .ok_or_else(|| format!("missing field {key}"))
 }
 
 fn opt_s(v: &Value, key: &str) -> Option<String> {
@@ -98,7 +107,7 @@ fn write_blob(repo: &Repository, bytes: &[u8]) -> Result<(Oid, u64), String> {
         return Ok((oid, 0));
     }
     // The loose format is zlib(header + bytes); the oid is the hash of
-    // header + bytes. Write it directly, exactly like the previous worker.
+    // header + bytes. Write it directly; the bytes match Git's format.
     let header = format!("blob {}\0", bytes.len()).into_bytes();
     use std::io::Write as _;
     let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
@@ -113,7 +122,10 @@ fn write_blob(repo: &Repository, bytes: &[u8]) -> Result<(Oid, u64), String> {
             let tmp = parent.join(format!(
                 "tmp-{}-{:08x}",
                 std::process::id(),
-                std::time::SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0)
+                std::time::SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.subsec_nanos())
+                    .unwrap_or(0)
             ));
             fs::write(&tmp, compressed).map_err(|e| format!("write failed: {e}"))?;
             match fs::rename(&tmp, &loose) {
@@ -137,7 +149,8 @@ fn read_file_verified(abs: &Path) -> Result<Vec<u8>, String> {
     let mut file = fs::File::open(abs).map_err(|e| format!("open failed: {e}"))?;
     let mut bytes = Vec::new();
     use std::io::Read;
-    file.read_to_end(&mut bytes).map_err(|e| format!("read failed: {e}"))?;
+    file.read_to_end(&mut bytes)
+        .map_err(|e| format!("read failed: {e}"))?;
     let after = file.metadata().map_err(|e| format!("fstat failed: {e}"))?;
     let same = before.dev() == after.dev()
         && before.ino() == after.ino()
@@ -147,7 +160,8 @@ fn read_file_verified(abs: &Path) -> Result<Vec<u8>, String> {
     if !same {
         return Err(format!("file changed while captured: {}", abs.display()));
     }
-    let path_st = fs::symlink_metadata(abs).map_err(|_| format!("file vanished while captured: {}", abs.display()))?;
+    let path_st = fs::symlink_metadata(abs)
+        .map_err(|_| format!("file vanished while captured: {}", abs.display()))?;
     if path_st.dev() != after.dev() || path_st.ino() != after.ino() {
         return Err(format!("file replaced while captured: {}", abs.display()));
     }
@@ -179,7 +193,12 @@ enum Node {
 }
 
 /// Insert a flat path into the nested tree. Errors on path conflicts.
-fn insert_node(root: &mut HashMap<String, Node>, path: &str, oid: Oid, mode: u32) -> Result<(), String> {
+fn insert_node(
+    root: &mut HashMap<String, Node>,
+    path: &str,
+    oid: Oid,
+    mode: u32,
+) -> Result<(), String> {
     let parts: Vec<&str> = path.split('/').collect();
     let mut current = root;
     for (i, part) in parts.iter().enumerate() {
@@ -190,10 +209,14 @@ fn insert_node(root: &mut HashMap<String, Node>, path: &str, oid: Oid, mode: u32
             }
             current.insert(part.to_string(), Node::Blob { oid, mode });
         } else {
-            let entry = current.entry(part.to_string()).or_insert_with(|| Node::Dir(HashMap::new()));
+            let entry = current
+                .entry(part.to_string())
+                .or_insert_with(|| Node::Dir(HashMap::new()));
             match entry {
                 Node::Dir(map) => current = map,
-                Node::Blob { .. } => return Err(format!("path component conflicts with a file: {path}")),
+                Node::Blob { .. } => {
+                    return Err(format!("path component conflicts with a file: {path}"));
+                }
             }
         }
     }
@@ -207,20 +230,29 @@ fn write_nested_tree(repo: &Repository, root: &mut HashMap<String, Node>) -> Res
     for name in names {
         match root.remove(&name) {
             Some(Node::Blob { oid, mode }) => {
-                builder.insert(&name, oid, mode as i32).map_err(|e| format!("tree insert failed: {e}"))?;
+                builder
+                    .insert(&name, oid, mode as i32)
+                    .map_err(|e| format!("tree insert failed: {e}"))?;
             }
             Some(Node::Dir(mut sub)) => {
                 let sub_oid = write_nested_tree(repo, &mut sub)?;
-                builder.insert(&name, sub_oid, 0o40000).map_err(|e| format!("tree insert failed: {e}"))?;
+                builder
+                    .insert(&name, sub_oid, 0o40000)
+                    .map_err(|e| format!("tree insert failed: {e}"))?;
             }
             None => {}
         }
     }
-    builder.write().map_err(|e| format!("tree write failed: {e}"))
+    builder
+        .write()
+        .map_err(|e| format!("tree write failed: {e}"))
 }
 
 /// Walk a tree and collect every non-tree entry into a flat map.
-fn collect_tree_map(repo: &Repository, tree_oid: Oid) -> Result<HashMap<String, FlatEntry>, String> {
+fn collect_tree_map(
+    repo: &Repository,
+    tree_oid: Oid,
+) -> Result<HashMap<String, FlatEntry>, String> {
     let mut out = HashMap::new();
     collect_tree_map_at(repo, tree_oid, "", &mut out)?;
     Ok(out)
@@ -235,7 +267,11 @@ fn collect_tree_map_at(
     let tree = repo.find_tree(tree_oid).map_err(|e| e.to_string())?;
     for entry in tree.iter() {
         let name = entry.name().map_err(|e| e.to_string())?;
-        let path = if prefix.is_empty() { name.to_string() } else { format!("{prefix}/{name}") };
+        let path = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        };
         match entry.kind() {
             Some(git2::ObjectType::Tree) => collect_tree_map_at(repo, entry.id(), &path, out)?,
             _ => {
@@ -248,11 +284,22 @@ fn collect_tree_map_at(
 
 /// The tree oid of a state commit.
 fn resolve_tree(repo: &Repository, commit: Oid) -> Result<Oid, String> {
-    let object = repo.revparse_single(&format!("{}^{{tree}}", commit)).map_err(|e| e.to_string())?;
-    object.as_tree().map(|t| t.id()).ok_or_else(|| "state is not a commit".to_string())}
+    let object = repo
+        .revparse_single(&format!("{}^{{tree}}", commit))
+        .map_err(|e| e.to_string())?;
+    object
+        .as_tree()
+        .map(|t| t.id())
+        .ok_or_else(|| "state is not a commit".to_string())
+}
 
 /// Create the synthetic state commit.
-fn commit_tree(repo: &Repository, tree: Oid, parent: Option<Oid>, message: &str) -> Result<Oid, String> {
+fn commit_tree(
+    repo: &Repository,
+    tree: Oid,
+    parent: Option<Oid>,
+    message: &str,
+) -> Result<Oid, String> {
     let signature = Signature::now("termina", "dev@termina.local").map_err(|e| e.to_string())?;
     let parents: Vec<git2::Commit> = match parent {
         Some(oid) => vec![repo.find_commit(oid).map_err(|e| e.to_string())?],
@@ -260,14 +307,23 @@ fn commit_tree(repo: &Repository, tree: Oid, parent: Option<Oid>, message: &str)
     };
     let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
     let tree_obj = repo.find_tree(tree).map_err(|e| e.to_string())?;
-    repo.commit(None, &signature, &signature, message, &tree_obj, &parent_refs)
-        .map_err(|e| format!("commit failed: {e}"))
+    repo.commit(
+        None,
+        &signature,
+        &signature,
+        message,
+        &tree_obj,
+        &parent_refs,
+    )
+    .map_err(|e| format!("commit failed: {e}"))
 }
 
 /// Pin a state commit with a store-local ref so gc never prunes it.
 fn update_state_ref(repo: &Repository, commit: Oid) -> Result<(), String> {
     let name = format!("refs/termina/state/{commit}");
-    repo.reference(&name, commit, true, "").map_err(|e| e.to_string()).map(|_| ())
+    repo.reference(&name, commit, true, "")
+        .map_err(|e| e.to_string())
+        .map(|_| ())
 }
 
 // ------------------------------------------------------------ capture -----
@@ -289,7 +345,11 @@ fn enumerate_domain(repo: &Repository) -> Result<Vec<String>, String> {
         }
     }
     let statuses = repo
-        .statuses(Some(&mut StatusOptions::new().include_untracked(true).recurse_untracked_dirs(true)))
+        .statuses(Some(
+            &mut StatusOptions::new()
+                .include_untracked(true)
+                .recurse_untracked_dirs(true),
+        ))
         .map_err(|e| e.to_string())?;
     for status in statuses.iter() {
         if status.status().is_wt_new() {
@@ -308,40 +368,60 @@ fn enumerate_domain(repo: &Repository) -> Result<Vec<String>, String> {
     Ok(paths)
 }
 
-/// Hash one workdir path into the store. Returns (mode, oid, new bytes).
-fn hash_path(repo: &Repository, abs: &Path, max_file_bytes: u64) -> Result<(u32, Oid, u64), String> {
+/// Hash one working-tree path into the store. Returns None when the path
+/// is gone or is a directory (a gitlink). Returns (mode, oid, new bytes).
+fn hash_path(
+    repo: &Repository,
+    abs: &Path,
+    max_file_bytes: u64,
+) -> Result<Option<(u32, Oid, u64)>, String> {
     let st = match fs::symlink_metadata(abs) {
         Ok(st) => st,
-        Err(_) => return Err("missing".to_string()),
+        Err(_) => return Ok(None),
     };
     if st.file_type().is_symlink() {
         let target = fs::read_link(abs).map_err(|e| format!("readlink failed: {e}"))?;
         let bytes = target.to_string_lossy().into_owned().into_bytes();
         let (oid, new_bytes) = write_blob(repo, &bytes)?;
-        return Ok((0o120000, oid, new_bytes));
+        return Ok(Some((0o120000, oid, new_bytes)));
     }
     if st.file_type().is_dir() {
-        return Err("directory".to_string());
+        return Ok(None);
     }
     if !st.file_type().is_file() {
-        return Err("unsupported".to_string());
+        return Err("unsupported file type".to_string());
     }
     if st.len() > max_file_bytes {
-        return Err(format!("file exceeds the {max_file_bytes} byte budget: {}", abs.display()));
+        return Err(format!(
+            "file exceeds the {max_file_bytes} byte budget: {}",
+            abs.display()
+        ));
     }
     let bytes = read_file_verified(abs)?;
-    let mode = if st.mode() & 0o111 != 0 { 0o100755 } else { 0o100644 };
+    let mode = if st.mode() & 0o111 != 0 {
+        0o100755
+    } else {
+        0o100644
+    };
     let (oid, new_bytes) = write_blob(repo, &bytes)?;
-    Ok((mode, oid, new_bytes))
+    Ok(Some((mode, oid, new_bytes)))
 }
 
 fn op_capture(req: &Value) -> Result<Value, String> {
     let source_root = PathBuf::from(s(req, "sourceRoot")?);
     let head = opt_s(req, "head");
     let parent_commit = opt_s(req, "parentCommit");
-    let capture_root = opt_s(req, "captureRoot").map(PathBuf::from).unwrap_or(source_root);
-    let max_paths = req.pointer("/budget/maxPaths").and_then(Value::as_u64).unwrap_or(BUDGET_MAX_PATHS as u64) as usize;
-    let max_file_bytes = req.pointer("/budget/maxFileBytes").and_then(Value::as_u64).unwrap_or(BUDGET_MAX_FILE_BYTES);
+    let capture_root = opt_s(req, "captureRoot")
+        .map(PathBuf::from)
+        .unwrap_or(source_root);
+    let max_paths = req
+        .pointer("/budget/maxPaths")
+        .and_then(Value::as_u64)
+        .unwrap_or(BUDGET_MAX_PATHS as u64) as usize;
+    let max_file_bytes = req
+        .pointer("/budget/maxFileBytes")
+        .and_then(Value::as_u64)
+        .unwrap_or(BUDGET_MAX_FILE_BYTES);
     let max_new_blob_bytes = req
         .pointer("/budget/maxNewBlobBytes")
         .and_then(Value::as_u64)
@@ -350,30 +430,28 @@ fn op_capture(req: &Value) -> Result<Value, String> {
     // The store owns every object and ref. The source repo feeds only the
     // enumeration and the raw file bytes.
     let store = open_store(&PathBuf::from(s(req, "storeDir")?), req)?;
-    let source = Repository::open(&capture_root).map_err(|e| format!("open source repository failed: {e}"))?;
-    let parent_oid = parent_commit.as_deref().map(|p| oid_ext(&store, p)).transpose()?;
+    let source = Repository::open(&capture_root)
+        .map_err(|e| format!("open source repository failed: {e}"))?;
+    let parent_oid = parent_commit
+        .as_deref()
+        .map(|p| oid_ext(&store, p))
+        .transpose()?;
 
-    let mut paths = enumerate_domain(&source)?;
+    let paths = enumerate_domain(&source)?;
     if paths.len() > max_paths {
-        return Err(format!("capture exceeds the {max_paths} path budget ({} paths)", paths.len()));
+        return Err(format!(
+            "capture exceeds the {max_paths} path budget ({} paths)",
+            paths.len()
+        ));
     }
-    paths.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
 
     let mut flat: HashMap<String, FlatEntry> = HashMap::new();
-    let mut expected: HashMap<String, FlatEntry> = HashMap::new();
     let mut new_blob_bytes = 0u64;
     for rel_path in &paths {
         let abs = capture_root.join(rel_path);
-        match hash_path(&store, &abs, max_file_bytes) {
-            Ok((mode, oid, new_bytes)) => {
-                new_blob_bytes += new_bytes;
-                flat.insert(rel_path.clone(), (mode, oid));
-                expected.insert(rel_path.clone(), (mode, oid));
-            }
-            Err(message) if message == "missing" || message == "directory" => {
-                // Deleted between enumeration and capture, or a gitlink.
-            }
-            Err(message) => return Err(message),
+        if let Some((mode, oid, new_bytes)) = hash_path(&store, &abs, max_file_bytes)? {
+            new_blob_bytes += new_bytes;
+            flat.insert(rel_path.clone(), (mode, oid));
         }
     }
     if new_blob_bytes > max_new_blob_bytes {
@@ -386,9 +464,9 @@ fn op_capture(req: &Value) -> Result<Value, String> {
     let commit = commit_tree(&store, tree, parent_oid, "termina source state")?;
     update_state_ref(&store, commit)?;
 
-    // Read the tree back and verify every expected entry.
+    // Read the tree back and verify every captured entry.
     let seen = collect_tree_map(&store, tree)?;
-    verify_expected(&seen, &expected, true)?;
+    verify_expected(&seen, &flat, true)?;
 
     Ok(json!({
         "state": {
@@ -419,7 +497,11 @@ fn verify_expected(
     exact: bool,
 ) -> Result<(), String> {
     if exact && seen.len() != expected.len() {
-        return Err(format!("tree verification size mismatch: {} vs {}", seen.len(), expected.len()));
+        return Err(format!(
+            "tree verification size mismatch: {} vs {}",
+            seen.len(),
+            expected.len()
+        ));
     }
     for (path, exp) in expected {
         match seen.get(path) {
@@ -434,9 +516,14 @@ fn verify_expected(
 
 fn op_capture_incremental(req: &Value) -> Result<Value, String> {
     let source_root = PathBuf::from(s(req, "sourceRoot")?);
-    let parent_commit = oid_ext_str(req, "parentCommit")?;
-    let capture_root = opt_s(req, "captureRoot").map(PathBuf::from).unwrap_or(source_root);
-    let max_file_bytes = req.pointer("/budget/maxFileBytes").and_then(Value::as_u64).unwrap_or(BUDGET_MAX_FILE_BYTES);
+    let parent_commit = s(req, "parentCommit")?;
+    let capture_root = opt_s(req, "captureRoot")
+        .map(PathBuf::from)
+        .unwrap_or(source_root);
+    let max_file_bytes = req
+        .pointer("/budget/maxFileBytes")
+        .and_then(Value::as_u64)
+        .unwrap_or(BUDGET_MAX_FILE_BYTES);
     let max_new_blob_bytes = req
         .pointer("/budget/maxNewBlobBytes")
         .and_then(Value::as_u64)
@@ -444,7 +531,11 @@ fn op_capture_incremental(req: &Value) -> Result<Value, String> {
     let hints: Vec<String> = req
         .get("hints")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let reconcile: Vec<(String, String)> = req
         .get("reconcile")
@@ -469,10 +560,10 @@ fn op_capture_incremental(req: &Value) -> Result<Value, String> {
 
     // The changed set: hints plus reconciled cache entries whose blob
     // differs from the parent tree.
-    let mut changed: HashMap<String, bool> = HashMap::new(); // path -> is_deleted (filled later)
+    let mut changed: HashSet<String> = HashSet::new();
     for hint in &hints {
         if is_safe_relative(hint) {
-            changed.entry(hint.clone()).or_insert(false);
+            changed.insert(hint.clone());
         }
     }
     for (rel_path, content) in &reconcile {
@@ -484,7 +575,7 @@ fn op_capture_incremental(req: &Value) -> Result<Value, String> {
         };
         let content_oid = blob_oid(&store, content.as_bytes());
         if content_oid != *parent_oid {
-            changed.insert(rel_path.clone(), false);
+            changed.insert(rel_path.clone());
         }
     }
     if changed.is_empty() {
@@ -505,18 +596,18 @@ fn op_capture_incremental(req: &Value) -> Result<Value, String> {
     let mut flat = parent_flat;
     let mut expected: HashMap<String, FlatEntry> = HashMap::new();
     let mut new_blob_bytes = 0u64;
-    for rel_path in changed.keys() {
+    for rel_path in changed.iter() {
         let abs = capture_root.join(rel_path);
-        match hash_path(&store, &abs, max_file_bytes) {
-            Ok((mode, oid, new_bytes)) => {
+        match hash_path(&store, &abs, max_file_bytes)? {
+            Some((mode, oid, new_bytes)) => {
                 new_blob_bytes += new_bytes;
                 flat.insert(rel_path.clone(), (mode, oid));
                 expected.insert(rel_path.clone(), (mode, oid));
             }
-            Err(message) if message == "missing" || message == "directory" => {
+            None => {
+                // The path is gone or is a gitlink: drop it from the tree.
                 flat.remove(rel_path);
             }
-            Err(message) => return Err(message),
         }
     }
     if new_blob_bytes > max_new_blob_bytes {
@@ -547,18 +638,16 @@ fn op_capture_incremental(req: &Value) -> Result<Value, String> {
     }))
 }
 
-fn oid_ext_str(req: &Value, key: &str) -> Result<String, String> {
-    s(req, key)
-}
-
 // --------------------------------------------------------- materialize -----
 
-/// Resolve a state commit and its flat entry map.
-fn state_entries(repo: &Repository, state_commit: &str) -> Result<(Oid, HashMap<String, FlatEntry>), String> {
+/// The flat entry map of a state commit.
+fn state_entries(
+    repo: &Repository,
+    state_commit: &str,
+) -> Result<HashMap<String, FlatEntry>, String> {
     let commit = oid_ext(repo, state_commit)?;
     let tree = resolve_tree(repo, commit)?;
-    let flat = collect_tree_map(repo, tree)?;
-    Ok((tree, flat))
+    collect_tree_map(repo, tree)
 }
 
 /// Every parent directory of the desired paths.
@@ -569,7 +658,11 @@ fn desired_directories(desired: &HashSet<String>) -> HashSet<String> {
         parts.pop();
         let mut current = String::new();
         for part in parts {
-            current = if current.is_empty() { part.to_string() } else { format!("{current}/{part}") };
+            current = if current.is_empty() {
+                part.to_string()
+            } else {
+                format!("{current}/{part}")
+            };
             directories.insert(current.clone());
         }
     }
@@ -594,7 +687,11 @@ fn remove_stale_paths(
             Err(_) => continue,
         };
         let name = entry.file_name().to_string_lossy().into_owned();
-        let rel_path = if rel_dir.is_empty() { name.clone() } else { format!("{rel_dir}/{name}") };
+        let rel_path = if rel_dir.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel_dir}/{name}")
+        };
         if rel_dir.is_empty() && preserve.contains(&name) {
             continue;
         }
@@ -617,13 +714,21 @@ fn remove_stale_paths(
 }
 
 /// Write one state entry onto disk.
-fn write_entry_file(repo: &Repository, target: &Path, rel_path: &str, mode: u32, oid: Oid) -> Result<(), String> {
+fn write_entry_file(
+    repo: &Repository,
+    target: &Path,
+    rel_path: &str,
+    mode: u32,
+    oid: Oid,
+) -> Result<(), String> {
     let full = target.join(rel_path);
     if let Some(parent) = full.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
     }
     if mode == 0o120000 {
-        let blob = repo.find_blob(oid).map_err(|e| format!("missing blob {oid}: {e}"))?;
+        let blob = repo
+            .find_blob(oid)
+            .map_err(|e| format!("missing blob {oid}: {e}"))?;
         let target_text = String::from_utf8_lossy(blob.content()).into_owned();
         let current = read_link_target(&full);
         if current.as_deref() != Some(target_text.as_str()) {
@@ -633,16 +738,19 @@ fn write_entry_file(repo: &Repository, target: &Path, rel_path: &str, mode: u32,
         }
         return Ok(());
     }
-    let blob = repo.find_blob(oid).map_err(|e| format!("missing blob {oid} while materializing {rel_path}: {e}"))?;
-    if let Ok(metadata) = fs::symlink_metadata(&full) {
-        if !metadata.file_type().is_file() {
-            fs::remove_dir_all(&full).ok();
-            fs::remove_file(&full).ok();
-        }
+    let blob = repo
+        .find_blob(oid)
+        .map_err(|e| format!("missing blob {oid} while materializing {rel_path}: {e}"))?;
+    if let Ok(metadata) = fs::symlink_metadata(&full)
+        && !metadata.file_type().is_file()
+    {
+        fs::remove_dir_all(&full).ok();
+        fs::remove_file(&full).ok();
     }
     let file_mode = if mode == 0o100755 { 0o755 } else { 0o644 };
     fs::write(&full, blob.content()).map_err(|e| format!("write failed: {e}"))?;
-    fs::set_permissions(&full, fs::Permissions::from_mode(file_mode)).map_err(|e| format!("chmod failed: {e}"))?;
+    fs::set_permissions(&full, fs::Permissions::from_mode(file_mode))
+        .map_err(|e| format!("chmod failed: {e}"))?;
     Ok(())
 }
 
@@ -651,7 +759,9 @@ fn read_link_target(path: &Path) -> Option<String> {
     if !metadata.file_type().is_symlink() {
         return None;
     }
-    fs::read_link(path).ok().map(|p| p.to_string_lossy().into_owned())
+    fs::read_link(path)
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Materialize a captured state into a directory.
@@ -661,7 +771,7 @@ fn materialize_state(
     target: &Path,
     preserve_top: &[String],
 ) -> Result<(), String> {
-    let (_, flat) = state_entries(repo, state_commit)?;
+    let flat = state_entries(repo, state_commit)?;
     fs::create_dir_all(target).map_err(|e| e.to_string())?;
     let desired: HashSet<String> = flat.keys().cloned().collect();
     let dirs = desired_directories(&desired);
@@ -678,7 +788,9 @@ fn materialize_state(
 /// oid when a commit was written.
 fn commit_index_if_changed(repo: &Repository, message: &str) -> Result<Option<Oid>, String> {
     let mut index = repo.index().map_err(|e| e.to_string())?;
-    let tree = index.write_tree_to(repo).map_err(|e| format!("write-tree failed: {e}"))?;
+    let tree = index
+        .write_tree_to(repo)
+        .map_err(|e| format!("write-tree failed: {e}"))?;
     let head_tree = match repo.head() {
         Ok(head) => match head.peel_to_tree() {
             Ok(tree) => Some(tree.id()),
@@ -701,16 +813,25 @@ fn commit_index_if_changed(repo: &Repository, message: &str) -> Result<Option<Oi
     let signature = Signature::now("termina", "dev@termina.local").map_err(|e| e.to_string())?;
     let tree_obj = repo.find_tree(tree).map_err(|e| e.to_string())?;
     let oid = repo
-        .commit(Some("HEAD"), &signature, &signature, message, &tree_obj, &parent_refs)
+        .commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            message,
+            &tree_obj,
+            &parent_refs,
+        )
         .map_err(|e| format!("commit failed: {e}"))?;
     Ok(Some(oid))
 }
 
-/// Stage the workdir, then drop entries not in the state (deletions and
-/// runtime dirs). Mirrors `git add -A -- . :(exclude)<runtime>`.
+/// Stage the working tree, then drop entries not in the state. Mirrors
+/// `git add -A -- . :(exclude)<runtime>`.
 fn stage_workdir(repo: &Repository, state_flat: &HashMap<String, FlatEntry>) -> Result<(), String> {
     let mut index = repo.index().map_err(|e| e.to_string())?;
-    index.add_all(&[] as &[&str], IndexAddOption::DEFAULT, None).map_err(|e| format!("git add failed: {e}"))?;
+    index
+        .add_all(&[] as &[&str], IndexAddOption::DEFAULT, None)
+        .map_err(|e| format!("git add failed: {e}"))?;
     // Drop every staged entry the state does not contain. The preserved
     // runtime paths stay on disk and stay untracked; entries deleted from
     // disk drop out of the index here too (the stage step cannot remove
@@ -724,7 +845,9 @@ fn stage_workdir(repo: &Repository, state_flat: &HashMap<String, FlatEntry>) -> 
         .collect();
     index.clear().map_err(|e| e.to_string())?;
     for entry in kept {
-        index.add(&entry).map_err(|e| format!("index rebuild failed: {e}"))?;
+        index
+            .add(&entry)
+            .map_err(|e| format!("index rebuild failed: {e}"))?;
     }
     index.write().map_err(|e| e.to_string())
 }
@@ -736,14 +859,19 @@ fn op_apply_state(req: &Value) -> Result<Value, String> {
     let preserve_top: Vec<String> = req
         .get("preserveTopLevel")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     let repo = open_store(&store_dir, req)?;
-    let (_, flat) = state_entries(&repo, &state_commit)?;
+    let flat = state_entries(&repo, &state_commit)?;
     materialize_state(&repo, &state_commit, &target, &preserve_top)?;
 
-    let candidate = Repository::open(&target).map_err(|e| format!("open candidate repository failed: {e}"))?;
+    let candidate =
+        Repository::open(&target).map_err(|e| format!("open candidate repository failed: {e}"))?;
     stage_workdir(&candidate, &flat)?;
     commit_index_if_changed(&candidate, "termina state")?;
     Ok(json!({}))
@@ -758,38 +886,51 @@ fn op_template(req: &Value) -> Result<Value, String> {
 
     let store = open_store(&store_dir, req)?;
     // An independent local repository with read-only object access.
-    let template = Repository::init_opts(&target, &RepositoryInitOptions::new()).map_err(|e| e.to_string())?;
-    let alternates = target.join(".git").join("objects").join("info").join("alternates");
+    let template =
+        Repository::init_opts(&target, &RepositoryInitOptions::new()).map_err(|e| e.to_string())?;
+    let alternates = target
+        .join(".git")
+        .join("objects")
+        .join("info")
+        .join("alternates");
     if let Some(parent) = alternates.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let store_objects = store_dir.join("git").join("objects");
-    fs::write(&alternates, format!("{}\n{}\n", store_objects.display(), source_git_dir.join("objects").display()))
-        .map_err(|e| e.to_string())?;
+    fs::write(
+        &alternates,
+        format!(
+            "{}\n{}\n",
+            store_objects.display(),
+            source_git_dir.join("objects").display()
+        ),
+    )
+    .map_err(|e| e.to_string())?;
 
     materialize_state(&store, &state_commit, &target, &[])?;
 
     let mut index = template.index().map_err(|e| e.to_string())?;
-    index.add_all(&[] as &[&str], IndexAddOption::DEFAULT, None).map_err(|e| format!("git add failed: {e}"))?;
+    index
+        .add_all(&[] as &[&str], IndexAddOption::DEFAULT, None)
+        .map_err(|e| format!("git add failed: {e}"))?;
     index.write().map_err(|e| e.to_string())?;
-    let commit = match commit_index_if_changed(&template, "termina base")? {
-        Some(commit) => commit,
-        None => {
-            // The state matches an empty tree; write an empty commit.
-            let tree = index.write_tree_to(&template).map_err(|e| e.to_string())?;
-            commit_tree(&template, tree, None, "termina base")?
-        }
-    };
+    let commit = commit_index_if_changed(&template, "termina base")?
+        .ok_or("template commit was not written")?;
 
     // Pull the store objects into a local pack, then drop the store
     // alternate. The template then needs only the read-only source objects.
     let mut packbuilder = template.packbuilder().map_err(|e| e.to_string())?;
-    packbuilder.insert_commit(commit).map_err(|e| e.to_string())?;
+    packbuilder
+        .insert_commit(commit)
+        .map_err(|e| e.to_string())?;
     let pack_dir = template.path().join("objects").join("pack");
     fs::create_dir_all(&pack_dir).map_err(|e| e.to_string())?;
     // The packbuilder writes the pack and index into the pack directory.
-    packbuilder.write(&pack_dir, 0o644).map_err(|e| format!("repack failed: {e}"))?;
-    fs::write(&alternates, format!("{}\n", source_objects_dir.display())).map_err(|e| e.to_string())?;
+    packbuilder
+        .write(&pack_dir, 0o644)
+        .map_err(|e| format!("repack failed: {e}"))?;
+    fs::write(&alternates, format!("{}\n", source_objects_dir.display()))
+        .map_err(|e| e.to_string())?;
 
     Ok(json!({}))
 }
@@ -820,23 +961,44 @@ fn op_trust_hashes(req: &Value) -> Result<Value, String> {
     let mut files = 0usize;
     let mut bytes = 0u64;
 
-    for name in ["settings.json", "models.json", "models-store.json", "prompts", "skills", "themes", "extensions"] {
+    for name in [
+        "settings.json",
+        "models.json",
+        "models-store.json",
+        "prompts",
+        "skills",
+        "themes",
+        "extensions",
+    ] {
         let full = agent_dir.join(name);
         let metadata = match fs::symlink_metadata(&full) {
             Ok(metadata) => metadata,
             Err(_) => continue, // absent
         };
         if metadata.file_type().is_dir() {
-            walk_hashes(&full, &format!("agent/{name}"), &mut out, &mut files, &mut bytes);
-        } else if metadata.file_type().is_file() {
-            if let Some((key, hash)) = hash_file(&full, &format!("agent/{name}"), &mut files, &mut bytes) {
-                out.insert(key, Value::String(hash));
-            }
+            walk_hashes(
+                &full,
+                &format!("agent/{name}"),
+                &mut out,
+                &mut files,
+                &mut bytes,
+            );
+        } else if metadata.file_type().is_file()
+            && let Some((key, hash)) =
+                hash_file(&full, &format!("agent/{name}"), &mut files, &mut bytes)
+        {
+            out.insert(key, Value::String(hash));
         }
     }
     if let Some(root) = project_root {
         for rel in [".pi", ".agents/skills"] {
-            walk_hashes(&root.join(rel), &format!("project/{rel}"), &mut out, &mut files, &mut bytes);
+            walk_hashes(
+                &root.join(rel),
+                &format!("project/{rel}"),
+                &mut out,
+                &mut files,
+                &mut bytes,
+            );
         }
     }
     Ok(json!({ "state": Value::Object(out) }))
@@ -866,10 +1028,10 @@ fn walk_hashes(
         let key = format!("{prefix}/{name}");
         if metadata.file_type().is_dir() {
             walk_hashes(&full, &key, out, files, bytes);
-        } else if metadata.file_type().is_file() {
-            if let Some((key, hash)) = hash_file(&full, &key, files, bytes) {
-                out.insert(key, Value::String(hash));
-            }
+        } else if metadata.file_type().is_file()
+            && let Some((key, hash)) = hash_file(&full, &key, files, bytes)
+        {
+            out.insert(key, Value::String(hash));
         }
     }
 }
@@ -920,11 +1082,20 @@ fn main() {
             Ok(value) => value,
             Err(_) => continue,
         };
-        let op = request.get("op").and_then(Value::as_str).unwrap_or("").to_string();
-        let request_id = request.get("requestId").and_then(Value::as_str).unwrap_or("").to_string();
+        let op = request
+            .get("op")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let request_id = request
+            .get("requestId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let response = match dispatch(&op, &request) {
             Ok(payload) => {
-                let mut response = json!({ "op": format!("{op}-result"), "requestId": request_id, "ok": true });
+                let mut response =
+                    json!({ "op": format!("{op}-result"), "requestId": request_id, "ok": true });
                 if let Some(obj) = payload.as_object() {
                     for (key, value) in obj {
                         response[key] = value.clone();
