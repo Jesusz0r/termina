@@ -212,10 +212,11 @@ The renderer never talks to the agent. It only renders what main pushes.
   `TERMINA_CORE_BIN` overrides the binary path at runtime. End users never
   need cargo: the packaged bundle ships the binary, and `scripts/install.sh`
   downloads it (`TERMINA_SKIP_CORE_BUILD=1` skips the cargo build).
-- Signed macOS builds need the Apple Distribution identity. Locally
-  `CSC_NAME="Apple Distribution"` selects it from the keychain; CI uses
-  the `CSC_LINK` p12 secret. Notarization needs `APPLE_ID`,
-  `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID`.
+- Signed macOS builds need the Developer ID Application identity (the
+  Apple Distribution certificate is not accepted by the notary service).
+  Locally `CSC_NAME="Developer ID Application"` selects it from the
+  keychain; CI uses the `CSC_LINK` p12 secret. Notarization needs
+  `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID`.
 - The packaged bundle ships its own node (pi's engine floor is 22.19).
   `cleanEnv` prepends `<resourcesPath>/node/bin` to PATH so pi's cli.js
   shebang and pi's own child processes resolve it. Every dependency is

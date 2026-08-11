@@ -88,7 +88,7 @@ the raw core binaries to every release tag.
 - The icon comes from `build/icon.svg`; regenerate the icns with
   `scripts/make-icon.sh`.
 - Signed macOS builds select the identity with `CSC_NAME`:
-  `CSC_NAME="Apple Distribution" npm run dist:mac`.
+  `CSC_NAME="Developer ID Application" npm run dist:mac`.
 - Notarization (removes the Gatekeeper warning): set `APPLE_ID`,
   `APPLE_APP_SPECIFIC_PASSWORD` (an app-specific password from
   https://appleid.apple.com), and `APPLE_TEAM_ID` (UWK965RX2N), then
