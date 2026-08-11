@@ -207,6 +207,12 @@ body {
   letter-spacing: 0;
   text-transform: none;
 }
+
+.explorer-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
   /* same size as the terminal/editor tab bars; left padding clears the
      inset traffic lights, which now sit over the explorer column */
   min-height: 34px;
