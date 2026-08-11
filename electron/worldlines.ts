@@ -103,7 +103,7 @@ interface ComparisonState {
   /** The model and thinking level of the source run. */
   model: string | null;
   thinkingLevel: string | null;
-  /** When the pair was created (ms epoch). */
+  /** When the pair started (ms epoch). */
   createdAt: number;
   candidates: Map<"A" | "B", CandidateState>;
   phase: "creating" | "running" | "error";
@@ -721,7 +721,7 @@ export class WorldlineManager {
       if (kind.startsWith("D")) set(path, "deleted");
       else if (kind.startsWith("A")) set(path, "created");
       else if (kind.startsWith("R")) {
-        // Rename: the new name is created, the old one gone.
+        // Rename: the new name replaces the old one.
         const [oldPath, newPath] = path.split("\t");
         if (newPath) {
           set(newPath, "created");

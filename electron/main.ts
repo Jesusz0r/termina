@@ -285,7 +285,7 @@ export default function (pi: ExtensionAPI): void {
     }
   });
   pi.on("tool_execution_end", async (event) => {
-    // The tool finished: its disk effects are done (the watcher confirms
+    // The tool finished: its disk effects landed (the watcher confirms
     // them); this is the moment-capture scheduling signal.
     log({ t: "tool_end", toolCallId: event.toolCallId, isError: !!event.isError });
   });
@@ -1055,7 +1055,7 @@ class PiEditorApp {
 
   /**
    * Create the worldline manager. Depends on app paths that exist only
-   * after the window is created.
+   * after the app creates the window.
    */
   private initWorldlines(): void {
     if (this.worldlines) return;
@@ -2597,7 +2597,7 @@ class PiEditorApp {
     if (changed) this.sendPlan(inst);
   }
 
-  /** The run ended: a task is done when every path it mentions was touched. */
+  /** The run ended: a task is done when the run touched every path it mentions. */
   private finalizePlan(inst: PiTerminalInstance): void {
     if (inst.plan.length === 0) return;
     for (const task of inst.plan) {
@@ -3224,8 +3224,8 @@ class PiEditorApp {
         inst.touched.add(this.rel(path));
         this.updatePlanProgress(inst, path);
         this.send("tool:target", { path, relPath: this.rel(path), toolName });
-        // Session Timeline: snapshot the file as of this tool call. The event
-        // object is created first so a delayed content fill can find it later.
+        // Session Timeline: snapshot the file as of this tool call. Create
+        // the event object first so a delayed content fill can find it later.
         // The tool call and entry ids make the dot a forkable moment.
         const ev: Omit<TimelineEvent, "seq" | "ts"> = {
           t: "tool",
@@ -3256,8 +3256,8 @@ class PiEditorApp {
    * - edit/apply_patch: apply the edit regions to the previously known content
    * - write/create_file: the watcher cache (the change event usually lands
    *   around the same poll; if not, a delayed fill attaches it later)
-   * The event object is passed so the delayed fill can locate it by reference
-   * even if newer events arrive in between.
+   * The caller passes the event object so the delayed fill can locate it by
+   * reference even if newer events arrive in between.
    */
   // ---------------------------------------------------- run boundaries ----
 
@@ -4284,7 +4284,7 @@ class PiEditorApp {
         if (oldest !== undefined) this.lastWatchChange.delete(oldest);
       }
       // A change with no busy agent terminal belongs to the user — unless a
-      // verify run is in flight: test outputs (snapshots, coverage,
+      // verify run is running: test outputs (snapshots, coverage,
       // fixtures) are automated writes, not user edits. The agent receives
       // user edits on its next turn (see the edits-<id>.md context file).
       const busy = workspaceTerminals().filter((t) => t.busy);
@@ -4577,7 +4577,7 @@ class PiEditorApp {
       if (!inst) return { ok: false, error: "terminal not found" };
       const ev = inst.timeline.find((e) => e.seq === seq);
       // Expected-version checks: the dot must exist with its state and
-      // entry, and the state must not have been evicted.
+      // entry, and the state must still exist.
       if (!ev) return { ok: false, error: "timeline moment not found" };
       if (!ev.stateId || !ev.entryId || ev.evicted) {
         return { ok: false, error: ev.evicted ? "this moment's source state was evicted" : "this moment is not forkable" };

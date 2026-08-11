@@ -77,13 +77,13 @@ export class ProjectWatcher {
   onChange: (change: FileChange) => void = () => {};
   /** Fired with just the path (used for the modified-files list). */
   onFileTouched: (path: string, status: "created" | "modified") => void = () => {};
-  /** Fired when a previously-seen file disappears (so tabs/list entries can be cleaned up). */
+  /** Fired when a previously-seen file disappears (tabs and list entries clean up). */
   onFileDeleted: (path: string) => void = () => {};
 
   /**
    * @param root watched directory
-   * @param canonicalize optional path normalizer (e.g. realpath) applied to
-   *        cache keys, so lookups with canonical paths always hit.
+   * @param canonicalize optional path normalizer (for example realpath)
+   *        applied to cache keys, so lookups with canonical paths always hit.
    */
   constructor(
     private root: string,

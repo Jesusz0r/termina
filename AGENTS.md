@@ -73,7 +73,10 @@ Examples:
 ## Architecture notes
 
 - The terminal stays the source of truth. The app never replaces the TUI.
-- The bridge extension lives in the project `.pi/extensions` folder (termina-bridge.ts).
+- The bridge extension is app-owned: the app writes it once to the app
+  user-data directory and passes it to pi with the CLI extension option.
+  It never lives in the project; the app removes a legacy generated copy
+  from a project that carries the Termina marker.
 - A folder switch resets every per-terminal state: timeline, baselines,
   snapshots, modified list, and verify state.
 
@@ -90,7 +93,9 @@ Use these terms exactly. Do not invent synonyms.
 - **Snapshot**: the content of a file at one moment of a run. The timeline
   uses snapshots.
 - **Dot**: one point on the timeline strip.
-- **Worker**: a shell terminal that runs the tests for Verify & Iterate.
+- **Worker**: a pi terminal that runs one dispatched plan task for the
+  owner. Verify & Iterate runs tests in a background process, not in a
+  worker terminal.
 - **Modified list**: the panel that shows the files a run changed.
 - **Fork point**: one visible timeline event coupled to a Pi session entry and
   an immutable source state.
@@ -142,7 +147,8 @@ Use these terms exactly. Do not invent synonyms.
 
 1. The agent runs a tool in the pi TUI.
 2. The bridge extension logs the event to a sidecar file.
-3. The sidecar tailer in main reads the file every 150 ms.
+3. The sidecar tailer in main reads the file every 300 ms (plus an
+   immediate event-driven tail on writes).
 4. Main updates its state and sends IPC events to the renderer.
 5. The renderer updates the UI.
 

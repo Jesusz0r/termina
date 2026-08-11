@@ -98,7 +98,7 @@ export type VerifyState = "untested" | "running" | "pass" | "fail" | "timeout" |
 /** Verify & Iterate: the last test run attached to a terminal. */
 export interface VerifyInfo {
   state: VerifyState;
-  /** Human label of the detected test command, e.g. "npm run test". */
+  /** Human label of the detected test command, for example "npm run test". */
   command: string | null;
   /** One-line result summary for the badge. */
   summary: string | null;
@@ -281,7 +281,7 @@ export interface WorldlineSummary {
   model: string | null;
   /** The thinking level of the source run. */
   thinkingLevel: string | null;
-  /** When the comparison pair was created (ms epoch). */
+  /** When the comparison pair started (ms epoch). */
   createdAt: number;
 }
 

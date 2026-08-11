@@ -73,9 +73,6 @@ export interface EvidenceDeps {
   sourceFilesOf(root: string): Promise<Array<{ relPath: string; content: string }>>;
 }
 
-/** The four fixed profiles (WORLDLINES §6.9). */
-export const PROFILES: ProfileName[] = ["fewer-dependencies", "preserve-api", "simpler-implementation", "performance-first"];
-
 /** The package declaration sections the dependency adapter measures. */
 const DEP_SECTIONS = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] as const;
 

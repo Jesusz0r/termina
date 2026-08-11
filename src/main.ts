@@ -266,7 +266,7 @@ function createPaneShell(instanceId: string): Pane {
   return pane;
 }
 
-/** A terminal tab that shows a message instead of a live pty (e.g. pi missing). */
+/** A terminal tab that shows a message instead of a live pty (pi missing). */
 let errorSeq = 0;
 function createErrorPane(message: string): void {
   const id = `term-error-${++errorSeq}`;
@@ -383,8 +383,8 @@ function renderTimeline(): void {
     void window.pi.getTimeline(pane.instanceId).then((events) => {
       const p = panes.get(pane.instanceId);
       if (!p) return;
-      // Events may have been pushed locally while the fetch was in flight —
-      // merge them in by seq (monotonic per terminal) instead of losing them.
+      // Events pushed locally while the fetch ran must not get lost:
+      // merge them by seq (monotonic per terminal) instead of dropping them.
       const maxSeq = events.length ? Math.max(...events.map((e) => e.seq)) : 0;
       p.timeline = events.concat(p.timeline.filter((e) => e.seq > maxSeq)).slice(-MAX_TIMELINE_EVENTS);
       if (activeId === pane.instanceId) timelineView.setEvents(p.timeline);
@@ -528,7 +528,7 @@ function renderPlan(pane: Pane): void {
   }
   planPanel.classList.toggle("collapsed", pane.plan.length === 0);
   // Dispatch is possible when the plan has tasks. The button label shows
-  // whether a dispatch is in flight (main re-sends the plan on settle).
+  // whether a dispatch is running (main re-sends the plan on settle).
   btnDispatch.hidden = pane.plan.length === 0;
 }
 
@@ -567,7 +567,7 @@ function renderVerify(pane: Pane): void {
   verifyBadge.className = `verify-badge state-${v.state}`;
   verifyBadge.replaceChildren();
   if (v.state === "running") {
-    // Loader: a spinner and a label show that the run is in flight.
+    // Loader: a spinner and a label show that the run is running.
     const spin = document.createElement("span");
     spin.className = "verify-spinner";
     verifyBadge.appendChild(spin);
@@ -583,7 +583,6 @@ function renderModified(pane: Pane): void {
   modifiedCount.textContent = pane.modified.length ? `(${pane.modified.length})` : "";
   modifiedList.replaceChildren();
   for (const f of pane.modified) {
-    void pane;
     const li = document.createElement("li");
     const badge = document.createElement("span");
     badge.className = `status-badge ${f.status}`;
@@ -1134,7 +1133,7 @@ async function boot(): Promise<void> {
   void refreshTestCommand();
 
   const instances = await window.pi.getInstances();
-  // No terminals could be created (e.g. pi is missing) — explain instead of
+  // No terminals could be created (pi is missing) — explain instead of
   // leaving an empty window behind the splash.
   if (instances.length === 0) {
     const status = await window.pi.getPiStatus();
@@ -1161,8 +1160,8 @@ async function boot(): Promise<void> {
     projectCwd = instances[0].cwd;
     explorer.setProject(instances[0].cwd);
   }
-  // The project may only be known after the instance list arrives — re-query
-  // Query the test command again. The project is now known (the boot query ran too early).
+  // The project may only be known after the instance list arrives —
+  // re-query the test command now that the project is known.
   void refreshTestCommand();
 
   // Worldlines: rebuild the panel from the live list (push events keep it

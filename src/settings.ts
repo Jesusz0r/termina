@@ -48,7 +48,7 @@ export function emptyShortcuts(): ShortcutMap {
   return result;
 }
 
-export function formatShortcut(value: string): string {
+function formatShortcut(value: string): string {
   if (!value) return "Not set";
   const mac = navigator.platform.toUpperCase().includes("MAC");
   const labels: Record<string, string> = mac

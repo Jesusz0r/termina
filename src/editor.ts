@@ -350,7 +350,7 @@ export class EditorManager {
     return this.userDirty.size > 0;
   }
 
-  /** Close a tab if it is open (e.g. the file was deleted on disk). */
+  /** Close a tab if it is open (the file was deleted on disk). */
   closeIfOpen(path: string): void {
     if (this.tabs.has(path)) this.closeTab(path);
   }

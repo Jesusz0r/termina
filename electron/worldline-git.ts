@@ -25,9 +25,6 @@ const APP_EMAIL = "dev@termina.local";
 const MAX_GIT_STDOUT_BYTES = 64 * 1024 * 1024;
 const MAX_GIT_STDERR_BYTES = 4 * 1024 * 1024;
 
-/** The empty tree oid (unborn HEAD base). */
-export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-
 /** Default capture budgets (WORLDLINES §9). */
 export const BUDGETS = {
   maxPaths: 100_000,
@@ -254,7 +251,7 @@ export class SnapshotStore {
   readonly dir: string;
   /** The bare Git directory of the store. */
   readonly gitDir: string;
-  /** The canonical source Git root this store was created for. */
+  /** The canonical source Git root this store serves. */
   readonly sourceRoot: string;
   /** The canonical common Git directory of the source repository. */
   readonly sourceGitDir: string;
