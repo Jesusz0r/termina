@@ -4,3 +4,5 @@ dist-renderer/
 *.log
 .DS_Store
 core/target/
+resources/
+release/

@@ -1,0 +1,31 @@
+appId: dev.termina.app
+productName: Termina
+directories:
+  output: release
+files:
+  - dist-electron/**/*
+  - dist-renderer/**/*
+# pi and node-pty load native code and spawn real files: keep every
+# dependency outside the asar archive. Electron redirects app.asar paths
+# to app.asar.unpacked for require and fs automatically.
+asarUnpack:
+  - node_modules/**/*
+extraResources:
+  - from: resources/termina-core
+    to: termina-core
+  - from: resources/node
+    to: node
+mac:
+  target:
+    - dmg
+    - zip
+  category: public.app-category.developer-tools
+  identity: null
+win:
+  target: nsis
+linux:
+  target: AppImage
+  category: Development
+npmRebuild: false
+electronLanguages:
+  - en

@@ -13,11 +13,14 @@ import { join } from "node:path";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
-/** The binary path: env override, the bundle dir, then the repo targets. */
+/** The binary path: env override, the packaged resources, the bundle
+ *  dir, then the repo targets. */
 function resolveCoreBin(): string {
   const override = process.env.TERMINA_CORE_BIN;
   if (override) return override;
+  const resources = typeof process.resourcesPath === "string" ? process.resourcesPath : null;
   const candidates = [
+    ...(resources ? [join(resources, "termina-core")] : []),
     join(__dirname, "termina-core"),
     join(process.cwd(), "core", "target", "release", "termina-core"),
     join(process.cwd(), "core", "target", "debug", "termina-core"),

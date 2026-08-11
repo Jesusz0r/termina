@@ -54,12 +54,32 @@ directory, separate from Pi `/settings` and project files.
 
 ## Getting started
 
+## Install
+
+**Packaged app (recommended):** download the `.dmg` from
+https://github.com/Jesusz0r/termina/releases. The bundle ships the app,
+the Rust core, the pinned pi package, and its own node runtime. Nothing
+else needs installing; run `/login` in the terminal to configure your
+model provider.
+
+**From source (script):** needs node >= 22.19 and npm, no cargo and no
+git (the Rust core downloads as a prebuilt binary):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Jesusz0r/termina/master/scripts/install.sh | sh
+TERMINA_SKIP_CORE_BUILD=1 npm run dev
+```
+
+**Contributors:** node + npm + cargo (the core builds from `core/`):
+
 ```bash
 npm install          # includes @lydell/node-pty (native, prebuilt for Electron)
 npm run dev          # builds the Rust core + main + preload, starts Vite, launches Electron
 ```
 
-Builds need the Rust toolchain (cargo) for the snapshot core in `core/`.
+Packaged builds: `npm run dist` (electron-builder; `dist:mac`, `dist:dir`).
+The CI workflow builds macOS arm64/x64 and Linux x64 bundles and attaches
+the raw core binaries to every release tag.
 
 - `npx tsc --noEmit` — typecheck
 - `npm run build` — production build for Electron and the renderer

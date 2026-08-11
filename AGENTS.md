@@ -151,6 +151,15 @@ Use these terms exactly. Do not invent synonyms.
 - `src/components/explorer.ts`: the file explorer.
 - `src/components/modals.ts`: dialogs and toasts.
 - `scripts/*.mjs`: the e2e test suites, the launcher, and the build steps.
+- `scripts/prepare-resources.mjs`: stages the bundled node runtime and the
+  core binary for electron-builder.
+- `scripts/install.sh`: source install for users without cargo; downloads
+  the prebuilt core from GitHub Releases.
+- `electron-builder.yml`: the packaged-app config (asar unpack, extra
+  resources).
+- `.github/workflows/release.yml`: per-platform release builds (macOS
+  arm64/x64, Linux x64) that publish the app bundles and the raw core
+  binaries.
 
 ## Event flow
 
@@ -196,7 +205,14 @@ The renderer never talks to the agent. It only renders what main pushes.
   Bundling it breaks with a dynamic-require error.
 - The Rust core needs cargo on the build machine. `scripts/build-core.mjs`
   builds it in release mode and copies the binary next to the main bundle;
-  `TERMINA_CORE_BIN` overrides the binary path at runtime.
+  `TERMINA_CORE_BIN` overrides the binary path at runtime. End users never
+  need cargo: the packaged bundle ships the binary, and `scripts/install.sh`
+  downloads it (`TERMINA_SKIP_CORE_BUILD=1` skips the cargo build).
+- The packaged bundle ships its own node (pi's engine floor is 22.19).
+  `cleanEnv` prepends `<resourcesPath>/node/bin` to PATH so pi's cli.js
+  shebang and pi's own child processes resolve it. Every dependency is
+  unpacked from the asar (`node_modules/**`); pi's cli.js is spawned from
+  the unpacked path, never from the archive.
 - Paths on macOS are canonical: `/tmp` is `/private/tmp`. The watcher
   canonicalizes its cache keys; lookups must use canonical paths too.
 - The events directory is `app.getPath("temp")/termina-events`

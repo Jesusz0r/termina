@@ -1,0 +1,52 @@
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            artifact: mac-arm64
+            core-asset: termina-core-darwin-arm64
+          - os: macos-13
+            artifact: mac-x64
+            core-asset: termina-core-darwin-x64
+          - os: ubuntu-22.04
+            artifact: linux-x64
+            core-asset: termina-core-linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npx tsc --noEmit
+      # Builds the Rust core, main + preload, and the renderer.
+      - run: npm run build
+      # Stages the bundled node runtime and the core binary.
+      - run: node scripts/prepare-resources.mjs
+      - name: Package
+        run: npx electron-builder ${{ startsWith(github.ref, 'refs/tags/') && '--publish always' || '--publish never' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: termina-${{ matrix.artifact }}
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.AppImage
+      - name: Attach the raw core binary
+        if: startsWith(github.ref, 'refs/tags/')
+        run: gh release upload "${GITHUB_REF_NAME}" "core/target/release/termina-core" --clobber --rename "${{ matrix.core-asset }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

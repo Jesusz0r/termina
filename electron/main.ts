@@ -391,6 +391,12 @@ function cleanEnv(): Record<string, string | undefined> {
   for (const [key, value] of Object.entries(process.env)) {
     if (!AGENT_ENV_BLOCKLIST.has(key)) env[key] = value;
   }
+  // The packaged bundle ships its own node for pi. Put it first on PATH so
+  // the cli.js shebang and pi's own child processes resolve it.
+  const bundledNode = join(process.resourcesPath, "node", "bin");
+  if (existsSync(bundledNode)) {
+    env.PATH = `${bundledNode}${env.PATH ? `:${env.PATH}` : ""}`;
+  }
   return env;
 }
 
@@ -1960,8 +1966,23 @@ class PiEditorApp {
     // import.meta.resolve, not require.resolve.
     try {
       const entry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
-      return join(dirname(entry), "cli.js");
+      // The packaged bundle unpacks this package: spawn the real files,
+      // not the asar archive (node-pty cannot open asar paths).
+      const real = entry.includes("app.asar") ? entry.replace("app.asar", "app.asar.unpacked") : entry;
+      return join(dirname(real), "cli.js");
     } catch (err) {
+      // Packaged: the ESM resolver cannot read inside app.asar, but the
+      // unpacked copy is a real path.
+      const unpacked = join(
+        process.resourcesPath,
+        "app.asar.unpacked",
+        "node_modules",
+        "@earendil-works",
+        "pi-coding-agent",
+        "dist",
+        "cli.js",
+      );
+      if (existsSync(unpacked)) return unpacked;
       console.warn(`[main] pinned pi package not found: ${(err as Error).message}`);
       return "pi";
     }
