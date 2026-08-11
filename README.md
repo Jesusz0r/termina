@@ -85,18 +85,11 @@ the raw core binaries to every release tag.
 
 ## Releasing
 
-- The icon comes from `build/icon.svg`; regenerate the icns with
-  `scripts/make-icon.sh`.
-- Signed macOS builds select the identity with `CSC_NAME`:
-  `CSC_NAME="Developer ID Application" npm run dist:mac`.
-- Notarization (removes the Gatekeeper warning): set `APPLE_ID`,
-  `APPLE_APP_SPECIFIC_PASSWORD` (an app-specific password from
-  https://appleid.apple.com), and `APPLE_TEAM_ID` (UWK965RX2N), then
-  build with `-c.mac.notarize=true`.
-- CI signs and notarizes when these GitHub secrets exist: `CSC_LINK`
-  (base64 of the exported `.p12`), `CSC_KEY_PASSWORD`, `CSC_NAME`,
-  `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`. Without
-  them the CI builds stay unsigned.
+See **`RELEASING.md`** — the full runbook: certificate requirements,
+CI secrets, the release checklist, and the failures to avoid. The short
+version: bump `package.json` version, then `git tag v<version> && git
+push origin v<version>`. The workflow signs and notarizes macOS builds
+automatically when the Apple secrets exist.
 
 - `npx tsc --noEmit` — typecheck
 - `npm run build` — production build for Electron and the renderer

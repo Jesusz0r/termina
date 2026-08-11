@@ -247,6 +247,9 @@ The renderer never talks to the agent. It only renders what main pushes.
 
 - IPC channels use the `area:action` pattern: `verify:run`, `timeline:get`,
   `file:open`, `review:baseline`.
+- Release tags are `v<version>`; keep the package.json version in
+  lockstep with the tag (electron-builder publishes under the
+  package.json version). See `RELEASING.md`.
 - Terminal ids use the `term-N` pattern.
 - Commits use the identity `termina <dev@termina.local>`.
 - Test suites live in `scripts/` and end with `-test.mjs`.
