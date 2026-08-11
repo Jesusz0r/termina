@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+base64 = "0.23.1"
 flate2 = "1.1.9"
 git2 = { version = "0.21.0", features = ["unstable-sha256"] }
 serde = { version = "1.0.229", features = ["derive"] }

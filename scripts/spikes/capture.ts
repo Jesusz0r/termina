@@ -306,9 +306,7 @@ export default async function run(log: (msg: string) => void) {
   let raceCaught = "no error thrown";
   try {
     await raceStore.capture(null, null, {}, {
-      onBeforeRead: (p) => {
-        if (p.endsWith("target.txt")) writeFileSync(p, "changed while read\n");
-      },
+      beforeRead: [{ path: "target.txt", content: "changed while read\n" }],
     });
   } catch (err) {
     raceCaught = String(err);

@@ -12,7 +12,7 @@ import { watch } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gitVersion, platformHasRecursiveWatcher, platformHasSandboxExec, platformHasCopyOnWrite, freeDiskBytes, MIN_GIT_VERSION } from "../../electron/worldline-git.js";
+import { platformHasRecursiveWatcher, platformHasSandboxExec, platformHasCopyOnWrite, freeDiskBytes } from "../../electron/worldline-git.js";
 
 export default async function run(log: (msg: string) => void) {
   const results: Array<{ name: string; ok: boolean; detail: string }> = [];
@@ -26,11 +26,6 @@ export default async function run(log: (msg: string) => void) {
   const forbidden = join(work, "forbidden");
   mkdirSync(candidate, { recursive: true });
   mkdirSync(forbidden, { recursive: true });
-
-  // -------------------------------------------------------------- git version
-  const v = await gitVersion();
-  check("git version parses", !!v, v?.join(".") ?? "null");
-  check("git meets the merge-tree minimum", !!v && v[0]! > MIN_GIT_VERSION[0]! || (!!v && v[0] === MIN_GIT_VERSION[0] && v[1]! >= MIN_GIT_VERSION[1]!), v?.join(".") ?? "null");
 
   // ------------------------------------------------------------- sandbox-exec
   const sb = platformHasSandboxExec();

@@ -23,10 +23,11 @@ import { Worker } from "node:worker_threads";
 import { PtyTerminal } from "./pty-terminal.js";
 import { SidecarEvent, SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
-import { SnapshotStore, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, platformHasCopyOnWrite, platformHasRecursiveWatcher, platformHasSandboxExec, runGitIn, type SourceState } from "./worldline-git.js";
+import { SnapshotStore, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, platformHasCopyOnWrite, platformHasRecursiveWatcher, platformHasSandboxExec, type SourceState } from "./worldline-git.js";
 import { WorldlineManager, type ForkableRun } from "./worldlines.js";
 import { sandboxShellPreamble, writeEvidenceProfile } from "./sandbox.js";
 import { EvidenceEngine, mineChangeReason, rankProfiles, type EvidenceDeps, type EvidenceRecord, type EvidenceSummary as EngineSummary } from "./evidence.js";
+import { coreClient } from "./core-client.js";
 import { AppPreferencesStore, normalizeAppPreferences, sanitizeShortcutMap } from "./preferences.js";
 import {
   DEFAULT_SHORTCUTS,
@@ -511,156 +512,6 @@ class PiTerminalInstance {
 }
 
 /**
- * The Rust snapshot core: one child process, JSON-lines over stdio.
- * Requests are serialized: the store writes one capture at a time.
- * A failed op does not block later ops.
- */
-class CoreClient {
-  private child: ReturnType<typeof spawn> | null = null;
-  private pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
-  private queue: Promise<unknown> = Promise.resolve();
-  private seq = 0;
-  private buffer = "";
-
-  private ensure(): ReturnType<typeof spawn> {
-    if (this.child) return this.child;
-    const bin = process.env.TERMINA_CORE_BIN ?? join(__dirname, "termina-core");
-    this.child = spawn(bin, [], { stdio: ["pipe", "pipe", "pipe"] });
-    this.child.stdout?.setEncoding("utf8");
-    this.child.stdout?.on("data", (chunk: string) => {
-      this.buffer += chunk;
-      let nl = this.buffer.indexOf("\n");
-      while (nl !== -1) {
-        const line = this.buffer.slice(0, nl);
-        this.buffer = this.buffer.slice(nl + 1);
-        if (line.trim()) {
-          try {
-            this.handleMessage(JSON.parse(line));
-          } catch {
-            /* malformed line — skip */
-          }
-        }
-        nl = this.buffer.indexOf("\n");
-      }
-    });
-    const failAll = (err: Error) => {
-      for (const pending of this.pending.values()) pending.reject(err);
-      this.pending.clear();
-      this.child = null;
-    };
-    this.child.on("error", failAll);
-    this.child.on("exit", () => failAll(new Error("snapshot core exited")));
-    return this.child;
-  }
-
-  /** The core answers every op with <op>-result. */
-  private handleMessage(msg: { op?: string; requestId?: string; ok?: boolean; error?: string; state?: unknown }): void {
-    if (!msg.requestId) return;
-    const pending = this.pending.get(msg.requestId);
-    if (!pending) return;
-    this.pending.delete(msg.requestId);
-    if (msg.ok) pending.resolve(msg.state ?? msg);
-    else pending.reject(new Error(msg.error ?? "snapshot core op failed"));
-  }
-
-  /** Serialize captures. A failed capture does not block later captures. */
-  request(payload: Record<string, unknown>): Promise<unknown> {
-    const run = this.queue.then(() => this.dispatch(payload));
-    this.queue = run.catch(() => undefined);
-    return run;
-  }
-
-  private dispatch(payload: Record<string, unknown>): Promise<unknown> {
-    return new Promise((resolve, reject) => {
-      const requestId = `cap-${++this.seq}`;
-      this.pending.set(requestId, { resolve, reject });
-      try {
-        // The payload carries its own op (capture, template, apply-state).
-        this.ensure().stdin?.write(JSON.stringify({ ...payload, requestId }) + "\n");
-      } catch (err) {
-        this.pending.delete(requestId);
-        reject(err instanceof Error ? err : new Error(String(err)));
-      }
-    });
-  }
-
-  /** Capture one source state off the main thread. */
-  capture(store: SnapshotStore, head: string | null, parentCommit: string | null, source?: { root: string; gitDir: string }): Promise<SourceState> {
-    return this.request({
-      op: "capture",
-      storeDir: store.dir,
-      sourceRoot: store.sourceRoot,
-      sourceGitDir: store.sourceGitDir,
-      objectFormat: store.objectFormat,
-      head,
-      parentCommit,
-      captureRoot: source?.root,
-      captureGitDir: source?.gitDir,
-    }) as Promise<SourceState>;
-  }
-
-  /** Capture one incremental state (watcher hints + reconcile) off-thread. */
-  captureIncremental(
-    store: SnapshotStore,
-    parentCommit: string,
-    hints: string[],
-    reconcile: Array<{ relPath: string; content: string }>,
-    source?: { root: string; gitDir: string },
-  ): Promise<SourceState> {
-    return this.request({
-      op: "capture-incremental",
-      storeDir: store.dir,
-      sourceRoot: store.sourceRoot,
-      sourceGitDir: store.sourceGitDir,
-      objectFormat: store.objectFormat,
-      parentCommit,
-      hints,
-      reconcile,
-      captureRoot: source?.root,
-      captureGitDir: source?.gitDir,
-    }) as Promise<SourceState>;
-  }
-
-  /** The trust-sensitive resource hashes, off the main thread (section 6.7). */
-  trustHashes(agentDir: string, projectRoot: string | null): Promise<Record<string, string>> {
-    return this.request({ op: "trust-hashes", agentDir, projectRoot }) as Promise<Record<string, string>>;
-  }
-
-  /** Create the comparison template (init, base bytes, commit, pack). */
-  template(opts: { store: SnapshotStore; stateId: string; targetDir: string; sourceObjectsDir: string }): Promise<void> {
-    return this.request({
-      op: "template",
-      storeDir: opts.store.dir,
-      sourceRoot: opts.store.sourceRoot,
-      sourceGitDir: opts.store.sourceGitDir,
-      objectFormat: opts.store.objectFormat,
-      stateId: opts.stateId,
-      targetDir: opts.targetDir,
-      sourceObjectsDir: opts.sourceObjectsDir,
-    }) as Promise<void>;
-  }
-
-  /** Apply a state over a candidate directory and commit it. */
-  applyState(opts: { store: SnapshotStore; stateId: string; targetDir: string; preserveTopLevel?: string[] }): Promise<void> {
-    return this.request({
-      op: "apply-state",
-      storeDir: opts.store.dir,
-      sourceRoot: opts.store.sourceRoot,
-      sourceGitDir: opts.store.sourceGitDir,
-      objectFormat: opts.store.objectFormat,
-      stateId: opts.stateId,
-      targetDir: opts.targetDir,
-      preserveTopLevel: opts.preserveTopLevel,
-    }) as Promise<void>;
-  }
-
-  dispose(): void {
-    this.child?.kill();
-    this.child = null;
-  }
-}
-
-/**
  * Runs SessionManager work (session forking) on a worker thread.
  * Requests are serialized.
  */
@@ -761,7 +612,6 @@ class PiEditorApp {
   /** The store directory (app-owned, outside the project). */
   private storeDir: string | null = null;
   /** The snapshot worker (captures off the main thread). */
-  private snapshotWorker = new CoreClient();
   /** The session worker (session forking off the main thread). */
   private sessionWorker = new SessionWorkerClient();
   /** The worldline manager (Fork Run candidates). */
@@ -1048,7 +898,7 @@ class PiEditorApp {
       }
       // The store pins the canonical root (gitTopLevel resolves symlinks).
       const store = await SnapshotStore.create(this.storeDir!, top, gitDir, fmt);
-      const state = await this.snapshotWorker.capture(store, await gitHead(ws.root), null);
+      const state = await store.capture(await gitHead(ws.root), null);
       ws.lastStateCommit = state.commit;
       this.pushRecorderForWorkspace(ws, "ready");
       return store;
@@ -1073,7 +923,7 @@ class PiEditorApp {
   private async computeTrustHashes(): Promise<Record<string, string>> {
     const agentDir = join(homedir(), ".pi", "agent");
     const project = this.projectCwd ? resolve(this.projectCwd) : null;
-    return this.snapshotWorker.trustHashes(agentDir, project);
+    return coreClient.trustHashes(agentDir, project);
   }
 
   /**
@@ -1111,8 +961,8 @@ class PiEditorApp {
         return [...new Set(out)];
       },
       snapshot: {
-        template: (opts) => this.snapshotWorker.template(opts),
-        applyState: (opts) => this.snapshotWorker.applyState(opts),
+        template: (opts) => opts.store.template(opts),
+        applyState: (opts) => opts.store.applyState(opts),
       },
       session: {
         fork: (opts) => this.sessionWorker.fork(opts),
@@ -1181,7 +1031,7 @@ class PiEditorApp {
       captureHead: async (root, gitDir, parent) => {
         const store = await this.storePromise;
         if (!store) throw new Error("recording is not available");
-        const state = await this.snapshotWorker.capture(store, await gitHead(root), parent, { root, gitDir });
+        const state = await store.capture(await gitHead(root), parent, {}, {}, { root, gitDir });
         return { commit: state.commit, tree: state.tree };
       },
       sourceRunOf: (runId) => {
@@ -1200,7 +1050,7 @@ class PiEditorApp {
         const store = await this.storePromise;
         if (!ws || !store || !ws.lastStateCommit) return null;
         try {
-          const state = await this.snapshotWorker.capture(store, await gitHead(ws.root), ws.lastStateCommit);
+          const state = await store.capture(await gitHead(ws.root), ws.lastStateCommit);
           return state.commit;
         } catch {
           return null;
@@ -1462,8 +1312,8 @@ class PiEditorApp {
       // Capture W (candidate head, chained from R) and P (current primary).
       const candGitDir = await gitCommonDir(target.root);
       const [wState, pState] = await Promise.all([
-        this.snapshotWorker.capture(store, await gitHead(target.root), baseState, { root: target.root, gitDir: candGitDir ?? target.root }),
-        this.snapshotWorker.capture(store, await gitHead(primary.root), primary.lastStateCommit ?? null),
+        store.capture(await gitHead(target.root), baseState, {}, {}, { root: target.root, gitDir: candGitDir ?? target.root }),
+        store.capture(await gitHead(primary.root), primary.lastStateCommit ?? null),
       ]);
       primary.lastStateCommit = pState.commit;
       // Expected versions: nothing moved during the captures.
@@ -1765,10 +1615,9 @@ class PiEditorApp {
     const out: Array<{ relPath: string; content: string }> = [];
     try {
       const canonicalRoot = await fsRealpath(root);
-      const res = await runGitIn(root, ["ls-files", "-z"]);
-      if (res.code !== 0) return out;
+      const tracked = await coreClient.lsTracked(root);
       let bytes = 0;
-      for (const rel of res.stdout.toString("utf8").split("\0")) {
+      for (const rel of tracked) {
         if (!rel || out.length >= 2000 || bytes >= 8 * 1024 * 1024) continue;
         try {
           const path = await fsRealpath(join(root, rel));
@@ -1954,7 +1803,7 @@ class PiEditorApp {
         primaryRoot: this.primaryWorkspace()?.root ?? "",
         mineFiles: new Set(this.mineFiles),
         captureHead: async (root, gitDir, parent) => {
-          const state = await this.snapshotWorker.capture(store, await gitHead(root), parent, { root, gitDir });
+          const state = await store.capture(await gitHead(root), parent, {}, {}, { root, gitDir });
           capturedStates.add(state.commit);
           capturedTrees.set(state.commit, state.tree);
           return { commit: state.commit, tree: state.tree };
@@ -3363,7 +3212,7 @@ class PiEditorApp {
         this.writeAck(inst.id, requestId, { ok: true, token: null });
         return;
       }
-      const state = await this.snapshotWorker.capture(store, await gitHead(ws.root), ws.lastStateCommit ?? null);
+      const state = await store.capture(await gitHead(ws.root), ws.lastStateCommit ?? null);
       this.setWorkspaceState(ws, state.commit);
       ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
       const token = randomUUID();
@@ -3618,7 +3467,7 @@ class PiEditorApp {
       if ((ws.retainedBlobBytes ?? 0) > 256 * 1024 * 1024) {
         throw new Error("the retained-blob budget is exhausted");
       }
-      const state = await this.snapshotWorker.capture(store, await gitHead(ws.root), ws.lastStateCommit ?? null);
+      const state = await store.capture(await gitHead(ws.root), ws.lastStateCommit ?? null);
       ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
       if (ws.generation === gen) return state;
     }
@@ -3707,7 +3556,7 @@ class PiEditorApp {
     try {
       // A candidate workspace captures its OWN tree (the source override).
       const source = ws.primary ? undefined : { root: ws.root, gitDir: (await gitCommonDir(ws.root)) ?? ws.root };
-      const state = await this.snapshotWorker.captureIncremental(store, ws.lastStateCommit, hints, reconcile, source);
+      const state = await store.captureIncremental(ws.lastStateCommit, hints, reconcile, {}, {}, source);
       this.setWorkspaceState(ws, state.commit);
       ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
       if (!ws.primary) this.worldlines?.updateHeadState(inst.id, state.commit);
@@ -4212,7 +4061,6 @@ class PiEditorApp {
     } catch (err) {
       console.warn(`[main] snapshot store initialization failed during cleanup: ${String(err)}`);
     }
-    this.snapshotWorker.dispose();
     if (store && storeDir) {
       try {
         await store.destroy();
@@ -4910,6 +4758,7 @@ class PiEditorApp {
     this.sidecarQueues.clear();
     await this.evidenceQueue.catch(() => undefined);
     await this.worldlines?.dispose().catch((err) => console.warn(`[main] worldline cleanup failed: ${String(err)}`));
+    coreClient.dispose();
     this.worldlines = null;
     for (const ws of this.workspaces.values()) ws.watcher?.stop();
     for (const inst of this.terminals.values()) inst.pty.kill();

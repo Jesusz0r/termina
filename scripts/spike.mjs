@@ -49,3 +49,5 @@ try {
   if (saveTo) writeFileSync(saveTo, lines.join("\n") + "\n", "utf8");
   rmSync(join(outfile, ".."), { recursive: true, force: true });
 }
+// Exit explicitly: the snapshot core child would keep the loop alive.
+process.exit(process.exitCode ?? 0);

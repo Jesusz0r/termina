@@ -18,9 +18,10 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
 use git2::{
     ErrorCode, IndexAddOption, IndexEntry, ObjectFormat, Oid, Repository, RepositoryInitOptions,
-    Signature, StatusOptions,
+    RepositoryOpenFlags, Signature, StatusOptions,
 };
 use serde_json::{Value, json};
 use sha1::Sha1;
@@ -53,6 +54,23 @@ fn s(v: &Value, key: &str) -> Result<String, String> {
 
 fn opt_s(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(|x| x.as_str()).map(String::from)
+}
+
+/// The before-read test seams of a capture request.
+fn before_read_hooks(req: &Value) -> Vec<(String, String)> {
+    req.pointer("/hooks/beforeRead")
+        .and_then(Value::as_array)
+        .map(|hooks| {
+            hooks
+                .iter()
+                .filter_map(|hook| {
+                    let path = hook.get("path").and_then(Value::as_str)?;
+                    let content = hook.get("content").and_then(Value::as_str)?;
+                    Some((path.to_string(), content.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn oid_ext(repo: &Repository, value: &str) -> Result<Oid, String> {
@@ -144,9 +162,16 @@ fn write_blob(repo: &Repository, bytes: &[u8]) -> Result<(Oid, u64), String> {
 }
 
 /// Read a file and verify it did not change while reading.
-fn read_file_verified(abs: &Path) -> Result<Vec<u8>, String> {
+fn read_file_verified(abs: &Path, before_read: &[(String, String)]) -> Result<Vec<u8>, String> {
     let before = fs::metadata(abs).map_err(|e| format!("stat failed: {e}"))?;
     let mut file = fs::File::open(abs).map_err(|e| format!("open failed: {e}"))?;
+    // The test seam rewrites a file after the open, before the read. The
+    // verification must then detect the change.
+    for (hook_path, content) in before_read {
+        if abs.to_string_lossy().ends_with(hook_path.as_str()) {
+            fs::write(abs, content).ok();
+        }
+    }
     let mut bytes = Vec::new();
     use std::io::Read;
     file.read_to_end(&mut bytes)
@@ -174,6 +199,13 @@ fn is_safe_relative(path: &str) -> bool {
         && path != "."
         && !path.starts_with('/')
         && !path.split(['/', '\\']).any(|seg| seg == "..")
+}
+
+/// Open a repository from an arbitrary folder. Searches upward, like the
+/// git CLI does.
+fn open_repo(root: &Path) -> Result<Repository, String> {
+    Repository::open_ext(root, RepositoryOpenFlags::empty(), None::<&str>)
+        .map_err(|e| format!("open source repository failed: {e}"))
 }
 
 /// True when a path contains a `.git` segment (a nested repository).
@@ -331,12 +363,37 @@ fn update_state_ref(repo: &Repository, commit: Oid) -> Result<(), String> {
 /// Enumerate the capture domain: tracked files plus untracked non-ignored
 /// files. Matches `git ls-files -z` plus `ls-files --others
 /// --exclude-standard`.
-fn enumerate_domain(repo: &Repository) -> Result<Vec<String>, String> {
+/// Enumerate the capture domain: tracked files plus untracked non-ignored
+/// files. Matches `git ls-files -z` plus `ls-files --others
+/// --exclude-standard` run in the capture root. Repo paths are relative to
+/// the workdir; the capture root can be a subdirectory, so strip the
+/// workdir prefix and keep only paths under the root.
+fn enumerate_domain(repo: &Repository, capture_root: &Path) -> Result<Vec<String>, String> {
+    let workdir = repo
+        .workdir()
+        .ok_or("the source repository has no working directory")?;
+    let root_canon = fs::canonicalize(capture_root).unwrap_or_else(|_| capture_root.to_path_buf());
+    let workdir_canon = fs::canonicalize(workdir).unwrap_or_else(|_| workdir.to_path_buf());
+    let prefix: Option<String> = if root_canon == workdir_canon {
+        None
+    } else {
+        let rel = root_canon
+            .strip_prefix(&workdir_canon)
+            .map_err(|_| "capture root is outside the repository".to_string())?;
+        Some(format!("{}/", rel.to_string_lossy()))
+    };
+    let map_path = |path: String| -> Option<String> {
+        match &prefix {
+            Some(prefix) => path.strip_prefix(prefix.as_str()).map(String::from),
+            None => Some(path),
+        }
+    };
     let mut seen = HashSet::new();
     let mut paths = Vec::new();
     let index = repo.index().map_err(|e| e.to_string())?;
     for entry in index.iter() {
         let path = String::from_utf8_lossy(&entry.path).to_string();
+        let Some(path) = map_path(path) else { continue };
         if has_git_segment(&path) {
             return Err(format!("nested repository in capture domain: {path}"));
         }
@@ -357,6 +414,7 @@ fn enumerate_domain(repo: &Repository) -> Result<Vec<String>, String> {
             if path.is_empty() {
                 continue;
             }
+            let Some(path) = map_path(path) else { continue };
             if has_git_segment(&path) {
                 return Err(format!("nested repository in capture domain: {path}"));
             }
@@ -374,6 +432,7 @@ fn hash_path(
     repo: &Repository,
     abs: &Path,
     max_file_bytes: u64,
+    before_read: &[(String, String)],
 ) -> Result<Option<(u32, Oid, u64)>, String> {
     let st = match fs::symlink_metadata(abs) {
         Ok(st) => st,
@@ -397,7 +456,7 @@ fn hash_path(
             abs.display()
         ));
     }
-    let bytes = read_file_verified(abs)?;
+    let bytes = read_file_verified(abs, before_read)?;
     let mode = if st.mode() & 0o111 != 0 {
         0o100755
     } else {
@@ -430,14 +489,14 @@ fn op_capture(req: &Value) -> Result<Value, String> {
     // The store owns every object and ref. The source repo feeds only the
     // enumeration and the raw file bytes.
     let store = open_store(&PathBuf::from(s(req, "storeDir")?), req)?;
-    let source = Repository::open(&capture_root)
-        .map_err(|e| format!("open source repository failed: {e}"))?;
+    let source = open_repo(&capture_root)?;
     let parent_oid = parent_commit
         .as_deref()
         .map(|p| oid_ext(&store, p))
         .transpose()?;
+    let hooks = before_read_hooks(req);
 
-    let paths = enumerate_domain(&source)?;
+    let paths = enumerate_domain(&source, &capture_root)?;
     if paths.len() > max_paths {
         return Err(format!(
             "capture exceeds the {max_paths} path budget ({} paths)",
@@ -449,7 +508,7 @@ fn op_capture(req: &Value) -> Result<Value, String> {
     let mut new_blob_bytes = 0u64;
     for rel_path in &paths {
         let abs = capture_root.join(rel_path);
-        if let Some((mode, oid, new_bytes)) = hash_path(&store, &abs, max_file_bytes)? {
+        if let Some((mode, oid, new_bytes)) = hash_path(&store, &abs, max_file_bytes, &hooks)? {
             new_blob_bytes += new_bytes;
             flat.insert(rel_path.clone(), (mode, oid));
         }
@@ -473,7 +532,7 @@ fn op_capture(req: &Value) -> Result<Value, String> {
             "commit": commit.to_string(),
             "tree": tree.to_string(),
             "head": head,
-            "pathCount": paths.len(),
+            "pathCount": flat.len(),
             "newBlobBytes": new_blob_bytes,
             "parentCommit": parent_commit,
             "ts": now_ms(),
@@ -554,6 +613,7 @@ fn op_capture_incremental(req: &Value) -> Result<Value, String> {
     // The store owns every object and ref. The delta comes from the hints
     // and the reconcile map; no source enumeration is needed.
     let store = open_store(&PathBuf::from(s(req, "storeDir")?), req)?;
+    let hooks = before_read_hooks(req);
     let parent_oid = oid_ext(&store, &parent_commit)?;
     let parent_tree = resolve_tree(&store, parent_oid)?;
     let parent_flat = collect_tree_map(&store, parent_tree)?;
@@ -598,7 +658,7 @@ fn op_capture_incremental(req: &Value) -> Result<Value, String> {
     let mut new_blob_bytes = 0u64;
     for rel_path in changed.iter() {
         let abs = capture_root.join(rel_path);
-        match hash_path(&store, &abs, max_file_bytes)? {
+        match hash_path(&store, &abs, max_file_bytes, &hooks)? {
             Some((mode, oid, new_bytes)) => {
                 new_blob_bytes += new_bytes;
                 flat.insert(rel_path.clone(), (mode, oid));
@@ -630,7 +690,7 @@ fn op_capture_incremental(req: &Value) -> Result<Value, String> {
             "commit": commit.to_string(),
             "tree": tree.to_string(),
             "head": null,
-            "pathCount": changed.len(),
+            "pathCount": expected.len(),
             "newBlobBytes": new_blob_bytes,
             "parentCommit": parent_commit,
             "ts": now_ms(),
@@ -870,8 +930,7 @@ fn op_apply_state(req: &Value) -> Result<Value, String> {
     let flat = state_entries(&repo, &state_commit)?;
     materialize_state(&repo, &state_commit, &target, &preserve_top)?;
 
-    let candidate =
-        Repository::open(&target).map_err(|e| format!("open candidate repository failed: {e}"))?;
+    let candidate = open_repo(&target)?;
     stage_workdir(&candidate, &flat)?;
     commit_index_if_changed(&candidate, "termina state")?;
     Ok(json!({}))
@@ -1054,6 +1113,552 @@ fn hash_file(
     Some((key.to_string(), hex))
 }
 
+// ---------------------------------------------------------- store create ----
+
+fn op_store_create(req: &Value) -> Result<Value, String> {
+    let store_dir = PathBuf::from(s(req, "storeDir")?);
+    let source_git_dir = PathBuf::from(s(req, "sourceGitDir")?);
+    let requested = object_format(&s(req, "objectFormat")?)?;
+    let git_dir = store_dir.join("git");
+    fs::create_dir_all(&store_dir).map_err(|e| e.to_string())?;
+    let mut opts = RepositoryInitOptions::new();
+    opts.bare(true).object_format(requested);
+    let repo = Repository::init_opts(&git_dir, &opts)
+        .map_err(|e| format!("snapshot store init failed: {e}"))?;
+    // Disable gc: the store keeps objects that a gc run would prune.
+    repo.config()
+        .map_err(|e| e.to_string())?
+        .set_bool("gc.auto", false)
+        .map_err(|e| e.to_string())?;
+    // A new app session has no in-memory run records. Remove refs left by a
+    // crashed session before the first capture.
+    let stale: Vec<String> = repo
+        .references_glob("refs/termina/state/*")
+        .map_err(|e| e.to_string())?
+        .filter_map(|reference| reference.ok())
+        .filter_map(|reference| reference.name().ok().map(String::from))
+        .collect();
+    for name in stale {
+        if let Ok(reference) = repo.find_reference(&name) {
+            let mut reference = reference;
+            reference.delete().ok();
+        }
+    }
+    // Read-only object access to the source repository.
+    let alt_dir = git_dir.join("objects").join("info");
+    fs::create_dir_all(&alt_dir).map_err(|e| e.to_string())?;
+    fs::write(
+        alt_dir.join("alternates"),
+        format!("{}\n", source_git_dir.join("objects").display()),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(json!({}))
+}
+
+// ------------------------------------------------------------ preflight ----
+
+/// True when the attributes text contains a content-transforming pattern.
+fn has_transform_attr(text: &str) -> bool {
+    const WORDS: [&str; 6] = [
+        "filter",
+        "eol",
+        "working-tree-encoding",
+        "ident",
+        "text",
+        "export-subst",
+    ];
+    for line in text.lines() {
+        for token in line.split_whitespace() {
+            if WORDS
+                .iter()
+                .any(|word| token == *word || token.starts_with(&format!("{word}=")))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn op_preflight(req: &Value) -> Result<Value, String> {
+    let source_root = PathBuf::from(s(req, "sourceRoot")?);
+    let source_git_dir = PathBuf::from(s(req, "sourceGitDir")?);
+    let worlds_root = opt_s(req, "worldsRoot").map(PathBuf::from);
+    let mut reasons: Vec<String> = Vec::new();
+
+    let repo = match open_repo(&source_root) {
+        Ok(repo) => repo,
+        Err(_) => {
+            reasons.push("the opened folder is not inside a Git repository".to_string());
+            return Ok(json!({ "result": { "ok": false, "reasons": reasons } }));
+        }
+    };
+    // Git reports canonical paths; compare canonical forms.
+    let cwd_canon = fs::canonicalize(&source_root).unwrap_or_else(|_| source_root.clone());
+    let top_level = repo
+        .workdir()
+        .map(|workdir| fs::canonicalize(workdir).unwrap_or_else(|_| workdir.to_path_buf()));
+    match top_level {
+        Some(top) if top != cwd_canon => {
+            reasons.push("the opened folder is not the Git top-level directory".to_string())
+        }
+        None => reasons.push("the opened folder is not inside a Git repository".to_string()),
+        _ => {}
+    }
+    if let Some(worlds) = &worlds_root
+        && (cwd_canon == *worlds || cwd_canon.starts_with(worlds))
+    {
+        reasons.push("the opened folder is inside the app-owned worlds root".to_string());
+    }
+
+    // Active merge/rebase/cherry-pick/revert state.
+    for (marker, label) in [
+        ("MERGE_HEAD", "merge-head"),
+        ("CHERRY_PICK_HEAD", "cherry-pick-head"),
+        ("REVERT_HEAD", "revert-head"),
+        ("BISECT_LOG", "bisect-log"),
+    ] {
+        if source_git_dir.join(marker).exists() {
+            reasons.push(format!("the repository has an active {label} operation"));
+        }
+    }
+    if source_git_dir.join("rebase-merge").exists() || source_git_dir.join("rebase-apply").exists()
+    {
+        reasons.push("the repository has an active rebase".to_string());
+    }
+
+    let index = repo.index().map_err(|e| e.to_string())?;
+    // Unresolved index entries (unmerged paths).
+    if index.has_conflicts() {
+        reasons.push("the repository has unresolved index entries".to_string());
+    }
+    // Submodules and gitlinks in the index.
+    if index.iter().any(|entry| entry.mode == 0o160000) {
+        reasons.push("the project contains a submodule".to_string());
+    }
+    let config = repo.config().map_err(|e| e.to_string())?;
+    // Sparse checkout and partial clones.
+    if let Ok(value) = config.get_string("core.sparseCheckout")
+        && value.trim() != "false"
+    {
+        reasons.push("a sparse checkout is active".to_string());
+    }
+    if config.get_string("extensions.partialClone").is_ok() {
+        reasons.push("a partial clone is active".to_string());
+    }
+    // A source object alternate in the user's repository.
+    if source_git_dir
+        .join("objects")
+        .join("info")
+        .join("alternates")
+        .exists()
+    {
+        reasons.push("a source object alternate is active".to_string());
+    }
+    // Content-transforming settings that break byte-exact materialization.
+    if let Ok(value) = config.get_string("core.autocrlf")
+        && value.trim() != "false"
+    {
+        reasons.push("core.autocrlf is not false".to_string());
+    }
+    if let Ok(value) = config.get_string("core.eol")
+        && value.trim() != "native"
+    {
+        reasons.push("core.eol is configured".to_string());
+    }
+    let has_key_prefix = |prefix: &str| -> bool {
+        config
+            .entries(Some(&format!("{prefix}.*")))
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(false)
+    };
+    if has_key_prefix("filter") {
+        reasons.push("a Git clean/smudge filter is configured".to_string());
+    }
+    if has_key_prefix("diff") {
+        reasons.push("a Git LFS or diff driver is configured".to_string());
+    }
+    if has_key_prefix("merge") {
+        reasons.push("a custom merge driver is configured".to_string());
+    }
+
+    // Transform-bearing attributes in any tracked .gitattributes file.
+    let attr_files: Vec<String> = index
+        .iter()
+        .filter_map(|entry| {
+            let path = String::from_utf8_lossy(&entry.path).into_owned();
+            if path.rsplit('/').next() == Some(".gitattributes") {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for attr in attr_files {
+        let content = match fs::read_to_string(source_root.join(&attr)) {
+            Ok(content) => content,
+            Err(_) => continue, // unreadable attributes file — leave as-is
+        };
+        if has_transform_attr(&content) {
+            reasons.push("a .gitattributes file contains content-transforming entries".to_string());
+            break;
+        }
+    }
+    Ok(json!({ "result": { "ok": reasons.is_empty(), "reasons": reasons } }))
+}
+
+// --------------------------------------------------------------- merge3 ----
+
+fn op_merge3(req: &Value) -> Result<Value, String> {
+    let store = open_store(&PathBuf::from(s(req, "storeDir")?), req)?;
+    let ours = oid_ext(&store, &s(req, "ours")?)?;
+    let theirs = oid_ext(&store, &s(req, "theirs")?)?;
+    // The commit graph provides the base: every state chains from the root
+    // primary state, so its LCA is that root.
+    let base = store
+        .merge_base(ours, theirs)
+        .map_err(|e| format!("merge base failed: {e}"))?;
+    let base_tree = store
+        .find_commit(base)
+        .map_err(|e| e.to_string())?
+        .tree()
+        .map_err(|e| e.to_string())?;
+    let ours_tree = store
+        .find_commit(ours)
+        .map_err(|e| e.to_string())?
+        .tree()
+        .map_err(|e| e.to_string())?;
+    let theirs_tree = store
+        .find_commit(theirs)
+        .map_err(|e| e.to_string())?
+        .tree()
+        .map_err(|e| e.to_string())?;
+    let mut index = store
+        .merge_trees(&base_tree, &ours_tree, &theirs_tree, None)
+        .map_err(|e| format!("merge failed: {e}"))?;
+    let conflicts: Vec<String> = index
+        .conflicts()
+        .map_err(|e| e.to_string())?
+        .filter_map(|conflict| conflict.ok())
+        .filter_map(|conflict| {
+            let entry = conflict.our.or(conflict.their)?;
+            Some(String::from_utf8_lossy(&entry.path).into_owned())
+        })
+        .collect();
+    if index.has_conflicts() {
+        return Ok(json!({ "result": { "ok": false, "tree": null, "conflicts": conflicts } }));
+    }
+    let tree = index
+        .write_tree_to(&store)
+        .map_err(|e| format!("merge write-tree failed: {e}"))?;
+    Ok(json!({ "result": { "ok": true, "tree": tree.to_string(), "conflicts": [] } }))
+}
+
+// ------------------------------------------------------------- diff-tree ----
+
+fn op_diff_tree(req: &Value) -> Result<Value, String> {
+    let store = open_store(&PathBuf::from(s(req, "storeDir")?), req)?;
+    let a = state_entries(&store, &s(req, "stateA")?)?;
+    let b = state_entries(&store, &s(req, "stateB")?)?;
+    let mut changes: Vec<Value> = Vec::new();
+    for (path, entry) in &a {
+        match b.get(path) {
+            Some(other) if other != entry => {
+                changes.push(json!({ "relPath": path, "status": "modified" }));
+            }
+            Some(_) => {}
+            None => {
+                changes.push(json!({ "relPath": path, "status": "deleted" }));
+            }
+        }
+    }
+    for path in b.keys() {
+        if !a.contains_key(path) {
+            changes.push(json!({ "relPath": path, "status": "created" }));
+        }
+    }
+    changes.sort_by(|x, y| {
+        x["relPath"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(y["relPath"].as_str().unwrap_or(""))
+    });
+    Ok(json!({ "changes": changes }))
+}
+
+// ------------------------------------------------------------ materialize ----
+
+fn op_materialize(req: &Value) -> Result<Value, String> {
+    let store = open_store(&PathBuf::from(s(req, "storeDir")?), req)?;
+    let state_commit = s(req, "stateId")?;
+    let target = PathBuf::from(s(req, "targetDir")?);
+    let preserve_top: Vec<String> = req
+        .get("preserveTopLevel")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    materialize_state(&store, &state_commit, &target, &preserve_top)?;
+    Ok(json!({}))
+}
+
+fn op_tree_paths(req: &Value) -> Result<Value, String> {
+    let store = open_store(&PathBuf::from(s(req, "storeDir")?), req)?;
+    let flat = state_entries(&store, &s(req, "stateId")?)?;
+    let mut paths: Vec<&String> = flat.keys().collect();
+    paths.sort();
+    Ok(json!({ "paths": paths }))
+}
+
+fn op_symlink_target(req: &Value) -> Result<Value, String> {
+    let store = open_store(&PathBuf::from(s(req, "storeDir")?), req)?;
+    let flat = state_entries(&store, &s(req, "stateId")?)?;
+    let rel = s(req, "relPath")?;
+    let target = match flat.get(&rel) {
+        Some((mode, oid)) if *mode == 0o120000 => {
+            let blob = store.find_blob(*oid).map_err(|e| e.to_string())?;
+            Some(String::from_utf8_lossy(blob.content()).into_owned())
+        }
+        _ => None,
+    };
+    Ok(json!({ "target": target }))
+}
+
+fn op_read_blob(req: &Value) -> Result<Value, String> {
+    let store = open_store(&PathBuf::from(s(req, "storeDir")?), req)?;
+    let flat = state_entries(&store, &s(req, "stateId")?)?;
+    let rel = s(req, "relPath")?;
+    let content = match flat.get(&rel) {
+        Some((_, oid)) => {
+            let blob = store.find_blob(*oid).map_err(|e| e.to_string())?;
+            Some(base64::engine::general_purpose::STANDARD.encode(blob.content()))
+        }
+        None => None,
+    };
+    Ok(json!({ "content": content }))
+}
+
+fn op_unref(req: &Value) -> Result<Value, String> {
+    let store = open_store(&PathBuf::from(s(req, "storeDir")?), req)?;
+    let commit = oid_ext(&store, &s(req, "commit")?)?;
+    let name = format!("refs/termina/state/{commit}");
+    if let Ok(reference) = store.find_reference(&name) {
+        let mut reference = reference;
+        reference.delete().map_err(|e| e.to_string())?;
+    }
+    Ok(json!({}))
+}
+
+// ---------------------------------------------------------- source queries ----
+
+fn op_git_head(req: &Value) -> Result<Value, String> {
+    let root = PathBuf::from(s(req, "root")?);
+    let repo = open_repo(&root)?;
+    let head = repo
+        .head()
+        .ok()
+        .and_then(|head| head.target().map(|oid| oid.to_string()));
+    Ok(json!({ "head": head }))
+}
+
+fn op_git_top_level(req: &Value) -> Result<Value, String> {
+    let root = PathBuf::from(s(req, "root")?);
+    let repo = match open_repo(&root) {
+        Ok(repo) => repo,
+        Err(_) => return Ok(json!({ "root": null })),
+    };
+    let top = repo
+        .workdir()
+        .map(|workdir| fs::canonicalize(workdir).unwrap_or_else(|_| workdir.to_path_buf()));
+    Ok(json!({ "root": top.map(|path| path.to_string_lossy().into_owned()) }))
+}
+
+fn op_git_common_dir(req: &Value) -> Result<Value, String> {
+    let root = PathBuf::from(s(req, "root")?);
+    let repo = open_repo(&root)?;
+    Ok(json!({ "gitDir": repo.commondir().to_string_lossy().into_owned() }))
+}
+
+fn op_git_object_format(req: &Value) -> Result<Value, String> {
+    let root = PathBuf::from(s(req, "root")?);
+    let repo = open_repo(&root)?;
+    let format = match repo.object_format() {
+        ObjectFormat::Sha1 => "sha1",
+        ObjectFormat::Sha256 => "sha256",
+    };
+    Ok(json!({ "format": format }))
+}
+
+fn op_ls_tracked(req: &Value) -> Result<Value, String> {
+    let root = PathBuf::from(s(req, "root")?);
+    let repo = open_repo(&root)?;
+    let index = repo.index().map_err(|e| e.to_string())?;
+    let paths: Vec<String> = index
+        .iter()
+        .map(|entry| String::from_utf8_lossy(&entry.path).into_owned())
+        .collect();
+    Ok(json!({ "paths": paths }))
+}
+
+// ------------------------------------------------- candidate repo queries --
+
+/// The workdir status of a candidate repo: staged, unstaged, and
+/// untracked changes as porcelain would report them.
+fn op_repo_status(req: &Value) -> Result<Value, String> {
+    let root = PathBuf::from(s(req, "root")?);
+    let repo = open_repo(&root)?;
+    let statuses = repo.statuses(None).map_err(|e| e.to_string())?;
+    let mut changes: Vec<Value> = Vec::new();
+    for status in statuses.iter() {
+        let Ok(path) = status.path() else { continue };
+        let flags = status.status();
+        let kind = if flags.is_wt_deleted() || flags.is_index_deleted() {
+            "deleted"
+        } else if flags.is_wt_new() || flags.is_index_new() {
+            "created"
+        } else {
+            "modified"
+        };
+        changes.push(json!({ "relPath": path, "status": kind }));
+    }
+    changes.sort_by(|x, y| {
+        x["relPath"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(y["relPath"].as_str().unwrap_or(""))
+    });
+    Ok(json!({ "changes": changes }))
+}
+
+/// The committed changes between two commits of a candidate repo.
+fn op_repo_diff(req: &Value) -> Result<Value, String> {
+    let root = PathBuf::from(s(req, "root")?);
+    let repo = open_repo(&root)?;
+    let from = repo
+        .revparse_single(&s(req, "from")?)
+        .map_err(|e| e.to_string())?;
+    let to = repo
+        .revparse_single(&s(req, "to")?)
+        .map_err(|e| e.to_string())?;
+    let from_tree = from.peel_to_tree().map_err(|e| e.to_string())?;
+    let to_tree = to.peel_to_tree().map_err(|e| e.to_string())?;
+    let diff = repo
+        .diff_tree_to_tree(Some(&from_tree), Some(&to_tree), None)
+        .map_err(|e| e.to_string())?;
+    let mut changes: Vec<Value> = Vec::new();
+    for delta in diff.deltas() {
+        use git2::Delta;
+        match delta.status() {
+            Delta::Added => changes.push(json!({ "relPath": delta.new_file().path().and_then(|p| p.to_str()).unwrap_or(""), "status": "created" })),
+            Delta::Deleted => changes.push(json!({ "relPath": delta.old_file().path().and_then(|p| p.to_str()).unwrap_or(""), "status": "deleted" })),
+            Delta::Modified | Delta::Typechange | Delta::Conflicted => {
+                changes.push(json!({ "relPath": delta.new_file().path().and_then(|p| p.to_str()).unwrap_or(""), "status": "modified" }))
+            }
+            Delta::Renamed => {
+                changes.push(json!({ "relPath": delta.old_file().path().and_then(|p| p.to_str()).unwrap_or(""), "status": "deleted" }));
+                changes.push(json!({ "relPath": delta.new_file().path().and_then(|p| p.to_str()).unwrap_or(""), "status": "created" }));
+            }
+            Delta::Copied => changes.push(json!({ "relPath": delta.new_file().path().and_then(|p| p.to_str()).unwrap_or(""), "status": "created" })),
+            Delta::Unmodified | Delta::Unreadable | Delta::Untracked | Delta::Ignored => {}
+        }
+    }
+    changes.sort_by(|x, y| {
+        x["relPath"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(y["relPath"].as_str().unwrap_or(""))
+    });
+    Ok(json!({ "changes": changes }))
+}
+
+/// The recursive tree of a candidate commit with blob sizes.
+fn op_repo_tree(req: &Value) -> Result<Value, String> {
+    let root = PathBuf::from(s(req, "root")?);
+    let repo = open_repo(&root)?;
+    let commit = repo
+        .revparse_single(&s(req, "commit")?)
+        .map_err(|e| e.to_string())?;
+    let tree = commit.peel_to_tree().map_err(|e| e.to_string())?;
+    let mut entries: Vec<Value> = Vec::new();
+    collect_repo_tree(&repo, &tree, "", &mut entries)?;
+    Ok(json!({ "entries": entries }))
+}
+
+fn collect_repo_tree(
+    repo: &Repository,
+    tree: &git2::Tree,
+    prefix: &str,
+    out: &mut Vec<Value>,
+) -> Result<(), String> {
+    for entry in tree.iter() {
+        let name = entry.name().map_err(|e| e.to_string())?;
+        let path = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        match entry.kind() {
+            Some(git2::ObjectType::Tree) => {
+                let sub = repo.find_tree(entry.id()).map_err(|e| e.to_string())?;
+                collect_repo_tree(repo, &sub, &path, out)?;
+            }
+            Some(git2::ObjectType::Blob) => {
+                let size = repo
+                    .find_blob(entry.id())
+                    .map(|blob| blob.size())
+                    .unwrap_or(0);
+                out.push(json!({ "path": path, "mode": format!("{:o}", entry.filemode()), "size": size }));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// One file of a candidate commit, or null when absent.
+fn op_repo_file(req: &Value) -> Result<Value, String> {
+    let root = PathBuf::from(s(req, "root")?);
+    let repo = open_repo(&root)?;
+    let commit = repo
+        .revparse_single(&s(req, "commit")?)
+        .map_err(|e| e.to_string())?;
+    let tree = commit.peel_to_tree().map_err(|e| e.to_string())?;
+    let rel = s(req, "path")?;
+    let mut flat = HashMap::new();
+    collect_tree_map_at(&repo, tree.id(), "", &mut flat)?;
+    let content = match flat.get(&rel) {
+        Some((_, oid)) => {
+            let blob = repo.find_blob(*oid).map_err(|e| e.to_string())?;
+            Some(base64::engine::general_purpose::STANDARD.encode(blob.content()))
+        }
+        None => None,
+    };
+    Ok(json!({ "content": content }))
+}
+
+/// The ignored untracked files of a candidate repo.
+fn op_ls_ignored(req: &Value) -> Result<Value, String> {
+    let root = PathBuf::from(s(req, "root")?);
+    let repo = open_repo(&root)?;
+    let statuses = repo
+        .statuses(Some(
+            &mut StatusOptions::new()
+                .include_untracked(true)
+                .include_ignored(true),
+        ))
+        .map_err(|e| e.to_string())?;
+    let mut paths: Vec<String> = statuses
+        .iter()
+        .filter(|status| status.status().is_ignored())
+        .filter_map(|status| status.path().ok().map(String::from))
+        .collect();
+    paths.sort();
+    Ok(json!({ "paths": paths }))
+}
+
 // ------------------------------------------------------------ dispatch -----
 
 fn dispatch(op: &str, req: &Value) -> Result<Value, String> {
@@ -1063,6 +1668,25 @@ fn dispatch(op: &str, req: &Value) -> Result<Value, String> {
         "apply-state" => op_apply_state(req),
         "template" => op_template(req),
         "trust-hashes" => op_trust_hashes(req),
+        "store-create" => op_store_create(req),
+        "preflight" => op_preflight(req),
+        "merge3" => op_merge3(req),
+        "diff-tree" => op_diff_tree(req),
+        "materialize" => op_materialize(req),
+        "tree-paths" => op_tree_paths(req),
+        "symlink-target" => op_symlink_target(req),
+        "read-blob" => op_read_blob(req),
+        "unref" => op_unref(req),
+        "git-head" => op_git_head(req),
+        "git-top-level" => op_git_top_level(req),
+        "git-common-dir" => op_git_common_dir(req),
+        "git-object-format" => op_git_object_format(req),
+        "ls-tracked" => op_ls_tracked(req),
+        "repo-status" => op_repo_status(req),
+        "repo-diff" => op_repo_diff(req),
+        "repo-tree" => op_repo_tree(req),
+        "repo-file" => op_repo_file(req),
+        "ls-ignored" => op_ls_ignored(req),
         other => Err(format!("unknown op: {other}")),
     }
 }

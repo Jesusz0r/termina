@@ -13,7 +13,8 @@ import { chmod, cp, lstat as lstatPath, mkdir, readFile, readdir, realpath, rena
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { writeSandboxProfile, sandboxShellPreamble, type SandboxPaths } from "./sandbox.js";
-import { runGitIn } from "./worldline-git.js";
+import { coreClient } from "./core-client.js";
+import { gitHead } from "./worldline-git.js";
 import type { SnapshotStore } from "./worldline-git.js";
 import { dependencyDiff } from "./evidence.js";
 import type { DependencyChange, WorldlineChangedFile, WorldlineDetails } from "../shared/types.js";
@@ -442,8 +443,7 @@ export class WorldlineManager {
         targetDir: ncmp.templateDir,
         sourceObjectsDir: join(ncmp.sourceGitDir, "objects"),
       });
-      const head = await runGitIn(ncmp.templateDir, ["rev-parse", "HEAD"]);
-      ncmp.baseCommit = head.code === 0 ? head.stdout.toString().trim() : null;
+      ncmp.baseCommit = await gitHead(ncmp.templateDir);
       for (const name of RUNTIME_ALLOWLIST) {
         const src = join(this.deps.primaryRoot, name);
         if (!existsSync(src)) continue;
@@ -510,10 +510,10 @@ export class WorldlineManager {
     const cand = cmp?.candidates.get(label);
     if (!cmp || !cand) return { count: 0, bytes: 0 };
     try {
-      const res = await runGitIn(cand.dir, ["ls-files", "-z", "-o", "-i", "--exclude-standard"]);
+      const ignored = await coreClient.lsIgnored(cand.dir);
       let count = 0;
       let bytes = 0;
-      for (const p of res.stdout.toString("utf8").split("\0")) {
+      for (const p of ignored) {
         if (!p || count >= MAX_IGNORED_FILES || bytes >= MAX_IGNORED_BYTES) continue;
         if (RUNTIME_ALLOWLIST.includes(p.split(/[\\/]/)[0])) continue;
         count++;
@@ -536,8 +536,8 @@ export class WorldlineManager {
       for (const cand of cmp.candidates.values()) {
         if (cand.state === "discarded" || cand.state === "error" || cand.state === "promoted") continue;
         try {
-          const res = await runGitIn(cand.dir, ["status", "--porcelain"]);
-          if (res.stdout.toString("utf8").trim().length > 0) {
+          const changes = await coreClient.repoStatus(cand.dir);
+          if (changes.length > 0) {
             active++;
             continue;
           }
@@ -677,10 +677,10 @@ export class WorldlineManager {
     if (!this.isSafeRelativePath(relPath)) return { ok: false, error: "invalid base path" };
     const anyCand = cmp.candidates.get("A") ?? cmp.candidates.get("B");
     if (!anyCand) return { ok: false, error: "candidate not found" };
-    const res = await runGitIn(anyCand.dir, ["show", `${cmp.baseCommit}:${relPath}`]);
-    if (res.code !== 0) return { ok: false, error: res.stderr.trim() || "file not in the base" };
-    if (res.stdout.byteLength > MAX_WORLDLINE_FILE_BYTES) return { ok: false, error: "the base file is too large" };
-    return { ok: true, content: res.stdout.toString() };
+    const res = await coreClient.repoFile(anyCand.dir, cmp.baseCommit!, relPath);
+    if (res === null) return { ok: false, error: "file not in the base" };
+    if (res.byteLength > MAX_WORLDLINE_FILE_BYTES) return { ok: false, error: "the base file is too large" };
+    return { ok: true, content: res.toString() };
   }
 
   private isSafeRelativePath(relPath: string): boolean {
@@ -690,11 +690,11 @@ export class WorldlineManager {
   /** Files differing from the base plus head-tree source statistics. */
   private async changedFiles(cmp: ComparisonState, cand: CandidateState): Promise<{ files: WorldlineChangedFile[]; sourceFiles: number; sourceBytes: number }> {
     // Working tree vs HEAD: staged, unstaged, and untracked changes.
-    const status = await runGitIn(cand.dir, ["status", "--porcelain"]);
+    const status = await coreClient.repoStatus(cand.dir);
     // Committed changes since the shared base (A's settled apply and any
     // agent commits; B usually has none).
-    const committed = await runGitIn(cand.dir, ["diff", "--name-status", cmp.baseCommit!, "HEAD"]);
-    const tree = await runGitIn(cand.dir, ["ls-tree", "-r", "--long", "HEAD"]);
+    const committed = await coreClient.repoDiff(cand.dir, cmp.baseCommit!, "HEAD");
+    const tree = await coreClient.repoTree(cand.dir, "HEAD");
     const byPath = new Map<string, WorldlineChangedFile>();
     const set = (relPath: string, status: "created" | "modified" | "deleted"): void => {
       const prev = byPath.get(relPath);
@@ -703,41 +703,16 @@ export class WorldlineManager {
         byPath.set(relPath, { relPath, status });
       }
     };
-    for (const line of status.stdout.toString().split("\n")) {
-      if (!line) continue;
-      const x = line[0];
-      const y = line[1];
-      const path = line.slice(3);
-      if (x === "?" && y === "?") set(path, "created");
-      else if (x === "D" || y === "D") set(path, "deleted");
-      else if (x === "A") set(path, "created");
-      else set(path, "modified");
+    for (const change of status) {
+      set(change.relPath, change.status);
     }
-    for (const line of committed.stdout.toString().split("\n")) {
-      if (!line) continue;
-      const [kind, ...rest] = line.split("\t");
-      const path = rest.join("\t");
-      if (!path) continue;
-      if (kind.startsWith("D")) set(path, "deleted");
-      else if (kind.startsWith("A")) set(path, "created");
-      else if (kind.startsWith("R")) {
-        // Rename: the new name replaces the old one.
-        const [oldPath, newPath] = path.split("\t");
-        if (newPath) {
-          set(newPath, "created");
-          set(oldPath, "deleted");
-        } else set(path, "modified");
-      } else set(path, "modified");
+    for (const change of committed) {
+      set(change.relPath, change.status);
     }
-    let sourceFiles = 0;
+    let sourceFiles = tree.length;
     let sourceBytes = 0;
-    for (const line of tree.stdout.toString().split("\n")) {
-      if (!line) continue;
-      // <mode> <type> <sha> <size>\t<path> — the size is right-padded.
-      const match = /^\S+ \S+ \S+ +(\d+)\t/.exec(line);
-      if (!match) continue;
-      sourceFiles++;
-      sourceBytes += Number(match[1]);
+    for (const entry of tree) {
+      sourceBytes += entry.size;
     }
     const files = [...byPath.values()].sort((a, b) => a.relPath.localeCompare(b.relPath));
     return { files, sourceFiles, sourceBytes };
@@ -748,10 +723,10 @@ export class WorldlineManager {
     const out: DependencyChange[] = [];
     for (const file of ["package.json", "pyproject.toml"]) {
       try {
-        const base = await runGitIn(cand.dir, ["show", `${cmp.baseCommit}:${file}`]);
+        const base = await coreClient.repoFile(cand.dir, cmp.baseCommit!, file);
         const head = await this.fileOf(cmp.id, cand.label, file);
-        if (base.code !== 0 || !head.ok || head.content === undefined) continue;
-        const diff = this.dependencyChangeOf(file, base.stdout.toString(), head.content);
+        if (base === null || !head.ok || head.content === undefined) continue;
+        const diff = this.dependencyChangeOf(file, base.toString(), head.content);
         if (diff) out.push(diff);
       } catch {
         /* the file is not comparable */
@@ -955,8 +930,7 @@ export class WorldlineManager {
     });
     // The template repo has exactly one commit ("termina base"). Its SHA
     // is the shared comparison base for both candidates.
-    const head = await runGitIn(cmp.templateDir, ["rev-parse", "HEAD"]);
-    cmp.baseCommit = head.code === 0 ? head.stdout.toString().trim() : null;
+    cmp.baseCommit = await gitHead(cmp.templateDir);
     // Copy the fixed runtime allowlist with copy-on-write clones.
     for (const name of RUNTIME_ALLOWLIST) {
       const src = join(this.deps.primaryRoot, name);
@@ -1331,8 +1305,7 @@ export class WorldlineManager {
         targetDir: cmp.templateDir,
         sourceObjectsDir: join(cmp.sourceGitDir, "objects"),
       });
-      const head = await runGitIn(cmp.templateDir, ["rev-parse", "HEAD"]);
-      cmp.baseCommit = head.code === 0 ? head.stdout.toString().trim() : null;
+      cmp.baseCommit = await gitHead(cmp.templateDir);
       for (const name of RUNTIME_ALLOWLIST) {
         const src = join(this.deps.primaryRoot, name);
         if (!existsSync(src)) continue;

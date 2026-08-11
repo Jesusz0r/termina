@@ -129,9 +129,11 @@ Use these terms exactly. Do not invent synonyms.
   the request plumbing.
 - `core/`: the Rust snapshot core (`termina-core`). It owns the
   app-owned Git store: full and incremental captures, materialization,
-  template creation, state application, and trust hashes. It speaks a
-  JSON-lines protocol over stdio; the built binary lives next to the main
-  bundle and is rebuilt by `scripts/build-core.mjs`.
+  template creation, state application, merges, preflight, diff-tree,
+  tree queries, trust hashes, and the source-repository queries. It
+  speaks a JSON-lines protocol over stdio; the built binary lives next to
+  the main bundle and is rebuilt by `scripts/build-core.mjs`. The app no
+  longer spawns the Git CLI.
 - `electron/worldlines.ts`: the WorldlineManager (fork-run pairs, moment
   candidates, promotion, challenges, compare).
 - `electron/evidence.ts`: the evidence engine and the four challenge

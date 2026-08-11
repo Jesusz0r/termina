@@ -1,31 +1,22 @@
 /**
- * App-owned snapshot store.
+ * App-owned snapshot store client.
  *
- * A bare Git repository outside the source repository. It captures the
- * source working-tree bytes byte-for-byte and reads source objects through
- * a read-only alternate. It never writes to the user's Git directory.
+ * The store is a bare Git repository outside the source repository. It
+ * captures the source working-tree bytes byte-for-byte and reads source
+ * objects through a read-only alternate. It never writes the user's Git
+ * directory.
  *
- * The store runs Git as argument arrays without a shell. Every command uses
- * a fixed C locale, disabled hooks, disabled pagers, disabled prompts, and
- * no optional locks. The store never runs maintenance in the user's repo.
+ * Every operation runs in the Rust snapshot core (core-client.ts). This
+ * module keeps only the paths, the object format, and the request
+ * plumbing. It never spawns Git.
  */
-import { execFile, spawn } from "node:child_process";
-import { constants, closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
-import { chmod, lstat, mkdir, readFile, readlink, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { createHash, randomBytes } from "node:crypto";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
-import { deflateSync } from "node:zlib";
+import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
+import { coreClient } from "./core-client.js";
 
-/** The minimum Git version proven for `merge-tree` (WORLDLINES §4). */
-export const MIN_GIT_VERSION = [2, 38, 0];
-
-/** The app identity used for synthetic commits. */
-const APP_AUTHOR = "termina";
-const APP_EMAIL = "dev@termina.local";
-const MAX_GIT_STDOUT_BYTES = 64 * 1024 * 1024;
-const MAX_GIT_STDERR_BYTES = 4 * 1024 * 1024;
-
-/** Default capture budgets (WORLDLINES §9). */
+/** Default capture budgets (WORLDLINES section 9). */
 export const BUDGETS = {
   maxPaths: 100_000,
   maxFileBytes: 64 * 1024 * 1024,
@@ -56,24 +47,17 @@ export interface CaptureBudget {
   maxNewBlobBytes?: number;
 }
 
-interface BlobWrite {
-  oid: string;
-  newBytes: number;
-}
-
 export interface MaterializeOptions {
   preserveTopLevel?: string[];
 }
 
-/** Test seams for capture. The hooks fire only in the spike suites. */
+/** Test seams for capture. The seams fire only in the spike suites. */
 export interface CaptureHooks {
-  /** Fired after a file is read and verified. */
-  onFileRead?: (path: string) => void;
-  /** Fired after the file is opened, before its bytes are read. */
-  onBeforeRead?: (path: string) => void;
+  /** Rewrite a file after the core opens it, before the core reads it. */
+  beforeRead?: Array<{ path: string; content: string }>;
 }
 
-/** The result of a three-way merge (WORLDLINES §6.10). */
+/** The result of a three-way merge (WORLDLINES section 6.10). */
 export interface MergeResult {
   ok: boolean;
   /** The merged tree oid (valid only when ok). */
@@ -84,164 +68,10 @@ export interface MergeResult {
   reason?: string;
 }
 
-/** The result of a repository preflight (WORLDLINES §4). */
+/** The result of a repository preflight (WORLDLINES section 4). */
 export interface PreflightResult {
   ok: boolean;
   reasons: string[];
-}
-
-interface GitResult {
-  code: number;
-  stdout: Buffer;
-  stderr: string;
-}
-
-export type { GitResult };
-
-/** Run Git in a directory with the store's safe environment. */
-export function runGitIn(dir: string, args: string[], extraEnv: Record<string, string> = {}): Promise<GitResult> {
-  return runGit(args, { cwd: dir, env: extraEnv });
-}
-
-/** The environment for every store Git command. */
-function gitEnv(extra: Record<string, string> = {}): Record<string, string> {
-  return {
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_OPTIONAL_LOCKS: "0",
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_CONFIG_SYSTEM: "/dev/null",
-    GIT_ATTR_NOSYSTEM: "1",
-    GIT_PAGER: "cat",
-    PAGER: "cat",
-    GIT_EDITOR: "true",
-    GIT_ASKPASS: "true",
-    GIT_SSH: "true",
-    GIT_EXTERNAL_DIFF: "true",
-    GIT_AUTHOR_NAME: APP_AUTHOR,
-    GIT_AUTHOR_EMAIL: APP_EMAIL,
-    GIT_COMMITTER_NAME: APP_AUTHOR,
-    GIT_COMMITTER_EMAIL: APP_EMAIL,
-    LC_ALL: "C",
-    LANG: "C",
-    ...extra,
-  };
-}
-
-/** Run Git as an argument array without a shell. */
-function runGit(args: string[], opts: { cwd?: string; env?: Record<string, string>; input?: Buffer | string } = {}): Promise<GitResult> {
-  return new Promise((resolvePromise) => {
-    const child = spawn("git", args, {
-      cwd: opts.cwd,
-      env: { ...process.env, ...gitEnv(opts.env) },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    let stdoutBytes = 0;
-    let stderrBytes = 0;
-    let overflow = false;
-    child.stdout.on("data", (d: Buffer) => {
-      if (stdoutBytes + d.length > MAX_GIT_STDOUT_BYTES) {
-        overflow = true;
-        child.kill("SIGKILL");
-        return;
-      }
-      stdout.push(d);
-      stdoutBytes += d.length;
-    });
-    child.stderr.on("data", (d: Buffer) => {
-      if (stderrBytes < MAX_GIT_STDERR_BYTES) {
-        const keep = d.subarray(0, MAX_GIT_STDERR_BYTES - stderrBytes);
-        stderr.push(keep);
-        stderrBytes += keep.length;
-      }
-    });
-    if (opts.input !== undefined) child.stdin.write(opts.input);
-    child.stdin.end();
-    child.on("error", (err) => resolvePromise({ code: -1, stdout: Buffer.alloc(0), stderr: err.message }));
-    child.on("close", (code) =>
-      resolvePromise({
-        code: overflow ? -1 : code ?? -1,
-        stdout: Buffer.concat(stdout),
-        stderr: overflow ? "git output exceeded the 64 MB limit" : Buffer.concat(stderr).toString("utf8"),
-      }),
-    );
-  });
-}
-
-/** Parse "2.53.0" style versions. Returns null on an unparsable string. */
-function parseGitVersion(raw: string): number[] | null {
-  const m = raw.match(/(\d+)\.(\d+)(?:\.(\d+))?/);
-  if (!m) return null;
-  return [Number(m[1]), Number(m[2]), m[3] !== undefined ? Number(m[3]) : 0];
-}
-
-/** True when versionA >= versionB. */
-function versionAtLeast(a: number[], b: number[]): boolean {
-  for (let i = 0; i < b.length; i++) {
-    if ((a[i] ?? 0) > (b[i] ?? 0)) return true;
-    if ((a[i] ?? 0) < (b[i] ?? 0)) return false;
-  }
-  return true;
-}
-
-/** The current Git version, or null when Git is missing or unparsable. */
-export async function gitVersion(): Promise<number[] | null> {
-  const r = await runGit(["--version"]);
-  if (r.code !== 0) return null;
-  return parseGitVersion(r.stdout.toString("utf8"));
-}
-
-/** True when the platform provides a reliable recursive watcher. */
-export function platformHasRecursiveWatcher(): boolean {
-  return process.platform === "darwin" || process.platform === "win32";
-}
-
-/** True when the platform binary `sandbox-exec` exists (macOS). */
-export function platformHasSandboxExec(): boolean {
-  if (process.platform !== "darwin") return false;
-  try {
-    readFileSync("/usr/bin/sandbox-exec");
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** True when the platform provides copy-on-write clones (`cp -c`). */
-export function platformHasCopyOnWrite(): boolean {
-  return process.platform === "darwin";
-}
-
-/** Free disk bytes on the volume that holds `path`. Returns null on error. */
-export async function freeDiskBytes(path: string): Promise<number | null> {
-  try {
-    const out = await new Promise<string>((res) => {
-      execFile("df", ["-k", path], { encoding: "utf8", maxBuffer: 1024 * 1024 }, (_err, stdout) => res(stdout));
-    });
-    const lines = out.trim().split("\n");
-    const header = lines[0]?.split(/\s+/) ?? [];
-    // macOS says "Available"; Linux says "Avail".
-    const availIdx = header.findIndex((h) => h.startsWith("Avail"));
-    const row = lines[1]?.split(/\s+/) ?? [];
-    const avail = Number(row[availIdx]);
-    return Number.isFinite(avail) ? avail * 1024 : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Resolve a Git directory that may be relative to `cwd`. */
-function resolveGitDir(cwd: string, gitDir: string): string {
-  return isAbsolute(gitDir) ? resolve(gitDir) : resolve(cwd, gitDir);
-}
-
-/** True when the path is inside the app-owned worlds root. */
-function insideWorldsRoot(path: string, worldsRoot: string | undefined): boolean {
-  if (!worldsRoot) return false;
-  if (path === worldsRoot) return true;
-  return path.startsWith(worldsRoot + sep);
 }
 
 /**
@@ -267,145 +97,18 @@ export class SnapshotStore {
 
   /** Create the store and link a read-only alternate to the source objects. */
   static async create(dir: string, sourceRoot: string, sourceGitDir: string, objectFormat: "sha1" | "sha256"): Promise<SnapshotStore> {
-    const store = new SnapshotStore(dir, sourceRoot, sourceGitDir, objectFormat);
-    await mkdir(dir, { recursive: true });
-    const init = await runGit(["init", "--bare", "--object-format", objectFormat, store.gitDir]);
-    if (init.code !== 0) throw new Error(`snapshot store init failed: ${init.stderr}`);
-    // Disable gc: the store keeps objects that a gc run would prune.
-    const env = { GIT_DIR: store.gitDir };
-    await runGit(["config", "gc.auto", "0"], { env });
-    // A new app session has no in-memory run records. Remove refs left by a
-    // crashed session before the first capture.
-    const oldRefs = await runGit(["for-each-ref", "--format=%(refname)", "refs/termina/state"], { env });
-    if (oldRefs.code === 0) {
-      for (const ref of oldRefs.stdout.toString("utf8").split("\n")) {
-        if (ref) await runGit(["update-ref", "-d", ref], { env });
-      }
-    }
-    // Read-only object access to the source repository.
-    const altDir = join(store.gitDir, "objects", "info");
-    await mkdir(altDir, { recursive: true });
-    await writeFile(join(altDir, "alternates"), sourceGitDir + sep + "objects" + "\n", "utf8");
-    return store;
-  }
-
-  /** Open an existing store without initializing it (worker side). */
-  static open(dir: string, sourceRoot: string, sourceGitDir: string, objectFormat: "sha1" | "sha256"): SnapshotStore {
+    await coreClient.request({
+      op: "store-create",
+      storeDir: dir,
+      sourceGitDir,
+      objectFormat,
+    });
     return new SnapshotStore(dir, sourceRoot, sourceGitDir, objectFormat);
   }
 
-  /** Run Git against the store. */
-  private async git(args: string[], opts: { input?: Buffer | string } = {}): Promise<GitResult> {
-    return runGit(args, { env: { GIT_DIR: this.gitDir }, input: opts.input });
-  }
-
-  /** Run a read-only Git command against the source repository. */
-  private async sourceGit(args: string[]): Promise<GitResult> {
-    return runGit(args, { cwd: this.sourceRoot });
-  }
-
-  /**
-   * Preflight the source repository for byte-exact capture.
-   * Returns every failing condition with a stable reason string.
-   */
-  async preflightRepo(opts: { worldsRoot?: string } = {}): Promise<PreflightResult> {
-    const reasons: string[] = [];
-    const version = await gitVersion();
-    if (!version) reasons.push("git is not installed or its version is unparsable");
-    else if (!versionAtLeast(version, MIN_GIT_VERSION)) reasons.push(`git ${version.join(".")} is older than the minimum ${MIN_GIT_VERSION.join(".")}`);
-
-    const cwd = this.sourceRoot;
-    const top = await this.sourceGit(["rev-parse", "--show-toplevel"]);
-    if (top.code !== 0) {
-      reasons.push("the opened folder is not inside a Git repository");
-      return { ok: reasons.length === 0, reasons };
-    }
-    // Git reports canonical paths (/private/var/...). Compare canonical forms.
-    let cwdCanon = resolve(cwd);
-    try {
-      cwdCanon = realpathSync(cwd);
-    } catch {
-      /* the folder vanished — keep the resolved form */
-    }
-    const topLevel = resolve(top.stdout.toString("utf8").trim());
-    if (topLevel !== cwdCanon) reasons.push("the opened folder is not the Git top-level directory");
-    if (insideWorldsRoot(cwdCanon, opts.worldsRoot)) reasons.push("the opened folder is inside the app-owned worlds root");
-
-    // Active merge/rebase/cherry-pick/revert state.
-    for (const marker of ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "BISECT_LOG"]) {
-      try {
-        await stat(join(this.sourceGitDir, marker));
-        reasons.push(`the repository has an active ${marker.replace(/_/g, "-").toLowerCase()} operation`);
-      } catch {
-        /* no marker */
-      }
-    }
-    for (const dir of ["rebase-merge", "rebase-apply"]) {
-      try {
-        await stat(join(this.sourceGitDir, dir));
-        reasons.push("the repository has an active rebase");
-        break;
-      } catch {
-        /* no marker */
-      }
-    }
-
-    // Unresolved index entries (unmerged paths).
-    const unmerged = await this.sourceGit(["ls-files", "-u"]);
-    if (unmerged.code === 0 && unmerged.stdout.length > 0) reasons.push("the repository has unresolved index entries");
-
-    // Submodules and gitlinks in the index.
-    const staged = await this.sourceGit(["ls-files", "-s"]);
-    if (staged.code === 0) {
-      const lines = staged.stdout.toString("utf8").split("\n");
-      if (lines.some((l) => l.startsWith("160000"))) reasons.push("the project contains a submodule");
-    }
-
-    // Sparse checkout and partial clones.
-    const sparse = await this.sourceGit(["config", "--get", "core.sparseCheckout"]);
-    if (sparse.code === 0 && sparse.stdout.toString("utf8").trim() !== "false") reasons.push("a sparse checkout is active");
-    const partial = await this.sourceGit(["config", "--get", "extensions.partialClone"]);
-    if (partial.code === 0) reasons.push("a partial clone is active");
-
-    // A source object alternate in the user's repository.
-    try {
-      await stat(join(this.sourceGitDir, "objects", "info", "alternates"));
-      reasons.push("a source object alternate is active");
-    } catch {
-      /* none */
-    }
-
-    // Content-transforming settings that break byte-exact materialization.
-    const autocrlf = await this.sourceGit(["config", "--get", "core.autocrlf"]);
-    if (autocrlf.code === 0 && autocrlf.stdout.toString("utf8").trim() !== "false") reasons.push("core.autocrlf is not false");
-    const eol = await this.sourceGit(["config", "--get", "core.eol"]);
-    if (eol.code === 0 && eol.stdout.toString("utf8").trim() !== "native") reasons.push("core.eol is configured");
-    const filters = await this.sourceGit(["config", "--get-regexp", "^filter\\."]);
-    if (filters.code === 0) reasons.push("a Git clean/smudge filter is configured");
-    const diffDrivers = await this.sourceGit(["config", "--get-regexp", "^diff\\."]);
-    if (diffDrivers.code === 0) reasons.push("a Git LFS or diff driver is configured");
-    const mergeDrivers = await this.sourceGit(["config", "--get-regexp", "^merge\\."]);
-    if (mergeDrivers.code === 0) reasons.push("a custom merge driver is configured");
-
-    // Transform-bearing attributes in any tracked .gitattributes file.
-    const transformAttrs = /(^|\s)(filter|eol|working-tree-encoding|ident|text|export-subst)(=|\s|$)/;
-    const attrFiles = await this.sourceGit(["ls-files", "-z", "--", "*.gitattributes", ".gitattributes", "**/.gitattributes"]);
-    if (attrFiles.code === 0 && attrFiles.stdout.length > 0) {
-      for (const file of attrFiles.stdout.toString("utf8").split("\0")) {
-        if (!file) continue;
-        try {
-          const content = await readFile(join(this.sourceRoot, file), "utf8");
-          if (transformAttrs.test(content)) {
-            reasons.push("a .gitattributes file contains content-transforming entries");
-            break;
-          }
-        } catch {
-          /* unreadable attributes file — leave as-is */
-        }
-      }
-    }
-
-    return { ok: reasons.length === 0, reasons };
+  /** The request payload shared by every store op. */
+  private payload(op: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+    return { op, storeDir: this.dir, sourceRoot: this.sourceRoot, sourceGitDir: this.sourceGitDir, objectFormat: this.objectFormat, ...extra };
   }
 
   /**
@@ -413,10 +116,6 @@ export class SnapshotStore {
    * Reads tracked, staged, unstaged, and non-ignored untracked files.
    * Accepts only regular files and symlinks.
    * Returns a synthetic commit in the store.
-   *
-   * @param head the current HEAD oid, or null when unborn
-   * @param parentCommit the lineage parent for the new commit, or null
-   * @param hooks test seams for the spike suites
    */
   async capture(
     head: string | null,
@@ -425,107 +124,23 @@ export class SnapshotStore {
     hooks: CaptureHooks = {},
     source?: { root: string; gitDir: string },
   ): Promise<SourceState> {
-    const maxPaths = budget.maxPaths ?? BUDGETS.maxPaths;
-    const maxFileBytes = budget.maxFileBytes ?? BUDGETS.maxFileBytes;
-    const maxNewBlobBytes = budget.maxNewBlobBytes ?? BUDGETS.maxNewBlobBytes;
-    // A promotion captures the candidate head from the candidate tree; the
-    // store still owns the synthetic commits. The default is the primary.
-    const cwd = source?.root ?? this.sourceRoot;
-    const gitCmd = source
-      ? (args: string[]) => runGitIn(cwd, args)
-      : (args: string[]) => this.sourceGit(args);
-
-    // Enumerate the capture domain: tracked paths plus non-ignored untracked.
-    const [tracked, untracked] = await Promise.all([
-      gitCmd(["ls-files", "-z"]),
-      gitCmd(["ls-files", "-z", "--others", "--exclude-standard"]),
-    ]);
-    if (tracked.code !== 0 || untracked.code !== 0) {
-      throw new Error(`source enumeration failed: ${tracked.stderr || untracked.stderr}`);
-    }
-    const paths = new Set<string>();
-    for (const buf of [tracked.stdout, untracked.stdout]) {
-      for (const p of buf.toString("utf8").split("\0")) {
-        if (!p) continue;
-        if (p.split(sep).some((seg) => seg === ".git")) throw new Error(`nested repository in capture domain: ${p}`);
-        paths.add(p);
-      }
-    }
-    if (paths.size > maxPaths) throw new Error(`capture exceeds the ${maxPaths} path budget (${paths.size} paths)`);
-
-    // Hash every file and build the tree entry list.
-    const entries: string[] = [];
-    const expected = new Map<string, { mode: string; oid: string }>();
-    let newBlobBytes = 0;
-    // Git sorts tree entries by raw bytes; sort the same way.
-    const sorted = [...paths].sort((a, b) => Buffer.from(a, "utf8").compare(Buffer.from(b, "utf8")));
-    for (const relPath of sorted) {
-      const abs = join(cwd, relPath);
-      let st;
-      try {
-        st = lstatSync(abs);
-      } catch {
-        continue; // deleted between enumeration and capture — not in the tree
-      }
-      if (st.isSymbolicLink()) {
-        const target = readlinkSync(abs);
-        const blob = await this.hashBytes(target);
-        newBlobBytes += blob.newBytes;
-        entries.push(`120000 blob ${blob.oid}\t${relPath}`);
-        expected.set(relPath, { mode: "120000", oid: blob.oid });
-        continue;
-      }
-      if (st.isDirectory()) continue; // a submodule gitlink: the fork preflight rejects it
-      if (!st.isFile()) throw new Error(`unsupported file type in capture domain: ${relPath}`);
-      if (st.size > maxFileBytes) throw new Error(`file exceeds the ${maxFileBytes} byte budget: ${relPath}`);
-
-      // Open without following symlinks. Verify the file did not change
-      // while it was read, and that the path still names the open file.
-      let fd: number;
-      try {
-        fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
-      } catch {
-        continue; // vanished — not in the tree
-      }
-      const mode = st.mode & 0o111 ? "100755" : "100644";
-      const blob = await this.hashFileWithCheck(fd, abs, hooks.onBeforeRead);
-      newBlobBytes += blob.newBytes;
-      entries.push(`${mode} blob ${blob.oid}\t${relPath}`);
-      expected.set(relPath, { mode, oid: blob.oid });
-      hooks.onFileRead?.(abs);
-    }
-    if (newBlobBytes > maxNewBlobBytes) throw new Error(`capture exceeds the ${maxNewBlobBytes} new-blob byte budget (${newBlobBytes} bytes)`);
-
-    // Build the tree through a temporary index, then the synthetic commit.
-    const tree = await this.writeTree(entries);
-    const commit = await this.commitTree(tree, parentCommit);
-    await this.updateRef(commit);
-
-    // Read the tree back and verify every expected entry.
-    const verify = await this.git(["ls-tree", "-r", "-z", tree]);
-    if (verify.code !== 0) throw new Error(`tree verification failed: ${verify.stderr}`);
-    const seen = new Map<string, { mode: string; oid: string }>();
-    for (const rec of verify.stdout.toString("utf8").split("\0")) {
-      if (!rec) continue;
-      const tab = rec.indexOf("\t");
-      if (tab === -1) continue;
-      const meta = rec.slice(0, tab).split(" ");
-      seen.set(rec.slice(tab + 1), { mode: meta[0] ?? "", oid: meta[2] ?? "" });
-    }
-    if (seen.size !== expected.size) throw new Error(`tree verification size mismatch: ${seen.size} vs ${expected.size}`);
-    for (const [p, exp] of expected) {
-      const got = seen.get(p);
-      if (!got || got.mode !== exp.mode || got.oid !== exp.oid) throw new Error(`tree verification mismatch for ${p}`);
-    }
-
-    return { commit, tree, head, pathCount: entries.length, newBlobBytes, parentCommit, ts: Date.now() };
+    return coreClient.request(
+      this.payload("capture", {
+        head,
+        parentCommit,
+        budget,
+        hooks,
+        captureRoot: source?.root,
+        captureGitDir: source?.gitDir,
+      }),
+    ) as Promise<SourceState>;
   }
 
   /**
-   * Incremental capture (WORLDLINES §6.4): reuse the parent tree and update
-   * only the hinted paths. The watcher hints are the delta; the optional
-   * reconcile map (watcher cache entries, path → content) catches missed
-   * events by comparing git blob hashes against the parent tree.
+   * Incremental capture (WORLDLINES section 6.4): reuse the parent tree
+   * and update only the hinted paths. The watcher hints are the delta;
+   * the reconcile map catches missed events by comparing blob hashes
+   * against the parent tree.
    */
   async captureIncremental(
     parentCommit: string,
@@ -535,235 +150,17 @@ export class SnapshotStore {
     hooks: CaptureHooks = {},
     source?: { root: string; gitDir: string },
   ): Promise<SourceState> {
-    const maxFileBytes = budget.maxFileBytes ?? BUDGETS.maxFileBytes;
-    const maxNewBlobBytes = budget.maxNewBlobBytes ?? BUDGETS.maxNewBlobBytes;
-    const cwd = source?.root ?? this.sourceRoot;
-    const parentTree = await this.resolveTree(parentCommit);
-
-    // The capture set: hints plus reconciled cache entries whose git blob
-    // differs from the parent tree (missed watcher events).
-    const isSafeRelative = (path: string): boolean => path.length > 0 && path !== "." && !isAbsolute(path) && !path.split(/[\\/]/).includes("..");
-    const changed = new Map<string, "created" | "modified" | "deleted">();
-    for (const h of hints) {
-      if (isSafeRelative(h)) changed.set(h, changed.has(h) ? changed.get(h)! : "modified");
-    }
-    const safeReconcile = reconcile.filter((entry) => isSafeRelative(entry.relPath));
-    if (safeReconcile.length > 0) {
-      // One path-limited ls-tree answers every cached path at once.
-      const args = ["ls-tree", parentTree, "-z", "--", ...safeReconcile.map((r) => r.relPath)];
-      const r = await this.git(args);
-      const parentBlobs = new Map<string, string>();
-      for (const rec of r.stdout.toString("utf8").split("\0")) {
-        if (!rec) continue;
-        const tab = rec.indexOf("\t");
-        if (tab === -1) continue;
-        const meta = rec.slice(0, tab).split(" ");
-        if (meta[1] === "blob") parentBlobs.set(rec.slice(tab + 1), meta[2]);
-      }
-      for (const { relPath, content } of safeReconcile) {
-        const parentOid = parentBlobs.get(relPath);
-        if (parentOid === undefined) continue; // not in the capture domain
-        const oid = this.blobOid(Buffer.from(content, "utf8"));
-        if (oid !== parentOid) {
-          changed.set(relPath, "modified");
-        }
-      }
-    }
-    if (changed.size === 0) return { commit: parentCommit, tree: parentTree, head: null, pathCount: 0, newBlobBytes: 0, parentCommit, ts: Date.now() };
-
-    // Seed the temp index from the parent tree, then apply the delta.
-    const indexPath = join(this.dir, "tmp", `index-${Math.random().toString(36).slice(2)}`);
-    const env = { GIT_DIR: this.gitDir, GIT_INDEX_FILE: indexPath };
-    const expected = new Map<string, { mode: string; oid: string }>();
-    let newBlobBytes = 0;
-    try {
-      await mkdir(dirname(indexPath), { recursive: true });
-      const rt = await runGit(["read-tree", parentTree], { env });
-      if (rt.code !== 0) throw new Error(`read-tree failed: ${rt.stderr}`);
-      const entries: string[] = [];
-      for (const relPath of changed.keys()) {
-        const abs = join(cwd, relPath);
-        let st;
-        try {
-          st = lstatSync(abs);
-        } catch {
-          changed.set(relPath, "deleted");
-        }
-        if (st) {
-          if (st.isSymbolicLink()) {
-            const target = readlinkSync(abs);
-            const blob = await this.hashBytes(target);
-            newBlobBytes += blob.newBytes;
-            entries.push(`120000 blob ${blob.oid}\t${relPath}`);
-            expected.set(relPath, { mode: "120000", oid: blob.oid });
-            continue;
-          }
-          if (st.isDirectory()) {
-            changed.set(relPath, "deleted");
-            continue;
-          }
-          if (!st.isFile()) throw new Error(`unsupported file type in capture domain: ${relPath}`);
-          if (st.size > maxFileBytes) throw new Error(`file exceeds the ${maxFileBytes} byte budget: ${relPath}`);
-          let fd: number;
-          try {
-            fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
-          } catch {
-            changed.set(relPath, "deleted");
-            continue;
-          }
-          const mode = st.mode & 0o111 ? "100755" : "100644";
-          const blob = await this.hashFileWithCheck(fd, abs, hooks.onBeforeRead);
-          newBlobBytes += blob.newBytes;
-          entries.push(`${mode} blob ${blob.oid}\t${relPath}`);
-          expected.set(relPath, { mode, oid: blob.oid });
-          hooks.onFileRead?.(abs);
-        }
-      }
-      if (newBlobBytes > maxNewBlobBytes) {
-        throw new Error(`capture exceeds the ${maxNewBlobBytes} new-blob byte budget (${newBlobBytes} bytes)`);
-      }
-      // Apply the delta to the temp index: writes via index-info, removals
-      // via force-remove.
-      if (entries.length > 0) {
-        const up = await runGit(["update-index", "--index-info"], { env, input: entries.join("\n") + "\n" });
-        if (up.code !== 0) throw new Error(`update-index failed: ${up.stderr}`);
-      }
-      const removes = [...changed.keys()].filter((p) => !expected.has(p));
-      for (const relPath of removes) {
-        const rmRes = await runGit(["update-index", "--force-remove", "--", relPath], { env });
-        if (rmRes.code !== 0) throw new Error(`update-index --force-remove failed: ${rmRes.stderr}`);
-      }
-      const tree = await runGit(["write-tree"], { env });
-      if (tree.code !== 0) throw new Error(`write-tree failed: ${tree.stderr}`);
-      const treeOid = tree.stdout.toString("utf8").trim();
-      const commit = await this.commitTree(treeOid, parentCommit);
-      await this.updateRef(commit);
-
-      // Verify every changed entry against the new tree.
-      if (expected.size > 0) {
-        const verify = await this.git(["ls-tree", "-z", treeOid, "--", ...expected.keys()]);
-        if (verify.code !== 0) throw new Error(`tree verification failed: ${verify.stderr}`);
-        const seen = new Map<string, { mode: string; oid: string }>();
-        for (const rec of verify.stdout.toString("utf8").split("\0")) {
-          if (!rec) continue;
-          const tab = rec.indexOf("\t");
-          if (tab === -1) continue;
-          const meta = rec.slice(0, tab).split(" ");
-          seen.set(rec.slice(tab + 1), { mode: meta[0] ?? "", oid: meta[2] ?? "" });
-        }
-        if (seen.size !== expected.size) throw new Error(`tree verification size mismatch: ${seen.size} vs ${expected.size}`);
-        for (const [p, exp] of expected) {
-          const got = seen.get(p);
-          if (!got || got.mode !== exp.mode || got.oid !== exp.oid) throw new Error(`tree verification mismatch for ${p}`);
-        }
-      }
-      return { commit, tree: treeOid, head: null, pathCount: entries.length, newBlobBytes, parentCommit, ts: Date.now() };
-    } finally {
-      await rm(indexPath, { force: true });
-    }
-  }
-
-  /**
-   * Write raw bytes as a loose blob object in the store.
-   * The loose format is zlib(header + bytes); the oid is the hash of
-   * header + bytes. Writing objects directly avoids one git spawn per
-   * file; the capture spike verifies the format byte-for-byte.
-   */
-  private blobOid(bytes: Buffer): string {
-    const header = Buffer.from(`blob ${bytes.length}\0`, "utf8");
-    const hash = createHash(this.objectFormat === "sha256" ? "sha256" : "sha1");
-    hash.update(header);
-    hash.update(bytes);
-    return hash.digest("hex");
-  }
-
-  private async writeBlob(bytes: Buffer): Promise<BlobWrite> {
-    const oid = this.blobOid(bytes);
-    const loose = join(this.gitDir, "objects", oid.slice(0, 2), oid.slice(2));
-    if (existsSync(loose)) return { oid, newBytes: 0 };
-    const header = Buffer.from(`blob ${bytes.length}\0`, "utf8");
-    await mkdir(dirname(loose), { recursive: true });
-    const tmp = `${loose}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
-    await writeFile(tmp, deflateSync(Buffer.concat([header, bytes])), { mode: 0o600 });
-    try {
-      await rename(tmp, loose);
-      return { oid, newBytes: bytes.length };
-    } catch (err) {
-      await rm(tmp, { force: true });
-      if (existsSync(loose)) return { oid, newBytes: 0 };
-      throw err;
-    }
-  }
-
-  /** Hash and store a byte string. */
-  private async hashBytes(content: string): Promise<BlobWrite> {
-    return this.writeBlob(Buffer.from(content, "utf8"));
-  }
-
-  /**
-   * Read an open file descriptor, verify it with fstat before and after,
-   * and hash the bytes into the store. Returns the blob result.
-   */
-  private async hashFileWithCheck(fd: number, abs: string, onBeforeRead?: (path: string) => void): Promise<BlobWrite> {
-    try {
-      const before = fstatSync(fd);
-      onBeforeRead?.(abs);
-      const { readFileSync } = await import("node:fs");
-      const bytes = readFileSync(fd);
-      const after = fstatSync(fd);
-      if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
-        throw new Error(`file changed while captured: ${abs}`);
-      }
-      // The path must still name the open file.
-      let pathSt;
-      try {
-        pathSt = lstatSync(abs);
-      } catch {
-        throw new Error(`file vanished while captured: ${abs}`);
-      }
-      if (pathSt.dev !== after.dev || pathSt.ino !== after.ino) throw new Error(`file replaced while captured: ${abs}`);
-      return this.writeBlob(bytes);
-    } finally {
-      try {
-        closeSync(fd);
-      } catch {
-        /* already closed */
-      }
-    }
-  }
-
-  /**
-   * Build a tree from flat entries through a temporary index.
-   * Handles nested paths; writes one tree object.
-   */
-  private async writeTree(entries: string[]): Promise<string> {
-    const indexPath = join(this.dir, "tmp", `index-${Math.random().toString(36).slice(2)}`);
-    await mkdir(dirname(indexPath), { recursive: true });
-    try {
-      const env = { GIT_DIR: this.gitDir, GIT_INDEX_FILE: indexPath };
-      const add = await runGit(["update-index", "--index-info"], { env, input: entries.length ? entries.join("\n") + "\n" : "" });
-      if (add.code !== 0) throw new Error(`update-index failed: ${add.stderr}`);
-      const wt = await runGit(["write-tree"], { env });
-      if (wt.code !== 0) throw new Error(`write-tree failed: ${wt.stderr}`);
-      return wt.stdout.toString("utf8").trim();
-    } finally {
-      await rm(indexPath, { force: true });
-    }
-  }
-
-  /** Create the synthetic state commit. */
-  private async commitTree(tree: string, parent: string | null): Promise<string> {
-    const args = ["commit-tree", tree, "-m", "termina source state"];
-    if (parent) args.push("-p", parent);
-    const r = await this.git(args);
-    if (r.code !== 0) throw new Error(`commit-tree failed: ${r.stderr}`);
-    return r.stdout.toString("utf8").trim();
-  }
-
-  /** Pin a state commit with a store-local ref so gc never prunes it. */
-  private async updateRef(commit: string): Promise<void> {
-    const r = await this.git(["update-ref", `refs/termina/state/${commit}`, commit]);
-    if (r.code !== 0) throw new Error(`update-ref failed: ${r.stderr}`);
+    return coreClient.request(
+      this.payload("capture-incremental", {
+        parentCommit,
+        hints,
+        reconcile,
+        budget,
+        hooks,
+        captureRoot: source?.root,
+        captureGitDir: source?.gitDir,
+      }),
+    ) as Promise<SourceState>;
   }
 
   /**
@@ -771,250 +168,72 @@ export class SnapshotStore {
    * Remove stale source paths and preserve only the requested runtime paths.
    */
   async materialize(stateCommit: string, targetDir: string, options: MaterializeOptions = {}): Promise<void> {
-    const tree = await this.resolveTree(stateCommit);
-    const list = await this.git(["ls-tree", "-r", "-z", tree]);
-    if (list.code !== 0) throw new Error(`ls-tree failed: ${list.stderr}`);
-    const records: Array<{ mode: string; type: string; oid: string; path: string }> = [];
-    for (const rec of list.stdout.toString("utf8").split("\0")) {
-      if (!rec) continue;
-      const tab = rec.indexOf("\t");
-      if (tab === -1) continue;
-      const meta = rec.slice(0, tab).split(" ");
-      if (meta[1] === "tree") continue;
-      records.push({ mode: meta[0] ?? "", type: meta[1] ?? "", oid: meta[2] ?? "", path: rec.slice(tab + 1) });
-    }
-    await mkdir(targetDir, { recursive: true });
-    const desired = new Set(records.map((record) => record.path));
-    const desiredDirectories = this.desiredDirectories(desired);
-    const preserve = new Set([".git", ...(options.preserveTopLevel ?? [])]);
-    await this.removeStalePaths(targetDir, "", desired, desiredDirectories, preserve);
-
-    const blobs = new Map<string, Buffer>();
-    const want = records.filter((r) => r.type === "blob").map((r) => r.oid);
-    if (want.length > 0) {
-      const all = await this.catFileBatch(want);
-      all.forEach((buf, oid) => blobs.set(oid, buf));
-    }
-    for (const rec of records) {
-      const full = join(targetDir, rec.path);
-      await this.ensureParentDirectories(targetDir, rec.path);
-      if (rec.mode === "120000") {
-        const target = blobs.get(rec.oid)?.toString("utf8") ?? "";
-        const current = await this.linkTarget(full);
-        if (current !== target) {
-          await this.removePath(full);
-          await symlink(target, full);
-        }
-        continue;
-      }
-      const content = blobs.get(rec.oid);
-      if (content === undefined) throw new Error(`missing blob ${rec.oid} while materializing ${rec.path}`);
-      await this.replaceFile(full, content, rec.mode === "100755" ? 0o755 : 0o644);
-    }
-  }
-
-  private desiredDirectories(desired: Set<string>): Set<string> {
-    const directories = new Set<string>();
-    for (const path of desired) {
-      const parts = path.split("/");
-      parts.pop();
-      let current = "";
-      for (const part of parts) {
-        current = current ? `${current}/${part}` : part;
-        directories.add(current);
-      }
-    }
-    return directories;
-  }
-
-  private async removeStalePaths(
-    dir: string,
-    relDir: string,
-    desired: Set<string>,
-    desiredDirectories: Set<string>,
-    preserve: Set<string>,
-  ): Promise<void> {
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const relPath = relDir ? `${relDir}/${entry.name}` : entry.name;
-      if (!relDir && preserve.has(entry.name)) continue;
-      const full = join(dir, entry.name);
-      if (entry.isDirectory() && !entry.isSymbolicLink()) {
-        if (desiredDirectories.has(relPath)) await this.removeStalePaths(full, relPath, desired, desiredDirectories, preserve);
-        else await rm(full, { recursive: true, force: true });
-      } else if (!desired.has(relPath)) {
-        await rm(full, { recursive: true, force: true });
-      }
-    }
-  }
-
-  private async ensureParentDirectories(root: string, relPath: string): Promise<void> {
-    const parts = relPath.split("/");
-    parts.pop();
-    let current = root;
-    for (const part of parts) {
-      current = join(current, part);
-      try {
-        const entry = await lstat(current);
-        if (!entry.isDirectory()) {
-          await rm(current, { recursive: true, force: true });
-          await mkdir(current);
-        }
-      } catch {
-        await mkdir(current, { recursive: true });
-      }
-    }
-  }
-
-  private async linkTarget(path: string): Promise<string | null> {
-    try {
-      const entry = await lstat(path);
-      if (!entry.isSymbolicLink()) return null;
-      return await readlink(path);
-    } catch {
-      return null;
-    }
-  }
-
-  private async removePath(path: string): Promise<void> {
-    await rm(path, { recursive: true, force: true });
-  }
-
-  private async replaceFile(path: string, content: Buffer, mode: number): Promise<void> {
-    try {
-      const entry = await lstat(path);
-      if (!entry.isFile()) await this.removePath(path);
-    } catch {
-      /* the file does not exist */
-    }
-    await writeFile(path, content, { mode });
-    await chmod(path, mode);
-  }
-
-  /** Resolve a state commit to its tree oid. */
-  private async resolveTree(commit: string): Promise<string> {
-    const r = await this.git(["rev-parse", `${commit}^{tree}`]);
-    if (r.code !== 0) throw new Error(`resolve tree failed: ${r.stderr}`);
-    return r.stdout.toString("utf8").trim();
-  }
-
-  /** Read many blobs from the store with one batch process. */
-  private async catFileBatch(oids: string[]): Promise<Map<string, Buffer>> {
-    return new Promise((resolvePromise, reject) => {
-      const child = spawn("git", ["cat-file", "--batch"], { env: { ...process.env, ...gitEnv({ GIT_DIR: this.gitDir }) } });
-      const out: Buffer[] = [];
-      child.stdout.on("data", (d: Buffer) => out.push(d));
-      child.on("error", (err) => reject(err));
-      child.on("close", () => {
-        const map = new Map<string, Buffer>();
-        const buf = Buffer.concat(out);
-        let pos = 0;
-        while (pos < buf.length) {
-          const nl = buf.indexOf(0x0a, pos);
-          if (nl === -1) break;
-          const header = buf.subarray(pos, nl).toString("utf8");
-          const parts = header.split(" ");
-          if (parts.length < 3 || parts[1] === "missing") {
-            pos = nl + 1;
-            continue;
-          }
-          const size = Number(parts[2]);
-          const start = nl + 1;
-          map.set(parts[0], buf.subarray(start, start + size));
-          pos = start + size + 1; // skip the trailing newline
-        }
-        resolvePromise(map);
-      });
-      child.stdin.write(oids.map((o) => `${o}\n`).join(""));
-      child.stdin.end();
-    });
+    await coreClient.request(this.payload("materialize", { stateId: stateCommit, targetDir, preserveTopLevel: options.preserveTopLevel }));
   }
 
   /**
    * Three-way merge of the candidate head into the current primary state.
    * The commit graph provides the base: every state chains from the root
-   * primary state, so its LCA is that root (WORLDLINES §6.10).
+   * primary state, so its LCA is that root (WORLDLINES section 6.10).
    * Detects conflicts without writing any primary path.
    */
   async merge3(candidateCommit: string, primaryCommit: string): Promise<MergeResult> {
-    const r = await this.git(["merge-tree", "--write-tree", "--name-only", "-z", "--no-messages", candidateCommit, primaryCommit]);
-    if (r.code !== 0 && r.code !== 1) return { ok: false, tree: null, conflicts: [], reason: `merge-tree failed: ${r.stderr}` };
-    const tokens = r.stdout.toString("utf8").split("\0").filter((t) => t.length > 0);
-    const tree = tokens[0] ?? null;
-    const conflicts = tokens.slice(1);
-    return { ok: r.code === 0, tree, conflicts };
+    const res = (await coreClient.request(this.payload("merge3", { ours: candidateCommit, theirs: primaryCommit }))) as { result: MergeResult };
+    return res.result;
   }
 
-  /** Remove a store-local state ref (eviction). */
-  async unref(commit: string): Promise<void> {
-    await this.git(["update-ref", "-d", `refs/termina/state/${commit}`]);
-  }
-
-  /** The changed paths between two store states (name-status). */
+  /** The changed paths between two store states. */
   async diffTree(stateA: string, stateB: string): Promise<Array<{ relPath: string; status: "created" | "modified" | "deleted" }>> {
-    const r = await this.git(["diff-tree", "-r", "--name-status", "-z", stateA, stateB]);
-    if (r.code !== 0) throw new Error(`diff-tree failed: ${r.stderr}`);
-    const out: Array<{ relPath: string; status: "created" | "modified" | "deleted" }> = [];
-    const tokens = r.stdout.toString("utf8").split("\0").filter((t) => t.length > 0);
-    for (let i = 0; i + 1 < tokens.length; i += 2) {
-      const kind = tokens[i];
-      const path = tokens[i + 1];
-      if (kind.startsWith("D")) out.push({ relPath: path, status: "deleted" });
-      else if (kind.startsWith("A")) out.push({ relPath: path, status: "created" });
-      else if (kind.startsWith("R")) {
-        const [oldPath, newPath] = path.split("\t");
-        if (newPath) {
-          out.push({ relPath: newPath, status: "created" });
-          out.push({ relPath: oldPath, status: "deleted" });
-        } else out.push({ relPath: path, status: "modified" });
-      } else out.push({ relPath: path, status: "modified" });
-    }
-    return out;
+    const res = (await coreClient.request(this.payload("diff-tree", { stateA, stateB }))) as { changes: Array<{ relPath: string; status: "created" | "modified" | "deleted" }> };
+    return res.changes;
   }
 
   /** The tree paths of a state (for deletion detection). */
   async treePaths(state: string): Promise<Set<string>> {
-    const tree = await this.resolveTree(state);
-    const r = await this.git(["ls-tree", "-r", "-z", tree]);
-    if (r.code !== 0) throw new Error(`ls-tree failed: ${r.stderr}`);
-    const out = new Set<string>();
-    for (const rec of r.stdout.toString("utf8").split("\0")) {
-      if (!rec) continue;
-      const tab = rec.indexOf("\t");
-      if (tab === -1) continue;
-      if (rec.slice(0, tab).split(" ")[1] === "tree") continue;
-      out.add(rec.slice(tab + 1));
-    }
-    return out;
+    const res = (await coreClient.request(this.payload("tree-paths", { stateId: state }))) as { paths: string[] };
+    return new Set(res.paths);
   }
 
   /** The target of a symlink at a state path, or null when not a link. */
   async symlinkTarget(state: string, relPath: string): Promise<string | null> {
-    const tree = await this.resolveTree(state);
-    const r = await this.git(["ls-tree", tree, "--", relPath]);
-    if (r.code !== 0) return null;
-    const line = r.stdout.toString("utf8").trim();
-    if (!line) return null;
-    const parts = line.split(/\s+/);
-    if (parts[1] !== "blob" || parts[0] !== "120000") return null;
-    const map = await this.catFileBatch([parts[2]]);
-    return map.get(parts[2])?.toString("utf8") ?? null;
+    const res = (await coreClient.request(this.payload("symlink-target", { stateId: state, relPath }))) as { target: string | null };
+    return res.target;
   }
 
-  /** Read one blob from a state (for example a symlink target). */
+  /** Read one blob from a state as bytes, or null when the path is absent. */
   async readBlob(state: string, relPath: string): Promise<Buffer | null> {
-    const tree = await this.resolveTree(state);
-    const r = await this.git(["ls-tree", tree, "--", relPath]);
-    if (r.code !== 0 || !r.stdout.toString("utf8").trim()) return null;
-    const meta = r.stdout.toString("utf8").trim().split(/\s+/);
-    if (meta[1] !== "blob") return null;
-    const map = await this.catFileBatch([meta[2]]);
-    return map.get(meta[2]) ?? null;
+    const res = (await coreClient.request(this.payload("read-blob", { stateId: state, relPath }))) as { content: string | null };
+    if (res.content === null) return null;
+    return Buffer.from(res.content, "base64");
+  }
+
+  /** Remove a store-local state ref (eviction). */
+  async unref(commit: string): Promise<void> {
+    await coreClient.request(this.payload("unref", { commit }));
+  }
+
+  /**
+   * Preflight the source repository for byte-exact capture.
+   * Returns every failing condition with a stable reason string.
+   */
+  async preflightRepo(opts: { worldsRoot?: string } = {}): Promise<PreflightResult> {
+    const res = (await coreClient.request({
+      op: "preflight",
+      sourceRoot: this.sourceRoot,
+      sourceGitDir: this.sourceGitDir,
+      worldsRoot: opts.worldsRoot ?? null,
+    })) as { result: PreflightResult };
+    return res.result;
+  }
+
+  /** Create the comparison template (init, base bytes, commit, pack). */
+  async template(opts: { stateId: string; targetDir: string; sourceObjectsDir: string }): Promise<void> {
+    await coreClient.request(this.payload("template", opts));
+  }
+
+  /** Apply a state over a candidate directory and commit it. */
+  async applyState(opts: { stateId: string; targetDir: string; preserveTopLevel?: string[] }): Promise<void> {
+    await coreClient.request(this.payload("apply-state", opts));
   }
 
   /** Delete the whole store. Idempotent. */
@@ -1025,28 +244,63 @@ export class SnapshotStore {
 
 /** Convenience: the canonical Git top-level directory of a folder. */
 export async function gitTopLevel(root: string): Promise<string | null> {
-  const r = await runGit(["rev-parse", "--show-toplevel"], { cwd: root });
-  if (r.code !== 0) return null;
-  return r.stdout.toString("utf8").trim();
+  const res = (await coreClient.request({ op: "git-top-level", root })) as { root: string | null };
+  return res.root;
 }
 
 /** Convenience: the canonical common Git directory of a folder. */
 export async function gitCommonDir(root: string): Promise<string | null> {
-  const r = await runGit(["rev-parse", "--git-common-dir"], { cwd: root });
-  if (r.code !== 0) return null;
-  return resolveGitDir(root, r.stdout.toString("utf8").trim());
+  const res = (await coreClient.request({ op: "git-common-dir", root })) as { gitDir: string | null };
+  return res.gitDir;
 }
 
 /** Convenience: the current HEAD oid, or null when the repo is unborn. */
 export async function gitHead(root: string): Promise<string | null> {
-  const r = await runGit(["rev-parse", "HEAD"], { cwd: root });
-  if (r.code !== 0) return null;
-  return r.stdout.toString("utf8").trim();
+  const res = (await coreClient.request({ op: "git-head", root })) as { head: string | null };
+  return res.head;
 }
 
 /** Convenience: the object format of a repository. */
 export async function gitObjectFormat(root: string): Promise<"sha1" | "sha256"> {
-  const r = await runGit(["rev-parse", "--show-object-format"], { cwd: root });
-  if (r.code !== 0) return "sha1";
-  return r.stdout.toString("utf8").trim() === "sha256" ? "sha256" : "sha1";
+  const res = (await coreClient.request({ op: "git-object-format", root })) as { format: "sha1" | "sha256" };
+  return res.format;
+}
+
+/** Free disk bytes on the volume that holds `path`. Returns null on error. */
+export async function freeDiskBytes(path: string): Promise<number | null> {
+  try {
+    const out = await new Promise<string>((res) => {
+      execFile("df", ["-k", path], { encoding: "utf8", maxBuffer: 1024 * 1024 }, (_err, stdout) => res(stdout));
+    });
+    const lines = out.trim().split("\n");
+    const header = lines[0]?.split(/\s+/) ?? [];
+    // macOS says "Available"; Linux says "Avail".
+    const availIdx = header.findIndex((h) => h.startsWith("Avail"));
+    const row = lines[1]?.split(/\s+/) ?? [];
+    const avail = Number(row[availIdx]);
+    return Number.isFinite(avail) ? avail * 1024 : null;
+  } catch {
+    return null;
+  }
+}
+
+/** True when the platform provides a reliable recursive watcher. */
+export function platformHasRecursiveWatcher(): boolean {
+  return process.platform === "darwin" || process.platform === "win32";
+}
+
+/** True when the platform binary `sandbox-exec` exists (macOS). */
+export function platformHasSandboxExec(): boolean {
+  if (process.platform !== "darwin") return false;
+  try {
+    readFileSync("/usr/bin/sandbox-exec");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** True when the platform provides copy-on-write clones (`cp -c`). */
+export function platformHasCopyOnWrite(): boolean {
+  return process.platform === "darwin";
 }
