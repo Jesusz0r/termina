@@ -20,12 +20,18 @@ mac:
     - dmg
     - zip
   category: public.app-category.developer-tools
-  identity: null
+  icon: build/icon.icns
+  hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  # Signing identity: the keychain when building locally, or CSC_NAME /
+  # CSC_LINK on CI. Without any identity the build stays unsigned.
 win:
   target: nsis
+  icon: build/icon.png
 linux:
   target: AppImage
   category: Development
+  icon: build/icon.png
 npmRebuild: false
 electronLanguages:
   - en

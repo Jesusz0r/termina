@@ -60,7 +60,9 @@ directory, separate from Pi `/settings` and project files.
 https://github.com/Jesusz0r/termina/releases. The bundle ships the app,
 the Rust core, the pinned pi package, and its own node runtime. Nothing
 else needs installing; run `/login` in the terminal to configure your
-model provider.
+model provider. Release builds are signed with the Apple Distribution
+identity; notarization activates when the Apple credentials exist (see
+below), which removes the Gatekeeper warning for downloaded apps.
 
 **From source (script):** needs node >= 22.19 and npm, no cargo and no
 git (the Rust core downloads as a prebuilt binary):
@@ -80,6 +82,21 @@ npm run dev          # builds the Rust core + main + preload, starts Vite, launc
 Packaged builds: `npm run dist` (electron-builder; `dist:mac`, `dist:dir`).
 The CI workflow builds macOS arm64/x64 and Linux x64 bundles and attaches
 the raw core binaries to every release tag.
+
+## Releasing
+
+- The icon comes from `build/icon.svg`; regenerate the icns with
+  `scripts/make-icon.sh`.
+- Signed macOS builds select the identity with `CSC_NAME`:
+  `CSC_NAME="Apple Distribution" npm run dist:mac`.
+- Notarization (removes the Gatekeeper warning): set `APPLE_ID`,
+  `APPLE_APP_SPECIFIC_PASSWORD` (an app-specific password from
+  https://appleid.apple.com), and `APPLE_TEAM_ID` (UWK965RX2N), then
+  build with `-c.mac.notarize=true`.
+- CI signs and notarizes when these GitHub secrets exist: `CSC_LINK`
+  (base64 of the exported `.p12`), `CSC_KEY_PASSWORD`, `CSC_NAME`,
+  `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`. Without
+  them the CI builds stay unsigned.
 
 - `npx tsc --noEmit` — typecheck
 - `npm run build` — production build for Electron and the renderer

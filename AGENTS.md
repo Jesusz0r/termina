@@ -159,7 +159,11 @@ Use these terms exactly. Do not invent synonyms.
   resources).
 - `.github/workflows/release.yml`: per-platform release builds (macOS
   arm64/x64, Linux x64) that publish the app bundles and the raw core
-  binaries.
+  binaries. Signing and notarization activate when the Apple secrets
+  exist.
+- `build/`: the app icon (`icon.svg`, generated `icon.icns`/`icon.png`)
+  and the hardened-runtime entitlements. Regenerate the icon with
+  `scripts/make-icon.sh`.
 
 ## Event flow
 
@@ -208,6 +212,10 @@ The renderer never talks to the agent. It only renders what main pushes.
   `TERMINA_CORE_BIN` overrides the binary path at runtime. End users never
   need cargo: the packaged bundle ships the binary, and `scripts/install.sh`
   downloads it (`TERMINA_SKIP_CORE_BUILD=1` skips the cargo build).
+- Signed macOS builds need the Apple Distribution identity. Locally
+  `CSC_NAME="Apple Distribution"` selects it from the keychain; CI uses
+  the `CSC_LINK` p12 secret. Notarization needs `APPLE_ID`,
+  `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID`.
 - The packaged bundle ships its own node (pi's engine floor is 22.19).
   `cleanEnv` prepends `<resourcesPath>/node/bin` to PATH so pi's cli.js
   shebang and pi's own child processes resolve it. Every dependency is

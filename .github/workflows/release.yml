@@ -41,14 +41,26 @@ jobs:
       # Stages the bundled node runtime and the core binary.
       - run: node scripts/prepare-resources.mjs
       - name: Package
-        # Retry once: the electron download on fresh runners is flaky.
+        # Signs and notarizes when the Apple credentials exist as secrets;
+        # otherwise the build stays unsigned. Retries once: the electron
+        # download on fresh runners is flaky.
         run: |
-          npx electron-builder ${{ startsWith(github.ref, 'refs/tags/') && '--publish always' || '--publish never' }} || {
+          EXTRA=""
+          if [ -n "${APPLE_ID}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD}" ]; then
+            EXTRA="-c.mac.notarize=true"
+          fi
+          npx electron-builder $EXTRA ${{ startsWith(github.ref, 'refs/tags/') && '--publish always' || '--publish never' }} || {
             sleep 15
-            npx electron-builder ${{ startsWith(github.ref, 'refs/tags/') && '--publish always' || '--publish never' }}
+            npx electron-builder $EXTRA ${{ startsWith(github.ref, 'refs/tags/') && '--publish always' || '--publish never' }}
           }
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          CSC_NAME: ${{ secrets.CSC_NAME }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       - uses: actions/upload-artifact@v4
         with:
           name: termina-${{ matrix.artifact }}
