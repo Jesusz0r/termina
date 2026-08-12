@@ -1357,6 +1357,7 @@ body {
 #btn-new-project {
   width: 22px;
   height: 22px;
+  align-self: center;
   border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
