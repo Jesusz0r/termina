@@ -1,14 +1,14 @@
 #!/bin/sh
 # Render the Termina app icon: build/icon.svg -> icon.icns + icon.png.
-# Uses only macOS built-ins (qlmanage, sips, iconutil).
+# Chromium (render-icon.mjs) rasterizes the SVG with real transparency;
+# sips and iconutil build the icns from the master.
 set -e
 cd "$(dirname "$0")/.."
 
 ICON_SET="build/icon.iconset"
 MASTER="build/icon-master.png"
 
-qlmanage -t -s 1024 -o build build/icon.svg >/dev/null 2>&1
-mv build/icon.svg.png "$MASTER"
+node scripts/render-icon.mjs "$MASTER"
 
 rm -rf "$ICON_SET"
 mkdir -p "$ICON_SET"
