@@ -4959,8 +4959,8 @@ class PiEditorApp {
     this.ensureAppBridge();
     await this.createWindow();
     if (initialCwd) {
-      await this.openProject(initialCwd);
-      return;
+        await this.openProject(initialCwd);
+        return;
     }
     // Create the agent terminal. A transient pi failure (slow start, update
     // check) must not kill the app: retry with backoff. The renderer shows
@@ -5099,7 +5099,7 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on("second-instance", () => appState.focusWindow());
-  app.whenReady().then(() => void appState.start());
+
 }
 
 app.on("window-all-closed", () => {

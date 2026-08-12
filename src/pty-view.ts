@@ -74,6 +74,12 @@ export class PtyView {
     }, 1500);
 
     requestAnimationFrame(() => this.fit());
+    // The first fit can run before the terminal font is ready; the cell
+    // measurement then differs from later fits and the row count jumps.
+    // Fit again once the fonts load so every terminal shares one size.
+    if (typeof document !== "undefined" && document.fonts?.ready) {
+      void document.fonts.ready.then(() => this.fit()).catch(() => undefined);
+    }
     try {
       new ResizeObserver(() => this.fit()).observe(container);
     } catch {
