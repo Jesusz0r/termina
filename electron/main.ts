@@ -718,6 +718,16 @@ class PiEditorApp {
   // ---------------------------------------------------------------- window --
 
   async createWindow(): Promise<void> {
+    // Dev runs the Electron binary, whose Dock icon is Electron's. The
+    // packaged bundle carries the Termina icon; override the Dock here.
+    if (!app.isPackaged) {
+      const icon = join(__dirname, "..", "build", "icon.png");
+      try {
+        app.dock?.setIcon(icon);
+      } catch {
+        /* the icon is optional in dev */
+      }
+    }
     nativeTheme.themeSource = this.preferences.theme === "light" ? "light" : "dark";
     const backgroundColor = this.preferences.theme === "light" ? "#f6f8fa" : this.preferences.theme === "high-contrast" ? "#000000" : "#1e1e1e";
     this.win = new BrowserWindow({
