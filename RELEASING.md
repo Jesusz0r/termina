@@ -14,7 +14,7 @@ git tag v0.1.2
 git push origin v0.1.2
 ```
 
-GitHub Actions builds macOS arm64/x64 and Linux x64 bundles, signs and
+GitHub Actions builds macOS arm64 and Linux x64 bundles, signs and
 notarizes the macOS ones, and publishes everything to the release plus
 the raw `termina-core-<platform>-<arch>` binaries.
 
@@ -95,16 +95,13 @@ them the builds stay unsigned.
    others skip with "existing type not compatible" when their publishing
    type is `draft`. `electron-builder.yml` pins `publish.releaseType:
    release`; do not change it back.
-3. **macOS x64 runners are scarce.** The macos-13 job can queue for
-   hours. Its artifacts publish automatically when it runs; do not
-   cancel it and retag to "speed things up" unless the workflow changed.
-4. **The bundled node and core must be signed for notarization.** The
+3. **The bundled node and core must be signed for notarization.** The
    notary reports every unsigned nested binary ("not signed with a valid
    Developer ID certificate"). electron-builder signs the app, but
    `resources/` files are copied in as-is — if the error ever returns
    for `resources/node` or `resources/termina-core`, ad-hoc sign them
    (`codesign -s -`) in `scripts/prepare-resources.mjs`.
-5. **The Apple Distribution cert trap.** The notary rejects it for real
+4. **The Apple Distribution cert trap.** The notary rejects it for real
    binaries while a shell-script-only test app passes — do not trust a
    minimal test that contains no compiled binary.
 

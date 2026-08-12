@@ -23,6 +23,12 @@ case "$ARCH" in
   *) echo "unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
+# Intel Macs get no builds: the release matrix covers darwin arm64 only.
+if [ "$OS" = "darwin" ] && [ "$ARCH" = "x64" ]; then
+  echo "unsupported platform: darwin x64 (arm64 Macs only)"
+  exit 1
+fi
+
 # pi's engine floor is node 22.19.
 if ! node -e 'const v = process.versions.node.split(".").map(Number); process.exit(v[0] > 22 || (v[0] === 22 && v[1] >= 19) ? 0 : 1)' 2>/dev/null; then
   echo "node >= 22.19 is required (https://nodejs.org)"

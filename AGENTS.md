@@ -162,7 +162,7 @@ Use these terms exactly. Do not invent synonyms.
 - `electron-builder.yml`: the packaged-app config (asar unpack, extra
   resources).
 - `.github/workflows/release.yml`: per-platform release builds (macOS
-  arm64/x64, Linux x64) that publish the app bundles and the raw core
+  arm64, Linux x64) that publish the app bundles and the raw core
   binaries. Signing and notarization activate when the Apple secrets
   exist.
 - `build/`: the app icon (`icon.svg`, generated `icon.icns`/`icon.png`)

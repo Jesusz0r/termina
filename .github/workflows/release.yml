@@ -17,9 +17,6 @@ jobs:
           - os: macos-14
             artifact: mac-arm64
             core-asset: termina-core-darwin-arm64
-          - os: macos-13
-            artifact: mac-x64
-            core-asset: termina-core-darwin-x64
           - os: ubuntu-22.04
             artifact: linux-x64
             core-asset: termina-core-linux-x64
