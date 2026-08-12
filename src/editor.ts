@@ -35,9 +35,9 @@ export class EditorManager {
   /** The candidate label of a path ("A"/"B"), or null (worldline badge). */
   tabBadge: (path: string) => "A" | "B" | null = () => null;
 
-  constructor(container: HTMLElement) {
-    this.tabsEl = document.getElementById("editor-tabs")!;
-    this.emptyEl = document.getElementById("editor-empty")!;
+  constructor(container: HTMLElement, tabsEl: HTMLElement, emptyEl: HTMLElement) {
+    this.tabsEl = tabsEl;
+    this.emptyEl = emptyEl;
 
     this.editor = monaco.editor.create(container, {
       theme: "vs-dark",

@@ -2986,6 +2986,7 @@ class PiEditorApp {
       type: t.type,
       shellName: t.shellName,
       workspaceId: t.workspaceId,
+      projectId: this.projectOfTerminal(t.id)?.id,
       dispatchWorker: this.dispatchWorkers.has(t.id),
       dispatchTask: this.dispatchWorkers.get(t.id),
       verify: t.type === "agent" ? t.verify : null,
@@ -4116,6 +4117,19 @@ class PiEditorApp {
     return project ? { cwd } : { cancelled: true };
   }
 
+  /** Open or reactivate the project at a path (the dialog-free path). */
+  private async openProjectAt(cwd: string): Promise<{ cwd: string } | { cancelled: true }> {
+    const canonical = this.canonicalPath(cwd);
+    for (const existing of this.projects.values()) {
+      if (existing.canonicalRoot === canonical) {
+        this.activateProject(existing.id);
+        return { cwd };
+      }
+    }
+    const project = await this.openProject(cwd);
+    return project ? { cwd } : { cancelled: true };
+  }
+
   /** Create a project, start its watcher and store, and activate it. */
   private async openProject(cwd: string): Promise<ProjectState | null> {
     this.switchingProject = true;
@@ -4204,6 +4218,7 @@ class PiEditorApp {
       await this.teardownRecording(project);
       for (const id of project.terminalIds) this.runsByTerminal.delete(id);
       this.projects.delete(projectId);
+      this.send("project:closed", { projectId });
       if (this.activeProjectId === projectId) {
         const next = this.projects.keys().next().value;
         this.activeProjectId = next ?? null;
@@ -4526,6 +4541,10 @@ class PiEditorApp {
       [...this.projects.values()].map((p) => ({ id: p.id, cwd: p.cwd, active: p.id === this.activeProjectId, terminals: p.terminalIds.size })),
     );
     ipcMain.handle("project:open", () => this.openFolder());
+    ipcMain.handle("project:open-path", (_e, cwd: unknown) => {
+      if (typeof cwd !== "string" || !existsSync(cwd)) return { cancelled: true };
+      return this.openProjectAt(cwd);
+    });
     ipcMain.handle("project:activate", (_e, projectId: string) => {
       this.activateProject(projectId);
       return { ok: true };

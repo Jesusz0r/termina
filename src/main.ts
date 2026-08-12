@@ -47,13 +47,141 @@ import type { AppPreferences, ModifiedFile, InstanceSummary, VerifyInfo, Timelin
 
 const { EditorManager } = await import("./editor");
 const { ReviewView } = await import("./review");
-const editorMgr = new EditorManager(document.getElementById("editor-container")!);
-(window as unknown as Record<string, unknown>).__editorMgr = editorMgr;
-// A disk write reached a model with unsaved edits: never replace silently.
-editorMgr.onConflict = (path) => {
+
+/** One open project tab: its editor view and its tab element. */
+interface ProjectView {
+  id: string;
+  cwd: string;
+  tabEl: HTMLElement;
+  editorMgr: InstanceType<typeof EditorManager>;
+  editorEl: HTMLElement;
+  activePaneId: string | null;
+}
+
+const projectViews = new Map<string, ProjectView>();
+let activeProjectId: string | null = null;
+const emptyTemplate = document.getElementById("editor-empty-template") as HTMLTemplateElement;
+// The base editor fills the pane before any project tab exists (the
+// no-project boot). Project views take over once a folder opens.
+const baseEditor = new EditorManager(
+  document.getElementById("editor-container")!,
+  document.getElementById("editor-tabs")!,
+  emptyTemplate.content.firstElementChild!.cloneNode(true) as HTMLElement,
+);
+baseEditor.onConflict = (path) => {
   toast(`${path.split("/").pop()} changed on disk — you have unsaved edits`, "warning");
 };
+applySharedEditorHooks(baseEditor);
+// The e2e suites drive the active editor through this hook.
+(window as unknown as Record<string, unknown>).__editorMgr = baseEditor;
+const projectTabsEl = document.getElementById("project-tabs")!;
+const btnNewProject = document.getElementById("btn-new-project") as HTMLButtonElement;
+const rightPaneEl2 = document.getElementById("right-pane")!;
+
+function createProjectView(project: { id: string; cwd: string }): ProjectView {
+  // The editor wrapper: its own tab bar, container, and empty state.
+  const editorEl = document.createElement("div");
+  editorEl.className = "project-editor";
+  editorEl.dataset.project = project.id;
+  const tabsEl = document.createElement("div");
+  tabsEl.className = "editor-tabs";
+  const containerEl = document.createElement("div");
+  containerEl.className = "editor-container";
+  const emptyEl = emptyTemplate.content.firstElementChild!.cloneNode(true) as HTMLElement;
+  editorEl.append(tabsEl, containerEl, emptyEl);
+  rightPaneEl2.insertBefore(editorEl, rightPaneEl2.firstElementChild);
+
+  const editorMgr = new EditorManager(containerEl, tabsEl, emptyEl);
+  // A disk write reached a model with unsaved edits: never replace silently.
+  editorMgr.onConflict = (path) => {
+    toast(`${path.split("/").pop()} changed on disk — you have unsaved edits`, "warning");
+  };
+  applySharedEditorHooks(editorMgr);
+  const tabEl = document.createElement("div");
+  tabEl.className = "project-tab";
+  const nameEl = document.createElement("span");
+  nameEl.className = "tab-name";
+  nameEl.textContent = basenameOf(project.cwd);
+  nameEl.title = project.cwd;
+  const closeEl = document.createElement("span");
+  closeEl.className = "tab-close";
+  closeEl.textContent = "×";
+  closeEl.title = "Close this project";
+  tabEl.append(nameEl, closeEl);
+  tabEl.addEventListener("click", () => void window.pi.projectActivate(project.id));
+  closeEl.addEventListener("click", (e) => {
+    e.stopPropagation();
+    void window.pi.projectClose(project.id).then((res) => {
+      if (res.ok) removeProjectView(project.id);
+      else toast(res.error ?? "could not close the project", "warning");
+    });
+  });
+  projectTabsEl.appendChild(tabEl);
+
+  const view: ProjectView = { id: project.id, cwd: project.cwd, tabEl, editorMgr, editorEl, activePaneId: null };
+  projectViews.set(project.id, view);
+  return view;
+}
+
+/** The editor hooks shared by every project view (mine toggle, badges). */
+function applySharedEditorHooks(editor: InstanceType<typeof EditorManager>): void {
+  editor.onToggleMine = (path) => {
+    const mine = !editor.isMine(path);
+    editor.setMine(path, mine);
+    void window.pi.setMineFile(path, mine).catch(() => {
+      editor.setMine(path, !mine); // the main side failed: revert the mark
+    });
+  };
+  editor.tabBadge = (path) => worldlinesView.labelOfPath(path);
+}
+
+/** Remove a closed project's tab, editor view, and panes. */
+function removeProjectView(projectId: string): void {
+  const view = projectViews.get(projectId);
+  if (!view) return;
+  view.tabEl.remove();
+  view.editorEl.remove();
+  projectViews.delete(projectId);
+  if (activeProjectId === projectId) {
+    activeProjectId = null;
+    const next = projectViews.keys().next().value;
+    if (next) setActiveProject(next);
+  }
+  for (const pane of [...panes.values()]) {
+    if (pane.projectId === projectId) void closePane(pane.instanceId);
+  }
+}
+
+/** The active project's editor manager (the tab in front). */
+function activeEditor(): InstanceType<typeof EditorManager> {
+  const view = activeProjectId ? projectViews.get(activeProjectId) : null;
+  const fallback = projectViews.values().next().value;
+  const editor = (view ?? fallback)?.editorMgr ?? baseEditor;
+  (window as unknown as Record<string, unknown>).__editorMgr = editor;
+  return editor;
+}
+
+function setActiveProject(projectId: string | null): void {
+  activeProjectId = projectId;
+  const baseContainer = document.getElementById("editor-container")!;
+  const baseTabs = document.getElementById("editor-tabs")!;
+  const noProject = projectId === null;
+  baseContainer.style.display = noProject ? "" : "none";
+  baseTabs.style.display = noProject ? "" : "none";
+  for (const view of projectViews.values()) {
+    const active = view.id === projectId;
+    view.tabEl.classList.toggle("active", active);
+    view.editorEl.style.display = active ? "" : "none";
+  }
+  // Terminal panes of the active project are visible; the rest stay alive.
+  for (const pane of panes.values()) {
+    pane.container.style.display = pane.projectId === projectId ? "" : "none";
+  }
+}
+
 const reviewView = new ReviewView();
+
+void reviewView;
 reviewView.bind({
   onOpenFile: (path) => {
     reviewView.hide();
@@ -80,17 +208,10 @@ sessionSearch.bind({ onOpenFile: (path) => void openFileSmart(path, true) });
 (window as unknown as Record<string, unknown>).__sessionSearch = sessionSearch;
 
 // ---- Mine (file ownership) ----
-editorMgr.onToggleMine = (path) => {
-  const mine = !editorMgr.isMine(path);
-  editorMgr.setMine(path, mine);
-  void window.pi.setMineFile(path, mine).catch(() => {
-    editorMgr.setMine(path, !mine); // the main side failed: revert the mark
-  });
-};
 function refreshMine(): void {
-  editorMgr.clearMine();
+  activeEditor().clearMine();
   void window.pi.getMineFiles().then((paths) => {
-    for (const p of paths) editorMgr.setMine(p, true);
+    for (const p of paths) activeEditor().setMine(p, true);
   });
 }
 void refreshMine();
@@ -125,8 +246,6 @@ worldlinesView.bind({
     void reviewView.showABDiff(comparisonId, relPath, worldlinesView.rootOf(comparisonId, "A")),
   onOpenFile: (absPath) => void openFileSmart(absPath, false),
 });
-// Editor tabs under a candidate root carry the A/B badge.
-editorMgr.tabBadge = (path) => worldlinesView.labelOfPath(path);
 const btnForkRun = document.getElementById("btn-fork-run") as HTMLButtonElement;
 
 // ---------------------------------------------------------------- panes -----
@@ -134,6 +253,7 @@ const btnForkRun = document.getElementById("btn-fork-run") as HTMLButtonElement;
 interface Pane {
   instanceId: string;
   workspaceId: string;
+  projectId: string | null;
   view: PtyView;
   container: HTMLElement;
   tabEl: HTMLElement;
@@ -173,9 +293,9 @@ let preferences: AppPreferences = await window.pi.getPreferences().catch(() => d
 function applyPreferences(next: AppPreferences, persist: boolean, activateShortcuts: boolean): void {
   preferences = next;
   document.documentElement.dataset.theme = next.theme;
-  editorMgr.setTheme(next.theme);
-  editorMgr.setFontSize(next.editorFontSize);
-  editorMgr.setMinimap(next.minimap);
+  activeEditor().setTheme(next.theme);
+  activeEditor().setFontSize(next.editorFontSize);
+  activeEditor().setMinimap(next.minimap);
   reviewView.setTheme(next.theme);
   reviewView.setFontSize(next.editorFontSize);
   for (const pane of panes.values()) pane.view.setTheme(next.theme);
@@ -235,6 +355,7 @@ function createPaneShell(instanceId: string): Pane {
   const pane: Pane = {
     instanceId,
     workspaceId: "",
+    projectId: null,
     view,
     container,
     tabEl,
@@ -415,7 +536,7 @@ timelineView.bind({
       return;
     }
     const label = `${new Date(res.ts ?? ev.ts).toLocaleTimeString()} · ${res.toolName ?? ev.toolName ?? "on disk"}`;
-    editorMgr.openSnapshot(pane.instanceId, String(ev.seq), res.relPath ?? res.path ?? "", res.content ?? "", label, opts?.replay ?? false);
+    activeEditor().openSnapshot(pane.instanceId, String(ev.seq), res.relPath ?? res.path ?? "", res.content ?? "", label, opts?.replay ?? false);
   },
   onFork: (ev) => {
     const pane = activeId ? panes.get(activeId) : undefined;
@@ -619,7 +740,7 @@ async function openFileSmart(path: string, preview = true): Promise<void> {
   // Opening a file from the explorer/modified list reveals the editor.
   if (splitEl.classList.contains("layout-terminal-fullscreen")) applyLayout("terminal-left");
   const abs = path.startsWith("/") ? path : projectCwd ? `${projectCwd}/${path}` : path;
-  await editorMgr.openFile(abs, { preview });
+  await activeEditor().openFile(abs, { preview });
 }
 
 // ---------------------------------------------------------------- panels ----
@@ -685,6 +806,8 @@ btnNewTerminal.addEventListener("click", (e) => {
   if (terminalMenu) closeTerminalMenu();
   else void openTerminalMenu();
 });
+window.pi.onProjectClosed(({ projectId }) => removeProjectView(projectId));
+btnNewProject.addEventListener("click", () => void window.pi.projectOpen());
 btnSettings.addEventListener("click", () => settingsView.open(preferences));
 window.addEventListener("click", () => closeTerminalMenu());
 window.addEventListener("blur", () => closeTerminalMenu());
@@ -805,7 +928,7 @@ function isColumnLayout(): boolean {
  * the browser command.
  */
 function runMenuEdit(kind: "undo" | "redo" | "select-all"): void {
-  if (editorMgr.runMenuEdit(kind)) return;
+  if (activeEditor().runMenuEdit(kind)) return;
   const pane = activeId ? panes.get(activeId) : undefined;
   if (pane && !pane.error) {
     const term = pane.view.getTerminal();
@@ -822,7 +945,7 @@ function runMenuEdit(kind: "undo" | "redo" | "select-all"): void {
 window.pi.onMenuCommand((cmd) => {
   switch (cmd.command) {
     case "save-all":
-      void editorMgr.flushAll().then((res) => {
+      void activeEditor().flushAll().then((res) => {
         if (!res.ok) toast(`could not save: ${res.failed.map((p) => p.split("/").pop()).join(", ")}`, "warning");
       });
       break;
@@ -955,11 +1078,11 @@ function updateEditorLock(): void {
   const busy = [...panes.values()].some(
     (p) => p.busy && p.type === "agent" && !p.error && worldlinesView.labelOfTerminal(p.instanceId) === null,
   );
-  editorMgr.setLocked(busy);
+  activeEditor().setLocked(busy);
 }
 
 window.pi.onFlushRequest(({ requestId, writerId }) => {
-  void editorMgr.flushAll(writerId).then((result) => void window.pi.reportFlush(requestId, result));
+  void activeEditor().flushAll(writerId).then((result) => void window.pi.reportFlush(requestId, result));
 });
 
 window.pi.onBusy(({ instanceId, busy }) => {
@@ -1017,20 +1140,20 @@ window.pi.onPlanUpdate(({ instanceId, tasks }) => {
 });
 
 window.pi.onToolTarget((p) => {
-  editorMgr.markTouched(p.path);
-  void editorMgr.openFile(p.path, { preview: false });
+  activeEditor().markTouched(p.path);
+  void activeEditor().openFile(p.path, { preview: false });
 });
 
 window.pi.onFileChanged((p) => {
-  editorMgr.markTouched(p.path);
-  editorMgr.updateContent(p.path, p.content);
+  activeEditor().markTouched(p.path);
+  activeEditor().updateContent(p.path, p.content);
   explorer.handleDiskChange();
   // The open review stays in sync with the agent's writes.
   if (reviewView.isVisible && reviewView.matchesPath(p.path)) void reviewView.refreshCurrent();
 });
 
 window.pi.onFileDeleted((p) => {
-  editorMgr.closeIfOpen(p.path);
+  activeEditor().closeIfOpen(p.path);
   explorer.handleDiskChange();
 });
 
@@ -1043,15 +1166,32 @@ window.pi.onModifiedList((p) => {
 
 window.pi.onFolderOpened((e) => {
   projectCwd = e.cwd;
+  const projectId = (e as { projectId?: string }).projectId ?? null;
+  let view = projectId ? projectViews.get(projectId) : null;
+  if (!view) {
+    view = createProjectView({ id: projectId ?? `proj-${projectCwd}`, cwd: e.cwd });
+  }
+  view.editorMgr.setProjectOpen(true);
+  setActiveProject(view.id);
   explorer.setProject(e.cwd);
   reviewView.resetForProject();
-  editorMgr.resetForProject();
   worldlinesView.resetForProject();
   refreshMine();
   void refreshTestCommand();
-  for (const p of [...panes.values()]) void closePane(p.instanceId);
+  // Activate the project's first terminal (its panes are now visible).
+  const firstPane = [...panes.values()].find((p) => p.projectId === view!.id);
+  if (firstPane) activatePane(firstPane.instanceId);
+  else {
+    activeId = null;
+    renderChrome();
+  }
   timelineView.resetForProject();
   renderTimeline();
+  // Rebuild the worldline panel for this project (pushes are per-project).
+  void window.pi.getWorldlines().then((list) => {
+    worldlinesView.resetForProject();
+    for (const summary of list) worldlinesView.upsert(summary);
+  });
 });
 
 // ---------------------------------------------------------- worldlines ----
@@ -1076,13 +1216,13 @@ window.pi.onWorldlineUpdate((summary) => {
     const pane = panes.get(summary.terminalId);
     if (pane) updatePaneTab(pane);
   }
-  editorMgr.refreshBadges();
+  activeEditor().refreshBadges();
 });
 
 window.pi.onWorldlineRemoved(({ comparisonId }) => {
   worldlinesView.remove(comparisonId);
   for (const p of panes.values()) updatePaneTab(p);
-  editorMgr.refreshBadges();
+  activeEditor().refreshBadges();
   if (activeId) {
     const pane = panes.get(activeId);
     if (pane) refreshCandidateTestCommand(pane);
@@ -1099,6 +1239,14 @@ window.pi.onInstances((list: InstanceSummary[]) => {
     if (!pane) pane = createPaneShell(summary.id); // terminal spawned after boot
     pane.cwd = summary.cwd;
     pane.workspaceId = summary.workspaceId ?? "";
+    pane.projectId = summary.projectId ?? null;
+    if (pane.projectId && !projectViews.has(pane.projectId) && summary.cwd) {
+      // The project view is created lazily; projectList resolves it.
+      void window.pi.projectList().then((list) => {
+        const project = list.find((p) => p.id === pane.projectId);
+        if (project && !projectViews.has(project.id)) createProjectView(project);
+      });
+    }
     pane.busy = summary.busy;
     pane.type = summary.type;
     pane.shellName = summary.shellName;
@@ -1132,6 +1280,13 @@ async function boot(): Promise<void> {
   if (localStorage.getItem(MODIFIED_KEY) === "0") setModifiedVisible(false);
   void refreshTestCommand();
 
+  // Build the project tab bar; the active project owns the initial view.
+  const projects = await window.pi.projectList();
+  for (const project of projects) {
+    createProjectView(project);
+    if (project.active) activeProjectId = project.id;
+  }
+
   const instances = await window.pi.getInstances();
   // No terminals could be created (pi is missing) — explain instead of
   // leaving an empty window behind the splash.
@@ -1160,6 +1315,9 @@ async function boot(): Promise<void> {
     projectCwd = instances[0].cwd;
     explorer.setProject(instances[0].cwd);
   }
+  // Show the correct project view (the boot instances may belong to it).
+  const bootProjectId = instances[0]?.projectId ?? activeProjectId;
+  if (bootProjectId && projectViews.has(bootProjectId)) setActiveProject(bootProjectId);
   // The project may only be known after the instance list arrives —
   // re-query the test command now that the project is known.
   void refreshTestCommand();

@@ -33,6 +33,7 @@ const BASIC_SUITES = [
   "verify-cancel-test.mjs",
   "settings-test.mjs",
   "terminal-clipboard-test.mjs",
+  "multiproj-test.mjs",
 ];
 const WORLDLINE_SUITES = [
   "worldline-run-boundary-test.mjs",

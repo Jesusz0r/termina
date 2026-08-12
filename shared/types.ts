@@ -112,6 +112,8 @@ export interface InstanceSummary {
   shellName?: string;
   /** The workspace this terminal works in ("" when no folder is open). */
   workspaceId: string;
+  /** The project tab that owns this terminal. */
+  projectId?: string;
   /** True when this terminal runs a dispatched plan task. */
   dispatchWorker?: boolean;
   /** The dispatched task text (for the tab title). */
@@ -482,6 +484,14 @@ export interface PiBridge {
   reviewRevert(terminalId: string, path: string): Promise<{ ok: boolean; error?: string }>;
 
   // project / files
+  /** One open project tab. */
+  projectList(): Promise<Array<{ id: string; cwd: string; active: boolean; terminals: number }>>;
+  projectOpen(): Promise<{ cwd: string } | { cancelled: true }>;
+  /** Open a project by path (the test suites cannot drive the dialog). */
+  projectOpenPath(cwd: string): Promise<{ cwd: string } | { cancelled: true }>;
+  projectActivate(projectId: string): Promise<{ ok: boolean }>;
+  projectClose(projectId: string): Promise<{ ok: boolean; error?: string }>;
+  onProjectClosed(cb: (e: { projectId: string }) => void): void;
   openFolder(): Promise<{ cwd: string } | { cancelled: true }>;
   openFile(path: string): Promise<{ path: string; content: string } | { path: string; error: string }>;
   saveFile(path: string, content: string): Promise<{ ok: boolean; error?: string }>;

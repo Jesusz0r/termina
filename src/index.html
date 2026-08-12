@@ -66,6 +66,10 @@
       <div class="hint">starting pi…</div>
     </div>
     <div id="app">
+      <header id="project-bar">
+        <div id="project-tabs"></div>
+        <button id="btn-new-project" title="Open a project in a new tab" aria-label="New project">＋</button>
+      </header>
       <main id="main">
         <div id="explorer">
           <div class="explorer-header">
@@ -142,15 +146,17 @@
               </div>
               <div id="review-diff"></div>
             </div>
-            <div id="editor-empty">
-              <div class="empty-logo">Tr</div>
-              <div class="empty-title">Termina</div>
-              <div class="empty-sub">
-                Open a project folder, then run <b>pi</b> in the terminal.
-                <br />
-                Files the agent writes or edits will appear here <b>live</b>.
+            <template id="editor-empty-template">
+              <div class="editor-empty">
+                <div class="empty-logo">Tr</div>
+                <div class="empty-title">Termina</div>
+                <div class="empty-sub">
+                  Open a project folder, then run <b>pi</b> in the terminal.
+                  <br />
+                  Files the agent writes or edits will appear here <b>live</b>.
+                </div>
               </div>
-            </div>
+            </template>
           </section>
         </div>
       </main>

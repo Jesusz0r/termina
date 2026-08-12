@@ -135,6 +135,14 @@ const bridge: PiBridge = {
   reviewRevert: (terminalId, path) => ipcRenderer.invoke("review:revert", terminalId, path),
 
   // ---- project / files ----
+  projectList: () => ipcRenderer.invoke("project:list"),
+  projectOpen: () => ipcRenderer.invoke("project:open"),
+  projectOpenPath: (cwd) => ipcRenderer.invoke("project:open-path", cwd),
+  onProjectClosed: (cb) => {
+    ipcRenderer.on("project:closed", (_e, p: { projectId: string }) => cb(p));
+  },
+  projectActivate: (projectId) => ipcRenderer.invoke("project:activate", projectId),
+  projectClose: (projectId) => ipcRenderer.invoke("project:close", projectId),
   openFolder: () => ipcRenderer.invoke("folder:open"),
   openFile: (path) => ipcRenderer.invoke("file:open", path),
   saveFile: (path, content) => ipcRenderer.invoke("file:save", path, content),
