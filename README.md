@@ -29,6 +29,7 @@ board showing the completed tasks](docs/screenshot-worldlines.png)
 
 | Feature | What it does |
 |---|---|
+| Project tabs | multiple projects side by side: one tab per folder, each with its own explorer, editor, and terminals — agents keep running when you switch |
 | Live editor | the file watcher pushes every disk change into open Monaco models; files the agent touches auto-open mid-run |
 | Change Review | per-terminal modified-files panel with pre-run baselines: side-by-side diffs, Accept / Revert, Accept all |
 | Verify & Iterate | `✓ Verify` runs the detected tests in a background process and feeds the result back to the agent on its next turn |

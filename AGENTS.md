@@ -79,6 +79,10 @@ Examples:
   from a project that carries the Termina marker.
 - A folder switch resets every per-terminal state: timeline, baselines,
   snapshots, modified list, and verify state.
+- Projects are per-folder tabs (main: `ProjectState`, renderer: the
+  project tab bar). Switching tabs never interrupts agents; each project
+  owns its workspaces, store, mine marks, and worldline manager.
+  Terminal-scoped event handlers resolve the terminal's own project.
 
 ## Glossary
 
