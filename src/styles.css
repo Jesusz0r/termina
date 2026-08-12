@@ -1314,7 +1314,9 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 4px 8px 0;
+  /* The left padding clears the inset traffic lights, which sit over
+     the bar (same clearance as the explorer header). */
+  padding: 4px 8px 0 78px;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
   -webkit-app-region: drag;
