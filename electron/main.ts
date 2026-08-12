@@ -295,6 +295,7 @@ export default function (pi: ExtensionAPI): void {
 
 let terminalSeq = 0;
 let workspaceSeq = 0;
+let projectSeq = 0;
 
 /** One source tree the app controls (WORLDLINES §6.2). */
 interface WorkspaceState {
@@ -584,13 +585,63 @@ class SessionWorkerClient {
   }
 }
 
+/** All per-project state. One entry per opened folder. */
+interface ProjectState {
+  id: string;
+  /** The opened folder. */
+  cwd: string;
+  /** The canonical project root (the Git top level). */
+  canonicalRoot: string;
+  /** One workspace per source tree: the primary plus candidates. */
+  workspaces: Map<string, WorkspaceState>;
+  /** The app-owned snapshot store of this project, or null. */
+  storePromise: Promise<SnapshotStore | null> | null;
+  /** The store directory (app-owned, outside the project). */
+  storeDir: string | null;
+  /** Files the user marked as theirs (canonical paths). The agent is told
+   *  not to modify them without asking. */
+  mineFiles: Set<string>;
+  /** The worldline manager (Fork Run candidates). */
+  worldlines: WorldlineManager | null;
+  /** Terminal ids owned by this project (agents, shells, candidates). */
+  terminalIds: Set<string>;
+}
+
 class PiEditorApp {
   private win: BrowserWindow | null = null;
   private terminals = new Map<string, PiTerminalInstance>();
+
+  /** The renderer-facing project (the tab in front), or null. */
+  private project(): ProjectState | null {
+    return this.activeProjectId ? this.projects.get(this.activeProjectId) ?? null : null;
+  }
+
+  /** The project that owns a terminal, or null. */
+  private projectOfTerminal(terminalId: string): ProjectState | null {
+    const inst = this.terminals.get(terminalId);
+    if (!inst) return null;
+    for (const project of this.projects.values()) {
+      if (project.terminalIds.has(inst.id)) return project;
+    }
+    return null;
+  }
+
+  /** The project that owns a workspace, or null. */
+  private projectOfWorkspace(workspaceId: string): ProjectState | null {
+    for (const project of this.projects.values()) {
+      if (project.workspaces.has(workspaceId)) return project;
+    }
+    return null;
+  }
+
+  /** A workspace by id, across all projects. Ids are globally unique. */
+  private workspaceById(workspaceId: string): WorkspaceState | null {
+    return this.projectOfWorkspace(workspaceId)?.workspaces.get(workspaceId) ?? null;
+  }
   /** One workspace per source tree (WORLDLINES §6.2). */
-  private workspaces = new Map<string, WorkspaceState>();
-  /** The cwd of the primary workspace (kept for renderer-facing APIs). */
-  private projectCwd: string | null = null;
+  /** One open project: its workspaces, store, and worldline manager. */
+  private projects = new Map<string, ProjectState>();
+  private activeProjectId: string | null = null;
   private eventsDir = process.env.TERMINA_EVENTS_DIR ?? join(app.getPath("temp"), "termina-events");
   /** The app-private session branch workspace. */
   private sessionWorkspaceDir = join(this.eventsDir, "session-workspace");
@@ -606,22 +657,16 @@ class PiEditorApp {
   private dispatchWorkers = new Map<string, string>();
   /** Dispatch runs: worker terminal id → owner + the dispatched task text. */
   private dispatchRuns = new Map<string, { ownerId: string; taskText: string }>();
-  /** Files the user marked as theirs (canonical paths). The agent is told
-   *  not to modify them without asking. */
-  private mineFiles = new Set<string>();
+
   /** Files the user changed while no agent terminal was busy. The agent
    *  receives them on its next turn. It adapts instead of overwriting them.
    *  One map per workspace. */
   private userEditsByWorkspace = new Map<string, Map<string, UserEdit>>();
-  /** The app-owned snapshot store of the current project, or null. */
-  private storePromise: Promise<SnapshotStore | null> | null = null;
-  /** The store directory (app-owned, outside the project). */
-  private storeDir: string | null = null;
+
   /** The snapshot worker (captures off the main thread). */
   /** The session worker (session forking off the main thread). */
   private sessionWorker = new SessionWorkerClient();
-  /** The worldline manager (Fork Run candidates). */
-  private worldlines: WorldlineManager | null = null;
+
   /** The app-owned worlds root. */
   private userDataDir = process.env.TERMINA_USER_DATA_DIR ?? app.getPath("userData");
   private preferencesStore = new AppPreferencesStore(join(this.userDataDir, "preferences.json"));
@@ -837,14 +882,18 @@ class PiEditorApp {
   // ---------------------------------------------------------- workspaces ---
 
   /** The opened project's workspace, or null when no folder is open. */
-  private primaryWorkspace(): WorkspaceState | null {
-    for (const ws of this.workspaces.values()) if (ws.primary) return ws;
+  private primaryWorkspace(project?: ProjectState): WorkspaceState | null {
+    const owner = project ?? this.project();
+    if (!owner) return null;
+    for (const ws of owner.workspaces.values()) if (ws.primary) return ws;
     return null;
   }
 
-  /** The workspace a terminal works in (falls back to the primary). */
+  /** The workspace a terminal works in (falls back to its project's primary). */
   private workspaceOfTerminal(inst: PiTerminalInstance): WorkspaceState | null {
-    return this.workspaces.get(inst.workspaceId) ?? this.primaryWorkspace();
+    const owner = this.projectOfTerminal(inst.id);
+    if (owner) return owner.workspaces.get(inst.workspaceId) ?? null;
+    return this.primaryWorkspace();
   }
 
   /** The user-edit map of a workspace (WORLDLINES §6.2: one per workspace). */
@@ -857,9 +906,9 @@ class PiEditorApp {
     return m;
   }
 
-  /** Create a workspace and start its watcher. The primary workspace sets
-   *  the project cwd used by the renderer-facing APIs. */
-  private createWorkspace(root: string, primary: boolean): WorkspaceState {
+  /** Create a workspace in a project and start its watcher. The primary
+   *  workspace sets the project cwd used by the renderer-facing APIs. */
+  private createWorkspace(project: ProjectState, root: string, primary: boolean): WorkspaceState {
     const ws: WorkspaceState = {
       id: `ws-${++workspaceSeq}`,
       root,
@@ -873,10 +922,10 @@ class PiEditorApp {
       indexReady: null,
       recordError: null,
     };
-    this.workspaces.set(ws.id, ws);
-    if (primary) this.projectCwd = root;
+    project.workspaces.set(ws.id, ws);
+    if (primary) project.cwd = root;
     ws.watcher = this.startWatcher(ws);
-    if (primary) this.initRecording(ws);
+    if (primary) this.initRecording(project, ws);
     return ws;
   }
 
@@ -884,10 +933,10 @@ class PiEditorApp {
    * Create the app-owned snapshot store and run the initial index capture
    * (WORLDLINES §6.4). Runs do not record until the index finishes.
    */
-  private initRecording(ws: WorkspaceState): void {
-    if (this.storePromise) return;
+  private initRecording(project: ProjectState, ws: WorkspaceState): void {
+    if (project.storePromise) return;
     const storeRoot = this.canonicalPath(ws.root);
-    this.storeDir = join(this.userDataDir, "worldlines", createHash("sha256").update(storeRoot).digest("hex").slice(0, 16));
+    project.storeDir = join(this.userDataDir, "worldlines", createHash("sha256").update(storeRoot).digest("hex").slice(0, 16));
     const promise = (async (): Promise<SnapshotStore | null> => {
       const top = await gitTopLevel(ws.root);
       if (!top) {
@@ -903,7 +952,7 @@ class PiEditorApp {
         return null;
       }
       // The store pins the canonical root (gitTopLevel resolves symlinks).
-      const store = await SnapshotStore.create(this.storeDir!, top, gitDir, fmt);
+      const store = await SnapshotStore.create(project.storeDir!, top, gitDir, fmt);
       const state = await store.capture(await gitHead(ws.root), null);
       ws.lastStateCommit = state.commit;
       this.pushRecorderForWorkspace(ws, "ready");
@@ -912,7 +961,7 @@ class PiEditorApp {
     ws.indexReady = promise.then(() => undefined, (err) => {
       ws.recordError = err instanceof Error ? err.message : String(err);
     });
-    this.storePromise = promise;
+    project.storePromise = promise;
   }
 
   /** Recorder state for every agent terminal of a workspace. */
@@ -928,20 +977,20 @@ class PiEditorApp {
   /** The trust-sensitive resource hashes, computed off the main thread. */
   private async computeTrustHashes(): Promise<Record<string, string>> {
     const agentDir = join(homedir(), ".pi", "agent");
-    const project = this.projectCwd ? resolve(this.projectCwd) : null;
+    const project = this.project()?.cwd ? resolve(this.project()!.cwd) : null;
     return coreClient.trustHashes(agentDir, project);
   }
 
   /**
-   * Create the worldline manager. Depends on app paths that exist only
-   * after the app creates the window.
+   * Create the worldline manager of one project. Depends on app paths
+   * that exist only after the app creates the window.
    */
-  private initWorldlines(): void {
-    if (this.worldlines) return;
-    this.worldlines = new WorldlineManager({
+  private initWorldlines(project: ProjectState): void {
+    if (project.worldlines) return;
+    project.worldlines = new WorldlineManager({
       worldsRoot: this.worldsRoot,
       // The canonical primary root: the sandbox compares canonical paths.
-      primaryRoot: realpathSync(this.primaryWorkspace()?.root ?? this.projectCwd ?? homedir()),
+      primaryRoot: realpathSync(this.primaryWorkspace(project)?.root ?? project.cwd ?? homedir()),
       realHome: homedir(),
       userData: this.userDataDir,
       primaryEventsDir: this.eventsDir,
@@ -949,7 +998,7 @@ class PiEditorApp {
       piBin: this.resolvePiBin(),
       baseEnv: cleanEnv(),
       getStore: async () => {
-        const store = await this.storePromise;
+        const store = await project.storePromise;
         return store;
       },
       // The sandboxed pi loads the pinned package and the node binary.
@@ -974,7 +1023,7 @@ class PiEditorApp {
         fork: (opts) => this.sessionWorker.fork(opts),
       },
       createCandidate: (opts) => this.createCandidate(opts),
-      createCandidateWorkspace: (root, baseStateId, comparisonId) => this.createCandidateWorkspace(root, baseStateId, comparisonId),
+      createCandidateWorkspace: (root, baseStateId, comparisonId) => this.createCandidateWorkspace(project, root, baseStateId, comparisonId),
       onUpdate: (summary) => this.send("worldline:update", summary),
       onCandidateState: (root, stateId) => {
         const workspace = this.workspaceContaining(root);
@@ -985,14 +1034,14 @@ class PiEditorApp {
         const summary = this.evidenceByComparison.get(comparisonId);
         this.evidenceByComparison.delete(comparisonId);
         if (summary) void this.releaseEvidenceStates(summary);
-        this.removeCandidateWorkspaces(comparisonId);
+        this.removeCandidateWorkspaces(project, comparisonId);
         this.send("worldline:removed", { comparisonId });
       },
       // The fork preflight (WORLDLINES §4): repository, platform, disk.
       preflight: async () => {
         const reasons: string[] = [];
-        const store = await this.storePromise;
-        const primaryRoot = this.primaryWorkspace()?.root ?? this.projectCwd ?? "";
+        const store = await project.storePromise;
+        const primaryRoot = this.primaryWorkspace(project)?.root ?? project.cwd ?? "";
         if (store) {
           const repo = await store.preflightRepo({ worldsRoot: this.worldsRoot });
           reasons.push(...repo.reasons);
@@ -1035,7 +1084,7 @@ class PiEditorApp {
         return run?.unownedEdits ?? 0;
       },
       captureHead: async (root, gitDir, parent) => {
-        const store = await this.storePromise;
+        const store = await project.storePromise;
         if (!store) throw new Error("recording is not available");
         const state = await store.capture(await gitHead(root), parent, {}, {}, { root, gitDir });
         return { commit: state.commit, tree: state.tree };
@@ -1052,8 +1101,8 @@ class PiEditorApp {
           : null;
       },
       capturePrimary: async () => {
-        const ws = this.primaryWorkspace();
-        const store = await this.storePromise;
+        const ws = this.primaryWorkspace(project);
+        const store = await project.storePromise;
         if (!ws || !store || !ws.lastStateCommit) return null;
         try {
           const state = await store.capture(await gitHead(ws.root), ws.lastStateCommit);
@@ -1070,7 +1119,8 @@ class PiEditorApp {
 
   /** The events dir a terminal's bridge reads (candidates have their own). */
   private eventsDirOf(inst: PiTerminalInstance): string {
-    return this.worldlines?.eventsDirOf(inst.id) ?? this.eventsDir;
+    const owner = this.projectOfTerminal(inst.id);
+    return owner?.worldlines?.eventsDirOf(inst.id) ?? this.eventsDir;
   }
 
   private async safeEventsFile(dir: string, name: string): Promise<string | null> {
@@ -1106,20 +1156,24 @@ class PiEditorApp {
   /** A candidate source tree workspace (no recording, own watcher). The
    *  lineage base seeds its moment-capture chain (nested worldlines keep
    *  the root promotion base). */
-  private createCandidateWorkspace(root: string, baseStateId: string | null, comparisonId: string): string {
-    const ws = this.createWorkspace(root, false);
+  private createCandidateWorkspace(project: ProjectState, root: string, baseStateId: string | null, comparisonId: string): string {
+    const ws = this.createWorkspace(project, root, false);
     ws.comparisonId = comparisonId;
     ws.lastStateCommit = baseStateId;
     return ws.id;
   }
 
   /** Remove candidate workspaces after one comparison is torn down. */
-  private removeCandidateWorkspaces(comparisonId: string): void {
-    for (const [id, ws] of [...this.workspaces]) {
+  private removeCandidateWorkspaces(project: ProjectState, comparisonId: string): void {
+    for (const [id, ws] of [...project.workspaces]) {
       if (ws.primary || ws.comparisonId !== comparisonId) continue;
       const stateId = ws.lastStateCommit;
       ws.watcher?.stop();
-      this.workspaces.delete(id);
+      project.workspaces.delete(id);
+      project.terminalIds.forEach((tid) => {
+        const inst = this.terminals.get(tid);
+        if (inst && inst.workspaceId === id) project.terminalIds.delete(tid);
+      });
       this.userEditsByWorkspace.delete(id);
       if (stateId) void this.releaseStateIfUnused(stateId);
     }
@@ -1127,7 +1181,7 @@ class PiEditorApp {
 
   /** Release a workspace write lease. Only the holder can release it. */
   private releaseWriteLease(wsId: string, requesterId: string): void {
-    const ws = this.workspaces.get(wsId);
+    const ws = this.workspaceById(wsId);
     if (ws && ws.writerId === requesterId) ws.writerId = null;
   }
 
@@ -1139,7 +1193,7 @@ class PiEditorApp {
   private async acquireWriteLease(wsId: string, requesterId: string, timeoutMs = 5000): Promise<{ ok: boolean; generation: number; error?: string }> {
     const deadline = Date.now() + timeoutMs;
     while (true) {
-      const ws = this.workspaces.get(wsId);
+      const ws = this.workspaceById(wsId);
       if (!ws) return { ok: false, generation: 0, error: "workspace not found" };
       if (ws.writerId === null || ws.writerId === requesterId) {
         ws.writerId = requesterId;
@@ -1153,10 +1207,12 @@ class PiEditorApp {
   /** The workspace whose root contains the path, or null. */
   private workspaceContaining(absPath: string): WorkspaceState | null {
     const p = this.canonicalPath(absPath);
-    for (const ws of this.workspaces.values()) {
-      const root = this.canonicalPath(ws.root);
-      const rel = relative(root, p);
-      if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) return ws;
+    for (const project of this.projects.values()) {
+      for (const ws of project.workspaces.values()) {
+        const root = this.canonicalPath(ws.root);
+        const rel = relative(root, p);
+        if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) return ws;
+      }
     }
     return null;
   }
@@ -1196,7 +1252,7 @@ class PiEditorApp {
    * never acquires it directly.
    */
   private assertWorkspaceWritable(wsId: string): string | null {
-    const ws = this.workspaces.get(wsId);
+    const ws = this.workspaceById(wsId);
     if (ws && ws.writerId !== null) return `the workspace is busy (${ws.writerId} holds the write lease)`;
     return null;
   }
@@ -1234,6 +1290,25 @@ class PiEditorApp {
     return join(homedir(), ".pi", "agent", "sessions", safePath);
   }
 
+  /** The terminal id of a comparison candidate, or null. */
+  private candidateTerminalOf(comparisonId: string, label: "A" | "B"): string | null {
+    for (const project of this.projects.values()) {
+      const target = project.worldlines?.promotionTarget(comparisonId, label);
+      if (target?.terminalId) return target.terminalId;
+    }
+    return null;
+  }
+
+  /** The project that owns a comparison, or null. */
+  private projectOfComparison(comparisonId: string): ProjectState | null {
+    for (const project of this.projects.values()) {
+      if (project.worldlines?.promotionTarget(comparisonId, "A") || project.worldlines?.evidenceTarget(comparisonId, "A")) {
+        return project;
+      }
+    }
+    return null;
+  }
+
   /**
    * Promote one candidate into the primary project (WORLDLINES §6.10).
    * The merge runs with R (the run start) as the shared base; P and W are
@@ -1241,7 +1316,11 @@ class PiEditorApp {
    * durable journal so a crash can roll back or recover.
    */
   private async promoteCandidate(comparisonId: string, label: "A" | "B", force = false): Promise<{ ok: boolean; error?: string; terminalId?: string; confirm?: string }> {
-    const target = this.worldlines?.promotionTarget(comparisonId, label);
+    const candTermId = this.candidateTerminalOf(comparisonId, label);
+    const owner = candTermId ? this.projectOfTerminal(candTermId) : null;
+    const manager = owner?.worldlines ?? null;
+    if (!manager) return { ok: false, error: "candidate not found" };
+    const target = manager.promotionTarget(comparisonId, label);
     if (!target) return { ok: false, error: "candidate not found" };
     if (!target.sessionFile) return { ok: false, error: "the candidate has no session" };
     if (!["ready", "running", "settled"].includes(target.state)) {
@@ -1252,14 +1331,14 @@ class PiEditorApp {
     if (target.terminalId && this.verifyRuns.has(target.terminalId)) {
       return { ok: false, error: "the candidate is verifying" };
     }
-    const store = await this.storePromise;
+    const store = await owner!.storePromise;
     if (!store) return { ok: false, error: "recording is not available" };
-    const primary = this.primaryWorkspace();
+    const primary = this.primaryWorkspace(owner!);
     if (!primary) return { ok: false, error: "no primary workspace" };
     const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === target.sourceRunId);
     if (!run?.startStateId) return { ok: false, error: "the source run base is missing" };
     const baseState = run.startStateId; // R
-    const candWs = candTerm ? this.workspaces.get(candTerm.workspaceId) : undefined;
+    const candWs = candTerm ? owner!.workspaces.get(candTerm.workspaceId) : undefined;
     const candGen = candWs?.generation ?? 0;
 
     const opId = `promote-${++this.promoteSeq}`;
@@ -1298,13 +1377,13 @@ class PiEditorApp {
     // previous lifecycle state.
     const fail = async (message: string): Promise<{ ok: false; error: string }> => {
       releaseLeases();
-      await this.worldlines?.finishPromotion(comparisonId, false, message);
+      await manager.finishPromotion(comparisonId, false, message);
       return { ok: false, error: message };
     };
     // A confirmation request releases the leases and keeps the pair usable.
     const askConfirm = async (message: string): Promise<{ ok: false; confirm: string }> => {
       releaseLeases();
-      await this.worldlines?.finishPromotion(comparisonId, false, null);
+      await manager.finishPromotion(comparisonId, false, null);
       return { ok: false, confirm: message };
     };
 
@@ -1313,7 +1392,7 @@ class PiEditorApp {
       const flush = await this.flushDirtyModels(requester, 8000);
       if (!flush.ok) return fail("could not save editor changes");
 
-      this.worldlines?.markPromoting(comparisonId, label);
+      manager.markPromoting(comparisonId, label);
 
       // Capture W (candidate head, chained from R) and P (current primary).
       const candGitDir = await gitCommonDir(target.root);
@@ -1333,13 +1412,13 @@ class PiEditorApp {
       const changed = await store.diffTree(baseState, wState.commit);
       for (const c of changed) {
         const abs = join(primary.root, c.relPath);
-        if (this.mineFiles.has(this.canonicalPath(abs))) {
+        if (owner!.mineFiles.has(this.canonicalPath(abs))) {
           return fail(`the candidate changes a file you own: ${c.relPath}`);
         }
         const link = await store.symlinkTarget(wState.commit, c.relPath);
         if (link) {
           const resolved = realpathSync(join(dirname(abs), link));
-          if (this.mineFiles.has(resolved)) {
+          if (owner!.mineFiles.has(resolved)) {
             return fail(`the candidate aliases a file you own through a symlink: ${c.relPath}`);
           }
         }
@@ -1359,7 +1438,7 @@ class PiEditorApp {
         const recs = summary?.byCandidate[label] ?? [];
         const verify = recs.find((r) => r.kind === "verify");
         const evidenceOk = verify?.status === "pass" && summary?.stale !== true;
-        const ignored = await this.worldlines?.ignoredWrites(comparisonId, label);
+        const ignored = await manager.ignoredWrites(comparisonId, label);
         if (!evidenceOk) {
           const why = !verify ? "no evidence has been computed for this candidate" : summary?.stale ? "the evidence is stale (the candidate ran again)" : `the evidence is ${verify?.status}`;
           return askConfirm(`promote without current passing evidence? (${why})`);
@@ -1492,7 +1571,7 @@ class PiEditorApp {
       }
 
       // The comparison is consumed: tear it down and release everything.
-      await this.worldlines?.finishPromotion(comparisonId, true, null);
+      await manager.finishPromotion(comparisonId, true, null);
       releaseLeases();
       // The promotion is complete: the journal has no recovery duty.
       await rm(journalDir, { recursive: true, force: true });
@@ -1505,7 +1584,7 @@ class PiEditorApp {
       // A session installed before the failure is an orphan: remove it.
       if (journal.installedSession) await rm(String(journal.installedSession), { force: true });
       releaseLeases();
-      await this.worldlines?.finishPromotion(comparisonId, false, message);
+      await manager.finishPromotion(comparisonId, false, message);
       return { ok: false, error: message };
     }
   }
@@ -1698,11 +1777,13 @@ class PiEditorApp {
     for (const pending of this.pendingPreflights.values()) {
       if (pending.startState?.commit === stateId) return true;
     }
-    for (const workspace of this.workspaces.values()) {
-      if (workspace.lastStateCommit === stateId) return true;
-    }
-    for (const summary of this.worldlines?.list() ?? []) {
-      if (summary.comparisonBaseStateId === stateId || summary.promotionBaseStateId === stateId || summary.headStateId === stateId) return true;
+    for (const project of this.projects.values()) {
+      for (const workspace of project.workspaces.values()) {
+        if (workspace.lastStateCommit === stateId) return true;
+      }
+      for (const summary of project.worldlines?.list() ?? []) {
+        if (summary.comparisonBaseStateId === stateId || summary.promotionBaseStateId === stateId || summary.headStateId === stateId) return true;
+      }
     }
     for (const summary of this.evidenceByComparison.values()) {
       if (Object.values(summary.byCandidate).some((records) => records.some((record) => record.stateId === stateId))) return true;
@@ -1718,9 +1799,11 @@ class PiEditorApp {
   }
 
   private async releaseStateIfUnused(stateId: string, ignoredTerminalId?: string, ignoredSeq?: number): Promise<void> {
-    const store = await this.storePromise;
-    if (!store || this.stateIsReferenced(stateId, ignoredTerminalId, ignoredSeq)) return;
-    await store.unref(stateId).catch(() => undefined);
+    if (this.stateIsReferenced(stateId, ignoredTerminalId, ignoredSeq)) return;
+    for (const project of this.projects.values()) {
+      const store = await project.storePromise;
+      if (store) await store.unref(stateId).catch(() => undefined);
+    }
   }
 
   private setWorkspaceState(ws: WorkspaceState, stateId: string): void {
@@ -1738,7 +1821,8 @@ class PiEditorApp {
   }
 
   private baseStateOf(comparisonId: string): string | null {
-    const target = this.worldlines?.promotionTarget(comparisonId, "A");
+    const project = this.projectOfComparison(comparisonId);
+    const target = project?.worldlines?.promotionTarget(comparisonId, "A");
     if (!target) return null;
     const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === target.sourceRunId);
     return run?.startStateId ?? null;
@@ -1750,7 +1834,9 @@ class PiEditorApp {
    */
   private runEvidence(comparisonId: string): Promise<{ ok: boolean; error?: string }> {
     const run = this.evidenceQueue.then(async (): Promise<{ ok: boolean; error?: string }> => {
-      const store = await this.storePromise;
+      const project = this.projectOfComparison(comparisonId);
+      if (!project) return { ok: false, error: "comparison not found" };
+      const store = await project.storePromise;
       const baseStateId = this.baseStateOf(comparisonId);
       if (!store || !baseStateId) return { ok: false, error: "recording is not available" };
       const targets = new Map<"A" | "B", NonNullable<ReturnType<WorldlineManager["evidenceTarget"]>>>();
@@ -1760,7 +1846,7 @@ class PiEditorApp {
         for (const lease of leases) this.releaseWriteLease(lease.workspaceId, lease.requesterId);
       };
       for (const label of ["A", "B"] as const) {
-        const target = this.worldlines?.evidenceTarget(comparisonId, label);
+        const target = project.worldlines?.evidenceTarget(comparisonId, label);
         if (!target) {
           releaseLeases();
           return { ok: false, error: "candidate not found" };
@@ -1806,8 +1892,8 @@ class PiEditorApp {
       const deps: EvidenceDeps = {
         store,
         baseStateId,
-        primaryRoot: this.primaryWorkspace()?.root ?? "",
-        mineFiles: new Set(this.mineFiles),
+        primaryRoot: this.primaryWorkspace(project)?.root ?? "",
+        mineFiles: new Set(project.mineFiles),
         captureHead: async (root, gitDir, parent) => {
           const state = await store.capture(await gitHead(root), parent, {}, {}, { root, gitDir });
           capturedStates.add(state.commit);
@@ -1833,7 +1919,7 @@ class PiEditorApp {
           byCandidate[label] = await engine.measure(label, cand);
           const finalState = await deps.captureHead(target.root, join(target.root, ".git"), null);
           const workspace = this.workspaceContaining(target.root);
-          const current = this.worldlines?.evidenceVersion(comparisonId, label);
+          const current = project.worldlines?.evidenceVersion(comparisonId, label);
           if (!workspace || workspace.generation !== generations.get(label) || !current || current.version !== target.version) {
             result = { ok: false, error: `candidate ${label} changed during evidence` };
             break;
@@ -1845,8 +1931,8 @@ class PiEditorApp {
           }
           if (head) {
             retainedStates.add(head.stateId);
-            this.worldlines?.setCandidateHead(comparisonId, label, head.stateId);
-            expectedVersions.set(label, this.worldlines?.evidenceVersion(comparisonId, label)?.version ?? target.version);
+            project.worldlines?.setCandidateHead(comparisonId, label, head.stateId);
+            expectedVersions.set(label, project.worldlines?.evidenceVersion(comparisonId, label)?.version ?? target.version);
             mineReason[label] = await mineChangeReason(store, baseStateId, head.stateId, deps.primaryRoot, deps.mineFiles, (p) => fsRealpath(p));
           } else {
             expectedVersions.set(label, target.version);
@@ -1856,7 +1942,7 @@ class PiEditorApp {
           for (const label of ["A", "B"] as const) {
             const target = targets.get(label)!;
             const workspace = this.workspaceContaining(target.root);
-            const current = this.worldlines?.evidenceVersion(comparisonId, label);
+            const current = project.worldlines?.evidenceVersion(comparisonId, label);
             if (!workspace || workspace.generation !== generations.get(label) || !current || current.version !== expectedVersions.get(label)) {
               result = { ok: false, error: `candidate ${label} changed during evidence` };
               break;
@@ -2127,9 +2213,13 @@ class PiEditorApp {
       args = ["-e", this.bridgePath()];
       env = { ...cleanEnv(), TERMINA_TERMINAL_ID: id, TERMINA_EVENTS_DIR: this.eventsDir };
     }
+    const owner = this.projectOfWorkspace(workspaceId) ?? this.project();
     const inst = new PiTerminalInstance(id, cwd ?? this.terminalCwd(), workspaceId, type, shellName, cmd, args, env, 80, 24);
     this.terminals.set(inst.id, inst);
-    this.workspaces.get(workspaceId)?.terminalIds.add(id);
+    if (owner) {
+      owner.workspaces.get(workspaceId)?.terminalIds.add(id);
+      owner.terminalIds.add(id);
+    }
 
     inst.pty.onData = (data) => this.sendPtyData(inst.id, data);
     inst.pty.onExit = (code) => {
@@ -2141,8 +2231,10 @@ class PiEditorApp {
         if (event.stateId) void this.releaseStateIfUnused(event.stateId, inst.id, event.seq);
       }
       this.terminals.delete(inst.id);
-      this.workspaces.get(inst.workspaceId)?.terminalIds.delete(inst.id);
-      this.worldlines?.terminalExited(inst.id);
+      const exitOwner = this.projectOfTerminal(inst.id);
+      exitOwner?.workspaces.get(inst.workspaceId)?.terminalIds.delete(inst.id);
+      exitOwner?.terminalIds.delete(inst.id);
+      exitOwner?.worldlines?.terminalExited(inst.id);
       this.worldlineTailers.get(inst.id)?.stop();
       this.worldlineTailers.delete(inst.id);
       this.tailer.stopWatching(inst.id);
@@ -2277,7 +2369,8 @@ class PiEditorApp {
     this.verifyRuns.add(ownerId);
     // Run candidate tests inside the candidate sandbox. The tests cannot write
     // the primary project.
-    const candidate = this.worldlines?.candidateSandboxOf(ownerId) ?? null;
+    const verifyOwner = this.projectOfTerminal(ownerId);
+    const candidate = verifyOwner?.worldlines?.candidateSandboxOf(ownerId) ?? null;
     const cwd = candidate?.root ?? this.terminalCwd();
     let tc: { command: string; args: string[]; label: string } | null;
     try {
@@ -2294,7 +2387,7 @@ class PiEditorApp {
       this.disposed ||
       this.switchingProject ||
       this.terminals.get(ownerId) !== owner ||
-      (candidate && (!this.worldlines?.candidateSandboxOf(ownerId) || !existsSync(candidate.root)))
+      (candidate && (!verifyOwner?.worldlines?.candidateSandboxOf(ownerId) || !existsSync(candidate.root)))
     ) {
       this.verifyRuns.delete(ownerId);
       return { ok: false, error: "the project is changing" };
@@ -2383,7 +2476,7 @@ class PiEditorApp {
   private cancelVerifyForComparison(comparisonId: string): void {
     for (const ownerId of [...this.verifyRuns]) {
       const owner = this.terminals.get(ownerId);
-      const workspace = owner ? this.workspaces.get(owner.workspaceId) : undefined;
+      const workspace = owner ? this.projectOfTerminal(ownerId)?.workspaces.get(owner.workspaceId) : undefined;
       if (workspace?.comparisonId !== comparisonId) continue;
       if (this.verifyJobs.has(ownerId)) this.cancelVerify(ownerId);
       else this.verifyRuns.delete(ownerId);
@@ -2457,8 +2550,8 @@ class PiEditorApp {
         clean = clean.replace(/\/+$/, "");
         // Normalize absolute paths to project-relative (canonical: /tmp and
         // /private/tmp are the same directory) so progress matching hits.
-        if (isAbsolute(clean) && this.projectCwd) {
-          const rel = relative(this.canonicalPath(this.projectCwd), this.canonicalPath(clean));
+        if (isAbsolute(clean) && this.project()?.cwd) {
+          const rel = relative(this.canonicalPath(this.project()!.cwd), this.canonicalPath(clean));
           if (rel && !rel.startsWith("..")) clean = rel;
         }
         if (this.looksLikePath(clean)) paths.push(clean);
@@ -2514,7 +2607,7 @@ class PiEditorApp {
   /** Full-text search over the project's past session files. Bounded: the
    *  50 newest sessions, 2 MB per file, 50 hits, 400 chars per line. */
   private async searchSessions(query: string): Promise<SessionHit[]> {
-    const cwd = this.projectCwd;
+    const cwd = this.project()?.cwd ?? null;
     const needle = query.trim().toLowerCase();
     if (!cwd || needle.length < 2) return [];
     const dir = join(homedir(), ".pi", "agent", "sessions", this.sanitizeSessionDir(this.canonicalPath(cwd)));
@@ -2567,12 +2660,12 @@ class PiEditorApp {
 
   /** The first token in a line that resolves to a file inside the project. */
   private resolveHitPath(line: string): string | null {
-    if (!this.projectCwd) return null;
+    if (!this.project()?.cwd) return null;
     const tokens = line.match(/`[^`]+`|"[^"]*"|'[^']*'|\S+/g) ?? [];
     for (const raw of tokens) {
       const token = raw.replace(/^[`"']+|[`"']+$/g, "");
       if (!token.includes("/") && !/\.[a-zA-Z0-9]{1,5}$/.test(token)) continue;
-      const abs = join(this.projectCwd, token);
+      const abs = join(this.project()!.cwd, token);
       if (!this.withinProject(abs)) continue;
       try {
         if (existsSync(abs)) return token;
@@ -2660,29 +2753,32 @@ class PiEditorApp {
 
   /** Mark a file as the user's own (or clear the mark). */
   private setMineFile(path: string, mine: boolean): void {
+    const project = this.project();
+    if (!project) return;
     const managed = this.managedPath(path, true);
     if (!managed) return;
     const p = managed.path;
     if (mine) {
-      if (!this.mineFiles.has(p) && this.mineFiles.size >= PiEditorApp.MAX_MINE_FILES) return;
-      this.mineFiles.add(p);
+      if (!project.mineFiles.has(p) && project.mineFiles.size >= PiEditorApp.MAX_MINE_FILES) return;
+      project.mineFiles.add(p);
     } else {
-      this.mineFiles.delete(p);
+      project.mineFiles.delete(p);
     }
-    this.saveMineFiles();
-    this.writeMineContext();
+    this.saveMineFiles(project);
+    this.writeMineContext(project);
   }
 
-  /** Write the mine context file for every agent terminal. */
-  private writeMineContext(): void {
+  /** Write the mine context file for the agent terminals of one project. */
+  private writeMineContext(project: ProjectState): void {
     try {
       mkdirSync(this.eventsDir, { recursive: true });
     } catch {
       return;
     }
-    const md = this.buildMineMarkdown();
+    const md = this.buildMineMarkdown(project);
     for (const inst of this.terminals.values()) {
       if (inst.type !== "agent") continue;
+      if (this.projectOfTerminal(inst.id) !== project) continue;
       const eventsDir = this.eventsDirOf(inst);
       try {
         writeFileSync(join(eventsDir, `mine-${inst.id}.md`), md, "utf8");
@@ -2693,18 +2789,19 @@ class PiEditorApp {
   }
 
   /** Build the mine context markdown: one file per line. */
-  private buildMineMarkdown(): string {
+  private buildMineMarkdown(project: ProjectState): string {
     const out: string[] = ["## Your files", "", "These files belong to the user. Do not modify them without asking first.", ""];
-    for (const p of this.mineFiles) out.push(`- \`${this.rel(p)}\``);
+    for (const p of project.mineFiles) out.push(`- \`${this.rel(p)}\``);
     return out.join("\n");
   }
 
-  /** Clear the marks and their context files (folder switch). The saved
+  /** Clear the marks and their context files (project switch). The saved
    *  marks stay in their file: revisiting the project restores them. */
-  private clearMineFiles(): void {
-    this.mineFiles.clear();
+  private clearMineFiles(project: ProjectState): void {
+    project.mineFiles.clear();
     for (const inst of this.terminals.values()) {
       if (inst.type !== "agent") continue;
+      if (this.projectOfTerminal(inst.id) !== project) continue;
       try {
         rmSync(join(this.eventsDir, `mine-${inst.id}.md`), { force: true });
       } catch {
@@ -2713,24 +2810,23 @@ class PiEditorApp {
     }
   }
 
-  /** The persisted marks file for the current project. */
-  private mineFilePath(): string {
-    const cwd = this.canonicalPath(this.projectCwd ?? "");
+  /** The persisted marks file for one project. */
+  private mineFilePath(project: ProjectState): string {
+    const cwd = this.canonicalPath(project.cwd);
     return join(this.eventsDir, `mine-${this.sanitizeSessionDir(cwd)}.json`);
   }
 
-  /** Load the marks saved for the current project (restart persistence). */
-  private loadMineFiles(): void {
-    if (!this.projectCwd) return;
+  /** Load the marks saved for one project (restart persistence). */
+  private loadMineFiles(project: ProjectState): void {
     try {
-      const raw = readFileSync(this.mineFilePath(), "utf8");
+      const raw = readFileSync(this.mineFilePath(project), "utf8");
       const list = JSON.parse(raw) as string[];
       if (Array.isArray(list)) {
         for (const p of list) {
-          if (this.mineFiles.size >= PiEditorApp.MAX_MINE_FILES) break;
+          if (project.mineFiles.size >= PiEditorApp.MAX_MINE_FILES) break;
           if (typeof p !== "string") continue;
           const managed = this.managedPath(p, true);
-          if (managed) this.mineFiles.add(managed.path);
+          if (managed) project.mineFiles.add(managed.path);
         }
       }
     } catch {
@@ -2739,11 +2835,10 @@ class PiEditorApp {
   }
 
   /** Save the marks so a restart restores the ownership. */
-  private saveMineFiles(): void {
-    if (!this.projectCwd) return;
+  private saveMineFiles(project: ProjectState): void {
     try {
       mkdirSync(this.eventsDir, { recursive: true });
-      writeFileSync(this.mineFilePath(), JSON.stringify([...this.mineFiles]), "utf8");
+      writeFileSync(this.mineFilePath(project), JSON.stringify([...project.mineFiles]), "utf8");
     } catch (err) {
       console.warn(`[main] could not save mine marks: ${(err as Error).message}`);
     }
@@ -2984,7 +3079,7 @@ class PiEditorApp {
       case "session_ready": {
         // The bridge consumed the candidate startup control.
         const readyOk = event.ok === true;
-        this.worldlines?.onSessionReady(terminalId, readyOk, String(event.error ?? null) || null);
+        this.projectOfTerminal(terminalId)?.worldlines?.onSessionReady(terminalId, readyOk, String(event.error ?? null) || null);
         break;
       }
       case "agent_start":
@@ -2994,7 +3089,8 @@ class PiEditorApp {
         if (inst.type === "agent") this.busyAgents.add(inst.id);
         // A candidate run invalidates its comparison's evidence: the head
         // moved (WORLDLINES §6.8 — results are bound to the measured state).
-        const candHit = (this.worldlines?.list() ?? []).find((w) => w.terminalId === inst.id);
+        const agentOwner = this.projectOfTerminal(inst.id);
+        const candHit = (agentOwner?.worldlines?.list() ?? []).find((w) => w.terminalId === inst.id);
         // The run consumes the user-edits context (the extension already read
         // it in before_agent_start). Clear it so the next run stays fresh.
         const startWs = this.workspaceOfTerminal(inst);
@@ -3015,7 +3111,7 @@ class PiEditorApp {
         this.pushTimeline(inst, { t: "agent_start" });
         // The run records moments: the recorder state follows the store.
         const startWs2 = this.workspaceOfTerminal(inst);
-        void this.storePromise?.then((s) => {
+        void agentOwner?.storePromise?.then((s) => {
           if (!this.disposed && !this.switchingProject && this.terminals.has(inst.id)) {
             this.setRecorderState(inst, !s ? "paused" : startWs2?.indexReady ? "indexing" : "ready");
           }
@@ -3075,10 +3171,10 @@ class PiEditorApp {
         // Candidate tool paths resolve against the candidate root; the
         // within-project guard applies to the primary only (nested moments).
         const toolWs = this.workspaceOfTerminal(inst);
-        const toolBase = toolWs?.root ?? this.projectCwd;
+        const toolBase = toolWs?.root ?? this.projectOfTerminal(inst.id)?.cwd ?? null;
         const path = this.canonicalPath(isAbsolute(rawPath) ? rawPath : toolBase ? join(toolBase, rawPath) : rawPath);
         if (!path) return;
-        const isCandidateTerminal = !!this.worldlines?.eventsDirOf(inst.id);
+        const isCandidateTerminal = !!this.projectOfTerminal(inst.id)?.worldlines?.eventsDirOf(inst.id);
         if (isCandidateTerminal) {
           // Reject file-tool paths that resolve outside the candidate root
           // (WORLDLINES §5): the sandbox blocks the write, the guard keeps
@@ -3218,7 +3314,8 @@ class PiEditorApp {
       this.writeAck(inst.id, requestId, { ok: false, error: "could not save editor changes" });
       return;
     }
-    const store = await this.storePromise;
+    const preflightOwner = this.projectOfTerminal(inst.id);
+    const store = await preflightOwner?.storePromise;
     await ws.indexReady;
     if (!store) {
       // Recording unavailable (no Git): the run proceeds without a token.
@@ -3447,7 +3544,8 @@ class PiEditorApp {
       this.writeAck(inst.id, requestId, { ok: false, error: "recording is not available" });
       return;
     }
-    const store = await this.storePromise;
+    const checkpointOwner = this.projectOfTerminal(inst.id);
+    const store = await checkpointOwner?.storePromise;
     if (!store) {
       this.writeAck(inst.id, requestId, { ok: false, error: "recording is not available" });
       return;
@@ -3461,7 +3559,7 @@ class PiEditorApp {
     try {
       const state = await this.captureStable(store, ws);
       this.setWorkspaceState(ws, state.commit);
-      if (!ws.primary) this.worldlines?.updateHeadState(inst.id, state.commit);
+      if (!ws.primary) checkpointOwner?.worldlines?.updateHeadState(inst.id, state.commit);
       this.writeAck(inst.id, requestId, { ok: true, stateId: state.commit });
       if (kind === "settled" && inst.currentRun && !inst.currentRun.settledAt) {
         await this.finalizeRun(inst, state, entryId);
@@ -3547,7 +3645,8 @@ class PiEditorApp {
     if (inst.momentDots.length === 0 && inst.pendingHints.size === 0) return;
     const batch = inst.momentDots;
     inst.momentDots = [];
-    const store = await this.storePromise;
+    const momentOwner = this.projectOfTerminal(inst.id);
+    const store = await momentOwner?.storePromise;
     if (!store || !ws.lastStateCommit) {
       this.setRecorderState(inst, "paused");
       inst.momentDots.unshift(...batch);
@@ -3581,7 +3680,7 @@ class PiEditorApp {
       const state = await store.captureIncremental(ws.lastStateCommit, hints, reconcile, {}, {}, source);
       this.setWorkspaceState(ws, state.commit);
       ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
-      if (!ws.primary) this.worldlines?.updateHeadState(inst.id, state.commit);
+      if (!ws.primary) momentOwner?.worldlines?.updateHeadState(inst.id, state.commit);
       this.attachMomentState(inst, state.commit, batch);
       this.setRecorderState(inst, "ready");
       this.evictForkPoints(inst);
@@ -3907,7 +4006,7 @@ class PiEditorApp {
     }
     const stateId = inst.currentRun?.startStateId;
     const workspace = this.workspaceOfTerminal(inst);
-    const store = await this.storePromise;
+    const store = await this.projectOfTerminal(inst.id)?.storePromise;
     if (!stateId || !workspace || !store) return;
     const relPath = relative(this.canonicalPath(workspace.root), path);
     if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return;
@@ -3964,7 +4063,10 @@ class PiEditorApp {
    * switch or app quit discards them; ask first.
    */
   async confirmDiscardActiveCandidates(): Promise<boolean> {
-    const active = await this.worldlines?.activeCandidates().catch(() => 0) ?? 0;
+    let active = 0;
+    for (const project of this.projects.values()) {
+      active += (await project.worldlines?.activeCandidates().catch(() => 0)) ?? 0;
+    }
     if (active === 0) return true;
     const win = this.win;
     if (!win) return true;
@@ -4002,19 +4104,79 @@ class PiEditorApp {
     });
     if (result.canceled || result.filePaths.length === 0) return { cancelled: true };
     const cwd = result.filePaths[0];
-    // Live candidates with activity need a confirmation before the switch
-    // discards them (WORLDLINES §6.11). A confirmed switch discards every
-    // live candidate and releases the manager.
-    if (!(await this.confirmDiscardActiveCandidates())) return { cancelled: true };
+    // One tab per folder: reactivate an already-open project.
+    const canonical = this.canonicalPath(cwd);
+    for (const existing of this.projects.values()) {
+      if (existing.canonicalRoot === canonical) {
+        this.activateProject(existing.id);
+        return { cwd };
+      }
+    }
+    const project = await this.openProject(cwd);
+    return project ? { cwd } : { cancelled: true };
+  }
+
+  /** Create a project, start its watcher and store, and activate it. */
+  private async openProject(cwd: string): Promise<ProjectState | null> {
+    this.switchingProject = true;
+    try {
+      const id = `proj-${++projectSeq}`;
+      const project: ProjectState = {
+        id,
+        cwd,
+        canonicalRoot: this.canonicalPath(cwd),
+        workspaces: new Map(),
+        storePromise: null,
+        storeDir: null,
+        mineFiles: new Set(),
+        worldlines: null,
+        terminalIds: new Set(),
+      };
+      this.projects.set(id, project);
+      this.activeProjectId = id;
+      this.ensureAppBridge();
+      this.removeLegacyProjectBridge(cwd);
+      // Finish or roll back any pending promotion journal BEFORE the
+      // primary watcher starts: the restored bytes must not attribute to
+      // a user edit.
+      await this.recoverPromotions();
+      this.createWorkspace(project, cwd, true);
+      this.loadMineFiles(project);
+      this.initWorldlines(project);
+      this.send("folder:opened", { cwd, projectId: id });
+      try {
+        await this.createTerminal(cwd);
+      } catch {
+        /* Pi can be unavailable while the folder still opens. */
+      }
+      return project;
+    } finally {
+      this.switchingProject = false;
+    }
+  }
+
+  /** Switch the renderer to another open project. Nothing is torn down. */
+  private activateProject(projectId: string): void {
+    if (!this.projects.has(projectId)) return;
+    this.activeProjectId = projectId;
+    const project = this.projects.get(projectId)!;
+    this.send("folder:opened", { cwd: project.cwd, projectId: project.id });
+  }
+
+  /** Tear down one project: manager, terminals, watchers, and store. */
+  private async closeProject(projectId: string): Promise<void> {
+    const project = this.projects.get(projectId);
+    if (!project) return;
+    if (!(await this.confirmDiscardActiveCandidates())) return;
     this.switchingProject = true;
     try {
       await this.drainVerifyJobs();
       await this.drainSidecarQueues();
       await this.evidenceQueue.catch(() => undefined);
-      await this.worldlines?.dispose().catch(() => undefined);
-      this.worldlines = null;
-      this.clearMineFiles();
-      for (const id of [...this.terminals.keys()]) {
+      await project.worldlines?.dispose().catch(() => undefined);
+      project.worldlines = null;
+      this.clearMineFiles(project);
+      for (const id of [...project.terminalIds]) {
         this.tailer.stopWatching(id);
         this.worldlineTailers.get(id)?.stop();
         this.worldlineTailers.delete(id);
@@ -4023,35 +4185,30 @@ class PiEditorApp {
       await this.drainTerminals();
       await this.drainSidecarQueues();
       this.sidecarQueues.clear();
-      for (const ws of this.workspaces.values()) ws.watcher?.stop();
-      this.workspaces.clear();
+      for (const ws of project.workspaces.values()) ws.watcher?.stop();
+      project.workspaces.clear();
+      for (const id of [...project.terminalIds]) project.terminalIds.delete(id);
       this.userEditsByWorkspace.clear();
       if (this.userEditsWriteTimer) clearTimeout(this.userEditsWriteTimer);
       this.userEditsWriteTimer = null;
       for (const waiter of this.flushWaiters.values()) {
         clearTimeout(waiter.timer);
-        waiter.resolve({ ok: false, failed: ["folder switch"] });
+        waiter.resolve({ ok: false, failed: ["project switch"] });
       }
       this.flushWaiters.clear();
-      this.clearRunRecords();
       this.evidenceByComparison.clear();
       this.lastWatchChange.clear();
       this.busyAgents.clear();
       this.dispatchWorkers.clear();
       this.dispatchRuns.clear();
-      await this.teardownRecording();
-      this.projectCwd = cwd;
-      this.ensureAppBridge();
-      this.removeLegacyProjectBridge(cwd);
-      this.createWorkspace(cwd, true);
-      this.loadMineFiles();
-      this.send("folder:opened", { cwd });
-      try {
-        await this.createTerminal(cwd);
-      } catch {
-        /* Pi can be unavailable while the folder still opens. */
+      await this.teardownRecording(project);
+      for (const id of project.terminalIds) this.runsByTerminal.delete(id);
+      this.projects.delete(projectId);
+      if (this.activeProjectId === projectId) {
+        const next = this.projects.keys().next().value;
+        this.activeProjectId = next ?? null;
+        if (next) this.send("folder:opened", { cwd: this.projects.get(next)!.cwd, projectId: next });
       }
-      return { cwd };
     } finally {
       this.switchingProject = false;
     }
@@ -4061,7 +4218,7 @@ class PiEditorApp {
    * Tear down the snapshot store and worker of the previous project.
    * The store is app-owned and deleted with its project session.
    */
-  private async teardownRecording(): Promise<void> {
+  private async teardownRecording(project: ProjectState): Promise<void> {
     for (const pending of this.pendingPreflights.values()) {
       clearTimeout(pending.timer);
       this.releaseWriteLease(pending.workspaceId, pending.leaseRequester);
@@ -4073,10 +4230,10 @@ class PiEditorApp {
     }
     this.flushWaiters.clear();
     await this.drainRecordingTasks();
-    const promise = this.storePromise;
-    this.storePromise = null;
-    const storeDir = this.storeDir;
-    this.storeDir = null;
+    const promise = project.storePromise;
+    project.storePromise = null;
+    const storeDir = project.storeDir;
+    project.storeDir = null;
     let store: SnapshotStore | null = null;
     try {
       store = promise ? await promise : null;
@@ -4299,18 +4456,18 @@ class PiEditorApp {
   }
 
   private withinProject(absPath: string): boolean {
-    if (!this.projectCwd) return false;
-    const rel = relative(this.canonicalPath(this.projectCwd), this.canonicalPath(absPath));
+    if (!this.project()?.cwd) return false;
+    const rel = relative(this.canonicalPath(this.project()!.cwd), this.canonicalPath(absPath));
     return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
   }
 
-  private rel(absPath: string, root: string | null = this.projectCwd): string {
+  private rel(absPath: string, root: string | null = this.project()?.cwd ?? null): string {
     const p = this.canonicalPath(absPath);
     return root ? relative(this.canonicalPath(root), p) : p;
   }
 
   private projectAbs(relPath: string): string {
-    const cwd = this.projectCwd;
+    const cwd = this.project()?.cwd;
     if (!cwd) throw new Error("open a project folder first");
     const abs = isAbsolute(relPath) ? relPath : join(cwd, relPath);
     const managed = this.managedPath(abs, true);
@@ -4364,6 +4521,21 @@ class PiEditorApp {
   }
 
   private registerIpc(): void {
+    // ---- Project tabs ----
+    ipcMain.handle("project:list", () =>
+      [...this.projects.values()].map((p) => ({ id: p.id, cwd: p.cwd, active: p.id === this.activeProjectId, terminals: p.terminalIds.size })),
+    );
+    ipcMain.handle("project:open", () => this.openFolder());
+    ipcMain.handle("project:activate", (_e, projectId: string) => {
+      this.activateProject(projectId);
+      return { ok: true };
+    });
+    ipcMain.handle("project:close", async (_e, projectId: string) => {
+      if (this.projects.size <= 1) return { ok: false, error: "the last project stays open" };
+      await this.closeProject(projectId);
+      return { ok: true };
+    });
+
     ipcMain.handle("folder:open", () => this.openFolder());
     ipcMain.handle("clipboard:write", (_e, text: unknown) => {
       if (typeof text !== "string") return { ok: false, error: "clipboard text is invalid" };
@@ -4436,13 +4608,15 @@ class PiEditorApp {
     });
 
     // ---- Worldlines: candidates (WORLDLINES §6.5, §6.6) ----
-    ipcMain.handle("worldline:list", () => this.worldlines?.list() ?? []);
+    ipcMain.handle("worldline:list", () => this.project()?.worldlines?.list() ?? []);
     ipcMain.handle("worldline:promote", (_e, comparisonId: string, label: "A" | "B", force?: boolean) => this.promoteCandidate(comparisonId, label, force ?? false));
     ipcMain.handle("worldline:challenge", async (_e, runId: string) => {
       const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === runId);
       if (!run) return { ok: false, error: "run not found" };
       if (!run.promptPayloadFile) return { ok: false, error: "the run has no captured task to replay" };
-      this.initWorldlines();
+      const forkProject = this.project();
+      if (!forkProject) return { ok: false, error: "no project open" };
+      this.initWorldlines(forkProject);
       const forkable: ForkableRun = {
         id: run.id,
         terminalId: run.terminalId,
@@ -4462,7 +4636,7 @@ class PiEditorApp {
         trustHashes: run.trustHashes,
         trusted: run.trusted,
       };
-      return this.worldlines!.forkRun(forkable, { challenge: true });
+      return forkProject.worldlines!.forkRun(forkable, { challenge: true });
     });
     ipcMain.handle("worldline:evidence", (_e, comparisonId: string) => this.runEvidence(comparisonId));
     ipcMain.handle("worldline:fork-point", async (_e, terminalId: string, seq: number) => {
@@ -4478,7 +4652,8 @@ class PiEditorApp {
       // A nested moment lives inside a candidate: its session is the
       // candidate's live session and its lineage base is the ROOT run
       // start (R) — promotion then includes every ancestor change.
-      const nested = this.worldlines?.candidateContextOf(terminalId) ?? null;
+      const forkOwner = this.projectOfTerminal(terminalId);
+      const nested = forkOwner?.worldlines?.candidateContextOf(terminalId) ?? null;
       const run = [...this.runsByTerminal.values()]
         .flat()
         .find((r) => r.startedAt <= ev.ts && (r.settledAt === null || r.settledAt >= ev.ts));
@@ -4487,8 +4662,9 @@ class PiEditorApp {
         : run;
       const sessionFile = nested?.sessionFile ?? run?.sessionFile;
       if (!sessionFile) return { ok: false, error: "the run session is unavailable" };
-      this.initWorldlines();
-      return this.worldlines!.forkPoint({
+      if (!forkOwner) return { ok: false, error: "no project open" };
+      this.initWorldlines(forkOwner);
+      return forkOwner.worldlines!.forkPoint({
         terminalId,
         stateId: ev.stateId,
         entryId: ev.entryId,
@@ -4500,15 +4676,18 @@ class PiEditorApp {
         inheritTrust: rootRun?.trusted === true ? true : null,
       });
     });
-    ipcMain.handle("worldline:details", (_e, comparisonId: string, label: "A" | "B") => this.worldlines?.details(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" });
-    ipcMain.handle("worldline:compare", (_e, comparisonId: string) => this.worldlines?.compare(comparisonId) ?? { ok: false, error: "worldlines unavailable" });
-    ipcMain.handle("worldline:challenge-candidate", (_e, comparisonId: string, label: "A" | "B") => this.worldlines?.challengeFromCandidate(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" });
-    ipcMain.handle("worldline:file", (_e, comparisonId: string, label: "A" | "B", relPath: string) => this.worldlines?.fileOf(comparisonId, label, relPath) ?? { ok: false, error: "worldlines unavailable" });
-    ipcMain.handle("worldline:base-file", (_e, comparisonId: string, relPath: string) => this.worldlines?.baseFileOf(comparisonId, relPath) ?? { ok: false, error: "worldlines unavailable" });
+    const wlOf = (comparisonId: string) => this.projectOfComparison(comparisonId)?.worldlines ?? null;
+    ipcMain.handle("worldline:details", (_e, comparisonId: string, label: "A" | "B") => wlOf(comparisonId)?.details(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" });
+    ipcMain.handle("worldline:compare", (_e, comparisonId: string) => wlOf(comparisonId)?.compare(comparisonId) ?? { ok: false, error: "worldlines unavailable" });
+    ipcMain.handle("worldline:challenge-candidate", (_e, comparisonId: string, label: "A" | "B") => wlOf(comparisonId)?.challengeFromCandidate(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" });
+    ipcMain.handle("worldline:file", (_e, comparisonId: string, label: "A" | "B", relPath: string) => wlOf(comparisonId)?.fileOf(comparisonId, label, relPath) ?? { ok: false, error: "worldlines unavailable" });
+    ipcMain.handle("worldline:base-file", (_e, comparisonId: string, relPath: string) => wlOf(comparisonId)?.baseFileOf(comparisonId, relPath) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:fork-run", async (_e, runId: string) => {
       const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === runId);
       if (!run) return { ok: false, error: "run not found" };
-      this.initWorldlines();
+      const forkProject = this.projectOfTerminal(run.terminalId) ?? this.project();
+      if (!forkProject) return { ok: false, error: "no project open" };
+      this.initWorldlines(forkProject);
       const forkable: ForkableRun = {
         id: run.id,
         terminalId: run.terminalId,
@@ -4528,12 +4707,12 @@ class PiEditorApp {
         trustHashes: run.trustHashes,
         trusted: run.trusted,
       };
-      return this.worldlines!.forkRun(forkable);
+      return forkProject.worldlines!.forkRun(forkable);
     });
-    ipcMain.handle("worldline:cancel", (_e, comparisonId: string) => this.worldlines?.cancel(comparisonId) ?? { ok: false, error: "worldlines unavailable" });
-    ipcMain.handle("worldline:discard", (_e, comparisonId: string) => this.worldlines?.discard(comparisonId) ?? { ok: false, error: "worldlines unavailable" });
+    ipcMain.handle("worldline:cancel", (_e, comparisonId: string) => wlOf(comparisonId)?.cancel(comparisonId) ?? { ok: false, error: "worldlines unavailable" });
+    ipcMain.handle("worldline:discard", (_e, comparisonId: string) => wlOf(comparisonId)?.discard(comparisonId) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:open-terminal", (_e, comparisonId: string, label: "A" | "B") =>
-      this.worldlines?.openTerminal(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" },
+      wlOf(comparisonId)?.openTerminal(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" },
     );
     /** Materialize a run's start or settled state for inspection. */
     ipcMain.handle("worldline:export-state", async (_e, runId: string, kind: "start" | "settled") => {
@@ -4541,7 +4720,7 @@ class PiEditorApp {
       if (!run) return { ok: false, error: "run not found" };
       const stateId = kind === "start" ? run.startStateId : run.settledStateId;
       if (!stateId) return { ok: false, error: `no ${kind} state` };
-      const store = await this.storePromise;
+      const store = await this.projectOfTerminal(run.terminalId)?.storePromise;
       if (!store) return { ok: false, error: "recording is not available" };
       try {
         const dir = await mkdtemp(join(app.getPath("temp"), "termina-state-"));
@@ -4596,7 +4775,7 @@ class PiEditorApp {
 
     // ---- Mine ----
     ipcMain.handle("mine:set", (_e, path: string, mine: boolean) => this.setMineFile(path, mine));
-    ipcMain.handle("mine:list", () => [...this.mineFiles]);
+    ipcMain.handle("mine:list", () => [...(this.project()?.mineFiles ?? [])]);
 
     // ---- Dispatch ----
     ipcMain.handle("dispatch:run", (_e, terminalId: string) => this.dispatchRun(terminalId));
@@ -4742,7 +4921,7 @@ class PiEditorApp {
     // must already point at the real folder — otherwise it answers with the
     // home directory and the Verify button stays disabled forever.
     const initial = process.env.TERMINA_INITIAL_CWD;
-    this.projectCwd = initial && existsSync(initial) ? initial : null;
+    const initialCwd = initial && existsSync(initial) ? initial : null;
     this.tailer.onEvent = (id, event) => this.enqueueSidecarEvent(id, event);
     this.tailer.start();
     // Write the bridge before the first terminal starts: pi loads it with
@@ -4750,15 +4929,10 @@ class PiEditorApp {
     // project folder.
     this.ensureAppBridge();
     await this.createWindow();
-    if (this.projectCwd) {
-      // Finish or roll back any pending promotion journal BEFORE the primary
-      // watcher starts: the restored bytes must not attribute to a user edit.
-      await this.recoverPromotions();
-      this.removeLegacyProjectBridge(this.projectCwd);
-      this.createWorkspace(this.projectCwd, true);
-      this.loadMineFiles();
+    if (initialCwd) {
+      await this.openProject(initialCwd);
+      return;
     }
-    this.initWorldlines();
     // Create the agent terminal. A transient pi failure (slow start, update
     // check) must not kill the app: retry with backoff. The renderer shows
     // the friendly install message when every attempt fails.
@@ -4782,10 +4956,12 @@ class PiEditorApp {
     await this.drainSidecarQueues();
     this.sidecarQueues.clear();
     await this.evidenceQueue.catch(() => undefined);
-    await this.worldlines?.dispose().catch((err) => console.warn(`[main] worldline cleanup failed: ${String(err)}`));
+    for (const project of this.projects.values()) {
+      await project.worldlines?.dispose().catch(() => undefined);
+      project.worldlines = null;
+      for (const ws of project.workspaces.values()) ws.watcher?.stop();
+    }
     coreClient.dispose();
-    this.worldlines = null;
-    for (const ws of this.workspaces.values()) ws.watcher?.stop();
     for (const inst of this.terminals.values()) inst.pty.kill();
     await this.drainTerminals();
     for (const inst of this.terminals.values()) {
@@ -4795,11 +4971,10 @@ class PiEditorApp {
     }
     this.clearRunRecords();
     this.evidenceByComparison.clear();
-    this.workspaces.clear();
+    this.projects.clear();
     this.terminals.clear();
     for (const tailer of this.worldlineTailers.values()) tailer.stop();
     this.worldlineTailers.clear();
-    await this.teardownRecording().catch((err) => console.warn(`[main] recording cleanup failed: ${String(err)}`));
     this.sessionWorker.dispose();
     this.stopPaintWatchdog();
   }
