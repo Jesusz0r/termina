@@ -222,7 +222,6 @@ const leftPane = document.getElementById("left-pane")!;
 const termTabsList = document.getElementById("terminal-tabs-list")!;
 const termContainer = document.getElementById("terminal-container")!;
 const btnNewTerminal = document.getElementById("btn-new-terminal") as HTMLButtonElement;
-const btnSettings = document.getElementById("btn-settings") as HTMLButtonElement;
 const btnVerify = document.getElementById("btn-verify") as HTMLButtonElement;
 const verifyBadge = document.getElementById("verify-badge")!;
 const statusCwd = document.getElementById("status-cwd")!;
@@ -313,6 +312,9 @@ const settingsView = new SettingsView({
 });
 
 applyPreferences(preferences, false, true);
+// The e2e suite opens settings through this hook (the menu owns the
+// visible entry).
+(window as unknown as Record<string, unknown>).__openSettings = () => settingsView.open(preferences);
 
 function createPaneShell(instanceId: string): Pane {
   const container = document.createElement("div");
@@ -808,7 +810,7 @@ btnNewTerminal.addEventListener("click", (e) => {
 });
 window.pi.onProjectClosed(({ projectId }) => removeProjectView(projectId));
 btnNewProject.addEventListener("click", () => void window.pi.projectOpen());
-btnSettings.addEventListener("click", () => settingsView.open(preferences));
+
 window.addEventListener("click", () => closeTerminalMenu());
 window.addEventListener("blur", () => closeTerminalMenu());
 btnVerify.addEventListener("click", () => {

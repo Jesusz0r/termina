@@ -226,32 +226,7 @@ body {
   -webkit-app-region: drag;
 }
 
-.explorer-header-actions {
-  display: flex;
-  gap: 4px;
-  margin-left: auto;
-  -webkit-app-region: no-drag;
-}
 
-.header-action {
-  width: 24px;
-  height: 24px;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-dim);
-  cursor: pointer;
-  font: inherit;
-  line-height: 1;
-}
-
-.header-action:hover,
-.header-action:focus-visible {
-  border-color: var(--border);
-  background: var(--bg-hover);
-  color: var(--text);
-  outline: none;
-}
 
 #explorer-tree {
   flex: 1;
@@ -1315,8 +1290,9 @@ body {
   align-items: center;
   gap: 4px;
   /* The left padding clears the inset traffic lights, which sit over
-     the bar (same clearance as the explorer header). */
-  padding: 4px 8px 0 78px;
+     the bar (same clearance as the explorer header). The top padding
+     keeps the lights clear of the bottom border. */
+  padding: 9px 8px 7px 78px;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
   -webkit-app-region: drag;

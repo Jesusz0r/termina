@@ -32,7 +32,7 @@ const evaluate = async (expression) => {
 };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-await evaluate(`localStorage.removeItem("termina.preferences"); document.getElementById("btn-settings").click()`);
+await evaluate(`localStorage.removeItem("termina.preferences"); window.__openSettings()`);
 await sleep(100);
 check("settings opens from the explorer header", await evaluate(`Boolean(document.querySelector(".settings-modal"))`));
 check("appearance section is selected", await evaluate(`document.querySelector(".settings-nav-item.active")?.textContent === "Appearance"`));
@@ -50,7 +50,7 @@ check("preferences persist through the main process", await evaluate(`window.pi.
 check("preferences do not use renderer storage", await evaluate(`localStorage.getItem("termina.preferences") === null`));
 
 await evaluate(`document.querySelector(".settings-close").click()`);
-await evaluate(`document.getElementById("btn-settings").click()`);
+await evaluate(`window.__openSettings()`);
 check("theme persists after reopening", await evaluate(`document.querySelector('.settings-theme-card[data-theme="light"]')?.classList.contains("selected")`));
 await evaluate(`document.querySelector(".settings-reset").click()`);
 check("reset all restores the default theme", await evaluate(`document.documentElement.dataset.theme === "dark"`));
