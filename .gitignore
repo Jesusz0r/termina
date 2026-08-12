@@ -6,3 +6,6 @@ dist-renderer/
 core/target/
 resources/
 release/
+*.p12
+*.csr
+*.key

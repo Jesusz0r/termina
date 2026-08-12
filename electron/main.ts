@@ -1967,8 +1967,9 @@ class PiEditorApp {
     try {
       const entry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
       // The packaged bundle unpacks this package: spawn the real files,
-      // not the asar archive (node-pty cannot open asar paths).
-      const real = entry.includes("app.asar") ? entry.replace("app.asar", "app.asar.unpacked") : entry;
+      // not the asar archive (node-pty cannot open asar paths). The
+      // resolver may already return the unpacked path; never remap twice.
+      const real = entry.includes("app.asar.unpacked") ? entry : entry.replace("app.asar/", "app.asar.unpacked/");
       return join(dirname(real), "cli.js");
     } catch (err) {
       // Packaged: the ESM resolver cannot read inside app.asar, but the
