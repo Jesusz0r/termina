@@ -1287,12 +1287,13 @@ body {
 
 #project-bar {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 4px;
   /* The left padding clears the inset traffic lights, which sit over
-     the bar (same clearance as the explorer header). The top padding
-     keeps the lights clear of the bottom border. */
-  padding: 9px 8px 7px 78px;
+     the bar (same clearance as the explorer header). The height keeps
+     the lights clear of the bottom border. */
+  height: 36px;
+  padding: 0 8px 0 78px;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
   -webkit-app-region: drag;
@@ -1309,7 +1310,9 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 8px;
+  /* The tab fills the bar; its bottom edge merges with the bar border. */
+  height: 100%;
+  padding: 0 12px;
   font-size: 12px;
   color: var(--text-dim);
   background: transparent;

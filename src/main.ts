@@ -810,6 +810,11 @@ btnNewTerminal.addEventListener("click", (e) => {
 });
 window.pi.onProjectClosed(({ projectId }) => removeProjectView(projectId));
 btnNewProject.addEventListener("click", () => void window.pi.projectOpen());
+// Double-click on the empty bar area opens a new project tab.
+projectTabsEl.addEventListener("dblclick", (e) => {
+  if ((e.target as HTMLElement).closest(".project-tab, #btn-new-project")) return;
+  void window.pi.projectOpen();
+});
 
 window.addEventListener("click", () => closeTerminalMenu());
 window.addEventListener("blur", () => closeTerminalMenu());
