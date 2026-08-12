@@ -22,6 +22,9 @@ writes your Git repository.
 ![Termina — the pi TUI on the left, the live Monaco editor with the
 modified list and session timeline on the right](docs/screenshot.png)
 
+![Worldlines — a forked run with candidates A and B, and the plan
+board showing the completed tasks](docs/screenshot-worldlines.png)
+
 ## Features
 
 | Feature | What it does |

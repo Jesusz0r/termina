@@ -4733,6 +4733,9 @@ class PiEditorApp {
     this.preferences = await this.preferencesStore.load();
     this.shortcutMap = { ...this.preferences.shortcuts };
     this.registerIpc();
+    // The session workspace is per-launch scratch: run ids restart at
+    // run-1, and stale copies from a previous launch would collide.
+    rmSync(this.sessionWorkspaceDir, { recursive: true, force: true });
     // Set the project BEFORE the window loads: the renderer queries the
     // project (test detection, cwd) as soon as it boots, and terminalCwd()
     // must already point at the real folder — otherwise it answers with the
