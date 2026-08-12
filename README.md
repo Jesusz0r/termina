@@ -96,6 +96,12 @@ Termina terminal before running model-driven e2e suites.
 - The detailed design lives in `docs/WORLDLINES.md` with per-phase
   records in `docs/PHASE0.md` … `PHASE8.md`.
 
+## Contributing
+
+See **`CONTRIBUTING.md`** for the dev setup, the test workflow, and the
+code conventions. Ideas and questions go in
+[Discussions](https://github.com/Jesusz0r/termina/discussions).
+
 ## Releasing
 
 See **`RELEASING.md`** for the full runbook: certificate requirements,
