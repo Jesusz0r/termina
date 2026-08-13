@@ -946,7 +946,12 @@ export class WorldlineManager {
       child.on("error", () => resolvePromise(-1));
       child.on("close", (code) => resolvePromise(code ?? -1));
     });
-    if (res !== 0) throw new Error(`copy-on-write clone failed for ${src}`);
+    if (res !== 0) {
+      // Remove the partial tree: the next fork must not start from a
+      // half-copied candidate directory.
+      await rm(dst, { recursive: true, force: true }).catch(() => undefined);
+      throw new Error(`copy-on-write clone failed for ${src}`);
+    }
   }
 
   /** CoW clone the template into A and B. */

@@ -213,6 +213,14 @@ export function referencedPackages(sourceFiles: Array<{ relPath: string; content
     for (const m of f.content.matchAll(/from\s+["'](@[^"'/]+\/[^"'/]+)/g)) {
       if (!NODE_BUILTINS.has(m[1])) refs.add(m[1]);
     }
+    // Bare side-effect imports (import "pkg") and dynamic import("pkg").
+    for (const m of f.content.matchAll(/import(?:\s*\(\s*|\s+)(["'])([^"'.][^"']*)\1/g)) {
+      const name = m[2] ?? "";
+      const first = name.split("/")[0];
+      if (first && !first.startsWith(".") && !first.startsWith("@") && !NODE_BUILTINS.has(first)) refs.add(first);
+      const scoped = /^@[^/]+\/[^/]+/.exec(name)?.[0];
+      if (scoped && !NODE_BUILTINS.has(scoped)) refs.add(scoped);
+    }
   }
   return refs;
 }
@@ -250,7 +258,7 @@ export class EvidenceEngine {
       return { kind: "verify", stateId, baseStateId: this.deps.baseStateId, status: "unavailable", result: {}, reason: "the shared base has no test command" };
     }
     const stateTree = (await this.deps.captureHead(cand.root, join(cand.root, ".git"), this.deps.baseStateId)).tree;
-    const run = await this.deps.runSandboxed(cand, [...tc.command.split(/\s+/), ...tc.args], 300_000);
+    const run = await this.deps.runSandboxed(cand, [tc.command, ...tc.args], 300_000);
     // A test that changed the source is not evidence: re-capture and compare
     // the trees (commit hashes differ by parent and timestamp).
     const after = await this.deps.captureHead(cand.root, join(cand.root, ".git"), null);
@@ -540,7 +548,9 @@ export function rankProfiles(
       const med = { A: Number(bm.A.result.median), B: Number(bm.B.result.median) };
       const varA = variability(bm.A);
       const varB = variability(bm.B);
-      if (varA === null || varB === null || varA > 0.2 || varB > 0.2) {
+      if (!Number.isFinite(med.A) || !Number.isFinite(med.B)) {
+        reason = "the benchmark measurement is not a finite number";
+      } else if (varA === null || varB === null || varA > 0.2 || varB > 0.2) {
         reason = `variability exceeds the allowed bound (A ${varA === null ? "?" : (varA * 100).toFixed(0)}%, B ${varB === null ? "?" : (varB * 100).toFixed(0)}%)`;
       } else {
         const direction = bm.A.result.direction === "higher" ? 1 : -1;
@@ -567,7 +577,7 @@ function variability(rec: EvidenceRecord | undefined): number | null {
   const median = Number(rec.result.median);
   const p25 = Number(rec.result.p25);
   const p75 = Number(rec.result.p75);
-  if (!median) return null;
+  if (!Number.isFinite(median)) return null;
   return (p75 - p25) / median;
 }
 

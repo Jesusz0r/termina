@@ -1,7 +1,8 @@
 import http from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
 const getJson = (url) => new Promise((resolve, reject) => {
-  http.get(url, (res) => { let d = ""; res.on("data", (c) => (d += c)); res.on("end", () => resolve(JSON.parse(d))); res.on("error", reject); });
+  const req = http.get(url, (res) => { let d = ""; res.on("data", (c) => (d += c)); res.on("end", () => resolve(JSON.parse(d))); res.on("error", reject); });
+  req.on("error", reject);
 });
 const targets = await getJson("http://localhost:9222/json");
 const page = targets.find((t) => t.type === "page");

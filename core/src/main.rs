@@ -37,6 +37,12 @@ const TRUST_MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const BUDGET_MAX_PATHS: usize = 100_000;
 const BUDGET_MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const BUDGET_MAX_NEW_BLOB_BYTES: u64 = 256 * 1024 * 1024;
+/// Unref prunes loose objects only past this many files. Small stores skip
+/// the reachability walk.
+const PRUNE_LOOSE_THRESHOLD: u64 = 20_000;
+/// A burst of unrefs shares one prune: the walk does not rerun inside this
+/// many seconds.
+const PRUNE_MIN_INTERVAL_SECS: u64 = 60;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -117,7 +123,8 @@ fn loose_path(repo: &Repository, oid: Oid) -> Option<PathBuf> {
 
 /// Write a blob into the store when it is new. The loose-path check ignores
 /// the source alternate, so the store keeps its own copy of every captured
-/// blob. Returns (oid, new bytes).
+/// blob. The store never packs its own objects (gc.auto is disabled), so a
+/// loose check is a complete check of the store. Returns (oid, new bytes).
 fn write_blob(repo: &Repository, bytes: &[u8]) -> Result<(Oid, u64), String> {
     let oid = blob_oid(repo, bytes);
     let loose = loose_path(repo, oid).ok_or("oid length does not match the object format")?;
@@ -168,7 +175,14 @@ fn read_file_verified(abs: &Path, before_read: &[(String, String)]) -> Result<Ve
     // The test seam rewrites a file after the open, before the read. The
     // verification must then detect the change.
     for (hook_path, content) in before_read {
-        if abs.to_string_lossy().ends_with(hook_path.as_str()) {
+        let target = abs.to_string_lossy();
+        // Match on a path boundary: a hook for "foo.txt" must not also
+        // rewrite "barfoo.txt".
+        if target == hook_path.as_str()
+            || (target.len() > hook_path.len()
+                && target.ends_with(hook_path.as_str())
+                && target.as_bytes()[target.len() - hook_path.len() - 1] == b'/')
+        {
             fs::write(abs, content).ok();
         }
     }
@@ -296,18 +310,22 @@ fn collect_tree_map_at(
     prefix: &str,
     out: &mut HashMap<String, FlatEntry>,
 ) -> Result<(), String> {
-    let tree = repo.find_tree(tree_oid).map_err(|e| e.to_string())?;
-    for entry in tree.iter() {
-        let name = entry.name().map_err(|e| e.to_string())?;
-        let path = if prefix.is_empty() {
-            name.to_string()
-        } else {
-            format!("{prefix}/{name}")
-        };
-        match entry.kind() {
-            Some(git2::ObjectType::Tree) => collect_tree_map_at(repo, entry.id(), &path, out)?,
-            _ => {
-                out.insert(path, (entry.filemode() as u32, entry.id()));
+    // Iterative walk: a deep tree must not overflow the stack.
+    let mut stack: Vec<(Oid, String)> = vec![(tree_oid, prefix.to_string())];
+    while let Some((current_oid, current_prefix)) = stack.pop() {
+        let tree = repo.find_tree(current_oid).map_err(|e| e.to_string())?;
+        for entry in tree.iter() {
+            let name = entry.name().map_err(|e| e.to_string())?;
+            let path = if current_prefix.is_empty() {
+                name.to_string()
+            } else {
+                format!("{current_prefix}/{name}")
+            };
+            match entry.kind() {
+                Some(git2::ObjectType::Tree) => stack.push((entry.id(), path)),
+                _ => {
+                    out.insert(path, (entry.filemode() as u32, entry.id()));
+                }
             }
         }
     }
@@ -362,9 +380,6 @@ fn update_state_ref(repo: &Repository, commit: Oid) -> Result<(), String> {
 
 /// Enumerate the capture domain: tracked files plus untracked non-ignored
 /// files. Matches `git ls-files -z` plus `ls-files --others
-/// --exclude-standard`.
-/// Enumerate the capture domain: tracked files plus untracked non-ignored
-/// files. Matches `git ls-files -z` plus `ls-files --others
 /// --exclude-standard` run in the capture root. Repo paths are relative to
 /// the working directory; the capture root can be a subdirectory, so strip
 /// the working-directory prefix and keep only paths under the root.
@@ -392,7 +407,8 @@ fn enumerate_domain(repo: &Repository, capture_root: &Path) -> Result<Vec<String
     let mut paths = Vec::new();
     let index = repo.index().map_err(|e| e.to_string())?;
     for entry in index.iter() {
-        let path = String::from_utf8_lossy(&entry.path).to_string();
+        let path = String::from_utf8(entry.path.clone())
+            .map_err(|_| "a tracked path is not valid UTF-8".to_string())?;
         let Some(path) = map_path(path) else { continue };
         if has_git_segment(&path) {
             return Err(format!("nested repository in capture domain: {path}"));
@@ -440,7 +456,11 @@ fn hash_path(
     };
     if st.file_type().is_symlink() {
         let target = fs::read_link(abs).map_err(|e| format!("readlink failed: {e}"))?;
-        let bytes = target.to_string_lossy().into_owned().into_bytes();
+        let bytes = target
+            .into_os_string()
+            .into_string()
+            .map_err(|_| format!("symlink target is not valid UTF-8: {}", abs.display()))?
+            .into_bytes();
         let (oid, new_bytes) = write_blob(repo, &bytes)?;
         return Ok(Some((0o120000, oid, new_bytes)));
     }
@@ -457,6 +477,14 @@ fn hash_path(
         ));
     }
     let bytes = read_file_verified(abs, before_read)?;
+    // The stat above approved the size. A file can grow between the stat
+    // and the read: verify the budget again after the bytes are in memory.
+    if bytes.len() as u64 > max_file_bytes {
+        return Err(format!(
+            "file grew past the {max_file_bytes} byte budget while captured: {}",
+            abs.display()
+        ));
+    }
     let mode = if st.mode() & 0o111 != 0 {
         0o100755
     } else {
@@ -587,6 +615,10 @@ fn op_capture_incremental(req: &Value) -> Result<Value, String> {
         .pointer("/budget/maxNewBlobBytes")
         .and_then(Value::as_u64)
         .unwrap_or(BUDGET_MAX_NEW_BLOB_BYTES);
+    let max_paths = req
+        .pointer("/budget/maxPaths")
+        .and_then(Value::as_u64)
+        .unwrap_or(BUDGET_MAX_PATHS as u64) as usize;
     let hints: Vec<String> = req
         .get("hints")
         .and_then(Value::as_array)
@@ -622,12 +654,14 @@ fn op_capture_incremental(req: &Value) -> Result<Value, String> {
     // differs from the parent tree.
     let mut changed: HashSet<String> = HashSet::new();
     for hint in &hints {
-        if is_safe_relative(hint) {
+        // A nested repository path must never enter the tree: apply-state
+        // would write into the target's own Git directory.
+        if is_safe_relative(hint) && !has_git_segment(hint) {
             changed.insert(hint.clone());
         }
     }
     for (rel_path, content) in &reconcile {
-        if !is_safe_relative(rel_path) {
+        if !is_safe_relative(rel_path) || has_git_segment(rel_path) {
             continue;
         }
         let Some((_, parent_oid)) = parent_flat.get(rel_path) else {
@@ -637,6 +671,12 @@ fn op_capture_incremental(req: &Value) -> Result<Value, String> {
         if content_oid != *parent_oid {
             changed.insert(rel_path.clone());
         }
+    }
+    if changed.len() > max_paths {
+        return Err(format!(
+            "capture exceeds the {max_paths} path budget ({} paths)",
+            changed.len()
+        ));
     }
     if changed.is_empty() {
         return Ok(json!({
@@ -764,10 +804,12 @@ fn remove_stale_paths(
             if desired_directories.contains(&rel_path) {
                 remove_stale_paths(&full, &rel_path, desired, desired_directories, preserve)?;
             } else {
-                fs::remove_dir_all(&full).ok();
+                // A failed removal must surface: stale content otherwise
+                // survives inside the materialized tree.
+                fs::remove_dir_all(&full).map_err(|e| format!("remove failed for {}: {e}", full.display()))?;
             }
         } else if !desired.contains(&rel_path) {
-            fs::remove_file(&full).ok();
+            fs::remove_file(&full).map_err(|e| format!("remove failed for {}: {e}", full.display()))?;
         }
     }
     Ok(())
@@ -789,7 +831,8 @@ fn write_entry_file(
         let blob = repo
             .find_blob(oid)
             .map_err(|e| format!("missing blob {oid}: {e}"))?;
-        let target_text = String::from_utf8_lossy(blob.content()).into_owned();
+        let target_text = String::from_utf8(blob.content().to_vec())
+            .map_err(|e| format!("symlink blob is not valid UTF-8: {e}"))?;
         let current = read_link_target(&full);
         if current.as_deref() != Some(target_text.as_str()) {
             fs::remove_file(&full).ok();
@@ -896,13 +939,14 @@ fn stage_workdir(repo: &Repository, state_flat: &HashMap<String, FlatEntry>) -> 
     // runtime paths stay on disk and stay untracked; entries deleted from
     // disk drop out of the index here too (the stage step cannot remove
     // them by itself).
-    let kept: Vec<IndexEntry> = index
-        .iter()
-        .filter(|entry| {
-            let path = String::from_utf8_lossy(&entry.path).into_owned();
-            state_flat.contains_key(&path)
-        })
-        .collect();
+    let mut kept: Vec<IndexEntry> = Vec::new();
+    for entry in index.iter() {
+        let path = String::from_utf8(entry.path.clone())
+            .map_err(|_| "a staged path is not valid UTF-8".to_string())?;
+        if state_flat.contains_key(&path) {
+            kept.push(entry);
+        }
+    }
     index.clear().map_err(|e| e.to_string())?;
     for entry in kept {
         index
@@ -944,9 +988,12 @@ fn op_template(req: &Value) -> Result<Value, String> {
     let source_objects_dir = PathBuf::from(s(req, "sourceObjectsDir")?);
 
     let store = open_store(&store_dir, req)?;
-    // An independent local repository with read-only object access.
-    let template =
-        Repository::init_opts(&target, &RepositoryInitOptions::new()).map_err(|e| e.to_string())?;
+    // An independent local repository with read-only object access. Use the
+    // store's object format: the alternates point at sha256 objects when the
+    // source uses them.
+    let mut init_opts = RepositoryInitOptions::new();
+    init_opts.object_format(store.object_format());
+    let template = Repository::init_opts(&target, &init_opts).map_err(|e| e.to_string())?;
     let alternates = target
         .join(".git")
         .join("objects")
@@ -1095,10 +1142,12 @@ fn walk_hashes(
         Err(_) => return,
     };
     for entry in entries.flatten() {
-        if *files > TRUST_MAX_FILES || *bytes > TRUST_MAX_BYTES {
+        if *files >= TRUST_MAX_FILES || *bytes >= TRUST_MAX_BYTES {
             return;
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(name) = entry.file_name().to_str().map(String::from) else {
+            continue; // a non-UTF-8 name cannot key the map
+        };
         let full = entry.path();
         let metadata = match fs::symlink_metadata(&full) {
             Ok(metadata) => metadata,
@@ -1152,12 +1201,17 @@ fn op_store_create(req: &Value) -> Result<Value, String> {
         .map_err(|e| e.to_string())?;
     // A new app session has no in-memory run records. Remove refs left by a
     // crashed session before the first capture.
-    let stale: Vec<String> = repo
-        .references_glob("refs/termina/state/*")
-        .map_err(|e| e.to_string())?
-        .filter_map(|reference| reference.ok())
-        .filter_map(|reference| reference.name().ok().map(String::from))
-        .collect();
+    let mut stale: Vec<String> = Vec::new();
+    for glob in ["refs/termina/state/*", "refs/termina/merge/*"] {
+        let refs = repo
+            .references_glob(glob)
+            .map_err(|e| e.to_string())?;
+        for reference in refs.flatten() {
+            if let Ok(name) = reference.name() {
+                stale.push(name.to_string());
+            }
+        }
+    }
     for name in stale {
         if let Ok(reference) = repo.find_reference(&name) {
             let mut reference = reference;
@@ -1225,10 +1279,13 @@ fn op_preflight(req: &Value) -> Result<Value, String> {
         None => reasons.push("the opened folder is not inside a Git repository".to_string()),
         _ => {}
     }
-    if let Some(worlds) = &worlds_root
-        && (cwd_canon == *worlds || cwd_canon.starts_with(worlds))
-    {
-        reasons.push("the opened folder is inside the app-owned worlds root".to_string());
+    if let Some(worlds) = &worlds_root {
+        // Compare canonical forms: macOS reports /tmp and /private/tmp for
+        // the same directory.
+        let worlds_canon = fs::canonicalize(worlds).unwrap_or_else(|_| worlds.clone());
+        if cwd_canon == worlds_canon || cwd_canon.starts_with(&worlds_canon) {
+            reasons.push("the opened folder is inside the app-owned worlds root".to_string());
+        }
     }
 
     // Active merge/rebase/cherry-pick/revert state.
@@ -1371,6 +1428,12 @@ fn op_merge3(req: &Value) -> Result<Value, String> {
     let tree = index
         .write_tree_to(&store)
         .map_err(|e| format!("merge write-tree failed: {e}"))?;
+    // Pin the merged tree: a concurrent unref prune must not delete it
+    // before the caller materializes it. Store-create clears these refs
+    // with the next session.
+    store
+        .reference(&format!("refs/termina/merge/{tree}"), tree, true, "")
+        .map_err(|e| format!("merge pin failed: {e}"))?;
     Ok(json!({ "result": { "ok": true, "tree": tree.to_string(), "conflicts": [] } }))
 }
 
@@ -1398,10 +1461,10 @@ fn op_diff_tree(req: &Value) -> Result<Value, String> {
         }
     }
     changes.sort_by(|x, y| {
-        x["relPath"]
-            .as_str()
+        x.get("relPath")
+            .and_then(Value::as_str)
             .unwrap_or("")
-            .cmp(y["relPath"].as_str().unwrap_or(""))
+            .cmp(y.get("relPath").and_then(Value::as_str).unwrap_or(""))
     });
     Ok(json!({ "changes": changes }))
 }
@@ -1441,7 +1504,10 @@ fn op_symlink_target(req: &Value) -> Result<Value, String> {
     let target = match tree_lookup(&store, tree, &rel)? {
         Some((0o120000, oid)) => {
             let blob = store.find_blob(oid).map_err(|e| e.to_string())?;
-            Some(String::from_utf8_lossy(blob.content()).into_owned())
+            Some(
+                String::from_utf8(blob.content().to_vec())
+                    .map_err(|e| format!("symlink blob is not valid UTF-8: {e}"))?,
+            )
         }
         _ => None,
     };
@@ -1456,6 +1522,11 @@ fn op_read_blob(req: &Value) -> Result<Value, String> {
     let content = match tree_lookup(&store, tree, &rel)? {
         Some((_, oid)) => {
             let blob = store.find_blob(oid).map_err(|e| e.to_string())?;
+            if blob.content().len() as u64 > BUDGET_MAX_FILE_BYTES {
+                return Err(format!(
+                    "blob exceeds the {BUDGET_MAX_FILE_BYTES} byte read budget: {rel}"
+                ));
+            }
             Some(base64::engine::general_purpose::STANDARD.encode(blob.content()))
         }
         None => None,
@@ -1471,7 +1542,136 @@ fn op_unref(req: &Value) -> Result<Value, String> {
         let mut reference = reference;
         reference.delete().map_err(|e| e.to_string())?;
     }
+    // The ref deletion makes objects unreachable. Prune them past the
+    // threshold so a long session does not grow the store without bound.
+    prune_unreachable(&store)?;
     Ok(json!({}))
+}
+
+/// Count the loose objects of the store. Stops at the prune threshold.
+fn loose_object_count(git_dir: &Path) -> u64 {
+    let mut count = 0u64;
+    let objects = git_dir.join("objects");
+    let Ok(entries) = fs::read_dir(&objects) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        if count >= PRUNE_LOOSE_THRESHOLD {
+            return count;
+        }
+        let path = entry.path();
+        let is_two_hex = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.len() == 2);
+        if !path.is_dir() || !is_two_hex {
+            continue;
+        }
+        if let Ok(inner) = fs::read_dir(&path) {
+            count += inner.flatten().count() as u64;
+        }
+    }
+    count
+}
+
+/// Collect every object a ref reaches: commits, trees, and blobs. The tree
+/// walk is iterative: deep trees must not overflow the stack.
+fn collect_reachable(repo: &Repository) -> Result<HashSet<Oid>, String> {
+    let mut reachable = HashSet::new();
+    let mut commits: Vec<Oid> = Vec::new();
+    let mut trees: Vec<Oid> = Vec::new();
+    for reference in repo.references().map_err(|e| e.to_string())? {
+        let reference = reference.map_err(|e| e.to_string())?;
+        if let Ok(commit) = reference.peel_to_commit() {
+            commits.push(commit.id());
+        } else if let Some(target) = reference.target() {
+            // A ref can pin a tree (the merge pin). Walk it like a commit tree.
+            trees.push(target);
+        }
+    }
+    let mut visited = HashSet::new();
+    while let Some(commit_oid) = commits.pop() {
+        if !visited.insert(commit_oid) {
+            continue;
+        }
+        reachable.insert(commit_oid);
+        let Ok(commit) = repo.find_commit(commit_oid) else {
+            continue;
+        };
+        for parent in commit.parent_ids() {
+            commits.push(parent);
+        }
+        trees.push(commit.tree_id());
+    }
+    // Iterative tree walk: deep trees must not overflow the stack.
+    while let Some(tree_oid) = trees.pop() {
+        if !reachable.insert(tree_oid) {
+            continue;
+        }
+        let Ok(tree) = repo.find_tree(tree_oid) else {
+            continue;
+        };
+        for entry in tree.iter() {
+            match entry.kind() {
+                Some(git2::ObjectType::Tree) => trees.push(entry.id()),
+                _ => {
+                    reachable.insert(entry.id());
+                }
+            }
+        }
+    }
+    Ok(reachable)
+}
+
+/// Delete loose objects that no ref reaches. Runs after an unref, past the
+/// threshold. Packed objects stay: the store does not pack its own objects.
+fn prune_unreachable(repo: &Repository) -> Result<(), String> {
+    let git_dir = repo.path().to_path_buf();
+    if loose_object_count(&git_dir) < PRUNE_LOOSE_THRESHOLD {
+        return Ok(());
+    }
+    // Throttle: a burst of unrefs must not repeat the full walk. One prune
+    // per minute is enough. The marker lives in the git dir, which Git
+    // ignores.
+    let marker = git_dir.join("prune-marker");
+    if let Ok(text) = fs::read_to_string(&marker)
+        && let Ok(last) = text.trim().parse::<u64>()
+        && now_ms() / 1000 - last < PRUNE_MIN_INTERVAL_SECS
+    {
+        return Ok(());
+    }
+    let reachable = collect_reachable(repo)?;
+    let objects = git_dir.join("objects");
+    let Ok(entries) = fs::read_dir(&objects) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if dir_name.len() != 2 {
+            continue;
+        }
+        let Ok(inner) = fs::read_dir(&path) else {
+            continue;
+        };
+        for file in inner.flatten() {
+            let file_path = file.path();
+            let Some(file_name) = file_path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let hex = format!("{dir_name}{file_name}");
+            let Ok(oid) = Oid::from_str(&hex) else {
+                continue; // pack and index files stay
+            };
+            if !reachable.contains(&oid) {
+                fs::remove_file(&file_path).ok();
+            }
+        }
+    }
+    fs::write(&marker, format!("{}", now_ms() / 1000)).ok();
+    Ok(())
 }
 
 // ---------------------------------------------------------- source queries ----
@@ -1479,10 +1679,13 @@ fn op_unref(req: &Value) -> Result<Value, String> {
 fn op_git_head(req: &Value) -> Result<Value, String> {
     let root = PathBuf::from(s(req, "root")?);
     let repo = open_repo(&root)?;
-    let head = repo
-        .head()
-        .ok()
-        .and_then(|head| head.target().map(|oid| oid.to_string()));
+    // Distinguish an unborn branch from a broken repository: the caller
+    // treats null as "no commits yet", but must see every real failure.
+    let head = match repo.head() {
+        Ok(head) => head.target().map(|oid| oid.to_string()),
+        Err(err) if err.code() == ErrorCode::UnbornBranch => None,
+        Err(err) => return Err(format!("git head failed: {err}")),
+    };
     Ok(json!({ "head": head }))
 }
 
@@ -1518,10 +1721,13 @@ fn op_ls_tracked(req: &Value) -> Result<Value, String> {
     let root = PathBuf::from(s(req, "root")?);
     let repo = open_repo(&root)?;
     let index = repo.index().map_err(|e| e.to_string())?;
-    let paths: Vec<String> = index
-        .iter()
-        .map(|entry| String::from_utf8_lossy(&entry.path).into_owned())
-        .collect();
+    let mut paths: Vec<String> = Vec::new();
+    for entry in index.iter() {
+        paths.push(
+            String::from_utf8(entry.path.clone())
+                .map_err(|_| "a tracked path is not valid UTF-8".to_string())?,
+        );
+    }
     Ok(json!({ "paths": paths }))
 }
 
@@ -1547,10 +1753,10 @@ fn op_repo_status(req: &Value) -> Result<Value, String> {
         changes.push(json!({ "relPath": path, "status": kind }));
     }
     changes.sort_by(|x, y| {
-        x["relPath"]
-            .as_str()
+        x.get("relPath")
+            .and_then(Value::as_str)
             .unwrap_or("")
-            .cmp(y["relPath"].as_str().unwrap_or(""))
+            .cmp(y.get("relPath").and_then(Value::as_str).unwrap_or(""))
     });
     Ok(json!({ "changes": changes }))
 }
@@ -1588,10 +1794,10 @@ fn op_repo_diff(req: &Value) -> Result<Value, String> {
         }
     }
     changes.sort_by(|x, y| {
-        x["relPath"]
-            .as_str()
+        x.get("relPath")
+            .and_then(Value::as_str)
             .unwrap_or("")
-            .cmp(y["relPath"].as_str().unwrap_or(""))
+            .cmp(y.get("relPath").and_then(Value::as_str).unwrap_or(""))
     });
     Ok(json!({ "changes": changes }))
 }
@@ -1615,26 +1821,28 @@ fn collect_repo_tree(
     prefix: &str,
     out: &mut Vec<Value>,
 ) -> Result<(), String> {
-    for entry in tree.iter() {
-        let name = entry.name().map_err(|e| e.to_string())?;
-        let path = if prefix.is_empty() {
-            name.to_string()
-        } else {
-            format!("{prefix}/{name}")
-        };
-        match entry.kind() {
-            Some(git2::ObjectType::Tree) => {
-                let sub = repo.find_tree(entry.id()).map_err(|e| e.to_string())?;
-                collect_repo_tree(repo, &sub, &path, out)?;
+    // Iterative walk: a deep tree must not overflow the stack.
+    let mut stack: Vec<(Oid, String)> = vec![(tree.id(), prefix.to_string())];
+    while let Some((current_oid, current_prefix)) = stack.pop() {
+        let current = repo.find_tree(current_oid).map_err(|e| e.to_string())?;
+        for entry in current.iter() {
+            let name = entry.name().map_err(|e| e.to_string())?;
+            let path = if current_prefix.is_empty() {
+                name.to_string()
+            } else {
+                format!("{current_prefix}/{name}")
+            };
+            match entry.kind() {
+                Some(git2::ObjectType::Tree) => stack.push((entry.id(), path)),
+                Some(git2::ObjectType::Blob) => {
+                    let size = repo
+                        .find_blob(entry.id())
+                        .map(|blob| blob.size())
+                        .unwrap_or(0);
+                    out.push(json!({ "path": path, "mode": format!("{:o}", entry.filemode()), "size": size }));
+                }
+                _ => {}
             }
-            Some(git2::ObjectType::Blob) => {
-                let size = repo
-                    .find_blob(entry.id())
-                    .map(|blob| blob.size())
-                    .unwrap_or(0);
-                out.push(json!({ "path": path, "mode": format!("{:o}", entry.filemode()), "size": size }));
-            }
-            _ => {}
         }
     }
     Ok(())
@@ -1652,6 +1860,11 @@ fn op_repo_file(req: &Value) -> Result<Value, String> {
     let content = match tree_lookup(&repo, tree.id(), &rel)? {
         Some((_, oid)) => {
             let blob = repo.find_blob(oid).map_err(|e| e.to_string())?;
+            if blob.content().len() as u64 > BUDGET_MAX_FILE_BYTES {
+                return Err(format!(
+                    "blob exceeds the {BUDGET_MAX_FILE_BYTES} byte read budget: {rel}"
+                ));
+            }
             Some(base64::engine::general_purpose::STANDARD.encode(blob.content()))
         }
         None => None,
@@ -1724,7 +1937,21 @@ fn main() {
         }
         let request: Value = match serde_json::from_str(&line) {
             Ok(value) => value,
-            Err(_) => continue,
+            Err(_) => {
+                // Answer every input line. The client waits forever for a
+                // reply that never comes.
+                let response = json!({
+                    "op": "error",
+                    "requestId": Value::Null,
+                    "ok": false,
+                    "error": "invalid request json"
+                });
+                let mut stdout = stdout.lock();
+                if writeln!(stdout, "{response}").is_err() || stdout.flush().is_err() {
+                    break;
+                }
+                continue;
+            }
         };
         let op = request
             .get("op")
@@ -1742,6 +1969,10 @@ fn main() {
                     json!({ "op": format!("{op}-result"), "requestId": request_id, "ok": true });
                 if let Some(obj) = payload.as_object() {
                     for (key, value) in obj {
+                        // Payload keys must not overwrite the envelope.
+                        if key == "op" || key == "requestId" || key == "ok" || key == "error" {
+                            continue;
+                        }
                         response[key] = value.clone();
                     }
                 }

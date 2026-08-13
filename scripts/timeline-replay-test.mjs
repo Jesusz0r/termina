@@ -21,7 +21,7 @@ const check = (name, ok, detail = "") => {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + String(detail).slice(0, 200) : ""}`);
 };
 
-const eventsDir = "/tmp/termina-events-test";
+const eventsDir = process.env.TERMINA_EVENTS_DIR ?? "/tmp/termina-events-test";
 mkdirSync(eventsDir, { recursive: true });
 const sidecar = join(eventsDir, "term-1.jsonl");
 const bridgeId = "synthetic-timeline";
@@ -59,9 +59,14 @@ check("three tool dots in the strip", dots === 3, `dots=${dots}`);
 
 // ---- 2. replay keeps ONE tab ----
 await evalJs(`document.getElementById('btn-timeline-play').click()`);
-await sleep(2600); // ~4 steps at 650 ms
-const tabsDuring = await evalJs(`document.querySelectorAll('.editor-tab.timeline-tab').length`);
-check("replay keeps a single snapshot tab", tabsDuring <= 1, `tabs=${tabsDuring}`);
+let tabsDuring = 0;
+for (let i = 0; i < 20; i++) {
+  await sleep(250);
+  tabsDuring = await evalJs(`document.querySelectorAll('.editor-tab.timeline-tab').length`);
+  if (tabsDuring > 0) break;
+}
+check("replay opens a snapshot tab", tabsDuring > 0, `tabs=${tabsDuring}`);
+check("replay keeps a single snapshot tab", tabsDuring === 1, `tabs=${tabsDuring}`);
 await evalJs(`document.getElementById('btn-timeline-play').click()`); // stop replay
 await sleep(300);
 

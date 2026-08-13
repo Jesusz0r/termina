@@ -1,7 +1,8 @@
 import http from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
 const getJson = (url) => new Promise((resolve, reject) => {
-  http.get(url, (res) => { let d = ""; res.on("data", (c) => (d += c)); res.on("end", () => resolve(JSON.parse(d))); res.on("error", reject); });
+  const req = http.get(url, (res) => { let d = ""; res.on("data", (c) => (d += c)); res.on("end", () => resolve(JSON.parse(d))); res.on("error", reject); });
+  req.on("error", reject);
 });
 const targets = await getJson("http://localhost:9222/json");
 const page = targets.find((t) => t.type === "page");
@@ -20,10 +21,12 @@ await evalJs(`document.querySelector('.xterm-helper-textarea')?.focus()`);
 await send("Input.insertText", { text: "Edit greeting.ts so the greeting is 'hi there'" });
 await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
 await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+let seenWorking = false;
 for (let i = 0; i < 150; i++) {
   await sleep(1000);
-  const busy = await evalJs(`document.getElementById('status-state').textContent`);
-  if (busy && !busy.includes('working') && i > 3) break;
+  const busy = await evalJs(`document.getElementById('status-state')?.textContent ?? ''`);
+  if (busy.includes('working')) seenWorking = true;
+  if (seenWorking && !busy.includes('working')) break;
 }
 await sleep(1500);
 const diskAfter = await evalJs(`window.pi.openFile('/tmp/termina-test-project/greeting.ts')`);

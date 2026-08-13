@@ -31,7 +31,7 @@ const check = (name, ok, detail = "") => {
 };
 
 // The events dir is overridable via TERMINA_EVENTS_DIR (set by the launcher).
-const eventsDir = "/tmp/termina-events-test";
+const eventsDir = process.env.TERMINA_EVENTS_DIR ?? "/tmp/termina-events-test";
 const { mkdirSync } = await import("node:fs");
 mkdirSync(eventsDir, { recursive: true });
 const sidecar = join(eventsDir, "term-1.jsonl");

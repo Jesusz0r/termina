@@ -11,7 +11,9 @@ export interface ModifiedFile {
 export interface FileChangedPayload {
   path: string;
   relPath: string;
-  content: string;
+  /** Present only when the file fits the live-sync budget. Fetch large
+   *  files on demand. */
+  content?: string;
   status: "created" | "modified";
 }
 
@@ -302,7 +304,6 @@ export interface DependencyChange {
   changed: string[];
 }
 
-/** Candidate details, computed on demand (WORLDLINES §6.9). */
 /** One measured evidence record for one candidate (WORLDLINES §6.8). */
 export interface EvidenceRecord {
   kind: "verify" | "dependencies" | "api" | "footprint" | "benchmark";
@@ -332,6 +333,7 @@ export interface EvidenceSummary {
   stale?: boolean;
 }
 
+/** Candidate details, computed on demand (WORLDLINES §6.9). */
 export interface WorldlineDetails {
   id: string;
   comparisonId: string;
@@ -490,7 +492,7 @@ export interface PiBridge {
   /** Open a project by path (the test suites cannot drive the dialog). */
   projectOpenPath(cwd: string): Promise<{ cwd: string } | { cancelled: true }>;
   projectActivate(projectId: string): Promise<{ ok: boolean }>;
-  projectClose(projectId: string): Promise<{ ok: boolean; error?: string }>;
+  projectClose(projectId: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean }>;
   onProjectClosed(cb: (e: { projectId: string }) => void): void;
   openFolder(): Promise<{ cwd: string } | { cancelled: true }>;
   openFile(path: string): Promise<{ path: string; content: string } | { path: string; error: string }>;

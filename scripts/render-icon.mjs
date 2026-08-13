@@ -22,6 +22,7 @@ mkdirSync(work, { recursive: true });
 
 const mainJs = `
 const { app, BrowserWindow } = require("electron");
+const { pathToFileURL } = require("node:url");
 const fs = require("node:fs");
 app.whenReady().then(async () => {
   const win = new BrowserWindow({
@@ -32,8 +33,11 @@ app.whenReady().then(async () => {
     transparent: true,
     webPreferences: { offscreen: true, backgroundThrottling: false },
   });
-  await win.loadURL("file://${join(projectRoot, "build", "icon.svg")}");
-  await new Promise((r) => setTimeout(r, 400));
+  await new Promise((resolve, reject) => {
+    win.webContents.once("did-finish-load", resolve);
+    win.webContents.once("did-fail-load", (_e, code, desc) => reject(new Error("icon svg failed to load (" + code + " " + desc + ")")));
+    void win.loadURL(pathToFileURL(${JSON.stringify(join(projectRoot, "build", "icon.svg"))}).href);
+  });
   const image = await win.webContents.capturePage();
   fs.writeFileSync(${JSON.stringify(outFile)}, image.toPNG());
   app.exit(0);
@@ -42,9 +46,16 @@ app.whenReady().then(async () => {
 writeFileSync(join(work, "main.js"), mainJs);
 
 const child = spawn(electronPath, [join(work, "main.js")], { stdio: "inherit" });
+const killTimer = setTimeout(() => {
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    /* the child can exit between the signal and the check */
+  }
+}, 30000);
 await new Promise((resolve, reject) => {
   child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`icon render exited ${code}`))));
   child.on("error", reject);
-});
+}).finally(() => clearTimeout(killTimer));
 rmSync(work, { recursive: true, force: true });
 console.log(`✓ ${outFile}`);

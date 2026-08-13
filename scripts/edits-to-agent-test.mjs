@@ -25,7 +25,7 @@ const check = (name, ok, detail = "") => {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + String(detail).slice(0, 200) : ""}`);
 };
 
-const eventsDir = "/tmp/termina-events-test";
+const eventsDir = process.env.TERMINA_EVENTS_DIR ?? "/tmp/termina-events-test";
 const editsFile = join(eventsDir, "edits-term-1.md");
 const greeting = "/tmp/termina-test-project/greeting.ts";
 // The fixture project gains a test script whose run writes a file (test
@@ -45,10 +45,14 @@ ws.onmessage = (m) => { const msg = JSON.parse(m.data); if (msg.id && pending.ha
 const send = (method, params = {}) => new Promise((res) => { const i = ++id; pending.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });
 const evalJs = async (expr) => { const r = await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true }); return r.result?.result?.value; };
 const waitIdle = async () => {
+  // Require a working → idle transition: an idle sample alone could mean
+  // the agent never started (a stale session then corrupts the checks).
+  let seenWorking = false;
   for (let i = 0; i < 120; i++) {
     await sleep(1000);
-    const busy = await evalJs(`document.getElementById('status-state').textContent`);
-    if (busy && !busy.includes("working") && i > 3) return;
+    const busy = await evalJs(`document.getElementById('status-state')?.textContent ?? ''`);
+    if (busy.includes("working")) seenWorking = true;
+    if (seenWorking && !busy.includes("working")) return;
   }
 };
 const promptAgent = async (text) => {
@@ -156,7 +160,7 @@ for (let i = 0; i < 20; i++) {
     break;
   }
 }
-check("a user deletion removes the stale edit entry", ctx6b !== "" || !existsSync(editsFile), ctx6b.slice(0, 80));
+check("a user deletion removes the stale edit entry", !ctx6b.includes("greeting.ts") && !ctx6b.includes("hi three"), ctx6b.slice(0, 80));
 
 const passed = results.filter(Boolean).length;
 console.log(`\n${passed}/${results.length} passed`);

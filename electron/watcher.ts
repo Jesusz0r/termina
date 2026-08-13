@@ -71,6 +71,8 @@ export class ProjectWatcher {
   private static readonly CACHE_LIMIT = 5000;
   /** Byte budget for the cache — count alone can reach gigabytes with big files. */
   private static readonly CACHE_BYTES = 64 * 1024 * 1024;
+  /** The debounce map cap for change bursts. */
+  private static readonly MAX_PENDING_TIMERS = 2000;
   private cacheBytes = 0;
 
   /** Fired with the new file content whenever a watched text file changes. */
@@ -123,6 +125,17 @@ export class ProjectWatcher {
 
   private schedule(relPath: string): void {
     if (this.isIgnored(relPath)) return;
+    // Bound the debounce map: a build storm must not hold thousands of
+    // timers. Flush the oldest entry first so no change gets lost.
+    if (!this.timers.has(relPath) && this.timers.size >= ProjectWatcher.MAX_PENDING_TIMERS) {
+      const oldest = this.timers.keys().next().value;
+      if (oldest !== undefined) {
+        const timer = this.timers.get(oldest);
+        if (timer) clearTimeout(timer);
+        this.timers.delete(oldest);
+        void this.emit(oldest);
+      }
+    }
     const existing = this.timers.get(relPath);
     if (existing) clearTimeout(existing);
     this.timers.set(
@@ -153,14 +166,27 @@ export class ProjectWatcher {
       }
       return;
     }
-    if (!st.isFile() || st.size > MAX_FILE_SIZE) return;
+    if (!st.isFile()) return;
+    if (st.size > MAX_FILE_SIZE) {
+      // A file can grow past the cap. Mark it seen so a later small read
+      // reports "modified", and drop the stale cached content.
+      this.seen.add(relPath);
+      const key = this.canonicalize ? this.canonicalize(abs) : abs;
+      const evicted = this.lastContents.get(key);
+      if (evicted !== undefined) {
+        this.cacheBytes -= Buffer.byteLength(evicted, "utf8");
+        this.lastContents.delete(key);
+      }
+      return;
+    }
 
     let content: string;
     try {
       const buf = await readFile(abs);
+      // NUL bytes do not appear in text. Check the buffer, not the decoded
+      // string: valid text can contain the replacement character.
+      if (buf.includes(0)) return;
       content = buf.toString("utf8");
-      // Detect binary files by the replacement character.
-      if (content.includes("\uFFFD")) return;
     } catch {
       return; // transient read error — leave as-is
     }

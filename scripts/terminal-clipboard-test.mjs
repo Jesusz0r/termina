@@ -44,13 +44,15 @@ check("terminal selection copies through the system clipboard", await evaluate(`
 await sleep(100);
 const clipboard = await evaluate(`window.pi.readClipboard()`);
 check("copied text contains the terminal output", clipboard.includes(marker), clipboard);
-check("terminal copy shortcut uses the selection", await evaluate(`(() => {
+check("terminal copy shortcut dispatches", await evaluate(`(() => {
   const pane = [...window.__panes.values()][0];
   const term = pane?.view.getTerminal();
   if (!term?.textarea) return false;
   term.selectAll();
-  term.textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "c", code: "KeyC", ctrlKey: true, bubbles: true, cancelable: true }));
-  return true;
+  // dispatchEvent returns false when preventDefault ran: the app
+  // intercepted the shortcut and copied the selection itself.
+  const intercepted = !term.textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "c", code: "KeyC", ctrlKey: true, bubbles: true, cancelable: true }));
+  return intercepted;
 })()`));
 await sleep(100);
 check("copy shortcut updates the system clipboard", (await evaluate(`window.pi.readClipboard()`)).includes(marker));

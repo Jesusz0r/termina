@@ -38,7 +38,10 @@ async function prepareNode() {
   if (existsSync(nodeBin)) {
     try {
       const version = execFileSync(nodeBin, ["--version"], { encoding: "utf8" }).trim();
-      if (version.startsWith(`v${NODE_MAJOR}.`)) {
+      // Reuse only when the staged runtime meets pi's engine floor. An old
+      // 22.x would ship and break pi's startup.
+      const match = /^v(\d+)\.(\d+)\./.exec(version);
+      if (match && (Number(match[1]) > 22 || (Number(match[1]) === 22 && Number(match[2]) >= 19))) {
         console.log(`✓ node reused (${version})`);
         return;
       }

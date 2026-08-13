@@ -126,6 +126,10 @@ check("B's tab is gone", Array.isArray(tabs2), JSON.stringify(tabs2));
 check("A's tab remains", tabs2.some((t) => t.includes("multiproj-a")), JSON.stringify(tabs2));
 const bGone = await evaluate(`window.pi.getInstances().then((v) => v.some((i) => i.cwd?.includes('multiproj-b')))`);
 check("B terminals are gone", !bGone);
+// The close must not have touched A: its agent stays alive (the scoped
+// terminal drain regression).
+const aAlive = await evaluate(`window.pi.getInstances().then((v) => v.some((i) => i.type === 'agent' && i.projectId === ${JSON.stringify(aProjId)}))`);
+check("A's agent survived closing B", aAlive === true, aAlive);
 
 const failed = results.filter((r) => !r).length;
 console.log(`\nmulti-project test: ${results.length - failed}/${results.length} passed`);

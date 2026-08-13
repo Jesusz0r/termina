@@ -24,7 +24,7 @@ const check = (name, ok, detail = "") => {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + String(detail).slice(0, 200) : ""}`);
 };
 
-const mineFile = join("/tmp/termina-events-test", "mine-term-1.md");
+const mineFile = join(process.env.TERMINA_EVENTS_DIR ?? "/tmp/termina-events-test", "mine-term-1.md");
 const greetingAbs = "/tmp/termina-test-project/greeting.ts";
 
 const pages = await fetch("http://127.0.0.1:9222/json").then((r) => r.json());
@@ -57,10 +57,12 @@ check("the mine context lists the file", ctx.includes("greeting.ts") && ctx.incl
 await evalJs(`document.querySelector('.xterm-helper-textarea')?.focus()`);
 await send("Input.insertText", { text: "Read greeting.ts and report what it says." });
 await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+let seenWorking = false;
 for (let i = 0; i < 180; i++) {
   await sleep(1000);
-  const busy = await evalJs(`document.getElementById('status-state').textContent`);
-  if (busy && !busy.includes("working") && i > 5) break;
+  const busy = await evalJs(`document.getElementById('status-state')?.textContent ?? ''`);
+  if (busy.includes("working")) seenWorking = true;
+  if (seenWorking && !busy.includes("working")) break;
 }
 await sleep(1500);
 const sessionDir = execSync(`ls -td ${process.env.HOME}/.pi/agent/sessions/--private-tmp-termina-test-project--/ 2>/dev/null | head -1`).toString().trim();

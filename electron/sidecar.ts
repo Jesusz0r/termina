@@ -210,10 +210,16 @@ export class SidecarTailer {
     const currentSize = this.offsets.get(id) ?? 0;
     if (this.offsets.has(id) && currentSize >= MAX_SIDECAR_BYTES) {
       try {
-        await truncateFile(file, 0);
-        this.offsets.set(id, 0);
-        this.streams.delete(id);
-        this.bridgeIds.delete(id);
+        // The bridge appends with a new open per line, so truncation is
+        // safe between appends. Skip the rotation when the file grew after
+        // the read: the next poll catches the new bytes.
+        const after = (await statFile(file)).size;
+        if (after === currentSize) {
+          await truncateFile(file, 0);
+          this.offsets.set(id, 0);
+          this.streams.delete(id);
+          this.bridgeIds.delete(id);
+        }
       } catch {
         /* The bridge can continue appending. */
       }

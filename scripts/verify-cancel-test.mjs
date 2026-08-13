@@ -23,7 +23,7 @@ const check = (name, ok, detail = "") => {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + String(detail).slice(0, 200) : ""}`);
 };
 
-const eventsDir = "/tmp/termina-events-test";
+const eventsDir = process.env.TERMINA_EVENTS_DIR ?? "/tmp/termina-events-test";
 const ctxFile = join(eventsDir, "verify-term-1.md");
 
 const pages = await fetch("http://127.0.0.1:9222/json").then((r) => r.json());
@@ -64,9 +64,9 @@ for (let i = 0; i < 30; i++) {
 check("state becomes cancelled", verify?.state === "cancelled", JSON.stringify(verify));
 
 const badge = await evalJs(
-  `(() => { const b = document.getElementById('verify-badge'); return { text: b.textContent, cls: b.className, hidden: b.hidden }; })()`,
+  `(() => { const b = document.getElementById('verify-badge'); if (!b) return null; return { text: b.textContent, cls: b.className, hidden: b.hidden }; })()`,
 );
-check("badge shows the cancelled state", !badge.hidden && String(badge.text).includes("cancelled"), JSON.stringify(badge));
+check("badge shows the cancelled state", badge !== null && !badge.hidden && String(badge.text).includes("cancelled"), JSON.stringify(badge));
 
 // ---- 3. no context file for a cancelled run ----
 await sleep(400);

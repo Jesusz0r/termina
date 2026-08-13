@@ -48,10 +48,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 await evalJs(`document.querySelector('.xterm-helper-textarea')?.focus()`);
 await send("Input.insertText", { text: "Edit greeting.ts so the greeting is hi there" });
 await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+let seenWorking = false;
 for (let i = 0; i < 120; i++) {
   await sleep(1000);
-  const busy = await evalJs(`document.getElementById('status-state').textContent`);
-  if (busy && !busy.includes("working") && i > 3) break;
+  const busy = await evalJs(`document.getElementById('status-state')?.textContent ?? ''`);
+  if (busy.includes("working")) seenWorking = true;
+  if (seenWorking && !busy.includes("working")) break;
 }
 await sleep(1500);
 

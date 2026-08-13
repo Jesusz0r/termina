@@ -19,6 +19,8 @@ export class ReviewView {
   private onOpenFile: (path: string) => void = () => {};
   private onAccepted: (path: string) => void = () => {};
   private onReverted: (path: string) => void = () => {};
+  /** Bumped on every show/hide. A stale load applies to nothing. */
+  private loadSeq = 0;
 
   constructor() {
     this.container = document.getElementById("review-container") as HTMLElement;
@@ -69,13 +71,16 @@ export class ReviewView {
 
   /** Show the diff for a file the agent changed in the given terminal. */
   async show(terminalId: string, path: string, relPath: string): Promise<void> {
+    const seq = ++this.loadSeq;
     this.terminalId = terminalId;
     this.path = path;
     this.nameEl.textContent = relPath;
 
     const res = await window.pi.reviewBaseline(terminalId, path);
+    if (seq !== this.loadSeq) return;
     this.baseline = res.baseline;
     const current = await window.pi.openFile(path);
+    if (seq !== this.loadSeq) return;
     const currentText = "content" in current ? current.content : "";
 
     this.setDiff(this.baseline ?? "", currentText);
@@ -123,6 +128,7 @@ export class ReviewView {
 
   /** Show the A-to-B diff for a worldline file. */
   async showABDiff(comparisonId: string, relPath: string, aRoot: string | null): Promise<void> {
+    const seq = ++this.loadSeq;
     this.terminalId = null;
     this.path = aRoot ? `${aRoot}/${relPath}` : null;
     this.nameEl.textContent = `${relPath}  ·  A ⇄ B`;
@@ -130,6 +136,7 @@ export class ReviewView {
       window.pi.getWorldlineFile(comparisonId, "A", relPath),
       window.pi.getWorldlineFile(comparisonId, "B", relPath),
     ]);
+    if (seq !== this.loadSeq) return;
     this.setDiff(a.ok && a.content !== undefined ? a.content : "", b.ok && b.content !== undefined ? b.content : "");
     const revertBtn = document.getElementById("review-revert") as HTMLButtonElement;
     const acceptBtn = document.getElementById("review-accept") as HTMLButtonElement;
@@ -185,6 +192,7 @@ export class ReviewView {
   }
 
   hide(): void {
+    this.loadSeq++;
     this.container.style.display = "none";
     document.getElementById("editor-container")!.style.display = "";
     document.getElementById("editor-tabs")!.style.display = "";

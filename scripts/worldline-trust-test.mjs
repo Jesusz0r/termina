@@ -53,8 +53,8 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PROJ = "/tmp/termina-wline10-project";
-const WORLDS = "/tmp/termina-wline10-worlds";
+const PROJ = process.env.TERMINA_INITIAL_CWD ?? "/tmp/termina-wline10-project";
+const WORLDS = process.env.TERMINA_WORLDS_DIR ?? "/tmp/termina-wline10-worlds";
 const trustJson = join(homedir(), ".pi", "agent", "trust.json");
 const readTrust = () => {
   try {

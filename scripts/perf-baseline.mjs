@@ -18,7 +18,7 @@ const entry = join(dir, "perf-entry.mjs");
 writeFileSync(
   entry,
   `
-import { SnapshotStore } from "${process.cwd()}/electron/worldline-git.ts";
+import { SnapshotStore } from "${join(import.meta.dirname, "electron", "worldline-git.ts")}";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";

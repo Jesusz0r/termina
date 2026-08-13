@@ -30,6 +30,7 @@ export class PtyView {
   private disposed = false;
   private watchdog: ReturnType<typeof setInterval> | null = null;
   private lastRender = 0;
+  private resizeObserver: ResizeObserver | null = null;
 
   constructor(
     container: HTMLElement,
@@ -81,7 +82,8 @@ export class PtyView {
       void document.fonts.ready.then(() => this.fit()).catch(() => undefined);
     }
     try {
-      new ResizeObserver(() => this.fit()).observe(container);
+      this.resizeObserver = new ResizeObserver(() => this.fit());
+      this.resizeObserver.observe(container);
     } catch {
       /* not available */
     }
@@ -184,6 +186,8 @@ export class PtyView {
     this.disposed = true;
     if (this.watchdog) clearInterval(this.watchdog);
     this.watchdog = null;
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
     this.term.dispose();
   }
 }

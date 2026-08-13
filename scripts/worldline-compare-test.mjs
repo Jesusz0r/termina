@@ -58,9 +58,9 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PROJ = "/tmp/termina-wline2-project";
-const EVENTS = "/tmp/termina-wline2-events";
-const WORLDS = "/tmp/termina-wline2-worlds";
+const PROJ = process.env.TERMINA_INITIAL_CWD ?? "/tmp/termina-wline2-project";
+const EVENTS = process.env.TERMINA_EVENTS_DIR ?? "/tmp/termina-wline2-events";
+const WORLDS = process.env.TERMINA_WORLDS_DIR ?? "/tmp/termina-wline2-worlds";
 const git = (args) => execFileSync("git", args, { cwd: PROJ, encoding: "utf8" }).trim();
 const sha256 = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
 const repoState = () => ({ head: git(["rev-parse", "HEAD"]), refs: git(["for-each-ref"]), indexSha: sha256(join(PROJ, ".git", "index")) });
@@ -114,7 +114,10 @@ check("Fork Run button enabled with the run", btn !== null, JSON.stringify(btn))
 await evalJs(`document.getElementById('btn-fork-run').click()`);
 const comparisonId = await waitFor(async () => {
   const list = (await evalJs(`window.pi.getWorldlines()`)) ?? [];
-  if (list.length === 2) return list[0].comparisonId;
+  // Match the pair to the run just forked: a stale pair left by a crashed
+  // prior run must not hijack the suite.
+  const pair = list.filter((w) => w.sourceRunId === run.id);
+  if (pair.length === 2) return pair[0].comparisonId;
   return null;
 }, 30000);
 check("fork-run starts from the button", comparisonId !== null, JSON.stringify(comparisonId));

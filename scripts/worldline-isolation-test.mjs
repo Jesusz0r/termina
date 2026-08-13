@@ -60,8 +60,8 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PROJ = "/tmp/termina-wline7-project";
-const WORLDS = "/tmp/termina-wline7-worlds";
+const PROJ = process.env.TERMINA_INITIAL_CWD ?? "/tmp/termina-wline7-project";
+const WORLDS = process.env.TERMINA_WORLDS_DIR ?? "/tmp/termina-wline7-worlds";
 const git = (args) => execFileSync("git", args, { cwd: PROJ, encoding: "utf8" }).trim();
 const sha256 = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
 const repoState = () => ({ head: git(["rev-parse", "HEAD"]), refs: git(["for-each-ref"]), indexSha: sha256(join(PROJ, ".git", "index")) });
@@ -119,7 +119,8 @@ const b = ready.pair.find((w) => w.label === "B");
 const aProfile = join(WORLDS, comparisonId, "A-support", "sandbox.sb");
 const profile = readFileSync(aProfile, "utf8");
 check("profile denies the real home writes", profile.includes(`(deny file-write* (subpath "${process.env.HOME}"))`), "");
-check("profile denies the app snapshot store", profile.includes(`(deny file-write* (subpath "${join(process.env.HOME, "Library", "Application Support")}`) || profile.includes("worldlines"), "store deny present");
+const userData = process.env.TERMINA_USER_DATA_DIR ?? join(process.env.HOME, "Library", "Application Support", "Termina");
+check("profile denies the app snapshot store", profile.includes(`(deny file-write* (subpath "${join(userData, "worldlines")}"))`), "store deny present");
 check("profile denies sibling writes", profile.includes(`(deny file-write* (subpath "${b.root}"))`), "");
 check("profile denies the primary", profile.includes(`(deny file-write* (subpath "${realpathSync(PROJ)}"))`), "");
 

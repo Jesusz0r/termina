@@ -60,8 +60,8 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PROJ = "/tmp/termina-wline5-project";
-const WORLDS = "/tmp/termina-wline5-worlds";
+const PROJ = process.env.TERMINA_INITIAL_CWD ?? "/tmp/termina-wline5-project";
+const WORLDS = process.env.TERMINA_WORLDS_DIR ?? "/tmp/termina-wline5-worlds";
 const git = (args) => execFileSync("git", args, { cwd: PROJ, encoding: "utf8" }).trim();
 
 async function typePrompt(text) {

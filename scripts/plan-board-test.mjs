@@ -35,10 +35,12 @@ await send("Input.insertText", {
   text: "Make a plan with checkbox tasks first, then implement it. The plan must mention the files by name. Tasks: create utils.ts with an add function, then edit greeting.ts so the greeting is hi there.",
 });
 await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+let seenWorking = false;
 for (let i = 0; i < 180; i++) {
   await sleep(1000);
-  const busy = await evalJs(`document.getElementById('status-state').textContent`);
-  if (busy && !busy.includes("working") && i > 5) break;
+  const busy = await evalJs(`document.getElementById('status-state')?.textContent ?? ''`);
+  if (busy.includes("working")) seenWorking = true;
+  if (seenWorking && !busy.includes("working")) break;
 }
 await sleep(1500);
 

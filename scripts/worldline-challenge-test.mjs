@@ -57,8 +57,8 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PROJ = "/tmp/termina-wline6-project";
-const WORLDS = "/tmp/termina-wline6-worlds";
+const PROJ = process.env.TERMINA_INITIAL_CWD ?? "/tmp/termina-wline6-project";
+const WORLDS = process.env.TERMINA_WORLDS_DIR ?? "/tmp/termina-wline6-worlds";
 const git = (args) => execFileSync("git", args, { cwd: PROJ, encoding: "utf8" }).trim();
 const sha256 = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
 const repoState = () => ({ head: git(["rev-parse", "HEAD"]), refs: git(["for-each-ref"]), indexSha: sha256(join(PROJ, ".git", "index")) });

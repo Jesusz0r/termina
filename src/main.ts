@@ -113,7 +113,7 @@ function createProjectView(project: { id: string; cwd: string }): ProjectView {
     e.stopPropagation();
     void window.pi.projectClose(project.id).then((res) => {
       if (res.ok) removeProjectView(project.id);
-      else toast(res.error ?? "could not close the project", "warning");
+      else if (!res.cancelled) toast(res.error ?? "could not close the project", "warning");
     });
   });
   projectTabsEl.appendChild(tabEl);
@@ -1151,9 +1151,22 @@ window.pi.onToolTarget((p) => {
   void activeEditor().openFile(p.path, { preview: false });
 });
 
+const lastChangePush = new Map<string, number>();
 window.pi.onFileChanged((p) => {
+  const at = Date.now();
+  lastChangePush.set(p.path, at);
   activeEditor().markTouched(p.path);
-  activeEditor().updateContent(p.path, p.content);
+  if (p.content !== undefined) {
+    activeEditor().updateContent(p.path, p.content);
+  } else {
+    // The main process caps large pushes. Fetch the file on demand, and
+    // drop the fetch when a newer change push superseded it.
+    void window.pi.openFile(p.path).then((res) => {
+      if ("content" in res && lastChangePush.get(p.path) === at) {
+        activeEditor().updateContent(p.path, res.content);
+      }
+    });
+  }
   explorer.handleDiskChange();
   // The open review stays in sync with the agent's writes.
   if (reviewView.isVisible && reviewView.matchesPath(p.path)) void reviewView.refreshCurrent();

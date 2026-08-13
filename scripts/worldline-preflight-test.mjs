@@ -78,12 +78,16 @@ async function waitFor(predicate, timeoutMs = 240000) {
 // still reaches the preflight checks. In a non-Git folder the run settles
 // without recording at all — wait for the idle cycle instead.
 if (CASE === "nogit") {
+  await typePrompt("Edit greeting.ts so the greeting is hi there");
+  // Require a working → idle transition: the idle state at boot must not
+  // count as the agent having run.
+  let seenWorking = false;
   const idle = await waitFor(async () => {
-    const state = await evalJs(`document.getElementById('status-state').textContent`);
-    return state && !String(state).includes("working") ? state : null;
+    const state = await evalJs(`document.getElementById('status-state')?.textContent ?? ''`);
+    if (String(state).includes("working")) seenWorking = true;
+    return seenWorking && !String(state).includes("working") ? state : null;
   }, 300000);
   check("the agent ran in the non-Git folder", idle !== null, String(idle));
-  await typePrompt("Edit greeting.ts so the greeting is hi there");
 } else {
   await typePrompt("Edit greeting.ts so the greeting is hi there");
   const run = await waitFor(async () => {

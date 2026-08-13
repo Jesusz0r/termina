@@ -59,9 +59,9 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PROJ = "/tmp/termina-wline-project";
-const EVENTS = "/tmp/termina-wline-events";
-const WORLDS = "/tmp/termina-wline-worlds";
+const PROJ = process.env.TERMINA_INITIAL_CWD ?? "/tmp/termina-wline-project";
+const EVENTS = process.env.TERMINA_EVENTS_DIR ?? "/tmp/termina-wline-events";
+const WORLDS = process.env.TERMINA_WORLDS_DIR ?? "/tmp/termina-wline-worlds";
 const git = (args) => execFileSync("git", args, { cwd: PROJ, encoding: "utf8" }).trim();
 const sha256 = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
 const repoState = () => ({ head: git(["rev-parse", "HEAD"]), refs: git(["for-each-ref"]), indexSha: sha256(join(PROJ, ".git", "index")) });
@@ -149,7 +149,7 @@ const aProfile = join(WORLDS, comparisonId, "A-support", "sandbox.sb");
 const profile = readFileSync(aProfile, "utf8");
 check("profile denies the primary root", profile.includes(`(deny file-write* (subpath "${realpathSync(PROJ)}"))`));
 check("profile denies the real home", profile.includes(`(deny file-write* (subpath "${process.env.HOME}"))`));
-check("profile denies the sibling", profile.includes("(deny file-write* (subpath"));
+check("profile denies the sibling", profile.includes(`(deny file-write* (subpath "${b.root}"))`));
 check("profile allows the candidate tree", profile.includes(`(allow file-write* (subpath "${a.root}"))`));
 
 // The profile enforces: a primary write is blocked, a candidate write is not.
@@ -167,8 +167,13 @@ for (let i = 0; i < 10; i++) {
   alivePids = Object.values(manifest.candidates ?? {})
     .map((c) => c.pid)
     .filter((pid) => {
-      const out = execFileSync("ps", ["-o", "comm=", "-p", String(pid)], { encoding: "utf8" }).trim();
-      return out.length > 0;
+      // A dead pid makes ps exit non-zero. Treat that as "not alive".
+      try {
+        const out = execFileSync("ps", ["-o", "comm=", "-p", String(pid)], { encoding: "utf8" }).trim();
+        return out.length > 0;
+      } catch {
+        return false;
+      }
     });
   if (alivePids.length >= 2) break;
   await sleep(1000);

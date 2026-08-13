@@ -11,6 +11,8 @@ export class SessionSearch {
   private resultsEl: HTMLElement | null = null;
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
   private lastQuery = "";
+  /** Bumped per search. A slow old search never renders over a newer one. */
+  private searchSeq = 0;
 
   private onOpenFile: (path: string) => void = () => {};
 
@@ -74,7 +76,9 @@ export class SessionSearch {
     const query = this.input?.value ?? "";
     if (query === this.lastQuery) return;
     this.lastQuery = query;
+    const seq = ++this.searchSeq;
     const hits = await window.pi.searchSessions(query);
+    if (seq !== this.searchSeq) return; // a newer search superseded this one
     this.render(hits, query);
   }
 

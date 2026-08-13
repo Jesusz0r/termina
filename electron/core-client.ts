@@ -13,6 +13,9 @@ import { join } from "node:path";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
+/** A hung core op times out and the core respawns on the next request. */
+const REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
+
 /** The binary path: env override, the packaged resources, the bundle
  *  dir, then the repo targets. */
 function resolveCoreBin(): string {
@@ -76,6 +79,16 @@ class CoreClient {
 
   /** The core answers every op with <op>-result. */
   private handleMessage(msg: { op?: string; requestId?: string; ok?: boolean; error?: string; state?: unknown }): void {
+    // A core-side parse failure replies without a request id. The queue
+    // holds one request at a time: fail it.
+    if (msg.op === "error" && !msg.requestId) {
+      const first = this.pending.values().next().value;
+      if (first) {
+        this.pending.clear();
+        first.reject(new Error(msg.error ?? "snapshot core could not parse the request"));
+      }
+      return;
+    }
     if (!msg.requestId) return;
     const pending = this.pending.get(msg.requestId);
     if (!pending) return;
@@ -94,11 +107,29 @@ class CoreClient {
   private dispatch(payload: Record<string, unknown>): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const requestId = `cap-${++this.seq}`;
-      this.pending.set(requestId, { resolve, reject });
+      // A hung core must not stall the queue forever. Kill it on timeout:
+      // the exit handler rejects pending requests and the next op respawns.
+      const timer = setTimeout(() => {
+        if (!this.pending.delete(requestId)) return;
+        this.buffer = "";
+        this.child?.kill();
+        reject(new Error("snapshot core request timed out"));
+      }, REQUEST_TIMEOUT_MS);
+      this.pending.set(requestId, {
+        resolve: (v: unknown) => {
+          clearTimeout(timer);
+          resolve(v);
+        },
+        reject: (e: Error) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      });
       try {
         // The payload carries its own op (capture, template, apply-state).
         this.ensure().stdin?.write(JSON.stringify({ ...payload, requestId }) + "\n");
       } catch (err) {
+        clearTimeout(timer);
         this.pending.delete(requestId);
         reject(err instanceof Error ? err : new Error(String(err)));
       }

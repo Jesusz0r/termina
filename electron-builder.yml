@@ -4,6 +4,9 @@ directories:
   output: release
 files:
   - dist-electron/**/*
+  # The core binary runs from extraResources, never from the archive. A
+  # Mach-O inside app.asar is dead weight and cannot be spawned.
+  - "!dist-electron/termina-core"
   - dist-renderer/**/*
 # pi and node-pty load native code and spawn real files: keep every
 # dependency outside the asar archive. Electron redirects app.asar paths

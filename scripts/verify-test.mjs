@@ -51,11 +51,14 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// The events dir is app.getPath("temp")/termina-events — locate it by globbing.
-// Re-glob every time: the dir may only be created mid-test by the app.
-import { execSync } from "node:child_process";
-const findEventsDir = () =>
-  process.env.TERMINA_EVENTS_DIR ?? execSync(`find /var/folders -name "termina-events" -type d 2>/dev/null | head -1`).toString().trim();
+// The events dir is app.getPath("temp")/termina-events. The launcher always
+// sets TERMINA_EVENTS_DIR; fail loudly instead of globbing /var/folders and
+// possibly picking a stale dir from another instance.
+const findEventsDir = () => {
+  const dir = process.env.TERMINA_EVENTS_DIR;
+  if (!dir) throw new Error("TERMINA_EVENTS_DIR is not set — run the suite through the launcher");
+  return dir;
+};
 const contextFile = (termId) => join(findEventsDir(), `verify-${termId}.md`);
 
 // ---- 1. detection ----

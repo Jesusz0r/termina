@@ -56,8 +56,8 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PROJ = "/tmp/termina-wline11-project";
-const WORLDS = "/tmp/termina-wline11-worlds";
+const PROJ = process.env.TERMINA_INITIAL_CWD ?? "/tmp/termina-wline11-project";
+const WORLDS = process.env.TERMINA_WORLDS_DIR ?? "/tmp/termina-wline11-worlds";
 
 async function typePrompt(text) {
   await evalJs(`document.querySelector('.xterm-helper-textarea')?.focus()`);

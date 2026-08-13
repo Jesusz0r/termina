@@ -41,6 +41,8 @@ interface CandidateCard {
   detailsBody: HTMLElement;
   changedList: HTMLElement;
   details: WorldlineDetails | null;
+  /** The candidate version the cached details were fetched at. */
+  detailsVersion: number | null;
   detailsLoading: boolean;
 }
 
@@ -358,6 +360,7 @@ export class WorldlinesView {
       detailsBody,
       changedList,
       details: null,
+      detailsVersion: null,
       detailsLoading: false,
     };
     return card;
@@ -493,6 +496,7 @@ export class WorldlinesView {
           return;
         }
         card.details = res.details;
+        card.detailsVersion = card.summary.version;
         this.fillDetails(card, res.details);
       });
     }
@@ -560,14 +564,16 @@ export class WorldlinesView {
     );
   }
 
-  /** Fetch (or reuse) the details of one candidate. */
+  /** Fetch (or reuse) the details of one candidate. A candidate version
+   *  bump invalidates the cache: the details describe the old head. */
   private async detailsOf(comparisonId: string, label: "A" | "B"): Promise<WorldlineDetails | null> {
     const card = this.pairs.get(comparisonId)?.cards.get(label);
     if (!card) return null;
-    if (card.details) return card.details;
+    if (card.details && card.detailsVersion === card.summary.version) return card.details;
     const res = await window.pi.getWorldlineDetails(comparisonId, label);
     if (res.ok && res.details) {
       card.details = res.details;
+      card.detailsVersion = card.summary.version;
       return res.details;
     }
     toast(res.error ?? "details unavailable", "warning");

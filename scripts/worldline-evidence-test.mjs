@@ -56,15 +56,18 @@ const evalJs = async (expr) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const PROJ = "/tmp/termina-wline9-project";
-const WORLDS = "/tmp/termina-wline9-worlds";
+const PROJ = process.env.TERMINA_INITIAL_CWD ?? "/tmp/termina-wline9-project";
+const WORLDS = process.env.TERMINA_WORLDS_DIR ?? "/tmp/termina-wline9-worlds";
 const git = (args) => execFileSync("git", args, { cwd: PROJ, encoding: "utf8" }).trim();
 const sha256 = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
 const repoState = () => ({ head: git(["rev-parse", "HEAD"]), refs: git(["for-each-ref"]), indexSha: sha256(join(PROJ, ".git", "index")) });
 
-async function typePrompt(text, tabIndex = 0) {
-  if (tabIndex > 0) {
-    await evalJs(`document.querySelectorAll('.terminal-tab')[${tabIndex}]?.click()`);
+async function typePrompt(text, terminalId = null) {
+  if (terminalId) {
+    // Locate the pane by the terminal's own id: tab order can shift and a
+    // hardcoded index would type into the wrong agent.
+    const ok = await evalJs(`(() => { const pane = [...window.__panes.values()].find((p) => p.instanceId === ${JSON.stringify(terminalId)}); if (!pane) return false; pane.tabEl.click(); return true; })()`);
+    if (!ok) throw new Error(`terminal pane not found: ${terminalId}`);
     await sleep(400);
   }
   await evalJs(`document.querySelector('.term-pane.active .xterm-helper-textarea')?.focus()`);
@@ -154,7 +157,9 @@ check("the base command still runs", verifyA2?.status === "pass" && String(verif
 writeFileSync(join(aRoot, "package.json"), readFileSync(join(aRoot, "package.json"), "utf8").replace('"test": "node other-test.js"', '"test": "node test.js"'));
 
 // -------------------------------------------- a candidate run invalidates evidence ----
-await typePrompt("Edit hello.txt so it says second", 1); // into candidate A's terminal
+// Type into candidate A's terminal, located by its id (not its tab order).
+const aTermId = ready?.pair?.find((w) => w.label === "A")?.terminalId ?? null;
+await typePrompt("Edit hello.txt so it says second", aTermId);
 const staleSummary = await waitFor(async () => {
   const s = await evalJs(`window.__lastEvidence`);
   return s && s.comparisonId === comparisonId && s.stale === true ? s : null;

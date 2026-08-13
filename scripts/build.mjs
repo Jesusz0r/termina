@@ -30,7 +30,7 @@ await build({
   platform: "node",
   format: "esm",
   outfile: "dist-electron/session-worker.mjs",
-  external: ["@earendil-works/pi-coding-agent"],
+  external: [...shared.external, "@earendil-works/pi-coding-agent"],
 });
 
 // Preload must be CommonJS: sandboxed preloads cannot load ESM.
