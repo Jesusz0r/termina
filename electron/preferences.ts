@@ -1,84 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import {
-  DEFAULT_SHORTCUTS,
-  defaultAppPreferences,
-  type AppPreferences,
-  type ShortcutCommand,
-  type ShortcutMap,
-} from "../shared/types.js";
+import { defaultAppPreferences, type AppPreferences } from "../shared/types.js";
+import { normalizeAppPreferences } from "../shared/preferences.js";
+
+export { normalizeAppPreferences, sanitizeShortcutMap } from "../shared/preferences.js";
 
 const MAX_PREFERENCES_BYTES = 128 * 1024;
-const MAX_SHORTCUT_LENGTH = 64;
-const SHORTCUT_MODIFIERS = new Set(["CmdOrCtrl", "Command", "Ctrl", "Alt", "Shift", "Super"]);
-const SHORTCUT_SPECIAL_KEYS = new Set([
-  "Enter",
-  "Escape",
-  "Space",
-  "Tab",
-  "Backspace",
-  "Delete",
-  "Insert",
-  "Home",
-  "End",
-  "PageUp",
-  "PageDown",
-  "Up",
-  "Down",
-  "Left",
-  "Right",
-  "-",
-  "=",
-  "[",
-  "]",
-  "\\",
-  ";",
-  "'",
-  ",",
-  ".",
-  "/",
-  "`",
-]);
-
-function isValidShortcut(value: string): boolean {
-  if (!value) return true;
-  const parts = value.split("+");
-  const key = parts.pop() ?? "";
-  if (parts.some((part) => !SHORTCUT_MODIFIERS.has(part)) || new Set(parts).size !== parts.length) return false;
-  return /^[A-Z0-9]$/.test(key) || /^F(?:[1-9]|1[0-2])$/.test(key) || SHORTCUT_SPECIAL_KEYS.has(key);
-}
-
-export function sanitizeShortcutMap(raw: unknown, fallback: ShortcutMap = DEFAULT_SHORTCUTS): ShortcutMap {
-  const input = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
-  const result = {} as ShortcutMap;
-  const used = new Set<string>();
-  for (const command of Object.keys(DEFAULT_SHORTCUTS) as ShortcutCommand[]) {
-    const fallbackValue = typeof fallback[command] === "string" ? fallback[command] : "";
-    const candidate = typeof input[command] === "string" ? input[command].trim() : fallbackValue;
-    if (candidate.length > MAX_SHORTCUT_LENGTH || !isValidShortcut(candidate) || (candidate !== "" && used.has(candidate))) {
-      result[command] = "";
-      continue;
-    }
-    result[command] = candidate;
-    if (candidate) used.add(candidate);
-  }
-  return result;
-}
-
-export function normalizeAppPreferences(raw: unknown): AppPreferences {
-  const defaults = defaultAppPreferences();
-  const input = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
-  const fontSize = input.editorFontSize;
-  return {
-    theme: input.theme === "light" || input.theme === "high-contrast" ? input.theme : defaults.theme,
-    editorFontSize: typeof fontSize === "number" && Number.isFinite(fontSize)
-      ? Math.min(20, Math.max(10, Math.round(fontSize)))
-      : defaults.editorFontSize,
-    minimap: typeof input.minimap === "boolean" ? input.minimap : defaults.minimap,
-    shortcuts: sanitizeShortcutMap(input.shortcuts, defaults.shortcuts),
-  };
-}
 
 export class AppPreferencesStore {
   private pendingWrites: Promise<void> = Promise.resolve();

@@ -58,7 +58,9 @@ In this repository that means:
 * `core/` (`termina-core`) owns every Git and snapshot operation. Do not
   spawn the Git CLI or add a second snapshot store.
 * `electron/worldline-git.ts` is the only TypeScript client for that core.
-* `electron/preferences.ts` is the only preferences validator and store.
+* `shared/preferences.ts` is the only preferences validator. The renderer
+  and main both call it. Do not add a second merge or default-fill path.
+* `electron/preferences.ts` is the only preferences file store.
 * The bridge extension is app-owned in the user-data directory. Do not
   generate a second copy in the project.
 * IPC channels use the `area:action` pattern. Do not invent a second
@@ -161,7 +163,7 @@ Even in these cases:
 * Keep one canonical business implementation.
 * Do not duplicate domain or application logic.
 * Put temporary compatibility at the narrowest possible boundary
-  (`electron/preferences.ts` for prefs, `core/` for snapshot objects).
+  (`shared/preferences.ts` for prefs, `core/` for snapshot objects).
 * Temporary adapters must delegate to the canonical implementation.
 * Do not introduce parallel internal architectures.
 * Do not maintain separate old and new workflows.
@@ -382,7 +384,8 @@ layers represent a real boundary.
 * Keep snapshot and Git behavior in `core/` and `electron/worldline-git.ts`.
 * Keep terminal, workspace, and IPC ownership in `electron/main.ts`.
 * Keep UI-specific behavior in `src/`.
-* Keep preference validation in `electron/preferences.ts`.
+* Keep preference validation in `shared/preferences.ts`.
+* Keep the preference file store in `electron/preferences.ts`.
 * Keep transformations near the data they transform.
 * Do not introduce cross-cutting infrastructure for inherently local
   behavior.
@@ -446,7 +449,7 @@ Keep product complexity proportional to actual user needs.
 
 * Prefer sensible defaults over user configuration.
 * Add configuration when users have a concrete reason to control the
-  behavior (theme, editor font, shortcuts).
+  behavior (theme, editor and terminal fonts, word wrap, shortcuts).
 * Prefer progressive disclosure over exposing every capability at once.
 * Avoid exposing implementation concepts (sidecars, write leases, core
   protocol) directly in the product.
@@ -703,7 +706,8 @@ Use these terms exactly. Do not invent synonyms.
 - `electron/sandbox.ts`: the candidate sandbox profiles, the evidence
   (offline) profile variant, and the ulimit preamble.
 - `electron/preload.ts`: exposes the typed `window.pi` bridge.
-- `electron/preferences.ts`: validates and persists app-owned preferences.
+- `electron/preferences.ts`: persists app-owned preferences.
+- `shared/preferences.ts`: the preferences validator used by main and the renderer.
 - `shared/types.ts`: the types shared between main, preload, and renderer.
 - `src/main.ts`: the renderer entry. It manages panes, layout, and events.
 - `src/pty-view.ts`: the xterm view for one terminal.
@@ -804,7 +808,9 @@ The renderer never talks to the agent. It only renders what main pushes.
   (PI_SESSION_FILE, PI_MODEL, PI_CODING_AGENT, ...) make the TUI crash or
   hang at startup. Do not remove the sanitization.
 - pi --version runs a flaky update check (measured up to 8 s). The check is
-  async on purpose; do not make it synchronous again.
+  async on purpose; do not make it synchronous again. App-owned pi processes
+  set `PI_SKIP_VERSION_CHECK=1` so the TUI does not nag about a pin the app
+  owns.
 - The paint watchdog reloads the window when it stays blank. A reload
   rebuilds renderer state from pushes.
 - The pty package has no synchronous open. Give the app time to boot

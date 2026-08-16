@@ -4,7 +4,8 @@
  */
 import * as monaco from "monaco-editor";
 import { toast } from "./components/modals";
-import type { ThemeId } from "../shared/types";
+import { applyMonacoTheme } from "./editor";
+import { cssFontFamily, type ThemeId } from "../shared/types";
 
 export class ReviewView {
   private container: HTMLElement;
@@ -30,7 +31,7 @@ export class ReviewView {
     this.diffEditor = monaco.editor.createDiffEditor(this.diffEl, {
       theme: "vs-dark",
       fontSize: 13,
-      fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
+      fontFamily: cssFontFamily(""),
       automaticLayout: true,
       readOnly: true,
       renderSideBySide: true,
@@ -53,11 +54,19 @@ export class ReviewView {
   }
 
   setTheme(theme: ThemeId): void {
-    monaco.editor.setTheme(theme === "light" ? "vs" : theme === "high-contrast" ? "hc-black" : "vs-dark");
+    applyMonacoTheme(theme);
   }
 
   setFontSize(size: number): void {
     this.diffEditor.updateOptions({ fontSize: size });
+  }
+
+  setFontFamily(family: string): void {
+    this.diffEditor.updateOptions({ fontFamily: cssFontFamily(family) });
+  }
+
+  setWordWrap(enabled: boolean): void {
+    this.diffEditor.updateOptions({ wordWrap: enabled ? "on" : "off" });
   }
 
   get isVisible(): boolean {

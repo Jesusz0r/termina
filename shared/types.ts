@@ -133,11 +133,41 @@ export interface ExplorerEntry {
   type: "file" | "dir";
 }
 
-export type ThemeId = "dark" | "light" | "high-contrast";
+export const THEME_IDS = ["dark", "light", "high-contrast", "atom"] as const;
+export type ThemeId = (typeof THEME_IDS)[number];
+
+/** Fallback stack used when a chosen family is missing on the machine. */
+export const DEFAULT_CODE_FONT_STACK = "ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
+
+/** Named families the settings window offers. Empty means the default stack. */
+export const CODE_FONT_FAMILIES = [
+  "",
+  "SF Mono",
+  "Menlo",
+  "Monaco",
+  "JetBrains Mono",
+  "Cascadia Code",
+  "Cascadia Mono",
+  "Fira Code",
+  "IBM Plex Mono",
+  "Source Code Pro",
+  "Consolas",
+  "Courier New",
+] as const;
+
+export type CodeFontFamily = (typeof CODE_FONT_FAMILIES)[number];
+
+export function cssFontFamily(family: string): string {
+  if (!family) return DEFAULT_CODE_FONT_STACK;
+  return `'${family}', ${DEFAULT_CODE_FONT_STACK}`;
+}
 
 export interface AppPreferences {
   theme: ThemeId;
   editorFontSize: number;
+  terminalFontSize: number;
+  fontFamily: CodeFontFamily;
+  wordWrap: boolean;
   minimap: boolean;
   shortcuts: ShortcutMap;
 }
@@ -158,7 +188,12 @@ export type ShortcutCommand =
   | "close-terminal"
   | "abort-terminal"
   | "fullscreen"
+  | "layout-terminal-left"
+  | "layout-terminal-right"
+  | "layout-terminal-top"
+  | "layout-terminal-bottom"
   | "toggle-explorer"
+  | "toggle-terminal"
   | "toggle-editor"
   | "toggle-modified"
   | "session-search"
@@ -182,7 +217,12 @@ export const DEFAULT_SHORTCUTS: ShortcutMap = {
   "close-terminal": "CmdOrCtrl+Shift+W",
   "abort-terminal": "CmdOrCtrl+.",
   fullscreen: "CmdOrCtrl+Shift+F",
+  "layout-terminal-left": "",
+  "layout-terminal-right": "",
+  "layout-terminal-top": "",
+  "layout-terminal-bottom": "",
   "toggle-explorer": "CmdOrCtrl+B",
+  "toggle-terminal": "CmdOrCtrl+Shift+E",
   "toggle-editor": "CmdOrCtrl+E",
   "toggle-modified": "",
   "session-search": "CmdOrCtrl+Shift+P",
@@ -193,6 +233,9 @@ export function defaultAppPreferences(): AppPreferences {
   return {
     theme: "dark",
     editorFontSize: 13,
+    terminalFontSize: 13,
+    fontFamily: "",
+    wordWrap: false,
     minimap: true,
     shortcuts: { ...DEFAULT_SHORTCUTS },
   };
@@ -211,6 +254,7 @@ export type MenuCommand =
   | "layout-terminal-fullscreen"
   | "toggle-explorer"
   | "toggle-modified"
+  | "toggle-terminal"
   | "toggle-editor"
   | "session-search"
   | "save-all"

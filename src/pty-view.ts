@@ -4,7 +4,7 @@
  */
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import type { ThemeId } from "../shared/types";
+import { cssFontFamily, type ThemeId } from "../shared/types";
 import { CanvasAddon } from "@xterm/addon-canvas";
 
 const TERMINAL_THEMES: Record<ThemeId, Record<string, string>> = {
@@ -20,6 +20,10 @@ const TERMINAL_THEMES: Record<ThemeId, Record<string, string>> = {
     background: "#000000", foreground: "#ffffff", cursor: "#ffffff", selectionBackground: "#264f78",
     black: "#000000", red: "#ff6b6b", green: "#7ee787", yellow: "#f2cc60", blue: "#79c0ff", magenta: "#d2a8ff", cyan: "#56d4dd", white: "#ffffff",
   },
+  atom: {
+    background: "#21252b", foreground: "#abb2bf", cursor: "#528bff", selectionBackground: "#3e4451",
+    black: "#282c34", red: "#e06c75", green: "#98c379", yellow: "#e5c07b", blue: "#61afef", magenta: "#c678dd", cyan: "#56b6c2", white: "#abb2bf",
+  },
 };
 
 export class PtyView {
@@ -31,6 +35,9 @@ export class PtyView {
   private watchdog: ReturnType<typeof setInterval> | null = null;
   private lastRender = 0;
   private resizeObserver: ResizeObserver | null = null;
+  private fontSize = 13;
+  private fontFamily = "";
+  private refreshFont = false;
 
   constructor(
     container: HTMLElement,
@@ -42,7 +49,7 @@ export class PtyView {
     this.sendInput = onInput;
     this.term = new Terminal({
       fontSize: 13,
-      fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
+      fontFamily: cssFontFamily(""),
       convertEol: true,
       theme: TERMINAL_THEMES.dark,
       cursorBlink: true,
@@ -147,6 +154,33 @@ export class PtyView {
     if (!this.disposed) this.term.options.theme = TERMINAL_THEMES[theme];
   }
 
+  setFontSize(size: number): void {
+    if (this.disposed || this.fontSize === size) return;
+    this.fontSize = size;
+    this.term.options.fontSize = size;
+    this.refreshFont = true;
+    this.fit();
+  }
+
+  setFontFamily(family: string): void {
+    if (this.disposed || this.fontFamily === family) return;
+    this.fontFamily = family;
+    this.term.options.fontFamily = cssFontFamily(family);
+    this.refreshFont = true;
+    this.fit();
+    this.loadFamilyThenFit(family);
+  }
+
+  private loadFamilyThenFit(family: string): void {
+    if (!family || !document.fonts?.load) return;
+    // document.fonts.ready does not wait for a family chosen after startup.
+    void document.fonts.load(`${this.fontSize}px "${family}"`).then(() => {
+      if (this.disposed || this.fontFamily !== family) return;
+      this.refreshFont = true;
+      this.fit();
+    }).catch(() => undefined);
+  }
+
   fit(): void {
     if (this.fitScheduled || this.disposed) return;
     this.fitScheduled = true;
@@ -157,12 +191,15 @@ export class PtyView {
       if (!container || container.clientWidth === 0 || container.clientHeight === 0) return;
       const prevCols = this.term.cols;
       const prevRows = this.term.rows;
+      const refreshFont = this.refreshFont;
+      this.refreshFont = false;
       try {
         this.fitAddon.fit();
       } catch {
+        this.refreshFont = refreshFont;
         return;
       }
-      if (this.term.cols !== prevCols || this.term.rows !== prevRows) {
+      if (refreshFont || this.term.cols !== prevCols || this.term.rows !== prevRows) {
         try {
           this.term.clearTextureAtlas();
           this.term.refresh(0, this.term.rows - 1);

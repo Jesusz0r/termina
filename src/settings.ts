@@ -1,11 +1,14 @@
 import {
+  CODE_FONT_FAMILIES,
   DEFAULT_SHORTCUTS,
   defaultAppPreferences,
   type AppPreferences,
+  type CodeFontFamily,
   type ShortcutCommand,
   type ShortcutMap,
   type ThemeId,
 } from "../shared/types";
+import { normalizeAppPreferences } from "../shared/preferences";
 
 interface SettingsCallbacks {
   onChange: (preferences: AppPreferences) => void;
@@ -29,7 +32,12 @@ const SHORTCUTS: Array<{ command: ShortcutCommand; label: string; description: s
   { command: "close-terminal", label: "Close terminal", description: "Close the active terminal" },
   { command: "abort-terminal", label: "Abort terminal", description: "Send an interrupt to the active terminal" },
   { command: "fullscreen", label: "Terminal fullscreen", description: "Show only the terminal" },
+  { command: "layout-terminal-left", label: "Terminal left", description: "Place the terminal on the left" },
+  { command: "layout-terminal-right", label: "Terminal right", description: "Place the terminal on the right" },
+  { command: "layout-terminal-top", label: "Terminal top", description: "Place the terminal on the top" },
+  { command: "layout-terminal-bottom", label: "Terminal bottom", description: "Place the terminal on the bottom" },
   { command: "toggle-explorer", label: "Toggle explorer", description: "Minimize or restore the file explorer" },
+  { command: "toggle-terminal", label: "Toggle terminal", description: "Minimize or restore the terminal" },
   { command: "toggle-editor", label: "Toggle editor", description: "Minimize or restore the editor" },
   { command: "toggle-modified", label: "Toggle modified panel", description: "Show or hide changed files" },
   { command: "session-search", label: "Search sessions", description: "Search previous Pi sessions" },
@@ -38,13 +46,14 @@ const SHORTCUTS: Array<{ command: ShortcutCommand; label: string; description: s
 
 const THEME_OPTIONS: Array<{ id: ThemeId; label: string; description: string }> = [
   { id: "dark", label: "Obsidian", description: "The default dark workspace" },
+  { id: "atom", label: "Atom", description: "One Dark from the Atom editor" },
   { id: "light", label: "Paper", description: "A bright, low-glare workspace" },
   { id: "high-contrast", label: "Signal", description: "Strong contrast for clear edges" },
 ];
 
 export function emptyShortcuts(): ShortcutMap {
-  const result = {} as ShortcutMap;
-  for (const item of SHORTCUTS) result[item.command] = "";
+  const result = { ...DEFAULT_SHORTCUTS };
+  for (const command of Object.keys(result) as ShortcutCommand[]) result[command] = "";
   return result;
 }
 
@@ -109,7 +118,7 @@ function shortcutForEvent(event: KeyboardEvent): string | null {
 }
 
 function copyPreferences(preferences: AppPreferences): AppPreferences {
-  return { ...preferences, shortcuts: { ...preferences.shortcuts } };
+  return normalizeAppPreferences(preferences);
 }
 
 export class SettingsView {
@@ -262,25 +271,27 @@ export class SettingsView {
     }
     content.appendChild(this.settingGroup("Color system", themeGrid));
 
-    const fontRow = document.createElement("div");
-    fontRow.className = "settings-inline-control";
-    const fontLabel = document.createElement("label");
-    fontLabel.textContent = "Editor font size";
-    const fontValue = document.createElement("output");
-    fontValue.textContent = `${this.preferences.editorFontSize}px`;
-    const font = document.createElement("input");
-    font.type = "range";
-    font.min = "10";
-    font.max = "20";
-    font.step = "1";
-    font.value = String(this.preferences.editorFontSize);
-    font.addEventListener("input", () => {
-      this.preferences.editorFontSize = Number(font.value);
-      fontValue.textContent = `${this.preferences.editorFontSize}px`;
+    const typeGroup = document.createElement("div");
+    typeGroup.append(
+      this.fontSizeRow("Editor font size", "editorFontSize"),
+      this.fontSizeRow("Terminal font size", "terminalFontSize"),
+      this.fontFamilyRow(),
+    );
+    content.appendChild(this.settingGroup("Type", typeGroup));
+
+    const wrapRow = document.createElement("label");
+    wrapRow.className = "settings-check-row";
+    const wrap = document.createElement("input");
+    wrap.type = "checkbox";
+    wrap.checked = this.preferences.wordWrap;
+    wrap.addEventListener("change", () => {
+      this.preferences.wordWrap = wrap.checked;
       this.notify();
     });
-    fontRow.append(fontLabel, font, fontValue);
-    content.appendChild(this.settingGroup("Editor", fontRow));
+    const wrapText = document.createElement("span");
+    wrapText.innerHTML = "<strong>Word wrap</strong><small>Wrap long lines in the editor and review.</small>";
+    wrapRow.append(wrap, wrapText);
+    content.appendChild(wrapRow);
 
     const miniRow = document.createElement("label");
     miniRow.className = "settings-check-row";
@@ -295,6 +306,49 @@ export class SettingsView {
     miniText.innerHTML = "<strong>Show minimap</strong><small>Keep the code map visible in the editor.</small>";
     miniRow.append(minimap, miniText);
     content.appendChild(miniRow);
+  }
+
+  private fontSizeRow(label: string, key: "editorFontSize" | "terminalFontSize"): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "settings-inline-control";
+    const fontLabel = document.createElement("label");
+    fontLabel.textContent = label;
+    const fontValue = document.createElement("output");
+    fontValue.textContent = `${this.preferences[key]}px`;
+    const font = document.createElement("input");
+    font.type = "range";
+    font.min = "10";
+    font.max = "20";
+    font.step = "1";
+    font.value = String(this.preferences[key]);
+    font.addEventListener("input", () => {
+      this.preferences[key] = Number(font.value);
+      fontValue.textContent = `${this.preferences[key]}px`;
+      this.notify();
+    });
+    row.append(fontLabel, font, fontValue);
+    return row;
+  }
+
+  private fontFamilyRow(): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "settings-inline-control settings-font-family";
+    const label = document.createElement("label");
+    label.textContent = "Font family";
+    const select = document.createElement("select");
+    for (const family of CODE_FONT_FAMILIES) {
+      const option = document.createElement("option");
+      option.value = family;
+      option.textContent = family || "System default";
+      select.appendChild(option);
+    }
+    select.value = this.preferences.fontFamily;
+    select.addEventListener("change", () => {
+      this.preferences.fontFamily = select.value as CodeFontFamily;
+      this.notify();
+    });
+    row.append(label, select);
+    return row;
   }
 
   private renderShortcuts(content: HTMLElement): void {

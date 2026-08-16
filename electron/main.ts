@@ -41,6 +41,7 @@ import {
   type SessionHit,
   type ShortcutCommand,
   type ShortcutMap,
+  type ThemeId,
   type TimelineEvent,
   type VerifyInfo,
   type VerifyState,
@@ -401,6 +402,9 @@ function cleanEnv(): Record<string, string | undefined> {
   if (existsSync(bundledNode)) {
     env.PATH = `${bundledNode}${env.PATH ? `:${env.PATH}` : ""}`;
   }
+  // Termina launches a pinned pi package. The TUI update check would tell
+  // the user to upgrade, but that command cannot change the pin.
+  env.PI_SKIP_VERSION_CHECK = "1";
   return env;
 }
 
@@ -743,7 +747,13 @@ class PiEditorApp {
       }
     }
     nativeTheme.themeSource = this.preferences.theme === "light" ? "light" : "dark";
-    const backgroundColor = this.preferences.theme === "light" ? "#f6f8fa" : this.preferences.theme === "high-contrast" ? "#000000" : "#1e1e1e";
+    const windowBackground: Record<ThemeId, string> = {
+      dark: "#1e1e1e",
+      light: "#f6f8fa",
+      "high-contrast": "#000000",
+      atom: "#282c34",
+    };
+    const backgroundColor = windowBackground[this.preferences.theme];
     this.win = new BrowserWindow({
       width: 1440,
       height: 900,
@@ -853,15 +863,16 @@ class PiEditorApp {
           {
             label: "Layout",
             submenu: [
-              { label: "Terminal Left", click: send("layout-terminal-left") },
-              { label: "Terminal Right", click: send("layout-terminal-right") },
-              { label: "Terminal Top", click: send("layout-terminal-top") },
-              { label: "Terminal Bottom", click: send("layout-terminal-bottom") },
+              { label: "Terminal Left", accelerator: shortcut("layout-terminal-left"), click: send("layout-terminal-left") },
+              { label: "Terminal Right", accelerator: shortcut("layout-terminal-right"), click: send("layout-terminal-right") },
+              { label: "Terminal Top", accelerator: shortcut("layout-terminal-top"), click: send("layout-terminal-top") },
+              { label: "Terminal Bottom", accelerator: shortcut("layout-terminal-bottom"), click: send("layout-terminal-bottom") },
               { type: "separator" },
               { label: "Terminal Fullscreen", accelerator: shortcut("fullscreen"), click: send("layout-terminal-fullscreen") },
             ],
           },
           { label: "Toggle Explorer", accelerator: shortcut("toggle-explorer"), click: send("toggle-explorer") },
+          { label: "Toggle Terminal", accelerator: shortcut("toggle-terminal"), click: send("toggle-terminal") },
           { label: "Toggle Editor", accelerator: shortcut("toggle-editor"), click: send("toggle-editor") },
           { label: "Toggle Modified Panel", accelerator: shortcut("toggle-modified"), click: send("toggle-modified") },
           { label: "Search Sessions…", accelerator: shortcut("session-search"), click: send("session-search") },
@@ -4701,10 +4712,7 @@ class PiEditorApp {
       this.activateProject(projectId);
       return { ok: true };
     });
-    ipcMain.handle("project:close", async (_e, projectId: string) => {
-      if (this.projects.size <= 1) return { ok: false, error: "the last project stays open" };
-      return this.closeProject(projectId);
-    });
+    ipcMain.handle("project:close", async (_e, projectId: string) => this.closeProject(projectId));
 
     ipcMain.handle("folder:open", () => this.openFolder());
     ipcMain.handle("clipboard:write", (_e, text: unknown) => {
@@ -4714,7 +4722,10 @@ class PiEditorApp {
       return { ok: true };
     });
     ipcMain.handle("clipboard:read", () => capUtf8(clipboard.readText(), MAX_CLIPBOARD_BYTES));
-    ipcMain.handle("settings:get", () => ({ ...this.preferences, shortcuts: { ...this.preferences.shortcuts } }));
+    ipcMain.handle("settings:get", () => {
+      const next = normalizeAppPreferences(this.preferences);
+      return { ...next, shortcuts: { ...next.shortcuts } };
+    });
     ipcMain.handle("settings:update", (_e, preferences: unknown, activateShortcuts?: boolean) =>
       this.updatePreferences(preferences, activateShortcuts === true),
     );
@@ -5089,10 +5100,8 @@ class PiEditorApp {
     // The session workspace is per-launch scratch: run ids restart at
     // run-1, and stale copies from a previous launch would collide.
     rmSync(this.sessionWorkspaceDir, { recursive: true, force: true });
-    // Set the project BEFORE the window loads: the renderer queries the
-    // project (test detection, cwd) as soon as it boots, and terminalCwd()
-    // must already point at the real folder. Otherwise it answers with the
-    // home directory and the Verify button stays disabled for the session.
+    // Tests set TERMINA_INITIAL_CWD so the fixture is open before the
+    // window loads. A normal launch has no folder until the user picks one.
     const initial = process.env.TERMINA_INITIAL_CWD;
     const initialCwd = initial && existsSync(initial) ? initial : null;
     this.tailer.onEvent = (id, event) => this.enqueueSidecarEvent(id, event);
@@ -5106,18 +5115,8 @@ class PiEditorApp {
       await this.openProject(initialCwd);
       return;
     }
-    // Create the agent terminal. A transient pi failure (slow start, update
-    // check) must not kill the app: retry with backoff. The renderer shows
-    // the friendly install message when every attempt fails.
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        await this.createTerminal();
-        break;
-      } catch (err) {
-        console.warn(`[main] terminal creation failed (attempt ${attempt}/3): ${(err as Error).message}`);
-        if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 4000));
-      }
-    }
+    // A normal launch has no folder. The renderer shows the open-folder
+    // placeholder until the user picks one. Tests set TERMINA_INITIAL_CWD.
   }
 
   async dispose(): Promise<void> {

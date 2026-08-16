@@ -47,6 +47,22 @@ html[data-theme="high-contrast"] {
   --purple: #d2a8ff;
 }
 
+html[data-theme="atom"] {
+  --bg: #282c34;
+  --bg-panel: #21252b;
+  --bg-raised: #2c313a;
+  --bg-hover: #3a3f4b;
+  --border: #181a1f;
+  --text: #abb2bf;
+  --text-dim: #5c6370;
+  --accent: #61afef;
+  --green: #98c379;
+  --yellow: #e5c07b;
+  --red: #e06c75;
+  --orange: #d19a66;
+  --purple: #c678dd;
+}
+
 * {
   box-sizing: border-box;
   margin: 0;
@@ -294,9 +310,23 @@ body {
 }
 
 .explorer-empty {
-  padding: 12px;
+  display: block;
+  width: calc(100% - 16px);
+  margin: 8px;
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 5px;
+  background: transparent;
   color: var(--text-dim);
+  font: inherit;
   font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.explorer-empty:hover {
+  border-color: var(--accent);
+  color: var(--text);
 }
 
 .explorer-node {
@@ -1649,6 +1679,23 @@ body {
   line-height: 1.7;
 }
 
+.empty-open-folder {
+  pointer-events: auto;
+  margin-top: 6px;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-raised);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.empty-open-folder:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 /* --------------------------------------------------------------- statusbar */
 
 /* ------------------------------------------------------------ search modal */
@@ -1950,7 +1997,7 @@ body {
 
 .settings-theme-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 9px;
 }
 
@@ -2006,6 +2053,10 @@ body {
   background: linear-gradient(135deg, #000 0 52%, #79c0ff 52%);
 }
 
+.settings-theme-card[data-theme="atom"] .theme-swatch {
+  background: linear-gradient(135deg, #282c34 0 52%, #c678dd 52%);
+}
+
 .settings-inline-control {
   display: grid;
   grid-template-columns: 130px 1fr 48px;
@@ -2028,6 +2079,21 @@ body {
 .settings-inline-control input[type="range"] {
   accent-color: var(--accent);
   width: 100%;
+}
+
+.settings-font-family {
+  grid-template-columns: 130px 1fr;
+}
+
+.settings-inline-control select {
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
 }
 
 .settings-check-row {

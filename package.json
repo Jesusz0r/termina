@@ -20,7 +20,7 @@
     "dist:mac": "npm run build && node scripts/prepare-resources.mjs && electron-builder --mac"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.84.1",
+    "@earendil-works/pi-coding-agent": "0.84.2",
     "@lydell/node-pty": "^1.2.0-beta.14",
     "@xterm/addon-canvas": "^0.7.0",
     "@xterm/addon-fit": "^0.10.0",

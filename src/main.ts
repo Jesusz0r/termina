@@ -43,6 +43,7 @@ import { Explorer } from "./components/explorer";
 import { toast } from "./components/modals";
 import { SettingsView, emptyShortcuts } from "./settings";
 import { defaultAppPreferences } from "../shared/types";
+import { normalizeAppPreferences } from "../shared/preferences";
 import type { AppPreferences, ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, PlanTask, RunSummary } from "../shared/types";
 
 const { EditorManager } = await import("./editor");
@@ -101,6 +102,7 @@ function createProjectView(project: { id: string; cwd: string }): ProjectView {
     toast(`${path.split("/").pop()} changed on disk — you have unsaved edits`, "warning");
   };
   applySharedEditorHooks(editorMgr);
+  applyEditorPreferences(editorMgr, preferences);
   const tabEl = document.createElement("div");
   tabEl.className = "project-tab";
   const nameEl = document.createElement("span");
@@ -309,22 +311,37 @@ const panes = new Map<string, Pane>();
 const closingPanes = new Set<string>();
 let activeId: string | null = null;
 let projectCwd: string | null = null;
-let preferences: AppPreferences = await window.pi.getPreferences().catch(() => defaultAppPreferences());
+let preferences: AppPreferences = normalizeAppPreferences(await window.pi.getPreferences().catch(() => defaultAppPreferences()));
 
 function applyPreferences(next: AppPreferences, persist: boolean, activateShortcuts: boolean): void {
-  preferences = next;
-  document.documentElement.dataset.theme = next.theme;
-  activeEditor().setTheme(next.theme);
-  activeEditor().setFontSize(next.editorFontSize);
-  activeEditor().setMinimap(next.minimap);
-  reviewView.setTheme(next.theme);
-  reviewView.setFontSize(next.editorFontSize);
-  for (const pane of panes.values()) pane.view.setTheme(next.theme);
+  preferences = normalizeAppPreferences(next);
+  document.documentElement.dataset.theme = preferences.theme;
+  applyEditorPreferences(baseEditor, preferences);
+  for (const view of projectViews.values()) applyEditorPreferences(view.editorMgr, preferences);
+  reviewView.setTheme(preferences.theme);
+  reviewView.setFontSize(preferences.editorFontSize);
+  reviewView.setFontFamily(preferences.fontFamily);
+  reviewView.setWordWrap(preferences.wordWrap);
+  for (const pane of panes.values()) applyTerminalPreferences(pane.view, preferences);
   if (persist) {
-    void window.pi.updatePreferences(next, activateShortcuts).catch(() => toast("Could not save settings", "error"));
+    void window.pi.updatePreferences(preferences, activateShortcuts).catch(() => toast("Could not save settings", "error"));
   } else if (activateShortcuts) {
-    void window.pi.setKeyboardShortcuts(next.shortcuts).catch(() => undefined);
+    void window.pi.setKeyboardShortcuts(preferences.shortcuts).catch(() => undefined);
   }
+}
+
+function applyEditorPreferences(editor: InstanceType<typeof EditorManager>, prefs: AppPreferences): void {
+  editor.setTheme(prefs.theme);
+  editor.setFontSize(prefs.editorFontSize);
+  editor.setFontFamily(prefs.fontFamily);
+  editor.setWordWrap(prefs.wordWrap);
+  editor.setMinimap(prefs.minimap);
+}
+
+function applyTerminalPreferences(view: PtyView, prefs: AppPreferences): void {
+  view.setTheme(prefs.theme);
+  view.setFontSize(prefs.terminalFontSize);
+  view.setFontFamily(prefs.fontFamily);
 }
 
 const settingsView = new SettingsView({
@@ -406,7 +423,7 @@ function createPaneShell(instanceId: string): Pane {
     testCommand: null,
   };
   panes.set(instanceId, pane);
-  view.setTheme(preferences.theme);
+  applyTerminalPreferences(view, preferences);
   pane.tabEl.prepend(typeEl);
   return pane;
 }
@@ -831,8 +848,20 @@ btnNewTerminal.addEventListener("click", (e) => {
   if (terminalMenu) closeTerminalMenu();
   else void openTerminalMenu();
 });
-window.pi.onProjectClosed(({ projectId }) => removeProjectView(projectId));
+window.pi.onProjectClosed(({ projectId }) => {
+  removeProjectView(projectId);
+  if (projectViews.size === 0) {
+    projectCwd = null;
+    explorer.setProject(null);
+    baseEditor.setProjectOpen(false);
+  }
+});
 btnNewProject.addEventListener("click", () => void window.pi.projectOpen());
+document.getElementById("right-pane")!.addEventListener("click", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLElement) || !target.closest(".empty-open-folder")) return;
+  void window.pi.projectOpen();
+});
 // Double-click on the empty bar area opens a new project tab.
 projectTabsEl.addEventListener("dblclick", (e) => {
   if ((e.target as HTMLElement).closest(".project-tab, #btn-new-project")) return;
@@ -1125,6 +1154,9 @@ window.pi.onMenuCommand((cmd) => {
     case "layout-terminal-fullscreen":
       applyLayout("terminal-fullscreen");
       break;
+    case "toggle-terminal":
+      requestMinimize("terminal");
+      break;
     case "toggle-editor":
       requestMinimize("editor");
       break;
@@ -1412,10 +1444,6 @@ window.pi.onInstances((list: InstanceSummary[]) => {
     pane.dispatchTask = summary.dispatchTask;
     if (summary.verify) pane.verify = summary.verify;
     updatePaneTab(pane);
-    if (!projectCwd && summary.cwd) {
-      projectCwd = summary.cwd;
-      explorer.setProject(summary.cwd);
-    }
   }
   if (!activeId && list.length > 0) activatePane(list[0].id);
   updateEditorLock();
@@ -1450,12 +1478,13 @@ async function boot(): Promise<void> {
   setActiveProject(activeProjectId);
 
   const instances = await window.pi.getInstances();
-  // No terminals could be created (pi is missing) — explain instead of
-  // leaving an empty window behind the splash.
-  if (instances.length === 0) {
+  // A project with no terminals: show why pi failed to start. A launch
+  // with no folder stays on the open-folder placeholder.
+  if (instances.length === 0 && projects.length > 0) {
     const status = await window.pi.getPiStatus();
     if (!status.available) {
       createErrorPane(status.message ?? "pi is not installed.");
+      removeSplash();
       return;
     }
   }
@@ -1473,10 +1502,7 @@ async function boot(): Promise<void> {
   }
   if (!activeId && instances.length > 0) activatePane(instances[0].id);
   updateEditorLock();
-  if (instances[0]?.cwd && !projectCwd) {
-    projectCwd = instances[0].cwd;
-    explorer.setProject(instances[0].cwd);
-  }
+  removeSplash();
   // Show the correct project view (the boot instances may belong to it).
   const bootProjectId = instances[0]?.projectId ?? activeProjectId;
   if (bootProjectId && projectViews.has(bootProjectId)) setActiveProject(bootProjectId);

@@ -7,7 +7,50 @@
  * when idle you can edit and save with Cmd+S.
  */
 import * as monaco from "monaco-editor";
-import type { ThemeId } from "../shared/types";
+import { cssFontFamily, type ThemeId } from "../shared/types";
+
+let atomThemeDefined = false;
+
+export function applyMonacoTheme(theme: ThemeId): void {
+  if (theme === "atom" && !atomThemeDefined) {
+    monaco.editor.defineTheme("termina-atom", {
+      base: "vs-dark",
+      inherit: true,
+      rules: [
+        { token: "comment", foreground: "5c6370", fontStyle: "italic" },
+        { token: "string", foreground: "98c379" },
+        { token: "keyword", foreground: "c678dd" },
+        { token: "number", foreground: "d19a66" },
+        { token: "regexp", foreground: "56b6c2" },
+        { token: "type", foreground: "e5c07b" },
+        { token: "class", foreground: "e5c07b" },
+        { token: "function", foreground: "61afef" },
+        { token: "identifier", foreground: "abb2bf" },
+        { token: "delimiter", foreground: "abb2bf" },
+        { token: "tag", foreground: "e06c75" },
+        { token: "attribute.name", foreground: "d19a66" },
+        { token: "attribute.value", foreground: "98c379" },
+      ],
+      colors: {
+        "editor.background": "#282c34",
+        "editor.foreground": "#abb2bf",
+        "editor.lineHighlightBackground": "#2c313c",
+        "editor.selectionBackground": "#3e4451",
+        "editorCursor.foreground": "#528bff",
+        "editorLineNumber.foreground": "#495162",
+        "editorLineNumber.activeForeground": "#abb2bf",
+        "editorWidget.background": "#21252b",
+        "editorSuggestWidget.background": "#21252b",
+        "editorHoverWidget.background": "#21252b",
+        "minimap.background": "#282c34",
+      },
+    });
+    atomThemeDefined = true;
+  }
+  monaco.editor.setTheme(
+    theme === "light" ? "vs" : theme === "high-contrast" ? "hc-black" : theme === "atom" ? "termina-atom" : "vs-dark",
+  );
+}
 
 interface OpenTab {
   key: string; // absolute path
@@ -42,7 +85,7 @@ export class EditorManager {
     this.editor = monaco.editor.create(container, {
       theme: "vs-dark",
       fontSize: 13,
-      fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
+      fontFamily: cssFontFamily(""),
       minimap: { enabled: true },
       scrollBeyondLastLine: false,
       automaticLayout: true,
@@ -70,7 +113,7 @@ export class EditorManager {
   }
 
   setTheme(theme: ThemeId): void {
-    monaco.editor.setTheme(theme === "light" ? "vs" : theme === "high-contrast" ? "hc-black" : "vs-dark");
+    applyMonacoTheme(theme);
   }
 
   setFontSize(size: number): void {
@@ -79,6 +122,14 @@ export class EditorManager {
 
   setMinimap(enabled: boolean): void {
     this.editor.updateOptions({ minimap: { enabled } });
+  }
+
+  setFontFamily(family: string): void {
+    this.editor.updateOptions({ fontFamily: cssFontFamily(family) });
+  }
+
+  setWordWrap(enabled: boolean): void {
+    this.editor.updateOptions({ wordWrap: enabled ? "on" : "off" });
   }
 
   /** Read-only when locked by a busy agent or when a snapshot is active. */

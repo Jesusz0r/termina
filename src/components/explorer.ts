@@ -52,8 +52,8 @@ export class Explorer {
     }
   }
 
-  /** Called when the project folder changes. */
-  setProject(cwd: string): void {
+  /** Called when the project folder changes. Null clears the tree. */
+  setProject(cwd: string | null): void {
     this.projectCwd = cwd;
     this.dirs.clear();
     this.selected = null;
@@ -79,9 +79,11 @@ export class Explorer {
     const cwd = this.projectCwd;
     this.treeEl.replaceChildren();
     if (!cwd) {
-      const empty = document.createElement("div");
+      const empty = document.createElement("button");
+      empty.type = "button";
       empty.className = "explorer-empty";
-      empty.textContent = "Open a folder to browse files";
+      empty.textContent = "Open folder";
+      empty.addEventListener("click", () => void window.pi.projectOpen());
       this.treeEl.appendChild(empty);
       return;
     }
