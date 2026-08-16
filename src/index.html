@@ -75,6 +75,7 @@
           <div class="explorer-header">
             <span class="header-logo">Tr</span>
             <span>Explorer</span>
+            <button type="button" id="btn-min-explorer" class="pane-toggle" title="Minimize explorer" aria-label="Minimize explorer">–</button>
           </div>
           <div id="explorer-tree"></div>
         </div>
@@ -84,6 +85,7 @@
             <div id="terminal-tabs">
               <div id="terminal-tabs-list"></div>
               <button id="btn-new-terminal" title="New terminal (Cmd+Shift+T)">＋</button>
+              <button type="button" id="btn-min-terminal" class="pane-toggle" title="Minimize terminal" aria-label="Minimize terminal">–</button>
             </div>
             <div id="terminal-container"></div>
             <div id="timeline-strip">
@@ -129,7 +131,10 @@
           <div id="divider" title="Drag to resize"></div>
 
           <section id="right-pane">
-            <div id="editor-tabs"></div>
+            <div id="editor-chrome" class="pane-chrome">
+              <div id="editor-tabs"></div>
+              <button type="button" id="btn-min-editor" class="pane-toggle" title="Minimize editor" aria-label="Minimize editor">–</button>
+            </div>
             <div id="editor-container"></div>
             <div id="review-container" style="display:none">
               <div class="review-header">

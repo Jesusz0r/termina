@@ -29,8 +29,8 @@ const SHORTCUTS: Array<{ command: ShortcutCommand; label: string; description: s
   { command: "close-terminal", label: "Close terminal", description: "Close the active terminal" },
   { command: "abort-terminal", label: "Abort terminal", description: "Send an interrupt to the active terminal" },
   { command: "fullscreen", label: "Terminal fullscreen", description: "Show only the terminal" },
-  { command: "toggle-explorer", label: "Toggle explorer", description: "Show or hide the file explorer" },
-  { command: "toggle-editor", label: "Toggle editor", description: "Show or hide the editor" },
+  { command: "toggle-explorer", label: "Toggle explorer", description: "Minimize or restore the file explorer" },
+  { command: "toggle-editor", label: "Toggle editor", description: "Minimize or restore the editor" },
   { command: "toggle-modified", label: "Toggle modified panel", description: "Show or hide changed files" },
   { command: "session-search", label: "Search sessions", description: "Search previous Pi sessions" },
   { command: "open-settings", label: "Open settings", description: "Open this preferences window" },
@@ -62,10 +62,12 @@ function keyForEvent(event: KeyboardEvent): string | null {
   const code = event.code;
   if (/^Key[A-Z]$/.test(code)) return code.slice(3);
   if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+  if (/^Numpad[0-9]$/.test(code)) return code.slice(6);
   if (/^F(?:[1-9]|1[0-2])$/.test(code)) return code;
   const keys: Record<string, string> = {
     Space: "Space",
     Enter: "Enter",
+    NumpadEnter: "Enter",
     Escape: "Escape",
     Backspace: "Backspace",
     Delete: "Delete",
@@ -136,17 +138,21 @@ export class SettingsView {
     backdrop.className = "settings-backdrop";
     backdrop.tabIndex = -1;
     backdrop.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && !this.recording) this.close();
+      if (event.key !== "Escape") return;
+      if (this.recording) this.cancelRecording();
+      else this.close();
     });
     backdrop.addEventListener("mousedown", (event) => {
-      if (event.target === backdrop) this.close();
+      if (event.target !== backdrop) return;
+      if (this.recording) this.cancelRecording();
+      else this.close();
     });
 
     const modal = document.createElement("section");
     modal.className = "settings-modal";
     modal.setAttribute("role", "dialog");
     modal.setAttribute("aria-modal", "true");
-    modal.setAttribute("aria-label", "Settings");
+    modal.setAttribute("aria-labelledby", "settings-title");
     backdrop.appendChild(modal);
     this.backdrop = backdrop;
     document.getElementById("modal-root")!.appendChild(backdrop);
@@ -167,18 +173,28 @@ export class SettingsView {
     this.callbacks.onChange(copyPreferences(this.preferences));
   }
 
+  private cancelRecording(): void {
+    if (!this.recording && !this.captureError) return;
+    this.recording = null;
+    this.captureError = null;
+    const modal = this.backdrop?.querySelector(".settings-modal");
+    if (modal instanceof HTMLElement) this.render(modal);
+  }
+
   private render(modal: HTMLElement): void {
     modal.replaceChildren();
 
     const header = document.createElement("header");
     header.className = "settings-header";
-    const heading = document.createElement("div");
-    heading.innerHTML = '<span class="settings-kicker">PI / DITOR</span><h2>Settings</h2>';
+    const heading = document.createElement("h2");
+    heading.id = "settings-title";
+    heading.textContent = "Settings";
     const close = document.createElement("button");
     close.className = "settings-close";
     close.type = "button";
     close.textContent = "×";
     close.title = "Close settings";
+    close.setAttribute("aria-label", "Close settings");
     close.addEventListener("click", () => this.close());
     header.append(heading, close);
     modal.appendChild(header);
@@ -312,9 +328,7 @@ export class SettingsView {
         event.preventDefault();
         event.stopPropagation();
         if (event.key === "Escape") {
-          this.recording = null;
-          this.captureError = null;
-          this.render(this.backdrop!.querySelector(".settings-modal") as HTMLElement);
+          this.cancelRecording();
           return;
         }
         if ((event.key === "Backspace" || event.key === "Delete") && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) {

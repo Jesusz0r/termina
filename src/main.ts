@@ -85,10 +85,14 @@ function createProjectView(project: { id: string; cwd: string }): ProjectView {
   editorEl.dataset.project = project.id;
   const tabsEl = document.createElement("div");
   tabsEl.className = "editor-tabs";
+  const chromeEl = document.createElement("div");
+  chromeEl.className = "pane-chrome";
+  chromeEl.appendChild(tabsEl);
   const containerEl = document.createElement("div");
   containerEl.className = "editor-container";
   const emptyEl = emptyTemplate.content.firstElementChild!.cloneNode(true) as HTMLElement;
-  editorEl.append(tabsEl, containerEl, emptyEl);
+  editorEl.append(chromeEl, containerEl, emptyEl);
+  editorEl.style.display = "none";
   rightPaneEl2.insertBefore(editorEl, rightPaneEl2.firstElementChild);
 
   const editorMgr = new EditorManager(containerEl, tabsEl, emptyEl);
@@ -139,13 +143,15 @@ function applySharedEditorHooks(editor: InstanceType<typeof EditorManager>): voi
 function removeProjectView(projectId: string): void {
   const view = projectViews.get(projectId);
   if (!view) return;
+  const editorToggle = document.getElementById("btn-min-editor");
+  if (editorToggle && view.editorEl.contains(editorToggle)) placeEditorToggle(null);
   view.tabEl.remove();
   view.editorEl.remove();
   projectViews.delete(projectId);
   if (activeProjectId === projectId) {
     activeProjectId = null;
     const next = projectViews.keys().next().value;
-    if (next) setActiveProject(next);
+    setActiveProject(next ?? null);
   }
   for (const pane of [...panes.values()]) {
     if (pane.projectId === projectId) void closePane(pane.instanceId);
@@ -161,18 +167,29 @@ function activeEditor(): InstanceType<typeof EditorManager> {
   return editor;
 }
 
+function placeEditorToggle(projectId: string | null): void {
+  const button = document.getElementById("btn-min-editor");
+  if (!(button instanceof HTMLButtonElement)) return;
+  if (projectId === null) {
+    document.getElementById("editor-chrome")?.appendChild(button);
+    return;
+  }
+  projectViews.get(projectId)?.editorEl.querySelector(".pane-chrome")?.appendChild(button);
+}
+
 function setActiveProject(projectId: string | null): void {
   activeProjectId = projectId;
+  const baseChrome = document.getElementById("editor-chrome")!;
   const baseContainer = document.getElementById("editor-container")!;
-  const baseTabs = document.getElementById("editor-tabs")!;
   const noProject = projectId === null;
+  baseChrome.style.display = noProject ? "" : "none";
   baseContainer.style.display = noProject ? "" : "none";
-  baseTabs.style.display = noProject ? "" : "none";
   for (const view of projectViews.values()) {
     const active = view.id === projectId;
     view.tabEl.classList.toggle("active", active);
     view.editorEl.style.display = active ? "" : "none";
   }
+  placeEditorToggle(projectId);
   // Terminal panes of the active project are visible; the rest stay alive.
   for (const pane of panes.values()) {
     pane.container.style.display = pane.projectId === projectId ? "" : "none";
@@ -240,9 +257,14 @@ const timelineView = new TimelineView(document.getElementById("timeline-strip")!
 const worldlinesView = new WorldlinesView(document.getElementById("worldline-panel")!);
 (window as unknown as Record<string, unknown>).__worldlinesView = worldlinesView;
 worldlinesView.bind({
-  onCompareBase: (comparisonId, label, relPath, absPath) => void reviewView.showCandidateDiff(comparisonId, label, relPath, absPath),
-  onCompareAB: (comparisonId, relPath) =>
-    void reviewView.showABDiff(comparisonId, relPath, worldlinesView.rootOf(comparisonId, "A")),
+  onCompareBase: (comparisonId, label, relPath, absPath) => {
+    revealEditor();
+    void reviewView.showCandidateDiff(comparisonId, label, relPath, absPath);
+  },
+  onCompareAB: (comparisonId, relPath) => {
+    revealEditor();
+    void reviewView.showABDiff(comparisonId, relPath, worldlinesView.rootOf(comparisonId, "A"));
+  },
   onOpenFile: (absPath) => void openFileSmart(absPath, false),
 });
 const btnForkRun = document.getElementById("btn-fork-run") as HTMLButtonElement;
@@ -520,7 +542,7 @@ function renderTimeline(): void {
 timelineView.bind({
   onJump: async (ev, opts) => {
     // Reveal the editor (a snapshot tab) without leaving fullscreen perma-hidden.
-    if (splitEl.classList.contains("layout-terminal-fullscreen")) applyLayout("terminal-left");
+    revealEditor();
     const pane = activeId ? panes.get(activeId) : undefined;
     if (!pane) return;
     // Snapshots are fetched on demand — the strip/IPC never carries content.
@@ -717,6 +739,7 @@ function renderModified(pane: Pane): void {
     li.append(badge, path);
     li.addEventListener("click", () => {
       // The modified list is the review surface: clicking opens the diff.
+      revealEditor();
       if (reviewView.isVisible) reviewView.hide();
       void reviewView.show(activeId ?? "", f.path, f.relPath);
     });
@@ -740,7 +763,7 @@ function renderModified(pane: Pane): void {
 
 async function openFileSmart(path: string, preview = true): Promise<void> {
   // Opening a file from the explorer/modified list reveals the editor.
-  if (splitEl.classList.contains("layout-terminal-fullscreen")) applyLayout("terminal-left");
+  revealEditor();
   const abs = path.startsWith("/") ? path : projectCwd ? `${projectCwd}/${path}` : path;
   await activeEditor().openFile(abs, { preview });
 }
@@ -875,44 +898,142 @@ btnDispatch.addEventListener("click", () => {
 // ---------------------------------------------------------------- layout ---
 
 type Layout = "terminal-left" | "terminal-right" | "terminal-top" | "terminal-bottom" | "terminal-fullscreen";
+type WorkPane = "terminal" | "editor";
+const SPLIT_LAYOUTS = ["terminal-left", "terminal-right", "terminal-top", "terminal-bottom"] as const;
 const DEFAULT_LAYOUT: Layout = "terminal-left";
 const LAYOUT_KEY = "termina.layout";
 const EXPLORER_KEY = "termina.explorer";
 const MODIFIED_KEY = "termina.modified";
+const WORKPANE_KEY = "termina.workpane";
+const PANE_MIN_ICON = "–";
+const PANE_MAX_ICON = "□";
 const MAX_TIMELINE_EVENTS = 400;
 
 const splitEl = document.getElementById("main-split")!;
 const modifiedPanelEl = document.getElementById("modified-panel")!;
 const explorerDividerEl = document.getElementById("explorer-divider")!;
 const rightPaneEl = document.getElementById("right-pane")!;
+const btnMinExplorer = document.getElementById("btn-min-explorer") as HTMLButtonElement;
+const btnMinTerminal = document.getElementById("btn-min-terminal") as HTMLButtonElement;
+const btnMinEditor = document.getElementById("btn-min-editor") as HTMLButtonElement;
+
+let explorerMinimized = false;
+let minimizedWork: WorkPane | null = null;
+let lastSplitLayout: Layout = DEFAULT_LAYOUT;
+
+function isSplitLayout(value: string | null): value is (typeof SPLIT_LAYOUTS)[number] {
+  return SPLIT_LAYOUTS.includes(value as (typeof SPLIT_LAYOUTS)[number]);
+}
+
+function parseLayout(raw: string | null): Layout {
+  if (raw === "terminal-fullscreen" || isSplitLayout(raw)) return raw;
+  return DEFAULT_LAYOUT;
+}
+
+function isFullscreenLayout(): boolean {
+  return splitEl.classList.contains("layout-terminal-fullscreen");
+}
+
+function exitFullscreen(): void {
+  if (isFullscreenLayout()) applyLayout(lastSplitLayout);
+}
 
 function applyLayout(layout: Layout): void {
+  if (isSplitLayout(layout)) lastSplitLayout = layout;
   for (const l of ["terminal-left", "terminal-right", "terminal-top", "terminal-bottom", "terminal-fullscreen"] as const) {
     splitEl.classList.toggle(`layout-${l}`, l === layout);
   }
-  // Fullscreen hides the editor (and explorer) so the TUI owns the window.
+  // Fullscreen hides the editor and explorer so the TUI owns the window.
+  // Minimize bars stay in the persisted state and return when fullscreen ends.
   if (layout === "terminal-fullscreen") {
-    // Hide without persisting: the user's own toggle preference is respected
-    // when they exit fullscreen.
-    setExplorerVisible(false, false);
-    setEditorVisible(false);
+    setExplorerHidden(true);
+    rightPaneEl.style.display = "none";
   } else {
-    setEditorVisible(true);
+    setExplorerHidden(false);
+    rightPaneEl.style.display = "";
+    applyExplorerMinimized();
+    applyWorkMinimized();
   }
-  // Drop inline size overrides from previous drags so the flex layout applies.
+  clearSplitSizes();
+  localStorage.setItem(LAYOUT_KEY, layout);
+  fitPanes();
+}
+
+function clearSplitSizes(): void {
   leftPane.style.width = "";
   leftPane.style.height = "";
   leftPane.style.flexBasis = "";
-  localStorage.setItem(LAYOUT_KEY, layout);
+}
+
+function fitPanes(): void {
   requestAnimationFrame(() => {
     for (const p of panes.values()) p.view.fit();
   });
 }
 
-function setExplorerVisible(visible: boolean, persist = true): void {
-  explorerEl.style.display = visible ? "" : "none";
-  explorerDividerEl.style.display = visible ? "" : "none";
-  if (persist) localStorage.setItem(EXPLORER_KEY, visible ? "1" : "0");
+function setExplorerHidden(hidden: boolean): void {
+  explorerEl.style.display = hidden ? "none" : "";
+  explorerDividerEl.style.display = hidden || explorerMinimized ? "none" : "";
+}
+
+function applyExplorerMinimized(): void {
+  explorerEl.classList.toggle("minimized", explorerMinimized);
+  if (!isFullscreenLayout()) {
+    explorerEl.style.display = "";
+    explorerDividerEl.style.display = explorerMinimized ? "none" : "";
+  }
+  syncPaneToggle(btnMinExplorer, explorerMinimized, "explorer");
+}
+
+function setExplorerMinimized(minimized: boolean): void {
+  explorerMinimized = minimized;
+  localStorage.setItem(EXPLORER_KEY, minimized ? "0" : "1");
+  applyExplorerMinimized();
+  fitPanes();
+}
+
+function applyWorkMinimized(): void {
+  leftPane.classList.toggle("minimized", minimizedWork === "terminal");
+  rightPaneEl.classList.toggle("minimized", minimizedWork === "editor");
+  syncPaneToggle(btnMinTerminal, minimizedWork === "terminal", "terminal");
+  syncPaneToggle(btnMinEditor, minimizedWork === "editor", "editor");
+}
+
+function setMinimizedWork(pane: WorkPane | null): void {
+  minimizedWork = pane;
+  if (pane) localStorage.setItem(WORKPANE_KEY, pane);
+  else localStorage.removeItem(WORKPANE_KEY);
+  applyWorkMinimized();
+  clearSplitSizes();
+  fitPanes();
+}
+
+function requestMinimize(pane: WorkPane): void {
+  if (isFullscreenLayout()) {
+    exitFullscreen();
+    if (minimizedWork === pane) setMinimizedWork(null);
+    return;
+  }
+  // Restore when this pane is already the thin bar.
+  if (minimizedWork === pane) {
+    setMinimizedWork(null);
+    return;
+  }
+  // Terminal and editor cannot both be bars. Minimizing the expanded pane
+  // swaps which one is compacted.
+  setMinimizedWork(pane);
+}
+
+function revealEditor(): void {
+  exitFullscreen();
+  if (minimizedWork === "editor") setMinimizedWork(null);
+}
+
+function syncPaneToggle(button: HTMLButtonElement, minimized: boolean, label: string): void {
+  button.textContent = minimized ? PANE_MAX_ICON : PANE_MIN_ICON;
+  const action = minimized ? "Restore" : "Minimize";
+  button.title = `${action} ${label}`;
+  button.setAttribute("aria-label", `${action} ${label}`);
 }
 
 function setModifiedVisible(visible: boolean): void {
@@ -920,12 +1041,29 @@ function setModifiedVisible(visible: boolean): void {
   localStorage.setItem(MODIFIED_KEY, visible ? "1" : "0");
 }
 
-function setEditorVisible(visible: boolean): void {
-  rightPaneEl.style.display = visible ? "" : "none";
-}
+btnMinExplorer.addEventListener("click", (event) => {
+  event.stopPropagation();
+  if (isFullscreenLayout()) {
+    exitFullscreen();
+    return;
+  }
+  setExplorerMinimized(!explorerMinimized);
+});
+btnMinTerminal.addEventListener("click", (event) => {
+  event.stopPropagation();
+  requestMinimize("terminal");
+});
+btnMinEditor.addEventListener("click", (event) => {
+  event.stopPropagation();
+  requestMinimize("editor");
+});
 
 function isColumnLayout(): boolean {
   return splitEl.classList.contains("layout-terminal-top") || splitEl.classList.contains("layout-terminal-bottom");
+}
+
+function workPaneCollapsed(): boolean {
+  return minimizedWork !== null;
 }
 
 // File-menu commands + layout/toggle commands
@@ -978,8 +1116,8 @@ window.pi.onMenuCommand((cmd) => {
       applyLayout("terminal-bottom");
       break;
     case "toggle-explorer":
-      // currently hidden → show; currently visible → hide
-      setExplorerVisible(explorerEl.style.display === "none");
+      if (isFullscreenLayout()) exitFullscreen();
+      else setExplorerMinimized(!explorerMinimized);
       break;
     case "toggle-modified":
       setModifiedVisible(modifiedPanelEl.style.display === "none");
@@ -988,9 +1126,7 @@ window.pi.onMenuCommand((cmd) => {
       applyLayout("terminal-fullscreen");
       break;
     case "toggle-editor":
-      // Toggle Editor = switch between fullscreen and the split view.
-      if (splitEl.classList.contains("layout-terminal-fullscreen")) applyLayout("terminal-left");
-      else applyLayout("terminal-fullscreen");
+      requestMinimize("editor");
       break;
     case "session-search":
       sessionSearch.open();
@@ -1008,6 +1144,7 @@ window.pi.onMenuCommand((cmd) => {
 const divider = document.getElementById("divider")!;
 let dragging = false;
 divider.addEventListener("mousedown", () => {
+  if (workPaneCollapsed()) return;
   dragging = true;
   document.body.style.cursor = isColumnLayout() ? "row-resize" : "col-resize";
 });
@@ -1030,6 +1167,7 @@ window.addEventListener("mouseup", () => {
 // explorer ↔ editor divider
 let exploring = false;
 explorerDividerEl.addEventListener("mousedown", () => {
+  if (explorerMinimized) return;
   exploring = true;
   document.body.style.cursor = "col-resize";
 });
@@ -1294,9 +1432,12 @@ setTimeout(removeSplash, 10000);
 
 async function boot(): Promise<void> {
   // Restore layout + panel visibility preferences (default: terminal-left split).
-  const layout = (localStorage.getItem(LAYOUT_KEY) as Layout | null) ?? DEFAULT_LAYOUT;
+  const layout = parseLayout(localStorage.getItem(LAYOUT_KEY));
+  explorerMinimized = localStorage.getItem(EXPLORER_KEY) === "0";
+  const storedWork = localStorage.getItem(WORKPANE_KEY);
+  minimizedWork = storedWork === "terminal" || storedWork === "editor" ? storedWork : null;
+  if (isSplitLayout(layout)) lastSplitLayout = layout;
   applyLayout(layout);
-  if (localStorage.getItem(EXPLORER_KEY) === "0") setExplorerVisible(false);
   if (localStorage.getItem(MODIFIED_KEY) === "0") setModifiedVisible(false);
   void refreshTestCommand();
 
@@ -1306,6 +1447,7 @@ async function boot(): Promise<void> {
     createProjectView(project);
     if (project.active) activeProjectId = project.id;
   }
+  setActiveProject(activeProjectId);
 
   const instances = await window.pi.getInstances();
   // No terminals could be created (pi is missing) — explain instead of

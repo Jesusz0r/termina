@@ -171,8 +171,8 @@ body {
 #left-pane {
   display: flex;
   flex-direction: column;
-  width: 52%;
-  min-width: 320px;
+  flex: 1 1 50%;
+  min-width: 0;
   background: var(--bg-panel);
   border-right: 1px solid var(--border);
 }
@@ -180,11 +180,11 @@ body {
 #right-pane {
   display: flex;
   flex-direction: column;
-  flex: 1;
-  min-width: 360px;
+  flex: 1 1 50%;
+  min-width: 0;
   min-height: 0;
   background: var(--bg);
-  position: relative; /* anchors #editor-empty */
+  position: relative; /* anchors #editor-empty and the editor toggle */
 }
 
 /* ---- explorer sidebar ---- */
@@ -215,15 +215,72 @@ body {
   font-weight: 500;
   /* same size as the terminal/editor tab bars; left padding clears the
      inset traffic lights, which now sit over the explorer column */
+  height: 34px;
   min-height: 34px;
+  max-height: 34px;
   padding: 0 8px 0 78px;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-dim);
   border-bottom: 1px solid var(--border);
-  flex: 0 0 auto;
+  flex: 0 0 34px;
   -webkit-app-region: drag;
+}
+
+.pane-toggle {
+  margin-left: auto;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.pane-toggle:hover,
+.pane-toggle:focus-visible {
+  border-color: var(--border);
+  background: var(--bg-hover);
+  color: var(--text);
+  outline: none;
+}
+
+#explorer.minimized {
+  width: 34px;
+  min-width: 34px;
+  max-width: 34px;
+}
+
+#explorer.minimized #explorer-tree,
+#explorer.minimized .header-logo,
+#explorer.minimized .explorer-header > span:not(.header-logo) {
+  display: none;
+}
+
+#explorer.minimized .explorer-header {
+  height: 34px;
+  min-height: 34px;
+  max-height: 34px;
+  flex: 0 0 34px;
+  padding: 0 3px;
+  justify-content: center;
+  align-self: stretch;
+  -webkit-app-region: no-drag;
+}
+
+#explorer.minimized .pane-toggle {
+  margin-left: 0;
+}
+
+#explorer.minimized + #explorer-divider {
+  display: none;
 }
 
 
@@ -346,6 +403,85 @@ body {
   background: var(--accent);
 }
 
+#left-pane.minimized,
+#right-pane.minimized {
+  flex: 0 0 34px;
+  width: 34px;
+  min-width: 34px;
+  max-width: 34px;
+  overflow: hidden;
+}
+
+#main-split.layout-terminal-top #left-pane.minimized,
+#main-split.layout-terminal-bottom #left-pane.minimized,
+#main-split.layout-terminal-top #right-pane.minimized,
+#main-split.layout-terminal-bottom #right-pane.minimized {
+  width: auto;
+  max-width: none;
+  min-width: 0;
+  height: 34px;
+  min-height: 34px;
+  max-height: 34px;
+  flex: 0 0 34px;
+}
+
+#main-split:has(#left-pane.minimized) #divider,
+#main-split:has(#right-pane.minimized) #divider {
+  display: none;
+}
+
+#main-split:has(#right-pane.minimized) #left-pane:not(.minimized),
+#main-split:has(#left-pane.minimized) #right-pane:not(.minimized) {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+#left-pane.minimized #terminal-container,
+#left-pane.minimized #timeline-strip,
+#left-pane.minimized #plan-panel,
+#left-pane.minimized #worldline-panel,
+#left-pane.minimized #modified-panel,
+#left-pane.minimized #terminal-tabs-list,
+#left-pane.minimized #btn-new-terminal {
+  display: none;
+}
+
+#left-pane.minimized #terminal-tabs {
+  flex: 0 0 34px;
+  height: 34px;
+  min-height: 34px;
+  max-height: 34px;
+  justify-content: center;
+  padding: 0 3px;
+}
+
+#left-pane.minimized .pane-toggle {
+  margin-left: 0;
+}
+
+#right-pane.minimized #editor-tabs,
+#right-pane.minimized #editor-container,
+#right-pane.minimized #review-container,
+#right-pane.minimized .editor-tab,
+#right-pane.minimized .project-editor .editor-container,
+#right-pane.minimized .project-editor .editor-empty {
+  display: none;
+}
+
+#right-pane.minimized .project-editor {
+  flex: 0 0 34px;
+  min-height: 34px;
+  max-height: 34px;
+}
+
+#right-pane.minimized .pane-chrome {
+  flex: 0 0 34px;
+  justify-content: center;
+  padding: 0 3px;
+}
+
 /* --------------------------------------------------------------- terminal */
 
 #terminal-tabs {
@@ -353,8 +489,10 @@ body {
   align-items: center;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
+  height: 34px;
   min-height: 34px;
-  flex: 0 0 auto;
+  max-height: 34px;
+  flex: 0 0 34px;
   padding: 0 8px;
   gap: 4px;
   -webkit-app-region: drag; /* drag the window from here */
@@ -362,7 +500,8 @@ body {
 
 .terminal-tab,
 #btn-new-terminal,
-#terminal-tabs-list {
+#terminal-tabs-list,
+#btn-min-terminal {
   -webkit-app-region: no-drag;
 }
 
@@ -1283,6 +1422,22 @@ body {
 
 .project-editor .editor-tabs {
   display: flex;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.pane-chrome {
+  display: flex;
+  align-items: center;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  height: 34px;
+  min-height: 34px;
+  max-height: 34px;
+  flex: 0 0 34px;
+  padding: 0 4px 0 0;
+  -webkit-app-region: drag;
 }
 
 #project-bar {
@@ -1375,12 +1530,11 @@ body {
 #editor-tabs {
   display: flex;
   align-items: center;
-  background: var(--bg-panel);
-  border-bottom: 1px solid var(--border);
   min-height: 34px;
   overflow-x: auto;
-  flex: 0 0 auto;
-  -webkit-app-region: drag; /* unify the top strip across all columns */
+  flex: 1;
+  min-width: 0;
+  -webkit-app-region: drag;
 }
 
 .editor-tab {
@@ -1682,7 +1836,7 @@ body {
   background: var(--bg-raised);
   border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
 }
 
 .settings-header,
@@ -1697,15 +1851,6 @@ body {
 .settings-header h2 {
   font-size: 20px;
   letter-spacing: -0.04em;
-}
-
-.settings-kicker {
-  display: block;
-  margin-bottom: 3px;
-  color: var(--accent);
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
 }
 
 .settings-close {
@@ -2017,7 +2162,7 @@ body {
   max-height: 80vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
 }
 
 .modal-title {
