@@ -12,7 +12,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme } fro
 // Name the app for the macOS menu bar and user-data paths. Unpackaged runs default to "Electron".
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
-import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { openSync, closeSync, fsyncSync } from "node:fs";
 import { chmod, cp, copyFile, mkdir, mkdtemp, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
@@ -136,15 +136,21 @@ export default function (pi: ExtensionAPI): void {
   });
 
   // ---- startup control (WORLDLINES §6.7) ----
-  // The candidate terminal starts with a one-shot control file: prefill
-  // text, send a structured prompt, or start with no prompt. The bridge
-  // consumes the file exactly once before applying it.
+  // Dispatch workers use startup-control-<terminal-id>.json in the shared
+  // events directory. Worldline candidates use startup-control.json in
+  // their own events directory. The bridge consumes the file once.
   pi.on("session_start", (_event, ctx) => {
     let control: { opId?: unknown; action?: unknown; text?: unknown; content?: unknown } | null = null;
     try {
-      const controlPath = join(dir, "startup-control.json");
-      const claimedPath = \`\${controlPath}.claimed-\${bridgeId}\`;
-      renameSync(controlPath, claimedPath);
+      const namedPath = join(dir, \`startup-control-\${id}.json\`);
+      const genericPath = join(dir, "startup-control.json");
+      let claimedPath = \`\${namedPath}.claimed-\${bridgeId}\`;
+      try {
+        renameSync(namedPath, claimedPath);
+      } catch {
+        claimedPath = \`\${genericPath}.claimed-\${bridgeId}\`;
+        renameSync(genericPath, claimedPath);
+      }
       try {
         const raw = readFileSync(claimedPath, "utf8");
         control = JSON.parse(raw) as { opId?: unknown; action?: unknown; text?: unknown; content?: unknown };
@@ -257,7 +263,7 @@ export default function (pi: ExtensionAPI): void {
   // an app-private payload file first.
   pi.on("before_agent_start", async (event) => {
     let context = "";
-    for (const name of [\`verify-\${id}.md\`, \`edits-\${id}.md\`, \`mine-\${id}.md\`]) {
+    for (const name of [\`verify-\${id}.md\`, \`edits-\${id}.md\`, \`mine-\${id}.md\`, \`mailbox-\${id}.md\`]) {
       try {
         const text = readFileSync(join(dir, name), "utf8");
         if (text) context += (context ? "\\n\\n---\\n\\n" : "") + text;
@@ -669,6 +675,10 @@ class PiEditorApp {
   private dispatchWorkers = new Map<string, string>();
   /** Dispatch runs: worker terminal id → owner + the dispatched task text. */
   private dispatchRuns = new Map<string, { ownerId: string; taskText: string }>();
+  /** Dispatch mailbox notes per terminal, flushed to mailbox-<id>.md. */
+  private dispatchMailbox = new Map<string, string[]>();
+  /** True after the first successful mkdir of the events directory. */
+  private eventsDirReady = false;
 
   /** Files the user changed while no agent terminal was busy. The agent
    *  receives them on its next turn. It adapts instead of overwriting them.
@@ -2225,15 +2235,19 @@ class PiEditorApp {
     );
   }
 
+  private allocateTerminalId(): string {
+    return `term-${++terminalSeq}`;
+  }
+
   private async createTerminal(
     cwd?: string,
-    opts?: { type?: "agent" | "shell"; shell?: string; workspaceId?: string; launch?: { cmd: string; args: string[]; env: Record<string, string | undefined> } },
+    opts?: { type?: "agent" | "shell"; shell?: string; workspaceId?: string; id?: string; launch?: { cmd: string; args: string[]; env: Record<string, string | undefined> } },
   ): Promise<PiTerminalInstance> {
     const type = opts?.type ?? "agent";
     if (type === "agent" && !(await this.checkPiAvailable())) {
       throw new Error(this.piMissingMessage());
     }
-    const id = `term-${++terminalSeq}`;
+    const id = opts?.id ?? this.allocateTerminalId();
     const workspaceId = opts?.workspaceId ?? this.primaryWorkspace()?.id ?? "";
     let cmd: string;
     let args: string[];
@@ -2290,6 +2304,7 @@ class PiEditorApp {
       // pending so the board stays honest.
       const dispatchExit = this.dispatchRuns.get(inst.id);
       if (dispatchExit) {
+        this.writeDispatchSettleNote(inst, "exited");
         this.dispatchRuns.delete(inst.id);
         this.dispatchWorkers.delete(inst.id);
         const ownerInst = this.terminals.get(dispatchExit.ownerId);
@@ -2785,6 +2800,12 @@ class PiEditorApp {
       }
     }
     if (owner.busy) owner.pty.write("\x03"); // the workers replace the owner's run
+    // Structured startup skips the interactive preflight. Flush once so
+    // unsaved editor buffers land before the workers write.
+    if (ownerWs) {
+      const flush = await this.flushDirtyModels(`dispatch:${ownerId}`, ownerWs.id);
+      if (!flush.ok) return { ok: false, error: "could not save editor changes" };
+    }
     // Pick tasks with paths, no overlapping files, at most 3. The overlap
     // check compares canonical paths: "utils.ts" and "./utils.ts" are the
     // same file, "src/utils.ts" is a different one.
@@ -2800,22 +2821,197 @@ class PiEditorApp {
       chosen.push(task);
     }
     if (chosen.length === 0) return { ok: false, error: "no task mentions a file to scope it" };
+    const jobs = chosen.map((task) => ({ task, id: this.allocateTerminalId() }));
+    try {
+      mkdirSync(this.eventsDir, { recursive: true, mode: 0o700 });
+      this.eventsDirReady = true;
+      for (const job of jobs) {
+        this.writeDispatchBriefing(job.id, job.task, jobs);
+        this.writeDispatchStartupControl(job.id, job.task.text);
+      }
+    } catch (err) {
+      for (const job of jobs) {
+        this.clearMailbox(job.id);
+        this.removeDispatchStartupControl(job.id);
+      }
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
     let dispatched = 0;
-    for (const task of chosen) {
+    for (const job of jobs) {
       try {
-        const worker = await this.createTerminal(undefined, { type: "agent", workspaceId: owner.workspaceId });
-        this.dispatchWorkers.set(worker.id, task.text);
-        this.dispatchRuns.set(worker.id, { ownerId, taskText: task.text });
-        // The pi TUI needs a moment to boot before it accepts the prompt.
-        setTimeout(() => {
-          if (this.terminals.has(worker.id)) worker.pty.write(task.text + "\r");
-        }, 1500);
+        const worker = await this.createTerminal(undefined, { type: "agent", workspaceId: owner.workspaceId, id: job.id });
+        this.dispatchWorkers.set(worker.id, job.task.text);
+        this.dispatchRuns.set(worker.id, { ownerId, taskText: job.task.text });
         dispatched++;
       } catch (err) {
+        this.clearMailbox(job.id);
+        this.removeDispatchStartupControl(job.id);
         console.warn(`[main] dispatch worker failed: ${(err as Error).message}`);
       }
     }
+    if (dispatched === 0) {
+      for (const job of jobs) {
+        this.clearMailbox(job.id);
+        this.removeDispatchStartupControl(job.id);
+      }
+      return { ok: false, error: "no dispatch worker started" };
+    }
     return { ok: true, dispatched };
+  }
+
+  private static readonly MAX_MAILBOX_BYTES = 4 * 1024;
+  private static readonly MAX_MAILBOX_NOTES = 20;
+
+  /** True when this terminal's bridge reads a Worldline events directory. */
+  private isWorldlineTerminal(terminalId: string): boolean {
+    return !!this.projectOfTerminal(terminalId)?.worldlines?.eventsDirOf(terminalId);
+  }
+
+  /** Primary events-dir mailbox path. Worldline terminals have no mailbox. */
+  private mailboxFile(terminalId: string): string | null {
+    if (this.isWorldlineTerminal(terminalId)) return null;
+    return join(this.eventsDir, `mailbox-${terminalId}.md`);
+  }
+
+  private writeDispatchBriefing(workerId: string, assigned: PlanTask, jobs: Array<{ task: PlanTask; id: string }>): void {
+    const lines: string[] = [
+      "## Dispatch briefing",
+      "",
+      "You are one of several Pi workers on the same project. Do not edit files claimed by a sibling.",
+      "",
+      "### Your assignment",
+      assigned.text,
+    ];
+    if (assigned.paths.length > 0) lines.push(`Paths: ${assigned.paths.map((p) => `\`${p}\``).join(", ")}`);
+    lines.push("", "### Plan");
+    for (const job of jobs) lines.push(`- ${job.task.text}`);
+    const siblingClaims: string[] = [];
+    const seen = new Set<string>();
+    for (const job of jobs) {
+      if (job.id === workerId) continue;
+      for (const path of job.task.paths) {
+        if (seen.has(path)) continue;
+        seen.add(path);
+        siblingClaims.push(path);
+      }
+    }
+    if (siblingClaims.length > 0) {
+      lines.push("", "### Sibling path claims");
+      for (const path of siblingClaims) lines.push(`- \`${path}\``);
+    }
+    let briefing = lines.join("\n");
+    if (briefing.length > PiEditorApp.MAX_MAILBOX_BYTES) briefing = briefing.slice(0, PiEditorApp.MAX_MAILBOX_BYTES) + "\n…";
+    this.dispatchMailbox.set(workerId, [briefing]);
+    this.flushMailbox(workerId);
+  }
+
+  private writeDispatchStartupControl(workerId: string, taskText: string): void {
+    const target = join(this.eventsDir, `startup-control-${workerId}.json`);
+    const temporary = `${target}.tmp-${randomUUID()}`;
+    const control = { opId: randomUUID(), action: "structured", content: [{ type: "text", text: taskText }] };
+    this.ensureEventsDir();
+    writeFileSync(temporary, JSON.stringify(control), { mode: 0o600 });
+    renameSync(temporary, target);
+  }
+
+  private removeDispatchStartupControl(workerId: string): void {
+    rmSync(join(this.eventsDir, `startup-control-${workerId}.json`), { force: true });
+  }
+
+  /** Remove leftover dispatch control and mailbox files. The events
+   *  directory persists across launches, and terminal ids restart at
+   *  term-1, so a stale control would submit the old task. */
+  private cleanupStaleDispatchFiles(): void {
+    let names: string[] = [];
+    try {
+      names = readdirSync(this.eventsDir);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      if (
+        name === "startup-control.json" ||
+        name.startsWith("mailbox-term-") ||
+        name.startsWith("startup-control-term-")
+      ) {
+        rmSync(join(this.eventsDir, name), { force: true });
+      }
+    }
+  }
+
+  private dispatchGroupIds(ownerId: string): string[] {
+    const ids = new Set<string>([ownerId]);
+    for (const [workerId, entry] of this.dispatchRuns) {
+      if (entry.ownerId === ownerId) ids.add(workerId);
+    }
+    return [...ids];
+  }
+
+  private ensureEventsDir(): void {
+    if (this.eventsDirReady) return;
+    mkdirSync(this.eventsDir, { recursive: true, mode: 0o700 });
+    this.eventsDirReady = true;
+  }
+
+  private appendMailboxNote(terminalId: string, note: string): void {
+    if (this.isWorldlineTerminal(terminalId)) return;
+    const notes = this.dispatchMailbox.get(terminalId) ?? [];
+    notes.push(note);
+    while (notes.length > PiEditorApp.MAX_MAILBOX_NOTES) notes.shift();
+    this.dispatchMailbox.set(terminalId, notes);
+    this.flushMailbox(terminalId);
+  }
+
+  private flushMailbox(terminalId: string): void {
+    const path = this.mailboxFile(terminalId);
+    if (!path) return;
+    const notes = this.dispatchMailbox.get(terminalId) ?? [];
+    try {
+      if (notes.length === 0) {
+        rmSync(path, { force: true });
+        return;
+      }
+      let body = notes.join("\n\n---\n\n");
+      while (body.length > PiEditorApp.MAX_MAILBOX_BYTES && notes.length > 1) {
+        notes.shift();
+        body = notes.join("\n\n---\n\n");
+      }
+      if (body.length > PiEditorApp.MAX_MAILBOX_BYTES) body = body.slice(0, PiEditorApp.MAX_MAILBOX_BYTES) + "\n…";
+      this.ensureEventsDir();
+      writeFileSync(path, body, { encoding: "utf8", mode: 0o600 });
+    } catch (err) {
+      console.warn(`[main] could not write mailbox context: ${(err as Error).message}`);
+    }
+  }
+
+  private clearMailbox(terminalId: string): void {
+    if (!this.dispatchMailbox.has(terminalId)) return;
+    this.dispatchMailbox.delete(terminalId);
+    const path = this.mailboxFile(terminalId);
+    if (path) {
+      try {
+        rmSync(path, { force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  private writeDispatchSettleNote(worker: PiTerminalInstance, status: "settled" | "exited"): void {
+    const dispatch = this.dispatchRuns.get(worker.id);
+    if (!dispatch) return;
+    const touched = [...worker.touched].map((p) => `\`${p}\``).join(", ");
+    const note = [
+      `## Sibling ${status} (\`${worker.id}\`)`,
+      "",
+      `Task: ${dispatch.taskText}`,
+      `Status: ${status}`,
+      touched ? `Touched: ${touched}` : "Touched: none",
+    ].join("\n");
+    for (const id of this.dispatchGroupIds(dispatch.ownerId)) {
+      if (id === worker.id) continue;
+      this.appendMailboxNote(id, note);
+    }
   }
 
   /** Copy a finished worker's files and baselines into the owner's review. */
@@ -3191,6 +3387,7 @@ class PiEditorApp {
         // it in before_agent_start). Clear it so the next run stays fresh.
         const startWs = this.workspaceOfTerminal(inst);
         if (startWs) this.clearUserEdits(startWs);
+        this.clearMailbox(inst.id);
         // The old run's plan is stale until the new plan message arrives.
         inst.plan = [];
         inst.touched = new Set();
@@ -3238,6 +3435,7 @@ class PiEditorApp {
         // files into the owner's Change Review.
         const dispatchEnd = this.dispatchRuns.get(inst.id);
         if (dispatchEnd) {
+          this.writeDispatchSettleNote(inst, "settled");
           const ownerInst = this.terminals.get(dispatchEnd.ownerId);
           const task = ownerInst ? this.findDispatchedTask(ownerInst, dispatchEnd.taskText) : undefined;
           if (ownerInst) {
@@ -3514,21 +3712,7 @@ class PiEditorApp {
       }
       // A second agent running in the same workspace overlaps this run and
       // the other open run (WORLDLINES §5): both become ineligible.
-      if (ws && inst.type === "agent") {
-        for (const otherId of this.busyAgents) {
-          if (otherId === inst.id) continue;
-          const other = this.terminals.get(otherId);
-          if (!other || other.workspaceId !== inst.workspaceId) continue;
-          run.overlap = true;
-          run.replayable = false;
-          run.reason = "another agent ran in the same workspace";
-          if (other.currentRun && other.currentRun.replayable) {
-            other.currentRun.overlap = true;
-            other.currentRun.replayable = false;
-            other.currentRun.reason = "another agent ran in the same workspace";
-          }
-        }
-      }
+      this.markOverlappingAgents(inst, run);
       this.pushRun(inst, run);
     } else if (inst.currentRun && !inst.currentRun.settledAt) {
       // A retry or compaction of the open run. Keep its start state.
@@ -3562,11 +3746,32 @@ class PiEditorApp {
         startedAt: Date.now(),
         settledAt: null,
       };
+      this.markOverlappingAgents(inst, run);
       this.pushRun(inst, run);
     }
     // The staged prompt belongs to one run start. Clear it so a later
     // retry cannot reuse the previous run's payload.
     inst.pendingPrompt = null;
+  }
+
+  /** Mark this run and every other open agent in the same workspace. */
+  private markOverlappingAgents(inst: PiTerminalInstance, run: RunRecord): void {
+    if (inst.type !== "agent") return;
+    for (const otherId of this.busyAgents) {
+      if (otherId === inst.id) continue;
+      const other = this.terminals.get(otherId);
+      if (!other || other.workspaceId !== inst.workspaceId) continue;
+      run.overlap = true;
+      run.replayable = false;
+      run.reason = "another agent ran in the same workspace";
+      if (other.currentRun) {
+        other.currentRun.overlap = true;
+        if (other.currentRun.replayable) {
+          other.currentRun.replayable = false;
+          other.currentRun.reason = "another agent ran in the same workspace";
+        }
+      }
+    }
   }
 
   /** Store a run record with per-terminal and global limits. */
@@ -4342,6 +4547,7 @@ class PiEditorApp {
         this.busyAgents.delete(id);
         this.dispatchWorkers.delete(id);
         this.dispatchRuns.delete(id);
+        this.clearMailbox(id);
       }
       await this.teardownRecording(project, closingWorkspaceIds);
       // Remove the closed project's run records. Use the captured workspace
@@ -5100,6 +5306,7 @@ class PiEditorApp {
     // The session workspace is per-launch scratch: run ids restart at
     // run-1, and stale copies from a previous launch would collide.
     rmSync(this.sessionWorkspaceDir, { recursive: true, force: true });
+    this.cleanupStaleDispatchFiles();
     // Tests set TERMINA_INITIAL_CWD so the fixture is open before the
     // window loads. A normal launch has no folder until the user picks one.
     const initial = process.env.TERMINA_INITIAL_CWD;

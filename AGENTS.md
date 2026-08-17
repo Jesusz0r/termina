@@ -13,12 +13,16 @@ Vite, TypeScript, and node-pty.
 
 These rules apply to all work in this repository.
 
-When multiple solutions are correct, prefer the solution that introduces the
-least new complexity, reuses existing behavior, and follows established
-codebase patterns.
+When multiple solutions are correct, prefer the solution that is faster on
+the hot path, introduces the least new complexity, reuses existing
+behavior, and follows established codebase patterns.
 
-Simplicity does not override correctness, security, data integrity, or
-explicit product requirements.
+Always optimize for performance. Treat latency, main-process
+responsiveness, IPC size, and renderer update cost as standing
+requirements, not as later polish.
+
+Simplicity does not override correctness, security, data integrity,
+performance, or explicit product requirements.
 
 ### Decision Priority
 
@@ -205,17 +209,21 @@ Do not leave dead architecture behind.
 
 ## No Overengineering
 
-Optimize for simplicity, clarity, locality, reuse, and maintainability.
+Optimize for performance, simplicity, clarity, locality, reuse, and
+maintainability.
 
 The goal is not to write the fewest lines of code.
 
 The goal is to introduce the **smallest amount of new complexity required
-to solve the current problem correctly**.
+to solve the current problem correctly and quickly**.
 
-Do not optimize for hypothetical future requirements.
+Always choose the faster correct design when the extra complexity is
+small. Do not add layers, caches, or thread hops for a cost you have not
+measured. Do not optimize for hypothetical future requirements.
 
 The performance rule does not excuse over-engineering. Measure first, then
-optimize the measured problem only.
+optimize the measured problem. Still keep every hot path fast by default:
+do not land a slower design because a faster one would take more care.
 
 ### Implementation Decision Order
 
@@ -538,6 +546,9 @@ be narrowly scoped, and validate its inputs.
 
 ## Performance
 
+Always optimize for performance. A change is not complete if it is
+correct but slower than a simple alternative on the same path.
+
 * Keep the main process responsive. Never block it with slow work.
 * Keep IPC messages small. Do not send file content when metadata is
   enough.
@@ -591,7 +602,8 @@ Before considering an implementation complete, check:
 
 1. Did I solve the actual requested problem?
 2. Did I preserve correctness, security, and data integrity?
-3. Did I keep the main process responsive and the IPC payload small?
+3. Did I keep the main process responsive, the IPC payload small, and
+   the hot path as fast as a simple correct design allows?
 4. Did I search for relevant existing functionality before creating
    something new?
 5. Did I reuse existing behavior only where the semantics actually match?
@@ -660,7 +672,8 @@ Use these terms exactly. Do not invent synonyms.
 - **Dot**: one point on the timeline strip.
 - **Worker**: a pi terminal that runs one dispatched plan task for the
   owner. Verify & Iterate runs tests in a background process, not in a
-  worker terminal.
+  worker terminal. Dispatch workers receive a mailbox briefing and sibling
+  settle notes through the same context-file path as Verify and user edits.
 - **Modified list**: the panel that shows the files a run changed.
 - **Fork point**: one visible timeline event coupled to a Pi session entry and
   an immutable source state.
@@ -763,6 +776,9 @@ The renderer never talks to the agent. It only renders what main pushes.
   the second one fail on stale state.
 - The events directory persists across app launches. A fresh instance
   tails from the current file size, so it never replays phantom history.
+  Launch also deletes leftover `mailbox-term-*.md` and
+  `startup-control-term-*.json` files. Terminal ids restart at `term-1`,
+  and a stale control file would submit the previous dispatch task.
 - `TERMINA_EVENTS_DIR` overrides the events directory. Use it for
   deterministic tests; do NOT set it to an empty string — the bridge
   extension then refuses to log anything.
@@ -793,7 +809,9 @@ The renderer never talks to the agent. It only renders what main pushes.
 - Paths on macOS are canonical: `/tmp` is `/private/tmp`. The watcher
   canonicalizes its cache keys; lookups must use canonical paths too.
 - The events directory is `app.getPath("temp")/termina-events`
-  (`/var/folders/.../T/`), not `/tmp`.
+  (`/var/folders/.../T/`), not `/tmp`. Dispatch mailbox and per-terminal
+  startup-control files live there. Worldline candidates use their own
+  events directory and `startup-control.json`.
 - localStorage keys: `termina.layout`, `termina.explorer`,
   `termina.modified`, `termina.workpane`. Explorer `0` means the explorer
   is minimized to a bar. `termina.workpane` is `terminal` or `editor`

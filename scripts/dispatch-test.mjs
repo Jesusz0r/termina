@@ -3,19 +3,57 @@
  *
  * Launch requirement:
  *   TERMINA_INITIAL_CWD=<fresh fixture: greeting.ts "hello", hello.txt, src/>
+ *   TERMINA_EVENTS_DIR=<events dir>
  *   --remote-debugging-port=9222
  *
  * Steps:
  *   1. The owner agent makes a plan (3 checkbox tasks with file paths) and
  *      does NOT execute it.
- *   2. dispatchRun sends each task to its own worker terminal.
+ *   2. dispatchRun sends each task to its own worker terminal with a
+ *      briefing mailbox and a per-terminal startup control.
  *   3. The tasks turn done as the workers settle; the workers' files land in
- *      the owner's Change Review.
+ *      the owner's Change Review. The owner mailbox records sibling settles.
  */
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+
 const results = [];
 const check = (name, ok, detail = "") => {
   results.push(ok);
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + String(detail).slice(0, 200) : ""}`);
+};
+
+const eventsDir = process.env.TERMINA_EVENTS_DIR ?? "/tmp/termina-events-test";
+const worldsDir = process.env.TERMINA_WORLDS_DIR ?? "";
+
+const listMailboxFiles = (dir, acc = []) => {
+  if (!dir || !existsSync(dir)) return acc;
+  let names = [];
+  try {
+    names = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return acc;
+  }
+  for (const entry of names) {
+    const p = join(dir, entry.name);
+    if (entry.isFile() && entry.name.startsWith("mailbox-") && entry.name.endsWith(".md")) acc.push(p);
+    else if (entry.isDirectory()) listMailboxFiles(p, acc);
+  }
+  return acc;
+};
+
+const readDispatchContext = () => {
+  if (!existsSync(eventsDir)) return "";
+  const parts = [];
+  for (const name of readdirSync(eventsDir)) {
+    if (!(name.startsWith("mailbox-") && name.endsWith(".md")) && !(name.startsWith("prompt-") && name.endsWith(".json"))) continue;
+    try {
+      parts.push(readFileSync(join(eventsDir, name), "utf8"));
+    } catch {
+      /* skip */
+    }
+  }
+  return parts.join("\n");
 };
 
 const pages = await fetch("http://127.0.0.1:9222/json").then((r) => r.json());
@@ -47,6 +85,14 @@ check("the plan board holds the tasks", planTasks.length >= 3, JSON.stringify(pl
 const run = await evalJs(`window.pi.dispatchRun('term-1')`);
 check("dispatch starts", run?.ok === true && run?.dispatched === 3, JSON.stringify(run));
 
+let briefing = "";
+for (let i = 0; i < 40; i++) {
+  briefing = readDispatchContext();
+  if (briefing.includes("## Dispatch briefing")) break;
+  await sleep(100);
+}
+check("a worker mailbox carries the dispatch briefing", briefing.includes("## Dispatch briefing") && briefing.includes("Sibling path claims"), briefing.slice(0, 180));
+
 // ---- 3. workers appear, tasks finish, files collect ----
 let workers = 0;
 let done = 0;
@@ -65,11 +111,20 @@ await sleep(1000);
 const files = await evalJs(`[...document.querySelectorAll('#modified-list .path')].map(p => p.textContent)`);
 check("worker files land in the owner's review", files.some((f) => f.includes("utils.ts")) && files.some((f) => f.includes("math.ts")), JSON.stringify(files));
 
-const { existsSync, readFileSync } = await import("node:fs");
 check("utils.ts exists on disk", existsSync("/tmp/termina-test-project/utils.ts"), "");
 check("math.ts exists on disk", existsSync("/tmp/termina-test-project/math.ts"), "");
 const greeting = existsSync("/tmp/termina-test-project/greeting.ts") ? readFileSync("/tmp/termina-test-project/greeting.ts", "utf8") : "";
 check("greeting.ts was edited by its worker", greeting.includes("hi there"), greeting.slice(0, 60));
+
+const ownerMailbox = existsSync(join(eventsDir, "mailbox-term-1.md")) ? readFileSync(join(eventsDir, "mailbox-term-1.md"), "utf8") : "";
+check(
+  "the owner mailbox records a sibling settle",
+  ownerMailbox.includes("## Sibling settled") && (ownerMailbox.includes("utils.ts") || ownerMailbox.includes("math.ts") || ownerMailbox.includes("greeting.ts")),
+  ownerMailbox.slice(0, 180),
+);
+
+const worldlineMailboxes = worldsDir ? listMailboxFiles(worldsDir) : [];
+check("worldline directories have no mailbox files", worldlineMailboxes.length === 0, worldlineMailboxes.join(", "));
 
 const passed = results.filter(Boolean).length;
 console.log(`\n${passed}/${results.length} passed`);
