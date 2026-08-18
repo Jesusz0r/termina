@@ -406,7 +406,9 @@ export class EvidenceEngine {
       return { code: run.code, stdout: run.stdout, timedOut: run.timedOut, sourceUnchanged: after.tree === stateTree };
     };
 
+    const firstStarted = Date.now();
     const first = await runAttempt(Math.max(0, budgetEnd - Date.now()));
+    const firstMs = Math.max(0, Date.now() - firstStarted);
     const canonicalPass = !first.timedOut && first.code === 0 && first.sourceUnchanged;
     const status = first.timedOut ? "fail" : canonicalPass ? "pass" : "fail";
     let failedCount = 0;
@@ -423,10 +425,13 @@ export class EvidenceEngine {
 
     let passCount = canonicalPass ? 1 : 0;
     let runs = 1;
-    if (!first.timedOut) {
+    // Extra attempts measure flake. Skip when the first run timed out or
+    // already changed the source: those extras cannot count.
+    if (!first.timedOut && first.sourceUnchanged) {
       while (runs < MAX_VERIFY_RUNS) {
         const remaining = budgetEnd - Date.now();
         if (remaining < MIN_VERIFY_REPEAT_MS) break;
+        if (remaining < firstMs) break;
         const extra = await runAttempt(remaining);
         if (extra.timedOut) break;
         runs++;
@@ -619,7 +624,18 @@ export class EvidenceEngine {
           reason: "the candidate event log was truncated",
         };
       }
-      const text = await readFile(file, "utf8");
+      const buf = await readFile(file);
+      if (buf.byteLength >= MAX_SIDECAR_BYTES) {
+        return {
+          kind: "trajectory",
+          stateId,
+          baseStateId: this.deps.baseStateId,
+          status: "unavailable",
+          result: {},
+          reason: "the candidate event log was truncated",
+        };
+      }
+      const text = buf.toString("utf8");
       const label = this.deps.baseTestCommand()?.label ?? null;
       const parsed = parseTrajectoryLog(text, label);
       return {
@@ -721,19 +737,19 @@ export interface TrajectorySignals {
  */
 export function parseTrajectoryLog(text: string, testLabel: string | null): TrajectorySignals {
   const lines = text.split("\n");
-  const events: Array<Record<string, unknown>> = [];
-  for (const line of lines) {
+  let start = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
     if (!line.trim()) continue;
     try {
       const event = JSON.parse(line) as Record<string, unknown>;
-      if (event && typeof event === "object") events.push(event);
+      if (event && typeof event === "object" && event.t === "agent_start") {
+        start = i;
+        break;
+      }
     } catch {
       /* Skip a malformed line. */
     }
-  }
-  let start = 0;
-  for (let i = 0; i < events.length; i++) {
-    if (events[i]?.t === "agent_start") start = i;
   }
   const pending = new Map<string, string>();
   const lastOutcome = new Map<string, "ok" | "error">();
@@ -743,8 +759,17 @@ export function parseTrajectoryLog(text: string, testLabel: string | null): Traj
   let cancelled = 0;
   let testLabelSeen = false;
   const needle = testLabel && testLabel.trim() ? testLabel.trim() : "";
-  for (let i = start; i < events.length; i++) {
-    const event = events[i]!;
+  for (let i = start; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    let event: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      if (!parsed || typeof parsed !== "object") continue;
+      event = parsed;
+    } catch {
+      continue;
+    }
     if (event.timedOut === true) timedOut++;
     if (event.cancelled === true) cancelled++;
     if (needle && typeof event.command === "string" && event.command.includes(needle)) testLabelSeen = true;
@@ -906,14 +931,16 @@ export function rankProfiles(
     } else if (!bm.A || !bm.B || bm.A.status === "unavailable" || bm.B.status === "unavailable") {
       reason = bm.A?.reason ?? bm.B?.reason ?? "the benchmark harness is unavailable";
     } else {
-      const med = { A: Number(bm.A.result.median), B: Number(bm.B.result.median) };
+      const medA = finiteNumber(bm.A.result.median);
+      const medB = finiteNumber(bm.B.result.median);
       const varA = variability(bm.A);
       const varB = variability(bm.B);
-      if (!Number.isFinite(med.A) || !Number.isFinite(med.B)) {
+      if (medA === null || medB === null) {
         reason = "the benchmark measurement is not a finite number";
       } else if (varA === null || varB === null || varA > 0.2 || varB > 0.2) {
         reason = `variability exceeds the allowed bound (A ${varA === null ? "?" : (varA * 100).toFixed(0)}%, B ${varB === null ? "?" : (varB * 100).toFixed(0)}%)`;
       } else {
+        const med = { A: medA, B: medB };
         const direction = bm.A.result.direction === "higher" ? 1 : -1;
         const effect = (med.B - med.A) / Math.max(med.A, med.B, 1e-9) * direction;
         const threshold = thresholdFraction;
@@ -935,19 +962,23 @@ export function rankProfiles(
   return verdicts;
 }
 
+/** A finite number from an evidence field. Null and non-numbers are not zero. */
+function finiteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 /** The interquartile spread of a benchmark record, or null. */
 function variability(rec: EvidenceRecord | undefined): number | null {
   if (!rec) return null;
-  const median = Number(rec.result.median);
-  const p25 = Number(rec.result.p25);
-  const p75 = Number(rec.result.p75);
-  if (!Number.isFinite(median)) return null;
+  const median = finiteNumber(rec.result.median);
+  const p25 = finiteQuartile(rec, "p25");
+  const p75 = finiteQuartile(rec, "p75");
+  if (median === null || p25 === null || p75 === null || p25 > p75) return null;
   return (p75 - p25) / median;
 }
 
 function finiteQuartile(rec: EvidenceRecord, key: "p25" | "p75"): number | null {
-  const v = rec.result[key];
-  return typeof v === "number" && Number.isFinite(v) ? v : null;
+  return finiteNumber(rec.result[key]);
 }
 
 /**

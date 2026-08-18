@@ -20,6 +20,8 @@ export class TimelineView {
   private dots = new Map<number, HTMLElement>();
   /** seq → on-demand progress. Dropped on reset, setEvents, and eviction. */
   private progressCache = new Map<number, TimelineProgress>();
+  /** seqs with an in-flight progress fetch. Prevents duplicate core calls. */
+  private progressInFlight = new Set<number>();
   private hoverSeq: number | null = null;
   private hoverTimer: ReturnType<typeof setTimeout> | null = null;
   private activeSeq: number | null = null;
@@ -100,6 +102,7 @@ export class TimelineView {
       this.dots.get(seq)?.remove();
       this.dots.delete(seq);
       this.progressCache.delete(seq);
+      this.progressInFlight.delete(seq);
     }
     this.countEl.textContent = this.events.length ? `(${this.events.length})` : "";
     this.btnPlay.hidden = this.events.length === 0;
@@ -109,6 +112,7 @@ export class TimelineView {
     this.stopReplay();
     this.clearHover();
     this.progressCache.clear();
+    this.progressInFlight.clear();
     this.events = events.slice(-MAX_TIMELINE_EVENTS);
     this.activeSeq = null;
     this.render();
@@ -135,6 +139,7 @@ export class TimelineView {
         this.dots.get(removed.seq)?.remove();
         this.dots.delete(removed.seq);
         this.progressCache.delete(removed.seq);
+        this.progressInFlight.delete(removed.seq);
       }
     }
     const dot = this.makeDot(event);
@@ -251,17 +256,25 @@ export class TimelineView {
       if (dot) dot.title = this.tooltip(ev, cached);
       return;
     }
+    if (this.progressInFlight.has(seq)) return;
     this.hoverTimer = setTimeout(() => {
       this.hoverTimer = null;
       if (this.hoverSeq !== seq) return;
-      void this.onProgress(seq).then((progress) => {
-        // Do not cache a miss: indexing or a project switch can succeed next.
-        if (progress.ok) this.progressCache.set(seq, progress);
-        if (this.hoverSeq !== seq) return;
-        const latest = this.eventBySeq(seq);
-        const dot = this.dots.get(seq);
-        if (latest && dot) dot.title = this.tooltip(latest, progress);
-      });
+      if (this.progressInFlight.has(seq)) return;
+      this.progressInFlight.add(seq);
+      void this.onProgress(seq).then(
+        (progress) => {
+          this.progressInFlight.delete(seq);
+          if (progress.ok) this.progressCache.set(seq, progress);
+          if (this.hoverSeq !== seq) return;
+          const latest = this.eventBySeq(seq);
+          const dot = this.dots.get(seq);
+          if (latest && dot) dot.title = this.tooltip(latest, progress);
+        },
+        () => {
+          this.progressInFlight.delete(seq);
+        },
+      );
     }, 80);
   }
 
