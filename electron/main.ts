@@ -1862,7 +1862,8 @@ class PiEditorApp {
           /* An optional or oversized resource is omitted. */
         }
       }
-      await mkdir(join(dir, "tmp"), { recursive: true, mode: 0o700 });
+      await mkdir(join(dir, "tmp", "A"), { recursive: true, mode: 0o700 });
+      await mkdir(join(dir, "tmp", "B"), { recursive: true, mode: 0o700 });
       complete = true;
       return dir;
     } finally {
@@ -1938,8 +1939,8 @@ class PiEditorApp {
   }
 
   /**
-   * Compute evidence for both candidates serially and rank the profiles
-   * (WORLDLINES §6.8: run required evidence for A and B serially).
+   * Compute evidence for both candidates: serial Verify/API/deps/footprint
+   * per candidate, then interleaved benchmark samples (WORLDLINES §6.8).
    */
   private runEvidence(comparisonId: string): Promise<{ ok: boolean; error?: string }> {
     const project = this.projectOfComparison(comparisonId);
@@ -2020,13 +2021,16 @@ class PiEditorApp {
       const mineReason: Record<"A" | "B", string | null> = { A: null, B: null };
       const retainedStates = new Set<string>();
       const expectedVersions = new Map<"A" | "B", number>();
+      const cands: Record<"A" | "B", { root: string; profilePath: string; homeDir: string; tmpDir: string; shell: string }> = {
+        A: { root: targets.get("A")!.root, profilePath: targets.get("A")!.profilePath, homeDir: evidenceRoot, tmpDir: join(evidenceRoot, "tmp", "A"), shell: "" },
+        B: { root: targets.get("B")!.root, profilePath: targets.get("B")!.profilePath, homeDir: evidenceRoot, tmpDir: join(evidenceRoot, "tmp", "B"), shell: "" },
+      };
       let result: { ok: boolean; error?: string };
       try {
         result = { ok: true };
         for (const label of ["A", "B"] as const) {
           const target = targets.get(label)!;
-          const cand = { root: target.root, profilePath: target.profilePath, homeDir: evidenceRoot, tmpDir: join(evidenceRoot, "tmp"), shell: "" };
-          byCandidate[label] = await engine.measure(label, cand);
+          byCandidate[label] = await engine.measure(label, cands[label]);
           const finalState = await deps.captureHead(target.root, join(target.root, ".git"), null);
           const workspace = this.workspaceContaining(target.root);
           const current = project.worldlines?.evidenceVersion(comparisonId, label);
@@ -2047,6 +2051,14 @@ class PiEditorApp {
           } else {
             expectedVersions.set(label, target.version);
           }
+        }
+        if (result.ok) {
+          const benches = await engine.measureBenchmarks(cands, {
+            A: byCandidate.A.find((r) => r.kind === "verify")?.stateId ?? byCandidate.A[0]?.stateId ?? "",
+            B: byCandidate.B.find((r) => r.kind === "verify")?.stateId ?? byCandidate.B[0]?.stateId ?? "",
+          });
+          byCandidate.A.push(benches.A);
+          byCandidate.B.push(benches.B);
         }
         if (result.ok) {
           for (const label of ["A", "B"] as const) {

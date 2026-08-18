@@ -286,13 +286,14 @@ export function parseFailingTests(output: string): FailingTests {
 }
 
 /**
- * The evidence engine. One run measures one candidate; the caller
- * serializes the A and B runs (WORLDLINES §6.8: run serially).
+ * The evidence engine. Verify, API, dependencies, and footprint run
+ * per candidate. The caller serializes those A then B. Benchmarks warm
+ * both sides, then interleave scored samples (WORLDLINES §6.8).
  */
 export class EvidenceEngine {
   constructor(private deps: EvidenceDeps) {}
 
-  /** The full evidence record set for one candidate. */
+  /** The non-benchmark evidence for one candidate. */
   async measure(_label: "A" | "B", cand: CandidateFacts): Promise<EvidenceRecord[]> {
     const out: EvidenceRecord[] = [];
     const head = await this.deps.captureHead(cand.root, join(cand.root, ".git"), this.deps.baseStateId);
@@ -306,9 +307,69 @@ export class EvidenceEngine {
     if (api) out.push(api);
     const footprint = await this.footprintEvidence(cand, stateId, dependencies?.result as Record<string, unknown> | undefined);
     if (footprint) out.push(footprint);
-    const benchmark = await this.benchmarkEvidence(cand, stateId);
-    if (benchmark) out.push(benchmark);
     return out;
+  }
+
+  /**
+   * Warm A, warm B, then sample A then B for each scored round. One
+   * sandboxed run at a time. A failed side does not abort the other.
+   */
+  async measureBenchmarks(
+    cands: Record<"A" | "B", CandidateFacts>,
+    stateIds: Record<"A" | "B", string>,
+  ): Promise<Record<"A" | "B", EvidenceRecord>> {
+    const cfg = this.deps.benchmarkConfig();
+    if (!cfg) {
+      const reason = "the base declares no benchmark harness (termina.benchmark)";
+      return {
+        A: this.benchmarkUnavailable(stateIds.A, reason),
+        B: this.benchmarkUnavailable(stateIds.B, reason),
+      };
+    }
+    const n = cfg.samples;
+    const samples: Record<"A" | "B", number[]> = { A: [], B: [] };
+    const out: Partial<Record<"A" | "B", EvidenceRecord>> = {};
+
+    const warmA = await this.warmBenchmark(cands.A, stateIds.A, cfg.command);
+    const warmB = await this.warmBenchmark(cands.B, stateIds.B, cfg.command);
+    if (warmA) out.A = warmA;
+    if (warmB) out.B = warmB;
+
+    const sampleSide = async (label: "A" | "B", start: number): Promise<EvidenceRecord | null> => {
+      for (let i = start; i < n; i++) {
+        const fail = await this.scoredSample(cands[label], stateIds[label], cfg, samples[label], i);
+        if (fail) return fail;
+      }
+      return null;
+    };
+
+    if (out.A && !out.B) {
+      out.B = (await sampleSide("B", 0)) ?? this.benchmarkPass(stateIds.B, cfg, samples.B);
+    } else if (out.B && !out.A) {
+      out.A = (await sampleSide("A", 0)) ?? this.benchmarkPass(stateIds.A, cfg, samples.A);
+    } else if (!out.A && !out.B) {
+      for (let i = 0; i < n; i++) {
+        if (!out.A) {
+          const fail = await this.scoredSample(cands.A, stateIds.A, cfg, samples.A, i);
+          if (fail) {
+            out.A = fail;
+            out.B = (await sampleSide("B", i)) ?? this.benchmarkPass(stateIds.B, cfg, samples.B);
+            break;
+          }
+        }
+        if (!out.B) {
+          const fail = await this.scoredSample(cands.B, stateIds.B, cfg, samples.B, i);
+          if (fail) {
+            out.B = fail;
+            out.A = (await sampleSide("A", i + 1)) ?? this.benchmarkPass(stateIds.A, cfg, samples.A);
+            break;
+          }
+        }
+      }
+      if (!out.A) out.A = this.benchmarkPass(stateIds.A, cfg, samples.A);
+      if (!out.B) out.B = this.benchmarkPass(stateIds.B, cfg, samples.B);
+    }
+    return { A: out.A ?? this.benchmarkUnavailable(stateIds.A, "the benchmark harness is unavailable"), B: out.B ?? this.benchmarkUnavailable(stateIds.B, "the benchmark harness is unavailable") };
   }
 
   /** Verify: the base test command in the candidate sandbox, state-checked. */
@@ -467,25 +528,53 @@ export class EvidenceEngine {
     };
   }
 
-  /** Benchmark: interleaved samples of the configured harness. */
-  private async benchmarkEvidence(cand: CandidateFacts, stateId: string): Promise<EvidenceRecord | null> {
-    const cfg = this.deps.benchmarkConfig();
-    if (!cfg) {
-      return { kind: "benchmark", stateId, baseStateId: this.deps.baseStateId, status: "unavailable", result: {}, reason: "the base declares no benchmark harness (termina.benchmark)" };
-    }
-    const samples: number[] = [];
-    const warm = await this.deps.runSandboxed(cand, cfg.command, 120_000);
+  private benchmarkUnavailable(stateId: string, reason: string): EvidenceRecord {
+    return { kind: "benchmark", stateId, baseStateId: this.deps.baseStateId, status: "unavailable", result: {}, reason };
+  }
+
+  private async warmBenchmark(cand: CandidateFacts, stateId: string, command: string[]): Promise<EvidenceRecord | null> {
+    const warm = await this.deps.runSandboxed(cand, command, 120_000);
     if (warm.code !== 0) {
-      return { kind: "benchmark", stateId, baseStateId: this.deps.baseStateId, status: "fail", result: {}, reason: `the benchmark harness failed (code ${warm.code})` };
+      return {
+        kind: "benchmark",
+        stateId,
+        baseStateId: this.deps.baseStateId,
+        status: "fail",
+        result: {},
+        reason: `the benchmark harness failed (code ${warm.code})`,
+      };
     }
-    for (let i = 0; i < cfg.samples; i++) {
-      const r = await this.deps.runSandboxed(cand, cfg.command, 120_000);
-      const value = parseBenchmarkValue(r.stdout, cfg.unit);
-      if (value === null) {
-        return { kind: "benchmark", stateId, baseStateId: this.deps.baseStateId, status: "fail", result: { samples }, reason: `sample ${i + 1} produced no ${cfg.unit} measurement` };
-      }
-      samples.push(value);
+    return null;
+  }
+
+  private async scoredSample(
+    cand: CandidateFacts,
+    stateId: string,
+    cfg: NonNullable<ReturnType<EvidenceDeps["benchmarkConfig"]>>,
+    samples: number[],
+    index: number,
+  ): Promise<EvidenceRecord | null> {
+    const r = await this.deps.runSandboxed(cand, cfg.command, 120_000);
+    const value = parseBenchmarkValue(r.stdout, cfg.unit);
+    if (value === null) {
+      return {
+        kind: "benchmark",
+        stateId,
+        baseStateId: this.deps.baseStateId,
+        status: "fail",
+        result: { samples: [...samples] },
+        reason: `sample ${index + 1} produced no ${cfg.unit} measurement`,
+      };
     }
+    samples.push(value);
+    return null;
+  }
+
+  private benchmarkPass(
+    stateId: string,
+    cfg: NonNullable<ReturnType<EvidenceDeps["benchmarkConfig"]>>,
+    samples: number[],
+  ): EvidenceRecord {
     const sorted = [...samples].sort((a, b) => a - b);
     const median = sorted[Math.floor(sorted.length / 2)];
     const p25 = sorted[Math.floor(sorted.length * 0.25)];
@@ -495,7 +584,7 @@ export class EvidenceEngine {
       stateId,
       baseStateId: this.deps.baseStateId,
       status: "pass",
-      result: { unit: cfg.unit, direction: cfg.direction, samples, median, p25, p75 },
+      result: { unit: cfg.unit, direction: cfg.direction, samples: [...samples], median, p25, p75 },
       reason: null,
     };
   }
