@@ -642,6 +642,9 @@ export function rankProfiles(
           reason = `${winner} wins (median ${med[winner]} vs ${med[winner === "A" ? "B" : "A"]} ${bm.A.result.unit})`;
         }
       }
+      // Overlap is display only. It does not change the winner.
+      const overlap = iqrOverlapClause(bm.A, bm.B);
+      if (overlap) reason += overlap;
     }
     verdicts.push({ profile: "performance-first", winner, reason, eligibility: el });
   }
@@ -657,6 +660,26 @@ function variability(rec: EvidenceRecord | undefined): number | null {
   const p75 = Number(rec.result.p75);
   if (!Number.isFinite(median)) return null;
   return (p75 - p25) / median;
+}
+
+function finiteQuartile(rec: EvidenceRecord, key: "p25" | "p75"): number | null {
+  const v = rec.result[key];
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * Whether the closed IQR intervals intersect. Returns null when either
+ * side lacks a finite p25/p75 pair. Does not rank.
+ */
+function iqrOverlapClause(a: EvidenceRecord, b: EvidenceRecord): string | null {
+  const a25 = finiteQuartile(a, "p25");
+  const a75 = finiteQuartile(a, "p75");
+  const b25 = finiteQuartile(b, "p25");
+  const b75 = finiteQuartile(b, "p75");
+  if (a25 === null || a75 === null || b25 === null || b75 === null) return null;
+  if (a25 > a75 || b25 > b75) return null;
+  const overlap = a25 <= b75 && b25 <= a75;
+  return overlap ? "; IQR intervals overlap" : "; IQR intervals do not overlap";
 }
 
 /** The Mine-path reason of a candidate, or null. */
