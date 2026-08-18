@@ -15,6 +15,13 @@ import { MAX_SIDECAR_BYTES } from "./sidecar.js";
 export type EvidenceKind = "verify" | "dependencies" | "api" | "footprint" | "benchmark" | "trajectory";
 export type ProfileName = "fewer-dependencies" | "preserve-api" | "simpler-implementation" | "performance-first";
 
+/** Wall-clock budget for all evidence Verify attempts of one candidate. */
+const VERIFY_BUDGET_MS = 300_000;
+/** Cap on completed evidence Verify attempts inside the budget. */
+const MAX_VERIFY_RUNS = 5;
+/** Do not start another attempt with less remaining time than this. */
+const MIN_VERIFY_REPEAT_MS = 1_000;
+
 /** One measured result for one candidate. */
 export interface EvidenceRecord {
   kind: EvidenceKind;
@@ -380,30 +387,53 @@ export class EvidenceEngine {
     return { A: out.A ?? this.benchmarkUnavailable(stateIds.A, "the benchmark harness is unavailable"), B: out.B ?? this.benchmarkUnavailable(stateIds.B, "the benchmark harness is unavailable") };
   }
 
-  /** Verify: the base test command in the candidate sandbox, state-checked. */
+  /**
+   * Verify: the base test command in the candidate sandbox, state-checked.
+   * Extra attempts share the same 300 s budget. Ranking uses the first run.
+   */
   private async verifyEvidence(cand: CandidateFacts, stateId: string): Promise<EvidenceRecord | null> {
     const tc = this.deps.baseTestCommand();
     if (!tc) {
       return { kind: "verify", stateId, baseStateId: this.deps.baseStateId, status: "unavailable", result: {}, reason: "the shared base has no test command" };
     }
+    const command = [tc.command, ...tc.args];
+    const budgetEnd = Date.now() + VERIFY_BUDGET_MS;
     const stateTree = (await this.deps.captureHead(cand.root, join(cand.root, ".git"), this.deps.baseStateId)).tree;
-    const run = await this.deps.runSandboxed(cand, [tc.command, ...tc.args], 300_000);
-    // A test that changed the source is not evidence: re-capture and compare
-    // the trees (commit hashes differ by parent and timestamp).
-    const after = await this.deps.captureHead(cand.root, join(cand.root, ".git"), null);
-    const sourceUnchanged = after.tree === stateTree;
-    const status = run.timedOut ? "fail" : run.code === 0 && sourceUnchanged ? "pass" : "fail";
+
+    const runAttempt = async (timeoutMs: number): Promise<{ code: number; stdout: string; timedOut: boolean; sourceUnchanged: boolean }> => {
+      const run = await this.deps.runSandboxed(cand, command, timeoutMs);
+      const after = await this.deps.captureHead(cand.root, join(cand.root, ".git"), null);
+      return { code: run.code, stdout: run.stdout, timedOut: run.timedOut, sourceUnchanged: after.tree === stateTree };
+    };
+
+    const first = await runAttempt(Math.max(0, budgetEnd - Date.now()));
+    const canonicalPass = !first.timedOut && first.code === 0 && first.sourceUnchanged;
+    const status = first.timedOut ? "fail" : canonicalPass ? "pass" : "fail";
     let failedCount = 0;
     let failedNames: string[] = [];
-    if (status === "fail" && !run.timedOut && run.code !== 0) {
+    if (status === "fail" && !first.timedOut && first.code !== 0) {
       try {
-        const parsed = parseFailingTests(run.stdout);
+        const parsed = parseFailingTests(first.stdout);
         failedCount = parsed.count;
         failedNames = parsed.names;
       } catch {
         /* Ranking uses status, not names. */
       }
     }
+
+    let passCount = canonicalPass ? 1 : 0;
+    let runs = 1;
+    if (!first.timedOut) {
+      while (runs < MAX_VERIFY_RUNS) {
+        const remaining = budgetEnd - Date.now();
+        if (remaining < MIN_VERIFY_REPEAT_MS) break;
+        const extra = await runAttempt(remaining);
+        if (extra.timedOut) break;
+        runs++;
+        if (extra.code === 0 && extra.sourceUnchanged) passCount++;
+      }
+    }
+
     return {
       kind: "verify",
       stateId,
@@ -411,16 +441,18 @@ export class EvidenceEngine {
       status,
       result: {
         command: tc.label,
-        code: run.code,
-        timedOut: run.timedOut,
-        sourceUnchanged,
-        output: run.stdout.slice(-2000),
+        code: first.code,
+        timedOut: first.timedOut,
+        sourceUnchanged: first.sourceUnchanged,
+        output: first.stdout.slice(-2000),
+        passCount,
+        runs,
         ...(failedCount > 0 ? { failedCount, failedNames } : {}),
       },
       reason:
-        run.timedOut ? "the test command timed out" :
-        run.code !== 0 ? `the test command exited with code ${run.code}` :
-        !sourceUnchanged ? "the tests changed the source" : null,
+        first.timedOut ? "the test command timed out" :
+        first.code !== 0 ? `the test command exited with code ${first.code}` :
+        !first.sourceUnchanged ? "the tests changed the source" : null,
     };
   }
 

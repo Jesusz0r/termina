@@ -135,7 +135,15 @@ function profileCaption(profiles: ProfileVerdict[] | undefined): string | null {
 
 /** This candidate's measured detail, plus the other side when both exist. */
 function evidenceLineDetail(rec: EvidenceRecord, other: EvidenceRecord | undefined, otherLabel: "A" | "B"): string {
-  if (rec.kind === "verify") return String(rec.result.command ?? "");
+  if (rec.kind === "verify") {
+    const cmd = String(rec.result.command ?? "");
+    const passCount = asFinite(rec.result.passCount);
+    const runs = asFinite(rec.result.runs);
+    if (passCount !== null && runs !== null && runs > 1) {
+      return cmd ? `${cmd} · ${formatChipNum(passCount)}/${formatChipNum(runs)}` : `${formatChipNum(passCount)}/${formatChipNum(runs)}`;
+    }
+    return cmd;
+  }
   if (rec.kind === "dependencies") {
     const n = addedLen(rec);
     const m = addedLen(other);
