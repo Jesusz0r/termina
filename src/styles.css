@@ -1299,21 +1299,27 @@ body {
   background: var(--bg);
   color: var(--text-dim);
   border: 1px solid var(--border);
+  white-space: nowrap;
 }
 
-.verdict-verdict-tie {
+.verdict-tie {
   color: var(--yellow);
   border-color: var(--yellow);
 }
 
-.verdict-verdict-unavailable {
+.verdict-unavailable {
   color: var(--text-dim);
 }
 
-.verdict-verdict-A,
-.verdict-verdict-B {
+.verdict-A,
+.verdict-B {
   color: var(--green);
   border-color: var(--green);
+}
+
+.verdict-stale {
+  color: var(--yellow);
+  border-color: var(--yellow);
 }
 
 .cand-evidence {

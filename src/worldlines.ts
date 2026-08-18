@@ -6,7 +6,7 @@
  *
  * DOM updates are incremental: an update push touches only its card.
  */
-import type { WorldlineSummary, WorldlineDetails, WorldlineChangedFile, EvidenceSummary } from "../shared/types";
+import type { WorldlineSummary, WorldlineDetails, WorldlineChangedFile, EvidenceRecord, EvidenceSummary, ProfileVerdict } from "../shared/types";
 import { showConfirm, toast } from "./components/modals";
 
 interface ViewHandlers {
@@ -16,6 +16,123 @@ interface ViewHandlers {
   onCompareAB(comparisonId: string, relPath: string): void;
   /** Open an absolute candidate path in the editor. */
   onOpenFile(absPath: string): void;
+}
+
+const PROFILE_LABEL: Record<ProfileVerdict["profile"], string> = {
+  "fewer-dependencies": "fewer deps",
+  "preserve-api": "api",
+  "simpler-implementation": "footprint",
+  "performance-first": "perf",
+};
+
+const KIND_LABEL: Record<EvidenceRecord["kind"], string> = {
+  verify: "verify",
+  dependencies: "deps",
+  api: "api",
+  footprint: "footprint",
+  benchmark: "benchmark",
+};
+
+function recordOf(records: EvidenceRecord[] | undefined, kind: EvidenceRecord["kind"]): EvidenceRecord | undefined {
+  return records?.find((r) => r.kind === kind);
+}
+
+function addedLen(rec: EvidenceRecord | undefined): number | null {
+  const added = rec?.result.added;
+  return Array.isArray(added) ? added.length : null;
+}
+
+function asFinite(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function formatChipNum(n: number): string {
+  if (Number.isInteger(n)) return String(n);
+  const s = n.toFixed(2).replace(/\.?0+$/, "");
+  return s.length > 0 ? s : String(n);
+}
+
+function chipUnit(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const unit = value.trim();
+  return unit.length > 0 && unit.length <= 8 ? unit : "";
+}
+
+/** Raw A/B magnitudes from measured records. Ranking math stays in reason. */
+function chipDelta(profile: ProfileVerdict["profile"], summary: EvidenceSummary): string | null {
+  const a = summary.byCandidate.A;
+  const b = summary.byCandidate.B;
+  if (profile === "fewer-dependencies") {
+    const na = addedLen(recordOf(a, "dependencies"));
+    const nb = addedLen(recordOf(b, "dependencies"));
+    if (na === null || nb === null) return null;
+    return `+${na}/+${nb}`;
+  }
+  if (profile === "simpler-implementation") {
+    const fa = recordOf(a, "footprint");
+    const fb = recordOf(b, "footprint");
+    const aFiles = asFinite(fa?.result.changedFiles);
+    const aLines = asFinite(fa?.result.changedLines);
+    const bFiles = asFinite(fb?.result.changedFiles);
+    const bLines = asFinite(fb?.result.changedLines);
+    if (aFiles === null || aLines === null || bFiles === null || bLines === null) return null;
+    const aAdd = addedLen(recordOf(a, "dependencies")) ?? 0;
+    const bAdd = addedLen(recordOf(b, "dependencies")) ?? 0;
+    return `${aAdd}d/${formatChipNum(aFiles)}f/${formatChipNum(aLines)}l vs ${bAdd}d/${formatChipNum(bFiles)}f/${formatChipNum(bLines)}l`;
+  }
+  if (profile === "performance-first") {
+    const ba = recordOf(a, "benchmark");
+    const bb = recordOf(b, "benchmark");
+    const medA = asFinite(ba?.result.median);
+    const medB = asFinite(bb?.result.median);
+    if (medA === null || medB === null) return null;
+    const unit = chipUnit(ba?.result.unit) || chipUnit(bb?.result.unit);
+    return unit
+      ? `${formatChipNum(medA)}${unit} vs ${formatChipNum(medB)}${unit}`
+      : `${formatChipNum(medA)} vs ${formatChipNum(medB)}`;
+  }
+  return null;
+}
+
+function chipText(v: ProfileVerdict, summary: EvidenceSummary): string {
+  const name = PROFILE_LABEL[v.profile];
+  const delta = chipDelta(v.profile, summary);
+  if (v.winner === "unavailable") return delta ? `${name}: unavailable ${delta}` : `${name}: unavailable`;
+  return delta ? `${name}: ${v.winner} ${delta}` : `${name}: ${v.winner}`;
+}
+
+/** This candidate's measured detail, plus the other side when both exist. */
+function evidenceLineDetail(rec: EvidenceRecord, other: EvidenceRecord | undefined, otherLabel: "A" | "B"): string {
+  if (rec.kind === "verify") return String(rec.result.command ?? "");
+  if (rec.kind === "dependencies") {
+    const n = addedLen(rec);
+    const m = addedLen(other);
+    if (n === null) return "";
+    return m === null ? `+${n}` : `+${n} · ${otherLabel} +${m}`;
+  }
+  if (rec.kind === "footprint") {
+    const files = rec.result.changedFiles ?? "?";
+    const lines = rec.result.changedLines ?? "?";
+    const mine = `${files} files · ${lines} lines`;
+    const oFiles = asFinite(other?.result.changedFiles);
+    const oLines = asFinite(other?.result.changedLines);
+    if (oFiles === null || oLines === null) return mine;
+    return `${mine} · ${otherLabel} ${oFiles}f/${oLines}l`;
+  }
+  if (rec.kind === "benchmark") {
+    const med = asFinite(rec.result.median);
+    const unit = chipUnit(rec.result.unit);
+    const mine = med === null ? String(rec.result.median ?? "?") : unit ? `${formatChipNum(med)} ${unit}` : formatChipNum(med);
+    const oMed = asFinite(other?.result.median);
+    if (oMed === null) return mine;
+    const oUnit = chipUnit(other?.result.unit) || unit;
+    return oUnit ? `${mine} · ${otherLabel} ${formatChipNum(oMed)}${oUnit}` : `${mine} · ${otherLabel} ${formatChipNum(oMed)}`;
+  }
+  if (rec.status === "fail") return (rec.result.changed as string[] | undefined)?.join(",") ?? "";
+  return "";
 }
 
 const STATE_LABELS: Record<string, string> = {
@@ -123,16 +240,17 @@ export class WorldlinesView {
     pair.verdictsEl.replaceChildren();
     const summary = pair.evidence;
     if (!summary) return;
+    if (summary.stale) {
+      const stale = document.createElement("span");
+      stale.className = "verdict verdict-stale";
+      stale.textContent = "stale";
+      stale.title = "a candidate ran again after this evidence";
+      pair.verdictsEl.appendChild(stale);
+    }
     for (const v of summary.profiles) {
       const chip = document.createElement("span");
       chip.className = `verdict verdict-${v.winner}`;
-      const label: Record<string, string> = {
-        "fewer-dependencies": "fewer deps",
-        "preserve-api": "api",
-        "simpler-implementation": "footprint",
-        "performance-first": "perf",
-      };
-      chip.textContent = `${label[v.profile]}: ${v.winner}`;
+      chip.textContent = chipText(v, summary);
       chip.title = v.reason;
       pair.verdictsEl.appendChild(chip);
     }
@@ -146,34 +264,18 @@ export class WorldlinesView {
     const summary = this.evidenceByCmp.get(card.summary.comparisonId);
     const records = summary?.byCandidate[card.summary.label];
     if (!records || records.length === 0) return;
+    const other = summary.byCandidate[card.summary.label === "A" ? "B" : "A"];
+    const otherLabel = card.summary.label === "A" ? "B" : "A";
     for (const rec of records) {
       const line = document.createElement("div");
       line.className = `evidence-line evidence-${rec.status}`;
-      const label: Record<string, string> = {
-        verify: "verify",
-        dependencies: "deps",
-        api: "api",
-        footprint: "footprint",
-        benchmark: "benchmark",
-      };
-      const detail =
-        rec.kind === "verify"
-          ? String(rec.result.command ?? "")
-          : rec.kind === "dependencies"
-            ? `+${(rec.result.added as string[] | undefined)?.length ?? 0}`
-            : rec.kind === "footprint"
-              ? `${rec.result.changedFiles ?? "?"} files · ${rec.result.changedLines ?? "?"} lines`
-              : rec.kind === "benchmark"
-                ? `${rec.result.median ?? "?"} ${rec.result.unit ?? ""}`
-                : rec.status === "fail"
-                  ? (rec.result.changed as string[] | undefined)?.join(",") ?? ""
-                  : "";
-      line.textContent = `${label[rec.kind]}: ${rec.status}${detail ? ` (${detail})` : ""}`;
+      const detail = evidenceLineDetail(rec, recordOf(other, rec.kind), otherLabel);
+      line.textContent = `${KIND_LABEL[rec.kind] ?? rec.kind}: ${rec.status}${detail ? ` (${detail})` : ""}`;
       line.title = rec.reason ?? "";
       evidenceEl.appendChild(line);
     }
     const verdicts = summary?.profiles;
-    if (verdicts) {
+    if (verdicts && !summary.stale) {
       for (const v of verdicts) {
         if (v.winner !== card.summary.label) continue;
         const win = document.createElement("span");
@@ -277,6 +379,11 @@ export class WorldlinesView {
     this.listEl.appendChild(block);
     this.pairs.set(comparisonId, pair);
     this.refreshCount();
+    const stored = this.evidenceByCmp.get(comparisonId);
+    if (stored) {
+      pair.evidence = stored;
+      this.renderVerdicts(pair);
+    }
     return pair;
   }
 
