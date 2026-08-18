@@ -496,8 +496,8 @@ body {
 #right-pane.minimized #review-container,
 #right-pane.minimized .editor-tab,
 #right-pane.minimized .project-editor .editor-container,
-#right-pane.minimized .project-editor .editor-empty {
-  display: none;
+#right-pane.minimized .editor-empty {
+  display: none !important;
 }
 
 #right-pane.minimized .project-editor {
@@ -927,9 +927,25 @@ body {
   color: #4ec9b0;
 }
 
+.plan-text {
+  min-width: 0;
+  flex: 1;
+}
+
 .plan-task.state-done .plan-text {
   text-decoration: line-through;
   opacity: 0.6;
+}
+
+.plan-meta {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-dim);
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .panel-header {
@@ -1660,6 +1676,10 @@ body {
   pointer-events: none;
 }
 
+.editor-empty[hidden] {
+  display: none !important;
+}
+
 #editor-empty .empty-logo, .editor-empty .empty-logo {
   font-size: 44px;
   font-weight: 700;
@@ -1802,6 +1822,20 @@ body {
   padding: 2px 6px;
   border-radius: 3px;
   cursor: pointer;
+}
+
+.statusbar-handoff {
+  background: transparent;
+  border: 1px solid rgba(13, 17, 23, 0.25);
+  color: #0d1117;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.statusbar-handoff:hover {
+  background: rgba(0, 0, 0, 0.12);
 }
 
 #verify-badge {

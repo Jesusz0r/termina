@@ -20,6 +20,7 @@ import type {
   WorldlineSummary,
   AppPreferences,
   ShortcutMap,
+  FolderOpenedPayload,
 } from "../shared/types.js";
 
 const bridge: PiBridge = {
@@ -64,7 +65,7 @@ const bridge: PiBridge = {
     ipcRenderer.on("timeline:recorder-state", (_e, p: { terminalId: string; state: RecorderState }) => cb(p));
   },
   onFolderOpened: (cb) => {
-    ipcRenderer.on("folder:opened", (_e, e: { cwd: string }) => cb(e));
+    ipcRenderer.on("folder:opened", (_e, e: FolderOpenedPayload) => cb(e));
   },
   onFlushRequest: (cb) => {
     ipcRenderer.on("editor:flush-request", (_e, p: { requestId: string; writerId: string }) => cb(p));

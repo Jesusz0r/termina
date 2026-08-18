@@ -258,13 +258,22 @@ export default async function run(log: (msg: string) => void) {
   check("core.autocrlf=true fails preflight", !pfBad.ok && pfBad.reasons.some((r) => r.includes("autocrlf")), pfBad.reasons.join("; "));
 
   const attr = makeRepo("attr");
-  writeFileSync(join(attr, ".gitattributes"), "*.bin filter=lfs\n");
+  writeFileSync(join(attr, ".gitattributes"), "* text=auto\n");
   git(["add", "-A"], attr);
   git(["commit", "-qm", "attrs"], attr);
   const attrStore = await SnapshotStore.create(join(work, "store-attr"), attr, join(attr, ".git"), "sha1");
   stores.push(attrStore);
   const pfAttr = await attrStore.preflightRepo();
   check("transform .gitattributes fails preflight", !pfAttr.ok && pfAttr.reasons.some((r) => r.includes("gitattributes")), pfAttr.reasons.join("; "));
+
+  const lfs = makeRepo("lfs");
+  writeFileSync(join(lfs, ".gitattributes"), "*.bin filter=lfs\n");
+  git(["add", "-A"], lfs);
+  git(["commit", "-qm", "lfs"], lfs);
+  const lfsStore = await SnapshotStore.create(join(work, "store-lfs"), lfs, join(lfs, ".git"), "sha1");
+  stores.push(lfsStore);
+  const pfLfs = await lfsStore.preflightRepo();
+  check("Git LFS attributes do not fail preflight", pfLfs.ok, pfLfs.reasons.join("; "));
 
   const sub = makeRepo("sub");
   const subCommit = git(["rev-parse", "HEAD"], sub);

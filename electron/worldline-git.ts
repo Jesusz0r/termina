@@ -259,6 +259,9 @@ export async function gitObjectFormat(root: string): Promise<"sha1" | "sha256"> 
   return res.format;
 }
 
+/** Pair-creation disk reserve for Worldline candidates. */
+export const MIN_WORLDS_FREE_BYTES = 512 * 1024 * 1024;
+
 /** Free disk bytes on the volume that holds `path`. Returns null on error. */
 export async function freeDiskBytes(path: string): Promise<number | null> {
   try {

@@ -9,7 +9,8 @@
  * Case fixtures (launcher-driven via PREFLIGHT_CASE):
  *   plain    — a clean repo: the fork must SUCCEED
  *   nogit    — a folder without a Git repository
- *   subdir   — a Git subdirectory (not the top level)
+ *   subdir   — a Git subdirectory: the fork must SUCCEED (capture is the opened folder)
+
  *   conflict — unresolved index entries (a merge conflict state)
  *   submodule— the repo contains a submodule
  *   autocrlf — core.autocrlf=true
@@ -119,7 +120,7 @@ if (CASE === "nogit") {
       check("clean repo forks", fork?.ok === true, JSON.stringify(fork));
       break;
     case "subdir":
-      check("Git subdirectory rejected", fork?.ok === false && String(fork?.error ?? "").includes("not the Git top-level directory"), JSON.stringify(fork));
+      check("Git subdirectory forks", fork?.ok === true, JSON.stringify(fork));
       break;
     case "conflict":
       check("unresolved index entries rejected", fork?.ok === false && String(fork?.error ?? "").includes("unresolved index"), JSON.stringify(fork));

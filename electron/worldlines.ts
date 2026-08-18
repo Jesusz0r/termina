@@ -14,8 +14,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { writeSandboxProfile, sandboxShellPreamble, type SandboxPaths } from "./sandbox.js";
 import { coreClient } from "./core-client.js";
-import { gitHead } from "./worldline-git.js";
-import type { SnapshotStore } from "./worldline-git.js";
+import { gitHead, platformHasCopyOnWrite, type SnapshotStore } from "./worldline-git.js";
 import { dependencyDiff } from "./evidence.js";
 import type { DependencyChange, WorldlineChangedFile, WorldlineDetails } from "../shared/types.js";
 
@@ -931,7 +930,7 @@ export class WorldlineManager {
     // The template repo has exactly one commit ("termina base"). Its SHA
     // is the shared comparison base for both candidates.
     cmp.baseCommit = await gitHead(cmp.templateDir);
-    // Copy the fixed runtime allowlist with copy-on-write clones.
+    // Copy the fixed runtime allowlist into the template.
     for (const name of RUNTIME_ALLOWLIST) {
       const src = join(this.deps.primaryRoot, name);
       if (!existsSync(src)) continue;
@@ -939,22 +938,31 @@ export class WorldlineManager {
     }
   }
 
-  /** Copy-on-write clone a directory tree. */
+  /** Clone a directory tree. Prefer copy-on-write (`cp -c`) when the volume supports it. */
   private async cloneTree(src: string, dst: string): Promise<void> {
-    const res = await new Promise<number>((resolvePromise) => {
-      const child = spawn("cp", ["-c", "-R", src, dst], { stdio: "ignore" });
-      child.on("error", () => resolvePromise(-1));
-      child.on("close", (code) => resolvePromise(code ?? -1));
-    });
-    if (res !== 0) {
-      // Remove the partial tree: the next fork must not start from a
-      // half-copied candidate directory.
+    const runCp = (args: string[]) =>
+      new Promise<number>((resolvePromise) => {
+        const child = spawn("cp", args, { stdio: "ignore" });
+        child.on("error", () => resolvePromise(-1));
+        child.on("close", (code) => resolvePromise(code ?? -1));
+      });
+    if (platformHasCopyOnWrite()) {
+      const coW = await runCp(["-c", "-R", src, dst]);
+      if (coW === 0) return;
       await rm(dst, { recursive: true, force: true }).catch(() => undefined);
-      throw new Error(`copy-on-write clone failed for ${src}`);
+    }
+    const copied = await runCp(["-R", src, dst]);
+    if (copied === 0) return;
+    await rm(dst, { recursive: true, force: true }).catch(() => undefined);
+    try {
+      await cp(src, dst, { recursive: true });
+    } catch {
+      await rm(dst, { recursive: true, force: true }).catch(() => undefined);
+      throw new Error(`directory clone failed for ${src}`);
     }
   }
 
-  /** CoW clone the template into A and B. */
+  /** CoW clone the template into A and B when the volume supports it. */
   private async cloneCandidates(cmp: ComparisonState): Promise<void> {
     for (const cand of cmp.candidates.values()) {
       await this.cloneTree(cmp.templateDir, cand.dir);

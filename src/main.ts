@@ -62,12 +62,15 @@ interface ProjectView {
 const projectViews = new Map<string, ProjectView>();
 let activeProjectId: string | null = null;
 const emptyTemplate = document.getElementById("editor-empty-template") as HTMLTemplateElement;
+const rightPaneEl2 = document.getElementById("right-pane")!;
 // The base editor fills the pane before any project tab exists (the
 // no-project boot). Project views take over once a folder opens.
+const baseEmptyEl = emptyTemplate.content.firstElementChild!.cloneNode(true) as HTMLElement;
+rightPaneEl2.appendChild(baseEmptyEl);
 const baseEditor = new EditorManager(
   document.getElementById("editor-container")!,
   document.getElementById("editor-tabs")!,
-  emptyTemplate.content.firstElementChild!.cloneNode(true) as HTMLElement,
+  baseEmptyEl,
 );
 baseEditor.onConflict = (path) => {
   toast(`${path.split("/").pop()} changed on disk — you have unsaved edits`, "warning");
@@ -77,9 +80,10 @@ applySharedEditorHooks(baseEditor);
 (window as unknown as Record<string, unknown>).__editorMgr = baseEditor;
 const projectTabsEl = document.getElementById("project-tabs")!;
 const btnNewProject = document.getElementById("btn-new-project") as HTMLButtonElement;
-const rightPaneEl2 = document.getElementById("right-pane")!;
 
-function createProjectView(project: { id: string; cwd: string }): ProjectView {
+function createProjectView(project: { id: string; cwd: string; needsLogin?: boolean }): ProjectView {
+  const existing = projectViews.get(project.id);
+  if (existing) return existing;
   // The editor wrapper: its own tab bar, container, and empty state.
   const editorEl = document.createElement("div");
   editorEl.className = "project-editor";
@@ -96,7 +100,7 @@ function createProjectView(project: { id: string; cwd: string }): ProjectView {
   editorEl.style.display = "none";
   rightPaneEl2.insertBefore(editorEl, rightPaneEl2.firstElementChild);
 
-  const editorMgr = new EditorManager(containerEl, tabsEl, emptyEl);
+  const editorMgr = new EditorManager(containerEl, tabsEl, emptyEl, true, project.needsLogin === true);
   // A disk write reached a model with unsaved edits: never replace silently.
   editorMgr.onConflict = (path) => {
     toast(`${path.split("/").pop()} changed on disk — you have unsaved edits`, "warning");
@@ -186,6 +190,8 @@ function setActiveProject(projectId: string | null): void {
   const noProject = projectId === null;
   baseChrome.style.display = noProject ? "" : "none";
   baseContainer.style.display = noProject ? "" : "none";
+  // The base overlay sits on #right-pane. Hide it while a project view is shown.
+  if (!noProject) baseEditor.setProjectOpen(true);
   for (const view of projectViews.values()) {
     const active = view.id === projectId;
     view.tabEl.classList.toggle("active", active);
@@ -212,6 +218,7 @@ reviewView.bind({
     pane.accepted.add(path);
     pane.reverted.delete(path);
     renderModified(pane);
+    renderHandoff(pane);
   },
   onReverted: (path) => {
     const pane = activeId ? panes.get(activeId) : undefined;
@@ -250,6 +257,8 @@ const modifiedPanel = document.getElementById("modified-panel")!;
 const modifiedCount = document.getElementById("modified-count")!;
 const btnClearModified = document.getElementById("btn-clear-modified") as HTMLButtonElement;
 const btnAcceptAll = document.getElementById("btn-accept-all") as HTMLButtonElement;
+const btnCopySubject = document.getElementById("btn-copy-subject") as HTMLButtonElement;
+const btnOpenShell = document.getElementById("btn-open-shell") as HTMLButtonElement;
 const planPanel = document.getElementById("plan-panel")!;
 const planList = document.getElementById("plan-list")!;
 const planCount = document.getElementById("plan-count")!;
@@ -528,7 +537,7 @@ function refreshCandidateTestCommand(pane: Pane): void {
     const p = panes.get(pane.instanceId);
     if (!p) return;
     p.testCommand = t?.label ?? null;
-    if (activeId === pane.instanceId) renderChrome();
+    if (activeId === pane.instanceId) renderStatus(p);
   });
 }
 
@@ -647,14 +656,22 @@ function renderChrome(): void {
     planList.replaceChildren();
     planPanel.classList.add("collapsed");
     modifiedList.replaceChildren();
+    btnCopySubject.hidden = true;
+    btnOpenShell.hidden = true;
     return;
   }
+  renderStatus(pane);
+  renderPlan(pane);
+  renderModified(pane);
+}
+
+/** Status bar and Verify only. Busy ticks must not rebuild the plan or modified lists. */
+function renderStatus(pane: Pane): void {
   statusState.textContent = pane.busy ? "● agent working" : "idle";
   statusState.classList.toggle("busy", pane.busy);
   statusCwd.textContent = pane.cwd ?? "";
   renderVerify(pane);
-  renderPlan(pane);
-  renderModified(pane);
+  renderHandoff(pane);
 }
 
 /** Plan Board: the current run's tasks with live progress. */
@@ -682,6 +699,14 @@ function renderPlan(pane: Pane): void {
     text.className = "plan-text";
     text.textContent = task.text;
     li.append(mark, text);
+    if (task.workerId || (task.claimed && task.claimed.length > 0)) {
+      const meta = document.createElement("span");
+      meta.className = "plan-meta";
+      const claim = (task.claimed ?? task.paths).join(", ");
+      const status = task.state === "done" ? "settled" : task.workerId ?? "dispatch";
+      meta.textContent = claim ? `${status} · ${claim}` : status;
+      li.appendChild(meta);
+    }
     if (task.paths.length > 0) {
       li.title = task.paths.join(", ");
       li.addEventListener("click", () => void openFileSmart(task.paths[0], true));
@@ -704,7 +729,8 @@ async function refreshTestCommand(): Promise<void> {
   } catch {
     testCommand = null;
   }
-  renderChrome();
+  const pane = activeId ? panes.get(activeId) : undefined;
+  if (pane) renderStatus(pane);
 }
 
 function renderVerify(pane: Pane): void {
@@ -774,6 +800,44 @@ function renderModified(pane: Pane): void {
     modifiedList.appendChild(li);
   }
   modifiedPanel.classList.toggle("collapsed", pane.modified.length === 0);
+}
+
+/** Show the Git handoff after a green Verify or an Accept. Termina never writes Git. */
+function renderHandoff(pane: Pane): void {
+  const accepted = pane.modified.some((f) => pane.accepted.has(f.path));
+  const show = pane.verify.state === "pass" || accepted;
+  btnCopySubject.hidden = !show;
+  btnOpenShell.hidden = !show;
+}
+
+function commitSubjectFromPrompt(text: string | null | undefined): string {
+  const line = (text ?? "").split(/\r?\n/).map((s) => s.trim()).find((s) => s.length > 0) ?? "";
+  const subject = line.replace(/\s+/g, " ").slice(0, 72);
+  return subject || "Apply review changes";
+}
+
+async function copyCommitSubject(): Promise<void> {
+  const pane = activeId ? panes.get(activeId) : undefined;
+  if (!pane) return;
+  if (!pane.runs) pane.runs = await window.pi.getRuns(pane.instanceId);
+  const subject = commitSubjectFromPrompt(lastCompletedRun(pane)?.promptText);
+  const res = await window.pi.writeClipboard(subject);
+  if (res.ok) toast("Copied commit subject — Termina does not write Git", "info");
+  else toast(res.error ?? "could not copy", "warning");
+}
+
+async function focusProjectShell(): Promise<void> {
+  const pane = activeId ? panes.get(activeId) : undefined;
+  const projectId = pane?.projectId ?? activeProjectId;
+  revealTerminal();
+  const existing = [...panes.values()].find((p) => p.projectId === projectId && p.type === "shell" && !p.error);
+  if (existing) {
+    activatePane(existing.instanceId);
+    return;
+  }
+  const res = await window.pi.createTerminal({ type: "shell" });
+  if (res.error) toast(res.error, "warning");
+  else if (res.id && panes.has(res.id)) activatePane(res.id);
 }
 
 // ---------------------------------------------------------------- commands --
@@ -870,6 +934,8 @@ projectTabsEl.addEventListener("dblclick", (e) => {
 
 window.addEventListener("click", () => closeTerminalMenu());
 window.addEventListener("blur", () => closeTerminalMenu());
+btnCopySubject.addEventListener("click", () => void copyCommitSubject());
+btnOpenShell.addEventListener("click", () => void focusProjectShell());
 btnVerify.addEventListener("click", () => {
   const id = activeId;
   if (!id) return;
@@ -906,7 +972,8 @@ btnAcceptAll.addEventListener("click", (e) => {
     pane.reverted.delete(f.path);
   }
   renderModified(pane);
-  toast(`${pane.modified.length} file(s) accepted`, "info");
+  renderHandoff(pane);
+  toast(`${pane.modified.length} file(s) accepted — Termina does not write Git`, "info");
 });
 modifiedPanel.querySelector(".panel-header")?.addEventListener("click", () => {
   modifiedPanel.classList.toggle("collapsed");
@@ -1056,6 +1123,11 @@ function requestMinimize(pane: WorkPane): void {
 function revealEditor(): void {
   exitFullscreen();
   if (minimizedWork === "editor") setMinimizedWork(null);
+}
+
+function revealTerminal(): void {
+  exitFullscreen();
+  if (minimizedWork === "terminal") setMinimizedWork(null);
 }
 
 function syncPaneToggle(button: HTMLButtonElement, minimized: boolean, label: string): void {
@@ -1268,14 +1340,14 @@ window.pi.onBusy(({ instanceId, busy }) => {
   pane.busy = busy;
   updatePaneTab(pane);
   updateEditorLock();
-  if (activeId === instanceId) renderChrome();
+  if (activeId === instanceId) renderStatus(pane);
 });
 
 window.pi.onVerifyState(({ terminalId, verify }) => {
   const pane = panes.get(terminalId);
   if (!pane) return;
   pane.verify = verify;
-  if (activeId === terminalId) renderChrome();
+  if (activeId === terminalId) renderStatus(pane);
 });
 
 window.pi.onTimelineEvent(({ terminalId, event }) => {
@@ -1356,12 +1428,14 @@ window.pi.onModifiedList((p) => {
 
 window.pi.onFolderOpened((e) => {
   projectCwd = e.cwd;
-  const projectId = (e as { projectId?: string }).projectId ?? null;
-  let view = projectId ? projectViews.get(projectId) : null;
+  const projectId = e.projectId;
+  let view = projectViews.get(projectId);
   if (!view) {
-    view = createProjectView({ id: projectId ?? `proj-${projectCwd}`, cwd: e.cwd });
+    view = createProjectView({ id: projectId, cwd: e.cwd, needsLogin: e.needsLogin });
+  } else {
+    view.editorMgr.setProjectOpen(true, e.needsLogin);
   }
-  view.editorMgr.setProjectOpen(true);
+  baseEditor.setProjectOpen(true);
   setActiveProject(view.id);
   explorer.setProject(e.cwd);
   reviewView.resetForProject();

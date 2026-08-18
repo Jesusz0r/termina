@@ -12,7 +12,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme } fro
 // Name the app for the macOS menu bar and user-data paths. Unpackaged runs default to "Electron".
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
-import { accessSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { openSync, closeSync, fsyncSync } from "node:fs";
 import { chmod, cp, copyFile, mkdir, mkdtemp, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
@@ -23,7 +23,7 @@ import { Worker } from "node:worker_threads";
 import { PtyTerminal } from "./pty-terminal.js";
 import { SidecarEvent, SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
-import { SnapshotStore, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, platformHasCopyOnWrite, platformHasRecursiveWatcher, platformHasSandboxExec, type SourceState } from "./worldline-git.js";
+import { SnapshotStore, MIN_WORLDS_FREE_BYTES, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, platformHasRecursiveWatcher, platformHasSandboxExec, type SourceState } from "./worldline-git.js";
 import { WorldlineManager, type ForkableRun } from "./worldlines.js";
 import { sandboxShellPreamble, writeEvidenceProfile } from "./sandbox.js";
 import { EvidenceEngine, mineChangeReason, rankProfiles, type EvidenceDeps, type EvidenceRecord, type EvidenceSummary as EngineSummary } from "./evidence.js";
@@ -36,6 +36,7 @@ import {
   type ExplorerEntry,
   type InstanceSummary,
   type ModifiedFile,
+  type PlanTask,
   type RecorderState,
   type RunSummary,
   type SessionHit,
@@ -51,6 +52,8 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MAX_OPEN_FILE_SIZE = 2 * 1024 * 1024;
 const MAX_PROMPT_BYTES = 20 * 1024 * 1024;
 const MAX_PI_RESOURCE_BYTES = 200 * 1024 * 1024;
+/** Bound for ~/.pi/agent/auth.json when checking whether a provider exists. */
+const MAX_AUTH_JSON_BYTES = 128 * 1024;
 const MAX_PTY_IPC_CHUNK = 64 * 1024;
 const MAX_CLIPBOARD_BYTES = 4 * 1024 * 1024;
 const MAX_VERIFY_OUTPUT = 200_000;
@@ -432,14 +435,6 @@ interface UserEdit {
   at: number;
 }
 
-/** One task on the Plan Board. */
-interface PlanTask {
-  text: string;
-  paths: string[];
-  state: "pending" | "active" | "done";
-}
-
-
 /** Quote one shell argument: the resolved base commands carry scripts that
  * must survive as one argument through the wrapper shell. */
 function quoteShellArg(a: string): string {
@@ -473,6 +468,8 @@ class PiTerminalInstance {
   cwd: string;
   /** The workspace this terminal works in (empty when no folder is open). */
   workspaceId: string;
+  /** The project that owns this terminal, or null. */
+  projectId: string | null = null;
   type: "agent" | "shell";
   shellName?: string;
   busy = false;
@@ -620,6 +617,63 @@ interface ProjectState {
   terminalIds: Set<string>;
 }
 
+/** Env vars pi treats as a provider credential (see pi providers.md). */
+const PI_PROVIDER_ENV = [
+  "ANTHROPIC_API_KEY",
+  "ANT_LING_API_KEY",
+  "AZURE_OPENAI_API_KEY",
+  "OPENAI_API_KEY",
+  "DEEPSEEK_API_KEY",
+  "NVIDIA_API_KEY",
+  "GEMINI_API_KEY",
+  "AWS_BEARER_TOKEN_BEDROCK",
+  "MISTRAL_API_KEY",
+  "GROQ_API_KEY",
+  "CEREBRAS_API_KEY",
+  "CLOUDFLARE_API_KEY",
+  "XAI_API_KEY",
+  "OPENROUTER_API_KEY",
+  "AI_GATEWAY_API_KEY",
+  "ZAI_API_KEY",
+  "ZAI_CODING_CN_API_KEY",
+  "OPENCODE_API_KEY",
+  "RADIUS_API_KEY",
+  "HF_TOKEN",
+  "FIREWORKS_API_KEY",
+  "TOGETHER_API_KEY",
+  "BASETEN_API_KEY",
+  "KIMI_API_KEY",
+  "MINIMAX_API_KEY",
+  "MINIMAX_CN_API_KEY",
+  "QWEN_TOKEN_PLAN_API_KEY",
+  "QWEN_TOKEN_PLAN_CN_API_KEY",
+  "XIAOMI_API_KEY",
+  "XIAOMI_TOKEN_PLAN_CN_API_KEY",
+  "XIAOMI_TOKEN_PLAN_AMS_API_KEY",
+  "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
+] as const;
+
+/** True when process env already supplies a pi provider key. */
+function envHasPiProvider(env: NodeJS.Dict<string | undefined>): boolean {
+  for (const key of PI_PROVIDER_ENV) {
+    if (env[key]) return true;
+  }
+  return false;
+}
+
+/** True when auth.json holds at least one provider credential. */
+function authJsonHasPiProvider(raw: unknown): boolean {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  for (const value of Object.values(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const entry = value as Record<string, unknown>;
+    const type = typeof entry.type === "string" ? entry.type : "";
+    if (type === "oauth") return true;
+    if (typeof entry.key === "string" && entry.key.length > 0) return true;
+  }
+  return false;
+}
+
 class PiEditorApp {
   private win: BrowserWindow | null = null;
   private terminals = new Map<string, PiTerminalInstance>();
@@ -632,19 +686,14 @@ class PiEditorApp {
   /** The project that owns a terminal, or null. */
   private projectOfTerminal(terminalId: string): ProjectState | null {
     const inst = this.terminals.get(terminalId);
-    if (!inst) return null;
-    for (const project of this.projects.values()) {
-      if (project.terminalIds.has(inst.id)) return project;
-    }
-    return null;
+    if (!inst?.projectId) return null;
+    return this.projects.get(inst.projectId) ?? null;
   }
 
   /** The project that owns a workspace, or null. */
   private projectOfWorkspace(workspaceId: string): ProjectState | null {
-    for (const project of this.projects.values()) {
-      if (project.workspaces.has(workspaceId)) return project;
-    }
-    return null;
+    const projectId = this.workspaceOwners.get(workspaceId);
+    return projectId ? this.projects.get(projectId) ?? null : null;
   }
 
   /** True while the given project id is opening or closing. */
@@ -660,6 +709,10 @@ class PiEditorApp {
   /** One open project: its workspaces, store, and worldline manager. */
   private projects = new Map<string, ProjectState>();
   private activeProjectId: string | null = null;
+  /** workspace id → project id. Watcher and IPC lookups stay O(1). */
+  private workspaceOwners = new Map<string, string>();
+  /** Last auth.json check. A matching mtime and size skip the parse. */
+  private loginHint: { mtimeMs: number; size: number; needsLogin: boolean } | null = null;
   private eventsDir = process.env.TERMINA_EVENTS_DIR ?? join(app.getPath("temp"), "termina-events");
   /** The app-private session branch workspace. */
   private sessionWorkspaceDir = join(this.eventsDir, "session-workspace");
@@ -968,6 +1021,7 @@ class PiEditorApp {
       recordError: null,
     };
     project.workspaces.set(ws.id, ws);
+    this.workspaceOwners.set(ws.id, project.id);
     if (primary) project.cwd = root;
     ws.watcher = this.startWatcher(ws);
     if (primary) this.initRecording(project, ws);
@@ -981,10 +1035,22 @@ class PiEditorApp {
   private initRecording(project: ProjectState, ws: WorkspaceState): void {
     if (project.storePromise) return;
     const storeRoot = this.canonicalPath(ws.root);
-    project.storeDir = join(this.userDataDir, "worldlines", createHash("sha256").update(storeRoot).digest("hex").slice(0, 16));
+    // v2 keys the store by the opened folder. Older stores captured the
+    // Git top-level for a subdirectory path and must not mix with this.
+    project.storeDir = join(
+      this.userDataDir,
+      "worldlines",
+      createHash("sha256").update(`v2:${storeRoot}`).digest("hex").slice(0, 16),
+    );
     const promise = (async (): Promise<SnapshotStore | null> => {
       const top = await gitTopLevel(ws.root);
       if (!top) {
+        ws.recordError = "the opened folder is not inside a Git repository";
+        this.pushRecorderForWorkspace(ws, "paused");
+        return null;
+      }
+      const topCanon = this.canonicalPath(top);
+      if (storeRoot !== topCanon && !storeRoot.startsWith(topCanon + sep)) {
         ws.recordError = "the opened folder is not inside a Git repository";
         this.pushRecorderForWorkspace(ws, "paused");
         return null;
@@ -996,8 +1062,9 @@ class PiEditorApp {
         this.pushRecorderForWorkspace(ws, "paused");
         return null;
       }
-      // The store pins the canonical root (gitTopLevel resolves symlinks).
-      const store = await SnapshotStore.create(project.storeDir!, top, gitDir, fmt);
+      // Capture the opened folder. A Git subdirectory is a valid project.
+      // v2: older stores captured the Git top-level for the same folder key.
+      const store = await SnapshotStore.create(project.storeDir!, storeRoot, gitDir, fmt);
       const state = await store.capture(await gitHead(ws.root), null);
       ws.lastStateCommit = state.commit;
       this.pushRecorderForWorkspace(ws, "ready");
@@ -1090,20 +1157,12 @@ class PiEditorApp {
         if (store) {
           const repo = await store.preflightRepo({ worldsRoot: this.worldsRoot });
           reasons.push(...repo.reasons);
-          // The opened folder must BE the top level (WORLDLINES §4: a Git
-          // subdirectory is not a recordable project).
-          const top = await gitTopLevel(primaryRoot).catch(() => null);
-          const canonicalRoot = realpathSync(primaryRoot);
-          if (top && resolve(top) !== resolve(canonicalRoot)) {
-            reasons.push("the opened folder is not the Git top-level directory");
-          }
         } else {
           // No store: the folder is not a recordable repository.
           const top = primaryRoot ? await gitTopLevel(primaryRoot).catch(() => null) : null;
           if (!top) reasons.push("the opened folder is not inside a Git repository");
         }
         if (!platformHasSandboxExec()) reasons.push("the platform has no sandbox-exec");
-        if (!platformHasCopyOnWrite()) reasons.push("the platform has no copy-on-write clone support");
         if (!platformHasRecursiveWatcher()) reasons.push("the platform has no reliable recursive watcher");
         // A custom TERMINA_PI_BIN must match the pinned pi version
         // (WORLDLINES §5): a mismatched session format disables Worldlines.
@@ -1118,8 +1177,8 @@ class PiEditorApp {
           }
         }
         const free = await freeDiskBytes(this.worldsRoot);
-        if (free !== null && free < 4 * 1024 * 1024 * 1024) {
-          reasons.push(`free disk space is below the 4 GB minimum (${(free / 1e9).toFixed(1)} GB)`);
+        if (free !== null && free < MIN_WORLDS_FREE_BYTES) {
+          reasons.push(`free disk space is below the 512 MB minimum (${Math.floor(free / (1024 * 1024))} MB)`);
         }
         return { ok: reasons.length === 0, reasons };
       },
@@ -1215,6 +1274,7 @@ class PiEditorApp {
       const stateId = ws.lastStateCommit;
       ws.watcher?.stop();
       project.workspaces.delete(id);
+      this.workspaceOwners.delete(id);
       project.terminalIds.forEach((tid) => {
         const inst = this.terminals.get(tid);
         if (inst && inst.workspaceId === id) project.terminalIds.delete(tid);
@@ -2274,6 +2334,7 @@ class PiEditorApp {
     }
     const owner = this.projectOfWorkspace(workspaceId) ?? this.project();
     const inst = new PiTerminalInstance(id, cwd ?? this.terminalCwd(), workspaceId, type, shellName, cmd, args, env, 80, 24);
+    inst.projectId = owner?.id ?? null;
     this.terminals.set(inst.id, inst);
     if (owner) {
       owner.workspaces.get(workspaceId)?.terminalIds.add(id);
@@ -2311,6 +2372,8 @@ class PiEditorApp {
         const task = ownerInst ? this.findDispatchedTask(ownerInst, dispatchExit.taskText) : undefined;
         if (ownerInst && task) {
           task.state = "pending";
+          task.workerId = undefined;
+          task.claimed = undefined;
           this.sendPlan(ownerInst);
         }
       }
@@ -2775,6 +2838,18 @@ class PiEditorApp {
     return owner.plan.find((t) => t.text === taskText);
   }
 
+  /** Keep Dispatch claims on the board when the agent posts a new plan. */
+  private reattachDispatchAssignments(owner: PiTerminalInstance): void {
+    for (const [workerId, entry] of this.dispatchRuns) {
+      if (entry.ownerId !== owner.id) continue;
+      const task = this.findDispatchedTask(owner, entry.taskText);
+      if (!task) continue;
+      task.workerId = workerId;
+      task.claimed = [...task.paths];
+      if (task.state === "pending") task.state = "active";
+    }
+  }
+
   /** True when an active verify or dispatch overlaps the given workspace. */
   private overlapInWorkspace(workspaceId: string): boolean {
     for (const id of this.verifyRuns) {
@@ -2842,6 +2917,9 @@ class PiEditorApp {
         const worker = await this.createTerminal(undefined, { type: "agent", workspaceId: owner.workspaceId, id: job.id });
         this.dispatchWorkers.set(worker.id, job.task.text);
         this.dispatchRuns.set(worker.id, { ownerId, taskText: job.task.text });
+        job.task.workerId = worker.id;
+        job.task.claimed = [...job.task.paths];
+        job.task.state = "active";
         dispatched++;
       } catch (err) {
         this.clearMailbox(job.id);
@@ -2856,6 +2934,7 @@ class PiEditorApp {
       }
       return { ok: false, error: "no dispatch worker started" };
     }
+    this.sendPlan(owner);
     return { ok: true, dispatched };
   }
 
@@ -3275,7 +3354,7 @@ class PiEditorApp {
       type: t.type,
       shellName: t.shellName,
       workspaceId: t.workspaceId,
-      projectId: this.projectOfTerminal(t.id)?.id,
+      projectId: t.projectId ?? undefined,
       dispatchWorker: this.dispatchWorkers.has(t.id),
       dispatchTask: this.dispatchWorkers.get(t.id),
       verify: t.type === "agent" ? t.verify : null,
@@ -3454,6 +3533,7 @@ class PiEditorApp {
       case "plan": {
         const text = String(event.text ?? "");
         inst.plan = this.parsePlanTasks(text, this.workspaceOfTerminal(inst)?.root ?? null);
+        this.reattachDispatchAssignments(inst);
         // touched was reset at agent_start. Do not reset it here: the plan
         // message can arrive after the first tool events, and their progress
         // must count.
@@ -4483,7 +4563,7 @@ class PiEditorApp {
       this.createWorkspace(project, cwd, true);
       this.loadMineFiles(project);
       this.initWorldlines(project);
-      this.send("folder:opened", { cwd, projectId: id });
+      this.sendFolderOpened(cwd, id);
       try {
         await this.createTerminal(cwd);
       } catch {
@@ -4500,7 +4580,41 @@ class PiEditorApp {
     if (!this.projects.has(projectId)) return;
     this.activeProjectId = projectId;
     const project = this.projects.get(projectId)!;
-    this.send("folder:opened", { cwd: project.cwd, projectId: project.id });
+    this.sendFolderOpened(project.cwd, project.id);
+  }
+
+  /** Push folder:opened with a login hint flag. The renderer never reads auth.json. */
+  private sendFolderOpened(cwd: string, projectId: string): void {
+    this.send("folder:opened", { cwd, projectId, needsLogin: this.piNeedsLogin() });
+  }
+
+  /**
+   * True when pi has no provider in auth.json or in the process environment.
+   * The check is boolean only. It never sends credentials to the renderer.
+   */
+  private piNeedsLogin(): boolean {
+    if (envHasPiProvider(process.env)) return false;
+    const authPath = join(homedir(), ".pi", "agent", "auth.json");
+    try {
+      const info = statSync(authPath);
+      if (!info.isFile() || info.size === 0) {
+        this.loginHint = null;
+        return true;
+      }
+      if (info.size > MAX_AUTH_JSON_BYTES) {
+        this.loginHint = { mtimeMs: info.mtimeMs, size: info.size, needsLogin: false };
+        return false;
+      }
+      if (this.loginHint && this.loginHint.mtimeMs === info.mtimeMs && this.loginHint.size === info.size) {
+        return this.loginHint.needsLogin;
+      }
+      const needsLogin = !authJsonHasPiProvider(JSON.parse(readFileSync(authPath, "utf8")));
+      this.loginHint = { mtimeMs: info.mtimeMs, size: info.size, needsLogin };
+      return needsLogin;
+    } catch {
+      this.loginHint = null;
+      return true;
+    }
   }
 
   /** Tear down one project: manager, terminals, watchers, and store. */
@@ -4533,6 +4647,7 @@ class PiEditorApp {
       await this.drainSidecarQueues();
       this.sidecarQueues.clear();
       for (const ws of project.workspaces.values()) ws.watcher?.stop();
+      for (const wsId of project.workspaces.keys()) this.workspaceOwners.delete(wsId);
       project.workspaces.clear();
       project.terminalIds.clear();
       // Scope every remaining cleanup to this project. Other open projects
@@ -4563,7 +4678,7 @@ class PiEditorApp {
       if (this.activeProjectId === projectId) {
         const next = this.projects.keys().next().value;
         this.activeProjectId = next ?? null;
-        if (next) this.send("folder:opened", { cwd: this.projects.get(next)!.cwd, projectId: next });
+        if (next) this.sendFolderOpened(this.projects.get(next)!.cwd, next);
       }
       return { ok: true };
     } finally {
@@ -4906,9 +5021,16 @@ class PiEditorApp {
 
   private registerIpc(): void {
     // ---- Project tabs ----
-    ipcMain.handle("project:list", () =>
-      [...this.projects.values()].map((p) => ({ id: p.id, cwd: p.cwd, active: p.id === this.activeProjectId, terminals: p.terminalIds.size })),
-    );
+    ipcMain.handle("project:list", () => {
+      const needsLogin = this.piNeedsLogin();
+      return [...this.projects.values()].map((p) => ({
+        id: p.id,
+        cwd: p.cwd,
+        active: p.id === this.activeProjectId,
+        terminals: p.terminalIds.size,
+        needsLogin,
+      }));
+    });
     ipcMain.handle("project:open", () => this.openFolder());
     ipcMain.handle("project:open-path", (_e, cwd: unknown) => {
       if (typeof cwd !== "string" || !existsSync(cwd)) return { cancelled: true };

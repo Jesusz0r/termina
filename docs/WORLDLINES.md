@@ -143,7 +143,8 @@ refs, or real home before step 9.
 ### Release 1 scope
 
 - Support normal Git working repositories with Git 2.38 or newer.
-- Require the opened folder to equal the Git top-level directory.
+- Require the opened folder to be inside a Git repository. A subdirectory of
+  the Git top-level is a valid project; capture is that folder.
 - Support an unborn repository by using an empty base tree.
 - Fork completed, persisted, replayable runs at run boundaries.
 - Create Candidate A and Candidate B as an all-or-nothing pair.
@@ -182,7 +183,7 @@ Disable Worldlines and show one precise reason when any required condition
 fails. Do not add a weaker fallback.
 
 - Git is older than the minimum version proven for `merge-tree`.
-- The opened folder is not the Git top-level directory or is inside the
+- The opened folder is not inside a Git repository, or is inside the
   app-owned worlds root.
 - The repository has unresolved index entries or an active merge, rebase,
   cherry-pick, or revert.
@@ -192,15 +193,15 @@ fails. Do not add a weaker fallback.
   active.
 - A captured path is a socket, device, first-in-first-out file, or another
   unsupported file type.
-- Git clean/smudge filters, Git Large File Storage filters,
-  `working-tree-encoding`, `eol` attributes, a non-false `core.autocrlf`, or
-  another content-transforming setting prevents byte-exact materialization.
+- Git clean/smudge filters other than Git LFS, `working-tree-encoding`, `eol`
+  attributes, a non-false `core.autocrlf`, or another content-transforming
+  setting prevents byte-exact materialization. Git LFS is allowed: capture
+  hashes working-tree bytes.
 - The platform cannot provide a reliable recursive source watcher and quiet
   window signal.
-- The platform cannot create copy-on-write directory clones.
 - The platform cannot enforce filesystem writes, process signaling, inherited
   descriptors, and child-process containment for the required sandbox.
-- Available disk space is below the pair-creation reserve.
+- Available disk space is below the 512 MB pair-creation reserve.
 - The running Pi binary does not exactly match Termina's pinned Pi package.
 
 Phase 0 can remove a restriction only after a byte-exact, isolation, cleanup,
@@ -1402,8 +1403,7 @@ Phase 0 must record real baselines. Initial targets:
   cancellation.
 - Bounded memory, CPU time, process count, file size, open files, captured
   output, and terminal scrollback per candidate.
-- Require at least 4 GB of free space before pair creation and keep a 1 GB
-  emergency reserve while candidates run.
+- Require at least 512 MB of free space before pair creation.
 - Checkpoint acknowledgement timeout of 5 seconds.
 - One concurrent comparison creation, promotion, or benchmark per project.
 - Fetch diff and evidence details only on demand.
@@ -1419,12 +1419,12 @@ a dedicated `TERMINA_WORLDS_DIR` on the fixture's filesystem for every suite.
 
 ### `scripts/worldline-preflight-test.mjs`
 
-- Reject a non-Git folder, Git subdirectory, app-owned candidate root, old Git,
-  sparse checkout,
+- Reject a non-Git folder, app-owned candidate root, sparse checkout,
   partial/promisor clone, source object alternate, unresolved index, submodule,
-  nested repository, unsupported file type, content filter, unreliable
-  recursive watcher, missing copy-on-write support, missing sandbox, low disk,
-  and mismatched Pi version.
+  nested repository, unsupported file type, content filter (not Git LFS),
+  unreliable recursive watcher, missing sandbox, low disk, and mismatched Pi
+  version. A Git subdirectory is a valid project. Copy-on-write clones are
+  preferred; a plain recursive copy is the fallback.
 - Support an unborn repository and the source repository's Git object format.
 - Keep exact ineligibility reasons stable.
 

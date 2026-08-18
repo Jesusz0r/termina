@@ -25,23 +25,28 @@ modified list and session timeline on the right](docs/screenshot.png)
 ![Worldlines — a forked run with candidates A and B, and the plan
 board showing the completed tasks](docs/screenshot-worldlines.png)
 
+Screenshots are from an earlier 0.1.x build. Settings now include Atom,
+terminal font, and word wrap; first launch is empty until you open a
+folder; the Plan Board shows Dispatch assignments.
+
 ## Features
 
 | Feature | What it does |
 |---|---|
+| Empty first launch | no folder until you pick one; after Open folder, the empty editor tells you to `/login` and `/models` in the terminal when pi has no provider |
 | Project tabs | multiple projects side by side: one tab per folder, each with its own explorer, editor, and terminals — agents keep running when you switch |
 | Live editor | the file watcher pushes every disk change into open Monaco models; files the agent touches auto-open mid-run |
-| Change Review | per-terminal modified-files panel with pre-run baselines: side-by-side diffs, Accept / Revert, Accept all |
+| Change Review | per-terminal modified-files panel with pre-run baselines: side-by-side diffs, Accept / Revert, Accept all. Termina never writes your Git repo; after a green Verify or Accept it offers a commit subject to copy and a shell in the project |
 | Verify & Iterate | `✓ Verify` runs the detected tests in a background process and feeds the result back to the agent on its next turn |
 | Session Timeline | a dot strip of every agent action with on-demand snapshots, replay, and a recorder state |
-| Plan Board | the agent's task list with live progress and one-click parallel Dispatch |
+| Plan Board | the agent's task list with live progress; Dispatch starts parallel workers and shows each assignment (claimed files, settled) on the board. Workers receive a mailbox briefing |
 | Session Search | full-text over past sessions with click-to-jump |
 | Fork Run | fork any completed run into isolated candidates (A = result, B = start + task) |
 | Fork Any Moment | Cmd/Ctrl+Click any timeline dot to fork a candidate at that exact source state |
 | Challenge Mode | replay the task against candidates and rank them with deterministic evidence |
 | Candidate sandbox | macOS `sandbox-exec` deny-list profiles; evidence and Verify processes run fully offline |
 | Promote | three-way merge candidates back with durable journaling and crash recovery |
-| Settings | themes, editor font and minimap options, and remappable keyboard shortcuts |
+| Settings | Dark / Light / High contrast / Atom themes; editor and terminal font size; font family; word wrap; minimap; remappable shortcuts including toggle-terminal |
 
 ## Install
 

@@ -66,7 +66,12 @@ export class EditorManager {
   private activeKey: string | null = null;
   private tabsEl: HTMLElement;
   private emptyEl: HTMLElement;
+  private emptyWelcome: HTMLElement | null;
+  private emptyLogin: HTMLElement | null;
+  private emptyOpenBtn: HTMLElement | null;
   private projectOpen = false;
+  /** True when the empty pane should tell the user to log in in the terminal. */
+  private needsLogin = false;
   /** The single replaceable preview tab (VS Code style). */
   private previewKey: string | null = null;
   /** Tab keys with unsaved user edits. */
@@ -78,9 +83,14 @@ export class EditorManager {
   /** The candidate label of a path ("A"/"B"), or null (worldline badge). */
   tabBadge: (path: string) => "A" | "B" | null = () => null;
 
-  constructor(container: HTMLElement, tabsEl: HTMLElement, emptyEl: HTMLElement) {
+  constructor(container: HTMLElement, tabsEl: HTMLElement, emptyEl: HTMLElement, projectOpen = false, needsLogin = false) {
     this.tabsEl = tabsEl;
     this.emptyEl = emptyEl;
+    this.emptyWelcome = emptyEl.querySelector<HTMLElement>(".empty-welcome");
+    this.emptyLogin = emptyEl.querySelector<HTMLElement>(".empty-login");
+    this.emptyOpenBtn = emptyEl.querySelector<HTMLElement>(".empty-open-folder");
+    this.projectOpen = projectOpen;
+    this.needsLogin = projectOpen && needsLogin;
 
     this.editor = monaco.editor.create(container, {
       theme: "vs-dark",
@@ -137,16 +147,21 @@ export class EditorManager {
     this.editor.updateOptions({ readOnly: this.locked || this.isTimelineActive() });
   }
 
-  /** Called when a project folder is opened/closed; hides the welcome hint. */
-  setProjectOpen(open: boolean): void {
+  /** Called when a project folder is opened or closed. */
+  setProjectOpen(open: boolean, needsLogin = false): void {
     this.projectOpen = open;
+    this.needsLogin = open && needsLogin;
     this.syncEmptyState();
   }
 
   private syncEmptyState(): void {
-    // The hint only makes sense before a folder is opened: once a project is
-    // open (even with no tabs yet) the pane stays clean.
-    this.emptyEl.style.display = !this.projectOpen && this.order.length === 0 ? "flex" : "none";
+    const noTabs = this.order.length === 0;
+    const showWelcome = !this.projectOpen && noTabs;
+    const showLogin = this.projectOpen && this.needsLogin && noTabs;
+    this.emptyEl.hidden = !(showWelcome || showLogin);
+    if (this.emptyWelcome) this.emptyWelcome.hidden = !showWelcome;
+    if (this.emptyLogin) this.emptyLogin.hidden = !showLogin;
+    if (this.emptyOpenBtn) this.emptyOpenBtn.hidden = !showWelcome;
   }
 
   /**
@@ -284,7 +299,7 @@ export class EditorManager {
     this.previewKey = null;
     this.lastTimelineKey = null;
     this.clearMine();
-    this.setProjectOpen(true);
+    this.setProjectOpen(true, this.needsLogin);
   }
 
   /** Forget every mine mark (folder switch resets ownership). */

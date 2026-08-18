@@ -107,7 +107,7 @@ export default async function run(log: (msg: string) => void) {
   // ------------------------------------------------------------------ disk
   const free = await freeDiskBytes(work);
   check("free disk space reports a number", typeof free === "number" && free !== null && free > 0, free === null ? "null" : `${Math.round(free / 1024 / 1024)} MB`);
-  check("free space meets the pair-creation reserve (4 GB)", free !== null && free >= 4 * 1024 * 1024 * 1024, free === null ? "null" : `${Math.round(free / 1024 / 1024 / 1024)} GB`);
+  check("free space meets the pair-creation reserve (512 MB)", free !== null && free >= 512 * 1024 * 1024, free === null ? "null" : `${Math.round(free / 1024 / 1024)} MB`);
 
   const failed = results.filter((r) => !r.ok).length;
   log(`\nplatform spike: ${results.length - failed}/${results.length} passed`);

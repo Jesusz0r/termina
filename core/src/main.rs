@@ -1232,6 +1232,8 @@ fn op_store_create(req: &Value) -> Result<Value, String> {
 // ------------------------------------------------------------ preflight ----
 
 /// True when the attributes text contains a content-transforming pattern.
+/// Git LFS `filter=lfs` is not a transform here: capture hashes working-tree
+/// bytes, so pointer files and smudged files both round-trip.
 fn has_transform_attr(text: &str) -> bool {
     const WORDS: [&str; 6] = [
         "filter",
@@ -1243,12 +1245,58 @@ fn has_transform_attr(text: &str) -> bool {
     ];
     for line in text.lines() {
         for token in line.split_whitespace() {
+            let lower = token.to_ascii_lowercase();
+            if lower == "filter=lfs" || lower.starts_with("filter=lfs,") || lower == "-filter=lfs" {
+                continue;
+            }
             if WORDS
                 .iter()
                 .any(|word| token == *word || token.starts_with(&format!("{word}=")))
             {
                 return true;
             }
+        }
+    }
+    false
+}
+
+/// True when `name` is a Git LFS config key (`filter.lfs.*`, `diff.lfs.*`).
+fn is_lfs_config_key(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains(".lfs.") || lower.ends_with(".lfs")
+}
+
+/// True when a non-LFS config key under `section` ends with `suffix`
+/// (for example `diff.tool.command` or `merge.ours.driver`).
+fn config_has_driver(config: &git2::Config, section: &str, suffix: &str) -> bool {
+    let glob = format!("{section}.*");
+    let Ok(mut entries) = config.entries(Some(&glob)) else {
+        return false;
+    };
+    let needle = format!(".{suffix}");
+    while let Some(entry) = entries.next() {
+        let Ok(entry) = entry else { continue };
+        let Ok(name) = entry.name() else { continue };
+        if is_lfs_config_key(name) {
+            continue;
+        }
+        if name.to_ascii_lowercase().ends_with(&needle) {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when any non-LFS `filter.*` key exists (a real clean/smudge filter).
+fn config_has_non_lfs_filter(config: &git2::Config) -> bool {
+    let Ok(mut entries) = config.entries(Some("filter.*")) else {
+        return false;
+    };
+    while let Some(entry) = entries.next() {
+        let Ok(entry) = entry else { continue };
+        let Ok(name) = entry.name() else { continue };
+        if !is_lfs_config_key(name) {
+            return true;
         }
     }
     false
@@ -1267,17 +1315,9 @@ fn op_preflight(req: &Value) -> Result<Value, String> {
             return Ok(json!({ "result": { "ok": false, "reasons": reasons } }));
         }
     };
-    // Git reports canonical paths; compare canonical forms.
     let cwd_canon = fs::canonicalize(&source_root).unwrap_or_else(|_| source_root.clone());
-    let top_level = repo
-        .workdir()
-        .map(|workdir| fs::canonicalize(workdir).unwrap_or_else(|_| workdir.to_path_buf()));
-    match top_level {
-        Some(top) if top != cwd_canon => {
-            reasons.push("the opened folder is not the Git top-level directory".to_string())
-        }
-        None => reasons.push("the opened folder is not inside a Git repository".to_string()),
-        _ => {}
+    if repo.workdir().is_none() {
+        reasons.push("the opened folder is not inside a Git repository".to_string());
     }
     if let Some(worlds) = &worlds_root {
         // Compare canonical forms: macOS reports /tmp and /private/tmp for
@@ -1343,19 +1383,14 @@ fn op_preflight(req: &Value) -> Result<Value, String> {
     {
         reasons.push("core.eol is configured".to_string());
     }
-    let has_key_prefix = |prefix: &str| -> bool {
-        config
-            .entries(Some(&format!("{prefix}.*")))
-            .map(|mut entries| entries.next().is_some())
-            .unwrap_or(false)
-    };
-    if has_key_prefix("filter") {
+    if config_has_non_lfs_filter(&config) {
         reasons.push("a Git clean/smudge filter is configured".to_string());
     }
-    if has_key_prefix("diff") {
-        reasons.push("a Git LFS or diff driver is configured".to_string());
+    if config_has_driver(&config, "diff", "command") || config_has_driver(&config, "diff", "textconv")
+    {
+        reasons.push("a custom diff driver is configured".to_string());
     }
-    if has_key_prefix("merge") {
+    if config_has_driver(&config, "merge", "driver") {
         reasons.push("a custom merge driver is configured".to_string());
     }
 
@@ -1372,7 +1407,8 @@ fn op_preflight(req: &Value) -> Result<Value, String> {
         })
         .collect();
     for attr in attr_files {
-        let content = match fs::read_to_string(source_root.join(&attr)) {
+        let attr_root = repo.workdir().unwrap_or(source_root.as_path());
+        let content = match fs::read_to_string(attr_root.join(&attr)) {
             Ok(content) => content,
             Err(_) => continue, // unreadable attributes file — leave as-is
         };

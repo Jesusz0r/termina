@@ -44,6 +44,10 @@ export interface PlanTask {
   /** File paths mentioned in the task (relative to the project). */
   paths: string[];
   state: "pending" | "active" | "done";
+  /** Dispatch worker terminal id when this task is assigned. */
+  workerId?: string;
+  /** Files this worker claimed. Empty when the task is not dispatched. */
+  claimed?: string[];
 }
 
 export interface PlanPayload {
@@ -410,6 +414,21 @@ export interface WorldlineDetails {
   primaryConflicts: string[];
 }
 
+export interface FolderOpenedPayload {
+  cwd: string;
+  projectId: string;
+  /** True when pi has no provider in auth.json or in the process environment. */
+  needsLogin: boolean;
+}
+
+export interface ProjectListItem {
+  id: string;
+  cwd: string;
+  active: boolean;
+  terminals: number;
+  needsLogin: boolean;
+}
+
 export interface PiBridge {
   // push events (main → renderer)
   onPtyData(cb: (e: { id: string; data: string }) => void): void;
@@ -427,7 +446,7 @@ export interface PiBridge {
   /** Push: the recorder state of a terminal's timeline. */
   onRecorderState(cb: (p: { terminalId: string; state: RecorderState }) => void): void;
   onVerifyState(cb: (p: { terminalId: string; verify: VerifyInfo }) => void): void;
-  onFolderOpened(cb: (e: { cwd: string }) => void): void;
+  onFolderOpened(cb: (e: FolderOpenedPayload) => void): void;
   onInstances(cb: (list: InstanceSummary[]) => void): void;
   /** Main asks the renderer to save every dirty model (run-start preflight). */
   onFlushRequest(cb: (p: { requestId: string; writerId: string }) => void): void;
@@ -531,7 +550,7 @@ export interface PiBridge {
 
   // project / files
   /** One open project tab. */
-  projectList(): Promise<Array<{ id: string; cwd: string; active: boolean; terminals: number }>>;
+  projectList(): Promise<ProjectListItem[]>;
   projectOpen(): Promise<{ cwd: string } | { cancelled: true }>;
   /** Open a project by path (the test suites cannot drive the dialog). */
   projectOpenPath(cwd: string): Promise<{ cwd: string } | { cancelled: true }>;
