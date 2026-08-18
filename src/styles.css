@@ -1353,6 +1353,10 @@ body {
   color: var(--red);
 }
 
+.evidence-line.evidence-unavailable {
+  color: var(--text-dim);
+}
+
 .evidence-winner {
   font-size: 10px;
   color: var(--purple);

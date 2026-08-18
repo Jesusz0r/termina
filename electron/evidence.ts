@@ -4,13 +4,15 @@
  * Computes deterministic, immutable evidence for one candidate against the
  * shared base: Verify (the base test command, in the candidate sandbox),
  * dependency declarations, the public API manifest, the source footprint,
- * and the benchmark harness. Ranking consumes only current evidence.
+ * and the benchmark harness. Trajectory reads the candidate sidecar.
+ * Ranking consumes only current evidence.
  */
-import { readFile, realpath as fsRealpath } from "node:fs/promises";
+import { readFile, realpath as fsRealpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { SnapshotStore } from "./worldline-git.js";
+import { MAX_SIDECAR_BYTES } from "./sidecar.js";
 
-export type EvidenceKind = "verify" | "dependencies" | "api" | "footprint" | "benchmark";
+export type EvidenceKind = "verify" | "dependencies" | "api" | "footprint" | "benchmark" | "trajectory";
 export type ProfileName = "fewer-dependencies" | "preserve-api" | "simpler-implementation" | "performance-first";
 
 /** One measured result for one candidate. */
@@ -54,6 +56,10 @@ interface CandidateFacts {
   homeDir: string;
   tmpDir: string;
   shell: string;
+  /** The candidate's own events directory, or empty when unknown. */
+  eventsDir: string;
+  /** The candidate terminal id that owns the sidecar file, or null. */
+  terminalId: string | null;
 }
 
 export interface EvidenceDeps {
@@ -307,6 +313,8 @@ export class EvidenceEngine {
     if (api) out.push(api);
     const footprint = await this.footprintEvidence(cand, stateId, dependencies?.result as Record<string, unknown> | undefined);
     if (footprint) out.push(footprint);
+    const trajectory = await this.trajectoryEvidence(cand, stateId);
+    if (trajectory) out.push(trajectory);
     return out;
   }
 
@@ -528,6 +536,80 @@ export class EvidenceEngine {
     };
   }
 
+  /**
+   * File-tool outcomes and sidecar signals from this candidate's event
+   * log. A truncated or missing log is unavailable. A missing test
+   * command in the sidecar is not a fail.
+   */
+  private async trajectoryEvidence(cand: CandidateFacts, stateId: string): Promise<EvidenceRecord | null> {
+    const id = cand.terminalId?.trim() ?? "";
+    if (!cand.eventsDir || !id || id.includes("/") || id.includes("\\") || id.includes("..")) {
+      return {
+        kind: "trajectory",
+        stateId,
+        baseStateId: this.deps.baseStateId,
+        status: "unavailable",
+        result: {},
+        reason: "the candidate has no event log",
+      };
+    }
+    const file = join(cand.eventsDir, `${id}.jsonl`);
+    const rel = relative(resolve(cand.eventsDir), resolve(file));
+    if (!rel || rel.startsWith("..") || isAbsolute(rel)) {
+      return {
+        kind: "trajectory",
+        stateId,
+        baseStateId: this.deps.baseStateId,
+        status: "unavailable",
+        result: {},
+        reason: "the candidate event log path is invalid",
+      };
+    }
+    try {
+      const info = await stat(file);
+      if (!info.isFile()) {
+        return {
+          kind: "trajectory",
+          stateId,
+          baseStateId: this.deps.baseStateId,
+          status: "unavailable",
+          result: {},
+          reason: "the candidate has no event log",
+        };
+      }
+      if (info.size >= MAX_SIDECAR_BYTES) {
+        return {
+          kind: "trajectory",
+          stateId,
+          baseStateId: this.deps.baseStateId,
+          status: "unavailable",
+          result: {},
+          reason: "the candidate event log was truncated",
+        };
+      }
+      const text = await readFile(file, "utf8");
+      const label = this.deps.baseTestCommand()?.label ?? null;
+      const parsed = parseTrajectoryLog(text, label);
+      return {
+        kind: "trajectory",
+        stateId,
+        baseStateId: this.deps.baseStateId,
+        status: "pass",
+        result: { ...parsed },
+        reason: trajectoryReason(parsed),
+      };
+    } catch {
+      return {
+        kind: "trajectory",
+        stateId,
+        baseStateId: this.deps.baseStateId,
+        status: "unavailable",
+        result: {},
+        reason: "the candidate has no event log",
+      };
+    }
+  }
+
   private benchmarkUnavailable(stateId: string, reason: string): EvidenceRecord {
     return { kind: "benchmark", stateId, baseStateId: this.deps.baseStateId, status: "unavailable", result: {}, reason };
   }
@@ -588,6 +670,86 @@ export class EvidenceEngine {
       reason: null,
     };
   }
+}
+
+/** Counts from one candidate sidecar. Last file-tool outcome matches Plan Board. */
+export interface TrajectorySignals {
+  fileToolStarts: number;
+  fileToolErrors: number;
+  lastErrorCount: number;
+  openFileTools: number;
+  timedOut: number;
+  cancelled: number;
+  testLabelSeen: boolean;
+}
+
+/**
+ * Parse one sidecar text. Counts the last agent_start run. Shell
+ * commands are not logged; a missing test label is not a fail.
+ */
+export function parseTrajectoryLog(text: string, testLabel: string | null): TrajectorySignals {
+  const lines = text.split("\n");
+  const events: Array<Record<string, unknown>> = [];
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line) as Record<string, unknown>;
+      if (event && typeof event === "object") events.push(event);
+    } catch {
+      /* Skip a malformed line. */
+    }
+  }
+  let start = 0;
+  for (let i = 0; i < events.length; i++) {
+    if (events[i]?.t === "agent_start") start = i;
+  }
+  const pending = new Map<string, string>();
+  const lastOutcome = new Map<string, "ok" | "error">();
+  let fileToolStarts = 0;
+  let fileToolErrors = 0;
+  let timedOut = 0;
+  let cancelled = 0;
+  let testLabelSeen = false;
+  const needle = testLabel && testLabel.trim() ? testLabel.trim() : "";
+  for (let i = start; i < events.length; i++) {
+    const event = events[i]!;
+    if (event.timedOut === true) timedOut++;
+    if (event.cancelled === true) cancelled++;
+    if (needle && typeof event.command === "string" && event.command.includes(needle)) testLabelSeen = true;
+    if (event.t === "tool") {
+      const path = typeof event.path === "string" ? event.path : "";
+      const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId.trim() : "";
+      if (!path || !toolCallId) continue;
+      fileToolStarts++;
+      pending.set(toolCallId, path);
+      continue;
+    }
+    if (event.t === "tool_end") {
+      const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId.trim() : "";
+      if (!toolCallId) continue;
+      const path = pending.get(toolCallId);
+      pending.delete(toolCallId);
+      if (path === undefined) continue;
+      const err = event.isError === true;
+      if (err) fileToolErrors++;
+      lastOutcome.set(path, err ? "error" : "ok");
+    }
+  }
+  let lastErrorCount = 0;
+  for (const outcome of lastOutcome.values()) {
+    if (outcome === "error") lastErrorCount++;
+  }
+  return { fileToolStarts, fileToolErrors, lastErrorCount, openFileTools: pending.size, timedOut, cancelled, testLabelSeen };
+}
+
+function trajectoryReason(parsed: TrajectorySignals): string {
+  const parts = [`${parsed.fileToolErrors} file-tool errors`];
+  if (parsed.lastErrorCount > 0) parts.push(`${parsed.lastErrorCount} paths ended in error`);
+  if (parsed.openFileTools > 0) parts.push(`${parsed.openFileTools} file tools without an end`);
+  if (parsed.timedOut > 0) parts.push(`${parsed.timedOut} timeouts`);
+  if (parsed.cancelled > 0) parts.push(`${parsed.cancelled} cancelled`);
+  if (!parsed.testLabelSeen) parts.push("test command not visible in the sidecar");
+  return parts.join("; ");
 }
 
 /** Parse one "name value unit" line from a benchmark run. */

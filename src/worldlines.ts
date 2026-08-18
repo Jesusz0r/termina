@@ -35,6 +35,7 @@ const KIND_LABEL: Record<EvidenceRecord["kind"], string> = {
   api: "api",
   footprint: "footprint",
   benchmark: "benchmark",
+  trajectory: "trajectory",
 };
 
 function recordOf(records: EvidenceRecord[] | undefined, kind: EvidenceRecord["kind"]): EvidenceRecord | undefined {
@@ -158,6 +159,12 @@ function evidenceLineDetail(rec: EvidenceRecord, other: EvidenceRecord | undefin
     if (oMed === null) return mine;
     const oUnit = chipUnit(other?.result.unit) || unit;
     return oUnit ? `${mine} · ${otherLabel} ${formatChipNum(oMed)}${oUnit}` : `${mine} · ${otherLabel} ${formatChipNum(oMed)}`;
+  }
+  if (rec.kind === "trajectory") {
+    const errors = asFinite(rec.result.fileToolErrors);
+    if (errors === null) return "";
+    const lastErr = asFinite(rec.result.lastErrorCount);
+    return lastErr !== null && lastErr > 0 ? `${formatChipNum(errors)} file-tool errors · ${formatChipNum(lastErr)} last-path errors` : `${formatChipNum(errors)} file-tool errors`;
   }
   if (rec.status === "fail") return (rec.result.changed as string[] | undefined)?.join(",") ?? "";
   return "";

@@ -49,7 +49,7 @@ export interface SidecarEvent {
   opId?: string;
 }
 
-const MAX_SIDECAR_BYTES = 8 * 1024 * 1024;
+export const MAX_SIDECAR_BYTES = 8 * 1024 * 1024;
 
 interface StreamState {
   bridgeId: string;

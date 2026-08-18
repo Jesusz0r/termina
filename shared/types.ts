@@ -354,7 +354,7 @@ export interface DependencyChange {
 
 /** One measured evidence record for one candidate (WORLDLINES §6.8). */
 export interface EvidenceRecord {
-  kind: "verify" | "dependencies" | "api" | "footprint" | "benchmark";
+  kind: "verify" | "dependencies" | "api" | "footprint" | "benchmark" | "trajectory";
   stateId: string;
   baseStateId: string;
   status: "pass" | "fail" | "unavailable";

@@ -262,6 +262,7 @@ export class WorldlineManager {
       headStateId: cand.headStateId,
       sourceRunId: cmp.sourceRunId,
       terminalId: cand.terminalId,
+      eventsDir: cand.eventsDir,
       version: cand.version,
       state: cand.state,
       error: cand.error,
@@ -753,6 +754,7 @@ export class WorldlineManager {
     tmpDir: string;
     state: WorldlineState;
     terminalId: string | null;
+    eventsDir: string;
     version: number;
     headStateId: string | null;
   } | null {
