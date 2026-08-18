@@ -68,7 +68,7 @@
     <div id="app">
       <header id="project-bar">
         <div id="project-tabs"></div>
-        <button id="btn-new-project" title="Open a project in a new tab" aria-label="New project">＋</button>
+        <button type="button" id="btn-new-project" title="Open a project in a new tab" aria-label="New project">＋</button>
       </header>
       <main id="main">
         <div id="explorer">
@@ -84,19 +84,19 @@
           <section id="left-pane">
             <div id="terminal-tabs">
               <div id="terminal-tabs-list"></div>
-              <button id="btn-new-terminal" title="New terminal (Cmd+Shift+T)">＋</button>
+              <button type="button" id="btn-new-terminal" title="New terminal (Cmd+Shift+T)">＋</button>
               <button type="button" id="btn-min-terminal" class="pane-toggle" title="Minimize terminal" aria-label="Minimize terminal">–</button>
             </div>
             <div id="terminal-container"></div>
             <div id="timeline-strip">
               <div class="timeline-header">
-                <span class="timeline-label">⏱ Timeline</span>
+                <span class="timeline-label">Timeline</span>
                 <span id="timeline-count" class="muted"></span>
                 <span id="timeline-prefix" class="muted" hidden></span>
                 <span id="timeline-recorder" class="timeline-recorder" hidden></span>
                 <div class="spacer"></div>
-                <button id="btn-fork-run" title="Fork the last completed run into two isolated candidates" hidden>⇉ Fork Run</button>
-                <button id="btn-timeline-play" title="Replay this run" hidden>▶</button>
+                <button type="button" id="btn-fork-run" title="Fork the last completed run into two isolated candidates" hidden>⇉ Fork Run</button>
+                <button type="button" id="btn-timeline-play" title="Replay this run" hidden>▶</button>
               </div>
               <div id="timeline-dots"></div>
             </div>
@@ -105,7 +105,7 @@
                 <span>Plan</span>
                 <span id="plan-count" class="muted"></span>
                 <div class="spacer"></div>
-                <button id="btn-dispatch" title="Dispatch the plan tasks to parallel agents" hidden>⇉</button>
+                <button type="button" id="btn-dispatch" title="Dispatch the plan tasks to parallel agents" hidden>⇉</button>
               </div>
               <ul id="plan-list"></ul>
             </section>
@@ -122,8 +122,8 @@
                 <span>Modified files</span>
                 <span id="modified-count" class="muted"></span>
                 <div class="spacer"></div>
-                <button id="btn-accept-all" title="Mark every modified file as accepted">Accept all</button>
-                <button id="btn-clear-modified" title="Clear the list">Clear</button>
+                <button type="button" id="btn-accept-all" title="Mark every modified file as accepted">Accept all</button>
+                <button type="button" id="btn-clear-modified" title="Clear the list">Clear</button>
               </div>
               <ul id="modified-list"></ul>
             </div>
@@ -139,13 +139,13 @@
             <div id="editor-container"></div>
             <div id="review-container" style="display:none">
               <div class="review-header">
-                <button id="review-back" class="review-btn" title="Back to the editor">←</button>
+                <button type="button" id="review-back" class="review-btn" title="Back to the editor">←</button>
                 <span id="review-filename" class="review-filename"></span>
                 <span id="review-hint" class="muted"></span>
                 <div class="spacer"></div>
-                <button id="review-open" class="review-btn" title="Open the current file as a tab">Open file</button>
-                <button id="review-accept" class="review-btn primary" title="Mark this change as accepted">Accept</button>
-                <button id="review-revert" class="review-btn danger" title="Restore the pre-run version">Revert</button>
+                <button type="button" id="review-open" class="review-btn" title="Open the current file as a tab">Open file</button>
+                <button type="button" id="review-accept" class="review-btn primary" title="Mark this change as accepted">Accept</button>
+                <button type="button" id="review-revert" class="review-btn danger" title="Restore the pre-run version">Revert</button>
               </div>
               <div id="review-diff"></div>
             </div>
@@ -154,9 +154,9 @@
                 <div class="empty-logo">Tr</div>
                 <div class="empty-title">Termina</div>
                 <div class="empty-sub empty-welcome">
-                  Open a project folder to start.
+                  Open a folder to start.
                   <br />
-                  Files the agent writes or edits appear here live.
+                  Files the agent writes appear here live.
                 </div>
                 <div class="empty-sub empty-login" hidden>
                   In the terminal, run /login then pick a model with /models.
@@ -170,7 +170,7 @@
 
       <footer id="statusbar">
         <span id="status-cwd" class="muted"></span>
-        <button id="btn-verify" class="statusbar-verify" disabled title="Run the detected tests and feed the result to the agent">✓ Verify</button>
+        <button type="button" id="btn-verify" class="statusbar-verify" disabled title="Run the detected tests and feed the result to the agent">Verify</button>
         <span id="verify-badge" class="muted" hidden></span>
         <button type="button" id="btn-copy-subject" class="statusbar-handoff" hidden title="Copy a commit subject from the last run. Termina does not write Git.">Copy commit subject</button>
         <button type="button" id="btn-open-shell" class="statusbar-handoff" hidden title="Focus a shell in this project">Open shell</button>

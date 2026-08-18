@@ -13,7 +13,7 @@ const TERMINAL_THEMES: Record<ThemeId, Record<string, string>> = {
     black: "#1e1e1e", red: "#f14c4c", green: "#4ec9b0", yellow: "#dcdcaa", blue: "#4fc1ff", magenta: "#c586c0", cyan: "#4ec9b0", white: "#d4d4d4",
   },
   light: {
-    background: "#f7f8fa", foreground: "#1f2328", cursor: "#0969da", selectionBackground: "#b6d7ff",
+    background: "#eef1f4", foreground: "#1f2328", cursor: "#0969da", selectionBackground: "#b6d7ff",
     black: "#24292f", red: "#cf222e", green: "#1a7f37", yellow: "#9a6700", blue: "#0969da", magenta: "#8250df", cyan: "#0a7b83", white: "#f6f8fa",
   },
   "high-contrast": {

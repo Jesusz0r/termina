@@ -77,6 +77,7 @@ function makeModal(title: string, message: string, buttons: ModalButton[], bodyE
   footer.className = "modal-footer";
   for (const b of buttons) {
     const btn = document.createElement("button");
+    btn.type = "button";
     btn.className = `modal-btn${b.primary ? " primary" : ""}`;
     btn.textContent = b.label;
     btn.addEventListener("click", () => {
@@ -103,14 +104,6 @@ export function toast(message: string, type: "info" | "warning" | "error" = "inf
   const el = document.createElement("div");
   el.className = `toast toast-${type}`;
   el.textContent = message;
-  el.style.cssText = `
-    position: fixed; bottom: 64px; right: 16px; z-index: 200;
-    background: #252526; border: 1px solid #3c3c3c; border-left: 3px solid #4fc1ff;
-    color: #d4d4d4; padding: 10px 14px; border-radius: 6px; max-width: 420px;
-    font-size: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.4); animation: fadein .15s ease;
-  `;
-  if (type === "error") el.style.borderLeftColor = "#f14c4c";
-  if (type === "warning") el.style.borderLeftColor = "#dcdcaa";
   document.body.appendChild(el);
   setTimeout(() => el.remove(), 5000);
 }

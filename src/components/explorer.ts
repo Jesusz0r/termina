@@ -202,16 +202,17 @@ export class Explorer {
     const actions = document.createElement("span");
     actions.className = "explorer-actions";
     if (entry.type === "dir") {
-      actions.appendChild(this.actionBtn("＋f", "New file", () => void this.createAt(entry.relPath, "file")));
-      actions.appendChild(this.actionBtn("＋d", "New folder", () => void this.createAt(entry.relPath, "dir")));
+      actions.appendChild(this.actionBtn("+", "New file", () => void this.createAt(entry.relPath, "file")));
+      actions.appendChild(this.actionBtn("+/", "New folder", () => void this.createAt(entry.relPath, "dir")));
     }
-    actions.appendChild(this.actionBtn("✎", "Rename", () => void this.renameAt(entry)));
-    actions.appendChild(this.actionBtn("🗑", "Delete", () => void this.deleteAt(entry)));
+    actions.appendChild(this.actionBtn("Aa", "Rename", () => void this.renameAt(entry)));
+    actions.appendChild(this.actionBtn("×", "Delete", () => void this.deleteAt(entry)));
     return actions;
   }
 
   private actionBtn(label: string, title: string, onClick: () => void): HTMLElement {
     const b = document.createElement("button");
+    b.type = "button";
     b.className = "explorer-action";
     b.textContent = label;
     b.title = title;

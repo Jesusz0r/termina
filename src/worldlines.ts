@@ -392,12 +392,12 @@ export class WorldlinesView {
     spacer.className = "spacer";
     const challengeBtn = document.createElement("button");
     challengeBtn.className = "cmp-challenge";
-    challengeBtn.textContent = "⚔ Challenge";
+    challengeBtn.textContent = "Challenge";
     challengeBtn.title = "Launch the challenger: B replays the original task automatically";
     challengeBtn.addEventListener("click", () => void this.challenge(comparisonId));
     const evidenceBtn = document.createElement("button");
     evidenceBtn.className = "cmp-evidence";
-    evidenceBtn.textContent = "⚖ Evidence";
+    evidenceBtn.textContent = "Evidence";
     evidenceBtn.title = "Run the evidence contract for both candidates and rank the profiles";
     evidenceBtn.addEventListener("click", () => void this.evidence(comparisonId));
     const abBtn = document.createElement("button");
@@ -487,12 +487,12 @@ export class WorldlinesView {
     actions.className = "cand-actions";
     const promoteBtn = document.createElement("button");
     promoteBtn.className = "cand-promote";
-    promoteBtn.textContent = "⇧ Promote";
+    promoteBtn.textContent = "Promote";
     promoteBtn.title = "Merge this candidate into the primary project";
     promoteBtn.addEventListener("click", () => void this.promote(comparisonId, label));
     const verifyBtn = document.createElement("button");
     verifyBtn.className = "cand-verify";
-    verifyBtn.textContent = "✓ Verify";
+    verifyBtn.textContent = "Verify";
     verifyBtn.title = "Run the detected tests inside the candidate sandbox";
     verifyBtn.addEventListener("click", () => void this.verify(comparisonId, label));
     const compareBtn = document.createElement("button");
@@ -540,7 +540,7 @@ export class WorldlinesView {
     verifyBtn.disabled = !usable;
     openBtn.disabled = !s.sessionFile;
     promoteBtn.disabled = !usable || !s.sessionFile;
-    promoteBtn.textContent = s.state === "promoting" ? "⇧ promoting…" : "⇧ Promote";
+    promoteBtn.textContent = s.state === "promoting" ? "promoting…" : "Promote";
     // The details stay valid while the card lives; refresh them on state
     // changes only when the user already opened them.
     if (!card.detailsBody.hidden && card.details) this.fillDetails(card, card.details);

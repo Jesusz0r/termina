@@ -183,7 +183,13 @@ export class EditorManager {
     if (preview && this.previewKey && this.tabs.has(this.previewKey)) {
       this.closeTab(this.previewKey);
     }
-    const model = monaco.editor.createModel("", languageForPath(path), monaco.Uri.file(path));
+    // Monaco forbids two models with the same URI. Reuse an existing model
+    // (another editor instance or a leftover URI) instead of throwing.
+    const uri = monaco.Uri.file(path);
+    let model = monaco.editor.getModel(uri);
+    if (!model || model.isDisposed()) {
+      model = monaco.editor.createModel("", languageForPath(path), uri);
+    }
     const tab = this.makeTab(key, model);
     if (preview) {
       this.previewKey = key;
@@ -357,7 +363,13 @@ export class EditorManager {
     this.editor.setModel(tab.model);
     for (const t of this.tabs.values()) t.dom.classList.toggle("active", t.key === key);
     this.syncEmptyState();
+    this.layout();
     this.editor.focus();
+  }
+
+  /** Recalculate Monaco size. Call this after a hidden container becomes visible. */
+  layout(): void {
+    this.editor.layout();
   }
 
   closeTab(key: string): void {

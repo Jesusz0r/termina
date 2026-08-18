@@ -167,8 +167,9 @@ function removeProjectView(projectId: string): void {
 /** The active project's editor manager (the tab in front). */
 function activeEditor(): InstanceType<typeof EditorManager> {
   const view = activeProjectId ? projectViews.get(activeProjectId) : null;
-  const fallback = projectViews.values().next().value;
-  const editor = (view ?? fallback)?.editorMgr ?? baseEditor;
+  // Never open files in a hidden project editor. The first map entry can
+  // be display:none while the base pane is what the user sees.
+  const editor = view?.editorMgr ?? baseEditor;
   (window as unknown as Record<string, unknown>).__editorMgr = editor;
   return editor;
 }
@@ -184,24 +185,31 @@ function placeEditorToggle(projectId: string | null): void {
 }
 
 function setActiveProject(projectId: string | null): void {
-  activeProjectId = projectId;
+  const view = projectId ? projectViews.get(projectId) : undefined;
+  activeProjectId = view ? projectId : null;
   const baseChrome = document.getElementById("editor-chrome")!;
   const baseContainer = document.getElementById("editor-container")!;
-  const noProject = projectId === null;
+  const noProject = !view;
   baseChrome.style.display = noProject ? "" : "none";
   baseContainer.style.display = noProject ? "" : "none";
   // The base overlay sits on #right-pane. Hide it while a project view is shown.
-  if (!noProject) baseEditor.setProjectOpen(true);
-  for (const view of projectViews.values()) {
-    const active = view.id === projectId;
-    view.tabEl.classList.toggle("active", active);
-    view.editorEl.style.display = active ? "" : "none";
+  if (!noProject) {
+    baseEditor.setProjectOpen(true);
+    baseEmptyEl.hidden = true;
+  } else {
+    baseEditor.setProjectOpen(false);
   }
-  placeEditorToggle(projectId);
+  for (const item of projectViews.values()) {
+    const active = item.id === activeProjectId;
+    item.tabEl.classList.toggle("active", active);
+    item.editorEl.style.display = active ? "" : "none";
+  }
+  placeEditorToggle(activeProjectId);
   // Terminal panes of the active project are visible; the rest stay alive.
   for (const pane of panes.values()) {
-    pane.container.style.display = pane.projectId === projectId ? "" : "none";
+    pane.container.style.display = pane.projectId === activeProjectId ? "" : "none";
   }
+  requestAnimationFrame(() => activeEditor().layout());
 }
 
 const reviewView = new ReviewView();
@@ -860,8 +868,17 @@ async function focusProjectShell(): Promise<void> {
 async function openFileSmart(path: string, preview = true): Promise<void> {
   // Opening a file from the explorer/modified list reveals the editor.
   revealEditor();
+  if (reviewView.isVisible) reviewView.hide();
+  if (!activeProjectId && projectCwd) {
+    const match = [...projectViews.values()].find((view) => view.cwd === projectCwd);
+    if (match) setActiveProject(match.id);
+  }
   const abs = path.startsWith("/") ? path : projectCwd ? `${projectCwd}/${path}` : path;
-  await activeEditor().openFile(abs, { preview });
+  try {
+    await activeEditor().openFile(abs, { preview });
+  } catch (err) {
+    toast(`could not open ${basenameOf(abs)}: ${(err as Error).message}`, "error");
+  }
 }
 
 // ---------------------------------------------------------------- panels ----
@@ -1572,6 +1589,11 @@ async function boot(): Promise<void> {
     if (project.active) activeProjectId = project.id;
   }
   setActiveProject(activeProjectId);
+  const bootView = activeProjectId ? projectViews.get(activeProjectId) : undefined;
+  if (bootView) {
+    projectCwd = bootView.cwd;
+    explorer.setProject(bootView.cwd);
+  }
 
   const instances = await window.pi.getInstances();
   // A project with no terminals: show why pi failed to start. A launch
