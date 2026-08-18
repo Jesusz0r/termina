@@ -483,6 +483,10 @@ class PiTerminalInstance {
   plan: PlanTask[] = [];
   /** Paths this run touched, relative to the project (for task progress). */
   touched = new Set<string>();
+  /** In-flight file tools: tool call id to the relative path. */
+  pendingFileTools = new Map<string, string>();
+  /** Last file-tool outcome per relative path. */
+  toolOutcomes = new Map<string, "ok" | "error">();
   /** When the user sent an interrupt (\x03) into this terminal. */
   interruptedAt?: number;
   /** Session Timeline: ordered points with file snapshots. */
@@ -2751,13 +2755,20 @@ class PiEditorApp {
     if (changed) this.sendPlan(inst);
   }
 
-  /** The run ended: a task is done when the run touched every path it mentions. */
+  /**
+   * A task is complete when every mentioned path was touched and the last
+   * file-tool outcome for that path is ok. A missing tool end is not ok.
+   */
+  private taskCompleted(inst: PiTerminalInstance, paths: string[]): boolean {
+    if (paths.length === 0) return false;
+    return paths.every((p) => inst.touched.has(p) && inst.toolOutcomes.get(p) === "ok");
+  }
+
+  /** The run ended: mark complete tasks done. Leave the rest as they are. */
   private finalizePlan(inst: PiTerminalInstance): void {
     if (inst.plan.length === 0) return;
     for (const task of inst.plan) {
-      if (task.paths.length > 0 && task.paths.every((p) => inst.touched.has(p))) {
-        task.state = "done";
-      }
+      if (this.taskCompleted(inst, task.paths)) task.state = "done";
     }
     this.sendPlan(inst);
   }
@@ -3496,6 +3507,8 @@ class PiEditorApp {
         // The old run's plan is stale until the new plan message arrives.
         inst.plan = [];
         inst.touched = new Set();
+        inst.pendingFileTools = new Map();
+        inst.toolOutcomes = new Map();
         this.sendPlan(inst);
         // Baseline for Change Review: snapshot the watcher's content cache so
         // diffs compare the run's start state against the current files.
@@ -3536,15 +3549,15 @@ class PiEditorApp {
         inst.busy = false;
         this.busyAgents.delete(inst.id);
         this.finalizePlan(inst);
-        // A dispatch worker finished: mark its task done and collect its
-        // files into the owner's Change Review.
+        // A dispatch worker finished: mark the owner task done only when
+        // the worker's last file-tool outcomes cover that task's paths.
         const dispatchEnd = this.dispatchRuns.get(inst.id);
         if (dispatchEnd) {
           this.writeDispatchSettleNote(inst, "settled");
           const ownerInst = this.terminals.get(dispatchEnd.ownerId);
           const task = ownerInst ? this.findDispatchedTask(ownerInst, dispatchEnd.taskText) : undefined;
           if (ownerInst) {
-            if (task) task.state = "done";
+            if (task && this.taskCompleted(inst, task.paths)) task.state = "done";
             this.sendPlan(ownerInst);
             this.collectWorker(inst, ownerInst);
           }
@@ -3560,9 +3573,9 @@ class PiEditorApp {
         const text = String(event.text ?? "");
         inst.plan = this.parsePlanTasks(text, this.workspaceOfTerminal(inst)?.root ?? null);
         this.reattachDispatchAssignments(inst);
-        // touched was reset at agent_start. Do not reset it here: the plan
-        // message can arrive after the first tool events, and their progress
-        // must count.
+        // touched and tool outcomes were reset at agent_start. Do not reset
+        // them here: the plan message can arrive after the first tool events,
+        // and their progress must count.
         this.sendPlan(inst);
         break;
       }
@@ -3611,7 +3624,10 @@ class PiEditorApp {
         if ((toolName === "write" || toolName === "create_file") && !inst.baselines.has(path)) {
           this.trackRecordingTask(this.fillBaselineFromState(inst, path, status));
         }
-        inst.touched.add(this.rel(path));
+        const rel = this.rel(path);
+        inst.touched.add(rel);
+        const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId.trim() : "";
+        if (toolCallId && rel) inst.pendingFileTools.set(toolCallId, rel);
         this.updatePlanProgress(inst, path);
         this.send("tool:target", { path, relPath: this.rel(path), toolName });
         // Session Timeline: snapshot the file as of this tool call. Create
@@ -3633,9 +3649,15 @@ class PiEditorApp {
         break;
       }
       case "tool_end": {
+        const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId.trim() : "";
+        if (toolCallId) {
+          const rel = inst.pendingFileTools.get(toolCallId);
+          inst.pendingFileTools.delete(toolCallId);
+          // Ignore ends with no matching file-tool start (read, bash, orphan).
+          if (rel !== undefined) inst.toolOutcomes.set(rel, event.isError === true ? "error" : "ok");
+        }
         // The tool finished: schedule the moment capture for its dots.
-        const inst2 = this.terminals.get(terminalId);
-        if (inst2 && inst2.currentRun) this.scheduleMomentCapture(inst2);
+        if (inst.currentRun) this.scheduleMomentCapture(inst);
         break;
       }
     }
