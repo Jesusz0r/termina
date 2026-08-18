@@ -63,7 +63,7 @@ export interface EvidenceDeps {
   mineFiles: Set<string>;
   /** Capture a candidate head off the main thread. */
   captureHead(root: string, gitDir: string, parent: string | null): Promise<{ commit: string; tree: string }>;
-  /** Run a shell command inside the candidate sandbox; bounded output. */
+  /** Run a shell command inside the candidate sandbox; bounded combined output. */
   runSandboxed(cand: CandidateFacts, command: string[], timeoutMs: number): Promise<{ code: number; stdout: string; timedOut: boolean }>;
   /** The test command of the shared base (from its package manifest). */
   baseTestCommand(): { command: string; args: string[]; label: string } | null;
@@ -225,6 +225,66 @@ export function referencedPackages(sourceFiles: Array<{ relPath: string; content
   return refs;
 }
 
+const MAX_FAIL_NAMES = 8;
+const MAX_FAIL_NAME_CHARS = 80;
+/** CSI and 2-byte escape sequences from colored test reporters. */
+const ANSI_ESCAPE = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
+
+export interface FailingTests {
+  /** Unique failing names in the output, including names past the display cap. */
+  count: number;
+  /** The first names, capped for the badge and the context file. */
+  names: string[];
+}
+
+/** One-line Verify badge text from parsed failing tests. */
+export function verifyFailSummary(parsed: FailingTests): string {
+  return `${parsed.count} failed: ${parsed.names.join(", ")}`;
+}
+
+/**
+ * Collect failing test names from pytest, cargo, go, and jest output.
+ * Unknown harnesses return no names. Callers must not fail Verify when
+ * this list is empty.
+ */
+export function parseFailingTests(output: string): FailingTests {
+  if (!output) return { count: 0, names: [] };
+  const text = output.replace(ANSI_ESCAPE, "");
+  const seen = new Set<string>();
+  const names: string[] = [];
+  const add = (raw: string): void => {
+    const name = raw.replace(/\s+/g, " ").replace(/`/g, "").trim().slice(0, MAX_FAIL_NAME_CHARS);
+    if (!name || seen.has(name)) return;
+    seen.add(name);
+    if (names.length < MAX_FAIL_NAMES) names.push(name);
+  };
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (line.length === 0 || line.length > 500) continue;
+    const go = /^--- FAIL: (\S+)/.exec(line);
+    if (go) {
+      add(go[1] ?? "");
+      continue;
+    }
+    const cargo = /^test (.+?) \.\.\. FAILED\s*$/.exec(line);
+    if (cargo) {
+      add(cargo[1] ?? "");
+      continue;
+    }
+    const pytest = /^FAILED (.+?)(?:\s+-\s+|$)/.exec(line);
+    if (pytest) {
+      add(pytest[1] ?? "");
+      continue;
+    }
+    const jest = /^\s*●\s+(.+)$/.exec(line);
+    if (!jest) continue;
+    const rest = (jest[1] ?? "").trim();
+    if (/^(Expected|Received|Difference|at\s)/i.test(rest)) continue;
+    add(rest);
+  }
+  return { count: seen.size, names };
+}
+
 /**
  * The evidence engine. One run measures one candidate; the caller
  * serializes the A and B runs (WORLDLINES §6.8: run serially).
@@ -264,12 +324,30 @@ export class EvidenceEngine {
     const after = await this.deps.captureHead(cand.root, join(cand.root, ".git"), null);
     const sourceUnchanged = after.tree === stateTree;
     const status = run.timedOut ? "fail" : run.code === 0 && sourceUnchanged ? "pass" : "fail";
+    let failedCount = 0;
+    let failedNames: string[] = [];
+    if (status === "fail" && !run.timedOut && run.code !== 0) {
+      try {
+        const parsed = parseFailingTests(run.stdout);
+        failedCount = parsed.count;
+        failedNames = parsed.names;
+      } catch {
+        /* Ranking uses status, not names. */
+      }
+    }
     return {
       kind: "verify",
       stateId,
       baseStateId: this.deps.baseStateId,
       status,
-      result: { command: tc.label, code: run.code, timedOut: run.timedOut, sourceUnchanged, output: run.stdout.slice(-2000) },
+      result: {
+        command: tc.label,
+        code: run.code,
+        timedOut: run.timedOut,
+        sourceUnchanged,
+        output: run.stdout.slice(-2000),
+        ...(failedCount > 0 ? { failedCount, failedNames } : {}),
+      },
       reason:
         run.timedOut ? "the test command timed out" :
         run.code !== 0 ? `the test command exited with code ${run.code}` :

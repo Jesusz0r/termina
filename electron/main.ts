@@ -26,7 +26,7 @@ import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
 import { SnapshotStore, MIN_WORLDS_FREE_BYTES, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, platformHasRecursiveWatcher, platformHasSandboxExec, type SourceState } from "./worldline-git.js";
 import { WorldlineManager, type ForkableRun } from "./worldlines.js";
 import { sandboxShellPreamble, writeEvidenceProfile } from "./sandbox.js";
-import { EvidenceEngine, mineChangeReason, rankProfiles, type EvidenceDeps, type EvidenceRecord, type EvidenceSummary as EngineSummary } from "./evidence.js";
+import { EvidenceEngine, mineChangeReason, parseFailingTests, rankProfiles, verifyFailSummary, type EvidenceDeps, type EvidenceRecord, type EvidenceSummary as EngineSummary } from "./evidence.js";
 import { coreClient } from "./core-client.js";
 import { AppPreferencesStore, normalizeAppPreferences, sanitizeShortcutMap } from "./preferences.js";
 import {
@@ -1730,7 +1730,7 @@ class PiEditorApp {
    */
   // ------------------------------------------------- evidence (WORLDLINES §6.8) ----
 
-  /** One sandboxed command run with bounded output and time. */
+  /** One sandboxed command run with bounded combined stdout and stderr. */
   private runSandboxedEvidence(
     cand: { root: string; profilePath: string; homeDir: string; tmpDir: string },
     command: string[],
@@ -1749,10 +1749,12 @@ class PiEditorApp {
       });
       let stdout = "";
       let timedOut = false;
-      child.stdout.on("data", (d: Buffer) => {
-        if (stdout.length < 200_000) stdout += d.toString("utf8");
-      });
-      child.stderr.on("data", () => undefined);
+      const appendOutput = (d: Buffer): void => {
+        if (stdout.length >= MAX_VERIFY_OUTPUT) return;
+        stdout += d.toString("utf8").slice(0, MAX_VERIFY_OUTPUT - stdout.length);
+      };
+      child.stdout.on("data", appendOutput);
+      child.stderr.on("data", appendOutput);
       let settled = false;
       let timer: ReturnType<typeof setTimeout>;
       const finish = (result: { code: number; stdout: string; timedOut: boolean }): void => {
@@ -2560,10 +2562,22 @@ class PiEditorApp {
       this.verifyRuns.delete(ownerId);
       this.verifyJobs.delete(ownerId);
       if (this.terminals.get(ownerId) !== owner || this.projectIsSwitching(this.projectOfTerminal(ownerId)?.id) || this.disposed) return;
-      const summary = how === "pass" ? "tests green" : how === "timeout" ? "tests timed out" : how === "cancelled" ? "cancelled" : "tests failing";
+      let summary = how === "pass" ? "tests green" : how === "timeout" ? "tests timed out" : how === "cancelled" ? "cancelled" : "tests failing";
+      let failed: { count: number; names: string[] } | null = null;
+      if (how === "fail") {
+        try {
+          const parsed = parseFailingTests(output);
+          if (parsed.count > 0) {
+            failed = parsed;
+            summary = verifyFailSummary(parsed);
+          }
+        } catch {
+          /* Keep the generic failing summary. Parsing never fails the run. */
+        }
+      }
       owner.verify = { state: how, command: tc.label, summary };
       // Do not write a result for a cancelled run. The previous context stays.
-      if (how !== "cancelled") this.writeVerifyContext(ownerId, tc.label, how, code, output);
+      if (how !== "cancelled") this.writeVerifyContext(ownerId, tc.label, how, code, output, failed);
       this.send("verify:state", { terminalId: ownerId, verify: owner.verify });
     };
     const verifyTimer = setTimeout(() => {
@@ -2644,17 +2658,29 @@ class PiEditorApp {
   }
 
   /** Write the verify result to the context file the bridge extension reads. */
-  private writeVerifyContext(ownerId: string, label: string, state: VerifyState, code: number | null, output: string): void {
+  private writeVerifyContext(
+    ownerId: string,
+    label: string,
+    state: VerifyState,
+    code: number | null,
+    output: string,
+    failed: { count: number; names: string[] } | null = null,
+  ): void {
     const owner = this.terminals.get(ownerId);
     const eventsDir = owner ? this.eventsDirOf(owner) : this.eventsDir;
     try {
       mkdirSync(eventsDir, { recursive: true, mode: 0o700 });
       const stamp = new Date().toLocaleTimeString();
       const status = state === "pass" ? "✅ PASSED" : state === "timeout" ? "⏰ TIMED OUT" : "❌ FAILED";
+      const failLine =
+        failed && failed.count > 0
+          ? `**Failed:** ${failed.count} — ${failed.names.map((n) => `\`${n}\``).join(", ")}\n\n`
+          : "";
       const body = output.trim().slice(-6000);
       const md =
         `## Test run — \`${label}\` — ${stamp}\n\n` +
         `**Status:** ${status}${code !== null ? ` (exit code ${code})` : ""}\n\n` +
+        failLine +
         (body ? `<details>\n<summary>Output</summary>\n\n\`\`\`text\n${body}\n\`\`\`\n</details>\n` : "");
       writeFileSync(join(eventsDir, `verify-${ownerId}.md`), md, "utf8");
     } catch (err) {

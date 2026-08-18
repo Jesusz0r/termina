@@ -764,7 +764,8 @@ function renderVerify(pane: Pane): void {
     verifyBadge.textContent =
       v.state === "pass" ? `✓ ${v.summary ?? "green"}` : v.state === "timeout" ? `⏰ ${v.summary ?? "timed out"}` : v.state === "cancelled" ? `⏸ ${v.summary ?? "cancelled"}` : `✗ ${v.summary ?? "failing"}`;
   }
-  verifyBadge.title = v.state === "running" ? "Click to cancel verification" : v.command ?? "";
+  verifyBadge.title =
+    v.state === "running" ? "Click to cancel verification" : v.state === "fail" && v.summary ? v.summary : v.command ?? "";
 }
 
 function renderModified(pane: Pane): void {
