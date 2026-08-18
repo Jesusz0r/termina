@@ -1322,6 +1322,18 @@ body {
   border-color: var(--yellow);
 }
 
+.cmp-caption {
+  flex: 1 0 100%;
+  margin: 0;
+  padding: 0 2px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: normal;
+}
+
 .cand-evidence {
   display: flex;
   flex-direction: column;

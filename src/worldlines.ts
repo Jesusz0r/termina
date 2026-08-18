@@ -25,6 +25,10 @@ const PROFILE_LABEL: Record<ProfileVerdict["profile"], string> = {
   "performance-first": "perf",
 };
 
+function captionName(profile: ProfileVerdict["profile"]): string {
+  return profile === "fewer-dependencies" ? "deps" : PROFILE_LABEL[profile];
+}
+
 const KIND_LABEL: Record<EvidenceRecord["kind"], string> = {
   verify: "verify",
   dependencies: "deps",
@@ -102,6 +106,30 @@ function chipText(v: ProfileVerdict, summary: EvidenceSummary): string {
   const delta = chipDelta(v.profile, summary);
   if (v.winner === "unavailable") return delta ? `${name}: unavailable ${delta}` : `${name}: unavailable`;
   return delta ? `${name}: ${v.winner} ${delta}` : `${name}: ${v.winner}`;
+}
+
+/**
+ * One line from ranked profiles. Skip unavailable. Omit when nothing
+ * resolved to A or B. Stale pairs keep this line; the stale chip marks
+ * the ranking as not current.
+ */
+function profileCaption(profiles: ProfileVerdict[] | undefined): string | null {
+  if (!Array.isArray(profiles) || profiles.length === 0) return null;
+  const resolved: Array<{ winner: "A" | "B" | "tie"; name: string }> = [];
+  for (const v of profiles) {
+    if (v.winner !== "A" && v.winner !== "B" && v.winner !== "tie") continue;
+    const name = captionName(v.profile);
+    if (!name) continue;
+    resolved.push({ winner: v.winner, name });
+  }
+  if (!resolved.some((v) => v.winner === "A" || v.winner === "B")) return null;
+  const parts: string[] = [];
+  for (const winner of ["A", "B", "tie"] as const) {
+    const names = resolved.filter((v) => v.winner === winner).map((v) => v.name);
+    if (names.length === 0) continue;
+    parts.push(winner === "tie" ? `${names.join(" ")} tie` : `${names.join(" ")} → ${winner}`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
 }
 
 /** This candidate's measured detail, plus the other side when both exist. */
@@ -253,6 +281,13 @@ export class WorldlinesView {
       chip.textContent = chipText(v, summary);
       chip.title = v.reason;
       pair.verdictsEl.appendChild(chip);
+    }
+    const caption = profileCaption(summary.profiles);
+    if (caption) {
+      const cap = document.createElement("div");
+      cap.className = "cmp-caption";
+      cap.textContent = caption;
+      pair.verdictsEl.appendChild(cap);
     }
   }
 
