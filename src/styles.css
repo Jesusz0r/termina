@@ -722,9 +722,13 @@ body {
 }
 
 .timeline-header .muted {
-  color: var(--text-muted);
+  color: var(--text-dim);
   opacity: 0.7;
   text-transform: none;
+}
+
+#timeline-prefix {
+  letter-spacing: 0;
 }
 
 #btn-timeline-play {

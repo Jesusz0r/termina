@@ -95,6 +95,28 @@ export interface TimelineEvent {
   model?: string | null;
   /** True when the dot's source state was evicted (no longer forkable). */
   evicted?: boolean;
+  /** The run-start store state. Progress diffs this against stateId. */
+  runStartStateId?: string | null;
+}
+
+/** Last-tool counts for the Timeline strip header (current run). */
+export interface TimelinePrefix {
+  terminalId: string;
+  ok: number;
+  error: number;
+  open: number;
+}
+
+/** On-demand source diff of one forkable timeline moment. */
+export interface TimelineProgress {
+  ok: boolean;
+  seq: number;
+  files?: number;
+  created?: number;
+  modified?: number;
+  deleted?: number;
+  /** Up to eight changed paths. Never the full tree. */
+  paths?: string[];
 }
 
 /** The recording state shown outside the dot strip (WORLDLINES §6). */
@@ -443,6 +465,8 @@ export interface PiBridge {
   onTimelineEvent(cb: (p: { terminalId: string; event: TimelineEvent }) => void): void;
   /** Push: dots whose source states were evicted (budget). */
   onTimelineEvict(cb: (p: { terminalId: string; seqs: number[] }) => void): void;
+  /** Push: last-tool counts for the Timeline header. */
+  onTimelinePrefix(cb: (p: TimelinePrefix) => void): void;
   /** Push: the recorder state of a terminal's timeline. */
   onRecorderState(cb: (p: { terminalId: string; state: RecorderState }) => void): void;
   onVerifyState(cb: (p: { terminalId: string; verify: VerifyInfo }) => void): void;
@@ -474,6 +498,10 @@ export interface PiBridge {
 
   // Session Timeline
   getTimeline(terminalId: string): Promise<TimelineEvent[]>;
+  /** Last-tool counts for the Timeline header (current run). */
+  getTimelinePrefix(terminalId: string): Promise<TimelinePrefix>;
+  /** Source diff of one forkable moment versus its run start. On demand. */
+  getTimelineProgress(terminalId: string, seq: number): Promise<TimelineProgress>;
   /** The current run's plan tasks (Plan Board). */
   getPlan(terminalId: string): Promise<PlanTask[]>;
   /** Full-text search over the project's past sessions. */

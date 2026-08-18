@@ -44,7 +44,7 @@ import { toast } from "./components/modals";
 import { SettingsView, emptyShortcuts } from "./settings";
 import { defaultAppPreferences } from "../shared/types";
 import { normalizeAppPreferences } from "../shared/preferences";
-import type { AppPreferences, ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, PlanTask, RunSummary } from "../shared/types";
+import type { AppPreferences, ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
 
 const { EditorManager } = await import("./editor");
 const { ReviewView } = await import("./review");
@@ -302,6 +302,7 @@ interface Pane {
   verify: VerifyInfo;
   timeline: TimelineEvent[];
   timelineLoaded: boolean;
+  timelinePrefix: Pick<TimelinePrefix, "ok" | "error" | "open"> | null;
   recorderState: string;
   plan: PlanTask[];
   planLoaded: boolean;
@@ -422,6 +423,7 @@ function createPaneShell(instanceId: string): Pane {
     verify: { state: "untested", command: null, summary: null },
     timeline: [],
     timelineLoaded: false,
+    timelinePrefix: null,
     recorderState: "paused",
     plan: [],
     planLoaded: false,
@@ -549,6 +551,7 @@ function renderTimeline(): void {
     return;
   }
   timelineView.setRecorder(pane.recorderState as Parameters<typeof timelineView.setRecorder>[0]);
+  timelineView.setPrefix(pane.timelinePrefix);
   if (!pane.timelineLoaded) {
     pane.timelineLoaded = true;
     void window.pi.getTimeline(pane.instanceId).then((events) => {
@@ -559,6 +562,12 @@ function renderTimeline(): void {
       const maxSeq = events.length ? Math.max(...events.map((e) => e.seq)) : 0;
       p.timeline = events.concat(p.timeline.filter((e) => e.seq > maxSeq)).slice(-MAX_TIMELINE_EVENTS);
       if (activeId === pane.instanceId) timelineView.setEvents(p.timeline);
+    });
+    void window.pi.getTimelinePrefix(pane.instanceId).then((prefix) => {
+      const p = panes.get(pane.instanceId);
+      if (!p) return;
+      p.timelinePrefix = prefix;
+      if (activeId === pane.instanceId) timelineView.setPrefix(prefix);
     });
     return;
   }
@@ -599,6 +608,11 @@ timelineView.bind({
       if (!res.ok) toast(`fork at this moment failed: ${res.error ?? "unknown error"}`, "warning");
       else toast(`forked this moment — candidate ${res.comparisonId ?? ""} is starting`, "info");
     });
+  },
+  onProgress: (seq) => {
+    const pane = activeId ? panes.get(activeId) : undefined;
+    if (!pane) return Promise.resolve({ ok: false, seq });
+    return window.pi.getTimelineProgress(pane.instanceId, seq);
   },
 });
 
@@ -1372,6 +1386,13 @@ window.pi.onTimelineEvict(({ terminalId, seqs }) => {
   if (!pane) return;
   pane.timeline = pane.timeline.filter((e) => !seqs.includes(e.seq));
   if (activeId === terminalId) timelineView.evict(seqs);
+});
+
+window.pi.onTimelinePrefix((p) => {
+  const pane = panes.get(p.terminalId);
+  if (!pane) return;
+  pane.timelinePrefix = p;
+  if (activeId === p.terminalId) timelineView.setPrefix(p);
 });
 
 window.pi.onRecorderState(({ terminalId, state }) => {

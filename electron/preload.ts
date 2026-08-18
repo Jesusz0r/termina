@@ -16,6 +16,7 @@ import type {
   VerifyInfo,
   EvidenceSummary,
   TimelineEvent,
+  TimelinePrefix,
   PlanPayload,
   WorldlineSummary,
   AppPreferences,
@@ -61,6 +62,9 @@ const bridge: PiBridge = {
   onTimelineEvict: (cb) => {
     ipcRenderer.on("timeline:evict", (_e, p: { terminalId: string; seqs: number[] }) => cb(p));
   },
+  onTimelinePrefix: (cb) => {
+    ipcRenderer.on("timeline:prefix", (_e, p: TimelinePrefix) => cb(p));
+  },
   onRecorderState: (cb) => {
     ipcRenderer.on("timeline:recorder-state", (_e, p: { terminalId: string; state: RecorderState }) => cb(p));
   },
@@ -93,6 +97,8 @@ const bridge: PiBridge = {
     ipcRenderer.invoke("settings:update", preferences, activateShortcuts),
   setKeyboardShortcuts: (shortcuts: ShortcutMap) => ipcRenderer.invoke("settings:shortcuts", shortcuts),
   getTimeline: (terminalId) => ipcRenderer.invoke("timeline:get", terminalId),
+  getTimelinePrefix: (terminalId) => ipcRenderer.invoke("timeline:prefix", terminalId),
+  getTimelineProgress: (terminalId, seq) => ipcRenderer.invoke("timeline:progress", terminalId, seq),
   getPlan: (terminalId) => ipcRenderer.invoke("plan:get", terminalId),
   searchSessions: (query) => ipcRenderer.invoke("session:search", query),
   getRuns: (terminalId) => ipcRenderer.invoke("worldline:runs", terminalId),

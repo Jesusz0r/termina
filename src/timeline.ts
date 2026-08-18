@@ -5,28 +5,35 @@
  * A forkable dot (captured source state) forks a candidate at that moment
  * with Cmd/Ctrl+Click.
  */
-import type { TimelineEvent, RecorderState } from "../shared/types";
+import type { TimelineEvent, RecorderState, TimelinePrefix, TimelineProgress } from "../shared/types";
 
 const MAX_TIMELINE_EVENTS = 400;
 
 export class TimelineView {
   private dotsEl: HTMLElement;
   private countEl: HTMLElement;
+  private prefixEl: HTMLElement;
   private btnPlay: HTMLElement;
   private recorderEl: HTMLElement;
   private events: TimelineEvent[] = [];
   /** seq → dot element, for O(1) updates (defensive; main rarely re-sends). */
   private dots = new Map<number, HTMLElement>();
+  /** seq → on-demand progress. Dropped on reset, setEvents, and eviction. */
+  private progressCache = new Map<number, TimelineProgress>();
+  private hoverSeq: number | null = null;
+  private hoverTimer: ReturnType<typeof setTimeout> | null = null;
   private activeSeq: number | null = null;
   private replayTimer: ReturnType<typeof setInterval> | null = null;
   private replayIdx = 0;
 
   private onJump: (ev: TimelineEvent, opts?: { replay?: boolean }) => void = () => {};
   private onFork: (ev: TimelineEvent) => void = () => {};
+  private onProgress: (seq: number) => Promise<TimelineProgress> = async (seq) => ({ ok: false, seq });
 
   constructor(container: HTMLElement) {
     this.dotsEl = container.querySelector("#timeline-dots")!;
     this.countEl = container.querySelector("#timeline-count")!;
+    this.prefixEl = container.querySelector("#timeline-prefix")!;
     this.recorderEl = container.querySelector("#timeline-recorder")!;
     this.btnPlay = container.querySelector("#btn-timeline-play")!;
     this.btnPlay.addEventListener("click", (e) => {
@@ -35,15 +42,39 @@ export class TimelineView {
     });
   }
 
-  bind(handlers: { onJump: (ev: TimelineEvent, opts?: { replay?: boolean }) => void; onFork: (ev: TimelineEvent) => void }): void {
+  bind(handlers: {
+    onJump: (ev: TimelineEvent, opts?: { replay?: boolean }) => void;
+    onFork: (ev: TimelineEvent) => void;
+    onProgress: (seq: number) => Promise<TimelineProgress>;
+  }): void {
     this.onJump = handlers.onJump;
     this.onFork = handlers.onFork;
+    this.onProgress = handlers.onProgress;
   }
 
   /** Clear timeline state when the project changes. */
   resetForProject(): void {
     this.setEvents([]);
     this.setRecorder("paused");
+    this.setPrefix(null);
+  }
+
+  /** Last-tool counts for this run. Hidden when every count is zero. */
+  setPrefix(p: Pick<TimelinePrefix, "ok" | "error" | "open"> | null): void {
+    const total = p ? p.ok + p.error + p.open : 0;
+    if (!p || total === 0) {
+      this.prefixEl.hidden = true;
+      this.prefixEl.textContent = "";
+      this.prefixEl.removeAttribute("title");
+      return;
+    }
+    const parts: string[] = [];
+    if (p.ok) parts.push(`${p.ok} ok`);
+    if (p.error) parts.push(`${p.error} error`);
+    if (p.open) parts.push(`${p.open} open`);
+    this.prefixEl.hidden = false;
+    this.prefixEl.textContent = parts.join(" · ");
+    this.prefixEl.title = "file tools in this run";
   }
 
   /** The recorder state label (indexing / ready / paused / degraded / budget). */
@@ -68,6 +99,7 @@ export class TimelineView {
     for (const seq of seqs) {
       this.dots.get(seq)?.remove();
       this.dots.delete(seq);
+      this.progressCache.delete(seq);
     }
     this.countEl.textContent = this.events.length ? `(${this.events.length})` : "";
     this.btnPlay.hidden = this.events.length === 0;
@@ -75,6 +107,8 @@ export class TimelineView {
 
   setEvents(events: TimelineEvent[]): void {
     this.stopReplay();
+    this.clearHover();
+    this.progressCache.clear();
     this.events = events.slice(-MAX_TIMELINE_EVENTS);
     this.activeSeq = null;
     this.render();
@@ -90,6 +124,7 @@ export class TimelineView {
       if (existing) {
         existing.className = this.dotClass(event);
         existing.title = this.tooltip(event);
+        this.progressCache.delete(event.seq);
       }
       return;
     }
@@ -99,6 +134,7 @@ export class TimelineView {
       if (removed) {
         this.dots.get(removed.seq)?.remove();
         this.dots.delete(removed.seq);
+        this.progressCache.delete(removed.seq);
       }
     }
     const dot = this.makeDot(event);
@@ -138,13 +174,16 @@ export class TimelineView {
     dot.dataset.seq = String(ev.seq);
     dot.title = this.tooltip(ev);
     dot.addEventListener("click", (e) => {
-      if ((e.metaKey || e.ctrlKey) && ev.stateId) {
+      const latest = this.eventBySeq(ev.seq) ?? ev;
+      if ((e.metaKey || e.ctrlKey) && latest.stateId) {
         e.stopPropagation();
-        this.forkAt(ev);
+        this.forkAt(latest);
         return;
       }
-      this.jumpTo(ev);
+      this.jumpTo(latest);
     });
+    dot.addEventListener("pointerenter", () => this.scheduleProgress(ev.seq));
+    dot.addEventListener("pointerleave", () => this.clearHover());
     if (ev.seq === this.activeSeq) dot.classList.add("active");
     return dot;
   }
@@ -167,19 +206,76 @@ export class TimelineView {
     if (n > 0 && nearEnd) this.dotsEl.scrollLeft = this.dotsEl.scrollWidth;
   }
 
-  private tooltip(ev: TimelineEvent): string {
+  private tooltip(ev: TimelineEvent, progress?: TimelineProgress): string {
     const time = new Date(ev.ts).toLocaleTimeString();
     const fork = ev.stateId ? " — Cmd/Ctrl+Click to fork at this moment" : ev.evicted ? " (source evicted)" : "";
+    let base: string;
     switch (ev.t) {
       case "agent_start":
-        return `${time} — run started`;
+        base = `${time} — run started`;
+        break;
       case "agent_settled":
-        return `${time} — run settled`;
+        base = `${time} — run settled`;
+        break;
       case "tool":
-        return `${time} — ${ev.toolName} ${ev.relPath ?? ""}${ev.content === undefined ? " (no snapshot)" : ""}${fork}`;
+        base = `${time} — ${ev.toolName} ${ev.relPath ?? ""}${ev.content === undefined ? " (no snapshot)" : ""}${fork}`;
+        break;
       case "change":
-        return `${time} — changed on disk: ${ev.relPath ?? ""}${fork}`;
+        base = `${time} — changed on disk: ${ev.relPath ?? ""}${fork}`;
+        break;
     }
+    return base + this.progressLine(progress);
+  }
+
+  private eventBySeq(seq: number): TimelineEvent | undefined {
+    return this.events.find((e) => e.seq === seq);
+  }
+
+  private clearHover(): void {
+    this.hoverSeq = null;
+    if (this.hoverTimer) {
+      clearTimeout(this.hoverTimer);
+      this.hoverTimer = null;
+    }
+  }
+
+  /** Fetch the source diff only for a forkable dot, and only on hover. */
+  private scheduleProgress(seq: number): void {
+    this.clearHover();
+    this.hoverSeq = seq;
+    const ev = this.eventBySeq(seq);
+    if (!ev?.stateId || ev.evicted) return;
+    const cached = this.progressCache.get(seq);
+    if (cached) {
+      const dot = this.dots.get(seq);
+      if (dot) dot.title = this.tooltip(ev, cached);
+      return;
+    }
+    this.hoverTimer = setTimeout(() => {
+      this.hoverTimer = null;
+      if (this.hoverSeq !== seq) return;
+      void this.onProgress(seq).then((progress) => {
+        // Do not cache a miss: indexing or a project switch can succeed next.
+        if (progress.ok) this.progressCache.set(seq, progress);
+        if (this.hoverSeq !== seq) return;
+        const latest = this.eventBySeq(seq);
+        const dot = this.dots.get(seq);
+        if (latest && dot) dot.title = this.tooltip(latest, progress);
+      });
+    }, 80);
+  }
+
+  private progressLine(progress?: TimelineProgress): string {
+    if (!progress?.ok) return "";
+    const n = progress.files ?? 0;
+    if (n === 0) return " — no source changes from run start";
+    const bits = [`${n} file${n === 1 ? "" : "s"}`];
+    if (progress.created) bits.push(`${progress.created} created`);
+    if (progress.modified) bits.push(`${progress.modified} modified`);
+    if (progress.deleted) bits.push(`${progress.deleted} deleted`);
+    const paths = progress.paths ?? [];
+    const extra = paths.length ? `\n${paths.join("\n")}${n > paths.length ? "\n…" : ""}` : "";
+    return ` — ${bits.join(" · ")}${extra}`;
   }
 
   /** Jump to a moment: open its snapshot via the bound handler. Content is

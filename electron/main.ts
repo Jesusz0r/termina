@@ -44,6 +44,8 @@ import {
   type ShortcutMap,
   type ThemeId,
   type TimelineEvent,
+  type TimelinePrefix,
+  type TimelineProgress,
   type VerifyInfo,
   type VerifyState,
 } from "../shared/types.js";
@@ -487,6 +489,8 @@ class PiTerminalInstance {
   pendingFileTools = new Map<string, string>();
   /** Last file-tool outcome per relative path. */
   toolOutcomes = new Map<string, "ok" | "error">();
+  /** Last prefix payload sent, so identical tool_end events skip IPC. */
+  lastTimelinePrefixKey = "";
   /** When the user sent an interrupt (\x03) into this terminal. */
   interruptedAt?: number;
   /** Session Timeline: ordered points with file snapshots. */
@@ -3522,6 +3526,7 @@ class PiEditorApp {
         inst.pendingFileTools = new Map();
         inst.toolOutcomes = new Map();
         this.sendPlan(inst);
+        this.sendTimelinePrefix(inst);
         // Baseline for Change Review: snapshot the watcher's content cache so
         // diffs compare the run's start state against the current files.
         this.resetBaselines(inst, startWs?.watcher?.lastContents);
@@ -3641,6 +3646,7 @@ class PiEditorApp {
         const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId.trim() : "";
         if (toolCallId && rel) inst.pendingFileTools.set(toolCallId, rel);
         this.updatePlanProgress(inst, path);
+        this.sendTimelinePrefix(inst);
         this.send("tool:target", { path, relPath: this.rel(path), toolName });
         // Session Timeline: snapshot the file as of this tool call. Create
         // the event object first so a delayed content fill can find it later.
@@ -3668,6 +3674,7 @@ class PiEditorApp {
           // Ignore ends with no matching file-tool start (read, bash, orphan).
           if (rel !== undefined) inst.toolOutcomes.set(rel, event.isError === true ? "error" : "ok");
         }
+        this.sendTimelinePrefix(inst);
         // The tool finished: schedule the moment capture for its dots.
         if (inst.currentRun) this.scheduleMomentCapture(inst);
         break;
@@ -4043,6 +4050,7 @@ class PiEditorApp {
   // -------------------------------------------------- fork any moment ----
 
   private static readonly MAX_FORK_POINTS = 100;
+  private static readonly MAX_PROGRESS_PATHS = 8;
 
 
 
@@ -4142,6 +4150,7 @@ class PiEditorApp {
     if (batch === inst.momentDots) inst.momentDots = [];
     for (const ev of batch) {
       ev.stateId = stateId;
+      if (ev.runStartStateId === undefined) ev.runStartStateId = inst.currentRun?.startStateId ?? null;
       const pub = { ...ev };
       delete (pub as Partial<TimelineEvent>).content;
       this.send("timeline:event", { terminalId: inst.id, event: pub });
@@ -4342,6 +4351,91 @@ class PiEditorApp {
     return out;
   }
 
+  /** Last-tool counts for the Timeline header. Tiny payload. Not ranking. */
+  private timelinePrefixOf(inst: PiTerminalInstance | undefined): TimelinePrefix {
+    if (!inst) return { terminalId: "", ok: 0, error: 0, open: 0 };
+    let ok = 0;
+    let error = 0;
+    for (const v of inst.toolOutcomes.values()) {
+      if (v === "ok") ok++;
+      else error++;
+    }
+    return { terminalId: inst.id, ok, error, open: inst.pendingFileTools.size };
+  }
+
+  private sendTimelinePrefix(inst: PiTerminalInstance): void {
+    const payload = this.timelinePrefixOf(inst);
+    const key = `${payload.ok}:${payload.error}:${payload.open}`;
+    if (inst.lastTimelinePrefixKey === key) return;
+    inst.lastTimelinePrefixKey = key;
+    this.send("timeline:prefix", payload);
+  }
+
+  /**
+   * The run-start state of a moment. Prefer the stamp taken when the dot
+   * joined the capture batch. Do not use the live currentRun: a later
+   * agent_start would make old dots diff against the new run.
+   */
+  private startStateForMoment(inst: PiTerminalInstance, ev: TimelineEvent): string | null {
+    if (ev.runStartStateId) return ev.runStartStateId;
+    if (ev.runStartStateId === null) return null;
+    const runs = this.runsByTerminal.get(inst.id) ?? [];
+    for (let i = runs.length - 1; i >= 0; i--) {
+      const run = runs[i];
+      if (ev.ts < run.startedAt) continue;
+      if (run.settledAt !== null && ev.ts > run.settledAt) continue;
+      return run.startStateId;
+    }
+    return null;
+  }
+
+  /** On-demand source diff of one forkable moment. Never from the sidecar handler. */
+  private async timelineProgress(terminalId: string, seq: number): Promise<TimelineProgress> {
+    const fail = (): TimelineProgress => ({ ok: false, seq });
+    const inst = this.terminals.get(terminalId);
+    const ev = inst?.timeline.find((e) => e.seq === seq);
+    if (!inst || !ev?.stateId || ev.evicted) return fail();
+    const base = this.startStateForMoment(inst, ev);
+    if (!base) return fail();
+    if (base === ev.stateId) {
+      return { ok: true, seq, files: 0, created: 0, modified: 0, deleted: 0, paths: [] };
+    }
+    const project = this.projectOfTerminal(terminalId);
+    const store = await project?.storePromise;
+    if (
+      !store ||
+      this.disposed ||
+      this.projectIsSwitching(project?.id) ||
+      this.terminals.get(terminalId) !== inst
+    ) {
+      return fail();
+    }
+    const still = inst.timeline.find((e) => e.seq === seq);
+    if (!still?.stateId || still.evicted || still.stateId !== ev.stateId) return fail();
+    try {
+      const changes = await store.diffTree(base, ev.stateId);
+      let created = 0;
+      let modified = 0;
+      let deleted = 0;
+      for (const c of changes) {
+        if (c.status === "created") created++;
+        else if (c.status === "deleted") deleted++;
+        else modified++;
+      }
+      return {
+        ok: true,
+        seq,
+        files: changes.length,
+        created,
+        modified,
+        deleted,
+        paths: changes.slice(0, PiEditorApp.MAX_PROGRESS_PATHS).map((c) => c.relPath),
+      };
+    } catch {
+      return fail();
+    }
+  }
+
   /** Append a timeline point, keep caps, push a CONTENT-FREE event to the
    *  renderer (snapshots are fetched on demand when a dot is clicked, so the
    *  strip and IPC stay light). Tool and change dots join the open batch and
@@ -4358,6 +4452,7 @@ class PiEditorApp {
     if (inst.currentRun && (event.t === "tool" || event.t === "change")) {
       inst.momentDots.push(event);
       if (inst.momentDots.length > MAX_TIMELINE_EVENTS) inst.momentDots.shift();
+      event.runStartStateId = inst.currentRun.startStateId;
     }
     const { content: _content, ...pub } = event;
     this.send("timeline:event", { terminalId: inst.id, event: pub });
@@ -5362,6 +5457,12 @@ class PiEditorApp {
       const tl = this.terminals.get(terminalId)?.timeline ?? [];
       return tl.map(({ content: _content, ...pub }) => pub);
     });
+    ipcMain.handle("timeline:prefix", (_e, terminalId: string) => {
+      const inst = this.terminals.get(terminalId);
+      if (!inst) return { terminalId, ok: 0, error: 0, open: 0 };
+      return this.timelinePrefixOf(inst);
+    });
+    ipcMain.handle("timeline:progress", (_e, terminalId: string, seq: number) => this.timelineProgress(terminalId, seq));
     ipcMain.handle("timeline:content", (_e, terminalId: string, seq: number) => {
       const inst = this.terminals.get(terminalId);
       const ev = inst?.timeline.find((e) => e.seq === seq);
