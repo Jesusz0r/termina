@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Termina — The Hybrid Coding Cockpit for Autonomous AI Agents</title>
+  <meta name="description" content="A hybrid coding cockpit combining the real Pi interactive TUI terminal with a live Monaco IDE, worldlines candidate sandboxes, deterministic evidence ranking, and durable 3-way merge promotion.">
+  <link rel="icon" type="image/svg+xml" href="assets/icon.svg">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="bg-grid"></div>
+  <canvas id="bg-canvas"></canvas>
+
+  <!-- Navigation Bar -->
+  <header class="navbar">
+    <div class="container nav-inner">
+      <a href="#" class="brand">
+        <img src="assets/icon.svg" alt="Termina Icon">
+        <span>Termina</span>
+        <span class="nav-pill">
+          <span class="pulse-dot"></span>
+          Core v0.1.8
+        </span>
+      </a>
+
+      <nav>
+        <ul class="nav-menu">
+          <li><a href="#cockpit">Cockpit Simulator</a></li>
+          <li><a href="#worldlines">Worldlines & Challenges</a></li>
+          <li><a href="#architecture">Process Isolation</a></li>
+          <li><a href="#benchmarks">Fast-Path Benchmarks</a></li>
+        </ul>
+      </nav>
+
+      <div class="nav-actions">
+        <select id="theme-select" class="select-compact" onchange="setTheme(this.value)">
+          <option value="dark">Dark Theme</option>
+          <option value="light">Light Theme</option>
+          <option value="high-contrast">OLED Theme</option>
+          <option value="atom">Atom Theme</option>
+        </select>
+        <a href="https://github.com/Jesusz0r/termina" target="_blank" class="btn btn-outline btn-sm">GitHub</a>
+        <a href="#install" class="btn btn-primary btn-sm">Download</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Hero Section -->
+  <section class="hero">
+    <div class="container">
+      <div class="hero-badge">
+        <span>⚡ Real Pi TUI (PTY) + Monaco IDE + Rust Worldlines Core</span>
+      </div>
+      <h1 class="hero-title">
+        The Hybrid Coding Cockpit<br>
+        <span>for Autonomous AI Agents</span>
+      </h1>
+      <p class="hero-desc">
+        The left side runs <b>Pi</b> — the real interactive terminal TUI with full model providers. The right side is a live <b>Monaco IDE</b> that watches the agent edit files in real time. Fork runs into isolated candidate sandboxes, verify with deterministic evidence, and converge on green code.
+      </p>
+
+      <div class="hero-cta-group">
+        <a href="#cockpit" class="btn btn-primary" style="padding: 12px 24px; font-size: 14px;">⚡ Launch Interactive Cockpit</a>
+        <a href="#install" class="btn btn-outline" style="padding: 12px 24px; font-size: 14px;">⬇ Download v0.1.8 (macOS DMG / Linux)</a>
+        <button class="btn btn-outline" onclick="copyText('curl -fsSL https://raw.githubusercontent.com/Jesusz0r/termina/master/scripts/install.sh | sh')" style="padding: 12px 20px; font-size: 14px;">📋 Copy Quick Install</button>
+      </div>
+
+      <div class="hero-specs">
+        <span class="spec-pill">🔒 <b>Zero Git Pollution</b> (App bare store)</span>
+        <span class="spec-pill">🛡️ <b>macOS sandbox-exec</b> Policy</span>
+        <span class="spec-pill">🦀 <b>Rust Core Engine</b> (&lt; 4ms capture)</span>
+        <span class="spec-pill">⚡ <b>Offline Verification</b> &amp; 3-Way Merge</span>
+      </div>
+
+      <!-- Real Product Screenshot: Hybrid Cockpit -->
+      <div class="hero-visual-container">
+        <img src="assets/screenshot-editor.png" alt="Termina product screenshot — Pi interactive TUI on the left, live Monaco editor and session timeline on the right">
+        <div class="hero-visual-caption-bar">
+          <div>
+            <b style="color:#ffffff; font-size:14px;">The Live Cockpit Interface</b>
+            <div style="font-size:12px; color:var(--text-muted);">The real Pi interactive TUI in a PTY on the left; Monaco IDE with live-sync and session timeline on the right.</div>
+          </div>
+          <span class="nav-pill" style="border-color:var(--accent); color:var(--accent); background:rgba(0,0,0,0.8);">
+            ● Live sync via fs.watch
+          </span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Interactive Cockpit Playground Section -->
+  <section id="cockpit" class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="section-tag">Interactive Simulator</span>
+        <h2 class="section-title">Experience the Dual-Pane Cockpit</h2>
+        <p class="section-subtitle">
+          Test drive the live synchronization between the Pi PTY terminal and the Monaco editor. Trigger real agent turns below and watch files auto-open mid-run with side-by-side diff review!
+        </p>
+      </div>
+
+      <div class="cockpit-window">
+        <!-- Titlebar -->
+        <div class="cockpit-titlebar">
+          <div class="window-dots">
+            <span class="dot dot-red"></span>
+            <span class="dot dot-yellow"></span>
+            <span class="dot dot-green"></span>
+          </div>
+
+          <div class="cockpit-title">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path></svg>
+            <span>termina-workspace (main)</span>
+            <span class="nav-pill" style="padding:1px 6px; font-size:10px;">Git 2.44</span>
+          </div>
+
+          <div style="display:flex; align-items:center; gap:8px;">
+            <select class="select-compact" onchange="setLayout(this.value)">
+              <option value="">Layout: Left / Right Split</option>
+              <option value="layout-reverse">Layout: Right / Left Split</option>
+              <option value="layout-vertical">Layout: Top / Bottom Split</option>
+            </select>
+            <button class="btn btn-outline btn-sm" onclick="runScenario('challenge')">⚡ Fork Run</button>
+            <button class="btn btn-primary btn-sm" onclick="toast('✓ Verified 14/14 tests in background sandbox');">✓ Verify</button>
+          </div>
+        </div>
+
+        <!-- Workspace Split -->
+        <div class="cockpit-workspace">
+          <!-- Left: Pi PTY Terminal -->
+          <div class="pane-terminal">
+            <div class="terminal-tab-bar">
+              <div class="term-tab active">
+                <span>Terminal 1</span>
+                <span class="tab-close">×</span>
+              </div>
+              <button class="term-tab-add" onclick="toast('Opened secondary terminal worker');">+</button>
+              <div class="term-status-badge">
+                <span class="pulse-dot" style="width:6px; height:6px;"></span>
+                <span id="term-status-text">idle</span>
+              </div>
+            </div>
+
+            <div class="terminal-body" id="terminal-screen">
+              <!-- Rendered via app.js -->
+            </div>
+
+            <div class="terminal-footer">
+              <div class="scenario-chips">
+                <span style="font-size:11px; color:var(--text-dim); align-self:center;">Quick prompts:</span>
+                <span class="chip" onclick="runScenario('auth')">⚡ Refactor Auth</span>
+                <span class="chip" onclick="runScenario('challenge')">🔀 /challenge</span>
+                <span class="chip" onclick="runScenario('models')">⚙️ /models</span>
+              </div>
+              <div class="input-row">
+                <span style="color:var(--accent); font-family:var(--font-mono); font-size:14px; align-self:center; font-weight:bold;">&gt;</span>
+                <input type="text" id="term-input" class="input-term" placeholder="Type prompt (e.g. 'refactor auth', '/challenge', '/models') and press Enter..." onkeydown="handleTerminalInput(event)">
+                <button class="btn btn-primary btn-sm" onclick="handleTerminalInput({key:'Enter'})">Run</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right: Monaco IDE + Modified Files Sidebar -->
+          <div class="pane-editor-container">
+            <!-- Modified Files Sub-Sidebar -->
+            <div class="pane-sidebar">
+              <div class="sidebar-head">
+                <span>MODIFIED FILES</span>
+                <span class="badge-count" id="mod-count">3</span>
+              </div>
+              <div class="sidebar-files">
+                <div class="sidebar-item active" data-file="src/auth.ts" onclick="renderEditor('src/auth.ts')">
+                  <span class="file-badge mod">M</span>
+                  <span class="file-path">src/auth.ts</span>
+                </div>
+                <div class="sidebar-item" data-file="src/cache.ts" onclick="renderEditor('src/cache.ts')">
+                  <span class="file-badge mod">M</span>
+                  <span class="file-path">src/cache.ts</span>
+                </div>
+                <div class="sidebar-item" data-file="core/engine.rs" onclick="renderEditor('core/engine.rs')">
+                  <span class="file-badge mod">M</span>
+                  <span class="file-path">core/engine.rs</span>
+                </div>
+                <div class="sidebar-item" data-file="tests/auth.test.ts" onclick="renderEditor('tests/auth.test.ts')">
+                  <span class="file-badge add">A</span>
+                  <span class="file-path">tests/auth.test.ts</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Monaco Editor Pane -->
+            <div class="pane-editor">
+              <div class="editor-tabs">
+                <div class="tab active" data-file="src/auth.ts" onclick="renderEditor('src/auth.ts')">
+                  <span class="file-icon ts">TS</span>
+                  <span>auth.ts</span>
+                  <span class="dirty-dot">●</span>
+                  <span class="tab-close">×</span>
+                </div>
+                <div class="tab" data-file="src/cache.ts" onclick="renderEditor('src/cache.ts')">
+                  <span class="file-icon ts">TS</span>
+                  <span>cache.ts</span>
+                  <span class="tab-close">×</span>
+                </div>
+                <div class="tab" data-file="core/engine.rs" onclick="renderEditor('core/engine.rs')">
+                  <span class="file-icon rs">RS</span>
+                  <span>engine.rs</span>
+                  <span class="tab-close">×</span>
+                </div>
+                <div class="tab" data-file="review" onclick="renderDiffReview()">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="18" r="3"></circle><circle cx="6" cy="6" r="3"></circle><path d="M13 6h3a2 2 0 0 1 2 2v7"></path><line x1="6" y1="9" x2="6" y2="21"></line></svg>
+                  <span>Review Diff</span>
+                </div>
+                <div class="tab" data-file="plan" onclick="renderPlanBoard()">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="9" x2="15" y2="9"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>
+                  <span>Plan Board (2)</span>
+                </div>
+              </div>
+
+              <!-- Breadcrumb bar -->
+              <div class="editor-breadcrumbs" id="editor-breadcrumbs">
+                <span>termina</span>
+                <span>›</span>
+                <span>src</span>
+                <span>›</span>
+                <span style="color:var(--text);">auth.ts</span>
+                <span>›</span>
+                <span style="color:var(--accent);">TokenValidator</span>
+              </div>
+
+              <div class="editor-main-area">
+                <div class="editor-viewport" id="code-container">
+                  <!-- Rendered via JavaScript -->
+                </div>
+                <!-- Minimap Simulation -->
+                <div class="editor-minimap" id="minimap-container"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Statusbar & Timeline Dot Strip -->
+        <div class="cockpit-bottombar">
+          <div style="display:flex; align-items:center; gap:16px;">
+            <span><b style="color:var(--purple);">⎇ master*</b></span>
+            <span style="color:var(--yellow);">3 files modified</span>
+            <span style="color:var(--green);">Lease: Free</span>
+            <div style="display:flex; align-items:center; gap:8px; margin-left:8px; border-left:1px solid var(--border); padding-left:12px;">
+              <span style="color:var(--text-dim);">Timeline:</span>
+              <div class="timeline-track">
+                <span class="dot-event settled" title="Checkpoint #1: Session Start (0s)">1</span>
+                <span class="dot-event settled" title="Checkpoint #2: read_file src/auth.ts (+1.2s)">2</span>
+                <span class="dot-event settled" title="Checkpoint #3: write_file src/auth.ts (+2.4s)">3</span>
+                <span class="dot-event active settled" title="Checkpoint #4: Verify tests passed (+3.8s) · Click to Fork!">4</span>
+              </div>
+            </div>
+          </div>
+
+          <div style="display:flex; align-items:center; gap:14px; color:var(--text-dim); font-size:11px;">
+            <span>Ln 14, Col 28</span>
+            <span>Spaces: 2</span>
+            <span>UTF-8</span>
+            <span style="color:var(--accent);">TypeScript</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Worldlines & Challenge Mode Section -->
+  <section id="worldlines" class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="section-tag">Worldlines &amp; Candidate Sandboxes</span>
+        <h2 class="section-title">Compare Parallel Agent Futures with Deterministic Evidence</h2>
+        <p class="section-subtitle">
+          Never trust blind code generation. Fork completed runs into isolated candidate sandboxes (Candidate A Reference vs Candidate B Alternative). Compare with measured benchmarks, then 3-way merge the winner back into trunk.
+        </p>
+      </div>
+
+      <!-- Real Product Screenshot: Worldlines & Plan Board -->
+      <div class="hero-visual-container" style="margin: 0 auto 36px;">
+        <img src="assets/screenshot-worldlines.png" alt="Termina Worldlines product screenshot — forked run with candidate sandboxes A and B and Plan Board">
+        <div class="hero-visual-caption-bar">
+          <div>
+            <b style="color:#ffffff; font-size:14px;">Worldlines &amp; Dispatch Plan Board</b>
+            <div style="font-size:12px; color:var(--text-muted);">Fork any completed run or timeline dot into isolated candidates (A = reference, B = alternative). Track parallel workers on the Plan Board.</div>
+          </div>
+          <span class="nav-pill" style="border-color:var(--purple); color:var(--purple); background:rgba(0,0,0,0.8);">
+            ⚡ Deterministic ranking
+          </span>
+        </div>
+      </div>
+
+      <!-- Challenge Profiles Selector -->
+      <div class="profiles-selector">
+        <div class="profile-card active" data-profile="performance" onclick="selectChallenge('performance')">
+          <div class="profile-name">⚡ Performance-First</div>
+          <div class="profile-summary">Minimizes latency, heap allocations, and memory footprint.</div>
+        </div>
+        <div class="profile-card" data-profile="deps" onclick="selectChallenge('deps')">
+          <div class="profile-name">📦 Fewer Dependencies</div>
+          <div class="profile-summary">Avoids new npm packages; prefers native standard library.</div>
+        </div>
+        <div class="profile-card" data-profile="preserve-api" onclick="selectChallenge('preserve-api')">
+          <div class="profile-name">🔒 Preserve API</div>
+          <div class="profile-summary">100% backward-compatible public TypeScript exports.</div>
+        </div>
+        <div class="profile-card" data-profile="simpler" onclick="selectChallenge('simpler')">
+          <div class="profile-name">🧼 Simpler Implementation</div>
+          <div class="profile-summary">ASD-STE100 clarity, lowest cyclomatic complexity.</div>
+        </div>
+      </div>
+
+      <!-- Dynamic Profile Header -->
+      <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:var(--radius-sm); padding:14px 20px; margin-bottom:20px; display:flex; justify-content:space-between; align-items:center;">
+        <div>
+          <b id="profile-title" style="color:var(--accent); font-size:14px;">⚡ Performance-First Profile</b>
+          <div id="profile-desc" style="color:var(--text-muted); font-size:12px; margin-top:2px;">Minimizes hot-path execution latency, memory footprint, and allocation overhead.</div>
+        </div>
+        <div style="font-size:12px; font-family:var(--font-mono); text-align:right;">
+          <span style="color:var(--text-dim);">Evidence contract:</span> <b style="color:var(--green);">Sha256 Immutable</b>
+        </div>
+      </div>
+
+      <!-- Candidate Comparison Matrix -->
+      <div class="worldlines-matrix">
+        <!-- Candidate A Card -->
+        <div class="candidate-box" id="candA-card">
+          <div class="candidate-head">
+            <div>
+              <span class="candidate-tag ref">Candidate A</span>
+              <b style="margin-left:8px;">Reference Implementation</b>
+            </div>
+            <span class="nav-pill" style="font-size:11px;">Original Settled Run</span>
+          </div>
+
+          <div class="stats-grid">
+            <div class="stat-cell">
+              <div class="stat-number" style="color:var(--accent);" id="candA-lat">34ms</div>
+              <div class="stat-label">P99 Latency</div>
+            </div>
+            <div class="stat-cell">
+              <div class="stat-number" style="color:var(--yellow);" id="candA-mem">14.2MB</div>
+              <div class="stat-label">RAM Usage</div>
+            </div>
+            <div class="stat-cell">
+              <div class="stat-number" style="color:var(--green);" id="candA-pass">100%</div>
+              <div class="stat-label">Tests (14/14)</div>
+            </div>
+          </div>
+
+          <div style="font-size:13px; line-height:1.75;">
+            <div><b>New Dependencies:</b> <span id="candA-deps" style="color:var(--text-muted);">+1</span></div>
+            <div><b>Code Churn:</b> <span id="candA-loc" style="color:var(--text-muted);">+42 lines</span></div>
+            <div><b>Sandbox:</b> <span style="color:var(--green);">macOS sandbox-exec policy</span></div>
+            <div><b>3-Way Merge:</b> <span style="color:var(--green);">✓ Clean (0 conflicts)</span></div>
+          </div>
+
+          <button class="btn btn-outline" style="width:100%; margin-top:auto;" onclick="promoteCandidate('A')">Promote Candidate A to Trunk</button>
+        </div>
+
+        <!-- Candidate B Card -->
+        <div class="candidate-box winner-highlight" id="candB-card">
+          <span class="winner-tag">★ EVIDENCE WINNER</span>
+          <div class="candidate-head">
+            <div>
+              <span class="candidate-tag alt">Candidate B</span>
+              <b style="margin-left:8px;">Challenger Alternative</b>
+            </div>
+            <span class="nav-pill" style="font-size:11px;">Fork from Base + Profile</span>
+          </div>
+
+          <div class="stats-grid">
+            <div class="stat-cell">
+              <div class="stat-number" style="color:var(--green);" id="candB-lat">19ms</div>
+              <div class="stat-label">P99 Latency (-44%)</div>
+            </div>
+            <div class="stat-cell">
+              <div class="stat-number" style="color:var(--green);" id="candB-mem">8.1MB</div>
+              <div class="stat-label">RAM Usage (-43%)</div>
+            </div>
+            <div class="stat-cell">
+              <div class="stat-number" style="color:var(--green);" id="candB-pass">100%</div>
+              <div class="stat-label">Tests (14/14)</div>
+            </div>
+          </div>
+
+          <div style="font-size:13px; line-height:1.75;">
+            <div><b>New Dependencies:</b> <span id="candB-deps" style="color:var(--green);">0 (zero new deps)</span></div>
+            <div><b>Code Churn:</b> <span id="candB-loc" style="color:var(--green);">+18 lines (Minimal)</span></div>
+            <div><b>Sandbox:</b> <span style="color:var(--green);">macOS sandbox-exec policy</span></div>
+            <div><b>3-Way Merge:</b> <span style="color:var(--green);">✓ Clean (0 conflicts)</span></div>
+          </div>
+
+          <button class="btn btn-primary" style="width:100%; margin-top:auto;" onclick="promoteCandidate('B')">★ Promote Evidence Winner to Trunk</button>
+        </div>
+      </div>
+
+      <div style="margin-top:20px; text-align:center; font-size:13px; color:var(--text-muted);">
+        <b>Deterministic Evidence Verdict:</b> <span id="winner-reason" style="color:var(--text);">Candidate B delivers 44% lower latency with zero dynamic heap allocations in hot path.</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Architecture & Process Isolation Section -->
+  <section id="architecture" class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="section-tag">Security &amp; Engineering</span>
+        <h2 class="section-title">Strict Process Isolation &amp; Zero Git Pollution</h2>
+        <p class="section-subtitle">
+          Termina enforces process isolation boundaries. The AI agent cannot corrupt your primary working directory or Git repository.
+        </p>
+      </div>
+
+      <div class="arch-grid">
+        <div class="arch-item">
+          <h3>
+            <span style="color:var(--accent);">🦀</span>
+            <span>Rust Core (termina-core)</span>
+          </h3>
+          <p>
+            All Git, tree hashing, snapshot captures, and three-way merges execute inside a native compiled Rust binary. Never invokes slow Git CLI subshells.
+          </p>
+        </div>
+
+        <div class="arch-item">
+          <h3>
+            <span style="color:var(--green);">🛡️</span>
+            <span>macOS sandbox-exec Boundaries</span>
+          </h3>
+          <p>
+            Candidate Pi processes, Verify workers, and descendant bash processes run inside operating-system level sandboxes. Escaping writes and network leaks are denied.
+          </p>
+        </div>
+
+        <div class="arch-item">
+          <h3>
+            <span style="color:var(--purple);">🔒</span>
+            <span>App-Owned Bare Snapshot Store</span>
+          </h3>
+          <p>
+            Source states are stored in an app-private snapshot repository with read-only Git object alternates. Your personal <code>.git</code> repository stays 100% untouched.
+          </p>
+        </div>
+
+        <div class="arch-item">
+          <h3>
+            <span style="color:var(--yellow);">⚡</span>
+            <span>Workspace Write Leases</span>
+          </h3>
+          <p>
+            Main-process write leases prevent concurrent writers from changing source trees. Editors are saved before snapshot checkpoints and unowned models are protected.
+          </p>
+        </div>
+
+        <div class="arch-item">
+          <h3>
+            <span style="color:var(--accent);">📦</span>
+            <span>APFS Copy-on-Write Cloning</span>
+          </h3>
+          <p>
+            Candidate workspaces materialize near-instantaneously on APFS volumes without duplicating heavy runtime assets like <code>node_modules</code> on disk.
+          </p>
+        </div>
+
+        <div class="arch-item">
+          <h3>
+            <span style="color:var(--green);">📜</span>
+            <span>Durable Crash-Recovery Journal</span>
+          </h3>
+          <p>
+            Three-way merges and promotion operations write an atomic pre-image journal before touching files. Crashes roll back cleanly on next launch.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Fast-Path Benchmarks Section -->
+  <section id="benchmarks" class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="section-tag">Performance</span>
+        <h2 class="section-title">Engineered for Sub-Millisecond Hot Paths</h2>
+        <p class="section-subtitle">
+          In Termina, performance is treated as a correctness requirement. Every hot path is profiled and enforced with automated perf baselines.
+        </p>
+      </div>
+
+      <div style="background:var(--bg-panel); border:1px solid var(--border); border-radius:var(--radius-lg); overflow:hidden; max-width:940px; margin:0 auto; box-shadow:var(--shadow-sm);">
+        <table style="width:100%; border-collapse:collapse; text-align:left; font-size:13px;">
+          <thead>
+            <tr style="background:var(--bg-raised); border-bottom:1px solid var(--border); color:var(--text-muted);">
+              <th style="padding:14px 18px;">Hot Path Operation</th>
+              <th style="padding:14px 18px;">Termina Rust Core</th>
+              <th style="padding:14px 18px;">Standard Git CLI</th>
+              <th style="padding:14px 18px;">Speedup</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="border-bottom:1px solid var(--border-subtle);">
+              <td style="padding:14px 18px;"><b>Working-tree Snapshot Capture</b> (1,000 files)</td>
+              <td style="padding:14px 18px; color:var(--green); font-family:var(--font-mono);"><b>3.8 ms</b></td>
+              <td style="padding:14px 18px; color:var(--text-dim); font-family:var(--font-mono);">48.2 ms</td>
+              <td style="padding:14px 18px; color:var(--accent); font-family:var(--font-mono);"><b>12.6x faster</b></td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--border-subtle);">
+              <td style="padding:14px 18px;"><b>Three-Way In-Memory Merge Tree</b></td>
+              <td style="padding:14px 18px; color:var(--green); font-family:var(--font-mono);"><b>7.1 ms</b></td>
+              <td style="padding:14px 18px; color:var(--text-dim); font-family:var(--font-mono);">62.0 ms</td>
+              <td style="padding:14px 18px; color:var(--accent); font-family:var(--font-mono);"><b>8.7x faster</b></td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--border-subtle);">
+              <td style="padding:14px 18px;"><b>APFS Candidate Materialization</b></td>
+              <td style="padding:14px 18px; color:var(--green); font-family:var(--font-mono);"><b>28.4 ms</b></td>
+              <td style="padding:14px 18px; color:var(--text-dim); font-family:var(--font-mono);">410.0 ms</td>
+              <td style="padding:14px 18px; color:var(--accent); font-family:var(--font-mono);"><b>14.4x faster</b></td>
+            </tr>
+            <tr>
+              <td style="padding:14px 18px;"><b>Live Watcher Reconciliation</b></td>
+              <td style="padding:14px 18px; color:var(--green); font-family:var(--font-mono);"><b>&lt; 1.0 ms</b></td>
+              <td style="padding:14px 18px; color:var(--text-dim); font-family:var(--font-mono);">18.5 ms</td>
+              <td style="padding:14px 18px; color:var(--accent); font-family:var(--font-mono);"><b>18.5x faster</b></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- Install & Quickstart Section -->
+  <section id="install" class="section">
+    <div class="container">
+      <div class="section-head">
+        <span class="section-tag">Quickstart</span>
+        <h2 class="section-title">Get Started with Termina</h2>
+        <p class="section-subtitle">
+          Signed and notarized for macOS. Ready-to-run standalone binaries for Linux.
+        </p>
+      </div>
+
+      <div class="install-container">
+        <div class="install-header">
+          <button class="install-tab active" data-tab="curl" onclick="setInstallTab('curl')">curl (Automated)</button>
+          <button class="install-tab" data-tab="dmg" onclick="setInstallTab('dmg')">macOS .dmg</button>
+          <button class="install-tab" data-tab="source" onclick="setInstallTab('source')">From Source (dev)</button>
+          <button class="install-tab" data-tab="shortcuts" onclick="setInstallTab('shortcuts')">Shortcuts</button>
+        </div>
+
+        <div class="install-body">
+          <!-- Curl Tab -->
+          <div class="install-pane" id="install-curl">
+            <p style="margin-bottom:14px; color:var(--text-muted);">One-line installation script (requires Node ≥ 22.19 &amp; npm):</p>
+            <div class="cmd-box">
+              <code>curl -fsSL https://raw.githubusercontent.com/Jesusz0r/termina/master/scripts/install.sh | sh</code>
+              <button class="btn btn-outline btn-sm" onclick="copyText('curl -fsSL https://raw.githubusercontent.com/Jesusz0r/termina/master/scripts/install.sh | sh')">Copy</button>
+            </div>
+            <p style="margin-top:14px; font-size:12px; color:var(--text-muted);">
+              After launch, run <code>/login</code> in the terminal to configure Gemini, Claude, or OpenAI providers.
+            </p>
+          </div>
+
+          <!-- DMG Tab -->
+          <div class="install-pane" id="install-dmg" style="display:none;">
+            <p style="margin-bottom:14px; color:var(--text-muted);">Download official signed &amp; notarized desktop releases:</p>
+            <div style="display:flex; gap:12px; flex-wrap:wrap;">
+              <a href="https://github.com/Jesusz0r/termina/releases" target="_blank" class="btn btn-primary">⬇ Download macOS DMG (Apple Silicon &amp; Intel)</a>
+              <a href="https://github.com/Jesusz0r/termina/releases" target="_blank" class="btn btn-outline">⬇ Download Linux AppImage</a>
+            </div>
+            <p style="margin-top:14px; font-size:12px; color:var(--text-muted);">
+              Ships app runtime, compiled Rust core binary, and pinned Pi agent package.
+            </p>
+          </div>
+
+          <!-- Source Tab -->
+          <div class="install-pane" id="install-source" style="display:none;">
+            <p style="margin-bottom:14px; color:var(--text-muted);">For contributors building both Electron &amp; Rust core:</p>
+            <div class="cmd-box">
+              <code>git clone https://github.com/Jesusz0r/termina.git &amp;&amp; cd termina &amp;&amp; npm install &amp;&amp; npm run dev</code>
+              <button class="btn btn-outline btn-sm" onclick="copyText('git clone https://github.com/Jesusz0r/termina.git && cd termina && npm install && npm run dev')">Copy</button>
+            </div>
+          </div>
+
+          <!-- Shortcuts Tab -->
+          <div class="install-pane" id="install-shortcuts" style="display:none;">
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; font-size:12.5px; font-family:var(--font-mono);">
+              <div style="background:var(--bg-raised); padding:10px 14px; border-radius:var(--radius-sm); border:1px solid var(--border); display:flex; justify-content:space-between;">
+                <span><code>Cmd/Ctrl + K</code></span> <span>Session Search</span>
+              </div>
+              <div style="background:var(--bg-raised); padding:10px 14px; border-radius:var(--radius-sm); border:1px solid var(--border); display:flex; justify-content:space-between;">
+                <span><code>Cmd/Ctrl + Shift + T</code></span> <span>Toggle Terminal</span>
+              </div>
+              <div style="background:var(--bg-raised); padding:10px 14px; border-radius:var(--radius-sm); border:1px solid var(--border); display:flex; justify-content:space-between;">
+                <span><code>Cmd/Ctrl + Click</code></span> <span>Fork Timeline Dot</span>
+              </div>
+              <div style="background:var(--bg-raised); padding:10px 14px; border-radius:var(--radius-sm); border:1px solid var(--border); display:flex; justify-content:space-between;">
+                <span><code>Cmd/Ctrl + S</code></span> <span>Save &amp; Re-lease</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Professional Modern Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-grid">
+        <!-- Brand Column -->
+        <div class="footer-brand">
+          <a href="#" class="footer-brand-title">
+            <img src="assets/icon.svg" alt="Termina">
+            <span>Termina</span>
+          </a>
+          <p class="footer-brand-desc">
+            The hybrid coding cockpit for autonomous AI agents. Real Pi interactive TUI, live Monaco IDE synchronization, and durable Worldlines sandboxes.
+          </p>
+          <div style="margin-top:4px;">
+            <span class="nav-pill" style="font-size:11px;">
+              <span class="pulse-dot"></span>
+              Rust Snapshot Core Online
+            </span>
+          </div>
+        </div>
+
+        <!-- Product Column -->
+        <div class="footer-col">
+          <h4>Product</h4>
+          <ul class="footer-links">
+            <li><a href="#cockpit">Cockpit Simulator</a></li>
+            <li><a href="#worldlines">Worldlines &amp; Sandboxes</a></li>
+            <li><a href="#architecture">Process Isolation</a></li>
+            <li><a href="#benchmarks">Fast-Path Baselines</a></li>
+          </ul>
+        </div>
+
+        <!-- Resources Column -->
+        <div class="footer-col">
+          <h4>Resources</h4>
+          <ul class="footer-links">
+            <li><a href="#install">Quickstart Install</a></li>
+            <li><a href="https://github.com/Jesusz0r/termina/releases" target="_blank">Releases (macOS / Linux)</a></li>
+            <li><a href="https://github.com/Jesusz0r/termina/blob/master/AGENTS.md" target="_blank">AGENTS.md Contract</a></li>
+            <li><a href="https://github.com/Jesusz0r/termina/blob/master/CONTRIBUTING.md" target="_blank">Contributing Guide</a></li>
+          </ul>
+        </div>
+
+        <!-- Community Column -->
+        <div class="footer-col">
+          <h4>Community</h4>
+          <ul class="footer-links">
+            <li>
+              <a href="https://github.com/Jesusz0r/termina" target="_blank">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg>
+                <span>GitHub Repository</span>
+              </a>
+            </li>
+            <li>
+              <a href="https://github.com/Jesusz0r/termina/discussions" target="_blank">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+                <span>Discussions</span>
+              </a>
+            </li>
+            <li>
+              <a href="https://github.com/Jesusz0r/termina/issues" target="_blank">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+                <span>Issue Tracker</span>
+              </a>
+            </li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="footer-bottom">
+        <div>
+          MIT License © 2026 <b>Jesus Mendoza</b>. All rights reserved.
+        </div>
+        <div style="display:flex; gap:16px;">
+          <a href="https://github.com/Jesusz0r/termina/blob/master/LICENSE" target="_blank">License (MIT)</a>
+          <a href="https://github.com/Jesusz0r/termina/blob/master/README.md" target="_blank">Documentation</a>
+          <a href="#cockpit">Back to Top ↑</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
