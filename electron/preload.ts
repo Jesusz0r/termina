@@ -134,7 +134,7 @@ const bridge: PiBridge = {
   onPromotionOpened: (cb) => {
     ipcRenderer.on("promotion:opened", (_e, e: { terminalId: string }) => cb(e));
   },
-  dispatchRun: (terminalId) => ipcRenderer.invoke("dispatch:run", terminalId),
+  dispatchRun: (terminalId, taskText) => ipcRenderer.invoke("dispatch:run", terminalId, taskText),
   setMineFile: (path, mine) => ipcRenderer.invoke("mine:set", path, mine),
   getMineFiles: () => ipcRenderer.invoke("mine:list"),
   getTimelineContent: (terminalId, seq) => ipcRenderer.invoke("timeline:content", terminalId, seq),

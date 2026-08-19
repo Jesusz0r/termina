@@ -205,11 +205,32 @@ function setActiveProject(projectId: string | null): void {
     item.editorEl.style.display = active ? "" : "none";
   }
   placeEditorToggle(activeProjectId);
-  // Terminal panes of the active project are visible; the rest stay alive.
-  for (const pane of panes.values()) {
-    pane.container.style.display = pane.projectId === activeProjectId ? "" : "none";
-  }
+  syncPaneVisibility();
   requestAnimationFrame(() => activeEditor().layout());
+}
+
+/** Show only the active project's terminals. Other project panes stay alive. */
+function syncPaneVisibility(): void {
+  for (const pane of panes.values()) {
+    const on = pane.projectId === activeProjectId;
+    pane.tabEl.style.display = on ? "" : "none";
+    pane.container.style.display = on ? "" : "none";
+  }
+}
+
+/** Activate a terminal that belongs to the active project, then fit it. */
+function activateProjectPane(): void {
+  const current = activeId ? panes.get(activeId) : undefined;
+  if (current && current.projectId === activeProjectId) {
+    activatePane(current.instanceId);
+    return;
+  }
+  const next = [...panes.values()].find((p) => p.projectId === activeProjectId);
+  if (next) activatePane(next.instanceId);
+  else {
+    activeId = null;
+    renderChrome();
+  }
 }
 
 const reviewView = new ReviewView();
@@ -477,8 +498,10 @@ function activatePane(instanceId: string): void {
   removeSplash();
   activeId = instanceId;
   for (const p of panes.values()) {
-    p.container.classList.toggle("active", p.instanceId === instanceId);
-    p.tabEl.classList.toggle("active", p.instanceId === instanceId);
+    const on = p.instanceId === instanceId;
+    p.container.classList.toggle("active", on);
+    p.tabEl.classList.toggle("active", on);
+    if (on) p.container.style.display = "";
   }
   pane.view.fit();
   pane.view.focus();
@@ -729,9 +752,20 @@ function renderPlan(pane: Pane): void {
       meta.textContent = claim ? `${status} · ${claim}` : status;
       li.appendChild(meta);
     }
-    if (task.paths.length > 0) {
-      li.title = task.paths.join(", ");
-      li.addEventListener("click", () => void openFileSmart(task.paths[0], true));
+    if (task.state !== "done") {
+      li.classList.add("dispatchable");
+      li.title = task.workerId ? "show dispatch worker" : "dispatch this task";
+      li.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (task.workerId) {
+          activatePane(task.workerId);
+          return;
+        }
+        void window.pi.dispatchRun(pane.instanceId, task.text).then((res) => {
+          if (!res.ok) toast(res.error ?? "dispatch failed", "warning");
+          else toast("dispatched 1 task to a parallel agent", "info");
+        });
+      });
     }
     planList.appendChild(li);
   }
@@ -1481,13 +1515,8 @@ window.pi.onFolderOpened((e) => {
   worldlinesView.resetForProject();
   refreshMine();
   void refreshTestCommand();
-  // Activate the project's first terminal (its panes are now visible).
-  const firstPane = [...panes.values()].find((p) => p.projectId === view!.id);
-  if (firstPane) activatePane(firstPane.instanceId);
-  else {
-    activeId = null;
-    renderChrome();
-  }
+  setActiveProject(view.id);
+  activateProjectPane();
   timelineView.resetForProject();
   renderTimeline();
   // Rebuild the worldline panel for this project (pushes are per-project).
@@ -1558,7 +1587,9 @@ window.pi.onInstances((list: InstanceSummary[]) => {
     if (summary.verify) pane.verify = summary.verify;
     updatePaneTab(pane);
   }
-  if (!activeId && list.length > 0) activatePane(list[0].id);
+  syncPaneVisibility();
+  const current = activeId ? panes.get(activeId) : undefined;
+  if (!current || current.projectId !== activeProjectId) activateProjectPane();
   updateEditorLock();
 });
 
@@ -1612,18 +1643,22 @@ async function boot(): Promise<void> {
     if (pane) {
       pane.cwd = inst.cwd;
       pane.workspaceId = inst.workspaceId ?? "";
+      pane.projectId = inst.projectId ?? null;
       pane.type = inst.type;
       pane.shellName = inst.shellName;
       if (inst.verify) pane.verify = inst.verify;
       updatePaneTab(pane);
     }
   }
-  if (!activeId && instances.length > 0) activatePane(instances[0].id);
+  activateProjectPane();
   updateEditorLock();
   removeSplash();
   // Show the correct project view (the boot instances may belong to it).
   const bootProjectId = instances[0]?.projectId ?? activeProjectId;
-  if (bootProjectId && projectViews.has(bootProjectId)) setActiveProject(bootProjectId);
+  if (bootProjectId && projectViews.has(bootProjectId)) {
+    setActiveProject(bootProjectId);
+    activateProjectPane();
+  }
   // The project may only be known after the instance list arrives —
   // re-query the test command now that the project is known.
   void refreshTestCommand();

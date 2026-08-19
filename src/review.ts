@@ -101,8 +101,7 @@ export class ReviewView {
     revertBtn.disabled = res.baseline === undefined;
     acceptBtn.disabled = false;
 
-    document.getElementById("editor-container")!.style.display = "none";
-    document.getElementById("editor-tabs")!.style.display = "none";
+    this.coverEditors(true);
     this.container.style.display = "flex";
     if (this.baseline === null && res.status === "created") {
       document.getElementById("review-hint")!.textContent = "new file created by the agent — reverting deletes it";
@@ -127,8 +126,7 @@ export class ReviewView {
     const acceptBtn = document.getElementById("review-accept") as HTMLButtonElement;
     revertBtn.style.display = "none";
     acceptBtn.style.display = "none";
-    document.getElementById("editor-container")!.style.display = "none";
-    document.getElementById("editor-tabs")!.style.display = "none";
+    this.coverEditors(true);
     this.container.style.display = "flex";
     const hint = document.getElementById("review-hint")!;
     hint.textContent = `shared base → candidate ${label}`;
@@ -151,8 +149,7 @@ export class ReviewView {
     const acceptBtn = document.getElementById("review-accept") as HTMLButtonElement;
     revertBtn.style.display = "none";
     acceptBtn.style.display = "none";
-    document.getElementById("editor-container")!.style.display = "none";
-    document.getElementById("editor-tabs")!.style.display = "none";
+    this.coverEditors(true);
     this.container.style.display = "flex";
     const hint = document.getElementById("review-hint")!;
     hint.textContent = "candidate A (reference) → candidate B (alternative)";
@@ -203,8 +200,7 @@ export class ReviewView {
   hide(): void {
     this.loadSeq++;
     this.container.style.display = "none";
-    document.getElementById("editor-container")!.style.display = "";
-    document.getElementById("editor-tabs")!.style.display = "";
+    this.coverEditors(false);
     this.diffEditor.setModel(null);
     this.originalModel?.dispose();
     this.modifiedModel?.dispose();
@@ -213,6 +209,12 @@ export class ReviewView {
     this.path = null;
     this.terminalId = null;
     this.baseline = null;
+  }
+
+  /** Cover the Monaco surfaces while the diff is open. Do not force the
+   *  base editor visible when hiding: the project view owns the pane. */
+  private coverEditors(cover: boolean): void {
+    document.getElementById("right-pane")?.classList.toggle("review-open", cover);
   }
 
   resetForProject(): void {

@@ -10,7 +10,7 @@
  *      (utils.ts + greeting.ts).
  *   2. The plan panel shows the tasks parsed from the plan message.
  *   3. Tasks whose files were touched become done when the run settles.
- *   4. Clicking a task opens its file in the editor.
+ *   4. Clicking a pending task dispatches that one task.
  */
 const results = [];
 const check = (name, ok, detail = "") => {
@@ -78,16 +78,24 @@ for (let i = 0; i < 90; i++) {
 check("utils.ts task is done", utilsDone, JSON.stringify(lastUtils));
 check("greeting.ts task is done", greetingDone, JSON.stringify(lastGreeting));
 
-// ---- 4. click a task opens its file ----
+// ---- 4. click a pending task dispatches that task ----
 // Re-query the live list (the plan may have been re-posted by a retry).
-const utilsTask = await evalJs(`(() => { const t = [...document.querySelectorAll('#plan-list .plan-task')].find(t => t.querySelector('.plan-text')?.textContent.includes('utils.ts')); return t ? [...document.querySelectorAll('#plan-list .plan-task')].indexOf(t) : -1; })()`);
-if (utilsTask !== -1) {
-  await evalJs(`(() => { const items = [...document.querySelectorAll('#plan-list .plan-task')]; items[${utilsTask}]?.click(); })()`);
-  await sleep(900);
-  const tabs = await evalJs(`[...document.querySelectorAll('.editor-tab .tab-name')].map(t => t.textContent)`);
-  check("clicking a task opens its file", tabs.includes("utils.ts"), JSON.stringify(tabs));
+const pendingTask = await evalJs(`(() => {
+  const items = [...document.querySelectorAll('#plan-list .plan-task')];
+  const i = items.findIndex((t) => t.classList.contains('dispatchable') && !t.classList.contains('state-active') && !t.classList.contains('state-done'));
+  return i;
+})()`);
+if (pendingTask !== -1) {
+  await evalJs(`(() => { const items = [...document.querySelectorAll('#plan-list .plan-task')]; items[${pendingTask}]?.click(); })()`);
+  let dispatched = false;
+  for (let i = 0; i < 20; i++) {
+    await sleep(250);
+    dispatched = await evalJs(`!!document.querySelector('#plan-list .plan-task.state-active, #plan-list .plan-meta') || [...document.querySelectorAll('.terminal-tab')].some(t => (t.title || '').includes('dispatch'))`);
+    if (dispatched) break;
+  }
+  check("clicking a task dispatches it", dispatched, "no dispatch worker or active claim after click");
 } else {
-  check("clicking a task opens its file", false, "no utils task to click");
+  check("clicking a task dispatches it", false, "no pending task to click");
 }
 
 const passed = results.filter(Boolean).length;

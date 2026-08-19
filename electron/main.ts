@@ -2749,10 +2749,15 @@ class PiEditorApp {
     return tasks;
   }
 
-  /** A token is a file path when it has a slash or a code extension. */
+  /** A token is a file path when it has a slash or a code extension.
+   *  Version numbers (0.1.5) and latin abbreviations (e.g.) are not paths. */
   private looksLikePath(token: string): boolean {
     if (!token || token.length > 200) return false;
-    return token.includes("/") || /\.[a-zA-Z0-9]{1,5}$/.test(token);
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(token)) return false;
+    if (/^v?\d+(?:\.\d+)+$/.test(token)) return false;
+    if (/^(?:e\.g|i\.e|vs|etc)\.?$/i.test(token)) return false;
+    if (token.includes("/")) return !token.endsWith(":");
+    return /\.[a-zA-Z][a-zA-Z0-9]{0,4}$/.test(token);
   }
 
   /** A tool touched a path: mark every task that mentions it as active. */
@@ -2873,12 +2878,6 @@ class PiEditorApp {
 
   // ------------------------------------------------------------- dispatch --
 
-  /**
-   * Dispatch the plan tasks of a terminal to parallel agent workers. Each
-   * task must mention files; tasks whose files overlap another task stay
-   * behind because their tasks can modify the same files. At most 3 workers run at
-   * once. The owner's partial run is interrupted first.
-   */
   /** Normalize a task path to a comparable key (canonical absolute path). */
   private taskPathKey(p: string, root: string): string {
     return this.canonicalPath(join(root, p));
@@ -2916,45 +2915,125 @@ class PiEditorApp {
     return false;
   }
 
-  private async dispatchRun(ownerId: string): Promise<{ ok: boolean; error?: string; dispatched?: number }> {
+  private static readonly MAX_DISPATCH_WORKERS = 3;
+
+  /** Count of live dispatch workers that this owner started. */
+  private ownerDispatchCount(ownerId: string): number {
+    let n = 0;
+    for (const entry of this.dispatchRuns.values()) {
+      if (entry.ownerId === ownerId) n++;
+    }
+    return n;
+  }
+
+  /** Canonical paths already claimed by this owner's live workers. */
+  private dispatchPathKeysInFlight(ownerId: string, root: string): Set<string> {
+    const used = new Set<string>();
+    const owner = this.terminals.get(ownerId);
+    if (!owner) return used;
+    for (const entry of this.dispatchRuns.values()) {
+      if (entry.ownerId !== ownerId) continue;
+      const task = this.findDispatchedTask(owner, entry.taskText);
+      if (!task) continue;
+      for (const p of task.paths) used.add(this.taskPathKey(p, root));
+    }
+    return used;
+  }
+
+  /**
+   * Choose plan tasks to send to workers. A taskText picks that one row.
+   * The bulk path still skips tasks that name no file. At most three
+   * workers run for one owner. Overlap uses canonical paths.
+   */
+  private pickDispatchTasks(
+    owner: PiTerminalInstance,
+    root: string,
+    taskText?: string,
+  ): { tasks: PlanTask[]; error?: string } {
+    const remaining = PiEditorApp.MAX_DISPATCH_WORKERS - this.ownerDispatchCount(owner.id);
+    if (remaining <= 0) return { tasks: [], error: "at most 3 dispatch workers run at once" };
+    const used = this.dispatchPathKeysInFlight(owner.id, root);
+    if (taskText !== undefined) {
+      const task = this.findDispatchedTask(owner, taskText);
+      if (!task) return { tasks: [], error: "that task is not on the plan board" };
+      if (task.workerId || task.state === "active" || task.state === "done") {
+        return { tasks: [], error: "that task is already dispatched" };
+      }
+      const keys = task.paths.map((p) => this.taskPathKey(p, root));
+      if (keys.some((k) => used.has(k))) {
+        return { tasks: [], error: "that task overlaps a running dispatch" };
+      }
+      return { tasks: [task] };
+    }
+    const chosen: PlanTask[] = [];
+    for (const task of owner.plan) {
+      if (chosen.length >= remaining) break;
+      if (task.workerId || task.state === "active" || task.state === "done") continue;
+      if (task.paths.length === 0) continue;
+      const keys = task.paths.map((p) => this.taskPathKey(p, root));
+      if (keys.some((k) => used.has(k))) continue;
+      keys.forEach((k) => used.add(k));
+      chosen.push(task);
+    }
+    if (chosen.length === 0) return { tasks: [], error: "no task mentions a file to scope it" };
+    return { tasks: chosen };
+  }
+
+  /** Live workers plus the jobs about to start. Briefings list sibling claims. */
+  private dispatchJobsForBriefing(
+    owner: PiTerminalInstance,
+    extra: Array<{ task: PlanTask; id: string }>,
+  ): Array<{ task: PlanTask; id: string }> {
+    const jobs: Array<{ task: PlanTask; id: string }> = [];
+    const seen = new Set<string>();
+    for (const [id, entry] of this.dispatchRuns) {
+      if (entry.ownerId !== owner.id) continue;
+      const task = this.findDispatchedTask(owner, entry.taskText);
+      if (!task) continue;
+      jobs.push({ task, id });
+      seen.add(id);
+    }
+    for (const job of extra) {
+      if (seen.has(job.id)) continue;
+      jobs.push(job);
+    }
+    return jobs;
+  }
+
+  private async dispatchRun(
+    ownerId: string,
+    taskText?: string,
+  ): Promise<{ ok: boolean; error?: string; dispatched?: number }> {
     const owner = this.terminals.get(ownerId);
     if (!owner || owner.type !== "agent") return { ok: false, error: "terminal not found" };
     if (owner.plan.length === 0) return { ok: false, error: "the plan board is empty — ask the agent for a plan first" };
     const ownerWs = this.workspaceOfTerminal(owner);
     for (const entry of this.dispatchRuns.values()) {
+      if (entry.ownerId === ownerId) continue;
       const running = this.terminals.get(entry.ownerId);
       if (running && ownerWs && running.workspaceId === ownerWs.id) {
         return { ok: false, error: "a dispatch is already running" };
       }
     }
-    if (owner.busy) owner.pty.write("\x03"); // the workers replace the owner's run
+    const dispatchRoot = ownerWs?.root ?? owner.cwd;
+    const picked = this.pickDispatchTasks(owner, dispatchRoot, taskText);
+    if (picked.error) return { ok: false, error: picked.error };
+    const chosen = picked.tasks;
+    const alreadyDispatching = this.ownerDispatchCount(ownerId) > 0;
+    if (owner.busy && !alreadyDispatching) owner.pty.write("\x03"); // the workers replace the owner's run
     // Structured startup skips the interactive preflight. Flush once so
     // unsaved editor buffers land before the workers write.
     if (ownerWs) {
       const flush = await this.flushDirtyModels(`dispatch:${ownerId}`, ownerWs.id);
       if (!flush.ok) return { ok: false, error: "could not save editor changes" };
     }
-    // Pick tasks with paths, no overlapping files, at most 3. The overlap
-    // check compares canonical paths: "utils.ts" and "./utils.ts" are the
-    // same file, "src/utils.ts" is a different one.
-    const chosen: PlanTask[] = [];
-    const used = new Set<string>();
-    const dispatchRoot = ownerWs?.root ?? owner.cwd;
-    for (const task of owner.plan) {
-      if (chosen.length >= 3) break;
-      if (task.paths.length === 0) continue;
-      const keys = task.paths.map((p) => this.taskPathKey(p, dispatchRoot));
-      if (keys.some((k) => used.has(k))) continue;
-      keys.forEach((k) => used.add(k));
-      chosen.push(task);
-    }
-    if (chosen.length === 0) return { ok: false, error: "no task mentions a file to scope it" };
     const jobs = chosen.map((task) => ({ task, id: this.allocateTerminalId() }));
     try {
       mkdirSync(this.eventsDir, { recursive: true, mode: 0o700 });
       this.eventsDirReady = true;
+      const briefingJobs = this.dispatchJobsForBriefing(owner, jobs);
       for (const job of jobs) {
-        this.writeDispatchBriefing(job.id, job.task, jobs);
+        this.writeDispatchBriefing(job.id, job.task, briefingJobs);
         this.writeDispatchStartupControl(job.id, job.task.text);
       }
     } catch (err) {
@@ -4718,12 +4797,14 @@ class PiEditorApp {
       this.createWorkspace(project, cwd, true);
       this.loadMineFiles(project);
       this.initWorldlines(project);
-      this.sendFolderOpened(cwd, id);
+      // Spawn the terminal before folder:opened so the renderer can show
+      // that pane when it switches the project view.
       try {
         await this.createTerminal(cwd);
       } catch {
         /* Pi can be unavailable while the folder still opens. */
       }
+      this.sendFolderOpened(cwd, id);
       return project;
     } finally {
       this.switchingProjects.delete(id);
@@ -5444,7 +5525,9 @@ class PiEditorApp {
     ipcMain.handle("mine:list", () => [...(this.project()?.mineFiles ?? [])]);
 
     // ---- Dispatch ----
-    ipcMain.handle("dispatch:run", (_e, terminalId: string) => this.dispatchRun(terminalId));
+    ipcMain.handle("dispatch:run", (_e, terminalId: string, taskText?: string) =>
+      this.dispatchRun(terminalId, typeof taskText === "string" ? taskText : undefined),
+    );
 
     // ---- Session Search ----
     ipcMain.handle("session:search", (_e, query: string) => this.searchSessions(query));

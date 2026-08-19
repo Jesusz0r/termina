@@ -935,10 +935,14 @@ body {
   padding: 3px 4px;
   font-size: 12px;
   border-radius: 3px;
+  cursor: default;
+}
+
+.plan-task.dispatchable {
   cursor: pointer;
 }
 
-.plan-task:hover {
+.plan-task.dispatchable:hover {
   background: var(--bg-hover);
 }
 
@@ -2412,6 +2416,13 @@ body {
   display: flex;
   flex-direction: column;
   background: var(--bg);
+}
+
+#right-pane.review-open .project-editor,
+#right-pane.review-open #editor-chrome,
+#right-pane.review-open #editor-container,
+#right-pane.review-open .editor-empty {
+  display: none !important;
 }
 
 .review-header {

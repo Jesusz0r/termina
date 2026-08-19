@@ -560,8 +560,8 @@ export interface PiBridge {
   onPromotionOpened(cb: (e: { terminalId: string }) => void): void;
 
   // Dispatch (parallel agents)
-  /** Dispatch the plan board tasks of the terminal to parallel workers. */
-  dispatchRun(terminalId: string): Promise<{ ok: boolean; error?: string; dispatched?: number }>;
+  /** Dispatch plan tasks to parallel workers. Pass task text to send one row. */
+  dispatchRun(terminalId: string, taskText?: string): Promise<{ ok: boolean; error?: string; dispatched?: number }>;
 
   // Mine (file ownership)
   /** Mark a file as the user's own (the agent is told not to modify it). */
