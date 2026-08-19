@@ -233,6 +233,8 @@ export class WorldlineManager {
   private seq = 0;
   private ready: Promise<void>;
   private terminalToComparison = new Map<string, { comparisonId: string; label: "A" | "B" }>();
+  /** Source comparison ids with a challenge launch in flight. */
+  private challengeInFlight = new Set<string>();
 
   constructor(private deps: WorldlineDeps) {
     mkdirSync(this.deps.worldsRoot, { recursive: true });
@@ -353,12 +355,19 @@ export class WorldlineManager {
    * recorded comparison base and the pre-task session anchor with the
    * original task. The root promotion base stays unchanged.
    */
-  async challengeFromCandidate(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; comparisonId?: string; error?: string; requiresDiscard?: boolean }> {
+  async challengeFromCandidate(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; comparisonId?: string; error?: string }> {
     await this.ready;
     const cmp = this.comparisons.get(comparisonId);
     const cand = cmp?.candidates.get(label);
     if (!cmp || !cand) return { ok: false, error: "candidate not found" };
+    if (cmp.phase !== "running" && cmp.phase !== "creating") {
+      return { ok: false, error: "this comparison is no longer live" };
+    }
+    if (this.challengeInFlight.has(comparisonId)) return { ok: false, error: "a challenge is already launching" };
     if (!cand.sessionFile) return { ok: false, error: "the candidate has no session" };
+    if (cand.state === "running" || cand.state === "creating" || cand.state === "promoting") {
+      return { ok: false, error: "wait for the candidate to settle before Challenge" };
+    }
     const store = await this.deps.getStore();
     if (!store) return { ok: false, error: "recording is not available" };
     if (!cmp.baseStateId) return { ok: false, error: "the comparison base is missing" };
@@ -366,12 +375,13 @@ export class WorldlineManager {
     if (!run?.promptPayloadFile || !run.promptParentEntryId) {
       return { ok: false, error: "the run has no captured task or pre-task anchor" };
     }
-    if (this.liveWorldlineCount() + 2 > 3) return { ok: false, error: "the live worldline budget is exhausted" };
-    // If another alternative occupies B, require discard confirmation.
-    const other = cmp.candidates.get(label === "A" ? "B" : "A");
-    if (other && other.state !== "discarded" && other.state !== "error") {
-      return { ok: false, error: "candidate B is occupied — discard it first", requiresDiscard: true };
+    // This comparison is replaced by the challenge pair, so its live
+    // candidates free their budget slots.
+    if (this.liveWorldlineCount() - cmp.candidates.size + 2 > 3) {
+      return { ok: false, error: "the live worldline budget is exhausted" };
     }
+    this.challengeInFlight.add(comparisonId);
+    try {
     // Snapshot the candidate head as the new reference A.
     const wHead = await this.deps.captureHead(cand.dir, join(cand.dir, ".git"), cmp.baseStateId);
     const id = `cmp-${++this.seq}`;
@@ -492,12 +502,19 @@ export class WorldlineManager {
         if (ncmp.phase !== "running") return;
         void this.teardown(ncmp.id, "error", "the candidates did not become ready in time");
       }, READY_TIMEOUT_MS);
+      // Drop the source from the live budget immediately. Teardown waits
+      // on process group signals; do not hold the IPC handler for that.
+      cmp.phase = "error";
+      void this.teardown(comparisonId, "discarded", null);
       return { ok: true, comparisonId: id };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       await this.teardown(ncmp.id, "error", message);
       await this.deps.releaseState(wHead.commit);
       return { ok: false, error: message };
+    }
+    } finally {
+      this.challengeInFlight.delete(comparisonId);
     }
   }
 
@@ -1436,7 +1453,7 @@ export class WorldlineManager {
   }
 
   /** Open a new terminal for an existing candidate (reopen). */
-  async openTerminal(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; error?: string }> {
+  async openTerminal(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; error?: string; terminalId?: string }> {
     const cmp = this.comparisons.get(comparisonId);
     const cand = cmp?.candidates.get(label);
     if (!cmp || !cand) return { ok: false, error: "candidate not found" };
@@ -1456,7 +1473,7 @@ export class WorldlineManager {
       cand.version++;
       this.terminalToComparison.set(terminalId, { comparisonId: cmp.id, label });
       this.pushUpdate(cmp, cand);
-      return { ok: true };
+      return { ok: true, terminalId };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }

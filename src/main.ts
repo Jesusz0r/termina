@@ -306,6 +306,11 @@ worldlinesView.bind({
     void reviewView.showABDiff(comparisonId, relPath, worldlinesView.rootOf(comparisonId, "A"));
   },
   onOpenFile: (absPath) => void openFileSmart(absPath, false),
+  onOpenTerminal: (terminalId) => activatePaneWhenReady(terminalId),
+  isLiveTerminal: (terminalId) => {
+    const pane = panes.get(terminalId);
+    return !!pane && !pane.error && !pane.exited;
+  },
 });
 const btnForkRun = document.getElementById("btn-fork-run") as HTMLButtonElement;
 
@@ -325,6 +330,8 @@ interface Pane {
   type: "agent" | "shell";
   shellName: string | undefined;
   error: boolean;
+  /** True after pty:exit. The pane remains until the user closes the tab. */
+  exited: boolean;
   modified: ModifiedFile[];
   accepted: Set<string>;
   reverted: Set<string>;
@@ -446,6 +453,7 @@ function createPaneShell(instanceId: string): Pane {
     type: "agent",
     shellName: undefined,
     error: false,
+    exited: false,
     modified: [],
     accepted: new Set(),
     reverted: new Set(),
@@ -492,6 +500,14 @@ function applyTypeBadge(pane: Pane): void {
   }
 }
 
+/** Focus a terminal once its pane exists (Open / Promote can race instances). */
+let pendingActivateId: string | null = null;
+function activatePaneWhenReady(instanceId: string): void {
+  pendingActivateId = instanceId;
+  const pane = panes.get(instanceId);
+  if (pane && !pane.exited) activatePane(instanceId);
+}
+
 function activatePane(instanceId: string): void {
   const pane = panes.get(instanceId);
   if (!pane) return;
@@ -503,6 +519,7 @@ function activatePane(instanceId: string): void {
     p.tabEl.classList.toggle("active", on);
     if (on) p.container.style.display = "";
   }
+  if (pendingActivateId === instanceId) pendingActivateId = null;
   pane.view.fit();
   pane.view.focus();
   renderChrome();
@@ -1384,6 +1401,7 @@ window.pi.onPtyData(({ id, data }) => {
 window.pi.onPtyExit(({ id }) => {
   const pane = panes.get(id);
   if (!pane) return;
+  pane.exited = true;
   pane.view.write("\r\n\x1b[90m[pi exited]\x1b[0m\r\n");
 });
 
@@ -1537,8 +1555,7 @@ window.pi.onWorldlineRunsChanged(({ terminalId }) => {
 
 // A promotion opens its primary terminal: bring it to the front.
 window.pi.onPromotionOpened(({ terminalId }) => {
-  const pane = panes.get(terminalId);
-  if (pane) activatePane(terminalId);
+  activatePaneWhenReady(terminalId);
 });
 
 window.pi.onWorldlineUpdate((summary) => {
@@ -1588,8 +1605,15 @@ window.pi.onInstances((list: InstanceSummary[]) => {
     updatePaneTab(pane);
   }
   syncPaneVisibility();
-  const current = activeId ? panes.get(activeId) : undefined;
-  if (!current || current.projectId !== activeProjectId) activateProjectPane();
+  if (pendingActivateId) {
+    const pane = panes.get(pendingActivateId);
+    if (pane && !pane.exited && (pane.projectId === activeProjectId || pane.projectId === null)) {
+      activatePane(pendingActivateId);
+    }
+  } else {
+    const current = activeId ? panes.get(activeId) : undefined;
+    if (!current || current.projectId !== activeProjectId) activateProjectPane();
+  }
   updateEditorLock();
 });
 

@@ -16,6 +16,10 @@ interface ViewHandlers {
   onCompareAB(comparisonId: string, relPath: string): void;
   /** Open an absolute candidate path in the editor. */
   onOpenFile(absPath: string): void;
+  /** Focus a terminal after Open or Promote. */
+  onOpenTerminal(terminalId: string): void;
+  /** True when this terminal still has a live pane. */
+  isLiveTerminal(terminalId: string): boolean;
 }
 
 const PROFILE_LABEL: Record<ProfileVerdict["profile"], string> = {
@@ -178,6 +182,19 @@ function evidenceLineDetail(rec: EvidenceRecord, other: EvidenceRecord | undefin
   return "";
 }
 
+function actionButton(className: string, label: string, title: string, onClick: () => void): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = className;
+  btn.textContent = label;
+  btn.title = title;
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    onClick();
+  });
+  return btn;
+}
+
 const STATE_LABELS: Record<string, string> = {
   creating: "creating",
   ready: "ready",
@@ -203,6 +220,8 @@ interface CandidateCard {
   details: WorldlineDetails | null;
   /** The candidate version the cached details were fetched at. */
   detailsVersion: number | null;
+  /** The version last written into the details DOM. */
+  filledVersion: number | null;
   detailsLoading: boolean;
 }
 
@@ -232,6 +251,8 @@ export class WorldlinesView {
     onCompareBase: () => {},
     onCompareAB: () => {},
     onOpenFile: () => {},
+    onOpenTerminal: () => {},
+    isLiveTerminal: () => false,
   };
 
   constructor(panel: HTMLElement) {
@@ -390,31 +411,14 @@ export class WorldlinesView {
     runEl.textContent = "…";
     const spacer = document.createElement("div");
     spacer.className = "spacer";
-    const challengeBtn = document.createElement("button");
-    challengeBtn.className = "cmp-challenge";
-    challengeBtn.textContent = "Challenge";
-    challengeBtn.title = "Launch the challenger: B replays the original task automatically";
-    challengeBtn.addEventListener("click", () => void this.challenge(comparisonId));
-    const evidenceBtn = document.createElement("button");
-    evidenceBtn.className = "cmp-evidence";
-    evidenceBtn.textContent = "Evidence";
-    evidenceBtn.title = "Run the evidence contract for both candidates and rank the profiles";
-    evidenceBtn.addEventListener("click", () => void this.evidence(comparisonId));
-    const abBtn = document.createElement("button");
-    abBtn.className = "cmp-ab";
-    abBtn.textContent = "A ⇄ B";
-    abBtn.title = "Compare the A and B heads file by file";
-    abBtn.addEventListener("click", () => void this.openABCompare(comparisonId));
-    const discardBtn = document.createElement("button");
-    discardBtn.className = "cmp-discard";
-    discardBtn.textContent = "Discard";
-    discardBtn.title = "Discard this comparison and remove every app-owned resource";
-    discardBtn.addEventListener("click", () => void this.confirmDiscard(comparisonId));
+    const challengeBtn = actionButton("cmp-challenge", "Challenge", "Launch the challenger: B replays the original task automatically", () => void this.challenge(comparisonId));
+    const evidenceBtn = actionButton("cmp-evidence", "Evidence", "Run the evidence contract for both candidates and rank the profiles", () => void this.evidence(comparisonId));
+    const abBtn = actionButton("cmp-ab", "A ⇄ B", "Compare the A and B heads file by file", () => void this.openABCompare(comparisonId));
+    const discardBtn = actionButton("cmp-discard", "Discard", "Discard this comparison and remove every app-owned resource", () => void this.confirmDiscard(comparisonId));
     head.append(idEl, runEl, spacer, challengeBtn, evidenceBtn, abBtn, discardBtn);
 
     const verdictsEl = document.createElement("div");
     verdictsEl.className = "cmp-verdicts";
-    block.appendChild(verdictsEl);
 
     const row = document.createElement("div");
     row.className = "candidate-row";
@@ -425,7 +429,7 @@ export class WorldlinesView {
       pair.cards.set(label, card);
       row.appendChild(card.el);
     }
-    block.append(head, row);
+    block.append(head, verdictsEl, row);
     this.listEl.appendChild(block);
     this.pairs.set(comparisonId, pair);
     this.refreshCount();
@@ -454,11 +458,7 @@ export class WorldlinesView {
     stateEl.className = "cand-state";
     const spacer = document.createElement("div");
     spacer.className = "spacer";
-    const detailsBtn = document.createElement("button");
-    detailsBtn.className = "cand-details";
-    detailsBtn.textContent = "▾";
-    detailsBtn.title = "Show source statistics, provenance, and dependency changes";
-    detailsBtn.addEventListener("click", () => this.toggleDetails(comparisonId, label, false));
+    const detailsBtn = actionButton("cand-details", "▾", "Show source statistics, provenance, and dependency changes", () => this.toggleDetails(comparisonId, label, false));
     head.append(badge, role, stateEl, spacer, detailsBtn);
 
     const meta = document.createElement("div");
@@ -485,26 +485,10 @@ export class WorldlinesView {
 
     const actions = document.createElement("div");
     actions.className = "cand-actions";
-    const promoteBtn = document.createElement("button");
-    promoteBtn.className = "cand-promote";
-    promoteBtn.textContent = "Promote";
-    promoteBtn.title = "Merge this candidate into the primary project";
-    promoteBtn.addEventListener("click", () => void this.promote(comparisonId, label));
-    const verifyBtn = document.createElement("button");
-    verifyBtn.className = "cand-verify";
-    verifyBtn.textContent = "Verify";
-    verifyBtn.title = "Run the detected tests inside the candidate sandbox";
-    verifyBtn.addEventListener("click", () => void this.verify(comparisonId, label));
-    const compareBtn = document.createElement("button");
-    compareBtn.className = "cand-compare";
-    compareBtn.textContent = "Compare";
-    compareBtn.title = "Diff the candidate head against the shared base";
-    compareBtn.addEventListener("click", () => this.toggleDetails(comparisonId, label, true));
-    const openBtn = document.createElement("button");
-    openBtn.className = "cand-open";
-    openBtn.textContent = "Open";
-    openBtn.title = "Reopen the candidate Pi terminal";
-    openBtn.addEventListener("click", () => void this.reopen(comparisonId, label));
+    const promoteBtn = actionButton("cand-promote", "Promote", "Merge this candidate into the primary project", () => void this.promote(comparisonId, label));
+    const verifyBtn = actionButton("cand-verify", "Verify", "Run the detected tests inside the candidate sandbox", () => void this.verify(comparisonId, label));
+    const compareBtn = actionButton("cand-compare", "Compare", "Diff the candidate head against the shared base", () => void this.openBaseCompare(comparisonId, label));
+    const openBtn = actionButton("cand-open", "Open", "Reopen the candidate Pi terminal", () => void this.reopen(comparisonId, label));
     actions.append(promoteBtn, verifyBtn, compareBtn, openBtn);
 
     el.append(head, meta, detailsBody, actions);
@@ -518,6 +502,7 @@ export class WorldlinesView {
       changedList,
       details: null,
       detailsVersion: null,
+      filledVersion: null,
       detailsLoading: false,
     };
     return card;
@@ -535,15 +520,14 @@ export class WorldlinesView {
     const verifyBtn = card.el.querySelector(".cand-verify") as HTMLButtonElement;
     const openBtn = card.el.querySelector(".cand-open") as HTMLButtonElement;
     const promoteBtn = card.el.querySelector(".cand-promote") as HTMLButtonElement;
-    const usable =
-      s.terminalId !== null && !["creating", "discarding", "discarded", "promoted", "cancelled", "error"].includes(s.state);
-    verifyBtn.disabled = !usable;
+    const dead = ["creating", "discarding", "discarded", "promoted", "cancelled", "error"];
+    verifyBtn.disabled = !s.sessionFile || dead.includes(s.state);
     openBtn.disabled = !s.sessionFile;
-    promoteBtn.disabled = !usable || !s.sessionFile;
+    promoteBtn.disabled = !s.sessionFile || dead.includes(s.state);
     promoteBtn.textContent = s.state === "promoting" ? "promoting…" : "Promote";
-    // The details stay valid while the card lives; refresh them on state
-    // changes only when the user already opened them.
-    if (!card.detailsBody.hidden && card.details) this.fillDetails(card, card.details);
+    if (!card.detailsBody.hidden && card.details && card.filledVersion !== card.detailsVersion) {
+      this.fillDetails(card, card.details);
+    }
     this.renderEvidence(card);
     // The pair header reflects the pair shape (challenge needs both sides).
     const pair = this.pairs.get(card.summary.comparisonId);
@@ -560,10 +544,17 @@ export class WorldlinesView {
     const bothReady = a !== undefined && b !== undefined;
     abBtn.style.display = bothReady ? "" : "none";
     challengeBtn.style.display = bothReady ? "" : "none";
-    const aSettled = a !== undefined && ["ready", "running", "settled"].includes(a.summary.state);
-    const bSettled = b !== undefined && ["ready", "running", "settled"].includes(b.summary.state);
-    evidenceBtn.disabled = !(aSettled && bSettled);
-    evidenceBtn.title = evidenceBtn.disabled ? "evidence needs both candidates settled" : "Run the evidence contract for both candidates and rank the profiles";
+    const idle = (card: CandidateCard | undefined): boolean =>
+      !!card && (card.summary.state === "ready" || card.summary.state === "settled");
+    evidenceBtn.disabled = !(idle(a) && idle(b));
+    evidenceBtn.title = evidenceBtn.disabled
+      ? "evidence needs both candidates idle"
+      : "Run the evidence contract for both candidates and rank the profiles";
+    const aReady = !!a?.summary.sessionFile && !["creating", "running", "promoting", "discarding", "discarded", "cancelled", "error"].includes(a.summary.state);
+    challengeBtn.disabled = !aReady;
+    challengeBtn.title = challengeBtn.disabled
+      ? "wait for candidate A to settle before Challenge"
+      : "Launch the challenger: B replays the original task automatically";
   }
 
   // ------------------------------------------------------------ actions ----
@@ -572,13 +563,12 @@ export class WorldlinesView {
     const pair = this.pairs.get(comparisonId);
     const a = pair?.cards.get("A");
     if (!pair || !a) return;
-    const runId = a.summary.sourceRunId;
     void showConfirm(
       "Launch challenge",
-      `Candidate B replays the original task of ${runId} unchanged against the run start. The settled candidate A stays the reference.`,
+      "Candidate B replays the original task against the run start. Candidate A stays the reference. This comparison is replaced by the challenge pair.",
     ).then(async (r) => {
       if (!r.confirmed) return;
-      const res = await window.pi.challengeRun(runId);
+      const res = await window.pi.challengeCandidate(comparisonId, "A");
       if (!res.ok) toast(`challenge failed: ${res.error ?? "unknown error"}`, "warning");
       else toast(`challenger launched — ${res.comparisonId ?? ""}`, "info");
     });
@@ -598,23 +588,55 @@ export class WorldlinesView {
       `Merge candidate ${label} (${s.role}) into the primary project? The three-way merge uses the run start as the base.`,
     ).then(async (r) => {
       if (!r.confirmed) return;
-      const res = await window.pi.promoteWorldline(comparisonId, label);
-      if (!res.ok) toast(`promotion failed: ${res.error ?? "unknown error"}`, "warning");
-      else toast(`candidate ${label} promoted — opening the result in a new terminal`, "info");
+      await this.runPromote(comparisonId, label, false);
     });
+  }
+
+  private async runPromote(comparisonId: string, label: "A" | "B", force: boolean): Promise<void> {
+    const res = await window.pi.promoteWorldline(comparisonId, label, force);
+    if (res.confirm) {
+      const again = await showConfirm("Promote candidate", res.confirm);
+      if (!again.confirmed) return;
+      await this.runPromote(comparisonId, label, true);
+      return;
+    }
+    if (!res.ok) toast(`promotion failed: ${res.error ?? "unknown error"}`, "warning");
+    else {
+      toast(`candidate ${label} promoted — opening the result in a new terminal`, "info");
+      if (res.terminalId) this.handlers.onOpenTerminal(res.terminalId);
+    }
   }
 
   private async verify(comparisonId: string, label: "A" | "B"): Promise<void> {
     const card = this.pairs.get(comparisonId)?.cards.get(label);
-    if (!card?.summary.terminalId) return;
-    const res = await window.pi.runVerify(card.summary.terminalId);
+    if (!card) return;
+    let terminalId = card.summary.terminalId;
+    if (!terminalId || !this.handlers.isLiveTerminal(terminalId)) {
+      const opened = await window.pi.openWorldlineTerminal(comparisonId, label);
+      if (!opened.ok || !opened.terminalId) {
+        toast(opened.error ?? "open the candidate terminal before Verify", "warning");
+        return;
+      }
+      terminalId = opened.terminalId;
+      this.handlers.onOpenTerminal(terminalId);
+    }
+    const res = await window.pi.runVerify(terminalId);
     if (!res.ok) toast(res.error ?? "verify failed to start", "warning");
   }
 
   private async reopen(comparisonId: string, label: "A" | "B"): Promise<void> {
+    const card = this.pairs.get(comparisonId)?.cards.get(label);
+    const liveId = card?.summary.terminalId;
+    if (liveId && this.handlers.isLiveTerminal(liveId)) {
+      this.handlers.onOpenTerminal(liveId);
+      return;
+    }
     const res = await window.pi.openWorldlineTerminal(comparisonId, label);
     if (!res.ok) toast(res.error ?? "could not reopen the candidate", "warning");
-    else toast(`candidate ${label} reopened`, "info");
+    else {
+      toast(`candidate ${label} reopened`, "info");
+      if (res.terminalId) this.handlers.onOpenTerminal(res.terminalId);
+    }
   }
 
   private confirmDiscard(comparisonId: string): void {
@@ -694,6 +716,25 @@ export class WorldlinesView {
       });
       card.changedList.appendChild(li);
     }
+  }
+
+  /** The candidate's changed files versus the shared base. */
+  private async openBaseCompare(comparisonId: string, label: "A" | "B"): Promise<void> {
+    const details = await this.detailsOf(comparisonId, label);
+    if (!details) return;
+    if (details.changedFiles.length === 0) {
+      toast(`candidate ${label} has no changes versus the shared base`, "info");
+      return;
+    }
+    this.openListModal(
+      `base → ${label} — ${details.changedFiles.length} file(s)`,
+      details.changedFiles.map((f) => [f.relPath, f.status] as [string, WorldlineChangedFile["status"]]),
+      (relPath) => {
+        const root = this.rootOf(comparisonId, label);
+        if (!root) return;
+        this.handlers.onCompareBase(comparisonId, label, relPath, `${root}/${relPath}`);
+      },
+    );
   }
 
   /** The union of both candidates' changed files, for the A ⇄ B list. */

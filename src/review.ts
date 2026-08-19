@@ -114,6 +114,7 @@ export class ReviewView {
 
   /** Show the base-to-candidate diff for a worldline file. */
   async showCandidateDiff(comparisonId: string, label: "A" | "B", relPath: string, absPath: string): Promise<void> {
+    const seq = ++this.loadSeq;
     this.terminalId = null;
     this.path = absPath;
     this.nameEl.textContent = `${relPath}  ·  ${label}`;
@@ -121,6 +122,7 @@ export class ReviewView {
       window.pi.getWorldlineBaseFile(comparisonId, relPath),
       window.pi.getWorldlineFile(comparisonId, label, relPath),
     ]);
+    if (seq !== this.loadSeq) return;
     this.setDiff(base.ok && base.content !== undefined ? base.content : "", cand.ok && cand.content !== undefined ? cand.content : "");
     const revertBtn = document.getElementById("review-revert") as HTMLButtonElement;
     const acceptBtn = document.getElementById("review-accept") as HTMLButtonElement;

@@ -168,6 +168,7 @@ export const DEFAULT_CODE_FONT_STACK = "ui-monospace, 'SF Mono', Menlo, Consolas
 /** Named families the settings window offers. Empty means the default stack. */
 export const CODE_FONT_FAMILIES = [
   "",
+  "Departure Mono",
   "SF Mono",
   "Menlo",
   "Monaco",
@@ -535,13 +536,13 @@ export interface PiBridge {
   /** Discard a live comparison. */
   discardWorldline(comparisonId: string): Promise<{ ok: boolean; error?: string }>;
   /** Reopen a candidate's Pi terminal. */
-  openWorldlineTerminal(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; error?: string }>;
+  openWorldlineTerminal(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; error?: string; terminalId?: string }>;
   /** Fork one candidate from a timeline moment (WORLDLINES §6). */
   forkPoint(terminalId: string, seq: number): Promise<{ ok: boolean; comparisonId?: string; error?: string }>;
   /** Launch the challenger of a completed run (WORLDLINES §6.9). */
   challengeRun(runId: string): Promise<{ ok: boolean; comparisonId?: string; error?: string }>;
   /** Challenge an existing candidate (snapshot as reference + challenger). */
-  challengeCandidate(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; comparisonId?: string; error?: string; requiresDiscard?: boolean }>;
+  challengeCandidate(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; comparisonId?: string; error?: string }>;
   /** The three comparison diffs (metadata only). */
   compareWorldline(comparisonId: string): Promise<{ ok: boolean; baseToA?: WorldlineChangedFile[]; baseToB?: WorldlineChangedFile[]; aToB?: WorldlineChangedFile[]; error?: string }>;
   /** Compute evidence for both candidates of a comparison. */
