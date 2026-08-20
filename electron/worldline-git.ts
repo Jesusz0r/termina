@@ -13,7 +13,7 @@
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { coreClient } from "./core-client.js";
 
 /** One captured source state in the store. */
@@ -233,6 +233,11 @@ export class SnapshotStore {
   async destroy(): Promise<void> {
     await rm(this.dir, { recursive: true, force: true });
   }
+}
+
+/** True when the capture root is the Git top-level or a folder inside it. */
+export function captureRootInRepo(captureRoot: string, gitTopLevel: string): boolean {
+  return captureRoot === gitTopLevel || captureRoot.startsWith(gitTopLevel + sep);
 }
 
 /** Convenience: the canonical Git top-level directory of a folder. */

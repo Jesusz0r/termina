@@ -23,7 +23,7 @@ import { Worker } from "node:worker_threads";
 import { PtyTerminal } from "./pty-terminal.js";
 import { SidecarEvent, SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
-import { SnapshotStore, MIN_WORLDS_FREE_BYTES, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, platformHasRecursiveWatcher, platformHasSandboxExec, type SourceState } from "./worldline-git.js";
+import { SnapshotStore, MIN_WORLDS_FREE_BYTES, captureRootInRepo, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, platformHasRecursiveWatcher, platformHasSandboxExec, type SourceState } from "./worldline-git.js";
 import { WorldlineManager, type ForkableRun } from "./worldlines.js";
 import { sandboxShellPreamble, writeEvidenceProfile } from "./sandbox.js";
 import { EvidenceEngine, mineChangeReason, parseFailingTests, rankProfiles, verifyFailSummary, type EvidenceDeps, type EvidenceRecord, type EvidenceSummary as EngineSummary } from "./evidence.js";
@@ -1057,8 +1057,7 @@ class PiEditorApp {
         this.pushRecorderForWorkspace(ws, "paused");
         return null;
       }
-      const topCanon = this.canonicalPath(top);
-      if (storeRoot !== topCanon && !storeRoot.startsWith(topCanon + sep)) {
+      if (!captureRootInRepo(storeRoot, this.canonicalPath(top))) {
         ws.recordError = "the opened folder is not inside a Git repository";
         this.pushRecorderForWorkspace(ws, "paused");
         return null;
@@ -1516,7 +1515,10 @@ class PiEditorApp {
       if (primary.generation !== leaseP.generation) return fail("the primary changed during promotion preflight");
       if (candWs && candWs.generation !== candGen) return fail("the candidate changed during promotion preflight");
       const top = await gitTopLevel(primary.root);
-      if (!top || resolve(top) !== resolve(store.sourceRoot)) return fail("the source repository identity changed");
+      // Capture is the opened folder, which may be a Git subdirectory.
+      if (!top || !captureRootInRepo(this.canonicalPath(store.sourceRoot), this.canonicalPath(top))) {
+        return fail("the source repository identity changed");
+      }
 
       // Mine enforcement: a changed path that is Mine (or a symlink that
       // aliases a Mine path) rejects the promotion.

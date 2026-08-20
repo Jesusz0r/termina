@@ -14,7 +14,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SnapshotStore, gitHead, gitObjectFormat, gitTopLevel, gitCommonDir } from "../../electron/worldline-git.js";
+import { SnapshotStore, captureRootInRepo, gitHead, gitObjectFormat, gitTopLevel, gitCommonDir } from "../../electron/worldline-git.js";
 
 export default async function run(log: (msg: string) => void) {
   const results: Array<{ name: string; ok: boolean; detail: string }> = [];
@@ -321,6 +321,11 @@ export default async function run(log: (msg: string) => void) {
     raceCaught = String(err);
   }
   check("a file changed during read aborts the capture", /changed while captured/.test(raceCaught), raceCaught);
+
+  const top = "/private/tmp/repo";
+  check("capture root may be the Git top-level", captureRootInRepo(top, top));
+  check("capture root may be a Git subdirectory", captureRootInRepo(`${top}/packages/app`, top));
+  check("a sibling of the Git top-level is not inside the repo", !captureRootInRepo(`${top}-other`, top));
 
   // ------------------------------------------------------------------ summary
   const failed = results.filter((r) => !r.ok).length;
