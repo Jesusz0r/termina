@@ -107,3 +107,54 @@ export function toast(message: string, type: "info" | "warning" | "error" = "inf
   document.body.appendChild(el);
   setTimeout(() => el.remove(), 5000);
 }
+
+/** A small modal with a clickable file list. */
+export function showFileListModal(
+  title: string,
+  items: Array<[string, "created" | "modified" | "deleted"]>,
+  onPick: (relPath: string) => void,
+): void {
+  const root = document.getElementById("modal-root")!;
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop";
+  backdrop.tabIndex = -1;
+  const modal = document.createElement("div");
+  modal.className = "modal worldline-list-modal";
+  const titleEl = document.createElement("div");
+  titleEl.className = "modal-title";
+  titleEl.textContent = title;
+  const body = document.createElement("div");
+  body.className = "modal-body";
+  const list = document.createElement("ul");
+  list.className = "worldline-list";
+  for (const [relPath, status] of items) {
+    const li = document.createElement("li");
+    const badge = document.createElement("span");
+    badge.className = `status-badge ${status}`;
+    badge.textContent = status === "created" ? "A" : status === "deleted" ? "D" : "M";
+    const path = document.createElement("span");
+    path.className = "path";
+    path.textContent = relPath;
+    li.append(badge, path);
+    li.addEventListener("click", () => {
+      backdrop.remove();
+      onPick(relPath);
+    });
+    list.appendChild(li);
+  }
+  body.appendChild(list);
+  const footer = document.createElement("div");
+  footer.className = "modal-footer";
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "modal-btn";
+  closeBtn.textContent = "Close";
+  closeBtn.addEventListener("click", () => backdrop.remove());
+  footer.appendChild(closeBtn);
+  modal.append(titleEl, body, footer);
+  backdrop.append(modal);
+  root.appendChild(backdrop);
+  backdrop.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") backdrop.remove();
+  });
+  backdrop.focus();
+}

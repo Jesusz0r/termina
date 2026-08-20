@@ -17,6 +17,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { waitFor as waitUntil } from "./wait-for.mjs";
 
 const port = 9222;
 const results = [];
@@ -67,15 +68,7 @@ async function typePrompt(text) {
   await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
 }
 
-async function waitFor(predicate, timeoutMs = 120000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await predicate();
-    if (value) return value;
-    await sleep(1000);
-  }
-  return null;
-}
+const waitFor = (predicate, timeoutMs = 120000) => waitUntil(predicate, timeoutMs, 1000);
 
 const before = repoState();
 

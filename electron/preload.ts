@@ -116,7 +116,6 @@ const bridge: PiBridge = {
   forkPoint: (terminalId, seq) => ipcRenderer.invoke("worldline:fork-point", terminalId, seq),
   challengeRun: (runId) => ipcRenderer.invoke("worldline:challenge", runId),
   challengeCandidate: (comparisonId, label) => ipcRenderer.invoke("worldline:challenge-candidate", comparisonId, label),
-  compareWorldline: (comparisonId) => ipcRenderer.invoke("worldline:compare", comparisonId),
   runEvidence: (comparisonId) => ipcRenderer.invoke("worldline:evidence", comparisonId),
   promoteWorldline: (comparisonId, label, force) => ipcRenderer.invoke("worldline:promote", comparisonId, label, force),
   onWorldlineUpdate: (cb) => {
@@ -150,12 +149,11 @@ const bridge: PiBridge = {
   },
   projectActivate: (projectId) => ipcRenderer.invoke("project:activate", projectId),
   projectClose: (projectId) => ipcRenderer.invoke("project:close", projectId),
-  openFolder: () => ipcRenderer.invoke("folder:open"),
   openFile: (path) => ipcRenderer.invoke("file:open", path),
   saveFile: (path, content) => ipcRenderer.invoke("file:save", path, content),
 
   // ---- file explorer ----
-  listDir: (absPath): Promise<{ entries: ExplorerEntry[]; error?: string }> => ipcRenderer.invoke("explorer:list-dir", absPath),
+  listDir: (absPath): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }> => ipcRenderer.invoke("explorer:list-dir", absPath),
   createEntry: (relPath, kind) => ipcRenderer.invoke("explorer:create", relPath, kind),
   renameEntry: (relPath, newName) => ipcRenderer.invoke("explorer:rename", relPath, newName),
   deleteEntry: (relPath) => ipcRenderer.invoke("explorer:delete", relPath),

@@ -18,6 +18,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { waitFor } from "./wait-for.mjs";
 
 const port = 9222;
 const results = [];
@@ -75,14 +76,10 @@ async function typePrompt(text) {
 
 /** Poll getRuns until a run matches the predicate or the deadline passes. */
 async function waitForRun(predicate, timeoutMs = 120000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  return waitFor(async () => {
     const runs = (await evalJs(`window.pi.getRuns("term-1")`)) ?? [];
-    const hit = runs.find(predicate);
-    if (hit) return hit;
-    await sleep(1000);
-  }
-  return null;
+    return runs.find(predicate);
+  }, timeoutMs);
 }
 
 // ---------------------------------------------------------------- run 1 ----

@@ -75,10 +75,31 @@ export class SessionSearch {
   private async runSearch(): Promise<void> {
     const query = this.input?.value ?? "";
     if (query === this.lastQuery) return;
-    this.lastQuery = query;
     const seq = ++this.searchSeq;
-    const hits = await window.pi.searchSessions(query);
-    if (seq !== this.searchSeq) return; // a newer search superseded this one
+    const list = this.resultsEl;
+    if (list) {
+      list.replaceChildren();
+      const loading = document.createElement("div");
+      loading.className = "search-empty";
+      loading.textContent = "searching…";
+      list.appendChild(loading);
+    }
+    let hits;
+    try {
+      hits = await window.pi.searchSessions(query);
+    } catch (err) {
+      if (seq !== this.searchSeq) return;
+      if (list) {
+        list.replaceChildren();
+        const empty = document.createElement("div");
+        empty.className = "search-empty";
+        empty.textContent = (err as Error).message;
+        list.appendChild(empty);
+      }
+      return;
+    }
+    if (seq !== this.searchSeq) return;
+    this.lastQuery = query;
     this.render(hits, query);
   }
 

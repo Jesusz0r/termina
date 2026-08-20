@@ -1974,8 +1974,7 @@ fn main() {
         let request: Value = match serde_json::from_str(&line) {
             Ok(value) => value,
             Err(_) => {
-                // Answer every input line. The client waits forever for a
-                // reply that never comes.
+                // Answer every input line. The client times out and respawns.
                 let response = json!({
                     "op": "error",
                     "requestId": Value::Null,

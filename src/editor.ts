@@ -7,7 +7,9 @@
  * when idle you can edit and save with Cmd+S.
  */
 import * as monaco from "monaco-editor";
-import { cssFontFamily, type ThemeId } from "../shared/types";
+import { cssFontFamily, pathBasename, type ThemeId } from "../shared/types";
+import { languageForPath } from "./editor-language";
+import { toast } from "./components/modals";
 
 let atomThemeDefined = false;
 
@@ -209,10 +211,11 @@ export class EditorManager {
     this.syncEmptyState();
 
     const res = await window.pi.openFile(path);
-    if ("content" in res) {
+    if (res.ok) {
       if (this.tabs.has(key)) model.setValue(res.content);
     } else {
       model.setValue(`// ${res.error}`);
+      throw new Error(res.error);
     }
     this.activate(key);
   }
@@ -319,7 +322,7 @@ export class EditorManager {
     dom.className = "editor-tab";
     const name = document.createElement("span");
     name.className = "tab-name";
-    name.textContent = basename(key);
+    name.textContent = pathBasename(key);
     name.title = key;
     const dirty = document.createElement("span");
     dirty.className = "tab-dirty";
@@ -400,6 +403,8 @@ export class EditorManager {
       this.userDirty.delete(tab.key);
       tab.dirtyDot.style.display = "none";
       tab.dom.classList.remove("conflict");
+    } else {
+      toast(`could not save ${pathBasename(tab.key)}: ${res.error ?? "unknown error"}`, "error");
     }
   }
 
@@ -503,39 +508,4 @@ export class EditorManager {
     this.editor.dispose();
     for (const tab of this.tabs.values()) tab.model.dispose();
   }
-}
-
-function basename(p: string): string {
-  return p.split(/[\\/]/).pop() || p;
-}
-
-/** Language detection for Monaco models. */
-function languageForPath(path: string): string {
-  const ext = path.split(".").pop()?.toLowerCase() ?? "";
-  const map: Record<string, string> = {
-    ts: "typescript", tsx: "typescript", mts: "typescript", cts: "typescript",
-    js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
-    json: "json", jsonc: "json",
-    html: "html", htm: "html",
-    css: "css", scss: "scss", less: "less",
-    md: "markdown",
-    py: "python",
-    rb: "ruby",
-    go: "go",
-    rs: "rust",
-    java: "java",
-    c: "c", h: "c", cpp: "cpp", hpp: "cpp", cc: "cpp",
-    cs: "csharp",
-    php: "php",
-    sh: "shell", bash: "shell", zsh: "shell",
-    yml: "yaml", yaml: "yaml",
-    toml: "ini",
-    sql: "sql",
-    xml: "xml", svg: "xml",
-    vue: "html",
-    swift: "swift",
-    kt: "kotlin",
-    dart: "dart",
-  };
-  return map[ext] ?? "plaintext";
 }

@@ -1,9 +1,9 @@
 /**
- * File explorer: shows the project folder tree, opens files in the shared
- * editor, and supports create / rename / delete of files and folders.
+ * File explorer: shows the project folder tree, opens files in the
+ * project editor, and supports create / rename / delete of files and folders.
  * Directories load lazily on expand; the tree refreshes from watcher events.
  */
-import type { ExplorerEntry } from "../../shared/types";
+import { pathBasename, type ExplorerEntry } from "../../shared/types";
 import { showConfirm, showInput, toast } from "./modals";
 
 interface DirState {
@@ -87,7 +87,7 @@ export class Explorer {
       this.treeEl.appendChild(empty);
       return;
     }
-    const name = cwd.split(/[\\/]/).pop() || cwd;
+    const name = pathBasename(cwd);
     const node = this.makeDirRow({ name, path: cwd, relPath: "", type: "dir" }, true);
     this.treeEl.appendChild(node);
   }
@@ -152,13 +152,34 @@ export class Explorer {
       children.replaceChildren();
       return;
     }
-    const res = await window.pi.listDir(entry.path);
+    children.replaceChildren();
+    const loading = document.createElement("div");
+    loading.className = "explorer-empty";
+    loading.textContent = "loading…";
+    children.appendChild(loading);
+    let res: { entries: ExplorerEntry[]; error?: string; truncated?: boolean };
+    try {
+      res = await window.pi.listDir(entry.path);
+    } catch (err) {
+      if (!state.expanded) return;
+      children.replaceChildren();
+      toast(`could not list ${entry.name}: ${(err as Error).message}`, "error");
+      return;
+    }
+    if (!state.expanded) return;
     state.loaded = true;
     if (res.error) {
       children.replaceChildren();
+      toast(res.error, "error");
       return;
     }
     children.replaceChildren();
+    if (res.truncated) {
+      const note = document.createElement("div");
+      note.className = "explorer-empty";
+      note.textContent = "folder truncated (too many entries)";
+      children.appendChild(note);
+    }
     for (const child of res.entries) {
       const node = child.type === "dir" ? this.makeDirRow(child) : this.makeFileRow(child);
       children.appendChild(node);

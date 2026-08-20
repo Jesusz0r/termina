@@ -2,7 +2,7 @@
  * Renderer entry — terminal-first architecture.
  *
  * Left: multiple terminal panes, each running real pi TUI in a pty.
- * Right: shared Monaco editor + file explorer, live-synced via the watcher.
+ * Right: per-project Monaco editor + file explorer, live-synced via the watcher.
  * The bridge extension's sidecar events drive auto-open and the modified list.
  */
 import editorWorker from "monaco-editor/editor/editor.worker?worker";
@@ -42,7 +42,7 @@ import { WorldlinesView } from "./worldlines";
 import { Explorer } from "./components/explorer";
 import { toast } from "./components/modals";
 import { SettingsView, emptyShortcuts } from "./settings";
-import { defaultAppPreferences } from "../shared/types";
+import { defaultAppPreferences, pathBasename } from "../shared/types";
 import { normalizeAppPreferences } from "../shared/preferences";
 import type { AppPreferences, ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
 
@@ -111,7 +111,7 @@ function createProjectView(project: { id: string; cwd: string; needsLogin?: bool
   tabEl.className = "project-tab";
   const nameEl = document.createElement("span");
   nameEl.className = "tab-name";
-  nameEl.textContent = basenameOf(project.cwd);
+  nameEl.textContent = pathBasename(project.cwd);
   nameEl.title = project.cwd;
   const closeEl = document.createElement("span");
   closeEl.className = "tab-close";
@@ -267,7 +267,7 @@ function refreshMine(): void {
   activeEditor().clearMine();
   void window.pi.getMineFiles().then((paths) => {
     for (const p of paths) activeEditor().setMine(p, true);
-  });
+  }).catch((err) => toast(`could not load mine marks: ${(err as Error).message}`, "error"));
 }
 void refreshMine();
 const explorerEl = document.getElementById("explorer")!;
@@ -541,7 +541,7 @@ function loadRuns(pane: Pane): void {
     if (!p) return;
     p.runs = runs;
     if (activeId === pane.instanceId) updateForkRunButton(p);
-  });
+  }).catch((err) => toast(`could not load runs: ${(err as Error).message}`, "error"));
 }
 
 /** The newest completed run of the pane, or null. */
@@ -588,7 +588,7 @@ function refreshCandidateTestCommand(pane: Pane): void {
     if (!p) return;
     p.testCommand = t?.label ?? null;
     if (activeId === pane.instanceId) renderStatus(p);
-  });
+  }).catch((err) => toast(`could not detect tests: ${(err as Error).message}`, "error"));
 }
 
 /** Session Timeline: show the active pane's points, fetch once per pane. */
@@ -601,22 +601,25 @@ function renderTimeline(): void {
   timelineView.setRecorder(pane.recorderState as Parameters<typeof timelineView.setRecorder>[0]);
   timelineView.setPrefix(pane.timelinePrefix);
   if (!pane.timelineLoaded) {
+    const id = pane.instanceId;
     pane.timelineLoaded = true;
-    void window.pi.getTimeline(pane.instanceId).then((events) => {
-      const p = panes.get(pane.instanceId);
+    void window.pi.getTimeline(id).then((events) => {
+      const p = panes.get(id);
       if (!p) return;
-      // Events pushed locally while the fetch ran must not get lost:
-      // merge them by seq (monotonic per terminal) instead of dropping them.
       const maxSeq = events.length ? Math.max(...events.map((e) => e.seq)) : 0;
       p.timeline = events.concat(p.timeline.filter((e) => e.seq > maxSeq)).slice(-MAX_TIMELINE_EVENTS);
-      if (activeId === pane.instanceId) timelineView.setEvents(p.timeline);
+      if (activeId === id) timelineView.setEvents(p.timeline);
+    }).catch((err) => {
+      const p = panes.get(id);
+      if (p) p.timelineLoaded = false;
+      toast(`could not load timeline: ${(err as Error).message}`, "error");
     });
-    void window.pi.getTimelinePrefix(pane.instanceId).then((prefix) => {
-      const p = panes.get(pane.instanceId);
+    void window.pi.getTimelinePrefix(id).then((prefix) => {
+      const p = panes.get(id);
       if (!p) return;
       p.timelinePrefix = prefix;
-      if (activeId === pane.instanceId) timelineView.setPrefix(prefix);
-    });
+      if (activeId === id) timelineView.setPrefix(prefix);
+    }).catch((err) => toast(`could not load timeline counts: ${(err as Error).message}`, "error"));
     return;
   }
   timelineView.setEvents(pane.timeline);
@@ -685,7 +688,7 @@ async function closePane(instanceId: string): Promise<void> {
 }
 
 function updatePaneTab(pane: Pane): void {
-  pane.nameEl.textContent = pane.dispatchWorker ? "dispatch" : pane.cwd ? basenameOf(pane.cwd) : "terminal";
+  pane.nameEl.textContent = pane.dispatchWorker ? "dispatch" : pane.cwd ? pathBasename(pane.cwd) : "terminal";
   pane.tabEl.title = pane.dispatchWorker
     ? `dispatch worker — ${pane.dispatchTask ?? "plan task"}`
     : `${pane.cwd ?? "?"}${pane.type === "shell" && pane.shellName ? ` · ${pane.shellName} shell` : " · pi agent"}`;
@@ -701,10 +704,6 @@ function updatePaneTab(pane: Pane): void {
     wlineEl.classList.toggle("a", label === "A");
     wlineEl.classList.toggle("b", label === "B");
   }
-}
-
-function basenameOf(p: string): string {
-  return p.split(/[\\/]/).pop() || p;
 }
 
 function renderChrome(): void {
@@ -910,7 +909,7 @@ async function focusProjectShell(): Promise<void> {
     return;
   }
   const res = await window.pi.createTerminal({ type: "shell" });
-  if (res.error) toast(res.error, "warning");
+  if (!res.ok) toast(res.error ?? "could not open a shell", "warning");
   else if (res.id && panes.has(res.id)) activatePane(res.id);
 }
 
@@ -928,7 +927,7 @@ async function openFileSmart(path: string, preview = true): Promise<void> {
   try {
     await activeEditor().openFile(abs, { preview });
   } catch (err) {
-    toast(`could not open ${basenameOf(abs)}: ${(err as Error).message}`, "error");
+    toast(`could not open ${pathBasename(abs)}: ${(err as Error).message}`, "error");
   }
 }
 
@@ -967,8 +966,8 @@ async function openTerminalMenu(): Promise<void> {
   };
   const makeTerminal = (opts?: { type?: "agent" | "shell"; shell?: string }) => {
     void window.pi.createTerminal(opts).then((res) => {
-      if (res.error) {
-        createErrorPane(res.error);
+      if (!res.ok) {
+        createErrorPane(res.error ?? "could not create terminal");
         return;
       }
       if (res.id && panes.has(res.id)) activatePane(res.id);
@@ -1495,10 +1494,9 @@ window.pi.onFileChanged((p) => {
     // The main process caps large pushes. Fetch the file on demand, and
     // drop the fetch when a newer change push superseded it.
     void window.pi.openFile(p.path).then((res) => {
-      if ("content" in res && lastChangePush.get(p.path) === at) {
-        activeEditor().updateContent(p.path, res.content);
-      }
-    });
+      if (lastChangePush.get(p.path) !== at) return;
+      if (res.ok) activeEditor().updateContent(p.path, res.content);
+    }).catch(() => undefined);
   }
   explorer.handleDiskChange();
   // The open review stays in sync with the agent's writes.
@@ -1541,7 +1539,7 @@ window.pi.onFolderOpened((e) => {
   void window.pi.getWorldlines().then((list) => {
     worldlinesView.resetForProject();
     for (const summary of list) worldlinesView.upsert(summary);
-  });
+  }).catch((err) => toast(`could not load worldlines: ${(err as Error).message}`, "error"));
 });
 
 // ---------------------------------------------------------- worldlines ----

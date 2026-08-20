@@ -15,6 +15,24 @@ import { buildCore } from "./build-core.mjs";
 const RESOURCES = join(process.cwd(), "resources");
 const NODE_MAJOR = 22;
 
+async function fetchWithRetry(url, label) {
+  let lastErr;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`${label} failed: ${res.status}`);
+      return res;
+    } catch (err) {
+      lastErr = err;
+      if (attempt === 2) break;
+      const delay = 2000 * 2 ** attempt;
+      console.warn(`${label}: ${err instanceof Error ? err.message : err}; retry in ${delay}ms`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  throw lastErr;
+}
+
 function osArch() {
   const arch = process.arch === "arm64" ? "arm64" : "x64";
   const os = platform() === "darwin" ? "darwin" : platform() === "win32" ? "win" : "linux";
@@ -23,8 +41,7 @@ function osArch() {
 
 /** The newest node 22.x LTS release. */
 async function latestNode22() {
-  const res = await fetch("https://nodejs.org/dist/index.json");
-  if (!res.ok) throw new Error(`node index fetch failed: ${res.status}`);
+  const res = await fetchWithRetry("https://nodejs.org/dist/index.json", "node index fetch");
   const releases = await res.json();
   const release = releases.find((r) => r.version.startsWith(`v${NODE_MAJOR}.`) && r.lts !== false);
   if (!release) throw new Error(`no node ${NODE_MAJOR} LTS release found`);
@@ -53,8 +70,7 @@ async function prepareNode() {
   console.log(`↓ node ${version} (${osArch()})`);
   mkdirSync(RESOURCES, { recursive: true });
   const archive = join(RESOURCES, `node-${version}.${process.platform === "win32" ? "zip" : "tar.gz"}`);
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`node download failed: ${res.status}`);
+  const res = await fetchWithRetry(url, "node download");
   writeFileSync(archive, Buffer.from(await res.arrayBuffer()));
   rmSync(join(RESOURCES, "node"), { recursive: true, force: true });
   execFileSync("tar", ["-xf", archive, "-C", RESOURCES], { stdio: "inherit" });

@@ -151,8 +151,3 @@ export function writeEvidenceProfile(cand: { profilePath: string; root: string }
   writeFileSync(path, `${base}\n(deny network*)\n`, { mode: 0o600 });
   return path;
 }
-
-/** The canonical real home directory. */
-export function realHome(): string {
-  return process.env.HOME ?? dirname(process.cwd());
-}
