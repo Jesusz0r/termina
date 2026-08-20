@@ -5215,11 +5215,14 @@ class PiEditorApp {
         if (aDir !== bDir) return aDir - bDir;
         return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
       });
-      const truncated = visible.length > MAX_EXPLORER_ENTRIES;
-      const slice = truncated ? visible.slice(0, MAX_EXPLORER_ENTRIES) : visible;
       const rootCanon = this.canonicalPath(managed.workspace.root);
       const entries: ExplorerEntry[] = [];
-      for (const ent of slice) {
+      let truncated = false;
+      for (const ent of visible) {
+        if (entries.length >= MAX_EXPLORER_ENTRIES) {
+          truncated = true;
+          break;
+        }
         const full = join(managed.path, ent.name);
         const child = this.managedPath(full, true);
         if (!child || child.workspace.id !== managed.workspace.id) continue;
@@ -5280,7 +5283,10 @@ class PiEditorApp {
       await this.activateProject(projectId);
       return { ok: true };
     });
-    ipcMain.handle("project:close", async (_e, projectId: string) => this.closeProject(projectId));
+    ipcMain.handle("project:close", async (_e, projectId: unknown) => {
+      if (typeof projectId !== "string") return { ok: false, error: "invalid project" };
+      return this.closeProject(projectId);
+    });
 
     ipcMain.handle("clipboard:write", (_e, text: unknown) => {
       if (typeof text !== "string") return { ok: false, error: "clipboard text is invalid" };
@@ -5298,9 +5304,25 @@ class PiEditorApp {
     );
     ipcMain.handle("settings:shortcuts", (_e, shortcuts: unknown) => this.setKeyboardShortcuts(shortcuts));
 
-    ipcMain.handle("terminals:create", async (_e, opts?: { type?: "agent" | "shell"; shell?: string }) => {
+    ipcMain.handle("terminals:create", async (_e, opts?: unknown) => {
+      let type: "agent" | "shell" | undefined;
+      let shell: string | undefined;
+      if (opts !== undefined) {
+        if (typeof opts !== "object" || opts === null) return { ok: false, error: "invalid terminal options" };
+        const rec = opts as { type?: unknown; shell?: unknown };
+        if (rec.type !== undefined && rec.type !== "agent" && rec.type !== "shell") {
+          return { ok: false, error: "invalid terminal type" };
+        }
+        if (rec.shell !== undefined && typeof rec.shell !== "string") return { ok: false, error: "invalid shell" };
+        type = rec.type;
+        shell = rec.shell;
+        if (shell) {
+          const shells = await detectShells();
+          if (!shells.some((item) => item.path === shell)) return { ok: false, error: "unknown shell" };
+        }
+      }
       try {
-        const t = await this.createTerminal(undefined, opts);
+        const t = await this.createTerminal(undefined, { type, shell });
         return { ok: true, id: t.id };
       } catch (err) {
         return { ok: false, error: (err as Error).message };
@@ -5599,8 +5621,12 @@ class PiEditorApp {
       }
     });
 
-    ipcMain.handle("file:open", (_e, absPath: string) => this.openFileInEditor(absPath));
-    ipcMain.handle("file:save", async (_e, absPath: string, content: string) => {
+    ipcMain.handle("file:open", (_e, absPath: unknown) => {
+      if (typeof absPath !== "string") return { ok: false, path: "", error: "invalid path" };
+      return this.openFileInEditor(absPath);
+    });
+    ipcMain.handle("file:save", async (_e, absPath: unknown, content: unknown) => {
+      if (typeof absPath !== "string") return { ok: false, error: "invalid path" };
       if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > MAX_OPEN_FILE_SIZE) return { ok: false, error: "file content is too large" };
       const managed = this.managedPath(absPath);
       if (!managed) return { ok: false, error: "path is outside a managed workspace" };
@@ -5616,8 +5642,12 @@ class PiEditorApp {
       }
     });
 
-    ipcMain.handle("explorer:list-dir", (_e, absPath: string) => this.listDir(absPath));
-    ipcMain.handle("explorer:create", async (_e, relPath: string, kind: unknown) => {
+    ipcMain.handle("explorer:list-dir", (_e, absPath: unknown) => {
+      if (typeof absPath !== "string") return { entries: [], error: "invalid path" };
+      return this.listDir(absPath);
+    });
+    ipcMain.handle("explorer:create", async (_e, relPath: unknown, kind: unknown) => {
+      if (typeof relPath !== "string") return { ok: false, error: "invalid path" };
       if (kind !== "file" && kind !== "dir") return { ok: false, error: "kind must be file or dir" };
       const blocked = this.assertWorkspaceWritable(this.primaryWorkspace()?.id ?? "");
       if (blocked) return { ok: false, error: blocked };
@@ -5634,11 +5664,12 @@ class PiEditorApp {
         return { ok: false, error: (err as Error).message };
       }
     });
-    ipcMain.handle("explorer:rename", async (_e, relPath: string, newName: string) => {
+    ipcMain.handle("explorer:rename", async (_e, relPath: unknown, newName: unknown) => {
       const blocked = this.assertWorkspaceWritable(this.primaryWorkspace()?.id ?? "");
       if (blocked) return { ok: false, error: blocked };
       try {
-        if (!newName || newName.includes("/") || newName === "." || newName === "..") {
+        if (typeof relPath !== "string") return { ok: false, error: "invalid path" };
+        if (typeof newName !== "string" || !newName || newName.includes("/") || newName === "." || newName === "..") {
           return { ok: false, error: "invalid name" };
         }
         const abs = this.projectAbs(relPath);
@@ -5648,7 +5679,8 @@ class PiEditorApp {
         return { ok: false, error: (err as Error).message };
       }
     });
-    ipcMain.handle("explorer:delete", async (_e, relPath: string) => {
+    ipcMain.handle("explorer:delete", async (_e, relPath: unknown) => {
+      if (typeof relPath !== "string") return { ok: false, error: "invalid path" };
       const blocked = this.assertWorkspaceWritable(this.primaryWorkspace()?.id ?? "");
       if (blocked) return { ok: false, error: blocked };
       try {

@@ -1480,10 +1480,30 @@ window.pi.onPlanUpdate(({ instanceId, tasks }) => {
 
 window.pi.onToolTarget((p) => {
   activeEditor().markTouched(p.path);
-  void activeEditor().openFile(p.path, { preview: false });
+  void activeEditor().openFile(p.path, { preview: false }).catch((err) => {
+    toast(`could not open ${pathBasename(p.path)}: ${(err as Error).message}`, "error");
+  });
 });
 
 const lastChangePush = new Map<string, number>();
+const largeChangeFetch = new Set<string>();
+
+function fetchLargeChange(path: string): void {
+  if (largeChangeFetch.has(path)) return;
+  largeChangeFetch.add(path);
+  const at = lastChangePush.get(path);
+  void window.pi.openFile(path).then((res) => {
+    largeChangeFetch.delete(path);
+    if (lastChangePush.get(path) !== at) {
+      fetchLargeChange(path);
+      return;
+    }
+    if (res.ok) activeEditor().updateContent(path, res.content);
+  }).catch(() => {
+    largeChangeFetch.delete(path);
+  });
+}
+
 window.pi.onFileChanged((p) => {
   const at = Date.now();
   lastChangePush.set(p.path, at);
@@ -1491,12 +1511,9 @@ window.pi.onFileChanged((p) => {
   if (p.content !== undefined) {
     activeEditor().updateContent(p.path, p.content);
   } else {
-    // The main process caps large pushes. Fetch the file on demand, and
-    // drop the fetch when a newer change push superseded it.
-    void window.pi.openFile(p.path).then((res) => {
-      if (lastChangePush.get(p.path) !== at) return;
-      if (res.ok) activeEditor().updateContent(p.path, res.content);
-    }).catch(() => undefined);
+    // The main process caps large pushes. Fetch once per path; a newer
+    // change while a fetch is in flight starts one follow-up fetch.
+    fetchLargeChange(p.path);
   }
   explorer.handleDiskChange();
   // The open review stays in sync with the agent's writes.

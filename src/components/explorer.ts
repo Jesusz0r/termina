@@ -9,6 +9,8 @@ import { showConfirm, showInput, toast } from "./modals";
 interface DirState {
   expanded: boolean;
   loaded: boolean;
+  /** Bumped per list. A slow listing never fills a newer expand. */
+  loadSeq: number;
 }
 
 export class Explorer {
@@ -95,7 +97,7 @@ export class Explorer {
   private dirState(absPath: string): DirState {
     let s = this.dirs.get(absPath);
     if (!s) {
-      s = { expanded: false, loaded: false };
+      s = { expanded: false, loaded: false, loadSeq: 0 };
       this.dirs.set(absPath, s);
     }
     return s;
@@ -152,6 +154,7 @@ export class Explorer {
       children.replaceChildren();
       return;
     }
+    const seq = ++state.loadSeq;
     children.replaceChildren();
     const loading = document.createElement("div");
     loading.className = "explorer-empty";
@@ -161,12 +164,12 @@ export class Explorer {
     try {
       res = await window.pi.listDir(entry.path);
     } catch (err) {
-      if (!state.expanded) return;
+      if (!state.expanded || seq !== state.loadSeq) return;
       children.replaceChildren();
       toast(`could not list ${entry.name}: ${(err as Error).message}`, "error");
       return;
     }
-    if (!state.expanded) return;
+    if (!state.expanded || seq !== state.loadSeq) return;
     state.loaded = true;
     if (res.error) {
       children.replaceChildren();

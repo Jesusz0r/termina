@@ -213,11 +213,11 @@ export class EditorManager {
     const res = await window.pi.openFile(path);
     if (res.ok) {
       if (this.tabs.has(key)) model.setValue(res.content);
-    } else {
-      model.setValue(`// ${res.error}`);
-      throw new Error(res.error);
+      this.activate(key);
+      return;
     }
-    this.activate(key);
+    this.closeTab(key);
+    throw new Error(res.error);
   }
 
   /** Promote the preview tab to a permanent tab. */

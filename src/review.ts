@@ -194,7 +194,10 @@ export class ReviewView {
   /** Refresh the modified side (for example after a revert changed the file). */
   async refreshCurrent(): Promise<void> {
     if (!this.path || !this.terminalId) return;
-    const current = await window.pi.openFile(this.path);
+    const seq = this.loadSeq;
+    const path = this.path;
+    const current = await window.pi.openFile(path);
+    if (seq !== this.loadSeq || this.path !== path) return;
     if (!current.ok) {
       toast(`could not refresh review: ${current.error}`, "error");
       return;

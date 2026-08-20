@@ -490,8 +490,17 @@ export class WorldlinesView {
       li.className = "cand-loading";
       li.textContent = "computing…";
       card.changedList.appendChild(li);
+      const version = card.summary.version;
       void window.pi.getWorldlineDetails(comparisonId, label).then((res) => {
         card.detailsLoading = false;
+        if (card.summary.version !== version) {
+          card.changedList.replaceChildren();
+          const stale = document.createElement("li");
+          stale.className = "cand-loading";
+          stale.textContent = "candidate updated — expand again";
+          card.changedList.appendChild(stale);
+          return;
+        }
         if (!res.ok || !res.details) {
           card.changedList.replaceChildren();
           const err = document.createElement("li");
@@ -501,10 +510,18 @@ export class WorldlinesView {
           return;
         }
         card.details = res.details;
-        card.detailsVersion = card.summary.version;
+        card.detailsVersion = version;
         this.fillDetails(card, res.details);
       }).catch((err) => {
         card.detailsLoading = false;
+        if (card.summary.version !== version) {
+          card.changedList.replaceChildren();
+          const stale = document.createElement("li");
+          stale.className = "cand-loading";
+          stale.textContent = "candidate updated — expand again";
+          card.changedList.appendChild(stale);
+          return;
+        }
         card.changedList.replaceChildren();
         const row = document.createElement("li");
         row.className = "cand-loading";
@@ -601,11 +618,13 @@ export class WorldlinesView {
     const card = this.pairs.get(comparisonId)?.cards.get(label);
     if (!card) return null;
     if (card.details && card.detailsVersion === card.summary.version) return card.details;
+    const version = card.summary.version;
     try {
       const res = await window.pi.getWorldlineDetails(comparisonId, label);
+      if (card.summary.version !== version) return null;
       if (res.ok && res.details) {
         card.details = res.details;
-        card.detailsVersion = card.summary.version;
+        card.detailsVersion = version;
         return res.details;
       }
       toast(res.error ?? "details unavailable", "warning");

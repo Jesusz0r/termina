@@ -10,7 +10,6 @@ export class SessionSearch {
   private input: HTMLInputElement | null = null;
   private resultsEl: HTMLElement | null = null;
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
-  private lastQuery = "";
   /** Bumped per search. A slow old search never renders over a newer one. */
   private searchSeq = 0;
 
@@ -74,7 +73,6 @@ export class SessionSearch {
   /** Debounced search; renders the hits under the input. */
   private async runSearch(): Promise<void> {
     const query = this.input?.value ?? "";
-    if (query === this.lastQuery) return;
     const seq = ++this.searchSeq;
     const list = this.resultsEl;
     if (list) {
@@ -88,7 +86,7 @@ export class SessionSearch {
     try {
       hits = await window.pi.searchSessions(query);
     } catch (err) {
-      if (seq !== this.searchSeq) return;
+      if (seq !== this.searchSeq || (this.input?.value ?? "") !== query) return;
       if (list) {
         list.replaceChildren();
         const empty = document.createElement("div");
@@ -98,8 +96,7 @@ export class SessionSearch {
       }
       return;
     }
-    if (seq !== this.searchSeq) return;
-    this.lastQuery = query;
+    if (seq !== this.searchSeq || (this.input?.value ?? "") !== query) return;
     this.render(hits, query);
   }
 
