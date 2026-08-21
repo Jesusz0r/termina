@@ -10,7 +10,6 @@ export class SessionSearch {
   private input: HTMLInputElement | null = null;
   private resultsEl: HTMLElement | null = null;
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
-  private lastQuery = "";
   /** Bumped per search. A slow old search never renders over a newer one. */
   private searchSeq = 0;
 
@@ -74,11 +73,30 @@ export class SessionSearch {
   /** Debounced search; renders the hits under the input. */
   private async runSearch(): Promise<void> {
     const query = this.input?.value ?? "";
-    if (query === this.lastQuery) return;
-    this.lastQuery = query;
     const seq = ++this.searchSeq;
-    const hits = await window.pi.searchSessions(query);
-    if (seq !== this.searchSeq) return; // a newer search superseded this one
+    const list = this.resultsEl;
+    if (list) {
+      list.replaceChildren();
+      const loading = document.createElement("div");
+      loading.className = "search-empty";
+      loading.textContent = "searching…";
+      list.appendChild(loading);
+    }
+    let hits;
+    try {
+      hits = await window.pi.searchSessions(query);
+    } catch (err) {
+      if (seq !== this.searchSeq || (this.input?.value ?? "") !== query) return;
+      if (list) {
+        list.replaceChildren();
+        const empty = document.createElement("div");
+        empty.className = "search-empty";
+        empty.textContent = (err as Error).message;
+        list.appendChild(empty);
+      }
+      return;
+    }
+    if (seq !== this.searchSeq || (this.input?.value ?? "") !== query) return;
     this.render(hits, query);
   }
 

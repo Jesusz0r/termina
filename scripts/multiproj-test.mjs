@@ -8,6 +8,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { waitFor as waitUntil } from "./wait-for.mjs";
 
 const results = [];
 const watchdog = setTimeout(() => {
@@ -67,15 +68,7 @@ const evaluate = async (expression) => {
   return response.result?.result?.value;
 };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-async function waitFor(predicate, timeoutMs = 15000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await predicate();
-    if (value) return value;
-    await sleep(500);
-  }
-  return null;
-}
+const waitFor = (predicate, timeoutMs = 15000) => waitUntil(predicate, timeoutMs, 500);
 
 // Boot: the launcher fixture is open. Open A explicitly.
 await sleep(4000);

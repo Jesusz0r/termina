@@ -27,7 +27,9 @@ export class AppPreferencesStore {
   save(preferences: AppPreferences): Promise<void> {
     const content = JSON.stringify(normalizeAppPreferences(preferences));
     const write = this.pendingWrites.then(() => this.write(content));
-    this.pendingWrites = write.catch(() => {});
+    this.pendingWrites = write.catch((err) => {
+      console.warn(`[preferences] write failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
     return write;
   }
 
@@ -42,7 +44,9 @@ export class AppPreferencesStore {
       await writeFile(temporary, content, { encoding: "utf8", mode: 0o600 });
       await rename(temporary, this.filePath);
     } finally {
-      await rm(temporary, { force: true }).catch(() => undefined);
+      await rm(temporary, { force: true }).catch((err) => {
+        console.warn(`[preferences] could not remove temp file: ${err instanceof Error ? err.message : String(err)}`);
+      });
     }
   }
 }

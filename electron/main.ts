@@ -12,9 +12,9 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme } fro
 // Name the app for the macOS menu bar and user-data paths. Unpackaged runs default to "Electron".
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
-import { accessSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { openSync, closeSync, fsyncSync } from "node:fs";
-import { chmod, cp, copyFile, mkdir, mkdtemp, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, cp, copyFile, mkdir, mkdtemp, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -24,7 +24,7 @@ import { PtyTerminal } from "./pty-terminal.js";
 import { SidecarEvent, SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
 import { SnapshotStore, MIN_WORLDS_FREE_BYTES, captureRootInRepo, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, platformHasRecursiveWatcher, platformHasSandboxExec, type SourceState } from "./worldline-git.js";
-import { WorldlineManager, type ForkableRun } from "./worldlines.js";
+import { WorldlineManager, dirBytes, quoteShellArg, type ForkableRun } from "./worldlines.js";
 import { sandboxShellPreamble, writeEvidenceProfile } from "./sandbox.js";
 import { EvidenceEngine, mineChangeReason, parseFailingTests, rankProfiles, verifyFailSummary, type EvidenceDeps, type EvidenceRecord, type EvidenceSummary as EngineSummary } from "./evidence.js";
 import { coreClient } from "./core-client.js";
@@ -58,6 +58,7 @@ const MAX_PI_RESOURCE_BYTES = 200 * 1024 * 1024;
 const MAX_AUTH_JSON_BYTES = 128 * 1024;
 const MAX_PTY_IPC_CHUNK = 64 * 1024;
 const MAX_CLIPBOARD_BYTES = 4 * 1024 * 1024;
+const MAX_EXPLORER_ENTRIES = 2000;
 const MAX_VERIFY_OUTPUT = 200_000;
 /** Timeline snapshots bigger than this are dropped (dot stays, no content). */
 const MAX_SNAPSHOT_SIZE = 100_000;
@@ -437,18 +438,25 @@ interface UserEdit {
   at: number;
 }
 
-/** Quote one shell argument: the resolved base commands carry scripts that
- * must survive as one argument through the wrapper shell. */
-function quoteShellArg(a: string): string {
-  return "'" + a.replace(/'/g, "'\\''") + "'";
-}
-
 function capUtf8(text: string, maxBytes: number): string {
   const bytes = Buffer.from(text, "utf8");
   return bytes.length <= maxBytes ? text : bytes.subarray(0, maxBytes).toString("utf8");
 }
 
-function detectShells(): { name: string; path: string }[] {
+function isFlushResult(value: unknown): value is { ok: boolean; failed: string[] } {
+  if (typeof value !== "object" || value === null) return false;
+  const rec = value as { ok?: unknown; failed?: unknown };
+  return typeof rec.ok === "boolean" && Array.isArray(rec.failed) && rec.failed.every((item) => typeof item === "string");
+}
+
+let shellsPromise: Promise<{ name: string; path: string }[]> | null = null;
+
+async function detectShells(): Promise<{ name: string; path: string }[]> {
+  if (!shellsPromise) shellsPromise = probeShells();
+  return shellsPromise;
+}
+
+async function probeShells(): Promise<{ name: string; path: string }[]> {
   const candidates: Array<[string, string]> = [
     ["zsh", "/bin/zsh"],
     ["bash", "/bin/bash"],
@@ -457,9 +465,17 @@ function detectShells(): { name: string; path: string }[] {
     ["fish", "/usr/local/bin/fish"],
     ["fish", "/usr/bin/fish"],
   ];
+  const found = await Promise.all(candidates.map(async ([name, path]) => {
+    try {
+      await access(path);
+      return { name, path };
+    } catch {
+      return null;
+    }
+  }));
   const out: { name: string; path: string }[] = [];
-  for (const [name, path] of candidates) {
-    if (existsSync(path) && !out.some((s) => s.name === name)) out.push({ name, path });
+  for (const item of found) {
+    if (item && !out.some((s) => s.name === item.name)) out.push(item);
   }
   return out;
 }
@@ -1741,14 +1757,14 @@ class PiEditorApp {
   // ------------------------------------------------- evidence (WORLDLINES §6.8) ----
 
   /** One sandboxed command run with bounded combined stdout and stderr. */
-  private runSandboxedEvidence(
+  private async runSandboxedEvidence(
     cand: { root: string; profilePath: string; homeDir: string; tmpDir: string },
     command: string[],
     timeoutMs: number,
   ): Promise<{ code: number; stdout: string; timedOut: boolean }> {
+    const shells = await detectShells();
+    const shell = shells[0] ?? { path: "/bin/zsh", name: "zsh" };
     return new Promise((resolvePromise) => {
-      const shells = detectShells();
-      const shell = shells[0] ?? { path: "/bin/zsh", name: "zsh" };
       // Evidence workers run fully offline under the same deny-list profile
       // with the resource limits applied by the wrapper (WORLDLINES §6.8).
       const profilePath = writeEvidenceProfile(cand);
@@ -1783,31 +1799,6 @@ class PiEditorApp {
       child.on("error", (err) => finish({ code: -1, stdout: String(err.message), timedOut: false }));
       child.on("close", (code) => finish({ code: code ?? -1, stdout, timedOut }));
     });
-  }
-
-  /** Return the bounded size of a directory tree. */
-  private async dirBytesOf(dir: string): Promise<number> {
-    let total = 0;
-    const walk = async (current: string): Promise<void> => {
-      let entries;
-      try {
-        entries = await readdir(current, { withFileTypes: true });
-      } catch {
-        return;
-      }
-      for (const entry of entries) {
-        if (total > 200 * 1024 * 1024) return;
-        const full = join(current, entry.name);
-        try {
-          if (entry.isDirectory()) await walk(full);
-          else if (entry.isFile()) total += (await stat(full)).size;
-        } catch {
-          /* A transient resource is not copied. */
-        }
-      }
-    };
-    await walk(dir);
-    return total;
   }
 
   /** Read bounded tracked source files for package checks. */
@@ -1861,7 +1852,7 @@ class PiEditorApp {
       for (const name of ["skills", "prompts", "themes", "extensions"]) {
         const src = join(agentSrc, name);
         try {
-          if ((await stat(src)).isDirectory() && (await this.dirBytesOf(src)) <= MAX_PI_RESOURCE_BYTES) {
+          if ((await stat(src)).isDirectory() && (await dirBytes(src)) <= MAX_PI_RESOURCE_BYTES) {
             await cp(src, join(agentDst, name), { recursive: true });
           }
         } catch {
@@ -2343,7 +2334,7 @@ class PiEditorApp {
       args = opts.launch.args;
       env = { ...opts.launch.env, TERMINA_TERMINAL_ID: id };
     } else if (type === "shell") {
-      const shells = detectShells();
+      const shells = await detectShells();
       const chosen = opts?.shell && existsSync(opts.shell) ? { path: opts.shell, name: basename(opts.shell) } : shells[0] ?? { path: "/bin/zsh", name: "zsh" };
       cmd = chosen.path;
       args = [];
@@ -2545,7 +2536,7 @@ class PiEditorApp {
 
     let child: ReturnType<typeof spawn>;
     try {
-      const shells = detectShells();
+      const shells = await detectShells();
       const shell = shells[0] ?? { path: "/bin/zsh", name: "zsh" };
       const cmdline = `${tc.command} ${tc.args.map(quoteShellArg).join(" ")}`;
       const command = candidate ? "sandbox-exec" : shell.path;
@@ -2692,7 +2683,7 @@ class PiEditorApp {
     const eventsDir = owner ? this.eventsDirOf(owner) : this.eventsDir;
     try {
       mkdirSync(eventsDir, { recursive: true, mode: 0o700 });
-      const stamp = new Date().toLocaleTimeString();
+      const stamp = new Date().toISOString();
       const status = state === "pass" ? "✅ PASSED" : state === "timeout" ? "⏰ TIMED OUT" : "❌ FAILED";
       const failLine =
         failed && failed.count > 0
@@ -4751,7 +4742,7 @@ class PiEditorApp {
     const canonical = this.canonicalPath(cwd);
     for (const existing of this.projects.values()) {
       if (existing.canonicalRoot === canonical) {
-        this.activateProject(existing.id);
+        await this.activateProject(existing.id);
         return { cwd };
       }
     }
@@ -4764,7 +4755,7 @@ class PiEditorApp {
     const canonical = this.canonicalPath(cwd);
     for (const existing of this.projects.values()) {
       if (existing.canonicalRoot === canonical) {
-        this.activateProject(existing.id);
+        await this.activateProject(existing.id);
         return { cwd };
       }
     }
@@ -4806,7 +4797,7 @@ class PiEditorApp {
       } catch {
         /* Pi can be unavailable while the folder still opens. */
       }
-      this.sendFolderOpened(cwd, id);
+      await this.sendFolderOpened(cwd, id);
       return project;
     } finally {
       this.switchingProjects.delete(id);
@@ -4814,27 +4805,27 @@ class PiEditorApp {
   }
 
   /** Switch the renderer to another open project. Nothing is torn down. */
-  private activateProject(projectId: string): void {
+  private async activateProject(projectId: string): Promise<void> {
     if (!this.projects.has(projectId)) return;
     this.activeProjectId = projectId;
     const project = this.projects.get(projectId)!;
-    this.sendFolderOpened(project.cwd, project.id);
+    await this.sendFolderOpened(project.cwd, project.id);
   }
 
   /** Push folder:opened with a login hint flag. The renderer never reads auth.json. */
-  private sendFolderOpened(cwd: string, projectId: string): void {
-    this.send("folder:opened", { cwd, projectId, needsLogin: this.piNeedsLogin() });
+  private async sendFolderOpened(cwd: string, projectId: string): Promise<void> {
+    this.send("folder:opened", { cwd, projectId, needsLogin: await this.piNeedsLogin() });
   }
 
   /**
    * True when pi has no provider in auth.json or in the process environment.
    * The check is boolean only. It never sends credentials to the renderer.
    */
-  private piNeedsLogin(): boolean {
+  private async piNeedsLogin(): Promise<boolean> {
     if (envHasPiProvider(process.env)) return false;
     const authPath = join(homedir(), ".pi", "agent", "auth.json");
     try {
-      const info = statSync(authPath);
+      const info = await stat(authPath);
       if (!info.isFile() || info.size === 0) {
         this.loginHint = null;
         return true;
@@ -4846,7 +4837,7 @@ class PiEditorApp {
       if (this.loginHint && this.loginHint.mtimeMs === info.mtimeMs && this.loginHint.size === info.size) {
         return this.loginHint.needsLogin;
       }
-      const needsLogin = !authJsonHasPiProvider(JSON.parse(readFileSync(authPath, "utf8")));
+      const needsLogin = !authJsonHasPiProvider(JSON.parse(await readFile(authPath, "utf8")));
       this.loginHint = { mtimeMs: info.mtimeMs, size: info.size, needsLogin };
       return needsLogin;
     } catch {
@@ -4916,7 +4907,7 @@ class PiEditorApp {
       if (this.activeProjectId === projectId) {
         const next = this.projects.keys().next().value;
         this.activeProjectId = next ?? null;
-        if (next) this.sendFolderOpened(this.projects.get(next)!.cwd, next);
+        if (next) await this.sendFolderOpened(this.projects.get(next)!.cwd, next);
       }
       return { ok: true };
     } finally {
@@ -5212,29 +5203,37 @@ class PiEditorApp {
     return managed.path;
   }
 
-  private async listDir(absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string }> {
+  private async listDir(absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }> {
     const managed = this.managedPath(absPath, true);
     if (!managed) return { entries: [], error: "path outside the project workspace" };
     try {
       const dirents = await readdir(managed.path, { withFileTypes: true });
+      const visible = dirents.filter((ent) => !IGNORED_SEGMENTS.has(ent.name) && !ent.name.startsWith("."));
+      visible.sort((a, b) => {
+        const aDir = a.isDirectory() ? 0 : 1;
+        const bDir = b.isDirectory() ? 0 : 1;
+        if (aDir !== bDir) return aDir - bDir;
+        return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+      });
+      const rootCanon = this.canonicalPath(managed.workspace.root);
       const entries: ExplorerEntry[] = [];
-      for (const ent of dirents) {
-        if (IGNORED_SEGMENTS.has(ent.name) || ent.name.startsWith(".")) continue;
+      let truncated = false;
+      for (const ent of visible) {
+        if (entries.length >= MAX_EXPLORER_ENTRIES) {
+          truncated = true;
+          break;
+        }
         const full = join(managed.path, ent.name);
         const child = this.managedPath(full, true);
         if (!child || child.workspace.id !== managed.workspace.id) continue;
         entries.push({
           name: ent.name,
           path: child.path,
-          relPath: relative(this.canonicalPath(managed.workspace.root), child.path),
+          relPath: relative(rootCanon, child.path),
           type: ent.isDirectory() ? "dir" : "file",
         });
       }
-      entries.sort((a, b) => {
-        if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
-        return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
-      });
-      return { entries };
+      return truncated ? { entries, truncated: true } : { entries };
     } catch (err) {
       return { entries: [], error: (err as Error).message };
     }
@@ -5259,8 +5258,8 @@ class PiEditorApp {
 
   private registerIpc(): void {
     // ---- Project tabs ----
-    ipcMain.handle("project:list", () => {
-      const needsLogin = this.piNeedsLogin();
+    ipcMain.handle("project:list", async () => {
+      const needsLogin = await this.piNeedsLogin();
       return [...this.projects.values()].map((p) => ({
         id: p.id,
         cwd: p.cwd,
@@ -5270,17 +5269,25 @@ class PiEditorApp {
       }));
     });
     ipcMain.handle("project:open", () => this.openFolder());
-    ipcMain.handle("project:open-path", (_e, cwd: unknown) => {
-      if (typeof cwd !== "string" || !existsSync(cwd)) return { cancelled: true };
+    ipcMain.handle("project:open-path", async (_e, cwd: unknown) => {
+      if (typeof cwd !== "string") return { cancelled: true };
+      try {
+        await access(cwd);
+      } catch {
+        return { cancelled: true };
+      }
       return this.openProjectAt(cwd);
     });
-    ipcMain.handle("project:activate", (_e, projectId: string) => {
-      this.activateProject(projectId);
+    ipcMain.handle("project:activate", async (_e, projectId: unknown) => {
+      if (typeof projectId !== "string" || !this.projects.has(projectId)) return { ok: false };
+      await this.activateProject(projectId);
       return { ok: true };
     });
-    ipcMain.handle("project:close", async (_e, projectId: string) => this.closeProject(projectId));
+    ipcMain.handle("project:close", async (_e, projectId: unknown) => {
+      if (typeof projectId !== "string") return { ok: false, error: "invalid project" };
+      return this.closeProject(projectId);
+    });
 
-    ipcMain.handle("folder:open", () => this.openFolder());
     ipcMain.handle("clipboard:write", (_e, text: unknown) => {
       if (typeof text !== "string") return { ok: false, error: "clipboard text is invalid" };
       if (Buffer.byteLength(text, "utf8") > MAX_CLIPBOARD_BYTES) return { ok: false, error: "clipboard text is too large" };
@@ -5297,12 +5304,28 @@ class PiEditorApp {
     );
     ipcMain.handle("settings:shortcuts", (_e, shortcuts: unknown) => this.setKeyboardShortcuts(shortcuts));
 
-    ipcMain.handle("terminals:create", async (_e, opts?: { type?: "agent" | "shell"; shell?: string }) => {
+    ipcMain.handle("terminals:create", async (_e, opts?: unknown) => {
+      let type: "agent" | "shell" | undefined;
+      let shell: string | undefined;
+      if (opts !== undefined) {
+        if (typeof opts !== "object" || opts === null) return { ok: false, error: "invalid terminal options" };
+        const rec = opts as { type?: unknown; shell?: unknown };
+        if (rec.type !== undefined && rec.type !== "agent" && rec.type !== "shell") {
+          return { ok: false, error: "invalid terminal type" };
+        }
+        if (rec.shell !== undefined && typeof rec.shell !== "string") return { ok: false, error: "invalid shell" };
+        type = rec.type;
+        shell = rec.shell;
+        if (shell) {
+          const shells = await detectShells();
+          if (!shells.some((item) => item.path === shell)) return { ok: false, error: "unknown shell" };
+        }
+      }
       try {
-        const t = await this.createTerminal(undefined, opts);
-        return { id: t.id };
+        const t = await this.createTerminal(undefined, { type, shell });
+        return { ok: true, id: t.id };
       } catch (err) {
-        return { error: (err as Error).message };
+        return { ok: false, error: (err as Error).message };
       }
     });
     ipcMain.handle("terminals:shells", () => detectShells());
@@ -5311,14 +5334,21 @@ class PiEditorApp {
       return { available, bin: this.resolvePiBin(), message: available ? undefined : this.piMissingMessage() };
     });
     ipcMain.handle("terminals:close", (_e, id: string) => this.closeTerminal(id));
-    ipcMain.handle("terminals:write", (_e, id: string, data: string) => {
+    ipcMain.handle("terminals:write", (_e, id: unknown, data: unknown) => {
+      if (typeof id !== "string" || typeof data !== "string") return;
       const inst = this.terminals.get(id);
       if (!inst) return;
-      if (String(data) === "\x03") inst.interruptedAt = Date.now();
-      inst.pty.write(String(data));
+      // Keystrokes are tiny. Skip the UTF-8 scan until the payload is large.
+      let text = data;
+      if (data.length > 4096 && Buffer.byteLength(data, "utf8") > MAX_CLIPBOARD_BYTES) {
+        text = capUtf8(data, MAX_CLIPBOARD_BYTES);
+      }
+      if (text === "\x03") inst.interruptedAt = Date.now();
+      inst.pty.write(text);
     });
-    ipcMain.handle("terminals:resize", (_e, id: string, cols: number, rows: number) => {
-      this.terminals.get(id)?.pty.resize(Math.max(2, Math.floor(cols)), Math.max(2, Math.floor(rows)));
+    ipcMain.handle("terminals:resize", (_e, id: unknown, cols: unknown, rows: unknown) => {
+      if (typeof id !== "string" || !Number.isFinite(cols) || !Number.isFinite(rows)) return;
+      this.terminals.get(id)?.pty.resize(Math.max(2, Math.floor(Number(cols))), Math.max(2, Math.floor(Number(rows))));
     });
     ipcMain.handle("terminals:list", () => {
       this.sendInstances();
@@ -5426,7 +5456,6 @@ class PiEditorApp {
     });
     const wlOf = (comparisonId: string) => this.projectOfComparison(comparisonId)?.worldlines ?? null;
     ipcMain.handle("worldline:details", (_e, comparisonId: string, label: "A" | "B") => wlOf(comparisonId)?.details(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" });
-    ipcMain.handle("worldline:compare", (_e, comparisonId: string) => wlOf(comparisonId)?.compare(comparisonId) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:challenge-candidate", (_e, comparisonId: string, label: "A" | "B") => wlOf(comparisonId)?.challengeFromCandidate(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:file", (_e, comparisonId: string, label: "A" | "B", relPath: string) => wlOf(comparisonId)?.fileOf(comparisonId, label, relPath) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:base-file", (_e, comparisonId: string, relPath: string) => wlOf(comparisonId)?.baseFileOf(comparisonId, relPath) ?? { ok: false, error: "worldlines unavailable" });
@@ -5481,7 +5510,9 @@ class PiEditorApp {
     });
 
     // ---- Editor flush (run-start preflight) ----
-    ipcMain.handle("editor:flush-report", (_e, requestId: string, result: { ok: boolean; failed: string[] }) => {
+    ipcMain.handle("editor:flush-report", (_e, requestId: unknown, result: unknown) => {
+      if (typeof requestId !== "string") return;
+      if (!isFlushResult(result)) return;
       const waiter = this.flushWaiters.get(requestId);
       if (!waiter) return;
       clearTimeout(waiter.timer);
@@ -5532,7 +5563,7 @@ class PiEditorApp {
     );
 
     // ---- Session Search ----
-    ipcMain.handle("session:search", (_e, query: string) => this.searchSessions(query));
+    ipcMain.handle("session:search", (_e, query: unknown) => this.searchSessions(typeof query === "string" ? query : ""));
 
     // ---- Plan Board ----
     ipcMain.handle("plan:get", (_e, terminalId: string) => this.terminals.get(terminalId)?.plan ?? []);
@@ -5590,8 +5621,12 @@ class PiEditorApp {
       }
     });
 
-    ipcMain.handle("file:open", (_e, absPath: string) => this.openFileInEditor(absPath));
-    ipcMain.handle("file:save", async (_e, absPath: string, content: string) => {
+    ipcMain.handle("file:open", (_e, absPath: unknown) => {
+      if (typeof absPath !== "string") return { ok: false, path: "", error: "invalid path" };
+      return this.openFileInEditor(absPath);
+    });
+    ipcMain.handle("file:save", async (_e, absPath: unknown, content: unknown) => {
+      if (typeof absPath !== "string") return { ok: false, error: "invalid path" };
       if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > MAX_OPEN_FILE_SIZE) return { ok: false, error: "file content is too large" };
       const managed = this.managedPath(absPath);
       if (!managed) return { ok: false, error: "path is outside a managed workspace" };
@@ -5607,8 +5642,13 @@ class PiEditorApp {
       }
     });
 
-    ipcMain.handle("explorer:list-dir", (_e, absPath: string) => this.listDir(absPath));
-    ipcMain.handle("explorer:create", async (_e, relPath: string, kind: "file" | "dir") => {
+    ipcMain.handle("explorer:list-dir", (_e, absPath: unknown) => {
+      if (typeof absPath !== "string") return { entries: [], error: "invalid path" };
+      return this.listDir(absPath);
+    });
+    ipcMain.handle("explorer:create", async (_e, relPath: unknown, kind: unknown) => {
+      if (typeof relPath !== "string") return { ok: false, error: "invalid path" };
+      if (kind !== "file" && kind !== "dir") return { ok: false, error: "kind must be file or dir" };
       const blocked = this.assertWorkspaceWritable(this.primaryWorkspace()?.id ?? "");
       if (blocked) return { ok: false, error: blocked };
       try {
@@ -5624,11 +5664,12 @@ class PiEditorApp {
         return { ok: false, error: (err as Error).message };
       }
     });
-    ipcMain.handle("explorer:rename", async (_e, relPath: string, newName: string) => {
+    ipcMain.handle("explorer:rename", async (_e, relPath: unknown, newName: unknown) => {
       const blocked = this.assertWorkspaceWritable(this.primaryWorkspace()?.id ?? "");
       if (blocked) return { ok: false, error: blocked };
       try {
-        if (!newName || newName.includes("/") || newName === "." || newName === "..") {
+        if (typeof relPath !== "string") return { ok: false, error: "invalid path" };
+        if (typeof newName !== "string" || !newName || newName.includes("/") || newName === "." || newName === "..") {
           return { ok: false, error: "invalid name" };
         }
         const abs = this.projectAbs(relPath);
@@ -5638,7 +5679,8 @@ class PiEditorApp {
         return { ok: false, error: (err as Error).message };
       }
     });
-    ipcMain.handle("explorer:delete", async (_e, relPath: string) => {
+    ipcMain.handle("explorer:delete", async (_e, relPath: unknown) => {
+      if (typeof relPath !== "string") return { ok: false, error: "invalid path" };
       const blocked = this.assertWorkspaceWritable(this.primaryWorkspace()?.id ?? "");
       if (blocked) return { ok: false, error: blocked };
       try {
@@ -5651,17 +5693,17 @@ class PiEditorApp {
     });
   }
 
-  private async openFileInEditor(absPath: string): Promise<{ path: string; content: string } | { path: string; error: string }> {
+  private async openFileInEditor(absPath: string): Promise<{ ok: true; path: string; content: string } | { ok: false; path: string; error: string }> {
     const managed = this.managedPath(absPath);
-    if (!managed) return { path: absPath, error: "path is outside a managed workspace" };
+    if (!managed) return { ok: false, path: absPath, error: "path is outside a managed workspace" };
     try {
       const st = await stat(managed.path);
-      if (!st.isFile()) return { path: managed.path, error: "not a file" };
-      if (st.size > MAX_OPEN_FILE_SIZE) return { path: managed.path, error: `file is too large to open (${st.size} bytes)` };
+      if (!st.isFile()) return { ok: false, path: managed.path, error: "not a file" };
+      if (st.size > MAX_OPEN_FILE_SIZE) return { ok: false, path: managed.path, error: `file is too large to open (${st.size} bytes)` };
       const content = await readFile(managed.path, "utf8");
-      return { path: managed.path, content };
+      return { ok: true, path: managed.path, content };
     } catch (err) {
-      return { path: managed.path, error: (err as Error).message };
+      return { ok: false, path: managed.path, error: (err as Error).message };
     }
   }
 
@@ -5671,6 +5713,7 @@ class PiEditorApp {
     this.preferences = await this.preferencesStore.load();
     this.shortcutMap = { ...this.preferences.shortcuts };
     this.registerIpc();
+    void detectShells();
     // The session workspace is per-launch scratch: run ids restart at
     // run-1, and stale copies from a previous launch would collide.
     rmSync(this.sessionWorkspaceDir, { recursive: true, force: true });

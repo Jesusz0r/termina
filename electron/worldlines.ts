@@ -18,8 +18,9 @@ import { gitHead, platformHasCopyOnWrite, type SnapshotStore } from "./worldline
 import { dependencyDiff } from "./evidence.js";
 import type { DependencyChange, WorldlineChangedFile, WorldlineDetails } from "../shared/types.js";
 
-/** Quote one shell argument for the ulimit wrapper command. */
-function quoteArg(a: string): string {
+/** Quote one shell argument: the resolved base commands carry scripts that
+ * must survive as one argument through the wrapper shell. */
+export function quoteShellArg(a: string): string {
   return `'${a.replace(/'/g, `'\\''`)}'`;
 }
 
@@ -205,8 +206,8 @@ const MAX_IGNORED_BYTES = 200 * 1024 * 1024;
 /** The app-owned marker that proves a worlds dir belongs to the app. */
 const MARKER = ".termina-world";
 
-/** The logical size of a directory tree (du, off the main-thread sync path). */
-async function dirBytes(dir: string): Promise<number> {
+/** The logical size of a directory tree (`du`, in a child process). */
+export async function dirBytes(dir: string): Promise<number> {
   return new Promise((resolvePromise) => {
     const child = spawn("du", ["-sk", dir], { stdio: ["ignore", "pipe", "ignore"] });
     let out = "";
@@ -307,46 +308,6 @@ export class WorldlineManager {
   evidenceVersion(comparisonId: string, label: "A" | "B"): { version: number; headStateId: string | null } | null {
     const cand = this.comparisons.get(comparisonId)?.candidates.get(label);
     return cand ? { version: cand.version, headStateId: cand.headStateId } : null;
-  }
-
-  /** The three comparison diffs (WORLDLINES §8 `worldline:compare`):
-   * metadata only — base→A, base→B, and A→B changed paths.
-   */
-  async compare(comparisonId: string): Promise<{
-    ok: boolean;
-    baseToA?: WorldlineChangedFile[];
-    baseToB?: WorldlineChangedFile[];
-    aToB?: WorldlineChangedFile[];
-    error?: string;
-  }> {
-    const cmp = this.comparisons.get(comparisonId);
-    const a = cmp?.candidates.get("A");
-    const b = cmp?.candidates.get("B");
-    if (!cmp || !a || !b) return { ok: false, error: "the comparison has no A/B pair" };
-    if (!cmp.baseStateId) return { ok: false, error: "the comparison base is missing" };
-    const store = await this.deps.getStore();
-    if (!store) return { ok: false, error: "recording is not available" };
-    try {
-      const [wA, wB] = await Promise.all([
-        this.deps.captureHead(a.dir, join(a.dir, ".git"), cmp.baseStateId),
-        this.deps.captureHead(b.dir, join(b.dir, ".git"), cmp.baseStateId),
-      ]);
-      this.setCandidateHead(cmp.id, "A", wA.commit);
-      this.setCandidateHead(cmp.id, "B", wB.commit);
-      const [baseToA, baseToB, aToB] = await Promise.all([
-        store.diffTree(cmp.baseStateId, wA.commit),
-        store.diffTree(cmp.baseStateId, wB.commit),
-        store.diffTree(wA.commit, wB.commit),
-      ]);
-      return {
-        ok: true,
-        baseToA: baseToA.map((c) => ({ relPath: c.relPath, status: c.status })),
-        baseToB: baseToB.map((c) => ({ relPath: c.relPath, status: c.status })),
-        aToB: aToB.map((c) => ({ relPath: c.relPath, status: c.status })),
-      };
-    } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
-    }
   }
 
   /**
@@ -1174,7 +1135,7 @@ export class WorldlineManager {
     const piArgs = ["--session", cand.sessionFile!, "-e", this.deps.bridgePath, ...extraPiArgs];
     return {
       cmd: "sandbox-exec",
-      args: ["-f", cand.profilePath, "/bin/zsh", "-c", `${sandboxShellPreamble()} exec ${quoteArg(this.deps.piBin)} ${piArgs.map(quoteArg).join(" ")}`],
+      args: ["-f", cand.profilePath, "/bin/zsh", "-c", `${sandboxShellPreamble()} exec ${quoteShellArg(this.deps.piBin)} ${piArgs.map(quoteShellArg).join(" ")}`],
       env: {
         ...this.deps.baseEnv,
         HOME: cand.homeDir,

@@ -6,8 +6,9 @@
  *
  * DOM updates are incremental: an update push touches only its card.
  */
-import type { WorldlineSummary, WorldlineDetails, WorldlineChangedFile, EvidenceRecord, EvidenceSummary, ProfileVerdict } from "../shared/types";
-import { showConfirm, toast } from "./components/modals";
+import type { WorldlineSummary, WorldlineDetails, WorldlineChangedFile, EvidenceSummary } from "../shared/types";
+import { showConfirm, showFileListModal, toast } from "./components/modals";
+import { KIND_LABEL, STATE_LABELS, chipText, evidenceLineDetail, formatBytes, profileCaption, recordOf } from "./worldline-evidence";
 
 interface ViewHandlers {
   /** Open a base-to-candidate diff in Change Review. */
@@ -22,166 +23,6 @@ interface ViewHandlers {
   isLiveTerminal(terminalId: string): boolean;
 }
 
-const PROFILE_LABEL: Record<ProfileVerdict["profile"], string> = {
-  "fewer-dependencies": "fewer deps",
-  "preserve-api": "api",
-  "simpler-implementation": "footprint",
-  "performance-first": "perf",
-};
-
-function captionName(profile: ProfileVerdict["profile"]): string {
-  return profile === "fewer-dependencies" ? "deps" : PROFILE_LABEL[profile];
-}
-
-const KIND_LABEL: Record<EvidenceRecord["kind"], string> = {
-  verify: "verify",
-  dependencies: "deps",
-  api: "api",
-  footprint: "footprint",
-  benchmark: "benchmark",
-  trajectory: "trajectory",
-};
-
-function recordOf(records: EvidenceRecord[] | undefined, kind: EvidenceRecord["kind"]): EvidenceRecord | undefined {
-  return records?.find((r) => r.kind === kind);
-}
-
-function addedLen(rec: EvidenceRecord | undefined): number | null {
-  const added = rec?.result.added;
-  return Array.isArray(added) ? added.length : null;
-}
-
-function asFinite(value: unknown): number | null {
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value !== "string" || value.trim() === "") return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
-function formatChipNum(n: number): string {
-  if (Number.isInteger(n)) return String(n);
-  const s = n.toFixed(2).replace(/\.?0+$/, "");
-  return s.length > 0 ? s : String(n);
-}
-
-function chipUnit(value: unknown): string {
-  if (typeof value !== "string") return "";
-  const unit = value.trim();
-  return unit.length > 0 && unit.length <= 8 ? unit : "";
-}
-
-/** Raw A/B magnitudes from measured records. Ranking math stays in reason. */
-function chipDelta(profile: ProfileVerdict["profile"], summary: EvidenceSummary): string | null {
-  const a = summary.byCandidate.A;
-  const b = summary.byCandidate.B;
-  if (profile === "fewer-dependencies") {
-    const na = addedLen(recordOf(a, "dependencies"));
-    const nb = addedLen(recordOf(b, "dependencies"));
-    if (na === null || nb === null) return null;
-    return `+${na}/+${nb}`;
-  }
-  if (profile === "simpler-implementation") {
-    const fa = recordOf(a, "footprint");
-    const fb = recordOf(b, "footprint");
-    const aFiles = asFinite(fa?.result.changedFiles);
-    const aLines = asFinite(fa?.result.changedLines);
-    const bFiles = asFinite(fb?.result.changedFiles);
-    const bLines = asFinite(fb?.result.changedLines);
-    if (aFiles === null || aLines === null || bFiles === null || bLines === null) return null;
-    const aAdd = addedLen(recordOf(a, "dependencies")) ?? 0;
-    const bAdd = addedLen(recordOf(b, "dependencies")) ?? 0;
-    return `${aAdd}d/${formatChipNum(aFiles)}f/${formatChipNum(aLines)}l vs ${bAdd}d/${formatChipNum(bFiles)}f/${formatChipNum(bLines)}l`;
-  }
-  if (profile === "performance-first") {
-    const ba = recordOf(a, "benchmark");
-    const bb = recordOf(b, "benchmark");
-    const medA = asFinite(ba?.result.median);
-    const medB = asFinite(bb?.result.median);
-    if (medA === null || medB === null) return null;
-    const unit = chipUnit(ba?.result.unit) || chipUnit(bb?.result.unit);
-    return unit
-      ? `${formatChipNum(medA)}${unit} vs ${formatChipNum(medB)}${unit}`
-      : `${formatChipNum(medA)} vs ${formatChipNum(medB)}`;
-  }
-  return null;
-}
-
-function chipText(v: ProfileVerdict, summary: EvidenceSummary): string {
-  const name = PROFILE_LABEL[v.profile];
-  const delta = chipDelta(v.profile, summary);
-  if (v.winner === "unavailable") return delta ? `${name}: unavailable ${delta}` : `${name}: unavailable`;
-  return delta ? `${name}: ${v.winner} ${delta}` : `${name}: ${v.winner}`;
-}
-
-/**
- * One line from ranked profiles. Skip unavailable. Omit when nothing
- * resolved to A or B. Stale pairs keep this line; the stale chip marks
- * the ranking as not current.
- */
-function profileCaption(profiles: ProfileVerdict[] | undefined): string | null {
-  if (!Array.isArray(profiles) || profiles.length === 0) return null;
-  const resolved: Array<{ winner: "A" | "B" | "tie"; name: string }> = [];
-  for (const v of profiles) {
-    if (v.winner !== "A" && v.winner !== "B" && v.winner !== "tie") continue;
-    const name = captionName(v.profile);
-    if (!name) continue;
-    resolved.push({ winner: v.winner, name });
-  }
-  if (!resolved.some((v) => v.winner === "A" || v.winner === "B")) return null;
-  const parts: string[] = [];
-  for (const winner of ["A", "B", "tie"] as const) {
-    const names = resolved.filter((v) => v.winner === winner).map((v) => v.name);
-    if (names.length === 0) continue;
-    parts.push(winner === "tie" ? `${names.join(" ")} tie` : `${names.join(" ")} → ${winner}`);
-  }
-  return parts.length > 0 ? parts.join(" · ") : null;
-}
-
-/** This candidate's measured detail, plus the other side when both exist. */
-function evidenceLineDetail(rec: EvidenceRecord, other: EvidenceRecord | undefined, otherLabel: "A" | "B"): string {
-  if (rec.kind === "verify") {
-    const cmd = String(rec.result.command ?? "");
-    const passCount = asFinite(rec.result.passCount);
-    const runs = asFinite(rec.result.runs);
-    if (passCount !== null && runs !== null && runs > 1) {
-      return cmd ? `${cmd} · ${formatChipNum(passCount)}/${formatChipNum(runs)}` : `${formatChipNum(passCount)}/${formatChipNum(runs)}`;
-    }
-    return cmd;
-  }
-  if (rec.kind === "dependencies") {
-    const n = addedLen(rec);
-    const m = addedLen(other);
-    if (n === null) return "";
-    return m === null ? `+${n}` : `+${n} · ${otherLabel} +${m}`;
-  }
-  if (rec.kind === "footprint") {
-    const files = rec.result.changedFiles ?? "?";
-    const lines = rec.result.changedLines ?? "?";
-    const mine = `${files} files · ${lines} lines`;
-    const oFiles = asFinite(other?.result.changedFiles);
-    const oLines = asFinite(other?.result.changedLines);
-    if (oFiles === null || oLines === null) return mine;
-    return `${mine} · ${otherLabel} ${oFiles}f/${oLines}l`;
-  }
-  if (rec.kind === "benchmark") {
-    const med = asFinite(rec.result.median);
-    const unit = chipUnit(rec.result.unit);
-    const mine = med === null ? String(rec.result.median ?? "?") : unit ? `${formatChipNum(med)} ${unit}` : formatChipNum(med);
-    const oMed = asFinite(other?.result.median);
-    if (oMed === null) return mine;
-    const oUnit = chipUnit(other?.result.unit) || unit;
-    return oUnit ? `${mine} · ${otherLabel} ${formatChipNum(oMed)}${oUnit}` : `${mine} · ${otherLabel} ${formatChipNum(oMed)}`;
-  }
-  if (rec.kind === "trajectory") {
-    const errors = asFinite(rec.result.fileToolErrors);
-    if (errors === null) return "";
-    const lastErr = asFinite(rec.result.lastErrorCount);
-    return lastErr !== null && lastErr > 0 ? `${formatChipNum(errors)} file-tool errors · ${formatChipNum(lastErr)} last-path errors` : `${formatChipNum(errors)} file-tool errors`;
-  }
-  if (rec.status === "fail") return (rec.result.changed as string[] | undefined)?.join(",") ?? "";
-  return "";
-}
-
 function actionButton(className: string, label: string, title: string, onClick: () => void): HTMLButtonElement {
   const btn = document.createElement("button");
   btn.type = "button";
@@ -194,21 +35,6 @@ function actionButton(className: string, label: string, title: string, onClick: 
   });
   return btn;
 }
-
-const STATE_LABELS: Record<string, string> = {
-  creating: "creating",
-  ready: "ready",
-  running: "running",
-  settled: "settled",
-  verifying: "verifying",
-  promoting: "promoting",
-  conflict: "conflict",
-  cancelled: "cancelled",
-  error: "error",
-  discarding: "discarding",
-  discarded: "discarded",
-  promoted: "promoted",
-};
 
 interface CandidateCard {
   summary: WorldlineSummary;
@@ -664,8 +490,17 @@ export class WorldlinesView {
       li.className = "cand-loading";
       li.textContent = "computing…";
       card.changedList.appendChild(li);
+      const version = card.summary.version;
       void window.pi.getWorldlineDetails(comparisonId, label).then((res) => {
         card.detailsLoading = false;
+        if (card.summary.version !== version) {
+          card.changedList.replaceChildren();
+          const stale = document.createElement("li");
+          stale.className = "cand-loading";
+          stale.textContent = "candidate updated — expand again";
+          card.changedList.appendChild(stale);
+          return;
+        }
         if (!res.ok || !res.details) {
           card.changedList.replaceChildren();
           const err = document.createElement("li");
@@ -675,8 +510,23 @@ export class WorldlinesView {
           return;
         }
         card.details = res.details;
-        card.detailsVersion = card.summary.version;
+        card.detailsVersion = version;
         this.fillDetails(card, res.details);
+      }).catch((err) => {
+        card.detailsLoading = false;
+        if (card.summary.version !== version) {
+          card.changedList.replaceChildren();
+          const stale = document.createElement("li");
+          stale.className = "cand-loading";
+          stale.textContent = "candidate updated — expand again";
+          card.changedList.appendChild(stale);
+          return;
+        }
+        card.changedList.replaceChildren();
+        const row = document.createElement("li");
+        row.className = "cand-loading";
+        row.textContent = (err as Error).message;
+        card.changedList.appendChild(row);
       });
     }
   }
@@ -726,7 +576,7 @@ export class WorldlinesView {
       toast(`candidate ${label} has no changes versus the shared base`, "info");
       return;
     }
-    this.openListModal(
+    showFileListModal(
       `base → ${label} — ${details.changedFiles.length} file(s)`,
       details.changedFiles.map((f) => [f.relPath, f.status] as [string, WorldlineChangedFile["status"]]),
       (relPath) => {
@@ -755,7 +605,7 @@ export class WorldlinesView {
     };
     for (const f of a.changedFiles) add(f, true, false);
     for (const f of b.changedFiles) add(f, false, true);
-    this.openListModal(
+    showFileListModal(
       `A ⇄ B — ${byPath.size} file(s)`,
       [...byPath.entries()].sort((x, y) => x[0].localeCompare(y[0])).map(([relPath, f]) => [relPath, f.status] as [string, WorldlineChangedFile["status"]]),
       (relPath) => this.handlers.onCompareAB(comparisonId, relPath),
@@ -768,66 +618,20 @@ export class WorldlinesView {
     const card = this.pairs.get(comparisonId)?.cards.get(label);
     if (!card) return null;
     if (card.details && card.detailsVersion === card.summary.version) return card.details;
-    const res = await window.pi.getWorldlineDetails(comparisonId, label);
-    if (res.ok && res.details) {
-      card.details = res.details;
-      card.detailsVersion = card.summary.version;
-      return res.details;
+    const version = card.summary.version;
+    try {
+      const res = await window.pi.getWorldlineDetails(comparisonId, label);
+      if (card.summary.version !== version) return null;
+      if (res.ok && res.details) {
+        card.details = res.details;
+        card.detailsVersion = version;
+        return res.details;
+      }
+      toast(res.error ?? "details unavailable", "warning");
+      return null;
+    } catch (err) {
+      toast((err as Error).message, "warning");
+      return null;
     }
-    toast(res.error ?? "details unavailable", "warning");
-    return null;
   }
-
-  /** A small modal with a clickable file list. */
-  private openListModal(title: string, items: Array<[string, WorldlineChangedFile["status"]]>, onPick: (relPath: string) => void): void {
-    const root = document.getElementById("modal-root")!;
-    const backdrop = document.createElement("div");
-    backdrop.className = "modal-backdrop";
-    backdrop.tabIndex = -1;
-    const modal = document.createElement("div");
-    modal.className = "modal worldline-list-modal";
-    const titleEl = document.createElement("div");
-    titleEl.className = "modal-title";
-    titleEl.textContent = title;
-    const body = document.createElement("div");
-    body.className = "modal-body";
-    const list = document.createElement("ul");
-    list.className = "worldline-list";
-    for (const [relPath, status] of items) {
-      const li = document.createElement("li");
-      const badge = document.createElement("span");
-      badge.className = `status-badge ${status}`;
-      badge.textContent = status === "created" ? "A" : status === "deleted" ? "D" : "M";
-      const path = document.createElement("span");
-      path.className = "path";
-      path.textContent = relPath;
-      li.append(badge, path);
-      li.addEventListener("click", () => {
-        backdrop.remove();
-        onPick(relPath);
-      });
-      list.appendChild(li);
-    }
-    body.appendChild(list);
-    const footer = document.createElement("div");
-    footer.className = "modal-footer";
-    const closeBtn = document.createElement("button");
-    closeBtn.className = "modal-btn";
-    closeBtn.textContent = "Close";
-    closeBtn.addEventListener("click", () => backdrop.remove());
-    footer.appendChild(closeBtn);
-    modal.append(titleEl, body, footer);
-    backdrop.append(modal);
-    root.appendChild(backdrop);
-    backdrop.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") backdrop.remove();
-    });
-    backdrop.focus();
-  }
-}
-
-function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} kB`;
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }

@@ -26,6 +26,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { realpathSync } from "node:fs";
+import { waitFor as waitUntil } from "./wait-for.mjs";
 
 const port = 9222;
 const results = [];
@@ -77,15 +78,7 @@ async function typePrompt(text) {
   await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
 }
 
-async function waitFor(predicate, timeoutMs = 120000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const value = await predicate();
-    if (value) return value;
-    await sleep(1000);
-  }
-  return null;
-}
+const waitFor = (predicate, timeoutMs = 120000) => waitUntil(predicate, timeoutMs, 1000);
 
 const journalRoot = join(WORLDS, "promotion-journal");
 

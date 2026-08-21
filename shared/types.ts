@@ -189,6 +189,11 @@ export function cssFontFamily(family: string): string {
   return `'${family}', ${DEFAULT_CODE_FONT_STACK}`;
 }
 
+/** The last path segment, for either POSIX or Windows separators. */
+export function pathBasename(p: string): string {
+  return p.split(/[\\/]/).pop() || p;
+}
+
 export interface AppPreferences {
   theme: ThemeId;
   editorFontSize: number;
@@ -477,7 +482,7 @@ export interface PiBridge {
   onFlushRequest(cb: (p: { requestId: string; writerId: string }) => void): void;
 
   // terminals (agent = pi TUI, shell = a real shell like zsh)
-  createTerminal(opts?: { type?: "agent" | "shell"; shell?: string }): Promise<{ id?: string; error?: string }>;
+  createTerminal(opts?: { type?: "agent" | "shell"; shell?: string }): Promise<{ ok: boolean; id?: string; error?: string }>;
   getShells(): Promise<{ name: string; path: string }[]>;
   getPiStatus(): Promise<{ available: boolean; bin: string; message?: string }>;
   closeTerminal(id: string): Promise<void>;
@@ -543,8 +548,6 @@ export interface PiBridge {
   challengeRun(runId: string): Promise<{ ok: boolean; comparisonId?: string; error?: string }>;
   /** Challenge an existing candidate (snapshot as reference + challenger). */
   challengeCandidate(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; comparisonId?: string; error?: string }>;
-  /** The three comparison diffs (metadata only). */
-  compareWorldline(comparisonId: string): Promise<{ ok: boolean; baseToA?: WorldlineChangedFile[]; baseToB?: WorldlineChangedFile[]; aToB?: WorldlineChangedFile[]; error?: string }>;
   /** Compute evidence for both candidates of a comparison. */
   runEvidence(comparisonId: string): Promise<{ ok: boolean; error?: string }>;
   /** Push: the evidence summary of a comparison changed. */
@@ -586,12 +589,11 @@ export interface PiBridge {
   projectActivate(projectId: string): Promise<{ ok: boolean }>;
   projectClose(projectId: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean }>;
   onProjectClosed(cb: (e: { projectId: string }) => void): void;
-  openFolder(): Promise<{ cwd: string } | { cancelled: true }>;
-  openFile(path: string): Promise<{ path: string; content: string } | { path: string; error: string }>;
+  openFile(path: string): Promise<{ ok: true; path: string; content: string } | { ok: false; path: string; error: string }>;
   saveFile(path: string, content: string): Promise<{ ok: boolean; error?: string }>;
 
   // file explorer
-  listDir(absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string }>;
+  listDir(absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }>;
   createEntry(relPath: string, kind: "file" | "dir"): Promise<{ ok: boolean; error?: string }>;
   renameEntry(relPath: string, newName: string): Promise<{ ok: boolean; error?: string }>;
   deleteEntry(relPath: string): Promise<{ ok: boolean; error?: string }>;

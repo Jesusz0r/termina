@@ -85,12 +85,28 @@ export class ReviewView {
     this.path = path;
     this.nameEl.textContent = relPath;
 
-    const res = await window.pi.reviewBaseline(terminalId, path);
+    const hint = document.getElementById("review-hint")!;
+    hint.textContent = "loading…";
+    let res;
+    let current;
+    try {
+      res = await window.pi.reviewBaseline(terminalId, path);
+      if (seq !== this.loadSeq) return;
+      current = await window.pi.openFile(path);
+    } catch (err) {
+      if (seq !== this.loadSeq) return;
+      hint.textContent = (err as Error).message;
+      toast(`could not load review: ${(err as Error).message}`, "error");
+      return;
+    }
     if (seq !== this.loadSeq) return;
     this.baseline = res.baseline;
-    const current = await window.pi.openFile(path);
-    if (seq !== this.loadSeq) return;
-    const currentText = "content" in current ? current.content : "";
+    if (!current.ok) {
+      hint.textContent = current.error;
+      toast(`could not load ${relPath}: ${current.error}`, "error");
+      return;
+    }
+    const currentText = current.content;
 
     this.setDiff(this.baseline ?? "", currentText);
 
@@ -155,6 +171,10 @@ export class ReviewView {
     this.container.style.display = "flex";
     const hint = document.getElementById("review-hint")!;
     hint.textContent = "candidate A (reference) → candidate B (alternative)";
+    if (!a.ok || !b.ok) {
+      hint.textContent = `A ⇄ B — ${a.error ?? b.error ?? ""}`;
+      toast(a.error ?? b.error ?? "could not load A ⇄ B diff", "error");
+    }
   }
 
   /** Build the diff models from two texts. */
@@ -174,9 +194,15 @@ export class ReviewView {
   /** Refresh the modified side (for example after a revert changed the file). */
   async refreshCurrent(): Promise<void> {
     if (!this.path || !this.terminalId) return;
-    const current = await window.pi.openFile(this.path);
-    const text = "content" in current ? current.content : "";
-    this.modifiedModel?.setValue(text);
+    const seq = this.loadSeq;
+    const path = this.path;
+    const current = await window.pi.openFile(path);
+    if (seq !== this.loadSeq || this.path !== path) return;
+    if (!current.ok) {
+      toast(`could not refresh review: ${current.error}`, "error");
+      return;
+    }
+    this.modifiedModel?.setValue(current.content);
   }
 
   async revert(): Promise<void> {
