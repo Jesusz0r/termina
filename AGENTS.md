@@ -69,8 +69,9 @@ In this repository that means:
 * `electron/preferences.ts` is the only preferences file store.
 * `electron/plan-board.ts` owns Plan Board parse, progress, finalize, and
   Dispatch task picks. The bridge does not define a second task-line rule.
-* `electron/worldlines.ts` owns comparisons, promotion journals, and
-  evidence runs. `electron/evidence.ts` only measures a candidate.
+* `electron/worldlines.ts` owns comparisons, promotion journals, evidence
+  runs, and the run-record catalog. Main writes a record at agent start
+  and settle. `electron/evidence.ts` only measures a candidate.
 * `electron/sidecar.ts` owns sidecar parse, sequence, and tail. The bridge
   extension is the only writer (`electron/bridge-extension.ts`).
 * The bridge extension is app-owned in the user-data directory. Do not
@@ -728,9 +729,9 @@ Use these terms exactly. Do not invent synonyms.
   speaks a JSON-lines protocol over stdio; the built binary lives next to
   the main bundle and is rebuilt by `scripts/build-core.mjs`. The app no
   longer spawns the Git CLI.
-- `electron/worldlines.ts`: the WorldlineManager (fork-run pairs, moment
-  candidates, promotion, evidence orchestration, challenges, compare).
-  Promotion journals recover through `recoverPromotionJournals`.
+- `electron/worldlines.ts`: the WorldlineManager (run records, fork-run
+  pairs, moment candidates, promotion, evidence orchestration, challenges,
+  compare). Promotion journals recover through `recoverPromotionJournals`.
 - `electron/evidence.ts`: the evidence engine and the four challenge
   profiles. Trajectory counts come from `electron/sidecar.ts`. The
   manager owns when evidence runs; this module measures one candidate.

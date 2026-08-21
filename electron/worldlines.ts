@@ -17,7 +17,7 @@ import { coreClient } from "./core-client.js";
 import { captureRootInRepo, gitCommonDir, gitHead, gitTopLevel, platformHasCopyOnWrite, type SnapshotStore } from "./worldline-git.js";
 import { EvidenceEngine, dependencyDiff, mineChangeReason, rankProfiles, type EvidenceDeps, type EvidenceRecord, type EvidenceSummary } from "./evidence.js";
 import type { SessionForkOpts, SessionForkResult } from "./session-fork.js";
-import type { DependencyChange, WorldlineChangedFile, WorldlineDetails } from "../shared/types.js";
+import type { DependencyChange, RunSummary, TimelineEvent, WorldlineChangedFile, WorldlineDetails } from "../shared/types.js";
 
 /** Quote one shell argument: the resolved base commands carry scripts that
  * must survive as one argument through the wrapper shell. */
@@ -113,27 +113,33 @@ interface ComparisonState {
   readyTimer: ReturnType<typeof setTimeout> | null;
 }
 
-/** One recorded run handed to the manager (main-side shape). */
-export interface ForkableRun {
+/** One recorded run (WORLDLINES §6.5). */
+export interface RunRecord {
   id: string;
   terminalId: string;
+  workspaceId: string;
   startStateId: string | null;
   settledStateId: string | null;
   promptPayloadFile: string | null;
   promptEventsDir: string | null;
+  promptText: string | null;
   promptEntryId: string | null;
   promptParentEntryId: string | null;
   settledEntryId: string | null;
+  sessionFile: string | null;
   sessionBranchFile: string | null;
-  replayable: boolean;
-  reason: string | null;
+  trusted: boolean | null;
   model: string | null;
   thinkingLevel: string | null;
+  replayable: boolean;
+  reason: string | null;
+  interrupted: boolean;
+  steering: boolean;
+  overlap: boolean;
+  unownedEdits: number;
   startedAt: number;
-  /** The trust-sensitive resource hashes captured at run start (§6.7). */
+  settledAt: number | null;
   trustHashes: Record<string, string> | null;
-  /** Whether the source session was project-trusted. */
-  trusted: boolean | null;
 }
 
 function isInside(parent: string, child: string): boolean {
@@ -179,16 +185,6 @@ export interface WorldlineDeps {
   trustHashes(): Promise<Record<string, string>>;
   /** Capture a candidate head off the main thread. */
   captureHead(root: string, gitDir: string, parent: string | null): Promise<{ commit: string; tree: string }>;
-  /** The unowned-edit count of a run (comparison provenance). */
-  unownedEditsOf(runId: string): number;
-  /** The source run of a comparison (challenge anchors). */
-  sourceRunOf(runId: string): {
-    promptPayloadFile: string | null;
-    promptEventsDir: string | null;
-    promptParentEntryId: string | null;
-    sessionFile: string | null;
-    startStateId: string | null;
-  } | null;
   /** Capture the current primary state (details conflict status). */
   capturePrimary(): Promise<string | null>;
   /** Release a temporary state reference after a comparison operation. */
@@ -230,6 +226,8 @@ const MAX_CANDIDATE_BYTES = 1024 * 1024 * 1024;
 const READY_TIMEOUT_MS = 90000;
 const MAX_PI_RESOURCE_BYTES = 200 * 1024 * 1024;
 const MAX_WORLDLINE_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_RUNS_PER_TERMINAL = 20;
+const MAX_RETAINED_RUNS = 200;
 const MAX_IGNORED_FILES = 5000;
 const MAX_IGNORED_BYTES = 200 * 1024 * 1024;
 
@@ -263,6 +261,8 @@ export class WorldlineManager {
   private challengeInFlight = new Set<string>();
   private evidenceByComparison = new Map<string, EvidenceSummary>();
   private evidenceQueue: Promise<unknown> = Promise.resolve();
+  private runsByTerminal = new Map<string, RunRecord[]>();
+  private runsById = new Map<string, RunRecord>();
 
   constructor(private deps: WorldlineDeps) {
     mkdirSync(this.deps.worldsRoot, { recursive: true });
@@ -279,6 +279,151 @@ export class WorldlineManager {
       }
     }
     return out;
+  }
+
+  /** Add the run to the project catalog. */
+  recordRun(run: RunRecord): void {
+    this.runsById.set(run.id, run);
+    let list = this.runsByTerminal.get(run.terminalId);
+    if (!list) {
+      list = [];
+      this.runsByTerminal.set(run.terminalId, list);
+    }
+    list.push(run);
+    this.evictOverflow(run.terminalId);
+  }
+
+  runOf(runId: string): RunRecord | null {
+    return this.runsById.get(runId) ?? null;
+  }
+
+  private runsOf(terminalId?: string): RunRecord[] {
+    if (terminalId) return [...(this.runsByTerminal.get(terminalId) ?? [])];
+    const out: RunRecord[] = [];
+    for (const list of this.runsByTerminal.values()) out.push(...list);
+    return out;
+  }
+
+  runSummaries(terminalId?: string): RunSummary[] {
+    return this.runsOf(terminalId).map((r) => ({
+      id: r.id,
+      terminalId: r.terminalId,
+      workspaceId: r.workspaceId,
+      startStateId: r.startStateId,
+      settledStateId: r.settledStateId,
+      promptText: r.promptText,
+      promptEntryId: r.promptEntryId,
+      promptParentEntryId: r.promptParentEntryId,
+      settledEntryId: r.settledEntryId,
+      sessionFile: r.sessionFile,
+      sessionBranchFile: r.sessionBranchFile,
+      replayable: r.replayable,
+      reason: r.reason,
+      interrupted: r.interrupted,
+      steering: r.steering,
+      overlap: r.overlap,
+      unownedEdits: r.unownedEdits,
+      trusted: r.trusted,
+      model: r.model,
+      thinkingLevel: r.thinkingLevel,
+      startedAt: r.startedAt,
+      settledAt: r.settledAt,
+    }));
+  }
+
+  runCovering(terminalId: string, ts: number): RunRecord | null {
+    const runs = this.runsByTerminal.get(terminalId) ?? [];
+    for (let i = runs.length - 1; i >= 0; i--) {
+      const run = runs[i];
+      if (ts < run.startedAt) continue;
+      if (run.settledAt !== null && ts > run.settledAt) continue;
+      return run;
+    }
+    return null;
+  }
+
+  holdsRunState(stateId: string): boolean {
+    for (const run of this.runsById.values()) {
+      if (run.startStateId === stateId || run.settledStateId === stateId) return true;
+    }
+    return false;
+  }
+
+  promptPayloadsOf(terminalId: string): Set<string> {
+    const keep = new Set<string>();
+    for (const run of this.runsByTerminal.get(terminalId) ?? []) {
+      if (run.promptPayloadFile) keep.add(run.promptPayloadFile);
+    }
+    return keep;
+  }
+
+  /** Run ids that a live comparison still needs (promote, evidence, nested fork). */
+  private pinnedRunIds(): Set<string> {
+    const pinned = new Set<string>();
+    for (const cmp of this.comparisons.values()) {
+      if (cmp.sourceRunId) pinned.add(cmp.sourceRunId);
+    }
+    return pinned;
+  }
+
+  private canDiscard(run: RunRecord, pinned: Set<string>): boolean {
+    return run.settledAt !== null && !pinned.has(run.id);
+  }
+
+  private oldestDiscardable(pinned: Set<string>): RunRecord | null {
+    let oldest: RunRecord | null = null;
+    for (const records of this.runsByTerminal.values()) {
+      for (const run of records) {
+        if (!this.canDiscard(run, pinned)) continue;
+        if (!oldest || run.startedAt < oldest.startedAt) oldest = run;
+      }
+    }
+    return oldest;
+  }
+
+  /**
+   * Drop the oldest disposable records. Never drop an open run or the
+   * source of a live comparison.
+   */
+  private evictOverflow(terminalId: string): void {
+    const pinned = this.pinnedRunIds();
+    const list = this.runsByTerminal.get(terminalId);
+    if (list) {
+      while (list.length > MAX_RUNS_PER_TERMINAL) {
+        const idx = list.findIndex((run) => this.canDiscard(run, pinned));
+        if (idx < 0) break;
+        this.discardRun(list.splice(idx, 1)[0]);
+      }
+    }
+    while (this.runsById.size > MAX_RETAINED_RUNS) {
+      const victim = this.oldestDiscardable(pinned);
+      if (!victim) break;
+      const records = this.runsByTerminal.get(victim.terminalId);
+      if (!records) break;
+      const idx = records.indexOf(victim);
+      if (idx >= 0) records.splice(idx, 1);
+      if (records.length === 0) this.runsByTerminal.delete(victim.terminalId);
+      this.discardRun(victim);
+    }
+  }
+
+  private discardRun(run: RunRecord | undefined): void {
+    if (!run) return;
+    this.runsById.delete(run.id);
+    if (run.startStateId) void this.deps.releaseState(run.startStateId);
+    if (run.settledStateId && run.settledStateId !== run.startStateId) void this.deps.releaseState(run.settledStateId);
+    if (run.promptPayloadFile && run.promptEventsDir) {
+      void rm(join(run.promptEventsDir, run.promptPayloadFile), { force: true }).catch(() => undefined);
+    }
+    if (run.sessionBranchFile) void rm(run.sessionBranchFile, { force: true }).catch(() => undefined);
+  }
+
+  private clearRuns(): void {
+    for (const list of this.runsByTerminal.values()) {
+      for (const run of list) this.discardRun(run);
+    }
+    this.runsByTerminal.clear();
+    this.runsById.clear();
   }
 
   private summaryOf(cmp: ComparisonState, cand: CandidateState): WorldlineSummary {
@@ -359,7 +504,7 @@ export class WorldlineManager {
     const store = await this.deps.getStore();
     if (!store) return { ok: false, error: "recording is not available" };
     if (!cmp.baseStateId) return { ok: false, error: "the comparison base is missing" };
-    const run = this.deps.sourceRunOf(cmp.sourceRunId);
+    const run = this.runOf(cmp.sourceRunId);
     if (!run?.promptPayloadFile || !run.promptParentEntryId) {
       return { ok: false, error: "the run has no captured task or pre-task anchor" };
     }
@@ -598,7 +743,7 @@ export class WorldlineManager {
     try {
       const changedFiles = await this.changedFiles(cmp, cand);
       // Provenance: the unowned edits of the source run (§6.9).
-      const unownedEdits = this.deps.unownedEditsOf(cmp.sourceRunId);
+      const unownedEdits = this.runOf(cmp.sourceRunId)?.unownedEdits ?? 0;
       // Ignored/generated runtime fingerprints: metadata only, bounded.
       const ignored = await this.ignoredWrites(comparisonId, label);
       // Conflict status against the current primary source: capture P and
@@ -779,8 +924,17 @@ export class WorldlineManager {
 
   // ------------------------------------------------------------ fork-run ----
 
-  async forkRun(run: ForkableRun, opts: { challenge?: boolean } = {}): Promise<{ ok: boolean; comparisonId?: string; error?: string }> {
+  async challenge(runId: string): Promise<{ ok: boolean; comparisonId?: string; error?: string }> {
+    const run = this.runOf(runId);
+    if (!run) return { ok: false, error: "run not found" };
+    if (!run.promptPayloadFile) return { ok: false, error: "the run has no captured task to replay" };
+    return this.forkRun(runId, { challenge: true });
+  }
+
+  async forkRun(runId: string, opts: { challenge?: boolean } = {}): Promise<{ ok: boolean; comparisonId?: string; error?: string }> {
     await this.ready;
+    const run = this.runOf(runId);
+    if (!run) return { ok: false, error: "run not found" };
     // Eligibility (WORLDLINES §6.5): replayable run with complete states.
     if (!run.replayable) return { ok: false, error: run.reason ?? "the run is not replayable" };
     if (!run.startStateId || !run.settledStateId) return { ok: false, error: "the run has no complete source checkpoints" };
@@ -861,7 +1015,7 @@ export class WorldlineManager {
     }
   }
 
-  private createComparison(run: ForkableRun): ComparisonState {
+  private createComparison(run: RunRecord): ComparisonState {
     const id = `cmp-${++this.seq}`;
     const dir = join(this.deps.worldsRoot, id);
     mkdirSync(dir, { recursive: true });
@@ -925,7 +1079,7 @@ export class WorldlineManager {
   }
 
   /** The comparison template: base source bytes plus independent git. */
-  private async buildTemplate(cmp: ComparisonState, store: SnapshotStore, run: ForkableRun): Promise<void> {
+  private async buildTemplate(cmp: ComparisonState, store: SnapshotStore, run: RunRecord): Promise<void> {
     mkdirSync(cmp.templateDir, { recursive: true });
     await store.template({
       stateId: run.startStateId!,
@@ -975,13 +1129,13 @@ export class WorldlineManager {
   }
 
   /** Candidate A receives the settled source state. */
-  private async applySettledToA(cmp: ComparisonState, store: SnapshotStore, run: ForkableRun): Promise<void> {
+  private async applySettledToA(cmp: ComparisonState, store: SnapshotStore, run: RunRecord): Promise<void> {
     const a = cmp.candidates.get("A")!;
     await store.applyState({ stateId: run.settledStateId!, targetDir: a.dir, preserveTopLevel: RUNTIME_ALLOWLIST });
   }
 
   /** Fork both Pi sessions in the session worker. */
-  private async forkSessions(cmp: ComparisonState, run: ForkableRun): Promise<void> {
+  private async forkSessions(cmp: ComparisonState, run: RunRecord): Promise<void> {
     const payload = await this.readPromptPayload(run);
     const a = cmp.candidates.get("A")!;
     const b = cmp.candidates.get("B")!;
@@ -1088,7 +1242,7 @@ export class WorldlineManager {
   }
 
   /** The startup control files: what the bridge does on session start. */
-  private async writeStartupControls(cmp: ComparisonState, run: ForkableRun, challenge: boolean): Promise<void> {
+  private async writeStartupControls(cmp: ComparisonState, run: RunRecord, challenge: boolean): Promise<void> {
     const payload = await this.readPromptPayload(run);
     const a = cmp.candidates.get("A")!;
     const b = cmp.candidates.get("B")!;
@@ -1116,7 +1270,7 @@ export class WorldlineManager {
   }
 
   /** Launch both candidate Pi terminals inside their sandboxes. */
-  private async launchCandidates(cmp: ComparisonState, run: ForkableRun): Promise<void> {
+  private async launchCandidates(cmp: ComparisonState, run: RunRecord): Promise<void> {
     for (const cand of cmp.candidates.values()) {
       // Candidate B replays with the captured model and thinking level.
       // A bare model id is ambiguous across providers; pass only the
@@ -1289,7 +1443,7 @@ export class WorldlineManager {
     if (!this.comparisons.has(comparisonId)) return { ok: false, error: "comparison not found" };
     const store = await this.deps.getStore();
     const cmp = this.comparisons.get(comparisonId);
-    const baseStateId = this.deps.sourceRunOf(cmp?.sourceRunId ?? "")?.startStateId ?? null;
+    const baseStateId = this.runOf(cmp?.sourceRunId ?? "")?.startStateId ?? null;
     if (!cmp || !store || !baseStateId) return { ok: false, error: !cmp ? "comparison not found" : "recording is not available" };
     const targets = new Map<"A" | "B", NonNullable<ReturnType<WorldlineManager["evidenceTarget"]>>>();
     const generations = new Map<"A" | "B", number>();
@@ -1451,7 +1605,7 @@ export class WorldlineManager {
     if (!store) return { ok: false, error: "recording is not available" };
     const primary = this.deps.workspaceAt(this.deps.primaryRoot);
     if (!primary) return { ok: false, error: "no primary workspace" };
-    const baseState = this.deps.sourceRunOf(target.sourceRunId)?.startStateId ?? null;
+    const baseState = this.runOf(target.sourceRunId)?.startStateId ?? null;
     if (!baseState) return { ok: false, error: "the source run base is missing" };
     const candWs = this.deps.workspaceAt(target.root);
     const candGen = candWs?.generation ?? 0;
@@ -1671,25 +1825,34 @@ export class WorldlineManager {
   // ------------------------------------------------------- fork any moment ----
 
   /**
-   * Fork ONE candidate from a timeline moment (WORLDLINES §6): the exact
+   * Fork one candidate from a timeline moment (WORLDLINES §6): the exact
    * captured source state and the session branched at the dot's entry.
-   * Nested worldlines (forking inside a candidate) stay disabled until the
-   * attribution and cleanup tests pass.
+   * A nested moment uses the candidate session and the root run start as
+   * the promotion lineage base.
    */
-  async forkPoint(opts: {
-    terminalId: string;
-    stateId: string;
-    entryId: string;
-    model: string | null;
-    thinkingLevel: string | null;
-    sessionFile: string;
-    sourceRunId: string;
-    /** The store-side lineage base (R): the root run start for nested. */
-    baseStateId: string | null;
-    /** Inherit one-process trust (run trusted + hashes matched). */
-    inheritTrust: boolean | null;
-  }): Promise<{ ok: boolean; comparisonId?: string; error?: string }> {
+  async forkPoint(terminalId: string, moment: TimelineEvent | null): Promise<{ ok: boolean; comparisonId?: string; error?: string }> {
     await this.ready;
+    if (!moment) return { ok: false, error: "timeline moment not found" };
+    if (!moment.stateId || !moment.entryId || moment.evicted) {
+      return { ok: false, error: moment.evicted ? "this moment's source state was evicted" : "this moment is not forkable" };
+    }
+    const nested = this.candidateContextOf(terminalId);
+    const covering = this.runCovering(terminalId, moment.ts);
+    const rootRun = nested ? this.runOf(nested.sourceRunId) : covering;
+    const sessionFile = nested?.sessionFile ?? covering?.sessionFile;
+    if (!rootRun) return { ok: false, error: "the source run is unavailable" };
+    if (!sessionFile) return { ok: false, error: "the run session is unavailable" };
+    const opts = {
+      terminalId,
+      stateId: moment.stateId,
+      entryId: moment.entryId,
+      model: moment.model ?? rootRun.model,
+      thinkingLevel: rootRun.thinkingLevel,
+      sessionFile,
+      sourceRunId: rootRun.id,
+      baseStateId: rootRun.startStateId,
+      inheritTrust: rootRun.trusted === true,
+    };
     if (this.liveWorldlineCount() + 1 > 3) return { ok: false, error: "the live worldline budget is exhausted" };
     const store = await this.deps.getStore();
     if (!store) return { ok: false, error: "recording is not available" };
@@ -2023,6 +2186,7 @@ export class WorldlineManager {
   async dispose(): Promise<void> {
     await this.ready;
     await Promise.all([...this.comparisons.values()].map((cmp) => this.teardown(cmp.id, "discarded", null)));
+    this.clearRuns();
   }
 }
 

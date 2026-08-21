@@ -24,7 +24,7 @@ import { BRIDGE_EXTENSION } from "./bridge-extension.js";
 import { AgentStartEvent, SidecarEvent, SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
 import { SnapshotStore, MIN_WORLDS_FREE_BYTES, captureRootInRepo, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, platformHasRecursiveWatcher, platformHasSandboxExec, type SourceState } from "./worldline-git.js";
-import { WorldlineManager, dirBytes, quoteShellArg, recoverPromotionJournals, type ForkableRun } from "./worldlines.js";
+import { WorldlineManager, dirBytes, quoteShellArg, recoverPromotionJournals, type RunRecord } from "./worldlines.js";
 import { sandboxShellPreamble, writeEvidenceProfile } from "./sandbox.js";
 import { parseFailingTests, verifyFailSummary } from "./evidence.js";
 import { coreClient } from "./core-client.js";
@@ -50,7 +50,6 @@ import {
   type ModifiedFile,
   type PlanTask,
   type RecorderState,
-  type RunSummary,
   type SessionHit,
   type ShortcutCommand,
   type ShortcutMap,
@@ -110,41 +109,6 @@ interface WorkspaceState {
   indexReady: Promise<void> | null;
   /** Why recording is unavailable, when it is. */
   recordError: string | null;
-}
-
-/** One recorded run (WORLDLINES §6.5). */
-interface RunRecord {
-  id: string;
-  terminalId: string;
-  workspaceId: string;
-  startStateId: string | null;
-  settledStateId: string | null;
-  /** The app-private prompt payload file (text + images). */
-  promptPayloadFile: string | null;
-  /** The events directory that contains the prompt payload. */
-  promptEventsDir: string | null;
-  /** The effective prompt text, capped for IPC. */
-  promptText: string | null;
-  promptEntryId: string | null;
-  promptParentEntryId: string | null;
-  settledEntryId: string | null;
-  sessionFile: string | null;
-  /** The app-private copy of the session branch. */
-  sessionBranchFile: string | null;
-  trusted: boolean | null;
-  /** The selected model and thinking level of the run. */
-  model: string | null;
-  thinkingLevel: string | null;
-  replayable: boolean;
-  reason: string | null;
-  interrupted: boolean;
-  steering: boolean;
-  overlap: boolean;
-  unownedEdits: number;
-  startedAt: number;
-  settledAt: number | null;
-  /** The trust-sensitive resource hashes captured at run start (§6.7). */
-  trustHashes: Record<string, string> | null;
 }
 
 /** A start preflight waiting for agent_start to consume its token. */
@@ -328,7 +292,9 @@ class PiTerminalInstance {
   }
 }
 
-/** All per-project state. One entry per opened folder. */
+/**
+ * All per-project state. One entry per opened folder.
+ */
 interface ProjectState {
   id: string;
   /** The opened folder. */
@@ -427,6 +393,14 @@ class PiEditorApp {
     return this.projects.get(inst.projectId) ?? null;
   }
 
+  /** The project that holds a recorded run, or null. */
+  private projectForRun(runId: string): ProjectState | null {
+    for (const project of this.projects.values()) {
+      if (project.worldlines?.runOf(runId)) return project;
+    }
+    return null;
+  }
+
   /** The project that owns a workspace, or null. */
   private projectOfWorkspace(workspaceId: string): ProjectState | null {
     const projectId = this.workspaceOwners.get(workspaceId);
@@ -494,9 +468,6 @@ class PiEditorApp {
   private pendingPreflights = new Map<string, PendingPreflight>();
   /** Capture and acknowledgement tasks that must finish before store teardown. */
   private recordingTasks = new Set<Promise<unknown>>();
-  /** Run records per terminal (WORLDLINES §6.5). */
-  private runsByTerminal = new Map<string, RunRecord[]>();
-  private runSeq = 0;
   /** Renderer flush requests awaiting their report. */
   private flushWaiters = new Map<string, { workspaceId: string; resolve: (r: { ok: boolean; failed: string[] }) => void; timer: ReturnType<typeof setTimeout> }>();
   private flushSeq = 0;
@@ -513,7 +484,6 @@ class PiEditorApp {
   private static readonly MAX_RUN_SNAPSHOT_BYTES = 64 * 1024 * 1024;
   private static readonly MAX_PENDING_HINTS = 2000;
   private static readonly MAX_MINE_FILES = 2000;
-  private static readonly MAX_RETAINED_RUNS = 200;
   /**
    * The last watcher change per path. A single physical write can produce
    * several fs events; the duplicates must not count as fresh user edits.
@@ -903,27 +873,11 @@ class PiEditorApp {
         return { ok: reasons.length === 0, reasons };
       },
       trustHashes: async () => this.computeTrustHashes(),
-      unownedEditsOf: (runId) => {
-        const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === runId);
-        return run?.unownedEdits ?? 0;
-      },
       captureHead: async (root, gitDir, parent) => {
         const store = await project.storePromise;
         if (!store) throw new Error("recording is not available");
         const state = await store.capture(await gitHead(root), parent, {}, {}, { root, gitDir });
         return { commit: state.commit, tree: state.tree };
-      },
-      sourceRunOf: (runId) => {
-        const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === runId);
-        return run
-          ? {
-              promptPayloadFile: run.promptPayloadFile,
-              promptEventsDir: run.promptEventsDir,
-              promptParentEntryId: run.promptParentEntryId,
-              sessionFile: run.sessionFile,
-              startStateId: run.startStateId,
-            }
-          : null;
       },
       capturePrimary: async () => {
         const ws = this.primaryWorkspace(project);
@@ -1284,9 +1238,6 @@ class PiEditorApp {
   }
 
   private stateIsReferenced(stateId: string, ignoredTerminalId?: string, ignoredSeq?: number): boolean {
-    for (const records of this.runsByTerminal.values()) {
-      if (records.some((run) => run.startStateId === stateId || run.settledStateId === stateId)) return true;
-    }
     for (const pending of this.pendingPreflights.values()) {
       if (pending.startState?.commit === stateId) return true;
     }
@@ -1298,6 +1249,7 @@ class PiEditorApp {
         if (summary.comparisonBaseStateId === stateId || summary.promotionBaseStateId === stateId || summary.headStateId === stateId) return true;
       }
       if (project.worldlines?.holdsEvidenceState(stateId)) return true;
+      if (project.worldlines?.holdsRunState(stateId)) return true;
     }
     for (const [terminalId, inst] of this.terminals) {
       if (terminalId === ignoredTerminalId) {
@@ -2921,12 +2873,15 @@ class PiEditorApp {
     const token = String(event.preflightToken ?? "");
     const pending = token ? this.pendingPreflights.get(token) : undefined;
     const ws = this.workspaceOfTerminal(inst);
+    const owner = this.projectOfTerminal(inst.id);
+    if (owner) this.initWorldlines(owner);
+    const manager = owner?.worldlines ?? null;
     if (pending && pending.terminalId === inst.id) {
       this.pendingPreflights.delete(token);
       clearTimeout(pending.timer);
       this.releaseWriteLease(pending.workspaceId, pending.leaseRequester);
       const run: RunRecord = {
-        id: `run-${++this.runSeq}`,
+        id: `run-${randomUUID()}`,
         terminalId: inst.id,
         workspaceId: inst.workspaceId,
         startStateId: pending.startState?.commit ?? null,
@@ -2964,14 +2919,14 @@ class PiEditorApp {
       // A second agent running in the same workspace overlaps this run and
       // the other open run (WORLDLINES §5): both become ineligible.
       this.markOverlappingAgents(inst, run);
-      this.pushRun(inst, run);
+      this.pushRun(inst, run, manager);
     } else if (inst.currentRun && !inst.currentRun.settledAt) {
       // A retry or compaction of the open run. Keep its start state.
     } else {
       // No preflight (for example a queued follow-up): the run still runs
       // but cannot be forked.
       const run: RunRecord = {
-        id: `run-${++this.runSeq}`,
+        id: `run-${randomUUID()}`,
         terminalId: inst.id,
         workspaceId: inst.workspaceId,
         startStateId: null,
@@ -2998,7 +2953,7 @@ class PiEditorApp {
         settledAt: null,
       };
       this.markOverlappingAgents(inst, run);
-      this.pushRun(inst, run);
+      this.pushRun(inst, run, manager);
     }
     // The staged prompt belongs to one run start. Clear it so a later
     // retry cannot reuse the previous run's payload.
@@ -3025,60 +2980,14 @@ class PiEditorApp {
     }
   }
 
-  /** Store a run record with per-terminal and global limits. */
-  private pushRun(inst: PiTerminalInstance, run: RunRecord): void {
+  /** Store a run record on the live terminal and on the project catalog. */
+  private pushRun(inst: PiTerminalInstance, run: RunRecord, manager: WorldlineManager | null): void {
     inst.currentRun = run;
-    let list = this.runsByTerminal.get(inst.id);
-    if (!list) {
-      list = [];
-      this.runsByTerminal.set(inst.id, list);
-    }
-    list.push(run);
-    if (list.length > 20) this.discardRunRecord(list.shift());
-    while (this.retainedRunCount() > PiEditorApp.MAX_RETAINED_RUNS) {
-      let oldestTerminal: string | null = null;
-      let oldest: RunRecord | undefined;
-      for (const [terminalId, records] of this.runsByTerminal) {
-        const candidate = records[0];
-        if (candidate && (!oldest || candidate.startedAt < oldest.startedAt)) {
-          oldest = candidate;
-          oldestTerminal = terminalId;
-        }
-      }
-      if (!oldest || !oldestTerminal) break;
-      const records = this.runsByTerminal.get(oldestTerminal);
-      if (!records) break;
-      this.discardRunRecord(records.shift());
-      if (records.length === 0) this.runsByTerminal.delete(oldestTerminal);
-    }
-  }
-
-  private retainedRunCount(): number {
-    let count = 0;
-    for (const records of this.runsByTerminal.values()) count += records.length;
-    return count;
-  }
-
-  private discardRunRecord(run: RunRecord | undefined): void {
-    if (!run) return;
-    if (run.startStateId) void this.releaseStateIfUnused(run.startStateId);
-    if (run.settledStateId && run.settledStateId !== run.startStateId) void this.releaseStateIfUnused(run.settledStateId);
-    if (run.promptPayloadFile && run.promptEventsDir) {
-      void rm(join(run.promptEventsDir, run.promptPayloadFile), { force: true }).catch(() => undefined);
-    }
-    if (run.sessionBranchFile) void rm(run.sessionBranchFile, { force: true }).catch(() => undefined);
-  }
-
-  private clearRunRecords(): void {
-    const records = [...this.runsByTerminal.values()];
-    this.runsByTerminal.clear();
-    for (const list of records) {
-      for (const run of list) this.discardRunRecord(run);
-    }
+    manager?.recordRun(run);
   }
 
   private async cleanupPromptPayloads(inst: PiTerminalInstance): Promise<void> {
-    const keep = new Set((this.runsByTerminal.get(inst.id) ?? []).map((run) => run.promptPayloadFile).filter((file): file is string => file !== null));
+    const keep = this.projectOfTerminal(inst.id)?.worldlines?.promptPayloadsOf(inst.id) ?? new Set<string>();
     const dir = this.eventsDirOf(inst);
     try {
       for (const file of await readdir(dir)) {
@@ -3489,14 +3398,8 @@ class PiEditorApp {
   private startStateForMoment(inst: PiTerminalInstance, ev: TimelineEvent): string | null {
     if (ev.runStartStateId) return ev.runStartStateId;
     if (ev.runStartStateId === null) return null;
-    const runs = this.runsByTerminal.get(inst.id) ?? [];
-    for (let i = runs.length - 1; i >= 0; i--) {
-      const run = runs[i];
-      if (ev.ts < run.startedAt) continue;
-      if (run.settledAt !== null && ev.ts > run.settledAt) continue;
-      return run.startStateId;
-    }
-    return null;
+    const run = this.projectOfTerminal(inst.id)?.worldlines?.runCovering(inst.id, ev.ts);
+    return run?.startStateId ?? null;
   }
 
   /** On-demand source diff of one forkable moment. Never from the sidecar handler. */
@@ -3931,13 +3834,6 @@ class PiEditorApp {
         this.clearMailbox(id);
       }
       await this.teardownRecording(project, closingWorkspaceIds);
-      // Remove the closed project's run records. Use the captured workspace
-      // ids because terminal ids can leave the project before the close.
-      for (const [terminalId, records] of [...this.runsByTerminal]) {
-        if (records.some((record) => closingWorkspaceIds.has(record.workspaceId))) {
-          this.runsByTerminal.delete(terminalId);
-        }
-      }
       this.cleanupExportedStates(projectId);
       this.projects.delete(projectId);
       this.send("project:closed", { projectId });
@@ -4398,31 +4294,10 @@ class PiEditorApp {
 
     // ---- Worldlines: run records (WORLDLINES §6.5) ----
     ipcMain.handle("worldline:runs", (_e, terminalId?: string) => {
-      const runs = terminalId ? (this.runsByTerminal.get(terminalId) ?? []) : [...this.runsByTerminal.values()].flat();
-      return runs.map((r): RunSummary => ({
-        id: r.id,
-        terminalId: r.terminalId,
-        workspaceId: r.workspaceId,
-        startStateId: r.startStateId,
-        settledStateId: r.settledStateId,
-        promptText: r.promptText,
-        promptEntryId: r.promptEntryId,
-        promptParentEntryId: r.promptParentEntryId,
-        settledEntryId: r.settledEntryId,
-        sessionFile: r.sessionFile,
-        sessionBranchFile: r.sessionBranchFile,
-        replayable: r.replayable,
-        reason: r.reason,
-        interrupted: r.interrupted,
-        steering: r.steering,
-        overlap: r.overlap,
-        unownedEdits: r.unownedEdits,
-        trusted: r.trusted,
-        model: r.model,
-        thinkingLevel: r.thinkingLevel,
-        startedAt: r.startedAt,
-        settledAt: r.settledAt,
-      }));
+      if (terminalId) {
+        return this.projectOfTerminal(terminalId)?.worldlines?.runSummaries(terminalId) ?? [];
+      }
+      return this.project()?.worldlines?.runSummaries() ?? [];
     });
 
     // ---- Worldlines: candidates (WORLDLINES §6.5, §6.6) ----
@@ -4433,32 +4308,9 @@ class PiEditorApp {
       return manager.promote(comparisonId, label, force ?? false);
     });
     ipcMain.handle("worldline:challenge", async (_e, runId: string) => {
-      const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === runId);
-      if (!run) return { ok: false, error: "run not found" };
-      if (!run.promptPayloadFile) return { ok: false, error: "the run has no captured task to replay" };
-      const forkProject = this.project();
-      if (!forkProject) return { ok: false, error: "no project open" };
-      this.initWorldlines(forkProject);
-      const forkable: ForkableRun = {
-        id: run.id,
-        terminalId: run.terminalId,
-        startStateId: run.startStateId,
-        settledStateId: run.settledStateId,
-        promptPayloadFile: run.promptPayloadFile,
-        promptEventsDir: run.promptEventsDir,
-        promptEntryId: run.promptEntryId,
-        promptParentEntryId: run.promptParentEntryId,
-        settledEntryId: run.settledEntryId,
-        sessionBranchFile: run.sessionBranchFile,
-        replayable: run.replayable,
-        reason: run.reason,
-        model: run.model,
-        thinkingLevel: run.thinkingLevel,
-        startedAt: run.startedAt,
-        trustHashes: run.trustHashes,
-        trusted: run.trusted,
-      };
-      return forkProject.worldlines!.forkRun(forkable, { challenge: true });
+      const manager = this.projectForRun(runId)?.worldlines;
+      if (!manager) return { ok: false, error: "run not found" };
+      return manager.challenge(runId);
     });
     ipcMain.handle("worldline:evidence", (_e, comparisonId: string) => {
       const manager = this.projectOfComparison(comparisonId)?.worldlines;
@@ -4468,40 +4320,11 @@ class PiEditorApp {
     ipcMain.handle("worldline:fork-point", async (_e, terminalId: string, seq: number) => {
       const inst = this.terminals.get(terminalId);
       if (!inst) return { ok: false, error: "terminal not found" };
-      const ev = inst.timeline.find((e) => e.seq === seq);
-      // Expected-version checks: the dot must exist with its state and
-      // entry, and the state must still exist.
-      if (!ev) return { ok: false, error: "timeline moment not found" };
-      if (!ev.stateId || !ev.entryId || ev.evicted) {
-        return { ok: false, error: ev.evicted ? "this moment's source state was evicted" : "this moment is not forkable" };
-      }
-      // A nested moment lives inside a candidate: its session is the
-      // candidate's live session and its lineage base is the ROOT run
-      // start (R) — promotion then includes every ancestor change.
-      const forkOwner = this.projectOfTerminal(terminalId);
-      const nested = forkOwner?.worldlines?.candidateContextOf(terminalId) ?? null;
-      // The dot belongs to this terminal. Match its own run records only: a
-      // concurrent run in another terminal covers the same time range.
-      const ownRuns = this.runsByTerminal.get(terminalId) ?? [];
-      const run = ownRuns.find((r) => r.startedAt <= ev.ts && (r.settledAt === null || r.settledAt >= ev.ts)) ?? null;
-      const rootRun = nested
-        ? [...this.runsByTerminal.values()].flat().find((r) => r.id === nested.sourceRunId) ?? run
-        : run;
-      const sessionFile = nested?.sessionFile ?? run?.sessionFile;
-      if (!sessionFile) return { ok: false, error: "the run session is unavailable" };
-      if (!forkOwner) return { ok: false, error: "no project open" };
-      this.initWorldlines(forkOwner);
-      return forkOwner.worldlines!.forkPoint({
-        terminalId,
-        stateId: ev.stateId,
-        entryId: ev.entryId,
-        model: ev.model ?? rootRun?.model ?? null,
-        thinkingLevel: rootRun?.thinkingLevel ?? null,
-        sessionFile,
-        sourceRunId: rootRun?.id ?? "",
-        baseStateId: rootRun?.startStateId ?? null,
-        inheritTrust: rootRun?.trusted === true ? true : null,
-      });
+      const owner = this.projectOfTerminal(terminalId);
+      if (!owner) return { ok: false, error: "no project open" };
+      this.initWorldlines(owner);
+      const ev = inst.timeline.find((e) => e.seq === seq) ?? null;
+      return owner.worldlines!.forkPoint(terminalId, ev);
     });
     const wlOf = (comparisonId: string) => this.projectOfComparison(comparisonId)?.worldlines ?? null;
     ipcMain.handle("worldline:details", (_e, comparisonId: string, label: "A" | "B") => wlOf(comparisonId)?.details(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" });
@@ -4509,31 +4332,9 @@ class PiEditorApp {
     ipcMain.handle("worldline:file", (_e, comparisonId: string, label: "A" | "B", relPath: string) => wlOf(comparisonId)?.fileOf(comparisonId, label, relPath) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:base-file", (_e, comparisonId: string, relPath: string) => wlOf(comparisonId)?.baseFileOf(comparisonId, relPath) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:fork-run", async (_e, runId: string) => {
-      const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === runId);
-      if (!run) return { ok: false, error: "run not found" };
-      const forkProject = this.projectOfTerminal(run.terminalId) ?? this.project();
-      if (!forkProject) return { ok: false, error: "no project open" };
-      this.initWorldlines(forkProject);
-      const forkable: ForkableRun = {
-        id: run.id,
-        terminalId: run.terminalId,
-        startStateId: run.startStateId,
-        settledStateId: run.settledStateId,
-        promptPayloadFile: run.promptPayloadFile,
-        promptEventsDir: run.promptEventsDir,
-        promptEntryId: run.promptEntryId,
-        promptParentEntryId: run.promptParentEntryId,
-        settledEntryId: run.settledEntryId,
-        sessionBranchFile: run.sessionBranchFile,
-        replayable: run.replayable,
-        reason: run.reason,
-        model: run.model,
-        thinkingLevel: run.thinkingLevel,
-        startedAt: run.startedAt,
-        trustHashes: run.trustHashes,
-        trusted: run.trusted,
-      };
-      return forkProject.worldlines!.forkRun(forkable);
+      const manager = this.projectForRun(runId)?.worldlines;
+      if (!manager) return { ok: false, error: "run not found" };
+      return manager.forkRun(runId);
     });
     ipcMain.handle("worldline:cancel", (_e, comparisonId: string) => wlOf(comparisonId)?.cancel(comparisonId) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:discard", (_e, comparisonId: string) => wlOf(comparisonId)?.discard(comparisonId) ?? { ok: false, error: "worldlines unavailable" });
@@ -4542,15 +4343,16 @@ class PiEditorApp {
     );
     /** Materialize a run's start or settled state for inspection. */
     ipcMain.handle("worldline:export-state", async (_e, runId: string, kind: "start" | "settled") => {
-      const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === runId);
-      if (!run) return { ok: false, error: "run not found" };
+      const project = this.projectForRun(runId);
+      const run = project?.worldlines?.runOf(runId);
+      if (!project || !run) return { ok: false, error: "run not found" };
       const stateId = kind === "start" ? run.startStateId : run.settledStateId;
       if (!stateId) return { ok: false, error: `no ${kind} state` };
-      const store = await this.projectOfTerminal(run.terminalId)?.storePromise;
+      const store = await project.storePromise;
       if (!store) return { ok: false, error: "recording is not available" };
       try {
         const dir = await mkdtemp(join(app.getPath("temp"), "termina-state-"));
-        this.exportedStateDirs.set(dir, this.projectOfTerminal(run.terminalId)?.id);
+        this.exportedStateDirs.set(dir, project.id);
         await store.materialize(stateId, dir);
         return { ok: true, dir };
       } catch (err) {
@@ -4839,7 +4641,6 @@ class PiEditorApp {
         if (event.stateId) void this.releaseStateIfUnused(event.stateId, inst.id, event.seq);
       }
     }
-    this.clearRunRecords();
     this.projects.clear();
     this.terminals.clear();
     for (const tailer of this.worldlineTailers.values()) tailer.stop();
