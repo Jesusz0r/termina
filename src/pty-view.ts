@@ -184,20 +184,27 @@ export class PtyView {
       this.refreshFont = false;
       if (!refreshFont && dims.cols === this.term.cols && dims.rows === this.term.rows) return;
       const viewport = this.term.element?.querySelector(".xterm-viewport") as HTMLElement | null;
-      const scrollTop = viewport?.scrollTop ?? 0;
+      const buf = this.term.buffer.active;
+      const fromBottom = viewport
+        ? Math.max(0, viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop)
+        : 0;
+      const atBottom = buf.baseY - buf.viewportY <= 1 || fromBottom <= 2;
       try {
         this.fitAddon.fit();
       } catch {
         this.refreshFont = refreshFont;
         return;
       }
-      if (viewport) viewport.scrollTop = scrollTop;
       try {
         this.term.clearTextureAtlas();
         this.term.refresh(0, this.term.rows - 1);
         this.lastRender = Date.now();
       } catch {
         /* ignore */
+      }
+      if (atBottom) this.term.scrollToBottom();
+      else if (viewport) {
+        viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight - fromBottom);
       }
     });
   }

@@ -237,6 +237,8 @@ export default function (pi: ExtensionAPI): void {
   // The settled boundary: report the settle, then ask for a checkpoint
   // and wait for the outcome.
   pi.on("agent_settled", async (event, ctx) => {
+    // Do not treat a wrap-up list as a plan after the run has ended.
+    planLogged = true;
     log({ t: "agent_settled" });
     const requestId = randomUUID();
     log({ t: "checkpoint_request", requestId, kind: "settled", entryId: ctx.sessionManager.getLeafId() });
@@ -245,7 +247,8 @@ export default function (pi: ExtensionAPI): void {
   });
 
   // Plan Board: capture the first assistant message of a run that contains
-  // a task list (bullet or numbered lines).
+  // an unchecked checkbox task list. Wrap-up bullets after the work is
+  // done are not a plan.
   pi.on("message_end", (event) => {
     if (planLogged) return;
     const message = (event as { message?: { role?: string; content?: unknown } }).message;
@@ -257,11 +260,18 @@ export default function (pi: ExtensionAPI): void {
       text = content;
     } else if (Array.isArray(content)) {
       text = content
-        .map((part) => (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : ""))
+        .map((part) => {
+          if (!part || typeof part !== "object") return "";
+          const rec = part;
+          if (rec.type === "thinking" || rec.type === "reasoning") return "";
+          return typeof rec.text === "string" ? rec.text : "";
+        })
         .join("\\n");
     }
     if (!text.trim()) return;
-    if (!/^\\s*(?:[-*]|\\d+[.)])\\s/m.test(text)) return;
+    // A plan has at least one unchecked checkbox. A wrap-up bullet list
+    // or a recap of checked items is not a plan.
+    if (!/^\\s*(?:[-*+]|\\d+[.)])\\s+\\[ \\]/m.test(text)) return;
     planLogged = true;
     log({ t: "plan", text: text.slice(0, 4000) });
   });
@@ -2716,13 +2726,13 @@ class PiEditorApp {
     this.send("plan:update", { instanceId: inst.id, tasks: inst.plan });
   }
 
-  /** Parse markdown task lines from the plan text. At most 20 tasks. The
+  /** Parse checkbox task lines from the plan text. At most 20 tasks. The
    *  cwd is the project root of the plan's terminal. */
   private parsePlanTasks(text: string, cwd: string | null): PlanTask[] {
     const tasks: PlanTask[] = [];
     for (const raw of text.split("\n")) {
       const line = raw.trim();
-      const match = line.match(/^(?:[-*]|\d+[.)])\s+(?:\[[ xX]\]\s+)?(.+)$/);
+      const match = line.match(/^(?:[-*+]|\d+[.)])\s+\[ \]\s*(.+)$/);
       if (!match) continue;
       const body = match[1].trim();
       if (!body) continue;
@@ -3667,8 +3677,12 @@ class PiEditorApp {
         this.sendInstances();
         break;
       case "plan": {
+        // The run already ended. A wrap-up list is not a plan.
+        if (!inst.busy) break;
         const text = String(event.text ?? "");
-        inst.plan = this.parsePlanTasks(text, this.workspaceOfTerminal(inst)?.root ?? null);
+        const tasks = this.parsePlanTasks(text, this.workspaceOfTerminal(inst)?.root ?? null);
+        if (tasks.length === 0) break;
+        inst.plan = tasks;
         this.reattachDispatchAssignments(inst);
         // touched and tool outcomes were reset at agent_start. Do not reset
         // them here: the plan message can arrive after the first tool events,
