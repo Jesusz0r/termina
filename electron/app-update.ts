@@ -13,8 +13,8 @@ import type { AppUpdateState } from "../shared/types.js";
 const require = createRequire(import.meta.url);
 const { autoUpdater } = require("electron-updater") as { autoUpdater: AppUpdater };
 
-const CHECK_MS = 6 * 60 * 60 * 1000;
-const PROGRESS_MS = 400;
+const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const PROGRESS_THROTTLE_MS = 400;
 
 export interface AppUpdateController {
   getState(): AppUpdateState;
@@ -33,6 +33,10 @@ function statesEqual(a: AppUpdateState, b: AppUpdateState): boolean {
   return a.version === b.version;
 }
 
+function isDownloadActive(state: AppUpdateState): boolean {
+  return state.status === "downloading" || state.status === "ready";
+}
+
 export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }): AppUpdateController {
   let state: AppUpdateState = { status: "idle" };
   let version = "";
@@ -48,8 +52,7 @@ export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }
   };
 
   const check = (): void => {
-    if (checkInFlight) return;
-    if (state.status === "downloading" || state.status === "ready") return;
+    if (checkInFlight || isDownloadActive(state)) return;
     checkInFlight = true;
     void autoUpdater
       .checkForUpdates()
@@ -67,12 +70,15 @@ export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }
     },
 
     install() {
-      if (state.status === "ready") return { ok: true };
-      if (state.status === "downloading") {
-        return { ok: false, error: "The update is still downloading." };
+      switch (state.status) {
+        case "ready":
+        case "available":
+          return { ok: true };
+        case "downloading":
+          return { ok: false, error: "The update is still downloading." };
+        default:
+          return { ok: false, error: "No update is ready." };
       }
-      if (state.status === "available") return { ok: true };
-      return { ok: false, error: "No update is ready." };
     },
 
     quitAndInstall() {
@@ -89,14 +95,14 @@ export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }
       autoUpdater.logger = null;
 
       autoUpdater.on("update-available", (info) => {
-        if (state.status === "downloading" || state.status === "ready") return;
+        if (isDownloadActive(state)) return;
         version = info.version;
         setState({ status: "available", version });
       });
       autoUpdater.on("download-progress", (progress) => {
         const percent = Math.max(0, Math.min(100, Math.round(progress.percent)));
         const now = Date.now();
-        if (state.status === "downloading" && state.percent === percent && now - lastProgressAt < PROGRESS_MS) {
+        if (state.status === "downloading" && state.percent === percent && now - lastProgressAt < PROGRESS_THROTTLE_MS) {
           return;
         }
         lastProgressAt = now;
@@ -114,7 +120,7 @@ export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }
       });
 
       check();
-      checkTimer = setInterval(check, CHECK_MS);
+      checkTimer = setInterval(check, CHECK_INTERVAL_MS);
     },
 
     dispose() {

@@ -1375,6 +1375,10 @@ const MODIFIED_LIST_MIN = 72;
 const MODIFIED_LIST_DEFAULT = 160;
 const TERMINAL_MIN_PX = 128;
 
+function modifiedPanelIsOpen(): boolean {
+  return modifiedPanel.style.display !== "none" && !modifiedPanel.classList.contains("collapsed");
+}
+
 function modifiedListMaxHeight(): number {
   const paneH = leftPane.clientHeight;
   if (paneH <= 0) return Number.POSITIVE_INFINITY;
@@ -1403,8 +1407,18 @@ let resizingModified = false;
 let modifiedDragStartY = 0;
 let modifiedDragStartH = 0;
 let modifiedDragMax = MODIFIED_LIST_MIN;
+let modifiedClampRaf = 0;
+
+function finishModifiedResize(): void {
+  if (!resizingModified) return;
+  resizingModified = false;
+  document.body.style.cursor = "";
+  document.body.style.userSelect = "";
+  localStorage.setItem(MODIFIED_HEIGHT_KEY, String(Math.round(modifiedList.getBoundingClientRect().height)));
+  fitPanes();
+}
 modifiedResizeEl.addEventListener("mousedown", (e) => {
-  if (modifiedPanel.classList.contains("collapsed")) return;
+  if (!modifiedPanelIsOpen()) return;
   e.preventDefault();
   resizingModified = true;
   modifiedDragStartY = e.clientY;
@@ -1425,24 +1439,14 @@ window.addEventListener("mouseup", () => {
   if (resizingModified) finishModifiedResize();
 });
 
-let modifiedClampRaf = 0;
 new ResizeObserver(() => {
   if (resizingModified || modifiedClampRaf) return;
   modifiedClampRaf = requestAnimationFrame(() => {
     modifiedClampRaf = 0;
-    if (modifiedPanel.style.display === "none" || modifiedPanel.classList.contains("collapsed")) return;
+    if (!modifiedPanelIsOpen()) return;
     applyModifiedListHeight(modifiedList.getBoundingClientRect().height);
   });
 }).observe(leftPane);
-
-function finishModifiedResize(): void {
-  if (!resizingModified) return;
-  resizingModified = false;
-  document.body.style.cursor = "";
-  document.body.style.userSelect = "";
-  localStorage.setItem(MODIFIED_HEIGHT_KEY, String(Math.round(modifiedList.getBoundingClientRect().height)));
-  fitPanes();
-}
 
 // drag to reorder terminal tabs
 let dragTabEl: HTMLElement | null = null;
@@ -1501,17 +1505,21 @@ function applyAppUpdateState(state: AppUpdateState): void {
   }
   btnAppUpdate.hidden = false;
   btnAppUpdate.classList.toggle("ready", state.status === "ready");
-  if (state.status === "available") {
-    btnAppUpdate.textContent = "↑";
-    btnAppUpdate.title = `Termina ${state.version} is available`;
-  } else if (state.status === "downloading") {
-    btnAppUpdate.textContent = `${state.percent}%`;
-    btnAppUpdate.title = `Downloading Termina ${state.version} (${state.percent}%)`;
-  } else {
-    btnAppUpdate.textContent = "↑";
-    btnAppUpdate.title = `Restart to install Termina ${state.version}`;
+  const label = appUpdateButtonLabel(state);
+  btnAppUpdate.textContent = label.text;
+  btnAppUpdate.title = label.title;
+  btnAppUpdate.setAttribute("aria-label", label.title);
+}
+
+function appUpdateButtonLabel(state: Exclude<AppUpdateState, { status: "idle" }>): { text: string; title: string } {
+  switch (state.status) {
+    case "available":
+      return { text: "↑", title: `Termina ${state.version} is available` };
+    case "downloading":
+      return { text: `${state.percent}%`, title: `Downloading Termina ${state.version} (${state.percent}%)` };
+    case "ready":
+      return { text: "↑", title: `Restart to install Termina ${state.version}` };
   }
-  btnAppUpdate.setAttribute("aria-label", btnAppUpdate.title);
 }
 
 btnAppUpdate.addEventListener("click", () => {
