@@ -183,12 +183,7 @@ export class PtyView {
       const refreshFont = this.refreshFont;
       this.refreshFont = false;
       if (!refreshFont && dims.cols === this.term.cols && dims.rows === this.term.rows) return;
-      const viewport = this.term.element?.querySelector(".xterm-viewport") as HTMLElement | null;
-      const buf = this.term.buffer.active;
-      const fromBottom = viewport
-        ? Math.max(0, viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop)
-        : 0;
-      const atBottom = buf.baseY - buf.viewportY <= 1 || fromBottom <= 2;
+      const scroll = this.readScrollAnchor();
       try {
         this.fitAddon.fit();
       } catch {
@@ -202,11 +197,32 @@ export class PtyView {
       } catch {
         /* ignore */
       }
-      if (atBottom) this.term.scrollToBottom();
-      else if (viewport) {
-        viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight - fromBottom);
-      }
+      this.restoreScrollAnchor(scroll);
     });
+  }
+
+  /** Pin to the live row when the user is at the bottom. Keep the same
+   *  distance from the bottom when they have scrolled up. */
+  private readScrollAnchor(): { pinToBottom: boolean; fromBottom: number } {
+    const viewport = this.term.element?.querySelector(".xterm-viewport") as HTMLElement | null;
+    const buf = this.term.buffer.active;
+    const fromBottom = viewport
+      ? Math.max(0, viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop)
+      : 0;
+    return {
+      pinToBottom: buf.baseY - buf.viewportY <= 1 || fromBottom <= 2,
+      fromBottom,
+    };
+  }
+
+  private restoreScrollAnchor(scroll: { pinToBottom: boolean; fromBottom: number }): void {
+    if (scroll.pinToBottom) {
+      this.term.scrollToBottom();
+      return;
+    }
+    const viewport = this.term.element?.querySelector(".xterm-viewport") as HTMLElement | null;
+    if (!viewport) return;
+    viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight - scroll.fromBottom);
   }
 
   getTerminal(): Terminal {
