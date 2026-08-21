@@ -42,4 +42,6 @@ electronLanguages:
 # publish skips when a release already exists.
 publish:
   provider: github
+  owner: Jesusz0r
+  repo: termina
   releaseType: release

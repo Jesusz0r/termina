@@ -720,6 +720,7 @@ Use these terms exactly. Do not invent synonyms.
   (offline) profile variant, and the ulimit preamble.
 - `electron/preload.ts`: exposes the typed `window.pi` bridge.
 - `electron/preferences.ts`: persists app-owned preferences.
+- `electron/app-update.ts`: packaged-app updates from GitHub Releases.
 - `shared/preferences.ts`: the preferences validator used by main and the renderer.
 - `shared/types.ts`: the types shared between main, preload, and renderer.
 - `src/main.ts`: the renderer entry. It manages panes, layout, and events.
@@ -813,7 +814,7 @@ The renderer never talks to the agent. It only renders what main pushes.
   startup-control files live there. Worldline candidates use their own
   events directory and `startup-control.json`.
 - localStorage keys: `termina.layout`, `termina.explorer`,
-  `termina.modified`, `termina.workpane`. Explorer `0` means the explorer
+  `termina.modified`, `termina.modifiedHeight`, `termina.workpane`. Explorer `0` means the explorer
   is minimized to a bar. `termina.workpane` is `terminal` or `editor`
   when that pane is minimized. Terminal and editor cannot both be
   minimized.
@@ -837,7 +838,7 @@ The renderer never talks to the agent. It only renders what main pushes.
 ## Conventions
 
 - IPC channels use the `area:action` pattern: `verify:run`, `timeline:get`,
-  `file:open`, `review:baseline`.
+  `file:open`, `review:baseline`, `update:get`.
 - Release tags are `v<version>`; keep the package.json version in
   lockstep with the tag (electron-builder publishes under the
   package.json version). See `RELEASING.md`.

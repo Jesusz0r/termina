@@ -44,7 +44,7 @@ import { toast } from "./components/modals";
 import { SettingsView, emptyShortcuts } from "./settings";
 import { defaultAppPreferences, pathBasename } from "../shared/types";
 import { normalizeAppPreferences } from "../shared/preferences";
-import type { AppPreferences, ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
+import type { AppPreferences, AppUpdateState, ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
 
 const { EditorManager } = await import("./editor");
 const { ReviewView } = await import("./review");
@@ -281,6 +281,7 @@ const btnVerify = document.getElementById("btn-verify") as HTMLButtonElement;
 const verifyBadge = document.getElementById("verify-badge")!;
 const statusCwd = document.getElementById("status-cwd")!;
 const statusState = document.getElementById("status-state")!;
+const btnAppUpdate = document.getElementById("btn-app-update") as HTMLButtonElement;
 const modifiedList = document.getElementById("modified-list")!;
 const modifiedPanel = document.getElementById("modified-panel")!;
 const modifiedCount = document.getElementById("modified-count")!;
@@ -1082,6 +1083,7 @@ const DEFAULT_LAYOUT: Layout = "terminal-left";
 const LAYOUT_KEY = "termina.layout";
 const EXPLORER_KEY = "termina.explorer";
 const MODIFIED_KEY = "termina.modified";
+const MODIFIED_HEIGHT_KEY = "termina.modifiedHeight";
 const WORKPANE_KEY = "termina.workpane";
 const PANE_MIN_ICON = "–";
 const PANE_MAX_ICON = "□";
@@ -1090,6 +1092,7 @@ const MAX_TIMELINE_EVENTS = 400;
 const splitEl = document.getElementById("main-split")!;
 const modifiedPanelEl = document.getElementById("modified-panel")!;
 const explorerDividerEl = document.getElementById("explorer-divider")!;
+const modifiedResizeEl = document.getElementById("modified-resize")!;
 const rightPaneEl = document.getElementById("right-pane")!;
 const btnMinExplorer = document.getElementById("btn-min-explorer") as HTMLButtonElement;
 const btnMinTerminal = document.getElementById("btn-min-terminal") as HTMLButtonElement;
@@ -1368,6 +1371,79 @@ window.addEventListener("mouseup", () => {
   document.body.style.cursor = "";
 });
 
+const MODIFIED_LIST_MIN = 72;
+const MODIFIED_LIST_DEFAULT = 160;
+const TERMINAL_MIN_PX = 128;
+
+function modifiedListMaxHeight(): number {
+  const paneH = leftPane.clientHeight;
+  if (paneH <= 0) return Number.POSITIVE_INFINITY;
+  const listH = modifiedList.getBoundingClientRect().height;
+  const termH = termContainer.getBoundingClientRect().height;
+  return Math.max(MODIFIED_LIST_MIN, Math.round(listH + termH - TERMINAL_MIN_PX));
+}
+
+function clampModifiedListHeight(px: number, max = modifiedListMaxHeight()): number {
+  const cap = Number.isFinite(max) ? max : Math.max(MODIFIED_LIST_MIN, Math.round(px));
+  return Math.min(cap, Math.max(MODIFIED_LIST_MIN, Math.round(px)));
+}
+
+function applyModifiedListHeight(px: number, max?: number): void {
+  modifiedList.style.height = `${clampModifiedListHeight(px, max)}px`;
+}
+
+function restoreModifiedListHeight(): void {
+  const raw = Number(localStorage.getItem(MODIFIED_HEIGHT_KEY));
+  const h = Number.isFinite(raw) && raw > 0 ? raw : MODIFIED_LIST_DEFAULT;
+  modifiedList.style.height = `${Math.max(MODIFIED_LIST_MIN, Math.round(h))}px`;
+  requestAnimationFrame(() => applyModifiedListHeight(h));
+}
+
+let resizingModified = false;
+let modifiedDragStartY = 0;
+let modifiedDragStartH = 0;
+let modifiedDragMax = MODIFIED_LIST_MIN;
+modifiedResizeEl.addEventListener("mousedown", (e) => {
+  if (modifiedPanel.classList.contains("collapsed")) return;
+  e.preventDefault();
+  resizingModified = true;
+  modifiedDragStartY = e.clientY;
+  modifiedDragStartH = modifiedList.getBoundingClientRect().height;
+  modifiedDragMax = modifiedListMaxHeight();
+  document.body.style.cursor = "row-resize";
+  document.body.style.userSelect = "none";
+});
+window.addEventListener("mousemove", (e) => {
+  if (!resizingModified) return;
+  if (e.buttons === 0) {
+    finishModifiedResize();
+    return;
+  }
+  applyModifiedListHeight(modifiedDragStartH + (modifiedDragStartY - e.clientY), modifiedDragMax);
+});
+window.addEventListener("mouseup", () => {
+  if (resizingModified) finishModifiedResize();
+});
+
+let modifiedClampRaf = 0;
+new ResizeObserver(() => {
+  if (resizingModified || modifiedClampRaf) return;
+  modifiedClampRaf = requestAnimationFrame(() => {
+    modifiedClampRaf = 0;
+    if (modifiedPanel.style.display === "none" || modifiedPanel.classList.contains("collapsed")) return;
+    applyModifiedListHeight(modifiedList.getBoundingClientRect().height);
+  });
+}).observe(leftPane);
+
+function finishModifiedResize(): void {
+  if (!resizingModified) return;
+  resizingModified = false;
+  document.body.style.cursor = "";
+  document.body.style.userSelect = "";
+  localStorage.setItem(MODIFIED_HEIGHT_KEY, String(Math.round(modifiedList.getBoundingClientRect().height)));
+  fitPanes();
+}
+
 // drag to reorder terminal tabs
 let dragTabEl: HTMLElement | null = null;
 function setupTabDrag(tabEl: HTMLElement): void {
@@ -1416,6 +1492,35 @@ function updateEditorLock(): void {
 window.pi.onFlushRequest(({ requestId, writerId }) => {
   void activeEditor().flushAll(writerId).then((result) => void window.pi.reportFlush(requestId, result));
 });
+
+function applyAppUpdateState(state: AppUpdateState): void {
+  if (state.status === "idle") {
+    btnAppUpdate.hidden = true;
+    btnAppUpdate.classList.remove("ready");
+    return;
+  }
+  btnAppUpdate.hidden = false;
+  btnAppUpdate.classList.toggle("ready", state.status === "ready");
+  if (state.status === "available") {
+    btnAppUpdate.textContent = "↑";
+    btnAppUpdate.title = `Termina ${state.version} is available`;
+  } else if (state.status === "downloading") {
+    btnAppUpdate.textContent = `${state.percent}%`;
+    btnAppUpdate.title = `Downloading Termina ${state.version} (${state.percent}%)`;
+  } else {
+    btnAppUpdate.textContent = "↑";
+    btnAppUpdate.title = `Restart to install Termina ${state.version}`;
+  }
+  btnAppUpdate.setAttribute("aria-label", btnAppUpdate.title);
+}
+
+btnAppUpdate.addEventListener("click", () => {
+  void window.pi.installUpdate().then((res) => {
+    if (!res.ok) toast(res.error ?? "could not install the update", "warning");
+  });
+});
+window.pi.onUpdateState(applyAppUpdateState);
+void window.pi.getUpdateState().then(applyAppUpdateState);
 
 window.pi.onBusy(({ instanceId, busy }) => {
   const pane = panes.get(instanceId);
@@ -1650,6 +1755,7 @@ async function boot(): Promise<void> {
   if (isSplitLayout(layout)) lastSplitLayout = layout;
   applyLayout(layout);
   if (localStorage.getItem(MODIFIED_KEY) === "0") setModifiedVisible(false);
+  restoreModifiedListHeight();
   void refreshTestCommand();
 
   // Build the project tab bar; the active project owns the initial view.

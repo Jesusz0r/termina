@@ -17,6 +17,7 @@ export class PtyView {
   private watchdog: ReturnType<typeof setInterval> | null = null;
   private lastRender = 0;
   private resizeObserver: ResizeObserver | null = null;
+  private resizeTimer: ReturnType<typeof setTimeout> | null = null;
   private fontSize = 13;
   private fontFamily = "";
   private refreshFont = false;
@@ -41,7 +42,7 @@ export class PtyView {
     this.term.loadAddon(this.fitAddon);
     this.term.loadAddon(new CanvasAddon());
     this.term.open(container);
-    container.addEventListener("mousedown", () => this.term.focus());
+    container.addEventListener("mousedown", () => this.focus());
     this.term.attachCustomKeyEventHandler((event) => this.handleKey(event));
 
     this.term.onData((data) => this.sendInput(data));
@@ -71,7 +72,13 @@ export class PtyView {
       void document.fonts.ready.then(() => this.fit()).catch(() => undefined);
     }
     try {
-      this.resizeObserver = new ResizeObserver(() => this.fit());
+      this.resizeObserver = new ResizeObserver(() => {
+        if (this.resizeTimer) clearTimeout(this.resizeTimer);
+        this.resizeTimer = setTimeout(() => {
+          this.resizeTimer = null;
+          this.fit();
+        }, 50);
+      });
       this.resizeObserver.observe(container);
     } catch {
       /* not available */
@@ -171,24 +178,26 @@ export class PtyView {
       if (this.disposed) return;
       const container = this.term.element?.parentElement;
       if (!container || container.clientWidth === 0 || container.clientHeight === 0) return;
-      const prevCols = this.term.cols;
-      const prevRows = this.term.rows;
+      const dims = this.fitAddon.proposeDimensions();
+      if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows)) return;
       const refreshFont = this.refreshFont;
       this.refreshFont = false;
+      if (!refreshFont && dims.cols === this.term.cols && dims.rows === this.term.rows) return;
+      const viewport = this.term.element?.querySelector(".xterm-viewport") as HTMLElement | null;
+      const scrollTop = viewport?.scrollTop ?? 0;
       try {
         this.fitAddon.fit();
       } catch {
         this.refreshFont = refreshFont;
         return;
       }
-      if (refreshFont || this.term.cols !== prevCols || this.term.rows !== prevRows) {
-        try {
-          this.term.clearTextureAtlas();
-          this.term.refresh(0, this.term.rows - 1);
-          this.lastRender = Date.now();
-        } catch {
-          /* ignore */
-        }
+      if (viewport) viewport.scrollTop = scrollTop;
+      try {
+        this.term.clearTextureAtlas();
+        this.term.refresh(0, this.term.rows - 1);
+        this.lastRender = Date.now();
+      } catch {
+        /* ignore */
       }
     });
   }
@@ -198,13 +207,18 @@ export class PtyView {
   }
 
   focus(): void {
-    if (!this.disposed) this.term.focus();
+    if (this.disposed) return;
+    const textarea = this.term.textarea;
+    if (textarea) textarea.focus({ preventScroll: true });
+    else this.term.focus();
   }
 
   dispose(): void {
     this.disposed = true;
     if (this.watchdog) clearInterval(this.watchdog);
     this.watchdog = null;
+    if (this.resizeTimer) clearTimeout(this.resizeTimer);
+    this.resizeTimer = null;
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.term.dispose();

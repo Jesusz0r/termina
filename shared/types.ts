@@ -27,6 +27,13 @@ export interface FileDeletedPayload {
   path: string;
 }
 
+/** Packaged-app update status pushed by main. */
+export type AppUpdateState =
+  | { status: "idle" }
+  | { status: "available"; version: string }
+  | { status: "downloading"; version: string; percent: number }
+  | { status: "ready"; version: string };
+
 export interface ModifiedListPayload {
   instanceId: string;
   files: ModifiedFile[];
@@ -480,6 +487,7 @@ export interface PiBridge {
   onInstances(cb: (list: InstanceSummary[]) => void): void;
   /** Main asks the renderer to save every dirty model (run-start preflight). */
   onFlushRequest(cb: (p: { requestId: string; writerId: string }) => void): void;
+  onUpdateState(cb: (state: AppUpdateState) => void): void;
 
   // terminals (agent = pi TUI, shell = a real shell like zsh)
   createTerminal(opts?: { type?: "agent" | "shell"; shell?: string }): Promise<{ ok: boolean; id?: string; error?: string }>;
@@ -597,4 +605,6 @@ export interface PiBridge {
   createEntry(relPath: string, kind: "file" | "dir"): Promise<{ ok: boolean; error?: string }>;
   renameEntry(relPath: string, newName: string): Promise<{ ok: boolean; error?: string }>;
   deleteEntry(relPath: string): Promise<{ ok: boolean; error?: string }>;
+  getUpdateState(): Promise<AppUpdateState>;
+  installUpdate(): Promise<{ ok: boolean; error?: string }>;
 }

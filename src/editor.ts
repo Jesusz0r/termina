@@ -9,6 +9,7 @@
 import * as monaco from "monaco-editor";
 import { cssFontFamily, pathBasename, type ThemeId } from "../shared/types";
 import { languageForPath } from "./editor-language";
+import { changedLinesInAfter } from "./line-diff";
 import { toast } from "./components/modals";
 
 let atomThemeDefined = false;
@@ -59,7 +60,18 @@ interface OpenTab {
   model: monaco.editor.ITextModel;
   dom: HTMLElement;
   dirtyDot: HTMLElement;
+  /** Live agent-change decorations on this model. */
+  changeDecorations: string[];
+  /** First changed line to reveal when this tab becomes active. */
+  agentRevealLine: number | null;
 }
+
+const AGENT_CHANGE_DECO: monaco.editor.IModelDecorationOptions = {
+  isWholeLine: true,
+  className: "agent-change-line",
+  linesDecorationsClassName: "agent-change-gutter",
+  stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
+};
 
 export class EditorManager {
   private editor: monaco.editor.IStandaloneCodeEditor;
@@ -203,6 +215,7 @@ export class EditorManager {
     model.onDidChangeContent((e) => {
       if (e.isFlush) return;
       this.userDirty.add(key);
+      this.clearAgentChanges(key);
       if (this.previewKey === key) this.pinPreview();
     });
     this.tabs.set(key, tab);
@@ -244,24 +257,43 @@ export class EditorManager {
     }
     const model = tab.model;
     if (model.getValue() === content) return;
+    const before = model.getValue();
     // setValue fires with isFlush=true; the model's change handler uses that
     // to tell programmatic pushes from user edits.
     model.setValue(content);
-    const editor = this.editor;
-    const isActive = editor.getModel() === model;
-    const scrollTop = editor.getScrollTop();
-    const sel = editor.getSelection();
-    if (isActive) {
-      const layout = editor.getLayoutInfo();
-      const maxScroll = Math.max(0, editor.getScrollHeight() - layout.height);
-      editor.setScrollTop(Math.min(scrollTop, maxScroll));
-      if (sel) {
-        const line = Math.min(sel.positionLineNumber, model.getLineCount());
-        const column = Math.min(sel.positionColumn, model.getLineMaxColumn(line));
-        editor.setPosition({ lineNumber: line, column });
-      }
-    }
+    const changed = changedLinesInAfter(before, content);
+    this.paintAgentChanges(tab, changed);
     tab.dirtyDot.style.display = "inline-block";
+    const first = changed[0];
+    if (first === undefined) return;
+    if (this.editor.getModel() === model) {
+      this.revealAgentChange(first);
+      tab.agentRevealLine = null;
+    } else {
+      tab.agentRevealLine = first;
+    }
+  }
+
+  private paintAgentChanges(tab: OpenTab, lines: number[]): void {
+    const last = tab.model.getLineCount();
+    const decos: monaco.editor.IModelDeltaDecoration[] = [];
+    for (const line of lines) {
+      if (line < 1 || line > last) continue;
+      decos.push({ range: new monaco.Range(line, 1, line, 1), options: AGENT_CHANGE_DECO });
+    }
+    tab.changeDecorations = tab.model.deltaDecorations(tab.changeDecorations, decos);
+  }
+
+  private clearAgentChanges(key: string): void {
+    const tab = this.tabs.get(key);
+    if (!tab) return;
+    tab.agentRevealLine = null;
+    if (tab.changeDecorations.length === 0) return;
+    tab.changeDecorations = tab.model.deltaDecorations(tab.changeDecorations, []);
+  }
+
+  private revealAgentChange(line: number): void {
+    this.editor.revealLineInCenter(line);
   }
 
   /** Mark a file as being touched by the agent (tab badge). */
@@ -348,7 +380,7 @@ export class EditorManager {
     dom.append(dirty, name, mine, wline, close);
     if (this.mineKeys.has(key)) dom.classList.add("mine");
     dom.addEventListener("click", () => this.activate(key));
-    return { key, model, dom, dirtyDot: dirty };
+    return { key, model, dom, dirtyDot: dirty, changeDecorations: [], agentRevealLine: null };
   }
 
   private renderTabs(): void {
@@ -367,12 +399,23 @@ export class EditorManager {
     for (const t of this.tabs.values()) t.dom.classList.toggle("active", t.key === key);
     this.syncEmptyState();
     this.layout();
-    this.editor.focus();
+    this.focusEditor();
+    if (tab.agentRevealLine !== null) {
+      this.revealAgentChange(tab.agentRevealLine);
+      tab.agentRevealLine = null;
+    }
   }
 
   /** Recalculate Monaco size. Call this after a hidden container becomes visible. */
   layout(): void {
     this.editor.layout();
+  }
+
+  /** Focus the editor without scrolling the terminal pane. */
+  private focusEditor(): void {
+    const textarea = this.editor.getDomNode()?.querySelector("textarea");
+    if (textarea) textarea.focus({ preventScroll: true });
+    else this.editor.focus();
   }
 
   closeTab(key: string): void {

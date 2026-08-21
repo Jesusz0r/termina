@@ -22,6 +22,7 @@ import type {
   AppPreferences,
   ShortcutMap,
   FolderOpenedPayload,
+  AppUpdateState,
 } from "../shared/types.js";
 
 const bridge: PiBridge = {
@@ -73,6 +74,9 @@ const bridge: PiBridge = {
   },
   onFlushRequest: (cb) => {
     ipcRenderer.on("editor:flush-request", (_e, p: { requestId: string; writerId: string }) => cb(p));
+  },
+  onUpdateState: (cb) => {
+    ipcRenderer.on("update:state", (_e, state: AppUpdateState) => cb(state));
   },
   onInstances: (cb) => {
     ipcRenderer.on("instances:list", (_e, list: InstanceSummary[]) => cb(list));
@@ -157,6 +161,8 @@ const bridge: PiBridge = {
   createEntry: (relPath, kind) => ipcRenderer.invoke("explorer:create", relPath, kind),
   renameEntry: (relPath, newName) => ipcRenderer.invoke("explorer:rename", relPath, newName),
   deleteEntry: (relPath) => ipcRenderer.invoke("explorer:delete", relPath),
+  getUpdateState: (): Promise<AppUpdateState> => ipcRenderer.invoke("update:get"),
+  installUpdate: () => ipcRenderer.invoke("update:install"),
 };
 
 contextBridge.exposeInMainWorld("pi", bridge);

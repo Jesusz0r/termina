@@ -7,7 +7,7 @@ const shared = {
   bundle: true,
   sourcemap: true,
   target: "node22",
-  external: ["electron", "@lydell/node-pty", "@lydell/node-pty-darwin-arm64", "@lydell/node-pty-win32-x64", "@lydell/node-pty-linux-x64"],
+  external: ["electron", "electron-updater", "@lydell/node-pty", "@lydell/node-pty-darwin-arm64", "@lydell/node-pty-win32-x64", "@lydell/node-pty-linux-x64"],
   logLevel: "info",
 };
 

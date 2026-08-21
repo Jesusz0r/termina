@@ -1,8 +1,12 @@
 {
   "name": "termina",
   "productName": "Termina",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Hybrid terminal/editor: prompt a pi coding agent in a terminal, watch it edit files live in a Monaco (VS Code) editor, click modified files to inspect them.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Jesusz0r/termina.git"
+  },
   "type": "module",
   "main": "dist-electron/main.mjs",
   "scripts": {
@@ -26,6 +30,7 @@
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
+    "electron-updater": "^6.8.9",
     "monaco-editor": "^0.56.0"
   },
   "devDependencies": {

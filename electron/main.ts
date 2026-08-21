@@ -28,6 +28,7 @@ import { WorldlineManager, dirBytes, quoteShellArg, type ForkableRun } from "./w
 import { sandboxShellPreamble, writeEvidenceProfile } from "./sandbox.js";
 import { EvidenceEngine, mineChangeReason, parseFailingTests, rankProfiles, verifyFailSummary, type EvidenceDeps, type EvidenceRecord, type EvidenceSummary as EngineSummary } from "./evidence.js";
 import { coreClient } from "./core-client.js";
+import { createAppUpdater, type AppUpdateController } from "./app-update.js";
 import { AppPreferencesStore, normalizeAppPreferences, sanitizeShortcutMap } from "./preferences.js";
 import {
   DEFAULT_SHORTCUTS,
@@ -514,8 +515,9 @@ class PiTerminalInstance {
   /** Per-path content as of the last snapshot in this run (for edit math). */
   runSnapshots = new Map<string, string>();
   runSnapshotBytes = 0;
-  /** Last tool event per path (dedupe with watcher changes). */
-  lastToolPath: { path: string; at: number } | null = null;
+  /** Recent file-tool paths. Watcher changes on these paths join the tool
+   *  dot instead of adding a second change dot. */
+  lastToolAt = new Map<string, number>();
   timelineSeq = 0;
   /** Watcher hint paths since the last moment capture (Phase 6). */
   pendingHints = new Set<string>();
@@ -698,6 +700,10 @@ function authJsonHasPiProvider(raw: unknown): boolean {
   return false;
 }
 
+let quitConfirmed = false;
+let cleanupComplete = false;
+let cleanupStarted = false;
+
 class PiEditorApp {
   private win: BrowserWindow | null = null;
   private terminals = new Map<string, PiTerminalInstance>();
@@ -742,6 +748,8 @@ class PiEditorApp {
   private sessionWorkspaceDir = join(this.eventsDir, "session-workspace");
   private tailer = new SidecarTailer(this.eventsDir);
   private paintWatchdog: ReturnType<typeof setInterval> | null = null;
+  private appUpdater: AppUpdateController | null = null;
+  private installingUpdate = false;
   /** In-flight background verify runs by owner terminal id. */
   private verifyRuns = new Set<string>();
   /** Background test processes by owner terminal id. */
@@ -3604,7 +3612,7 @@ class PiEditorApp {
         this.resetBaselines(inst, startWs?.watcher?.lastContents);
         inst.runSnapshots.clear();
         inst.runSnapshotBytes = 0;
-        inst.lastToolPath = null;
+        inst.lastToolAt.clear();
         inst.pendingHints = new Set();
         inst.momentDots = [];
         inst.captureTimer = null;
@@ -4373,7 +4381,13 @@ class PiEditorApp {
     const status = toolName === "write" ? this.classifyWrite(path) : "modified";
     // Claim the imminent watcher change. Set the marker in every branch so
     // the write-without-cache path also claims the change event.
-    inst.lastToolPath = { path, at: Date.now() };
+    inst.lastToolAt.set(path, Date.now());
+    if (inst.lastToolAt.size > 64) {
+      const cutoff = Date.now() - TOOL_CHANGE_DEDUP_MS;
+      for (const [p, at] of inst.lastToolAt) {
+        if (at < cutoff) inst.lastToolAt.delete(p);
+      }
+    }
     if (toolName === "edit" || toolName === "apply_patch") {
       const base = inst.runSnapshots.get(path) ?? this.preRunContent(inst, path) ?? "";
       const content = this.applyEdits(base, edits);
@@ -5056,6 +5070,7 @@ class PiEditorApp {
         const oldest = this.lastWatchChange.keys().next().value;
         if (oldest !== undefined) this.lastWatchChange.delete(oldest);
       }
+      if (isDupWatch) return;
       // A change with no busy agent terminal belongs to the user — unless a
       // verify run is running in this workspace: test outputs (snapshots,
       // coverage, fixtures) are automated writes, not user edits. The agent
@@ -5063,7 +5078,7 @@ class PiEditorApp {
       // file).
       const busy = workspaceTerminals().filter((t) => t.busy);
       const verifyInWorkspace = [...this.verifyRuns].some((id) => this.terminals.get(id)?.workspaceId === ws.id);
-      if (!isDupWatch && busy.length === 0 && !verifyInWorkspace && !this.promotionPaths?.has(relPath)) {
+      if (busy.length === 0 && !verifyInWorkspace && !this.promotionPaths?.has(relPath)) {
         this.recordUserEdit(ws, { path, relPath, status: change.status, prev: change.prev, content: change.content, at: now });
       }
       // The watcher change event is the baseline authority for writes: it
@@ -5089,7 +5104,8 @@ class PiEditorApp {
       const owners: PiTerminalInstance[] = [];
       const unowned: PiTerminalInstance[] = [];
       for (const inst of busy) {
-        const mine = inst.lastToolPath && inst.lastToolPath.path === path && now - inst.lastToolPath.at < TOOL_CHANGE_DEDUP_MS;
+        const at = inst.lastToolAt.get(path);
+        const mine = at !== undefined && now - at < TOOL_CHANGE_DEDUP_MS;
         (mine ? owners : unowned).push(inst);
       }
       if (owners.length > 0) {
@@ -5104,7 +5120,7 @@ class PiEditorApp {
             this.setRunSnapshot(inst, path, change.content);
           }
         }
-      } else {
+      } else if (!verifyInWorkspace) {
         for (const inst of unowned) {
           this.recordModified(inst, path, change.status);
           this.addPendingHint(inst, relPath);
@@ -5303,6 +5319,8 @@ class PiEditorApp {
       this.updatePreferences(preferences, activateShortcuts === true),
     );
     ipcMain.handle("settings:shortcuts", (_e, shortcuts: unknown) => this.setKeyboardShortcuts(shortcuts));
+    ipcMain.handle("update:get", () => this.appUpdater?.getState() ?? { status: "idle" as const });
+    ipcMain.handle("update:install", () => this.installAppUpdate());
 
     ipcMain.handle("terminals:create", async (_e, opts?: unknown) => {
       let type: "agent" | "shell" | undefined;
@@ -5712,6 +5730,9 @@ class PiEditorApp {
   async start(): Promise<void> {
     this.preferences = await this.preferencesStore.load();
     this.shortcutMap = { ...this.preferences.shortcuts };
+    this.appUpdater = createAppUpdater({
+      send: (state) => this.send("update:state", state),
+    });
     this.registerIpc();
     void detectShells();
     // The session workspace is per-launch scratch: run ids restart at
@@ -5729,6 +5750,7 @@ class PiEditorApp {
     // project folder.
     this.ensureAppBridge();
     await this.createWindow();
+    this.appUpdater.start();
     if (initialCwd) {
       await this.openProject(initialCwd);
       return;
@@ -5737,9 +5759,35 @@ class PiEditorApp {
     // placeholder until the user picks one. Tests set TERMINA_INITIAL_CWD.
   }
 
+  private async installAppUpdate(): Promise<{ ok: boolean; error?: string }> {
+    const updater = this.appUpdater;
+    if (!updater) return { ok: false, error: "No update is ready." };
+    const current = updater.getState();
+    if (current.status !== "ready") return updater.install();
+    if (this.installingUpdate) return { ok: false, error: "The update is already installing." };
+    this.installingUpdate = true;
+    if (!(await this.confirmDiscardActiveCandidates())) {
+      this.installingUpdate = false;
+      return { ok: false, error: "Update cancelled." };
+    }
+    // Finish app teardown before the installer quits the process. A
+    // preventDefault on before-quit would stop macOS from installing.
+    quitConfirmed = true;
+    cleanupStarted = true;
+    try {
+      await this.dispose();
+    } catch (err) {
+      console.warn(`[main] dispose failed before update: ${(err as Error).message}`);
+    }
+    cleanupComplete = true;
+    updater.quitAndInstall();
+    return { ok: true };
+  }
+
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    this.appUpdater?.dispose();
     await this.preferencesStore.flush();
     await this.drainVerifyJobs(null);
     this.tailer.stop();
@@ -5875,9 +5923,6 @@ app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) void appState.createWindow();
 });
 
-let quitConfirmed = false;
-let cleanupComplete = false;
-let cleanupStarted = false;
 app.on("before-quit", (event) => {
   if (cleanupComplete) return;
   event.preventDefault();
