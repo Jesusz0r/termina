@@ -12,7 +12,6 @@ export class PtyView {
   private term: Terminal;
   private fitAddon: FitAddon;
   private readonly sendInput: (data: string) => void;
-  private fitScheduled = false;
   private disposed = false;
   private watchdog: ReturnType<typeof setInterval> | null = null;
   private lastRender = 0;
@@ -171,25 +170,22 @@ export class PtyView {
   }
 
   fit(): void {
-    if (this.fitScheduled || this.disposed) return;
-    this.fitScheduled = true;
-    requestAnimationFrame(() => {
-      this.fitScheduled = false;
-      if (this.disposed) return;
-      const container = this.term.element?.parentElement;
-      if (!container || container.clientWidth === 0 || container.clientHeight === 0) return;
-      const dims = this.fitAddon.proposeDimensions();
-      if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows)) return;
-      const refreshFont = this.refreshFont;
-      this.refreshFont = false;
-      if (!refreshFont && dims.cols === this.term.cols && dims.rows === this.term.rows) return;
-      const scroll = this.readScrollAnchor();
-      try {
-        this.fitAddon.fit();
-      } catch {
-        this.refreshFont = refreshFont;
-        return;
-      }
+    if (this.disposed) return;
+    const container = this.term.element?.parentElement;
+    if (!container || container.clientWidth === 0 || container.clientHeight === 0) return;
+    const dims = this.fitAddon.proposeDimensions();
+    if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows)) return;
+    const refreshFont = this.refreshFont;
+    this.refreshFont = false;
+    if (!refreshFont && dims.cols === this.term.cols && dims.rows === this.term.rows) return;
+    const scroll = this.readScrollAnchor();
+    try {
+      this.fitAddon.fit();
+    } catch {
+      this.refreshFont = refreshFont;
+      return;
+    }
+    if (refreshFont) {
       try {
         this.term.clearTextureAtlas();
         this.term.refresh(0, this.term.rows - 1);
@@ -197,8 +193,8 @@ export class PtyView {
       } catch {
         /* ignore */
       }
-      this.restoreScrollAnchor(scroll);
-    });
+    }
+    this.restoreScrollAnchor(scroll);
   }
 
   /** Pin to the live row when the user is at the bottom. Keep the same

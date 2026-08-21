@@ -19,12 +19,25 @@ export class Explorer {
   private projectCwd: string | null = null;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private selected: ExplorerEntry | null = null;
+  private menu: HTMLElement | null = null;
 
   private onOpenFile: (absPath: string, preview?: boolean) => void = () => {};
 
   constructor(container: HTMLElement) {
     this.treeEl = container.querySelector("#explorer-tree") as HTMLElement;
-    void this.renderRoot(); // show the empty state before any project is opened
+    this.treeEl.addEventListener("contextmenu", (e) => {
+      if ((e.target as HTMLElement).closest(".explorer-row")) return;
+      e.preventDefault();
+      if (!this.projectCwd) return;
+      this.openMenu(e.clientX, e.clientY, this.rootMenuItems());
+    });
+    window.addEventListener("pointerdown", (e) => {
+      if (!this.menu) return;
+      if (this.menu.contains(e.target as Node)) return;
+      this.closeMenu();
+    });
+    window.addEventListener("blur", () => this.closeMenu());
+    void this.renderRoot();
   }
 
   bind(handlers: { onOpenFile: (absPath: string, preview?: boolean) => void }): void {
@@ -129,15 +142,18 @@ export class Explorer {
     name.className = "explorer-name";
     name.textContent = entry.name || entry.path;
 
-    const actions = this.makeActions(entry);
-
-    row.append(arrow, icon, name, actions);
-    row.addEventListener("click", (e) => {
-      if ((e.target as HTMLElement).closest(".explorer-actions")) return;
+    row.append(arrow, icon, name);
+    row.addEventListener("click", () => {
       this.select(entry, row);
       state.expanded = !state.expanded;
       arrow.textContent = state.expanded ? "▾" : "▸";
       void this.renderChildren(children, entry, state);
+    });
+    row.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.select(entry, row);
+      this.openMenu(e.clientX, e.clientY, this.entryMenuItems(entry));
     });
 
     const children = document.createElement("div");
@@ -198,17 +214,20 @@ export class Explorer {
     const name = document.createElement("span");
     name.className = "explorer-name";
     name.textContent = entry.name;
-    const actions = this.makeActions(entry);
-    row.append(icon, name, actions);
-    row.addEventListener("click", (e) => {
-      if ((e.target as HTMLElement).closest(".explorer-actions")) return;
+    row.append(icon, name);
+    row.addEventListener("click", () => {
       this.select(entry, row);
-      this.onOpenFile(entry.path, true); // preview
+      this.onOpenFile(entry.path, true);
     });
-    row.addEventListener("dblclick", (e) => {
-      if ((e.target as HTMLElement).closest(".explorer-actions")) return;
+    row.addEventListener("dblclick", () => {
       this.select(entry, row);
-      this.onOpenFile(entry.path, false); // pin as a permanent tab
+      this.onOpenFile(entry.path, false);
+    });
+    row.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.select(entry, row);
+      this.openMenu(e.clientX, e.clientY, this.entryMenuItems(entry));
     });
     return row;
   }
@@ -222,29 +241,64 @@ export class Explorer {
     row.classList.add("selected");
   }
 
-  private makeActions(entry: ExplorerEntry): HTMLElement {
-    const actions = document.createElement("span");
-    actions.className = "explorer-actions";
-    if (entry.type === "dir") {
-      actions.appendChild(this.actionBtn("+", "New file", () => void this.createAt(entry.relPath, "file")));
-      actions.appendChild(this.actionBtn("+/", "New folder", () => void this.createAt(entry.relPath, "dir")));
-    }
-    actions.appendChild(this.actionBtn("Aa", "Rename", () => void this.renameAt(entry)));
-    actions.appendChild(this.actionBtn("×", "Delete", () => void this.deleteAt(entry)));
-    return actions;
+  private rootMenuItems(): Array<{ label: string; run: () => void }> {
+    return [
+      { label: "New file", run: () => void this.createAt("", "file") },
+      { label: "New folder", run: () => void this.createAt("", "dir") },
+      { label: "Refresh", run: () => void this.refresh() },
+    ];
   }
 
-  private actionBtn(label: string, title: string, onClick: () => void): HTMLElement {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "explorer-action";
-    b.textContent = label;
-    b.title = title;
-    b.addEventListener("click", (e) => {
-      e.stopPropagation();
-      onClick();
-    });
-    return b;
+  private entryMenuItems(entry: ExplorerEntry): Array<{ label: string; run: () => void }> {
+    const items: Array<{ label: string; run: () => void }> = [];
+    if (entry.type === "file") {
+      items.push({ label: "Open", run: () => this.onOpenFile(entry.path, false) });
+    } else {
+      items.push(
+        { label: "New file", run: () => void this.createAt(entry.relPath, "file") },
+        { label: "New folder", run: () => void this.createAt(entry.relPath, "dir") },
+      );
+    }
+    if (entry.relPath) {
+      items.push(
+        { label: "Rename", run: () => void this.renameAt(entry) },
+        { label: "Delete", run: () => void this.deleteAt(entry) },
+      );
+    }
+    if (entry.type === "dir") items.push({ label: "Refresh", run: () => void this.refresh() });
+    return items;
+  }
+
+  private openMenu(x: number, y: number, items: Array<{ label: string; run: () => void }>): void {
+    this.closeMenu();
+    const menu = document.createElement("div");
+    menu.className = "terminal-menu";
+    for (const item of items) {
+      const row = document.createElement("div");
+      row.className = "terminal-menu-item";
+      const name = document.createElement("span");
+      name.className = "terminal-menu-name";
+      name.textContent = item.label;
+      row.appendChild(name);
+      row.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.closeMenu();
+        item.run();
+      });
+      menu.appendChild(row);
+    }
+    document.body.appendChild(menu);
+    const pad = 8;
+    const left = Math.max(pad, Math.min(x, window.innerWidth - menu.offsetWidth - pad));
+    const top = Math.max(pad, Math.min(y, window.innerHeight - menu.offsetHeight - pad));
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+    this.menu = menu;
+  }
+
+  private closeMenu(): void {
+    this.menu?.remove();
+    this.menu = null;
   }
 
   // -------------------------------------------------------------- actions --

@@ -209,7 +209,7 @@ function setActiveProject(projectId: string | null): void {
   placeEditorToggle(activeProjectId);
   syncPaneVisibility();
   collapseEditorIfIdle();
-  requestAnimationFrame(() => activeEditor().layout());
+  fitPanes();
 }
 
 /** Show only the active project's terminals. Other project panes stay alive. */
@@ -1144,9 +1144,11 @@ function clearSplitSizes(): void {
 }
 
 function fitPanes(): void {
-  requestAnimationFrame(() => {
-    for (const p of panes.values()) p.view.fit();
-  });
+  // Flush the new flex sizes before measuring. A delayed fit paints one
+  // frame at the old cell grid, then snaps — that is the occupancy flicker.
+  void splitEl.getBoundingClientRect();
+  activeEditor().layout();
+  for (const p of panes.values()) p.view.fit();
 }
 
 function setExplorerHidden(hidden: boolean): void {
@@ -1191,16 +1193,13 @@ function editorPaneOccupied(): boolean {
 }
 
 function collapseEditorIfIdle(): void {
-  requestAnimationFrame(() => {
-    if (editorPaneOccupied()) return;
-    if (minimizedWork !== "editor") setMinimizedWork("editor");
-  });
+  if (editorPaneOccupied()) return;
+  if (minimizedWork !== "editor") setMinimizedWork("editor");
 }
 
 function revealEditor(): void {
   exitFullscreen();
   if (minimizedWork === "editor") setMinimizedWork(null);
-  requestAnimationFrame(() => activeEditor().layout());
 }
 
 function revealTerminal(): void {

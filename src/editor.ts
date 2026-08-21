@@ -198,10 +198,9 @@ export class EditorManager {
       this.activate(key);
       return;
     }
-    // A new preview replaces the previous preview when the previous preview is not edited.
-    if (preview && this.previewKey && this.tabs.has(this.previewKey)) {
-      this.closeTab(this.previewKey);
-    }
+    // Keep a replacement tab in the map before closing the previous preview.
+    // Closing the last tab first would collapse the editor, then expand it again.
+    const replacing = preview && this.previewKey && this.previewKey !== key ? this.previewKey : null;
     // Monaco forbids two models with the same URI. Reuse an existing model
     // (another editor instance or a leftover URI) instead of throwing.
     const uri = monaco.Uri.file(path);
@@ -225,14 +224,15 @@ export class EditorManager {
     });
     this.tabs.set(key, tab);
     this.order.push(key);
+    if (replacing && this.tabs.has(replacing)) this.closeTab(replacing);
     this.renderTabs();
     this.syncEmptyState();
 
     const res = await window.pi.openFile(path);
     if (res.ok) {
       if (this.tabs.has(key)) model.setValue(res.content);
-      this.onFileOpened();
       this.activate(key);
+      this.onFileOpened();
       return;
     }
     this.closeTab(key);
@@ -506,26 +506,28 @@ export class EditorManager {
     const prevKey = this.lastTimelineKey;
     // Replay shows one tab: close the previous snapshot tab. Clicks keep one
     // tab per dot, so comparing moments stays easy.
-    if (replay && prevKey && prevKey !== key && this.tabs.has(prevKey)) this.closeTab(prevKey);
     const existing = this.tabs.get(key);
     if (existing) {
       existing.model.setValue(content);
-      this.onFileOpened();
       this.activate(key);
+      this.onFileOpened();
       this.lastTimelineKey = key;
+      if (replay && prevKey && prevKey !== key && this.tabs.has(prevKey)) this.closeTab(prevKey);
       return;
     }
-    if (this.previewKey && this.tabs.has(this.previewKey)) this.closeTab(this.previewKey);
+    const replacingPreview = this.previewKey && this.previewKey !== key ? this.previewKey : null;
     const model = monaco.editor.createModel(content, languageForPath(relPath), monaco.Uri.parse(`timeline://${terminalId}/${encodeURIComponent(eventKey)}`));
     const tab = this.makeTab(key, model);
     tab.dom.classList.add("timeline-tab");
     tab.dom.title = `${relPath} — ${label}`;
     this.tabs.set(key, tab);
     this.order.push(key);
+    if (replay && prevKey && prevKey !== key && this.tabs.has(prevKey)) this.closeTab(prevKey);
+    if (replacingPreview && this.tabs.has(replacingPreview)) this.closeTab(replacingPreview);
     this.renderTabs();
     this.syncEmptyState();
-    this.onFileOpened();
     this.activate(key);
+    this.onFileOpened();
     this.lastTimelineKey = key;
     // The test suites read the snapshot from the model, not the DOM render.
     (window as unknown as Record<string, unknown>).__timelineTab = { key, content };

@@ -1,7 +1,7 @@
 {
   "name": "termina",
   "productName": "Termina",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Hybrid terminal/editor: prompt a pi coding agent in a terminal, watch it edit files live in a Monaco (VS Code) editor, click modified files to inspect them.",
   "repository": {
     "type": "git",

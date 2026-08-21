@@ -351,10 +351,6 @@ body {
   -webkit-app-region: no-drag;
 }
 
-.explorer-row:hover {
-  background: var(--bg-hover);
-}
-
 .explorer-row.selected {
   background: var(--bg-hover);
   box-shadow: inset 2px 0 var(--accent);
@@ -403,38 +399,6 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   flex: 1;
-}
-
-.explorer-actions {
-  display: none;
-  gap: 2px;
-  flex: 0 0 auto;
-}
-
-.explorer-row:hover .explorer-actions {
-  display: flex;
-}
-
-.explorer-action {
-  background: none;
-  border: 1px solid transparent;
-  color: var(--text-dim);
-  font: inherit;
-  font-size: 11px;
-  line-height: 1;
-  cursor: pointer;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 4px;
-  border-radius: 3px;
-}
-
-.explorer-action:hover,
-.explorer-action:focus-visible {
-  background: var(--bg-raised);
-  border-color: var(--border);
-  color: var(--text);
-  outline: none;
 }
 
 .explorer-children {
