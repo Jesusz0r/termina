@@ -837,7 +837,8 @@ The renderer never talks to the agent. It only renders what main pushes.
   `termina.modified`, `termina.modifiedHeight`, `termina.workpane`. Explorer `0` means the explorer
   is minimized to a bar. `termina.workpane` is `terminal` or `editor`
   when that pane is minimized. Terminal and editor cannot both be
-  minimized.
+  minimized. The editor stays minimized while no file or Change Review
+  is open.
 - The bridge extension is app-owned: the app writes it once to the user-data
   directory and passes it to pi with the CLI extension option. A template
   change in `electron/bridge-extension.ts` takes effect on the next app start.

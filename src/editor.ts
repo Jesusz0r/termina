@@ -94,6 +94,10 @@ export class EditorManager {
   private locked = false;
   /** Fired when a disk write reaches a model with unsaved user edits. */
   onConflict: (path: string) => void = () => {};
+  /** Fired after a file or snapshot tab is shown. */
+  onFileOpened: () => void = () => {};
+  /** Fired when the last tab closes. */
+  onBecameEmpty: () => void = () => {};
   /** The candidate label of a path ("A"/"B"), or null (worldline badge). */
   tabBadge: (path: string) => "A" | "B" | null = () => null;
 
@@ -190,6 +194,7 @@ export class EditorManager {
     if (existing) {
       // Pin the preview when explicitly requested (for example double-click).
       if (!preview && this.previewKey === key) this.pinPreview();
+      this.onFileOpened();
       this.activate(key);
       return;
     }
@@ -226,11 +231,17 @@ export class EditorManager {
     const res = await window.pi.openFile(path);
     if (res.ok) {
       if (this.tabs.has(key)) model.setValue(res.content);
+      this.onFileOpened();
       this.activate(key);
       return;
     }
     this.closeTab(key);
     throw new Error(res.error);
+  }
+
+  /** True when at least one file or snapshot tab is open. */
+  hasOpenTabs(): boolean {
+    return this.order.length > 0;
   }
 
   /** Promote the preview tab to a permanent tab. */
@@ -435,6 +446,7 @@ export class EditorManager {
         this.syncEmptyState();
       }
     }
+    if (this.order.length === 0) this.onBecameEmpty();
   }
 
   private async saveActive(): Promise<void> {
@@ -498,6 +510,7 @@ export class EditorManager {
     const existing = this.tabs.get(key);
     if (existing) {
       existing.model.setValue(content);
+      this.onFileOpened();
       this.activate(key);
       this.lastTimelineKey = key;
       return;
@@ -511,6 +524,7 @@ export class EditorManager {
     this.order.push(key);
     this.renderTabs();
     this.syncEmptyState();
+    this.onFileOpened();
     this.activate(key);
     this.lastTimelineKey = key;
     // The test suites read the snapshot from the model, not the DOM render.

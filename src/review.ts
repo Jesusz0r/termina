@@ -20,6 +20,8 @@ export class ReviewView {
   private onOpenFile: (path: string) => void = () => {};
   private onAccepted: (path: string) => void = () => {};
   private onReverted: (path: string) => void = () => {};
+  private onHidden: () => void = () => {};
+  private onShown: () => void = () => {};
   /** Bumped on every show/hide. A stale load applies to nothing. */
   private loadSeq = 0;
 
@@ -47,10 +49,12 @@ export class ReviewView {
     document.getElementById("review-accept")!.addEventListener("click", () => this.accept());
   }
 
-  bind(handlers: { onOpenFile: (path: string) => void; onAccepted: (path: string) => void; onReverted: (path: string) => void }): void {
+  bind(handlers: { onOpenFile: (path: string) => void; onAccepted: (path: string) => void; onReverted: (path: string) => void; onHidden?: () => void; onShown?: () => void }): void {
     this.onOpenFile = handlers.onOpenFile;
     this.onAccepted = handlers.onAccepted;
     this.onReverted = handlers.onReverted;
+    this.onHidden = handlers.onHidden ?? (() => {});
+    this.onShown = handlers.onShown ?? (() => {});
   }
 
   setTheme(theme: ThemeId): void {
@@ -119,6 +123,7 @@ export class ReviewView {
 
     this.coverEditors(true);
     this.container.style.display = "flex";
+    this.onShown();
     if (this.baseline === null && res.status === "created") {
       document.getElementById("review-hint")!.textContent = "new file created by the agent — reverting deletes it";
     } else if (this.baseline === null) {
@@ -146,6 +151,7 @@ export class ReviewView {
     acceptBtn.style.display = "none";
     this.coverEditors(true);
     this.container.style.display = "flex";
+    this.onShown();
     const hint = document.getElementById("review-hint")!;
     hint.textContent = `shared base → candidate ${label}`;
     if (!base.ok || !cand.ok) hint.textContent = `shared base → candidate ${label} — ${base.error ?? cand.error ?? ""}`;
@@ -169,6 +175,7 @@ export class ReviewView {
     acceptBtn.style.display = "none";
     this.coverEditors(true);
     this.container.style.display = "flex";
+    this.onShown();
     const hint = document.getElementById("review-hint")!;
     hint.textContent = "candidate A (reference) → candidate B (alternative)";
     if (!a.ok || !b.ok) {
@@ -237,6 +244,7 @@ export class ReviewView {
     this.path = null;
     this.terminalId = null;
     this.baseline = null;
+    this.onHidden();
   }
 
   /** Cover the Monaco surfaces while the diff is open. Do not force the

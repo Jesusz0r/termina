@@ -143,6 +143,8 @@ function applySharedEditorHooks(editor: InstanceType<typeof EditorManager>): voi
     });
   };
   editor.tabBadge = (path) => worldlinesView.labelOfPath(path);
+  editor.onFileOpened = () => revealEditor();
+  editor.onBecameEmpty = () => collapseEditorIfIdle();
 }
 
 /** Remove a closed project's tab, editor view, and panes. */
@@ -206,6 +208,7 @@ function setActiveProject(projectId: string | null): void {
   }
   placeEditorToggle(activeProjectId);
   syncPaneVisibility();
+  collapseEditorIfIdle();
   requestAnimationFrame(() => activeEditor().layout());
 }
 
@@ -256,6 +259,8 @@ reviewView.bind({
     pane.accepted.delete(path);
     renderModified(pane);
   },
+  onHidden: () => collapseEditorIfIdle(),
+  onShown: () => revealEditor(),
 });
 const explorer = new Explorer(document.getElementById("explorer")!);
 const sessionSearch = new SessionSearch();
@@ -299,11 +304,9 @@ const worldlinesView = new WorldlinesView(document.getElementById("worldline-pan
 (window as unknown as Record<string, unknown>).__worldlinesView = worldlinesView;
 worldlinesView.bind({
   onCompareBase: (comparisonId, label, relPath, absPath) => {
-    revealEditor();
     void reviewView.showCandidateDiff(comparisonId, label, relPath, absPath);
   },
   onCompareAB: (comparisonId, relPath) => {
-    revealEditor();
     void reviewView.showABDiff(comparisonId, relPath, worldlinesView.rootOf(comparisonId, "A"));
   },
   onOpenFile: (absPath) => void openFileSmart(absPath, false),
@@ -628,8 +631,6 @@ function renderTimeline(): void {
 
 timelineView.bind({
   onJump: async (ev, opts) => {
-    // Reveal the editor (a snapshot tab) without leaving fullscreen perma-hidden.
-    revealEditor();
     const pane = activeId ? panes.get(activeId) : undefined;
     if (!pane) return;
     // Snapshots are fetched on demand — the strip/IPC never carries content.
@@ -856,8 +857,6 @@ function renderModified(pane: Pane): void {
     li.append(badge, path);
     li.addEventListener("click", () => {
       // The modified list is the review surface: clicking opens the diff.
-      revealEditor();
-      if (reviewView.isVisible) reviewView.hide();
       void reviewView.show(activeId ?? "", f.path, f.relPath);
     });
     if (pane.accepted.has(f.path)) {
@@ -917,8 +916,6 @@ async function focusProjectShell(): Promise<void> {
 // ---------------------------------------------------------------- commands --
 
 async function openFileSmart(path: string, preview = true): Promise<void> {
-  // Opening a file from the explorer/modified list reveals the editor.
-  revealEditor();
   if (reviewView.isVisible) reviewView.hide();
   if (!activeProjectId && projectCwd) {
     const match = [...projectViews.values()].find((view) => view.cwd === projectCwd);
@@ -1189,30 +1186,50 @@ function setMinimizedWork(pane: WorkPane | null): void {
   fitPanes();
 }
 
-function requestMinimize(pane: WorkPane): void {
-  if (isFullscreenLayout()) {
-    exitFullscreen();
-    if (minimizedWork === pane) setMinimizedWork(null);
-    return;
-  }
-  // Restore when this pane is already the thin bar.
-  if (minimizedWork === pane) {
-    setMinimizedWork(null);
-    return;
-  }
-  // Terminal and editor cannot both be bars. Minimizing the expanded pane
-  // swaps which one is compacted.
-  setMinimizedWork(pane);
+function editorPaneOccupied(): boolean {
+  return reviewView.isVisible || activeEditor().hasOpenTabs();
+}
+
+function collapseEditorIfIdle(): void {
+  requestAnimationFrame(() => {
+    if (editorPaneOccupied()) return;
+    if (minimizedWork !== "editor") setMinimizedWork("editor");
+  });
 }
 
 function revealEditor(): void {
   exitFullscreen();
   if (minimizedWork === "editor") setMinimizedWork(null);
+  requestAnimationFrame(() => activeEditor().layout());
 }
 
 function revealTerminal(): void {
   exitFullscreen();
   if (minimizedWork === "terminal") setMinimizedWork(null);
+}
+
+function requestMinimize(pane: WorkPane): void {
+  if (isFullscreenLayout()) {
+    exitFullscreen();
+    if (minimizedWork === pane) {
+      if (pane === "editor" && !editorPaneOccupied()) return;
+      setMinimizedWork(null);
+    }
+    return;
+  }
+  // Restore when this pane is already the thin bar.
+  if (minimizedWork === pane) {
+    // Keep the editor closed until a file or review occupies it.
+    if (pane === "editor" && !editorPaneOccupied()) return;
+    setMinimizedWork(null);
+    return;
+  }
+  // An idle editor is already a bar. Compacting the terminal would expand
+  // the empty editor, which the occupancy rule forbids.
+  if (pane === "terminal" && !editorPaneOccupied()) return;
+  // Terminal and editor cannot both be bars. Minimizing the expanded pane
+  // swaps which one is compacted.
+  setMinimizedWork(pane);
 }
 
 function syncPaneToggle(button: HTMLButtonElement, minimized: boolean, label: string): void {
@@ -1762,6 +1779,7 @@ async function boot(): Promise<void> {
   minimizedWork = storedWork === "terminal" || storedWork === "editor" ? storedWork : null;
   if (isSplitLayout(layout)) lastSplitLayout = layout;
   applyLayout(layout);
+  if (minimizedWork !== "editor" && !editorPaneOccupied()) setMinimizedWork("editor");
   if (localStorage.getItem(MODIFIED_KEY) === "0") setModifiedVisible(false);
   restoreModifiedListHeight();
   void refreshTestCommand();
