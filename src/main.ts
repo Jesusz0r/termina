@@ -1514,20 +1514,20 @@ window.pi.onFlushRequest(({ requestId, writerId }) => {
 });
 
 function applyAppUpdateState(state: AppUpdateState): void {
-  if (state.status === "idle") {
-    btnAppUpdate.hidden = true;
-    btnAppUpdate.classList.remove("ready");
-    return;
-  }
-  btnAppUpdate.hidden = false;
+  const show = state.status === "available" || state.status === "downloading" || state.status === "ready" || state.status === "error";
+  btnAppUpdate.hidden = !show;
   btnAppUpdate.classList.toggle("ready", state.status === "ready");
+  btnAppUpdate.classList.toggle("error", state.status === "error");
+  if (!show) return;
   const label = appUpdateButtonLabel(state);
   btnAppUpdate.textContent = label.text;
   btnAppUpdate.title = label.title;
   btnAppUpdate.setAttribute("aria-label", label.title);
 }
 
-function appUpdateButtonLabel(state: Exclude<AppUpdateState, { status: "idle" }>): { text: string; title: string } {
+function appUpdateButtonLabel(
+  state: Extract<AppUpdateState, { status: "available" | "downloading" | "ready" | "error" }>,
+): { text: string; title: string } {
   switch (state.status) {
     case "available":
       return { text: "↑", title: `Termina ${state.version} is available` };
@@ -1535,12 +1535,20 @@ function appUpdateButtonLabel(state: Exclude<AppUpdateState, { status: "idle" }>
       return { text: `${state.percent}%`, title: `Downloading Termina ${state.version} (${state.percent}%)` };
     case "ready":
       return { text: "↑", title: `Restart to install Termina ${state.version}` };
+    case "error":
+      return { text: "!", title: `Could not check for updates: ${state.message}` };
   }
 }
 
 btnAppUpdate.addEventListener("click", () => {
-  void window.pi.installUpdate().then((res) => {
-    if (!res.ok) toast(res.error ?? "could not install the update", "warning");
+  void window.pi.getUpdateState().then((state) => {
+    if (state.status === "error") {
+      void window.pi.checkUpdate();
+      return;
+    }
+    void window.pi.installUpdate().then((res) => {
+      if (!res.ok) toast(res.error ?? "could not install the update", "warning");
+    });
   });
 });
 window.pi.onUpdateState(applyAppUpdateState);

@@ -28,7 +28,7 @@ import { WorldlineManager, dirBytes, quoteShellArg, recoverPromotionJournals, ty
 import { sandboxShellPreamble, writeEvidenceProfile } from "./sandbox.js";
 import { parseFailingTests, verifyFailSummary } from "./evidence.js";
 import { coreClient } from "./core-client.js";
-import { createAppUpdater, type AppUpdateController } from "./app-update.js";
+import { createAppUpdater, updateMenuCopy, type AppUpdateController } from "./app-update.js";
 import {
   MAX_DISPATCH_WORKERS,
   findTaskByText,
@@ -557,11 +557,22 @@ class PiEditorApp {
   private buildMenu(): void {
     const send = (command: string) => () => this.send("menu:command", { command });
     const shortcut = (command: ShortcutCommand): string | undefined => this.shortcutMap[command] || undefined;
+    const update = updateMenuCopy(
+      this.appUpdater?.getState() ?? { status: "disabled", currentVersion: app.getVersion() },
+    );
     const template: Electron.MenuItemConstructorOptions[] = [
       {
         label: "Termina",
         submenu: [
           { role: "about" },
+          { type: "separator" },
+          { label: update.status, id: "app-update-status", enabled: false },
+          {
+            id: "app-update-action",
+            label: update.action,
+            enabled: update.enabled,
+            click: () => void this.handleUpdateMenuAction(),
+          },
           { type: "separator" },
           { label: "Settings…", accelerator: shortcut("open-settings"), click: send("open-settings") },
           { type: "separator" },
@@ -650,6 +661,30 @@ class PiEditorApp {
       },
     ];
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  }
+
+  private applyUpdateMenu(): void {
+    const copy = updateMenuCopy(
+      this.appUpdater?.getState() ?? { status: "disabled", currentVersion: app.getVersion() },
+    );
+    const menu = Menu.getApplicationMenu();
+    const statusItem = menu?.getMenuItemById("app-update-status");
+    const actionItem = menu?.getMenuItemById("app-update-action");
+    if (!statusItem || !actionItem) {
+      this.buildMenu();
+      return;
+    }
+    statusItem.label = copy.status;
+    actionItem.label = copy.action;
+    actionItem.enabled = copy.enabled;
+  }
+
+  private handleUpdateMenuAction(): void {
+    const copy = updateMenuCopy(
+      this.appUpdater?.getState() ?? { status: "disabled", currentVersion: app.getVersion() },
+    );
+    if (copy.kind === "install") void this.installAppUpdate();
+    else if (copy.kind === "check") void this.checkAppUpdateFromMenu();
   }
 
   private setKeyboardShortcuts(raw: unknown): ShortcutMap {
@@ -4238,7 +4273,11 @@ class PiEditorApp {
       this.updatePreferences(preferences, activateShortcuts === true),
     );
     ipcMain.handle("settings:shortcuts", (_e, shortcuts: unknown) => this.setKeyboardShortcuts(shortcuts));
-    ipcMain.handle("update:get", () => this.appUpdater?.getState() ?? { status: "idle" as const });
+    ipcMain.handle("update:get", () => this.appUpdater?.getState() ?? { status: "disabled" as const, currentVersion: app.getVersion() });
+    ipcMain.handle("update:check", () => {
+      this.appUpdater?.check();
+      return this.appUpdater?.getState() ?? { status: "disabled" as const, currentVersion: app.getVersion() };
+    });
     ipcMain.handle("update:install", () => this.installAppUpdate());
 
     ipcMain.handle("terminals:create", async (_e, opts?: unknown) => {
@@ -4564,7 +4603,10 @@ class PiEditorApp {
     this.preferences = await this.preferencesStore.load();
     this.shortcutMap = { ...this.preferences.shortcuts };
     this.appUpdater = createAppUpdater({
-      send: (state) => this.send("update:state", state),
+      send: (state) => {
+        this.send("update:state", state);
+        this.applyUpdateMenu();
+      },
     });
     this.registerIpc();
     void detectShells();
@@ -4590,6 +4632,22 @@ class PiEditorApp {
     }
     // A normal launch has no folder. The renderer shows the open-folder
     // placeholder until the user picks one. Tests set TERMINA_INITIAL_CWD.
+  }
+
+  private async checkAppUpdateFromMenu(): Promise<void> {
+    if (!app.isPackaged) {
+      const payload = {
+        type: "info" as const,
+        title: "Updates",
+        message: "This launch does not auto-update.",
+        detail: "Install Termina from GitHub Releases to receive in-app updates. A source or npm run dev launch stays on the code you built.",
+      };
+      const win = this.win;
+      if (win && !win.isDestroyed()) await dialog.showMessageBox(win, payload);
+      else await dialog.showMessageBox(payload);
+      return;
+    }
+    this.appUpdater?.check();
   }
 
   private async installAppUpdate(): Promise<{ ok: boolean; error?: string }> {

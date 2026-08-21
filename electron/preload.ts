@@ -162,6 +162,7 @@ const bridge: PiBridge = {
   renameEntry: (relPath, newName) => ipcRenderer.invoke("explorer:rename", relPath, newName),
   deleteEntry: (relPath) => ipcRenderer.invoke("explorer:delete", relPath),
   getUpdateState: (): Promise<AppUpdateState> => ipcRenderer.invoke("update:get"),
+  checkUpdate: (): Promise<AppUpdateState> => ipcRenderer.invoke("update:check"),
   installUpdate: () => ipcRenderer.invoke("update:install"),
 };
 

@@ -1999,6 +1999,11 @@ body {
   animation: update-pulse 1.6s ease-in-out infinite;
 }
 
+#btn-app-update.error {
+  background: color-mix(in srgb, var(--red) 75%, transparent);
+  color: var(--text);
+}
+
 @keyframes update-pulse {
   0%,
   100% {

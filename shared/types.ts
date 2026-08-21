@@ -29,10 +29,13 @@ export interface FileDeletedPayload {
 
 /** Packaged-app update status pushed by main. */
 export type AppUpdateState =
-  | { status: "idle" }
-  | { status: "available"; version: string }
-  | { status: "downloading"; version: string; percent: number }
-  | { status: "ready"; version: string };
+  | { status: "disabled"; currentVersion: string }
+  | { status: "checking"; currentVersion: string }
+  | { status: "current"; currentVersion: string }
+  | { status: "available"; currentVersion: string; version: string }
+  | { status: "downloading"; currentVersion: string; version: string; percent: number }
+  | { status: "ready"; currentVersion: string; version: string }
+  | { status: "error"; currentVersion: string; message: string };
 
 export interface ModifiedListPayload {
   instanceId: string;
@@ -606,5 +609,6 @@ export interface PiBridge {
   renameEntry(relPath: string, newName: string): Promise<{ ok: boolean; error?: string }>;
   deleteEntry(relPath: string): Promise<{ ok: boolean; error?: string }>;
   getUpdateState(): Promise<AppUpdateState>;
+  checkUpdate(): Promise<AppUpdateState>;
   installUpdate(): Promise<{ ok: boolean; error?: string }>;
 }
