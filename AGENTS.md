@@ -62,6 +62,8 @@ In this repository that means:
 * `core/` (`termina-core`) owns every Git and snapshot operation. Do not
   spawn the Git CLI or add a second snapshot store.
 * `electron/worldline-git.ts` is the only TypeScript client for that core.
+* `electron/session-fork.ts` is the only TypeScript client for the session
+  worker. The worker entry stays in `electron/session-worker.ts`.
 * `shared/preferences.ts` is the only preferences validator. The renderer
   and main both call it. Do not add a second merge or default-fill path.
 * `electron/preferences.ts` is the only preferences file store.
@@ -396,6 +398,8 @@ over extra coordinator / service / adapter / strategy layers unless those
 layers represent a real boundary.
 
 * Keep snapshot and Git behavior in `core/` and `electron/worldline-git.ts`.
+* Keep session fork plumbing in `electron/session-fork.ts` and the
+  SessionManager work in `electron/session-worker.ts`.
 * Keep terminal, workspace, and IPC ownership in `electron/main.ts`.
 * Keep UI-specific behavior in `src/`.
 * Keep preference validation in `shared/preferences.ts`.
@@ -426,6 +430,7 @@ with the same job.
 
 `electron/pty-terminal.ts` stays a thin wrapper around node-pty.
 `electron/worldline-git.ts` stays request plumbing over the Rust core.
+`electron/session-fork.ts` stays request plumbing over the session worker.
 Do not thicken those files into parallel implementations.
 
 ---
@@ -703,6 +708,10 @@ Use these terms exactly. Do not invent synonyms.
   workspaces, the watchers, all state, and the IPC handlers. It writes the
   materialized bridge file to the app user-data directory.
 - `electron/pty-terminal.ts`: a thin wrapper around node-pty.
+- `electron/session-fork.ts`: the session-fork client. It owns the request
+  plumbing over the worker thread. SessionManager work stays in the worker.
+- `electron/session-worker.ts`: forks candidate sessions off the main
+  thread (copy, branch, forkFrom).
 - `electron/sidecar.ts`: sidecar protocol parse, sequence, and tail.
 - `electron/bridge-extension.ts`: the bridge extension source. Pi loads the
   materialized copy from the user-data directory.

@@ -16,6 +16,7 @@ import { writeSandboxProfile, sandboxShellPreamble, type SandboxPaths } from "./
 import { coreClient } from "./core-client.js";
 import { captureRootInRepo, gitCommonDir, gitHead, gitTopLevel, platformHasCopyOnWrite, type SnapshotStore } from "./worldline-git.js";
 import { EvidenceEngine, dependencyDiff, mineChangeReason, rankProfiles, type EvidenceDeps, type EvidenceRecord, type EvidenceSummary } from "./evidence.js";
+import type { SessionForkOpts, SessionForkResult } from "./session-fork.js";
 import type { DependencyChange, WorldlineChangedFile, WorldlineDetails } from "../shared/types.js";
 
 /** Quote one shell argument: the resolved base commands carry scripts that
@@ -162,17 +163,7 @@ export interface WorldlineDeps {
   getStore(): Promise<SnapshotStore | null>;
   /** Read-only load paths for the sandboxed pi (app package + node). */
   appReadPaths(): string[];
-  session: {
-    fork(opts: {
-      sourceSessionFile: string;
-      entryId: string | null;
-      sessionWorkspaceDir: string;
-      candidateRoot: string;
-      candidateSessionDir: string;
-      relocationNote?: string;
-      contextText?: string;
-    }): Promise<{ ok: boolean; sessionFile: string | null; entryCount: number; leafId: string | null }>;
-  };
+  forkSession(opts: SessionForkOpts): Promise<SessionForkResult>;
   createCandidate(opts: {
     root: string;
     workspaceId: string;
@@ -461,7 +452,7 @@ export class WorldlineManager {
       // A's session continues from the candidate leaf; B's session branches
       // at the pre-task anchor (the original run's prompt parent).
       const [forkA, forkB] = await Promise.all([
-        this.deps.session.fork({
+        this.deps.forkSession({
           sourceSessionFile: cand.sessionFile,
           entryId: null,
           sessionWorkspaceDir: ncmp.sessionWorkspaceDir,
@@ -469,7 +460,7 @@ export class WorldlineManager {
           candidateSessionDir: nA.sessionDir,
           relocationNote: `The source project lived at ${this.deps.primaryRoot}. In this candidate, that path maps to ${nA.dir}.`,
         }),
-        this.deps.session.fork({
+        this.deps.forkSession({
           sourceSessionFile: run.sessionFile ?? cand.sessionFile,
           entryId: run.promptParentEntryId,
           sessionWorkspaceDir: ncmp.sessionWorkspaceDir,
@@ -995,7 +986,7 @@ export class WorldlineManager {
     const a = cmp.candidates.get("A")!;
     const b = cmp.candidates.get("B")!;
     const [forkA, forkB] = await Promise.all([
-      this.deps.session.fork({
+      this.deps.forkSession({
         sourceSessionFile: run.sessionBranchFile!,
         entryId: run.settledEntryId,
         sessionWorkspaceDir: cmp.sessionWorkspaceDir,
@@ -1003,7 +994,7 @@ export class WorldlineManager {
         candidateSessionDir: a.sessionDir,
         relocationNote: `The source project lived at ${this.deps.primaryRoot}. In this candidate, that path maps to ${a.dir}.`,
       }),
-      this.deps.session.fork({
+      this.deps.forkSession({
         sourceSessionFile: run.sessionBranchFile!,
         entryId: run.promptParentEntryId,
         sessionWorkspaceDir: cmp.sessionWorkspaceDir,
@@ -1598,7 +1589,7 @@ export class WorldlineManager {
       journal.paths = paths;
 
       const sessionDir = join(journalDir, "session");
-      const fork = await this.deps.session.fork({
+      const fork = await this.deps.forkSession({
         sourceSessionFile: target.sessionFile,
         entryId: null,
         sessionWorkspaceDir: sessionDir,
@@ -1773,7 +1764,7 @@ export class WorldlineManager {
       }
       await this.cloneTree(cmp.templateDir, cand.dir);
       // The session branches at the dot's entry: later entries stay out.
-      const fork = await this.deps.session.fork({
+      const fork = await this.deps.forkSession({
         sourceSessionFile: opts.sessionFile,
         entryId: opts.entryId,
         sessionWorkspaceDir: cmp.sessionWorkspaceDir,

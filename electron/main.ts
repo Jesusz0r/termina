@@ -18,7 +18,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Worker } from "node:worker_threads";
+import { SessionForkClient } from "./session-fork.js";
 import { PtyTerminal } from "./pty-terminal.js";
 import { BRIDGE_EXTENSION } from "./bridge-extension.js";
 import { AgentStartEvent, SidecarEvent, SidecarTailer } from "./sidecar.js";
@@ -328,73 +328,6 @@ class PiTerminalInstance {
   }
 }
 
-/**
- * Runs SessionManager work (session forking) on a worker thread.
- * Requests are serialized.
- */
-class SessionWorkerClient {
-  private worker: Worker | null = null;
-  private pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
-  private queue: Promise<unknown> = Promise.resolve();
-  private seq = 0;
-
-  private ensure(): Worker {
-    if (this.worker) return this.worker;
-    this.worker = new Worker(join(__dirname, "session-worker.mjs"));
-    this.worker.on("message", (msg: { op?: string; requestId?: string; ok?: boolean; error?: string }) => {
-      if (msg.op !== "fork-result" || !msg.requestId) return;
-      const p = this.pending.get(msg.requestId);
-      if (!p) return;
-      this.pending.delete(msg.requestId);
-      if (msg.ok) p.resolve(msg);
-      else p.reject(new Error(msg.error ?? "session fork failed"));
-    });
-    this.worker.on("error", (err) => {
-      for (const p of this.pending.values()) p.reject(err);
-      this.pending.clear();
-      this.worker = null;
-    });
-    return this.worker;
-  }
-
-  request(payload: Record<string, unknown>): Promise<unknown> {
-    const run = this.queue.then(() => this.dispatch(payload));
-    this.queue = run.catch(() => undefined);
-    return run;
-  }
-
-  private dispatch(payload: Record<string, unknown>): Promise<unknown> {
-    return new Promise((resolve, reject) => {
-      const requestId = `fork-${++this.seq}`;
-      this.pending.set(requestId, { resolve, reject });
-      try {
-        this.ensure().postMessage({ ...payload, op: "fork", requestId });
-      } catch (err) {
-        this.pending.delete(requestId);
-        reject(err instanceof Error ? err : new Error(String(err)));
-      }
-    });
-  }
-
-  /** Fork a candidate session: branch at the entry, fork into the dir. */
-  fork(opts: {
-    sourceSessionFile: string;
-    entryId: string | null;
-    sessionWorkspaceDir: string;
-    candidateRoot: string;
-    candidateSessionDir: string;
-    relocationNote?: string;
-    contextText?: string;
-  }): Promise<{ ok: boolean; sessionFile: string | null; entryCount: number; leafId: string | null }> {
-    return this.request(opts) as Promise<{ ok: boolean; sessionFile: string | null; entryCount: number; leafId: string | null }>;
-  }
-
-  dispose(): void {
-    this.worker?.terminate();
-    this.worker = null;
-  }
-}
-
 /** All per-project state. One entry per opened folder. */
 interface ProjectState {
   id: string;
@@ -544,9 +477,8 @@ class PiEditorApp {
    *  One map per workspace. */
   private userEditsByWorkspace = new Map<string, Map<string, UserEdit>>();
 
-  /** The snapshot worker (captures off the main thread). */
-  /** The session worker (session forking off the main thread). */
-  private sessionWorker = new SessionWorkerClient();
+  /** The session-fork client. SessionManager work runs in the worker. */
+  private sessionFork = new SessionForkClient();
 
   /** The app-owned worlds root. */
   private userDataDir = process.env.TERMINA_USER_DATA_DIR ?? app.getPath("userData");
@@ -924,9 +856,7 @@ class PiEditorApp {
         }
         return [...new Set(out)];
       },
-      session: {
-        fork: (opts) => this.sessionWorker.fork(opts),
-      },
+      forkSession: (opts) => this.sessionFork.fork(opts),
       createCandidate: (opts) => this.createCandidate(opts),
       createCandidateWorkspace: (root, baseStateId, comparisonId) => this.createCandidateWorkspace(project, root, baseStateId, comparisonId),
       onUpdate: (summary) => this.send("worldline:update", summary),
@@ -4914,7 +4844,7 @@ class PiEditorApp {
     this.terminals.clear();
     for (const tailer of this.worldlineTailers.values()) tailer.stop();
     this.worldlineTailers.clear();
-    this.sessionWorker.dispose();
+    this.sessionFork.dispose();
     this.stopPaintWatchdog();
   }
 

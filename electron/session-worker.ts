@@ -6,35 +6,21 @@
  * source session to an app-private workspace, open the copy, verify the
  * entry chain, extract the path, and fork it into the candidate session
  * directory.
+ *
+ * Import types only. A runtime import of session-fork.ts would load the
+ * client (and Worker) inside this thread.
  */
 import { parentPort } from "node:worker_threads";
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import type { SessionForkReply, SessionForkRequest } from "./session-fork.js";
 
-interface ForkRequest {
-  op: "fork";
-  requestId: string;
-  /** The complete source session file. */
-  sourceSessionFile: string;
-  /** The entry to branch at (the leaf of the forked path); null forks the
-   *  whole leaf (promotion). */
-  entryId: string | null;
-  /** The app-private session workspace for intermediate copies. */
-  sessionWorkspaceDir: string;
-  candidateRoot: string;
-  candidateSessionDir: string;
-  /** A hidden relocation note appended to the session (display: false). */
-  relocationNote?: string;
-  /** A hidden one-shot context message appended before the prompt. */
-  contextText?: string;
-}
-
-function post(msg: Record<string, unknown>): void {
+function post(msg: SessionForkReply): void {
   parentPort?.postMessage(msg);
 }
 
-parentPort?.on("message", (msg: ForkRequest) => {
+parentPort?.on("message", (msg: SessionForkRequest) => {
   if (msg.op !== "fork") return;
   void (async () => {
     try {
@@ -68,16 +54,22 @@ parentPort?.on("message", (msg: ForkRequest) => {
       if (msg.contextText) {
         forked.appendCustomMessageEntry("termina-context", msg.contextText, false);
       }
-      post({
+      const reply: SessionForkReply = {
         op: "fork-result",
         requestId: msg.requestId,
         ok: true,
         sessionFile: forked.getSessionFile() ?? null,
         entryCount: forked.getEntries().length,
         leafId: forked.getLeafId(),
-      });
+      };
+      post(reply);
     } catch (err) {
-      post({ op: "fork-result", requestId: msg.requestId, ok: false, error: err instanceof Error ? err.message : String(err) });
+      post({
+        op: "fork-result",
+        requestId: msg.requestId,
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   })();
 });
