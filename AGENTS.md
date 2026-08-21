@@ -65,6 +65,12 @@ In this repository that means:
 * `shared/preferences.ts` is the only preferences validator. The renderer
   and main both call it. Do not add a second merge or default-fill path.
 * `electron/preferences.ts` is the only preferences file store.
+* `electron/plan-board.ts` owns Plan Board parse, progress, finalize, and
+  Dispatch task picks. The bridge does not define a second task-line rule.
+* `electron/worldlines.ts` owns comparisons, promotion journals, and
+  evidence runs. `electron/evidence.ts` only measures a candidate.
+* `electron/sidecar.ts` owns sidecar parse, sequence, and tail. The bridge
+  extension is the only writer (`electron/bridge-extension.ts`).
 * The bridge extension is app-owned in the user-data directory. Do not
   generate a second copy in the project.
 * IPC channels use the `area:action` pattern. Do not invent a second
@@ -415,7 +421,7 @@ error handling, or isolation from an external system.
 Do not replace several obvious operations with a vaguely named `Manager`,
 `Processor`, `Handler`, `Coordinator`, or `Service` unless that object owns
 a meaningful responsibility. `WorldlineManager` owns fork-run pairs,
-candidates, promotion, challenges, and compare. Do not add a second object
+candidates, promotion, evidence orchestration, challenges, and compare. Do not add a second object
 with the same job.
 
 `electron/pty-terminal.ts` stays a thin wrapper around node-pty.
@@ -694,11 +700,12 @@ Use these terms exactly. Do not invent synonyms.
 ## File map
 
 - `electron/main.ts`: the main process. It owns the terminals, the
-  workspaces, the watchers, all state, and the IPC handlers. The bridge
-  extension template is a string in this file; the materialized bridge file
-  lives in the app user-data directory.
+  workspaces, the watchers, all state, and the IPC handlers. It writes the
+  materialized bridge file to the app user-data directory.
 - `electron/pty-terminal.ts`: a thin wrapper around node-pty.
-- `electron/sidecar.ts`: tails the sidecar files and emits events.
+- `electron/sidecar.ts`: sidecar protocol parse, sequence, and tail.
+- `electron/bridge-extension.ts`: the bridge extension source. Pi loads the
+  materialized copy from the user-data directory.
 - `electron/watcher.ts`: watches the project, keeps a content cache, and
   emits change events.
 - `electron/worldline-git.ts`: the snapshot store client (capture,
@@ -713,14 +720,17 @@ Use these terms exactly. Do not invent synonyms.
   the main bundle and is rebuilt by `scripts/build-core.mjs`. The app no
   longer spawns the Git CLI.
 - `electron/worldlines.ts`: the WorldlineManager (fork-run pairs, moment
-  candidates, promotion, challenges, compare).
+  candidates, promotion, evidence orchestration, challenges, compare).
+  Promotion journals recover through `recoverPromotionJournals`.
 - `electron/evidence.ts`: the evidence engine and the four challenge
-  profiles.
+  profiles. Trajectory counts come from `electron/sidecar.ts`. The
+  manager owns when evidence runs; this module measures one candidate.
 - `electron/sandbox.ts`: the candidate sandbox profiles, the evidence
   (offline) profile variant, and the ulimit preamble.
 - `electron/preload.ts`: exposes the typed `window.pi` bridge.
 - `electron/preferences.ts`: persists app-owned preferences.
 - `electron/app-update.ts`: packaged-app updates from GitHub Releases.
+- `electron/plan-board.ts`: Plan Board parse, progress, finalize, and Dispatch picks. The bridge logs assistant text; this module decides what a task is.
 - `shared/preferences.ts`: the preferences validator used by main and the renderer.
 - `shared/types.ts`: the types shared between main, preload, and renderer.
 - `src/main.ts`: the renderer entry. It manages panes, layout, and events.
@@ -820,9 +830,9 @@ The renderer never talks to the agent. It only renders what main pushes.
   minimized.
 - The bridge extension is app-owned: the app writes it once to the user-data
   directory and passes it to pi with the CLI extension option. A template
-  change in main.ts takes effect on the next app start. The app removes the
-  legacy generated bridge from a project when it carries the Termina marker;
-  a user file that only shares the name stays untouched.
+  change in `electron/bridge-extension.ts` takes effect on the next app start.
+  The app removes the legacy generated bridge from a project when it carries
+  the Termina marker; a user file that only shares the name stays untouched.
 - The app sanitizes the env for pi processes: host session variables
   (PI_SESSION_FILE, PI_MODEL, PI_CODING_AGENT, ...) make the TUI crash or
   hang at startup. Do not remove the sanitization.

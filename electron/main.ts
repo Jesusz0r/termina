@@ -3,9 +3,9 @@
  *
  * Left side: real pi interactive TUI instances running in ptys (node-pty).
  * Right side: Monaco IDE + explorer, live-synced by the file watcher.
- * A bridge extension auto-installed into the project streams agent events
- * (tool calls, busy state) to sidecar files we tail — that powers auto-open
- * of files mid-run and the modified-files panel.
+ * An app-owned bridge extension streams agent events (tool calls, busy
+ * state) to sidecar files we tail — that powers auto-open of files
+ * mid-run and the modified-files panel.
  */
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme } from "electron";
 
@@ -13,7 +13,6 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme } fro
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
 import { accessSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { openSync, closeSync, fsyncSync } from "node:fs";
 import { access, chmod, cp, copyFile, mkdir, mkdtemp, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
@@ -21,14 +20,26 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { PtyTerminal } from "./pty-terminal.js";
-import { SidecarEvent, SidecarTailer } from "./sidecar.js";
+import { BRIDGE_EXTENSION } from "./bridge-extension.js";
+import { AgentStartEvent, SidecarEvent, SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
 import { SnapshotStore, MIN_WORLDS_FREE_BYTES, captureRootInRepo, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, platformHasRecursiveWatcher, platformHasSandboxExec, type SourceState } from "./worldline-git.js";
-import { WorldlineManager, dirBytes, quoteShellArg, type ForkableRun } from "./worldlines.js";
+import { WorldlineManager, dirBytes, quoteShellArg, recoverPromotionJournals, type ForkableRun } from "./worldlines.js";
 import { sandboxShellPreamble, writeEvidenceProfile } from "./sandbox.js";
-import { EvidenceEngine, mineChangeReason, parseFailingTests, rankProfiles, verifyFailSummary, type EvidenceDeps, type EvidenceRecord, type EvidenceSummary as EngineSummary } from "./evidence.js";
+import { parseFailingTests, verifyFailSummary } from "./evidence.js";
 import { coreClient } from "./core-client.js";
 import { createAppUpdater, type AppUpdateController } from "./app-update.js";
+import {
+  MAX_DISPATCH_WORKERS,
+  findTaskByText,
+  finalizePlanTasks,
+  formatDispatchBriefing,
+  markPlanProgress,
+  parsePlanTasks,
+  pickDispatchTasks,
+  reattachDispatchAssignments,
+  taskIsComplete,
+} from "./plan-board.js";
 import { AppPreferencesStore, normalizeAppPreferences, sanitizeShortcutMap } from "./preferences.js";
 import {
   DEFAULT_SHORTCUTS,
@@ -72,253 +83,6 @@ const MAX_TIMELINE_EVENTS = 400;
 const MAX_TIMELINE_CONTENT_BYTES = 4 * 1024 * 1024;
 /** A watcher change within this window after a tool event is the same action. */
 const TOOL_CHANGE_DEDUP_MS = 1500;
-const BRIDGE_EXTENSION = `
-/**
- * Termina bridge extension — auto-generated, do not edit.
- */
-import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { randomUUID } from "node:crypto";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-
-const FILE_TOOLS = new Set(["write", "edit", "apply_patch", "create_file", "insert"]);
-
-
-export default function (pi: ExtensionAPI): void {
-  const dir = process.env.TERMINA_EVENTS_DIR;
-  const id = process.env.TERMINA_TERMINAL_ID;
-  if (!dir || !id) return;
-  // One random bridge instance id per extension load. Main accepts a
-  // sequence reset only after a new instance id (WORLDLINES §6.3).
-  const bridgeId = randomUUID();
-  let seq = 0;
-  const log = (event: Record<string, unknown>): void => {
-    try {
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      seq++;
-      appendFileSync(join(dir, id + ".jsonl"), JSON.stringify({ bridgeId, seq, ...event }) + "\\n", { mode: 0o600 });
-    } catch {}
-  };
-  /** Poll for the app's acknowledgement file, consume it exactly once. */
-  const waitForAck = (requestId: string, timeoutMs: number): Promise<Record<string, unknown> | null> => {
-    const ackPath = join(dir, \`ack-\${id}-\${requestId}.json\`);
-    const deadline = Date.now() + timeoutMs;
-    return new Promise((resolve) => {
-      const poll = (): void => {
-        try {
-          const claimedPath = \`\${ackPath}.claimed-\${bridgeId}\`;
-          renameSync(ackPath, claimedPath);
-          try {
-            const raw = readFileSync(claimedPath, "utf8");
-            resolve(JSON.parse(raw) as Record<string, unknown>);
-          } finally {
-            rmSync(claimedPath, { force: true });
-          }
-          return;
-        } catch {
-          /* not written yet */
-        }
-        if (Date.now() > deadline) {
-          resolve(null);
-          return;
-        }
-        setTimeout(poll, 50);
-      };
-      poll();
-    });
-  };
-  /** One-use preflight state carried from input to agent_start. */
-  let preflight: { requestId: string; token: string | null } | null = null;
-  let planLogged = false;
-
-  // ---- project trust (WORLDLINES §6.7) ----
-  // A candidate inherits one-process trust only when the app granted it:
-  // the run was trusted and its trust-sensitive resources still match.
-  // The grant never persists the candidate path (remember: false).
-  pi.on("project_trust", async () => {
-    if (process.env.TERMINA_INHERIT_TRUST === "1") {
-      return { trusted: "yes" as const, remember: false };
-    }
-    return { trusted: "undecided" as const };
-  });
-
-  // ---- startup control (WORLDLINES §6.7) ----
-  // Dispatch workers use startup-control-<terminal-id>.json in the shared
-  // events directory. Worldline candidates use startup-control.json in
-  // their own events directory. The bridge consumes the file once.
-  pi.on("session_start", (_event, ctx) => {
-    let control: { opId?: unknown; action?: unknown; text?: unknown; content?: unknown } | null = null;
-    try {
-      const namedPath = join(dir, \`startup-control-\${id}.json\`);
-      const genericPath = join(dir, "startup-control.json");
-      let claimedPath = \`\${namedPath}.claimed-\${bridgeId}\`;
-      try {
-        renameSync(namedPath, claimedPath);
-      } catch {
-        claimedPath = \`\${genericPath}.claimed-\${bridgeId}\`;
-        renameSync(genericPath, claimedPath);
-      }
-      try {
-        const raw = readFileSync(claimedPath, "utf8");
-        control = JSON.parse(raw) as { opId?: unknown; action?: unknown; text?: unknown; content?: unknown };
-      } finally {
-        rmSync(claimedPath, { force: true });
-      }
-    } catch {
-      /* no control: a reload after application */
-    }
-    const opId = String(control?.opId ?? "");
-    if (!control) {
-      log({ t: "session_ready", opId, ok: true, reload: true });
-      return;
-    }
-    try {
-      if (control.action === "prefill" && typeof control.text === "string") {
-        // Editable text: the user can change it before submitting.
-        ctx.ui.setEditorText(control.text);
-      } else if (control.action === "structured") {
-        // One-shot marker: a reload cannot submit the prompt twice.
-        pi.appendEntry("termina-control", { opId });
-        const content = Array.isArray(control.content) ? control.content : [String(control.text ?? "")];
-        pi.sendUserMessage(content);
-      }
-      log({ t: "session_ready", opId, ok: true });
-    } catch (err) {
-      log({ t: "session_ready", opId, ok: false, error: String(err) });
-    }
-  });
-
-  // ---- run-start preflight (WORLDLINES §6.3) ----
-  pi.on("input", async (event, ctx) => {
-    if (event.source !== "interactive") return { action: "continue" };
-    const text = String(event.text ?? "").trim();
-    const images = (event.images ?? []) as unknown[];
-    if (!ctx.isIdle()) {
-      // A steering interrupt or queued follow-up: the open run cannot be
-      // replayed as one task.
-      log({ t: "steer_input", behavior: String(event.streamingBehavior ?? "steer") });
-      return { action: "continue" };
-    }
-    if (!text && images.length === 0) return { action: "continue" };
-    const requestId = randomUUID();
-    log({ t: "preflight_request", requestId, hasImages: images.length > 0 });
-    const ack = await waitForAck(requestId, 15000);
-    if (!ack || ack.ok !== true) {
-      const err = String((ack as { error?: unknown })?.error ?? "preflight timed out");
-      // Keep the draft editable: restore the raw text and do not start.
-      if (text) ctx.ui.setEditorText(String(event.text ?? ""));
-      ctx.ui.notify("termina: the run did not start (" + err + "). Your text is still in the editor.", "warning");
-      return { action: "handled" };
-    }
-    preflight = { requestId, token: (ack as { token?: string | null }).token ?? null };
-    return { action: "continue" };
-  });
-
-  pi.on("agent_start", (event, ctx) => {
-    planLogged = false;
-    const sessionFile = ctx.sessionManager.getSessionFile() ?? null;
-    const leafId = ctx.sessionManager.getLeafId();
-    const parentId = leafId ? (ctx.sessionManager.getEntry(leafId)?.parentId ?? null) : null;
-    log({
-      t: "agent_start",
-      preflightRequestId: preflight?.requestId ?? null,
-      preflightToken: preflight?.token ?? null,
-      sessionFile,
-      sessionId: ctx.sessionManager.getSessionId(),
-      entryId: leafId,
-      parentEntryId: parentId,
-      trusted: ctx.isProjectTrusted(),
-      model: ctx.model?.id ?? null,
-      thinkingLevel: ctx.thinkingLevel ?? null,
-    });
-    preflight = null;
-  });
-
-  // The settled boundary: report the settle, then ask for a checkpoint
-  // and wait for the outcome.
-  pi.on("agent_settled", async (event, ctx) => {
-    // Do not treat a wrap-up list as a plan after the run has ended.
-    planLogged = true;
-    log({ t: "agent_settled" });
-    const requestId = randomUUID();
-    log({ t: "checkpoint_request", requestId, kind: "settled", entryId: ctx.sessionManager.getLeafId() });
-    const ack = await waitForAck(requestId, 5000);
-    log({ t: "checkpoint_result", requestId, ok: ack?.ok === true, error: (ack as { error?: unknown })?.error ?? null });
-  });
-
-  // Plan Board: capture the first assistant message of a run that contains
-  // an unchecked checkbox task list. Wrap-up bullets after the work is
-  // done are not a plan.
-  pi.on("message_end", (event) => {
-    if (planLogged) return;
-    const message = (event as { message?: { role?: string; content?: unknown } }).message;
-    if (message?.role !== "assistant") return;
-    // Message content is an array of parts (thinking, text) or a plain string.
-    let text = "";
-    const content = message.content;
-    if (typeof content === "string") {
-      text = content;
-    } else if (Array.isArray(content)) {
-      text = content
-        .map((part) => {
-          if (!part || typeof part !== "object") return "";
-          const rec = part;
-          if (rec.type === "thinking" || rec.type === "reasoning") return "";
-          return typeof rec.text === "string" ? rec.text : "";
-        })
-        .join("\\n");
-    }
-    if (!text.trim()) return;
-    // A plan has at least one unchecked checkbox. A wrap-up bullet list
-    // or a recap of checked items is not a plan.
-    if (!/^\\s*(?:[-*+]|\\d+[.)])\\s+\\[ \\]/m.test(text)) return;
-    planLogged = true;
-    log({ t: "plan", text: text.slice(0, 4000) });
-  });
-  // Feed the latest context files (test results, user edits) into the
-  // agent's next turn. Capture the effective expanded prompt and images in
-  // an app-private payload file first.
-  pi.on("before_agent_start", async (event) => {
-    let context = "";
-    for (const name of [\`verify-\${id}.md\`, \`edits-\${id}.md\`, \`mine-\${id}.md\`, \`mailbox-\${id}.md\`]) {
-      try {
-        const text = readFileSync(join(dir, name), "utf8");
-        if (text) context += (context ? "\\n\\n---\\n\\n" : "") + text;
-      } catch {}
-    }
-    try {
-      const file = \`prompt-\${id}-\${bridgeId.slice(0, 8)}-\${seq}.json\`;
-      writeFileSync(join(dir, file), JSON.stringify({ prompt: event.prompt, images: event.images ?? [], context }), { mode: 0o600 });
-      log({ t: "prompt", file, hasPreflight: preflight !== null });
-    } catch {}
-    if (!context) return;
-    return {
-      message: { customType: "termina-context", content: context, display: false },
-    };
-  });
-  pi.on("tool_execution_start", async (event, ctx) => {
-    if (!FILE_TOOLS.has(event.toolName)) return;
-    const args = (event.args ?? {}) as { path?: unknown; edits?: unknown };
-    if (typeof args.path === "string" && args.path) {
-      log({
-        t: "tool",
-        toolName: event.toolName,
-        path: args.path,
-        edits: event.toolName === "edit" || event.toolName === "apply_patch" ? args.edits : undefined,
-        // The tool call id correlates the result; the leaf id is the
-        // session entry of this moment (parallel siblings share it).
-        toolCallId: event.toolCallId,
-        entryId: ctx?.sessionManager?.getLeafId?.() ?? null,
-      });
-    }
-  });
-  pi.on("tool_execution_end", async (event) => {
-    // The tool finished: its disk effects landed (the watcher confirms
-    // them); this is the moment-capture scheduling signal.
-    log({ t: "tool_end", toolCallId: event.toolCallId, isError: !!event.isError });
-  });
-}
-`;
 
 let terminalSeq = 0;
 let workspaceSeq = 0;
@@ -805,16 +569,8 @@ class PiEditorApp {
   private flushWaiters = new Map<string, { workspaceId: string; resolve: (r: { ok: boolean; failed: string[] }) => void; timer: ReturnType<typeof setTimeout> }>();
   private flushSeq = 0;
   private userEditsWriteTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Promotion operation sequence (op ids). */
-  private promoteSeq = 0;
   /** Paths the promotion is applying right now (suppress user-edit records). */
   private promotionPaths: Set<string> | null = null;
-  /** Evidence summaries per comparison (WORLDLINES §6.9). */
-  private evidenceByComparison = new Map<string, EngineSummary>();
-  /** Evidence runs serialize: one challenger and one evidence run at a time. */
-  /** The evidence run queue per project. Evidence serializes inside one
-   *  project; other projects run independently. */
-  private evidenceQueues = new Map<string, Promise<unknown>>();
   /** The materialized export dirs: dir path → owning project id. */
   private exportedStateDirs = new Map<string, string | undefined>();
   private static readonly USER_EDITS_MAX = 50;
@@ -1168,10 +924,6 @@ class PiEditorApp {
         }
         return [...new Set(out)];
       },
-      snapshot: {
-        template: (opts) => opts.store.template(opts),
-        applyState: (opts) => opts.store.applyState(opts),
-      },
       session: {
         fork: (opts) => this.sessionWorker.fork(opts),
       },
@@ -1180,13 +932,10 @@ class PiEditorApp {
       onUpdate: (summary) => this.send("worldline:update", summary),
       onCandidateState: (root, stateId) => {
         const workspace = this.workspaceContaining(root);
-        if (workspace && !workspace.primary) this.setWorkspaceState(workspace, stateId);
+        if (workspace) this.setWorkspaceState(workspace, stateId);
       },
       onRemoved: (comparisonId) => {
         this.cancelVerifyForComparison(comparisonId);
-        const summary = this.evidenceByComparison.get(comparisonId);
-        this.evidenceByComparison.delete(comparisonId);
-        if (summary) void this.releaseEvidenceStates(summary);
         this.removeCandidateWorkspaces(project, comparisonId);
         this.send("worldline:removed", { comparisonId });
       },
@@ -1242,6 +991,7 @@ class PiEditorApp {
               promptEventsDir: run.promptEventsDir,
               promptParentEntryId: run.promptParentEntryId,
               sessionFile: run.sessionFile,
+              startStateId: run.startStateId,
             }
           : null;
       },
@@ -1258,6 +1008,63 @@ class PiEditorApp {
       },
       releaseState: async (stateId) => {
         await this.releaseStateIfUnused(stateId);
+      },
+      terminalBusy: (terminalId) => this.terminals.get(terminalId)?.busy === true,
+      terminalVerifying: (terminalId) => this.verifyRuns.has(terminalId),
+      workspaceAt: (root) => {
+        const ws = this.workspaceContaining(root);
+        return ws ? { id: ws.id, generation: ws.generation, lastStateCommit: ws.lastStateCommit } : null;
+      },
+      acquireWriteLease: (workspaceId, requester, timeoutMs) => this.acquireWriteLease(workspaceId, requester, timeoutMs),
+      releaseWriteLease: (workspaceId, requester) => this.releaseWriteLease(workspaceId, requester),
+      flushDirtyModels: (requester, workspaceId, timeoutMs) => this.flushDirtyModels(requester, workspaceId, timeoutMs),
+      canonicalPath: (absPath) => this.canonicalPath(absPath),
+      mineFiles: () => project.mineFiles,
+      runSandboxedEvidence: (cand, command, timeoutMs) => this.runSandboxedEvidence(cand, command, timeoutMs),
+      sourceFilesOf: (root) => this.sourceFilesOf(root),
+      createEvidenceHome: () => this.createEvidenceHome(),
+      detectTestFromState: (store, stateId) => this.detectTestFromState(store, stateId),
+      benchmarkConfigFrom: (store, stateId) => this.benchmarkConfigFrom(store, stateId),
+      onEvidenceUpdate: (summary) => this.send("worldline:evidence-update", summary),
+      onPromotionApply: (relPaths) => {
+        this.promotionPaths = relPaths ? new Set(relPaths) : null;
+      },
+      primarySessionDir: (cwd) => this.primarySessionDir(cwd),
+      installPromoted: async (seed) => {
+        const inst = await this.createTerminal(seed.primaryRoot, {
+          type: "agent",
+          workspaceId: seed.primaryWorkspaceId,
+          launch: {
+            cmd: this.resolvePiBin(),
+            args: ["-e", this.bridgePath(), "--session", seed.installedSession],
+            env: { ...cleanEnv(), TERMINA_EVENTS_DIR: this.eventsDir },
+          },
+        });
+        for (const path of seed.paths) {
+          const abs = this.canonicalPath(join(seed.primaryRoot, path.rel));
+          const before = path.beforeExists ? await readFile(join(seed.beforeDir, path.rel)) : null;
+          this.setBaseline(inst, abs, before === null ? null : before.toString("utf8"));
+          if (path.kind === "delete") this.recordDeleted(inst, abs);
+          else this.recordModified(inst, abs, path.beforeExists ? "modified" : "created");
+        }
+        this.send("modified:list", { instanceId: inst.id, files: [...inst.modified.values()] });
+        const changedList = seed.paths.map((path) => `- \`${path.rel}\``).join("\n");
+        for (const other of this.terminals.values()) {
+          if (other.id === inst.id || other.workspaceId !== seed.primaryWorkspaceId || other.type !== "agent") continue;
+          try {
+            mkdirSync(this.eventsDirOf(other), { recursive: true, mode: 0o700 });
+            writeFileSync(
+              join(this.eventsDirOf(other), `edits-${other.id}.md`),
+              `## Source changed by promotion (${seed.comparisonId}, candidate ${seed.label})\n\n${changedList}\n`,
+              "utf8",
+            );
+          } catch {
+            /* The context file is optional. */
+          }
+        }
+        this.sendInstances();
+        this.send("promotion:opened", { terminalId: inst.id });
+        return { terminalId: inst.id };
       },
     });
   }
@@ -1410,37 +1217,11 @@ class PiEditorApp {
 
   // ------------------------------------------------- promotion (WORLDLINES §6.10) ----
 
-  /** The journal of one promotion operation. */
-  private journalOf(opId: string): string {
-    return join(this.worldsRoot, "promotion-journal", opId);
-  }
-
-  private writeJournal(journalDir: string, journal: Record<string, unknown>): void {
-    mkdirSync(journalDir, { recursive: true, mode: 0o700 });
-    const file = join(journalDir, "journal.json");
-    const fd = openSync(file, "w", 0o600);
-    try {
-      writeFileSync(fd, JSON.stringify(journal, null, 2));
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-  }
-
   /** The promoted session installs into the primary session directory. */
   private primarySessionDir(cwd: string): string {
     // pi canonicalizes the cwd for its session dir (realpath); the install
     // must land in the same directory the session picker reads.
     return join(homedir(), ".pi", "agent", "sessions", this.sanitizeSessionDir(realpathSync(cwd)));
-  }
-
-  /** The terminal id of a comparison candidate, or null. */
-  private candidateTerminalOf(comparisonId: string, label: "A" | "B"): string | null {
-    for (const project of this.projects.values()) {
-      const target = project.worldlines?.promotionTarget(comparisonId, label);
-      if (target?.terminalId) return target.terminalId;
-    }
-    return null;
   }
 
   /** The project that owns a comparison, or null. */
@@ -1453,325 +1234,6 @@ class PiEditorApp {
     return null;
   }
 
-  /**
-   * Promote one candidate into the primary project (WORLDLINES §6.10).
-   * The merge runs with R (the run start) as the shared base; P and W are
-   * captured fresh under the write leases. Every output lands through a
-   * durable journal so a crash can roll back or recover.
-   */
-  private async promoteCandidate(comparisonId: string, label: "A" | "B", force = false): Promise<{ ok: boolean; error?: string; terminalId?: string; confirm?: string }> {
-    const candTermId = this.candidateTerminalOf(comparisonId, label);
-    const owner = candTermId ? this.projectOfTerminal(candTermId) : null;
-    const manager = owner?.worldlines ?? null;
-    if (!manager) return { ok: false, error: "candidate not found" };
-    const target = manager.promotionTarget(comparisonId, label);
-    if (!target) return { ok: false, error: "candidate not found" };
-    if (!target.sessionFile) return { ok: false, error: "the candidate has no session" };
-    if (!["ready", "running", "settled"].includes(target.state)) {
-      return { ok: false, error: `cannot promote from state ${target.state}` };
-    }
-    const candTerm = target.terminalId ? this.terminals.get(target.terminalId) : undefined;
-    if (candTerm?.busy) return { ok: false, error: "the candidate agent is busy" };
-    if (target.terminalId && this.verifyRuns.has(target.terminalId)) {
-      return { ok: false, error: "the candidate is verifying" };
-    }
-    const store = await owner!.storePromise;
-    if (!store) return { ok: false, error: "recording is not available" };
-    const primary = this.primaryWorkspace(owner!);
-    if (!primary) return { ok: false, error: "no primary workspace" };
-    const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === target.sourceRunId);
-    if (!run?.startStateId) return { ok: false, error: "the source run base is missing" };
-    const baseState = run.startStateId; // R
-    const candWs = candTerm ? owner!.workspaces.get(candTerm.workspaceId) : undefined;
-    const candGen = candWs?.generation ?? 0;
-
-    const opId = `promote-${++this.promoteSeq}`;
-    const requester = `promote:${opId}`;
-    const journalDir = this.journalOf(opId);
-    const journal: Record<string, unknown> = {
-      opId,
-      comparisonId,
-      label,
-      stateR: baseState,
-      primaryRoot: primary.root,
-      phase: "prepared",
-      createdAt: Date.now(),
-      paths: [],
-      stagedSession: null,
-      installedSession: null,
-    };
-
-    // The write leases serialize the promotion against every other writer.
-    const leaseP = await this.acquireWriteLease(primary.id, requester, 12000);
-    if (!leaseP.ok) return { ok: false, error: leaseP.error ?? "the primary workspace is busy" };
-    let candLease = true;
-    if (candWs) {
-      const l = await this.acquireWriteLease(candWs.id, requester, 8000);
-      candLease = l.ok;
-    }
-    if (!candLease) {
-      this.releaseWriteLease(primary.id, requester);
-      return { ok: false, error: "the candidate workspace is busy" };
-    }
-    const releaseLeases = (): void => {
-      this.releaseWriteLease(primary.id, requester);
-      if (candWs) this.releaseWriteLease(candWs.id, requester);
-    };
-    // A rejected promotion releases the leases and returns the pair to its
-    // previous lifecycle state.
-    const fail = async (message: string): Promise<{ ok: false; error: string }> => {
-      releaseLeases();
-      await manager.finishPromotion(comparisonId, false, message);
-      return { ok: false, error: message };
-    };
-    // A confirmation request releases the leases and keeps the pair usable.
-    const askConfirm = async (message: string): Promise<{ ok: false; confirm: string }> => {
-      releaseLeases();
-      await manager.finishPromotion(comparisonId, false, null);
-      return { ok: false, confirm: message };
-    };
-
-    try {
-      // Flush the dirty editor models (both leases cover every save path).
-      const flush = await this.flushDirtyModels(requester, primary.id, 8000);
-      if (!flush.ok) return fail("could not save editor changes");
-
-      manager.markPromoting(comparisonId, label);
-
-      // Capture W (candidate head, chained from R) and P (current primary).
-      const candGitDir = await gitCommonDir(target.root);
-      const [wState, pState] = await Promise.all([
-        store.capture(await gitHead(target.root), baseState, {}, {}, { root: target.root, gitDir: candGitDir ?? target.root }),
-        store.capture(await gitHead(primary.root), primary.lastStateCommit ?? null),
-      ]);
-      primary.lastStateCommit = pState.commit;
-      // Expected versions: nothing moved during the captures.
-      if (primary.generation !== leaseP.generation) return fail("the primary changed during promotion preflight");
-      if (candWs && candWs.generation !== candGen) return fail("the candidate changed during promotion preflight");
-      const top = await gitTopLevel(primary.root);
-      // Capture is the opened folder, which may be a Git subdirectory.
-      if (!top || !captureRootInRepo(this.canonicalPath(store.sourceRoot), this.canonicalPath(top))) {
-        return fail("the source repository identity changed");
-      }
-
-      // Mine enforcement: a changed path that is Mine (or a symlink that
-      // aliases a Mine path) rejects the promotion.
-      const changed = await store.diffTree(baseState, wState.commit);
-      for (const c of changed) {
-        const abs = join(primary.root, c.relPath);
-        if (owner!.mineFiles.has(this.canonicalPath(abs))) {
-          return fail(`the candidate changes a file you own: ${c.relPath}`);
-        }
-        const link = await store.symlinkTarget(wState.commit, c.relPath);
-        if (link) {
-          const resolved = realpathSync(join(dirname(abs), link));
-          if (owner!.mineFiles.has(resolved)) {
-            return fail(`the candidate aliases a file you own through a symlink: ${c.relPath}`);
-          }
-        }
-      }
-
-      // The three-way merge with R as the shared base (WORLDLINES §6.10).
-      const merge = await store.merge3(wState.commit, pState.commit);
-      if (!merge.ok || !merge.tree) {
-        const reason = merge.reason ?? `the merge conflicts on: ${merge.conflicts.join(", ")}`;
-        return fail(reason);
-      }
-      // Confirmations (WORLDLINES §6.10): after the hard checks, absent /
-      // stale / failed evidence and ignored/generated writes require an
-      // explicit confirmation once.
-      if (!force) {
-        const summary = this.evidenceByComparison.get(comparisonId);
-        const recs = summary?.byCandidate[label] ?? [];
-        const verify = recs.find((r) => r.kind === "verify");
-        const evidenceOk = verify?.status === "pass" && summary?.stale !== true;
-        const ignored = await manager.ignoredWrites(comparisonId, label);
-        if (!evidenceOk) {
-          const why = !verify ? "no evidence has been computed for this candidate" : summary?.stale ? "the evidence is stale (the candidate ran again)" : `the evidence is ${verify?.status}`;
-          return askConfirm(`promote without current passing evidence? (${why})`);
-        }
-        if ((ignored?.count ?? 0) > 0) {
-          return askConfirm(`${ignored!.count} ignored/generated file(s) (${((ignored!.bytes ?? 0) / 1024).toFixed(0)} kB) will be excluded from the promotion`);
-        }
-      }
-
-      // Stage: merged bytes, before-bytes, and the promoted session.
-      const mergedDir = join(journalDir, "merged");
-      await store.materialize(merge.tree, mergedDir);
-      const pPaths = await store.treePaths(pState.commit);
-      const mergedPaths = await store.treePaths(merge.tree);
-      const beforeDir = join(journalDir, "before");
-      const paths: Array<{ rel: string; kind: "write" | "delete"; beforeHash: string; afterHash: string; beforeExists: boolean }> = [];
-      const sha = (buf: Buffer): string => createHash("sha256").update(buf).digest("hex");
-      for (const rel of [...mergedPaths].sort()) {
-        const abs = join(primary.root, rel);
-        const beforeExists = existsSync(abs);
-        const before = beforeExists ? await readFile(abs) : Buffer.alloc(0);
-        const after = await readFile(join(mergedDir, rel));
-        paths.push({ rel, kind: "write", beforeHash: sha(before), afterHash: sha(after), beforeExists });
-        if (beforeExists) {
-          const target = join(beforeDir, rel);
-          await mkdir(dirname(target), { recursive: true });
-          await writeFile(target, before);
-        }
-      }
-      for (const rel of [...pPaths].filter((p) => !mergedPaths.has(p)).sort()) {
-        const abs = join(primary.root, rel);
-        const beforeExists = existsSync(abs);
-        const before = beforeExists ? await readFile(abs) : Buffer.alloc(0);
-        paths.push({ rel, kind: "delete", beforeHash: sha(before), afterHash: sha(Buffer.alloc(0)), beforeExists });
-        if (beforeExists) {
-          const target = join(beforeDir, rel);
-          await mkdir(dirname(target), { recursive: true });
-          await writeFile(target, before);
-        }
-      }
-      if (paths.length > 2000) throw new Error("the promotion touches too many paths");
-      journal.paths = paths;
-
-      // Fork the candidate leaf into a primary-cwd session (staged).
-      const sessionDir = join(journalDir, "session");
-      const fork = await this.sessionWorker.fork({
-        sourceSessionFile: target.sessionFile,
-        entryId: null,
-        sessionWorkspaceDir: sessionDir,
-        candidateRoot: primary.root,
-        candidateSessionDir: sessionDir,
-        relocationNote: `The candidate project lived at ${target.root}. In this promoted session, that path maps to ${primary.root}.`,
-      });
-      if (!fork.sessionFile) throw new Error("the promoted session fork produced no file");
-      journal.stagedSession = fork.sessionFile;
-      this.writeJournal(journalDir, journal);
-
-      // Recheck expected P: every target path still matches the preflight.
-      for (const p of paths) {
-        const abs = join(primary.root, p.rel);
-        const now = existsSync(abs) ? await readFile(abs) : Buffer.alloc(0);
-        if (sha(now) !== p.beforeHash) return fail(`the primary changed at ${p.rel} during promotion`);
-      }
-      if (primary.generation !== leaseP.generation) return fail("the primary changed during promotion apply");
-
-      // Apply: atomic per-path renames; the watcher events land after.
-      this.promotionPaths = new Set(paths.map((p) => p.rel));
-      try {
-        for (const p of paths) {
-          const abs = join(primary.root, p.rel);
-          if (p.kind === "delete") {
-            await rm(abs, { force: true });
-          } else {
-            await mkdir(dirname(abs), { recursive: true });
-            await fsRename(join(mergedDir, p.rel), abs);
-          }
-        }
-      } finally {
-        this.promotionPaths = null;
-      }
-      journal.phase = "applied";
-      this.writeJournal(journalDir, journal);
-
-      // Install the session atomically in the primary session directory.
-      const installDir = this.primarySessionDir(primary.root);
-      await mkdir(installDir, { recursive: true });
-      const sessionName = `${new Date().toISOString().replace(/[:.]/g, "-")}_${randomUUID()}.jsonl`;
-      const installed = join(installDir, sessionName);
-      const tmp = join(installDir, `.${sessionName}.tmp`);
-      await writeFile(tmp, await readFile(fork.sessionFile));
-      await fsRename(tmp, installed);
-      journal.installedSession = installed;
-      journal.phase = "done";
-      this.writeJournal(journalDir, journal);
-
-      // Open the promoted primary terminal on the installed session.
-      const inst = await this.createTerminal(primary.root, {
-        type: "agent",
-        workspaceId: primary.id,
-        launch: {
-          cmd: this.resolvePiBin(),
-          args: ["-e", this.bridgePath(), "--session", installed],
-          env: { ...cleanEnv(), TERMINA_EVENTS_DIR: this.eventsDir },
-        },
-      });
-      // Seed Change Review: the promotion is the run's own change set.
-      for (const p of paths) {
-        const abs = this.canonicalPath(join(primary.root, p.rel));
-        const before = p.beforeExists ? await readFile(join(beforeDir, p.rel)) : null;
-        this.setBaseline(inst, abs, before === null ? null : before.toString("utf8"));
-        if (p.kind === "delete") this.recordDeleted(inst, abs);
-        else this.recordModified(inst, abs, p.beforeExists ? "modified" : "created");
-      }
-      this.send("modified:list", { instanceId: inst.id, files: [...inst.modified.values()] });
-
-      // Mark the older primary terminals out of date with a context file.
-      const changedList = paths.map((p) => `- \`${p.rel}\``).join("\n");
-      for (const other of this.terminals.values()) {
-        if (other.id === inst.id || other.workspaceId !== primary.id || other.type !== "agent") continue;
-        try {
-          mkdirSync(this.eventsDirOf(other), { recursive: true, mode: 0o700 });
-          writeFileSync(
-            join(this.eventsDirOf(other), `edits-${other.id}.md`),
-            `## Source changed by promotion (${comparisonId}, candidate ${label})\n\n${changedList}\n`,
-            "utf8",
-          );
-        } catch {
-          /* The context file is optional. */
-        }
-      }
-
-      // The comparison is consumed: tear it down and release everything.
-      await manager.finishPromotion(comparisonId, true, null);
-      releaseLeases();
-      // The promotion is complete: the journal has no recovery duty.
-      await rm(journalDir, { recursive: true, force: true });
-      this.sendInstances();
-      this.send("promotion:opened", { terminalId: inst.id });
-      return { ok: true, terminalId: inst.id };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      await this.rollbackPromotion(journalDir, journal, primary.root);
-      // A session installed before the failure is an orphan: remove it.
-      if (journal.installedSession) await rm(String(journal.installedSession), { force: true });
-      releaseLeases();
-      await manager.finishPromotion(comparisonId, false, message);
-      return { ok: false, error: message };
-    }
-  }
-
-  /** Roll back every applied path of a failed promotion. */
-  private async rollbackPromotion(journalDir: string, journal: Record<string, unknown>, primaryRoot: string): Promise<void> {
-    const phase = String(journal.phase ?? "prepared");
-    // "done" means the promotion completed: the journal has no duty.
-    if (phase !== "applied") {
-      await rm(journalDir, { recursive: true, force: true });
-      return;
-    }
-    const sha = (buf: Buffer): string => createHash("sha256").update(buf).digest("hex");
-    let conflicted = false;
-    for (const p of (journal.paths ?? []) as Array<{ rel: string; beforeHash: string; afterHash: string; beforeExists: boolean }>) {
-      const abs = join(primaryRoot, p.rel);
-      const now = existsSync(abs) ? await readFile(abs) : Buffer.alloc(0);
-      if (sha(now) !== p.afterHash) {
-        // The app did not write this path (or someone wrote after us).
-        if (sha(now) !== p.beforeHash) conflicted = true;
-        continue;
-      }
-      const before = join(journalDir, "before", p.rel);
-      if (p.beforeExists && existsSync(before)) {
-        await mkdir(dirname(abs), { recursive: true });
-        await writeFile(abs, await readFile(before));
-      } else {
-        await rm(abs, { force: true });
-      }
-    }
-    journal.phase = conflicted ? "conflict" : "rolled-back";
-    this.writeJournal(journalDir, journal);
-    if (!conflicted) await rm(journalDir, { recursive: true, force: true });
-  }
-
-  /**
-   * Startup recovery: finish or roll back every pending promotion journal
-   * before the primary watcher starts (WORLDLINES §6.10 step 10-11).
-   * Restore a path only when its bytes still equal the app-written value.
-   */
   // ------------------------------------------------- evidence (WORLDLINES §6.8) ----
 
   /** One sandboxed command run with bounded combined stdout and stderr. */
@@ -1886,13 +1348,9 @@ class PiEditorApp {
     }
   }
 
-  /** The base state of a comparison (its source run's start state). */
   private markCandidateEvidenceStale(comparisonId: string | undefined): void {
     if (!comparisonId) return;
-    const summary = this.evidenceByComparison.get(comparisonId);
-    if (!summary || summary.stale) return;
-    summary.stale = true;
-    this.send("worldline:evidence-update", summary);
+    this.projectOfComparison(comparisonId)?.worldlines?.markEvidenceStale(comparisonId);
   }
 
   private stateIsReferenced(stateId: string, ignoredTerminalId?: string, ignoredSeq?: number): boolean {
@@ -1909,9 +1367,7 @@ class PiEditorApp {
       for (const summary of project.worldlines?.list() ?? []) {
         if (summary.comparisonBaseStateId === stateId || summary.promotionBaseStateId === stateId || summary.headStateId === stateId) return true;
       }
-    }
-    for (const summary of this.evidenceByComparison.values()) {
-      if (Object.values(summary.byCandidate).some((records) => records.some((record) => record.stateId === stateId))) return true;
+      if (project.worldlines?.holdsEvidenceState(stateId)) return true;
     }
     for (const [terminalId, inst] of this.terminals) {
       if (terminalId === ignoredTerminalId) {
@@ -1936,245 +1392,6 @@ class PiEditorApp {
     ws.lastStateCommit = stateId;
     if (previous && previous !== stateId) void this.releaseStateIfUnused(previous);
   }
-
-  private async releaseEvidenceStates(summary: EngineSummary): Promise<void> {
-    const states = new Set<string>();
-    for (const records of Object.values(summary.byCandidate)) {
-      for (const record of records) states.add(record.stateId);
-    }
-    for (const stateId of states) await this.releaseStateIfUnused(stateId);
-  }
-
-  private baseStateOf(comparisonId: string): string | null {
-    const project = this.projectOfComparison(comparisonId);
-    const target = project?.worldlines?.promotionTarget(comparisonId, "A");
-    if (!target) return null;
-    const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === target.sourceRunId);
-    return run?.startStateId ?? null;
-  }
-
-  /**
-   * Compute evidence for both candidates: serial Verify/API/deps/footprint
-   * per candidate, then interleaved benchmark samples (WORLDLINES §6.8).
-   */
-  private runEvidence(comparisonId: string): Promise<{ ok: boolean; error?: string }> {
-    const project = this.projectOfComparison(comparisonId);
-    if (!project) return Promise.resolve({ ok: false, error: "comparison not found" });
-    const queue = this.evidenceQueues.get(project.id) ?? Promise.resolve();
-    const run = queue.then(async (): Promise<{ ok: boolean; error?: string }> => {
-      const store = await project.storePromise;
-      const baseStateId = this.baseStateOf(comparisonId);
-      if (!store || !baseStateId) return { ok: false, error: "recording is not available" };
-      const targets = new Map<"A" | "B", NonNullable<ReturnType<WorldlineManager["evidenceTarget"]>>>();
-      const generations = new Map<"A" | "B", number>();
-      const leases: Array<{ workspaceId: string; requesterId: string }> = [];
-      const releaseLeases = (): void => {
-        for (const lease of leases) this.releaseWriteLease(lease.workspaceId, lease.requesterId);
-      };
-      for (const label of ["A", "B"] as const) {
-        const target = project.worldlines?.evidenceTarget(comparisonId, label);
-        if (!target) {
-          releaseLeases();
-          return { ok: false, error: "candidate not found" };
-        }
-        const terminal = target.terminalId ? this.terminals.get(target.terminalId) : null;
-        if (terminal?.busy || target.state === "running" || target.state === "verifying") {
-          releaseLeases();
-          return { ok: false, error: `candidate ${label} is active` };
-        }
-        const workspace = this.workspaceContaining(target.root);
-        if (!workspace) {
-          releaseLeases();
-          return { ok: false, error: "candidate workspace not found" };
-        }
-        const requesterId = `evidence:${comparisonId}:${label}`;
-        const lease = await this.acquireWriteLease(workspace.id, requesterId, 2000);
-        if (!lease.ok) {
-          releaseLeases();
-          return { ok: false, error: lease.error ?? "a candidate workspace is busy" };
-        }
-        leases.push({ workspaceId: workspace.id, requesterId });
-        targets.set(label, target);
-        generations.set(label, workspace.generation);
-      }
-      let tc: { command: string; args: string[]; label: string } | null;
-      let bm: { command: string[]; unit: string; direction: "lower" | "higher"; samples: number; thresholdPct: number } | null;
-      let evidenceHome: string | null = null;
-      try {
-        tc = await this.detectTestFromState(store, baseStateId);
-        bm = await this.benchmarkConfigFrom(store, baseStateId);
-        evidenceHome = await this.createEvidenceHome();
-      } catch (err) {
-        releaseLeases();
-        return { ok: false, error: err instanceof Error ? err.message : String(err) };
-      }
-      const evidenceRoot = evidenceHome;
-      if (!evidenceRoot) {
-        releaseLeases();
-        return { ok: false, error: "evidence home is unavailable" };
-      }
-      const capturedStates = new Set<string>();
-      const capturedTrees = new Map<string, string>();
-      const deps: EvidenceDeps = {
-        store,
-        baseStateId,
-        primaryRoot: this.primaryWorkspace(project)?.root ?? "",
-        mineFiles: new Set(project.mineFiles),
-        captureHead: async (root, gitDir, parent) => {
-          const state = await store.capture(await gitHead(root), parent, {}, {}, { root, gitDir });
-          capturedStates.add(state.commit);
-          capturedTrees.set(state.commit, state.tree);
-          return { commit: state.commit, tree: state.tree };
-        },
-        runSandboxed: (cand, command, timeoutMs) => this.runSandboxedEvidence(cand, command, timeoutMs),
-        baseTestCommand: () => tc,
-        benchmarkConfig: () => bm,
-        sourceFilesOf: (root) => this.sourceFilesOf(root),
-      };
-      const engine = new EvidenceEngine(deps);
-      const byCandidate: Record<"A" | "B", EvidenceRecord[]> = { A: [], B: [] };
-      const mineReason: Record<"A" | "B", string | null> = { A: null, B: null };
-      const retainedStates = new Set<string>();
-      const expectedVersions = new Map<"A" | "B", number>();
-      const cands: Record<"A" | "B", { root: string; profilePath: string; homeDir: string; tmpDir: string; shell: string; eventsDir: string; terminalId: string | null }> = {
-        A: { root: targets.get("A")!.root, profilePath: targets.get("A")!.profilePath, homeDir: evidenceRoot, tmpDir: join(evidenceRoot, "tmp", "A"), shell: "", eventsDir: targets.get("A")!.eventsDir, terminalId: targets.get("A")!.terminalId },
-        B: { root: targets.get("B")!.root, profilePath: targets.get("B")!.profilePath, homeDir: evidenceRoot, tmpDir: join(evidenceRoot, "tmp", "B"), shell: "", eventsDir: targets.get("B")!.eventsDir, terminalId: targets.get("B")!.terminalId },
-      };
-      let result: { ok: boolean; error?: string };
-      try {
-        result = { ok: true };
-        for (const label of ["A", "B"] as const) {
-          const target = targets.get(label)!;
-          byCandidate[label] = await engine.measure(label, cands[label]);
-          const finalState = await deps.captureHead(target.root, join(target.root, ".git"), null);
-          const workspace = this.workspaceContaining(target.root);
-          const current = project.worldlines?.evidenceVersion(comparisonId, label);
-          if (!workspace || workspace.generation !== generations.get(label) || !current || current.version !== target.version) {
-            result = { ok: false, error: `candidate ${label} changed during evidence` };
-            break;
-          }
-          const head = byCandidate[label].find((record) => record.kind === "verify") ?? byCandidate[label][0];
-          if (head && capturedTrees.get(head.stateId) !== finalState.tree) {
-            result = { ok: false, error: `candidate ${label} changed during evidence` };
-            break;
-          }
-          if (head) {
-            retainedStates.add(head.stateId);
-            project.worldlines?.setCandidateHead(comparisonId, label, head.stateId);
-            expectedVersions.set(label, project.worldlines?.evidenceVersion(comparisonId, label)?.version ?? target.version);
-            mineReason[label] = await mineChangeReason(store, baseStateId, head.stateId, deps.primaryRoot, deps.mineFiles, (p) => fsRealpath(p));
-          } else {
-            expectedVersions.set(label, target.version);
-          }
-        }
-        if (result.ok) {
-          const benches = await engine.measureBenchmarks(cands, {
-            A: byCandidate.A.find((r) => r.kind === "verify")?.stateId ?? byCandidate.A[0]?.stateId ?? "",
-            B: byCandidate.B.find((r) => r.kind === "verify")?.stateId ?? byCandidate.B[0]?.stateId ?? "",
-          });
-          byCandidate.A.push(benches.A);
-          byCandidate.B.push(benches.B);
-        }
-        if (result.ok) {
-          for (const label of ["A", "B"] as const) {
-            const target = targets.get(label)!;
-            const workspace = this.workspaceContaining(target.root);
-            const current = project.worldlines?.evidenceVersion(comparisonId, label);
-            if (!workspace || workspace.generation !== generations.get(label) || !current || current.version !== expectedVersions.get(label)) {
-              result = { ok: false, error: `candidate ${label} changed during evidence` };
-              break;
-            }
-          }
-        }
-        if (!result.ok) return result;
-        const summary: EngineSummary = {
-          comparisonId,
-          ts: Date.now(),
-          byCandidate,
-          profiles: rankProfiles(byCandidate, mineReason, bm?.thresholdPct ?? 0.05),
-          error: null,
-          stale: false,
-        };
-        const previous = this.evidenceByComparison.get(comparisonId);
-        this.evidenceByComparison.set(comparisonId, summary);
-        if (previous) void this.releaseEvidenceStates(previous);
-        this.send("worldline:evidence-update", summary);
-        return result;
-      } finally {
-        for (const stateId of capturedStates) {
-          if (!retainedStates.has(stateId)) await this.releaseStateIfUnused(stateId);
-        }
-        releaseLeases();
-        if (evidenceHome) await rm(evidenceHome, { recursive: true, force: true }).catch(() => undefined);
-      }
-    });
-    this.evidenceQueues.set(project.id, run.catch(() => undefined));
-    return run;
-  }
-
-  private async recoverPromotions(): Promise<void> {
-    const root = join(this.worldsRoot, "promotion-journal");
-    let names: string[] = [];
-    try {
-      names = await readdir(root);
-    } catch {
-      return; // no journal dir yet
-    }
-    const sha = (buf: Buffer): string => createHash("sha256").update(buf).digest("hex");
-    for (const name of names) {
-      const dir = join(root, name);
-      let journal: Record<string, unknown> | null = null;
-      try {
-        journal = JSON.parse(await readFile(join(dir, "journal.json"), "utf8")) as Record<string, unknown>;
-      } catch {
-        continue;
-      }
-      const phase = String(journal.phase ?? "prepared");
-      const primaryRoot = String(journal.primaryRoot ?? "");
-      const paths = (journal.paths ?? []) as Array<{ rel: string; beforeHash: string; afterHash: string; beforeExists: boolean }>;
-      // "done" means the promotion completed: keep the source as it is.
-      if (phase === "done") {
-        await rm(dir, { recursive: true, force: true });
-        continue;
-      }
-      if (phase !== "applied") {
-        // Nothing reached the primary: drop the staged resources.
-        await rm(dir, { recursive: true, force: true });
-        continue;
-      }
-      // Restore every path the app wrote. An external change keeps all
-      // versions and stops automatic recovery (a recovery conflict).
-      for (const p of paths) {
-        const abs = join(primaryRoot, p.rel);
-        const now = existsSync(abs) ? await readFile(abs) : Buffer.alloc(0);
-        if (sha(now) !== p.afterHash) continue;
-        const before = join(dir, "before", p.rel);
-        if (p.beforeExists && existsSync(before)) {
-          await mkdir(dirname(abs), { recursive: true });
-          await writeFile(abs, await readFile(before));
-        } else {
-          await rm(abs, { force: true });
-        }
-      }
-      let conflicted = false;
-      for (const p of paths) {
-        const abs = join(primaryRoot, p.rel);
-        const now = existsSync(abs) ? await readFile(abs) : Buffer.alloc(0);
-        const h = sha(now);
-        if (h !== p.beforeHash && h !== p.afterHash) {
-          conflicted = true;
-          break;
-        }
-      }
-      if (!conflicted) {
-        await rm(dir, { recursive: true, force: true });
-      } else {
-        await writeFile(join(dir, "conflict.json"), JSON.stringify({ at: Date.now(), paths: paths.map((p) => p.rel) }));
-        console.warn(`[main] promotion recovery conflict: ${dir} — kept every version`);
-      }
-    }
-  }
-
 
   private resolvePiBin(): string {
     if (process.env.TERMINA_PI_BIN) return process.env.TERMINA_PI_BIN;
@@ -2402,7 +1619,7 @@ class PiEditorApp {
         this.dispatchRuns.delete(inst.id);
         this.dispatchWorkers.delete(inst.id);
         const ownerInst = this.terminals.get(dispatchExit.ownerId);
-        const task = ownerInst ? this.findDispatchedTask(ownerInst, dispatchExit.taskText) : undefined;
+        const task = ownerInst ? findTaskByText(ownerInst.plan, dispatchExit.taskText) : undefined;
         if (ownerInst && task) {
           task.state = "pending";
           task.workerId = undefined;
@@ -2726,82 +1943,33 @@ class PiEditorApp {
     this.send("plan:update", { instanceId: inst.id, tasks: inst.plan });
   }
 
-  /** Parse checkbox task lines from the plan text. At most 20 tasks. The
-   *  cwd is the project root of the plan's terminal. */
-  private parsePlanTasks(text: string, cwd: string | null): PlanTask[] {
-    const tasks: PlanTask[] = [];
-    for (const raw of text.split("\n")) {
-      const line = raw.trim();
-      const match = line.match(/^(?:[-*+]|\d+[.)])\s+\[ \]\s*(.+)$/);
-      if (!match) continue;
-      const body = match[1].trim();
-      if (!body) continue;
-      const paths: string[] = [];
-      for (const token of body.split(/\s+/)) {
-        // Strip punctuation AND markdown emphasis (bold/italic markers often
-        // wrap the path: **`utils.ts`**). A LEADING underscore is a filename
-        // (for example _test.py), not italic markup — unless the token also ends
-        // with one (markdown italic pairs _text_).
-        const isItalicPair = /_$/.test(token);
-        let clean = token.replace(/[`.,;:!?)"'*_]+$/g, "").replace(/^[`("'*]+/g, "");
-        if (isItalicPair) clean = clean.replace(/^_+/, "");
-        clean = clean.replace(/\/+$/, "");
-        // Normalize absolute paths to project-relative (canonical: /tmp and
-        // /private/tmp are the same directory) so progress matching hits.
-        if (isAbsolute(clean) && cwd) {
-          const rel = relative(this.canonicalPath(cwd), this.canonicalPath(clean));
-          if (rel && !rel.startsWith("..")) clean = rel;
-        }
-        if (this.looksLikePath(clean)) paths.push(clean);
-      }
-      tasks.push({ text: body, paths: [...new Set(paths)].slice(0, 5), state: "pending" });
-      if (tasks.length >= 20) break;
-    }
-    return tasks;
+  private applyPlanMessage(inst: PiTerminalInstance, text: string): void {
+    if (!inst.busy) return;
+    const tasks = parsePlanTasks(
+      text,
+      this.workspaceOfTerminal(inst)?.root ?? null,
+      (p) => this.canonicalPath(p),
+    );
+    if (tasks.length === 0) return;
+    inst.plan = tasks;
+    // Do not reset touched or tool outcomes. The plan can arrive after
+    // the first tool events, and their progress must count.
+    reattachDispatchAssignments(
+      inst.plan,
+      [...this.dispatchRuns]
+        .filter(([, entry]) => entry.ownerId === inst.id)
+        .map(([workerId, entry]) => ({ workerId, taskText: entry.taskText })),
+    );
+    this.sendPlan(inst);
   }
 
-  /** A token is a file path when it has a slash or a code extension.
-   *  Version numbers (0.1.5) and latin abbreviations (e.g.) are not paths. */
-  private looksLikePath(token: string): boolean {
-    if (!token || token.length > 200) return false;
-    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(token)) return false;
-    if (/^v?\d+(?:\.\d+)+$/.test(token)) return false;
-    if (/^(?:e\.g|i\.e|vs|etc)\.?$/i.test(token)) return false;
-    if (token.includes("/")) return !token.endsWith(":");
-    return /\.[a-zA-Z][a-zA-Z0-9]{0,4}$/.test(token);
-  }
-
-  /** A tool touched a path: mark every task that mentions it as active. */
   private updatePlanProgress(inst: PiTerminalInstance, path: string): void {
-    if (inst.plan.length === 0) return;
-    const rel = this.rel(path);
-    let changed = false;
-    for (const task of inst.plan) {
-      if (task.state === "done") continue;
-      const matched = task.paths.some((p) => rel === p || rel.endsWith("/" + p));
-      if (matched && task.state !== "active") {
-        task.state = "active";
-        changed = true;
-      }
-    }
-    if (changed) this.sendPlan(inst);
+    if (markPlanProgress(inst.plan, this.rel(path))) this.sendPlan(inst);
   }
 
-  /**
-   * A task is complete when every mentioned path was touched and the last
-   * file-tool outcome for that path is ok. A missing tool end is not ok.
-   */
-  private taskCompleted(inst: PiTerminalInstance, paths: string[]): boolean {
-    if (paths.length === 0) return false;
-    return paths.every((p) => inst.touched.has(p) && inst.toolOutcomes.get(p) === "ok");
-  }
-
-  /** The run ended: mark complete tasks done. Leave the rest as they are. */
   private finalizePlan(inst: PiTerminalInstance): void {
     if (inst.plan.length === 0) return;
-    for (const task of inst.plan) {
-      if (this.taskCompleted(inst, task.paths)) task.state = "done";
-    }
+    finalizePlanTasks(inst.plan, inst.touched, inst.toolOutcomes);
     this.sendPlan(inst);
   }
 
@@ -2894,25 +2062,6 @@ class PiEditorApp {
     return this.canonicalPath(join(root, p));
   }
 
-  /** The owner's task that matches a dispatched text. The plan can be
-   *  replaced mid-dispatch (an auto-retry posts a new plan), so tasks are
-   *  matched by text, never by position. */
-  private findDispatchedTask(owner: PiTerminalInstance, taskText: string): PlanTask | undefined {
-    return owner.plan.find((t) => t.text === taskText);
-  }
-
-  /** Keep Dispatch claims on the board when the agent posts a new plan. */
-  private reattachDispatchAssignments(owner: PiTerminalInstance): void {
-    for (const [workerId, entry] of this.dispatchRuns) {
-      if (entry.ownerId !== owner.id) continue;
-      const task = this.findDispatchedTask(owner, entry.taskText);
-      if (!task) continue;
-      task.workerId = workerId;
-      task.claimed = [...task.paths];
-      if (task.state === "pending") task.state = "active";
-    }
-  }
-
   /** True when an active verify or dispatch overlaps the given workspace. */
   private overlapInWorkspace(workspaceId: string): boolean {
     for (const id of this.verifyRuns) {
@@ -2926,9 +2075,6 @@ class PiEditorApp {
     return false;
   }
 
-  private static readonly MAX_DISPATCH_WORKERS = 3;
-
-  /** Count of live dispatch workers that this owner started. */
   private ownerDispatchCount(ownerId: string): number {
     let n = 0;
     for (const entry of this.dispatchRuns.values()) {
@@ -2944,50 +2090,11 @@ class PiEditorApp {
     if (!owner) return used;
     for (const entry of this.dispatchRuns.values()) {
       if (entry.ownerId !== ownerId) continue;
-      const task = this.findDispatchedTask(owner, entry.taskText);
+      const task = findTaskByText(owner.plan, entry.taskText);
       if (!task) continue;
       for (const p of task.paths) used.add(this.taskPathKey(p, root));
     }
     return used;
-  }
-
-  /**
-   * Choose plan tasks to send to workers. A taskText picks that one row.
-   * The bulk path still skips tasks that name no file. At most three
-   * workers run for one owner. Overlap uses canonical paths.
-   */
-  private pickDispatchTasks(
-    owner: PiTerminalInstance,
-    root: string,
-    taskText?: string,
-  ): { tasks: PlanTask[]; error?: string } {
-    const remaining = PiEditorApp.MAX_DISPATCH_WORKERS - this.ownerDispatchCount(owner.id);
-    if (remaining <= 0) return { tasks: [], error: "at most 3 dispatch workers run at once" };
-    const used = this.dispatchPathKeysInFlight(owner.id, root);
-    if (taskText !== undefined) {
-      const task = this.findDispatchedTask(owner, taskText);
-      if (!task) return { tasks: [], error: "that task is not on the plan board" };
-      if (task.workerId || task.state === "active" || task.state === "done") {
-        return { tasks: [], error: "that task is already dispatched" };
-      }
-      const keys = task.paths.map((p) => this.taskPathKey(p, root));
-      if (keys.some((k) => used.has(k))) {
-        return { tasks: [], error: "that task overlaps a running dispatch" };
-      }
-      return { tasks: [task] };
-    }
-    const chosen: PlanTask[] = [];
-    for (const task of owner.plan) {
-      if (chosen.length >= remaining) break;
-      if (task.workerId || task.state === "active" || task.state === "done") continue;
-      if (task.paths.length === 0) continue;
-      const keys = task.paths.map((p) => this.taskPathKey(p, root));
-      if (keys.some((k) => used.has(k))) continue;
-      keys.forEach((k) => used.add(k));
-      chosen.push(task);
-    }
-    if (chosen.length === 0) return { tasks: [], error: "no task mentions a file to scope it" };
-    return { tasks: chosen };
   }
 
   /** Live workers plus the jobs about to start. Briefings list sibling claims. */
@@ -2999,7 +2106,7 @@ class PiEditorApp {
     const seen = new Set<string>();
     for (const [id, entry] of this.dispatchRuns) {
       if (entry.ownerId !== owner.id) continue;
-      const task = this.findDispatchedTask(owner, entry.taskText);
+      const task = findTaskByText(owner.plan, entry.taskText);
       if (!task) continue;
       jobs.push({ task, id });
       seen.add(id);
@@ -3027,7 +2134,13 @@ class PiEditorApp {
       }
     }
     const dispatchRoot = ownerWs?.root ?? owner.cwd;
-    const picked = this.pickDispatchTasks(owner, dispatchRoot, taskText);
+    const picked = pickDispatchTasks({
+      plan: owner.plan,
+      remainingSlots: MAX_DISPATCH_WORKERS - this.ownerDispatchCount(owner.id),
+      inFlightPathKeys: this.dispatchPathKeysInFlight(owner.id, dispatchRoot),
+      pathKey: (p) => this.taskPathKey(p, dispatchRoot),
+      taskText,
+    });
     if (picked.error) return { ok: false, error: picked.error };
     const chosen = picked.tasks;
     const alreadyDispatching = this.ownerDispatchCount(ownerId) > 0;
@@ -3096,33 +2209,10 @@ class PiEditorApp {
   }
 
   private writeDispatchBriefing(workerId: string, assigned: PlanTask, jobs: Array<{ task: PlanTask; id: string }>): void {
-    const lines: string[] = [
-      "## Dispatch briefing",
-      "",
-      "You are one of several Pi workers on the same project. Do not edit files claimed by a sibling.",
-      "",
-      "### Your assignment",
-      assigned.text,
-    ];
-    if (assigned.paths.length > 0) lines.push(`Paths: ${assigned.paths.map((p) => `\`${p}\``).join(", ")}`);
-    lines.push("", "### Plan");
-    for (const job of jobs) lines.push(`- ${job.task.text}`);
-    const siblingClaims: string[] = [];
-    const seen = new Set<string>();
-    for (const job of jobs) {
-      if (job.id === workerId) continue;
-      for (const path of job.task.paths) {
-        if (seen.has(path)) continue;
-        seen.add(path);
-        siblingClaims.push(path);
-      }
+    let briefing = formatDispatchBriefing(workerId, assigned, jobs);
+    if (briefing.length > PiEditorApp.MAX_MAILBOX_BYTES) {
+      briefing = briefing.slice(0, PiEditorApp.MAX_MAILBOX_BYTES) + "\n…";
     }
-    if (siblingClaims.length > 0) {
-      lines.push("", "### Sibling path claims");
-      for (const path of siblingClaims) lines.push(`- \`${path}\``);
-    }
-    let briefing = lines.join("\n");
-    if (briefing.length > PiEditorApp.MAX_MAILBOX_BYTES) briefing = briefing.slice(0, PiEditorApp.MAX_MAILBOX_BYTES) + "\n…";
     this.dispatchMailbox.set(workerId, [briefing]);
     this.flushMailbox(workerId);
   }
@@ -3640,7 +2730,7 @@ class PiEditorApp {
         const dispatchStart = this.dispatchRuns.get(inst.id);
         if (dispatchStart) {
           const ownerInst = this.terminals.get(dispatchStart.ownerId);
-          const task = ownerInst ? this.findDispatchedTask(ownerInst, dispatchStart.taskText) : undefined;
+          const task = ownerInst ? findTaskByText(ownerInst.plan, dispatchStart.taskText) : undefined;
           if (ownerInst && task) {
             task.state = "active";
             this.sendPlan(ownerInst);
@@ -3662,9 +2752,9 @@ class PiEditorApp {
         if (dispatchEnd) {
           this.writeDispatchSettleNote(inst, "settled");
           const ownerInst = this.terminals.get(dispatchEnd.ownerId);
-          const task = ownerInst ? this.findDispatchedTask(ownerInst, dispatchEnd.taskText) : undefined;
+          const task = ownerInst ? findTaskByText(ownerInst.plan, dispatchEnd.taskText) : undefined;
           if (ownerInst) {
-            if (task && this.taskCompleted(inst, task.paths)) task.state = "done";
+            if (task && taskIsComplete(task.paths, inst.touched, inst.toolOutcomes)) task.state = "done";
             this.sendPlan(ownerInst);
             this.collectWorker(inst, ownerInst);
           }
@@ -3677,17 +2767,7 @@ class PiEditorApp {
         this.sendInstances();
         break;
       case "plan": {
-        // The run already ended. A wrap-up list is not a plan.
-        if (!inst.busy) break;
-        const text = String(event.text ?? "");
-        const tasks = this.parsePlanTasks(text, this.workspaceOfTerminal(inst)?.root ?? null);
-        if (tasks.length === 0) break;
-        inst.plan = tasks;
-        this.reattachDispatchAssignments(inst);
-        // touched and tool outcomes were reset at agent_start. Do not reset
-        // them here: the plan message can arrive after the first tool events,
-        // and their progress must count.
-        this.sendPlan(inst);
+        this.applyPlanMessage(inst, String(event.text ?? ""));
         break;
       }
       case "tool": {
@@ -3907,7 +2987,7 @@ class PiEditorApp {
    * agent_start: consume the preflight token and open the run record.
    * A token-less agent_start is a retry or compaction of the open run.
    */
-  private coupleRunStart(inst: PiTerminalInstance, event: SidecarEvent): void {
+  private coupleRunStart(inst: PiTerminalInstance, event: AgentStartEvent): void {
     const token = String(event.preflightToken ?? "");
     const pending = token ? this.pendingPreflights.get(token) : undefined;
     const ws = this.workspaceOfTerminal(inst);
@@ -4814,7 +3894,7 @@ class PiEditorApp {
       // Finish or roll back any pending promotion journal BEFORE the
       // primary watcher starts: the restored bytes must not attribute to
       // a user edit.
-      await this.recoverPromotions();
+      await recoverPromotionJournals(this.worldsRoot);
       this.createWorkspace(project, cwd, true);
       this.loadMineFiles(project);
       this.initWorldlines(project);
@@ -4888,8 +3968,7 @@ class PiEditorApp {
     try {
       await this.drainVerifyJobs(closingIds);
       await this.drainSidecarQueues();
-      await (this.evidenceQueues.get(projectId) ?? Promise.resolve()).catch(() => undefined);
-      this.evidenceQueues.delete(projectId);
+      await project.worldlines?.drainEvidence();
       await project.worldlines?.dispose().catch(() => undefined);
       project.worldlines = null;
       this.clearMineFiles(project);
@@ -5418,7 +4497,11 @@ class PiEditorApp {
 
     // ---- Worldlines: candidates (WORLDLINES §6.5, §6.6) ----
     ipcMain.handle("worldline:list", () => this.project()?.worldlines?.list() ?? []);
-    ipcMain.handle("worldline:promote", (_e, comparisonId: string, label: "A" | "B", force?: boolean) => this.promoteCandidate(comparisonId, label, force ?? false));
+    ipcMain.handle("worldline:promote", (_e, comparisonId: string, label: "A" | "B", force?: boolean) => {
+      const manager = this.projectOfComparison(comparisonId)?.worldlines;
+      if (!manager) return Promise.resolve({ ok: false, error: "candidate not found" });
+      return manager.promote(comparisonId, label, force ?? false);
+    });
     ipcMain.handle("worldline:challenge", async (_e, runId: string) => {
       const run = [...this.runsByTerminal.values()].flat().find((r) => r.id === runId);
       if (!run) return { ok: false, error: "run not found" };
@@ -5447,7 +4530,11 @@ class PiEditorApp {
       };
       return forkProject.worldlines!.forkRun(forkable, { challenge: true });
     });
-    ipcMain.handle("worldline:evidence", (_e, comparisonId: string) => this.runEvidence(comparisonId));
+    ipcMain.handle("worldline:evidence", (_e, comparisonId: string) => {
+      const manager = this.projectOfComparison(comparisonId)?.worldlines;
+      if (!manager) return Promise.resolve({ ok: false, error: "comparison not found" });
+      return manager.measureEvidence(comparisonId);
+    });
     ipcMain.handle("worldline:fork-point", async (_e, terminalId: string, seq: number) => {
       const inst = this.terminals.get(terminalId);
       if (!inst) return { ok: false, error: "terminal not found" };
@@ -5807,8 +4894,7 @@ class PiEditorApp {
     this.tailer.stop();
     await this.drainSidecarQueues();
     this.sidecarQueues.clear();
-    await Promise.all([...this.evidenceQueues.values()].map((queue) => queue.catch(() => undefined)));
-    this.evidenceQueues.clear();
+    await Promise.all([...this.projects.values()].map((project) => project.worldlines?.drainEvidence() ?? Promise.resolve()));
     this.cleanupExportedStates();
     for (const project of this.projects.values()) {
       await project.worldlines?.dispose().catch(() => undefined);
@@ -5824,7 +4910,6 @@ class PiEditorApp {
       }
     }
     this.clearRunRecords();
-    this.evidenceByComparison.clear();
     this.projects.clear();
     this.terminals.clear();
     for (const tailer of this.worldlineTailers.values()) tailer.stop();

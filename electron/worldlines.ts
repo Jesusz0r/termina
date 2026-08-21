@@ -8,14 +8,14 @@
  * removes every app-owned resource.
  */
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID, createHash } from "node:crypto";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { chmod, cp, lstat as lstatPath, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { writeSandboxProfile, sandboxShellPreamble, type SandboxPaths } from "./sandbox.js";
 import { coreClient } from "./core-client.js";
-import { gitHead, platformHasCopyOnWrite, type SnapshotStore } from "./worldline-git.js";
-import { dependencyDiff } from "./evidence.js";
+import { captureRootInRepo, gitCommonDir, gitHead, gitTopLevel, platformHasCopyOnWrite, type SnapshotStore } from "./worldline-git.js";
+import { EvidenceEngine, dependencyDiff, mineChangeReason, rankProfiles, type EvidenceDeps, type EvidenceRecord, type EvidenceSummary } from "./evidence.js";
 import type { DependencyChange, WorldlineChangedFile, WorldlineDetails } from "../shared/types.js";
 
 /** Quote one shell argument: the resolved base commands carry scripts that
@@ -135,6 +135,21 @@ export interface ForkableRun {
   trusted: boolean | null;
 }
 
+function isInside(parent: string, child: string): boolean {
+  const rel = child.startsWith(parent) ? child.slice(parent.length) : null;
+  return rel !== null && (rel.startsWith("/") || rel === "");
+}
+
+export interface PromoteSeed {
+  paths: Array<{ rel: string; kind: "write" | "delete"; beforeExists: boolean }>;
+  beforeDir: string;
+  installedSession: string;
+  primaryRoot: string;
+  primaryWorkspaceId: string;
+  comparisonId: string;
+  label: "A" | "B";
+}
+
 export interface WorldlineDeps {
   worldsRoot: string;
   primaryRoot: string;
@@ -147,10 +162,6 @@ export interface WorldlineDeps {
   getStore(): Promise<SnapshotStore | null>;
   /** Read-only load paths for the sandboxed pi (app package + node). */
   appReadPaths(): string[];
-  snapshot: {
-    template(opts: { store: SnapshotStore; stateId: string; targetDir: string; sourceObjectsDir: string }): Promise<void>;
-    applyState(opts: { store: SnapshotStore; stateId: string; targetDir: string; preserveTopLevel?: string[] }): Promise<void>;
-  };
   session: {
     fork(opts: {
       sourceSessionFile: string;
@@ -185,11 +196,39 @@ export interface WorldlineDeps {
     promptEventsDir: string | null;
     promptParentEntryId: string | null;
     sessionFile: string | null;
+    startStateId: string | null;
   } | null;
   /** Capture the current primary state (details conflict status). */
   capturePrimary(): Promise<string | null>;
   /** Release a temporary state reference after a comparison operation. */
   releaseState(stateId: string): Promise<void>;
+  terminalBusy(terminalId: string): boolean;
+  terminalVerifying(terminalId: string): boolean;
+  workspaceAt(root: string): { id: string; generation: number; lastStateCommit: string | null } | null;
+  acquireWriteLease(workspaceId: string, requester: string, timeoutMs: number): Promise<{ ok: boolean; error?: string; generation?: number }>;
+  releaseWriteLease(workspaceId: string, requester: string): void;
+  flushDirtyModels(requester: string, workspaceId: string, timeoutMs?: number): Promise<{ ok: boolean }>;
+  canonicalPath(absPath: string): string;
+  mineFiles(): ReadonlySet<string>;
+  runSandboxedEvidence(
+    cand: { root: string; profilePath: string; homeDir: string; tmpDir: string },
+    command: string[],
+    timeoutMs: number,
+  ): Promise<{ code: number; stdout: string; timedOut: boolean }>;
+  sourceFilesOf(root: string): Promise<Array<{ relPath: string; content: string }>>;
+  createEvidenceHome(): Promise<string>;
+  detectTestFromState(store: SnapshotStore, stateId: string): Promise<{ command: string; args: string[]; label: string } | null>;
+  benchmarkConfigFrom(store: SnapshotStore, stateId: string): Promise<{
+    command: string[];
+    unit: string;
+    direction: "lower" | "higher";
+    samples: number;
+    thresholdPct: number;
+  } | null>;
+  onEvidenceUpdate(summary: EvidenceSummary): void;
+  onPromotionApply(relPaths: string[] | null): void;
+  primarySessionDir(cwd: string): string;
+  installPromoted(seed: PromoteSeed): Promise<{ terminalId: string }>;
 }
 
 const RUNTIME_ALLOWLIST = ["node_modules", ".venv", "venv"];
@@ -224,11 +263,6 @@ export async function dirBytes(dir: string): Promise<number> {
   });
 }
 
-function isInside(parent: string, child: string): boolean {
-  const rel = child.startsWith(parent) ? child.slice(parent.length) : null;
-  return rel !== null && (rel.startsWith("/") || rel === "");
-}
-
 export class WorldlineManager {
   private comparisons = new Map<string, ComparisonState>();
   private seq = 0;
@@ -236,6 +270,8 @@ export class WorldlineManager {
   private terminalToComparison = new Map<string, { comparisonId: string; label: "A" | "B" }>();
   /** Source comparison ids with a challenge launch in flight. */
   private challengeInFlight = new Set<string>();
+  private evidenceByComparison = new Map<string, EvidenceSummary>();
+  private evidenceQueue: Promise<unknown> = Promise.resolve();
 
   constructor(private deps: WorldlineDeps) {
     mkdirSync(this.deps.worldsRoot, { recursive: true });
@@ -407,8 +443,7 @@ export class WorldlineManager {
       // The template is the SHARED BASE (R), not the reference head: the
       // challenger starts from the recorded base.
       mkdirSync(ncmp.templateDir, { recursive: true });
-      await this.deps.snapshot.template({
-        store,
+      await store.template({
         stateId: cmp.baseStateId,
         targetDir: ncmp.templateDir,
         sourceObjectsDir: join(ncmp.sourceGitDir, "objects"),
@@ -422,7 +457,7 @@ export class WorldlineManager {
       await this.cloneTree(ncmp.templateDir, nA.dir);
       await this.cloneTree(ncmp.templateDir, nB.dir);
       // The reference A receives the candidate head state.
-      await this.deps.snapshot.applyState({ store, stateId: wHead.commit, targetDir: nA.dir, preserveTopLevel: RUNTIME_ALLOWLIST });
+      await store.applyState({ stateId: wHead.commit, targetDir: nA.dir, preserveTopLevel: RUNTIME_ALLOWLIST });
       // A's session continues from the candidate leaf; B's session branches
       // at the pre-task anchor (the original run's prompt parent).
       const [forkA, forkB] = await Promise.all([
@@ -901,8 +936,7 @@ export class WorldlineManager {
   /** The comparison template: base source bytes plus independent git. */
   private async buildTemplate(cmp: ComparisonState, store: SnapshotStore, run: ForkableRun): Promise<void> {
     mkdirSync(cmp.templateDir, { recursive: true });
-    await this.deps.snapshot.template({
-      store,
+    await store.template({
       stateId: run.startStateId!,
       targetDir: cmp.templateDir,
       sourceObjectsDir: join(cmp.sourceGitDir, "objects"),
@@ -952,7 +986,7 @@ export class WorldlineManager {
   /** Candidate A receives the settled source state. */
   private async applySettledToA(cmp: ComparisonState, store: SnapshotStore, run: ForkableRun): Promise<void> {
     const a = cmp.candidates.get("A")!;
-    await this.deps.snapshot.applyState({ store, stateId: run.settledStateId!, targetDir: a.dir, preserveTopLevel: RUNTIME_ALLOWLIST });
+    await store.applyState({ stateId: run.settledStateId!, targetDir: a.dir, preserveTopLevel: RUNTIME_ALLOWLIST });
   }
 
   /** Fork both Pi sessions in the session worker. */
@@ -1190,6 +1224,13 @@ export class WorldlineManager {
     this.pushUpdate(cmp, cand);
   }
 
+  private isPromoting(cmp: ComparisonState): boolean {
+    for (const cand of cmp.candidates.values()) {
+      if (cand.state === "promoting") return true;
+    }
+    return false;
+  }
+
   /** Promotion finished: tear the pair down ("promoted") or release. */
   async finishPromotion(comparisonId: string, ok: boolean, error: string | null): Promise<void> {
     if (ok) {
@@ -1206,6 +1247,433 @@ export class WorldlineManager {
         cand.version++;
         this.pushUpdate(cmp, cand);
       }
+    }
+  }
+
+  // ---------------------------------------------------------- evidence ----
+
+  markEvidenceStale(comparisonId: string | undefined): EvidenceSummary | null {
+    if (!comparisonId) return null;
+    const summary = this.evidenceByComparison.get(comparisonId);
+    if (!summary || summary.stale) return null;
+    summary.stale = true;
+    this.deps.onEvidenceUpdate(summary);
+    return summary;
+  }
+
+  holdsEvidenceState(stateId: string): boolean {
+    for (const summary of this.evidenceByComparison.values()) {
+      for (const records of Object.values(summary.byCandidate)) {
+        if (records.some((record) => record.stateId === stateId)) return true;
+      }
+    }
+    return false;
+  }
+
+  measureEvidence(comparisonId: string): Promise<{ ok: boolean; error?: string }> {
+    const run = this.evidenceQueue.then(() => this.runEvidence(comparisonId));
+    this.evidenceQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  async drainEvidence(): Promise<void> {
+    await this.evidenceQueue.catch(() => undefined);
+  }
+
+  private async dropEvidence(comparisonId: string): Promise<void> {
+    const summary = this.evidenceByComparison.get(comparisonId);
+    this.evidenceByComparison.delete(comparisonId);
+    if (summary) await this.releaseSummaryStates(summary);
+  }
+
+  private async releaseSummaryStates(summary: EvidenceSummary): Promise<void> {
+    const states = new Set<string>();
+    for (const records of Object.values(summary.byCandidate)) {
+      for (const record of records) states.add(record.stateId);
+    }
+    for (const stateId of states) await this.deps.releaseState(stateId);
+  }
+
+  private async runEvidence(comparisonId: string): Promise<{ ok: boolean; error?: string }> {
+    if (!this.comparisons.has(comparisonId)) return { ok: false, error: "comparison not found" };
+    const store = await this.deps.getStore();
+    const cmp = this.comparisons.get(comparisonId);
+    const baseStateId = this.deps.sourceRunOf(cmp?.sourceRunId ?? "")?.startStateId ?? null;
+    if (!cmp || !store || !baseStateId) return { ok: false, error: !cmp ? "comparison not found" : "recording is not available" };
+    const targets = new Map<"A" | "B", NonNullable<ReturnType<WorldlineManager["evidenceTarget"]>>>();
+    const generations = new Map<"A" | "B", number>();
+    const leases: Array<{ workspaceId: string; requesterId: string }> = [];
+    const releaseLeases = (): void => {
+      for (const lease of leases) this.deps.releaseWriteLease(lease.workspaceId, lease.requesterId);
+    };
+    for (const label of ["A", "B"] as const) {
+      const target = this.evidenceTarget(comparisonId, label);
+      if (!target) {
+        releaseLeases();
+        return { ok: false, error: "candidate not found" };
+      }
+      if ((target.terminalId && this.deps.terminalBusy(target.terminalId)) || target.state === "running" || target.state === "verifying") {
+        releaseLeases();
+        return { ok: false, error: `candidate ${label} is active` };
+      }
+      const workspace = this.deps.workspaceAt(target.root);
+      if (!workspace) {
+        releaseLeases();
+        return { ok: false, error: "candidate workspace not found" };
+      }
+      const requesterId = `evidence:${comparisonId}:${label}`;
+      const lease = await this.deps.acquireWriteLease(workspace.id, requesterId, 2000);
+      if (!lease.ok) {
+        releaseLeases();
+        return { ok: false, error: lease.error ?? "a candidate workspace is busy" };
+      }
+      leases.push({ workspaceId: workspace.id, requesterId });
+      targets.set(label, target);
+      generations.set(label, workspace.generation);
+    }
+    let tc: { command: string; args: string[]; label: string } | null;
+    let bm: { command: string[]; unit: string; direction: "lower" | "higher"; samples: number; thresholdPct: number } | null;
+    let evidenceHome: string | null = null;
+    try {
+      tc = await this.deps.detectTestFromState(store, baseStateId);
+      bm = await this.deps.benchmarkConfigFrom(store, baseStateId);
+      evidenceHome = await this.deps.createEvidenceHome();
+    } catch (err) {
+      releaseLeases();
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    if (!evidenceHome) {
+      releaseLeases();
+      return { ok: false, error: "evidence home is unavailable" };
+    }
+    const evidenceRoot = evidenceHome;
+    const capturedStates = new Set<string>();
+    const capturedTrees = new Map<string, string>();
+    const deps: EvidenceDeps = {
+      store,
+      baseStateId,
+      primaryRoot: this.deps.primaryRoot,
+      mineFiles: new Set(this.deps.mineFiles()),
+      captureHead: async (root, gitDir, parent) => {
+        const state = await this.deps.captureHead(root, gitDir, parent);
+        capturedStates.add(state.commit);
+        capturedTrees.set(state.commit, state.tree);
+        return state;
+      },
+      runSandboxed: (cand, command, timeoutMs) => this.deps.runSandboxedEvidence(cand, command, timeoutMs),
+      baseTestCommand: () => tc,
+      benchmarkConfig: () => bm,
+      sourceFilesOf: (root) => this.deps.sourceFilesOf(root),
+    };
+    const engine = new EvidenceEngine(deps);
+    const byCandidate: Record<"A" | "B", EvidenceRecord[]> = { A: [], B: [] };
+    const mineReason: Record<"A" | "B", string | null> = { A: null, B: null };
+    const retainedStates = new Set<string>();
+    const expectedVersions = new Map<"A" | "B", number>();
+    const cands: Record<"A" | "B", { root: string; profilePath: string; homeDir: string; tmpDir: string; shell: string; eventsDir: string; terminalId: string | null }> = {
+      A: { root: targets.get("A")!.root, profilePath: targets.get("A")!.profilePath, homeDir: evidenceRoot, tmpDir: join(evidenceRoot, "tmp", "A"), shell: "", eventsDir: targets.get("A")!.eventsDir, terminalId: targets.get("A")!.terminalId },
+      B: { root: targets.get("B")!.root, profilePath: targets.get("B")!.profilePath, homeDir: evidenceRoot, tmpDir: join(evidenceRoot, "tmp", "B"), shell: "", eventsDir: targets.get("B")!.eventsDir, terminalId: targets.get("B")!.terminalId },
+    };
+    let result: { ok: boolean; error?: string };
+    try {
+      result = { ok: true };
+      for (const label of ["A", "B"] as const) {
+        const target = targets.get(label)!;
+        byCandidate[label] = await engine.measure(label, cands[label]);
+        const finalState = await deps.captureHead(target.root, join(target.root, ".git"), null);
+        const workspace = this.deps.workspaceAt(target.root);
+        const current = this.evidenceVersion(comparisonId, label);
+        if (!workspace || workspace.generation !== generations.get(label) || !current || current.version !== target.version) {
+          result = { ok: false, error: `candidate ${label} changed during evidence` };
+          break;
+        }
+        const head = byCandidate[label].find((record) => record.kind === "verify") ?? byCandidate[label][0];
+        if (head && capturedTrees.get(head.stateId) !== finalState.tree) {
+          result = { ok: false, error: `candidate ${label} changed during evidence` };
+          break;
+        }
+        if (head) {
+          retainedStates.add(head.stateId);
+          this.setCandidateHead(comparisonId, label, head.stateId);
+          expectedVersions.set(label, this.evidenceVersion(comparisonId, label)?.version ?? target.version);
+          mineReason[label] = await mineChangeReason(store, baseStateId, head.stateId, deps.primaryRoot, deps.mineFiles, (p) => realpath(p));
+        } else {
+          expectedVersions.set(label, target.version);
+        }
+      }
+      if (result.ok) {
+        const benches = await engine.measureBenchmarks(cands, {
+          A: byCandidate.A.find((r) => r.kind === "verify")?.stateId ?? byCandidate.A[0]?.stateId ?? "",
+          B: byCandidate.B.find((r) => r.kind === "verify")?.stateId ?? byCandidate.B[0]?.stateId ?? "",
+        });
+        byCandidate.A.push(benches.A);
+        byCandidate.B.push(benches.B);
+      }
+      if (result.ok) {
+        for (const label of ["A", "B"] as const) {
+          const target = targets.get(label)!;
+          const workspace = this.deps.workspaceAt(target.root);
+          const current = this.evidenceVersion(comparisonId, label);
+          if (!workspace || workspace.generation !== generations.get(label) || !current || current.version !== expectedVersions.get(label)) {
+            result = { ok: false, error: `candidate ${label} changed during evidence` };
+            break;
+          }
+        }
+      }
+      if (!result.ok) return result;
+      const summary: EvidenceSummary = {
+        comparisonId,
+        ts: Date.now(),
+        byCandidate,
+        profiles: rankProfiles(byCandidate, mineReason, bm?.thresholdPct ?? 0.05),
+        error: null,
+        stale: false,
+      };
+      const previous = this.evidenceByComparison.get(comparisonId);
+      this.evidenceByComparison.set(comparisonId, summary);
+      if (previous) await this.releaseSummaryStates(previous);
+      this.deps.onEvidenceUpdate(summary);
+      return result;
+    } finally {
+      for (const stateId of capturedStates) {
+        if (!retainedStates.has(stateId)) await this.deps.releaseState(stateId);
+      }
+      releaseLeases();
+      if (evidenceHome) await rm(evidenceHome, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  // ---------------------------------------------------------- promote ----
+
+  async promote(comparisonId: string, label: "A" | "B", force = false): Promise<{ ok: boolean; error?: string; confirm?: string; terminalId?: string }> {
+    const target = this.promotionTarget(comparisonId, label);
+    if (!target) return { ok: false, error: "candidate not found" };
+    if (!target.sessionFile) return { ok: false, error: "the candidate has no session" };
+    if (!["ready", "running", "settled"].includes(target.state)) {
+      return { ok: false, error: `cannot promote from state ${target.state}` };
+    }
+    if (target.terminalId && this.deps.terminalBusy(target.terminalId)) return { ok: false, error: "the candidate agent is busy" };
+    if (target.terminalId && this.deps.terminalVerifying(target.terminalId)) {
+      return { ok: false, error: "the candidate is verifying" };
+    }
+    const store = await this.deps.getStore();
+    if (!store) return { ok: false, error: "recording is not available" };
+    const primary = this.deps.workspaceAt(this.deps.primaryRoot);
+    if (!primary) return { ok: false, error: "no primary workspace" };
+    const baseState = this.deps.sourceRunOf(target.sourceRunId)?.startStateId ?? null;
+    if (!baseState) return { ok: false, error: "the source run base is missing" };
+    const candWs = this.deps.workspaceAt(target.root);
+    const candGen = candWs?.generation ?? 0;
+
+    const opId = `promote-${randomUUID()}`;
+    const requester = `promote:${opId}`;
+    const journalDir = join(this.deps.worldsRoot, "promotion-journal", opId);
+    const journal: Record<string, unknown> = {
+      opId,
+      comparisonId,
+      label,
+      stateR: baseState,
+      primaryRoot: this.deps.primaryRoot,
+      phase: "prepared",
+      createdAt: Date.now(),
+      paths: [],
+      stagedSession: null,
+      installedSession: null,
+    };
+
+    const leaseP = await this.deps.acquireWriteLease(primary.id, requester, 12000);
+    if (!leaseP.ok) return { ok: false, error: leaseP.error ?? "the primary workspace is busy" };
+    let candLease = true;
+    if (candWs) {
+      const l = await this.deps.acquireWriteLease(candWs.id, requester, 8000);
+      candLease = l.ok;
+    }
+    if (!candLease) {
+      this.deps.releaseWriteLease(primary.id, requester);
+      return { ok: false, error: "the candidate workspace is busy" };
+    }
+    const releaseLeases = (): void => {
+      this.deps.releaseWriteLease(primary.id, requester);
+      if (candWs) this.deps.releaseWriteLease(candWs.id, requester);
+    };
+    const fail = async (message: string): Promise<{ ok: false; error: string }> => {
+      releaseLeases();
+      await rm(journalDir, { recursive: true, force: true }).catch(() => undefined);
+      await this.finishPromotion(comparisonId, false, message);
+      return { ok: false, error: message };
+    };
+    const askConfirm = async (message: string): Promise<{ ok: false; confirm: string }> => {
+      releaseLeases();
+      await rm(journalDir, { recursive: true, force: true }).catch(() => undefined);
+      await this.finishPromotion(comparisonId, false, null);
+      return { ok: false, confirm: message };
+    };
+
+    try {
+      const flush = await this.deps.flushDirtyModels(requester, primary.id, 8000);
+      if (!flush.ok) return fail("could not save editor changes");
+      this.markPromoting(comparisonId, label);
+      const candGitDir = await gitCommonDir(target.root);
+      const [wState, pState] = await Promise.all([
+        store.capture(await gitHead(target.root), baseState, {}, {}, { root: target.root, gitDir: candGitDir ?? target.root }),
+        store.capture(await gitHead(this.deps.primaryRoot), primary.lastStateCommit ?? null),
+      ]);
+      this.deps.onCandidateState(this.deps.primaryRoot, pState.commit);
+      const primaryNow = this.deps.workspaceAt(this.deps.primaryRoot);
+      if (!primaryNow || primaryNow.generation !== leaseP.generation) return fail("the primary changed during promotion preflight");
+      if (candWs && this.deps.workspaceAt(target.root)?.generation !== candGen) return fail("the candidate changed during promotion preflight");
+      const top = await gitTopLevel(this.deps.primaryRoot);
+      if (!top || !captureRootInRepo(this.deps.canonicalPath(store.sourceRoot), this.deps.canonicalPath(top))) {
+        return fail("the source repository identity changed");
+      }
+
+      const changed = await store.diffTree(baseState, wState.commit);
+      for (const c of changed) {
+        const abs = join(this.deps.primaryRoot, c.relPath);
+        if (this.deps.mineFiles().has(this.deps.canonicalPath(abs))) {
+          return fail(`the candidate changes a file you own: ${c.relPath}`);
+        }
+        const link = await store.symlinkTarget(wState.commit, c.relPath);
+        if (link) {
+          try {
+            if (this.deps.mineFiles().has(realpathSync(join(dirname(abs), link)))) {
+              return fail(`the candidate aliases a file you own through a symlink: ${c.relPath}`);
+            }
+          } catch {
+            /* A broken symlink cannot alias a Mine path. */
+          }
+        }
+      }
+
+      const merge = await store.merge3(wState.commit, pState.commit);
+      if (!merge.ok || !merge.tree) {
+        const reason = merge.reason ?? `the merge conflicts on: ${merge.conflicts.join(", ")}`;
+        return fail(reason);
+      }
+      if (!force) {
+        const summary = this.evidenceByComparison.get(comparisonId);
+        const recs = summary?.byCandidate[label] ?? [];
+        const verify = recs.find((r) => r.kind === "verify");
+        const evidenceOk = verify?.status === "pass" && summary?.stale !== true;
+        const ignored = await this.ignoredWrites(comparisonId, label);
+        if (!evidenceOk) {
+          const why = !verify ? "no evidence has been computed for this candidate" : summary?.stale ? "the evidence is stale (the candidate ran again)" : `the evidence is ${verify?.status}`;
+          return askConfirm(`promote without current passing evidence? (${why})`);
+        }
+        if ((ignored?.count ?? 0) > 0) {
+          return askConfirm(`${ignored!.count} ignored/generated file(s) (${((ignored!.bytes ?? 0) / 1024).toFixed(0)} kB) will be excluded from the promotion`);
+        }
+      }
+
+      const mergedDir = join(journalDir, "merged");
+      await store.materialize(merge.tree, mergedDir);
+      const pPaths = await store.treePaths(pState.commit);
+      const mergedPaths = await store.treePaths(merge.tree);
+      const beforeDir = join(journalDir, "before");
+      const paths: Array<{ rel: string; kind: "write" | "delete"; beforeHash: string; afterHash: string; beforeExists: boolean }> = [];
+      for (const rel of [...mergedPaths].sort()) {
+        const abs = join(this.deps.primaryRoot, rel);
+        const beforeExists = existsSync(abs);
+        const before = beforeExists ? await readFile(abs) : Buffer.alloc(0);
+        const after = await readFile(join(mergedDir, rel));
+        paths.push({ rel, kind: "write", beforeHash: sha256Hex(before), afterHash: sha256Hex(after), beforeExists });
+        if (beforeExists) {
+          const dest = join(beforeDir, rel);
+          await mkdir(dirname(dest), { recursive: true });
+          await writeFile(dest, before);
+        }
+      }
+      for (const rel of [...pPaths].filter((p) => !mergedPaths.has(p)).sort()) {
+        const abs = join(this.deps.primaryRoot, rel);
+        const beforeExists = existsSync(abs);
+        const before = beforeExists ? await readFile(abs) : Buffer.alloc(0);
+        paths.push({ rel, kind: "delete", beforeHash: sha256Hex(before), afterHash: sha256Hex(Buffer.alloc(0)), beforeExists });
+        if (beforeExists) {
+          const dest = join(beforeDir, rel);
+          await mkdir(dirname(dest), { recursive: true });
+          await writeFile(dest, before);
+        }
+      }
+      if (paths.length > 2000) throw new Error("the promotion touches too many paths");
+      journal.paths = paths;
+
+      const sessionDir = join(journalDir, "session");
+      const fork = await this.deps.session.fork({
+        sourceSessionFile: target.sessionFile,
+        entryId: null,
+        sessionWorkspaceDir: sessionDir,
+        candidateRoot: this.deps.primaryRoot,
+        candidateSessionDir: sessionDir,
+        relocationNote: `The candidate project lived at ${target.root}. In this promoted session, that path maps to ${this.deps.primaryRoot}.`,
+      });
+      if (!fork.sessionFile) throw new Error("the promoted session fork produced no file");
+      journal.stagedSession = fork.sessionFile;
+      writePromotionJournal(journalDir, journal);
+
+      for (const p of paths) {
+        const abs = join(this.deps.primaryRoot, p.rel);
+        const now = existsSync(abs) ? await readFile(abs) : Buffer.alloc(0);
+        if (sha256Hex(now) !== p.beforeHash) return fail(`the primary changed at ${p.rel} during promotion`);
+      }
+      if (this.deps.workspaceAt(this.deps.primaryRoot)?.generation !== leaseP.generation) {
+        return fail("the primary changed during promotion apply");
+      }
+
+      this.deps.onPromotionApply(paths.map((p) => p.rel));
+      try {
+        for (const p of paths) {
+          const abs = join(this.deps.primaryRoot, p.rel);
+          if (p.kind === "delete") {
+            await rm(abs, { force: true });
+          } else {
+            await mkdir(dirname(abs), { recursive: true });
+            await rename(join(mergedDir, p.rel), abs);
+          }
+        }
+      } finally {
+        this.deps.onPromotionApply(null);
+      }
+      journal.phase = "applied";
+      writePromotionJournal(journalDir, journal);
+
+      const installDir = this.deps.primarySessionDir(this.deps.primaryRoot);
+      await mkdir(installDir, { recursive: true });
+      const sessionName = `${new Date().toISOString().replace(/[:.]/g, "-")}_${randomUUID()}.jsonl`;
+      const installed = join(installDir, sessionName);
+      const tmp = join(installDir, `.${sessionName}.tmp`);
+      await writeFile(tmp, await readFile(fork.sessionFile));
+      await rename(tmp, installed);
+      journal.installedSession = installed;
+      journal.phase = "done";
+      writePromotionJournal(journalDir, journal);
+
+      const opened = await this.deps.installPromoted({
+        paths,
+        beforeDir,
+        installedSession: installed,
+        primaryRoot: this.deps.primaryRoot,
+        primaryWorkspaceId: primary.id,
+        comparisonId,
+        label,
+      });
+      await this.finishPromotion(comparisonId, true, null);
+      releaseLeases();
+      await rm(journalDir, { recursive: true, force: true });
+      return { ok: true, terminalId: opened.terminalId };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (String(journal.phase) === "done") {
+        // The primary already has the merged bytes and the session file.
+        releaseLeases();
+        await this.finishPromotion(comparisonId, true, null);
+        await rm(journalDir, { recursive: true, force: true }).catch(() => undefined);
+        return { ok: false, error: `the source was promoted, but the new session did not open: ${message}` };
+      }
+      await rollbackPromotion(journalDir, journal, this.deps.primaryRoot);
+      if (journal.installedSession) await rm(String(journal.installedSession), { force: true });
+      releaseLeases();
+      await this.finishPromotion(comparisonId, false, message);
+      return { ok: false, error: message };
     }
   }
 
@@ -1292,8 +1760,7 @@ export class WorldlineManager {
     try {
       // The template IS the moment state: build it, then clone one candidate.
       mkdirSync(cmp.templateDir, { recursive: true });
-      await this.deps.snapshot.template({
-        store,
+      await store.template({
         stateId: opts.stateId,
         targetDir: cmp.templateDir,
         sourceObjectsDir: join(cmp.sourceGitDir, "objects"),
@@ -1401,6 +1868,7 @@ export class WorldlineManager {
   async cancel(comparisonId: string): Promise<{ ok: boolean; error?: string }> {
     const cmp = this.comparisons.get(comparisonId);
     if (!cmp) return { ok: false, error: "comparison not found" };
+    if (this.isPromoting(cmp)) return { ok: false, error: "a promotion is in progress" };
     await this.teardown(comparisonId, "cancelled", null);
     return { ok: true };
   }
@@ -1409,6 +1877,7 @@ export class WorldlineManager {
   async discard(comparisonId: string): Promise<{ ok: boolean; error?: string }> {
     const cmp = this.comparisons.get(comparisonId);
     if (!cmp) return { ok: false, error: "comparison not found" };
+    if (this.isPromoting(cmp)) return { ok: false, error: "a promotion is in progress" };
     await this.teardown(comparisonId, "discarded", null);
     return { ok: true };
   }
@@ -1481,6 +1950,7 @@ export class WorldlineManager {
       if (hit.comparisonId === comparisonId) this.terminalToComparison.delete(terminalId);
     }
     this.comparisons.delete(comparisonId);
+    await this.dropEvidence(comparisonId);
     this.deps.onRemoved(comparisonId);
   }
 
@@ -1578,4 +2048,104 @@ function readProcessStart(pid: number): Promise<string | null> {
 async function processStartMatches(pid: number, lstart: string): Promise<boolean> {
   const current = await readProcessStart(pid);
   return current !== null && current === lstart;
+}
+
+function sha256Hex(buf: Buffer): string {
+  return createHash("sha256").update(buf).digest("hex");
+}
+
+function writePromotionJournal(journalDir: string, journal: Record<string, unknown>): void {
+  mkdirSync(journalDir, { recursive: true, mode: 0o700 });
+  const file = join(journalDir, "journal.json");
+  const fd = openSync(file, "w", 0o600);
+  try {
+    writeFileSync(fd, JSON.stringify(journal, null, 2));
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+async function rollbackPromotion(journalDir: string, journal: Record<string, unknown>, primaryRoot: string): Promise<void> {
+  const phase = String(journal.phase ?? "prepared");
+  if (phase !== "applied") {
+    await rm(journalDir, { recursive: true, force: true });
+    return;
+  }
+  const sha = sha256Hex;
+  let conflicted = false;
+  for (const p of (journal.paths ?? []) as Array<{ rel: string; beforeHash: string; afterHash: string; beforeExists: boolean }>) {
+    const abs = join(primaryRoot, p.rel);
+    const now = existsSync(abs) ? await readFile(abs) : Buffer.alloc(0);
+    if (sha(now) !== p.afterHash) {
+      if (sha(now) !== p.beforeHash) conflicted = true;
+      continue;
+    }
+    const before = join(journalDir, "before", p.rel);
+    if (p.beforeExists && existsSync(before)) {
+      await mkdir(dirname(abs), { recursive: true });
+      await writeFile(abs, await readFile(before));
+    } else {
+      await rm(abs, { force: true });
+    }
+  }
+  journal.phase = conflicted ? "conflict" : "rolled-back";
+  writePromotionJournal(journalDir, journal);
+  if (!conflicted) await rm(journalDir, { recursive: true, force: true });
+}
+
+/** Startup recovery: finish or roll back every pending promotion journal. */
+export async function recoverPromotionJournals(worldsRoot: string): Promise<void> {
+  const root = join(worldsRoot, "promotion-journal");
+  let names: string[] = [];
+  try {
+    names = await readdir(root);
+  } catch {
+    return;
+  }
+  const sha = sha256Hex;
+  for (const name of names) {
+    const dir = join(root, name);
+    let journal: Record<string, unknown> | null = null;
+    try {
+      journal = JSON.parse(await readFile(join(dir, "journal.json"), "utf8")) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const phase = String(journal.phase ?? "prepared");
+    const primaryRoot = String(journal.primaryRoot ?? "");
+    const paths = (journal.paths ?? []) as Array<{ rel: string; beforeHash: string; afterHash: string; beforeExists: boolean }>;
+    if (phase !== "applied") {
+      await rm(dir, { recursive: true, force: true });
+      continue;
+    }
+    for (const p of paths) {
+      const abs = join(primaryRoot, p.rel);
+      const now = existsSync(abs) ? await readFile(abs) : Buffer.alloc(0);
+      if (sha(now) !== p.afterHash) continue;
+      const before = join(dir, "before", p.rel);
+      if (p.beforeExists && existsSync(before)) {
+        await mkdir(dirname(abs), { recursive: true });
+        await writeFile(abs, await readFile(before));
+      } else {
+        await rm(abs, { force: true });
+      }
+    }
+    let conflicted = false;
+    for (const p of paths) {
+      const abs = join(primaryRoot, p.rel);
+      const now = existsSync(abs) ? await readFile(abs) : Buffer.alloc(0);
+      const h = sha(now);
+      if (h !== p.beforeHash && h !== p.afterHash) {
+        conflicted = true;
+        break;
+      }
+    }
+    if (!conflicted) {
+      await rm(dir, { recursive: true, force: true });
+    } else {
+      await writeFile(join(dir, "conflict.json"), JSON.stringify({ at: Date.now(), paths: paths.map((p) => p.rel) }));
+      console.warn(`[worldline] promotion recovery conflict: ${dir} — kept every version`);
+    }
+  }
 }
