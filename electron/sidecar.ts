@@ -1,55 +1,194 @@
 /**
- * Tails the per-terminal sidecar files written by the Termina bridge
- * extension (tool calls, busy state, run-boundary events) and emits
- * structured events.
- * Delivery is event-driven: an fs.watch on the events directory triggers
- * immediate tails. The interval poll remains as recovery for missed watch
- * events. Reads only the new bytes since the last poll. The sidecar rotates
- * at a bounded size.
+ * Sidecar protocol: JSONL events the bridge writes and the app tails.
+ *
+ * The bridge extension is the only writer. This module is the only parser
+ * and the only tailer of sidecar JSONL.
  */
 import { watch, type FSWatcher } from "node:fs";
 import { statSync, truncateSync } from "node:fs";
 import { open as openFile, stat as statFile, truncate as truncateFile } from "node:fs/promises";
 import { join } from "node:path";
 
-export interface SidecarEvent {
-  t: "agent_start" | "agent_settled" | "tool" | "tool_end" | "plan" | "preflight_request" | "prompt" | "steer_input" | "checkpoint_request" | "checkpoint_result" | "session_ready";
-  toolName?: string;
-  path?: string;
-  /** The edit regions of edit/apply_patch tool calls (for baselines). */
-  edits?: Array<{ oldText?: string; newText?: string }>;
-  /** The tool call id (correlates the tool result). */
-  toolCallId?: string;
-  isError?: boolean;
-  /** The plan text (the first assistant message of a run). */
-  text?: string;
-  /** Bridge instance id (monotonic sequence resets with it). */
-  bridgeId?: string;
-  /** Monotonic event sequence within one bridge instance. */
-  seq?: number;
-  requestId?: string;
-  kind?: string;
-  entryId?: string | null;
-  parentEntryId?: string | null;
-  sessionFile?: string | null;
-  sessionId?: string | null;
-  trusted?: boolean;
-  preflightToken?: string | null;
-  preflightRequestId?: string | null;
-  /** The prompt payload file in the events directory. */
-  file?: string;
-  hasImages?: boolean;
-  behavior?: string;
-  ok?: boolean;
-  error?: string | null;
-  /** The selected model and thinking level (agent_start). */
-  model?: string | null;
-  thinkingLevel?: string | null;
-  /** The startup control id (session_ready). */
-  opId?: string;
+export const MAX_SIDECAR_BYTES = 8 * 1024 * 1024;
+
+type ToolEdits = Array<{ oldText?: string; newText?: string }>;
+
+interface SidecarMeta {
+  bridgeId: string;
+  seq: number;
 }
 
-export const MAX_SIDECAR_BYTES = 8 * 1024 * 1024;
+export type SidecarEvent =
+  | (SidecarMeta & { t: "preflight_request"; requestId?: string; hasImages?: boolean })
+  | (SidecarMeta & { t: "prompt"; file?: string; hasPreflight?: boolean })
+  | (SidecarMeta & { t: "steer_input"; behavior?: string })
+  | (SidecarMeta & { t: "checkpoint_request"; requestId?: string; kind?: string; entryId?: string | null })
+  | (SidecarMeta & { t: "checkpoint_result"; requestId?: string; ok?: boolean; error?: string | null })
+  | (SidecarMeta & { t: "session_ready"; opId?: string; ok?: boolean; error?: string | null })
+  | (SidecarMeta & {
+      t: "agent_start";
+      preflightRequestId?: string | null;
+      preflightToken?: string | null;
+      sessionFile?: string | null;
+      sessionId?: string | null;
+      entryId?: string | null;
+      parentEntryId?: string | null;
+      trusted?: boolean;
+      model?: string | null;
+      thinkingLevel?: string | null;
+    })
+  | (SidecarMeta & { t: "agent_settled" })
+  | (SidecarMeta & { t: "plan"; text?: string })
+  | (SidecarMeta & {
+      t: "tool";
+      toolName?: string;
+      path?: string;
+      edits?: ToolEdits;
+      toolCallId?: string;
+      entryId?: string | null;
+    })
+  | (SidecarMeta & { t: "tool_end"; toolCallId?: string; isError?: boolean });
+
+export type AgentStartEvent = Extract<SidecarEvent, { t: "agent_start" }>;
+
+const SIDECAR_KINDS = new Set<SidecarEvent["t"]>([
+  "preflight_request",
+  "prompt",
+  "steer_input",
+  "checkpoint_request",
+  "checkpoint_result",
+  "session_ready",
+  "agent_start",
+  "agent_settled",
+  "plan",
+  "tool",
+  "tool_end",
+]);
+
+/** One JSONL object. Arrays, primitives, and malformed JSON are not records. */
+export function parseSidecarRecord(line: string): Record<string, unknown> | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  return raw as Record<string, unknown>;
+}
+
+/** bridgeId plus a monotonic seq. Unknown kinds still occupy this slot. */
+function sidecarEnvelope(rec: Record<string, unknown>): SidecarMeta | null {
+  const bridgeId = rec.bridgeId;
+  const seq = rec.seq;
+  if (typeof bridgeId !== "string" || bridgeId.length === 0) return null;
+  if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 1) return null;
+  return { bridgeId, seq };
+}
+
+export function sidecarEventFromRecord(rec: Record<string, unknown>): SidecarEvent | null {
+  const envelope = sidecarEnvelope(rec);
+  if (!envelope) return null;
+  return sidecarEventBody(envelope, rec);
+}
+
+function isSidecarKind(t: string): t is SidecarEvent["t"] {
+  return SIDECAR_KINDS.has(t as SidecarEvent["t"]);
+}
+
+function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>): SidecarEvent | null {
+  const t = rec.t;
+  if (typeof t !== "string" || !isSidecarKind(t)) return null;
+  switch (t) {
+    case "preflight_request":
+      return { ...meta, t: "preflight_request", requestId: optionalString(rec.requestId), hasImages: optionalBoolean(rec.hasImages) };
+    case "prompt":
+      return { ...meta, t: "prompt", file: optionalString(rec.file), hasPreflight: optionalBoolean(rec.hasPreflight) };
+    case "steer_input":
+      return { ...meta, t: "steer_input", behavior: optionalString(rec.behavior) };
+    case "checkpoint_request":
+      return {
+        ...meta,
+        t: "checkpoint_request",
+        requestId: optionalString(rec.requestId),
+        kind: optionalString(rec.kind),
+        entryId: optionalStringOrNull(rec.entryId),
+      };
+    case "checkpoint_result":
+      return {
+        ...meta,
+        t: "checkpoint_result",
+        requestId: optionalString(rec.requestId),
+        ok: optionalBoolean(rec.ok),
+        error: optionalStringOrNull(rec.error),
+      };
+    case "session_ready":
+      return {
+        ...meta,
+        t: "session_ready",
+        opId: optionalString(rec.opId),
+        ok: optionalBoolean(rec.ok),
+        error: optionalStringOrNull(rec.error),
+      };
+    case "agent_start":
+      return {
+        ...meta,
+        t: "agent_start",
+        preflightRequestId: optionalStringOrNull(rec.preflightRequestId),
+        preflightToken: optionalStringOrNull(rec.preflightToken),
+        sessionFile: optionalStringOrNull(rec.sessionFile),
+        sessionId: optionalStringOrNull(rec.sessionId),
+        entryId: optionalStringOrNull(rec.entryId),
+        parentEntryId: optionalStringOrNull(rec.parentEntryId),
+        trusted: optionalBoolean(rec.trusted),
+        model: optionalStringOrNull(rec.model),
+        thinkingLevel: optionalStringOrNull(rec.thinkingLevel),
+      };
+    case "agent_settled":
+      return { ...meta, t: "agent_settled" };
+    case "plan":
+      return { ...meta, t: "plan", text: optionalString(rec.text) };
+    case "tool":
+      return {
+        ...meta,
+        t: "tool",
+        toolName: optionalString(rec.toolName),
+        path: optionalString(rec.path),
+        edits: optionalEdits(rec.edits),
+        toolCallId: optionalString(rec.toolCallId),
+        entryId: optionalStringOrNull(rec.entryId),
+      };
+    case "tool_end":
+      return { ...meta, t: "tool_end", toolCallId: optionalString(rec.toolCallId), isError: optionalBoolean(rec.isError) };
+  }
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function optionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function optionalStringOrNull(value: unknown): string | null | undefined {
+  if (value === null) return null;
+  return typeof value === "string" ? value : undefined;
+}
+
+function optionalEdits(value: unknown): ToolEdits | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const edits: ToolEdits = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const rec = item as Record<string, unknown>;
+    const oldText = optionalString(rec.oldText);
+    const newText = optionalString(rec.newText);
+    if (oldText === undefined && newText === undefined) continue;
+    edits.push({ ...(oldText !== undefined ? { oldText } : {}), ...(newText !== undefined ? { newText } : {}) });
+  }
+  return edits;
+}
 
 interface StreamState {
   bridgeId: string;
@@ -200,12 +339,12 @@ export class SidecarTailer {
     for (const line of lines) {
       if (!this.offsets.has(id)) return;
       if (!line.trim()) continue;
-      try {
-        const event = JSON.parse(line) as SidecarEvent;
-        if (event && this.acceptEvent(id, event)) this.onEvent(id, event);
-      } catch {
-        /* malformed line — skip */
-      }
+      const rec = parseSidecarRecord(line);
+      if (!rec) continue;
+      const envelope = sidecarEnvelope(rec);
+      if (!envelope || !this.acceptEvent(id, envelope)) continue;
+      const event = sidecarEventBody(envelope, rec);
+      if (event) this.onEvent(id, event);
     }
     const currentSize = this.offsets.get(id) ?? 0;
     if (this.offsets.has(id) && currentSize >= MAX_SIDECAR_BYTES) {
@@ -226,17 +365,15 @@ export class SidecarTailer {
     }
   }
 
-  private acceptEvent(id: string, event: SidecarEvent): boolean {
-    const sequence = event.seq;
-    if (typeof event.bridgeId !== "string" || typeof sequence !== "number" || !Number.isInteger(sequence) || sequence < 1) return false;
+  private acceptEvent(id: string, envelope: SidecarMeta): boolean {
     const previous = this.streams.get(id);
     const known = this.bridgeIds.get(id) ?? new Set<string>();
-    if (known.has(event.bridgeId) && previous?.bridgeId !== event.bridgeId) return false;
-    if (previous?.bridgeId === event.bridgeId && sequence <= previous.sequence) return false;
-    known.add(event.bridgeId);
+    if (known.has(envelope.bridgeId) && previous?.bridgeId !== envelope.bridgeId) return false;
+    if (previous?.bridgeId === envelope.bridgeId && envelope.seq <= previous.sequence) return false;
+    known.add(envelope.bridgeId);
     while (known.size > 8) known.delete(known.values().next().value!);
     this.bridgeIds.set(id, known);
-    this.streams.set(id, { bridgeId: event.bridgeId, sequence });
+    this.streams.set(id, { bridgeId: envelope.bridgeId, sequence: envelope.seq });
     return true;
   }
 }

@@ -10,7 +10,7 @@
 import { readFile, realpath as fsRealpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { SnapshotStore } from "./worldline-git.js";
-import { MAX_SIDECAR_BYTES } from "./sidecar.js";
+import { MAX_SIDECAR_BYTES, parseSidecarRecord, sidecarEventFromRecord } from "./sidecar.js";
 
 export type EvidenceKind = "verify" | "dependencies" | "api" | "footprint" | "benchmark" | "trajectory";
 export type ProfileName = "fewer-dependencies" | "preserve-api" | "simpler-implementation" | "performance-first";
@@ -741,14 +741,10 @@ export function parseTrajectoryLog(text: string, testLabel: string | null): Traj
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
     if (!line.trim()) continue;
-    try {
-      const event = JSON.parse(line) as Record<string, unknown>;
-      if (event && typeof event === "object" && event.t === "agent_start") {
-        start = i;
-        break;
-      }
-    } catch {
-      /* Skip a malformed line. */
+    const rec = parseSidecarRecord(line);
+    if (rec && sidecarEventFromRecord(rec)?.t === "agent_start") {
+      start = i;
+      break;
     }
   }
   const pending = new Map<string, string>();
@@ -762,27 +758,22 @@ export function parseTrajectoryLog(text: string, testLabel: string | null): Traj
   for (let i = start; i < lines.length; i++) {
     const line = lines[i];
     if (!line.trim()) continue;
-    let event: Record<string, unknown>;
-    try {
-      const parsed = JSON.parse(line) as Record<string, unknown>;
-      if (!parsed || typeof parsed !== "object") continue;
-      event = parsed;
-    } catch {
-      continue;
-    }
-    if (event.timedOut === true) timedOut++;
-    if (event.cancelled === true) cancelled++;
-    if (needle && typeof event.command === "string" && event.command.includes(needle)) testLabelSeen = true;
-    if (event.t === "tool") {
-      const path = typeof event.path === "string" ? event.path : "";
-      const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId.trim() : "";
+    const rec = parseSidecarRecord(line);
+    if (!rec) continue;
+    if (rec.timedOut === true) timedOut++;
+    if (rec.cancelled === true) cancelled++;
+    if (needle && typeof rec.command === "string" && rec.command.includes(needle)) testLabelSeen = true;
+    const event = sidecarEventFromRecord(rec);
+    if (event?.t === "tool") {
+      const path = event.path ?? "";
+      const toolCallId = event.toolCallId?.trim() ?? "";
       if (!path || !toolCallId) continue;
       fileToolStarts++;
       pending.set(toolCallId, path);
       continue;
     }
-    if (event.t === "tool_end") {
-      const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId.trim() : "";
+    if (event?.t === "tool_end") {
+      const toolCallId = event.toolCallId?.trim() ?? "";
       if (!toolCallId) continue;
       const path = pending.get(toolCallId);
       pending.delete(toolCallId);
