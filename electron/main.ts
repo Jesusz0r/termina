@@ -12,8 +12,9 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme } fro
 // Name the app for the macOS menu bar and user-data paths. Unpackaged runs default to "Electron".
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
-import { accessSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, constants, createReadStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { access, chmod, cp, copyFile, mkdir, mkdtemp, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
+import { createInterface } from "node:readline";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -31,16 +32,19 @@ import { coreClient } from "./core-client.js";
 import { createAppUpdater, updateMenuCopy, type AppUpdateController } from "./app-update.js";
 import {
   MAX_DISPATCH_WORKERS,
+  cleanPlanPathToken,
   findTaskByText,
   finalizePlanTasks,
   formatDispatchBriefing,
+  looksLikePath,
   markPlanProgress,
   parsePlanTasks,
   pickDispatchTasks,
   reattachDispatchAssignments,
   taskIsComplete,
 } from "./plan-board.js";
-import { AppPreferencesStore, normalizeAppPreferences, sanitizeShortcutMap } from "./preferences.js";
+import { AppPreferencesStore } from "./preferences.js";
+import { normalizeAppPreferences, sanitizeShortcutMap } from "../shared/preferences.js";
 import {
   DEFAULT_SHORTCUTS,
   defaultAppPreferences,
@@ -190,12 +194,8 @@ function isFlushResult(value: unknown): value is { ok: boolean; failed: string[]
 
 let shellsPromise: Promise<{ name: string; path: string }[]> | null = null;
 
-async function detectShells(): Promise<{ name: string; path: string }[]> {
-  if (!shellsPromise) shellsPromise = probeShells();
-  return shellsPromise;
-}
-
-async function probeShells(): Promise<{ name: string; path: string }[]> {
+function detectShells(): Promise<{ name: string; path: string }[]> {
+  if (shellsPromise) return shellsPromise;
   const candidates: Array<[string, string]> = [
     ["zsh", "/bin/zsh"],
     ["bash", "/bin/bash"],
@@ -204,19 +204,23 @@ async function probeShells(): Promise<{ name: string; path: string }[]> {
     ["fish", "/usr/local/bin/fish"],
     ["fish", "/usr/bin/fish"],
   ];
-  const found = await Promise.all(candidates.map(async ([name, path]) => {
-    try {
-      await access(path);
-      return { name, path };
-    } catch {
-      return null;
+  shellsPromise = Promise.all(
+    candidates.map(async ([name, path]) => {
+      try {
+        await access(path);
+        return { name, path };
+      } catch {
+        return null;
+      }
+    }),
+  ).then((found) => {
+    const out: { name: string; path: string }[] = [];
+    for (const item of found) {
+      if (item && !out.some((s) => s.name === item.name)) out.push(item);
     }
-  }));
-  const out: { name: string; path: string }[] = [];
-  for (const item of found) {
-    if (item && !out.some((s) => s.name === item.name)) out.push(item);
-  }
-  return out;
+    return out;
+  });
+  return shellsPromise;
 }
 
 class PiTerminalInstance {
@@ -625,7 +629,7 @@ class PiEditorApp {
       {
         label: "Terminal",
         submenu: [
-          { label: "New Terminal", accelerator: shortcut("new-terminal"), click: () => void this.createTerminal() },
+          { label: "New Terminal", accelerator: shortcut("new-terminal"), click: send("new-terminal") },
           { label: "Close Terminal", accelerator: shortcut("close-terminal"), click: () => void this.closeActiveTerminal() },
           { type: "separator" },
           { label: "Send Ctrl+C (abort)", accelerator: shortcut("abort-terminal"), click: () => void this.abortActive() },
@@ -695,6 +699,9 @@ class PiEditorApp {
 
   private async updatePreferences(raw: unknown, activateShortcuts: boolean): Promise<AppPreferences> {
     const next = normalizeAppPreferences(raw);
+    // Main owns openProjects: the renderer sends a stale snapshot, and a
+    // settings save must never roll back the current project list.
+    next.openProjects = this.preferences.openProjects;
     this.preferences = next;
     nativeTheme.themeSource = next.theme === "light" ? "light" : "dark";
     if (activateShortcuts) {
@@ -1511,6 +1518,16 @@ class PiEditorApp {
     inst.pty.onData = (data) => this.sendPtyData(inst.id, data);
     inst.pty.onExit = (code) => {
       console.log(`[main] terminal ${inst.id} (${inst.type}) exited code=${code}`);
+      if (inst.captureTimer) {
+        clearTimeout(inst.captureTimer);
+        inst.captureTimer = null;
+      }
+      for (const [token, pending] of [...this.pendingPreflights]) {
+        if (pending.terminalId !== inst.id) continue;
+        clearTimeout(pending.timer);
+        this.releaseWriteLease(pending.workspaceId, pending.leaseRequester);
+        this.pendingPreflights.delete(token);
+      }
       this.send("pty:exit", { id: inst.id, code });
       this.closeRunOnExit(inst);
       void this.cleanupPromptPayloads(inst);
@@ -1900,8 +1917,13 @@ class PiEditorApp {
     return "--" + p + "--";
   }
 
-  /** Full-text search over the project's past session files. Bounded: the
-   *  50 newest sessions, 2 MB per file, 50 hits, 400 chars per line. */
+  private searchSessionsSeq = 0;
+
+  /**
+   * Search past session files for the active project.
+   * Streams lines asynchronously so the main process stays responsive.
+   * Bounded to the 50 newest sessions and 50 total hits.
+   */
   private async searchSessions(query: string): Promise<SessionHit[]> {
     const cwd = this.project()?.cwd ?? null;
     const needle = query.trim().toLowerCase();
@@ -1911,40 +1933,147 @@ class PiEditorApp {
     try {
       files = (await readdir(dir)).filter((f) => f.endsWith(".jsonl")).sort().reverse();
     } catch {
-      return []; // no sessions for this project yet
+      return [];
     }
+    const seq = ++this.searchSessionsSeq;
     const hits: SessionHit[] = [];
+    const projectCwd = this.canonicalPath(cwd);
+
     for (const file of files.slice(0, 50)) {
-      let content: string;
+      if (seq !== this.searchSessionsSeq || this.disposed) break;
+      const filePath = join(dir, file);
       try {
-        const st = await stat(join(dir, file));
-        if (st.size > 2 * 1024 * 1024) continue;
-        content = await readFile(join(dir, file), "utf8");
+        const st = await stat(filePath);
+        if (st.size > 10 * 1024 * 1024) continue;
       } catch {
-        continue; // unreadable session — skip
+        continue;
       }
-      const lines = content.split("\n");
-      for (let i = 0; i < lines.length; i++) {
-        if (!lines[i].toLowerCase().includes(needle)) continue;
-        hits.push({
-          sessionFile: file,
-          line: i + 1,
-          text: this.snippetLine(lines[i]),
-          before: i > 0 ? this.snippetLine(lines[i - 1]) : "",
-          after: i + 1 < lines.length ? this.snippetLine(lines[i + 1]) : "",
-          ts: this.sessionTimestamp(file),
-          filePath: this.resolveHitPath(lines[i]) ?? undefined,
-        });
-        if (hits.length >= 50) break;
+
+      const stream = createReadStream(filePath, { encoding: "utf8" });
+      const rl = createInterface({ input: stream, crlfDelay: Infinity });
+      let lineNum = 0;
+      let prevText = "";
+
+      try {
+        for await (const line of rl) {
+          if (seq !== this.searchSessionsSeq || this.disposed) {
+            rl.close();
+            stream.destroy();
+            break;
+          }
+          lineNum++;
+          if (lineNum > 10000) break;
+          const parsed = this.parseSessionMessageLine(line);
+          if (!parsed) continue;
+
+          const matchIdx = parsed.text.toLowerCase().indexOf(needle);
+          if (matchIdx !== -1) {
+            const hitPath = this.resolveSessionHitPath(parsed, projectCwd);
+            hits.push({
+              sessionFile: file,
+              line: lineNum,
+              text: this.formatSessionHitSnippet(parsed.role, parsed.text, matchIdx, needle.length),
+              before: prevText,
+              after: "",
+              ts: this.sessionTimestamp(file),
+              filePath: hitPath ?? undefined,
+            });
+            if (hits.length >= 50) {
+              rl.close();
+              stream.destroy();
+              break;
+            }
+          }
+          prevText = `[${parsed.role}] ${parsed.text.slice(0, 120)}`;
+        }
+      } catch {
+        /* skip read errors */
+      } finally {
+        rl.close();
+        stream.destroy();
       }
+
       if (hits.length >= 50) break;
+      await new Promise<void>((resolve) => setImmediate(resolve));
     }
-    return hits;
+
+    return seq === this.searchSessionsSeq ? hits : [];
   }
 
-  /** Cap a hit line so the result list stays small. */
-  private snippetLine(line: string): string {
-    return line.length > 400 ? line.slice(0, 400) + "…" : line;
+  private parseSessionMessageLine(line: string): { role: string; text: string; paths: string[] } | null {
+    if (!line || !line.includes('"message"')) return null;
+    try {
+      const entry = JSON.parse(line) as {
+        type?: string;
+        message?: {
+          role?: string;
+          content?: string | Array<{ type?: string; text?: string; name?: string; arguments?: Record<string, unknown> }>;
+        };
+      };
+      if (entry.type !== "message" || !entry.message) return null;
+      const role = entry.message.role ?? "message";
+      if (role !== "user" && role !== "assistant") return null;
+      const content = entry.message.content;
+      const texts: string[] = [];
+      const paths: string[] = [];
+      if (typeof content === "string") {
+        texts.push(content);
+      } else if (Array.isArray(content)) {
+        for (const block of content) {
+          if (block.type === "text" && typeof block.text === "string") {
+            texts.push(block.text);
+          } else if (block.type === "toolCall" && typeof block.name === "string") {
+            texts.push(`[${block.name}]`);
+            if (block.arguments && typeof block.arguments === "object") {
+              for (const v of Object.values(block.arguments)) {
+                if (typeof v === "string" && looksLikePath(v)) paths.push(v);
+              }
+            }
+          }
+        }
+      }
+      if (texts.length === 0) return null;
+      const text = texts.join(" ").replace(/\s+/g, " ").trim();
+      return { role, text, paths };
+    } catch {
+      return null;
+    }
+  }
+
+  private formatSessionHitSnippet(role: string, text: string, matchIdx: number, matchLen: number): string {
+    const prefix = `[${role}] `;
+    if (text.length <= 300) return prefix + text;
+    const start = Math.max(0, matchIdx - 60);
+    const end = Math.min(text.length, matchIdx + matchLen + 200);
+    const snippet = (start > 0 ? "…" : "") + text.slice(start, end) + (end < text.length ? "…" : "");
+    return prefix + snippet;
+  }
+
+  private resolveSessionHitPath(parsed: { text: string; paths: string[] }, projectCwd: string): string | null {
+    for (const p of parsed.paths.slice(0, 5)) {
+      const clean = cleanPlanPathToken(p, projectCwd, this.canonicalPath.bind(this));
+      if (this.isProjectFile(clean, projectCwd)) return clean;
+    }
+    const backticks = parsed.text.match(/`([^`]+)`/g);
+    if (backticks) {
+      for (const raw of backticks.slice(0, 5)) {
+        const token = raw.slice(1, -1).trim();
+        const clean = cleanPlanPathToken(token, projectCwd, this.canonicalPath.bind(this));
+        if (this.isProjectFile(clean, projectCwd)) return clean;
+      }
+    }
+    return null;
+  }
+
+  private isProjectFile(relPath: string, projectCwd: string): boolean {
+    if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return false;
+    const abs = join(projectCwd, relPath);
+    if (!this.withinProject(abs)) return false;
+    try {
+      return existsSync(abs) && statSync(abs).isFile();
+    } catch {
+      return false;
+    }
   }
 
   /** The session start time from the file name (ISO prefix). */
@@ -1952,24 +2081,6 @@ class PiEditorApp {
     const m = file.match(/^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})/);
     if (!m) return 0;
     return new Date(`${m[1]}T${m[2]}:${m[3]}:${m[4]}`).getTime();
-  }
-
-  /** The first token in a line that resolves to a file inside the project. */
-  private resolveHitPath(line: string): string | null {
-    if (!this.project()?.cwd) return null;
-    const tokens = line.match(/`[^`]+`|"[^"]*"|'[^']*'|\S+/g) ?? [];
-    for (const raw of tokens) {
-      const token = raw.replace(/^[`"']+|[`"']+$/g, "");
-      if (!token.includes("/") && !/\.[a-zA-Z0-9]{1,5}$/.test(token)) continue;
-      const abs = join(this.project()!.cwd, token);
-      if (!this.withinProject(abs)) continue;
-      try {
-        if (existsSync(abs)) return token;
-      } catch {
-        /* keep scanning */
-      }
-    }
-    return null;
   }
 
   // ------------------------------------------------------------- dispatch --
@@ -2475,6 +2586,10 @@ class PiEditorApp {
   private closeTerminal(id: string): void {
     const inst = this.terminals.get(id);
     if (!inst) return;
+    if (inst.captureTimer) {
+      clearTimeout(inst.captureTimer);
+      inst.captureTimer = null;
+    }
     if (this.verifyRuns.has(id)) this.cancelVerify(id);
     inst.pty.kill();
     // pty.onExit removes it from the map
@@ -2896,6 +3011,7 @@ class PiEditorApp {
   private expirePreflight(token: string): void {
     const pending = this.pendingPreflights.get(token);
     if (!pending) return;
+    clearTimeout(pending.timer);
     this.pendingPreflights.delete(token);
     this.releaseWriteLease(pending.workspaceId, pending.leaseRequester);
   }
@@ -3372,6 +3488,7 @@ class PiEditorApp {
     // addressing the event by reference (the tail may have moved on). Content
     // stays main-side; the renderer fetches it on click.
     setTimeout(() => {
+      if (this.disposed || !this.terminals.has(inst.id)) return;
       const fresh = this.workspaceOfTerminal(inst)?.watcher?.lastContents.get(path);
       if (fresh === undefined) return;
       const idx = inst.timeline.indexOf(ev as TimelineEvent);
@@ -3774,6 +3891,7 @@ class PiEditorApp {
         /* Pi can be unavailable while the folder still opens. */
       }
       await this.sendFolderOpened(cwd, id);
+      this.persistOpenProjects();
       return project;
     } finally {
       this.switchingProjects.delete(id);
@@ -3871,6 +3989,7 @@ class PiEditorApp {
       await this.teardownRecording(project, closingWorkspaceIds);
       this.cleanupExportedStates(projectId);
       this.projects.delete(projectId);
+      this.persistOpenProjects();
       this.send("project:closed", { projectId });
       if (this.activeProjectId === projectId) {
         const next = this.projects.keys().next().value;
@@ -4630,8 +4749,32 @@ class PiEditorApp {
       await this.openProject(initialCwd);
       return;
     }
+    // Restore the projects from the last session. Missing or non-directory
+    // paths are skipped: they may be unmounted volumes or hand-edited entries.
+    for (const root of this.preferences.openProjects) {
+      try {
+        if (!statSync(root).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      try {
+        await this.openProject(root);
+      } catch (err) {
+        console.warn(`[main] could not restore project ${root}: ${(err as Error).message}`);
+      }
+    }
     // A normal launch has no folder. The renderer shows the open-folder
     // placeholder until the user picks one. Tests set TERMINA_INITIAL_CWD.
+  }
+
+  /** Record the open projects so the next launch restores them. */
+  private persistOpenProjects(): void {
+    const roots = [...this.projects.values()].map((p) => p.canonicalRoot);
+    if (JSON.stringify(roots) === JSON.stringify(this.preferences.openProjects)) return;
+    this.preferences.openProjects = roots;
+    void this.preferencesStore.save(this.preferences).catch((err) => {
+      console.warn(`[main] project list save failed: ${(err as Error).message}`);
+    });
   }
 
   private async checkAppUpdateFromMenu(): Promise<void> {
@@ -4679,6 +4822,7 @@ class PiEditorApp {
     if (this.disposed) return;
     this.disposed = true;
     this.appUpdater?.dispose();
+    this.persistOpenProjects();
     await this.preferencesStore.flush();
     await this.drainVerifyJobs(null);
     this.tailer.stop();
@@ -4692,13 +4836,32 @@ class PiEditorApp {
       for (const ws of project.workspaces.values()) ws.watcher?.stop();
     }
     coreClient.dispose();
-    for (const inst of this.terminals.values()) inst.pty.kill();
+    for (const inst of this.terminals.values()) {
+      if (inst.captureTimer) {
+        clearTimeout(inst.captureTimer);
+        inst.captureTimer = null;
+      }
+      inst.pty.kill();
+    }
     await this.drainTerminals(null);
     for (const inst of this.terminals.values()) {
       for (const event of inst.timeline) {
         if (event.stateId) void this.releaseStateIfUnused(event.stateId, inst.id, event.seq);
       }
     }
+    if (this.userEditsWriteTimer) {
+      clearTimeout(this.userEditsWriteTimer);
+      this.userEditsWriteTimer = null;
+    }
+    for (const pending of this.pendingPreflights.values()) {
+      clearTimeout(pending.timer);
+    }
+    this.pendingPreflights.clear();
+    for (const waiter of this.flushWaiters.values()) {
+      clearTimeout(waiter.timer);
+      waiter.resolve({ ok: false, failed: ["app disposed"] });
+    }
+    this.flushWaiters.clear();
     this.projects.clear();
     this.terminals.clear();
     for (const tailer of this.worldlineTailers.values()) tailer.stop();

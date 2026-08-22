@@ -41,7 +41,8 @@ import { SessionSearch } from "./session-search";
 import { WorldlinesView } from "./worldlines";
 import { Explorer } from "./components/explorer";
 import { toast } from "./components/modals";
-import { SettingsView, emptyShortcuts } from "./settings";
+import { SettingsView } from "./settings";
+import { emptyShortcuts } from "./settings-shortcuts";
 import { defaultAppPreferences, pathBasename } from "../shared/types";
 import { normalizeAppPreferences } from "../shared/preferences";
 import type { AppPreferences, AppUpdateState, ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
@@ -62,18 +63,18 @@ interface ProjectView {
 const projectViews = new Map<string, ProjectView>();
 let activeProjectId: string | null = null;
 const emptyTemplate = document.getElementById("editor-empty-template") as HTMLTemplateElement;
-const rightPaneEl2 = document.getElementById("right-pane")!;
+const rightPaneEl = document.getElementById("right-pane")!;
 // The base editor fills the pane before any project tab exists (the
 // no-project boot). Project views take over once a folder opens.
 const baseEmptyEl = emptyTemplate.content.firstElementChild!.cloneNode(true) as HTMLElement;
-rightPaneEl2.appendChild(baseEmptyEl);
+rightPaneEl.appendChild(baseEmptyEl);
 const baseEditor = new EditorManager(
   document.getElementById("editor-container")!,
   document.getElementById("editor-tabs")!,
   baseEmptyEl,
 );
 baseEditor.onConflict = (path) => {
-  toast(`${path.split("/").pop()} changed on disk — you have unsaved edits`, "warning");
+  toast(`${pathBasename(path)} changed on disk — you have unsaved edits`, "warning");
 };
 applySharedEditorHooks(baseEditor);
 // The e2e suites drive the active editor through this hook.
@@ -98,12 +99,12 @@ function createProjectView(project: { id: string; cwd: string; needsLogin?: bool
   const emptyEl = emptyTemplate.content.firstElementChild!.cloneNode(true) as HTMLElement;
   editorEl.append(chromeEl, containerEl, emptyEl);
   editorEl.style.display = "none";
-  rightPaneEl2.insertBefore(editorEl, rightPaneEl2.firstElementChild);
+  rightPaneEl.insertBefore(editorEl, rightPaneEl.firstElementChild);
 
   const editorMgr = new EditorManager(containerEl, tabsEl, emptyEl, true, project.needsLogin === true);
   // A disk write reached a model with unsaved edits: never replace silently.
   editorMgr.onConflict = (path) => {
-    toast(`${path.split("/").pop()} changed on disk — you have unsaved edits`, "warning");
+    toast(`${pathBasename(path)} changed on disk — you have unsaved edits`, "warning");
   };
   applySharedEditorHooks(editorMgr);
   applyEditorPreferences(editorMgr, preferences);
@@ -153,6 +154,7 @@ function removeProjectView(projectId: string): void {
   if (!view) return;
   const editorToggle = document.getElementById("btn-min-editor");
   if (editorToggle && view.editorEl.contains(editorToggle)) placeEditorToggle(null);
+  view.editorMgr.dispose();
   view.tabEl.remove();
   view.editorEl.remove();
   projectViews.delete(projectId);
@@ -301,7 +303,6 @@ const btnDispatch = document.getElementById("btn-dispatch") as HTMLButtonElement
 const timelineView = new TimelineView(document.getElementById("timeline-strip")!);
 (window as unknown as Record<string, unknown>).__timelineView = timelineView;
 const worldlinesView = new WorldlinesView(document.getElementById("worldline-panel")!);
-(window as unknown as Record<string, unknown>).__worldlinesView = worldlinesView;
 worldlinesView.bind({
   onCompareBase: (comparisonId, label, relPath, absPath) => {
     void reviewView.showCandidateDiff(comparisonId, label, relPath, absPath);
@@ -1090,7 +1091,6 @@ const splitEl = document.getElementById("main-split")!;
 const modifiedPanelEl = document.getElementById("modified-panel")!;
 const explorerDividerEl = document.getElementById("explorer-divider")!;
 const modifiedResizeEl = document.getElementById("modified-resize")!;
-const rightPaneEl = document.getElementById("right-pane")!;
 const btnMinExplorer = document.getElementById("btn-min-explorer") as HTMLButtonElement;
 const btnMinTerminal = document.getElementById("btn-min-terminal") as HTMLButtonElement;
 const btnMinEditor = document.getElementById("btn-min-editor") as HTMLButtonElement;
@@ -1293,8 +1293,11 @@ window.pi.onMenuCommand((cmd) => {
   switch (cmd.command) {
     case "save-all":
       void activeEditor().flushAll().then((res) => {
-        if (!res.ok) toast(`could not save: ${res.failed.map((p) => p.split("/").pop()).join(", ")}`, "warning");
+        if (!res.ok) toast(`could not save: ${res.failed.map((p) => pathBasename(p)).join(", ")}`, "warning");
       });
+      break;
+    case "new-terminal":
+      void openTerminalMenu();
       break;
     case "edit:undo":
       runMenuEdit("undo");
@@ -1624,6 +1627,7 @@ window.pi.onToolTarget((p) => {
 
 const lastChangePush = new Map<string, number>();
 const largeChangeFetch = new Set<string>();
+const MAX_LAST_CHANGE_PUSH = 500;
 
 function fetchLargeChange(path: string): void {
   if (largeChangeFetch.has(path)) return;
@@ -1631,7 +1635,8 @@ function fetchLargeChange(path: string): void {
   const at = lastChangePush.get(path);
   void window.pi.openFile(path).then((res) => {
     largeChangeFetch.delete(path);
-    if (lastChangePush.get(path) !== at) {
+    const latest = lastChangePush.get(path);
+    if (latest !== undefined && latest !== at) {
       fetchLargeChange(path);
       return;
     }
@@ -1643,7 +1648,13 @@ function fetchLargeChange(path: string): void {
 
 window.pi.onFileChanged((p) => {
   const at = Date.now();
+  lastChangePush.delete(p.path);
   lastChangePush.set(p.path, at);
+  while (lastChangePush.size > MAX_LAST_CHANGE_PUSH) {
+    const oldestKey = lastChangePush.keys().next().value;
+    if (oldestKey === undefined) break;
+    lastChangePush.delete(oldestKey);
+  }
   activeEditor().markTouched(p.path);
   if (p.content !== undefined) {
     activeEditor().updateContent(p.path, p.content);
@@ -1658,6 +1669,7 @@ window.pi.onFileChanged((p) => {
 });
 
 window.pi.onFileDeleted((p) => {
+  lastChangePush.delete(p.path);
   activeEditor().closeIfOpen(p.path);
   explorer.handleDiskChange();
 });

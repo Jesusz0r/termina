@@ -8,7 +8,7 @@
  */
 import type { WorldlineSummary, WorldlineDetails, WorldlineChangedFile, EvidenceSummary } from "../shared/types";
 import { showConfirm, showFileListModal, toast } from "./components/modals";
-import { KIND_LABEL, STATE_LABELS, chipText, evidenceLineDetail, formatBytes, profileCaption, recordOf } from "./worldline-evidence";
+import { KIND_LABEL, chipText, evidenceLineDetail, formatBytes, profileCaption, recordOf } from "./worldline-evidence";
 
 interface ViewHandlers {
   /** Open a base-to-candidate diff in Change Review. */
@@ -339,7 +339,7 @@ export class WorldlinesView {
     card.el.querySelector(".cand-role")!.textContent = s.role;
     card.el.querySelector(".cand-meta")!.textContent =
       [s.model, s.thinkingLevel].filter(Boolean).join(" · ") || "model unknown";
-    card.stateEl.textContent = STATE_LABELS[s.state] ?? s.state;
+    card.stateEl.textContent = s.state;
     card.stateEl.className = `cand-state state-${s.state}`;
     card.el.title = s.error ? `error: ${s.error}` : "";
     card.el.classList.toggle("has-error", s.state === "error" || s.state === "conflict");

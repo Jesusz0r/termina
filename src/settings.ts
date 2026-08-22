@@ -8,9 +8,7 @@ import {
   type ThemeId,
 } from "../shared/types";
 import { normalizeAppPreferences } from "../shared/preferences";
-import { SHORTCUTS, emptyShortcuts, formatShortcut, shortcutForEvent } from "./settings-shortcuts";
-
-export { emptyShortcuts };
+import { SHORTCUTS, formatShortcut, shortcutForEvent } from "./settings-shortcuts";
 
 interface SettingsCallbacks {
   onChange: (preferences: AppPreferences) => void;

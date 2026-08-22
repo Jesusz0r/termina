@@ -16,21 +16,6 @@ export const KIND_LABEL: Record<EvidenceRecord["kind"], string> = {
   trajectory: "trajectory",
 };
 
-export const STATE_LABELS: Record<string, string> = {
-  creating: "creating",
-  ready: "ready",
-  running: "running",
-  settled: "settled",
-  verifying: "verifying",
-  promoting: "promoting",
-  conflict: "conflict",
-  cancelled: "cancelled",
-  error: "error",
-  discarding: "discarding",
-  discarded: "discarded",
-  promoted: "promoted",
-};
-
 function captionName(profile: ProfileVerdict["profile"]): string {
   return profile === "fewer-dependencies" ? "deps" : PROFILE_LABEL[profile];
 }

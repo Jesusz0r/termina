@@ -3,9 +3,6 @@ import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { defaultAppPreferences, type AppPreferences } from "../shared/types.js";
 import { normalizeAppPreferences } from "../shared/preferences.js";
-
-export { normalizeAppPreferences, sanitizeShortcutMap } from "../shared/preferences.js";
-
 const MAX_PREFERENCES_BYTES = 128 * 1024;
 
 export class AppPreferencesStore {
