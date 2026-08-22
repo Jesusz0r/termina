@@ -212,6 +212,8 @@ export interface AppPreferences {
   wordWrap: boolean;
   minimap: boolean;
   shortcuts: ShortcutMap;
+  /** Canonical project roots to reopen on launch. Main owns this field. */
+  openProjects: string[];
 }
 
 export type ShortcutCommand =
@@ -255,7 +257,7 @@ export const DEFAULT_SHORTCUTS: ShortcutMap = {
   undo: "CmdOrCtrl+Z",
   redo: "Shift+CmdOrCtrl+Z",
   "select-all": "CmdOrCtrl+A",
-  "new-terminal": "CmdOrCtrl+Shift+T",
+  "new-terminal": "CmdOrCtrl+T",
   "close-terminal": "CmdOrCtrl+Shift+W",
   "abort-terminal": "CmdOrCtrl+.",
   fullscreen: "CmdOrCtrl+Shift+F",
@@ -280,12 +282,14 @@ export function defaultAppPreferences(): AppPreferences {
     wordWrap: false,
     minimap: true,
     shortcuts: { ...DEFAULT_SHORTCUTS },
+    openProjects: [],
   };
 }
 
 export type MenuCommand =
   | "new-file"
   | "new-folder"
+  | "new-terminal"
   | "rename"
   | "delete"
   | "refresh"

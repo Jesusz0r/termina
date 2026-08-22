@@ -75,6 +75,24 @@ function sanitizeFontFamily(value: unknown, fallback: CodeFontFamily): CodeFontF
   return CODE_FONT_FAMILIES.includes(value as CodeFontFamily) ? value as CodeFontFamily : fallback;
 }
 
+const MAX_OPEN_PROJECTS = 12;
+
+/** Canonical roots of the projects to reopen on launch. Main owns writes;
+ *  validation still guards the file against a hand-edited entry. */
+function sanitizeOpenProjects(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || entry.length === 0 || entry.length > 1024) continue;
+    if (seen.has(entry)) continue;
+    seen.add(entry);
+    result.push(entry);
+    if (result.length >= MAX_OPEN_PROJECTS) break;
+  }
+  return result;
+}
+
 export function normalizeAppPreferences(raw: unknown): AppPreferences {
   const defaults = defaultAppPreferences();
   const input = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
@@ -86,5 +104,6 @@ export function normalizeAppPreferences(raw: unknown): AppPreferences {
     wordWrap: typeof input.wordWrap === "boolean" ? input.wordWrap : defaults.wordWrap,
     minimap: typeof input.minimap === "boolean" ? input.minimap : defaults.minimap,
     shortcuts: sanitizeShortcutMap(input.shortcuts, defaults.shortcuts),
+    openProjects: sanitizeOpenProjects(input.openProjects),
   };
 }

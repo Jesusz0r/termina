@@ -7,12 +7,12 @@ isolated candidates, and converge on green code together.
 
 ```
 ┌──────────────────────────────┬───────────────────────────────┐
-│ pi TUI (real terminal, pty)  │  Monaco IDE + file explorer    │
-│  /settings /login /models     │  files auto-open mid-run       │
-│  plan mode, completions…      │  live-synced via fs.watch      │
+│ pi TUI (real terminal, pty)  │  Monaco IDE + file explorer   │
+│  /settings /login /models    │   files auto-open mid-run     │
+│  plan mode, completions…     │   live-synced via fs.watch    │
 ├──────────────────────────────┴───────────────────────────────┤
-│ terminal tabs · status bar                                    │
-└───────────────────────────────────────────────────────────────┘
+│ terminal tabs · status bar                                   │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 Everything runs locally. The terminal stays the source of truth; the app
@@ -33,7 +33,7 @@ folder; the Plan Board shows Dispatch assignments.
 
 | Feature | What it does |
 |---|---|
-| Empty first launch | no folder until you pick one; after Open folder, the empty editor tells you to `/login` and `/models` in the terminal when pi has no provider |
+| Empty first launch | fresh launches start with no folder until you pick one; later launches restore saved project tabs; the empty editor tells you to `/login` and `/models` when pi has no provider |
 | Project tabs | multiple projects side by side: one tab per folder, each with its own explorer, editor, and terminals — agents keep running when you switch |
 | Live editor | the file watcher pushes every disk change into open Monaco models; files the agent touches auto-open mid-run |
 | Change Review | per-terminal modified-files panel with pre-run baselines: side-by-side diffs, Accept / Revert, Accept all. Termina never writes your Git repo; after a green Verify or Accept it offers a commit subject to copy and a shell in the project |

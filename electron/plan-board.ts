@@ -200,7 +200,7 @@ function planTaskPaths(body: string, cwd: string | null, canonicalize: Canonical
   return [...new Set(paths)].slice(0, MAX_PATHS_PER_TASK);
 }
 
-function cleanPlanPathToken(token: string, cwd: string | null, canonicalize: CanonicalizePath): string {
+export function cleanPlanPathToken(token: string, cwd: string | null, canonicalize: CanonicalizePath): string {
   const isItalicPair = /_$/.test(token);
   // Strip punctuation and markdown emphasis. A leading underscore is a
   // filename (_test.py) unless the token also ends with one (_italic_).
@@ -216,7 +216,7 @@ function cleanPlanPathToken(token: string, cwd: string | null, canonicalize: Can
 
 /** A token is a file path when it has a slash or a code extension.
  *  Version numbers (0.1.5) and latin abbreviations (e.g.) are not paths. */
-function looksLikePath(token: string): boolean {
+export function looksLikePath(token: string): boolean {
   if (!token || token.length > 200) return false;
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(token)) return false;
   if (/^v?\d+(?:\.\d+)+$/.test(token)) return false;

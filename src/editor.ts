@@ -566,5 +566,9 @@ export class EditorManager {
   dispose(): void {
     this.editor.dispose();
     for (const tab of this.tabs.values()) tab.model.dispose();
+    this.tabs.clear();
+    this.order = [];
+    this.userDirty.clear();
+    this.mineKeys.clear();
   }
 }
