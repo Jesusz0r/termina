@@ -85,7 +85,8 @@ export class PtyView {
   }
 
   private handleKey(event: KeyboardEvent): boolean {
-    if (event.type !== "keydown" || (!event.metaKey && !event.ctrlKey && !(event.altKey && event.key === "Backspace"))) return true;
+    const altKey = event.altKey && (event.key === "Backspace" || event.key === "Enter");
+    if (event.type !== "keydown" || (!event.metaKey && !event.ctrlKey && !altKey)) return true;
     const key = event.key.toLowerCase();
     if (key === "c" && this.term.hasSelection()) {
       event.preventDefault();
@@ -113,6 +114,13 @@ export class PtyView {
     if (event.altKey && event.key === "Backspace") {
       event.preventDefault();
       this.sendInput("\x17");
+      return false;
+    }
+    // macOS treats Option+Enter as a third-level shift, so xterm sends
+    // nothing. Send the ESC CR sequence pi reads as Alt+Enter.
+    if (event.altKey && !event.ctrlKey && !event.metaKey && event.key === "Enter") {
+      event.preventDefault();
+      this.sendInput("\x1b\r");
       return false;
     }
     return true;

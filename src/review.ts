@@ -4,6 +4,7 @@
  */
 import * as monaco from "monaco-editor";
 import { toast } from "./components/modals";
+import { languageForPath } from "./editor-language";
 import { applyMonacoTheme } from "./editor";
 import { cssFontFamily, type ThemeId } from "../shared/types";
 
@@ -189,9 +190,12 @@ export class ReviewView {
     const path = this.path ?? "";
     this.originalModel?.dispose();
     this.modifiedModel?.dispose();
-    this.originalModel = monaco.editor.createModel(originalText, undefined, monaco.Uri.parse(`file:///review/original/${encodeURIComponent(path)}`));
-    this.modifiedModel = monaco.editor.createModel(modifiedText, undefined, monaco.Uri.parse(`file:///review/modified/${encodeURIComponent(path)}`));
+    const lang = languageForPath(path);
+    this.originalModel = monaco.editor.createModel(originalText, lang, monaco.Uri.parse(`file:///review/original/${encodeURIComponent(path)}`));
+    this.modifiedModel = monaco.editor.createModel(modifiedText, lang, monaco.Uri.parse(`file:///review/modified/${encodeURIComponent(path)}`));
     this.diffEditor.setModel({ original: this.originalModel, modified: this.modifiedModel });
+    // Test seam: the e2e suites assert on the diff sides. Content is small
+    // (review files) and lives only while the modal is open.
     (window as unknown as Record<string, unknown>).__reviewDebug = {
       original: this.originalModel.getValue(),
       modified: this.modifiedModel.getValue(),
