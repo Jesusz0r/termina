@@ -1,20 +1,27 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#2a2d2e"/>
-      <stop offset="1" stop-color="#141414"/>
+      <stop offset="0" stop-color="#13160c"/>
+      <stop offset="1" stop-color="#0b0d09"/>
     </linearGradient>
     <linearGradient id="glow" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#4fc1ff" stop-opacity="0.55"/>
-      <stop offset="1" stop-color="#4fc1ff" stop-opacity="0"/>
+      <stop offset="0" stop-color="#b8f04a" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#b8f04a" stop-opacity="0"/>
     </linearGradient>
   </defs>
-  <!-- macOS squircle background -->
+  <!-- macOS squircle background, green-tinted like the landing base -->
   <rect x="40" y="40" width="944" height="944" rx="210" fill="url(#bg)"/>
-  <!-- top-left accent glow -->
+  <!-- top-left lime glow -->
   <rect x="40" y="40" width="944" height="944" rx="210" fill="url(#glow)"/>
+  <!-- session timeline: settled moments on a dim rail -->
+  <line x1="180" y1="636" x2="650" y2="636" stroke="#b8f04a" stroke-opacity="0.35" stroke-width="56" stroke-linecap="round"/>
+  <circle cx="250" cy="636" r="54" fill="#b8f04a"/>
+  <circle cx="410" cy="636" r="54" fill="#b8f04a"/>
+  <!-- the forkable moment -->
+  <circle cx="568" cy="636" r="70" fill="#b8f04a"/>
+  <!-- fork into the alternative worldline -->
+  <path d="M568 636 Q612 566 692 506" fill="none" stroke="#b8f04a" stroke-width="56" stroke-linecap="round"/>
+  <circle cx="800" cy="420" r="62" fill="none" stroke="#b8f04a" stroke-width="50"/>
   <!-- subtle border -->
-  <rect x="40" y="40" width="944" height="944" rx="210" fill="none" stroke="#3c3c3c" stroke-width="6"/>
-  <!-- Tr monogram -->
-  <text x="512" y="700" font-family="Menlo, Monaco, monospace" font-size="480" font-weight="700" fill="#4fc1ff" text-anchor="middle">Tr</text>
+  <rect x="40" y="40" width="944" height="944" rx="210" fill="none" stroke="#333c26" stroke-width="6"/>
 </svg>

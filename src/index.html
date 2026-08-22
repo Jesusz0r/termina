@@ -31,11 +31,10 @@
         color: #d4d4d4;
         font-family: ui-monospace, "SF Mono", Menlo, monospace;
       }
-      #splash .logo-text {
-        font-size: 42px;
-        font-weight: 700;
-        color: #4fc1ff;
-        letter-spacing: 0.02em;
+      #splash .brand-mark {
+        width: 72px;
+        height: 72px;
+        color: #b8f04a;
       }
       #splash .pulse {
         width: 8px;
@@ -61,7 +60,7 @@
   </head>
   <body>
     <div id="splash">
-      <div class="logo-text">Tr</div>
+      <svg class="brand-mark" viewBox="0 0 1024 1024" aria-hidden="true" focusable="false"><line x1="180" y1="636" x2="650" y2="636" stroke="currentColor" stroke-opacity="0.35" stroke-width="56" stroke-linecap="round"/><circle cx="250" cy="636" r="54" fill="currentColor"/><circle cx="410" cy="636" r="54" fill="currentColor"/><circle cx="568" cy="636" r="70" fill="currentColor"/><path d="M568 636Q612 566 692 506" fill="none" stroke="currentColor" stroke-width="56" stroke-linecap="round"/><circle cx="800" cy="420" r="62" fill="none" stroke="currentColor" stroke-width="50"/></svg>
       <div class="pulse"></div>
       <div class="hint">starting pi…</div>
     </div>
@@ -73,7 +72,7 @@
       <main id="main">
         <div id="explorer">
           <div class="explorer-header">
-            <span class="header-logo">Tr</span>
+            <svg class="header-logo brand-mark" viewBox="0 0 1024 1024" aria-hidden="true" focusable="false"><line x1="180" y1="636" x2="650" y2="636" stroke="currentColor" stroke-opacity="0.35" stroke-width="56" stroke-linecap="round"/><circle cx="250" cy="636" r="54" fill="currentColor"/><circle cx="410" cy="636" r="54" fill="currentColor"/><circle cx="568" cy="636" r="70" fill="currentColor"/><path d="M568 636Q612 566 692 506" fill="none" stroke="currentColor" stroke-width="56" stroke-linecap="round"/><circle cx="800" cy="420" r="62" fill="none" stroke="currentColor" stroke-width="50"/></svg>
             <span>Explorer</span>
             <button type="button" id="btn-min-explorer" class="pane-toggle" title="Minimize explorer" aria-label="Minimize explorer">–</button>
           </div>
@@ -84,7 +83,7 @@
           <section id="left-pane">
             <div id="terminal-tabs">
               <div id="terminal-tabs-list"></div>
-              <button type="button" id="btn-new-terminal" title="New terminal (Cmd+Shift+T)">＋</button>
+              <button type="button" id="btn-new-terminal" title="New terminal (Cmd+T / Ctrl+T)">＋</button>
               <button type="button" id="btn-min-terminal" class="pane-toggle" title="Minimize terminal" aria-label="Minimize terminal">–</button>
             </div>
             <div id="terminal-container"></div>
@@ -152,7 +151,7 @@
             </div>
             <template id="editor-empty-template">
               <div class="editor-empty">
-                <div class="empty-logo">Tr</div>
+                <svg class="empty-logo brand-mark" viewBox="0 0 1024 1024" aria-hidden="true" focusable="false"><line x1="180" y1="636" x2="650" y2="636" stroke="currentColor" stroke-opacity="0.35" stroke-width="56" stroke-linecap="round"/><circle cx="250" cy="636" r="54" fill="currentColor"/><circle cx="410" cy="636" r="54" fill="currentColor"/><circle cx="568" cy="636" r="70" fill="currentColor"/><path d="M568 636Q612 566 692 506" fill="none" stroke="currentColor" stroke-width="56" stroke-linecap="round"/><circle cx="800" cy="420" r="62" fill="none" stroke="currentColor" stroke-width="50"/></svg>
                 <div class="empty-title">Termina</div>
                 <div class="empty-sub empty-welcome">
                   Open a folder to start.

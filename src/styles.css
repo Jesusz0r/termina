@@ -213,11 +213,10 @@ body {
 }
 
 .explorer-header .header-logo {
-  font-size: 13px;
-  font-weight: 700;
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
   color: var(--accent);
-  letter-spacing: 0;
-  text-transform: none;
 }
 
 .explorer-header {
@@ -1770,10 +1769,10 @@ body {
 }
 
 #editor-empty .empty-logo, .editor-empty .empty-logo {
-  font-size: 44px;
-  font-weight: 700;
+  width: 56px;
+  height: 56px;
   color: var(--accent);
-  margin-bottom: 4px;
+  margin-bottom: 8px;
 }
 
 #editor-empty .empty-title, .editor-empty .empty-title {
