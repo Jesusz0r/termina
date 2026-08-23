@@ -1062,9 +1062,12 @@ async function openTerminalMenu(): Promise<void> {
 function closeTerminalMenu(): void {
   for (const cleanup of terminalMenuCleanups) cleanup();
   terminalMenuCleanups = [];
+  const menu = terminalMenu;
   terminalMenu?.remove();
   terminalMenu = null;
-  if (activeId && panes.has(activeId)) {
+  // Focus returns to the terminal only when a menu was open. Every window
+  // click routes here; stealing focus on each one breaks editor typing.
+  if (menu && activeId && panes.has(activeId)) {
     panes.get(activeId)?.view.focus();
   }
 }
