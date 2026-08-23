@@ -74,6 +74,12 @@ class CoreClient {
     };
     this.child.on("error", failAll);
     this.child.on("exit", () => failAll(new Error("snapshot core exited")));
+    // A killed core makes in-flight writes fail with an async EPIPE. Without
+    // listeners those become uncaught exceptions; the exit handler above
+    // already rejects every pending request.
+    this.child.stdin?.on("error", () => {});
+    this.child.stdout?.on("error", () => {});
+    this.child.stderr?.on("error", () => {});
     return this.child;
   }
 
