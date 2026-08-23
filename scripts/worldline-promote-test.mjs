@@ -197,7 +197,7 @@ const baseline = await evalJs(`window.pi.reviewBaseline(${JSON.stringify(promote
 check("promoted review baseline is the pre-promotion content", baseline?.status === "modified" && baseline?.baseline?.includes("hello"), JSON.stringify(baseline));
 const insts = await evalJs(`window.pi.getInstances()`);
 const promotedInst = (insts ?? []).find((i) => i.id === promotedId);
-check("promoted terminal is a primary agent", promotedInst?.type === "agent" && promotedInst?.cwd === PROJ, JSON.stringify(promotedInst));
+check("promoted terminal is a primary agent", promotedInst?.type === "agent" && promotedInst?.cwd === realpathSync(PROJ), JSON.stringify(promotedInst));
 
 // ------------------------------------------------- primary stays clean ----
 const after = repoState();
