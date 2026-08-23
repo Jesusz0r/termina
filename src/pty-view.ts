@@ -104,6 +104,7 @@ export class PtyView {
         Delete: "\x0b",
         ArrowLeft: "\x01",
         ArrowRight: "\x05",
+        Enter: "\x1b\r",
       }[event.key];
       if (macInput) {
         event.preventDefault();
