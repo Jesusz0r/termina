@@ -747,6 +747,7 @@ export class EditorManager {
   }
 
   dispose(): void {
+    closeContextMenu();
     this.editor.dispose();
     for (const tab of this.tabs.values()) tab.model.dispose();
     this.tabs.clear();

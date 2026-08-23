@@ -19,6 +19,7 @@ const USER_DATA_ROOT = "/tmp/termina-e2e-user-data";
 const BASIC_SUITES = [
   "explorer-test.mjs",
   "preview-test.mjs",
+  "editor-tabs-test.mjs",
   "review-test.mjs",
   "timeline-test.mjs",
   "timeline-replay-test.mjs",
