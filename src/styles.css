@@ -415,7 +415,7 @@ body {
 #explorer-divider {
   width: 4px;
   cursor: col-resize;
-  background: var(--border);
+  background: color-mix(in srgb, var(--accent) 18%, var(--border));
   flex: 0 0 4px;
 }
 
@@ -430,7 +430,7 @@ body {
 #divider {
   width: 5px;
   cursor: col-resize;
-  background: var(--border);
+  background: color-mix(in srgb, var(--accent) 18%, var(--border));
   flex: 0 0 5px;
 }
 
@@ -925,7 +925,7 @@ body {
 #modified-resize {
   flex: 0 0 5px;
   cursor: row-resize;
-  background: var(--border);
+  background: color-mix(in srgb, var(--accent) 18%, var(--border));
 }
 
 #modified-resize:hover {
