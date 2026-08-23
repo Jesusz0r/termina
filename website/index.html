@@ -61,7 +61,7 @@
     <div class="ticker">
       <div class="ticker-track" id="ticker-track">
         <span><i>●</i>&nbsp; Zero Git pollution</span>
-        <span><i>●</i>&nbsp; Snapshots under 4 ms</span>
+        <span><i>●</i>&nbsp; ~7× faster snapshots than git</span>
         <span><i>●</i>&nbsp; sandbox-exec isolation</span>
         <span><i>●</i>&nbsp; Offline verification</span>
         <span><i>●</i>&nbsp; Three-way merge promotion</span>
@@ -207,7 +207,7 @@
           <rect class="fnode" x="700" y="210" width="180" height="72" rx="10" stroke="#ffb454"/>
           <text class="fk" x="790" y="234" text-anchor="middle" fill="#ffb454">RUST CORE</text>
           <text class="fnote" x="790" y="256" text-anchor="middle">snapshots · merges</text>
-          <text class="fnote" x="790" y="271" text-anchor="middle">&lt;4ms captures</text>
+          <text class="fnote" x="790" y="271" text-anchor="middle">hint-driven captures</text>
 
           <!-- connections -->
           <line class="flow-line" x1="140" y1="150" x2="194" y2="150" stroke="#5f6a51" stroke-width="1.5" marker-end="url(#arr)"/>
@@ -385,43 +385,43 @@
       <div class="reveal">
         <span class="eyebrow">Speed</span>
         <h2 class="section-title">Performance is a correctness requirement.</h2>
-        <p class="section-sub">Snapshotting happens on every agent action. If it were slow, the timeline would lag behind the truth. So the hot paths run in a compiled Rust binary — never the Git CLI.</p>
+        <p class="section-sub">Snapshotting happens on every agent action. If it were slow, the timeline would lag behind the truth. So the hot paths run in a compiled Rust binary — never the Git CLI. Every row below is measured, including the ones where git holds its own.</p>
       </div>
 
       <div class="bench-chart reveal" id="bench-chart">
         <div class="bench-row">
-          <div class="bench-name">Snapshot capture<small>1,000-file working tree</small></div>
+          <div class="bench-name">Snapshot capture<small>per agent action, 10-file change</small></div>
           <div class="bench-bars">
-            <div class="bar-row"><span>termina</span><div class="bar-track"><div class="bar core" data-w="8"></div></div></div>
+            <div class="bar-row"><span>termina</span><div class="bar-track"><div class="bar core" data-w="13"></div></div></div>
             <div class="bar-row"><span>git cli</span><div class="bar-track"><div class="bar git" data-w="100"></div></div></div>
           </div>
-          <div class="bench-speed">12.6×</div>
+          <div class="bench-speed">7×</div>
         </div>
         <div class="bench-row">
-          <div class="bench-name">Three-way merge<small>in-memory merge tree</small></div>
+          <div class="bench-name">Full-tree snapshot<small>cold scan, 1,000-file working tree</small></div>
           <div class="bench-bars">
-            <div class="bar-row"><span>termina</span><div class="bar-track"><div class="bar core" data-w="11"></div></div></div>
-            <div class="bar-row"><span>git cli</span><div class="bar-track"><div class="bar git" data-w="96"></div></div></div>
-          </div>
-          <div class="bench-speed">8.7×</div>
-        </div>
-        <div class="bench-row">
-          <div class="bench-name">Candidate materialize<small>APFS clone, full workspace</small></div>
-          <div class="bench-bars">
-            <div class="bar-row"><span>termina</span><div class="bar-track"><div class="bar core" data-w="7"></div></div></div>
+            <div class="bar-row"><span>termina</span><div class="bar-track"><div class="bar core" data-w="20"></div></div></div>
             <div class="bar-row"><span>git cli</span><div class="bar-track"><div class="bar git" data-w="100"></div></div></div>
           </div>
-          <div class="bench-speed">14.4×</div>
+          <div class="bench-speed">5×</div>
         </div>
         <div class="bench-row">
-          <div class="bench-name">Watcher reconcile<small>disk event → editor model</small></div>
+          <div class="bench-name">Candidate materialize<small>full workspace export</small></div>
           <div class="bench-bars">
-            <div class="bar-row"><span>termina</span><div class="bar-track"><div class="bar core" data-w="5"></div></div></div>
-            <div class="bar-row"><span>git cli</span><div class="bar-track"><div class="bar git" data-w="95"></div></div></div>
+            <div class="bar-row"><span>termina</span><div class="bar-track"><div class="bar core" data-w="100"></div></div></div>
+            <div class="bar-row"><span>git cli</span><div class="bar-track"><div class="bar git" data-w="99"></div></div></div>
           </div>
-          <div class="bench-speed">18.5×</div>
+          <div class="bench-speed" style="color:var(--dim)">on par</div>
         </div>
-        <div class="bench-note">measured on apple m-series, release build · lower is better · green = termina rust core</div>
+        <div class="bench-row">
+          <div class="bench-name">Three-way merge<small>conflict-free, 100-file diff</small></div>
+          <div class="bench-bars">
+            <div class="bar-row"><span>termina</span><div class="bar-track"><div class="bar core" data-w="100"></div></div></div>
+            <div class="bar-row"><span>git cli</span><div class="bar-track"><div class="bar git" data-w="60"></div></div></div>
+          </div>
+          <div class="bench-speed" style="color:var(--amber)">0.6× — git wins</div>
+        </div>
+        <div class="bench-note">medians of phased samples on an apple m4, release build · lower is better · the core owns merges for isolation and zero repo pollution, not raw speed · reproduce: node scripts/perf-compare.mjs</div>
       </div>
     </div>
   </section>

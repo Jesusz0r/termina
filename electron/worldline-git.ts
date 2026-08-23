@@ -132,13 +132,13 @@ export class SnapshotStore {
   /**
    * Incremental capture (WORLDLINES section 6.4): reuse the parent tree
    * and update only the hinted paths. The watcher hints are the delta;
-   * the reconcile map catches missed events by comparing blob hashes
-   * against the parent tree.
+   * the reconcile map catches missed events by comparing precomputed
+   * blob hashes against the parent tree.
    */
   async captureIncremental(
     parentCommit: string,
     hints: string[],
-    reconcile: Array<{ relPath: string; content: string }>,
+    reconcile: Array<{ relPath: string; oid: string }>,
     budget: CaptureBudget = {},
     hooks: CaptureHooks = {},
     source?: { root: string; gitDir: string },

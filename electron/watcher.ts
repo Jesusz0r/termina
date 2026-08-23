@@ -7,8 +7,21 @@
  * files" panel for files changed outside of explicit write/edit tool calls.
  */
 import { watch, type FSWatcher } from "node:fs";
+import { createHash } from "node:crypto";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
+
+/** The precomputed Git blob oids of one cached content string. */
+export interface CachedOids {
+  sha1: string;
+  sha256: string;
+}
+
+/** The Git blob oid of a content string in one object format. */
+export function blobOid(content: string, algorithm: "sha1" | "sha256"): string {
+  const header = Buffer.from(`blob ${Buffer.byteLength(content)}\0`);
+  return createHash(algorithm).update(header).update(content, "utf8").digest("hex");
+}
 
 interface FileChange {
   /** Absolute path. */
@@ -68,6 +81,10 @@ export class ProjectWatcher {
    * state against the current file.
    */
   lastContents = new Map<string, string>();
+  /** Blob oids of the cached contents, hashed once per file version.
+   *  The moment capture ships these instead of the contents themselves,
+   *  so the core compares hashes without re-hashing every file. */
+  lastOids = new Map<string, CachedOids>();
   private static readonly CACHE_LIMIT = 5000;
   /** Byte budget for the cache — count alone can reach gigabytes with big files. */
   private static readonly CACHE_BYTES = 64 * 1024 * 1024;
@@ -110,6 +127,7 @@ export class ProjectWatcher {
 
   stop(): void {
     this.lastContents.clear();
+    this.lastOids.clear();
     this.cacheBytes = 0;
     for (const t of this.timers.values()) clearTimeout(t);
     this.timers.clear();
@@ -176,6 +194,7 @@ export class ProjectWatcher {
       if (evicted !== undefined) {
         this.cacheBytes -= Buffer.byteLength(evicted, "utf8");
         this.lastContents.delete(key);
+        this.lastOids.delete(key);
       }
       return;
     }
@@ -199,12 +218,14 @@ export class ProjectWatcher {
     const prev = this.lastContents.get(key); // pre-change content, for baselines
     this.cacheBytes += Buffer.byteLength(content, "utf8") - (prev ? Buffer.byteLength(prev, "utf8") : 0);
     this.lastContents.set(key, content);
+    this.lastOids.set(key, { sha1: blobOid(content, "sha1"), sha256: blobOid(content, "sha256") });
     while (this.lastContents.size > 1 && (this.lastContents.size > ProjectWatcher.CACHE_LIMIT || this.cacheBytes > ProjectWatcher.CACHE_BYTES)) {
       const oldest = this.lastContents.keys().next().value;
       if (oldest === undefined) break;
       const evicted = this.lastContents.get(oldest);
       this.cacheBytes -= evicted ? Buffer.byteLength(evicted, "utf8") : 0;
       this.lastContents.delete(oldest);
+      this.lastOids.delete(oldest);
     }
     const change: FileChange = { path: abs, relPath, content, status, prev };
     this.onChange(change);

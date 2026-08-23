@@ -3282,19 +3282,21 @@ class PiEditorApp {
     }
     const hints = [...inst.pendingHints];
     inst.pendingHints.clear();
-    // Reconcile: the watcher cache catches changes the hints missed. Bound
-    // the reconcile walk so a huge cache cannot stall the capture.
-    const cache = ws.watcher?.lastContents ?? new Map<string, string>();
-    const reconcile: Array<{ relPath: string; content: string }> = [];
+    // Reconcile: the watcher's precomputed blob oids catch changes the
+    // hints missed. Shipping hashes instead of contents keeps the request
+    // small and skips a re-hash of the whole cache per capture. Bound the
+    // walk so a huge cache cannot stall the capture.
+    const oids = ws.watcher?.lastOids;
+    const reconcile: Array<{ relPath: string; oid: string }> = [];
     const hinted = new Set(hints);
     let walked = 0;
-    for (const [path, content] of cache) {
+    for (const [path, pair] of oids ?? []) {
       if (walked++ > 2000) break;
       const rel = this.rel(path, ws.root);
       if (!rel || rel.startsWith("..") || isAbsolute(rel)) continue;
       if (hinted.has(rel)) continue;
       if (this.ignoredSegmentIn(rel)) continue;
-      reconcile.push({ relPath: rel, content });
+      reconcile.push({ relPath: rel, oid: store.objectFormat === "sha256" ? pair.sha256 : pair.sha1 });
     }
     try {
       // A candidate workspace captures its OWN tree (the source override).
@@ -4301,6 +4303,20 @@ class PiEditorApp {
     return managed.path;
   }
 
+  /** Path under dirAbs that does not exist. Collisions use " copy" then " copy N". */
+  private unusedCopyDest(dirAbs: string, name: string): string | null {
+    const first = join(dirAbs, name);
+    if (!existsSync(first)) return first;
+    const ext = extname(name);
+    const stem = name.slice(0, name.length - ext.length);
+    for (let n = 2; n < 100; n++) {
+      const candidate = n === 2 ? `${stem} copy${ext}` : `${stem} copy ${n}${ext}`;
+      const dest = join(dirAbs, candidate);
+      if (!existsSync(dest)) return dest;
+    }
+    return null;
+  }
+
   private async listDir(absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }> {
     const managed = this.managedPath(absPath, true);
     if (!managed) return { entries: [], error: "path outside the project workspace" };
@@ -4749,23 +4765,8 @@ class PiEditorApp {
         if (dirAbs === src || dirAbs.startsWith(src + sep)) {
           return { ok: false, error: "cannot paste a folder into itself" };
         }
-        let name = basename(src);
-        let dest = join(dirAbs, name);
-        // Both copies and moves must never overwrite an existing entry.
-        if (existsSync(dest)) {
-          const ext = extname(name);
-          const stem = name.slice(0, name.length - ext.length);
-          let placed = false;
-          for (let n = 2; n < 100; n++) {
-            const candidate = n === 2 ? `${stem} copy${ext}` : `${stem} copy ${n}${ext}`;
-            dest = join(dirAbs, candidate);
-            if (!existsSync(dest)) {
-              placed = true;
-              break;
-            }
-          }
-          if (!placed) return { ok: false, error: "destination already exists" };
-        }
+        const dest = this.unusedCopyDest(dirAbs, basename(src));
+        if (!dest) return { ok: false, error: "destination already exists" };
         if (move) await fsRename(src, dest);
         else await cp(src, dest, { recursive: true });
         return { ok: true, name: basename(dest) };

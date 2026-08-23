@@ -118,11 +118,6 @@ fn object_oid(repo: &Repository, kind: &str, content: &[u8]) -> Oid {
     Oid::from_bytes(&digest).expect("digest length matches the object format")
 }
 
-/// The hash of a blob object for the store's object format.
-fn blob_oid(repo: &Repository, bytes: &[u8]) -> Oid {
-    object_oid(repo, "blob", bytes)
-}
-
 /// The loose-object path of a blob in the store, or None when the oid
 /// length does not match the store format.
 fn loose_path(repo: &Repository, oid: Oid) -> Option<PathBuf> {
@@ -306,6 +301,119 @@ fn write_nested_tree(repo: &Repository, root: &mut HashMap<String, Node>) -> Res
     write_loose_object(repo, "tree", &content).map(|(oid, _)| oid)
 }
 
+/// Write a new tree by patching the parent tree with only the changed
+/// paths. Unchanged directories keep their existing tree objects; only
+/// the ancestors of a change are rewritten bottom-up. Returns None when
+/// every path is gone and the root ends up empty; the caller then writes
+/// an explicit empty root tree.
+fn write_tree_delta(
+    repo: &Repository,
+    parent_tree: Oid,
+    changes: &HashMap<String, Option<FlatEntry>>,
+) -> Result<Option<Oid>, String> {
+    // A deletion of X is superseded when the same batch also changes paths
+    // under X/: the path turned into a directory and its children carry
+    // the truth. Without this rule a "rm -rf d && echo hi > d" batch would
+    // resurrect the stale child deletions over the new file.
+    let mut superseded: HashSet<String> = HashSet::new();
+    for path in changes.keys() {
+        if changes.get(path) == Some(&None) {
+            continue;
+        }
+        let mut rest = path.as_str();
+        while let Some(i) = rest.rfind('/') {
+            rest = &rest[..i];
+            if changes.get(rest) == Some(&None) {
+                superseded.insert(rest.to_string());
+            }
+        }
+    }
+
+    // Group the changes under their parent directory so one recursion
+    // level only touches its own direct children.
+    let mut per_dir: HashMap<String, HashMap<String, Option<FlatEntry>>> = HashMap::new();
+    for (path, entry) in changes {
+        if superseded.contains(path) {
+            continue;
+        }
+        let (dir, name) = match path.rsplit_once('/') {
+            Some((dir, name)) => (dir.to_string(), name.to_string()),
+            None => (String::new(), path.clone()),
+        };
+        per_dir.entry(dir).or_default().insert(name, entry.clone());
+    }
+    write_dir_delta(repo, parent_tree, "", &per_dir)
+}
+
+/// The existing entries of one directory inside the parent root tree.
+/// A non-tree entry at the path (the parent state had a file where this
+/// batch builds a directory) counts as absent.
+fn dir_entries(repo: &Repository, parent_root: Oid, dir_rel: &str) -> Result<Vec<TreeEntry>, String> {
+    let mut entries = Vec::new();
+    let dir_oid = if dir_rel.is_empty() {
+        Some(parent_root)
+    } else {
+        match tree_lookup(repo, parent_root, dir_rel)? {
+            Some((mode, oid)) if mode == 0o040000 => Some(oid),
+            _ => None,
+        }
+    };
+    if let Some(oid) = dir_oid {
+        let tree = repo.find_tree(oid).map_err(|e| format!("tree read failed for {dir_rel}: {e}"))?;
+        for entry in tree.iter() {
+            let name = entry.name().map_err(|e| format!("tree entry name read failed: {e}"))?;
+            entries.push(TreeEntry { mode: entry.filemode() as u32, name: name.to_string(), oid: entry.id() });
+        }
+    }
+    Ok(entries)
+}
+
+/// Recursively patch one directory. Returns None when it ends up empty so
+/// the parent drops its entry (Git trees carry no empty directories).
+fn write_dir_delta(
+    repo: &Repository,
+    parent_root: Oid,
+    dir_rel: &str,
+    per_dir: &HashMap<String, HashMap<String, Option<FlatEntry>>>,
+) -> Result<Option<Oid>, String> {
+    let mut entries = dir_entries(repo, parent_root, dir_rel)?;
+    // Descend first: children are patched against the parent state, then
+    // direct changes below apply last and win. The ordering decides type
+    // flips — a "rm -rf d && echo hi > d" batch must end with the file,
+    // not with the stale empty subtree.
+    let prefix = if dir_rel.is_empty() { String::new() } else { format!("{dir_rel}/") };
+    let mut child_names: Vec<&str> = Vec::new();
+    for key in per_dir.keys() {
+        if key.as_str() == dir_rel { continue; }
+        let Some(rest) = key.strip_prefix(prefix.as_str()) else { continue };
+        if let Some(child) = rest.split('/').next() {
+            if !child.is_empty() && !child_names.contains(&child) {
+                child_names.push(child);
+            }
+        }
+    }
+    for child in child_names {
+        let child_oid = write_dir_delta(repo, parent_root, &format!("{prefix}{child}"), per_dir)?;
+        entries.retain(|e| e.name != child);
+        if let Some(oid) = child_oid {
+            entries.push(TreeEntry { mode: 0o040000, name: child.to_string(), oid });
+        }
+    }
+    let none = HashMap::new();
+    for (name, change) in per_dir.get(dir_rel).unwrap_or(&none) {
+        entries.retain(|e| e.name != *name);
+        if let Some((mode, oid)) = change {
+            entries.push(TreeEntry { mode: *mode, name: name.clone(), oid: *oid });
+        }
+    }
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    sort_git_entries(&mut entries);
+    let content = tree_object_content(&entries);
+    write_loose_object(repo, "tree", &content).map(|(oid, _)| Some(oid))
+}
+
 /// Write nested trees bottom-up and collect the entries of one directory.
 fn build_tree_entries(
     repo: &Repository,
@@ -329,8 +437,13 @@ fn build_tree_entries(
             }
         }
     }
-    // Git sorts tree entries byte-wise; directories compare as if their
-    // name carried a trailing slash.
+    sort_git_entries(&mut entries);
+    Ok(entries)
+}
+
+/// Sort tree entries byte-wise; directories compare as if their name
+/// carried a trailing slash.
+fn sort_git_entries(entries: &mut [TreeEntry]) {
     let sort_key = |e: &TreeEntry| {
         if e.mode == 0o040000 {
             format!("{}/", e.name)
@@ -339,7 +452,6 @@ fn build_tree_entries(
         }
     };
     entries.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
-    Ok(entries)
 }
 
 /// The canonical Git tree object bytes for sorted entries.
@@ -822,8 +934,8 @@ fn op_capture_incremental(req: &Value) -> Result<Value, String> {
             a.iter()
                 .filter_map(|v| {
                     let rel = v.get("relPath").and_then(Value::as_str)?;
-                    let content = v.get("content").and_then(Value::as_str)?;
-                    Some((rel.to_string(), content.to_string()))
+                    let oid = v.get("oid").and_then(Value::as_str)?;
+                    Some((rel.to_string(), oid.to_string()))
                 })
                 .collect()
         })
@@ -848,15 +960,21 @@ fn op_capture_incremental(req: &Value) -> Result<Value, String> {
             changed.insert(hint.clone());
         }
     }
-    for (rel_path, content) in &reconcile {
+    for (rel_path, oid_hex) in &reconcile {
         if !is_safe_relative(rel_path) || has_git_segment(rel_path) {
             continue;
         }
+        // The watcher precomputed this blob oid from the cached content.
+        // A malformed oid is a caller bug: fail loudly instead of silently
+        // skipping the safety net. Validate against the store's object
+        // format before the domain lookup so bad input never slips
+        // through on an unknown path.
+        let reconciled = oid_ext(&store, oid_hex)
+            .map_err(|_| format!("reconcile oid is invalid for {rel_path}"))?;
         let Some((_, parent_oid)) = parent_flat.get(rel_path) else {
             continue; // not in the capture domain
         };
-        let content_oid = blob_oid(&store, content.as_bytes());
-        if content_oid != *parent_oid {
+        if reconciled != *parent_oid {
             changed.insert(rel_path.clone());
         }
     }
@@ -880,9 +998,12 @@ fn op_capture_incremental(req: &Value) -> Result<Value, String> {
         }));
     }
 
-    // Seed the flat map from the parent tree, then apply the delta.
+    // Seed the flat map from the parent tree, then apply the delta. The
+    // delta also drives the tree writer below: only the ancestors of a
+    // change are rewritten, untouched directories keep their objects.
     let mut flat = parent_flat;
     let mut expected: HashMap<String, FlatEntry> = HashMap::new();
+    let mut changed_entries: HashMap<String, Option<FlatEntry>> = HashMap::with_capacity(changed.len());
     let mut new_blob_bytes = 0u64;
     for rel_path in changed.iter() {
         let abs = capture_root.join(rel_path);
@@ -891,10 +1012,12 @@ fn op_capture_incremental(req: &Value) -> Result<Value, String> {
                 new_blob_bytes += new_bytes;
                 flat.insert(rel_path.clone(), (mode, oid));
                 expected.insert(rel_path.clone(), (mode, oid));
+                changed_entries.insert(rel_path.clone(), Some((mode, oid)));
             }
             None => {
                 // The path is gone or is a gitlink: drop it from the tree.
                 flat.remove(rel_path);
+                changed_entries.insert(rel_path.clone(), None);
             }
         }
     }
@@ -904,7 +1027,10 @@ fn op_capture_incremental(req: &Value) -> Result<Value, String> {
         ));
     }
 
-    let tree = write_nested_tree(&store, &mut nested_from_flat(&flat)?)?;
+    let tree = match write_tree_delta(&store, parent_tree, &changed_entries)? {
+        Some(oid) => oid,
+        None => write_nested_tree(&store, &mut HashMap::new())?,
+    };
     let commit = commit_tree(&store, tree, Some(parent_oid), "termina source state")?;
     update_state_ref(&store, commit)?;
 
