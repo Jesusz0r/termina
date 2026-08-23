@@ -1697,7 +1697,6 @@ window.pi.onPlanUpdate(({ instanceId, tasks }) => {
 });
 
 window.pi.onToolTarget((p) => {
-  activeEditor().markTouched(p.path);
   void activeEditor().openFile(p.path, { preview: false }).catch((err) => {
     toast(`could not open ${pathBasename(p.path)}: ${(err as Error).message}`, "error");
   });
@@ -1733,7 +1732,6 @@ window.pi.onFileChanged((p) => {
     if (oldestKey === undefined) break;
     lastChangePush.delete(oldestKey);
   }
-  activeEditor().markTouched(p.path);
   if (p.content !== undefined) {
     activeEditor().updateContent(p.path, p.content);
   } else {

@@ -93,6 +93,8 @@ interface OpenTab {
   model: monaco.editor.ITextModel;
   dom: HTMLElement;
   dirtyDot: HTMLElement;
+  /** The model version last known to match the disk content. */
+  savedVersionId: number;
   /** Live agent-change decorations on this model. */
   changeDecorations: string[];
   /** First changed line to reveal when this tab becomes active. */
@@ -250,12 +252,12 @@ export class EditorManager {
     }
     // User edits pin the preview into a permanent tab. Programmatic content
     // replacements (watcher/agent live updates) come through as isFlush and
-    // do not pin. The same event marks the model dirty.
+    // do not pin. The same event marks the tab unsaved.
     model.onDidChangeContent((e) => {
       if (e.isFlush) return;
-      this.userDirty.add(key);
       this.clearAgentChanges(key);
       if (this.previewKey === key) this.pinPreview();
+      this.syncDirty(tab);
     });
     this.tabs.set(key, tab);
     this.order.push(key);
@@ -265,7 +267,10 @@ export class EditorManager {
 
     const res = await window.pi.openFile(path);
     if (res.ok) {
-      if (this.tabs.has(key)) model.setValue(res.content);
+      if (this.tabs.has(key)) {
+        model.setValue(res.content);
+        tab.savedVersionId = model.getAlternativeVersionId();
+      }
       this.activate(key);
       this.onFileOpened();
       return;
@@ -342,10 +347,14 @@ export class EditorManager {
     this.editor.revealLineInCenter(line);
   }
 
-  /** Mark a file as being touched by the agent (tab badge). */
-  markTouched(path: string): void {
-    const tab = this.tabs.get(path);
-    if (tab) tab.dirtyDot.style.display = "inline-block";
+  /** The tab dot reflects unsaved user edits only: content that matches
+   *  the disk (agent pushes, saves, undo back to the saved version) hides
+   *  it again. */
+  private syncDirty(tab: OpenTab): void {
+    const dirty = tab.model.getAlternativeVersionId() !== tab.savedVersionId;
+    tab.dirtyDot.style.display = dirty ? "inline-block" : "none";
+    if (dirty) this.userDirty.add(tab.key);
+    else this.userDirty.delete(tab.key);
   }
 
   /** Paths marked as the user's own (agent off-limits). */
@@ -526,8 +535,8 @@ export class EditorManager {
     if (!tab) return;
     const res = await window.pi.saveFile(tab.key, tab.model.getValue());
     if (res.ok) {
-      this.userDirty.delete(tab.key);
-      tab.dirtyDot.style.display = "none";
+      tab.savedVersionId = tab.model.getAlternativeVersionId();
+      this.syncDirty(tab);
       tab.dom.classList.remove("conflict");
     } else {
       toast(`could not save ${pathBasename(tab.key)}: ${res.error ?? "unknown error"}`, "error");
@@ -544,8 +553,8 @@ export class EditorManager {
       if (!tab) continue;
       const res = writerId ? await window.pi.flushSave(tab.key, tab.model.getValue(), writerId) : await window.pi.saveFile(tab.key, tab.model.getValue());
       if (res.ok) {
-        this.userDirty.delete(key);
-        tab.dirtyDot.style.display = "none";
+        tab.savedVersionId = tab.model.getAlternativeVersionId();
+        this.syncDirty(tab);
         tab.dom.classList.remove("conflict");
       } else {
         failed.push(key);
