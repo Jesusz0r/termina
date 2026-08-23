@@ -1741,6 +1741,54 @@ body {
 .monaco-editor .agent-change-line {
   background: color-mix(in srgb, var(--green) 16%, transparent);
 }
+/* -------------------------------------------------------- tab context menu */
+
+.context-menu {
+  position: fixed;
+  z-index: 96;
+  min-width: 190px;
+  padding: 4px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.context-menu-item {
+  padding: 5px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.context-menu-item.selected {
+  background: var(--bg-hover);
+}
+
+.context-menu-item.disabled {
+  color: var(--text-dim);
+  opacity: 0.55;
+  cursor: default;
+}
+
+.context-menu-separator {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+
+.editor-tab.dragging {
+  opacity: 0.45;
+}
+
+.editor-tab.drop-before {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.editor-tab.drop-after {
+  box-shadow: inset -2px 0 0 var(--accent);
+}
 
 .monaco-editor .agent-change-gutter {
   background: var(--green);

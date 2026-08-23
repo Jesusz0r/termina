@@ -78,6 +78,8 @@ baseEditor.onConflict = (path) => {
   toast(`${pathBasename(path)} changed on disk — you have unsaved edits`, "warning");
 };
 applySharedEditorHooks(baseEditor);
+// The pre-project editor computes relative paths against the opened folder.
+baseEditor.projectRootProvider = () => projectCwd;
 // The e2e suites drive the active editor through this hook.
 (window as unknown as Record<string, unknown>).__editorMgr = baseEditor;
 const projectTabsEl = document.getElementById("project-tabs")!;
@@ -108,6 +110,8 @@ function createProjectView(project: { id: string; cwd: string; needsLogin?: bool
     toast(`${pathBasename(path)} changed on disk — you have unsaved edits`, "warning");
   };
   applySharedEditorHooks(editorMgr);
+  // Relative paths must resolve against THIS project, not the active one.
+  editorMgr.projectRootProvider = () => project.cwd;
   applyEditorPreferences(editorMgr, preferences);
   const tabEl = document.createElement("div");
   tabEl.className = "project-tab";

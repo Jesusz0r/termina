@@ -11,47 +11,80 @@ import { cssFontFamily, pathBasename, type ThemeId } from "../shared/types";
 import { languageForPath } from "./editor-language";
 import { changedLinesInAfter } from "./line-diff";
 import { toast } from "./components/modals";
+import { showContextMenu, closeContextMenu } from "./components/context-menu";
 
-let atomThemeDefined = false;
+// Both custom themes are defined at import time: the editor constructor
+// references "termina-dark" before applyMonacoTheme ever runs, and an
+// undefined theme silently falls back to stock vs-dark.
+monaco.editor.defineTheme("termina-dark", {
+  base: "vs-dark",
+  inherit: true,
+  rules: [
+    { token: "comment", foreground: "5f6a51", fontStyle: "italic" },
+    { token: "string", foreground: "86e29b" },
+    { token: "keyword", foreground: "ffb454" },
+    { token: "number", foreground: "d9a05b" },
+    { token: "regexp", foreground: "7cc4ff" },
+    { token: "type", foreground: "b8f04a" },
+    { token: "class", foreground: "b8f04a" },
+    { token: "function", foreground: "7cc4ff" },
+    { token: "identifier", foreground: "edf2e2" },
+    { token: "delimiter", foreground: "9aa78c" },
+    { token: "tag", foreground: "ff7a6b" },
+    { token: "attribute.name", foreground: "ffb454" },
+    { token: "attribute.value", foreground: "86e29b" },
+  ],
+  colors: {
+    "editor.background": "#0b0d09",
+    "editor.foreground": "#edf2e2",
+    "editor.lineHighlightBackground": "#11140d",
+    "editor.selectionBackground": "#333c26",
+    "editorCursor.foreground": "#b8f04a",
+    "editorLineNumber.foreground": "#3f4930",
+    "editorLineNumber.activeForeground": "#9aa78c",
+    "editorWidget.background": "#11140d",
+    "editorSuggestWidget.background": "#11140d",
+    "editorHoverWidget.background": "#11140d",
+    "minimap.background": "#0b0d09",
+  },
+});
+
+monaco.editor.defineTheme("termina-atom", {
+  base: "vs-dark",
+  inherit: true,
+  rules: [
+    { token: "comment", foreground: "5c6370", fontStyle: "italic" },
+    { token: "string", foreground: "98c379" },
+    { token: "keyword", foreground: "c678dd" },
+    { token: "number", foreground: "d19a66" },
+    { token: "regexp", foreground: "56b6c2" },
+    { token: "type", foreground: "e5c07b" },
+    { token: "class", foreground: "e5c07b" },
+    { token: "function", foreground: "61afef" },
+    { token: "identifier", foreground: "abb2bf" },
+    { token: "delimiter", foreground: "abb2bf" },
+    { token: "tag", foreground: "e06c75" },
+    { token: "attribute.name", foreground: "d19a66" },
+    { token: "attribute.value", foreground: "98c379" },
+  ],
+  colors: {
+    "editor.background": "#282c34",
+    "editor.foreground": "#abb2bf",
+    "editor.lineHighlightBackground": "#2c313c",
+    "editor.selectionBackground": "#3e4451",
+    "editorCursor.foreground": "#528bff",
+    "editorLineNumber.foreground": "#495162",
+    "editorLineNumber.activeForeground": "#abb2bf",
+    "editorWidget.background": "#21252b",
+    "editorSuggestWidget.background": "#21252b",
+    "editorHoverWidget.background": "#21252b",
+    "minimap.background": "#282c34",
+  },
+});
 
 export function applyMonacoTheme(theme: ThemeId): void {
-  if (theme === "atom" && !atomThemeDefined) {
-    monaco.editor.defineTheme("termina-atom", {
-      base: "vs-dark",
-      inherit: true,
-      rules: [
-        { token: "comment", foreground: "5c6370", fontStyle: "italic" },
-        { token: "string", foreground: "98c379" },
-        { token: "keyword", foreground: "c678dd" },
-        { token: "number", foreground: "d19a66" },
-        { token: "regexp", foreground: "56b6c2" },
-        { token: "type", foreground: "e5c07b" },
-        { token: "class", foreground: "e5c07b" },
-        { token: "function", foreground: "61afef" },
-        { token: "identifier", foreground: "abb2bf" },
-        { token: "delimiter", foreground: "abb2bf" },
-        { token: "tag", foreground: "e06c75" },
-        { token: "attribute.name", foreground: "d19a66" },
-        { token: "attribute.value", foreground: "98c379" },
-      ],
-      colors: {
-        "editor.background": "#282c34",
-        "editor.foreground": "#abb2bf",
-        "editor.lineHighlightBackground": "#2c313c",
-        "editor.selectionBackground": "#3e4451",
-        "editorCursor.foreground": "#528bff",
-        "editorLineNumber.foreground": "#495162",
-        "editorLineNumber.activeForeground": "#abb2bf",
-        "editorWidget.background": "#21252b",
-        "editorSuggestWidget.background": "#21252b",
-        "editorHoverWidget.background": "#21252b",
-        "minimap.background": "#282c34",
-      },
-    });
-    atomThemeDefined = true;
-  }
   monaco.editor.setTheme(
-    theme === "light" ? "vs" : theme === "high-contrast" ? "hc-black" : theme === "atom" ? "termina-atom" : "vs-dark",
+    theme === "light" ? "vs" : theme === "high-contrast" ? "hc-black" : theme === "atom" ? "termina-atom" : "termina-dark",
   );
 }
 
@@ -100,6 +133,8 @@ export class EditorManager {
   onBecameEmpty: () => void = () => {};
   /** The candidate label of a path ("A"/"B"), or null (worldline badge). */
   tabBadge: (path: string) => "A" | "B" | null = () => null;
+  /** The opened project root, for Copy Relative Path (null when unknown). */
+  projectRootProvider: () => string | null = () => null;
 
   constructor(container: HTMLElement, tabsEl: HTMLElement, emptyEl: HTMLElement, projectOpen = false, needsLogin = false) {
     this.tabsEl = tabsEl;
@@ -391,7 +426,43 @@ export class EditorManager {
     dom.append(dirty, name, mine, wline, close);
     if (this.mineKeys.has(key)) dom.classList.add("mine");
     dom.addEventListener("click", () => this.activate(key));
-    return { key, model, dom, dirtyDot: dirty, changeDecorations: [], agentRevealLine: null };
+    dom.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.openTabMenu(key, e.clientX, e.clientY);
+    });
+    // Middle-click closes, like VS Code.
+    dom.addEventListener("mousedown", (e) => {
+      if (e.button === 1) {
+        e.preventDefault();
+        this.closeTab(key);
+      }
+    });
+    // Drag to reorder. The drop indicator is a class on the target tab;
+    // the order itself commits on drop so a cancelled drag changes nothing.
+    dom.draggable = true;
+    dom.addEventListener("dragstart", (e) => {
+      this.dragKey = key;
+      if (e.dataTransfer) {
+        e.dataTransfer.setData("text/plain", key);
+        e.dataTransfer.effectAllowed = "move";
+      }
+      dom.classList.add("dragging");
+    });
+    dom.addEventListener("dragover", (e) => {
+      if (!this.dragKey || this.dragKey === key) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+      const rect = dom.getBoundingClientRect();
+      this.setDropTarget(key, e.clientX > rect.left + rect.width / 2);
+    });
+    dom.addEventListener("drop", (e) => {
+      e.preventDefault();
+      this.commitDrop(key);
+    });
+    dom.addEventListener("dragleave", () => this.clearDropTarget());
+    dom.addEventListener("dragend", () => this.clearDrag());
+    return { key, model, dom, dirtyDot: dirty, savedVersionId: model.getAlternativeVersionId(), changeDecorations: [], agentRevealLine: null };
   }
 
   private renderTabs(): void {
@@ -491,6 +562,109 @@ export class EditorManager {
   /** Close a tab if it is open (the file was deleted on disk). */
   closeIfOpen(path: string): void {
     if (this.tabs.has(path)) this.closeTab(path);
+  }
+
+  // ---------------- tab actions (VS Code-style context menu) ---------------
+
+  private dragKey: string | null = null;
+  private dropTarget: { key: string; after: boolean } | null = null;
+
+  closeOthers(key: string): void {
+    for (const k of [...this.order]) if (k !== key) this.closeTab(k);
+    if (this.tabs.has(key)) this.activate(key);
+  }
+
+  closeToLeft(key: string): void {
+    for (const k of this.order.slice(0, Math.max(0, this.order.indexOf(key)))) this.closeTab(k);
+  }
+
+  closeToRight(key: string): void {
+    const at = this.order.indexOf(key);
+    if (at === -1) return;
+    for (const k of this.order.slice(at + 1)) this.closeTab(k);
+  }
+
+  closeAllTabs(): void {
+    for (const k of [...this.order]) this.closeTab(k);
+  }
+
+  private setDropTarget(key: string, after: boolean): void {
+    const tab = this.tabs.get(key);
+    if (!tab) return;
+    if (this.dropTarget?.key === key && this.dropTarget.after === after) return;
+    this.clearDropTarget();
+    this.dropTarget = { key, after };
+    tab.dom.classList.add(after ? "drop-after" : "drop-before");
+  }
+
+  private clearDropTarget(): void {
+    if (!this.dropTarget) return;
+    const el = this.tabs.get(this.dropTarget.key)?.dom;
+    if (el) { el.classList.remove("drop-before", "drop-after"); }
+    this.dropTarget = null;
+  }
+
+  private clearDrag(): void {
+    this.dragKey = null;
+    this.clearDropTarget();
+    this.tabsEl.querySelectorAll(".dragging").forEach((el) => el.classList.remove("dragging"));
+  }
+
+  private commitDrop(targetKey: string): void {
+    const dragKey = this.dragKey;
+    const after = this.dropTarget?.key === targetKey ? this.dropTarget.after : false;
+    this.clearDrag();
+    if (!dragKey || dragKey === targetKey) return;
+    const from = this.order.indexOf(dragKey);
+    if (from === -1) return;
+    this.order.splice(from, 1);
+    const to = this.order.indexOf(targetKey) + (after ? 1 : 0);
+    this.order.splice(to, 0, dragKey);
+    this.renderTabs();
+  }
+
+  private openTabMenu(key: string, x: number, y: number): void {
+    const tab = this.tabs.get(key);
+    if (!tab) return;
+    const idx = this.order.indexOf(key);
+    const isTimeline = key.startsWith("timeline:");
+    const root = this.projectRootProvider();
+    const relPath = !isTimeline && root && key.startsWith(`${root.replace(/\/+$/, "")}/`) ? key.slice(root.replace(/\/+$/, "").length + 1) : null;
+    showContextMenu(
+      [
+        { label: "Close", action: () => this.closeTab(key) },
+        { label: "Close Others", action: () => this.closeOthers(key) },
+        { label: "Close to the Left", disabled: idx === 0, action: () => this.closeToLeft(key) },
+        { label: "Close to the Right", disabled: idx === this.order.length - 1, action: () => this.closeToRight(key) },
+        { label: "Close All", action: () => this.closeAllTabs() },
+        ...(this.previewKey === key ? [{ label: "Keep Open", action: () => this.pinPreview() }] : []),
+        ...(isTimeline
+          ? []
+          : [
+              { separator: true },
+              {
+                label: "Copy Path",
+                action: () => {
+                  navigator.clipboard.writeText(key)
+                    .then(() => toast("Path copied", "info"))
+                    .catch(() => toast("could not copy the path", "error"));
+                },
+              },
+              {
+                label: "Copy Relative Path",
+                disabled: relPath === null,
+                action: () => {
+                  if (relPath === null) return;
+                  navigator.clipboard.writeText(relPath)
+                    .then(() => toast("Relative path copied", "info"))
+                    .catch(() => toast("could not copy the path", "error"));
+                },
+              },
+            ]),
+      ],
+      x,
+      y,
+    );
   }
 
   /**
