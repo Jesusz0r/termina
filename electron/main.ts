@@ -4951,6 +4951,19 @@ const appState = new PiEditorApp();
 
 app.disableHardwareAcceleration();
 
+// An explicit user-data dir must also move the single-instance lock. A
+// dev or test instance then runs beside the installed app.
+const userDataOverride = process.env.TERMINA_USER_DATA_DIR;
+if (userDataOverride) {
+  try {
+    mkdirSync(userDataOverride, { recursive: true });
+    app.setPath("userData", userDataOverride);
+  } catch (err) {
+    // Keep the default user data: a broken override must not kill startup.
+    console.error(`[termina] ignoring TERMINA_USER_DATA_DIR: ${(err as Error).message}`);
+  }
+}
+
 app.on("child-process-gone", (_e, details) => {
   if (details.type === "GPU") {
     console.warn(`[main] GPU process gone (${details.reason}) — reloading window`);
