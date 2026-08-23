@@ -8,20 +8,22 @@
 }
 
 :root {
-  --bg: #1e1e1e;
-  --bg-panel: #141414;
-  --bg-raised: #252526;
-  --bg-hover: #2a2d2e;
-  --border: #3c3c3c;
-  --text: #d4d4d4;
-  --text-dim: #8a8a8a;
-  --accent: #4fc1ff;
-  --on-accent: #0d1117;
-  --green: #4ec9b0;
-  --yellow: #dcdcaa;
-  --red: #f14c4c;
-  --orange: #ce9178;
-  --purple: #c586c0;
+  /* The committed landing palette: near-black green-tinted base,
+   * acid-lime signal, amber telemetry. */
+  --bg: #0b0d09;
+  --bg-panel: #11140d;
+  --bg-raised: #161a10;
+  --bg-hover: #1d2314;
+  --border: #252b1c;
+  --text: #edf2e2;
+  --text-dim: #9aa78c;
+  --accent: #b8f04a;
+  --on-accent: #10130a;
+  --green: #86e29b;
+  --yellow: #ffb454;
+  --red: #ff7a6b;
+  --orange: #d9a05b;
+  --purple: #7cc4ff;
   --badge-add-bg: color-mix(in srgb, var(--green) 22%, var(--bg));
   --badge-mod-bg: color-mix(in srgb, var(--yellow) 22%, var(--bg));
   --badge-del-bg: color-mix(in srgb, var(--red) 22%, var(--bg));
@@ -94,8 +96,13 @@ body {
   background: var(--bg);
   color: var(--text);
   /* Pi's typography: the whole chrome uses the monospace family. */
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-family: "Departure Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   user-select: none;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--on-accent);
 }
 
 #app {
@@ -303,7 +310,7 @@ body {
   flex: 1;
   overflow-y: auto;
   padding: 4px 0;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Departure Mono", ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 12px;
   -webkit-app-region: no-drag;
 }
@@ -621,7 +628,7 @@ body {
 }
 
 .terminal-menu-name {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Departure Mono", ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 12px;
   color: var(--text);
   white-space: nowrap;
@@ -1031,7 +1038,7 @@ body {
   padding: 4px 8px;
   border-radius: 4px;
   cursor: pointer;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Departure Mono", ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 12px;
 }
 
@@ -1924,7 +1931,7 @@ body {
 
 .search-text {
   flex: 1 1 auto;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Departure Mono", ui-monospace, "SF Mono", Menlo, monospace;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1933,7 +1940,7 @@ body {
 .search-path {
   flex: 0 0 auto;
   color: var(--accent);
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Departure Mono", ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 11px;
 }
 
@@ -2253,7 +2260,7 @@ body {
   height: 30px;
   border: 1px solid var(--border);
   border-radius: 5px;
-  background: linear-gradient(135deg, #141414 0 52%, #4fc1ff 52%);
+  background: linear-gradient(135deg, #0b0d09 0 52%, #b8f04a 52%);
 }
 
 .settings-theme-card[data-theme="light"] .theme-swatch {
@@ -2553,7 +2560,7 @@ body {
 }
 
 .review-filename {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: "Departure Mono", ui-monospace, "SF Mono", Menlo, monospace;
   font-size: 11px;
   color: var(--text);
 }

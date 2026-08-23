@@ -148,7 +148,7 @@ export class EditorManager {
     this.needsLogin = projectOpen && needsLogin;
 
     this.editor = monaco.editor.create(container, {
-      theme: "vs-dark",
+      theme: "termina-dark",
       fontSize: 13,
       fontFamily: cssFontFamily(""),
       minimap: { enabled: true },

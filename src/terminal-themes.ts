@@ -3,8 +3,8 @@ import type { ThemeId } from "../shared/types";
 /** xterm palettes keyed by the app theme id. */
 export const TERMINAL_THEMES: Record<ThemeId, Record<string, string>> = {
   dark: {
-    background: "#141414", foreground: "#d4d4d4", cursor: "#4fc1ff", selectionBackground: "#264f78",
-    black: "#1e1e1e", red: "#f14c4c", green: "#4ec9b0", yellow: "#dcdcaa", blue: "#4fc1ff", magenta: "#c586c0", cyan: "#4ec9b0", white: "#d4d4d4",
+    background: "#0b0d09", foreground: "#edf2e2", cursor: "#b8f04a", cursorAccent: "#0b0d09", selectionBackground: "#333c26",
+    black: "#11140d", red: "#ff7a6b", green: "#86e29b", yellow: "#ffb454", blue: "#7cc4ff", magenta: "#c586c0", cyan: "#56d4dd", white: "#edf2e2",
   },
   light: {
     background: "#eef1f4", foreground: "#1f2328", cursor: "#0969da", selectionBackground: "#b6d7ff",

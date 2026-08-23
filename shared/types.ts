@@ -173,7 +173,7 @@ export const THEME_IDS = ["dark", "light", "high-contrast", "atom"] as const;
 export type ThemeId = (typeof THEME_IDS)[number];
 
 /** Fallback stack used when a chosen family is missing on the machine. */
-export const DEFAULT_CODE_FONT_STACK = "ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
+export const DEFAULT_CODE_FONT_STACK = "'Departure Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
 
 /** Named families the settings window offers. Empty means the default stack. */
 export const CODE_FONT_FAMILIES = [
