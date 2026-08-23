@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Termina — Mission control for your AI coding agent</title>
-  <meta name="description" content="Termina runs the real pi TUI beside a live Monaco IDE. Watch every edit, verify offline, fork any moment into isolated candidates, and merge the winner back — your Git repo stays untouched.">
+  <meta name="description" content="Termina runs the real pi TUI beside a live Monaco IDE. Watch every edit, test in the background, fork any moment into isolated candidates, and merge the winner back — your Git repo stays untouched.">
   <link rel="icon" type="image/svg+xml" href="assets/icon.svg?v=0.1.15">
   <link rel="icon" type="image/png" sizes="512x512" href="assets/icon.png?v=0.1.15">
   <link rel="shortcut icon" href="favicon.ico?v=0.1.15">
@@ -42,8 +42,8 @@
       <h1>Your agent writes the code.<br>You hold the <span class="hl">timeline.</span></h1>
       <p class="hero-sub">
         Termina runs the <b>real pi TUI</b> in a terminal on the left and a <b>live Monaco IDE</b> on the right.
-        Every edit streams in as it happens. Verify offline, fork any moment into an isolated candidate,
-        and merge only the run that earns it.
+        Every edit streams in as it happens. Test in the background, fork any moment into an isolated
+        candidate, and merge only the run that earns it.
       </p>
       <div class="hero-ctas">
         <a href="#install" class="btn btn-primary">↓ Download for macOS &amp; Linux — free</a>
@@ -63,7 +63,7 @@
         <span><i>●</i>&nbsp; Zero Git pollution</span>
         <span><i>●</i>&nbsp; ~7× faster snapshots than git</span>
         <span><i>●</i>&nbsp; sandbox-exec isolation</span>
-        <span><i>●</i>&nbsp; Offline verification</span>
+        <span><i>●</i>&nbsp; Offline evidence runs</span>
         <span><i>●</i>&nbsp; Three-way merge promotion</span>
         <span><i>●</i>&nbsp; APFS copy-on-write forks</span>
         <span><i>●</i>&nbsp; Crash-recovery journals</span>
@@ -152,8 +152,8 @@
         <div class="step">
           <div class="step-num">03<small>VERIFY</small></div>
           <div>
-            <h3>Run tests offline; the result feeds back to the agent</h3>
-            <p><code>✓ Verify</code> executes your test suite in a sandboxed background process with no network. Green or red, the verdict is delivered to the agent on its next turn.</p>
+            <h3>Run tests in the background; the verdict reaches the agent</h3>
+            <p><code>✓ Verify</code> runs your test suite as a background process and delivers green or red on the agent's next turn. Inside candidate worlds the same verify runs sandboxed with network denied.</p>
           </div>
         </div>
         <div class="step">
@@ -343,7 +343,7 @@
           <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#b8f04a" stroke-width="1.6"><path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/><path d="M9 12l2 2 4-4"/></svg>
           <span class="g-key">ISOLATION</span>
           <h3>OS-level sandboxes</h3>
-          <p>Candidate agents, verify workers, and their child processes run inside macOS <code>sandbox-exec</code> profiles with network denied. Escapes fail closed.</p>
+          <p>Candidate agents run inside macOS <code>sandbox-exec</code> profiles: your project, your home, and the snapshot store are denied, and child processes inherit the walls. Evidence and verify workers go further — fully offline.</p>
         </div>
         <div class="guard">
           <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#b8f04a" stroke-width="1.6"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
