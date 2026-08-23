@@ -17,7 +17,7 @@ import { access, chmod, cp, copyFile, mkdir, mkdtemp, readFile, readdir, realpat
 import { createInterface } from "node:readline";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SessionForkClient } from "./session-fork.js";
 import { PtyTerminal } from "./pty-terminal.js";
@@ -4716,6 +4716,55 @@ class PiEditorApp {
         const abs = this.projectAbs(relPath);
         await rm(abs, { recursive: true, force: true });
         return { ok: true };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+    });
+
+    // Explorer clipboard paste. Copies (or moves, for a cut entry) the source
+    // under the target directory; a name collision gets " copy" / " copy N".
+    // An empty targetDirRel means the project root itself.
+    ipcMain.handle("explorer:paste", async (_e, targetDirRel: unknown, srcRel: unknown, move: unknown) => {
+      if (typeof targetDirRel !== "string" || typeof srcRel !== "string" || typeof move !== "boolean") {
+        return { ok: false, error: "invalid arguments" };
+      }
+      if (!srcRel || srcRel === ".") return { ok: false, error: "invalid source" };
+      const blocked = this.assertWorkspaceWritable(this.primaryWorkspace()?.id ?? "");
+      if (blocked) return { ok: false, error: blocked };
+      try {
+        const src = this.projectAbs(srcRel);
+        let dirAbs: string;
+        if (targetDirRel === "" || targetDirRel === ".") {
+          const cwd = this.project()?.cwd;
+          if (!cwd) return { ok: false, error: "open a project folder first" };
+          dirAbs = this.canonicalPath(cwd);
+        } else {
+          dirAbs = this.projectAbs(targetDirRel);
+        }
+        // A folder cannot be pasted into itself or one of its descendants.
+        if (dirAbs === src || dirAbs.startsWith(src + sep)) {
+          return { ok: false, error: "cannot paste a folder into itself" };
+        }
+        let name = basename(src);
+        let dest = join(dirAbs, name);
+        // Both copies and moves must never overwrite an existing entry.
+        if (existsSync(dest)) {
+          const ext = extname(name);
+          const stem = name.slice(0, name.length - ext.length);
+          let placed = false;
+          for (let n = 2; n < 100; n++) {
+            const candidate = n === 2 ? `${stem} copy${ext}` : `${stem} copy ${n}${ext}`;
+            dest = join(dirAbs, candidate);
+            if (!existsSync(dest)) {
+              placed = true;
+              break;
+            }
+          }
+          if (!placed) return { ok: false, error: "destination already exists" };
+        }
+        if (move) await fsRename(src, dest);
+        else await cp(src, dest, { recursive: true });
+        return { ok: true, name: basename(dest) };
       } catch (err) {
         return { ok: false, error: (err as Error).message };
       }

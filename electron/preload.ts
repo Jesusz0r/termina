@@ -162,6 +162,7 @@ const bridge: PiBridge = {
   createEntry: (relPath, kind) => ipcRenderer.invoke("explorer:create", relPath, kind),
   renameEntry: (relPath, newName) => ipcRenderer.invoke("explorer:rename", relPath, newName),
   deleteEntry: (relPath) => ipcRenderer.invoke("explorer:delete", relPath),
+  pasteEntry: (targetDirRel, srcRel, move) => ipcRenderer.invoke("explorer:paste", targetDirRel, srcRel, move),
   getUpdateState: (): Promise<AppUpdateState> => ipcRenderer.invoke("update:get"),
   checkUpdate: (): Promise<AppUpdateState> => ipcRenderer.invoke("update:check"),
   installUpdate: () => ipcRenderer.invoke("update:install"),

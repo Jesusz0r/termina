@@ -559,6 +559,9 @@ export interface PiBridge {
   createEntry(relPath: string, kind: "file" | "dir"): Promise<{ ok: boolean; error?: string }>;
   renameEntry(relPath: string, newName: string): Promise<{ ok: boolean; error?: string }>;
   deleteEntry(relPath: string): Promise<{ ok: boolean; error?: string }>;
+  /** Explorer clipboard paste: copy (or move, for a cut entry) srcRel under
+   *  the target directory. Collisions get a " copy" / " copy N" suffix. */
+  pasteEntry(targetDirRel: string, srcRel: string, move: boolean): Promise<{ ok: boolean; error?: string; name?: string }>;
   getUpdateState(): Promise<AppUpdateState>;
   checkUpdate(): Promise<AppUpdateState>;
   installUpdate(): Promise<{ ok: boolean; error?: string }>;
