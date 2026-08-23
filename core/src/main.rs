@@ -13,6 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::sync::Mutex;
 use std::io::{BufRead, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
@@ -40,6 +41,12 @@ const BUDGET_MAX_NEW_BLOB_BYTES: u64 = 256 * 1024 * 1024;
 /// Unref prunes loose objects only past this many files. Small stores skip
 /// the reachability walk.
 const PRUNE_LOOSE_THRESHOLD: u64 = 20_000;
+/// Cached tree maps kept across requests. Captures chain parent to child,
+/// so the parent map of the next request is usually the one just built.
+const TREE_MAP_CACHE_SIZE: usize = 8;
+/// Loose-object compression level. The format matches Git at every level;
+/// the fast level cuts capture CPU on the hot path.
+const BLOB_COMPRESSION: flate2::Compression = flate2::Compression::fast();
 /// A burst of unrefs shares one prune: the walk does not rerun inside this
 /// many seconds.
 const PRUNE_MIN_INTERVAL_SECS: u64 = 60;
@@ -91,24 +98,29 @@ fn object_format(value: &str) -> Result<ObjectFormat, String> {
     }
 }
 
-/// The hash of a blob object for the store's object format.
-fn blob_oid(repo: &Repository, bytes: &[u8]) -> Oid {
-    let header = format!("blob {}\0", bytes.len()).into_bytes();
+/// The hash of an object for the store's object format.
+fn object_oid(repo: &Repository, kind: &str, content: &[u8]) -> Oid {
+    let header = format!("{} {}\0", kind, content.len()).into_bytes();
     let digest = match repo.object_format() {
         ObjectFormat::Sha1 => {
             let mut hasher = Sha1::new();
             hasher.update(&header);
-            hasher.update(bytes);
+            hasher.update(content);
             hasher.finalize().to_vec()
         }
         ObjectFormat::Sha256 => {
             let mut hasher = Sha256::new();
             hasher.update(&header);
-            hasher.update(bytes);
+            hasher.update(content);
             hasher.finalize().to_vec()
         }
     };
     Oid::from_bytes(&digest).expect("digest length matches the object format")
+}
+
+/// The hash of a blob object for the store's object format.
+fn blob_oid(repo: &Repository, bytes: &[u8]) -> Oid {
+    object_oid(repo, "blob", bytes)
 }
 
 /// The loose-object path of a blob in the store, or None when the oid
@@ -126,19 +138,28 @@ fn loose_path(repo: &Repository, oid: Oid) -> Option<PathBuf> {
 /// blob. The store never packs its own objects (gc.auto is disabled), so a
 /// loose check is a complete check of the store. Returns (oid, new bytes).
 fn write_blob(repo: &Repository, bytes: &[u8]) -> Result<(Oid, u64), String> {
-    let oid = blob_oid(repo, bytes);
+    write_loose_object(repo, "blob", bytes)
+}
+
+/// Write one loose object in Git's format. The oid is the hash of
+/// header + content; an existing object short-circuits to no write.
+fn write_loose_object(
+    repo: &Repository,
+    kind: &str,
+    content: &[u8],
+) -> Result<(Oid, u64), String> {
+    let oid = object_oid(repo, kind, content);
     let loose = loose_path(repo, oid).ok_or("oid length does not match the object format")?;
     if loose.exists() {
         return Ok((oid, 0));
     }
-    // The loose format is zlib(header + bytes); the oid is the hash of
-    // header + bytes. Write it directly; the bytes match Git's format.
-    let header = format!("blob {}\0", bytes.len()).into_bytes();
+    // The loose format is zlib(header + bytes).
+    let header = format!("{} {}\0", kind, content.len()).into_bytes();
     use std::io::Write as _;
-    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), BLOB_COMPRESSION);
     encoder
         .write_all(&header)
-        .and_then(|_| encoder.write_all(bytes))
+        .and_then(|_| encoder.write_all(content))
         .and_then(|_| encoder.finish())
         .map_err(|e| format!("deflate failed: {e}"))
         .and_then(|compressed| {
@@ -165,7 +186,7 @@ fn write_blob(repo: &Repository, bytes: &[u8]) -> Result<(Oid, u64), String> {
                 }
             }
         })?;
-    Ok((oid, bytes.len() as u64))
+    Ok((oid, content.len() as u64))
 }
 
 /// Read a file and verify it did not change while reading.
@@ -270,28 +291,65 @@ fn insert_node(
 }
 
 /// Write the nested tree into the repository. Returns the tree oid.
+/// One prepared entry of a tree being written.
+struct TreeEntry {
+    mode: u32,
+    name: String,
+    oid: Oid,
+}
+
 fn write_nested_tree(repo: &Repository, root: &mut HashMap<String, Node>) -> Result<Oid, String> {
-    let mut builder = repo.treebuilder(None).map_err(|e| e.to_string())?;
-    let names: Vec<String> = root.keys().cloned().collect();
-    for name in names {
-        match root.remove(&name) {
-            Some(Node::Blob { oid, mode }) => {
-                builder
-                    .insert(&name, oid, mode as i32)
-                    .map_err(|e| format!("tree insert failed: {e}"))?;
+    let entries = build_tree_entries(repo, root)?;
+    let content = tree_object_content(&entries);
+    // The read-back verification in the capture ops parses this object
+    // through libgit2, so a format mistake fails loudly there.
+    write_loose_object(repo, "tree", &content).map(|(oid, _)| oid)
+}
+
+/// Write nested trees bottom-up and collect the entries of one directory.
+fn build_tree_entries(
+    repo: &Repository,
+    dir: &mut HashMap<String, Node>,
+) -> Result<Vec<TreeEntry>, String> {
+    let mut entries: Vec<TreeEntry> = Vec::with_capacity(dir.len());
+    for (name, node) in dir.iter_mut() {
+        match node {
+            Node::Blob { oid, mode } => entries.push(TreeEntry {
+                mode: *mode,
+                name: name.clone(),
+                oid: *oid,
+            }),
+            Node::Dir(sub) => {
+                let sub_oid = write_nested_tree(repo, sub)?;
+                entries.push(TreeEntry {
+                    mode: 0o040000,
+                    name: name.clone(),
+                    oid: sub_oid,
+                });
             }
-            Some(Node::Dir(mut sub)) => {
-                let sub_oid = write_nested_tree(repo, &mut sub)?;
-                builder
-                    .insert(&name, sub_oid, 0o40000)
-                    .map_err(|e| format!("tree insert failed: {e}"))?;
-            }
-            None => {}
         }
     }
-    builder
-        .write()
-        .map_err(|e| format!("tree write failed: {e}"))
+    // Git sorts tree entries byte-wise; directories compare as if their
+    // name carried a trailing slash.
+    let sort_key = |e: &TreeEntry| {
+        if e.mode == 0o040000 {
+            format!("{}/", e.name)
+        } else {
+            e.name.clone()
+        }
+    };
+    entries.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
+    Ok(entries)
+}
+
+/// The canonical Git tree object bytes for sorted entries.
+fn tree_object_content(entries: &[TreeEntry]) -> Vec<u8> {
+    let mut content = Vec::new();
+    for entry in entries {
+        content.extend_from_slice(format!("{:o} {}\0", entry.mode, entry.name).as_bytes());
+        content.extend_from_slice(entry.oid.as_bytes());
+    }
+    content
 }
 
 /// Walk a tree and collect every non-tree entry into a flat map.
@@ -302,6 +360,46 @@ fn collect_tree_map(
     let mut out = HashMap::new();
     collect_tree_map_at(repo, tree_oid, "", &mut out)?;
     Ok(out)
+}
+
+type TreeMap = HashMap<String, FlatEntry>;
+type TreeMapCache = HashMap<Oid, std::sync::Arc<TreeMap>>;
+
+fn tree_map_cache() -> &'static Mutex<TreeMapCache> {
+    static CACHE: std::sync::OnceLock<Mutex<TreeMapCache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Cached flat map of a tree. The core process handles requests one at a
+/// time, so the parent tree of the next capture is usually cached.
+fn collect_tree_map_cached(
+    repo: &Repository,
+    tree_oid: Oid,
+) -> Result<std::sync::Arc<TreeMap>, String> {
+    if let Some(hit) = tree_map_cache().lock().unwrap().get(&tree_oid) {
+        return Ok(hit.clone());
+    }
+    let map = std::sync::Arc::new(collect_tree_map(repo, tree_oid)?);
+    let mut cache = tree_map_cache().lock().unwrap();
+    if cache.len() >= TREE_MAP_CACHE_SIZE {
+        // Evict one arbitrary entry. Any policy beats a full walk here.
+        if let Some(oldest) = cache.keys().next().cloned() {
+            cache.remove(&oldest);
+        }
+    }
+    cache.insert(tree_oid, map.clone());
+    Ok(map)
+}
+
+/// Remember the flat map of a freshly written tree.
+fn cache_tree_map(tree_oid: Oid, map: std::sync::Arc<TreeMap>) {
+    let mut cache = tree_map_cache().lock().unwrap();
+    if cache.len() >= TREE_MAP_CACHE_SIZE {
+        if let Some(oldest) = cache.keys().next().cloned() {
+            cache.remove(&oldest);
+        }
+    }
+    cache.insert(tree_oid, map);
 }
 
 fn collect_tree_map_at(
@@ -383,7 +481,10 @@ fn update_state_ref(repo: &Repository, commit: Oid) -> Result<(), String> {
 /// --exclude-standard` run in the capture root. Repo paths are relative to
 /// the working directory; the capture root can be a subdirectory, so strip
 /// the working-directory prefix and keep only paths under the root.
-fn enumerate_domain(repo: &Repository, capture_root: &Path) -> Result<Vec<String>, String> {
+fn enumerate_domain(
+    repo: &Repository,
+    capture_root: &Path,
+) -> Result<(Vec<String>, HashMap<String, IndexEntry>), String> {
     let workdir = repo
         .workdir()
         .ok_or("the source repository has no working directory")?;
@@ -405,6 +506,9 @@ fn enumerate_domain(repo: &Repository, capture_root: &Path) -> Result<Vec<String
     };
     let mut seen = HashSet::new();
     let mut paths = Vec::new();
+    // Stage-0 index entries feed the stat-cache: an unchanged file reuses
+    // the index blob instead of being read and hashed again.
+    let mut index_entries: HashMap<String, IndexEntry> = HashMap::new();
     let index = repo.index().map_err(|e| e.to_string())?;
     for entry in index.iter() {
         let path = String::from_utf8(entry.path.clone())
@@ -412,6 +516,10 @@ fn enumerate_domain(repo: &Repository, capture_root: &Path) -> Result<Vec<String
         let Some(path) = map_path(path) else { continue };
         if has_git_segment(&path) {
             return Err(format!("nested repository in capture domain: {path}"));
+        }
+        // Stage 0 only: conflict stages must re-hash.
+        if (entry.flags & 0x3000) >> 12 == 0 {
+            index_entries.insert(path.clone(), entry);
         }
         if seen.insert(path.clone()) {
             paths.push(path);
@@ -439,7 +547,63 @@ fn enumerate_domain(repo: &Repository, capture_root: &Path) -> Result<Vec<String
             }
         }
     }
-    Ok(paths)
+    Ok((paths, index_entries))
+}
+
+/// The stat-cached blob for one unchanged working-tree path. Returns None
+/// unless the file's stat data matches its stage-0 index entry exactly.
+/// The store reads the referenced blob through its read-only alternate, so
+/// no bytes are copied.
+fn stat_cached_entry(
+    abs: &Path,
+    entry: &IndexEntry,
+    max_file_bytes: u64,
+    index_write: Option<std::time::SystemTime>,
+) -> Option<(u32, Oid)> {
+    let mode = entry.mode;
+    if mode != 0o100644 && mode != 0o100755 && mode != 0o120000 {
+        return None;
+    }
+    let st = fs::symlink_metadata(abs).ok()?;
+    // Racy-git rule: a file modified at or after the last index write is
+    // re-read even when every other stat field matches.
+    if let Some(index_write) = index_write {
+        let mtime = st.modified().ok()?;
+        if mtime >= index_write {
+            return None;
+        }
+    }
+    let entry_mtime = entry.mtime;
+    let stat_matches = st.dev() == u64::from(entry.dev)
+        && st.ino() == u64::from(entry.ino)
+        && st.len() == u64::from(entry.file_size)
+        && st.mtime() == i64::from(entry_mtime.seconds())
+        && st.mtime_nsec() == i64::from(entry_mtime.nanoseconds());
+    if !stat_matches {
+        return None;
+    }
+    if mode == 0o120000 {
+        if !st.file_type().is_symlink() {
+            return None;
+        }
+        return Some((0o120000, entry.id));
+    }
+    if !st.is_file() {
+        return None;
+    }
+    if st.len() > max_file_bytes {
+        return None;
+    }
+    // An executable-bit change must re-hash so the tree records the mode.
+    let live_mode = if st.mode() & 0o111 != 0 {
+        0o100755
+    } else {
+        0o100644
+    };
+    if live_mode != mode {
+        return None;
+    }
+    Some((mode, entry.id))
 }
 
 /// Hash one working-tree path into the store. Returns None when the path
@@ -524,7 +688,9 @@ fn op_capture(req: &Value) -> Result<Value, String> {
         .transpose()?;
     let hooks = before_read_hooks(req);
 
-    let paths = enumerate_domain(&source, &capture_root)?;
+    let paths_and_index = enumerate_domain(&source, &capture_root)?;
+    let paths = paths_and_index.0;
+    let index_entries = paths_and_index.1;
     if paths.len() > max_paths {
         return Err(format!(
             "capture exceeds the {max_paths} path budget ({} paths)",
@@ -532,11 +698,31 @@ fn op_capture(req: &Value) -> Result<Value, String> {
         ));
     }
 
+    // Racy-git baseline: the index write time. Files modified at or after
+    // it are re-read even when their other stat fields match.
+    let index_write = fs::metadata(source.path().join("index"))
+        .and_then(|m| m.modified())
+        .ok();
+
     let mut flat: HashMap<String, FlatEntry> = HashMap::new();
     let mut new_blob_bytes = 0u64;
     for rel_path in &paths {
         let abs = capture_root.join(rel_path);
-        if let Some((mode, oid, new_bytes)) = hash_path(&store, &abs, max_file_bytes, &hooks)? {
+        // The test seam rewrites files mid-read; bypass the stat-cache so
+        // its verification semantics stay intact.
+        let cached = if hooks.is_empty() {
+            index_entries
+                .get(rel_path)
+                .and_then(|e| stat_cached_entry(&abs, e, max_file_bytes, index_write))
+                .map(|(mode, oid)| (mode, oid, 0u64))
+        } else {
+            None
+        };
+        let captured = match cached {
+            Some(hit) => Some(hit),
+            None => hash_path(&store, &abs, max_file_bytes, &hooks)?,
+        };
+        if let Some((mode, oid, new_bytes)) = captured {
             new_blob_bytes += new_bytes;
             flat.insert(rel_path.clone(), (mode, oid));
         }
@@ -554,6 +740,7 @@ fn op_capture(req: &Value) -> Result<Value, String> {
     // Read the tree back and verify every captured entry.
     let seen = collect_tree_map(&store, tree)?;
     verify_expected(&seen, &flat, true)?;
+    cache_tree_map(tree, std::sync::Arc::new(flat.clone()));
 
     Ok(json!({
         "state": {
@@ -648,7 +835,8 @@ fn op_capture_incremental(req: &Value) -> Result<Value, String> {
     let hooks = before_read_hooks(req);
     let parent_oid = oid_ext(&store, &parent_commit)?;
     let parent_tree = resolve_tree(&store, parent_oid)?;
-    let parent_flat = collect_tree_map(&store, parent_tree)?;
+    let parent_arc = collect_tree_map_cached(&store, parent_tree)?;
+    let parent_flat = (*parent_arc).clone();
 
     // The changed set: hints plus reconciled cache entries whose blob
     // differs from the parent tree.
@@ -720,10 +908,15 @@ fn op_capture_incremental(req: &Value) -> Result<Value, String> {
     let commit = commit_tree(&store, tree, Some(parent_oid), "termina source state")?;
     update_state_ref(&store, commit)?;
 
-    if !expected.is_empty() {
-        let seen = collect_tree_map(&store, tree)?;
-        verify_expected(&seen, &expected, false)?;
+    // Verify only the changed paths. A full read-back would walk every
+    // entry; the untouched ones came straight from the verified parent.
+    for (rel_path, (exp_mode, exp_oid)) in &expected {
+        match tree_lookup(&store, tree, rel_path)? {
+            Some((mode, oid)) if mode == *exp_mode && oid == *exp_oid => {}
+            _ => return Err(format!("tree verification mismatch for {rel_path}")),
+        }
     }
+    cache_tree_map(tree, std::sync::Arc::new(flat));
 
     Ok(json!({
         "state": {
