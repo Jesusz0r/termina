@@ -42,6 +42,18 @@ export class TimelineView {
       e.stopPropagation();
       this.toggleReplay();
     });
+    container.addEventListener(
+      "wheel",
+      (e) => {
+        if (this.dotsEl.scrollWidth <= this.dotsEl.clientWidth) return;
+        if (Math.abs(e.deltaY) > Math.abs(e.deltaX) && e.deltaY !== 0) {
+          const delta = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * this.dotsEl.clientWidth : e.deltaY;
+          this.dotsEl.scrollLeft += delta;
+          e.preventDefault();
+        }
+      },
+      { passive: false },
+    );
   }
 
   bind(handlers: {

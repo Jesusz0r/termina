@@ -839,17 +839,15 @@ body {
   gap: 5px;
   min-width: 0;
   overflow-x: auto;
-  scrollbar-width: thin;
-  padding: 2px 0 4px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  padding: 4px;
 }
 
 #timeline-dots::-webkit-scrollbar {
-  height: 6px;
-}
-
-#timeline-dots::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 3px;
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .timeline-dot {
