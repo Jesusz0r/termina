@@ -39,6 +39,7 @@ folder; the Plan Board shows Dispatch assignments.
 | Change Review | per-terminal modified-files panel with pre-run baselines: side-by-side diffs, Accept / Revert, Accept all. Termina never writes your Git repo; after a green Verify or Accept it offers a commit subject to copy and a shell in the project |
 | Verify & Iterate | `✓ Verify` runs the detected tests in a background process and feeds the result back to the agent on its next turn |
 | Session Timeline | a dot strip of every agent action with on-demand snapshots, replay, and a recorder state |
+| Multi-line input | Cmd/Ctrl/Shift+Enter inserts a newline in the terminal; Option+Enter (macOS) queues a follow-up while an agent runs |
 | Plan Board | the agent's task list with live progress; Dispatch starts parallel workers and shows each assignment (claimed files, settled) on the board. Workers receive a mailbox briefing |
 | Session Search | full-text over past sessions with click-to-jump |
 | Fork Run | fork any completed run into isolated candidates (A = result, B = start + task) |

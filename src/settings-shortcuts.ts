@@ -2,6 +2,11 @@ import { COMMAND_DEFINITIONS, DEFAULT_SHORTCUTS, type ShortcutCommand, type Shor
 
 export const SHORTCUTS = COMMAND_DEFINITIONS;
 
+/** True on Apple platforms, where the primary modifier is Cmd not Ctrl. */
+export function isMacPlatform(): boolean {
+  return navigator.platform.toUpperCase().includes("MAC");
+}
+
 export function emptyShortcuts(): ShortcutMap {
   const result = { ...DEFAULT_SHORTCUTS };
   for (const command of Object.keys(result) as ShortcutCommand[]) result[command] = "";
@@ -10,7 +15,7 @@ export function emptyShortcuts(): ShortcutMap {
 
 export function formatShortcut(value: string): string {
   if (!value) return "Not set";
-  const mac = navigator.platform.toUpperCase().includes("MAC");
+  const mac = isMacPlatform();
   const labels: Record<string, string> = mac
     ? { CmdOrCtrl: "⌘", Command: "⌘", Ctrl: "⌃", Alt: "⌥", Shift: "⇧", Enter: "↵", Escape: "Esc", Backspace: "⌫", Delete: "⌦", Up: "↑", Down: "↓", Left: "←", Right: "→", Space: "Space" }
     : { CmdOrCtrl: "Ctrl", Command: "Ctrl", Ctrl: "Ctrl", Alt: "Alt", Shift: "Shift", Enter: "Enter", Escape: "Esc", Backspace: "Backspace", Delete: "Delete", Up: "↑", Down: "↓", Left: "←", Right: "→", Space: "Space" };
@@ -58,7 +63,7 @@ function keyForEvent(event: KeyboardEvent): string | null {
 export function shortcutForEvent(event: KeyboardEvent): string | null {
   const key = keyForEvent(event);
   if (!key || ["Shift", "Control", "Alt", "Meta"].includes(event.key)) return null;
-  const mac = navigator.platform.toUpperCase().includes("MAC");
+  const mac = isMacPlatform();
   const modifiers: string[] = [];
   if (event.metaKey) modifiers.push("CmdOrCtrl");
   else if (event.ctrlKey) modifiers.push(mac ? "Ctrl" : "CmdOrCtrl");

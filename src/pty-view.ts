@@ -7,6 +7,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { cssFontFamily, type ThemeId } from "../shared/types";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import { TERMINAL_THEMES } from "./terminal-themes";
+import { isMacPlatform } from "./settings-shortcuts";
 
 export class PtyView {
   private term: Terminal;
@@ -85,8 +86,21 @@ export class PtyView {
   }
 
   private handleKey(event: KeyboardEvent): boolean {
-    const altKey = event.altKey && (event.key === "Backspace" || event.key === "Enter");
-    if (event.type !== "keydown" || (!event.metaKey && !event.ctrlKey && !altKey)) return true;
+    // Let the IME own every keystroke during composition: committing
+    // candidates fires modified Enter keydowns that must reach the
+    // composition buffer, never the pty.
+    if (event.type !== "keydown" || event.isComposing) return true;
+    // Enter inserts a newline in pi's editor on the platform's primary
+    // modifier — Cmd on macOS, Alt elsewhere — plus Shift and Ctrl
+    // everywhere (OpenCode-style: every conventional newline chord).
+    // xterm.js drops the Shift modifier on Enter, and macOS treats
+    // Option as a level-3 shift, so neither reaches the pty correctly
+    // without synthesis. The CSI-u shift+Enter sequence is what pi's
+    // decoder reads as its newLine binding in every protocol.
+    const mac = isMacPlatform();
+    const newlineCombo = event.key === "Enter" && !event.altKey &&
+      (event.shiftKey || event.ctrlKey || (mac && event.metaKey));
+    if (!event.metaKey && !event.ctrlKey && !event.altKey && !newlineCombo) return true;
     const key = event.key.toLowerCase();
     if (key === "c" && this.term.hasSelection()) {
       event.preventDefault();
@@ -98,31 +112,35 @@ export class PtyView {
       void this.pasteClipboard();
       return false;
     }
-    if (event.metaKey && !event.ctrlKey) {
-      const macInput = {
-        Backspace: "\x15",
-        Delete: "\x0b",
-        ArrowLeft: "\x01",
-        ArrowRight: "\x05",
-        Enter: "\x1b\r",
-      }[event.key];
-      if (macInput) {
-        event.preventDefault();
-        this.sendInput(macInput);
-        return false;
-      }
+    if (newlineCombo) {
+      event.preventDefault();
+      this.sendInput("\x1b[13;2u");
+      return false;
+    }
+    // macOS keeps pi's alt+enter queue-follow-up on Option, the one chord
+    // left free; other platforms spend their modifiers on newlines.
+    if (mac && event.key === "Enter" && event.altKey && !event.metaKey) {
+      event.preventDefault();
+      this.sendInput("\x1b\r");
+      return false;
     }
     if (event.altKey && event.key === "Backspace") {
       event.preventDefault();
       this.sendInput("\x17");
       return false;
     }
-    // macOS treats Option+Enter as a third-level shift, so xterm sends
-    // nothing. Send the ESC CR sequence pi reads as Alt+Enter.
-    if (event.altKey && !event.ctrlKey && !event.metaKey && event.key === "Enter") {
-      event.preventDefault();
-      this.sendInput("\x1b\r");
-      return false;
+    if (event.metaKey && !event.ctrlKey) {
+      const macInput = {
+        Backspace: "\x15",
+        Delete: "\x0b",
+        ArrowLeft: "\x01",
+        ArrowRight: "\x05",
+      }[event.key];
+      if (macInput) {
+        event.preventDefault();
+        this.sendInput(macInput);
+        return false;
+      }
     }
     return true;
   }
