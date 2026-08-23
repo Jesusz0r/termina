@@ -236,6 +236,21 @@ await sleep(700);
 const t2 = await rowNames();
 check("name collision gets a numbered copy", t2.includes("greeting copy.ts"), JSON.stringify(t2));
 
+// ---- pasting a folder into itself is rejected ----
+await rightClickRow("src");
+await sleep(200);
+await clickMenuItem("Copy");
+await sleep(150);
+await rightClickRow("src");
+await sleep(200);
+await clickMenuItem("Paste");
+await sleep(500);
+const selfToasts = await evalJs(`JSON.stringify([...document.querySelectorAll('.toast')].map(t => t.textContent))`);
+const rowsStable = !(await rowNames()).some((n) => n.includes("src copy"));
+check("pasting a folder into itself is rejected",
+  selfToasts.includes("cannot paste a folder into itself") && rowsStable,
+  `${selfToasts}`);
+
 // ---- cleanup: the suite owns its fixture pollution ----
 for (const p of [
   "/tmp/termina-test-project/hello copy.txt",

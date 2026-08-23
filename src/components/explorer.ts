@@ -4,7 +4,7 @@
  * Directories load lazily on expand; the tree refreshes from watcher events.
  */
 import { pathBasename, type CommandId, type ExplorerEntry } from "../../shared/types";
-import { showContextMenu, type ContextMenuItem } from "./context-menu";
+import { showContextMenu, closeContextMenu, type ContextMenuItem } from "./context-menu";
 import { showConfirm, showInput, toast } from "./modals";
 
 interface DirState {
@@ -68,6 +68,9 @@ export class Explorer {
     this.projectCwd = cwd;
     this.dirs.clear();
     this.selected = null;
+    // Clipboard entries are project-relative: they never survive a switch.
+    this.clip = null;
+    closeContextMenu();
     void this.renderRoot();
   }
 
@@ -244,6 +247,7 @@ export class Explorer {
       { separator: true },
       { label: "Paste", disabled: this.clip === null, action: () => void this.pasteAt("") },
       { separator: true },
+      { label: "Refresh", action: () => void this.refresh() },
       { label: "Copy Path", action: () => this.copyPath(this.projectCwd ?? "") },
     ];
   }

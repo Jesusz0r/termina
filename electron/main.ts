@@ -4741,6 +4741,10 @@ class PiEditorApp {
         } else {
           dirAbs = this.projectAbs(targetDirRel);
         }
+        // The paste target must be a directory.
+        if (!existsSync(dirAbs) || !statSync(dirAbs).isDirectory()) {
+          return { ok: false, error: "paste target is not a folder" };
+        }
         // A folder cannot be pasted into itself or one of its descendants.
         if (dirAbs === src || dirAbs.startsWith(src + sep)) {
           return { ok: false, error: "cannot paste a folder into itself" };
