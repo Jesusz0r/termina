@@ -108,6 +108,13 @@ export function toast(message: string, type: "info" | "warning" | "error" = "inf
   setTimeout(() => el.remove(), 5000);
 }
 
+/** Copy text and report the result with a toast. */
+export function copyText(text: string, okMessage: string): void {
+  navigator.clipboard.writeText(text)
+    .then(() => toast(okMessage, "info"))
+    .catch(() => toast("could not copy the path", "error"));
+}
+
 /** A small modal with a clickable file list. */
 export function showFileListModal(
   title: string,

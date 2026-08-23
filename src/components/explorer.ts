@@ -5,7 +5,7 @@
  */
 import { pathBasename, type CommandId, type ExplorerEntry } from "../../shared/types";
 import { showContextMenu, closeContextMenu, type ContextMenuItem } from "./context-menu";
-import { showConfirm, showInput, toast } from "./modals";
+import { copyText, showConfirm, showInput, toast } from "./modals";
 
 interface DirState {
   expanded: boolean;
@@ -20,8 +20,8 @@ export class Explorer {
   private projectCwd: string | null = null;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private selected: ExplorerEntry | null = null;
-  /** The explorer clipboard: the entry waiting for a Paste. */
-  private clip: { relPath: string; cut: boolean } | null = null;
+  /** Project-relative entry waiting for Paste. */
+  private clipboardEntry: { relPath: string; cut: boolean } | null = null;
 
   private onOpenFile: (absPath: string, preview?: boolean) => void = () => {};
 
@@ -50,12 +50,10 @@ export class Explorer {
         void this.createAt("", "dir");
         break;
       case "rename":
-        if (this.selected) void this.renameAt(this.selected);
-        else toast("Select a file or folder in the explorer first", "warning");
+        this.withSelected((entry) => void this.renameAt(entry));
         break;
       case "delete":
-        if (this.selected) void this.deleteAt(this.selected);
-        else toast("Select a file or folder in the explorer first", "warning");
+        this.withSelected((entry) => void this.deleteAt(entry));
         break;
       case "refresh":
         void this.refresh();
@@ -69,7 +67,7 @@ export class Explorer {
     this.dirs.clear();
     this.selected = null;
     // Clipboard entries are project-relative: they never survive a switch.
-    this.clip = null;
+    this.clipboardEntry = null;
     closeContextMenu();
     void this.renderRoot();
   }
@@ -107,12 +105,12 @@ export class Explorer {
   }
 
   private dirState(absPath: string): DirState {
-    let s = this.dirs.get(absPath);
-    if (!s) {
-      s = { expanded: false, loaded: false, loadSeq: 0 };
-      this.dirs.set(absPath, s);
+    let state = this.dirs.get(absPath);
+    if (!state) {
+      state = { expanded: false, loaded: false, loadSeq: 0 };
+      this.dirs.set(absPath, state);
     }
-    return s;
+    return state;
   }
 
   private makeDirRow(entry: ExplorerEntry, forceOpen = false): HTMLElement {
@@ -148,12 +146,7 @@ export class Explorer {
       arrow.textContent = state.expanded ? "▾" : "▸";
       void this.renderChildren(children, entry, state);
     });
-    row.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      this.select(entry, row);
-      showContextMenu(this.entryMenuItems(entry), e.clientX, e.clientY);
-    });
+    this.bindRowMenu(row, entry);
 
     const children = document.createElement("div");
     children.className = "explorer-children";
@@ -222,13 +215,17 @@ export class Explorer {
       this.select(entry, row);
       this.onOpenFile(entry.path, false);
     });
+    this.bindRowMenu(row, entry);
+    return row;
+  }
+
+  private bindRowMenu(row: HTMLElement, entry: ExplorerEntry): void {
     row.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       e.stopPropagation();
       this.select(entry, row);
       showContextMenu(this.entryMenuItems(entry), e.clientX, e.clientY);
     });
-    return row;
   }
 
   /** Highlight the selected row; keeps it as the rename/delete target. */
@@ -240,12 +237,17 @@ export class Explorer {
     row.classList.add("selected");
   }
 
+  private withSelected(run: (entry: ExplorerEntry) => void): void {
+    if (this.selected) run(this.selected);
+    else toast("Select a file or folder in the explorer first", "warning");
+  }
+
   private rootMenuItems(): ContextMenuItem[] {
     return [
       { label: "New File", action: () => void this.createAt("", "file") },
       { label: "New Folder", action: () => void this.createAt("", "dir") },
       { separator: true },
-      { label: "Paste", disabled: this.clip === null, action: () => void this.pasteAt("") },
+      { label: "Paste", disabled: this.clipboardEntry === null, action: () => void this.pasteAt("") },
       { separator: true },
       { label: "Refresh", action: () => void this.refresh() },
       { label: "Copy Path", action: () => this.copyPath(this.projectCwd ?? "") },
@@ -253,7 +255,7 @@ export class Explorer {
   }
 
   private entryMenuItems(entry: ExplorerEntry): ContextMenuItem[] {
-    const pasteTarget = entry.type === "dir" ? entry.relPath : dirnameRel(entry.relPath);
+    const pasteTarget = pasteTargetRel(entry);
     const items: ContextMenuItem[] = [];
     if (entry.type === "file") {
       items.push({ label: "Open", action: () => this.onOpenFile(entry.path, false) });
@@ -267,7 +269,7 @@ export class Explorer {
     items.push(
       { label: "Cut", action: () => this.cutEntry(entry) },
       { label: "Copy", action: () => this.copyEntry(entry) },
-      { label: "Paste", disabled: this.clip === null, action: () => void this.pasteAt(pasteTarget) },
+      { label: "Paste", disabled: this.clipboardEntry === null, action: () => void this.pasteAt(pasteTarget) },
     );
     if (entry.type === "file") items.push({ separator: true });
     items.push(
@@ -284,51 +286,49 @@ export class Explorer {
   // -------------------------------------------------------------- actions --
 
   private cutEntry(entry: ExplorerEntry): void {
-    this.clip = { relPath: entry.relPath, cut: true };
+    this.clipboardEntry = { relPath: entry.relPath, cut: true };
     toast(`Cut ${entry.relPath || entry.name} — paste to move`, "info");
   }
 
   private copyEntry(entry: ExplorerEntry): void {
-    this.clip = { relPath: entry.relPath, cut: false };
+    this.clipboardEntry = { relPath: entry.relPath, cut: false };
     toast(`Copied ${entry.relPath || entry.name} — paste to duplicate`, "info");
   }
 
   /** Paste the clipboard entry under targetDir ("" is the project root). */
   private async pasteAt(targetDirRel: string): Promise<void> {
-    const clip = this.clip;
+    const clip = this.clipboardEntry;
     if (!clip) return;
     const res = await window.pi.pasteEntry(targetDirRel, clip.relPath, clip.cut);
     if (!res.ok) {
       toast(res.error ?? "paste failed", "error");
       return;
     }
-    if (clip.cut) this.clip = null; // a move pastes exactly once
+    if (clip.cut) this.clipboardEntry = null; // a move pastes exactly once
     toast(`Pasted as ${res.name ?? "entry"}`, "info");
     await this.refresh();
   }
 
   private copyPath(path: string): void {
-    navigator.clipboard.writeText(path)
-      .then(() => toast("Path copied", "info"))
-      .catch(() => toast("could not copy the path", "error"));
+    copyText(path, "Path copied");
   }
 
-  // -------------------------------------------------------------- actions --
+  private toastIfFailed(res: { ok: boolean; error?: string }): void {
+    if (!res.ok) toast(res.error ?? "failed", "error");
+  }
 
   private async createAt(parentRel: string, kind: "file" | "dir"): Promise<void> {
     const name = await showInput(kind === "file" ? "New file" : "New folder", "name", "");
     if (name.cancelled || !name.value?.trim()) return;
     const rel = parentRel ? `${parentRel}/${name.value.trim()}` : name.value.trim();
-    const res = await window.pi.createEntry(rel, kind);
-    if (!res.ok) toast(res.error ?? "failed", "error");
+    this.toastIfFailed(await window.pi.createEntry(rel, kind));
     await this.refresh();
   }
 
   private async renameAt(entry: ExplorerEntry): Promise<void> {
     const res = await showInput("Rename", "new name", entry.name);
     if (res.cancelled || !res.value?.trim() || res.value.trim() === entry.name) return;
-    const r = await window.pi.renameEntry(entry.relPath, res.value.trim());
-    if (!r.ok) toast(r.error ?? "failed", "error");
+    this.toastIfFailed(await window.pi.renameEntry(entry.relPath, res.value.trim()));
     // Renames produce watcher delete+create events; refresh covers it.
     await this.refresh();
   }
@@ -336,15 +336,15 @@ export class Explorer {
   private async deleteAt(entry: ExplorerEntry): Promise<void> {
     const ok = await showConfirm("Delete", `Delete "${entry.relPath || entry.name}"?`);
     if (!ok.confirmed) return;
-    const res = await window.pi.deleteEntry(entry.relPath);
-    if (!res.ok) toast(res.error ?? "failed", "error");
+    this.toastIfFailed(await window.pi.deleteEntry(entry.relPath));
     // The watcher fires file:deleted, which closes any open editor tab.
     await this.refresh();
   }
 }
 
-/** The parent directory of a relative path; "" when top-level. */
-function dirnameRel(relPath: string): string {
-  const at = relPath.lastIndexOf("/");
-  return at === -1 ? "" : relPath.slice(0, at);
+/** Folder that receives Paste for this row. Files paste into their parent. */
+function pasteTargetRel(entry: ExplorerEntry): string {
+  if (entry.type === "dir") return entry.relPath;
+  const at = entry.relPath.lastIndexOf("/");
+  return at === -1 ? "" : entry.relPath.slice(0, at);
 }

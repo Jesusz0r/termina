@@ -58,10 +58,9 @@ export function showContextMenu(items: ContextMenuItem[], x: number, y: number):
     if (e.key === "Escape") return cleanup();
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      const enabled = rows.map((r, i) => (r.item.disabled ? -1 : i)).filter((i) => i !== -1);
-      if (enabled.length === 0) return;
-      const at = enabled.indexOf(index);
-      index = e.key === "ArrowDown" ? enabled[(at + 1) % enabled.length] : enabled[(at - 1 + enabled.length) % enabled.length];
+      const next = nextEnabledIndex(rows, index, e.key === "ArrowDown" ? 1 : -1);
+      if (next === null) return;
+      index = next;
       paint();
       return;
     }
@@ -106,4 +105,17 @@ export function showContextMenu(items: ContextMenuItem[], x: number, y: number):
   window.addEventListener("wheel", onWheelOrResize, { passive: true });
   window.addEventListener("resize", onWheelOrResize);
   open = { el: menu, cleanup };
+}
+
+function nextEnabledIndex(
+  rows: Array<{ item: ContextMenuItem }>,
+  index: number,
+  direction: 1 | -1,
+): number | null {
+  const enabled = rows.map((row, i) => (row.item.disabled ? -1 : i)).filter((i) => i !== -1);
+  if (enabled.length === 0) return null;
+  const at = enabled.indexOf(index);
+  return direction === 1
+    ? enabled[(at + 1) % enabled.length]
+    : enabled[(at - 1 + enabled.length) % enabled.length];
 }
