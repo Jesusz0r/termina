@@ -4597,6 +4597,17 @@ class PiEditorApp {
       return { ok: true, seq, path: ev.path, relPath: ev.relPath, content: ev.content, ts: ev.ts, toolName: ev.toolName };
     });
 
+    // ---- Modified list ----
+    ipcMain.handle("modified:clear", (_e, terminalId: string) => {
+      const inst = this.terminals.get(terminalId);
+      if (!inst) return { ok: false, error: "terminal not found" };
+      // Main owns the list: clearing only the renderer copy would resurrect
+      // every entry on the next push.
+      inst.modified.clear();
+      this.send("modified:list", { instanceId: inst.id, files: [] });
+      return { ok: true };
+    });
+
     // ---- Change Review ----
     ipcMain.handle("review:baseline", (_e, terminalId: string, path: string) => {
       const inst = this.terminals.get(terminalId);

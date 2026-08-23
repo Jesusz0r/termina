@@ -1122,10 +1122,11 @@ verifyBadge.addEventListener("click", () => {
 btnClearModified.addEventListener("click", (e) => {
   e.stopPropagation();
   const pane = activeId ? panes.get(activeId) : undefined;
-  if (pane) {
-    pane.modified = [];
-    renderModified(pane);
-  }
+  if (!pane) return;
+  // Main owns the list: clear it there or the next push resurrects it.
+  void window.pi.clearModified(pane.instanceId).then((res) => {
+    if (!res.ok) toast(res.error ?? "could not clear the list", "warning");
+  });
 });
 btnAcceptAll.addEventListener("click", (e) => {
   e.stopPropagation();

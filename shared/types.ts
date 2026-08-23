@@ -536,6 +536,9 @@ export interface PiBridge {
     terminalId: string,
     seq: number,
   ): Promise<{ ok: boolean; seq: number; path?: string; relPath?: string; content?: string; ts?: number; toolName?: string }>;
+  /** Clear the terminal's modified-file list. Main owns the list; the
+   *  next change re-adds only files that change after the clear. */
+  clearModified(terminalId: string): Promise<{ ok: boolean; error?: string }>;
   reviewBaseline(terminalId: string, path: string): Promise<{ status: "created" | "modified"; baseline: string | null | undefined }>;
   reviewRevert(terminalId: string, path: string): Promise<{ ok: boolean; error?: string }>;
 

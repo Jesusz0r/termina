@@ -141,6 +141,7 @@ const bridge: PiBridge = {
   setMineFile: (path, mine) => ipcRenderer.invoke("mine:set", path, mine),
   getMineFiles: () => ipcRenderer.invoke("mine:list"),
   getTimelineContent: (terminalId, seq) => ipcRenderer.invoke("timeline:content", terminalId, seq),
+  clearModified: (terminalId) => ipcRenderer.invoke("modified:clear", terminalId),
   reviewBaseline: (terminalId, path) => ipcRenderer.invoke("review:baseline", terminalId, path),
   reviewRevert: (terminalId, path) => ipcRenderer.invoke("review:revert", terminalId, path),
 
