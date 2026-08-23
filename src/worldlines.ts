@@ -474,8 +474,8 @@ export class WorldlinesView {
     });
   }
 
-  /** Expand the changed-files list for a candidate (details load lazily). */
-  private toggleDetails(comparisonId: string, label: "A" | "B", forceOpen: boolean): void {
+  /** Expand the changed-files list for one candidate (details load lazily). */
+  private async toggleDetails(comparisonId: string, label: "A" | "B", forceOpen: boolean): Promise<void> {
     const card = this.pairs.get(comparisonId)?.cards.get(label);
     if (!card) return;
     if (!card.detailsBody.hidden && !forceOpen) {
@@ -483,52 +483,49 @@ export class WorldlinesView {
       return;
     }
     card.detailsBody.hidden = false;
-    if (!card.details && !card.detailsLoading) {
-      card.detailsLoading = true;
+    if (card.details || card.detailsLoading) return;
+    card.detailsLoading = true;
+    card.changedList.replaceChildren();
+    const li = document.createElement("li");
+    li.className = "cand-loading";
+    li.textContent = "computing…";
+    card.changedList.appendChild(li);
+    const res = await this.fetchDetailsStable(comparisonId, label);
+    card.detailsLoading = false;
+    if (!res.ok || !res.details) {
       card.changedList.replaceChildren();
-      const li = document.createElement("li");
-      li.className = "cand-loading";
-      li.textContent = "computing…";
-      card.changedList.appendChild(li);
-      const version = card.summary.version;
-      void window.pi.getWorldlineDetails(comparisonId, label).then((res) => {
-        card.detailsLoading = false;
-        if (card.summary.version !== version) {
-          card.changedList.replaceChildren();
-          const stale = document.createElement("li");
-          stale.className = "cand-loading";
-          stale.textContent = "candidate updated — expand again";
-          card.changedList.appendChild(stale);
-          return;
-        }
-        if (!res.ok || !res.details) {
-          card.changedList.replaceChildren();
-          const err = document.createElement("li");
-          err.className = "cand-loading";
-          err.textContent = res.error ?? "details unavailable";
-          card.changedList.appendChild(err);
-          return;
-        }
-        card.details = res.details;
-        card.detailsVersion = version;
-        this.fillDetails(card, res.details);
-      }).catch((err) => {
-        card.detailsLoading = false;
-        if (card.summary.version !== version) {
-          card.changedList.replaceChildren();
-          const stale = document.createElement("li");
-          stale.className = "cand-loading";
-          stale.textContent = "candidate updated — expand again";
-          card.changedList.appendChild(stale);
-          return;
-        }
-        card.changedList.replaceChildren();
-        const row = document.createElement("li");
-        row.className = "cand-loading";
-        row.textContent = (err as Error).message;
-        card.changedList.appendChild(row);
-      });
+      const err = document.createElement("li");
+      err.className = "cand-loading";
+      err.textContent = res.error ?? "details unavailable";
+      card.changedList.appendChild(err);
+      return;
     }
+    card.details = res.details;
+    card.detailsVersion = card.summary.version;
+    this.fillDetails(card, res.details);
+  }
+
+  /** Fetch the details of one candidate. A version bump during the request
+   *  means the answer describes the old head; retry until stable instead of
+   *  stranding the panel on a stale result. */
+  private async fetchDetailsStable(
+    comparisonId: string,
+    label: "A" | "B",
+  ): Promise<{ ok: boolean; details?: WorldlineDetails; error?: string }> {
+    const card = this.pairs.get(comparisonId)?.cards.get(label);
+    if (!card) return { ok: false, error: "the candidate is gone" };
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const version = card.summary.version;
+      let res: { ok: boolean; details?: WorldlineDetails; error?: string };
+      try {
+        res = await window.pi.getWorldlineDetails(comparisonId, label);
+      } catch (err) {
+        // A rejected IPC call is final; retrying cannot fix it.
+        return { ok: false, error: (err as Error).message };
+      }
+      if (card.summary.version === version) return res;
+    }
+    return { ok: false, error: "the candidate keeps updating — expand again" };
   }
 
   private fillDetails(card: CandidateCard, d: WorldlineDetails): void {
@@ -618,20 +615,13 @@ export class WorldlinesView {
     const card = this.pairs.get(comparisonId)?.cards.get(label);
     if (!card) return null;
     if (card.details && card.detailsVersion === card.summary.version) return card.details;
-    const version = card.summary.version;
-    try {
-      const res = await window.pi.getWorldlineDetails(comparisonId, label);
-      if (card.summary.version !== version) return null;
-      if (res.ok && res.details) {
-        card.details = res.details;
-        card.detailsVersion = version;
-        return res.details;
-      }
-      toast(res.error ?? "details unavailable", "warning");
-      return null;
-    } catch (err) {
-      toast((err as Error).message, "warning");
-      return null;
+    const res = await this.fetchDetailsStable(comparisonId, label);
+    if (res.ok && res.details) {
+      card.details = res.details;
+      card.detailsVersion = card.summary.version;
+      return res.details;
     }
+    toast(res.error ?? "details unavailable", "warning");
+    return null;
   }
 }
