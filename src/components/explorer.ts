@@ -3,7 +3,7 @@
  * project editor, and supports create / rename / delete of files and folders.
  * Directories load lazily on expand; the tree refreshes from watcher events.
  */
-import { pathBasename, type ExplorerEntry } from "../../shared/types";
+import { pathBasename, type CommandId, type ExplorerEntry } from "../../shared/types";
 import { showConfirm, showInput, toast } from "./modals";
 
 interface DirState {
@@ -45,7 +45,7 @@ export class Explorer {
   }
 
   /** File-menu commands (File → New File / New Folder / Rename / Delete…). */
-  handleCommand(command: "new-file" | "new-folder" | "rename" | "delete" | "refresh"): void {
+  handleCommand(command: CommandId): void {
     switch (command) {
       case "new-file":
         void this.createAt("", "file");

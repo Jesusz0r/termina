@@ -43,6 +43,7 @@ import { Explorer } from "./components/explorer";
 import { toast } from "./components/modals";
 import { SettingsView } from "./settings";
 import { emptyShortcuts } from "./settings-shortcuts";
+import { CommandDispatcher } from "./commands";
 import { defaultAppPreferences, pathBasename } from "../shared/types";
 import { normalizeAppPreferences } from "../shared/preferences";
 import type { AppPreferences, AppUpdateState, ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
@@ -1369,62 +1370,51 @@ function runMenuEdit(kind: "undo" | "redo" | "select-all"): void {
   else document.execCommand(kind);
 }
 
+const commands = new CommandDispatcher();
+
+// File & Explorer commands
+commands.register("new-file", () => explorer.handleCommand("new-file"));
+commands.register("new-folder", () => explorer.handleCommand("new-folder"));
+commands.register("rename", () => explorer.handleCommand("rename"));
+commands.register("delete", () => explorer.handleCommand("delete"));
+commands.register("refresh", () => explorer.handleCommand("refresh"));
+commands.register("save-all", () => {
+  void activeEditor().flushAll().then((res) => {
+    if (!res.ok) toast(`could not save: ${res.failed.map((p) => pathBasename(p)).join(", ")}`, "warning");
+  });
+});
+
+// Edit commands
+commands.register("undo", () => runMenuEdit("undo"));
+commands.register("redo", () => runMenuEdit("redo"));
+commands.register("select-all", () => runMenuEdit("select-all"));
+
+// Terminal commands
+commands.register("new-terminal", () => {
+  if (terminalMenu) closeTerminalMenu();
+  else void openTerminalMenu();
+});
+
+// View & Layout commands
+commands.register("fullscreen", () => applyLayout("terminal-fullscreen"));
+commands.register("layout-terminal-left", () => applyLayout("terminal-left"));
+commands.register("layout-terminal-right", () => applyLayout("terminal-right"));
+commands.register("layout-terminal-top", () => applyLayout("terminal-top"));
+commands.register("layout-terminal-bottom", () => applyLayout("terminal-bottom"));
+commands.register("toggle-explorer", () => {
+  if (isFullscreenLayout()) exitFullscreen();
+  else setExplorerMinimized(!explorerMinimized);
+});
+commands.register("toggle-terminal", () => requestMinimize("terminal"));
+commands.register("toggle-editor", () => requestMinimize("editor"));
+commands.register("toggle-modified", () => setModifiedVisible(modifiedPanelEl.style.display === "none"));
+commands.register("session-search", () => sessionSearch.open());
+
+// Settings
+commands.register("open-settings", () => settingsView.open(preferences));
+
 window.pi.onMenuCommand((cmd) => {
-  switch (cmd.command) {
-    case "save-all":
-      void activeEditor().flushAll().then((res) => {
-        if (!res.ok) toast(`could not save: ${res.failed.map((p) => pathBasename(p)).join(", ")}`, "warning");
-      });
-      break;
-    case "new-terminal":
-      void openTerminalMenu();
-      break;
-    case "edit:undo":
-      runMenuEdit("undo");
-      break;
-    case "edit:redo":
-      runMenuEdit("redo");
-      break;
-    case "edit:select-all":
-      runMenuEdit("select-all");
-      break;
-    case "layout-terminal-left":
-      applyLayout("terminal-left");
-      break;
-    case "layout-terminal-right":
-      applyLayout("terminal-right");
-      break;
-    case "layout-terminal-top":
-      applyLayout("terminal-top");
-      break;
-    case "layout-terminal-bottom":
-      applyLayout("terminal-bottom");
-      break;
-    case "toggle-explorer":
-      if (isFullscreenLayout()) exitFullscreen();
-      else setExplorerMinimized(!explorerMinimized);
-      break;
-    case "toggle-modified":
-      setModifiedVisible(modifiedPanelEl.style.display === "none");
-      break;
-    case "layout-terminal-fullscreen":
-      applyLayout("terminal-fullscreen");
-      break;
-    case "toggle-terminal":
-      requestMinimize("terminal");
-      break;
-    case "toggle-editor":
-      requestMinimize("editor");
-      break;
-    case "session-search":
-      sessionSearch.open();
-      break;
-    case "open-settings":
-      settingsView.open(preferences);
-      break;
-    default:
-      explorer.handleCommand(cmd.command);
-  }
+  commands.execute(cmd.command);
 });
 
 // ------------------------------------------------------------ split pane ----

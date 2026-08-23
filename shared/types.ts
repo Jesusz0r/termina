@@ -204,6 +204,30 @@ export function pathBasename(p: string): string {
   return p.split(/[\\/]/).pop() || p;
 }
 
+import {
+  type CommandCategory,
+  type CommandScope,
+  type CommandDefinition,
+  type CommandId,
+  type ShortcutCommand,
+  type MenuCommand,
+  type ShortcutMap,
+  COMMAND_DEFINITIONS,
+  DEFAULT_SHORTCUTS,
+} from "./commands";
+
+export {
+  type CommandCategory,
+  type CommandScope,
+  type CommandDefinition,
+  type CommandId,
+  type ShortcutCommand,
+  type MenuCommand,
+  type ShortcutMap,
+  COMMAND_DEFINITIONS,
+  DEFAULT_SHORTCUTS,
+};
+
 export interface AppPreferences {
   theme: ThemeId;
   editorFontSize: number;
@@ -215,63 +239,6 @@ export interface AppPreferences {
   /** Canonical project roots to reopen on launch. Main owns this field. */
   openProjects: string[];
 }
-
-export type ShortcutCommand =
-  | "open-folder"
-  | "new-file"
-  | "new-folder"
-  | "rename"
-  | "delete"
-  | "refresh"
-  | "save-all"
-  | "close-window"
-  | "undo"
-  | "redo"
-  | "select-all"
-  | "new-terminal"
-  | "close-terminal"
-  | "abort-terminal"
-  | "fullscreen"
-  | "layout-terminal-left"
-  | "layout-terminal-right"
-  | "layout-terminal-top"
-  | "layout-terminal-bottom"
-  | "toggle-explorer"
-  | "toggle-terminal"
-  | "toggle-editor"
-  | "toggle-modified"
-  | "session-search"
-  | "open-settings";
-
-export type ShortcutMap = Record<ShortcutCommand, string>;
-
-export const DEFAULT_SHORTCUTS: ShortcutMap = {
-  "open-folder": "CmdOrCtrl+O",
-  "new-file": "CmdOrCtrl+Alt+N",
-  "new-folder": "CmdOrCtrl+Alt+Shift+N",
-  rename: "F2",
-  delete: "",
-  refresh: "",
-  "save-all": "CmdOrCtrl+Alt+S",
-  "close-window": "CmdOrCtrl+W",
-  undo: "CmdOrCtrl+Z",
-  redo: "Shift+CmdOrCtrl+Z",
-  "select-all": "CmdOrCtrl+A",
-  "new-terminal": "CmdOrCtrl+T",
-  "close-terminal": "CmdOrCtrl+Shift+W",
-  "abort-terminal": "CmdOrCtrl+.",
-  fullscreen: "CmdOrCtrl+Shift+F",
-  "layout-terminal-left": "",
-  "layout-terminal-right": "",
-  "layout-terminal-top": "",
-  "layout-terminal-bottom": "",
-  "toggle-explorer": "CmdOrCtrl+B",
-  "toggle-terminal": "CmdOrCtrl+Shift+E",
-  "toggle-editor": "CmdOrCtrl+E",
-  "toggle-modified": "",
-  "session-search": "CmdOrCtrl+Shift+P",
-  "open-settings": "CmdOrCtrl+,",
-};
 
 export function defaultAppPreferences(): AppPreferences {
   return {
@@ -285,29 +252,6 @@ export function defaultAppPreferences(): AppPreferences {
     openProjects: [],
   };
 }
-
-export type MenuCommand =
-  | "new-file"
-  | "new-folder"
-  | "new-terminal"
-  | "rename"
-  | "delete"
-  | "refresh"
-  | "layout-terminal-left"
-  | "layout-terminal-right"
-  | "layout-terminal-top"
-  | "layout-terminal-bottom"
-  | "layout-terminal-fullscreen"
-  | "toggle-explorer"
-  | "toggle-modified"
-  | "toggle-terminal"
-  | "toggle-editor"
-  | "session-search"
-  | "save-all"
-  | "edit:undo"
-  | "edit:redo"
-  | "edit:select-all"
-  | "open-settings";
 
 /** One recorded run (WORLDLINES §6.5) — metadata only, no blobs. */
 export interface RunSummary {

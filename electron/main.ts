@@ -49,6 +49,7 @@ import {
   DEFAULT_SHORTCUTS,
   defaultAppPreferences,
   type AppPreferences,
+  type CommandId,
   type ExplorerEntry,
   type InstanceSummary,
   type ModifiedFile,
@@ -559,7 +560,7 @@ class PiEditorApp {
   }
 
   private buildMenu(): void {
-    const send = (command: string) => () => this.send("menu:command", { command });
+    const send = (command: CommandId) => () => this.send("menu:command", { command });
     const shortcut = (command: ShortcutCommand): string | undefined => this.shortcutMap[command] || undefined;
     const update = updateMenuCopy(
       this.appUpdater?.getState() ?? { status: "disabled", currentVersion: app.getVersion() },
@@ -614,8 +615,8 @@ class PiEditorApp {
           // inherits the standard accelerator. Undo, Redo, and Select All
           // dispatch to the renderer instead: the user can rebind them, and
           // each surface keeps its own undo stack and selection.
-          { label: "Undo", accelerator: shortcut("undo"), click: send("edit:undo") },
-          { label: "Redo", accelerator: shortcut("redo"), click: send("edit:redo") },
+          { label: "Undo", accelerator: shortcut("undo"), click: send("undo") },
+          { label: "Redo", accelerator: shortcut("redo"), click: send("redo") },
           { type: "separator" },
           { role: "cut" },
           { role: "copy" },
@@ -623,7 +624,7 @@ class PiEditorApp {
           { role: "pasteAndMatchStyle" },
           { role: "delete" },
           { type: "separator" },
-          { label: "Select All", accelerator: shortcut("select-all"), click: send("edit:select-all") },
+          { label: "Select All", accelerator: shortcut("select-all"), click: send("select-all") },
         ],
       },
       {
@@ -646,7 +647,7 @@ class PiEditorApp {
               { label: "Terminal Top", accelerator: shortcut("layout-terminal-top"), click: send("layout-terminal-top") },
               { label: "Terminal Bottom", accelerator: shortcut("layout-terminal-bottom"), click: send("layout-terminal-bottom") },
               { type: "separator" },
-              { label: "Terminal Fullscreen", accelerator: shortcut("fullscreen"), click: send("layout-terminal-fullscreen") },
+              { label: "Terminal Fullscreen", accelerator: shortcut("fullscreen"), click: send("fullscreen") },
             ],
           },
           { label: "Toggle Explorer", accelerator: shortcut("toggle-explorer"), click: send("toggle-explorer") },
