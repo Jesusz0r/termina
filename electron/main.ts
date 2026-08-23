@@ -87,6 +87,9 @@ const MAX_TIMELINE_EVENTS = 400;
 const MAX_TIMELINE_CONTENT_BYTES = 4 * 1024 * 1024;
 /** A watcher change within this window after a tool event is the same action. */
 const TOOL_CHANGE_DEDUP_MS = 1500;
+/** Unowned disk writes (installs, builds, tests) inside this window refresh
+ *  the last change dot instead of adding one per file. */
+const CHANGE_BURST_MS = 2000;
 
 let terminalSeq = 0;
 let workspaceSeq = 0;
@@ -4205,12 +4208,17 @@ class PiEditorApp {
           const content = this.contentSizeOk(change.content) ? change.content : undefined;
           // Bash-driven changes provide the authoritative content for edit math.
           if (content !== undefined) this.setRunSnapshot(inst, path, content);
-          // Burst throttle: a build writing the same file repeatedly is one
-          // moment — refresh the last change point instead of adding dots.
+          // Burst coalescing: a build or install writing many files is one
+          // moment. Refresh the last change dot instead of spraying dots.
           const last = inst.timeline.at(-1);
-          if (last && last.t === "change" && last.path === path && now - (last.ts ?? 0) < 800) {
+          if (last && last.t === "change" && now - (last.ts ?? 0) < CHANGE_BURST_MS) {
+            last.path = path;
+            last.relPath = relPath;
+            last.status = change.status;
             if (content !== undefined) last.content = content;
             last.ts = now;
+            const { content: _burstContent, ...pub } = last;
+            this.send("timeline:event", { terminalId: inst.id, event: pub });
           } else {
             this.pushTimeline(inst, { t: "change", path, relPath, content, status: change.status });
           }
