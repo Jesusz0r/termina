@@ -545,6 +545,9 @@ body {
   gap: 4px;
   overflow-x: auto;
   flex: 1;
+  /* The list paints above the new-terminal stub where they overlap. */
+  position: relative;
+  z-index: 1;
 }
 
 .terminal-tab {
@@ -660,21 +663,66 @@ body {
   color: var(--text);
 }
 
+/* The new-terminal stub reads as half a tab tucked behind the tab list.
+ * It grows from the strip floor, lower than the floating tab chips. */
 #btn-new-terminal {
-  background: none;
-  border: none;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  align-self: flex-end;
+  height: 22px;
+  margin-left: -6px;
+  padding: 0 9px 0 12px;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: var(--bg-raised);
   color: var(--text-dim);
-  font-size: 16px;
+  font-size: 13px;
   line-height: 1;
-  padding: 2px 8px;
   cursor: pointer;
   flex: 0 0 auto;
+  position: relative;
+  z-index: 0;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 
 #btn-new-terminal:hover,
 #btn-new-terminal:focus-visible {
   color: var(--text);
+  background: var(--bg-hover);
   outline: none;
+}
+
+/* The hidden label shows only in the empty-strip full-tab state. */
+.newtab-label {
+  display: none;
+  font-size: 11px;
+}
+
+/* No terminals yet: the stub becomes a complete labeled tab. The idle
+ * list stops growing so the tab sits where the first tab would. */
+#terminal-tabs:has(#terminal-tabs-list:empty) #terminal-tabs-list {
+  flex: 0 0 auto;
+}
+
+#terminal-tabs:has(#terminal-tabs-list:empty) #btn-new-terminal {
+  align-self: stretch;
+  height: auto;
+  margin-left: 0;
+  padding: 0 14px;
+  background: var(--bg);
+  color: var(--text-dim);
+}
+
+#terminal-tabs:has(#terminal-tabs-list:empty) #btn-new-terminal:hover,
+#terminal-tabs:has(#terminal-tabs-list:empty) #btn-new-terminal:focus-visible {
+  color: var(--text);
+}
+
+#terminal-tabs:has(#terminal-tabs-list:empty) .newtab-label,
+#project-bar:has(#project-tabs:empty) .newtab-label {
+  display: inline;
 }
 
 #btn-clear-modified,
@@ -1583,6 +1631,9 @@ body {
   gap: 4px;
   overflow-x: auto;
   flex: 1;
+  /* The tabs paint above the new-project stub where they overlap. */
+  position: relative;
+  z-index: 1;
 }
 
 .project-tab {
@@ -1633,17 +1684,29 @@ body {
   background: var(--bg-hover);
 }
 
+/* The new-project stub reads as half a tab tucked behind the open tabs.
+ * It grows from the bar floor like a real project tab, but shorter. */
 #btn-new-project {
-  width: 22px;
-  height: 22px;
-  align-self: center;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  background: transparent;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  align-self: flex-end;
+  height: 26px;
+  margin-left: -8px;
+  padding: 0 10px 0 13px;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: var(--bg-raised);
   color: var(--text-dim);
+  font-size: 15px;
+  line-height: 1;
   cursor: pointer;
-  font: inherit;
+  flex: 0 0 auto;
+  position: relative;
+  z-index: 0;
   -webkit-app-region: no-drag;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 
 #btn-new-project:hover,
@@ -1651,6 +1714,26 @@ body {
   color: var(--text);
   background: var(--bg-hover);
   outline: none;
+}
+
+/* No projects yet: the stub becomes a complete labeled tab. The idle
+ * list stops growing so the tab sits where the first tab would. */
+#project-bar:has(#project-tabs:empty) #project-tabs {
+  flex: 0 0 auto;
+}
+
+#project-bar:has(#project-tabs:empty) #btn-new-project {
+  align-self: stretch;
+  height: auto;
+  margin-left: 0;
+  padding: 0 14px;
+  background: var(--bg);
+  font-size: 13px;
+}
+
+#project-bar:has(#project-tabs:empty) #btn-new-project:hover,
+#project-bar:has(#project-tabs:empty) #btn-new-project:focus-visible {
+  color: var(--text);
 }
 
 #editor-tabs {
