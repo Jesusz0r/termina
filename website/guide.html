@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Termina — User Guide</title>
+  <meta name="description" content="The Termina user guide: get started, review changes, verify with one click, fork any moment into isolated candidates, and promote the winner.">
+  <link rel="icon" type="image/svg+xml" href="assets/icon.svg?v=0.1.17">
+  <link rel="icon" type="image/png" sizes="512x512" href="assets/icon.png?v=0.1.17">
+  <link rel="shortcut icon" href="favicon.ico?v=0.1.17">
+  <link rel="apple-touch-icon" href="assets/icon.png?v=0.1.17">
+  <link rel="stylesheet" href="styles.css?v=0.1.17">
+</head>
+<body>
+
+  <!-- ============ NAV ============ -->
+  <header class="nav">
+    <div class="container nav-inner">
+      <a href="index.html" class="brand">
+        <img src="assets/icon.svg?v=0.1.17" alt="Termina">
+        TERMINA
+        <span class="ver">v0.1.17</span>
+      </a>
+      <nav class="nav-links">
+        <a href="index.html#watch">See it work</a>
+        <a href="index.html#how">How it works</a>
+        <a href="index.html#worldlines">Worldlines</a>
+        <a href="index.html#safety">Safety</a>
+        <a href="guide.html" aria-current="page">Guide</a>
+      </nav>
+      <div class="nav-actions">
+        <a href="https://github.com/Jesusz0r/termina" target="_blank" class="btn btn-ghost btn-sm">GitHub</a>
+        <a href="index.html#install" class="btn btn-primary btn-sm">Download</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- ============ GUIDE HEADER ============ -->
+  <section class="guide-hero">
+    <div class="container">
+      <span class="eyebrow">User guide</span>
+      <h1>Master the <span class="hl">cockpit.</span></h1>
+      <p class="section-sub">
+        Termina is a hybrid coding cockpit: the real pi TUI in a terminal on the left, a live Monaco IDE on the
+        right. This guide walks through everything the app can do — reviewed against the source, not the marketing.
+      </p>
+    </div>
+  </section>
+
+  <!-- ============ GUIDE BODY ============ -->
+  <main class="container guide">
+
+    <nav class="toc" aria-label="Contents">
+      <span class="toc-title">Contents</span>
+      <ol>
+        <li><a href="#getting-started">Getting started</a></li>
+        <li><a href="#layout">The layout</a></li>
+        <li><a href="#agent">Working with the agent</a></li>
+        <li><a href="#live">Watching work live</a></li>
+        <li><a href="#review">Change Review</a></li>
+        <li><a href="#verify">Verify &amp; Iterate</a></li>
+        <li><a href="#timeline">Session Timeline</a></li>
+        <li><a href="#plan">Plan Board and Dispatch</a></li>
+        <li><a href="#worldlines-guide">Worldlines: fork, compare, promote</a></li>
+        <li><a href="#files">Explorer, editor, and Mine marks</a></li>
+        <li><a href="#settings">Settings</a></li>
+        <li><a href="#shortcuts">Keyboard shortcuts</a></li>
+        <li><a href="#privacy">Privacy and safety model</a></li>
+        <li><a href="#troubleshooting">Troubleshooting</a></li>
+      </ol>
+    </nav>
+
+    <!-- ============ 1. GETTING STARTED ============ -->
+    <section id="getting-started" class="guide-section">
+      <h2>1 · Getting started</h2>
+
+      <h3>Install</h3>
+      <p>
+        Download the signed <code>.dmg</code> (macOS Apple Silicon) or <code>.AppImage</code> (Linux x64) from the
+        <a class="link" href="index.html#install">releases page</a>. The bundle ships everything: the app, the Rust
+        snapshot core, the pinned pi package, and its own node runtime. Nothing else to install.
+      </p>
+      <p>Packaged builds check GitHub Releases for updates and install them when you quit the app.</p>
+
+      <h3>First launch</h3>
+      <p>A fresh install starts empty:</p>
+      <ol>
+        <li>Click <b>Open folder</b> (or press <code>Cmd/Ctrl+O</code>) and pick a project folder.</li>
+        <li>In the terminal, run <code>/login</code> to configure your model provider.</li>
+        <li>Run <code>/models</code> to pick the default model.</li>
+      </ol>
+      <p>The empty editor tells you about <code>/login</code> and <code>/models</code> when pi has no provider configured yet.</p>
+      <p>
+        Opening a folder creates one project tab and starts one pi agent terminal in it. Your open project tabs
+        restore on the next launch.
+      </p>
+
+      <h3>Project tabs</h3>
+      <p>
+        Each tab is one folder with its own explorer, editor, terminals, timeline, and worldlines. Switching tabs
+        never interrupts a running agent — every project keeps working in the background. Reopening a folder that
+        already has a tab reactivates that tab instead of duplicating it.
+      </p>
+    </section>
+
+    <!-- ============ 2. LAYOUT ============ -->
+    <section id="layout" class="guide-section">
+      <h2>2 · The layout</h2>
+      <table>
+        <thead><tr><th>Area</th><th>What lives there</th></tr></thead>
+        <tbody>
+          <tr><td>Project bar</td><td>Project tabs and <code>＋</code> to open another folder</td></tr>
+          <tr><td>Explorer</td><td>File tree (far left, collapsible with <code>Cmd/Ctrl+B</code>)</td></tr>
+          <tr><td>Terminal pane</td><td>Terminal tabs, the Session Timeline strip, the Plan Board, the Worldlines panel, and the Modified files panel</td></tr>
+          <tr><td>Editor pane</td><td>Editor tabs, the Monaco editor, and Change Review</td></tr>
+          <tr><td>Status bar</td><td>Current folder, the Verify button, and the Git handoff buttons</td></tr>
+        </tbody>
+      </table>
+      <p>Panes resize by dragging the dividers. Each pane minimizes with its <code>–</code> button:</p>
+      <ul>
+        <li><code>Cmd/Ctrl+B</code> toggles the explorer.</li>
+        <li><code>Cmd/Ctrl+Shift+E</code> toggles the terminal.</li>
+        <li><code>Cmd/Ctrl+E</code> toggles the editor.</li>
+        <li><code>Cmd/Ctrl+Shift+F</code> makes the terminal fullscreen (only the terminal shows).</li>
+      </ul>
+      <p>Terminal and editor cannot both be minimized. The editor stays minimized while no file or review is open.</p>
+    </section>
+
+    <!-- ============ 3. AGENT ============ -->
+    <section id="agent" class="guide-section">
+      <h2>3 · Working with the agent</h2>
+
+      <h3>Terminals</h3>
+      <p>Click <code>＋</code> next to the terminal tabs to open the terminal chooser:</p>
+      <ul>
+        <li><b>pi agent</b> — a real pi TUI session in your project.</li>
+        <li><b>Shells</b> — any shell detected on your system (<code>zsh</code>, <code>bash</code>, …).</li>
+      </ul>
+      <p>Shell tabs show the shell name as a badge. <code>Cmd/Ctrl+T</code> opens the chooser.</p>
+
+      <h3>Talking to pi</h3>
+      <p>
+        The terminal is a full pi TUI. Everything pi can do, you can do here: <code>/settings</code>,
+        <code>/login</code>, <code>/models</code>, plan mode, completions, and so on.
+      </p>
+      <p>Multi-line input works everywhere:</p>
+      <ul>
+        <li><code>Shift+Enter</code>, <code>Ctrl+Enter</code>, or <code>Cmd+Enter</code> (macOS) inserts a newline.</li>
+        <li><code>Option+Enter</code> (macOS) queues a follow-up message while the agent runs.</li>
+      </ul>
+      <p><code>Cmd/Ctrl+.</code> sends an interrupt to the active terminal. <code>Cmd/Ctrl+Shift+W</code> closes it.</p>
+    </section>
+
+    <!-- ============ 4. LIVE ============ -->
+    <section id="live" class="guide-section">
+      <h2>4 · Watching work live</h2>
+      <p>While the agent works:</p>
+      <ul>
+        <li>The file watcher pushes every disk change into open editor models. You see edits land as the agent writes them.</li>
+        <li>Files the agent touches auto-open in editor tabs mid-run, so you can follow along without hunting for paths.</li>
+        <li>The Modified files panel (bottom of the terminal pane) lists every file the current run changed, with a badge per file: <code>A</code> created, <code>M</code> modified, <code>D</code> deleted.</li>
+      </ul>
+      <p>Files larger than 2&nbsp;MB cannot be opened in the editor; the terminal stays the place to inspect them.</p>
+    </section>
+
+    <!-- ============ 5. CHANGE REVIEW ============ -->
+    <section id="review" class="guide-section">
+      <h2>5 · Change Review</h2>
+      <p>
+        Every run gets a <b>baseline</b>: the content of each file at the moment the run started. Change Review
+        compares against that baseline, not against Git.
+      </p>
+      <p>To review a change:</p>
+      <ol>
+        <li>Click a file in the Modified files panel. Change Review opens a side-by-side diff: baseline on the left, current content on the right.</li>
+        <li>Choose an action:
+          <ul>
+            <li><b>Accept</b> — mark the change as kept (<code>✓</code> mark in the list).</li>
+            <li><b>Revert</b> — restore the pre-run version (<code>↩</code> mark in the list).</li>
+            <li><b>Open file</b> — leave the diff and edit the file as a normal tab.</li>
+          </ul>
+        </li>
+        <li>Use <b>Accept all</b> in the panel header to accept every change at once, or <b>Clear</b> to reset the list display.</li>
+      </ol>
+
+      <h3>Handing off to Git</h3>
+      <p>Termina never writes your Git repository — no staging, no commits, no refs. After a green Verify or after you Accept changes, the status bar shows two handoff actions:</p>
+      <ul>
+        <li><b>Copy commit subject</b> — copies a commit subject derived from the last run's prompt.</li>
+        <li><b>Open shell</b> — opens a shell in the project so you can commit yourself.</li>
+      </ul>
+    </section>
+
+    <!-- ============ 6. VERIFY ============ -->
+    <section id="verify" class="guide-section">
+      <h2>6 · Verify &amp; Iterate</h2>
+      <p>
+        The <b>Verify</b> button in the status bar runs your tests in a background process and feeds the result back
+        to the agent on its next turn. The agent sees the failure output and can fix it without you relaying anything.
+      </p>
+      <p>
+        Termina detects the test command automatically from <code>package.json</code> scripts, pytest, cargo, or go.
+        The button's tooltip shows the detected command.
+      </p>
+      <p>States you will see:</p>
+      <table>
+        <thead><tr><th>Badge</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><i>(none)</i></td><td>Not tested yet</td></tr>
+          <tr><td>spinner <code>verifying · …</code></td><td>Running. Click to cancel.</td></tr>
+          <tr><td><code>✓ …</code></td><td>Passed. The Git handoff buttons appear.</td></tr>
+          <tr><td><code>✗ …</code></td><td>Failed. The summary explains why.</td></tr>
+          <tr><td><code>⏰ …</code></td><td>Timed out.</td></tr>
+          <tr><td><code>⏸ …</code></td><td>Cancelled.</td></tr>
+        </tbody>
+      </table>
+      <p>Candidate terminals (see Worldlines) detect their own test command from their own copy of the project.</p>
+    </section>
+
+    <!-- ============ 7. TIMELINE ============ -->
+    <section id="timeline" class="guide-section">
+      <h2>7 · Session Timeline</h2>
+      <p>
+        Below the terminal sits a dot strip: one dot per stable action the agent took, with a running count. This is
+        the record of what happened, in order.
+      </p>
+      <ul>
+        <li><b>Hover a dot</b> for the time, the tool, the file, and an on-demand diff of what changed at that point.</li>
+        <li><b>▶ Replay</b> walks through the run's snapshots step by step.</li>
+        <li><b>Cmd/Ctrl+Click a forkable dot</b> to fork a candidate from that exact source state — any moment of any run becomes a branch point. See <a class="link" href="#fork-any-moment">Fork Any Moment</a>.</li>
+      </ul>
+      <p>The recorder label next to the count tells you the recording health:</p>
+      <table>
+        <thead><tr><th>Label</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><i>(empty)</i></td><td>Recording normally.</td></tr>
+          <tr><td><code>indexing</code></td><td>Termina is indexing the source before moments can fork.</td></tr>
+          <tr><td><code>paused</code></td><td>Moment forking is paused; no Git recording is happening.</td></tr>
+          <tr><td><code>degraded</code></td><td>Some moments could not be captured.</td></tr>
+          <tr><td><code>budget</code></td><td>The retained-blob budget is full, so old unpinned moments are being evicted to make room.</td></tr>
+        </tbody>
+      </table>
+      <p>If a dot exists, it is forkable. Termina never shows a dot whose source state it cannot restore.</p>
+    </section>
+
+    <!-- ============ 8. PLAN BOARD ============ -->
+    <section id="plan" class="guide-section">
+      <h2>8 · Plan Board and Dispatch</h2>
+      <p>
+        When the agent plans multi-step work, the Plan Board (below the timeline) shows the task list with live
+        progress: <code>○</code> pending, <code>◐</code> active, <code>✓</code> done.
+      </p>
+
+      <h3>Dispatching tasks</h3>
+      <ul>
+        <li><b>Click any pending task</b> to send it to a parallel worker — a separate pi agent that works on the same project simultaneously. A toast confirms the dispatch.</li>
+        <li><b>⇉ Dispatch</b> sends the plan's tasks out.</li>
+      </ul>
+      <p>
+        Dispatched tasks show their worker and claimed files on the board. Clicking a dispatched task jumps to that
+        worker's terminal (tabs are named <code>dispatch</code>). Workers receive a mailbox briefing with their task,
+        and settle notes flow back to siblings so they stay aware of each other's results.
+      </p>
+    </section>
+
+    <!-- ============ 9. WORLDLINES ============ -->
+    <section id="worldlines-guide" class="guide-section">
+      <h2>9 · Worldlines: fork, compare, promote</h2>
+      <p>
+        Worldlines answer one question: <i>what if the agent had done it differently?</i> A completed run can be
+        forked into isolated candidates — full copies of the project with their own pi sessions — that run side by
+        side with the original.
+      </p>
+      <p>
+        Requirements: the project must be inside a Git repository, and your platform must support the candidate
+        sandbox (macOS and Linux x64 do). Otherwise the feature disables itself with a precise reason.
+      </p>
+
+      <h3>Fork Run</h3>
+      <p>When a terminal's last run completes, a <b>⇉ Fork Run</b> button appears above the timeline. It forks the run into two candidates:</p>
+      <ul>
+        <li><b>Candidate A — Reference</b>: the run's final result, preserved exactly.</li>
+        <li><b>Candidate B — Alternative</b>: the project at the run's start, with the original prompt loaded. Text prompts arrive editable, so you can change the instructions and get a different implementation of the same task.</li>
+      </ul>
+      <p>
+        Both candidates open as real pi terminals (badged <code>A</code> and <code>B</code>). They are fully isolated:
+        their own source trees, sessions, homes, and process groups, with network access denied except the model
+        provider.
+      </p>
+      <p>
+        The Fork Run button is disabled with the exact reason when a run is not replayable — for example when you
+        steered mid-run with extra messages, another writer touched the workspace, or you edited files during the run.
+      </p>
+
+      <h3 id="fork-any-moment">Fork Any Moment</h3>
+      <p>
+        <code>Cmd/Ctrl+Click</code> any forkable timeline dot to fork a candidate from that exact moment instead of a
+        run boundary. The candidate starts from that source state with the conversation branched at the matching point.
+      </p>
+
+      <h3>Working with candidates</h3>
+      <p>Each comparison gets a card pair in the Worldlines panel:</p>
+      <table>
+        <thead><tr><th>Action</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td><b>Verify</b></td><td>Runs the candidate's detected tests inside its sandbox.</td></tr>
+          <tr><td><b>Compare</b></td><td>Diffs the candidate head against the shared base.</td></tr>
+          <tr><td><b>A ⇄ B</b></td><td>Compares the two candidates file by file.</td></tr>
+          <tr><td><b>▾</b></td><td>Details: changed-file statistics, provenance, dependency changes.</td></tr>
+          <tr><td><b>Promote</b></td><td>Three-way merges the candidate back into your project.</td></tr>
+          <tr><td><b>Discard</b></td><td>Removes both candidates and every app-owned resource.</td></tr>
+        </tbody>
+      </table>
+      <p>
+        Promotion merges source changes only — never commits, branches, or staging state. It refuses on conflicts
+        before touching anything, journals every step so a crash recovers cleanly, and opens the merged result in
+        Change Review plus a fresh terminal continuing the candidate's conversation.
+      </p>
+      <p>
+        Candidates are temporary. Closing the project or quitting asks for confirmation when candidates hold changes;
+        confirmed closes discard them.
+      </p>
+
+      <h3>Challenge Mode</h3>
+      <p>
+        When candidate A has settled, the comparison header offers <b>Challenge</b>: it relaunches candidate B as an
+        automatic challenger that replays the original task under one fixed constraint:
+      </p>
+      <table>
+        <thead><tr><th>Profile</th><th>The challenger must…</th></tr></thead>
+        <tbody>
+          <tr><td>Fewer dependencies</td><td>Solve the task adding as few dependencies as possible.</td></tr>
+          <tr><td>Preserve API</td><td>Keep the public interface unchanged.</td></tr>
+          <tr><td>Simpler implementation</td><td>Produce the smallest direct implementation.</td></tr>
+          <tr><td>Performance-first</td><td>Improve measured performance without breaking correctness.</td></tr>
+        </tbody>
+      </table>
+      <p>
+        Ranking never asks a model for opinions. Termina measures deterministic evidence (tests, dependency counts,
+        API manifests, footprint, benchmark samples) and labels the result an <b>evidence winner</b> — a measurement,
+        not a claim that one implementation is objectively better. Equal or noisy measurements report a tie.
+      </p>
+    </section>
+
+    <!-- ============ 10. FILES ============ -->
+    <section id="files" class="guide-section">
+      <h2>10 · Explorer, editor, and Mine marks</h2>
+
+      <h3>Explorer</h3>
+      <p>
+        Full file tree with VS Code-style interactions: right-click context menu, New File / New Folder,
+        Cut / Copy / Paste, Copy Path and Copy Relative Path, Rename (<code>F2</code>), Delete, and Refresh.
+      </p>
+
+      <h3>Editor</h3>
+      <ul>
+        <li>Preview tabs: single-click opens a replaceable preview; editing the file or double-clicking the tab pins it. Middle-click closes; drag reorders; tab context menus offer close and pin actions.</li>
+        <li>Unsaved edits show a dot on the tab; <b>Save all</b> is <code>Cmd/Ctrl+Alt+S</code>.</li>
+        <li>Word wrap and minimap follow your Settings preferences.</li>
+      </ul>
+
+      <h3>Mine marks</h3>
+      <p>
+        Every editor tab has an <code>M</code> marker: click it to mark the file as yours. Mine marks matter to
+        Worldlines: a candidate that modifies a file marked as yours is disqualified from automatic challenge ranking,
+        and promotion checks your current Mine set before merging.
+      </p>
+    </section>
+
+    <!-- ============ 11. SETTINGS ============ -->
+    <section id="settings" class="guide-section">
+      <h2>11 · Settings</h2>
+      <p>Open with <code>Cmd/Ctrl+,</code>.</p>
+
+      <h3>Appearance</h3>
+      <table>
+        <thead><tr><th>Setting</th><th>Options</th></tr></thead>
+        <tbody>
+          <tr><td>Theme</td><td>Obsidian (dark), Atom (One Dark), Paper (light), Signal (high contrast)</td></tr>
+          <tr><td>Editor font size</td><td>Pixels</td></tr>
+          <tr><td>Terminal font size</td><td>Pixels</td></tr>
+          <tr><td>Font family</td><td>Curated monospace picker, applies to editor, terminal, and diffs</td></tr>
+          <tr><td>Word wrap</td><td>On / off</td></tr>
+          <tr><td>Minimap</td><td>On / off</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Shortcuts</h3>
+      <p>Every command is remappable, including layout toggles and terminal management. Press Escape while recording to cancel.</p>
+      <p>Preferences apply immediately and persist across launches.</p>
+    </section>
+
+    <!-- ============ 12. SHORTCUTS ============ -->
+    <section id="shortcuts" class="guide-section">
+      <h2>12 · Keyboard shortcuts</h2>
+      <p>Defaults (all remappable in Settings; <code>Cmd</code> on macOS, <code>Ctrl</code> elsewhere):</p>
+      <table>
+        <thead><tr><th>Shortcut</th><th>Command</th></tr></thead>
+        <tbody>
+          <tr><td><code>Cmd/Ctrl+O</code></td><td>Open folder</td></tr>
+          <tr><td><code>Cmd/Ctrl+T</code></td><td>New terminal (chooser: agent or shell)</td></tr>
+          <tr><td><code>Cmd/Ctrl+Shift+W</code></td><td>Close terminal</td></tr>
+          <tr><td><code>Cmd/Ctrl+.</code></td><td>Interrupt the active terminal</td></tr>
+          <tr><td><code>Cmd/Ctrl+Alt+N</code></td><td>New file</td></tr>
+          <tr><td><code>Cmd/Ctrl+Alt+Shift+N</code></td><td>New folder</td></tr>
+          <tr><td><code>F2</code></td><td>Rename selected explorer entry</td></tr>
+          <tr><td><code>Cmd/Ctrl+Alt+S</code></td><td>Save all dirty editors</td></tr>
+          <tr><td><code>Cmd/Ctrl+B</code></td><td>Toggle explorer</td></tr>
+          <tr><td><code>Cmd/Ctrl+Shift+E</code></td><td>Toggle terminal</td></tr>
+          <tr><td><code>Cmd/Ctrl+E</code></td><td>Toggle editor</td></tr>
+          <tr><td><code>Cmd/Ctrl+Shift+F</code></td><td>Terminal fullscreen</td></tr>
+          <tr><td><code>Cmd/Ctrl+Shift+P</code></td><td>Search sessions</td></tr>
+          <tr><td><code>Cmd/Ctrl+,</code></td><td>Open settings</td></tr>
+          <tr><td><code>Shift+Enter</code> / <code>Ctrl+Enter</code></td><td>Newline in the terminal input</td></tr>
+          <tr><td><code>Option+Enter</code> (macOS)</td><td>Queue a follow-up while the agent runs</td></tr>
+          <tr><td><code>Cmd/Ctrl+Click</code> a timeline dot</td><td>Fork a candidate at that moment</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Session Search</h3>
+      <p>
+        <code>Cmd/Ctrl+Shift+P</code> opens a full-text search over past pi sessions of the project. Results list the
+        matching moments; clicking one opens the file it mentions. Type at least two characters.
+      </p>
+    </section>
+
+    <!-- ============ 13. PRIVACY ============ -->
+    <section id="privacy" class="guide-section">
+      <h2>13 · Privacy and safety model</h2>
+      <ul>
+        <li><b>Local first.</b> Sessions, snapshots, preferences, and events live on your machine. The only network traffic is your chosen model provider (and the update check in packaged builds).</li>
+        <li><b>Your Git is read-only to Termina.</b> Snapshots live in an app-owned store outside your repository. Promotion writes files, never Git history.</li>
+        <li><b>Renderer isolation.</b> The editor UI never talks to the agent directly; it renders state the main process pushes.</li>
+        <li><b>Clean environments.</b> Host <code>PI_*</code> session variables are stripped before pi starts, so a host session can never attach to a terminal.</li>
+        <li><b>Candidate sandboxes.</b> Worldline candidates, Verify, and evidence runs execute under OS-level profiles that deny writes outside their own tree and deny network except the model provider. Evidence runs are fully offline.</li>
+        <li><b>External effects are not isolated.</b> Filesystem isolation does not cover remote services: a command inside a sandbox can still affect an allowed cloud account or deployed service.</li>
+      </ul>
+    </section>
+
+    <!-- ============ 14. TROUBLESHOOTING ============ -->
+    <section id="troubleshooting" class="guide-section">
+      <h2>14 · Troubleshooting</h2>
+
+      <p><b>The editor says to run <code>/login</code> and <code>/models</code>.</b><br>
+      pi has no provider configured yet. Run <code>/login</code> in the terminal, then pick a model with <code>/models</code>.</p>
+
+      <p><b>Worldlines is unavailable.</b><br>
+      The opened folder must be inside a Git repository, and the platform must support the sandbox. Submodules,
+      sparse checkouts, content-transforming Git filters, unresolved merge states, or unsupported file types also
+      disable it — the UI names the specific reason.</p>
+
+      <p><b>Fork Run is greyed out.</b><br>
+      Hover the button: it states the reason. Most often the run had steering messages or follow-ups, another writer
+      overlapped the workspace, or the run was interrupted.</p>
+
+      <p><b>A timeline dot is missing or marked evicted.</b><br>
+      Recording pauses when the event budget fills, and captures skip themselves when the filesystem could not
+      settle. The terminal keeps working either way; only the forkable record is affected.</p>
+
+      <p><b>Verification says no test command detected.</b><br>
+      Add a <code>test</code> script to <code>package.json</code>, or use pytest / cargo / go so the detector finds your suite.</p>
+
+      <p><b>The window is blank.</b><br>
+      The paint watchdog reloads it automatically. State rebuilds from the recorded events; nothing is lost.</p>
+
+      <p><b>An update is stuck downloading.</b><br>
+      Updates install on quit. If the download stalls, quit and relaunch, then check again from the menu.</p>
+    </section>
+
+    <div class="guide-end">
+      <a href="index.html#install" class="btn btn-primary">↓ Download Termina — free</a>
+      <a href="https://github.com/Jesusz0r/termina/blob/master/docs/USER-GUIDE.md" target="_blank" class="btn btn-ghost">this guide on GitHub ↗</a>
+    </div>
+  </main>
+
+  <!-- ============ FOOTER ============ -->
+  <footer class="footer">
+    <div class="container footer-inner">
+      <span>TERMINA © 2026 JESUS MENDOZA · MIT</span>
+      <div class="footer-links">
+        <a href="index.html">HOME</a>
+        <a href="guide.html">GUIDE</a>
+        <a href="https://github.com/Jesusz0r/termina" target="_blank">GITHUB</a>
+        <a href="https://github.com/Jesusz0r/termina/releases" target="_blank">RELEASES</a>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>

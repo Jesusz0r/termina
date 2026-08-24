@@ -29,6 +29,10 @@ Screenshots are from an earlier 0.1.x build. Settings now include Atom,
 terminal font, and word wrap; first launch is empty until you open a
 folder; the Plan Board shows Dispatch assignments.
 
+## User guide
+
+New to Termina? Read **[`docs/USER-GUIDE.md`](docs/USER-GUIDE.md)** — a walkthrough of every feature: Change Review, Verify & Iterate, the Session Timeline, Plan Board dispatch, and Worldlines.
+
 ## Features
 
 | Feature | What it does |
