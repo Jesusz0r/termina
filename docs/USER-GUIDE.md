@@ -107,6 +107,10 @@ Click `＋` next to the terminal tabs to open the terminal chooser:
 
 Shell tabs show the shell name as a badge. `Cmd/Ctrl+T` opens the chooser.
 
+Cycle without the mouse: `Ctrl+Tab` / `Ctrl+Shift+Tab` move between terminal
+tabs, `Cmd/Ctrl+Shift+[` / `]` move between project tabs, and scrolling over a
+tab strip cycles its tabs.
+
 ### Talking to pi
 
 The terminal is a full pi TUI. Everything pi can do, you can do here:
@@ -362,13 +366,16 @@ Preferences apply immediately and persist across launches.
 
 ## 12. Keyboard shortcuts
 
-Defaults (all remappable in Settings; `Cmd` on macOS, `Ctrl` elsewhere):
+Defaults (all remappable in Settings; most use `Cmd` on macOS, `Ctrl`
+elsewhere — `Ctrl+Tab` is literal `Ctrl` on every platform):
 
 | Shortcut | Command |
 |---|---|
 | `Cmd/Ctrl+O` | Open folder |
 | `Cmd/Ctrl+T` | New terminal (chooser: agent or shell) |
 | `Cmd/Ctrl+Shift+W` | Close terminal |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous terminal tab |
+| `Cmd/Ctrl+Shift+[` / `]` | Previous / next project tab |
 | `Cmd/Ctrl+.` | Interrupt the active terminal |
 | `Cmd/Ctrl+Alt+N` | New file |
 | `Cmd/Ctrl+Alt+Shift+N` | New folder |
