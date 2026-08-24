@@ -30,6 +30,8 @@ export const COMMAND_DEFINITIONS = [
   { command: "new-terminal", label: "New terminal", category: "Terminal", description: "Open a shell or Pi terminal", defaultShortcut: "CmdOrCtrl+T", scope: "renderer" },
   { command: "close-terminal", label: "Close terminal", category: "Terminal", description: "Close the active terminal", defaultShortcut: "CmdOrCtrl+Shift+W", scope: "main" },
   { command: "abort-terminal", label: "Abort terminal", category: "Terminal", description: "Send an interrupt to the active terminal", defaultShortcut: "CmdOrCtrl+.", scope: "main" },
+  { command: "next-terminal", label: "Next terminal", category: "Terminal", description: "Activate the next terminal tab", defaultShortcut: "Ctrl+Tab", scope: "renderer" },
+  { command: "previous-terminal", label: "Previous terminal", category: "Terminal", description: "Activate the previous terminal tab", defaultShortcut: "Ctrl+Shift+Tab", scope: "renderer" },
   { command: "fullscreen", label: "Terminal fullscreen", category: "View", description: "Show only the terminal", defaultShortcut: "CmdOrCtrl+Shift+F", scope: "renderer" },
   { command: "layout-terminal-left", label: "Terminal left", category: "View", description: "Place the terminal on the left", defaultShortcut: "", scope: "renderer" },
   { command: "layout-terminal-right", label: "Terminal right", category: "View", description: "Place the terminal on the right", defaultShortcut: "", scope: "renderer" },
@@ -39,6 +41,8 @@ export const COMMAND_DEFINITIONS = [
   { command: "toggle-terminal", label: "Toggle terminal", category: "View", description: "Minimize or restore the terminal", defaultShortcut: "CmdOrCtrl+Shift+E", scope: "renderer" },
   { command: "toggle-editor", label: "Toggle editor", category: "View", description: "Minimize or restore the editor", defaultShortcut: "CmdOrCtrl+E", scope: "renderer" },
   { command: "toggle-modified", label: "Toggle modified panel", category: "View", description: "Show or hide changed files", defaultShortcut: "", scope: "renderer" },
+  { command: "next-project", label: "Next project", category: "View", description: "Activate the next project tab", defaultShortcut: "CmdOrCtrl+Shift+]", scope: "renderer" },
+  { command: "previous-project", label: "Previous project", category: "View", description: "Activate the previous project tab", defaultShortcut: "CmdOrCtrl+Shift+[", scope: "renderer" },
   { command: "session-search", label: "Search sessions", category: "View", description: "Search previous Pi sessions", defaultShortcut: "CmdOrCtrl+Shift+P", scope: "renderer" },
   { command: "open-settings", label: "Open settings", category: "Settings", description: "Open this preferences window", defaultShortcut: "CmdOrCtrl+,", scope: "renderer" },
 ] as const;

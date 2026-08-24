@@ -1402,6 +1402,74 @@ commands.register("new-terminal", () => {
   if (terminalMenu) closeTerminalMenu();
   else void openTerminalMenu();
 });
+commands.register("next-terminal", () => cycleTerminals(1));
+commands.register("previous-terminal", () => cycleTerminals(-1));
+commands.register("next-project", () => cycleProjects(1));
+commands.register("previous-project", () => cycleProjects(-1));
+
+// ---- tab cycling ----
+// Tab order is DOM order: drag reorder moves nodes without touching the
+// maps, so both cycles read the strips and match elements back to ids.
+
+function orderedProjectPanes(): Pane[] {
+  const byTab = new Map<HTMLElement, Pane>();
+  for (const p of panes.values()) byTab.set(p.tabEl, p);
+  const out: Pane[] = [];
+  for (const el of termTabsList.children) {
+    const pane = byTab.get(el as HTMLElement);
+    if (pane && pane.projectId === activeProjectId) out.push(pane);
+  }
+  return out;
+}
+
+function cycleTerminals(delta: 1 | -1): void {
+  const list = orderedProjectPanes();
+  if (list.length < 2) return;
+  const index = list.findIndex((p) => p.instanceId === activeId);
+  const next = list[(index + delta + list.length) % list.length];
+  if (next) activatePane(next.instanceId);
+}
+
+function cycleProjects(delta: 1 | -1): void {
+  const byTab = new Map<HTMLElement, string>();
+  for (const view of projectViews.values()) byTab.set(view.tabEl, view.id);
+  const ids: string[] = [];
+  for (const el of projectTabsEl.children) {
+    const id = byTab.get(el as HTMLElement);
+    if (id) ids.push(id);
+  }
+  if (ids.length < 2) return;
+  const index = activeProjectId ? ids.indexOf(activeProjectId) : -1;
+  const next = ids[(index + delta + ids.length) % ids.length];
+  if (next) void window.pi.projectActivate(next);
+}
+
+// Scroll over a tab strip cycles its tabs (iTerm-style). The accumulator
+// turns one trackpad gesture into one switch; the idle timer drops stale
+// scroll so a slow rub never fires late.
+function setupWheelCycling(el: HTMLElement, cycle: (delta: 1 | -1) => void): void {
+  let acc = 0;
+  let idle: number | null = null;
+  el.addEventListener(
+    "wheel",
+    (e) => {
+      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+      acc += e.deltaY;
+      if (idle !== null) window.clearTimeout(idle);
+      idle = window.setTimeout(() => {
+        acc = 0;
+        idle = null;
+      }, 300);
+      if (Math.abs(acc) < 50) return;
+      const delta = acc > 0 ? 1 : -1;
+      acc = 0;
+      cycle(delta);
+    },
+    { passive: true },
+  );
+}
+setupWheelCycling(projectTabsEl, cycleProjects);
+setupWheelCycling(termTabsList, cycleTerminals);
 
 // View & Layout commands
 commands.register("fullscreen", () => applyLayout("terminal-fullscreen"));
