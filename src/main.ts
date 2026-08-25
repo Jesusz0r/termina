@@ -700,7 +700,13 @@ async function closePane(instanceId: string): Promise<void> {
   await window.pi.closeTerminal(instanceId);
   setTimeout(() => closingPanes.delete(instanceId), 3000);
   if (activeId === instanceId) {
-    const next = [...panes.values()].at(-1);
+    // Prefer another terminal of the same project. Never surface a
+    // background project's terminal: its view is not in front.
+    const candidates =
+      pane.projectId !== null
+        ? [...panes.values()].filter((p) => p.projectId === pane.projectId)
+        : [...panes.values()];
+    const next = candidates[candidates.length - 1];
     if (next) activatePane(next.instanceId);
     else {
       activeId = null;
