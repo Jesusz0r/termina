@@ -163,6 +163,7 @@ function removeProjectView(projectId: string): void {
   view.tabEl.remove();
   view.editorEl.remove();
   projectViews.delete(projectId);
+  lastActivePane.delete(projectId);
   if (activeProjectId === projectId) {
     activeProjectId = null;
     const next = projectViews.keys().next().value;
@@ -233,6 +234,13 @@ function activateProjectPane(): void {
   const current = activeId ? panes.get(activeId) : undefined;
   if (current && current.projectId === activeProjectId) {
     activatePane(current.instanceId);
+    return;
+  }
+  // Restore the terminal that was active when this project was last in front.
+  const rememberedId = activeProjectId ? lastActivePane.get(activeProjectId) : undefined;
+  const remembered = rememberedId ? panes.get(rememberedId) : undefined;
+  if (remembered && remembered.projectId === activeProjectId) {
+    activatePane(remembered.instanceId);
     return;
   }
   const next = [...panes.values()].find((p) => p.projectId === activeProjectId);
@@ -363,6 +371,8 @@ interface Pane {
 }
 
 const panes = new Map<string, Pane>();
+/** Last active terminal per project. Returning to a project restores it. */
+const lastActivePane = new Map<string, string>();
 (window as unknown as Record<string, unknown>).__panes = panes;
 const closingPanes = new Set<string>();
 let activeId: string | null = null;
@@ -523,6 +533,7 @@ function activatePane(instanceId: string): void {
   if (!pane) return;
   removeSplash();
   activeId = instanceId;
+  if (pane.projectId) lastActivePane.set(pane.projectId, instanceId);
   for (const p of panes.values()) {
     const on = p.instanceId === instanceId;
     p.container.classList.toggle("active", on);
@@ -680,6 +691,9 @@ async function closePane(instanceId: string): Promise<void> {
   if (!pane) return;
   closingPanes.add(instanceId);
   panes.delete(instanceId);
+  for (const [projectId, activeInstanceId] of lastActivePane) {
+    if (activeInstanceId === instanceId) lastActivePane.delete(projectId);
+  }
   pane.view.dispose();
   pane.container.remove();
   pane.tabEl.remove();
