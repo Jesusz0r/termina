@@ -474,6 +474,8 @@ class PiEditorApp {
   private preferences: AppPreferences = defaultAppPreferences();
   private shortcutMap: ShortcutMap = { ...DEFAULT_SHORTCUTS };
   private worldsRoot = process.env.TERMINA_WORLDS_DIR ?? join(this.userDataDir, "worlds");
+  /** Input buffer for /new slash-command detection (terminals:write is per keystroke). */
+  private newCommandBuffers = new Map<string, string>();
   /** Tailers for candidate events directories. */
   private worldlineTailers = new Map<string, SidecarTailer>();
   /** Preserve event order while prompt payloads load asynchronously. */
@@ -2604,6 +2606,7 @@ class PiEditorApp {
   private closeTerminal(id: string): void {
     const inst = this.terminals.get(id);
     if (!inst) return;
+    this.newCommandBuffers.delete(id);
     if (inst.captureTimer) {
       clearTimeout(inst.captureTimer);
       inst.captureTimer = null;
@@ -2710,6 +2713,9 @@ class PiEditorApp {
             text: String(payload.prompt ?? "").slice(0, 64000),
             images: Array.isArray(payload.images) ? payload.images.length : 0,
           };
+          if (inst.pendingPrompt.text && this.isNewCommand(inst.pendingPrompt.text)) {
+            this.clearForNewSession(terminalId);
+          }
         } catch {
           inst.pendingPrompt = null;
         }
@@ -3560,6 +3566,61 @@ class PiEditorApp {
     if (inst.lastTimelinePrefixKey === key) return;
     inst.lastTimelinePrefixKey = key;
     this.send("timeline:prefix", payload);
+  }
+
+  private isNewCommand(text: string): boolean {
+    const t = text.trim();
+    return t === "/new" || t.startsWith("/new ");
+  }
+
+  /**
+   * Reset session-scoped state for a slash-command reset (/new). The
+   * timeline, plan, and worldline comparisons reflect the abandoned run;\n   * the workspace source and modified files reflect real disk changes and\n   * persist.\n   */
+  private clearForNewSession(terminalId: string): void {
+    const inst = this.terminals.get(terminalId);
+    if (!inst) return;
+    // Timeline: drop every dot and release its captured state.
+    for (const ev of inst.timeline) {
+      if (ev.stateId) void this.releaseStateIfUnused(ev.stateId, terminalId, ev.seq);
+    }
+    inst.timeline = [];
+    inst.momentDots = [];
+    if (inst.captureTimer) { clearTimeout(inst.captureTimer); inst.captureTimer = null; }
+    inst.pendingHints.clear();
+    inst.lastToolAt.clear();
+    inst.runSnapshots.clear();
+    inst.runSnapshotBytes = 0;
+    inst.lastTimelinePrefixKey = "";
+    this.send("timeline:clear", { terminalId });
+    this.sendTimelinePrefix(inst);
+    // Plan: fresh board for the new session.
+    inst.plan = [];
+    inst.touched = new Set();
+    inst.pendingFileTools.clear();
+    inst.toolOutcomes.clear();
+    this.sendPlan(inst);
+    // The open run is abandoned by /new. Mark it non-replayable so a later
+    // token-less agent_start does not treat it as a retry.
+    if (inst.currentRun && !inst.currentRun.settledAt) {
+      inst.currentRun.replayable = false;
+      inst.currentRun.reason = inst.currentRun.reason ?? "session reset by /new";
+      inst.currentRun = null;
+    }
+    // Baselines and user-edit context: cleared so a new run starts clean,
+    // matching the agent_start reset even when /new skipped a prompt cycle.
+    // Modified files are intentionally kept (agent_start also preserves them)
+    // as they reflect real workspace changes on disk.
+    inst.baselines.clear();
+    inst.baselineBytes = 0;
+    const ws = this.workspaceOfTerminal(inst);
+    if (ws) this.clearUserEdits(ws);
+    this.clearMailbox(terminalId);
+    // Worldlines: discard every live comparison of this project.
+    const project = this.projectOfTerminal(terminalId);
+    if (project?.worldlines) {
+      const ids = [...new Set(project.worldlines.list().map((s) => s.comparisonId))];
+      for (const id of ids) void project.worldlines.discard(id).catch(() => undefined);
+    }
   }
 
   /**
@@ -4493,6 +4554,24 @@ class PiEditorApp {
       if (typeof id !== "string" || typeof data !== "string") return;
       const inst = this.terminals.get(id);
       if (!inst) return;
+      // Detect /new slash command before it reaches the pty. The bridge also
+      // catches it via the prompt payload, but /new may reset the session
+      // without a prompt/before_agent_start cycle.
+      if (inst.type === "agent") {
+        const buf = (this.newCommandBuffers.get(id) ?? "") + data;
+        if (buf.includes("\r") || buf.includes("\n")) {
+          const lines = buf.split(/\r|\n/);
+          this.newCommandBuffers.set(id, lines.pop() ?? "");
+          for (const line of lines) {
+            if (this.isNewCommand(line)) { this.clearForNewSession(id); break; }
+          }
+        } else {
+          this.newCommandBuffers.set(id, buf.length > 200 ? buf.slice(-200) : buf);
+        }
+        if ((this.newCommandBuffers.get(id)?.length ?? 0) > 200) {
+          this.newCommandBuffers.set(id, (this.newCommandBuffers.get(id) ?? "").slice(-200));
+        }
+      }
       // Keystrokes are tiny. Skip the UTF-8 scan until the payload is large.
       let text = data;
       if (data.length > 4096 && Buffer.byteLength(data, "utf8") > MAX_CLIPBOARD_BYTES) {

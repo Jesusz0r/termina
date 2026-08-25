@@ -63,6 +63,9 @@ const bridge: PiBridge = {
   onTimelineEvict: (cb) => {
     ipcRenderer.on("timeline:evict", (_e, p: { terminalId: string; seqs: number[] }) => cb(p));
   },
+  onTimelineClear: (cb) => {
+    ipcRenderer.on("timeline:clear", (_e, p: { terminalId: string }) => cb(p));
+  },
   onTimelinePrefix: (cb) => {
     ipcRenderer.on("timeline:prefix", (_e, p: TimelinePrefix) => cb(p));
   },

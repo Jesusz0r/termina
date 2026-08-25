@@ -1804,6 +1804,20 @@ window.pi.onTimelineEvict(({ terminalId, seqs }) => {
   if (activeId === terminalId) timelineView.evict(seqs);
 });
 
+window.pi.onTimelineClear(({ terminalId }) => {
+  const pane = panes.get(terminalId);
+  if (!pane) return;
+  pane.timeline = [];
+  pane.timelinePrefix = null;
+  pane.plan = [];
+  pane.planVersion++;
+  if (activeId === terminalId) {
+    timelineView.setEvents([]);
+    timelineView.setPrefix(null);
+    renderPlan(pane);
+  }
+});
+
 window.pi.onTimelinePrefix((p) => {
   const pane = panes.get(p.terminalId);
   if (!pane) return;
