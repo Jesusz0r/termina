@@ -38,6 +38,11 @@ export class SettingsView {
     this.preferences = defaultAppPreferences();
   }
 
+  /** True while the modal covers the window. Shortcut capture owns the keys. */
+  get isOpen(): boolean {
+    return this.backdrop !== null;
+  }
+
   open(preferences: AppPreferences): void {
     if (this.backdrop) {
       this.backdrop.focus();

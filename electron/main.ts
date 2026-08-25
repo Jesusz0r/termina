@@ -29,6 +29,7 @@ import { WorldlineManager, dirBytes, quoteShellArg, recoverPromotionJournals, ty
 import { sandboxShellPreamble, writeEvidenceProfile } from "./sandbox.js";
 import { parseFailingTests, verifyFailSummary } from "./evidence.js";
 import { coreClient } from "./core-client.js";
+import { changedLinesInAfter } from "../shared/line-diff.js";
 import { createAppUpdater, updateMenuCopy, type AppUpdateController } from "./app-update.js";
 import {
   MAX_DISPATCH_WORKERS,
@@ -117,6 +118,9 @@ interface WorkspaceState {
   indexReady: Promise<void> | null;
   /** Why recording is unavailable, when it is. */
   recordError: string | null;
+  /** Last watcher transition per path as 1-based changed lines. The editor
+   *  paints these on open, so highlights do not depend on tab history. */
+  changeLines: Map<string, number[]>;
 }
 
 /** A start preflight waiting for agent_start to consume its token. */
@@ -242,6 +246,8 @@ class PiTerminalInstance {
   /** Pre-run content per path (Change Review): string = baseline, null = created. */
   baselines = new Map<string, string | null>();
   baselineBytes = 0;
+  /** In-flight lazy baseline captures per path (Change Review waits for them). */
+  baselineFills = new Map<string, Promise<void>>();
   /** Verify & Iterate: last test run attached to this terminal. */
   verify: VerifyInfo = { state: "untested", command: null, summary: null };
   /** Plan Board: the tasks of the current run. */
@@ -770,6 +776,7 @@ class PiEditorApp {
       retainedBlobBytes: 0,
       indexReady: null,
       recordError: null,
+      changeLines: new Map(),
     };
     project.workspaces.set(ws.id, ws);
     this.workspaceOwners.set(ws.id, project.id);
@@ -2487,7 +2494,9 @@ class PiEditorApp {
     const capped = { ...edit, prev: edit.prev === undefined ? undefined : this.snippet(edit.prev), content: this.snippet(edit.content) };
     const existing = edits.get(capped.path);
     if (existing) {
-      if (existing.prev === undefined && capped.prev !== undefined) existing.prev = capped.prev;
+      // Track the latest transition: the cache now always knows the state
+      // right before this edit, so the context shows a fresh before block.
+      if (capped.prev !== undefined) existing.prev = capped.prev;
       existing.content = capped.content;
       existing.at = capped.at;
     } else {
@@ -2854,7 +2863,7 @@ class PiEditorApp {
         const status = toolName === "write" ? this.classifyWrite(path) : "modified";
         this.recordModified(inst, path, status);
         if ((toolName === "write" || toolName === "create_file") && !inst.baselines.has(path)) {
-          this.trackRecordingTask(this.fillBaselineFromState(inst, path, status));
+          this.trackRecordingTask(this.fillBaseline(inst, path, status));
         }
         const rel = this.rel(path);
         inst.touched.add(rel);
@@ -3733,6 +3742,18 @@ class PiEditorApp {
     }
   }
 
+  /** Run one lazy baseline capture and remember it. Change Review waits
+   *  for the fill so an early diff open does not show a missing baseline. */
+  private fillBaseline(inst: PiTerminalInstance, path: string, status: "created" | "modified"): Promise<void> {
+    const task = this.fillBaselineFromState(inst, path, status)
+      .catch(() => undefined)
+      .finally(() => {
+        if (inst.baselineFills.get(path) === task) inst.baselineFills.delete(path);
+      });
+    inst.baselineFills.set(path, task);
+    return task;
+  }
+
   private async fillBaselineFromState(inst: PiTerminalInstance, path: string, status: "created" | "modified"): Promise<void> {
     if (inst.baselines.has(path) || status === "created") {
       if (status === "created" && !inst.baselines.has(path)) this.setBaseline(inst, path, null);
@@ -4178,7 +4199,7 @@ class PiEditorApp {
         } else if (change.prev !== undefined) {
           this.setBaseline(inst, path, change.prev);
         } else {
-          this.trackRecordingTask(this.fillBaselineFromState(inst, path, change.status));
+          this.trackRecordingTask(this.fillBaseline(inst, path, change.status));
         }
       }
       // Attribute the change: the terminal whose recent tool event touched
@@ -4234,7 +4255,16 @@ class PiEditorApp {
       // Keep the IPC light: push the content only when it fits the live
       // sync budget. The renderer fetches larger files on demand.
       const liveContent = Buffer.byteLength(change.content, "utf8") <= MAX_LIVE_SYNC_BYTES ? change.content : undefined;
-      this.send("file:changed", { path, relPath, content: liveContent, status: change.status });
+      // The pre-change cache gives the exact transition. Cache the lines so
+      // a later open paints the same highlight without tab history.
+      let changedLines: number[] | undefined;
+      if (change.prev !== undefined) {
+        changedLines = changedLinesInAfter(change.prev, change.content);
+        this.setBounded(ws.changeLines, path, changedLines, PiEditorApp.MAX_MODIFIED_FILES);
+      } else {
+        ws.changeLines.delete(path);
+      }
+      this.send("file:changed", { path, relPath, content: liveContent, status: change.status, changedLines });
     };
     watcher.onFileTouched = (path, status) => {
       if (this.disposed || this.projectIsSwitching(this.projectOfWorkspace(ws.id)?.id)) return;
@@ -4638,10 +4668,17 @@ class PiEditorApp {
     });
 
     // ---- Change Review ----
-    ipcMain.handle("review:baseline", (_e, terminalId: string, path: string) => {
+    ipcMain.handle("review:baseline", async (_e, terminalId: string, path: string) => {
       const inst = this.terminals.get(terminalId);
       const managed = inst ? this.managedPath(path) : null;
       if (!inst || !managed || managed.workspace.id !== inst.workspaceId) return { status: "modified", baseline: undefined };
+      // A lazy capture can still be in flight when the user clicks the
+      // modified entry. Wait for it so the diff does not show a false
+      // "no baseline" state.
+      if (!inst.baselines.has(managed.path)) {
+        const pending = inst.baselineFills.get(managed.path);
+        if (pending) await Promise.race([pending, new Promise((r) => setTimeout(r, 2000))]);
+      }
       const b = inst.baselines.get(managed.path);
       if (b === undefined) return { status: "modified", baseline: undefined };
       if (b === null) return { status: "created", baseline: null };
@@ -4781,7 +4818,7 @@ class PiEditorApp {
     });
   }
 
-  private async openFileInEditor(absPath: string): Promise<{ ok: true; path: string; content: string } | { ok: false; path: string; error: string }> {
+  private async openFileInEditor(absPath: string): Promise<{ ok: true; path: string; content: string; changedLines?: number[] } | { ok: false; path: string; error: string }> {
     const managed = this.managedPath(absPath);
     if (!managed) return { ok: false, path: absPath, error: "path is outside a managed workspace" };
     try {
@@ -4789,7 +4826,7 @@ class PiEditorApp {
       if (!st.isFile()) return { ok: false, path: managed.path, error: "not a file" };
       if (st.size > MAX_OPEN_FILE_SIZE) return { ok: false, path: managed.path, error: `file is too large to open (${st.size} bytes)` };
       const content = await readFile(managed.path, "utf8");
-      return { ok: true, path: managed.path, content };
+      return { ok: true, path: managed.path, content, changedLines: managed.workspace.changeLines.get(managed.path) };
     } catch (err) {
       return { ok: false, path: managed.path, error: (err as Error).message };
     }

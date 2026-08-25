@@ -69,18 +69,19 @@ await sleep(600);
 const b1 = await evalJs(`window.pi.reviewBaseline('term-1', '/tmp/termina-test-project/greeting.ts')`);
 check("edit baseline reconstructed (landed ordering)", b1?.baseline === 'export const greeting = "hello";\n', JSON.stringify(b1));
 
-// ---- 2b. write to existing uncached file → undefined (revert refuses) ----
+// ---- 2b. write to existing file → watcher cache provides the baseline ----
 emit({ t: "agent_start" });
 await sleep(500);
 // Simulate the agent writing hello.txt (disk change while busy, no tool args
-// for content): the watcher change fires with status modified and NO prev.
+// for content). The seeded watcher cache carries the pre-change content, so
+// the baseline is exact and revert restores it.
 const { writeFileSync, readFileSync } = await import("node:fs");
 const helloPath = "/tmp/termina-test-project/hello.txt";
 const helloBefore = readFileSync(helloPath, "utf8");
 writeFileSync(helloPath, helloBefore + "extra line\n");
 await sleep(700);
 const b2 = await evalJs(`window.pi.reviewBaseline('term-1', '${helloPath}')`);
-check("write to existing file: baseline unavailable (revert refuses, no delete)", b2?.baseline === undefined && b2?.status === "modified", JSON.stringify(b2));
+check("write to existing file: baseline from seeded cache", b2?.baseline === helloBefore && b2?.status === "modified", JSON.stringify(b2));
 emit({ t: "agent_settled" });
 await sleep(400);
 

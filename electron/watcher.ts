@@ -360,7 +360,16 @@ export class ProjectWatcher {
     // Keys are canonicalized so lookups from anywhere in the app hit.
     const key = this.canonicalize ? this.canonicalize(abs) : abs;
     const prev = this.lastContents.get(key); // pre-change content, for baselines
-    this.cacheBytes += Buffer.byteLength(content, "utf8") - (prev ? Buffer.byteLength(prev, "utf8") : 0);
+    this.putCached(key, content);
+    const change: FileChange = { path: abs, relPath, content, status, prev };
+    this.onChange(change);
+    this.onFileTouched(abs, status);
+  }
+
+  /** Add one file version to the content cache and evict when over budget. */
+  private putCached(key: string, content: string): void {
+    const previous = this.lastContents.get(key);
+    this.cacheBytes += Buffer.byteLength(content, "utf8") - (previous ? Buffer.byteLength(previous, "utf8") : 0);
     this.lastContents.set(key, content);
     this.lastOids.set(key, { sha1: blobOid(content, "sha1"), sha256: blobOid(content, "sha256") });
     while (this.lastContents.size > 1 && (this.lastContents.size > ProjectWatcher.CACHE_LIMIT || this.cacheBytes > ProjectWatcher.CACHE_BYTES)) {
@@ -371,12 +380,11 @@ export class ProjectWatcher {
       this.lastContents.delete(oldest);
       this.lastOids.delete(oldest);
     }
-    const change: FileChange = { path: abs, relPath, content, status, prev };
-    this.onChange(change);
-    this.onFileTouched(abs, status);
   }
 
-  /** Walk the project (ignoring noise) and mark existing files as seen. */
+  /** Walk the project and mark existing files as seen. Their content is
+   *  cached too, so the first change of a file still carries the pre-change
+   *  content: editor highlights and run baselines need it. */
   private async seedExisting(): Promise<void> {
     const walk = async (dir: string): Promise<void> => {
       let entries;
@@ -392,8 +400,23 @@ export class ProjectWatcher {
         if (ent.isDirectory()) {
           await walk(full);
         } else if (ent.isFile()) {
-          if (ent.name === ".gitignore") await this.loadGitignore(full, relative(this.root, full));
-          this.seen.add(relative(this.root, full));
+          const relPath = relative(this.root, full);
+          if (ent.name === ".gitignore") await this.loadGitignore(full, relPath);
+          this.seen.add(relPath);
+          // Cache the content within the existing byte budget. Ignored and
+          // oversized files stay seen-only: emit never reports them.
+          if (this.cacheBytes >= ProjectWatcher.CACHE_BYTES) continue;
+          if (this.isIgnored(relPath)) continue;
+          try {
+            const st = await stat(full);
+            if (!st.isFile() || st.size > MAX_FILE_SIZE) continue;
+            const buf = await readFile(full);
+            if (buf.includes(0)) continue; // binary
+            const key = this.canonicalize ? this.canonicalize(full) : full;
+            if (!this.lastContents.has(key)) this.putCached(key, buf.toString("utf8"));
+          } catch {
+            /* unreadable — seen-only is enough */
+          }
         }
       }
     };

@@ -42,11 +42,11 @@ import { WorldlinesView } from "./worldlines";
 import { Explorer } from "./components/explorer";
 import { toast } from "./components/modals";
 import { SettingsView } from "./settings";
-import { emptyShortcuts } from "./settings-shortcuts";
+import { emptyShortcuts, isMacPlatform, shortcutForEvent } from "./settings-shortcuts";
 import { CommandDispatcher } from "./commands";
 import { defaultAppPreferences, pathBasename } from "../shared/types";
 import { normalizeAppPreferences } from "../shared/preferences";
-import type { AppPreferences, AppUpdateState, ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
+import type { AppPreferences, AppUpdateState, CommandId, ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
 
 const { EditorManager } = await import("./editor");
 const { ReviewView } = await import("./review");
@@ -1430,7 +1430,8 @@ function cycleTerminals(delta: 1 | -1): void {
   if (next) activatePane(next.instanceId);
 }
 
-function cycleProjects(delta: 1 | -1): void {
+/** Project ids in tab-strip order. Drag reorder moves nodes, not maps. */
+function orderedProjectIds(): string[] {
   const byTab = new Map<HTMLElement, string>();
   for (const view of projectViews.values()) byTab.set(view.tabEl, view.id);
   const ids: string[] = [];
@@ -1438,11 +1439,52 @@ function cycleProjects(delta: 1 | -1): void {
     const id = byTab.get(el as HTMLElement);
     if (id) ids.push(id);
   }
+  return ids;
+}
+
+function cycleProjects(delta: 1 | -1): void {
+  const ids = orderedProjectIds();
   if (ids.length < 2) return;
   const index = activeProjectId ? ids.indexOf(activeProjectId) : -1;
   const next = ids[(index + delta + ids.length) % ids.length];
   if (next) void window.pi.projectActivate(next);
 }
+
+function activateProjectByIndex(index: number): void {
+  const id = orderedProjectIds()[index];
+  if (id) void window.pi.projectActivate(id);
+}
+
+for (let i = 1; i <= 9; i++) {
+  commands.register(`project-${i}` as CommandId, () => activateProjectByIndex(i - 1));
+}
+
+// ---- keyboard shortcuts ----
+// Menu accelerators cannot capture Tab keys. The renderer matches keydown
+// events against the same shortcut map the menu uses. Working menu
+// accelerators consume their keys first, so this path never double-fires.
+// While settings is open its shortcut recorder owns the keys, and the menu
+// accelerators are blank; the bridge must not fire behind the modal.
+function normalizeShortcut(value: string): string {
+  return value.replace("CmdOrCtrl", isMacPlatform() ? "Cmd" : "Ctrl");
+}
+
+window.addEventListener(
+  "keydown",
+  (e) => {
+    if (settingsView.isOpen) return;
+    const computed = shortcutForEvent(e);
+    if (!computed) return;
+    const target = normalizeShortcut(computed);
+    const entries = Object.entries(preferences.shortcuts) as [CommandId, string][];
+    const command = entries.find(([, bound]) => bound && normalizeShortcut(bound) === target)?.[0];
+    if (!command || !commands.has(command)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    commands.execute(command);
+  },
+  true,
+);
 
 // Scroll over a tab strip cycles its tabs (iTerm-style). The accumulator
 // turns one trackpad gesture into one switch; the idle timer drops stale
@@ -1770,22 +1812,22 @@ window.pi.onToolTarget((p) => {
   });
 });
 
-const lastChangePush = new Map<string, number>();
+const lastChangePush = new Map<string, { at: number; changedLines?: number[] }>();
 const largeChangeFetch = new Set<string>();
 const MAX_LAST_CHANGE_PUSH = 500;
 
 function fetchLargeChange(path: string): void {
   if (largeChangeFetch.has(path)) return;
   largeChangeFetch.add(path);
-  const at = lastChangePush.get(path);
+  const at = lastChangePush.get(path)?.at;
   void window.pi.openFile(path).then((res) => {
     largeChangeFetch.delete(path);
     const latest = lastChangePush.get(path);
-    if (latest !== undefined && latest !== at) {
+    if (latest !== undefined && latest.at !== at) {
       fetchLargeChange(path);
       return;
     }
-    if (res.ok) activeEditor().updateContent(path, res.content);
+    if (res.ok) activeEditor().updateContent(path, res.content, res.changedLines ?? latest?.changedLines);
   }).catch(() => {
     largeChangeFetch.delete(path);
   });
@@ -1794,14 +1836,14 @@ function fetchLargeChange(path: string): void {
 window.pi.onFileChanged((p) => {
   const at = Date.now();
   lastChangePush.delete(p.path);
-  lastChangePush.set(p.path, at);
+  lastChangePush.set(p.path, { at, changedLines: p.changedLines });
   while (lastChangePush.size > MAX_LAST_CHANGE_PUSH) {
     const oldestKey = lastChangePush.keys().next().value;
     if (oldestKey === undefined) break;
     lastChangePush.delete(oldestKey);
   }
   if (p.content !== undefined) {
-    activeEditor().updateContent(p.path, p.content);
+    activeEditor().updateContent(p.path, p.content, p.changedLines);
   } else {
     // The main process caps large pushes. Fetch once per path; a newer
     // change while a fetch is in flight starts one follow-up fetch.

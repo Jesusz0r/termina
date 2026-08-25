@@ -46,7 +46,7 @@ await evaluate(`(() => { const input = document.querySelectorAll(".settings-inli
 check("terminal font size and word wrap persist", await evaluate(`window.pi.getPreferences().then((value) => value.terminalFontSize === 16 && value.wordWrap === true)`));
 
 await evaluate(`document.querySelectorAll(".settings-nav-item")[1].click()`);
-check("keyboard section lists shortcuts", await evaluate(`document.querySelectorAll(".settings-shortcut-row").length === 25`));
+check("keyboard section lists shortcuts", await evaluate(`document.querySelectorAll(".settings-shortcut-row").length === 38`));
 
 await evaluate(`(() => { const button = document.querySelector('[data-shortcut="open-settings"]'); button.click(); button.dispatchEvent(new KeyboardEvent("keydown", { key: "K", code: "KeyK", metaKey: true, bubbles: true, cancelable: true })); })()`);
 check("shortcut recording accepts a new key", await evaluate(`document.querySelector('[data-shortcut="open-settings"]')?.textContent === "⌘K" || document.querySelector('[data-shortcut="open-settings"]')?.textContent === "Ctrl+K"`));

@@ -9,7 +9,7 @@
 import * as monaco from "monaco-editor";
 import { cssFontFamily, pathBasename, type ThemeId } from "../shared/types";
 import { languageForPath } from "./editor-language";
-import { changedLinesInAfter } from "./line-diff";
+import { changedLinesInAfter } from "../shared/line-diff";
 import { copyText, toast } from "./components/modals";
 import { showContextMenu, closeContextMenu } from "./components/context-menu";
 
@@ -268,8 +268,19 @@ export class EditorManager {
     const res = await window.pi.openFile(path);
     if (res.ok) {
       if (this.tabs.has(key)) {
+        // Learn the canonical alias so watcher pushes under the canonical
+        // path find this tab.
+        if (res.path !== key) this.canonicalKeys.set(res.path, key);
         model.setValue(res.content);
         tab.savedVersionId = model.getAlternativeVersionId();
+        // Paint the last watcher transition even though this open has no
+        // previous model content to diff against.
+        if (res.changedLines && res.changedLines.length > 0) {
+          this.paintAgentChanges(tab, res.changedLines);
+          tab.agentRevealLine = res.changedLines[0];
+        } else {
+          tab.agentRevealLine = null;
+        }
       }
       this.activate(key);
       this.onFileOpened();
@@ -292,17 +303,30 @@ export class EditorManager {
     this.previewKey = null;
   }
 
+  /** Canonical-path aliases per tab key. Main pushes canonical paths
+   *  (/private/tmp on macOS); tabs are keyed by the opened path. The open
+   *  response returns the canonical path, so every tab learns its alias. */
+  private canonicalKeys = new Map<string, string>();
+
+  /** The tab key for a pushed path: the path itself or its canonical alias. */
+  private resolveKey(path: string): string | null {
+    if (this.tabs.has(path)) return path;
+    const aliased = this.canonicalKeys.get(path);
+    return aliased !== undefined && this.tabs.has(aliased) ? aliased : null;
+  }
+
   /** Update model content from the watcher (live edits). A model with
    *  unsaved user edits is never replaced silently: the tab shows a conflict
    *  and the user decides (save overwrites the disk, or revert the model). */
-  updateContent(path: string, content: string): void {
-    const tab = this.tabs.get(path);
-    if (!tab) return;
-    if (this.userDirty.has(path)) {
+  updateContent(path: string, content: string, changedLines?: number[]): void {
+    const resolved = this.resolveKey(path);
+    if (resolved === null) return;
+    const tab = this.tabs.get(resolved)!;
+    if (this.userDirty.has(resolved)) {
       if (!tab.dom.classList.contains("conflict")) {
         tab.dom.classList.add("conflict");
-        tab.dom.title = `${path} — changed on disk while you have unsaved edits`;
-        this.onConflict(path);
+        tab.dom.title = `${resolved} — changed on disk while you have unsaved edits`;
+        this.onConflict(resolved);
       }
       return;
     }
@@ -312,9 +336,15 @@ export class EditorManager {
     // setValue fires with isFlush=true; the model's change handler uses that
     // to tell programmatic pushes from user edits.
     model.setValue(content);
-    const changed = changedLinesInAfter(before, content);
+    // The agent saved to disk, so this content is the new baseline. The
+    // dot stays hidden: it marks unsaved user edits, not agent writes.
+    // Without the reset, the next syncDirty compares against the
+    // pre-push version and shows a phantom diff.
+    tab.savedVersionId = model.getAlternativeVersionId();
+    // Main diffs the watcher's pre-change cache. It is authoritative even
+    // when this model missed an earlier push (large-file fetches).
+    const changed = changedLines ?? changedLinesInAfter(before, content);
     this.paintAgentChanges(tab, changed);
-    tab.dirtyDot.style.display = "inline-block";
     const first = changed[0];
     if (first === undefined) return;
     if (this.editor.getModel() === model) {
@@ -512,6 +542,9 @@ export class EditorManager {
   closeTab(key: string): void {
     const tab = this.tabs.get(key);
     if (!tab) return;
+    for (const [canonical, mapped] of this.canonicalKeys) {
+      if (mapped === key) this.canonicalKeys.delete(canonical);
+    }
     tab.model.dispose();
     this.tabs.delete(key);
     this.order = this.order.filter((k) => k !== key);
@@ -570,7 +603,8 @@ export class EditorManager {
 
   /** Close a tab if it is open (the file was deleted on disk). */
   closeIfOpen(path: string): void {
-    if (this.tabs.has(path)) this.closeTab(path);
+    const resolved = this.resolveKey(path);
+    if (resolved !== null) this.closeTab(resolved);
   }
 
   // ---------------- tab actions (VS Code-style context menu) ---------------

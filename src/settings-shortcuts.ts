@@ -31,6 +31,7 @@ function keyForEvent(event: KeyboardEvent): string | null {
   if (/^F(?:[1-9]|1[0-2])$/.test(code)) return code;
   const keys: Record<string, string> = {
     Space: "Space",
+    Tab: "Tab",
     Enter: "Enter",
     NumpadEnter: "Enter",
     Escape: "Escape",

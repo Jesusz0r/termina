@@ -15,6 +15,9 @@ export interface FileChangedPayload {
    *  files on demand. */
   content?: string;
   status: "created" | "modified";
+  /** 1-based lines of the last watcher transition, diffed from the
+   *  pre-change cache. Absent on the first touch of a file. */
+  changedLines?: number[];
 }
 
 export interface ToolTargetPayload {
@@ -551,7 +554,7 @@ export interface PiBridge {
   projectActivate(projectId: string): Promise<{ ok: boolean }>;
   projectClose(projectId: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean }>;
   onProjectClosed(cb: (e: { projectId: string }) => void): void;
-  openFile(path: string): Promise<{ ok: true; path: string; content: string } | { ok: false; path: string; error: string }>;
+  openFile(path: string): Promise<{ ok: true; path: string; content: string; changedLines?: number[] } | { ok: false; path: string; error: string }>;
   saveFile(path: string, content: string): Promise<{ ok: boolean; error?: string }>;
 
   // file explorer
