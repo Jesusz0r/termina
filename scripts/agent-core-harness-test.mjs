@@ -66,6 +66,9 @@ const {
   resolveSessionFile,
   quarantineSessionFile,
   MAX_SESSION_FILE_BYTES,
+  SLASH_COMMANDS,
+  matchingSlashCommands,
+  completeSlashLine,
 } = core;
 
 const results = [];
@@ -1188,6 +1191,159 @@ check("quarantineSessionFile moves a file aside", quarantineSessionFile(qfile) =
 writeFileSync(qfile, "second\n");
 check("quarantineSessionFile does not overwrite an existing aside file", quarantineSessionFile(qfile) === true && existsSync(`${qfile}.bad`) && readFileSync(`${qfile}.bad`, "utf8") === '{"storageSeq":1}\n');
 check("MAX_SESSION_FILE_BYTES is 32 MiB", MAX_SESSION_FILE_BYTES === 32 * 1024 * 1024);
+check("slash menu puts help first", SLASH_COMMANDS[0]?.name === "/help");
+check("slash menu puts exit last", SLASH_COMMANDS.at(-1)?.name === "/exit");
+check(
+  "slash / lists every command",
+  matchingSlashCommands("/").map((c) => c.name).join(" ") === SLASH_COMMANDS.map((c) => c.name).join(" "),
+);
+check(
+  "slash /m is model and models",
+  matchingSlashCommands("/m").map((c) => c.name).join(" ") === "/model /models",
+);
+check("slash /models is exact", matchingSlashCommands("/models").map((c) => c.name).join(" ") === "/models");
+check("slash hides after a space", matchingSlashCommands("/help ").length === 0);
+check(
+  "slash /login lists OpenAI and OpenAI (key)",
+  matchingSlashCommands("/login").some((c) => c.name === "OpenAI" && c.submit === "/login openai oauth") &&
+    matchingSlashCommands("/login").some((c) => c.name === "OpenAI (key)" && c.submit === "/login openai key") &&
+    matchingSlashCommands("/login").some((c) => c.name === "Anthropic" && c.submit === "/login anthropic oauth") &&
+    matchingSlashCommands("/login").some((c) => c.name === "Anthropic (key)" && c.submit === "/login anthropic key") &&
+    matchingSlashCommands("/login").some((c) => c.name === "GitHub Copilot" && c.submit === "/login github-copilot oauth") &&
+    matchingSlashCommands("/login").some((c) => c.name === "xAI" && c.submit === "/login xai oauth") &&
+    matchingSlashCommands("/login").some((c) => c.name === "xAI (key)" && c.submit === "/login xai key") &&
+    matchingSlashCommands("/login").some((c) => c.name === "Google Gemini (key)" && c.submit === "/login google key") &&
+    !matchingSlashCommands("/login").some((c) => c.name.startsWith("/login ")),
+);
+check(
+  "slash /login openai lists both modes",
+  matchingSlashCommands("/login openai").map((c) => c.name).join(" ") === "OpenAI OpenAI (key)",
+);
+check(
+  "slash /login key lists API key rows",
+  matchingSlashCommands("/login key").length > 0 &&
+    matchingSlashCommands("/login key").every((c) => c.name.endsWith(" (key)")) &&
+    matchingSlashCommands("/login key").some((c) => c.name === "OpenAI (key)"),
+);
+check(
+  "slash /login oauth lists OAuth rows",
+  matchingSlashCommands("/login oauth").every((c) => !c.name.endsWith(" (key)")) &&
+    matchingSlashCommands("/login oauth").some((c) => c.name === "OpenAI") &&
+    !matchingSlashCommands("/login oauth").some((c) => c.name === "Google Gemini (key)"),
+);
+check(
+  "slash /login a is Anthropic only",
+  matchingSlashCommands("/login a").map((c) => c.name).join(" ") === "Anthropic Anthropic (key)",
+);
+check(
+  "slash /login gemini is Google Gemini (key)",
+  matchingSlashCommands("/login gemini").map((c) => c.name).join(" ") === "Google Gemini (key)",
+);
+check("slash Tab /login completes to /login ", completeSlashLine("/login") === "/login ");
+check("slash Tab unique picker does not expand", completeSlashLine("/login google") === "/login google");
+check("slash ignores prompts", matchingSlashCommands("hello").length === 0);
+check("slash Tab /m completes to /model", completeSlashLine("/m") === "/model");
+check("slash Tab /ex completes to /exit", completeSlashLine("/ex") === "/exit");
+check("slash Tab /foo is unchanged", completeSlashLine("/foo") === "/foo");
+
+const tuiMod = await import("../agent-core/tui.ts");
+check("wrapText splits on width", tuiMod.wrapText("abcdef", 3).join("|") === "abc|def");
+check("wrapText keeps newlines", tuiMod.wrapText("ab\ncd", 10).join("|") === "ab|cd");
+check("wrapText counts a code point as one cell", tuiMod.wrapText("👍👍", 1).join("|") === "👍|👍");
+check(
+  "layoutHeights keeps a transcript",
+  tuiMod.layoutHeights(24, 1, 7).transcript >= 2 && tuiMod.layoutHeights(24, 1, 7).header === 1,
+);
+check("layoutHeights fits a tiny screen", tuiMod.layoutHeights(5, 1, 7).transcript >= 1 && tuiMod.layoutHeights(5, 1, 7).slash < 7);
+const visSrc = Array.from({ length: 80 }, (_, i) => `L${String(i).padStart(2, "0")}`).join("\n") + "\n";
+const vis = tuiMod.visibleLines(visSrc, 10, 3, 0);
+check("visibleLines is the tail", vis.join("|").includes("L79") && !vis.join("|").includes("L00"));
+const submitted = [];
+const exits = [];
+const tui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: (line) => submitted.push(line),
+  onInterrupt: () => {},
+  onExit: () => exits.push(true),
+});
+tui.setStatus({ model: "anthropic/claude", auth: "oauth" });
+tui.append("hello from transcript\n");
+const frame = tui.frame();
+check("tui header names the kernel", frame.includes("termina agent-core v1"));
+check("tui header shows the model", frame.includes("anthropic/claude"));
+check("tui transcript is visible", frame.includes("hello from transcript"));
+tui.feed("/");
+check("tui slash menu lists help and exit", tui.frame().includes("/help") && tui.frame().includes("/exit"));
+tui.feed("\r");
+check("tui enter on / submits help", submitted[0] === "/help");
+const loginPicks = [];
+const loginTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: (line) => loginPicks.push(line),
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+loginTui.feed("/login");
+check(
+  "tui /login shows OpenAI and OpenAI (key)",
+  loginTui.frame().includes("OpenAI (key)") && loginTui.frame().includes("Anthropic") && !loginTui.frame().includes("/login openai oauth"),
+);
+loginTui.feed("\x1b[B\x1b[B\r");
+check("tui enter on highlighted OpenAI", loginPicks[0] === "/login openai oauth");
+check(
+  "tui login echo uses the picker label",
+  loginTui.frame().includes("> OpenAI") && !loginTui.frame().includes("> /login openai oauth"),
+);
+loginTui.feed("/login openai key\r");
+check("tui enter on /login openai key", loginPicks[1] === "/login openai key");
+loginTui.feed("/login openai oauth\r");
+check("tui enter on /login openai oauth", loginPicks[2] === "/login openai oauth");
+const loginFromSlash = [];
+const slashLoginTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: (line) => loginFromSlash.push(line),
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+slashLoginTui.feed("/");
+slashLoginTui.feed("\x1b[B\r");
+check(
+  "tui enter on /login command opens picker",
+  loginFromSlash.length === 0 && slashLoginTui.frame().includes("OpenAI (key)"),
+);
+tui.feed("/exit\r");
+check("tui /exit hits onExit", exits[0] === true);
+tui.setRawInput(true);
+tui.feed("/\r");
+check("raw input does not expand slash", submitted.at(-1) === "/");
+tui.feed("/login\r");
+check("raw input submits /login as a line", submitted.at(-1) === "/login");
+tui.setRawInput(false);
+const histLines = [];
+const histTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: (line) => histLines.push(line),
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+histTui.feed("hello\r");
+histTui.feed("/login openai oauth\r");
+histTui.feed("\x1b[A\x1b[A\r");
+check("tui history up past a login command", histLines.at(-1) === "hello");
+tui.append("\x1b[31mred-text\x1b[0m");
+check("tui strips ansi from transcript", tui.frame().includes("red-text") && !tui.frame().includes("\x1b[31m"));
+const tuiFail = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24 },
+  stdin: { isTTY: true, setRawMode: () => { throw new Error("no raw"); } },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+check("tui start fails closed", tuiFail.start() === false && tuiFail.active() === false);
 
 const failed = results.filter((r) => !r).length;
 console.log(`${results.length - failed}/${results.length} passed`);

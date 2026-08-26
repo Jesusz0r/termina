@@ -4,7 +4,8 @@
  * One of Termina's terminal engines (alongside Pi and the shell). Same pty
  * surface and sidecar contract (TERMINA_TERMINAL_ID + TERMINA_EVENTS_DIR,
  * agent_start/tool/tool_end/agent_settled) so the host timeline and modified
- * list work. Line-based stdin prompts; streamed plain-text stdout.
+ * list work. Full-screen TUI in a tty; streamed tokens land in the
+ * transcript. Piped runs print a banner and exit.
  *
  * - Frozen deterministic front matter; append-only session storage;
  *       revisions change the view, never the stored bytes; /resume replay
@@ -46,6 +47,7 @@ import {
   DEFAULT_MODELS,
   firstAuthenticatedProvider,
   isSupportedProvider,
+  loginPickerItems,
   parseAuthCommand,
   parseModelRef,
   providerProtocol,
@@ -74,6 +76,9 @@ import {
   pickDefaultModel,
   type ModelInfo,
 } from "./models.ts";
+import { AgentTui, SLASH_COMMANDS } from "./tui.ts";
+
+export { SLASH_COMMANDS, completeSlashLine, matchingSlashCommands, type SlashCommand } from "./tui.ts";
 
 /** Example starting values from docs/AGENT-CORE.md; never spec constants. */
 const MODEL_ENV = process.env.TERMINA_CORE_MODEL?.trim() || "";
@@ -1402,7 +1407,7 @@ function logServerSearch(
       const name = b.name ?? "web_search";
       names.push(name);
       logEvent(sidecarStartFor({ name, id: b.id ?? "", input: {} }));
-      process.stdout.write(`\n[${name}]\n`);
+      out(`\n[${name}]\n`);
     } else if (b.type === "web_search_tool_result") {
       const err =
         Boolean(b.content) &&
@@ -1816,7 +1821,7 @@ async function summarize(): Promise<boolean> {
         systemHash: hashSystem("You compress coding-agent session history. Only output the structured handoff."),
       }),
     );
-    process.stdout.write(`[context summarized: ${boundary} messages folded]\n`);
+    out(`[context summarized: ${boundary} messages folded]\n`);
     return true;
   } catch (err) {
     writeTrace(
@@ -1834,7 +1839,7 @@ async function summarize(): Promise<boolean> {
         systemHash: hashSystem("You compress coding-agent session history. Only output the structured handoff."),
       }),
     );
-    if (!interrupted) process.stdout.write(`\n(summarization failed: ${(err as Error).message})\n`);
+    if (!interrupted) out(`\n(summarization failed: ${(err as Error).message})\n`);
     return false;
   }
 }
@@ -2001,8 +2006,8 @@ async function callModel(messages: Message[]): Promise<CallResult> {
     const events = await readSseJson(res.body, currentAbort?.signal);
     const parsed =
       proto === "openai-codex-responses"
-        ? responsesResultFromEvents(events, (t) => process.stdout.write(t), started)
-        : completionResultFromEvents(events, (t) => process.stdout.write(t), started);
+        ? responsesResultFromEvents(events, (t) => out(t), started)
+        : completionResultFromEvents(events, (t) => out(t), started);
     if (parsed.error) throw new Error(parsed.error);
     return {
       blocks: parsed.blocks as Block[],
@@ -2095,7 +2100,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
           if (d.type === "text_delta" && target.type === "text") {
             if (ttftMs === null) ttftMs = Date.now() - started;
             target.text += d.text ?? "";
-            process.stdout.write(d.text ?? "");
+            out(d.text ?? "");
           } else if (d.type === "citations_delta" && target.type === "text" && d.citation !== undefined) {
             target.citations = [...(target.citations ?? []), d.citation];
           } else if (d.type === "thinking_delta" && "thinking" in target) {
@@ -2233,6 +2238,7 @@ async function runPrompt(prompt: string): Promise<void> {
   pushMessage("user", prompt);
   logEvent({ t: "agent_start", model: route.model, sessionFile, sessionId });
   running = true;
+  showPrompt();
   interrupted = false;
   currentAbort = new AbortController();
   if (!rateLookup && !ratesFailed) void loadRates().then(() => { ratesFailed = true; });
@@ -2327,7 +2333,7 @@ async function runPrompt(prompt: string): Promise<void> {
         const chunk = uses.slice(i, i + TOOL_CONCURRENCY);
         for (const use of chunk) {
           logToolStart(use);
-          process.stdout.write(`\n[${use.name}]\n`);
+          out(`\n[${use.name}]\n`);
         }
         const chunkOutcomes = await Promise.all(chunk.map(executeTool));
         for (let ci = 0; ci < chunk.length; ci++) {
@@ -2365,20 +2371,21 @@ async function runPrompt(prompt: string): Promise<void> {
           systemHash: hashSystem(sys),
         }),
       );
-      process.stdout.write("\n");
+      out("\n");
     }
     if (modelCalls >= MAX_TURNS && lastHadTools && !interrupted) {
-      process.stdout.write(`\n(turn cap ${MAX_TURNS} reached this prompt)\n`);
+      out(`\n(turn cap ${MAX_TURNS} reached this prompt)\n`);
     }
   } catch (err) {
-    if (interrupted) process.stdout.write("\n(interrupted)\n");
-    else process.stdout.write(`\nerror: ${(err as Error).message}\n`);
+    if (interrupted) out("\n(interrupted)\n");
+    else out(`\nerror: ${(err as Error).message}\n`);
   } finally {
     running = false;
     currentAbort = null;
+    showPrompt();
   }
   logEvent({ t: "agent_settled" });
-  printPromptLine();
+  showPrompt();
 }
 
 // ---- session resume: replay the append-only log into a fresh view ----
@@ -2386,7 +2393,7 @@ async function runPrompt(prompt: string): Promise<void> {
 /** Rebuild the context view from storage. Revision records address messages
  *  by stable sseq, so replay is order-independent and exact. */
 function abortResume(message: string): void {
-  process.stdout.write(`${message}\n`);
+  out(`${message}\n`);
   history.length = 0;
   if (sessionFile && quarantineSessionFile(sessionFile)) {
     streamPrepared = false;
@@ -2399,18 +2406,18 @@ function abortResume(message: string): void {
 
 function resumeSession(): void {
   if (!sessionFile || !existsSync(sessionFile)) {
-    process.stdout.write("(no stored session)\n");
+    out("(no stored session)\n");
     return;
   }
   let text: string;
   try {
     const info = statSync(sessionFile);
     if (!info.isFile()) {
-      process.stdout.write("(no stored session)\n");
+      out("(no stored session)\n");
       return;
     }
     if (info.size === 0) {
-      process.stdout.write("(stored session is empty)\n");
+      out("(stored session is empty)\n");
       streamPrepared = false;
       return;
     }
@@ -2429,7 +2436,7 @@ function resumeSession(): void {
     return;
   }
   if (replayed.messages.length === 0) {
-    process.stdout.write("(stored session is empty)\n");
+    out("(stored session is empty)\n");
     streamPrepared = false;
     return;
   }
@@ -2449,15 +2456,33 @@ function resumeSession(): void {
   storageSeq = Math.max(storageSeq, replayed.maxSeq);
   streamPrepared = true;
   prevPrompt = null;
-  process.stdout.write(`resumed ${history.length} messages\n`);
+  out(`resumed ${history.length} messages\n`);
 }
 
-// ---- terminal surface: raw-mode line input ----
+// ---- terminal surface ----
 
-let inputLine = "";
+let surface: AgentTui | null = null;
 
-function printPromptLine(): void {
-  process.stdout.write("\n> ");
+function out(text: string): void {
+  if (surface) surface.append(text);
+  else process.stdout.write(text);
+}
+
+function showPrompt(): void {
+  surface?.setBusy(running || authBusy);
+  if (!surface) out("\n> ");
+}
+
+function printSlashHelp(): void {
+  const width = Math.max(...SLASH_COMMANDS.map((c) => c.name.length));
+  for (const c of SLASH_COMMANDS) out(`  ${c.name.padEnd(width)}  ${c.hint}\n`);
+}
+
+function printLoginPicker(cmd: "/login" | "/logout"): void {
+  const items = loginPickerItems(cmd);
+  const width = Math.max(...items.map((i) => i.label.length));
+  out(cmd === "/login" ? "pick a provider:\n" : "pick a credential to drop:\n");
+  for (const i of items) out(`  ${i.label.padEnd(width)}  ${i.hint}  ${i.command}\n`);
 }
 
 let running = false;
@@ -2468,15 +2493,15 @@ function submit(line: string): void {
   if (running) {
     // Keep one typed-ahead prompt. More than one has no consumer yet.
     queuedLine = line;
-    process.stdout.write("(queued — runs after the current task)\n");
+    out("(queued — runs after the current task)\n");
     return;
   }
   // A rejected prompt promise must never kill the engine: the pty would
   // close and the terminal looks like it quit on the user.
   void runPrompt(line)
     .catch((err: unknown) => {
-      process.stdout.write(`\nengine error: ${(err as Error).message}\n`);
-      printPromptLine();
+      out(`\nengine error: ${(err as Error).message}\n`);
+      showPrompt();
     })
     .then(() => {
     if (queuedLine !== null) {
@@ -2511,6 +2536,7 @@ function cancelLogin(): void {
     loginCodeResolve("");
     loginCodeResolve = null;
   }
+  surface?.setRawInput(false);
 }
 
 function retargetSummary(provider: ProviderId): void {
@@ -2560,62 +2586,65 @@ async function bootCatalog(): Promise<void> {
 
 function startCatalogCommand(line: string): void {
   if (line === "/model") {
-    process.stdout.write(`model ${route.provider}/${route.model}\n`);
-    printPromptLine();
+    out(`model ${route.provider}/${route.model}\n`);
+    showPrompt();
     return;
   }
   if (line === "/models" || line.startsWith("/models ")) {
     if (running || authBusy) {
-      process.stdout.write("(engine busy)\n");
-      printPromptLine();
+      out("(engine busy)\n");
+      showPrompt();
       return;
     }
     const refresh = /\brefresh\b/.test(line);
     authBusy = true;
+    showPrompt();
     void (async () => {
       try {
         if (refresh || !catalog) {
           const got = await loadCatalog(route.provider, false);
-          if (!got.ok) process.stdout.write(`(${got.error})\n`);
+          if (!got.ok) out(`(${got.error})\n`);
         }
-        if (catalog && catalog.length > 0) process.stdout.write(`${formatModelLines(catalog, route.model)}\n`);
-        else process.stdout.write("(no model list — run /login)\n");
+        if (catalog && catalog.length > 0) out(`${formatModelLines(catalog, route.model)}\n`);
+        else out("(no model list — run /login)\n");
       } finally {
         authBusy = false;
-        printPromptLine();
+        showPrompt();
       }
     })();
     return;
   }
   if (!line.startsWith("/model ")) return;
   if (running || authBusy) {
-    process.stdout.write("(engine busy)\n");
-    printPromptLine();
+    out("(engine busy)\n");
+    showPrompt();
     return;
   }
   const rest = line.slice("/model ".length).trim();
   if (!rest) {
-    process.stdout.write(`model ${route.provider}/${route.model}\n`);
-    printPromptLine();
+    out(`model ${route.provider}/${route.model}\n`);
+    showPrompt();
     return;
   }
   authBusy = true;
+  showPrompt();
   void (async () => {
     try {
       if (catalog?.some((m) => m.id === rest)) {
         route.model = rest;
-        process.stdout.write(`model ${route.provider}/${route.model}\n`);
+        out(`model ${route.provider}/${route.model}\n`);
+        syncStatus();
         return;
       }
       const next = parseModelSwitch(rest, route.provider);
       const auth = await resolveAuth(next.provider);
       if (!auth.ok) {
-        process.stdout.write(`(${auth.error})\n`);
+        out(`(${auth.error})\n`);
         return;
       }
       if (next.provider !== route.provider) {
         const got = await loadCatalog(next.provider, true);
-        if (!got.ok) process.stdout.write(`(${got.error})\n`);
+        if (!got.ok) out(`(${got.error})\n`);
         if (catalog?.some((m) => m.id === next.model || m.id.startsWith(`${next.model}-`))) {
           const pick = pickDefaultModel(catalog, next.model);
           if (pick) route.model = pick;
@@ -2625,10 +2654,11 @@ function startCatalogCommand(line: string): void {
       } else {
         route.model = next.model;
       }
-      process.stdout.write(`model ${route.provider}/${route.model}\n`);
+      out(`model ${route.provider}/${route.model}\n`);
+      syncStatus();
     } finally {
       authBusy = false;
-      printPromptLine();
+      showPrompt();
     }
   })();
 }
@@ -2636,39 +2666,48 @@ function startCatalogCommand(line: string): void {
 function startAuthCommand(line: string): void {
   const parsed = parseAuthCommand(line);
   if ("error" in parsed) {
-    process.stdout.write(`(${parsed.error})\n`);
-    printPromptLine();
+    out(`(${parsed.error})\n`);
+    showPrompt();
     return;
   }
   if (parsed.cmd === "logout") {
-    const out = runLogout(parsed.provider);
-    if (out.ok && parsed.provider === route.provider) catalog = null;
-    process.stdout.write(out.ok ? `${out.summary}\n` : `(${out.error})\n`);
-    printPromptLine();
+    const result = runLogout(parsed.provider);
+    if (result.ok && parsed.provider === route.provider) catalog = null;
+    out(result.ok ? `${result.summary}\n` : `(${result.error})\n`);
+    if (result.ok) syncStatus("");
+    showPrompt();
     return;
   }
   authBusy = true;
+  showPrompt();
   loginAbort = new AbortController();
   const abort = loginAbort;
   void runLogin(parsed.provider, parsed.mode, {
-    write: (text) => process.stdout.write(text),
-    waitForCode: () =>
-      new Promise<string>((resolve) => {
-        loginCodeResolve = resolve;
-      }),
+    write: (text) => out(text),
+    waitForCode: () => {
+      surface?.setRawInput(true);
+      return new Promise<string>((resolve) => {
+        loginCodeResolve = (code) => {
+          surface?.setRawInput(false);
+          resolve(code);
+        };
+      });
+    },
     signal: abort.signal,
   })
-    .then(async (out) => {
-      process.stdout.write(out.ok ? `${out.summary}\n` : `(${out.error})\n`);
-      if (!out.ok) return;
+    .then(async (result) => {
+      out(result.ok ? `${result.summary}\n` : `(${result.error})\n`);
+      if (!result.ok) return;
       if (!isSupportedProvider(parsed.provider)) return;
       const got = await loadCatalog(parsed.provider, !PINNED_ROUTE);
       if (route.provider !== parsed.provider) return;
-      if (!got.ok) process.stdout.write(`(${got.error})\n`);
-      else if (catalog && catalog.length > 0) process.stdout.write(`${formatModelBanner(catalog, route.model)}\n`);
+      if (!got.ok) out(`(${got.error})\n`);
+      else if (catalog && catalog.length > 0) out(`${formatModelBanner(catalog, route.model)}\n`);
+      const nextAuth = await resolveAuth(route.provider);
+      syncStatus(nextAuth.ok ? authBanner(nextAuth) : undefined);
     })
     .catch((err: unknown) => {
-      process.stdout.write(`(login failed: ${(err as Error).message})\n`);
+      out(`(login failed: ${(err as Error).message})\n`);
     })
     .finally(() => {
       if (loginAbort === abort) {
@@ -2676,8 +2715,75 @@ function startAuthCommand(line: string): void {
         loginCodeResolve = null;
         authBusy = false;
       }
-      printPromptLine();
+      showPrompt();
     });
+}
+
+function syncStatus(authText?: string): void {
+  surface?.setStatus({
+    model: `${route.provider}/${route.model}`,
+    auth: authText,
+  });
+}
+
+function dispatchLine(line: string): void {
+  if (!line) {
+    showPrompt();
+    return;
+  }
+  if (line === "/exit" || line === "/quit") {
+    currentAbort?.abort();
+    cancelLogin();
+    process.exit(0);
+  }
+  if (loginCodeResolve) {
+    const resolve = loginCodeResolve;
+    loginCodeResolve = null;
+    resolve(line);
+    return;
+  }
+  if (line === "/help") {
+    printSlashHelp();
+    showPrompt();
+    return;
+  }
+  if (line === "/login" || line === "/logout") {
+    if (running || authBusy) {
+      out("(engine busy)\n");
+      showPrompt();
+      return;
+    }
+    printLoginPicker(line);
+    showPrompt();
+    return;
+  }
+  if (line.startsWith("/login ") || line.startsWith("/logout ")) {
+    if (running || authBusy) {
+      out("(engine busy)\n");
+      showPrompt();
+      return;
+    }
+    startAuthCommand(line);
+    return;
+  }
+  if (line === "/models" || line.startsWith("/models ") || line === "/model" || line.startsWith("/model ")) {
+    startCatalogCommand(line);
+    return;
+  }
+  if (line === "/resume") {
+    if (running || authBusy) out("(engine busy)\n");
+    else if (history.length > 0) out("(session already live — /resume only on a fresh engine)\n");
+    else resumeSession();
+    showPrompt();
+    return;
+  }
+  if (line.startsWith("/")) {
+    out(`(unknown command: ${line} — type /help)\n`);
+    showPrompt();
+    return;
+  }
+  submit(line);
+  showPrompt();
 }
 
 async function main(): Promise<void> {
@@ -2685,102 +2791,53 @@ async function main(): Promise<void> {
   freezeFrontMatter();
   await bootCatalog();
   const auth = await resolveAuth(route.provider);
-  process.stdout.write(
-    `termina agent-core v1 · model ${route.provider}/${route.model} · ${authBanner(auth)} · Ctrl+C interrupts · /exit quits\n`,
-  );
-  if (catalog && catalog.length > 0) process.stdout.write(`${formatModelBanner(catalog, route.model)}\n`);
-  if (process.env.TERMINA_CORE_RESUME === "1") resumeSession();
-  printPromptLine();
-  if (!process.stdin.isTTY) return;
-  process.stdin.setRawMode(true);
-  process.stdin.resume();
-  process.stdin.on("data", (chunk: Buffer) => {
-    // The handler owns the echo writes. One failed write must not take
-    // down the engine; Node exits the process on an uncaught throw.
-    try {
-      handleInput(chunk);
-    } catch (err) {
-      process.stderr.write(`input error: ${(err as Error).message}\n`);
-    }
-  });
-}
-
-function handleInput(chunk: Buffer): void {
-  for (const ch of chunk.toString("utf8")) {
-      if (ch === "\r" || ch === "\n") {
-        process.stdout.write("\n");
-        const line = inputLine.trim();
-        inputLine = "";
-        if (!line) {
-          printPromptLine();
-          continue;
+  const banner = `termina agent-core v1 · model ${route.provider}/${route.model} · ${authBanner(auth)} · Ctrl+C interrupts · /exit quits\n`;
+  if (process.stdin.isTTY && process.stdout.isTTY) {
+    surface = new AgentTui({
+      stdin: process.stdin,
+      stdout: process.stdout,
+      commands: SLASH_COMMANDS,
+      onSubmit: (line) => {
+        try {
+          dispatchLine(line);
+        } catch (err) {
+          out(`\nengine error: ${(err as Error).message}\n`);
         }
-        if (line === "/exit" || line === "/quit") {
-          currentAbort?.abort();
-          cancelLogin();
-          process.exit(0);
-        }
-        if (loginCodeResolve) {
-          const resolve = loginCodeResolve;
-          loginCodeResolve = null;
-          resolve(line);
-          continue;
-        }
-        if (line.startsWith("/login") || line.startsWith("/logout")) {
-          if (running || authBusy) {
-            process.stdout.write("(engine busy)\n");
-            printPromptLine();
-            continue;
-          }
-          startAuthCommand(line);
-          continue;
-        }
-        if (line === "/models" || line.startsWith("/models ") || line === "/model" || line.startsWith("/model ")) {
-          startCatalogCommand(line);
-          continue;
-        }
-        if (line.startsWith("/") && line !== "/resume") {
-          process.stdout.write(`(unknown command: ${line})\n`);
-          printPromptLine();
-          continue;
-        }
-        if (line === "/resume") {
-          if (running || authBusy) {
-            process.stdout.write("(engine busy)\n");
-          } else if (history.length > 0) {
-            process.stdout.write("(session already live — /resume only on a fresh engine)\n");
-          } else {
-            resumeSession();
-          }
-          printPromptLine();
-          continue;
-        }
-        submit(line);
-        if (!running) printPromptLine();
-      } else if (ch === "\x7f") {
-        if (inputLine.length > 0) {
-          inputLine = inputLine.slice(0, -1);
-          process.stdout.write("\b \b");
-        }
-      } else if (ch === "\x03") {
-        // Interrupt the run, never kill the engine. The app's abort button
-        // and Cmd+C send \x03 into the pty.
+      },
+      onInterrupt: () => {
         if (running) {
           interrupted = true;
           currentAbort?.abort();
-        } else if (authBusy) {
-          process.stdout.write("^C\n");
-          cancelLogin();
-        } else {
-          inputLine = "";
-          process.stdout.write("^C\n");
-          printPromptLine();
-        }
-      } else {
-        inputLine += ch;
-        process.stdout.write(ch);
-      }
+        } else if (authBusy) cancelLogin();
+      },
+      onExit: () => {
+        currentAbort?.abort();
+        cancelLogin();
+        surface?.stop();
+        surface = null;
+        process.exit(0);
+      },
+    });
+    const teardown = (): void => {
+      surface?.stop();
+      surface = null;
+    };
+    process.on("exit", teardown);
+    process.on("SIGTERM", () => {
+      teardown();
+      process.exit(0);
+    });
+    process.on("SIGHUP", () => {
+      teardown();
+      process.exit(0);
+    });
+    surface.setStatus({ model: `${route.provider}/${route.model}`, auth: authBanner(auth) });
+    if (!surface.start()) surface = null;
   }
+  if (!surface) out(banner);
+  if (catalog && catalog.length > 0) out(`${formatModelBanner(catalog, route.model)}\n`);
+  if (process.env.TERMINA_CORE_RESUME === "1") resumeSession();
+  showPrompt();
 }
 
 if (isDirectRun()) {

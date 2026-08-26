@@ -5,12 +5,13 @@ principles, not implementations: each principle names the invariant, the rule
 that follows from it, and how to verify it. Where a number appears it is an
 example starting point, never the spec.
 
-Status: implemented in `agent-core/main.ts` (frozen zones + append-only
+Status: implemented in `agent-core/main.ts` and `agent-core/tui.ts` (frozen zones + append-only
 storage + `/resume` replay, reclamation hysteresis + summarization with
 handoff chaining + emergency overflow + truncate last resort, executable
 stubs + structured inventories, waste attribution with models.dev pricing,
 two-role routing map, bounded concurrency, cwd jail, grep/glob, web_search, skill
-index, prefix `cache_control`, traces, provider auth, live model list). Zone 1 is identity, environment,
+index, prefix `cache_control`, traces, provider auth, live model list,
+full-screen TUI). Zone 1 is identity, environment,
 user-global `~/.agents/AGENTS.md`, the skill index, then cwd `AGENTS.md`.
 Skill bodies load with `read_file`. Skills come from `~/.agents/skills`
 then `<cwd>/.agents/skills` (no ancestor walk). Truncated instructions
@@ -187,9 +188,17 @@ footprint, not these numbers.
 
 ## Auth
 
+The kernel owns a full-screen TUI in a tty: status header, scrolling
+transcript, input, slash menu, and footer. Typing `/` lists commands;
+Tab completes; arrows move the highlight. `/help` prints the same list.
+`/login` opens a provider picker. OAuth is the provider name (`OpenAI`);
+API key is `OpenAI (key)`. OpenAI OAuth is the ChatGPT Codex subscription;
+OpenAI key is the platform API. `/login [provider] [oauth|key]` and
+`/logout [provider]` still run when typed in full. Supported ids:
+`anthropic`, `openai-codex`, `github-copilot`, `xai`, `openrouter`,
+`openai`, `google`.
+
 Agent-core stores credentials in `~/.termina/agent/auth.json` (mode 0600).
-`/login [provider]` and `/logout [provider]` run in the kernel. Supported
-ids: `anthropic`, `openai`, `openai-codex`, `xai`, `google`, `openrouter`.
 A stored credential wins over that provider's env key. OAuth tokens refresh
 once on expiry or 401. After login (and on startup when a credential
 exists) the kernel loads that provider's live model list. `/models` prints
