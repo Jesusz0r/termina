@@ -91,6 +91,9 @@ import {
   waitForAck,
   writePromptPayload,
 } from "./host.ts";
+import { MAX_SESSION_FILE_BYTES } from "./session.ts";
+
+export { MAX_SESSION_FILE_BYTES, sliceSessionText, writeForkedSession } from "./session.ts";
 import { AgentTui, SLASH_COMMANDS } from "./tui.ts";
 
 export { SLASH_COMMANDS, completeSlashLine, matchingSlashCommands, type SlashCommand } from "./tui.ts";
@@ -1163,8 +1166,6 @@ let storageSeq = 0;
 export function prepareSessionStream(sessionPath: string, mode: "fresh"): void {
   if (mode === "fresh") writeFileSync(sessionPath, "");
 }
-
-export const MAX_SESSION_FILE_BYTES = 32 * 1024 * 1024;
 
 /** Move a failed resume file aside so the next prompt does not truncate it. */
 export function quarantineSessionFile(path: string): boolean {

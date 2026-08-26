@@ -9,7 +9,7 @@
  */
 import { execFile, spawn } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { chmod, cp, lstat as lstatPath, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { writeSandboxProfile, sandboxShellPreamble, type SandboxPaths } from "./sandbox.js";
@@ -18,6 +18,7 @@ import { captureRootInRepo, gitCommonDir, gitHead, gitTopLevel, platformHasCopyO
 import { EvidenceEngine, dependencyDiff, mineChangeReason, rankProfiles, type EvidenceDeps, type EvidenceRecord, type EvidenceSummary } from "./evidence.js";
 import type { SessionForkOpts, SessionForkResult } from "./session-fork.js";
 import type { DependencyChange, RunSummary, TimelineEvent, WorldlineChangedFile, WorldlineDetails } from "../shared/types.js";
+import { writeForkedSession } from "../agent-core/session.js";
 
 /** Quote one shell argument: the resolved base commands carry scripts that
  * must survive as one argument through the wrapper shell. */
@@ -105,6 +106,8 @@ interface ComparisonState {
   /** The model and thinking level of the source run. */
   model: string | null;
   thinkingLevel: string | null;
+  /** Which engine produced the source run. */
+  engine: "pi" | "core";
   /** When the pair started (ms epoch). */
   createdAt: number;
   candidates: Map<"A" | "B", CandidateState>;
@@ -140,6 +143,18 @@ export interface RunRecord {
   startedAt: number;
   settledAt: number | null;
   trustHashes: Record<string, string> | null;
+  engine?: "pi" | "core";
+}
+
+function runEngine(run: { engine?: "pi" | "core" }): "pi" | "core" {
+  return run.engine === "core" ? "core" : "pi";
+}
+
+function parseStorageSeq(value: string | null | undefined): number | null {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0) return null;
+  return n;
 }
 
 function isInside(parent: string, child: string): boolean {
@@ -155,6 +170,7 @@ export interface PromoteSeed {
   primaryWorkspaceId: string;
   comparisonId: string;
   label: "A" | "B";
+  engine: "pi" | "core";
 }
 
 export interface WorldlineDeps {
@@ -165,6 +181,8 @@ export interface WorldlineDeps {
   primaryEventsDir: string;
   bridgePath: string;
   piBin: string;
+  agentCorePath: string;
+  electronExecPath: string;
   baseEnv: Record<string, string | undefined>;
   getStore(): Promise<SnapshotStore | null>;
   /** Read-only load paths for the sandboxed pi (app package + node). */
@@ -173,6 +191,7 @@ export interface WorldlineDeps {
   createCandidate(opts: {
     root: string;
     workspaceId: string;
+    engine?: "pi" | "core";
     launch: { cmd: string; args: string[]; env: Record<string, string | undefined> };
   }): Promise<{ terminalId: string; pid: number }>;
   createCandidateWorkspace(root: string, baseStateId: string | null, comparisonId: string): string;
@@ -505,7 +524,10 @@ export class WorldlineManager {
     if (!store) return { ok: false, error: "recording is not available" };
     if (!cmp.baseStateId) return { ok: false, error: "the comparison base is missing" };
     const run = this.runOf(cmp.sourceRunId);
-    if (!run?.promptPayloadFile || !run.promptParentEntryId) {
+    if (!run?.promptPayloadFile) {
+      return { ok: false, error: "the run has no captured task or pre-task anchor" };
+    }
+    if (cmp.engine !== "core" && !run.promptParentEntryId) {
       return { ok: false, error: "the run has no captured task or pre-task anchor" };
     }
     // This comparison is replaced by the challenge pair, so its live
@@ -535,6 +557,7 @@ export class WorldlineManager {
       inheritTrust: cmp.inheritTrust,
       model: cmp.model,
       thinkingLevel: cmp.thinkingLevel,
+      engine: cmp.engine,
       createdAt: Date.now(),
       candidates: new Map(),
       phase: "creating",
@@ -576,6 +599,7 @@ export class WorldlineManager {
     this.comparisons.set(id, ncmp);
     try {
       const payload = await this.readPromptPayload(run);
+      this.createSupportDirs(ncmp);
       // The template is the SHARED BASE (R), not the reference head: the
       // challenger starts from the recorded base.
       mkdirSync(ncmp.templateDir, { recursive: true });
@@ -596,30 +620,43 @@ export class WorldlineManager {
       await store.applyState({ stateId: wHead.commit, targetDir: nA.dir, preserveTopLevel: RUNTIME_ALLOWLIST });
       // A's session continues from the candidate leaf; B's session branches
       // at the pre-task anchor (the original run's prompt parent).
-      const [forkA, forkB] = await Promise.all([
-        this.deps.forkSession({
-          sourceSessionFile: cand.sessionFile,
-          entryId: null,
-          sessionWorkspaceDir: ncmp.sessionWorkspaceDir,
-          candidateRoot: nA.dir,
-          candidateSessionDir: nA.sessionDir,
-          relocationNote: `The source project lived at ${this.deps.primaryRoot}. In this candidate, that path maps to ${nA.dir}.`,
-        }),
-        this.deps.forkSession({
-          sourceSessionFile: run.sessionFile ?? cand.sessionFile,
-          entryId: run.promptParentEntryId,
-          sessionWorkspaceDir: ncmp.sessionWorkspaceDir,
-          candidateRoot: nB.dir,
-          candidateSessionDir: nB.sessionDir,
-          contextText: payload.context || undefined,
-        }),
-      ]);
-      if (!forkA.ok || !forkA.sessionFile) throw new Error("could not fork the reference session");
-      if (!forkB.ok || !forkB.sessionFile) throw new Error("could not fork the challenger session");
-      nA.sessionFile = forkA.sessionFile;
-      nB.sessionFile = forkB.sessionFile;
-      this.createSupportDirs(ncmp);
-      await this.copyPiResources(ncmp);
+      if (ncmp.engine === "core") {
+        if (!cand.sessionFile) throw new Error("could not fork the reference session");
+        const destA = join(nA.sessionDir, "session.jsonl");
+        const destB = join(nB.sessionDir, "session.jsonl");
+        await writeFile(destA, await readFile(cand.sessionFile), { mode: 0o600 });
+        const throughB = parseStorageSeq(run.promptParentEntryId) ?? 0;
+        const sourceB = run.sessionBranchFile ?? run.sessionFile ?? cand.sessionFile;
+        const forkB = await writeForkedSession(sourceB, destB, throughB);
+        if (!forkB.ok) throw new Error(`could not fork the challenger session: ${forkB.error}`);
+        nA.sessionFile = destA;
+        nB.sessionFile = destB;
+        await this.copyCoreResources(ncmp);
+      } else {
+        const [forkA, forkB] = await Promise.all([
+          this.deps.forkSession({
+            sourceSessionFile: cand.sessionFile,
+            entryId: null,
+            sessionWorkspaceDir: ncmp.sessionWorkspaceDir,
+            candidateRoot: nA.dir,
+            candidateSessionDir: nA.sessionDir,
+            relocationNote: `The source project lived at ${this.deps.primaryRoot}. In this candidate, that path maps to ${nA.dir}.`,
+          }),
+          this.deps.forkSession({
+            sourceSessionFile: run.sessionFile ?? cand.sessionFile,
+            entryId: run.promptParentEntryId,
+            sessionWorkspaceDir: ncmp.sessionWorkspaceDir,
+            candidateRoot: nB.dir,
+            candidateSessionDir: nB.sessionDir,
+            contextText: payload.context || undefined,
+          }),
+        ]);
+        if (!forkA.ok || !forkA.sessionFile) throw new Error("could not fork the reference session");
+        if (!forkB.ok || !forkB.sessionFile) throw new Error("could not fork the challenger session");
+        nA.sessionFile = forkA.sessionFile;
+        nB.sessionFile = forkB.sessionFile;
+        await this.copyPiResources(ncmp);
+      }
       // B replays the original task automatically (structured control).
       await this.writeControl(nA, { opId: randomUUID(), action: "none" });
       await this.writeControl(nB, {
@@ -998,7 +1035,8 @@ export class WorldlineManager {
       }
       await this.forkSessions(cmp, run);
       this.createSupportDirs(cmp);
-      await this.copyPiResources(cmp);
+      if (cmp.engine === "core") await this.copyCoreResources(cmp);
+      else await this.copyPiResources(cmp);
       await this.writeStartupControls(cmp, run, opts.challenge ?? false);
       await this.launchCandidates(cmp, run);
       cmp.phase = "running";
@@ -1039,6 +1077,7 @@ export class WorldlineManager {
       inheritTrust: run.trusted === true && run.trustHashes !== null,
       model: run.model,
       thinkingLevel: run.thinkingLevel,
+      engine: runEngine(run),
       createdAt: Date.now(),
       candidates: new Map(),
       phase: "creating",
@@ -1134,8 +1173,12 @@ export class WorldlineManager {
     await store.applyState({ stateId: run.settledStateId!, targetDir: a.dir, preserveTopLevel: RUNTIME_ALLOWLIST });
   }
 
-  /** Fork both Pi sessions in the session worker. */
+  /** Fork both sessions. Pi uses SessionManager; core slices JSONL. */
   private async forkSessions(cmp: ComparisonState, run: RunRecord): Promise<void> {
+    if (cmp.engine === "core") {
+      await this.forkCoreSessions(cmp, run);
+      return;
+    }
     const payload = await this.readPromptPayload(run);
     const a = cmp.candidates.get("A")!;
     const b = cmp.candidates.get("B")!;
@@ -1161,6 +1204,25 @@ export class WorldlineManager {
     if (!forkB.ok || !forkB.sessionFile) throw new Error("could not fork the alternative session");
     a.sessionFile = forkA.sessionFile;
     b.sessionFile = forkB.sessionFile;
+  }
+
+  private async forkCoreSessions(cmp: ComparisonState, run: RunRecord): Promise<void> {
+    const source = run.sessionBranchFile!;
+    const a = cmp.candidates.get("A")!;
+    const b = cmp.candidates.get("B")!;
+    const destA = join(a.sessionDir, "session.jsonl");
+    const destB = join(b.sessionDir, "session.jsonl");
+    const throughA = parseStorageSeq(run.settledEntryId);
+    if (throughA === null || throughA < 1) throw new Error("the settled session address is missing");
+    const throughB = parseStorageSeq(run.promptParentEntryId) ?? 0;
+    const [forkA, forkB] = await Promise.all([
+      writeForkedSession(source, destA, throughA),
+      writeForkedSession(source, destB, throughB),
+    ]);
+    if (!forkA.ok) throw new Error(`could not fork the reference session: ${forkA.error}`);
+    if (!forkB.ok) throw new Error(`could not fork the alternative session: ${forkB.error}`);
+    a.sessionFile = destA;
+    b.sessionFile = destB;
   }
 
   private async safePromptPayloadPath(run: { promptPayloadFile: string | null; promptEventsDir?: string | null }): Promise<string | null> {
@@ -1200,6 +1262,35 @@ export class WorldlineManager {
     for (const cand of cmp.candidates.values()) {
       for (const dir of [cand.supportDir, cand.homeDir, cand.sessionDir, cand.eventsDir, cand.tmpDir, cand.cacheDir]) {
         mkdirSync(dir, { recursive: true, mode: 0o700 });
+      }
+    }
+  }
+
+  /** Copy agent-core auth and user skills into each candidate home. */
+  private async copyCoreResources(cmp: ComparisonState): Promise<void> {
+    const authSrc = join(this.deps.realHome, ".termina", "agent", "auth.json");
+    const agentsSrc = join(this.deps.realHome, ".agents");
+    for (const cand of cmp.candidates.values()) {
+      const authDstDir = join(cand.homeDir, ".termina", "agent");
+      await mkdir(authDstDir, { recursive: true, mode: 0o700 });
+      if (existsSync(authSrc)) {
+        try {
+          const info = await stat(authSrc);
+          if (info.isFile() && info.size <= MAX_PI_RESOURCE_BYTES) {
+            const target = join(authDstDir, "auth.json");
+            await cp(authSrc, target, { force: true });
+            await chmod(target, 0o600);
+          }
+        } catch {
+          /* Keep the candidate without this file. */
+        }
+      }
+      if (existsSync(agentsSrc)) {
+        try {
+          await this.copyResourceTree(agentsSrc, join(cand.homeDir, ".agents"));
+        } catch {
+          /* Keep the candidate without user skills. */
+        }
       }
     }
   }
@@ -1285,6 +1376,15 @@ export class WorldlineManager {
     }
   }
 
+  private sessionHasContent(path: string | null): boolean {
+    if (!path) return false;
+    try {
+      return existsSync(path) && statSync(path).size > 0;
+    } catch {
+      return false;
+    }
+  }
+
   /** The sandboxed launch command for one candidate. */
   private candidateLaunch(
     cmp: ComparisonState,
@@ -1294,6 +1394,7 @@ export class WorldlineManager {
     // A moment comparison has a single candidate: no sibling to deny (the
     // worlds-root deny covers its tree anyway).
     const sibling = cmp.candidates.get(cand.label === "A" ? "B" : "A");
+    const core = cmp.engine === "core";
     const paths: SandboxPaths = {
       candidateRoot: cand.dir,
       candidateSupport: cand.supportDir,
@@ -1307,10 +1408,39 @@ export class WorldlineManager {
       primaryEventsDir: this.deps.primaryEventsDir,
       userData: this.deps.userData,
       appReadPaths: this.deps.appReadPaths(),
-      agentHomeDir: join(cand.homeDir, ".pi", "agent"),
+      agentHomeDir: join(cand.homeDir, core ? ".termina" : ".pi", "agent"),
       denyNetwork: false,
     };
     cand.profilePath = writeSandboxProfile(cand.supportDir, paths);
+    if (core) {
+      const model = cmp.model && cmp.model.includes("/") ? cmp.model : null;
+      const cut = model ? model.indexOf("/") : -1;
+      const env: Record<string, string | undefined> = {
+        ...this.deps.baseEnv,
+        HOME: cand.homeDir,
+        TMPDIR: cand.tmpDir,
+        TERMINA_EVENTS_DIR: cand.eventsDir,
+        ELECTRON_RUN_AS_NODE: "1",
+        TERMINA_CORE_SESSION_FILE: cand.sessionFile ?? undefined,
+        TERMINA_CORE_APPROVE: "all",
+        ...(this.sessionHasContent(cand.sessionFile) ? { TERMINA_CORE_RESUME: "1" } : {}),
+        ...(model && cut > 0
+          ? { TERMINA_CORE_PROVIDER: model.slice(0, cut), TERMINA_CORE_MODEL: model.slice(cut + 1) }
+          : {}),
+        ...(cmp.inheritTrust ? { TERMINA_INHERIT_TRUST: "1" } : {}),
+      };
+      return {
+        cmd: "sandbox-exec",
+        args: [
+          "-f",
+          cand.profilePath,
+          "/bin/zsh",
+          "-c",
+          `${sandboxShellPreamble()} exec ${quoteShellArg(this.deps.electronExecPath)} ${quoteShellArg(this.deps.agentCorePath)}`,
+        ],
+        env,
+      };
+    }
     const piArgs = ["--session", cand.sessionFile!, "-e", this.deps.bridgePath, ...extraPiArgs];
     return {
       cmd: "sandbox-exec",
@@ -1743,16 +1873,26 @@ export class WorldlineManager {
       journal.paths = paths;
 
       const sessionDir = join(journalDir, "session");
-      const fork = await this.deps.forkSession({
-        sourceSessionFile: target.sessionFile,
-        entryId: null,
-        sessionWorkspaceDir: sessionDir,
-        candidateRoot: this.deps.primaryRoot,
-        candidateSessionDir: sessionDir,
-        relocationNote: `The candidate project lived at ${target.root}. In this promoted session, that path maps to ${this.deps.primaryRoot}.`,
-      });
-      if (!fork.sessionFile) throw new Error("the promoted session fork produced no file");
-      journal.stagedSession = fork.sessionFile;
+      const comparison = this.comparisons.get(comparisonId);
+      const promoteEngine = comparison?.engine === "core" ? "core" : "pi";
+      if (promoteEngine === "core") {
+        if (!target.sessionFile) throw new Error("the candidate has no session");
+        mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+        const staged = join(sessionDir, "session.jsonl");
+        await writeFile(staged, await readFile(target.sessionFile), { mode: 0o600 });
+        journal.stagedSession = staged;
+      } else {
+        const fork = await this.deps.forkSession({
+          sourceSessionFile: target.sessionFile,
+          entryId: null,
+          sessionWorkspaceDir: sessionDir,
+          candidateRoot: this.deps.primaryRoot,
+          candidateSessionDir: sessionDir,
+          relocationNote: `The candidate project lived at ${target.root}. In this promoted session, that path maps to ${this.deps.primaryRoot}.`,
+        });
+        if (!fork.sessionFile) throw new Error("the promoted session fork produced no file");
+        journal.stagedSession = fork.sessionFile;
+      }
       writePromotionJournal(journalDir, journal);
 
       for (const p of paths) {
@@ -1786,7 +1926,7 @@ export class WorldlineManager {
       const sessionName = `${new Date().toISOString().replace(/[:.]/g, "-")}_${randomUUID()}.jsonl`;
       const installed = join(installDir, sessionName);
       const tmp = join(installDir, `.${sessionName}.tmp`);
-      await writeFile(tmp, await readFile(fork.sessionFile));
+      await writeFile(tmp, await readFile(String(journal.stagedSession)));
       await rename(tmp, installed);
       journal.installedSession = installed;
       journal.phase = "done";
@@ -1800,6 +1940,7 @@ export class WorldlineManager {
         primaryWorkspaceId: primary.id,
         comparisonId,
         label,
+        engine: promoteEngine,
       });
       await this.finishPromotion(comparisonId, true, null);
       releaseLeases();
@@ -1878,6 +2019,7 @@ export class WorldlineManager {
       inheritTrust: opts.inheritTrust ?? false,
       model: opts.model,
       thinkingLevel: opts.thinkingLevel,
+      engine: runEngine(rootRun),
       createdAt: Date.now(),
       candidates: new Map(),
       phase: "creating",
@@ -1927,18 +2069,28 @@ export class WorldlineManager {
       }
       await this.cloneTree(cmp.templateDir, cand.dir);
       // The session branches at the dot's entry: later entries stay out.
-      const fork = await this.deps.forkSession({
-        sourceSessionFile: opts.sessionFile,
-        entryId: opts.entryId,
-        sessionWorkspaceDir: cmp.sessionWorkspaceDir,
-        candidateRoot: cand.dir,
-        candidateSessionDir: cand.sessionDir,
-        relocationNote: `The source project lived at ${this.deps.primaryRoot}. In this candidate, that path maps to ${cand.dir}.`,
-      });
-      if (!fork.ok || !fork.sessionFile) throw new Error("could not fork the moment session");
-      cand.sessionFile = fork.sessionFile;
       this.createSupportDirs(cmp);
-      await this.copyPiResources(cmp);
+      if (cmp.engine === "core") {
+        const through = parseStorageSeq(opts.entryId);
+        if (through === null) throw new Error("this moment has no session address");
+        const dest = join(cand.sessionDir, "session.jsonl");
+        const fork = await writeForkedSession(opts.sessionFile, dest, through);
+        if (!fork.ok) throw new Error(`could not fork the moment session: ${fork.error}`);
+        cand.sessionFile = dest;
+        await this.copyCoreResources(cmp);
+      } else {
+        const fork = await this.deps.forkSession({
+          sourceSessionFile: opts.sessionFile,
+          entryId: opts.entryId,
+          sessionWorkspaceDir: cmp.sessionWorkspaceDir,
+          candidateRoot: cand.dir,
+          candidateSessionDir: cand.sessionDir,
+          relocationNote: `The source project lived at ${this.deps.primaryRoot}. In this candidate, that path maps to ${cand.dir}.`,
+        });
+        if (!fork.ok || !fork.sessionFile) throw new Error("could not fork the moment session");
+        cand.sessionFile = fork.sessionFile;
+        await this.copyPiResources(cmp);
+      }
       // A moment candidate starts with no prompt: the user continues it.
       // Replay the captured model and thinking level of that moment.
       await this.writeControl(cand, { opId: randomUUID(), action: "none" });
@@ -1968,6 +2120,7 @@ export class WorldlineManager {
     const { terminalId, pid } = await this.deps.createCandidate({
       root: cand.dir,
       workspaceId,
+      engine: cmp.engine,
       launch: { cmd, args, env },
     });
     cand.terminalId = terminalId;
@@ -2048,6 +2201,7 @@ export class WorldlineManager {
       const { terminalId, pid } = await this.deps.createCandidate({
         root: cand.dir,
         workspaceId,
+        engine: cmp.engine,
         launch: { cmd, args, env },
       });
       cand.terminalId = terminalId;

@@ -71,6 +71,8 @@ const {
   resolveSessionFile,
   quarantineSessionFile,
   MAX_SESSION_FILE_BYTES,
+  sliceSessionText,
+  writeForkedSession,
   SLASH_COMMANDS,
   matchingSlashCommands,
   completeSlashLine,
@@ -1399,6 +1401,38 @@ check("quarantineSessionFile moves a file aside", quarantineSessionFile(qfile) =
 writeFileSync(qfile, "second\n");
 check("quarantineSessionFile does not overwrite an existing aside file", quarantineSessionFile(qfile) === true && existsSync(`${qfile}.bad`) && readFileSync(`${qfile}.bad`, "utf8") === '{"storageSeq":1}\n');
 check("MAX_SESSION_FILE_BYTES is 32 MiB", MAX_SESSION_FILE_BYTES === 32 * 1024 * 1024);
+
+const sliceSrc = [
+  JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "u1" } }),
+  JSON.stringify({ storageSeq: 2, type: "message", message: { role: "assistant", content: "a1" } }),
+  JSON.stringify({ storageSeq: 3, type: "revision", kind: "prune", targets: [] }),
+  JSON.stringify({ storageSeq: 4, type: "message", message: { role: "user", content: "u2" } }),
+].join("\n") + "\n";
+const slice2 = sliceSessionText(sliceSrc, 2);
+check("slice keeps prefix messages", slice2.ok && slice2.kept === 2 && slice2.text.includes("\"u1\"") && !slice2.text.includes("\"u2\""));
+const slice3 = sliceSessionText(sliceSrc, 3);
+check("slice keeps revision records in the prefix", slice3.ok && slice3.kept === 3 && slice3.text.includes("\"prune\""));
+check("slice through 0 is empty", sliceSessionText(sliceSrc, 0).ok && sliceSessionText(sliceSrc, 0).text === "");
+check("slice rejects negative seq", sliceSessionText(sliceSrc, -1).ok === false);
+const dupSlice = sliceSessionText(
+  JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "a" } }) +
+    "\n" +
+    JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "b" } }) +
+    "\n",
+  1,
+);
+check("slice fails closed on duplicate storageSeq", dupSlice.ok === false);
+const truncSlice = sliceSessionText(sliceSrc + "{not json", 4);
+check("slice ignores a truncated final line", truncSlice.ok && truncSlice.kept === 4);
+const forkDir = mkdtempSync(join(tmpdir(), "agent-core-fork-"));
+leftovers.push(forkDir);
+const forkSrc = join(forkDir, "src.jsonl");
+const forkDst = join(forkDir, "out", "dst.jsonl");
+writeFileSync(forkSrc, sliceSrc);
+const writtenFork = await writeForkedSession(forkSrc, forkDst, 2);
+check("writeForkedSession writes the sliced prefix", writtenFork.ok && existsSync(forkDst) && readFileSync(forkDst, "utf8").includes("\"a1\"") && !readFileSync(forkDst, "utf8").includes("\"u2\""));
+const emptyFork = await writeForkedSession(forkSrc, join(forkDir, "empty.jsonl"), 0);
+check("writeForkedSession through 0 writes an empty file", emptyFork.ok && readFileSync(join(forkDir, "empty.jsonl"), "utf8") === "");
 check("slash menu puts help first", SLASH_COMMANDS[0]?.name === "/help");
 check("slash menu puts exit last", SLASH_COMMANDS.at(-1)?.name === "/exit");
 check(

@@ -899,6 +899,8 @@ class PiEditorApp {
       primaryEventsDir: this.eventsDir,
       bridgePath: this.bridgePath(),
       piBin: this.resolvePiBin(),
+      agentCorePath: join(__dirname, "agent-core.mjs").replace("app.asar", "app.asar.unpacked"),
+      electronExecPath: process.execPath,
       baseEnv: cleanEnv(),
       getStore: async () => {
         const store = await project.storePromise;
@@ -909,6 +911,8 @@ class PiEditorApp {
         const out: string[] = [dirname(dirname(dirname(dirname(this.resolvePiBin()))))];
         out.push(process.execPath);
         out.push(dirname(dirname(process.execPath)));
+        const corePath = join(__dirname, "agent-core.mjs").replace("app.asar", "app.asar.unpacked");
+        out.push(corePath, dirname(corePath));
         const node = this.findOnPath("node") ?? process.execPath;
         out.push(node, dirname(node));
         try {
@@ -1007,15 +1011,31 @@ class PiEditorApp {
       },
       primarySessionDir: (cwd) => this.primarySessionDir(cwd),
       installPromoted: async (seed) => {
-        const inst = await this.createTerminal(seed.primaryRoot, {
-          type: "agent",
-          workspaceId: seed.primaryWorkspaceId,
-          launch: {
-            cmd: this.resolvePiBin(),
-            args: ["-e", this.bridgePath(), "--session", seed.installedSession],
-            env: { ...cleanEnv(), TERMINA_EVENTS_DIR: this.eventsDir },
-          },
-        });
+        const inst = await this.createTerminal(
+          seed.primaryRoot,
+          seed.engine === "core"
+            ? await (async () => {
+                const sessionId = `core-${randomUUID()}`;
+                mkdirSync(this.coreSessionDir(), { recursive: true, mode: 0o700 });
+                const dest = this.coreSessionFile(sessionId);
+                await copyFile(seed.installedSession, dest);
+                return {
+                  type: "agent" as const,
+                  engine: "core" as const,
+                  workspaceId: seed.primaryWorkspaceId,
+                  resume: { sessionId, sessionFile: dest },
+                };
+              })()
+            : {
+                type: "agent",
+                workspaceId: seed.primaryWorkspaceId,
+                launch: {
+                  cmd: this.resolvePiBin(),
+                  args: ["-e", this.bridgePath(), "--session", seed.installedSession],
+                  env: { ...cleanEnv(), TERMINA_EVENTS_DIR: this.eventsDir },
+                },
+              },
+        );
         for (const path of seed.paths) {
           const abs = this.canonicalPath(join(seed.primaryRoot, path.rel));
           const before = path.beforeExists ? await readFile(join(seed.beforeDir, path.rel)) : null;
@@ -1066,9 +1086,15 @@ class PiEditorApp {
   private async createCandidate(opts: {
     root: string;
     workspaceId: string;
+    engine?: "pi" | "core";
     launch: { cmd: string; args: string[]; env: Record<string, string | undefined> };
   }): Promise<{ terminalId: string; pid: number }> {
-    const inst = await this.createTerminal(opts.root, { type: "agent", workspaceId: opts.workspaceId, launch: opts.launch });
+    const inst = await this.createTerminal(opts.root, {
+      type: "agent",
+      engine: opts.engine,
+      workspaceId: opts.workspaceId,
+      launch: opts.launch,
+    });
     // The candidate's bridge writes to its own events dir: tail it.
     const eventsDir = opts.launch.env.TERMINA_EVENTS_DIR;
     if (eventsDir && eventsDir !== this.eventsDir) {
@@ -3446,6 +3472,7 @@ class PiEditorApp {
         unownedEdits: 0,
         startedAt: Date.now(),
         settledAt: null,
+        engine: inst.engine === "core" ? "core" : "pi",
       };
       // The source must not have changed between preflight and start.
       if (ws && ws.generation !== pending.generation) {
@@ -3491,6 +3518,7 @@ class PiEditorApp {
         unownedEdits: 0,
         startedAt: Date.now(),
         settledAt: null,
+        engine: inst.engine === "core" ? "core" : "pi",
       };
       this.markOverlappingAgents(inst, run);
       this.pushRun(inst, run, manager);
@@ -3498,10 +3526,12 @@ class PiEditorApp {
     const startedSessionFile = String(event.sessionFile ?? "") || inst.sessionFile;
     const startedSessionId = String(event.sessionId ?? "") || inst.sessionId;
     if (inst.engine === "core") {
-      if (startedSessionId && isCoreSessionId(startedSessionId) && (startedSessionId === inst.sessionId || !this.coreSessionInUse(startedSessionId))) {
-        inst.sessionId = startedSessionId;
+      if (inst.persist) {
+        if (startedSessionId && isCoreSessionId(startedSessionId) && (startedSessionId === inst.sessionId || !this.coreSessionInUse(startedSessionId))) {
+          inst.sessionId = startedSessionId;
+        }
+        if (inst.sessionId) inst.sessionFile = this.coreSessionFile(inst.sessionId);
       }
-      if (inst.sessionId) inst.sessionFile = this.coreSessionFile(inst.sessionId);
     } else {
       const trusted = this.trustedPiSessionFile(startedSessionFile) ?? this.trustedPiSessionFile(inst.sessionFile);
       if (trusted && (trusted === inst.sessionFile || !this.sessionFileInUse(trusted))) inst.sessionFile = trusted;
