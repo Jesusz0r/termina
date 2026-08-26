@@ -197,6 +197,13 @@ it; `/model <id>` selects one. The file is not Pi's `auth.json`. Model ids
 may carry a provider prefix (`xai/grok-4.3`, `openai-codex/gpt-5.4`). See
 `docs/AUTH-PLAN.md`.
 
+The host owns session resume. `TERMINA_CORE_SESSION_FILE` is the jsonl
+path under the app user-data `agent-sessions` directory.
+`TERMINA_CORE_RESUME=1` replays it at process start. A failed replay
+renames the file aside so the next prompt does not truncate the only
+copy. Without the resume flag a new prompt still truncates the stream so
+a reused terminal id cannot append a second history.
+
 ## Relationship to prior art
 
 Pi demonstrates P5 fully (waste attribution with noise floors and cause

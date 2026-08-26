@@ -346,6 +346,7 @@ interface Pane {
   cwd: string | null;
   busy: boolean;
   type: "agent" | "shell";
+  engine?: "pi" | "core";
   shellName: string | undefined;
   error: boolean;
   /** True after pty:exit. The pane remains until the user closes the tab. */
@@ -719,7 +720,13 @@ function updatePaneTab(pane: Pane): void {
   pane.nameEl.textContent = pane.dispatchWorker ? "dispatch" : pane.cwd ? pathBasename(pane.cwd) : "terminal";
   pane.tabEl.title = pane.dispatchWorker
     ? `dispatch worker — ${pane.dispatchTask ?? "plan task"}`
-    : `${pane.cwd ?? "?"}${pane.type === "shell" && pane.shellName ? ` · ${pane.shellName} shell` : " · pi agent"}`;
+    : `${pane.cwd ?? "?"}${
+        pane.type === "shell" && pane.shellName
+          ? ` · ${pane.shellName} shell`
+          : pane.engine === "core"
+            ? " · core agent"
+            : " · pi agent"
+      }`;
   pane.statusEl.classList.toggle("busy", pane.busy);
   applyTypeBadge(pane);
   // Worldline candidates carry the A/B badge on their tab.
@@ -1986,6 +1993,7 @@ window.pi.onInstances((list: InstanceSummary[]) => {
     }
     pane.busy = summary.busy;
     pane.type = summary.type;
+    pane.engine = summary.engine;
     pane.shellName = summary.shellName;
     pane.dispatchWorker = summary.dispatchWorker ?? false;
     pane.dispatchTask = summary.dispatchTask;

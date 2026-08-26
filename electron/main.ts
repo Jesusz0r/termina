@@ -47,6 +47,7 @@ import {
 import { AppPreferencesStore } from "./preferences.js";
 import {
   composeTerminalRoster,
+  isCoreSessionId,
   isRosterSessionId,
   MAX_ROSTER_BYTES,
   MAX_TERMINAL_ROSTER,
@@ -159,6 +160,9 @@ const AGENT_ENV_BLOCKLIST = new Set([
   "PI_CODING_AGENT",
   "PI_CODING_AGENT_DIR",
   "PI_CODING_AGENT_SESSION_DIR",
+  "TERMINA_CORE_SESSION_FILE",
+  "TERMINA_CORE_SESSION_ID",
+  "TERMINA_CORE_RESUME",
 ]);
 
 /** The environment for a pi process: the host env minus session pins. */
@@ -254,18 +258,18 @@ class PiTerminalInstance {
   type: "agent" | "shell";
   /** The engine for an agent terminal. Shells leave this unset. */
   engine?: "pi" | "core";
-  /** Save this user tab in the project roster. */
+  /** Persist this tab in the project roster (user terminals, not dispatch or candidates). */
   persist = true;
-  /** Agent session id used to resume this tab. */
+  /** Harness session id for resume. */
   sessionId: string | null = null;
-  /** Absolute agent session file used to resume this tab. */
+  /** Absolute session file used to resume this harness. */
   sessionFile: string | null = null;
   /** The live model of this agent, provider-qualified when known. */
   model: string | null = null;
   /** The live thinking level of this agent. */
   thinkingLevel: string | null = null;
   shellName?: string;
-  /** Absolute shell binary used to restore this tab. */
+  /** Absolute shell binary, for roster resume. */
   shellPath?: string;
   busy = false;
   modified = new Map<string, ModifiedFile>();
@@ -354,7 +358,7 @@ interface ProjectState {
   worldlines: WorldlineManager | null;
   /** Terminal ids owned by this project (agents, shells, candidates). */
   terminalIds: Set<string>;
-  /** Roster entries that failed to start. A later launch can retry them. */
+  /** Roster entries that failed to spawn this session. Keep them on disk so a later launch can retry. */
   unrestoredTerminals: TerminalRosterEntry[];
 }
 
@@ -1520,10 +1524,18 @@ class PiEditorApp {
   }
 
   private noteTerminalId(id: string): void {
-    const match = /^term-(\d+)$/.exec(id);
-    if (!match) return;
-    const value = Number(match[1]);
-    if (Number.isInteger(value) && value > terminalSeq) terminalSeq = value;
+    const m = /^term-(\d+)$/.exec(id);
+    if (!m) return;
+    const n = Number(m[1]);
+    if (Number.isInteger(n) && n > terminalSeq) terminalSeq = n;
+  }
+
+  private coreSessionDir(): string {
+    return join(this.userDataDir, "agent-sessions");
+  }
+
+  private coreSessionFile(sessionId: string): string {
+    return join(this.coreSessionDir(), `${sessionId}.jsonl`);
   }
 
   private terminalRosterPath(project: ProjectState): string {
@@ -1535,7 +1547,8 @@ class PiEditorApp {
       const path = this.terminalRosterPath(project);
       const info = statSync(path);
       if (!info.isFile() || info.size > MAX_ROSTER_BYTES) return [];
-      return parseTerminalRoster(JSON.parse(readFileSync(path, "utf8")) as unknown);
+      const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
+      return parseTerminalRoster(raw);
     } catch {
       return [];
     }
@@ -1543,6 +1556,7 @@ class PiEditorApp {
 
   private rosterEntryFor(inst: PiTerminalInstance): TerminalRosterEntry {
     const entry: TerminalRosterEntry = { id: inst.id, type: inst.type };
+    if (inst.type === "agent") entry.engine = inst.engine === "core" ? "core" : "pi";
     if (inst.type === "shell" && inst.shellPath) entry.shell = inst.shellPath;
     if (inst.sessionId) entry.sessionId = inst.sessionId;
     if (inst.sessionFile) entry.sessionFile = inst.sessionFile;
@@ -1553,7 +1567,8 @@ class PiEditorApp {
     const live: TerminalRosterEntry[] = [];
     for (const id of project.terminalIds) {
       const inst = this.terminals.get(id);
-      if (inst?.persist) live.push(this.rosterEntryFor(inst));
+      if (!inst?.persist) continue;
+      live.push(this.rosterEntryFor(inst));
     }
     const entries = composeTerminalRoster(live, project.unrestoredTerminals);
     try {
@@ -1577,7 +1592,17 @@ class PiEditorApp {
     }
   }
 
-  /** True when target resolves inside parent. Neither path must exist. */
+  private sessionFileHasContent(path: string | null | undefined): boolean {
+    if (!path) return false;
+    try {
+      const info = statSync(path);
+      return info.isFile() && info.size > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /** True when `target` resolves inside `parent`. Neither path needs to exist. */
   private pathInside(parent: string, target: string): boolean {
     const rel = relative(resolve(parent), resolve(target));
     return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
@@ -1591,15 +1616,37 @@ class PiEditorApp {
     return false;
   }
 
-  /** Pi accepts a session file only from its session directory. */
+  private coreSessionInUse(sessionId: string): boolean {
+    const file = this.coreSessionFile(sessionId);
+    for (const inst of this.terminals.values()) {
+      if (inst.sessionId === sessionId || inst.sessionFile === file) return true;
+    }
+    return false;
+  }
+
+  /** Pi `--session` only accepts a jsonl file under ~/.pi/agent/sessions. */
   private trustedPiSessionFile(path: string | null | undefined): string | null {
     if (!path || !path.endsWith(".jsonl") || !this.sessionFileExists(path)) return null;
     try {
       const real = realpathSync(path);
       const root = realpathSync(join(homedir(), ".pi", "agent", "sessions"));
-      return this.pathInside(root, real) ? real : null;
+      if (!this.pathInside(root, real)) return null;
+      return real;
     } catch {
       return null;
+    }
+  }
+
+  /** Delete an agent-core jsonl only when it sits in the app session directory. */
+  private discardCoreSession(inst: PiTerminalInstance): void {
+    if (inst.engine !== "core" || !inst.sessionId || !isCoreSessionId(inst.sessionId)) return;
+    const path = this.coreSessionFile(inst.sessionId);
+    if (inst.sessionFile && inst.sessionFile !== path) return;
+    if (!this.pathInside(this.coreSessionDir(), path)) return;
+    try {
+      rmSync(path, { force: true });
+    } catch {
+      /* ignore */
     }
   }
 
@@ -1630,6 +1677,7 @@ class PiEditorApp {
         const inst = await this.createTerminal(project.cwd, {
           id: rec.id,
           type: rec.type,
+          engine: rec.engine,
           shell: rec.shell,
           persist: true,
           skipRosterSave: true,
@@ -1723,6 +1771,7 @@ class PiEditorApp {
     const owner = this.projectOfWorkspace(workspaceId) ?? this.project();
     let id = opts?.id;
     if (id && this.terminals.has(id)) {
+      // Two projects both restore term-1. Keep the session; never overwrite a live pty.
       if (!persist) throw new Error(`terminal ${id} already exists`);
       id = this.allocateTerminalId();
     } else if (id) {
@@ -1763,7 +1812,32 @@ class PiEditorApp {
       // (same rule as pi's cli.js).
       cmd = process.execPath;
       args = [join(__dirname, "agent-core.mjs").replace("app.asar", "app.asar.unpacked")];
-      env = { ...cleanEnv(), ELECTRON_RUN_AS_NODE: "1", TERMINA_TERMINAL_ID: id, TERMINA_EVENTS_DIR: this.eventsDir };
+      if (persist) {
+        if (!sessionId || !isCoreSessionId(sessionId) || this.coreSessionInUse(sessionId)) {
+          sessionId = `core-${randomUUID()}`;
+        }
+        sessionFile = this.coreSessionFile(sessionId);
+        try {
+          mkdirSync(this.coreSessionDir(), { recursive: true, mode: 0o700 });
+        } catch {
+          /* resume still tries the path */
+        }
+      } else {
+        sessionId = null;
+        sessionFile = null;
+      }
+      env = {
+        ...cleanEnv(),
+        ELECTRON_RUN_AS_NODE: "1",
+        TERMINA_TERMINAL_ID: id,
+        TERMINA_EVENTS_DIR: this.eventsDir,
+      };
+      if (sessionFile) env.TERMINA_CORE_SESSION_FILE = sessionFile;
+      else delete env.TERMINA_CORE_SESSION_FILE;
+      if (sessionId) env.TERMINA_CORE_SESSION_ID = sessionId;
+      else delete env.TERMINA_CORE_SESSION_ID;
+      if (this.sessionFileHasContent(sessionFile)) env.TERMINA_CORE_RESUME = "1";
+      else delete env.TERMINA_CORE_RESUME;
     } else {
       cmd = this.resolvePiBin();
       // The app-owned bridge loads through the CLI option, not project
@@ -1819,6 +1893,7 @@ class PiEditorApp {
       exitOwner?.workspaces.get(inst.workspaceId)?.terminalIds.delete(inst.id);
       exitOwner?.terminalIds.delete(inst.id);
       if (inst.persist && exitOwner && !this.disposed && !this.projectIsSwitching(exitOwner.id)) {
+        this.discardCoreSession(inst);
         this.saveTerminalRoster(exitOwner);
       }
       exitOwner?.worldlines?.terminalExited(inst.id);
@@ -2901,6 +2976,7 @@ class PiEditorApp {
       cwd: t.cwd,
       busy: t.busy,
       type: t.type,
+      engine: t.engine,
       shellName: t.shellName,
       workspaceId: t.workspaceId,
       projectId: t.projectId ?? undefined,
@@ -3399,9 +3475,16 @@ class PiEditorApp {
     }
     const startedSessionFile = String(event.sessionFile ?? "") || inst.sessionFile;
     const startedSessionId = String(event.sessionId ?? "") || inst.sessionId;
-    const trusted = this.trustedPiSessionFile(startedSessionFile) ?? this.trustedPiSessionFile(inst.sessionFile);
-    if (trusted && (trusted === inst.sessionFile || !this.sessionFileInUse(trusted))) inst.sessionFile = trusted;
-    if (startedSessionId && isRosterSessionId(startedSessionId)) inst.sessionId = startedSessionId;
+    if (inst.engine === "core") {
+      if (startedSessionId && isCoreSessionId(startedSessionId) && (startedSessionId === inst.sessionId || !this.coreSessionInUse(startedSessionId))) {
+        inst.sessionId = startedSessionId;
+      }
+      if (inst.sessionId) inst.sessionFile = this.coreSessionFile(inst.sessionId);
+    } else {
+      const trusted = this.trustedPiSessionFile(startedSessionFile) ?? this.trustedPiSessionFile(inst.sessionFile);
+      if (trusted && (trusted === inst.sessionFile || !this.sessionFileInUse(trusted))) inst.sessionFile = trusted;
+      if (startedSessionId && isRosterSessionId(startedSessionId)) inst.sessionId = startedSessionId;
+    }
     const rosterOwner = this.projectOfTerminal(inst.id);
     if (inst.persist && rosterOwner) this.saveTerminalRoster(rosterOwner);
     // The staged prompt belongs to one run start. Clear it so a later
@@ -4251,8 +4334,8 @@ class PiEditorApp {
       this.createWorkspace(project, cwd, true);
       this.loadMineFiles(project);
       this.initWorldlines(project);
-      // Spawn terminals before folder:opened so the renderer can show
-      // the tabs when it switches the project view.
+      // Spawn the terminal before folder:opened so the renderer can show
+      // that pane when it switches the project view.
       await this.restoreProjectTerminals(project);
       await this.sendFolderOpened(cwd, id);
       this.persistOpenProjects();

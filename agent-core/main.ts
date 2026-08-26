@@ -33,6 +33,7 @@ import {
   readFileSync,
   readSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -964,6 +965,7 @@ export function retainTraceFiles(dir: string, cap: number): string[] {
 const eventsDir = process.env.TERMINA_EVENTS_DIR ?? "";
 const rawTerminalId = process.env.TERMINA_TERMINAL_ID ?? "";
 const terminalId = isValidTerminalId(rawTerminalId) ? rawTerminalId : "";
+const sessionId = process.env.TERMINA_CORE_SESSION_ID?.trim() || terminalId;
 const bridgeId = `core-${randomUUID()}`;
 let seq = 0;
 const canonicalCwd = freezeCwd(process.cwd());
@@ -1063,11 +1065,31 @@ export function hashSystem(text: string): string {
 
 // ---- append-only session storage ----
 
-const sessionFile = eventsDir && terminalId ? join(eventsDir, `${terminalId}.session.jsonl`) : null;
+export function resolveSessionFile(events: string, termId: string, override?: string): string | null {
+  const explicit = override?.trim() || "";
+  if (explicit) return explicit;
+  if (events && termId) return join(events, `${termId}.session.jsonl`);
+  return null;
+}
+
+const sessionFile = resolveSessionFile(eventsDir, terminalId, process.env.TERMINA_CORE_SESSION_FILE);
 let storageSeq = 0;
 
 export function prepareSessionStream(sessionPath: string, mode: "fresh"): void {
   if (mode === "fresh") writeFileSync(sessionPath, "");
+}
+
+export const MAX_SESSION_FILE_BYTES = 32 * 1024 * 1024;
+
+/** Move a failed resume file aside so the next prompt does not truncate it. */
+export function quarantineSessionFile(path: string): boolean {
+  try {
+    const dest = existsSync(`${path}.bad`) ? `${path}.bad-${Date.now()}` : `${path}.bad`;
+    renameSync(path, dest);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function ensureFreshSession(): void {
@@ -2209,7 +2231,7 @@ let interrupted = false;
 async function runPrompt(prompt: string): Promise<void> {
   if (!streamPrepared) ensureFreshSession();
   pushMessage("user", prompt);
-  logEvent({ t: "agent_start", model: route.model });
+  logEvent({ t: "agent_start", model: route.model, sessionFile, sessionId });
   running = true;
   interrupted = false;
   currentAbort = new AbortController();
@@ -2363,6 +2385,18 @@ async function runPrompt(prompt: string): Promise<void> {
 
 /** Rebuild the context view from storage. Revision records address messages
  *  by stable sseq, so replay is order-independent and exact. */
+function abortResume(message: string): void {
+  process.stdout.write(`${message}\n`);
+  history.length = 0;
+  if (sessionFile && quarantineSessionFile(sessionFile)) {
+    streamPrepared = false;
+    return;
+  }
+  // Keep the original file. Do not truncate it on the next prompt.
+  streamPrepared = true;
+  storageSeq = 0;
+}
+
 function resumeSession(): void {
   if (!sessionFile || !existsSync(sessionFile)) {
     process.stdout.write("(no stored session)\n");
@@ -2370,16 +2404,28 @@ function resumeSession(): void {
   }
   let text: string;
   try {
+    const info = statSync(sessionFile);
+    if (!info.isFile()) {
+      process.stdout.write("(no stored session)\n");
+      return;
+    }
+    if (info.size === 0) {
+      process.stdout.write("(stored session is empty)\n");
+      streamPrepared = false;
+      return;
+    }
+    if (info.size > MAX_SESSION_FILE_BYTES) {
+      abortResume("(resume failed: session file is too large)");
+      return;
+    }
     text = readFileSync(sessionFile, "utf8");
   } catch (err) {
-    process.stdout.write(`(resume failed: ${(err as Error).message})\n`);
+    abortResume(`(resume failed: ${(err as Error).message})`);
     return;
   }
   const replayed = replaySessionRecords(text);
   if (!replayed.ok) {
-    process.stdout.write(`(resume failed: ${replayed.error})\n`);
-    history.length = 0;
-    streamPrepared = false;
+    abortResume(`(resume failed: ${replayed.error})`);
     return;
   }
   if (replayed.messages.length === 0) {
@@ -2643,6 +2689,7 @@ async function main(): Promise<void> {
     `termina agent-core v1 · model ${route.provider}/${route.model} · ${authBanner(auth)} · Ctrl+C interrupts · /exit quits\n`,
   );
   if (catalog && catalog.length > 0) process.stdout.write(`${formatModelBanner(catalog, route.model)}\n`);
+  if (process.env.TERMINA_CORE_RESUME === "1") resumeSession();
   printPromptLine();
   if (!process.stdin.isTTY) return;
   process.stdin.setRawMode(true);

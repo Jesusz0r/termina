@@ -150,6 +150,8 @@ export interface InstanceSummary {
   cwd: string;
   busy: boolean;
   type: "agent" | "shell";
+  /** The agent harness. Unset for shells. */
+  engine?: "pi" | "core";
   shellName?: string;
   /** The workspace this terminal works in ("" when no folder is open). */
   workspaceId: string;
