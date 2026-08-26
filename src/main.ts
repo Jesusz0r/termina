@@ -1009,7 +1009,7 @@ async function openTerminalMenu(): Promise<void> {
   const makeTerminal = (opts?: { type?: "agent" | "shell"; shell?: string; engine?: "pi" | "core" }) => {
     const source = activeId ? panes.get(activeId) : undefined;
     const fromTerminalId = source && !source.error && !source.exited ? source.instanceId : undefined;
-    const inherit = Boolean(fromTerminalId) && opts?.type !== "shell" && opts?.engine !== "core";
+    const inherit = Boolean(fromTerminalId) && opts?.type !== "shell";
     void window.pi.createTerminal(inherit ? { ...opts, fromTerminalId } : opts).then((res) => {
       if (!res.ok) {
         createErrorPane(res.error ?? "could not create terminal");
@@ -1040,8 +1040,8 @@ async function openTerminalMenu(): Promise<void> {
     items.push({ row, run });
   };
 
-  addItem("Agent (pi)", "the pi coding agent terminal", () => makeTerminal({ type: "agent" }));
-  addItem("Agent (core)", "experimental in-house agent engine", () => makeTerminal({ type: "agent", engine: "core" }));
+  addItem("Agent (core)", "Termina's in-house coding agent", () => makeTerminal({ type: "agent" }));
+  addItem("Agent (pi)", "the pi coding agent terminal", () => makeTerminal({ type: "agent", engine: "pi" }));
   for (const shell of shells) {
     addItem(shell.name, `interactive ${shell.name} shell`, () => makeTerminal({ type: "shell", shell: shell.path }));
   }

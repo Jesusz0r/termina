@@ -102,21 +102,24 @@ while no file or review is open.
 
 Click `＋` next to the terminal tabs to open the terminal chooser:
 
-- **pi agent** — a real pi TUI session in your project.
+- **Agent (core)** — Termina's in-house coding agent (the default for a new folder).
+- **Agent (pi)** — a pi TUI session in your project.
 - **Shells** — any shell detected on your system (`zsh`, `bash`, …).
 
 Shell tabs show the shell name as a badge. `Cmd/Ctrl+T` opens the chooser.
+Opening a folder starts one **Agent (core)** tab. Existing Pi tabs restore as Pi.
 
 Cycle without the mouse: `Ctrl+Tab` / `Ctrl+Shift+Tab` move between terminal
 tabs, `Cmd/Ctrl+Shift+[` / `]` move between project tabs, and scrolling over a
 tab strip cycles its tabs.
 
-### Talking to pi
+### Talking to the agent
 
-The terminal is a full pi TUI. Everything pi can do, you can do here:
-`/settings`, `/login`, `/models`, plan mode, completions, and so on.
+A core tab is a full-screen TUI: `/login`, `/models`, `/clear`, `/compact`,
+`/resume`. Ctrl+J inserts a newline; Enter submits. Paste keeps newlines.
+Pi tabs still run the pi TUI with its own commands.
 
-Multi-line input works everywhere:
+Multi-line input in a Pi tab:
 
 - `Shift+Enter`, `Ctrl+Enter`, or `Cmd+Enter` (macOS) inserts a newline.
 - `Option+Enter` (macOS) queues a follow-up message while the agent runs.

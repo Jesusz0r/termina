@@ -101,6 +101,9 @@ npm run test:e2e                    # the full Electron e2e matrix (fresh instan
 npm test                            # typecheck + agent-core + build + spikes
 ```
 
+A new folder opens an **Agent (core)** tab. **Agent (pi)** remains in the
+terminal chooser. Rostered Pi tabs still restore as Pi.
+
 Termina uses the pi configuration in `~/.pi/agent`. Host `PI_*` session
 variables are removed before launch so a host session file cannot attach
 to a terminal. Run `/login` and set the default provider and model in the

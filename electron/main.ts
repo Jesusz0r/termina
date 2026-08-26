@@ -1028,6 +1028,7 @@ class PiEditorApp {
               })()
             : {
                 type: "agent",
+                engine: "pi" as const,
                 workspaceId: seed.primaryWorkspaceId,
                 launch: {
                   cmd: this.resolvePiBin(),
@@ -1801,6 +1802,7 @@ class PiEditorApp {
     },
   ): Promise<PiTerminalInstance> {
     const type = opts?.type ?? "agent";
+    const agentEngine: "pi" | "core" | undefined = type === "agent" ? (opts?.engine === "pi" ? "pi" : "core") : undefined;
     const persist = opts?.persist ?? (!opts?.launch && !opts?.id);
     const workspaceId = opts?.workspaceId ?? this.primaryWorkspace()?.id ?? "";
     const owner = this.projectOfWorkspace(workspaceId) ?? this.project();
@@ -1814,10 +1816,10 @@ class PiEditorApp {
     } else {
       id = this.allocateTerminalId();
     }
-    if (type === "agent" && opts?.engine !== "core" && !(await this.checkPiAvailable())) {
+    if (agentEngine === "pi" && !(await this.checkPiAvailable())) {
       throw new Error(this.piMissingMessage());
     }
-    const copied = type === "agent" && opts?.engine !== "core" && !opts?.launch && !opts?.resume
+    const copied = agentEngine === "pi" && !opts?.launch && !opts?.resume
       ? this.copiedAgentSettings(opts?.fromTerminalId)
       : null;
     let cmd: string;
@@ -1840,11 +1842,11 @@ class PiEditorApp {
       shellName = chosen.name;
       shellPath = chosen.path;
       env = { ...process.env };
-    } else if (type === "agent" && opts?.engine === "core") {
-      // The experimental in-house engine. Same sidecar contract as the
-      // bridge, so timeline and modified list work unchanged. ELECTRON_
-      // RUN_AS_NODE cannot read inside the asar; spawn the unpacked copy
-      // (same rule as pi's cli.js).
+    } else if (agentEngine === "core") {
+      // In-house engine. Same sidecar contract as the Pi bridge, so
+      // timeline and modified list work unchanged. ELECTRON_RUN_AS_NODE
+      // cannot read inside the asar; spawn the unpacked copy (same rule
+      // as pi's cli.js).
       cmd = process.execPath;
       args = [join(__dirname, "agent-core.mjs").replace("app.asar", "app.asar.unpacked")];
       if (persist) {
@@ -1900,7 +1902,7 @@ class PiEditorApp {
     inst.shellPath = shellPath;
     inst.sessionId = sessionId;
     inst.sessionFile = sessionFile;
-    if (type === "agent") inst.engine = opts?.engine === "core" ? "core" : "pi";
+    if (type === "agent") inst.engine = agentEngine === "core" ? "core" : "pi";
     if (copied) this.applyAgentSettings(inst, copied.model, copied.thinkingLevel);
     this.terminals.set(inst.id, inst);
     if (owner) {
