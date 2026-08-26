@@ -722,6 +722,14 @@ check("parseAuthCommand bare /logout asks to pick", "error" in parseAuthCommand(
 check("parseAuthCommand code mode", parseAuthCommand("/login code").mode === "code");
 check("parseAuthCommand rejects unknown provider", "error" in parseAuthCommand("/login nope"));
 check("banner does not contain raw token", !authBanner({ ok: true, providerId: "anthropic", token: "sk-ant-oat-SUPERSECRET99", kind: "oauth", source: "oauth", baseUrl: "https://api.anthropic.com", headers: {} }).includes("SUPERSECRET"));
+const cancelledLogin = new AbortController();
+cancelledLogin.abort();
+const cancelledResult = await runLogin("anthropic", "browser", {
+  write: () => {},
+  openUrl: () => {},
+  signal: cancelledLogin.signal,
+});
+check("browser login respects an already-aborted signal", cancelledResult.ok === false && cancelledResult.error === "login cancelled");
 
 const tokenSrv = createServer((req, res) => {
   let body = "";

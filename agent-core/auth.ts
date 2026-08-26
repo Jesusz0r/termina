@@ -1010,6 +1010,10 @@ function waitForCallback(
     });
     const onAbort = () => finish({ error: "login cancelled" });
     signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
     server.on("error", (err) => {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "EADDRINUSE") finish({ error: `port ${port} busy — another login may be running` });
@@ -1067,6 +1071,7 @@ async function collectCode(
     return { ok: true, code: parsed.code };
   }
   if (!io.openUrl && !canOpenBrowser()) return { ok: false, error: "no browser — use /login code" };
+  if (io.signal?.aborted) return { ok: false, error: "login cancelled" };
   openAuthorize(url, io);
   const expectedState = providerId === "openrouter" ? null : state;
   const waited = await waitForCallback(port, redirectPath(providerId), expectedState, io.signal);
