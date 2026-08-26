@@ -2565,8 +2565,23 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   const extras = extraImages
     .map((ref) => loadImageFromRoots(ref, imageRoots))
     .filter((img): img is NonNullable<typeof img> => img !== null);
-  const images = persistLoadedImages(sessionFile, [...loaded, ...extras].slice(0, 4));
-  if (sessionFile && loaded.length) removePendingImageFiles(eventsDir, loaded.map((img) => img.name));
+  const allImages = [...loaded, ...extras].slice(0, 4);
+  const images = persistLoadedImages(sessionFile, allImages);
+  if (sessionFile) {
+    const sessionDir = dirname(sessionFile);
+    const done: string[] = [];
+    for (let i = 0; i < loaded.length && i < images.length; i++) {
+      const ref = images[i]!;
+      const src = loaded[i]!;
+      if (ref.name === src.name) continue;
+      try {
+        if (existsSync(join(sessionDir, ref.name))) done.push(src.name);
+      } catch {
+        /* keep the pending file */
+      }
+    }
+    removePendingImageFiles(eventsDir, done);
+  }
   const context = eventsDir && terminalId ? readContextFiles(eventsDir, terminalId) : "";
   if (eventsDir && terminalId) {
     const file = promptFileName(terminalId, bridgeId, randomUUID().slice(0, 8));

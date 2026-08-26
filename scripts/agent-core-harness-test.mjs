@@ -295,6 +295,18 @@ const expanded = host.expandFileImageSource({ type: "file", name: stored[0].name
 check("expandFileImageSource reads base64", expanded?.type === "base64" && typeof expanded.data === "string" && expanded.data.length > 0);
 const missingImg = host.expandFileImageSource({ type: "file", name: "core-imgtest-img-1.png", media_type: "image/png" }, [join(imgDir, "nope")]);
 check("expandFileImageSource jails the path", missingImg === null);
+const evilName = "image-term-1-evil.png";
+try {
+  symlinkSync("/etc/passwd", join(imgDir, evilName));
+  writeFileSync(join(imgDir, `images-${hostId}.json`), JSON.stringify({ images: [{ name: evilName, mediaType: "image/png" }] }));
+  const evilGot = host.consumePendingImages(imgDir, hostId);
+  check(
+    "consumePendingImages skips a symlink out of the events dir",
+    evilGot.length === 0 && !evilGot.some((img) => img.bytes.includes(Buffer.from("root:"))),
+  );
+} catch (err) {
+  check("consumePendingImages skips a symlink out of the events dir", false, err instanceof Error ? err.message : String(err));
+}
 const structuredImg = host.structuredStartup({
   opId: "op-3",
   action: "structured",
@@ -1518,13 +1530,16 @@ check("writeForkedSession writes the sliced prefix", writtenFork.ok && existsSyn
 const emptyFork = await writeForkedSession(forkSrc, join(forkDir, "empty.jsonl"), 0);
 check("writeForkedSession through 0 writes an empty file", emptyFork.ok && readFileSync(join(forkDir, "empty.jsonl"), "utf8") === "");
 writeFileSync(join(forkDir, "src-img-1.png"), png1x1);
+writeFileSync(join(forkDir, "other-img-1.png"), png1x1);
 const forkImgDst = join(forkDir, "out-img", "dst.jsonl");
 await writeForkedSession(forkSrc, forkImgDst, 2);
 check("writeForkedSession copies sidecar images", existsSync(join(forkDir, "out-img", "src-img-1.png")));
+check("writeForkedSession does not copy a sibling session's images", !existsSync(join(forkDir, "out-img", "other-img-1.png")));
 const copyOnlyDir = join(forkDir, "copy-only");
 mkdirSync(copyOnlyDir);
 await copySessionImageFiles(forkSrc, join(copyOnlyDir, "session.jsonl"));
 check("copySessionImageFiles copies without rewriting jsonl", existsSync(join(copyOnlyDir, "src-img-1.png")));
+check("copySessionImageFiles keeps the source stem", !existsSync(join(copyOnlyDir, "other-img-1.png")));
 
 const rotDir = mkdtempSync(join(tmpdir(), "agent-core-rotate-"));
 leftovers.push(rotDir);

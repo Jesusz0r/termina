@@ -5,8 +5,8 @@
  * verify/edits/mine/mailbox context, startup-control. The parser stays
  * electron/sidecar.ts. This module is the kernel writer of that protocol.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { HAS_UNCHECKED_PLAN_TASK } from "../shared/plan-task.ts";
 
 const ACK_ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -262,15 +262,14 @@ export function appendPendingImage(
 
 function loadImageBytes(dir: string, name: string): Buffer | null {
   if (!isSafeImageName(name)) return null;
-  const abs = join(dir, name);
   try {
-    const realDir = resolve(dir);
-    const realFile = resolve(abs);
+    const realDir = realpathSync(dir);
+    const realFile = realpathSync(join(dir, name));
     const rel = relative(realDir, realFile);
     if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null;
-    const info = statSync(abs);
+    const info = statSync(realFile);
     if (!info.isFile() || info.size === 0 || info.size > MAX_IMAGE_BYTES) return null;
-    return readFileSync(abs);
+    return readFileSync(realFile);
   } catch {
     return null;
   }
@@ -330,7 +329,9 @@ export function persistSessionImage(
     n += 1;
     name = `${stem}-img-${n}.${ext}`;
   }
-  if (!STORED_IMAGE_NAME.test(name)) return { name: img.name, mediaType: img.mediaType };
+  if (!STORED_IMAGE_NAME.test(name) || existsSync(join(dir, name))) {
+    return { name: img.name, mediaType: img.mediaType };
+  }
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(join(dir, name), img.bytes, { mode: 0o600 });
@@ -369,11 +370,6 @@ export function structuredStartup(control: StartupControl): { text: string; imag
   return { text, images };
 }
 
-function underDir(dir: string, file: string): boolean {
-  const rel = relative(resolve(dir), resolve(file));
-  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
-}
-
 export function expandFileImageSource(
   source: Record<string, unknown>,
   roots: string[],
@@ -386,8 +382,6 @@ export function expandFileImageSource(
   const media = typeof source.media_type === "string" ? source.media_type : mediaTypeOfName(source.name);
   for (const root of roots) {
     if (!root) continue;
-    const abs = join(root, source.name);
-    if (!underDir(root, abs) || !existsSync(abs)) continue;
     const bytes = loadImageBytes(root, source.name);
     if (!bytes) continue;
     return { type: "base64", media_type: media, data: bytes.toString("base64") };

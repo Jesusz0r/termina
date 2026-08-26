@@ -599,8 +599,10 @@ export class AgentTui {
       return;
     }
     if (this.paste) {
-      if (params === "201") this.paste = false;
-      else if (params === "200") this.paste = true;
+      if (params === "201") {
+        this.paste = false;
+        this.schedule();
+      } else if (params === "200") this.paste = true;
       return;
     }
     if (final === "~") {

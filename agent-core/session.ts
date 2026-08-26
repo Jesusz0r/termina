@@ -118,9 +118,12 @@ export async function copySessionImageFiles(sourcePath: string, destPath: string
   } catch {
     return;
   }
+  const stem = basename(sourcePath, ".jsonl");
+  if (!stem) return;
+  const prefix = `${stem}-img-`;
   await mkdir(destDir, { recursive: true, mode: 0o700 });
   for (const name of names) {
-    if (!SESSION_IMAGE.test(name)) continue;
+    if (!name.startsWith(prefix) || !SESSION_IMAGE.test(name)) continue;
     try {
       await copyFile(join(srcDir, name), join(destDir, name));
     } catch {
