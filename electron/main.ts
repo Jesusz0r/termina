@@ -1714,6 +1714,15 @@ class PiEditorApp {
     };
   }
 
+  /** Provider-qualified model of a core tab, for TERMINA_CORE_* env. */
+  private copiedCoreModel(fromTerminalId: string | undefined): string | null {
+    if (!fromTerminalId) return null;
+    const source = this.terminals.get(fromTerminalId);
+    if (!source || source.type !== "agent" || source.engine !== "core") return null;
+    const model = source.model ?? source.currentRun?.model ?? null;
+    return typeof model === "string" && model.includes("/") ? model : null;
+  }
+
   /** Provider-qualified model id that is safe to pass as --model. */
   private usablePiModel(model: string | null | undefined): string | null {
     if (typeof model !== "string") return null;
@@ -1838,6 +1847,13 @@ class PiEditorApp {
       else delete env.TERMINA_CORE_SESSION_ID;
       if (this.sessionFileHasContent(sessionFile)) env.TERMINA_CORE_RESUME = "1";
       else delete env.TERMINA_CORE_RESUME;
+      const coreModel = this.copiedCoreModel(opts?.fromTerminalId);
+      if (coreModel) {
+        const cut = coreModel.indexOf("/");
+        env.TERMINA_CORE_PROVIDER = coreModel.slice(0, cut);
+        env.TERMINA_CORE_MODEL = coreModel.slice(cut + 1);
+      }
+      if (!persist) env.TERMINA_CORE_APPROVE = "all";
     } else {
       cmd = this.resolvePiBin();
       // The app-owned bridge loads through the CLI option, not project
@@ -2554,7 +2570,13 @@ class PiEditorApp {
     let dispatched = 0;
     for (const job of jobs) {
       try {
-        const worker = await this.createTerminal(undefined, { type: "agent", workspaceId: owner.workspaceId, id: job.id, fromTerminalId: ownerId });
+        const worker = await this.createTerminal(undefined, {
+          type: "agent",
+          engine: owner.engine === "core" ? "core" : "pi",
+          workspaceId: owner.workspaceId,
+          id: job.id,
+          fromTerminalId: ownerId,
+        });
         this.dispatchWorkers.set(worker.id, job.task.text);
         this.dispatchRuns.set(worker.id, { ownerId, taskText: job.task.text });
         job.task.workerId = worker.id;
@@ -3432,7 +3454,7 @@ class PiEditorApp {
       }
       if (!run.sessionFile) {
         run.replayable = false;
-        run.reason = "the Pi session is not persisted";
+        run.reason = "the session is not persisted";
       }
       // A second agent running in the same workspace overlaps this run and
       // the other open run (WORLDLINES §5): both become ineligible.

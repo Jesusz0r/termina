@@ -1,8 +1,8 @@
 /**
  * The Termina bridge extension source.
  *
- * Pi loads this file through the CLI extension option. The bridge is the
- * only writer of sidecar JSONL. `electron/sidecar.ts` is the only parser.
+ * Pi loads this file through the CLI extension option. agent-core writes
+ * the same sidecar protocol. `electron/sidecar.ts` is the only parser.
  */
 import { HAS_UNCHECKED_PLAN_TASK } from "./plan-board.js";
 

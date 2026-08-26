@@ -72,8 +72,10 @@ In this repository that means:
 * `electron/worldlines.ts` owns comparisons, promotion journals, evidence
   runs, and the run-record catalog. Main writes a record at agent start
   and settle. `electron/evidence.ts` only measures a candidate.
-* `electron/sidecar.ts` owns sidecar parse, sequence, and tail. The bridge
-  extension is the only writer (`electron/bridge-extension.ts`).
+* `electron/sidecar.ts` owns sidecar parse, sequence, and tail. Two writers
+  emit that protocol: the Pi bridge (`electron/bridge-extension.ts`) and
+  agent-core (`agent-core/host.ts` plus `logEvent` in `agent-core/main.ts`).
+  Do not add a third writer or a second event schema.
 * The bridge extension is app-owned in the user-data directory. Do not
   generate a second copy in the project.
 * IPC channels use the `area:action` pattern. Do not invent a second
@@ -714,8 +716,11 @@ Use these terms exactly. Do not invent synonyms.
 - `electron/session-worker.ts`: forks candidate sessions off the main
   thread (copy, branch, forkFrom).
 - `electron/sidecar.ts`: sidecar protocol parse, sequence, and tail.
-- `electron/bridge-extension.ts`: the bridge extension source. Pi loads the
+- `electron/bridge-extension.ts`: the Pi bridge extension source. Pi loads the
   materialized copy from the user-data directory.
+- `agent-core/`: the in-house agent kernel (loop, tools, TUI, auth).
+- `agent-core/host.ts`: Termina host adapter (ack, prompt payload, context
+  files, startup-control). Same file names as the Pi bridge.
 - `electron/watcher.ts`: watches the project, keeps a content cache, and
   emits change events.
 - `electron/worldline-git.ts`: the snapshot store client (capture,

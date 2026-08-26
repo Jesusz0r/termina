@@ -1,8 +1,8 @@
 /**
- * Sidecar protocol: JSONL events the bridge writes and the app tails.
+ * Sidecar protocol: JSONL events the engine writes and the app tails.
  *
- * The bridge extension is the only writer. This module is the only parser
- * and the only tailer of sidecar JSONL.
+ * Two writers emit this protocol: the Pi bridge and agent-core. This
+ * module is the only parser and the only tailer of sidecar JSONL.
  */
 import { watch, type FSWatcher } from "node:fs";
 import { statSync, truncateSync } from "node:fs";
