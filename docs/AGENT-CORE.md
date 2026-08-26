@@ -10,13 +10,15 @@ storage + `/resume` replay, reclamation hysteresis + summarization with
 handoff chaining + emergency overflow + truncate last resort, executable
 stubs + structured inventories, waste attribution with models.dev pricing,
 two-role routing map, bounded concurrency, cwd jail, grep/glob, web_search, skill
-index, prefix `cache_control`, traces). Zone 1 is identity, environment,
+index, prefix `cache_control`, traces, provider auth, live model list). Zone 1 is identity, environment,
 user-global `~/.agents/AGENTS.md`, the skill index, then cwd `AGENTS.md`.
 Skill bodies load with `read_file`. Skills come from `~/.agents/skills`
 then `<cwd>/.agents/skills` (no ancestor walk). Truncated instructions
 are overflow-recoverable. The kernel does not call the snapshot store.
-`termina-core` stays the snapshot/Git owner. Auth is a separate track
-(`docs/AUTH-PLAN.md`). The implementation plan is `docs/AGENT-CORE-PLAN.md`.
+`termina-core` stays the snapshot/Git owner. Credentials live in
+`~/.termina/agent/auth.json` (`/login`, `/logout`). Providers: Anthropic,
+OpenAI, ChatGPT Codex OAuth, xAI, Google, OpenRouter. The implementation plan is
+`docs/AGENT-CORE-PLAN.md`. Auth details: `docs/AUTH-PLAN.md`.
 
 ## Why this document exists
 
@@ -182,6 +184,18 @@ footprint, not these numbers.
 | Summarizations | ≤ 1 per 50 turns | scales with session length; short tasks expect zero |
 | Unexplained cache-waste dollars | 0 | any occurrence is a bug |
 | p50 first-token latency | < 1 s | provider-dependent floor |
+
+## Auth
+
+Agent-core stores credentials in `~/.termina/agent/auth.json` (mode 0600).
+`/login [provider]` and `/logout [provider]` run in the kernel. Supported
+ids: `anthropic`, `openai`, `openai-codex`, `xai`, `google`, `openrouter`.
+A stored credential wins over that provider's env key. OAuth tokens refresh
+once on expiry or 401. After login (and on startup when a credential
+exists) the kernel loads that provider's live model list. `/models` prints
+it; `/model <id>` selects one. The file is not Pi's `auth.json`. Model ids
+may carry a provider prefix (`xai/grok-4.3`, `openai-codex/gpt-5.4`). See
+`docs/AUTH-PLAN.md`.
 
 ## Relationship to prior art
 

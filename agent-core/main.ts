@@ -17,6 +17,7 @@
  * - Two-role routing map (main + summary), env-overridable
  * - Streaming always; tool calls run concurrently behind a small bound
  * - cwd jail; grep/glob; web_search; skill index; prefix cache_control; traces
+ * - provider auth (Anthropic, OpenAI, ChatGPT Codex, xAI, Google, OpenRouter)
  */
 import { execFile, execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -39,12 +40,51 @@ import {
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  authBanner,
+  DEFAULT_MODELS,
+  firstAuthenticatedProvider,
+  isSupportedProvider,
+  parseAuthCommand,
+  parseModelRef,
+  providerProtocol,
+  refreshOauth,
+  resolveAuth,
+  runLogin,
+  runLogout,
+  type ProviderId,
+} from "./auth.ts";
+import {
+  completionsBody,
+  completionResultFromEvents,
+  readSseJson,
+  responsesBody,
+  responsesResultFromEvents,
+  textFromCompletionPayload,
+  textFromResponsesPayload,
+  type ToolDef,
+} from "./openai-compat.ts";
+import {
+  catalogFetchAllowed,
+  formatModelBanner,
+  formatModelLines,
+  loadProviderModels,
+  parseModelSwitch,
+  pickDefaultModel,
+  type ModelInfo,
+} from "./models.ts";
 
 /** Example starting values from docs/AGENT-CORE.md; never spec constants. */
-const MODEL = process.env.TERMINA_CORE_MODEL ?? "claude-sonnet-4-5";
+const MODEL_ENV = process.env.TERMINA_CORE_MODEL?.trim() || "";
+const PROVIDER_ENV = process.env.TERMINA_CORE_PROVIDER?.trim() || "";
+const PINNED_ROUTE = Boolean(MODEL_ENV || PROVIDER_ENV);
+let route = parseModelRef(MODEL_ENV || DEFAULT_MODELS.anthropic.main, PROVIDER_ENV || undefined);
 /** Routing map, role → model. Mechanical work rides the cheap lane. */
-const SUMMARY_MODEL = process.env.TERMINA_CORE_SUMMARY_MODEL ?? "claude-haiku-4-5";
-const API_BASE = process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com";
+let summaryRoute = parseModelRef(
+  process.env.TERMINA_CORE_SUMMARY_MODEL ?? DEFAULT_MODELS[route.provider].summary,
+  process.env.TERMINA_CORE_SUMMARY_MODEL ? undefined : route.provider,
+);
+let catalog: ModelInfo[] | null = null;
 const CONTEXT_WINDOW = Number(process.env.TERMINA_CORE_CONTEXT ?? 200_000);
 const OUTPUT_RESERVE = 16_384;
 const USABLE = Math.max(8_000, CONTEXT_WINDOW - OUTPUT_RESERVE);
@@ -74,12 +114,6 @@ const GREP_VISIT_CAP = 2_000;
 const GREP_LINE_CHARS = 8_192;
 const GREP_BUDGET_MS = 2_000;
 const GLOB_HIT_CAP = 200;
-const SEARCH_HIT_CAP = 8;
-const SEARCH_BYTE_CAP = 20 * 1024;
-const SEARCH_TIMEOUT_MS = 15_000;
-const SEARCH_QUERY_MAX = 256;
-const SEARCH_JSON_CAP = 512_000;
-const SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
 const TRACE_CAP = 64;
 const LISTING_CAP = 20;
 const PROBE_TIMEOUT_MS = 500;
@@ -566,141 +600,6 @@ export async function globFiles(
     if (out.length >= GLOB_HIT_CAP) break;
   }
   return out.length > 0 ? out.join("\n") : "(no matches)";
-}
-
-export type SearchFetcher = (
-  url: string,
-  init: { method: string; headers: Record<string, string>; signal?: AbortSignal },
-) => Promise<{ ok: boolean; status: number; text: () => Promise<string> }>;
-
-function decodeHtml(s: string): string {
-  return s
-    .replace(/<[^>]+>/g, "")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function isHttpUrl(value: string): boolean {
-  try {
-    const u = new URL(value);
-    return u.protocol === "http:" || u.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
-
-export function parseSearchResults(payload: unknown): Array<{ title: string; url: string; snippet: string }> {
-  const rows =
-    payload && typeof payload === "object"
-      ? (payload as { web?: { results?: unknown } }).web?.results
-      : undefined;
-  if (!Array.isArray(rows)) return [];
-  const out: Array<{ title: string; url: string; snippet: string }> = [];
-  for (const row of rows) {
-    if (!row || typeof row !== "object") continue;
-    const item = row as { title?: unknown; url?: unknown; description?: unknown };
-    const title = decodeHtml(String(item.title ?? ""));
-    const url = String(item.url ?? "").replace(/[\x00-\x1f\x7f]/g, "");
-    const snippet = decodeHtml(String(item.description ?? ""));
-    if (title && isHttpUrl(url)) out.push({ title, url, snippet });
-  }
-  return out;
-}
-
-function formatSearchHits(hits: Array<{ title: string; url: string; snippet: string }>): string {
-  const lines: string[] = [];
-  let bytes = 0;
-  let n = 0;
-  for (const hit of hits) {
-    if (n >= SEARCH_HIT_CAP) break;
-    const block = [`${n + 1}. ${hit.title}`, `   ${hit.url}`];
-    if (hit.snippet) block.push(`   ${hit.snippet}`);
-    const text = block.join("\n");
-    const rowBytes = Buffer.byteLength(text) + (lines.length > 0 ? 1 : 0);
-    if (bytes + rowBytes > SEARCH_BYTE_CAP) break;
-    lines.push(text);
-    bytes += rowBytes;
-    n++;
-  }
-  return lines.length > 0 ? lines.join("\n") : "(no results)";
-}
-
-export async function webSearch(
-  query: unknown,
-  opts?: { fetch?: SearchFetcher; signal?: AbortSignal; timeoutMs?: number; apiKey?: string },
-): Promise<string> {
-  const raw = typeof query === "string" ? query : query == null ? "" : String(query);
-  const q = raw.trim().replace(/\s+/g, " ");
-  if (q.length < 1 || q.length > SEARCH_QUERY_MAX) return "error: query length must be 1–256";
-  if (q.split(" ").length > 50) return "error: query must be at most 50 words";
-  const apiKey = (opts?.apiKey ?? process.env.BRAVE_API_KEY ?? "").trim();
-  if (!apiKey) return "error: BRAVE_API_KEY is not set";
-  if (/[\x00-\x1f\x7f]/.test(apiKey)) return "error: BRAVE_API_KEY is invalid";
-  const timeoutMs =
-    typeof opts?.timeoutMs === "number" && Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0
-      ? Math.min(opts.timeoutMs, 60_000)
-      : SEARCH_TIMEOUT_MS;
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), timeoutMs);
-  if (opts?.signal) {
-    if (opts.signal.aborted) ac.abort();
-    else opts.signal.addEventListener("abort", () => ac.abort(), { once: true });
-  }
-  const fetchFn = opts?.fetch ?? (fetch as unknown as SearchFetcher);
-  const endpoint = new URL(SEARCH_ENDPOINT);
-  endpoint.searchParams.set("q", q);
-  endpoint.searchParams.set("count", String(SEARCH_HIT_CAP));
-  endpoint.searchParams.set("result_filter", "web");
-  try {
-    if (ac.signal.aborted) return "error: search timed out";
-    const abortWait = new Promise<never>((_, reject) => {
-      const fail = () => {
-        const err = new Error("aborted");
-        err.name = "AbortError";
-        reject(err);
-      };
-      if (ac.signal.aborted) fail();
-      else ac.signal.addEventListener("abort", fail, { once: true });
-    });
-    const fetchP = fetchFn(endpoint.href, {
-      method: "GET",
-      headers: {
-        accept: "application/json",
-        "cache-control": "no-cache",
-        "x-subscription-token": apiKey,
-        "user-agent": "Termina-agent-core/1",
-      },
-      signal: ac.signal,
-    });
-    // The loser of the race must not become an unhandled rejection after abort.
-    void abortWait.catch(() => {});
-    void fetchP.catch(() => {});
-    const res = await Promise.race([fetchP, abortWait]);
-    if (!res.ok) return `error: search HTTP ${res.status}`;
-    const rawJson = await res.text();
-    if (ac.signal.aborted) return "error: search timed out";
-    if (rawJson.length > SEARCH_JSON_CAP) return "error: search response too large";
-    let payload: unknown;
-    try {
-      payload = JSON.parse(rawJson);
-    } catch {
-      return "error: search returned invalid JSON";
-    }
-    return formatSearchHits(parseSearchResults(payload));
-  } catch (err) {
-    if ((err as { name?: string }).name === "AbortError" || ac.signal.aborted) return "error: search timed out";
-    return `error: search failed: ${(err as Error).message}`;
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 export interface Skill {
@@ -1361,8 +1260,7 @@ async function executeTool(use: ToolUse): Promise<ToolOutcome> {
     return done(use, out, out.startsWith("error:"));
   }
   if (use.name === "web_search") {
-    const out = await webSearch(use.input.query, { signal: currentAbort?.signal });
-    return done(use, out, out.startsWith("error:"));
+    return done(use, "error: web_search is provider-executed", true);
   }
   if (use.name === "bash") {
     return new Promise((res) => {
@@ -1432,18 +1330,22 @@ const TOOLS = [
     description: "Run one bash command in the working directory. 60 s timeout. Combined output caps near 20 KB.",
     input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
   },
-  {
-    name: "web_search",
-    description:
-      "Search the public web via Brave Search. Returns titles, URLs, and snippets. Use for current docs, errors, and APIs. Not a project file search. Needs BRAVE_API_KEY.",
-    input_schema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
-  },
 ];
 
-export function buildCachedPrefix(system: string, tools: typeof TOOLS): {
+/** Provider-executed search. Same Anthropic key as the model. No Brave key. */
+export const WEB_SEARCH_TOOL = {
+  type: "web_search_20250305",
+  name: "web_search",
+  max_uses: 5,
+} as const;
+
+export function buildCachedPrefix(
+  system: string,
+  tools: Array<Record<string, unknown>>,
+): {
   cache_control: { type: "ephemeral" };
   system: Array<{ type: "text"; text: string; cache_control: { type: "ephemeral" } }>;
-  tools: Array<(typeof TOOLS)[number] & { cache_control?: { type: "ephemeral" } }>;
+  tools: Array<Record<string, unknown> & { cache_control?: { type: "ephemeral" } }>;
 } {
   const copied = tools.map((t, i) =>
     i === tools.length - 1 ? { ...t, cache_control: { type: "ephemeral" as const } } : { ...t },
@@ -1455,8 +1357,40 @@ export function buildCachedPrefix(system: string, tools: typeof TOOLS): {
   };
 }
 
+/** Append provider search after cached client tools. Do not put
+ *  cache_control on the server tool: a strict schema can 400. */
+export function requestTools(
+  cachedClientTools: Array<Record<string, unknown>>,
+  provider: string = "anthropic",
+): Array<Record<string, unknown>> {
+  if (provider !== "anthropic") return cachedClientTools;
+  return [...cachedClientTools, { ...WEB_SEARCH_TOOL }];
+}
+
 function logToolStart(use: ToolUse): void {
   logEvent(sidecarStartFor(use));
+}
+
+function logServerSearch(
+  blocks: Array<{ type: string; id?: string; name?: string; tool_use_id?: string; content?: unknown }>,
+): string[] {
+  const names: string[] = [];
+  for (const b of blocks) {
+    if (b.type === "server_tool_use") {
+      const name = b.name ?? "web_search";
+      names.push(name);
+      logEvent(sidecarStartFor({ name, id: b.id ?? "", input: {} }));
+      process.stdout.write(`\n[${name}]\n`);
+    } else if (b.type === "web_search_tool_result") {
+      const err =
+        Boolean(b.content) &&
+        typeof b.content === "object" &&
+        !Array.isArray(b.content) &&
+        (b.content as { type?: string }).type === "web_search_tool_result_error";
+      if (b.tool_use_id) logEvent({ t: "tool_end", toolCallId: b.tool_use_id, isError: err });
+    }
+  }
+  return names;
 }
 
 // ---- history: in-memory view over the append-only storage ----
@@ -1493,32 +1427,44 @@ function estimate(m: Message): number {
   if (typeof m.content === "string") return tokenEstimate(m.content) + 4;
   let sum = 4;
   for (const b of m.content) {
-    sum += tokenEstimate(
-      b.type === "tool_use"
+    const payload =
+      b.type === "tool_use" || b.type === "server_tool_use"
         ? JSON.stringify((b as { input?: unknown }).input ?? {})
-        : String((b as { text?: string; content?: string }).text ?? (b as { content?: string }).content ?? ""),
-    ) + 10;
+        : b.type === "web_search_tool_result" || b.type === "thinking" || b.type === "redacted_thinking"
+          ? JSON.stringify(b)
+          : String((b as { text?: string; content?: string }).text ?? (b as { content?: string }).content ?? "");
+    sum += tokenEstimate(payload) + 10;
   }
   return sum;
 }
 
-/** Strip view metadata. Whitelist provider fields: any extra key on a
- *  content block (stubbed flags included) makes the provider reject the
- *  whole request. Exported for the self-check. */
+const VIEW_KEYS = new Set(["chars", "tool", "repro", "stubbed"]);
+
+/** Strip view metadata. Extra keys on a content block (stubbed flags
+ *  included) make the provider reject the whole request. */
+export function toProviderBlock(b: ContentBlock): Record<string, unknown> {
+  const out: Record<string, unknown> = { type: b.type };
+  for (const [k, v] of Object.entries(b)) {
+    if (k === "type" || VIEW_KEYS.has(k) || v === undefined) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 export function toRequest(messages: Message[]): Array<{ role: string; content: unknown }> {
   return messages.map((m) => {
     if (typeof m.content === "string") return { role: m.role, content: m.content };
-    const blocks = m.content.map((b) => {
-      if (b.type === "tool_result") {
-        return { type: b.type, tool_use_id: (b as { tool_use_id?: string }).tool_use_id, content: (b as { content?: string }).content };
-      }
-      if (b.type === "tool_use") {
-        return { type: b.type, id: (b as { id?: string }).id, name: (b as { name?: string }).name, input: (b as { input?: unknown }).input };
-      }
-      return { type: b.type, text: (b as { text?: string }).text };
-    });
-    return { role: m.role, content: blocks };
+    return { role: m.role, content: m.content.map(toProviderBlock) };
   });
+}
+
+export function placeStreamBlock<T>(slots: Array<T | undefined>, index: unknown, block: T): void {
+  if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index > 10_000) return;
+  slots[index] = block;
+}
+
+export function compactStreamBlocks<T>(slots: Array<T | undefined>): T[] {
+  return slots.filter((b): b is T => b !== undefined);
 }
 
 function pushMessage(role: Message["role"], content: Message["content"]): Message {
@@ -1777,7 +1723,7 @@ function serializeForSummary(messages: Message[]): string {
     }
     for (const b of m.content as ContentBlock[]) {
       if (b.type === "text") parts.push(`[Assistant]: ${String(b.text ?? "").slice(0, 2_000)}`);
-      else if (b.type === "tool_use")
+      else if (b.type === "tool_use" || b.type === "server_tool_use")
         parts.push(`[Tool call]: ${b.name}(${JSON.stringify(b.input).slice(0, 300)})`);
       else if (b.type === "tool_result" && !b.stubbed)
         parts.push(`[Tool result]: ${String(b.content ?? "").slice(0, 500)}`);
@@ -1818,22 +1764,11 @@ async function summarize(): Promise<boolean> {
   const started = Date.now();
   currentAbort ??= new AbortController();
   try {
-    const res = await fetch(`${API_BASE}/v1/messages`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-api-key": process.env.ANTHROPIC_API_KEY ?? "", "anthropic-version": "2023-06-01" },
-      signal: currentAbort.signal,
-      body: JSON.stringify({
-        model: SUMMARY_MODEL,
-        max_tokens: 2048,
-        system: "You compress coding-agent session history. Only output the structured handoff.",
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
-    if (!res.ok) throw new Error(`API ${res.status}`);
-    const data = (await res.json()) as { usage?: Record<string, number>; content?: Array<{ type: string; text?: string }> };
-    const text = (data.content ?? []).map((c) => c.text ?? "").join("").trim();
+    const summarySystem = "You compress coding-agent session history. Only output the structured handoff.";
+    const folded = await completeText(summaryRoute.provider, summaryRoute.model, summarySystem, prompt, currentAbort.signal);
+    const text = folded.text;
     if (!text) return false;
-    const u = data.usage;
+    const u = folded.usage;
     const inventories = fileInventories(evicted);
     const handoff = `<context-handoff>\n${text}${inventories ? `\n\n${inventories}` : ""}\n</context-handoff>`;
     lastHandoff = text;
@@ -1847,18 +1782,11 @@ async function summarize(): Promise<boolean> {
     writeTrace(
       traceRecord({
         role: "summary",
-        model: SUMMARY_MODEL,
+        model: summaryRoute.model,
         status: "ok",
         storageSeqRange: [m.sseq, m.sseq],
         toolNames: [],
-        usage: u
-          ? {
-              input: u.input_tokens ?? 0,
-              cacheRead: u.cache_read_input_tokens ?? 0,
-              cacheWrite: u.cache_creation_input_tokens ?? 0,
-              output: u.output_tokens ?? 0,
-            }
-          : null,
+        usage: u,
         ttftMs: null,
         turnMs: Date.now() - started,
         revisions: 1,
@@ -1872,7 +1800,7 @@ async function summarize(): Promise<boolean> {
     writeTrace(
       traceRecord({
         role: "summary",
-        model: SUMMARY_MODEL,
+        model: summaryRoute.model,
         status: "error",
         storageSeqRange: [storageSeq, storageSeq],
         toolNames: [],
@@ -1892,8 +1820,10 @@ async function summarize(): Promise<boolean> {
 // ---- provider call (minimal SSE stream with usage capture) ----
 
 type Block =
-  | { type: "text"; text: string }
-  | { type: "tool_use"; id: string; name: string; input: ToolUse["input"] };
+  | { type: "text"; text: string; citations?: unknown[] }
+  | { type: "tool_use"; id: string; name: string; input: ToolUse["input"] }
+  | { type: "server_tool_use"; id: string; name: string; input: Record<string, unknown> }
+  | { type: "web_search_tool_result"; tool_use_id: string; content: unknown };
 
 interface Usage {
   input: number;
@@ -1906,40 +1836,168 @@ interface CallResult {
   blocks: Block[];
   usage: Usage | null;
   ttftMs: number | null;
+  stopReason: string | null;
 }
 
 let currentAbort: AbortController | null = null;
 
-async function callModel(messages: Message[]): Promise<CallResult> {
-  const key = process.env.ANTHROPIC_API_KEY ?? "";
-  const started = Date.now();
-  const res = await fetch(`${API_BASE}/v1/messages`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": key,
-      "anthropic-version": "2023-06-01",
+function endpointFor(auth: { providerId: ProviderId; baseUrl: string }): string {
+  const base = auth.baseUrl.replace(/\/$/, "");
+  const proto = providerProtocol(auth.providerId);
+  if (proto === "anthropic-messages") return `${base}/v1/messages`;
+  if (proto === "openai-codex-responses") {
+    if (base.endsWith("/codex/responses")) return base;
+    if (base.endsWith("/codex")) return `${base}/responses`;
+    return `${base}/codex/responses`;
+  }
+  return `${base}/chat/completions`;
+}
+
+async function providerPost(providerId: ProviderId, body: unknown, signal: AbortSignal | undefined): Promise<Response> {
+  let replayed = false;
+  for (;;) {
+    const auth = await resolveAuth(providerId);
+    if (!auth.ok) throw new Error(auth.error);
+    const headers = { ...auth.headers };
+    if (body && typeof body === "object" && (body as { stream?: unknown }).stream === true) {
+      headers.accept = "text/event-stream";
+    }
+    const res = await fetch(endpointFor(auth), {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (res.status !== 401) return res;
+    await res.text();
+    if (auth.kind === "oauth" && !replayed) {
+      const refreshed = await refreshOauth(providerId);
+      if (!refreshed.ok) throw new Error(refreshed.error);
+      replayed = true;
+      continue;
+    }
+    throw new Error(auth.kind === "oauth" ? "auth expired — run /login" : "invalid API key");
+  }
+}
+
+function normalizeUsage(u: Record<string, number> | undefined): Usage | null {
+  if (!u) return null;
+  const prompt = u.input_tokens ?? u.prompt_tokens ?? 0;
+  const output = u.output_tokens ?? u.completion_tokens ?? 0;
+  return {
+    input: prompt,
+    cacheRead: u.cache_read_input_tokens ?? 0,
+    cacheWrite: u.cache_creation_input_tokens ?? 0,
+    output,
+  };
+}
+
+async function completeText(
+  providerId: ProviderId,
+  model: string,
+  system: string,
+  prompt: string,
+  signal: AbortSignal | undefined,
+): Promise<{ text: string; usage: Usage | null }> {
+  const proto = providerProtocol(providerId);
+  if (proto === "anthropic-messages") {
+    const res = await providerPost(
+      providerId,
+      { model, max_tokens: 2048, system, messages: [{ role: "user", content: prompt }] },
+      signal,
+    );
+    if (!res.ok) throw new Error(`API ${res.status}`);
+    const data = (await res.json()) as { usage?: Record<string, number>; content?: Array<{ type: string; text?: string }> };
+    const text = (data.content ?? []).map((c) => c.text ?? "").join("").trim();
+    return { text, usage: normalizeUsage(data.usage) };
+  }
+  if (proto === "openai-codex-responses") {
+    const res = await providerPost(
+      providerId,
+      { model, store: false, stream: false, instructions: system, input: prompt },
+      signal,
+    );
+    if (!res.ok) throw new Error(`API ${res.status}`);
+    const got = textFromResponsesPayload(await res.json());
+    return { text: got.text, usage: normalizeUsage(got.usage) };
+  }
+  const res = await providerPost(
+    providerId,
+    {
+      model,
+      stream: false,
+      ...(providerId === "openai" ? { max_completion_tokens: 2048 } : { max_tokens: 2048 }),
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: prompt },
+      ],
     },
-    signal: currentAbort?.signal,
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 8192,
-      stream: true,
-      ...buildCachedPrefix(systemPrompt(), TOOLS),
-      messages: toRequest(messages),
-    }),
-  });
+    signal,
+  );
+  if (!res.ok) throw new Error(`API ${res.status}`);
+  const got = textFromCompletionPayload(await res.json());
+  return { text: got.text, usage: normalizeUsage(got.usage) };
+}
+
+async function callModel(messages: Message[]): Promise<CallResult> {
+  const started = Date.now();
+  const prefix = buildCachedPrefix(systemPrompt(), TOOLS);
+  const proto = providerProtocol(route.provider);
+  const kernelMessages = messages.map((m) => ({ role: m.role, content: m.content }));
+  const clientTools = TOOLS as ToolDef[];
+  const body =
+    proto === "anthropic-messages"
+      ? {
+          model: route.model,
+          max_tokens: 8192,
+          stream: true,
+          cache_control: prefix.cache_control,
+          system: prefix.system,
+          tools: requestTools(prefix.tools, route.provider),
+          messages: toRequest(messages),
+        }
+      : proto === "openai-codex-responses"
+        ? responsesBody(route.model, systemPrompt(), kernelMessages, clientTools)
+        : completionsBody(
+            route.model,
+            systemPrompt(),
+            kernelMessages,
+            clientTools,
+            route.provider === "openai" ? "max_completion_tokens" : "max_tokens",
+          );
+  const res = await providerPost(route.provider, body, currentAbort?.signal);
   if (!res.ok || !res.body) {
-    throw new Error(`API ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    const detail = (await res.text()).slice(0, 300);
+    const hint =
+      proto === "anthropic-messages" && /web_search/i.test(detail)
+        ? " — enable Web search in the Anthropic console"
+        : "";
+    throw new Error(`API ${res.status}: ${detail}${hint}`);
   }
 
-  const blocks: Block[] = [];
+  if (proto !== "anthropic-messages") {
+    const events = await readSseJson(res.body, currentAbort?.signal);
+    const parsed =
+      proto === "openai-codex-responses"
+        ? responsesResultFromEvents(events, (t) => process.stdout.write(t), started)
+        : completionResultFromEvents(events, (t) => process.stdout.write(t), started);
+    if (parsed.error) throw new Error(parsed.error);
+    return {
+      blocks: parsed.blocks as Block[],
+      usage: parsed.usage,
+      ttftMs: parsed.ttftMs,
+      stopReason: parsed.stopReason,
+    };
+  }
+
+  const slots: Array<Block | undefined> = [];
   const jsonParts = new Map<number, string>();
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let usage: Usage | null = null;
   let ttftMs: number | null = null;
+  let stopReason: string | null = null;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -1970,25 +2028,60 @@ async function callModel(messages: Message[]): Promise<CallResult> {
           break;
         }
         case "content_block_start": {
-          const cb = ev.content_block as Block;
+          const idx = Number(ev.index);
+          const cb = (ev.content_block ?? {}) as {
+            type?: string;
+            id?: string;
+            name?: string;
+            tool_use_id?: string;
+            citations?: unknown[];
+            content?: unknown;
+          };
           if (cb.type === "tool_use") {
-            blocks.push({ type: "tool_use", id: cb.id, name: cb.name, input: {} });
-            jsonParts.set(blocks.length - 1, "");
+            placeStreamBlock(slots, idx, { type: "tool_use", id: cb.id ?? "", name: cb.name ?? "", input: {} });
+            jsonParts.set(idx, "");
+          } else if (cb.type === "server_tool_use") {
+            placeStreamBlock(slots, idx, {
+              type: "server_tool_use",
+              id: cb.id ?? "",
+              name: cb.name ?? "",
+              input: {},
+            });
+            jsonParts.set(idx, "");
+          } else if (cb.type === "web_search_tool_result") {
+            placeStreamBlock(slots, idx, {
+              type: "web_search_tool_result",
+              tool_use_id: cb.tool_use_id ?? "",
+              content: cb.content,
+            });
           } else if (cb.type === "text") {
-            blocks.push({ type: "text", text: "" });
+            placeStreamBlock(slots, idx, {
+              type: "text",
+              text: "",
+              citations: Array.isArray(cb.citations) && cb.citations.length > 0 ? cb.citations : undefined,
+            });
+          } else if (cb.type) {
+            placeStreamBlock(slots, idx, { ...(ev.content_block as Block), type: cb.type } as Block);
           }
           break;
         }
         case "content_block_delta": {
-          const d = ev.delta as { type: string; text?: string; partial_json?: string };
+          const d = ev.delta as { type: string; text?: string; partial_json?: string; citation?: unknown; thinking?: string };
           const idx = Number(ev.index);
-          const target = blocks[idx];
+          const target = slots[idx];
           if (!target) break;
           if (d.type === "text_delta" && target.type === "text") {
             if (ttftMs === null) ttftMs = Date.now() - started;
             target.text += d.text ?? "";
             process.stdout.write(d.text ?? "");
-          } else if (d.type === "input_json_delta" && target.type === "tool_use") {
+          } else if (d.type === "citations_delta" && target.type === "text" && d.citation !== undefined) {
+            target.citations = [...(target.citations ?? []), d.citation];
+          } else if (d.type === "thinking_delta" && "thinking" in target) {
+            (target as { thinking?: string }).thinking = `${(target as { thinking?: string }).thinking ?? ""}${d.thinking ?? ""}`;
+          } else if (
+            d.type === "input_json_delta" &&
+            (target.type === "tool_use" || target.type === "server_tool_use")
+          ) {
             jsonParts.set(idx, (jsonParts.get(idx) ?? "") + (d.partial_json ?? ""));
           }
           break;
@@ -1996,6 +2089,8 @@ async function callModel(messages: Message[]): Promise<CallResult> {
         case "message_delta": {
           const u = (ev.usage ?? {}) as Record<string, number>;
           if (usage && typeof u.output_tokens === "number") usage.output = u.output_tokens;
+          const reason = (ev.delta as { stop_reason?: string } | undefined)?.stop_reason;
+          if (typeof reason === "string") stopReason = reason;
           break;
         }
         default:
@@ -2003,17 +2098,34 @@ async function callModel(messages: Message[]): Promise<CallResult> {
       }
     }
   }
-  for (const [idx, part] of jsonParts) {
-    const target = blocks[idx];
-    if (target?.type === "tool_use") {
+  buffer += decoder.decode();
+  if (buffer.trim().startsWith("data:")) {
+    const payload = buffer.trim().slice(5).trim();
+    if (payload && payload !== "[DONE]") {
       try {
-        target.input = JSON.parse(part || "{}");
+        const ev = JSON.parse(payload) as Record<string, unknown>;
+        if (ev.type === "message_delta") {
+          const u = (ev.usage ?? {}) as Record<string, number>;
+          if (usage && typeof u.output_tokens === "number") usage.output = u.output_tokens;
+          const reason = (ev.delta as { stop_reason?: string } | undefined)?.stop_reason;
+          if (typeof reason === "string") stopReason = reason;
+        }
+      } catch {
+        /* ignore truncated tail */
+      }
+    }
+  }
+  for (const [idx, part] of jsonParts) {
+    const target = slots[idx];
+    if (target?.type === "tool_use" || target?.type === "server_tool_use") {
+      try {
+        target.input = JSON.parse(part || "{}") as typeof target.input;
       } catch {
         target.input = {};
       }
     }
   }
-  return { blocks, usage, ttftMs };
+  return { blocks: compactStreamBlocks(slots), usage, ttftMs, stopReason };
 }
 
 // ---- waste attribution ----
@@ -2036,9 +2148,10 @@ async function loadRates(): Promise<void> {
   try {
     const res = await fetch("https://models.dev/api.json");
     const db = (await res.json()) as Record<string, { models?: Record<string, { cost?: Record<string, number> }> }>;
-    const models = db.anthropic?.models ?? {};
     const per = 1_000_000;
-    const parse = (model: string): Rates | null => {
+    rateLookup = (model: string): Rates | null => {
+      const catalogId = route.provider === "openai-codex" ? "openai" : route.provider;
+      const models = db[catalogId]?.models ?? {};
       const entry = models[model] ?? models[Object.keys(models).find((k) => k.startsWith(model + "-")) ?? ""];
       const c = entry?.cost;
       if (!c) return null;
@@ -2049,7 +2162,6 @@ async function loadRates(): Promise<void> {
         cacheWrite: (c.cache_write ?? c.input ?? 0) / per,
       };
     };
-    rateLookup = parse;
   } catch {
     /* offline or catalog gone: usage records carry tokens without usd */
   }
@@ -2076,7 +2188,7 @@ function reportUsage(
   }
   postRevision = false;
   prevPrompt = { total: cur, ts: Date.now() };
-  const rates = rateLookup?.(MODEL) ?? null;
+  const rates = rateLookup?.(route.model) ?? null;
   let usd: number | null = null;
   if (rates) {
     usd =
@@ -2097,7 +2209,7 @@ let interrupted = false;
 async function runPrompt(prompt: string): Promise<void> {
   if (!streamPrepared) ensureFreshSession();
   pushMessage("user", prompt);
-  logEvent({ t: "agent_start", model: MODEL });
+  logEvent({ t: "agent_start", model: route.model });
   running = true;
   interrupted = false;
   currentAbort = new AbortController();
@@ -2105,15 +2217,19 @@ async function runPrompt(prompt: string): Promise<void> {
   let retriedOverflow = false;
   let modelCalls = 0;
   let lastHadTools = false;
+  let resumePaused = false;
   try {
     while (modelCalls < MAX_TURNS) {
       if (interrupted) break;
-      reclaim();
-      // Maintenance order: reclaim first; summarize only when reclamation cannot
-      // hold the high-water line; truncate is the last resort.
-      if (totalTokens() >= USABLE * HIGH_WATER && !(await summarize()) && totalTokens() >= USABLE) {
-        truncate();
+      if (!resumePaused) {
+        reclaim();
+        // Maintenance order: reclaim first; summarize only when reclamation cannot
+        // hold the high-water line; truncate is the last resort.
+        if (totalTokens() >= USABLE * HIGH_WATER && !(await summarize()) && totalTokens() >= USABLE) {
+          truncate();
+        }
       }
+      resumePaused = false;
       let result: CallResult;
       const callStarted = Date.now();
       const seqBefore = storageSeq;
@@ -2132,7 +2248,7 @@ async function runPrompt(prompt: string): Promise<void> {
           writeTrace(
             traceRecord({
               role: "main",
-              model: MODEL,
+              model: route.model,
               status: "error",
               storageSeqRange: [seqBefore + 1, storageSeq],
               toolNames: [],
@@ -2156,18 +2272,19 @@ async function runPrompt(prompt: string): Promise<void> {
       assistantMsg.tokens = estimate(assistantMsg);
       history.push(assistantMsg);
       assistantMsg.sseq = store({ type: "message", message: { role: "assistant", content: result.blocks } });
+      const serverNames = logServerSearch(result.blocks);
       const uses = (result.blocks.filter((b) => b.type === "tool_use") as Extract<Block, { type: "tool_use" }>[]).map(
         (b): ToolUse => ({ id: b.id, name: b.name, input: b.input }),
       );
-      lastHadTools = uses.length > 0;
+      lastHadTools = uses.length > 0 || result.stopReason === "pause_turn";
       if (uses.length === 0) {
         writeTrace(
           traceRecord({
             role: "main",
-            model: MODEL,
+            model: route.model,
             status: "ok",
             storageSeqRange: [seqBefore + 1, storageSeq],
-            toolNames: [],
+            toolNames: serverNames,
             usage: result.usage,
             ttftMs: waste.ttftMs,
             turnMs: waste.turnMs,
@@ -2176,6 +2293,10 @@ async function runPrompt(prompt: string): Promise<void> {
             systemHash: hashSystem(sys),
           }),
         );
+        if (result.stopReason === "pause_turn" && !interrupted) {
+          resumePaused = true;
+          continue;
+        }
         break;
       }
       const outcomes: ToolOutcome[] = [];
@@ -2210,10 +2331,10 @@ async function runPrompt(prompt: string): Promise<void> {
       writeTrace(
         traceRecord({
           role: "main",
-          model: MODEL,
+          model: route.model,
           status: "ok",
           storageSeqRange: [seqBefore + 1, storageSeq],
-          toolNames: uses.map((u) => u.name),
+          toolNames: [...serverNames, ...uses.map((u) => u.name)],
           usage: result.usage,
           ttftMs: waste.ttftMs,
           turnMs: waste.turnMs,
@@ -2334,11 +2455,194 @@ export function isDirectRun(): boolean {
   return isDirectRunFrom(import.meta.url, process.argv[1]);
 }
 
-function main(): void {
+let authBusy = false;
+let loginCodeResolve: ((code: string) => void) | null = null;
+let loginAbort: AbortController | null = null;
+
+function cancelLogin(): void {
+  loginAbort?.abort();
+  if (loginCodeResolve) {
+    loginCodeResolve("");
+    loginCodeResolve = null;
+  }
+}
+
+function retargetSummary(provider: ProviderId): void {
+  if (process.env.TERMINA_CORE_SUMMARY_MODEL) return;
+  summaryRoute = parseModelRef(DEFAULT_MODELS[provider].summary, provider);
+}
+
+async function loadCatalog(provider: ProviderId, adopt: boolean): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!catalogFetchAllowed()) return { ok: false, error: "catalog fetch skipped in tests" };
+  if (adopt && provider !== route.provider) {
+    route = { provider, model: DEFAULT_MODELS[provider].main };
+    retargetSummary(provider);
+    catalog = null;
+  }
+  if (provider !== route.provider) return { ok: true };
+  const got = await loadProviderModels(provider);
+  if (!got.ok) return got;
+  catalog = got.models;
+  const preferred =
+    MODEL_ENV && route.provider === parseModelRef(MODEL_ENV, PROVIDER_ENV || undefined).provider
+      ? route.model
+      : DEFAULT_MODELS[provider].main;
+  const pick = pickDefaultModel(catalog, preferred);
+  if (pick) {
+    if (!PINNED_ROUTE || !MODEL_ENV) route.model = pick;
+    else if (pick === route.model || pick.startsWith(`${route.model}-`)) route.model = pick;
+  }
+  return { ok: true };
+}
+
+async function bootCatalog(): Promise<void> {
+  if (!catalogFetchAllowed()) return;
+  try {
+    if (!PINNED_ROUTE) {
+      const id = firstAuthenticatedProvider();
+      if (!id) return;
+      route = { provider: id, model: DEFAULT_MODELS[id].main };
+      retargetSummary(id);
+    }
+    const auth = await resolveAuth(route.provider);
+    if (!auth.ok) return;
+    await loadCatalog(route.provider, false);
+  } catch (err) {
+    process.stderr.write(`agent-core: model list failed: ${(err as Error).message}\n`);
+  }
+}
+
+function startCatalogCommand(line: string): void {
+  if (line === "/model") {
+    process.stdout.write(`model ${route.provider}/${route.model}\n`);
+    printPromptLine();
+    return;
+  }
+  if (line === "/models" || line.startsWith("/models ")) {
+    if (running || authBusy) {
+      process.stdout.write("(engine busy)\n");
+      printPromptLine();
+      return;
+    }
+    const refresh = /\brefresh\b/.test(line);
+    authBusy = true;
+    void (async () => {
+      try {
+        if (refresh || !catalog) {
+          const got = await loadCatalog(route.provider, false);
+          if (!got.ok) process.stdout.write(`(${got.error})\n`);
+        }
+        if (catalog && catalog.length > 0) process.stdout.write(`${formatModelLines(catalog, route.model)}\n`);
+        else process.stdout.write("(no model list — run /login)\n");
+      } finally {
+        authBusy = false;
+        printPromptLine();
+      }
+    })();
+    return;
+  }
+  if (!line.startsWith("/model ")) return;
+  if (running || authBusy) {
+    process.stdout.write("(engine busy)\n");
+    printPromptLine();
+    return;
+  }
+  const rest = line.slice("/model ".length).trim();
+  if (!rest) {
+    process.stdout.write(`model ${route.provider}/${route.model}\n`);
+    printPromptLine();
+    return;
+  }
+  authBusy = true;
+  void (async () => {
+    try {
+      if (catalog?.some((m) => m.id === rest)) {
+        route.model = rest;
+        process.stdout.write(`model ${route.provider}/${route.model}\n`);
+        return;
+      }
+      const next = parseModelSwitch(rest, route.provider);
+      const auth = await resolveAuth(next.provider);
+      if (!auth.ok) {
+        process.stdout.write(`(${auth.error})\n`);
+        return;
+      }
+      if (next.provider !== route.provider) {
+        const got = await loadCatalog(next.provider, true);
+        if (!got.ok) process.stdout.write(`(${got.error})\n`);
+        if (catalog?.some((m) => m.id === next.model || m.id.startsWith(`${next.model}-`))) {
+          const pick = pickDefaultModel(catalog, next.model);
+          if (pick) route.model = pick;
+        } else {
+          route.model = next.model;
+        }
+      } else {
+        route.model = next.model;
+      }
+      process.stdout.write(`model ${route.provider}/${route.model}\n`);
+    } finally {
+      authBusy = false;
+      printPromptLine();
+    }
+  })();
+}
+
+function startAuthCommand(line: string): void {
+  const parsed = parseAuthCommand(line);
+  if ("error" in parsed) {
+    process.stdout.write(`(${parsed.error})\n`);
+    printPromptLine();
+    return;
+  }
+  if (parsed.cmd === "logout") {
+    const out = runLogout(parsed.provider);
+    if (out.ok && parsed.provider === route.provider) catalog = null;
+    process.stdout.write(out.ok ? `${out.summary}\n` : `(${out.error})\n`);
+    printPromptLine();
+    return;
+  }
+  authBusy = true;
+  loginAbort = new AbortController();
+  const abort = loginAbort;
+  void runLogin(parsed.provider, parsed.mode, {
+    write: (text) => process.stdout.write(text),
+    waitForCode: () =>
+      new Promise<string>((resolve) => {
+        loginCodeResolve = resolve;
+      }),
+    signal: abort.signal,
+  })
+    .then(async (out) => {
+      process.stdout.write(out.ok ? `${out.summary}\n` : `(${out.error})\n`);
+      if (!out.ok) return;
+      if (!isSupportedProvider(parsed.provider)) return;
+      const got = await loadCatalog(parsed.provider, !PINNED_ROUTE);
+      if (route.provider !== parsed.provider) return;
+      if (!got.ok) process.stdout.write(`(${got.error})\n`);
+      else if (catalog && catalog.length > 0) process.stdout.write(`${formatModelBanner(catalog, route.model)}\n`);
+    })
+    .catch((err: unknown) => {
+      process.stdout.write(`(login failed: ${(err as Error).message})\n`);
+    })
+    .finally(() => {
+      if (loginAbort === abort) {
+        loginAbort = null;
+        loginCodeResolve = null;
+        authBusy = false;
+      }
+      printPromptLine();
+    });
+}
+
+async function main(): Promise<void> {
   resetTraces();
   freezeFrontMatter();
-  const hasKey = Boolean(process.env.ANTHROPIC_API_KEY);
-  process.stdout.write(`termina agent-core v1 · model ${MODEL} · ${hasKey ? "key ok" : "no ANTHROPIC_API_KEY"} · Ctrl+C interrupts · /exit quits\n`);
+  await bootCatalog();
+  const auth = await resolveAuth(route.provider);
+  process.stdout.write(
+    `termina agent-core v1 · model ${route.provider}/${route.model} · ${authBanner(auth)} · Ctrl+C interrupts · /exit quits\n`,
+  );
+  if (catalog && catalog.length > 0) process.stdout.write(`${formatModelBanner(catalog, route.model)}\n`);
   printPromptLine();
   if (!process.stdin.isTTY) return;
   process.stdin.setRawMode(true);
@@ -2366,7 +2670,27 @@ function handleInput(chunk: Buffer): void {
         }
         if (line === "/exit" || line === "/quit") {
           currentAbort?.abort();
+          cancelLogin();
           process.exit(0);
+        }
+        if (loginCodeResolve) {
+          const resolve = loginCodeResolve;
+          loginCodeResolve = null;
+          resolve(line);
+          continue;
+        }
+        if (line.startsWith("/login") || line.startsWith("/logout")) {
+          if (running || authBusy) {
+            process.stdout.write("(engine busy)\n");
+            printPromptLine();
+            continue;
+          }
+          startAuthCommand(line);
+          continue;
+        }
+        if (line === "/models" || line.startsWith("/models ") || line === "/model" || line.startsWith("/model ")) {
+          startCatalogCommand(line);
+          continue;
         }
         if (line.startsWith("/") && line !== "/resume") {
           process.stdout.write(`(unknown command: ${line})\n`);
@@ -2374,7 +2698,7 @@ function handleInput(chunk: Buffer): void {
           continue;
         }
         if (line === "/resume") {
-          if (running) {
+          if (running || authBusy) {
             process.stdout.write("(engine busy)\n");
           } else if (history.length > 0) {
             process.stdout.write("(session already live — /resume only on a fresh engine)\n");
@@ -2397,6 +2721,9 @@ function handleInput(chunk: Buffer): void {
         if (running) {
           interrupted = true;
           currentAbort?.abort();
+        } else if (authBusy) {
+          process.stdout.write("^C\n");
+          cancelLogin();
         } else {
           inputLine = "";
           process.stdout.write("^C\n");
@@ -2410,5 +2737,5 @@ function handleInput(chunk: Buffer): void {
 }
 
 if (isDirectRun()) {
-  main();
+  void main();
 }

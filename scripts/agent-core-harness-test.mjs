@@ -7,6 +7,7 @@
 process.env.TERMINA_CORE_TEST = "1";
 
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
 import {
   existsSync,
   mkdirSync,
@@ -57,8 +58,11 @@ const {
   traceRecord,
   isDirectRunFrom,
   hashSystem,
-  webSearch,
-  parseSearchResults,
+  WEB_SEARCH_TOOL,
+  requestTools,
+  placeStreamBlock,
+  compactStreamBlocks,
+  toProviderBlock,
 } = core;
 
 const results = [];
@@ -162,82 +166,55 @@ check("glob overlong errors", (await globFiles(root, "a".repeat(300))).startsWit
 check("matchGlob repeated ** terminates", matchGlob("**/**/*.ts", "pkg/src/a.ts") === true);
 check("sidecar glob has no path", sidecarStartFor({ name: "glob", id: "1", input: {} }).path === undefined);
 
-const parsed = parseSearchResults({
-  web: {
-    results: [
-      { title: "Node &lt;docs&gt;", url: "https://example.com/docs", description: "Official <b>documentation</b>" },
-      { title: "Node.js API", url: "https://nodejs.org/api/", description: "" },
-      { title: "Skip me", url: "javascript:alert(1)", description: "nope" },
-    ],
-  },
-});
-check("search parser keeps https url", parsed[0]?.url === "https://example.com/docs");
-check("search parser strips markup", parsed[0]?.title === "Node <docs>" && parsed[0]?.snippet === "Official documentation");
-check("search parser keeps second https", parsed[1]?.url === "https://nodejs.org/api/");
-check("search parser skips non-http href", parsed.every((h) => h.title !== "Skip me"));
-
-const manyJson = JSON.stringify({
-  web: { results: Array.from({ length: 12 }, (_, i) => ({ title: `Hit ${i}`, url: `https://ex.test/${i}`, description: "s" })) },
-});
-let captured = { url: "", token: "", cache: "" };
-const cappedSearch = await webSearch("node docs", {
-  apiKey: "test-key",
-  fetch: async (url, init) => {
-    captured = {
-      url,
-      token: init.headers["x-subscription-token"] ?? "",
-      cache: init.headers["cache-control"] ?? "",
-    };
-    return { ok: true, status: 200, text: async () => manyJson };
-  },
-});
-check("web_search caps hits at 8", cappedSearch.split("\n").filter((l) => /^\d+\. /.test(l)).length === 8);
+check("web_search is Anthropic server tool", WEB_SEARCH_TOOL.type === "web_search_20250305" && WEB_SEARCH_TOOL.name === "web_search");
+const clientPrefix = buildCachedPrefix("sys", [
+  { name: "a", description: "a", input_schema: { type: "object" } },
+  { name: "b", description: "b", input_schema: { type: "object" } },
+]);
+const reqTools = requestTools(clientPrefix.tools);
+check("requestTools keeps cache on last client tool", reqTools[1]?.cache_control?.type === "ephemeral");
 check(
-  "web_search formats title and url",
-  cappedSearch.includes("1. Hit 0") && cappedSearch.includes("https://ex.test/0"),
-);
-const capturedUrl = new URL(captured.url);
-check(
-  "web_search uses Brave JSON endpoint",
-  capturedUrl.origin + capturedUrl.pathname === "https://api.search.brave.com/res/v1/web/search" &&
-    capturedUrl.searchParams.get("q") === "node docs" &&
-    capturedUrl.searchParams.get("count") === "8" &&
-    capturedUrl.searchParams.get("result_filter") === "web",
-);
-check("web_search sends subscription token", captured.token === "test-key");
-check("web_search sends cache-control no-cache", captured.cache === "no-cache");
-
-check("web_search empty query errors", (await webSearch("")).startsWith("error:"));
-check("web_search overlong query errors", (await webSearch("a".repeat(300))).startsWith("error:"));
-check("web_search too many words errors", (await webSearch("w ".repeat(51))).includes("50 words"));
-check("web_search missing key errors", (await webSearch("q", { apiKey: "" })).includes("BRAVE_API_KEY"));
-check("web_search control-char key errors", (await webSearch("q", { apiKey: "abc\nxyz" })).includes("invalid"));
-check(
-  "web_search HTTP error",
-  (await webSearch("q", { apiKey: "k", fetch: async () => ({ ok: false, status: 403, text: async () => "nope" }) })).includes("HTTP 403"),
+  "requestTools skips web_search for completions providers",
+  requestTools(clientPrefix.tools, "xai").every((t) => t.name !== "web_search") &&
+    requestTools(clientPrefix.tools, "xai").length === clientPrefix.tools.length,
 );
 check(
-  "web_search no results",
-  (await webSearch("q", { apiKey: "k", fetch: async () => ({ ok: true, status: 200, text: async () => "{}" }) })) === "(no results)",
-);
-check(
-  "web_search invalid JSON errors",
-  (await webSearch("q", { apiKey: "k", fetch: async () => ({ ok: true, status: 200, text: async () => "<html></html>" }) })).includes("invalid JSON"),
-);
-check(
-  "web_search oversized JSON errors",
-  (
-    await webSearch("q", {
-      apiKey: "k",
-      fetch: async () => ({ ok: true, status: 200, text: async () => "x".repeat(512_001) }),
-    })
-  ).includes("too large"),
-);
-check(
-  "web_search timeout",
-  (await webSearch("q", { apiKey: "k", timeoutMs: 40, fetch: () => new Promise(() => {}) })).startsWith("error: search timed out"),
+  "requestTools appends web_search without cache_control",
+  reqTools[2]?.type === "web_search_20250305" && reqTools[2]?.cache_control === undefined,
 );
 check("sidecar web_search has no path", sidecarStartFor({ name: "web_search", id: "1", input: { path: "src" } }).path === undefined);
+const slots = [];
+placeStreamBlock(slots, 1, { type: "text", text: "kept" });
+check("stream compact skips holes", compactStreamBlocks(slots).length === 1 && compactStreamBlocks(slots)[0].text === "kept");
+check(
+  "toProviderBlock strips view keys only",
+  JSON.stringify(toProviderBlock({ type: "text", text: "hi", stubbed: true, chars: 2 })).includes("hi") &&
+    !JSON.stringify(toProviderBlock({ type: "text", text: "hi", stubbed: true })).includes("stubbed"),
+);
+check(
+  "toProviderBlock keeps thinking",
+  toProviderBlock({ type: "thinking", thinking: "abc", signature: "sig" }).thinking === "abc",
+);
+const searchReq = toRequest([
+  {
+    role: "assistant",
+    content: [
+      { type: "server_tool_use", id: "s1", name: "web_search", input: { query: "x" } },
+      {
+        type: "web_search_tool_result",
+        tool_use_id: "s1",
+        content: [{ type: "web_search_result", url: "https://ex.test", title: "t", encrypted_content: "secret" }],
+      },
+      { type: "text", text: "hi", citations: [{ type: "web_search_result_location", url: "https://ex.test" }] },
+    ],
+    tokens: 1,
+    sseq: 1,
+  },
+]);
+const searchJson = JSON.stringify(searchReq);
+check("toRequest keeps server_tool_use", searchJson.includes("server_tool_use") && searchJson.includes("\"query\":\"x\""));
+check("toRequest keeps encrypted search content", searchJson.includes("encrypted_content"));
+check("toRequest keeps text citations", searchJson.includes("citations") && searchJson.includes("web_search_result_location"));
 check(
   "reproFor web_search quotes query",
   (reproFor({ id: "1", name: "web_search", input: { query: "foo 'bar'" } }) ?? "").includes("'\\''"),
@@ -654,6 +631,460 @@ check(
 writeFileSync(join(root, "skip.bin"), Buffer.from("secret-bin\0more"));
 check("grep skips binary NUL files", !(await grepFiles(root, { pattern: "secret-bin" })).includes("skip.bin"));
 check("replay reports max storageSeq", replayed.ok && replayed.maxSeq === 5);
+
+const auth = await import("../agent-core/auth.ts");
+const {
+  pickHeaders,
+  needsRefresh,
+  parseTokenResponse,
+  parseOauthToken,
+  parseModelRef,
+  modifyProvider,
+  resolveAuth,
+  runLogin,
+  runLogout,
+  parseAuthCommand,
+  maskSecret,
+  authBanner,
+  resetAuthCache,
+  isOAuthToken,
+  requestHeaders,
+  extractAccountId,
+  defaultLoginMode,
+  providerProtocol,
+  hasStoredCredential,
+  hasEnvCredential,
+  firstAuthenticatedProvider,
+} = auth;
+const compat = await import("../agent-core/openai-compat.ts");
+const authFile = join(root, "auth.json");
+process.env.TERMINA_AUTH_PATH = authFile;
+resetAuthCache();
+
+check("pickHeaders oat uses bearer", pickHeaders("sk-ant-oat-secret").authorization === "Bearer sk-ant-oat-secret");
+check("pickHeaders oat sets betas", Boolean(pickHeaders("sk-ant-oat-secret")["anthropic-beta"]));
+check("pickHeaders api key uses x-api-key", pickHeaders("sk-ant-api-x")["x-api-key"] === "sk-ant-api-x");
+check("pickHeaders api key has no bearer", pickHeaders("sk-ant-api-x").authorization === undefined);
+check("isOAuthToken sniffs oat", isOAuthToken("prefix-sk-ant-oat-zz") === true);
+
+check("needsRefresh past is true", needsRefresh(Date.now() - 1000) === true);
+check("needsRefresh future is false", needsRefresh(Date.now() + 60_000) === false);
+
+check("parseTokenResponse missing access fails", parseTokenResponse({ refresh_token: "r", expires_in: 10 }).ok === false);
+check("parseTokenResponse missing refresh fails", parseTokenResponse({ access_token: "a", expires_in: 10 }).ok === false);
+const parsedTok = parseTokenResponse({ access_token: "a", refresh_token: "r", expires_in: 3600 }, 1_000_000);
+check(
+  "parseTokenResponse back-dates expires",
+  parsedTok.ok === true && parsedTok.expires === 1_000_000 + 3600 * 1000 - 300_000,
+);
+check("maskSecret hides the raw token", !maskSecret("sk-ant-oat-abcdefgh").includes("sk-ant-oat-abcd") && maskSecret("sk-ant-oat-abcdefgh").endsWith("efgh"));
+
+modifyProvider("anthropic", () => ({ type: "api_key", key: "stored-key", extra: "keep-me" }));
+modifyProvider("other", () => ({ type: "api_key", key: "other-key" }));
+modifyProvider("anthropic", (current) => ({ ...current, key: "stored-key-2" }));
+const storedFile = JSON.parse(readFileSync(authFile, "utf8"));
+check("modifyProvider preserves unrelated root keys", storedFile.other?.key === "other-key");
+check("modifyProvider preserves extra entry fields", storedFile.anthropic?.extra === "keep-me");
+
+const prevKey = process.env.ANTHROPIC_API_KEY;
+const prevTok = process.env.ANTHROPIC_AUTH_TOKEN;
+process.env.ANTHROPIC_API_KEY = "env-api-key";
+process.env.ANTHROPIC_AUTH_TOKEN = "env-auth-token";
+resetAuthCache();
+const storedWins = await resolveAuth("anthropic");
+check("stored credential beats env", storedWins.ok && storedWins.token === "stored-key-2" && storedWins.source === "api_key");
+runLogout("anthropic");
+resetAuthCache();
+const envWins = await resolveAuth("anthropic");
+check("env ANTHROPIC_API_KEY used when no store", envWins.ok && envWins.envName === "ANTHROPIC_API_KEY" && envWins.token === "env-api-key");
+delete process.env.ANTHROPIC_API_KEY;
+resetAuthCache();
+const altEnv = await resolveAuth("anthropic");
+check("env ANTHROPIC_AUTH_TOKEN is second", altEnv.ok && altEnv.envName === "ANTHROPIC_AUTH_TOKEN");
+delete process.env.ANTHROPIC_AUTH_TOKEN;
+resetAuthCache();
+const none = await resolveAuth("anthropic");
+check("missing credential fails closed", none.ok === false);
+if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+else process.env.ANTHROPIC_API_KEY = prevKey;
+if (prevTok === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
+else process.env.ANTHROPIC_AUTH_TOKEN = prevTok;
+
+check("parseAuthCommand default provider", parseAuthCommand("/login").cmd === "login" && parseAuthCommand("/login").provider === "anthropic");
+check("parseAuthCommand code mode", parseAuthCommand("/login code").mode === "code");
+check("parseAuthCommand rejects unknown provider", "error" in parseAuthCommand("/login nope"));
+check("banner does not contain raw token", !authBanner({ ok: true, providerId: "anthropic", token: "sk-ant-oat-SUPERSECRET99", kind: "oauth", source: "oauth", baseUrl: "https://api.anthropic.com", headers: {} }).includes("SUPERSECRET"));
+
+const tokenSrv = createServer((req, res) => {
+  let body = "";
+  req.on("data", (c) => {
+    body += c;
+  });
+  req.on("end", () => {
+    let grant = "";
+    try {
+      grant = JSON.parse(body).grant_type;
+    } catch {
+      grant = "";
+    }
+    res.setHeader("content-type", "application/json");
+    if (grant === "refresh_token") {
+      res.end(JSON.stringify({ access_token: "sk-ant-oat-refreshed99", refresh_token: "refresh-2", expires_in: 3600 }));
+      return;
+    }
+    res.end(JSON.stringify({ access_token: "sk-ant-oat-login99xy", refresh_token: "refresh-1", expires_in: 3600 }));
+  });
+});
+const tokenPort = await new Promise((resolve) => {
+  tokenSrv.listen(0, "127.0.0.1", () => resolve(tokenSrv.address().port));
+});
+const prevTokenUrl = process.env.TERMINA_TEST_TOKEN_URL;
+const prevRedir = process.env.TERMINA_TEST_REDIRECT_PORT;
+process.env.TERMINA_TEST_TOKEN_URL = `http://127.0.0.1:${tokenPort}/`;
+process.env.TERMINA_TEST_REDIRECT_PORT = "27321";
+resetAuthCache();
+runLogout("anthropic");
+let loginOut = "";
+const loginP = runLogin("anthropic", "browser", {
+  write: (t) => {
+    loginOut += t;
+  },
+  openUrl: () => {},
+});
+let loginResult;
+try {
+  const started = Date.now();
+  while (!loginOut.includes("authorize:") && Date.now() - started < 2000) await new Promise((r) => setTimeout(r, 20));
+  const authUrl = (loginOut.match(/authorize: (\S+)/) || [])[1];
+  const state = new URL(authUrl).searchParams.get("state");
+  await fetch(`http://127.0.0.1:27321/callback?code=test-code&state=${state}`);
+  loginResult = await loginP;
+} catch (err) {
+  loginResult = { ok: false, error: String(err) };
+}
+check("login stores oauth credential", loginResult.ok === true);
+resetAuthCache();
+const afterLogin = await resolveAuth("anthropic");
+check(
+  "login resolve uses bearer oat",
+  afterLogin.ok && afterLogin.kind === "oauth" && afterLogin.headers.authorization?.startsWith("Bearer ") && afterLogin.headers["x-api-key"] === undefined,
+);
+modifyProvider("anthropic", (current) => ({ ...current, expires: Date.now() - 1 }));
+resetAuthCache();
+const afterRefresh = await resolveAuth("anthropic");
+check(
+  "expired oauth refreshes and persists",
+  afterRefresh.ok && afterRefresh.token === "sk-ant-oat-refreshed99" && JSON.parse(readFileSync(authFile, "utf8")).anthropic.refresh === "refresh-2",
+);
+if (prevTokenUrl === undefined) delete process.env.TERMINA_TEST_TOKEN_URL;
+else process.env.TERMINA_TEST_TOKEN_URL = prevTokenUrl;
+if (prevRedir === undefined) delete process.env.TERMINA_TEST_REDIRECT_PORT;
+else process.env.TERMINA_TEST_REDIRECT_PORT = prevRedir;
+tokenSrv.close();
+
+check("parseModelRef grok is xai", parseModelRef("grok-4.3").provider === "xai" && parseModelRef("grok-4.3").model === "grok-4.3");
+check(
+  "parseModelRef openai-codex prefix",
+  parseModelRef("openai-codex/gpt-5.4").provider === "openai-codex" && parseModelRef("openai-codex/gpt-5.4").model === "gpt-5.4",
+);
+check("parseModelRef provider override", parseModelRef("gpt-5", "openai-codex").provider === "openai-codex");
+check("parseModelRef gpt defaults to openai", parseModelRef("gpt-5").provider === "openai");
+check("defaultLoginMode xai is device", defaultLoginMode("xai") === "device");
+check("defaultLoginMode openai is key", defaultLoginMode("openai") === "key");
+check("providerProtocol xai is completions", providerProtocol("xai") === "openai-completions");
+check("providerProtocol openai-codex is responses", providerProtocol("openai-codex") === "openai-codex-responses");
+check("parseAuthCommand /login xai is device", parseAuthCommand("/login xai").mode === "device" && parseAuthCommand("/login xai").provider === "xai");
+check("parseAuthCommand /login key openai", parseAuthCommand("/login key openai").mode === "key" && parseAuthCommand("/login key openai").provider === "openai");
+check("parseAuthCommand /login openai-codex", parseAuthCommand("/login openai-codex").provider === "openai-codex" && parseAuthCommand("/login openai-codex").mode === "browser");
+
+const prevOpenAI = process.env.OPENAI_API_KEY;
+const prevXai = process.env.XAI_API_KEY;
+process.env.OPENAI_API_KEY = "sk-openai-env";
+process.env.XAI_API_KEY = "xai-env-key";
+resetAuthCache();
+const openaiEnv = await resolveAuth("openai");
+const xaiEnv = await resolveAuth("xai");
+check("OPENAI_API_KEY resolves", openaiEnv.ok && openaiEnv.token === "sk-openai-env" && openaiEnv.headers.authorization === "Bearer sk-openai-env");
+check("XAI_API_KEY resolves", xaiEnv.ok && xaiEnv.token === "xai-env-key");
+modifyProvider("openai", () => ({ type: "api_key", key: "stored-openai" }));
+resetAuthCache();
+const openaiStored = await resolveAuth("openai");
+check("stored openai key beats env", openaiStored.ok && openaiStored.token === "stored-openai");
+runLogout("openai");
+if (prevOpenAI === undefined) delete process.env.OPENAI_API_KEY;
+else process.env.OPENAI_API_KEY = prevOpenAI;
+if (prevXai === undefined) delete process.env.XAI_API_KEY;
+else process.env.XAI_API_KEY = prevXai;
+
+const xaiKeep = parseOauthToken(
+  { access_token: "new-access", expires_in: 3600 },
+  1_000_000,
+  { requireRefresh: false, previousRefresh: "old-refresh", defaultExpiresIn: 3600 },
+);
+check(
+  "xai refresh keeps previous refresh token",
+  xaiKeep.ok === true && xaiKeep.refresh === "old-refresh" && xaiKeep.access === "new-access",
+);
+
+const jwtPayload = Buffer.from(
+  JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-99" } }),
+).toString("base64url");
+const jwt = `eyJhbGciOiJub25lIn0.${jwtPayload}.sig`;
+check("extractAccountId reads chatgpt_account_id", extractAccountId(jwt) === "acct-99");
+check(
+  "codex headers include account id",
+  requestHeaders("openai-codex", jwt, { accountId: "acct-99" })["chatgpt-account-id"] === "acct-99" &&
+    requestHeaders("openai-codex", jwt).originator === "termina-agent-core",
+);
+
+let keyOut = "";
+const keyLogin = await runLogin("google", "key", {
+  write: (t) => {
+    keyOut += t;
+  },
+  waitForCode: async () => "gemini-stored-key",
+});
+resetAuthCache();
+const googleStored = await resolveAuth("google");
+check("google key login stores api_key", keyLogin.ok === true && googleStored.ok && googleStored.token === "gemini-stored-key");
+runLogout("google");
+
+const mapped = compat.toCompletionsMessages("sys", [
+  { role: "assistant", content: [{ type: "tool_use", id: "call-1", name: "bash", input: { command: "ls" } }] },
+  { role: "user", content: [{ type: "tool_result", tool_use_id: "call-1", content: "ok" }] },
+]);
+check(
+  "completions maps tool_use to tool_calls",
+  mapped[0].role === "system" &&
+    mapped[1].role === "assistant" &&
+    mapped[1].tool_calls?.[0]?.id === "call-1" &&
+    mapped[2].role === "tool" &&
+    mapped[2].tool_call_id === "call-1",
+);
+const responsesIn = compat.toResponsesInput([
+  { role: "assistant", content: [{ type: "tool_use", id: "call-1", name: "bash", input: { command: "ls" } }] },
+  { role: "user", content: [{ type: "tool_result", tool_use_id: "call-1", content: "ok" }] },
+]);
+check(
+  "responses maps tool_use to function_call",
+  responsesIn[0].type === "function_call" && responsesIn[0].call_id === "call-1" && responsesIn[1].type === "function_call_output",
+);
+const streamResult = compat.completionResultFromEvents(
+  [
+    { choices: [{ delta: { content: "Hi" } }] },
+    {
+      choices: [
+        {
+          delta: { tool_calls: [{ index: 0, id: "c1", function: { name: "bash", arguments: "{\"command\":\"ls\"}" } }] },
+          finish_reason: "tool_calls",
+        },
+      ],
+    },
+    { usage: { prompt_tokens: 10, completion_tokens: 4 } },
+  ],
+  () => {},
+  Date.now(),
+);
+check(
+  "completion stream collects text and tool_use",
+  streamResult.blocks[0]?.type === "text" &&
+    streamResult.blocks[0]?.text === "Hi" &&
+    streamResult.blocks[1]?.type === "tool_use" &&
+    streamResult.blocks[1]?.name === "bash" &&
+    streamResult.stopReason === "tool_calls",
+);
+
+const deviceSrv = createServer((req, res) => {
+  let body = "";
+  req.on("data", (c) => {
+    body += c;
+  });
+  req.on("end", () => {
+    const params = new URLSearchParams(body);
+    res.setHeader("content-type", "application/json");
+    if (params.get("grant_type") === "urn:ietf:params:oauth:grant-type:device_code") {
+      res.end(JSON.stringify({ access_token: "xai-access-99", refresh_token: "xai-refresh-1", expires_in: 3600 }));
+      return;
+    }
+    res.end(
+      JSON.stringify({
+        device_code: "dev-1",
+        user_code: "ABCD-1234",
+        verification_uri: "http://127.0.0.1/device",
+        interval: 0,
+        expires_in: 60,
+      }),
+    );
+  });
+});
+const devicePort = await new Promise((resolve) => {
+  deviceSrv.listen(0, "127.0.0.1", () => resolve(deviceSrv.address().port));
+});
+const prevDevice = process.env.TERMINA_TEST_DEVICE_URL;
+const prevTok2 = process.env.TERMINA_TEST_TOKEN_URL;
+process.env.TERMINA_TEST_DEVICE_URL = `http://127.0.0.1:${devicePort}/`;
+process.env.TERMINA_TEST_TOKEN_URL = `http://127.0.0.1:${devicePort}/`;
+resetAuthCache();
+runLogout("xai");
+const xaiLogin = await runLogin("xai", "device", {
+  write: () => {},
+  openUrl: () => {},
+});
+resetAuthCache();
+const xaiAfter = await resolveAuth("xai");
+check(
+  "xai device login stores oauth",
+  xaiLogin.ok === true && xaiAfter.ok && xaiAfter.kind === "oauth" && xaiAfter.token === "xai-access-99",
+);
+runLogout("xai");
+if (prevDevice === undefined) delete process.env.TERMINA_TEST_DEVICE_URL;
+else process.env.TERMINA_TEST_DEVICE_URL = prevDevice;
+if (prevTok2 === undefined) delete process.env.TERMINA_TEST_TOKEN_URL;
+else process.env.TERMINA_TEST_TOKEN_URL = prevTok2;
+deviceSrv.close();
+
+const modelsMod = await import("../agent-core/models.ts");
+const {
+  parseModelsPayload,
+  isChatModel,
+  pickDefaultModel,
+  parseModelSwitch,
+  modelsUrl,
+  formatModelBanner,
+  formatModelLines,
+  loadProviderModels,
+  catalogFetchAllowed,
+} = modelsMod;
+
+check("isChatModel drops embeddings", isChatModel("text-embedding-3-small", "openai") === false);
+check("isChatModel keeps gpt", isChatModel("gpt-5", "openai") === true);
+check("isChatModel keeps gpt-4o", isChatModel("gpt-4o", "openai") === true);
+check("isChatModel keeps gemini flash", isChatModel("gemini-2.5-flash", "google") === true);
+check("isChatModel grok on xai", isChatModel("grok-4.3", "xai") === true);
+check("isChatModel grok-image dropped", isChatModel("grok-2-image", "xai") === false);
+
+const openaiList = parseModelsPayload(
+  { data: [{ id: "gpt-5" }, { id: "text-embedding-3-small" }, { id: "gpt-4.1-mini" }] },
+  "openai",
+);
+check("parseModelsPayload filters non-chat", openaiList.map((m) => m.id).join(",") === "gpt-5,gpt-4.1-mini");
+const anthList = parseModelsPayload(
+  { data: [{ id: "claude-sonnet-4-5-20250929", display_name: "Claude Sonnet 4.5" }] },
+  "anthropic",
+);
+check("parseModelsPayload anthropic display name", anthList[0]?.id === "claude-sonnet-4-5-20250929" && anthList[0]?.name === "Claude Sonnet 4.5");
+const gemList = parseModelsPayload(
+  { models: [{ name: "models/gemini-2.5-flash", displayName: "Gemini 2.5 Flash" }] },
+  "google",
+);
+check("parseModelsPayload strips google models/ prefix", gemList[0]?.id === "gemini-2.5-flash");
+check(
+  "pickDefaultModel prefix match",
+  pickDefaultModel(anthList, "claude-sonnet-4-5") === "claude-sonnet-4-5-20250929",
+);
+check("pickDefaultModel empty is null", pickDefaultModel([], "gpt-5") === null);
+check("parseModelSwitch prefix changes provider", parseModelSwitch("xai/grok-4.3", "anthropic").provider === "xai");
+check(
+  "parseModelSwitch empty tail uses default",
+  parseModelSwitch("xai/", "anthropic").provider === "xai" && parseModelSwitch("xai/", "anthropic").model === "grok-4.3",
+);
+check(
+  "parseModelSwitch openrouter keeps vendor/model",
+  parseModelSwitch("anthropic/claude-sonnet-4", "openrouter").provider === "openrouter" &&
+    parseModelSwitch("anthropic/claude-sonnet-4", "openrouter").model === "anthropic/claude-sonnet-4",
+);
+check("modelsUrl anthropic uses /v1/models", modelsUrl("anthropic", "https://api.anthropic.com").includes("/v1/models"));
+check("modelsUrl openai uses /models", modelsUrl("openai", "https://api.openai.com/v1").endsWith("/models"));
+check("formatModelBanner marks current", formatModelBanner([{ id: "a" }, { id: "b" }], "b").includes("*b"));
+check("formatModelLines stars current", formatModelLines([{ id: "a" }, { id: "b" }], "a").startsWith("* a"));
+check("catalogFetchAllowed is false under harness", catalogFetchAllowed() === false);
+
+const modelSrv = createServer((_req, res) => {
+  res.setHeader("content-type", "application/json");
+  res.end(JSON.stringify({ data: [{ id: "claude-sonnet-4-5-20250929" }, { id: "claude-haiku-4-5-20251001" }, { id: "not-a-model" }] }));
+});
+const modelPort = await new Promise((resolve) => {
+  modelSrv.listen(0, "127.0.0.1", () => resolve(modelSrv.address().port));
+});
+const prevModelsUrl = process.env.TERMINA_TEST_MODELS_URL;
+const prevAnth = process.env.ANTHROPIC_API_KEY;
+process.env.TERMINA_TEST_MODELS_URL = `http://127.0.0.1:${modelPort}/`;
+process.env.ANTHROPIC_API_KEY = "test-catalog-key";
+resetAuthCache();
+runLogout("anthropic");
+const live = await loadProviderModels("anthropic");
+check(
+  "loadProviderModels uses live list when authenticated",
+  live.ok === true && live.models.map((m) => m.id).join(",") === "claude-sonnet-4-5-20250929,claude-haiku-4-5-20251001",
+);
+if (prevModelsUrl === undefined) delete process.env.TERMINA_TEST_MODELS_URL;
+else process.env.TERMINA_TEST_MODELS_URL = prevModelsUrl;
+if (prevAnth === undefined) delete process.env.ANTHROPIC_API_KEY;
+else process.env.ANTHROPIC_API_KEY = prevAnth;
+resetAuthCache();
+modelSrv.close();
+
+runLogout("anthropic");
+runLogout("xai");
+modifyProvider("xai", () => ({ type: "oauth", access: "xai-access", refresh: "xai-refresh", expires: Date.now() + 60_000 }));
+const prevAnth2 = process.env.ANTHROPIC_API_KEY;
+process.env.ANTHROPIC_API_KEY = "env-anthropic-leftover";
+resetAuthCache();
+check("hasStoredCredential xai", hasStoredCredential("xai") === true);
+check("hasEnvCredential anthropic", hasEnvCredential("anthropic") === true);
+check("firstAuthenticatedProvider prefers stored over env", firstAuthenticatedProvider() === "xai");
+runLogout("xai");
+resetAuthCache();
+check("firstAuthenticatedProvider falls back to env", firstAuthenticatedProvider() === "anthropic");
+if (prevAnth2 === undefined) delete process.env.ANTHROPIC_API_KEY;
+else process.env.ANTHROPIC_API_KEY = prevAnth2;
+resetAuthCache();
+
+const refused = await loadProviderModels("anthropic");
+check("loadProviderModels without catalog url is skipped in tests", refused.ok === false);
+
+process.env.TERMINA_TEST_MODELS_URL = "http://127.0.0.1:1/";
+process.env.ANTHROPIC_API_KEY = "k";
+resetAuthCache();
+runLogout("anthropic");
+const netFail = await loadProviderModels("anthropic");
+check("loadProviderModels network failure is not a throw", netFail.ok === false && typeof netFail.error === "string");
+delete process.env.TERMINA_TEST_MODELS_URL;
+if (prevAnth === undefined) delete process.env.ANTHROPIC_API_KEY;
+else process.env.ANTHROPIC_API_KEY = prevAnth;
+resetAuthCache();
+
+const sse = new ReadableStream({
+  start(c) {
+    c.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"Hi"}}]}'));
+    c.close();
+  },
+});
+const sseEvents = await compat.readSseJson(sse);
+check("readSseJson flushes last line without newline", sseEvents[0]?.choices?.[0]?.delta?.content === "Hi");
+
+const itemDelta = compat.responsesResultFromEvents(
+  [
+    { type: "response.output_item.added", item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "bash", arguments: "" } },
+    { type: "response.function_call_arguments.delta", item_id: "fc_1", delta: '{"command":"ls"}' },
+  ],
+  () => {},
+  Date.now(),
+);
+check(
+  "responses delta item_id attaches to call_id",
+  itemDelta.blocks[0]?.type === "tool_use" && itemDelta.blocks[0]?.id === "call_1" && itemDelta.blocks[0]?.name === "bash",
+);
+const failedStream = compat.responsesResultFromEvents(
+  [{ type: "response.failed", response: { error: { message: "quota" } } }],
+  () => {},
+  Date.now(),
+);
+check("responses failed event is an error", failedStream.error === "quota");
+const bodyOpenAI = compat.completionsBody("gpt-5", "sys", [], [], "max_completion_tokens");
+check("openai completions uses max_completion_tokens", bodyOpenAI.max_completion_tokens === 8192 && bodyOpenAI.max_tokens === undefined);
+const bodyXai = compat.completionsBody("grok-4.3", "sys", [], []);
+check("other completions keep max_tokens", bodyXai.max_tokens === 8192);
 
 const failed = results.filter((r) => !r).length;
 console.log(`${results.length - failed}/${results.length} passed`);
