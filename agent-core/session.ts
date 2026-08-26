@@ -29,8 +29,14 @@ export function rotateSessionFile(path: string, now = Date.now()): { ok: true; a
     const dir = dirname(path);
     const name = basename(path);
     const stem = name.endsWith(".jsonl") ? name.slice(0, -".jsonl".length) : name;
-    let aside = join(dir, `${stem}-${sessionRotateStamp(now)}.jsonl`);
-    if (existsSync(aside)) aside = join(dir, `${stem}-${now}.jsonl`);
+    const stamp = sessionRotateStamp(now);
+    let aside = join(dir, `${stem}-${stamp}.jsonl`);
+    let n = 0;
+    while (existsSync(aside)) {
+      n += 1;
+      if (n > 20) return { ok: false, error: "could not pick a rotate name" };
+      aside = join(dir, `${stem}-${stamp}-${n}.jsonl`);
+    }
     renameSync(path, aside);
     return { ok: true, aside };
   } catch (err) {

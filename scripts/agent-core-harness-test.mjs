@@ -1455,6 +1455,16 @@ check(
     existsSync(rotated.aside) &&
     readFileSync(rotated.aside, "utf8").includes("keep me"),
 );
+writeFileSync(rotLive, JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "newer" } }) + "\n");
+const rotatedAgain = rotateSessionFile(rotLive, rotFixed);
+check(
+  "rotateSessionFile does not overwrite an existing aside file",
+  rotatedAgain.ok &&
+    rotatedAgain.aside === join(rotDir, "core-aaaa-2026-08-26T15-04-05-1.jsonl") &&
+    readFileSync(rotated.aside, "utf8").includes("keep me") &&
+    existsSync(rotatedAgain.aside) &&
+    readFileSync(rotatedAgain.aside, "utf8").includes("newer"),
+);
 
 const searchMod = await import("../electron/session-search.ts");
 const piLine = JSON.stringify({
@@ -1492,6 +1502,18 @@ check(
     coreParsed.paths.includes("greeting.ts"),
 );
 check("parse skips usage records", searchMod.parseSessionMessageLine(usageLine) === null);
+const toolResultLine = JSON.stringify({
+  storageSeq: 4,
+  type: "message",
+  message: {
+    role: "user",
+    content: [{ type: "tool_result", tool_use_id: "1", content: [{ type: "text", text: "compute output" }] }],
+  },
+});
+check(
+  "parse core tool_result arrays",
+  searchMod.parseSessionMessageLine(toolResultLine)?.text.includes("compute output") === true,
+);
 check("sessionTimestampFromName reads a rotate suffix", searchMod.sessionTimestampFromName("core-aaaa-2026-08-26T15-04-05.jsonl") === rotFixed);
 const merged = searchMod.mergeSessionFiles([
   [

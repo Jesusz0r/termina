@@ -3201,15 +3201,24 @@ function dispatchLine(line: string): void {
       showPrompt();
       return;
     }
-    history.length = 0;
-    streamPrepared = false;
-    storageSeq = 0;
     if (sessionFile) {
       const rotated = rotateSessionFile(sessionFile);
-      if (!rotated.ok) out(`(could not keep the previous session: ${rotated.error})\n`);
-      prepareSessionStream(sessionFile, "fresh");
+      if (!rotated.ok) {
+        out(`(could not keep the previous session: ${rotated.error})\n`);
+        showPrompt();
+        return;
+      }
+      try {
+        prepareSessionStream(sessionFile, "fresh");
+      } catch (err) {
+        out(`(could not start a fresh session: ${err instanceof Error ? err.message : String(err)})\n`);
+        showPrompt();
+        return;
+      }
     }
+    history.length = 0;
     streamPrepared = true;
+    storageSeq = 0;
     out("(session cleared)\n");
     showPrompt();
     return;

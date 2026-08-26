@@ -1567,6 +1567,46 @@ class PiEditorApp {
     return join(this.coreProjectSessionDir(cwd), `${sessionId}.jsonl`);
   }
 
+  /** True when `file` sits directly in `parent` (not in a subdirectory). */
+  private isDirectSessionChild(parent: string, file: string): boolean {
+    try {
+      return realpathSync(dirname(file)) === realpathSync(parent);
+    } catch {
+      return resolve(dirname(file)) === resolve(parent);
+    }
+  }
+
+  /**
+   * Move a leftover flat `agent-sessions/core-*.jsonl` into this project's
+   * session directory. Search only walks the project dir after a tab
+   * closes, so a file left at the root would disappear from results.
+   */
+  private adoptCoreSessionFile(sessionId: string, sessionFile: string | null, cwd: string): string {
+    const dest = this.coreSessionFile(sessionId, cwd);
+    try {
+      mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
+    } catch {
+      /* dest writes still try */
+    }
+    if (!sessionFile || !this.sessionFileExists(sessionFile)) return dest;
+    try {
+      if (realpathSync(sessionFile) === realpathSync(dest)) return dest;
+    } catch {
+      if (resolve(sessionFile) === resolve(dest)) return dest;
+    }
+    if (!this.isDirectSessionChild(this.coreSessionRoot(), sessionFile)) return sessionFile;
+    try {
+      if (this.sessionFileExists(dest)) {
+        if (this.sessionFileHasContent(dest) || !this.sessionFileHasContent(sessionFile)) return dest;
+        rmSync(dest, { force: true });
+      }
+      renameSync(sessionFile, dest);
+      return dest;
+    } catch {
+      return sessionFile;
+    }
+  }
+
   private terminalRosterPath(project: ProjectState): string {
     return join(this.userDataDir, "terminal-rosters", `${this.sanitizeSessionDir(project.canonicalRoot)}.json`);
   }
@@ -1666,11 +1706,17 @@ class PiEditorApp {
   }
 
   /** Delete an empty agent-core jsonl. A session with content stays on disk
-   *  so Session Search can read it after the tab closes. */
+   *  so Session Search can read it after the tab closes. A leftover file
+   *  at the agent-sessions root moves into this project's directory. */
   private discardCoreSession(inst: PiTerminalInstance): void {
     if (inst.engine !== "core" || !inst.sessionFile) return;
     if (!this.pathInside(this.coreSessionRoot(), inst.sessionFile)) return;
-    if (this.sessionFileHasContent(inst.sessionFile)) return;
+    if (this.sessionFileHasContent(inst.sessionFile)) {
+      if (inst.sessionId && isCoreSessionId(inst.sessionId)) {
+        this.adoptCoreSessionFile(inst.sessionId, inst.sessionFile, inst.cwd);
+      }
+      return;
+    }
     try {
       rmSync(inst.sessionFile, { force: true });
     } catch {
@@ -1855,8 +1901,8 @@ class PiEditorApp {
         if (!sessionId || !isCoreSessionId(sessionId) || this.coreSessionInUse(sessionId)) {
           sessionId = `core-${randomUUID()}`;
           sessionFile = this.coreSessionFile(sessionId, sessionCwd);
-        } else if (!sessionFile || !this.sessionFileExists(sessionFile)) {
-          sessionFile = this.coreSessionFile(sessionId, sessionCwd);
+        } else {
+          sessionFile = this.adoptCoreSessionFile(sessionId, sessionFile, sessionCwd);
         }
         try {
           if (sessionFile) mkdirSync(dirname(sessionFile), { recursive: true, mode: 0o700 });

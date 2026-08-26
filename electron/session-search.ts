@@ -6,7 +6,7 @@
  * search hits.
  */
 import { createReadStream } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
+import { readdir, realpath, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 // .ts extensions so the harness can load this file with strip-types.
@@ -78,8 +78,15 @@ export function parseSessionMessageLine(line: string): SessionMessageParse | nul
           texts.push(`[${block.name}]`);
           pushToolPaths(block, paths);
         } else if (type === "tool_result") {
-          const body = typeof block.content === "string" ? block.content : "";
-          if (body) texts.push(body.slice(0, 2000));
+          if (typeof block.content === "string") {
+            if (block.content) texts.push(block.content.slice(0, 2000));
+          } else if (Array.isArray(block.content)) {
+            for (const part of block.content) {
+              if (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string") {
+                texts.push(((part as { text: string }).text).slice(0, 2000));
+              }
+            }
+          }
         }
       }
     }
@@ -148,7 +155,13 @@ export async function listSessionJsonl(dir: string): Promise<SessionFileEntry[]>
     try {
       const info = await stat(path);
       if (!info.isFile()) continue;
-      out.push({ path, name, mtimeMs: info.mtimeMs });
+      let real = path;
+      try {
+        real = await realpath(path);
+      } catch {
+        /* keep the unresolved path */
+      }
+      out.push({ path: real, name, mtimeMs: info.mtimeMs });
     } catch {
       /* skip unreadable entries */
     }
