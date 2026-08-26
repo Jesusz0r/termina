@@ -1,158 +1,263 @@
-# Provider Auth for agent-core — Implementation Plan
+# Provider Auth for agent-core
 
-Status: draft v2 (audited against pi-ai source). Scope: the experimental
-in-house engine (`agent-core/`). The pi terminals already have full auth;
-they run pi, which owns its own flows. This plan covers only what the core
-engine needs.
+Status: implemented in `agent-core/auth.ts` and `agent-core/openai-compat.ts`.
+Scope: Termina's agent-core engine only.
 
-## Current state (contrast)
+Pi terminals keep Pi's own login. Shell terminals have no model auth.
+Agent-core does not read Pi's files, does not write Pi's `auth.json`, and
+does not share Pi's OAuth client. The user picks an engine per tab;
+credentials do not leak across engines.
 
-| Concern | Today (agent-core/main.ts) | pi (verified in source) | opencode |
-|---|---|---|---|
-| Providers | Anthropic only (`API_BASE`) | catalog of many | many |
-| API keys | `ANTHROPIC_API_KEY` env only | env checked only when nothing stored | env vars, then `auth.json` |
-| OAuth | none | PKCE/device per provider, `pi-ai/dist/auth/oauth/` | plugin-owned hooks |
-| Storage | none | `~/.pi/agent/auth.json`, `{type:"api_key"\|"oauth"}`, 0600 | `~/.local/share/opencode/auth.json`, 0600 |
-| Precedence | n/a | stored credential wins over env | similar |
-| Refresh | none (401 = dead end) | serialized `modify()` under file lock | single-flight promise in fetch wrapper |
+Public OAuth endpoints and client ids below are the same registrations Pi
+and OpenCode use (Claude Code, Codex CLI, xAI Grok-CLI, OpenRouter PKCE).
+This engine still owns the store, the headers, and the API translators.
 
-Hardcoded today: `API_BASE = ANTHROPIC_BASE_URL ?? https://api.anthropic.com`
-and `"x-api-key": ANTHROPIC_API_KEY` in both `callModel()` and `summarize()`.
+## Current state
 
-## Verified facts this plan relies on
+`agent-core/main.ts` routes by model to one of three protocols:
 
-All checked in pi's shipped code, not assumed:
+- Anthropic Messages (`anthropic`)
+- OpenAI Chat Completions (`openai`, `xai`, `google`, `openrouter`)
+- ChatGPT Codex Responses (`openai-codex`)
 
-- Storage key for Claude OAuth is `"anthropic"`
-  (`createProvider({id:"anthropic", auth:{apiKey, oauth:{...isSubscription:true}}})`).
-- Credential shape after login:
-  `{type:"oauth", refresh, access, expires}` where
-  `expires = Date.now() + expires_in*1000 - 300_000`. The 5-minute margin
-  is baked in at store time; consumers treat `expires <= Date.now()` as
-  expired (`minOAuthValidityMs` default 300 s).
-- Precedence (`auth/resolve.js`): "A stored credential owns the provider:
-  ambient/env is consulted only when nothing is stored." No silent env
-  fallback after a failed refresh.
-- Request shape depends on the token string itself, not its origin
-  (`isOAuthToken`): tokens containing `sk-ant-oat` go as
-  `Authorization: Bearer` plus `anthropic-beta:
-  claude-code-20250219,oauth-2025-04-20`, `user-agent: claude-cli/<ver>`,
-  `x-app: cli`; everything else goes as `x-api-key` with no Claude Code
-  betas. Base URL stays `https://api.anthropic.com` unless
-  `ANTHROPIC_BASE_URL` overrides it.
+Credentials live in `~/.termina/agent/auth.json`. `/login` / `/logout`
+take a provider id. `TERMINA_CORE_MODEL` and `TERMINA_CORE_PROVIDER`
+select which credential and protocol a run uses.
 
-## Design decisions
+## Design
 
-1. **One credential store on the machine: `~/.pi/agent/auth.json`.**
-   Same file pi uses, same shapes. Users run pi and core side by side;
-   logging into one logs into both. We are a narrow client of pi's
-   on-disk format — no second store, no migration machinery.
-2. **Phase 1 supports two auth kinds for Anthropic** (OAuth subscription,
-   API key). Every function takes `providerId` so adding OpenRouter
-   (key-paste only) later is additive, not structural.
-3. **Header selection by token sniffing, matching pi**: if the resolved
-   token contains `sk-ant-oat` use Bearer + beta headers + UA; otherwise
-   `x-api-key`. This stays correct no matter which slot the token came
-   from (stored, env, or a future proxy).
-4. **Login flow = pi's exact constants**: client id
-   `9d1c250a-e61b-44d9-88ed-5944d1962f5e`, authorize
-   `https://claude.ai/oauth/authorize`, token URL
-   `https://platform.claude.com/v1/oauth/token`, redirect
-   `http://127.0.0.1:53692/callback`, PKCE S256, scopes
-   `org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload`.
-   Store `expires` back-dated 300 s like pi does.
-5. **Refresh correctness**:
-   - Single rule: a stored oauth credential with `expires <= Date.now()`
-     needs a refresh. No second skew constant anywhere.
-   - Single-flight per process (`refreshPromise` dedupe) plus a lockfile
-     around the auth.json read-modify-write so a concurrent pi process
-     cannot double-refresh a rotated token.
-   - Persist the rotated refresh token BEFORE replaying any request.
-     Known residual risk: a crash between successful exchange and disk
-     write loses the rotation and forces re-login. Accepted; unavoidable
-     without transactional storage.
-6. **No tokens in sidecars or error messages.** Usage/log events never
-   carry credentials; status lines show masked ids only.
+**One store, owned by this engine:** `~/.termina/agent/auth.json` (mode `0600`).
+Override with `TERMINA_AUTH_PATH` for tests. Do not read `~/.pi/`,
+`~/.claude/`, or any other product's credential file.
 
-## Edge cases handled
+Root shape (unknown keys are preserved):
 
-- **Port 53692 already bound** (another pi/core login in progress):
-  fail with "port 53692 busy — another login may be running". No
-  ephemeral-port fallback: redirect_uri is fixed by the client
-  registration.
-- **CSRF / forged callbacks**: the authorize request carries a random
-  `state`; the callback server rejects mismatches, and surfaces an IdP
-  `error` query param as a readable failure instead of hanging.
-- **Stale view of auth.json**: a parallel pi process may login/logout or
-  refresh while we run. Resolve stats the file and reloads when mtime
-  changed (one stat per turn — free).
-- **Corrupt or unparseable auth.json**: warn and run env-only, and never
-  write. A blind rewrite could destroy other providers' credentials.
-- **Write shape**: every write is a whole-object read-modify-write that
-  preserves unknown root keys and unknown fields inside the credential
-  entry (pi may add `accountId` etc. later).
-- **401 handling**: with an oauth credential, refresh once and replay the
-  request once; then surface `(auth expired — run /login)`. With an api
-  key, never replay — surface "invalid API key".
-- **Missing fields in token response**: validate `access_token`,
-  `refresh_token`, `expires_in` exist; fail loudly rather than storing a
-  half credential.
-- **Ctrl+C during login**: aborts the wait and closes the callback server.
-- **`/login` while a run is active**: blocked like other commands.
-  `/login bogus-provider`: lists supported providers.
-- **Env chain**: `ANTHROPIC_API_KEY`, then `ANTHROPIC_AUTH_TOKEN` (common
-  in proxy setups alongside `ANTHROPIC_BASE_URL`). Consulted only when no
-  stored credential exists.
-- **Headless machines**: `/login` skips spawning a browser when no
-  display/browser opener exists and points at `/login code` (paste the
-  authorization code back; verifier lives in the same process).
+```json
+{
+  "anthropic": { "type": "oauth", "access": "…", "refresh": "…", "expires": 0 },
+  "xai": { "type": "oauth", "access": "…", "refresh": "…", "expires": 0 },
+  "openai": { "type": "api_key", "key": "…" },
+  "openai-codex": { "type": "oauth", "access": "…", "refresh": "…", "expires": 0, "accountId": "…" },
+  "google": { "type": "api_key", "key": "…" },
+  "openrouter": { "type": "api_key", "key": "…" }
+}
+```
+
+A corrupt file is never overwritten.
+
+**Providers**
+
+| Id | Login | Env | Protocol | Base URL |
+|---|---|---|---|---|
+| `anthropic` | Claude Pro/Max PKCE, or `/login key anthropic` | `ANTHROPIC_API_KEY`, then `ANTHROPIC_AUTH_TOKEN` | Anthropic Messages | `ANTHROPIC_BASE_URL` or `https://api.anthropic.com` |
+| `openai` | paste key | `OPENAI_API_KEY` | Chat Completions | `OPENAI_BASE_URL` or `https://api.openai.com/v1` |
+| `openai-codex` | ChatGPT Plus/Pro PKCE | none | Codex Responses | `https://chatgpt.com/backend-api` |
+| `xai` | SuperGrok / X Premium device code, or `/login key xai` | `XAI_API_KEY` | Chat Completions | `XAI_BASE_URL` or `https://api.x.ai/v1` |
+| `google` | paste key | `GEMINI_API_KEY`, then `GOOGLE_API_KEY` | Chat Completions (OpenAI-compat) | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| `openrouter` | PKCE-minted key, or `/login key openrouter` | `OPENROUTER_API_KEY` | Chat Completions | `OPENROUTER_BASE_URL` or `https://openrouter.ai/api/v1` |
+
+GitHub Copilot, Radius, Bedrock, and Azure stay out of this engine. Copilot
+uses a third token exchange (`copilot_internal`) and is not Completions.
+
+**Resolution order** (first hit wins, per provider):
+
+1. Stored entry for that provider
+2. Else env for that provider
+
+A stored entry owns the provider. Do not fall back to env after a failed
+refresh. Ambient env is only for machines with no file.
+
+**Model routing**
+
+`TERMINA_CORE_PROVIDER` wins when it is a supported id. Else a
+`provider/model` prefix (`xai/grok-4.3`, `openai-codex/gpt-5.4`). Else
+infer: `claude*` → anthropic, `grok*` → xai, `gemini*`/`gemma*` → google,
+`gpt-*`/`o1`/`o3`/`o4` → openai. Else anthropic.
+
+When a credential exists, the kernel GET-lists that provider's models
+(`agent-core/models.ts`) and uses that list. It does not use a baked-in
+catalog as the source of truth. `TERMINA_CORE_MODEL` still pins an id
+when set; a live id that only adds a date suffix may replace the pin
+(`claude-sonnet-4-5` → `claude-sonnet-4-5-20250929`). If the env does
+not pin a provider, startup picks the first **stored** credential in
+`anthropic`, `openai-codex`, `openai`, `xai`, `google`, `openrouter`
+order, then ambient env. A leftover `ANTHROPIC_API_KEY` does not hide a
+stored xAI or ChatGPT login. The GET has a 10 s timeout and a failed
+fetch does not invent a fake list.
+
+`/models` prints the live list. `/models refresh` fetches again.
+`/model <id>` switches. After `/login`, the kernel loads that provider's
+list and adopts it unless the env pinned a different provider.
+
+Embeddings, TTS, image, and similar ids are dropped. The list caps at
+200. Tests skip the live GET unless `TERMINA_TEST_MODELS_URL` is set.
+
+Summarization uses `TERMINA_CORE_SUMMARY_MODEL` when set, otherwise the
+cheap default on the same provider.
+
+**Anthropic request headers** follow the token string:
+
+- Token contains `sk-ant-oat`: `Authorization: Bearer`, plus
+  `anthropic-beta: claude-code-20250219,oauth-2025-04-20`,
+  `user-agent: termina-agent-core/1`, `x-app: cli`
+- Anything else: `x-api-key` and no Claude Code betas
+
+`anthropic-version: 2023-06-01` and `content-type: application/json` on
+every Anthropic request.
+
+**Other providers** send `Authorization: Bearer`. Codex also sends
+`chatgpt-account-id` (from the stored field or the JWT) and
+`originator: termina-agent-core`. OpenRouter also sends `HTTP-Referer`
+and `X-Title`.
+
+**Anthropic OAuth** (Claude Pro/Max). Public client used by Anthropic's CLI:
+
+- Client id `9d1c250a-e61b-44d9-88ed-5944d1962f5e`
+- Authorize `https://claude.ai/oauth/authorize`
+- Token `https://platform.claude.com/v1/oauth/token`
+- Redirect `http://127.0.0.1:53692/callback`
+- PKCE S256
+- Scopes `org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload`
+
+**OpenAI Codex OAuth** (ChatGPT Plus/Pro). Same public client as Codex CLI
+and OpenCode:
+
+- Client id `app_EMoamEEZ73f0CkXaXp7hrann`
+- Authorize `https://auth.openai.com/oauth/authorize`
+- Token `https://auth.openai.com/oauth/token` (form-urlencoded)
+- Redirect `http://localhost:1455/auth/callback`
+- PKCE S256
+- Scopes `openid profile email offline_access`
+- Extra authorize params: `id_token_add_organizations=true`,
+  `codex_cli_simplified_flow=true`, `originator=termina-agent-core`
+- Store `accountId` from the JWT claim `https://api.openai.com/auth`
+- API `POST {base}/codex/responses`
+
+**xAI SuperGrok OAuth**. Same public Grok-CLI client as Pi and OpenCode.
+Device code, not loopback PKCE:
+
+- Client id `b1a00492-073a-47ea-816f-4c329264a828`
+- Device `https://auth.x.ai/oauth2/device/code`
+- Token `https://auth.x.ai/oauth2/token` (form-urlencoded)
+- Scope `openid profile email offline_access grok-cli:access api:access`
+- `referrer=termina`
+- RFC 8628 `authorization_pending` / `slow_down`; refresh may omit a new
+  refresh token (keep the previous one); missing `expires_in` defaults to
+  3600 seconds
+
+**OpenRouter OAuth**. PKCE that mints a permanent user-controlled API key
+(no refresh). Stored as `api_key`. Redirect
+`http://127.0.0.1:53693/callback`. Token
+`https://openrouter.ai/api/v1/auth/keys`.
+
+Store `expires = Date.now() + expires_in * 1000 - 300_000` (five-minute
+margin at write time). A credential needs refresh when
+`expires <= Date.now()`. One rule. No second skew constant.
+
+Refresh is single-flight per provider and uses a lockfile around the
+read-modify-write so two agent-core processes cannot rotate the same
+refresh token twice. Persist the new refresh token before replaying a
+request. A crash between a successful exchange and the disk write loses
+the rotation and forces `/login` again. Accepted.
+
+Tests may point authorize, token, device, redirect, and models GET at
+loopback with `TERMINA_TEST_AUTHORIZE_URL`, `TERMINA_TEST_TOKEN_URL`,
+`TERMINA_TEST_DEVICE_URL`, `TERMINA_TEST_REDIRECT_PORT`, and
+`TERMINA_TEST_MODELS_URL`. Production constants stay in
+`agent-core/auth.ts` and `agent-core/models.ts`. Harness runs set
+`TERMINA_CORE_TEST=1` so startup does not call a real models endpoint.
+
+**No tokens in sidecars, traces, or error text.** Status lines show a
+masked suffix only (last four characters).
+
+**web_search** stays the Anthropic server tool. Completions providers do
+not get a second search implementation.
+
+## Edge cases
+
+- Port 53692 / 1455 / 53693 bound: fail `port N busy — another login may be running`.
+  No ephemeral port. Registered redirect URIs are fixed.
+- CSRF: random `state` on Anthropic and Codex authorize; callback rejects
+  mismatches. OpenRouter does not echo state. IdP `error` query param
+  becomes a readable failure, not a hang.
+- Parallel writer: `resolveAuth` stats the file and reloads on mtime
+  change (one stat per turn).
+- Corrupt `auth.json`: warn, env-only, never write.
+- Writes are whole-object read-modify-write.
+- 401 + oauth: refresh once, replay once, then `(auth expired — run /login)`.
+- 401 + api key: no replay; `invalid API key`.
+- Token response missing required fields: reject. Do not store a half credential.
+- Ctrl+C during login: abort the wait and close the callback server.
+- `/login` while a run is active: blocked. `/login` with an unknown
+  provider: list supported ids.
+- No display / no `open`: `/login` does not spawn a browser and tells
+  the user to use `/login code`.
+- `/login code`: print the authorize URL, wait for the next line as the
+  authorization code or redirect URL, exchange in-process (PKCE verifier
+  never leaves the process).
+- `/login key [provider]`: paste an API key onto the next line.
+- `/login xai`: device code. Prints the verification URL and user code,
+  then polls. `/login key xai` stores `XAI_API_KEY`.
+- Windows browser-open is out of scope (macOS-first).
+- xAI `verification_uri` must be https, except when tests override the
+  device URL.
 
 ## Slash commands
 
-- `/login [provider]` — PKCE flow rendered in the terminal: start loopback
-  server → print authorize URL → try `open`/`xdg-open` (Windows support
-  deliberately out of scope while the app is macOS-first) → wait →
-  exchange → store → print masked summary.
-- `/login code [provider]` — paste-the-code variant for headless/SSH.
-- `/logout [provider]` — delete the entry, confirm.
-- Banner shows resolved auth source, e.g.
-  `auth: oauth (claude.ai)` / `auth: api_key (auth.json)` /
-  `auth: env ANTHROPIC_API_KEY` — replacing today's bare `key ok`.
+- `/login [provider]` — default login for that provider (`anthropic` if omitted).
+- `/login code [provider]` — paste-the-code variant (PKCE providers).
+- `/login key [provider]` — paste an API key.
+- `/logout [provider]` — delete the stored entry and confirm.
+- Banner replaces `key ok` with the resolved source, for example
+  `auth: oauth (…abcd)` / `auth: xai oauth (…abcd)` /
+  `auth: api_key (auth.json)` / `auth: env ANTHROPIC_API_KEY` /
+  `auth: none`.
 
-## File changes
+## Files
 
-- `agent-core/auth.ts` (new, bundled automatically via import):
-  `readAuth()` / `modifyProvider(id, fn)` (lockfile, atomic tmp+rename,
-  0600), `resolveAuth()` (mtime reload + precedence), `refreshOauth()`,
-  `runLogin(io)` / `runLogout(io)`, and pure helpers (`pickHeaders`,
-  `needsRefresh`, `parseTokenResponse`) exported for the self-check.
-  Test hooks: `TERMINA_AUTH_PATH` overrides the file path; the authorize
-  and token URLs honor `TERMINA_TEST_AUTHORIZE_URL` /
-  `TERMINA_TEST_TOKEN_URL` so the login flow can be exercised against a
-  local mock without touching production constants elsewhere.
-- `agent-core/main.ts`: delete the `API_BASE`/`x-api-key` literals; route
-  `callModel` and `summarize` through `resolveAuth()` + header builder;
-  401 retry-once logic; register `/login`, `/logout`, banner change.
-- `docs/AGENT-CORE.md`: document commands and precedence.
-- No electron/, preload, or renderer changes.
+| File | Change |
+|---|---|
+| `agent-core/auth.ts` | Store, resolve, refresh, login, logout, header pick, model routing |
+| `agent-core/openai-compat.ts` | Completions and Codex Responses translators |
+| `agent-core/models.ts` | Live GET `/models`, parse, pick default, `/models` `/model` helpers |
+| `agent-core/main.ts` | Provider post, 401 retry-once, protocol switch, `/login` `/logout`, banner, catalog |
+| `docs/AGENT-CORE.md` | Commands and precedence |
+| `scripts/agent-core-harness-test.mjs` | auth and translator cases via `TERMINA_AUTH_PATH` |
+| `docs/AUTH-PLAN.md` | this file |
 
-## Test plan
+No Electron, preload, renderer, or Pi package changes. The kernel process
+reads its own file. The host env already passes provider keys through
+`cleanEnv()`.
 
-- Self-check (pattern exists: `toRequest` is exported for this): assert
-  `pickHeaders` sniffs `sk-ant-oat` correctly from all three sources,
-  precedence order, `needsRefresh` math against back-dated expiries,
-  `parseTokenResponse` rejecting incomplete payloads, and that
-  `modifyProvider` preserves unrelated keys and survives a concurrent-
-  writer simulation.
-- One pty smoke test reusing the mock-API harness: boot with
-  `TERMINA_TEST_*_URL` pointing at a local mock, verify login end-to-end
-  (callback → stored credential → request carries Bearer + betas), then
-  401 → refresh → replay.
+## Tests
 
-## Explicitly out of scope
+Focused gate already imports `agent-core/main.ts`. Import `agent-core/auth.ts`
+and `agent-core/openai-compat.ts` the same way. `TERMINA_AUTH_PATH` points
+at a temp file. No network to real providers.
 
-- OpenRouter/OpenAI/xAI/Copilot OAuth — add when the routing map points
-  at them; `providerId` plumbing already exists.
-- A settings UI for auth — slash commands are the product surface while
-  the engine is experimental.
-- Windows browser-open support.
+- `pickHeaders`: `sk-ant-oat` → Bearer + betas; other tokens → `x-api-key`
+- Precedence: stored api_key beats env; stored oauth beats env; missing
+  file uses `ANTHROPIC_API_KEY` then `ANTHROPIC_AUTH_TOKEN`
+- `OPENAI_API_KEY` / `XAI_API_KEY` resolve when no stored entry
+- `needsRefresh`: `expires` in the past is true; future is false
+- `parseTokenResponse`: missing fields fail; complete payload computes
+  back-dated `expires`
+- xAI refresh keeps the previous refresh token when the response omits one
+- `modifyProvider` preserves unrelated root keys and extra fields on the
+  entry
+- Masked status never contains the raw token
+- Login against loopback token URL stores oauth and builds Bearer headers
+- 401 + oauth refreshes once and persists the new refresh token
+- xAI device login against loopback stores oauth
+- Codex headers include `chatgpt-account-id` from the JWT
+- Completions translator maps `tool_use` / `tool_result` to tool calls
+- `parseModelRef` reads prefixes and `TERMINA_CORE_PROVIDER`
+
+## Out of scope
+
+- GitHub Copilot, Radius, Bedrock, Azure, and every other catalog id
+- A settings UI (slash commands while the engine is experimental)
+- Windows `open`
+- Reading or writing Pi credential files
+- Syncing login between Pi tabs and Agent (core) tabs
+- A second web_search implementation for Completions providers
