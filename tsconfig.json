@@ -24,6 +24,8 @@
   "include": [
     "src",
     "electron",
-    "scripts"
+    "scripts",
+    "agent-core",
+    "shared"
   ]
 }

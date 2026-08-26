@@ -252,11 +252,13 @@ class PiTerminalInstance {
   /** The project that owns this terminal, or null. */
   projectId: string | null = null;
   type: "agent" | "shell";
+  /** The engine for an agent terminal. Shells leave this unset. */
+  engine?: "pi" | "core";
   /** Save this user tab in the project roster. */
   persist = true;
-  /** Pi session id used to resume this tab. */
+  /** Agent session id used to resume this tab. */
   sessionId: string | null = null;
-  /** Absolute Pi session file used to resume this tab. */
+  /** Absolute agent session file used to resume this tab. */
   sessionFile: string | null = null;
   /** The live model of this agent, provider-qualified when known. */
   model: string | null = null;
@@ -1657,7 +1659,7 @@ class PiEditorApp {
   private copiedAgentSettings(fromTerminalId: string | undefined): { model: string | null; thinkingLevel: string | null } | null {
     if (!fromTerminalId) return null;
     const source = this.terminals.get(fromTerminalId);
-    if (!source || source.type !== "agent") return null;
+    if (!source || source.type !== "agent" || source.engine === "core") return null;
     return {
       model: source.model ?? source.currentRun?.model ?? null,
       thinkingLevel: source.thinkingLevel ?? source.currentRun?.thinkingLevel ?? null,
@@ -1705,6 +1707,7 @@ class PiEditorApp {
     opts?: {
       type?: "agent" | "shell";
       shell?: string;
+      engine?: "pi" | "core";
       workspaceId?: string;
       id?: string;
       fromTerminalId?: string;
@@ -1727,10 +1730,10 @@ class PiEditorApp {
     } else {
       id = this.allocateTerminalId();
     }
-    if (type === "agent" && !(await this.checkPiAvailable())) {
+    if (type === "agent" && opts?.engine !== "core" && !(await this.checkPiAvailable())) {
       throw new Error(this.piMissingMessage());
     }
-    const copied = type === "agent" && !opts?.launch && !opts?.resume
+    const copied = type === "agent" && opts?.engine !== "core" && !opts?.launch && !opts?.resume
       ? this.copiedAgentSettings(opts?.fromTerminalId)
       : null;
     let cmd: string;
@@ -1753,6 +1756,14 @@ class PiEditorApp {
       shellName = chosen.name;
       shellPath = chosen.path;
       env = { ...process.env };
+    } else if (type === "agent" && opts?.engine === "core") {
+      // The experimental in-house engine. Same sidecar contract as the
+      // bridge, so timeline and modified list work unchanged. ELECTRON_
+      // RUN_AS_NODE cannot read inside the asar; spawn the unpacked copy
+      // (same rule as pi's cli.js).
+      cmd = process.execPath;
+      args = [join(__dirname, "agent-core.mjs").replace("app.asar", "app.asar.unpacked")];
+      env = { ...cleanEnv(), ELECTRON_RUN_AS_NODE: "1", TERMINA_TERMINAL_ID: id, TERMINA_EVENTS_DIR: this.eventsDir };
     } else {
       cmd = this.resolvePiBin();
       // The app-owned bridge loads through the CLI option, not project
@@ -1773,6 +1784,7 @@ class PiEditorApp {
     inst.shellPath = shellPath;
     inst.sessionId = sessionId;
     inst.sessionFile = sessionFile;
+    if (type === "agent") inst.engine = opts?.engine === "core" ? "core" : "pi";
     if (copied) this.applyAgentSettings(inst, copied.model, copied.thinkingLevel);
     this.terminals.set(inst.id, inst);
     if (owner) {
@@ -4782,12 +4794,16 @@ class PiEditorApp {
     ipcMain.handle("terminals:create", async (_e, opts?: unknown) => {
       let type: "agent" | "shell" | undefined;
       let shell: string | undefined;
+      let engine: "pi" | "core" | undefined;
       let fromTerminalId: string | undefined;
       if (opts !== undefined) {
         if (typeof opts !== "object" || opts === null) return { ok: false, error: "invalid terminal options" };
-        const rec = opts as { type?: unknown; shell?: unknown; fromTerminalId?: unknown };
+        const rec = opts as { type?: unknown; shell?: unknown; engine?: unknown; fromTerminalId?: unknown };
         if (rec.type !== undefined && rec.type !== "agent" && rec.type !== "shell") {
           return { ok: false, error: "invalid terminal type" };
+        }
+        if (rec.engine !== undefined && rec.engine !== "pi" && rec.engine !== "core") {
+          return { ok: false, error: "invalid agent engine" };
         }
         if (rec.shell !== undefined && typeof rec.shell !== "string") return { ok: false, error: "invalid shell" };
         if (rec.fromTerminalId != null) {
@@ -4799,13 +4815,14 @@ class PiEditorApp {
         }
         type = rec.type;
         shell = rec.shell;
+        engine = rec.engine;
         if (shell) {
           const shells = await detectShells();
           if (!shells.some((item) => item.path === shell)) return { ok: false, error: "unknown shell" };
         }
       }
       try {
-        const t = await this.createTerminal(undefined, { type, shell, fromTerminalId });
+        const t = await this.createTerminal(undefined, { type, shell, engine, fromTerminalId });
         return { ok: true, id: t.id };
       } catch (err) {
         return { ok: false, error: (err as Error).message };

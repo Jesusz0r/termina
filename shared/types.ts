@@ -202,7 +202,9 @@ export function cssFontFamily(family: string): string {
   return `'${family}', ${DEFAULT_CODE_FONT_STACK}`;
 }
 
-/** The last path segment, for either POSIX or Windows separators. */
+/** The last path segment, for either POSIX or Windows separators.
+ *  Hand-rolled on purpose: this module also bundles into the renderer,
+ *  where node:path is unavailable. Do not swap for node:path.basename. */
 export function pathBasename(p: string): string {
   return p.split(/[\\/]/).pop() || p;
 }
@@ -446,7 +448,7 @@ export interface PiBridge {
   onUpdateState(cb: (state: AppUpdateState) => void): void;
 
   // terminals (agent = pi TUI, shell = a real shell like zsh)
-  createTerminal(opts?: { type?: "agent" | "shell"; shell?: string; fromTerminalId?: string }): Promise<{ ok: boolean; id?: string; error?: string }>;
+  createTerminal(opts?: { type?: "agent" | "shell"; shell?: string; engine?: "pi" | "core"; fromTerminalId?: string }): Promise<{ ok: boolean; id?: string; error?: string }>;
   getShells(): Promise<{ name: string; path: string }[]>;
   getPiStatus(): Promise<{ available: boolean; bin: string; message?: string }>;
   closeTerminal(id: string): Promise<void>;

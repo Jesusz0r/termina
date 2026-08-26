@@ -33,6 +33,14 @@ await build({
   external: [...shared.external, "@earendil-works/pi-coding-agent"],
 });
 
+await build({
+  ...shared,
+  entryPoints: ["agent-core/main.ts"],
+  platform: "node",
+  format: "esm",
+  outfile: "dist-electron/agent-core.mjs",
+});
+
 // Preload must be CommonJS: sandboxed preloads cannot load ESM.
 await build({
   ...shared,

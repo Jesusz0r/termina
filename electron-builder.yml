@@ -13,6 +13,9 @@ files:
 # to app.asar.unpacked for require and fs automatically.
 asarUnpack:
   - node_modules/**/*
+  # agent-core runs under ELECTRON_RUN_AS_NODE, which cannot read inside
+  # the archive. Spawn it from app.asar.unpacked.
+  - dist-electron/agent-core.mjs
 extraResources:
   - from: resources/termina-core
     to: termina-core
