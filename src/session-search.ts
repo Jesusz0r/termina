@@ -1,7 +1,7 @@
 /**
- * Session Search: a modal that searches the project's past sessions and
- * opens the files the hits mention. Triggered by View → Search Sessions
- * (Cmd+Shift+F).
+ * Session Search: a modal that searches the project's past Pi and core
+ * sessions and opens the files the hits mention. Triggered by View →
+ * Search Sessions.
  */
 import type { SessionHit } from "../shared/types";
 

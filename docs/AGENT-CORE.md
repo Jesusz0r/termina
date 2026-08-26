@@ -209,11 +209,14 @@ provider. `/models` prints `provider` and `id` on each row; typing
 selects one. The file is not Pi's `auth.json`. See `docs/AUTH-PLAN.md`.
 
 The host owns session resume. `TERMINA_CORE_SESSION_FILE` is the jsonl
-path under the app user-data `agent-sessions` directory.
+path under the app user-data `agent-sessions/<project>/` directory.
 `TERMINA_CORE_RESUME=1` replays it at process start. A failed replay
 renames the file aside so the next prompt does not truncate the only
 copy. Without the resume flag a new prompt still truncates the stream so
-a reused terminal id cannot append a second history.
+a reused terminal id cannot append a second history. `/clear` rotates a
+non-empty file aside (`core-<id>-<stamp>.jsonl`) and starts a fresh file
+at the same path so Session Search can still read the previous
+conversation. Closing a tab keeps a non-empty persist session.
 
 ## Relationship to prior art
 

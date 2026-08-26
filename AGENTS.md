@@ -76,6 +76,9 @@ In this repository that means:
   emit that protocol: the Pi bridge (`electron/bridge-extension.ts`) and
   agent-core (`agent-core/host.ts` plus `logEvent` in `agent-core/main.ts`).
   Do not add a third writer or a second event schema.
+* `electron/session-search.ts` owns Session Search parse and walk. Main
+  supplies this project's Pi directory, core directory, and live/roster
+  files. Do not add a second session JSONL parser.
 * The bridge extension is app-owned in the user-data directory. Do not
   generate a second copy in the project.
 * IPC channels use the `area:action` pattern. Do not invent a second
@@ -721,8 +724,10 @@ Use these terms exactly. Do not invent synonyms.
 - `agent-core/`: the in-house agent kernel (loop, tools, TUI, auth).
 - `agent-core/host.ts`: Termina host adapter (ack, prompt payload, context
   files, startup-control). Same file names as the Pi bridge.
-- `agent-core/session.ts`: core session JSONL slice and fork write. Pi
-  session fork stays in `electron/session-fork.ts`.
+- `agent-core/session.ts`: core session JSONL slice, fork write, and
+  `/clear` rotate. Pi session fork stays in `electron/session-fork.ts`.
+- `electron/session-search.ts`: Session Search parse and walk (Pi and
+  core JSONL). Main supplies the file list for the active project.
 - `electron/watcher.ts`: watches the project, keeps a content cache, and
   emits change events.
 - `electron/worldline-git.ts`: the snapshot store client (capture,

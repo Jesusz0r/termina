@@ -6,8 +6,8 @@
  * decides whether that text is a plan and how Dispatch claims rows.
  */
 import { isAbsolute, relative } from "node:path";
-import { HAS_UNCHECKED_PLAN_TASK, PLAN_TASK_MARKER } from "../shared/plan-task.js";
-import type { PlanTask } from "../shared/types.js";
+import { HAS_UNCHECKED_PLAN_TASK, PLAN_TASK_MARKER } from "../shared/plan-task.ts";
+import type { PlanTask } from "../shared/types.ts";
 
 export { HAS_UNCHECKED_PLAN_TASK, PLAN_TASK_MARKER };
 

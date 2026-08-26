@@ -72,6 +72,8 @@ const {
   resolveSessionFile,
   quarantineSessionFile,
   MAX_SESSION_FILE_BYTES,
+  rotateSessionFile,
+  sessionRotateStamp,
   sliceSessionText,
   writeForkedSession,
   SLASH_COMMANDS,
@@ -1434,6 +1436,100 @@ const writtenFork = await writeForkedSession(forkSrc, forkDst, 2);
 check("writeForkedSession writes the sliced prefix", writtenFork.ok && existsSync(forkDst) && readFileSync(forkDst, "utf8").includes("\"a1\"") && !readFileSync(forkDst, "utf8").includes("\"u2\""));
 const emptyFork = await writeForkedSession(forkSrc, join(forkDir, "empty.jsonl"), 0);
 check("writeForkedSession through 0 writes an empty file", emptyFork.ok && readFileSync(join(forkDir, "empty.jsonl"), "utf8") === "");
+
+const rotDir = mkdtempSync(join(tmpdir(), "agent-core-rotate-"));
+leftovers.push(rotDir);
+const rotLive = join(rotDir, "core-aaaa.jsonl");
+check("rotateSessionFile skips a missing file", rotateSessionFile(rotLive).ok && rotateSessionFile(rotLive).aside === null);
+writeFileSync(rotLive, "");
+check("rotateSessionFile skips an empty file", rotateSessionFile(rotLive).ok && rotateSessionFile(rotLive).aside === null && existsSync(rotLive));
+writeFileSync(rotLive, JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "keep me" } }) + "\n");
+const rotFixed = new Date(2026, 7, 26, 15, 4, 5).getTime();
+const rotated = rotateSessionFile(rotLive, rotFixed);
+check("sessionRotateStamp is filesystem-safe", sessionRotateStamp(rotFixed) === "2026-08-26T15-04-05");
+check(
+  "rotateSessionFile moves a non-empty session aside",
+  rotated.ok &&
+    rotated.aside === join(rotDir, "core-aaaa-2026-08-26T15-04-05.jsonl") &&
+    !existsSync(rotLive) &&
+    existsSync(rotated.aside) &&
+    readFileSync(rotated.aside, "utf8").includes("keep me"),
+);
+
+const searchMod = await import("../electron/session-search.ts");
+const piLine = JSON.stringify({
+  type: "message",
+  message: {
+    role: "assistant",
+    content: [
+      { type: "text", text: "created compute in `utils.ts`" },
+      { type: "toolCall", name: "write", arguments: { path: "utils.ts" } },
+    ],
+  },
+});
+const coreLine = JSON.stringify({
+  storageSeq: 2,
+  type: "message",
+  message: {
+    role: "assistant",
+    content: [
+      { type: "text", text: "edited greeting" },
+      { type: "thinking", text: "secret" },
+      { type: "tool_use", id: "1", name: "edit", input: { path: "greeting.ts", old_text: "a", new_text: "b" } },
+    ],
+  },
+});
+const usageLine = JSON.stringify({ storageSeq: 3, type: "usage", input: 1 });
+const piParsed = searchMod.parseSessionMessageLine(piLine);
+const coreParsed = searchMod.parseSessionMessageLine(coreLine);
+check("parse Pi toolCall extracts the path", piParsed?.role === "assistant" && piParsed.text.includes("compute") && piParsed.paths.includes("utils.ts"));
+check(
+  "parse core tool_use extracts the path and skips thinking",
+  coreParsed?.role === "assistant" &&
+    coreParsed.text.includes("edited greeting") &&
+    coreParsed.text.includes("[edit]") &&
+    !coreParsed.text.includes("secret") &&
+    coreParsed.paths.includes("greeting.ts"),
+);
+check("parse skips usage records", searchMod.parseSessionMessageLine(usageLine) === null);
+check("sessionTimestampFromName reads a rotate suffix", searchMod.sessionTimestampFromName("core-aaaa-2026-08-26T15-04-05.jsonl") === rotFixed);
+const merged = searchMod.mergeSessionFiles([
+  [
+    { path: "/s/a.jsonl", name: "a.jsonl", mtimeMs: 10 },
+    { path: "/s/b.jsonl", name: "b.jsonl", mtimeMs: 20 },
+  ],
+  [{ path: "/s/a.jsonl", name: "a.jsonl", mtimeMs: 10 }],
+]);
+check("mergeSessionFiles drops duplicate paths and sorts newest first", merged.length === 2 && merged[0]?.path === "/s/b.jsonl");
+
+const searchDir = mkdtempSync(join(tmpdir(), "agent-core-search-"));
+leftovers.push(searchDir);
+writeFileSync(join(searchDir, "utils.ts"), "export function compute() {}\n");
+writeFileSync(join(searchDir, "greeting.ts"), "export const greeting = 'hi';\n");
+const coreJsonl = join(searchDir, "core-bbbb.jsonl");
+writeFileSync(
+  coreJsonl,
+  [
+    JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "add compute" } }),
+    coreLine,
+  ].join("\n") + "\n",
+);
+const searchHits = await searchMod.searchSessionFiles({
+  query: "compute",
+  files: [{ path: coreJsonl, name: "core-bbbb.jsonl", mtimeMs: 1 }],
+  projectCwd: searchDir,
+  canonicalize: (p) => p,
+  isProjectFile: (rel) => rel === "utils.ts" || rel === "greeting.ts",
+});
+check("search finds a core user line", searchHits.some((h) => h.text.includes("add compute") && h.sessionFile === "core-bbbb.jsonl"));
+const greetingHits = await searchMod.searchSessionFiles({
+  query: "greeting",
+  files: [{ path: coreJsonl, name: "core-bbbb.jsonl", mtimeMs: 1 }],
+  projectCwd: searchDir,
+  canonicalize: (p) => p,
+  isProjectFile: (rel) => rel === "utils.ts" || rel === "greeting.ts",
+});
+check("search resolves a core edit path", greetingHits.some((h) => h.filePath === "greeting.ts"));
 check("slash menu puts help first", SLASH_COMMANDS[0]?.name === "/help");
 check("slash menu puts exit last", SLASH_COMMANDS.at(-1)?.name === "/exit");
 check("slash /clear is listed", SLASH_COMMANDS.some((c) => c.name === "/clear"));

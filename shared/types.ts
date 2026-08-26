@@ -80,7 +80,7 @@ export interface SessionHit {
   before: string;
   /** One line of context after the hit. */
   after: string;
-  /** The session start time (from the file name). */
+  /** The session start time (from the file name, or mtime for core files). */
   ts: number;
   /** A project file the hit mentions, resolved against disk (when any). */
   filePath?: string;

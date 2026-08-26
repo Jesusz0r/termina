@@ -4,10 +4,39 @@
  * Worldlines slices this format without importing the kernel loop.
  * Revisions stay in the prefix: replay on the candidate applies them.
  */
+import { existsSync, renameSync, statSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 export const MAX_SESSION_FILE_BYTES = 32 * 1024 * 1024;
+
+/** Filesystem-safe stamp for a rotated session file name. */
+export function sessionRotateStamp(ms: number): string {
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
+}
+
+/**
+ * Move a non-empty session jsonl aside so /clear can start a fresh file
+ * at the same path. Empty or missing files stay as they are.
+ */
+export function rotateSessionFile(path: string, now = Date.now()): { ok: true; aside: string | null } | { ok: false; error: string } {
+  try {
+    if (!existsSync(path)) return { ok: true, aside: null };
+    const info = statSync(path);
+    if (!info.isFile() || info.size === 0) return { ok: true, aside: null };
+    const dir = dirname(path);
+    const name = basename(path);
+    const stem = name.endsWith(".jsonl") ? name.slice(0, -".jsonl".length) : name;
+    let aside = join(dir, `${stem}-${sessionRotateStamp(now)}.jsonl`);
+    if (existsSync(aside)) aside = join(dir, `${stem}-${now}.jsonl`);
+    renameSync(path, aside);
+    return { ok: true, aside };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
 
 export function sliceSessionText(
   text: string,

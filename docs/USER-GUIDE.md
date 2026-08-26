@@ -396,9 +396,11 @@ elsewhere — `Ctrl+Tab` is literal `Ctrl` on every platform):
 
 ### Session Search
 
-`Cmd/Ctrl+Shift+P` opens a full-text search over past pi sessions of the
-project. Results list the matching moments; clicking one opens the file it
-mentions. Type at least two characters.
+`Cmd/Ctrl+Shift+P` opens a full-text search over past Pi and core sessions
+of the project. Results list the matching moments; clicking one opens the
+file it mentions. Type at least two characters. Closing a core tab keeps
+that session on disk. `/clear` in a core tab starts a fresh session and
+leaves the previous one searchable.
 
 ---
 

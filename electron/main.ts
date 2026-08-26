@@ -12,9 +12,8 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme } fro
 // Name the app for the macOS menu bar and user-data paths. Unpackaged runs default to "Electron".
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
-import { accessSync, constants, createReadStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { access, chmod, cp, copyFile, mkdir, mkdtemp, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
-import { createInterface } from "node:readline";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -33,11 +32,9 @@ import { changedLinesInAfter } from "../shared/line-diff.js";
 import { createAppUpdater, updateMenuCopy, type AppUpdateController } from "./app-update.js";
 import {
   MAX_DISPATCH_WORKERS,
-  cleanPlanPathToken,
   findTaskByText,
   finalizePlanTasks,
   formatDispatchBriefing,
-  looksLikePath,
   markPlanProgress,
   parsePlanTasks,
   pickDispatchTasks,
@@ -45,6 +42,7 @@ import {
   taskIsComplete,
 } from "./plan-board.js";
 import { AppPreferencesStore } from "./preferences.js";
+import { listSessionJsonl, mergeSessionFiles, searchSessionFiles, sessionFileEntry, type SessionFileEntry } from "./session-search.js";
 import {
   composeTerminalRoster,
   isCoreSessionId,
@@ -1016,8 +1014,8 @@ class PiEditorApp {
           seed.engine === "core"
             ? await (async () => {
                 const sessionId = `core-${randomUUID()}`;
-                mkdirSync(this.coreSessionDir(), { recursive: true, mode: 0o700 });
-                const dest = this.coreSessionFile(sessionId);
+                const dest = this.coreSessionFile(sessionId, seed.primaryRoot);
+                mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
                 await copyFile(seed.installedSession, dest);
                 return {
                   type: "agent" as const,
@@ -1557,12 +1555,16 @@ class PiEditorApp {
     if (Number.isInteger(n) && n > terminalSeq) terminalSeq = n;
   }
 
-  private coreSessionDir(): string {
+  private coreSessionRoot(): string {
     return join(this.userDataDir, "agent-sessions");
   }
 
-  private coreSessionFile(sessionId: string): string {
-    return join(this.coreSessionDir(), `${sessionId}.jsonl`);
+  private coreProjectSessionDir(cwd: string): string {
+    return join(this.coreSessionRoot(), this.sanitizeSessionDir(this.canonicalPath(cwd)));
+  }
+
+  private coreSessionFile(sessionId: string, cwd: string): string {
+    return join(this.coreProjectSessionDir(cwd), `${sessionId}.jsonl`);
   }
 
   private terminalRosterPath(project: ProjectState): string {
@@ -1644,9 +1646,8 @@ class PiEditorApp {
   }
 
   private coreSessionInUse(sessionId: string): boolean {
-    const file = this.coreSessionFile(sessionId);
     for (const inst of this.terminals.values()) {
-      if (inst.sessionId === sessionId || inst.sessionFile === file) return true;
+      if (inst.sessionId === sessionId) return true;
     }
     return false;
   }
@@ -1664,14 +1665,14 @@ class PiEditorApp {
     }
   }
 
-  /** Delete an agent-core jsonl only when it sits in the app session directory. */
+  /** Delete an empty agent-core jsonl. A session with content stays on disk
+   *  so Session Search can read it after the tab closes. */
   private discardCoreSession(inst: PiTerminalInstance): void {
-    if (inst.engine !== "core" || !inst.sessionId || !isCoreSessionId(inst.sessionId)) return;
-    const path = this.coreSessionFile(inst.sessionId);
-    if (inst.sessionFile && inst.sessionFile !== path) return;
-    if (!this.pathInside(this.coreSessionDir(), path)) return;
+    if (inst.engine !== "core" || !inst.sessionFile) return;
+    if (!this.pathInside(this.coreSessionRoot(), inst.sessionFile)) return;
+    if (this.sessionFileHasContent(inst.sessionFile)) return;
     try {
-      rmSync(path, { force: true });
+      rmSync(inst.sessionFile, { force: true });
     } catch {
       /* ignore */
     }
@@ -1850,12 +1851,15 @@ class PiEditorApp {
       cmd = process.execPath;
       args = [join(__dirname, "agent-core.mjs").replace("app.asar", "app.asar.unpacked")];
       if (persist) {
+        const sessionCwd = cwd ?? owner?.cwd ?? this.terminalCwd();
         if (!sessionId || !isCoreSessionId(sessionId) || this.coreSessionInUse(sessionId)) {
           sessionId = `core-${randomUUID()}`;
+          sessionFile = this.coreSessionFile(sessionId, sessionCwd);
+        } else if (!sessionFile || !this.sessionFileExists(sessionFile)) {
+          sessionFile = this.coreSessionFile(sessionId, sessionCwd);
         }
-        sessionFile = this.coreSessionFile(sessionId);
         try {
-          mkdirSync(this.coreSessionDir(), { recursive: true, mode: 0o700 });
+          if (sessionFile) mkdirSync(dirname(sessionFile), { recursive: true, mode: 0o700 });
         } catch {
           /* resume still tries the path */
         }
@@ -2320,149 +2324,58 @@ class PiEditorApp {
   private searchSessionsSeq = 0;
 
   /**
-   * Search past session files for the active project.
+   * Search past session files for the active project (Pi and core).
    * Streams lines asynchronously so the main process stays responsive.
    * Bounded to the 50 newest sessions and 50 total hits.
    */
   private async searchSessions(query: string): Promise<SessionHit[]> {
-    const cwd = this.project()?.cwd ?? null;
-    const needle = query.trim().toLowerCase();
-    if (!cwd || needle.length < 2) return [];
-    const dir = join(homedir(), ".pi", "agent", "sessions", this.sanitizeSessionDir(this.canonicalPath(cwd)));
-    let files: string[];
-    try {
-      files = (await readdir(dir)).filter((f) => f.endsWith(".jsonl")).sort().reverse();
-    } catch {
-      return [];
-    }
-    const seq = ++this.searchSessionsSeq;
-    const hits: SessionHit[] = [];
+    const project = this.project();
+    const cwd = project?.cwd ?? null;
+    if (!project || !cwd || query.trim().length < 2) return [];
     const projectCwd = this.canonicalPath(cwd);
-
-    for (const file of files.slice(0, 50)) {
-      if (seq !== this.searchSessionsSeq || this.disposed) break;
-      const filePath = join(dir, file);
-      try {
-        const st = await stat(filePath);
-        if (st.size > 10 * 1024 * 1024) continue;
-      } catch {
-        continue;
-      }
-
-      const stream = createReadStream(filePath, { encoding: "utf8" });
-      const rl = createInterface({ input: stream, crlfDelay: Infinity });
-      let lineNum = 0;
-      let prevText = "";
-
-      try {
-        for await (const line of rl) {
-          if (seq !== this.searchSessionsSeq || this.disposed) {
-            rl.close();
-            stream.destroy();
-            break;
-          }
-          lineNum++;
-          if (lineNum > 10000) break;
-          const parsed = this.parseSessionMessageLine(line);
-          if (!parsed) continue;
-
-          const matchIdx = parsed.text.toLowerCase().indexOf(needle);
-          if (matchIdx !== -1) {
-            const hitPath = this.resolveSessionHitPath(parsed, projectCwd);
-            hits.push({
-              sessionFile: file,
-              line: lineNum,
-              text: this.formatSessionHitSnippet(parsed.role, parsed.text, matchIdx, needle.length),
-              before: prevText,
-              after: "",
-              ts: this.sessionTimestamp(file),
-              filePath: hitPath ?? undefined,
-            });
-            if (hits.length >= 50) {
-              rl.close();
-              stream.destroy();
-              break;
-            }
-          }
-          prevText = `[${parsed.role}] ${parsed.text.slice(0, 120)}`;
-        }
-      } catch {
-        /* skip read errors */
-      } finally {
-        rl.close();
-        stream.destroy();
-      }
-
-      if (hits.length >= 50) break;
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
-
+    const key = this.sanitizeSessionDir(projectCwd);
+    const piDir = join(homedir(), ".pi", "agent", "sessions", key);
+    const coreDir = join(this.coreSessionRoot(), key);
+    const seq = ++this.searchSessionsSeq;
+    const extra = await this.extraSessionFiles(project);
+    const files = mergeSessionFiles([
+      await listSessionJsonl(piDir),
+      await listSessionJsonl(coreDir),
+      extra,
+    ]);
+    const hits = await searchSessionFiles({
+      query,
+      files,
+      projectCwd,
+      canonicalize: (absPath) => this.canonicalPath(absPath),
+      isProjectFile: (relPath, root) => this.isProjectFile(relPath, root),
+      shouldStop: () => seq !== this.searchSessionsSeq || this.disposed,
+    });
     return seq === this.searchSessionsSeq ? hits : [];
   }
 
-  private parseSessionMessageLine(line: string): { role: string; text: string; paths: string[] } | null {
-    if (!line || !line.includes('"message"')) return null;
-    try {
-      const entry = JSON.parse(line) as {
-        type?: string;
-        message?: {
-          role?: string;
-          content?: string | Array<{ type?: string; text?: string; name?: string; arguments?: Record<string, unknown> }>;
-        };
-      };
-      if (entry.type !== "message" || !entry.message) return null;
-      const role = entry.message.role ?? "message";
-      if (role !== "user" && role !== "assistant") return null;
-      const content = entry.message.content;
-      const texts: string[] = [];
-      const paths: string[] = [];
-      if (typeof content === "string") {
-        texts.push(content);
-      } else if (Array.isArray(content)) {
-        for (const block of content) {
-          if (block.type === "text" && typeof block.text === "string") {
-            texts.push(block.text);
-          } else if (block.type === "toolCall" && typeof block.name === "string") {
-            texts.push(`[${block.name}]`);
-            if (block.arguments && typeof block.arguments === "object") {
-              for (const v of Object.values(block.arguments)) {
-                if (typeof v === "string" && looksLikePath(v)) paths.push(v);
-              }
-            }
-          }
-        }
+  /** Live persist tabs and unrestored roster entries (flat paths still count). */
+  private async extraSessionFiles(project: ProjectState): Promise<SessionFileEntry[]> {
+    const paths: string[] = [];
+    for (const id of project.terminalIds) {
+      const inst = this.terminals.get(id);
+      if (inst?.persist && inst.sessionFile) paths.push(inst.sessionFile);
+    }
+    for (const rec of project.unrestoredTerminals) {
+      if (rec.sessionFile) paths.push(rec.sessionFile);
+    }
+    const out: SessionFileEntry[] = [];
+    for (const path of paths) {
+      let real = path;
+      try {
+        real = realpathSync(path);
+      } catch {
+        /* keep the unresolved path */
       }
-      if (texts.length === 0) return null;
-      const text = texts.join(" ").replace(/\s+/g, " ").trim();
-      return { role, text, paths };
-    } catch {
-      return null;
+      const entry = await sessionFileEntry(real);
+      if (entry) out.push(entry);
     }
-  }
-
-  private formatSessionHitSnippet(role: string, text: string, matchIdx: number, matchLen: number): string {
-    const prefix = `[${role}] `;
-    if (text.length <= 300) return prefix + text;
-    const start = Math.max(0, matchIdx - 60);
-    const end = Math.min(text.length, matchIdx + matchLen + 200);
-    const snippet = (start > 0 ? "…" : "") + text.slice(start, end) + (end < text.length ? "…" : "");
-    return prefix + snippet;
-  }
-
-  private resolveSessionHitPath(parsed: { text: string; paths: string[] }, projectCwd: string): string | null {
-    for (const p of parsed.paths.slice(0, 5)) {
-      const clean = cleanPlanPathToken(p, projectCwd, this.canonicalPath.bind(this));
-      if (this.isProjectFile(clean, projectCwd)) return clean;
-    }
-    const backticks = parsed.text.match(/`([^`]+)`/g);
-    if (backticks) {
-      for (const raw of backticks.slice(0, 5)) {
-        const token = raw.slice(1, -1).trim();
-        const clean = cleanPlanPathToken(token, projectCwd, this.canonicalPath.bind(this));
-        if (this.isProjectFile(clean, projectCwd)) return clean;
-      }
-    }
-    return null;
+    return out;
   }
 
   private isProjectFile(relPath: string, projectCwd: string): boolean {
@@ -2474,13 +2387,6 @@ class PiEditorApp {
     } catch {
       return false;
     }
-  }
-
-  /** The session start time from the file name (ISO prefix). */
-  private sessionTimestamp(file: string): number {
-    const m = file.match(/^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})/);
-    if (!m) return 0;
-    return new Date(`${m[1]}T${m[2]}:${m[3]}:${m[4]}`).getTime();
   }
 
   // ------------------------------------------------------------- dispatch --
@@ -3532,7 +3438,9 @@ class PiEditorApp {
         if (startedSessionId && isCoreSessionId(startedSessionId) && (startedSessionId === inst.sessionId || !this.coreSessionInUse(startedSessionId))) {
           inst.sessionId = startedSessionId;
         }
-        if (inst.sessionId) inst.sessionFile = this.coreSessionFile(inst.sessionId);
+        if (!inst.sessionFile && inst.sessionId) {
+          inst.sessionFile = this.coreSessionFile(inst.sessionId, inst.cwd);
+        }
       }
     } else {
       const trusted = this.trustedPiSessionFile(startedSessionFile) ?? this.trustedPiSessionFile(inst.sessionFile);

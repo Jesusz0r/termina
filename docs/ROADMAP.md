@@ -91,7 +91,7 @@ Task states on the owner's Plan Board track the workers live: pending → active
 
 | Capability | Detail |
 |---|---|
-| Full-text | Search over the project's past session files (`~/.pi/agent/sessions/<sanitized project>/`), newest 50 sessions, case-insensitive, bounded (2 MB/file, 50 hits, 400 chars/line) |
+| Full-text | Search over the project's Pi sessions (`~/.pi/agent/sessions/<sanitized project>/`) and core sessions (`userData/agent-sessions/<sanitized project>/`), newest 50 sessions, case-insensitive, bounded (10 MB/file, 50 hits) |
 | Context | Each hit shows its session time plus the matching line with one line of context before/after |
 | Jump | The first token that resolves to a file inside the project becomes the hit's target; clicking opens it in the editor |
 

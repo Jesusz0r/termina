@@ -92,9 +92,9 @@ import {
   waitForAck,
   writePromptPayload,
 } from "./host.ts";
-import { MAX_SESSION_FILE_BYTES } from "./session.ts";
+import { MAX_SESSION_FILE_BYTES, rotateSessionFile } from "./session.ts";
 
-export { MAX_SESSION_FILE_BYTES, sliceSessionText, writeForkedSession } from "./session.ts";
+export { MAX_SESSION_FILE_BYTES, rotateSessionFile, sessionRotateStamp, sliceSessionText, writeForkedSession } from "./session.ts";
 import { AgentTui, SLASH_COMMANDS } from "./tui.ts";
 
 export { SLASH_COMMANDS, completeSlashLine, matchingSlashCommands, type SlashCommand } from "./tui.ts";
@@ -3204,7 +3204,11 @@ function dispatchLine(line: string): void {
     history.length = 0;
     streamPrepared = false;
     storageSeq = 0;
-    if (sessionFile) prepareSessionStream(sessionFile, "fresh");
+    if (sessionFile) {
+      const rotated = rotateSessionFile(sessionFile);
+      if (!rotated.ok) out(`(could not keep the previous session: ${rotated.error})\n`);
+      prepareSessionStream(sessionFile, "fresh");
+    }
     streamPrepared = true;
     out("(session cleared)\n");
     showPrompt();
