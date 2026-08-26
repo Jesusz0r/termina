@@ -18,7 +18,7 @@ import {
 
 export { firstAuthenticatedProvider } from "./auth.ts";
 
-export type ModelInfo = { id: string; name?: string };
+export type ModelInfo = { id: string; name?: string; context?: number };
 
 export const MODEL_LIST_CAP = 200;
 const CATALOG_TIMEOUT_MS = 10_000;
@@ -92,7 +92,9 @@ function rowId(row: Record<string, unknown>): { id: string; name?: string } | nu
         : typeof row.name === "string" && row.name !== raw
           ? row.name
           : undefined;
-  return name ? { id, name } : { id };
+  const contextRaw = Number(row.context_length ?? row.context_window ?? row.max_input_tokens ?? row.context);
+  const context = Number.isFinite(contextRaw) && contextRaw >= 8_000 ? Math.floor(contextRaw) : undefined;
+  return { id, ...(name ? { name } : {}), ...(context ? { context } : {}) };
 }
 
 export function parseModelsPayload(payload: unknown, provider: ProviderId): ModelInfo[] {

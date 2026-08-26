@@ -12,7 +12,8 @@ stubs + structured inventories, waste attribution with models.dev pricing,
 two-role routing map, bounded concurrency, cwd jail, grep/glob, unique first-occurrence
 edit, interruptible bash, web_search, skill
 index, prefix `cache_control`, traces, provider auth, live model list,
-full-screen TUI, Termina sidecar host contract, core worldline session slice). Zone 1 is identity, environment,
+full-screen TUI, Termina sidecar host contract, core worldline session slice,
+bash approval, /clear /compact, -p print, usage footer). Zone 1 is identity, environment,
 user-global `~/.agents/AGENTS.md`, the skill index, then cwd `AGENTS.md`.
 Skill bodies load with `read_file`. Skills come from `~/.agents/skills`
 then `<cwd>/.agents/skills` (no ancestor walk). Truncated instructions

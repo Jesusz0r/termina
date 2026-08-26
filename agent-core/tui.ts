@@ -14,6 +14,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/model", hint: "show or switch the model" },
   { name: "/models", hint: "list live models" },
   { name: "/resume", hint: "replay the stored session" },
+  { name: "/clear", hint: "start a new empty session" },
+  { name: "/compact", hint: "reclaim and summarize context" },
   { name: "/exit", hint: "quit the engine" },
 ];
 
@@ -229,6 +231,7 @@ export class AgentTui {
   private rawInput = false;
   private model = "";
   private auth = "";
+  private usage = "";
   private busy = false;
   private spin = 0;
   private spinTimer: ReturnType<typeof setInterval> | null = null;
@@ -260,9 +263,10 @@ export class AgentTui {
     return this.started;
   }
 
-  setStatus(status: { model?: string; auth?: string }): void {
+  setStatus(status: { model?: string; auth?: string; usage?: string }): void {
     if (status.model !== undefined) this.model = status.model;
     if (status.auth !== undefined) this.auth = status.auth;
+    if (status.usage !== undefined) this.usage = status.usage;
     this.schedule();
   }
 
@@ -714,7 +718,7 @@ export class AgentTui {
     const view = visibleLines(this.plain, cols, layout.transcript, this.scroll);
     const nameW = shownSlash.length > 0 ? Math.max(...shownSlash.map((c) => c.name.length)) : 0;
     const spin = this.busy ? `${SPIN[this.spin]!} ` : "";
-    const title = ` termina agent-core v1  ${spin}${this.model}${this.auth ? `  ${this.auth}` : ""} `;
+    const title = ` termina agent-core v1  ${spin}${this.model}${this.auth ? `  ${this.auth}` : ""}${this.usage ? `  ${this.usage}` : ""} `;
     const picker = matches.length > 0 && Boolean(matches[0]?.submit);
     const foot = this.busy
       ? " Ctrl+C interrupt · PgUp/PgDn scroll "

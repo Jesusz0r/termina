@@ -37,6 +37,7 @@ const {
   formatEnvironment,
   formatStub,
   parseMaxTurns,
+  parsePrintPrompt,
   reproFor,
   toRequest,
   planPruneStubs,
@@ -1435,6 +1436,11 @@ const emptyFork = await writeForkedSession(forkSrc, join(forkDir, "empty.jsonl")
 check("writeForkedSession through 0 writes an empty file", emptyFork.ok && readFileSync(join(forkDir, "empty.jsonl"), "utf8") === "");
 check("slash menu puts help first", SLASH_COMMANDS[0]?.name === "/help");
 check("slash menu puts exit last", SLASH_COMMANDS.at(-1)?.name === "/exit");
+check("slash /clear is listed", SLASH_COMMANDS.some((c) => c.name === "/clear"));
+check("slash /compact is listed", SLASH_COMMANDS.some((c) => c.name === "/compact"));
+check("parsePrintPrompt missing is null", parsePrintPrompt(["node", "agent-core.mjs"]) === null);
+check("parsePrintPrompt -p joins the rest", parsePrintPrompt(["node", "x", "-p", "fix", "the", "bug"]) === "fix the bug");
+check("parsePrintPrompt --print empty is empty", parsePrintPrompt(["node", "--print"]) === "");
 check(
   "slash / lists every command",
   matchingSlashCommands("/").map((c) => c.name).join(" ") === SLASH_COMMANDS.map((c) => c.name).join(" "),

@@ -40,6 +40,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
+import { createInterface } from "node:readline";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -109,15 +110,28 @@ let summaryRoute = parseModelRef(
   process.env.TERMINA_CORE_SUMMARY_MODEL ? undefined : route.provider,
 );
 const catalogs = new Map<ProviderId, ModelInfo[]>();
-const CONTEXT_WINDOW = Number(process.env.TERMINA_CORE_CONTEXT ?? 200_000);
 const OUTPUT_RESERVE = 16_384;
-const USABLE = Math.max(8_000, CONTEXT_WINDOW - OUTPUT_RESERVE);
 const HIGH_WATER = 0.8;
 const LOW_WATER = 0.6;
 /** Trailing tool-output span never reclaimed (fraction of usable, clamped). */
 const PROTECT_MIN = 4_000;
 const PROTECT_MAX = 40_000;
-const PROTECT_TOKENS = Math.min(PROTECT_MAX, Math.max(PROTECT_MIN, Math.floor(USABLE * 0.25)));
+
+function contextWindow(): number {
+  const env = Number(process.env.TERMINA_CORE_CONTEXT ?? "");
+  if (Number.isFinite(env) && env >= 8_000) return env;
+  const hit = catalogs.get(route.provider)?.find((m) => m.id === route.model);
+  if (hit?.context && hit.context >= 8_000) return hit.context;
+  return 200_000;
+}
+
+function usableTokens(): number {
+  return Math.max(8_000, contextWindow() - OUTPUT_RESERVE);
+}
+
+function protectTokens(): number {
+  return Math.min(PROTECT_MAX, Math.max(PROTECT_MIN, Math.floor(usableTokens() * 0.25)));
+}
 /** Newest user turns whose messages are never touched. */
 const PROTECT_TURNS = 2;
 /** Tool results below this size are never worth a stub. */
@@ -143,6 +157,12 @@ const LISTING_CAP = 20;
 const PROBE_TIMEOUT_MS = 500;
 const EDIT_MAX_BYTES = 8 * 1024 * 1024;
 const TOOL_DISPLAY_BYTES = 2 * 1024;
+
+export function parsePrintPrompt(argv: string[]): string | null {
+  const i = argv.findIndex((a) => a === "-p" || a === "--print");
+  if (i < 0) return null;
+  return argv.slice(i + 1).join(" ").trim();
+}
 
 export function parseMaxTurns(raw: string | undefined): number {
   if (raw === undefined || raw === "") return 80;
@@ -1478,6 +1498,26 @@ export function runBash(
   });
 }
 
+let approveAll = process.env.TERMINA_CORE_APPROVE === "all";
+let approvalResolve: ((line: string) => void) | null = null;
+
+async function confirmBash(command: string): Promise<boolean> {
+  if (approveAll || !surface?.active()) return true;
+  out(`\napprove bash?\n  ${command}\n  [y] yes  [n] no  [a] always this session\n`);
+  surface.setRawInput(true);
+  const line = await new Promise<string>((resolve) => {
+    approvalResolve = resolve;
+  });
+  approvalResolve = null;
+  surface.setRawInput(false);
+  const ans = line.trim().toLowerCase();
+  if (ans === "a" || ans === "always") {
+    approveAll = true;
+    return true;
+  }
+  return ans === "y" || ans === "yes";
+}
+
 async function executeTool(use: ToolUse): Promise<ToolOutcome> {
   if (use.name === "read_file") {
     const got = readProjectFile(canonicalCwd, use.input, allowPaths);
@@ -1503,7 +1543,9 @@ async function executeTool(use: ToolUse): Promise<ToolOutcome> {
     return done(use, "error: web_search is provider-executed", true);
   }
   if (use.name === "bash") {
-    const got = await runBash(use.input.command ?? "", { cwd: canonicalCwd, shouldStop: () => interrupted });
+    const command = use.input.command ?? "";
+    if (!(await confirmBash(command))) return done(use, "error: bash denied", true);
+    const got = await runBash(command, { cwd: canonicalCwd, shouldStop: () => interrupted });
     return done(use, got.content, got.isError);
   }
   return done(use, `error: unknown tool ${use.name}`, true);
@@ -1867,8 +1909,8 @@ function reclaim(): number {
     history.map((m) => ({ role: m.role, content: m.content, tokens: m.tokens })),
     {
       systemTokens: tokenEstimate(systemPrompt()),
-      usable: USABLE,
-      protectTokens: PROTECT_TOKENS,
+      usable: usableTokens(),
+      protectTokens: protectTokens(),
     },
   );
   let stubbedCount = 0;
@@ -1903,13 +1945,13 @@ function reclaim(): number {
  *  turns, cutting only at real prompts. Storage keeps every dropped byte. */
 function truncate(): boolean {
   let total = totalTokens();
-  if (total < USABLE) return false;
+  if (total < usableTokens()) return false;
   let cut = 0;
   for (let i = 0; i < history.length; i++) {
     const m = history[i]!;
     if (m.role === "user" && typeof m.content === "string") cut = i;
     total -= m.tokens;
-    if (i === cut && total < USABLE * LOW_WATER) break;
+    if (i === cut && total < usableTokens() * LOW_WATER) break;
   }
   if (cut <= 0) return false;
   history.splice(0, cut);
@@ -1940,7 +1982,7 @@ function evictionBoundary(): number {
     guarded += history[i]!.tokens;
     if (history[i]!.role === "user" && typeof history[i]!.content === "string") {
       seen++;
-      if (seen >= PROTECT_TURNS && guarded >= Math.min(PROTECT_TOKENS, USABLE / 4)) break;
+      if (seen >= PROTECT_TURNS && guarded >= Math.min(protectTokens(), usableTokens() / 4)) break;
     }
   }
   // The tail must start at a real prompt; walk forward past orphan results.
@@ -2060,6 +2102,7 @@ async function summarize(): Promise<boolean> {
 
 type Block =
   | { type: "text"; text: string; citations?: unknown[] }
+  | { type: "thinking"; thinking: string }
   | { type: "tool_use"; id: string; name: string; input: ToolUse["input"] }
   | { type: "server_tool_use"; id: string; name: string; input: Record<string, unknown> }
   | { type: "web_search_tool_result"; tool_use_id: string; content: unknown };
@@ -2190,6 +2233,9 @@ async function callModel(messages: Message[]): Promise<CallResult> {
           model: route.model,
           max_tokens: 8192,
           stream: true,
+          ...(route.model.toLowerCase().includes("claude") && !route.model.toLowerCase().includes("haiku")
+            ? { thinking: { type: "enabled", budget_tokens: 8_000 } }
+            : {}),
           cache_control: prefix.cache_control,
           system: prefix.system,
           tools: requestTools(prefix.tools, route.provider),
@@ -2293,6 +2339,8 @@ async function callModel(messages: Message[]): Promise<CallResult> {
               tool_use_id: cb.tool_use_id ?? "",
               content: cb.content,
             });
+          } else if (cb.type === "thinking") {
+            placeStreamBlock(slots, idx, { type: "thinking", thinking: "" });
           } else if (cb.type === "text") {
             placeStreamBlock(slots, idx, {
               type: "text",
@@ -2313,10 +2361,12 @@ async function callModel(messages: Message[]): Promise<CallResult> {
             if (ttftMs === null) ttftMs = Date.now() - started;
             target.text += d.text ?? "";
             out(d.text ?? "");
+          } else if (d.type === "thinking_delta" && target.type === "thinking") {
+            const chunk = d.thinking ?? "";
+            target.thinking += chunk;
+            out(chunk);
           } else if (d.type === "citations_delta" && target.type === "text" && d.citation !== undefined) {
             target.citations = [...(target.citations ?? []), d.citation];
-          } else if (d.type === "thinking_delta" && "thinking" in target) {
-            (target as { thinking?: string }).thinking = `${(target as { thinking?: string }).thinking ?? ""}${d.thinking ?? ""}`;
           } else if (
             d.type === "input_json_delta" &&
             (target.type === "tool_use" || target.type === "server_tool_use")
@@ -2514,7 +2564,7 @@ async function runPrompt(prompt: string): Promise<void> {
         reclaim();
         // Maintenance order: reclaim first; summarize only when reclamation cannot
         // hold the high-water line; truncate is the last resort.
-        if (totalTokens() >= USABLE * HIGH_WATER && !(await summarize()) && totalTokens() >= USABLE) {
+        if (totalTokens() >= usableTokens() * HIGH_WATER && !(await summarize()) && totalTokens() >= usableTokens()) {
           truncate();
         }
       }
@@ -2557,6 +2607,11 @@ async function runPrompt(prompt: string): Promise<void> {
       const waste = result.usage
         ? reportUsage(result.usage, result.ttftMs, callStarted)
         : { cause: null, usd: null, turnMs: Date.now() - callStarted, ttftMs: result.ttftMs, revisionCount: 0 };
+      if (result.usage) {
+        const bits = [`in ${result.usage.input}`, result.usage.cacheRead ? `cache ${result.usage.cacheRead}` : "", `out ${result.usage.output}`];
+        if (waste.usd != null) bits.push(`$${waste.usd.toFixed(4)}`);
+        surface?.setStatus({ usage: bits.filter(Boolean).join("  ") });
+      }
       const assistantMsg: Message = { role: "assistant", content: result.blocks as ContentBlock[], tokens: 0, sseq: 0 };
       assistantMsg.tokens = estimate(assistantMsg);
       history.push(assistantMsg);
@@ -3099,6 +3154,12 @@ function dispatchLine(line: string): void {
     resolve(line);
     return;
   }
+  if (approvalResolve) {
+    const resolve = approvalResolve;
+    approvalResolve = null;
+    resolve(line);
+    return;
+  }
   if (line === "/help") {
     printSlashHelp();
     showPrompt();
@@ -3134,6 +3195,35 @@ function dispatchLine(line: string): void {
     showPrompt();
     return;
   }
+  if (line === "/clear") {
+    if (running || authBusy) {
+      out("(engine busy)\n");
+      showPrompt();
+      return;
+    }
+    history.length = 0;
+    streamPrepared = false;
+    storageSeq = 0;
+    if (sessionFile) prepareSessionStream(sessionFile, "fresh");
+    streamPrepared = true;
+    out("(session cleared)\n");
+    showPrompt();
+    return;
+  }
+  if (line === "/compact") {
+    if (running || authBusy) {
+      out("(engine busy)\n");
+      showPrompt();
+      return;
+    }
+    void (async () => {
+      const n = reclaim();
+      const summed = await summarize();
+      out(`(compacted${n ? `; reclaimed ${n}` : ""}${summed ? "; summarized" : ""})\n`);
+      showPrompt();
+    })();
+    return;
+  }
   if (line.startsWith("/")) {
     out(`(unknown command: ${line} — type /help)\n`);
     showPrompt();
@@ -3162,6 +3252,13 @@ async function main(): Promise<void> {
         }
       },
       onInterrupt: () => {
+        if (approvalResolve) {
+          const resolve = approvalResolve;
+          approvalResolve = null;
+          surface?.setRawInput(false);
+          resolve("n");
+          return;
+        }
         if (running) {
           interrupted = true;
           currentAbort?.abort();
@@ -3214,6 +3311,26 @@ async function main(): Promise<void> {
   if (structured) {
     out(`> ${structured}\n`);
     submit(structured);
+    return;
+  }
+  const printed = parsePrintPrompt(process.argv);
+  if (printed !== null) {
+    if (!printed) {
+      process.stderr.write("agent-core: -p needs a prompt\n");
+      process.exit(1);
+    }
+    await runPrompt(printed);
+    process.exit(0);
+  }
+  if (!surface) {
+    const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: false });
+    rl.on("line", (line) => {
+      try {
+        dispatchLine(line);
+      } catch (err) {
+        out(`\nengine error: ${(err as Error).message}\n`);
+      }
+    });
   }
 }
 
