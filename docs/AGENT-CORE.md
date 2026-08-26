@@ -9,7 +9,7 @@ Status: implemented in `agent-core/main.ts` (frozen zones + append-only
 storage + `/resume` replay, reclamation hysteresis + summarization with
 handoff chaining + emergency overflow + truncate last resort, executable
 stubs + structured inventories, waste attribution with models.dev pricing,
-two-role routing map, bounded concurrency, cwd jail, grep/glob, skill
+two-role routing map, bounded concurrency, cwd jail, grep/glob, web_search, skill
 index, prefix `cache_control`, traces). Zone 1 is identity, environment,
 user-global `~/.agents/AGENTS.md`, the skill index, then cwd `AGENTS.md`.
 Skill bodies load with `read_file`. Skills come from `~/.agents/skills`

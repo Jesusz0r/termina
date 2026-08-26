@@ -16,7 +16,7 @@
  * - Per-turn usage records with waste attribution and models.dev pricing
  * - Two-role routing map (main + summary), env-overridable
  * - Streaming always; tool calls run concurrently behind a small bound
- * - cwd jail; grep/glob; skill index; prefix cache_control; traces
+ * - cwd jail; grep/glob; web_search; skill index; prefix cache_control; traces
  */
 import { execFile, execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -74,6 +74,12 @@ const GREP_VISIT_CAP = 2_000;
 const GREP_LINE_CHARS = 8_192;
 const GREP_BUDGET_MS = 2_000;
 const GLOB_HIT_CAP = 200;
+const SEARCH_HIT_CAP = 8;
+const SEARCH_BYTE_CAP = 20 * 1024;
+const SEARCH_TIMEOUT_MS = 15_000;
+const SEARCH_QUERY_MAX = 256;
+const SEARCH_JSON_CAP = 512_000;
+const SEARCH_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
 const TRACE_CAP = 64;
 const LISTING_CAP = 20;
 const PROBE_TIMEOUT_MS = 500;
@@ -560,6 +566,141 @@ export async function globFiles(
     if (out.length >= GLOB_HIT_CAP) break;
   }
   return out.length > 0 ? out.join("\n") : "(no matches)";
+}
+
+export type SearchFetcher = (
+  url: string,
+  init: { method: string; headers: Record<string, string>; signal?: AbortSignal },
+) => Promise<{ ok: boolean; status: number; text: () => Promise<string> }>;
+
+function decodeHtml(s: string): string {
+  return s
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const u = new URL(value);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+export function parseSearchResults(payload: unknown): Array<{ title: string; url: string; snippet: string }> {
+  const rows =
+    payload && typeof payload === "object"
+      ? (payload as { web?: { results?: unknown } }).web?.results
+      : undefined;
+  if (!Array.isArray(rows)) return [];
+  const out: Array<{ title: string; url: string; snippet: string }> = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const item = row as { title?: unknown; url?: unknown; description?: unknown };
+    const title = decodeHtml(String(item.title ?? ""));
+    const url = String(item.url ?? "").replace(/[\x00-\x1f\x7f]/g, "");
+    const snippet = decodeHtml(String(item.description ?? ""));
+    if (title && isHttpUrl(url)) out.push({ title, url, snippet });
+  }
+  return out;
+}
+
+function formatSearchHits(hits: Array<{ title: string; url: string; snippet: string }>): string {
+  const lines: string[] = [];
+  let bytes = 0;
+  let n = 0;
+  for (const hit of hits) {
+    if (n >= SEARCH_HIT_CAP) break;
+    const block = [`${n + 1}. ${hit.title}`, `   ${hit.url}`];
+    if (hit.snippet) block.push(`   ${hit.snippet}`);
+    const text = block.join("\n");
+    const rowBytes = Buffer.byteLength(text) + (lines.length > 0 ? 1 : 0);
+    if (bytes + rowBytes > SEARCH_BYTE_CAP) break;
+    lines.push(text);
+    bytes += rowBytes;
+    n++;
+  }
+  return lines.length > 0 ? lines.join("\n") : "(no results)";
+}
+
+export async function webSearch(
+  query: unknown,
+  opts?: { fetch?: SearchFetcher; signal?: AbortSignal; timeoutMs?: number; apiKey?: string },
+): Promise<string> {
+  const raw = typeof query === "string" ? query : query == null ? "" : String(query);
+  const q = raw.trim().replace(/\s+/g, " ");
+  if (q.length < 1 || q.length > SEARCH_QUERY_MAX) return "error: query length must be 1–256";
+  if (q.split(" ").length > 50) return "error: query must be at most 50 words";
+  const apiKey = (opts?.apiKey ?? process.env.BRAVE_API_KEY ?? "").trim();
+  if (!apiKey) return "error: BRAVE_API_KEY is not set";
+  if (/[\x00-\x1f\x7f]/.test(apiKey)) return "error: BRAVE_API_KEY is invalid";
+  const timeoutMs =
+    typeof opts?.timeoutMs === "number" && Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0
+      ? Math.min(opts.timeoutMs, 60_000)
+      : SEARCH_TIMEOUT_MS;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  if (opts?.signal) {
+    if (opts.signal.aborted) ac.abort();
+    else opts.signal.addEventListener("abort", () => ac.abort(), { once: true });
+  }
+  const fetchFn = opts?.fetch ?? (fetch as unknown as SearchFetcher);
+  const endpoint = new URL(SEARCH_ENDPOINT);
+  endpoint.searchParams.set("q", q);
+  endpoint.searchParams.set("count", String(SEARCH_HIT_CAP));
+  endpoint.searchParams.set("result_filter", "web");
+  try {
+    if (ac.signal.aborted) return "error: search timed out";
+    const abortWait = new Promise<never>((_, reject) => {
+      const fail = () => {
+        const err = new Error("aborted");
+        err.name = "AbortError";
+        reject(err);
+      };
+      if (ac.signal.aborted) fail();
+      else ac.signal.addEventListener("abort", fail, { once: true });
+    });
+    const fetchP = fetchFn(endpoint.href, {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+        "cache-control": "no-cache",
+        "x-subscription-token": apiKey,
+        "user-agent": "Termina-agent-core/1",
+      },
+      signal: ac.signal,
+    });
+    // The loser of the race must not become an unhandled rejection after abort.
+    void abortWait.catch(() => {});
+    void fetchP.catch(() => {});
+    const res = await Promise.race([fetchP, abortWait]);
+    if (!res.ok) return `error: search HTTP ${res.status}`;
+    const rawJson = await res.text();
+    if (ac.signal.aborted) return "error: search timed out";
+    if (rawJson.length > SEARCH_JSON_CAP) return "error: search response too large";
+    let payload: unknown;
+    try {
+      payload = JSON.parse(rawJson);
+    } catch {
+      return "error: search returned invalid JSON";
+    }
+    return formatSearchHits(parseSearchResults(payload));
+  } catch (err) {
+    if ((err as { name?: string }).name === "AbortError" || ac.signal.aborted) return "error: search timed out";
+    return `error: search failed: ${(err as Error).message}`;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export interface Skill {
@@ -1156,6 +1297,7 @@ interface ToolUse {
     offset?: unknown;
     pattern?: string;
     glob?: string;
+    query?: string;
   };
 }
 
@@ -1190,6 +1332,7 @@ export function reproFor(use: ToolUse): string | undefined {
   if (use.name === "read_file") return `read_file(${JSON.stringify(use.input.path ?? "")})`;
   if (use.name === "grep") return `grep ${shellQuote(use.input.pattern ?? "")}`;
   if (use.name === "glob") return `glob ${shellQuote(use.input.pattern ?? "")}`;
+  if (use.name === "web_search") return `web_search ${shellQuote(use.input.query ?? "")}`;
   return undefined;
 }
 
@@ -1215,6 +1358,10 @@ async function executeTool(use: ToolUse): Promise<ToolOutcome> {
   }
   if (use.name === "glob") {
     const out = await globFiles(canonicalCwd, use.input.pattern ?? "", { shouldStop: () => interrupted });
+    return done(use, out, out.startsWith("error:"));
+  }
+  if (use.name === "web_search") {
+    const out = await webSearch(use.input.query, { signal: currentAbort?.signal });
     return done(use, out, out.startsWith("error:"));
   }
   if (use.name === "bash") {
@@ -1284,6 +1431,12 @@ const TOOLS = [
     name: "bash",
     description: "Run one bash command in the working directory. 60 s timeout. Combined output caps near 20 KB.",
     input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+  },
+  {
+    name: "web_search",
+    description:
+      "Search the public web via Brave Search. Returns titles, URLs, and snippets. Use for current docs, errors, and APIs. Not a project file search. Needs BRAVE_API_KEY.",
+    input_schema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
   },
 ];
 

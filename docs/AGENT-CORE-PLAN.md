@@ -143,7 +143,7 @@ The first draft had holes that would ship as bugs:
 17. **Nested pointer does not fire on the nested file itself.** If the read path's basename is `AGENTS.md`, skip. If the path is not under the canonical cwd (allow-set skill file), skip. Directory read (`EISDIR`) is an error, no pointer. One nearest pointer only.
 18. **Binary `read_file`.** If the first 4 KB contains a NUL, return `error: binary file`, not a UTF-8 garbage body.
 19. **Grep ReDoS.** Pattern length 1–256 is not enough (`(a+)+` on a long line). Compile once and test `line.slice(0, 8192)` (the slice is a JS string cap, not bytes), but do not claim a post-match deadline can preempt backtracking. Audit fix 30 defines the conservative accepted subset, the event-loop yield, and the 2-second secondary bound. Do not add a worker.
-20. **`reproFor` must cover grep/glob.** Otherwise stubs for those tools have no reproduce line. `grep '<pattern>'` / `glob '<pattern>'`, pattern sliced to 80 chars.
+20. **`reproFor` must cover grep/glob/web_search.** Otherwise stubs for those tools have no reproduce line. `grep '<pattern>'` / `glob '<pattern>'` / `web_search '<query>'`, argument sliced to 80 chars.
 21. **Writes jail before mkdir.** `confinePath` the final file path with `allow` ignored; only then `mkdirSync(dirname(abs), { recursive: true })`.
 22. **Skill-root symlink escape.** Directory walk for skills: do not follow a directory or file symlink whose realpath is outside that scan root (`~/.agents/skills` or `<cwd>/.agents/skills`). Audit fix 29 adds cycle detection and deterministic order.
 23. **Trace names sort numerically.** Delete oldest by the integer in `turn-<n>.json`, not lexicographic (`turn-10` before `turn-2` as strings).
@@ -159,8 +159,8 @@ The first draft had holes that would ship as bugs:
 33. **Toolchain probes must not trust the opened project.** Use `process.version` for Node. For `python3`, `rustc`, and `go`, search only absolute `PATH` directories whose canonical paths are outside cwd; call the resolved absolute executable with `execFileSync`, no shell. Share one 500 ms total deadline across all external probes, cap each first output line, and fail silent.
 34. **Cache construction needs one testable owner.** Add a pure `buildCachedPrefix(system, tools)` used by `callModel()`. It returns top-level `cache_control: { type: "ephemeral" }`, the cached system text block, and a tools array whose last entry is a shallow copy with `cache_control`; it never mutates `TOOLS`. Repeated calls with the same inputs are deep-equal. The explicit last-tool breakpoint preserves the reusable tools prefix across projects, the explicit system breakpoint preserves tools plus this process's frozen system, and top-level automatic caching advances a third breakpoint through append-only messages. This placement matches Anthropic's documented `tools → system → messages` hierarchy and stays below the four-breakpoint limit.
 35. **The harness test belongs in the normal gate.** Add `test:agent-core` to `package.json`, run it from `npm test` after typecheck and before the existing build/spikes, and list the focused command in `README.md`. The focused script still imports TypeScript source and never builds Rust or Electron.
-36. **Reproduction strings must survive quotes and control characters.** One helper shell-quotes the 80-character bash / grep / glob argument after replacing control characters with spaces. A command containing `'` must still produce an executable repro. `read_file` repro uses a JSON-quoted path. Test quote and newline cases.
-37. **Agent-core tool names are not the sidecar file-tool vocabulary.** Keep provider tools named `read_file` and `write_file`. Build sidecar starts through one helper: `write_file` emits `{ t: "tool", toolName: "write", path, toolCallId }`; `read_file`, `bash`, `grep`, and `glob` emit their provider tool name and id with no `path`. This reuses the host's canonical write classification and prevents reads from entering the Modified list. Every provider tool still emits `tool_end` with the original call id.
+36. **Reproduction strings must survive quotes and control characters.** One helper shell-quotes the 80-character bash / grep / glob / web_search argument after replacing control characters with spaces. A command containing `'` must still produce an executable repro. `read_file` repro uses a JSON-quoted path. Test quote and newline cases.
+37. **Agent-core tool names are not the sidecar file-tool vocabulary.** Keep provider tools named `read_file` and `write_file`. Build sidecar starts through one helper: `write_file` emits `{ t: "tool", toolName: "write", path, toolCallId }`; `read_file`, `bash`, `grep`, `glob`, and `web_search` emit their provider tool name and id with no `path`. This reuses the host's canonical write classification and prevents reads from entering the Modified list. Every provider tool still emits `tool_end` with the original call id.
 38. **Glob matching also needs a bounded algorithm.** Cap glob patterns at 1–256 characters. Implement `matchGlob` without a backtracking regular expression (an iterative dynamic-programming matcher is sufficient and bounded by pattern × path length). Reject the unsupported bracket / brace forms before matching. Test repeated `**` / `*` patterns and root-level matching.
 39. **Project instruction and skill roots must not escape through their own symlink.** The project `AGENTS.md`, nested `AGENTS.md` pointers, and `<cwd>/.agents/skills` root are project-scoped resources. Canonicalize them and omit them if their realpath leaves canonical cwd. The user-global file and root are separately trusted user scope and use their canonical allow-set entries.
 40. **The test guard must not disable a real direct launch.** Compute the direct-run decision by comparing canonical `fileURLToPath(import.meta.url)` with canonical `process.argv[1]`. `TERMINA_CORE_TEST=1` suppresses initialization only on import. A directly executed source or bundled `agent-core.mjs` still starts, even if that variable leaked from a parent shell.
@@ -246,7 +246,16 @@ Export `confinePath(cwd, input, opts?: { mustExist?: boolean; allow?: ReadonlySe
 
 `bash` stays unjailed beyond `cwd` on `execFile` (it is a shell). Do not pretend otherwise.
 
-**Sidecar:** after each tool, `logEvent({ t: "tool_end", toolCallId, isError })`. Main matches by `toolCallId`. Only `write_file` emits a file-tool start, mapped to `{ toolName: "write", path }`. `read_file` / `bash` / `grep` / `glob` emit starts **without** `path` and therefore do not enter the host's Modified list or file timeline. All five emit `tool_end`. Usage goes to traces only (audit 42).
+`web_search`: `{ query }`
+
+- Query length 1–256 after trim, at most 50 words (Brave's limit). Collapse whitespace. Invalid length → error string, not throw
+- One Brave Search JSON GET (`https://api.search.brave.com/res/v1/web/search`). Key from `BRAVE_API_KEY`. Missing or control-character keys fail closed. Do not scrape HTML search pages and do not add a second vendor fallback. Send `Cache-Control: no-cache` (Brave 422s without it). Do not slice a large JSON body and then parse the cut; reject it as too large.
+- Parse `web.results[]` `title` / `url` / `description`. Keep `http` / `https` URLs only
+- Cap 8 whole hits and 20 KiB without cutting a hit. Empty is `(no results)`, not `isError`
+- 15 s timeout. Tests inject `fetch` and a test key; they never hit the network
+- Sidecar start has **no path**, same as grep
+
+**Sidecar:** after each tool, `logEvent({ t: "tool_end", toolCallId, isError })`. Main matches by `toolCallId`. Only `write_file` emits a file-tool start, mapped to `{ toolName: "write", path }`. `read_file` / `bash` / `grep` / `glob` / `web_search` emit starts **without** `path` and therefore do not enter the host's Modified list or file timeline. All six emit `tool_end`. Usage goes to traces only (audit 42).
 
 ## Tests
 
@@ -258,7 +267,7 @@ Export the canonical helpers that the fixture script exercises. Filesystem helpe
 - bounded `readFileResult`
 - `matchGlob`
 - `validateGrepPattern`
-- `grepFiles` / `globFiles`
+- `grepFiles` / `globFiles` / `webSearch` / `parseSearchResults`
 - `scanSkills` / `formatSkillIndex`
 - `formatProjectInstructions` (project cap + overflow note)
 - `formatUserInstructions` (global cap + overflow note)
@@ -283,6 +292,7 @@ Cases:
 - environment snapshot with `probes: false`: listing sorted, capped at 20, ignored names absent, control characters JSON-encoded; two calls equal. A project-local fake toolchain binary is never executed; a missing trusted probe omits that line
 - grep: matches, skips `node_modules`, caps hits, empty pattern errors, invalid or unsafe regex errors; its sidecar start has no `path`
 - glob: `**/*.ts` matches nested and root files, ignores `node_modules`, repeated wildcards terminate, overlong and `{a,b}` patterns error; its sidecar start has no `path`
+- web_search: fixture JSON returns title/url/snippet; missing or control-character `BRAVE_API_KEY` errors; empty, overlong, and over-50-word queries error; HTTP failures error; invalid JSON and oversized JSON error; no results is success; timeout note; sidecar start has no `path`; tests inject `fetch`
 - skills: fixture `SKILL.md` under `.agents/skills` with frontmatter formats; missing dirs silent; XML-special name escaped; a later project skill overrides a user-global skill with the same name
 - project `AGENTS.md` under cap: full text, no overflow note
 - project `AGENTS.md` over cap: overflow note with remaining char count; does not claim the omitted tail is present; note tells the model to `read_file` `AGENTS.md`

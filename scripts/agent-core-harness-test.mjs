@@ -57,6 +57,8 @@ const {
   traceRecord,
   isDirectRunFrom,
   hashSystem,
+  webSearch,
+  parseSearchResults,
 } = core;
 
 const results = [];
@@ -159,6 +161,87 @@ check("glob brace errors", (await globFiles(root, "{a,b}")).startsWith("error:")
 check("glob overlong errors", (await globFiles(root, "a".repeat(300))).startsWith("error:"));
 check("matchGlob repeated ** terminates", matchGlob("**/**/*.ts", "pkg/src/a.ts") === true);
 check("sidecar glob has no path", sidecarStartFor({ name: "glob", id: "1", input: {} }).path === undefined);
+
+const parsed = parseSearchResults({
+  web: {
+    results: [
+      { title: "Node &lt;docs&gt;", url: "https://example.com/docs", description: "Official <b>documentation</b>" },
+      { title: "Node.js API", url: "https://nodejs.org/api/", description: "" },
+      { title: "Skip me", url: "javascript:alert(1)", description: "nope" },
+    ],
+  },
+});
+check("search parser keeps https url", parsed[0]?.url === "https://example.com/docs");
+check("search parser strips markup", parsed[0]?.title === "Node <docs>" && parsed[0]?.snippet === "Official documentation");
+check("search parser keeps second https", parsed[1]?.url === "https://nodejs.org/api/");
+check("search parser skips non-http href", parsed.every((h) => h.title !== "Skip me"));
+
+const manyJson = JSON.stringify({
+  web: { results: Array.from({ length: 12 }, (_, i) => ({ title: `Hit ${i}`, url: `https://ex.test/${i}`, description: "s" })) },
+});
+let captured = { url: "", token: "", cache: "" };
+const cappedSearch = await webSearch("node docs", {
+  apiKey: "test-key",
+  fetch: async (url, init) => {
+    captured = {
+      url,
+      token: init.headers["x-subscription-token"] ?? "",
+      cache: init.headers["cache-control"] ?? "",
+    };
+    return { ok: true, status: 200, text: async () => manyJson };
+  },
+});
+check("web_search caps hits at 8", cappedSearch.split("\n").filter((l) => /^\d+\. /.test(l)).length === 8);
+check(
+  "web_search formats title and url",
+  cappedSearch.includes("1. Hit 0") && cappedSearch.includes("https://ex.test/0"),
+);
+const capturedUrl = new URL(captured.url);
+check(
+  "web_search uses Brave JSON endpoint",
+  capturedUrl.origin + capturedUrl.pathname === "https://api.search.brave.com/res/v1/web/search" &&
+    capturedUrl.searchParams.get("q") === "node docs" &&
+    capturedUrl.searchParams.get("count") === "8" &&
+    capturedUrl.searchParams.get("result_filter") === "web",
+);
+check("web_search sends subscription token", captured.token === "test-key");
+check("web_search sends cache-control no-cache", captured.cache === "no-cache");
+
+check("web_search empty query errors", (await webSearch("")).startsWith("error:"));
+check("web_search overlong query errors", (await webSearch("a".repeat(300))).startsWith("error:"));
+check("web_search too many words errors", (await webSearch("w ".repeat(51))).includes("50 words"));
+check("web_search missing key errors", (await webSearch("q", { apiKey: "" })).includes("BRAVE_API_KEY"));
+check("web_search control-char key errors", (await webSearch("q", { apiKey: "abc\nxyz" })).includes("invalid"));
+check(
+  "web_search HTTP error",
+  (await webSearch("q", { apiKey: "k", fetch: async () => ({ ok: false, status: 403, text: async () => "nope" }) })).includes("HTTP 403"),
+);
+check(
+  "web_search no results",
+  (await webSearch("q", { apiKey: "k", fetch: async () => ({ ok: true, status: 200, text: async () => "{}" }) })) === "(no results)",
+);
+check(
+  "web_search invalid JSON errors",
+  (await webSearch("q", { apiKey: "k", fetch: async () => ({ ok: true, status: 200, text: async () => "<html></html>" }) })).includes("invalid JSON"),
+);
+check(
+  "web_search oversized JSON errors",
+  (
+    await webSearch("q", {
+      apiKey: "k",
+      fetch: async () => ({ ok: true, status: 200, text: async () => "x".repeat(512_001) }),
+    })
+  ).includes("too large"),
+);
+check(
+  "web_search timeout",
+  (await webSearch("q", { apiKey: "k", timeoutMs: 40, fetch: () => new Promise(() => {}) })).startsWith("error: search timed out"),
+);
+check("sidecar web_search has no path", sidecarStartFor({ name: "web_search", id: "1", input: { path: "src" } }).path === undefined);
+check(
+  "reproFor web_search quotes query",
+  (reproFor({ id: "1", name: "web_search", input: { query: "foo 'bar'" } }) ?? "").includes("'\\''"),
+);
 
 mkdirSync(join(root, ".agents", "skills", "demo"), { recursive: true });
 writeFileSync(join(root, ".agents", "skills", "demo", "SKILL.md"), "---\nname: demo\ndescription: from project\n---\n");
