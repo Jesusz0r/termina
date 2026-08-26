@@ -23,6 +23,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const core = await import("../agent-core/main.ts");
+const host = await import("../agent-core/host.ts");
 
 const {
   confinePath,
@@ -41,6 +42,7 @@ const {
   planPruneStubs,
   readProjectFile,
   writeProjectFile,
+  editProjectFile,
   nestedAgentsPointer,
   parseOffset,
   validateGrepPattern,
@@ -48,6 +50,9 @@ const {
   replaySessionRecords,
   prepareSessionStream,
   sidecarStartFor,
+  formatToolAnnounce,
+  formatToolFollowup,
+  runBash,
   isDirectRun,
   tracesDirFor,
   retainTraceFiles,
@@ -171,6 +176,112 @@ check("glob brace errors", (await globFiles(root, "{a,b}")).startsWith("error:")
 check("glob overlong errors", (await globFiles(root, "a".repeat(300))).startsWith("error:"));
 check("matchGlob repeated ** terminates", matchGlob("**/**/*.ts", "pkg/src/a.ts") === true);
 check("sidecar glob has no path", sidecarStartFor({ name: "glob", id: "1", input: {} }).path === undefined);
+
+writeFileSync(join(root, ".gitignore"), "hidden.secret\nskipdir/\n");
+writeFileSync(join(root, "hidden.secret"), "gitignore-secret\n");
+mkdirSync(join(root, "skipdir"), { recursive: true });
+writeFileSync(join(root, "skipdir", "x.ts"), "gitignore-secret\n");
+writeFileSync(join(root, "visible.secret"), "keep-secret\n");
+const giGrep = await grepFiles(root, { pattern: "gitignore-secret" });
+check("grep skips gitignored file", !giGrep.includes("hidden.secret"));
+check("grep skips gitignored directory", !giGrep.includes("skipdir"));
+check(
+  "grep of an explicit gitignored path still reads it",
+  (await grepFiles(root, { pattern: "gitignore-secret", path: "hidden.secret" })).includes("hidden.secret"),
+);
+const giGlob = await globFiles(root, "**/*.ts");
+check("glob skips gitignored directory", !giGlob.includes("skipdir/x.ts") && giGlob.includes("hit.ts"));
+const envGi = formatEnvironment(root, { probes: false });
+check("environment listing omits gitignored names", !envGi.includes("hidden.secret") && envGi.includes("visible.secret"));
+
+writeFileSync(join(root, "edit-me.ts"), "const a = 1;\nconst b = 2;\n");
+const edited = editProjectFile(root, "edit-me.ts", "const a = 1;", "const a = 42;");
+check("edit unique occurrence", edited.isError === false && readFileSync(join(root, "edit-me.ts"), "utf8").includes("const a = 42;"));
+check("edit missing old_text fails", editProjectFile(root, "edit-me.ts", "no-such-text", "x").isError === true);
+check("edit non-unique old_text fails", editProjectFile(root, "edit-me.ts", "const", "x").isError === true);
+check("edit empty old_text fails", editProjectFile(root, "edit-me.ts", "", "x").isError === true);
+check("edit outside cwd fails", editProjectFile(root, "/etc/passwd", "root", "x").isError === true);
+writeFileSync(join(root, "dollar.ts"), "cost $1 and done\n");
+const dollar = editProjectFile(root, "dollar.ts", "cost $1", "cost $2");
+check("edit treats $ in new_text as literal", dollar.isError === false && readFileSync(join(root, "dollar.ts"), "utf8") === "cost $2 and done\n");
+const editStart = sidecarStartFor({
+  name: "edit",
+  id: "e1",
+  input: { path: "a.ts", old_text: "old", new_text: "new" },
+});
+check("sidecar edit maps to edit with path", editStart.toolName === "edit" && editStart.path === "a.ts");
+check(
+  "sidecar edit carries oldText/newText",
+  editStart.edits?.[0]?.oldText === "old" && editStart.edits?.[0]?.newText === "new",
+);
+check(
+  "tool announce shows edit path",
+  formatToolAnnounce({ id: "1", name: "edit", input: { path: "a.ts" } }) === "[edit a.ts]",
+);
+check(
+  "tool followup counts grep hits",
+  formatToolFollowup({ id: "1", name: "grep", input: {} }, { result: { content: "a:1:x\nb:2:y" }, isError: false }) ===
+    "(2 hits)\n",
+);
+
+const echo = await runBash("echo hello-core", { cwd: root });
+check("bash echo succeeds", echo.isError === false && echo.content.includes("hello-core"));
+const t0 = Date.now();
+let stopBash = false;
+const killed = runBash("sleep 8", { cwd: root, timeoutMs: 20_000, shouldStop: () => stopBash });
+setTimeout(() => {
+  stopBash = true;
+}, 120);
+const killedGot = await killed;
+check("bash interrupt returns quickly", Date.now() - t0 < 3000);
+check("bash interrupt is an error", killedGot.isError === true);
+
+const hostDir = mkdtempSync(join(tmpdir(), "agent-core-host-"));
+leftovers.push(hostDir);
+const hostId = "term-1";
+const hostBridge = "core-test-bridge";
+writeFileSync(join(hostDir, `verify-${hostId}.md`), "verify-body");
+writeFileSync(join(hostDir, `edits-${hostId}.md`), "edits-body");
+const ctx = host.readContextFiles(hostDir, hostId);
+check("context concatenates verify and edits", ctx.includes("verify-body") && ctx.includes("edits-body") && ctx.includes("---"));
+check("context skips missing mailbox", !ctx.includes("mailbox"));
+const promptName = host.promptFileName(hostId, hostBridge, "abcd1234");
+const written = host.writePromptPayload(hostDir, hostId, promptName, { prompt: "do work", context: ctx });
+check("prompt payload writes a plain filename", written === promptName && existsSync(join(hostDir, promptName)));
+const payload = JSON.parse(readFileSync(join(hostDir, promptName), "utf8"));
+check("prompt payload keeps prompt and context", payload.prompt === "do work" && payload.context.includes("verify-body"));
+const ackId = "ack-req-1";
+const ackWait = host.waitForAck(hostDir, hostId, ackId, 1000, hostBridge);
+setTimeout(() => {
+  writeFileSync(join(hostDir, `ack-${hostId}-${ackId}.json`), JSON.stringify({ ok: true, token: "tok-1" }));
+}, 80);
+const ackGot = await ackWait;
+check("waitForAck claims a successful ack", ackGot?.ok === true && ackGot?.token === "tok-1");
+check("waitForAck removes the ack file", !existsSync(join(hostDir, `ack-${hostId}-${ackId}.json`)));
+const missed = await host.waitForAck(hostDir, hostId, "missing-ack", 120, hostBridge);
+check("waitForAck times out to null", missed === null);
+writeFileSync(
+  join(hostDir, `startup-control-${hostId}.json`),
+  JSON.stringify({ opId: "op-1", action: "structured", content: [{ type: "text", text: "do the task" }] }),
+);
+const control = host.consumeStartupControl(hostDir, hostId, hostBridge);
+check("startup-control structured is consumed", control?.action === "structured" && host.structuredStartupText(control) === "do the task");
+check("startup-control file is claimed away", !existsSync(join(hostDir, `startup-control-${hostId}.json`)));
+writeFileSync(join(hostDir, "startup-control.json"), JSON.stringify({ opId: "op-2", action: "prefill", text: "draft" }));
+const generic = host.consumeStartupControl(hostDir, hostId, hostBridge);
+check("startup-control generic prefill", generic?.action === "prefill" && generic.text === "draft");
+check(
+  "firstPlanText accepts a checkbox list",
+  host.firstPlanText("intro\n- [ ] edit src/foo.ts\n")?.includes("- [ ] edit src/foo.ts"),
+);
+check("firstPlanText ignores prose", host.firstPlanText("hello there") === null);
+check(
+  "visibleAssistantText skips thinking",
+  host.visibleAssistantText([
+    { type: "thinking", text: "secret" },
+    { type: "text", text: "- [ ] task" },
+  ]) === "- [ ] task" && host.firstPlanText(host.visibleAssistantText([{ type: "thinking", text: "- [ ] nope" }])) === null,
+);
 
 check("web_search is Anthropic server tool", WEB_SEARCH_TOOL.type === "web_search_20250305" && WEB_SEARCH_TOOL.name === "web_search");
 const clientPrefix = buildCachedPrefix("sys", [
@@ -1453,6 +1564,48 @@ histTui.feed("\x1b[A\x1b[A\r");
 check("tui history up past a login command", histLines.at(-1) === "hello");
 tui.append("\x1b[31mred-text\x1b[0m");
 check("tui strips ansi from transcript", tui.frame().includes("red-text") && !tui.frame().includes("\x1b[31m"));
+const pasteLines = [];
+const pasteTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: (line) => pasteLines.push(line),
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+pasteTui.feed("\x1b[200~hello\nworld\x1b[201~\r");
+check("paste keeps newlines", pasteLines[0] === "hello\nworld");
+const nlLines = [];
+const nlTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: (line) => nlLines.push(line),
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+nlTui.feed("ab\ncd\r");
+check("ctrl-j inserts a newline", nlLines[0] === "ab\ncd");
+const killLines = [];
+const killTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: (line) => killLines.push(line),
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+killTui.feed("one two\x17\r");
+check("ctrl-w kills the last word", killLines[0] === "one");
+const draftLines = [];
+const draftTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: (line) => draftLines.push(line),
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+draftTui.setDraft("prefill text");
+check("setDraft shows in the frame", draftTui.frame().includes("prefill text"));
+draftTui.feed("\r");
+check("setDraft submits", draftLines[0] === "prefill text");
 const tuiFail = new tuiMod.AgentTui({
   stdout: { write: () => true, columns: 80, rows: 24 },
   stdin: { isTTY: true, setRawMode: () => { throw new Error("no raw"); } },

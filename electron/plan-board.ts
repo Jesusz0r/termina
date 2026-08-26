@@ -6,16 +6,10 @@
  * decides whether that text is a plan and how Dispatch claims rows.
  */
 import { isAbsolute, relative } from "node:path";
+import { HAS_UNCHECKED_PLAN_TASK, PLAN_TASK_MARKER } from "../shared/plan-task.js";
 import type { PlanTask } from "../shared/types.js";
 
-/**
- * Unchecked checkbox after a list marker. HAS_UNCHECKED_PLAN_TASK and the
- * per-line parser both use this so wrap-up lists cannot drift from the board.
- */
-const PLAN_TASK_MARKER = String.raw`(?:[-*+]|\d+[.)])\s+\[ \]`;
-
-/** At least one unchecked checkbox list item. The bridge uses this source. */
-export const HAS_UNCHECKED_PLAN_TASK = new RegExp(String.raw`^\s*` + PLAN_TASK_MARKER, "m");
+export { HAS_UNCHECKED_PLAN_TASK, PLAN_TASK_MARKER };
 
 const UNCHECKED_PLAN_LINE = new RegExp("^" + PLAN_TASK_MARKER + String.raw`\s*(.+)$`);
 const MAX_PLAN_TASKS = 20;

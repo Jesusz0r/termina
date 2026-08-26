@@ -225,6 +225,7 @@ export class AgentTui {
   private esc = 0;
   private csi = "";
   private paste = false;
+  private pasteCR = false;
   private rawInput = false;
   private model = "";
   private auth = "";
@@ -282,6 +283,15 @@ export class AgentTui {
     if (this.rawInput === raw) return;
     this.rawInput = raw;
     this.slashIndex = 0;
+    this.schedule();
+  }
+
+  setDraft(text: string): void {
+    this.chars = [...text];
+    this.cursor = this.chars.length;
+    this.slashIndex = 0;
+    this.histIndex = -1;
+    this.draft = "";
     this.schedule();
   }
 
@@ -479,12 +489,26 @@ export class AgentTui {
       return;
     }
     if (this.paste) {
-      if (ch === "\r" || ch === "\n") this.insert(" ");
-      else if (ch >= " ") this.insert(ch);
+      if (ch === "\r") {
+        this.insert("\n");
+        this.pasteCR = true;
+        return;
+      }
+      if (ch === "\n") {
+        if (!this.pasteCR) this.insert("\n");
+        this.pasteCR = false;
+        return;
+      }
+      this.pasteCR = false;
+      if (ch === "\t" || ch >= " ") this.insert(ch);
       return;
     }
-    if (ch === "\r" || ch === "\n") {
+    if (ch === "\r") {
       this.submitLine();
+      return;
+    }
+    if (ch === "\n") {
+      this.insert("\n");
       return;
     }
     if (ch === "\x7f") {
@@ -533,6 +557,17 @@ export class AgentTui {
     if (ch === "\x15") {
       this.chars = [];
       this.cursor = 0;
+      this.slashIndex = 0;
+      this.schedule();
+      return;
+    }
+    if (ch === "\x17") {
+      if (this.cursor === 0) return;
+      let i = this.cursor;
+      while (i > 0 && (this.chars[i - 1] === " " || this.chars[i - 1] === "\n")) i--;
+      while (i > 0 && this.chars[i - 1] !== " " && this.chars[i - 1] !== "\n") i--;
+      this.chars.splice(i, this.cursor - i);
+      this.cursor = i;
       this.slashIndex = 0;
       this.schedule();
       return;
@@ -685,7 +720,7 @@ export class AgentTui {
       ? " Ctrl+C interrupt · PgUp/PgDn scroll "
       : picker
         ? " ↑↓ pick · Enter select · Ctrl+C cancel "
-        : " / commands · Tab complete · PgUp/PgDn scroll · Ctrl+C clear ";
+        : " / commands · Tab complete · Ctrl+J newline · PgUp/PgDn scroll · Ctrl+C clear ";
 
     const lines: string[] = [];
     lines.push(clip(title, cols));

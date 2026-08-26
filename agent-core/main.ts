@@ -17,10 +17,10 @@
  * - Per-turn usage records with waste attribution and models.dev pricing
  * - Two-role routing map (main + summary), env-overridable
  * - Streaming always; tool calls run concurrently behind a small bound
- * - cwd jail; grep/glob; web_search; skill index; prefix cache_control; traces
+ * - cwd jail; grep/glob; unique edit; interruptible bash; web_search; skill index; prefix cache_control; traces
  * - provider auth (Anthropic, OpenAI, ChatGPT Codex, xAI, Google, OpenRouter)
  */
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
@@ -80,6 +80,17 @@ import {
   type CatalogModel,
   type ModelInfo,
 } from "./models.ts";
+import { IGNORED_SEGMENTS, matchGitignore, parseGitignore, type GitignoreRules } from "../shared/gitignore.ts";
+import {
+  consumeStartupControl,
+  firstPlanText,
+  promptFileName,
+  readContextFiles,
+  structuredStartupText,
+  visibleAssistantText,
+  waitForAck,
+  writePromptPayload,
+} from "./host.ts";
 import { AgentTui, SLASH_COMMANDS } from "./tui.ts";
 
 export { SLASH_COMMANDS, completeSlashLine, matchingSlashCommands, type SlashCommand } from "./tui.ts";
@@ -127,37 +138,8 @@ const GLOB_HIT_CAP = 200;
 const TRACE_CAP = 64;
 const LISTING_CAP = 20;
 const PROBE_TIMEOUT_MS = 500;
-
-/** Copy of the watcher's ignored names. Do not import electron/watcher.ts. */
-const IGNORED_SEGMENTS = new Set([
-  "node_modules",
-  ".git",
-  ".pi",
-  ".agents",
-  ".next",
-  ".nuxt",
-  ".cache",
-  ".parcel-cache",
-  ".turbo",
-  ".yarn",
-  ".venv",
-  "venv",
-  "dist",
-  "out",
-  "build",
-  "coverage",
-  ".DS_Store",
-  "vendor",
-  ".idea",
-  ".vscode",
-  ".hg",
-  ".svn",
-  ".terraform",
-  ".serverless",
-  ".expo",
-  ".android",
-  ".ios",
-]);
+const EDIT_MAX_BYTES = 8 * 1024 * 1024;
+const TOOL_DISPLAY_BYTES = 2 * 1024;
 
 export function parseMaxTurns(raw: string | undefined): number {
   if (raw === undefined || raw === "") return 80;
@@ -192,6 +174,16 @@ export function isValidTerminalId(id: string): boolean {
 
 function sortUtf8(names: string[]): string[] {
   return names.slice().sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
+}
+
+function posixRel(root: string, abs: string): string {
+  return relative(root, abs).split(sep).join("/");
+}
+
+function gitignoreSkips(rules: GitignoreRules, rel: string, isDir: boolean): boolean {
+  if (!rel || rel === ".") return false;
+  if (matchGitignore(rules, rel)) return true;
+  return isDir && matchGitignore(rules, `${rel}/x`);
 }
 
 function yieldEventLoop(): Promise<void> {
@@ -405,9 +397,12 @@ export async function collectFiles(
   const files: string[] = [];
   const visited = new Set<string>();
   const seenFiles = new Set<string>();
+  const gitignore: GitignoreRules = new Map();
   const classified = classifyWalkPath(start, root);
   if (!classified) return { files, hitCap: false, timedOut: false };
   if (classified.kind === "file") {
+    const rel = posixRel(root, classified.real);
+    if (rel && gitignoreSkips(gitignore, rel, false)) return { files, hitCap: false, timedOut: false };
     if (skipNul && fileHasNul(classified.real)) return { files, hitCap: false, timedOut: false };
     return { files: [classified.real], hitCap: false, timedOut: false };
   }
@@ -434,6 +429,13 @@ export async function collectFiles(
     }
     const names = sortUtf8(ents.map((e) => e.name));
     const byName = new Map(ents.map((e) => [e.name, e]));
+    if (byName.has(".gitignore")) {
+      try {
+        gitignore.set(posixRel(root, dirReal), parseGitignore(readFileSync(join(dirReal, ".gitignore"), "utf8")));
+      } catch {
+        /* unreadable gitignore */
+      }
+    }
     for (const name of names) {
       if (name === "." || name === "..") continue;
       if (IGNORED_SEGMENTS.has(name)) continue;
@@ -445,6 +447,8 @@ export async function collectFiles(
       if (visits % 25 === 0) await yieldEventLoop();
       const next = classifyWalkPath(abs, root);
       if (!next) continue;
+      const rel = posixRel(root, next.real);
+      if (gitignoreSkips(gitignore, rel, next.kind === "dir")) continue;
       if (next.kind === "dir") stack.push(next.real);
       else {
         if (seenFiles.has(next.real)) continue;
@@ -813,10 +817,19 @@ export function formatEnvironment(cwd: string, opts?: { probes?: boolean }): str
   const root = freezeCwd(cwd);
   const lines = [`cwd: ${JSON.stringify(root)}`, `platform: ${JSON.stringify(process.platform)}`];
   try {
-    const names = sortUtf8(readdirSync(root).filter((n) => n !== "." && n !== ".." && !IGNORED_SEGMENTS.has(n))).slice(
-      0,
-      LISTING_CAP,
-    );
+    const giPath = join(root, ".gitignore");
+    const listingRules: GitignoreRules = new Map();
+    try {
+      if (existsSync(giPath)) listingRules.set("", parseGitignore(readFileSync(giPath, "utf8")));
+    } catch {
+      /* listing still works without gitignore */
+    }
+    const names = sortUtf8(
+      readdirSync(root).filter((n) => {
+        if (n === "." || n === ".." || IGNORED_SEGMENTS.has(n)) return false;
+        return !gitignoreSkips(listingRules, n, false) && !gitignoreSkips(listingRules, n, true);
+      }),
+    ).slice(0, LISTING_CAP);
     if (names.length > 0) lines.push(`listing: ${names.map((n) => JSON.stringify(n)).join(", ")}`);
   } catch {
     /* unreadable cwd */
@@ -936,6 +949,69 @@ export function writeProjectFile(cwd: string, path: string | undefined, content:
   } catch (err) {
     return { content: `error: ${(err as Error).message}`, isError: true };
   }
+}
+
+export type EditResult = {
+  content: string;
+  isError: boolean;
+  edits?: Array<{ oldText: string; newText: string }>;
+};
+
+/** First unique occurrence of oldText. Does not write when the match is missing or repeated. */
+export function editProjectFile(
+  cwd: string,
+  path: string | undefined,
+  oldText: string,
+  newText: string,
+): EditResult {
+  if (oldText === "") return { content: "error: old_text must not be empty", isError: true };
+  const confined = confinePath(cwd, path ?? "", { mustExist: true });
+  if (!confined.ok) return { content: confined.error, isError: true };
+  let st;
+  try {
+    st = statSync(confined.abs);
+  } catch (err) {
+    return { content: `error: ${(err as Error).message}`, isError: true };
+  }
+  if (st.isDirectory()) return { content: "error: EISDIR", isError: true };
+  if (st.size > EDIT_MAX_BYTES) return { content: `error: file exceeds ${EDIT_MAX_BYTES} bytes`, isError: true };
+  let fd: number | undefined;
+  let body: string;
+  try {
+    fd = openSync(confined.abs, "r");
+    const buf = Buffer.alloc(st.size);
+    if (st.size > 0) readSync(fd, buf, 0, st.size, 0);
+    if (buf.subarray(0, Math.min(4096, buf.length)).includes(0)) {
+      return { content: "error: binary file", isError: true };
+    }
+    body = buf.toString("utf8");
+  } catch (err) {
+    return { content: `error: ${(err as Error).message}`, isError: true };
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+  let count = 0;
+  let idx = 0;
+  while (idx < body.length) {
+    const at = body.indexOf(oldText, idx);
+    if (at < 0) break;
+    count++;
+    if (count > 1) return { content: "error: old_text is not unique", isError: true };
+    idx = at + oldText.length;
+  }
+  if (count === 0) return { content: "error: old_text not found", isError: true };
+  const at = body.indexOf(oldText);
+  const next = body.slice(0, at) + newText + body.slice(at + oldText.length);
+  try {
+    writeFileSync(confined.abs, next);
+  } catch (err) {
+    return { content: `error: ${(err as Error).message}`, isError: true };
+  }
+  return {
+    content: `ok: edited ${posixRel(freezeCwd(cwd), confined.abs)}`,
+    isError: false,
+    edits: [{ oldText, newText }],
+  };
 }
 
 // ---- sidecar (the bridge contract) ----
@@ -1228,6 +1304,8 @@ interface ToolUse {
     pattern?: string;
     glob?: string;
     query?: string;
+    old_text?: string;
+    new_text?: string;
   };
 }
 
@@ -1260,17 +1338,143 @@ export function capTail(text: string, maxBytes: number, repro?: string): string 
 export function reproFor(use: ToolUse): string | undefined {
   if (use.name === "bash") return `bash ${shellQuote(use.input.command ?? "")}`;
   if (use.name === "read_file") return `read_file(${JSON.stringify(use.input.path ?? "")})`;
+  if (use.name === "edit") return `edit(${JSON.stringify(use.input.path ?? "")})`;
   if (use.name === "grep") return `grep ${shellQuote(use.input.pattern ?? "")}`;
   if (use.name === "glob") return `glob ${shellQuote(use.input.pattern ?? "")}`;
   if (use.name === "web_search") return `web_search ${shellQuote(use.input.query ?? "")}`;
   return undefined;
 }
 
-export function sidecarStartFor(use: { name: string; id: string; input: { path?: string } }): Record<string, unknown> {
+export function sidecarStartFor(use: {
+  name: string;
+  id: string;
+  input: { path?: string; old_text?: string; new_text?: string };
+}): Record<string, unknown> {
   if (use.name === "write_file") {
     return { t: "tool", toolName: "write", path: use.input.path, toolCallId: use.id };
   }
+  if (use.name === "edit") {
+    return {
+      t: "tool",
+      toolName: "edit",
+      path: use.input.path,
+      toolCallId: use.id,
+      edits: [{ oldText: use.input.old_text ?? "", newText: use.input.new_text ?? "" }],
+    };
+  }
   return { t: "tool", toolName: use.name, toolCallId: use.id };
+}
+
+export function formatToolAnnounce(use: ToolUse): string {
+  if (use.name === "edit" || use.name === "write_file" || use.name === "read_file") {
+    return `[${use.name} ${use.input.path ?? ""}]`;
+  }
+  if (use.name === "bash") return `[bash] ${use.input.command ?? ""}`;
+  if (use.name === "grep") return `[grep ${use.input.pattern ?? ""}]`;
+  if (use.name === "glob") return `[glob ${use.input.pattern ?? ""}]`;
+  return `[${use.name}]`;
+}
+
+function capDisplay(text: string, maxBytes: number): string {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= maxBytes) return text;
+  return buf.subarray(buf.length - maxBytes).toString("utf8");
+}
+
+export function formatToolFollowup(use: ToolUse, outcome: { result: Record<string, unknown>; isError: boolean }): string {
+  const content = typeof outcome.result.content === "string" ? outcome.result.content : "";
+  if (use.name === "bash") {
+    const shown = capDisplay(content, TOOL_DISPLAY_BYTES);
+    return shown ? `${shown}\n` : "";
+  }
+  if (outcome.isError) return content ? `${content}\n` : "";
+  if (use.name === "grep" || use.name === "glob") {
+    if (content === "(no matches)") return `${content}\n`;
+    const n = content === "" ? 0 : content.split("\n").length;
+    return `(${n} ${use.name === "grep" ? "hits" : "files"})\n`;
+  }
+  return "";
+}
+
+export function runBash(
+  command: string,
+  opts: { cwd: string; timeoutMs?: number; shouldStop?: () => boolean },
+): Promise<{ content: string; isError: boolean }> {
+  const timeoutMs = opts.timeoutMs ?? BASH_TIMEOUT_MS;
+  const repro = `bash ${shellQuote(command)}`;
+  return new Promise((resolve) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn("/bin/bash", ["-c", command], {
+        cwd: opts.cwd,
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (err) {
+      resolve({ content: `error: ${(err as Error).message}`, isError: true });
+      return;
+    }
+    const pid = child.pid;
+    const maxBuf = 10 * 1024 * 1024;
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    const take = (chunks: Buffer[], used: number, chunk: Buffer): number => {
+      if (used >= maxBuf) return used;
+      const piece = chunk.subarray(0, maxBuf - used);
+      chunks.push(piece);
+      return used + piece.length;
+    };
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdoutBytes = take(stdoutChunks, stdoutBytes, chunk);
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderrBytes = take(stderrChunks, stderrBytes, chunk);
+    });
+    let settled = false;
+    const killGroup = (): void => {
+      if (typeof pid === "number") {
+        try {
+          process.kill(-pid, "SIGKILL");
+          return;
+        } catch {
+          /* fall through to the child handle */
+        }
+      }
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    };
+    const finish = (err: { code?: number | null; signal?: string | null } | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearInterval(poll);
+      const parts = [Buffer.concat(stdoutChunks).toString("utf8"), Buffer.concat(stderrChunks).toString("utf8")];
+      let failed = false;
+      if (err) {
+        failed = true;
+        parts.push(`[exit ${typeof err.code === "number" ? err.code : err.signal ?? "error"}]`);
+      }
+      resolve({
+        content: capTail(parts.filter(Boolean).join("\n") || "(no output)", BASH_CAP_BYTES, repro),
+        isError: failed,
+      });
+    };
+    const timer = setTimeout(killGroup, timeoutMs);
+    const poll = setInterval(() => {
+      if (opts.shouldStop?.()) killGroup();
+    }, 50);
+    if (opts.shouldStop?.()) killGroup();
+    child.on("error", (e) => finish({ signal: e.message }));
+    child.on("close", (code, signal) => {
+      if (code === 0 && !signal) finish(null);
+      else finish({ code, signal });
+    });
+  });
 }
 
 async function executeTool(use: ToolUse): Promise<ToolOutcome> {
@@ -1280,6 +1484,10 @@ async function executeTool(use: ToolUse): Promise<ToolOutcome> {
   }
   if (use.name === "write_file") {
     const got = writeProjectFile(canonicalCwd, use.input.path, use.input.content ?? "");
+    return done(use, got.content, got.isError);
+  }
+  if (use.name === "edit") {
+    const got = editProjectFile(canonicalCwd, use.input.path, use.input.old_text ?? "", use.input.new_text ?? "");
     return done(use, got.content, got.isError);
   }
   if (use.name === "grep") {
@@ -1294,23 +1502,8 @@ async function executeTool(use: ToolUse): Promise<ToolOutcome> {
     return done(use, "error: web_search is provider-executed", true);
   }
   if (use.name === "bash") {
-    return new Promise((res) => {
-      execFile(
-        "/bin/bash",
-        ["-c", use.input.command ?? ""],
-        { cwd: canonicalCwd, timeout: BASH_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024, encoding: "utf8" },
-        (err, stdout, stderr) => {
-          const parts = [stdout, stderr];
-          let failed = false;
-          if (err) {
-            failed = true;
-            parts.push(`[exit ${typeof err.code === "number" ? err.code : err.signal ?? "error"}]`);
-          }
-          const repro = reproFor(use);
-          res(done(use, capTail(parts.filter(Boolean).join("\n") || "(no output)", BASH_CAP_BYTES, repro), failed));
-        },
-      );
-    });
+    const got = await runBash(use.input.command ?? "", { cwd: canonicalCwd, shouldStop: () => interrupted });
+    return done(use, got.content, got.isError);
   }
   return done(use, `error: unknown tool ${use.name}`, true);
 }
@@ -1332,6 +1525,20 @@ const TOOLS = [
       type: "object",
       properties: { path: { type: "string" }, content: { type: "string" } },
       required: ["path", "content"],
+    },
+  },
+  {
+    name: "edit",
+    description:
+      "Replace one unique occurrence of old_text with new_text in a file. Fails if old_text is missing or appears more than once. Prefer this over write_file for existing files.",
+    input_schema: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        old_text: { type: "string" },
+        new_text: { type: "string" },
+      },
+      required: ["path", "old_text", "new_text"],
     },
   },
   {
@@ -2237,19 +2444,68 @@ function reportUsage(
 
 let interrupted = false;
 
+function logSettings(): void {
+  logEvent({
+    t: "agent_settings",
+    model: `${route.provider}/${route.model}`,
+    thinkingLevel: null,
+  });
+}
+
 async function runPrompt(prompt: string): Promise<void> {
   if (!streamPrepared) ensureFreshSession();
-  pushMessage("user", prompt);
-  logEvent({ t: "agent_start", model: route.model, sessionFile, sessionId });
   running = true;
   showPrompt();
   interrupted = false;
   currentAbort = new AbortController();
+  let preflight: { requestId: string; token: string | null } | null = null;
+  if (eventsDir && terminalId) {
+    const requestId = randomUUID();
+    logEvent({ t: "preflight_request", requestId, hasImages: false });
+    const ack = await waitForAck(eventsDir, terminalId, requestId, 15_000, bridgeId, {
+      shouldStop: () => interrupted,
+    });
+    if (!ack || ack.ok !== true) {
+      const err = String(ack && typeof ack.error === "string" ? ack.error : "preflight timed out");
+      out(`(the run did not start: ${err})\n`);
+      surface?.setDraft(prompt);
+      running = false;
+      currentAbort = null;
+      showPrompt();
+      return;
+    }
+    preflight = { requestId, token: typeof ack.token === "string" ? ack.token : null };
+  }
+  const context = eventsDir && terminalId ? readContextFiles(eventsDir, terminalId) : "";
+  if (eventsDir && terminalId) {
+    const file = promptFileName(terminalId, bridgeId, randomUUID().slice(0, 8));
+    const written = writePromptPayload(eventsDir, terminalId, file, { prompt, context });
+    if (written) logEvent({ t: "prompt", file: written, hasPreflight: preflight !== null });
+  }
+  if (context) {
+    pushMessage("user", context);
+    out("(host context injected)\n");
+  }
+  const userMsg = pushMessage("user", prompt);
+  logEvent({
+    t: "agent_start",
+    model: `${route.provider}/${route.model}`,
+    sessionFile,
+    sessionId,
+    preflightRequestId: preflight?.requestId ?? null,
+    preflightToken: preflight?.token ?? null,
+    entryId: String(userMsg.sseq),
+    parentEntryId: null,
+    trusted: null,
+    thinkingLevel: null,
+  });
   if (!rateLookup && !ratesFailed) void loadRates().then(() => { ratesFailed = true; });
   let retriedOverflow = false;
   let modelCalls = 0;
   let lastHadTools = false;
   let resumePaused = false;
+  let planLogged = false;
+  let lastAssistantSseq = 0;
   try {
     while (modelCalls < MAX_TURNS) {
       if (interrupted) break;
@@ -2304,6 +2560,14 @@ async function runPrompt(prompt: string): Promise<void> {
       assistantMsg.tokens = estimate(assistantMsg);
       history.push(assistantMsg);
       assistantMsg.sseq = store({ type: "message", message: { role: "assistant", content: result.blocks } });
+      lastAssistantSseq = assistantMsg.sseq;
+      if (!planLogged) {
+        const plan = firstPlanText(visibleAssistantText(result.blocks));
+        if (plan) {
+          planLogged = true;
+          logEvent({ t: "plan", text: plan });
+        }
+      }
       const serverNames = logServerSearch(result.blocks);
       const uses = (result.blocks.filter((b) => b.type === "tool_use") as Extract<Block, { type: "tool_use" }>[]).map(
         (b): ToolUse => ({ id: b.id, name: b.name, input: b.input }),
@@ -2337,11 +2601,13 @@ async function runPrompt(prompt: string): Promise<void> {
         const chunk = uses.slice(i, i + TOOL_CONCURRENCY);
         for (const use of chunk) {
           logToolStart(use);
-          out(`\n[${use.name}]\n`);
+          out(`\n${formatToolAnnounce(use)}\n`);
         }
         const chunkOutcomes = await Promise.all(chunk.map(executeTool));
         for (let ci = 0; ci < chunk.length; ci++) {
           logEvent({ t: "tool_end", toolCallId: chunk[ci]!.id, isError: chunkOutcomes[ci]!.isError });
+          const follow = formatToolFollowup(chunk[ci]!, chunkOutcomes[ci]!);
+          if (follow) out(follow);
         }
         outcomes.push(...chunkOutcomes);
       }
@@ -2389,6 +2655,24 @@ async function runPrompt(prompt: string): Promise<void> {
     showPrompt();
   }
   logEvent({ t: "agent_settled" });
+  if (eventsDir && terminalId) {
+    const requestId = randomUUID();
+    logEvent({
+      t: "checkpoint_request",
+      requestId,
+      kind: "settled",
+      entryId: lastAssistantSseq > 0 ? String(lastAssistantSseq) : null,
+    });
+    const ack = await waitForAck(eventsDir, terminalId, requestId, 5_000, bridgeId, {
+      shouldStop: () => interrupted,
+    });
+    logEvent({
+      t: "checkpoint_result",
+      requestId,
+      ok: ack?.ok === true,
+      error: ack && typeof ack.error === "string" ? ack.error : null,
+    });
+  }
   showPrompt();
 }
 
@@ -2495,6 +2779,7 @@ let ratesFailed = false;
 
 function submit(line: string): void {
   if (running) {
+    logEvent({ t: "steer_input", behavior: "steer" });
     // Keep one typed-ahead prompt. More than one has no consumer yet.
     queuedLine = line;
     out("(queued — runs after the current task)\n");
@@ -2794,6 +3079,7 @@ function syncStatus(authText?: string): void {
     model: `${route.provider}/${route.model}`,
     auth: authText,
   });
+  logSettings();
 }
 
 function dispatchLine(line: string): void {
@@ -2909,7 +3195,25 @@ async function main(): Promise<void> {
   const bootList = currentCatalog();
   if (bootList && bootList.length > 0) out(`${formatModelBanner(bootList, route.model)}\n`);
   if (process.env.TERMINA_CORE_RESUME === "1") resumeSession();
+  let structured = "";
+  if (eventsDir && terminalId) {
+    const control = consumeStartupControl(eventsDir, terminalId, bridgeId);
+    const opId = control?.opId ?? "";
+    if (!control) logEvent({ t: "session_ready", opId, ok: true, reload: true });
+    else logEvent({ t: "session_ready", opId, ok: true });
+    logSettings();
+    if (control?.action === "prefill" && control.text) {
+      surface?.setDraft(control.text);
+      if (!surface) out(`${control.text}\n`);
+    } else if (control?.action === "structured") {
+      structured = structuredStartupText(control);
+    }
+  }
   showPrompt();
+  if (structured) {
+    out(`> ${structured}\n`);
+    submit(structured);
+  }
 }
 
 if (isDirectRun()) {

@@ -9,9 +9,10 @@ Status: implemented in `agent-core/main.ts` and `agent-core/tui.ts` (frozen zone
 storage + `/resume` replay, reclamation hysteresis + summarization with
 handoff chaining + emergency overflow + truncate last resort, executable
 stubs + structured inventories, waste attribution with models.dev pricing,
-two-role routing map, bounded concurrency, cwd jail, grep/glob, web_search, skill
+two-role routing map, bounded concurrency, cwd jail, grep/glob, unique first-occurrence
+edit, interruptible bash, web_search, skill
 index, prefix `cache_control`, traces, provider auth, live model list,
-full-screen TUI). Zone 1 is identity, environment,
+full-screen TUI, Termina sidecar host contract). Zone 1 is identity, environment,
 user-global `~/.agents/AGENTS.md`, the skill index, then cwd `AGENTS.md`.
 Skill bodies load with `read_file`. Skills come from `~/.agents/skills`
 then `<cwd>/.agents/skills` (no ancestor walk). Truncated instructions
