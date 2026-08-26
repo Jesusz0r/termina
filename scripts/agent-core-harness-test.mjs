@@ -731,6 +731,38 @@ const cancelledResult = await runLogin("anthropic", "browser", {
 });
 check("browser login respects an already-aborted signal", cancelledResult.ok === false && cancelledResult.error === "login cancelled");
 
+const prevTimeout = process.env.TERMINA_TEST_LOGIN_TIMEOUT_MS;
+const prevDenyPort = process.env.TERMINA_TEST_REDIRECT_PORT;
+process.env.TERMINA_TEST_REDIRECT_PORT = "27323";
+let denyOut = "";
+const denyP = runLogin("anthropic", "browser", {
+  write: (t) => {
+    denyOut += t;
+  },
+  openUrl: () => {},
+});
+let denyResult;
+try {
+  const started = Date.now();
+  while (!denyOut.includes("authorize:") && Date.now() - started < 2000) await new Promise((r) => setTimeout(r, 20));
+  await fetch("http://127.0.0.1:27323/callback?error=access_denied&state=x");
+  denyResult = await denyP;
+} catch (err) {
+  denyResult = { ok: false, error: String(err) };
+}
+check("oauth access_denied is login cancelled", denyResult.ok === false && denyResult.error === "login cancelled");
+process.env.TERMINA_TEST_LOGIN_TIMEOUT_MS = "150";
+process.env.TERMINA_TEST_REDIRECT_PORT = "27324";
+const timedOut = await runLogin("anthropic", "browser", { write: () => {}, openUrl: () => {} });
+check(
+  "oauth wait times out as cancelled",
+  timedOut.ok === false && String(timedOut.error).includes("login cancelled"),
+);
+if (prevTimeout === undefined) delete process.env.TERMINA_TEST_LOGIN_TIMEOUT_MS;
+else process.env.TERMINA_TEST_LOGIN_TIMEOUT_MS = prevTimeout;
+if (prevDenyPort === undefined) delete process.env.TERMINA_TEST_REDIRECT_PORT;
+else process.env.TERMINA_TEST_REDIRECT_PORT = prevDenyPort;
+
 const tokenSrv = createServer((req, res) => {
   let body = "";
   req.on("data", (c) => {

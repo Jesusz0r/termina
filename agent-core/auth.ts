@@ -964,6 +964,21 @@ function parseAuthorizationInput(input: string): { code?: string; state?: string
   return { code: value };
 }
 
+function isOauthCancelError(err: string): boolean {
+  return err === "access_denied" || err === "login_cancelled" || err === "user_cancelled";
+}
+
+function loginCallbackTimeoutMs(): number | null {
+  const raw = process.env.TERMINA_TEST_LOGIN_TIMEOUT_MS?.trim();
+  if (raw === "0") return null;
+  if (raw) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  if (process.env.TERMINA_CORE_TEST === "1") return null;
+  return 3 * 60 * 1000;
+}
+
 function waitForCallback(
   port: number,
   path: string,
@@ -991,8 +1006,9 @@ function waitForCallback(
       const code = url.searchParams.get("code");
       res.setHeader("content-type", "text/html; charset=utf-8");
       if (err) {
-        res.end("<p>Login failed. You can close this tab.</p>");
-        finish({ error: `login failed: ${err}` });
+        const cancelled = isOauthCancelError(err);
+        res.end(cancelled ? "<p>Login cancelled. You can close this tab.</p>" : "<p>Login failed. You can close this tab.</p>");
+        finish({ error: cancelled ? "login cancelled" : `login failed: ${err}` });
         return;
       }
       if (expectedState && state !== expectedState) {
@@ -1019,7 +1035,9 @@ function waitForCallback(
       if (code === "EADDRINUSE") finish({ error: `port ${port} busy — another login may be running` });
       else finish({ error: `login failed: ${(err as Error).message}` });
     });
-    server.listen(port, "127.0.0.1");
+    server.listen(port, "127.0.0.1", () => {
+      if (done) server.close();
+    });
   });
 }
 
@@ -1073,10 +1091,34 @@ async function collectCode(
   if (!io.openUrl && !canOpenBrowser()) return { ok: false, error: "no browser — use /login code" };
   if (io.signal?.aborted) return { ok: false, error: "login cancelled" };
   openAuthorize(url, io);
-  const expectedState = providerId === "openrouter" ? null : state;
-  const waited = await waitForCallback(port, redirectPath(providerId), expectedState, io.signal);
-  if ("error" in waited) return { ok: false, error: waited.error };
-  return { ok: true, code: waited.code };
+  io.write("waiting for browser — finish sign-in or Ctrl+C to cancel\n");
+  const timeoutMs = loginCallbackTimeoutMs();
+  const ac = new AbortController();
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const onUserAbort = () => ac.abort();
+  if (timeoutMs) {
+    timer = setTimeout(() => {
+      timedOut = true;
+      ac.abort();
+    }, timeoutMs);
+  }
+  io.signal?.addEventListener("abort", onUserAbort, { once: true });
+  if (io.signal?.aborted) ac.abort();
+  try {
+    const expectedState = providerId === "openrouter" ? null : state;
+    const waited = await waitForCallback(port, redirectPath(providerId), expectedState, ac.signal);
+    if ("error" in waited) {
+      if (timedOut && !io.signal?.aborted) {
+        return { ok: false, error: "login cancelled — browser closed or timed out" };
+      }
+      return { ok: false, error: waited.error };
+    }
+    return { ok: true, code: waited.code };
+  } finally {
+    if (timer) clearTimeout(timer);
+    io.signal?.removeEventListener("abort", onUserAbort);
+  }
 }
 
 function validateVerificationUri(raw: string): string {

@@ -183,7 +183,10 @@ not get a second search implementation.
   No ephemeral port. Registered redirect URIs are fixed.
 - CSRF: random `state` on Anthropic and Codex authorize; callback rejects
   mismatches. OpenRouter does not echo state. IdP `error` query param
-  becomes a readable failure, not a hang.
+  becomes a readable failure, not a hang. `access_denied` is
+  `login cancelled`. Closing the authorize tab cannot be observed, so
+  the wait times out after 3 minutes with
+  `login cancelled — browser closed or timed out`. Ctrl+C cancels sooner.
 - Parallel writer: `resolveAuth` stats the file and reloads on mtime
   change (one stat per turn).
 - Corrupt `auth.json`: warn, env-only, never write.
