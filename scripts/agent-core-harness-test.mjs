@@ -921,7 +921,7 @@ check("extractAccountId reads chatgpt_account_id", extractAccountId(jwt) === "ac
 check(
   "codex headers include account id",
   requestHeaders("openai-codex", jwt, { accountId: "acct-99" })["chatgpt-account-id"] === "acct-99" &&
-    requestHeaders("openai-codex", jwt).originator === "termina-agent-core",
+    requestHeaders("openai-codex", jwt).originator === "codex_cli_rs",
 );
 
 let keyOut = "";
@@ -1039,6 +1039,7 @@ const {
   modelsUrl,
   formatModelBanner,
   formatModelLines,
+  catalogHeaders,
   loadProviderModels,
   catalogFetchAllowed,
 } = modelsMod;
@@ -1065,6 +1066,8 @@ const gemList = parseModelsPayload(
   "google",
 );
 check("parseModelsPayload strips google models/ prefix", gemList[0]?.id === "gemini-2.5-flash");
+const slugList = parseModelsPayload({ models: [{ slug: "gpt-5.4", display_name: "GPT-5.4" }] }, "openai-codex");
+check("parseModelsPayload reads Codex slug", slugList[0]?.id === "gpt-5.4");
 check(
   "pickDefaultModel prefix match",
   pickDefaultModel(anthList, "claude-sonnet-4-5") === "claude-sonnet-4-5-20250929",
@@ -1082,6 +1085,32 @@ check(
 );
 check("modelsUrl anthropic uses /v1/models", modelsUrl("anthropic", "https://api.anthropic.com").includes("/v1/models"));
 check("modelsUrl openai uses /models", modelsUrl("openai", "https://api.openai.com/v1").endsWith("/models"));
+check(
+  "modelsUrl openai-codex adds client_version",
+  modelsUrl("openai-codex", "https://chatgpt.com/backend-api").includes("/codex/models") &&
+    modelsUrl("openai-codex", "https://chatgpt.com/backend-api").includes("client_version="),
+);
+check(
+  "catalogHeaders drop Responses-only fields",
+  catalogHeaders({
+    authorization: "Bearer x",
+    "content-type": "application/json",
+    "openai-beta": "responses=experimental",
+    originator: "codex_cli_rs",
+  }).authorization === "Bearer x" &&
+    catalogHeaders({
+      authorization: "Bearer x",
+      "content-type": "application/json",
+      "openai-beta": "responses=experimental",
+      originator: "codex_cli_rs",
+    })["openai-beta"] === undefined &&
+    catalogHeaders({
+      authorization: "Bearer x",
+      "content-type": "application/json",
+      "openai-beta": "responses=experimental",
+      originator: "codex_cli_rs",
+    })["content-type"] === undefined,
+);
 check("formatModelBanner marks current", formatModelBanner([{ id: "a" }, { id: "b" }], "b").includes("*b"));
 check("formatModelLines stars current", formatModelLines([{ id: "a" }, { id: "b" }], "a").startsWith("* a"));
 check("catalogFetchAllowed is false under harness", catalogFetchAllowed() === false);

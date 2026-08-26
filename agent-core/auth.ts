@@ -52,7 +52,9 @@ const OPENAI_CODEX_TOKEN = "https://auth.openai.com/oauth/token";
 const OPENAI_CODEX_SCOPES = "openid profile email offline_access";
 const OPENAI_CODEX_REDIRECT_PORT = 1455;
 const OPENAI_CODEX_REDIRECT_PATH = "/auth/callback";
-const OPENAI_CODEX_ORIGINATOR = "termina-agent-core";
+/** ChatGPT's Codex backend gates on this originator. */
+const OPENAI_CODEX_ORIGINATOR = "codex_cli_rs";
+const OPENAI_CODEX_CLIENT_VERSION = "1.0.0";
 const OPENAI_JWT_AUTH = "https://api.openai.com/auth";
 
 const XAI_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828";
@@ -277,6 +279,10 @@ export function pickHeaders(token: string): Record<string, string> {
   return headers;
 }
 
+export function openaiCodexClientVersion(): string {
+  return OPENAI_CODEX_CLIENT_VERSION;
+}
+
 export function extractAccountId(token: string): string | null {
   try {
     const parts = token.split(".");
@@ -311,6 +317,7 @@ export function requestHeaders(
       (typeof extra?.accountId === "string" && extra.accountId) || extractAccountId(token) || "";
     if (account) headers["chatgpt-account-id"] = account;
     headers.originator = OPENAI_CODEX_ORIGINATOR;
+    headers["user-agent"] = `codex_cli_rs/${OPENAI_CODEX_CLIENT_VERSION}`;
     headers["openai-beta"] = "responses=experimental";
   }
   if (providerId === "openrouter") {
@@ -926,7 +933,10 @@ async function exchangeCodex(code: string, verifier: string, port: number): Prom
   });
   const parsed = parseTokenResponse(res.payload);
   if (!parsed.ok) return { ok: false, error: `login failed: ${parsed.error}` };
-  return persistOauth("openai-codex", parsed);
+  const rec = isObject(res.payload) ? res.payload : {};
+  const idToken = typeof rec.id_token === "string" ? rec.id_token : "";
+  const accountId = extractAccountId(parsed.access) || extractAccountId(idToken) || undefined;
+  return persistOauth("openai-codex", parsed, accountId ? { accountId } : {});
 }
 
 async function exchangeOpenRouter(code: string, verifier: string, signal?: AbortSignal): Promise<{ ok: true } | { ok: false; error: string }> {

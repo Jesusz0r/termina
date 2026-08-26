@@ -110,9 +110,10 @@ cheap default on the same provider.
 every Anthropic request.
 
 **Other providers** send `Authorization: Bearer`. Codex also sends
-`chatgpt-account-id` (from the stored field or the JWT) and
-`originator: termina-agent-core`. OpenRouter also sends `HTTP-Referer`
-and `X-Title`.
+`chatgpt-account-id` (from the stored field or the JWT),
+`originator: codex_cli_rs`, and `user-agent: codex_cli_rs/1.0.0`.
+ChatGPT's Codex backend requires that originator. OpenRouter also sends
+`HTTP-Referer` and `X-Title`.
 
 **Anthropic OAuth** (Claude Pro/Max). Public client used by Anthropic's CLI:
 
@@ -133,9 +134,12 @@ and OpenCode:
 - PKCE S256
 - Scopes `openid profile email offline_access`
 - Extra authorize params: `id_token_add_organizations=true`,
-  `codex_cli_simplified_flow=true`, `originator=termina-agent-core`
-- Store `accountId` from the JWT claim `https://api.openai.com/auth`
-- API `POST {base}/codex/responses`
+  `codex_cli_simplified_flow=true`, `originator=codex_cli_rs`
+- Store `accountId` from the access or id-token JWT claim
+  `https://api.openai.com/auth`
+- API `POST {base}/codex/responses` with `originator: codex_cli_rs`
+- Models `GET {base}/codex/models?client_version=1.0.0` without
+  `openai-beta` or `content-type`
 
 **xAI SuperGrok OAuth**. Same public Grok-CLI client as Pi and OpenCode.
 Device code, not loopback PKCE:

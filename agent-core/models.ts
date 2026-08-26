@@ -8,6 +8,7 @@
 import {
   DEFAULT_MODELS,
   isSupportedProvider,
+  openaiCodexClientVersion,
   parseModelRef,
   providerProtocol,
   refreshOauth,
@@ -31,9 +32,18 @@ export function modelsUrl(provider: ProviderId, baseUrl: string): string {
   const base = baseUrl.replace(/\/$/, "");
   if (provider === "anthropic") return `${base}/v1/models?limit=100`;
   if (provider === "openai-codex") {
-    if (base.endsWith("/codex/responses")) return base.replace(/\/responses$/, "/models");
-    if (base.endsWith("/codex")) return `${base}/models`;
-    return `${base}/codex/models`;
+    let path = `${base}/codex/models`;
+    if (base.endsWith("/codex/responses")) path = base.replace(/\/responses$/, "/models");
+    else if (base.endsWith("/codex")) path = `${base}/models`;
+    const version = encodeURIComponent(openaiCodexClientVersion());
+    try {
+      const url = new URL(path);
+      url.searchParams.set("client_version", openaiCodexClientVersion());
+      return url.toString();
+    } catch {
+      const sep = path.includes("?") ? "&" : "?";
+      return `${path}${sep}client_version=${version}`;
+    }
   }
   return `${base}/models`;
 }
@@ -65,11 +75,13 @@ function rowId(row: Record<string, unknown>): { id: string; name?: string } | nu
   const raw =
     typeof row.id === "string"
       ? row.id
-      : typeof row.name === "string"
-        ? row.name
-        : typeof row.model === "string"
-          ? row.model
-          : "";
+      : typeof row.slug === "string"
+        ? row.slug
+        : typeof row.name === "string"
+          ? row.name
+          : typeof row.model === "string"
+            ? row.model
+            : "";
   const id = stripModelsPrefix(raw.trim());
   if (!id) return null;
   const name =
@@ -162,6 +174,30 @@ function catalogSignal(user?: AbortSignal): AbortSignal {
   return user ? AbortSignal.any([user, timeout]) : timeout;
 }
 
+/** Catalog GET is not a Responses call. Drop POST-only Codex headers. */
+export function catalogHeaders(authHeaders: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { accept: "application/json" };
+  for (const key of [
+    "authorization",
+    "chatgpt-account-id",
+    "originator",
+    "user-agent",
+    "x-api-key",
+    "anthropic-version",
+    "anthropic-beta",
+    "x-app",
+    "http-referer",
+    "x-title",
+    "editor-version",
+    "editor-plugin-version",
+    "copilot-integration-id",
+  ]) {
+    const value = authHeaders[key];
+    if (value) headers[key] = value;
+  }
+  return headers;
+}
+
 export async function loadProviderModels(
   providerId: ProviderId,
   signal?: AbortSignal,
@@ -174,7 +210,7 @@ export async function loadProviderModels(
       const auth = await resolveAuth(providerId);
       if (!auth.ok) return { ok: false, error: auth.error };
       const url = modelsUrl(providerId, auth.baseUrl);
-      const headers = { ...auth.headers, accept: "application/json" };
+      const headers = catalogHeaders(auth.headers);
       const res = await fetch(url, { method: "GET", headers, signal: combined });
       if (res.status === 401) {
         await res.text();
@@ -187,7 +223,10 @@ export async function loadProviderModels(
         return { ok: false, error: auth.kind === "oauth" ? "auth expired — run /login" : "invalid API key" };
       }
       const raw = await res.text();
-      if (!res.ok) return { ok: false, error: `models HTTP ${res.status}` };
+      if (!res.ok) {
+        const detail = raw.replace(/\s+/g, " ").trim().slice(0, 200);
+        return { ok: false, error: detail ? `models HTTP ${res.status}: ${detail}` : `models HTTP ${res.status}` };
+      }
       let payload: unknown;
       try {
         payload = JSON.parse(raw);
