@@ -46,6 +46,7 @@ export function isChatModel(id: string, provider: ProviderId): boolean {
   if (provider === "xai") return n.includes("grok");
   if (provider === "google") return n.includes("gemini") || n.includes("gemma");
   if (provider === "openai-codex") return /^(gpt-|o[0-9]|codex)/.test(n);
+  if (provider === "github-copilot") return /^(gpt-|o[0-9]|claude|gemini|copilot)/.test(n);
   if (provider === "openrouter") return n.includes("/");
   return /^(gpt-|o[0-9]|chatgpt|claude|grok|gemini|gemma|deepseek|mistral|llama|qwen|kimi|minimax|command|glm|moonshot)/.test(
     n,

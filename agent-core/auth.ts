@@ -30,6 +30,7 @@ export const SUPPORTED_PROVIDERS = [
   "anthropic",
   "openai",
   "openai-codex",
+  "github-copilot",
   "xai",
   "google",
   "openrouter",
@@ -69,6 +70,21 @@ const OPENROUTER_AUTHORIZE = "https://openrouter.ai/auth";
 const OPENROUTER_TOKEN = "https://openrouter.ai/api/v1/auth/keys";
 const OPENROUTER_REDIRECT_PORT = 53693;
 
+/** Same GitHub Copilot OAuth app Pi and OpenCode use (VS Code Copilot). */
+const GITHUB_COPILOT_CLIENT_ID = "Iv1.b507a08c87ecfe98";
+const GITHUB_DEVICE_URL = "https://github.com/login/device/code";
+const GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token";
+const GITHUB_COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token";
+const GITHUB_DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
+const COPILOT_HEADERS = {
+  accept: "application/json",
+  "content-type": "application/json",
+  "user-agent": "GitHubCopilotChat/0.35.0",
+  "editor-version": "vscode/1.107.0",
+  "editor-plugin-version": "copilot-chat/0.35.0",
+  "copilot-integration-id": "vscode-chat",
+} as const;
+
 const EXPIRE_MARGIN_MS = 300_000;
 const OAT_MARK = "sk-ant-oat";
 const DEFAULT_ANTHROPIC_BASE = "https://api.anthropic.com";
@@ -81,11 +97,98 @@ export function isSupportedProvider(id: string): id is ProviderId {
 export const AUTH_PROVIDER_ORDER: ProviderId[] = [
   "anthropic",
   "openai-codex",
+  "github-copilot",
   "openai",
   "xai",
   "google",
   "openrouter",
 ];
+
+export type LoginKind = "oauth" | "key";
+
+/** One row per login method. `/login openai oauth` is Codex; `/login openai key` is the API key. */
+export const LOGIN_METHODS: {
+  group: string;
+  id: ProviderId;
+  kind: LoginKind;
+  mode: LoginMode;
+  name: string;
+  hint: string;
+}[] = [
+  { group: "anthropic", id: "anthropic", kind: "oauth", mode: "browser", name: "Anthropic", hint: "Claude Pro/Max" },
+  { group: "anthropic", id: "anthropic", kind: "key", mode: "key", name: "Anthropic", hint: "API key" },
+  { group: "openai", id: "openai-codex", kind: "oauth", mode: "browser", name: "OpenAI", hint: "ChatGPT Plus/Pro (Codex)" },
+  { group: "openai", id: "openai", kind: "key", mode: "key", name: "OpenAI", hint: "API key" },
+  { group: "github-copilot", id: "github-copilot", kind: "oauth", mode: "device", name: "GitHub Copilot", hint: "Copilot subscription" },
+  { group: "github-copilot", id: "github-copilot", kind: "key", mode: "key", name: "GitHub Copilot", hint: "GitHub token" },
+  { group: "xai", id: "xai", kind: "oauth", mode: "device", name: "xAI", hint: "Grok/X subscription" },
+  { group: "xai", id: "xai", kind: "key", mode: "key", name: "xAI", hint: "API key" },
+  { group: "openrouter", id: "openrouter", kind: "oauth", mode: "browser", name: "OpenRouter", hint: "sign-in mints an API key" },
+  { group: "openrouter", id: "openrouter", kind: "key", mode: "key", name: "OpenRouter", hint: "API key" },
+  { group: "google", id: "google", kind: "key", mode: "key", name: "Google Gemini", hint: "API key" },
+];
+
+/** OAuth rows use the provider name. API-key rows add (key). */
+export function loginPickerLabel(method: { name: string; kind: LoginKind }): string {
+  return method.kind === "key" ? `${method.name} (key)` : method.name;
+}
+
+export type LoginPickerItem = {
+  label: string;
+  hint: string;
+  command: string;
+};
+
+export function loginPickerItems(cmd: "/login" | "/logout"): LoginPickerItem[] {
+  return LOGIN_METHODS.map((m) => ({
+    label: loginPickerLabel(m),
+    hint: m.hint,
+    command: `${cmd} ${m.group} ${m.kind}`,
+  }));
+}
+
+const LOGIN_KIND_WORDS = new Set(["key", "oauth", "code", "device", "browser"]);
+
+function loginKindFromWord(word: string): LoginKind | null {
+  if (word === "key") return "key";
+  if (word === "oauth" || word === "code" || word === "device" || word === "browser") return "oauth";
+  return null;
+}
+
+export function resolveLoginPick(
+  groupOrId: string,
+  kindWord?: string,
+): { provider: ProviderId; mode: LoginMode } | { error: string } {
+  const byId = LOGIN_METHODS.filter((m) => m.id === groupOrId);
+  const byGroup = LOGIN_METHODS.filter((m) => m.group === groupOrId);
+  const methods = kindWord ? (byGroup.length > 0 ? byGroup : byId) : byId.length > 0 ? byId : byGroup;
+  if (methods.length === 0) {
+    if (!isSupportedProvider(groupOrId)) {
+      return { error: `unsupported provider: ${groupOrId} (supported: ${[...new Set(LOGIN_METHODS.map((m) => m.group))].join(", ")})` };
+    }
+    const mode =
+      kindWord && loginKindFromWord(kindWord) === "key"
+        ? "key"
+        : kindWord === "code"
+          ? "code"
+          : kindWord === "device"
+            ? "device"
+            : kindWord === "browser" || kindWord === "oauth"
+              ? "browser"
+              : defaultLoginMode(groupOrId);
+    return { provider: groupOrId, mode };
+  }
+  const kind = kindWord ? loginKindFromWord(kindWord) : null;
+  const picked =
+    kind != null
+      ? methods.find((m) => m.kind === kind)
+      : methods.find((m) => m.mode === defaultLoginMode(m.id)) ?? methods[0];
+  if (!picked) return { error: `${groupOrId} has no ${kindWord} login` };
+  if (kindWord === "code") return { provider: picked.id, mode: "code" };
+  if (kindWord === "device") return { provider: picked.id, mode: "device" };
+  if (kindWord === "browser") return { provider: picked.id, mode: "browser" };
+  return { provider: picked.id, mode: picked.mode };
+}
 
 export function providerProtocol(id: ProviderId): ProviderProtocol {
   if (id === "anthropic") return "anthropic-messages";
@@ -94,7 +197,7 @@ export function providerProtocol(id: ProviderId): ProviderProtocol {
 }
 
 export function defaultLoginMode(id: ProviderId): LoginMode {
-  if (id === "xai") return "device";
+  if (id === "xai" || id === "github-copilot") return "device";
   if (id === "openai" || id === "google") return "key";
   return "browser";
 }
@@ -214,6 +317,12 @@ export function requestHeaders(
     headers["http-referer"] = "https://termina.local";
     headers["x-title"] = "Termina agent-core";
   }
+  if (providerId === "github-copilot") {
+    headers["editor-version"] = COPILOT_HEADERS["editor-version"];
+    headers["editor-plugin-version"] = COPILOT_HEADERS["editor-plugin-version"];
+    headers["copilot-integration-id"] = COPILOT_HEADERS["copilot-integration-id"];
+    headers["user-agent"] = COPILOT_HEADERS["user-agent"];
+  }
   return headers;
 }
 
@@ -269,6 +378,26 @@ function isObject(v: unknown): v is Record<string, unknown> {
   return Boolean(v) && typeof v === "object" && !Array.isArray(v);
 }
 
+function extraApiUrl(entry: Record<string, unknown>): string | null {
+  const raw = typeof entry.apiUrl === "string" ? entry.apiUrl.trim() : "";
+  return raw ? validateCopilotApiUrl(raw) : null;
+}
+
+export function validateCopilotApiUrl(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  try {
+    const url = new URL(trimmed);
+    if (testOverride("TERMINA_TEST_COPILOT_TOKEN_URL")) return `${url.origin}${url.pathname}`.replace(/\/$/, "");
+    if (url.protocol !== "https:") return null;
+    const host = url.hostname;
+    if (host !== "api.githubcopilot.com" && !host.endsWith(".githubcopilot.com")) return null;
+    return `${url.origin}${url.pathname}`.replace(/\/$/, "");
+  } catch {
+    return null;
+  }
+}
+
 function sleep(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
@@ -279,9 +408,14 @@ function sleepAsync(ms: number, signal?: AbortSignal): Promise<void> {
       reject(new Error("login cancelled"));
       return;
     }
-    const t = setTimeout(resolve, ms);
+    const onDone = () => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    };
+    const t = setTimeout(onDone, ms);
     const onAbort = () => {
       clearTimeout(t);
+      signal?.removeEventListener("abort", onAbort);
       reject(new Error("login cancelled"));
     };
     signal?.addEventListener("abort", onAbort, { once: true });
@@ -389,6 +523,7 @@ const DEFAULT_BASE: Record<ProviderId, string> = {
   anthropic: DEFAULT_ANTHROPIC_BASE,
   openai: "https://api.openai.com/v1",
   "openai-codex": "https://chatgpt.com/backend-api",
+  "github-copilot": "https://api.individual.githubcopilot.com",
   xai: "https://api.x.ai/v1",
   google: "https://generativelanguage.googleapis.com/v1beta/openai",
   openrouter: "https://openrouter.ai/api/v1",
@@ -405,6 +540,7 @@ const ENV_KEYS: Record<ProviderId, string[]> = {
   anthropic: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
   openai: ["OPENAI_API_KEY"],
   "openai-codex": [],
+  "github-copilot": [],
   xai: ["XAI_API_KEY"],
   google: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
   openrouter: ["OPENROUTER_API_KEY"],
@@ -414,6 +550,7 @@ export const DEFAULT_MODELS: Record<ProviderId, { main: string; summary: string 
   anthropic: { main: "claude-sonnet-4-5", summary: "claude-haiku-4-5" },
   openai: { main: "gpt-5", summary: "gpt-4.1-mini" },
   "openai-codex": { main: "gpt-5.4", summary: "gpt-5.4-mini" },
+  "github-copilot": { main: "gpt-4.1", summary: "gpt-4.1-mini" },
   xai: { main: "grok-4.3", summary: "grok-4.3" },
   google: { main: "gemini-2.5-flash", summary: "gemini-2.5-flash" },
   openrouter: { main: "openai/gpt-4o-mini", summary: "openai/gpt-4o-mini" },
@@ -511,13 +648,14 @@ function fromStored(
     const refresh = typeof entry.refresh === "string" ? entry.refresh : "";
     if (!access || !refresh) return null;
     if (needsRefresh(entry.expires)) return { needsOauthRefresh: true, refresh, extra: entry };
+    const storedBase = extraApiUrl(entry);
     return {
       ok: true,
       providerId: id,
       token: access,
       kind: "oauth",
       source: "oauth",
-      baseUrl: baseUrl(id),
+      baseUrl: storedBase || baseUrl(id),
       headers: requestHeaders(id, access, entry),
     };
   }
@@ -538,10 +676,15 @@ function missingCredentialError(id: ProviderId): string {
   return `no ${id} credential — run /login ${id}`;
 }
 
-async function postJson(url: string, body: unknown, signal?: AbortSignal): Promise<{ ok: boolean; status: number; payload: unknown; raw: string }> {
+async function postJson(
+  url: string,
+  body: unknown,
+  signal?: AbortSignal,
+  extraHeaders?: Record<string, string>,
+): Promise<{ ok: boolean; status: number; payload: unknown; raw: string }> {
   const res = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json" },
+    headers: { "content-type": "application/json", accept: "application/json", ...extraHeaders },
     body: JSON.stringify(body),
     signal,
   });
@@ -629,6 +772,7 @@ export async function refreshOauth(providerId: string): Promise<{ ok: true } | {
           return { ok: false, error: "auth expired — run /login" };
         }
         let parsed: ReturnType<typeof parseOauthToken>;
+        let extra: Record<string, unknown> = entry;
         if (providerId === "anthropic") {
           const res = await postJson(tokenUrl(providerId), {
             grant_type: "refresh_token",
@@ -654,11 +798,21 @@ export async function refreshOauth(providerId: string): Promise<{ ok: true } | {
             previousRefresh: entry.refresh,
             defaultExpiresIn: 3600,
           });
+        } else if (providerId === "github-copilot") {
+          const session = await exchangeGithubCopilotToken(entry.refresh);
+          if (!session.ok) return { ok: false, error: "auth expired — run /login" };
+          parsed = {
+            ok: true,
+            access: session.access,
+            refresh: entry.refresh,
+            expires: session.expires,
+          };
+          extra = { ...(isObject(entry) ? entry : {}), apiUrl: session.apiUrl };
         } else {
           return { ok: true };
         }
         if (!parsed.ok) return { ok: false, error: "auth expired — run /login" };
-        const stored = persistOauth(providerId, parsed, isObject(entry) ? entry : {});
+        const stored = persistOauth(providerId, parsed, extra);
         if (!stored.ok) return { ok: false, error: "auth expired — run /login" };
         return { ok: true };
       } catch {
@@ -817,6 +971,14 @@ function waitForCallback(
   signal?: AbortSignal,
 ): Promise<{ code: string } | { error: string }> {
   return new Promise((resolve) => {
+    let done = false;
+    const finish = (result: { code: string } | { error: string }) => {
+      if (done) return;
+      done = true;
+      signal?.removeEventListener("abort", onAbort);
+      server.close();
+      resolve(result);
+    };
     const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
       if (url.pathname !== path) {
@@ -830,35 +992,28 @@ function waitForCallback(
       res.setHeader("content-type", "text/html; charset=utf-8");
       if (err) {
         res.end("<p>Login failed. You can close this tab.</p>");
-        server.close();
-        resolve({ error: `login failed: ${err}` });
+        finish({ error: `login failed: ${err}` });
         return;
       }
       if (expectedState && state !== expectedState) {
         res.end("<p>Login failed (state mismatch). You can close this tab.</p>");
-        server.close();
-        resolve({ error: "login failed: state mismatch" });
+        finish({ error: "login failed: state mismatch" });
         return;
       }
       if (!code) {
         res.end("<p>Login failed (missing code). You can close this tab.</p>");
-        server.close();
-        resolve({ error: "login failed: missing code" });
+        finish({ error: "login failed: missing code" });
         return;
       }
       res.end("<p>Termina agent-core is signed in. You can close this tab.</p>");
-      server.close();
-      resolve({ code });
+      finish({ code });
     });
-    const onAbort = () => {
-      server.close();
-      resolve({ error: "login cancelled" });
-    };
+    const onAbort = () => finish({ error: "login cancelled" });
     signal?.addEventListener("abort", onAbort, { once: true });
     server.on("error", (err) => {
       const code = (err as NodeJS.ErrnoException).code;
-      if (code === "EADDRINUSE") resolve({ error: `port ${port} busy — another login may be running` });
-      else resolve({ error: `login failed: ${(err as Error).message}` });
+      if (code === "EADDRINUSE") finish({ error: `port ${port} busy — another login may be running` });
+      else finish({ error: `login failed: ${(err as Error).message}` });
     });
     server.listen(port, "127.0.0.1");
   });
@@ -1040,6 +1195,168 @@ async function loginXaiDevice(io: LoginIo): Promise<{ ok: true } | { ok: false; 
   }
 }
 
+function githubDeviceUrl(): string {
+  return testOverride("TERMINA_TEST_DEVICE_URL") || GITHUB_DEVICE_URL;
+}
+
+function githubAccessUrl(): string {
+  return testOverride("TERMINA_TEST_TOKEN_URL") || GITHUB_ACCESS_TOKEN_URL;
+}
+
+function copilotSessionUrl(): string {
+  return testOverride("TERMINA_TEST_COPILOT_TOKEN_URL") || GITHUB_COPILOT_TOKEN_URL;
+}
+
+function validateGithubVerificationUri(raw: string): string {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("Untrusted verification URI in GitHub OAuth response");
+  }
+  if (url.protocol !== "https:" && !testOverride("TERMINA_TEST_DEVICE_URL")) {
+    throw new Error("Untrusted verification URI in GitHub OAuth response");
+  }
+  if (!testOverride("TERMINA_TEST_DEVICE_URL") && url.hostname !== "github.com" && !url.hostname.endsWith(".github.com")) {
+    throw new Error("Untrusted verification URI in GitHub OAuth response");
+  }
+  return url.href;
+}
+
+export async function requestGithubDeviceCode(signal?: AbortSignal): Promise<{
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  intervalMs: number;
+  expiresMs: number;
+}> {
+  const res = await postJson(
+    githubDeviceUrl(),
+    { client_id: GITHUB_COPILOT_CLIENT_ID, scope: "read:user" },
+    signal,
+    { accept: "application/json", "user-agent": COPILOT_HEADERS["user-agent"] },
+  );
+  if (!res.ok || !isObject(res.payload)) {
+    throw new Error(`GitHub device authorization failed (HTTP ${res.status})`);
+  }
+  const deviceCode = typeof res.payload.device_code === "string" ? res.payload.device_code : "";
+  const userCode = typeof res.payload.user_code === "string" ? res.payload.user_code : "";
+  const verification = typeof res.payload.verification_uri === "string" ? res.payload.verification_uri : "";
+  if (!deviceCode || !userCode || !verification) {
+    throw new Error("GitHub device code response is missing fields");
+  }
+  return {
+    deviceCode,
+    userCode,
+    verificationUri: validateGithubVerificationUri(verification),
+    intervalMs: intervalMs(res.payload.interval, 5_000, testOverride("TERMINA_TEST_DEVICE_URL") ? 0 : 1_000),
+    expiresMs: positiveMs(res.payload.expires_in, 15 * 60 * 1000),
+  };
+}
+
+export async function pollGithubDeviceToken(
+  device: { deviceCode: string; intervalMs: number; expiresMs: number },
+  signal?: AbortSignal,
+): Promise<{ ok: true; githubToken: string } | { ok: false; error: string }> {
+  const deadline = Date.now() + device.expiresMs;
+  let waitMs = device.intervalMs;
+  while (Date.now() < deadline) {
+    const res = await postJson(
+      githubAccessUrl(),
+      {
+        client_id: GITHUB_COPILOT_CLIENT_ID,
+        device_code: device.deviceCode,
+        grant_type: GITHUB_DEVICE_GRANT,
+      },
+      signal,
+      { accept: "application/json", "user-agent": COPILOT_HEADERS["user-agent"] },
+    );
+    if (isObject(res.payload) && typeof res.payload.access_token === "string" && res.payload.access_token) {
+      return { ok: true, githubToken: res.payload.access_token };
+    }
+    const err = isObject(res.payload) && typeof res.payload.error === "string" ? res.payload.error : "";
+    if (err === "access_denied") return { ok: false, error: "GitHub device authorization was denied" };
+    if (err === "expired_token") return { ok: false, error: "GitHub device code expired" };
+    if (err === "slow_down") waitMs += 5_000;
+    else if (err && err !== "authorization_pending") {
+      return { ok: false, error: `GitHub device token exchange failed (HTTP ${res.status})` };
+    } else if (!res.ok && err !== "authorization_pending") {
+      return { ok: false, error: `GitHub device token exchange failed (HTTP ${res.status})` };
+    }
+    const wait = Math.min(waitMs, Math.max(0, deadline - Date.now()));
+    if (wait > 0) await sleepAsync(wait, signal);
+  }
+  return { ok: false, error: "GitHub device authorization timed out" };
+}
+
+export async function exchangeGithubCopilotToken(
+  githubToken: string,
+  signal?: AbortSignal,
+): Promise<{ ok: true; access: string; expires: number; apiUrl: string } | { ok: false; error: string }> {
+  const res = await fetch(copilotSessionUrl(), {
+    method: "GET",
+    headers: {
+      ...COPILOT_HEADERS,
+      authorization: `Bearer ${githubToken}`,
+    },
+    signal,
+  });
+  const raw = await res.text();
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    payload = null;
+  }
+  if (!res.ok || !isObject(payload) || typeof payload.token !== "string" || !payload.token) {
+    return { ok: false, error: `Copilot session token failed (HTTP ${res.status})` };
+  }
+  const endpoints = isObject(payload.endpoints) ? payload.endpoints : {};
+  const reported = typeof endpoints.api === "string" ? endpoints.api : "";
+  const apiUrl = validateCopilotApiUrl(reported) || DEFAULT_BASE["github-copilot"];
+  let expires = Date.now() + 25 * 60 * 1000;
+  const expiresAt = payload.expires_at;
+  if (typeof expiresAt === "number" && Number.isFinite(expiresAt) && expiresAt > 0) {
+    expires = (expiresAt > 1_000_000_000_000 ? expiresAt : expiresAt * 1000) - EXPIRE_MARGIN_MS;
+  } else if (typeof payload.refresh_in === "number" && payload.refresh_in > 0) {
+    expires = Date.now() + payload.refresh_in * 1000 - EXPIRE_MARGIN_MS;
+  }
+  return { ok: true, access: payload.token, expires, apiUrl };
+}
+
+async function loginGithubCopilot(io: LoginIo): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const device = await requestGithubDeviceCode(io.signal);
+    io.write(`Open ${device.verificationUri} and enter code: ${device.userCode}\n`);
+    openAuthorize(device.verificationUri, io);
+    const github = await pollGithubDeviceToken(device, io.signal);
+    if (!github.ok) return github;
+    const session = await exchangeGithubCopilotToken(github.githubToken, io.signal);
+    if (!session.ok) return session;
+    return persistOauth(
+      "github-copilot",
+      { access: session.access, refresh: github.githubToken, expires: session.expires },
+      { apiUrl: session.apiUrl },
+    );
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+}
+
+async function loginGithubCopilotKey(io: LoginIo): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!io.waitForCode) return { ok: false, error: "login failed: no token input" };
+  io.write("paste a GitHub token with Copilot access, then press enter\n");
+  const githubToken = (await io.waitForCode()).trim();
+  if (!githubToken) return { ok: false, error: "login failed: empty token" };
+  const session = await exchangeGithubCopilotToken(githubToken, io.signal);
+  if (!session.ok) return session;
+  return persistOauth(
+    "github-copilot",
+    { access: session.access, refresh: githubToken, expires: session.expires },
+    { apiUrl: session.apiUrl },
+  );
+}
+
 async function finishResolved(
   providerId: ProviderId,
 ): Promise<{ ok: true; summary: string } | { ok: false; error: string }> {
@@ -1057,6 +1374,11 @@ export async function runLogin(
     return { ok: false, error: `unsupported provider: ${providerId} (supported: ${SUPPORTED_PROVIDERS.join(", ")})` };
   }
   const chosen = mode;
+  if (providerId === "github-copilot") {
+    const stored = chosen === "key" ? await loginGithubCopilotKey(io) : await loginGithubCopilot(io);
+    if (!stored.ok) return stored;
+    return finishResolved(providerId);
+  }
   if (chosen === "key" || (chosen === "browser" && defaultLoginMode(providerId) === "key")) {
     const stored = await loginKey(providerId, io);
     if (!stored.ok) return stored;
@@ -1116,29 +1438,25 @@ export function parseAuthCommand(line: string):
   | { error: string } {
   const parts = line.trim().split(/\s+/);
   const cmd = parts[0];
+  const first = parts[1]?.toLowerCase();
+  const second = parts[2]?.toLowerCase();
   if (cmd === "/logout") {
-    const provider = parts[1] ?? "anthropic";
-    if (!isSupportedProvider(provider)) {
-      return { error: `unsupported provider: ${provider} (supported: ${SUPPORTED_PROVIDERS.join(", ")})` };
-    }
-    return { cmd: "logout", provider };
+    if (!first) return { error: "pick a provider" };
+    let picked: ReturnType<typeof resolveLoginPick>;
+    if (LOGIN_KIND_WORDS.has(first) && second) picked = resolveLoginPick(second, first);
+    else if (second && LOGIN_KIND_WORDS.has(second)) picked = resolveLoginPick(first, second);
+    else if (isSupportedProvider(first)) return { cmd: "logout", provider: first };
+    else picked = resolveLoginPick(first);
+    if ("error" in picked) return picked;
+    return { cmd: "logout", provider: picked.provider };
   }
   if (cmd === "/login") {
-    let mode: LoginMode | "default" = "default";
-    let provider = "anthropic";
-    const first = parts[1];
-    const second = parts[2];
-    if (first === "code" || first === "key" || first === "device") {
-      mode = first;
-      provider = second ?? "anthropic";
-    } else if (first) {
-      provider = first;
-    }
-    if (!isSupportedProvider(provider)) {
-      return { error: `unsupported provider: ${provider} (supported: ${SUPPORTED_PROVIDERS.join(", ")})` };
-    }
-    const resolvedMode = mode === "default" ? defaultLoginMode(provider) : mode;
-    return { cmd: "login", mode: resolvedMode, provider };
+    if (!first) return { error: "pick a provider" };
+    let picked: ReturnType<typeof resolveLoginPick>;
+    if (LOGIN_KIND_WORDS.has(first)) picked = resolveLoginPick(second ?? "anthropic", first);
+    else picked = resolveLoginPick(first, second);
+    if ("error" in picked) return picked;
+    return { cmd: "login", mode: picked.mode, provider: picked.provider };
   }
   return { error: `unknown command: ${line}` };
 }

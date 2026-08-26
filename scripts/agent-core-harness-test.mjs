@@ -655,6 +655,7 @@ const {
   extractAccountId,
   defaultLoginMode,
   providerProtocol,
+  validateCopilotApiUrl,
   hasStoredCredential,
   hasEnvCredential,
   firstAuthenticatedProvider,
@@ -713,7 +714,8 @@ else process.env.ANTHROPIC_API_KEY = prevKey;
 if (prevTok === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
 else process.env.ANTHROPIC_AUTH_TOKEN = prevTok;
 
-check("parseAuthCommand default provider", parseAuthCommand("/login").cmd === "login" && parseAuthCommand("/login").provider === "anthropic");
+check("parseAuthCommand bare /login asks to pick", "error" in parseAuthCommand("/login") && String(parseAuthCommand("/login").error).includes("pick a provider"));
+check("parseAuthCommand bare /logout asks to pick", "error" in parseAuthCommand("/logout") && String(parseAuthCommand("/logout").error).includes("pick a provider"));
 check("parseAuthCommand code mode", parseAuthCommand("/login code").mode === "code");
 check("parseAuthCommand rejects unknown provider", "error" in parseAuthCommand("/login nope"));
 check("banner does not contain raw token", !authBanner({ ok: true, providerId: "anthropic", token: "sk-ant-oat-SUPERSECRET99", kind: "oauth", source: "oauth", baseUrl: "https://api.anthropic.com", headers: {} }).includes("SUPERSECRET"));
@@ -799,6 +801,45 @@ check("providerProtocol openai-codex is responses", providerProtocol("openai-cod
 check("parseAuthCommand /login xai is device", parseAuthCommand("/login xai").mode === "device" && parseAuthCommand("/login xai").provider === "xai");
 check("parseAuthCommand /login key openai", parseAuthCommand("/login key openai").mode === "key" && parseAuthCommand("/login key openai").provider === "openai");
 check("parseAuthCommand /login openai-codex", parseAuthCommand("/login openai-codex").provider === "openai-codex" && parseAuthCommand("/login openai-codex").mode === "browser");
+check(
+  "parseAuthCommand /login openai oauth is Codex",
+  parseAuthCommand("/login openai oauth").provider === "openai-codex" && parseAuthCommand("/login openai oauth").mode === "browser",
+);
+check(
+  "parseAuthCommand /login openai key is API key",
+  parseAuthCommand("/login openai key").provider === "openai" && parseAuthCommand("/login openai key").mode === "key",
+);
+check(
+  "parseAuthCommand /login anthropic key",
+  parseAuthCommand("/login anthropic key").provider === "anthropic" && parseAuthCommand("/login anthropic key").mode === "key",
+);
+check(
+  "parseAuthCommand /login xai oauth is device",
+  parseAuthCommand("/login xai oauth").mode === "device" && parseAuthCommand("/login xai oauth").provider === "xai",
+);
+check(
+  "parseAuthCommand is case-insensitive",
+  parseAuthCommand("/login OpenAI OAuth").provider === "openai-codex" && parseAuthCommand("/login KEY Anthropic").mode === "key",
+);
+check("parseAuthCommand google oauth is rejected", "error" in parseAuthCommand("/login google oauth"));
+check(
+  "parseAuthCommand /logout openai oauth is Codex",
+  parseAuthCommand("/logout openai oauth").cmd === "logout" && parseAuthCommand("/logout openai oauth").provider === "openai-codex",
+);
+check(
+  "parseAuthCommand /logout openai key is API key store",
+  parseAuthCommand("/logout openai key").provider === "openai",
+);
+check(
+  "parseAuthCommand /login github-copilot is device",
+  parseAuthCommand("/login github-copilot").mode === "device" && parseAuthCommand("/login github-copilot").provider === "github-copilot",
+);
+check(
+  "validateCopilotApiUrl allows githubcopilot hosts",
+  validateCopilotApiUrl("https://api.individual.githubcopilot.com/") === "https://api.individual.githubcopilot.com",
+);
+check("validateCopilotApiUrl rejects http", validateCopilotApiUrl("http://api.githubcopilot.com") === null);
+check("validateCopilotApiUrl rejects other hosts", validateCopilotApiUrl("https://evil.example/copilot") === null);
 
 const prevOpenAI = process.env.OPENAI_API_KEY;
 const prevXai = process.env.XAI_API_KEY;

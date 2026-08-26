@@ -53,11 +53,15 @@ A corrupt file is never overwritten.
 | `openai` | paste key | `OPENAI_API_KEY` | Chat Completions | `OPENAI_BASE_URL` or `https://api.openai.com/v1` |
 | `openai-codex` | ChatGPT Plus/Pro PKCE | none | Codex Responses | `https://chatgpt.com/backend-api` |
 | `xai` | SuperGrok / X Premium device code, or `/login key xai` | `XAI_API_KEY` | Chat Completions | `XAI_BASE_URL` or `https://api.x.ai/v1` |
+| `github-copilot` | GitHub device code, then Copilot session token | none | Chat Completions | token `endpoints.api` or `https://api.individual.githubcopilot.com` |
 | `google` | paste key | `GEMINI_API_KEY`, then `GOOGLE_API_KEY` | Chat Completions (OpenAI-compat) | `https://generativelanguage.googleapis.com/v1beta/openai` |
 | `openrouter` | PKCE-minted key, or `/login key openrouter` | `OPENROUTER_API_KEY` | Chat Completions | `OPENROUTER_BASE_URL` or `https://openrouter.ai/api/v1` |
 
-GitHub Copilot, Radius, Bedrock, and Azure stay out of this engine. Copilot
-uses a third token exchange (`copilot_internal`) and is not Completions.
+`/login` opens a TUI picker. OAuth is the provider name (`OpenAI`); API
+key is `OpenAI (key)`. Both exist when the provider supports both.
+`/login openai oauth` stores ChatGPT Codex; `/login openai key` stores
+an OpenAI API key. Google is API key only.
+Radius, Bedrock, and Azure stay out of this engine.
 
 **Resolution order** (first hit wins, per provider):
 
@@ -204,7 +208,8 @@ not get a second search implementation.
 
 ## Slash commands
 
-- `/login [provider]` — default login for that provider (`anthropic` if omitted).
+- `/login` — TUI picker of providers (`OpenAI`, `OpenAI (key)`, …).
+- `/login [provider]` — default login for that provider.
 - `/login code [provider]` — paste-the-code variant (PKCE providers).
 - `/login key [provider]` — paste an API key.
 - `/logout [provider]` — delete the stored entry and confirm.
