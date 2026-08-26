@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
@@ -289,6 +289,20 @@ async function stopProcess(child) {
   }
 }
 
+/** Restore term-1 as Pi so agent-driving suites keep the existing term-1 contract. */
+async function seedPiRoster(userData, cwd) {
+  let abs = cwd;
+  try {
+    abs = await realpath(cwd);
+  } catch {
+    /* keep cwd */
+  }
+  const slug = `--${abs.replace(/^[/\\]+/, "").replace(/[/\\]+$/, "").replace(/[/\\:]/g, "-")}--`;
+  const dir = join(userData, "terminal-rosters");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, `${slug}.json`), `${JSON.stringify({ terminals: [{ id: "term-1", type: "agent", engine: "pi" }] })}\n`);
+}
+
 async function runSuite(name, testCase) {
   const fixture = await prepare(name, testCase);
   await rm(fixture.events, { recursive: true, force: true });
@@ -298,6 +312,7 @@ async function runSuite(name, testCase) {
   const userData = join(USER_DATA_ROOT, `${name.replace(/[^a-z0-9-]/gi, "-")}${testCase ? `-${testCase}` : ""}`);
   await rm(userData, { recursive: true, force: true });
   await mkdir(userData, { recursive: true });
+  await seedPiRoster(userData, fixture.root);
   await clearDebugPort();
   if (name === "worldline-recovery-test.mjs") await seedRecovery(fixture.root, fixture.worlds);
   if (name === "worldline-cleanup-test.mjs") await seedCleanup(fixture.worlds);

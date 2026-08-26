@@ -2049,15 +2049,12 @@ async function boot(): Promise<void> {
   }
 
   const instances = await window.pi.getInstances();
-  // A project with no terminals: show why pi failed to start. A launch
-  // with no folder stays on the open-folder placeholder.
+  // A project with no terminals: show why the default agent failed. A
+  // launch with no folder stays on the open-folder placeholder.
   if (instances.length === 0 && projects.length > 0) {
-    const status = await window.pi.getPiStatus();
-    if (!status.available) {
-      createErrorPane(status.message ?? "pi is not installed.");
-      removeSplash();
-      return;
-    }
+    createErrorPane("no agent terminal started.");
+    removeSplash();
+    return;
   }
   for (const inst of instances) {
     if (!panes.has(inst.id)) createPaneShell(inst.id);

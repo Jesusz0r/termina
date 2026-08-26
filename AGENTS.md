@@ -802,6 +802,9 @@ The renderer never talks to the agent. It only renders what main pushes.
 - Run every suite against a FRESH instance. Suites share the app instance
   and the events directory; running two suites against one instance makes
   the second one fail on stale state.
+- `scripts/e2e.mjs` seeds a Pi `term-1` roster before launch. Agent-driving
+  suites keep the Pi TUI and `term-1` ids. A new folder in the product
+  still opens Agent (core).
 - The events directory persists across app launches. A fresh instance
   tails from the current file size, so it never replays phantom history.
   Launch also deletes leftover `mailbox-term-*.md` and
