@@ -91,13 +91,14 @@ npm run dev   # builds the Rust core + main + preload, starts Vite, launches Ele
 
 ```bash
 npm run typecheck                   # tsc --noEmit
+npm run test:agent-core             # agent-core kernel harness tests (no Electron)
 npm run build                       # production build (Electron main + renderer)
 npm run spike -- capture            # one plain-node store spike suite
 npm run test:spikes                 # capture · merge · session-fork · platform · tree-delta
 node scripts/perf-baseline.mjs      # capture latency baselines
 node scripts/perf-compare.mjs       # compare a run against a baseline
 npm run test:e2e                    # the full Electron e2e matrix (fresh instances)
-npm test                            # typecheck + build + spikes
+npm test                            # typecheck + agent-core + build + spikes
 ```
 
 Termina uses the pi configuration in `~/.pi/agent`. Host `PI_*` session

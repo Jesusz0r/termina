@@ -5,12 +5,18 @@ principles, not implementations: each principle names the invariant, the rule
 that follows from it, and how to verify it. Where a number appears it is an
 example starting point, never the spec.
 
-Status: largely implemented in `agent-core/main.ts` (frozen zones +
-append-only storage + `/resume` replay, reclamation hysteresis +
-summarization with handoff chaining + emergency overflow + truncate last
-resort, executable stubs + structured inventories, waste attribution
-with models.dev pricing, two-role routing map, bounded concurrency).
-`termina-core` and pi remain canonical.
+Status: implemented in `agent-core/main.ts` (frozen zones + append-only
+storage + `/resume` replay, reclamation hysteresis + summarization with
+handoff chaining + emergency overflow + truncate last resort, executable
+stubs + structured inventories, waste attribution with models.dev pricing,
+two-role routing map, bounded concurrency, cwd jail, grep/glob, skill
+index, prefix `cache_control`, traces). Zone 1 is identity, environment,
+user-global `~/.agents/AGENTS.md`, the skill index, then cwd `AGENTS.md`.
+Skill bodies load with `read_file`. Skills come from `~/.agents/skills`
+then `<cwd>/.agents/skills` (no ancestor walk). Truncated instructions
+are overflow-recoverable. The kernel does not call the snapshot store.
+`termina-core` stays the snapshot/Git owner. Auth is a separate track
+(`docs/AUTH-PLAN.md`). The implementation plan is `docs/AGENT-CORE-PLAN.md`.
 
 ## Why this document exists
 
@@ -29,12 +35,15 @@ except for its tail.
 Rules:
 
 - Order zones by volatility, freeze the front: system prompt, tool schemas,
-  loaded skill bodies never mutate mid-session. If the tool set must change,
-  start a new session rather than mutating zone 1–2.
-- Dynamic front matter enters deterministically: AGENTS.md, environment
-  description, and skill bodies are read once, at defined points, in a fixed
-  order. Two sessions with the same inputs must produce byte-identical
-  frozen zones — any divergence makes the cache cold from byte zero.
+  and the skill index never mutate mid-session. Skill bodies are not in
+  zone 1; the model loads `SKILL.md` with `read_file`, so they sit in the
+  transcript tail. If the tool set must change, start a new session rather
+  than mutating zone 1–2.
+- Dynamic front matter enters deterministically: environment, user-global
+  `AGENTS.md`, the skill index, and project `AGENTS.md` are read once, at
+  process start, in a fixed order. Two sessions with the same inputs must
+  produce byte-identical frozen zones — any divergence makes the cache cold
+  from byte zero.
 - Corrections are new messages, never edits of old ones.
 - Revision events (compaction, prune) are the ONLY writes to the visible
   context, and they must be reconstructable: the storage log stays
@@ -115,11 +124,9 @@ Rules:
 - Tool outputs carry caps with escape hatches: truncation markers name the cap
   and the command to fetch more. Nothing is silently dropped.
 
-Termina-specific upgrade neither pi nor opencode has: evicted content here is
-not lost — the snapshot store holds every byte. A stub can read
-`[evicted; recoverable — timeline seq N]`, and forked sessions rehydrate full
-fidelity from `worldline-git`. Our eviction can be more aggressive than
-theirs precisely because ours is reversible.
+Stubs recover through the reproducing command and the append-only session
+JSONL, which keeps originals. The kernel does not call the snapshot store
+and does not put a timeline sequence in the stub.
 
 ## P5 — Measure waste as money, attribute it to causes
 
