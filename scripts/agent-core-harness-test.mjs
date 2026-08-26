@@ -1039,6 +1039,7 @@ const {
   modelsUrl,
   formatModelBanner,
   formatModelLines,
+  formatCatalogLines,
   catalogHeaders,
   loadProviderModels,
   catalogFetchAllowed,
@@ -1113,6 +1114,33 @@ check(
 );
 check("formatModelBanner marks current", formatModelBanner([{ id: "a" }, { id: "b" }], "b").includes("*b"));
 check("formatModelLines stars current", formatModelLines([{ id: "a" }, { id: "b" }], "a").startsWith("* a"));
+check(
+  "formatCatalogLines names the provider",
+  formatCatalogLines(
+    [
+      { provider: "openai-codex", id: "gpt-5.4" },
+      { provider: "anthropic", id: "claude-sonnet-4-5" },
+    ],
+    "openai-codex",
+    "gpt-5.4",
+  ).includes("openai-codex") &&
+    formatCatalogLines(
+      [
+        { provider: "openai-codex", id: "gpt-5.4" },
+        { provider: "anthropic", id: "claude-sonnet-4-5" },
+      ],
+      "openai-codex",
+      "gpt-5.4",
+    ).includes("*") &&
+    formatCatalogLines(
+      [
+        { provider: "openai-codex", id: "gpt-5.4" },
+        { provider: "anthropic", id: "claude-sonnet-4-5" },
+      ],
+      "openai-codex",
+      "gpt-5.4",
+    ).includes("anthropic"),
+);
 check("catalogFetchAllowed is false under harness", catalogFetchAllowed() === false);
 
 const modelSrv = createServer((_req, res) => {
@@ -1309,6 +1337,26 @@ check(
   matchingSlashCommands("/login gemini").map((c) => c.name).join(" ") === "Google Gemini (key)",
 );
 check("slash Tab /login completes to /login ", completeSlashLine("/login") === "/login ");
+check(
+  "slash /models lists provider-prefixed ids",
+  matchingSlashCommands("/models", SLASH_COMMANDS, [
+    { name: "openai-codex/gpt-5.4", hint: "openai-codex", submit: "/model openai-codex/gpt-5.4" },
+    { name: "anthropic/claude-sonnet-4-5", hint: "anthropic", submit: "/model anthropic/claude-sonnet-4-5" },
+  ]).map((c) => c.name).join(" ") === "openai-codex/gpt-5.4 anthropic/claude-sonnet-4-5",
+);
+check(
+  "slash /models a is Anthropic only",
+  matchingSlashCommands("/models a", SLASH_COMMANDS, [
+    { name: "openai-codex/gpt-5.4", hint: "openai-codex", submit: "/model openai-codex/gpt-5.4" },
+    { name: "anthropic/claude-sonnet-4-5", hint: "anthropic", submit: "/model anthropic/claude-sonnet-4-5" },
+  ]).map((c) => c.name).join(" ") === "anthropic/claude-sonnet-4-5",
+);
+check(
+  "slash /models refresh is not a model row",
+  matchingSlashCommands("/models refresh", SLASH_COMMANDS, [
+    { name: "openai-codex/gpt-5.4", hint: "openai-codex", submit: "/model openai-codex/gpt-5.4" },
+  ]).length === 0,
+);
 check("slash Tab unique picker does not expand", completeSlashLine("/login google") === "/login google");
 check("slash ignores prompts", matchingSlashCommands("hello").length === 0);
 check("slash Tab /m completes to /model", completeSlashLine("/m") === "/model");

@@ -148,6 +148,24 @@ export function formatModelLines(models: ModelInfo[], current: string): string {
     .join("\n");
 }
 
+export type CatalogModel = { provider: ProviderId; id: string; name?: string };
+
+export function formatCatalogLines(
+  models: CatalogModel[],
+  currentProvider: string,
+  currentModel: string,
+): string {
+  if (models.length === 0) return "";
+  const pw = Math.max(...models.map((m) => m.provider.length));
+  return models
+    .map((m) => {
+      const mark = m.provider === currentProvider && m.id === currentModel ? "*" : " ";
+      const extra = m.name && m.name !== m.id ? `  ${m.name}` : "";
+      return `${mark} ${m.provider.padEnd(pw)}  ${m.id}${extra}`;
+    })
+    .join("\n");
+}
+
 export function parseModelSwitch(
   raw: string,
   current: ProviderId,

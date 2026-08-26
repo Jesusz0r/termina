@@ -78,9 +78,9 @@ refresh. Ambient env is only for machines with no file.
 infer: `claude*` → anthropic, `grok*` → xai, `gemini*`/`gemma*` → google,
 `gpt-*`/`o1`/`o3`/`o4` → openai. Else anthropic.
 
-When a credential exists, the kernel GET-lists that provider's models
-(`agent-core/models.ts`) and uses that list. It does not use a baked-in
-catalog as the source of truth. `TERMINA_CORE_MODEL` still pins an id
+When a credential exists, the kernel GET-lists **every authenticated
+provider's** models (`agent-core/models.ts`) and uses those lists. It does
+not use a baked-in catalog as the source of truth. `TERMINA_CORE_MODEL` still pins an id
 when set; a live id that only adds a date suffix may replace the pin
 (`claude-sonnet-4-5` → `claude-sonnet-4-5-20250929`). If the env does
 not pin a provider, startup picks the first **stored** credential in
@@ -89,9 +89,11 @@ order, then ambient env. A leftover `ANTHROPIC_API_KEY` does not hide a
 stored xAI or ChatGPT login. The GET has a 10 s timeout and a failed
 fetch does not invent a fake list.
 
-`/models` prints the live list. `/models refresh` fetches again.
-`/model <id>` switches. After `/login`, the kernel loads that provider's
-list and adopts it unless the env pinned a different provider.
+`/models` prints every authenticated provider's live list, with the
+provider id on each row. Typing `/models` in the TUI lists
+`provider/model`. `/models refresh` fetches again. `/model <id>` or
+`/model <provider>/<id>` switches. After `/login`, the kernel loads that
+provider's list and adopts it unless the env pinned a different provider.
 
 Embeddings, TTS, image, and similar ids are dropped. The list caps at
 200. Tests skip the live GET unless `TERMINA_TEST_MODELS_URL` is set.

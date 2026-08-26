@@ -43,9 +43,12 @@ import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  AUTH_PROVIDER_ORDER,
   authBanner,
   DEFAULT_MODELS,
   firstAuthenticatedProvider,
+  hasEnvCredential,
+  hasStoredCredential,
   isSupportedProvider,
   loginPickerItems,
   parseAuthCommand,
@@ -69,11 +72,12 @@ import {
 } from "./openai-compat.ts";
 import {
   catalogFetchAllowed,
+  formatCatalogLines,
   formatModelBanner,
-  formatModelLines,
   loadProviderModels,
   parseModelSwitch,
   pickDefaultModel,
+  type CatalogModel,
   type ModelInfo,
 } from "./models.ts";
 import { AgentTui, SLASH_COMMANDS } from "./tui.ts";
@@ -90,7 +94,7 @@ let summaryRoute = parseModelRef(
   process.env.TERMINA_CORE_SUMMARY_MODEL ?? DEFAULT_MODELS[route.provider].summary,
   process.env.TERMINA_CORE_SUMMARY_MODEL ? undefined : route.provider,
 );
-let catalog: ModelInfo[] | null = null;
+const catalogs = new Map<ProviderId, ModelInfo[]>();
 const CONTEXT_WINDOW = Number(process.env.TERMINA_CORE_CONTEXT ?? 200_000);
 const OUTPUT_RESERVE = 16_384;
 const USABLE = Math.max(8_000, CONTEXT_WINDOW - OUTPUT_RESERVE);
@@ -2544,22 +2548,48 @@ function retargetSummary(provider: ProviderId): void {
   summaryRoute = parseModelRef(DEFAULT_MODELS[provider].summary, provider);
 }
 
+function allCatalogModels(): CatalogModel[] {
+  const out: CatalogModel[] = [];
+  for (const id of AUTH_PROVIDER_ORDER) {
+    const models = catalogs.get(id);
+    if (!models) continue;
+    for (const m of models) out.push({ provider: id, id: m.id, name: m.name });
+  }
+  return out;
+}
+
+function currentCatalog(): ModelInfo[] | undefined {
+  return catalogs.get(route.provider);
+}
+
+function modelPickerRows(): { name: string; hint: string; submit: string }[] {
+  return allCatalogModels().map((m) => ({
+    name: `${m.provider}/${m.id}`,
+    hint: m.name && m.name !== m.id ? m.name : m.provider,
+    submit: `/model ${m.provider}/${m.id}`,
+  }));
+}
+
+function syncModelRows(): void {
+  surface?.setModelRows(modelPickerRows());
+}
+
 async function loadCatalog(provider: ProviderId, adopt: boolean): Promise<{ ok: true } | { ok: false; error: string }> {
   if (!catalogFetchAllowed()) return { ok: false, error: "catalog fetch skipped in tests" };
   if (adopt && provider !== route.provider) {
     route = { provider, model: DEFAULT_MODELS[provider].main };
     retargetSummary(provider);
-    catalog = null;
   }
-  if (provider !== route.provider) return { ok: true };
   const got = await loadProviderModels(provider);
   if (!got.ok) return got;
-  catalog = got.models;
+  catalogs.set(provider, got.models);
+  syncModelRows();
+  if (provider !== route.provider) return { ok: true };
   const preferred =
     MODEL_ENV && route.provider === parseModelRef(MODEL_ENV, PROVIDER_ENV || undefined).provider
       ? route.model
       : DEFAULT_MODELS[provider].main;
-  const pick = pickDefaultModel(catalog, preferred);
+  const pick = pickDefaultModel(got.models, preferred);
   if (pick) {
     if (!PINNED_ROUTE || !MODEL_ENV) route.model = pick;
     else if (pick === route.model || pick.startsWith(`${route.model}-`)) route.model = pick;
@@ -2567,18 +2597,45 @@ async function loadCatalog(provider: ProviderId, adopt: boolean): Promise<{ ok: 
   return { ok: true };
 }
 
+async function loadAuthenticatedCatalogs(refresh: boolean): Promise<string[]> {
+  if (!catalogFetchAllowed()) return [];
+  const ids = AUTH_PROVIDER_ORDER.filter((id) => hasStoredCredential(id) || hasEnvCredential(id));
+  const errors: string[] = [];
+  await Promise.all(
+    ids.map(async (id) => {
+      if (!refresh && catalogs.has(id)) return;
+      const got = await loadProviderModels(id);
+      if (!got.ok) errors.push(`${id}: ${got.error}`);
+      else catalogs.set(id, got.models);
+    }),
+  );
+  syncModelRows();
+  return errors;
+}
+
 async function bootCatalog(): Promise<void> {
   if (!catalogFetchAllowed()) return;
   try {
     if (!PINNED_ROUTE) {
       const id = firstAuthenticatedProvider();
-      if (!id) return;
-      route = { provider: id, model: DEFAULT_MODELS[id].main };
-      retargetSummary(id);
+      if (id) {
+        route = { provider: id, model: DEFAULT_MODELS[id].main };
+        retargetSummary(id);
+      }
     }
-    const auth = await resolveAuth(route.provider);
-    if (!auth.ok) return;
-    await loadCatalog(route.provider, false);
+    await loadAuthenticatedCatalogs(true);
+    const current = currentCatalog();
+    if (current && current.length > 0) {
+      const preferred =
+        MODEL_ENV && route.provider === parseModelRef(MODEL_ENV, PROVIDER_ENV || undefined).provider
+          ? route.model
+          : DEFAULT_MODELS[route.provider].main;
+      const pick = pickDefaultModel(current, preferred);
+      if (pick) {
+        if (!PINNED_ROUTE || !MODEL_ENV) route.model = pick;
+        else if (pick === route.model || pick.startsWith(`${route.model}-`)) route.model = pick;
+      }
+    }
   } catch (err) {
     process.stderr.write(`agent-core: model list failed: ${(err as Error).message}\n`);
   }
@@ -2601,11 +2658,10 @@ function startCatalogCommand(line: string): void {
     showPrompt();
     void (async () => {
       try {
-        if (refresh || !catalog) {
-          const got = await loadCatalog(route.provider, false);
-          if (!got.ok) out(`(${got.error})\n`);
-        }
-        if (catalog && catalog.length > 0) out(`${formatModelLines(catalog, route.model)}\n`);
+        const errors = await loadAuthenticatedCatalogs(refresh || catalogs.size === 0);
+        for (const err of errors) out(`(${err})\n`);
+        const listed = allCatalogModels();
+        if (listed.length > 0) out(`${formatCatalogLines(listed, route.provider, route.model)}\n`);
         else out("(no model list — run /login)\n");
       } finally {
         authBusy = false;
@@ -2630,8 +2686,16 @@ function startCatalogCommand(line: string): void {
   showPrompt();
   void (async () => {
     try {
-      if (catalog?.some((m) => m.id === rest)) {
-        route.model = rest;
+      const listed = allCatalogModels().find(
+        (m) => `${m.provider}/${m.id}` === rest || (m.provider === route.provider && m.id === rest),
+      );
+      if (listed) {
+        if (listed.provider !== route.provider) {
+          route = { provider: listed.provider, model: listed.id };
+          retargetSummary(listed.provider);
+        } else {
+          route.model = listed.id;
+        }
         out(`model ${route.provider}/${route.model}\n`);
         syncStatus();
         return;
@@ -2645,8 +2709,9 @@ function startCatalogCommand(line: string): void {
       if (next.provider !== route.provider) {
         const got = await loadCatalog(next.provider, true);
         if (!got.ok) out(`(${got.error})\n`);
-        if (catalog?.some((m) => m.id === next.model || m.id.startsWith(`${next.model}-`))) {
-          const pick = pickDefaultModel(catalog, next.model);
+        const loaded = currentCatalog();
+        if (loaded?.some((m) => m.id === next.model || m.id.startsWith(`${next.model}-`))) {
+          const pick = pickDefaultModel(loaded, next.model);
           if (pick) route.model = pick;
         } else {
           route.model = next.model;
@@ -2672,9 +2737,12 @@ function startAuthCommand(line: string): void {
   }
   if (parsed.cmd === "logout") {
     const result = runLogout(parsed.provider);
-    if (result.ok && parsed.provider === route.provider) catalog = null;
+    if (result.ok && isSupportedProvider(parsed.provider)) {
+      catalogs.delete(parsed.provider);
+      syncModelRows();
+    }
     out(result.ok ? `${result.summary}\n` : `(${result.error})\n`);
-    if (result.ok) syncStatus("");
+    if (result.ok && parsed.provider === route.provider) syncStatus("");
     showPrompt();
     return;
   }
@@ -2700,9 +2768,11 @@ function startAuthCommand(line: string): void {
       if (!result.ok) return;
       if (!isSupportedProvider(parsed.provider)) return;
       const got = await loadCatalog(parsed.provider, !PINNED_ROUTE);
-      if (route.provider !== parsed.provider) return;
       if (!got.ok) out(`(${got.error})\n`);
-      else if (catalog && catalog.length > 0) out(`${formatModelBanner(catalog, route.model)}\n`);
+      const listed = catalogs.get(parsed.provider);
+      if (got.ok && listed && listed.length > 0 && parsed.provider === route.provider) {
+        out(`${formatModelBanner(listed, route.model)}\n`);
+      }
       const nextAuth = await resolveAuth(route.provider);
       syncStatus(nextAuth.ok ? authBanner(nextAuth) : undefined);
     })
@@ -2833,9 +2903,11 @@ async function main(): Promise<void> {
     });
     surface.setStatus({ model: `${route.provider}/${route.model}`, auth: authBanner(auth) });
     if (!surface.start()) surface = null;
+    else syncModelRows();
   }
   if (!surface) out(banner);
-  if (catalog && catalog.length > 0) out(`${formatModelBanner(catalog, route.model)}\n`);
+  const bootList = currentCatalog();
+  if (bootList && bootList.length > 0) out(`${formatModelBanner(bootList, route.model)}\n`);
   if (process.env.TERMINA_CORE_RESUME === "1") resumeSession();
   showPrompt();
 }

@@ -201,10 +201,10 @@ OpenAI key is the platform API. `/login [provider] [oauth|key]` and
 Agent-core stores credentials in `~/.termina/agent/auth.json` (mode 0600).
 A stored credential wins over that provider's env key. OAuth tokens refresh
 once on expiry or 401. After login (and on startup when a credential
-exists) the kernel loads that provider's live model list. `/models` prints
-it; `/model <id>` selects one. The file is not Pi's `auth.json`. Model ids
-may carry a provider prefix (`xai/grok-4.3`, `openai-codex/gpt-5.4`). See
-`docs/AUTH-PLAN.md`.
+exists) the kernel loads live model lists for every authenticated
+provider. `/models` prints `provider` and `id` on each row; typing
+`/models` in the TUI lists them. `/model <id>` or `/model <provider>/<id>`
+selects one. The file is not Pi's `auth.json`. See `docs/AUTH-PLAN.md`.
 
 The host owns session resume. `TERMINA_CORE_SESSION_FILE` is the jsonl
 path under the app user-data `agent-sessions` directory.

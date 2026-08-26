@@ -55,10 +55,14 @@ function pickerRowMatches(line: string, row: SlashCommand): boolean {
   const label = row.name.toLowerCase();
   if (label.startsWith(rest)) return true;
   // Token prefix so "/login a" matches Anthropic, not OpenAI.
-  return label.split(/[\s()]+/).filter(Boolean).some((token) => token.startsWith(rest));
+  return label.split(/[\s()/]+/).filter(Boolean).some((token) => token.startsWith(rest));
 }
 
-export function matchingSlashCommands(line: string, commands: SlashCommand[] = SLASH_COMMANDS): SlashCommand[] {
+export function matchingSlashCommands(
+  line: string,
+  commands: SlashCommand[] = SLASH_COMMANDS,
+  modelRows: SlashCommand[] = [],
+): SlashCommand[] {
   if (!line.startsWith("/")) return [];
   const space = line.indexOf(" ");
   const head = space < 0 ? line : line.slice(0, space);
@@ -70,12 +74,28 @@ export function matchingSlashCommands(line: string, commands: SlashCommand[] = S
     if (space < 0) return rows;
     return rows.filter((c) => pickerRowMatches(line, c));
   }
+  if (head === "/models") {
+    if (space < 0 && line !== "/models") {
+      return commands.filter((c) => c.name.startsWith(line));
+    }
+    if (modelRows.length === 0) {
+      return space < 0 ? commands.filter((c) => c.name === "/models") : [];
+    }
+    if (space < 0) return modelRows;
+    const rest = line.slice(space + 1).trim().toLowerCase();
+    if (!rest) return modelRows;
+    return modelRows.filter((c) => pickerRowMatches(`/model ${rest}`, c));
+  }
   if (space >= 0) return [];
   return commands.filter((c) => c.name.startsWith(line));
 }
 
-export function completeSlashLine(line: string, commands: SlashCommand[] = SLASH_COMMANDS): string {
-  const matches = matchingSlashCommands(line, commands);
+export function completeSlashLine(
+  line: string,
+  commands: SlashCommand[] = SLASH_COMMANDS,
+  modelRows: SlashCommand[] = [],
+): string {
+  const matches = matchingSlashCommands(line, commands, modelRows);
   if (matches.length === 0) return line;
   if (matches.length === 1) {
     if (matches[0]!.submit) return line;
@@ -217,6 +237,7 @@ export class AgentTui {
   private decoder = new TextDecoder("utf8");
   private lastPainted: string[] | null = null;
   private lastDim = { cols: 0, rows: 0 };
+  private modelRows: SlashCommand[] = [];
 
   constructor(opts: {
     stdout: TuiIO;
@@ -241,6 +262,11 @@ export class AgentTui {
   setStatus(status: { model?: string; auth?: string }): void {
     if (status.model !== undefined) this.model = status.model;
     if (status.auth !== undefined) this.auth = status.auth;
+    this.schedule();
+  }
+
+  setModelRows(rows: SlashCommand[]): void {
+    this.modelRows = rows;
     this.schedule();
   }
 
@@ -361,12 +387,12 @@ export class AgentTui {
 
   private matches(): SlashCommand[] {
     if (this.rawInput) return [];
-    return matchingSlashCommands(this.chars.join(""), this.commands);
+    return matchingSlashCommands(this.chars.join(""), this.commands, this.modelRows);
   }
 
   private submitLine(): void {
     const typed = this.chars.join("");
-    const matches = this.rawInput ? [] : matchingSlashCommands(typed, this.commands);
+    const matches = this.rawInput ? [] : matchingSlashCommands(typed, this.commands, this.modelRows);
     let line = typed.trim();
     let echo = line;
     if (matches.length > 0) {
@@ -380,7 +406,10 @@ export class AgentTui {
         echo = picked.name;
       }
     }
-    if (!this.rawInput && (line === "/login" || line === "/logout")) {
+    if (
+      !this.rawInput &&
+      (line === "/login" || line === "/logout" || (line === "/models" && this.modelRows.length > 0))
+    ) {
       this.chars = [...line];
       this.cursor = this.chars.length;
       this.slashIndex = 0;
@@ -480,7 +509,7 @@ export class AgentTui {
     }
     if (ch === "\t") {
       if (this.rawInput) return;
-      const next = completeSlashLine(this.chars.join(""), this.commands);
+      const next = completeSlashLine(this.chars.join(""), this.commands, this.modelRows);
       this.chars = [...next];
       this.cursor = this.chars.length;
       this.slashIndex = 0;
