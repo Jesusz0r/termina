@@ -6,7 +6,7 @@
  * connect; a new session reconnects.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
 export const MAX_MCP_SERVERS = 8;
@@ -80,44 +80,60 @@ export function mcpToolName(server: string, tool: string): string {
   return TOOL_NAME.test(out) ? out : "mcp_tool";
 }
 
-export function parseMcpConfig(raw: unknown): McpServerConfig[] {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
-  const servers = (raw as { mcpServers?: unknown }).mcpServers;
-  if (!servers || typeof servers !== "object" || Array.isArray(servers)) return [];
-  const out: McpServerConfig[] = [];
-  for (const [name, rec] of Object.entries(servers as Record<string, unknown>)) {
-    if (out.length >= MAX_MCP_SERVERS) break;
-    if (!name || name.length > 64) continue;
-    if (!rec || typeof rec !== "object" || Array.isArray(rec)) continue;
-    const obj = rec as Record<string, unknown>;
-    if (obj.disabled === true) continue;
-    if (obj.type === "http" || obj.type === "sse" || typeof obj.url === "string") continue;
-    if (typeof obj.command !== "string" || !obj.command.trim() || obj.command.length > 512) continue;
-    if (/[\0\n]/.test(obj.command)) continue;
-    const args: string[] = [];
-    if (Array.isArray(obj.args)) {
-      for (const a of obj.args) {
-        if (typeof a !== "string" || a.length > 4096 || /[\0]/.test(a)) continue;
-        args.push(a);
-        if (args.length >= 32) break;
-      }
+const SCHEMA_CAP = 8 * 1024;
+
+function parseOneServer(name: string, rec: unknown): McpServerConfig | "disabled" | null {
+  if (!name || name.length > 64) return null;
+  if (!rec || typeof rec !== "object" || Array.isArray(rec)) return null;
+  const obj = rec as Record<string, unknown>;
+  if (obj.disabled === true) return "disabled";
+  if (obj.type === "http" || obj.type === "sse") return null;
+  if (typeof obj.url === "string" && typeof obj.command !== "string") return null;
+  if (typeof obj.command !== "string" || !obj.command.trim() || obj.command.length > 512) return null;
+  if (/[\0\n]/.test(obj.command)) return null;
+  const args: string[] = [];
+  if (Array.isArray(obj.args)) {
+    for (const a of obj.args) {
+      if (typeof a !== "string" || a.length > 4096 || /[\0]/.test(a)) continue;
+      args.push(a);
+      if (args.length >= 32) break;
     }
-    const env: Record<string, string> = {};
-    if (obj.env && typeof obj.env === "object" && !Array.isArray(obj.env)) {
-      for (const [k, v] of Object.entries(obj.env as Record<string, unknown>)) {
-        if (typeof k !== "string" || !k || k.length > 128) continue;
-        if (typeof v !== "string" || v.length > 4096) continue;
-        env[k] = v;
-        if (Object.keys(env).length >= 32) break;
-      }
-    }
-    let cwd: string | undefined;
-    if (typeof obj.cwd === "string" && obj.cwd.trim() && obj.cwd.length <= 1024 && !/[\0]/.test(obj.cwd)) {
-      cwd = obj.cwd.trim();
-    }
-    out.push({ name, command: obj.command.trim(), args, env, cwd });
   }
-  return out;
+  const env: Record<string, string> = {};
+  if (obj.env && typeof obj.env === "object" && !Array.isArray(obj.env)) {
+    for (const [k, v] of Object.entries(obj.env as Record<string, unknown>)) {
+      if (typeof k !== "string" || !k || k.length > 128) continue;
+      if (typeof v !== "string" || v.length > 4096) continue;
+      env[k] = v;
+      if (Object.keys(env).length >= 32) break;
+    }
+  }
+  let cwd: string | undefined;
+  if (typeof obj.cwd === "string" && obj.cwd.trim() && obj.cwd.length <= 1024 && !/[\0]/.test(obj.cwd)) {
+    cwd = obj.cwd.trim();
+  }
+  return { name, command: obj.command.trim(), args, env, cwd };
+}
+
+export function parseMcpConfig(raw: unknown): McpServerConfig[] {
+  const byName = new Map<string, McpServerConfig>();
+  applyMcpConfig(byName, raw);
+  return [...byName.values()].slice(0, MAX_MCP_SERVERS);
+}
+
+function applyMcpConfig(byName: Map<string, McpServerConfig>, raw: unknown): void {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+  const servers = (raw as { mcpServers?: unknown }).mcpServers;
+  if (!servers || typeof servers !== "object" || Array.isArray(servers)) return;
+  for (const [name, rec] of Object.entries(servers as Record<string, unknown>)) {
+    const parsed = parseOneServer(name, rec);
+    if (parsed === "disabled") {
+      byName.delete(name);
+      continue;
+    }
+    if (!parsed) continue;
+    byName.set(name, parsed);
+  }
 }
 
 function readMcpFile(path: string): unknown | null {
@@ -130,21 +146,34 @@ function readMcpFile(path: string): unknown | null {
   }
 }
 
-/** User file first, project file overrides the same server name. */
+/** User file first, project file overrides the same server name. A project
+ *  `disabled: true` removes that user server. */
 export function loadMcpConfigs(userFile: string, projectFile: string): McpServerConfig[] {
   const byName = new Map<string, McpServerConfig>();
-  for (const rec of parseMcpConfig(readMcpFile(userFile))) byName.set(rec.name, rec);
-  for (const rec of parseMcpConfig(readMcpFile(projectFile))) byName.set(rec.name, rec);
+  applyMcpConfig(byName, readMcpFile(userFile));
+  applyMcpConfig(byName, readMcpFile(projectFile));
   return [...byName.values()].slice(0, MAX_MCP_SERVERS);
 }
 
 export function jailMcpCwd(projectRoot: string, requested: string | undefined): string | null {
-  const root = resolve(projectRoot);
+  let root = resolve(projectRoot);
+  try {
+    root = realpathSync(root);
+  } catch {
+    /* missing project root still jails by lexical path */
+  }
   if (!requested) return root;
   const abs = resolve(isAbsolute(requested) ? requested : join(root, requested));
-  const rel = relative(root, abs);
-  if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) return abs;
-  return null;
+  try {
+    const real = realpathSync(abs);
+    const rel = relative(root, real);
+    if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) return real;
+    return null;
+  } catch {
+    const rel = relative(root, abs);
+    if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) return abs;
+    return null;
+  }
 }
 
 type Pending = {
@@ -210,6 +239,14 @@ class McpProcess {
     child.on("error", (err) => this.failAll(err instanceof Error ? err : new Error(String(err))));
   }
 
+  abandon(err: Error): void {
+    for (const wait of this.pending.values()) {
+      clearTimeout(wait.timer);
+      wait.reject(err);
+    }
+    this.pending.clear();
+  }
+
   private onStdout(chunk: string): void {
     this.buf += chunk;
     if (this.buf.length > 2 * 1024 * 1024) this.buf = this.buf.slice(-1024 * 1024);
@@ -249,6 +286,7 @@ class McpProcess {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`mcp ${this.name} timed out`));
+        this.kill();
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       try {
@@ -284,26 +322,25 @@ class McpProcess {
     const child = this.child;
     this.child = null;
     if (!child) return;
+    try {
+      child.stdin?.end();
+    } catch {
+      /* gone */
+    }
     const pid = child.pid;
     if (typeof pid === "number") {
       try {
-        process.kill(-pid, "SIGTERM");
+        process.kill(-pid, "SIGKILL");
+        return;
       } catch {
-        try {
-          child.kill("SIGTERM");
-        } catch {
-          /* gone */
-        }
+        /* fall through to the child handle */
       }
     }
-    setTimeout(() => {
-      if (typeof pid !== "number") return;
-      try {
-        process.kill(-pid, "SIGKILL");
-      } catch {
-        /* gone */
-      }
-    }, 1000).unref?.();
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      /* gone */
+    }
   }
 
   stderrTail(): string {
@@ -319,6 +356,20 @@ function mcpEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
   return env;
 }
 
+function normalizeInputSchema(raw: unknown): Record<string, unknown> {
+  const fallback = { type: "object", properties: {} };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fallback;
+  const schema = raw as Record<string, unknown>;
+  if (schema.type !== undefined && schema.type !== "object") return fallback;
+  const out: Record<string, unknown> = { ...schema, type: "object" };
+  try {
+    if (JSON.stringify(out).length > SCHEMA_CAP) return fallback;
+  } catch {
+    return fallback;
+  }
+  return out;
+}
+
 async function handshake(proc: McpProcess): Promise<McpClientTool[]> {
   await proc.request(
     "initialize",
@@ -330,27 +381,27 @@ async function handshake(proc: McpProcess): Promise<McpClientTool[]> {
     MCP_HANDSHAKE_MS,
   );
   proc.notify("notifications/initialized");
-  const listed = await proc.request("tools/list", {}, MCP_HANDSHAKE_MS);
-  const tools = listed && typeof listed === "object" ? (listed as { tools?: unknown }).tools : null;
-  if (!Array.isArray(tools)) return [];
   const out: McpClientTool[] = [];
-  for (const item of tools) {
-    if (!item || typeof item !== "object") continue;
-    const rec = item as { name?: unknown; description?: unknown; inputSchema?: unknown; input_schema?: unknown };
-    if (typeof rec.name !== "string" || !rec.name) continue;
-    const schema =
-      rec.inputSchema && typeof rec.inputSchema === "object" && !Array.isArray(rec.inputSchema)
-        ? (rec.inputSchema as Record<string, unknown>)
-        : rec.input_schema && typeof rec.input_schema === "object" && !Array.isArray(rec.input_schema)
-          ? (rec.input_schema as Record<string, unknown>)
-          : { type: "object", properties: {} };
-    out.push({
-      name: rec.name,
-      description: typeof rec.description === "string" ? rec.description.slice(0, 1024) : rec.name,
-      input_schema: schema,
-      server: proc.name,
-      original: rec.name,
-    });
+  let cursor: unknown;
+  for (let page = 0; page < 4; page++) {
+    const listed = await proc.request("tools/list", cursor ? { cursor } : {}, MCP_HANDSHAKE_MS);
+    const rec = listed && typeof listed === "object" ? (listed as { tools?: unknown; nextCursor?: unknown }) : null;
+    const tools = rec && Array.isArray(rec.tools) ? rec.tools : [];
+    for (const item of tools) {
+      if (!item || typeof item !== "object") continue;
+      const tool = item as { name?: unknown; description?: unknown; inputSchema?: unknown; input_schema?: unknown };
+      if (typeof tool.name !== "string" || !tool.name) continue;
+      const schema = normalizeInputSchema(tool.inputSchema ?? tool.input_schema);
+      out.push({
+        name: tool.name,
+        description: typeof tool.description === "string" ? tool.description.slice(0, 1024) : tool.name,
+        input_schema: schema,
+        server: proc.name,
+        original: tool.name,
+      });
+    }
+    if (typeof rec?.nextCursor !== "string" || !rec.nextCursor) break;
+    cursor = rec.nextCursor;
   }
   return out;
 }
@@ -380,26 +431,30 @@ export async function startMcp(
   const notes: string[] = [];
   const byOriginal = new Map<string, McpProcess>();
 
-  for (const cfg of configs.slice(0, MAX_MCP_SERVERS)) {
-    const cwd = opts.confineCwd(cfg.cwd);
-    if (!cwd) {
-      notes.push(`mcp ${cfg.name}: cwd is outside the project`);
-      continue;
-    }
-    const proc = new McpProcess(cfg.name);
-    try {
-      proc.start(cfg, cwd, mcpEnv(cfg.env));
-      const tools = await handshake(proc);
-      procs.push(proc);
-      for (const tool of tools) {
-        byOriginal.set(`${cfg.name}\0${tool.original}`, proc);
-        discovered.push(tool);
+  const started = await Promise.all(
+    configs.slice(0, MAX_MCP_SERVERS).map(async (cfg) => {
+      const cwd = opts.confineCwd(cfg.cwd);
+      if (!cwd) return { cfg, proc: null as McpProcess | null, tools: [] as McpClientTool[], note: `mcp ${cfg.name}: cwd is outside the project` };
+      const proc = new McpProcess(cfg.name);
+      try {
+        proc.start(cfg, cwd, mcpEnv(cfg.env));
+        const tools = await handshake(proc);
+        return { cfg, proc, tools, note: "" };
+      } catch (err) {
+        proc.kill();
+        const extra = proc.stderrTail();
+        const why = err instanceof Error ? err.message : String(err);
+        return { cfg, proc: null, tools: [] as McpClientTool[], note: `mcp ${cfg.name}: ${why}${extra ? ` (${extra.slice(0, 200)})` : ""}` };
       }
-    } catch (err) {
-      proc.kill();
-      const extra = proc.stderrTail();
-      const why = err instanceof Error ? err.message : String(err);
-      notes.push(`mcp ${cfg.name}: ${why}${extra ? ` (${extra.slice(0, 200)})` : ""}`);
+    }),
+  );
+  for (const row of started) {
+    if (row.note) notes.push(row.note);
+    if (!row.proc) continue;
+    procs.push(row.proc);
+    for (const tool of row.tools) {
+      byOriginal.set(`${row.cfg.name}\0${tool.original}`, row.proc);
+      discovered.push(tool);
     }
   }
 
@@ -423,17 +478,11 @@ export async function startMcp(
       try {
         const result = await new Promise<unknown>((resolve, reject) => {
           const req = hit.proc.request("tools/call", { name: hit.original, arguments: args ?? {} }, timeoutMs);
-          poll = setInterval(() => {
-            if (stop?.()) {
-              if (poll) clearInterval(poll);
-              reject(new Error("interrupted"));
-            }
-          }, 50);
-          if (stop?.()) {
-            reject(new Error("interrupted"));
-            return;
-          }
           req.then(resolve, reject);
+          poll = setInterval(() => {
+            if (stop?.()) hit.proc.abandon(new Error("interrupted"));
+          }, 50);
+          if (stop?.()) hit.proc.abandon(new Error("interrupted"));
         });
         return textFromCallResult(result);
       } catch (err) {

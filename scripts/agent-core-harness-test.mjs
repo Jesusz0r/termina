@@ -1469,6 +1469,12 @@ check(
     },
   }).map((s) => s.name).join(",") === "gh",
 );
+check(
+  "parseMcpConfig keeps stdio when a url field is present",
+  mcp.parseMcpConfig({
+    mcpServers: { gh: { command: "npx", args: ["-y", "x"], url: "https://github.com" } },
+  }).map((s) => s.name).join(",") === "gh",
+);
 check("jailMcpCwd rejects a parent path", mcp.jailMcpCwd("/proj", "..") === null);
 check("jailMcpCwd allows a subdir", mcp.jailMcpCwd("/proj", "tools") === join("/proj", "tools"));
 const mcpMerged = mcp.mergeClientTools(
@@ -1487,6 +1493,22 @@ check(
 );
 const mcpDir = mkdtempSync(join(tmpdir(), "agent-core-mcp-"));
 leftovers.push(mcpDir);
+const mcpUser = join(mcpDir, "user.json");
+const mcpProj = join(mcpDir, "proj.json");
+writeFileSync(mcpUser, JSON.stringify({ mcpServers: { gh: { command: "npx" }, keep: { command: "npx" } } }));
+writeFileSync(mcpProj, JSON.stringify({ mcpServers: { gh: { command: "npx", disabled: true } } }));
+check(
+  "project disabled removes a user MCP server",
+  mcp.loadMcpConfigs(mcpUser, mcpProj).map((s) => s.name).join(",") === "keep",
+);
+const mcpJail = mkdtempSync(join(tmpdir(), "agent-core-mcp-jail-"));
+leftovers.push(mcpJail);
+try {
+  symlinkSync("/tmp", join(mcpJail, "out"));
+  check("jailMcpCwd rejects a symlink out of the project", mcp.jailMcpCwd(mcpJail, "out") === null);
+} catch (err) {
+  check("jailMcpCwd rejects a symlink out of the project", false, err instanceof Error ? err.message : String(err));
+}
 const echoServer = join(mcpDir, "echo-mcp.mjs");
 writeFileSync(
   echoServer,
@@ -1519,6 +1541,40 @@ check("mcp handshake lists the echo tool", liveMcp.tools[0]?.name === "mcp_echo_
 const echoed = await liveMcp.call("mcp_echo_echo", { text: "hello-mcp" });
 check("mcp tools/call round-trips", echoed.isError === false && echoed.content === "hello-mcp");
 liveMcp.shutdown();
+const hangServer = join(mcpDir, "hang-mcp.mjs");
+writeFileSync(
+  hangServer,
+  `process.stdin.setEncoding("utf8");
+let buf = "";
+process.stdin.on("data", (chunk) => {
+  buf += chunk;
+  let n;
+  while ((n = buf.indexOf("\\n")) >= 0) {
+    const line = buf.slice(0, n);
+    buf = buf.slice(n + 1);
+    let msg;
+    try { msg = JSON.parse(line); } catch { continue; }
+    if (msg.method === "initialize") {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "hang" } } }) + "\\n");
+    } else if (msg.method === "tools/list") {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "hang", description: "hang", inputSchema: { type: "object" } }] } }) + "\\n");
+    }
+  }
+});
+`,
+);
+const hangMcp = await mcp.startMcp(
+  [{ name: "hang", command: process.execPath, args: [hangServer], env: {} }],
+  { projectRoot: mcpDir, confineCwd: (cwd) => mcp.jailMcpCwd(mcpDir, cwd) },
+);
+const tHang = Date.now();
+const interruptedCall = await hangMcp.call("mcp_hang_hang", {}, { shouldStop: () => true });
+check("mcp interrupt returns quickly", Date.now() - tHang < 2000 && interruptedCall.isError === true && interruptedCall.content.includes("interrupted"));
+const timed = await hangMcp.call("mcp_hang_hang", {}, { timeoutMs: 200, shouldStop: () => false });
+check("mcp call timeout kills the server", timed.isError === true && timed.content.includes("timed out"));
+const afterKill = await hangMcp.call("mcp_hang_hang", {});
+check("mcp call after timeout sees a dead server", afterKill.isError === true);
+hangMcp.shutdown();
 const deadMcp = await mcp.startMcp(
   [{ name: "gone", command: join(mcpDir, "missing-bin"), args: [], env: {} }],
   { projectRoot: mcpDir, confineCwd: (cwd) => mcp.jailMcpCwd(mcpDir, cwd) },
