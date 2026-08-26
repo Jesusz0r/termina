@@ -5,8 +5,8 @@
  * verify/edits/mine/mailbox context, startup-control. The parser stays
  * electron/sidecar.ts. This module is the kernel writer of that protocol.
  */
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { HAS_UNCHECKED_PLAN_TASK } from "../shared/plan-task.ts";
 
 const ACK_ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -167,6 +167,232 @@ export function visibleAssistantText(blocks: Array<{ type?: string; text?: strin
 export function firstPlanText(text: string): string | null {
   if (!text.trim() || !HAS_UNCHECKED_PLAN_TASK.test(text)) return null;
   return text.slice(0, PLAN_TEXT_CAP);
+}
+
+export const MAX_PENDING_IMAGES = 4;
+export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+const PENDING_IMAGE_NAME = /^image-[A-Za-z0-9._-]+\.(png|jpe?g|webp|gif)$/;
+const STORED_IMAGE_NAME = /^[A-Za-z0-9._-]+-img-[1-9][0-9]{0,3}\.(png|jpe?g|webp|gif)$/;
+
+export type ImageRef = { name: string; mediaType: string };
+export type LoadedImage = ImageRef & { bytes: Buffer };
+
+export function isSafeImageName(name: string): boolean {
+  return PENDING_IMAGE_NAME.test(name) || STORED_IMAGE_NAME.test(name);
+}
+
+export function mediaTypeOfName(name: string): string {
+  if (name.endsWith(".png")) return "image/png";
+  if (name.endsWith(".webp")) return "image/webp";
+  if (name.endsWith(".gif")) return "image/gif";
+  return "image/jpeg";
+}
+
+export function pendingImagesPath(eventsDir: string, terminalId: string): string {
+  return join(eventsDir, `images-${terminalId}.json`);
+}
+
+function readImageList(path: string): ImageRef[] {
+  try {
+    const rec = JSON.parse(readFileSync(path, "utf8")) as { images?: unknown };
+    if (!Array.isArray(rec.images)) return [];
+    const out: ImageRef[] = [];
+    for (const item of rec.images) {
+      if (!item || typeof item !== "object") continue;
+      const name = (item as { name?: unknown }).name;
+      const mediaType = (item as { mediaType?: unknown }).mediaType;
+      if (typeof name !== "string" || !isSafeImageName(name)) continue;
+      out.push({
+        name,
+        mediaType: typeof mediaType === "string" && mediaType.startsWith("image/") ? mediaType : mediaTypeOfName(name),
+      });
+      if (out.length >= MAX_PENDING_IMAGES) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+export function peekPendingImages(eventsDir: string, terminalId: string): ImageRef[] {
+  if (!eventsDir || !terminalId) return [];
+  return readImageList(pendingImagesPath(eventsDir, terminalId));
+}
+
+export function peekPendingImageCount(eventsDir: string, terminalId: string): number {
+  return peekPendingImages(eventsDir, terminalId).length;
+}
+
+function extForMedia(mediaType: string): string {
+  if (mediaType === "image/jpeg") return "jpg";
+  if (mediaType === "image/webp") return "webp";
+  if (mediaType === "image/gif") return "gif";
+  return "png";
+}
+
+/** Append one clipboard image to the pending list. Main is the writer. */
+export function appendPendingImage(
+  eventsDir: string,
+  terminalId: string,
+  bytes: Buffer,
+  mediaType: string,
+  id: string,
+): { ok: true; count: number; name: string } | { ok: false; error: string } {
+  if (!eventsDir || !terminalId) return { ok: false, error: "no events directory" };
+  if (!ACK_ID.test(terminalId) || !ACK_ID.test(id)) return { ok: false, error: "invalid id" };
+  if (bytes.length === 0 || bytes.length > MAX_IMAGE_BYTES) return { ok: false, error: "image is too large" };
+  const kind = mediaType.startsWith("image/") ? mediaType : "image/png";
+  const name = `image-${terminalId}-${id}.${extForMedia(kind)}`;
+  if (!PENDING_IMAGE_NAME.test(name)) return { ok: false, error: "invalid image name" };
+  try {
+    mkdirSync(eventsDir, { recursive: true, mode: 0o700 });
+    const listPath = pendingImagesPath(eventsDir, terminalId);
+    const list = readImageList(listPath);
+    if (list.length >= MAX_PENDING_IMAGES) return { ok: true, count: list.length, name: list[list.length - 1]!.name };
+    writeFileSync(join(eventsDir, name), bytes, { mode: 0o600 });
+    list.push({ name, mediaType: kind });
+    const tmp = `${listPath}.tmp`;
+    writeFileSync(tmp, JSON.stringify({ images: list }), { mode: 0o600 });
+    renameSync(tmp, listPath);
+    return { ok: true, count: list.length, name };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+function loadImageBytes(dir: string, name: string): Buffer | null {
+  if (!isSafeImageName(name)) return null;
+  const abs = join(dir, name);
+  try {
+    const realDir = resolve(dir);
+    const realFile = resolve(abs);
+    const rel = relative(realDir, realFile);
+    if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null;
+    const info = statSync(abs);
+    if (!info.isFile() || info.size === 0 || info.size > MAX_IMAGE_BYTES) return null;
+    return readFileSync(abs);
+  } catch {
+    return null;
+  }
+}
+
+export function consumePendingImages(eventsDir: string, terminalId: string): LoadedImage[] {
+  if (!eventsDir || !terminalId) return [];
+  const listPath = pendingImagesPath(eventsDir, terminalId);
+  const list = readImageList(listPath);
+  const out: LoadedImage[] = [];
+  for (const ref of list) {
+    const bytes = loadImageBytes(eventsDir, ref.name);
+    if (bytes) out.push({ ...ref, bytes });
+  }
+  try {
+    rmSync(listPath, { force: true });
+  } catch {
+    /* ignore */
+  }
+  return out;
+}
+
+export function removePendingImageFiles(eventsDir: string, names: string[]): void {
+  if (!eventsDir) return;
+  for (const name of names) {
+    if (!isSafeImageName(name)) continue;
+    try {
+      rmSync(join(eventsDir, name), { force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+export function loadImageFromRoots(ref: ImageRef, roots: string[]): LoadedImage | null {
+  for (const root of roots) {
+    if (!root) continue;
+    const bytes = loadImageBytes(root, ref.name);
+    if (bytes) return { ...ref, bytes };
+  }
+  return null;
+}
+
+export function persistSessionImage(
+  sessionFile: string | null,
+  img: LoadedImage,
+  index: number,
+): ImageRef {
+  if (!sessionFile || index < 1) return { name: img.name, mediaType: img.mediaType };
+  if (STORED_IMAGE_NAME.test(img.name)) return { name: img.name, mediaType: img.mediaType };
+  const dir = dirname(sessionFile);
+  const stem = basename(sessionFile, ".jsonl") || "session";
+  const ext = extForMedia(img.mediaType);
+  let n = Math.max(1, index);
+  let name = `${stem}-img-${n}.${ext}`;
+  while (existsSync(join(dir, name)) && n < 99) {
+    n += 1;
+    name = `${stem}-img-${n}.${ext}`;
+  }
+  if (!STORED_IMAGE_NAME.test(name)) return { name: img.name, mediaType: img.mediaType };
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(dir, name), img.bytes, { mode: 0o600 });
+    return { name, mediaType: img.mediaType };
+  } catch {
+    return { name: img.name, mediaType: img.mediaType };
+  }
+}
+
+export function persistLoadedImages(sessionFile: string | null, images: LoadedImage[]): ImageRef[] {
+  return images.map((img, i) => persistSessionImage(sessionFile, img, i + 1));
+}
+
+export function structuredStartup(control: StartupControl): { text: string; images: ImageRef[] } {
+  const text = structuredStartupText(control);
+  const images: ImageRef[] = [];
+  if (!Array.isArray(control.content)) return { text, images };
+  for (const item of control.content) {
+    if (!item || typeof item !== "object") continue;
+    const rec = item as Record<string, unknown>;
+    if (typeof rec.name === "string" && isSafeImageName(rec.name)) {
+      images.push({
+        name: rec.name,
+        mediaType: typeof rec.mediaType === "string" ? rec.mediaType : mediaTypeOfName(rec.name),
+      });
+      continue;
+    }
+    if (rec.type !== "image" || !rec.source || typeof rec.source !== "object") continue;
+    const src = rec.source as Record<string, unknown>;
+    if (typeof src.name !== "string" || !isSafeImageName(src.name)) continue;
+    images.push({
+      name: src.name,
+      mediaType: typeof src.media_type === "string" ? src.media_type : mediaTypeOfName(src.name),
+    });
+  }
+  return { text, images };
+}
+
+function underDir(dir: string, file: string): boolean {
+  const rel = relative(resolve(dir), resolve(file));
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+export function expandFileImageSource(
+  source: Record<string, unknown>,
+  roots: string[],
+): { type: "base64"; media_type: string; data: string } | null {
+  if (source.type === "base64" && typeof source.data === "string" && typeof source.media_type === "string") {
+    if (source.data.length === 0 || source.data.length > MAX_IMAGE_BYTES * 2) return null;
+    return { type: "base64", media_type: source.media_type, data: source.data };
+  }
+  if (source.type !== "file" || typeof source.name !== "string" || !isSafeImageName(source.name)) return null;
+  const media = typeof source.media_type === "string" ? source.media_type : mediaTypeOfName(source.name);
+  for (const root of roots) {
+    if (!root) continue;
+    const abs = join(root, source.name);
+    if (!underDir(root, abs) || !existsSync(abs)) continue;
+    const bytes = loadImageBytes(root, source.name);
+    if (!bytes) continue;
+    return { type: "base64", media_type: media, data: bytes.toString("base64") };
+  }
+  return null;
 }
 
 

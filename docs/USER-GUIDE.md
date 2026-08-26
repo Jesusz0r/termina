@@ -117,7 +117,10 @@ tab strip cycles its tabs.
 
 A core tab is a full-screen TUI: `/login`, `/models`, `/clear`, `/compact`,
 `/resume`. Ctrl+J inserts a newline; Enter submits. Paste keeps newlines.
-Pi tabs still run the pi TUI with its own commands.
+Paste a screenshot (Cmd/Ctrl+V) to attach it to the next prompt — up to
+four images, about 4 MB each. The status line shows how many are waiting.
+Pi tabs still run the pi TUI with its own commands. Text paste is
+unchanged there; a PNG cannot go through the terminal.
 
 Multi-line input in a Pi tab:
 

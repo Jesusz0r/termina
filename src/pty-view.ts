@@ -27,7 +27,7 @@ export class PtyView {
     onInput: (data: string) => void,
     onResize: (cols: number, rows: number) => void,
     private readonly writeClipboard: (text: string) => void,
-    private readonly readClipboard: () => Promise<string>,
+    private readonly pasteFromHost: () => Promise<{ kind: "text"; text: string } | { kind: "image"; count: number }>,
   ) {
     this.sendInput = onInput;
     this.term = new Terminal({
@@ -154,8 +154,10 @@ export class PtyView {
   async pasteClipboard(): Promise<void> {
     if (this.disposed) return;
     try {
-      const text = await this.readClipboard();
-      if (!this.disposed && text) this.term.paste(text);
+      const result = await this.pasteFromHost();
+      if (this.disposed) return;
+      if (result.kind === "text" && result.text) this.term.paste(result.text);
+      else if (result.kind === "image") this.sendInput("\x1b[201~");
     } catch {
       // Keep terminal input available when the system clipboard is unavailable.
     }

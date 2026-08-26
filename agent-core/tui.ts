@@ -232,6 +232,7 @@ export class AgentTui {
   private model = "";
   private auth = "";
   private usage = "";
+  private pendingImages: () => number = () => 0;
   private busy = false;
   private spin = 0;
   private spinTimer: ReturnType<typeof setInterval> | null = null;
@@ -250,6 +251,7 @@ export class AgentTui {
     onSubmit: (line: string) => void;
     onInterrupt: () => void;
     onExit: () => void;
+    pendingImages?: () => number;
   }) {
     this.out = opts.stdout;
     this.inp = opts.stdin;
@@ -257,6 +259,7 @@ export class AgentTui {
     this.onSubmit = opts.onSubmit;
     this.onInterrupt = opts.onInterrupt;
     this.onExit = opts.onExit;
+    if (opts.pendingImages) this.pendingImages = opts.pendingImages;
   }
 
   active(): boolean {
@@ -718,7 +721,9 @@ export class AgentTui {
     const view = visibleLines(this.plain, cols, layout.transcript, this.scroll);
     const nameW = shownSlash.length > 0 ? Math.max(...shownSlash.map((c) => c.name.length)) : 0;
     const spin = this.busy ? `${SPIN[this.spin]!} ` : "";
-    const title = ` termina agent-core v1  ${spin}${this.model}${this.auth ? `  ${this.auth}` : ""}${this.usage ? `  ${this.usage}` : ""} `;
+    const imageN = this.pendingImages();
+    const images = imageN > 0 ? `  ${imageN} image${imageN === 1 ? "" : "s"}` : "";
+    const title = ` termina agent-core v1  ${spin}${this.model}${this.auth ? `  ${this.auth}` : ""}${this.usage ? `  ${this.usage}` : ""}${images} `;
     const picker = matches.length > 0 && Boolean(matches[0]?.submit);
     const foot = this.busy
       ? " Ctrl+C interrupt · PgUp/PgDn scroll "

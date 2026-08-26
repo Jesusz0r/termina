@@ -27,10 +27,18 @@ export type CallResultLike = {
 
 type CompletionMessage = {
   role: string;
-  content?: string | null;
+  content?: string | null | Array<Record<string, unknown>>;
   tool_calls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>;
   tool_call_id?: string;
 };
+
+function imageDataUrl(b: Record<string, unknown>): string | null {
+  const source = b.source;
+  if (!source || typeof source !== "object") return null;
+  const src = source as { type?: unknown; media_type?: unknown; data?: unknown };
+  if (src.type !== "base64" || typeof src.media_type !== "string" || typeof src.data !== "string" || !src.data) return null;
+  return `data:${src.media_type};base64,${src.data}`;
+}
 
 export function toCompletionsTools(tools: ToolDef[]): Array<Record<string, unknown>> {
   return tools.map((t) => ({
@@ -88,6 +96,7 @@ export function toCompletionsMessages(system: string, messages: KernelMessage[])
       continue;
     }
     const texts: string[] = [];
+    const parts: Array<Record<string, unknown>> = [];
     for (const b of m.content) {
       if (b.type === "tool_result") {
         out.push({
@@ -96,10 +105,16 @@ export function toCompletionsMessages(system: string, messages: KernelMessage[])
           content: blockText(b),
         });
       } else if (b.type === "text") {
-        texts.push(blockText(b));
+        const text = blockText(b);
+        texts.push(text);
+        parts.push({ type: "text", text });
+      } else if (b.type === "image") {
+        const url = imageDataUrl(b);
+        if (url) parts.push({ type: "image_url", image_url: { url } });
       }
     }
-    if (texts.length) out.push({ role: "user", content: texts.join("\n") });
+    if (parts.some((p) => p.type === "image_url")) out.push({ role: "user", content: parts });
+    else if (texts.length) out.push({ role: "user", content: texts.join("\n") });
   }
   return out;
 }
@@ -131,7 +146,7 @@ export function toResponsesInput(messages: KernelMessage[]): Array<Record<string
       out.push(...calls);
       continue;
     }
-    const texts: string[] = [];
+    const parts: Array<Record<string, unknown>> = [];
     for (const b of m.content) {
       if (b.type === "tool_result") {
         out.push({
@@ -140,10 +155,13 @@ export function toResponsesInput(messages: KernelMessage[]): Array<Record<string
           output: blockText(b),
         });
       } else if (b.type === "text") {
-        texts.push(blockText(b));
+        parts.push({ type: "input_text", text: blockText(b) });
+      } else if (b.type === "image") {
+        const url = imageDataUrl(b);
+        if (url) parts.push({ type: "input_image", image_url: url });
       }
     }
-    if (texts.length) out.push({ role: "user", content: [{ type: "input_text", text: texts.join("\n") }] });
+    if (parts.length) out.push({ role: "user", content: parts });
   }
   return out;
 }

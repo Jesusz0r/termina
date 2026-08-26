@@ -457,7 +457,7 @@ function createPaneShell(instanceId: string): Pane {
     (data) => void window.pi.writeTerminal(instanceId, data),
     (cols, rows) => void window.pi.resizeTerminal(instanceId, cols, rows),
     (text) => void window.pi.writeClipboard(text).catch(() => undefined),
-    () => window.pi.readClipboard(),
+    () => window.pi.pasteTerminal(instanceId),
   );
 
   const pane: Pane = {

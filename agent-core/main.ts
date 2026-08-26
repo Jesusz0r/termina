@@ -83,18 +83,24 @@ import {
 } from "./models.ts";
 import { IGNORED_SEGMENTS, matchGitignore, parseGitignore, type GitignoreRules } from "../shared/gitignore.ts";
 import {
+  consumePendingImages,
   consumeStartupControl,
+  expandFileImageSource,
   firstPlanText,
+  loadImageFromRoots,
+  peekPendingImageCount,
+  persistLoadedImages,
   promptFileName,
   readContextFiles,
-  structuredStartupText,
+  removePendingImageFiles,
+  structuredStartup,
   visibleAssistantText,
   waitForAck,
   writePromptPayload,
 } from "./host.ts";
 import { MAX_SESSION_FILE_BYTES, rotateSessionFile } from "./session.ts";
 
-export { MAX_SESSION_FILE_BYTES, rotateSessionFile, sessionRotateStamp, sliceSessionText, writeForkedSession } from "./session.ts";
+export { MAX_SESSION_FILE_BYTES, copySessionImageFiles, rotateSessionFile, sessionRotateStamp, sliceSessionText, writeForkedSession } from "./session.ts";
 import { AgentTui, SLASH_COMMANDS } from "./tui.ts";
 
 export { SLASH_COMMANDS, completeSlashLine, matchingSlashCommands, type SlashCommand } from "./tui.ts";
@@ -1701,6 +1707,7 @@ function blockChars(b: ContentBlock): number {
   if (b.type === "text") return String((b as { text?: string }).text ?? "").length;
   if (b.type === "tool_result") return String((b as { content?: string }).content ?? "").length;
   if (b.type === "tool_use") return JSON.stringify((b as { input?: unknown }).input ?? {}).length;
+  if (b.type === "image") return 8_000;
   return 0;
 }
 
@@ -1711,6 +1718,8 @@ function estimate(m: Message): number {
     const payload =
       b.type === "tool_use" || b.type === "server_tool_use"
         ? JSON.stringify((b as { input?: unknown }).input ?? {})
+        : b.type === "image"
+          ? "image"
         : b.type === "web_search_tool_result" || b.type === "thinking" || b.type === "redacted_thinking"
           ? JSON.stringify(b)
           : String((b as { text?: string; content?: string }).text ?? (b as { content?: string }).content ?? "");
@@ -1722,20 +1731,26 @@ function estimate(m: Message): number {
 const VIEW_KEYS = new Set(["chars", "tool", "repro", "stubbed"]);
 
 /** Strip view metadata. Extra keys on a content block (stubbed flags
- *  included) make the provider reject the whole request. */
-export function toProviderBlock(b: ContentBlock): Record<string, unknown> {
+ *  included) make the provider reject the whole request. File images
+ *  expand to base64 at request time. */
+export function toProviderBlock(b: ContentBlock, imageRoots: string[] = []): Record<string, unknown> {
   const out: Record<string, unknown> = { type: b.type };
   for (const [k, v] of Object.entries(b)) {
     if (k === "type" || VIEW_KEYS.has(k) || v === undefined) continue;
     out[k] = v;
   }
+  if (b.type === "image" && out.source && typeof out.source === "object" && !Array.isArray(out.source)) {
+    const expanded = expandFileImageSource(out.source as Record<string, unknown>, imageRoots);
+    if (expanded) out.source = expanded;
+    else return { type: "text", text: "[image missing]" };
+  }
   return out;
 }
 
-export function toRequest(messages: Message[]): Array<{ role: string; content: unknown }> {
+export function toRequest(messages: Message[], imageRoots: string[] = []): Array<{ role: string; content: unknown }> {
   return messages.map((m) => {
     if (typeof m.content === "string") return { role: m.role, content: m.content };
-    return { role: m.role, content: m.content.map(toProviderBlock) };
+    return { role: m.role, content: m.content.map((b) => toProviderBlock(b, imageRoots)) };
   });
 }
 
@@ -1754,6 +1769,17 @@ function pushMessage(role: Message["role"], content: Message["content"]): Messag
   history.push(m);
   m.sseq = store({ type: "message", message: { role, content } });
   return m;
+}
+
+function pushUserPrompt(prompt: string, images: Array<{ name: string; mediaType: string }>): Message {
+  if (images.length === 0) return pushMessage("user", prompt);
+  return pushMessage("user", [
+    { type: "text", text: prompt },
+    ...images.map((img) => ({
+      type: "image",
+      source: { type: "file", name: img.name, media_type: img.mediaType },
+    })),
+  ]);
 }
 
 // ---- reclamation with hysteresis ----
@@ -2225,7 +2251,12 @@ async function callModel(messages: Message[]): Promise<CallResult> {
   const started = Date.now();
   const prefix = buildCachedPrefix(systemPrompt(), TOOLS);
   const proto = providerProtocol(route.provider);
-  const kernelMessages = messages.map((m) => ({ role: m.role, content: m.content }));
+  const imageRoots = [sessionFile ? dirname(sessionFile) : "", eventsDir].filter(Boolean);
+  const requestMessages = toRequest(messages, imageRoots);
+  const kernelMessages = requestMessages.map((m) => ({
+    role: m.role as "user" | "assistant",
+    content: m.content as string | Array<Record<string, unknown>>,
+  }));
   const clientTools = TOOLS as ToolDef[];
   const body =
     proto === "anthropic-messages"
@@ -2239,7 +2270,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
           cache_control: prefix.cache_control,
           system: prefix.system,
           tools: requestTools(prefix.tools, route.provider),
-          messages: toRequest(messages),
+          messages: requestMessages,
         }
       : proto === "openai-codex-responses"
         ? responsesBody(route.model, systemPrompt(), kernelMessages, clientTools)
@@ -2503,16 +2534,18 @@ function logSettings(): void {
   });
 }
 
-async function runPrompt(prompt: string): Promise<void> {
+async function runPrompt(prompt: string, extraImages: Array<{ name: string; mediaType: string }> = []): Promise<void> {
   if (!streamPrepared) ensureFreshSession();
   running = true;
   showPrompt();
   interrupted = false;
   currentAbort = new AbortController();
+  const pendingCount = eventsDir && terminalId ? peekPendingImageCount(eventsDir, terminalId) : 0;
+  const hasImages = pendingCount > 0 || extraImages.length > 0;
   let preflight: { requestId: string; token: string | null } | null = null;
   if (eventsDir && terminalId) {
     const requestId = randomUUID();
-    logEvent({ t: "preflight_request", requestId, hasImages: false });
+    logEvent({ t: "preflight_request", requestId, hasImages });
     const ack = await waitForAck(eventsDir, terminalId, requestId, 15_000, bridgeId, {
       shouldStop: () => interrupted,
     });
@@ -2527,17 +2560,24 @@ async function runPrompt(prompt: string): Promise<void> {
     }
     preflight = { requestId, token: typeof ack.token === "string" ? ack.token : null };
   }
+  const imageRoots = [sessionFile ? dirname(sessionFile) : "", eventsDir].filter(Boolean);
+  const loaded = eventsDir && terminalId ? consumePendingImages(eventsDir, terminalId) : [];
+  const extras = extraImages
+    .map((ref) => loadImageFromRoots(ref, imageRoots))
+    .filter((img): img is NonNullable<typeof img> => img !== null);
+  const images = persistLoadedImages(sessionFile, [...loaded, ...extras].slice(0, 4));
+  if (sessionFile && loaded.length) removePendingImageFiles(eventsDir, loaded.map((img) => img.name));
   const context = eventsDir && terminalId ? readContextFiles(eventsDir, terminalId) : "";
   if (eventsDir && terminalId) {
     const file = promptFileName(terminalId, bridgeId, randomUUID().slice(0, 8));
-    const written = writePromptPayload(eventsDir, terminalId, file, { prompt, context });
+    const written = writePromptPayload(eventsDir, terminalId, file, { prompt, context, images });
     if (written) logEvent({ t: "prompt", file: written, hasPreflight: preflight !== null });
   }
   if (context) {
     pushMessage("user", context);
     out("(host context injected)\n");
   }
-  const userMsg = pushMessage("user", prompt);
+  const userMsg = pushUserPrompt(prompt, images);
   logEvent({
     t: "agent_start",
     model: `${route.provider}/${route.model}`,
@@ -3257,6 +3297,7 @@ async function main(): Promise<void> {
       stdin: process.stdin,
       stdout: process.stdout,
       commands: SLASH_COMMANDS,
+      pendingImages: () => (eventsDir && terminalId ? peekPendingImageCount(eventsDir, terminalId) : 0),
       onSubmit: (line) => {
         try {
           dispatchLine(line);
@@ -3307,6 +3348,7 @@ async function main(): Promise<void> {
   if (bootList && bootList.length > 0) out(`${formatModelBanner(bootList, route.model)}\n`);
   if (process.env.TERMINA_CORE_RESUME === "1") resumeSession();
   let structured = "";
+  let structuredImages: Array<{ name: string; mediaType: string }> = [];
   if (eventsDir && terminalId) {
     const control = consumeStartupControl(eventsDir, terminalId, bridgeId);
     const opId = control?.opId ?? "";
@@ -3317,13 +3359,19 @@ async function main(): Promise<void> {
       surface?.setDraft(control.text);
       if (!surface) out(`${control.text}\n`);
     } else if (control?.action === "structured") {
-      structured = structuredStartupText(control);
+      const started = structuredStartup(control);
+      structured = started.text;
+      structuredImages = started.images;
     }
   }
   showPrompt();
-  if (structured) {
-    out(`> ${structured}\n`);
-    submit(structured);
+  if (structured || structuredImages.length > 0) {
+    if (structured) out(`> ${structured}\n`);
+    void runPrompt(structured, structuredImages)
+      .catch((err: unknown) => {
+        out(`\nengine error: ${(err as Error).message}\n`);
+        showPrompt();
+      });
     return;
   }
   const printed = parsePrintPrompt(process.argv);

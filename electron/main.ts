@@ -43,6 +43,7 @@ import {
 } from "./plan-board.js";
 import { AppPreferencesStore } from "./preferences.js";
 import { listSessionJsonl, mergeSessionFiles, searchSessionFiles, sessionFileEntry, type SessionFileEntry } from "./session-search.js";
+import { appendPendingImage } from "../agent-core/host.js";
 import {
   composeTerminalRoster,
   isCoreSessionId,
@@ -1068,6 +1069,27 @@ class PiEditorApp {
   private eventsDirOf(inst: PiTerminalInstance): string {
     const owner = this.projectOfTerminal(inst.id);
     return owner?.worldlines?.eventsDirOf(inst.id) ?? this.eventsDir;
+  }
+
+  /** Core tabs attach a clipboard image as a pending host file. Pi and
+   *  shell tabs only paste text: a PNG cannot travel through the pty. */
+  private pasteTerminal(id: unknown): { kind: "text"; text: string } | { kind: "image"; count: number } {
+    const text = (): { kind: "text"; text: string } => ({ kind: "text", text: capUtf8(clipboard.readText(), MAX_CLIPBOARD_BYTES) });
+    if (typeof id !== "string") return text();
+    const inst = this.terminals.get(id);
+    if (!inst || inst.engine !== "core") return text();
+    const image = clipboard.readImage();
+    if (image.isEmpty()) return text();
+    let png: Buffer;
+    try {
+      png = Buffer.from(image.toPNG());
+    } catch {
+      return text();
+    }
+    if (png.length === 0 || png.length > MAX_CLIPBOARD_BYTES) return text();
+    const attached = appendPendingImage(this.eventsDirOf(inst), inst.id, png, "image/png", randomUUID());
+    if (!attached.ok) return text();
+    return { kind: "image", count: attached.count };
   }
 
   private async safeEventsFile(dir: string, name: string): Promise<string | null> {
@@ -2630,7 +2652,9 @@ class PiEditorApp {
       if (
         name === "startup-control.json" ||
         name.startsWith("mailbox-term-") ||
-        name.startsWith("startup-control-term-")
+        name.startsWith("startup-control-term-") ||
+        name.startsWith("image-term-") ||
+        name.startsWith("images-term-")
       ) {
         rmSync(join(this.eventsDir, name), { force: true });
       }
@@ -4867,6 +4891,7 @@ class PiEditorApp {
       return { ok: true };
     });
     ipcMain.handle("clipboard:read", () => capUtf8(clipboard.readText(), MAX_CLIPBOARD_BYTES));
+    ipcMain.handle("terminals:paste", (_e, id: unknown) => this.pasteTerminal(id));
     ipcMain.handle("settings:get", () => {
       const next = normalizeAppPreferences(this.preferences);
       return { ...next, shortcuts: { ...next.shortcuts } };

@@ -76,6 +76,7 @@ const {
   sessionRotateStamp,
   sliceSessionText,
   writeForkedSession,
+  copySessionImageFiles,
   SLASH_COMMANDS,
   matchingSlashCommands,
   completeSlashLine,
@@ -275,6 +276,55 @@ check("startup-control file is claimed away", !existsSync(join(hostDir, `startup
 writeFileSync(join(hostDir, "startup-control.json"), JSON.stringify({ opId: "op-2", action: "prefill", text: "draft" }));
 const generic = host.consumeStartupControl(hostDir, hostId, hostBridge);
 check("startup-control generic prefill", generic?.action === "prefill" && generic.text === "draft");
+const png1x1 = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "base64",
+);
+const imgDir = mkdtempSync(join(tmpdir(), "agent-core-img-"));
+leftovers.push(imgDir);
+const attached = host.appendPendingImage(imgDir, hostId, png1x1, "image/png", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+check("appendPendingImage writes a pending png", attached.ok && attached.count === 1 && existsSync(join(imgDir, attached.name)));
+check("peekPendingImageCount sees the file", host.peekPendingImageCount(imgDir, hostId) === 1);
+const consumed = host.consumePendingImages(imgDir, hostId);
+check("consumePendingImages returns bytes and drops the list", consumed.length === 1 && consumed[0]?.bytes.length === png1x1.length && host.peekPendingImageCount(imgDir, hostId) === 0);
+const sessImg = join(imgDir, "core-imgtest.jsonl");
+writeFileSync(sessImg, "");
+const stored = host.persistLoadedImages(sessImg, consumed);
+check("persistLoadedImages writes a sidecar file", stored[0]?.name === "core-imgtest-img-1.png" && existsSync(join(imgDir, "core-imgtest-img-1.png")));
+const expanded = host.expandFileImageSource({ type: "file", name: stored[0].name, media_type: "image/png" }, [imgDir]);
+check("expandFileImageSource reads base64", expanded?.type === "base64" && typeof expanded.data === "string" && expanded.data.length > 0);
+const missingImg = host.expandFileImageSource({ type: "file", name: "core-imgtest-img-1.png", media_type: "image/png" }, [join(imgDir, "nope")]);
+check("expandFileImageSource jails the path", missingImg === null);
+const structuredImg = host.structuredStartup({
+  opId: "op-3",
+  action: "structured",
+  content: [
+    { type: "text", text: "look at this" },
+    { name: "core-imgtest-img-1.png", mediaType: "image/png" },
+  ],
+});
+check(
+  "structuredStartup keeps image refs",
+  structuredImg.text === "look at this" && structuredImg.images[0]?.name === "core-imgtest-img-1.png",
+);
+const imgReq = toRequest(
+  [{ role: "user", content: [{ type: "text", text: "see" }, { type: "image", source: { type: "file", name: stored[0].name, media_type: "image/png" } }], tokens: 1, sseq: 1 }],
+  [imgDir],
+);
+check(
+  "toRequest expands a file image to base64",
+  Array.isArray(imgReq[0].content) &&
+    imgReq[0].content[1]?.type === "image" &&
+    imgReq[0].content[1]?.source?.type === "base64",
+);
+const oversize = host.appendPendingImage(imgDir, hostId, Buffer.alloc(host.MAX_IMAGE_BYTES + 1), "image/png", "bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee");
+check("appendPendingImage rejects an oversized image", oversize.ok === false);
+host.appendPendingImage(imgDir, hostId, png1x1, "image/png", "cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee");
+host.appendPendingImage(imgDir, hostId, png1x1, "image/png", "dddddddd-bbbb-cccc-dddd-eeeeeeeeeeee");
+host.appendPendingImage(imgDir, hostId, png1x1, "image/png", "eeeeeeee-bbbb-cccc-dddd-eeeeeeeeeeee");
+host.appendPendingImage(imgDir, hostId, png1x1, "image/png", "ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee");
+const fifth = host.appendPendingImage(imgDir, hostId, png1x1, "image/png", "99999999-bbbb-cccc-dddd-eeeeeeeeeeee");
+check("appendPendingImage caps at four", fifth.ok && fifth.count === 4 && host.peekPendingImageCount(imgDir, hostId) === 4);
 check(
   "firstPlanText accepts a checkbox list",
   host.firstPlanText("intro\n- [ ] edit src/foo.ts\n")?.includes("- [ ] edit src/foo.ts"),
@@ -1064,6 +1114,37 @@ check(
     mapped[2].role === "tool" &&
     mapped[2].tool_call_id === "call-1",
 );
+const mappedImg = compat.toCompletionsMessages("sys", [
+  {
+    role: "user",
+    content: [
+      { type: "text", text: "what is this" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "aaa" } },
+    ],
+  },
+]);
+check(
+  "completions maps image blocks to image_url",
+  Array.isArray(mappedImg[1].content) &&
+    mappedImg[1].content[0]?.type === "text" &&
+    mappedImg[1].content[1]?.type === "image_url" &&
+    String(mappedImg[1].content[1]?.image_url?.url).startsWith("data:image/png;base64,"),
+);
+const responsesImg = compat.toResponsesInput([
+  {
+    role: "user",
+    content: [
+      { type: "text", text: "what is this" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "aaa" } },
+    ],
+  },
+]);
+check(
+  "responses maps image blocks to input_image",
+  responsesImg[0].role === "user" &&
+    responsesImg[0].content[1]?.type === "input_image" &&
+    String(responsesImg[0].content[1]?.image_url).startsWith("data:image/png;base64,"),
+);
 const responsesIn = compat.toResponsesInput([
   { role: "assistant", content: [{ type: "tool_use", id: "call-1", name: "bash", input: { command: "ls" } }] },
   { role: "user", content: [{ type: "tool_result", tool_use_id: "call-1", content: "ok" }] },
@@ -1436,6 +1517,14 @@ const writtenFork = await writeForkedSession(forkSrc, forkDst, 2);
 check("writeForkedSession writes the sliced prefix", writtenFork.ok && existsSync(forkDst) && readFileSync(forkDst, "utf8").includes("\"a1\"") && !readFileSync(forkDst, "utf8").includes("\"u2\""));
 const emptyFork = await writeForkedSession(forkSrc, join(forkDir, "empty.jsonl"), 0);
 check("writeForkedSession through 0 writes an empty file", emptyFork.ok && readFileSync(join(forkDir, "empty.jsonl"), "utf8") === "");
+writeFileSync(join(forkDir, "src-img-1.png"), png1x1);
+const forkImgDst = join(forkDir, "out-img", "dst.jsonl");
+await writeForkedSession(forkSrc, forkImgDst, 2);
+check("writeForkedSession copies sidecar images", existsSync(join(forkDir, "out-img", "src-img-1.png")));
+const copyOnlyDir = join(forkDir, "copy-only");
+mkdirSync(copyOnlyDir);
+await copySessionImageFiles(forkSrc, join(copyOnlyDir, "session.jsonl"));
+check("copySessionImageFiles copies without rewriting jsonl", existsSync(join(copyOnlyDir, "src-img-1.png")));
 
 const rotDir = mkdtempSync(join(tmpdir(), "agent-core-rotate-"));
 leftovers.push(rotDir);
@@ -1658,6 +1747,16 @@ tui.append("hello from transcript\n");
 const frame = tui.frame();
 check("tui header names the kernel", frame.includes("termina agent-core v1"));
 check("tui header shows the model", frame.includes("anthropic/claude"));
+const imgTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  pendingImages: () => 2,
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+imgTui.append("x");
+check("tui header shows pending images", imgTui.frame().includes("2 images"));
 check("tui transcript is visible", frame.includes("hello from transcript"));
 tui.feed("/");
 check("tui slash menu lists help and exit", tui.frame().includes("/help") && tui.frame().includes("/exit"));

@@ -96,6 +96,7 @@ const bridge: PiBridge = {
   abortTerminal: (id) => ipcRenderer.invoke("terminals:abort", id),
   writeClipboard: (text) => ipcRenderer.invoke("clipboard:write", text),
   readClipboard: () => ipcRenderer.invoke("clipboard:read"),
+  pasteTerminal: (id) => ipcRenderer.invoke("terminals:paste", id),
   detectTest: (terminalId) => ipcRenderer.invoke("verify:detect", terminalId),
   runVerify: (terminalId) => ipcRenderer.invoke("verify:run", terminalId),
   cancelVerify: (terminalId) => ipcRenderer.invoke("verify:cancel", terminalId),

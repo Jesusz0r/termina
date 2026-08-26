@@ -5,7 +5,7 @@
  * Revisions stay in the prefix: replay on the candidate applies them.
  */
 import { existsSync, renameSync, statSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
 export const MAX_SESSION_FILE_BYTES = 32 * 1024 * 1024;
@@ -98,8 +98,33 @@ export async function writeForkedSession(
     const sliced = sliceSessionText(buf.toString("utf8"), throughSeq);
     if (!sliced.ok) return sliced;
     await writeFile(destPath, sliced.text, { mode: 0o600 });
+    await copySessionImageFiles(sourcePath, destPath);
     return { ok: true, kept: sliced.kept };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+const SESSION_IMAGE = /-img-[1-9][0-9]{0,3}\.(png|jpe?g|webp|gif)$/;
+
+/** Copy sidecar image files that sit next to a session jsonl. */
+export async function copySessionImageFiles(sourcePath: string, destPath: string): Promise<void> {
+  const srcDir = dirname(sourcePath);
+  const destDir = dirname(destPath);
+  if (srcDir === destDir) return;
+  let names: string[] = [];
+  try {
+    names = await readdir(srcDir);
+  } catch {
+    return;
+  }
+  await mkdir(destDir, { recursive: true, mode: 0o700 });
+  for (const name of names) {
+    if (!SESSION_IMAGE.test(name)) continue;
+    try {
+      await copyFile(join(srcDir, name), join(destDir, name));
+    } catch {
+      /* skip one image; the jsonl copy still stands */
+    }
   }
 }

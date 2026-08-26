@@ -18,7 +18,7 @@ import { captureRootInRepo, gitCommonDir, gitHead, gitTopLevel, platformHasCopyO
 import { EvidenceEngine, dependencyDiff, mineChangeReason, rankProfiles, type EvidenceDeps, type EvidenceRecord, type EvidenceSummary } from "./evidence.js";
 import type { SessionForkOpts, SessionForkResult } from "./session-fork.js";
 import type { DependencyChange, RunSummary, TimelineEvent, WorldlineChangedFile, WorldlineDetails } from "../shared/types.js";
-import { writeForkedSession } from "../agent-core/session.js";
+import { copySessionImageFiles, writeForkedSession } from "../agent-core/session.js";
 
 /** Quote one shell argument: the resolved base commands carry scripts that
  * must survive as one argument through the wrapper shell. */
@@ -625,6 +625,7 @@ export class WorldlineManager {
         const destA = join(nA.sessionDir, "session.jsonl");
         const destB = join(nB.sessionDir, "session.jsonl");
         await writeFile(destA, await readFile(cand.sessionFile), { mode: 0o600 });
+        await copySessionImageFiles(cand.sessionFile, destA);
         const throughB = parseStorageSeq(run.promptParentEntryId) ?? 0;
         const sourceB = run.sessionBranchFile ?? run.sessionFile ?? cand.sessionFile;
         const forkB = await writeForkedSession(sourceB, destB, throughB);
@@ -1880,6 +1881,7 @@ export class WorldlineManager {
         mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
         const staged = join(sessionDir, "session.jsonl");
         await writeFile(staged, await readFile(target.sessionFile), { mode: 0o600 });
+        await copySessionImageFiles(target.sessionFile, staged);
         journal.stagedSession = staged;
       } else {
         const fork = await this.deps.forkSession({

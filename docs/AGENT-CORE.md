@@ -218,6 +218,13 @@ non-empty file aside (`core-<id>-<stamp>.jsonl`) and starts a fresh file
 at the same path so Session Search can still read the previous
 conversation. Closing a tab keeps a non-empty persist session.
 
+Clipboard images never enter the pty. The host writes them next to the
+sidecar as `image-<terminal>-<id>.png` and a pending list
+`images-<terminal>.json`. On submit the kernel copies them next to the
+session file (`<session>-img-N.png`), stores a file-source block in the
+JSONL, and expands to provider base64 at request time. The prompt payload
+keeps refs, not bytes.
+
 ## Relationship to prior art
 
 Pi demonstrates P5 fully (waste attribution with noise floors and cause

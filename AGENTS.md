@@ -723,7 +723,8 @@ Use these terms exactly. Do not invent synonyms.
   materialized copy from the user-data directory.
 - `agent-core/`: the in-house agent kernel (loop, tools, TUI, auth).
 - `agent-core/host.ts`: Termina host adapter (ack, prompt payload, context
-  files, startup-control). Same file names as the Pi bridge.
+  files, startup-control, pending clipboard images). Same file names as
+  the Pi bridge.
 - `agent-core/session.ts`: core session JSONL slice, fork write, and
   `/clear` rotate. Pi session fork stays in `electron/session-fork.ts`.
 - `electron/session-search.ts`: Session Search parse and walk (Pi and
