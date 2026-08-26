@@ -727,6 +727,8 @@ Use these terms exactly. Do not invent synonyms.
   the Pi bridge.
 - `agent-core/session.ts`: core session JSONL slice, fork write, and
   `/clear` rotate. Pi session fork stays in `electron/session-fork.ts`.
+- `agent-core/mcp.ts`: stdio MCP client. Config files list servers; the
+  kernel freezes those tools at process start. Not a plugin loader.
 - `electron/session-search.ts`: Session Search parse and walk (Pi and
   core JSONL). Main supplies the file list for the active project.
 - `electron/watcher.ts`: watches the project, keeps a content cache, and

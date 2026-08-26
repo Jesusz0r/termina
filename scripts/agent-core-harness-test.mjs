@@ -1448,6 +1448,86 @@ check(
   resolveSessionFile("/events", "term-1") === join("/events", "term-1.session.jsonl"),
 );
 
+const mcp = await import("../agent-core/mcp.ts");
+check("mcpToolName prefixes server and tool", mcp.mcpToolName("github", "list_issues") === "mcp_github_list_issues");
+check("mcpToolName stays within 64 chars", mcp.mcpToolName("very-long-server-name-here", "very_long_tool_name_that_exceeds").length <= 64);
+check(
+  "selectMcpTools prefixes kernel-like names and drops duplicates",
+  mcp.selectMcpTools([{ name: "bash", description: "nope", input_schema: {}, server: "x", original: "bash" }])[0]?.name === "mcp_x_bash" &&
+    mcp.selectMcpTools([
+      { name: "echo", description: "echo", input_schema: {}, server: "x", original: "echo" },
+      { name: "echo", description: "echo", input_schema: {}, server: "x", original: "echo" },
+    ]).length === 1,
+);
+check(
+  "parseMcpConfig skips http and disabled servers",
+  mcp.parseMcpConfig({
+    mcpServers: {
+      gh: { command: "npx", args: ["-y", "x"] },
+      web: { type: "http", url: "https://example.com" },
+      off: { command: "npx", disabled: true },
+    },
+  }).map((s) => s.name).join(",") === "gh",
+);
+check("jailMcpCwd rejects a parent path", mcp.jailMcpCwd("/proj", "..") === null);
+check("jailMcpCwd allows a subdir", mcp.jailMcpCwd("/proj", "tools") === join("/proj", "tools"));
+const mcpMerged = mcp.mergeClientTools(
+  [{ name: "bash", description: "bash", input_schema: { type: "object" } }],
+  [{ name: "mcp_x_echo", description: "echo", input_schema: { type: "object" } }],
+);
+const mcpPrefix = buildCachedPrefix("sys", mcpMerged);
+check(
+  "MCP tools sit in the cached client list",
+  mcpPrefix.tools.some((t) => t.name === "mcp_x_echo") && mcpPrefix.tools.at(-1)?.name === "mcp_x_echo" && mcpPrefix.tools.at(-1)?.cache_control?.type === "ephemeral",
+);
+const mcpRequested = requestTools(mcpPrefix.tools, "anthropic");
+check(
+  "web_search stays last and uncached after MCP tools",
+  mcpRequested.at(-1)?.name === "web_search" && mcpRequested.at(-1)?.cache_control === undefined && mcpRequested.at(-2)?.name === "mcp_x_echo",
+);
+const mcpDir = mkdtempSync(join(tmpdir(), "agent-core-mcp-"));
+leftovers.push(mcpDir);
+const echoServer = join(mcpDir, "echo-mcp.mjs");
+writeFileSync(
+  echoServer,
+  `process.stdin.setEncoding("utf8");
+let buf = "";
+process.stdin.on("data", (chunk) => {
+  buf += chunk;
+  let n;
+  while ((n = buf.indexOf("\\n")) >= 0) {
+    const line = buf.slice(0, n);
+    buf = buf.slice(n + 1);
+    let msg;
+    try { msg = JSON.parse(line); } catch { continue; }
+    if (msg.method === "initialize") {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "echo" } } }) + "\\n");
+    } else if (msg.method === "tools/list") {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "echo", description: "echo text", inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } }] } }) + "\\n");
+    } else if (msg.method === "tools/call") {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: String(msg.params?.arguments?.text ?? "") }] } }) + "\\n");
+    }
+  }
+});
+`,
+);
+const liveMcp = await mcp.startMcp(
+  [{ name: "echo", command: process.execPath, args: [echoServer], env: {} }],
+  { projectRoot: mcpDir, confineCwd: (cwd) => mcp.jailMcpCwd(mcpDir, cwd) },
+);
+check("mcp handshake lists the echo tool", liveMcp.tools[0]?.name === "mcp_echo_echo" && liveMcp.notes.length === 0);
+const echoed = await liveMcp.call("mcp_echo_echo", { text: "hello-mcp" });
+check("mcp tools/call round-trips", echoed.isError === false && echoed.content === "hello-mcp");
+liveMcp.shutdown();
+const deadMcp = await mcp.startMcp(
+  [{ name: "gone", command: join(mcpDir, "missing-bin"), args: [], env: {} }],
+  { projectRoot: mcpDir, confineCwd: (cwd) => mcp.jailMcpCwd(mcpDir, cwd) },
+);
+check("mcp spawn failure does not throw", deadMcp.tools.length === 0 && deadMcp.notes.some((n) => n.includes("gone")));
+deadMcp.shutdown();
+writeFileSync(join(mcpDir, "bad.json"), "{not json");
+check("invalid mcp json loads as no servers", mcp.parseMcpConfig(null).length === 0 && mcp.loadMcpConfigs(join(mcpDir, "bad.json"), join(mcpDir, "missing.json")).length === 0);
+
 const rosterMod = await import("../electron/terminal-roster.ts");
 check("parseTerminalRoster empty", rosterMod.parseTerminalRoster(null).length === 0);
 check(

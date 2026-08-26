@@ -13,7 +13,7 @@ two-role routing map, bounded concurrency, cwd jail, grep/glob, unique first-occ
 edit, interruptible bash, web_search, skill
 index, prefix `cache_control`, traces, provider auth, live model list,
 full-screen TUI, Termina sidecar host contract, core worldline session slice,
-bash approval, /clear /compact, -p print, usage footer). Zone 1 is identity, environment,
+bash approval, /clear /compact, -p print, usage footer, stdio MCP). Zone 1 is identity, environment,
 user-global `~/.agents/AGENTS.md`, the skill index, then cwd `AGENTS.md`.
 Skill bodies load with `read_file`. Skills come from `~/.agents/skills`
 then `<cwd>/.agents/skills` (no ancestor walk). Truncated instructions
@@ -224,6 +224,13 @@ sidecar as `image-<terminal>-<id>.png` and a pending list
 session file (`<session>-img-N.png`), stores a file-source block in the
 JSONL, and expands to provider base64 at request time. The prompt payload
 keeps refs, not bytes.
+
+MCP is a stdio client, not a plugin surface. Servers come from
+`~/.termina/agent/mcp.json` and `<cwd>/.mcp.json` (project wins on the
+same name). The kernel spawns them at process start, lists tools once,
+prefixes names `mcp_<server>_<tool>`, and freezes that list in zone 1.
+`/clear` reconnects. HTTP/SSE MCP is out of scope. MCP is a user-installed
+subprocess, the same class as `bash`.
 
 ## Relationship to prior art
 

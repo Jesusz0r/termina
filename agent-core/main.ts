@@ -99,6 +99,16 @@ import {
   writePromptPayload,
 } from "./host.ts";
 import { MAX_SESSION_FILE_BYTES, rotateSessionFile } from "./session.ts";
+import {
+  jailMcpCwd,
+  loadMcpConfigs,
+  mergeClientTools,
+  mcpToolDefs,
+  projectMcpPath,
+  startMcp,
+  userMcpPath,
+  type McpSession,
+} from "./mcp.ts";
 
 export { MAX_SESSION_FILE_BYTES, copySessionImageFiles, rotateSessionFile, sessionRotateStamp, sliceSessionText, writeForkedSession } from "./session.ts";
 import { AgentTui, SLASH_COMMANDS } from "./tui.ts";
@@ -1333,6 +1343,7 @@ interface ToolUse {
     query?: string;
     old_text?: string;
     new_text?: string;
+    [key: string]: unknown;
   };
 }
 
@@ -1554,6 +1565,10 @@ async function executeTool(use: ToolUse): Promise<ToolOutcome> {
     const got = await runBash(command, { cwd: canonicalCwd, shouldStop: () => interrupted });
     return done(use, got.content, got.isError);
   }
+  if (mcpSession?.tools.some((t) => t.name === use.name)) {
+    const got = await mcpSession.call(use.name, use.input, { shouldStop: () => interrupted });
+    return done(use, got.content, got.isError);
+  }
   return done(use, `error: unknown tool ${use.name}`, true);
 }
 
@@ -1618,6 +1633,22 @@ const TOOLS = [
     input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
   },
 ];
+
+let clientTools: Array<Record<string, unknown>> = TOOLS.slice();
+let mcpSession: McpSession | null = null;
+
+async function connectMcp(): Promise<void> {
+  mcpSession?.shutdown();
+  mcpSession = null;
+  clientTools = TOOLS.slice();
+  const session = await startMcp(loadMcpConfigs(userMcpPath(homedir()), projectMcpPath(canonicalCwd)), {
+    projectRoot: canonicalCwd,
+    confineCwd: (cwd) => jailMcpCwd(canonicalCwd, cwd),
+  });
+  mcpSession = session;
+  clientTools = mergeClientTools(TOOLS, mcpToolDefs(session.tools));
+  for (const note of session.notes) out(`(${note})\n`);
+}
 
 /** Provider-executed search. Same Anthropic key as the model. No Brave key. */
 export const WEB_SEARCH_TOOL = {
@@ -2249,7 +2280,7 @@ async function completeText(
 
 async function callModel(messages: Message[]): Promise<CallResult> {
   const started = Date.now();
-  const prefix = buildCachedPrefix(systemPrompt(), TOOLS);
+  const prefix = buildCachedPrefix(systemPrompt(), clientTools);
   const proto = providerProtocol(route.provider);
   const imageRoots = [sessionFile ? dirname(sessionFile) : "", eventsDir].filter(Boolean);
   const requestMessages = toRequest(messages, imageRoots);
@@ -2257,7 +2288,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
     role: m.role as "user" | "assistant",
     content: m.content as string | Array<Record<string, unknown>>,
   }));
-  const clientTools = TOOLS as ToolDef[];
+  const toolsForProvider = clientTools as ToolDef[];
   const body =
     proto === "anthropic-messages"
       ? {
@@ -2273,12 +2304,12 @@ async function callModel(messages: Message[]): Promise<CallResult> {
           messages: requestMessages,
         }
       : proto === "openai-codex-responses"
-        ? responsesBody(route.model, systemPrompt(), kernelMessages, clientTools)
+        ? responsesBody(route.model, systemPrompt(), kernelMessages, toolsForProvider)
         : completionsBody(
             route.model,
             systemPrompt(),
             kernelMessages,
-            clientTools,
+            toolsForProvider,
             route.provider === "openai" ? "max_completion_tokens" : "max_tokens",
           );
   const res = await providerPost(route.provider, body, currentAbort?.signal);
@@ -3275,7 +3306,7 @@ function dispatchLine(line: string): void {
     streamPrepared = true;
     storageSeq = 0;
     out("(session cleared)\n");
-    showPrompt();
+    void connectMcp().then(() => showPrompt());
     return;
   }
   if (line === "/compact") {
@@ -3342,6 +3373,8 @@ async function main(): Promise<void> {
       },
     });
     const teardown = (): void => {
+      mcpSession?.shutdown();
+      mcpSession = null;
       surface?.stop();
       surface = null;
     };
@@ -3361,6 +3394,8 @@ async function main(): Promise<void> {
   if (!surface) out(banner);
   const bootList = currentCatalog();
   if (bootList && bootList.length > 0) out(`${formatModelBanner(bootList, route.model)}\n`);
+  process.on("exit", () => mcpSession?.shutdown());
+  await connectMcp();
   if (process.env.TERMINA_CORE_RESUME === "1") resumeSession();
   let structured = "";
   let structuredImages: Array<{ name: string; mediaType: string }> = [];

@@ -19,6 +19,7 @@ import { EvidenceEngine, dependencyDiff, mineChangeReason, rankProfiles, type Ev
 import type { SessionForkOpts, SessionForkResult } from "./session-fork.js";
 import type { DependencyChange, RunSummary, TimelineEvent, WorldlineChangedFile, WorldlineDetails } from "../shared/types.js";
 import { copySessionImageFiles, writeForkedSession } from "../agent-core/session.js";
+import { MAX_MCP_JSON_BYTES } from "../agent-core/mcp.js";
 
 /** Quote one shell argument: the resolved base commands carry scripts that
  * must survive as one argument through the wrapper shell. */
@@ -1270,6 +1271,7 @@ export class WorldlineManager {
   /** Copy agent-core auth and user skills into each candidate home. */
   private async copyCoreResources(cmp: ComparisonState): Promise<void> {
     const authSrc = join(this.deps.realHome, ".termina", "agent", "auth.json");
+    const mcpSrc = join(this.deps.realHome, ".termina", "agent", "mcp.json");
     const agentsSrc = join(this.deps.realHome, ".agents");
     for (const cand of cmp.candidates.values()) {
       const authDstDir = join(cand.homeDir, ".termina", "agent");
@@ -1280,6 +1282,18 @@ export class WorldlineManager {
           if (info.isFile() && info.size <= MAX_PI_RESOURCE_BYTES) {
             const target = join(authDstDir, "auth.json");
             await cp(authSrc, target, { force: true });
+            await chmod(target, 0o600);
+          }
+        } catch {
+          /* Keep the candidate without this file. */
+        }
+      }
+      if (existsSync(mcpSrc)) {
+        try {
+          const info = await stat(mcpSrc);
+          if (info.isFile() && info.size <= MAX_MCP_JSON_BYTES) {
+            const target = join(authDstDir, "mcp.json");
+            await cp(mcpSrc, target, { force: true });
             await chmod(target, 0o600);
           }
         } catch {
