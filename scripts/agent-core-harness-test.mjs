@@ -1909,7 +1909,7 @@ check(
     })[0]?.sessionId === "core-abc",
 );
 check("parseTerminalRoster drops dispatch-like ids", rosterMod.parseTerminalRoster([{ id: "job-1", type: "agent", engine: "pi" }]).length === 0);
-check("parseTerminalRoster defaults agent engine to pi", rosterMod.parseTerminalRoster([{ id: "term-1", type: "agent" }])[0]?.engine === "pi");
+check("parseTerminalRoster defaults agent engine to core", rosterMod.parseTerminalRoster([{ id: "term-1", type: "agent" }])[0]?.engine === "core");
 check(
   "parseTerminalRoster drops relative sessionFile",
   rosterMod.parseTerminalRoster([{ id: "term-1", type: "agent", engine: "core", sessionFile: "agent-sessions/x.jsonl" }])[0]?.sessionFile == null,

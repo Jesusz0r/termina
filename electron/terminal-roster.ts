@@ -51,7 +51,7 @@ export function parseTerminalRoster(raw: unknown): TerminalRosterEntry[] {
     const entry: TerminalRosterEntry = { id: rec.id, type: rec.type };
     if (rec.type === "agent") {
       if (rec.engine === "core" || rec.engine === "pi") entry.engine = rec.engine;
-      else entry.engine = "pi";
+      else entry.engine = "core";
     }
     if (rec.type === "shell" && typeof rec.shell === "string" && isAbsPath(rec.shell)) entry.shell = rec.shell;
     if (typeof rec.sessionId === "string" && isRosterSessionId(rec.sessionId)) {
