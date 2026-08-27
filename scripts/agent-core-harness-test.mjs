@@ -1642,15 +1642,15 @@ const bodyXai = compat.completionsBody("grok-4.3", "sys", [], []);
 check("other completions keep max_tokens and skip cache key", bodyXai.max_tokens === 16_384 && bodyXai.prompt_cache_key === undefined);
 const bodyCodex = compat.responsesBody("gpt-5.6-sol", "sys", [], [], {
   cacheKey: "def",
-  maxTokens: 32_768,
   reasoningEffort: "none",
 });
 check(
-  "codex responses set cache key and max_output_tokens",
-  bodyCodex.prompt_cache_key === "def" && bodyCodex.max_output_tokens === 32_768,
+  "codex responses set cache key and omit unsupported max_output_tokens",
+  bodyCodex.prompt_cache_key === "def" && bodyCodex.max_output_tokens === undefined,
 );
-const bodyMaxEffort = compat.responsesBody("gpt-5.6-sol", "sys", [], [], { reasoningEffort: "max" });
-check("responses body keeps max reasoning effort", bodyMaxEffort.reasoning?.effort === "max");
+const bodyResponses = compat.responsesBody("gpt-5.6-sol", "sys", [], [], { maxTokens: 32_768, reasoningEffort: "max" });
+check("other responses set max_output_tokens", bodyResponses.max_output_tokens === 32_768);
+check("responses body keeps max reasoning effort", bodyResponses.reasoning?.effort === "max");
 check(
   "responses body asks for encrypted reasoning",
   Array.isArray(bodyCodex.include) && bodyCodex.include.includes("reasoning.encrypted_content"),

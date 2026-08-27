@@ -225,13 +225,13 @@ export function responsesBody(
     model,
     store: false,
     stream: true,
-    max_output_tokens: opts?.maxTokens ?? 16_384,
     instructions: system || "You are a coding agent.",
     input: toResponsesInput(messages),
     tools: toResponsesTools(tools),
     tool_choice: "auto",
     parallel_tool_calls: true,
   };
+  if (opts?.maxTokens !== undefined) body.max_output_tokens = opts.maxTokens;
   if (opts?.includeEncryptedReasoning !== false) body.include = ["reasoning.encrypted_content"];
   if (opts?.cacheKey) body.prompt_cache_key = opts.cacheKey;
   if (opts?.reasoningEffort) body.reasoning = { effort: opts.reasoningEffort };

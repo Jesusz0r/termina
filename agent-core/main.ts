@@ -2909,7 +2909,7 @@ async function completeText(
         model,
         store: false,
         stream: false,
-        max_output_tokens: 2048,
+        ...(providerId === "openai-codex" ? {} : { max_output_tokens: 2048 }),
         instructions: system,
         input: prompt,
         ...(effort ? { reasoning: { effort } } : {}),
@@ -2990,7 +2990,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
         }
       : usesResponsesApi(route.provider)
         ? responsesBody(route.model, sys, kernelMessages, toolsForProvider, {
-            maxTokens,
+            ...(route.provider === "openai-codex" ? {} : { maxTokens }),
             ...(sendCacheKey ? { cacheKey } : {}),
             ...(reasoningEffort ? { reasoningEffort } : {}),
             includeEncryptedReasoning: route.provider !== "xai",
