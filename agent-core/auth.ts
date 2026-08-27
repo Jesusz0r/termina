@@ -36,7 +36,11 @@ export const SUPPORTED_PROVIDERS = [
   "openrouter",
 ] as const;
 export type ProviderId = (typeof SUPPORTED_PROVIDERS)[number];
-export type ProviderProtocol = "anthropic-messages" | "openai-completions" | "openai-codex-responses";
+export type ProviderProtocol =
+  | "anthropic-messages"
+  | "openai-completions"
+  | "openai-codex-responses"
+  | "openai-responses";
 export type LoginMode = "browser" | "code" | "key" | "device";
 
 const ANTHROPIC_AUTHORIZE = "https://claude.ai/oauth/authorize";
@@ -195,7 +199,13 @@ export function resolveLoginPick(
 export function providerProtocol(id: ProviderId): ProviderProtocol {
   if (id === "anthropic") return "anthropic-messages";
   if (id === "openai-codex") return "openai-codex-responses";
-  return "openai-completions";
+  if (id === "google") return "openai-completions";
+  return "openai-responses";
+}
+
+export function usesResponsesApi(id: ProviderId): boolean {
+  const proto = providerProtocol(id);
+  return proto === "openai-codex-responses" || proto === "openai-responses";
 }
 
 export function defaultLoginMode(id: ProviderId): LoginMode {

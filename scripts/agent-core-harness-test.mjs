@@ -87,7 +87,10 @@ const {
   parseThinkingCommand,
   thinkingEnabledFor,
   thinkingRequestFor,
+  reasoningEffortFor,
   outputTokenBudget,
+  defaultContextWindow,
+  tokenEstimate,
   fetchUrl,
   fetchUrlError,
 } = core;
@@ -394,7 +397,7 @@ check(
   ]) === "- [ ] task" && host.firstPlanText(host.visibleAssistantText([{ type: "thinking", text: "- [ ] nope" }])) === null,
 );
 
-check("web_search is Anthropic server tool", WEB_SEARCH_TOOL.type === "web_search_20250305" && WEB_SEARCH_TOOL.name === "web_search");
+check("web_search is Anthropic server tool", WEB_SEARCH_TOOL.type === "web_search_20260209" && WEB_SEARCH_TOOL.name === "web_search");
 const clientPrefix = buildCachedPrefix("sys", [
   { name: "a", description: "a", input_schema: { type: "object" } },
   { name: "b", description: "b", input_schema: { type: "object" } },
@@ -409,6 +412,10 @@ check(
 check(
   "requestTools appends web_search without cache_control",
   reqTools[2]?.type === "web_search_20250305" && reqTools[2]?.cache_control === undefined,
+);
+check(
+  "requestTools sonnet 5 uses dynamic web search",
+  requestTools(clientPrefix.tools, "anthropic", "claude-sonnet-5")[2]?.type === "web_search_20260209",
 );
 check("sidecar web_search has no path", sidecarStartFor({ name: "web_search", id: "1", input: { path: "src" } }).path === undefined);
 check("sidecar fetch has no path", sidecarStartFor({ name: "fetch", id: "1", input: { url: "https://example.com" } }).path === undefined);
@@ -1194,7 +1201,10 @@ check("parseModelRef provider override", parseModelRef("gpt-5", "openai-codex").
 check("parseModelRef gpt defaults to openai", parseModelRef("gpt-5").provider === "openai");
 check("defaultLoginMode xai is device", defaultLoginMode("xai") === "device");
 check("defaultLoginMode openai is key", defaultLoginMode("openai") === "key");
-check("providerProtocol xai is completions", providerProtocol("xai") === "openai-completions");
+check("providerProtocol xai is responses", providerProtocol("xai") === "openai-responses");
+check("providerProtocol openai is responses", providerProtocol("openai") === "openai-responses");
+check("providerProtocol google is completions", providerProtocol("google") === "openai-completions");
+check("providerProtocol copilot is responses", providerProtocol("github-copilot") === "openai-responses");
 check("providerProtocol openai-codex is responses", providerProtocol("openai-codex") === "openai-codex-responses");
 check("parseAuthCommand /login xai is device", parseAuthCommand("/login xai").mode === "device" && parseAuthCommand("/login xai").provider === "xai");
 check("parseAuthCommand /login key openai", parseAuthCommand("/login key openai").mode === "key" && parseAuthCommand("/login key openai").provider === "openai");
@@ -1625,10 +1635,97 @@ check(
 );
 const bodyXai = compat.completionsBody("grok-4.3", "sys", [], []);
 check("other completions keep max_tokens and skip cache key", bodyXai.max_tokens === 16_384 && bodyXai.prompt_cache_key === undefined);
-const bodyCodex = compat.responsesBody("gpt-5.4", "sys", [], [], { cacheKey: "def", maxTokens: 24_384 });
+const bodyCodex = compat.responsesBody("gpt-5.6-sol", "sys", [], [], {
+  cacheKey: "def",
+  maxTokens: 32_768,
+  reasoningEffort: "none",
+});
 check(
   "codex responses set cache key and max_output_tokens",
-  bodyCodex.prompt_cache_key === "def" && bodyCodex.max_output_tokens === 24_384,
+  bodyCodex.prompt_cache_key === "def" && bodyCodex.max_output_tokens === 32_768,
+);
+check(
+  "responses body asks for encrypted reasoning",
+  Array.isArray(bodyCodex.include) && bodyCodex.include.includes("reasoning.encrypted_content"),
+);
+check("responses body sets reasoning effort", bodyCodex.reasoning?.effort === "none");
+const reasoned = compat.toResponsesInput([
+  {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "plan", signature: "enc", id: "rs_1" },
+      { type: "tool_use", id: "call_1", name: "bash", input: { command: "ls" } },
+    ],
+  },
+]);
+check(
+  "toResponsesInput round-trips reasoning before the tool call",
+  reasoned[0]?.type === "reasoning" &&
+    reasoned[0]?.id === "rs_1" &&
+    reasoned[0]?.encrypted_content === "enc" &&
+    reasoned[1]?.type === "function_call",
+);
+check("responses tools are non-strict", compat.toResponsesTools([{ name: "bash", description: "b", input_schema: { type: "object" } }])[0]?.strict === false);
+check(
+  "toResponsesInput drops thinking without encrypted content",
+  compat.toResponsesInput([{ role: "assistant", content: [{ type: "thinking", thinking: "plan", id: "rs_x" }] }]).length === 0,
+);
+const interleaved = compat.toResponsesInput([
+  {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "a", signature: "s1", id: "rs_a" },
+      { type: "tool_use", id: "c1", name: "bash", input: { command: "ls" } },
+      { type: "thinking", thinking: "b", signature: "s2", id: "rs_b" },
+      { type: "tool_use", id: "c2", name: "bash", input: { command: "pwd" } },
+    ],
+  },
+]);
+check(
+  "toResponsesInput keeps interleaved reasoning and tool calls",
+  interleaved.map((x) => x.type || x.role).join(",") === "reasoning,function_call,reasoning,function_call" &&
+    interleaved[1]?.call_id === "c1" &&
+    interleaved[3]?.call_id === "c2",
+);
+const doneOnly = compat.responsesResultFromEvents(
+  [
+    {
+      type: "response.output_item.done",
+      item: { type: "function_call", id: "fc_9", call_id: "call_9", name: "bash", arguments: '{"command":"pwd"}' },
+    },
+  ],
+  () => {},
+  Date.now(),
+);
+check(
+  "responses result reads a function call from output_item.done",
+  doneOnly.blocks[0]?.type === "tool_use" && doneOnly.blocks[0]?.id === "call_9" && doneOnly.blocks[0]?.input?.command === "pwd",
+);
+const xaiBody = compat.responsesBody("grok-4.6", "sys", [], [], { includeEncryptedReasoning: false, reasoningEffort: "low" });
+check("xai responses omit encrypted include", xaiBody.include === undefined && xaiBody.reasoning?.effort === "low");
+const reasonedOut = compat.responsesResultFromEvents(
+  [
+    {
+      type: "response.output_item.done",
+      item: {
+        type: "reasoning",
+        id: "rs_9",
+        encrypted_content: "blob",
+        summary: [{ type: "summary_text", text: "why" }],
+      },
+    },
+    { type: "response.output_item.added", item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "bash", arguments: "" } },
+    { type: "response.function_call_arguments.delta", item_id: "fc_1", delta: '{"command":"ls"}' },
+  ],
+  () => {},
+  Date.now(),
+);
+check(
+  "responses result keeps reasoning then the tool call",
+  reasonedOut.blocks[0]?.type === "thinking" &&
+    reasonedOut.blocks[0]?.signature === "blob" &&
+    reasonedOut.blocks[0]?.id === "rs_9" &&
+    reasonedOut.blocks[1]?.type === "tool_use",
 );
 
 check(
@@ -2020,8 +2117,21 @@ check("parseThinkingCommand rejects junk", typeof parseThinkingCommand("/thinkin
 check("thinkingEnabledFor default off", thinkingEnabledFor("claude-sonnet-5", false) === false);
 check("thinkingEnabledFor sonnet on", thinkingEnabledFor("claude-sonnet-5", true) === true);
 check("thinkingEnabledFor haiku stays off", thinkingEnabledFor("claude-haiku-4-5", true) === false);
-check("thinkingEnabledFor gpt stays off", thinkingEnabledFor("gpt-5.6-sol", true) === false);
+check("thinkingEnabledFor gpt on", thinkingEnabledFor("gpt-5.6-sol", true) === true);
+check("thinkingEnabledFor gpt default off", thinkingEnabledFor("gpt-5.6-sol", false) === false);
+check("thinkingEnabledFor gemini stays off", thinkingEnabledFor("gemini-3.7-flash", true) === false);
 check("thinkingEnabledFor fable stays on", thinkingEnabledFor("claude-fable-5", false) === true);
+check("reasoningEffortFor gpt off is none", reasoningEffortFor("gpt-5.6-sol", false) === "none");
+check("reasoningEffortFor gpt on is medium", reasoningEffortFor("gpt-5.6-sol", true) === "medium");
+check("reasoningEffortFor grok off is low", reasoningEffortFor("grok-4.6", false) === "low");
+check("reasoningEffortFor o-series off is low", reasoningEffortFor("o3", false) === "low");
+check("reasoningEffortFor gpt-5.3-codex off is low", reasoningEffortFor("gpt-5.3-codex", false) === "low");
+check("reasoningEffortFor claude is omitted", reasoningEffortFor("claude-sonnet-5", true) === undefined);
+check("defaultContextWindow anthropic is 1M", defaultContextWindow("anthropic", "claude-sonnet-5") === 1_000_000);
+check("defaultContextWindow haiku is 200k", defaultContextWindow("anthropic", "claude-haiku-4-5") === 200_000);
+check("defaultContextWindow openai is 1.05M", defaultContextWindow("openai", "gpt-5.6-sol") === 1_050_000);
+check("defaultContextWindow xai is 500k", defaultContextWindow("xai", "grok-4.6") === 500_000);
+check("tokenEstimate is conservative", tokenEstimate("abcd") === 2);
 check("outputTokenBudget off is output cap", outputTokenBudget({ thinking: false }) === 16_384);
 check("outputTokenBudget on is a single cap", outputTokenBudget({ thinking: true }) === 32_768);
 check(

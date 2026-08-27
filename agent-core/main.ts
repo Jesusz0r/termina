@@ -56,6 +56,7 @@ import {
   parseAuthCommand,
   parseModelRef,
   providerProtocol,
+  usesResponsesApi,
   refreshOauth,
   resolveAuth,
   runLogin,
@@ -138,12 +139,20 @@ const LOW_WATER = 0.6;
 const PROTECT_MIN = 4_000;
 const PROTECT_MAX = 40_000;
 
+export function defaultContextWindow(provider: ProviderId, model: string): number {
+  const id = model.toLowerCase();
+  if (id.includes("haiku")) return 200_000;
+  if (provider === "xai") return 500_000;
+  if (provider === "anthropic" || provider === "google") return 1_000_000;
+  return 1_050_000;
+}
+
 function contextWindow(): number {
   const env = Number(process.env.TERMINA_CORE_CONTEXT ?? "");
   if (Number.isFinite(env) && env >= 8_000) return env;
   const hit = catalogs.get(route.provider)?.find((m) => m.id === route.model);
   if (hit?.context && hit.context >= 8_000) return hit.context;
-  return route.provider === "anthropic" ? 200_000 : 128_000;
+  return defaultContextWindow(route.provider, route.model);
 }
 
 function usableTokens(): number {
@@ -218,10 +227,30 @@ function thinkingLockedOn(model: string): boolean {
   return id.includes("fable") || id.includes("mythos");
 }
 
+function openAiFamilyModel(model: string): boolean {
+  const id = model.toLowerCase();
+  return id.includes("gpt-") || id.includes("chatgpt") || id.includes("grok") || /(?:^|\/)o[0-9]/.test(id);
+}
+
 export function thinkingEnabledFor(model: string, enabled: boolean): boolean {
-  if (claudeThinkingApi(model) === "none") return false;
-  if (thinkingLockedOn(model)) return true;
-  return enabled;
+  if (claudeThinkingApi(model) !== "none") {
+    if (thinkingLockedOn(model)) return true;
+    return enabled;
+  }
+  if (openAiFamilyModel(model)) return enabled;
+  return false;
+}
+
+export function reasoningEffortFor(
+  model: string,
+  enabled: boolean,
+): "none" | "low" | "medium" | "high" | undefined {
+  const id = model.toLowerCase();
+  if (id.includes("grok")) return enabled ? "high" : "low";
+  const rejectsNone = /(?:^|\/)o[0-9]/.test(id) || (id.includes("codex") && !id.includes("5.6"));
+  if (rejectsNone) return enabled ? "medium" : "low";
+  if (openAiFamilyModel(model)) return enabled ? "medium" : "none";
+  return undefined;
 }
 
 export function thinkingRequestFor(model: string, enabled: boolean): ThinkingRequest | undefined {
@@ -255,9 +284,9 @@ function thinkingLevelFor(model: string): "on" | "off" {
   return thinkingEnabledFor(model, thinkingWanted) ? "on" : "off";
 }
 
-/** Chars-per-token estimate. Good enough for water marks; never billing. */
-function tokenEstimate(text: string): number {
-  return Math.ceil(text.length / 4);
+/** Chars-per-token estimate for water marks. Sonnet 5 counts about 30 percent more tokens than four chars. */
+export function tokenEstimate(text: string): number {
+  return Math.ceil(text.length / 3);
 }
 
 export function freezeCwd(cwd: string): string {
@@ -1961,7 +1990,7 @@ async function connectMcp(): Promise<void> {
 
 /** Provider-executed search. Same Anthropic key as the model. No Brave key. */
 export const WEB_SEARCH_TOOL = {
-  type: "web_search_20250305",
+  type: "web_search_20260209",
   name: "web_search",
   max_uses: 5,
 } as const;
@@ -2051,9 +2080,11 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 export function requestTools(
   cachedClientTools: Array<Record<string, unknown>>,
   provider: string = "anthropic",
+  model: string = "",
 ): Array<Record<string, unknown>> {
   if (provider !== "anthropic") return cachedClientTools;
-  return [...cachedClientTools, { ...WEB_SEARCH_TOOL }];
+  const type = claudeThinkingApi(model) === "adaptive" ? WEB_SEARCH_TOOL.type : "web_search_20250305";
+  return [...cachedClientTools, { type, name: "web_search", max_uses: 5 }];
 }
 
 function logToolStart(use: ToolUse): void {
@@ -2663,6 +2694,10 @@ function endpointFor(auth: { providerId: ProviderId; baseUrl: string }): string 
     if (base.endsWith("/codex")) return `${base}/responses`;
     return `${base}/codex/responses`;
   }
+  if (proto === "openai-responses") {
+    if (base.endsWith("/responses")) return base;
+    return `${base}/responses`;
+  }
   return `${base}/chat/completions`;
 }
 
@@ -2725,9 +2760,16 @@ async function completeText(
 ): Promise<{ text: string; usage: Usage | null }> {
   const proto = providerProtocol(providerId);
   if (proto === "anthropic-messages") {
+    const thinking = thinkingRequestFor(model, false);
     const res = await providerPost(
       providerId,
-      { model, max_tokens: 2048, system, messages: [{ role: "user", content: prompt }] },
+      {
+        model,
+        max_tokens: 2048,
+        system,
+        messages: [{ role: "user", content: prompt }],
+        ...(thinking ? { thinking } : {}),
+      },
       signal,
     );
     if (!res.ok) throw new Error(`API ${res.status}`);
@@ -2735,10 +2777,19 @@ async function completeText(
     const text = (data.content ?? []).map((c) => c.text ?? "").join("").trim();
     return { text, usage: normalizeUsage(data.usage) };
   }
-  if (proto === "openai-codex-responses") {
+  if (usesResponsesApi(providerId)) {
+    const effort = reasoningEffortFor(model, false);
     const res = await providerPost(
       providerId,
-      { model, store: false, stream: false, instructions: system, input: prompt },
+      {
+        model,
+        store: false,
+        stream: false,
+        max_output_tokens: 2048,
+        instructions: system,
+        input: prompt,
+        ...(effort ? { reasoning: { effort } } : {}),
+      },
       signal,
     );
     if (!res.ok) throw new Error(`API ${res.status}`);
@@ -2782,7 +2833,23 @@ async function callModel(messages: Message[]): Promise<CallResult> {
   const think = thinkingEnabledFor(route.model, thinkingWanted);
   const maxTokens = outputTokenBudget({ thinking: think });
   const thinking = thinkingRequestFor(route.model, thinkingWanted);
+  const effort = reasoningEffortFor(route.model, thinkingWanted);
   const cacheKey = hashSystem(sys);
+  const sendCacheKey =
+    route.provider === "openai" || route.provider === "openai-codex" || route.provider === "openrouter";
+  const anthropicMessages =
+    proto === "anthropic-messages"
+      ? providerMessages.map((m) => {
+          if (!Array.isArray(m.content)) return m;
+          return {
+            ...m,
+            content: (m.content as Array<Record<string, unknown>>).map((b) => {
+              if (b.type !== "thinking") return b;
+              return { type: "thinking", thinking: b.thinking, signature: b.signature };
+            }),
+          };
+        })
+      : providerMessages;
   const body =
     proto === "anthropic-messages"
       ? {
@@ -2792,22 +2859,20 @@ async function callModel(messages: Message[]): Promise<CallResult> {
           ...(thinking ? { thinking } : {}),
           cache_control: prefix.cache_control,
           system: prefix.system,
-          tools: requestTools(prefix.tools, route.provider),
-          messages: providerMessages,
+          tools: requestTools(prefix.tools, route.provider, route.model),
+          messages: anthropicMessages,
         }
-      : proto === "openai-codex-responses"
-        ? responsesBody(route.model, sys, kernelMessages, toolsForProvider, { maxTokens, cacheKey })
-        : completionsBody(
-            route.model,
-            sys,
-            kernelMessages,
-            toolsForProvider,
-            route.provider === "openai" ? "max_completion_tokens" : "max_tokens",
-            {
-              maxTokens,
-              ...(route.provider === "openai" ? { cacheKey } : {}),
-            },
-          );
+      : usesResponsesApi(route.provider)
+        ? responsesBody(route.model, sys, kernelMessages, toolsForProvider, {
+            maxTokens,
+            ...(sendCacheKey ? { cacheKey } : {}),
+            ...(effort ? { reasoningEffort: effort } : {}),
+            includeEncryptedReasoning: route.provider !== "xai",
+          })
+        : completionsBody(route.model, sys, kernelMessages, toolsForProvider, "max_tokens", {
+            maxTokens,
+            ...(sendCacheKey ? { cacheKey } : {}),
+          });
   const res = await providerPost(route.provider, body, currentAbort?.signal);
   if (!res.ok || !res.body) {
     const detail = (await res.text()).slice(0, 300);
@@ -2821,9 +2886,10 @@ async function callModel(messages: Message[]): Promise<CallResult> {
   if (proto !== "anthropic-messages") {
     let streamedText = "";
     let ttftMs: number | null = null;
+    const viaResponses = usesResponsesApi(route.provider);
     const events = await readSseJson(res.body, currentAbort?.signal, (event) => {
       let chunk = "";
-      if (proto === "openai-codex-responses" && event.type === "response.output_text.delta") {
+      if (viaResponses && event.type === "response.output_text.delta") {
         const delta = event.delta;
         if (typeof delta === "string") chunk = delta;
         else if (delta && typeof delta === "object" && !Array.isArray(delta)) {
@@ -2831,7 +2897,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
           if (typeof value === "string") chunk = value;
         }
         if (chunk) event.delta = "";
-      } else if (proto === "openai-completions" && Array.isArray(event.choices)) {
+      } else if (!viaResponses && Array.isArray(event.choices)) {
         const choice = event.choices[0];
         if (choice && typeof choice === "object") {
           const delta = (choice as { delta?: Record<string, unknown> }).delta;
@@ -2846,21 +2912,24 @@ async function callModel(messages: Message[]): Promise<CallResult> {
         streamedText += chunk;
         out(chunk);
       }
-      if (proto === "openai-codex-responses" && event.type === "response.output_text.delta") return false;
-      if (proto === "openai-completions" && chunk && Array.isArray(event.choices)) {
+      if (viaResponses && event.type === "response.output_text.delta") return false;
+      if (!viaResponses && chunk && Array.isArray(event.choices)) {
         const choice = event.choices[0] as { delta?: { tool_calls?: unknown }; finish_reason?: unknown } | undefined;
         if (!choice?.delta?.tool_calls && !choice?.finish_reason && !event.usage) return false;
       }
       return true;
     });
-    const parsed =
-      proto === "openai-codex-responses"
-        ? responsesResultFromEvents(events, () => {}, started)
-        : completionResultFromEvents(events, () => {}, started);
+    const parsed = viaResponses
+      ? responsesResultFromEvents(events, () => {}, started)
+      : completionResultFromEvents(events, () => {}, started);
     if (parsed.error) throw new Error(parsed.error);
-    if (streamedText) parsed.blocks.unshift({ type: "text", text: streamedText });
+    const blocks = parsed.blocks as Block[];
+    if (streamedText && !blocks.some((b) => b.type === "text")) {
+      const at = blocks.findIndex((b) => b.type !== "thinking");
+      blocks.splice(at < 0 ? blocks.length : at, 0, { type: "text", text: streamedText });
+    }
     return {
-      blocks: parsed.blocks as Block[],
+      blocks,
       usage: parsed.usage,
       ttftMs,
       stopReason: parsed.stopReason,

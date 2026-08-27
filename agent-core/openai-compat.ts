@@ -2,8 +2,8 @@
  * OpenAI Chat Completions and Codex Responses conversion.
  *
  * The kernel stores Anthropic-shaped messages. This module is the only
- * translator for OpenAI-compatible providers (openai, xai, google,
- * openrouter) and ChatGPT Codex (openai-codex).
+ * translator for OpenAI Responses (openai, xai, github-copilot, openrouter,
+ * openai-codex) and Chat Completions (google).
  */
 
 export type ToolDef = {
@@ -59,6 +59,7 @@ export function toResponsesTools(tools: ToolDef[]): Array<Record<string, unknown
     name: t.name,
     description: t.description,
     parameters: t.input_schema,
+    strict: false,
   }));
 }
 
@@ -130,13 +131,31 @@ export function toResponsesInput(messages: KernelMessage[]): Array<Record<string
     }
     if (m.role === "assistant") {
       let text = "";
-      const calls: Array<Record<string, unknown>> = [];
+      const flushText = (): void => {
+        if (!text) return;
+        out.push({ role: "assistant", content: [{ type: "output_text", text }] });
+        text = "";
+      };
       for (const b of m.content) {
-        if (b.type === "text") text += blockText(b);
+        if (b.type === "thinking") {
+          flushText();
+          const id = typeof b.id === "string" ? b.id : "";
+          const sig = typeof b.signature === "string" ? b.signature : "";
+          if (!sig) continue;
+          const item: Record<string, unknown> = { type: "reasoning", encrypted_content: sig };
+          if (id) item.id = id;
+          out.push(item);
+          continue;
+        }
+        if (b.type === "text") {
+          text += blockText(b);
+          continue;
+        }
         if (b.type === "tool_use") {
+          flushText();
           const callId = String(b.id ?? "");
           if (!callId) continue;
-          calls.push({
+          out.push({
             type: "function_call",
             call_id: callId,
             name: String(b.name ?? ""),
@@ -144,8 +163,7 @@ export function toResponsesInput(messages: KernelMessage[]): Array<Record<string
           });
         }
       }
-      if (text) out.push({ role: "assistant", content: [{ type: "output_text", text }] });
-      out.push(...calls);
+      flushText();
       continue;
     }
     const parts: Array<Record<string, unknown>> = [];
@@ -168,7 +186,12 @@ export function toResponsesInput(messages: KernelMessage[]): Array<Record<string
   return out;
 }
 
-export type CompletionsOpts = { cacheKey?: string; maxTokens?: number };
+export type CompletionsOpts = {
+  cacheKey?: string;
+  maxTokens?: number;
+  reasoningEffort?: "none" | "low" | "medium" | "high";
+  includeEncryptedReasoning?: boolean;
+};
 
 export function completionsBody(
   model: string,
@@ -209,7 +232,9 @@ export function responsesBody(
     tool_choice: "auto",
     parallel_tool_calls: true,
   };
+  if (opts?.includeEncryptedReasoning !== false) body.include = ["reasoning.encrypted_content"];
   if (opts?.cacheKey) body.prompt_cache_key = opts.cacheKey;
+  if (opts?.reasoningEffort) body.reasoning = { effort: opts.reasoningEffort };
   return body;
 }
 
@@ -305,6 +330,17 @@ function errorFromEvent(ev: Record<string, unknown>): string | null {
   return "provider error";
 }
 
+function reasoningSummaryText(item: { summary?: unknown }): string {
+  if (!Array.isArray(item.summary)) return "";
+  const parts: string[] = [];
+  for (const row of item.summary) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+    const text = (row as { text?: unknown }).text;
+    if (typeof text === "string" && text) parts.push(text);
+  }
+  return parts.join("");
+}
+
 export function responsesResultFromEvents(
   events: Array<Record<string, unknown>>,
   onText: (text: string) => void,
@@ -313,6 +349,8 @@ export function responsesResultFromEvents(
   let text = "";
   const byKey = new Map<string, { id: string; name: string; args: string }>();
   const order: Array<{ id: string; name: string; args: string }> = [];
+  const reasoning = new Map<string, { id: string; thinking: string; signature?: string }>();
+  const reasoningOrder: string[] = [];
   let usage: CallResultLike["usage"] = null;
   let ttftMs: number | null = null;
   let stopReason: string | null = null;
@@ -321,6 +359,46 @@ export function responsesResultFromEvents(
     const callId = typeof ev.call_id === "string" ? ev.call_id : "";
     const itemId = typeof ev.item_id === "string" ? ev.item_id : "";
     return (callId && byKey.get(callId)) || (itemId && byKey.get(itemId)) || undefined;
+  };
+  const takeReasoning = (item: {
+    type?: string;
+    id?: string;
+    encrypted_content?: unknown;
+    summary?: unknown;
+  }): void => {
+    if (item.type !== "reasoning") return;
+    const id = String(item.id ?? "");
+    if (!id && item.encrypted_content == null) return;
+    const key = id || "__anon";
+    const prev = reasoning.get(key) ?? { id, thinking: "" };
+    const summary = reasoningSummaryText(item);
+    if (summary) prev.thinking = summary;
+    if (typeof item.encrypted_content === "string" && item.encrypted_content) prev.signature = item.encrypted_content;
+    if (id) prev.id = id;
+    if (!reasoning.has(key)) reasoningOrder.push(key);
+    reasoning.set(key, prev);
+  };
+  const takeFunctionCall = (item: {
+    type?: string;
+    call_id?: string;
+    id?: string;
+    name?: string;
+    arguments?: string;
+  }): void => {
+    if (item.type !== "function_call") return;
+    const id = String(item.call_id ?? item.id ?? "");
+    if (!id) return;
+    let call = (item.call_id ? byKey.get(item.call_id) : undefined) || (item.id ? byKey.get(item.id) : undefined) || byKey.get(id);
+    if (!call) {
+      call = { id, name: String(item.name ?? ""), args: typeof item.arguments === "string" ? item.arguments : "" };
+      order.push(call);
+      if (item.call_id) byKey.set(item.call_id, call);
+      if (item.id) byKey.set(item.id, call);
+      if (!byKey.has(id)) byKey.set(id, call);
+      return;
+    }
+    if (item.name) call.name = String(item.name);
+    if (typeof item.arguments === "string" && item.arguments.length >= call.args.length) call.args = item.arguments;
   };
   for (const ev of events) {
     const failed = errorFromEvent(ev);
@@ -332,16 +410,30 @@ export function responsesResultFromEvents(
       text += chunk;
       onText(chunk);
     }
-    if (type === "response.output_item.added" && ev.item && typeof ev.item === "object") {
-      const item = ev.item as { type?: string; call_id?: string; id?: string; name?: string; arguments?: string };
-      if (item.type === "function_call") {
-        const id = String(item.call_id ?? item.id ?? "");
-        const call = { id, name: String(item.name ?? ""), args: typeof item.arguments === "string" ? item.arguments : "" };
-        order.push(call);
-        if (item.call_id) byKey.set(item.call_id, call);
-        if (item.id) byKey.set(item.id, call);
-        if (id && !byKey.has(id)) byKey.set(id, call);
-      }
+    if (type === "response.reasoning_summary_text.delta") {
+      const id = typeof ev.item_id === "string" ? ev.item_id : "";
+      const key = id || "__anon";
+      const prev = reasoning.get(key) ?? { id, thinking: "" };
+      prev.thinking += deltaText(ev.delta);
+      if (!reasoning.has(key)) reasoningOrder.push(key);
+      reasoning.set(key, prev);
+    }
+    if (
+      (type === "response.output_item.added" || type === "response.output_item.done") &&
+      ev.item &&
+      typeof ev.item === "object"
+    ) {
+      const item = ev.item as {
+        type?: string;
+        call_id?: string;
+        id?: string;
+        name?: string;
+        arguments?: string;
+        encrypted_content?: unknown;
+        summary?: unknown;
+      };
+      takeReasoning(item);
+      takeFunctionCall(item);
     }
     if (type === "response.function_call_arguments.delta") {
       let call = lookup(ev);
@@ -355,13 +447,41 @@ export function responsesResultFromEvents(
       call.args += deltaText(ev.delta);
     }
     if (type === "response.completed" && ev.response && typeof ev.response === "object") {
-      const response = ev.response as { usage?: Record<string, unknown>; status?: string };
+      const response = ev.response as {
+        usage?: Record<string, unknown>;
+        status?: string;
+        output?: Array<Record<string, unknown>>;
+      };
       usage = usageFromOpenAI(response.usage);
       if (typeof response.status === "string") stopReason = response.status === "completed" ? "stop" : response.status;
+      for (const item of response.output ?? []) {
+        if (!item || typeof item !== "object") continue;
+        const rec = item as {
+          type?: string;
+          id?: string;
+          call_id?: string;
+          name?: string;
+          arguments?: string;
+          encrypted_content?: unknown;
+          summary?: unknown;
+        };
+        takeReasoning(rec);
+        takeFunctionCall(rec);
+      }
     }
     if (typeof ev.usage === "object" && ev.usage) usage = usageFromOpenAI(ev.usage as Record<string, unknown>);
   }
   const blocks: Array<Record<string, unknown>> = [];
+  for (const key of reasoningOrder) {
+    const rec = reasoning.get(key);
+    if (!rec || (!rec.thinking && !rec.signature)) continue;
+    blocks.push({
+      type: "thinking",
+      thinking: rec.thinking,
+      ...(rec.signature ? { signature: rec.signature } : {}),
+      ...(rec.id ? { id: rec.id } : {}),
+    });
+  }
   if (text) blocks.push({ type: "text", text });
   const seen = new Set<{ id: string; name: string; args: string }>();
   for (const call of order) {
