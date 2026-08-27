@@ -17,9 +17,10 @@ import {
   rmSync,
   symlinkSync,
   writeFileSync,
+  chmodSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const core = await import("../agent-core/main.ts");
@@ -86,6 +87,8 @@ const {
   parseThinkingCommand,
   thinkingEnabledFor,
   outputTokenBudget,
+  fetchUrl,
+  fetchUrlError,
 } = core;
 
 const results = [];
@@ -173,6 +176,17 @@ const g = await grepFiles(root, { pattern: "unique-token" });
 check("grep matches", g.includes("unique-token") && g.includes("hit.ts"));
 check("grep skips node_modules", !(await grepFiles(root, { pattern: "secret" })).includes("hid.ts"));
 check("grep empty pattern errors", (await grepFiles(root, { pattern: "" })).startsWith("error:"));
+const rgDir = mkdtempSync(join(tmpdir(), "agent-core-rg-"));
+leftovers.push(rgDir);
+writeFileSync(join(rgDir, "rg"), "#!/bin/sh\necho \"from-rg.ts:1:rg-hit\"\n");
+chmodSync(join(rgDir, "rg"), 0o755);
+const prevPathForRg = process.env.PATH;
+process.env.PATH = `${rgDir}${delimiter}${prevPathForRg ?? ""}`;
+const rgHit = await grepFiles(root, { pattern: "unique-token" });
+check("grep uses trusted rg when present", rgHit.includes("from-rg.ts") && rgHit.includes("rg-hit"));
+process.env.PATH = prevPathForRg;
+const jsHit = await grepFiles(root, { pattern: "unique-token", }, { jsOnly: true });
+check("grep jsOnly fallback still matches", jsHit.includes("unique-token") && jsHit.includes("hit.ts"));
 check("grep invalid regex errors", (await grepFiles(root, { pattern: "(" })).startsWith("error:"));
 check("grep (a+)+ rejected", validateGrepPattern("(a+)+") !== null);
 check("grep (a|aa)+ rejected", validateGrepPattern("(a|aa)+") !== null);
@@ -226,6 +240,19 @@ check(
   "sidecar edit carries oldText/newText",
   editStart.edits?.[0]?.oldText === "old" && editStart.edits?.[0]?.newText === "new",
 );
+writeFileSync(join(root, "many.ts"), "foo foo foo\n");
+const replaced = editProjectFile(root, "many.ts", "foo", "bar", true);
+check("replace_all counts three", replaced.isError === false && replaced.content.includes("3 replacements"));
+check("replace_all writes every occurrence", readFileSync(join(root, "many.ts"), "utf8") === "bar bar bar\n");
+check("replace_all omits sidecar edits", sidecarStartFor({
+  name: "edit",
+  id: "e2",
+  input: { path: "many.ts", old_text: "foo", new_text: "bar", replace_all: true },
+}).edits === undefined);
+const noneReplace = editProjectFile(root, "many.ts", "zzz", "q", true);
+check("replace_all zero matches errors", noneReplace.isError === true);
+const stillUnique = editProjectFile(root, "many.ts", "bar", "baz");
+check("unique default still errors on duplicates", stillUnique.isError === true && stillUnique.content.includes("not unique"));
 check(
   "tool announce shows edit path",
   formatToolAnnounce({ id: "1", name: "edit", input: { path: "a.ts" } }) === "[edit a.ts]",
@@ -354,6 +381,10 @@ check(
   host.firstPlanText("intro\n- [ ] edit src/foo.ts\n")?.includes("- [ ] edit src/foo.ts"),
 );
 check("firstPlanText ignores prose", host.firstPlanText("hello there") === null);
+const planA = "- [ ] one.ts\n";
+check("planTextIfChanged emits first list", host.planTextIfChanged(planA, "") === planA);
+check("planTextIfChanged silent on identical", host.planTextIfChanged(planA, planA) === null);
+check("planTextIfChanged emits a changed list", host.planTextIfChanged("- [ ] two.ts\n", planA)?.includes("two.ts"));
 check(
   "visibleAssistantText skips thinking",
   host.visibleAssistantText([
@@ -379,6 +410,35 @@ check(
   reqTools[2]?.type === "web_search_20250305" && reqTools[2]?.cache_control === undefined,
 );
 check("sidecar web_search has no path", sidecarStartFor({ name: "web_search", id: "1", input: { path: "src" } }).path === undefined);
+check("sidecar fetch has no path", sidecarStartFor({ name: "fetch", id: "1", input: { url: "https://example.com" } }).path === undefined);
+check("fetchUrlError rejects file", Boolean(fetchUrlError("file:///etc/passwd")?.includes("not allowed")));
+check("fetchUrlError rejects data", Boolean(fetchUrlError("data:text/plain,hi")?.includes("not allowed")));
+check("fetchUrlError allows https", fetchUrlError("https://example.com/x") === null);
+const fetchSrv = createServer((req, res) => {
+  if (req.url === "/big") {
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end("z".repeat(30_000));
+    return;
+  }
+  if (req.url === "/go") {
+    res.writeHead(302, { location: "/ok" });
+    res.end();
+    return;
+  }
+  res.writeHead(200, { "content-type": "text/plain" });
+  res.end("fetched-body");
+});
+await new Promise((resolve) => fetchSrv.listen(0, "127.0.0.1", resolve));
+const fetchPort = fetchSrv.address().port;
+const fetched = await fetchUrl(`http://127.0.0.1:${fetchPort}/ok`);
+check("fetch loopback in tests", fetched.isError === false && fetched.content === "fetched-body");
+const bounced = await fetchUrl(`http://127.0.0.1:${fetchPort}/go`);
+check("fetch follows a redirect", bounced.isError === false && bounced.content === "fetched-body");
+const bigFetch = await fetchUrl(`http://127.0.0.1:${fetchPort}/big`);
+check("fetch caps bytes", bigFetch.isError === false && bigFetch.content.includes("truncated") && Buffer.byteLength(bigFetch.content) < 30_000);
+const stopped = await fetchUrl(`http://127.0.0.1:${fetchPort}/ok`, { shouldStop: () => true });
+check("fetch interrupt is an error", stopped.isError === true);
+fetchSrv.close();
 const slots = [];
 placeStreamBlock(slots, 1, { type: "text", text: "kept" });
 check("stream compact skips holes", compactStreamBlocks(slots).length === 1 && compactStreamBlocks(slots)[0].text === "kept");
@@ -1551,6 +1611,7 @@ check(
 );
 
 const mcp = await import("../agent-core/mcp.ts");
+check("KERNEL_TOOL_NAMES includes fetch", mcp.KERNEL_TOOL_NAMES.has("fetch"));
 check("mcpToolName prefixes server and tool", mcp.mcpToolName("github", "list_issues") === "mcp_github_list_issues");
 check("mcpToolName stays within 64 chars", mcp.mcpToolName("very-long-server-name-here", "very_long_tool_name_that_exceeds").length <= 64);
 check(

@@ -10,7 +10,7 @@ storage + `/resume` replay, reclamation hysteresis + summarization with
 handoff chaining + emergency overflow + truncate last resort, executable
 stubs + structured inventories, waste attribution with models.dev pricing,
 two-role routing map, bounded concurrency, cwd jail, grep/glob, unique first-occurrence
-edit, interruptible bash, web_search, skill
+edit (replace_all), interruptible bash, web_search, fetch, skill
 index, prefix `cache_control`, last `tool_result` cache pin, OpenAI/Codex `prompt_cache_key`,
 429 retry, opt-in `/thinking`, request-only working-set overlay, traces, provider auth, live model list,
 full-screen TUI, Termina sidecar host contract, core worldline session slice,

@@ -193,6 +193,12 @@ export function firstPlanText(text: string): string | null {
   return text.slice(0, PLAN_TEXT_CAP);
 }
 
+export function planTextIfChanged(text: string, lastEmitted: string): string | null {
+  const plan = firstPlanText(text);
+  if (!plan || plan === lastEmitted) return null;
+  return plan;
+}
+
 export const MAX_PENDING_IMAGES = 4;
 export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const PENDING_IMAGE_NAME = /^image-[A-Za-z0-9._-]+\.(png|jpe?g|webp|gif)$/;

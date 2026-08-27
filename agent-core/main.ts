@@ -87,7 +87,7 @@ import {
   consumePendingImages,
   consumeStartupControl,
   expandFileImageSource,
-  firstPlanText,
+  planTextIfChanged,
   loadImageFromRoots,
   peekPendingImageCount,
   persistLoadedImages,
@@ -170,6 +170,9 @@ const GREP_BYTE_CAP = 20 * 1024;
 const GREP_VISIT_CAP = 2_000;
 const GREP_LINE_CHARS = 8_192;
 const GREP_BUDGET_MS = 2_000;
+const FETCH_TIMEOUT_MS = 15_000;
+const FETCH_CAP_BYTES = 20 * 1024;
+const FETCH_REDIRECT_CAP = 5;
 const GLOB_HIT_CAP = 200;
 const TRACE_CAP = 64;
 const LISTING_CAP = 20;
@@ -590,26 +593,108 @@ function forEachGrepLine(
   }
 }
 
+function grepRipgrep(
+  rg: string,
+  root: string,
+  searchAbs: string,
+  pattern: string,
+  glob: string | undefined,
+  opts: { shouldStop?: () => boolean; budgetMs?: number },
+): Promise<string> {
+  const budgetMs = opts.budgetMs ?? GREP_BUDGET_MS;
+  const relSearch = searchAbs === root ? "." : posixRel(root, searchAbs);
+  const args = ["--color=never", "-n", "--no-heading", `--max-count=${GREP_HIT_CAP}`];
+  if (glob) args.push("-g", glob);
+  args.push("--", pattern, relSearch);
+  return new Promise((resolve) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(rg, args, { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (err) {
+      resolve(`error: ${(err as Error).message}`);
+      return;
+    }
+    const chunks: Buffer[] = [];
+    const errChunks: Buffer[] = [];
+    let used = 0;
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (used >= GREP_BYTE_CAP) return;
+      const piece = chunk.subarray(0, GREP_BYTE_CAP - used);
+      chunks.push(piece);
+      used += piece.length;
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      if (errChunks.length < 8) errChunks.push(chunk.subarray(0, 2 * 1024));
+    });
+    let settled = false;
+    const finish = (code: number | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearInterval(poll);
+      const text = Buffer.concat(chunks).toString("utf8").replace(/\n+$/, "");
+      if (code === 2) {
+        const err = Buffer.concat(errChunks).toString("utf8").trim().slice(0, 300);
+        resolve(err ? `error: ${err}` : "error: invalid regular expression");
+        return;
+      }
+      if (!text) {
+        resolve("(no matches)");
+        return;
+      }
+      const lines = text.split("\n").slice(0, GREP_HIT_CAP);
+      resolve(lines.join("\n"));
+    };
+    const kill = (): void => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    };
+    const timer = setTimeout(kill, budgetMs);
+    const poll = setInterval(() => {
+      if (opts.shouldStop?.()) kill();
+    }, 50);
+    if (opts.shouldStop?.()) kill();
+    child.on("error", (e) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearInterval(poll);
+      resolve(`error: ${e.message}`);
+    });
+    child.on("close", (code) => finish(code));
+  });
+}
+
 export async function grepFiles(
   cwd: string,
   input: { pattern?: string; path?: string; glob?: string },
-  opts?: { shouldStop?: () => boolean; budgetMs?: number },
+  opts?: { shouldStop?: () => boolean; budgetMs?: number; jsOnly?: boolean },
 ): Promise<string> {
   const pattern = input.pattern ?? "";
   const unsafe = validateGrepPattern(pattern);
-  if (unsafe) return unsafe;
-  let regex: RegExp;
-  try {
-    regex = new RegExp(pattern);
-  } catch {
-    return "error: invalid regular expression";
-  }
   const root = freezeCwd(cwd);
   const confined = confinePath(cwd, input.path ?? ".", { mustExist: true });
   if (!confined.ok) return confined.error;
   if (input.glob) {
     if (input.glob.length < 1 || input.glob.length > 256) return "error: glob pattern length must be 1–256";
     if (/[\[\]{}]/.test(input.glob)) return "error: glob only supports * ** ?";
+  }
+  if (!opts?.jsOnly) {
+    const rg = resolveTrustedBin("rg", root);
+    if (rg) {
+      if (pattern.length < 1 || pattern.length > 256) return unsafe ?? "error: pattern length must be 1–256";
+      return grepRipgrep(rg, root, confined.abs, pattern, input.glob, opts ?? {});
+    }
+  }
+  if (unsafe) return unsafe;
+  let regex: RegExp;
+  try {
+    regex = new RegExp(pattern);
+  } catch {
+    return "error: invalid regular expression";
   }
   const budgetMs = opts?.budgetMs ?? GREP_BUDGET_MS;
   const started = Date.now();
@@ -1047,12 +1132,18 @@ export type EditResult = {
   edits?: Array<{ oldText: string; newText: string }>;
 };
 
-/** First unique occurrence of oldText. Does not write when the match is missing or repeated. */
+function isReplaceAll(value: unknown): boolean {
+  return value === true || value === "true";
+}
+
+/** First unique occurrence of oldText, or every occurrence when replaceAll is set.
+ *  Does not write when the match is missing. Unique mode also fails when repeated. */
 export function editProjectFile(
   cwd: string,
   path: string | undefined,
   oldText: string,
   newText: string,
+  replaceAll = false,
 ): EditResult {
   if (oldText === "") return { content: "error: old_text must not be empty", isError: true };
   const confined = confinePath(cwd, path ?? "", { mustExist: true });
@@ -1080,27 +1171,49 @@ export function editProjectFile(
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
-  let count = 0;
-  let idx = 0;
-  while (idx < body.length) {
-    const at = body.indexOf(oldText, idx);
-    if (at < 0) break;
-    count++;
-    if (count > 1) return { content: "error: old_text is not unique", isError: true };
-    idx = at + oldText.length;
+  if (!replaceAll) {
+    let count = 0;
+    let idx = 0;
+    while (idx < body.length) {
+      const at = body.indexOf(oldText, idx);
+      if (at < 0) break;
+      count++;
+      if (count > 1) return { content: "error: old_text is not unique", isError: true };
+      idx = at + oldText.length;
+    }
+    if (count === 0) return { content: "error: old_text not found", isError: true };
+    const at = body.indexOf(oldText);
+    const next = body.slice(0, at) + newText + body.slice(at + oldText.length);
+    try {
+      atomicWrite(confined.abs, next, st.mode & 0o777);
+    } catch (err) {
+      return { content: `error: ${(err as Error).message}`, isError: true };
+    }
+    return {
+      content: `ok: edited ${posixRel(freezeCwd(cwd), confined.abs)}`,
+      isError: false,
+      edits: [{ oldText, newText }],
+    };
   }
-  if (count === 0) return { content: "error: old_text not found", isError: true };
-  const at = body.indexOf(oldText);
-  const next = body.slice(0, at) + newText + body.slice(at + oldText.length);
+  let next = body;
+  let from = 0;
+  let n = 0;
+  while (from <= next.length) {
+    const at = next.indexOf(oldText, from);
+    if (at < 0) break;
+    next = next.slice(0, at) + newText + next.slice(at + oldText.length);
+    from = at + newText.length;
+    n++;
+  }
+  if (n === 0) return { content: "error: old_text not found", isError: true };
   try {
     atomicWrite(confined.abs, next, st.mode & 0o777);
   } catch (err) {
     return { content: `error: ${(err as Error).message}`, isError: true };
   }
   return {
-    content: `ok: edited ${posixRel(freezeCwd(cwd), confined.abs)}`,
+    content: `ok: edited ${posixRel(freezeCwd(cwd), confined.abs)} (${n} replacements)`,
     isError: false,
-    edits: [{ oldText, newText }],
   };
 }
 
@@ -1431,25 +1544,29 @@ export function reproFor(use: ToolUse): string | undefined {
   if (use.name === "grep") return `grep ${shellQuote(use.input.pattern ?? "")}`;
   if (use.name === "glob") return `glob ${shellQuote(use.input.pattern ?? "")}`;
   if (use.name === "web_search") return `web_search ${shellQuote(use.input.query ?? "")}`;
+  if (use.name === "fetch") return `fetch ${shellQuote(String(use.input.url ?? ""))}`;
   return undefined;
 }
 
 export function sidecarStartFor(use: {
   name: string;
   id: string;
-  input: { path?: string; old_text?: string; new_text?: string };
+  input: { path?: string; old_text?: string; new_text?: string; replace_all?: unknown };
 }): Record<string, unknown> {
   if (use.name === "write_file") {
     return { t: "tool", toolName: "write", path: use.input.path, toolCallId: use.id };
   }
   if (use.name === "edit") {
-    return {
+    const start: Record<string, unknown> = {
       t: "tool",
       toolName: "edit",
       path: use.input.path,
       toolCallId: use.id,
-      edits: [{ oldText: use.input.old_text ?? "", newText: use.input.new_text ?? "" }],
     };
+    if (!isReplaceAll(use.input.replace_all)) {
+      start.edits = [{ oldText: use.input.old_text ?? "", newText: use.input.new_text ?? "" }];
+    }
+    return start;
   }
   return { t: "tool", toolName: use.name, toolCallId: use.id };
 }
@@ -1461,6 +1578,7 @@ export function formatToolAnnounce(use: ToolUse): string {
   if (use.name === "bash") return `[bash] ${use.input.command ?? ""}`;
   if (use.name === "grep") return `[grep ${use.input.pattern ?? ""}]`;
   if (use.name === "glob") return `[glob ${use.input.pattern ?? ""}]`;
+  if (use.name === "fetch") return `[fetch ${String(use.input.url ?? "")}]`;
   return `[${use.name}]`;
 }
 
@@ -1562,6 +1680,101 @@ export function runBash(
   });
 }
 
+export function fetchUrlError(url: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return "error: invalid URL";
+  }
+  if (parsed.protocol === "https:") return null;
+  const loopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
+  if (parsed.protocol === "http:" && loopback && process.env.TERMINA_CORE_TEST === "1") return null;
+  if (parsed.protocol === "http:") return "error: only https URLs are allowed";
+  return `error: URL scheme not allowed: ${parsed.protocol}`;
+}
+
+export async function fetchUrl(
+  url: string,
+  opts?: { shouldStop?: () => boolean; timeoutMs?: number },
+): Promise<{ content: string; isError: boolean }> {
+  const timeoutMs = opts?.timeoutMs ?? FETCH_TIMEOUT_MS;
+  let current = url;
+  for (let hop = 0; hop <= FETCH_REDIRECT_CAP; hop++) {
+    const bad = fetchUrlError(current);
+    if (bad) return { content: bad, isError: true };
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    const poll = setInterval(() => {
+      if (opts?.shouldStop?.()) ac.abort();
+    }, 50);
+    if (opts?.shouldStop?.()) ac.abort();
+    try {
+      const res = await fetch(current, {
+        method: "GET",
+        redirect: "manual",
+        signal: ac.signal,
+        headers: { accept: "text/*, application/json, application/xml;q=0.9, */*;q=0.1" },
+      });
+      if (res.status >= 300 && res.status < 400) {
+        const loc = res.headers.get("location");
+        try {
+          await res.arrayBuffer();
+        } catch {
+          /* drain */
+        }
+        if (!loc) return { content: "error: redirect without location", isError: true };
+        current = new URL(loc, current).href;
+        continue;
+      }
+      if (!res.ok) {
+        const detail = (await res.text()).slice(0, 200);
+        return { content: `error: HTTP ${res.status}${detail ? `: ${detail}` : ""}`, isError: true };
+      }
+      if (!res.body) return { content: "", isError: false };
+      const reader = res.body.getReader();
+      const chunks: Buffer[] = [];
+      let used = 0;
+      let truncated = false;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = Buffer.from(value);
+        if (used >= FETCH_CAP_BYTES) {
+          truncated = true;
+          await reader.cancel();
+          break;
+        }
+        const piece = chunk.subarray(0, FETCH_CAP_BYTES - used);
+        chunks.push(piece);
+        used += piece.length;
+        if (chunk.length > piece.length) {
+          truncated = true;
+          await reader.cancel();
+          break;
+        }
+      }
+      const text = Buffer.concat(chunks).toString("utf8");
+      const repro = `fetch ${shellQuote(url)}`;
+      return {
+        content: truncated
+          ? `${text}\n[truncated at ${FETCH_CAP_BYTES} bytes — reproduce: ${repro}]`
+          : text,
+        isError: false,
+      };
+    } catch (err) {
+      const msg = (err as Error).name === "AbortError" || /aborted/i.test((err as Error).message)
+        ? (opts?.shouldStop?.() ? "error: interrupted" : "error: timed out")
+        : `error: ${(err as Error).message}`;
+      return { content: msg, isError: true };
+    } finally {
+      clearTimeout(timer);
+      clearInterval(poll);
+    }
+  }
+  return { content: "error: too many redirects", isError: true };
+}
+
 let approveAll = process.env.TERMINA_CORE_APPROVE === "all";
 let approvalResolve: ((line: string) => void) | null = null;
 
@@ -1592,7 +1805,13 @@ async function executeTool(use: ToolUse): Promise<ToolOutcome> {
     return done(use, got.content, got.isError);
   }
   if (use.name === "edit") {
-    const got = editProjectFile(canonicalCwd, use.input.path, use.input.old_text ?? "", use.input.new_text ?? "");
+    const got = editProjectFile(
+      canonicalCwd,
+      use.input.path,
+      use.input.old_text ?? "",
+      use.input.new_text ?? "",
+      isReplaceAll(use.input.replace_all),
+    );
     return done(use, got.content, got.isError);
   }
   if (use.name === "grep") {
@@ -1605,6 +1824,10 @@ async function executeTool(use: ToolUse): Promise<ToolOutcome> {
   }
   if (use.name === "web_search") {
     return done(use, "error: web_search is provider-executed", true);
+  }
+  if (use.name === "fetch") {
+    const got = await fetchUrl(String(use.input.url ?? ""), { shouldStop: () => interrupted });
+    return done(use, got.content, got.isError);
   }
   if (use.name === "bash") {
     const command = use.input.command ?? "";
@@ -1641,20 +1864,21 @@ const TOOLS = [
   {
     name: "edit",
     description:
-      "Replace one unique occurrence of old_text with new_text in a file. Fails if old_text is missing or appears more than once. Prefer this over write_file for existing files.",
+      "Replace old_text with new_text in a file. Default: one unique occurrence (fails if missing or repeated). Set replace_all to replace every occurrence. Prefer this over write_file for existing files.",
     input_schema: {
       type: "object",
       properties: {
         path: { type: "string" },
         old_text: { type: "string" },
         new_text: { type: "string" },
+        replace_all: { type: "boolean" },
       },
       required: ["path", "old_text", "new_text"],
     },
   },
   {
     name: "grep",
-    description: "Search file contents with a JavaScript regular expression. Caps hits and skips ignored directories.",
+    description: "Search file contents with a regular expression. Uses ripgrep when available. Caps hits and skips ignored directories.",
     input_schema: {
       type: "object",
       properties: {
@@ -1678,6 +1902,11 @@ const TOOLS = [
     name: "bash",
     description: "Run one bash command in the working directory. 60 s timeout. Combined output caps near 20 KB.",
     input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+  },
+  {
+    name: "fetch",
+    description: "Fetch an https URL. Output caps near 20 KB. No file or data URLs.",
+    input_schema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
   },
 ];
 
@@ -2909,7 +3138,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   let modelCalls = 0;
   let lastHadTools = false;
   let resumePaused = false;
-  let planLogged = false;
+  let lastPlanText = "";
   let lastAssistantSseq = 0;
   try {
     while (modelCalls < MAX_TURNS) {
@@ -2971,12 +3200,10 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       history.push(assistantMsg);
       assistantMsg.sseq = store({ type: "message", message: { role: "assistant", content: result.blocks } });
       lastAssistantSseq = assistantMsg.sseq;
-      if (!planLogged) {
-        const plan = firstPlanText(visibleAssistantText(result.blocks));
-        if (plan) {
-          planLogged = true;
-          logEvent({ t: "plan", text: plan });
-        }
+      const plan = planTextIfChanged(visibleAssistantText(result.blocks), lastPlanText);
+      if (plan) {
+        lastPlanText = plan;
+        logEvent({ t: "plan", text: plan });
       }
       const serverNames = logServerSearch(result.blocks);
       const uses = (result.blocks.filter((b) => b.type === "tool_use") as Extract<Block, { type: "tool_use" }>[]).map(

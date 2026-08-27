@@ -26,6 +26,7 @@ export const KERNEL_TOOL_NAMES = new Set([
   "glob",
   "bash",
   "web_search",
+  "fetch",
 ]);
 
 const IDENT = /[^A-Za-z0-9_-]+/g;
