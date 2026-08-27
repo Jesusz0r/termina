@@ -202,9 +202,9 @@ OpenAI key is the platform API. `/login [provider] [oauth|key]` and
 
 Agent-core stores credentials in `~/.termina/agent/auth.json` (mode 0600).
 A stored credential wins over that provider's env key. OAuth tokens refresh
-once on expiry or 401. After login (and on startup when a credential
-exists) the kernel loads live model lists for every authenticated
-provider. `/models` prints `provider` and `id` on each row; typing
+once on expiry or 401. After login the kernel loads that provider's live
+model list. Startup loads only the active provider. `/models` loads every
+authenticated provider on demand and prints `provider` and `id`; typing
 `/models` in the TUI lists them. `/model <id>` or `/model <provider>/<id>`
 selects one. The file is not Pi's `auth.json`. See `docs/AUTH-PLAN.md`.
 
@@ -225,12 +225,11 @@ session file (`<session>-img-N.png`), stores a file-source block in the
 JSONL, and expands to provider base64 at request time. The prompt payload
 keeps refs, not bytes.
 
-MCP is a stdio client, not a plugin surface. Servers come from
-`~/.termina/agent/mcp.json` and `<cwd>/.mcp.json` (project wins on the
-same name). The kernel spawns them at process start, lists tools once,
+MCP is a stdio client, not a plugin surface. Servers come from the user-owned
+`~/.termina/agent/mcp.json`. The kernel does not execute project-owned MCP
+configuration. It spawns user servers at process start, lists tools once,
 prefixes names `mcp_<server>_<tool>`, and freezes that list in zone 1.
-`/clear` reconnects. HTTP/SSE MCP is out of scope. MCP is a user-installed
-subprocess, the same class as `bash`.
+`/clear` reconnects. HTTP/SSE MCP is out of scope.
 
 ## Relationship to prior art
 

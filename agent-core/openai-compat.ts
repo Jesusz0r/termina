@@ -17,6 +17,8 @@ export type KernelMessage = {
   content: string | Array<Record<string, unknown>>;
 };
 
+const MAX_SSE_BUFFER_CHARS = 8 * 1024 * 1024;
+
 export type CallResultLike = {
   blocks: Array<Record<string, unknown>>;
   usage: { input: number; cacheRead: number; cacheWrite: number; output: number } | null;
@@ -393,47 +395,70 @@ export function textFromResponsesPayload(data: unknown): { text: string; usage?:
   return { text: parts.join("").trim(), usage: rec.usage };
 }
 
-function takeSseEvents(buffer: string, events: Array<Record<string, unknown>>, flush: boolean): string {
+function takeSseEvents(
+  buffer: string,
+  events: Array<Record<string, unknown>>,
+  flush: boolean,
+  filter?: (event: Record<string, unknown>) => boolean,
+): string {
   let nl: number;
   while ((nl = buffer.indexOf("\n")) !== -1) {
     const line = buffer.slice(0, nl).trim();
     buffer = buffer.slice(nl + 1);
-    pushSseLine(line, events);
+    pushSseLine(line, events, filter);
   }
   if (flush) {
-    pushSseLine(buffer.trim(), events);
+    pushSseLine(buffer.trim(), events, filter);
     return "";
   }
   return buffer;
 }
 
-function pushSseLine(line: string, events: Array<Record<string, unknown>>): void {
+function pushSseLine(
+  line: string,
+  events: Array<Record<string, unknown>>,
+  filter?: (event: Record<string, unknown>) => boolean,
+): void {
   if (!line.startsWith("data:")) return;
   const payload = line.slice(5).trim();
   if (!payload || payload === "[DONE]") return;
   try {
     const parsed = JSON.parse(payload) as unknown;
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) events.push(parsed as Record<string, unknown>);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+    const event = parsed as Record<string, unknown>;
+    if (!filter || filter(event)) events.push(event);
   } catch {
     /* ignore truncated JSON */
   }
 }
 
-export async function readSseJson(body: ReadableStream<Uint8Array>, signal?: AbortSignal): Promise<Array<Record<string, unknown>>> {
+export async function readSseJson(
+  body: ReadableStream<Uint8Array>,
+  signal?: AbortSignal,
+  filter?: (event: Record<string, unknown>) => boolean,
+): Promise<Array<Record<string, unknown>>> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   const events: Array<Record<string, unknown>> = [];
-  for (;;) {
-    if (signal?.aborted) break;
-    const { done, value } = await reader.read();
-    if (done) {
-      buffer += decoder.decode();
-      takeSseEvents(buffer, events, true);
-      break;
+  try {
+    for (;;) {
+      if (signal?.aborted) {
+        await reader.cancel();
+        break;
+      }
+      const { done, value } = await reader.read();
+      if (done) {
+        buffer += decoder.decode();
+        takeSseEvents(buffer, events, true, filter);
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      if (buffer.length > MAX_SSE_BUFFER_CHARS) throw new Error("provider stream line is too large");
+      buffer = takeSseEvents(buffer, events, false, filter);
     }
-    buffer += decoder.decode(value, { stream: true });
-    buffer = takeSseEvents(buffer, events, false);
+    return events;
+  } finally {
+    reader.releaseLock();
   }
-  return events;
 }

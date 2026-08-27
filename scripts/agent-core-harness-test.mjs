@@ -232,6 +232,8 @@ check(
 
 const echo = await runBash("echo hello-core", { cwd: root });
 check("bash echo succeeds", echo.isError === false && echo.content.includes("hello-core"));
+const largeBash = await runBash(`${JSON.stringify(process.execPath)} -e 'process.stdout.write("x".repeat(30000))'`, { cwd: root });
+check("bash keeps a bounded tail with a marker", Buffer.byteLength(largeBash.content) < 22 * 1024 && largeBash.content.includes("early output truncated"));
 const t0 = Date.now();
 let stopBash = false;
 const killed = runBash("sleep 8", { cwd: root, timeoutMs: 20_000, shouldStop: () => stopBash });
@@ -251,6 +253,10 @@ writeFileSync(join(hostDir, `edits-${hostId}.md`), "edits-body");
 const ctx = host.readContextFiles(hostDir, hostId);
 check("context concatenates verify and edits", ctx.includes("verify-body") && ctx.includes("edits-body") && ctx.includes("---"));
 check("context skips missing mailbox", !ctx.includes("mailbox"));
+writeFileSync(join(hostDir, `verify-${hostId}.md`), "x".repeat(host.HOST_CONTEXT_BYTES + 100));
+const cappedContext = host.readContextFiles(hostDir, hostId);
+check("host context has a total byte cap", Buffer.byteLength(cappedContext) === host.HOST_CONTEXT_BYTES);
+check("host context reports truncation", cappedContext.endsWith("[host context truncated]"));
 const promptName = host.promptFileName(hostId, hostBridge, "abcd1234");
 const written = host.writePromptPayload(hostDir, hostId, promptName, { prompt: "do work", context: ctx });
 check("prompt payload writes a plain filename", written === promptName && existsSync(join(hostDir, promptName)));
@@ -379,6 +385,8 @@ check(
   "toProviderBlock keeps thinking",
   toProviderBlock({ type: "thinking", thinking: "abc", signature: "sig" }).thinking === "abc",
 );
+const unsignedThinking = toRequest([{ role: "assistant", content: [{ type: "thinking", thinking: "abc" }], tokens: 1, sseq: 1 }]);
+check("toRequest drops unsigned thinking", unsignedThinking[0]?.content?.length === 0);
 const searchReq = toRequest([
   {
     role: "assistant",
@@ -482,6 +490,22 @@ check(
   planPruneStubs([{ role: "user", content: "hi", tokens: 10 }], { systemTokens: 10, usable: 100_000, protectTokens: 4_000 })
     .length === 0,
 );
+const prunePlan = planPruneStubs(
+  [
+    {
+      role: "user",
+      content: [
+        { type: "tool_result", content: "a".repeat(8_000) },
+        { type: "tool_result", content: "b".repeat(8_000) },
+      ],
+      tokens: 9_000,
+    },
+    { role: "user", content: "recent one", tokens: 10 },
+    { role: "user", content: "recent two", tokens: 10 },
+  ],
+  { systemTokens: 0, usable: 10_000, protectTokens: 10 },
+);
+check("planPruneStubs addresses exact blocks", prunePlan.map((p) => p.blockIndex).join(",") === "0,1");
 
 const tools = [
   { name: "a", description: "a", input_schema: { type: "object", properties: {} } },
@@ -547,6 +571,8 @@ check("fresh session stream truncates file", readFileSync(sess, "utf8") === "");
 
 check("duplicate storageSeq fails resume", replaySessionRecords(`${sessionLines}\n${JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "x" } })}`).ok === false);
 check("non-positive storageSeq fails", replaySessionRecords(JSON.stringify({ storageSeq: 0, type: "message", message: { role: "user", content: "x" } })).ok === false);
+check("invalid message content fails resume", replaySessionRecords(JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: {} } })).ok === false);
+check("invalid truncate revision fails resume", replaySessionRecords(`${JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "x" } })}\n${JSON.stringify({ storageSeq: 2, type: "revision", kind: "truncate", dropped: 2 })}`).ok === false);
 check("truncated final line ignored", replaySessionRecords(`${JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "ok" } })}\n{not-json`).ok === true);
 
 check("invalid terminal id rejected", isValidTerminalId("../evil") === false);
@@ -1413,8 +1439,12 @@ const sse = new ReadableStream({
     c.close();
   },
 });
-const sseEvents = await compat.readSseJson(sse);
-check("readSseJson flushes last line without newline", sseEvents[0]?.choices?.[0]?.delta?.content === "Hi");
+let filteredText = "";
+const sseEvents = await compat.readSseJson(sse, undefined, (event) => {
+  filteredText = event.choices?.[0]?.delta?.content ?? "";
+  return false;
+});
+check("readSseJson streams and can discard events", filteredText === "Hi" && sseEvents.length === 0);
 
 const itemDelta = compat.responsesResultFromEvents(
   [
@@ -1459,6 +1489,14 @@ check(
       { name: "echo", description: "echo", input_schema: {}, server: "x", original: "echo" },
     ]).length === 1,
 );
+const manyMcpTools = Array.from({ length: 20 }, (_, i) => ({
+  name: `tool_${i}`,
+  description: "x".repeat(1000),
+  input_schema: { type: "object", description: "y".repeat(7000) },
+  server: "large",
+  original: `tool_${i}`,
+}));
+check("MCP tool schemas have one total budget", mcp.selectMcpTools(manyMcpTools).length < manyMcpTools.length);
 check(
   "parseMcpConfig skips http and disabled servers",
   mcp.parseMcpConfig({
@@ -1498,9 +1536,10 @@ const mcpProj = join(mcpDir, "proj.json");
 writeFileSync(mcpUser, JSON.stringify({ mcpServers: { gh: { command: "npx" }, keep: { command: "npx" } } }));
 writeFileSync(mcpProj, JSON.stringify({ mcpServers: { gh: { command: "npx", disabled: true } } }));
 check(
-  "project disabled removes a user MCP server",
-  mcp.loadMcpConfigs(mcpUser, mcpProj).map((s) => s.name).join(",") === "keep",
+  "MCP loads only the user-owned config",
+  mcp.loadMcpConfigs(mcpUser).map((s) => s.name).join(",") === "gh,keep",
 );
+check("project MCP config is not an executable source", mcp.projectMcpPath === undefined);
 const mcpJail = mkdtempSync(join(tmpdir(), "agent-core-mcp-jail-"));
 leftovers.push(mcpJail);
 try {
@@ -1570,11 +1609,18 @@ const hangMcp = await mcp.startMcp(
 const tHang = Date.now();
 const interruptedCall = await hangMcp.call("mcp_hang_hang", {}, { shouldStop: () => true });
 check("mcp interrupt returns quickly", Date.now() - tHang < 2000 && interruptedCall.isError === true && interruptedCall.content.includes("interrupted"));
-const timed = await hangMcp.call("mcp_hang_hang", {}, { timeoutMs: 200, shouldStop: () => false });
-check("mcp call timeout kills the server", timed.isError === true && timed.content.includes("timed out"));
-const afterKill = await hangMcp.call("mcp_hang_hang", {});
-check("mcp call after timeout sees a dead server", afterKill.isError === true);
+const afterInterrupt = await hangMcp.call("mcp_hang_hang", {});
+check("mcp interrupt kills the server", afterInterrupt.isError === true);
 hangMcp.shutdown();
+const timeoutMcp = await mcp.startMcp(
+  [{ name: "hang", command: process.execPath, args: [hangServer], env: {} }],
+  { projectRoot: mcpDir, confineCwd: (cwd) => mcp.jailMcpCwd(mcpDir, cwd) },
+);
+const timed = await timeoutMcp.call("mcp_hang_hang", {}, { timeoutMs: 200, shouldStop: () => false });
+check("mcp call timeout kills the server", timed.isError === true && timed.content.includes("timed out"));
+const afterKill = await timeoutMcp.call("mcp_hang_hang", {});
+check("mcp call after timeout sees a dead server", afterKill.isError === true);
+timeoutMcp.shutdown();
 const deadMcp = await mcp.startMcp(
   [{ name: "gone", command: join(mcpDir, "missing-bin"), args: [], env: {} }],
   { projectRoot: mcpDir, confineCwd: (cwd) => mcp.jailMcpCwd(mcpDir, cwd) },
@@ -1582,7 +1628,7 @@ const deadMcp = await mcp.startMcp(
 check("mcp spawn failure does not throw", deadMcp.tools.length === 0 && deadMcp.notes.some((n) => n.includes("gone")));
 deadMcp.shutdown();
 writeFileSync(join(mcpDir, "bad.json"), "{not json");
-check("invalid mcp json loads as no servers", mcp.parseMcpConfig(null).length === 0 && mcp.loadMcpConfigs(join(mcpDir, "bad.json"), join(mcpDir, "missing.json")).length === 0);
+check("invalid mcp json loads as no servers", mcp.parseMcpConfig(null).length === 0 && mcp.loadMcpConfigs(join(mcpDir, "bad.json")).length === 0);
 
 const rosterMod = await import("../electron/terminal-roster.ts");
 check("parseTerminalRoster empty", rosterMod.parseTerminalRoster(null).length === 0);

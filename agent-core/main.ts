@@ -104,7 +104,6 @@ import {
   loadMcpConfigs,
   mergeClientTools,
   mcpToolDefs,
-  projectMcpPath,
   startMcp,
   userMcpPath,
   type McpSession,
@@ -138,7 +137,7 @@ function contextWindow(): number {
   if (Number.isFinite(env) && env >= 8_000) return env;
   const hit = catalogs.get(route.provider)?.find((m) => m.id === route.model);
   if (hit?.context && hit.context >= 8_000) return hit.context;
-  return 200_000;
+  return route.provider === "anthropic" ? 200_000 : 128_000;
 }
 
 function usableTokens(): number {
@@ -978,12 +977,33 @@ export function readProjectFile(
   return got;
 }
 
+function atomicWrite(path: string, content: string, mode?: number): void {
+  const tmp = join(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
+  try {
+    writeFileSync(tmp, content, { flag: "wx", ...(mode === undefined ? {} : { mode }) });
+    renameSync(tmp, path);
+  } catch (err) {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      /* preserve the original error */
+    }
+    throw err;
+  }
+}
+
 export function writeProjectFile(cwd: string, path: string | undefined, content: string): { content: string; isError: boolean } {
   const confined = confinePath(cwd, path ?? "");
   if (!confined.ok) return { content: confined.error, isError: true };
   try {
     mkdirSync(dirname(confined.abs), { recursive: true });
-    writeFileSync(confined.abs, content);
+    let mode: number | undefined;
+    try {
+      mode = statSync(confined.abs).mode & 0o777;
+    } catch {
+      /* use the process umask for a new file */
+    }
+    atomicWrite(confined.abs, content, mode);
     return { content: `ok: wrote ${confined.abs}`, isError: false };
   } catch (err) {
     return { content: `error: ${(err as Error).message}`, isError: true };
@@ -1042,7 +1062,7 @@ export function editProjectFile(
   const at = body.indexOf(oldText);
   const next = body.slice(0, at) + newText + body.slice(at + oldText.length);
   try {
-    writeFileSync(confined.abs, next);
+    atomicWrite(confined.abs, next, st.mode & 0o777);
   } catch (err) {
     return { content: `error: ${(err as Error).message}`, isError: true };
   }
@@ -1453,22 +1473,18 @@ export function runBash(
       return;
     }
     const pid = child.pid;
-    const maxBuf = 10 * 1024 * 1024;
-    const stdoutChunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
-    let stdoutBytes = 0;
-    let stderrBytes = 0;
-    const take = (chunks: Buffer[], used: number, chunk: Buffer): number => {
-      if (used >= maxBuf) return used;
-      const piece = chunk.subarray(0, maxBuf - used);
-      chunks.push(piece);
-      return used + piece.length;
+    let stdout: Buffer = Buffer.alloc(0);
+    let stderr: Buffer = Buffer.alloc(0);
+    const takeTail = (tail: Buffer, chunk: Buffer): Buffer => {
+      const next = tail.length === 0 ? chunk : Buffer.concat([tail, chunk]);
+      const cap = BASH_CAP_BYTES + 1;
+      return next.length <= cap ? next : next.subarray(next.length - cap);
     };
     child.stdout?.on("data", (chunk: Buffer) => {
-      stdoutBytes = take(stdoutChunks, stdoutBytes, chunk);
+      stdout = takeTail(stdout, chunk);
     });
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderrBytes = take(stderrChunks, stderrBytes, chunk);
+      stderr = takeTail(stderr, chunk);
     });
     let settled = false;
     const killGroup = (): void => {
@@ -1491,7 +1507,7 @@ export function runBash(
       settled = true;
       clearTimeout(timer);
       clearInterval(poll);
-      const parts = [Buffer.concat(stdoutChunks).toString("utf8"), Buffer.concat(stderrChunks).toString("utf8")];
+      const parts = [stdout.toString("utf8"), stderr.toString("utf8")];
       let failed = false;
       if (err) {
         failed = true;
@@ -1641,7 +1657,7 @@ async function connectMcp(): Promise<void> {
   mcpSession?.shutdown();
   mcpSession = null;
   clientTools = TOOLS.slice();
-  const session = await startMcp(loadMcpConfigs(userMcpPath(homedir()), projectMcpPath(canonicalCwd)), {
+  const session = await startMcp(loadMcpConfigs(userMcpPath(homedir())), {
     projectRoot: canonicalCwd,
     confineCwd: (cwd) => jailMcpCwd(canonicalCwd, cwd),
   });
@@ -1742,15 +1758,27 @@ function blockChars(b: ContentBlock): number {
   return 0;
 }
 
+function isUserPrompt(m: { role: string; content: unknown }): boolean {
+  if (m.role !== "user") return false;
+  if (typeof m.content === "string") return true;
+  return Array.isArray(m.content) && m.content.some((b) => {
+    if (!b || typeof b !== "object") return false;
+    const type = (b as { type?: unknown }).type;
+    return type === "text" || type === "image";
+  });
+}
+
 function estimate(m: Message): number {
   if (typeof m.content === "string") return tokenEstimate(m.content) + 4;
   let sum = 4;
   for (const b of m.content) {
+    if (b.type === "image") {
+      sum += 8_010;
+      continue;
+    }
     const payload =
       b.type === "tool_use" || b.type === "server_tool_use"
         ? JSON.stringify((b as { input?: unknown }).input ?? {})
-        : b.type === "image"
-          ? "image"
         : b.type === "web_search_tool_result" || b.type === "thinking" || b.type === "redacted_thinking"
           ? JSON.stringify(b)
           : String((b as { text?: string; content?: string }).text ?? (b as { content?: string }).content ?? "");
@@ -1781,7 +1809,10 @@ export function toProviderBlock(b: ContentBlock, imageRoots: string[] = []): Rec
 export function toRequest(messages: Message[], imageRoots: string[] = []): Array<{ role: string; content: unknown }> {
   return messages.map((m) => {
     if (typeof m.content === "string") return { role: m.role, content: m.content };
-    return { role: m.role, content: m.content.map((b) => toProviderBlock(b, imageRoots)) };
+    const content = m.content
+      .map((b) => toProviderBlock(b, imageRoots))
+      .filter((b) => b.type !== "thinking" || typeof b.signature === "string");
+    return { role: m.role, content };
   });
 }
 
@@ -1820,7 +1851,7 @@ function pushUserPrompt(prompt: string, images: Array<{ name: string; mediaType:
 export function planPruneStubs(
   messages: Array<{ role: string; content: unknown; tokens: number }>,
   opts: { systemTokens: number; usable: number; protectTokens: number },
-): Array<{ msgIndex: number }> {
+): Array<{ msgIndex: number; blockIndex: number }> {
   const total =
     opts.systemTokens +
     messages.reduce((sum, m) => sum + m.tokens, 0);
@@ -1838,7 +1869,7 @@ export function planPruneStubs(
     const m = messages[i]!;
     protectedIdx.add(i);
     guarded += m.tokens;
-    if (m.role === "user" && typeof m.content === "string") {
+    if (isUserPrompt(m)) {
       seen++;
       if (seen >= PROTECT_TURNS) break;
     }
@@ -1852,20 +1883,21 @@ export function planPruneStubs(
   }
 
   // Oldest-first selection among unprotected bulky tool results.
-  const picks: Array<{ msgIndex: number }> = [];
+  const picks: Array<{ msgIndex: number; blockIndex: number }> = [];
   let reclaimed = 0;
   for (let i = 0; i < messages.length && reclaimed < quota; i++) {
     if (protectedIdx.has(i)) continue;
     const m = messages[i]!;
     if (typeof m.content === "string") continue;
-    for (const b of m.content as ContentBlock[]) {
+    const blocks = m.content as ContentBlock[];
+    for (let blockIndex = 0; blockIndex < blocks.length; blockIndex++) {
       if (reclaimed >= quota) break;
+      const b = blocks[blockIndex]!;
       if (b.type !== "tool_result") continue;
-      const chars = blockChars(b as ContentBlock);
-      if (chars < PRUNE_MIN_CHARS) continue;
-      if ((b as ContentBlock).stubbed) continue;
-      picks.push({ msgIndex: i });
-      reclaimed += tokenEstimate("x".repeat(chars));
+      const chars = blockChars(b);
+      if (chars < PRUNE_MIN_CHARS || b.stubbed) continue;
+      picks.push({ msgIndex: i, blockIndex });
+      reclaimed += Math.ceil(chars / 4);
     }
   }
   return picks;
@@ -1876,6 +1908,13 @@ export type ReplayMessage = {
   content: string | ContentBlock[];
   sseq: number;
 };
+
+function isReplayContent(content: unknown): content is ReplayMessage["content"] {
+  if (typeof content === "string") return true;
+  return Array.isArray(content) && content.every((block) => {
+    return Boolean(block) && typeof block === "object" && !Array.isArray(block) && typeof (block as { type?: unknown }).type === "string";
+  });
+}
 
 export function replaySessionRecords(
   text: string,
@@ -1920,11 +1959,15 @@ export function replaySessionRecords(
     seen.add(e.storageSeq);
     maxSeq = Math.max(maxSeq, e.storageSeq);
     if (e.type === "message" && e.message && (e.message.role === "user" || e.message.role === "assistant")) {
+      if (!isReplayContent(e.message.content)) return { ok: false, error: "invalid message content" };
       const m: ReplayMessage = { role: e.message.role, content: e.message.content, sseq: e.storageSeq };
       messages.push(m);
       bySeq.set(m.sseq, m);
     } else if (e.type === "revision" && e.kind === "prune" && Array.isArray(e.targets)) {
       for (const t of e.targets) {
+        if (!t || !Number.isInteger(t.sseq) || t.sseq < 1 || !Number.isInteger(t.blockIndex) || t.blockIndex < 0) {
+          return { ok: false, error: "invalid prune target" };
+        }
         const m = bySeq.get(t.sseq);
         if (!m || typeof m.content === "string") continue;
         const b = m.content[t.blockIndex] as ContentBlock | undefined;
@@ -1939,6 +1982,9 @@ export function replaySessionRecords(
         b.stubbed = true;
       }
     } else if (e.type === "revision" && e.kind === "truncate" && typeof e.dropped === "number") {
+      if (!Number.isInteger(e.dropped) || e.dropped < 0 || e.dropped > messages.length) {
+        return { ok: false, error: "invalid truncate revision" };
+      }
       messages.splice(0, e.dropped);
     } else if (e.type === "revision" && e.kind === "summarize") {
       if (typeof e.summarySseq !== "number" || !Number.isInteger(e.summarySseq) || e.summarySseq < 1) {
@@ -1972,24 +2018,23 @@ function reclaim(): number {
   );
   let stubbedCount = 0;
   const targets: Array<{ sseq: number; blockIndex: number }> = [];
+  const touched = new Set<number>();
   for (const pick of plan) {
     const m = history[pick.msgIndex]!;
     if (typeof m.content === "string") continue;
-    const blocks = m.content as ContentBlock[];
-    for (let bi = 0; bi < blocks.length; bi++) {
-      const b = blocks[bi]!;
-      if (b.type !== "tool_result" || b.stubbed) continue;
-      const c = blockChars(b);
-      if (c < PRUNE_MIN_CHARS) continue;
-      const stub = formatStub({ chars: c, tool: b.tool ?? "tool", sseq: m.sseq, repro: b.repro });
-      (b as unknown as { content: string }).content = stub;
-      b.chars = stub.length;
-      b.stubbed = true;
-      stubbedCount++;
-      targets.push({ sseq: m.sseq, blockIndex: bi });
-    }
-    m.tokens = estimate(m);
+    const b = (m.content as ContentBlock[])[pick.blockIndex];
+    if (!b || b.type !== "tool_result" || b.stubbed) continue;
+    const c = blockChars(b);
+    if (c < PRUNE_MIN_CHARS) continue;
+    const stub = formatStub({ chars: c, tool: b.tool ?? "tool", sseq: m.sseq, repro: b.repro });
+    (b as unknown as { content: string }).content = stub;
+    b.chars = stub.length;
+    b.stubbed = true;
+    stubbedCount++;
+    touched.add(pick.msgIndex);
+    targets.push({ sseq: m.sseq, blockIndex: pick.blockIndex });
   }
+  for (const i of touched) history[i]!.tokens = estimate(history[i]!);
   if (stubbedCount > 0) {
     postRevision = true;
     revisions++;
@@ -2006,7 +2051,7 @@ function truncate(): boolean {
   let cut = 0;
   for (let i = 0; i < history.length; i++) {
     const m = history[i]!;
-    if (m.role === "user" && typeof m.content === "string") cut = i;
+    if (isUserPrompt(m)) cut = i;
     total -= m.tokens;
     if (i === cut && total < usableTokens() * LOW_WATER) break;
   }
@@ -2037,7 +2082,7 @@ function evictionBoundary(): number {
   for (let i = history.length - 1; i >= 0; i--) {
     boundary = i;
     guarded += history[i]!.tokens;
-    if (history[i]!.role === "user" && typeof history[i]!.content === "string") {
+    if (isUserPrompt(history[i]!)) {
       seen++;
       if (seen >= PROTECT_TURNS && guarded >= Math.min(protectTokens(), usableTokens() / 4)) break;
     }
@@ -2045,7 +2090,7 @@ function evictionBoundary(): number {
   // The tail must start at a real prompt; walk forward past orphan results.
   while (
     boundary < history.length &&
-    !(history[boundary]!.role === "user" && typeof history[boundary]!.content === "string")
+    !isUserPrompt(history[boundary]!)
   ) {
     boundary++;
   }
@@ -2081,7 +2126,7 @@ function fileInventories(messages: Message[]): string {
       const input = (b as { input?: { path?: string } }).input;
       if (!input?.path) continue;
       if (b.name === "read_file") read.add(input.path);
-      if (b.name === "write_file") modified.add(input.path);
+      if (b.name === "write_file" || b.name === "edit") modified.add(input.path);
     }
   }
   const sections: string[] = [];
@@ -2108,8 +2153,9 @@ async function summarize(): Promise<boolean> {
     if (!text) return false;
     const u = folded.usage;
     const inventories = fileInventories(evicted);
-    const handoff = `<context-handoff>\n${text}${inventories ? `\n\n${inventories}` : ""}\n</context-handoff>`;
-    lastHandoff = text;
+    const handoffBody = `${text}${inventories ? `\n\n${inventories}` : ""}`;
+    const handoff = `<context-handoff>\n${handoffBody}\n</context-handoff>`;
+    lastHandoff = handoffBody;
     history.splice(0, boundary);
     const m: Message = { role: "user", content: handoff, tokens: estimate({ role: "user", content: handoff, tokens: 0, sseq: 0 }), sseq: 0 };
     history.unshift(m);
@@ -2159,7 +2205,7 @@ async function summarize(): Promise<boolean> {
 
 type Block =
   | { type: "text"; text: string; citations?: unknown[] }
-  | { type: "thinking"; thinking: string }
+  | { type: "thinking"; thinking: string; signature?: string }
   | { type: "tool_use"; id: string; name: string; input: ToolUse["input"] }
   | { type: "server_tool_use"; id: string; name: string; input: Record<string, unknown> }
   | { type: "web_search_tool_result"; tool_use_id: string; content: unknown };
@@ -2295,9 +2341,6 @@ async function callModel(messages: Message[]): Promise<CallResult> {
           model: route.model,
           max_tokens: 8192,
           stream: true,
-          ...(route.model.toLowerCase().includes("claude") && !route.model.toLowerCase().includes("haiku")
-            ? { thinking: { type: "enabled", budget_tokens: 8_000 } }
-            : {}),
           cache_control: prefix.cache_control,
           system: prefix.system,
           tools: requestTools(prefix.tools, route.provider),
@@ -2323,16 +2366,50 @@ async function callModel(messages: Message[]): Promise<CallResult> {
   }
 
   if (proto !== "anthropic-messages") {
-    const events = await readSseJson(res.body, currentAbort?.signal);
+    let streamedText = "";
+    let ttftMs: number | null = null;
+    const events = await readSseJson(res.body, currentAbort?.signal, (event) => {
+      let chunk = "";
+      if (proto === "openai-codex-responses" && event.type === "response.output_text.delta") {
+        const delta = event.delta;
+        if (typeof delta === "string") chunk = delta;
+        else if (delta && typeof delta === "object" && !Array.isArray(delta)) {
+          const value = (delta as { text?: unknown; delta?: unknown }).text ?? (delta as { delta?: unknown }).delta;
+          if (typeof value === "string") chunk = value;
+        }
+        if (chunk) event.delta = "";
+      } else if (proto === "openai-completions" && Array.isArray(event.choices)) {
+        const choice = event.choices[0];
+        if (choice && typeof choice === "object") {
+          const delta = (choice as { delta?: Record<string, unknown> }).delta;
+          if (delta && typeof delta.content === "string") {
+            chunk = delta.content;
+            delta.content = "";
+          }
+        }
+      }
+      if (chunk) {
+        if (ttftMs === null) ttftMs = Date.now() - started;
+        streamedText += chunk;
+        out(chunk);
+      }
+      if (proto === "openai-codex-responses" && event.type === "response.output_text.delta") return false;
+      if (proto === "openai-completions" && chunk && Array.isArray(event.choices)) {
+        const choice = event.choices[0] as { delta?: { tool_calls?: unknown }; finish_reason?: unknown } | undefined;
+        if (!choice?.delta?.tool_calls && !choice?.finish_reason && !event.usage) return false;
+      }
+      return true;
+    });
     const parsed =
       proto === "openai-codex-responses"
-        ? responsesResultFromEvents(events, (t) => out(t), started)
-        : completionResultFromEvents(events, (t) => out(t), started);
+        ? responsesResultFromEvents(events, () => {}, started)
+        : completionResultFromEvents(events, () => {}, started);
     if (parsed.error) throw new Error(parsed.error);
+    if (streamedText) parsed.blocks.unshift({ type: "text", text: streamedText });
     return {
       blocks: parsed.blocks as Block[],
       usage: parsed.usage,
-      ttftMs: parsed.ttftMs,
+      ttftMs,
       stopReason: parsed.stopReason,
     };
   }
@@ -2415,7 +2492,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
           break;
         }
         case "content_block_delta": {
-          const d = ev.delta as { type: string; text?: string; partial_json?: string; citation?: unknown; thinking?: string };
+          const d = ev.delta as { type: string; text?: string; partial_json?: string; citation?: unknown; thinking?: string; signature?: string };
           const idx = Number(ev.index);
           const target = slots[idx];
           if (!target) break;
@@ -2427,6 +2504,8 @@ async function callModel(messages: Message[]): Promise<CallResult> {
             const chunk = d.thinking ?? "";
             target.thinking += chunk;
             out(chunk);
+          } else if (d.type === "signature_delta" && target.type === "thinking") {
+            target.signature = (target.signature ?? "") + (d.signature ?? "");
           } else if (d.type === "citations_delta" && target.type === "text" && d.citation !== undefined) {
             target.citations = [...(target.citations ?? []), d.citation];
           } else if (
@@ -3050,7 +3129,8 @@ async function bootCatalog(): Promise<void> {
         retargetSummary(id);
       }
     }
-    await loadAuthenticatedCatalogs(true);
+    const loaded = await loadProviderModels(route.provider);
+    if (loaded.ok) catalogs.set(route.provider, loaded.models);
     const current = currentCatalog();
     if (current && current.length > 0) {
       const preferred =
@@ -3123,6 +3203,7 @@ function startCatalogCommand(line: string): void {
         } else {
           route.model = listed.id;
         }
+        prevPrompt = null;
         out(`model ${route.provider}/${route.model}\n`);
         syncStatus();
         return;
@@ -3146,6 +3227,7 @@ function startCatalogCommand(line: string): void {
       } else {
         route.model = next.model;
       }
+      prevPrompt = null;
       out(`model ${route.provider}/${route.model}\n`);
       syncStatus();
     } finally {
@@ -3303,6 +3385,11 @@ function dispatchLine(line: string): void {
       }
     }
     history.length = 0;
+    lastHandoff = null;
+    approveAll = process.env.TERMINA_CORE_APPROVE === "all";
+    prevPrompt = null;
+    postRevision = false;
+    revisions = 0;
     streamPrepared = true;
     storageSeq = 0;
     out("(session cleared)\n");

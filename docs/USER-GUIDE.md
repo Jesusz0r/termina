@@ -132,16 +132,14 @@ closes it.
 
 ### MCP servers (core)
 
-A core tab can call MCP tools listed in:
-
-- `~/.termina/agent/mcp.json` (every project)
-- `.mcp.json` in the opened folder (overrides the same server name)
+A core tab can call MCP tools listed in the user-owned
+`~/.termina/agent/mcp.json`. Project files cannot start MCP processes.
 
 Use the Claude/Cursor `mcpServers` shape with `command`, `args`, and
 `env`. HTTP and SSE servers are ignored. The kernel starts those
 processes when the tab starts and keeps the tool list frozen until
-`/clear` or a new tab. MCP is a program you installed, like `bash`: it
-is not limited to the project jail.
+`/clear` or a new tab. MCP is a program you installed. It is not limited
+to the project jail.
 
 ---
 

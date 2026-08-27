@@ -1,7 +1,7 @@
 /**
  * Kernel-sized MCP stdio client.
  *
- * Config files list servers. This module spawns them, lists tools once,
+ * The user config lists servers. This module spawns them, lists tools once,
  * and calls them. It is not a plugin loader. Tool schemas freeze at
  * connect; a new session reconnects.
  */
@@ -11,6 +11,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 
 export const MAX_MCP_SERVERS = 8;
 export const MAX_MCP_TOOLS = 32;
+export const MAX_MCP_TOOL_BYTES = 64 * 1024;
 export const MAX_MCP_JSON_BYTES = 64 * 1024;
 export const MCP_HANDSHAKE_MS = 10_000;
 export const MCP_CALL_MS = 60_000;
@@ -146,12 +147,10 @@ function readMcpFile(path: string): unknown | null {
   }
 }
 
-/** User file first, project file overrides the same server name. A project
- *  `disabled: true` removes that user server. */
-export function loadMcpConfigs(userFile: string, projectFile: string): McpServerConfig[] {
+/** Load servers only from the user-owned configuration file. */
+export function loadMcpConfigs(userFile: string): McpServerConfig[] {
   const byName = new Map<string, McpServerConfig>();
   applyMcpConfig(byName, readMcpFile(userFile));
-  applyMcpConfig(byName, readMcpFile(projectFile));
   return [...byName.values()].slice(0, MAX_MCP_SERVERS);
 }
 
@@ -239,14 +238,6 @@ class McpProcess {
     child.on("error", (err) => this.failAll(err instanceof Error ? err : new Error(String(err))));
   }
 
-  abandon(err: Error): void {
-    for (const wait of this.pending.values()) {
-      clearTimeout(wait.timer);
-      wait.reject(err);
-    }
-    this.pending.clear();
-  }
-
   private onStdout(chunk: string): void {
     this.buf += chunk;
     if (this.buf.length > 2 * 1024 * 1024) this.buf = this.buf.slice(-1024 * 1024);
@@ -316,9 +307,9 @@ class McpProcess {
     this.pending.clear();
   }
 
-  kill(): void {
+  kill(err = new Error(`mcp ${this.name} stopped`)): void {
     this.dead = true;
-    this.failAll(new Error(`mcp ${this.name} stopped`));
+    this.failAll(err);
     const child = this.child;
     this.child = null;
     if (!child) return;
@@ -412,12 +403,17 @@ export function selectMcpTools(
 ): McpClientTool[] {
   const out: McpClientTool[] = [];
   const used = new Set<string>(kernelNames);
+  let bytes = 0;
   for (const tool of discovered) {
     if (out.length >= MAX_MCP_TOOLS) break;
     const name = mcpToolName(tool.server, tool.original);
     if (used.has(name) || kernelNames.has(name)) continue;
+    const next = { ...tool, name };
+    const nextBytes = Buffer.byteLength(JSON.stringify(next));
+    if (bytes + nextBytes > MAX_MCP_TOOL_BYTES) continue;
     used.add(name);
-    out.push({ ...tool, name });
+    out.push(next);
+    bytes += nextBytes;
   }
   return out;
 }
@@ -480,9 +476,9 @@ export async function startMcp(
           const req = hit.proc.request("tools/call", { name: hit.original, arguments: args ?? {} }, timeoutMs);
           req.then(resolve, reject);
           poll = setInterval(() => {
-            if (stop?.()) hit.proc.abandon(new Error("interrupted"));
+            if (stop?.()) hit.proc.kill(new Error("interrupted"));
           }, 50);
-          if (stop?.()) hit.proc.abandon(new Error("interrupted"));
+          if (stop?.()) hit.proc.kill(new Error("interrupted"));
         });
         return textFromCallResult(result);
       } catch (err) {
@@ -516,8 +512,4 @@ export function mergeClientTools(
 
 export function userMcpPath(home: string): string {
   return join(home, ".termina", "agent", "mcp.json");
-}
-
-export function projectMcpPath(cwd: string): string {
-  return join(cwd, ".mcp.json");
 }

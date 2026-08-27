@@ -78,9 +78,10 @@ refresh. Ambient env is only for machines with no file.
 infer: `claude*` → anthropic, `grok*` → xai, `gemini*`/`gemma*` → google,
 `gpt-*`/`o1`/`o3`/`o4` → openai. Else anthropic.
 
-When a credential exists, the kernel GET-lists **every authenticated
-provider's** models (`agent-core/models.ts`) and uses those lists. It does
-not use a baked-in catalog as the source of truth. `TERMINA_CORE_MODEL` still pins an id
+At startup, the kernel GET-lists the active provider's models
+(`agent-core/models.ts`). `/models` loads the other authenticated providers
+on demand. The kernel does not use a baked-in catalog as the source of truth.
+`TERMINA_CORE_MODEL` still pins an id
 when set; a live id that only adds a date suffix may replace the pin
 (`claude-sonnet-4-5` → `claude-sonnet-4-5-20250929`). If the env does
 not pin a provider, startup picks the first **stored** credential in

@@ -5,13 +5,14 @@
  * verify/edits/mine/mailbox context, startup-control. The parser stays
  * electron/sidecar.ts. This module is the kernel writer of that protocol.
  */
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { HAS_UNCHECKED_PLAN_TASK } from "../shared/plan-task.ts";
 
 const ACK_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const CONTEXT_FILES = ["verify", "edits", "mine", "mailbox"] as const;
 const PLAN_TEXT_CAP = 4000;
+export const HOST_CONTEXT_BYTES = 64 * 1024;
 
 export function ackPath(eventsDir: string, terminalId: string, requestId: string): string {
   return join(eventsDir, `ack-${terminalId}-${requestId}.json`);
@@ -50,16 +51,39 @@ export async function waitForAck(
 export function readContextFiles(eventsDir: string, terminalId: string): string {
   if (!eventsDir || !terminalId) return "";
   const parts: string[] = [];
+  const separator = "\n\n---\n\n";
+  let remaining = HOST_CONTEXT_BYTES;
+  let truncated = false;
   for (const kind of CONTEXT_FILES) {
+    if (remaining <= 0) break;
     const path = join(eventsDir, `${kind}-${terminalId}.md`);
+    let fd: number | undefined;
     try {
-      const text = readFileSync(path, "utf8");
+      fd = openSync(path, "r");
+      if (parts.length > 0) remaining -= Buffer.byteLength(separator);
+      if (remaining <= 0) {
+        truncated = true;
+        break;
+      }
+      const fileSize = fstatSync(fd).size;
+      const size = Math.min(fileSize, remaining);
+      if (fileSize > size) truncated = true;
+      const buf = Buffer.alloc(size);
+      const read = size > 0 ? readSync(fd, buf, 0, size, 0) : 0;
+      const text = buf.subarray(0, read).toString("utf8");
       if (text) parts.push(text);
+      remaining -= read;
     } catch {
       /* missing context file */
+    } finally {
+      if (fd !== undefined) closeSync(fd);
     }
   }
-  return parts.join("\n\n---\n\n");
+  const text = parts.join(separator);
+  if (!truncated) return text;
+  const marker = Buffer.from("\n[host context truncated]", "utf8");
+  const body = Buffer.from(text, "utf8");
+  return Buffer.concat([body.subarray(0, Math.max(0, HOST_CONTEXT_BYTES - marker.length)), marker]).toString("utf8");
 }
 
 export function writePromptPayload(
