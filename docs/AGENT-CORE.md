@@ -12,7 +12,7 @@ stubs + structured inventories, waste attribution with models.dev pricing,
 two-role routing map, bounded concurrency, cwd jail, grep/glob, unique first-occurrence
 edit, interruptible bash, web_search, skill
 index, prefix `cache_control`, last `tool_result` cache pin, OpenAI/Codex `prompt_cache_key`,
-429 retry, opt-in `/thinking`, traces, provider auth, live model list,
+429 retry, opt-in `/thinking`, request-only working-set overlay, traces, provider auth, live model list,
 full-screen TUI, Termina sidecar host contract, core worldline session slice,
 bash approval, /clear /compact, -p print, usage footer, stdio MCP). Zone 1 is identity, environment,
 user-global `~/.agents/AGENTS.md`, the skill index, then cwd `AGENTS.md`.
@@ -53,6 +53,8 @@ Rules:
   from byte zero.
 - Corrections are new messages, never edits of old ones. A request may stamp
   `cache_control` on a copy of the last `tool_result`. That copy is not stored.
+  The request suffix after that breakpoint (file inventories and host context)
+  may be rebuilt every call. It is not stored in the session log.
 - Revision events (compaction, prune) are the ONLY writes to the visible
   context, and they must be reconstructable: the storage log stays
   append-only (a revision is a new entry, like pi's), or snapshots back the

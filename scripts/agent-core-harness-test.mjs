@@ -81,6 +81,7 @@ const {
   matchingSlashCommands,
   completeSlashLine,
   stampHistoryCache,
+  formatOverlay,
   retryAfter,
   parseThinkingCommand,
   thinkingEnabledFor,
@@ -1901,6 +1902,29 @@ check(
   converted.every((m) => !("cache_control" in m) && (typeof m.content === "string" || m.content == null || !JSON.stringify(m).includes("cache_control"))),
 );
 check("stampHistoryCache no-ops without tool_result", stampHistoryCache([{ role: "user", content: "hi" }])[0].content === "hi");
+check("formatOverlay omits empty", formatOverlay({ messages: [] }) === "");
+const overlayMsgs = [
+  { role: "assistant", content: [{ type: "tool_use", name: "edit", input: { path: "a.ts" } }] },
+  { role: "user", content: [{ type: "tool_result", tool_use_id: "1", content: "ok" }] },
+];
+const overlay = formatOverlay({ messages: overlayMsgs, hostContext: "verify failed" });
+check("formatOverlay includes edit path", overlay.includes("a.ts") && overlay.includes("<modified-files>"));
+check("formatOverlay includes host context", overlay.includes("verify failed") && overlay.startsWith("<working-set>"));
+check("formatOverlay does not invent a stored user message", overlayMsgs.every((m) => m.role !== "user" || Array.isArray(m.content)));
+const manyReads = {
+  role: "assistant",
+  content: Array.from({ length: 41 }, (_, i) => ({ type: "tool_use", name: "read_file", input: { path: `f${i}.ts` } })),
+};
+check("formatOverlay caps inventories", formatOverlay({ messages: [manyReads] }).includes("<!-- 1 paths omitted -->"));
+const stampedThenOverlay = [
+  ...stampHistoryCache(overlayMsgs),
+  { role: "user", content: overlay },
+];
+check(
+  "overlay sits after stamped tool_result",
+  stampedThenOverlay.at(-1)?.content === overlay &&
+    stampedThenOverlay.at(-2)?.content?.[0]?.cache_control?.type === "ephemeral",
+);
 const hdr = (v) => ({ get: (name) => (name.toLowerCase() === "retry-after" ? v : null) });
 check("retryAfter 400 is null", retryAfter(400, hdr(null), 0) === null);
 check("retryAfter 429 first wait 1s", retryAfter(429, hdr(null), 0) === 1_000);

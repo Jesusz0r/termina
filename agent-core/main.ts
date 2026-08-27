@@ -192,6 +192,7 @@ export function parseMaxTurns(raw: string | undefined): number {
 
 const MAX_TURNS = parseMaxTurns(process.env.TERMINA_CORE_MAX_TURNS);
 let thinkingWanted = false;
+let hostContextSnapshot = "";
 
 export function thinkingEnabledFor(model: string, enabled: boolean): boolean {
   if (!enabled) return false;
@@ -2208,11 +2209,22 @@ function serializeForSummary(messages: Message[]): string {
 }
 
 /** Structured inventories extracted from tool calls, not prose hope. */
-function fileInventories(messages: Message[]): string {
+const INVENTORY_CAP = 40;
+
+function formatInventoryTag(tag: string, names: Set<string>): string {
+  const list = [...names];
+  const shown = list.slice(0, INVENTORY_CAP);
+  const omitted = list.length - shown.length;
+  const extra = omitted > 0 ? `\n<!-- ${omitted} paths omitted -->` : "";
+  return `<${tag}>\n${shown.join("\n")}${extra}\n</${tag}>`;
+}
+
+function fileInventories(messages: Array<{ role: string; content: unknown }>): string {
   const read = new Set<string>();
   const modified = new Set<string>();
   for (const m of messages) {
     if (typeof m.content === "string") continue;
+    if (!Array.isArray(m.content)) continue;
     for (const b of m.content as ContentBlock[]) {
       if (b.type !== "tool_use") continue;
       const input = (b as { input?: { path?: string } }).input;
@@ -2222,9 +2234,24 @@ function fileInventories(messages: Message[]): string {
     }
   }
   const sections: string[] = [];
-  if (read.size > 0) sections.push(`<read-files>\n${[...read].join("\n")}\n</read-files>`);
-  if (modified.size > 0) sections.push(`<modified-files>\n${[...modified].join("\n")}\n</modified-files>`);
+  if (read.size > 0) sections.push(formatInventoryTag("read-files", read));
+  if (modified.size > 0) sections.push(formatInventoryTag("modified-files", modified));
   return sections.join("\n");
+}
+
+/** Request-only working set. Not stored in session JSONL. */
+export function formatOverlay(opts: {
+  messages: Array<{ role: string; content: unknown }>;
+  hostContext?: string;
+}): string {
+  const inventories = fileInventories(opts.messages);
+  const host = (opts.hostContext ?? "").trim();
+  if (!inventories && !host) return "";
+  const parts = ["<working-set>"];
+  if (inventories) parts.push(inventories);
+  if (host) parts.push(host);
+  parts.push("</working-set>");
+  return parts.join("\n");
 }
 
 /** Collapse old turns into one handoff message. Runs on the cheap lane.
@@ -2434,8 +2461,11 @@ async function callModel(messages: Message[]): Promise<CallResult> {
   const proto = providerProtocol(route.provider);
   const imageRoots = [sessionFile ? dirname(sessionFile) : "", eventsDir].filter(Boolean);
   const requestMessages = toRequest(messages, imageRoots);
-  const anthropicMessages = proto === "anthropic-messages" ? stampHistoryCache(requestMessages) : requestMessages;
-  const kernelMessages = requestMessages.map((m) => ({
+  const overlay = formatOverlay({ messages, hostContext: hostContextSnapshot });
+  const overlayTail = overlay ? [{ role: "user" as const, content: overlay }] : [];
+  const historyForProvider = proto === "anthropic-messages" ? stampHistoryCache(requestMessages) : requestMessages;
+  const providerMessages = [...historyForProvider, ...overlayTail];
+  const kernelMessages = providerMessages.map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content as string | Array<Record<string, unknown>>,
   }));
@@ -2453,7 +2483,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
           cache_control: prefix.cache_control,
           system: prefix.system,
           tools: requestTools(prefix.tools, route.provider),
-          messages: anthropicMessages,
+          messages: providerMessages,
         }
       : proto === "openai-codex-responses"
         ? responsesBody(route.model, sys, kernelMessages, toolsForProvider, { maxTokens, cacheKey })
@@ -2806,15 +2836,13 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     removePendingImageFiles(eventsDir, done);
   }
   const context = eventsDir && terminalId ? readContextFiles(eventsDir, terminalId) : "";
+  hostContextSnapshot = context;
   if (eventsDir && terminalId) {
     const file = promptFileName(terminalId, bridgeId, randomUUID().slice(0, 8));
     const written = writePromptPayload(eventsDir, terminalId, file, { prompt, context, images });
     if (written) logEvent({ t: "prompt", file: written, hasPreflight: preflight !== null });
   }
-  if (context) {
-    pushMessage("user", context);
-    out("(host context injected)\n");
-  }
+  if (context) out("(host context injected)\n");
   const userMsg = pushUserPrompt(prompt, images);
   logEvent({
     t: "agent_start",
@@ -3499,6 +3527,7 @@ function dispatchLine(line: string): void {
     }
     history.length = 0;
     lastHandoff = null;
+    hostContextSnapshot = "";
     approveAll = process.env.TERMINA_CORE_APPROVE === "all";
     prevPrompt = null;
     postRevision = false;
