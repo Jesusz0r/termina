@@ -1711,6 +1711,7 @@ check(
   reasoned[0]?.type === "reasoning" &&
     reasoned[0]?.id === "rs_1" &&
     reasoned[0]?.encrypted_content === "enc" &&
+    reasoned[0]?.summary?.[0]?.text === "plan" &&
     reasoned[1]?.type === "function_call",
 );
 check("responses tools are non-strict", compat.toResponsesTools([{ name: "bash", description: "b", input_schema: { type: "object" } }])[0]?.strict === false);

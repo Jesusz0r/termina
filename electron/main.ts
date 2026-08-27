@@ -652,17 +652,14 @@ class PiEditorApp {
       {
         label: "Edit",
         submenu: [
-          // Cut, Copy, Paste, and Delete use system roles. The browser
-          // routes the edit command to the focused surface, and the role
-          // inherits the standard accelerator. Undo, Redo, and Select All
-          // dispatch to the renderer instead: the user can rebind them, and
-          // each surface keeps its own undo stack and selection.
+          // Copy and Paste route through the terminal when it has focus.
+          // System roles cannot read the terminal's canvas selection.
           { label: "Undo", accelerator: shortcut("undo"), click: send("undo") },
           { label: "Redo", accelerator: shortcut("redo"), click: send("redo") },
           { type: "separator" },
           { role: "cut" },
-          { role: "copy" },
-          { role: "paste" },
+          { label: "Copy", accelerator: shortcut("copy"), click: send("copy") },
+          { label: "Paste", accelerator: shortcut("paste"), click: send("paste") },
           { role: "pasteAndMatchStyle" },
           { role: "delete" },
           { type: "separator" },
@@ -4891,6 +4888,11 @@ class PiEditorApp {
       return { ok: true };
     });
     ipcMain.handle("clipboard:read", () => capUtf8(clipboard.readText(), MAX_CLIPBOARD_BYTES));
+    ipcMain.handle("clipboard:edit", (_e, command: unknown) => {
+      if (!this.win || this.win.isDestroyed()) return;
+      if (command === "copy") this.win.webContents.copy();
+      else if (command === "paste") this.win.webContents.paste();
+    });
     ipcMain.handle("terminals:paste", (_e, id: unknown) => this.pasteTerminal(id));
     ipcMain.handle("settings:get", () => {
       const next = normalizeAppPreferences(this.preferences);

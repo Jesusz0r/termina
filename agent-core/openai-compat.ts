@@ -142,7 +142,12 @@ export function toResponsesInput(messages: KernelMessage[]): Array<Record<string
           const id = typeof b.id === "string" ? b.id : "";
           const sig = typeof b.signature === "string" ? b.signature : "";
           if (!sig) continue;
-          const item: Record<string, unknown> = { type: "reasoning", encrypted_content: sig };
+          const thinking = typeof b.thinking === "string" ? b.thinking : "";
+          const item: Record<string, unknown> = {
+            type: "reasoning",
+            encrypted_content: sig,
+            summary: thinking ? [{ type: "summary_text", text: thinking }] : [],
+          };
           if (id) item.id = id;
           out.push(item);
           continue;

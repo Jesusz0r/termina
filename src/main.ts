@@ -1413,6 +1413,17 @@ function runMenuEdit(kind: "undo" | "redo" | "select-all"): void {
   else document.execCommand(kind);
 }
 
+function runClipboardCommand(command: "copy" | "paste"): void {
+  const pane = activeId ? panes.get(activeId) : undefined;
+  const term = pane?.view.getTerminal();
+  if (term?.textarea && document.activeElement === term.textarea) {
+    if (command === "copy") pane?.view.copySelection();
+    else void pane?.view.pasteClipboard();
+    return;
+  }
+  void window.pi.editClipboard(command);
+}
+
 const commands = new CommandDispatcher();
 
 // File & Explorer commands
@@ -1430,6 +1441,8 @@ commands.register("save-all", () => {
 // Edit commands
 commands.register("undo", () => runMenuEdit("undo"));
 commands.register("redo", () => runMenuEdit("redo"));
+commands.register("copy", () => runClipboardCommand("copy"));
+commands.register("paste", () => runClipboardCommand("paste"));
 commands.register("select-all", () => runMenuEdit("select-all"));
 
 // Terminal commands

@@ -460,6 +460,7 @@ export interface PiBridge {
   abortTerminal(id: string): Promise<void>; // sends Ctrl+C into the pty
   writeClipboard(text: string): Promise<{ ok: boolean; error?: string }>;
   readClipboard(): Promise<string>;
+  editClipboard(command: "copy" | "paste"): Promise<void>;
   /** Paste into a terminal. Core tabs attach clipboard images as files. */
   pasteTerminal(id: string): Promise<{ kind: "text"; text: string } | { kind: "image"; count: number }>;
 
