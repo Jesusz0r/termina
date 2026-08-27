@@ -781,19 +781,23 @@ export class AgentTui {
       const row = c ? `  ${c.name.padEnd(nameW)}  ${c.hint}` : "";
       lines.push(clip(row, cols));
     }
-    while (lines.length < rows - 1) lines.push(clip("", cols));
+    while (lines.length < rows - layout.header - 2) lines.push(clip("", cols));
+    lines.push(clip("─".repeat(Math.max(0, cols)), cols));
+    lines.push(clip(title, cols));
+    if (layout.header === 2) lines.push(clip(` ${this.usage}`, cols));
     lines.push(clip(foot, cols));
     if (lines.length > rows) lines.length = rows;
 
     const pos = cursorRowCol("> ", this.chars, this.cursor, cols);
-    const inputTop = layout.header + 1 + layout.transcript;
+    const inputTop = layout.transcript;
     const cursorRow = Math.min(rows, Math.max(1, Math.min(inputTop + layout.input, inputTop + pos.row + 1)));
     const cursorCol = Math.min(cols, Math.max(1, pos.col + 1));
     const slashTop = inputTop + layout.input;
+    const titleRow = rows - layout.header - 1;
     const painted: string[] = [];
     for (let i = 0; i < rows; i++) {
       const raw = lines[i] ?? clip("", cols);
-      if (i === 0) painted.push(`\x1b[7m${raw}\x1b[0m`);
+      if (i === titleRow) painted.push(`\x1b[7m${raw}\x1b[0m`);
       else if (i === rows - 1) painted.push(`\x1b[2m${raw}\x1b[0m`);
       else if (i >= slashTop && i < slashTop + layout.slash) {
         const si = i - slashTop;

@@ -2374,9 +2374,14 @@ tui.setStatus({
 });
 tui.append("hello from transcript\n");
 const frame = tui.frame();
-check("tui header names the kernel", frame.includes("termina agent-core v1"));
-check("tui header shows the model", frame.includes("anthropic/claude"));
-check("tui header shows effort", frame.includes("effort max"));
+const frameLines = frame.split("\n");
+check("tui status names the kernel", frame.includes("termina agent-core v1"));
+check("tui status shows the model", frame.includes("anthropic/claude"));
+check("tui status shows effort", frame.includes("effort max"));
+check(
+  "tui status stays at the bottom",
+  frameLines.at(-3)?.includes("anthropic/claude") && frameLines.at(-2)?.includes("cache 67%"),
+);
 const narrowTui = new tuiMod.AgentTui({
   stdout: { write: () => true, columns: 40, rows: 24, isTTY: false },
   stdin: { isTTY: false },
@@ -2399,7 +2404,7 @@ const imgTui = new tuiMod.AgentTui({
   onExit: () => {},
 });
 imgTui.append("x");
-check("tui header shows pending images", imgTui.frame().includes("2 images"));
+check("tui status shows pending images", imgTui.frame().includes("2 images"));
 const effortPicks = [];
 const effortTui = new tuiMod.AgentTui({
   stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
