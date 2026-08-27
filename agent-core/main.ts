@@ -757,8 +757,21 @@ function grepRipgrep(
   opts: { shouldStop?: () => boolean; budgetMs?: number },
 ): Promise<string> {
   const budgetMs = opts.budgetMs ?? GREP_BUDGET_MS;
+  if (budgetMs <= 0) return Promise.resolve("(grep timed out after 0 files)");
   const relSearch = searchAbs === root ? "." : posixRel(root, searchAbs);
-  const args = ["--color=never", "-n", "--no-heading", `--max-count=${GREP_HIT_CAP}`];
+  const args = [
+    "--color=never",
+    "-n",
+    "--no-heading",
+    "--with-filename",
+    "--hidden",
+    "--no-ignore-dot",
+    "--no-ignore-global",
+    "--no-ignore-parent",
+    "--no-require-git",
+    `--max-count=${GREP_HIT_CAP}`,
+  ];
+  for (const name of IGNORED_SEGMENTS) args.push("-g", `!**/${name}`, "-g", `!**/${name}/**`);
   if (glob) args.push("-g", glob);
   args.push("--", pattern, relSearch);
   return new Promise((resolve) => {
@@ -782,12 +795,17 @@ function grepRipgrep(
       if (errChunks.length < 8) errChunks.push(chunk.subarray(0, 2 * 1024));
     });
     let settled = false;
+    let timedOut = false;
     const finish = (code: number | null): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       clearInterval(poll);
       const text = Buffer.concat(chunks).toString("utf8").replace(/\n+$/, "");
+      if (timedOut) {
+        resolve(text ? `${text}\n(grep timed out)` : "(grep timed out)");
+        return;
+      }
       if (code === 2) {
         const err = Buffer.concat(errChunks).toString("utf8").trim().slice(0, 300);
         resolve(err ? `error: ${err}` : "error: invalid regular expression");
@@ -807,7 +825,10 @@ function grepRipgrep(
         /* already gone */
       }
     };
-    const timer = setTimeout(kill, budgetMs);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      kill();
+    }, budgetMs);
     const poll = setInterval(() => {
       if (opts.shouldStop?.()) kill();
     }, 50);
