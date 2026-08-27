@@ -1847,8 +1847,15 @@ function blockChars(b: ContentBlock): number {
   if (b.type === "text") return String((b as { text?: string }).text ?? "").length;
   if (b.type === "tool_result") return String((b as { content?: string }).content ?? "").length;
   if (b.type === "tool_use") return JSON.stringify((b as { input?: unknown }).input ?? {}).length;
+  if (b.type === "thinking" || b.type === "redacted_thinking") {
+    return String((b as { thinking?: string }).thinking ?? JSON.stringify(b)).length;
+  }
   if (b.type === "image") return 8_000;
   return 0;
+}
+
+function isThinkingBlock(b: { type?: string }): boolean {
+  return b.type === "thinking" || b.type === "redacted_thinking";
 }
 
 function isUserPrompt(m: { role: string; content: unknown }): boolean {
@@ -1939,19 +1946,25 @@ function pushUserPrompt(prompt: string, images: Array<{ name: string; mediaType:
 
 // ---- reclamation with hysteresis ----
 
-/** Pure planner: pick the oldest prunable tool results outside the protected
- *  recency window until the projected total falls under the low-water mark. */
+export type PruneAction = "stub" | "drop";
+export type PrunePick = { msgIndex: number; blockIndex: number; action: PruneAction };
+
+/** Pure planner: pick the oldest prunable tool results and thinking outside
+ *  the protected recency window until the projected total falls under the
+ *  low-water mark. */
 export function planPruneStubs(
   messages: Array<{ role: string; content: unknown; tokens: number }>,
-  opts: { systemTokens: number; usable: number; protectTokens: number },
-): Array<{ msgIndex: number; blockIndex: number }> {
-  const total =
+  opts: { systemTokens: number; usable: number; protectTokens: number; fillTokens?: number },
+): PrunePick[] {
+  const historyTotal =
     opts.systemTokens +
     messages.reduce((sum, m) => sum + m.tokens, 0);
+  const fill = opts.fillTokens ?? historyTotal;
   // Hysteresis lives on the fill level: act at the high-water mark, reclaim
   // down to the low-water mark. Between the marks: do nothing.
-  if (total < opts.usable * HIGH_WATER) return [];
-  const quota = total - opts.usable * LOW_WATER;
+  if (fill < opts.usable * HIGH_WATER) return [];
+  const quota = historyTotal - opts.usable * LOW_WATER;
+  if (quota <= 0) return [];
 
   // Walk from the newest message backwards marking the protected span: the
   // last PROTECT_TURNS user prompts plus PROTECT_TOKENS of context.
@@ -1975,8 +1988,8 @@ export function planPruneStubs(
     }
   }
 
-  // Oldest-first selection among unprotected bulky tool results.
-  const picks: Array<{ msgIndex: number; blockIndex: number }> = [];
+  // Oldest-first selection among unprotected bulky tool results and thinking.
+  const picks: PrunePick[] = [];
   let reclaimed = 0;
   for (let i = 0; i < messages.length && reclaimed < quota; i++) {
     if (protectedIdx.has(i)) continue;
@@ -1986,10 +1999,16 @@ export function planPruneStubs(
     for (let blockIndex = 0; blockIndex < blocks.length; blockIndex++) {
       if (reclaimed >= quota) break;
       const b = blocks[blockIndex]!;
-      if (b.type !== "tool_result") continue;
       const chars = blockChars(b);
-      if (chars < PRUNE_MIN_CHARS || b.stubbed) continue;
-      picks.push({ msgIndex: i, blockIndex });
+      if (chars < PRUNE_MIN_CHARS) continue;
+      if (isThinkingBlock(b)) {
+        if (blocks.filter((x) => !isThinkingBlock(x)).length === 0) continue;
+        picks.push({ msgIndex: i, blockIndex, action: "drop" });
+        reclaimed += Math.ceil(chars / 4);
+        continue;
+      }
+      if (b.type !== "tool_result" || b.stubbed) continue;
+      picks.push({ msgIndex: i, blockIndex, action: "stub" });
       reclaimed += Math.ceil(chars / 4);
     }
   }
@@ -2035,7 +2054,7 @@ export function replaySessionRecords(
       type?: string;
       message?: { role: string; content: ReplayMessage["content"] };
       kind?: string;
-      targets?: Array<{ sseq: number; blockIndex: number }>;
+      targets?: Array<{ sseq: number; blockIndex: number; action?: string }>;
       dropped?: number;
       evicted?: number;
       summarySseq?: number;
@@ -2057,12 +2076,26 @@ export function replaySessionRecords(
       messages.push(m);
       bySeq.set(m.sseq, m);
     } else if (e.type === "revision" && e.kind === "prune" && Array.isArray(e.targets)) {
-      for (const t of e.targets) {
+      const ordered = e.targets.slice().sort((a, b) => {
+        const as = a?.sseq ?? 0;
+        const bs = b?.sseq ?? 0;
+        if (as !== bs) return as - bs;
+        return (b?.blockIndex ?? 0) - (a?.blockIndex ?? 0);
+      });
+      for (const t of ordered) {
         if (!t || !Number.isInteger(t.sseq) || t.sseq < 1 || !Number.isInteger(t.blockIndex) || t.blockIndex < 0) {
           return { ok: false, error: "invalid prune target" };
         }
         const m = bySeq.get(t.sseq);
         if (!m || typeof m.content === "string") continue;
+        const action = t.action === "drop" ? "drop" : "stub";
+        if (action === "drop") {
+          const b = m.content[t.blockIndex] as ContentBlock | undefined;
+          if (!b || !isThinkingBlock(b)) continue;
+          if (m.content.filter((x) => !isThinkingBlock(x as ContentBlock)).length === 0) continue;
+          m.content.splice(t.blockIndex, 1);
+          continue;
+        }
         const b = m.content[t.blockIndex] as ContentBlock | undefined;
         if (!b || b.type !== "tool_result" || b.stubbed) continue;
         const stub = formatStub({
@@ -2098,6 +2131,7 @@ export function replaySessionRecords(
 }
 
 let postRevision = false;
+let lastBilledTokens: number | null = null;
 
 /** Apply the planner to the live view. Storage already holds the originals. */
 function reclaim(): number {
@@ -2107,33 +2141,46 @@ function reclaim(): number {
       systemTokens: tokenEstimate(systemPrompt()),
       usable: usableTokens(),
       protectTokens: protectTokens(),
+      fillTokens: lastBilledTokens ?? undefined,
     },
   );
-  let stubbedCount = 0;
-  const targets: Array<{ sseq: number; blockIndex: number }> = [];
+  let changed = 0;
+  const targets: Array<{ sseq: number; blockIndex: number; action: PruneAction }> = [];
   const touched = new Set<number>();
-  for (const pick of plan) {
+  const ordered = plan.slice().sort((a, b) => a.msgIndex - b.msgIndex || b.blockIndex - a.blockIndex);
+  for (const pick of ordered) {
     const m = history[pick.msgIndex]!;
     if (typeof m.content === "string") continue;
-    const b = (m.content as ContentBlock[])[pick.blockIndex];
-    if (!b || b.type !== "tool_result" || b.stubbed) continue;
+    const blocks = m.content as ContentBlock[];
+    const b = blocks[pick.blockIndex];
+    if (!b) continue;
+    if (pick.action === "drop") {
+      if (!isThinkingBlock(b)) continue;
+      if (blocks.filter((x) => !isThinkingBlock(x)).length === 0) continue;
+      blocks.splice(pick.blockIndex, 1);
+      changed++;
+      touched.add(pick.msgIndex);
+      targets.push({ sseq: m.sseq, blockIndex: pick.blockIndex, action: "drop" });
+      continue;
+    }
+    if (b.type !== "tool_result" || b.stubbed) continue;
     const c = blockChars(b);
     if (c < PRUNE_MIN_CHARS) continue;
     const stub = formatStub({ chars: c, tool: b.tool ?? "tool", sseq: m.sseq, repro: b.repro });
     (b as unknown as { content: string }).content = stub;
     b.chars = stub.length;
     b.stubbed = true;
-    stubbedCount++;
+    changed++;
     touched.add(pick.msgIndex);
-    targets.push({ sseq: m.sseq, blockIndex: pick.blockIndex });
+    targets.push({ sseq: m.sseq, blockIndex: pick.blockIndex, action: "stub" });
   }
   for (const i of touched) history[i]!.tokens = estimate(history[i]!);
-  if (stubbedCount > 0) {
+  if (changed > 0) {
     postRevision = true;
     revisions++;
     store({ type: "revision", kind: "prune", targets });
   }
-  return stubbedCount;
+  return changed;
 }
 
 /** Last resort when reclamation alone cannot fit the window: drop whole old
@@ -2761,6 +2808,7 @@ function reportUsage(
   }
   postRevision = false;
   prevPrompt = { total: cur, ts: Date.now() };
+  lastBilledTokens = cur;
   const rates = rateLookup?.(route.model) ?? null;
   let usd: number | null = null;
   if (rates) {
@@ -3528,6 +3576,7 @@ function dispatchLine(line: string): void {
     history.length = 0;
     lastHandoff = null;
     hostContextSnapshot = "";
+    lastBilledTokens = null;
     approveAll = process.env.TERMINA_CORE_APPROVE === "all";
     prevPrompt = null;
     postRevision = false;

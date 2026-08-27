@@ -512,6 +512,61 @@ const prunePlan = planPruneStubs(
   { systemTokens: 0, usable: 10_000, protectTokens: 10 },
 );
 check("planPruneStubs addresses exact blocks", prunePlan.map((p) => p.blockIndex).join(",") === "0,1");
+check("planPruneStubs stubs tool_results", prunePlan.every((p) => p.action === "stub"));
+const thinkPlan = planPruneStubs(
+  [
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "t".repeat(4_000) },
+        { type: "text", text: "hi" },
+      ],
+      tokens: 9_000,
+    },
+    { role: "user", content: "recent one", tokens: 10 },
+    { role: "user", content: "recent two", tokens: 10 },
+  ],
+  { systemTokens: 0, usable: 10_000, protectTokens: 10 },
+);
+check("planPruneStubs drops old thinking", thinkPlan.length === 1 && thinkPlan[0]?.action === "drop" && thinkPlan[0]?.blockIndex === 0);
+check(
+  "planPruneStubs billed high with small history is a no-op",
+  planPruneStubs(
+    [
+      { role: "user", content: [{ type: "tool_result", content: "a".repeat(8_000) }], tokens: 100 },
+      { role: "user", content: "a", tokens: 10 },
+      { role: "user", content: "b", tokens: 10 },
+    ],
+    { systemTokens: 0, usable: 10_000, protectTokens: 10, fillTokens: 9_000 },
+  ).length === 0,
+);
+const thinkReplay = [
+  JSON.stringify({
+    storageSeq: 1,
+    type: "message",
+    message: {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "secret" },
+        { type: "text", text: "ok" },
+      ],
+    },
+  }),
+  JSON.stringify({
+    storageSeq: 2,
+    type: "revision",
+    kind: "prune",
+    targets: [{ sseq: 1, blockIndex: 0, action: "drop" }],
+  }),
+].join("\n");
+const droppedThink = replaySessionRecords(thinkReplay);
+check(
+  "prune replay drops thinking and matches live",
+  droppedThink.ok &&
+    droppedThink.messages[0]?.content?.length === 1 &&
+    droppedThink.messages[0]?.content[0]?.type === "text" &&
+    droppedThink.messages[0]?.content[0]?.text === "ok",
+);
 
 const tools = [
   { name: "a", description: "a", input_schema: { type: "object", properties: {} } },
