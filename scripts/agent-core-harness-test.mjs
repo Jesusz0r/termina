@@ -2423,6 +2423,34 @@ check(
 );
 effortTui.feed("\x1b[B\r");
 check("tui effort picker submits max", effortPicks[0] === "/effort max");
+const shortcutLines = [];
+let shortcutInterrupts = 0;
+const shortcutTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: (line) => shortcutLines.push(line),
+  onInterrupt: () => shortcutInterrupts++,
+  onExit: () => {},
+});
+shortcutTui.setModelRows([
+  { name: "anthropic/a", hint: "a", submit: "/model anthropic/a" },
+  { name: "anthropic/b", hint: "b", submit: "/model anthropic/b" },
+  { name: "anthropic/c", hint: "c", submit: "/model anthropic/c" },
+]);
+shortcutTui.setEffortLevels(["low", "max"]);
+shortcutTui.setStatus({ model: "anthropic/b", effort: "low" });
+shortcutTui.feed("\x0c");
+check("Ctrl+L opens the model picker", shortcutTui.frame().includes("anthropic/a"));
+shortcutTui.feed("\x10");
+shortcutTui.feed("\x1b[112;6u");
+shortcutTui.feed("\x1b[Z");
+shortcutTui.feed("\x1b");
+check("Escape cancels the model picker", !shortcutTui.frame().includes("> /models"));
+shortcutTui.feed("\x1b");
+check("Ctrl+P cycles models forward", shortcutLines[0] === "/model anthropic/c");
+check("Ctrl+Shift+P cycles models backward", shortcutLines[1] === "/model anthropic/a");
+check("Shift+Tab cycles effort", shortcutLines[2] === "/effort max");
+check("Escape interrupts", shortcutInterrupts === 1);
 check("tui transcript is visible", frame.includes("hello from transcript"));
 tui.feed("/");
 check("tui slash menu lists help and exit", tui.frame().includes("/help") && tui.frame().includes("/exit"));
@@ -2505,8 +2533,8 @@ const nlTui = new tuiMod.AgentTui({
   onInterrupt: () => {},
   onExit: () => {},
 });
-nlTui.feed("ab\ncd\r");
-check("ctrl-j inserts a newline", nlLines[0] === "ab\ncd");
+nlTui.feed("ab\x1b[13;2ucd\r");
+check("Shift+Enter inserts a newline", nlLines[0] === "ab\ncd");
 const killLines = [];
 const killTui = new tuiMod.AgentTui({
   stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
@@ -2517,6 +2545,20 @@ const killTui = new tuiMod.AgentTui({
 });
 killTui.feed("one two\x17\r");
 check("ctrl-w kills the last word", killLines[0] === "one");
+const editLines = [];
+const editTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: (line) => editLines.push(line),
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+editTui.setDraft("one two");
+editTui.feed("\x1bb\x0b\r");
+check("Alt+B and Ctrl+K edit by word and line", editLines[0] === "one");
+editTui.setDraft("ab\ncd");
+editTui.feed("\x01X\x05Y\r");
+check("Ctrl+A and Ctrl+E use the current line", editLines[1] === "ab\nXcdY");
 const draftLines = [];
 const draftTui = new tuiMod.AgentTui({
   stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },

@@ -408,6 +408,16 @@ export class AgentTui {
   }
 
   feed(text: string): void {
+    if (text === "\x1b") {
+      this.esc = 0;
+      if (this.matches().length > 0) {
+        this.chars = [];
+        this.cursor = 0;
+        this.slashIndex = 0;
+        this.schedule();
+      } else this.onInterrupt();
+      return;
+    }
     for (const ch of text) this.handleChar(ch);
   }
 
@@ -504,11 +514,17 @@ export class AgentTui {
       }
       if (ch === "\x1b") return;
       this.esc = 0;
+      if (ch === "b") this.moveWord(-1);
+      else if (ch === "f") this.moveWord(1);
+      else if (ch === "d") this.deleteWord(1);
+      else if (ch === "\x7f") this.deleteWord(-1);
+      else if (ch === "\r") this.submitLine();
+      this.schedule();
       return;
     }
     if (this.esc === 3) {
-      if (ch === "H") this.cursor = 0;
-      else if (ch === "F") this.cursor = this.chars.length;
+      if (ch === "H") this.cursor = this.lineStart();
+      else if (ch === "F") this.cursor = this.lineEnd();
       this.esc = 0;
       this.schedule();
       return;
@@ -574,6 +590,35 @@ export class AgentTui {
       }
       return;
     }
+    if (ch === "\x02") {
+      this.cursor = Math.max(0, this.cursor - 1);
+      this.schedule();
+      return;
+    }
+    if (ch === "\x06") {
+      this.cursor = Math.min(this.chars.length, this.cursor + 1);
+      this.schedule();
+      return;
+    }
+    if (ch === "\x04") {
+      if (this.cursor < this.chars.length) this.chars.splice(this.cursor, 1);
+      else if (this.chars.length === 0) this.onExit();
+      this.schedule();
+      return;
+    }
+    if (ch === "\x0b") {
+      this.chars.splice(this.cursor, this.lineEnd() - this.cursor);
+      this.schedule();
+      return;
+    }
+    if (ch === "\x0c") {
+      this.openModelPicker();
+      return;
+    }
+    if (ch === "\x10") {
+      this.cycleModel(1);
+      return;
+    }
     if (ch === "\t") {
       if (this.rawInput) return;
       const next = completeSlashLine(this.chars.join(""), this.commands, this.modelRows, this.effortRows);
@@ -584,34 +629,25 @@ export class AgentTui {
       return;
     }
     if (ch === "\x01") {
-      this.cursor = 0;
+      this.cursor = this.lineStart();
       this.schedule();
       return;
     }
     if (ch === "\x05") {
-      this.cursor = this.chars.length;
+      this.cursor = this.lineEnd();
       this.schedule();
       return;
     }
-    if (ch === "\x0c") {
-      this.render();
-      return;
-    }
     if (ch === "\x15") {
-      this.chars = [];
-      this.cursor = 0;
+      const start = this.lineStart();
+      this.chars.splice(start, this.cursor - start);
+      this.cursor = start;
       this.slashIndex = 0;
       this.schedule();
       return;
     }
     if (ch === "\x17") {
-      if (this.cursor === 0) return;
-      let i = this.cursor;
-      while (i > 0 && (this.chars[i - 1] === " " || this.chars[i - 1] === "\n")) i--;
-      while (i > 0 && this.chars[i - 1] !== " " && this.chars[i - 1] !== "\n") i--;
-      this.chars.splice(i, this.cursor - i);
-      this.cursor = i;
-      this.slashIndex = 0;
+      this.deleteWord(-1);
       this.schedule();
       return;
     }
@@ -625,6 +661,62 @@ export class AgentTui {
     this.slashIndex = 0;
     this.histIndex = -1;
     this.schedule();
+  }
+
+  private lineStart(): number {
+    return this.chars.lastIndexOf("\n", this.cursor - 1) + 1;
+  }
+
+  private lineEnd(): number {
+    const end = this.chars.indexOf("\n", this.cursor);
+    return end < 0 ? this.chars.length : end;
+  }
+
+  private moveWord(direction: -1 | 1): void {
+    if (direction < 0) {
+      while (this.cursor > 0 && /\s/.test(this.chars[this.cursor - 1]!)) this.cursor--;
+      while (this.cursor > 0 && !/\s/.test(this.chars[this.cursor - 1]!)) this.cursor--;
+    } else {
+      while (this.cursor < this.chars.length && /\s/.test(this.chars[this.cursor]!)) this.cursor++;
+      while (this.cursor < this.chars.length && !/\s/.test(this.chars[this.cursor]!)) this.cursor++;
+    }
+  }
+
+  private deleteWord(direction: -1 | 1): void {
+    const from = this.cursor;
+    this.moveWord(direction);
+    const start = Math.min(from, this.cursor);
+    this.chars.splice(start, Math.abs(from - this.cursor));
+    this.cursor = start;
+    this.slashIndex = 0;
+  }
+
+  private openModelPicker(): void {
+    if (this.modelRows.length === 0) {
+      this.onSubmit("/models");
+      return;
+    }
+    this.chars = [..."/models"];
+    this.cursor = this.chars.length;
+    this.slashIndex = Math.max(0, this.modelRows.findIndex((row) => row.name === this.model));
+    this.schedule();
+  }
+
+  private cycleModel(direction: -1 | 1): void {
+    if (this.modelRows.length === 0) return;
+    const current = this.modelRows.findIndex((row) => row.name === this.model);
+    const base = current >= 0 ? current : direction > 0 ? -1 : 0;
+    const index = (base + direction + this.modelRows.length) % this.modelRows.length;
+    const command = this.modelRows[index]?.submit;
+    if (command) this.onSubmit(command);
+  }
+
+  private cycleEffort(): void {
+    if (this.effortRows.length === 0) return;
+    const current = this.effortRows.findIndex((row) => row.name === this.effort);
+    const index = (current + 1 + this.effortRows.length) % this.effortRows.length;
+    const command = this.effortRows[index]?.submit;
+    if (command) this.onSubmit(command);
   }
 
   private applyCsi(params: string, final: string): void {
@@ -646,18 +738,34 @@ export class AgentTui {
       else if (params === "201") this.paste = false;
       else if (params === "3") {
         if (this.cursor < this.chars.length) this.chars.splice(this.cursor, 1);
-      } else if (params === "5") this.scrollBy(1);
+      } else if (params === "3;3") this.deleteWord(1);
+      else if (params === "5") this.scrollBy(1);
       else if (params === "6") this.scrollBy(-1);
       this.schedule();
       return;
     }
+    if (final === "Z") {
+      this.cycleEffort();
+      return;
+    }
+    if (final === "u") {
+      if (params === "13;2") this.insert("\n");
+      else if (params === "9;2") this.cycleEffort();
+      else if (params === "112;6") this.cycleModel(-1);
+      return;
+    }
     const n = Number.parseInt(params || "1", 10) || 1;
+    const word = params.endsWith(";3") || params.endsWith(";5");
     if (final === "A") this.moveUp(n);
     else if (final === "B") this.moveDown(n);
-    else if (final === "C") this.cursor = Math.min(this.chars.length, this.cursor + n);
-    else if (final === "D") this.cursor = Math.max(0, this.cursor - n);
-    else if (final === "H") this.cursor = 0;
-    else if (final === "F") this.cursor = this.chars.length;
+    else if (final === "C") {
+      if (word) this.moveWord(1);
+      else this.cursor = Math.min(this.chars.length, this.cursor + n);
+    } else if (final === "D") {
+      if (word) this.moveWord(-1);
+      else this.cursor = Math.max(0, this.cursor - n);
+    } else if (final === "H") this.cursor = this.lineStart();
+    else if (final === "F") this.cursor = this.lineEnd();
     this.schedule();
   }
 
@@ -671,7 +779,7 @@ export class AgentTui {
       this.slashIndex = Math.max(0, this.slashIndex - n);
       return;
     }
-    this.historyBy(-n);
+    if (!this.moveVertical(-n)) this.historyBy(-n);
   }
 
   private moveDown(n: number): void {
@@ -684,7 +792,30 @@ export class AgentTui {
       this.slashIndex = Math.min(matches.length - 1, this.slashIndex + n);
       return;
     }
-    this.historyBy(n);
+    if (!this.moveVertical(n)) this.historyBy(n);
+  }
+
+  private moveVertical(delta: number): boolean {
+    let moved = false;
+    for (let step = 0; step < Math.abs(delta); step++) {
+      const start = this.lineStart();
+      const end = this.lineEnd();
+      const col = this.cursor - start;
+      if (delta < 0) {
+        if (start === 0) break;
+        const previousEnd = start - 1;
+        const previousStart = this.chars.lastIndexOf("\n", previousEnd - 1) + 1;
+        this.cursor = Math.min(previousStart + col, previousEnd);
+      } else {
+        if (end === this.chars.length) break;
+        const nextStart = end + 1;
+        const nextBreak = this.chars.indexOf("\n", nextStart);
+        const nextEnd = nextBreak < 0 ? this.chars.length : nextBreak;
+        this.cursor = Math.min(nextStart + col, nextEnd);
+      }
+      moved = true;
+    }
+    return moved;
   }
 
   private historyBy(delta: number): void {
@@ -770,9 +901,6 @@ export class AgentTui {
         : " / commands · Tab complete · Ctrl+J newline · PgUp/PgDn scroll · Ctrl+C clear ";
 
     const lines: string[] = [];
-    lines.push(clip(title, cols));
-    if (layout.header === 2) lines.push(clip(` ${this.usage}`, cols));
-    lines.push(clip("─".repeat(Math.max(0, cols)), cols));
     for (let i = 0; i < layout.transcript; i++) lines.push(clip(view[i] ?? "", cols));
     const inputShown = inputWrapped.slice(0, layout.input);
     for (let i = 0; i < layout.input; i++) lines.push(clip(inputShown[i] ?? "", cols));

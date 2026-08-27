@@ -100,8 +100,14 @@ export class PtyView {
     const mac = isMacPlatform();
     const newlineCombo = event.key === "Enter" && !event.altKey &&
       (event.shiftKey || event.ctrlKey || (mac && event.metaKey));
+    const modelBackCombo = event.key.toLowerCase() === "p" && event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey;
     if (!event.metaKey && !event.ctrlKey && !event.altKey && !newlineCombo) return true;
     const key = event.key.toLowerCase();
+    if (modelBackCombo) {
+      event.preventDefault();
+      this.sendInput("\x1b[112;6u");
+      return false;
+    }
     if (key === "c" && this.term.hasSelection()) {
       event.preventDefault();
       this.copySelection();
