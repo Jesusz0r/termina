@@ -84,13 +84,18 @@ const {
   stampHistoryCache,
   formatOverlay,
   retryAfter,
-  parseThinkingCommand,
+  parseEffortCommand,
+  supportedEffortLevels,
+  clampEffortLevel,
   thinkingEnabledFor,
   thinkingRequestFor,
+  adaptiveEffortFor,
+  effectiveEffortFor,
   reasoningEffortFor,
   outputTokenBudget,
   defaultContextWindow,
   tokenEstimate,
+  formatUsageIndicators,
   fetchUrl,
   fetchUrlError,
 } = core;
@@ -1644,6 +1649,8 @@ check(
   "codex responses set cache key and max_output_tokens",
   bodyCodex.prompt_cache_key === "def" && bodyCodex.max_output_tokens === 32_768,
 );
+const bodyMaxEffort = compat.responsesBody("gpt-5.6-sol", "sys", [], [], { reasoningEffort: "max" });
+check("responses body keeps max reasoning effort", bodyMaxEffort.reasoning?.effort === "max");
 check(
   "responses body asks for encrypted reasoning",
   Array.isArray(bodyCodex.include) && bodyCodex.include.includes("reasoning.encrypted_content"),
@@ -2102,63 +2109,107 @@ check("slash menu puts help first", SLASH_COMMANDS[0]?.name === "/help");
 check("slash menu puts exit last", SLASH_COMMANDS.at(-1)?.name === "/exit");
 check("slash /clear is listed", SLASH_COMMANDS.some((c) => c.name === "/clear"));
 check("slash /compact is listed", SLASH_COMMANDS.some((c) => c.name === "/compact"));
-check("slash /thinking is listed", SLASH_COMMANDS.some((c) => c.name === "/thinking"));
+check("slash /effort is listed", SLASH_COMMANDS.some((c) => c.name === "/effort"));
 check(
-  "slash /thinking lists off first",
-  matchingSlashCommands("/thinking")[0]?.submit === "/thinking off" &&
-    matchingSlashCommands("/thinking").some((c) => c.submit === "/thinking on"),
+  "slash /effort lists the full default range",
+  matchingSlashCommands("/effort").map((c) => c.name).join(" ") === "off minimal low medium high xhigh max",
 );
-check("slash /thinking o matches off", matchingSlashCommands("/thinking o")[0]?.submit === "/thinking off");
-check("parseThinkingCommand missing is null", parseThinkingCommand("/model") === null);
-check("parseThinkingCommand bare shows", parseThinkingCommand("/thinking")?.show === true);
-check("parseThinkingCommand on", parseThinkingCommand("/thinking on")?.enabled === true);
-check("parseThinkingCommand off", parseThinkingCommand("/thinking off")?.enabled === false);
-check("parseThinkingCommand rejects junk", typeof parseThinkingCommand("/thinking maybe")?.error === "string");
-check("thinkingEnabledFor default off", thinkingEnabledFor("claude-sonnet-5", false) === false);
-check("thinkingEnabledFor sonnet on", thinkingEnabledFor("claude-sonnet-5", true) === true);
-check("thinkingEnabledFor haiku stays off", thinkingEnabledFor("claude-haiku-4-5", true) === false);
-check("thinkingEnabledFor gpt on", thinkingEnabledFor("gpt-5.6-sol", true) === true);
-check("thinkingEnabledFor gpt default off", thinkingEnabledFor("gpt-5.6-sol", false) === false);
-check("thinkingEnabledFor gemini stays off", thinkingEnabledFor("gemini-3.7-flash", true) === false);
-check("thinkingEnabledFor fable stays on", thinkingEnabledFor("claude-fable-5", false) === true);
-check("reasoningEffortFor gpt off is none", reasoningEffortFor("gpt-5.6-sol", false) === "none");
-check("reasoningEffortFor gpt on is medium", reasoningEffortFor("gpt-5.6-sol", true) === "medium");
-check("reasoningEffortFor grok off is low", reasoningEffortFor("grok-4.6", false) === "low");
-check("reasoningEffortFor o-series off is low", reasoningEffortFor("o3", false) === "low");
-check("reasoningEffortFor gpt-5.3-codex off is low", reasoningEffortFor("gpt-5.3-codex", false) === "low");
-check("reasoningEffortFor claude is omitted", reasoningEffortFor("claude-sonnet-5", true) === undefined);
+check("slash /effort x matches xhigh", matchingSlashCommands("/effort x")[0]?.submit === "/effort xhigh");
+check("parseEffortCommand missing is null", parseEffortCommand("/model") === null);
+check("parseEffortCommand bare shows", parseEffortCommand("/effort")?.show === true);
+check("parseEffortCommand max", parseEffortCommand("/effort max")?.effort === "max");
+check("parseEffortCommand xhigh", parseEffortCommand("/effort xhigh")?.effort === "xhigh");
+check("parseEffortCommand rejects junk", typeof parseEffortCommand("/effort ultra")?.error === "string");
+check(
+  "gpt 5.6 exposes xhigh and max",
+  supportedEffortLevels("openai", "gpt-5.6-sol").join(" ") === "off minimal low medium high xhigh max",
+);
+check(
+  "gpt 5.4 exposes xhigh but not max",
+  supportedEffortLevels("openai", "gpt-5.4").join(" ") === "off minimal low medium high xhigh",
+);
+check(
+  "claude opus 4.6 exposes max but not xhigh",
+  supportedEffortLevels("anthropic", "claude-opus-4-6").join(" ") === "off minimal low medium high max",
+);
+check(
+  "claude sonnet 5 exposes xhigh and max",
+  supportedEffortLevels("anthropic", "claude-sonnet-5").join(" ") === "off minimal low medium high xhigh max",
+);
+check(
+  "legacy claude omits extended effort",
+  supportedEffortLevels("anthropic", "claude-sonnet-4-5").join(" ") === "off minimal low medium high",
+);
+check("unsupported max clamps down to xhigh", clampEffortLevel("openai", "gpt-5.4", "max") === "xhigh");
+check("grok off clamps up to low", clampEffortLevel("xai", "grok-4.6", "off") === "low");
+check("thinkingEnabledFor default off", thinkingEnabledFor("anthropic", "claude-sonnet-5", "off") === false);
+check("thinkingEnabledFor sonnet high", thinkingEnabledFor("anthropic", "claude-sonnet-5", "high") === true);
+check("thinkingEnabledFor haiku supports effort", thinkingEnabledFor("anthropic", "claude-haiku-4-5", "high") === true);
+check("thinkingEnabledFor gpt high", thinkingEnabledFor("openai", "gpt-5.6-sol", "high") === true);
+check("thinkingEnabledFor gemini stays off", thinkingEnabledFor("google", "gemini-3.7-flash", "high") === false);
+check("thinkingEnabledFor gpt 4 stays off", thinkingEnabledFor("openai", "gpt-4.1", "high") === false);
+check("thinkingEnabledFor fable stays on", thinkingEnabledFor("anthropic", "claude-fable-5", "off") === true);
+check("reasoningEffortFor gpt off is none", reasoningEffortFor("openai", "gpt-5.6-sol", "off") === "none");
+check("reasoningEffortFor gpt minimal maps low", reasoningEffortFor("openai", "gpt-5.6-sol", "minimal") === "low");
+check("reasoningEffortFor gpt max stays max", reasoningEffortFor("openai", "gpt-5.6-sol", "max") === "max");
+check("reasoningEffortFor grok off is low", reasoningEffortFor("xai", "grok-4.6", "off") === "low");
+check("reasoningEffortFor o-series off is low", reasoningEffortFor("openai", "o3", "off") === "low");
+check("reasoningEffortFor claude is omitted", reasoningEffortFor("anthropic", "claude-sonnet-5", "high") === undefined);
 check("defaultContextWindow anthropic is 1M", defaultContextWindow("anthropic", "claude-sonnet-5") === 1_000_000);
 check("defaultContextWindow haiku is 200k", defaultContextWindow("anthropic", "claude-haiku-4-5") === 200_000);
 check("defaultContextWindow openai is 1.05M", defaultContextWindow("openai", "gpt-5.6-sol") === 1_050_000);
 check("defaultContextWindow xai is 500k", defaultContextWindow("xai", "grok-4.6") === 500_000);
 check("tokenEstimate is conservative", tokenEstimate("abcd") === 2);
+const usageIndicators = formatUsageIndicators(
+  { input: 500, cacheRead: 1_000, cacheWrite: 0, output: 250 },
+  20_000,
+  200_000,
+  0.0123,
+);
+check(
+  "usage indicators show tokens, cache, context, and cost",
+  usageIndicators === "tokens 1.5K in/250 out · cache 67% · context ~20K/200K 10% · last $0.0123",
+);
+check(
+  "usage indicators handle unknown and invalid values",
+  formatUsageIndicators({ input: Number.NaN, cacheRead: Number.POSITIVE_INFINITY, cacheWrite: -1, output: -2 }, Number.NaN, Number.POSITIVE_INFINITY, Number.NaN) ===
+    "tokens 0 in/0 out · cache -- · context ~0/1 0%",
+);
 check("outputTokenBudget off is output cap", outputTokenBudget({ thinking: false }) === 16_384);
 check("outputTokenBudget on is a single cap", outputTokenBudget({ thinking: true }) === 32_768);
 check(
   "thinkingRequestFor sonnet 5 off is disabled",
-  JSON.stringify(thinkingRequestFor("claude-sonnet-5", false)) === JSON.stringify({ type: "disabled" }),
+  JSON.stringify(thinkingRequestFor("anthropic", "claude-sonnet-5", "off")) === JSON.stringify({ type: "disabled" }),
 );
 check(
-  "thinkingRequestFor sonnet 5 on is adaptive",
-  JSON.stringify(thinkingRequestFor("claude-sonnet-5", true)) ===
+  "thinkingRequestFor sonnet 5 high is adaptive",
+  JSON.stringify(thinkingRequestFor("anthropic", "claude-sonnet-5", "high")) ===
     JSON.stringify({ type: "adaptive", display: "summarized" }),
 );
+check("adaptive sonnet 5 keeps xhigh", adaptiveEffortFor("anthropic", "claude-sonnet-5", "xhigh") === "xhigh");
+check("adaptive sonnet 5 keeps max", adaptiveEffortFor("anthropic", "claude-sonnet-5", "max") === "max");
+check("adaptive effort maps minimal to low", adaptiveEffortFor("anthropic", "claude-sonnet-5", "minimal") === "low");
 check(
-  "thinkingRequestFor sonnet 4.6 on is adaptive",
-  JSON.stringify(thinkingRequestFor("claude-sonnet-4-6", true)) ===
-    JSON.stringify({ type: "adaptive", display: "summarized" }),
+  "thinkingRequestFor legacy sonnet uses low budget",
+  JSON.stringify(thinkingRequestFor("anthropic", "claude-sonnet-4-5", "low")) ===
+    JSON.stringify({ type: "enabled", budget_tokens: 2_048 }),
 );
 check(
-  "thinkingRequestFor sonnet 4.5 on is budget",
-  JSON.stringify(thinkingRequestFor("claude-sonnet-4-5", true)) ===
+  "thinkingRequestFor legacy sonnet uses high budget",
+  JSON.stringify(thinkingRequestFor("anthropic", "claude-sonnet-4-5", "high")) ===
     JSON.stringify({ type: "enabled", budget_tokens: 16_384 }),
 );
-check("thinkingRequestFor sonnet 4.5 off is omitted", thinkingRequestFor("claude-sonnet-4-5", false) === undefined);
-check("thinkingRequestFor haiku is omitted", thinkingRequestFor("claude-haiku-4-5", true) === undefined);
-check("thinkingRequestFor gpt is omitted", thinkingRequestFor("gpt-5.6-sol", true) === undefined);
+check("thinkingRequestFor legacy sonnet off is omitted", thinkingRequestFor("anthropic", "claude-sonnet-4-5", "off") === undefined);
+check(
+  "thinkingRequestFor haiku uses a budget",
+  JSON.stringify(thinkingRequestFor("anthropic", "claude-haiku-4-5", "low")) ===
+    JSON.stringify({ type: "enabled", budget_tokens: 2_048 }),
+);
+check("thinkingRequestFor gpt is omitted", thinkingRequestFor("openai", "gpt-5.6-sol", "high") === undefined);
+check("fable off clamps to minimal", effectiveEffortFor("anthropic", "claude-fable-5", "off") === "minimal");
 check(
   "thinkingRequestFor fable off stays adaptive",
-  JSON.stringify(thinkingRequestFor("claude-fable-5", false)) ===
+  JSON.stringify(thinkingRequestFor("anthropic", "claude-fable-5", "off")) ===
     JSON.stringify({ type: "adaptive", display: "summarized" }),
 );
 
@@ -2300,7 +2351,7 @@ check("wrapText keeps newlines", tuiMod.wrapText("ab\ncd", 10).join("|") === "ab
 check("wrapText counts a code point as one cell", tuiMod.wrapText("👍👍", 1).join("|") === "👍|👍");
 check(
   "layoutHeights keeps a transcript",
-  tuiMod.layoutHeights(24, 1, 7).transcript >= 2 && tuiMod.layoutHeights(24, 1, 7).header === 1,
+  tuiMod.layoutHeights(24, 1, 7).transcript >= 2 && tuiMod.layoutHeights(24, 1, 7).header === 2,
 );
 check("layoutHeights fits a tiny screen", tuiMod.layoutHeights(5, 1, 7).transcript >= 1 && tuiMod.layoutHeights(5, 1, 7).slash < 7);
 const visSrc = Array.from({ length: 80 }, (_, i) => `L${String(i).padStart(2, "0")}`).join("\n") + "\n";
@@ -2315,11 +2366,30 @@ const tui = new tuiMod.AgentTui({
   onInterrupt: () => {},
   onExit: () => exits.push(true),
 });
-tui.setStatus({ model: "anthropic/claude", auth: "oauth" });
+tui.setStatus({
+  model: "anthropic/claude",
+  auth: "oauth",
+  effort: "max",
+  usage: usageIndicators,
+});
 tui.append("hello from transcript\n");
 const frame = tui.frame();
 check("tui header names the kernel", frame.includes("termina agent-core v1"));
 check("tui header shows the model", frame.includes("anthropic/claude"));
+check("tui header shows effort", frame.includes("effort max"));
+const narrowTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 40, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+narrowTui.setStatus({ model: "openrouter/a-very-long-model-name", effort: "max" });
+check("tui keeps effort visible with a long model", narrowTui.frame().includes("effort max"));
+check("tui status shows token usage", frame.includes("tokens 1.5K in/250 out"));
+check("tui status shows cache", frame.includes("cache 67%"));
+check("tui status shows context", frame.includes("context ~20K/200K 10%"));
+check("tui status keeps cost visible at 80 columns", frame.includes("$0.0123"));
 const imgTui = new tuiMod.AgentTui({
   stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
   stdin: { isTTY: false },
@@ -2330,6 +2400,24 @@ const imgTui = new tuiMod.AgentTui({
 });
 imgTui.append("x");
 check("tui header shows pending images", imgTui.frame().includes("2 images"));
+const effortPicks = [];
+const effortTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: (line) => effortPicks.push(line),
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+effortTui.setEffortLevels(["low", "max"]);
+effortTui.feed("/effort");
+check(
+  "tui effort picker shows only supported levels",
+  effortTui.frame().includes("use low reasoning effort") &&
+    effortTui.frame().includes("use maximum reasoning effort") &&
+    !effortTui.frame().includes("use medium reasoning effort"),
+);
+effortTui.feed("\x1b[B\r");
+check("tui effort picker submits max", effortPicks[0] === "/effort max");
 check("tui transcript is visible", frame.includes("hello from transcript"));
 tui.feed("/");
 check("tui slash menu lists help and exit", tui.frame().includes("/help") && tui.frame().includes("/exit"));

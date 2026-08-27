@@ -16,15 +16,26 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/resume", hint: "replay the stored session" },
   { name: "/clear", hint: "start a new empty session" },
   { name: "/compact", hint: "reclaim and summarize context" },
-  { name: "/thinking", hint: "show or set thinking" },
+  { name: "/effort", hint: "show or set reasoning effort" },
   { name: "/exit", hint: "quit the engine" },
 ];
 
-function thinkingCommandRows(): SlashCommand[] {
-  return [
-    { name: "off", hint: "disable thinking", submit: "/thinking off" },
-    { name: "on", hint: "enable thinking", submit: "/thinking on" },
-  ];
+const EFFORT_HINTS: Record<string, string> = {
+  off: "disable reasoning",
+  minimal: "use minimal reasoning effort",
+  low: "use low reasoning effort",
+  medium: "use medium reasoning effort",
+  high: "use high reasoning effort",
+  xhigh: "use extra-high reasoning effort",
+  max: "use maximum reasoning effort",
+};
+
+function effortCommandRows(levels: readonly string[] = Object.keys(EFFORT_HINTS)): SlashCommand[] {
+  return levels.map((level) => ({
+    name: level,
+    hint: EFFORT_HINTS[level] ?? "use this reasoning effort",
+    submit: `/effort ${level}`,
+  }));
 }
 
 function authCommandRows(cmd: "/login" | "/logout"): SlashCommand[] {
@@ -72,6 +83,7 @@ export function matchingSlashCommands(
   line: string,
   commands: SlashCommand[] = SLASH_COMMANDS,
   modelRows: SlashCommand[] = [],
+  effortRows: SlashCommand[] = effortCommandRows(),
 ): SlashCommand[] {
   if (!line.startsWith("/")) return [];
   const space = line.indexOf(" ");
@@ -96,13 +108,12 @@ export function matchingSlashCommands(
     if (!rest) return modelRows;
     return modelRows.filter((c) => pickerRowMatches(`/model ${rest}`, c));
   }
-  if (head === "/thinking") {
-    if (space < 0 && line !== "/thinking") {
+  if (head === "/effort") {
+    if (space < 0 && line !== "/effort") {
       return commands.filter((c) => c.name.startsWith(line));
     }
-    const rows = thinkingCommandRows();
-    if (space < 0) return rows;
-    return rows.filter((c) => pickerRowMatches(line, c));
+    if (space < 0) return effortRows;
+    return effortRows.filter((c) => pickerRowMatches(line, c));
   }
   if (space >= 0) return [];
   return commands.filter((c) => c.name.startsWith(line));
@@ -112,8 +123,9 @@ export function completeSlashLine(
   line: string,
   commands: SlashCommand[] = SLASH_COMMANDS,
   modelRows: SlashCommand[] = [],
+  effortRows: SlashCommand[] = effortCommandRows(),
 ): string {
-  const matches = matchingSlashCommands(line, commands, modelRows);
+  const matches = matchingSlashCommands(line, commands, modelRows, effortRows);
   if (matches.length === 0) return line;
   if (matches.length === 1) {
     if (matches[0]!.submit) return line;
@@ -166,7 +178,7 @@ export function layoutHeights(
   inputLines: number,
   slashCount: number,
 ): { header: number; transcript: number; input: number; slash: number; footer: number } {
-  const header = 1;
+  const header = rows >= 6 ? 2 : 1;
   const footer = 1;
   const sep = 1;
   const minTranscript = 1;
@@ -247,6 +259,7 @@ export class AgentTui {
   private rawInput = false;
   private model = "";
   private auth = "";
+  private effort = "off";
   private usage = "";
   private pendingImages: () => number = () => 0;
   private busy = false;
@@ -259,6 +272,7 @@ export class AgentTui {
   private lastPainted: string[] | null = null;
   private lastDim = { cols: 0, rows: 0 };
   private modelRows: SlashCommand[] = [];
+  private effortRows: SlashCommand[] = effortCommandRows();
 
   constructor(opts: {
     stdout: TuiIO;
@@ -282,15 +296,21 @@ export class AgentTui {
     return this.started;
   }
 
-  setStatus(status: { model?: string; auth?: string; usage?: string }): void {
+  setStatus(status: { model?: string; auth?: string; effort?: string; usage?: string }): void {
     if (status.model !== undefined) this.model = status.model;
     if (status.auth !== undefined) this.auth = status.auth;
+    if (status.effort !== undefined) this.effort = status.effort;
     if (status.usage !== undefined) this.usage = status.usage;
     this.schedule();
   }
 
   setModelRows(rows: SlashCommand[]): void {
     this.modelRows = rows;
+    this.schedule();
+  }
+
+  setEffortLevels(levels: readonly string[]): void {
+    this.effortRows = effortCommandRows(levels);
     this.schedule();
   }
 
@@ -420,12 +440,12 @@ export class AgentTui {
 
   private matches(): SlashCommand[] {
     if (this.rawInput) return [];
-    return matchingSlashCommands(this.chars.join(""), this.commands, this.modelRows);
+    return matchingSlashCommands(this.chars.join(""), this.commands, this.modelRows, this.effortRows);
   }
 
   private submitLine(): void {
     const typed = this.chars.join("");
-    const matches = this.rawInput ? [] : matchingSlashCommands(typed, this.commands, this.modelRows);
+    const matches = this.rawInput ? [] : matchingSlashCommands(typed, this.commands, this.modelRows, this.effortRows);
     let line = typed.trim();
     let echo = line;
     if (matches.length > 0) {
@@ -556,7 +576,7 @@ export class AgentTui {
     }
     if (ch === "\t") {
       if (this.rawInput) return;
-      const next = completeSlashLine(this.chars.join(""), this.commands, this.modelRows);
+      const next = completeSlashLine(this.chars.join(""), this.commands, this.modelRows, this.effortRows);
       this.chars = [...next];
       this.cursor = this.chars.length;
       this.slashIndex = 0;
@@ -741,7 +761,7 @@ export class AgentTui {
     const spin = this.busy ? `${SPIN[this.spin]!} ` : "";
     const imageN = this.pendingImages();
     const images = imageN > 0 ? `  ${imageN} image${imageN === 1 ? "" : "s"}` : "";
-    const title = ` termina agent-core v1  ${spin}${this.model}${this.auth ? `  ${this.auth}` : ""}${this.usage ? `  ${this.usage}` : ""}${images} `;
+    const title = ` termina agent-core v1  ${spin}effort ${this.effort}  ${this.model}${this.auth ? `  ${this.auth}` : ""}${images} `;
     const picker = matches.length > 0 && Boolean(matches[0]?.submit);
     const foot = this.busy
       ? " Ctrl+C interrupt · PgUp/PgDn scroll "
@@ -751,6 +771,7 @@ export class AgentTui {
 
     const lines: string[] = [];
     lines.push(clip(title, cols));
+    if (layout.header === 2) lines.push(clip(` ${this.usage}`, cols));
     lines.push(clip("─".repeat(Math.max(0, cols)), cols));
     for (let i = 0; i < layout.transcript; i++) lines.push(clip(view[i] ?? "", cols));
     const inputShown = inputWrapped.slice(0, layout.input);
@@ -765,7 +786,7 @@ export class AgentTui {
     if (lines.length > rows) lines.length = rows;
 
     const pos = cursorRowCol("> ", this.chars, this.cursor, cols);
-    const inputTop = 2 + layout.transcript;
+    const inputTop = layout.header + 1 + layout.transcript;
     const cursorRow = Math.min(rows, Math.max(1, Math.min(inputTop + layout.input, inputTop + pos.row + 1)));
     const cursorCol = Math.min(cols, Math.max(1, pos.col + 1));
     const slashTop = inputTop + layout.input;

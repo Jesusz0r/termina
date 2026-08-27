@@ -18,7 +18,7 @@
  * - Two-role routing map (main + summary), env-overridable
  * - Streaming always; tool calls run concurrently behind a small bound
  * - cwd jail; grep/glob; unique edit; interruptible bash; web_search; skill index; prefix cache_control; traces
- * - last tool_result cache pin (Anthropic); OpenAI/Codex prompt_cache_key; 429 retry; opt-in thinking
+ * - last tool_result cache pin (Anthropic); OpenAI/Codex prompt_cache_key; 429 retry; model-aware effort
  * - provider auth (Anthropic, OpenAI, ChatGPT Codex, xAI, Google, OpenRouter)
  */
 import { execFileSync, spawn } from "node:child_process";
@@ -151,7 +151,7 @@ function contextWindow(): number {
   const env = Number(process.env.TERMINA_CORE_CONTEXT ?? "");
   if (Number.isFinite(env) && env >= 8_000) return env;
   const hit = catalogs.get(route.provider)?.find((m) => m.id === route.model);
-  if (hit?.context && hit.context >= 8_000) return hit.context;
+  if (typeof hit?.context === "number" && Number.isFinite(hit.context) && hit.context >= 8_000) return hit.context;
   return defaultContextWindow(route.provider, route.model);
 }
 
@@ -205,7 +205,11 @@ export function parseMaxTurns(raw: string | undefined): number {
 }
 
 const MAX_TURNS = parseMaxTurns(process.env.TERMINA_CORE_MAX_TURNS);
-let thinkingWanted = false;
+export const EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+type EffortLevelMap = Partial<Record<EffortLevel, string | null>>;
+type ReasoningEffort = "none" | Exclude<EffortLevel, "off">;
+let effortWanted: EffortLevel = "off";
 let hostContextSnapshot = "";
 
 export type ThinkingRequest =
@@ -213,10 +217,10 @@ export type ThinkingRequest =
   | { type: "adaptive"; display: "summarized" }
   | { type: "enabled"; budget_tokens: number };
 
-/** Claude 5 and 4.6+ reject a fixed thinking budget. Haiku has no thinking. */
+/** Claude 5 and 4.6+ reject a fixed thinking budget. */
 function claudeThinkingApi(model: string): "adaptive" | "budget" | "none" {
   const id = model.toLowerCase();
-  if (!id.includes("claude") || id.includes("haiku")) return "none";
+  if (!id.includes("claude") || /claude-[1-3](?:-|$)/.test(id)) return "none";
   if (/(?:sonnet|opus|fable|mythos)-5(?:$|[^0-9])/.test(id)) return "adaptive";
   if (/4-[6-8]/.test(id)) return "adaptive";
   return "budget";
@@ -229,59 +233,129 @@ function thinkingLockedOn(model: string): boolean {
 
 function openAiFamilyModel(model: string): boolean {
   const id = model.toLowerCase();
-  return id.includes("gpt-") || id.includes("chatgpt") || id.includes("grok") || /(?:^|\/)o[0-9]/.test(id);
+  return /gpt-[5-9]/.test(id) || id.includes("gpt-oss") || id.includes("codex") || id.includes("grok") || /(?:^|\/)o[0-9]/.test(id);
 }
 
-export function thinkingEnabledFor(model: string, enabled: boolean): boolean {
-  if (claudeThinkingApi(model) !== "none") {
-    if (thinkingLockedOn(model)) return true;
-    return enabled;
+function effortLevelMap(provider: ProviderId, model: string): EffortLevelMap {
+  const id = model.toLowerCase();
+  const map: EffortLevelMap = {};
+  if (provider === "anthropic" && claudeThinkingApi(model) === "adaptive") {
+    map.minimal = "low";
+    map.max = "max";
+    if (/(?:opus-4-[78]|(?:sonnet|opus|fable)-5)(?:$|[^0-9])/.test(id)) map.xhigh = "xhigh";
+    if (thinkingLockedOn(model)) map.off = null;
+    return map;
   }
-  if (openAiFamilyModel(model)) return enabled;
-  return false;
+  if (!openAiFamilyModel(model)) return map;
+  if (id.includes("grok")) {
+    if (!id.includes("4.3")) map.off = null;
+    map.minimal = null;
+    if (id.includes("4.6")) map.xhigh = "xhigh";
+    map.max = null;
+    return map;
+  }
+  const rejectsNone = /(?:^|\/)o[0-9]/.test(id) || (id.includes("codex") && !id.includes("5.6"));
+  if (rejectsNone) {
+    map.off = null;
+    map.minimal = "low";
+  }
+  if (/gpt-5\.[3-6]|codex/.test(id)) {
+    map.minimal = "low";
+    map.xhigh = "xhigh";
+  }
+  if (id.includes("5.6")) map.max = "max";
+  return map;
+}
+
+export function supportedEffortLevels(provider: ProviderId, model: string): EffortLevel[] {
+  if (provider === "anthropic" ? claudeThinkingApi(model) === "none" : !openAiFamilyModel(model)) return ["off"];
+  const map = effortLevelMap(provider, model);
+  return EFFORT_LEVELS.filter((level) => {
+    const mapped = map[level];
+    if (mapped === null) return false;
+    if (level === "xhigh" || level === "max") return mapped !== undefined;
+    return true;
+  });
+}
+
+export function clampEffortLevel(provider: ProviderId, model: string, effort: EffortLevel): EffortLevel {
+  const available = supportedEffortLevels(provider, model);
+  if (available.includes(effort)) return effort;
+  const requested = EFFORT_LEVELS.indexOf(effort);
+  for (let i = requested; i < EFFORT_LEVELS.length; i++) {
+    if (available.includes(EFFORT_LEVELS[i]!)) return EFFORT_LEVELS[i]!;
+  }
+  for (let i = requested - 1; i >= 0; i--) {
+    if (available.includes(EFFORT_LEVELS[i]!)) return EFFORT_LEVELS[i]!;
+  }
+  return "off";
+}
+
+export function thinkingEnabledFor(provider: ProviderId, model: string, effort: EffortLevel): boolean {
+  return clampEffortLevel(provider, model, effort) !== "off";
 }
 
 export function reasoningEffortFor(
+  provider: ProviderId,
   model: string,
-  enabled: boolean,
-): "none" | "low" | "medium" | "high" | undefined {
-  const id = model.toLowerCase();
-  if (id.includes("grok")) return enabled ? "high" : "low";
-  const rejectsNone = /(?:^|\/)o[0-9]/.test(id) || (id.includes("codex") && !id.includes("5.6"));
-  if (rejectsNone) return enabled ? "medium" : "low";
-  if (openAiFamilyModel(model)) return enabled ? "medium" : "none";
-  return undefined;
+  effort: EffortLevel,
+): ReasoningEffort | undefined {
+  if (provider === "anthropic" || !openAiFamilyModel(model)) return undefined;
+  const actual = clampEffortLevel(provider, model, effort);
+  const mapped = effortLevelMap(provider, model)[actual];
+  if (typeof mapped === "string") return mapped as ReasoningEffort;
+  return actual === "off" ? "none" : actual;
 }
 
-export function thinkingRequestFor(model: string, enabled: boolean): ThinkingRequest | undefined {
+export function thinkingRequestFor(
+  provider: ProviderId,
+  model: string,
+  effort: EffortLevel,
+): ThinkingRequest | undefined {
+  if (provider !== "anthropic") return undefined;
   const api = claudeThinkingApi(model);
   if (api === "none") return undefined;
-  const on = thinkingEnabledFor(model, enabled);
+  const actual = clampEffortLevel(provider, model, effort);
   if (api === "adaptive") {
-    if (!on) return { type: "disabled" };
+    if (actual === "off") return { type: "disabled" };
     return { type: "adaptive", display: "summarized" };
   }
-  if (!on) return undefined;
-  return { type: "enabled", budget_tokens: LEGACY_THINK_BUDGET };
+  if (actual === "off") return undefined;
+  const budgets: Record<Exclude<EffortLevel, "off">, number> = {
+    minimal: 1_024,
+    low: 2_048,
+    medium: 8_192,
+    high: LEGACY_THINK_BUDGET,
+    xhigh: LEGACY_THINK_BUDGET,
+    max: LEGACY_THINK_BUDGET,
+  };
+  return { type: "enabled", budget_tokens: budgets[actual] };
+}
+
+export function adaptiveEffortFor(provider: ProviderId, model: string, effort: EffortLevel): ReasoningEffort | undefined {
+  if (provider !== "anthropic" || claudeThinkingApi(model) !== "adaptive") return undefined;
+  const actual = clampEffortLevel(provider, model, effort);
+  if (actual === "off") return undefined;
+  const mapped = effortLevelMap(provider, model)[actual];
+  return (typeof mapped === "string" ? mapped : actual) as ReasoningEffort;
+}
+
+export function effectiveEffortFor(provider: ProviderId, model: string, effort: EffortLevel): EffortLevel {
+  return clampEffortLevel(provider, model, effort);
 }
 
 export function outputTokenBudget(opts: { thinking: boolean }): number {
   return opts.thinking ? THINKING_OUTPUT_CAP : OUTPUT_CAP;
 }
 
-export function parseThinkingCommand(
+export function parseEffortCommand(
   line: string,
-): { show: true } | { enabled: boolean } | { error: string } | null {
-  if (line !== "/thinking" && !line.startsWith("/thinking ")) return null;
-  const rest = line.slice("/thinking".length).trim().toLowerCase();
+): { show: true } | { effort: EffortLevel } | { error: string } | null {
+  if (line !== "/effort" && !line.startsWith("/effort ")) return null;
+  const rest = line.slice("/effort".length).trim().toLowerCase();
   if (!rest) return { show: true };
-  if (rest === "on") return { enabled: true };
-  if (rest === "off") return { enabled: false };
-  return { error: "use /thinking on or /thinking off" };
-}
-
-function thinkingLevelFor(model: string): "on" | "off" {
-  return thinkingEnabledFor(model, thinkingWanted) ? "on" : "off";
+  if ((EFFORT_LEVELS as readonly string[]).includes(rest)) return { effort: rest as EffortLevel };
+  return { error: "use /effort off, minimal, low, medium, high, xhigh, or max" };
 }
 
 /** Chars-per-token estimate for water marks. Sonnet 5 counts about 30 percent more tokens than four chars. */
@@ -1985,6 +2059,7 @@ async function connectMcp(): Promise<void> {
   });
   mcpSession = session;
   clientTools = mergeClientTools(TOOLS, mcpToolDefs(session.tools));
+  syncIndicators();
   for (const note of session.notes) out(`(${note})\n`);
 }
 
@@ -2223,6 +2298,7 @@ function pushMessage(role: Message["role"], content: Message["content"]): Messag
   m.tokens = estimate(m);
   history.push(m);
   m.sseq = store({ type: "message", message: { role, content } });
+  syncIndicators();
   return m;
 }
 
@@ -2472,6 +2548,7 @@ function reclaim(): number {
     postRevision = true;
     revisions++;
     store({ type: "revision", kind: "prune", targets });
+    syncIndicators();
   }
   return changed;
 }
@@ -2493,6 +2570,7 @@ function truncate(): boolean {
   postRevision = true;
   revisions++;
   store({ type: "revision", kind: "truncate", dropped: cut });
+  syncIndicators();
   return true;
 }
 
@@ -2608,9 +2686,14 @@ async function summarize(): Promise<boolean> {
   try {
     const summarySystem = "You compress coding-agent session history. Only output the structured handoff.";
     const folded = await completeText(summaryRoute.provider, summaryRoute.model, summarySystem, prompt, currentAbort.signal);
+    const u = folded.usage;
+    if (u) {
+      accumulateUsage(u);
+      lastUsd = null;
+      syncIndicators();
+    }
     const text = folded.text;
     if (!text) return false;
-    const u = folded.usage;
     const inventories = fileInventories(evicted);
     const handoffBody = `${text}${inventories ? `\n\n${inventories}` : ""}`;
     const handoff = `<context-handoff>\n${handoffBody}\n</context-handoff>`;
@@ -2622,6 +2705,7 @@ async function summarize(): Promise<boolean> {
     postRevision = true;
     revisions++;
     store({ type: "revision", kind: "summarize", evicted: boundary, summarySseq: m.sseq });
+    syncIndicators();
     writeTrace(
       traceRecord({
         role: "summary",
@@ -2674,6 +2758,46 @@ interface Usage {
   cacheRead: number;
   cacheWrite: number;
   output: number;
+}
+
+const COMPACT_TOKEN_FORMAT = new Intl.NumberFormat("en-US", {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+
+function safeTokenCount(value: number): number {
+  return Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
+}
+
+function compactTokenCount(value: number): string {
+  return COMPACT_TOKEN_FORMAT.format(safeTokenCount(value));
+}
+
+export function formatUsageIndicators(
+  usage: { input: number; cacheRead: number; cacheWrite: number; output: number },
+  contextTokens: number,
+  maxContext: number,
+  usd: number | null = null,
+): string {
+  const uncachedInput = safeTokenCount(usage.input);
+  const cacheRead = safeTokenCount(usage.cacheRead);
+  const input = uncachedInput + cacheRead + safeTokenCount(usage.cacheWrite);
+  const cache = input > 0 ? `${Math.round((cacheRead / input) * 100)}%` : "--";
+  const context = safeTokenCount(contextTokens);
+  const limit = Math.max(1, safeTokenCount(maxContext));
+  const contextPct = Math.round((context / limit) * 100);
+  const cost = usd !== null && Number.isFinite(usd) && usd >= 0 ? ` · last $${usd.toFixed(4)}` : "";
+  return `tokens ${compactTokenCount(input)} in/${compactTokenCount(usage.output)} out · cache ${cache} · context ~${compactTokenCount(context)}/${compactTokenCount(limit)} ${contextPct}%${cost}`;
+}
+
+let sessionUsage: Usage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
+let lastUsd: number | null = null;
+
+function accumulateUsage(usage: Usage): void {
+  sessionUsage.input += safeTokenCount(usage.input);
+  sessionUsage.cacheRead += safeTokenCount(usage.cacheRead);
+  sessionUsage.cacheWrite += safeTokenCount(usage.cacheWrite);
+  sessionUsage.output += safeTokenCount(usage.output);
 }
 
 interface CallResult {
@@ -2760,7 +2884,7 @@ async function completeText(
 ): Promise<{ text: string; usage: Usage | null }> {
   const proto = providerProtocol(providerId);
   if (proto === "anthropic-messages") {
-    const thinking = thinkingRequestFor(model, false);
+    const thinking = thinkingRequestFor(providerId, model, "off");
     const res = await providerPost(
       providerId,
       {
@@ -2778,7 +2902,7 @@ async function completeText(
     return { text, usage: normalizeUsage(data.usage) };
   }
   if (usesResponsesApi(providerId)) {
-    const effort = reasoningEffortFor(model, false);
+    const effort = reasoningEffortFor(providerId, model, "off");
     const res = await providerPost(
       providerId,
       {
@@ -2830,10 +2954,11 @@ async function callModel(messages: Message[]): Promise<CallResult> {
     content: m.content as string | Array<Record<string, unknown>>,
   }));
   const toolsForProvider = clientTools as ToolDef[];
-  const think = thinkingEnabledFor(route.model, thinkingWanted);
-  const maxTokens = outputTokenBudget({ thinking: think });
-  const thinking = thinkingRequestFor(route.model, thinkingWanted);
-  const effort = reasoningEffortFor(route.model, thinkingWanted);
+  const actualEffort = effectiveEffortFor(route.provider, route.model, effortWanted);
+  const maxTokens = outputTokenBudget({ thinking: actualEffort !== "off" });
+  const thinking = thinkingRequestFor(route.provider, route.model, effortWanted);
+  const adaptiveEffort = adaptiveEffortFor(route.provider, route.model, effortWanted);
+  const reasoningEffort = reasoningEffortFor(route.provider, route.model, effortWanted);
   const cacheKey = hashSystem(sys);
   const sendCacheKey =
     route.provider === "openai" || route.provider === "openai-codex" || route.provider === "openrouter";
@@ -2857,6 +2982,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
           max_tokens: maxTokens,
           stream: true,
           ...(thinking ? { thinking } : {}),
+          ...(adaptiveEffort ? { output_config: { effort: adaptiveEffort } } : {}),
           cache_control: prefix.cache_control,
           system: prefix.system,
           tools: requestTools(prefix.tools, route.provider, route.model),
@@ -2866,7 +2992,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
         ? responsesBody(route.model, sys, kernelMessages, toolsForProvider, {
             maxTokens,
             ...(sendCacheKey ? { cacheKey } : {}),
-            ...(effort ? { reasoningEffort: effort } : {}),
+            ...(reasoningEffort ? { reasoningEffort } : {}),
             includeEncryptedReasoning: route.provider !== "xai",
           })
         : completionsBody(route.model, sys, kernelMessages, toolsForProvider, "max_tokens", {
@@ -3163,7 +3289,7 @@ function logSettings(): void {
   logEvent({
     t: "agent_settings",
     model: `${route.provider}/${route.model}`,
-    thinkingLevel: thinkingLevelFor(route.model),
+    thinkingLevel: effectiveEffortFor(route.provider, route.model, effortWanted),
   });
 }
 
@@ -3234,7 +3360,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     entryId: String(userMsg.sseq),
     parentEntryId: null,
     trusted: null,
-    thinkingLevel: thinkingLevelFor(route.model),
+    thinkingLevel: effectiveEffortFor(route.provider, route.model, effortWanted),
   });
   if (!rateLookup && !ratesFailed) void loadRates().then(() => { ratesFailed = true; });
   let retriedOverflow = false;
@@ -3293,15 +3419,13 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       const waste = result.usage
         ? reportUsage(result.usage, result.ttftMs, callStarted)
         : { cause: null, usd: null, turnMs: Date.now() - callStarted, ttftMs: result.ttftMs, revisionCount: 0 };
-      if (result.usage) {
-        const bits = [`in ${result.usage.input}`, result.usage.cacheRead ? `cache ${result.usage.cacheRead}` : "", `out ${result.usage.output}`];
-        if (waste.usd != null) bits.push(`$${waste.usd.toFixed(4)}`);
-        surface?.setStatus({ usage: bits.filter(Boolean).join("  ") });
-      }
+      if (result.usage) accumulateUsage(result.usage);
+      lastUsd = waste.usd != null && Number.isFinite(waste.usd) && waste.usd >= 0 ? waste.usd : null;
       const assistantMsg: Message = { role: "assistant", content: result.blocks as ContentBlock[], tokens: 0, sseq: 0 };
       assistantMsg.tokens = estimate(assistantMsg);
       history.push(assistantMsg);
       assistantMsg.sseq = store({ type: "message", message: { role: "assistant", content: result.blocks } });
+      syncIndicators();
       lastAssistantSseq = assistantMsg.sseq;
       const plan = planTextIfChanged(visibleAssistantText(result.blocks), lastPlanText);
       if (plan) {
@@ -3423,6 +3547,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
 function abortResume(message: string): void {
   out(`${message}\n`);
   history.length = 0;
+  syncIndicators();
   if (sessionFile && quarantineSessionFile(sessionFile)) {
     streamPrepared = false;
     return;
@@ -3484,6 +3609,7 @@ function resumeSession(): void {
   storageSeq = Math.max(storageSeq, replayed.maxSeq);
   streamPrepared = true;
   prevPrompt = null;
+  syncIndicators();
   out(`resumed ${history.length} messages\n`);
 }
 
@@ -3494,6 +3620,18 @@ let surface: AgentTui | null = null;
 function out(text: string): void {
   if (surface) surface.append(text);
   else process.stdout.write(text);
+}
+
+function statusContextTokens(): number {
+  const overlay = formatOverlay({ messages: history, hostContext: hostContextSnapshot });
+  const tools = requestTools(clientTools, route.provider, route.model);
+  return totalTokens() + tokenEstimate(overlay) + tokenEstimate(JSON.stringify(tools));
+}
+
+function syncIndicators(): void {
+  surface?.setStatus({
+    usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd),
+  });
 }
 
 function showPrompt(): void {
@@ -3635,6 +3773,7 @@ async function loadAuthenticatedCatalogs(refresh: boolean): Promise<string[]> {
     }),
   );
   syncModelRows();
+  syncIndicators();
   return errors;
 }
 
@@ -3818,9 +3957,13 @@ function startAuthCommand(line: string): void {
 }
 
 function syncStatus(authText?: string): void {
+  effortWanted = clampEffortLevel(route.provider, route.model, effortWanted);
+  surface?.setEffortLevels(supportedEffortLevels(route.provider, route.model));
   surface?.setStatus({
     model: `${route.provider}/${route.model}`,
     auth: authText,
+    effort: effectiveEffortFor(route.provider, route.model, effortWanted),
+    usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd),
   });
   logSettings();
 }
@@ -3907,12 +4050,15 @@ function dispatchLine(line: string): void {
     lastHandoff = null;
     hostContextSnapshot = "";
     lastBilledTokens = null;
+    sessionUsage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
+    lastUsd = null;
     approveAll = process.env.TERMINA_CORE_APPROVE === "all";
     prevPrompt = null;
     postRevision = false;
     revisions = 0;
     streamPrepared = true;
     storageSeq = 0;
+    syncIndicators();
     out("(session cleared)\n");
     void connectMcp().then(() => showPrompt());
     return;
@@ -3926,44 +4072,34 @@ function dispatchLine(line: string): void {
     void (async () => {
       const n = reclaim();
       const summed = await summarize();
+      syncIndicators();
       out(`(compacted${n ? `; reclaimed ${n}` : ""}${summed ? "; summarized" : ""})\n`);
       showPrompt();
     })();
     return;
   }
-  const thinkingCmd = parseThinkingCommand(line);
-  if (thinkingCmd) {
+  const effortCmd = parseEffortCommand(line);
+  if (effortCmd) {
     if (running || authBusy) {
       out("(engine busy)\n");
       showPrompt();
       return;
     }
-    if ("error" in thinkingCmd) {
-      out(`(${thinkingCmd.error})\n`);
+    if ("error" in effortCmd) {
+      out(`(${effortCmd.error})\n`);
       showPrompt();
       return;
     }
-    if ("show" in thinkingCmd) {
-      const actual = thinkingLevelFor(route.model);
-      out(
-        thinkingWanted && actual === "off"
-          ? "(thinking off for this model)\n"
-          : !thinkingWanted && actual === "on"
-            ? "(thinking on for this model)\n"
-            : `(thinking ${actual})\n`,
-      );
+    const available = supportedEffortLevels(route.provider, route.model);
+    if ("show" in effortCmd) {
+      const actual = effectiveEffortFor(route.provider, route.model, effortWanted);
+      out(`(effort ${actual}; available: ${available.join(", ")})\n`);
       showPrompt();
       return;
     }
-    thinkingWanted = thinkingCmd.enabled;
-    const actual = thinkingLevelFor(route.model);
-    out(
-      thinkingWanted && actual === "off"
-        ? "(thinking on — this model stays off)\n"
-        : !thinkingWanted && actual === "on"
-          ? "(thinking off — this model stays on)\n"
-          : `(thinking ${actual})\n`,
-    );
+    const requested = effortCmd.effort;
+    effortWanted = clampEffortLevel(route.provider, route.model, requested);
+    out(effortWanted === requested ? `(effort ${effortWanted})\n` : `(effort ${effortWanted}; ${requested} is unavailable)\n`);
     syncStatus();
     showPrompt();
     return;
@@ -4032,7 +4168,14 @@ async function main(): Promise<void> {
       teardown();
       process.exit(0);
     });
-    surface.setStatus({ model: `${route.provider}/${route.model}`, auth: authBanner(auth) });
+    effortWanted = clampEffortLevel(route.provider, route.model, effortWanted);
+    surface.setEffortLevels(supportedEffortLevels(route.provider, route.model));
+    surface.setStatus({
+      model: `${route.provider}/${route.model}`,
+      auth: authBanner(auth),
+      effort: effectiveEffortFor(route.provider, route.model, effortWanted),
+      usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd),
+    });
     if (!surface.start()) surface = null;
     else syncModelRows();
   }

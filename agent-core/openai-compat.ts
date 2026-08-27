@@ -189,7 +189,7 @@ export function toResponsesInput(messages: KernelMessage[]): Array<Record<string
 export type CompletionsOpts = {
   cacheKey?: string;
   maxTokens?: number;
-  reasoningEffort?: "none" | "low" | "medium" | "high";
+  reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   includeEncryptedReasoning?: boolean;
 };
 

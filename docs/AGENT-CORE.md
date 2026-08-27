@@ -12,9 +12,9 @@ stubs + structured inventories, waste attribution with models.dev pricing,
 two-role routing map, bounded concurrency, cwd jail, grep/glob, unique first-occurrence
 edit (replace_all), interruptible bash, web_search, fetch, skill
 index, prefix `cache_control`, last `tool_result` cache pin, OpenAI/Codex `prompt_cache_key`,
-429 retry, opt-in `/thinking`, request-only working-set overlay, traces, provider auth, live model list,
+429 retry, model-aware `/effort`, request-only working-set overlay, traces, provider auth, live model list,
 full-screen TUI, Termina sidecar host contract, core worldline session slice,
-bash approval, /clear /compact, -p print, usage footer, stdio MCP). Zone 1 is identity, environment,
+bash approval, /clear /compact, -p print, token/cache/context status, stdio MCP). Zone 1 is identity, environment,
 user-global `~/.agents/AGENTS.md`, the skill index, then cwd `AGENTS.md`.
 Skill bodies load with `read_file`. Skills come from `~/.agents/skills`
 then `<cwd>/.agents/skills` (no ancestor walk). Truncated instructions
@@ -195,8 +195,14 @@ footprint, not these numbers.
 
 ## Auth
 
-The kernel owns a full-screen TUI in a tty: status header, scrolling
-transcript, input, slash menu, and footer. Typing `/` lists commands;
+The kernel owns a full-screen TUI in a tty: a two-row model and usage
+header, scrolling transcript, input, slash menu, and footer. The model row
+shows the effective reasoning effort. `/effort` lists only levels that the
+current model supports: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`,
+and `max`. Pi names the extra-high level `xhigh`; it does not define an
+`ultra` level. The usage row shows cumulative input/output tokens, cumulative
+cache-read share, estimated current context-window use, and the last priced
+main-model call. Typing `/` lists commands;
 Tab completes; arrows move the highlight. `/help` prints the same list.
 `/login` opens a provider picker. OAuth is the provider name (`OpenAI`);
 API key is `OpenAI (key)`. OpenAI OAuth is the ChatGPT Codex subscription;
