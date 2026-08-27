@@ -17,7 +17,14 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/clear", hint: "start a new empty session" },
   { name: "/compact", hint: "reclaim and summarize context" },
   { name: "/effort", hint: "show or set reasoning effort" },
+  { name: "/permissions", hint: "set bash approval policy" },
   { name: "/exit", hint: "quit the engine" },
+];
+
+export const PERMISSION_COMMANDS: SlashCommand[] = [
+  { name: "Always ask", hint: "ask before every bash command", submit: "/permissions ask" },
+  { name: "Ask on dangerous requests", hint: "ask before recognized destructive commands", submit: "/permissions dangerous" },
+  { name: "Always approve", hint: "run bash without asking", submit: "/permissions always" },
 ];
 
 const EFFORT_HINTS: Record<string, string> = {
@@ -114,6 +121,14 @@ export function matchingSlashCommands(
     }
     if (space < 0) return effortRows;
     return effortRows.filter((c) => pickerRowMatches(line, c));
+  }
+  if (head === "/permissions") {
+    if (space < 0 && line !== "/permissions") {
+      return commands.filter((c) => c.name.startsWith(line));
+    }
+    if (space < 0) return PERMISSION_COMMANDS;
+    const exact = PERMISSION_COMMANDS.find((c) => c.submit === line);
+    return exact ? [exact] : PERMISSION_COMMANDS.filter((c) => pickerRowMatches(line, c));
   }
   if (space >= 0) return [];
   return commands.filter((c) => c.name.startsWith(line));
@@ -273,6 +288,9 @@ export class AgentTui {
   private lastDim = { cols: 0, rows: 0 };
   private modelRows: SlashCommand[] = [];
   private effortRows: SlashCommand[] = effortCommandRows();
+  private choicePrompt = "";
+  private choiceRows: SlashCommand[] = [];
+  private choiceDraft: { chars: string[]; cursor: number } | null = null;
 
   constructor(opts: {
     stdout: TuiIO;
@@ -326,6 +344,28 @@ export class AgentTui {
     if (this.rawInput === raw) return;
     this.rawInput = raw;
     this.slashIndex = 0;
+    this.schedule();
+  }
+
+  setChoices(prompt: string, rows: SlashCommand[]): void {
+    if (this.choiceRows.length === 0) this.choiceDraft = { chars: this.chars, cursor: this.cursor };
+    this.choicePrompt = prompt;
+    this.choiceRows = rows;
+    this.chars = [];
+    this.cursor = 0;
+    this.slashIndex = 0;
+    this.schedule();
+  }
+
+  clearChoices(): void {
+    this.choicePrompt = "";
+    this.choiceRows = [];
+    this.slashIndex = 0;
+    if (this.choiceDraft) {
+      this.chars = this.choiceDraft.chars;
+      this.cursor = this.choiceDraft.cursor;
+      this.choiceDraft = null;
+    }
     this.schedule();
   }
 
@@ -410,7 +450,10 @@ export class AgentTui {
   feed(text: string): void {
     if (text === "\x1b") {
       this.esc = 0;
-      if (this.matches().length > 0) {
+      if (this.choiceRows.length > 0) {
+        this.clearChoices();
+        this.onInterrupt();
+      } else if (this.matches().length > 0) {
         this.chars = [];
         this.cursor = 0;
         this.slashIndex = 0;
@@ -450,12 +493,14 @@ export class AgentTui {
 
   private matches(): SlashCommand[] {
     if (this.rawInput) return [];
+    if (this.choiceRows.length > 0) return this.choiceRows;
     return matchingSlashCommands(this.chars.join(""), this.commands, this.modelRows, this.effortRows);
   }
 
   private submitLine(): void {
     const typed = this.chars.join("");
-    const matches = this.rawInput ? [] : matchingSlashCommands(typed, this.commands, this.modelRows, this.effortRows);
+    const wasChoice = this.choiceRows.length > 0;
+    const matches = this.rawInput ? [] : this.matches();
     let line = typed.trim();
     let echo = line;
     if (matches.length > 0) {
@@ -471,7 +516,10 @@ export class AgentTui {
     }
     if (
       !this.rawInput &&
-      (line === "/login" || line === "/logout" || (line === "/models" && this.modelRows.length > 0))
+      (line === "/login" ||
+        line === "/logout" ||
+        line === "/permissions" ||
+        (line === "/models" && this.modelRows.length > 0))
     ) {
       this.chars = [...line];
       this.cursor = this.chars.length;
@@ -486,7 +534,8 @@ export class AgentTui {
     this.slashIndex = 0;
     this.histIndex = -1;
     this.draft = "";
-    if (line && (this.history.length === 0 || this.history[this.history.length - 1] !== line)) {
+    if (wasChoice) this.clearChoices();
+    if (!wasChoice && line && (this.history.length === 0 || this.history[this.history.length - 1] !== line)) {
       this.history.push(line);
       if (this.history.length > MAX_HISTORY) this.history.shift();
     }
@@ -877,7 +926,7 @@ export class AgentTui {
     cursorCol: number;
   } {
     const { cols, rows } = size;
-    const inputText = `> ${this.chars.join("")}`;
+    const inputText = this.choicePrompt || `> ${this.chars.join("")}`;
     const matches = this.matches();
     if (this.slashIndex >= matches.length) this.slashIndex = Math.max(0, matches.length - 1);
     const inputWrapped = wrapText(inputText, cols);
@@ -894,10 +943,10 @@ export class AgentTui {
     const images = imageN > 0 ? `  ${imageN} image${imageN === 1 ? "" : "s"}` : "";
     const title = ` termina agent-core v1  ${spin}effort ${this.effort}  ${this.model}${this.auth ? `  ${this.auth}` : ""}${images} `;
     const picker = matches.length > 0 && Boolean(matches[0]?.submit);
-    const foot = this.busy
-      ? " Ctrl+C interrupt · PgUp/PgDn scroll "
-      : picker
-        ? " ↑↓ pick · Enter select · Ctrl+C cancel "
+    const foot = picker
+      ? " ↑↓ pick · Enter select · Ctrl+C cancel "
+      : this.busy
+        ? " Ctrl+C interrupt · PgUp/PgDn scroll "
         : " / commands · Tab complete · Ctrl+J newline · PgUp/PgDn scroll · Ctrl+C clear ";
 
     const lines: string[] = [];
@@ -916,7 +965,9 @@ export class AgentTui {
     lines.push(clip(foot, cols));
     if (lines.length > rows) lines.length = rows;
 
-    const pos = cursorRowCol("> ", this.chars, this.cursor, cols);
+    const pos = this.choicePrompt
+      ? { row: 0, col: Math.min(cols - 1, unitsLen(this.choicePrompt)) }
+      : cursorRowCol("> ", this.chars, this.cursor, cols);
     const inputTop = layout.transcript;
     const cursorRow = Math.min(rows, Math.max(1, Math.min(inputTop + layout.input, inputTop + pos.row + 1)));
     const cursorCol = Math.min(cols, Math.max(1, pos.col + 1));
@@ -925,11 +976,12 @@ export class AgentTui {
     const painted: string[] = [];
     for (let i = 0; i < rows; i++) {
       const raw = lines[i] ?? clip("", cols);
-      if (i === titleRow) painted.push(`\x1b[7m${raw}\x1b[0m`);
-      else if (i === rows - 1) painted.push(`\x1b[2m${raw}\x1b[0m`);
-      else if (i >= slashTop && i < slashTop + layout.slash) {
+      if (i === titleRow) painted.push(`\x1b[30;104m${raw}\x1b[0m`);
+      else if (i === rows - 1 || i === titleRow - 1 || (layout.header === 2 && i === titleRow + 1)) {
+        painted.push(`\x1b[90m${raw}\x1b[0m`);
+      } else if (i >= slashTop && i < slashTop + layout.slash) {
         const si = i - slashTop;
-        painted.push(si === this.slashIndex - slashStart ? `\x1b[7m${raw}\x1b[0m` : raw);
+        painted.push(si === this.slashIndex - slashStart ? `\x1b[30;104m${raw}\x1b[0m` : raw);
       } else painted.push(raw);
     }
     return { text: lines.join("\n"), painted, cursorRow, cursorCol };

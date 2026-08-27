@@ -30,6 +30,8 @@ const {
   confinePath,
   matchGlob,
   grepFiles,
+  formatGrepHits,
+  completeGrepStdout,
   globFiles,
   scanSkills,
   formatSkillIndex,
@@ -54,6 +56,8 @@ const {
   sidecarStartFor,
   formatToolAnnounce,
   formatToolFollowup,
+  isDangerousBash,
+  shouldAskPermission,
   runBash,
   isDirectRun,
   tracesDirFor,
@@ -263,14 +267,23 @@ check("replace_all zero matches errors", noneReplace.isError === true);
 const stillUnique = editProjectFile(root, "many.ts", "bar", "baz");
 check("unique default still errors on duplicates", stillUnique.isError === true && stillUnique.content.includes("not unique"));
 check(
-  "tool announce shows edit path",
-  formatToolAnnounce({ id: "1", name: "edit", input: { path: "a.ts" } }) === "[edit a.ts]",
+  "tool announce structures edit path",
+  formatToolAnnounce({ id: "1", name: "edit", input: { path: "a.ts" } }) === "◆ Tool · edit\n  a.ts",
 );
 check(
-  "tool followup counts grep hits",
-  formatToolFollowup({ id: "1", name: "grep", input: {} }, { result: { content: "a:1:x\nb:2:y" }, isError: false }) ===
-    "(2 hits)\n",
+  "tool followup structures grep hits",
+  formatToolFollowup(
+    { id: "1", name: "grep", input: {} },
+    { result: { content: "2 hits in 2 files, showing 2\na.ts (1 hit)\n  1:x\nb.ts (1 hit)\n  2:y" }, isError: false },
+  ) === "◇ grep · done · 2 hits\n",
 );
+check("dangerous permissions ask for rm", isDangerousBash("rm -rf build") && shouldAskPermission("dangerous", "rm -rf build"));
+check("dangerous permissions catch wrapped rm", isDangerousBash("bash -c 'rm -rf build'"));
+check("dangerous permissions catch git with global args", isDangerousBash("git -C repo reset --hard HEAD"));
+check("dangerous permissions catch inline programs", isDangerousBash("node -e 'require(\"fs\").rmSync(\"x\")'"));
+check("dangerous permissions skip a read", !isDangerousBash("git status") && !shouldAskPermission("dangerous", "git status"));
+check("always ask asks for a read", shouldAskPermission("ask", "git status"));
+check("always approve never asks", !shouldAskPermission("always", "rm -rf build"));
 
 const echo = await runBash("echo hello-core", { cwd: root });
 check("bash echo succeeds", echo.isError === false && echo.content.includes("hello-core"));
@@ -786,6 +799,70 @@ check(
 
 writeFileSync(join(root, "many.txt"), Array.from({ length: 60 }, (_, i) => `hit-line-${i}`).join("\n"));
 check("grep caps hits", (await grepFiles(root, { pattern: "hit-line" })).split("\n").length <= 50);
+check("grep marks a per-file collect cap", (await grepFiles(root, { pattern: "hit-line" }, { jsOnly: true })).includes("50+ hits"));
+
+const groupedRaw = [
+  ...Array.from({ length: 30 }, (_, i) => `noise.ts:${i + 1}:TODO fix`),
+  "app.ts:12:TODO handle",
+  "app.ts:40:TODO retry",
+  "utils.ts:4:TODO",
+].join("\n");
+const grouped = formatGrepHits(groupedRaw);
+check("grep groups sparse files first", grouped.indexOf("utils.ts") < grouped.indexOf("app.ts") && grouped.indexOf("app.ts") < grouped.indexOf("noise.ts"));
+check("grep page names the dense file", grouped.includes("noise.ts (30 hits, showing 8)"));
+check("grep page keeps sparse files", grouped.includes("app.ts (2 hits)") && grouped.includes("utils.ts (1 hit)"));
+check(
+  "grep page does not dump the dense file",
+  grouped.split("\n").filter((l) => l.includes("TODO fix")).length === 8,
+);
+check(
+  "grep continue hint uses path",
+  grouped.includes("22 more in noise.ts") && grouped.includes('path="noise.ts"'),
+);
+check("grep error passthrough", formatGrepHits("error: invalid regular expression") === "error: invalid regular expression");
+check("grep empty passthrough", formatGrepHits("(no matches)") === "(no matches)");
+check(
+  "grep formats a path that starts with error:",
+  formatGrepHits("error:codes.ts:1:boom").includes("error:codes.ts") &&
+    formatGrepHits("error:codes.ts:1:boom").includes("1 hit"),
+);
+check("grep drops unparseable lines", !formatGrepHits("hit.ts:1:x\nnot-a-row").includes("not-a-row"));
+check("grep strips CR from ripgrep rows", formatGrepHits("hit.ts:1:x\r").includes("  1:x"));
+check(
+  "grep clips long match lines",
+  formatGrepHits(`a.ts:1:${"y".repeat(400)}`).includes("...") &&
+    !formatGrepHits(`a.ts:1:${"y".repeat(400)}`).includes("y".repeat(400)),
+);
+check("grep stdout drops an incomplete last line", completeGrepStdout("a.ts:1:x\na.ts:2:part", true) === "a.ts:1:x");
+check("grep stdout keeps complete lines", completeGrepStdout("a.ts:1:x\n", true) === "a.ts:1:x");
+const omittedPage = formatGrepHits(
+  `${Array.from({ length: 10 }, (_, i) => `f${String(i).padStart(2, "0")}.ts:1:x`).join("\n")}\nzz.ts:1:y\nzz.ts:2:y`,
+);
+check(
+  "grep names the largest omitted file",
+  omittedPage.includes("more files (largest: zz.ts 2 hits)") && omittedPage.includes('path="zz.ts"'),
+);
+const denseOmitted = formatGrepHits(
+  `${Array.from({ length: 8 }, (_, i) => `a${i}.ts:1:x`).join("\n")}\n${Array.from({ length: 30 }, (_, i) => `noise.ts:${i + 1}:TODO`).join("\n")}`,
+);
+check(
+  "grep continue path is the omitted dense file",
+  denseOmitted.includes("largest: noise.ts 30 hits") && denseOmitted.includes('path="noise.ts"'),
+);
+const multiPartial = formatGrepHits(
+  ["a.ts", "b.ts", "c.ts"].flatMap((f) => Array.from({ length: 10 }, (_, i) => `${f}:${i + 1}:x`)).join("\n"),
+);
+check("grep continue hint keeps the largest remainder", multiPartial.includes("6 more in c.ts") && multiPartial.includes('path="c.ts"'));
+
+writeFileSync(join(root, "noise.ts"), `${Array.from({ length: 30 }, () => "TODO-CORE-NOISE fix").join("\n")}\n`);
+writeFileSync(join(root, "app-todo.ts"), "TODO-CORE-NOISE a\nTODO-CORE-NOISE b\n");
+writeFileSync(join(root, "utils-todo.ts"), "TODO-CORE-NOISE c\n");
+const jsGrouped = await grepFiles(root, { pattern: "TODO-CORE-NOISE" }, { jsOnly: true });
+check("grep js groups sparse files onto the first page", jsGrouped.includes("app-todo.ts") && jsGrouped.includes("utils-todo.ts"));
+check("grep js caps the dense file", jsGrouped.includes("noise.ts (30 hits, showing 8)"));
+check("grep js continue hint", jsGrouped.includes('path="noise.ts"'));
+const jsShown = jsGrouped.split("\n").filter((l) => l.includes("TODO-CORE-NOISE")).length;
+check("grep js shows 11 match lines", jsShown === 11);
 
 const parentDir = mkdtempSync(join(tmpdir(), "agent-core-parent-"));
 leftovers.push(parentDir);
@@ -2349,6 +2426,16 @@ check(
   matchingSlashCommands("/m").map((c) => c.name).join(" ") === "/model /models",
 );
 check("slash /models is exact", matchingSlashCommands("/models").map((c) => c.name).join(" ") === "/models");
+check(
+  "slash /permissions lists policies",
+  matchingSlashCommands("/permissions").map((c) => c.name).join(" ") ===
+    "Always ask Ask on dangerous requests Always approve",
+);
+check("slash /permissions filters dangerous", matchingSlashCommands("/permissions dangerous")[0]?.submit === "/permissions dangerous");
+check(
+  "slash /permissions ask is exact",
+  matchingSlashCommands("/permissions ask").length === 1 && matchingSlashCommands("/permissions ask")[0]?.submit === "/permissions ask",
+);
 check("slash hides after a space", matchingSlashCommands("/help ").length === 0);
 check(
   "slash /login lists OpenAI and OpenAI (key)",
@@ -2491,6 +2578,32 @@ check(
 );
 effortTui.feed("\x1b[B\r");
 check("tui effort picker submits max", effortPicks[0] === "/effort max");
+const permissionPicks = [];
+const permissionTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: (line) => permissionPicks.push(line),
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+permissionTui.feed("/permissions");
+check("tui permissions picker shows all policies", permissionTui.frame().includes("Ask on dangerous requests"));
+permissionTui.feed("\x1b[B\r");
+check("tui permissions picker submits dangerous", permissionPicks[0] === "/permissions dangerous");
+permissionTui.setDraft("keep this draft");
+permissionTui.setChoices("Approve bash? rm -rf build", [
+  { name: "Deny", hint: "reject", submit: "/approve deny" },
+  { name: "Approve once", hint: "run", submit: "/approve once" },
+]);
+permissionTui.setBusy(true);
+check(
+  "tui approval is selectable while busy",
+  permissionTui.frame().includes("Approve bash? rm -rf build") && permissionTui.frame().includes("↑↓ pick"),
+);
+permissionTui.feed("\r");
+check("tui approval defaults to deny", permissionPicks[1] === "/approve deny");
+check("tui approval keeps an in-flight draft", permissionTui.frame().includes("> keep this draft"));
+permissionTui.setBusy(false);
 const shortcutLines = [];
 let shortcutInterrupts = 0;
 const shortcutTui = new tuiMod.AgentTui({

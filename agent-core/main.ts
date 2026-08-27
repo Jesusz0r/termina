@@ -116,7 +116,7 @@ import {
 export { MAX_SESSION_FILE_BYTES, copySessionImageFiles, rotateSessionFile, sessionRotateStamp, sliceSessionText, writeForkedSession } from "./session.ts";
 import { AgentTui, SLASH_COMMANDS } from "./tui.ts";
 
-export { SLASH_COMMANDS, completeSlashLine, matchingSlashCommands, type SlashCommand } from "./tui.ts";
+export { PERMISSION_COMMANDS, SLASH_COMMANDS, completeSlashLine, matchingSlashCommands, type SlashCommand } from "./tui.ts";
 
 /** Example starting values from docs/AGENT-CORE.md; never spec constants. */
 const MODEL_ENV = process.env.TERMINA_CORE_MODEL?.trim() || "";
@@ -179,10 +179,16 @@ const PROJECT_AGENTS_CAP = 24_576;
 const SKILL_XML_CAP = 8_192;
 const SKILL_COUNT_CAP = 32;
 const GREP_HIT_CAP = 50;
-const GREP_BYTE_CAP = 20 * 1024;
+const GREP_SHOW_PER_FILE = 8;
+const GREP_SHOW_HITS = 20;
+const GREP_SHOW_FILES = 8;
+const GREP_SHOW_LINE_CHARS = 240;
+const GREP_COLLECT_FILES = 40;
+const GREP_BYTE_CAP = 64 * 1024;
 const GREP_VISIT_CAP = 2_000;
 const GREP_LINE_CHARS = 8_192;
 const GREP_BUDGET_MS = 2_000;
+const GREP_ROW = /^(.+):(\d+):(.*)$/;
 const FETCH_TIMEOUT_MS = 15_000;
 const FETCH_CAP_BYTES = 20 * 1024;
 const FETCH_REDIRECT_CAP = 5;
@@ -748,6 +754,151 @@ function forEachGrepLine(
   }
 }
 
+function parseGrepRow(row: string): { file: string; line: number; text: string } | null {
+  const m = GREP_ROW.exec(row.endsWith("\r") ? row.slice(0, -1) : row);
+  if (!m) return null;
+  const line = Number(m[2]);
+  if (!Number.isInteger(line) || line < 1) return null;
+  return { file: m[1]!, line, text: m[3]! };
+}
+
+function cmpUtf8(a: string, b: string): number {
+  return Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
+}
+
+function clipGrepText(text: string): string {
+  if (text.length <= GREP_SHOW_LINE_CHARS) return text;
+  return `${text.slice(0, GREP_SHOW_LINE_CHARS)}...`;
+}
+
+function countLabel(count: number, capped: boolean): string {
+  return capped ? `${GREP_HIT_CAP}+` : String(count);
+}
+
+/** Drop a trailing incomplete line when ripgrep stdout hit the byte cap. */
+export function completeGrepStdout(text: string, truncated: boolean): string {
+  if (!truncated) return text.replace(/\n+$/, "");
+  const cut = text.endsWith("\n") ? text : text.slice(0, Math.max(0, text.lastIndexOf("\n")));
+  return cut.replace(/\n+$/, "");
+}
+
+/** Group hits by file, put sparse files first, and cap the page the model sees. */
+export function formatGrepHits(raw: string): string {
+  if (!raw) return raw;
+
+  const byFile = new Map<string, Array<{ line: number; text: string }>>();
+  for (const row of raw.split("\n")) {
+    if (!row) continue;
+    const hit = parseGrepRow(row);
+    if (!hit) continue;
+    const list = byFile.get(hit.file);
+    if (list) list.push({ line: hit.line, text: hit.text });
+    else byFile.set(hit.file, [{ line: hit.line, text: hit.text }]);
+  }
+  if (byFile.size === 0) return raw;
+
+  const files = [...byFile.entries()].sort((a, b) => {
+    if (a[1].length !== b[1].length) return a[1].length - b[1].length;
+    return cmpUtf8(a[0], b[0]);
+  });
+
+  let total = 0;
+  let totalCapped = false;
+  for (const [, hits] of files) {
+    total += hits.length;
+    if (hits.length >= GREP_HIT_CAP) totalCapped = true;
+  }
+
+  const body: string[] = [];
+  let shownHits = 0;
+  let shownFiles = 0;
+  const partials: Array<{ file: string; left: number }> = [];
+  const omitted: Array<{ file: string; count: number; capped: boolean }> = [];
+
+  for (const [file, hits] of files) {
+    const capped = hits.length >= GREP_HIT_CAP;
+    const label = countLabel(hits.length, capped);
+    if (shownFiles >= GREP_SHOW_FILES || shownHits >= GREP_SHOW_HITS) {
+      omitted.push({ file, count: hits.length, capped });
+      continue;
+    }
+    const take = Math.min(GREP_SHOW_PER_FILE, hits.length, GREP_SHOW_HITS - shownHits);
+    if (take <= 0) {
+      omitted.push({ file, count: hits.length, capped });
+      continue;
+    }
+    const left = hits.length - take;
+    if (left > 0) {
+      body.push(`${file} (${label} hits, showing ${take})`);
+      partials.push({ file, left });
+    } else {
+      body.push(`${file} (${label} ${hits.length === 1 && !capped ? "hit" : "hits"})`);
+    }
+    for (let i = 0; i < take; i++) {
+      const h = hits[i]!;
+      body.push(`  ${h.line}:${clipGrepText(h.text)}`);
+    }
+    shownHits += take;
+    shownFiles += 1;
+  }
+
+  const hitWord = total === 1 && !totalCapped ? "hit" : "hits";
+  const fileWord = files.length === 1 ? "file" : "files";
+  const out = [
+    `${total}${totalCapped ? "+" : ""} ${hitWord} in ${files.length} ${fileWord}, showing ${shownHits}`,
+    ...body,
+  ];
+  const footer = grepContinueFooter(partials, omitted);
+  if (footer) out.push(footer);
+  return out.join("\n");
+}
+
+function grepContinueFooter(
+  partials: Array<{ file: string; left: number }>,
+  omitted: Array<{ file: string; count: number; capped: boolean }>,
+): string | undefined {
+  if (partials.length === 0 && omitted.length === 0) return undefined;
+
+  let bestFile = "";
+  let bestScore = -1;
+  for (const p of partials) {
+    if (p.left > bestScore) {
+      bestScore = p.left;
+      bestFile = p.file;
+    }
+  }
+  for (const o of omitted) {
+    if (o.count > bestScore) {
+      bestScore = o.count;
+      bestFile = o.file;
+    }
+  }
+
+  const parts: string[] = [];
+  if (partials.length > 0) {
+    let dense = partials[0]!;
+    for (const p of partials) {
+      if (p.left > dense.left) dense = p;
+    }
+    parts.push(`${dense.left} more in ${dense.file}`);
+  }
+  if (omitted.length > 0) {
+    let largest = omitted[0]!;
+    for (const item of omitted) {
+      if (item.count > largest.count) largest = item;
+    }
+    if (bestFile === largest.file) {
+      parts.push(
+        `${omitted.length} more files (largest: ${largest.file} ${countLabel(largest.count, largest.capped)} hits)`,
+      );
+    } else {
+      parts.push(`${omitted.length} more files`);
+    }
+  }
+  parts.push(`Grep again with path=${JSON.stringify(bestFile)} or a tighter glob.`);
+  return parts.join(". ");
+}
+
 function grepRipgrep(
   rg: string,
   root: string,
@@ -765,9 +916,6 @@ function grepRipgrep(
     "--no-heading",
     "--with-filename",
     "--hidden",
-    "--no-ignore-dot",
-    "--no-ignore-global",
-    "--no-ignore-parent",
     "--no-require-git",
     `--max-count=${GREP_HIT_CAP}`,
   ];
@@ -785,11 +933,27 @@ function grepRipgrep(
     const chunks: Buffer[] = [];
     const errChunks: Buffer[] = [];
     let used = 0;
+    let truncated = false;
+    const kill = (): void => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    };
     child.stdout?.on("data", (chunk: Buffer) => {
-      if (used >= GREP_BYTE_CAP) return;
+      if (used >= GREP_BYTE_CAP) {
+        truncated = true;
+        kill();
+        return;
+      }
       const piece = chunk.subarray(0, GREP_BYTE_CAP - used);
       chunks.push(piece);
       used += piece.length;
+      if (piece.length < chunk.length) {
+        truncated = true;
+        kill();
+      }
     });
     child.stderr?.on("data", (chunk: Buffer) => {
       if (errChunks.length < 8) errChunks.push(chunk.subarray(0, 2 * 1024));
@@ -801,29 +965,27 @@ function grepRipgrep(
       settled = true;
       clearTimeout(timer);
       clearInterval(poll);
-      const text = Buffer.concat(chunks).toString("utf8").replace(/\n+$/, "");
+      const text = completeGrepStdout(Buffer.concat(chunks).toString("utf8"), truncated);
       if (timedOut) {
-        resolve(text ? `${text}\n(grep timed out)` : "(grep timed out)");
+        resolve(text ? `${formatGrepHits(text)}\n(grep timed out)` : "(grep timed out)");
         return;
       }
-      if (code === 2) {
+      if (code === 2 && !truncated) {
         const err = Buffer.concat(errChunks).toString("utf8").trim().slice(0, 300);
         resolve(err ? `error: ${err}` : "error: invalid regular expression");
         return;
       }
       if (!text) {
-        resolve("(no matches)");
+        if (truncated) resolve("(more matching files not listed. Grep again with path or glob.)");
+        else resolve("(no matches)");
         return;
       }
-      const lines = text.split("\n").slice(0, GREP_HIT_CAP);
-      resolve(lines.join("\n"));
-    };
-    const kill = (): void => {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        /* already gone */
-      }
+      const formatted = formatGrepHits(text);
+      resolve(
+        truncated
+          ? `${formatted}\n(more matching files not listed. Grep again with path or glob.)`
+          : formatted,
+      );
     };
     const timer = setTimeout(() => {
       timedOut = true;
@@ -880,20 +1042,25 @@ export async function grepFiles(
   });
   if (collected.timedOut) return `(grep timed out after ${collected.files.length} files)`;
   const hits: string[] = [];
-  let bytes = 0;
+  let filesWithHits = 0;
   let scanned = 0;
+  let timedOut = false;
+  let fileCap = false;
   for (const abs of collected.files) {
     if (opts?.shouldStop?.()) break;
     if (Date.now() - started >= budgetMs) {
-      hits.push(`(grep timed out after ${scanned} files)`);
+      timedOut = true;
       break;
     }
     scanned++;
     if (scanned % 25 === 0) await yieldEventLoop();
     const rel = relative(root, abs).split(sep).join("/");
     if (input.glob && !matchGlob(input.glob, rel)) continue;
-    let hitCap = false;
-    let timedOut = false;
+    if (filesWithHits >= GREP_COLLECT_FILES) {
+      fileCap = true;
+      break;
+    }
+    let fileHits = 0;
     forEachGrepLine(
       abs,
       (lineNo, line) => {
@@ -902,25 +1069,24 @@ export async function grepFiles(
           return false;
         }
         if (!regex.test(line)) return true;
-        const row = `${rel}:${lineNo}:${line}`;
-        const rowBytes = Buffer.byteLength(row) + (hits.length > 0 ? 1 : 0);
-        if (hits.length >= GREP_HIT_CAP || bytes + rowBytes > GREP_BYTE_CAP) {
-          hitCap = true;
-          return false;
-        }
-        hits.push(row);
-        bytes += rowBytes;
-        return true;
+        fileHits++;
+        if (fileHits <= GREP_HIT_CAP) hits.push(`${rel}:${lineNo}:${line}`);
+        return fileHits < GREP_HIT_CAP;
       },
       opts?.shouldStop,
     );
-    if (hitCap) return hits.join("\n");
-    if (timedOut) {
-      hits.push(`(grep timed out after ${scanned} files)`);
-      break;
-    }
+    if (fileHits > 0) filesWithHits++;
+    if (timedOut) break;
   }
-  return hits.length > 0 ? hits.join("\n") : "(no matches)";
+  if (hits.length === 0) {
+    if (timedOut) return `(grep timed out after ${scanned} files)`;
+    return "(no matches)";
+  }
+  const formatted = formatGrepHits(hits.join("\n"));
+  const extra: string[] = [];
+  if (fileCap) extra.push("(more matching files not listed. Grep again with path or glob.)");
+  if (timedOut) extra.push(`(grep timed out after ${scanned} files)`);
+  return extra.length > 0 ? `${formatted}\n${extra.join("\n")}` : formatted;
 }
 
 export async function globFiles(
@@ -1748,14 +1914,13 @@ export function sidecarStartFor(use: {
 }
 
 export function formatToolAnnounce(use: ToolUse): string {
-  if (use.name === "edit" || use.name === "write_file" || use.name === "read_file") {
-    return `[${use.name} ${use.input.path ?? ""}]`;
-  }
-  if (use.name === "bash") return `[bash] ${use.input.command ?? ""}`;
-  if (use.name === "grep") return `[grep ${use.input.pattern ?? ""}]`;
-  if (use.name === "glob") return `[glob ${use.input.pattern ?? ""}]`;
-  if (use.name === "fetch") return `[fetch ${String(use.input.url ?? "")}]`;
-  return `[${use.name}]`;
+  let detail = "";
+  if (use.name === "edit" || use.name === "write_file" || use.name === "read_file") detail = use.input.path ?? "";
+  else if (use.name === "bash") detail = `$ ${use.input.command ?? ""}`;
+  else if (use.name === "grep") detail = use.input.pattern ?? "";
+  else if (use.name === "glob") detail = use.input.pattern ?? "";
+  else if (use.name === "fetch") detail = String(use.input.url ?? "");
+  return `◆ Tool · ${use.name}${detail ? `\n  ${detail}` : ""}`;
 }
 
 function capDisplay(text: string, maxBytes: number): string {
@@ -1766,17 +1931,25 @@ function capDisplay(text: string, maxBytes: number): string {
 
 export function formatToolFollowup(use: ToolUse, outcome: { result: Record<string, unknown>; isError: boolean }): string {
   const content = typeof outcome.result.content === "string" ? outcome.result.content : "";
+  const status = outcome.isError ? "failed" : "done";
   if (use.name === "bash") {
     const shown = capDisplay(content, TOOL_DISPLAY_BYTES);
-    return shown ? `${shown}\n` : "";
+    return `◇ ${use.name} · ${status}${shown ? `\n${shown}` : ""}\n`;
   }
-  if (outcome.isError) return content ? `${content}\n` : "";
+  if (outcome.isError) {
+    const shown = capDisplay(content, TOOL_DISPLAY_BYTES);
+    return `◇ ${use.name} · failed${shown ? `\n${shown}` : ""}\n`;
+  }
   if (use.name === "grep" || use.name === "glob") {
-    if (content === "(no matches)") return `${content}\n`;
+    if (content === "(no matches)") return `◇ ${use.name} · done · no matches\n`;
+    if (use.name === "grep") {
+      const hm = /^(\d+\+?) hits? in /.exec(content);
+      if (hm) return `◇ grep · done · ${hm[1]} hits\n`;
+    }
     const n = content === "" ? 0 : content.split("\n").length;
-    return `(${n} ${use.name === "grep" ? "hits" : "files"})\n`;
+    return `◇ ${use.name} · done · ${n} ${use.name === "grep" ? "hits" : "files"}\n`;
   }
-  return "";
+  return `◇ ${use.name} · done\n`;
 }
 
 export function runBash(
@@ -1951,24 +2124,61 @@ export async function fetchUrl(
   return { content: "error: too many redirects", isError: true };
 }
 
-let approveAll = process.env.TERMINA_CORE_APPROVE === "all";
-let approvalResolve: ((line: string) => void) | null = null;
+export type PermissionMode = "always" | "dangerous" | "ask";
 
-async function confirmBash(command: string): Promise<boolean> {
-  if (approveAll || !surface?.active()) return true;
-  out(`\napprove bash?\n  ${command}\n  [y] yes  [n] no  [a] always this session\n`);
-  surface.setRawInput(true);
+export function isDangerousBash(command: string): boolean {
+  const text = command.replace(/\\\n/g, " ");
+  return (
+    /\b(?:sudo|doas|su|rm|rmdir|unlink|shred|truncate|mkfs|fdisk|parted|shutdown|reboot|halt|poweroff|chmod|chown|kill|pkill|killall)\b/i.test(text) ||
+    /\bdd\b[^\n]*\bof=/i.test(text) ||
+    /\bfind\b[^\n]*(?:\s-delete\b|\s-exec\b)/i.test(text) ||
+    /\bgit\b[^\n;&|]*\b(?:clean\b|restore\b|push\b|reset\s+--hard\b|checkout\s+--\b)/i.test(text) ||
+    /\b(?:npm|pnpm|yarn)\s+publish\b/i.test(text) ||
+    /\b(?:curl|wget)\b[^\n]*\|\s*(?:env\s+)?(?:ba|z|k|c)?sh\b/i.test(text) ||
+    /\b(?:python\d*|node|ruby|perl|(?:ba|z|k|c)?sh)\b[^\n]*(?:\s-c\b|\s-e\b)/i.test(text)
+  );
+}
+
+export function shouldAskPermission(mode: PermissionMode, command: string): boolean {
+  return mode === "ask" || (mode === "dangerous" && isDangerousBash(command));
+}
+
+let permissionMode: PermissionMode = process.env.TERMINA_CORE_APPROVE === "all" ? "always" : "ask";
+let approvalResolve: ((line: string) => void) | null = null;
+let approvalQueue = Promise.resolve();
+
+async function confirmBashNow(command: string): Promise<boolean> {
+  if (interrupted) return false;
+  if (!surface?.active() || !shouldAskPermission(permissionMode, command)) return true;
+  surface.setChoices(`Approve bash? ${command.slice(0, 160)}`, [
+    { name: "Deny", hint: "reject this command", submit: "/approve deny" },
+    { name: "Approve once", hint: "run this command", submit: "/approve once" },
+    { name: "Always approve", hint: "run bash without asking this session", submit: "/approve always" },
+  ]);
   const line = await new Promise<string>((resolve) => {
     approvalResolve = resolve;
   });
   approvalResolve = null;
-  surface.setRawInput(false);
-  const ans = line.trim().toLowerCase();
-  if (ans === "a" || ans === "always") {
-    approveAll = true;
+  surface.clearChoices();
+  if (line === "/approve always") {
+    permissionMode = "always";
     return true;
   }
-  return ans === "y" || ans === "yes";
+  return line === "/approve once";
+}
+
+async function confirmBash(command: string): Promise<boolean> {
+  const previous = approvalQueue;
+  let release!: () => void;
+  approvalQueue = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  try {
+    return await confirmBashNow(command);
+  } finally {
+    release();
+  }
 }
 
 async function executeTool(use: ToolUse): Promise<ToolOutcome> {
@@ -2054,7 +2264,8 @@ const TOOLS = [
   },
   {
     name: "grep",
-    description: "Search file contents with a regular expression. Uses ripgrep when available. Caps hits and skips ignored directories.",
+    description:
+      "Search file contents with a regular expression. Uses ripgrep when available. Groups hits by file, shows sparse files first, and caps per file. Skip ignored directories. Narrow with path or glob when a file has more hits.",
     input_schema: {
       type: "object",
       properties: {
@@ -2215,7 +2426,8 @@ function logServerSearch(
       const name = b.name ?? "web_search";
       names.push(name);
       logEvent(sidecarStartFor({ name, id: b.id ?? "", input: {} }));
-      out(`\n[${name}]\n`);
+      transcriptSection = null;
+      out(`\n◆ Tool · ${name}\n`);
     } else if (b.type === "web_search_tool_result") {
       const err =
         Boolean(b.content) &&
@@ -2223,6 +2435,7 @@ function logServerSearch(
         !Array.isArray(b.content) &&
         (b.content as { type?: string }).type === "web_search_tool_result_error";
       if (b.tool_use_id) logEvent({ t: "tool_end", toolCallId: b.tool_use_id, isError: err });
+      out(`◇ ${err ? "failed" : "done"}\n`);
     }
   }
   return names;
@@ -2979,6 +3192,7 @@ async function completeText(
 }
 
 async function callModel(messages: Message[]): Promise<CallResult> {
+  transcriptSection = null;
   const started = Date.now();
   const sys = systemPrompt();
   const prefix = buildCachedPrefix(sys, clientTools);
@@ -3063,7 +3277,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
         const live = responsesLiveDelta(event);
         if (live?.kind === "thinking") {
           if (ttftMs === null) ttftMs = Date.now() - started;
-          out(live.text);
+          streamOut("thinking", live.text);
         }
         if (live?.kind === "text") {
           chunk = live.text;
@@ -3074,7 +3288,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
         if (live?.thinking) {
           if (ttftMs === null) ttftMs = Date.now() - started;
           keepEvent = true;
-          out(live.thinking);
+          streamOut("thinking", live.thinking);
         }
         if (live?.text) {
           chunk = live.text;
@@ -3088,7 +3302,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
       if (chunk) {
         if (ttftMs === null) ttftMs = Date.now() - started;
         streamedText += chunk;
-        out(chunk);
+        streamOut("assistant", chunk);
       }
       if (viaResponses && event.type === "response.output_text.delta") return false;
       if (!viaResponses && chunk && Array.isArray(event.choices)) {
@@ -3199,12 +3413,12 @@ async function callModel(messages: Message[]): Promise<CallResult> {
           if (d.type === "text_delta" && target.type === "text") {
             if (ttftMs === null) ttftMs = Date.now() - started;
             target.text += d.text ?? "";
-            out(d.text ?? "");
+            streamOut("assistant", d.text ?? "");
           } else if (d.type === "thinking_delta" && target.type === "thinking") {
             const chunk = d.thinking ?? "";
             if (chunk && ttftMs === null) ttftMs = Date.now() - started;
             target.thinking += chunk;
-            out(chunk);
+            streamOut("thinking", chunk);
           } else if (d.type === "signature_delta" && target.type === "thinking") {
             target.signature = (target.signature ?? "") + (d.signature ?? "");
           } else if (d.type === "citations_delta" && target.type === "text" && d.citation !== undefined) {
@@ -3518,6 +3732,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         const chunk = uses.slice(i, i + TOOL_CONCURRENCY);
         for (const use of chunk) {
           logToolStart(use);
+          transcriptSection = null;
           out(`\n${formatToolAnnounce(use)}\n`);
         }
         const chunkOutcomes = await Promise.all(chunk.map(executeTool));
@@ -3669,10 +3884,20 @@ function resumeSession(): void {
 // ---- terminal surface ----
 
 let surface: AgentTui | null = null;
+let transcriptSection: "thinking" | "assistant" | null = null;
 
 function out(text: string): void {
   if (surface) surface.append(text);
   else process.stdout.write(text);
+}
+
+function streamOut(section: "thinking" | "assistant", text: string): void {
+  if (!text) return;
+  if (transcriptSection !== section) {
+    out(`\n◆ ${section === "thinking" ? "Thinking" : "Assistant"}\n`);
+    transcriptSection = section;
+  }
+  out(text);
 }
 
 function statusContextTokens(): number {
@@ -4071,6 +4296,22 @@ function dispatchLine(line: string): void {
     startCatalogCommand(line);
     return;
   }
+  if (line === "/permissions") {
+    out(`(permissions ${permissionMode}; choose: always, dangerous, ask)\n`);
+    showPrompt();
+    return;
+  }
+  if (line.startsWith("/permissions ")) {
+    const next = line.slice("/permissions ".length).trim();
+    if (next !== "always" && next !== "dangerous" && next !== "ask") {
+      out("(permissions must be always, dangerous, or ask)\n");
+    } else {
+      permissionMode = next;
+      out(`(permissions ${permissionMode})\n`);
+    }
+    showPrompt();
+    return;
+  }
   if (line === "/resume") {
     if (running || authBusy) out("(engine busy)\n");
     else if (history.length > 0) out("(session already live — /resume only on a fresh engine)\n");
@@ -4105,7 +4346,7 @@ function dispatchLine(line: string): void {
     lastBilledTokens = null;
     sessionUsage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
     lastUsd = null;
-    approveAll = process.env.TERMINA_CORE_APPROVE === "all";
+    permissionMode = process.env.TERMINA_CORE_APPROVE === "all" ? "always" : "ask";
     prevPrompt = null;
     postRevision = false;
     revisions = 0;
@@ -4189,8 +4430,8 @@ async function main(): Promise<void> {
         if (approvalResolve) {
           const resolve = approvalResolve;
           approvalResolve = null;
-          surface?.setRawInput(false);
-          resolve("n");
+          surface?.clearChoices();
+          resolve("/approve deny");
           return;
         }
         if (running) {

@@ -14,7 +14,7 @@ edit (replace_all), interruptible bash, web_search, fetch, skill
 index, prefix `cache_control`, last `tool_result` cache pin, OpenAI/Codex `prompt_cache_key`,
 429 retry, model-aware `/effort`, live provider reasoning, request-only working-set overlay,
 traces, provider auth, live model list, full-screen TUI, Termina sidecar host contract, core worldline session slice,
-bash approval, /clear /compact, -p print, token/cache/context status, stdio MCP). Zone 1 is identity, environment,
+selectable bash approval policies, `/permissions`, /clear /compact, -p print, token/cache/context status, stdio MCP). Zone 1 is identity, environment,
 user-global `~/.agents/AGENTS.md`, the skill index, then cwd `AGENTS.md`.
 Skill bodies load with `read_file`. Skills come from `~/.agents/skills`
 then `<cwd>/.agents/skills` (no ancestor walk). Truncated instructions
@@ -217,7 +217,10 @@ once on expiry or 401. After login the kernel loads that provider's live
 model list. Startup loads only the active provider. `/models` loads every
 authenticated provider on demand and prints `provider` and `id`; typing
 `/models` in the TUI lists them. `/model <id>` or `/model <provider>/<id>`
-selects one. The file is not Pi's `auth.json`. See `docs/AUTH-PLAN.md`.
+selects one. `/permissions` opens a picker for `Always approve`, `Ask on dangerous requests`,
+or `Always ask`. Bash approval prompts also use arrow-key selection instead of typed letters.
+The dangerous mode recognizes destructive command patterns; it is not a shell sandbox.
+The file is not Pi's `auth.json`. See `docs/AUTH-PLAN.md`.
 
 The host owns session resume. `TERMINA_CORE_SESSION_FILE` is the jsonl
 path under the app user-data `agent-sessions/<project>/` directory.
