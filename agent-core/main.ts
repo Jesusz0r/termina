@@ -18,6 +18,7 @@
  * - Two-role routing map (main + summary), env-overridable
  * - Streaming always; tool calls run concurrently behind a small bound
  * - cwd jail; grep/glob; unique edit; interruptible bash; web_search; skill index; prefix cache_control; traces
+ * - last tool_result cache pin (Anthropic); OpenAI/Codex prompt_cache_key; 429 retry; opt-in thinking
  * - provider auth (Anthropic, OpenAI, ChatGPT Codex, xAI, Google, OpenRouter)
  */
 import { execFileSync, spawn } from "node:child_process";
@@ -126,6 +127,9 @@ let summaryRoute = parseModelRef(
 );
 const catalogs = new Map<ProviderId, ModelInfo[]>();
 const OUTPUT_RESERVE = 16_384;
+/** Example starting values; never spec constants. Thinking counts against max_tokens. */
+const THINK_BUDGET = 8_000;
+const OUTPUT_CAP = 16_384;
 const HIGH_WATER = 0.8;
 const LOW_WATER = 0.6;
 /** Trailing tool-output span never reclaimed (fraction of usable, clamped). */
@@ -187,6 +191,32 @@ export function parseMaxTurns(raw: string | undefined): number {
 }
 
 const MAX_TURNS = parseMaxTurns(process.env.TERMINA_CORE_MAX_TURNS);
+let thinkingWanted = false;
+
+export function thinkingEnabledFor(model: string, enabled: boolean): boolean {
+  if (!enabled) return false;
+  const id = model.toLowerCase();
+  return id.includes("claude") && !id.includes("haiku");
+}
+
+export function outputTokenBudget(opts: { thinking: boolean }): number {
+  return opts.thinking ? THINK_BUDGET + OUTPUT_CAP : OUTPUT_CAP;
+}
+
+export function parseThinkingCommand(
+  line: string,
+): { show: true } | { enabled: boolean } | { error: string } | null {
+  if (line !== "/thinking" && !line.startsWith("/thinking ")) return null;
+  const rest = line.slice("/thinking".length).trim().toLowerCase();
+  if (!rest) return { show: true };
+  if (rest === "on") return { enabled: true };
+  if (rest === "off") return { enabled: false };
+  return { error: "use /thinking on or /thinking off" };
+}
+
+function thinkingLevelFor(model: string): "on" | "off" {
+  return thinkingEnabledFor(model, thinkingWanted) ? "on" : "off";
+}
 
 /** Chars-per-token estimate. Good enough for water marks; never billing. */
 function tokenEstimate(text: string): number {
@@ -1691,6 +1721,68 @@ export function buildCachedPrefix(
   };
 }
 
+/** Stamp cache_control on a copy of the last tool_result. Do not mutate input. */
+export function stampHistoryCache(
+  messages: Array<{ role: string; content: unknown }>,
+): Array<{ role: string; content: unknown }> {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (!Array.isArray(m.content)) continue;
+    const blocks = m.content as Array<Record<string, unknown>>;
+    for (let j = blocks.length - 1; j >= 0; j--) {
+      const b = blocks[j]!;
+      if (b.type !== "tool_result") continue;
+      const next = messages.slice();
+      const copied = blocks.slice();
+      copied[j] = { ...b, cache_control: { type: "ephemeral" as const } };
+      next[i] = { ...m, content: copied };
+      return next;
+    }
+  }
+  return messages;
+}
+
+const RETRY_STATUSES = new Set([429, 529, 500, 502, 503]);
+const RETRY_AFTER_CAP_S = 10;
+
+/** Milliseconds to wait, or null when this status/attempt must not retry. */
+export function retryAfter(
+  status: number,
+  headers: { get(name: string): string | null },
+  attempt: number,
+): number | null {
+  if (attempt >= 2) return null;
+  if (!RETRY_STATUSES.has(status)) return null;
+  const raw = headers.get("retry-after");
+  if (raw !== null && raw !== "") {
+    const secs = Number(raw);
+    if (Number.isInteger(secs) && secs >= 0 && secs <= RETRY_AFTER_CAP_S) return secs * 1000;
+  }
+  return attempt === 0 ? 1_000 : 2_000;
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("aborted"));
+      return;
+    }
+    if (ms <= 0) {
+      resolve();
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new Error("aborted"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 /** Append provider search after cached client tools. Do not put
  *  cache_control on the server tool: a strict schema can 400. */
 export function requestTools(
@@ -2240,7 +2332,9 @@ function endpointFor(auth: { providerId: ProviderId; baseUrl: string }): string 
 
 async function providerPost(providerId: ProviderId, body: unknown, signal: AbortSignal | undefined): Promise<Response> {
   let replayed = false;
+  let retries = 0;
   for (;;) {
+    if (signal?.aborted) throw new Error("aborted");
     const auth = await resolveAuth(providerId);
     if (!auth.ok) throw new Error(auth.error);
     const headers = { ...auth.headers };
@@ -2253,15 +2347,24 @@ async function providerPost(providerId: ProviderId, body: unknown, signal: Abort
       body: JSON.stringify(body),
       signal,
     });
-    if (res.status !== 401) return res;
-    await res.text();
-    if (auth.kind === "oauth" && !replayed) {
-      const refreshed = await refreshOauth(providerId);
-      if (!refreshed.ok) throw new Error(refreshed.error);
-      replayed = true;
+    if (res.status === 401) {
+      await res.text();
+      if (auth.kind === "oauth" && !replayed) {
+        const refreshed = await refreshOauth(providerId);
+        if (!refreshed.ok) throw new Error(refreshed.error);
+        replayed = true;
+        continue;
+      }
+      throw new Error(auth.kind === "oauth" ? "auth expired — run /login" : "invalid API key");
+    }
+    const wait = retryAfter(res.status, res.headers, retries);
+    if (wait != null) {
+      await res.text();
+      retries++;
+      await sleep(wait, signal);
       continue;
     }
-    throw new Error(auth.kind === "oauth" ? "auth expired — run /login" : "invalid API key");
+    return res;
   }
 }
 
@@ -2326,34 +2429,44 @@ async function completeText(
 
 async function callModel(messages: Message[]): Promise<CallResult> {
   const started = Date.now();
-  const prefix = buildCachedPrefix(systemPrompt(), clientTools);
+  const sys = systemPrompt();
+  const prefix = buildCachedPrefix(sys, clientTools);
   const proto = providerProtocol(route.provider);
   const imageRoots = [sessionFile ? dirname(sessionFile) : "", eventsDir].filter(Boolean);
   const requestMessages = toRequest(messages, imageRoots);
+  const anthropicMessages = proto === "anthropic-messages" ? stampHistoryCache(requestMessages) : requestMessages;
   const kernelMessages = requestMessages.map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content as string | Array<Record<string, unknown>>,
   }));
   const toolsForProvider = clientTools as ToolDef[];
+  const think = thinkingEnabledFor(route.model, thinkingWanted);
+  const maxTokens = outputTokenBudget({ thinking: think });
+  const cacheKey = hashSystem(sys);
   const body =
     proto === "anthropic-messages"
       ? {
           model: route.model,
-          max_tokens: 8192,
+          max_tokens: maxTokens,
           stream: true,
+          ...(think ? { thinking: { type: "enabled" as const, budget_tokens: THINK_BUDGET } } : {}),
           cache_control: prefix.cache_control,
           system: prefix.system,
           tools: requestTools(prefix.tools, route.provider),
-          messages: requestMessages,
+          messages: anthropicMessages,
         }
       : proto === "openai-codex-responses"
-        ? responsesBody(route.model, systemPrompt(), kernelMessages, toolsForProvider)
+        ? responsesBody(route.model, sys, kernelMessages, toolsForProvider, { maxTokens, cacheKey })
         : completionsBody(
             route.model,
-            systemPrompt(),
+            sys,
             kernelMessages,
             toolsForProvider,
             route.provider === "openai" ? "max_completion_tokens" : "max_tokens",
+            {
+              maxTokens,
+              ...(route.provider === "openai" ? { cacheKey } : {}),
+            },
           );
   const res = await providerPost(route.provider, body, currentAbort?.signal);
   if (!res.ok || !res.body) {
@@ -2640,7 +2753,7 @@ function logSettings(): void {
   logEvent({
     t: "agent_settings",
     model: `${route.provider}/${route.model}`,
-    thinkingLevel: null,
+    thinkingLevel: thinkingLevelFor(route.model),
   });
 }
 
@@ -2713,7 +2826,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     entryId: String(userMsg.sseq),
     parentEntryId: null,
     trusted: null,
-    thinkingLevel: null,
+    thinkingLevel: thinkingLevelFor(route.model),
   });
   if (!rateLookup && !ratesFailed) void loadRates().then(() => { ratesFailed = true; });
   let retriedOverflow = false;
@@ -3408,6 +3521,39 @@ function dispatchLine(line: string): void {
       out(`(compacted${n ? `; reclaimed ${n}` : ""}${summed ? "; summarized" : ""})\n`);
       showPrompt();
     })();
+    return;
+  }
+  const thinkingCmd = parseThinkingCommand(line);
+  if (thinkingCmd) {
+    if (running || authBusy) {
+      out("(engine busy)\n");
+      showPrompt();
+      return;
+    }
+    if ("error" in thinkingCmd) {
+      out(`(${thinkingCmd.error})\n`);
+      showPrompt();
+      return;
+    }
+    if ("show" in thinkingCmd) {
+      const actual = thinkingLevelFor(route.model);
+      out(
+        thinkingWanted && actual === "off"
+          ? "(thinking off for this model)\n"
+          : `(thinking ${actual})\n`,
+      );
+      showPrompt();
+      return;
+    }
+    thinkingWanted = thinkingCmd.enabled;
+    const actual = thinkingLevelFor(route.model);
+    out(
+      thinkingWanted && actual === "off"
+        ? "(thinking on — this model stays off)\n"
+        : `(thinking ${actual})\n`,
+    );
+    syncStatus();
+    showPrompt();
     return;
   }
   if (line.startsWith("/")) {

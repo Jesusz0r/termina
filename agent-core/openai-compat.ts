@@ -168,21 +168,27 @@ export function toResponsesInput(messages: KernelMessage[]): Array<Record<string
   return out;
 }
 
+export type CompletionsOpts = { cacheKey?: string; maxTokens?: number };
+
 export function completionsBody(
   model: string,
   system: string,
   messages: KernelMessage[],
   tools: ToolDef[],
   limitKey: "max_tokens" | "max_completion_tokens" = "max_tokens",
+  opts?: CompletionsOpts,
 ): Record<string, unknown> {
-  return {
+  const maxTokens = opts?.maxTokens ?? 16_384;
+  const body: Record<string, unknown> = {
     model,
     stream: true,
     stream_options: { include_usage: true },
-    [limitKey]: 8192,
+    [limitKey]: maxTokens,
     messages: toCompletionsMessages(system, messages),
     tools: toCompletionsTools(tools),
   };
+  if (opts?.cacheKey) body.prompt_cache_key = opts.cacheKey;
+  return body;
 }
 
 export function responsesBody(
@@ -190,18 +196,21 @@ export function responsesBody(
   system: string,
   messages: KernelMessage[],
   tools: ToolDef[],
+  opts?: CompletionsOpts,
 ): Record<string, unknown> {
-  return {
+  const body: Record<string, unknown> = {
     model,
     store: false,
     stream: true,
-    max_output_tokens: 8192,
+    max_output_tokens: opts?.maxTokens ?? 16_384,
     instructions: system || "You are a coding agent.",
     input: toResponsesInput(messages),
     tools: toResponsesTools(tools),
     tool_choice: "auto",
     parallel_tool_calls: true,
   };
+  if (opts?.cacheKey) body.prompt_cache_key = opts.cacheKey;
+  return body;
 }
 
 function usageFromOpenAI(u: Record<string, unknown> | undefined): CallResultLike["usage"] {

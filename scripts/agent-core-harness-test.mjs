@@ -80,6 +80,11 @@ const {
   SLASH_COMMANDS,
   matchingSlashCommands,
   completeSlashLine,
+  stampHistoryCache,
+  retryAfter,
+  parseThinkingCommand,
+  thinkingEnabledFor,
+  outputTokenBudget,
 } = core;
 
 const results = [];
@@ -1464,10 +1469,21 @@ const failedStream = compat.responsesResultFromEvents(
   Date.now(),
 );
 check("responses failed event is an error", failedStream.error === "quota");
-const bodyOpenAI = compat.completionsBody("gpt-5", "sys", [], [], "max_completion_tokens");
-check("openai completions uses max_completion_tokens", bodyOpenAI.max_completion_tokens === 8192 && bodyOpenAI.max_tokens === undefined);
+const bodyOpenAI = compat.completionsBody("gpt-5", "sys", [], [], "max_completion_tokens", {
+  cacheKey: "abc",
+  maxTokens: 16_384,
+});
+check(
+  "openai completions uses max_completion_tokens",
+  bodyOpenAI.max_completion_tokens === 16_384 && bodyOpenAI.max_tokens === undefined && bodyOpenAI.prompt_cache_key === "abc",
+);
 const bodyXai = compat.completionsBody("grok-4.3", "sys", [], []);
-check("other completions keep max_tokens", bodyXai.max_tokens === 8192);
+check("other completions keep max_tokens and skip cache key", bodyXai.max_tokens === 16_384 && bodyXai.prompt_cache_key === undefined);
+const bodyCodex = compat.responsesBody("gpt-5.4", "sys", [], [], { cacheKey: "def", maxTokens: 24_384 });
+check(
+  "codex responses set cache key and max_output_tokens",
+  bodyCodex.prompt_cache_key === "def" && bodyCodex.max_output_tokens === 24_384,
+);
 
 check(
   "resolveSessionFile override wins",
@@ -1842,6 +1858,58 @@ check("slash menu puts help first", SLASH_COMMANDS[0]?.name === "/help");
 check("slash menu puts exit last", SLASH_COMMANDS.at(-1)?.name === "/exit");
 check("slash /clear is listed", SLASH_COMMANDS.some((c) => c.name === "/clear"));
 check("slash /compact is listed", SLASH_COMMANDS.some((c) => c.name === "/compact"));
+check("slash /thinking is listed", SLASH_COMMANDS.some((c) => c.name === "/thinking"));
+check(
+  "slash /thinking lists off first",
+  matchingSlashCommands("/thinking")[0]?.submit === "/thinking off" &&
+    matchingSlashCommands("/thinking").some((c) => c.submit === "/thinking on"),
+);
+check("slash /thinking o matches off", matchingSlashCommands("/thinking o")[0]?.submit === "/thinking off");
+check("parseThinkingCommand missing is null", parseThinkingCommand("/model") === null);
+check("parseThinkingCommand bare shows", parseThinkingCommand("/thinking")?.show === true);
+check("parseThinkingCommand on", parseThinkingCommand("/thinking on")?.enabled === true);
+check("parseThinkingCommand off", parseThinkingCommand("/thinking off")?.enabled === false);
+check("parseThinkingCommand rejects junk", typeof parseThinkingCommand("/thinking maybe")?.error === "string");
+check("thinkingEnabledFor default off", thinkingEnabledFor("claude-sonnet-4-5", false) === false);
+check("thinkingEnabledFor sonnet on", thinkingEnabledFor("claude-sonnet-4-5", true) === true);
+check("thinkingEnabledFor haiku stays off", thinkingEnabledFor("claude-haiku-4-5", true) === false);
+check("thinkingEnabledFor gpt stays off", thinkingEnabledFor("gpt-5", true) === false);
+check("outputTokenBudget off is output cap", outputTokenBudget({ thinking: false }) === 16_384);
+check("outputTokenBudget on adds think budget", outputTokenBudget({ thinking: true }) === 8_000 + 16_384);
+
+const cacheMsgs = [
+  { role: "user", content: "hi" },
+  { role: "assistant", content: [{ type: "tool_use", id: "1", name: "read_file", input: {} }] },
+  {
+    role: "user",
+    content: [
+      { type: "tool_result", tool_use_id: "1", content: "one" },
+      { type: "tool_result", tool_use_id: "2", content: "two" },
+    ],
+  },
+];
+const stamped = stampHistoryCache(cacheMsgs);
+check("stampHistoryCache does not mutate input", cacheMsgs[2].content[1].cache_control === undefined);
+check(
+  "stampHistoryCache marks last tool_result only",
+  stamped[2].content[1].cache_control?.type === "ephemeral" && stamped[2].content[0].cache_control === undefined,
+);
+check("stampHistoryCache leaves earlier messages", stamped[0] === cacheMsgs[0]);
+const converted = compat.toCompletionsMessages("sys", stamped);
+check(
+  "openai conversion drops cache_control",
+  converted.every((m) => !("cache_control" in m) && (typeof m.content === "string" || m.content == null || !JSON.stringify(m).includes("cache_control"))),
+);
+check("stampHistoryCache no-ops without tool_result", stampHistoryCache([{ role: "user", content: "hi" }])[0].content === "hi");
+const hdr = (v) => ({ get: (name) => (name.toLowerCase() === "retry-after" ? v : null) });
+check("retryAfter 400 is null", retryAfter(400, hdr(null), 0) === null);
+check("retryAfter 429 first wait 1s", retryAfter(429, hdr(null), 0) === 1_000);
+check("retryAfter 429 second wait 2s", retryAfter(429, hdr(null), 1) === 2_000);
+check("retryAfter 429 third is null", retryAfter(429, hdr(null), 2) === null);
+check("retryAfter honors small Retry-After", retryAfter(503, hdr("3"), 0) === 3_000);
+check("retryAfter ignores large Retry-After", retryAfter(429, hdr("120"), 0) === 1_000);
+check("retryAfter ignores http-date", retryAfter(429, hdr("Wed, 21 Oct 2015 07:28:00 GMT"), 0) === 1_000);
+check("retryAfter 529 retries", retryAfter(529, hdr(null), 0) === 1_000);
 check("parsePrintPrompt missing is null", parsePrintPrompt(["node", "agent-core.mjs"]) === null);
 check("parsePrintPrompt -p joins the rest", parsePrintPrompt(["node", "x", "-p", "fix", "the", "bug"]) === "fix the bug");
 check("parsePrintPrompt --print empty is empty", parsePrintPrompt(["node", "--print"]) === "");

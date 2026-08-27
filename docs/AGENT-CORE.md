@@ -11,7 +11,8 @@ handoff chaining + emergency overflow + truncate last resort, executable
 stubs + structured inventories, waste attribution with models.dev pricing,
 two-role routing map, bounded concurrency, cwd jail, grep/glob, unique first-occurrence
 edit, interruptible bash, web_search, skill
-index, prefix `cache_control`, traces, provider auth, live model list,
+index, prefix `cache_control`, last `tool_result` cache pin, OpenAI/Codex `prompt_cache_key`,
+429 retry, opt-in `/thinking`, traces, provider auth, live model list,
 full-screen TUI, Termina sidecar host contract, core worldline session slice,
 bash approval, /clear /compact, -p print, usage footer, stdio MCP). Zone 1 is identity, environment,
 user-global `~/.agents/AGENTS.md`, the skill index, then cwd `AGENTS.md`.
@@ -21,7 +22,8 @@ are overflow-recoverable. The kernel does not call the snapshot store.
 `termina-core` stays the snapshot/Git owner. Credentials live in
 `~/.termina/agent/auth.json` (`/login`, `/logout`). Providers: Anthropic,
 OpenAI, ChatGPT Codex OAuth, xAI, Google, OpenRouter. The implementation plan is
-`docs/AGENT-CORE-PLAN.md`. Auth details: `docs/AUTH-PLAN.md`.
+`docs/AGENT-CORE-PLAN.md`. The remaining segmented-session work is in
+`docs/AGENT-CORE-SESSION-STORAGE-PLAN.md`. Auth details: `docs/AUTH-PLAN.md`.
 
 ## Why this document exists
 
@@ -49,7 +51,8 @@ Rules:
   process start, in a fixed order. Two sessions with the same inputs must
   produce byte-identical frozen zones — any divergence makes the cache cold
   from byte zero.
-- Corrections are new messages, never edits of old ones.
+- Corrections are new messages, never edits of old ones. A request may stamp
+  `cache_control` on a copy of the last `tool_result`. That copy is not stored.
 - Revision events (compaction, prune) are the ONLY writes to the visible
   context, and they must be reconstructable: the storage log stays
   append-only (a revision is a new entry, like pi's), or snapshots back the

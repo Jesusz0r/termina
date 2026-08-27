@@ -16,8 +16,16 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/resume", hint: "replay the stored session" },
   { name: "/clear", hint: "start a new empty session" },
   { name: "/compact", hint: "reclaim and summarize context" },
+  { name: "/thinking", hint: "show or set thinking" },
   { name: "/exit", hint: "quit the engine" },
 ];
+
+function thinkingCommandRows(): SlashCommand[] {
+  return [
+    { name: "off", hint: "disable thinking", submit: "/thinking off" },
+    { name: "on", hint: "enable thinking", submit: "/thinking on" },
+  ];
+}
 
 function authCommandRows(cmd: "/login" | "/logout"): SlashCommand[] {
   return loginPickerItems(cmd).map((m) => ({
@@ -87,6 +95,14 @@ export function matchingSlashCommands(
     const rest = line.slice(space + 1).trim().toLowerCase();
     if (!rest) return modelRows;
     return modelRows.filter((c) => pickerRowMatches(`/model ${rest}`, c));
+  }
+  if (head === "/thinking") {
+    if (space < 0 && line !== "/thinking") {
+      return commands.filter((c) => c.name.startsWith(line));
+    }
+    const rows = thinkingCommandRows();
+    if (space < 0) return rows;
+    return rows.filter((c) => pickerRowMatches(line, c));
   }
   if (space >= 0) return [];
   return commands.filter((c) => c.name.startsWith(line));
