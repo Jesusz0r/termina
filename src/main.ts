@@ -458,6 +458,11 @@ function createPaneShell(instanceId: string): Pane {
     (cols, rows) => void window.pi.resizeTerminal(instanceId, cols, rows),
     (text) => void window.pi.writeClipboard(text).catch(() => undefined),
     () => window.pi.pasteTerminal(instanceId),
+    {
+      theme: preferences.theme,
+      fontSize: preferences.terminalFontSize,
+      fontFamily: preferences.fontFamily,
+    },
   );
 
   const pane: Pane = {
@@ -492,7 +497,6 @@ function createPaneShell(instanceId: string): Pane {
     testCommand: null,
   };
   panes.set(instanceId, pane);
-  applyTerminalPreferences(view, preferences);
   pane.tabEl.prepend(typeEl);
   return pane;
 }

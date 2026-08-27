@@ -18,8 +18,8 @@ export class PtyView {
   private lastRender = 0;
   private resizeObserver: ResizeObserver | null = null;
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
-  private fontSize = 13;
-  private fontFamily = "";
+  private fontSize: number;
+  private fontFamily: string;
   private refreshFont = false;
 
   constructor(
@@ -28,13 +28,16 @@ export class PtyView {
     onResize: (cols: number, rows: number) => void,
     private readonly writeClipboard: (text: string) => void,
     private readonly pasteFromHost: () => Promise<{ kind: "text"; text: string } | { kind: "image"; count: number }>,
+    appearance: { theme: ThemeId; fontSize: number; fontFamily: string },
   ) {
     this.sendInput = onInput;
+    this.fontSize = appearance.fontSize;
+    this.fontFamily = appearance.fontFamily;
     this.term = new Terminal({
-      fontSize: 13,
-      fontFamily: cssFontFamily(""),
+      fontSize: appearance.fontSize,
+      fontFamily: cssFontFamily(appearance.fontFamily),
       convertEol: true,
-      theme: TERMINAL_THEMES.dark,
+      theme: TERMINAL_THEMES[appearance.theme],
       cursorBlink: true,
       scrollback: 8000,
     });
