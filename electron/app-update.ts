@@ -7,7 +7,7 @@
  */
 import { app } from "electron";
 import { createRequire } from "node:module";
-import type { AppUpdater } from "electron-updater";
+import type { AppUpdater, ProgressInfo, UpdateInfo } from "electron-updater";
 import type { AppUpdateState } from "../shared/types.js";
 
 const require = createRequire(import.meta.url);
@@ -51,6 +51,7 @@ export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }
     : { status: "disabled", currentVersion: currentVersion() };
   let version = "";
   let checkTimer: ReturnType<typeof setInterval> | null = null;
+  let checkTimeout: ReturnType<typeof setTimeout> | null = null;
   let lastProgressAt = 0;
   let started = false;
   let checkInFlight = false;
@@ -63,6 +64,7 @@ export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }
   };
 
   const check = (): void => {
+    if (!started) return;
     if (!app.isPackaged) {
       setState({ status: "disabled", currentVersion: currentVersion() });
       return;
@@ -71,7 +73,8 @@ export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }
     checkInFlight = true;
     const seq = ++checkSeq;
     setState({ status: "checking", currentVersion: currentVersion() });
-    const timeout = setTimeout(() => {
+    checkTimeout = setTimeout(() => {
+      checkTimeout = null;
       if (seq !== checkSeq) return;
       checkInFlight = false;
       if (state.status === "checking") {
@@ -99,9 +102,42 @@ export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }
       })
       .finally(() => {
         if (seq !== checkSeq) return;
-        clearTimeout(timeout);
+        if (checkTimeout) clearTimeout(checkTimeout);
+        checkTimeout = null;
         checkInFlight = false;
       });
+  };
+
+  const onUpdateAvailable = (info: UpdateInfo): void => {
+    if (isUpdateInFlight(state) && state.status !== "available") return;
+    version = info.version;
+    setState({ status: "available", currentVersion: currentVersion(), version });
+  };
+  const onUpdateNotAvailable = (): void => {
+    if (isUpdateInFlight(state)) return;
+    setState({ status: "current", currentVersion: currentVersion() });
+  };
+  const onDownloadProgress = (progress: ProgressInfo): void => {
+    if (!version && state.status === "available") version = state.version;
+    if (!version) return;
+    const percent = Math.max(0, Math.min(100, Math.round(progress.percent)));
+    const now = Date.now();
+    if (state.status === "downloading" && state.percent === percent && now - lastProgressAt < PROGRESS_THROTTLE_MS) return;
+    lastProgressAt = now;
+    setState({ status: "downloading", currentVersion: currentVersion(), version, percent });
+  };
+  const onUpdateDownloaded = (info: UpdateInfo): void => {
+    version = info.version;
+    setState({ status: "ready", currentVersion: currentVersion(), version });
+  };
+  const onError = (err: Error): void => {
+    console.warn(`[update] ${err.message}`);
+    if (state.status === "downloading" && version) {
+      setState({ status: "available", currentVersion: currentVersion(), version });
+      return;
+    }
+    if (state.status === "ready") return;
+    setState({ status: "error", currentVersion: currentVersion(), message: err.message });
   };
 
   return {
@@ -140,49 +176,29 @@ export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }
       autoUpdater.allowPrerelease = false;
       autoUpdater.logger = null;
 
-      autoUpdater.on("update-available", (info) => {
-        if (isUpdateInFlight(state) && state.status !== "available") return;
-        version = info.version;
-        setState({ status: "available", currentVersion: currentVersion(), version });
-      });
-      autoUpdater.on("update-not-available", () => {
-        if (isUpdateInFlight(state)) return;
-        setState({ status: "current", currentVersion: currentVersion() });
-      });
-      autoUpdater.on("download-progress", (progress) => {
-        if (!version && state.status === "available") version = state.version;
-        if (!version) return;
-        const percent = Math.max(0, Math.min(100, Math.round(progress.percent)));
-        const now = Date.now();
-        if (state.status === "downloading" && state.percent === percent && now - lastProgressAt < PROGRESS_THROTTLE_MS) {
-          return;
-        }
-        lastProgressAt = now;
-        setState({ status: "downloading", currentVersion: currentVersion(), version, percent });
-      });
-      autoUpdater.on("update-downloaded", (info) => {
-        version = info.version;
-        setState({ status: "ready", currentVersion: currentVersion(), version });
-      });
-      autoUpdater.on("error", (err) => {
-        console.warn(`[update] ${err.message}`);
-        if (state.status === "downloading" && version) {
-          setState({ status: "available", currentVersion: currentVersion(), version });
-          return;
-        }
-        if (state.status === "ready") return;
-        setState({ status: "error", currentVersion: currentVersion(), message: err.message });
-      });
+      autoUpdater.on("update-available", onUpdateAvailable);
+      autoUpdater.on("update-not-available", onUpdateNotAvailable);
+      autoUpdater.on("download-progress", onDownloadProgress);
+      autoUpdater.on("update-downloaded", onUpdateDownloaded);
+      autoUpdater.on("error", onError);
 
       check();
       checkTimer = setInterval(check, CHECK_INTERVAL_MS);
     },
 
     dispose() {
-      if (checkTimer) {
-        clearInterval(checkTimer);
-        checkTimer = null;
-      }
+      started = false;
+      checkSeq++;
+      checkInFlight = false;
+      if (checkTimer) clearInterval(checkTimer);
+      checkTimer = null;
+      if (checkTimeout) clearTimeout(checkTimeout);
+      checkTimeout = null;
+      autoUpdater.off("update-available", onUpdateAvailable);
+      autoUpdater.off("update-not-available", onUpdateNotAvailable);
+      autoUpdater.off("download-progress", onDownloadProgress);
+      autoUpdater.off("update-downloaded", onUpdateDownloaded);
+      autoUpdater.off("error", onError);
     },
   };
 }

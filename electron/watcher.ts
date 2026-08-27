@@ -206,6 +206,7 @@ export class ProjectWatcher {
   /** The debounce map cap for change bursts. */
   private static readonly MAX_PENDING_TIMERS = 2000;
   private cacheBytes = 0;
+  private generation = 0;
 
   /** Fired with the new file content whenever a watched text file changes. */
   onChange: (change: FileChange) => void = () => {};
@@ -226,21 +227,23 @@ export class ProjectWatcher {
 
   start(): void {
     this.stop();
-    this.seen.clear();
+    const generation = this.generation;
     // macOS/Windows support recursive watching; on Linux this throws and we degrade.
     try {
       this.watcher = watch(this.root, { recursive: true }, (_event, filename) => {
-        if (filename) this.schedule(filename.toString());
+        if (filename) this.schedule(filename.toString(), generation);
       });
     } catch (err) {
       console.warn(`[watcher] recursive watch unavailable: ${(err as Error).message}`);
     }
     // Seed the seen-set with existing files so the first real edit reads as
     // "modified" rather than "created" (files the agent creates are new to us).
-    void this.seedExisting();
+    void this.seedExisting(generation);
   }
 
   stop(): void {
+    this.generation++;
+    this.seen.clear();
     this.lastContents.clear();
     this.lastOids.clear();
     this.cacheBytes = 0;
@@ -257,8 +260,8 @@ export class ProjectWatcher {
     }
   }
 
-  private schedule(relPath: string): void {
-    if (this.isIgnored(relPath)) return;
+  private schedule(relPath: string, generation: number): void {
+    if (generation !== this.generation || this.isIgnored(relPath)) return;
     // Bound the debounce map: a build storm must not hold thousands of
     // timers. Flush the oldest entry first so no change gets lost.
     if (!this.timers.has(relPath) && this.timers.size >= ProjectWatcher.MAX_PENDING_TIMERS) {
@@ -267,7 +270,7 @@ export class ProjectWatcher {
         const timer = this.timers.get(oldest);
         if (timer) clearTimeout(timer);
         this.timers.delete(oldest);
-        void this.emit(oldest);
+        void this.emit(oldest, generation);
       }
     }
     const existing = this.timers.get(relPath);
@@ -275,8 +278,9 @@ export class ProjectWatcher {
     this.timers.set(
       relPath,
       setTimeout(() => {
+        if (generation !== this.generation) return;
         this.timers.delete(relPath);
-        void this.emit(relPath);
+        void this.emit(relPath, generation);
       }, DEBOUNCE_MS),
     );
   }
@@ -296,17 +300,19 @@ export class ProjectWatcher {
   }
 
   /** Read one .gitignore and store its rules under its directory key. */
-  private async loadGitignore(absPath: string, relPath: string): Promise<void> {
+  private async loadGitignore(absPath: string, relPath: string, generation: number): Promise<void> {
     let source: string;
     try {
       source = await readFile(absPath, "utf8");
     } catch {
       return;
     }
+    if (generation !== this.generation) return;
     this.gitignoreRules.set(this.gitignoreDirKey(relPath), parseGitignore(source));
   }
 
-  private async emit(relPath: string): Promise<void> {
+  private async emit(relPath: string, generation: number): Promise<void> {
+    if (generation !== this.generation) return;
     const abs = this.root.endsWith(sep) ? this.root + relPath : `${this.root}${sep}${relPath}`;
 
     // Stat first so a vanished file is reported as a deletion (not a read error).
@@ -314,7 +320,7 @@ export class ProjectWatcher {
     try {
       st = await stat(abs);
     } catch {
-      if (this.seen.has(relPath)) {
+      if (generation === this.generation && this.seen.has(relPath)) {
         this.seen.delete(relPath);
         if (relPath.split(sep).pop() === ".gitignore") {
           this.gitignoreRules.delete(this.gitignoreDirKey(relPath));
@@ -323,7 +329,7 @@ export class ProjectWatcher {
       }
       return;
     }
-    if (!st.isFile()) return;
+    if (generation !== this.generation || !st.isFile()) return;
     if (st.size > MAX_FILE_SIZE) {
       // A file can grow past the cap. Mark it seen so a later small read
       // reports "modified", and drop the stale cached content.
@@ -348,11 +354,13 @@ export class ProjectWatcher {
     } catch {
       return; // transient read error — leave as-is
     }
+    if (generation !== this.generation) return;
 
     // A changed .gitignore refreshes the rules before the next event uses
     // them. The file itself still flows through as a normal change.
     const baseName = relPath.split(sep).pop();
-    if (baseName === ".gitignore") await this.loadGitignore(abs, relPath);
+    if (baseName === ".gitignore") await this.loadGitignore(abs, relPath, generation);
+    if (generation !== this.generation) return;
 
     const status: "created" | "modified" = this.seen.has(relPath) ? "modified" : "created";
     this.seen.add(relPath);
@@ -363,7 +371,7 @@ export class ProjectWatcher {
     this.putCached(key, content);
     const change: FileChange = { path: abs, relPath, content, status, prev };
     this.onChange(change);
-    this.onFileTouched(abs, status);
+    if (generation === this.generation) this.onFileTouched(abs, status);
   }
 
   /** Add one file version to the content cache and evict when over budget. */
@@ -385,23 +393,27 @@ export class ProjectWatcher {
   /** Walk the project and mark existing files as seen. Their content is
    *  cached too, so the first change of a file still carries the pre-change
    *  content: editor highlights and run baselines need it. */
-  private async seedExisting(): Promise<void> {
+  private async seedExisting(generation: number): Promise<void> {
+    const active = (): boolean => generation === this.generation;
     const walk = async (dir: string): Promise<void> => {
+      if (!active()) return;
       let entries;
       try {
         entries = await readdir(dir, { withFileTypes: true });
       } catch {
         return;
       }
+      if (!active()) return;
       for (const ent of entries) {
-        if (this.seen.size > 100_000) return;
+        if (!active() || this.seen.size > 100_000) return;
         if (IGNORED_SEGMENTS.has(ent.name)) continue;
         const full = join(dir, ent.name);
         if (ent.isDirectory()) {
           await walk(full);
         } else if (ent.isFile()) {
           const relPath = relative(this.root, full);
-          if (ent.name === ".gitignore") await this.loadGitignore(full, relPath);
+          if (ent.name === ".gitignore") await this.loadGitignore(full, relPath, generation);
+          if (!active()) return;
           this.seen.add(relPath);
           // Cache the content within the existing byte budget. Ignored and
           // oversized files stay seen-only: emit never reports them.
@@ -409,8 +421,10 @@ export class ProjectWatcher {
           if (this.isIgnored(relPath)) continue;
           try {
             const st = await stat(full);
+            if (!active()) return;
             if (!st.isFile() || st.size > MAX_FILE_SIZE) continue;
             const buf = await readFile(full);
+            if (!active()) return;
             if (buf.includes(0)) continue; // binary
             const key = this.canonicalize ? this.canonicalize(full) : full;
             if (!this.lastContents.has(key)) this.putCached(key, buf.toString("utf8"));

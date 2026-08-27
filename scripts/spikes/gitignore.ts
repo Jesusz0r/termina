@@ -78,6 +78,17 @@ export default async function run(log: (msg: string) => void) {
   check("deeper negation overrides the root file", !matchGitignore(nested, "pkg/keep.gen"));
   check("nested directory pattern applies", matchGitignore(nested, "pkg/generated/g.ts") && !matchGitignore(nested, "generated/g.ts"));
 
+  // ---- watcher lifecycle ----
+
+  const stoppedWork = mkdtempSync(join(tmpdir(), "termina-gitignore-stop-"));
+  writeFileSync(join(stoppedWork, "seed.txt"), "seed");
+  const stoppedWatcher = new ProjectWatcher(stoppedWork);
+  stoppedWatcher.start();
+  stoppedWatcher.stop();
+  await sleep(100);
+  check("stopped seed does not refill the cache", stoppedWatcher.lastContents.size === 0);
+  rmSync(stoppedWork, { recursive: true, force: true });
+
   // ---- live watcher ----
 
   const work = mkdtempSync(join(tmpdir(), "termina-gitignore-"));

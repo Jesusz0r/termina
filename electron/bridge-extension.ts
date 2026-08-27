@@ -64,6 +64,14 @@ export default function (pi: ExtensionAPI): void {
   /** One-use preflight state carried from input to agent_start. */
   let preflight: { requestId: string; token: string | null } | null = null;
   let planLogged = false;
+  /** Provider-qualified model id for --model. A bare id is ambiguous. */
+  function modelRef(model) {
+    if (!model || typeof model.id !== "string" || !model.id) return null;
+    return typeof model.provider === "string" && model.provider ? model.provider + "/" + model.id : model.id;
+  }
+  function logSettings(ctx) {
+    log({ t: "agent_settings", model: modelRef(ctx.model), thinkingLevel: ctx.thinkingLevel ?? null });
+  }
 
   // ---- project trust (WORLDLINES §6.7) ----
   // A candidate inherits one-process trust only when the app granted it:
@@ -104,6 +112,7 @@ export default function (pi: ExtensionAPI): void {
     const opId = String(control?.opId ?? "");
     if (!control) {
       log({ t: "session_ready", opId, ok: true, reload: true });
+      logSettings(ctx);
       return;
     }
     try {
@@ -120,6 +129,13 @@ export default function (pi: ExtensionAPI): void {
     } catch (err) {
       log({ t: "session_ready", opId, ok: false, error: String(err) });
     }
+    logSettings(ctx);
+  });
+  pi.on("model_select", (event, ctx) => {
+    log({ t: "agent_settings", model: modelRef(event.model), thinkingLevel: ctx.thinkingLevel ?? null });
+  });
+  pi.on("thinking_level_select", (event, ctx) => {
+    log({ t: "agent_settings", model: modelRef(ctx.model), thinkingLevel: event.level ?? null });
   });
 
   // ---- run-start preflight (WORLDLINES §6.3) ----
@@ -162,7 +178,7 @@ export default function (pi: ExtensionAPI): void {
       entryId: leafId,
       parentEntryId: parentId,
       trusted: ctx.isProjectTrusted(),
-      model: ctx.model?.id ?? null,
+      model: modelRef(ctx.model),
       thinkingLevel: ctx.thinkingLevel ?? null,
     });
     preflight = null;

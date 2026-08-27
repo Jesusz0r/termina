@@ -45,6 +45,14 @@ import {
   taskIsComplete,
 } from "./plan-board.js";
 import { AppPreferencesStore } from "./preferences.js";
+import {
+  composeTerminalRoster,
+  isRosterSessionId,
+  MAX_ROSTER_BYTES,
+  MAX_TERMINAL_ROSTER,
+  parseTerminalRoster,
+  type TerminalRosterEntry,
+} from "./terminal-roster.js";
 import { normalizeAppPreferences, sanitizeShortcutMap } from "../shared/preferences.js";
 import {
   DEFAULT_SHORTCUTS,
@@ -171,6 +179,10 @@ function cleanEnv(): Record<string, string | undefined> {
   return env;
 }
 
+/** Values pi accepts for --thinking. Reject anything else at spawn. */
+const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const MAX_PI_MODEL_CHARS = 256;
+
 /** One background process that runs a test command. */
 interface VerifyJob {
   child: ReturnType<typeof spawn>;
@@ -240,7 +252,19 @@ class PiTerminalInstance {
   /** The project that owns this terminal, or null. */
   projectId: string | null = null;
   type: "agent" | "shell";
+  /** Save this user tab in the project roster. */
+  persist = true;
+  /** Pi session id used to resume this tab. */
+  sessionId: string | null = null;
+  /** Absolute Pi session file used to resume this tab. */
+  sessionFile: string | null = null;
+  /** The live model of this agent, provider-qualified when known. */
+  model: string | null = null;
+  /** The live thinking level of this agent. */
+  thinkingLevel: string | null = null;
   shellName?: string;
+  /** Absolute shell binary used to restore this tab. */
+  shellPath?: string;
   busy = false;
   modified = new Map<string, ModifiedFile>();
   /** Pre-run content per path (Change Review): string = baseline, null = created. */
@@ -328,6 +352,8 @@ interface ProjectState {
   worldlines: WorldlineManager | null;
   /** Terminal ids owned by this project (agents, shells, candidates). */
   terminalIds: Set<string>;
+  /** Roster entries that failed to start. A later launch can retry them. */
+  unrestoredTerminals: TerminalRosterEntry[];
 }
 
 /** Env vars pi treats as a provider credential (see pi providers.md). */
@@ -1491,20 +1517,229 @@ class PiEditorApp {
     return `term-${++terminalSeq}`;
   }
 
+  private noteTerminalId(id: string): void {
+    const match = /^term-(\d+)$/.exec(id);
+    if (!match) return;
+    const value = Number(match[1]);
+    if (Number.isInteger(value) && value > terminalSeq) terminalSeq = value;
+  }
+
+  private terminalRosterPath(project: ProjectState): string {
+    return join(this.userDataDir, "terminal-rosters", `${this.sanitizeSessionDir(project.canonicalRoot)}.json`);
+  }
+
+  private loadTerminalRoster(project: ProjectState): TerminalRosterEntry[] {
+    try {
+      const path = this.terminalRosterPath(project);
+      const info = statSync(path);
+      if (!info.isFile() || info.size > MAX_ROSTER_BYTES) return [];
+      return parseTerminalRoster(JSON.parse(readFileSync(path, "utf8")) as unknown);
+    } catch {
+      return [];
+    }
+  }
+
+  private rosterEntryFor(inst: PiTerminalInstance): TerminalRosterEntry {
+    const entry: TerminalRosterEntry = { id: inst.id, type: inst.type };
+    if (inst.type === "shell" && inst.shellPath) entry.shell = inst.shellPath;
+    if (inst.sessionId) entry.sessionId = inst.sessionId;
+    if (inst.sessionFile) entry.sessionFile = inst.sessionFile;
+    return entry;
+  }
+
+  private saveTerminalRoster(project: ProjectState): void {
+    const live: TerminalRosterEntry[] = [];
+    for (const id of project.terminalIds) {
+      const inst = this.terminals.get(id);
+      if (inst?.persist) live.push(this.rosterEntryFor(inst));
+    }
+    const entries = composeTerminalRoster(live, project.unrestoredTerminals);
+    try {
+      const dir = join(this.userDataDir, "terminal-rosters");
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const path = this.terminalRosterPath(project);
+      const tmp = `${path}.${process.pid}.tmp`;
+      writeFileSync(tmp, `${JSON.stringify({ terminals: entries })}\n`, { mode: 0o600 });
+      renameSync(tmp, path);
+    } catch (err) {
+      console.warn(`[main] could not save terminal roster: ${(err as Error).message}`);
+    }
+  }
+
+  private sessionFileExists(path: string | null | undefined): boolean {
+    if (!path) return false;
+    try {
+      return statSync(path).isFile();
+    } catch {
+      return false;
+    }
+  }
+
+  /** True when target resolves inside parent. Neither path must exist. */
+  private pathInside(parent: string, target: string): boolean {
+    const rel = relative(resolve(parent), resolve(target));
+    return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+  }
+
+  private sessionFileInUse(path: string | null | undefined): boolean {
+    if (!path) return false;
+    for (const inst of this.terminals.values()) {
+      if (inst.sessionFile === path) return true;
+    }
+    return false;
+  }
+
+  /** Pi accepts a session file only from its session directory. */
+  private trustedPiSessionFile(path: string | null | undefined): string | null {
+    if (!path || !path.endsWith(".jsonl") || !this.sessionFileExists(path)) return null;
+    try {
+      const real = realpathSync(path);
+      const root = realpathSync(join(homedir(), ".pi", "agent", "sessions"));
+      return this.pathInside(root, real) ? real : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private persistLive(project: ProjectState): PiTerminalInstance[] {
+    const out: PiTerminalInstance[] = [];
+    for (const id of project.terminalIds) {
+      const inst = this.terminals.get(id);
+      if (inst?.persist) out.push(inst);
+    }
+    return out;
+  }
+
+  private async restoreProjectTerminals(project: ProjectState): Promise<void> {
+    const roster = this.loadTerminalRoster(project);
+    if (roster.length === 0) {
+      try {
+        await this.createTerminal(project.cwd);
+      } catch {
+        /* Pi can be unavailable while the folder still opens. */
+      }
+      return;
+    }
+    const unrestored: TerminalRosterEntry[] = [];
+    const spawned: { rec: TerminalRosterEntry; id: string }[] = [];
+    for (const rec of roster) {
+      this.noteTerminalId(rec.id);
+      try {
+        const inst = await this.createTerminal(project.cwd, {
+          id: rec.id,
+          type: rec.type,
+          shell: rec.shell,
+          persist: true,
+          skipRosterSave: true,
+          resume: { sessionId: rec.sessionId ?? null, sessionFile: rec.sessionFile ?? null },
+        });
+        spawned.push({ rec, id: inst.id });
+      } catch (err) {
+        unrestored.push(rec);
+        console.warn(`[main] could not restore terminal ${rec.id}: ${(err as Error).message}`);
+      }
+    }
+    for (const item of spawned) {
+      if (!this.terminals.get(item.id)?.persist) unrestored.push(item.rec);
+    }
+    if (this.persistLive(project).length === 0) {
+      try {
+        await this.createTerminal(project.cwd, { persist: true, skipRosterSave: true });
+      } catch {
+        /* Pi can be unavailable while the folder still opens. */
+      }
+    }
+    project.unrestoredTerminals = unrestored;
+    this.saveTerminalRoster(project);
+  }
+
+  /** Live model and thinking of a pi agent tab, for copying onto a new tab. */
+  private copiedAgentSettings(fromTerminalId: string | undefined): { model: string | null; thinkingLevel: string | null } | null {
+    if (!fromTerminalId) return null;
+    const source = this.terminals.get(fromTerminalId);
+    if (!source || source.type !== "agent") return null;
+    return {
+      model: source.model ?? source.currentRun?.model ?? null,
+      thinkingLevel: source.thinkingLevel ?? source.currentRun?.thinkingLevel ?? null,
+    };
+  }
+
+  /** Provider-qualified model id that is safe to pass as --model. */
+  private usablePiModel(model: string | null | undefined): string | null {
+    if (typeof model !== "string") return null;
+    const next = model.trim();
+    if (next.length < 3 || next.length > MAX_PI_MODEL_CHARS) return null;
+    if (!next.includes("/")) return null;
+    if (/[\x00-\x1f]/.test(next)) return null;
+    return next;
+  }
+
+  private usablePiThinking(level: string | null | undefined): string | null {
+    if (typeof level !== "string") return null;
+    const next = level.trim().toLowerCase();
+    return PI_THINKING_LEVELS.has(next) ? next : null;
+  }
+
+  /** CLI flags that pin a new pi process to another tab's live model. */
+  private piFlagsFromSettings(settings: { model: string | null; thinkingLevel: string | null } | null): string[] {
+    if (!settings) return [];
+    const model = this.usablePiModel(settings.model);
+    if (!model) return [];
+    const extra = ["--model", model];
+    const thinking = this.usablePiThinking(settings.thinkingLevel);
+    // Do not pin thinking onto a different default model when the copy
+    // of the model itself cannot be applied.
+    if (thinking) extra.push("--thinking", thinking);
+    return extra;
+  }
+
+  private applyAgentSettings(inst: PiTerminalInstance, model: string | null | undefined, thinkingLevel: string | null | undefined): void {
+    const nextModel = this.usablePiModel(model);
+    if (nextModel) inst.model = nextModel;
+    const nextThinking = this.usablePiThinking(thinkingLevel);
+    if (nextThinking) inst.thinkingLevel = nextThinking;
+  }
+
   private async createTerminal(
     cwd?: string,
-    opts?: { type?: "agent" | "shell"; shell?: string; workspaceId?: string; id?: string; launch?: { cmd: string; args: string[]; env: Record<string, string | undefined> } },
+    opts?: {
+      type?: "agent" | "shell";
+      shell?: string;
+      workspaceId?: string;
+      id?: string;
+      fromTerminalId?: string;
+      launch?: { cmd: string; args: string[]; env: Record<string, string | undefined> };
+      persist?: boolean;
+      skipRosterSave?: boolean;
+      resume?: { sessionId: string | null; sessionFile: string | null };
+    },
   ): Promise<PiTerminalInstance> {
     const type = opts?.type ?? "agent";
+    const persist = opts?.persist ?? (!opts?.launch && !opts?.id);
+    const workspaceId = opts?.workspaceId ?? this.primaryWorkspace()?.id ?? "";
+    const owner = this.projectOfWorkspace(workspaceId) ?? this.project();
+    let id = opts?.id;
+    if (id && this.terminals.has(id)) {
+      if (!persist) throw new Error(`terminal ${id} already exists`);
+      id = this.allocateTerminalId();
+    } else if (id) {
+      this.noteTerminalId(id);
+    } else {
+      id = this.allocateTerminalId();
+    }
     if (type === "agent" && !(await this.checkPiAvailable())) {
       throw new Error(this.piMissingMessage());
     }
-    const id = opts?.id ?? this.allocateTerminalId();
-    const workspaceId = opts?.workspaceId ?? this.primaryWorkspace()?.id ?? "";
+    const copied = type === "agent" && !opts?.launch && !opts?.resume
+      ? this.copiedAgentSettings(opts?.fromTerminalId)
+      : null;
     let cmd: string;
     let args: string[];
     let shellName: string | undefined;
+    let shellPath: string | undefined;
     let env: Record<string, string | undefined>;
+    let sessionId = persist ? opts?.resume?.sessionId ?? null : null;
+    let sessionFile = persist ? opts?.resume?.sessionFile ?? null : null;
     if (opts?.launch) {
       // A worldline candidate: the sandbox wraps the pinned pi binary.
       cmd = opts.launch.cmd;
@@ -1516,21 +1751,34 @@ class PiEditorApp {
       cmd = chosen.path;
       args = [];
       shellName = chosen.name;
+      shellPath = chosen.path;
       env = { ...process.env };
     } else {
       cmd = this.resolvePiBin();
       // The app-owned bridge loads through the CLI option, not project
-      // trust (WORLDLINES §6.3).
-      args = ["-e", this.bridgePath()];
+      // trust (WORLDLINES §6.3). A new tab copies model and thinking
+      // from the focused agent so session-scoped picks survive.
+      const trusted = this.trustedPiSessionFile(sessionFile);
+      sessionFile = trusted && !this.sessionFileInUse(trusted) ? trusted : null;
+      const sessionArgs = sessionFile ? ["--session", sessionFile] : [];
+      args = ["-e", this.bridgePath(), ...sessionArgs, ...this.piFlagsFromSettings(copied)];
       env = { ...cleanEnv(), TERMINA_TERMINAL_ID: id, TERMINA_EVENTS_DIR: this.eventsDir };
     }
-    const owner = this.projectOfWorkspace(workspaceId) ?? this.project();
+    if (persist && owner && this.persistLive(owner).length >= MAX_TERMINAL_ROSTER) {
+      throw new Error("this project already has the maximum number of saved terminals");
+    }
     const inst = new PiTerminalInstance(id, cwd ?? this.terminalCwd(), workspaceId, type, shellName, cmd, args, env, 80, 24);
     inst.projectId = owner?.id ?? null;
+    inst.persist = persist;
+    inst.shellPath = shellPath;
+    inst.sessionId = sessionId;
+    inst.sessionFile = sessionFile;
+    if (copied) this.applyAgentSettings(inst, copied.model, copied.thinkingLevel);
     this.terminals.set(inst.id, inst);
     if (owner) {
       owner.workspaces.get(workspaceId)?.terminalIds.add(id);
       owner.terminalIds.add(id);
+      if (persist && !opts?.skipRosterSave) this.saveTerminalRoster(owner);
     }
 
     inst.pty.onData = (data) => this.sendPtyData(inst.id, data);
@@ -1558,6 +1806,9 @@ class PiEditorApp {
       this.terminals.delete(inst.id);
       exitOwner?.workspaces.get(inst.workspaceId)?.terminalIds.delete(inst.id);
       exitOwner?.terminalIds.delete(inst.id);
+      if (inst.persist && exitOwner && !this.disposed && !this.projectIsSwitching(exitOwner.id)) {
+        this.saveTerminalRoster(exitOwner);
+      }
       exitOwner?.worldlines?.terminalExited(inst.id);
       this.worldlineTailers.get(inst.id)?.stop();
       this.worldlineTailers.delete(inst.id);
@@ -2216,7 +2467,7 @@ class PiEditorApp {
     let dispatched = 0;
     for (const job of jobs) {
       try {
-        const worker = await this.createTerminal(undefined, { type: "agent", workspaceId: owner.workspaceId, id: job.id });
+        const worker = await this.createTerminal(undefined, { type: "agent", workspaceId: owner.workspaceId, id: job.id, fromTerminalId: ownerId });
         this.dispatchWorkers.set(worker.id, job.task.text);
         this.dispatchRuns.set(worker.id, { ownerId, taskText: job.task.text });
         job.task.workerId = worker.id;
@@ -2742,7 +2993,11 @@ class PiEditorApp {
         this.projectOfTerminal(terminalId)?.worldlines?.onSessionReady(terminalId, readyOk, String(event.error ?? null) || null);
         break;
       }
+      case "agent_settings":
+        this.applyAgentSettings(inst, event.model, event.thinkingLevel);
+        break;
       case "agent_start":
+        this.applyAgentSettings(inst, event.model, event.thinkingLevel);
         inst.busy = true;
         // Track busy agents: a second agent starting in the same workspace
         // overlaps this run (marked in coupleRunStart, WORLDLINES §5).
@@ -3130,6 +3385,13 @@ class PiEditorApp {
       this.markOverlappingAgents(inst, run);
       this.pushRun(inst, run, manager);
     }
+    const startedSessionFile = String(event.sessionFile ?? "") || inst.sessionFile;
+    const startedSessionId = String(event.sessionId ?? "") || inst.sessionId;
+    const trusted = this.trustedPiSessionFile(startedSessionFile) ?? this.trustedPiSessionFile(inst.sessionFile);
+    if (trusted && (trusted === inst.sessionFile || !this.sessionFileInUse(trusted))) inst.sessionFile = trusted;
+    if (startedSessionId && isRosterSessionId(startedSessionId)) inst.sessionId = startedSessionId;
+    const rosterOwner = this.projectOfTerminal(inst.id);
+    if (inst.persist && rosterOwner) this.saveTerminalRoster(rosterOwner);
     // The staged prompt belongs to one run start. Clear it so a later
     // retry cannot reuse the previous run's payload.
     inst.pendingPrompt = null;
@@ -3964,6 +4226,7 @@ class PiEditorApp {
         mineFiles: new Set(),
         worldlines: null,
         terminalIds: new Set(),
+        unrestoredTerminals: [],
       };
       this.projects.set(id, project);
       this.activeProjectId = id;
@@ -3976,13 +4239,9 @@ class PiEditorApp {
       this.createWorkspace(project, cwd, true);
       this.loadMineFiles(project);
       this.initWorldlines(project);
-      // Spawn the terminal before folder:opened so the renderer can show
-      // that pane when it switches the project view.
-      try {
-        await this.createTerminal(cwd);
-      } catch {
-        /* Pi can be unavailable while the folder still opens. */
-      }
+      // Spawn terminals before folder:opened so the renderer can show
+      // the tabs when it switches the project view.
+      await this.restoreProjectTerminals(project);
       await this.sendFolderOpened(cwd, id);
       this.persistOpenProjects();
       return project;
@@ -4523,13 +4782,21 @@ class PiEditorApp {
     ipcMain.handle("terminals:create", async (_e, opts?: unknown) => {
       let type: "agent" | "shell" | undefined;
       let shell: string | undefined;
+      let fromTerminalId: string | undefined;
       if (opts !== undefined) {
         if (typeof opts !== "object" || opts === null) return { ok: false, error: "invalid terminal options" };
-        const rec = opts as { type?: unknown; shell?: unknown };
+        const rec = opts as { type?: unknown; shell?: unknown; fromTerminalId?: unknown };
         if (rec.type !== undefined && rec.type !== "agent" && rec.type !== "shell") {
           return { ok: false, error: "invalid terminal type" };
         }
         if (rec.shell !== undefined && typeof rec.shell !== "string") return { ok: false, error: "invalid shell" };
+        if (rec.fromTerminalId != null) {
+          if (typeof rec.fromTerminalId !== "string" || rec.fromTerminalId.length > 64) {
+            return { ok: false, error: "invalid source terminal" };
+          }
+          const id = rec.fromTerminalId.trim();
+          if (id) fromTerminalId = id;
+        }
         type = rec.type;
         shell = rec.shell;
         if (shell) {
@@ -4538,7 +4805,7 @@ class PiEditorApp {
         }
       }
       try {
-        const t = await this.createTerminal(undefined, { type, shell });
+        const t = await this.createTerminal(undefined, { type, shell, fromTerminalId });
         return { ok: true, id: t.id };
       } catch (err) {
         return { ok: false, error: (err as Error).message };

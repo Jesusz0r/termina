@@ -446,7 +446,7 @@ export interface PiBridge {
   onUpdateState(cb: (state: AppUpdateState) => void): void;
 
   // terminals (agent = pi TUI, shell = a real shell like zsh)
-  createTerminal(opts?: { type?: "agent" | "shell"; shell?: string }): Promise<{ ok: boolean; id?: string; error?: string }>;
+  createTerminal(opts?: { type?: "agent" | "shell"; shell?: string; fromTerminalId?: string }): Promise<{ ok: boolean; id?: string; error?: string }>;
   getShells(): Promise<{ name: string; path: string }[]>;
   getPiStatus(): Promise<{ available: boolean; bin: string; message?: string }>;
   closeTerminal(id: string): Promise<void>;

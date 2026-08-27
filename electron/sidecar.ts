@@ -38,6 +38,7 @@ export type SidecarEvent =
       thinkingLevel?: string | null;
     })
   | (SidecarMeta & { t: "agent_settled" })
+  | (SidecarMeta & { t: "agent_settings"; model?: string | null; thinkingLevel?: string | null })
   | (SidecarMeta & { t: "plan"; text?: string })
   | (SidecarMeta & {
       t: "tool";
@@ -60,6 +61,7 @@ const SIDECAR_KINDS = new Set<SidecarEvent["t"]>([
   "session_ready",
   "agent_start",
   "agent_settled",
+  "agent_settings",
   "plan",
   "tool",
   "tool_end",
@@ -146,6 +148,13 @@ function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>): Side
       };
     case "agent_settled":
       return { ...meta, t: "agent_settled" };
+    case "agent_settings":
+      return {
+        ...meta,
+        t: "agent_settings",
+        model: optionalStringOrNull(rec.model),
+        thinkingLevel: optionalStringOrNull(rec.thinkingLevel),
+      };
     case "plan":
       return { ...meta, t: "plan", text: optionalString(rec.text) };
     case "tool":
@@ -209,6 +218,7 @@ export class SidecarTailer {
   constructor(private dir: string) {}
 
   start(): void {
+    if (this.timer) return;
     this.armWatch();
     this.timer = setInterval(() => {
       // Recovery poll: catch events the watcher missed. Also re-arm the
@@ -234,6 +244,7 @@ export class SidecarTailer {
 
   /** Debounce tails so a burst of appends tails once. */
   private schedule(id: string): void {
+    if (!this.timer) return;
     const existing = this.pendingTails.get(id);
     if (existing) clearTimeout(existing);
     this.pendingTails.set(

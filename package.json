@@ -1,7 +1,7 @@
 {
   "name": "termina",
   "productName": "Termina",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "description": "Hybrid terminal/editor: prompt a pi coding agent in a terminal, watch it edit files live in a Monaco (VS Code) editor, click modified files to inspect them.",
   "repository": {
     "type": "git",
@@ -15,7 +15,7 @@
     "start": "electron .",
     "typecheck": "tsc --noEmit",
     "test": "npm run typecheck && npm run build && npm run test:spikes",
-    "test:spikes": "npm run spike -- capture && npm run spike -- merge && npm run spike -- session-fork && npm run spike -- platform && npm run spike -- tree-delta && npm run spike -- gitignore",
+    "test:spikes": "npm run spike -- capture && npm run spike -- merge && npm run spike -- session-fork && npm run spike -- platform && npm run spike -- tree-delta && npm run spike -- gitignore && npm run spike -- terminal-roster",
     "test:loop": "node scripts/tui-loop-test.mjs",
     "test:e2e": "node scripts/e2e.mjs",
     "spike": "node scripts/spike.mjs",

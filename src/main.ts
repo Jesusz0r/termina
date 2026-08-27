@@ -1000,7 +1000,10 @@ async function openTerminalMenu(): Promise<void> {
   };
 
   const makeTerminal = (opts?: { type?: "agent" | "shell"; shell?: string }) => {
-    void window.pi.createTerminal(opts).then((res) => {
+    const source = activeId ? panes.get(activeId) : undefined;
+    const fromTerminalId = source && !source.error && !source.exited ? source.instanceId : undefined;
+    const inherit = Boolean(fromTerminalId) && opts?.type !== "shell";
+    void window.pi.createTerminal(inherit ? { ...opts, fromTerminalId } : opts).then((res) => {
       if (!res.ok) {
         createErrorPane(res.error ?? "could not create terminal");
         return;
