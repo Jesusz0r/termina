@@ -86,6 +86,7 @@ const {
   retryAfter,
   parseThinkingCommand,
   thinkingEnabledFor,
+  thinkingRequestFor,
   outputTokenBudget,
   fetchUrl,
   fetchUrlError,
@@ -970,6 +971,7 @@ const {
   parseTokenResponse,
   parseOauthToken,
   parseModelRef,
+  DEFAULT_MODELS,
   modifyProvider,
   resolveAuth,
   runLogin,
@@ -1155,10 +1157,38 @@ if (prevRedir === undefined) delete process.env.TERMINA_TEST_REDIRECT_PORT;
 else process.env.TERMINA_TEST_REDIRECT_PORT = prevRedir;
 tokenSrv.close();
 
-check("parseModelRef grok is xai", parseModelRef("grok-4.3").provider === "xai" && parseModelRef("grok-4.3").model === "grok-4.3");
+check(
+  "DEFAULT_MODELS anthropic main is sonnet 5",
+  DEFAULT_MODELS.anthropic.main === "claude-sonnet-5" && DEFAULT_MODELS.anthropic.summary === "claude-haiku-4-5",
+);
+check(
+  "DEFAULT_MODELS openai is gpt-5.6 sol/luna",
+  DEFAULT_MODELS.openai.main === "gpt-5.6-sol" && DEFAULT_MODELS.openai.summary === "gpt-5.6-luna",
+);
+check(
+  "DEFAULT_MODELS openai-codex is gpt-5.6 sol/luna",
+  DEFAULT_MODELS["openai-codex"].main === "gpt-5.6-sol" && DEFAULT_MODELS["openai-codex"].summary === "gpt-5.6-luna",
+);
+check(
+  "DEFAULT_MODELS github-copilot is gpt-5.6 terra/luna",
+  DEFAULT_MODELS["github-copilot"].main === "gpt-5.6-terra" && DEFAULT_MODELS["github-copilot"].summary === "gpt-5.6-luna",
+);
+check(
+  "DEFAULT_MODELS xai is grok-4.6",
+  DEFAULT_MODELS.xai.main === "grok-4.6" && DEFAULT_MODELS.xai.summary === "grok-4.6",
+);
+check(
+  "DEFAULT_MODELS google is gemini 3.7 flash / 3.5 flash-lite",
+  DEFAULT_MODELS.google.main === "gemini-3.7-flash" && DEFAULT_MODELS.google.summary === "gemini-3.5-flash-lite",
+);
+check(
+  "DEFAULT_MODELS openrouter is gpt-5.6 terra/luna",
+  DEFAULT_MODELS.openrouter.main === "openai/gpt-5.6-terra" && DEFAULT_MODELS.openrouter.summary === "openai/gpt-5.6-luna",
+);
+check("parseModelRef grok is xai", parseModelRef("grok-4.6").provider === "xai" && parseModelRef("grok-4.6").model === "grok-4.6");
 check(
   "parseModelRef openai-codex prefix",
-  parseModelRef("openai-codex/gpt-5.4").provider === "openai-codex" && parseModelRef("openai-codex/gpt-5.4").model === "gpt-5.4",
+  parseModelRef("openai-codex/gpt-5.6-sol").provider === "openai-codex" && parseModelRef("openai-codex/gpt-5.6-sol").model === "gpt-5.6-sol",
 );
 check("parseModelRef provider override", parseModelRef("gpt-5", "openai-codex").provider === "openai-codex");
 check("parseModelRef gpt defaults to openai", parseModelRef("gpt-5").provider === "openai");
@@ -1430,10 +1460,10 @@ check(
   pickDefaultModel(anthList, "claude-sonnet-4-5") === "claude-sonnet-4-5-20250929",
 );
 check("pickDefaultModel empty is null", pickDefaultModel([], "gpt-5") === null);
-check("parseModelSwitch prefix changes provider", parseModelSwitch("xai/grok-4.3", "anthropic").provider === "xai");
+check("parseModelSwitch prefix changes provider", parseModelSwitch("xai/grok-4.6", "anthropic").provider === "xai");
 check(
   "parseModelSwitch empty tail uses default",
-  parseModelSwitch("xai/", "anthropic").provider === "xai" && parseModelSwitch("xai/", "anthropic").model === "grok-4.3",
+  parseModelSwitch("xai/", "anthropic").provider === "xai" && parseModelSwitch("xai/", "anthropic").model === DEFAULT_MODELS.xai.main,
 );
 check(
   "parseModelSwitch openrouter keeps vendor/model",
@@ -1987,12 +2017,40 @@ check("parseThinkingCommand bare shows", parseThinkingCommand("/thinking")?.show
 check("parseThinkingCommand on", parseThinkingCommand("/thinking on")?.enabled === true);
 check("parseThinkingCommand off", parseThinkingCommand("/thinking off")?.enabled === false);
 check("parseThinkingCommand rejects junk", typeof parseThinkingCommand("/thinking maybe")?.error === "string");
-check("thinkingEnabledFor default off", thinkingEnabledFor("claude-sonnet-4-5", false) === false);
-check("thinkingEnabledFor sonnet on", thinkingEnabledFor("claude-sonnet-4-5", true) === true);
+check("thinkingEnabledFor default off", thinkingEnabledFor("claude-sonnet-5", false) === false);
+check("thinkingEnabledFor sonnet on", thinkingEnabledFor("claude-sonnet-5", true) === true);
 check("thinkingEnabledFor haiku stays off", thinkingEnabledFor("claude-haiku-4-5", true) === false);
-check("thinkingEnabledFor gpt stays off", thinkingEnabledFor("gpt-5", true) === false);
+check("thinkingEnabledFor gpt stays off", thinkingEnabledFor("gpt-5.6-sol", true) === false);
+check("thinkingEnabledFor fable stays on", thinkingEnabledFor("claude-fable-5", false) === true);
 check("outputTokenBudget off is output cap", outputTokenBudget({ thinking: false }) === 16_384);
-check("outputTokenBudget on adds think budget", outputTokenBudget({ thinking: true }) === 8_000 + 16_384);
+check("outputTokenBudget on is a single cap", outputTokenBudget({ thinking: true }) === 32_768);
+check(
+  "thinkingRequestFor sonnet 5 off is disabled",
+  JSON.stringify(thinkingRequestFor("claude-sonnet-5", false)) === JSON.stringify({ type: "disabled" }),
+);
+check(
+  "thinkingRequestFor sonnet 5 on is adaptive",
+  JSON.stringify(thinkingRequestFor("claude-sonnet-5", true)) ===
+    JSON.stringify({ type: "adaptive", display: "summarized" }),
+);
+check(
+  "thinkingRequestFor sonnet 4.6 on is adaptive",
+  JSON.stringify(thinkingRequestFor("claude-sonnet-4-6", true)) ===
+    JSON.stringify({ type: "adaptive", display: "summarized" }),
+);
+check(
+  "thinkingRequestFor sonnet 4.5 on is budget",
+  JSON.stringify(thinkingRequestFor("claude-sonnet-4-5", true)) ===
+    JSON.stringify({ type: "enabled", budget_tokens: 16_384 }),
+);
+check("thinkingRequestFor sonnet 4.5 off is omitted", thinkingRequestFor("claude-sonnet-4-5", false) === undefined);
+check("thinkingRequestFor haiku is omitted", thinkingRequestFor("claude-haiku-4-5", true) === undefined);
+check("thinkingRequestFor gpt is omitted", thinkingRequestFor("gpt-5.6-sol", true) === undefined);
+check(
+  "thinkingRequestFor fable off stays adaptive",
+  JSON.stringify(thinkingRequestFor("claude-fable-5", false)) ===
+    JSON.stringify({ type: "adaptive", display: "summarized" }),
+);
 
 const cacheMsgs = [
   { role: "user", content: "hi" },

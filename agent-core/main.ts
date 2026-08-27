@@ -128,8 +128,10 @@ let summaryRoute = parseModelRef(
 const catalogs = new Map<ProviderId, ModelInfo[]>();
 const OUTPUT_RESERVE = 16_384;
 /** Example starting values; never spec constants. Thinking counts against max_tokens. */
-const THINK_BUDGET = 8_000;
 const OUTPUT_CAP = 16_384;
+const THINKING_OUTPUT_CAP = 32_768;
+/** Fixed-budget thinking on Claude 4.5 and earlier. Must stay below THINKING_OUTPUT_CAP. */
+const LEGACY_THINK_BUDGET = 16_384;
 const HIGH_WATER = 0.8;
 const LOW_WATER = 0.6;
 /** Trailing tool-output span never reclaimed (fraction of usable, clamped). */
@@ -197,14 +199,45 @@ const MAX_TURNS = parseMaxTurns(process.env.TERMINA_CORE_MAX_TURNS);
 let thinkingWanted = false;
 let hostContextSnapshot = "";
 
-export function thinkingEnabledFor(model: string, enabled: boolean): boolean {
-  if (!enabled) return false;
+export type ThinkingRequest =
+  | { type: "disabled" }
+  | { type: "adaptive"; display: "summarized" }
+  | { type: "enabled"; budget_tokens: number };
+
+/** Claude 5 and 4.6+ reject a fixed thinking budget. Haiku has no thinking. */
+function claudeThinkingApi(model: string): "adaptive" | "budget" | "none" {
   const id = model.toLowerCase();
-  return id.includes("claude") && !id.includes("haiku");
+  if (!id.includes("claude") || id.includes("haiku")) return "none";
+  if (/(?:sonnet|opus|fable|mythos)-5(?:$|[^0-9])/.test(id)) return "adaptive";
+  if (/4-[6-8]/.test(id)) return "adaptive";
+  return "budget";
+}
+
+function thinkingLockedOn(model: string): boolean {
+  const id = model.toLowerCase();
+  return id.includes("fable") || id.includes("mythos");
+}
+
+export function thinkingEnabledFor(model: string, enabled: boolean): boolean {
+  if (claudeThinkingApi(model) === "none") return false;
+  if (thinkingLockedOn(model)) return true;
+  return enabled;
+}
+
+export function thinkingRequestFor(model: string, enabled: boolean): ThinkingRequest | undefined {
+  const api = claudeThinkingApi(model);
+  if (api === "none") return undefined;
+  const on = thinkingEnabledFor(model, enabled);
+  if (api === "adaptive") {
+    if (!on) return { type: "disabled" };
+    return { type: "adaptive", display: "summarized" };
+  }
+  if (!on) return undefined;
+  return { type: "enabled", budget_tokens: LEGACY_THINK_BUDGET };
 }
 
 export function outputTokenBudget(opts: { thinking: boolean }): number {
-  return opts.thinking ? THINK_BUDGET + OUTPUT_CAP : OUTPUT_CAP;
+  return opts.thinking ? THINKING_OUTPUT_CAP : OUTPUT_CAP;
 }
 
 export function parseThinkingCommand(
@@ -2748,6 +2781,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
   const toolsForProvider = clientTools as ToolDef[];
   const think = thinkingEnabledFor(route.model, thinkingWanted);
   const maxTokens = outputTokenBudget({ thinking: think });
+  const thinking = thinkingRequestFor(route.model, thinkingWanted);
   const cacheKey = hashSystem(sys);
   const body =
     proto === "anthropic-messages"
@@ -2755,7 +2789,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
           model: route.model,
           max_tokens: maxTokens,
           stream: true,
-          ...(think ? { thinking: { type: "enabled" as const, budget_tokens: THINK_BUDGET } } : {}),
+          ...(thinking ? { thinking } : {}),
           cache_control: prefix.cache_control,
           system: prefix.system,
           tools: requestTools(prefix.tools, route.provider),
@@ -3845,7 +3879,9 @@ function dispatchLine(line: string): void {
       out(
         thinkingWanted && actual === "off"
           ? "(thinking off for this model)\n"
-          : `(thinking ${actual})\n`,
+          : !thinkingWanted && actual === "on"
+            ? "(thinking on for this model)\n"
+            : `(thinking ${actual})\n`,
       );
       showPrompt();
       return;
@@ -3855,7 +3891,9 @@ function dispatchLine(line: string): void {
     out(
       thinkingWanted && actual === "off"
         ? "(thinking on — this model stays off)\n"
-        : `(thinking ${actual})\n`,
+        : !thinkingWanted && actual === "on"
+          ? "(thinking off — this model stays on)\n"
+          : `(thinking ${actual})\n`,
     );
     syncStatus();
     showPrompt();

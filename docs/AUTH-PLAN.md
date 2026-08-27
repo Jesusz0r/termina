@@ -74,7 +74,7 @@ refresh. Ambient env is only for machines with no file.
 **Model routing**
 
 `TERMINA_CORE_PROVIDER` wins when it is a supported id. Else a
-`provider/model` prefix (`xai/grok-4.3`, `openai-codex/gpt-5.4`). Else
+`provider/model` prefix (`xai/grok-4.6`, `openai-codex/gpt-5.6-sol`). Else
 infer: `claude*` → anthropic, `grok*` → xai, `gemini*`/`gemma*` → google,
 `gpt-*`/`o1`/`o3`/`o4` → openai. Else anthropic.
 
@@ -83,7 +83,7 @@ At startup, the kernel GET-lists the active provider's models
 on demand. The kernel does not use a baked-in catalog as the source of truth.
 `TERMINA_CORE_MODEL` still pins an id
 when set; a live id that only adds a date suffix may replace the pin
-(`claude-sonnet-4-5` → `claude-sonnet-4-5-20250929`). If the env does
+(`claude-sonnet-5` → a dated snapshot when the live list has one). If the env does
 not pin a provider, startup picks the first **stored** credential in
 `anthropic`, `openai-codex`, `openai`, `xai`, `google`, `openrouter`
 order, then ambient env. A leftover `ANTHROPIC_API_KEY` does not hide a

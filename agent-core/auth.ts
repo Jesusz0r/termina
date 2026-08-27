@@ -554,13 +554,13 @@ const ENV_KEYS: Record<ProviderId, string[]> = {
 };
 
 export const DEFAULT_MODELS: Record<ProviderId, { main: string; summary: string }> = {
-  anthropic: { main: "claude-sonnet-4-5", summary: "claude-haiku-4-5" },
-  openai: { main: "gpt-5", summary: "gpt-4.1-mini" },
-  "openai-codex": { main: "gpt-5.4", summary: "gpt-5.4-mini" },
-  "github-copilot": { main: "gpt-4.1", summary: "gpt-4.1-mini" },
-  xai: { main: "grok-4.3", summary: "grok-4.3" },
-  google: { main: "gemini-2.5-flash", summary: "gemini-2.5-flash" },
-  openrouter: { main: "openai/gpt-4o-mini", summary: "openai/gpt-4o-mini" },
+  anthropic: { main: "claude-sonnet-5", summary: "claude-haiku-4-5" },
+  openai: { main: "gpt-5.6-sol", summary: "gpt-5.6-luna" },
+  "openai-codex": { main: "gpt-5.6-sol", summary: "gpt-5.6-luna" },
+  "github-copilot": { main: "gpt-5.6-terra", summary: "gpt-5.6-luna" },
+  xai: { main: "grok-4.6", summary: "grok-4.6" },
+  google: { main: "gemini-3.7-flash", summary: "gemini-3.5-flash-lite" },
+  openrouter: { main: "openai/gpt-5.6-terra", summary: "openai/gpt-5.6-luna" },
 };
 
 export function parseModelRef(
