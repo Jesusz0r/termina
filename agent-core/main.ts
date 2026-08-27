@@ -1,7 +1,7 @@
 /**
  * Termina agent-core v1 — in-house coding-agent engine.
  *
- * One of Termina's terminal engines (alongside Pi and the shell). Same pty
+ * One of Termina's terminal engines. It uses the same pty
  * surface and sidecar contract (TERMINA_TERMINAL_ID + TERMINA_EVENTS_DIR,
  * agent_start/tool/tool_end/agent_settled) so the host timeline and modified
  * list work. Full-screen TUI in a tty; streamed tokens land in the

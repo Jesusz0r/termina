@@ -31,8 +31,7 @@ Wall-clock per agent turn is ~99% network wait. Money and tokens are spent on
 exactly one thing: what sits in the context window. Provider prompt caches are
 prefix caches — a byte change at position N re-bills everything after N.
 Every efficiency property of an agent harness follows from respecting that one
-fact. (Evidence: opencode reports 98%+ steady-state hit rates with no provider
-tricks; pi ships a subsystem whose only job is attributing cache waste.)
+fact.
 
 ## P1 — Context is an append-only log with explicit revisions
 
@@ -57,7 +56,7 @@ Rules:
   may be rebuilt every call. It is not stored in the session log.
 - Revision events (compaction, prune) are the ONLY writes to the visible
   context, and they must be reconstructable: the storage log stays
-  append-only (a revision is a new entry, like pi's), or snapshots back the
+  append-only (a revision is a new entry), or snapshots back the
   replaced bytes (Termina's store does). An implementation that mutates its
   only copy of history forfeits every guarantee below — forks, audits,
   recovery — so it is not an optimization, it is data loss.
@@ -199,8 +198,7 @@ The kernel owns a full-screen TUI in a tty: a two-row model and usage
 header, scrolling transcript, input, slash menu, and footer. The model row
 shows the effective reasoning effort. `/effort` lists only levels that the
 current model supports: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`,
-and `max`. Pi names the extra-high level `xhigh`; it does not define an
-`ultra` level. The usage row shows cumulative input/output tokens, cumulative
+and `max`. The extra-high level is `xhigh`; there is no `ultra` level. The usage row shows cumulative input/output tokens, cumulative
 cache-read share, estimated current context-window use, and the last priced
 main-model call. Typing `/` lists commands;
 Tab completes; arrows move the highlight. `/help` prints the same list.
@@ -241,13 +239,3 @@ MCP is a stdio client, not a plugin surface. Servers come from the user-owned
 configuration. It spawns user servers at process start, lists tools once,
 prefixes names `mcp_<server>_<tool>`, and freezes that list in zone 1.
 `/clear` reconnects. HTTP/SSE MCP is out of scope.
-
-## Relationship to prior art
-
-Pi demonstrates P5 fully (waste attribution with noise floors and cause
-exemption) and structured inventory carry-over (P4). Opencode demonstrates
-P2/P3 fully (prune vs compact split, backwards eviction, fractional budgets).
-Neither treats eviction as recoverable (P4 upgrade), ties revisions to
-fork-coherent boundaries as a product requirement (P3/Termina), or grounds
-recovery in an immutable snapshot store (P1/P4 together). Constants in both
-codebases informed example values only.

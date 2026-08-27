@@ -8,9 +8,9 @@ Agent-core does not read Pi's files, does not write Pi's `auth.json`, and
 does not share Pi's OAuth client. The user picks an engine per tab;
 credentials do not leak across engines.
 
-Public OAuth endpoints and client ids below are the same registrations Pi
-and OpenCode use (Claude Code, Codex CLI, xAI Grok-CLI, OpenRouter PKCE).
-This engine still owns the store, the headers, and the API translators.
+The OAuth endpoints and client ids below are public registrations for Claude
+Code, Codex CLI, xAI Grok-CLI, and OpenRouter PKCE. This engine owns the store,
+the headers, and the API translators.
 
 ## Current state
 
@@ -144,8 +144,8 @@ and OpenCode:
 - Models `GET {base}/codex/models?client_version=1.0.0` without
   `openai-beta` or `content-type`
 
-**xAI SuperGrok OAuth**. Same public Grok-CLI client as Pi and OpenCode.
-Device code, not loopback PKCE:
+**xAI SuperGrok OAuth**. This uses the public Grok-CLI client with device code,
+not loopback PKCE:
 
 - Client id `b1a00492-073a-47ea-816f-4c329264a828`
 - Device `https://auth.x.ai/oauth2/device/code`

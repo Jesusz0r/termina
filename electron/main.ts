@@ -2381,9 +2381,9 @@ class PiEditorApp {
 
   // ------------------------------------------------------ session search ----
 
-  /** The sessions directory name for a project path: "--" + the path with
-   *  separators replaced by dashes + "--" (pi's convention, canonical path).
-   *  One sanitizer serves the session picker and the promotion install. */
+  /** The sessions directory name for a project path: "--" + the canonical
+   *  path with separators replaced by dashes + "--". One sanitizer serves
+   *  the session picker and the promotion install. */
   private sanitizeSessionDir(absPath: string): string {
     const p = absPath.replace(/^[/\\]+/, "").replace(/[/\\]+$/, "").replace(/[/\\:]/g, "-");
     return "--" + p + "--";

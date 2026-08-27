@@ -1,7 +1,7 @@
 /**
  * Termina host adapter for agent-core.
  *
- * Same sidecar file names as the Pi bridge: ack, prompt payload,
+ * Same sidecar file names as the app bridge: ack, prompt payload,
  * verify/edits/mine/mailbox context, startup-control. The parser stays
  * electron/sidecar.ts. This module is the kernel writer of that protocol.
  */

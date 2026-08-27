@@ -4,8 +4,8 @@
  * Own file: ~/.termina/agent/auth.json. This engine does not read or write
  * another product's credential store.
  *
- * Login shapes match the public flows Pi and OpenCode use for the same
- * providers (Claude Code PKCE, Codex CLI PKCE, xAI Grok-CLI device code,
+ * Login shapes match the providers' public authentication flows
+ * (Claude Code PKCE, Codex CLI PKCE, xAI Grok-CLI device code,
  * OpenRouter PKCE-minted key). This file is the only credential owner.
  */
 import { createHash, randomBytes } from "node:crypto";
@@ -76,7 +76,7 @@ const OPENROUTER_AUTHORIZE = "https://openrouter.ai/auth";
 const OPENROUTER_TOKEN = "https://openrouter.ai/api/v1/auth/keys";
 const OPENROUTER_REDIRECT_PORT = 53693;
 
-/** Same GitHub Copilot OAuth app Pi and OpenCode use (VS Code Copilot). */
+/** Public GitHub Copilot OAuth app for VS Code Copilot clients. */
 const GITHUB_COPILOT_CLIENT_ID = "Iv1.b507a08c87ecfe98";
 const GITHUB_DEVICE_URL = "https://github.com/login/device/code";
 const GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token";
