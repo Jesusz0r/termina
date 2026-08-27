@@ -1611,6 +1611,35 @@ const sseEvents = await compat.readSseJson(sse, undefined, (event) => {
   return false;
 });
 check("readSseJson streams and can discard events", filteredText === "Hi" && sseEvents.length === 0);
+check(
+  "completion live delta exposes provider thinking",
+  compat.completionLiveDelta({ choices: [{ delta: { reasoning_content: "Checking files" } }] })?.thinking === "Checking files" &&
+    compat.completionLiveDelta({ choices: [{ delta: { reasoning: "Planning", content: "Done" } }] })?.text === "Done",
+);
+const completionThinking = compat.completionResultFromEvents(
+  [{ choices: [{ delta: { reasoning_text: "Plan", content: "" } }] }],
+  () => {},
+  Date.now(),
+);
+check(
+  "completion result keeps provider thinking and first-token time",
+  completionThinking.blocks[0]?.type === "thinking" && completionThinking.ttftMs !== null,
+);
+const completionMixed = compat.completionResultFromEvents(
+  [{ choices: [{ delta: { reasoning: "Plan", content: "Done" } }] }],
+  () => {},
+  Date.now(),
+);
+check(
+  "completion result keeps thinking and text from one delta",
+  completionMixed.blocks[0]?.type === "thinking" && completionMixed.blocks[1]?.type === "text",
+);
+check(
+  "responses live delta exposes reasoning summaries",
+  compat.responsesLiveDelta({ type: "response.reasoning_summary_text.delta", delta: "Checking files" })?.text === "Checking files" &&
+    compat.responsesLiveDelta({ type: "response.reasoning_text.delta", delta: "Planning" })?.kind === "thinking" &&
+    compat.responsesLiveDelta({ type: "response.reasoning_summary_part.done" })?.text === "\n\n",
+);
 
 const itemDelta = compat.responsesResultFromEvents(
   [
@@ -1640,6 +1669,15 @@ check(
 );
 const bodyXai = compat.completionsBody("grok-4.3", "sys", [], []);
 check("other completions keep max_tokens and skip cache key", bodyXai.max_tokens === 16_384 && bodyXai.prompt_cache_key === undefined);
+const bodyGoogle = compat.completionsBody("gemini-3.7-flash", "sys", [], [], "max_tokens", {
+  reasoningEffort: "minimal",
+  googleThinking: true,
+});
+check(
+  "Google completions request visible thought summaries",
+  bodyGoogle.extra_body?.google?.thinking_config?.thinking_level === "minimal" &&
+    bodyGoogle.extra_body?.google?.thinking_config?.include_thoughts === true,
+);
 const bodyCodex = compat.responsesBody("gpt-5.6-sol", "sys", [], [], {
   cacheKey: "def",
   reasoningEffort: "none",
@@ -1650,7 +1688,10 @@ check(
 );
 const bodyResponses = compat.responsesBody("gpt-5.6-sol", "sys", [], [], { maxTokens: 32_768, reasoningEffort: "max" });
 check("other responses set max_output_tokens", bodyResponses.max_output_tokens === 32_768);
-check("responses body keeps max reasoning effort", bodyResponses.reasoning?.effort === "max");
+check(
+  "responses body requests a live reasoning summary",
+  bodyResponses.reasoning?.effort === "max" && bodyResponses.reasoning?.summary === "auto",
+);
 check(
   "responses body asks for encrypted reasoning",
   Array.isArray(bodyCodex.include) && bodyCodex.include.includes("reasoning.encrypted_content"),
@@ -2121,12 +2162,16 @@ check("parseEffortCommand max", parseEffortCommand("/effort max")?.effort === "m
 check("parseEffortCommand xhigh", parseEffortCommand("/effort xhigh")?.effort === "xhigh");
 check("parseEffortCommand rejects junk", typeof parseEffortCommand("/effort ultra")?.error === "string");
 check(
-  "gpt 5.6 exposes xhigh and max",
-  supportedEffortLevels("openai", "gpt-5.6-sol").join(" ") === "off minimal low medium high xhigh max",
+  "gpt 5.6 exposes its direct API levels",
+  supportedEffortLevels("openai", "gpt-5.6-sol").join(" ") === "off low medium high xhigh max",
 );
 check(
-  "gpt 5.4 exposes xhigh but not max",
-  supportedEffortLevels("openai", "gpt-5.4").join(" ") === "off minimal low medium high xhigh",
+  "gpt 5.4 exposes xhigh but not minimal or max",
+  supportedEffortLevels("openai", "gpt-5.4").join(" ") === "off low medium high xhigh",
+);
+check(
+  "Codex GPT 5.6 keeps its mapped minimal level",
+  supportedEffortLevels("openai-codex", "gpt-5.6-sol").join(" ") === "off minimal low medium high xhigh max",
 );
 check(
   "claude opus 4.6 exposes max but not xhigh",
@@ -2140,13 +2185,31 @@ check(
   "legacy claude omits extended effort",
   supportedEffortLevels("anthropic", "claude-sonnet-4-5").join(" ") === "off minimal low medium high",
 );
+check(
+  "OpenRouter Claude exposes model effort",
+  supportedEffortLevels("openrouter", "anthropic/claude-sonnet-4.6").join(" ") === "off minimal low medium high max",
+);
+check(
+  "OpenRouter Claude dot versions expose extended effort",
+  supportedEffortLevels("openrouter", "anthropic/claude-opus-4.7").join(" ") === "off minimal low medium high xhigh max",
+);
+check(
+  "OpenRouter Gemini exposes model effort",
+  supportedEffortLevels("openrouter", "google/gemini-3.7-flash").join(" ") === "off minimal low medium high",
+);
 check("unsupported max clamps down to xhigh", clampEffortLevel("openai", "gpt-5.4", "max") === "xhigh");
 check("grok off clamps up to low", clampEffortLevel("xai", "grok-4.6", "off") === "low");
 check("thinkingEnabledFor default off", thinkingEnabledFor("anthropic", "claude-sonnet-5", "off") === false);
 check("thinkingEnabledFor sonnet high", thinkingEnabledFor("anthropic", "claude-sonnet-5", "high") === true);
 check("thinkingEnabledFor haiku supports effort", thinkingEnabledFor("anthropic", "claude-haiku-4-5", "high") === true);
 check("thinkingEnabledFor gpt high", thinkingEnabledFor("openai", "gpt-5.6-sol", "high") === true);
-check("thinkingEnabledFor gemini stays off", thinkingEnabledFor("google", "gemini-3.7-flash", "high") === false);
+check("GitHub GPT reasoning cannot turn off", clampEffortLevel("github-copilot", "gpt-5.6-terra", "off") === "minimal");
+check("thinkingEnabledFor Gemini 3", thinkingEnabledFor("google", "gemini-3.7-flash", "high") === true);
+check(
+  "Gemini 3 exposes visible reasoning levels",
+  supportedEffortLevels("google", "gemini-3.7-flash").join(" ") === "minimal low medium high",
+);
+check("unsupported Gemini 2.5 stays off", thinkingEnabledFor("google", "gemini-2.5-flash", "high") === false);
 check("thinkingEnabledFor gpt 4 stays off", thinkingEnabledFor("openai", "gpt-4.1", "high") === false);
 check("thinkingEnabledFor fable stays on", thinkingEnabledFor("anthropic", "claude-fable-5", "off") === true);
 check("reasoningEffortFor gpt off is none", reasoningEffortFor("openai", "gpt-5.6-sol", "off") === "none");
@@ -2154,7 +2217,11 @@ check("reasoningEffortFor gpt minimal maps low", reasoningEffortFor("openai", "g
 check("reasoningEffortFor gpt max stays max", reasoningEffortFor("openai", "gpt-5.6-sol", "max") === "max");
 check("reasoningEffortFor grok off is low", reasoningEffortFor("xai", "grok-4.6", "off") === "low");
 check("reasoningEffortFor o-series off is low", reasoningEffortFor("openai", "o3", "off") === "low");
-check("reasoningEffortFor claude is omitted", reasoningEffortFor("anthropic", "claude-sonnet-5", "high") === undefined);
+check("reasoningEffortFor direct Claude is omitted", reasoningEffortFor("anthropic", "claude-sonnet-5", "high") === undefined);
+check(
+  "reasoningEffortFor OpenRouter Claude is sent",
+  reasoningEffortFor("openrouter", "anthropic/claude-sonnet-4.6", "high") === "high",
+);
 check("defaultContextWindow anthropic is 1M", defaultContextWindow("anthropic", "claude-sonnet-5") === 1_000_000);
 check("defaultContextWindow haiku is 200k", defaultContextWindow("anthropic", "claude-haiku-4-5") === 200_000);
 check("defaultContextWindow openai is 1.05M", defaultContextWindow("openai", "gpt-5.6-sol") === 1_050_000);

@@ -65,9 +65,11 @@ import {
 } from "./auth.ts";
 import {
   completionsBody,
+  completionLiveDelta,
   completionResultFromEvents,
   readSseJson,
   responsesBody,
+  responsesLiveDelta,
   responsesResultFromEvents,
   textFromCompletionPayload,
   textFromResponsesPayload,
@@ -209,7 +211,7 @@ export const EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"
 export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 type EffortLevelMap = Partial<Record<EffortLevel, string | null>>;
 type ReasoningEffort = "none" | Exclude<EffortLevel, "off">;
-let effortWanted: EffortLevel = "off";
+let effortWanted: EffortLevel = "medium";
 let hostContextSnapshot = "";
 
 export type ThinkingRequest =
@@ -222,7 +224,7 @@ function claudeThinkingApi(model: string): "adaptive" | "budget" | "none" {
   const id = model.toLowerCase();
   if (!id.includes("claude") || /claude-[1-3](?:-|$)/.test(id)) return "none";
   if (/(?:sonnet|opus|fable|mythos)-5(?:$|[^0-9])/.test(id)) return "adaptive";
-  if (/4-[6-8]/.test(id)) return "adaptive";
+  if (/4[.-][6-8]/.test(id)) return "adaptive";
   return "budget";
 }
 
@@ -236,13 +238,26 @@ function openAiFamilyModel(model: string): boolean {
   return /gpt-[5-9]/.test(id) || id.includes("gpt-oss") || id.includes("codex") || id.includes("grok") || /(?:^|\/)o[0-9]/.test(id);
 }
 
+function responsesReasoningModel(model: string): boolean {
+  const id = model.toLowerCase();
+  return openAiFamilyModel(model) || claudeThinkingApi(model) !== "none" || /gemini-[3-9]/.test(id);
+}
+
 function effortLevelMap(provider: ProviderId, model: string): EffortLevelMap {
   const id = model.toLowerCase();
   const map: EffortLevelMap = {};
-  if (provider === "anthropic" && claudeThinkingApi(model) === "adaptive") {
+  if (provider === "google" && /gemini-[3-9]/.test(id)) {
+    map.off = null;
+    if (/gemini-3(?:\.\d+)?-pro/.test(id)) {
+      map.minimal = null;
+      map.medium = null;
+    }
+    return map;
+  }
+  if (claudeThinkingApi(model) === "adaptive") {
     map.minimal = "low";
     map.max = "max";
-    if (/(?:opus-4-[78]|(?:sonnet|opus|fable)-5)(?:$|[^0-9])/.test(id)) map.xhigh = "xhigh";
+    if (/(?:opus-4[.-][78]|(?:sonnet|opus|fable)-5)(?:$|[^0-9])/.test(id)) map.xhigh = "xhigh";
     if (thinkingLockedOn(model)) map.off = null;
     return map;
   }
@@ -254,13 +269,17 @@ function effortLevelMap(provider: ProviderId, model: string): EffortLevelMap {
     map.max = null;
     return map;
   }
-  const rejectsNone = /(?:^|\/)o[0-9]/.test(id) || (id.includes("codex") && !id.includes("5.6"));
-  if (rejectsNone) {
+  if (/(?:^|\/)o[0-9]/.test(id)) {
     map.off = null;
-    map.minimal = "low";
+    map.minimal = null;
+    return map;
   }
   if (/gpt-5\.[3-6]|codex/.test(id)) {
-    map.minimal = "low";
+    if (provider === "openai") map.minimal = null;
+    else if (provider === "openai-codex" || provider === "github-copilot") map.minimal = "low";
+    if (provider === "github-copilot" || (id.includes("codex") && provider !== "openrouter" && !id.includes("5.6"))) {
+      map.off = null;
+    }
     map.xhigh = "xhigh";
   }
   if (id.includes("5.6")) map.max = "max";
@@ -268,7 +287,7 @@ function effortLevelMap(provider: ProviderId, model: string): EffortLevelMap {
 }
 
 export function supportedEffortLevels(provider: ProviderId, model: string): EffortLevel[] {
-  if (provider === "anthropic" ? claudeThinkingApi(model) === "none" : !openAiFamilyModel(model)) return ["off"];
+  if (provider === "anthropic" ? claudeThinkingApi(model) === "none" : !responsesReasoningModel(model)) return ["off"];
   const map = effortLevelMap(provider, model);
   return EFFORT_LEVELS.filter((level) => {
     const mapped = map[level];
@@ -300,7 +319,7 @@ export function reasoningEffortFor(
   model: string,
   effort: EffortLevel,
 ): ReasoningEffort | undefined {
-  if (provider === "anthropic" || !openAiFamilyModel(model)) return undefined;
+  if (provider === "anthropic" || !responsesReasoningModel(model)) return undefined;
   const actual = clampEffortLevel(provider, model, effort);
   const mapped = effortLevelMap(provider, model)[actual];
   if (typeof mapped === "string") return mapped as ReasoningEffort;
@@ -2998,6 +3017,9 @@ async function callModel(messages: Message[]): Promise<CallResult> {
         : completionsBody(route.model, sys, kernelMessages, toolsForProvider, "max_tokens", {
             maxTokens,
             ...(sendCacheKey ? { cacheKey } : {}),
+            ...(route.provider === "google" && reasoningEffort
+              ? { reasoningEffort, googleThinking: true }
+              : {}),
           });
   const res = await providerPost(route.provider, body, currentAbort?.signal);
   if (!res.ok || !res.body) {
@@ -3015,22 +3037,31 @@ async function callModel(messages: Message[]): Promise<CallResult> {
     const viaResponses = usesResponsesApi(route.provider);
     const events = await readSseJson(res.body, currentAbort?.signal, (event) => {
       let chunk = "";
-      if (viaResponses && event.type === "response.output_text.delta") {
-        const delta = event.delta;
-        if (typeof delta === "string") chunk = delta;
-        else if (delta && typeof delta === "object" && !Array.isArray(delta)) {
-          const value = (delta as { text?: unknown; delta?: unknown }).text ?? (delta as { delta?: unknown }).delta;
-          if (typeof value === "string") chunk = value;
+      let keepEvent = false;
+      if (viaResponses) {
+        const live = responsesLiveDelta(event);
+        if (live?.kind === "thinking") {
+          if (ttftMs === null) ttftMs = Date.now() - started;
+          out(live.text);
         }
-        if (chunk) event.delta = "";
-      } else if (!viaResponses && Array.isArray(event.choices)) {
-        const choice = event.choices[0];
-        if (choice && typeof choice === "object") {
-          const delta = (choice as { delta?: Record<string, unknown> }).delta;
-          if (delta && typeof delta.content === "string") {
-            chunk = delta.content;
-            delta.content = "";
-          }
+        if (live?.kind === "text") {
+          chunk = live.text;
+          event.delta = "";
+        }
+      } else {
+        const live = completionLiveDelta(event);
+        if (live?.thinking) {
+          if (ttftMs === null) ttftMs = Date.now() - started;
+          keepEvent = true;
+          out(live.thinking);
+        }
+        if (live?.text) {
+          chunk = live.text;
+          const choice = Array.isArray(event.choices) ? event.choices[0] : null;
+          const delta = choice && typeof choice === "object"
+            ? (choice as { delta?: Record<string, unknown> }).delta
+            : undefined;
+          if (delta) delta.content = "";
         }
       }
       if (chunk) {
@@ -3041,7 +3072,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
       if (viaResponses && event.type === "response.output_text.delta") return false;
       if (!viaResponses && chunk && Array.isArray(event.choices)) {
         const choice = event.choices[0] as { delta?: { tool_calls?: unknown }; finish_reason?: unknown } | undefined;
-        if (!choice?.delta?.tool_calls && !choice?.finish_reason && !event.usage) return false;
+        if (!keepEvent && !choice?.delta?.tool_calls && !choice?.finish_reason && !event.usage) return false;
       }
       return true;
     });
@@ -3150,6 +3181,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
             out(d.text ?? "");
           } else if (d.type === "thinking_delta" && target.type === "thinking") {
             const chunk = d.thinking ?? "";
+            if (chunk && ttftMs === null) ttftMs = Date.now() - started;
             target.thinking += chunk;
             out(chunk);
           } else if (d.type === "signature_delta" && target.type === "thinking") {

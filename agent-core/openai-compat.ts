@@ -190,6 +190,7 @@ export type CompletionsOpts = {
   cacheKey?: string;
   maxTokens?: number;
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  googleThinking?: boolean;
   includeEncryptedReasoning?: boolean;
 };
 
@@ -211,6 +212,16 @@ export function completionsBody(
     tools: toCompletionsTools(tools),
   };
   if (opts?.cacheKey) body.prompt_cache_key = opts.cacheKey;
+  if (opts?.googleThinking && opts.reasoningEffort && opts.reasoningEffort !== "none") {
+    body.extra_body = {
+      google: {
+        thinking_config: {
+          thinking_level: opts.reasoningEffort,
+          include_thoughts: true,
+        },
+      },
+    };
+  }
   return body;
 }
 
@@ -234,7 +245,7 @@ export function responsesBody(
   if (opts?.maxTokens !== undefined) body.max_output_tokens = opts.maxTokens;
   if (opts?.includeEncryptedReasoning !== false) body.include = ["reasoning.encrypted_content"];
   if (opts?.cacheKey) body.prompt_cache_key = opts.cacheKey;
-  if (opts?.reasoningEffort) body.reasoning = { effort: opts.reasoningEffort };
+  if (opts?.reasoningEffort) body.reasoning = { effort: opts.reasoningEffort, summary: "auto" };
   return body;
 }
 
@@ -252,12 +263,32 @@ function usageFromOpenAI(u: Record<string, unknown> | undefined): CallResultLike
   };
 }
 
+export function completionLiveDelta(
+  event: Record<string, unknown>,
+): { text: string; thinking: string } | null {
+  const choices = event.choices;
+  if (!Array.isArray(choices) || !choices[0] || typeof choices[0] !== "object") return null;
+  const delta = (choices[0] as { delta?: Record<string, unknown> }).delta;
+  if (!delta) return null;
+  let thinking = "";
+  for (const field of ["reasoning_content", "reasoning", "reasoning_text"] as const) {
+    const value = delta[field];
+    if (typeof value === "string" && value) {
+      thinking = value;
+      break;
+    }
+  }
+  const text = typeof delta.content === "string" ? delta.content : "";
+  return text || thinking ? { text, thinking } : null;
+}
+
 export function completionResultFromEvents(
   events: Array<Record<string, unknown>>,
   onText: (text: string) => void,
   started: number,
 ): CallResultLike {
   let text = "";
+  let thinking = "";
   const calls = new Map<number, { id: string; name: string; args: string }>();
   let usage: CallResultLike["usage"] = null;
   let ttftMs: number | null = null;
@@ -269,10 +300,15 @@ export function completionResultFromEvents(
     const choice = choices[0] as { delta?: Record<string, unknown>; finish_reason?: unknown };
     if (typeof choice.finish_reason === "string") stopReason = choice.finish_reason;
     const delta = choice.delta ?? {};
-    if (typeof delta.content === "string" && delta.content) {
+    const live = completionLiveDelta(ev);
+    if (live?.text) {
       if (ttftMs === null) ttftMs = Date.now() - started;
-      text += delta.content;
-      onText(delta.content);
+      text += live.text;
+      onText(live.text);
+    }
+    if (live?.thinking) {
+      if (ttftMs === null) ttftMs = Date.now() - started;
+      thinking += live.thinking;
     }
     const toolCalls = delta.tool_calls;
     if (Array.isArray(toolCalls)) {
@@ -289,6 +325,7 @@ export function completionResultFromEvents(
     }
   }
   const blocks: Array<Record<string, unknown>> = [];
+  if (thinking) blocks.push({ type: "thinking", thinking });
   if (text) blocks.push({ type: "text", text });
   const ordered = [...calls.entries()].sort((a, b) => a[0] - b[0]);
   for (const [, call] of ordered) {
@@ -338,7 +375,22 @@ function reasoningSummaryText(item: { summary?: unknown }): string {
     const text = (row as { text?: unknown }).text;
     if (typeof text === "string" && text) parts.push(text);
   }
-  return parts.join("");
+  return parts.join("\n\n");
+}
+
+export function responsesLiveDelta(
+  event: Record<string, unknown>,
+): { kind: "text" | "thinking"; text: string } | null {
+  const type = event.type;
+  if (type === "response.reasoning_summary_part.done") return { kind: "thinking", text: "\n\n" };
+  const kind = type === "response.output_text.delta"
+    ? "text"
+    : type === "response.reasoning_summary_text.delta" || type === "response.reasoning_text.delta"
+      ? "thinking"
+      : null;
+  if (!kind) return null;
+  const text = deltaText(event.delta);
+  return text ? { kind, text } : null;
 }
 
 export function responsesResultFromEvents(
@@ -404,17 +456,18 @@ export function responsesResultFromEvents(
     const failed = errorFromEvent(ev);
     if (failed) error = failed;
     const type = typeof ev.type === "string" ? ev.type : "";
-    const chunk = type === "response.output_text.delta" ? deltaText(ev.delta) : "";
-    if (chunk) {
+    const live = responsesLiveDelta(ev);
+    if (live?.kind === "text") {
       if (ttftMs === null) ttftMs = Date.now() - started;
-      text += chunk;
-      onText(chunk);
+      text += live.text;
+      onText(live.text);
     }
-    if (type === "response.reasoning_summary_text.delta") {
+    if (live?.kind === "thinking") {
+      if (ttftMs === null) ttftMs = Date.now() - started;
       const id = typeof ev.item_id === "string" ? ev.item_id : "";
       const key = id || "__anon";
       const prev = reasoning.get(key) ?? { id, thinking: "" };
-      prev.thinking += deltaText(ev.delta);
+      prev.thinking += live.text;
       if (!reasoning.has(key)) reasoningOrder.push(key);
       reasoning.set(key, prev);
     }
