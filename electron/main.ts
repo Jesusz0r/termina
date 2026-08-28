@@ -43,7 +43,14 @@ import {
 } from "./plan-board.js";
 import { AppPreferencesStore } from "./preferences.js";
 import { listSessionJsonl, mergeSessionFiles, searchSessionFiles, sessionFileEntry, type SessionFileEntry } from "./session-search.js";
-import { appendPendingImage } from "../agent-core/host.js";
+import { appendPendingImages, MAX_PENDING_IMAGES, pendingImageState } from "../agent-core/host.js";
+import {
+  isAuthorizedDropSender,
+  normalizeDroppedPaths,
+  quotePosixPaths,
+  readDroppedImages,
+  validatePathDropTargets,
+} from "./terminal-drop.js";
 import {
   composeTerminalRoster,
   isCoreSessionId,
@@ -67,6 +74,7 @@ import {
   type SessionHit,
   type ShortcutCommand,
   type ShortcutMap,
+  type TerminalPasteResult,
   type ThemeId,
   type TimelineEvent,
   type TimelinePrefix,
@@ -1070,23 +1078,59 @@ class PiEditorApp {
 
   /** Core tabs attach a clipboard image as a pending host file. Pi and
    *  shell tabs only paste text: a PNG cannot travel through the pty. */
-  private pasteTerminal(id: unknown): { kind: "text"; text: string } | { kind: "image"; count: number } {
-    const text = (): { kind: "text"; text: string } => ({ kind: "text", text: capUtf8(clipboard.readText(), MAX_CLIPBOARD_BYTES) });
+  private async pasteTerminal(id: unknown): Promise<TerminalPasteResult> {
+    const text = (): TerminalPasteResult => ({ ok: true, kind: "text", text: capUtf8(clipboard.readText(), MAX_CLIPBOARD_BYTES) });
     if (typeof id !== "string") return text();
-    const inst = this.terminals.get(id);
-    if (!inst || inst.engine !== "core") return text();
+    const captured = this.terminals.get(id);
+    if (!captured || captured.engine !== "core") return text();
     const image = clipboard.readImage();
     if (image.isEmpty()) return text();
     let png: Buffer;
     try {
       png = Buffer.from(image.toPNG());
     } catch {
-      return text();
+      return { ok: false, error: "image is empty" };
     }
-    if (png.length === 0 || png.length > MAX_CLIPBOARD_BYTES) return text();
-    const attached = appendPendingImage(this.eventsDirOf(inst), inst.id, png, "image/png", randomUUID());
-    if (!attached.ok) return text();
-    return { kind: "image", count: attached.count };
+    if (png.length === 0) return { ok: false, error: "image is empty" };
+    if (png.length > MAX_CLIPBOARD_BYTES) return { ok: false, error: "image is too large" };
+    if (this.terminals.get(id) !== captured) return { ok: false, error: "terminal closed" };
+    const attached = await appendPendingImages(
+      this.eventsDirOf(captured),
+      captured.id,
+      [{ bytes: png, mediaType: "image/png", id: randomUUID() }],
+      { canCommit: () => this.terminals.get(id) === captured },
+    );
+    if (!attached.ok) return { ok: false, error: attached.error };
+    return { ok: true, kind: "image", count: attached.count, queued: captured.busy };
+  }
+
+  private async dropTerminalFiles(event: Electron.IpcMainInvokeEvent, id: unknown, raw: unknown): Promise<TerminalPasteResult> {
+    if (!isAuthorizedDropSender(event, this.win)) return { ok: false, error: "unauthorized" };
+    if (typeof id !== "string" || !/^term-\d+$/.test(id)) return { ok: false, error: "terminal closed" };
+    const captured = this.terminals.get(id);
+    if (!captured) return { ok: false, error: "terminal closed" };
+    const normalized = normalizeDroppedPaths(raw);
+    if (!normalized.ok) return normalized;
+    if (captured.engine === "core") {
+      const eventsDir = this.eventsDirOf(captured);
+      const state = await pendingImageState(eventsDir, captured.id);
+      if (!state.ok) return { ok: false, error: state.error };
+      const remaining = Math.max(0, MAX_PENDING_IMAGES - state.count);
+      const images = await readDroppedImages(normalized.paths, remaining);
+      if (!images.ok) return images;
+      if (this.terminals.get(id) !== captured) return { ok: false, error: "terminal closed" };
+      const attached = await appendPendingImages(eventsDir, captured.id, images.images, {
+        canCommit: () => this.terminals.get(id) === captured,
+      });
+      if (!attached.ok) return { ok: false, error: attached.error };
+      return { ok: true, kind: "image", count: attached.count, queued: captured.busy };
+    }
+    const exists = await validatePathDropTargets(normalized.paths);
+    if (!exists.ok) return exists;
+    const quoted = quotePosixPaths(normalized.paths, process.platform);
+    if (!quoted.ok) return quoted;
+    if (this.terminals.get(id) !== captured) return { ok: false, error: "terminal closed" };
+    return { ok: true, kind: "text", text: quoted.text };
   }
 
   private async safeEventsFile(dir: string, name: string): Promise<string | null> {
@@ -2651,7 +2695,10 @@ class PiEditorApp {
         name.startsWith("mailbox-term-") ||
         name.startsWith("startup-control-term-") ||
         name.startsWith("image-term-") ||
-        name.startsWith("images-term-")
+        name.startsWith("images-term-") ||
+        name.startsWith("images-claim-term-") ||
+        name.startsWith("images-owner-term-") ||
+        name.startsWith("images-tx-term-")
       ) {
         rmSync(join(this.eventsDir, name), { force: true });
       }
@@ -4894,6 +4941,7 @@ class PiEditorApp {
       else if (command === "paste") this.win.webContents.paste();
     });
     ipcMain.handle("terminals:paste", (_e, id: unknown) => this.pasteTerminal(id));
+    ipcMain.handle("terminals:drop-files", (e, id: unknown, paths: unknown) => this.dropTerminalFiles(e, id, paths));
     ipcMain.handle("settings:get", () => {
       const next = normalizeAppPreferences(this.preferences);
       return { ...next, shortcuts: { ...next.shortcuts } };

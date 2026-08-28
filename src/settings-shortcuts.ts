@@ -1,6 +1,4 @@
-import { COMMAND_DEFINITIONS, DEFAULT_SHORTCUTS, type ShortcutCommand, type ShortcutMap } from "../shared/types";
-
-export const SHORTCUTS = COMMAND_DEFINITIONS;
+import { DEFAULT_SHORTCUTS, type ShortcutCommand, type ShortcutMap } from "../shared/types";
 
 /** True on Apple platforms, where the primary modifier is Cmd not Ctrl. */
 export function isMacPlatform(): boolean {

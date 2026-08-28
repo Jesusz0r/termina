@@ -212,28 +212,12 @@ export function pathBasename(p: string): string {
 }
 
 import {
-  type CommandCategory,
-  type CommandScope,
-  type CommandDefinition,
-  type CommandId,
-  type ShortcutCommand,
+  DEFAULT_SHORTCUTS,
   type MenuCommand,
   type ShortcutMap,
-  COMMAND_DEFINITIONS,
-  DEFAULT_SHORTCUTS,
 } from "./commands";
 
-export {
-  type CommandCategory,
-  type CommandScope,
-  type CommandDefinition,
-  type CommandId,
-  type ShortcutCommand,
-  type MenuCommand,
-  type ShortcutMap,
-  COMMAND_DEFINITIONS,
-  DEFAULT_SHORTCUTS,
-};
+export * from "./commands";
 
 export interface AppPreferences {
   theme: ThemeId;
@@ -422,6 +406,11 @@ export interface ProjectListItem {
   needsLogin: boolean;
 }
 
+export type TerminalPasteResult =
+  | { ok: true; kind: "text"; text: string }
+  | { ok: true; kind: "image"; count: number; queued: boolean }
+  | { ok: false; error: string };
+
 export interface PiBridge {
   // push events (main → renderer)
   onPtyData(cb: (e: { id: string; data: string }) => void): void;
@@ -462,7 +451,9 @@ export interface PiBridge {
   readClipboard(): Promise<string>;
   editClipboard(command: "copy" | "paste"): Promise<void>;
   /** Paste into a terminal. Core tabs attach clipboard images as files. */
-  pasteTerminal(id: string): Promise<{ kind: "text"; text: string } | { kind: "image"; count: number }>;
+  pasteTerminal(id: string): Promise<TerminalPasteResult>;
+  /** Drop Finder files into a terminal. Core tabs attach images; others paste quoted paths. */
+  dropTerminalFiles(id: string, files: readonly File[]): Promise<TerminalPasteResult>;
 
   // Verify & Iterate
   runVerify(terminalId: string): Promise<{ ok: boolean; error?: string }>;

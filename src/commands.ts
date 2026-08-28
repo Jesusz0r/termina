@@ -19,12 +19,6 @@ export class CommandDispatcher {
     };
   }
 
-  registerAll(map: Partial<Record<CommandId, CommandHandler>>): () => void {
-    const unsubs = Object.entries(map).map(([cmd, handler]) =>
-      this.register(cmd as CommandId, handler as CommandHandler),
-    );
-    return () => unsubs.forEach((unsub) => unsub());
-  }
 
   execute(command: CommandId): void {
     const handler = this.handlers.get(command);

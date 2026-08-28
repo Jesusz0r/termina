@@ -1,5 +1,6 @@
 import {
   CODE_FONT_FAMILIES,
+  COMMAND_DEFINITIONS,
   DEFAULT_SHORTCUTS,
   defaultAppPreferences,
   type AppPreferences,
@@ -8,7 +9,7 @@ import {
   type ThemeId,
 } from "../shared/types";
 import { normalizeAppPreferences } from "../shared/preferences";
-import { SHORTCUTS, formatShortcut, shortcutForEvent } from "./settings-shortcuts";
+import { formatShortcut, shortcutForEvent } from "./settings-shortcuts";
 
 interface SettingsCallbacks {
   onChange: (preferences: AppPreferences) => void;
@@ -266,7 +267,7 @@ export class SettingsView {
     content.appendChild(this.sectionHeading("Keyboard shortcuts", "Select a shortcut to record a new key combination."));
     const list = document.createElement("div");
     list.className = "settings-shortcut-list";
-    for (const item of SHORTCUTS) {
+    for (const item of COMMAND_DEFINITIONS) {
       const row = document.createElement("div");
       row.className = "settings-shortcut-row";
       const copy = document.createElement("div");
@@ -311,7 +312,7 @@ export class SettingsView {
           (this.backdrop!.querySelector(`[data-shortcut="${item.command}"]`) as HTMLElement | null)?.focus();
           return;
         }
-        const conflict = SHORTCUTS.find((other) => other.command !== item.command && this.preferences.shortcuts[other.command] === value);
+        const conflict = COMMAND_DEFINITIONS.find((other) => other.command !== item.command && this.preferences.shortcuts[other.command] === value);
         if (conflict) {
           this.captureError = `Used by ${conflict.label}`;
           this.render(this.backdrop!.querySelector(".settings-modal") as HTMLElement);

@@ -232,12 +232,17 @@ non-empty file aside (`core-<id>-<stamp>.jsonl`) and starts a fresh file
 at the same path so Session Search can still read the previous
 conversation. Closing a tab keeps a non-empty persist session.
 
-Clipboard images never enter the pty. The host writes them next to the
-sidecar as `image-<terminal>-<id>.png` and a pending list
-`images-<terminal>.json`. On submit the kernel copies them next to the
-session file (`<session>-img-N.png`), stores a file-source block in the
-JSONL, and expands to provider base64 at request time. The prompt payload
-keeps refs, not bytes.
+Clipboard and Finder image drops never enter the pty. The host writes
+validated PNG, JPEG, WebP, and GIF files next to the sidecar as
+`image-<terminal>-<id>.<ext>` and a pending list `images-<terminal>.json`.
+A core terminal accepts at most four pending images, each at most 4 MiB.
+If the agent is already running, the batch stays queued for the next
+prompt. On submit the kernel claims that list, copies persisted files
+next to the session (`<session>-img-N.png`), and only then acknowledges
+the claim. A crash before persistence leaves the claim in place so the
+next prompt recovers the bytes. The prompt payload keeps refs, not bytes.
+Pi and shell terminals do not attach image bytes; a drop inserts
+POSIX-quoted absolute paths through xterm paste and does not submit them.
 
 MCP is a stdio client, not a plugin surface. Servers come from the user-owned
 `~/.termina/agent/mcp.json`. The kernel does not execute project-owned MCP

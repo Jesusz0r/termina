@@ -87,16 +87,16 @@ import {
 } from "./models.ts";
 import { IGNORED_SEGMENTS, matchGitignore, parseGitignore, type GitignoreRules } from "../shared/gitignore.ts";
 import {
-  consumePendingImages,
+  acknowledgePendingImages,
+  claimPendingImages,
   consumeStartupControl,
   expandFileImageSource,
   planTextIfChanged,
   loadImageFromRoots,
-  peekPendingImageCount,
+  pendingImageState,
   persistLoadedImages,
   promptFileName,
   readContextFiles,
-  removePendingImageFiles,
   structuredStartup,
   visibleAssistantText,
   waitForAck,
@@ -3566,8 +3566,18 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   showPrompt();
   interrupted = false;
   currentAbort = new AbortController();
-  const pendingCount = eventsDir && terminalId ? peekPendingImageCount(eventsDir, terminalId) : 0;
-  const hasImages = pendingCount > 0 || extraImages.length > 0;
+  const pendingResult = eventsDir && terminalId
+    ? await pendingImageState(eventsDir, terminalId)
+    : { ok: true as const, count: 0, hasImages: false };
+  if (!pendingResult.ok) {
+    out(`(the run did not start: ${pendingResult.error})\n`);
+    surface?.setDraft(prompt);
+    running = false;
+    currentAbort = null;
+    showPrompt();
+    return;
+  }
+  const hasImages = pendingResult.hasImages || extraImages.length > 0;
   let preflight: { requestId: string; token: string | null } | null = null;
   if (eventsDir && terminalId) {
     const requestId = randomUUID();
@@ -3587,27 +3597,44 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     preflight = { requestId, token: typeof ack.token === "string" ? ack.token : null };
   }
   const imageRoots = [sessionFile ? dirname(sessionFile) : "", eventsDir].filter(Boolean);
-  const loaded = eventsDir && terminalId ? consumePendingImages(eventsDir, terminalId) : [];
+  const claimResult = eventsDir && terminalId
+    ? await claimPendingImages(eventsDir, terminalId)
+    : { ok: true as const, claim: { claimId: "", images: [] } };
+  if (!claimResult.ok) {
+    out(`(the run did not start: ${claimResult.error})\n`);
+    surface?.setDraft(prompt);
+    running = false;
+    currentAbort = null;
+    showPrompt();
+    void refreshPendingImageCount();
+    return;
+  }
+  const claim = claimResult.claim;
+  const loaded = claim.images;
   const extras = extraImages
     .map((ref) => loadImageFromRoots(ref, imageRoots))
     .filter((img): img is NonNullable<typeof img> => img !== null);
   const allImages = [...loaded, ...extras].slice(0, 4);
   const images = persistLoadedImages(sessionFile, allImages);
-  if (sessionFile) {
-    const sessionDir = dirname(sessionFile);
-    const done: string[] = [];
-    for (let i = 0; i < loaded.length && i < images.length; i++) {
-      const ref = images[i]!;
-      const src = loaded[i]!;
-      if (ref.name === src.name) continue;
-      try {
-        if (existsSync(join(sessionDir, ref.name))) done.push(src.name);
-      } catch {
-        /* keep the pending file */
+  if (eventsDir && terminalId && claim.claimId) {
+    const persistedNames: string[] = [];
+    if (sessionFile) {
+      const sessionDir = dirname(sessionFile);
+      for (let i = 0; i < loaded.length && i < images.length; i++) {
+        const ref = images[i]!;
+        const src = loaded[i]!;
+        if (ref.name === src.name) continue;
+        try {
+          if (existsSync(join(sessionDir, ref.name))) persistedNames.push(src.name);
+        } catch {
+          /* Keep the pending source until acknowledgement. */
+        }
       }
     }
-    removePendingImageFiles(eventsDir, done);
+    const ackImages = await acknowledgePendingImages(eventsDir, terminalId, claim.claimId, persistedNames);
+    if (!ackImages.ok) out(`(host: ${ackImages.error})\n`);
   }
+  void refreshPendingImageCount();
   const context = eventsDir && terminalId ? readContextFiles(eventsDir, terminalId) : "";
   hostContextSnapshot = context;
   if (eventsDir && terminalId) {
@@ -3885,6 +3912,39 @@ function resumeSession(): void {
 
 let surface: AgentTui | null = null;
 let transcriptSection: "thinking" | "assistant" | null = null;
+let pendingImageRefresh: Promise<void> | null = null;
+let pendingImageRefreshAgain = false;
+
+async function refreshPendingImageCount(): Promise<void> {
+  if (pendingImageRefresh) {
+    pendingImageRefreshAgain = true;
+    return pendingImageRefresh;
+  }
+  pendingImageRefresh = (async () => {
+    do {
+      pendingImageRefreshAgain = false;
+      const captured = surface;
+      if (!eventsDir || !terminalId || !captured) return;
+      try {
+        const result = await pendingImageState(eventsDir, terminalId);
+        if (surface !== captured) continue;
+        if (!result.ok) {
+          out(`(host: ${result.error})\n`);
+          return;
+        }
+        captured.setPendingImageCount(result.count);
+      } catch (err) {
+        if (surface !== captured) continue;
+        out(`(host: ${err instanceof Error ? err.message : "image queue is invalid"})\n`);
+        return;
+      }
+    } while (pendingImageRefreshAgain);
+  })().finally(() => {
+    pendingImageRefresh = null;
+    if (pendingImageRefreshAgain) void refreshPendingImageCount();
+  });
+  return pendingImageRefresh;
+}
 
 function out(text: string): void {
   if (surface) surface.append(text);
@@ -4418,7 +4478,9 @@ async function main(): Promise<void> {
       stdin: process.stdin,
       stdout: process.stdout,
       commands: SLASH_COMMANDS,
-      pendingImages: () => (eventsDir && terminalId ? peekPendingImageCount(eventsDir, terminalId) : 0),
+      onHostRefresh: () => {
+        void refreshPendingImageCount();
+      },
       onSubmit: (line) => {
         try {
           dispatchLine(line);
@@ -4471,7 +4533,10 @@ async function main(): Promise<void> {
       usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd),
     });
     if (!surface.start()) surface = null;
-    else syncModelRows();
+    else {
+      syncModelRows();
+      void refreshPendingImageCount();
+    }
   }
   if (!surface) out(banner);
   const bootList = currentCatalog();

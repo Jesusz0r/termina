@@ -5,9 +5,12 @@
  * verify/edits/mine/mailbox context, startup-control. The parser stays
  * electron/sidecar.ts. This module is the kernel writer of that protocol.
  */
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, constants as fsConstants } from "node:fs";
+import { link, lstat, mkdir, open, readdir, rename, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { HAS_UNCHECKED_PLAN_TASK } from "../shared/plan-task.ts";
+import type { FileHandle } from "node:fs/promises";
 
 const ACK_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const CONTEXT_FILES = ["verify", "edits", "mine", "mailbox"] as const;
@@ -201,11 +204,55 @@ export function planTextIfChanged(text: string, lastEmitted: string): string | n
 
 export const MAX_PENDING_IMAGES = 4;
 export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+export const MAX_PENDING_IMAGE_BATCH_BYTES = MAX_PENDING_IMAGES * MAX_IMAGE_BYTES;
 const PENDING_IMAGE_NAME = /^image-[A-Za-z0-9._-]+\.(png|jpe?g|webp|gif)$/;
 const STORED_IMAGE_NAME = /^[A-Za-z0-9._-]+-img-[1-9][0-9]{0,3}\.(png|jpe?g|webp|gif)$/;
+const STAGE_IMAGE_NAME = /^image-[A-Za-z0-9._-]+\.(png|jpe?g|webp|gif)\.stage-[A-Za-z0-9_-]+$/;
+const MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const IMAGE_LOCK_WAIT_MS = 250;
+const IMAGE_LOCK_STALE_MS = 5_000;
+const MAX_IMAGE_RECORD_BYTES = 16 * 1024;
+const IMAGE_CLEANUP_MAX = 32;
+const OPEN_NOFOLLOW_READ = fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW;
+const OPEN_EXCL_WRITE = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL;
+const OWNER_NAME = /^images-owner-(.+)-([0-9]+)-([0-9]+)-([A-Za-z0-9_-]+)$/;
+const CLAIM_NAME = /^images-claim-(.+)-([0-9]+)-([0-9]+)-([A-Za-z0-9_-]+)\.json$/;
+const TX_NAME = /^images-tx-(.+)-([0-9]+)-([0-9]+)-([A-Za-z0-9_-]+)\.json$/;
+const MANIFEST_TMP_NAME = /^images-[A-Za-z0-9_-]+\.json\.tmp-[A-Za-z0-9_-]+$/;
+const QUARANTINE_NAME = /^images-[A-Za-z0-9_-]+\.quarantine-[A-Za-z0-9_-]+$/;
 
 export type ImageRef = { name: string; mediaType: string };
 export type LoadedImage = ImageRef & { bytes: Buffer };
+export type PendingImageMediaType = "image/png" | "image/jpeg" | "image/webp" | "image/gif";
+export type PendingImageInput = { bytes: Buffer; mediaType: PendingImageMediaType; id: string };
+export type PendingImageResult =
+  | { ok: true; count: number; names: string[] }
+  | { ok: false; error: string };
+export type PendingImageClaim = { claimId: string; images: LoadedImage[] };
+export type PendingImageStateResult =
+  | { ok: true; count: number; hasImages: boolean }
+  | { ok: false; error: string };
+export type PendingImageClaimResult =
+  | { ok: true; claim: PendingImageClaim }
+  | { ok: false; error: string };
+
+type OwnerRecord = { pid: number; createdAt: number; nonce: string };
+type ProducerTx = {
+  terminalId: string;
+  pid: number;
+  createdAt: number;
+  nonce: string;
+  staged: string[];
+  final: string[];
+};
+type NamedParts = { terminalId: string; pid: number; createdAt: number; nonce: string };
+
+class PendingImageError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PendingImageError";
+  }
+}
 
 export function isSafeImageName(name: string): boolean {
   return PENDING_IMAGE_NAME.test(name) || STORED_IMAGE_NAME.test(name);
@@ -222,37 +269,6 @@ export function pendingImagesPath(eventsDir: string, terminalId: string): string
   return join(eventsDir, `images-${terminalId}.json`);
 }
 
-function readImageList(path: string): ImageRef[] {
-  try {
-    const rec = JSON.parse(readFileSync(path, "utf8")) as { images?: unknown };
-    if (!Array.isArray(rec.images)) return [];
-    const out: ImageRef[] = [];
-    for (const item of rec.images) {
-      if (!item || typeof item !== "object") continue;
-      const name = (item as { name?: unknown }).name;
-      const mediaType = (item as { mediaType?: unknown }).mediaType;
-      if (typeof name !== "string" || !isSafeImageName(name)) continue;
-      out.push({
-        name,
-        mediaType: typeof mediaType === "string" && mediaType.startsWith("image/") ? mediaType : mediaTypeOfName(name),
-      });
-      if (out.length >= MAX_PENDING_IMAGES) break;
-    }
-    return out;
-  } catch {
-    return [];
-  }
-}
-
-export function peekPendingImages(eventsDir: string, terminalId: string): ImageRef[] {
-  if (!eventsDir || !terminalId) return [];
-  return readImageList(pendingImagesPath(eventsDir, terminalId));
-}
-
-export function peekPendingImageCount(eventsDir: string, terminalId: string): number {
-  return peekPendingImages(eventsDir, terminalId).length;
-}
-
 function extForMedia(mediaType: string): string {
   if (mediaType === "image/jpeg") return "jpg";
   if (mediaType === "image/webp") return "webp";
@@ -260,33 +276,692 @@ function extForMedia(mediaType: string): string {
   return "png";
 }
 
-/** Append one clipboard image to the pending list. Main is the writer. */
-export function appendPendingImage(
+function isErrno(err: unknown, code: string): boolean {
+  return Boolean(err && typeof err === "object" && "code" in err && (err as { code: unknown }).code === code);
+}
+
+function queueFail(error: string): never {
+  throw new PendingImageError(error);
+}
+
+function queueError(err: unknown): { ok: false; error: string } {
+  if (err instanceof PendingImageError) return { ok: false, error: err.message };
+  return { ok: false, error: "image queue is invalid" };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isAllowedMediaType(value: string): value is PendingImageMediaType {
+  return MEDIA_TYPES.has(value);
+}
+
+function parseNamedParts(name: string, re: RegExp): NamedParts | null {
+  const m = re.exec(name);
+  if (!m) return null;
+  const terminalId = m[1] ?? "";
+  const pid = Number(m[2]);
+  const createdAt = Number(m[3]);
+  const nonce = m[4] ?? "";
+  if (!ACK_ID.test(terminalId) || !ACK_ID.test(nonce)) return null;
+  if (!Number.isInteger(pid) || pid < 0 || !Number.isInteger(createdAt) || createdAt < 0) return null;
+  return { terminalId, pid, createdAt, nonce };
+}
+
+function lockPath(eventsDir: string, terminalId: string): string {
+  return join(eventsDir, `images-${terminalId}.lock`);
+}
+
+function isStageName(name: string): boolean {
+  return STAGE_IMAGE_NAME.test(name);
+}
+
+function isClaimName(name: string, terminalId: string): boolean {
+  const parsed = parseNamedParts(name, CLAIM_NAME);
+  return Boolean(parsed && parsed.terminalId === terminalId);
+}
+
+function isOwnerName(name: string, terminalId?: string): boolean {
+  const parsed = parseNamedParts(name, OWNER_NAME);
+  if (!parsed) return false;
+  return terminalId ? parsed.terminalId === terminalId : ACK_ID.test(parsed.terminalId);
+}
+
+function isCleanupName(name: string, terminalId: string): boolean {
+  if (isOwnerName(name, terminalId) || isStageName(name)) return true;
+  if (MANIFEST_TMP_NAME.test(name) && name.startsWith(`images-${terminalId}.json.tmp-`)) return true;
+  if (QUARANTINE_NAME.test(name) && name.startsWith(`images-${terminalId}.quarantine-`)) return true;
+  const tx = parseNamedParts(name, TX_NAME);
+  return Boolean(tx && tx.terminalId === terminalId);
+}
+
+function isDeadPid(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (err) {
+    return isErrno(err, "ESRCH");
+  }
+}
+
+async function openNoFollow(path: string): Promise<FileHandle> {
+  return open(path, OPEN_NOFOLLOW_READ);
+}
+
+async function writeExclusiveFile(path: string, data: Buffer | string): Promise<void> {
+  const buf = typeof data === "string" ? Buffer.from(data, "utf8") : data;
+  const fh = await open(path, OPEN_EXCL_WRITE, 0o600);
+  try {
+    let offset = 0;
+    while (offset < buf.length) {
+      const { bytesWritten } = await fh.write(buf, offset, buf.length - offset, offset);
+      if (bytesWritten === 0) queueFail("image queue is invalid");
+      offset += bytesWritten;
+    }
+    await fh.sync();
+  } catch (err) {
+    await fh.close().catch(() => undefined);
+    await unlinkRegular(path);
+    throw err;
+  }
+  await fh.close();
+}
+
+async function readCappedRecord(path: string): Promise<{ ok: true; raw: string } | { ok: false; reason: "missing" | "invalid" }> {
+  let fh: FileHandle | undefined;
+  try {
+    fh = await openNoFollow(path);
+    const st = await fh.stat();
+    if (!st.isFile()) return { ok: false, reason: "invalid" };
+    if (st.size > MAX_IMAGE_RECORD_BYTES) return { ok: false, reason: "invalid" };
+    const buf = Buffer.alloc(st.size);
+    let offset = 0;
+    while (offset < st.size) {
+      const { bytesRead } = await fh.read(buf, offset, st.size - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset !== st.size) return { ok: false, reason: "invalid" };
+    return { ok: true, raw: buf.toString("utf8") };
+  } catch (err) {
+    if (isErrno(err, "ENOENT")) return { ok: false, reason: "missing" };
+    return { ok: false, reason: "invalid" };
+  } finally {
+    if (fh) await fh.close().catch(() => undefined);
+  }
+}
+
+function parseImageRefs(raw: string): ImageRef[] | null {
+  let rec: unknown;
+  try {
+    rec = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!rec || typeof rec !== "object" || Array.isArray(rec)) return null;
+  const images = (rec as { images?: unknown }).images;
+  if (!Array.isArray(images) || images.length > MAX_PENDING_IMAGES) return null;
+  const out: ImageRef[] = [];
+  for (const item of images) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    const name = (item as { name?: unknown }).name;
+    const mediaType = (item as { mediaType?: unknown }).mediaType;
+    if (typeof name !== "string" || !isSafeImageName(name)) return null;
+    if (typeof mediaType !== "string" || !mediaType.startsWith("image/")) return null;
+    out.push({ name, mediaType });
+  }
+  return out;
+}
+
+function parseOwnerRecord(raw: string): OwnerRecord | null {
+  let rec: unknown;
+  try {
+    rec = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!rec || typeof rec !== "object" || Array.isArray(rec)) return null;
+  const pid = (rec as { pid?: unknown }).pid;
+  const createdAt = (rec as { createdAt?: unknown }).createdAt;
+  const nonce = (rec as { nonce?: unknown }).nonce;
+  if (!Number.isInteger(pid) || (pid as number) < 0) return null;
+  if (!Number.isInteger(createdAt) || (createdAt as number) < 0) return null;
+  if (typeof nonce !== "string" || !ACK_ID.test(nonce)) return null;
+  return { pid: pid as number, createdAt: createdAt as number, nonce };
+}
+
+function parseTxRecord(raw: string, terminalId: string): ProducerTx | null {
+  let rec: unknown;
+  try {
+    rec = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!rec || typeof rec !== "object" || Array.isArray(rec)) return null;
+  const obj = rec as Record<string, unknown>;
+  if (obj.terminalId !== terminalId || typeof obj.terminalId !== "string") return null;
+  if (!Number.isInteger(obj.pid) || (obj.pid as number) < 0) return null;
+  if (!Number.isInteger(obj.createdAt) || (obj.createdAt as number) < 0) return null;
+  if (typeof obj.nonce !== "string" || !ACK_ID.test(obj.nonce)) return null;
+  if (!Array.isArray(obj.staged) || !Array.isArray(obj.final)) return null;
+  const staged: string[] = [];
+  const final: string[] = [];
+  for (const name of obj.staged) {
+    if (typeof name !== "string" || !isStageName(name)) return null;
+    staged.push(name);
+  }
+  for (const name of obj.final) {
+    if (typeof name !== "string" || !isSafeImageName(name)) return null;
+    final.push(name);
+  }
+  return {
+    terminalId,
+    pid: obj.pid as number,
+    createdAt: obj.createdAt as number,
+    nonce: obj.nonce,
+    staged,
+    final,
+  };
+}
+
+async function quarantineRecord(eventsDir: string, terminalId: string, path: string): Promise<void> {
+  const dest = join(eventsDir, `images-${terminalId}.quarantine-${randomUUID()}`);
+  try {
+    await rename(path, dest);
+  } catch {
+    /* The next locked operation retries quarantine. */
+  }
+}
+
+async function readImageRecord(
   eventsDir: string,
   terminalId: string,
-  bytes: Buffer,
-  mediaType: string,
-  id: string,
-): { ok: true; count: number; name: string } | { ok: false; error: string } {
-  if (!eventsDir || !terminalId) return { ok: false, error: "no events directory" };
-  if (!ACK_ID.test(terminalId) || !ACK_ID.test(id)) return { ok: false, error: "invalid id" };
-  if (bytes.length === 0 || bytes.length > MAX_IMAGE_BYTES) return { ok: false, error: "image is too large" };
-  const kind = mediaType.startsWith("image/") ? mediaType : "image/png";
-  const name = `image-${terminalId}-${id}.${extForMedia(kind)}`;
-  if (!PENDING_IMAGE_NAME.test(name)) return { ok: false, error: "invalid image name" };
+  path: string,
+): Promise<{ images: ImageRef[] } | "missing"> {
+  const got = await readCappedRecord(path);
+  if (got.ok === false) {
+    if (got.reason === "missing") return "missing";
+    await quarantineRecord(eventsDir, terminalId, path);
+    queueFail("image queue is invalid");
+  }
+  const images = parseImageRefs(got.raw);
+  if (!images) {
+    await quarantineRecord(eventsDir, terminalId, path);
+    queueFail("image queue is invalid");
+  }
+  return { images };
+}
+
+async function sameFileIdentity(a: string, b: string): Promise<boolean> {
+  let fa: FileHandle | undefined;
+  let fb: FileHandle | undefined;
   try {
-    mkdirSync(eventsDir, { recursive: true, mode: 0o700 });
-    const listPath = pendingImagesPath(eventsDir, terminalId);
-    const list = readImageList(listPath);
-    if (list.length >= MAX_PENDING_IMAGES) return { ok: true, count: list.length, name: list[list.length - 1]!.name };
-    writeFileSync(join(eventsDir, name), bytes, { mode: 0o600 });
-    list.push({ name, mediaType: kind });
-    const tmp = `${listPath}.tmp`;
-    writeFileSync(tmp, JSON.stringify({ images: list }), { mode: 0o600 });
-    renameSync(tmp, listPath);
-    return { ok: true, count: list.length, name };
+    fa = await openNoFollow(a);
+    fb = await openNoFollow(b);
+    const sa = await fa.stat();
+    const sb = await fb.stat();
+    return sa.isFile() && sb.isFile() && sa.dev === sb.dev && sa.ino === sb.ino;
+  } catch {
+    return false;
+  } finally {
+    if (fa) await fa.close().catch(() => undefined);
+    if (fb) await fb.close().catch(() => undefined);
+  }
+}
+
+async function unlinkRegular(path: string): Promise<boolean> {
+  let fh: FileHandle | undefined;
+  try {
+    fh = await openNoFollow(path);
+    const st = await fh.stat();
+    if (!st.isFile()) return false;
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return isErrno(err, "ENOENT");
+  } finally {
+    if (fh) await fh.close().catch(() => undefined);
+  }
+  try {
+    await unlink(path);
+    return true;
+  } catch (err) {
+    return isErrno(err, "ENOENT");
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (err) {
+    return !isErrno(err, "ENOENT");
+  }
+}
+
+async function tryStealLock(lockFile: string): Promise<"stolen" | "busy" | "invalid"> {
+  const first = await readCappedRecord(lockFile);
+  if (first.ok === false) return first.reason === "missing" ? "stolen" : "invalid";
+  const owner = parseOwnerRecord(first.raw);
+  if (!owner) return "invalid";
+  let fh: FileHandle | undefined;
+  let ino: bigint | number | undefined;
+  let dev: number | undefined;
+  try {
+    fh = await openNoFollow(lockFile);
+    const st = await fh.stat();
+    if (!st.isFile()) return "invalid";
+    ino = st.ino;
+    dev = st.dev;
+  } catch {
+    return "busy";
+  } finally {
+    if (fh) await fh.close().catch(() => undefined);
+  }
+  const second = await readCappedRecord(lockFile);
+  if (second.ok === false) return second.reason === "missing" ? "stolen" : "invalid";
+  const again = parseOwnerRecord(second.raw);
+  if (!again || again.nonce !== owner.nonce) return "busy";
+  let fh2: FileHandle | undefined;
+  try {
+    fh2 = await openNoFollow(lockFile);
+    const st2 = await fh2.stat();
+    if (!st2.isFile() || st2.ino !== ino || st2.dev !== dev) return "busy";
+  } catch {
+    return "busy";
+  } finally {
+    if (fh2) await fh2.close().catch(() => undefined);
+  }
+  if (Date.now() - owner.createdAt < IMAGE_LOCK_STALE_MS) return "busy";
+  if (!isDeadPid(owner.pid)) return "busy";
+  return (await unlinkRegular(lockFile)) ? "stolen" : "busy";
+}
+
+async function assertLockHeld(ownerFile: string, lockFile: string): Promise<void> {
+  if (!(await sameFileIdentity(ownerFile, lockFile))) queueFail("image queue busy");
+}
+
+async function listDir(eventsDir: string): Promise<string[]> {
+  try {
+    return await readdir(eventsDir);
+  } catch {
+    return [];
+  }
+}
+
+async function referencedFinalNames(eventsDir: string, terminalId: string): Promise<Set<string>> {
+  const names = new Set<string>();
+  const live = await readImageRecord(eventsDir, terminalId, pendingImagesPath(eventsDir, terminalId));
+  if (live !== "missing") for (const ref of live.images) names.add(ref.name);
+  for (const name of await listDir(eventsDir)) {
+    if (!isClaimName(name, terminalId)) continue;
+    const rec = await readImageRecord(eventsDir, terminalId, join(eventsDir, name));
+    if (rec === "missing") continue;
+    for (const ref of rec.images) names.add(ref.name);
+  }
+  return names;
+}
+
+async function queuedImageCount(eventsDir: string, terminalId: string): Promise<number> {
+  const live = await readImageRecord(eventsDir, terminalId, pendingImagesPath(eventsDir, terminalId));
+  let count = live === "missing" ? 0 : live.images.length;
+  for (const name of await listDir(eventsDir)) {
+    if (!isClaimName(name, terminalId)) continue;
+    const rec = await readImageRecord(eventsDir, terminalId, join(eventsDir, name));
+    if (rec !== "missing") count += rec.images.length;
+  }
+  return count;
+}
+
+async function recoverProducerTransactions(eventsDir: string, terminalId: string): Promise<void> {
+  const referenced = await referencedFinalNames(eventsDir, terminalId);
+  for (const name of await listDir(eventsDir)) {
+    const parsed = parseNamedParts(name, TX_NAME);
+    if (!parsed || parsed.terminalId !== terminalId) continue;
+    const path = join(eventsDir, name);
+    const got = await readCappedRecord(path);
+    if (got.ok === false) {
+      if (got.reason === "missing") continue;
+      await quarantineRecord(eventsDir, terminalId, path);
+      queueFail("image queue is invalid");
+    }
+    const tx = parseTxRecord(got.raw, terminalId);
+    if (!tx) {
+      await quarantineRecord(eventsDir, terminalId, path);
+      queueFail("image queue is invalid");
+    }
+    let incomplete = false;
+    for (const staged of tx.staged) {
+      const target = join(eventsDir, staged);
+      if (!(await unlinkRegular(target)) && (await pathExists(target))) incomplete = true;
+    }
+    for (const final of tx.final) {
+      if (referenced.has(final)) continue;
+      const target = join(eventsDir, final);
+      if (!(await unlinkRegular(target)) && (await pathExists(target))) incomplete = true;
+    }
+    if (incomplete) queueFail("image queue is invalid");
+    if (!(await unlinkRegular(path))) queueFail("image queue is invalid");
+  }
+}
+
+async function cleanupStaleRecords(eventsDir: string, terminalId: string): Promise<void> {
+  const names = await listDir(eventsDir);
+  let examined = 0;
+  const staleBefore = Date.now() - IMAGE_LOCK_STALE_MS;
+  for (const name of names) {
+    if (examined >= IMAGE_CLEANUP_MAX) break;
+    if (!isCleanupName(name, terminalId)) continue;
+    examined += 1;
+    const path = join(eventsDir, name);
+    let fh: FileHandle | undefined;
+    try {
+      fh = await openNoFollow(path);
+      const st = await fh.stat();
+      if (!st.isFile() || st.mtimeMs > staleBefore) continue;
+    } catch {
+      continue;
+    } finally {
+      if (fh) await fh.close().catch(() => undefined);
+    }
+    if (isOwnerName(name, terminalId)) {
+      if (await sameFileIdentity(path, lockPath(eventsDir, terminalId))) continue;
+    }
+    if (parseNamedParts(name, TX_NAME)) continue;
+    await unlinkRegular(path);
+  }
+}
+
+export async function withPendingImageLock<T>(
+  eventsDir: string,
+  terminalId: string,
+  fn: (assertHeld: () => Promise<void>) => Promise<T>,
+): Promise<T> {
+  if (!eventsDir) queueFail("no events directory");
+  if (!ACK_ID.test(terminalId)) queueFail("invalid id");
+  await mkdir(eventsDir, { recursive: true, mode: 0o700 });
+  const pid = process.pid;
+  const createdAt = Date.now();
+  const nonce = randomUUID();
+  const ownerFile = join(eventsDir, `images-owner-${terminalId}-${pid}-${createdAt}-${nonce}`);
+  const lockFile = lockPath(eventsDir, terminalId);
+  await writeExclusiveFile(ownerFile, JSON.stringify({ pid, createdAt, nonce }));
+  const deadline = Date.now() + IMAGE_LOCK_WAIT_MS;
+  let acquired = false;
+  try {
+    while (!acquired) {
+      try {
+        await link(ownerFile, lockFile);
+        acquired = true;
+        break;
+      } catch (err) {
+        if (isErrno(err, "EXDEV") || isErrno(err, "ENOSYS") || isErrno(err, "ENOTSUP")) {
+          queueFail("image queue is invalid");
+        }
+        if (!isErrno(err, "EEXIST")) queueFail("image queue is invalid");
+        const steal = await tryStealLock(lockFile);
+        if (steal === "invalid") queueFail("image queue is invalid");
+        if (steal === "stolen") continue;
+        if (Date.now() >= deadline) queueFail("image queue busy");
+        await sleep(Math.min(20, Math.max(1, deadline - Date.now())));
+      }
+    }
+    const assertHeld = () => assertLockHeld(ownerFile, lockFile);
+    await recoverProducerTransactions(eventsDir, terminalId);
+    return await fn(assertHeld);
+  } finally {
+    if (acquired) {
+      try {
+        if (await sameFileIdentity(ownerFile, lockFile)) await unlink(lockFile);
+      } catch {
+        /* A successor may already own the lock. */
+      }
+    }
+    await unlinkRegular(ownerFile);
+  }
+}
+
+async function rollbackTransaction(eventsDir: string, tx: ProducerTx, txPath: string): Promise<void> {
+  let incomplete = false;
+  for (const staged of tx.staged) {
+    const target = join(eventsDir, staged);
+    if (!(await unlinkRegular(target)) && (await pathExists(target))) incomplete = true;
+  }
+  for (const final of tx.final) {
+    const target = join(eventsDir, final);
+    if (!(await unlinkRegular(target)) && (await pathExists(target))) incomplete = true;
+  }
+  if (!incomplete) await unlinkRegular(txPath);
+}
+
+async function loadClaimImage(eventsDir: string, name: string): Promise<Buffer> {
+  if (!isSafeImageName(name)) queueFail("image queue is invalid");
+  let fh: FileHandle | undefined;
+  try {
+    fh = await openNoFollow(join(eventsDir, name));
+    const first = await fh.stat();
+    if (!first.isFile() || first.size === 0 || first.size > MAX_IMAGE_BYTES) queueFail("image queue is invalid");
+    const buf = Buffer.alloc(first.size);
+    let offset = 0;
+    while (offset < first.size) {
+      const { bytesRead } = await fh.read(buf, offset, first.size - offset, offset);
+      if (bytesRead === 0) queueFail("image queue is invalid");
+      offset += bytesRead;
+    }
+    const probe = Buffer.alloc(1);
+    const extra = await fh.read(probe, 0, 1, first.size);
+    if (extra.bytesRead > 0) queueFail("image queue is invalid");
+    const second = await fh.stat();
+    if (second.size !== first.size) queueFail("image queue is invalid");
+    return buf;
+  } catch (err) {
+    if (err instanceof PendingImageError) throw err;
+    throw new PendingImageError("image queue is invalid");
+  } finally {
+    if (fh) await fh.close().catch(() => undefined);
+  }
+}
+
+function emptyClaim(): PendingImageClaim {
+  return { claimId: "", images: [] };
+}
+
+async function listAdoptableClaims(eventsDir: string, terminalId: string): Promise<Array<{ name: string; createdAt: number }>> {
+  const out: Array<{ name: string; createdAt: number }> = [];
+  for (const name of await listDir(eventsDir)) {
+    const parsed = parseNamedParts(name, CLAIM_NAME);
+    if (!parsed || parsed.terminalId !== terminalId) continue;
+    if (parsed.pid !== process.pid && !isDeadPid(parsed.pid)) continue;
+    out.push({ name, createdAt: parsed.createdAt });
+  }
+  out.sort((a, b) => a.createdAt - b.createdAt || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return out;
+}
+
+export async function appendPendingImages(
+  eventsDir: string,
+  terminalId: string,
+  images: readonly PendingImageInput[],
+  options?: { canCommit?: () => boolean | Promise<boolean> },
+): Promise<PendingImageResult> {
+  try {
+    if (!eventsDir) return { ok: false, error: "no events directory" };
+    if (!ACK_ID.test(terminalId)) return { ok: false, error: "invalid id" };
+    if (!Array.isArray(images) || images.length === 0) return { ok: false, error: "no images" };
+    if (images.length > MAX_PENDING_IMAGES) return { ok: false, error: "too many pending images" };
+    const seen = new Set<string>();
+    let total = 0;
+    for (const img of images) {
+      if (!img || !ACK_ID.test(img.id)) return { ok: false, error: "invalid id" };
+      if (seen.has(img.id)) return { ok: false, error: "duplicate image id" };
+      seen.add(img.id);
+      if (!isAllowedMediaType(img.mediaType)) return { ok: false, error: "unsupported media type" };
+      if (!Buffer.isBuffer(img.bytes) || img.bytes.length === 0) return { ok: false, error: "image is empty" };
+      if (img.bytes.length > MAX_IMAGE_BYTES) return { ok: false, error: "image is too large" };
+      total += img.bytes.length;
+    }
+    if (total > MAX_PENDING_IMAGE_BATCH_BYTES) return { ok: false, error: "image is too large" };
+    await mkdir(eventsDir, { recursive: true, mode: 0o700 });
+    const staged: Array<{ stageName: string; finalName: string; mediaType: PendingImageMediaType }> = [];
+    const dropStaged = async (): Promise<void> => {
+      for (const item of staged) await unlinkRegular(join(eventsDir, item.stageName));
+    };
+    try {
+      for (const img of images) {
+        const finalName = `image-${terminalId}-${img.id}.${extForMedia(img.mediaType)}`;
+        if (!PENDING_IMAGE_NAME.test(finalName)) {
+          await dropStaged();
+          return { ok: false, error: "invalid image name" };
+        }
+        const stageName = `${finalName}.stage-${randomUUID()}`;
+        await writeExclusiveFile(join(eventsDir, stageName), img.bytes);
+        staged.push({ stageName, finalName, mediaType: img.mediaType });
+      }
+      return await withPendingImageLock(eventsDir, terminalId, async (assertHeld) => {
+        const livePath = pendingImagesPath(eventsDir, terminalId);
+        const live = await readImageRecord(eventsDir, terminalId, livePath);
+        const current = live === "missing" ? [] : live.images;
+        const queued = await queuedImageCount(eventsDir, terminalId);
+        if (queued + staged.length > MAX_PENDING_IMAGES) {
+          await dropStaged();
+          return { ok: false, error: "too many pending images" };
+        }
+        const pid = process.pid;
+        const createdAt = Date.now();
+        const nonce = randomUUID();
+        const tx: ProducerTx = {
+          terminalId,
+          pid,
+          createdAt,
+          nonce,
+          staged: staged.map((item) => item.stageName),
+          final: staged.map((item) => item.finalName),
+        };
+        const txPath = join(eventsDir, `images-tx-${terminalId}-${pid}-${createdAt}-${nonce}.json`);
+        await writeExclusiveFile(txPath, JSON.stringify(tx));
+        try {
+          await assertHeld();
+          for (const item of staged) {
+            const dest = join(eventsDir, item.finalName);
+            if (await pathExists(dest)) queueFail("image queue is invalid");
+            await rename(join(eventsDir, item.stageName), dest);
+          }
+          const merged = [...current, ...staged.map((item) => ({ name: item.finalName, mediaType: item.mediaType }))];
+          const tmpName = `images-${terminalId}.json.tmp-${randomUUID()}`;
+          const tmpPath = join(eventsDir, tmpName);
+          await writeExclusiveFile(tmpPath, JSON.stringify({ images: merged }));
+          await assertHeld();
+          const allowed = options?.canCommit ? await options.canCommit() : true;
+          if (!allowed) {
+            await unlinkRegular(tmpPath);
+            await rollbackTransaction(eventsDir, tx, txPath);
+            return { ok: false, error: "terminal closed" };
+          }
+          await assertHeld();
+          await rename(tmpPath, livePath);
+          await unlinkRegular(txPath);
+          try {
+            await cleanupStaleRecords(eventsDir, terminalId);
+          } catch {
+            /* Cleanup is maintenance after a committed attachment. */
+          }
+          return { ok: true, count: merged.length, names: staged.map((item) => item.finalName) };
+        } catch (err) {
+          await rollbackTransaction(eventsDir, tx, txPath);
+          throw err;
+        }
+      });
+    } catch (err) {
+      await dropStaged();
+      return queueError(err);
+    }
+  } catch (err) {
+    return queueError(err);
+  }
+}
+
+export async function pendingImageState(eventsDir: string, terminalId: string): Promise<PendingImageStateResult> {
+  try {
+    return await withPendingImageLock(eventsDir, terminalId, async () => {
+      const count = await queuedImageCount(eventsDir, terminalId);
+      await cleanupStaleRecords(eventsDir, terminalId);
+      return { ok: true, count, hasImages: count > 0 };
+    });
+  } catch (err) {
+    return queueError(err);
+  }
+}
+
+export async function claimPendingImages(eventsDir: string, terminalId: string): Promise<PendingImageClaimResult> {
+  try {
+    const claimed = await withPendingImageLock(eventsDir, terminalId, async () => {
+      const adoptable = await listAdoptableClaims(eventsDir, terminalId);
+      for (const item of adoptable) {
+        const rec = await readImageRecord(eventsDir, terminalId, join(eventsDir, item.name));
+        if (rec === "missing") continue;
+        await cleanupStaleRecords(eventsDir, terminalId);
+        return { claimId: item.name, images: rec.images };
+      }
+      const livePath = pendingImagesPath(eventsDir, terminalId);
+      const live = await readImageRecord(eventsDir, terminalId, livePath);
+      if (live === "missing" || live.images.length === 0) {
+        if (live !== "missing" && live.images.length === 0) await unlinkRegular(livePath);
+        await cleanupStaleRecords(eventsDir, terminalId);
+        return emptyClaim();
+      }
+      const createdAt = Date.now();
+      const claimId = `images-claim-${terminalId}-${process.pid}-${createdAt}-${randomUUID()}.json`;
+      await rename(livePath, join(eventsDir, claimId));
+      await cleanupStaleRecords(eventsDir, terminalId);
+      return { claimId, images: live.images };
+    });
+    if (!claimed.claimId || claimed.images.length === 0) {
+      return { ok: true, claim: { claimId: claimed.claimId, images: [] } };
+    }
+    const loaded: LoadedImage[] = [];
+    for (const ref of claimed.images) {
+      loaded.push({ ...ref, bytes: await loadClaimImage(eventsDir, ref.name) });
+    }
+    return { ok: true, claim: { claimId: claimed.claimId, images: loaded } };
+  } catch (err) {
+    return queueError(err);
+  }
+}
+
+export async function acknowledgePendingImages(
+  eventsDir: string,
+  terminalId: string,
+  claimId: string,
+  persistedNames: readonly string[],
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    if (!persistedNames.length) return { ok: true };
+    if (!ACK_ID.test(terminalId) || !isClaimName(claimId, terminalId) || claimId.includes("/") || claimId.includes("\\")) {
+      return { ok: false, error: "image queue is invalid" };
+    }
+    const wanted = new Set(persistedNames.filter((name) => isSafeImageName(name)));
+    return await withPendingImageLock(eventsDir, terminalId, async () => {
+      const path = join(eventsDir, claimId);
+      const rec = await readImageRecord(eventsDir, terminalId, path);
+      if (rec === "missing") queueFail("image queue is invalid");
+      const kept: ImageRef[] = [];
+      const done: ImageRef[] = [];
+      for (const ref of rec.images) {
+        if (wanted.has(ref.name)) done.push(ref);
+        else kept.push(ref);
+      }
+      if (kept.length === 0) {
+        await unlinkRegular(path);
+      } else {
+        const tmp = join(eventsDir, `images-${terminalId}.json.tmp-${randomUUID()}`);
+        await writeExclusiveFile(tmp, JSON.stringify({ images: kept }));
+        await rename(tmp, path);
+      }
+      for (const ref of done) await unlinkRegular(join(eventsDir, ref.name));
+      await cleanupStaleRecords(eventsDir, terminalId);
+      return { ok: true as const };
+    });
+  } catch (err) {
+    return queueError(err);
   }
 }
 
@@ -302,35 +977,6 @@ function loadImageBytes(dir: string, name: string): Buffer | null {
     return readFileSync(realFile);
   } catch {
     return null;
-  }
-}
-
-export function consumePendingImages(eventsDir: string, terminalId: string): LoadedImage[] {
-  if (!eventsDir || !terminalId) return [];
-  const listPath = pendingImagesPath(eventsDir, terminalId);
-  const list = readImageList(listPath);
-  const out: LoadedImage[] = [];
-  for (const ref of list) {
-    const bytes = loadImageBytes(eventsDir, ref.name);
-    if (bytes) out.push({ ...ref, bytes });
-  }
-  try {
-    rmSync(listPath, { force: true });
-  } catch {
-    /* ignore */
-  }
-  return out;
-}
-
-export function removePendingImageFiles(eventsDir: string, names: string[]): void {
-  if (!eventsDir) return;
-  for (const name of names) {
-    if (!isSafeImageName(name)) continue;
-    try {
-      rmSync(join(eventsDir, name), { force: true });
-    } catch {
-      /* ignore */
-    }
   }
 }
 

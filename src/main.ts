@@ -458,6 +458,8 @@ function createPaneShell(instanceId: string): Pane {
     (cols, rows) => void window.pi.resizeTerminal(instanceId, cols, rows),
     (text) => void window.pi.writeClipboard(text).catch(() => undefined),
     () => window.pi.pasteTerminal(instanceId),
+    (message) => toast(message, "error"),
+    (files) => window.pi.dropTerminalFiles(instanceId, files),
     {
       theme: preferences.theme,
       fontSize: preferences.terminalFontSize,

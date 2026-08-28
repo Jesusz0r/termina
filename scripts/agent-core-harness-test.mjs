@@ -13,12 +13,14 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
   chmodSync,
 } from "node:fs";
+import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -343,30 +345,51 @@ const png1x1 = Buffer.from(
 );
 const imgDir = mkdtempSync(join(tmpdir(), "agent-core-img-"));
 leftovers.push(imgDir);
-const attached = host.appendPendingImage(imgDir, hostId, png1x1, "image/png", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-check("appendPendingImage writes a pending png", attached.ok && attached.count === 1 && existsSync(join(imgDir, attached.name)));
-check("peekPendingImageCount sees the file", host.peekPendingImageCount(imgDir, hostId) === 1);
-const consumed = host.consumePendingImages(imgDir, hostId);
-check("consumePendingImages returns bytes and drops the list", consumed.length === 1 && consumed[0]?.bytes.length === png1x1.length && host.peekPendingImageCount(imgDir, hostId) === 0);
+const idA = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+const idB = "bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee";
+const batch = await host.appendPendingImages(imgDir, hostId, [
+  { bytes: png1x1, mediaType: "image/png", id: idA },
+  { bytes: png1x1, mediaType: "image/png", id: idB },
+]);
+check("appendPendingImages commits one batch", batch.ok && batch.count === 2 && batch.names.length === 2);
+check("appendPendingImages writes pending files", batch.ok && batch.names.every((name) => existsSync(join(imgDir, name))));
+const stateAfterBatch = await host.pendingImageState(imgDir, hostId);
+check("pendingImageState sees the batch", stateAfterBatch.ok && stateAfterBatch.count === 2 && stateAfterBatch.hasImages === true);
+const claimed = await host.claimPendingImages(imgDir, hostId);
+check(
+  "claimPendingImages returns bytes and leaves the live list empty",
+  claimed.ok && claimed.claim.images.length === 2 && claimed.claim.images[0]?.bytes.length === png1x1.length,
+);
+const stateAfterClaim = await host.pendingImageState(imgDir, hostId);
+check("pendingImageState sees the durable claim", stateAfterClaim.ok && stateAfterClaim.count === 2);
 const sessImg = join(imgDir, "core-imgtest.jsonl");
 writeFileSync(sessImg, "");
-const stored = host.persistLoadedImages(sessImg, consumed);
+const stored = host.persistLoadedImages(sessImg, claimed.claim.images);
 check("persistLoadedImages writes a sidecar file", stored[0]?.name === "core-imgtest-img-1.png" && existsSync(join(imgDir, "core-imgtest-img-1.png")));
+const persistedNames = stored
+  .map((ref, i) => (ref.name !== claimed.claim.images[i]?.name && existsSync(join(imgDir, ref.name)) ? claimed.claim.images[i].name : null))
+  .filter(Boolean);
+const ackOk = await host.acknowledgePendingImages(imgDir, hostId, claimed.claim.claimId, persistedNames);
+check("acknowledgePendingImages removes persisted sources", ackOk.ok === true && !existsSync(join(imgDir, claimed.claim.images[0].name)));
+const emptyAck = await host.acknowledgePendingImages(imgDir, hostId, claimed.claim.claimId, []);
+check("zero acknowledgement is a successful no-op", emptyAck.ok === true);
 const expanded = host.expandFileImageSource({ type: "file", name: stored[0].name, media_type: "image/png" }, [imgDir]);
 check("expandFileImageSource reads base64", expanded?.type === "base64" && typeof expanded.data === "string" && expanded.data.length > 0);
 const missingImg = host.expandFileImageSource({ type: "file", name: "core-imgtest-img-1.png", media_type: "image/png" }, [join(imgDir, "nope")]);
 check("expandFileImageSource jails the path", missingImg === null);
+const evilDir = mkdtempSync(join(tmpdir(), "agent-core-img-evil-"));
+leftovers.push(evilDir);
 const evilName = "image-term-1-evil.png";
 try {
-  symlinkSync("/etc/passwd", join(imgDir, evilName));
-  writeFileSync(join(imgDir, `images-${hostId}.json`), JSON.stringify({ images: [{ name: evilName, mediaType: "image/png" }] }));
-  const evilGot = host.consumePendingImages(imgDir, hostId);
+  symlinkSync("/etc/passwd", join(evilDir, evilName));
+  writeFileSync(join(evilDir, `images-${hostId}.json`), JSON.stringify({ images: [{ name: evilName, mediaType: "image/png" }] }));
+  const evilGot = await host.claimPendingImages(evilDir, hostId);
   check(
-    "consumePendingImages skips a symlink out of the events dir",
-    evilGot.length === 0 && !evilGot.some((img) => img.bytes.includes(Buffer.from("root:"))),
+    "claimPendingImages rejects a symlink out of the events dir",
+    evilGot.ok === false && evilGot.error === "image queue is invalid",
   );
 } catch (err) {
-  check("consumePendingImages skips a symlink out of the events dir", false, err instanceof Error ? err.message : String(err));
+  check("claimPendingImages rejects a symlink out of the events dir", false, err instanceof Error ? err.message : String(err));
 }
 const structuredImg = host.structuredStartup({
   opId: "op-3",
@@ -390,14 +413,376 @@ check(
     imgReq[0].content[1]?.type === "image" &&
     imgReq[0].content[1]?.source?.type === "base64",
 );
-const oversize = host.appendPendingImage(imgDir, hostId, Buffer.alloc(host.MAX_IMAGE_BYTES + 1), "image/png", "bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee");
-check("appendPendingImage rejects an oversized image", oversize.ok === false);
-host.appendPendingImage(imgDir, hostId, png1x1, "image/png", "cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee");
-host.appendPendingImage(imgDir, hostId, png1x1, "image/png", "dddddddd-bbbb-cccc-dddd-eeeeeeeeeeee");
-host.appendPendingImage(imgDir, hostId, png1x1, "image/png", "eeeeeeee-bbbb-cccc-dddd-eeeeeeeeeeee");
-host.appendPendingImage(imgDir, hostId, png1x1, "image/png", "ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee");
-const fifth = host.appendPendingImage(imgDir, hostId, png1x1, "image/png", "99999999-bbbb-cccc-dddd-eeeeeeeeeeee");
-check("appendPendingImage caps at four", fifth.ok && fifth.count === 4 && host.peekPendingImageCount(imgDir, hostId) === 4);
+check(
+  "appendPendingImages rejects an invalid id",
+  (await host.appendPendingImages(imgDir, hostId, [{ bytes: png1x1, mediaType: "image/png", id: "bad id" }])).ok === false,
+);
+check(
+  "appendPendingImages rejects an unsupported media type",
+  (await host.appendPendingImages(imgDir, hostId, [{ bytes: png1x1, mediaType: "image/bmp", id: "cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee" }])).ok === false,
+);
+check(
+  "appendPendingImages rejects empty bytes",
+  (await host.appendPendingImages(imgDir, hostId, [{ bytes: Buffer.alloc(0), mediaType: "image/png", id: "cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee" }])).ok === false,
+);
+const oversize = await host.appendPendingImages(imgDir, hostId, [
+  { bytes: Buffer.alloc(host.MAX_IMAGE_BYTES + 1), mediaType: "image/png", id: "cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee" },
+]);
+check("appendPendingImages rejects an oversized image", oversize.ok === false);
+check(
+  "appendPendingImages rejects duplicate ids",
+  (await host.appendPendingImages(imgDir, hostId, [
+    { bytes: png1x1, mediaType: "image/png", id: idA },
+    { bytes: png1x1, mediaType: "image/png", id: idA },
+  ])).ok === false,
+);
+check("appendPendingImages rejects an empty batch", (await host.appendPendingImages(imgDir, hostId, [])).ok === false);
+
+const capDir = mkdtempSync(join(tmpdir(), "agent-core-img-cap-"));
+leftovers.push(capDir);
+for (const id of [
+  "cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee",
+  "dddddddd-bbbb-cccc-dddd-eeeeeeeeeeee",
+  "eeeeeeee-bbbb-cccc-dddd-eeeeeeeeeeee",
+  "ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee",
+]) {
+  await host.appendPendingImages(capDir, hostId, [{ bytes: png1x1, mediaType: "image/png", id }]);
+}
+const fifth = await host.appendPendingImages(capDir, hostId, [
+  { bytes: png1x1, mediaType: "image/png", id: "99999999-bbbb-cccc-dddd-eeeeeeeeeeee" },
+]);
+const capState = await host.pendingImageState(capDir, hostId);
+check("appendPendingImages rejects over capacity", fifth.ok === false && fifth.error === "too many pending images" && capState.count === 4);
+
+const failDir = mkdtempSync(join(tmpdir(), "agent-core-img-fail-"));
+leftovers.push(failDir);
+const failId2 = "22222222-bbbb-cccc-dddd-eeeeeeeeeeee";
+mkdirSync(join(failDir, `image-${hostId}-${failId2}.png`));
+const midFail = await host.appendPendingImages(failDir, hostId, [
+  { bytes: png1x1, mediaType: "image/png", id: "11111111-bbbb-cccc-dddd-eeeeeeeeeeee" },
+  { bytes: png1x1, mediaType: "image/png", id: failId2 },
+]);
+check(
+  "appendPendingImages rolls back a mid-commit rename failure",
+  midFail.ok === false &&
+    !existsSync(join(failDir, `images-${hostId}.json`)) &&
+    !existsSync(join(failDir, `image-${hostId}-11111111-bbbb-cccc-dddd-eeeeeeeeeeee.png`)),
+);
+
+const closedDir = mkdtempSync(join(tmpdir(), "agent-core-img-closed-"));
+leftovers.push(closedDir);
+const closed = await host.appendPendingImages(
+  closedDir,
+  hostId,
+  [{ bytes: png1x1, mediaType: "image/png", id: "33333333-bbbb-cccc-dddd-eeeeeeeeeeee" }],
+  { canCommit: () => false },
+);
+check(
+  "appendPendingImages honors canCommit",
+  closed.ok === false &&
+    closed.error === "terminal closed" &&
+    !existsSync(join(closedDir, `images-${hostId}.json`)) &&
+    readdirSync(closedDir).filter((name) => name.startsWith("image-")).length === 0,
+);
+
+const txDir = mkdtempSync(join(tmpdir(), "agent-core-img-tx-"));
+leftovers.push(txDir);
+const deadFinal = `image-${hostId}-deadfinal.png`;
+writeFileSync(join(txDir, deadFinal), png1x1);
+writeFileSync(
+  join(txDir, `images-tx-${hostId}-${process.pid}-${Date.now()}-deadtx1.json`),
+  JSON.stringify({
+    terminalId: hostId,
+    pid: process.pid,
+    createdAt: Date.now(),
+    nonce: "deadtx1",
+    staged: [],
+    final: [deadFinal],
+  }),
+);
+const recovered = await host.appendPendingImages(txDir, hostId, [
+  { bytes: png1x1, mediaType: "image/png", id: "44444444-bbbb-cccc-dddd-eeeeeeeeeeee" },
+]);
+check(
+  "lock recovery removes unreferenced finals from a crashed producer",
+  recovered.ok === true && !existsSync(join(txDir, deadFinal)) && !readdirSync(txDir).some((name) => name.startsWith("images-tx-")),
+);
+
+const keepDir = mkdtempSync(join(tmpdir(), "agent-core-img-keep-"));
+leftovers.push(keepDir);
+const keepFinal = `image-${hostId}-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.png`;
+writeFileSync(join(keepDir, keepFinal), png1x1);
+writeFileSync(join(keepDir, `images-${hostId}.json`), JSON.stringify({ images: [{ name: keepFinal, mediaType: "image/png" }] }));
+writeFileSync(
+  join(keepDir, `images-tx-${hostId}-${process.pid}-${Date.now()}-keeptx.json`),
+  JSON.stringify({
+    terminalId: hostId,
+    pid: process.pid,
+    createdAt: Date.now(),
+    nonce: "keeptx",
+    staged: [],
+    final: [keepFinal],
+  }),
+);
+const kept = await host.pendingImageState(keepDir, hostId);
+check(
+  "lock recovery preserves referenced finals even when the recorded pid is live",
+  kept.ok && kept.count === 1 && existsSync(join(keepDir, keepFinal)) && !readdirSync(keepDir).some((name) => name.startsWith("images-tx-")),
+);
+
+const stuckDir = mkdtempSync(join(tmpdir(), "agent-core-img-stuck-"));
+leftovers.push(stuckDir);
+const stuckName = `image-${hostId}-stuckfinal.png`;
+mkdirSync(join(stuckDir, stuckName));
+writeFileSync(join(stuckDir, join(stuckName, "keep")), "x");
+const stuckTx = `images-tx-${hostId}-${process.pid}-${Date.now()}-stucktx.json`;
+writeFileSync(
+  join(stuckDir, stuckTx),
+  JSON.stringify({
+    terminalId: hostId,
+    pid: process.pid,
+    createdAt: Date.now(),
+    nonce: "stucktx",
+    staged: [],
+    final: [stuckName],
+  }),
+);
+const stuck = await host.pendingImageState(stuckDir, hostId);
+check(
+  "lock recovery retains a transaction when artifact removal fails",
+  stuck.ok === false && existsSync(join(stuckDir, stuckTx)),
+);
+
+let holdRelease;
+const holdGate = new Promise((resolve) => {
+  holdRelease = resolve;
+});
+let holdStarted;
+const holdReady = new Promise((resolve) => {
+  holdStarted = resolve;
+});
+const busyDir = mkdtempSync(join(tmpdir(), "agent-core-img-busy-"));
+leftovers.push(busyDir);
+const holder = host.withPendingImageLock(busyDir, hostId, async () => {
+  holdStarted();
+  await holdGate;
+});
+await holdReady;
+const busy = await host.appendPendingImages(busyDir, hostId, [
+  { bytes: png1x1, mediaType: "image/png", id: "55555555-bbbb-cccc-dddd-eeeeeeeeeeee" },
+]);
+holdRelease();
+await holder;
+check("appendPendingImages times out on a live lock", busy.ok === false && busy.error === "image queue busy");
+
+const malformedDir = mkdtempSync(join(tmpdir(), "agent-core-img-bad-"));
+leftovers.push(malformedDir);
+writeFileSync(join(malformedDir, `images-${hostId}.lock`), "not-json");
+const badLock = await host.appendPendingImages(malformedDir, hostId, [
+  { bytes: png1x1, mediaType: "image/png", id: "66666666-bbbb-cccc-dddd-eeeeeeeeeeee" },
+]);
+check("malformed lock fails closed", badLock.ok === false && badLock.error === "image queue is invalid");
+
+const hugeLockDir = mkdtempSync(join(tmpdir(), "agent-core-img-huge-"));
+leftovers.push(hugeLockDir);
+writeFileSync(join(hugeLockDir, `images-${hostId}.lock`), "x".repeat(16 * 1024 + 8));
+const hugeLock = await host.appendPendingImages(hugeLockDir, hostId, [
+  { bytes: png1x1, mediaType: "image/png", id: "77777777-bbbb-cccc-dddd-eeeeeeeeeeee" },
+]);
+check("oversized lock fails closed", hugeLock.ok === false && hugeLock.error === "image queue is invalid");
+
+const qDir = mkdtempSync(join(tmpdir(), "agent-core-img-q-"));
+leftovers.push(qDir);
+writeFileSync(join(qDir, `images-${hostId}.json`), "{not json");
+const q = await host.appendPendingImages(qDir, hostId, [
+  { bytes: png1x1, mediaType: "image/png", id: "88888888-bbbb-cccc-dddd-eeeeeeeeeeee" },
+]);
+check(
+  "malformed manifest is quarantined",
+  q.ok === false && q.error === "image queue is invalid" && readdirSync(qDir).some((name) => name.includes(".quarantine-")),
+);
+
+const raceDir = mkdtempSync(join(tmpdir(), "agent-core-img-race-"));
+leftovers.push(raceDir);
+let releaseCommit;
+const commitGate = new Promise((resolve) => {
+  releaseCommit = resolve;
+});
+let atCommit;
+const commitReady = new Promise((resolve) => {
+  atCommit = resolve;
+});
+const prodP = host.appendPendingImages(
+  raceDir,
+  hostId,
+  [
+    { bytes: png1x1, mediaType: "image/png", id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" },
+    { bytes: png1x1, mediaType: "image/png", id: "bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee" },
+  ],
+  {
+    canCommit: () => {
+      atCommit();
+      return commitGate.then(() => true);
+    },
+  },
+);
+await commitReady;
+const claimWhileHeld = host.claimPendingImages(raceDir, hostId);
+releaseCommit();
+const prodR = await prodP;
+const claimLate = await claimWhileHeld;
+const afterRace = claimLate.ok && claimLate.claim.images.length === 2
+  ? claimLate
+  : await host.claimPendingImages(raceDir, hostId);
+check(
+  "producer-first race publishes a complete batch",
+  prodR.ok === true && afterRace.ok && afterRace.claim.images.length === 2,
+);
+
+const firstClaimDir = mkdtempSync(join(tmpdir(), "agent-core-img-first-"));
+leftovers.push(firstClaimDir);
+const consumerFirst = await host.claimPendingImages(firstClaimDir, hostId);
+const afterEmpty = await host.appendPendingImages(firstClaimDir, hostId, [
+  { bytes: png1x1, mediaType: "image/png", id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" },
+]);
+const laterClaim = await host.claimPendingImages(firstClaimDir, hostId);
+check(
+  "consumer-first leaves a later producer generation intact",
+  consumerFirst.ok && consumerFirst.claim.images.length === 0 && afterEmpty.ok && laterClaim.ok && laterClaim.claim.images.length === 1,
+);
+
+const reuseDir = mkdtempSync(join(tmpdir(), "agent-core-img-reuse-"));
+leftovers.push(reuseDir);
+await host.appendPendingImages(reuseDir, hostId, [{ bytes: png1x1, mediaType: "image/png", id: idA }]);
+const firstReuse = await host.claimPendingImages(reuseDir, hostId);
+const secondReuse = await host.claimPendingImages(reuseDir, hostId);
+check(
+  "current-process claim is reused",
+  firstReuse.ok && secondReuse.ok && firstReuse.claim.claimId === secondReuse.claim.claimId && secondReuse.claim.images.length === 1,
+);
+const partialAck = await host.acknowledgePendingImages(reuseDir, hostId, firstReuse.claim.claimId, [firstReuse.claim.images[0].name]);
+const afterPartial = await host.claimPendingImages(reuseDir, hostId);
+check("full acknowledgement removes the claim", partialAck.ok && afterPartial.ok && afterPartial.claim.images.length === 0);
+
+const persistFailDir = mkdtempSync(join(tmpdir(), "agent-core-img-persist-"));
+leftovers.push(persistFailDir);
+await host.appendPendingImages(persistFailDir, hostId, [{ bytes: png1x1, mediaType: "image/png", id: idA }]);
+const persistClaim = await host.claimPendingImages(persistFailDir, hostId);
+const zeroPersisted = await host.acknowledgePendingImages(persistFailDir, hostId, persistClaim.claim.claimId, []);
+const recoveredClaim = await host.claimPendingImages(persistFailDir, hostId);
+check(
+  "failed persistence leaves the durable claim",
+  persistClaim.ok &&
+    zeroPersisted.ok &&
+    recoveredClaim.ok &&
+    recoveredClaim.claim.claimId === persistClaim.claim.claimId &&
+    recoveredClaim.claim.images[0]?.bytes.equals(png1x1),
+);
+const capClaimDir = mkdtempSync(join(tmpdir(), "agent-core-img-capclaim-"));
+leftovers.push(capClaimDir);
+for (const id of [
+  "cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee",
+  "dddddddd-bbbb-cccc-dddd-eeeeeeeeeeee",
+  "eeeeeeee-bbbb-cccc-dddd-eeeeeeeeeeee",
+  "ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee",
+]) {
+  await host.appendPendingImages(capClaimDir, hostId, [{ bytes: png1x1, mediaType: "image/png", id }]);
+}
+const heldClaim = await host.claimPendingImages(capClaimDir, hostId);
+const overflowWhileClaimed = await host.appendPendingImages(capClaimDir, hostId, [
+  { bytes: png1x1, mediaType: "image/png", id: "99999999-bbbb-cccc-dddd-eeeeeeeeeeee" },
+]);
+const claimedCapState = await host.pendingImageState(capClaimDir, hostId);
+check(
+  "appendPendingImages counts durable claims toward capacity",
+  heldClaim.ok &&
+    heldClaim.claim.images.length === 4 &&
+    overflowWhileClaimed.ok === false &&
+    overflowWhileClaimed.error === "too many pending images" &&
+    claimedCapState.ok &&
+    claimedCapState.count === 4,
+);
+
+const deadChild = spawn(process.execPath, ["-e", "process.exit(0)"]);
+await once(deadChild, "exit");
+const deadPid = deadChild.pid;
+const adoptDir = mkdtempSync(join(tmpdir(), "agent-core-img-adopt-"));
+leftovers.push(adoptDir);
+const adoptName = `image-${hostId}-${idA}.png`;
+writeFileSync(join(adoptDir, adoptName), png1x1);
+const deadClaim = `images-claim-${hostId}-${deadPid}-${Date.now()}-deadclaim.json`;
+writeFileSync(join(adoptDir, deadClaim), JSON.stringify({ images: [{ name: adoptName, mediaType: "image/png" }] }));
+const adopted = await host.claimPendingImages(adoptDir, hostId);
+check("next consumer adopts a dead-owner claim", adopted.ok && adopted.claim.claimId === deadClaim && adopted.claim.images.length === 1);
+
+const liveClaimDir = mkdtempSync(join(tmpdir(), "agent-core-img-livec-"));
+leftovers.push(liveClaimDir);
+const foreignPid = process.pid;
+const liveClaimName = `images-claim-${hostId}-${foreignPid === 1 ? 2 : 1}-${Date.now()}-liveclaim.json`;
+const liveImg = `image-${hostId}-${idA}.png`;
+writeFileSync(join(liveClaimDir, liveImg), png1x1);
+writeFileSync(join(liveClaimDir, liveClaimName), JSON.stringify({ images: [{ name: liveImg, mediaType: "image/png" }] }));
+writeFileSync(join(liveClaimDir, `images-${hostId}.json`), JSON.stringify({ images: [{ name: liveImg, mediaType: "image/png" }] }));
+let skippedForeign = true;
+try {
+  process.kill(1, 0);
+} catch (err) {
+  skippedForeign = err && err.code === "EPERM";
+}
+if (liveClaimName.includes(`-${process.pid}-`)) skippedForeign = false;
+const skipClaim = await host.claimPendingImages(liveClaimDir, hostId);
+check(
+  "a live foreign claim is skipped while a live manifest can still be claimed",
+  skipClaim.ok &&
+    skipClaim.claim.claimId !== liveClaimName &&
+    skipClaim.claim.images.length === 1 &&
+    existsSync(join(liveClaimDir, liveClaimName)),
+);
+
+let epermChecked = false;
+try {
+  process.kill(1, 0);
+} catch (err) {
+  if (err && err.code === "EPERM") {
+    const epermDir = mkdtempSync(join(tmpdir(), "agent-core-img-eperm-"));
+    leftovers.push(epermDir);
+    writeFileSync(
+      join(epermDir, `images-${hostId}.lock`),
+      JSON.stringify({ pid: 1, createdAt: Date.now() - 10_000, nonce: "epermnonce" }),
+    );
+    const epermGot = await host.appendPendingImages(epermDir, hostId, [
+      { bytes: png1x1, mediaType: "image/png", id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" },
+    ]);
+    check("EPERM owner checks do not steal the lock", epermGot.ok === false && epermGot.error === "image queue busy");
+    epermChecked = true;
+  }
+}
+if (!epermChecked) check("EPERM owner checks do not steal the lock", true, "skipped: pid 1 is signalable");
+
+const staleChild = spawn(process.execPath, ["-e", "process.exit(0)"]);
+await once(staleChild, "exit");
+const staleDir = mkdtempSync(join(tmpdir(), "agent-core-img-stale-"));
+leftovers.push(staleDir);
+writeFileSync(
+  join(staleDir, `images-${hostId}.lock`),
+  JSON.stringify({ pid: staleChild.pid, createdAt: Date.now() - 10_000, nonce: "stalenonce" }),
+);
+const stole = await host.appendPendingImages(staleDir, hostId, [
+  { bytes: png1x1, mediaType: "image/png", id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" },
+]);
+check("a dead stale lock is stolen", stole.ok === true);
+
+const fakeTerm = { id: hostId };
+const captured = fakeTerm;
+const termDir = mkdtempSync(join(tmpdir(), "agent-core-img-term-"));
+leftovers.push(termDir);
+const closedByIdentity = await host.appendPendingImages(
+  termDir,
+  hostId,
+  [{ bytes: png1x1, mediaType: "image/png", id: idA }],
+  { canCommit: () => captured === fakeTerm && false },
+);
+check("commit guard sees a replaced terminal identity", closedByIdentity.ok === false && closedByIdentity.error === "terminal closed");
 check(
   "firstPlanText accepts a checkbox list",
   host.firstPlanText("intro\n- [ ] edit src/foo.ts\n")?.includes("- [ ] edit src/foo.ts"),
@@ -729,8 +1114,8 @@ mkdirSync(tdir);
 writeFileSync(join(tdir, "turn-10.json"), "{}");
 writeFileSync(join(tdir, "turn-2.json"), "{}");
 writeFileSync(join(tdir, "noise.txt"), "x");
-const kept = retainTraceFiles(tdir, 1);
-check("trace retention numeric", kept.includes("turn-10.json") && !kept.includes("turn-2.json"));
+const traceKept = retainTraceFiles(tdir, 1);
+check("trace retention numeric", traceKept.includes("turn-10.json") && !traceKept.includes("turn-2.json"));
 
 mkdirSync(join(root, "cycle", "a"), { recursive: true });
 try {
@@ -1516,7 +1901,6 @@ const {
   parseModelSwitch,
   modelsUrl,
   formatModelBanner,
-  formatModelLines,
   formatCatalogLines,
   catalogHeaders,
   loadProviderModels,
@@ -1591,7 +1975,6 @@ check(
     })["content-type"] === undefined,
 );
 check("formatModelBanner marks current", formatModelBanner([{ id: "a" }, { id: "b" }], "b").includes("*b"));
-check("formatModelLines stars current", formatModelLines([{ id: "a" }, { id: "b" }], "a").startsWith("* a"));
 check(
   "formatCatalogLines names the provider",
   formatCatalogLines(
@@ -2553,13 +2936,32 @@ check("tui status keeps cost visible at 80 columns", frame.includes("$0.0123"));
 const imgTui = new tuiMod.AgentTui({
   stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
   stdin: { isTTY: false },
-  pendingImages: () => 2,
   onSubmit: () => {},
   onInterrupt: () => {},
   onExit: () => {},
 });
+imgTui.setPendingImageCount(2);
 imgTui.append("x");
 check("tui status shows pending images", imgTui.frame().includes("2 images"));
+let hostRefresh = 0;
+const refreshTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onHostRefresh: () => {
+    hostRefresh += 1;
+  },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+refreshTui.setDraft("keep this");
+refreshTui.feed("\x1b[201~");
+check(
+  "standalone paste-end refreshes host images without changing the draft",
+  hostRefresh === 1 && refreshTui.frame().includes("keep this"),
+);
+refreshTui.feed("\x1b[200~abc\x1b[201~");
+check("bracketed paste end does not invoke host refresh", hostRefresh === 1 && refreshTui.frame().includes("keep this"));
 const effortPicks = [];
 const effortTui = new tuiMod.AgentTui({
   stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },

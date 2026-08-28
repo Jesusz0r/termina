@@ -4,10 +4,11 @@
  */
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { cssFontFamily, type ThemeId } from "../shared/types";
+import { cssFontFamily, type TerminalPasteResult, type ThemeId } from "../shared/types";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import { TERMINAL_THEMES } from "./terminal-themes";
 import { isMacPlatform } from "./settings-shortcuts";
+import { toast } from "./components/modals";
 
 export class PtyView {
   private term: Terminal;
@@ -21,15 +22,29 @@ export class PtyView {
   private fontSize: number;
   private fontFamily: string;
   private refreshFont = false;
+  private readonly container: HTMLElement;
+  private dragDepth = 0;
+  private dropInFlight = false;
+  private readonly onDragEnter = (event: DragEvent) => this.handleDragEnter(event);
+  private readonly onDragOver = (event: DragEvent) => this.handleDragOver(event);
+  private readonly onDragLeave = (event: DragEvent) => this.handleDragLeave(event);
+  private readonly onDrop = (event: DragEvent) => {
+    void this.handleDrop(event);
+  };
+  private readonly onDragEnd = () => this.clearDropTarget();
+  private readonly onWindowBlur = () => this.clearDropTarget();
 
   constructor(
     container: HTMLElement,
     onInput: (data: string) => void,
     onResize: (cols: number, rows: number) => void,
     private readonly writeClipboard: (text: string) => void,
-    private readonly pasteFromHost: () => Promise<{ kind: "text"; text: string } | { kind: "image"; count: number }>,
+    private readonly pasteFromHost: () => Promise<TerminalPasteResult>,
+    private readonly reportTerminalError: (message: string) => void,
+    private readonly dropFromHost: (files: File[]) => Promise<TerminalPasteResult>,
     appearance: { theme: ThemeId; fontSize: number; fontFamily: string },
   ) {
+    this.container = container;
     this.sendInput = onInput;
     this.fontSize = appearance.fontSize;
     this.fontFamily = appearance.fontFamily;
@@ -46,6 +61,12 @@ export class PtyView {
     this.term.loadAddon(new CanvasAddon());
     this.term.open(container);
     container.addEventListener("mousedown", () => this.focus());
+    container.addEventListener("dragenter", this.onDragEnter);
+    container.addEventListener("dragover", this.onDragOver);
+    container.addEventListener("dragleave", this.onDragLeave);
+    container.addEventListener("drop", this.onDrop);
+    container.addEventListener("dragend", this.onDragEnd);
+    window.addEventListener("blur", this.onWindowBlur);
     this.term.attachCustomKeyEventHandler((event) => this.handleKey(event));
 
     this.term.onData((data) => this.sendInput(data));
@@ -164,12 +185,88 @@ export class PtyView {
     if (this.disposed) return;
     try {
       const result = await this.pasteFromHost();
-      if (this.disposed) return;
-      if (result.kind === "text" && result.text) this.term.paste(result.text);
-      else if (result.kind === "image") this.sendInput("\x1b[201~");
+      this.applyPasteResult(result, false);
     } catch {
       // Keep terminal input available when the system clipboard is unavailable.
     }
+  }
+
+  private isFileDrag(event: DragEvent): boolean {
+    const types = Array.from(event.dataTransfer?.types ?? []);
+    return types.includes("Files") || (event.dataTransfer?.files.length ?? 0) > 0;
+  }
+
+  private filesFromEvent(event: DragEvent): File[] {
+    const listed = Array.from(event.dataTransfer?.files ?? []);
+    if (listed.length > 0) return listed;
+    const items = event.dataTransfer?.items;
+    if (!items) return [];
+    const files: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const file = items[i]?.getAsFile();
+      if (file) files.push(file);
+    }
+    return files;
+  }
+
+  private handleDragEnter(event: DragEvent): void {
+    if (this.disposed || !this.isFileDrag(event)) return;
+    event.preventDefault();
+    this.dragDepth += 1;
+    this.container.classList.add("term-drop-target");
+  }
+
+  private handleDragOver(event: DragEvent): void {
+    if (this.disposed || !this.isFileDrag(event)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  }
+
+  private handleDragLeave(event: DragEvent): void {
+    if (this.disposed || !this.isFileDrag(event)) return;
+    this.dragDepth = Math.max(0, this.dragDepth - 1);
+    if (this.dragDepth === 0) this.container.classList.remove("term-drop-target");
+  }
+
+  private clearDropTarget(): void {
+    this.dragDepth = 0;
+    this.container.classList.remove("term-drop-target");
+  }
+
+  private async handleDrop(event: DragEvent): Promise<void> {
+    if (this.disposed || !this.isFileDrag(event)) return;
+    event.preventDefault();
+    this.clearDropTarget();
+    if (this.dropInFlight) {
+      this.reportTerminalError("drop already in progress");
+      return;
+    }
+    const files = this.filesFromEvent(event);
+    if (files.length === 0) {
+      this.reportTerminalError("no files");
+      return;
+    }
+    this.dropInFlight = true;
+    try {
+      const result = await this.dropFromHost(files);
+      this.applyPasteResult(result, true);
+    } catch {
+      if (!this.disposed) this.reportTerminalError("invalid dropped file");
+    } finally {
+      this.dropInFlight = false;
+    }
+  }
+
+  private applyPasteResult(result: TerminalPasteResult, focus: boolean): void {
+    if (this.disposed) return;
+    if (!result.ok) {
+      this.reportTerminalError(result.error);
+      return;
+    }
+    if (result.kind === "text" && result.text) this.term.paste(result.text);
+    else if (result.kind === "image") this.sendInput("\x1b[201~");
+    if (result.kind === "image" && result.queued) toast("queued for next prompt", "info");
+    if (focus) this.focus();
   }
 
   write(data: string): void {
@@ -272,6 +369,13 @@ export class PtyView {
 
   dispose(): void {
     this.disposed = true;
+    this.clearDropTarget();
+    this.container.removeEventListener("dragenter", this.onDragEnter);
+    this.container.removeEventListener("dragover", this.onDragOver);
+    this.container.removeEventListener("dragleave", this.onDragLeave);
+    this.container.removeEventListener("drop", this.onDrop);
+    this.container.removeEventListener("dragend", this.onDragEnd);
+    window.removeEventListener("blur", this.onWindowBlur);
     if (this.watchdog) clearInterval(this.watchdog);
     this.watchdog = null;
     if (this.resizeTimer) clearTimeout(this.resizeTimer);

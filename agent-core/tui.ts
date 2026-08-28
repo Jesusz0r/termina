@@ -276,7 +276,8 @@ export class AgentTui {
   private auth = "";
   private effort = "off";
   private usage = "";
-  private pendingImages: () => number = () => 0;
+  private pendingImageCount = 0;
+  private onHostRefresh: (() => void) | null = null;
   private busy = false;
   private spin = 0;
   private spinTimer: ReturnType<typeof setInterval> | null = null;
@@ -299,7 +300,7 @@ export class AgentTui {
     onSubmit: (line: string) => void;
     onInterrupt: () => void;
     onExit: () => void;
-    pendingImages?: () => number;
+    onHostRefresh?: () => void;
   }) {
     this.out = opts.stdout;
     this.inp = opts.stdin;
@@ -307,7 +308,14 @@ export class AgentTui {
     this.onSubmit = opts.onSubmit;
     this.onInterrupt = opts.onInterrupt;
     this.onExit = opts.onExit;
-    if (opts.pendingImages) this.pendingImages = opts.pendingImages;
+    if (opts.onHostRefresh) this.onHostRefresh = opts.onHostRefresh;
+  }
+
+  setPendingImageCount(count: number): void {
+    const n = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+    if (this.pendingImageCount === n) return;
+    this.pendingImageCount = n;
+    this.schedule();
   }
 
   active(): boolean {
@@ -784,7 +792,7 @@ export class AgentTui {
     }
     if (final === "~") {
       if (params === "200") this.paste = true;
-      else if (params === "201") this.paste = false;
+      else if (params === "201") this.onHostRefresh?.();
       else if (params === "3") {
         if (this.cursor < this.chars.length) this.chars.splice(this.cursor, 1);
       } else if (params === "3;3") this.deleteWord(1);
@@ -939,7 +947,7 @@ export class AgentTui {
     const view = visibleLines(this.plain, cols, layout.transcript, this.scroll);
     const nameW = shownSlash.length > 0 ? Math.max(...shownSlash.map((c) => c.name.length)) : 0;
     const spin = this.busy ? `${SPIN[this.spin]!} ` : "";
-    const imageN = this.pendingImages();
+    const imageN = this.pendingImageCount;
     const images = imageN > 0 ? `  ${imageN} image${imageN === 1 ? "" : "s"}` : "";
     const title = ` termina agent-core v1  ${spin}effort ${this.effort}  ${this.model}${this.auth ? `  ${this.auth}` : ""}${images} `;
     const picker = matches.length > 0 && Boolean(matches[0]?.submit);

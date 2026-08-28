@@ -1,10 +1,11 @@
 /**
  * Preload script: exposes the typed `window.pi` bridge to the renderer.
  */
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   MenuCommand,
   PiBridge,
+  TerminalPasteResult,
   FileChangedPayload,
   ToolTargetPayload,
   FileDeletedPayload,
@@ -98,6 +99,19 @@ const bridge: PiBridge = {
   readClipboard: () => ipcRenderer.invoke("clipboard:read"),
   editClipboard: (command) => ipcRenderer.invoke("clipboard:edit", command),
   pasteTerminal: (id) => ipcRenderer.invoke("terminals:paste", id),
+  dropTerminalFiles: (id, files): Promise<TerminalPasteResult> => {
+    if (!Array.isArray(files) || files.length === 0) return Promise.resolve({ ok: false, error: "no files" });
+    if (files.length > 16) return Promise.resolve({ ok: false, error: "too many files" });
+    try {
+      const paths = files.map((file) => webUtils.getPathForFile(file));
+      if (paths.some((path) => typeof path !== "string" || path.length === 0)) {
+        return Promise.resolve({ ok: false, error: "invalid dropped file" });
+      }
+      return ipcRenderer.invoke("terminals:drop-files", id, paths);
+    } catch {
+      return Promise.resolve({ ok: false, error: "invalid dropped file" });
+    }
+  },
   detectTest: (terminalId) => ipcRenderer.invoke("verify:detect", terminalId),
   runVerify: (terminalId) => ipcRenderer.invoke("verify:run", terminalId),
   cancelVerify: (terminalId) => ipcRenderer.invoke("verify:cancel", terminalId),

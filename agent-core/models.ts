@@ -140,16 +140,6 @@ export function formatModelBanner(models: ModelInfo[], current: string): string 
   return `models: ${models.length}${cap} · ${names.join(", ")}${more}`;
 }
 
-export function formatModelLines(models: ModelInfo[], current: string): string {
-  return models
-    .map((m) => {
-      const mark = m.id === current ? "*" : " ";
-      const extra = m.name && m.name !== m.id ? `  ${m.name}` : "";
-      return `${mark} ${m.id}${extra}`;
-    })
-    .join("\n");
-}
-
 export type CatalogModel = { provider: ProviderId; id: string; name?: string };
 
 export function formatCatalogLines(
@@ -310,10 +300,4 @@ async function loadAnthropicPages(
     cursor = rec.last_id;
   }
   return out;
-}
-
-export function fallbackModels(provider: ProviderId): ModelInfo[] {
-  const def = DEFAULT_MODELS[provider];
-  const ids = def.main === def.summary ? [def.main] : [def.main, def.summary];
-  return ids.map((id) => ({ id }));
 }
