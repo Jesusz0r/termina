@@ -226,23 +226,25 @@ or `Always ask`. Bash approval prompts also use arrow-key selection instead of t
 The dangerous mode recognizes destructive command patterns; it is not a shell sandbox.
 The file is not Pi's `auth.json`. See `docs/AUTH-PLAN.md`.
 
-The host owns session resume. `TERMINA_CORE_SESSION_FILE` is the jsonl
-path under the app user-data `agent-sessions/<project>/` directory.
-`TERMINA_CORE_RESUME=1` replays it at process start. A failed replay
-renames the file aside so the next prompt does not truncate the only
-copy. Without the resume flag a new prompt still truncates the stream so
-a reused terminal id cannot append a second history. `/clear` rotates a
-non-empty file aside (`core-<id>-<stamp>.jsonl`) and starts a fresh file
-at the same path so Session Search can still read the previous
-conversation. Closing a tab keeps a non-empty persist session.
+The host owns session resume. `TERMINA_CORE_SESSION_FILE` is the stable
+`<session-id>/current/session.jsonl` address under the app user-data
+`agent-sessions/<project>/` directory. The current session is a bundle:
+numbered immutable JSONL parts, the active `session.jsonl`, and referenced
+images all live in `current/`. `TERMINA_CORE_RESUME=1` replays the ordered
+segments at process start. A failed replay moves `current/` to a unique
+`bad-<stamp>/` directory. A new prompt moves a non-empty `current/` to an
+`archive-<stamp>/` directory before it creates a fresh current session.
+`/clear` uses the same archive rotation. Session Search reads current and
+archived bundles as logical sessions. Closing a tab keeps every non-empty
+session bundle.
 
 Clipboard and Finder image drops never enter the pty. The host writes
 validated PNG, JPEG, WebP, and GIF files next to the sidecar as
 `image-<terminal>-<id>.<ext>` and a pending list `images-<terminal>.json`.
 A core terminal accepts at most four pending images, each at most 4 MiB.
 If the agent is already running, the batch stays queued for the next
-prompt. On submit the kernel claims that list, copies persisted files
-next to the session (`<session>-img-N.png`), and only then acknowledges
+prompt. On submit the kernel claims that list, copies persisted files into
+the bundle's `current/` directory (`<session-id>-img-N.png`), and only then acknowledges
 the claim. A crash before persistence leaves the claim in place so the
 next prompt recovers the bytes. The prompt payload keeps refs, not bytes.
 Pi and shell terminals do not attach image bytes; a drop inserts

@@ -2,6 +2,9 @@
  * Per-project terminal roster. Main owns when to load and save.
  * This module only parses and caps the on-disk shape.
  */
+// Use .ts so the source harness can load this module with strip-types.
+import { isCoreSessionId } from "../agent-core/session.ts";
+
 export const MAX_TERMINAL_ROSTER = 16;
 export const MAX_ROSTER_BYTES = 64 * 1024;
 const MAX_ID = 64;
@@ -9,7 +12,6 @@ const MAX_PATH = 1024;
 const MAX_SESSION_ID = 128;
 const TERM_ID = /^term-[1-9][0-9]{0,5}$/;
 const SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
-const CORE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export type TerminalRosterEntry = {
   id: string;
@@ -27,11 +29,6 @@ function isAbsPath(value: string): boolean {
 
 export function isRosterSessionId(value: string): boolean {
   return value.length <= MAX_SESSION_ID && SESSION_ID.test(value);
-}
-
-/** Session ids that are safe as a single path segment under agent-sessions. */
-export function isCoreSessionId(value: string): boolean {
-  return value.length <= MAX_SESSION_ID && CORE_SESSION_ID.test(value);
 }
 
 export function parseTerminalRoster(raw: unknown): TerminalRosterEntry[] {
@@ -54,10 +51,15 @@ export function parseTerminalRoster(raw: unknown): TerminalRosterEntry[] {
       else entry.engine = "core";
     }
     if (rec.type === "shell" && typeof rec.shell === "string" && isAbsPath(rec.shell)) entry.shell = rec.shell;
-    if (typeof rec.sessionId === "string" && isRosterSessionId(rec.sessionId)) {
+    if (
+      typeof rec.sessionId === "string" &&
+      (entry.engine === "core" ? isCoreSessionId(rec.sessionId) : isRosterSessionId(rec.sessionId))
+    ) {
       entry.sessionId = rec.sessionId;
     }
-    if (typeof rec.sessionFile === "string" && isAbsPath(rec.sessionFile)) entry.sessionFile = rec.sessionFile;
+    if (entry.engine !== "core" && typeof rec.sessionFile === "string" && isAbsPath(rec.sessionFile)) {
+      entry.sessionFile = rec.sessionFile;
+    }
     seen.add(entry.id);
     out.push(entry);
     if (out.length >= MAX_TERMINAL_ROSTER) break;

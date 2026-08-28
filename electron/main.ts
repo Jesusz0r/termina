@@ -45,6 +45,15 @@ import { AppPreferencesStore } from "./preferences.js";
 import { listSessionJsonl, mergeSessionFiles, searchSessionFiles, sessionFileEntry, type SessionFileEntry } from "./session-search.js";
 import { appendPendingImages, MAX_PENDING_IMAGES, pendingImageState } from "../agent-core/host.js";
 import {
+  coreSessionFile as bundleSessionFile,
+  isCoreSessionId,
+  listLogicalSessions,
+  parseSessionBundlePath,
+  removeEmptySessionBundle,
+  sessionBundleHasContent,
+  writeForkedSession,
+} from "../agent-core/session.js";
+import {
   isAuthorizedDropSender,
   normalizeDroppedPaths,
   quotePosixPaths,
@@ -53,7 +62,6 @@ import {
 } from "./terminal-drop.js";
 import {
   composeTerminalRoster,
-  isCoreSessionId,
   isRosterSessionId,
   MAX_ROSTER_BYTES,
   MAX_TERMINAL_ROSTER,
@@ -1039,21 +1047,21 @@ class PiEditorApp {
       onPromotionApply: (relPaths) => {
         this.promotionPaths = relPaths ? new Set(relPaths) : null;
       },
-      primarySessionDir: (cwd) => this.primarySessionDir(cwd),
+      primarySessionDir: (cwd, engine) => engine === "core" ? this.coreProjectSessionDir(cwd) : this.primarySessionDir(cwd),
       installPromoted: async (seed) => {
         const inst = await this.createTerminal(
           seed.primaryRoot,
           seed.engine === "core"
             ? await (async () => {
-                const sessionId = `core-${randomUUID()}`;
-                const dest = this.coreSessionFile(sessionId, seed.primaryRoot);
-                mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
-                await copyFile(seed.installedSession, dest);
+                const parsed = parseSessionBundlePath(seed.installedSession);
+                if (!parsed || resolve(parsed.projectDir) !== resolve(this.coreProjectSessionDir(seed.primaryRoot))) {
+                  throw new Error("the promoted core session path is invalid");
+                }
                 return {
                   type: "agent" as const,
                   engine: "core" as const,
                   workspaceId: seed.primaryWorkspaceId,
-                  resume: { sessionId, sessionFile: dest },
+                  resume: { sessionId: parsed.sessionId, sessionFile: parsed.sessionFile },
                 };
               })()
             : {
@@ -1653,47 +1661,7 @@ class PiEditorApp {
   }
 
   private coreSessionFile(sessionId: string, cwd: string): string {
-    return join(this.coreProjectSessionDir(cwd), `${sessionId}.jsonl`);
-  }
-
-  /** True when `file` sits directly in `parent` (not in a subdirectory). */
-  private isDirectSessionChild(parent: string, file: string): boolean {
-    try {
-      return realpathSync(dirname(file)) === realpathSync(parent);
-    } catch {
-      return resolve(dirname(file)) === resolve(parent);
-    }
-  }
-
-  /**
-   * Move a leftover flat `agent-sessions/core-*.jsonl` into this project's
-   * session directory. Search only walks the project dir after a tab
-   * closes, so a file left at the root would disappear from results.
-   */
-  private adoptCoreSessionFile(sessionId: string, sessionFile: string | null, cwd: string): string {
-    const dest = this.coreSessionFile(sessionId, cwd);
-    try {
-      mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
-    } catch {
-      /* dest writes still try */
-    }
-    if (!sessionFile || !this.sessionFileExists(sessionFile)) return dest;
-    try {
-      if (realpathSync(sessionFile) === realpathSync(dest)) return dest;
-    } catch {
-      if (resolve(sessionFile) === resolve(dest)) return dest;
-    }
-    if (!this.isDirectSessionChild(this.coreSessionRoot(), sessionFile)) return sessionFile;
-    try {
-      if (this.sessionFileExists(dest)) {
-        if (this.sessionFileHasContent(dest) || !this.sessionFileHasContent(sessionFile)) return dest;
-        rmSync(dest, { force: true });
-      }
-      renameSync(sessionFile, dest);
-      return dest;
-    } catch {
-      return sessionFile;
-    }
+    return bundleSessionFile(this.coreProjectSessionDir(cwd), sessionId);
   }
 
   private terminalRosterPath(project: ProjectState): string {
@@ -1750,16 +1718,6 @@ class PiEditorApp {
     }
   }
 
-  private sessionFileHasContent(path: string | null | undefined): boolean {
-    if (!path) return false;
-    try {
-      const info = statSync(path);
-      return info.isFile() && info.size > 0;
-    } catch {
-      return false;
-    }
-  }
-
   /** True when `target` resolves inside `parent`. Neither path needs to exist. */
   private pathInside(parent: string, target: string): boolean {
     const rel = relative(resolve(parent), resolve(target));
@@ -1774,9 +1732,12 @@ class PiEditorApp {
     return false;
   }
 
-  private coreSessionInUse(sessionId: string): boolean {
+  private coreSessionInUse(sessionId: string, cwd: string): boolean {
+    const target = resolve(this.coreSessionFile(sessionId, cwd));
     for (const inst of this.terminals.values()) {
-      if (inst.sessionId === sessionId) return true;
+      if (inst.engine !== "core") continue;
+      const active = inst.sessionFile ?? (inst.sessionId ? this.coreSessionFile(inst.sessionId, inst.cwd) : null);
+      if (active && resolve(active) === target) return true;
     }
     return false;
   }
@@ -1794,23 +1755,13 @@ class PiEditorApp {
     }
   }
 
-  /** Delete an empty agent-core jsonl. A session with content stays on disk
-   *  so Session Search can read it after the tab closes. A leftover file
-   *  at the agent-sessions root moves into this project's directory. */
+  /** Delete an empty agent-core bundle. Keep a bundle with content so
+   *  Session Search can read it after the tab closes. */
   private discardCoreSession(inst: PiTerminalInstance): void {
     if (inst.engine !== "core" || !inst.sessionFile) return;
     if (!this.pathInside(this.coreSessionRoot(), inst.sessionFile)) return;
-    if (this.sessionFileHasContent(inst.sessionFile)) {
-      if (inst.sessionId && isCoreSessionId(inst.sessionId)) {
-        this.adoptCoreSessionFile(inst.sessionId, inst.sessionFile, inst.cwd);
-      }
-      return;
-    }
-    try {
-      rmSync(inst.sessionFile, { force: true });
-    } catch {
-      /* ignore */
-    }
+    if (sessionBundleHasContent(inst.sessionFile)) return;
+    removeEmptySessionBundle(inst.sessionFile);
   }
 
   private persistLive(project: ProjectState): PiTerminalInstance[] {
@@ -1990,17 +1941,10 @@ class PiEditorApp {
       ];
       if (persist) {
         const sessionCwd = cwd ?? owner?.cwd ?? this.terminalCwd();
-        if (!sessionId || !isCoreSessionId(sessionId) || this.coreSessionInUse(sessionId)) {
+        if (!sessionId || !isCoreSessionId(sessionId) || this.coreSessionInUse(sessionId, sessionCwd)) {
           sessionId = `core-${randomUUID()}`;
-          sessionFile = this.coreSessionFile(sessionId, sessionCwd);
-        } else {
-          sessionFile = this.adoptCoreSessionFile(sessionId, sessionFile, sessionCwd);
         }
-        try {
-          if (sessionFile) mkdirSync(dirname(sessionFile), { recursive: true, mode: 0o700 });
-        } catch {
-          /* resume still tries the path */
-        }
+        sessionFile = this.coreSessionFile(sessionId, sessionCwd);
       } else {
         sessionId = null;
         sessionFile = null;
@@ -2015,7 +1959,7 @@ class PiEditorApp {
       else delete env.TERMINA_CORE_SESSION_FILE;
       if (sessionId) env.TERMINA_CORE_SESSION_ID = sessionId;
       else delete env.TERMINA_CORE_SESSION_ID;
-      if (this.sessionFileHasContent(sessionFile)) env.TERMINA_CORE_RESUME = "1";
+      if (sessionFile && sessionBundleHasContent(sessionFile)) env.TERMINA_CORE_RESUME = "1";
       else delete env.TERMINA_CORE_RESUME;
       const coreModel = this.copiedCoreModel(opts?.fromTerminalId);
       if (coreModel) {
@@ -2475,10 +2419,15 @@ class PiEditorApp {
     const piDir = join(homedir(), ".pi", "agent", "sessions", key);
     const coreDir = join(this.coreSessionRoot(), key);
     const seq = ++this.searchSessionsSeq;
-    const extra = await this.extraSessionFiles(project);
+    const [coreSessions, extra] = await Promise.all([listLogicalSessions(coreDir), this.extraSessionFiles(project)]);
     const files = mergeSessionFiles([
       await listSessionJsonl(piDir),
-      await listSessionJsonl(coreDir),
+      coreSessions.map((entry) => ({
+        path: entry.path,
+        name: entry.name,
+        mtimeMs: entry.mtimeMs,
+        segments: entry.segments,
+      })),
       extra,
     ]);
     const hits = await searchSessionFiles({
@@ -2492,15 +2441,15 @@ class PiEditorApp {
     return seq === this.searchSessionsSeq ? hits : [];
   }
 
-  /** Live persist tabs and unrestored roster entries (flat paths still count). */
+  /** Extra Pi sessions from live tabs and unrestored roster entries. */
   private async extraSessionFiles(project: ProjectState): Promise<SessionFileEntry[]> {
     const paths: string[] = [];
     for (const id of project.terminalIds) {
       const inst = this.terminals.get(id);
-      if (inst?.persist && inst.sessionFile) paths.push(inst.sessionFile);
+      if (inst?.persist && inst.engine !== "core" && inst.sessionFile) paths.push(inst.sessionFile);
     }
     for (const rec of project.unrestoredTerminals) {
-      if (rec.sessionFile) paths.push(rec.sessionFile);
+      if (rec.engine !== "core" && rec.sessionFile) paths.push(rec.sessionFile);
     }
     const out: SessionFileEntry[] = [];
     for (const path of paths) {
@@ -3134,6 +3083,11 @@ class PiEditorApp {
       case "preflight_request":
         this.trackRecordingTask(this.handlePreflightRequest(inst, String(event.requestId ?? "")));
         break;
+      case "preflight_cancel": {
+        const pending = event.token ? this.pendingPreflights.get(event.token) : undefined;
+        if (pending?.terminalId === inst.id) this.expirePreflight(event.token!);
+        break;
+      }
       case "prompt": {
         const file = String(event.file ?? "");
         // The payload file must be a plain name inside the events dir.
@@ -3177,7 +3131,7 @@ class PiEditorApp {
       case "session_ready": {
         // The bridge consumed the candidate startup control.
         const readyOk = event.ok === true;
-        this.projectOfTerminal(terminalId)?.worldlines?.onSessionReady(terminalId, readyOk, String(event.error ?? null) || null);
+        this.projectOfTerminal(terminalId)?.worldlines?.onSessionReady(terminalId, readyOk, event.error ?? null);
         break;
       }
       case "agent_settings":
@@ -3243,6 +3197,13 @@ class PiEditorApp {
       case "agent_settled":
         inst.busy = false;
         this.busyAgents.delete(inst.id);
+        if (event.error && inst.currentRun) {
+          inst.currentRun.replayable = false;
+          inst.currentRun.reason = `session storage failed: ${event.error}`;
+          inst.currentRun.settledAt = Date.now();
+          inst.currentRun = null;
+          this.send("worldline:runs-changed", { terminalId: inst.id });
+        }
         this.finalizePlan(inst);
         // A dispatch worker finished: mark the owner task done only when
         // the worker's last file-tool outcomes cover that task's paths.
@@ -3506,15 +3467,15 @@ class PiEditorApp {
         promptPayloadFile: inst.pendingPrompt?.file ?? null,
         promptEventsDir: inst.pendingPrompt?.file ? this.eventsDirOf(inst) : null,
         promptText: inst.pendingPrompt?.text ?? null,
-        promptEntryId: String(event.entryId ?? null) || null,
-        promptParentEntryId: String(event.parentEntryId ?? null) || null,
+        promptEntryId: event.entryId ?? null,
+        promptParentEntryId: event.parentEntryId ?? null,
         settledEntryId: null,
-        sessionFile: String(event.sessionFile ?? null) || null,
+        sessionFile: event.sessionFile ?? null,
         sessionBranchFile: null,
         trusted: typeof event.trusted === "boolean" ? event.trusted : null,
         trustHashes: pending ? pending.trustHashes : null,
-        model: String(event.model ?? null) || null,
-        thinkingLevel: String(event.thinkingLevel ?? null) || null,
+        model: event.model ?? null,
+        thinkingLevel: event.thinkingLevel ?? null,
         replayable: true,
         reason: null,
         interrupted: false,
@@ -3552,15 +3513,15 @@ class PiEditorApp {
         promptPayloadFile: inst.pendingPrompt?.file ?? null,
         promptEventsDir: inst.pendingPrompt?.file ? this.eventsDirOf(inst) : null,
         promptText: inst.pendingPrompt?.text ?? null,
-        promptEntryId: String(event.entryId ?? null) || null,
-        promptParentEntryId: String(event.parentEntryId ?? null) || null,
+        promptEntryId: event.entryId ?? null,
+        promptParentEntryId: event.parentEntryId ?? null,
         settledEntryId: null,
-        sessionFile: String(event.sessionFile ?? null) || null,
+        sessionFile: event.sessionFile ?? null,
         sessionBranchFile: null,
         trusted: typeof event.trusted === "boolean" ? event.trusted : null,
         trustHashes: pending ? pending.trustHashes : null,
-        model: String(event.model ?? null) || null,
-        thinkingLevel: String(event.thinkingLevel ?? null) || null,
+        model: event.model ?? null,
+        thinkingLevel: event.thinkingLevel ?? null,
         replayable: false,
         reason: "the run started without a start preflight",
         interrupted: false,
@@ -3578,12 +3539,10 @@ class PiEditorApp {
     const startedSessionId = String(event.sessionId ?? "") || inst.sessionId;
     if (inst.engine === "core") {
       if (inst.persist) {
-        if (startedSessionId && isCoreSessionId(startedSessionId) && (startedSessionId === inst.sessionId || !this.coreSessionInUse(startedSessionId))) {
+        if (startedSessionId && isCoreSessionId(startedSessionId) && (startedSessionId === inst.sessionId || !this.coreSessionInUse(startedSessionId, inst.cwd))) {
           inst.sessionId = startedSessionId;
         }
-        if (!inst.sessionFile && inst.sessionId) {
-          inst.sessionFile = this.coreSessionFile(inst.sessionId, inst.cwd);
-        }
+        if (inst.sessionId) inst.sessionFile = this.coreSessionFile(inst.sessionId, inst.cwd);
       }
     } else {
       const trusted = this.trustedPiSessionFile(startedSessionFile) ?? this.trustedPiSessionFile(inst.sessionFile);
@@ -3869,12 +3828,21 @@ class PiEditorApp {
       run.replayable = false;
       run.reason = run.reason ?? "the run has no complete source checkpoints";
     }
-    // Copy the session branch into app-private storage.
+    // Materialize the session branch into app-private storage.
     if (run.sessionFile) {
       try {
         mkdirSync(this.sessionWorkspaceDir, { recursive: true, mode: 0o700 });
-        const target = join(this.sessionWorkspaceDir, `${run.id}.jsonl`);
-        await copyFile(run.sessionFile, target, constants.COPYFILE_EXCL);
+        let target: string;
+        if (run.engine === "core") {
+          const through = Number(entryId);
+          if (!Number.isInteger(through) || through < 1) throw new Error("the settled session address is missing");
+          target = bundleSessionFile(this.sessionWorkspaceDir, run.id);
+          const forked = await writeForkedSession(run.sessionFile, target, through);
+          if (!forked.ok) throw new Error(forked.error);
+        } else {
+          target = join(this.sessionWorkspaceDir, `${run.id}.jsonl`);
+          await copyFile(run.sessionFile, target, constants.COPYFILE_EXCL);
+        }
         run.sessionBranchFile = target;
       } catch (err) {
         run.replayable = false;

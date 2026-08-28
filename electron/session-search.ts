@@ -7,10 +7,11 @@
  */
 import { createReadStream } from "node:fs";
 import { readdir, realpath, stat } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 // .ts extensions so the harness can load this file with strip-types.
 import { cleanPlanPathToken, looksLikePath } from "./plan-board.ts";
+import { listCurrentSegments } from "../agent-core/session.ts";
 import type { SessionHit } from "../shared/types.ts";
 
 export const MAX_SESSION_SEARCH_FILES = 50;
@@ -20,7 +21,7 @@ export const MAX_SESSION_SEARCH_LINES = 10_000;
 
 export type SessionMessageParse = { role: string; text: string; paths: string[] };
 
-export type SessionFileEntry = { path: string; name: string; mtimeMs: number };
+export type SessionFileEntry = { path: string; name: string; mtimeMs: number; segments?: string[] };
 
 type CanonicalizePath = (absPath: string) => string;
 
@@ -214,59 +215,84 @@ export async function searchSessionFiles(opts: {
 
   for (const file of opts.files) {
     if (opts.shouldStop?.()) return [];
-    try {
-      const info = await stat(file.path);
-      if (info.size > MAX_SESSION_SEARCH_FILE_BYTES) continue;
-    } catch {
-      continue;
-    }
-
-    const stream = createReadStream(file.path, { encoding: "utf8" });
-    const rl = createInterface({ input: stream, crlfDelay: Infinity });
-    let lineNum = 0;
-    let prevText = "";
-
-    try {
-      for await (const line of rl) {
-        if (opts.shouldStop?.()) {
+    let snapshot = sessionSegmentSnapshot(file);
+    if (!snapshot) continue;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const hitStart = hits.length;
+      let lineNum = 0;
+      let prevText = "";
+      let hitCap = false;
+      for (const segment of snapshot.paths) {
+        if (opts.shouldStop?.()) return [];
+        try {
+          const info = await stat(segment);
+          if (!info.isFile() || info.size > MAX_SESSION_SEARCH_FILE_BYTES) continue;
+        } catch {
+          continue;
+        }
+        const stream = createReadStream(segment, { encoding: "utf8" });
+        const rl = createInterface({ input: stream, crlfDelay: Infinity });
+        try {
+          for await (const line of rl) {
+            if (opts.shouldStop?.()) {
+              rl.close();
+              stream.destroy();
+              return [];
+            }
+            lineNum++;
+            if (lineNum > MAX_SESSION_SEARCH_LINES) break;
+            const parsed = parseSessionMessageLine(line);
+            if (parsed) {
+              const matchIdx = parsed.text.toLowerCase().indexOf(needle);
+              if (matchIdx !== -1) {
+                const hitPath = resolveSessionHitPath(parsed, opts.projectCwd, opts.canonicalize, opts.isProjectFile);
+                hits.push({
+                  sessionFile: file.name,
+                  line: lineNum,
+                  text: formatSessionHitSnippet(parsed.role, parsed.text, matchIdx, needle.length),
+                  before: prevText,
+                  after: "",
+                  ts: sessionFileTime(file.name, file.mtimeMs),
+                  filePath: hitPath ?? undefined,
+                });
+                if (hits.length >= MAX_SESSION_SEARCH_HITS) {
+                  hitCap = true;
+                  break;
+                }
+              }
+              prevText = `[${parsed.role}] ${parsed.text.slice(0, 120)}`;
+            }
+            if (lineNum % 256 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+          }
+        } catch {
+          /* skip read errors */
+        } finally {
           rl.close();
           stream.destroy();
-          return [];
         }
-        lineNum++;
-        if (lineNum > MAX_SESSION_SEARCH_LINES) break;
-        const parsed = parseSessionMessageLine(line);
-        if (!parsed) continue;
-
-        const matchIdx = parsed.text.toLowerCase().indexOf(needle);
-        if (matchIdx !== -1) {
-          const hitPath = resolveSessionHitPath(parsed, opts.projectCwd, opts.canonicalize, opts.isProjectFile);
-          hits.push({
-            sessionFile: file.name,
-            line: lineNum,
-            text: formatSessionHitSnippet(parsed.role, parsed.text, matchIdx, needle.length),
-            before: prevText,
-            after: "",
-            ts: sessionFileTime(file.name, file.mtimeMs),
-            filePath: hitPath ?? undefined,
-          });
-          if (hits.length >= MAX_SESSION_SEARCH_HITS) {
-            rl.close();
-            stream.destroy();
-            return hits;
-          }
-        }
-        prevText = `[${parsed.role}] ${parsed.text.slice(0, 120)}`;
+        if (hitCap || lineNum > MAX_SESSION_SEARCH_LINES) break;
       }
-    } catch {
-      /* skip read errors */
-    } finally {
-      rl.close();
-      stream.destroy();
+      const next = sessionSegmentSnapshot(file);
+      if (!file.segments || !next || next.key === snapshot.key) {
+        if (hitCap) return hits;
+        break;
+      }
+      hits.splice(hitStart);
+      if (attempt === 1) break;
+      snapshot = next;
     }
-
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
 
   return opts.shouldStop?.() ? [] : hits;
+}
+
+function sessionSegmentSnapshot(file: SessionFileEntry): { paths: string[]; key: string } | null {
+  if (!file.segments) return { paths: [file.path], key: file.path };
+  const listing = listCurrentSegments(dirname(file.path));
+  if (!listing.ok) return null;
+  const paths = listing.parts.map((part) => part.path);
+  if (listing.active) paths.push(listing.active.path);
+  const key = paths.join("\n");
+  return { paths, key };
 }

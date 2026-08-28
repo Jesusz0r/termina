@@ -17,6 +17,7 @@ import {
   closeSync,
   existsSync,
   fstatSync,
+  ftruncateSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -238,8 +239,16 @@ export function sessionBundleHasContent(sessionFile: string): boolean {
   const parsed = parseSessionBundlePath(sessionFile);
   if (!parsed) return false;
   const listing = listCurrentSegments(parsed.currentDir);
-  if (!listing.ok) return false;
+  if (!listing.ok) return inspectEntry(parsed.currentDir) !== null;
   return currentHasContent(listing);
+}
+
+export function sessionBundleBytes(sessionFile: string): number | null {
+  const parsed = parseSessionBundlePath(sessionFile);
+  if (!parsed) return null;
+  const listing = listCurrentSegments(parsed.currentDir);
+  if (!listing.ok) return null;
+  return listing.parts.reduce((total, part) => total + part.size, listing.active?.size ?? 0);
 }
 
 function uniqueSiblingDir(parent: string, prefix: string, stamp: string): string {
@@ -316,6 +325,12 @@ function recoverActiveSegment(currentDir: string, sessionFile: string): SessionR
 export function ensureSessionBundle(sessionFile: string): SessionResult<SessionBundlePaths> {
   const parsed = parseSessionBundlePath(sessionFile);
   if (!parsed) return { ok: false, error: "session path is not a core session bundle" };
+  const project = inspectEntry(parsed.projectDir);
+  if (project?.kind === "symlink") return { ok: false, error: "session project directory is a symlink" };
+  if (project && project.kind !== "dir") return { ok: false, error: "session project path is not a directory" };
+  const bundle = inspectEntry(parsed.bundleDir);
+  if (bundle?.kind === "symlink") return { ok: false, error: "session bundle is a symlink" };
+  if (bundle && bundle.kind !== "dir") return { ok: false, error: "session bundle is not a directory" };
   const current = inspectEntry(parsed.currentDir);
   if (!current) {
     const created = createCurrentDir(parsed.currentDir, parsed.sessionFile);
@@ -332,6 +347,12 @@ export function ensureSessionBundle(sessionFile: string): SessionResult<SessionB
 export function prepareFreshSession(sessionFile: string, now = Date.now()): SessionResult<{ archived: string | null }> {
   const parsed = parseSessionBundlePath(sessionFile);
   if (!parsed) return { ok: false, error: "session path is not a core session bundle" };
+  const project = inspectEntry(parsed.projectDir);
+  if (project?.kind === "symlink") return { ok: false, error: "session project directory is a symlink" };
+  if (project && project.kind !== "dir") return { ok: false, error: "session project path is not a directory" };
+  const bundle = inspectEntry(parsed.bundleDir);
+  if (bundle?.kind === "symlink") return { ok: false, error: "session bundle is a symlink" };
+  if (bundle && bundle.kind !== "dir") return { ok: false, error: "session bundle is not a directory" };
   const current = inspectEntry(parsed.currentDir);
   if (!current) {
     const created = createCurrentDir(parsed.currentDir, parsed.sessionFile);
@@ -370,12 +391,41 @@ export function quarantineSessionBundle(sessionFile: string, now = Date.now()): 
   return renameCurrentUnique(parsed.currentDir, BAD_PREFIX, now);
 }
 
-export function removeSessionBundle(sessionFile: string): SessionResult {
+export async function removeSessionBundle(sessionFile: string): Promise<SessionResult> {
   const parsed = parseSessionBundlePath(sessionFile);
   if (!parsed) return { ok: false, error: "session path is not a core session bundle" };
   try {
-    rmSync(parsed.bundleDir, { recursive: true, force: true });
+    await rm(parsed.bundleDir, { recursive: true, force: true });
     return { ok: true };
+  } catch (err) {
+    return { ok: false, error: errMsg(err) };
+  }
+}
+
+export function removeEmptySessionBundle(sessionFile: string): SessionResult<{ removed: boolean }> {
+  const parsed = parseSessionBundlePath(sessionFile);
+  if (!parsed) return { ok: false, error: "session path is not a core session bundle" };
+  const bundle = inspectEntry(parsed.bundleDir);
+  if (!bundle) return { ok: true, removed: false };
+  if (bundle.kind !== "dir") return { ok: false, error: "session bundle is not a directory" };
+  let bundleNames: string[];
+  let currentNames: string[];
+  try {
+    bundleNames = readdirSync(parsed.bundleDir);
+    currentNames = readdirSync(parsed.currentDir);
+  } catch (err) {
+    return { ok: false, error: errMsg(err) };
+  }
+  if (bundleNames.length !== 1 || bundleNames[0] !== CURRENT_DIR) return { ok: true, removed: false };
+  if (currentNames.length !== 1 || currentNames[0] !== ACTIVE_NAME) return { ok: true, removed: false };
+  const listing = listCurrentSegments(parsed.currentDir);
+  if (!listing.ok) return { ok: false, error: listing.error };
+  if (!listing.active || listing.active.size !== 0 || listing.parts.length > 0 || listing.images.length > 0) {
+    return { ok: true, removed: false };
+  }
+  try {
+    rmSync(parsed.bundleDir, { recursive: true, force: true });
+    return { ok: true, removed: true };
   } catch (err) {
     return { ok: false, error: errMsg(err) };
   }
@@ -493,7 +543,10 @@ export function applySessionRecord(state: ReplayState, rec: unknown): SessionRes
   }
   state.lastSeq = e.storageSeq;
   state.maxSeq = e.storageSeq;
-  if (e.type === "checkpoint") return { ok: true };
+  if (e.type === "checkpoint") {
+    if ("message" in e) return { ok: false, error: "checkpoint contains a message" };
+    return { ok: true };
+  }
   if (e.type === "message") {
     const role = e.message?.role;
     if (role !== "user" && role !== "assistant") return { ok: false, error: "invalid message role" };
@@ -504,28 +557,33 @@ export function applySessionRecord(state: ReplayState, rec: unknown): SessionRes
     return { ok: true };
   }
   if (e.type === "revision" && e.kind === "prune" && Array.isArray(e.targets)) {
-    const ordered = e.targets.slice().sort((a, b) => {
-      const as = (a as { sseq?: number })?.sseq ?? 0;
-      const bs = (b as { sseq?: number })?.sseq ?? 0;
-      if (as !== bs) return as - bs;
-      return ((b as { blockIndex?: number })?.blockIndex ?? 0) - ((a as { blockIndex?: number })?.blockIndex ?? 0);
-    });
-    for (const raw of ordered) {
+    const targets: Array<{ sseq: number; blockIndex: number; action: "drop" | "stub" }> = [];
+    for (const raw of e.targets) {
       const t = raw as { sseq?: unknown; blockIndex?: unknown; action?: unknown };
-      if (!t || !Number.isInteger(t.sseq) || (t.sseq as number) < 1 || !Number.isInteger(t.blockIndex) || (t.blockIndex as number) < 0) {
+      if (
+        !t ||
+        !Number.isInteger(t.sseq) ||
+        (t.sseq as number) < 1 ||
+        !Number.isInteger(t.blockIndex) ||
+        (t.blockIndex as number) < 0 ||
+        (t.action !== "drop" && t.action !== "stub")
+      ) {
         return { ok: false, error: "invalid prune target" };
       }
-      const m = state.bySeq.get(t.sseq as number);
+      targets.push({ sseq: t.sseq as number, blockIndex: t.blockIndex as number, action: t.action });
+    }
+    targets.sort((a, b) => a.sseq - b.sseq || b.blockIndex - a.blockIndex);
+    for (const t of targets) {
+      const m = state.bySeq.get(t.sseq);
       if (!m || typeof m.content === "string") continue;
-      const action = t.action === "drop" ? "drop" : "stub";
-      if (action === "drop") {
-        const b = m.content[t.blockIndex as number] as Record<string, unknown> | undefined;
+      if (t.action === "drop") {
+        const b = m.content[t.blockIndex] as Record<string, unknown> | undefined;
         if (!b || !isThinkingBlock(b)) continue;
         if (m.content.filter((x) => !isThinkingBlock(x as { type?: string })).length === 0) continue;
-        m.content.splice(t.blockIndex as number, 1);
+        m.content.splice(t.blockIndex, 1);
         continue;
       }
-      const b = m.content[t.blockIndex as number] as Record<string, unknown> | undefined;
+      const b = m.content[t.blockIndex] as Record<string, unknown> | undefined;
       if (!b || b.type !== "tool_result" || b.stubbed) continue;
       const stub = formatStub({
         chars: blockChars(b),
@@ -547,19 +605,20 @@ export function applySessionRecord(state: ReplayState, rec: unknown): SessionRes
     return { ok: true };
   }
   if (e.type === "revision" && e.kind === "summarize") {
-    if (typeof e.summarySseq !== "number" || !Number.isInteger(e.summarySseq) || e.summarySseq < 1) {
+    if (e.summarySseq !== e.storageSeq) {
       return { ok: false, error: "invalid summarize revision" };
     }
-    if (typeof e.evicted !== "number" || !Number.isInteger(e.evicted) || e.evicted < 0) {
+    if (typeof e.evicted !== "number" || !Number.isInteger(e.evicted) || e.evicted < 0 || e.evicted > state.messages.length) {
       return { ok: false, error: "invalid summarize revision" };
     }
-    const idx = state.messages.findIndex((m) => m.sseq === e.summarySseq);
-    if (idx < 0) return { ok: false, error: "summarize handoff missing" };
-    if (idx < e.evicted) return { ok: false, error: "summarize handoff inside evicted span" };
-    const handoff = state.messages.splice(idx, 1)[0]!;
+    if (e.message?.role !== "user" || !isReplayContent(e.message.content)) {
+      return { ok: false, error: "invalid summarize handoff" };
+    }
     const removed = state.messages.splice(0, e.evicted);
     for (const m of removed) dropIndexedMessage(state, m);
+    const handoff: ReplayMessage = { role: "user", content: e.message.content, sseq: e.storageSeq };
     state.messages.unshift(handoff);
+    state.bySeq.set(handoff.sseq, handoff);
     return { ok: true };
   }
   return { ok: false, error: "unknown session record type" };
@@ -636,6 +695,15 @@ async function readSegmentIntoState(
       if (n > 0) pending = Buffer.concat([pending, chunk.subarray(0, n)]);
       for (;;) {
         const nl = pending.indexOf(0x0a);
+        if (atEnd && nl < 0 && pending.length > 0) {
+          if (pending.length > MAX_SESSION_RECORD_BYTES) {
+            return { ok: false, error: "oversized session record" };
+          }
+          if (!allowTruncatedTail) return { ok: false, error: "truncated session record" };
+          bytes += pending.length;
+          pending = Buffer.alloc(0);
+          break;
+        }
         const taken = takeFramedLine(pending, atEnd && nl < 0, allowTruncatedTail);
         pending = taken.rest;
         const parsed = taken.done ?? (taken.line ? parseFramedLine(taken.line) : null);
@@ -704,28 +772,91 @@ export function replaySessionRecords(text: string): SessionResult<{ messages: Re
 export async function replaySessionBundle(
   sessionFile: string,
   opts?: { throughSeq?: number },
-): Promise<SessionResult<{ messages: ReplayMessage[]; maxSeq: number; state: ReplayState }>> {
+): Promise<SessionResult<{ messages: ReplayMessage[]; maxSeq: number; state: ReplayState; stopped: boolean }>> {
   const parsed = parseSessionBundlePath(sessionFile);
   if (!parsed) return { ok: false, error: "session path is not a core session bundle" };
+  const project = inspectEntry(parsed.projectDir);
+  if (!project) return { ok: false, error: "session project directory is missing" };
+  if (project.kind === "symlink") return { ok: false, error: "session project directory is a symlink" };
+  if (project.kind !== "dir") return { ok: false, error: "session project path is not a directory" };
+  const bundle = inspectEntry(parsed.bundleDir);
+  if (!bundle) return { ok: false, error: "session bundle is missing" };
+  if (bundle.kind === "symlink") return { ok: false, error: "session bundle is a symlink" };
+  if (bundle.kind !== "dir") return { ok: false, error: "session bundle is not a directory" };
   const current = inspectEntry(parsed.currentDir);
   if (!current) return { ok: false, error: "current directory is missing" };
   if (current.kind === "symlink") return { ok: false, error: "current directory is a symlink" };
   if (current.kind !== "dir") return { ok: false, error: "current is not a directory" };
-  const listing = listCurrentSegments(parsed.currentDir);
-  if (!listing.ok) return listing;
-  const recovered = listing.active ? listing : recoverActiveSegment(parsed.currentDir, parsed.sessionFile);
-  if (!recovered.ok) return recovered;
-  const state = createReplayState();
-  for (const part of recovered.parts) {
-    const got = await readSegmentIntoState(part.path, state, false, opts?.throughSeq);
-    if (!got.ok) return got;
-    if (got.stop) return { ok: true, messages: state.messages, maxSeq: state.maxSeq, state };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const listing = listCurrentSegments(parsed.currentDir);
+    if (!listing.ok) return listing;
+    const recovered = listing.active ? listing : recoverActiveSegment(parsed.currentDir, parsed.sessionFile);
+    if (!recovered.ok) return recovered;
+    const identity = [...recovered.parts.map((part) => part.path), ...(recovered.active ? [recovered.active.path] : [])].join("\n");
+    const state = createReplayState();
+    let stopped = false;
+    let retry = false;
+    for (const part of recovered.parts) {
+      const got = await readSegmentIntoState(part.path, state, false, opts?.throughSeq);
+      if (!got.ok) {
+        if (attempt < 2) {
+          retry = true;
+          break;
+        }
+        return got;
+      }
+      if (got.stop) {
+        stopped = true;
+        break;
+      }
+    }
+    if (retry) continue;
+    if (!stopped && recovered.active) {
+      const got = await readSegmentIntoState(recovered.active.path, state, true, opts?.throughSeq);
+      if (!got.ok) {
+        if (attempt < 2) continue;
+        return got;
+      }
+      stopped = got.stop;
+    }
+    if (stopped) return { ok: true, messages: state.messages, maxSeq: state.maxSeq, state, stopped: true };
+    const after = listCurrentSegments(parsed.currentDir);
+    if (!after.ok) return after;
+    const afterIdentity = [...after.parts.map((part) => part.path), ...(after.active ? [after.active.path] : [])].join("\n");
+    if (identity === afterIdentity) return { ok: true, messages: state.messages, maxSeq: state.maxSeq, state, stopped: false };
   }
-  if (recovered.active) {
-    const got = await readSegmentIntoState(recovered.active.path, state, true, opts?.throughSeq);
-    if (!got.ok) return got;
+  return { ok: false, error: "session segments changed during replay" };
+}
+
+function discardIncompleteActiveTail(path: string): SessionResult<{ size: number }> {
+  let fd: number | null = null;
+  try {
+    fd = openSync(path, "r+");
+    const size = fstatSync(fd).size;
+    if (size === 0) return { ok: true, size: 0 };
+    const last = Buffer.allocUnsafe(1);
+    readSync(fd, last, 0, 1, size - 1);
+    if (last[0] === 0x0a) return { ok: true, size };
+    let cursor = size;
+    while (cursor > 0) {
+      const start = Math.max(0, cursor - READ_CHUNK);
+      const chunk = Buffer.allocUnsafe(cursor - start);
+      const read = readSync(fd, chunk, 0, chunk.length, start);
+      const newline = chunk.subarray(0, read).lastIndexOf(0x0a);
+      if (newline >= 0) {
+        const durableSize = start + newline + 1;
+        ftruncateSync(fd, durableSize);
+        return { ok: true, size: durableSize };
+      }
+      cursor = start;
+    }
+    ftruncateSync(fd, 0);
+    return { ok: true, size: 0 };
+  } catch (err) {
+    return { ok: false, error: errMsg(err) };
+  } finally {
+    if (fd !== null) closeSync(fd);
   }
-  return { ok: true, messages: state.messages, maxSeq: state.maxSeq, state };
 }
 
 function encodeRecord(record: Record<string, unknown>): SessionResult<{ line: Buffer }> {
@@ -746,13 +877,16 @@ export class SessionWriter {
   private fd: number | null = null;
   private activeBytes = 0;
   private nextPart = 1;
+  private lastStorageSeq: number;
 
-  private constructor(sessionFile: string, currentDir: string) {
+  private constructor(sessionFile: string, currentDir: string, lastStorageSeq: number) {
     this.sessionFile = sessionFile;
     this.currentDir = currentDir;
+    this.lastStorageSeq = lastStorageSeq;
   }
 
-  static open(sessionFile: string): SessionResult<{ writer: SessionWriter }> {
+  static open(sessionFile: string, lastStorageSeq: number): SessionResult<{ writer: SessionWriter }> {
+    if (!Number.isInteger(lastStorageSeq) || lastStorageSeq < 0) return { ok: false, error: "invalid lastStorageSeq" };
     const ensured = ensureSessionBundle(sessionFile);
     if (!ensured.ok) return ensured;
     const listing = listCurrentSegments(ensured.currentDir);
@@ -760,8 +894,10 @@ export class SessionWriter {
     const recovered = listing.active ? listing : recoverActiveSegment(ensured.currentDir, ensured.sessionFile);
     if (!recovered.ok) return recovered;
     if (!recovered.active) return { ok: false, error: "active segment is missing" };
-    const writer = new SessionWriter(ensured.sessionFile, ensured.currentDir);
-    writer.activeBytes = recovered.active.size;
+    const repaired = discardIncompleteActiveTail(ensured.sessionFile);
+    if (!repaired.ok) return repaired;
+    const writer = new SessionWriter(ensured.sessionFile, ensured.currentDir, lastStorageSeq);
+    writer.activeBytes = repaired.size;
     writer.nextPart = recovered.parts.length > 0 ? recovered.parts[recovered.parts.length - 1]!.n + 1 : 1;
     try {
       writer.fd = openSync(ensured.sessionFile, "a", 0o600);
@@ -833,6 +969,9 @@ export class SessionWriter {
     if (typeof record.storageSeq !== "number" || !Number.isInteger(record.storageSeq) || record.storageSeq < 1) {
       return { ok: false, error: "invalid storageSeq" };
     }
+    if (record.storageSeq <= this.lastStorageSeq) {
+      return { ok: false, error: record.storageSeq === this.lastStorageSeq ? "duplicate storageSeq" : "decreasing storageSeq" };
+    }
     const encoded = encodeRecord(record);
     if (!encoded.ok) return encoded;
     if (this.activeBytes + encoded.line.length > MAX_SESSION_SEGMENT_BYTES) {
@@ -844,8 +983,14 @@ export class SessionWriter {
       if (!opened.ok) return opened;
     }
     try {
-      writeSync(this.fd!, encoded.line);
+      let offset = 0;
+      while (offset < encoded.line.length) {
+        const written = writeSync(this.fd!, encoded.line, offset, encoded.line.length - offset);
+        if (written === 0) return { ok: false, error: "could not write the session record" };
+        offset += written;
+      }
       this.activeBytes += encoded.line.length;
+      this.lastStorageSeq = record.storageSeq;
       return { ok: true, storageSeq: record.storageSeq };
     } catch (err) {
       return { ok: false, error: errMsg(err) };
@@ -887,9 +1032,11 @@ async function copyReferencedImages(sourceCurrent: string, destCurrent: string, 
 export async function writeForkedSession(
   sourcePath: string,
   destPath: string,
-  throughSeq: number,
+  throughSeq?: number,
 ): Promise<SessionResult<{ kept: number }>> {
-  if (!Number.isInteger(throughSeq) || throughSeq < 0) return { ok: false, error: "invalid throughSeq" };
+  if (throughSeq !== undefined && (!Number.isInteger(throughSeq) || throughSeq < 0)) {
+    return { ok: false, error: "invalid throughSeq" };
+  }
   const source = parseSessionBundlePath(sourcePath);
   const dest = parseSessionBundlePath(destPath);
   if (!source) return { ok: false, error: "source path is not a core session bundle" };
@@ -897,12 +1044,14 @@ export async function writeForkedSession(
   if (throughSeq === 0) {
     return materializeEmptyFork(dest);
   }
-  const replayed = await replaySessionBundle(source.sessionFile, { throughSeq });
+  const replayed = await replaySessionBundle(source.sessionFile, throughSeq === undefined ? undefined : { throughSeq });
   if (!replayed.ok) return replayed;
-  if (throughSeq > replayed.maxSeq) return { ok: false, error: "fork point is beyond the source maximum" };
+  const targetSeq = throughSeq ?? replayed.maxSeq;
+  if (targetSeq === 0) return materializeEmptyFork(dest);
+  if (targetSeq > replayed.maxSeq && !replayed.stopped) return { ok: false, error: "fork point is beyond the source maximum" };
   const images = referencedImageNames(replayed.messages);
   if (!images.ok) return images;
-  return materializeVisibleFork(source, dest, replayed.messages, throughSeq, images.names);
+  return materializeVisibleFork(source, dest, replayed.messages, targetSeq, images.names);
 }
 
 async function materializeEmptyFork(dest: SessionBundlePaths): Promise<SessionResult<{ kept: number }>> {
@@ -931,7 +1080,7 @@ async function materializeVisibleFork(
   const tmpFile = join(tmpCurrent, ACTIVE_NAME);
   try {
     await mkdir(tmpCurrent, { recursive: true, mode: 0o700 });
-    const opened = SessionWriter.open(tmpFile);
+    const opened = SessionWriter.open(tmpFile, 0);
     if (!opened.ok) {
       await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
       return opened;

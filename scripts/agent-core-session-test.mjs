@@ -18,6 +18,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const session = await import("../agent-core/session.ts");
+const host = await import("../agent-core/host.ts");
 const {
   MAX_SESSION_RECORD_BYTES,
   MAX_SESSION_SEGMENT_BYTES,
@@ -29,6 +30,7 @@ const {
   listLogicalSessions,
   prepareFreshSession,
   quarantineSessionBundle,
+  removeEmptySessionBundle,
   replaySessionBundle,
   replaySessionRecords,
   resolveSessionFile,
@@ -48,8 +50,8 @@ function bundlePaths(root, id) {
   return { sessionFile, currentDir: dirname(sessionFile), bundleDir: join(root, id) };
 }
 
-function openWriter(sessionFile) {
-  const opened = SessionWriter.open(sessionFile);
+function openWriter(sessionFile, lastStorageSeq = 0) {
+  const opened = SessionWriter.open(sessionFile, lastStorageSeq);
   if (!opened.ok) throw new Error(opened.error);
   return opened.writer;
 }
@@ -63,7 +65,7 @@ function fillRecord(sseq, bytes) {
   return { storageSeq: sseq, type: "message", message: { role: "user", content: pad } };
 }
 
-function spawnCore(env, args = [], stdinLines = []) {
+function spawnCore(env, args = [], stdinLines = [], opts = {}) {
   const src = join(dirname(fileURLToPath(import.meta.url)), "..", "agent-core", "main.ts");
   return new Promise((resolve) => {
     const child = spawn(process.execPath, ["--experimental-strip-types", "--no-warnings", src, ...args], {
@@ -78,6 +80,23 @@ function spawnCore(env, args = [], stdinLines = []) {
     child.stderr.on("data", (d) => {
       err += d.toString();
     });
+    const ackTimer = opts.autoAck
+      ? setInterval(() => {
+          try {
+            const sidecar = readFileSync(join(env.TERMINA_EVENTS_DIR, `${env.TERMINA_TERMINAL_ID}.jsonl`), "utf8");
+            const records = sidecar.trim().split("\n").map((line) => JSON.parse(line));
+            const request = records.findLast((record) => record.t === "preflight_request");
+            if (request?.requestId) {
+              writeFileSync(
+                host.ackPath(env.TERMINA_EVENTS_DIR, env.TERMINA_TERMINAL_ID, request.requestId),
+                JSON.stringify({ ok: true, ...(opts.ackPayload ?? {}) }),
+              );
+            }
+          } catch {
+            /* Wait until the preflight request is visible. */
+          }
+        }, 10)
+      : null;
     if (stdinLines.length) child.stdin.write(stdinLines.join("\n") + "\n");
     child.stdin.end();
     const timer = setTimeout(() => {
@@ -86,6 +105,7 @@ function spawnCore(env, args = [], stdinLines = []) {
     }, 12_000);
     child.on("exit", (code) => {
       clearTimeout(timer);
+      if (ackTimer) clearInterval(ackTimer);
       resolve({ out, err, code });
     });
   });
@@ -94,6 +114,10 @@ function spawnCore(env, args = [], stdinLines = []) {
 export async function run({ check, leftovers }) {
   const root = mkdtempSync(join(tmpdir(), "agent-core-session-"));
   leftovers.push(root);
+
+  const firstSession = coreSessionFile(join(root, "first-project"), "first-session");
+  const firstPrepared = prepareFreshSession(firstSession);
+  check("fresh session creates a missing project session directory", firstPrepared.ok && existsSync(firstSession));
 
   const roll = bundlePaths(root, "roll-1");
   mkdirSync(roll.currentDir, { recursive: true, mode: 0o700 });
@@ -193,6 +217,21 @@ export async function run({ check, leftovers }) {
     gapReplay.ok && gapReplay.maxSeq === 15 && gapReplay.messages.some((m) => m.content === "gap-ok"),
   );
 
+  const writerOrder = bundlePaths(root, "writer-order");
+  const writerOrderHandle = openWriter(writerOrder.sessionFile);
+  const writerFirst = writerOrderHandle.appendRecord({ storageSeq: 2, type: "checkpoint" });
+  const writerDuplicate = writerOrderHandle.appendRecord({ storageSeq: 2, type: "checkpoint" });
+  const writerDecrease = writerOrderHandle.appendRecord({ storageSeq: 1, type: "checkpoint" });
+  writerOrderHandle.close();
+  check(
+    "writer rejects duplicate and decreasing sequence addresses",
+    writerFirst.ok && writerDuplicate.ok === false && writerDecrease.ok === false,
+  );
+  const checkpointWithMessage = replaySessionRecords(
+    JSON.stringify({ storageSeq: 1, type: "checkpoint", message: { role: "user", content: "hidden" } }),
+  );
+  check("checkpoint records cannot hide a message", checkpointWithMessage.ok === false);
+
   const dec = bundlePaths(root, "dec-1");
   mkdirSync(dec.currentDir, { recursive: true, mode: 0o700 });
   const decWriter = openWriter(dec.sessionFile);
@@ -237,6 +276,29 @@ export async function run({ check, leftovers }) {
   );
   const truncActiveReplay = await replaySessionBundle(truncActive.sessionFile);
   check("truncated active tail is ignored", truncActiveReplay.ok && truncActiveReplay.messages[0]?.content === "keep");
+  const truncActiveOpen = SessionWriter.open(truncActive.sessionFile, 1);
+  const truncActiveAppend = truncActiveOpen.ok
+    ? truncActiveOpen.writer.appendRecord({ storageSeq: 2, type: "message", message: { role: "assistant", content: "after" } })
+    : truncActiveOpen;
+  if (truncActiveOpen.ok) truncActiveOpen.writer.close();
+  const truncActiveAfter = await replaySessionBundle(truncActive.sessionFile);
+  check(
+    "writer removes a truncated active tail before appending",
+    truncActiveAppend.ok && truncActiveAfter.ok && truncActiveAfter.maxSeq === 2 && truncActiveAfter.messages[1]?.content === "after",
+  );
+
+  const validTruncActive = bundlePaths(root, "trunc-valid-a");
+  mkdirSync(validTruncActive.currentDir, { recursive: true, mode: 0o700 });
+  writeFileSync(
+    validTruncActive.sessionFile,
+    JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "not durable" } }),
+    { mode: 0o600 },
+  );
+  const validTruncActiveReplay = await replaySessionBundle(validTruncActive.sessionFile);
+  check(
+    "active record without a newline is ignored even when its JSON is complete",
+    validTruncActiveReplay.ok && validTruncActiveReplay.messages.length === 0 && validTruncActiveReplay.maxSeq === 0,
+  );
 
   const truncPart = bundlePaths(root, "trunc-p");
   mkdirSync(truncPart.currentDir, { recursive: true, mode: 0o700 });
@@ -249,6 +311,20 @@ export async function run({ check, leftovers }) {
   const truncPartReplay = await replaySessionBundle(truncPart.sessionFile);
   check("truncated immutable part is rejected", truncPartReplay.ok === false && String(truncPartReplay.error).includes("truncated"));
 
+  const validTruncPart = bundlePaths(root, "trunc-valid-p");
+  mkdirSync(validTruncPart.currentDir, { recursive: true, mode: 0o700 });
+  writeFileSync(
+    join(validTruncPart.currentDir, "part-000001.jsonl"),
+    JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "not durable" } }),
+    { mode: 0o600 },
+  );
+  writeFileSync(validTruncPart.sessionFile, "", { mode: 0o600 });
+  const validTruncPartReplay = await replaySessionBundle(validTruncPart.sessionFile);
+  check(
+    "immutable record without a newline is rejected even when its JSON is complete",
+    validTruncPartReplay.ok === false && String(validTruncPartReplay.error).includes("truncated"),
+  );
+
   const crash1 = bundlePaths(root, "crash-1");
   mkdirSync(crash1.currentDir, { recursive: true, mode: 0o700 });
   const c1w = openWriter(crash1.sessionFile);
@@ -257,7 +333,7 @@ export async function run({ check, leftovers }) {
   writeFileSync(join(crash1.currentDir, "part-000001.jsonl"), readFileSync(crash1.sessionFile));
   writeFileSync(crash1.sessionFile, "");
   const crash1Replay = await replaySessionBundle(crash1.sessionFile);
-  const crash1Open = SessionWriter.open(crash1.sessionFile);
+  const crash1Open = SessionWriter.open(crash1.sessionFile, 1);
   check(
     "crash after rename recovers an empty active segment",
     crash1Replay.ok && crash1Replay.messages[0]?.content === "before-roll" && crash1Open.ok && crash1Open.writer.activeSize === 0,
@@ -271,7 +347,7 @@ export async function run({ check, leftovers }) {
   c2w.close();
   writeFileSync(join(crash2.currentDir, "part-000001.jsonl"), readFileSync(crash2.sessionFile));
   writeFileSync(crash2.sessionFile, "", { mode: 0o600 });
-  const c2w2 = openWriter(crash2.sessionFile);
+  const c2w2 = openWriter(crash2.sessionFile, 1);
   check("crash after new active before append leaves an empty valid segment", c2w2.activeSize === 0);
   const more = c2w2.appendRecord({ storageSeq: 2, type: "message", message: { role: "user", content: "next" } });
   c2w2.close();
@@ -290,15 +366,14 @@ export async function run({ check, leftovers }) {
       }),
       JSON.stringify({ storageSeq: 2, type: "message", message: { role: "user", content: "old" } }),
       JSON.stringify({ storageSeq: 3, type: "message", message: { role: "user", content: "tail" } }),
-      JSON.stringify({ storageSeq: 4, type: "message", message: { role: "user", content: "<context-handoff>\nkeep\n</context-handoff>" } }),
     ].join("\n") + "\n",
     { mode: 0o600 },
   );
   writeFileSync(
     rev.sessionFile,
     [
-      JSON.stringify({ storageSeq: 6, type: "revision", kind: "prune", targets: [{ sseq: 1, blockIndex: 0 }] }),
-      JSON.stringify({ storageSeq: 7, type: "revision", kind: "summarize", evicted: 2, summarySseq: 4 }),
+      JSON.stringify({ storageSeq: 6, type: "revision", kind: "prune", targets: [{ sseq: 1, blockIndex: 0, action: "stub" }] }),
+      JSON.stringify({ storageSeq: 7, type: "revision", kind: "summarize", evicted: 2, summarySseq: 7, message: { role: "user", content: "<context-handoff>\nkeep\n</context-handoff>" } }),
       JSON.stringify({ storageSeq: 8, type: "revision", kind: "truncate", dropped: 1 }),
     ].join("\n") + "\n",
     { mode: 0o600 },
@@ -318,10 +393,17 @@ export async function run({ check, leftovers }) {
         type: "message",
         message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "BODY", tool: "bash", repro: "bash x" }] },
       }),
-      JSON.stringify({ storageSeq: 2, type: "revision", kind: "prune", targets: [{ sseq: 1, blockIndex: 0 }] }),
+      JSON.stringify({ storageSeq: 2, type: "revision", kind: "prune", targets: [{ sseq: 1, blockIndex: 0, action: "stub" }] }),
     ].join("\n"),
   );
   check("prune revision stubs a tool result", pruneReplay.ok && String(pruneReplay.messages[0]?.content[0]?.content ?? "").includes("storageSeq 1"));
+  const badPruneReplay = replaySessionRecords(
+    [
+      JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: [{ type: "tool_result", content: "BODY" }] } }),
+      JSON.stringify({ storageSeq: 2, type: "revision", kind: "prune", targets: [{ sseq: 1, blockIndex: 0, action: "unknown" }] }),
+    ].join("\n"),
+  );
+  check("unknown prune actions fail before replay mutation", badPruneReplay.ok === false);
 
   const evict = bundlePaths(root, "evict-1");
   mkdirSync(evict.currentDir, { recursive: true, mode: 0o700 });
@@ -346,7 +428,7 @@ export async function run({ check, leftovers }) {
   failW.appendRecord({ storageSeq: 1, type: "message", message: { role: "user", content: "ok" } });
   failW.close();
   chmodSync(fail.sessionFile, 0o444);
-  const failW2 = SessionWriter.open(fail.sessionFile);
+  const failW2 = SessionWriter.open(fail.sessionFile, 1);
   let failAppend = { ok: false, error: "writer did not open" };
   if (failW2.ok) {
     failAppend = failW2.writer.appendRecord({ storageSeq: 2, type: "message", message: { role: "user", content: "nope" } });
@@ -383,6 +465,50 @@ export async function run({ check, leftovers }) {
     !sidecar.includes('"t":"agent_start"') && stored.out.includes("did not start"),
   );
 
+  const pendingEvents = mkdtempSync(join(tmpdir(), "agent-core-pending-store-"));
+  leftovers.push(pendingEvents);
+  const pendingId = "pending-store-1";
+  const terminalId = "term-1";
+  const pendingBatch = await host.appendPendingImages(pendingEvents, terminalId, [
+    { bytes: png1x1, mediaType: "image/png", id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" },
+  ]);
+  const oversizedPrompt = "x".repeat(MAX_SESSION_RECORD_BYTES);
+  const pendingRun = await spawnCore(
+    {
+      TERMINA_EVENTS_DIR: pendingEvents,
+      TERMINA_TERMINAL_ID: terminalId,
+      TERMINA_CORE_SESSION_ID: pendingId,
+    },
+    [],
+    [oversizedPrompt],
+    { autoAck: true },
+  );
+  const pendingAfterFailure = await host.pendingImageState(pendingEvents, terminalId);
+  check(
+    "storage failure keeps pending images until the message is durable",
+    pendingBatch.ok &&
+      pendingRun.out.includes("did not start") &&
+      pendingAfterFailure.ok &&
+      pendingAfterFailure.count === 1,
+  );
+  const pendingSidecar = readFileSync(join(pendingEvents, `${terminalId}.jsonl`), "utf8");
+  const cancelledRun = await spawnCore(
+    {
+      TERMINA_EVENTS_DIR: pendingEvents,
+      TERMINA_TERMINAL_ID: "term-cancel",
+      TERMINA_CORE_SESSION_ID: "cancel-store-1",
+    },
+    [],
+    [oversizedPrompt],
+    { autoAck: true, ackPayload: { token: "lease-token" } },
+  );
+  const cancelledSidecar = readFileSync(join(pendingEvents, "term-cancel.jsonl"), "utf8");
+  check(
+    "pre-start storage failure cancels its preflight lease",
+    cancelledRun.out.includes("did not start") && cancelledSidecar.includes('"t":"preflight_cancel"') && cancelledSidecar.includes('"token":"lease-token"'),
+    pendingSidecar.slice(-120),
+  );
+
   const resumeDir = mkdtempSync(join(tmpdir(), "agent-core-resume-"));
   leftovers.push(resumeDir);
   const resumeId = "resume-1";
@@ -407,6 +533,24 @@ export async function run({ check, leftovers }) {
     "startup resume replays before a queued prompt",
     startupResume.out.includes("resumed-marker") || startupResume.out.includes("stored session"),
   );
+  const invalidResumeId = "invalid-resume";
+  const invalidResumeFile = coreSessionFile(resumeDir, invalidResumeId);
+  mkdirSync(dirname(invalidResumeFile), { recursive: true, mode: 0o700 });
+  writeFileSync(invalidResumeFile, `${JSON.stringify({ storageSeq: 1, type: "unknown" })}\n`, { mode: 0o600 });
+  await spawnCore(
+    {
+      TERMINA_EVENTS_DIR: resumeDir,
+      TERMINA_TERMINAL_ID: "term-invalid",
+      TERMINA_CORE_SESSION_ID: invalidResumeId,
+      TERMINA_CORE_RESUME: "1",
+    },
+  );
+  const invalidReady = readFileSync(join(resumeDir, "term-invalid.jsonl"), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+    .findLast((event) => event.t === "session_ready");
+  check("invalid startup bundle reports session_ready failure", invalidReady?.ok === false && typeof invalidReady?.error === "string");
   const explicitResume = await spawnCore(
     {
       TERMINA_EVENTS_DIR: resumeDir,
@@ -447,12 +591,41 @@ export async function run({ check, leftovers }) {
   const midGot = await writeForkedSession(forkSrc.sessionFile, forkMid.sessionFile, 1);
   const midReplay = await replaySessionBundle(forkMid.sessionFile);
   check("fork in the first segment keeps that prefix", midGot.ok && midReplay.ok && midReplay.messages[0]?.content === "s1" && midReplay.maxSeq >= 1);
+  const gapDest = bundlePaths(root, "fork-gap");
+  const gapGot = await writeForkedSession(forkSrc.sessionFile, gapDest.sessionFile, 5);
+  const gapForkReplay = await replaySessionBundle(gapDest.sessionFile);
+  check(
+    "fork accepts an address inside a valid sequence gap",
+    gapGot.ok && gapForkReplay.ok && gapForkReplay.messages.every((message) => message.content !== "s2") && gapForkReplay.maxSeq === 5,
+  );
   const forkActive = bundlePaths(root, "fork-active");
   const activeGot = await writeForkedSession(forkSrc.sessionFile, forkActive.sessionFile, srcReplay.maxSeq);
   const activeReplay = await replaySessionBundle(forkActive.sessionFile);
   check("fork in the active segment keeps visible messages", activeGot.ok && activeReplay.ok && activeReplay.messages.length === srcReplay.messages.length);
+  const forkLatest = bundlePaths(root, "fork-latest");
+  const latestGot = await writeForkedSession(forkSrc.sessionFile, forkLatest.sessionFile);
+  const latestReplay = await replaySessionBundle(forkLatest.sessionFile);
+  check(
+    "fork without a sequence materializes the latest durable state",
+    latestGot.ok && latestReplay.ok && latestReplay.messages.length === srcReplay.messages.length && latestReplay.maxSeq === srcReplay.maxSeq,
+  );
   const beyond = await writeForkedSession(forkSrc.sessionFile, coreSessionFile(root, "fork-beyond"), srcReplay.maxSeq + 5);
   check("fork beyond the source maximum fails closed", beyond.ok === false);
+  const redirectedRoot = join(root, "redirected-root");
+  mkdirSync(redirectedRoot, { recursive: true });
+  const redirected = bundlePaths(redirectedRoot, "redirected");
+  const redirectedWriter = openWriter(redirected.sessionFile);
+  appendMsg(redirectedWriter, 1, "user", "outside");
+  redirectedWriter.close();
+  const symlinkProject = join(root, "symlink-project");
+  symlinkSync(redirectedRoot, symlinkProject, "dir");
+  const symlinkFork = await writeForkedSession(coreSessionFile(symlinkProject, "redirected"), coreSessionFile(root, "symlink-fork"));
+  check("fork rejects a symlinked session project directory", symlinkFork.ok === false && String(symlinkFork.error).includes("symlink"));
+  const symlinkBundleRoot = join(root, "symlink-bundle-root");
+  mkdirSync(symlinkBundleRoot, { recursive: true });
+  symlinkSync(redirected.bundleDir, join(symlinkBundleRoot, "redirected"), "dir");
+  const symlinkBundleFork = await writeForkedSession(coreSessionFile(symlinkBundleRoot, "redirected"), coreSessionFile(root, "symlink-bundle-fork"));
+  check("fork rejects a symlinked session bundle", symlinkBundleFork.ok === false && String(symlinkBundleFork.error).includes("symlink"));
 
   const sumSrc = bundlePaths(root, "sum-src");
   mkdirSync(sumSrc.currentDir, { recursive: true, mode: 0o700 });
@@ -463,14 +636,13 @@ export async function run({ check, leftovers }) {
       JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "old1" } }),
       JSON.stringify({ storageSeq: 2, type: "message", message: { role: "user", content: "old2" } }),
       JSON.stringify({ storageSeq: 3, type: "message", message: { role: "user", content: "tail" } }),
-      JSON.stringify({ storageSeq: 4, type: "message", message: { role: "user", content: handoff } }),
-      JSON.stringify({ storageSeq: 5, type: "revision", kind: "summarize", evicted: 2, summarySseq: 4 }),
+      JSON.stringify({ storageSeq: 4, type: "revision", kind: "summarize", evicted: 2, summarySseq: 4, message: { role: "user", content: handoff } }),
     ].join("\n") + "\n",
     { mode: 0o600 },
   );
   const sumReplay = await replaySessionBundle(sumSrc.sessionFile);
   const sumDst = bundlePaths(root, "sum-dst");
-  const sumFork = await writeForkedSession(sumSrc.sessionFile, sumDst.sessionFile, 5);
+  const sumFork = await writeForkedSession(sumSrc.sessionFile, sumDst.sessionFile, 4);
   const sumForkReplay = await replaySessionBundle(sumDst.sessionFile);
   check(
     "materialized fork matches summarized context",
@@ -486,9 +658,9 @@ export async function run({ check, leftovers }) {
   check("dense renumbering writes 1..N after summary", sumForkReplay.maxSeq >= 2 && sumForkReplay.messages[0]?.sseq === 1);
 
   const ckptDst = bundlePaths(root, "ckpt-dst");
-  const ckptFork = await writeForkedSession(sumSrc.sessionFile, ckptDst.sessionFile, 5);
+  const ckptFork = await writeForkedSession(sumSrc.sessionFile, ckptDst.sessionFile, 4);
   const ckptReplay = await replaySessionBundle(ckptDst.sessionFile);
-  check("checkpoint preserves the source sequence", ckptFork.ok && ckptReplay.ok && ckptReplay.maxSeq === 5);
+  check("checkpoint preserves the source sequence", ckptFork.ok && ckptReplay.ok && ckptReplay.maxSeq === 4);
   const ckptW = openWriter(ckptDst.sessionFile);
   const ckptNext = ckptW.appendRecord({ storageSeq: 6, type: "message", message: { role: "user", content: "after" } });
   ckptW.close();
@@ -595,6 +767,20 @@ export async function run({ check, leftovers }) {
   check("archived current keeps the image", existsSync(join(cleared.archived, "session-img-1.png")));
   const clearedAgain = clearSessionBundle(clearB.sessionFile);
   check("clear of an empty current does not create an archive", clearedAgain.ok && clearedAgain.archived === null);
+  const removeCleared = removeEmptySessionBundle(clearB.sessionFile);
+  check(
+    "empty-session cleanup preserves a bundle with archives",
+    removeCleared.ok && removeCleared.removed === false && existsSync(clearB.bundleDir),
+  );
+
+  const emptyRemovable = bundlePaths(root, "empty-removable");
+  const emptyWriter = openWriter(emptyRemovable.sessionFile);
+  emptyWriter.close();
+  const removedEmpty = removeEmptySessionBundle(emptyRemovable.sessionFile);
+  check(
+    "empty-session cleanup removes a bundle with only an empty current",
+    removedEmpty.ok && removedEmpty.removed === true && !existsSync(emptyRemovable.bundleDir),
+  );
 
   const fresh = bundlePaths(root, "fresh-1");
   mkdirSync(fresh.currentDir, { recursive: true, mode: 0o700 });

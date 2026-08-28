@@ -112,6 +112,7 @@ import {
   resolveSessionFile,
   sessionBundleExists,
   sessionBundleHasContent,
+  type SessionResult,
 } from "./session.ts";
 import {
   jailMcpCwd,
@@ -140,11 +141,13 @@ export {
   parseSessionBundlePath,
   prepareFreshSession,
   quarantineSessionBundle,
+  removeEmptySessionBundle,
   removeSessionBundle,
   replaySessionBundle,
   replaySessionRecords,
   resolveSessionFile,
   sessionBundleExists,
+  sessionBundleBytes,
   sessionBundleHasContent,
   sessionRotateStamp,
   writeForkedSession,
@@ -1787,7 +1790,7 @@ function closeSessionWriter(): void {
 function openSessionWriter(): void {
   closeSessionWriter();
   if (!sessionFile) return;
-  const opened = SessionWriter.open(sessionFile);
+  const opened = SessionWriter.open(sessionFile, storageSeq);
   if (!opened.ok) throw new SessionStoreError(opened.error);
   sessionWriter = opened.writer;
 }
@@ -1798,10 +1801,11 @@ function ensureFreshSession(): void {
     closeSessionWriter();
     const prep = prepareFreshSession(sessionFile);
     if (!prep.ok) throw new SessionStoreError(prep.error);
+    storageSeq = 0;
     openSessionWriter();
   }
-  streamPrepared = true;
   storageSeq = 0;
+  streamPrepared = true;
 }
 
 /**
@@ -3132,8 +3136,8 @@ async function summarize(): Promise<boolean> {
     const inventories = fileInventories(evicted);
     const handoffBody = `${text}${inventories ? `\n\n${inventories}` : ""}`;
     const handoff = `<context-handoff>\n${handoffBody}\n</context-handoff>`;
-    const sseq = persist({ type: "message", message: { role: "user", content: handoff } });
-    persist({ type: "revision", kind: "summarize", evicted: boundary, summarySseq: sseq });
+    const sseq = storageSeq + 1;
+    persist({ type: "revision", kind: "summarize", evicted: boundary, summarySseq: sseq, message: { role: "user", content: handoff } });
     lastHandoff = handoffBody;
     history.splice(0, boundary);
     const m: Message = { role: "user", content: handoff, tokens: estimate({ role: "user", content: handoff, tokens: 0, sseq }), sseq };
@@ -3798,6 +3802,10 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   }
   const hasImages = pendingResult.hasImages || extraImages.length > 0;
   let preflight: { requestId: string; token: string | null } | null = null;
+  const cancelPreflight = (): void => {
+    if (preflight?.token) logEvent({ t: "preflight_cancel", token: preflight.token });
+    preflight = null;
+  };
   if (eventsDir && terminalId) {
     const requestId = randomUUID();
     logEvent({ t: "preflight_request", requestId, hasImages });
@@ -3820,6 +3828,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     ? await claimPendingImages(eventsDir, terminalId)
     : { ok: true as const, claim: { claimId: "", images: [] } };
   if (!claimResult.ok) {
+    cancelPreflight();
     out(`(the run did not start: ${claimResult.error})\n`);
     surface?.setDraft(prompt);
     running = false;
@@ -3834,9 +3843,19 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     .map((ref) => loadImageFromRoots(ref, imageRoots))
     .filter((img): img is NonNullable<typeof img> => img !== null);
   const allImages = [...loaded, ...extras].slice(0, 4);
-  const images = persistLoadedImages(sessionFile, allImages);
+  const persistedImages = persistLoadedImages(sessionFile, allImages);
+  if (!persistedImages.ok) {
+    cancelPreflight();
+    out(`(the run did not start: ${persistedImages.error})\n`);
+    surface?.setDraft(prompt);
+    running = false;
+    currentAbort = null;
+    showPrompt();
+    return;
+  }
+  const images = persistedImages.images;
+  const persistedPendingNames: string[] = [];
   if (eventsDir && terminalId && claim.claimId) {
-    const persistedNames: string[] = [];
     if (sessionFile) {
       const sessionDir = dirname(sessionFile);
       for (let i = 0; i < loaded.length && i < images.length; i++) {
@@ -3844,14 +3863,12 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         const src = loaded[i]!;
         if (ref.name === src.name) continue;
         try {
-          if (existsSync(join(sessionDir, ref.name))) persistedNames.push(src.name);
+          if (existsSync(join(sessionDir, ref.name))) persistedPendingNames.push(src.name);
         } catch {
           /* Keep the pending source until acknowledgement. */
         }
       }
     }
-    const ackImages = await acknowledgePendingImages(eventsDir, terminalId, claim.claimId, persistedNames);
-    if (!ackImages.ok) out(`(host: ${ackImages.error})\n`);
   }
   void refreshPendingImageCount();
   const context = eventsDir && terminalId ? readContextFiles(eventsDir, terminalId) : "";
@@ -3865,6 +3882,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   try {
     userMsg = pushUserPrompt(prompt, images);
   } catch (err) {
+    cancelPreflight();
     const message = err instanceof SessionStoreError ? err.message : err instanceof Error ? err.message : String(err);
     out(`(the run did not start: ${message})\n`);
     surface?.setDraft(prompt);
@@ -3872,6 +3890,10 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     currentAbort = null;
     showPrompt();
     return;
+  }
+  if (eventsDir && terminalId && claim.claimId) {
+    const ackImages = await acknowledgePendingImages(eventsDir, terminalId, claim.claimId, persistedPendingNames);
+    if (!ackImages.ok) out(`(host: ${ackImages.error})\n`);
   }
   logEvent({
     t: "agent_start",
@@ -3885,13 +3907,13 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     trusted: null,
     thinkingLevel: effectiveEffortFor(route.provider, route.model, effortWanted),
   });
+  let storageFailure: string | null = null;
   if (!rateLookup && !ratesFailed) void loadRates().then(() => { ratesFailed = true; });
   let retriedOverflow = false;
   let modelCalls = 0;
   let lastHadTools = false;
   let resumePaused = false;
   let lastPlanText = "";
-  let lastAssistantSseq = 0;
   try {
     while (modelCalls < MAX_TURNS) {
       if (interrupted) break;
@@ -4000,7 +4022,6 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       assistantMsg.sseq = persist({ type: "message", message: { role: "assistant", content: result.blocks } });
       history.push(assistantMsg);
       syncIndicators();
-      lastAssistantSseq = assistantMsg.sseq;
       const plan = planTextIfChanged(visibleAssistantText(result.blocks), lastPlanText);
       if (plan) {
         lastPlanText = plan;
@@ -4120,21 +4141,24 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     }
   } catch (err) {
     if (interrupted) out("\n(interrupted)\n");
-    else if (err instanceof SessionStoreError) out(`\n(storage failed: ${err.message})\n`);
+    else if (err instanceof SessionStoreError) {
+      storageFailure = err.message;
+      out(`\n(storage failed: ${err.message})\n`);
+    }
     else out(`\nerror: ${(err as Error).message}\n`);
   } finally {
     running = false;
     currentAbort = null;
     showPrompt();
   }
-  logEvent({ t: "agent_settled" });
-  if (eventsDir && terminalId) {
+  logEvent({ t: "agent_settled", error: storageFailure });
+  if (!storageFailure && eventsDir && terminalId) {
     const requestId = randomUUID();
     logEvent({
       t: "checkpoint_request",
       requestId,
       kind: "settled",
-      entryId: lastAssistantSseq > 0 ? String(lastAssistantSseq) : null,
+      entryId: storageSeq > 0 ? String(storageSeq) : null,
     });
     const ack = await waitForAck(eventsDir, terminalId, requestId, 5_000, bridgeId, {
       shouldStop: () => interrupted,
@@ -4170,36 +4194,36 @@ function abortResume(message: string): void {
   storageSeq = 0;
 }
 
-async function resumeSession(): Promise<void> {
+async function resumeSession(): Promise<SessionResult> {
   resumeBusy = true;
   showPrompt();
   try {
-    await resumeSessionBody();
+    return await resumeSessionBody();
   } finally {
     resumeBusy = false;
     showPrompt();
   }
 }
 
-async function resumeSessionBody(): Promise<void> {
+async function resumeSessionBody(): Promise<SessionResult> {
   if (!sessionFile || !sessionBundleExists(sessionFile)) {
     out("(no stored session)\n");
-    return;
+    return { ok: false, error: "stored session is missing" };
   }
   if (!sessionBundleHasContent(sessionFile)) {
     out("(stored session is empty)\n");
     streamPrepared = false;
-    return;
+    return { ok: true };
   }
   const replayed = await replaySessionBundle(sessionFile);
   if (!replayed.ok) {
     abortResume(`(resume failed: ${replayed.error})`);
-    return;
+    return { ok: false, error: replayed.error };
   }
   if (replayed.messages.length === 0 && replayed.maxSeq === 0) {
     out("(stored session is empty)\n");
     streamPrepared = false;
-    return;
+    return { ok: true };
   }
   history.length = 0;
   for (const rm of replayed.messages) {
@@ -4218,13 +4242,15 @@ async function resumeSessionBody(): Promise<void> {
   try {
     openSessionWriter();
   } catch (err) {
-    abortResume(`(resume failed: ${err instanceof Error ? err.message : String(err)})`);
-    return;
+    const error = err instanceof Error ? err.message : String(err);
+    abortResume(`(resume failed: ${error})`);
+    return { ok: false, error };
   }
   streamPrepared = true;
   prevPrompt = null;
   syncIndicators();
   renderHistoryTranscript(history, surface);
+  return { ok: true };
 }
 
 // ---- terminal surface ----
@@ -4763,6 +4789,7 @@ function dispatchLine(line: string): void {
         showPrompt();
         return;
       }
+      storageSeq = 0;
       try {
         openSessionWriter();
       } catch (err) {
@@ -4771,6 +4798,7 @@ function dispatchLine(line: string): void {
         return;
       }
     }
+    storageSeq = 0;
     history.length = 0;
     lastHandoff = null;
     hostContextSnapshot = "";
@@ -4783,7 +4811,6 @@ function dispatchLine(line: string): void {
     revisions = 0;
     revisionKinds = [];
     streamPrepared = true;
-    storageSeq = 0;
     syncIndicators();
     out("(session cleared)\n");
     void connectMcp().then(() => showPrompt());
@@ -4939,13 +4966,14 @@ async function main(): Promise<void> {
   if (bootList && bootList.length > 0) out(`${formatModelBanner(bootList, route.model)}\n`);
   process.on("exit", () => mcpSession?.shutdown());
   await connectMcp();
-  if (process.env.TERMINA_CORE_RESUME === "1") await resumeSession();
+  const resumeResult = process.env.TERMINA_CORE_RESUME === "1" ? await resumeSession() : { ok: true as const };
   let structured = "";
   let structuredImages: Array<{ name: string; mediaType: string }> = [];
   if (eventsDir && terminalId) {
     const control = consumeStartupControl(eventsDir, terminalId, bridgeId);
     const opId = control?.opId ?? "";
-    if (!control) logEvent({ t: "session_ready", opId, ok: true, reload: true });
+    if (!resumeResult.ok) logEvent({ t: "session_ready", opId, ok: false, error: resumeResult.error });
+    else if (!control) logEvent({ t: "session_ready", opId, ok: true, reload: true });
     else logEvent({ t: "session_ready", opId, ok: true });
     logSettings();
     if (control?.action === "prefill" && control.text) {
