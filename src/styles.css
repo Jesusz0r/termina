@@ -752,6 +752,30 @@ body {
   display: none;
   overflow: hidden;
   position: relative;
+  margin: 0;
+  padding: 0;
+}
+
+.term-pane .xterm {
+  margin: 0;
+  padding: 8px 8px 0 8px;
+}
+
+.term-pane .xterm-screen {
+  margin: 0;
+  padding: 0;
+}
+
+.term-pane .xterm-viewport {
+  margin: 0;
+  padding: 0;
+  scrollbar-width: none;
+}
+
+.term-pane .xterm-viewport::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .term-pane.active {
@@ -768,7 +792,8 @@ body {
 #terminal-container {
   flex: 1 1 auto;
   min-height: 8rem;
-  padding: 8px 0 0 8px;
+  margin: 0;
+  padding: 0;
   background: var(--bg-panel);
   overflow: hidden;
   position: relative;
