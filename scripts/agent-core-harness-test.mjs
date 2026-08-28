@@ -105,6 +105,8 @@ const {
   formatUsageIndicators,
   fetchUrl,
   fetchUrlError,
+  trustedPath,
+  parseBangCommand,
 } = core;
 
 const results = [];
@@ -288,8 +290,34 @@ check("dangerous permissions skip a read", !isDangerousBash("git status") && !sh
 check("always ask asks for a read", shouldAskPermission("ask", "git status"));
 check("always approve never asks", !shouldAskPermission("always", "rm -rf build"));
 
+check("trustedPath keeps process PATH first", trustedPath("/a/bin:/b/bin").startsWith("/a/bin"));
+check(
+  "trustedPath adds user bin dirs GUI PATH omits",
+  trustedPath("/usr/bin").includes("/opt/homebrew/bin") && trustedPath("/usr/bin").includes("/usr/local/bin"),
+);
+let extraUnderCwd = false;
+try {
+  const realExtra = realpathSync("/usr/local/bin");
+  const realRoot = realpathSync("/usr/local");
+  extraUnderCwd = realExtra === realRoot || realExtra.startsWith(`${realRoot}/`);
+} catch {
+  extraUnderCwd = false;
+}
+check(
+  "trustedPath skips extra dirs under cwd",
+  !extraUnderCwd || !trustedPath("/bin", "/usr/local").includes("/usr/local/bin"),
+);
+check("parseBangCommand reads the shell command", parseBangCommand("!ls -la")?.command === "ls -la");
+check("parseBangCommand rejects a bare bang", parseBangCommand("!")?.error === "empty command");
+check("parseBangCommand rejects whitespace", parseBangCommand("!   ")?.error === "empty command");
+check("parseBangCommand ignores prompts", parseBangCommand("hello") === null);
 const echo = await runBash("echo hello-core", { cwd: root });
 check("bash echo succeeds", echo.isError === false && echo.content.includes("hello-core"));
+const bashPath = await runBash("printf %s \"$PATH\"", { cwd: root });
+check(
+  "bash PATH includes extra user bins",
+  bashPath.content.includes("/opt/homebrew/bin") && bashPath.content.includes("/usr/local/bin"),
+);
 const largeBash = await runBash(`${JSON.stringify(process.execPath)} -e 'process.stdout.write("x".repeat(30000))'`, { cwd: root });
 check("bash keeps a bounded tail with a marker", Buffer.byteLength(largeBash.content) < 22 * 1024 && largeBash.content.includes("early output truncated"));
 const t0 = Date.now();
@@ -1352,7 +1380,7 @@ try {
 } finally {
   process.env.PATH = prevPath;
 }
-check("missing trusted probe omits that line", envMissing.includes("node ") && !envMissing.includes("python3") && !envMissing.includes("rustc"));
+check("empty PATH still reports node", envMissing.includes("node "));
 
 const noArgs = traceRecord({
   role: "main",
@@ -1361,15 +1389,42 @@ const noArgs = traceRecord({
   storageSeqRange: [1, 2],
   toolNames: ["grep"],
   usage: null,
+  usd: null,
   ttftMs: 1,
   turnMs: 2,
   revisions: 0,
+  revisionKinds: [],
+  wasteTokens: 0,
   wasteCause: null,
   systemHash: hashSystem("sys"),
 });
 const traceJson = JSON.stringify(noArgs);
 check("trace record has no tool arguments or paths", !traceJson.includes("args") && !traceJson.includes("pattern") && !Object.hasOwn(noArgs, "input"));
 check("trace record keeps tool names only", noArgs.toolNames[0] === "grep" && noArgs.systemHash.length === 16);
+const overflowTrace = traceRecord({
+  role: "main",
+  model: "m",
+  status: "overflow",
+  storageSeqRange: [2, 2],
+  toolNames: [],
+  usage: null,
+  usd: 0.0123,
+  ttftMs: null,
+  turnMs: 3,
+  revisions: 1,
+  revisionKinds: ["prune"],
+  wasteTokens: 17,
+  wasteCause: "post-revision",
+  systemHash: hashSystem("sys"),
+});
+check(
+  "trace record preserves overflow and revision kinds",
+  overflowTrace.status === "overflow" &&
+    overflowTrace.usd === 0.0123 &&
+    overflowTrace.revisionKinds[0] === "prune" &&
+    overflowTrace.wasteTokens === 17 &&
+    overflowTrace.wasteCause === "post-revision",
+);
 
 const fakeEntry = join(root, "entry.mjs");
 writeFileSync(fakeEntry, "");
@@ -2936,6 +2991,9 @@ check("wrapText keeps newlines", tuiMod.wrapText("ab\ncd", 10).join("|") === "ab
 check("wrapText keeps emoji graphemes", tuiMod.wrapText("👍👍", 1).join("|") === "👍|👍");
 check("cellWidth treats CJK as two cells", tuiMod.cellWidth("界") === 2);
 check("cellWidth treats combining marks as one cell", tuiMod.cellWidth("e\u0301") === 1);
+check("cursorRowCol treats newline as a wrap break", tuiMod.cursorRowCol("> ", ["a", "\n", "b"], 2, 80).row === 1);
+check("cursorRowCol places the caret on the next line", tuiMod.cursorRowCol("> ", ["a", "\n", "b"], 3, 80).col === 1);
+check("cursorRowCol stays on the first line before the break", tuiMod.cursorRowCol("> ", ["a", "\n", "b"], 1, 80).row === 0);
 const semanticTui = new tuiMod.AgentTui({
   stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
   stdin: { isTTY: false },
@@ -3557,6 +3615,10 @@ const nlTui = new tuiMod.AgentTui({
 });
 nlTui.feed("ab\x1b[13;2ucd\r");
 check("Shift+Enter inserts a newline", nlLines[0] === "ab\ncd");
+nlTui.feed("ab\x1b\rcd\r");
+check("Alt+Enter inserts a newline", nlLines[1] === "ab\ncd");
+nlTui.feed("ab\x1b[13;3ucd\r");
+check("CSI-u Alt+Enter inserts a newline", nlLines[2] === "ab\ncd");
 const killLines = [];
 const killTui = new tuiMod.AgentTui({
   stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
@@ -3581,6 +3643,15 @@ check("Alt+B and Ctrl+K edit by word and line", editLines[0] === "one");
 editTui.setDraft("ab\ncd");
 editTui.feed("\x01X\x05Y\r");
 check("Ctrl+A and Ctrl+E use the current line", editLines[1] === "ab\nXcdY");
+editTui.setDraft("ab\ncd");
+editTui.feed("\x1b[AX\r");
+check("up arrow keeps the screen column", editLines[2] === "Xab\ncd");
+editTui.setDraft("ab\ncd");
+editTui.feed("\x1b[A\x1b[B!\r");
+check("down arrow returns to the next input line", editLines[3] === "ab\ncd!");
+editTui.setDraft("\ncd");
+editTui.feed("\x1b[AX\r");
+check("up arrow from a later line reaches an empty first line", editLines[4] === "X\ncd");
 const draftLines = [];
 const draftTui = new tuiMod.AgentTui({
   stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },

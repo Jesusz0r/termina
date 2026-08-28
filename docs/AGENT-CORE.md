@@ -64,6 +64,14 @@ Rules:
 Verify: replay two adjacent requests and diff — everything before the last
 user turn must be identical bytes.
 
+Context water marks use `ceil(stringLength / 3)` as a conservative estimate.
+This is not a tokenizer. The prune planner uses `ceil(chars / 4)` only to
+estimate reclaimed space. Provider usage is authoritative after a request.
+The fallback context window is 1,000,000 tokens for Anthropic and Google,
+500,000 for xAI, and 1,050,000 for other providers. Anthropic Haiku uses
+200,000. A live model catalog can provide another value. There is no
+1,000,000-token run cap. `MAX_TURNS` defaults to 80 model calls per prompt.
+
 ## P2 — Separate reclamation from summarization
 
 **Invariant**: clearing bulk and compressing meaning have different costs,
@@ -144,21 +152,17 @@ dollars billed above the cache-read rate, and *why* they were billed.
 
 Rules:
 
-- Per-turn miss = overlap(prev prompt, this prompt) − cached read. Computing
-  the exact overlap is unnecessary: min(prev total, current total) is the
-  standard cheap upper bound. Ignore misses below breakpoint granularity
-  (~1024 tokens); they are measurement noise, not waste.
-- Attribute each miss: post-revision (expected), idle-expired (cache TTL
-  lapsed between turns), model-switch (full re-bill by definition), or
-  unexplained (a bug — chase it). Attribution runs per terminal stream;
-  interleaved dispatch workers share no previous prompt.
-- Exempt the turn immediately after a revision; new content there is the
-  point, not waste.
-- Emit per-turn usage records (tokens in/out/cached per role, cost, time to
-  first token, revision count) to the sidecar JSONL so Termina's existing
-  evidence engine aggregates without change.
+- Per-turn miss uses `min(previous total, current total) − cached read`.
+  This is a cheap upper-bound heuristic, not an exact prefix comparison.
+  Misses at or below the 1,024-token noise floor are ignored.
+- Attribute each measured miss as `post-revision`, `idle-expired`, or
+  `unexplained`. Model changes reset the previous-prompt baseline instead of
+  creating a separate cause. Attribution runs per terminal stream.
+- Traces are JSON files, not sidecar events. They record usage, estimated
+  cost when the local price catalog has a match, measured waste tokens and
+  cause, revision count and kinds, and overflow attempts.
 
-Verify: every wasted dollar in a session has exactly one attributed cause.
+Verify: every measured miss has one recorded cause or is below the noise floor.
 
 ## P6 — Routing changes cost, never behavior
 
@@ -187,9 +191,9 @@ footprint, not these numbers.
 
 | Metric | Target | Notes |
 |---|---|---|
-| Cached share of input tokens per task | > 95% | measured across the whole task, so post-revision turns dilute but do not dominate |
+| Cached share of input tokens per task | > 95% | provider-dependent; xAI receives no app-supplied `prompt_cache_key` |
 | Summarizations | ≤ 1 per 50 turns | scales with session length; short tasks expect zero |
-| Unexplained cache-waste dollars | 0 | any occurrence is a bug |
+| Unexplained cache-waste tokens | 0 | investigate every occurrence |
 | p50 first-token latency | < 1 s | provider-dependent floor |
 
 ## Auth

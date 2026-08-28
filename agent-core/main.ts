@@ -1272,9 +1272,40 @@ export function formatUserInstructions(md: string, absPath: string): string {
   return `<user-instructions>\n${body}\n</user-instructions>`;
 }
 
+function extraBinDirs(): string[] {
+  const home = homedir();
+  return [
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    join(home, ".local", "bin"),
+    join(home, ".cargo", "bin"),
+  ];
+}
+
+/** Add user binary directories that a GUI launch leaves off PATH. Search the process PATH first. */
+export function trustedPath(pathEnv = process.env.PATH ?? "", cwdRoot?: string): string {
+  const seen = new Set<string>();
+  const parts: string[] = [];
+  const extra = extraBinDirs();
+  const extraSet = new Set(extra);
+  const root = cwdRoot ? freezeCwd(cwdRoot) : "";
+  for (const dir of [...pathEnv.split(delimiter), ...extra]) {
+    if (!dir || seen.has(dir)) continue;
+    if (root && extraSet.has(dir)) {
+      try {
+        if (underRoot(realpathSync(dir), root)) continue;
+      } catch {
+        /* A missing extra directory stays on PATH. bash skips it. */
+      }
+    }
+    seen.add(dir);
+    parts.push(dir);
+  }
+  return parts.join(delimiter);
+}
+
 function resolveTrustedBin(bin: string, cwdRoot: string): string | null {
-  const pathEnv = process.env.PATH ?? "";
-  for (const dir of pathEnv.split(delimiter)) {
+  for (const dir of trustedPath(process.env.PATH, cwdRoot).split(delimiter)) {
     if (!dir || !isAbsolute(dir)) continue;
     let realDir: string;
     try {
@@ -1638,9 +1669,12 @@ export function traceRecord(fields: {
   storageSeqRange: readonly [number, number];
   toolNames: string[];
   usage: { input: number; cacheRead: number; cacheWrite: number; output: number } | null;
+  usd: number | null;
   ttftMs: number | null;
   turnMs: number;
   revisions: number;
+  revisionKinds: readonly RevisionKind[];
+  wasteTokens: number;
   wasteCause: string | null;
   systemHash: string;
 }): {
@@ -1650,9 +1684,12 @@ export function traceRecord(fields: {
   storageSeqRange: readonly [number, number];
   toolNames: string[];
   usage: { input: number; cacheRead: number; cacheWrite: number; output: number } | null;
+  usd: number | null;
   ttftMs: number | null;
   turnMs: number;
   revisions: number;
+  revisionKinds: RevisionKind[];
+  wasteTokens: number;
   wasteCause: string | null;
   systemHash: string;
 } {
@@ -1670,9 +1707,12 @@ export function traceRecord(fields: {
           output: fields.usage.output,
         }
       : null,
+    usd: fields.usd,
     ttftMs: fields.ttftMs,
     turnMs: fields.turnMs,
     revisions: fields.revisions,
+    revisionKinds: fields.revisionKinds.slice(),
+    wasteTokens: fields.wasteTokens,
     wasteCause: fields.wasteCause,
     systemHash: fields.systemHash,
   };
@@ -1964,10 +2004,16 @@ export function runBash(
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
+      const env: Record<string, string> = {};
+      for (const [key, value] of Object.entries(process.env)) {
+        if (value !== undefined) env[key] = value;
+      }
+      env.PATH = trustedPath(process.env.PATH, opts.cwd);
       child = spawn("/bin/bash", ["-c", command], {
         cwd: opts.cwd,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
+        env,
       });
     } catch (err) {
       resolve({ content: `error: ${(err as Error).message}`, isError: true });
@@ -2268,7 +2314,7 @@ const TOOLS = [
   {
     name: "grep",
     description:
-      "Search file contents with a regular expression. Uses ripgrep when available. Groups hits by file, shows sparse files first, and caps per file. Skip ignored directories. Narrow with path or glob when a file has more hits.",
+      "Search file contents with a regular expression. Uses ripgrep when available. Prefer this over bash rg or grep. Groups hits by file, shows sparse files first, and caps per file. Skip ignored directories. Narrow with path or glob when a file has more hits.",
     input_schema: {
       type: "object",
       properties: {
@@ -2290,7 +2336,7 @@ const TOOLS = [
   },
   {
     name: "bash",
-    description: "Run one bash command in the working directory. 60 s timeout. Combined output caps near 20 KB.",
+    description: "Run one bash command in the working directory. 60 s timeout. Combined output caps near 20 KB. Use grep or glob for file search; do not call rg.",
     input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
   },
   {
@@ -2925,7 +2971,15 @@ export function replaySessionRecords(
 }
 
 let postRevision = false;
+export type RevisionKind = "prune" | "summarize" | "truncate";
+let revisions = 0;
+let revisionKinds: RevisionKind[] = [];
 let lastBilledTokens: number | null = null;
+
+function recordRevision(kind: RevisionKind): void {
+  revisions++;
+  revisionKinds.push(kind);
+}
 
 /** Apply the planner to the live view. Storage already holds the originals. */
 function reclaim(): number {
@@ -2971,7 +3025,7 @@ function reclaim(): number {
   for (const i of touched) history[i]!.tokens = estimate(history[i]!);
   if (changed > 0) {
     postRevision = true;
-    revisions++;
+    recordRevision("prune");
     store({ type: "revision", kind: "prune", targets });
     syncIndicators();
   }
@@ -2993,7 +3047,7 @@ function truncate(): boolean {
   if (cut <= 0) return false;
   history.splice(0, cut);
   postRevision = true;
-  revisions++;
+  recordRevision("truncate");
   store({ type: "revision", kind: "truncate", dropped: cut });
   syncIndicators();
   return true;
@@ -3118,7 +3172,27 @@ async function summarize(): Promise<boolean> {
       syncIndicators();
     }
     const text = folded.text;
-    if (!text) return false;
+    if (!text) {
+      writeTrace(
+        traceRecord({
+          role: "summary",
+          model: summaryRoute.model,
+          status: "empty",
+          storageSeqRange: [storageSeq, storageSeq],
+          toolNames: [],
+          usage: u,
+          usd: null,
+          ttftMs: null,
+          turnMs: Date.now() - started,
+          revisions: 0,
+          revisionKinds: [],
+          wasteTokens: 0,
+          wasteCause: null,
+          systemHash: hashSystem("You compress coding-agent session history. Only output the structured handoff."),
+        }),
+      );
+      return false;
+    }
     const inventories = fileInventories(evicted);
     const handoffBody = `${text}${inventories ? `\n\n${inventories}` : ""}`;
     const handoff = `<context-handoff>\n${handoffBody}\n</context-handoff>`;
@@ -3128,7 +3202,7 @@ async function summarize(): Promise<boolean> {
     history.unshift(m);
     m.sseq = store({ type: "message", message: { role: "user", content: handoff } });
     postRevision = true;
-    revisions++;
+    recordRevision("summarize");
     store({ type: "revision", kind: "summarize", evicted: boundary, summarySseq: m.sseq });
     syncIndicators();
     writeTrace(
@@ -3139,9 +3213,12 @@ async function summarize(): Promise<boolean> {
         storageSeqRange: [m.sseq, m.sseq],
         toolNames: [],
         usage: u,
+        usd: null,
         ttftMs: null,
         turnMs: Date.now() - started,
         revisions: 1,
+        revisionKinds: ["summarize"],
+        wasteTokens: 0,
         wasteCause: null,
         systemHash: hashSystem("You compress coding-agent session history. Only output the structured handoff."),
       }),
@@ -3157,9 +3234,12 @@ async function summarize(): Promise<boolean> {
         storageSeqRange: [storageSeq, storageSeq],
         toolNames: [],
         usage: null,
+        usd: null,
         ttftMs: null,
         turnMs: Date.now() - started,
         revisions: 0,
+        revisionKinds: [],
+        wasteTokens: 0,
         wasteCause: null,
         systemHash: hashSystem("You compress coding-agent session history. Only output the structured handoff."),
       }),
@@ -3386,6 +3466,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
   const adaptiveEffort = adaptiveEffortFor(route.provider, route.model, effortWanted);
   const reasoningEffort = reasoningEffortFor(route.provider, route.model, effortWanted);
   const cacheKey = hashSystem(sys);
+  // Do not send this key to xAI until its prompt-cache contract is verified.
   const sendCacheKey =
     route.provider === "openai" || route.provider === "openai-codex" || route.provider === "openrouter";
   const anthropicMessages =
@@ -3648,7 +3729,6 @@ async function callModel(messages: Message[]): Promise<CallResult> {
 // ---- waste attribution ----
 
 let prevPrompt: { total: number; ts: number } | null = null;
-let revisions = 0;
 
 // Providers bill tokens; prices come from a local catalog (models.dev),
 // not from the API response. Rates are USD per token once divided.
@@ -3688,7 +3768,15 @@ function reportUsage(
   usage: Usage,
   ttftMs: number | null,
   turnStarted: number,
-): { cause: string | null; usd: number | null; turnMs: number; ttftMs: number | null; revisionCount: number } {
+): {
+  cause: string | null;
+  usd: number | null;
+  turnMs: number;
+  ttftMs: number | null;
+  revisionCount: number;
+  revisionKinds: RevisionKind[];
+  wasteTokens: number;
+} {
   const cur = usage.input + usage.cacheRead + usage.cacheWrite;
   let waste: { tokens: number; cause: string } | null = null;
   if (prevPrompt) {
@@ -3716,8 +3804,19 @@ function reportUsage(
       usage.cacheWrite * rates.cacheWrite;
   }
   const revisionCount = revisions;
+  const kinds = revisionKinds.slice();
+  const wasteTokens = waste?.tokens ?? 0;
   revisions = 0;
-  return { cause: waste?.cause ?? null, usd, turnMs: Date.now() - turnStarted, ttftMs, revisionCount };
+  revisionKinds = [];
+  return {
+    cause: waste?.cause ?? null,
+    usd,
+    turnMs: Date.now() - turnStarted,
+    ttftMs,
+    revisionCount,
+    revisionKinds: kinds,
+    wasteTokens,
+  };
 }
 
 // ---- agent loop ----
@@ -3814,7 +3913,6 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     const written = writePromptPayload(eventsDir, terminalId, file, { prompt, context, images });
     if (written) logEvent({ t: "prompt", file: written, hasPreflight: preflight !== null });
   }
-  if (context) out("(host context injected)\n");
   const userMsg = pushUserPrompt(prompt, images);
   logEvent({
     t: "agent_start",
@@ -3856,11 +3954,51 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         // Emergency mid-turn revision: the provider
         // rejected the window; reclaim hard and retry exactly once.
         if (!retriedOverflow && /prompt is too long|maximum context|context_length/i.test(String((err as Error).message))) {
+          writeTrace(
+            traceRecord({
+              role: "main",
+              model: route.model,
+              status: "overflow",
+              storageSeqRange: [seqBefore + 1, storageSeq],
+              toolNames: [],
+              usage: null,
+              usd: null,
+              ttftMs: null,
+              turnMs: Date.now() - callStarted,
+              revisions,
+              revisionKinds: revisionKinds.slice(),
+              wasteTokens: 0,
+              wasteCause: null,
+              systemHash: hashSystem(systemPrompt()),
+            }),
+          );
           retriedOverflow = true;
           reclaim();
           await summarize();
           truncate();
-          result = await callModel(history);
+          try {
+            result = await callModel(history);
+          } catch (retryErr) {
+            writeTrace(
+              traceRecord({
+                role: "main",
+                model: route.model,
+                status: "overflow-retry-error",
+                storageSeqRange: [seqBefore + 1, storageSeq],
+                toolNames: [],
+                usage: null,
+                usd: null,
+                ttftMs: null,
+                turnMs: Date.now() - callStarted,
+                revisions,
+                revisionKinds: revisionKinds.slice(),
+                wasteTokens: 0,
+                wasteCause: null,
+                systemHash: hashSystem(systemPrompt()),
+              }),
+            );
+            throw retryErr;
+          }
         } else {
           writeTrace(
             traceRecord({
@@ -3870,9 +4008,12 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
               storageSeqRange: [seqBefore + 1, storageSeq],
               toolNames: [],
               usage: null,
+              usd: null,
               ttftMs: null,
               turnMs: Date.now() - callStarted,
               revisions,
+              revisionKinds: revisionKinds.slice(),
+              wasteTokens: 0,
               wasteCause: null,
               systemHash: hashSystem(systemPrompt()),
             }),
@@ -3884,7 +4025,15 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       const sys = systemPrompt();
       const waste = result.usage
         ? reportUsage(result.usage, result.ttftMs, callStarted)
-        : { cause: null, usd: null, turnMs: Date.now() - callStarted, ttftMs: result.ttftMs, revisionCount: 0 };
+        : {
+            cause: null,
+            usd: null,
+            turnMs: Date.now() - callStarted,
+            ttftMs: result.ttftMs,
+            revisionCount: 0,
+            revisionKinds: [],
+            wasteTokens: 0,
+          };
       if (result.usage) accumulateUsage(result.usage);
       lastUsd = waste.usd != null && Number.isFinite(waste.usd) && waste.usd >= 0 ? waste.usd : null;
       const assistantMsg: Message = { role: "assistant", content: result.blocks as ContentBlock[], tokens: 0, sseq: 0 };
@@ -3912,9 +4061,12 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
             storageSeqRange: [seqBefore + 1, storageSeq],
             toolNames: serverNames,
             usage: result.usage,
+            usd: waste.usd,
             ttftMs: waste.ttftMs,
             turnMs: waste.turnMs,
             revisions: waste.revisionCount,
+            revisionKinds: waste.revisionKinds,
+            wasteTokens: waste.wasteTokens,
             wasteCause: waste.cause,
             systemHash: hashSystem(sys),
           }),
@@ -3992,9 +4144,12 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           storageSeqRange: [seqBefore + 1, storageSeq],
           toolNames: [...serverNames, ...uses.map((u) => u.name)],
           usage: result.usage,
+          usd: waste.usd,
           ttftMs: waste.ttftMs,
           turnMs: waste.turnMs,
           revisions: waste.revisionCount,
+          revisionKinds: waste.revisionKinds,
+          wasteTokens: waste.wasteTokens,
           wasteCause: waste.cause,
           systemHash: hashSystem(sys),
         }),
@@ -4182,8 +4337,36 @@ function showPrompt(): void {
 }
 
 function printSlashHelp(): void {
-  const width = Math.max(...SLASH_COMMANDS.map((c) => c.name.length));
-  for (const c of SLASH_COMMANDS) out(`  ${c.name.padEnd(width)}  ${c.hint}\n`);
+  const rows = [...SLASH_COMMANDS, { name: "!cmd", hint: "run a bash command" }];
+  const width = Math.max(...rows.map((c) => c.name.length));
+  for (const c of rows) out(`  ${c.name.padEnd(width)}  ${c.hint}\n`);
+}
+
+export function parseBangCommand(line: string): { command: string } | { error: string } | null {
+  if (!line.startsWith("!")) return null;
+  const command = line.slice(1);
+  if (!command.trim()) return { error: "empty command" };
+  return { command };
+}
+
+async function runBangCommand(command: string): Promise<void> {
+  running = true;
+  interrupted = false;
+  showPrompt();
+  try {
+    if (!(await confirmBash(command))) {
+      out("(bash denied)\n");
+      return;
+    }
+    const got = await runBash(command, { cwd: canonicalCwd, shouldStop: () => interrupted });
+    out(got.content.endsWith("\n") ? got.content : `${got.content}\n`);
+    if (interrupted) out("(interrupted)\n");
+  } finally {
+    running = false;
+    interrupted = false;
+    showPrompt();
+    drainQueuedLine();
+  }
 }
 
 function printLoginPicker(cmd: "/login" | "/logout"): void {
@@ -4196,6 +4379,13 @@ function printLoginPicker(cmd: "/login" | "/logout"): void {
 let running = false;
 let queuedLine: string | null = null;
 let ratesFailed = false;
+
+function drainQueuedLine(): void {
+  if (queuedLine === null) return;
+  const next = queuedLine;
+  queuedLine = null;
+  submit(next);
+}
 
 function submit(line: string): void {
   if (running) {
@@ -4212,13 +4402,7 @@ function submit(line: string): void {
       out(`\nengine error: ${(err as Error).message}\n`);
       showPrompt();
     })
-    .then(() => {
-    if (queuedLine !== null) {
-      const next = queuedLine;
-      queuedLine = null;
-      submit(next);
-    }
-  });
+    .then(() => drainQueuedLine());
 }
 
 export function isDirectRunFrom(selfUrl: string, argv1: string | undefined): boolean {
@@ -4614,6 +4798,7 @@ function dispatchLine(line: string): void {
     prevPrompt = null;
     postRevision = false;
     revisions = 0;
+    revisionKinds = [];
     streamPrepared = true;
     storageSeq = 0;
     syncIndicators();
@@ -4665,6 +4850,24 @@ function dispatchLine(line: string): void {
   if (line.startsWith("/")) {
     out(`(unknown command: ${line} — type /help)\n`);
     showPrompt();
+    return;
+  }
+  const bang = parseBangCommand(line);
+  if (bang) {
+    if ("error" in bang) {
+      out(`(${bang.error})\n`);
+      showPrompt();
+      return;
+    }
+    if (running || authBusy) {
+      out("(engine busy)\n");
+      showPrompt();
+      return;
+    }
+    void runBangCommand(bang.command).catch((err: unknown) => {
+      out(`\nengine error: ${(err as Error).message}\n`);
+      showPrompt();
+    });
     return;
   }
   submit(line);

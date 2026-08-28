@@ -425,11 +425,28 @@ function clip(text: string, cols: number): string {
   return out;
 }
 
-function cursorRowCol(prefix: string, chars: string[], cursor: number, cols: number): { row: number; col: number } {
-  const n = cellWidth(prefix + chars.slice(0, cursor).join(""));
-  if (n === 0) return { row: 0, col: 0 };
-  if (n % cols === 0) return { row: n / cols, col: 0 };
-  return { row: Math.floor(n / cols), col: n % cols };
+const INPUT_PREFIX = "> ";
+
+export function cursorRowCol(prefix: string, chars: string[], cursor: number, cols: number): { row: number; col: number } {
+  const width = Math.max(1, cols);
+  const text = prefix + chars.slice(0, Math.max(0, cursor)).join("");
+  const lines = wrapText(text, width);
+  const row = Math.max(0, lines.length - 1);
+  const col = cellWidth(lines[row] ?? "");
+  if (col >= width) return { row: row + 1, col: 0 };
+  return { row, col };
+}
+
+function wrapInput(
+  prefix: string,
+  chars: string[],
+  cursor: number,
+  cols: number,
+): { wrapped: string[]; pos: { row: number; col: number } } {
+  const pos = cursorRowCol(prefix, chars, cursor, cols);
+  const wrapped = wrapText(prefix + chars.join(""), cols);
+  while (wrapped.length <= pos.row) wrapped.push("");
+  return { wrapped, pos };
 }
 
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -950,8 +967,10 @@ export class AgentTui {
       return;
     }
     const { cols, rows } = this.size();
-    const inputText = this.choicePrompt || `> ${this.chars.join("")}`;
-    const layout = layoutHeights(rows, Math.max(1, wrapText(inputText, cols).length), this.matches().length);
+    const inputLines = this.choicePrompt
+      ? wrapText(this.choicePrompt, cols).length
+      : wrapInput(INPUT_PREFIX, this.chars, this.cursor, cols).wrapped.length;
+    const layout = layoutHeights(rows, Math.max(1, inputLines), this.matches().length);
     const anchor = this.topVisibleEntryId(cols, layout.transcript, this.scroll);
     this.thinkingVisible = visible;
     const next = anchor === null ? null : this.nearestVisibleEntryId(anchor);
@@ -1497,7 +1516,7 @@ export class AgentTui {
       else if (ch === "f") this.moveWord(1);
       else if (ch === "d") this.deleteWord(1);
       else if (ch === "\x7f") this.deleteWord(-1);
-      else if (ch === "\r") this.submitLine();
+      else if (ch === "\r" || ch === "\n") this.insert("\n");
       this.schedule();
       return;
     }
@@ -1656,6 +1675,7 @@ export class AgentTui {
   }
 
   private lineStart(): number {
+    if (this.cursor <= 0) return 0;
     return this.chars.lastIndexOf("\n", this.cursor - 1) + 1;
   }
 
@@ -1741,7 +1761,7 @@ export class AgentTui {
       return;
     }
     if (final === "u") {
-      if (params === "13;2") this.insert("\n");
+      if (params === "13;2" || params === "13;3") this.insert("\n");
       else if (params === "9;2") this.cycleEffort();
       else if (params === "112;6") this.cycleModel(-1);
       return;
@@ -1787,23 +1807,41 @@ export class AgentTui {
     if (!this.moveVertical(n)) this.historyBy(n);
   }
 
+  private lineScreenCol(start: number, cursor: number): number {
+    const prefix = start === 0 ? cellWidth(INPUT_PREFIX) : 0;
+    return prefix + cellWidth(this.chars.slice(start, cursor).join(""));
+  }
+
+  private cursorAtScreenCol(start: number, end: number, screenCol: number): number {
+    const prefix = start === 0 ? cellWidth(INPUT_PREFIX) : 0;
+    const want = Math.max(0, screenCol - prefix);
+    let used = 0;
+    for (let i = start; i < end; i++) {
+      const w = cellWidth(this.chars[i]!);
+      if (used + w > want) return i;
+      used += w;
+      if (used === want) return i + 1;
+    }
+    return end;
+  }
+
   private moveVertical(delta: number): boolean {
     let moved = false;
     for (let step = 0; step < Math.abs(delta); step++) {
       const start = this.lineStart();
       const end = this.lineEnd();
-      const col = this.cursor - start;
+      const screenCol = this.lineScreenCol(start, this.cursor);
       if (delta < 0) {
         if (start === 0) break;
         const previousEnd = start - 1;
-        const previousStart = this.chars.lastIndexOf("\n", previousEnd - 1) + 1;
-        this.cursor = Math.min(previousStart + col, previousEnd);
+        const previousStart = previousEnd <= 0 ? 0 : this.chars.lastIndexOf("\n", previousEnd - 1) + 1;
+        this.cursor = this.cursorAtScreenCol(previousStart, previousEnd, screenCol);
       } else {
         if (end === this.chars.length) break;
         const nextStart = end + 1;
         const nextBreak = this.chars.indexOf("\n", nextStart);
         const nextEnd = nextBreak < 0 ? this.chars.length : nextBreak;
-        this.cursor = Math.min(nextStart + col, nextEnd);
+        this.cursor = this.cursorAtScreenCol(nextStart, nextEnd, screenCol);
       }
       moved = true;
     }
@@ -1830,9 +1868,8 @@ export class AgentTui {
 
   private scrollBy(pages: number): void {
     const { cols, rows } = this.size();
-    const inputText = `> ${this.chars.join("")}`;
     const matches = this.matches();
-    const inputLines = Math.max(1, wrapText(inputText, cols).length || 1);
+    const inputLines = Math.max(1, wrapInput(INPUT_PREFIX, this.chars, this.cursor, cols).wrapped.length || 1);
     const layout = layoutHeights(rows, inputLines, matches.length);
     const page = Math.max(1, layout.transcript - 1);
     const wrapped = this.visibleTranscript(cols, layout.transcript + this.scroll + page + 2, 0);
@@ -1868,10 +1905,12 @@ export class AgentTui {
     cursorCol: number;
   } {
     const { cols, rows } = size;
-    const inputText = this.choicePrompt || `> ${this.chars.join("")}`;
     const matches = this.matches();
     if (this.slashIndex >= matches.length) this.slashIndex = Math.max(0, matches.length - 1);
-    const inputWrapped = wrapText(inputText, cols);
+    const input = this.choicePrompt
+      ? { wrapped: wrapText(this.choicePrompt, cols), pos: { row: 0, col: Math.min(cols - 1, cellWidth(this.choicePrompt)) } }
+      : wrapInput(INPUT_PREFIX, this.chars, this.cursor, cols);
+    const { wrapped: inputWrapped, pos } = input;
     const layout = layoutHeights(rows, Math.max(1, inputWrapped.length), matches.length);
     const slashStart = Math.max(
       0,
@@ -1907,9 +1946,6 @@ export class AgentTui {
     lines.push(clip(foot, cols));
     if (lines.length > rows) lines.length = rows;
 
-    const pos = this.choicePrompt
-      ? { row: 0, col: Math.min(cols - 1, cellWidth(this.choicePrompt)) }
-      : cursorRowCol("> ", this.chars, this.cursor, cols);
     const inputTop = layout.transcript;
     const cursorRow = Math.min(rows, Math.max(1, Math.min(inputTop + layout.input, inputTop + pos.row + 1)));
     const cursorCol = Math.min(cols, Math.max(1, pos.col + 1));
