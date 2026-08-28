@@ -247,7 +247,8 @@ POSIX-quoted absolute paths through xterm paste and does not submit them.
 The TUI transcript keeps assistant, thinking, tool, and error entries.
 Provider-visible thinking is shown by default. `CmdOrCtrl+Shift+H` toggles
 it. Encrypted reasoning is never shown. Tools render one status box.
-Live layout is not restored from session JSONL.
+Resume paints stored messages into that transcript. Scroll position and
+pending tool widgets are not restored from session JSONL.
 
 MCP is a stdio client, not a plugin surface. Servers come from the user-owned
 `~/.termina/agent/mcp.json`. The kernel does not execute project-owned MCP

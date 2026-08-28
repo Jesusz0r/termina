@@ -54,6 +54,7 @@ const {
   validateGrepPattern,
   buildCachedPrefix,
   replaySessionRecords,
+  renderHistoryTranscript,
   prepareSessionStream,
   sidecarStartFor,
   formatToolAnnounce,
@@ -2998,6 +2999,121 @@ hideTui.setThinkingVisible(false);
 check("hidden thinking leaves assistant text", hideTui.frame().includes("A1") && hideTui.frame().includes("A2") && !hideTui.frame().includes("secret-think"));
 hideTui.setThinkingVisible(true);
 check("showing thinking restores the same entry", hideTui.frame().includes("secret-think"));
+const resumeTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+renderHistoryTranscript(
+  [
+    { role: "user", content: "hello there" },
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "resume-think" },
+        { type: "redacted_thinking", thinking: "hidden-encrypted" },
+        { type: "text", text: "hi back" },
+        { type: "tool_use", id: "t1", name: "read_file", input: { path: "a.ts" } },
+      ],
+    },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok file" }] },
+    { role: "assistant", content: [{ type: "text", text: "done reading" }] },
+  ],
+  resumeTui,
+);
+const resumeFrame = resumeTui.frame();
+check(
+  "resume paints stored messages",
+  resumeFrame.includes("hello there") &&
+    resumeFrame.includes("hi back") &&
+    resumeFrame.includes("a.ts") &&
+    resumeFrame.includes("ok file") &&
+    resumeFrame.includes("done reading") &&
+    resumeFrame.includes("resume-think") &&
+    !resumeFrame.includes("hidden-encrypted") &&
+    !resumeFrame.includes("resumed 4 messages"),
+);
+resumeTui.setThinkingVisible(false);
+check(
+  "resume keeps thinking hideable",
+  resumeTui.frame().includes("hi back") && !resumeTui.frame().includes("resume-think"),
+);
+const resumePair = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+renderHistoryTranscript(
+  [
+    {
+      role: "assistant",
+      content: [
+        { type: "tool_use", id: "a", name: "read_file", input: { path: "first.ts" } },
+        { type: "tool_use", id: "b", name: "read_file", input: { path: "second.ts" } },
+        { type: "tool_use", id: "", name: "read_file", input: { path: "empty-id.ts" } },
+      ],
+    },
+    {
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: "b", content: "second-body" },
+        { type: "tool_result", tool_use_id: "a", content: "first-body" },
+        { type: "tool_result", tool_use_id: "", content: "empty-body" },
+        { type: "tool_result", tool_use_id: "missing", content: "orphan-body" },
+      ],
+    },
+  ],
+  resumePair,
+);
+const pairFrame = resumePair.frame();
+check(
+  "resume pairs tools out of order and keeps orphan results",
+  pairFrame.includes("first.ts") &&
+    pairFrame.includes("second.ts") &&
+    pairFrame.includes("empty-id.ts") &&
+    pairFrame.includes("first-body") &&
+    pairFrame.includes("second-body") &&
+    pairFrame.includes("empty-body") &&
+    pairFrame.includes("orphan-body") &&
+    !pairFrame.includes("running"),
+);
+const resumeCancel = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+renderHistoryTranscript(
+  [{ role: "assistant", content: [{ type: "tool_use", id: "open", name: "bash", input: { command: "sleep 1" } }] }],
+  resumeCancel,
+);
+check("resume cancels tools with no result", resumeCancel.frame().includes("cancelled") && resumeCancel.frame().includes("sleep 1"));
+const resumeHandoff = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+renderHistoryTranscript(
+  [
+    { role: "user", content: "<context-handoff>prior work</context-handoff>" },
+    { role: "user", content: [{ type: "text", text: "see this" }, { type: "image", source: { type: "file", name: "x.png" } }] },
+  ],
+  resumeHandoff,
+);
+check(
+  "resume paints handoff and image notices",
+  resumeHandoff.frame().includes("prior work") &&
+    resumeHandoff.frame().includes("see this") &&
+    resumeHandoff.frame().includes("(image)") &&
+    !resumeHandoff.frame().includes("<context-handoff>"),
+);
 function paintCapture(setup) {
   const writes = [];
   const tui = new tuiMod.AgentTui({
