@@ -44,7 +44,7 @@ const READ_CHUNK = 64 * 1024;
 const YIELD_EVERY_BYTES = 256 * 1024;
 const YIELD_EVERY_RECORDS = 64;
 
-export type SessionResult<T> = ({ ok: true } & T) | { ok: false; error: string };
+export type SessionResult<T = object> = ({ ok: true } & T) | { ok: false; error: string };
 
 export type ReplayContent = string | Array<Record<string, unknown>>;
 
@@ -275,7 +275,7 @@ function renameCurrentUnique(currentDir: string, prefix: string, now = Date.now(
   }
 }
 
-function createCurrentDir(currentDir: string, sessionFile: string): SessionResult<Record<string, never>> {
+function createCurrentDir(currentDir: string, sessionFile: string): SessionResult {
   try {
     mkdirSync(dirname(currentDir), { recursive: true, mode: 0o700 });
     mkdirSync(currentDir, { recursive: true, mode: 0o700 });
@@ -370,7 +370,7 @@ export function quarantineSessionBundle(sessionFile: string, now = Date.now()): 
   return renameCurrentUnique(parsed.currentDir, BAD_PREFIX, now);
 }
 
-export function removeSessionBundle(sessionFile: string): SessionResult<Record<string, never>> {
+export function removeSessionBundle(sessionFile: string): SessionResult {
   const parsed = parseSessionBundlePath(sessionFile);
   if (!parsed) return { ok: false, error: "session path is not a core session bundle" };
   try {
@@ -473,7 +473,7 @@ export function createReplayState(): ReplayState {
   return { messages: [], bySeq: new Map(), lastSeq: 0, maxSeq: 0 };
 }
 
-export function applySessionRecord(state: ReplayState, rec: unknown): SessionResult<Record<string, never>> {
+export function applySessionRecord(state: ReplayState, rec: unknown): SessionResult {
   if (!rec || typeof rec !== "object" || Array.isArray(rec)) return { ok: false, error: "malformed session record" };
   const e = rec as {
     storageSeq?: unknown;
@@ -622,7 +622,7 @@ async function readSegmentIntoState(
   } catch (err) {
     return { ok: false, error: errMsg(err) };
   }
-  let pending = Buffer.alloc(0);
+  let pending: Buffer = Buffer.alloc(0);
   const chunk = Buffer.alloc(READ_CHUNK);
   let bytes = 0;
   let records = 0;
@@ -673,7 +673,7 @@ async function readSegmentIntoState(
   }
 }
 
-function applyFramed(state: ReplayState, framed: FramedRecord): SessionResult<Record<string, never>> | "skip" {
+function applyFramed(state: ReplayState, framed: FramedRecord): SessionResult | "skip" {
   if (!framed.ok) return framed;
   if ("skip" in framed && framed.skip) return "skip";
   if (!("rec" in framed)) return "skip";
@@ -683,7 +683,7 @@ function applyFramed(state: ReplayState, framed: FramedRecord): SessionResult<Re
 export function replaySessionRecords(text: string): SessionResult<{ messages: ReplayMessage[]; maxSeq: number }> {
   const state = createReplayState();
   const buf = Buffer.from(text, "utf8");
-  let pending = buf;
+  let pending: Buffer = buf;
   for (;;) {
     const nl = pending.indexOf(0x0a);
     const taken = takeFramedLine(pending, nl < 0, true);
@@ -788,7 +788,7 @@ export class SessionWriter {
     }
   }
 
-  private reopenActive(): SessionResult<Record<string, never>> {
+  private reopenActive(): SessionResult {
     this.close();
     try {
       this.fd = openSync(this.sessionFile, "a", 0o600);
@@ -799,7 +799,7 @@ export class SessionWriter {
     }
   }
 
-  private roll(): SessionResult<Record<string, never>> {
+  private roll(): SessionResult {
     this.close();
     const partPath = join(this.currentDir, partFileName(this.nextPart));
     try {
@@ -868,7 +868,7 @@ function referencedImageNames(messages: ReplayMessage[]): SessionResult<{ names:
   return { ok: true, names: [...names] };
 }
 
-async function copyReferencedImages(sourceCurrent: string, destCurrent: string, names: string[]): Promise<SessionResult<Record<string, never>>> {
+async function copyReferencedImages(sourceCurrent: string, destCurrent: string, names: string[]): Promise<SessionResult> {
   for (const name of names) {
     const src = join(sourceCurrent, name);
     const info = inspectEntry(src);
