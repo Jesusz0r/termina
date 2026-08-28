@@ -17,14 +17,14 @@ const MAX_PATHS_PER_TASK = 5;
 
 export const MAX_DISPATCH_WORKERS = 3;
 
-export type CanonicalizePath = (absPath: string) => string;
+export type CanonicalizePath = (absPath: string) => string | Promise<string>;
 
-export function parsePlanTasks(text: string, cwd: string | null, canonicalize: CanonicalizePath): PlanTask[] {
+export async function parsePlanTasks(text: string, cwd: string | null, canonicalize: CanonicalizePath): Promise<PlanTask[]> {
   const tasks: PlanTask[] = [];
   for (const raw of text.split("\n")) {
     const body = uncheckedPlanTaskBody(raw);
     if (!body) continue;
-    tasks.push({ text: body, paths: planTaskPaths(body, cwd, canonicalize), state: "pending" });
+    tasks.push({ text: body, paths: await planTaskPaths(body, cwd, canonicalize), state: "pending" });
     if (tasks.length >= MAX_PLAN_TASKS) break;
   }
   return tasks;
@@ -79,13 +79,13 @@ export function reattachDispatchAssignments(
   }
 }
 
-export function pickDispatchTasks(opts: {
+export async function pickDispatchTasks(opts: {
   plan: PlanTask[];
   remainingSlots: number;
   inFlightPathKeys: ReadonlySet<string>;
-  pathKey: (relPath: string) => string;
+  pathKey: (relPath: string) => string | Promise<string>;
   taskText?: string;
-}): { tasks: PlanTask[]; error?: string } {
+}): Promise<{ tasks: PlanTask[]; error?: string }> {
   const { plan, remainingSlots, inFlightPathKeys, pathKey, taskText } = opts;
   if (remainingSlots <= 0) {
     return { tasks: [], error: `at most ${MAX_DISPATCH_WORKERS} dispatch workers run at once` };
@@ -119,32 +119,32 @@ export function formatDispatchBriefing(
   return lines.join("\n");
 }
 
-function pickNamedDispatchTask(
+async function pickNamedDispatchTask(
   plan: PlanTask[],
   taskText: string,
   used: Set<string>,
-  pathKey: (relPath: string) => string,
-): { tasks: PlanTask[]; error?: string } {
+  pathKey: (relPath: string) => string | Promise<string>,
+): Promise<{ tasks: PlanTask[]; error?: string }> {
   const task = findTaskByText(plan, taskText);
   if (!task) return { tasks: [], error: "that task is not on the plan board" };
   if (dispatchUnavailable(task)) return { tasks: [], error: "that task is already dispatched" };
-  if (pathKeysOf(task, pathKey).some((k) => used.has(k))) {
+  if ((await pathKeysOf(task, pathKey)).some((k) => used.has(k))) {
     return { tasks: [], error: "that task overlaps a running dispatch" };
   }
   return { tasks: [task] };
 }
 
-function pickScopedDispatchTasks(
+async function pickScopedDispatchTasks(
   plan: PlanTask[],
   remainingSlots: number,
   used: Set<string>,
-  pathKey: (relPath: string) => string,
-): { tasks: PlanTask[]; error?: string } {
+  pathKey: (relPath: string) => string | Promise<string>,
+): Promise<{ tasks: PlanTask[]; error?: string }> {
   const chosen: PlanTask[] = [];
   for (const task of plan) {
     if (chosen.length >= remainingSlots) break;
     if (dispatchUnavailable(task) || task.paths.length === 0) continue;
-    const keys = pathKeysOf(task, pathKey);
+    const keys = await pathKeysOf(task, pathKey);
     if (keys.some((k) => used.has(k))) continue;
     for (const k of keys) used.add(k);
     chosen.push(task);
@@ -157,8 +157,8 @@ function dispatchUnavailable(task: PlanTask): boolean {
   return Boolean(task.workerId) || task.state === "active" || task.state === "done";
 }
 
-function pathKeysOf(task: PlanTask, pathKey: (relPath: string) => string): string[] {
-  return task.paths.map(pathKey);
+async function pathKeysOf(task: PlanTask, pathKey: (relPath: string) => string | Promise<string>): Promise<string[]> {
+  return Promise.all(task.paths.map(pathKey));
 }
 
 function siblingClaimPaths(workerId: string, jobs: Array<{ task: PlanTask; id: string }>): string[] {
@@ -185,16 +185,16 @@ function uncheckedPlanTaskBody(line: string): string | null {
   return body || null;
 }
 
-function planTaskPaths(body: string, cwd: string | null, canonicalize: CanonicalizePath): string[] {
+async function planTaskPaths(body: string, cwd: string | null, canonicalize: CanonicalizePath): Promise<string[]> {
   const paths: string[] = [];
   for (const token of body.split(/\s+/)) {
-    const clean = cleanPlanPathToken(token, cwd, canonicalize);
+    const clean = await cleanPlanPathToken(token, cwd, canonicalize);
     if (looksLikePath(clean)) paths.push(clean);
   }
   return [...new Set(paths)].slice(0, MAX_PATHS_PER_TASK);
 }
 
-export function cleanPlanPathToken(token: string, cwd: string | null, canonicalize: CanonicalizePath): string {
+export async function cleanPlanPathToken(token: string, cwd: string | null, canonicalize: CanonicalizePath): Promise<string> {
   const isItalicPair = /_$/.test(token);
   // Strip punctuation and markdown emphasis. A leading underscore is a
   // filename (_test.py) unless the token also ends with one (_italic_).
@@ -202,7 +202,7 @@ export function cleanPlanPathToken(token: string, cwd: string | null, canonicali
   if (isItalicPair) clean = clean.replace(/^_+/, "");
   clean = clean.replace(/\/+$/, "");
   if (isAbsolute(clean) && cwd) {
-    const rel = relative(canonicalize(cwd), canonicalize(clean));
+    const rel = relative(await canonicalize(cwd), await canonicalize(clean));
     if (rel && !rel.startsWith("..")) return rel;
   }
   return clean;

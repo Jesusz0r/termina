@@ -75,11 +75,11 @@ export class ProjectWatcher {
   private generation = 0;
 
   /** Fired with the new file content whenever a watched text file changes. */
-  onChange: (change: FileChange) => void = () => {};
+  onChange: (change: FileChange) => void | Promise<void> = () => {};
   /** Fired with just the path (used for the modified-files list). */
-  onFileTouched: (path: string, status: "created" | "modified") => void = () => {};
+  onFileTouched: (path: string, status: "created" | "modified") => void | Promise<void> = () => {};
   /** Fired when a previously-seen file disappears (tabs and list entries clean up). */
-  onFileDeleted: (path: string) => void = () => {};
+  onFileDeleted: (path: string) => void | Promise<void> = () => {};
 
   /**
    * @param root watched directory
@@ -88,7 +88,7 @@ export class ProjectWatcher {
    */
   constructor(
     private root: string,
-    private canonicalize?: (p: string) => string,
+    private canonicalize?: (p: string) => string | Promise<string>,
   ) {}
 
   start(): void {
@@ -191,7 +191,7 @@ export class ProjectWatcher {
         if (relPath.split(sep).pop() === ".gitignore") {
           this.gitignoreRules.delete(this.gitignoreDirKey(relPath));
         }
-        this.onFileDeleted(abs);
+        await this.onFileDeleted(abs);
       }
       return;
     }
@@ -200,7 +200,7 @@ export class ProjectWatcher {
       // A file can grow past the cap. Mark it seen so a later small read
       // reports "modified", and drop the stale cached content.
       this.seen.add(relPath);
-      const key = this.canonicalize ? this.canonicalize(abs) : abs;
+      const key = this.canonicalize ? await this.canonicalize(abs) : abs;
       const evicted = this.lastContents.get(key);
       if (evicted !== undefined) {
         this.cacheBytes -= Buffer.byteLength(evicted, "utf8");
@@ -232,12 +232,12 @@ export class ProjectWatcher {
     this.seen.add(relPath);
     // Update the rolling content cache (evict oldest when over the limit).
     // Keys are canonicalized so lookups from anywhere in the app hit.
-    const key = this.canonicalize ? this.canonicalize(abs) : abs;
+    const key = this.canonicalize ? await this.canonicalize(abs) : abs;
     const prev = this.lastContents.get(key); // pre-change content, for baselines
     this.putCached(key, content);
     const change: FileChange = { path: abs, relPath, content, status, prev };
-    this.onChange(change);
-    if (generation === this.generation) this.onFileTouched(abs, status);
+    await this.onChange(change);
+    if (generation === this.generation) await this.onFileTouched(abs, status);
   }
 
   /** Add one file version to the content cache and evict when over budget. */
@@ -292,7 +292,7 @@ export class ProjectWatcher {
             const buf = await readFile(full);
             if (!active()) return;
             if (buf.includes(0)) continue; // binary
-            const key = this.canonicalize ? this.canonicalize(full) : full;
+            const key = this.canonicalize ? await this.canonicalize(full) : full;
             if (!this.lastContents.has(key)) this.putCached(key, buf.toString("utf8"));
           } catch {
             /* unreadable — seen-only is enough */

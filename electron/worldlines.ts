@@ -199,7 +199,7 @@ export interface WorldlineDeps {
   }): Promise<{ terminalId: string; pid: number }>;
   createCandidateWorkspace(root: string, baseStateId: string | null, comparisonId: string): string;
   onUpdate(summary: WorldlineSummary): void;
-  onCandidateState(root: string, stateId: string): void;
+  onCandidateState(root: string, stateId: string): void | Promise<void>;
   onRemoved(comparisonId: string): void;
   /** The fork preflight (WORLDLINES §4): repo, platform, disk. */
   preflight(): Promise<{ ok: boolean; reasons: string[] }>;
@@ -213,11 +213,11 @@ export interface WorldlineDeps {
   releaseState(stateId: string): Promise<void>;
   terminalBusy(terminalId: string): boolean;
   terminalVerifying(terminalId: string): boolean;
-  workspaceAt(root: string): { id: string; generation: number; lastStateCommit: string | null } | null;
+  workspaceAt(root: string): Promise<{ id: string; generation: number; lastStateCommit: string | null } | null>;
   acquireWriteLease(workspaceId: string, requester: string, timeoutMs: number): Promise<{ ok: boolean; error?: string; generation?: number }>;
   releaseWriteLease(workspaceId: string, requester: string): void;
   flushDirtyModels(requester: string, workspaceId: string, timeoutMs?: number): Promise<{ ok: boolean }>;
-  canonicalPath(absPath: string): string;
+  canonicalPath(absPath: string): Promise<string>;
   mineFiles(): ReadonlySet<string>;
   runSandboxedEvidence(
     cand: { root: string; profilePath: string; homeDir: string; tmpDir: string },
@@ -480,17 +480,17 @@ export class WorldlineManager {
   /** Update the latest captured state of a candidate. */
   updateHeadState(terminalId: string, stateId: string): void {
     const hit = this.terminalToComparison.get(terminalId);
-    if (hit) this.setCandidateHead(hit.comparisonId, hit.label, stateId);
+    if (hit) void this.setCandidateHead(hit.comparisonId, hit.label, stateId);
   }
 
   /** Record a captured candidate state from an on-demand operation. */
-  setCandidateHead(comparisonId: string, label: "A" | "B", stateId: string): void {
+  async setCandidateHead(comparisonId: string, label: "A" | "B", stateId: string): Promise<void> {
     const cmp = this.comparisons.get(comparisonId);
     const cand = cmp?.candidates.get(label);
     if (!cmp || !cand || cand.headStateId === stateId) return;
     const previousStateId = cand.headStateId;
     cand.headStateId = stateId;
-    this.deps.onCandidateState(cand.dir, stateId);
+    await this.deps.onCandidateState(cand.dir, stateId);
     if (previousStateId) void this.deps.releaseState(previousStateId);
     cand.version++;
     this.pushUpdate(cmp, cand);
@@ -796,7 +796,7 @@ export class WorldlineManager {
           const store = await this.deps.getStore();
           if (store) {
             const wHead = await this.deps.captureHead(cand.dir, join(cand.dir, ".git"), cmp.baseStateId);
-            this.setCandidateHead(cmp.id, label, wHead.commit);
+            await this.setCandidateHead(cmp.id, label, wHead.commit);
             const merged = await store.merge3(wHead.commit, primaryCommit);
             if (!merged.ok && merged.tree) conflicts = merged.conflicts;
             else if (!merged.ok && !merged.tree) conflicts = [merged.reason ?? "merge failed"];
@@ -1608,7 +1608,7 @@ export class WorldlineManager {
         releaseLeases();
         return { ok: false, error: `candidate ${label} is active` };
       }
-      const workspace = this.deps.workspaceAt(target.root);
+      const workspace = await this.deps.workspaceAt(target.root);
       if (!workspace) {
         releaseLeases();
         return { ok: false, error: "candidate workspace not found" };
@@ -1673,7 +1673,7 @@ export class WorldlineManager {
         const target = targets.get(label)!;
         byCandidate[label] = await engine.measure(label, cands[label]);
         const finalState = await deps.captureHead(target.root, join(target.root, ".git"), null);
-        const workspace = this.deps.workspaceAt(target.root);
+        const workspace = await this.deps.workspaceAt(target.root);
         const current = this.evidenceVersion(comparisonId, label);
         if (!workspace || workspace.generation !== generations.get(label) || !current || current.version !== target.version) {
           result = { ok: false, error: `candidate ${label} changed during evidence` };
@@ -1686,7 +1686,7 @@ export class WorldlineManager {
         }
         if (head) {
           retainedStates.add(head.stateId);
-          this.setCandidateHead(comparisonId, label, head.stateId);
+          await this.setCandidateHead(comparisonId, label, head.stateId);
           expectedVersions.set(label, this.evidenceVersion(comparisonId, label)?.version ?? target.version);
           mineReason[label] = await mineChangeReason(store, baseStateId, head.stateId, deps.primaryRoot, deps.mineFiles, (p) => realpath(p));
         } else {
@@ -1704,7 +1704,7 @@ export class WorldlineManager {
       if (result.ok) {
         for (const label of ["A", "B"] as const) {
           const target = targets.get(label)!;
-          const workspace = this.deps.workspaceAt(target.root);
+          const workspace = await this.deps.workspaceAt(target.root);
           const current = this.evidenceVersion(comparisonId, label);
           if (!workspace || workspace.generation !== generations.get(label) || !current || current.version !== expectedVersions.get(label)) {
             result = { ok: false, error: `candidate ${label} changed during evidence` };
@@ -1750,11 +1750,11 @@ export class WorldlineManager {
     }
     const store = await this.deps.getStore();
     if (!store) return { ok: false, error: "recording is not available" };
-    const primary = this.deps.workspaceAt(this.deps.primaryRoot);
+    const primary = await this.deps.workspaceAt(this.deps.primaryRoot);
     if (!primary) return { ok: false, error: "no primary workspace" };
     const baseState = this.runOf(target.sourceRunId)?.startStateId ?? null;
     if (!baseState) return { ok: false, error: "the source run base is missing" };
-    const candWs = this.deps.workspaceAt(target.root);
+    const candWs = await this.deps.workspaceAt(target.root);
     const candGen = candWs?.generation ?? 0;
 
     const opId = `promote-${randomUUID()}`;
@@ -1810,19 +1810,19 @@ export class WorldlineManager {
         store.capture(await gitHead(target.root), baseState, {}, {}, { root: target.root, gitDir: candGitDir ?? target.root }),
         store.capture(await gitHead(this.deps.primaryRoot), primary.lastStateCommit ?? null),
       ]);
-      this.deps.onCandidateState(this.deps.primaryRoot, pState.commit);
-      const primaryNow = this.deps.workspaceAt(this.deps.primaryRoot);
+      await this.deps.onCandidateState(this.deps.primaryRoot, pState.commit);
+      const primaryNow = await this.deps.workspaceAt(this.deps.primaryRoot);
       if (!primaryNow || primaryNow.generation !== leaseP.generation) return fail("the primary changed during promotion preflight");
-      if (candWs && this.deps.workspaceAt(target.root)?.generation !== candGen) return fail("the candidate changed during promotion preflight");
+      if (candWs && (await this.deps.workspaceAt(target.root))?.generation !== candGen) return fail("the candidate changed during promotion preflight");
       const top = await gitTopLevel(this.deps.primaryRoot);
-      if (!top || !captureRootInRepo(this.deps.canonicalPath(store.sourceRoot), this.deps.canonicalPath(top))) {
+      if (!top || !captureRootInRepo(await this.deps.canonicalPath(store.sourceRoot), await this.deps.canonicalPath(top))) {
         return fail("the source repository identity changed");
       }
 
       const changed = await store.diffTree(baseState, wState.commit);
       for (const c of changed) {
         const abs = join(this.deps.primaryRoot, c.relPath);
-        if (this.deps.mineFiles().has(this.deps.canonicalPath(abs))) {
+        if (this.deps.mineFiles().has(await this.deps.canonicalPath(abs))) {
           return fail(`the candidate changes a file you own: ${c.relPath}`);
         }
         const link = await store.symlinkTarget(wState.commit, c.relPath);
@@ -1918,7 +1918,7 @@ export class WorldlineManager {
         const now = existsSync(abs) ? await readFile(abs) : Buffer.alloc(0);
         if (sha256Hex(now) !== p.beforeHash) return fail(`the primary changed at ${p.rel} during promotion`);
       }
-      if (this.deps.workspaceAt(this.deps.primaryRoot)?.generation !== leaseP.generation) {
+      if ((await this.deps.workspaceAt(this.deps.primaryRoot))?.generation !== leaseP.generation) {
         return fail("the primary changed during promotion apply");
       }
 

@@ -843,7 +843,7 @@ function renderPlan(pane: Pane): void {
       if (p.planVersion !== versionAtStart) return; // a push won the race
       p.plan = tasks;
       if (activeId === pane.instanceId) renderPlan(p);
-    });
+    }).catch((err) => toast(`could not load plan: ${(err as Error).message}`, "error"));
   }
   planCount.textContent = pane.plan.length ? `(${pane.plan.length})` : "";
   planList.replaceChildren();
@@ -2117,57 +2117,62 @@ async function boot(): Promise<void> {
   restoreModifiedListHeight();
   void refreshTestCommand();
 
-  // Build the project tab bar; the active project owns the initial view.
-  const projects = await window.pi.projectList();
-  for (const project of projects) {
-    createProjectView(project);
-    if (project.active) activeProjectId = project.id;
-  }
-  setActiveProject(activeProjectId);
-  const bootView = activeProjectId ? projectViews.get(activeProjectId) : undefined;
-  if (bootView) {
-    projectCwd = bootView.cwd;
-    explorer.setProject(bootView.cwd);
-  }
-
-  const instances = await window.pi.getInstances();
-  // A project with no terminals: show why the default agent failed. A
-  // launch with no folder stays on the open-folder placeholder.
-  if (instances.length === 0 && projects.length > 0) {
-    createErrorPane("no agent terminal started.");
-    removeSplash();
-    return;
-  }
-  for (const inst of instances) {
-    if (!panes.has(inst.id)) createPaneShell(inst.id);
-    const pane = panes.get(inst.id);
-    if (pane) {
-      pane.cwd = inst.cwd;
-      pane.workspaceId = inst.workspaceId ?? "";
-      pane.projectId = inst.projectId ?? null;
-      pane.type = inst.type;
-      pane.shellName = inst.shellName;
-      if (inst.verify) pane.verify = inst.verify;
-      updatePaneTab(pane);
+  try {
+    // Build the project tab bar; the active project owns the initial view.
+    const projects = await window.pi.projectList();
+    for (const project of projects) {
+      createProjectView(project);
+      if (project.active) activeProjectId = project.id;
     }
-  }
-  activateProjectPane();
-  updateEditorLock();
-  removeSplash();
-  // Show the correct project view (the boot instances may belong to it).
-  const bootProjectId = instances[0]?.projectId ?? activeProjectId;
-  if (bootProjectId && projectViews.has(bootProjectId)) {
-    setActiveProject(bootProjectId);
-    activateProjectPane();
-  }
-  // The project may only be known after the instance list arrives —
-  // re-query the test command now that the project is known.
-  void refreshTestCommand();
+    setActiveProject(activeProjectId);
+    const bootView = activeProjectId ? projectViews.get(activeProjectId) : undefined;
+    if (bootView) {
+      projectCwd = bootView.cwd;
+      explorer.setProject(bootView.cwd);
+    }
 
-  // Worldlines: rebuild the panel from the live list (push events keep it
-  // current after this).
-  const worldlines = await window.pi.getWorldlines();
-  for (const summary of worldlines) worldlinesView.upsert(summary);
+    const instances = await window.pi.getInstances();
+    // A project with no terminals: show why the default agent failed. A
+    // launch with no folder stays on the open-folder placeholder.
+    if (instances.length === 0 && projects.length > 0) {
+      createErrorPane("no agent terminal started.");
+      removeSplash();
+      return;
+    }
+    for (const inst of instances) {
+      if (!panes.has(inst.id)) createPaneShell(inst.id);
+      const pane = panes.get(inst.id);
+      if (pane) {
+        pane.cwd = inst.cwd;
+        pane.workspaceId = inst.workspaceId ?? "";
+        pane.projectId = inst.projectId ?? null;
+        pane.type = inst.type;
+        pane.shellName = inst.shellName;
+        if (inst.verify) pane.verify = inst.verify;
+        updatePaneTab(pane);
+      }
+    }
+    activateProjectPane();
+    updateEditorLock();
+    removeSplash();
+    // Show the correct project view (the boot instances may belong to it).
+    const bootProjectId = instances[0]?.projectId ?? activeProjectId;
+    if (bootProjectId && projectViews.has(bootProjectId)) {
+      setActiveProject(bootProjectId);
+      activateProjectPane();
+    }
+    // The project may only be known after the instance list arrives —
+    // re-query the test command now that the project is known.
+    void refreshTestCommand();
+
+    // Worldlines: rebuild the panel from the live list (push events keep it
+    // current after this).
+    const worldlines = await window.pi.getWorldlines();
+    for (const summary of worldlines) worldlinesView.upsert(summary);
+  } catch (err) {
+    toast(`could not start: ${(err as Error).message}`, "error");
+    removeSplash();
+  }
 }
 
 void boot();

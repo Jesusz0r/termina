@@ -38,7 +38,7 @@ fi
 mkdir -p dist-electron
 CORE_URL="https://github.com/Jesusz0r/termina/releases/latest/download/termina-core-${OS}-${ARCH}"
 echo "downloading the snapshot core: ${CORE_URL}"
-curl -fsSL -o dist-electron/termina-core "$CORE_URL"
+curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors -o dist-electron/termina-core "$CORE_URL"
 chmod +x dist-electron/termina-core
 
 echo "installing the app dependencies (includes the pinned pi package)"

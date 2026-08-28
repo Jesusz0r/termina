@@ -94,7 +94,7 @@ export default async function run(log: (msg: string) => void) {
   const work = mkdtempSync(join(tmpdir(), "termina-gitignore-"));
   const watcher = new ProjectWatcher(work);
   const seen = new Set<string>();
-  watcher.onChange = (change) => seen.add(change.relPath);
+  watcher.onChange = (change) => { seen.add(change.relPath); };
   // Poll for the positive events first. The negatives below are only
   // meaningful once the pipeline has proven itself alive in this run.
   const waitFor = async (pred: () => boolean): Promise<boolean> => {
