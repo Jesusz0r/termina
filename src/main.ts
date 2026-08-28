@@ -41,6 +41,7 @@ import { SessionSearch } from "./session-search";
 import { WorldlinesView } from "./worldlines";
 import { Explorer } from "./components/explorer";
 import { toast } from "./components/modals";
+import { showContextMenu, type ContextMenuItem } from "./components/context-menu";
 import { SettingsView } from "./settings";
 import { emptyShortcuts, isMacPlatform, shortcutForEvent } from "./settings-shortcuts";
 import { CommandDispatcher } from "./commands";
@@ -379,21 +380,61 @@ const closingPanes = new Set<string>();
 let activeId: string | null = null;
 let projectCwd: string | null = null;
 let preferences: AppPreferences = normalizeAppPreferences(await window.pi.getPreferences().catch(() => defaultAppPreferences()));
+let committedPreferences: AppPreferences = preferences;
+let preferenceGeneration = 0;
+
+function userPatch(prev: AppPreferences, next: AppPreferences): import("../shared/types").UserPreferencePatch {
+  const patch: import("../shared/types").UserPreferencePatch = {};
+  if (prev.theme !== next.theme) patch.theme = next.theme;
+  if (prev.editorFontSize !== next.editorFontSize) patch.editorFontSize = next.editorFontSize;
+  if (prev.terminalFontSize !== next.terminalFontSize) patch.terminalFontSize = next.terminalFontSize;
+  if (prev.fontFamily !== next.fontFamily) patch.fontFamily = next.fontFamily;
+  if (prev.wordWrap !== next.wordWrap) patch.wordWrap = next.wordWrap;
+  if (prev.minimap !== next.minimap) patch.minimap = next.minimap;
+  if (JSON.stringify(prev.shortcuts) !== JSON.stringify(next.shortcuts)) patch.shortcuts = next.shortcuts;
+  if (prev.showThinking !== next.showThinking) patch.showThinking = next.showThinking;
+  return patch;
+}
+
+function paintPreferences(prefs: AppPreferences): void {
+  document.documentElement.dataset.theme = prefs.theme;
+  applyEditorPreferences(baseEditor, prefs);
+  for (const view of projectViews.values()) applyEditorPreferences(view.editorMgr, prefs);
+  reviewView.setTheme(prefs.theme);
+  reviewView.setFontSize(prefs.editorFontSize);
+  reviewView.setFontFamily(prefs.fontFamily);
+  reviewView.setWordWrap(prefs.wordWrap);
+  for (const pane of panes.values()) applyTerminalPreferences(pane.view, prefs);
+}
 
 function applyPreferences(next: AppPreferences, persist: boolean, activateShortcuts: boolean): void {
-  preferences = normalizeAppPreferences(next);
-  document.documentElement.dataset.theme = preferences.theme;
-  applyEditorPreferences(baseEditor, preferences);
-  for (const view of projectViews.values()) applyEditorPreferences(view.editorMgr, preferences);
-  reviewView.setTheme(preferences.theme);
-  reviewView.setFontSize(preferences.editorFontSize);
-  reviewView.setFontFamily(preferences.fontFamily);
-  reviewView.setWordWrap(preferences.wordWrap);
-  for (const pane of panes.values()) applyTerminalPreferences(pane.view, preferences);
+  const generation = ++preferenceGeneration;
+  const preview = normalizeAppPreferences(next);
+  preferences = preview;
+  paintPreferences(preferences);
   if (persist) {
-    void window.pi.updatePreferences(preferences, activateShortcuts).catch(() => toast("Could not save settings", "error"));
-  } else if (activateShortcuts) {
-    void window.pi.setKeyboardShortcuts(preferences.shortcuts).catch(() => undefined);
+    const patch = userPatch(committedPreferences, preview);
+    if (Object.keys(patch).length > 0) {
+      void window.pi.updatePreferences({ patch, activateShortcuts }).then((saved) => {
+        const normalized = normalizeAppPreferences(saved);
+        committedPreferences = normalized;
+        if (generation !== preferenceGeneration) return;
+        preferences = normalized;
+        paintPreferences(preferences);
+      }).catch(() => {
+        if (generation !== preferenceGeneration) return;
+        preferences = committedPreferences;
+        paintPreferences(preferences);
+        toast("Could not save settings", "error");
+      });
+    } else if (activateShortcuts) {
+      void window.pi.setKeyboardShortcuts(committedPreferences.shortcuts).catch(() => undefined);
+    }
+  } else {
+    committedPreferences = preview;
+    if (activateShortcuts) {
+      void window.pi.setKeyboardShortcuts(preferences.shortcuts).catch(() => undefined);
+    }
   }
 }
 
@@ -500,6 +541,21 @@ function createPaneShell(instanceId: string): Pane {
   };
   panes.set(instanceId, pane);
   pane.tabEl.prepend(typeEl);
+  container.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    const items: ContextMenuItem[] = [
+      { label: "Copy", action: () => { view.copySelection(); } },
+      { label: "Paste", action: () => { void view.pasteClipboard(); } },
+    ];
+    if (pane.engine === "core") {
+      items.push({ separator: true });
+      items.push({
+        label: committedPreferences.showThinking ? "Hide Thinking" : "Show Thinking",
+        action: () => commands.execute("toggle-thinking"),
+      });
+    }
+    showContextMenu(items, event.clientX, event.clientY);
+  });
   return pane;
 }
 
@@ -1454,6 +1510,12 @@ commands.register("new-terminal", () => {
 });
 commands.register("next-terminal", () => cycleTerminals(1));
 commands.register("previous-terminal", () => cycleTerminals(-1));
+commands.register("toggle-thinking", () => {
+  const next = !committedPreferences.showThinking;
+  void window.pi.updatePreferences({ patch: { showThinking: next }, activateShortcuts: false }).then((saved) => {
+    applyPreferences(saved, false, false);
+  }).catch(() => toast("Could not save settings", "error"));
+});
 commands.register("next-project", () => cycleProjects(1));
 commands.register("previous-project", () => cycleProjects(-1));
 
@@ -2013,6 +2075,7 @@ window.pi.onInstances((list: InstanceSummary[]) => {
     pane.busy = summary.busy;
     pane.type = summary.type;
     pane.engine = summary.engine;
+    pane.view.setEngine(summary.engine);
     pane.shellName = summary.shellName;
     pane.dispatchWorker = summary.dispatchWorker ?? false;
     pane.dispatchTask = summary.dispatchTask;

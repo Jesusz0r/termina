@@ -244,6 +244,11 @@ next prompt recovers the bytes. The prompt payload keeps refs, not bytes.
 Pi and shell terminals do not attach image bytes; a drop inserts
 POSIX-quoted absolute paths through xterm paste and does not submit them.
 
+The TUI transcript keeps assistant, thinking, tool, and error entries.
+Provider-visible thinking is shown by default. `CmdOrCtrl+Shift+H` toggles
+it. Encrypted reasoning is never shown. Tools render one status box.
+Live layout is not restored from session JSONL.
+
 MCP is a stdio client, not a plugin surface. Servers come from the user-owned
 `~/.termina/agent/mcp.json`. The kernel does not execute project-owned MCP
 configuration. It spawns user servers at process start, lists tools once,

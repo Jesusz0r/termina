@@ -8,6 +8,7 @@ import {
   type ShortcutCommand,
   type ShortcutMap,
   type ThemeId,
+  type UserPreferencePatch,
 } from "./types";
 
 const MAX_SHORTCUT_LENGTH = 64;
@@ -105,5 +106,29 @@ export function normalizeAppPreferences(raw: unknown): AppPreferences {
     minimap: typeof input.minimap === "boolean" ? input.minimap : defaults.minimap,
     shortcuts: sanitizeShortcutMap(input.shortcuts, defaults.shortcuts),
     openProjects: sanitizeOpenProjects(input.openProjects),
+    showThinking: typeof input.showThinking === "boolean" ? input.showThinking : defaults.showThinking,
   };
+}
+
+const USER_PATCH_KEYS = [
+  "theme",
+  "editorFontSize",
+  "terminalFontSize",
+  "fontFamily",
+  "wordWrap",
+  "minimap",
+  "shortcuts",
+  "showThinking",
+] as const satisfies ReadonlyArray<keyof UserPreferencePatch>;
+
+export function normalizeUserPreferencePatch(raw: unknown): UserPreferencePatch {
+  const input = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  const full = normalizeAppPreferences(input);
+  const patch: UserPreferencePatch = {};
+  for (const key of USER_PATCH_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(input, key)) {
+      (patch as Record<string, unknown>)[key] = full[key];
+    }
+  }
+  return patch;
 }

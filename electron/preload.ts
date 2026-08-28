@@ -21,6 +21,7 @@ import type {
   PlanPayload,
   WorldlineSummary,
   AppPreferences,
+  PreferenceUpdate,
   ShortcutMap,
   FolderOpenedPayload,
   AppUpdateState,
@@ -116,8 +117,8 @@ const bridge: PiBridge = {
   runVerify: (terminalId) => ipcRenderer.invoke("verify:run", terminalId),
   cancelVerify: (terminalId) => ipcRenderer.invoke("verify:cancel", terminalId),
   getPreferences: (): Promise<AppPreferences> => ipcRenderer.invoke("settings:get"),
-  updatePreferences: (preferences: AppPreferences, activateShortcuts: boolean): Promise<AppPreferences> =>
-    ipcRenderer.invoke("settings:update", preferences, activateShortcuts),
+  updatePreferences: (update: PreferenceUpdate): Promise<AppPreferences> =>
+    ipcRenderer.invoke("settings:update", update),
   setKeyboardShortcuts: (shortcuts: ShortcutMap) => ipcRenderer.invoke("settings:shortcuts", shortcuts),
   getTimeline: (terminalId) => ipcRenderer.invoke("timeline:get", terminalId),
   getTimelinePrefix: (terminalId) => ipcRenderer.invoke("timeline:prefix", terminalId),

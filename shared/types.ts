@@ -229,7 +229,12 @@ export interface AppPreferences {
   shortcuts: ShortcutMap;
   /** Canonical project roots to reopen on launch. Main owns this field. */
   openProjects: string[];
+  /** Show provider-supplied thinking in core terminals. */
+  showThinking: boolean;
 }
+
+export type UserPreferencePatch = Partial<Omit<AppPreferences, "openProjects">>;
+export type PreferenceUpdate = { patch: UserPreferencePatch; activateShortcuts: boolean };
 
 export function defaultAppPreferences(): AppPreferences {
   return {
@@ -241,6 +246,7 @@ export function defaultAppPreferences(): AppPreferences {
     minimap: true,
     shortcuts: { ...DEFAULT_SHORTCUTS },
     openProjects: [],
+    showThinking: true,
   };
 }
 
@@ -461,7 +467,7 @@ export interface PiBridge {
 
   // Settings
   getPreferences(): Promise<AppPreferences>;
-  updatePreferences(preferences: AppPreferences, activateShortcuts: boolean): Promise<AppPreferences>;
+  updatePreferences(update: PreferenceUpdate): Promise<AppPreferences>;
   setKeyboardShortcuts(shortcuts: ShortcutMap): Promise<ShortcutMap>;
 
   // Session Timeline

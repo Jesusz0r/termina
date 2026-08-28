@@ -60,7 +60,8 @@ import {
   parseTerminalRoster,
   type TerminalRosterEntry,
 } from "./terminal-roster.js";
-import { normalizeAppPreferences, sanitizeShortcutMap } from "../shared/preferences.js";
+import { normalizeAppPreferences, normalizeUserPreferencePatch, sanitizeShortcutMap } from "../shared/preferences.js";
+import { HIDE_THINKING_CSI, SHOW_THINKING_CSI, thinkingStartupArgs } from "../shared/terminal-control.js";
 import {
   DEFAULT_SHORTCUTS,
   defaultAppPreferences,
@@ -511,6 +512,7 @@ class PiEditorApp {
   private userDataDir = process.env.TERMINA_USER_DATA_DIR ?? app.getPath("userData");
   private preferencesStore = new AppPreferencesStore(join(this.userDataDir, "preferences.json"));
   private preferences: AppPreferences = defaultAppPreferences();
+  private preferenceCommits: Promise<void> = Promise.resolve();
   private shortcutMap: ShortcutMap = { ...DEFAULT_SHORTCUTS };
   private worldsRoot = process.env.TERMINA_WORLDS_DIR ?? join(this.userDataDir, "worlds");
   /** Input buffer for /new slash-command detection (terminals:write is per keystroke). */
@@ -684,6 +686,15 @@ class PiEditorApp {
           { label: "Previous Terminal", accelerator: shortcut("previous-terminal"), click: send("previous-terminal") },
           { type: "separator" },
           { label: "Send Ctrl+C (abort)", accelerator: shortcut("abort-terminal"), click: () => void this.abortActive() },
+          {
+            label: "Show Thinking",
+            type: "checkbox",
+            checked: this.preferences.showThinking,
+            click: (item) => {
+              item.checked = this.preferences.showThinking;
+              send("toggle-thinking")();
+            },
+          },
         ],
       },
       {
@@ -750,24 +761,38 @@ class PiEditorApp {
     return { ...this.shortcutMap };
   }
 
-  private async updatePreferences(raw: unknown, activateShortcuts: boolean): Promise<AppPreferences> {
-    const next = normalizeAppPreferences(raw);
-    // Main owns openProjects: the renderer sends a stale snapshot, and a
-    // settings save must never roll back the current project list.
-    next.openProjects = this.preferences.openProjects;
-    this.preferences = next;
-    nativeTheme.themeSource = next.theme === "light" ? "light" : "dark";
-    if (activateShortcuts) {
-      this.shortcutMap = { ...next.shortcuts };
+  private async commitPreferencePatch(patch: Partial<AppPreferences>, activateShortcuts: boolean): Promise<AppPreferences> {
+    const operation = this.preferenceCommits.then(async () => {
+      const candidate = normalizeAppPreferences({ ...this.preferences, ...patch });
+      if (!Object.prototype.hasOwnProperty.call(patch, "openProjects")) {
+        candidate.openProjects = this.preferences.openProjects;
+      }
+      await this.preferencesStore.save(candidate);
+      const thinkingChanged = this.preferences.showThinking !== candidate.showThinking;
+      this.preferences = candidate;
+      nativeTheme.themeSource = candidate.theme === "light" ? "light" : "dark";
+      if (activateShortcuts) this.shortcutMap = { ...candidate.shortcuts };
       this.buildMenu();
-    }
-    try {
-      await this.preferencesStore.save(next);
-    } catch (err) {
-      console.warn(`[main] preferences save failed: ${(err as Error).message}`);
-      throw err;
-    }
-    return { ...next, shortcuts: { ...next.shortcuts } };
+      if (thinkingChanged) {
+        const seq = candidate.showThinking ? SHOW_THINKING_CSI : HIDE_THINKING_CSI;
+        for (const inst of this.terminals.values()) {
+          if (inst.engine === "core") inst.pty.write(seq);
+        }
+      }
+      return { ...candidate, shortcuts: { ...candidate.shortcuts } };
+    });
+    this.preferenceCommits = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  private async updatePreferences(raw: unknown, activateShortcuts: boolean): Promise<AppPreferences> {
+    const patch = normalizeUserPreferencePatch(raw && typeof raw === "object" && raw !== null && "patch" in raw
+      ? (raw as { patch: unknown }).patch
+      : raw);
+    const activate = raw && typeof raw === "object" && raw !== null && "activateShortcuts" in raw
+      ? (raw as { activateShortcuts?: boolean }).activateShortcuts === true
+      : activateShortcuts;
+    return this.commitPreferencePatch(patch, activate);
   }
 
   // ------------------------------------------------------------- terminals --
@@ -906,6 +931,7 @@ class PiEditorApp {
       agentCorePath: join(__dirname, "agent-core.mjs").replace("app.asar", "app.asar.unpacked"),
       electronExecPath: process.execPath,
       baseEnv: cleanEnv(),
+      showThinking: () => this.preferences.showThinking,
       getStore: async () => {
         const store = await project.storePromise;
         return store;
@@ -1958,7 +1984,10 @@ class PiEditorApp {
       // cannot read inside the asar; spawn the unpacked copy (same rule
       // as pi's cli.js).
       cmd = process.execPath;
-      args = [join(__dirname, "agent-core.mjs").replace("app.asar", "app.asar.unpacked")];
+      args = [
+        join(__dirname, "agent-core.mjs").replace("app.asar", "app.asar.unpacked"),
+        ...thinkingStartupArgs(this.preferences.showThinking),
+      ];
       if (persist) {
         const sessionCwd = cwd ?? owner?.cwd ?? this.terminalCwd();
         if (!sessionId || !isCoreSessionId(sessionId) || this.coreSessionInUse(sessionId)) {
@@ -4946,8 +4975,8 @@ class PiEditorApp {
       const next = normalizeAppPreferences(this.preferences);
       return { ...next, shortcuts: { ...next.shortcuts } };
     });
-    ipcMain.handle("settings:update", (_e, preferences: unknown, activateShortcuts?: boolean) =>
-      this.updatePreferences(preferences, activateShortcuts === true),
+    ipcMain.handle("settings:update", (_e, update: unknown, activateShortcuts?: boolean) =>
+      this.updatePreferences(update, activateShortcuts === true),
     );
     ipcMain.handle("settings:shortcuts", (_e, shortcuts: unknown) => this.setKeyboardShortcuts(shortcuts));
     ipcMain.handle("update:get", () => this.appUpdater?.getState() ?? { status: "disabled" as const, currentVersion: app.getVersion() });
@@ -5413,13 +5442,15 @@ class PiEditorApp {
   }
 
   /** Record the open projects so the next launch restores them. */
-  private persistOpenProjects(): void {
+  private persistOpenProjects(): Promise<void> {
     const roots = [...this.projects.values()].map((p) => p.canonicalRoot);
-    if (JSON.stringify(roots) === JSON.stringify(this.preferences.openProjects)) return;
-    this.preferences.openProjects = roots;
-    void this.preferencesStore.save(this.preferences).catch((err) => {
-      console.warn(`[main] project list save failed: ${(err as Error).message}`);
-    });
+    if (JSON.stringify(roots) === JSON.stringify(this.preferences.openProjects)) return Promise.resolve();
+    return this.commitPreferencePatch({ openProjects: roots }, false).then(
+      () => undefined,
+      (err) => {
+        console.warn(`[main] project list save failed: ${(err as Error).message}`);
+      },
+    );
   }
 
   private async checkAppUpdateFromMenu(): Promise<void> {
@@ -5467,7 +5498,8 @@ class PiEditorApp {
     if (this.disposed) return;
     this.disposed = true;
     this.appUpdater?.dispose();
-    this.persistOpenProjects();
+    await this.persistOpenProjects();
+    await this.preferenceCommits;
     await this.preferencesStore.flush();
     await this.drainVerifyJobs(null);
     this.tailer.stop();

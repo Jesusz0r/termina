@@ -1,8 +1,16 @@
+import type { ITheme } from "@xterm/xterm";
 import type { ThemeId } from "../shared/types";
+
+const CORE_EXTENDED: Record<ThemeId, string[]> = {
+  dark: ["#16324a", "#163a28", "#4a1818"],
+  light: ["#c5ddf6", "#c5e6d0", "#f5c8c8"],
+  "high-contrast": ["#003366", "#004422", "#550000"],
+  atom: ["#1c3148", "#1e3a2a", "#4a2024"],
+};
 
 /** xterm palettes keyed by the app theme id. Agent-core uses blue as the
  *  accent and bright black as dim text. */
-export const TERMINAL_THEMES: Record<ThemeId, Record<string, string>> = {
+export const TERMINAL_THEMES: Record<ThemeId, ITheme> = {
   dark: {
     background: "#0b0d09",
     foreground: "#edf2e2",
@@ -96,3 +104,9 @@ export const TERMINAL_THEMES: Record<ThemeId, Record<string, string>> = {
     brightWhite: "#ffffff",
   },
 };
+
+export function terminalTheme(theme: ThemeId, engine?: "pi" | "core"): ITheme {
+  const base = TERMINAL_THEMES[theme];
+  if (engine !== "core") return base;
+  return { ...base, extendedAnsi: [...CORE_EXTENDED[theme]] };
+}

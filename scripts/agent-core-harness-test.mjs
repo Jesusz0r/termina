@@ -701,6 +701,7 @@ check(
     overflowWhileClaimed.error === "too many pending images" &&
     claimedCapState.ok &&
     claimedCapState.count === 4,
+  JSON.stringify({ heldClaim: heldClaim.ok && heldClaim.claim.images.length, overflowWhileClaimed, claimedCapState }),
 );
 
 const deadChild = spawn(process.execPath, ["-e", "process.exit(0)"]);
@@ -2882,11 +2883,332 @@ check("slash ignores prompts", matchingSlashCommands("hello").length === 0);
 check("slash Tab /m completes to /model", completeSlashLine("/m") === "/model");
 check("slash Tab /ex completes to /exit", completeSlashLine("/ex") === "/exit");
 check("slash Tab /foo is unchanged", completeSlashLine("/foo") === "/foo");
+const terminalControl = await import("../shared/terminal-control.ts");
+check("thinkingStartupArgs is empty when thinking is shown", terminalControl.thinkingStartupArgs(true).length === 0);
+check(
+  "thinkingStartupArgs hides thinking",
+  terminalControl.thinkingStartupArgs(false).length === 1 && terminalControl.thinkingStartupArgs(false)[0] === "--hide-thinking",
+);
+check("parseHideThinking reads the core flag", terminalControl.parseHideThinking(["node", "agent-core.mjs", "--hide-thinking"]) === true);
+const commandsMod = await import("../shared/commands.ts");
+check(
+  "showThinking defaults to true",
+  /showThinking:\s*true/.test(readFileSync(new URL("../shared/types.ts", import.meta.url), "utf8")),
+);
+check(
+  "toggle-thinking is registered",
+  commandsMod.COMMAND_DEFINITIONS.some((c) => c.command === "toggle-thinking" && c.label === "Toggle Thinking" && c.defaultShortcut === "CmdOrCtrl+Shift+H"),
+);
+const themesMod = await import("../src/terminal-themes.ts");
+function luminance(hex) {
+  const n = Number.parseInt(hex.slice(1), 16);
+  const rgb = [n >> 16, (n >> 8) & 255, n & 255].map((c) => {
+    const s = c / 255;
+    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+}
+function contrastRatio(a, b) {
+  const l1 = luminance(a);
+  const l2 = luminance(b);
+  const hi = Math.max(l1, l2);
+  const lo = Math.min(l1, l2);
+  return (hi + 0.05) / (lo + 0.05);
+}
+for (const theme of Object.keys(themesMod.TERMINAL_THEMES)) {
+  const coreTheme = themesMod.terminalTheme(theme, "core");
+  const plainTheme = themesMod.terminalTheme(theme, "pi");
+  check(
+    `core ${theme} has three extendedAnsi entries`,
+    Array.isArray(coreTheme.extendedAnsi) && coreTheme.extendedAnsi.length === 3,
+  );
+  check(`pi ${theme} has no extendedAnsi override`, plainTheme.extendedAnsi === undefined);
+  check(
+    `core ${theme} tool backgrounds keep 4.5 contrast`,
+    coreTheme.extendedAnsi.every((bg) => contrastRatio(coreTheme.foreground, bg) >= 4.5),
+  );
+}
 
 const tuiMod = await import("../agent-core/tui.ts");
 check("wrapText splits on width", tuiMod.wrapText("abcdef", 3).join("|") === "abc|def");
 check("wrapText keeps newlines", tuiMod.wrapText("ab\ncd", 10).join("|") === "ab|cd");
-check("wrapText counts a code point as one cell", tuiMod.wrapText("👍👍", 1).join("|") === "👍|👍");
+check("wrapText keeps emoji graphemes", tuiMod.wrapText("👍👍", 1).join("|") === "👍|👍");
+check("cellWidth treats CJK as two cells", tuiMod.cellWidth("界") === 2);
+check("cellWidth treats combining marks as one cell", tuiMod.cellWidth("e\u0301") === 1);
+const semanticTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+semanticTui.appendAssistant("hello ");
+semanticTui.appendThinking("reason");
+semanticTui.appendAssistant("world");
+semanticTui.appendPlain("note\n");
+semanticTui.appendError("boom\n");
+const h1 = semanticTui.startTool("read_file", "a.ts");
+const h2 = semanticTui.startTool("read_file", "a.ts");
+semanticTui.finishTool(h2, "error", "nope");
+semanticTui.finishTool(h1, "success", "ok");
+const semFrame = semanticTui.frame();
+check(
+  "semantic transcript keeps insertion order",
+  semFrame.indexOf("hello") < semFrame.indexOf("reason") &&
+    semFrame.indexOf("reason") < semFrame.indexOf("world") &&
+    semFrame.includes("done") &&
+    semFrame.includes("failed"),
+);
+semanticTui.finishTool(h1, "success");
+semanticTui.finishTool(/** @type {any} */ ({}), "success");
+check("forged or duplicate tool handles stay bounded", semanticTui.frame().includes("invalid tool handle"));
+const boundTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+for (let i = 0; i < 2100; i++) boundTui.appendPlain("x");
+check("transcript evicts oldest settled entries", !boundTui.frame().includes("hello") && boundTui.frame().includes("x"));
+const truncTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+truncTui.appendAssistant("a".repeat(410_000));
+const truncText = String(truncTui.entries?.[0]?.text ?? truncTui.frame());
+check(
+  "active assistant over budget keeps one truncation marker",
+  (truncText.match(/\[truncated\]/g) || []).length === 1 && truncText.length <= 400_000 + 32,
+);
+const hideTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+hideTui.appendAssistant("A1");
+hideTui.appendThinking("secret-think");
+hideTui.appendAssistant("A2");
+hideTui.setThinkingVisible(false);
+check("hidden thinking leaves assistant text", hideTui.frame().includes("A1") && hideTui.frame().includes("A2") && !hideTui.frame().includes("secret-think"));
+hideTui.setThinkingVisible(true);
+check("showing thinking restores the same entry", hideTui.frame().includes("secret-think"));
+function paintCapture(setup) {
+  const writes = [];
+  const tui = new tuiMod.AgentTui({
+    stdout: { write: (s) => { writes.push(s); return true; }, columns: 80, rows: 24, isTTY: true },
+    stdin: { isTTY: true, setRawMode: () => {}, resume: () => {} },
+    onSubmit: () => {},
+    onInterrupt: () => {},
+    onExit: () => {},
+  });
+  setup(tui);
+  tui.start();
+  const out = writes.join("");
+  tui.stop();
+  return out;
+}
+const runningPaint = paintCapture((tui) => {
+  tui.startTool("bash", "ls");
+});
+check(
+  "pending tool uses index 16",
+  runningPaint.includes("\x1b[48;5;16m") && runningPaint.includes("running") && runningPaint.includes("\x1b[0m"),
+);
+const donePaint = paintCapture((tui) => {
+  tui.finishTool(tui.startTool("bash", "ls"), "success", "ok");
+});
+check("successful tool uses index 17", donePaint.includes("\x1b[48;5;17m") && donePaint.includes("done"));
+const failedPaint = paintCapture((tui) => {
+  tui.finishTool(tui.startTool("bash", "ls"), "error", "nope");
+});
+check("failed tool uses index 18", failedPaint.includes("\x1b[48;5;18m") && failedPaint.includes("failed"));
+const cancelledPaint = paintCapture((tui) => {
+  tui.startTool("bash", "ls");
+  tui.cancelPendingTools();
+});
+check(
+  "cancelled tool keeps pending background",
+  cancelledPaint.includes("\x1b[48;5;16m") && cancelledPaint.includes("cancelled") && !cancelledPaint.includes("\x1b[48;5;18m"),
+);
+const csiTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+csiTui.appendAssistant("visible-a");
+csiTui.appendThinking("hidden-think");
+csiTui.appendAssistant("visible-b");
+csiTui.setDraft("keep-draft");
+const hideSeq = terminalControl.HIDE_THINKING_CSI;
+let hideOk = true;
+for (let i = 1; i < hideSeq.length; i++) {
+  const split = new tuiMod.AgentTui({
+    stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+    stdin: { isTTY: false },
+    onSubmit: () => {},
+    onInterrupt: () => {},
+    onExit: () => {},
+  });
+  split.appendAssistant("visible-a");
+  split.appendThinking("hidden-think");
+  split.appendAssistant("visible-b");
+  split.setDraft("keep-draft");
+  split.feed(hideSeq.slice(0, i));
+  split.feed(hideSeq.slice(i));
+  const frame = split.frame();
+  if (frame.includes("hidden-think") || !frame.includes("visible-a") || !frame.includes("keep-draft")) hideOk = false;
+}
+check("hide CSI works at every split", hideOk);
+csiTui.feed(hideSeq);
+check(
+  "complete hide CSI keeps the draft",
+  !csiTui.frame().includes("hidden-think") && csiTui.frame().includes("keep-draft"),
+);
+csiTui.setDraft("keep-draft");
+csiTui.feed("\x1b[?25h");
+csiTui.feed("\x1b[?9001;h");
+csiTui.feed(`\x1b[?${"0".repeat(40)}hhello`);
+check(
+  "unknown and malformed private CSI stay out of the draft",
+  csiTui.frame().includes("keep-drafthello") &&
+    !csiTui.frame().includes("9001") &&
+    !csiTui.frame().includes("hidden-think"),
+);
+csiTui.feed(terminalControl.SHOW_THINKING_CSI);
+check("show CSI restores thinking", csiTui.frame().includes("hidden-think"));
+const mdTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+mdTui.appendAssistant("*em* **strong** `code`\n");
+check("markdown frame drops emphasis markers", mdTui.frame().includes("em") && mdTui.frame().includes("strong") && !mdTui.frame().includes("*em*"));
+const unclosedMd = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+unclosedMd.appendAssistant("**not closed *em*");
+check(
+  "unclosed strong stays literal",
+  unclosedMd.frame().includes("**not closed") && unclosedMd.frame().includes("em") && !unclosedMd.frame().includes("*em*"),
+);
+unclosedMd.appendAssistant("\n```js\nstill-open");
+check("unclosed fence stays literal", unclosedMd.frame().includes("```js") && unclosedMd.frame().includes("still-open"));
+unclosedMd.appendAssistant("\n```\n");
+check("closed fence drops markers", unclosedMd.frame().includes("still-open") && !unclosedMd.frame().includes("```js"));
+const nestMd = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+nestMd.appendAssistant(`${"> ".repeat(9)}deep\n`);
+check("quote nesting beyond eight stays literal", nestMd.frame().includes("> > > > > > > > > deep") && !nestMd.frame().includes("│ │ │ │ │ │ │ │ │"));
+const scanMd = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+scanMd.appendAssistant(`${"> quote line\n".repeat(8000)}`);
+scanMd.frame();
+const scannedBefore = scanMd.markdownScannedChars;
+scanMd.appendAssistant("tail-only");
+scanMd.frame();
+const scannedDelta = scanMd.markdownScannedChars - scannedBefore;
+check("markdown scan stays on the unfinished suffix", scannedDelta > 0 && scannedDelta <= "tail-only".length * 4);
+const streamTail = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+streamTail.appendAssistant("a".repeat(80_000));
+streamTail.frame();
+const streamBefore = streamTail.markdownScannedChars;
+streamTail.appendAssistant("Z");
+const streamFrame = streamTail.frame();
+const streamDelta = streamTail.markdownScannedChars - streamBefore;
+check("streaming wrap scans a window not the whole entry", streamDelta > 0 && streamDelta <= 80 * 24 * 8);
+check("streaming wrap keeps the visible tail", streamFrame.includes("Z"));
+const hideOld = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+hideOld.appendPlain("UNIQUE_OLD_MARKER\n");
+hideOld.appendAssistant(`${"a".repeat(80_000)}TAILEND`);
+check(
+  "a huge newer entry does not splice older rows into the tail",
+  hideOld.frame().replace(/\s+/g, "").includes("TAILEND") && !hideOld.frame().includes("UNIQUE_OLD_MARKER"),
+);
+const showOld = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+showOld.appendPlain("UNIQUE_OLD_MARKER\n");
+showOld.appendAssistant("short-new");
+check(
+  "a short newer entry still shows older rows",
+  showOld.frame().includes("UNIQUE_OLD_MARKER") && showOld.frame().includes("short-new"),
+);
+const cjkTail = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+cjkTail.appendAssistant(`${"界".repeat(20_000)}尾`);
+check("CJK tail wrap keeps the last grapheme", cjkTail.frame().includes("尾"));
+const mixTrunc = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+mixTrunc.appendPlain("s".repeat(390_000));
+mixTrunc.appendAssistant(`keep-me-${"a".repeat(20_000)}`);
+const mixText = String(mixTrunc.entries?.[0]?.text ?? mixTrunc.frame());
+check(
+  "eviction runs before active-stream truncation",
+  mixText.includes("keep-me-") && !mixText.includes("[truncated]"),
+);
+const sanTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+sanTui.appendPlain("\x1b[31mSAFE\x1b[0m");
+sanTui.appendAssistant("\x1b]0;title\x07SAFE");
+check("sanitizer strips escapes and keeps SAFE", sanTui.frame().includes("SAFE") && !sanTui.frame().includes("\x1b"));
+sanTui.appendThinking("\x1b[");
+sanTui.appendPlain("SAFE2");
+check("incomplete escape does not leak into the next entry", sanTui.frame().includes("SAFE2") && !sanTui.frame().includes("[SAFE2"));
 check(
   "layoutHeights keeps a transcript",
   tuiMod.layoutHeights(24, 1, 7).transcript >= 2 && tuiMod.layoutHeights(24, 1, 7).header === 2,
@@ -2910,7 +3232,7 @@ tui.setStatus({
   effort: "max",
   usage: usageIndicators,
 });
-tui.append("hello from transcript\n");
+tui.appendPlain("hello from transcript\n");
 const frame = tui.frame();
 const frameLines = frame.split("\n");
 check("tui status names the kernel", frame.includes("termina agent-core v1"));
@@ -2941,7 +3263,7 @@ const imgTui = new tuiMod.AgentTui({
   onExit: () => {},
 });
 imgTui.setPendingImageCount(2);
-imgTui.append("x");
+imgTui.appendPlain("x");
 check("tui status shows pending images", imgTui.frame().includes("2 images"));
 let hostRefresh = 0;
 const refreshTui = new tuiMod.AgentTui({
@@ -3030,6 +3352,7 @@ shortcutTui.feed("\x1b[Z");
 shortcutTui.feed("\x1b");
 check("Escape cancels the model picker", !shortcutTui.frame().includes("> /models"));
 shortcutTui.feed("\x1b");
+shortcutTui.frame();
 check("Ctrl+P cycles models forward", shortcutLines[0] === "/model anthropic/c");
 check("Ctrl+Shift+P cycles models backward", shortcutLines[1] === "/model anthropic/a");
 check("Shift+Tab cycles effort", shortcutLines[2] === "/effort max");
@@ -3096,7 +3419,7 @@ histTui.feed("hello\r");
 histTui.feed("/login openai oauth\r");
 histTui.feed("\x1b[A\x1b[A\r");
 check("tui history up past a login command", histLines.at(-1) === "hello");
-tui.append("\x1b[31mred-text\x1b[0m");
+tui.appendPlain("\x1b[31mred-text\x1b[0m");
 check("tui strips ansi from transcript", tui.frame().includes("red-text") && !tui.frame().includes("\x1b[31m"));
 const pasteLines = [];
 const pasteTui = new tuiMod.AgentTui({

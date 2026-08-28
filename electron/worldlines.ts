@@ -20,6 +20,7 @@ import type { SessionForkOpts, SessionForkResult } from "./session-fork.js";
 import type { DependencyChange, RunSummary, TimelineEvent, WorldlineChangedFile, WorldlineDetails } from "../shared/types.js";
 import { copySessionImageFiles, writeForkedSession } from "../agent-core/session.js";
 import { MAX_MCP_JSON_BYTES } from "../agent-core/mcp.js";
+import { thinkingStartupArgs } from "../shared/terminal-control.js";
 
 /** Quote one shell argument: the resolved base commands carry scripts that
  * must survive as one argument through the wrapper shell. */
@@ -185,6 +186,7 @@ export interface WorldlineDeps {
   agentCorePath: string;
   electronExecPath: string;
   baseEnv: Record<string, string | undefined>;
+  showThinking(): boolean;
   getStore(): Promise<SnapshotStore | null>;
   /** Read-only load paths for the sandboxed pi (app package + node). */
   appReadPaths(): string[];
@@ -1451,7 +1453,7 @@ export class WorldlineManager {
           cand.profilePath,
           "/bin/zsh",
           "-c",
-          `${sandboxShellPreamble()} exec ${quoteShellArg(this.deps.electronExecPath)} ${quoteShellArg(this.deps.agentCorePath)}`,
+          `${sandboxShellPreamble()} exec ${quoteShellArg(this.deps.electronExecPath)} ${quoteShellArg(this.deps.agentCorePath)}${thinkingStartupArgs(this.deps.showThinking()).map((arg) => ` ${quoteShellArg(arg)}`).join("")}`,
         ],
         env,
       };

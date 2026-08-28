@@ -32,6 +32,7 @@ export const COMMAND_DEFINITIONS = [
   { command: "new-terminal", label: "New terminal", category: "Terminal", description: "Open a shell or Pi terminal", defaultShortcut: "CmdOrCtrl+T", scope: "renderer" },
   { command: "close-terminal", label: "Close terminal", category: "Terminal", description: "Close the active terminal", defaultShortcut: "CmdOrCtrl+Shift+W", scope: "main" },
   { command: "abort-terminal", label: "Abort terminal", category: "Terminal", description: "Send an interrupt to the active terminal", defaultShortcut: "CmdOrCtrl+.", scope: "main" },
+  { command: "toggle-thinking", label: "Toggle Thinking", category: "Terminal", description: "Show or hide provider thinking in core terminals", defaultShortcut: "CmdOrCtrl+Shift+H", scope: "renderer" },
   { command: "next-terminal", label: "Next terminal", category: "Terminal", description: "Activate the next terminal tab", defaultShortcut: "Ctrl+Tab", scope: "renderer" },
   { command: "previous-terminal", label: "Previous terminal", category: "Terminal", description: "Activate the previous terminal tab", defaultShortcut: "Ctrl+Shift+Tab", scope: "renderer" },
   { command: "fullscreen", label: "Terminal fullscreen", category: "View", description: "Show only the terminal", defaultShortcut: "CmdOrCtrl+Shift+F", scope: "renderer" },

@@ -115,6 +115,7 @@ import {
 
 export { MAX_SESSION_FILE_BYTES, copySessionImageFiles, rotateSessionFile, sessionRotateStamp, sliceSessionText, writeForkedSession } from "./session.ts";
 import { AgentTui, SLASH_COMMANDS } from "./tui.ts";
+import { parseHideThinking } from "../shared/terminal-control.ts";
 
 export { PERMISSION_COMMANDS, SLASH_COMMANDS, completeSlashLine, matchingSlashCommands, type SlashCommand } from "./tui.ts";
 
@@ -1926,7 +1927,9 @@ export function formatToolAnnounce(use: ToolUse): string {
 function capDisplay(text: string, maxBytes: number): string {
   const buf = Buffer.from(text, "utf8");
   if (buf.length <= maxBytes) return text;
-  return buf.subarray(buf.length - maxBytes).toString("utf8");
+  let start = buf.length - maxBytes;
+  while (start < buf.length && (buf[start]! & 0xc0) === 0x80) start += 1;
+  return buf.subarray(start).toString("utf8");
 }
 
 export function formatToolFollowup(use: ToolUse, outcome: { result: Record<string, unknown>; isError: boolean }): string {
@@ -2417,17 +2420,37 @@ function logToolStart(use: ToolUse): void {
   logEvent(sidecarStartFor(use));
 }
 
-function logServerSearch(
+function toolTranscriptDetail(use: ToolUse): string {
+  if (use.name === "edit" || use.name === "write_file" || use.name === "read_file") return use.input.path ?? "";
+  if (use.name === "bash") return use.input.command ?? "";
+  if (use.name === "grep" || use.name === "glob") return use.input.pattern ?? "";
+  if (use.name === "fetch") return String(use.input.url ?? "");
+  return "";
+}
+
+function toolTranscriptOutput(outcome: ToolOutcome): string {
+  const content = typeof outcome.result.content === "string" ? outcome.result.content : "";
+  if (Buffer.byteLength(content, "utf8") <= TOOL_DISPLAY_BYTES) return content;
+  return `${capDisplay(content, TOOL_DISPLAY_BYTES)}\n…[truncated]`;
+}
+
+function renderServerTools(
   blocks: Array<{ type: string; id?: string; name?: string; tool_use_id?: string; content?: unknown }>,
 ): string[] {
   const names: string[] = [];
+  const unmatched: Array<{ providerId: string; handle: ReturnType<NonNullable<typeof surface>["startTool"]> }> = [];
   for (const b of blocks) {
     if (b.type === "server_tool_use") {
       const name = b.name ?? "web_search";
       names.push(name);
       logEvent(sidecarStartFor({ name, id: b.id ?? "", input: {} }));
-      transcriptSection = null;
-      out(`\n◆ Tool · ${name}\n`);
+      nonTtyTranscriptSection = null;
+      if (surface) {
+        const handle = surface.startTool(name, "");
+        unmatched.push({ providerId: b.id ?? "", handle });
+      } else {
+        process.stdout.write(`\n◆ Tool · ${name}\n`);
+      }
     } else if (b.type === "web_search_tool_result") {
       const err =
         Boolean(b.content) &&
@@ -2435,9 +2458,16 @@ function logServerSearch(
         !Array.isArray(b.content) &&
         (b.content as { type?: string }).type === "web_search_tool_result_error";
       if (b.tool_use_id) logEvent({ t: "tool_end", toolCallId: b.tool_use_id, isError: err });
-      out(`◇ ${err ? "failed" : "done"}\n`);
+      if (surface) {
+        const idx = unmatched.findIndex((item) => item.providerId && item.providerId === (b.tool_use_id ?? ""));
+        const rec = idx >= 0 ? unmatched.splice(idx, 1)[0] : unmatched.shift();
+        if (rec) surface.finishTool(rec.handle, err ? "error" : "success");
+      } else {
+        process.stdout.write(`◇ ${err ? "failed" : "done"}\n`);
+      }
     }
   }
+  for (const rec of unmatched) surface?.finishTool(rec.handle, "cancelled");
   return names;
 }
 
@@ -3192,7 +3222,7 @@ async function completeText(
 }
 
 async function callModel(messages: Message[]): Promise<CallResult> {
-  transcriptSection = null;
+  nonTtyTranscriptSection = null;
   const started = Date.now();
   const sys = systemPrompt();
   const prefix = buildCachedPrefix(sys, clientTools);
@@ -3726,7 +3756,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         lastPlanText = plan;
         logEvent({ t: "plan", text: plan });
       }
-      const serverNames = logServerSearch(result.blocks);
+      const serverNames = renderServerTools(result.blocks);
       const uses = (result.blocks.filter((b) => b.type === "tool_use") as Extract<Block, { type: "tool_use" }>[]).map(
         (b): ToolUse => ({ id: b.id, name: b.name, input: b.input }),
       );
@@ -3754,21 +3784,48 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         break;
       }
       const outcomes: ToolOutcome[] = [];
+      try {
       for (let i = 0; i < uses.length; i += TOOL_CONCURRENCY) {
         if (interrupted) break;
         const chunk = uses.slice(i, i + TOOL_CONCURRENCY);
-        for (const use of chunk) {
+        const handles = chunk.map((use) => {
           logToolStart(use);
-          transcriptSection = null;
-          out(`\n${formatToolAnnounce(use)}\n`);
-        }
-        const chunkOutcomes = await Promise.all(chunk.map(executeTool));
+          nonTtyTranscriptSection = null;
+          if (surface) return surface.startTool(use.name, toolTranscriptDetail(use));
+          process.stdout.write(`\n${formatToolAnnounce(use)}\n`);
+          return null;
+        });
+        const wrapped = chunk.map((use) => executeTool(use));
+        const settled = await Promise.allSettled(wrapped);
         for (let ci = 0; ci < chunk.length; ci++) {
-          logEvent({ t: "tool_end", toolCallId: chunk[ci]!.id, isError: chunkOutcomes[ci]!.isError });
-          const follow = formatToolFollowup(chunk[ci]!, chunkOutcomes[ci]!);
-          if (follow) out(follow);
+          const item = settled[ci]!;
+          if (item.status === "fulfilled") {
+            const outcome = item.value;
+            if (interrupted) {
+              if (handles[ci]) surface?.finishTool(handles[ci]!, "cancelled");
+            } else if (handles[ci]) {
+              surface?.finishTool(
+                handles[ci]!,
+                outcome.isError ? "error" : "success",
+                toolTranscriptOutput(outcome),
+              );
+            } else {
+              const follow = formatToolFollowup(chunk[ci]!, outcome);
+              if (follow) process.stdout.write(follow);
+            }
+            outcomes.push(outcome);
+            logEvent({ t: "tool_end", toolCallId: chunk[ci]!.id, isError: outcome.isError });
+          } else {
+            const err = item.reason;
+            const message = err instanceof Error ? err.message : String(err);
+            if (handles[ci]) surface?.finishTool(handles[ci]!, "error", capDisplay(message, TOOL_DISPLAY_BYTES));
+            outcomes.push({ result: toolResult(chunk[ci]!, message), isError: true });
+            logEvent({ t: "tool_end", toolCallId: chunk[ci]!.id, isError: true });
+          }
         }
-        outcomes.push(...chunkOutcomes);
+      }
+      } finally {
+        surface?.cancelPendingTools();
       }
       // An interrupted turn must still answer the open tool calls, or the
       // stored pair breaks the next request.
@@ -3911,7 +3968,7 @@ function resumeSession(): void {
 // ---- terminal surface ----
 
 let surface: AgentTui | null = null;
-let transcriptSection: "thinking" | "assistant" | null = null;
+let nonTtyTranscriptSection: "thinking" | "assistant" | null = null;
 let pendingImageRefresh: Promise<void> | null = null;
 let pendingImageRefreshAgain = false;
 
@@ -3947,17 +4004,22 @@ async function refreshPendingImageCount(): Promise<void> {
 }
 
 function out(text: string): void {
-  if (surface) surface.append(text);
+  if (surface) surface.appendPlain(text);
   else process.stdout.write(text);
 }
 
 function streamOut(section: "thinking" | "assistant", text: string): void {
   if (!text) return;
-  if (transcriptSection !== section) {
-    out(`\n◆ ${section === "thinking" ? "Thinking" : "Assistant"}\n`);
-    transcriptSection = section;
+  if (surface) {
+    if (section === "thinking") surface.appendThinking(text);
+    else surface.appendAssistant(text);
+    return;
   }
-  out(text);
+  if (nonTtyTranscriptSection !== section) {
+    process.stdout.write(`\n◆ ${section === "thinking" ? "Thinking" : "Assistant"}\n`);
+    nonTtyTranscriptSection = section;
+  }
+  process.stdout.write(text);
 }
 
 function statusContextTokens(): number {
@@ -4478,6 +4540,7 @@ async function main(): Promise<void> {
       stdin: process.stdin,
       stdout: process.stdout,
       commands: SLASH_COMMANDS,
+      thinkingVisible: !parseHideThinking(process.argv),
       onHostRefresh: () => {
         void refreshPendingImageCount();
       },

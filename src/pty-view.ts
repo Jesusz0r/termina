@@ -6,7 +6,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { cssFontFamily, type TerminalPasteResult, type ThemeId } from "../shared/types";
 import { CanvasAddon } from "@xterm/addon-canvas";
-import { TERMINAL_THEMES } from "./terminal-themes";
+import { terminalTheme } from "./terminal-themes";
 import { isMacPlatform } from "./settings-shortcuts";
 import { toast } from "./components/modals";
 
@@ -21,6 +21,8 @@ export class PtyView {
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
   private fontSize: number;
   private fontFamily: string;
+  private themeId: ThemeId;
+  private engine: "pi" | "core" | undefined;
   private refreshFont = false;
   private readonly container: HTMLElement;
   private dragDepth = 0;
@@ -48,11 +50,12 @@ export class PtyView {
     this.sendInput = onInput;
     this.fontSize = appearance.fontSize;
     this.fontFamily = appearance.fontFamily;
+    this.themeId = appearance.theme;
     this.term = new Terminal({
       fontSize: appearance.fontSize,
       fontFamily: cssFontFamily(appearance.fontFamily),
       convertEol: true,
-      theme: TERMINAL_THEMES[appearance.theme],
+      theme: terminalTheme(appearance.theme),
       cursorBlink: true,
       scrollback: 8000,
     });
@@ -274,7 +277,15 @@ export class PtyView {
   }
 
   setTheme(theme: ThemeId): void {
-    if (!this.disposed) this.term.options.theme = TERMINAL_THEMES[theme];
+    if (this.disposed) return;
+    this.themeId = theme;
+    this.term.options.theme = terminalTheme(theme, this.engine);
+  }
+
+  setEngine(engine: "pi" | "core" | undefined): void {
+    if (this.disposed || this.engine === engine) return;
+    this.engine = engine;
+    this.term.options.theme = terminalTheme(this.themeId, this.engine);
   }
 
   setFontSize(size: number): void {

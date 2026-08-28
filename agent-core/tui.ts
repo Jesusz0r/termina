@@ -156,17 +156,222 @@ export function completeSlashLine(
   return prefix.length > line.length ? prefix : line;
 }
 
+const graphemeSegmenter = new Intl.Segmenter("en", { granularity: "grapheme" });
+
+export function splitGraphemes(text: string): string[] {
+  if (!text) return [];
+  return [...graphemeSegmenter.segment(text)].map((part) => part.segment);
+}
+
+function isCombiningCode(cp: number): boolean {
+  return (
+    (cp >= 0x0300 && cp <= 0x036f) ||
+    (cp >= 0x1ab0 && cp <= 0x1aff) ||
+    (cp >= 0x1dc0 && cp <= 0x1dff) ||
+    (cp >= 0x20d0 && cp <= 0x20ff) ||
+    (cp >= 0xfe20 && cp <= 0xfe2f) ||
+    cp === 0x200d ||
+    (cp >= 0xfe00 && cp <= 0xfe0f) ||
+    (cp >= 0xe0100 && cp <= 0xe01ef)
+  );
+}
+
+function isWideCode(cp: number): boolean {
+  if (cp >= 0x1f000 && cp <= 0x1ffff) return true;
+  if (cp >= 0x2600 && cp <= 0x27bf) return true;
+  if (cp >= 0x2e80 && cp <= 0xa4cf) return true;
+  if (cp >= 0xac00 && cp <= 0xd7af) return true;
+  if (cp >= 0xf900 && cp <= 0xfaff) return true;
+  if (cp >= 0xfe10 && cp <= 0xfe19) return true;
+  if (cp >= 0xfe30 && cp <= 0xfe6f) return true;
+  if (cp >= 0xff01 && cp <= 0xff60) return true;
+  if (cp >= 0xffe0 && cp <= 0xffe6) return true;
+  if (cp >= 0x1100 && cp <= 0x115f) return true;
+  if (cp >= 0x2329 && cp <= 0x232a) return true;
+  if (cp >= 0x2ff0 && cp <= 0x2fff) return true;
+  if (cp >= 0x3000 && cp <= 0x303e) return true;
+  if (cp >= 0x3040 && cp <= 0x33ff) return true;
+  if (cp >= 0x1f1e6 && cp <= 0x1f1ff) return true;
+  return false;
+}
+
+function graphemeCells(g: string, column: number): number {
+  if (g === "\t") return 8 - (column % 8);
+  let wide = false;
+  let base = false;
+  for (const ch of g) {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (isCombiningCode(cp)) continue;
+    base = true;
+    if (isWideCode(cp)) wide = true;
+  }
+  if (!base) return 0;
+  return wide ? 2 : 1;
+}
+
+export function cellWidth(text: string, startColumn = 0): number {
+  let col = Math.max(0, startColumn);
+  for (const g of splitGraphemes(text)) col += graphemeCells(g, col);
+  return col - Math.max(0, startColumn);
+}
+
 export function wrapText(text: string, width: number): string[] {
   const cols = Math.max(1, width);
   const out: string[] = [];
   for (const raw of text.split("\n")) {
-    const units = [...raw];
-    if (units.length === 0) {
+    const gs = splitGraphemes(raw);
+    if (gs.length === 0) {
       out.push("");
       continue;
     }
-    for (let i = 0; i < units.length; i += cols) out.push(units.slice(i, i + cols).join(""));
+    let line = "";
+    let used = 0;
+    for (const g of gs) {
+      const cells = graphemeCells(g, used);
+      if (cells === 0) {
+        line += g;
+        continue;
+      }
+      if (used > 0 && used + cells > cols) {
+        out.push(line);
+        line = g;
+        used = graphemeCells(g, 0);
+        continue;
+      }
+      line += g;
+      used += cells;
+    }
+    out.push(line);
   }
+  return out;
+}
+
+function displayBudget(cols: number, maxRows: number): number {
+  return (Math.max(1, maxRows) + 2) * Math.max(1, cols) + 2;
+}
+
+function graphemeSafeTail(text: string, maxChars: number): string {
+  if (maxChars <= 0) return "";
+  if (text.length <= maxChars) return text;
+  let start = text.length - maxChars;
+  const lead = text.charCodeAt(start);
+  if (lead >= 0xdc00 && lead <= 0xdfff) start += 1;
+  let slice = text.slice(start);
+  const gs = splitGraphemes(slice);
+  if (gs.length === 0) return "";
+  if (gs.length > 1 && graphemeCells(gs[0]!, 0) === 0) slice = gs.slice(1).join("");
+  return slice;
+}
+
+function sourceTail(text: string, maxChars: number): { text: string; sliced: boolean } {
+  if (maxChars <= 0) return { text: "", sliced: text.length > 0 };
+  if (text.length <= maxChars) return { text, sliced: false };
+  let slice = graphemeSafeTail(text, maxChars);
+  const nl = slice.indexOf("\n");
+  if (nl >= 0 && nl + 1 < slice.length) slice = slice.slice(nl + 1);
+  return { text: slice, sliced: true };
+}
+
+function spanTextLen(spans: StyledSpan[]): number {
+  let n = 0;
+  for (const span of spans) n += span.text.length;
+  return n;
+}
+
+function tailSpans(spans: StyledSpan[], maxChars: number): StyledSpan[] {
+  if (maxChars <= 0) return [];
+  let n = 0;
+  const out: StyledSpan[] = [];
+  for (let i = spans.length - 1; i >= 0; i--) {
+    const span = spans[i]!;
+    if (n >= maxChars) break;
+    if (n + span.text.length <= maxChars) {
+      out.push(span);
+      n += span.text.length;
+      continue;
+    }
+    out.push({ text: graphemeSafeTail(span.text, maxChars - n), style: span.style });
+    break;
+  }
+  out.reverse();
+  return out;
+}
+
+function wrapSpans(spans: StyledSpan[], width: number): Array<{ frags: StyledSpan[]; cells: number }> {
+  const cols = Math.max(1, width);
+  const rows: Array<{ frags: StyledSpan[]; cells: number }> = [];
+  let row: StyledSpan[] = [];
+  let used = 0;
+  const flush = (): void => {
+    rows.push({ frags: row, cells: used });
+    row = [];
+    used = 0;
+  };
+  const add = (g: string, style: StyleId): void => {
+    if (g === "\n") {
+      flush();
+      return;
+    }
+    const cells = graphemeCells(g, used);
+    if (cells === 0) {
+      const last = row[row.length - 1];
+      if (last && last.style === style) last.text += g;
+      else row.push({ text: g, style });
+      return;
+    }
+    if (used > 0 && used + cells > cols) flush();
+    const placed = graphemeCells(g, used);
+    const last = row[row.length - 1];
+    if (last && last.style === style) last.text += g;
+    else row.push({ text: g, style });
+    used += placed;
+  };
+  for (const span of spans) {
+    for (const g of splitGraphemes(span.text)) add(g, span.style);
+  }
+  rows.push({ frags: row, cells: used });
+  return rows;
+}
+
+function paintRow(frags: StyledSpan[], cols: number, entry: TranscriptEntry, cells: number): string {
+  const bg =
+    entry.kind === "tool"
+      ? entry.toolState === "success"
+        ? 17
+        : entry.toolState === "error"
+          ? 18
+          : 16
+      : 0;
+  let out = "\x1b[0m";
+  if (bg) out += `\x1b[48;5;${bg}m`;
+  if (entry.kind === "thinking") out += "\x1b[3;90m";
+  if (entry.kind === "error") out += "\x1b[31m";
+  for (const frag of frags) {
+    const sgr =
+      frag.style === 1
+        ? "\x1b[3m"
+        : frag.style === 2
+          ? "\x1b[1m"
+          : frag.style === 3
+            ? "\x1b[36m"
+            : frag.style === 4
+              ? "\x1b[1;34m"
+              : frag.style === 5
+                ? "\x1b[2m"
+                : frag.style === 6 || frag.style === 7
+                  ? "\x1b[2;90m"
+                  : "";
+    if (sgr) out += sgr;
+    out += frag.text;
+    if (sgr) {
+      out += "\x1b[0m";
+      if (bg) out += `\x1b[48;5;${bg}m`;
+      if (entry.kind === "thinking") out += "\x1b[3;90m";
+      if (entry.kind === "error") out += "\x1b[31m";
+    }
+  }
+  if (cells < cols) out += " ".repeat(cols - cells);
+  out += "\x1b[0m";
   return out;
 }
 
@@ -179,8 +384,8 @@ export function visibleLines(plain: string, cols: number, rowCount: number, scro
   let slice = plain;
   if (plain.length > need) {
     slice = plain.slice(plain.length - need);
-    const lead = slice.charCodeAt(0);
-    if (lead >= 0xdc00 && lead <= 0xdfff) slice = slice.slice(1);
+    const gs = splitGraphemes(slice);
+    if (gs[0] && cellWidth(gs[0]) === 0) slice = gs.slice(1).join("");
   }
   const wrapped = wrapText(slice, colsN);
   const end = Math.max(0, wrapped.length - scrollN);
@@ -206,32 +411,356 @@ export function layoutHeights(
   return { header, transcript: Math.max(minTranscript, budget - used), input, slash, footer };
 }
 
-function unitsLen(text: string): number {
-  return [...text].length;
-}
-
 function clip(text: string, cols: number): string {
-  const units = [...text];
-  if (units.length === cols) return text;
-  if (units.length > cols) return units.slice(0, cols).join("");
-  return text + " ".repeat(cols - units.length);
+  const gs = splitGraphemes(text);
+  let used = 0;
+  let out = "";
+  for (const g of gs) {
+    const cells = graphemeCells(g, used);
+    if (used + cells > cols) break;
+    out += g;
+    used += cells;
+  }
+  if (used < cols) out += " ".repeat(cols - used);
+  return out;
 }
 
 function cursorRowCol(prefix: string, chars: string[], cursor: number, cols: number): { row: number; col: number } {
-  const n = unitsLen(prefix) + chars.slice(0, cursor).length;
+  const n = cellWidth(prefix + chars.slice(0, cursor).join(""));
   if (n === 0) return { row: 0, col: 0 };
   if (n % cols === 0) return { row: n / cols, col: 0 };
   return { row: Math.floor(n / cols), col: n % cols };
 }
 
-function stripAnsi(text: string): string {
-  return text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "").replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "");
-}
-
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const MAX_TRANSCRIPT = 400_000;
+const MAX_TRANSCRIPT_ENTRIES = 2_000;
 const MAX_HISTORY = 100;
 const MAX_CSI = 32;
+const MAX_ESCAPE = 32;
+const TRUNCATION_MARKER = "…[truncated]\n";
+const HANDLE_ERROR = "invalid tool handle\n";
+const MAX_MD_NEST = 8;
+
+const transcriptHandleBrand = Symbol("transcript-handle");
+export type TranscriptHandle = Readonly<{ [transcriptHandleBrand]: number }>;
+export type ToolTranscriptState = "success" | "error" | "cancelled";
+
+type SanitizerMode = "ground" | "esc" | "csi" | "osc" | "dcs";
+type SanitizerState = { mode: SanitizerMode; n: number; esc: boolean };
+
+function freshSanitizer(): SanitizerState {
+  return { mode: "ground", n: 0, esc: false };
+}
+
+function isC1(code: number): boolean {
+  return code >= 0x80 && code <= 0x9f;
+}
+
+function sanitizeText(input: string, start: SanitizerState): { text: string; state: SanitizerState } {
+  const state: SanitizerState = { ...start };
+  let out = "";
+  const flushIncomplete = (): void => {
+    state.mode = "ground";
+    state.n = 0;
+    state.esc = false;
+  };
+  for (const ch of input) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (state.mode === "ground") {
+      if (code === 0x1b) {
+        state.mode = "esc";
+        state.n = 0;
+        continue;
+      }
+      if (code === 0x9b) {
+        state.mode = "csi";
+        state.n = 0;
+        continue;
+      }
+      if (code === 0x9d) {
+        state.mode = "osc";
+        state.n = 0;
+        continue;
+      }
+      if (code === 0x90) {
+        state.mode = "dcs";
+        state.n = 0;
+        continue;
+      }
+      if (code === 0x9c || isC1(code) || (code < 0x20 && ch !== "\n" && ch !== "\t")) continue;
+      out += ch;
+      continue;
+    }
+    if (state.mode === "esc") {
+      if (ch === "[") {
+        state.mode = "csi";
+        state.n = 0;
+        continue;
+      }
+      if (ch === "]") {
+        state.mode = "osc";
+        state.n = 0;
+        continue;
+      }
+      if (ch === "P") {
+        state.mode = "dcs";
+        state.n = 0;
+        continue;
+      }
+      if (ch === "\\") {
+        flushIncomplete();
+        continue;
+      }
+      flushIncomplete();
+      continue;
+    }
+    if (state.mode === "csi") {
+      if (code === 0x0a) {
+        flushIncomplete();
+        out += ch;
+        continue;
+      }
+      state.n += 1;
+      if (code >= 0x40 && code <= 0x7e) {
+        flushIncomplete();
+        continue;
+      }
+      if (state.n > MAX_ESCAPE) continue;
+      continue;
+    }
+    if (state.mode === "osc" || state.mode === "dcs") {
+      if (code === 0x07 || code === 0x9c) {
+        flushIncomplete();
+        continue;
+      }
+      if (code === 0x1b) {
+        state.esc = true;
+        continue;
+      }
+      if (state.esc) {
+        state.esc = false;
+        if (ch === "\\") {
+          flushIncomplete();
+          continue;
+        }
+      }
+      if (code === 0x0a) {
+        flushIncomplete();
+        out += ch;
+        continue;
+      }
+      state.n += 1;
+      if (state.n > MAX_ESCAPE) continue;
+    }
+  }
+  return { text: out, state };
+}
+
+function closeSanitize(input: string, start: SanitizerState): string {
+  return sanitizeText(input, start).text;
+}
+
+type StyleId = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
+type StyledSpan = { text: string; style: StyleId };
+
+type EntryKind = "plain" | "assistant" | "thinking" | "tool" | "error";
+type ToolUiState = "running" | "success" | "error" | "cancelled";
+type TranscriptEntry = {
+  id: number;
+  kind: EntryKind;
+  text: string;
+  settled: boolean;
+  toolName?: string;
+  toolDetail?: string;
+  toolState?: ToolUiState;
+  sanitizer: SanitizerState;
+  revision: number;
+  mdPrefixLen: number;
+  mdPrefixSpans: StyledSpan[];
+  cache: {
+    revision: number;
+    width: number;
+    cover: number;
+    complete: boolean;
+    rows: string[];
+    painted: string[];
+  } | null;
+};
+
+function entryChars(entry: TranscriptEntry): number {
+  if (entry.kind === "tool") {
+    return (entry.toolName?.length ?? 0) + (entry.toolDetail?.length ?? 0) + entry.text.length;
+  }
+  return entry.text.length;
+}
+
+function toolStatusLabel(state: ToolUiState | undefined): string {
+  if (state === "success") return "done";
+  if (state === "error") return "failed";
+  if (state === "cancelled") return "cancelled";
+  return "running";
+}
+
+function parseInline(text: string, scanned: { n: number }, depth = 0): StyledSpan[] {
+  scanned.n += text.length;
+  if (depth >= MAX_MD_NEST) return text ? [{ text, style: 0 }] : [];
+  const spans: StyledSpan[] = [];
+  let i = 0;
+  let buf = "";
+  const flush = (style: StyleId): void => {
+    if (!buf) return;
+    spans.push({ text: buf, style });
+    buf = "";
+  };
+  while (i < text.length) {
+    if (text.startsWith("**", i)) {
+      const end = text.indexOf("**", i + 2);
+      if (end > i + 2 && !text.slice(i + 2, end).includes("\n")) {
+        flush(0);
+        const inner = parseInline(text.slice(i + 2, end), scanned, depth + 1);
+        for (const span of inner) spans.push({ text: span.text, style: 2 });
+        i = end + 2;
+        continue;
+      }
+      buf += "**";
+      i += 2;
+      continue;
+    }
+    if (text[i] === "*" && text[i + 1] !== "*") {
+      const end = text.indexOf("*", i + 1);
+      if (end > i + 1 && !text.slice(i + 1, end).includes("\n")) {
+        flush(0);
+        const inner = parseInline(text.slice(i + 1, end), scanned, depth + 1);
+        for (const span of inner) spans.push({ text: span.text, style: span.style === 0 ? 1 : span.style });
+        i = end + 1;
+        continue;
+      }
+    }
+    if (text[i] === "`") {
+      const end = text.indexOf("`", i + 1);
+      if (end > i + 1 && !text.slice(i + 1, end).includes("\n")) {
+        flush(0);
+        spans.push({ text: text.slice(i + 1, end), style: 3 });
+        i = end + 1;
+        continue;
+      }
+    }
+    buf += text[i];
+    i += 1;
+  }
+  flush(0);
+  return spans.length > 0 ? spans : text ? [{ text, style: 0 }] : [];
+}
+
+function quoteDepth(line: string): number {
+  let depth = 0;
+  let i = 0;
+  while (line.startsWith("> ", i) && depth < 32) {
+    depth += 1;
+    i += 2;
+  }
+  return depth;
+}
+
+function listDepth(line: string): number {
+  const m = /^(\s*)(?:[-*]|\d+\.)\s+/.exec(line);
+  if (!m) return 0;
+  return Math.floor((m[1] ?? "").length / 2) + 1;
+}
+
+function unfinishedStart(text: string): number {
+  let fence = false;
+  let fenceStart = 0;
+  let completeEnd = 0;
+  let lineStart = 0;
+  for (let i = 0; i <= text.length; i++) {
+    if (i < text.length && text[i] !== "\n") continue;
+    const line = text.slice(lineStart, i);
+    if (line.startsWith("```")) {
+      if (!fence) {
+        fence = true;
+        fenceStart = lineStart;
+      } else {
+        fence = false;
+        completeEnd = i + 1;
+      }
+    } else if (!fence && i < text.length) {
+      completeEnd = i + 1;
+    }
+    lineStart = i + 1;
+  }
+  if (fence) return fenceStart;
+  return Math.min(completeEnd, text.length);
+}
+
+function parseMarkdown(text: string, scanned: { n: number }): StyledSpan[] {
+  if (!text) return [];
+  const lines = text.split("\n");
+  const spans: StyledSpan[] = [];
+  let fence: string[] | null = null;
+  let fenceLang = "";
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li]!;
+    scanned.n += line.length + 1;
+    const more = li < lines.length - 1;
+    if (line.startsWith("```")) {
+      if (!fence) {
+        fence = [];
+        fenceLang = line.slice(3).trim();
+      } else {
+        if (fenceLang) spans.push({ text: fenceLang + "\n", style: 6 });
+        for (let fi = 0; fi < fence.length; fi++) {
+          const last = fi === fence.length - 1;
+          spans.push({ text: fence[fi]! + (last ? "" : "\n"), style: 3 });
+        }
+        if (fence.length === 0) spans.push({ text: "", style: 3 });
+        if (more) spans.push({ text: "\n", style: 3 });
+        fence = null;
+        fenceLang = "";
+      }
+      continue;
+    }
+    if (fence) {
+      fence.push(line);
+      continue;
+    }
+    const qd = quoteDepth(line);
+    const ld = listDepth(line);
+    if (/^#{1,6}\s/.test(line)) {
+      spans.push(...parseInline(line.replace(/^#{1,6}\s+/, ""), scanned).map((s) => ({ ...s, style: 4 as StyleId })));
+      if (more) spans.push({ text: "\n", style: 4 });
+      continue;
+    }
+    if (qd > MAX_MD_NEST || ld > MAX_MD_NEST) {
+      spans.push({ text: line, style: 0 });
+      if (more) spans.push({ text: "\n", style: 0 });
+      continue;
+    }
+    if (qd > 0) {
+      let rest = line;
+      for (let d = 0; d < qd; d++) rest = rest.slice(2);
+      spans.push({ text: "│ ".repeat(qd), style: 5 });
+      spans.push(...parseInline(rest, scanned).map((s) => ({ ...s, style: s.style === 0 ? 5 : s.style })));
+      if (more) spans.push({ text: "\n", style: 5 });
+      continue;
+    }
+    if (ld > 0) {
+      const item = line.replace(/^\s*[-*]\s+/, "• ").replace(/^\s*\d+\.\s+/, (m) => m);
+      spans.push(...parseInline(item, scanned));
+      if (more) spans.push({ text: "\n", style: 0 });
+      continue;
+    }
+    spans.push(...parseInline(line, scanned));
+    if (more) spans.push({ text: "\n", style: 0 });
+  }
+  if (fence) {
+    const open = `\`\`\`${fenceLang}`;
+    spans.push({ text: open, style: 0 });
+    for (const body of fence) spans.push({ text: `\n${body}`, style: 0 });
+  }
+  return spans;
+}
 
 export type TuiIO = {
   write(s: string): unknown;
@@ -258,7 +787,15 @@ export class AgentTui {
   private readonly onInterrupt: () => void;
   private readonly onExit: () => void;
   private started = false;
-  private plain = "";
+  private entries: TranscriptEntry[] = [];
+  private nextEntryId = 1;
+  private nextHandle = 1;
+  private transcriptChars = 0;
+  private activeStream: { kind: "assistant" | "thinking"; entryId: number } | null = null;
+  private activeEntry: TranscriptEntry | null = null;
+  private toolHandles = new Map<number, number>();
+  private thinkingVisible = true;
+  markdownScannedChars = 0;
   private scroll = 0;
   private follow = true;
   private chars: string[] = [];
@@ -287,6 +824,7 @@ export class AgentTui {
   private decoder = new TextDecoder("utf8");
   private lastPainted: string[] | null = null;
   private lastDim = { cols: 0, rows: 0 };
+  private escTimer: ReturnType<typeof setTimeout> | null = null;
   private modelRows: SlashCommand[] = [];
   private effortRows: SlashCommand[] = effortCommandRows();
   private choicePrompt = "";
@@ -301,6 +839,7 @@ export class AgentTui {
     onInterrupt: () => void;
     onExit: () => void;
     onHostRefresh?: () => void;
+    thinkingVisible?: boolean;
   }) {
     this.out = opts.stdout;
     this.inp = opts.stdin;
@@ -309,6 +848,7 @@ export class AgentTui {
     this.onInterrupt = opts.onInterrupt;
     this.onExit = opts.onExit;
     if (opts.onHostRefresh) this.onHostRefresh = opts.onHostRefresh;
+    if (opts.thinkingVisible === false) this.thinkingVisible = false;
   }
 
   setPendingImageCount(count: number): void {
@@ -378,7 +918,7 @@ export class AgentTui {
   }
 
   setDraft(text: string): void {
-    this.chars = [...text];
+    this.chars = splitGraphemes(text);
     this.cursor = this.chars.length;
     this.slashIndex = 0;
     this.histIndex = -1;
@@ -386,18 +926,380 @@ export class AgentTui {
     this.schedule();
   }
 
-  append(text: string): void {
-    if (!text) return;
-    this.plain += stripAnsi(text);
-    if (this.plain.length > MAX_TRANSCRIPT) {
-      const cut = this.plain.slice(-MAX_TRANSCRIPT);
-      const lead = cut.charCodeAt(0);
-      const trimmed = lead >= 0xdc00 && lead <= 0xdfff ? cut.slice(1) : cut;
-      const nl = trimmed.indexOf("\n");
-      this.plain = nl === -1 ? trimmed : trimmed.slice(nl + 1);
+  appendPlain(text: string): void {
+    this.pushText("plain", text, true);
+  }
+
+  appendAssistant(text: string): void {
+    this.pushStream("assistant", text);
+  }
+
+  appendThinking(text: string): void {
+    this.pushStream("thinking", text);
+  }
+
+  appendError(text: string): void {
+    this.pushText("error", text, true);
+  }
+
+  setThinkingVisible(visible: boolean): void {
+    if (this.thinkingVisible === visible) return;
+    if (this.follow) {
+      this.thinkingVisible = visible;
+      this.schedule();
+      return;
     }
+    const { cols, rows } = this.size();
+    const inputText = this.choicePrompt || `> ${this.chars.join("")}`;
+    const layout = layoutHeights(rows, Math.max(1, wrapText(inputText, cols).length), this.matches().length);
+    const anchor = this.topVisibleEntryId(cols, layout.transcript, this.scroll);
+    this.thinkingVisible = visible;
+    const next = anchor === null ? null : this.nearestVisibleEntryId(anchor);
+    if (next === null) this.scroll = 0;
+    else this.scrollEntryToTop(next, cols, layout.transcript);
+    this.follow = this.scroll === 0;
+    this.schedule();
+  }
+
+  startTool(name: string, detail: string): TranscriptHandle {
+    this.closeStream();
+    const id = this.nextEntryId++;
+    const handleId = this.nextHandle++;
+    const handle = { [transcriptHandleBrand]: handleId } as TranscriptHandle;
+    const cleanName = closeSanitize(name, freshSanitizer());
+    const cleanDetail = closeSanitize(detail, freshSanitizer());
+    this.entries.push({
+      id,
+      kind: "tool",
+      text: "",
+      settled: false,
+      toolName: cleanName,
+      toolDetail: cleanDetail,
+      toolState: "running",
+      sanitizer: freshSanitizer(),
+      revision: 1,
+      mdPrefixLen: 0,
+      mdPrefixSpans: [],
+      cache: null,
+    });
+    this.toolHandles.set(handleId, id);
+    this.transcriptChars += entryChars(this.entries[this.entries.length - 1]!);
+    this.evictSettled();
     if (this.follow) this.scroll = 0;
     this.schedule();
+    return handle;
+  }
+
+  finishTool(handle: TranscriptHandle, state: ToolTranscriptState, output?: string): void {
+    const handleId = (handle as unknown as { [transcriptHandleBrand]?: number })[transcriptHandleBrand];
+    const entryId = typeof handleId === "number" ? this.toolHandles.get(handleId) : undefined;
+    const entry = entryId !== undefined ? this.entries.find((item) => item.id === entryId) : undefined;
+    if (!entry || entry.kind !== "tool") {
+      this.appendPlain(HANDLE_ERROR);
+      return;
+    }
+    if (entry.settled) {
+      this.appendPlain(HANDLE_ERROR);
+      return;
+    }
+    this.transcriptChars -= entryChars(entry);
+    entry.toolState = state === "success" ? "success" : state === "cancelled" ? "cancelled" : "error";
+    entry.settled = true;
+    entry.text = closeSanitize(output ?? "", freshSanitizer());
+    entry.revision += 1;
+    entry.mdPrefixLen = 0;
+    entry.mdPrefixSpans = [];
+    entry.cache = null;
+    this.transcriptChars += entryChars(entry);
+    this.toolHandles.delete(handleId as number);
+    this.evictSettled();
+    if (this.follow) this.scroll = 0;
+    this.schedule();
+  }
+
+  cancelPendingTools(): void {
+    for (const entry of this.entries) {
+      if (entry.kind === "tool" && !entry.settled) {
+        entry.toolState = "cancelled";
+        entry.settled = true;
+        entry.revision += 1;
+        entry.cache = null;
+      }
+    }
+    this.toolHandles.clear();
+    this.evictSettled();
+    this.schedule();
+  }
+
+  private closeStream(): void {
+    if (!this.activeStream) return;
+    if (this.activeEntry) {
+      this.activeEntry.settled = true;
+      this.activeEntry.sanitizer = freshSanitizer();
+    }
+    this.activeStream = null;
+    this.activeEntry = null;
+  }
+
+  private pushStream(kind: "assistant" | "thinking", text: string): void {
+    if (!text) return;
+    if (!this.activeEntry || this.activeStream?.kind !== kind) {
+      this.closeStream();
+      const id = this.nextEntryId++;
+      const entry: TranscriptEntry = {
+        id,
+        kind,
+        text: "",
+        settled: false,
+        sanitizer: freshSanitizer(),
+        revision: 1,
+        mdPrefixLen: 0,
+        mdPrefixSpans: [],
+        cache: null,
+      };
+      this.entries.push(entry);
+      this.activeStream = { kind, entryId: id };
+      this.activeEntry = entry;
+    }
+    const entry = this.activeEntry;
+    if (!entry) return;
+    const next = sanitizeText(text, entry.sanitizer);
+    entry.sanitizer = next.state;
+    entry.text += next.text;
+    entry.revision += 1;
+    entry.cache = null;
+    this.transcriptChars += next.text.length;
+    this.evictSettled();
+    this.truncateActive(entry);
+    if (this.follow) this.scroll = 0;
+    this.schedule();
+  }
+
+  private pushText(kind: "plain" | "error", text: string, settled: boolean): void {
+    if (!text) return;
+    this.closeStream();
+    const clean = closeSanitize(text, freshSanitizer());
+    const id = this.nextEntryId++;
+    this.entries.push({
+      id,
+      kind,
+      text: clean,
+      settled,
+      sanitizer: freshSanitizer(),
+      revision: 1,
+      mdPrefixLen: 0,
+      mdPrefixSpans: [],
+      cache: null,
+    });
+    this.transcriptChars += clean.length;
+    this.evictSettled();
+    if (this.follow) this.scroll = 0;
+    this.schedule();
+  }
+
+  private truncateActive(entry: TranscriptEntry): void {
+    if (this.transcriptChars <= MAX_TRANSCRIPT) return;
+    if (this.activeStream?.entryId !== entry.id) return;
+    const others = this.transcriptChars - entryChars(entry);
+    const budget = Math.max(0, MAX_TRANSCRIPT - others - TRUNCATION_MARKER.length);
+    let tail = entry.text.length > budget ? graphemeSafeTail(entry.text, budget) : entry.text;
+    const nl = tail.indexOf("\n");
+    if (nl >= 0 && nl + 1 < tail.length) tail = tail.slice(nl + 1);
+    const next = TRUNCATION_MARKER + tail;
+    this.transcriptChars -= entryChars(entry);
+    entry.text = next;
+    entry.mdPrefixLen = 0;
+    entry.mdPrefixSpans = [];
+    entry.revision += 1;
+    entry.cache = null;
+    this.transcriptChars += entryChars(entry);
+  }
+
+  private evictSettled(): void {
+    while (this.entries.length > MAX_TRANSCRIPT_ENTRIES || this.transcriptChars > MAX_TRANSCRIPT) {
+      const idx = this.entries.findIndex(
+        (item) => item.settled && this.activeStream?.entryId !== item.id,
+      );
+      if (idx < 0) break;
+      const gone = this.entries[idx]!;
+      this.entries.splice(idx, 1);
+      this.transcriptChars -= entryChars(gone);
+      for (const [handleId, entryId] of [...this.toolHandles]) {
+        if (entryId === gone.id) this.toolHandles.delete(handleId);
+      }
+    }
+  }
+
+  private entrySpans(entry: TranscriptEntry): StyledSpan[] {
+    if (entry.kind === "tool") {
+      const title = `◆ ${entry.toolName || "tool"}${entry.toolDetail ? `  ${entry.toolDetail}` : ""}`;
+      const status = toolStatusLabel(entry.toolState);
+      const spans: StyledSpan[] = [
+        { text: title, style: 4 },
+        { text: `\n  ${status}`, style: 7 },
+      ];
+      if (entry.text) spans.push({ text: `\n${entry.text}`, style: 0 });
+      return spans;
+    }
+    if (entry.kind !== "assistant" && entry.kind !== "thinking") {
+      return entry.text ? [{ text: entry.text, style: 0 }] : [];
+    }
+    return this.entryTailSpans(entry, Number.MAX_SAFE_INTEGER).spans;
+  }
+
+  private ensureMdPrefix(entry: TranscriptEntry, start: number): void {
+    if (entry.mdPrefixLen > start) {
+      entry.mdPrefixLen = 0;
+      entry.mdPrefixSpans = [];
+    }
+    if (entry.mdPrefixLen >= start) return;
+    const scanned = { n: 0 };
+    const extra = parseMarkdown(entry.text.slice(entry.mdPrefixLen, start), scanned);
+    this.markdownScannedChars += scanned.n;
+    for (const span of extra) entry.mdPrefixSpans.push(span);
+    entry.mdPrefixLen = start;
+  }
+
+  private entryTailSpans(entry: TranscriptEntry, maxChars: number): { spans: StyledSpan[]; complete: boolean } {
+    if (entry.kind === "tool") return { spans: this.entrySpans(entry), complete: true };
+    if (entry.kind !== "assistant" && entry.kind !== "thinking") {
+      const tail = sourceTail(entry.text, maxChars);
+      return {
+        spans: tail.text ? [{ text: tail.text, style: 0 }] : [],
+        complete: !tail.sliced,
+      };
+    }
+    const start = unfinishedStart(entry.text);
+    const suffix = entry.text.slice(start);
+    if (suffix.length > maxChars) {
+      const tail = sourceTail(suffix, maxChars);
+      const scanned = { n: 0 };
+      const spans = parseMarkdown(tail.text, scanned);
+      this.markdownScannedChars += scanned.n;
+      return { spans, complete: false };
+    }
+    this.ensureMdPrefix(entry, start);
+    const scanned = { n: 0 };
+    const parsed = parseMarkdown(suffix, scanned);
+    this.markdownScannedChars += scanned.n;
+    const prefix = entry.mdPrefixSpans;
+    if (spanTextLen(prefix) + suffix.length <= maxChars) {
+      return { spans: prefix.length ? prefix.concat(parsed) : parsed, complete: true };
+    }
+    return {
+      spans: tailSpans(prefix, Math.max(0, maxChars - suffix.length)).concat(parsed),
+      complete: false,
+    };
+  }
+
+  private renderedEntry(
+    entry: TranscriptEntry,
+    cols: number,
+    maxRows: number,
+  ): { rows: string[]; painted: string[]; complete: boolean } {
+    const want = Math.max(1, maxRows);
+    const hit = entry.cache;
+    if (hit && hit.revision === entry.revision && hit.width === cols && (hit.complete || hit.cover >= want)) {
+      if (hit.rows.length <= want) return hit;
+      return {
+        rows: hit.rows.slice(-want),
+        painted: hit.painted.slice(-want),
+        complete: hit.complete,
+      };
+    }
+    let budget = displayBudget(cols, want);
+    let chunk = this.entryTailSpans(entry, budget);
+    let wrapped = wrapSpans(chunk.spans, cols);
+    for (let pass = 0; pass < 3 && !chunk.complete && wrapped.length < want && budget < entry.text.length; pass++) {
+      budget = Math.min(entry.text.length, budget * 2);
+      chunk = this.entryTailSpans(entry, budget);
+      wrapped = wrapSpans(chunk.spans, cols);
+    }
+    let rows = wrapped.map((row) => row.frags.map((frag) => frag.text).join(""));
+    let painted = wrapped.map((row) => paintRow(row.frags, cols, entry, row.cells));
+    if (!chunk.complete && rows.length > want) {
+      rows = rows.slice(-want);
+      painted = painted.slice(-want);
+    }
+    entry.cache = {
+      revision: entry.revision,
+      width: cols,
+      cover: rows.length,
+      complete: chunk.complete,
+      rows,
+      painted,
+    };
+    return entry.cache;
+  }
+
+  private visibleSlice(
+    cols: number,
+    rowCount: number,
+    scroll: number,
+  ): { rows: string[]; painted: string[]; ids: number[] } {
+    let stillNeed = Math.max(0, rowCount + scroll);
+    const rows: string[] = [];
+    const painted: string[] = [];
+    const ids: number[] = [];
+    for (let i = this.entries.length - 1; i >= 0 && stillNeed > 0; i--) {
+      const entry = this.entries[i]!;
+      if (!this.thinkingVisible && entry.kind === "thinking") continue;
+      const rendered = this.renderedEntry(entry, cols, stillNeed);
+      rows.unshift(...rendered.rows);
+      painted.unshift(...rendered.painted);
+      for (let r = 0; r < rendered.rows.length; r++) ids.unshift(entry.id);
+      if (!rendered.complete) break;
+      stillNeed -= rendered.rows.length;
+    }
+    const end = Math.max(0, rows.length - scroll);
+    const start = Math.max(0, end - rowCount);
+    return {
+      rows: rows.slice(start, end),
+      painted: painted.slice(start, end),
+      ids: ids.slice(start, end),
+    };
+  }
+
+  private visibleTranscript(cols: number, rowCount: number, scroll: number): string[] {
+    return this.visibleSlice(cols, rowCount, scroll).rows;
+  }
+
+  private topVisibleEntryId(cols: number, rowCount: number, scroll: number): number | null {
+    const ids = this.visibleSlice(cols, rowCount, scroll).ids;
+    return ids[0] ?? null;
+  }
+
+  private nearestVisibleEntryId(id: number): number | null {
+    const idx = this.entries.findIndex((item) => item.id === id);
+    const visible = (entry: TranscriptEntry): boolean => this.thinkingVisible || entry.kind !== "thinking";
+    if (idx < 0) return this.entries.find(visible)?.id ?? null;
+    for (let d = 0; d < this.entries.length; d++) {
+      const left = this.entries[idx - d];
+      if (left && visible(left)) return left.id;
+      const right = this.entries[idx + d];
+      if (d > 0 && right && visible(right)) return right.id;
+    }
+    return null;
+  }
+
+  private scrollEntryToTop(id: number, cols: number, rowCount: number): void {
+    let after = 0;
+    for (let i = this.entries.length - 1; i >= 0; i--) {
+      const entry = this.entries[i]!;
+      if (!this.thinkingVisible && entry.kind === "thinking") continue;
+      if (entry.id === id) {
+        const piece = this.renderedEntry(entry, cols, after + rowCount);
+        if (!piece.complete) {
+          this.scroll = after;
+          return;
+        }
+        this.scroll = Math.max(0, after + piece.rows.length - rowCount);
+        return;
+      }
+      const newer = this.renderedEntry(entry, cols, 4096);
+      after += newer.complete ? newer.rows.length : 4096;
+    }
+    this.scroll = 0;
   }
 
   start(): boolean {
@@ -435,6 +1337,10 @@ export class AgentTui {
       clearTimeout(this.paintTimer);
       this.paintTimer = null;
     }
+    if (this.escTimer) {
+      clearTimeout(this.escTimer);
+      this.escTimer = null;
+    }
     if (this.onResize) this.out.off?.("resize", this.onResize);
     if (this.onData) this.inp.off?.("data", this.onData);
     try {
@@ -452,24 +1358,40 @@ export class AgentTui {
 
   /** Visible frame without tty side effects. Tests use this. */
   frame(): string {
+    this.flushBareEscape();
     return this.buildFrame(this.size()).text;
   }
 
   feed(text: string): void {
+    if (this.escTimer) {
+      clearTimeout(this.escTimer);
+      this.escTimer = null;
+    }
     if (text === "\x1b") {
-      this.esc = 0;
-      if (this.choiceRows.length > 0) {
-        this.clearChoices();
-        this.onInterrupt();
-      } else if (this.matches().length > 0) {
-        this.chars = [];
-        this.cursor = 0;
-        this.slashIndex = 0;
-        this.schedule();
-      } else this.onInterrupt();
+      this.esc = 1;
+      this.escTimer = setTimeout(() => this.flushBareEscape(), 25);
       return;
     }
     for (const ch of text) this.handleChar(ch);
+  }
+
+  private flushBareEscape(): void {
+    if (!this.escTimer && this.esc !== 1) return;
+    if (this.escTimer) {
+      clearTimeout(this.escTimer);
+      this.escTimer = null;
+    }
+    if (this.esc !== 1) return;
+    this.esc = 0;
+    if (this.choiceRows.length > 0) {
+      this.clearChoices();
+      this.onInterrupt();
+    } else if (this.matches().length > 0) {
+      this.chars = [];
+      this.cursor = 0;
+      this.slashIndex = 0;
+      this.schedule();
+    } else this.onInterrupt();
   }
 
   private size(): { cols: number; rows: number } {
@@ -529,7 +1451,7 @@ export class AgentTui {
         line === "/permissions" ||
         (line === "/models" && this.modelRows.length > 0))
     ) {
-      this.chars = [...line];
+      this.chars = splitGraphemes(line);
       this.cursor = this.chars.length;
       this.slashIndex = 0;
       this.histIndex = -1;
@@ -549,7 +1471,7 @@ export class AgentTui {
     }
     this.follow = true;
     this.scroll = 0;
-    if (line) this.append(`\n> ${echo}\n`);
+    if (line) this.appendPlain(`\n> ${echo}\n`);
     else this.schedule();
     if (line === "/exit" || line === "/quit") {
       this.onExit();
@@ -587,12 +1509,21 @@ export class AgentTui {
       return;
     }
     if (this.esc === 2) {
-      if (this.csi.length === 0 && ch === "<") {
-        this.csi = "<";
+      if (this.csi.length === 0 && (ch === "<" || ch === "?")) {
+        this.csi = ch;
         return;
       }
       if ((ch >= "0" && ch <= "9") || ch === ";") {
         if (this.csi.length < MAX_CSI) this.csi += ch;
+        else this.csi = this.csi.slice(0, MAX_CSI) + "x";
+        return;
+      }
+      if (this.csi.startsWith("?")) {
+        if (this.csi.length <= MAX_CSI && this.csi === "?9001" && (ch === "h" || ch === "l")) {
+          this.setThinkingVisible(ch === "h");
+        }
+        this.esc = 0;
+        this.csi = "";
         return;
       }
       this.applyCsi(this.csi, ch);
@@ -679,7 +1610,7 @@ export class AgentTui {
     if (ch === "\t") {
       if (this.rawInput) return;
       const next = completeSlashLine(this.chars.join(""), this.commands, this.modelRows, this.effortRows);
-      this.chars = [...next];
+      this.chars = splitGraphemes(next);
       this.cursor = this.chars.length;
       this.slashIndex = 0;
       this.schedule();
@@ -714,7 +1645,11 @@ export class AgentTui {
 
   private insert(ch: string): void {
     this.chars.splice(this.cursor, 0, ch);
-    this.cursor++;
+    const prefix = this.chars.slice(0, this.cursor + 1).join("");
+    const rest = this.chars.slice(this.cursor + 1).join("");
+    const prefixGs = splitGraphemes(prefix);
+    this.chars = [...prefixGs, ...splitGraphemes(rest)];
+    this.cursor = prefixGs.length;
     this.slashIndex = 0;
     this.histIndex = -1;
     this.schedule();
@@ -753,7 +1688,7 @@ export class AgentTui {
       this.onSubmit("/models");
       return;
     }
-    this.chars = [..."/models"];
+    this.chars = splitGraphemes("/models");
     this.cursor = this.chars.length;
     this.slashIndex = Math.max(0, this.modelRows.findIndex((row) => row.name === this.model));
     this.schedule();
@@ -883,13 +1818,13 @@ export class AgentTui {
       this.histIndex = 0;
     } else if (next >= this.history.length) {
       this.histIndex = -1;
-      this.chars = [...this.draft];
+      this.chars = splitGraphemes(this.draft);
       this.cursor = this.chars.length;
       return;
     } else {
       this.histIndex = next;
     }
-    this.chars = [...(this.history[this.histIndex] ?? "")];
+    this.chars = splitGraphemes(this.history[this.histIndex] ?? "");
     this.cursor = this.chars.length;
   }
 
@@ -899,9 +1834,8 @@ export class AgentTui {
     const matches = this.matches();
     const inputLines = Math.max(1, wrapText(inputText, cols).length || 1);
     const layout = layoutHeights(rows, inputLines, matches.length);
-    const wrapped = wrapText(this.plain.length > (layout.transcript + this.scroll + 2) * cols
-      ? this.plain.slice(-(layout.transcript + this.scroll + 2) * cols)
-      : this.plain, cols);
+    const page = Math.max(1, layout.transcript - 1);
+    const wrapped = this.visibleTranscript(cols, layout.transcript + this.scroll + page + 2, 0);
     const maxScroll = Math.max(0, wrapped.length - layout.transcript);
     this.scroll = Math.max(0, Math.min(maxScroll, this.scroll + pages * Math.max(1, layout.transcript - 1)));
     this.follow = this.scroll === 0;
@@ -944,7 +1878,7 @@ export class AgentTui {
       Math.min(this.slashIndex - layout.slash + 1, Math.max(0, matches.length - layout.slash)),
     );
     const shownSlash = matches.slice(slashStart, slashStart + layout.slash);
-    const view = visibleLines(this.plain, cols, layout.transcript, this.scroll);
+    const view = this.visibleSlice(cols, layout.transcript, this.scroll);
     const nameW = shownSlash.length > 0 ? Math.max(...shownSlash.map((c) => c.name.length)) : 0;
     const spin = this.busy ? `${SPIN[this.spin]!} ` : "";
     const imageN = this.pendingImageCount;
@@ -958,7 +1892,7 @@ export class AgentTui {
         : " / commands · Tab complete · Ctrl+J newline · PgUp/PgDn scroll · Ctrl+C clear ";
 
     const lines: string[] = [];
-    for (let i = 0; i < layout.transcript; i++) lines.push(clip(view[i] ?? "", cols));
+    for (let i = 0; i < layout.transcript; i++) lines.push(clip(view.rows[i] ?? "", cols));
     const inputShown = inputWrapped.slice(0, layout.input);
     for (let i = 0; i < layout.input; i++) lines.push(clip(inputShown[i] ?? "", cols));
     for (let i = 0; i < layout.slash; i++) {
@@ -974,7 +1908,7 @@ export class AgentTui {
     if (lines.length > rows) lines.length = rows;
 
     const pos = this.choicePrompt
-      ? { row: 0, col: Math.min(cols - 1, unitsLen(this.choicePrompt)) }
+      ? { row: 0, col: Math.min(cols - 1, cellWidth(this.choicePrompt)) }
       : cursorRowCol("> ", this.chars, this.cursor, cols);
     const inputTop = layout.transcript;
     const cursorRow = Math.min(rows, Math.max(1, Math.min(inputTop + layout.input, inputTop + pos.row + 1)));
@@ -990,7 +1924,8 @@ export class AgentTui {
       } else if (i >= slashTop && i < slashTop + layout.slash) {
         const si = i - slashTop;
         painted.push(si === this.slashIndex - slashStart ? `\x1b[30;104m${raw}\x1b[0m` : raw);
-      } else painted.push(raw);
+      } else if (i < layout.transcript) painted.push(view.painted[i] ?? `\x1b[0m${raw}\x1b[0m`);
+      else painted.push(raw);
     }
     return { text: lines.join("\n"), painted, cursorRow, cursorCol };
   }
