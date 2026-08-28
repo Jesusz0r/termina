@@ -236,6 +236,64 @@ try {
   }
   check("core drop refreshes the image title", /1 image/.test(coreTitle), coreTitle);
 
+  const palette = await evaluate(`(() => {
+    const read = (id) => {
+      const pane = window.__panes.get(id);
+      const theme = pane?.view.getTerminal()?.options?.theme || {};
+      return { engine: pane?.engine, extended: Array.isArray(theme.extendedAnsi) ? theme.extendedAnsi.length : 0 };
+    };
+    const pi = read("term-1");
+    const shell = ${JSON.stringify(shellId)} ? read(${JSON.stringify(shellId)}) : { engine: "none", extended: -1 };
+    const core = ${JSON.stringify(coreId)} ? read(${JSON.stringify(coreId)}) : { engine: "none", extended: -1 };
+    return { pi, shell, core };
+  })()`);
+  check("Pi palette has no extendedAnsi override", palette?.pi?.extended === 0, JSON.stringify(palette?.pi));
+  check("shell palette has no extendedAnsi override", palette?.shell?.extended === 0, JSON.stringify(palette?.shell));
+  check("core palette has three extendedAnsi entries", palette?.core?.extended === 3, JSON.stringify(palette?.core));
+
+  const late = await evaluate(`(async () => {
+    const created = await window.pi.createTerminal({ type: "agent", engine: "core" });
+    if (!created || !created.ok) return { ok: false, error: created && created.error };
+    const pane = window.__panes.get(created.id);
+    const beforeEngine = pane?.engine;
+    const before = Array.isArray(pane?.view.getTerminal()?.options?.theme?.extendedAnsi)
+      ? pane.view.getTerminal().options.theme.extendedAnsi.length
+      : 0;
+    for (let i = 0; i < 20; i++) {
+      if (pane.engine === "core") break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const after = Array.isArray(pane.view.getTerminal().options.theme.extendedAnsi)
+      ? pane.view.getTerminal().options.theme.extendedAnsi.length
+      : 0;
+    return { ok: true, id: created.id, beforeEngine, before, engine: pane.engine, after };
+  })()`);
+  check(
+    "late engine discovery applies the core palette",
+    late?.ok === true && late.engine === "core" && late.after === 3,
+    JSON.stringify(late),
+  );
+
+  const themed = await evaluate(`(async () => {
+    await window.pi.updatePreferences({ patch: { theme: "light" }, activateShortcuts: false });
+    const read = (id) => {
+      const pane = window.__panes.get(id);
+      const theme = pane?.view.getTerminal()?.options?.theme || {};
+      return Array.isArray(theme.extendedAnsi) ? theme.extendedAnsi.length : 0;
+    };
+    return {
+      pi: read("term-1"),
+      shell: ${JSON.stringify(shellId)} ? read(${JSON.stringify(shellId)}) : -1,
+      core: ${JSON.stringify(coreId)} ? read(${JSON.stringify(coreId)}) : -1,
+      late: ${JSON.stringify(late?.id ?? null)} ? read(${JSON.stringify(late?.id ?? null)}) : -1,
+    };
+  })()`);
+  check(
+    "theme change keeps core-only extendedAnsi",
+    themed?.pi === 0 && themed?.shell === 0 && themed?.core === 3,
+    JSON.stringify(themed),
+  );
+
   const memErr = await evaluate(`(() => {
     for (const el of document.querySelectorAll(".toast-error")) el.remove();
     const pane = document.querySelector(".term-pane.active") || document.querySelector(".term-pane");
