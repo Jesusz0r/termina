@@ -118,32 +118,56 @@ export async function run({ check, leftovers }) {
   rolled = afterRoll.ok && afterRoll.parts.length === 1 && afterRoll.active && afterRoll.active.size === encodedRoll;
   check("rollover happens before the segment budget", rolledAppend.ok && rolled);
 
+  function recordWithEncodedSize(sseq, targetBytes) {
+    const rec = { storageSeq: sseq, type: "message", message: { role: "user", content: "" } };
+    const overhead = Buffer.byteLength(`${JSON.stringify(rec)}\n`);
+    rec.message.content = "x".repeat(Math.max(1, targetBytes - overhead));
+    let line = Buffer.from(`${JSON.stringify(rec)}\n`);
+    while (line.length > targetBytes && rec.message.content.length > 0) {
+      rec.message.content = rec.message.content.slice(0, -(line.length - targetBytes));
+      line = Buffer.from(`${JSON.stringify(rec)}\n`);
+    }
+    while (line.length < targetBytes) {
+      rec.message.content += "x";
+      line = Buffer.from(`${JSON.stringify(rec)}\n`);
+    }
+    return rec;
+  }
+
   const bound = bundlePaths(root, "bound-1");
   mkdirSync(bound.currentDir, { recursive: true, mode: 0o700 });
   const boundWriter = openWriter(bound.sessionFile);
-  const exact = { storageSeq: 1, type: "message", message: { role: "user", content: "exact" } };
-  const exactLine = Buffer.from(`${JSON.stringify(exact)}\n`);
-  const padBytes = MAX_SESSION_SEGMENT_BYTES - exactLine.length - Buffer.byteLength(`${JSON.stringify({ storageSeq: 2, type: "checkpoint" })}\n`);
-  const pad = fillRecord(2, Math.max(1, padBytes - 80));
-  let padLine = Buffer.from(`${JSON.stringify(pad)}\n`);
-  if (exactLine.length + padLine.length > MAX_SESSION_SEGMENT_BYTES) {
-    pad.message.content = pad.message.content.slice(0, pad.message.content.length - (exactLine.length + padLine.length - MAX_SESSION_SEGMENT_BYTES));
-    padLine = Buffer.from(`${JSON.stringify(pad)}\n`);
+  const fillChunk = 700 * 1024;
+  let boundSeq = 0;
+  for (;;) {
+    const next = fillRecord(boundSeq + 1, fillChunk);
+    const nextLine = Buffer.byteLength(`${JSON.stringify(next)}\n`);
+    if (boundWriter.activeSize + nextLine > MAX_SESSION_SEGMENT_BYTES) break;
+    const got = boundWriter.appendRecord(next);
+    if (!got.ok) throw new Error(got.error);
+    boundSeq += 1;
   }
-  check("exact-boundary pair fits one segment", exactLine.length + padLine.length <= MAX_SESSION_SEGMENT_BYTES);
-  check("first exact-boundary append succeeds", boundWriter.appendRecord(exact).ok);
-  const padGot = boundWriter.appendRecord(pad);
+  const remaining = MAX_SESSION_SEGMENT_BYTES - boundWriter.activeSize;
+  check("exact-boundary remainder is a legal record", remaining > 64 && remaining <= MAX_SESSION_RECORD_BYTES);
+  boundSeq += 1;
+  const exactRec = recordWithEncodedSize(boundSeq, remaining);
+  const exactLine = Buffer.from(`${JSON.stringify(exactRec)}\n`);
+  check("exact-boundary record matches the remainder", exactLine.length === remaining);
+  const exactGot = boundWriter.appendRecord(exactRec);
   const boundListing = listCurrentSegments(bound.currentDir);
   check(
     "exact-boundary append stays on the active segment",
-    padGot.ok && boundListing.ok && boundListing.parts.length === 0 && boundListing.active.size === exactLine.length + padLine.length,
+    exactGot.ok &&
+      boundListing.ok &&
+      boundListing.parts.length === 0 &&
+      boundListing.active.size === MAX_SESSION_SEGMENT_BYTES,
   );
-  const oversized = fillRecord(3, MAX_SESSION_RECORD_BYTES);
+  const oversized = fillRecord(boundSeq + 1, MAX_SESSION_RECORD_BYTES);
   const overGot = boundWriter.appendRecord(oversized);
   boundWriter.close();
   check("oversized encoded record is rejected", overGot.ok === false && String(overGot.error).includes("MAX_SESSION_RECORD_BYTES"));
   const afterOver = await replaySessionBundle(bound.sessionFile);
-  check("oversized rejection does not persist a record", afterOver.ok && afterOver.maxSeq === 2);
+  check("oversized rejection does not persist a record", afterOver.ok && afterOver.maxSeq === boundSeq);
 
   const gap = bundlePaths(root, "gap-1");
   mkdirSync(gap.currentDir, { recursive: true, mode: 0o700 });
