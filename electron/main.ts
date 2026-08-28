@@ -1040,6 +1040,7 @@ class PiEditorApp {
       flushDirtyModels: (requester, workspaceId, timeoutMs) => this.flushDirtyModels(requester, workspaceId, timeoutMs),
       canonicalPath: (absPath) => this.canonicalPath(absPath),
       mineFiles: () => project.mineFiles,
+      drainMineUpdates: () => project.mineCommit.catch(() => undefined),
       runSandboxedEvidence: (cand, command, timeoutMs) => this.runSandboxedEvidence(cand, command, timeoutMs),
       sourceFilesOf: (root) => this.sourceFilesOf(root),
       createEvidenceHome: () => this.createEvidenceHome(),
@@ -1267,6 +1268,7 @@ class PiEditorApp {
     for (const project of this.projects.values()) {
       for (const ws of project.workspaces.values()) {
         const root = await this.canonicalPath(ws.root);
+        if (project.workspaces.get(ws.id) !== ws || this.workspaceOwners.get(ws.id) !== project.id) continue;
         const rel = relative(root, path);
         if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) return ws;
       }
@@ -1738,16 +1740,6 @@ class PiEditorApp {
     return false;
   }
 
-  private async coreSessionInUse(sessionId: string, cwd: string): Promise<boolean> {
-    const target = resolve(await this.coreSessionFile(sessionId, cwd));
-    for (const inst of this.terminals.values()) {
-      if (inst.engine !== "core") continue;
-      const active = inst.sessionFile ?? (inst.sessionId ? await this.coreSessionFile(inst.sessionId, inst.cwd) : null);
-      if (active && resolve(active) === target) return true;
-    }
-    return false;
-  }
-
   /** Pi `--session` only accepts a jsonl file under ~/.pi/agent/sessions. */
   private trustedPiSessionFile(path: string | null | undefined): string | null {
     if (!path || !path.endsWith(".jsonl") || !this.sessionFileExists(path)) return null;
@@ -1766,8 +1758,7 @@ class PiEditorApp {
   private async discardCoreSession(inst: PiTerminalInstance): Promise<void> {
     if (inst.engine !== "core" || !inst.sessionFile) return;
     if (!this.pathInside(this.coreSessionRoot(), inst.sessionFile)) return;
-    if (sessionBundleHasContent(inst.sessionFile)) return;
-    removeEmptySessionBundle(inst.sessionFile);
+    await removeEmptySessionBundle(inst.sessionFile);
   }
 
   private persistLive(project: ProjectState): PiTerminalInstance[] {
@@ -1947,10 +1938,11 @@ class PiEditorApp {
       ];
       if (persist) {
         const sessionCwd = cwd ?? owner?.cwd ?? this.terminalCwd();
-        if (!sessionId || !isCoreSessionId(sessionId) || await this.coreSessionInUse(sessionId, sessionCwd)) {
+        sessionFile = sessionId && isCoreSessionId(sessionId) ? await this.coreSessionFile(sessionId, sessionCwd) : null;
+        if (!sessionFile || this.sessionFileInUse(sessionFile)) {
           sessionId = `core-${randomUUID()}`;
+          sessionFile = await this.coreSessionFile(sessionId, sessionCwd);
         }
-        sessionFile = await this.coreSessionFile(sessionId, sessionCwd);
       } else {
         sessionId = null;
         sessionFile = null;
@@ -2058,6 +2050,11 @@ class PiEditorApp {
     };
 
     this.tailer.watch(inst.id);
+    if (type === "agent" && owner) {
+      const mineRefresh = owner.mineCommit.catch(() => undefined).then(() => this.writeMineContext(owner));
+      owner.mineCommit = mineRefresh;
+      void mineRefresh.catch((err) => console.warn(`[main] could not refresh mine context: ${(err as Error).message}`));
+    }
     this.sendInstances();
     return inst;
   }
@@ -2790,6 +2787,8 @@ class PiEditorApp {
     const commit = project.mineCommit.catch(() => undefined).then(async () => {
       const managed = await this.managedPath(path, true);
       if (!managed || this.projectOfWorkspace(managed.workspace.id) !== project) throw new Error("path is outside the active project");
+      const blocked = this.assertWorkspaceWritable(managed.workspace.id);
+      if (blocked) throw new Error(blocked);
       const p = managed.path;
       const wasMine = project.mineFiles.has(p);
       if (wasMine === mine) return;
@@ -2818,13 +2817,15 @@ class PiEditorApp {
   private async writeMineContext(project: ProjectState): Promise<void> {
     const md = await this.buildMineMarkdown(project);
     const agents = [...this.terminals.values()].filter((inst) => inst.type === "agent" && this.projectOfTerminal(inst.id) === project);
-    await Promise.all(
+    const writes = await Promise.allSettled(
       agents.map(async (inst) => {
         const eventsDir = this.eventsDirOf(inst);
         await mkdir(eventsDir, { recursive: true });
         await this.writeFileAtomically(join(eventsDir, `mine-${inst.id}.md`), md);
       }),
     );
+    const failed = writes.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failed) throw failed.reason;
   }
 
   /** Build the mine context markdown: one file per line. */
@@ -3556,10 +3557,13 @@ class PiEditorApp {
     const startedSessionId = String(event.sessionId ?? "") || inst.sessionId;
     if (inst.engine === "core") {
       if (inst.persist) {
-        if (startedSessionId && isCoreSessionId(startedSessionId) && (startedSessionId === inst.sessionId || !await this.coreSessionInUse(startedSessionId, inst.cwd))) {
-          inst.sessionId = startedSessionId;
+        if (startedSessionId && isCoreSessionId(startedSessionId)) {
+          const startedCoreFile = await this.coreSessionFile(startedSessionId, inst.cwd);
+          if (startedSessionId === inst.sessionId || !this.sessionFileInUse(startedCoreFile)) {
+            inst.sessionId = startedSessionId;
+            inst.sessionFile = startedCoreFile;
+          }
         }
-        if (inst.sessionId) inst.sessionFile = await this.coreSessionFile(inst.sessionId, inst.cwd);
       }
     } else {
       const trusted = this.trustedPiSessionFile(startedSessionFile) ?? this.trustedPiSessionFile(inst.sessionFile);
@@ -5502,12 +5506,16 @@ class PiEditorApp {
       project.worldlines = null;
       for (const ws of project.workspaces.values()) ws.watcher?.stop();
     }
-    coreClient.dispose();
     for (const inst of this.terminals.values()) {
       if (inst.captureTimer) {
         clearTimeout(inst.captureTimer);
         inst.captureTimer = null;
       }
+    }
+    await this.drainRecordingTasks();
+    await Promise.all([...this.projects.values()].map((project) => project.storePromise?.catch(() => null) ?? Promise.resolve(null)));
+    coreClient.dispose();
+    for (const inst of this.terminals.values()) {
       inst.pty.kill();
     }
     await this.drainTerminals(null);

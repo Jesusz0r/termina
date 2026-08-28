@@ -767,7 +767,7 @@ export async function run({ check, leftovers }) {
   check("archived current keeps the image", existsSync(join(cleared.archived, "session-img-1.png")));
   const clearedAgain = clearSessionBundle(clearB.sessionFile);
   check("clear of an empty current does not create an archive", clearedAgain.ok && clearedAgain.archived === null);
-  const removeCleared = removeEmptySessionBundle(clearB.sessionFile);
+  const removeCleared = await removeEmptySessionBundle(clearB.sessionFile);
   check(
     "empty-session cleanup preserves a bundle with archives",
     removeCleared.ok && removeCleared.removed === false && existsSync(clearB.bundleDir),
@@ -776,7 +776,7 @@ export async function run({ check, leftovers }) {
   const emptyRemovable = bundlePaths(root, "empty-removable");
   const emptyWriter = openWriter(emptyRemovable.sessionFile);
   emptyWriter.close();
-  const removedEmpty = removeEmptySessionBundle(emptyRemovable.sessionFile);
+  const removedEmpty = await removeEmptySessionBundle(emptyRemovable.sessionFile);
   check(
     "empty-session cleanup removes a bundle with only an empty current",
     removedEmpty.ok && removedEmpty.removed === true && !existsSync(emptyRemovable.bundleDir),

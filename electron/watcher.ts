@@ -136,7 +136,7 @@ export class ProjectWatcher {
         const timer = this.timers.get(oldest);
         if (timer) clearTimeout(timer);
         this.timers.delete(oldest);
-        void this.emit(oldest, generation);
+        void this.emit(oldest, generation).catch((err) => console.warn(`[watcher] change failed: ${(err as Error).message}`));
       }
     }
     const existing = this.timers.get(relPath);
@@ -146,7 +146,7 @@ export class ProjectWatcher {
       setTimeout(() => {
         if (generation !== this.generation) return;
         this.timers.delete(relPath);
-        void this.emit(relPath, generation);
+        void this.emit(relPath, generation).catch((err) => console.warn(`[watcher] change failed: ${(err as Error).message}`));
       }, DEBOUNCE_MS),
     );
   }

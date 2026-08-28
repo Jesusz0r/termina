@@ -24,11 +24,10 @@ import {
   readdirSync,
   readSync,
   renameSync,
-  rmSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
-import { copyFile, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
 export const MAX_SESSION_SEGMENT_BYTES = 8 * 1024 * 1024;
@@ -402,31 +401,26 @@ export async function removeSessionBundle(sessionFile: string): Promise<SessionR
   }
 }
 
-export function removeEmptySessionBundle(sessionFile: string): SessionResult<{ removed: boolean }> {
+export async function removeEmptySessionBundle(sessionFile: string): Promise<SessionResult<{ removed: boolean }>> {
   const parsed = parseSessionBundlePath(sessionFile);
   if (!parsed) return { ok: false, error: "session path is not a core session bundle" };
-  const bundle = inspectEntry(parsed.bundleDir);
-  if (!bundle) return { ok: true, removed: false };
-  if (bundle.kind !== "dir") return { ok: false, error: "session bundle is not a directory" };
-  let bundleNames: string[];
-  let currentNames: string[];
   try {
-    bundleNames = readdirSync(parsed.bundleDir);
-    currentNames = readdirSync(parsed.currentDir);
-  } catch (err) {
-    return { ok: false, error: errMsg(err) };
-  }
-  if (bundleNames.length !== 1 || bundleNames[0] !== CURRENT_DIR) return { ok: true, removed: false };
-  if (currentNames.length !== 1 || currentNames[0] !== ACTIVE_NAME) return { ok: true, removed: false };
-  const listing = listCurrentSegments(parsed.currentDir);
-  if (!listing.ok) return { ok: false, error: listing.error };
-  if (!listing.active || listing.active.size !== 0 || listing.parts.length > 0 || listing.images.length > 0) {
-    return { ok: true, removed: false };
-  }
-  try {
-    rmSync(parsed.bundleDir, { recursive: true, force: true });
+    const bundle = await lstat(parsed.bundleDir);
+    if (bundle.isSymbolicLink() || !bundle.isDirectory()) return { ok: false, error: "session bundle is not a directory" };
+    const [bundleNames, currentNames, current, active] = await Promise.all([
+      readdir(parsed.bundleDir),
+      readdir(parsed.currentDir),
+      lstat(parsed.currentDir),
+      lstat(parsed.sessionFile),
+    ]);
+    if (bundleNames.length !== 1 || bundleNames[0] !== CURRENT_DIR) return { ok: true, removed: false };
+    if (current.isSymbolicLink() || !current.isDirectory()) return { ok: false, error: "current is not a directory" };
+    if (currentNames.length !== 1 || currentNames[0] !== ACTIVE_NAME) return { ok: true, removed: false };
+    if (active.isSymbolicLink() || !active.isFile() || active.size !== 0) return { ok: true, removed: false };
+    await rm(parsed.bundleDir, { recursive: true, force: true });
     return { ok: true, removed: true };
   } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { ok: true, removed: false };
     return { ok: false, error: errMsg(err) };
   }
 }

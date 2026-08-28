@@ -228,6 +228,7 @@ export interface WorldlineDeps {
   flushDirtyModels(requester: string, workspaceId: string, timeoutMs?: number): Promise<{ ok: boolean }>;
   canonicalPath(absPath: string): Promise<string>;
   mineFiles(): ReadonlySet<string>;
+  drainMineUpdates(): Promise<void>;
   runSandboxedEvidence(
     cand: { root: string; profilePath: string; homeDir: string; tmpDir: string },
     command: string[],
@@ -499,12 +500,25 @@ export class WorldlineManager {
   setCandidateHead(comparisonId: string, label: "A" | "B", stateId: string): Promise<void> {
     const cmp = this.comparisons.get(comparisonId);
     const cand = cmp?.candidates.get(label);
-    if (!cmp || !cand) return Promise.resolve();
+    if (!cmp || !cand) return this.deps.releaseState(stateId);
+    const inactive = (): boolean => this.comparisons.get(comparisonId)?.candidates.get(label) !== cand || cmp.phase === "error";
+    if (inactive()) return this.deps.releaseState(stateId);
     const commit = cand.headCommit.catch(() => undefined).then(async () => {
-      if (this.comparisons.get(comparisonId)?.candidates.get(label) !== cand || cand.headStateId === stateId) return;
+      if (inactive() || cand.headStateId === stateId) {
+        await this.deps.releaseState(stateId);
+        return;
+      }
       const previousStateId = cand.headStateId;
-      await this.deps.onCandidateState(cand.dir, stateId);
-      if (this.comparisons.get(comparisonId)?.candidates.get(label) !== cand) return;
+      try {
+        await this.deps.onCandidateState(cand.dir, stateId);
+      } catch (err) {
+        await this.deps.releaseState(stateId);
+        throw err;
+      }
+      if (inactive()) {
+        await this.deps.releaseState(stateId);
+        return;
+      }
       cand.headStateId = stateId;
       if (previousStateId) void this.deps.releaseState(previousStateId);
       cand.version++;
@@ -1759,6 +1773,7 @@ export class WorldlineManager {
     if (target.terminalId && this.deps.terminalVerifying(target.terminalId)) {
       return { ok: false, error: "the candidate is verifying" };
     }
+    await this.deps.drainMineUpdates();
     const store = await this.deps.getStore();
     if (!store) return { ok: false, error: "recording is not available" };
     const primary = await this.deps.workspaceAt(this.deps.primaryRoot);
@@ -2266,6 +2281,8 @@ export class WorldlineManager {
     if (!cmp) return;
     if (cmp.readyTimer) clearTimeout(cmp.readyTimer);
     cmp.phase = "error";
+    await Promise.all([...cmp.candidates.values()].map((cand) => cand.headCommit.catch(() => undefined)));
+    if (this.comparisons.get(comparisonId) !== cmp) return;
     // 1. Mark both candidates and push the final update.
     for (const cand of cmp.candidates.values()) {
       if (cand.state === "discarded") continue;

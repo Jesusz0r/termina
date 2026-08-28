@@ -40,6 +40,7 @@ class CoreClient {
   private queue: Promise<unknown> = Promise.resolve();
   private seq = 0;
   private buffer = "";
+  private disposed = false;
 
   private ensure(): ReturnType<typeof spawn> {
     if (this.child) return this.child;
@@ -105,12 +106,14 @@ class CoreClient {
 
   /** Serialize captures. A failed capture does not block later captures. */
   request(payload: Record<string, unknown>): Promise<unknown> {
+    if (this.disposed) return Promise.reject(new Error("snapshot core is disposed"));
     const run = this.queue.then(() => this.dispatch(payload));
     this.queue = run.catch(() => undefined);
     return run;
   }
 
   private dispatch(payload: Record<string, unknown>): Promise<unknown> {
+    if (this.disposed) return Promise.reject(new Error("snapshot core is disposed"));
     return new Promise((resolve, reject) => {
       const requestId = `cap-${++this.seq}`;
       // A hung core must not stall the queue forever. Kill it on timeout:
@@ -181,6 +184,10 @@ class CoreClient {
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    for (const pending of this.pending.values()) pending.reject(new Error("snapshot core is disposed"));
+    this.pending.clear();
     this.child?.kill();
     this.child = null;
   }

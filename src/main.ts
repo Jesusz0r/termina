@@ -362,6 +362,7 @@ interface Pane {
   recorderState: string;
   plan: PlanTask[];
   planLoaded: boolean;
+  planLoadAttempts: number;
   /** Bumped on every plan:update push (fetch race guard). */
   planVersion: number;
   dispatchWorker: boolean;
@@ -533,6 +534,7 @@ function createPaneShell(instanceId: string): Pane {
     recorderState: "paused",
     plan: [],
     planLoaded: false,
+    planLoadAttempts: 0,
     planVersion: 0,
     dispatchWorker: false,
     dispatchTask: undefined,
@@ -842,10 +844,21 @@ function renderPlan(pane: Pane): void {
       if (!p) return;
       if (p.planVersion !== versionAtStart) return; // a push won the race
       p.plan = tasks;
+      p.planLoadAttempts = 0;
       if (activeId === pane.instanceId) renderPlan(p);
     }).catch((err) => {
       const p = panes.get(pane.instanceId);
-      if (p && p.planVersion === versionAtStart) p.planLoaded = false;
+      if (!p || p.planVersion !== versionAtStart) return;
+      p.planLoaded = false;
+      p.planLoadAttempts++;
+      if (p.planLoadAttempts < 3) {
+        const delay = 250 * (2 ** (p.planLoadAttempts - 1));
+        setTimeout(() => {
+          const current = panes.get(p.instanceId);
+          if (current === p && current.planVersion === versionAtStart && activeId === current.instanceId) renderPlan(current);
+        }, delay);
+        return;
+      }
       toast(`could not load plan: ${(err as Error).message}`, "error");
     });
   }
@@ -1933,6 +1946,8 @@ window.pi.onPlanUpdate(({ instanceId, tasks }) => {
   if (!pane) return;
   pane.planVersion++;
   pane.plan = tasks;
+  pane.planLoaded = true;
+  pane.planLoadAttempts = 0;
   if (activeId === instanceId) renderPlan(pane);
 });
 
@@ -2108,7 +2123,7 @@ function removeSplash(): void {
 // Remove the splash. Do not leave the user on it when the terminal never appears.
 setTimeout(removeSplash, 10000);
 
-async function boot(): Promise<void> {
+async function boot(attempt = 0): Promise<void> {
   // Restore layout + panel visibility preferences (default: terminal-left split).
   const layout = parseLayout(localStorage.getItem(LAYOUT_KEY));
   explorerMinimized = localStorage.getItem(EXPLORER_KEY) === "0";
@@ -2174,6 +2189,10 @@ async function boot(): Promise<void> {
     const worldlines = await window.pi.getWorldlines();
     for (const summary of worldlines) worldlinesView.upsert(summary);
   } catch (err) {
+    if (attempt < 2) {
+      setTimeout(() => void boot(attempt + 1), 250 * (2 ** attempt));
+      return;
+    }
     toast(`could not start: ${(err as Error).message}`, "error");
     removeSplash();
   }
