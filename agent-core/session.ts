@@ -610,55 +610,6 @@ function parseFramedLine(line: Buffer): FramedRecord {
   }
 }
 
-function readSegmentRecordsSync(
-  path: string,
-  allowTruncatedTail: boolean,
-): SessionResult<{ records: unknown[] }> {
-  let fd: number;
-  try {
-    fd = openSync(path, "r");
-  } catch (err) {
-    return { ok: false, error: errMsg(err) };
-  }
-  const records: unknown[] = [];
-  let pending = Buffer.alloc(0);
-  const chunk = Buffer.alloc(READ_CHUNK);
-  try {
-    for (;;) {
-      const n = readSync(fd, chunk, 0, chunk.length, null);
-      const atEnd = n === 0;
-      if (n > 0) pending = Buffer.concat([pending, chunk.subarray(0, n)]);
-      for (;;) {
-        const taken = takeFramedLine(pending, atEnd && pending.indexOf(0x0a) < 0, allowTruncatedTail);
-        pending = taken.rest;
-        if (taken.done) {
-          if (!taken.done.ok) return taken.done;
-          break;
-        }
-        if (!taken.line) break;
-        const parsed = parseFramedLine(taken.line);
-        if (!parsed.ok) return parsed;
-        if ("skip" in parsed && parsed.skip) continue;
-        if ("rec" in parsed) records.push(parsed.rec);
-      }
-      if (atEnd) {
-        if (pending.length === 0) break;
-        const taken = takeFramedLine(pending, true, allowTruncatedTail);
-        if (taken.done && !taken.done.ok) return taken.done;
-        if (taken.line) {
-          const parsed = parseFramedLine(taken.line);
-          if (!parsed.ok) return parsed;
-          if ("rec" in parsed && !("skip" in parsed && parsed.skip)) records.push(parsed.rec);
-        }
-        break;
-      }
-    }
-    return { ok: true, records };
-  } finally {
-    closeSync(fd);
-  }
-}
-
 async function readSegmentIntoState(
   path: string,
   state: ReplayState,
@@ -687,16 +638,16 @@ async function readSegmentIntoState(
         const nl = pending.indexOf(0x0a);
         const taken = takeFramedLine(pending, atEnd && nl < 0, allowTruncatedTail);
         pending = taken.rest;
-        if (taken.done) {
-          if (!taken.done.ok) return taken.done;
-          break;
-        }
-        if (!taken.line) break;
-        const parsed = parseFramedLine(taken.line);
+        const parsed = taken.done ?? (taken.line ? parseFramedLine(taken.line) : null);
+        if (taken.done && !taken.done.ok) return taken.done;
+        if (!parsed) break;
         if (!parsed.ok) return parsed;
         bytes += parsed.bytes;
         sinceYieldBytes += parsed.bytes;
-        if ("skip" in parsed && parsed.skip) continue;
+        if ("skip" in parsed && parsed.skip) {
+          if (taken.done) break;
+          continue;
+        }
         const rec = (parsed as { rec: unknown }).rec;
         const seq = rec && typeof rec === "object" && !Array.isArray(rec) ? (rec as { storageSeq?: unknown }).storageSeq : undefined;
         if (typeof throughSeq === "number" && typeof seq === "number" && seq > throughSeq) {
@@ -712,17 +663,21 @@ async function readSegmentIntoState(
           sinceYieldRecords = 0;
           await yieldToEventLoop();
         }
+        if (taken.done) break;
       }
       if (stop || atEnd) break;
-    }
-    if (!stop && pending.length > 0) {
-      const taken = takeFramedLine(pending, true, allowTruncatedTail);
-      if (taken.done && !taken.done.ok) return taken.done;
     }
     return { ok: true, bytes, records, stop };
   } finally {
     closeSync(fd);
   }
+}
+
+function applyFramed(state: ReplayState, framed: FramedRecord): SessionResult<Record<string, never>> | "skip" {
+  if (!framed.ok) return framed;
+  if ("skip" in framed && framed.skip) return "skip";
+  if (!("rec" in framed)) return "skip";
+  return applySessionRecord(state, framed.rec);
 }
 
 export function replaySessionRecords(text: string): SessionResult<{ messages: ReplayMessage[]; maxSeq: number }> {
@@ -734,15 +689,14 @@ export function replaySessionRecords(text: string): SessionResult<{ messages: Re
     const taken = takeFramedLine(pending, nl < 0, true);
     pending = taken.rest;
     if (taken.done) {
-      if (!taken.done.ok) return taken.done;
+      const applied = applyFramed(state, taken.done);
+      if (applied !== "skip" && !applied.ok) return applied;
       break;
     }
     if (!taken.line) break;
     const parsed = parseFramedLine(taken.line);
-    if (!parsed.ok) return parsed;
-    if ("skip" in parsed && parsed.skip) continue;
-    const applied = applySessionRecord(state, (parsed as { rec: unknown }).rec);
-    if (!applied.ok) return applied;
+    const applied = applyFramed(state, parsed);
+    if (applied !== "skip" && !applied.ok) return applied;
   }
   return { ok: true, messages: state.messages, maxSeq: state.maxSeq };
 }

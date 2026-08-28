@@ -55,7 +55,6 @@ const {
   buildCachedPrefix,
   replaySessionRecords,
   renderHistoryTranscript,
-  prepareSessionStream,
   sidecarStartFor,
   formatToolAnnounce,
   formatToolFollowup,

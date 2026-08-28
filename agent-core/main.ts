@@ -1767,13 +1767,6 @@ export function hashSystem(text: string): string {
 
 // ---- append-only session storage ----
 
-export function resolveSessionFile(events: string, termId: string, override?: string): string | null {
-  const explicit = override?.trim() || "";
-  if (explicit) return explicit;
-  if (events && termId) return join(events, `${termId}.session.jsonl`);
-  return null;
-}
-
 const sessionFile = resolveSessionFile(eventsDir, sessionId, process.env.TERMINA_CORE_SESSION_FILE);
 let storageSeq = 0;
 let sessionWriter: SessionWriter | null = null;
@@ -1823,7 +1816,7 @@ function persist(entry: Record<string, unknown>): number {
     return sseq;
   }
   if (!sessionWriter) throw new SessionStoreError("session writer is not open");
-  const result = sessionWriter.appendRecord({ storageSeq: sseq, ...entry });
+  const result = sessionWriter.appendRecord({ ...entry, storageSeq: sseq });
   if (!result.ok) throw new SessionStoreError(result.error);
   storageSeq = sseq;
   return sseq;
@@ -4748,6 +4741,8 @@ function dispatchLine(line: string): void {
     if (engineBusy()) out("(engine busy)\n");
     else if (history.length > 0) out("(session already live — /resume only on a fresh engine)\n");
     else {
+      resumeBusy = true;
+      showPrompt();
       void resumeSession();
       return;
     }
