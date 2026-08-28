@@ -478,9 +478,9 @@ export class WorldlineManager {
   }
 
   /** Update the latest captured state of a candidate. */
-  updateHeadState(terminalId: string, stateId: string): void {
+  async updateHeadState(terminalId: string, stateId: string): Promise<void> {
     const hit = this.terminalToComparison.get(terminalId);
-    if (hit) void this.setCandidateHead(hit.comparisonId, hit.label, stateId);
+    if (hit) await this.setCandidateHead(hit.comparisonId, hit.label, stateId);
   }
 
   /** Record a captured candidate state from an on-demand operation. */

@@ -1797,12 +1797,12 @@ class PiEditorApp {
   /** Delete an empty agent-core jsonl. A session with content stays on disk
    *  so Session Search can read it after the tab closes. A leftover file
    *  at the agent-sessions root moves into this project's directory. */
-  private discardCoreSession(inst: PiTerminalInstance): void {
+  private async discardCoreSession(inst: PiTerminalInstance): Promise<void> {
     if (inst.engine !== "core" || !inst.sessionFile) return;
     if (!this.pathInside(this.coreSessionRoot(), inst.sessionFile)) return;
     if (this.sessionFileHasContent(inst.sessionFile)) {
       if (inst.sessionId && isCoreSessionId(inst.sessionId)) {
-        void this.adoptCoreSessionFile(inst.sessionId, inst.sessionFile, inst.cwd);
+        await this.adoptCoreSessionFile(inst.sessionId, inst.sessionFile, inst.cwd);
       }
       return;
     }
@@ -2054,7 +2054,7 @@ class PiEditorApp {
     }
 
     inst.pty.onData = (data) => this.sendPtyData(inst.id, data);
-    inst.pty.onExit = (code) => {
+    inst.pty.onExit = async (code) => {
       console.log(`[main] terminal ${inst.id} (${inst.type}) exited code=${code}`);
       if (inst.captureTimer) {
         clearTimeout(inst.captureTimer);
@@ -2079,7 +2079,7 @@ class PiEditorApp {
       exitOwner?.workspaces.get(inst.workspaceId)?.terminalIds.delete(inst.id);
       exitOwner?.terminalIds.delete(inst.id);
       if (inst.persist && exitOwner && !this.disposed && !this.projectIsSwitching(exitOwner.id)) {
-        this.discardCoreSession(inst);
+        await this.discardCoreSession(inst);
         this.saveTerminalRoster(exitOwner);
       }
       exitOwner?.worldlines?.terminalExited(inst.id);
@@ -3662,7 +3662,7 @@ class PiEditorApp {
     try {
       const state = await this.captureStable(store, ws);
       this.setWorkspaceState(ws, state.commit);
-      if (!ws.primary) checkpointOwner?.worldlines?.updateHeadState(inst.id, state.commit);
+      if (!ws.primary) await checkpointOwner?.worldlines?.updateHeadState(inst.id, state.commit);
       this.writeAck(inst.id, requestId, { ok: true, stateId: state.commit });
       if (kind === "settled" && inst.currentRun && !inst.currentRun.settledAt) {
         await this.finalizeRun(inst, state, entryId);
@@ -3786,7 +3786,7 @@ class PiEditorApp {
       const state = await store.captureIncremental(ws.lastStateCommit, hints, reconcile, {}, {}, source);
       this.setWorkspaceState(ws, state.commit);
       ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
-      if (!ws.primary) momentOwner?.worldlines?.updateHeadState(inst.id, state.commit);
+      if (!ws.primary) await momentOwner?.worldlines?.updateHeadState(inst.id, state.commit);
       this.attachMomentState(inst, state.commit, batch);
       this.setRecorderState(inst, "ready");
       this.evictForkPoints(inst);
