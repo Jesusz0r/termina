@@ -843,7 +843,11 @@ function renderPlan(pane: Pane): void {
       if (p.planVersion !== versionAtStart) return; // a push won the race
       p.plan = tasks;
       if (activeId === pane.instanceId) renderPlan(p);
-    }).catch((err) => toast(`could not load plan: ${(err as Error).message}`, "error"));
+    }).catch((err) => {
+      const p = panes.get(pane.instanceId);
+      if (p && p.planVersion === versionAtStart) p.planLoaded = false;
+      toast(`could not load plan: ${(err as Error).message}`, "error");
+    });
   }
   planCount.textContent = pane.plan.length ? `(${pane.plan.length})` : "";
   planList.replaceChildren();

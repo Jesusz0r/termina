@@ -12,8 +12,8 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme } fro
 // Name the app for the macOS menu bar and user-data paths. Unpackaged runs default to "Electron".
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
-import { accessSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { access, chmod, cp, copyFile, mkdir, mkdtemp, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
+import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { access, chmod, cp, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -362,6 +362,8 @@ interface ProjectState {
   /** Files the user marked as theirs (canonical paths). The agent is told
    *  not to modify them without asking. */
   mineFiles: Set<string>;
+  /** Serializes Mine mutations and their two persisted views. */
+  mineCommit: Promise<void>;
   /** The worldline manager (Fork Run candidates). */
   worldlines: WorldlineManager | null;
   /** Terminal ids owned by this project (agents, shells, candidates). */
@@ -1249,11 +1251,15 @@ class PiEditorApp {
 
   /** The workspace whose root contains the path, or null. */
   private async workspaceContaining(absPath: string): Promise<WorkspaceState | null> {
-    const p = await this.canonicalPath(absPath);
+    return this.workspaceContainingCanonical(await this.canonicalPath(absPath));
+  }
+
+  /** Find a workspace for a path that is already canonical. */
+  private async workspaceContainingCanonical(path: string): Promise<WorkspaceState | null> {
     for (const project of this.projects.values()) {
       for (const ws of project.workspaces.values()) {
         const root = await this.canonicalPath(ws.root);
-        const rel = relative(root, p);
+        const rel = relative(root, path);
         if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) return ws;
       }
     }
@@ -1261,20 +1267,20 @@ class PiEditorApp {
   }
 
   private async managedPath(absPath: string, primaryOnly = false): Promise<{ path: string; workspace: WorkspaceState } | null> {
-    if (this.hasDanglingSymlink(absPath)) return null;
+    if (await this.hasDanglingSymlink(absPath)) return null;
     const path = await this.canonicalPath(absPath);
-    const workspace = await this.workspaceContaining(path);
+    const workspace = await this.workspaceContainingCanonical(path);
     if (!workspace || (primaryOnly && !workspace.primary)) return null;
     return { path, workspace };
   }
 
-  private hasDanglingSymlink(path: string): boolean {
+  private async hasDanglingSymlink(path: string): Promise<boolean> {
     let current = resolve(path);
     while (true) {
       try {
-        if (lstatSync(current).isSymbolicLink()) {
+        if ((await lstat(current)).isSymbolicLink()) {
           try {
-            realpathSync(current);
+            await fsRealpath(current);
           } catch {
             return true;
           }
@@ -2075,13 +2081,14 @@ class PiEditorApp {
       // Resolve the owner before the map delete. projectOfTerminal reads
       // the terminal map, so a lookup after the delete finds no project.
       const exitOwner = this.projectOfTerminal(inst.id);
+      const persistOwner = inst.persist && exitOwner && !this.disposed && !this.projectIsSwitching(exitOwner.id) ? exitOwner : null;
+      if (persistOwner) {
+        await this.discardCoreSession(inst);
+      }
       this.terminals.delete(inst.id);
       exitOwner?.workspaces.get(inst.workspaceId)?.terminalIds.delete(inst.id);
       exitOwner?.terminalIds.delete(inst.id);
-      if (inst.persist && exitOwner && !this.disposed && !this.projectIsSwitching(exitOwner.id)) {
-        await this.discardCoreSession(inst);
-        this.saveTerminalRoster(exitOwner);
-      }
+      if (persistOwner) this.saveTerminalRoster(persistOwner);
       exitOwner?.worldlines?.terminalExited(inst.id);
       this.worldlineTailers.get(inst.id)?.stop();
       this.worldlineTailers.delete(inst.id);
@@ -2827,63 +2834,65 @@ class PiEditorApp {
   // ----------------------------------------------------------------- mine ----
 
   /** Mark a file as the user's own (or clear the mark). */
-  private async setMineFile(path: string, mine: boolean): Promise<void> {
+  private setMineFile(path: string, mine: boolean): Promise<void> {
     const project = this.project();
-    if (!project) return;
-    const managed = await this.managedPath(path, true);
-    if (!managed) return;
-    const p = managed.path;
-    if (mine) {
-      if (!project.mineFiles.has(p) && project.mineFiles.size >= PiEditorApp.MAX_MINE_FILES) return;
-      project.mineFiles.add(p);
-    } else {
-      project.mineFiles.delete(p);
-    }
-    await this.saveMineFiles(project);
-    await this.writeMineContext(project);
+    if (typeof path !== "string" || typeof mine !== "boolean") return Promise.reject(new Error("invalid Mine update"));
+    if (!project || this.disposed || this.projectIsSwitching(project.id)) return Promise.reject(new Error("project is not available"));
+    const commit = project.mineCommit.catch(() => undefined).then(async () => {
+      const managed = await this.managedPath(path, true);
+      if (!managed || this.projectOfWorkspace(managed.workspace.id) !== project) throw new Error("path is outside the active project");
+      const p = managed.path;
+      const wasMine = project.mineFiles.has(p);
+      if (wasMine === mine) return;
+      if (mine) {
+        if (project.mineFiles.size >= PiEditorApp.MAX_MINE_FILES) throw new Error("too many Mine files");
+        project.mineFiles.add(p);
+      } else {
+        project.mineFiles.delete(p);
+      }
+      try {
+        await this.saveMineFiles(project);
+        await this.writeMineContext(project);
+      } catch (err) {
+        if (wasMine) project.mineFiles.add(p);
+        else project.mineFiles.delete(p);
+        await this.saveMineFiles(project).catch(() => undefined);
+        await this.writeMineContext(project).catch(() => undefined);
+        throw err;
+      }
+    });
+    project.mineCommit = commit;
+    return commit;
   }
 
   /** Write the mine context file for the agent terminals of one project. */
   private async writeMineContext(project: ProjectState): Promise<void> {
-    try {
-      mkdirSync(this.eventsDir, { recursive: true });
-    } catch {
-      return;
-    }
     const md = await this.buildMineMarkdown(project);
-    for (const inst of this.terminals.values()) {
-      if (inst.type !== "agent") continue;
-      if (this.projectOfTerminal(inst.id) !== project) continue;
-      const eventsDir = this.eventsDirOf(inst);
-      try {
-        writeFileSync(join(eventsDir, `mine-${inst.id}.md`), md, "utf8");
-      } catch (err) {
-        console.warn(`[main] could not write mine context: ${(err as Error).message}`);
-      }
-    }
+    const agents = [...this.terminals.values()].filter((inst) => inst.type === "agent" && this.projectOfTerminal(inst.id) === project);
+    await Promise.all(
+      agents.map(async (inst) => {
+        const eventsDir = this.eventsDirOf(inst);
+        await mkdir(eventsDir, { recursive: true });
+        await this.writeFileAtomically(join(eventsDir, `mine-${inst.id}.md`), md);
+      }),
+    );
   }
 
   /** Build the mine context markdown: one file per line. */
   private async buildMineMarkdown(project: ProjectState): Promise<string> {
     const out: string[] = ["## Your files", "", "These files belong to the user. Do not modify them without asking first.", ""];
-    for (const p of project.mineFiles) out.push(`- \`${await this.rel(p)}\``);
+    for (const p of project.mineFiles) out.push(`- \`${await this.rel(p, project.cwd)}\``);
     return out.join("\n");
   }
 
   /** Clear the marks and their context files (project switch). The saved
    *  marks stay in their file: revisiting the project restores them. */
-  private clearMineFiles(project: ProjectState): void {
+  private async clearMineFiles(project: ProjectState): Promise<void> {
     project.mineFiles.clear();
-    for (const inst of this.terminals.values()) {
-      if (inst.type !== "agent") continue;
-      if (this.projectOfTerminal(inst.id) !== project) continue;
-      try {
-        // Remove from the terminal's OWN events dir (see writeMineContext).
-        rmSync(join(this.eventsDirOf(inst), `mine-${inst.id}.md`), { force: true });
-      } catch {
-        /* ignore */
-      }
-    }
+    const agents = [...this.terminals.values()].filter((inst) => inst.type === "agent" && this.projectOfTerminal(inst.id) === project);
+    await Promise.all(
+      agents.map((inst) => rm(join(this.eventsDirOf(inst), `mine-${inst.id}.md`), { force: true }).catch(() => undefined)),
+    );
   }
 
   /** The persisted marks file for one project. */
@@ -2895,14 +2904,14 @@ class PiEditorApp {
   /** Load the marks saved for one project (restart persistence). */
   private async loadMineFiles(project: ProjectState): Promise<void> {
     try {
-      const raw = readFileSync(await this.mineFilePath(project), "utf8");
+      const raw = await readFile(await this.mineFilePath(project), "utf8");
       const list = JSON.parse(raw) as string[];
       if (Array.isArray(list)) {
         for (const p of list) {
           if (project.mineFiles.size >= PiEditorApp.MAX_MINE_FILES) break;
           if (typeof p !== "string") continue;
           const managed = await this.managedPath(p, true);
-          if (managed) project.mineFiles.add(managed.path);
+          if (managed && this.projectOfWorkspace(managed.workspace.id) === project) project.mineFiles.add(managed.path);
         }
       }
     } catch {
@@ -2912,11 +2921,19 @@ class PiEditorApp {
 
   /** Save the marks so a restart restores the ownership. */
   private async saveMineFiles(project: ProjectState): Promise<void> {
+    await mkdir(this.eventsDir, { recursive: true });
+    await this.writeFileAtomically(await this.mineFilePath(project), JSON.stringify([...project.mineFiles]));
+  }
+
+  /** Replace one app-owned file without exposing a partial write. */
+  private async writeFileAtomically(target: string, content: string): Promise<void> {
+    const temporary = `${target}.tmp-${randomUUID()}`;
     try {
-      mkdirSync(this.eventsDir, { recursive: true });
-      await writeFile(await this.mineFilePath(project), JSON.stringify([...project.mineFiles]), "utf8");
+      await writeFile(temporary, content, { encoding: "utf8", mode: 0o600 });
+      await fsRename(temporary, target);
     } catch (err) {
-      console.warn(`[main] could not save mine marks: ${(err as Error).message}`);
+      await rm(temporary, { force: true }).catch(() => undefined);
+      throw err;
     }
   }
 
@@ -4424,6 +4441,7 @@ class PiEditorApp {
         storePromise: null,
         storeDir: null,
         mineFiles: new Set(),
+        mineCommit: Promise.resolve(),
         worldlines: null,
         terminalIds: new Set(),
         unrestoredTerminals: [],
@@ -4506,10 +4524,11 @@ class PiEditorApp {
     try {
       await this.drainVerifyJobs(closingIds);
       await this.drainSidecarQueues();
+      await project.mineCommit.catch(() => undefined);
       await project.worldlines?.drainEvidence();
       await project.worldlines?.dispose().catch(() => undefined);
       project.worldlines = null;
-      this.clearMineFiles(project);
+      await this.clearMineFiles(project);
       // Drain only this project's terminals. Other open projects keep running.
       for (const id of closingIds) {
         this.tailer.stopWatching(id);
@@ -4574,14 +4593,14 @@ class PiEditorApp {
     await this.drainRecordingTasks();
     const promise = project.storePromise;
     project.storePromise = null;
-    const storeDir = project.storeDir;
-    project.storeDir = null;
     let store: SnapshotStore | null = null;
     try {
       store = promise ? await promise : null;
     } catch (err) {
       console.warn(`[main] snapshot store initialization failed during cleanup: ${String(err)}`);
     }
+    const storeDir = project.storeDir;
+    project.storeDir = null;
     if (store && storeDir) {
       try {
         await store.destroy();
@@ -5507,6 +5526,7 @@ class PiEditorApp {
     this.tailer.stop();
     await this.drainSidecarQueues();
     this.sidecarQueues.clear();
+    await Promise.all([...this.projects.values()].map((project) => project.mineCommit.catch(() => undefined)));
     await Promise.all([...this.projects.values()].map((project) => project.worldlines?.drainEvidence() ?? Promise.resolve()));
     this.cleanupExportedStates();
     for (const project of this.projects.values()) {

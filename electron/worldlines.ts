@@ -81,6 +81,8 @@ interface CandidateState {
   promotionBaseStateId: string | null;
   /** The latest captured state of this candidate. */
   headStateId: string | null;
+  /** Serializes head updates with the matching workspace state. */
+  headCommit: Promise<void>;
   terminalId: string | null;
   pid: number | null;
   lstart: string | null;
@@ -484,16 +486,22 @@ export class WorldlineManager {
   }
 
   /** Record a captured candidate state from an on-demand operation. */
-  async setCandidateHead(comparisonId: string, label: "A" | "B", stateId: string): Promise<void> {
+  setCandidateHead(comparisonId: string, label: "A" | "B", stateId: string): Promise<void> {
     const cmp = this.comparisons.get(comparisonId);
     const cand = cmp?.candidates.get(label);
-    if (!cmp || !cand || cand.headStateId === stateId) return;
-    const previousStateId = cand.headStateId;
-    cand.headStateId = stateId;
-    await this.deps.onCandidateState(cand.dir, stateId);
-    if (previousStateId) void this.deps.releaseState(previousStateId);
-    cand.version++;
-    this.pushUpdate(cmp, cand);
+    if (!cmp || !cand) return Promise.resolve();
+    const commit = cand.headCommit.catch(() => undefined).then(async () => {
+      if (this.comparisons.get(comparisonId)?.candidates.get(label) !== cand || cand.headStateId === stateId) return;
+      const previousStateId = cand.headStateId;
+      await this.deps.onCandidateState(cand.dir, stateId);
+      if (this.comparisons.get(comparisonId)?.candidates.get(label) !== cand) return;
+      cand.headStateId = stateId;
+      if (previousStateId) void this.deps.releaseState(previousStateId);
+      cand.version++;
+      this.pushUpdate(cmp, cand);
+    });
+    cand.headCommit = commit;
+    return commit;
   }
 
   /**
@@ -582,6 +590,7 @@ export class WorldlineManager {
       comparisonBaseStateId: null,
       promotionBaseStateId: null,
       headStateId: null,
+      headCommit: Promise.resolve(),
       terminalId: null,
       pid: null,
       lstart: null,
@@ -1104,6 +1113,7 @@ export class WorldlineManager {
         comparisonBaseStateId: null,
         promotionBaseStateId: null,
         headStateId: null,
+        headCommit: Promise.resolve(),
         terminalId: null,
         pid: null,
         lstart: null,
@@ -2059,6 +2069,7 @@ export class WorldlineManager {
       comparisonBaseStateId: null,
       promotionBaseStateId: null,
       headStateId: null,
+      headCommit: Promise.resolve(),
       terminalId: null,
       pid: null,
       lstart: null,
