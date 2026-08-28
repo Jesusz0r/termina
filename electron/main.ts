@@ -12,8 +12,8 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme } fro
 // Name the app for the macOS menu bar and user-data paths. Unpackaged runs default to "Electron".
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
-import { accessSync, constants, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { access, chmod, cp, copyFile, mkdir, mkdtemp, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
+import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { access, chmod, cp, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -370,6 +370,8 @@ interface ProjectState {
   /** Files the user marked as theirs (canonical paths). The agent is told
    *  not to modify them without asking. */
   mineFiles: Set<string>;
+  /** Serializes Mine mutations and their two persisted views. */
+  mineCommit: Promise<void>;
   /** The worldline manager (Fork Run candidates). */
   worldlines: WorldlineManager | null;
   /** Terminal ids owned by this project (agents, shells, candidates). */
@@ -863,22 +865,22 @@ class PiEditorApp {
    */
   private initRecording(project: ProjectState, ws: WorkspaceState): void {
     if (project.storePromise) return;
-    const storeRoot = this.canonicalPath(ws.root);
-    // v2 keys the store by the opened folder. Older stores captured the
-    // Git top-level for a subdirectory path and must not mix with this.
-    project.storeDir = join(
-      this.userDataDir,
-      "worldlines",
-      createHash("sha256").update(`v2:${storeRoot}`).digest("hex").slice(0, 16),
-    );
     const promise = (async (): Promise<SnapshotStore | null> => {
+      const storeRoot = await this.canonicalPath(ws.root);
+      // v2 keys the store by the opened folder. Older stores captured the
+      // Git top-level for a subdirectory path and must not mix with this.
+      project.storeDir = join(
+        this.userDataDir,
+        "worldlines",
+        createHash("sha256").update(`v2:${storeRoot}`).digest("hex").slice(0, 16),
+      );
       const top = await gitTopLevel(ws.root);
       if (!top) {
         ws.recordError = "the opened folder is not inside a Git repository";
         this.pushRecorderForWorkspace(ws, "paused");
         return null;
       }
-      if (!captureRootInRepo(storeRoot, this.canonicalPath(top))) {
+      if (!captureRootInRepo(storeRoot, await this.canonicalPath(top))) {
         ws.recordError = "the opened folder is not inside a Git repository";
         this.pushRecorderForWorkspace(ws, "paused");
         return null;
@@ -964,8 +966,8 @@ class PiEditorApp {
       createCandidate: (opts) => this.createCandidate(opts),
       createCandidateWorkspace: (root, baseStateId, comparisonId) => this.createCandidateWorkspace(project, root, baseStateId, comparisonId),
       onUpdate: (summary) => this.send("worldline:update", summary),
-      onCandidateState: (root, stateId) => {
-        const workspace = this.workspaceContaining(root);
+      onCandidateState: async (root, stateId) => {
+        const workspace = await this.workspaceContaining(root);
         if (workspace) this.setWorkspaceState(workspace, stateId);
       },
       onRemoved: (comparisonId) => {
@@ -1029,8 +1031,8 @@ class PiEditorApp {
       },
       terminalBusy: (terminalId) => this.terminals.get(terminalId)?.busy === true,
       terminalVerifying: (terminalId) => this.verifyRuns.has(terminalId),
-      workspaceAt: (root) => {
-        const ws = this.workspaceContaining(root);
+      workspaceAt: async (root) => {
+        const ws = await this.workspaceContaining(root);
         return ws ? { id: ws.id, generation: ws.generation, lastStateCommit: ws.lastStateCommit } : null;
       },
       acquireWriteLease: (workspaceId, requester, timeoutMs) => this.acquireWriteLease(workspaceId, requester, timeoutMs),
@@ -1047,14 +1049,14 @@ class PiEditorApp {
       onPromotionApply: (relPaths) => {
         this.promotionPaths = relPaths ? new Set(relPaths) : null;
       },
-      primarySessionDir: (cwd, engine) => engine === "core" ? this.coreProjectSessionDir(cwd) : this.primarySessionDir(cwd),
+      primarySessionDir: (cwd, engine) => engine === "core" ? this.coreProjectSessionDir(cwd) : Promise.resolve(this.primarySessionDir(cwd)),
       installPromoted: async (seed) => {
         const inst = await this.createTerminal(
           seed.primaryRoot,
           seed.engine === "core"
             ? await (async () => {
                 const parsed = parseSessionBundlePath(seed.installedSession);
-                if (!parsed || resolve(parsed.projectDir) !== resolve(this.coreProjectSessionDir(seed.primaryRoot))) {
+                if (!parsed || resolve(parsed.projectDir) !== resolve(await this.coreProjectSessionDir(seed.primaryRoot))) {
                   throw new Error("the promoted core session path is invalid");
                 }
                 return {
@@ -1076,11 +1078,11 @@ class PiEditorApp {
               },
         );
         for (const path of seed.paths) {
-          const abs = this.canonicalPath(join(seed.primaryRoot, path.rel));
+          const abs = await this.canonicalPath(join(seed.primaryRoot, path.rel));
           const before = path.beforeExists ? await readFile(join(seed.beforeDir, path.rel)) : null;
           this.setBaseline(inst, abs, before === null ? null : before.toString("utf8"));
-          if (path.kind === "delete") this.recordDeleted(inst, abs);
-          else this.recordModified(inst, abs, path.beforeExists ? "modified" : "created");
+          if (path.kind === "delete") await this.recordDeleted(inst, abs);
+          else await this.recordModified(inst, abs, path.beforeExists ? "modified" : "created");
         }
         this.send("modified:list", { instanceId: inst.id, files: [...inst.modified.values()] });
         const changedList = seed.paths.map((path) => `- \`${path.rel}\``).join("\n");
@@ -1256,33 +1258,37 @@ class PiEditorApp {
   }
 
   /** The workspace whose root contains the path, or null. */
-  private workspaceContaining(absPath: string): WorkspaceState | null {
-    const p = this.canonicalPath(absPath);
+  private async workspaceContaining(absPath: string): Promise<WorkspaceState | null> {
+    return this.workspaceContainingCanonical(await this.canonicalPath(absPath));
+  }
+
+  /** Find a workspace for a path that is already canonical. */
+  private async workspaceContainingCanonical(path: string): Promise<WorkspaceState | null> {
     for (const project of this.projects.values()) {
       for (const ws of project.workspaces.values()) {
-        const root = this.canonicalPath(ws.root);
-        const rel = relative(root, p);
+        const root = await this.canonicalPath(ws.root);
+        const rel = relative(root, path);
         if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) return ws;
       }
     }
     return null;
   }
 
-  private managedPath(absPath: string, primaryOnly = false): { path: string; workspace: WorkspaceState } | null {
-    if (this.hasDanglingSymlink(absPath)) return null;
-    const path = this.canonicalPath(absPath);
-    const workspace = this.workspaceContaining(path);
+  private async managedPath(absPath: string, primaryOnly = false): Promise<{ path: string; workspace: WorkspaceState } | null> {
+    if (await this.hasDanglingSymlink(absPath)) return null;
+    const path = await this.canonicalPath(absPath);
+    const workspace = await this.workspaceContainingCanonical(path);
     if (!workspace || (primaryOnly && !workspace.primary)) return null;
     return { path, workspace };
   }
 
-  private hasDanglingSymlink(path: string): boolean {
+  private async hasDanglingSymlink(path: string): Promise<boolean> {
     let current = resolve(path);
     while (true) {
       try {
-        if (lstatSync(current).isSymbolicLink()) {
+        if ((await lstat(current)).isSymbolicLink()) {
           try {
-            realpathSync(current);
+            await fsRealpath(current);
           } catch {
             return true;
           }
@@ -1656,12 +1662,12 @@ class PiEditorApp {
     return join(this.userDataDir, "agent-sessions");
   }
 
-  private coreProjectSessionDir(cwd: string): string {
-    return join(this.coreSessionRoot(), this.sanitizeSessionDir(this.canonicalPath(cwd)));
+  private async coreProjectSessionDir(cwd: string): Promise<string> {
+    return join(this.coreSessionRoot(), this.sanitizeSessionDir(await this.canonicalPath(cwd)));
   }
 
-  private coreSessionFile(sessionId: string, cwd: string): string {
-    return bundleSessionFile(this.coreProjectSessionDir(cwd), sessionId);
+  private async coreSessionFile(sessionId: string, cwd: string): Promise<string> {
+    return bundleSessionFile(await this.coreProjectSessionDir(cwd), sessionId);
   }
 
   private terminalRosterPath(project: ProjectState): string {
@@ -1732,11 +1738,11 @@ class PiEditorApp {
     return false;
   }
 
-  private coreSessionInUse(sessionId: string, cwd: string): boolean {
-    const target = resolve(this.coreSessionFile(sessionId, cwd));
+  private async coreSessionInUse(sessionId: string, cwd: string): Promise<boolean> {
+    const target = resolve(await this.coreSessionFile(sessionId, cwd));
     for (const inst of this.terminals.values()) {
       if (inst.engine !== "core") continue;
-      const active = inst.sessionFile ?? (inst.sessionId ? this.coreSessionFile(inst.sessionId, inst.cwd) : null);
+      const active = inst.sessionFile ?? (inst.sessionId ? await this.coreSessionFile(inst.sessionId, inst.cwd) : null);
       if (active && resolve(active) === target) return true;
     }
     return false;
@@ -1757,7 +1763,7 @@ class PiEditorApp {
 
   /** Delete an empty agent-core bundle. Keep a bundle with content so
    *  Session Search can read it after the tab closes. */
-  private discardCoreSession(inst: PiTerminalInstance): void {
+  private async discardCoreSession(inst: PiTerminalInstance): Promise<void> {
     if (inst.engine !== "core" || !inst.sessionFile) return;
     if (!this.pathInside(this.coreSessionRoot(), inst.sessionFile)) return;
     if (sessionBundleHasContent(inst.sessionFile)) return;
@@ -1941,10 +1947,10 @@ class PiEditorApp {
       ];
       if (persist) {
         const sessionCwd = cwd ?? owner?.cwd ?? this.terminalCwd();
-        if (!sessionId || !isCoreSessionId(sessionId) || this.coreSessionInUse(sessionId, sessionCwd)) {
+        if (!sessionId || !isCoreSessionId(sessionId) || await this.coreSessionInUse(sessionId, sessionCwd)) {
           sessionId = `core-${randomUUID()}`;
         }
-        sessionFile = this.coreSessionFile(sessionId, sessionCwd);
+        sessionFile = await this.coreSessionFile(sessionId, sessionCwd);
       } else {
         sessionId = null;
         sessionFile = null;
@@ -1998,7 +2004,7 @@ class PiEditorApp {
     }
 
     inst.pty.onData = (data) => this.sendPtyData(inst.id, data);
-    inst.pty.onExit = (code) => {
+    inst.pty.onExit = async (code) => {
       console.log(`[main] terminal ${inst.id} (${inst.type}) exited code=${code}`);
       if (inst.captureTimer) {
         clearTimeout(inst.captureTimer);
@@ -2019,13 +2025,14 @@ class PiEditorApp {
       // Resolve the owner before the map delete. projectOfTerminal reads
       // the terminal map, so a lookup after the delete finds no project.
       const exitOwner = this.projectOfTerminal(inst.id);
+      const persistOwner = inst.persist && exitOwner && !this.disposed && !this.projectIsSwitching(exitOwner.id) ? exitOwner : null;
+      if (persistOwner) {
+        await this.discardCoreSession(inst);
+      }
       this.terminals.delete(inst.id);
       exitOwner?.workspaces.get(inst.workspaceId)?.terminalIds.delete(inst.id);
       exitOwner?.terminalIds.delete(inst.id);
-      if (inst.persist && exitOwner && !this.disposed && !this.projectIsSwitching(exitOwner.id)) {
-        this.discardCoreSession(inst);
-        this.saveTerminalRoster(exitOwner);
-      }
+      if (persistOwner) this.saveTerminalRoster(persistOwner);
       exitOwner?.worldlines?.terminalExited(inst.id);
       this.worldlineTailers.get(inst.id)?.stop();
       this.worldlineTailers.delete(inst.id);
@@ -2363,9 +2370,9 @@ class PiEditorApp {
     this.send("plan:update", { instanceId: inst.id, tasks: inst.plan });
   }
 
-  private applyPlanMessage(inst: PiTerminalInstance, text: string): void {
+  private async applyPlanMessage(inst: PiTerminalInstance, text: string): Promise<void> {
     if (!inst.busy) return;
-    const tasks = parsePlanTasks(
+    const tasks = await parsePlanTasks(
       text,
       this.workspaceOfTerminal(inst)?.root ?? null,
       (p) => this.canonicalPath(p),
@@ -2383,8 +2390,8 @@ class PiEditorApp {
     this.sendPlan(inst);
   }
 
-  private updatePlanProgress(inst: PiTerminalInstance, path: string): void {
-    if (markPlanProgress(inst.plan, this.rel(path))) this.sendPlan(inst);
+  private async updatePlanProgress(inst: PiTerminalInstance, path: string): Promise<void> {
+    if (markPlanProgress(inst.plan, await this.rel(path))) this.sendPlan(inst);
   }
 
   private finalizePlan(inst: PiTerminalInstance): void {
@@ -2414,7 +2421,7 @@ class PiEditorApp {
     const project = this.project();
     const cwd = project?.cwd ?? null;
     if (!project || !cwd || query.trim().length < 2) return [];
-    const projectCwd = this.canonicalPath(cwd);
+    const projectCwd = await this.canonicalPath(cwd);
     const key = this.sanitizeSessionDir(projectCwd);
     const piDir = join(homedir(), ".pi", "agent", "sessions", key);
     const coreDir = join(this.coreSessionRoot(), key);
@@ -2465,10 +2472,10 @@ class PiEditorApp {
     return out;
   }
 
-  private isProjectFile(relPath: string, projectCwd: string): boolean {
+  private async isProjectFile(relPath: string, projectCwd: string): Promise<boolean> {
     if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return false;
     const abs = join(projectCwd, relPath);
-    if (!this.withinProject(abs)) return false;
+    if (!await this.withinProject(abs)) return false;
     try {
       return existsSync(abs) && statSync(abs).isFile();
     } catch {
@@ -2479,7 +2486,7 @@ class PiEditorApp {
   // ------------------------------------------------------------- dispatch --
 
   /** Normalize a task path to a comparable key (canonical absolute path). */
-  private taskPathKey(p: string, root: string): string {
+  private taskPathKey(p: string, root: string): Promise<string> {
     return this.canonicalPath(join(root, p));
   }
 
@@ -2505,7 +2512,7 @@ class PiEditorApp {
   }
 
   /** Canonical paths already claimed by this owner's live workers. */
-  private dispatchPathKeysInFlight(ownerId: string, root: string): Set<string> {
+  private async dispatchPathKeysInFlight(ownerId: string, root: string): Promise<Set<string>> {
     const used = new Set<string>();
     const owner = this.terminals.get(ownerId);
     if (!owner) return used;
@@ -2513,7 +2520,7 @@ class PiEditorApp {
       if (entry.ownerId !== ownerId) continue;
       const task = findTaskByText(owner.plan, entry.taskText);
       if (!task) continue;
-      for (const p of task.paths) used.add(this.taskPathKey(p, root));
+      for (const p of task.paths) used.add(await this.taskPathKey(p, root));
     }
     return used;
   }
@@ -2555,10 +2562,10 @@ class PiEditorApp {
       }
     }
     const dispatchRoot = ownerWs?.root ?? owner.cwd;
-    const picked = pickDispatchTasks({
+    const picked = await pickDispatchTasks({
       plan: owner.plan,
       remainingSlots: MAX_DISPATCH_WORKERS - this.ownerDispatchCount(owner.id),
-      inFlightPathKeys: this.dispatchPathKeysInFlight(owner.id, dispatchRoot),
+      inFlightPathKeys: await this.dispatchPathKeysInFlight(owner.id, dispatchRoot),
       pathKey: (p) => this.taskPathKey(p, dispatchRoot),
       taskText,
     });
@@ -2776,82 +2783,84 @@ class PiEditorApp {
   // ----------------------------------------------------------------- mine ----
 
   /** Mark a file as the user's own (or clear the mark). */
-  private setMineFile(path: string, mine: boolean): void {
+  private setMineFile(path: string, mine: boolean): Promise<void> {
     const project = this.project();
-    if (!project) return;
-    const managed = this.managedPath(path, true);
-    if (!managed) return;
-    const p = managed.path;
-    if (mine) {
-      if (!project.mineFiles.has(p) && project.mineFiles.size >= PiEditorApp.MAX_MINE_FILES) return;
-      project.mineFiles.add(p);
-    } else {
-      project.mineFiles.delete(p);
-    }
-    this.saveMineFiles(project);
-    this.writeMineContext(project);
+    if (typeof path !== "string" || typeof mine !== "boolean") return Promise.reject(new Error("invalid Mine update"));
+    if (!project || this.disposed || this.projectIsSwitching(project.id)) return Promise.reject(new Error("project is not available"));
+    const commit = project.mineCommit.catch(() => undefined).then(async () => {
+      const managed = await this.managedPath(path, true);
+      if (!managed || this.projectOfWorkspace(managed.workspace.id) !== project) throw new Error("path is outside the active project");
+      const p = managed.path;
+      const wasMine = project.mineFiles.has(p);
+      if (wasMine === mine) return;
+      if (mine) {
+        if (project.mineFiles.size >= PiEditorApp.MAX_MINE_FILES) throw new Error("too many Mine files");
+        project.mineFiles.add(p);
+      } else {
+        project.mineFiles.delete(p);
+      }
+      try {
+        await this.saveMineFiles(project);
+        await this.writeMineContext(project);
+      } catch (err) {
+        if (wasMine) project.mineFiles.add(p);
+        else project.mineFiles.delete(p);
+        await this.saveMineFiles(project).catch(() => undefined);
+        await this.writeMineContext(project).catch(() => undefined);
+        throw err;
+      }
+    });
+    project.mineCommit = commit;
+    return commit;
   }
 
   /** Write the mine context file for the agent terminals of one project. */
-  private writeMineContext(project: ProjectState): void {
-    try {
-      mkdirSync(this.eventsDir, { recursive: true });
-    } catch {
-      return;
-    }
-    const md = this.buildMineMarkdown(project);
-    for (const inst of this.terminals.values()) {
-      if (inst.type !== "agent") continue;
-      if (this.projectOfTerminal(inst.id) !== project) continue;
-      const eventsDir = this.eventsDirOf(inst);
-      try {
-        writeFileSync(join(eventsDir, `mine-${inst.id}.md`), md, "utf8");
-      } catch (err) {
-        console.warn(`[main] could not write mine context: ${(err as Error).message}`);
-      }
-    }
+  private async writeMineContext(project: ProjectState): Promise<void> {
+    const md = await this.buildMineMarkdown(project);
+    const agents = [...this.terminals.values()].filter((inst) => inst.type === "agent" && this.projectOfTerminal(inst.id) === project);
+    await Promise.all(
+      agents.map(async (inst) => {
+        const eventsDir = this.eventsDirOf(inst);
+        await mkdir(eventsDir, { recursive: true });
+        await this.writeFileAtomically(join(eventsDir, `mine-${inst.id}.md`), md);
+      }),
+    );
   }
 
   /** Build the mine context markdown: one file per line. */
-  private buildMineMarkdown(project: ProjectState): string {
+  private async buildMineMarkdown(project: ProjectState): Promise<string> {
     const out: string[] = ["## Your files", "", "These files belong to the user. Do not modify them without asking first.", ""];
-    for (const p of project.mineFiles) out.push(`- \`${this.rel(p)}\``);
+    for (const p of project.mineFiles) out.push(`- \`${await this.rel(p, project.cwd)}\``);
     return out.join("\n");
   }
 
   /** Clear the marks and their context files (project switch). The saved
    *  marks stay in their file: revisiting the project restores them. */
-  private clearMineFiles(project: ProjectState): void {
+  private async clearMineFiles(project: ProjectState): Promise<void> {
     project.mineFiles.clear();
-    for (const inst of this.terminals.values()) {
-      if (inst.type !== "agent") continue;
-      if (this.projectOfTerminal(inst.id) !== project) continue;
-      try {
-        // Remove from the terminal's OWN events dir (see writeMineContext).
-        rmSync(join(this.eventsDirOf(inst), `mine-${inst.id}.md`), { force: true });
-      } catch {
-        /* ignore */
-      }
-    }
+    const agents = [...this.terminals.values()].filter((inst) => inst.type === "agent" && this.projectOfTerminal(inst.id) === project);
+    await Promise.all(
+      agents.map((inst) => rm(join(this.eventsDirOf(inst), `mine-${inst.id}.md`), { force: true }).catch(() => undefined)),
+    );
   }
 
   /** The persisted marks file for one project. */
-  private mineFilePath(project: ProjectState): string {
-    const cwd = this.canonicalPath(project.cwd);
+  private async mineFilePath(project: ProjectState): Promise<string> {
+    const cwd = await this.canonicalPath(project.cwd);
     return join(this.eventsDir, `mine-${this.sanitizeSessionDir(cwd)}.json`);
   }
 
   /** Load the marks saved for one project (restart persistence). */
-  private loadMineFiles(project: ProjectState): void {
+  private async loadMineFiles(project: ProjectState): Promise<void> {
     try {
-      const raw = readFileSync(this.mineFilePath(project), "utf8");
+      const raw = await readFile(await this.mineFilePath(project), "utf8");
       const list = JSON.parse(raw) as string[];
       if (Array.isArray(list)) {
         for (const p of list) {
           if (project.mineFiles.size >= PiEditorApp.MAX_MINE_FILES) break;
           if (typeof p !== "string") continue;
-          const managed = this.managedPath(p, true);
-          if (managed) project.mineFiles.add(managed.path);
+          const managed = await this.managedPath(p, true);
+          if (managed && this.projectOfWorkspace(managed.workspace.id) === project) project.mineFiles.add(managed.path);
         }
       }
     } catch {
@@ -2860,12 +2869,20 @@ class PiEditorApp {
   }
 
   /** Save the marks so a restart restores the ownership. */
-  private saveMineFiles(project: ProjectState): void {
+  private async saveMineFiles(project: ProjectState): Promise<void> {
+    await mkdir(this.eventsDir, { recursive: true });
+    await this.writeFileAtomically(await this.mineFilePath(project), JSON.stringify([...project.mineFiles]));
+  }
+
+  /** Replace one app-owned file without exposing a partial write. */
+  private async writeFileAtomically(target: string, content: string): Promise<void> {
+    const temporary = `${target}.tmp-${randomUUID()}`;
     try {
-      mkdirSync(this.eventsDir, { recursive: true });
-      writeFileSync(this.mineFilePath(project), JSON.stringify([...project.mineFiles]), "utf8");
+      await writeFile(temporary, content, { encoding: "utf8", mode: 0o600 });
+      await fsRename(temporary, target);
     } catch (err) {
-      console.warn(`[main] could not save mine marks: ${(err as Error).message}`);
+      await rm(temporary, { force: true }).catch(() => undefined);
+      throw err;
     }
   }
 
@@ -3177,7 +3194,7 @@ class PiEditorApp {
           }
         });
         // Couple the run to its start preflight when the token matches.
-        this.coupleRunStart(inst, event);
+        await this.coupleRunStart(inst, event);
         // A dispatch worker started: mark its task active on the owner board.
         const dispatchStart = this.dispatchRuns.get(inst.id);
         if (dispatchStart) {
@@ -3226,7 +3243,7 @@ class PiEditorApp {
         this.sendInstances();
         break;
       case "plan": {
-        this.applyPlanMessage(inst, String(event.text ?? ""));
+        await this.applyPlanMessage(inst, String(event.text ?? ""));
         break;
       }
       case "tool": {
@@ -3235,16 +3252,16 @@ class PiEditorApp {
         // within-project guard applies to the primary only (nested moments).
         const toolWs = this.workspaceOfTerminal(inst);
         const toolBase = toolWs?.root ?? this.projectOfTerminal(inst.id)?.cwd ?? null;
-        const path = this.canonicalPath(isAbsolute(rawPath) ? rawPath : toolBase ? join(toolBase, rawPath) : rawPath);
+        const path = await this.canonicalPath(isAbsolute(rawPath) ? rawPath : toolBase ? join(toolBase, rawPath) : rawPath);
         if (!path) return;
         const isCandidateTerminal = !!this.projectOfTerminal(inst.id)?.worldlines?.eventsDirOf(inst.id);
         if (isCandidateTerminal) {
           // Reject file-tool paths that resolve outside the candidate root
           // (WORLDLINES §5): the sandbox blocks the write, the guard keeps
           // the timeline and baselines truthful.
-          const root = toolWs?.root ? this.canonicalPath(toolWs.root) : null;
+          const root = toolWs?.root ? await this.canonicalPath(toolWs.root) : null;
           if (!root || !(path === root || path.startsWith(root + "/"))) return;
-        } else if (!this.withinProject(path)) {
+        } else if (!await this.withinProject(path)) {
           return;
         }
         const toolName = String(event.toolName ?? "");
@@ -3270,17 +3287,17 @@ class PiEditorApp {
           }
         }
         const status = toolName === "write" ? this.classifyWrite(path) : "modified";
-        this.recordModified(inst, path, status);
+        await this.recordModified(inst, path, status);
         if ((toolName === "write" || toolName === "create_file") && !inst.baselines.has(path)) {
           this.trackRecordingTask(this.fillBaseline(inst, path, status));
         }
-        const rel = this.rel(path);
+        const rel = await this.rel(path);
         inst.touched.add(rel);
         const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId.trim() : "";
         if (toolCallId && rel) inst.pendingFileTools.set(toolCallId, rel);
-        this.updatePlanProgress(inst, path);
+        await this.updatePlanProgress(inst, path);
         this.sendTimelinePrefix(inst);
-        this.send("tool:target", { path, relPath: this.rel(path), toolName });
+        this.send("tool:target", { path, relPath: await this.rel(path), toolName });
         // Session Timeline: snapshot the file as of this tool call. Create
         // the event object first so a delayed content fill can find it later.
         // The tool call and entry ids make the dot a forkable moment.
@@ -3288,7 +3305,7 @@ class PiEditorApp {
           t: "tool",
           toolName,
           path,
-          relPath: this.rel(path, toolWs?.root ?? null),
+          relPath: await this.rel(path, toolWs?.root ?? null),
           toolCallId: event.toolCallId ?? null,
           entryId: event.entryId ?? null,
           model: inst.currentRun?.model ?? null,
@@ -3447,7 +3464,7 @@ class PiEditorApp {
    * agent_start: consume the preflight token and open the run record.
    * A token-less agent_start is a retry or compaction of the open run.
    */
-  private coupleRunStart(inst: PiTerminalInstance, event: AgentStartEvent): void {
+  private async coupleRunStart(inst: PiTerminalInstance, event: AgentStartEvent): Promise<void> {
     const token = String(event.preflightToken ?? "");
     const pending = token ? this.pendingPreflights.get(token) : undefined;
     const ws = this.workspaceOfTerminal(inst);
@@ -3539,10 +3556,10 @@ class PiEditorApp {
     const startedSessionId = String(event.sessionId ?? "") || inst.sessionId;
     if (inst.engine === "core") {
       if (inst.persist) {
-        if (startedSessionId && isCoreSessionId(startedSessionId) && (startedSessionId === inst.sessionId || !this.coreSessionInUse(startedSessionId, inst.cwd))) {
+        if (startedSessionId && isCoreSessionId(startedSessionId) && (startedSessionId === inst.sessionId || !await this.coreSessionInUse(startedSessionId, inst.cwd))) {
           inst.sessionId = startedSessionId;
         }
-        if (inst.sessionId) inst.sessionFile = this.coreSessionFile(inst.sessionId, inst.cwd);
+        if (inst.sessionId) inst.sessionFile = await this.coreSessionFile(inst.sessionId, inst.cwd);
       }
     } else {
       const trusted = this.trustedPiSessionFile(startedSessionFile) ?? this.trustedPiSessionFile(inst.sessionFile);
@@ -3621,7 +3638,7 @@ class PiEditorApp {
     try {
       const state = await this.captureStable(store, ws);
       this.setWorkspaceState(ws, state.commit);
-      if (!ws.primary) checkpointOwner?.worldlines?.updateHeadState(inst.id, state.commit);
+      if (!ws.primary) await checkpointOwner?.worldlines?.updateHeadState(inst.id, state.commit);
       this.writeAck(inst.id, requestId, { ok: true, stateId: state.commit });
       if (kind === "settled" && inst.currentRun && !inst.currentRun.settledAt) {
         await this.finalizeRun(inst, state, entryId);
@@ -3733,7 +3750,7 @@ class PiEditorApp {
     let walked = 0;
     for (const [path, pair] of oids ?? []) {
       if (walked++ > 2000) break;
-      const rel = this.rel(path, ws.root);
+      const rel = await this.rel(path, ws.root);
       if (!rel || rel.startsWith("..") || isAbsolute(rel)) continue;
       if (hinted.has(rel)) continue;
       if (this.ignoredSegmentIn(rel)) continue;
@@ -3745,7 +3762,7 @@ class PiEditorApp {
       const state = await store.captureIncremental(ws.lastStateCommit, hints, reconcile, {}, {}, source);
       this.setWorkspaceState(ws, state.commit);
       ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
-      if (!ws.primary) momentOwner?.worldlines?.updateHeadState(inst.id, state.commit);
+      if (!ws.primary) await momentOwner?.worldlines?.updateHeadState(inst.id, state.commit);
       this.attachMomentState(inst, state.commit, batch);
       this.setRecorderState(inst, "ready");
       this.evictForkPoints(inst);
@@ -4254,7 +4271,7 @@ class PiEditorApp {
     const workspace = this.workspaceOfTerminal(inst);
     const store = await this.projectOfTerminal(inst.id)?.storePromise;
     if (!stateId || !workspace || !store) return;
-    const relPath = relative(this.canonicalPath(workspace.root), path);
+    const relPath = relative(await this.canonicalPath(workspace.root), path);
     if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return;
     const content = await store.readBlob(stateId, relPath);
     if (content !== null && content.byteLength <= MAX_OPEN_FILE_SIZE && !inst.baselines.has(path)) {
@@ -4271,20 +4288,20 @@ class PiEditorApp {
     }
   }
 
-  private recordModified(inst: PiTerminalInstance, absPath: string, status: "created" | "modified"): void {
-    const p = this.canonicalPath(absPath);
+  private async recordModified(inst: PiTerminalInstance, absPath: string, status: "created" | "modified"): Promise<void> {
+    const p = await this.canonicalPath(absPath);
     const existing = inst.modified.get(p);
     if (existing) {
       // The watcher status is authoritative: it knows whether the file
       // existed before the first change it ever saw for this path.
       existing.status = status;
     } else {
-      this.setBounded(inst.modified, p, { path: p, relPath: this.rel(p), status }, PiEditorApp.MAX_MODIFIED_FILES);
+      this.setBounded(inst.modified, p, { path: p, relPath: await this.rel(p), status }, PiEditorApp.MAX_MODIFIED_FILES);
     }
   }
 
-  private recordDeleted(inst: PiTerminalInstance, absPath: string): void {
-    const p = this.canonicalPath(absPath);
+  private async recordDeleted(inst: PiTerminalInstance, absPath: string): Promise<void> {
+    const p = await this.canonicalPath(absPath);
     const baseline = inst.baselines.get(p);
     if (baseline !== undefined && baseline !== null) {
       // A pre-existing file was deleted and a baseline can restore it: keep
@@ -4293,7 +4310,7 @@ class PiEditorApp {
       if (entry) {
         entry.status = "deleted";
       } else {
-        this.setBounded(inst.modified, p, { path: p, relPath: this.rel(p), status: "deleted" }, PiEditorApp.MAX_MODIFIED_FILES);
+        this.setBounded(inst.modified, p, { path: p, relPath: await this.rel(p), status: "deleted" }, PiEditorApp.MAX_MODIFIED_FILES);
       }
     } else {
       // Nothing to restore (created this run, or no baseline): drop the entry.
@@ -4355,7 +4372,7 @@ class PiEditorApp {
     if (result.canceled || result.filePaths.length === 0) return { cancelled: true };
     const cwd = result.filePaths[0];
     // One tab per folder: reactivate an already-open project.
-    const canonical = this.canonicalPath(cwd);
+    const canonical = await this.canonicalPath(cwd);
     for (const existing of this.projects.values()) {
       if (existing.canonicalRoot === canonical) {
         await this.activateProject(existing.id);
@@ -4368,7 +4385,7 @@ class PiEditorApp {
 
   /** Open or reactivate the project at a path (the dialog-free path). */
   private async openProjectAt(cwd: string): Promise<{ cwd: string } | { cancelled: true }> {
-    const canonical = this.canonicalPath(cwd);
+    const canonical = await this.canonicalPath(cwd);
     for (const existing of this.projects.values()) {
       if (existing.canonicalRoot === canonical) {
         await this.activateProject(existing.id);
@@ -4387,11 +4404,12 @@ class PiEditorApp {
       const project: ProjectState = {
         id,
         cwd,
-        canonicalRoot: this.canonicalPath(cwd),
+        canonicalRoot: await this.canonicalPath(cwd),
         workspaces: new Map(),
         storePromise: null,
         storeDir: null,
         mineFiles: new Set(),
+        mineCommit: Promise.resolve(),
         worldlines: null,
         terminalIds: new Set(),
         unrestoredTerminals: [],
@@ -4405,7 +4423,7 @@ class PiEditorApp {
       // a user edit.
       await recoverPromotionJournals(this.worldsRoot);
       this.createWorkspace(project, cwd, true);
-      this.loadMineFiles(project);
+      await this.loadMineFiles(project);
       this.initWorldlines(project);
       // Spawn the terminal before folder:opened so the renderer can show
       // that pane when it switches the project view.
@@ -4469,15 +4487,16 @@ class PiEditorApp {
     // Capture the project's ids before teardown removes candidate workspaces
     // and exited terminals leave the sets.
     const closingWorkspaceIds = new Set(project.workspaces.keys());
-    const closingRoots = [...project.workspaces.values()].map((ws) => this.canonicalPath(ws.root));
+    const closingRoots = await Promise.all([...project.workspaces.values()].map((ws) => this.canonicalPath(ws.root)));
     const closingIds = [...project.terminalIds];
     try {
       await this.drainVerifyJobs(closingIds);
       await this.drainSidecarQueues();
+      await project.mineCommit.catch(() => undefined);
       await project.worldlines?.drainEvidence();
       await project.worldlines?.dispose().catch(() => undefined);
       project.worldlines = null;
-      this.clearMineFiles(project);
+      await this.clearMineFiles(project);
       // Drain only this project's terminals. Other open projects keep running.
       for (const id of closingIds) {
         this.tailer.stopWatching(id);
@@ -4542,14 +4561,14 @@ class PiEditorApp {
     await this.drainRecordingTasks();
     const promise = project.storePromise;
     project.storePromise = null;
-    const storeDir = project.storeDir;
-    project.storeDir = null;
     let store: SnapshotStore | null = null;
     try {
       store = promise ? await promise : null;
     } catch (err) {
       console.warn(`[main] snapshot store initialization failed during cleanup: ${String(err)}`);
     }
+    const storeDir = project.storeDir;
+    project.storeDir = null;
     if (store && storeDir) {
       try {
         await store.destroy();
@@ -4640,10 +4659,10 @@ class PiEditorApp {
     const watcher = new ProjectWatcher(ws.root, (p) => this.canonicalPath(p));
     const workspaceTerminals = (): PiTerminalInstance[] =>
       [...ws.terminalIds].map((id) => this.terminals.get(id)).filter((t): t is PiTerminalInstance => t !== undefined);
-    watcher.onChange = (change) => {
+    watcher.onChange = async (change) => {
       if (this.disposed || this.projectIsSwitching(this.projectOfWorkspace(ws.id)?.id)) return;
-      const path = this.canonicalPath(change.path);
-      const relPath = relative(this.canonicalPath(ws.root), path);
+      const path = await this.canonicalPath(change.path);
+      const relPath = relative(await this.canonicalPath(ws.root), path);
       if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return;
       ws.generation++;
       this.markCandidateEvidenceStale(ws.comparisonId);
@@ -4703,7 +4722,7 @@ class PiEditorApp {
       }
       if (owners.length > 0) {
         for (const inst of owners) {
-          this.recordModified(inst, path, change.status);
+          await this.recordModified(inst, path, change.status);
           // Fork Any Moment: the path joins the terminal's next capture.
           this.addPendingHint(inst, relPath);
           this.scheduleMomentCapture(inst);
@@ -4715,7 +4734,7 @@ class PiEditorApp {
         }
       } else if (!verifyInWorkspace) {
         for (const inst of unowned) {
-          this.recordModified(inst, path, change.status);
+          await this.recordModified(inst, path, change.status);
           this.addPendingHint(inst, relPath);
           this.scheduleMomentCapture(inst);
           // An unowned change during a run is manual provenance: it marks
@@ -4754,26 +4773,26 @@ class PiEditorApp {
       }
       this.send("file:changed", { path, relPath, content: liveContent, status: change.status, changedLines });
     };
-    watcher.onFileTouched = (path, status) => {
+    watcher.onFileTouched = async (path, status) => {
       if (this.disposed || this.projectIsSwitching(this.projectOfWorkspace(ws.id)?.id)) return;
-      const canonical = this.canonicalPath(path);
-      const relPath = relative(this.canonicalPath(ws.root), canonical);
+      const canonical = await this.canonicalPath(path);
+      const relPath = relative(await this.canonicalPath(ws.root), canonical);
       if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return;
       ws.generation++;
       this.markCandidateEvidenceStale(ws.comparisonId);
       for (const inst of workspaceTerminals()) {
-        if (inst.busy) this.recordModified(inst, canonical, status);
+        if (inst.busy) await this.recordModified(inst, canonical, status);
       }
     };
-    watcher.onFileDeleted = (path) => {
+    watcher.onFileDeleted = async (path) => {
       if (this.disposed || this.projectIsSwitching(this.projectOfWorkspace(ws.id)?.id)) return;
-      const p = this.canonicalPath(path);
-      const relPath = relative(this.canonicalPath(ws.root), p);
+      const p = await this.canonicalPath(path);
+      const relPath = relative(await this.canonicalPath(ws.root), p);
       if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return;
       ws.generation++;
       this.markCandidateEvidenceStale(ws.comparisonId);
       this.send("file:deleted", { path: p });
-      for (const inst of workspaceTerminals()) this.recordDeleted(inst, p);
+      for (const inst of workspaceTerminals()) await this.recordDeleted(inst, p);
       // A user-side deletion makes the recorded edit moot: drop the entry so
       // the context never points at a file that no longer exists. An empty
       // map must remove the file itself — the writer skips empty maps.
@@ -4790,12 +4809,12 @@ class PiEditorApp {
 
   // ---------------------------------------------------------------- paths ---
 
-  private canonicalPath(p: string): string {
+  private async canonicalPath(p: string): Promise<string> {
     let tail = "";
     let cur = p;
     while (true) {
       try {
-        const real = realpathSync(cur);
+        const real = await fsRealpath(cur);
         return tail ? join(real, tail) : real;
       } catch {
         const parent = dirname(cur);
@@ -4806,23 +4825,23 @@ class PiEditorApp {
     }
   }
 
-  private withinProject(absPath: string): boolean {
+  private async withinProject(absPath: string): Promise<boolean> {
     if (!this.project()?.cwd) return false;
-    const rel = relative(this.canonicalPath(this.project()!.cwd), this.canonicalPath(absPath));
+    const rel = relative(await this.canonicalPath(this.project()!.cwd), await this.canonicalPath(absPath));
     return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
   }
 
-  private rel(absPath: string, root: string | null = this.project()?.cwd ?? null): string {
-    const p = this.canonicalPath(absPath);
-    return root ? relative(this.canonicalPath(root), p) : p;
+  private async rel(absPath: string, root: string | null = this.project()?.cwd ?? null): Promise<string> {
+    const p = await this.canonicalPath(absPath);
+    return root ? relative(await this.canonicalPath(root), p) : p;
   }
 
-  private projectAbs(relPath: string): string {
+  private async projectAbs(relPath: string): Promise<string> {
     const cwd = this.project()?.cwd;
     if (!cwd) throw new Error("open a project folder first");
     const abs = isAbsolute(relPath) ? relPath : join(cwd, relPath);
-    const managed = this.managedPath(abs, true);
-    if (!managed || managed.path === this.canonicalPath(cwd)) throw new Error(`path outside project: ${relPath}`);
+    const managed = await this.managedPath(abs, true);
+    if (!managed || managed.path === await this.canonicalPath(cwd)) throw new Error(`path outside project: ${relPath}`);
     return managed.path;
   }
 
@@ -4841,7 +4860,7 @@ class PiEditorApp {
   }
 
   private async listDir(absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }> {
-    const managed = this.managedPath(absPath, true);
+    const managed = await this.managedPath(absPath, true);
     if (!managed) return { entries: [], error: "path outside the project workspace" };
     try {
       const dirents = await readdir(managed.path, { withFileTypes: true });
@@ -4852,7 +4871,7 @@ class PiEditorApp {
         if (aDir !== bDir) return aDir - bDir;
         return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
       });
-      const rootCanon = this.canonicalPath(managed.workspace.root);
+      const rootCanon = await this.canonicalPath(managed.workspace.root);
       const entries: ExplorerEntry[] = [];
       let truncated = false;
       for (const ent of visible) {
@@ -4861,7 +4880,7 @@ class PiEditorApp {
           break;
         }
         const full = join(managed.path, ent.name);
-        const child = this.managedPath(full, true);
+        const child = await this.managedPath(full, true);
         if (!child || child.workspace.id !== managed.workspace.id) continue;
         entries.push({
           name: ent.name,
@@ -4907,6 +4926,7 @@ class PiEditorApp {
     });
     ipcMain.handle("project:open", () => this.openFolder());
     ipcMain.handle("project:open-path", async (_e, cwd: unknown) => {
+      if (app.isPackaged && process.env.TERMINA_E2E !== "1") return { cancelled: true };
       if (typeof cwd !== "string") return { cancelled: true };
       try {
         await access(cwd);
@@ -5047,9 +5067,10 @@ class PiEditorApp {
     // ---- Worldlines: candidates (WORLDLINES §6.5, §6.6) ----
     ipcMain.handle("worldline:list", () => this.project()?.worldlines?.list() ?? []);
     ipcMain.handle("worldline:promote", (_e, comparisonId: string, label: "A" | "B", force?: boolean) => {
+      if (force !== undefined && force !== true && force !== false) return { ok: false, error: "invalid force" };
       const manager = this.projectOfComparison(comparisonId)?.worldlines;
       if (!manager) return Promise.resolve({ ok: false, error: "candidate not found" });
-      return manager.promote(comparisonId, label, force ?? false);
+      return manager.promote(comparisonId, label, force === true);
     });
     ipcMain.handle("worldline:challenge", async (_e, runId: string) => {
       const manager = this.projectForRun(runId)?.worldlines;
@@ -5117,7 +5138,7 @@ class PiEditorApp {
     /** The flush saves go through the lease holder (the preflight). */
     ipcMain.handle("file:flush-save", async (_e, absPath: string, content: string, writerId: string) => {
       if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > MAX_OPEN_FILE_SIZE) return { ok: false, error: "file content is too large" };
-      const managed = this.managedPath(absPath);
+      const managed = await this.managedPath(absPath);
       if (!managed) return { ok: false, error: "path is outside a managed workspace" };
       if (managed.workspace.writerId !== writerId) return { ok: false, error: "the flush does not hold the write lease" };
       try {
@@ -5196,7 +5217,7 @@ class PiEditorApp {
     // ---- Change Review ----
     ipcMain.handle("review:baseline", async (_e, terminalId: string, path: string) => {
       const inst = this.terminals.get(terminalId);
-      const managed = inst ? this.managedPath(path) : null;
+      const managed = inst ? await this.managedPath(path) : null;
       if (!inst || !managed || managed.workspace.id !== inst.workspaceId) return { status: "modified", baseline: undefined };
       // A lazy capture can still be in flight when the user clicks the
       // modified entry. Wait for it so the diff does not show a false
@@ -5215,7 +5236,7 @@ class PiEditorApp {
       if (!inst) return { ok: false, error: "terminal not found" };
       const blocked = this.assertWorkspaceWritable(inst.workspaceId);
       if (blocked) return { ok: false, error: blocked };
-      const managed = this.managedPath(path);
+      const managed = await this.managedPath(path);
       if (!managed || managed.workspace.id !== inst.workspaceId) return { ok: false, error: "path is outside the terminal workspace" };
       const p = managed.path;
       const b = inst.baselines.get(p);
@@ -5241,7 +5262,7 @@ class PiEditorApp {
     ipcMain.handle("file:save", async (_e, absPath: unknown, content: unknown) => {
       if (typeof absPath !== "string") return { ok: false, error: "invalid path" };
       if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > MAX_OPEN_FILE_SIZE) return { ok: false, error: "file content is too large" };
-      const managed = this.managedPath(absPath);
+      const managed = await this.managedPath(absPath);
       if (!managed) return { ok: false, error: "path is outside a managed workspace" };
       const blocked = this.assertWorkspaceWritable(managed.workspace.id);
       if (blocked) return { ok: false, error: blocked };
@@ -5265,7 +5286,7 @@ class PiEditorApp {
       const blocked = this.assertWorkspaceWritable(this.primaryWorkspace()?.id ?? "");
       if (blocked) return { ok: false, error: blocked };
       try {
-        const abs = this.projectAbs(relPath);
+        const abs = await this.projectAbs(relPath);
         if (kind === "dir") {
           await mkdir(abs, { recursive: true });
         } else {
@@ -5285,7 +5306,7 @@ class PiEditorApp {
         if (typeof newName !== "string" || !newName || newName.includes("/") || newName === "." || newName === "..") {
           return { ok: false, error: "invalid name" };
         }
-        const abs = this.projectAbs(relPath);
+        const abs = await this.projectAbs(relPath);
         await fsRename(abs, join(dirname(abs), newName));
         return { ok: true };
       } catch (err) {
@@ -5297,7 +5318,7 @@ class PiEditorApp {
       const blocked = this.assertWorkspaceWritable(this.primaryWorkspace()?.id ?? "");
       if (blocked) return { ok: false, error: blocked };
       try {
-        const abs = this.projectAbs(relPath);
+        const abs = await this.projectAbs(relPath);
         await rm(abs, { recursive: true, force: true });
         return { ok: true };
       } catch (err) {
@@ -5316,14 +5337,14 @@ class PiEditorApp {
       const blocked = this.assertWorkspaceWritable(this.primaryWorkspace()?.id ?? "");
       if (blocked) return { ok: false, error: blocked };
       try {
-        const src = this.projectAbs(srcRel);
+        const src = await this.projectAbs(srcRel);
         let dirAbs: string;
         if (targetDirRel === "" || targetDirRel === ".") {
           const cwd = this.project()?.cwd;
           if (!cwd) return { ok: false, error: "open a project folder first" };
-          dirAbs = this.canonicalPath(cwd);
+          dirAbs = await this.canonicalPath(cwd);
         } else {
-          dirAbs = this.projectAbs(targetDirRel);
+          dirAbs = await this.projectAbs(targetDirRel);
         }
         // The paste target must be a directory.
         if (!existsSync(dirAbs) || !statSync(dirAbs).isDirectory()) {
@@ -5345,7 +5366,7 @@ class PiEditorApp {
   }
 
   private async openFileInEditor(absPath: string): Promise<{ ok: true; path: string; content: string; changedLines?: number[] } | { ok: false; path: string; error: string }> {
-    const managed = this.managedPath(absPath);
+    const managed = await this.managedPath(absPath);
     if (!managed) return { ok: false, path: absPath, error: "path is outside a managed workspace" };
     try {
       const st = await stat(managed.path);
@@ -5473,6 +5494,7 @@ class PiEditorApp {
     this.tailer.stop();
     await this.drainSidecarQueues();
     this.sidecarQueues.clear();
+    await Promise.all([...this.projects.values()].map((project) => project.mineCommit.catch(() => undefined)));
     await Promise.all([...this.projects.values()].map((project) => project.worldlines?.drainEvidence() ?? Promise.resolve()));
     this.cleanupExportedStates();
     for (const project of this.projects.values()) {

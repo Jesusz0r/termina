@@ -23,7 +23,7 @@ export type SessionMessageParse = { role: string; text: string; paths: string[] 
 
 export type SessionFileEntry = { path: string; name: string; mtimeMs: number; segments?: string[] };
 
-type CanonicalizePath = (absPath: string) => string;
+type CanonicalizePath = (absPath: string) => string | Promise<string>;
 
 function stringArgPaths(value: unknown, paths: string[]): void {
   if (typeof value === "string") {
@@ -121,22 +121,22 @@ export function formatSessionHitSnippet(role: string, text: string, matchIdx: nu
   return prefix + snippet;
 }
 
-export function resolveSessionHitPath(
+export async function resolveSessionHitPath(
   parsed: SessionMessageParse,
   projectCwd: string,
   canonicalize: CanonicalizePath,
-  isProjectFile: (relPath: string, projectCwd: string) => boolean,
-): string | null {
+  isProjectFile: (relPath: string, projectCwd: string) => boolean | Promise<boolean>,
+): Promise<string | null> {
   for (const p of parsed.paths.slice(0, 5)) {
-    const clean = cleanPlanPathToken(p, projectCwd, canonicalize);
-    if (isProjectFile(clean, projectCwd)) return clean;
+    const clean = await cleanPlanPathToken(p, projectCwd, canonicalize);
+    if (await isProjectFile(clean, projectCwd)) return clean;
   }
   const backticks = parsed.text.match(/`([^`]+)`/g);
   if (backticks) {
     for (const raw of backticks.slice(0, 5)) {
       const token = raw.slice(1, -1).trim();
-      const clean = cleanPlanPathToken(token, projectCwd, canonicalize);
-      if (isProjectFile(clean, projectCwd)) return clean;
+      const clean = await cleanPlanPathToken(token, projectCwd, canonicalize);
+      if (await isProjectFile(clean, projectCwd)) return clean;
     }
   }
   return null;
@@ -206,7 +206,7 @@ export async function searchSessionFiles(opts: {
   files: SessionFileEntry[];
   projectCwd: string;
   canonicalize: CanonicalizePath;
-  isProjectFile: (relPath: string, projectCwd: string) => boolean;
+  isProjectFile: (relPath: string, projectCwd: string) => boolean | Promise<boolean>;
   shouldStop?: () => boolean;
 }): Promise<SessionHit[]> {
   const needle = opts.query.trim().toLowerCase();
@@ -245,7 +245,7 @@ export async function searchSessionFiles(opts: {
             if (parsed) {
               const matchIdx = parsed.text.toLowerCase().indexOf(needle);
               if (matchIdx !== -1) {
-                const hitPath = resolveSessionHitPath(parsed, opts.projectCwd, opts.canonicalize, opts.isProjectFile);
+                const hitPath = await resolveSessionHitPath(parsed, opts.projectCwd, opts.canonicalize, opts.isProjectFile);
                 hits.push({
                   sessionFile: file.name,
                   line: lineNum,
