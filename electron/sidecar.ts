@@ -20,6 +20,7 @@ interface SidecarMeta {
 
 export type SidecarEvent =
   | (SidecarMeta & { t: "preflight_request"; requestId?: string; hasImages?: boolean })
+  | (SidecarMeta & { t: "preflight_cancel"; token?: string })
   | (SidecarMeta & { t: "prompt"; file?: string; hasPreflight?: boolean })
   | (SidecarMeta & { t: "steer_input"; behavior?: string })
   | (SidecarMeta & { t: "checkpoint_request"; requestId?: string; kind?: string; entryId?: string | null })
@@ -37,7 +38,7 @@ export type SidecarEvent =
       model?: string | null;
       thinkingLevel?: string | null;
     })
-  | (SidecarMeta & { t: "agent_settled" })
+  | (SidecarMeta & { t: "agent_settled"; error?: string | null })
   | (SidecarMeta & { t: "agent_settings"; model?: string | null; thinkingLevel?: string | null })
   | (SidecarMeta & { t: "plan"; text?: string })
   | (SidecarMeta & {
@@ -54,6 +55,7 @@ export type AgentStartEvent = Extract<SidecarEvent, { t: "agent_start" }>;
 
 const SIDECAR_KINDS = new Set<SidecarEvent["t"]>([
   "preflight_request",
+  "preflight_cancel",
   "prompt",
   "steer_input",
   "checkpoint_request",
@@ -104,6 +106,8 @@ function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>): Side
   switch (t) {
     case "preflight_request":
       return { ...meta, t: "preflight_request", requestId: optionalString(rec.requestId), hasImages: optionalBoolean(rec.hasImages) };
+    case "preflight_cancel":
+      return { ...meta, t: "preflight_cancel", token: optionalString(rec.token) };
     case "prompt":
       return { ...meta, t: "prompt", file: optionalString(rec.file), hasPreflight: optionalBoolean(rec.hasPreflight) };
     case "steer_input":
@@ -147,7 +151,7 @@ function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>): Side
         thinkingLevel: optionalStringOrNull(rec.thinkingLevel),
       };
     case "agent_settled":
-      return { ...meta, t: "agent_settled" };
+      return { ...meta, t: "agent_settled", error: optionalStringOrNull(rec.error) };
     case "agent_settings":
       return {
         ...meta,

@@ -9,7 +9,7 @@
  */
 import { execFile, spawn } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { chmod, cp, lstat as lstatPath, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { writeSandboxProfile, sandboxShellPreamble, type SandboxPaths } from "./sandbox.js";
@@ -18,7 +18,14 @@ import { captureRootInRepo, gitCommonDir, gitHead, gitTopLevel, platformHasCopyO
 import { EvidenceEngine, dependencyDiff, mineChangeReason, rankProfiles, type EvidenceDeps, type EvidenceRecord, type EvidenceSummary } from "./evidence.js";
 import type { SessionForkOpts, SessionForkResult } from "./session-fork.js";
 import type { DependencyChange, RunSummary, TimelineEvent, WorldlineChangedFile, WorldlineDetails } from "../shared/types.js";
-import { copySessionImageFiles, writeForkedSession } from "../agent-core/session.js";
+import {
+  coreSessionFile,
+  parseSessionBundlePath,
+  removeSessionBundle,
+  sessionBundleBytes,
+  sessionBundleHasContent,
+  writeForkedSession,
+} from "../agent-core/session.js";
 import { MAX_MCP_JSON_BYTES } from "../agent-core/mcp.js";
 import { thinkingStartupArgs } from "../shared/terminal-control.js";
 
@@ -236,7 +243,7 @@ export interface WorldlineDeps {
   } | null>;
   onEvidenceUpdate(summary: EvidenceSummary): void;
   onPromotionApply(relPaths: string[] | null): void;
-  primarySessionDir(cwd: string): string;
+  primarySessionDir(cwd: string, engine: "pi" | "core"): string;
   installPromoted(seed: PromoteSeed): Promise<{ terminalId: string }>;
 }
 
@@ -437,7 +444,10 @@ export class WorldlineManager {
     if (run.promptPayloadFile && run.promptEventsDir) {
       void rm(join(run.promptEventsDir, run.promptPayloadFile), { force: true }).catch(() => undefined);
     }
-    if (run.sessionBranchFile) void rm(run.sessionBranchFile, { force: true }).catch(() => undefined);
+    if (run.sessionBranchFile) {
+      if (runEngine(run) === "core") void removeSessionBundle(run.sessionBranchFile);
+      else void rm(run.sessionBranchFile, { force: true }).catch(() => undefined);
+    }
   }
 
   private clearRuns(): void {
@@ -625,10 +635,10 @@ export class WorldlineManager {
       // at the pre-task anchor (the original run's prompt parent).
       if (ncmp.engine === "core") {
         if (!cand.sessionFile) throw new Error("could not fork the reference session");
-        const destA = join(nA.sessionDir, "session.jsonl");
-        const destB = join(nB.sessionDir, "session.jsonl");
-        await writeFile(destA, await readFile(cand.sessionFile), { mode: 0o600 });
-        await copySessionImageFiles(cand.sessionFile, destA);
+        const destA = coreSessionFile(nA.sessionDir, "session");
+        const destB = coreSessionFile(nB.sessionDir, "session");
+        const forkA = await writeForkedSession(cand.sessionFile, destA);
+        if (!forkA.ok) throw new Error(`could not fork the reference session: ${forkA.error}`);
         const throughB = parseStorageSeq(run.promptParentEntryId) ?? 0;
         const sourceB = run.sessionBranchFile ?? run.sessionFile ?? cand.sessionFile;
         const forkB = await writeForkedSession(sourceB, destB, throughB);
@@ -737,11 +747,8 @@ export class WorldlineManager {
         }
         // Session activity beyond the fork: the session file has entries
         // past the initial control marker.
-        try {
-          if (cand.sessionFile && (await stat(cand.sessionFile)).size > 1024) active++;
-        } catch {
-          active++;
-        }
+        const bytes = cand.sessionFile ? sessionBundleBytes(cand.sessionFile) : null;
+        if (bytes === null || bytes > 1024) active++;
       }
     }
     return active;
@@ -998,7 +1005,7 @@ export class WorldlineManager {
       }
     }
     // Budgets (WORLDLINES §9): session and prompt payload caps.
-    if (run.sessionBranchFile) {
+    if (run.sessionBranchFile && runEngine(run) !== "core") {
       try {
         if ((await stat(run.sessionBranchFile)).size > MAX_SESSION_BYTES) {
           return { ok: false, error: "the session branch exceeds the 64 MB budget" };
@@ -1177,7 +1184,7 @@ export class WorldlineManager {
     await store.applyState({ stateId: run.settledStateId!, targetDir: a.dir, preserveTopLevel: RUNTIME_ALLOWLIST });
   }
 
-  /** Fork both sessions. Pi uses SessionManager; core slices JSONL. */
+  /** Fork both sessions. Pi uses SessionManager; core materializes bundles. */
   private async forkSessions(cmp: ComparisonState, run: RunRecord): Promise<void> {
     if (cmp.engine === "core") {
       await this.forkCoreSessions(cmp, run);
@@ -1214,8 +1221,8 @@ export class WorldlineManager {
     const source = run.sessionBranchFile!;
     const a = cmp.candidates.get("A")!;
     const b = cmp.candidates.get("B")!;
-    const destA = join(a.sessionDir, "session.jsonl");
-    const destB = join(b.sessionDir, "session.jsonl");
+    const destA = coreSessionFile(a.sessionDir, "session");
+    const destB = coreSessionFile(b.sessionDir, "session");
     const throughA = parseStorageSeq(run.settledEntryId);
     if (throughA === null || throughA < 1) throw new Error("the settled session address is missing");
     const throughB = parseStorageSeq(run.promptParentEntryId) ?? 0;
@@ -1393,15 +1400,6 @@ export class WorldlineManager {
     }
   }
 
-  private sessionHasContent(path: string | null): boolean {
-    if (!path) return false;
-    try {
-      return existsSync(path) && statSync(path).size > 0;
-    } catch {
-      return false;
-    }
-  }
-
   /** The sandboxed launch command for one candidate. */
   private candidateLaunch(
     cmp: ComparisonState,
@@ -1430,6 +1428,8 @@ export class WorldlineManager {
     };
     cand.profilePath = writeSandboxProfile(cand.supportDir, paths);
     if (core) {
+      const session = cand.sessionFile ? parseSessionBundlePath(cand.sessionFile) : null;
+      if (!session) throw new Error("the candidate session path is invalid");
       const model = cmp.model && cmp.model.includes("/") ? cmp.model : null;
       const cut = model ? model.indexOf("/") : -1;
       const env: Record<string, string | undefined> = {
@@ -1439,8 +1439,9 @@ export class WorldlineManager {
         TERMINA_EVENTS_DIR: cand.eventsDir,
         ELECTRON_RUN_AS_NODE: "1",
         TERMINA_CORE_SESSION_FILE: cand.sessionFile ?? undefined,
+        TERMINA_CORE_SESSION_ID: session.sessionId,
         TERMINA_CORE_APPROVE: "all",
-        ...(this.sessionHasContent(cand.sessionFile) ? { TERMINA_CORE_RESUME: "1" } : {}),
+        ...(sessionBundleHasContent(cand.sessionFile!) ? { TERMINA_CORE_RESUME: "1" } : {}),
         ...(model && cut > 0
           ? { TERMINA_CORE_PROVIDER: model.slice(0, cut), TERMINA_CORE_MODEL: model.slice(cut + 1) }
           : {}),
@@ -1756,6 +1757,8 @@ export class WorldlineManager {
     if (!baseState) return { ok: false, error: "the source run base is missing" };
     const candWs = this.deps.workspaceAt(target.root);
     const candGen = candWs?.generation ?? 0;
+    const comparison = this.comparisons.get(comparisonId);
+    const promoteEngine = comparison?.engine === "core" ? "core" : "pi";
 
     const opId = `promote-${randomUUID()}`;
     const requester = `promote:${opId}`;
@@ -1771,6 +1774,7 @@ export class WorldlineManager {
       paths: [],
       stagedSession: null,
       installedSession: null,
+      engine: promoteEngine,
     };
 
     const leaseP = await this.deps.acquireWriteLease(primary.id, requester, 12000);
@@ -1890,14 +1894,11 @@ export class WorldlineManager {
       journal.paths = paths;
 
       const sessionDir = join(journalDir, "session");
-      const comparison = this.comparisons.get(comparisonId);
-      const promoteEngine = comparison?.engine === "core" ? "core" : "pi";
       if (promoteEngine === "core") {
         if (!target.sessionFile) throw new Error("the candidate has no session");
-        mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
-        const staged = join(sessionDir, "session.jsonl");
-        await writeFile(staged, await readFile(target.sessionFile), { mode: 0o600 });
-        await copySessionImageFiles(target.sessionFile, staged);
+        const staged = coreSessionFile(sessionDir, "staged");
+        const fork = await writeForkedSession(target.sessionFile, staged);
+        if (!fork.ok) throw new Error(`could not stage the promoted session: ${fork.error}`);
         journal.stagedSession = staged;
       } else {
         const fork = await this.deps.forkSession({
@@ -1939,14 +1940,24 @@ export class WorldlineManager {
       journal.phase = "applied";
       writePromotionJournal(journalDir, journal);
 
-      const installDir = this.deps.primarySessionDir(this.deps.primaryRoot);
+      const installDir = this.deps.primarySessionDir(this.deps.primaryRoot, promoteEngine);
       await mkdir(installDir, { recursive: true });
-      const sessionName = `${new Date().toISOString().replace(/[:.]/g, "-")}_${randomUUID()}.jsonl`;
-      const installed = join(installDir, sessionName);
-      const tmp = join(installDir, `.${sessionName}.tmp`);
-      await writeFile(tmp, await readFile(String(journal.stagedSession)));
-      await rename(tmp, installed);
-      journal.installedSession = installed;
+      let installed: string;
+      if (promoteEngine === "core") {
+        installed = coreSessionFile(installDir, `core-${randomUUID()}`);
+        journal.installedSession = installed;
+        writePromotionJournal(journalDir, journal);
+        const fork = await writeForkedSession(String(journal.stagedSession), installed);
+        if (!fork.ok) throw new Error(`could not install the promoted session: ${fork.error}`);
+      } else {
+        const sessionName = `${new Date().toISOString().replace(/[:.]/g, "-")}_${randomUUID()}.jsonl`;
+        installed = join(installDir, sessionName);
+        const tmp = join(installDir, `.${sessionName}.tmp`);
+        journal.installedSession = installed;
+        writePromotionJournal(journalDir, journal);
+        await writeFile(tmp, await readFile(String(journal.stagedSession)));
+        await rename(tmp, installed);
+      }
       journal.phase = "done";
       writePromotionJournal(journalDir, journal);
 
@@ -1974,7 +1985,10 @@ export class WorldlineManager {
         return { ok: false, error: `the source was promoted, but the new session did not open: ${message}` };
       }
       await rollbackPromotion(journalDir, journal, this.deps.primaryRoot);
-      if (journal.installedSession) await rm(String(journal.installedSession), { force: true });
+      if (journal.installedSession) {
+        if (promoteEngine === "core") await removeSessionBundle(String(journal.installedSession));
+        else await rm(String(journal.installedSession), { force: true });
+      }
       releaseLeases();
       await this.finishPromotion(comparisonId, false, message);
       return { ok: false, error: message };
@@ -2091,7 +2105,7 @@ export class WorldlineManager {
       if (cmp.engine === "core") {
         const through = parseStorageSeq(opts.entryId);
         if (through === null) throw new Error("this moment has no session address");
-        const dest = join(cand.sessionDir, "session.jsonl");
+        const dest = coreSessionFile(cand.sessionDir, "session");
         const fork = await writeForkedSession(opts.sessionFile, dest, through);
         if (!fork.ok) throw new Error(`could not fork the moment session: ${fork.error}`);
         cand.sessionFile = dest;
@@ -2469,6 +2483,11 @@ export async function recoverPromotionJournals(worldsRoot: string): Promise<void
       }
     }
     if (!conflicted) {
+      const installedSession = typeof journal.installedSession === "string" ? journal.installedSession : null;
+      if (installedSession) {
+        if (journal.engine === "core") await removeSessionBundle(installedSession);
+        else await rm(installedSession, { force: true });
+      }
       await rm(dir, { recursive: true, force: true });
     } else {
       await writeFile(join(dir, "conflict.json"), JSON.stringify({ at: Date.now(), paths: paths.map((p) => p.rel) }));
