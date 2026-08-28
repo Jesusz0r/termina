@@ -1541,11 +1541,40 @@ const {
   hasStoredCredential,
   hasEnvCredential,
   firstAuthenticatedProvider,
+  canOpenBrowser,
+  browserOpenArgs,
+  zenWireProtocol,
 } = auth;
 const compat = await import("../agent-core/openai-compat.ts");
 const authFile = join(root, "auth.json");
 process.env.TERMINA_AUTH_PATH = authFile;
 resetAuthCache();
+
+check("canOpenBrowser is true on Windows", canOpenBrowser("win32", {}) === true);
+check("canOpenBrowser is false on Windows over SSH", canOpenBrowser("win32", { SSH_CONNECTION: "1" }) === false);
+check("canOpenBrowser is false on Linux without a display", canOpenBrowser("linux", {}) === false);
+check("canOpenBrowser is true on Linux with DISPLAY", canOpenBrowser("linux", { DISPLAY: ":0" }) === true);
+const winOpen = browserOpenArgs("https://example.com/auth", "win32");
+check(
+  "Windows browser open uses start without a shell",
+  winOpen?.cmd === "cmd" &&
+    winOpen.args[0] === "/c" &&
+    winOpen.args[1] === "start" &&
+    winOpen.args[2] === '""' &&
+    winOpen.args[3] === '"https://example.com/auth"' &&
+    winOpen.windowsHide === true &&
+    winOpen.windowsVerbatimArguments === true,
+);
+const winAmp = browserOpenArgs("https://example.com/auth?foo=1&bar=2", "win32");
+check(
+  "Windows browser open quotes a URL that contains &",
+  winAmp?.args[3] === '"https://example.com/auth?foo=1&bar=2"' && winAmp.windowsVerbatimArguments === true,
+);
+check("Windows browser open rejects a URL with a quote", browserOpenArgs('https://example.com/x"y', "win32") === null);
+check("macOS browser open uses open", browserOpenArgs("https://example.com/auth", "darwin")?.cmd === "open");
+check("Linux browser open uses xdg-open", browserOpenArgs("https://example.com/auth", "linux")?.cmd === "xdg-open");
+check("browser open rejects a non-https URL", browserOpenArgs("http://example.com/auth", "win32") === null);
+check("browser open rejects a file URL", browserOpenArgs("file:///tmp/x", "darwin") === null);
 
 check("pickHeaders oat uses bearer", pickHeaders("sk-ant-oat-secret").authorization === "Bearer sk-ant-oat-secret");
 check("pickHeaders oat sets betas", Boolean(pickHeaders("sk-ant-oat-secret")["anthropic-beta"]));
@@ -1737,6 +1766,14 @@ check(
   "DEFAULT_MODELS openrouter is gpt-5.6 terra/luna",
   DEFAULT_MODELS.openrouter.main === "openai/gpt-5.6-terra" && DEFAULT_MODELS.openrouter.summary === "openai/gpt-5.6-luna",
 );
+check(
+  "DEFAULT_MODELS opencode-go is glm-5.1",
+  DEFAULT_MODELS["opencode-go"].main === "glm-5.1" && DEFAULT_MODELS["opencode-go"].summary === "glm-5.1",
+);
+check(
+  "DEFAULT_MODELS opencode-zen is gpt-5.6 sol/luna",
+  DEFAULT_MODELS["opencode-zen"].main === "gpt-5.6-sol" && DEFAULT_MODELS["opencode-zen"].summary === "gpt-5.6-luna",
+);
 check("parseModelRef grok is xai", parseModelRef("grok-4.6").provider === "xai" && parseModelRef("grok-4.6").model === "grok-4.6");
 check(
   "parseModelRef openai-codex prefix",
@@ -1751,6 +1788,20 @@ check("providerProtocol openai is responses", providerProtocol("openai") === "op
 check("providerProtocol google is completions", providerProtocol("google") === "openai-completions");
 check("providerProtocol copilot is responses", providerProtocol("github-copilot") === "openai-responses");
 check("providerProtocol openai-codex is responses", providerProtocol("openai-codex") === "openai-codex-responses");
+check("providerProtocol opencode-go is completions", providerProtocol("opencode-go") === "openai-completions");
+check("zenWireProtocol claude is messages", zenWireProtocol("claude-sonnet-4-5") === "anthropic-messages");
+check("zenWireProtocol gpt is responses", zenWireProtocol("gpt-5.6-sol") === "openai-responses");
+check("zenWireProtocol glm is completions", zenWireProtocol("glm-5.1") === "openai-completions");
+check("zenWireProtocol prefixed gpt is responses", zenWireProtocol("openai/gpt-5.6-sol") === "openai-responses");
+check("zenWireProtocol prefixed claude is messages", zenWireProtocol("anthropic/claude-sonnet-4-5") === "anthropic-messages");
+check(
+  "providerProtocol opencode-zen follows the model",
+  providerProtocol("opencode-zen", "claude-opus-4-6") === "anthropic-messages" &&
+    providerProtocol("opencode-zen", "gpt-5.1-codex") === "openai-responses" &&
+    providerProtocol("opencode-zen", "kimi-k2.7-code") === "openai-completions",
+);
+check("defaultLoginMode opencode-go is key", defaultLoginMode("opencode-go") === "key");
+check("defaultLoginMode opencode-zen is key", defaultLoginMode("opencode-zen") === "key");
 check("parseAuthCommand /login xai is device", parseAuthCommand("/login xai").mode === "device" && parseAuthCommand("/login xai").provider === "xai");
 check("parseAuthCommand /login key openai", parseAuthCommand("/login key openai").mode === "key" && parseAuthCommand("/login key openai").provider === "openai");
 check("parseAuthCommand /login openai-codex", parseAuthCommand("/login openai-codex").provider === "openai-codex" && parseAuthCommand("/login openai-codex").mode === "browser");
@@ -1787,6 +1838,15 @@ check(
   "parseAuthCommand /login github-copilot is device",
   parseAuthCommand("/login github-copilot").mode === "device" && parseAuthCommand("/login github-copilot").provider === "github-copilot",
 );
+check(
+  "parseAuthCommand /login opencode-go is key",
+  parseAuthCommand("/login opencode-go").mode === "key" && parseAuthCommand("/login opencode-go").provider === "opencode-go",
+);
+check(
+  "parseAuthCommand /login opencode-zen is key",
+  parseAuthCommand("/login opencode-zen").mode === "key" && parseAuthCommand("/login opencode-zen").provider === "opencode-zen",
+);
+check("parseAuthCommand opencode-go oauth is rejected", "error" in parseAuthCommand("/login opencode-go oauth"));
 check(
   "validateCopilotApiUrl allows githubcopilot hosts",
   validateCopilotApiUrl("https://api.individual.githubcopilot.com/") === "https://api.individual.githubcopilot.com",
@@ -1845,6 +1905,45 @@ resetAuthCache();
 const googleStored = await resolveAuth("google");
 check("google key login stores api_key", keyLogin.ok === true && googleStored.ok && googleStored.token === "gemini-stored-key");
 runLogout("google");
+
+const goLogin = await runLogin("opencode-go", "key", {
+  write: () => {},
+  waitForCode: async () => "go-stored-key",
+});
+resetAuthCache();
+const goStored = await resolveAuth("opencode-go");
+check(
+  "opencode-go key login stores api_key",
+  goLogin.ok === true && goStored.ok && goStored.token === "go-stored-key" && goStored.baseUrl === "https://opencode.ai/zen/go/v1",
+);
+check(
+  "opencode-go headers send bearer and x-api-key",
+  goStored.ok &&
+    goStored.headers.authorization === "Bearer go-stored-key" &&
+    goStored.headers["x-api-key"] === "go-stored-key",
+);
+runLogout("opencode-go");
+
+const zenLogin = await runLogin("opencode-zen", "key", {
+  write: () => {},
+  waitForCode: async () => "zen-stored-key",
+});
+resetAuthCache();
+const zenStored = await resolveAuth("opencode-zen");
+check(
+  "opencode-zen key login stores api_key",
+  zenLogin.ok === true && zenStored.ok && zenStored.token === "zen-stored-key" && zenStored.baseUrl === "https://opencode.ai/zen/v1",
+);
+runLogout("opencode-zen");
+
+const prevGo = process.env.OPENCODE_GO_API_KEY;
+process.env.OPENCODE_GO_API_KEY = "env-go-key";
+resetAuthCache();
+const goEnv = await resolveAuth("opencode-go");
+check("OPENCODE_GO_API_KEY resolves", goEnv.ok && goEnv.token === "env-go-key" && goEnv.source === "env");
+if (prevGo === undefined) delete process.env.OPENCODE_GO_API_KEY;
+else process.env.OPENCODE_GO_API_KEY = prevGo;
+resetAuthCache();
 
 const mapped = compat.toCompletionsMessages("sys", [
   { role: "assistant", content: [{ type: "tool_use", id: "call-1", name: "bash", input: { command: "ls" } }] },
@@ -1991,6 +2090,8 @@ check("isChatModel keeps gpt-4o", isChatModel("gpt-4o", "openai") === true);
 check("isChatModel keeps gemini flash", isChatModel("gemini-2.5-flash", "google") === true);
 check("isChatModel grok on xai", isChatModel("grok-4.3", "xai") === true);
 check("isChatModel grok-image dropped", isChatModel("grok-2-image", "xai") === false);
+check("isChatModel opencode keeps big-pickle", isChatModel("big-pickle", "opencode-zen") === true);
+check("isChatModel opencode drops embeddings", isChatModel("text-embedding-3-small", "opencode-go") === false);
 
 const openaiList = parseModelsPayload(
   { data: [{ id: "gpt-5" }, { id: "text-embedding-3-small" }, { id: "gpt-4.1-mini" }] },
@@ -2355,20 +2456,47 @@ const manyMcpTools = Array.from({ length: 20 }, (_, i) => ({
 }));
 check("MCP tool schemas have one total budget", mcp.selectMcpTools(manyMcpTools).length < manyMcpTools.length);
 check(
-  "parseMcpConfig skips http and disabled servers",
+  "parseMcpConfig skips disabled servers",
   mcp.parseMcpConfig({
     mcpServers: {
       gh: { command: "npx", args: ["-y", "x"] },
-      web: { type: "http", url: "https://example.com" },
       off: { command: "npx", disabled: true },
     },
   }).map((s) => s.name).join(",") === "gh",
 );
 check(
-  "parseMcpConfig keeps stdio when a url field is present",
+  "parseMcpConfig keeps https MCP servers",
   mcp.parseMcpConfig({
-    mcpServers: { gh: { command: "npx", args: ["-y", "x"], url: "https://github.com" } },
-  }).map((s) => s.name).join(",") === "gh",
+    mcpServers: { web: { type: "http", url: "https://example.com/mcp" } },
+  }).map((s) => s.name).join(",") === "web",
+);
+check(
+  "parseMcpConfig prefers a URL over a command",
+  mcp.parseMcpConfig({
+    mcpServers: { gh: { command: "npx", args: ["-y", "x"], url: "https://github.com/mcp" } },
+  })[0]?.url === "https://github.com/mcp" &&
+    mcp.parseMcpConfig({
+      mcpServers: { gh: { command: "npx", args: ["-y", "x"], url: "https://github.com/mcp" } },
+    })[0]?.command === undefined,
+);
+check("mcpHttpUrlError rejects http", mcp.mcpHttpUrlError("http://example.com/mcp")?.includes("https"));
+check("mcpHttpUrlError rejects file", mcp.mcpHttpUrlError("file:///tmp/x")?.includes("scheme"));
+check("mcpHttpUrlError allows https", mcp.mcpHttpUrlError("https://example.com/mcp") === null);
+check("parseMcpConfig drops a non-https MCP URL", mcp.parseMcpConfig({ mcpServers: { web: { type: "http", url: "http://example.com" } } }).length === 0);
+const httpHdrs = mcp.parseMcpConfig({
+  mcpServers: {
+    web: {
+      url: "https://example.com/mcp",
+      headers: { Authorization: "Bearer x", "mcp-session-id": "evil", "mcp-protocol-version": "0", Accept: "text/plain" },
+    },
+  },
+})[0]?.headers ?? {};
+check(
+  "parseMcpConfig skips hop-by-hop and session MCP headers",
+  httpHdrs.Authorization === "Bearer x" &&
+    httpHdrs["mcp-session-id"] === undefined &&
+    httpHdrs["mcp-protocol-version"] === undefined &&
+    httpHdrs.Accept === undefined,
 );
 check("jailMcpCwd rejects a parent path", mcp.jailMcpCwd("/proj", "..") === null);
 check("jailMcpCwd allows a subdir", mcp.jailMcpCwd("/proj", "tools") === join("/proj", "tools"));
@@ -2484,6 +2612,111 @@ const deadMcp = await mcp.startMcp(
 );
 check("mcp spawn failure does not throw", deadMcp.tools.length === 0 && deadMcp.notes.some((n) => n.includes("gone")));
 deadMcp.shutdown();
+
+const httpStub = createServer((req, res) => {
+  const chunks = [];
+  req.on("data", (c) => chunks.push(c));
+  req.on("end", () => {
+    let msg = {};
+    try {
+      msg = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    } catch {
+      res.statusCode = 400;
+      res.end("{}");
+      return;
+    }
+    res.setHeader("mcp-session-id", "sess-1");
+    const path = String(req.url ?? "");
+    if (path.includes("hang") && msg.method === "tools/call") return;
+    const sse = path.includes("sse");
+    const body =
+      msg.method === "initialize"
+        ? { jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "http-echo" } } }
+        : msg.method === "tools/list"
+          ? { jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "echo", description: "echo text", inputSchema: { type: "object", properties: { text: { type: "string" } } } }] } }
+          : msg.method === "tools/call"
+            ? { jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: String(msg.params?.arguments?.text ?? "") }] } }
+            : { jsonrpc: "2.0", id: msg.id, result: {} };
+    if (sse) {
+      res.setHeader("content-type", "text/event-stream");
+      res.end(`event: message\r\ndata: ${JSON.stringify(body)}\r\n\r\n`);
+      return;
+    }
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify(body));
+  });
+});
+await new Promise((resolve) => httpStub.listen(0, "127.0.0.1", resolve));
+const httpPort = httpStub.address().port;
+const httpMcp = await mcp.startMcp(
+  [{ name: "httpecho", url: `http://127.0.0.1:${httpPort}/mcp`, args: [], env: {} }],
+  { projectRoot: mcpDir, confineCwd: (cwd) => mcp.jailMcpCwd(mcpDir, cwd) },
+);
+check("http mcp handshake lists the echo tool", httpMcp.tools[0]?.name === "mcp_httpecho_echo" && httpMcp.notes.length === 0);
+const httpEchoed = await httpMcp.call("mcp_httpecho_echo", { text: "hello-http" });
+check("http mcp tools/call round-trips", httpEchoed.isError === false && httpEchoed.content === "hello-http");
+httpMcp.shutdown();
+const sseMcp = await mcp.startMcp(
+  [{ name: "sssecho", url: `http://127.0.0.1:${httpPort}/sse`, args: [], env: {} }],
+  { projectRoot: mcpDir, confineCwd: (cwd) => mcp.jailMcpCwd(mcpDir, cwd) },
+);
+const sseEchoed = await sseMcp.call("mcp_sssecho_echo", { text: "hello-sse" });
+check("sse mcp tools/call round-trips", sseEchoed.isError === false && sseEchoed.content === "hello-sse");
+sseMcp.shutdown();
+const hangHttpMcp = await mcp.startMcp(
+  [{ name: "httphang", url: `http://127.0.0.1:${httpPort}/hang`, args: [], env: {} }],
+  { projectRoot: mcpDir, confineCwd: (cwd) => mcp.jailMcpCwd(mcpDir, cwd) },
+);
+const tHttpHang = Date.now();
+const httpInterrupted = await hangHttpMcp.call("mcp_httphang_echo", { text: "x" }, { shouldStop: () => true });
+check(
+  "http mcp interrupt returns quickly",
+  Date.now() - tHttpHang < 2000 && httpInterrupted.isError === true && httpInterrupted.content.includes("interrupted"),
+);
+hangHttpMcp.shutdown();
+const blockedHttp = await mcp.startMcp(
+  [{ name: "evilhttp", url: "http://example.com/mcp", args: [], env: {} }],
+  { projectRoot: mcpDir, confineCwd: (cwd) => mcp.jailMcpCwd(mcpDir, cwd) },
+);
+check(
+  "http mcp rejects non-loopback http at start",
+  blockedHttp.tools.length === 0 && blockedHttp.notes.some((n) => n.includes("https")),
+);
+blockedHttp.shutdown();
+const redirStub = createServer((req, res) => {
+  res.statusCode = 302;
+  res.setHeader("location", "http://127.0.0.1/steal");
+  res.end("moved");
+});
+await new Promise((resolve) => redirStub.listen(0, "127.0.0.1", resolve));
+const redirPort = redirStub.address().port;
+const redirMcp = await mcp.startMcp(
+  [{ name: "redir", url: `http://127.0.0.1:${redirPort}/mcp`, args: [], env: {} }],
+  { projectRoot: mcpDir, confineCwd: (cwd) => mcp.jailMcpCwd(mcpDir, cwd) },
+);
+check(
+  "http mcp does not follow redirects",
+  redirMcp.tools.length === 0 && redirMcp.notes.some((n) => n.includes("HTTP 302")),
+);
+redirMcp.shutdown();
+redirStub.close();
+const hugeStub = createServer((req, res) => {
+  res.setHeader("content-type", "application/json");
+  res.end(`${"x".repeat(300 * 1024)}`);
+});
+await new Promise((resolve) => hugeStub.listen(0, "127.0.0.1", resolve));
+const hugePort = hugeStub.address().port;
+const hugeMcp = await mcp.startMcp(
+  [{ name: "huge", url: `http://127.0.0.1:${hugePort}/mcp`, args: [], env: {} }],
+  { projectRoot: mcpDir, confineCwd: (cwd) => mcp.jailMcpCwd(mcpDir, cwd) },
+);
+check(
+  "http mcp caps the response body",
+  hugeMcp.tools.length === 0 && hugeMcp.notes.some((n) => n.includes("too large")),
+);
+hugeMcp.shutdown();
+hugeStub.close();
+httpStub.close();
 writeFileSync(join(mcpDir, "bad.json"), "{not json");
 check("invalid mcp json loads as no servers", mcp.parseMcpConfig(null).length === 0 && mcp.loadMcpConfigs(join(mcpDir, "bad.json")).length === 0);
 
@@ -2959,6 +3192,10 @@ check(
 check(
   "slash /login gemini is Google Gemini (key)",
   matchingSlashCommands("/login gemini").map((c) => c.name).join(" ") === "Google Gemini (key)",
+);
+check(
+  "slash /login opencode lists Go and Zen keys",
+  matchingSlashCommands("/login opencode").map((c) => c.name).join(" ") === "OpenCode Go (key) OpenCode Zen (key)",
 );
 check("slash Tab /login completes to /login ", completeSlashLine("/login") === "/login ");
 check(

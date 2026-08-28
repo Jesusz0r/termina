@@ -1,5 +1,9 @@
 # Agent Core Session Storage Plan
 
+Status: implemented in `agent-core/session.ts`, `agent-core/main.ts`,
+`electron/main.ts`, `electron/session-search.ts`, and `electron/worldlines.ts`.
+Focused tests live in `scripts/agent-core-session-test.mjs`.
+
 ## Goal
 
 Replace the single append-only agent-core session file with a segmented

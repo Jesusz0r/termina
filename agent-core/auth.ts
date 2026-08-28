@@ -34,6 +34,8 @@ export const SUPPORTED_PROVIDERS = [
   "xai",
   "google",
   "openrouter",
+  "opencode-go",
+  "opencode-zen",
 ] as const;
 export type ProviderId = (typeof SUPPORTED_PROVIDERS)[number];
 export type ProviderProtocol =
@@ -108,6 +110,8 @@ export const AUTH_PROVIDER_ORDER: ProviderId[] = [
   "xai",
   "google",
   "openrouter",
+  "opencode-go",
+  "opencode-zen",
 ];
 
 export type LoginKind = "oauth" | "key";
@@ -132,6 +136,8 @@ export const LOGIN_METHODS: {
   { group: "openrouter", id: "openrouter", kind: "oauth", mode: "browser", name: "OpenRouter", hint: "sign-in mints an API key" },
   { group: "openrouter", id: "openrouter", kind: "key", mode: "key", name: "OpenRouter", hint: "API key" },
   { group: "google", id: "google", kind: "key", mode: "key", name: "Google Gemini", hint: "API key" },
+  { group: "opencode-go", id: "opencode-go", kind: "key", mode: "key", name: "OpenCode Go", hint: "subscription API key" },
+  { group: "opencode-zen", id: "opencode-zen", kind: "key", mode: "key", name: "OpenCode Zen", hint: "pay-as-you-go API key" },
 ];
 
 /** OAuth rows use the provider name. API-key rows add (key). */
@@ -196,21 +202,33 @@ export function resolveLoginPick(
   return { provider: picked.id, mode: picked.mode };
 }
 
-export function providerProtocol(id: ProviderId): ProviderProtocol {
+/** OpenCode Zen picks an existing kernel protocol from the model id. */
+export function zenWireProtocol(model: string): ProviderProtocol {
+  const n = model.toLowerCase();
+  const leaf = n.includes("/") ? n.slice(n.lastIndexOf("/") + 1) : n;
+  if (leaf.includes("claude") || n.includes("claude")) return "anthropic-messages";
+  if (/^(gpt-|o[0-9]|chatgpt)/.test(leaf) || leaf.includes("codex") || n.includes("codex")) {
+    return "openai-responses";
+  }
+  return "openai-completions";
+}
+
+export function providerProtocol(id: ProviderId, model = ""): ProviderProtocol {
   if (id === "anthropic") return "anthropic-messages";
   if (id === "openai-codex") return "openai-codex-responses";
-  if (id === "google") return "openai-completions";
+  if (id === "google" || id === "opencode-go") return "openai-completions";
+  if (id === "opencode-zen") return zenWireProtocol(model);
   return "openai-responses";
 }
 
-export function usesResponsesApi(id: ProviderId): boolean {
-  const proto = providerProtocol(id);
+export function usesResponsesApi(id: ProviderId, model = ""): boolean {
+  const proto = providerProtocol(id, model);
   return proto === "openai-codex-responses" || proto === "openai-responses";
 }
 
 export function defaultLoginMode(id: ProviderId): LoginMode {
   if (id === "xai" || id === "github-copilot") return "device";
-  if (id === "openai" || id === "google") return "key";
+  if (id === "openai" || id === "google" || id === "opencode-go" || id === "opencode-zen") return "key";
   return "browser";
 }
 
@@ -339,6 +357,10 @@ export function requestHeaders(
     headers["editor-plugin-version"] = COPILOT_HEADERS["editor-plugin-version"];
     headers["copilot-integration-id"] = COPILOT_HEADERS["copilot-integration-id"];
     headers["user-agent"] = COPILOT_HEADERS["user-agent"];
+  }
+  if (providerId === "opencode-go" || providerId === "opencode-zen") {
+    headers["x-api-key"] = token;
+    headers["anthropic-version"] = "2023-06-01";
   }
   return headers;
 }
@@ -544,6 +566,8 @@ const DEFAULT_BASE: Record<ProviderId, string> = {
   xai: "https://api.x.ai/v1",
   google: "https://generativelanguage.googleapis.com/v1beta/openai",
   openrouter: "https://openrouter.ai/api/v1",
+  "opencode-go": "https://opencode.ai/zen/go/v1",
+  "opencode-zen": "https://opencode.ai/zen/v1",
 };
 
 const BASE_ENV: Partial<Record<ProviderId, string>> = {
@@ -561,6 +585,8 @@ const ENV_KEYS: Record<ProviderId, string[]> = {
   xai: ["XAI_API_KEY"],
   google: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
   openrouter: ["OPENROUTER_API_KEY"],
+  "opencode-go": ["OPENCODE_GO_API_KEY"],
+  "opencode-zen": ["OPENCODE_API_KEY"],
 };
 
 export const DEFAULT_MODELS: Record<ProviderId, { main: string; summary: string }> = {
@@ -571,6 +597,8 @@ export const DEFAULT_MODELS: Record<ProviderId, { main: string; summary: string 
   xai: { main: "grok-4.6", summary: "grok-4.6" },
   google: { main: "gemini-3.7-flash", summary: "gemini-3.5-flash-lite" },
   openrouter: { main: "openai/gpt-5.6-terra", summary: "openai/gpt-5.6-luna" },
+  "opencode-go": { main: "glm-5.1", summary: "glm-5.1" },
+  "opencode-zen": { main: "gpt-5.6-sol", summary: "gpt-5.6-luna" },
 };
 
 export function parseModelRef(
@@ -1061,19 +1089,55 @@ function waitForCallback(
   });
 }
 
-export function canOpenBrowser(): boolean {
-  if (process.platform === "darwin") return true;
-  if (process.platform === "linux") {
-    if (process.env.SSH_CONNECTION) return false;
-    return Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+export function canOpenBrowser(
+  platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (platform === "darwin") return true;
+  if (platform === "win32") return !env.SSH_CONNECTION;
+  if (platform === "linux") {
+    if (env.SSH_CONNECTION) return false;
+    return Boolean(env.DISPLAY || env.WAYLAND_DISPLAY);
   }
   return false;
 }
 
+/** Spawn argv for the platform browser. HTTPS URLs only. */
+export function browserOpenArgs(
+  url: string,
+  platform = process.platform,
+): {
+  cmd: string;
+  args: string[];
+  windowsHide?: boolean;
+  windowsVerbatimArguments?: boolean;
+} | null {
+  if (!/^https:\/\//i.test(url) || /[\0\r\n"]/.test(url)) return null;
+  if (platform === "darwin") return { cmd: "open", args: [url] };
+  if (platform === "linux") return { cmd: "xdg-open", args: [url] };
+  if (platform === "win32") {
+    // cmd /c start treats & as a command break. Quote the URL and pass
+    // the command line as-is so Node does not re-quote the quotes.
+    return {
+      cmd: "cmd",
+      args: ["/c", "start", '""', `"${url}"`],
+      windowsHide: true,
+      windowsVerbatimArguments: true,
+    };
+  }
+  return null;
+}
+
 function openBrowser(url: string): void {
-  const cmd = process.platform === "darwin" ? "open" : "xdg-open";
+  const spec = browserOpenArgs(url);
+  if (!spec) return;
   try {
-    spawn(cmd, [url], { stdio: "ignore", detached: true }).unref();
+    spawn(spec.cmd, spec.args, {
+      stdio: "ignore",
+      detached: true,
+      windowsHide: spec.windowsHide === true,
+      windowsVerbatimArguments: spec.windowsVerbatimArguments === true,
+    }).unref();
   } catch {
     /* ignore */
   }

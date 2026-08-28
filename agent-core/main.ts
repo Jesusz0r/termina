@@ -3254,10 +3254,13 @@ interface CallResult {
 
 let currentAbort: AbortController | null = null;
 
-function endpointFor(auth: { providerId: ProviderId; baseUrl: string }): string {
+function endpointFor(auth: { providerId: ProviderId; baseUrl: string }, model = ""): string {
   const base = auth.baseUrl.replace(/\/$/, "");
-  const proto = providerProtocol(auth.providerId);
-  if (proto === "anthropic-messages") return `${base}/v1/messages`;
+  const proto = providerProtocol(auth.providerId, model);
+  if (proto === "anthropic-messages") {
+    if (base.endsWith("/v1")) return `${base}/messages`;
+    return `${base}/v1/messages`;
+  }
   if (proto === "openai-codex-responses") {
     if (base.endsWith("/codex/responses")) return base;
     if (base.endsWith("/codex")) return `${base}/responses`;
@@ -3270,7 +3273,12 @@ function endpointFor(auth: { providerId: ProviderId; baseUrl: string }): string 
   return `${base}/chat/completions`;
 }
 
-async function providerPost(providerId: ProviderId, body: unknown, signal: AbortSignal | undefined): Promise<Response> {
+async function providerPost(
+  providerId: ProviderId,
+  body: unknown,
+  signal: AbortSignal | undefined,
+  model = "",
+): Promise<Response> {
   let replayed = false;
   let retries = 0;
   for (;;) {
@@ -3281,7 +3289,7 @@ async function providerPost(providerId: ProviderId, body: unknown, signal: Abort
     if (body && typeof body === "object" && (body as { stream?: unknown }).stream === true) {
       headers.accept = "text/event-stream";
     }
-    const res = await fetch(endpointFor(auth), {
+    const res = await fetch(endpointFor(auth, model), {
       method: "POST",
       headers,
       body: JSON.stringify(body),
@@ -3327,7 +3335,7 @@ async function completeText(
   prompt: string,
   signal: AbortSignal | undefined,
 ): Promise<{ text: string; usage: Usage | null }> {
-  const proto = providerProtocol(providerId);
+  const proto = providerProtocol(providerId, model);
   if (proto === "anthropic-messages") {
     const thinking = thinkingRequestFor(providerId, model, "off");
     const res = await providerPost(
@@ -3340,13 +3348,14 @@ async function completeText(
         ...(thinking ? { thinking } : {}),
       },
       signal,
+      model,
     );
     if (!res.ok) throw new Error(`API ${res.status}`);
     const data = (await res.json()) as { usage?: Record<string, number>; content?: Array<{ type: string; text?: string }> };
     const text = (data.content ?? []).map((c) => c.text ?? "").join("").trim();
     return { text, usage: normalizeUsage(data.usage) };
   }
-  if (usesResponsesApi(providerId)) {
+  if (usesResponsesApi(providerId, model)) {
     const effort = reasoningEffortFor(providerId, model, "off");
     const res = await providerPost(
       providerId,
@@ -3360,6 +3369,7 @@ async function completeText(
         ...(effort ? { reasoning: { effort } } : {}),
       },
       signal,
+      model,
     );
     if (!res.ok) throw new Error(`API ${res.status}`);
     const got = textFromResponsesPayload(await res.json());
@@ -3377,6 +3387,7 @@ async function completeText(
       ],
     },
     signal,
+    model,
   );
   if (!res.ok) throw new Error(`API ${res.status}`);
   const got = textFromCompletionPayload(await res.json());
@@ -3388,7 +3399,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
   const started = Date.now();
   const sys = systemPrompt();
   const prefix = buildCachedPrefix(sys, clientTools);
-  const proto = providerProtocol(route.provider);
+  const proto = providerProtocol(route.provider, route.model);
   const imageRoots = [sessionFile ? dirname(sessionFile) : "", eventsDir].filter(Boolean);
   const requestMessages = toRequest(messages, imageRoots);
   const overlay = formatOverlay({ messages, hostContext: hostContextSnapshot });
@@ -3435,7 +3446,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
           tools: requestTools(prefix.tools, route.provider, route.model),
           messages: anthropicMessages,
         }
-      : usesResponsesApi(route.provider)
+      : usesResponsesApi(route.provider, route.model)
         ? responsesBody(route.model, sys, kernelMessages, toolsForProvider, {
             ...(route.provider === "openai-codex" ? {} : { maxTokens }),
             ...(sendCacheKey ? { cacheKey } : {}),
@@ -3449,7 +3460,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
               ? { reasoningEffort, googleThinking: true }
               : {}),
           });
-  const res = await providerPost(route.provider, body, currentAbort?.signal);
+  const res = await providerPost(route.provider, body, currentAbort?.signal, route.model);
   if (!res.ok || !res.body) {
     const detail = (await res.text()).slice(0, 300);
     const hint =
@@ -3462,7 +3473,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
   if (proto !== "anthropic-messages") {
     let streamedText = "";
     let ttftMs: number | null = null;
-    const viaResponses = usesResponsesApi(route.provider);
+    const viaResponses = usesResponsesApi(route.provider, route.model);
     const events = await readSseJson(res.body, currentAbort?.signal, (event) => {
       let chunk = "";
       let keepEvent = false;

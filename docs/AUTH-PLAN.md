@@ -39,7 +39,8 @@ Root shape (unknown keys are preserved):
   "openai": { "type": "api_key", "key": "…" },
   "openai-codex": { "type": "oauth", "access": "…", "refresh": "…", "expires": 0, "accountId": "…" },
   "google": { "type": "api_key", "key": "…" },
-  "openrouter": { "type": "api_key", "key": "…" }
+  "openrouter": { "type": "api_key", "key": "…" },
+  "github-copilot": { "type": "oauth", "access": "…", "refresh": "…", "expires": 0, "apiUrl": "…" }
 }
 ```
 
@@ -56,11 +57,19 @@ A corrupt file is never overwritten.
 | `github-copilot` | GitHub device code, then Copilot session token | none | Chat Completions | token `endpoints.api` or `https://api.individual.githubcopilot.com` |
 | `google` | paste key | `GEMINI_API_KEY`, then `GOOGLE_API_KEY` | Chat Completions (OpenAI-compat) | `https://generativelanguage.googleapis.com/v1beta/openai` |
 | `openrouter` | PKCE-minted key, or `/login key openrouter` | `OPENROUTER_API_KEY` | Chat Completions | `OPENROUTER_BASE_URL` or `https://openrouter.ai/api/v1` |
+| `opencode-go` | paste key | `OPENCODE_GO_API_KEY` | Chat Completions | `https://opencode.ai/zen/go/v1` |
+| `opencode-zen` | paste key | `OPENCODE_API_KEY` | Completions, Anthropic Messages, or OpenAI Responses by model | `https://opencode.ai/zen/v1` |
 
 `/login` opens a TUI picker. OAuth is the provider name (`OpenAI`); API
 key is `OpenAI (key)`. Both exist when the provider supports both.
 `/login openai oauth` stores ChatGPT Codex; `/login openai key` stores
-an OpenAI API key. Google is API key only.
+an OpenAI API key. Google, OpenCode Go, and OpenCode Zen are API key
+only. GitHub Copilot is device code (or a pasted GitHub token).
+
+OpenCode Zen routes `claude*` to Anthropic Messages (`/messages`),
+`gpt-*` / Codex ids to OpenAI Responses (`/responses`), and other ids to
+Chat Completions. One function (`zenWireProtocol`) owns that map. Do not
+add an OpenCode package. Do not read `~/.local/share/opencode/auth.json`.
 Radius, Bedrock, and Azure stay out of this engine.
 
 **Resolution order** (first hit wins, per provider):
@@ -85,8 +94,8 @@ on demand. The kernel does not use a baked-in catalog as the source of truth.
 when set; a live id that only adds a date suffix may replace the pin
 (`claude-sonnet-5` → a dated snapshot when the live list has one). If the env does
 not pin a provider, startup picks the first **stored** credential in
-`anthropic`, `openai-codex`, `openai`, `xai`, `google`, `openrouter`
-order, then ambient env. A leftover `ANTHROPIC_API_KEY` does not hide a
+`anthropic`, `openai-codex`, `github-copilot`, `openai`, `xai`, `google`,
+`openrouter`, `opencode-go`, `opencode-zen` order, then ambient env. A leftover `ANTHROPIC_API_KEY` does not hide a
 stored xAI or ChatGPT login. The GET has a 10 s timeout and a failed
 fetch does not invent a fake list.
 
@@ -212,7 +221,9 @@ not get a second search implementation.
 - `/login key [provider]`: paste an API key onto the next line.
 - `/login xai`: device code. Prints the verification URL and user code,
   then polls. `/login key xai` stores `XAI_API_KEY`.
-- Windows browser-open is out of scope (macOS-first).
+- Windows browser-open uses `cmd /c start "" <https-url>` without a
+  shell. SSH sessions and non-https URLs do not spawn a browser.
+  `/login code` still works without a browser.
 - xAI `verification_uri` must be https, except when tests override the
   device URL.
 
@@ -270,9 +281,11 @@ at a temp file. No network to real providers.
 
 ## Out of scope
 
-- GitHub Copilot, Radius, Bedrock, Azure, and every other catalog id
-- A settings UI (slash commands while the engine is experimental)
-- Windows `open`
+- Radius, Bedrock, Azure, and every other unnamed catalog id
+- A settings UI for login (`/login` in the TUI is the only path)
 - Reading or writing Pi credential files
 - Syncing login between Pi tabs and Agent (core) tabs
 - A second web_search implementation for Completions providers
+- Importing OpenCode's `auth.json` or any other product store
+
+

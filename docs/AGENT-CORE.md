@@ -21,8 +21,9 @@ then `<cwd>/.agents/skills` (no ancestor walk). Truncated instructions
 are overflow-recoverable. The kernel does not call the snapshot store.
 `termina-core` stays the snapshot/Git owner. Credentials live in
 `~/.termina/agent/auth.json` (`/login`, `/logout`). Providers: Anthropic,
-OpenAI, ChatGPT Codex OAuth, xAI, Google, OpenRouter. The implementation plan is
-`docs/AGENT-CORE-PLAN.md`. The remaining segmented-session work is in
+OpenAI, ChatGPT Codex OAuth, GitHub Copilot, xAI, Google, OpenRouter,
+OpenCode Go, OpenCode Zen. The implementation plan is `docs/AGENT-CORE-PLAN.md`.
+Segmented session bundles are implemented; the record is
 `docs/AGENT-CORE-SESSION-STORAGE-PLAN.md`. Auth details: `docs/AUTH-PLAN.md`.
 
 ## Why this document exists
@@ -213,7 +214,8 @@ API key is `OpenAI (key)`. OpenAI OAuth is the ChatGPT Codex subscription;
 OpenAI key is the platform API. `/login [provider] [oauth|key]` and
 `/logout [provider]` still run when typed in full. Supported ids:
 `anthropic`, `openai-codex`, `github-copilot`, `xai`, `openrouter`,
-`openai`, `google`.
+`openai`, `google`, `opencode-go`, `opencode-zen`. OpenCode Go and Zen
+are paste-key logins (`/login key opencode-go`, `/login key opencode-zen`).
 
 Agent-core stores credentials in `~/.termina/agent/auth.json` (mode 0600).
 A stored credential wins over that provider's env key. OAuth tokens refresh
@@ -260,4 +262,7 @@ MCP is a stdio client, not a plugin surface. Servers come from the user-owned
 `~/.termina/agent/mcp.json`. The kernel does not execute project-owned MCP
 configuration. It spawns user servers at process start, lists tools once,
 prefixes names `mcp_<server>_<tool>`, and freezes that list in zone 1.
-`/clear` reconnects. HTTP/SSE MCP is out of scope.
+`/clear` reconnects. The same client also speaks Streamable HTTP and SSE
+when `mcp.json` lists a `url` (`type: "http"` or `"sse"`, https only).
+A marketplace, hot-reload, MCP OAuth, and project-owned MCP config stay
+out.

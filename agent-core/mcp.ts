@@ -1,7 +1,7 @@
 /**
- * Kernel-sized MCP stdio client.
+ * Kernel-sized MCP client (stdio or HTTP).
  *
- * The user config lists servers. This module spawns them, lists tools once,
+ * The user config lists servers. This module connects, lists tools once,
  * and calls them. It is not a plugin loader. Tool schemas freeze at
  * connect; a new session reconnects.
  */
@@ -17,6 +17,7 @@ export const MCP_HANDSHAKE_MS = 10_000;
 export const MCP_CALL_MS = 60_000;
 export const MCP_RESULT_BYTES = 20 * 1024;
 export const MCP_PROTOCOL = "2024-11-05";
+const MCP_HTTP_BODY_BYTES = 256 * 1024;
 
 export const KERNEL_TOOL_NAMES = new Set([
   "read_file",
@@ -34,10 +35,12 @@ const TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 
 export type McpServerConfig = {
   name: string;
-  command: string;
+  command?: string;
   args: string[];
   env: Record<string, string>;
   cwd?: string;
+  url?: string;
+  headers?: Record<string, string>;
 };
 
 export type McpClientTool = {
@@ -83,16 +86,60 @@ export function mcpToolName(server: string, tool: string): string {
 }
 
 const SCHEMA_CAP = 8 * 1024;
+const HEADER_SKIP = new Set([
+  "host",
+  "content-length",
+  "transfer-encoding",
+  "connection",
+  "content-type",
+  "accept",
+  "mcp-session-id",
+  "mcp-protocol-version",
+]);
+
+function parseStringMap(raw: unknown, maxKeys: number): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof k !== "string" || !k || k.length > 128) continue;
+    if (typeof v !== "string" || v.length > 4096) continue;
+    out[k] = v;
+    if (Object.keys(out).length >= maxKeys) break;
+  }
+  return out;
+}
+
+function parseHeaderMap(raw: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(parseStringMap(raw, 32))) {
+    const name = k.toLowerCase();
+    if (HEADER_SKIP.has(name) || /[\0\n\r]/.test(k) || /[\0\n\r]/.test(v)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+export function mcpHttpUrlError(url: string): string | null {
+  if (!url || url.length > 2048) return "error: invalid URL";
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return "error: invalid URL";
+  }
+  if (parsed.protocol === "https:") return null;
+  const loopback =
+    parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "::1";
+  if (parsed.protocol === "http:" && loopback && process.env.TERMINA_CORE_TEST === "1") return null;
+  if (parsed.protocol === "http:") return "error: only https URLs are allowed";
+  return `error: URL scheme not allowed: ${parsed.protocol}`;
+}
 
 function parseOneServer(name: string, rec: unknown): McpServerConfig | "disabled" | null {
   if (!name || name.length > 64) return null;
   if (!rec || typeof rec !== "object" || Array.isArray(rec)) return null;
   const obj = rec as Record<string, unknown>;
   if (obj.disabled === true) return "disabled";
-  if (obj.type === "http" || obj.type === "sse") return null;
-  if (typeof obj.url === "string" && typeof obj.command !== "string") return null;
-  if (typeof obj.command !== "string" || !obj.command.trim() || obj.command.length > 512) return null;
-  if (/[\0\n]/.test(obj.command)) return null;
   const args: string[] = [];
   if (Array.isArray(obj.args)) {
     for (const a of obj.args) {
@@ -101,19 +148,19 @@ function parseOneServer(name: string, rec: unknown): McpServerConfig | "disabled
       if (args.length >= 32) break;
     }
   }
-  const env: Record<string, string> = {};
-  if (obj.env && typeof obj.env === "object" && !Array.isArray(obj.env)) {
-    for (const [k, v] of Object.entries(obj.env as Record<string, unknown>)) {
-      if (typeof k !== "string" || !k || k.length > 128) continue;
-      if (typeof v !== "string" || v.length > 4096) continue;
-      env[k] = v;
-      if (Object.keys(env).length >= 32) break;
-    }
-  }
+  const env = parseStringMap(obj.env, 32);
   let cwd: string | undefined;
   if (typeof obj.cwd === "string" && obj.cwd.trim() && obj.cwd.length <= 1024 && !/[\0]/.test(obj.cwd)) {
     cwd = obj.cwd.trim();
   }
+  const url = typeof obj.url === "string" ? obj.url.trim() : "";
+  const httpType = obj.type === "http" || obj.type === "sse";
+  if (url || httpType) {
+    if (!url || mcpHttpUrlError(url)) return null;
+    return { name, args, env, cwd, url, headers: parseHeaderMap(obj.headers) };
+  }
+  if (typeof obj.command !== "string" || !obj.command.trim() || obj.command.length > 512) return null;
+  if (/[\0\n]/.test(obj.command)) return null;
   return { name, command: obj.command.trim(), args, env, cwd };
 }
 
@@ -184,6 +231,14 @@ type Pending = {
 
 type RpcMsg = { jsonrpc?: string; id?: unknown; method?: string; params?: unknown; result?: unknown; error?: unknown };
 
+type McpConn = {
+  name: string;
+  dead: boolean;
+  request(method: string, params: unknown, timeoutMs: number): Promise<unknown>;
+  notify(method: string, params?: unknown): void;
+  kill(err?: Error): void;
+};
+
 function encode(msg: Record<string, unknown>): string {
   return `${JSON.stringify(msg)}\n`;
 }
@@ -222,6 +277,7 @@ class McpProcess {
   }
 
   start(cfg: McpServerConfig, cwd: string, env: NodeJS.ProcessEnv): void {
+    if (!cfg.command) throw new Error(`mcp ${this.name} needs a command`);
     const child = spawn(cfg.command, cfg.args, {
       cwd,
       env,
@@ -340,6 +396,152 @@ class McpProcess {
   }
 }
 
+function rpcError(name: string, error: unknown): Error {
+  const rec = error && typeof error === "object" ? (error as { message?: unknown }) : null;
+  return new Error(typeof rec?.message === "string" ? rec.message : `mcp ${name} error`);
+}
+
+function parseSseRpc(text: string, id: number): RpcMsg {
+  for (const event of text.split(/\r?\n\r?\n/)) {
+    const data = event
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n");
+    if (!data) continue;
+    try {
+      const msg = JSON.parse(data) as RpcMsg;
+      if (msg.id === id) return msg;
+    } catch {
+      /* next event */
+    }
+  }
+  throw new Error("mcp SSE response missing result");
+}
+
+async function readCappedBody(res: Response, max: number, name: string): Promise<string> {
+  if (!res.body) {
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > max) throw new Error(`mcp ${name} response too large`);
+    return buf.toString("utf8");
+  }
+  const reader = res.body.getReader();
+  const chunks: Buffer[] = [];
+  let used = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = Buffer.from(value);
+    if (used + chunk.length > max) {
+      await reader.cancel();
+      throw new Error(`mcp ${name} response too large`);
+    }
+    chunks.push(chunk);
+    used += chunk.length;
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+class McpHttp implements McpConn {
+  readonly name: string;
+  dead = false;
+  private nextId = 1;
+  private sessionId = "";
+  private inflight = new Set<AbortController>();
+  private lastErr: Error | null = null;
+
+  constructor(
+    name: string,
+    url: string,
+    extraHeaders: Record<string, string>,
+  ) {
+    this.name = name;
+    this.url = url;
+    this.extraHeaders = parseHeaderMap(extraHeaders);
+  }
+
+  private url: string;
+  private extraHeaders: Record<string, string>;
+
+  private headers(): Record<string, string> {
+    const headers: Record<string, string> = {
+      ...this.extraHeaders,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      "mcp-protocol-version": MCP_PROTOCOL,
+    };
+    if (this.sessionId) headers["mcp-session-id"] = this.sessionId;
+    return headers;
+  }
+
+  async request(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
+    if (this.dead) throw new Error(`mcp ${this.name} is not running`);
+    const id = this.nextId++;
+    const ac = new AbortController();
+    this.inflight.add(ac);
+    const timer = setTimeout(() => {
+      ac.abort();
+      this.kill(new Error(`mcp ${this.name} timed out`));
+    }, timeoutMs);
+    try {
+      const res = await fetch(this.url, {
+        method: "POST",
+        headers: this.headers(),
+        body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+        signal: ac.signal,
+        redirect: "manual",
+      });
+      const sid = res.headers.get("mcp-session-id");
+      if (sid && /^[\x21-\x7E]{1,128}$/.test(sid)) this.sessionId = sid;
+      if (res.status >= 300 && res.status < 400) {
+        try {
+          await readCappedBody(res, MCP_HTTP_BODY_BYTES, this.name);
+        } catch {
+          /* drain */
+        }
+        throw new Error(`mcp ${this.name} HTTP ${res.status}`);
+      }
+      const text = await readCappedBody(res, MCP_HTTP_BODY_BYTES, this.name);
+      if (!res.ok) throw new Error(`mcp ${this.name} HTTP ${res.status}`);
+      const ctype = res.headers.get("content-type") ?? "";
+      const msg = ctype.includes("text/event-stream") ? parseSseRpc(text, id) : (JSON.parse(text) as RpcMsg);
+      if (msg.error) throw rpcError(this.name, msg.error);
+      return msg.result;
+    } catch (err) {
+      if (this.lastErr) throw this.lastErr;
+      if ((err as { name?: string }).name === "AbortError") throw new Error(`mcp ${this.name} timed out`);
+      throw err instanceof Error ? err : new Error(String(err));
+    } finally {
+      clearTimeout(timer);
+      this.inflight.delete(ac);
+    }
+  }
+
+  notify(method: string, params?: unknown): void {
+    if (this.dead) return;
+    const ac = new AbortController();
+    this.inflight.add(ac);
+    void fetch(this.url, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({ jsonrpc: "2.0", method, params }),
+      signal: ac.signal,
+      redirect: "manual",
+    })
+      .catch(() => {
+        /* ignore notify failures */
+      })
+      .finally(() => this.inflight.delete(ac));
+  }
+
+  kill(err = new Error(`mcp ${this.name} stopped`)): void {
+    this.dead = true;
+    this.lastErr = err;
+    for (const ac of this.inflight) ac.abort();
+    this.inflight.clear();
+  }
+}
+
 function mcpEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
   for (const key of Object.keys(env)) {
@@ -362,7 +564,7 @@ function normalizeInputSchema(raw: unknown): Record<string, unknown> {
   return out;
 }
 
-async function handshake(proc: McpProcess): Promise<McpClientTool[]> {
+async function handshake(proc: McpConn): Promise<McpClientTool[]> {
   await proc.request(
     "initialize",
     {
@@ -423,15 +625,30 @@ export async function startMcp(
   configs: McpServerConfig[],
   opts: { projectRoot: string; confineCwd: (cwd: string | undefined) => string | null },
 ): Promise<McpSession> {
-  const procs: McpProcess[] = [];
+  const procs: McpConn[] = [];
   const discovered: McpClientTool[] = [];
   const notes: string[] = [];
-  const byOriginal = new Map<string, McpProcess>();
+  const byOriginal = new Map<string, McpConn>();
 
   const started = await Promise.all(
     configs.slice(0, MAX_MCP_SERVERS).map(async (cfg) => {
+      if (cfg.url) {
+        const bad = mcpHttpUrlError(cfg.url);
+        if (bad) {
+          return { cfg, proc: null as McpConn | null, tools: [] as McpClientTool[], note: `mcp ${cfg.name}: ${bad}` };
+        }
+        const proc = new McpHttp(cfg.name, cfg.url, cfg.headers ?? {});
+        try {
+          const tools = await handshake(proc);
+          return { cfg, proc, tools, note: "" };
+        } catch (err) {
+          proc.kill();
+          const why = err instanceof Error ? err.message : String(err);
+          return { cfg, proc: null as McpConn | null, tools: [] as McpClientTool[], note: `mcp ${cfg.name}: ${why}` };
+        }
+      }
       const cwd = opts.confineCwd(cfg.cwd);
-      if (!cwd) return { cfg, proc: null as McpProcess | null, tools: [] as McpClientTool[], note: `mcp ${cfg.name}: cwd is outside the project` };
+      if (!cwd) return { cfg, proc: null as McpConn | null, tools: [] as McpClientTool[], note: `mcp ${cfg.name}: cwd is outside the project` };
       const proc = new McpProcess(cfg.name);
       try {
         proc.start(cfg, cwd, mcpEnv(cfg.env));
@@ -456,7 +673,7 @@ export async function startMcp(
   }
 
   const tools = selectMcpTools(discovered);
-  const byPrefixed = new Map<string, { proc: McpProcess; original: string }>();
+  const byPrefixed = new Map<string, { proc: McpConn; original: string }>();
   for (const tool of tools) {
     const proc = byOriginal.get(`${tool.server}\0${tool.original}`);
     if (proc) byPrefixed.set(tool.name, { proc, original: tool.original });
