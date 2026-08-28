@@ -102,7 +102,18 @@ import {
   waitForAck,
   writePromptPayload,
 } from "./host.ts";
-import { MAX_SESSION_FILE_BYTES, rotateSessionFile } from "./session.ts";
+import {
+  SessionWriter,
+  clearSessionBundle,
+  formatStub,
+  prepareFreshSession,
+  quarantineSessionBundle,
+  replaySessionBundle,
+  resolveSessionFile,
+  sessionBundleExists,
+  sessionBundleHasContent,
+  type SessionResult,
+} from "./session.ts";
 import {
   jailMcpCwd,
   loadMcpConfigs,
@@ -113,7 +124,34 @@ import {
   type McpSession,
 } from "./mcp.ts";
 
-export { MAX_SESSION_FILE_BYTES, copySessionImageFiles, rotateSessionFile, sessionRotateStamp, sliceSessionText, writeForkedSession } from "./session.ts";
+export {
+  MAX_SESSION_RECORD_BYTES,
+  MAX_SESSION_SEGMENT_BYTES,
+  SessionWriter,
+  applySessionRecord,
+  clearSessionBundle,
+  coreSessionFile,
+  createReplayState,
+  ensureSessionBundle,
+  formatStub,
+  isCoreSessionBundleFile,
+  isCoreSessionId,
+  listCurrentSegments,
+  listLogicalSessions,
+  parseSessionBundlePath,
+  prepareFreshSession,
+  quarantineSessionBundle,
+  removeEmptySessionBundle,
+  removeSessionBundle,
+  replaySessionBundle,
+  replaySessionRecords,
+  resolveSessionFile,
+  sessionBundleExists,
+  sessionBundleBytes,
+  sessionBundleHasContent,
+  sessionRotateStamp,
+  writeForkedSession,
+} from "./session.ts";
 import { AgentTui, SLASH_COMMANDS, type TranscriptHandle } from "./tui.ts";
 import { parseHideThinking } from "../shared/terminal-control.ts";
 
@@ -1376,10 +1414,6 @@ export function formatEnvironment(cwd: string, opts?: { probes?: boolean }): str
   return `<environment>\n${lines.join("\n")}\n</environment>`;
 }
 
-export function formatStub(opts: { chars: number; tool: string; sseq: number; repro?: string }): string {
-  const repro = opts.repro ? ` — reproduce: ${opts.repro}` : "";
-  return `[cleared: ${opts.chars} chars of ${opts.tool} — storageSeq ${opts.sseq}${repro}]`;
-}
 
 export function parseOffset(value: unknown): number | { error: string } {
   if (value === undefined || value === null || value === "") return 0;
@@ -1736,54 +1770,59 @@ export function hashSystem(text: string): string {
 
 // ---- append-only session storage ----
 
-export function resolveSessionFile(events: string, termId: string, override?: string): string | null {
-  const explicit = override?.trim() || "";
-  if (explicit) return explicit;
-  if (events && termId) return join(events, `${termId}.session.jsonl`);
-  return null;
-}
-
-const sessionFile = resolveSessionFile(eventsDir, terminalId, process.env.TERMINA_CORE_SESSION_FILE);
+const sessionFile = resolveSessionFile(eventsDir, sessionId, process.env.TERMINA_CORE_SESSION_FILE);
 let storageSeq = 0;
+let sessionWriter: SessionWriter | null = null;
+let resumeBusy = false;
 
-export function prepareSessionStream(sessionPath: string, mode: "fresh"): void {
-  if (mode === "fresh") writeFileSync(sessionPath, "");
+class SessionStoreError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SessionStoreError";
+  }
 }
 
-/** Move a failed resume file aside so the next prompt does not truncate it. */
-export function quarantineSessionFile(path: string): boolean {
-  try {
-    const dest = existsSync(`${path}.bad`) ? `${path}.bad-${Date.now()}` : `${path}.bad`;
-    renameSync(path, dest);
-    return true;
-  } catch {
-    return false;
-  }
+function closeSessionWriter(): void {
+  sessionWriter?.close();
+  sessionWriter = null;
+}
+
+function openSessionWriter(): void {
+  closeSessionWriter();
+  if (!sessionFile) return;
+  const opened = SessionWriter.open(sessionFile, storageSeq);
+  if (!opened.ok) throw new SessionStoreError(opened.error);
+  sessionWriter = opened.writer;
 }
 
 function ensureFreshSession(): void {
   if (streamPrepared) return;
-  streamPrepared = true;
   if (sessionFile) {
-    try {
-      prepareSessionStream(sessionFile, "fresh");
-    } catch {
-      /* ignore */
-    }
+    closeSessionWriter();
+    const prep = prepareFreshSession(sessionFile);
+    if (!prep.ok) throw new SessionStoreError(prep.error);
+    storageSeq = 0;
+    openSessionWriter();
   }
   storageSeq = 0;
+  streamPrepared = true;
 }
 
-/** Storage takes originals only. Revisions append records; they never
- *  rewrite these lines. Returns the entry's stable sequence address. */
-function store(entry: Record<string, unknown>): number {
-  const sseq = ++storageSeq;
-  if (!sessionFile) return sseq;
-  try {
-    appendFileSync(sessionFile, JSON.stringify({ storageSeq: sseq, ...entry }) + "\n", { mode: 0o600 });
-  } catch {
-    /* storage failure degrades to in-memory only */
+/**
+ * Persist one record, then return its durable sequence. In-memory sessions
+ * increment without a file. A configured writer must succeed before the
+ * caller mutates live history.
+ */
+function persist(entry: Record<string, unknown>): number {
+  const sseq = storageSeq + 1;
+  if (!sessionFile) {
+    storageSeq = sseq;
+    return sseq;
   }
+  if (!sessionWriter) throw new SessionStoreError("session writer is not open");
+  const result = sessionWriter.appendRecord({ ...entry, storageSeq: sseq });
+  if (!result.ok) throw new SessionStoreError(result.error);
+  storageSeq = sseq;
   return sseq;
 }
 
@@ -2765,10 +2804,10 @@ export function compactStreamBlocks<T>(slots: Array<T | undefined>): T[] {
 }
 
 function pushMessage(role: Message["role"], content: Message["content"]): Message {
-  const m: Message = { role, content, tokens: 0, sseq: 0 };
+  const sseq = persist({ type: "message", message: { role, content } });
+  const m: Message = { role, content, tokens: 0, sseq };
   m.tokens = estimate(m);
   history.push(m);
-  m.sseq = store({ type: "message", message: { role, content } });
   syncIndicators();
   return m;
 }
@@ -2855,120 +2894,7 @@ export function planPruneStubs(
   return picks;
 }
 
-export type ReplayMessage = {
-  role: "user" | "assistant";
-  content: string | ContentBlock[];
-  sseq: number;
-};
-
-function isReplayContent(content: unknown): content is ReplayMessage["content"] {
-  if (typeof content === "string") return true;
-  return Array.isArray(content) && content.every((block) => {
-    return Boolean(block) && typeof block === "object" && !Array.isArray(block) && typeof (block as { type?: unknown }).type === "string";
-  });
-}
-
-export function replaySessionRecords(
-  text: string,
-): { ok: true; messages: ReplayMessage[]; maxSeq: number } | { ok: false; error: string } {
-  const rawLines = text.split("\n");
-  const lines = rawLines.filter((line, i) => {
-    if (line.trim() === "") return false;
-    if (i === rawLines.length - 1) {
-      try {
-        JSON.parse(line);
-        return true;
-      } catch {
-        return false;
-      }
-    }
-    return true;
-  });
-  const messages: ReplayMessage[] = [];
-  const bySeq = new Map<number, ReplayMessage>();
-  const seen = new Set<number>();
-  let maxSeq = 0;
-  for (const line of lines) {
-    let e: {
-      storageSeq?: unknown;
-      type?: string;
-      message?: { role: string; content: ReplayMessage["content"] };
-      kind?: string;
-      targets?: Array<{ sseq: number; blockIndex: number; action?: string }>;
-      dropped?: number;
-      evicted?: number;
-      summarySseq?: number;
-    };
-    try {
-      e = JSON.parse(line) as typeof e;
-    } catch {
-      return { ok: false, error: "malformed session record" };
-    }
-    if (typeof e.storageSeq !== "number" || !Number.isInteger(e.storageSeq) || e.storageSeq < 1) {
-      return { ok: false, error: "invalid storageSeq" };
-    }
-    if (seen.has(e.storageSeq)) return { ok: false, error: "duplicate storageSeq" };
-    seen.add(e.storageSeq);
-    maxSeq = Math.max(maxSeq, e.storageSeq);
-    if (e.type === "message" && e.message && (e.message.role === "user" || e.message.role === "assistant")) {
-      if (!isReplayContent(e.message.content)) return { ok: false, error: "invalid message content" };
-      const m: ReplayMessage = { role: e.message.role, content: e.message.content, sseq: e.storageSeq };
-      messages.push(m);
-      bySeq.set(m.sseq, m);
-    } else if (e.type === "revision" && e.kind === "prune" && Array.isArray(e.targets)) {
-      const ordered = e.targets.slice().sort((a, b) => {
-        const as = a?.sseq ?? 0;
-        const bs = b?.sseq ?? 0;
-        if (as !== bs) return as - bs;
-        return (b?.blockIndex ?? 0) - (a?.blockIndex ?? 0);
-      });
-      for (const t of ordered) {
-        if (!t || !Number.isInteger(t.sseq) || t.sseq < 1 || !Number.isInteger(t.blockIndex) || t.blockIndex < 0) {
-          return { ok: false, error: "invalid prune target" };
-        }
-        const m = bySeq.get(t.sseq);
-        if (!m || typeof m.content === "string") continue;
-        const action = t.action === "drop" ? "drop" : "stub";
-        if (action === "drop") {
-          const b = m.content[t.blockIndex] as ContentBlock | undefined;
-          if (!b || !isThinkingBlock(b)) continue;
-          if (m.content.filter((x) => !isThinkingBlock(x as ContentBlock)).length === 0) continue;
-          m.content.splice(t.blockIndex, 1);
-          continue;
-        }
-        const b = m.content[t.blockIndex] as ContentBlock | undefined;
-        if (!b || b.type !== "tool_result" || b.stubbed) continue;
-        const stub = formatStub({
-          chars: blockChars(b),
-          tool: String(b.tool ?? "tool"),
-          sseq: m.sseq,
-          repro: typeof b.repro === "string" ? b.repro : undefined,
-        });
-        (b as unknown as { content: string }).content = stub;
-        b.stubbed = true;
-      }
-    } else if (e.type === "revision" && e.kind === "truncate" && typeof e.dropped === "number") {
-      if (!Number.isInteger(e.dropped) || e.dropped < 0 || e.dropped > messages.length) {
-        return { ok: false, error: "invalid truncate revision" };
-      }
-      messages.splice(0, e.dropped);
-    } else if (e.type === "revision" && e.kind === "summarize") {
-      if (typeof e.summarySseq !== "number" || !Number.isInteger(e.summarySseq) || e.summarySseq < 1) {
-        return { ok: false, error: "invalid summarize revision" };
-      }
-      if (typeof e.evicted !== "number" || !Number.isInteger(e.evicted) || e.evicted < 0) {
-        return { ok: false, error: "invalid summarize revision" };
-      }
-      const idx = messages.findIndex((m) => m.sseq === e.summarySseq);
-      if (idx < 0) return { ok: false, error: "summarize handoff missing" };
-      if (idx < e.evicted) return { ok: false, error: "summarize handoff inside evicted span" };
-      const handoff = messages.splice(idx, 1)[0]!;
-      messages.splice(0, e.evicted);
-      messages.unshift(handoff);
-    }
-  }
-  return { ok: true, messages, maxSeq };
-}
+export type { ReplayMessage } from "./session.ts";
 
 let postRevision = false;
 export type RevisionKind = "prune" | "summarize" | "truncate";
@@ -2992,10 +2918,29 @@ function reclaim(): number {
       fillTokens: lastBilledTokens ?? undefined,
     },
   );
-  let changed = 0;
   const targets: Array<{ sseq: number; blockIndex: number; action: PruneAction }> = [];
-  const touched = new Set<number>();
   const ordered = plan.slice().sort((a, b) => a.msgIndex - b.msgIndex || b.blockIndex - a.blockIndex);
+  for (const pick of ordered) {
+    const m = history[pick.msgIndex]!;
+    if (typeof m.content === "string") continue;
+    const blocks = m.content as ContentBlock[];
+    const b = blocks[pick.blockIndex];
+    if (!b) continue;
+    if (pick.action === "drop") {
+      if (!isThinkingBlock(b)) continue;
+      if (blocks.filter((x) => !isThinkingBlock(x)).length === 0) continue;
+      targets.push({ sseq: m.sseq, blockIndex: pick.blockIndex, action: "drop" });
+      continue;
+    }
+    if (b.type !== "tool_result" || b.stubbed) continue;
+    const c = blockChars(b);
+    if (c < PRUNE_MIN_CHARS) continue;
+    targets.push({ sseq: m.sseq, blockIndex: pick.blockIndex, action: "stub" });
+  }
+  if (targets.length === 0) return 0;
+  persist({ type: "revision", kind: "prune", targets });
+  const touched = new Set<number>();
+  let changed = 0;
   for (const pick of ordered) {
     const m = history[pick.msgIndex]!;
     if (typeof m.content === "string") continue;
@@ -3008,7 +2953,6 @@ function reclaim(): number {
       blocks.splice(pick.blockIndex, 1);
       changed++;
       touched.add(pick.msgIndex);
-      targets.push({ sseq: m.sseq, blockIndex: pick.blockIndex, action: "drop" });
       continue;
     }
     if (b.type !== "tool_result" || b.stubbed) continue;
@@ -3020,15 +2964,11 @@ function reclaim(): number {
     b.stubbed = true;
     changed++;
     touched.add(pick.msgIndex);
-    targets.push({ sseq: m.sseq, blockIndex: pick.blockIndex, action: "stub" });
   }
   for (const i of touched) history[i]!.tokens = estimate(history[i]!);
-  if (changed > 0) {
-    postRevision = true;
-    recordRevision("prune");
-    store({ type: "revision", kind: "prune", targets });
-    syncIndicators();
-  }
+  postRevision = true;
+  recordRevision("prune");
+  syncIndicators();
   return changed;
 }
 
@@ -3045,10 +2985,10 @@ function truncate(): boolean {
     if (i === cut && total < usableTokens() * LOW_WATER) break;
   }
   if (cut <= 0) return false;
+  persist({ type: "revision", kind: "truncate", dropped: cut });
   history.splice(0, cut);
   postRevision = true;
   recordRevision("truncate");
-  store({ type: "revision", kind: "truncate", dropped: cut });
   syncIndicators();
   return true;
 }
@@ -3196,14 +3136,14 @@ async function summarize(): Promise<boolean> {
     const inventories = fileInventories(evicted);
     const handoffBody = `${text}${inventories ? `\n\n${inventories}` : ""}`;
     const handoff = `<context-handoff>\n${handoffBody}\n</context-handoff>`;
+    const sseq = storageSeq + 1;
+    persist({ type: "revision", kind: "summarize", evicted: boundary, summarySseq: sseq, message: { role: "user", content: handoff } });
     lastHandoff = handoffBody;
     history.splice(0, boundary);
-    const m: Message = { role: "user", content: handoff, tokens: estimate({ role: "user", content: handoff, tokens: 0, sseq: 0 }), sseq: 0 };
+    const m: Message = { role: "user", content: handoff, tokens: estimate({ role: "user", content: handoff, tokens: 0, sseq }), sseq };
     history.unshift(m);
-    m.sseq = store({ type: "message", message: { role: "user", content: handoff } });
     postRevision = true;
     recordRevision("summarize");
-    store({ type: "revision", kind: "summarize", evicted: boundary, summarySseq: m.sseq });
     syncIndicators();
     writeTrace(
       traceRecord({
@@ -3832,7 +3772,19 @@ function logSettings(): void {
 }
 
 async function runPrompt(prompt: string, extraImages: Array<{ name: string; mediaType: string }> = []): Promise<void> {
-  if (!streamPrepared) ensureFreshSession();
+  if (!streamPrepared) {
+    try {
+      ensureFreshSession();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      out(`(the run did not start: ${message})\n`);
+      surface?.setDraft(prompt);
+      running = false;
+      currentAbort = null;
+      showPrompt();
+      return;
+    }
+  }
   running = true;
   showPrompt();
   interrupted = false;
@@ -3850,6 +3802,10 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   }
   const hasImages = pendingResult.hasImages || extraImages.length > 0;
   let preflight: { requestId: string; token: string | null } | null = null;
+  const cancelPreflight = (): void => {
+    if (preflight?.token) logEvent({ t: "preflight_cancel", token: preflight.token });
+    preflight = null;
+  };
   if (eventsDir && terminalId) {
     const requestId = randomUUID();
     logEvent({ t: "preflight_request", requestId, hasImages });
@@ -3872,6 +3828,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     ? await claimPendingImages(eventsDir, terminalId)
     : { ok: true as const, claim: { claimId: "", images: [] } };
   if (!claimResult.ok) {
+    cancelPreflight();
     out(`(the run did not start: ${claimResult.error})\n`);
     surface?.setDraft(prompt);
     running = false;
@@ -3886,9 +3843,19 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     .map((ref) => loadImageFromRoots(ref, imageRoots))
     .filter((img): img is NonNullable<typeof img> => img !== null);
   const allImages = [...loaded, ...extras].slice(0, 4);
-  const images = persistLoadedImages(sessionFile, allImages);
+  const persistedImages = persistLoadedImages(sessionFile, allImages);
+  if (!persistedImages.ok) {
+    cancelPreflight();
+    out(`(the run did not start: ${persistedImages.error})\n`);
+    surface?.setDraft(prompt);
+    running = false;
+    currentAbort = null;
+    showPrompt();
+    return;
+  }
+  const images = persistedImages.images;
+  const persistedPendingNames: string[] = [];
   if (eventsDir && terminalId && claim.claimId) {
-    const persistedNames: string[] = [];
     if (sessionFile) {
       const sessionDir = dirname(sessionFile);
       for (let i = 0; i < loaded.length && i < images.length; i++) {
@@ -3896,14 +3863,12 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         const src = loaded[i]!;
         if (ref.name === src.name) continue;
         try {
-          if (existsSync(join(sessionDir, ref.name))) persistedNames.push(src.name);
+          if (existsSync(join(sessionDir, ref.name))) persistedPendingNames.push(src.name);
         } catch {
           /* Keep the pending source until acknowledgement. */
         }
       }
     }
-    const ackImages = await acknowledgePendingImages(eventsDir, terminalId, claim.claimId, persistedNames);
-    if (!ackImages.ok) out(`(host: ${ackImages.error})\n`);
   }
   void refreshPendingImageCount();
   const context = eventsDir && terminalId ? readContextFiles(eventsDir, terminalId) : "";
@@ -3913,7 +3878,23 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     const written = writePromptPayload(eventsDir, terminalId, file, { prompt, context, images });
     if (written) logEvent({ t: "prompt", file: written, hasPreflight: preflight !== null });
   }
-  const userMsg = pushUserPrompt(prompt, images);
+  let userMsg: Message;
+  try {
+    userMsg = pushUserPrompt(prompt, images);
+  } catch (err) {
+    cancelPreflight();
+    const message = err instanceof SessionStoreError ? err.message : err instanceof Error ? err.message : String(err);
+    out(`(the run did not start: ${message})\n`);
+    surface?.setDraft(prompt);
+    running = false;
+    currentAbort = null;
+    showPrompt();
+    return;
+  }
+  if (eventsDir && terminalId && claim.claimId) {
+    const ackImages = await acknowledgePendingImages(eventsDir, terminalId, claim.claimId, persistedPendingNames);
+    if (!ackImages.ok) out(`(host: ${ackImages.error})\n`);
+  }
   logEvent({
     t: "agent_start",
     model: `${route.provider}/${route.model}`,
@@ -3926,13 +3907,13 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     trusted: null,
     thinkingLevel: effectiveEffortFor(route.provider, route.model, effortWanted),
   });
+  let storageFailure: string | null = null;
   if (!rateLookup && !ratesFailed) void loadRates().then(() => { ratesFailed = true; });
   let retriedOverflow = false;
   let modelCalls = 0;
   let lastHadTools = false;
   let resumePaused = false;
   let lastPlanText = "";
-  let lastAssistantSseq = 0;
   try {
     while (modelCalls < MAX_TURNS) {
       if (interrupted) break;
@@ -4038,10 +4019,9 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       lastUsd = waste.usd != null && Number.isFinite(waste.usd) && waste.usd >= 0 ? waste.usd : null;
       const assistantMsg: Message = { role: "assistant", content: result.blocks as ContentBlock[], tokens: 0, sseq: 0 };
       assistantMsg.tokens = estimate(assistantMsg);
+      assistantMsg.sseq = persist({ type: "message", message: { role: "assistant", content: result.blocks } });
       history.push(assistantMsg);
-      assistantMsg.sseq = store({ type: "message", message: { role: "assistant", content: result.blocks } });
       syncIndicators();
-      lastAssistantSseq = assistantMsg.sseq;
       const plan = planTextIfChanged(visibleAssistantText(result.blocks), lastPlanText);
       if (plan) {
         lastPlanText = plan;
@@ -4161,20 +4141,24 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     }
   } catch (err) {
     if (interrupted) out("\n(interrupted)\n");
+    else if (err instanceof SessionStoreError) {
+      storageFailure = err.message;
+      out(`\n(storage failed: ${err.message})\n`);
+    }
     else out(`\nerror: ${(err as Error).message}\n`);
   } finally {
     running = false;
     currentAbort = null;
     showPrompt();
   }
-  logEvent({ t: "agent_settled" });
-  if (eventsDir && terminalId) {
+  logEvent({ t: "agent_settled", error: storageFailure });
+  if (!storageFailure && eventsDir && terminalId) {
     const requestId = randomUUID();
     logEvent({
       t: "checkpoint_request",
       requestId,
       kind: "settled",
-      entryId: lastAssistantSseq > 0 ? String(lastAssistantSseq) : null,
+      entryId: storageSeq > 0 ? String(storageSeq) : null,
     });
     const ack = await waitForAck(eventsDir, terminalId, requestId, 5_000, bridgeId, {
       shouldStop: () => interrupted,
@@ -4197,54 +4181,53 @@ function abortResume(message: string): void {
   out(`${message}\n`);
   history.length = 0;
   syncIndicators();
-  if (sessionFile && quarantineSessionFile(sessionFile)) {
-    streamPrepared = false;
-    return;
+  closeSessionWriter();
+  if (sessionFile) {
+    const quarantined = quarantineSessionBundle(sessionFile);
+    if (quarantined.ok) {
+      streamPrepared = false;
+      storageSeq = 0;
+      return;
+    }
   }
-  // Keep the original file. Do not truncate it on the next prompt.
   streamPrepared = true;
   storageSeq = 0;
 }
 
-function resumeSession(): void {
-  if (!sessionFile || !existsSync(sessionFile)) {
-    out("(no stored session)\n");
-    return;
-  }
-  let text: string;
+async function resumeSession(): Promise<SessionResult> {
+  resumeBusy = true;
+  showPrompt();
   try {
-    const info = statSync(sessionFile);
-    if (!info.isFile()) {
-      out("(no stored session)\n");
-      return;
-    }
-    if (info.size === 0) {
-      out("(stored session is empty)\n");
-      streamPrepared = false;
-      return;
-    }
-    if (info.size > MAX_SESSION_FILE_BYTES) {
-      abortResume("(resume failed: session file is too large)");
-      return;
-    }
-    text = readFileSync(sessionFile, "utf8");
-  } catch (err) {
-    abortResume(`(resume failed: ${(err as Error).message})`);
-    return;
+    return await resumeSessionBody();
+  } finally {
+    resumeBusy = false;
+    showPrompt();
   }
-  const replayed = replaySessionRecords(text);
-  if (!replayed.ok) {
-    abortResume(`(resume failed: ${replayed.error})`);
-    return;
+}
+
+async function resumeSessionBody(): Promise<SessionResult> {
+  if (!sessionFile || !sessionBundleExists(sessionFile)) {
+    out("(no stored session)\n");
+    return { ok: false, error: "stored session is missing" };
   }
-  if (replayed.messages.length === 0) {
+  if (!sessionBundleHasContent(sessionFile)) {
     out("(stored session is empty)\n");
     streamPrepared = false;
-    return;
+    return { ok: true };
+  }
+  const replayed = await replaySessionBundle(sessionFile);
+  if (!replayed.ok) {
+    abortResume(`(resume failed: ${replayed.error})`);
+    return { ok: false, error: replayed.error };
+  }
+  if (replayed.messages.length === 0 && replayed.maxSeq === 0) {
+    out("(stored session is empty)\n");
+    streamPrepared = false;
+    return { ok: true };
   }
   history.length = 0;
   for (const rm of replayed.messages) {
-    const m: Message = { role: rm.role, content: rm.content, tokens: 0, sseq: rm.sseq };
+    const m: Message = { role: rm.role, content: rm.content as Message["content"], tokens: 0, sseq: rm.sseq };
     m.tokens = estimate(m);
     history.push(m);
   }
@@ -4256,10 +4239,18 @@ function resumeSession(): void {
     }
   }
   storageSeq = Math.max(storageSeq, replayed.maxSeq);
+  try {
+    openSessionWriter();
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    abortResume(`(resume failed: ${error})`);
+    return { ok: false, error };
+  }
   streamPrepared = true;
   prevPrompt = null;
   syncIndicators();
   renderHistoryTranscript(history, surface);
+  return { ok: true };
 }
 
 // ---- terminal surface ----
@@ -4332,7 +4323,7 @@ function syncIndicators(): void {
 }
 
 function showPrompt(): void {
-  surface?.setBusy(running || authBusy);
+  surface?.setBusy(running || authBusy || resumeBusy);
   if (!surface) out("\n> ");
 }
 
@@ -4379,6 +4370,7 @@ function printLoginPicker(cmd: "/login" | "/logout"): void {
 let running = false;
 let queuedLine: string | null = null;
 let ratesFailed = false;
+let authBusy = false;
 
 function drainQueuedLine(): void {
   if (queuedLine === null) return;
@@ -4387,7 +4379,19 @@ function drainQueuedLine(): void {
   submit(next);
 }
 
+function engineBusy(): boolean {
+  return running || authBusy || resumeBusy;
+}
+
+export function isEngineBusy(): boolean {
+  return engineBusy();
+}
+
 function submit(line: string): void {
+  if (resumeBusy) {
+    out("(engine busy)\n");
+    return;
+  }
   if (running) {
     logEvent({ t: "steer_input", behavior: "steer" });
     // Keep one typed-ahead prompt. More than one has no consumer yet.
@@ -4419,7 +4423,6 @@ export function isDirectRun(): boolean {
   return isDirectRunFrom(import.meta.url, process.argv[1]);
 }
 
-let authBusy = false;
 let loginCodeResolve: ((code: string) => void) | null = null;
 let loginAbort: AbortController | null = null;
 
@@ -4539,7 +4542,7 @@ function startCatalogCommand(line: string): void {
     return;
   }
   if (line === "/models" || line.startsWith("/models ")) {
-    if (running || authBusy) {
+    if (engineBusy()) {
       out("(engine busy)\n");
       showPrompt();
       return;
@@ -4562,7 +4565,7 @@ function startCatalogCommand(line: string): void {
     return;
   }
   if (!line.startsWith("/model ")) return;
-  if (running || authBusy) {
+  if (engineBusy()) {
     out("(engine busy)\n");
     showPrompt();
     return;
@@ -4722,7 +4725,7 @@ function dispatchLine(line: string): void {
     return;
   }
   if (line === "/login" || line === "/logout") {
-    if (running || authBusy) {
+    if (engineBusy()) {
       out("(engine busy)\n");
       showPrompt();
       return;
@@ -4732,7 +4735,7 @@ function dispatchLine(line: string): void {
     return;
   }
   if (line.startsWith("/login ") || line.startsWith("/logout ")) {
-    if (running || authBusy) {
+    if (engineBusy()) {
       out("(engine busy)\n");
       showPrompt();
       return;
@@ -4761,33 +4764,41 @@ function dispatchLine(line: string): void {
     return;
   }
   if (line === "/resume") {
-    if (running || authBusy) out("(engine busy)\n");
+    if (engineBusy()) out("(engine busy)\n");
     else if (history.length > 0) out("(session already live — /resume only on a fresh engine)\n");
-    else resumeSession();
+    else {
+      resumeBusy = true;
+      showPrompt();
+      void resumeSession();
+      return;
+    }
     showPrompt();
     return;
   }
   if (line === "/clear") {
-    if (running || authBusy) {
+    if (engineBusy()) {
       out("(engine busy)\n");
       showPrompt();
       return;
     }
     if (sessionFile) {
-      const rotated = rotateSessionFile(sessionFile);
-      if (!rotated.ok) {
-        out(`(could not keep the previous session: ${rotated.error})\n`);
+      closeSessionWriter();
+      const cleared = clearSessionBundle(sessionFile);
+      if (!cleared.ok) {
+        out(`(could not keep the previous session: ${cleared.error})\n`);
         showPrompt();
         return;
       }
+      storageSeq = 0;
       try {
-        prepareSessionStream(sessionFile, "fresh");
+        openSessionWriter();
       } catch (err) {
         out(`(could not start a fresh session: ${err instanceof Error ? err.message : String(err)})\n`);
         showPrompt();
         return;
       }
     }
+    storageSeq = 0;
     history.length = 0;
     lastHandoff = null;
     hostContextSnapshot = "";
@@ -4800,30 +4811,34 @@ function dispatchLine(line: string): void {
     revisions = 0;
     revisionKinds = [];
     streamPrepared = true;
-    storageSeq = 0;
     syncIndicators();
     out("(session cleared)\n");
     void connectMcp().then(() => showPrompt());
     return;
   }
   if (line === "/compact") {
-    if (running || authBusy) {
+    if (engineBusy()) {
       out("(engine busy)\n");
       showPrompt();
       return;
     }
     void (async () => {
-      const n = reclaim();
-      const summed = await summarize();
-      syncIndicators();
-      out(`(compacted${n ? `; reclaimed ${n}` : ""}${summed ? "; summarized" : ""})\n`);
+      try {
+        const n = reclaim();
+        const summed = await summarize();
+        syncIndicators();
+        out(`(compacted${n ? `; reclaimed ${n}` : ""}${summed ? "; summarized" : ""})\n`);
+      } catch (err) {
+        if (err instanceof SessionStoreError) out(`(storage failed: ${err.message})\n`);
+        else out(`(compact failed: ${err instanceof Error ? err.message : String(err)})\n`);
+      }
       showPrompt();
     })();
     return;
   }
   const effortCmd = parseEffortCommand(line);
   if (effortCmd) {
-    if (running || authBusy) {
+    if (engineBusy()) {
       out("(engine busy)\n");
       showPrompt();
       return;
@@ -4859,7 +4874,7 @@ function dispatchLine(line: string): void {
       showPrompt();
       return;
     }
-    if (running || authBusy) {
+    if (engineBusy()) {
       out("(engine busy)\n");
       showPrompt();
       return;
@@ -4951,13 +4966,14 @@ async function main(): Promise<void> {
   if (bootList && bootList.length > 0) out(`${formatModelBanner(bootList, route.model)}\n`);
   process.on("exit", () => mcpSession?.shutdown());
   await connectMcp();
-  if (process.env.TERMINA_CORE_RESUME === "1") resumeSession();
+  const resumeResult = process.env.TERMINA_CORE_RESUME === "1" ? await resumeSession() : { ok: true as const };
   let structured = "";
   let structuredImages: Array<{ name: string; mediaType: string }> = [];
   if (eventsDir && terminalId) {
     const control = consumeStartupControl(eventsDir, terminalId, bridgeId);
     const opId = control?.opId ?? "";
-    if (!control) logEvent({ t: "session_ready", opId, ok: true, reload: true });
+    if (!resumeResult.ok) logEvent({ t: "session_ready", opId, ok: false, error: resumeResult.error });
+    else if (!control) logEvent({ t: "session_ready", opId, ok: true, reload: true });
     else logEvent({ t: "session_ready", opId, ok: true });
     logSettings();
     if (control?.action === "prefill" && control.text) {

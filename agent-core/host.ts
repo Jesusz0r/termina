@@ -5,7 +5,7 @@
  * verify/edits/mine/mailbox context, startup-control. The parser stays
  * electron/sidecar.ts. This module is the kernel writer of that protocol.
  */
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, constants as fsConstants } from "node:fs";
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, constants as fsConstants } from "node:fs";
 import { link, lstat, mkdir, open, readdir, rename, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
@@ -215,9 +215,10 @@ const MAX_IMAGE_RECORD_BYTES = 16 * 1024;
 const IMAGE_CLEANUP_MAX = 32;
 const OPEN_NOFOLLOW_READ = fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW;
 const OPEN_EXCL_WRITE = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL;
-const OWNER_NAME = /^images-owner-(.+)-([0-9]+)-([0-9]+)-([A-Za-z0-9_-]+)$/;
-const CLAIM_NAME = /^images-claim-(.+)-([0-9]+)-([0-9]+)-([A-Za-z0-9_-]+)\.json$/;
-const TX_NAME = /^images-tx-(.+)-([0-9]+)-([0-9]+)-([A-Za-z0-9_-]+)\.json$/;
+const NAMED_NONCE = "([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|[A-Za-z_][A-Za-z0-9_]*)";
+const OWNER_NAME = new RegExp(`^images-owner-(.+?)-([0-9]+)-([0-9]+)-${NAMED_NONCE}$`);
+const CLAIM_NAME = new RegExp(`^images-claim-(.+?)-([0-9]+)-([0-9]+)-${NAMED_NONCE}\\.json$`);
+const TX_NAME = new RegExp(`^images-tx-(.+?)-([0-9]+)-([0-9]+)-${NAMED_NONCE}\\.json$`);
 const MANIFEST_TMP_NAME = /^images-[A-Za-z0-9_-]+\.json\.tmp-[A-Za-z0-9_-]+$/;
 const QUARANTINE_NAME = /^images-[A-Za-z0-9_-]+\.quarantine-[A-Za-z0-9_-]+$/;
 
@@ -993,10 +994,16 @@ export function persistSessionImage(
   sessionFile: string | null,
   img: LoadedImage,
   index: number,
-): ImageRef {
+): ImageRef | null {
   if (!sessionFile || index < 1) return { name: img.name, mediaType: img.mediaType };
-  if (STORED_IMAGE_NAME.test(img.name)) return { name: img.name, mediaType: img.mediaType };
   const dir = dirname(sessionFile);
+  if (STORED_IMAGE_NAME.test(img.name)) {
+    try {
+      if (lstatSync(join(dir, img.name)).isFile()) return { name: img.name, mediaType: img.mediaType };
+    } catch {
+      /* Copy the loaded bytes to a new stored image. */
+    }
+  }
   const stem = basename(sessionFile, ".jsonl") || "session";
   const ext = extForMedia(img.mediaType);
   let n = Math.max(1, index);
@@ -1006,19 +1013,41 @@ export function persistSessionImage(
     name = `${stem}-img-${n}.${ext}`;
   }
   if (!STORED_IMAGE_NAME.test(name) || existsSync(join(dir, name))) {
-    return { name: img.name, mediaType: img.mediaType };
+    return null;
   }
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    writeFileSync(join(dir, name), img.bytes, { mode: 0o600 });
+    writeFileSync(join(dir, name), img.bytes, { flag: "wx", mode: 0o600 });
     return { name, mediaType: img.mediaType };
   } catch {
-    return { name: img.name, mediaType: img.mediaType };
+    return null;
   }
 }
 
-export function persistLoadedImages(sessionFile: string | null, images: LoadedImage[]): ImageRef[] {
-  return images.map((img, i) => persistSessionImage(sessionFile, img, i + 1));
+export function persistLoadedImages(
+  sessionFile: string | null,
+  images: LoadedImage[],
+): { ok: true; images: ImageRef[] } | { ok: false; error: string } {
+  const stored: ImageRef[] = [];
+  const created: string[] = [];
+  for (let i = 0; i < images.length; i++) {
+    const ref = persistSessionImage(sessionFile, images[i]!, i + 1);
+    if (!ref) {
+      if (sessionFile) {
+        for (const name of created) {
+          try {
+            rmSync(join(dirname(sessionFile), name), { force: true });
+          } catch {
+            /* The failed prompt does not reference this file. */
+          }
+        }
+      }
+      return { ok: false, error: "could not persist a session image" };
+    }
+    stored.push(ref);
+    if (sessionFile && ref.name !== images[i]!.name) created.push(ref.name);
+  }
+  return { ok: true, images: stored };
 }
 
 export function structuredStartup(control: StartupControl): { text: string; images: ImageRef[] } {
@@ -1064,5 +1093,3 @@ export function expandFileImageSource(
   }
   return null;
 }
-
-

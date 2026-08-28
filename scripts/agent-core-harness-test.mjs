@@ -15,6 +15,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -55,7 +56,6 @@ const {
   buildCachedPrefix,
   replaySessionRecords,
   renderHistoryTranscript,
-  prepareSessionStream,
   sidecarStartFor,
   formatToolAnnounce,
   formatToolFollowup,
@@ -78,13 +78,12 @@ const {
   compactStreamBlocks,
   toProviderBlock,
   resolveSessionFile,
-  quarantineSessionFile,
-  MAX_SESSION_FILE_BYTES,
-  rotateSessionFile,
   sessionRotateStamp,
-  sliceSessionText,
-  writeForkedSession,
-  copySessionImageFiles,
+  MAX_SESSION_SEGMENT_BYTES,
+  MAX_SESSION_RECORD_BYTES,
+  isCoreSessionBundleFile,
+  isCoreSessionId,
+  prepareFreshSession,
   SLASH_COMMANDS,
   matchingSlashCommands,
   completeSlashLine,
@@ -394,18 +393,22 @@ check("pendingImageState sees the durable claim", stateAfterClaim.ok && stateAft
 const sessImg = join(imgDir, "core-imgtest.jsonl");
 writeFileSync(sessImg, "");
 const stored = host.persistLoadedImages(sessImg, claimed.claim.images);
-check("persistLoadedImages writes a sidecar file", stored[0]?.name === "core-imgtest-img-1.png" && existsSync(join(imgDir, "core-imgtest-img-1.png")));
-const persistedNames = stored
+check("persistLoadedImages writes a sidecar file", stored.ok && stored.images[0]?.name === "core-imgtest-img-1.png" && existsSync(join(imgDir, "core-imgtest-img-1.png")));
+const persistedNames = (stored.ok ? stored.images : [])
   .map((ref, i) => (ref.name !== claimed.claim.images[i]?.name && existsSync(join(imgDir, ref.name)) ? claimed.claim.images[i].name : null))
   .filter(Boolean);
 const ackOk = await host.acknowledgePendingImages(imgDir, hostId, claimed.claim.claimId, persistedNames);
 check("acknowledgePendingImages removes persisted sources", ackOk.ok === true && !existsSync(join(imgDir, claimed.claim.images[0].name)));
 const emptyAck = await host.acknowledgePendingImages(imgDir, hostId, claimed.claim.claimId, []);
 check("zero acknowledgement is a successful no-op", emptyAck.ok === true);
-const expanded = host.expandFileImageSource({ type: "file", name: stored[0].name, media_type: "image/png" }, [imgDir]);
+const expanded = host.expandFileImageSource({ type: "file", name: stored.ok ? stored.images[0].name : "", media_type: "image/png" }, [imgDir]);
 check("expandFileImageSource reads base64", expanded?.type === "base64" && typeof expanded.data === "string" && expanded.data.length > 0);
 const missingImg = host.expandFileImageSource({ type: "file", name: "core-imgtest-img-1.png", media_type: "image/png" }, [join(imgDir, "nope")]);
 check("expandFileImageSource jails the path", missingImg === null);
+const blockedImageParent = join(imgDir, "not-a-directory");
+writeFileSync(blockedImageParent, "blocked");
+const failedImagePersist = host.persistLoadedImages(join(blockedImageParent, "session.jsonl"), claimed.claim.images.slice(0, 1));
+check("persistLoadedImages reports a session copy failure", failedImagePersist.ok === false);
 const evilDir = mkdtempSync(join(tmpdir(), "agent-core-img-evil-"));
 leftovers.push(evilDir);
 const evilName = "image-term-1-evil.png";
@@ -433,7 +436,7 @@ check(
   structuredImg.text === "look at this" && structuredImg.images[0]?.name === "core-imgtest-img-1.png",
 );
 const imgReq = toRequest(
-  [{ role: "user", content: [{ type: "text", text: "see" }, { type: "image", source: { type: "file", name: stored[0].name, media_type: "image/png" } }], tokens: 1, sseq: 1 }],
+  [{ role: "user", content: [{ type: "text", text: "see" }, { type: "image", source: { type: "file", name: stored.ok ? stored.images[0].name : "", media_type: "image/png" } }], tokens: 1, sseq: 1 }],
   [imgDir],
 );
 check(
@@ -692,6 +695,23 @@ check(
 const partialAck = await host.acknowledgePendingImages(reuseDir, hostId, firstReuse.claim.claimId, [firstReuse.claim.images[0].name]);
 const afterPartial = await host.claimPendingImages(reuseDir, hostId);
 check("full acknowledgement removes the claim", partialAck.ok && afterPartial.ok && afterPartial.claim.images.length === 0);
+
+const numericUuidClaimDir = mkdtempSync(join(tmpdir(), "agent-core-img-numeric-uuid-"));
+leftovers.push(numericUuidClaimDir);
+const numericUuidImage = `image-${hostId}-${idA}.png`;
+const numericUuidClaim = `images-claim-${hostId}-${process.pid}-${Date.now()}-12345678-1234-4234-8234-123456789012.json`;
+writeFileSync(join(numericUuidClaimDir, numericUuidImage), png1x1);
+writeFileSync(
+  join(numericUuidClaimDir, numericUuidClaim),
+  JSON.stringify({ images: [{ name: numericUuidImage, mediaType: "image/png" }] }),
+);
+const parsedNumericUuidClaim = await host.claimPendingImages(numericUuidClaimDir, hostId);
+check(
+  "claim parsing preserves numeric UUID segments",
+  parsedNumericUuidClaim.ok &&
+    parsedNumericUuidClaim.claim.claimId === numericUuidClaim &&
+    parsedNumericUuidClaim.claim.images[0]?.bytes.equals(png1x1),
+);
 
 const persistFailDir = mkdtempSync(join(tmpdir(), "agent-core-img-persist-"));
 leftovers.push(persistFailDir);
@@ -1097,8 +1117,7 @@ const sessionLines = [
     message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "BIG".repeat(100), tool: "bash", repro: "bash x" }] },
   }),
   JSON.stringify({ storageSeq: 3, type: "message", message: { role: "user", content: "tail" } }),
-  JSON.stringify({ storageSeq: 4, type: "message", message: { role: "user", content: handoff } }),
-  JSON.stringify({ storageSeq: 5, type: "revision", kind: "summarize", evicted: 2, summarySseq: 4 }),
+  JSON.stringify({ storageSeq: 4, type: "revision", kind: "summarize", evicted: 2, summarySseq: 4, message: { role: "user", content: handoff } }),
 ].join("\n");
 const replayed = replaySessionRecords(sessionLines);
 check("summarize replay handoff first", replayed.ok && replayed.messages[0]?.content === handoff);
@@ -1110,7 +1129,7 @@ const pruneLines = [
     type: "message",
     message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "BODY", tool: "bash", repro: "bash x" }] },
   }),
-  JSON.stringify({ storageSeq: 2, type: "revision", kind: "prune", targets: [{ sseq: 1, blockIndex: 0 }] }),
+  JSON.stringify({ storageSeq: 2, type: "revision", kind: "prune", targets: [{ sseq: 1, blockIndex: 0, action: "stub" }] }),
 ].join("\n");
 const pruned = replaySessionRecords(pruneLines);
 check(
@@ -1126,10 +1145,12 @@ const truncLines = [
 const truncated = replaySessionRecords(truncLines);
 check("truncate replay preserves boundary", truncated.ok && truncated.messages.length === 1 && truncated.messages[0]?.content === "keep");
 
-const sess = join(root, "term-1.session.jsonl");
-writeFileSync(sess, sessionLines);
-prepareSessionStream(sess, "fresh");
-check("fresh session stream truncates file", readFileSync(sess, "utf8") === "");
+const sessBundle = join(root, "term-1", "current", "session.jsonl");
+mkdirSync(join(root, "term-1", "current"), { recursive: true, mode: 0o700 });
+writeFileSync(sessBundle, sessionLines, { mode: 0o600 });
+const freshPrep = prepareFreshSession(sessBundle);
+check("fresh session archives non-empty current", freshPrep.ok && typeof freshPrep.archived === "string" && existsSync(freshPrep.archived));
+check("fresh session starts an empty active segment", readFileSync(sessBundle, "utf8") === "");
 
 check("duplicate storageSeq fails resume", replaySessionRecords(`${sessionLines}\n${JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "x" } })}`).ok === false);
 check("non-positive storageSeq fails", replaySessionRecords(JSON.stringify({ storageSeq: 0, type: "message", message: { role: "user", content: "x" } })).ok === false);
@@ -1467,7 +1488,7 @@ const summarizeMissing = replaySessionRecords(
     JSON.stringify({ storageSeq: 2, type: "revision", kind: "summarize", evicted: 1 }),
   ].join("\n"),
 );
-check("summarize without summarySseq fails closed", summarizeMissing.ok === false);
+check("summarize without its atomic handoff fails closed", summarizeMissing.ok === false);
 
 check("sidecar bash has no path", sidecarStartFor({ name: "bash", id: "1", input: { path: "src" } }).path === undefined);
 check("sidecar write keeps path", sidecarStartFor({ name: "write_file", id: "1", input: { path: "a.ts" } }).path === "a.ts");
@@ -1493,7 +1514,7 @@ check(
 
 writeFileSync(join(root, "skip.bin"), Buffer.from("secret-bin\0more"));
 check("grep skips binary NUL files", !(await grepFiles(root, { pattern: "secret-bin" })).includes("skip.bin"));
-check("replay reports max storageSeq", replayed.ok && replayed.maxSeq === 5);
+check("replay reports max storageSeq", replayed.ok && replayed.maxSeq === 4);
 
 const auth = await import("../agent-core/auth.ts");
 const {
@@ -2295,13 +2316,23 @@ check(
 );
 
 check(
-  "resolveSessionFile override wins",
-  resolveSessionFile("/events", "term-1", "/tmp/sess.jsonl") === "/tmp/sess.jsonl",
+  "resolveSessionFile ignores a flat override",
+  resolveSessionFile("/events", "term-1", "/tmp/sess.jsonl") === join("/events", "term-1", "current", "session.jsonl"),
 );
 check(
-  "resolveSessionFile falls back to events dir",
-  resolveSessionFile("/events", "term-1") === join("/events", "term-1.session.jsonl"),
+  "resolveSessionFile derives the bundle path",
+  resolveSessionFile("/events", "term-1") === join("/events", "term-1", "current", "session.jsonl"),
 );
+check(
+  "resolveSessionFile accepts a matching bundle override",
+  resolveSessionFile("/events", "term-1", "/proj/term-1/current/session.jsonl") === "/proj/term-1/current/session.jsonl",
+);
+check("resolveSessionFile rejects an invalid session id", resolveSessionFile("/events", "../evil") === null);
+check("isCoreSessionBundleFile rejects a flat file", isCoreSessionBundleFile("/tmp/core-abc.jsonl") === false);
+check("isCoreSessionBundleFile accepts a bundle path", isCoreSessionBundleFile("/proj/core-abc/current/session.jsonl") === true);
+check("isCoreSessionId rejects a parent segment", isCoreSessionId("..") === false);
+check("MAX_SESSION_SEGMENT_BYTES is 8 MiB", MAX_SESSION_SEGMENT_BYTES === 8 * 1024 * 1024);
+check("MAX_SESSION_RECORD_BYTES is 1 MiB", MAX_SESSION_RECORD_BYTES === 1 * 1024 * 1024);
 
 const mcp = await import("../agent-core/mcp.ts");
 check("KERNEL_TOOL_NAMES includes fetch", mcp.KERNEL_TOOL_NAMES.has("fetch"));
@@ -2470,8 +2501,8 @@ check(
 check("parseTerminalRoster drops dispatch-like ids", rosterMod.parseTerminalRoster([{ id: "job-1", type: "agent", engine: "pi" }]).length === 0);
 check("parseTerminalRoster defaults agent engine to core", rosterMod.parseTerminalRoster([{ id: "term-1", type: "agent" }])[0]?.engine === "core");
 check(
-  "parseTerminalRoster drops relative sessionFile",
-  rosterMod.parseTerminalRoster([{ id: "term-1", type: "agent", engine: "core", sessionFile: "agent-sessions/x.jsonl" }])[0]?.sessionFile == null,
+  "parseTerminalRoster drops obsolete core sessionFile values",
+  rosterMod.parseTerminalRoster([{ id: "term-1", type: "agent", engine: "core", sessionFile: "/tmp/core-flat.jsonl" }])[0]?.sessionFile == null,
 );
 check(
   "parseTerminalRoster drops duplicate ids",
@@ -2484,8 +2515,8 @@ check(
   "parseTerminalRoster drops sessionId with slash",
   rosterMod.parseTerminalRoster([{ id: "term-1", type: "agent", sessionId: "a/b" }])[0]?.sessionId == null,
 );
-check("isCoreSessionId rejects parent segment", rosterMod.isCoreSessionId("..") === false);
-check("isCoreSessionId accepts uuid form", rosterMod.isCoreSessionId("core-11111111-1111-1111-1111-111111111111") === true);
+check("isCoreSessionId rejects parent segment", isCoreSessionId("..") === false);
+check("isCoreSessionId accepts uuid form", isCoreSessionId("core-11111111-1111-1111-1111-111111111111") === true);
 const liveRoster = [{ id: "term-3", type: "agent", engine: "core" }];
 const unrestoredRoster = [
   { id: "term-1", type: "agent", engine: "pi" },
@@ -2497,86 +2528,10 @@ check("composeTerminalRoster keeps unrestored sibling", composed[1]?.id === "ter
 const manyLive = Array.from({ length: 20 }, (_, i) => ({ id: `term-${i + 1}`, type: "agent", engine: "pi" }));
 check("composeTerminalRoster caps at 16", rosterMod.composeTerminalRoster(manyLive, []).length === rosterMod.MAX_TERMINAL_ROSTER);
 
-const qdir = mkdtempSync(join(tmpdir(), "agent-core-quarantine-"));
-leftovers.push(qdir);
-const qfile = join(qdir, "sess.jsonl");
-writeFileSync(qfile, '{"storageSeq":1}\n');
-check("quarantineSessionFile moves a file aside", quarantineSessionFile(qfile) === true && !existsSync(qfile) && existsSync(`${qfile}.bad`));
-writeFileSync(qfile, "second\n");
-check("quarantineSessionFile does not overwrite an existing aside file", quarantineSessionFile(qfile) === true && existsSync(`${qfile}.bad`) && readFileSync(`${qfile}.bad`, "utf8") === '{"storageSeq":1}\n');
-check("MAX_SESSION_FILE_BYTES is 32 MiB", MAX_SESSION_FILE_BYTES === 32 * 1024 * 1024);
-
-const sliceSrc = [
-  JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "u1" } }),
-  JSON.stringify({ storageSeq: 2, type: "message", message: { role: "assistant", content: "a1" } }),
-  JSON.stringify({ storageSeq: 3, type: "revision", kind: "prune", targets: [] }),
-  JSON.stringify({ storageSeq: 4, type: "message", message: { role: "user", content: "u2" } }),
-].join("\n") + "\n";
-const slice2 = sliceSessionText(sliceSrc, 2);
-check("slice keeps prefix messages", slice2.ok && slice2.kept === 2 && slice2.text.includes("\"u1\"") && !slice2.text.includes("\"u2\""));
-const slice3 = sliceSessionText(sliceSrc, 3);
-check("slice keeps revision records in the prefix", slice3.ok && slice3.kept === 3 && slice3.text.includes("\"prune\""));
-check("slice through 0 is empty", sliceSessionText(sliceSrc, 0).ok && sliceSessionText(sliceSrc, 0).text === "");
-check("slice rejects negative seq", sliceSessionText(sliceSrc, -1).ok === false);
-const dupSlice = sliceSessionText(
-  JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "a" } }) +
-    "\n" +
-    JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "b" } }) +
-    "\n",
-  1,
-);
-check("slice fails closed on duplicate storageSeq", dupSlice.ok === false);
-const truncSlice = sliceSessionText(sliceSrc + "{not json", 4);
-check("slice ignores a truncated final line", truncSlice.ok && truncSlice.kept === 4);
-const forkDir = mkdtempSync(join(tmpdir(), "agent-core-fork-"));
-leftovers.push(forkDir);
-const forkSrc = join(forkDir, "src.jsonl");
-const forkDst = join(forkDir, "out", "dst.jsonl");
-writeFileSync(forkSrc, sliceSrc);
-const writtenFork = await writeForkedSession(forkSrc, forkDst, 2);
-check("writeForkedSession writes the sliced prefix", writtenFork.ok && existsSync(forkDst) && readFileSync(forkDst, "utf8").includes("\"a1\"") && !readFileSync(forkDst, "utf8").includes("\"u2\""));
-const emptyFork = await writeForkedSession(forkSrc, join(forkDir, "empty.jsonl"), 0);
-check("writeForkedSession through 0 writes an empty file", emptyFork.ok && readFileSync(join(forkDir, "empty.jsonl"), "utf8") === "");
-writeFileSync(join(forkDir, "src-img-1.png"), png1x1);
-writeFileSync(join(forkDir, "other-img-1.png"), png1x1);
-const forkImgDst = join(forkDir, "out-img", "dst.jsonl");
-await writeForkedSession(forkSrc, forkImgDst, 2);
-check("writeForkedSession copies sidecar images", existsSync(join(forkDir, "out-img", "src-img-1.png")));
-check("writeForkedSession does not copy a sibling session's images", !existsSync(join(forkDir, "out-img", "other-img-1.png")));
-const copyOnlyDir = join(forkDir, "copy-only");
-mkdirSync(copyOnlyDir);
-await copySessionImageFiles(forkSrc, join(copyOnlyDir, "session.jsonl"));
-check("copySessionImageFiles copies without rewriting jsonl", existsSync(join(copyOnlyDir, "src-img-1.png")));
-check("copySessionImageFiles keeps the source stem", !existsSync(join(copyOnlyDir, "other-img-1.png")));
-
-const rotDir = mkdtempSync(join(tmpdir(), "agent-core-rotate-"));
-leftovers.push(rotDir);
-const rotLive = join(rotDir, "core-aaaa.jsonl");
-check("rotateSessionFile skips a missing file", rotateSessionFile(rotLive).ok && rotateSessionFile(rotLive).aside === null);
-writeFileSync(rotLive, "");
-check("rotateSessionFile skips an empty file", rotateSessionFile(rotLive).ok && rotateSessionFile(rotLive).aside === null && existsSync(rotLive));
-writeFileSync(rotLive, JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "keep me" } }) + "\n");
 const rotFixed = new Date(2026, 7, 26, 15, 4, 5).getTime();
-const rotated = rotateSessionFile(rotLive, rotFixed);
 check("sessionRotateStamp is filesystem-safe", sessionRotateStamp(rotFixed) === "2026-08-26T15-04-05");
-check(
-  "rotateSessionFile moves a non-empty session aside",
-  rotated.ok &&
-    rotated.aside === join(rotDir, "core-aaaa-2026-08-26T15-04-05.jsonl") &&
-    !existsSync(rotLive) &&
-    existsSync(rotated.aside) &&
-    readFileSync(rotated.aside, "utf8").includes("keep me"),
-);
-writeFileSync(rotLive, JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "newer" } }) + "\n");
-const rotatedAgain = rotateSessionFile(rotLive, rotFixed);
-check(
-  "rotateSessionFile does not overwrite an existing aside file",
-  rotatedAgain.ok &&
-    rotatedAgain.aside === join(rotDir, "core-aaaa-2026-08-26T15-04-05-1.jsonl") &&
-    readFileSync(rotated.aside, "utf8").includes("keep me") &&
-    existsSync(rotatedAgain.aside) &&
-    readFileSync(rotatedAgain.aside, "utf8").includes("newer"),
-);
+const sessionTests = await import("./agent-core-session-test.mjs");
+await sessionTests.run({ check, leftovers });
 
 const searchMod = await import("../electron/session-search.ts");
 const piLine = JSON.stringify({
@@ -2664,6 +2619,98 @@ const greetingHits = await searchMod.searchSessionFiles({
   isProjectFile: (rel) => rel === "utils.ts" || rel === "greeting.ts",
 });
 check("search resolves a core edit path", greetingHits.some((h) => h.filePath === "greeting.ts"));
+
+const logicalDir = join(searchDir, "core-logical", "current");
+mkdirSync(logicalDir, { recursive: true, mode: 0o700 });
+const logicalPart = join(logicalDir, "part-000001.jsonl");
+const logicalActive = join(logicalDir, "session.jsonl");
+writeFileSync(
+  logicalPart,
+  `${JSON.stringify({ storageSeq: 1, type: "message", message: { role: "assistant", content: "context from the first segment" } })}\n`,
+);
+writeFileSync(
+  logicalActive,
+  `${JSON.stringify({ storageSeq: 2, type: "message", message: { role: "user", content: "compute in the active segment" } })}\n`,
+);
+const logicalHits = await searchMod.searchSessionFiles({
+  query: "compute",
+  files: [{ path: logicalActive, name: "core-logical/current/session.jsonl", mtimeMs: 2, segments: [logicalPart, logicalActive] }],
+  projectCwd: searchDir,
+  canonicalize: (p) => p,
+  isProjectFile: () => false,
+});
+check(
+  "search treats bundle segments as one logical session",
+  logicalHits.length === 1 &&
+    logicalHits[0]?.sessionFile === "core-logical/current/session.jsonl" &&
+    logicalHits[0]?.line === 2 &&
+    logicalHits[0]?.before.includes("first segment"),
+);
+const cancelledLogicalHits = await searchMod.searchSessionFiles({
+  query: "compute",
+  files: [{ path: logicalActive, name: "core-logical/current/session.jsonl", mtimeMs: 2, segments: [logicalPart, logicalActive] }],
+  projectCwd: searchDir,
+  canonicalize: (p) => p,
+  isProjectFile: () => false,
+  shouldStop: () => true,
+});
+check("logical session search honors cancellation", cancelledLogicalHits.length === 0);
+
+const rolloverDir = join(searchDir, "core-rollover", "current");
+mkdirSync(rolloverDir, { recursive: true, mode: 0o700 });
+const rolloverActive = join(rolloverDir, "session.jsonl");
+writeFileSync(
+  rolloverActive,
+  Array.from({ length: 300 }, (_, i) =>
+    JSON.stringify({ storageSeq: i + 1, type: "message", message: { role: "user", content: i === 10 ? "unique rollover needle" : `row ${i}` } }),
+  ).join("\n") + "\n",
+);
+let rolloverChecks = 0;
+let rolledDuringSearch = false;
+const rolloverHits = await searchMod.searchSessionFiles({
+  query: "rollover needle",
+  files: [{ path: rolloverActive, name: "core-rollover/current/session.jsonl", mtimeMs: 3, segments: [rolloverActive] }],
+  projectCwd: searchDir,
+  canonicalize: (p) => p,
+  isProjectFile: () => false,
+  shouldStop: () => {
+    rolloverChecks++;
+    if (!rolledDuringSearch && rolloverChecks === 100) {
+      renameSync(rolloverActive, join(rolloverDir, "part-000001.jsonl"));
+      writeFileSync(rolloverActive, "");
+      rolledDuringSearch = true;
+    }
+    return false;
+  },
+});
+check(
+  "logical session search retries a live rollover without duplicate hits",
+  rolledDuringSearch && rolloverHits.length === 1,
+  JSON.stringify({ rolledDuringSearch, rolloverChecks, hits: rolloverHits.map((hit) => ({ line: hit.line, text: hit.text })) }),
+);
+
+const appendDir = join(searchDir, "core-append", "current");
+mkdirSync(appendDir, { recursive: true, mode: 0o700 });
+const appendActive = join(appendDir, "session.jsonl");
+writeFileSync(appendActive, `${JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "stable append needle" } })}\n`);
+let appendChecks = 0;
+const appendHits = await searchMod.searchSessionFiles({
+  query: "append needle",
+  files: [{ path: appendActive, name: "core-append/current/session.jsonl", mtimeMs: 4, segments: [appendActive] }],
+  projectCwd: searchDir,
+  canonicalize: (p) => p,
+  isProjectFile: () => false,
+  shouldStop: () => {
+    appendChecks++;
+    writeFileSync(
+      appendActive,
+      `${JSON.stringify({ storageSeq: appendChecks + 1, type: "checkpoint" })}\n`,
+      { flag: "a" },
+    );
+    return false;
+  },
+});
+check("ordinary active appends do not discard logical-session hits", appendChecks > 0 && appendHits.length === 1);
 check("slash menu puts help first", SLASH_COMMANDS[0]?.name === "/help");
 check("slash menu puts exit last", SLASH_COMMANDS.at(-1)?.name === "/exit");
 check("slash /clear is listed", SLASH_COMMANDS.some((c) => c.name === "/clear"));
