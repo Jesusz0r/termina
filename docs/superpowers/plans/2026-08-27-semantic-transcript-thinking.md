@@ -444,9 +444,11 @@
 
   Expected: PASS from a fresh build.
 
-- [ ] **Step 5: Inspect all four themes manually**
+- [x] **Step 5: Inspect all four themes manually**
 
   In dark, light, high-contrast, and Atom core terminals, inspect assistant emphasis/code, thinking italic/dim text, running/done/failed/cancelled tools, hidden-thinking restoration, narrow resize, CJK/emoji wrapping, and Pi/shell palette isolation. Use the native Terminal checkbox to hide/show thinking, confirm its check follows only a committed toggle, and relaunch once while hidden to verify startup state. Record any contrast, row-leak, checkbox, or startup-state failure before proceeding.
+
+  Findings: Atom `brightBlack` on the terminal background was 2.55:1 (thinking/dim). Light `cyan` was 4.44:1 (markdown code). Raised Atom dim to `#8b92a0` and light cyan to `#09757c`. Tool backgrounds, hide/show thinking (committed checkbox + `--hide-thinking` startup), wrap, and Pi/shell `extendedAnsi` isolation already held.
 
 - [x] **Step 6: Verify scope and commit documentation**
 

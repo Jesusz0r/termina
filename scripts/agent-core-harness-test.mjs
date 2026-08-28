@@ -2983,6 +2983,14 @@ for (const theme of Object.keys(themesMod.TERMINAL_THEMES)) {
     `core ${theme} tool backgrounds keep 4.5 contrast`,
     coreTheme.extendedAnsi.every((bg) => contrastRatio(coreTheme.foreground, bg) >= 4.5),
   );
+  check(
+    `core ${theme} thinking dim keeps 4.5 contrast`,
+    contrastRatio(coreTheme.brightBlack, coreTheme.background) >= 4.5,
+  );
+  check(
+    `core ${theme} code cyan keeps 4.5 contrast`,
+    contrastRatio(coreTheme.cyan, coreTheme.background) >= 4.5,
+  );
 }
 
 const tuiMod = await import("../agent-core/tui.ts");
