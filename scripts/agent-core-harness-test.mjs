@@ -78,13 +78,12 @@ const {
   compactStreamBlocks,
   toProviderBlock,
   resolveSessionFile,
-  quarantineSessionFile,
-  MAX_SESSION_FILE_BYTES,
-  rotateSessionFile,
   sessionRotateStamp,
-  sliceSessionText,
-  writeForkedSession,
-  copySessionImageFiles,
+  MAX_SESSION_SEGMENT_BYTES,
+  MAX_SESSION_RECORD_BYTES,
+  isCoreSessionBundleFile,
+  isCoreSessionId,
+  prepareFreshSession,
   SLASH_COMMANDS,
   matchingSlashCommands,
   completeSlashLine,
@@ -1126,10 +1125,12 @@ const truncLines = [
 const truncated = replaySessionRecords(truncLines);
 check("truncate replay preserves boundary", truncated.ok && truncated.messages.length === 1 && truncated.messages[0]?.content === "keep");
 
-const sess = join(root, "term-1.session.jsonl");
-writeFileSync(sess, sessionLines);
-prepareSessionStream(sess, "fresh");
-check("fresh session stream truncates file", readFileSync(sess, "utf8") === "");
+const sessBundle = join(root, "term-1", "current", "session.jsonl");
+mkdirSync(join(root, "term-1", "current"), { recursive: true, mode: 0o700 });
+writeFileSync(sessBundle, sessionLines, { mode: 0o600 });
+const freshPrep = prepareFreshSession(sessBundle);
+check("fresh session archives non-empty current", freshPrep.ok && typeof freshPrep.archived === "string" && existsSync(freshPrep.archived));
+check("fresh session starts an empty active segment", readFileSync(sessBundle, "utf8") === "");
 
 check("duplicate storageSeq fails resume", replaySessionRecords(`${sessionLines}\n${JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "x" } })}`).ok === false);
 check("non-positive storageSeq fails", replaySessionRecords(JSON.stringify({ storageSeq: 0, type: "message", message: { role: "user", content: "x" } })).ok === false);
@@ -2295,13 +2296,23 @@ check(
 );
 
 check(
-  "resolveSessionFile override wins",
-  resolveSessionFile("/events", "term-1", "/tmp/sess.jsonl") === "/tmp/sess.jsonl",
+  "resolveSessionFile ignores a flat override",
+  resolveSessionFile("/events", "term-1", "/tmp/sess.jsonl") === join("/events", "term-1", "current", "session.jsonl"),
 );
 check(
-  "resolveSessionFile falls back to events dir",
-  resolveSessionFile("/events", "term-1") === join("/events", "term-1.session.jsonl"),
+  "resolveSessionFile derives the bundle path",
+  resolveSessionFile("/events", "term-1") === join("/events", "term-1", "current", "session.jsonl"),
 );
+check(
+  "resolveSessionFile accepts a matching bundle override",
+  resolveSessionFile("/events", "term-1", "/proj/term-1/current/session.jsonl") === "/proj/term-1/current/session.jsonl",
+);
+check("resolveSessionFile rejects an invalid session id", resolveSessionFile("/events", "../evil") === null);
+check("isCoreSessionBundleFile rejects a flat file", isCoreSessionBundleFile("/tmp/core-abc.jsonl") === false);
+check("isCoreSessionBundleFile accepts a bundle path", isCoreSessionBundleFile("/proj/core-abc/current/session.jsonl") === true);
+check("isCoreSessionId rejects a parent segment", isCoreSessionId("..") === false);
+check("MAX_SESSION_SEGMENT_BYTES is 8 MiB", MAX_SESSION_SEGMENT_BYTES === 8 * 1024 * 1024);
+check("MAX_SESSION_RECORD_BYTES is 1 MiB", MAX_SESSION_RECORD_BYTES === 1 * 1024 * 1024);
 
 const mcp = await import("../agent-core/mcp.ts");
 check("KERNEL_TOOL_NAMES includes fetch", mcp.KERNEL_TOOL_NAMES.has("fetch"));
@@ -2497,86 +2508,10 @@ check("composeTerminalRoster keeps unrestored sibling", composed[1]?.id === "ter
 const manyLive = Array.from({ length: 20 }, (_, i) => ({ id: `term-${i + 1}`, type: "agent", engine: "pi" }));
 check("composeTerminalRoster caps at 16", rosterMod.composeTerminalRoster(manyLive, []).length === rosterMod.MAX_TERMINAL_ROSTER);
 
-const qdir = mkdtempSync(join(tmpdir(), "agent-core-quarantine-"));
-leftovers.push(qdir);
-const qfile = join(qdir, "sess.jsonl");
-writeFileSync(qfile, '{"storageSeq":1}\n');
-check("quarantineSessionFile moves a file aside", quarantineSessionFile(qfile) === true && !existsSync(qfile) && existsSync(`${qfile}.bad`));
-writeFileSync(qfile, "second\n");
-check("quarantineSessionFile does not overwrite an existing aside file", quarantineSessionFile(qfile) === true && existsSync(`${qfile}.bad`) && readFileSync(`${qfile}.bad`, "utf8") === '{"storageSeq":1}\n');
-check("MAX_SESSION_FILE_BYTES is 32 MiB", MAX_SESSION_FILE_BYTES === 32 * 1024 * 1024);
-
-const sliceSrc = [
-  JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "u1" } }),
-  JSON.stringify({ storageSeq: 2, type: "message", message: { role: "assistant", content: "a1" } }),
-  JSON.stringify({ storageSeq: 3, type: "revision", kind: "prune", targets: [] }),
-  JSON.stringify({ storageSeq: 4, type: "message", message: { role: "user", content: "u2" } }),
-].join("\n") + "\n";
-const slice2 = sliceSessionText(sliceSrc, 2);
-check("slice keeps prefix messages", slice2.ok && slice2.kept === 2 && slice2.text.includes("\"u1\"") && !slice2.text.includes("\"u2\""));
-const slice3 = sliceSessionText(sliceSrc, 3);
-check("slice keeps revision records in the prefix", slice3.ok && slice3.kept === 3 && slice3.text.includes("\"prune\""));
-check("slice through 0 is empty", sliceSessionText(sliceSrc, 0).ok && sliceSessionText(sliceSrc, 0).text === "");
-check("slice rejects negative seq", sliceSessionText(sliceSrc, -1).ok === false);
-const dupSlice = sliceSessionText(
-  JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "a" } }) +
-    "\n" +
-    JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "b" } }) +
-    "\n",
-  1,
-);
-check("slice fails closed on duplicate storageSeq", dupSlice.ok === false);
-const truncSlice = sliceSessionText(sliceSrc + "{not json", 4);
-check("slice ignores a truncated final line", truncSlice.ok && truncSlice.kept === 4);
-const forkDir = mkdtempSync(join(tmpdir(), "agent-core-fork-"));
-leftovers.push(forkDir);
-const forkSrc = join(forkDir, "src.jsonl");
-const forkDst = join(forkDir, "out", "dst.jsonl");
-writeFileSync(forkSrc, sliceSrc);
-const writtenFork = await writeForkedSession(forkSrc, forkDst, 2);
-check("writeForkedSession writes the sliced prefix", writtenFork.ok && existsSync(forkDst) && readFileSync(forkDst, "utf8").includes("\"a1\"") && !readFileSync(forkDst, "utf8").includes("\"u2\""));
-const emptyFork = await writeForkedSession(forkSrc, join(forkDir, "empty.jsonl"), 0);
-check("writeForkedSession through 0 writes an empty file", emptyFork.ok && readFileSync(join(forkDir, "empty.jsonl"), "utf8") === "");
-writeFileSync(join(forkDir, "src-img-1.png"), png1x1);
-writeFileSync(join(forkDir, "other-img-1.png"), png1x1);
-const forkImgDst = join(forkDir, "out-img", "dst.jsonl");
-await writeForkedSession(forkSrc, forkImgDst, 2);
-check("writeForkedSession copies sidecar images", existsSync(join(forkDir, "out-img", "src-img-1.png")));
-check("writeForkedSession does not copy a sibling session's images", !existsSync(join(forkDir, "out-img", "other-img-1.png")));
-const copyOnlyDir = join(forkDir, "copy-only");
-mkdirSync(copyOnlyDir);
-await copySessionImageFiles(forkSrc, join(copyOnlyDir, "session.jsonl"));
-check("copySessionImageFiles copies without rewriting jsonl", existsSync(join(copyOnlyDir, "src-img-1.png")));
-check("copySessionImageFiles keeps the source stem", !existsSync(join(copyOnlyDir, "other-img-1.png")));
-
-const rotDir = mkdtempSync(join(tmpdir(), "agent-core-rotate-"));
-leftovers.push(rotDir);
-const rotLive = join(rotDir, "core-aaaa.jsonl");
-check("rotateSessionFile skips a missing file", rotateSessionFile(rotLive).ok && rotateSessionFile(rotLive).aside === null);
-writeFileSync(rotLive, "");
-check("rotateSessionFile skips an empty file", rotateSessionFile(rotLive).ok && rotateSessionFile(rotLive).aside === null && existsSync(rotLive));
-writeFileSync(rotLive, JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "keep me" } }) + "\n");
 const rotFixed = new Date(2026, 7, 26, 15, 4, 5).getTime();
-const rotated = rotateSessionFile(rotLive, rotFixed);
 check("sessionRotateStamp is filesystem-safe", sessionRotateStamp(rotFixed) === "2026-08-26T15-04-05");
-check(
-  "rotateSessionFile moves a non-empty session aside",
-  rotated.ok &&
-    rotated.aside === join(rotDir, "core-aaaa-2026-08-26T15-04-05.jsonl") &&
-    !existsSync(rotLive) &&
-    existsSync(rotated.aside) &&
-    readFileSync(rotated.aside, "utf8").includes("keep me"),
-);
-writeFileSync(rotLive, JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "newer" } }) + "\n");
-const rotatedAgain = rotateSessionFile(rotLive, rotFixed);
-check(
-  "rotateSessionFile does not overwrite an existing aside file",
-  rotatedAgain.ok &&
-    rotatedAgain.aside === join(rotDir, "core-aaaa-2026-08-26T15-04-05-1.jsonl") &&
-    readFileSync(rotated.aside, "utf8").includes("keep me") &&
-    existsSync(rotatedAgain.aside) &&
-    readFileSync(rotatedAgain.aside, "utf8").includes("newer"),
-);
+const sessionTests = await import("./agent-core-session-test.mjs");
+await sessionTests.run({ check, leftovers });
 
 const searchMod = await import("../electron/session-search.ts");
 const piLine = JSON.stringify({
