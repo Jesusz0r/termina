@@ -644,6 +644,9 @@ Before considering an implementation complete, check:
 17. Did I avoid unrelated refactoring?
 18. Is this the simplest correct solution that remains easy to understand
     and maintain?
+19. If I touched models, tokens, cache, thinking, effort, provider
+    protocols, or default model ids: did I search the live official docs
+    in this turn before I edited code?
 
 If a simpler solution provides the same correctness, security, clarity,
 and maintainability, choose the simpler solution.
@@ -673,6 +676,44 @@ and think:
   project tab bar). Switching tabs never interrupts agents; each project
   owns its workspaces, store, mine marks, and worldline manager.
   Terminal-scoped event handlers resolve the terminal's own project.
+
+## Live provider docs for agent-core
+
+Provider APIs, model ids, context windows, thinking and effort fields,
+prompt-cache markers, tool type strings, and default model names change
+often. Session memory, this file, and comments in `agent-core/` are not
+the source of truth for those facts.
+
+Before you edit `agent-core/` (or docs that describe it) for any of the
+items below, search the live official docs in **this turn**. Do not start
+from an earlier conversation, a remembered model list, or an older
+request body.
+
+Search when the work touches:
+
+- default or fallback model ids
+- context windows, output caps, or token budgets
+- thinking, reasoning, effort, or verbosity request fields
+- prompt cache markers, keys, TTLs, or cache modes
+- provider protocol choice (Messages, Responses, Completions,
+  generateContent) or endpoint paths
+- provider-hosted tools (`web_search_*` and similar)
+- auth headers that a gateway documents per protocol
+
+Use the provider's current documentation, not a blog paraphrase, as the
+authority:
+
+- Anthropic: `https://platform.claude.com/docs`
+- OpenAI: `https://developers.openai.com/api/docs`
+- Google Gemini: `https://ai.google.dev/gemini-api/docs`
+- xAI: `https://docs.x.ai`
+- OpenCode Zen: `https://opencode.ai/docs/zen`
+- OpenRouter: `https://openrouter.ai/docs`
+
+Confirm the field names, allowed values, and which login/protocol they
+apply to. Then change the canonical owner (`agent-core/auth.ts`,
+`agent-core/main.ts`, `agent-core/openai-compat.ts`). Do not add a second
+cache engine, a second protocol mapper, or a second model catalog.
 
 ## Glossary
 
@@ -894,3 +935,5 @@ The renderer never talks to the agent. It only renders what main pushes.
 - Build with `node scripts/build.mjs`.
 - Run the e2e suites in `scripts/` against an Electron instance on port 9222.
 - A change must keep the existing test suites green.
+- Model, token, cache, thinking, and protocol changes also require a live
+  docs check in this turn. See **Live provider docs for agent-core**.

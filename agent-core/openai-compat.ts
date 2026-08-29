@@ -3,7 +3,8 @@
  *
  * The kernel stores Anthropic-shaped messages. This module is the only
  * translator for OpenAI Responses (openai, xai, github-copilot, openrouter,
- * openai-codex) and Chat Completions (google).
+ * openai-codex), Chat Completions (google login), and Google generateContent
+ * (OpenCode Zen Gemini).
  */
 
 export type ToolDef = {
@@ -122,6 +123,43 @@ export function toCompletionsMessages(system: string, messages: KernelMessage[])
   return out;
 }
 
+/** Stamp the last input_text part. Assistant output_text is not a valid OpenAI breakpoint. */
+export function markLastInputText(
+  input: Array<Record<string, unknown>>,
+  extra: Record<string, unknown>,
+): Array<Record<string, unknown>> {
+  for (let i = input.length - 1; i >= 0; i--) {
+    const item = input[i]!;
+    const content = item.content;
+    if (!Array.isArray(content)) continue;
+    for (let j = content.length - 1; j >= 0; j--) {
+      const part = content[j] as Record<string, unknown>;
+      if (!part || part.type !== "input_text" || typeof part.text !== "string") continue;
+      const next = input.slice();
+      const parts = content.slice() as Array<Record<string, unknown>>;
+      parts[j] = { ...part, ...extra };
+      next[i] = { ...item, content: parts };
+      return next;
+    }
+  }
+  return input;
+}
+
+/** Mark the last user input_text. Used before a volatile overlay. */
+export function markResponsesPrefixBreakpoint(
+  input: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  return markLastInputText(input, { prompt_cache_breakpoint: { mode: "explicit" as const } });
+}
+
+function markPrefixThenTail(
+  input: Array<Record<string, unknown>>,
+  extra: Record<string, unknown>,
+): Array<Record<string, unknown>> {
+  if (input.length < 2) return input;
+  return [...markLastInputText(input.slice(0, -1), extra), input[input.length - 1]!];
+}
+
 export function toResponsesInput(messages: KernelMessage[]): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = [];
   for (const m of messages) {
@@ -193,11 +231,23 @@ export function toResponsesInput(messages: KernelMessage[]): Array<Record<string
 
 export type CompletionsOpts = {
   cacheKey?: string;
+  sessionId?: string;
+  cacheControl?: boolean;
+  explicitCacheBreakpoint?: boolean;
   maxTokens?: number;
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  reasoningContext?: "all_turns" | "current_turn";
+  textVerbosity?: "low" | "medium" | "high";
   googleThinking?: boolean;
   includeEncryptedReasoning?: boolean;
+  promptCacheMode?: "implicit" | "explicit";
+  explicitCacheSkipTail?: boolean;
 };
+
+function applyCacheOpts(body: Record<string, unknown>, opts?: CompletionsOpts): void {
+  if (opts?.cacheKey) body.prompt_cache_key = opts.cacheKey;
+  if (opts?.sessionId) body.session_id = opts.sessionId;
+}
 
 export function completionsBody(
   model: string,
@@ -216,7 +266,7 @@ export function completionsBody(
     messages: toCompletionsMessages(system, messages),
     tools: toCompletionsTools(tools),
   };
-  if (opts?.cacheKey) body.prompt_cache_key = opts.cacheKey;
+  applyCacheOpts(body, opts);
   if (opts?.googleThinking && opts.reasoningEffort && opts.reasoningEffort !== "none") {
     body.extra_body = {
       google: {
@@ -226,7 +276,117 @@ export function completionsBody(
         },
       },
     };
+  } else if (opts?.reasoningEffort) {
+    body.reasoning_effort = opts.reasoningEffort;
   }
+  return body;
+}
+
+function pushGoogleContent(
+  out: Array<Record<string, unknown>>,
+  role: "user" | "model",
+  parts: Array<Record<string, unknown>>,
+): void {
+  if (!parts.length) return;
+  const last = out[out.length - 1];
+  if (last && last.role === role && Array.isArray(last.parts)) {
+    last.parts = [...last.parts, ...parts];
+    return;
+  }
+  out.push({ role, parts });
+}
+
+function toGoogleContents(messages: KernelMessage[]): Array<Record<string, unknown>> {
+  const names = new Map<string, string>();
+  const out: Array<Record<string, unknown>> = [];
+  for (const m of messages) {
+    if (typeof m.content === "string") {
+      if (m.content) {
+        pushGoogleContent(out, m.role === "assistant" ? "model" : "user", [{ text: m.content }]);
+      }
+      continue;
+    }
+    if (m.role === "assistant") {
+      const parts: Array<Record<string, unknown>> = [];
+      for (const b of m.content) {
+        if (b.type === "thinking") {
+          // Gemini 3 rejects replayed thought parts without a thoughtSignature.
+          const sig = typeof b.signature === "string" ? b.signature : "";
+          if (!sig) continue;
+          const text = typeof b.thinking === "string" ? b.thinking : "";
+          parts.push({ text, thought: true, thoughtSignature: sig });
+          continue;
+        }
+        if (b.type === "text") {
+          const text = blockText(b);
+          if (text) parts.push({ text });
+          continue;
+        }
+        if (b.type === "tool_use") {
+          const id = String(b.id ?? "");
+          const name = String(b.name ?? "");
+          if (id && name) names.set(id, name);
+          if (!name) continue;
+          parts.push({
+            functionCall: { name, args: b.input && typeof b.input === "object" && !Array.isArray(b.input) ? b.input : {} },
+          });
+        }
+      }
+      pushGoogleContent(out, "model", parts);
+      continue;
+    }
+    const parts: Array<Record<string, unknown>> = [];
+    for (const b of m.content) {
+      if (b.type === "tool_result") {
+        const id = String(b.tool_use_id ?? "");
+        const name = names.get(id);
+        if (!name) continue;
+        parts.push({
+          functionResponse: {
+            name,
+            response: { output: blockText(b) },
+          },
+        });
+      } else if (b.type === "text") {
+        const text = blockText(b);
+        if (text) parts.push({ text });
+      } else if (b.type === "image") {
+        const url = imageDataUrl(b);
+        const match = url?.match(/^data:([^;]+);base64,(.+)$/);
+        if (match) parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
+      }
+    }
+    pushGoogleContent(out, "user", parts);
+  }
+  return out;
+}
+
+/** Zen Gemini generateContent. Model id lives in the URL, not the body. */
+export function googleGenerateBody(
+  system: string,
+  messages: KernelMessage[],
+  tools: ToolDef[],
+  opts?: CompletionsOpts,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = { contents: toGoogleContents(messages) };
+  if (system) body.systemInstruction = { parts: [{ text: system }] };
+  if (tools.length) {
+    body.tools = [
+      {
+        functionDeclarations: tools.map((t) => ({
+          name: t.name,
+          description: t.description,
+          parameters: t.input_schema,
+        })),
+      },
+    ];
+  }
+  const gen: Record<string, unknown> = {};
+  if (opts?.maxTokens !== undefined) gen.maxOutputTokens = Math.min(opts.maxTokens, 65_536);
+  if (opts?.googleThinking && opts.reasoningEffort && opts.reasoningEffort !== "none") {
+    gen.thinkingConfig = { thinkingLevel: opts.reasoningEffort, includeThoughts: true };
+  }
+  if (Object.keys(gen).length) body.generationConfig = gen;
   return body;
 }
 
@@ -249,8 +409,27 @@ export function responsesBody(
   };
   if (opts?.maxTokens !== undefined) body.max_output_tokens = opts.maxTokens;
   if (opts?.includeEncryptedReasoning !== false) body.include = ["reasoning.encrypted_content"];
-  if (opts?.cacheKey) body.prompt_cache_key = opts.cacheKey;
-  if (opts?.reasoningEffort) body.reasoning = { effort: opts.reasoningEffort, summary: "auto" };
+  applyCacheOpts(body, opts);
+  if (opts?.promptCacheMode === "explicit") {
+    body.prompt_cache_options = { mode: "explicit", ttl: "30m" };
+  }
+  const input = body.input as Array<Record<string, unknown>>;
+  if (opts?.explicitCacheBreakpoint) {
+    const extra = { prompt_cache_breakpoint: { mode: "explicit" as const } };
+    body.input =
+      opts.explicitCacheSkipTail === false ? markLastInputText(input, extra) : markPrefixThenTail(input, extra);
+  } else if (opts?.cacheControl) {
+    // OpenRouter converts a block cache_control onto Anthropic. Do not put
+    // cache_control on the Responses root: that field is a chat-completions shape.
+    body.input = markPrefixThenTail(input, { cache_control: { type: "ephemeral" as const } });
+  }
+  if (opts?.reasoningEffort || opts?.reasoningContext) {
+    body.reasoning = {
+      ...(opts.reasoningEffort ? { effort: opts.reasoningEffort, summary: "auto" } : {}),
+      ...(opts.reasoningContext ? { context: opts.reasoningContext } : {}),
+    };
+  }
+  if (opts?.textVerbosity) body.text = { verbosity: opts.textVerbosity };
   return body;
 }
 
@@ -343,6 +522,122 @@ export function completionResultFromEvents(
     blocks.push({ type: "tool_use", id: call.id, name: call.name, input });
   }
   return { blocks, usage, ttftMs, stopReason };
+}
+
+function usageFromGoogle(u: Record<string, unknown> | undefined): CallResultLike["usage"] {
+  if (!u) return null;
+  const prompt = Number(u.promptTokenCount ?? 0) || 0;
+  const output = Number(u.candidatesTokenCount ?? 0) || 0;
+  const cached = Number(u.cachedContentTokenCount ?? 0) || 0;
+  return {
+    input: Math.max(0, prompt - cached),
+    cacheRead: cached,
+    cacheWrite: 0,
+    output,
+  };
+}
+
+function googleParts(event: Record<string, unknown>): Array<Record<string, unknown>> {
+  const candidates = event.candidates;
+  if (!Array.isArray(candidates) || !candidates[0] || typeof candidates[0] !== "object") return [];
+  const content = (candidates[0] as { content?: { parts?: unknown } }).content;
+  const parts = content && typeof content === "object" ? content.parts : undefined;
+  return Array.isArray(parts) ? (parts.filter((p) => p && typeof p === "object") as Array<Record<string, unknown>>) : [];
+}
+
+export function googleLiveDelta(
+  event: Record<string, unknown>,
+): { text: string; thinking: string } | null {
+  let text = "";
+  let thinking = "";
+  for (const part of googleParts(event)) {
+    const value = typeof part.text === "string" ? part.text : "";
+    if (!value) continue;
+    if (part.thought === true) thinking += value;
+    else text += value;
+  }
+  return text || thinking ? { text, thinking } : null;
+}
+
+export function googleResultFromEvents(
+  events: Array<Record<string, unknown>>,
+  _onText: (text: string) => void,
+  started: number,
+): CallResultLike {
+  let text = "";
+  const thoughts: Array<{ thinking: string; signature: string }> = [];
+  const thoughtKeys = new Set<string>();
+  const calls: Array<{ id: string; name: string; args: string }> = [];
+  const callKeys = new Set<string>();
+  let usage: CallResultLike["usage"] = null;
+  let ttftMs: number | null = null;
+  let stopReason: string | null = null;
+  for (const ev of events) {
+    if (ev.usageMetadata && typeof ev.usageMetadata === "object") {
+      usage = usageFromGoogle(ev.usageMetadata as Record<string, unknown>);
+    }
+    const candidates = ev.candidates;
+    if (Array.isArray(candidates) && candidates[0] && typeof candidates[0] === "object") {
+      const finish = (candidates[0] as { finishReason?: unknown }).finishReason;
+      if (typeof finish === "string") stopReason = finish;
+    }
+    const live = googleLiveDelta(ev);
+    if (live?.text) {
+      if (ttftMs === null) ttftMs = Date.now() - started;
+      text += live.text;
+    }
+    if (live?.thinking && ttftMs === null) ttftMs = Date.now() - started;
+    for (const part of googleParts(ev)) {
+      if (part.thought === true) {
+        const signature = typeof part.thoughtSignature === "string" ? part.thoughtSignature : "";
+        const thinking = typeof part.text === "string" ? part.text : "";
+        if (!signature) continue;
+        if (thoughtKeys.has(signature)) continue;
+        thoughtKeys.add(signature);
+        thoughts.push({ thinking, signature });
+        continue;
+      }
+      const call = part.functionCall;
+      if (!call || typeof call !== "object") continue;
+      const fn = call as { name?: unknown; args?: unknown };
+      const name = typeof fn.name === "string" ? fn.name : "";
+      if (!name) continue;
+      const args = JSON.stringify(fn.args ?? {});
+      const key = `${name}:${args}`;
+      if (callKeys.has(key)) continue;
+      callKeys.add(key);
+      calls.push({ id: `call_${calls.length + 1}`, name, args });
+    }
+  }
+  const blocks: Array<Record<string, unknown>> = [];
+  for (const thought of thoughts) {
+    blocks.push({ type: "thinking", thinking: thought.thinking, signature: thought.signature });
+  }
+  if (text) blocks.push({ type: "text", text });
+  for (const call of calls) {
+    let input: unknown = {};
+    try {
+      input = JSON.parse(call.args || "{}");
+    } catch {
+      input = {};
+    }
+    blocks.push({ type: "tool_use", id: call.id, name: call.name, input });
+  }
+  return { blocks, usage, ttftMs, stopReason };
+}
+
+export function textFromGooglePayload(data: unknown): { text: string; usage: CallResultLike["usage"] } {
+  const rec = data && typeof data === "object" ? (data as Record<string, unknown>) : {};
+  const parts = googleParts(rec);
+  const text = parts
+    .filter((p) => p.thought !== true && typeof p.text === "string")
+    .map((p) => p.text as string)
+    .join("")
+    .trim();
+  const usage = rec.usageMetadata && typeof rec.usageMetadata === "object"
+    ? usageFromGoogle(rec.usageMetadata as Record<string, unknown>)
+    : null;
+  return { text, usage };
 }
 
 function deltaText(delta: unknown): string {

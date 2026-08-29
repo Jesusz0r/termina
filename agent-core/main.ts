@@ -18,7 +18,7 @@
  * - Two-role routing map (main + summary), env-overridable
  * - Streaming always; tool calls run concurrently behind a small bound
  * - cwd jail; grep/glob; unique edit; interruptible bash; web_search; skill index; prefix cache_control; traces
- * - last tool_result cache pin (Anthropic); OpenAI/Codex prompt_cache_key; 429 retry; model-aware effort
+ * - last tool_result cache pin (Anthropic); session prompt_cache_key by model family; 429 retry; model-aware effort
  * - provider auth (Anthropic, OpenAI, ChatGPT Codex, xAI, Google, OpenRouter)
  */
 import { execFileSync, spawn } from "node:child_process";
@@ -57,6 +57,13 @@ import {
   parseModelRef,
   providerProtocol,
   usesResponsesApi,
+  usesAnthropicCacheMarkers,
+  usesPromptCacheKey,
+  usesOpenAIExplicitCache,
+  cacheSessionKey,
+  cacheSessionHeaders,
+  googleNativeHeaders,
+  modelLeaf,
   refreshOauth,
   resolveAuth,
   runLogin,
@@ -67,6 +74,9 @@ import {
   completionsBody,
   completionLiveDelta,
   completionResultFromEvents,
+  googleGenerateBody,
+  googleLiveDelta,
+  googleResultFromEvents,
   readSseJson,
   responsesBody,
   responsesLiveDelta,
@@ -168,10 +178,10 @@ let summaryRoute = parseModelRef(
   process.env.TERMINA_CORE_SUMMARY_MODEL ? undefined : route.provider,
 );
 const catalogs = new Map<ProviderId, ModelInfo[]>();
-const OUTPUT_RESERVE = 16_384;
-/** Example starting values; never spec constants. Thinking counts against max_tokens. */
+/** Leave room for thinking output. Thinking counts against max_tokens. */
 const OUTPUT_CAP = 16_384;
-const THINKING_OUTPUT_CAP = 32_768;
+const THINKING_OUTPUT_CAP = 64_000;
+const OUTPUT_RESERVE = THINKING_OUTPUT_CAP;
 /** Fixed-budget thinking on Claude 4.5 and earlier. Must stay below THINKING_OUTPUT_CAP. */
 const LEGACY_THINK_BUDGET = 16_384;
 const HIGH_WATER = 0.8;
@@ -183,7 +193,7 @@ const PROTECT_MAX = 40_000;
 export function defaultContextWindow(provider: ProviderId, model: string): number {
   const id = model.toLowerCase();
   if (id.includes("haiku")) return 200_000;
-  if (provider === "xai") return 500_000;
+  if (provider === "xai" || modelLeaf(model).startsWith("grok")) return 500_000;
   if (provider === "anthropic" || provider === "google") return 1_000_000;
   return 1_050_000;
 }
@@ -288,15 +298,42 @@ function responsesReasoningModel(model: string): boolean {
   return openAiFamilyModel(model) || claudeThinkingApi(model) !== "none" || /gemini-[3-9]/.test(id);
 }
 
+function gemini3Model(model: string): boolean {
+  return /gemini-[3-9]/.test(model.toLowerCase());
+}
+
+function glm52Model(model: string): boolean {
+  const id = model.toLowerCase();
+  return /glm-5[.-]2/.test(id) || id.includes("glm-5p2");
+}
+
+/** Anthropic thinking fields belong on Messages + a Claude model, not on the login id. */
+function usesAnthropicThinking(provider: ProviderId, model: string): boolean {
+  return providerProtocol(provider, model) === "anthropic-messages" && claudeThinkingApi(model) !== "none";
+}
+
+/** Effort that this protocol actually sends. Login id is not enough. */
+function usesModelEffort(provider: ProviderId, model: string): boolean {
+  if (usesAnthropicThinking(provider, model)) return true;
+  if (usesResponsesApi(provider, model) && responsesReasoningModel(model)) return true;
+  if (gemini3Model(model) && (provider === "google" || providerProtocol(provider, model) === "google-generate")) {
+    return true;
+  }
+  return glm52Model(model);
+}
+
 function effortLevelMap(provider: ProviderId, model: string): EffortLevelMap {
   const id = model.toLowerCase();
   const map: EffortLevelMap = {};
-  if (provider === "google" && /gemini-[3-9]/.test(id)) {
+  if (gemini3Model(model) && (provider === "google" || providerProtocol(provider, model) === "google-generate")) {
     map.off = null;
     if (/gemini-3(?:\.\d+)?-pro/.test(id)) {
       map.minimal = null;
-      map.medium = null;
+      // gemini-3-pro (no minor) rejects medium. 3.1 Pro and later accept it.
+      if (!/gemini-3\.\d+-pro/.test(id)) map.medium = null;
     }
+    // Gemini 3.7 Flash returns 400 on thinking_level minimal.
+    if (/gemini-3\.7/.test(id) && id.includes("flash") && !id.includes("lite")) map.minimal = null;
     return map;
   }
   if (claudeThinkingApi(model) === "adaptive") {
@@ -304,6 +341,15 @@ function effortLevelMap(provider: ProviderId, model: string): EffortLevelMap {
     map.max = "max";
     if (/(?:opus-4[.-][78]|(?:sonnet|opus|fable)-5)(?:$|[^0-9])/.test(id)) map.xhigh = "xhigh";
     if (thinkingLockedOn(model)) map.off = null;
+    return map;
+  }
+  if (glm52Model(model)) {
+    map.off = null;
+    map.minimal = null;
+    map.low = null;
+    map.medium = null;
+    if (usesResponsesApi(provider, model)) map.xhigh = "xhigh";
+    else map.max = "max";
     return map;
   }
   if (!openAiFamilyModel(model)) return map;
@@ -320,8 +366,8 @@ function effortLevelMap(provider: ProviderId, model: string): EffortLevelMap {
     return map;
   }
   if (/gpt-5\.[3-6]|codex/.test(id)) {
-    if (provider === "openai") map.minimal = null;
-    else if (provider === "openai-codex" || provider === "github-copilot") map.minimal = "low";
+    if (provider === "openai-codex" || provider === "github-copilot") map.minimal = "low";
+    else map.minimal = null;
     if (provider === "github-copilot" || (id.includes("codex") && provider !== "openrouter" && !id.includes("5.6"))) {
       map.off = null;
     }
@@ -332,7 +378,7 @@ function effortLevelMap(provider: ProviderId, model: string): EffortLevelMap {
 }
 
 export function supportedEffortLevels(provider: ProviderId, model: string): EffortLevel[] {
-  if (provider === "anthropic" ? claudeThinkingApi(model) === "none" : !responsesReasoningModel(model)) return ["off"];
+  if (!usesModelEffort(provider, model)) return ["off"];
   const map = effortLevelMap(provider, model);
   return EFFORT_LEVELS.filter((level) => {
     const mapped = map[level];
@@ -364,7 +410,7 @@ export function reasoningEffortFor(
   model: string,
   effort: EffortLevel,
 ): ReasoningEffort | undefined {
-  if (provider === "anthropic" || !responsesReasoningModel(model)) return undefined;
+  if (usesAnthropicThinking(provider, model) || !usesModelEffort(provider, model)) return undefined;
   const actual = clampEffortLevel(provider, model, effort);
   const mapped = effortLevelMap(provider, model)[actual];
   if (typeof mapped === "string") return mapped as ReasoningEffort;
@@ -376,7 +422,7 @@ export function thinkingRequestFor(
   model: string,
   effort: EffortLevel,
 ): ThinkingRequest | undefined {
-  if (provider !== "anthropic") return undefined;
+  if (!usesAnthropicThinking(provider, model)) return undefined;
   const api = claudeThinkingApi(model);
   if (api === "none") return undefined;
   const actual = clampEffortLevel(provider, model, effort);
@@ -397,7 +443,7 @@ export function thinkingRequestFor(
 }
 
 export function adaptiveEffortFor(provider: ProviderId, model: string, effort: EffortLevel): ReasoningEffort | undefined {
-  if (provider !== "anthropic" || claudeThinkingApi(model) !== "adaptive") return undefined;
+  if (!usesAnthropicThinking(provider, model) || claudeThinkingApi(model) !== "adaptive") return undefined;
   const actual = clampEffortLevel(provider, model, effort);
   if (actual === "off") return undefined;
   const mapped = effortLevelMap(provider, model)[actual];
@@ -410,6 +456,27 @@ export function effectiveEffortFor(provider: ProviderId, model: string, effort: 
 
 export function outputTokenBudget(opts: { thinking: boolean }): number {
   return opts.thinking ? THINKING_OUTPUT_CAP : OUTPUT_CAP;
+}
+
+/** Grok rejects OpenAI encrypted-reasoning include, including on Zen and OpenRouter. */
+export function includeEncryptedReasoning(provider: ProviderId, model: string): boolean {
+  if (provider === "xai") return false;
+  if (modelLeaf(model).startsWith("grok")) return false;
+  return true;
+}
+
+export function gpt56ReasoningContext(model: string): "all_turns" | undefined {
+  const leaf = modelLeaf(model);
+  if (!(leaf.startsWith("gpt-5.6") || leaf.includes("gpt-5.6"))) return undefined;
+  return "all_turns";
+}
+
+/** GPT-5 coding requests keep short answers. Pro and Codex keep provider defaults. */
+export function gpt5TextVerbosity(model: string): "low" | undefined {
+  const leaf = modelLeaf(model);
+  if (!leaf.startsWith("gpt-5")) return undefined;
+  if (leaf.includes("pro") || leaf.includes("codex")) return undefined;
+  return "low";
 }
 
 export function parseEffortCommand(
@@ -2409,38 +2476,57 @@ export const WEB_SEARCH_TOOL = {
   max_uses: 5,
 } as const;
 
+export type AnthropicCacheMark = { type: "ephemeral"; ttl?: "1h" };
+
+/** 1-hour TTL on the Anthropic login only. Zen and OpenRouter keep the 5-minute default. */
+export function anthropicCacheMark(provider: ProviderId): AnthropicCacheMark {
+  return provider === "anthropic" ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
+}
+
 export function buildCachedPrefix(
   system: string,
   tools: Array<Record<string, unknown>>,
+  provider: ProviderId = "anthropic",
 ): {
-  cache_control: { type: "ephemeral" };
-  system: Array<{ type: "text"; text: string; cache_control: { type: "ephemeral" } }>;
-  tools: Array<Record<string, unknown> & { cache_control?: { type: "ephemeral" } }>;
+  system: Array<{ type: "text"; text: string; cache_control: AnthropicCacheMark }>;
+  tools: Array<Record<string, unknown> & { cache_control?: AnthropicCacheMark }>;
 } {
-  const copied = tools.map((t, i) =>
-    i === tools.length - 1 ? { ...t, cache_control: { type: "ephemeral" as const } } : { ...t },
-  );
+  const mark = anthropicCacheMark(provider);
+  const copied = tools.map((t, i) => (i === tools.length - 1 ? { ...t, cache_control: mark } : { ...t }));
   return {
-    cache_control: { type: "ephemeral" },
-    system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
+    system: [{ type: "text", text: system, cache_control: mark }],
     tools: copied,
   };
 }
 
-/** Stamp cache_control on a copy of the last tool_result. Do not mutate input. */
+const HISTORY_CACHE_BLOCKS = new Set(["text", "tool_result", "image"]);
+
+/** Stamp cache_control on the last stable history block. Skip thinking and
+ *  tool_use. The request overlay sits after this mark so it can change. */
 export function stampHistoryCache(
   messages: Array<{ role: string; content: unknown }>,
+  provider: ProviderId = "anthropic",
 ): Array<{ role: string; content: unknown }> {
+  const mark = anthropicCacheMark(provider);
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]!;
+    if (typeof m.content === "string") {
+      if (!m.content) continue;
+      const next = messages.slice();
+      next[i] = {
+        ...m,
+        content: [{ type: "text", text: m.content, cache_control: mark }],
+      };
+      return next;
+    }
     if (!Array.isArray(m.content)) continue;
     const blocks = m.content as Array<Record<string, unknown>>;
     for (let j = blocks.length - 1; j >= 0; j--) {
       const b = blocks[j]!;
-      if (b.type !== "tool_result") continue;
+      if (typeof b.type !== "string" || !HISTORY_CACHE_BLOCKS.has(b.type)) continue;
       const next = messages.slice();
       const copied = blocks.slice();
-      copied[j] = { ...b, cache_control: { type: "ephemeral" as const } };
+      copied[j] = { ...b, cache_control: mark };
       next[i] = { ...m, content: copied };
       return next;
     }
@@ -2489,8 +2575,10 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/** Append provider search after cached client tools. Do not put
- *  cache_control on the server tool: a strict schema can 400. */
+/** Append Anthropic server search after cached client tools.
+ *  Only the Anthropic login: web_search is executed with that org's key
+ *  and must be enabled in the Anthropic console. OpenCode Zen and
+ *  OpenRouter do not run that tool; they 400 or ignore it. */
 export function requestTools(
   cachedClientTools: Array<Record<string, unknown>>,
   provider: string = "anthropic",
@@ -3254,7 +3342,7 @@ interface CallResult {
 
 let currentAbort: AbortController | null = null;
 
-function endpointFor(auth: { providerId: ProviderId; baseUrl: string }, model = ""): string {
+function endpointFor(auth: { providerId: ProviderId; baseUrl: string }, model = "", stream = true): string {
   const base = auth.baseUrl.replace(/\/$/, "");
   const proto = providerProtocol(auth.providerId, model);
   if (proto === "anthropic-messages") {
@@ -3270,6 +3358,12 @@ function endpointFor(auth: { providerId: ProviderId; baseUrl: string }, model = 
     if (base.endsWith("/responses")) return base;
     return `${base}/responses`;
   }
+  if (proto === "google-generate") {
+    const leaf = modelLeaf(model) || "gemini-3.7-flash";
+    return stream
+      ? `${base}/models/${leaf}:streamGenerateContent?alt=sse`
+      : `${base}/models/${leaf}:generateContent`;
+  }
   return `${base}/chat/completions`;
 }
 
@@ -3278,6 +3372,7 @@ async function providerPost(
   body: unknown,
   signal: AbortSignal | undefined,
   model = "",
+  stream = true,
 ): Promise<Response> {
   let replayed = false;
   let retries = 0;
@@ -3285,11 +3380,13 @@ async function providerPost(
     if (signal?.aborted) throw new Error("aborted");
     const auth = await resolveAuth(providerId);
     if (!auth.ok) throw new Error(auth.error);
-    const headers = { ...auth.headers };
+    let headers = { ...auth.headers, ...cacheSessionHeaders(providerId, sessionId) };
+    if (providerProtocol(providerId, model) === "google-generate") headers = googleNativeHeaders(headers);
     if (body && typeof body === "object" && (body as { stream?: unknown }).stream === true) {
       headers.accept = "text/event-stream";
     }
-    const res = await fetch(endpointFor(auth, model), {
+    if (stream && providerProtocol(providerId, model) === "google-generate") headers.accept = "text/event-stream";
+    const res = await fetch(endpointFor(auth, model, stream), {
       method: "POST",
       headers,
       body: JSON.stringify(body),
@@ -3336,6 +3433,9 @@ async function completeText(
   signal: AbortSignal | undefined,
 ): Promise<{ text: string; usage: Usage | null }> {
   const proto = providerProtocol(providerId, model);
+  const cacheKey = cacheSessionKey(sessionId);
+  const sendCacheKey = Boolean(cacheKey) && usesPromptCacheKey(providerId, model);
+  const sendSessionId = providerId === "openrouter" ? cacheKey || undefined : undefined;
   if (proto === "anthropic-messages") {
     const thinking = thinkingRequestFor(providerId, model, "off");
     const res = await providerPost(
@@ -3355,6 +3455,32 @@ async function completeText(
     const text = (data.content ?? []).map((c) => c.text ?? "").join("").trim();
     return { text, usage: normalizeUsage(data.usage) };
   }
+  if (proto === "google-generate") {
+    const effort = reasoningEffortFor(providerId, model, "off");
+    const res = await providerPost(
+      providerId,
+      googleGenerateBody(
+        system,
+        [{ role: "user", content: prompt }],
+        [],
+        {
+          maxTokens: 2048,
+          ...(effort ? { reasoningEffort: effort, googleThinking: true } : {}),
+        },
+      ),
+      signal,
+      model,
+    );
+    if (!res.ok || !res.body) throw new Error(`API ${res.status}`);
+    const events = await readSseJson(res.body, signal);
+    const parsed = googleResultFromEvents(events, () => {}, Date.now());
+    const text = parsed.blocks
+      .filter((b) => b.type === "text" && typeof b.text === "string")
+      .map((b) => b.text as string)
+      .join("")
+      .trim();
+    return { text, usage: parsed.usage };
+  }
   if (usesResponsesApi(providerId, model)) {
     const effort = reasoningEffortFor(providerId, model, "off");
     const res = await providerPost(
@@ -3366,6 +3492,8 @@ async function completeText(
         ...(providerId === "openai-codex" ? {} : { max_output_tokens: 2048 }),
         instructions: system,
         input: prompt,
+        ...(sendCacheKey ? { prompt_cache_key: cacheKey } : {}),
+        ...(sendSessionId ? { session_id: sendSessionId } : {}),
         ...(effort ? { reasoning: { effort } } : {}),
       },
       signal,
@@ -3385,6 +3513,8 @@ async function completeText(
         { role: "system", content: system },
         { role: "user", content: prompt },
       ],
+      ...(sendCacheKey ? { prompt_cache_key: cacheKey } : {}),
+      ...(sendSessionId ? { session_id: sendSessionId } : {}),
     },
     signal,
     model,
@@ -3398,13 +3528,14 @@ async function callModel(messages: Message[]): Promise<CallResult> {
   nonTtyTranscriptSection = null;
   const started = Date.now();
   const sys = systemPrompt();
-  const prefix = buildCachedPrefix(sys, clientTools);
+  const prefix = buildCachedPrefix(sys, clientTools, route.provider);
   const proto = providerProtocol(route.provider, route.model);
   const imageRoots = [sessionFile ? dirname(sessionFile) : "", eventsDir].filter(Boolean);
   const requestMessages = toRequest(messages, imageRoots);
   const overlay = formatOverlay({ messages, hostContext: hostContextSnapshot });
   const overlayTail = overlay ? [{ role: "user" as const, content: overlay }] : [];
-  const historyForProvider = proto === "anthropic-messages" ? stampHistoryCache(requestMessages) : requestMessages;
+  const historyForProvider =
+    proto === "anthropic-messages" ? stampHistoryCache(requestMessages, route.provider) : requestMessages;
   const providerMessages = [...historyForProvider, ...overlayTail];
   const kernelMessages = providerMessages.map((m) => ({
     role: m.role as "user" | "assistant",
@@ -3416,10 +3547,11 @@ async function callModel(messages: Message[]): Promise<CallResult> {
   const thinking = thinkingRequestFor(route.provider, route.model, effortWanted);
   const adaptiveEffort = adaptiveEffortFor(route.provider, route.model, effortWanted);
   const reasoningEffort = reasoningEffortFor(route.provider, route.model, effortWanted);
-  const cacheKey = hashSystem(sys);
-  // Do not send this key to xAI until its prompt-cache contract is verified.
-  const sendCacheKey =
-    route.provider === "openai" || route.provider === "openai-codex" || route.provider === "openrouter";
+  const cacheKey = cacheSessionKey(sessionId);
+  const sendCacheKey = Boolean(cacheKey) && usesPromptCacheKey(route.provider, route.model);
+  const sendSessionId = route.provider === "openrouter" ? cacheKey || undefined : undefined;
+  const sendCacheControl = route.provider === "openrouter" && usesAnthropicCacheMarkers(route.provider, route.model);
+  const sendExplicitCache = usesOpenAIExplicitCache(route.model, route.provider);
   const anthropicMessages =
     proto === "anthropic-messages"
       ? providerMessages.map((m) => {
@@ -3441,7 +3573,6 @@ async function callModel(messages: Message[]): Promise<CallResult> {
           stream: true,
           ...(thinking ? { thinking } : {}),
           ...(adaptiveEffort ? { output_config: { effort: adaptiveEffort } } : {}),
-          cache_control: prefix.cache_control,
           system: prefix.system,
           tools: requestTools(prefix.tools, route.provider, route.model),
           messages: anthropicMessages,
@@ -3450,14 +3581,33 @@ async function callModel(messages: Message[]): Promise<CallResult> {
         ? responsesBody(route.model, sys, kernelMessages, toolsForProvider, {
             ...(route.provider === "openai-codex" ? {} : { maxTokens }),
             ...(sendCacheKey ? { cacheKey } : {}),
+            ...(sendSessionId ? { sessionId: sendSessionId } : {}),
+            ...(sendCacheControl ? { cacheControl: true } : {}),
+            ...(sendExplicitCache
+              ? {
+                  promptCacheMode: "explicit" as const,
+                  explicitCacheBreakpoint: true,
+                  explicitCacheSkipTail: overlayTail.length > 0,
+                }
+              : {}),
             ...(reasoningEffort ? { reasoningEffort } : {}),
-            includeEncryptedReasoning: route.provider !== "xai",
+            ...(gpt56ReasoningContext(route.model) ? { reasoningContext: "all_turns" as const } : {}),
+            ...(gpt5TextVerbosity(route.model) ? { textVerbosity: "low" as const } : {}),
+            includeEncryptedReasoning: includeEncryptedReasoning(route.provider, route.model),
           })
+        : proto === "google-generate"
+          ? googleGenerateBody(sys, kernelMessages, toolsForProvider, {
+              maxTokens,
+              ...(reasoningEffort ? { reasoningEffort, googleThinking: true } : {}),
+            })
         : completionsBody(route.model, sys, kernelMessages, toolsForProvider, "max_tokens", {
             maxTokens,
             ...(sendCacheKey ? { cacheKey } : {}),
-            ...(route.provider === "google" && reasoningEffort
-              ? { reasoningEffort, googleThinking: true }
+            ...(sendSessionId ? { sessionId: sendSessionId } : {}),
+            ...(reasoningEffort
+              ? route.provider === "google"
+                ? { reasoningEffort, googleThinking: true }
+                : { reasoningEffort }
               : {}),
           });
   const res = await providerPost(route.provider, body, currentAbort?.signal, route.model);
@@ -3474,6 +3624,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
     let streamedText = "";
     let ttftMs: number | null = null;
     const viaResponses = usesResponsesApi(route.provider, route.model);
+    const viaGoogle = proto === "google-generate";
     const events = await readSseJson(res.body, currentAbort?.signal, (event) => {
       let chunk = "";
       let keepEvent = false;
@@ -3487,6 +3638,13 @@ async function callModel(messages: Message[]): Promise<CallResult> {
           chunk = live.text;
           event.delta = "";
         }
+      } else if (viaGoogle) {
+        const live = googleLiveDelta(event);
+        if (live?.thinking) {
+          if (ttftMs === null) ttftMs = Date.now() - started;
+          streamOut("thinking", live.thinking);
+        }
+        if (live?.text) chunk = live.text;
       } else {
         const live = completionLiveDelta(event);
         if (live?.thinking) {
@@ -3517,6 +3675,8 @@ async function callModel(messages: Message[]): Promise<CallResult> {
     });
     const parsed = viaResponses
       ? responsesResultFromEvents(events, () => {}, started)
+      : viaGoogle
+        ? googleResultFromEvents(events, () => {}, started)
       : completionResultFromEvents(events, () => {}, started);
     if (parsed.error) throw new Error(parsed.error);
     const blocks = parsed.blocks as Block[];

@@ -66,11 +66,31 @@ key is `OpenAI (key)`. Both exist when the provider supports both.
 an OpenAI API key. Google, OpenCode Go, and OpenCode Zen are API key
 only. GitHub Copilot is device code (or a pasted GitHub token).
 
-OpenCode Zen routes `claude*` to Anthropic Messages (`/messages`),
-`gpt-*` / Codex ids to OpenAI Responses (`/responses`), and other ids to
-Chat Completions. One function (`zenWireProtocol`) owns that map. Do not
-add an OpenCode package. Do not read `~/.local/share/opencode/auth.json`.
-Radius, Bedrock, and Azure stay out of this engine.
+OpenCode Zen routes by model id (`zenWireProtocol`): `claude*` and
+`qwen*` to Anthropic Messages (`/messages`); `gpt-*`, Codex, `grok*`,
+and Muse Spark to OpenAI Responses (`/responses`); Gemini to Google
+generateContent (`/models/{id}:streamGenerateContent`); other ids to
+Chat Completions. OpenRouter stays on Responses for every model and still
+sends Claude/Qwen `cache_control` plus a session pin. Cache markers
+follow the selected model, not the login provider. The session id is
+the `prompt_cache_key` / `session_id` / `x-opencode-session` value.
+
+Thinking and `/effort` follow the same rule. Messages + Claude send
+`thinking` and `output_config.effort`. Responses send `reasoning.effort`
+(OpenRouter Claude included). GPT-5.6 also sends `reasoning.context:
+all_turns` and `prompt_cache_options.mode: explicit` so the overlay is
+not a 1.25× cache write. GPT-5 (not Pro or Codex) sends
+`text.verbosity: low`. The Google login sends Completions
+`thinking_config`. Zen Gemini sends generateContent `thinkingConfig`.
+GLM 5.2 Completions send `reasoning_effort`. Anthropic automatic
+top-level `cache_control` stays off: it would pin the volatile overlay.
+Explicit breakpoints stay on the last tool, the system block, and the
+last stable history block. The Anthropic login sets `ttl: "1h"` on those
+marks. Zen keeps the 5-minute default. xAI sends `x-grok-conv-id` with
+the session id. Anthropic server `web_search` stays on the Anthropic
+login only. Do not add an OpenCode package. Do not read
+`~/.local/share/opencode/auth.json`. Radius, Bedrock, and Azure stay out
+of this engine.
 
 **Resolution order** (first hit wins, per provider):
 
@@ -190,8 +210,9 @@ loopback with `TERMINA_TEST_AUTHORIZE_URL`, `TERMINA_TEST_TOKEN_URL`,
 **No tokens in sidecars, traces, or error text.** Status lines show a
 masked suffix only (last four characters).
 
-**web_search** stays the Anthropic server tool. Completions providers do
-not get a second search implementation.
+**web_search** stays the Anthropic server tool on the Anthropic login.
+OpenCode Zen and OpenRouter do not execute that tool. Completions
+providers do not get a second search implementation.
 
 ## Edge cases
 

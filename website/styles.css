@@ -428,10 +428,10 @@ h1, h2, h3 {
   font-size: 10px;
   color: var(--dim);
 }
-.tl-track { flex: 1; display: flex; align-items: center; margin: 0 16px; position: relative; }
-.tl-rail { position: absolute; left: 0; right: 0; top: 50%; height: 1px; background: var(--border-strong); }
+.tl-track { flex: 1; display: flex; align-items: center; justify-content: space-between; margin: 0 16px; position: relative; }
+.tl-rail { position: absolute; left: 4.5px; right: 4.5px; top: 50%; height: 1px; background: var(--border-strong); }
 .tl-fill {
-  position: absolute; left: 0; top: 50%; height: 1px;
+  position: absolute; left: 4.5px; top: 50%; height: 1px;
   background: var(--lime);
   width: 0;
   transition: width 0.5s ease;

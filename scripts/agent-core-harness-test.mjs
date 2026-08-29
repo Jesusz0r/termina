@@ -54,6 +54,7 @@ const {
   parseOffset,
   validateGrepPattern,
   buildCachedPrefix,
+  anthropicCacheMark,
   replaySessionRecords,
   renderHistoryTranscript,
   sidecarStartFor,
@@ -99,6 +100,9 @@ const {
   effectiveEffortFor,
   reasoningEffortFor,
   outputTokenBudget,
+  includeEncryptedReasoning,
+  gpt56ReasoningContext,
+  gpt5TextVerbosity,
   defaultContextWindow,
   tokenEstimate,
   formatUsageIndicators,
@@ -863,6 +867,10 @@ check(
     requestTools(clientPrefix.tools, "xai").length === clientPrefix.tools.length,
 );
 check(
+  "requestTools skips web_search on OpenCode Zen Claude",
+  requestTools(clientPrefix.tools, "opencode-zen", "claude-sonnet-5").every((t) => t.name !== "web_search"),
+);
+check(
   "requestTools appends web_search without cache_control",
   reqTools[2]?.type === "web_search_20250305" && reqTools[2]?.cache_control === undefined,
 );
@@ -1096,9 +1104,11 @@ const tools = [
 const prefix1 = buildCachedPrefix("sys", tools);
 const prefix2 = buildCachedPrefix("sys", tools);
 check("buildCachedPrefix deep-equal", JSON.stringify(prefix1) === JSON.stringify(prefix2));
-check("buildCachedPrefix top-level automatic cache", prefix1.cache_control?.type === "ephemeral");
+check("buildCachedPrefix omits automatic top-level cache", prefix1.cache_control === undefined);
 check("buildCachedPrefix system marker", prefix1.system[0]?.cache_control?.type === "ephemeral");
 check("buildCachedPrefix last tool copy", prefix1.tools[1]?.cache_control?.type === "ephemeral");
+check("buildCachedPrefix anthropic uses 1h ttl", buildCachedPrefix("sys", tools, "anthropic").system[0]?.cache_control?.ttl === "1h");
+check("buildCachedPrefix zen omits ttl", buildCachedPrefix("sys", tools, "opencode-zen").system[0]?.cache_control?.ttl === undefined);
 check("buildCachedPrefix does not mutate tools", tools[1].cache_control === undefined);
 
 check("sidecar write maps to write", sidecarStartFor({ name: "write_file", id: "9", input: { path: "a.ts" } }).toolName === "write");
@@ -1544,6 +1554,12 @@ const {
   canOpenBrowser,
   browserOpenArgs,
   zenWireProtocol,
+  usesAnthropicCacheMarkers,
+  usesPromptCacheKey,
+  usesOpenAIExplicitCache,
+  cacheSessionKey,
+  cacheSessionHeaders,
+  googleNativeHeaders,
 } = auth;
 const compat = await import("../agent-core/openai-compat.ts");
 const authFile = join(root, "auth.json");
@@ -1792,14 +1808,68 @@ check("providerProtocol opencode-go is completions", providerProtocol("opencode-
 check("zenWireProtocol claude is messages", zenWireProtocol("claude-sonnet-4-5") === "anthropic-messages");
 check("zenWireProtocol gpt is responses", zenWireProtocol("gpt-5.6-sol") === "openai-responses");
 check("zenWireProtocol glm is completions", zenWireProtocol("glm-5.1") === "openai-completions");
+check("zenWireProtocol grok is responses", zenWireProtocol("grok-4.6") === "openai-responses");
+check("zenWireProtocol qwen is messages", zenWireProtocol("qwen3.7-max") === "anthropic-messages");
+check("zenWireProtocol muse-spark is responses", zenWireProtocol("muse-spark-1.2") === "openai-responses");
+check("zenWireProtocol gemini is google-generate", zenWireProtocol("gemini-3.7-flash") === "google-generate");
 check("zenWireProtocol prefixed gpt is responses", zenWireProtocol("openai/gpt-5.6-sol") === "openai-responses");
 check("zenWireProtocol prefixed claude is messages", zenWireProtocol("anthropic/claude-sonnet-4-5") === "anthropic-messages");
 check(
   "providerProtocol opencode-zen follows the model",
   providerProtocol("opencode-zen", "claude-opus-4-6") === "anthropic-messages" &&
     providerProtocol("opencode-zen", "gpt-5.1-codex") === "openai-responses" &&
-    providerProtocol("opencode-zen", "kimi-k2.7-code") === "openai-completions",
+    providerProtocol("opencode-zen", "kimi-k2.7-code") === "openai-completions" &&
+    providerProtocol("opencode-zen", "grok-4.6") === "openai-responses" &&
+    providerProtocol("opencode-zen", "qwen3.7-plus") === "anthropic-messages",
 );
+check("usesPromptCacheKey xai is true", usesPromptCacheKey("xai", "grok-4.6") === true);
+check("usesPromptCacheKey google is false", usesPromptCacheKey("google", "gemini-3.7-flash") === false);
+check("usesPromptCacheKey zen gemini is false", usesPromptCacheKey("opencode-zen", "gemini-3.7-flash") === false);
+check("usesPromptCacheKey anthropic is false", usesPromptCacheKey("anthropic", "claude-sonnet-5") === false);
+check("usesPromptCacheKey zen claude is false", usesPromptCacheKey("opencode-zen", "claude-sonnet-5") === false);
+check("usesPromptCacheKey zen glm is true", usesPromptCacheKey("opencode-zen", "glm-5.1") === true);
+check("usesPromptCacheKey copilot is true", usesPromptCacheKey("github-copilot", "gpt-5.6-terra") === true);
+check("usesAnthropicCacheMarkers openrouter claude", usesAnthropicCacheMarkers("openrouter", "anthropic/claude-sonnet-5") === true);
+check("usesAnthropicCacheMarkers openrouter gpt", usesAnthropicCacheMarkers("openrouter", "openai/gpt-5.6-sol") === false);
+check("usesAnthropicCacheMarkers openrouter qwen", usesAnthropicCacheMarkers("openrouter", "qwen/qwen3.7-max") === true);
+check("usesOpenAIExplicitCache gpt-5.6", usesOpenAIExplicitCache("gpt-5.6-sol") === true);
+check("usesOpenAIExplicitCache gpt-5.5", usesOpenAIExplicitCache("gpt-5.5") === false);
+check("usesOpenAIExplicitCache skips Codex", usesOpenAIExplicitCache("gpt-5.6-sol", "openai-codex") === false);
+check("usesOpenAIExplicitCache skips Copilot", usesOpenAIExplicitCache("gpt-5.6-sol", "github-copilot") === false);
+check("usesOpenAIExplicitCache zen gpt-5.6", usesOpenAIExplicitCache("gpt-5.6-sol", "opencode-zen") === true);
+check("cacheSessionKey clamps length", cacheSessionKey(`${"a".repeat(300)}`).length === 256);
+check("cacheSessionKey rejects a control character", cacheSessionKey("core-1\nHost: x") === "");
+check(
+  "cacheSessionHeaders opencode",
+  cacheSessionHeaders("opencode-zen", "core-1")["x-opencode-session"] === "core-1",
+);
+check(
+  "cacheSessionHeaders openrouter",
+  cacheSessionHeaders("openrouter", "core-1")["x-session-id"] === "core-1",
+);
+check("cacheSessionHeaders openai is empty", Object.keys(cacheSessionHeaders("openai", "core-1")).length === 0);
+check("cacheSessionHeaders xai pins grok conversation", cacheSessionHeaders("xai", "core-1")["x-grok-conv-id"] === "core-1");
+check(
+  "googleNativeHeaders drops Bearer for Zen Gemini",
+  googleNativeHeaders({ authorization: "Bearer zen-key", "content-type": "application/json" })["x-goog-api-key"] ===
+    "zen-key" &&
+    googleNativeHeaders({ authorization: "Bearer zen-key" }).authorization === undefined,
+);
+check(
+  "googleNativeHeaders drops x-api-key and anthropic-version",
+  googleNativeHeaders({
+    authorization: "Bearer zen-key",
+    "x-api-key": "zen-key",
+    "anthropic-version": "2023-06-01",
+  })["x-api-key"] === undefined &&
+    googleNativeHeaders({
+      authorization: "Bearer zen-key",
+      "x-api-key": "zen-key",
+      "anthropic-version": "2023-06-01",
+    })["anthropic-version"] === undefined,
+);
+check("anthropicCacheMark anthropic is 1h", anthropicCacheMark("anthropic").ttl === "1h");
+check("anthropicCacheMark zen omits ttl", anthropicCacheMark("opencode-zen").ttl === undefined);
 check("defaultLoginMode opencode-go is key", defaultLoginMode("opencode-go") === "key");
 check("defaultLoginMode opencode-zen is key", defaultLoginMode("opencode-zen") === "key");
 check("parseAuthCommand /login xai is device", parseAuthCommand("/login xai").mode === "device" && parseAuthCommand("/login xai").provider === "xai");
@@ -2317,6 +2387,13 @@ check(
   bodyGoogle.extra_body?.google?.thinking_config?.thinking_level === "minimal" &&
     bodyGoogle.extra_body?.google?.thinking_config?.include_thoughts === true,
 );
+const bodyGlm = compat.completionsBody("glm-5.2", "sys", [], [], "max_tokens", {
+  reasoningEffort: "high",
+});
+check(
+  "GLM 5.2 completions send reasoning_effort",
+  bodyGlm.reasoning_effort === "high" && bodyGlm.extra_body === undefined,
+);
 const bodyCodex = compat.responsesBody("gpt-5.6-sol", "sys", [], [], {
   cacheKey: "def",
   reasoningEffort: "none",
@@ -2324,6 +2401,94 @@ const bodyCodex = compat.responsesBody("gpt-5.6-sol", "sys", [], [], {
 check(
   "codex responses set cache key and omit unsupported max_output_tokens",
   bodyCodex.prompt_cache_key === "def" && bodyCodex.max_output_tokens === undefined,
+);
+const bodyOrClaude = compat.responsesBody(
+  "anthropic/claude-sonnet-5",
+  "sys",
+  [
+    { role: "user", content: "stable" },
+    { role: "user", content: "overlay" },
+  ],
+  [],
+  { cacheKey: "sess-1", sessionId: "sess-1", cacheControl: true, includeEncryptedReasoning: false },
+);
+check(
+  "openrouter claude responses pin session and cache_control",
+  bodyOrClaude.prompt_cache_key === "sess-1" &&
+    bodyOrClaude.session_id === "sess-1" &&
+    bodyOrClaude.cache_control === undefined &&
+    bodyOrClaude.input[0]?.content?.[0]?.cache_control?.type === "ephemeral" &&
+    bodyOrClaude.input.at(-1)?.content?.[0]?.cache_control === undefined,
+);
+const bodyGpt56 = compat.responsesBody(
+  "gpt-5.6-sol",
+  "sys",
+  [
+    { role: "user", content: "stable history" },
+    { role: "user", content: "<working-set>" },
+  ],
+  [],
+  { cacheKey: "sess-2", explicitCacheBreakpoint: true, includeEncryptedReasoning: false },
+);
+const gpt56First = bodyGpt56.input[0]?.content?.[0];
+const gpt56Last = bodyGpt56.input.at(-1)?.content?.[0];
+check(
+  "gpt-5.6 breakpoint sits before the overlay",
+  gpt56First?.prompt_cache_breakpoint?.mode === "explicit" && gpt56Last?.prompt_cache_breakpoint === undefined,
+);
+const bodyGpt56Explicit = compat.responsesBody(
+  "gpt-5.6-sol",
+  "sys",
+  [
+    { role: "user", content: "stable history" },
+    { role: "user", content: "<working-set>" },
+  ],
+  [],
+  {
+    explicitCacheBreakpoint: true,
+    explicitCacheSkipTail: true,
+    promptCacheMode: "explicit",
+    includeEncryptedReasoning: false,
+  },
+);
+check(
+  "gpt-5.6 explicit mode disables implicit overlay writes",
+  bodyGpt56Explicit.prompt_cache_options?.mode === "explicit" &&
+    bodyGpt56Explicit.prompt_cache_options?.ttl === "30m" &&
+    bodyGpt56Explicit.input.at(-1)?.content?.[0]?.prompt_cache_breakpoint === undefined,
+);
+const bodyGpt56NoOverlay = compat.responsesBody("gpt-5.6-sol", "sys", [{ role: "user", content: "stable history" }], [], {
+  explicitCacheBreakpoint: true,
+  explicitCacheSkipTail: false,
+  promptCacheMode: "explicit",
+  includeEncryptedReasoning: false,
+});
+check(
+  "gpt-5.6 without overlay still pins the last user text",
+  bodyGpt56NoOverlay.input[0]?.content?.[0]?.prompt_cache_breakpoint?.mode === "explicit",
+);
+const bodyGpt56Assistant = compat.responsesBody(
+  "gpt-5.6-sol",
+  "sys",
+  [
+    { role: "assistant", content: "done" },
+    { role: "user", content: "<working-set>" },
+  ],
+  [],
+  { explicitCacheBreakpoint: true, includeEncryptedReasoning: false },
+);
+check(
+  "gpt-5.6 breakpoint does not mark assistant output_text",
+  bodyGpt56Assistant.input[0]?.content?.[0]?.prompt_cache_breakpoint === undefined &&
+    bodyGpt56Assistant.input.at(-1)?.content?.[0]?.prompt_cache_breakpoint === undefined,
+);
+const bodyGpt56Solo = compat.responsesBody("gpt-5.6-sol", "sys", [{ role: "user", content: "only overlay" }], [], {
+  explicitCacheBreakpoint: true,
+  includeEncryptedReasoning: false,
+});
+check(
+  "gpt-5.6 breakpoint does not mark a lone overlay",
+  bodyGpt56Solo.input[0]?.content?.[0]?.prompt_cache_breakpoint === undefined,
 );
 const bodyResponses = compat.responsesBody("gpt-5.6-sol", "sys", [], [], { maxTokens: 32_768, reasoningEffort: "max" });
 check("other responses set max_output_tokens", bodyResponses.max_output_tokens === 32_768);
@@ -2336,6 +2501,21 @@ check(
   Array.isArray(bodyCodex.include) && bodyCodex.include.includes("reasoning.encrypted_content"),
 );
 check("responses body sets reasoning effort", bodyCodex.reasoning?.effort === "none");
+const bodyGpt56Agent = compat.responsesBody("gpt-5.6-sol", "sys", [], [], {
+  reasoningEffort: "medium",
+  reasoningContext: "all_turns",
+  textVerbosity: "low",
+  includeEncryptedReasoning: false,
+});
+check(
+  "GPT-5.6 responses keep reasoning across turns and low verbosity",
+  bodyGpt56Agent.reasoning?.context === "all_turns" && bodyGpt56Agent.text?.verbosity === "low",
+);
+check("gpt56ReasoningContext sol", gpt56ReasoningContext("gpt-5.6-sol") === "all_turns");
+check("gpt56ReasoningContext grok is omitted", gpt56ReasoningContext("grok-4.6") === undefined);
+check("gpt5TextVerbosity sol is low", gpt5TextVerbosity("gpt-5.6-sol") === "low");
+check("gpt5TextVerbosity pro is omitted", gpt5TextVerbosity("gpt-5.5-pro") === undefined);
+check("gpt5TextVerbosity codex is omitted", gpt5TextVerbosity("gpt-5.3-codex") === undefined);
 const reasoned = compat.toResponsesInput([
   {
     role: "assistant",
@@ -3004,8 +3184,12 @@ check("thinkingEnabledFor gpt high", thinkingEnabledFor("openai", "gpt-5.6-sol",
 check("GitHub GPT reasoning cannot turn off", clampEffortLevel("github-copilot", "gpt-5.6-terra", "off") === "minimal");
 check("thinkingEnabledFor Gemini 3", thinkingEnabledFor("google", "gemini-3.7-flash", "high") === true);
 check(
-  "Gemini 3 exposes visible reasoning levels",
-  supportedEffortLevels("google", "gemini-3.7-flash").join(" ") === "minimal low medium high",
+  "Gemini 3.7 Flash omits unsupported minimal",
+  supportedEffortLevels("google", "gemini-3.7-flash").join(" ") === "low medium high",
+);
+check(
+  "Gemini 3.1 Pro keeps medium",
+  supportedEffortLevels("google", "gemini-3.1-pro").join(" ") === "low medium high",
 );
 check("unsupported Gemini 2.5 stays off", thinkingEnabledFor("google", "gemini-2.5-flash", "high") === false);
 check("thinkingEnabledFor gpt 4 stays off", thinkingEnabledFor("openai", "gpt-4.1", "high") === false);
@@ -3024,6 +3208,10 @@ check("defaultContextWindow anthropic is 1M", defaultContextWindow("anthropic", 
 check("defaultContextWindow haiku is 200k", defaultContextWindow("anthropic", "claude-haiku-4-5") === 200_000);
 check("defaultContextWindow openai is 1.05M", defaultContextWindow("openai", "gpt-5.6-sol") === 1_050_000);
 check("defaultContextWindow xai is 500k", defaultContextWindow("xai", "grok-4.6") === 500_000);
+check("defaultContextWindow zen grok is 500k", defaultContextWindow("opencode-zen", "grok-4.6") === 500_000);
+check("includeEncryptedReasoning skips xai", includeEncryptedReasoning("xai", "grok-4.6") === false);
+check("includeEncryptedReasoning skips zen grok", includeEncryptedReasoning("opencode-zen", "grok-4.6") === false);
+check("includeEncryptedReasoning keeps openai", includeEncryptedReasoning("openai", "gpt-5.6-sol") === true);
 check("tokenEstimate is conservative", tokenEstimate("abcd") === 2);
 const usageIndicators = formatUsageIndicators(
   { input: 500, cacheRead: 1_000, cacheWrite: 0, output: 250 },
@@ -3041,7 +3229,7 @@ check(
     "tokens 0 in/0 out · cache -- · context ~0/1 0%",
 );
 check("outputTokenBudget off is output cap", outputTokenBudget({ thinking: false }) === 16_384);
-check("outputTokenBudget on is a single cap", outputTokenBudget({ thinking: true }) === 32_768);
+check("outputTokenBudget on is a single cap", outputTokenBudget({ thinking: true }) === 64_000);
 check(
   "thinkingRequestFor sonnet 5 off is disabled",
   JSON.stringify(thinkingRequestFor("anthropic", "claude-sonnet-5", "off")) === JSON.stringify({ type: "disabled" }),
@@ -3071,6 +3259,132 @@ check(
     JSON.stringify({ type: "enabled", budget_tokens: 2_048 }),
 );
 check("thinkingRequestFor gpt is omitted", thinkingRequestFor("openai", "gpt-5.6-sol", "high") === undefined);
+check(
+  "thinkingRequestFor zen sonnet 5 is adaptive",
+  JSON.stringify(thinkingRequestFor("opencode-zen", "claude-sonnet-5", "high")) ===
+    JSON.stringify({ type: "adaptive", display: "summarized" }),
+);
+check("thinkingRequestFor zen qwen is omitted", thinkingRequestFor("opencode-zen", "qwen3.7-max", "high") === undefined);
+check(
+  "thinkingRequestFor openrouter claude is omitted",
+  thinkingRequestFor("openrouter", "anthropic/claude-sonnet-5", "high") === undefined,
+);
+check(
+  "adaptiveEffortFor zen sonnet 5",
+  adaptiveEffortFor("opencode-zen", "claude-sonnet-5", "high") === "high",
+);
+check("adaptiveEffortFor zen qwen is omitted", adaptiveEffortFor("opencode-zen", "qwen3.7-max", "high") === undefined);
+check(
+  "Zen Claude exposes the same effort levels as Anthropic",
+  supportedEffortLevels("opencode-zen", "claude-sonnet-5").join(" ") ===
+    supportedEffortLevels("anthropic", "claude-sonnet-5").join(" "),
+);
+check(
+  "Zen GPT 5.6 hides unsupported minimal",
+  supportedEffortLevels("opencode-zen", "gpt-5.6-sol").join(" ") === "off low medium high xhigh max",
+);
+check(
+  "reasoningEffortFor zen Claude is omitted",
+  reasoningEffortFor("opencode-zen", "claude-sonnet-5", "high") === undefined,
+);
+check(
+  "reasoningEffortFor zen GPT is sent",
+  reasoningEffortFor("opencode-zen", "gpt-5.6-sol", "high") === "high",
+);
+check(
+  "Zen Gemini exposes Google thinking levels",
+  supportedEffortLevels("opencode-zen", "gemini-3.7-flash").join(" ") === "low medium high",
+);
+check("reasoningEffortFor zen Gemini is high", reasoningEffortFor("opencode-zen", "gemini-3.7-flash", "high") === "high");
+const bodyZenGemini = compat.googleGenerateBody("sys", [{ role: "user", content: "hi" }], [], {
+  maxTokens: 64_000,
+  reasoningEffort: "high",
+  googleThinking: true,
+});
+check(
+  "Zen Gemini generateContent sets thinkingLevel",
+  bodyZenGemini.generationConfig?.thinkingConfig?.thinkingLevel === "high" &&
+    bodyZenGemini.generationConfig?.thinkingConfig?.includeThoughts === true &&
+    bodyZenGemini.model === undefined,
+);
+const bodyZenGeminiMerged = compat.googleGenerateBody(
+  "sys",
+  [
+    { role: "user", content: "hi" },
+    { role: "user", content: "<working-set>" },
+  ],
+  [],
+);
+check(
+  "Zen Gemini merges consecutive user turns",
+  bodyZenGeminiMerged.contents?.length === 1 &&
+    bodyZenGeminiMerged.contents[0]?.role === "user" &&
+    bodyZenGeminiMerged.contents[0]?.parts?.length === 2,
+);
+const bodyZenGeminiUnsigned = compat.googleGenerateBody(
+  "sys",
+  [{ role: "assistant", content: [{ type: "thinking", thinking: "secret" }, { type: "text", text: "ok" }] }],
+  [],
+);
+check(
+  "Zen Gemini drops unsigned thought on replay",
+  JSON.stringify(bodyZenGeminiUnsigned.contents).includes("ok") &&
+    !JSON.stringify(bodyZenGeminiUnsigned.contents).includes("secret"),
+);
+check(
+  "googleLiveDelta splits thought parts",
+  compat.googleLiveDelta({
+    candidates: [{ content: { parts: [{ text: "plan", thought: true }, { text: "ok" }] } }],
+  })?.thinking === "plan" &&
+    compat.googleLiveDelta({
+      candidates: [{ content: { parts: [{ text: "plan", thought: true }, { text: "ok" }] } }],
+    })?.text === "ok",
+);
+const googleDup = compat.googleResultFromEvents(
+  [
+    {
+      candidates: [
+        {
+          content: {
+            parts: [
+              { text: "plan", thought: true, thoughtSignature: "sig1" },
+              { functionCall: { name: "read_file", args: { path: "a.ts" } } },
+            ],
+          },
+        },
+      ],
+    },
+    {
+      candidates: [
+        {
+          content: {
+            parts: [
+              { text: "plan", thought: true, thoughtSignature: "sig1" },
+              { functionCall: { name: "read_file", args: { path: "a.ts" } } },
+            ],
+          },
+        },
+      ],
+    },
+  ],
+  () => {},
+  Date.now(),
+);
+check(
+  "googleResultFromEvents dedupes snapshot repeats",
+  googleDup.blocks.filter((b) => b.type === "thinking").length === 1 &&
+    googleDup.blocks.filter((b) => b.type === "tool_use").length === 1 &&
+    googleDup.blocks[0]?.signature === "sig1",
+);
+check(
+  "Zen GLM 5.2 exposes Completions effort",
+  supportedEffortLevels("opencode-zen", "glm-5.2").join(" ") === "high max",
+);
+check("reasoningEffortFor zen GLM is high", reasoningEffortFor("opencode-zen", "glm-5.2", "high") === "high");
+check(
+  "OpenRouter GLM 5.2 maps max onto xhigh",
+  supportedEffortLevels("openrouter", "z-ai/glm-5.2").join(" ") === "high xhigh",
+);
 check("fable off clamps to minimal", effectiveEffortFor("anthropic", "claude-fable-5", "off") === "minimal");
 check(
   "thinkingRequestFor fable off stays adaptive",
@@ -3101,7 +3415,13 @@ check(
   "openai conversion drops cache_control",
   converted.every((m) => !("cache_control" in m) && (typeof m.content === "string" || m.content == null || !JSON.stringify(m).includes("cache_control"))),
 );
-check("stampHistoryCache no-ops without tool_result", stampHistoryCache([{ role: "user", content: "hi" }])[0].content === "hi");
+const stampedUser = stampHistoryCache([{ role: "user", content: "hi" }]);
+check(
+  "stampHistoryCache pins the last user text",
+  stampedUser[0]?.content?.[0]?.type === "text" &&
+    stampedUser[0]?.content?.[0]?.text === "hi" &&
+    stampedUser[0]?.content?.[0]?.cache_control?.type === "ephemeral",
+);
 check("formatOverlay omits empty", formatOverlay({ messages: [] }) === "");
 const overlayMsgs = [
   { role: "assistant", content: [{ type: "tool_use", name: "edit", input: { path: "a.ts" } }] },

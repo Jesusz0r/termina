@@ -42,7 +42,8 @@ export type ProviderProtocol =
   | "anthropic-messages"
   | "openai-completions"
   | "openai-codex-responses"
-  | "openai-responses";
+  | "openai-responses"
+  | "google-generate";
 export type LoginMode = "browser" | "code" | "key" | "device";
 
 const ANTHROPIC_AUTHORIZE = "https://claude.ai/oauth/authorize";
@@ -202,15 +203,94 @@ export function resolveLoginPick(
   return { provider: picked.id, mode: picked.mode };
 }
 
-/** OpenCode Zen picks an existing kernel protocol from the model id. */
-export function zenWireProtocol(model: string): ProviderProtocol {
+/** Last path segment of a vendor/model id. */
+export function modelLeaf(model: string): string {
+  const n = model.trim().toLowerCase();
+  const slash = n.lastIndexOf("/");
+  return slash >= 0 ? n.slice(slash + 1) : n;
+}
+
+function modelLooksClaude(model: string): boolean {
   const n = model.toLowerCase();
-  const leaf = n.includes("/") ? n.slice(n.lastIndexOf("/") + 1) : n;
-  if (leaf.includes("claude") || n.includes("claude")) return "anthropic-messages";
-  if (/^(gpt-|o[0-9]|chatgpt)/.test(leaf) || leaf.includes("codex") || n.includes("codex")) {
+  return modelLeaf(model).includes("claude") || n.includes("claude");
+}
+
+function modelLooksQwen(model: string): boolean {
+  const leaf = modelLeaf(model);
+  const n = model.toLowerCase();
+  return leaf.startsWith("qwen") || n.includes("/qwen");
+}
+
+function modelLooksGemini(model: string): boolean {
+  const leaf = modelLeaf(model);
+  const n = model.toLowerCase();
+  return leaf.startsWith("gemini") || n.includes("/gemini");
+}
+
+/**
+ * OpenCode Zen picks an existing kernel protocol from the model id.
+ * Claude and Qwen use Messages. GPT, Codex, Grok, and Muse Spark use Responses.
+ * Gemini uses Google generateContent on /models/{id}.
+ */
+export function zenWireProtocol(model: string): ProviderProtocol {
+  const leaf = modelLeaf(model);
+  if (modelLooksClaude(model) || modelLooksQwen(model)) return "anthropic-messages";
+  if (modelLooksGemini(model)) return "google-generate";
+  if (
+    /^(gpt-|o[0-9]|chatgpt)/.test(leaf) ||
+    leaf.includes("codex") ||
+    leaf.startsWith("grok") ||
+    leaf.startsWith("muse-spark")
+  ) {
     return "openai-responses";
   }
   return "openai-completions";
+}
+
+/**
+ * Cache markers follow the selected model, not the login provider.
+ * OpenRouter and OpenCode Zen host Claude, GPT, Grok, and Qwen on one credential.
+ */
+export function usesAnthropicCacheMarkers(provider: ProviderId, model = ""): boolean {
+  if (provider === "anthropic") return true;
+  if (providerProtocol(provider, model) === "anthropic-messages") return true;
+  if (provider === "openrouter" && (modelLooksClaude(model) || modelLooksQwen(model))) return true;
+  return false;
+}
+
+/** Completions and Responses hosts that accept prompt_cache_key. Not Anthropic Messages. Not Gemini. */
+export function usesPromptCacheKey(provider: ProviderId, model = ""): boolean {
+  if (provider === "google") return false;
+  const proto = providerProtocol(provider, model);
+  if (proto === "anthropic-messages" || proto === "google-generate") return false;
+  return true;
+}
+
+/**
+ * GPT-5.6 Sol/Terra/Luna accept explicit prompt_cache_breakpoint.
+ * Codex and Copilot backends are not verified for that field.
+ */
+export function usesOpenAIExplicitCache(model: string, provider?: ProviderId): boolean {
+  const leaf = modelLeaf(model);
+  if (!(leaf.startsWith("gpt-5.6") || leaf.includes("gpt-5.6"))) return false;
+  if (!provider) return true;
+  return provider === "openai" || provider === "openrouter" || provider === "opencode-zen";
+}
+
+export function cacheSessionKey(session: string): string {
+  const id = session.trim().slice(0, 256);
+  if (!id || /[\0\r\n]/.test(id)) return "";
+  return id;
+}
+
+/** Host-specific session pin. Body prompt_cache_key is separate. */
+export function cacheSessionHeaders(provider: ProviderId, session: string): Record<string, string> {
+  const id = cacheSessionKey(session);
+  if (!id) return {};
+  if (provider === "opencode-go" || provider === "opencode-zen") return { "x-opencode-session": id };
+  if (provider === "openrouter") return { "x-session-id": id };
+  if (provider === "xai") return { "x-grok-conv-id": id };
+  return {};
 }
 
 export function providerProtocol(id: ProviderId, model = ""): ProviderProtocol {
@@ -363,6 +443,17 @@ export function requestHeaders(
     headers["anthropic-version"] = "2023-06-01";
   }
   return headers;
+}
+
+/** Zen Gemini generateContent forwards Bearer to Vertex and 401s. Use only the Google key header. */
+export function googleNativeHeaders(headers: Record<string, string>): Record<string, string> {
+  const token = (headers.authorization?.replace(/^Bearer\s+/i, "") || headers["x-api-key"] || "").trim();
+  const next = { ...headers };
+  delete next.authorization;
+  delete next["x-api-key"];
+  delete next["anthropic-version"];
+  if (token) next["x-goog-api-key"] = token;
+  return next;
 }
 
 export function needsRefresh(expires: unknown, now = Date.now()): boolean {

@@ -166,8 +166,12 @@
       else d.classList.remove("lit");
     });
     const fill = document.getElementById("tl-fill");
-    const pct = Math.max(0, ((upTo - 1) / (total - 1)) * 100 - 2);
-    fill.style.width = pct + "%";
+    if (upTo <= 0) { fill.style.width = "0px"; return; }
+    const pct = ((upTo - 1) / (total - 1)) * 100;
+    // tl-fill is inset by half the dot (4.5px) on the left; width is % of the
+    // full track so we subtract the proportional 9px dot-diameter to land
+    // exactly on dot centres: width = pct% * (track - 9px) / track
+    fill.style.width = `calc(${pct}% - ${pct * 0.09}px)`;
   }
 
   function resetMockup() {

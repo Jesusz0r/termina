@@ -11,7 +11,7 @@ handoff chaining + emergency overflow + truncate last resort, executable
 stubs + structured inventories, waste attribution with models.dev pricing,
 two-role routing map, bounded concurrency, cwd jail, grep/glob, unique first-occurrence
 edit (replace_all), interruptible bash, web_search, fetch, skill
-index, prefix `cache_control`, last `tool_result` cache pin, OpenAI/Codex `prompt_cache_key`,
+index, prefix `cache_control` on tools and system (1-hour TTL on the Anthropic login), last history-block cache pin, GPT-5.6 explicit prompt cache, session `prompt_cache_key` by model family,
 429 retry, model-aware `/effort`, live provider reasoning, request-only working-set overlay,
 traces, provider auth, live model list, full-screen TUI, Termina sidecar host contract, core worldline session slice,
 selectable bash approval policies, `/permissions`, /clear /compact, -p print, token/cache/context status, stdio MCP). Zone 1 is identity, environment,
@@ -52,9 +52,10 @@ Rules:
   produce byte-identical frozen zones — any divergence makes the cache cold
   from byte zero.
 - Corrections are new messages, never edits of old ones. A request may stamp
-  `cache_control` on a copy of the last `tool_result`. That copy is not stored.
-  The request suffix after that breakpoint (file inventories and host context)
-  may be rebuilt every call. It is not stored in the session log.
+  `cache_control` on a copy of the last stable history block. That copy is not
+  stored. The request suffix after that breakpoint (file inventories and host
+  context) may be rebuilt every call. It is not stored in the session log.
+  Do not send top-level automatic `cache_control`: that pins the suffix.
 - Revision events (compaction, prune) are the ONLY writes to the visible
   context, and they must be reconstructable: the storage log stays
   append-only (a revision is a new entry), or snapshots back the
@@ -192,7 +193,7 @@ footprint, not these numbers.
 
 | Metric | Target | Notes |
 |---|---|---|
-| Cached share of input tokens per task | > 95% | provider-dependent; xAI receives no app-supplied `prompt_cache_key` |
+| Cached share of input tokens per task | > 95% | provider-dependent; routing key is the session id |
 | Summarizations | ≤ 1 per 50 turns | scales with session length; short tasks expect zero |
 | Unexplained cache-waste tokens | 0 | investigate every occurrence |
 | p50 first-token latency | < 1 s | provider-dependent floor |
@@ -202,7 +203,9 @@ footprint, not these numbers.
 The kernel owns a full-screen TUI in a tty: a two-row model and usage
 header, scrolling transcript, input, slash menu, and footer. The model row
 shows the effective reasoning effort. New engines start at `medium` and clamp
-that choice to the current model. `/effort` lists only supported levels:
+that choice to the current model and protocol: Messages Claude uses native
+thinking, Responses uses `reasoning.effort`, and GLM 5.2 Completions uses
+`reasoning_effort`. `/effort` lists only supported levels:
 `off`, `minimal`, `low`, `medium`, `high`, `xhigh`,
 and `max`. The extra-high level is `xhigh`; there is no `ultra` level. The
 usage row shows cumulative input/output tokens, cumulative
