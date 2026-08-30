@@ -4,6 +4,8 @@ Take the only Meta-Harness lessons that belong in the kernel: freeze and cache t
 
 Learn Harness Engineering ([walkinglabs/learn-harness-engineering](https://github.com/walkinglabs/learn-harness-engineering)) is a third layer. It does not replace this plan. It confirms the kernel moves and names artifacts that must **not** land in `agent-core`.
 
+The full rationale for the searcher ban, the inventory of what this change set shipped, and the next inner-harness ACI work live in `docs/AGENT-CORE-HARNESS.md`. Do not fold that track back into this file.
+
 Termina lets the user pick a terminal engine. Those engines are independent:
 
 1. **Pi** — existing TUI. Unchanged.
@@ -78,7 +80,7 @@ Shrinking Termina's 878-line `AGENTS.md` into a directory page is optional hygie
 
 **Why those paper/course items stay out (not sequencing):**
 
-- **Outer-loop proposer that rewrites `agent-core/main.ts`.** That is a second product: a searcher over harness source. This kernel is the coding engine the user selected. Traces in this change set are the diagnostic filesystem that search would need; they do not run the search. A loop that mutates the engine while the user is coding is not an inner-harness upgrade.
+- **Outer-loop proposer that rewrites `agent-core/main.ts`.** That is a second product: a searcher over harness source. This kernel is the coding engine the user selected. Traces in this change set are the diagnostic filesystem that search would need; they do not run the search. A loop that mutates the engine while the user is coding is not an inner-harness upgrade. Canonical write-up: `docs/AGENT-CORE-HARNESS.md` (product boundary, P1 freeze, wrong-domain policies, isolation already in worldlines/Dispatch, unconstrained search overfits and often hurts). An *offline* searcher that reads traces and patches via worldline or CI is allowed later; it must not run inside `runPrompt()`.
 - **Pareto search, BM25 math routes, ACE/MCE memory banks, draft-verify classifiers.** Those are the paper's *discovered policies for classification and olympiad math*, not coding-agent mechanics. Copying them would stuff the wrong procedure into zone 1. Skills + `grep` are the coding form of retrieve-don't-stuff.
 - **TerminalBench completion checklist as a kernel state machine.** KIRA's checklist is prompt text plus a "don't stop" rubric for that benchmark. A kernel state machine of done-criteria is a second verifier. Done-criteria belong in the opened project's `AGENTS.md` (runnable tests). The loop already stops when the model emits no tool calls.
 - **Plugin / hook surface.** Hooks are user scripts on the tool lifecycle; plugins are a loader. That is a platform. This kernel is one file. Kernel-owned policy later (permissions) is not a plugin API. Skills cover "how to do X" without a second runtime. Stdio and HTTP/SSE MCP share one frozen tool client (`agent-core/mcp.ts`); a marketplace and hot-reload stay out.

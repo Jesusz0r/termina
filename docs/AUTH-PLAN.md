@@ -78,8 +78,12 @@ the `prompt_cache_key` / `session_id` / `x-opencode-session` value.
 Thinking and `/effort` follow the same rule. Messages + Claude send
 `thinking` and `output_config.effort`. Responses send `reasoning.effort`
 (OpenRouter Claude included). GPT-5.6 also sends `reasoning.context:
-all_turns` and `prompt_cache_options.mode: explicit` so the overlay is
-not a 1.25× cache write. GPT-5 (not Pro or Codex) sends
+all_turns`. On the OpenAI platform and OpenRouter, GPT-5.6 sends
+`prompt_cache_options.mode: explicit` so the overlay is not a 1.25×
+cache write. Codex ChatGPT and OpenCode Zen 400 that field; they still
+get `prompt_cache_breakpoint` on the stable prefix. Cheap-lane
+summarize uses the same streaming Responses body (`stream: true`, list
+`input`). Those hosts reject a string `input` and `stream: false`. GPT-5 (not Pro or Codex) sends
 `text.verbosity: low`. The Google login sends Completions
 `thinking_config`. Zen Gemini sends generateContent `thinkingConfig`.
 GLM 5.2 Completions send `reasoning_effort`. Anthropic automatic

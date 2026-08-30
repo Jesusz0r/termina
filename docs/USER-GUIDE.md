@@ -116,8 +116,12 @@ tab strip cycles its tabs.
 ### Talking to the agent
 
 A core tab is a full-screen TUI: `/login`, `/models`, `/clear`, `/compact`,
-`/resume`, `/effort`. Reasoning starts at medium; `/effort` shows the levels
-available for the current model. Ctrl+J inserts a newline; Enter submits. Paste keeps newlines.
+`/resume`, `/effort`. Type `@` to pick a project file; keep typing to filter.
+Tab completes, Enter inserts the path, Enter again submits. Esc closes the
+picker and keeps what you typed. Ctrl+R searches prompt history. Drag to
+select transcript text; Cmd/Ctrl+C copies. Reasoning starts at medium;
+`/effort` shows the levels available for the current model. Ctrl+J inserts
+a newline; Enter submits. Paste keeps newlines. `/help` lists keys.
 Paste a screenshot (Cmd/Ctrl+V) to attach it to the next prompt — up to
 four images, about 4 MB each. The status line shows how many are waiting.
 Pi tabs still run the pi TUI with its own commands. Text paste is
