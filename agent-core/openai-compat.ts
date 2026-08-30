@@ -67,6 +67,12 @@ export function toResponsesTools(tools: ToolDef[]): Array<Record<string, unknown
 function blockText(b: Record<string, unknown>): string {
   if (typeof b.text === "string") return b.text;
   if (typeof b.content === "string") return b.content;
+  if (Array.isArray(b.content)) {
+    return b.content
+      .map((c) => (typeof c === "string" ? c : typeof c === "object" && c && "text" in c ? String((c as { text: unknown }).text) : ""))
+      .filter(Boolean)
+      .join("\n");
+  }
   if (b.content != null) return JSON.stringify(b.content);
   return "";
 }
@@ -74,12 +80,27 @@ function blockText(b: Record<string, unknown>): string {
 export function toCompletionsMessages(system: string, messages: KernelMessage[]): CompletionMessage[] {
   const out: CompletionMessage[] = [];
   if (system) out.push({ role: "system", content: system });
+  const openToolCalls: string[] = [];
+
+  const flushOpenToolCalls = (): void => {
+    while (openToolCalls.length > 0) {
+      const toolCallId = openToolCalls.shift()!;
+      out.push({
+        role: "tool",
+        tool_call_id: toolCallId,
+        content: "(interrupted)",
+      });
+    }
+  };
+
   for (const m of messages) {
     if (typeof m.content === "string") {
-      out.push({ role: m.role, content: m.content });
+      flushOpenToolCalls();
+      out.push({ role: m.role as CompletionMessage["role"], content: m.content });
       continue;
     }
     if (m.role === "assistant") {
+      flushOpenToolCalls();
       let text = "";
       const toolCalls: NonNullable<CompletionMessage["tool_calls"]> = [];
       for (const b of m.content) {
@@ -87,6 +108,7 @@ export function toCompletionsMessages(system: string, messages: KernelMessage[])
         if (b.type === "tool_use") {
           const id = String(b.id ?? "");
           if (!id) continue;
+          openToolCalls.push(id);
           toolCalls.push({
             id,
             type: "function",
@@ -103,9 +125,13 @@ export function toCompletionsMessages(system: string, messages: KernelMessage[])
     const parts: Array<Record<string, unknown>> = [];
     for (const b of m.content) {
       if (b.type === "tool_result") {
+        const callId = String(b.tool_use_id ?? b.toolUseId ?? b.call_id ?? b.id ?? "");
+        if (!callId) continue;
+        const at = openToolCalls.indexOf(callId);
+        if (at >= 0) openToolCalls.splice(at, 1);
         out.push({
           role: "tool",
-          tool_call_id: String(b.tool_use_id ?? ""),
+          tool_call_id: callId,
           content: blockText(b),
         });
       } else if (b.type === "text") {
@@ -117,8 +143,12 @@ export function toCompletionsMessages(system: string, messages: KernelMessage[])
         if (url) parts.push({ type: "image_url", image_url: { url } });
       }
     }
-    if (parts.some((p) => p.type === "image_url")) out.push({ role: "user", content: parts });
-    else if (texts.length) out.push({ role: "user", content: texts.join("\n") });
+    flushOpenToolCalls();
+    if (parts.some((p) => p.type === "image_url")) {
+      out.push({ role: "user", content: parts });
+    } else if (texts.length) {
+      out.push({ role: "user", content: texts.join("\n") });
+    }
   }
   return out;
 }
@@ -160,14 +190,50 @@ function markPrefixThenTail(
   return [...markLastInputText(input.slice(0, -1), extra), input[input.length - 1]!];
 }
 
+/** Strip prompt_cache_breakpoint and prompt_cache_options when a model rejects explicit caching. */
+export function stripResponsesBreakpoints(body: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...body };
+  delete next.prompt_cache_options;
+  if (Array.isArray(next.input)) {
+    next.input = next.input.map((item) => {
+      if (!item || typeof item !== "object" || !Array.isArray((item as Record<string, unknown>).content)) return item;
+      const rec = item as Record<string, unknown>;
+      return {
+        ...rec,
+        content: (rec.content as Array<Record<string, unknown>>).map((part) => {
+          if (!part || typeof part !== "object" || !("prompt_cache_breakpoint" in part)) return part;
+          const { prompt_cache_breakpoint: _, ...rest } = part;
+          return rest;
+        }),
+      };
+    });
+  }
+  return next;
+}
+
 export function toResponsesInput(messages: KernelMessage[]): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = [];
+  const openCalls: string[] = [];
+
+  const flushOpenCalls = (): void => {
+    while (openCalls.length > 0) {
+      const callId = openCalls.shift()!;
+      out.push({
+        type: "function_call_output",
+        call_id: callId,
+        output: "(interrupted)",
+      });
+    }
+  };
+
   for (const m of messages) {
     if (typeof m.content === "string") {
+      flushOpenCalls();
       out.push({ role: m.role, content: [{ type: m.role === "assistant" ? "output_text" : "input_text", text: m.content }] });
       continue;
     }
     if (m.role === "assistant") {
+      flushOpenCalls();
       let text = "";
       const flushText = (): void => {
         if (!text) return;
@@ -198,6 +264,7 @@ export function toResponsesInput(messages: KernelMessage[]): Array<Record<string
           flushText();
           const callId = String(b.id ?? "");
           if (!callId) continue;
+          openCalls.push(callId);
           out.push({
             type: "function_call",
             call_id: callId,
@@ -212,9 +279,13 @@ export function toResponsesInput(messages: KernelMessage[]): Array<Record<string
     const parts: Array<Record<string, unknown>> = [];
     for (const b of m.content) {
       if (b.type === "tool_result") {
+        const callId = String(b.tool_use_id ?? b.toolUseId ?? b.call_id ?? b.id ?? "");
+        if (!callId) continue;
+        const at = openCalls.indexOf(callId);
+        if (at >= 0) openCalls.splice(at, 1);
         out.push({
           type: "function_call_output",
-          call_id: String(b.tool_use_id ?? ""),
+          call_id: callId,
           output: blockText(b),
         });
       } else if (b.type === "text") {
@@ -224,7 +295,10 @@ export function toResponsesInput(messages: KernelMessage[]): Array<Record<string
         if (url) parts.push({ type: "input_image", image_url: url });
       }
     }
-    if (parts.length) out.push({ role: "user", content: parts });
+    flushOpenCalls();
+    if (parts.length) {
+      out.push({ role: "user", content: parts });
+    }
   }
   return out;
 }
@@ -738,17 +812,23 @@ export function responsesResultFromEvents(
     arguments?: string;
   }): void => {
     if (item.type !== "function_call") return;
-    const id = String(item.call_id ?? item.id ?? "");
+    const realCallId = typeof item.call_id === "string" && item.call_id ? item.call_id : "";
+    const id = realCallId || String(item.id ?? "");
     if (!id) return;
-    let call = (item.call_id ? byKey.get(item.call_id) : undefined) || (item.id ? byKey.get(item.id) : undefined) || byKey.get(id);
+    let call = (realCallId ? byKey.get(realCallId) : undefined) || (item.id ? byKey.get(item.id) : undefined) || byKey.get(id);
     if (!call) {
       call = { id, name: String(item.name ?? ""), args: typeof item.arguments === "string" ? item.arguments : "" };
       order.push(call);
-      if (item.call_id) byKey.set(item.call_id, call);
+      if (realCallId) byKey.set(realCallId, call);
       if (item.id) byKey.set(item.id, call);
       if (!byKey.has(id)) byKey.set(id, call);
       return;
     }
+    if (realCallId && call.id !== realCallId) {
+      call.id = realCallId;
+      byKey.set(realCallId, call);
+    }
+    if (item.id && !byKey.has(item.id)) byKey.set(item.id, call);
     if (item.name) call.name = String(item.name);
     if (typeof item.arguments === "string" && item.arguments.length >= call.args.length) call.args = item.arguments;
   };
@@ -790,12 +870,20 @@ export function responsesResultFromEvents(
     }
     if (type === "response.function_call_arguments.delta") {
       let call = lookup(ev);
+      const callId = typeof ev.call_id === "string" && ev.call_id ? ev.call_id : "";
+      const itemId = typeof ev.item_id === "string" && ev.item_id ? ev.item_id : "";
       if (!call) {
-        const id = String(ev.call_id ?? ev.item_id ?? "");
+        const id = callId || itemId || "";
         call = { id, name: "", args: "" };
         order.push(call);
-        if (typeof ev.call_id === "string") byKey.set(ev.call_id, call);
-        if (typeof ev.item_id === "string") byKey.set(ev.item_id, call);
+        if (callId) byKey.set(callId, call);
+        if (itemId) byKey.set(itemId, call);
+      } else {
+        if (callId && call.id !== callId) {
+          call.id = callId;
+          byKey.set(callId, call);
+        }
+        if (itemId && !byKey.has(itemId)) byKey.set(itemId, call);
       }
       call.args += deltaText(ev.delta);
     }

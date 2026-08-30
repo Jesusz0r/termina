@@ -52,6 +52,10 @@ const {
   editProjectFile,
   nestedAgentsPointer,
   parseOffset,
+  parseLineBound,
+  formatNumberedText,
+  listProjectDir,
+  editMissDiagnostic,
   validateGrepPattern,
   buildCachedPrefix,
   anthropicCacheMark,
@@ -69,6 +73,7 @@ const {
   isValidTerminalId,
   capTail,
   readFileResult,
+  FROZEN_IDENTITY,
   buildFrozenSystem,
   traceRecord,
   isDirectRunFrom,
@@ -78,6 +83,7 @@ const {
   placeStreamBlock,
   compactStreamBlocks,
   toProviderBlock,
+  userPromptContent,
   resolveSessionFile,
   sessionRotateStamp,
   MAX_SESSION_SEGMENT_BYTES,
@@ -88,8 +94,20 @@ const {
   SLASH_COMMANDS,
   matchingSlashCommands,
   completeSlashLine,
+  fileMentionAt,
+  applyFileMention,
+  completeFileMention,
+  rankFileTags,
+  subsequenceSpread,
+  formatTuiFooter,
+  displayToolOutput,
+  listTaggedFiles,
+  collectRelativeFiles,
+  parseFileTags,
+  expandFileTags,
   stampHistoryCache,
-  formatOverlay,
+  formatWorkingSet,
+  shouldCompactForCacheCost,
   retryAfter,
   parseEffortCommand,
   supportedEffortLevels,
@@ -182,6 +200,94 @@ check("offset unsafe integer errors", typeof parseOffset(Number.MAX_SAFE_INTEGER
 writeFileSync(join(root, "bin.dat"), Buffer.from([1, 0, 2, 3]));
 check("NUL in first 4 KB errors", readProjectFile(root, { path: "bin.dat" }).isError === true);
 check("readFileResult does not require whole file API", !readFileResult(join(root, "ok.txt"), 0).isError);
+check("formatNumberedText prefixes 1-based lines", formatNumberedText("a\nb\n", 1) === "     1|a\n     2|b");
+check("formatNumberedText strips CR", formatNumberedText("a\r\nb\r\n", 1) === "     1|a\n     2|b");
+check("read_file numbers lines", readProjectFile(root, { path: "ok.txt" }).content === "     1|hello");
+writeFileSync(join(root, "lines.txt"), "one\ntwo\nthree\nfour\n");
+check(
+  "read_file start_line/end_line is inclusive",
+  readProjectFile(root, { path: "lines.txt", start_line: 2, end_line: 3 }).content === "     2|two\n     3|three",
+);
+check("read_file start_line past EOF is empty", readProjectFile(root, { path: "lines.txt", start_line: 99 }).content === "");
+check("read_file rejects offset with start_line", readProjectFile(root, { path: "lines.txt", offset: 1, start_line: 1 }).isError === true);
+check("read_file directory rejects start_line", readProjectFile(root, { path: "pkg", start_line: 1 }).isError === true);
+check("parseLineBound rejects 0", typeof parseLineBound(0, "start_line") === "object");
+const manyRows = [];
+for (let i = 1; i <= 8000; i++) manyRows.push(`row-${String(i).padStart(4, "0")}`);
+writeFileSync(join(root, "many-lines.txt"), `${manyRows.join("\n")}\n`);
+const manyPage = readProjectFile(root, { path: "many-lines.txt" });
+const manyNext = Number((manyPage.content.match(/start_line (\d+)/) || [])[1]);
+const manyLast = manyPage.content.split("\n").filter((l) => l.includes("|")).at(-1) ?? "";
+const manyCont = readProjectFile(root, { path: "many-lines.txt", start_line: manyNext });
+const manyFirst = manyCont.content.split("\n")[0] ?? "";
+check("read_file line truncation names start_line", Number.isInteger(manyNext) && manyNext > 1);
+check("read_file line continuation does not repeat the last shown line", manyFirst !== manyLast && manyFirst.includes(`row-${String(manyNext).padStart(4, "0")}`));
+writeFileSync(join(root, "huge-line.txt"), "H".repeat(50 * 1024));
+const hugeLine = readProjectFile(root, { path: "huge-line.txt", start_line: 1 });
+check("read_file long line continues with offset not start_line 1", hugeLine.content.includes("read_file offset ") && !hugeLine.content.includes("start_line"));
+check(
+  "read_file directory lists names",
+  !readProjectFile(root, { path: "pkg" }).isError &&
+    readProjectFile(root, { path: "pkg" }).content.includes("[directory pkg]") &&
+    readProjectFile(root, { path: "pkg" }).content.includes("src/") &&
+    readProjectFile(root, { path: "pkg" }).content.includes("AGENTS.md"),
+);
+check(
+  "read_file directory skips ignored segments",
+  !readProjectFile(root, { path: "." }).content.includes("node_modules"),
+);
+const relWrite = writeProjectFile(root, "rel-write.txt", "ok");
+check("write_file receipt is project-relative", relWrite.content === "ok: wrote rel-write.txt");
+check("write_file receipt uses the real path", insideWrite.content === "ok: wrote inner/new.txt");
+const bashFail = await runBash("exit 7", { cwd: root });
+check("bash failure includes exit code", bashFail.isError === true && bashFail.content.includes("[exit 7]"));
+check("editMissDiagnostic counts hits", editMissDiagnostic("aa aa aa", "aa").includes("3 occurrences"));
+const manyHits = editMissDiagnostic(Array(5000).fill("x").join(" "), "x");
+check(
+  "editMissDiagnostic does not dump every hit",
+  manyHits.includes("5000 occurrences") && manyHits.includes("(4997 more)") && (manyHits.match(/^  \d+:/gm) || []).length === 3,
+);
+check("fileMentionAt ignores emails", fileMentionAt("hi user@host.com", 16) === null);
+check("fileMentionAt reads a tag after space", fileMentionAt("fix @src/a.ts", 13)?.query === "src/a.ts");
+check("fileMentionAt empty query at @", fileMentionAt("@", 1)?.query === "");
+check(
+  "applyFileMention inserts the path",
+  applyFileMention("fix @au", 7, "agent-core/auth.ts")?.text === "fix @agent-core/auth.ts ",
+);
+check(
+  "applyFileMention replaces a mid-token suffix",
+  applyFileMention("fix @auX.ts", 7, "auth.ts")?.text === "fix @auth.ts ",
+);
+check(
+  "completeFileMention unique adds a space",
+  completeFileMention("@ok", 3, ["ok.txt"])?.text === "@ok.txt ",
+);
+check(
+  "completeFileMention shares a prefix",
+  completeFileMention("@p", 2, ["pkg/a.ts", "pkg/b.ts"])?.text === "@pkg/",
+);
+check("rankFileTags empty query prefers cwd files", rankFileTags(["pkg/a.ts", "ok.txt"], "")[0] === "ok.txt");
+check("rankFileTags matches basename first", rankFileTags(["pkg/auth.ts", "other.txt"], "auth")[0] === "pkg/auth.ts");
+check("subsequenceSpread finds ath in auth.ts", subsequenceSpread("auth.ts", "ath") === 3);
+check("rankFileTags fuzzy basename subsequence", rankFileTags(["pkg/auth.ts", "ok.txt"], "ath")[0] === "pkg/auth.ts");
+check("formatTuiFooter fits 80 columns", formatTuiFooter({}).length < 80 && formatTuiFooter({}).includes("@ · /"));
+check(
+  "displayToolOutput names how to get the rest",
+  displayToolOutput("x".repeat(3000)).includes("re-run or read_file"),
+);
+const tagged = collectRelativeFiles(root);
+check("collectRelativeFiles includes cwd files", tagged.includes("ok.txt") && tagged.includes("pkg/src/a.ts"));
+check("collectRelativeFiles skips ignored segments", !tagged.some((p) => p.includes("node_modules")));
+check("listTaggedFiles filters as you type", listTaggedFiles(root, "a.ts")[0] === "pkg/src/a.ts");
+check("parseFileTags skips emails", parseFileTags("ping me@x.com look at @ok.txt").join(" ") === "ok.txt");
+const taggedBody = expandFileTags(root, "look at @ok.txt");
+check("expandFileTags inlines tagged file bodies", taggedBody.includes("<tagged-files>") && taggedBody.includes('path="ok.txt"') && taggedBody.includes("hello"));
+writeFileSync(join(root, "xml-tag.txt"), "<file></tagged-files>\n");
+const escapedTag = expandFileTags(root, "see @xml-tag.txt");
+check(
+  "expandFileTags escapes markup in tagged bodies",
+  escapedTag.includes("&lt;file&gt;") && escapedTag.includes("&lt;/tagged-files&gt;") && !escapedTag.includes("<file></tagged-files>"),
+);
 
 const env1 = formatEnvironment(root, { probes: false });
 const env2 = formatEnvironment(root, { probes: false });
@@ -240,12 +346,25 @@ const giGlob = await globFiles(root, "**/*.ts");
 check("glob skips gitignored directory", !giGlob.includes("skipdir/x.ts") && giGlob.includes("hit.ts"));
 const envGi = formatEnvironment(root, { probes: false });
 check("environment listing omits gitignored names", !envGi.includes("hidden.secret") && envGi.includes("visible.secret"));
+check(
+  "listProjectDir skips gitignored names",
+  !listProjectDir(root, root).content.includes("hidden.secret") && listProjectDir(root, root).content.includes("visible.secret"),
+);
 
 writeFileSync(join(root, "edit-me.ts"), "const a = 1;\nconst b = 2;\n");
 const edited = editProjectFile(root, "edit-me.ts", "const a = 1;", "const a = 42;");
 check("edit unique occurrence", edited.isError === false && readFileSync(join(root, "edit-me.ts"), "utf8").includes("const a = 42;"));
 check("edit missing old_text fails", editProjectFile(root, "edit-me.ts", "no-such-text", "x").isError === true);
+check(
+  "edit miss names occurrence count",
+  editProjectFile(root, "edit-me.ts", "no-such-text", "x").content.includes("0 occurrences"),
+);
 check("edit non-unique old_text fails", editProjectFile(root, "edit-me.ts", "const", "x").isError === true);
+const uniqueMiss = editProjectFile(root, "edit-me.ts", "const", "x");
+check(
+  "edit non-unique includes nearby lines",
+  uniqueMiss.content.includes("not unique") && uniqueMiss.content.includes("occurrence") && uniqueMiss.content.includes("  1:"),
+);
 check("edit empty old_text fails", editProjectFile(root, "edit-me.ts", "", "x").isError === true);
 check("edit outside cwd fails", editProjectFile(root, "/etc/passwd", "root", "x").isError === true);
 writeFileSync(join(root, "dollar.ts"), "cost $1 and done\n");
@@ -315,7 +434,7 @@ check("parseBangCommand rejects a bare bang", parseBangCommand("!")?.error === "
 check("parseBangCommand rejects whitespace", parseBangCommand("!   ")?.error === "empty command");
 check("parseBangCommand ignores prompts", parseBangCommand("hello") === null);
 const echo = await runBash("echo hello-core", { cwd: root });
-check("bash echo succeeds", echo.isError === false && echo.content.includes("hello-core"));
+check("bash echo succeeds", echo.isError === false && echo.content.includes("hello-core") && echo.content.includes("[exit 0]"));
 const bashPath = await runBash("printf %s \"$PATH\"", { cwd: root });
 check(
   "bash PATH includes extra user bins",
@@ -920,6 +1039,20 @@ check(
   "toProviderBlock keeps thinking",
   toProviderBlock({ type: "thinking", thinking: "abc", signature: "sig" }).thinking === "abc",
 );
+check(
+  "hidden context becomes provider text",
+  JSON.stringify(toProviderBlock({ type: "context", text: "<working-set>x</working-set>" })) ===
+    JSON.stringify({ type: "text", text: "<working-set>x</working-set>" }),
+);
+const hiddenWorkingSet = userPromptContent("visible", [], "<working-set>hidden</working-set>");
+check(
+  "working set persists separately from visible prompt text",
+  Array.isArray(hiddenWorkingSet) &&
+    hiddenWorkingSet[0]?.type === "text" &&
+    hiddenWorkingSet[0]?.text === "visible" &&
+    hiddenWorkingSet[1]?.type === "context",
+);
+check("plain user prompt stays a string", userPromptContent("visible", []) === "visible");
 const unsignedThinking = toRequest([{ role: "assistant", content: [{ type: "thinking", thinking: "abc" }], tokens: 1, sseq: 1 }]);
 check("toRequest drops unsigned thinking", unsignedThinking[0]?.content?.length === 0);
 const searchReq = toRequest([
@@ -1323,6 +1456,13 @@ const childFrozen = buildFrozenSystem({
 });
 check("ancestor AGENTS.md is not loaded", !childFrozen.system.includes("PARENT-ONLY-TEXT"));
 check("missing project AGENTS.md omits block", !childFrozen.system.includes("<project-instructions>"));
+check("frozen identity is the zone-1 prefix", childFrozen.system.startsWith(`${FROZEN_IDENTITY}\n\n`));
+check(
+  "frozen identity forbids conversational edit permission",
+  FROZEN_IDENTITY.includes("instead of asking permission conversationally") &&
+    FROZEN_IDENTITY.includes("Follow an explicit host instruction not to touch a file") &&
+    !FROZEN_IDENTITY.includes("not a stop"),
+);
 check("missing user-global omitted", !childFrozen.system.includes("<user-instructions>"));
 
 const escapedCwd = mkdtempSync(join(tmpdir(), "agent-core-esc-"));
@@ -1415,6 +1555,8 @@ check("empty PATH still reports node", envMissing.includes("node "));
 
 const noArgs = traceRecord({
   role: "main",
+  provider: "openai-codex",
+  protocol: "openai-codex-responses",
   model: "m",
   status: "ok",
   storageSeqRange: [1, 2],
@@ -1428,12 +1570,15 @@ const noArgs = traceRecord({
   wasteTokens: 0,
   wasteCause: null,
   systemHash: hashSystem("sys"),
+  cache: null,
 });
 const traceJson = JSON.stringify(noArgs);
 check("trace record has no tool arguments or paths", !traceJson.includes("args") && !traceJson.includes("pattern") && !Object.hasOwn(noArgs, "input"));
 check("trace record keeps tool names only", noArgs.toolNames[0] === "grep" && noArgs.systemHash.length === 16);
 const overflowTrace = traceRecord({
   role: "main",
+  provider: "openai-codex",
+  protocol: "openai-codex-responses",
   model: "m",
   status: "overflow",
   storageSeqRange: [2, 2],
@@ -1447,6 +1592,7 @@ const overflowTrace = traceRecord({
   wasteTokens: 17,
   wasteCause: "post-revision",
   systemHash: hashSystem("sys"),
+  cache: null,
 });
 check(
   "trace record preserves overflow and revision kinds",
@@ -1557,6 +1703,7 @@ const {
   usesAnthropicCacheMarkers,
   usesPromptCacheKey,
   usesOpenAIExplicitCache,
+  usesPromptCacheOptions,
   cacheSessionKey,
   cacheSessionHeaders,
   googleNativeHeaders,
@@ -1833,10 +1980,13 @@ check("usesAnthropicCacheMarkers openrouter claude", usesAnthropicCacheMarkers("
 check("usesAnthropicCacheMarkers openrouter gpt", usesAnthropicCacheMarkers("openrouter", "openai/gpt-5.6-sol") === false);
 check("usesAnthropicCacheMarkers openrouter qwen", usesAnthropicCacheMarkers("openrouter", "qwen/qwen3.7-max") === true);
 check("usesOpenAIExplicitCache gpt-5.6", usesOpenAIExplicitCache("gpt-5.6-sol") === true);
-check("usesOpenAIExplicitCache gpt-5.5", usesOpenAIExplicitCache("gpt-5.5") === false);
 check("usesOpenAIExplicitCache skips Codex", usesOpenAIExplicitCache("gpt-5.6-sol", "openai-codex") === false);
 check("usesOpenAIExplicitCache skips Copilot", usesOpenAIExplicitCache("gpt-5.6-sol", "github-copilot") === false);
 check("usesOpenAIExplicitCache zen gpt-5.6", usesOpenAIExplicitCache("gpt-5.6-sol", "opencode-zen") === true);
+check("usesPromptCacheOptions openai gpt-5.6", usesPromptCacheOptions("openai", "gpt-5.6-sol") === true);
+check("usesPromptCacheOptions openrouter gpt-5.6", usesPromptCacheOptions("openrouter", "openai/gpt-5.6-sol") === true);
+check("usesPromptCacheOptions skips Codex", usesPromptCacheOptions("openai-codex", "gpt-5.6-sol") === false);
+check("usesPromptCacheOptions skips Zen", usesPromptCacheOptions("opencode-zen", "gpt-5.6-sol") === false);
 check("cacheSessionKey clamps length", cacheSessionKey(`${"a".repeat(300)}`).length === 256);
 check("cacheSessionKey rejects a control character", cacheSessionKey("core-1\nHost: x") === "");
 check(
@@ -2402,6 +2552,28 @@ check(
   "codex responses set cache key and omit unsupported max_output_tokens",
   bodyCodex.prompt_cache_key === "def" && bodyCodex.max_output_tokens === undefined,
 );
+const bodySummary = compat.responsesBody("gpt-5.6-sol", "You compress coding-agent session history. Only output the structured handoff.", [{ role: "user", content: "fold me" }], [], {
+  maxTokens: 2048,
+  cacheKey: "sess-sum",
+  includeEncryptedReasoning: false,
+});
+check(
+  "summarize responses stream a list input",
+  bodySummary.stream === true &&
+    Array.isArray(bodySummary.input) &&
+    bodySummary.input[0]?.content?.[0]?.text === "fold me" &&
+    typeof bodySummary.input !== "string",
+);
+check("summarize responses omit prompt_cache_options", bodySummary.prompt_cache_options === undefined);
+check("summarize responses omit reasoning.effort none", bodySummary.reasoning === undefined);
+check("summarize responses omit encrypted include", bodySummary.include === undefined);
+const bodySummaryCodex = compat.responsesBody("gpt-5.6-sol", "sys", [{ role: "user", content: "fold" }], [], {
+  includeEncryptedReasoning: false,
+});
+check(
+  "summarize Codex responses omit max_output_tokens",
+  bodySummaryCodex.max_output_tokens === undefined && bodySummaryCodex.stream === true,
+);
 const bodyOrClaude = compat.responsesBody(
   "anthropic/claude-sonnet-5",
   "sys",
@@ -2436,6 +2608,7 @@ check(
   "gpt-5.6 breakpoint sits before the overlay",
   gpt56First?.prompt_cache_breakpoint?.mode === "explicit" && gpt56Last?.prompt_cache_breakpoint === undefined,
 );
+check("gpt-5.6 breakpoint-only omits prompt_cache_options", bodyGpt56.prompt_cache_options === undefined);
 const bodyGpt56Explicit = compat.responsesBody(
   "gpt-5.6-sol",
   "sys",
@@ -2489,6 +2662,12 @@ const bodyGpt56Solo = compat.responsesBody("gpt-5.6-sol", "sys", [{ role: "user"
 check(
   "gpt-5.6 breakpoint does not mark a lone overlay",
   bodyGpt56Solo.input[0]?.content?.[0]?.prompt_cache_breakpoint === undefined,
+);
+const stripped = compat.stripResponsesBreakpoints(bodyGpt56Explicit);
+check(
+  "stripResponsesBreakpoints removes options and input markers",
+  stripped.prompt_cache_options === undefined &&
+    stripped.input[0]?.content?.[0]?.prompt_cache_breakpoint === undefined,
 );
 const bodyResponses = compat.responsesBody("gpt-5.6-sol", "sys", [], [], { maxTokens: 32_768, reasoningEffort: "max" });
 check("other responses set max_output_tokens", bodyResponses.max_output_tokens === 32_768);
@@ -2554,6 +2733,65 @@ check(
   interleaved.map((x) => x.type || x.role).join(",") === "reasoning,function_call,reasoning,function_call" &&
     interleaved[1]?.call_id === "c1" &&
     interleaved[3]?.call_id === "c2",
+);
+const orphanTest = compat.toResponsesInput([
+  {
+    role: "assistant",
+    content: [{ type: "tool_use", id: "call_9uC6HZkBPZk6cPwVyuGR4IwC", name: "bash", input: { command: "ls" } }],
+  },
+  {
+    role: "user",
+    content: "next prompt",
+  },
+]);
+check(
+  "toResponsesInput flushes missing tool output before next user turn",
+  orphanTest[1]?.type === "function_call_output" &&
+    orphanTest[1]?.call_id === "call_9uC6HZkBPZk6cPwVyuGR4IwC" &&
+    orphanTest[2]?.role === "user",
+);
+const partialAnswer = compat.toResponsesInput([
+  {
+    role: "assistant",
+    content: [
+      { type: "tool_use", id: "call_A", name: "bash", input: { command: "ls" } },
+      { type: "tool_use", id: "call_B", name: "bash", input: { command: "pwd" } },
+    ],
+  },
+  {
+    role: "user",
+    content: [{ type: "tool_result", tool_use_id: "call_A", content: "file.txt" }],
+  },
+]);
+check(
+  "toResponsesInput flushes unanswered parallel tool calls even without user text",
+  partialAnswer.length === 4 &&
+    partialAnswer[0]?.call_id === "call_A" &&
+    partialAnswer[1]?.call_id === "call_B" &&
+    partialAnswer[2]?.call_id === "call_A" &&
+    partialAnswer[2]?.output === "file.txt" &&
+    partialAnswer[3]?.call_id === "call_B" &&
+    partialAnswer[3]?.output === "(interrupted)",
+);
+const deltaThenDone = compat.responsesResultFromEvents(
+  [
+    {
+      type: "response.function_call_arguments.delta",
+      item_id: "item_9",
+      delta: '{"command":',
+    },
+    {
+      type: "response.output_item.done",
+      item: { type: "function_call", id: "item_9", call_id: "call_9uC6HZkBPZk6cPwVyuGR4IwC", name: "bash", arguments: '{"command":"ls"}' },
+    },
+  ],
+  () => {},
+  Date.now(),
+);
+check(
+  "responses result updates call_id over item_id from delta",
+  deltaThenDone.blocks[0]?.type === "tool_use" &&
+    deltaThenDone.blocks[0]?.id === "call_9uC6HZkBPZk6cPwVyuGR4IwC",
 );
 const doneOnly = compat.responsesResultFromEvents(
   [
@@ -2792,6 +3030,16 @@ const deadMcp = await mcp.startMcp(
 );
 check("mcp spawn failure does not throw", deadMcp.tools.length === 0 && deadMcp.notes.some((n) => n.includes("gone")));
 deadMcp.shutdown();
+
+const crashServer = join(mcpDir, "crash-server.mjs");
+writeFileSync(crashServer, "process.exit(1);\n", "utf8");
+const crashMcp = await mcp.startMcp(
+  [{ name: "crash", command: process.execPath, args: [crashServer], env: {} }],
+  { projectRoot: mcpDir, confineCwd: (cwd) => mcp.jailMcpCwd(mcpDir, cwd) },
+);
+const crashedCall = await crashMcp.call("mcp_crash_test", {});
+check("crashed mcp call fails cleanly without unhandled exception", crashedCall.isError === true);
+crashMcp.shutdown();
 
 const httpStub = createServer((req, res) => {
   const chunks = [];
@@ -3422,20 +3670,22 @@ check(
     stampedUser[0]?.content?.[0]?.text === "hi" &&
     stampedUser[0]?.content?.[0]?.cache_control?.type === "ephemeral",
 );
-check("formatOverlay omits empty", formatOverlay({ messages: [] }) === "");
+check("formatWorkingSet omits empty", formatWorkingSet({ messages: [] }) === "");
 const overlayMsgs = [
   { role: "assistant", content: [{ type: "tool_use", name: "edit", input: { path: "a.ts" } }] },
   { role: "user", content: [{ type: "tool_result", tool_use_id: "1", content: "ok" }] },
 ];
-const overlay = formatOverlay({ messages: overlayMsgs, hostContext: "verify failed" });
-check("formatOverlay includes edit path", overlay.includes("a.ts") && overlay.includes("<modified-files>"));
-check("formatOverlay includes host context", overlay.includes("verify failed") && overlay.startsWith("<working-set>"));
-check("formatOverlay does not invent a stored user message", overlayMsgs.every((m) => m.role !== "user" || Array.isArray(m.content)));
+const overlay = formatWorkingSet({ messages: overlayMsgs, hostContext: "verify failed" });
+check("formatWorkingSet includes edit path", overlay.includes("a.ts") && overlay.includes("<modified-files>"));
+check("formatWorkingSet includes host context", overlay.includes("verify failed") && overlay.startsWith("<working-set>"));
 const manyReads = {
   role: "assistant",
   content: Array.from({ length: 41 }, (_, i) => ({ type: "tool_use", name: "read_file", input: { path: `f${i}.ts` } })),
 };
-check("formatOverlay caps inventories", formatOverlay({ messages: [manyReads] }).includes("<!-- 1 paths omitted -->"));
+check("formatWorkingSet caps inventories", formatWorkingSet({ messages: [manyReads] }).includes("<!-- 1 paths omitted -->"));
+check("cache-cost compaction waits below 100k", shouldCompactForCacheCost(99_999, 0, 120_000) === false);
+check("cache-cost compaction waits on a cache hit", shouldCompactForCacheCost(120_000, 0.8, 120_000) === false);
+check("cache-cost compaction starts on an expensive miss", shouldCompactForCacheCost(120_000, 0.1, 120_000) === true);
 const stampedThenOverlay = [
   ...stampHistoryCache(overlayMsgs),
   { role: "user", content: overlay },
@@ -3678,7 +3928,7 @@ const resumeTui = new tuiMod.AgentTui({
 });
 renderHistoryTranscript(
   [
-    { role: "user", content: "hello there" },
+    { role: "user", content: [{ type: "text", text: "hello there" }, { type: "context", text: "hidden-working-set" }] },
     {
       role: "assistant",
       content: [
@@ -3702,6 +3952,7 @@ check(
     resumeFrame.includes("ok file") &&
     resumeFrame.includes("done reading") &&
     resumeFrame.includes("resume-think") &&
+    !resumeFrame.includes("hidden-working-set") &&
     !resumeFrame.includes("hidden-encrypted") &&
     !resumeFrame.includes("resumed 4 messages"),
 );
@@ -3805,6 +4056,10 @@ const runningPaint = paintCapture((tui) => {
 check(
   "pending tool uses index 16",
   runningPaint.includes("\x1b[48;5;16m") && runningPaint.includes("running") && runningPaint.includes("\x1b[0m"),
+);
+check(
+  "tui start does not enable mouse tracking",
+  runningPaint.includes("\x1b[?1049h") && !runningPaint.includes("\x1b[?1000h") && !runningPaint.includes("\x1b[?1006h"),
 );
 const donePaint = paintCapture((tui) => {
   tui.finishTool(tui.startTool("bash", "ls"), "success", "ok");
@@ -4108,7 +4363,7 @@ permissionTui.setChoices("Approve bash? rm -rf build", [
 permissionTui.setBusy(true);
 check(
   "tui approval is selectable while busy",
-  permissionTui.frame().includes("Approve bash? rm -rf build") && permissionTui.frame().includes("↑↓ pick"),
+  permissionTui.frame().includes("Approve bash? rm -rf build") && permissionTui.frame().includes("↑↓ · Enter"),
 );
 permissionTui.feed("\r");
 check("tui approval defaults to deny", permissionPicks[1] === "/approve deny");
@@ -4136,7 +4391,10 @@ shortcutTui.feed("\x10");
 shortcutTui.feed("\x1b[112;6u");
 shortcutTui.feed("\x1b[Z");
 shortcutTui.feed("\x1b");
-check("Escape cancels the model picker", !shortcutTui.frame().includes("> /models"));
+check(
+  "Escape cancels the model picker",
+  !shortcutTui.frame().includes("anthropic/a") && shortcutTui.frame().includes("> /models"),
+);
 shortcutTui.feed("\x1b");
 shortcutTui.frame();
 check("Ctrl+P cycles models forward", shortcutLines[0] === "/model anthropic/c");
@@ -4144,8 +4402,90 @@ check("Ctrl+Shift+P cycles models backward", shortcutLines[1] === "/model anthro
 check("Shift+Tab cycles effort", shortcutLines[2] === "/effort max");
 check("Escape interrupts", shortcutInterrupts === 1);
 check("tui transcript is visible", frame.includes("hello from transcript"));
+const emptyTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+check("tui empty state orients the user", emptyTui.frame().includes("Type a task") && emptyTui.frame().includes("/help lists keys"));
+check("tui idle footer is short", emptyTui.frame().includes("@ · / · Tab") && !emptyTui.frame().includes("Ctrl+J newline"));
+emptyTui.setStatus({ permissions: "ask" });
+check("tui shows permissions in the header", emptyTui.frame().includes(" ask "));
+emptyTui.setQueued("fix the test");
+check("tui shows a queued prompt", emptyTui.frame().includes("queued fix the test"));
+const escKeep = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  fileMatches: (query) => rankFileTags(["ok.txt", "agent-core/auth.ts"], query),
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+escKeep.feed("fix @au");
+escKeep.feed("\x1b");
+escKeep.frame();
+check(
+  "Escape keeps the draft when closing the file picker",
+  escKeep.frame().includes("fix @au") && !escKeep.frame().includes("agent-core/auth.ts"),
+);
+const histSearch = [];
+const histTuiSearch = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: (line) => histSearch.push(line),
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+histTuiSearch.feed("alpha one\r");
+histTuiSearch.feed("beta two\r");
+histTuiSearch.feed("\x12");
+histTuiSearch.feed("beta");
+check("Ctrl+R searches prompt history", histTuiSearch.frame().includes("beta two") && histTuiSearch.frame().includes("(search)"));
 tui.feed("/");
 check("tui slash menu lists help and exit", tui.frame().includes("/help") && tui.frame().includes("/exit"));
+const tagSubmitted = [];
+const tagTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  fileMatches: (query) => rankFileTags(["ok.txt", "pkg/src/a.ts", "agent-core/auth.ts"], query),
+  onSubmit: (line) => tagSubmitted.push(line),
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+tagTui.feed("@");
+check("tui @ lists cwd files first", tagTui.frame().includes("ok.txt") && tagTui.frame().includes("pkg/src/a.ts"));
+tagTui.feed("auth");
+check(
+  "tui @ filters as you type",
+  tagTui.frame().includes("agent-core/auth.ts") && !tagTui.frame().includes("ok.txt"),
+);
+tagTui.feed("\r");
+check("tui @ enter inserts the path", tagTui.frame().includes("@agent-core/auth.ts") && tagSubmitted.length === 0);
+tagTui.feed("\r");
+check("tui @ second enter submits", tagSubmitted[0] === "@agent-core/auth.ts");
+const tagTab = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  fileMatches: (query) => rankFileTags(["ok.txt"], query),
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+tagTab.feed("@ok\t");
+check("tui @ tab completes a unique file", tagTab.frame().includes("@ok.txt"));
+const tagExact = [];
+const tagExactTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  fileMatches: (query) => rankFileTags(["ok.txt"], query),
+  onSubmit: (line) => tagExact.push(line),
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+tagExactTui.feed("@ok.txt\r");
+check("tui @ enter on an exact path submits", tagExact[0] === "@ok.txt");
 tui.feed("\r");
 check("tui enter on / submits help", submitted[0] === "/help");
 const loginPicks = [];
@@ -4284,6 +4624,23 @@ const tuiFail = new tuiMod.AgentTui({
   onExit: () => {},
 });
 check("tui start fails closed", tuiFail.start() === false && tuiFail.active() === false);
+
+const scrollTestTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+scrollTestTui.appendAssistant("line\n".repeat(100));
+scrollTestTui.feed("\x1b[<64;1;1M");
+check("mouse wheel up scrolls by 1 line", scrollTestTui.scroll === 1);
+scrollTestTui.feed("\x1b[<64;1;1M");
+check("second mouse wheel up scrolls by 1 line", scrollTestTui.scroll === 2);
+scrollTestTui.feed("\x1b[<65;1;1M");
+check("mouse wheel down scrolls by 1 line", scrollTestTui.scroll === 1);
+scrollTestTui.feed("\x1b[5~");
+check("page up scrolls by full page", scrollTestTui.scroll > 10);
 
 const failed = results.filter((r) => !r).length;
 console.log(`${results.length - failed}/${results.length} passed`);
