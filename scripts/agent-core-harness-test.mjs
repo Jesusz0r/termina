@@ -42,7 +42,6 @@ const {
   formatUserInstructions,
   formatEnvironment,
   formatStub,
-  parseMaxTurns,
   parsePrintPrompt,
   reproFor,
   toRequest,
@@ -1123,13 +1122,6 @@ check(
   "read nested AGENTS.md has no pointer",
   !readProjectFile(root, { path: "pkg/AGENTS.md" }).content.startsWith("[package instructions:"),
 );
-
-check("parseMaxTurns missing → 80", parseMaxTurns(undefined) === 80);
-check("parseMaxTurns 2", parseMaxTurns("2") === 2);
-check("parseMaxTurns 0", parseMaxTurns("0") === 80);
-check("parseMaxTurns -1", parseMaxTurns("-1") === 80);
-check("parseMaxTurns 2.5", parseMaxTurns("2.5") === 80);
-check("parseMaxTurns nope", parseMaxTurns("nope") === 80);
 
 const stub = formatStub({ chars: 12, tool: "grep", sseq: 7, repro: "grep 'x'" });
 check("formatStub includes storageSeq and repro", stub.includes("storageSeq 7") && stub.includes("reproduce: grep 'x'"));

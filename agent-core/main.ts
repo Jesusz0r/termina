@@ -267,14 +267,6 @@ export function parsePrintPrompt(argv: string[]): string | null {
   return argv.slice(i + 1).join(" ").trim();
 }
 
-export function parseMaxTurns(raw: string | undefined): number {
-  if (raw === undefined || raw === "") return 80;
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n < 1) return 80;
-  return n;
-}
-
-const MAX_TURNS = parseMaxTurns(process.env.TERMINA_CORE_MAX_TURNS);
 export const EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 type EffortLevelMap = Partial<Record<EffortLevel, string | null>>;
@@ -2243,10 +2235,20 @@ export function hashSystem(text: string): string {
 }
 
 const diagnosticHashSalt = randomUUID();
+const DIAGNOSTIC_INLINE_STRING_CHARS = 16_384;
+
+function hashDiagnosticText(text: string): string {
+  return createHash("sha256").update(diagnosticHashSalt, "utf8").update("\0").update(text, "utf8").digest("hex").slice(0, 16);
+}
 
 function hashDiagnostic(value: unknown): string {
-  const text = typeof value === "string" ? value : (JSON.stringify(value) ?? "undefined");
-  return createHash("sha256").update(diagnosticHashSalt, "utf8").update("\0").update(text, "utf8").digest("hex").slice(0, 16);
+  if (typeof value === "string") return hashDiagnosticText(value);
+  const text = JSON.stringify(value, (_key, item) =>
+    typeof item === "string" && item.length > DIAGNOSTIC_INLINE_STRING_CHARS
+      ? { chars: item.length, hash: hashDiagnosticText(item) }
+      : item,
+  ) ?? "undefined";
+  return hashDiagnosticText(text);
 }
 
 function cacheDiagnosticsForRequest(
@@ -3521,13 +3523,16 @@ let revisions = 0;
 let revisionKinds: RevisionKind[] = [];
 let lastBilledTokens: number | null = null;
 let lastCacheReadShare: number | null = null;
+let lastRequestFollowedRevision = false;
 
 export function shouldCompactForCacheCost(
   billedTokens: number | null,
   cacheReadShare: number | null,
   contextTokens: number,
+  followedRevision: boolean,
 ): boolean {
   return (
+    !followedRevision &&
     billedTokens !== null &&
     cacheReadShare !== null &&
     billedTokens >= CACHE_MISS_COMPACT_TOKENS &&
@@ -4378,6 +4383,7 @@ function resetUsageContinuity(): void {
   prevCacheDiagnostics = null;
   lastBilledTokens = null;
   lastCacheReadShare = null;
+  lastRequestFollowedRevision = false;
 }
 
 function resetCacheContinuity(): void {
@@ -4455,12 +4461,11 @@ function reportUsage(
                 ? "tool-schema-changed"
                 : prevCacheDiagnostics?.stablePrefixHash !== cache.stablePrefixHash
                   ? "stable-prefix-changed"
-                  : prevCacheDiagnostics?.workingSetHash !== cache.workingSetHash
-                    ? "working-set-changed"
-                    : "backend-or-prefix-miss";
+                  : "backend-or-prefix-miss";
       waste = { tokens: missed, cause };
     }
   }
+  lastRequestFollowedRevision = postRevision;
   postRevision = false;
   prevPrompt = { total: cur, ts: Date.now() };
   prevCacheDiagnostics = { ...cache };
@@ -4647,20 +4652,19 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   let storageFailure: string | null = null;
   if (!rateLookup && !ratesFailed) void loadRates().then(() => { ratesFailed = true; });
   let retriedOverflow = false;
-  let modelCalls = 0;
-  let lastHadTools = false;
   let resumePaused = false;
   let lastPlanText = "";
   let cacheCostCompactionAttempted = false;
   codexTurnState = "";
   try {
-    while (modelCalls < MAX_TURNS) {
+    while (true) {
       if (interrupted) break;
       if (!resumePaused) {
         reclaim();
         // Compact an expensive cache miss before the context limit forces it.
         const shouldCompactForCost =
           !cacheCostCompactionAttempted &&
+          !lastRequestFollowedRevision &&
           shouldCompactForCacheCost(lastBilledTokens, lastCacheReadShare, totalTokens());
         if (shouldCompactForCost) cacheCostCompactionAttempted = true;
         const compactedForCost = shouldCompactForCost ? await summarize() : false;
@@ -4699,7 +4703,6 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           throw err;
         }
       }
-      modelCalls++;
       const sys = systemPrompt();
       if (!result.usage) resetUsageContinuity();
       const waste = result.usage
@@ -4729,7 +4732,6 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       const uses = (result.blocks.filter((b) => b.type === "tool_use") as Extract<Block, { type: "tool_use" }>[]).map(
         (b): ToolUse => ({ id: b.id, name: b.name, input: b.input }),
       );
-      lastHadTools = uses.length > 0 || result.stopReason === "pause_turn";
       if (uses.length === 0) {
         writeMainTrace({ status: "ok", seqBefore, toolNames: serverNames, usage: result.usage, waste, sysHash: hashSystem(sys), cache: result.cache, started: callStarted });
         if (result.stopReason === "pause_turn" && !interrupted) {
@@ -4800,9 +4802,6 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       pushMessage("user", resultBlocks);
       writeMainTrace({ status: "ok", seqBefore, toolNames: [...serverNames, ...uses.map((u) => u.name)], usage: result.usage, waste, sysHash: hashSystem(sys), cache: result.cache, started: callStarted });
       out("\n");
-    }
-    if (modelCalls >= MAX_TURNS && lastHadTools && !interrupted) {
-      out(`\n(turn cap ${MAX_TURNS} reached this prompt)\n`);
     }
   } catch (err) {
     if (interrupted) out("\n(interrupted)\n");
