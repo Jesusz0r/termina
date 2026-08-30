@@ -211,6 +211,8 @@ export function pathBasename(p: string): string {
   return p.split(/[\\/]/).pop() || p;
 }
 
+export type CanonicalizePath = (absPath: string) => string | Promise<string>;
+
 import {
   DEFAULT_SHORTCUTS,
   type MenuCommand,

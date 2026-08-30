@@ -7,17 +7,16 @@
  */
 import { isAbsolute, relative } from "node:path";
 import { HAS_UNCHECKED_PLAN_TASK, PLAN_TASK_MARKER } from "../shared/plan-task.ts";
-import type { PlanTask } from "../shared/types.ts";
+import type { CanonicalizePath, PlanTask } from "../shared/types.ts";
 
 export { HAS_UNCHECKED_PLAN_TASK, PLAN_TASK_MARKER };
+export type { CanonicalizePath };
 
 const UNCHECKED_PLAN_LINE = new RegExp("^" + PLAN_TASK_MARKER + String.raw`\s*(.+)$`);
 const MAX_PLAN_TASKS = 20;
 const MAX_PATHS_PER_TASK = 5;
 
 export const MAX_DISPATCH_WORKERS = 3;
-
-export type CanonicalizePath = (absPath: string) => string | Promise<string>;
 
 export async function parsePlanTasks(text: string, cwd: string | null, canonicalize: CanonicalizePath): Promise<PlanTask[]> {
   const tasks: PlanTask[] = [];

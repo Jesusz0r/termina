@@ -7,6 +7,7 @@ import { lstat, open } from "node:fs/promises";
 import { isAbsolute, normalize } from "node:path";
 import { randomUUID } from "node:crypto";
 import { MAX_IMAGE_BYTES, MAX_PENDING_IMAGES, type PendingImageMediaType } from "../agent-core/host.ts";
+import { quoteShellArg } from "../shared/terminal-control.ts";
 import type { FileHandle } from "node:fs/promises";
 
 const MAX_DROP_PATHS = 16;
@@ -64,8 +65,7 @@ export async function validatePathDropTargets(paths: readonly string[]): Promise
 
 export function quotePosixPaths(paths: readonly string[], platform: NodeJS.Platform): { ok: true; text: string } | DropFailure {
   if (platform !== "darwin" && platform !== "linux") return { ok: false, error: "unsupported platform" };
-  const quoted = paths.map((path) => `'${path.replaceAll("'", "'\\''")}'`);
-  return { ok: true, text: quoted.join(" ") };
+  return { ok: true, text: paths.map(quoteShellArg).join(" ") };
 }
 
 export async function readStableImage(

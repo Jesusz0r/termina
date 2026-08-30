@@ -11,3 +11,8 @@ export function thinkingStartupArgs(showThinking: boolean): string[] {
 export function parseHideThinking(argv: string[]): boolean {
   return argv.includes(HIDE_THINKING_ARG);
 }
+
+/** Quote one argument for POSIX shell execution. */
+export function quoteShellArg(arg: string): string {
+  return `'${arg.replace(/'/g, `'\\''`)}'`;
+}

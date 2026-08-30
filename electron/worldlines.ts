@@ -27,13 +27,9 @@ import {
   writeForkedSession,
 } from "../agent-core/session.js";
 import { MAX_MCP_JSON_BYTES } from "../agent-core/mcp.js";
-import { thinkingStartupArgs } from "../shared/terminal-control.js";
+import { quoteShellArg, thinkingStartupArgs } from "../shared/terminal-control.js";
 
-/** Quote one shell argument: the resolved base commands carry scripts that
- * must survive as one argument through the wrapper shell. */
-export function quoteShellArg(a: string): string {
-  return `'${a.replace(/'/g, `'\\''`)}'`;
-}
+export { quoteShellArg };
 
 /** The lifecycle of one candidate (WORLDLINES §6.1). */
 export type WorldlineState =

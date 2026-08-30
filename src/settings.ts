@@ -24,10 +24,6 @@ const THEME_OPTIONS: Array<{ id: ThemeId; label: string; description: string }> 
   { id: "high-contrast", label: "Signal", description: "Strong contrast for clear edges" },
 ];
 
-function copyPreferences(preferences: AppPreferences): AppPreferences {
-  return normalizeAppPreferences(preferences);
-}
-
 export class SettingsView {
   private preferences: AppPreferences;
   private backdrop: HTMLElement | null = null;
@@ -49,7 +45,7 @@ export class SettingsView {
       this.backdrop.focus();
       return;
     }
-    this.preferences = copyPreferences(preferences);
+    this.preferences = normalizeAppPreferences(preferences);
     this.recording = null;
     this.captureError = null;
     this.activeSection = "appearance";
@@ -91,7 +87,7 @@ export class SettingsView {
   }
 
   private notify(): void {
-    this.callbacks.onChange(copyPreferences(this.preferences));
+    this.callbacks.onChange(normalizeAppPreferences(this.preferences));
   }
 
   private cancelRecording(): void {

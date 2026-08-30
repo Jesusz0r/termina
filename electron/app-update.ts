@@ -17,14 +17,7 @@ const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const CHECK_TIMEOUT_MS = 60 * 1000;
 const PROGRESS_THROTTLE_MS = 400;
 
-export interface AppUpdateController {
-  getState(): AppUpdateState;
-  check(): void;
-  install(): { ok: boolean; error?: string };
-  quitAndInstall(): void;
-  start(): void;
-  dispose(): void;
-}
+export type AppUpdateController = ReturnType<typeof createAppUpdater>;
 
 function currentVersion(): string {
   return app.getVersion();
@@ -45,7 +38,7 @@ function isUpdateInFlight(state: AppUpdateState): boolean {
   return state.status === "available" || state.status === "downloading" || state.status === "ready";
 }
 
-export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }): AppUpdateController {
+export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }) {
   let state: AppUpdateState = app.isPackaged
     ? { status: "checking", currentVersion: currentVersion() }
     : { status: "disabled", currentVersion: currentVersion() };

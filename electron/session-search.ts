@@ -12,7 +12,7 @@ import { createInterface } from "node:readline";
 // .ts extensions so the harness can load this file with strip-types.
 import { cleanPlanPathToken, looksLikePath } from "./plan-board.ts";
 import { listCurrentSegments } from "../agent-core/session.ts";
-import type { SessionHit } from "../shared/types.ts";
+import type { CanonicalizePath, SessionHit } from "../shared/types.ts";
 
 export const MAX_SESSION_SEARCH_FILES = 50;
 export const MAX_SESSION_SEARCH_HITS = 50;
@@ -22,8 +22,6 @@ export const MAX_SESSION_SEARCH_LINES = 10_000;
 export type SessionMessageParse = { role: string; text: string; paths: string[] };
 
 export type SessionFileEntry = { path: string; name: string; mtimeMs: number; segments?: string[] };
-
-type CanonicalizePath = (absPath: string) => string | Promise<string>;
 
 function stringArgPaths(value: unknown, paths: string[]): void {
   if (typeof value === "string") {
