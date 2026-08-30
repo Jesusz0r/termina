@@ -154,14 +154,19 @@
                 <svg class="empty-logo brand-mark" viewBox="0 0 1024 1024" aria-hidden="true" focusable="false"><line x1="180" y1="636" x2="650" y2="636" stroke="currentColor" stroke-opacity="0.35" stroke-width="56" stroke-linecap="round"/><circle cx="250" cy="636" r="54" fill="currentColor"/><circle cx="410" cy="636" r="54" fill="currentColor"/><circle cx="568" cy="636" r="70" fill="currentColor"/><path d="M568 636Q612 566 692 506" fill="none" stroke="currentColor" stroke-width="56" stroke-linecap="round"/><circle cx="800" cy="420" r="62" fill="none" stroke="currentColor" stroke-width="50"/></svg>
                 <div class="empty-title">Termina</div>
                 <div class="empty-sub empty-welcome">
-                  Open a folder to start.
-                  <br />
-                  Files the agent writes appear here live.
+                  Open a folder to start — the agent edits live beside its terminal.
+                  <div class="empty-hints">
+                    <span><kbd>⌘</kbd><kbd>O</kbd> open folder</span>
+                    <span><kbd>@</kbd> attach file</span>
+                    <span><kbd>/</kbd> commands</span>
+                    <span><kbd>^J</kbd> newline</span>
+                  </div>
                 </div>
                 <div class="empty-sub empty-login" hidden>
-                  In the terminal, run /login then pick a model with /models.
+                  In the terminal: <kbd>/login</kbd> then <kbd>/models</kbd> to pick a model.
                 </div>
                 <button type="button" class="empty-open-folder">Open folder</button>
+                <div class="empty-foot muted">Drop files onto the terminal to attach them · Drag the divider to resize panes</div>
               </div>
             </template>
           </section>

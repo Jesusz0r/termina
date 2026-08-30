@@ -2958,7 +2958,9 @@ class PiEditorApp {
     const out: string[] = [];
     out.push("## Your edits");
     out.push("");
-    out.push("You changed these files after the last agent run. Read them before you change them.");
+    // Informational only. Do not tell the model to stop or ask. Mine and
+    // dispatch mailbox carry the real do-not-touch rules in other files.
+    out.push("These files changed after the last agent run. Snippets are partial. Read a listed file when you need more than the snippet.");
     let size = out.join("\n").length;
     for (const edit of edits.values()) {
       const block: string[] = [];
