@@ -137,6 +137,16 @@ export async function resolveSessionHitPath(
       if (await isProjectFile(clean, projectCwd)) return clean;
     }
   }
+  // Resolve the first ordinary path-like token too. Bound the scan because a
+  // session message can contain a large pasted document.
+  let scanned = 0;
+  for (const raw of parsed.text.split(/\s+/)) {
+    if (scanned++ >= 64) break;
+    const token = raw.replace(/^[\s'"([{<]+/, "").replace(/[\s'"\])}>.,;:!?]+$/, "");
+    if (!token || (!token.includes("/") && !/\.[A-Za-z0-9_-]{1,12}$/.test(token))) continue;
+    const clean = await cleanPlanPathToken(token, projectCwd, canonicalize);
+    if (await isProjectFile(clean, projectCwd)) return clean;
+  }
   return null;
 }
 

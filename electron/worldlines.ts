@@ -17,7 +17,7 @@ import { coreClient } from "./core-client.js";
 import { captureRootInRepo, gitCommonDir, gitHead, gitTopLevel, platformHasCopyOnWrite, type SnapshotStore } from "./worldline-git.js";
 import { EvidenceEngine, dependencyDiff, mineChangeReason, rankProfiles, type EvidenceDeps, type EvidenceRecord, type EvidenceSummary } from "./evidence.js";
 import type { SessionForkOpts, SessionForkResult } from "./session-fork.js";
-import type { DependencyChange, RunSummary, TimelineEvent, WorldlineChangedFile, WorldlineDetails } from "../shared/types.js";
+import type { ChallengeProfile, DependencyChange, RunSummary, TimelineEvent, WorldlineChangedFile, WorldlineDetails } from "../shared/types.js";
 import {
   coreSessionFile,
   parseSessionBundlePath,
@@ -68,7 +68,7 @@ export interface WorldlineSummary {
 
 interface CandidateState {
   label: "A" | "B";
-  role: "reference" | "alternative" | "moment";
+  role: "reference" | "alternative" | "challenge" | "moment";
   dir: string;
   supportDir: string;
   homeDir: string;
@@ -155,6 +155,17 @@ export interface RunRecord {
 
 function runEngine(run: { engine?: "pi" | "core" }): "pi" | "core" {
   return run.engine === "core" ? "core" : "pi";
+}
+
+const CHALLENGE_CONSTRAINTS: Record<ChallengeProfile, string> = {
+  "fewer-dependencies": "Do not add dependencies. Prefer existing dependencies and platform APIs.",
+  "preserve-api": "Preserve existing public APIs and externally visible behavior unless the task explicitly requires a change.",
+  "simpler-implementation": "Prefer the smallest implementation: minimize touched files, changed lines, and new abstractions.",
+  "performance-first": "Prioritize runtime performance and validate performance-sensitive choices with the existing benchmark when available.",
+};
+
+function challengedPrompt(text: string, profile: ChallengeProfile): string {
+  return `${text}\n\nChallenge constraint (${profile}): ${CHALLENGE_CONSTRAINTS[profile]}`;
 }
 
 function parseStorageSeq(value: string | null | undefined): number | null {
@@ -538,7 +549,7 @@ export class WorldlineManager {
    * recorded comparison base and the pre-task session anchor with the
    * original task. The root promotion base stays unchanged.
    */
-  async challengeFromCandidate(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; comparisonId?: string; error?: string }> {
+  async challengeFromCandidate(comparisonId: string, label: "A" | "B", profile: ChallengeProfile): Promise<{ ok: boolean; comparisonId?: string; error?: string }> {
     await this.ready;
     const cmp = this.comparisons.get(comparisonId);
     const cand = cmp?.candidates.get(label);
@@ -595,7 +606,7 @@ export class WorldlineManager {
       error: null,
       readyTimer: null,
     };
-    const mk = (l: "A" | "B", role: "reference" | "alternative"): CandidateState => ({
+    const mk = (l: "A" | "B", role: "reference" | "challenge"): CandidateState => ({
       label: l,
       role,
       dir: join(dir, l),
@@ -619,7 +630,7 @@ export class WorldlineManager {
       error: null,
     });
     const nA = mk("A", "reference");
-    const nB = mk("B", "alternative");
+    const nB = mk("B", "challenge");
     ncmp.candidates.set("A", nA);
     ncmp.candidates.set("B", nB);
     for (const candidate of ncmp.candidates.values()) {
@@ -695,7 +706,7 @@ export class WorldlineManager {
       await this.writeControl(nB, {
         opId: randomUUID(),
         action: "structured",
-        content: [{ type: "text", text: payload.text }, ...payload.images],
+        content: [{ type: "text", text: challengedPrompt(payload.text, profile) }, ...payload.images],
       });
       await this.launchCandidate(ncmp, nA, [], wHead.commit);
       await this.launchCandidate(ncmp, nB, cmp.model && cmp.model.includes("/") ? ["--model", cmp.model] : [], ncmp.baseStateId);
@@ -991,14 +1002,21 @@ export class WorldlineManager {
 
   // ------------------------------------------------------------ fork-run ----
 
-  async challenge(runId: string): Promise<{ ok: boolean; comparisonId?: string; error?: string }> {
+  async challenge(runId: string, profile: ChallengeProfile): Promise<{ ok: boolean; comparisonId?: string; error?: string }> {
     const run = this.runOf(runId);
     if (!run) return { ok: false, error: "run not found" };
     if (!run.promptPayloadFile) return { ok: false, error: "the run has no captured task to replay" };
-    return this.forkRun(runId, { challenge: true });
+    const inFlightKey = `run:${runId}`;
+    if (this.challengeInFlight.has(inFlightKey)) return { ok: false, error: "a challenge is already launching" };
+    this.challengeInFlight.add(inFlightKey);
+    try {
+      return await this.forkRun(runId, { challengeProfile: profile });
+    } finally {
+      this.challengeInFlight.delete(inFlightKey);
+    }
   }
 
-  async forkRun(runId: string, opts: { challenge?: boolean } = {}): Promise<{ ok: boolean; comparisonId?: string; error?: string }> {
+  async forkRun(runId: string, opts: { challengeProfile?: ChallengeProfile } = {}): Promise<{ ok: boolean; comparisonId?: string; error?: string }> {
     await this.ready;
     const run = this.runOf(runId);
     if (!run) return { ok: false, error: "run not found" };
@@ -1048,7 +1066,7 @@ export class WorldlineManager {
       }
     }
 
-    const cmp = this.createComparison(run);
+    const cmp = this.createComparison(run, opts.challengeProfile);
     try {
       cmp.sourceGitDir = store.sourceGitDir;
       cmp.primaryRoot = store.sourceRoot;
@@ -1067,7 +1085,7 @@ export class WorldlineManager {
       this.createSupportDirs(cmp);
       if (cmp.engine === "core") await this.copyCoreResources(cmp);
       else await this.copyPiResources(cmp);
-      await this.writeStartupControls(cmp, run, opts.challenge ?? false);
+      await this.writeStartupControls(cmp, run, opts.challengeProfile);
       await this.launchCandidates(cmp, run);
       cmp.phase = "running";
       // Readiness arrives through the bridge session_ready events.
@@ -1083,7 +1101,7 @@ export class WorldlineManager {
     }
   }
 
-  private createComparison(run: RunRecord): ComparisonState {
+  private createComparison(run: RunRecord, challengeProfile?: ChallengeProfile): ComparisonState {
     const id = `cmp-${++this.seq}`;
     const dir = join(this.deps.worldsRoot, id);
     mkdirSync(dir, { recursive: true });
@@ -1117,7 +1135,7 @@ export class WorldlineManager {
     for (const label of ["A", "B"] as const) {
       cmp.candidates.set(label, {
         label,
-        role: label === "A" ? "reference" : "alternative",
+        role: label === "A" ? "reference" : challengeProfile ? "challenge" : "alternative",
         dir: join(dir, label),
         supportDir: join(dir, `${label}-support`),
         homeDir: join(dir, `${label}-support`, "home"),
@@ -1377,23 +1395,25 @@ export class WorldlineManager {
   }
 
   /** The startup control files: what the bridge does on session start. */
-  private async writeStartupControls(cmp: ComparisonState, run: RunRecord, challenge: boolean): Promise<void> {
+  private async writeStartupControls(cmp: ComparisonState, run: RunRecord, challengeProfile?: ChallengeProfile): Promise<void> {
     const payload = await this.readPromptPayload(run);
+    const promptText = challengeProfile ? challengedPrompt(payload.text, challengeProfile) : payload.text;
     const a = cmp.candidates.get("A")!;
     const b = cmp.candidates.get("B")!;
     await this.writeControl(a, { opId: randomUUID(), action: "none" });
     // A challenge replays the original task with one action; a
     // plain fork prefills it as editable text.
-    if (payload.images.length > 0 || challenge) {
-      // Structured prompt: replay the original content blocks unchanged.
+    if (payload.images.length > 0 || challengeProfile) {
+      // A challenge appends only its selected fixed constraint; image blocks
+      // and the captured task stay unchanged.
       await this.writeControl(b, {
         opId: randomUUID(),
         action: "structured",
-        content: [{ type: "text", text: payload.text }, ...payload.images],
+        content: [{ type: "text", text: promptText }, ...payload.images],
       });
     } else {
       // Text-only prompt: prefilled and editable in the Pi editor.
-      await this.writeControl(b, { opId: randomUUID(), action: "prefill", text: payload.text });
+      await this.writeControl(b, { opId: randomUUID(), action: "prefill", text: promptText });
     }
   }
 

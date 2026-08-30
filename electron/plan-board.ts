@@ -6,13 +6,13 @@
  * decides whether that text is a plan and how Dispatch claims rows.
  */
 import { isAbsolute, relative } from "node:path";
-import { HAS_UNCHECKED_PLAN_TASK, PLAN_TASK_MARKER } from "../shared/plan-task.ts";
+import { HAS_PLAN_TASK, PLAN_TASK_MARKER } from "../shared/plan-task.ts";
 import type { CanonicalizePath, PlanTask } from "../shared/types.ts";
 
-export { HAS_UNCHECKED_PLAN_TASK, PLAN_TASK_MARKER };
+export { HAS_PLAN_TASK, PLAN_TASK_MARKER };
 export type { CanonicalizePath };
 
-const UNCHECKED_PLAN_LINE = new RegExp("^" + PLAN_TASK_MARKER + String.raw`\s*(.+)$`);
+const PLAN_LINE = new RegExp("^" + PLAN_TASK_MARKER + String.raw`(.+)$`);
 const MAX_PLAN_TASKS = 20;
 const MAX_PATHS_PER_TASK = 5;
 
@@ -21,9 +21,13 @@ export const MAX_DISPATCH_WORKERS = 3;
 export async function parsePlanTasks(text: string, cwd: string | null, canonicalize: CanonicalizePath): Promise<PlanTask[]> {
   const tasks: PlanTask[] = [];
   for (const raw of text.split("\n")) {
-    const body = uncheckedPlanTaskBody(raw);
-    if (!body) continue;
-    tasks.push({ text: body, paths: await planTaskPaths(body, cwd, canonicalize), state: "pending" });
+    const line = parsePlanTaskLine(raw);
+    if (!line) continue;
+    tasks.push({
+      text: line.body,
+      paths: await planTaskPaths(line.body, cwd, canonicalize),
+      state: line.checked ? "done" : "pending",
+    });
     if (tasks.length >= MAX_PLAN_TASKS) break;
   }
   return tasks;
@@ -178,10 +182,11 @@ function taskMentionsPath(task: PlanTask, relPath: string): boolean {
   return task.paths.some((p) => relPath === p || relPath.endsWith("/" + p));
 }
 
-function uncheckedPlanTaskBody(line: string): string | null {
-  const match = line.trim().match(UNCHECKED_PLAN_LINE);
-  const body = match?.[1]?.trim();
-  return body || null;
+function parsePlanTaskLine(line: string): { body: string; checked: boolean } | null {
+  const match = line.trim().match(PLAN_LINE);
+  const body = match?.[2]?.trim();
+  if (!body) return null;
+  return { body, checked: match?.[1]?.toLowerCase() === "x" };
 }
 
 async function planTaskPaths(body: string, cwd: string | null, canonicalize: CanonicalizePath): Promise<string[]> {

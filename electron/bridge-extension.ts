@@ -4,7 +4,7 @@
  * Pi loads this file through the CLI extension option. agent-core writes
  * the same sidecar protocol. `electron/sidecar.ts` is the only parser.
  */
-import { HAS_UNCHECKED_PLAN_TASK } from "./plan-board.js";
+import { HAS_PLAN_TASK } from "./plan-board.js";
 
 export const BRIDGE_EXTENSION = `
 /**
@@ -205,17 +205,17 @@ export default function (pi: ExtensionAPI): void {
       return typeof part.text === "string" ? part.text : "";
     }).join("\\n");
   }
-  const UNCHECKED_PLAN_TASK = new RegExp(${JSON.stringify(HAS_UNCHECKED_PLAN_TASK.source)}, ${JSON.stringify(HAS_UNCHECKED_PLAN_TASK.flags)});
-  function hasUncheckedPlanTask(text) {
-    return UNCHECKED_PLAN_TASK.test(text);
+  const PLAN_TASK = new RegExp(${JSON.stringify(HAS_PLAN_TASK.source)}, ${JSON.stringify(HAS_PLAN_TASK.flags)});
+  function hasPlanTask(text) {
+    return PLAN_TASK.test(text);
   }
-  // Plan Board: first assistant message with an unchecked checkbox task.
+  // Plan Board: first assistant message with a bullet or numbered task list.
   pi.on("message_end", (event) => {
     if (planLogged) return;
     const message = event.message;
     if (!message || message.role !== "assistant") return;
     const text = visibleAssistantText(message);
-    if (!text.trim() || !hasUncheckedPlanTask(text)) return;
+    if (!text.trim() || !hasPlanTask(text)) return;
     planLogged = true;
     log({ t: "plan", text: text.slice(0, 4000) });
   });

@@ -110,6 +110,17 @@ const run2 = await waitFor(async () => {
 check("run 2 settled", run2 !== null, JSON.stringify(run2?.id ?? null));
 const dot2 = await waitFor(async () => forkableDotFor("hello.txt"), 30000);
 check("hello dot captured its moment state", dot2 !== null, JSON.stringify(dot2 ? { seq: dot2.seq, stateId: dot2.stateId?.slice(0, 8) } : null));
+const visibleTimeline = (await evalJs(`window.pi.getTimeline("term-1")`)) ?? [];
+check(
+  "every published dot has source and session addresses",
+  visibleTimeline.length > 0 && visibleTimeline.every((event) => event.stateId && event.entryId && !event.evicted),
+  JSON.stringify(visibleTimeline.map((event) => ({ t: event.t, state: !!event.stateId, entry: !!event.entryId, evicted: !!event.evicted }))),
+);
+check(
+  "run-start and settled boundaries are forkable",
+  visibleTimeline.filter((event) => event.t === "agent_start").length >= 2 && visibleTimeline.filter((event) => event.t === "agent_settled").length >= 2,
+  JSON.stringify(visibleTimeline.map((event) => event.t)),
+);
 
 // -------------------------------------------- fork at run 1's moment ----
 const fork1 = await evalJs(`window.pi.forkPoint("term-1", ${dot1.seq})`);

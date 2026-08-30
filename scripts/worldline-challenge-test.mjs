@@ -87,7 +87,9 @@ check("a replayable run exists", run !== null, JSON.stringify(run?.id ?? null));
 if (!run) process.exit(1);
 
 // -------------------------------------------------------------- challenge ----
-const chal = await evalJs(`window.pi.challengeRun(${JSON.stringify(run.id)})`);
+const runActions = await evalJs(`([...document.querySelectorAll('.timeline-header .cmp-challenge')]).filter((b) => !b.hidden).map((b) => b.textContent)`);
+check("completed run exposes four direct challenge actions", JSON.stringify(runActions) === JSON.stringify(["Deps", "API", "Simple", "Perf"]), JSON.stringify(runActions));
+const chal = await evalJs(`window.pi.challengeRun(${JSON.stringify(run.id)}, "fewer-dependencies")`);
 check("challenge launches", chal?.ok === true, JSON.stringify(chal));
 if (!chal?.ok) process.exit(1);
 const comparisonId = chal.comparisonId;
@@ -111,7 +113,12 @@ const settled = await waitFor(async () => {
 }, 300000);
 check("the challenger B settled on its own", settled !== null && !("error" in settled), JSON.stringify(settled));
 if (!settled || "error" in settled) process.exit(1);
+check("candidate B is identified as the selected challenge", settled.b.role === "challenge", JSON.stringify(settled.b.role));
 check("B solved the task", readFileSync(join(settled.b.root, "greeting.ts"), "utf8").includes("hi there"), readFileSync(join(settled.b.root, "greeting.ts"), "utf8").slice(0, 40));
+if (settled.b.sessionFile) {
+  const challengerSession = readFileSync(settled.b.sessionFile, "utf8");
+  check("selected challenge constraint reaches B", challengerSession.includes("Challenge constraint (fewer-dependencies)"), challengerSession.slice(-240));
+}
 
 // ---------------------------------------------------------------- evidence ----
 const t0 = Date.now();

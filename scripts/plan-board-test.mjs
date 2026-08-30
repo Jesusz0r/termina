@@ -37,6 +37,20 @@ const send = (method, params = {}) => new Promise((res) => { const i = ++id; pen
 const evalJs = async (expr) => { const r = await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true }); return r.result?.result?.value; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Parser contract: ordinary bullets, numbered items, and checkbox state.
+const { parsePlanTasks } = await import("../electron/plan-board.ts");
+const parsedSyntaxes = await parsePlanTasks(
+  "- dash\n* star\n+ plus\n1. numbered dot\n2) numbered paren\n- [ ] unchecked\n* [x] checked lower\n+ [X] checked upper",
+  null,
+  (path) => path,
+);
+check(
+  "parser accepts bullet, numbered, unchecked, and checked task variants",
+  parsedSyntaxes.map((task) => `${task.text}:${task.state}`).join("|") ===
+    "dash:pending|star:pending|plus:pending|numbered dot:pending|numbered paren:pending|unchecked:pending|checked lower:done|checked upper:done",
+  JSON.stringify(parsedSyntaxes),
+);
+
 const focusTerminal = () => evalJs(`document.querySelector('.xterm-helper-textarea')?.focus()`);
 const typeLine = async (text) => {
   await focusTerminal();
@@ -74,12 +88,12 @@ const sampleTasks = () =>
   evalJs(`[...document.querySelectorAll('#plan-list .plan-task')].map(t => ({ text: t.querySelector('.plan-text')?.textContent ?? '', cls: t.className }))`);
 
 // ---- 1 + 2. get a plan posted ----
-// The prompt contains the literal checklist lines: models copy them
-// verbatim, which guarantees parseable unchecked boxes.
+// The prompt contains one ordinary bullet and one numbered task: models copy
+// them verbatim, proving checkbox syntax is not required.
 const PLAN_PROMPT = [
   "First reply with this exact plan, then implement it:",
-  "- [ ] Create utils.ts with an add function",
-  "- [ ] Edit greeting.ts so the greeting is hi there",
+  "- Create utils.ts with an add function",
+  "1. Edit greeting.ts so the greeting is hi there",
   "Implement both tasks right after the plan in the same turn.",
 ].join("\n");
 let sawPlan = false;

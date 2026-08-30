@@ -347,9 +347,12 @@ export interface EvidenceRecord {
   reason: string | null;
 }
 
+export const CHALLENGE_PROFILES = ["fewer-dependencies", "preserve-api", "simpler-implementation", "performance-first"] as const;
+export type ChallengeProfile = (typeof CHALLENGE_PROFILES)[number];
+
 /** The verdict of one fixed challenge profile. */
 export interface ProfileVerdict {
-  profile: "fewer-dependencies" | "preserve-api" | "simpler-implementation" | "performance-first";
+  profile: ChallengeProfile;
   winner: "A" | "B" | "tie" | "unavailable";
   reason: string;
   eligibility: Record<string, string>;
@@ -515,9 +518,9 @@ export interface PiBridge {
   /** Fork one candidate from a timeline moment (WORLDLINES §6). */
   forkPoint(terminalId: string, seq: number): Promise<{ ok: boolean; comparisonId?: string; error?: string }>;
   /** Launch the challenger of a completed run (WORLDLINES §6.9). */
-  challengeRun(runId: string): Promise<{ ok: boolean; comparisonId?: string; error?: string }>;
+  challengeRun(runId: string, profile: ChallengeProfile): Promise<{ ok: boolean; comparisonId?: string; error?: string }>;
   /** Challenge an existing candidate (snapshot as reference + challenger). */
-  challengeCandidate(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; comparisonId?: string; error?: string }>;
+  challengeCandidate(comparisonId: string, label: "A" | "B", profile: ChallengeProfile): Promise<{ ok: boolean; comparisonId?: string; error?: string }>;
   /** Compute evidence for both candidates of a comparison. */
   runEvidence(comparisonId: string): Promise<{ ok: boolean; error?: string }>;
   /** Push: the evidence summary of a comparison changed. */
@@ -550,7 +553,7 @@ export interface PiBridge {
   /** Clear the terminal's modified-file list. Main owns the list; the
    *  next change re-adds only files that change after the clear. */
   clearModified(terminalId: string): Promise<{ ok: boolean; error?: string }>;
-  reviewBaseline(terminalId: string, path: string): Promise<{ status: "created" | "modified"; baseline: string | null | undefined }>;
+  reviewBaseline(terminalId: string, path: string): Promise<{ status: "created" | "modified" | "deleted"; baseline: string | null | undefined }>;
   reviewRevert(terminalId: string, path: string): Promise<{ ok: boolean; error?: string }>;
 
   // project / files

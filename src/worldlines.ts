@@ -6,7 +6,7 @@
  *
  * DOM updates are incremental: an update push touches only its card.
  */
-import type { WorldlineSummary, WorldlineDetails, WorldlineChangedFile, EvidenceSummary } from "../shared/types";
+import { CHALLENGE_PROFILES, type ChallengeProfile, type WorldlineSummary, type WorldlineDetails, type WorldlineChangedFile, type EvidenceSummary } from "../shared/types";
 import { showConfirm, showFileListModal, toast } from "./components/modals";
 import { KIND_LABEL, chipText, evidenceLineDetail, formatBytes, profileCaption, recordOf } from "./worldline-evidence";
 
@@ -237,11 +237,22 @@ export class WorldlinesView {
     runEl.textContent = "…";
     const spacer = document.createElement("div");
     spacer.className = "spacer";
-    const challengeBtn = actionButton("cmp-challenge", "Challenge", "Launch the challenger: B replays the original task automatically", () => void this.challenge(comparisonId));
+    const challengeLabels: Record<ChallengeProfile, string> = {
+      "fewer-dependencies": "Deps",
+      "preserve-api": "API",
+      "simpler-implementation": "Simple",
+      "performance-first": "Perf",
+    };
+    const challengeButtons = CHALLENGE_PROFILES.map((profile) => {
+      const label = challengeLabels[profile];
+      const btn = actionButton("cmp-challenge", label, `Challenge with ${profile}`, () => void this.challenge(comparisonId, profile));
+      btn.dataset.profile = profile;
+      return btn;
+    });
     const evidenceBtn = actionButton("cmp-evidence", "Evidence", "Run the evidence contract for both candidates and rank the profiles", () => void this.evidence(comparisonId));
     const abBtn = actionButton("cmp-ab", "A ⇄ B", "Compare the A and B heads file by file", () => void this.openABCompare(comparisonId));
     const discardBtn = actionButton("cmp-discard", "Discard", "Discard this comparison and remove every app-owned resource", () => void this.confirmDiscard(comparisonId));
-    head.append(idEl, runEl, spacer, challengeBtn, evidenceBtn, abBtn, discardBtn);
+    head.append(idEl, runEl, spacer, ...challengeButtons, evidenceBtn, abBtn, discardBtn);
 
     const verdictsEl = document.createElement("div");
     verdictsEl.className = "cmp-verdicts";
@@ -362,14 +373,14 @@ export class WorldlinesView {
 
   /** Enable or disable the pair actions from the candidate shapes. */
   private renderPairActions(pair: PairView): void {
-    const challengeBtn = pair.block.querySelector(".cmp-challenge") as HTMLButtonElement;
+    const challengeButtons = [...pair.block.querySelectorAll<HTMLButtonElement>(".cmp-challenge")];
     const evidenceBtn = pair.block.querySelector(".cmp-evidence") as HTMLButtonElement;
     const a = pair.cards.get("A");
     const b = pair.cards.get("B");
     const abBtn = pair.block.querySelector(".cmp-ab") as HTMLButtonElement;
     const bothReady = a !== undefined && b !== undefined;
     abBtn.style.display = bothReady ? "" : "none";
-    challengeBtn.style.display = bothReady ? "" : "none";
+    for (const button of challengeButtons) button.style.display = bothReady ? "" : "none";
     const idle = (card: CandidateCard | undefined): boolean =>
       !!card && (card.summary.state === "ready" || card.summary.state === "settled");
     evidenceBtn.disabled = !(idle(a) && idle(b));
@@ -377,24 +388,26 @@ export class WorldlinesView {
       ? "evidence needs both candidates idle"
       : "Run the evidence contract for both candidates and rank the profiles";
     const aReady = !!a?.summary.sessionFile && !["creating", "running", "promoting", "discarding", "discarded", "cancelled", "error"].includes(a.summary.state);
-    challengeBtn.disabled = !aReady;
-    challengeBtn.title = challengeBtn.disabled
-      ? "wait for candidate A to settle before Challenge"
-      : "Launch the challenger: B replays the original task automatically";
+    for (const button of challengeButtons) {
+      button.disabled = !aReady;
+      button.title = button.disabled
+        ? "wait for candidate A to settle before Challenge"
+        : `Launch the challenger with ${button.dataset.profile}`;
+    }
   }
 
   // ------------------------------------------------------------ actions ----
 
-  private async challenge(comparisonId: string): Promise<void> {
+  private async challenge(comparisonId: string, profile: ChallengeProfile): Promise<void> {
     const pair = this.pairs.get(comparisonId);
     const a = pair?.cards.get("A");
     if (!pair || !a) return;
     void showConfirm(
       "Launch challenge",
-      "Candidate B replays the original task against the run start. Candidate A stays the reference. This comparison is replaced by the challenge pair.",
+      `Candidate B replays the original task against the run start with the ${profile} constraint. Candidate A stays the reference. This comparison is replaced by the challenge pair.`,
     ).then(async (r) => {
       if (!r.confirmed) return;
-      const res = await window.pi.challengeCandidate(comparisonId, "A");
+      const res = await window.pi.challengeCandidate(comparisonId, "A", profile);
       if (!res.ok) toast(`challenge failed: ${res.error ?? "unknown error"}`, "warning");
       else toast(`challenger launched — ${res.comparisonId ?? ""}`, "info");
     });

@@ -106,17 +106,20 @@ export class ReviewView {
     }
     if (seq !== this.loadSeq) return;
     this.baseline = res.baseline;
-    if (!current.ok) {
+    const deleted = res.status === "deleted" && !current.ok && typeof this.baseline === "string";
+    if (!current.ok && !deleted) {
       hint.textContent = current.error;
       toast(`could not load ${relPath}: ${current.error}`, "error");
       return;
     }
-    const currentText = current.content;
+    const currentText = current.ok ? current.content : "";
 
     this.setDiff(this.baseline ?? "", currentText);
 
+    const openBtn = document.getElementById("review-open") as HTMLButtonElement;
     const revertBtn = document.getElementById("review-revert") as HTMLButtonElement;
     const acceptBtn = document.getElementById("review-accept") as HTMLButtonElement;
+    openBtn.disabled = deleted;
     revertBtn.style.display = "";
     acceptBtn.style.display = "";
     revertBtn.disabled = res.baseline === undefined;
@@ -125,12 +128,14 @@ export class ReviewView {
     this.coverEditors(true);
     this.container.style.display = "flex";
     this.onShown();
-    if (this.baseline === null && res.status === "created") {
-      document.getElementById("review-hint")!.textContent = "new file created by the agent — reverting deletes it";
+    if (deleted) {
+      hint.textContent = "file deleted by the agent — reverting restores it";
+    } else if (this.baseline === null && res.status === "created") {
+      hint.textContent = "new file created by the agent — reverting deletes it";
     } else if (this.baseline === null) {
-      document.getElementById("review-hint")!.textContent = "no pre-run baseline captured — revert unavailable";
+      hint.textContent = "no pre-run baseline captured — revert unavailable";
     } else {
-      document.getElementById("review-hint")!.textContent = "";
+      hint.textContent = "";
     }
   }
 
@@ -214,6 +219,7 @@ export class ReviewView {
       return;
     }
     this.modifiedModel?.setValue(current.content);
+    (document.getElementById("review-open") as HTMLButtonElement).disabled = false;
   }
 
   async revert(): Promise<void> {

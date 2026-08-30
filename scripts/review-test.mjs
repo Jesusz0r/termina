@@ -67,5 +67,48 @@ check("revert restores the original content", afterRevert.content.includes('"hel
 const mark = await evalJs(`JSON.stringify([...document.querySelectorAll('#modified-list li .review-mark')].map(m => m.textContent))`);
 check("reverted marker shows", mark.includes("↩"), JSON.stringify(mark));
 
+// 4. a deleted file remains reviewable and revert restores it
+await evalJs(`document.getElementById('review-back').click()`);
+await evalJs(`document.querySelector('.xterm-helper-textarea')?.focus()`);
+await send("Input.insertText", { text: "Delete greeting.ts" });
+await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+seenWorking = false;
+for (let i = 0; i < 150; i++) {
+  await sleep(1000);
+  const busy = await evalJs(`document.getElementById('status-state')?.textContent ?? ''`);
+  if (busy.includes("working")) seenWorking = true;
+  if (seenWorking && !busy.includes("working")) break;
+}
+await sleep(1500);
+await evalJs(`(() => [...document.querySelectorAll('#modified-list li')].find(li => li.querySelector('.path')?.textContent.includes('greeting.ts'))?.click())()`);
+await sleep(1200);
+const deletedReview = JSON.parse(await evalJs(`JSON.stringify({
+  visible: document.getElementById('review-container').style.display !== 'none',
+  hint: document.getElementById('review-hint').textContent,
+  models: window.__reviewDebug,
+  openDisabled: document.getElementById('review-open').disabled,
+  revertDisabled: document.getElementById('review-revert').disabled,
+})`));
+check(
+  "deleted file diff opens with baseline and empty current side",
+  deletedReview.visible && deletedReview.hint.includes("deleted") && deletedReview.models.original.includes("hello") && deletedReview.models.modified === "" && deletedReview.openDisabled && !deletedReview.revertDisabled,
+  JSON.stringify(deletedReview),
+);
+await evalJs(`document.getElementById('review-accept').click()`);
+await sleep(300);
+const acceptedDelete = await evalJs(`JSON.stringify({
+  marks: [...document.querySelectorAll('#modified-list li .review-mark')].map((m) => m.textContent),
+  current: null,
+})`);
+const stillDeleted = await evalJs(`window.pi.openFile('/tmp/termina-test-project/greeting.ts')`);
+check("accept marks a deletion reviewed without restoring it", acceptedDelete.includes("✓") && stillDeleted.ok === false, `${acceptedDelete} ${JSON.stringify(stillDeleted)}`);
+await evalJs(`(() => [...document.querySelectorAll('#modified-list li')].find(li => li.querySelector('.path')?.textContent.includes('greeting.ts'))?.click())()`);
+await sleep(600);
+await evalJs(`document.getElementById('review-revert').click()`);
+await sleep(1000);
+const restoredDelete = await evalJs(`window.pi.openFile('/tmp/termina-test-project/greeting.ts')`);
+check("deleted file revert restores the baseline", restoredDelete.ok && restoredDelete.content.includes('"hello"'), JSON.stringify(restoredDelete));
+
 console.log(`\n${results.filter(Boolean).length}/${results.length} passed`);
 process.exit(results.every(Boolean) ? 0 : 1);

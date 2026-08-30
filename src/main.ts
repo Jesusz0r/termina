@@ -45,9 +45,9 @@ import { showContextMenu, type ContextMenuItem } from "./components/context-menu
 import { SettingsView } from "./settings";
 import { emptyShortcuts, isMacPlatform, shortcutForEvent } from "./settings-shortcuts";
 import { CommandDispatcher } from "./commands";
-import { defaultAppPreferences, pathBasename } from "../shared/types";
+import { CHALLENGE_PROFILES, defaultAppPreferences, pathBasename } from "../shared/types";
 import { normalizeAppPreferences } from "../shared/preferences";
-import type { AppPreferences, AppUpdateState, CommandId, ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
+import type { AppPreferences, AppUpdateState, ChallengeProfile, CommandId, ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
 
 const { EditorManager } = await import("./editor");
 const { ReviewView } = await import("./review");
@@ -332,6 +332,24 @@ worldlinesView.bind({
   },
 });
 const btnForkRun = document.getElementById("btn-fork-run") as HTMLButtonElement;
+const challengeRunLabels: Record<ChallengeProfile, string> = {
+  "fewer-dependencies": "Deps",
+  "preserve-api": "API",
+  "simpler-implementation": "Simple",
+  "performance-first": "Perf",
+};
+let challengeRunAnchor: HTMLElement = btnForkRun;
+const challengeRunButtons = CHALLENGE_PROFILES.map((profile) => {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "cmp-challenge";
+  button.textContent = challengeRunLabels[profile];
+  button.dataset.profile = profile;
+  button.hidden = true;
+  challengeRunAnchor.after(button);
+  challengeRunAnchor = button;
+  return button;
+});
 
 // ---------------------------------------------------------------- panes -----
 
@@ -643,6 +661,7 @@ function updateForkRunButton(pane: Pane): void {
   const run = lastCompletedRun(pane);
   if (!run) {
     btnForkRun.hidden = true;
+    for (const button of challengeRunButtons) button.hidden = true;
     return;
   }
   btnForkRun.hidden = false;
@@ -650,6 +669,13 @@ function updateForkRunButton(pane: Pane): void {
   btnForkRun.title = run.replayable
     ? `Fork ${run.id} into candidates A (settled) and B (start) — ${run.promptText ?? ""}`.slice(0, 140)
     : `Fork Run unavailable: ${run.reason ?? "the run is not replayable"}`;
+  for (const button of challengeRunButtons) {
+    button.hidden = false;
+    button.disabled = !run.replayable;
+    button.title = run.replayable
+      ? `Challenge ${run.id} with ${button.dataset.profile}`
+      : `Challenge unavailable: ${run.reason ?? "the run is not replayable"}`;
+  }
 }
 
 btnForkRun.addEventListener("click", () => {
@@ -665,6 +691,23 @@ btnForkRun.addEventListener("click", () => {
     else toast(`forked ${run.id} — candidates ${res.comparisonId ?? ""} are starting`, "info");
   });
 });
+
+for (const button of challengeRunButtons) {
+  button.addEventListener("click", () => {
+    const pane = activeId ? panes.get(activeId) : undefined;
+    const run = pane ? lastCompletedRun(pane) : null;
+    const profile = button.dataset.profile as ChallengeProfile | undefined;
+    if (!run || !profile) return;
+    if (!run.replayable) {
+      toast(`Challenge unavailable: ${run.reason ?? "the run is not replayable"}`, "warning");
+      return;
+    }
+    void window.pi.challengeRun(run.id, profile).then((res) => {
+      if (!res.ok) toast(`Challenge failed: ${res.error ?? "unknown error"}`, "warning");
+      else toast(`${profile} challenger ${res.comparisonId ?? ""} is starting`, "info");
+    });
+  });
+}
 
 /** Candidate terminals detect tests from their own isolated tree. */
 function refreshCandidateTestCommand(pane: Pane): void {

@@ -46,6 +46,11 @@ await sleep(1500);
 const hits1 = await evalJs(`window.pi.searchSessions('compute')`);
 check("search finds the word", Array.isArray(hits1) && hits1.length >= 1, JSON.stringify(hits1?.slice(0, 2)));
 check("a hit resolves to utils.ts", (hits1 ?? []).some((h) => h.filePath === "utils.ts"), JSON.stringify((hits1 ?? []).map((h) => h.filePath).slice(0, 5)));
+check(
+  "ordinary text path tokens resolve on user-message hits",
+  (hits1 ?? []).some((h) => h.filePath === "utils.ts" && String(h.text).includes("Create utils.ts")),
+  JSON.stringify((hits1 ?? []).slice(0, 5)),
+);
 check("hits carry context", (hits1 ?? []).some((h) => typeof h.before === "string" && typeof h.after === "string"), "");
 
 const hits2 = await evalJs(`window.pi.searchSessions('greeting')`);

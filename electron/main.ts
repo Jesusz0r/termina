@@ -74,6 +74,8 @@ import {
   DEFAULT_SHORTCUTS,
   defaultAppPreferences,
   type AppPreferences,
+  CHALLENGE_PROFILES,
+  type ChallengeProfile,
   type CommandId,
   type ExplorerEntry,
   type InstanceSummary,
@@ -98,6 +100,10 @@ const MAX_PROMPT_BYTES = 20 * 1024 * 1024;
 const MAX_PI_RESOURCE_BYTES = 200 * 1024 * 1024;
 /** Bound for ~/.pi/agent/auth.json when checking whether a provider exists. */
 const MAX_AUTH_JSON_BYTES = 128 * 1024;
+
+function isChallengeProfile(value: unknown): value is ChallengeProfile {
+  return typeof value === "string" && (CHALLENGE_PROFILES as readonly string[]).includes(value);
+}
 const MAX_PTY_IPC_CHUNK = 64 * 1024;
 const MAX_CLIPBOARD_BYTES = 4 * 1024 * 1024;
 const MAX_EXPLORER_ENTRIES = 2000;
@@ -2903,9 +2909,9 @@ class PiEditorApp {
     const capped = { ...edit, prev: edit.prev === undefined ? undefined : this.snippet(edit.prev), content: this.snippet(edit.content) };
     const existing = edits.get(capped.path);
     if (existing) {
-      // Track the latest transition: the cache now always knows the state
-      // right before this edit, so the context shows a fresh before block.
-      if (capped.prev !== undefined) existing.prev = capped.prev;
+      // Preserve the first known pre-edit state so the injected context shows
+      // the user's net change across an idle editing burst.
+      if (existing.prev === undefined && capped.prev !== undefined) existing.prev = capped.prev;
       existing.content = capped.content;
       existing.at = capped.at;
     } else {
@@ -3191,7 +3197,6 @@ class PiEditorApp {
         inst.pendingHints = new Set();
         inst.momentDots = [];
         inst.captureTimer = null;
-        this.pushTimeline(inst, { t: "agent_start" });
         // The run records moments: the recorder state follows the store.
         const startWs2 = this.workspaceOfTerminal(inst);
         void agentOwner?.storePromise?.then((s) => {
@@ -3199,8 +3204,19 @@ class PiEditorApp {
             this.setRecorderState(inst, !s ? "paused" : startWs2?.indexReady ? "indexing" : "ready");
           }
         });
-        // Couple the run to its start preflight when the token matches.
+        // Couple the run to its start preflight when the token matches. Publish
+        // the boundary only when it has both immutable source and session
+        // addresses; every visible timeline dot is therefore forkable.
         await this.coupleRunStart(inst, event);
+        if (inst.currentRun?.startStateId) {
+          this.pushTimeline(inst, {
+            t: "agent_start",
+            stateId: inst.currentRun.startStateId,
+            entryId: event.parentEntryId ?? event.entryId ?? null,
+            model: inst.currentRun.model,
+            runStartStateId: inst.currentRun.startStateId,
+          });
+        }
         // A dispatch worker started: mark its task active on the owner board.
         const dispatchStart = this.dispatchRuns.get(inst.id);
         if (dispatchStart) {
@@ -3243,7 +3259,8 @@ class PiEditorApp {
           // The run entry goes; the tab label stays until the terminal exits.
           this.dispatchRuns.delete(inst.id);
         }
-        this.pushTimeline(inst, { t: "agent_settled" });
+        // The settled marker is published by the checkpoint handler only after
+        // its immutable source state has been captured.
         this.send("busy", { instanceId: inst.id, busy: false });
         this.send("modified:list", { instanceId: inst.id, files: [...inst.modified.values()] });
         this.sendInstances();
@@ -3650,7 +3667,16 @@ class PiEditorApp {
       if (!ws.primary) await checkpointOwner?.worldlines?.updateHeadState(inst.id, state.commit);
       this.writeAck(inst.id, requestId, { ok: true, stateId: state.commit });
       if (kind === "settled" && inst.currentRun && !inst.currentRun.settledAt) {
+        const runStartStateId = inst.currentRun.startStateId;
+        const model = inst.currentRun.model;
         await this.finalizeRun(inst, state, entryId);
+        this.pushTimeline(inst, {
+          t: "agent_settled",
+          stateId: state.commit,
+          entryId: entryId || null,
+          model,
+          runStartStateId,
+        });
       }
       // Fork Any Moment: the settled state is the last moment of the run.
       if (kind === "settled" && inst.momentDots.length > 0) {
@@ -3774,10 +3800,9 @@ class PiEditorApp {
       if (!ws.primary) await momentOwner?.worldlines?.updateHeadState(inst.id, state.commit);
       this.attachMomentState(inst, state.commit, batch);
       this.setRecorderState(inst, "ready");
-      this.evictForkPoints(inst);
     } catch (err) {
       console.warn(`[main] moment capture failed: ${(err as Error).message}`);
-      // The dots stay visible but not forkable; the recorder degrades.
+      // Failed batches remain internal and are never published as dots.
       this.setRecorderState(inst, "degraded");
     }
   }
@@ -3785,9 +3810,15 @@ class PiEditorApp {
   /** Attach the captured state to every dot of the batch and push it. */
   private attachMomentState(inst: PiTerminalInstance, stateId: string, batch = inst.momentDots): void {
     if (batch === inst.momentDots) inst.momentDots = [];
-    for (const ev of batch) {
+    const liveSeqs = new Set(inst.timeline.map((event) => event.seq));
+    const liveBatch = batch.filter((event) => liveSeqs.has(event.seq));
+    for (const ev of liveBatch) {
       ev.stateId = stateId;
       if (ev.runStartStateId === undefined) ev.runStartStateId = inst.currentRun?.startStateId ?? null;
+    }
+    this.evictForkPoints(inst);
+    for (const ev of liveBatch) {
+      if (!ev.entryId || !ev.stateId || ev.evicted) continue;
       const pub = { ...ev };
       delete (pub as Partial<TimelineEvent>).content;
       this.send("timeline:event", { terminalId: inst.id, event: pub });
@@ -3812,9 +3843,6 @@ class PiEditorApp {
       if (evictedState) void this.releaseStateIfUnused(evictedState, inst.id, e.seq);
       e.stateId = null;
       e.evicted = true;
-      const pub = { ...e };
-      delete (pub as Partial<TimelineEvent>).content;
-      this.send("timeline:event", { terminalId: inst.id, event: pub });
     }
     if (evicted.length > 0) {
       this.send("timeline:evict", { terminalId: inst.id, seqs: evicted });
@@ -4149,15 +4177,29 @@ class PiEditorApp {
     event.seq = ++inst.timelineSeq;
     event.ts = Date.now();
     inst.timeline.push(event);
-    if (inst.timeline.length > MAX_TIMELINE_EVENTS) inst.timeline.splice(0, inst.timeline.length - MAX_TIMELINE_EVENTS);
+    if (inst.timeline.length > MAX_TIMELINE_EVENTS) {
+      const removed = inst.timeline.splice(0, inst.timeline.length - MAX_TIMELINE_EVENTS);
+      const seqs = removed.map((old) => old.seq);
+      const removedSeqs = new Set(seqs);
+      inst.momentDots = inst.momentDots.filter((dot) => !removedSeqs.has(dot.seq));
+      for (const old of removed) {
+        if (old.stateId) void this.releaseStateIfUnused(old.stateId, inst.id, old.seq);
+      }
+      // Hidden failed captures still consume the internal cap. Explicitly
+      // remove any displaced visible dots so renderer and main cannot diverge.
+      this.send("timeline:evict", { terminalId: inst.id, seqs });
+    }
     this.trimTimelineContent(inst);
     if (inst.currentRun && (event.t === "tool" || event.t === "change")) {
       inst.momentDots.push(event);
       if (inst.momentDots.length > MAX_TIMELINE_EVENTS) inst.momentDots.shift();
       event.runStartStateId = inst.currentRun.startStateId;
     }
-    const { content: _content, ...pub } = event;
-    this.send("timeline:event", { terminalId: inst.id, event: pub });
+    if (event.stateId) this.evictForkPoints(inst);
+    if (event.stateId && event.entryId && !event.evicted) {
+      const { content: _content, ...pub } = event;
+      this.send("timeline:event", { terminalId: inst.id, event: pub });
+    }
     return event;
   }
 
@@ -5090,10 +5132,11 @@ class PiEditorApp {
       if (!manager) return Promise.resolve({ ok: false, error: "candidate not found" });
       return manager.promote(comparisonId, label, force === true);
     });
-    ipcMain.handle("worldline:challenge", async (_e, runId: string) => {
+    ipcMain.handle("worldline:challenge", async (_e, runId: string, profile: unknown) => {
+      if (!isChallengeProfile(profile)) return { ok: false, error: "invalid challenge profile" };
       const manager = this.projectForRun(runId)?.worldlines;
       if (!manager) return { ok: false, error: "run not found" };
-      return manager.challenge(runId);
+      return manager.challenge(runId, profile);
     });
     ipcMain.handle("worldline:evidence", (_e, comparisonId: string) => {
       const manager = this.projectOfComparison(comparisonId)?.worldlines;
@@ -5111,7 +5154,10 @@ class PiEditorApp {
     });
     const wlOf = (comparisonId: string) => this.projectOfComparison(comparisonId)?.worldlines ?? null;
     ipcMain.handle("worldline:details", (_e, comparisonId: string, label: "A" | "B") => wlOf(comparisonId)?.details(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" });
-    ipcMain.handle("worldline:challenge-candidate", (_e, comparisonId: string, label: "A" | "B") => wlOf(comparisonId)?.challengeFromCandidate(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" });
+    ipcMain.handle("worldline:challenge-candidate", (_e, comparisonId: string, label: "A" | "B", profile: unknown) => {
+      if (!isChallengeProfile(profile)) return { ok: false, error: "invalid challenge profile" };
+      return wlOf(comparisonId)?.challengeFromCandidate(comparisonId, label, profile) ?? { ok: false, error: "worldlines unavailable" };
+    });
     ipcMain.handle("worldline:file", (_e, comparisonId: string, label: "A" | "B", relPath: string) => wlOf(comparisonId)?.fileOf(comparisonId, label, relPath) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:base-file", (_e, comparisonId: string, relPath: string) => wlOf(comparisonId)?.baseFileOf(comparisonId, relPath) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:fork-run", async (_e, runId: string) => {
@@ -5205,7 +5251,9 @@ class PiEditorApp {
     // ---- Session Timeline ----
     ipcMain.handle("timeline:get", (_e, terminalId: string) => {
       const tl = this.terminals.get(terminalId)?.timeline ?? [];
-      return tl.map(({ content: _content, ...pub }) => pub);
+      return tl
+        .filter((event) => !!event.stateId && !!event.entryId && !event.evicted)
+        .map(({ content: _content, ...pub }) => pub);
     });
     ipcMain.handle("timeline:prefix", (_e, terminalId: string) => {
       const inst = this.terminals.get(terminalId);
@@ -5244,10 +5292,11 @@ class PiEditorApp {
         const pending = inst.baselineFills.get(managed.path);
         if (pending) await Promise.race([pending, new Promise((r) => setTimeout(r, 2000))]);
       }
+      const status = inst.modified.get(managed.path)?.status;
       const b = inst.baselines.get(managed.path);
-      if (b === undefined) return { status: "modified", baseline: undefined };
+      if (b === undefined) return { status: status === "deleted" ? "deleted" : "modified", baseline: undefined };
       if (b === null) return { status: "created", baseline: null };
-      return { status: "modified", baseline: b };
+      return { status: status === "deleted" ? "deleted" : "modified", baseline: b };
     });
     ipcMain.handle("review:revert", async (_e, terminalId: string, path: string) => {
       const inst = this.terminals.get(terminalId);
@@ -5264,6 +5313,8 @@ class PiEditorApp {
           // The agent created the file. Delete it.
           await rm(p, { force: true });
         } else {
+          // The file's parent may have been deleted with it.
+          await mkdir(dirname(p), { recursive: true });
           await writeFile(p, b, "utf8");
         }
         this.deleteBaseline(inst, p);

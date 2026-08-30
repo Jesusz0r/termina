@@ -9,7 +9,7 @@ import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readF
 import { link, lstat, mkdir, open, readdir, rename, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
-import { HAS_UNCHECKED_PLAN_TASK } from "../shared/plan-task.ts";
+import { HAS_PLAN_TASK } from "../shared/plan-task.ts";
 import type { FileHandle } from "node:fs/promises";
 import { BoundedTextAccumulator, type BoundedText, type BoundedTextMarkerDetails, type CompletionState } from "./tool-output.ts";
 
@@ -334,7 +334,7 @@ export function visibleAssistantText(blocks: Array<{ type?: string; text?: strin
 }
 
 export function firstPlanText(text: string): string | null {
-  if (!text.trim() || !HAS_UNCHECKED_PLAN_TASK.test(text)) return null;
+  if (!text.trim() || !HAS_PLAN_TASK.test(text)) return null;
   return text.slice(0, PLAN_TEXT_CAP);
 }
 

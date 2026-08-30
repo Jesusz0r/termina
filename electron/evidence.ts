@@ -11,9 +11,9 @@ import { readFile, realpath as fsRealpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { SnapshotStore } from "./worldline-git.js";
 import { MAX_SIDECAR_BYTES, parseSidecarRecord, sidecarEventFromRecord } from "./sidecar.js";
+import type { ChallengeProfile } from "../shared/types.js";
 
 export type EvidenceKind = "verify" | "dependencies" | "api" | "footprint" | "benchmark" | "trajectory";
-export type ProfileName = "fewer-dependencies" | "preserve-api" | "simpler-implementation" | "performance-first";
 
 /** Wall-clock budget for all evidence Verify attempts of one candidate. */
 const VERIFY_BUDGET_MS = 300_000;
@@ -36,7 +36,7 @@ export interface EvidenceRecord {
 
 /** The verdict of one fixed profile. */
 export interface ProfileVerdict {
-  profile: ProfileName;
+  profile: ChallengeProfile;
   winner: "A" | "B" | "tie" | "unavailable";
   /** The exact reason for the verdict. */
   reason: string;

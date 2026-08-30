@@ -74,7 +74,8 @@ for (let i = 0; i < 20; i++) {
   }
 }
 check("user edit writes the context file", ctx1.includes("## Your edits") && ctx1.includes("greeting.ts"), ctx1.slice(0, 120));
-// A second edit gives the watcher a cached prev → the context shows before/after.
+// A second edit updates the after side while preserving the first pre-edit
+// state for the whole idle editing burst.
 writeFileSync(greeting, 'export const greeting = "hi again";\n');
 let ctx2 = "";
 for (let i = 0; i < 20; i++) {
@@ -86,8 +87,8 @@ for (let i = 0; i < 20; i++) {
   }
 }
 check(
-  "context has before/after content",
-  ctx2.includes('export const greeting = "hi there";') && ctx2.includes('export const greeting = "hi again";'),
+  "context preserves first before and latest after content",
+  ctx2.includes('export const greeting = "hello";') && ctx2.includes('export const greeting = "hi again";'),
   ctx2.slice(0, 200),
 );
 
