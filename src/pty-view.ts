@@ -24,6 +24,8 @@ export class PtyView {
   private themeId: ThemeId;
   private engine: "pi" | "core" | undefined;
   private refreshFont = false;
+  private wheelDelta = 0;
+  private wheelTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly container: HTMLElement;
   private dragDepth = 0;
   private dropInFlight = false;
@@ -71,6 +73,7 @@ export class PtyView {
     container.addEventListener("dragend", this.onDragEnd);
     window.addEventListener("blur", this.onWindowBlur);
     this.term.attachCustomKeyEventHandler((event) => this.handleKey(event));
+    this.term.attachCustomWheelEventHandler((event) => this.handleWheel(event));
 
     this.term.onData((data) => this.sendInput(data));
     this.term.onResize(({ cols, rows }) => onResize(cols, rows));
@@ -110,6 +113,48 @@ export class PtyView {
     } catch {
       /* not available */
     }
+  }
+
+  /** Core TUI does not enable mouse tracking (so drag-select works).
+   *  Forward wheel as SGR 64/65, the sequences it already scrolls on.
+   *  Accumulate pixel delta so trackpads and wheels scroll smoothly. */
+  private handleWheel(event: WheelEvent): boolean {
+    if (this.disposed || this.engine !== "core") return true;
+    if (event.deltaY === 0) return true;
+    event.preventDefault();
+
+    const lineHeight = Math.max(16, Math.round(this.fontSize * 1.35));
+    let delta = event.deltaY;
+    if (event.deltaMode === 1) {
+      delta *= lineHeight;
+    } else if (event.deltaMode === 2) {
+      delta *= lineHeight * 20;
+    }
+
+    if (this.wheelTimer !== null) {
+      clearTimeout(this.wheelTimer);
+      this.wheelTimer = null;
+    }
+    this.wheelTimer = setTimeout(() => {
+      this.wheelDelta = 0;
+      this.wheelTimer = null;
+    }, 150);
+
+    if ((this.wheelDelta > 0 && delta < 0) || (this.wheelDelta < 0 && delta > 0)) {
+      this.wheelDelta = 0;
+    }
+
+    this.wheelDelta += delta;
+    const steps = Math.trunc(this.wheelDelta / lineHeight);
+    if (steps !== 0) {
+      this.wheelDelta -= steps * lineHeight;
+      const count = Math.min(Math.abs(steps), 8);
+      const btn = steps > 0 ? 65 : 64;
+      for (let i = 0; i < count; i++) {
+        this.sendInput(`\x1b[<${btn};1;1M`);
+      }
+    }
+    return false;
   }
 
   private handleKey(event: KeyboardEvent): boolean {
@@ -195,8 +240,7 @@ export class PtyView {
   }
 
   private isFileDrag(event: DragEvent): boolean {
-    const types = Array.from(event.dataTransfer?.types ?? []);
-    return types.includes("Files") || (event.dataTransfer?.files.length ?? 0) > 0;
+    return Boolean(event.dataTransfer?.types?.includes("Files") || (event.dataTransfer?.files?.length ?? 0) > 0);
   }
 
   private filesFromEvent(event: DragEvent): File[] {
@@ -391,6 +435,8 @@ export class PtyView {
     this.watchdog = null;
     if (this.resizeTimer) clearTimeout(this.resizeTimer);
     this.resizeTimer = null;
+    if (this.wheelTimer) clearTimeout(this.wheelTimer);
+    this.wheelTimer = null;
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.term.dispose();
