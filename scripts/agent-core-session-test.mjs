@@ -34,9 +34,12 @@ const {
   replaySessionBundle,
   replaySessionRecords,
   resolveSessionFile,
+  sessionBlockBytes,
+  sessionBlockHash,
   sessionBundleExists,
   sessionBundleHasContent,
   sessionRotateStamp,
+  validateSessionReclaimReceipt,
   writeForkedSession,
 } = session;
 
@@ -63,6 +66,29 @@ function appendMsg(writer, sseq, role, content) {
 function fillRecord(sseq, bytes) {
   const pad = "x".repeat(Math.max(1, bytes));
   return { storageSeq: sseq, type: "message", message: { role: "user", content: pad } };
+}
+
+function canonicalStubReceipt(revisionId, sseq, block) {
+  const bytes = sessionBlockBytes(block);
+  const sha256 = sessionBlockHash(block);
+  if (bytes === null || sha256 === null) throw new Error("could not hash test block");
+  const chars = typeof block.chars === "number" ? block.chars : String(block.content ?? "").length;
+  const tool = typeof block.tool === "string" ? block.tool : block.type;
+  const repro = typeof block.repro === "string" ? block.repro : null;
+  const checked = validateSessionReclaimReceipt({
+    revisionId,
+    targets: [{
+      sseq,
+      blockIndex: 0,
+      action: "stub",
+      original: { type: block.type, chars, bytes, sha256 },
+      reclaimedTokens: 1,
+      revisionId,
+      recovery: { source: "session-record", tool, repro },
+    }],
+  });
+  if (!checked.ok) throw new Error(checked.error);
+  return checked.receipt;
 }
 
 function spawnCore(env, args = [], stdinLines = [], opts = {}) {
@@ -356,13 +382,15 @@ export async function run({ check, leftovers }) {
 
   const rev = bundlePaths(root, "rev-1");
   mkdirSync(rev.currentDir, { recursive: true, mode: 0o700 });
+  const revBlock = { type: "tool_result", tool_use_id: "t", content: "BODY", tool: "bash", repro: "bash x" };
+  const revReceipt = canonicalStubReceipt("rev-1", 1, revBlock);
   writeFileSync(
     join(rev.currentDir, "part-000001.jsonl"),
     [
       JSON.stringify({
         storageSeq: 1,
         type: "message",
-        message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "BODY", tool: "bash", repro: "bash x" }] },
+        message: { role: "user", content: [revBlock] },
       }),
       JSON.stringify({ storageSeq: 2, type: "message", message: { role: "user", content: "old" } }),
       JSON.stringify({ storageSeq: 3, type: "message", message: { role: "user", content: "tail" } }),
@@ -372,7 +400,7 @@ export async function run({ check, leftovers }) {
   writeFileSync(
     rev.sessionFile,
     [
-      JSON.stringify({ storageSeq: 6, type: "revision", kind: "prune", targets: [{ sseq: 1, blockIndex: 0, action: "stub" }] }),
+      JSON.stringify({ storageSeq: 6, type: "revision", kind: "prune", ...revReceipt }),
       JSON.stringify({ storageSeq: 7, type: "revision", kind: "summarize", evicted: 2, summarySseq: 7, message: { role: "user", content: "<context-handoff>\nkeep\n</context-handoff>" } }),
       JSON.stringify({ storageSeq: 8, type: "revision", kind: "truncate", dropped: 1 }),
     ].join("\n") + "\n",
@@ -386,21 +414,26 @@ export async function run({ check, leftovers }) {
       revReplay.messages[0]?.content === "tail" &&
       String(revReplay.messages[0]?.content ?? "").includes("BODY") === false,
   );
+  const pruneBlock = { type: "tool_result", tool_use_id: "t", content: "BODY", tool: "bash", repro: "bash x" };
+  const pruneReceipt = canonicalStubReceipt("rev-memory", 1, pruneBlock);
   const pruneReplay = replaySessionRecords(
     [
       JSON.stringify({
         storageSeq: 1,
         type: "message",
-        message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "BODY", tool: "bash", repro: "bash x" }] },
+        message: { role: "user", content: [pruneBlock] },
       }),
-      JSON.stringify({ storageSeq: 2, type: "revision", kind: "prune", targets: [{ sseq: 1, blockIndex: 0, action: "stub" }] }),
+      JSON.stringify({ storageSeq: 2, type: "revision", kind: "prune", ...pruneReceipt }),
     ].join("\n"),
   );
   check("prune revision stubs a tool result", pruneReplay.ok && String(pruneReplay.messages[0]?.content[0]?.content ?? "").includes("storageSeq 1"));
+  const badPruneBlock = { type: "tool_result", content: "BODY" };
+  const badPruneReceipt = canonicalStubReceipt("rev-bad", 1, badPruneBlock);
+  badPruneReceipt.targets[0].action = "unknown";
   const badPruneReplay = replaySessionRecords(
     [
-      JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: [{ type: "tool_result", content: "BODY" }] } }),
-      JSON.stringify({ storageSeq: 2, type: "revision", kind: "prune", targets: [{ sseq: 1, blockIndex: 0, action: "unknown" }] }),
+      JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: [badPruneBlock] } }),
+      JSON.stringify({ storageSeq: 2, type: "revision", kind: "prune", ...badPruneReceipt }),
     ].join("\n"),
   );
   check("unknown prune actions fail before replay mutation", badPruneReplay.ok === false);

@@ -5,17 +5,23 @@
  * verify/edits/mine/mailbox context, startup-control. The parser stays
  * electron/sidecar.ts. This module is the kernel writer of that protocol.
  */
-import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, constants as fsConstants } from "node:fs";
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, writeFileSync, constants as fsConstants } from "node:fs";
 import { link, lstat, mkdir, open, readdir, rename, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { HAS_UNCHECKED_PLAN_TASK } from "../shared/plan-task.ts";
 import type { FileHandle } from "node:fs/promises";
+import { BoundedTextAccumulator, type BoundedText, type BoundedTextMarkerDetails, type CompletionState } from "./tool-output.ts";
 
 const ACK_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const CONTEXT_FILES = ["verify", "edits", "mine", "mailbox"] as const;
 const PLAN_TEXT_CAP = 4000;
 export const HOST_CONTEXT_BYTES = 64 * 1024;
+const HOST_CONTEXT_READ_CHUNK_BYTES = 16 * 1024;
+
+export type ReadContextFilesOptions = {
+  shouldStop?: () => boolean;
+};
 
 export function ackPath(eventsDir: string, terminalId: string, requestId: string): string {
   return join(eventsDir, `ack-${terminalId}-${requestId}.json`);
@@ -51,42 +57,178 @@ export async function waitForAck(
   return null;
 }
 
-export function readContextFiles(eventsDir: string, terminalId: string): string {
-  if (!eventsDir || !terminalId) return "";
-  const parts: string[] = [];
+function hostContextMarker(details: BoundedTextMarkerDetails): string {
+  return details.state === "complete"
+    ? "[host context truncated]"
+    : `[host context incomplete: ${details.state}]`;
+}
+
+function mergeContextState(current: CompletionState, next: CompletionState): CompletionState {
+  if (current === "interrupted" || next === "interrupted") return "interrupted";
+  if (current === "failed" || next === "failed") return "failed";
+  if (current === "unreadable" || next === "unreadable") return "unreadable";
+  return "complete";
+}
+
+function probeContextStop(options: ReadContextFilesOptions | undefined): "continue" | CompletionState {
+  if (!options?.shouldStop) return "continue";
+  try {
+    return options.shouldStop() ? "interrupted" : "continue";
+  } catch {
+    return "failed";
+  }
+}
+
+function withKnownContextInput(result: BoundedText, inputBytes: number): BoundedText {
+  if (result.inputBytes === inputBytes) return result;
+  return Object.freeze({
+    ...result,
+    inputBytes,
+    omittedBytes: Math.max(0, inputBytes - result.retainedBytes),
+    truncated: result.truncated || inputBytes > result.retainedBytes,
+  });
+}
+
+/** Read all available host context while keeping the rendered result bounded. */
+export function readContextFilesResult(
+  eventsDir: string,
+  terminalId: string,
+  options?: ReadContextFilesOptions,
+): BoundedText {
+  const accumulator = new BoundedTextAccumulator({
+    maxBytes: HOST_CONTEXT_BYTES,
+    direction: "head",
+    marker: hostContextMarker,
+  });
+  if (!eventsDir || !terminalId) return accumulator.finish();
+
   const separator = "\n\n---\n\n";
-  let remaining = HOST_CONTEXT_BYTES;
-  let truncated = false;
+  const separatorBytes = Buffer.byteLength(separator, "utf8");
+  let state: CompletionState = "complete";
+  const files: Array<{ fd: number; size: number }> = [];
+
+  const closeFiles = (): void => {
+    for (const file of files.splice(0)) {
+      try {
+        closeSync(file.fd);
+      } catch {
+        state = mergeContextState(state, "unreadable");
+      }
+    }
+  };
+
+  if (OPEN_NOFOLLOW_READ === null) return accumulator.finish("unreadable");
+
+  // Stat every readable context entry first. This gives the bounded reader an
+  // exact remaining-byte count without scanning a multi-gigabyte file.
   for (const kind of CONTEXT_FILES) {
-    if (remaining <= 0) break;
-    const path = join(eventsDir, `${kind}-${terminalId}.md`);
+    const initialProbe = probeContextStop(options);
+    if (initialProbe !== "continue") {
+      state = mergeContextState(state, initialProbe);
+      break;
+    }
+
     let fd: number | undefined;
     try {
-      fd = openSync(path, "r");
-      if (parts.length > 0) remaining -= Buffer.byteLength(separator);
-      if (remaining <= 0) {
-        truncated = true;
-        break;
+      fd = openSync(join(eventsDir, `${kind}-${terminalId}.md`), OPEN_NOFOLLOW_READ);
+      const info = fstatSync(fd);
+      if (!info.isFile() || !Number.isSafeInteger(info.size) || info.size < 0) {
+        state = mergeContextState(state, "unreadable");
+        continue;
       }
-      const fileSize = fstatSync(fd).size;
-      const size = Math.min(fileSize, remaining);
-      if (fileSize > size) truncated = true;
-      const buf = Buffer.alloc(size);
-      const read = size > 0 ? readSync(fd, buf, 0, size, 0) : 0;
-      const text = buf.subarray(0, read).toString("utf8");
-      if (text) parts.push(text);
-      remaining -= read;
-    } catch {
-      /* missing context file */
+      files.push({ fd, size: info.size });
+      fd = undefined;
+    } catch (error) {
+      if (!isErrno(error, "ENOENT")) state = mergeContextState(state, "unreadable");
     } finally {
-      if (fd !== undefined) closeSync(fd);
+      if (fd !== undefined) {
+        try {
+          closeSync(fd);
+        } catch {
+          state = mergeContextState(state, "unreadable");
+        }
+      }
     }
+    if (state === "interrupted" || state === "failed") break;
   }
-  const text = parts.join(separator);
-  if (!truncated) return text;
-  const marker = Buffer.from("\n[host context truncated]", "utf8");
-  const body = Buffer.from(text, "utf8");
-  return Buffer.concat([body.subarray(0, Math.max(0, HOST_CONTEXT_BYTES - marker.length)), marker]).toString("utf8");
+
+  if (state === "interrupted" || state === "failed") {
+    closeFiles();
+    return accumulator.finish(state);
+  }
+
+  let knownInputBytes = 0;
+  let nonEmptyFiles = 0;
+  for (const file of files) {
+    if (file.size <= 0) continue;
+    if (nonEmptyFiles > 0) knownInputBytes += separatorBytes;
+    knownInputBytes += file.size;
+    nonEmptyFiles += 1;
+  }
+
+  const needsBoundedRead = knownInputBytes > HOST_CONTEXT_BYTES;
+  // Read only a few bytes beyond the output budget. The extra bytes let the
+  // canonical accumulator observe omission even when the cap falls exactly on
+  // a UTF-8 boundary or at the end of a context file.
+  const prefixReadLimit = HOST_CONTEXT_BYTES + separatorBytes + 4;
+  let streamedBytes = 0;
+  let hasContent = false;
+
+  try {
+    outer: for (const file of files) {
+      let fileHadBytes = false;
+      let readOffset = 0;
+      while (readOffset < file.size) {
+        const probe = probeContextStop(options);
+        if (probe !== "continue") {
+          state = mergeContextState(state, probe);
+          break outer;
+        }
+        if (needsBoundedRead && streamedBytes >= prefixReadLimit) break outer;
+
+        if (!fileHadBytes && hasContent) {
+          accumulator.push(separator);
+          streamedBytes += separatorBytes;
+        }
+        const remainingPrefix = needsBoundedRead ? Math.max(0, prefixReadLimit - streamedBytes) : file.size - readOffset;
+        if (remainingPrefix <= 0) break outer;
+        const want = Math.min(HOST_CONTEXT_READ_CHUNK_BYTES, file.size - readOffset, remainingPrefix);
+        const buf = Buffer.allocUnsafe(want);
+        const read = readSync(file.fd, buf, 0, want, readOffset);
+        if (read <= 0) {
+          state = mergeContextState(state, "failed");
+          break outer;
+        }
+        accumulator.push(buf.subarray(0, read));
+        fileHadBytes = true;
+        hasContent = true;
+        readOffset += read;
+        streamedBytes += read;
+      }
+
+      if (state === "complete" && readOffset === file.size) {
+        try {
+          if (fstatSync(file.fd).size !== file.size) state = mergeContextState(state, "failed");
+        } catch {
+          state = mergeContextState(state, "unreadable");
+        }
+      }
+      if (state === "interrupted" || state === "failed") break;
+    }
+  } finally {
+    closeFiles();
+  }
+
+  const result = accumulator.finish(state);
+  // The accumulator only sees the bounded prefix. For a complete read, stats
+  // provide the exact source-byte total without retaining or scanning the
+  // omitted suffix.
+  return state === "complete" ? withKnownContextInput(result, knownInputBytes) : result;
+}
+
+/** Existing bridge contract: callers that only need text get the bounded view. */
+export function readContextFiles(eventsDir: string, terminalId: string): string {
+  return readContextFilesResult(eventsDir, terminalId).text;
 }
 
 export function writePromptPayload(
@@ -213,7 +355,9 @@ const IMAGE_LOCK_WAIT_MS = 250;
 const IMAGE_LOCK_STALE_MS = 5_000;
 const MAX_IMAGE_RECORD_BYTES = 16 * 1024;
 const IMAGE_CLEANUP_MAX = 32;
-const OPEN_NOFOLLOW_READ = fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW;
+const OPEN_NOFOLLOW_READ: number | null = typeof fsConstants.O_NOFOLLOW === "number"
+  ? fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW
+  : null;
 const OPEN_EXCL_WRITE = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL;
 const NAMED_NONCE = "([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|[A-Za-z_][A-Za-z0-9_]*)";
 const OWNER_NAME = new RegExp(`^images-owner-(.+?)-([0-9]+)-([0-9]+)-${NAMED_NONCE}$`);
@@ -347,6 +491,7 @@ function isDeadPid(pid: number): boolean {
 }
 
 async function openNoFollow(path: string): Promise<FileHandle> {
+  if (OPEN_NOFOLLOW_READ === null) throw new Error("secure no-follow reads unavailable");
   return open(path, OPEN_NOFOLLOW_READ);
 }
 
@@ -967,15 +1112,29 @@ export async function acknowledgePendingImages(
 }
 
 function loadImageBytes(dir: string, name: string): Buffer | null {
-  if (!isSafeImageName(name)) return null;
+  if (!isSafeImageName(name) || OPEN_NOFOLLOW_READ === null) return null;
   try {
     const realDir = realpathSync(dir);
-    const realFile = realpathSync(join(dir, name));
+    const candidate = join(dir, name);
+    const realFile = realpathSync(candidate);
     const rel = relative(realDir, realFile);
     if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null;
-    const info = statSync(realFile);
-    if (!info.isFile() || info.size === 0 || info.size > MAX_IMAGE_BYTES) return null;
-    return readFileSync(realFile);
+    const fd = openSync(candidate, OPEN_NOFOLLOW_READ);
+    try {
+      const info = fstatSync(fd);
+      if (!info.isFile() || !Number.isSafeInteger(info.size) || info.size === 0 || info.size > MAX_IMAGE_BYTES) return null;
+      const bytes = Buffer.alloc(info.size);
+      let offset = 0;
+      while (offset < info.size) {
+        const read = readSync(fd, bytes, offset, info.size - offset, offset);
+        if (read <= 0) return null;
+        offset += read;
+      }
+      if (fstatSync(fd).size !== info.size) return null;
+      return bytes;
+    } finally {
+      closeSync(fd);
+    }
   } catch {
     return null;
   }

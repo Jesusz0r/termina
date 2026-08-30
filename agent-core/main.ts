@@ -57,11 +57,12 @@ import {
   parseModelRef,
   providerProtocol,
   usesResponsesApi,
-  usesAnthropicCacheMarkers,
-  usesPromptCacheKey,
-  usesOpenAIExplicitCache,
-  usesPromptCacheOptions,
-  cacheSessionKey,
+  CACHE_CAPABILITY_FEATURE,
+  documentedCacheCapability,
+  cacheRouteDomain,
+  type CacheCapabilityScope,
+  cacheIdentityFor,
+  cacheSessionSeed,
   cacheSessionHeaders,
   googleNativeHeaders,
   modelLeaf,
@@ -84,8 +85,34 @@ import {
   responsesResultFromEvents,
   stripResponsesBreakpoints,
   textFromCompletionPayload,
+  type ProviderUsage,
   type ToolDef,
 } from "./openai-compat.ts";
+import {
+  computeTraceCost,
+  normalizeRateSnapshot,
+  type RateSnapshot,
+  type RateSnapshotInput,
+} from "./rates.ts";
+import {
+  appendRequestOverlay,
+  buildRequestOverlay,
+  projectRequest,
+  type RequestMessage,
+  type RequestOverlay,
+  userPromptContent as projectedUserPromptContent,
+} from "./request-projection.ts";
+import {
+  cacheRequestDiagnostics,
+  classifyCacheMiss,
+  createCapabilityCache,
+  queryCapability,
+  recordCapability,
+  type CapabilityCacheRecord,
+  type CacheAttemptSnapshot,
+  type CachePolicyDiagnostics,
+  type CacheRequestDiagnostics,
+} from "./cache.ts";
 import {
   catalogFetchAllowed,
   formatCatalogLines,
@@ -101,28 +128,52 @@ import {
   acknowledgePendingImages,
   claimPendingImages,
   consumeStartupControl,
-  expandFileImageSource,
   planTextIfChanged,
   loadImageFromRoots,
   pendingImageState,
   persistLoadedImages,
   promptFileName,
-  readContextFiles,
+  readContextFilesResult,
   structuredStartup,
   visibleAssistantText,
   waitForAck,
   writePromptPayload,
 } from "./host.ts";
 import {
+  BoundedTextAccumulator,
+  boundedToolResult,
+  type BoundedText,
+  type BoundedToolResult,
+  type CompletionState,
+} from "./tool-output.ts";
+import {
+  estimateReclaimTokens,
+  makePruneRevision,
+  planPruneStubs as planReclaimStubs,
+  type PrunePick as ReclaimPick,
+} from "./reclaim.ts";
+import {
+  createTraceRuntime,
+  DEFAULT_TRACE_RETENTION_CAP,
+  type TraceAttemptInput,
+  type TraceCacheInput,
+  type TraceCostInput as TraceRecordCostInput,
+  type TraceRuntime,
+  type TraceWriteOutcome,
+} from "./trace.ts";
+import {
   SessionWriter,
+  applySessionRecord,
   clearSessionBundle,
-  formatStub,
+  createReplayState,
   prepareFreshSession,
   quarantineSessionBundle,
   replaySessionBundle,
   resolveSessionFile,
   sessionBundleExists,
   sessionBundleHasContent,
+  sessionBlockBytes,
+  sessionBlockHash,
   type SessionResult,
 } from "./session.ts";
 import {
@@ -132,45 +183,13 @@ import {
   mcpToolDefs,
   startMcp,
   userMcpPath,
+  type McpCancellationScope,
+  type McpContinuation,
   type McpSession,
 } from "./mcp.ts";
 
 import { AgentTui, SLASH_COMMANDS, TUI_SHORTCUTS, rankFileTags, type TranscriptHandle } from "./tui.ts";
 import { parseHideThinking } from "../shared/terminal-control.ts";
-
-// ---- sections (single file per AGENTS.md; do not split) ----
-// 1: config/effort  2: jail/walk/grep/glob  3: skills/env  4: session/traces  5: provider/cache/waste  6: agent loop
-
-// kept for harness compat; canonical owner is session.ts — do not add more
-// ponytail: narrow re-export, full removal when harness imports session.ts directly
-export {
-  formatStub,
-  replaySessionRecords,
-  resolveSessionFile,
-  sessionRotateStamp,
-  MAX_SESSION_RECORD_BYTES,
-  MAX_SESSION_SEGMENT_BYTES,
-  isCoreSessionBundleFile,
-  isCoreSessionId,
-  prepareFreshSession,
-} from "./session.ts";
-
-export {
-  PERMISSION_COMMANDS,
-  SLASH_COMMANDS,
-  TUI_SHORTCUTS,
-  applyFileMention,
-  completeFileMention,
-  completeSlashLine,
-  fileMentionAt,
-  formatPickerRow,
-  formatTuiFooter,
-  matchingSlashCommands,
-  rankFileTags,
-  subsequenceSpread,
-  truncateMiddle,
-  type SlashCommand,
-} from "./tui.ts";
 
 /** Example starting values from docs/AGENT-CORE.md; never spec constants. */
 const MODEL_ENV = process.env.TERMINA_CORE_MODEL?.trim() || "";
@@ -221,7 +240,6 @@ function protectTokens(): number {
 /** Newest user turns whose messages are never touched. */
 const PROTECT_TURNS = 2;
 /** Tool results below this size are never worth a stub. */
-const PRUNE_MIN_CHARS = 2_048;
 const READ_CAP_BYTES = 40 * 1024;
 const BASH_CAP_BYTES = 20 * 1024;
 const BASH_TIMEOUT_MS = 60_000;
@@ -232,7 +250,6 @@ const EDIT_MISS_LINE_CHARS = 240;
 const READ_SCAN_MS = 2_000;
 const TOOL_CONCURRENCY = 4;
 const NOISE_FLOOR_TOKENS = 1_024;
-const CACHE_TTL_MS = 5 * 60 * 1000;
 /** Compact an expensive miss before the request reaches the context limit. */
 const CACHE_MISS_COMPACT_TOKENS = 100_000;
 const CACHE_MISS_COMPACT_SHARE = 0.5;
@@ -255,7 +272,6 @@ const FETCH_TIMEOUT_MS = 15_000;
 const FETCH_CAP_BYTES = 20 * 1024;
 const FETCH_REDIRECT_CAP = 5;
 const GLOB_HIT_CAP = 200;
-const TRACE_CAP = 64;
 const LISTING_CAP = 20;
 const PROBE_TIMEOUT_MS = 500;
 const EDIT_MAX_BYTES = 8 * 1024 * 1024;
@@ -276,6 +292,12 @@ let currentWorkingSetHash: string | null = null;
 let currentWorkingSetChanged: boolean | null = null;
 let previousWorkingSetHash: string | null = null;
 let hasPreviousWorkingSet = false;
+type HostContextTrace = Pick<
+  BoundedText,
+  "state" | "direction" | "limitBytes" | "inputBytes" | "retainedBytes" | "omittedBytes" | "outputBytes" | "truncated"
+>;
+let currentHostContext: HostContextTrace | null = null;
+let activeRequestOverlay: RequestOverlay | null = null;
 
 export type ThinkingRequest =
   | { type: "disabled" }
@@ -497,11 +519,6 @@ export function parseEffortCommand(
   return { error: "use /effort off, minimal, low, medium, high, xhigh, or max" };
 }
 
-/** Chars-per-token estimate for water marks. Sonnet 5 counts about 30 percent more tokens than four chars. */
-export function tokenEstimate(text: string): number {
-  return Math.ceil(text.length / 3);
-}
-
 export function freezeCwd(cwd: string): string {
   try {
     if (existsSync(cwd)) return realpathSync(cwd);
@@ -686,6 +703,18 @@ function fileHasNul(abs: string): boolean {
   }
 }
 
+function isReadableFile(abs: string): boolean {
+  let fd: number | undefined;
+  try {
+    fd = openSync(abs, "r");
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
 // ---- walk helpers (shared between collectFiles + collectRelativeFiles) ----
 function readDirState(dirReal: string, root: string, gitignore: GitignoreRules): { names: string[]; byName: Map<string, import("node:fs").Dirent> } | null {
   let ents;
@@ -704,14 +733,6 @@ function readDirState(dirReal: string, root: string, gitignore: GitignoreRules):
     }
   }
   return { names, byName };
-}
-
-function nextWalkEntry(abs: string, root: string, gitignore: GitignoreRules): { kind: "dir" | "file"; real: string; rel: string } | null {
-  const next = classifyWalkPath(abs, root);
-  if (!next) return null;
-  const rel = posixRel(root, next.real);
-  if (gitignoreSkips(gitignore, rel, next.kind === "dir")) return null;
-  return { kind: next.kind, real: next.real, rel };
 }
 
 function classifyWalkPath(abs: string, root: string): { kind: "dir" | "file"; real: string } | null {
@@ -766,60 +787,113 @@ export async function collectFiles(
   root: string,
   visitCap: number,
   opts?: { skipNul?: boolean; shouldStop?: () => boolean; budgetMs?: number },
-): Promise<{ files: string[]; hitCap: boolean; timedOut: boolean }> {
+): Promise<{
+  files: string[];
+  state: CompletionState;
+  hitCap: boolean;
+  timedOut: boolean;
+}> {
   const skipNul = opts?.skipNul !== false;
-  const budgetMs = opts?.budgetMs ?? GREP_BUDGET_MS;
+  const rawBudgetMs = opts?.budgetMs ?? GREP_BUDGET_MS;
+  const budgetMs = Number.isFinite(rawBudgetMs) && rawBudgetMs >= 0 ? rawBudgetMs : 0;
+  const normalizedVisitCap = Number.isSafeInteger(visitCap) && visitCap >= 0 ? visitCap : 0;
   const files: string[] = [];
   const visited = new Set<string>();
   const seenFiles = new Set<string>();
   const gitignore: GitignoreRules = new Map();
+  let stopCallbackFailed = false;
+  const shouldStop = (): boolean => {
+    try {
+      return opts?.shouldStop?.() === true;
+    } catch {
+      stopCallbackFailed = true;
+      return true;
+    }
+  };
+  if (shouldStop()) return { files, state: stopCallbackFailed ? "failed" : "interrupted", hitCap: false, timedOut: false };
+  if (budgetMs <= 0) return { files, state: "timeout", hitCap: false, timedOut: true };
   const classified = classifyWalkPath(start, root);
-  if (!classified) return { files, hitCap: false, timedOut: false };
+  if (!classified) return { files, state: "unreadable", hitCap: false, timedOut: false };
   if (classified.kind === "file") {
     const rel = posixRel(root, classified.real);
-    if (rel && gitignoreSkips(gitignore, rel, false)) return { files, hitCap: false, timedOut: false };
-    if (skipNul && fileHasNul(classified.real)) return { files, hitCap: false, timedOut: false };
-    return { files: [classified.real], hitCap: false, timedOut: false };
+    if (rel && gitignoreSkips(gitignore, rel, false)) return { files, state: "complete", hitCap: false, timedOut: false };
+    if (!isReadableFile(classified.real)) return { files, state: "unreadable", hitCap: false, timedOut: false };
+    if (skipNul && fileHasNul(classified.real)) return { files, state: "complete", hitCap: false, timedOut: false };
+    return { files: [classified.real], state: "complete", hitCap: false, timedOut: false };
   }
   const stack = [classified.real];
   let visits = 0;
   const started = Date.now();
+  let unreadable = false;
   while (stack.length > 0) {
-    if (opts?.shouldStop?.()) break;
-    if (Date.now() - started >= budgetMs) return { files, hitCap: false, timedOut: true };
+    if (shouldStop()) {
+      files.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
+      return { files, state: stopCallbackFailed ? "failed" : "interrupted", hitCap: false, timedOut: false };
+    }
+    if (budgetMs <= 0 || Date.now() - started >= budgetMs) {
+      files.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
+      return { files, state: "timeout", hitCap: false, timedOut: true };
+    }
     const dir = stack.pop()!;
     let dirReal = dir;
     try {
       dirReal = realpathSync(dir);
     } catch {
+      unreadable = true;
       continue;
     }
     if (visited.has(dirReal)) continue;
     visited.add(dirReal);
     const state = readDirState(dirReal, root, gitignore);
-    if (!state) continue;
+    if (!state) {
+      unreadable = true;
+      continue;
+    }
     const { names, byName } = state;
     for (const name of names) {
+      if (shouldStop()) {
+        files.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
+        return { files, state: stopCallbackFailed ? "failed" : "interrupted", hitCap: false, timedOut: false };
+      }
       if (name === "." || name === "..") continue;
       if (IGNORED_SEGMENTS.has(name)) continue;
       if (!byName.has(name)) continue;
       const abs = join(dirReal, name);
       visits++;
-      if (visits > visitCap) return { files, hitCap: true, timedOut: false };
-      if (visits % 25 === 0) await yieldEventLoop();
-      const next = nextWalkEntry(abs, root, gitignore);
-      if (!next) continue;
+      if (visits > normalizedVisitCap) {
+        files.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
+        return { files, state: "visit-cap", hitCap: true, timedOut: false };
+      }
+      if (visits % 25 === 0) {
+        await yieldEventLoop();
+        if (shouldStop()) {
+          files.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
+          return { files, state: stopCallbackFailed ? "failed" : "interrupted", hitCap: false, timedOut: false };
+        }
+      }
+      const candidate = classifyWalkPath(abs, root);
+      if (!candidate) {
+        unreadable = true;
+        continue;
+      }
+      const rel = posixRel(root, candidate.real);
+      if (gitignoreSkips(gitignore, rel, candidate.kind === "dir")) continue;
+      const next = { kind: candidate.kind, real: candidate.real, rel };
       if (next.kind === "dir") stack.push(next.real);
       else {
         if (seenFiles.has(next.real)) continue;
         seenFiles.add(next.real);
+        if (!isReadableFile(next.real)) {
+          unreadable = true;
+          continue;
+        }
         if (skipNul && fileHasNul(next.real)) continue;
         files.push(next.real);
       }
     }
   }
   files.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
-  return { files, hitCap: false, timedOut: false };
+  return { files, state: unreadable ? "unreadable" : "complete", hitCap: false, timedOut: false };
 }
 
 const FILE_TAG_VISIT_CAP = GREP_VISIT_CAP;
@@ -828,61 +902,162 @@ const FILE_TAG_ATTACH_CAP = 8;
 const FILE_TAG_SCAN_MS = GREP_BUDGET_MS;
 
 const FILE_TAG_TTL_MS = 2_000;
-let fileTagIndex: { root: string; rels: string[]; at: number } | null = null;
+export type RelativeFilesScanOptions = {
+  shouldStop?: () => boolean;
+  budgetMs?: number;
+};
+
+/**
+ * Array-shaped result so existing ranking/selection code remains a normal
+ * string-array consumer while every scan carries its completion state. The
+ * `files` copy is the explicit canonical payload for metadata-aware callers.
+ */
+export type RelativeFilesResult = string[] & {
+  readonly files: string[];
+  readonly state: CompletionState;
+  readonly hitCap: boolean;
+  readonly timedOut: boolean;
+  readonly visits: number;
+  readonly visitedDirectories: number;
+};
+
+function relativeFilesResult(
+  files: string[],
+  metadata: Omit<RelativeFilesResult, "files" | keyof string[]>,
+): RelativeFilesResult {
+  const result = files.slice() as RelativeFilesResult;
+  Object.defineProperties(result, {
+    files: { value: result.slice(), enumerable: true },
+    state: { value: metadata.state, enumerable: true },
+    hitCap: { value: metadata.hitCap, enumerable: true },
+    timedOut: { value: metadata.timedOut, enumerable: true },
+    visits: { value: metadata.visits, enumerable: true },
+    visitedDirectories: { value: metadata.visitedDirectories, enumerable: true },
+  });
+  return result;
+}
+
+let fileTagIndex: { root: string; scan: RelativeFilesResult; at: number } | null = null;
 
 /** Relative project files for `@` tagging. Sync, ignored walks, no NUL scan. */
-export function collectRelativeFiles(cwd: string, visitCap = FILE_TAG_VISIT_CAP): string[] {
+export function collectRelativeFiles(
+  cwd: string,
+  visitCap = FILE_TAG_VISIT_CAP,
+  opts?: RelativeFilesScanOptions,
+): RelativeFilesResult {
   const root = freezeCwd(cwd);
   const files: string[] = [];
   const visited = new Set<string>();
   const seenFiles = new Set<string>();
   const gitignore: GitignoreRules = new Map();
-  const classified = classifyWalkPath(root, root);
-  if (!classified || classified.kind !== "dir") return [];
-  const stack = [classified.real];
-  let visits = 0;
+  const normalizedVisitCap = Number.isSafeInteger(visitCap) && visitCap >= 0 ? visitCap : 0;
+  const rawBudgetMs = opts?.budgetMs ?? FILE_TAG_SCAN_MS;
+  const budgetMs = Number.isFinite(rawBudgetMs) && rawBudgetMs >= 0 ? rawBudgetMs : 0;
+  let stopCallbackFailed = false;
+  const shouldStop = (): boolean => {
+    try {
+      return opts?.shouldStop?.() === true;
+    } catch {
+      stopCallbackFailed = true;
+      return true;
+    }
+  };
   const started = Date.now();
+  let visits = 0;
+  let unreadable = false;
+  const finish = (
+    state: CompletionState,
+    hitCap = false,
+    timedOut = false,
+  ): RelativeFilesResult => {
+    files.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
+    return relativeFilesResult(files, {
+      state,
+      hitCap,
+      timedOut,
+      visits,
+      visitedDirectories: visited.size,
+    } as Omit<RelativeFilesResult, "files" | keyof string[]>);
+  };
+  if (shouldStop()) return finish(stopCallbackFailed ? "failed" : "interrupted");
+  if (budgetMs <= 0) return finish("timeout", false, true);
+  const classified = classifyWalkPath(root, root);
+  if (!classified || classified.kind !== "dir") return finish("unreadable");
+  const stack = [classified.real];
   while (stack.length > 0) {
-    if (Date.now() - started >= FILE_TAG_SCAN_MS) break;
+    if (shouldStop()) return finish(stopCallbackFailed ? "failed" : "interrupted");
+    if (Date.now() - started >= budgetMs) return finish("timeout", false, true);
     const dir = stack.pop()!;
     let dirReal = dir;
     try {
       dirReal = realpathSync(dir);
     } catch {
+      unreadable = true;
       continue;
     }
     if (visited.has(dirReal)) continue;
     visited.add(dirReal);
     const state = readDirState(dirReal, root, gitignore);
-    if (!state) continue;
+    if (!state) {
+      unreadable = true;
+      continue;
+    }
     const { names } = state;
     for (const name of names) {
+      if (shouldStop()) return finish(stopCallbackFailed ? "failed" : "interrupted");
+      if (Date.now() - started >= budgetMs) return finish("timeout", false, true);
       if (name === "." || name === "..") continue;
       if (IGNORED_SEGMENTS.has(name)) continue;
       visits++;
-      if (visits > visitCap) {
-        files.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
-        return files;
+      if (visits > normalizedVisitCap) {
+        return finish("visit-cap", true);
       }
-      const next = nextWalkEntry(join(dirReal, name), root, gitignore);
-      if (!next) continue;
-      if (next.kind === "dir") stack.push(next.real);
-      else if (!seenFiles.has(next.real)) {
-        seenFiles.add(next.real);
-        if (next.rel) files.push(next.rel);
+      const candidate = classifyWalkPath(join(dirReal, name), root);
+      if (!candidate) {
+        unreadable = true;
+        continue;
+      }
+      const rel = posixRel(root, candidate.real);
+      if (gitignoreSkips(gitignore, rel, candidate.kind === "dir")) continue;
+      if (candidate.kind === "dir") stack.push(candidate.real);
+      else if (!seenFiles.has(candidate.real)) {
+        seenFiles.add(candidate.real);
+        if (rel) files.push(rel);
       }
     }
   }
-  files.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
-  return files;
+  return finish(unreadable ? "unreadable" : "complete");
 }
 
-export function listTaggedFiles(cwd: string, query: string, cap = FILE_TAG_PICK_CAP): string[] {
+export function listTaggedFiles(
+  cwd: string,
+  query: string,
+  cap = FILE_TAG_PICK_CAP,
+  opts?: RelativeFilesScanOptions & { visitCap?: number },
+): RelativeFilesResult {
   const root = freezeCwd(cwd);
   const now = Date.now();
-  const stale = !fileTagIndex || fileTagIndex.root !== root || (query === "" && now - fileTagIndex.at >= FILE_TAG_TTL_MS);
-  if (stale) fileTagIndex = { root, rels: collectRelativeFiles(root), at: now };
-  return rankFileTags(fileTagIndex?.rels ?? [], query, cap);
+  const requestedScan = opts !== undefined;
+  const stale = requestedScan || !fileTagIndex || fileTagIndex.root !== root ||
+    (query === "" && now - fileTagIndex.at >= FILE_TAG_TTL_MS);
+  let scan: RelativeFilesResult;
+  if (stale) {
+    scan = collectRelativeFiles(root, opts?.visitCap ?? FILE_TAG_VISIT_CAP, opts);
+    // Never retain an incomplete scan as if it were a complete autocomplete
+    // index. A subsequent query will rescan and report its own state.
+    if (scan.state === "complete") fileTagIndex = { root, scan, at: now };
+    else fileTagIndex = null;
+  } else {
+    scan = fileTagIndex!.scan;
+  }
+  const matches = rankFileTags(scan.files, query, cap);
+  return relativeFilesResult(matches, {
+    state: scan.state,
+    hitCap: scan.hitCap,
+    timedOut: scan.timedOut,
+    visits: scan.visits,
+    visitedDirectories: scan.visitedDirectories,
+  } as Omit<RelativeFilesResult, "files" | keyof string[]>);
 }
 
 export function parseFileTags(text: string): string[] {
@@ -904,8 +1079,13 @@ export function expandFileTags(cwd: string, prompt: string): string {
   const tags = parseFileTags(prompt);
   if (tags.length === 0) return prompt;
   const chunks: string[] = [];
-  for (const path of tags) {
-    if (chunks.length >= FILE_TAG_ATTACH_CAP) break;
+  let omitted = 0;
+  for (let index = 0; index < tags.length; index += 1) {
+    const path = tags[index]!;
+    if (chunks.length >= FILE_TAG_ATTACH_CAP) {
+      omitted = tags.length - index;
+      break;
+    }
     const confined = confinePath(cwd, path);
     if (!confined.ok) continue;
     let st;
@@ -925,17 +1105,40 @@ export function expandFileTags(cwd: string, prompt: string): string {
     chunks.push(`<file path="${xmlSafe(path)}">\n${xmlSafe(got.content)}\n</file>`);
   }
   if (chunks.length === 0) return prompt;
-  return `${prompt}\n\n<tagged-files>\n${chunks.join("\n")}\n</tagged-files>`;
+  const omission = omitted > 0
+    ? `\n<!-- ${omitted} file attachments omitted after the ${FILE_TAG_ATTACH_CAP}-file cap; read_file the omitted paths explicitly -->`
+    : "";
+  return `${prompt}\n\n<tagged-files>\n${chunks.join("\n")}${omission}\n</tagged-files>`;
 }
 
 const GREP_LINE_BYTE_CAP = GREP_LINE_CHARS * 4;
+
+function decodeGrepLine(value: Uint8Array): { text: string; truncated: boolean } {
+  const bounded = new BoundedTextAccumulator({
+    maxBytes: GREP_LINE_BYTE_CAP,
+    direction: "head",
+    // The surrounding grep result carries the actionable continuation.  A
+    // marker on every clipped line would consume the page budget and obscure
+    // the line number.
+    marker: "",
+  });
+  bounded.push(value);
+  const result = bounded.finish();
+  return { text: result.text, truncated: result.truncated };
+}
+
+type LineScanResult = { state: CompletionState; truncated: boolean };
 
 function forEachGrepLine(
   abs: string,
   fn: (lineNo: number, line: string) => boolean,
   shouldStop?: () => boolean,
-): void {
+  budgetMs = GREP_BUDGET_MS,
+): LineScanResult {
   let fd: number | undefined;
+  const started = Date.now();
+  let truncated = false;
+  const result = (state: CompletionState): LineScanResult => ({ state, truncated });
   try {
     fd = openSync(abs, "r");
     const chunk = Buffer.alloc(64 * 1024);
@@ -944,7 +1147,8 @@ function forEachGrepLine(
     let lineNo = 1;
     let pos = 0;
     for (;;) {
-      if (shouldStop?.()) return;
+      if (shouldStop?.()) return result("interrupted");
+      if (budgetMs <= 0 || Date.now() - started >= budgetMs) return result("timeout");
       const n = readSync(fd, chunk, 0, chunk.length, pos);
       if (n <= 0) break;
       pos += n;
@@ -962,26 +1166,33 @@ function forEachGrepLine(
         let end = i;
         if (end > start && data[end - 1] === 13) end--;
         const raw = data.subarray(start, end);
-        const line = raw.subarray(0, GREP_LINE_BYTE_CAP).toString("utf8").slice(0, GREP_LINE_CHARS);
-        if (!fn(lineNo, line)) return;
+        if (raw.length > GREP_LINE_BYTE_CAP) truncated = true;
+        const line = decodeGrepLine(raw.subarray(0, GREP_LINE_BYTE_CAP));
+        truncated ||= line.truncated;
+        if (!fn(lineNo, line.text)) return result("complete");
         lineNo++;
         start = i + 1;
       }
       leftover = start < data.length ? Buffer.from(data.subarray(start)) : Buffer.alloc(0);
       if (leftover.length > GREP_LINE_BYTE_CAP) {
-        const line = leftover.subarray(0, GREP_LINE_BYTE_CAP).toString("utf8").slice(0, GREP_LINE_CHARS);
-        if (!fn(lineNo, line)) return;
+        truncated = true;
+        const line = decodeGrepLine(leftover.subarray(0, GREP_LINE_BYTE_CAP));
+        truncated ||= line.truncated;
+        if (!fn(lineNo, line.text)) return result("complete");
         lineNo++;
         leftover = Buffer.alloc(0);
         skipUntilNl = true;
       }
     }
     if (!skipUntilNl && leftover.length > 0) {
-      const line = leftover.subarray(0, GREP_LINE_BYTE_CAP).toString("utf8").slice(0, GREP_LINE_CHARS);
-      fn(lineNo, line);
+      if (leftover.length > GREP_LINE_BYTE_CAP) truncated = true;
+      const line = decodeGrepLine(leftover.subarray(0, GREP_LINE_BYTE_CAP));
+      truncated ||= line.truncated;
+      fn(lineNo, line.text);
     }
+    return result("complete");
   } catch {
-    /* unreadable file */
+    return result("unreadable");
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
@@ -1013,6 +1224,21 @@ export function completeGrepStdout(text: string, truncated: boolean): string {
   if (!truncated) return text.replace(/\n+$/, "");
   const cut = text.endsWith("\n") ? text : text.slice(0, Math.max(0, text.lastIndexOf("\n")));
   return cut.replace(/\n+$/, "");
+}
+
+/** Ripgrep's per-file --max-count cannot distinguish exactly-cap hits from a
+ * file with additional matches, so reaching the cap is always an incomplete
+ * result and must carry a continuation. */
+function grepHitCapReached(raw: string): boolean {
+  const counts = new Map<string, number>();
+  for (const row of raw.split("\n")) {
+    const hit = parseGrepRow(row);
+    if (!hit) continue;
+    const count = (counts.get(hit.file) ?? 0) + 1;
+    counts.set(hit.file, count);
+    if (count >= GREP_HIT_CAP) return true;
+  }
+  return false;
 }
 
 /** Group hits by file, put sparse files first, and cap the page the model sees. */
@@ -1139,9 +1365,27 @@ function grepRipgrep(
   pattern: string,
   glob: string | undefined,
   opts: { shouldStop?: () => boolean; budgetMs?: number },
-): Promise<string> {
+): Promise<ToolTextResult> {
   const budgetMs = opts.budgetMs ?? GREP_BUDGET_MS;
-  if (budgetMs <= 0) return Promise.resolve("(grep timed out after 0 files)");
+  const repro = `grep ${shellQuote(pattern)}${glob ? ` --glob ${shellQuote(glob)}` : ""}`;
+  const continuation = `Grep again with path=${JSON.stringify(searchAbs === root ? "." : posixRel(root, searchAbs))}${glob ? ` or a tighter glob than ${JSON.stringify(glob)}` : " or a tighter glob"}.`;
+  let stopCallbackFailed = false;
+  const shouldStop = (): boolean => {
+    try {
+      return opts.shouldStop?.() === true;
+    } catch {
+      stopCallbackFailed = true;
+      return true;
+    }
+  };
+  if (budgetMs <= 0) {
+    return Promise.resolve(boundedToolResult("(grep timed out after 0 files)", {
+      maxBytes: GREP_BYTE_CAP,
+      marker: continuation,
+      state: "timeout",
+      isError: true,
+    }));
+  }
   const relSearch = searchAbs === root ? "." : posixRel(root, searchAbs);
   const args = [
     "--color=never",
@@ -1160,13 +1404,19 @@ function grepRipgrep(
     try {
       child = spawn(rg, args, { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
     } catch (err) {
-      resolve(`error: ${(err as Error).message}`);
+      resolve(boundedToolResult(`error: ${(err as Error).message}`, {
+        maxBytes: GREP_BYTE_CAP,
+        marker: "",
+        state: "failed",
+        isError: true,
+      }));
       return;
     }
-    const chunks: Buffer[] = [];
-    const errChunks: Buffer[] = [];
-    let used = 0;
-    let truncated = false;
+    const stdout = new BoundedTextAccumulator({ maxBytes: GREP_BYTE_CAP, direction: "head", marker: "" });
+    const stderr = new BoundedTextAccumulator({ maxBytes: 8 * 1024, direction: "head", marker: "" });
+    let stdoutSeen = 0;
+    let outputTruncated = false;
+    let killedForOutput = false;
     const kill = (): void => {
       try {
         child.kill("SIGKILL");
@@ -1175,65 +1425,103 @@ function grepRipgrep(
       }
     };
     child.stdout?.on("data", (chunk: Buffer) => {
-      if (used >= GREP_BYTE_CAP) {
-        truncated = true;
-        kill();
-        return;
-      }
-      const piece = chunk.subarray(0, GREP_BYTE_CAP - used);
-      chunks.push(piece);
-      used += piece.length;
-      if (piece.length < chunk.length) {
-        truncated = true;
+      stdout.push(chunk);
+      stdoutSeen += chunk.byteLength;
+      if (stdoutSeen > GREP_BYTE_CAP) {
+        outputTruncated = true;
+        killedForOutput = true;
         kill();
       }
     });
     child.stderr?.on("data", (chunk: Buffer) => {
-      if (errChunks.length < 8) errChunks.push(chunk.subarray(0, 2 * 1024));
+      stderr.push(chunk);
     });
     let settled = false;
     let timedOut = false;
+    let interruptedByUser = false;
+    let spawnFailed = false;
     const finish = (code: number | null): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       clearInterval(poll);
-      const text = completeGrepStdout(Buffer.concat(chunks).toString("utf8"), truncated);
+      const stdoutResult = stdout.finish();
+      const stderrResult = stderr.finish();
+      const stderrTruncated = stderrResult.truncated;
+      const text = completeGrepStdout(stdoutResult.text, outputTruncated || stdoutResult.truncated);
+      const hitCap = grepHitCapReached(text);
+      let state: CompletionState = "complete";
+      let isError = false;
+      let body = "";
       if (timedOut) {
-        resolve(text ? `${formatGrepHits(text)}\n(grep timed out)` : "(grep timed out)");
-        return;
+        state = "timeout";
+        isError = true;
+        body = text ? `${formatGrepHits(text)}\n(grep timed out)` : "(grep timed out)";
+      } else if (stopCallbackFailed) {
+        state = "failed";
+        isError = true;
+        body = text ? `${formatGrepHits(text)}\n(grep stop callback failed)` : "error: grep stop callback failed";
+      } else if (interruptedByUser) {
+        state = "interrupted";
+        isError = true;
+        body = text ? `${formatGrepHits(text)}\n(grep interrupted)` : "(grep interrupted)";
+      } else if (spawnFailed) {
+        state = "failed";
+        isError = true;
+        body = `error: ${stderrResult.text || "could not start ripgrep"}`;
+      } else if (killedForOutput) {
+        // The process was stopped only because its display stream reached the
+        // output cap; this is a complete search with an intentionally clipped
+        // page, not a provider/tool failure.
+        state = "complete";
+      } else if (code === 2 && !outputTruncated) {
+        state = "failed";
+        isError = true;
+        const err = stderrResult.text.trim().slice(0, 300);
+        body = err ? `error: ${err}` : "error: invalid regular expression";
+      } else if (!text) {
+        body = outputTruncated ? "(more matching files not listed)" : "(no matches)";
+      } else {
+        const formatted = formatGrepHits(text);
+        body = outputTruncated || hitCap
+          ? `${formatted}\n(more matching files not listed)`
+          : formatted;
       }
-      if (code === 2 && !truncated) {
-        const err = Buffer.concat(errChunks).toString("utf8").trim().slice(0, 300);
-        resolve(err ? `error: ${err}` : "error: invalid regular expression");
-        return;
-      }
-      if (!text) {
-        if (truncated) resolve("(more matching files not listed. Grep again with path or glob.)");
-        else resolve("(no matches)");
-        return;
-      }
-      const formatted = formatGrepHits(text);
-      resolve(
-        truncated
-          ? `${formatted}\n(more matching files not listed. Grep again with path or glob.)`
-          : formatted,
-      );
+      const marker = state === "complete" && !outputTruncated && !stderrTruncated && !hitCap ? "" : continuation;
+      const result = logicalToolText(body, {
+        maxBytes: GREP_BYTE_CAP,
+        state,
+        isError,
+        forceMarker: Boolean(marker),
+        marker,
+        continuation: marker || null,
+        repro,
+      });
+      resolve(Object.freeze({
+        ...result,
+        continuation: state === "complete" && !outputTruncated && !stderrTruncated && !hitCap ? null : continuation,
+        repro,
+        stdout: stdoutResult,
+        stderr: stderrResult,
+      }));
     };
     const timer = setTimeout(() => {
       timedOut = true;
       kill();
     }, budgetMs);
     const poll = setInterval(() => {
-      if (opts.shouldStop?.()) kill();
+      if (shouldStop()) {
+        interruptedByUser = true;
+        kill();
+      }
     }, 50);
-    if (opts.shouldStop?.()) kill();
-    child.on("error", (e) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      clearInterval(poll);
-      resolve(`error: ${e.message}`);
+    if (shouldStop()) {
+      interruptedByUser = true;
+      kill();
+    }
+    child.on("error", () => {
+      spawnFailed = true;
+      if (!settled) finish(null);
     });
     child.on("close", (code) => finish(code));
   });
@@ -1243,46 +1531,66 @@ export async function grepFiles(
   cwd: string,
   input: { pattern?: string; path?: string; glob?: string },
   opts?: { shouldStop?: () => boolean; budgetMs?: number; jsOnly?: boolean },
-): Promise<string> {
+): Promise<ToolTextResult> {
   const pattern = input.pattern ?? "";
+  const repro = `grep ${shellQuote(pattern)}${input.glob ? ` --glob ${shellQuote(input.glob)}` : ""}`;
+  const continuation = `Grep again with path=${JSON.stringify(input.path ?? ".")}${input.glob ? ` or a tighter glob than ${JSON.stringify(input.glob)}` : " or a tighter glob"}.`;
+  let stopCallbackFailed = false;
+  const shouldStop = (): boolean => {
+    try {
+      return opts?.shouldStop?.() === true;
+    } catch {
+      stopCallbackFailed = true;
+      return true;
+    }
+  };
+  const fail = (content: string): ToolTextResult => Object.freeze({
+    ...boundedToolResult(content, { maxBytes: GREP_BYTE_CAP, marker: "", state: "failed", isError: true }),
+    continuation: null,
+    repro,
+  });
   const unsafe = validateGrepPattern(pattern);
   const root = freezeCwd(cwd);
   const confined = confinePath(cwd, input.path ?? ".", { mustExist: true });
-  if (!confined.ok) return confined.error;
+  if (!confined.ok) return fail(confined.error);
   if (input.glob) {
-    if (input.glob.length < 1 || input.glob.length > 256) return "error: glob pattern length must be 1–256";
-    if (/[\[\]{}]/.test(input.glob)) return "error: glob only supports * ** ?";
+    if (input.glob.length < 1 || input.glob.length > 256) return fail("error: glob pattern length must be 1–256");
+    if (/[\[\]{}]/.test(input.glob)) return fail("error: glob only supports * ** ?");
   }
   if (!opts?.jsOnly) {
     const rg = resolveTrustedBin("rg", root);
     if (rg) {
-      if (pattern.length < 1 || pattern.length > 256) return unsafe ?? "error: pattern length must be 1–256";
-      return grepRipgrep(rg, root, confined.abs, pattern, input.glob, opts ?? {});
+      if (pattern.length < 1 || pattern.length > 256) return fail(unsafe ?? "error: pattern length must be 1–256");
+      return grepRipgrep(rg, root, confined.abs, pattern, input.glob, { ...opts, shouldStop });
     }
   }
-  if (unsafe) return unsafe;
+  if (unsafe) return fail(unsafe);
   let regex: RegExp;
   try {
     regex = new RegExp(pattern);
   } catch {
-    return "error: invalid regular expression";
+    return fail("error: invalid regular expression");
   }
   const budgetMs = opts?.budgetMs ?? GREP_BUDGET_MS;
   const started = Date.now();
   const collected = await collectFiles(confined.abs, root, GREP_VISIT_CAP, {
-    shouldStop: opts?.shouldStop,
+    shouldStop,
     budgetMs,
   });
-  if (collected.timedOut) return `(grep timed out after ${collected.files.length} files)`;
   const hits: string[] = [];
   let filesWithHits = 0;
   let scanned = 0;
-  let timedOut = false;
+  let state: CompletionState = collected.state;
   let fileCap = false;
+  let hitCap = false;
+  let lineTruncated = false;
   for (const abs of collected.files) {
-    if (opts?.shouldStop?.()) break;
+    if (shouldStop()) {
+      state = stopCallbackFailed ? "failed" : "interrupted";
+      break;
+    }
     if (Date.now() - started >= budgetMs) {
-      timedOut = true;
+      state = "timeout";
       break;
     }
     scanned++;
@@ -1294,11 +1602,10 @@ export async function grepFiles(
       break;
     }
     let fileHits = 0;
-    forEachGrepLine(
+    const lineState = forEachGrepLine(
       abs,
       (lineNo, line) => {
         if (Date.now() - started >= budgetMs) {
-          timedOut = true;
           return false;
         }
         if (!regex.test(line)) return true;
@@ -1306,43 +1613,109 @@ export async function grepFiles(
         if (fileHits <= GREP_HIT_CAP) hits.push(`${rel}:${lineNo}:${line}`);
         return fileHits < GREP_HIT_CAP;
       },
-      opts?.shouldStop,
+      shouldStop,
+      Math.max(1, budgetMs - (Date.now() - started)),
     );
     if (fileHits > 0) filesWithHits++;
-    if (timedOut) break;
+    if (fileHits >= GREP_HIT_CAP) hitCap = true;
+    lineTruncated ||= lineState.truncated;
+    if (lineState.state === "interrupted" || shouldStop()) {
+      state = stopCallbackFailed ? "failed" : "interrupted";
+      break;
+    }
+    if (lineState.state === "timeout") {
+      state = "timeout";
+      break;
+    }
+    if (Date.now() - started >= budgetMs && lineState.state === "complete") {
+      state = "timeout";
+      break;
+    }
+    if (lineState.state === "unreadable" && state === "complete") state = "unreadable";
   }
+  const stateError = state !== "complete";
   if (hits.length === 0) {
-    if (timedOut) return `(grep timed out after ${scanned} files)`;
-    return "(no matches)";
+    const body = state === "complete"
+      ? lineTruncated ? "(no matches in retained line prefixes; some lines were truncated)" : "(no matches)"
+      : `(grep ${state} after ${scanned} files)`;
+    const needsContinuation = stateError || lineTruncated;
+    const result = logicalToolText(body, {
+      maxBytes: GREP_BYTE_CAP,
+      state,
+      isError: stateError,
+      forceMarker: needsContinuation,
+      marker: needsContinuation ? continuation : "",
+      continuation: needsContinuation ? continuation : null,
+      repro,
+    });
+    return result;
   }
   const formatted = formatGrepHits(hits.join("\n"));
   const extra: string[] = [];
   if (fileCap) extra.push("(more matching files not listed. Grep again with path or glob.)");
-  if (timedOut) extra.push(`(grep timed out after ${scanned} files)`);
-  return extra.length > 0 ? `${formatted}\n${extra.join("\n")}` : formatted;
+  if (hitCap) extra.push("(grep hit cap; more matching lines may be omitted)");
+  if (state !== "complete") extra.push(`(grep ${state} after ${scanned} files)`);
+  if (lineTruncated) extra.push("(some matching lines were truncated)");
+  const body = extra.length > 0 ? `${formatted}\n${extra.join("\n")}` : formatted;
+  const needsContinuation = stateError || fileCap || hitCap || lineTruncated;
+  const result = logicalToolText(body, {
+    maxBytes: GREP_BYTE_CAP,
+    state,
+    isError: stateError,
+    forceMarker: needsContinuation,
+    marker: needsContinuation ? continuation : "",
+    continuation: needsContinuation ? continuation : null,
+    repro,
+  });
+  return result;
 }
 
 export async function globFiles(
   cwd: string,
   pattern: string,
   opts?: { shouldStop?: () => boolean; budgetMs?: number },
-): Promise<string> {
-  if (pattern.length < 1 || pattern.length > 256) return "error: pattern length must be 1–256";
-  if (/[\[\]{}]/.test(pattern)) return "error: glob only supports * ** ?";
+): Promise<ToolTextResult> {
+  const repro = `glob ${shellQuote(pattern)}`;
+  const continuation = `Glob again with a narrower pattern than ${JSON.stringify(pattern)} or a narrower path.`;
+  const fail = (content: string): ToolTextResult => Object.freeze({
+    ...boundedToolResult(content, { maxBytes: GREP_BYTE_CAP, marker: "", state: "failed", isError: true }),
+    continuation: null,
+    repro,
+  });
+  if (pattern.length < 1 || pattern.length > 256) return fail("error: pattern length must be 1–256");
+  if (/[\[\]{}]/.test(pattern)) return fail("error: glob only supports * ** ?");
   const root = freezeCwd(cwd);
   const collected = await collectFiles(root, root, GREP_VISIT_CAP, {
     shouldStop: opts?.shouldStop,
     budgetMs: opts?.budgetMs,
   });
-  if (collected.timedOut) return `(glob timed out after ${collected.files.length} files)`;
   const out: string[] = [];
   for (const abs of collected.files) {
     const rel = relative(root, abs).split(sep).join("/");
     if (!matchGlob(pattern, rel)) continue;
     out.push(rel);
-    if (out.length >= GLOB_HIT_CAP) break;
+    // One lookahead distinguishes an exact page from an omitted continuation.
+    if (out.length > GLOB_HIT_CAP) break;
   }
-  return out.length > 0 ? out.join("\n") : "(no matches)";
+  const hasMore = out.length > GLOB_HIT_CAP;
+  const visible = out.slice(0, GLOB_HIT_CAP);
+  const incomplete = collected.state !== "complete";
+  const body = visible.length > 0
+    ? visible.join("\n")
+    : incomplete
+      ? `(glob ${collected.state} after ${collected.files.length} files)`
+      : "(no matches)";
+  const needsContinuation = hasMore || incomplete;
+  const result = logicalToolText(body, {
+    maxBytes: GREP_BYTE_CAP,
+    state: collected.state,
+    isError: incomplete,
+    forceMarker: needsContinuation,
+    marker: needsContinuation ? `${hasMore ? "(more matching files not listed)\n" : ""}${continuation}` : "",
+    continuation: needsContinuation ? continuation : null,
+    repro,
+  });
+  return Object.freeze({ ...result, truncated: result.truncated || needsContinuation });
 }
 
 export interface Skill {
@@ -1651,6 +2024,34 @@ function lastNewlineIndex(buf: Buffer): number {
   return -1;
 }
 
+/** Number of source bytes ending at a complete UTF-8 code-point boundary. */
+function completeUtf8Boundary(value: Uint8Array): number {
+  let cursor = 0;
+  while (cursor < value.byteLength) {
+    const first = value[cursor]!;
+    let length = 0;
+    if (first <= 0x7f) length = 1;
+    else if (first >= 0xc2 && first <= 0xdf) length = 2;
+    else if (first >= 0xe0 && first <= 0xef) length = 3;
+    else if (first >= 0xf0 && first <= 0xf4) length = 4;
+    else break;
+    if (cursor + length > value.byteLength) break;
+    const second = value[cursor + 1];
+    if (length >= 2) {
+      if (second === undefined || (second & 0xc0) !== 0x80) break;
+      if (first === 0xe0 && second < 0xa0) break;
+      if (first === 0xed && second >= 0xa0) break;
+      if (first === 0xf0 && second < 0x90) break;
+      if (first === 0xf4 && second >= 0x90) break;
+      for (let i = 2; i < length; i += 1) {
+        if ((value[cursor + i]! & 0xc0) !== 0x80) return cursor;
+      }
+    }
+    cursor += length;
+  }
+  return cursor;
+}
+
 function scanTimedOut(started: number): boolean {
   return Date.now() - started >= READ_SCAN_MS;
 }
@@ -1717,20 +2118,32 @@ function gitignoreRulesFor(root: string, dirAbs: string): GitignoreRules {
   return rules;
 }
 
-export function listProjectDir(cwd: string, abs: string): { content: string; isError: boolean } {
+export function listProjectDir(cwd: string, abs: string): ToolTextResult {
   const root = freezeCwd(cwd);
   let dirReal = abs;
   try {
     dirReal = realpathSync(abs);
   } catch (err) {
-    return { content: `error: ${(err as Error).message}`, isError: true };
+    return logicalToolText(`error: ${(err as Error).message}`, {
+      maxBytes: READ_CAP_BYTES,
+      state: "failed",
+      isError: true,
+    });
   }
-  if (!underRoot(dirReal, root)) return { content: "error: path outside project", isError: true };
+  if (!underRoot(dirReal, root)) return logicalToolText("error: path outside project", {
+    maxBytes: READ_CAP_BYTES,
+    state: "failed",
+    isError: true,
+  });
   let ents;
   try {
     ents = readdirSync(dirReal, { withFileTypes: true });
   } catch (err) {
-    return { content: `error: ${(err as Error).message}`, isError: true };
+    return logicalToolText(`error: ${(err as Error).message}`, {
+      maxBytes: READ_CAP_BYTES,
+      state: "unreadable",
+      isError: true,
+    });
   }
   const names = sortUtf8(ents.map((e) => e.name));
   const gi = gitignoreRulesFor(root, dirReal);
@@ -1753,7 +2166,15 @@ export function listProjectDir(cwd: string, abs: string): { content: string; isE
   const relDir = (posixRel(root, dirReal) || ".").replace(/[\x00-\x1f\x7f]/g, " ");
   let body = rows.length > 0 ? rows.join("\n") : "(empty directory)";
   if (omitted > 0) body += `\n<!-- ${omitted} entries omitted -->`;
-  return { content: `[directory ${relDir}]\n${body}`, isError: false };
+  const continuation = omitted > 0 ? `List ${JSON.stringify(relDir)} with a narrower path or filter.` : null;
+  return logicalToolText(`[directory ${relDir}]\n${body}`, {
+    maxBytes: READ_CAP_BYTES,
+    state: "complete",
+    isError: false,
+    forceMarker: omitted > 0,
+    marker: continuation,
+    continuation,
+  });
 }
 
 function truncationMarker(nextOffset: number, nextLine?: number): string {
@@ -1766,15 +2187,27 @@ function truncationMarker(nextOffset: number, nextLine?: number): string {
 export function readTextView(
   abs: string,
   opts: { offset: number; startLine?: number; endLine?: number },
-): { content: string; isError: boolean } {
+): ToolTextResult {
+  const repro = `read_file(${JSON.stringify(abs)})`;
+  const fail = (content: string, state: CompletionState = "failed"): ToolTextResult => logicalToolText(content, {
+    maxBytes: READ_CAP_BYTES,
+    state,
+    isError: true,
+    repro,
+  });
   let fd: number | undefined;
   try {
     fd = openSync(abs, "r");
     const st = fstatSync(fd);
     const head = Buffer.alloc(Math.min(4096, st.size));
     if (head.length > 0) readSync(fd, head, 0, head.length, 0);
-    if (head.includes(0)) return { content: "error: binary file", isError: true };
-    if (st.size === 0) return { content: "", isError: false };
+    if (head.includes(0)) return fail("error: binary file");
+    if (st.size === 0) return logicalToolText("", {
+      maxBytes: READ_CAP_BYTES,
+      state: "complete",
+      isError: false,
+      repro,
+    });
 
     const started = Date.now();
     const lineMode = opts.startLine !== undefined || opts.endLine !== undefined;
@@ -1785,20 +2218,25 @@ export function readTextView(
     let until = st.size;
     if (lineMode) {
       const startOff = lineStartOffset(fd, st.size, startLine, started);
-      if (typeof startOff === "object") return { content: startOff.error, isError: true };
+      if (typeof startOff === "object") return fail(startOff.error, startOff.error.includes("timed out") ? "timeout" : "failed");
       from = startOff;
       viewStartLine = startLine;
       if (endLine !== undefined) {
         const endOff = lineStartOffset(fd, st.size, endLine + 1, started);
-        if (typeof endOff === "object") return { content: endOff.error, isError: true };
+        if (typeof endOff === "object") return fail(endOff.error, endOff.error.includes("timed out") ? "timeout" : "failed");
         until = endOff;
       }
     } else {
       const nls = countNewlinesInRange(fd, from, started);
-      if (typeof nls === "object") return { content: nls.error, isError: true };
+      if (typeof nls === "object") return fail(nls.error, nls.error.includes("timed out") ? "timeout" : "failed");
       viewStartLine = nls + 1;
     }
-    if (from >= st.size || from >= until) return { content: "", isError: false };
+    if (from >= st.size || from >= until) return logicalToolText("", {
+      maxBytes: READ_CAP_BYTES,
+      state: "complete",
+      isError: false,
+      repro,
+    });
     const want = Math.min(READ_CAP_BYTES, Math.max(0, until - from));
     const slice = Buffer.alloc(want);
     if (want > 0) readSync(fd, slice, 0, want, from);
@@ -1814,15 +2252,51 @@ export function readTextView(
         atLineBoundary = true;
       }
     }
-    const numbered = formatNumberedText(view.toString("utf8"), viewStartLine);
+    const safe = new BoundedTextAccumulator({ maxBytes: READ_CAP_BYTES, direction: "head", marker: "" });
+    safe.push(view);
+    const safeText = safe.finish();
+    // The provider-visible continuation is a byte offset into the source,
+    // not the end of the raw read buffer.  A cap can split a 2–4 byte code
+    // point; advancing by `want` would silently skip its remaining bytes.
+    const completeBytes = completeUtf8Boundary(view);
+    const sourceBoundary = Math.min(safeText.retainedBytes, completeBytes);
+    nextOffset = from + sourceBoundary;
+    const numbered = formatNumberedText(safeText.text, viewStartLine);
     if (nextOffset < until) {
-      const nextLine = atLineBoundary ? viewStartLine + newlineCount(view) : undefined;
+      const nextLine = atLineBoundary && sourceBoundary === view.length
+        ? viewStartLine + newlineCount(view)
+        : undefined;
       const marker = truncationMarker(nextOffset, nextLine);
-      return { content: numbered ? `${numbered}\n${marker}` : marker, isError: false };
+      return logicalToolText(numbered, {
+        maxBytes: READ_CAP_BYTES,
+        state: "complete",
+        isError: false,
+        forceMarker: true,
+        marker,
+        continuation: marker,
+        repro,
+      });
     }
-    return { content: numbered, isError: false };
+    if (safeText.truncated) {
+      const marker = truncationMarker(nextOffset);
+      return logicalToolText(numbered, {
+        maxBytes: READ_CAP_BYTES,
+        state: "unreadable",
+        isError: true,
+        forceMarker: true,
+        marker,
+        continuation: marker,
+        repro,
+      });
+    }
+    return logicalToolText(numbered, {
+      maxBytes: READ_CAP_BYTES,
+      state: "complete",
+      isError: false,
+      repro,
+    });
   } catch (err) {
-    return { content: `error: ${(err as Error).message}`, isError: true };
+    return fail(`error: ${(err as Error).message}`);
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
@@ -1858,25 +2332,52 @@ export function nestedAgentsPointer(cwd: string, fileAbs: string): string | null
   return null;
 }
 
-export function readFileResult(abs: string, offset: number): { content: string; isError: boolean } {
+export function readFileResult(abs: string, offset: number): ToolTextResult {
+  const repro = `read_file(${JSON.stringify(abs)})`;
+  const fail = (content: string): ToolTextResult => logicalToolText(content, {
+    maxBytes: READ_CAP_BYTES,
+    state: "failed",
+    isError: true,
+    repro,
+  });
   let fd: number | undefined;
   try {
     fd = openSync(abs, "r");
     const st = fstatSync(fd);
     const head = Buffer.alloc(Math.min(4096, st.size));
     if (head.length > 0) readSync(fd, head, 0, head.length, 0);
-    if (head.includes(0)) return { content: "error: binary file", isError: true };
-    if (offset >= st.size) return { content: "", isError: false };
+    if (head.includes(0)) return fail("error: binary file");
+    if (offset >= st.size) return logicalToolText("", {
+      maxBytes: READ_CAP_BYTES,
+      state: "complete",
+      isError: false,
+      repro,
+    });
     const want = Math.min(READ_CAP_BYTES, Math.max(0, st.size - offset));
     const slice = Buffer.alloc(want);
     if (want > 0) readSync(fd, slice, 0, want, offset);
-    let text = slice.toString("utf8");
-    if (offset + want < st.size) {
-      text += `\n[truncated at ${READ_CAP_BYTES} bytes — read_file offset ${offset + want}]`;
-    }
-    return { content: text, isError: false };
+    const safe = new BoundedTextAccumulator({ maxBytes: READ_CAP_BYTES, direction: "head", marker: "" });
+    safe.push(slice);
+    const text = safe.finish();
+    const completeBytes = completeUtf8Boundary(slice);
+    const nextOffset = offset + Math.min(text.retainedBytes, completeBytes);
+    const marker = nextOffset < st.size
+      ? `[truncated at ${READ_CAP_BYTES} bytes — read_file offset ${nextOffset}]`
+      : text.truncated
+        ? `[invalid UTF-8 omitted — continue with read_file offset ${nextOffset}]`
+        : null;
+    const result = logicalToolText(text.text, {
+      maxBytes: READ_CAP_BYTES,
+      state: nextOffset >= st.size && text.truncated ? "unreadable" : "complete",
+      isError: nextOffset >= st.size && text.truncated,
+      forceMarker: marker !== null,
+      marker,
+      continuation: marker,
+      repro,
+    });
+    return result;
   } catch (err) {
-    return { content: `error: ${(err as Error).message}`, isError: true };
+    return fail(`error: ${(err as Error).message}`);
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
@@ -1886,37 +2387,62 @@ export function readProjectFile(
   cwd: string,
   input: { path?: string; offset?: unknown; start_line?: unknown; end_line?: unknown },
   allow?: ReadonlySet<string>,
-): { content: string; isError: boolean } {
+): ToolTextResult {
+  const fail = (content: string): ToolTextResult => logicalToolText(content, {
+    maxBytes: READ_CAP_BYTES,
+    state: "failed",
+    isError: true,
+  });
   const off = parseOffset(input.offset);
-  if (typeof off !== "number") return { content: off.error, isError: true };
+  if (typeof off !== "number") return fail(off.error);
   const startLine = parseLineBound(input.start_line, "start_line");
-  if (typeof startLine === "object") return { content: startLine.error, isError: true };
+  if (typeof startLine === "object") return fail(startLine.error);
   const endLine = parseLineBound(input.end_line, "end_line");
-  if (typeof endLine === "object") return { content: endLine.error, isError: true };
+  if (typeof endLine === "object") return fail(endLine.error);
   if (startLine !== undefined && endLine !== undefined && endLine < startLine) {
-    return { content: "error: end_line must be >= start_line", isError: true };
+    return fail("error: end_line must be >= start_line");
   }
   if (off > 0 && (startLine !== undefined || endLine !== undefined)) {
-    return { content: "error: use start_line or offset, not both", isError: true };
+    return fail("error: use start_line or offset, not both");
   }
   const confined = confinePath(cwd, input.path ?? "", { allow });
-  if (!confined.ok) return { content: confined.error, isError: true };
+  if (!confined.ok) return fail(confined.error);
   let st;
   try {
     st = statSync(confined.abs);
   } catch (err) {
-    return { content: `error: ${(err as Error).message}`, isError: true };
+    return fail(`error: ${(err as Error).message}`);
   }
   if (st.isDirectory()) {
     if (off > 0 || startLine !== undefined || endLine !== undefined) {
-      return { content: "error: path is a directory", isError: true };
+      return fail("error: path is a directory");
     }
     return listProjectDir(cwd, confined.abs);
   }
   const got = readTextView(confined.abs, { offset: off, startLine, endLine });
   if (got.isError) return got;
   const pointer = nestedAgentsPointer(cwd, confined.abs);
-  if (pointer) return { content: `${pointer}\n${got.content}`, isError: false };
+  if (pointer) {
+    const pointerContent = `${pointer}\n${got.content}`;
+    const pointerContinuation = typeof got.continuation === "string"
+      ? got.continuation
+      : `Continue with read_file(${JSON.stringify(confined.abs)}).`;
+    const withPointer = logicalToolText(pointerContent, {
+      maxBytes: READ_CAP_BYTES,
+      state: got.state,
+      isError: got.isError,
+      forceMarker: Buffer.byteLength(pointerContent, "utf8") > READ_CAP_BYTES,
+      marker: pointerContinuation,
+      continuation: typeof got.continuation === "string" ? got.continuation : null,
+      repro: got.repro ?? null,
+    });
+    return Object.freeze({
+      ...withPointer,
+      truncated: withPointer.truncated || got.truncated,
+      continuation: withPointer.continuation ?? got.continuation ?? null,
+      repro: withPointer.repro ?? got.repro ?? null,
+    });
+  }
   return got;
 }
 
@@ -2078,43 +2604,189 @@ export function tracesDirFor(events: string, id: string): string | null {
   return join(events, `${id}.traces`);
 }
 
-export function retainTraceFiles(dir: string, cap: number): string[] {
-  if (!existsSync(dir)) return [];
-  let names: string[];
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return [];
-  }
-  const turns = names
-    .map((n) => {
-      const m = n.match(/^turn-(\d+)\.json$/);
-      return m ? { n, i: Number(m[1]) } : null;
-    })
-    .filter((x): x is { n: string; i: number } => x !== null)
-    .sort((a, b) => a.i - b.i);
-  while (turns.length > cap) {
-    const oldest = turns.shift()!;
-    try {
-      rmSync(join(dir, oldest.n), { force: true });
-    } catch {
-      /* ignore */
-    }
-  }
-  return turns.map((t) => t.n);
-}
-
 const eventsDir = process.env.TERMINA_EVENTS_DIR ?? "";
 const rawTerminalId = process.env.TERMINA_TERMINAL_ID ?? "";
 const terminalId = isValidTerminalId(rawTerminalId) ? rawTerminalId : "";
 const sessionId = process.env.TERMINA_CORE_SESSION_ID?.trim() || terminalId;
+/** Stable for one logical session boundary; rotated by /clear/quarantine. */
+let cacheSeed = cacheSessionSeed(sessionId);
 const bridgeId = `core-${randomUUID()}`;
+const traceRunId = `run-${randomUUID()}`;
 let seq = 0;
 const canonicalCwd = freezeCwd(process.cwd());
 let allowPaths = new Set<string>();
 const tracesDir = tracesDirFor(eventsDir, terminalId) ?? "";
-let traceTurn = 0;
 let streamPrepared = false;
+
+let traceRuntime: TraceRuntime | null = null;
+let traceRuntimeStartupError: string | null = null;
+if (tracesDir) {
+  try {
+    traceRuntime = createTraceRuntime({
+      directory: tracesDir,
+      namespace: traceRunId,
+      retentionCap: DEFAULT_TRACE_RETENTION_CAP,
+    });
+    void traceRuntime.ready.then((startup) => {
+      traceRuntimeStartupError = startup.error;
+    }).catch((error: unknown) => {
+      traceRuntimeStartupError = error instanceof Error ? error.message : String(error);
+    });
+  } catch (error) {
+    traceRuntimeStartupError = error instanceof Error ? error.message : String(error);
+  }
+}
+
+type MainCacheIdentity = NonNullable<ReturnType<typeof cacheIdentityFor>>;
+
+/** Route origin used for documented capability gates. Custom relay origins
+ * remain unknown because a model name alone cannot establish their fields. */
+function cacheRouteForProvider(provider: ProviderId): string {
+  const envName: Partial<Record<ProviderId, string>> = {
+    anthropic: "ANTHROPIC_BASE_URL",
+    openai: "OPENAI_BASE_URL",
+    xai: "XAI_BASE_URL",
+    openrouter: "OPENROUTER_BASE_URL",
+  };
+  const env = envName[provider];
+  if (env) {
+    const configured = process.env[env]?.trim();
+    if (configured) return configured;
+  }
+  if (provider === "anthropic") return "https://api.anthropic.com";
+  if (provider === "openai") return "https://api.openai.com/v1";
+  if (provider === "xai") return "https://api.x.ai/v1";
+  if (provider === "google") return "https://generativelanguage.googleapis.com/v1beta/openai";
+  return `${provider}`;
+}
+
+/** One bounded, route/model/feature-scoped cache capability cache for this
+ * process.  Documentation-backed observations are seeded lazily; relay and
+ * compatibility routes stay explicitly unknown and therefore disabled. */
+const cacheCapabilities = createCapabilityCache();
+
+function cacheCapabilityScope(
+  provider: ProviderId,
+  model: string,
+  feature: string,
+): CacheCapabilityScope {
+  return {
+    provider,
+    protocol: providerProtocol(provider, model),
+    route: cacheRouteDomain(cacheRouteForProvider(provider)),
+    model,
+    feature,
+  };
+}
+
+function observeCacheCapability(
+  provider: ProviderId,
+  model: string,
+  feature: string,
+): CapabilityCacheRecord {
+  const scope = cacheCapabilityScope(provider, model, feature);
+  const now = Date.now();
+  const cached = queryCapability(cacheCapabilities, scope, now);
+  if (cached.reason !== "not-observed" && cached.reason !== "expired") return cached;
+  const documented = documentedCacheCapability(scope);
+  const recorded = recordCapability(cacheCapabilities, {
+    scope,
+    supported: documented.supported,
+    status: documented.status,
+    source: documented.source,
+    reason: documented.reason,
+    provenance: documented.provenance,
+    observedAtMs: now,
+    // No provider-independent expiry is assumed.  A live rejection can be
+    // invalidated by a process restart or a future route-specific probe.
+    expiresAtMs: null,
+  });
+  return recorded ?? cached;
+}
+
+function cacheCapabilitySupported(provider: ProviderId, model: string, feature: string): boolean {
+  return observeCacheCapability(provider, model, feature).supported === true;
+}
+
+function recordRejectedCacheCapability(
+  provider: ProviderId,
+  model: string,
+  feature: string,
+  reason: string,
+): void {
+  const scope = cacheCapabilityScope(provider, model, feature);
+  recordCapability(cacheCapabilities, {
+    scope,
+    supported: false,
+    status: "rejected",
+    source: "probe",
+    reason: reason.slice(0, 512),
+    provenance: null,
+    observedAtMs: Date.now(),
+    // Retention/expiry is route-specific and unknown; do not invent a TTL.
+    expiresAtMs: null,
+  });
+}
+
+function recordRejectedCacheFields(
+  provider: ProviderId,
+  model: string,
+  body: Record<string, unknown>,
+  detail: string,
+): void {
+  const lower = detail.toLowerCase();
+  const serialized = JSON.stringify(body);
+  const candidates: Array<{ feature: string; present: boolean; words: string[] }> = [
+    {
+      feature: CACHE_CAPABILITY_FEATURE.promptCacheOptions,
+      present: body.prompt_cache_options !== undefined,
+      words: ["prompt_cache_options", "cache options"],
+    },
+    {
+      feature: CACHE_CAPABILITY_FEATURE.promptCacheBreakpoint,
+      present: serialized.includes("prompt_cache_breakpoint"),
+      words: ["prompt_cache_breakpoint", "cache breakpoint"],
+    },
+    {
+      feature: CACHE_CAPABILITY_FEATURE.promptCacheKey,
+      present: typeof body.prompt_cache_key === "string",
+      words: ["prompt_cache_key", "cache key"],
+    },
+  ];
+  for (const candidate of candidates) {
+    if (candidate.present && candidate.words.some((word) => lower.includes(word))) {
+      recordRejectedCacheCapability(provider, model, candidate.feature, detail);
+    }
+  }
+}
+
+function cacheIdentityForRole(role: "main" | "summary", provider: ProviderId, model: string): MainCacheIdentity | null {
+  const protocol = providerProtocol(provider, model);
+  const identity = cacheIdentityFor({
+    sessionSeed: cacheSeed,
+    role,
+    provider,
+    protocol,
+    route: cacheRouteForProvider(provider),
+  });
+  if (!identity) return null;
+  // xAI documents different identities for Responses and Chat. A relay must
+  // not receive the Chat header (or a diagnostic hash) merely because the
+  // selected model happens to be a Grok model.
+  if (
+    provider === "xai" &&
+    !cacheCapabilitySupported(provider, model, CACHE_CAPABILITY_FEATURE.promptCacheKey) &&
+    !cacheCapabilitySupported(provider, model, CACHE_CAPABILITY_FEATURE.xaiConversationHeader)
+  ) {
+    return null;
+  }
+  return identity;
+}
+
+function rotateCacheSession(): void {
+  cacheSeed = cacheSessionSeed(undefined);
+  resetCacheContinuity();
+}
 
 function logEvent(body: Record<string, unknown>): void {
   if (!eventsDir || !terminalId) return;
@@ -2127,106 +2799,370 @@ function logEvent(body: Record<string, unknown>): void {
   }
 }
 
-function resetTraces(): void {
-  if (!tracesDir) return;
-  try {
-    rmSync(tracesDir, { recursive: true, force: true });
-    mkdirSync(tracesDir, { recursive: true, mode: 0o700 });
-  } catch {
-    /* traces are best-effort */
-  }
-}
-
-function pruneTraces(): void {
-  if (!tracesDir) return;
-  retainTraceFiles(tracesDir, TRACE_CAP);
-}
-
-export interface TraceCacheDiagnostics {
-  cacheKeyHash: string | null;
-  modelSettingsHash: string;
-  toolsHash: string;
-  stablePrefixHash: string;
-  messagePrefixHash: string;
-  workingSetHash: string | null;
-  workingSetChanged: boolean | null;
+export interface TraceCacheDiagnostics extends CacheRequestDiagnostics {
+  /** Hash and exact byte count of the volatile overlay, if one was sent. */
+  overlayHash: string | null;
+  overlayBytes: number | null;
+  /** Bounded host-reader metadata retained without exposing host content. */
+  hostContext: HostContextTrace | null;
+  retryPromptIdentical: boolean | null;
   codexTurnStateUsed: boolean;
+  /** Exact UTF-8 serialization metadata for the provider tool schema. */
+  serializedToolsHash: string | null;
+  serializedToolsBytes: number | null;
+  /** Full local miss evidence; null fields mean the provider did not expose enough data. */
+  missAttribution: NonNullable<TraceCacheInput["missAttribution"]>;
 }
 
-export function traceRecord(fields: {
-  role: "main" | "summary";
-  provider: ProviderId;
-  protocol: string;
-  model: string;
-  status: string;
-  storageSeqRange: readonly [number, number];
-  toolNames: string[];
-  usage: { input: number; cacheRead: number; cacheWrite: number; output: number } | null;
-  usd: number | null;
-  ttftMs: number | null;
-  turnMs: number;
-  revisions: number;
-  revisionKinds: readonly RevisionKind[];
-  wasteTokens: number;
-  wasteCause: string | null;
-  systemHash: string;
-  cache: TraceCacheDiagnostics | null;
-}): {
-  role: "main" | "summary";
-  provider: ProviderId;
-  protocol: string;
-  model: string;
-  status: string;
-  storageSeqRange: readonly [number, number];
-  toolNames: string[];
-  usage: { input: number; cacheRead: number; cacheWrite: number; output: number } | null;
-  usd: number | null;
-  ttftMs: number | null;
-  turnMs: number;
-  revisions: number;
-  revisionKinds: RevisionKind[];
-  wasteTokens: number;
-  wasteCause: string | null;
-  systemHash: string;
-  cache: TraceCacheDiagnostics | null;
-} {
+/** Decide whether a trace write actually persisted and whether a retry is
+ * meaningful.  A failed write must not be mistaken for a durable attempt. */
+export function traceWriteDisposition(
+  outcome: TraceWriteOutcome,
+): { persisted: boolean; retry: boolean; terminal: boolean } {
+  const persisted = outcome.ok || outcome.persisted;
+  const retryable = outcome.ok ? false : outcome.retryable;
   return {
-    role: fields.role,
-    provider: fields.provider,
-    protocol: fields.protocol,
-    model: fields.model,
-    status: fields.status,
-    storageSeqRange: fields.storageSeqRange,
-    toolNames: fields.toolNames.slice(),
-    usage: fields.usage
-      ? {
-          input: fields.usage.input,
-          cacheRead: fields.usage.cacheRead,
-          cacheWrite: fields.usage.cacheWrite,
-          output: fields.usage.output,
-        }
-      : null,
-    usd: fields.usd,
-    ttftMs: fields.ttftMs,
-    turnMs: fields.turnMs,
-    revisions: fields.revisions,
-    revisionKinds: fields.revisionKinds.slice(),
-    wasteTokens: fields.wasteTokens,
-    wasteCause: fields.wasteCause,
-    systemHash: fields.systemHash,
-    cache: fields.cache ? { ...fields.cache } : null,
+    persisted,
+    retry: !persisted && retryable,
+    terminal: persisted || !retryable,
   };
 }
 
-function writeTrace(payload: ReturnType<typeof traceRecord>): void {
-  if (!tracesDir) return;
+/** Return a storage range only when this operation actually appended records. */
+export function storageSeqRange(
+  seqBefore: number,
+  seqAfter: number,
+): readonly [number, number] | null {
+  if (!Number.isSafeInteger(seqBefore) || !Number.isSafeInteger(seqAfter)) return null;
+  if (seqAfter < seqBefore + 1) return null;
+  return [seqBefore + 1, seqAfter];
+}
+
+/** Intermediate provider records must not become the task's final attempt. */
+export function isTerminalTraceAttemptStatus(status: string): boolean {
+  return status !== "retrying" && status !== "fallback" && status !== "overflow";
+}
+
+type TraceTaskState = {
+  runId: string;
+  taskId: string;
+  taskClass: string | null;
+  criteriaHash: string | null;
+  /** Immutable catalog view captured for this logical run. */
+  rateSnapshots: ReadonlyMap<string, RateSnapshot>;
+  attemptIds: string[];
+  summaryAttemptIds: string[];
+  lastMainAttemptId: string | null;
+  finalAttemptId: string | null;
+  settled: boolean;
+};
+
+type TraceAttemptState = {
+  task: TraceTaskState;
+  attemptId: string;
+  role: "main" | "summary";
+  provider: ProviderId;
+  protocol: string;
+  model: string;
+  parentAttemptId: string | null;
+  retryOfAttemptId: string | null;
+  retryCount: number;
+  fallbackReason: string | null;
+  started: number;
+  ended: number | null;
+  written: boolean;
+  traceWriteComplete: boolean;
+  traceWriteRetries: number;
+};
+
+let activeTraceTask: TraceTaskState | null = null;
+let inFlightTraceAttempt: TraceAttemptState | null = null;
+
+function traceMetadataText(value: string | undefined): string | null {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed || /[\u0000-\u001f\u007f-\u009f]/.test(trimmed)) return null;
+  return trimmed.slice(0, 256);
+}
+
+function beginTraceTask(): TraceTaskState {
+  const task: TraceTaskState = {
+    runId: traceRunId,
+    taskId: `task-${randomUUID()}`,
+    taskClass: traceMetadataText(process.env.TERMINA_CORE_TASK_CLASS),
+    criteriaHash: traceMetadataText(process.env.TERMINA_CORE_SUCCESS_CRITERIA_HASH),
+    rateSnapshots: new Map(rateSnapshotMap),
+    attemptIds: [],
+    summaryAttemptIds: [],
+    lastMainAttemptId: null,
+    finalAttemptId: null,
+    settled: false,
+  };
+  activeTraceTask = task;
+  return task;
+}
+
+function beginTraceAttempt(
+  role: "main" | "summary",
+  opts: {
+    parentAttemptId?: string | null;
+    retryOfAttemptId?: string | null;
+    fallbackReason?: string | null;
+    retryCount?: number;
+  } = {},
+): TraceAttemptState | null {
+  const task = activeTraceTask;
+  if (!task) return null;
+  const parentAttemptId = opts.parentAttemptId === undefined
+    ? role === "summary" ? task.lastMainAttemptId : task.lastMainAttemptId
+    : opts.parentAttemptId;
+  const retryOfAttemptId = opts.retryOfAttemptId ?? null;
+  const attempt: TraceAttemptState = {
+    task,
+    attemptId: `attempt-${randomUUID()}`,
+    role,
+    provider: role === "summary" ? summaryRoute.provider : route.provider,
+    protocol: role === "summary"
+      ? providerProtocol(summaryRoute.provider, summaryRoute.model)
+      : providerProtocol(route.provider, route.model),
+    model: role === "summary" ? summaryRoute.model : route.model,
+    parentAttemptId: parentAttemptId ?? null,
+    retryOfAttemptId,
+    retryCount: Number.isSafeInteger(opts.retryCount) && (opts.retryCount as number) >= 0 ? opts.retryCount as number : retryOfAttemptId ? 1 : 0,
+    fallbackReason: opts.fallbackReason ?? null,
+    started: Date.now(),
+    ended: null,
+    written: false,
+    traceWriteComplete: false,
+    traceWriteRetries: 0,
+  };
+  task.attemptIds.push(attempt.attemptId);
+  if (role === "summary") task.summaryAttemptIds.push(attempt.attemptId);
+  else task.lastMainAttemptId = attempt.attemptId;
+  inFlightTraceAttempt = attempt;
+  return attempt;
+}
+
+function traceFailure(outcome: TraceWriteOutcome): void {
+  if (outcome.ok) return;
+  logEvent({
+    t: "trace_write_failure",
+    kind: outcome.kind,
+    persisted: outcome.persisted,
+    path: outcome.path,
+    traceTurn: outcome.traceTurn,
+    error: outcome.error,
+    omittedRecords: outcome.omittedRecords,
+    retentionFailures: outcome.retentionFailures,
+  });
+}
+
+/** Close the async trace writer on the bounded print-and-exit path. */
+async function closeTraceRuntime(): Promise<boolean> {
+  const runtime = traceRuntime;
+  traceRuntime = null;
+  if (!runtime) return true;
   try {
-    mkdirSync(tracesDir, { recursive: true, mode: 0o700 });
-    const n = ++traceTurn;
-    writeFileSync(join(tracesDir, `turn-${n}.json`), JSON.stringify(payload), { mode: 0o600 });
-    pruneTraces();
-  } catch {
-    /* traces are best-effort */
+    const outcome = await runtime.close();
+    if (!outcome.ok) {
+      logEvent({
+        t: "trace_manifest_failure",
+        kind: outcome.kind,
+        path: outcome.path,
+        error: outcome.error,
+      });
+    }
+    return outcome.ok;
+  } catch (error) {
+    logEvent({
+      t: "trace_manifest_failure",
+      kind: "manifest-write-failure",
+      path: tracesDir ? join(tracesDir, "trace-manifest.json") : null,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+}
+
+function traceCachePolicyInput(
+  cache: TraceCacheDiagnostics,
+  role: "main" | "summary",
+  rejected: boolean,
+  effective: boolean,
+): TraceCacheInput["requested"] {
+  const policy = cache.policy;
+  const namespace = `${policy.provider}/${policy.protocol}/${role}`;
+  return {
+    mode: effective ? policy.effectiveMode : policy.requestedMode,
+    ttlMs: effective ? policy.effectiveTtlMs : policy.requestedTtlMs,
+    namespace,
+    markerCount: cache.markerCount,
+    markerPositions: cache.markerPositions,
+    // A rejected request is not the effective policy.  Leave the effective
+    // rejection nullable rather than labeling the stripped retry rejected.
+    rejected: effective ? null : rejected ? true : null,
+    fallbackReason: policy.fallbackReason,
+  };
+}
+
+function traceCacheInput(
+  cache: TraceCacheDiagnostics | null,
+  attempt: TraceAttemptState,
+): TraceCacheInput | null {
+  if (!cache) return null;
+  const rejected = Boolean(cache.policy.fallbackReason);
+  return {
+    namespace: `${cache.policy.provider}/${cache.policy.protocol}/${attempt.role}`,
+    requested: traceCachePolicyInput(cache, attempt.role, rejected, false),
+    effective: traceCachePolicyInput(cache, attempt.role, rejected, true),
+    markerCount: cache.markerCount,
+    markerPositions: cache.markerPositions,
+    rejected,
+    fallbackReason: cache.policy.fallbackReason,
+    cacheKeyHash: cache.cacheKeyHash,
+    modelSettingsHash: cache.modelSettingsHash,
+    toolsHash: cache.toolsHash,
+    stablePrefixHash: cache.stablePrefixHash,
+    reusablePrefixHash: cache.reusablePrefixHash,
+    messagePrefixHash: cache.messagePrefixHash,
+    workingSetHash: cache.workingSetHash,
+    workingSetChanged: cache.workingSetChanged,
+    retryPromptIdentical: cache.retryPromptIdentical,
+    codexTurnStateUsed: cache.codexTurnStateUsed,
+    serializedToolsHash: cache.serializedToolsHash,
+    serializedToolsBytes: cache.serializedToolsBytes,
+    missAttribution: cache.missAttribution,
+  };
+}
+
+async function writeTraceAttempt(
+  attempt: TraceAttemptState | null,
+  fields: {
+    status: string;
+    storageSeqRange: readonly [number, number] | null;
+    toolNames: readonly string[];
+    usage: Usage | null;
+    usd: number | null;
+    cost?: TraceRecordCostInput | null;
+    ttftMs: number | null;
+    turnMs: number | null;
+    revisions: number;
+    revisionKinds: readonly RevisionKind[];
+    wasteTokens: number | null;
+    wasteCause: string | null;
+    cache: TraceCacheDiagnostics | null;
+    toolOutcomes?: readonly unknown[];
+    reclaimEvidence?: unknown;
+  },
+): Promise<void> {
+  if (!attempt || attempt.traceWriteComplete) return;
+  const endedAtMs = attempt.ended ?? Date.now();
+  attempt.ended = endedAtMs;
+  if (!traceRuntime) {
+    attempt.traceWriteComplete = true;
+    if (inFlightTraceAttempt === attempt) inFlightTraceAttempt = null;
+    return;
+  }
+  const input: TraceAttemptInput = {
+    runId: attempt.task.runId,
+    taskId: attempt.task.taskId,
+    attemptId: attempt.attemptId,
+    parentAttemptId: attempt.parentAttemptId,
+    retryOfAttemptId: attempt.retryOfAttemptId,
+    role: attempt.role,
+    provider: attempt.provider,
+    protocol: attempt.protocol,
+    route: `${attempt.provider}/${attempt.protocol}`,
+    model: attempt.model,
+    taskClass: attempt.task.taskClass,
+    requestedEffort: attempt.role === "summary" ? "off" : effortWanted,
+    effectiveEffort: attempt.role === "summary"
+      ? effectiveEffortFor(summaryRoute.provider, summaryRoute.model, "off")
+      : effectiveEffortFor(route.provider, route.model, effortWanted),
+    status: fields.status,
+    retryCount: attempt.retryCount,
+    fallbackReason: attempt.fallbackReason,
+    storageSeqRange: fields.storageSeqRange,
+    toolNames: fields.toolNames,
+    startedAtMs: attempt.started,
+    endedAtMs,
+    ttftMs: fields.ttftMs,
+    turnMs: fields.turnMs,
+    usage: fields.usage,
+    cost: fields.cost ?? { usd: fields.usd },
+    cache: traceCacheInput(fields.cache, attempt),
+    toolOutcomes: fields.toolOutcomes,
+    reclaimEvidence: fields.reclaimEvidence,
+    revisions: { count: fields.revisions, kinds: fields.revisionKinds },
+    wasteTokens: fields.wasteTokens,
+    wasteCause: fields.wasteCause,
+  };
+  try {
+    let outcome = await traceRuntime.writeAttempt(input);
+    let disposition = traceWriteDisposition(outcome);
+    if (disposition.retry && attempt.traceWriteRetries < 1) {
+      attempt.traceWriteRetries += 1;
+      const failure = outcome.ok ? null : outcome;
+      logEvent({
+        t: "trace_write_retry",
+        kind: outcome.kind,
+        retryable: failure?.retryable ?? false,
+        error: failure?.error ?? null,
+        attemptId: attempt.attemptId,
+      });
+      outcome = await traceRuntime.writeAttempt(input);
+      disposition = traceWriteDisposition(outcome);
+    }
+    traceFailure(outcome);
+    if (disposition.persisted) {
+      attempt.written = true;
+      if (attempt.role === "main" && isTerminalTraceAttemptStatus(fields.status)) {
+        attempt.task.finalAttemptId = attempt.attemptId;
+      }
+    } else if (!disposition.terminal) {
+      const failure = outcome.ok ? null : outcome;
+      logEvent({
+        t: "trace_write_unpersisted",
+        kind: failure?.kind ?? outcome.kind,
+        retryable: failure?.retryable ?? false,
+        persisted: outcome.persisted,
+        error: failure?.error ?? null,
+        attemptId: attempt.attemptId,
+      });
+    }
+    attempt.traceWriteComplete = true;
+  } catch (error) {
+    attempt.traceWriteComplete = true;
+    logEvent({ t: "trace_write_failure", kind: "write-failure", persisted: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    if (inFlightTraceAttempt === attempt) inFlightTraceAttempt = null;
+  }
+}
+
+async function settleTraceTask(status: string): Promise<void> {
+  const task = activeTraceTask;
+  if (!task || task.settled) return;
+  task.settled = true;
+  if (!traceRuntime) {
+    activeTraceTask = null;
+    inFlightTraceAttempt = null;
+    return;
+  }
+  try {
+    traceFailure(await traceRuntime.writeTaskSettled({
+      runId: task.runId,
+      taskId: task.taskId,
+      taskClass: task.taskClass,
+      attemptCount: task.attemptIds.length,
+      finalAttemptId: task.finalAttemptId,
+      attemptIds: task.attemptIds,
+      summaryAttemptIds: task.summaryAttemptIds,
+      outcome: { status, correctness: null, criteriaHash: task.criteriaHash },
+    }));
+  } catch (error) {
+    logEvent({ t: "trace_write_failure", kind: "write-failure", persisted: false, error: error instanceof Error ? error.message : String(error) });
+  } finally {
+    activeTraceTask = null;
+    inFlightTraceAttempt = null;
   }
 }
 
@@ -2234,30 +3170,111 @@ export function hashSystem(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
 }
 
-const diagnosticHashSalt = randomUUID();
-const DIAGNOSTIC_INLINE_STRING_CHARS = 16_384;
+type CacheMarkerDetails = { count: number; positions: number[]; ttlMs: number | null };
 
-function hashDiagnosticText(text: string): string {
-  return createHash("sha256").update(diagnosticHashSalt, "utf8").update("\0").update(text, "utf8").digest("hex").slice(0, 16);
+function cacheMarkerDetails(value: unknown): CacheMarkerDetails {
+  const details: CacheMarkerDetails = { count: 0, positions: [], ttlMs: null };
+  const walk = (item: unknown): void => {
+    if (Array.isArray(item)) {
+      for (const child of item) walk(child);
+      return;
+    }
+    if (!item || typeof item !== "object") return;
+    for (const [key, child] of Object.entries(item as Record<string, unknown>)) {
+      if (key === "cache_control" || key === "prompt_cache_breakpoint") {
+        details.count++;
+        if (details.positions.length < 64) details.positions.push(details.count - 1);
+        if (
+          child &&
+          typeof child === "object" &&
+          !Array.isArray(child) &&
+          (child as Record<string, unknown>).ttl === "1h"
+        ) {
+          details.ttlMs = 60 * 60 * 1000;
+        }
+      }
+      walk(child);
+    }
+  };
+  walk(value);
+  return details;
 }
 
-function hashDiagnostic(value: unknown): string {
-  if (typeof value === "string") return hashDiagnosticText(value);
-  const text = JSON.stringify(value, (_key, item) =>
-    typeof item === "string" && item.length > DIAGNOSTIC_INLINE_STRING_CHARS
-      ? { chars: item.length, hash: hashDiagnosticText(item) }
-      : item,
-  ) ?? "undefined";
-  return hashDiagnosticText(text);
+function cachePolicyFromBody(
+  body: Record<string, unknown>,
+  identity: { provider: ProviderId; protocol: string; model: string },
+  prior: CachePolicyDiagnostics | null,
+  fallbackReason: string | null,
+): { policy: CachePolicyDiagnostics; markers: CacheMarkerDetails } {
+  const markers = cacheMarkerDetails(body);
+  const options = body.prompt_cache_options;
+  const hasExplicitOptions = Boolean(options && typeof options === "object" && !Array.isArray(options));
+  const hasCacheKey = typeof body.prompt_cache_key === "string" && body.prompt_cache_key.length > 0;
+  const hasSessionId = typeof body.session_id === "string" && body.session_id.length > 0;
+  const requestedMode = hasExplicitOptions
+    ? "explicit"
+    : hasCacheKey || hasSessionId
+      ? "implicit"
+        : markers.count > 0
+          ? identity.protocol === "anthropic-messages"
+            ? "markers"
+            : "explicit"
+          : "none";
+  // A rejected explicit field may be removed while a supported implicit key
+  // remains in the same body. Derive the effective policy from that actual
+  // body instead of collapsing every fallback to "none".
+  const effectiveMode = requestedMode;
+  let requestedTtlMs: number | null = null;
+  if (hasExplicitOptions && (options as Record<string, unknown>).ttl === "30m") requestedTtlMs = 30 * 60 * 1000;
+  else if (markers.ttlMs !== null) requestedTtlMs = markers.ttlMs;
+  const effectiveTtlMs = fallbackReason ? null : requestedTtlMs;
+  const retentionKnown =
+    identity.provider === "anthropic" && markers.count > 0
+      ? true
+      : identity.provider === "openai" && hasExplicitOptions
+        ? true
+        : requestedMode === "none"
+          ? true
+          : null;
+  return {
+    markers,
+    policy: {
+      provider: identity.provider,
+      protocol: identity.protocol,
+      model: identity.model,
+      requestedMode: prior?.requestedMode ?? requestedMode,
+      effectiveMode,
+      requestedTtlMs: prior?.requestedTtlMs ?? requestedTtlMs,
+      effectiveTtlMs,
+      retentionKnown,
+      fallbackReason,
+    },
+  };
 }
 
 function cacheDiagnosticsForRequest(
   body: Record<string, unknown>,
   identity: { provider: ProviderId; protocol: string; model: string },
-  cacheKey: string | null,
+  cacheIdentity: MainCacheIdentity | null,
+  overlay: RequestOverlay | null,
+  hostContext: HostContextTrace | null,
+  fallbackReason: string | null = null,
+  priorPolicy: CachePolicyDiagnostics | null = null,
+  retryPromptIdentical: boolean | null = null,
 ): TraceCacheDiagnostics {
   const settings = { ...body };
   const tools = settings.tools ?? [];
+  let serializedToolsHash: string | null = null;
+  let serializedToolsBytes: number | null = null;
+  try {
+    const serializedTools = JSON.stringify(tools);
+    if (serializedTools !== undefined) {
+      serializedToolsHash = createHash("sha256").update(serializedTools, "utf8").digest("hex").slice(0, 16);
+      serializedToolsBytes = Buffer.byteLength(serializedTools, "utf8");
+    }
+  } catch {
+    /* A cyclic/unsupported schema remains explicitly unknown in the trace. */
+  }
   delete settings.tools;
   let stableSystem = settings.instructions ?? settings.system ?? settings.systemInstruction ?? null;
   delete settings.instructions;
@@ -2274,66 +3291,147 @@ function cacheDiagnosticsForRequest(
   delete settings.prompt_cache_key;
   delete settings.session_id;
   const modelSettings = { ...identity, request: settings };
-  return {
-    cacheKeyHash: cacheKey ? hashDiagnostic(cacheKey) : null,
-    modelSettingsHash: hashDiagnostic(modelSettings),
-    toolsHash: hashDiagnostic(tools),
-    stablePrefixHash: hashDiagnostic({ system: stableSystem, tools, settings: modelSettings }),
-    messagePrefixHash: hashDiagnostic(messages),
-    workingSetHash: currentWorkingSetHash,
+  const policyDetails = cachePolicyFromBody(body, identity, priorPolicy, fallbackReason);
+  // `toGoogleContents` coalesces adjacent user turns into one contents item,
+  // so its last array element is not a reliable overlay boundary. Leave that
+  // reusable-prefix hash unknown rather than claiming a prefix we cannot
+  // reconstruct byte-for-byte after serialization.
+  const persistedMessages = identity.protocol === "google-generate" && overlay
+    ? undefined
+    : Array.isArray(messages) && overlay ? messages.slice(0, -1) : messages;
+  // A session seed is useful for deriving provider headers, but it is not a
+  // provider-facing cache key on every route (for example direct Anthropic or
+  // Gemini). Only report the identity hash when this request actually emits
+  // a supported body/header identity.
+  const diagnosticIdentity = cacheIdentity && (
+    identity.provider === "openrouter" ||
+    identity.provider === "xai" ||
+    cacheCapabilitySupported(identity.provider, identity.model, CACHE_CAPABILITY_FEATURE.promptCacheKey)
+  ) ? cacheIdentity : null;
+  const base = cacheRequestDiagnostics({
+    identity: diagnosticIdentity,
+    policy: policyDetails.policy,
+    modelSettings,
+    tools,
+    stablePrefix: { system: stableSystem, tools, settings: modelSettings },
+    reusablePrefix: persistedMessages,
+    messagePrefix: messages,
+    workingSet: overlay?.text,
     workingSetChanged: currentWorkingSetChanged,
+    markerCount: policyDetails.markers.count,
+    markerPositions: policyDetails.markers.positions,
+  });
+  return {
+    ...base,
+    overlayHash: overlay?.hash ?? null,
+    overlayBytes: overlay?.bytes ?? null,
+    hostContext: hostContext ? { ...hostContext } : null,
+    retryPromptIdentical,
     codexTurnStateUsed: identity.provider === "openai-codex" && Boolean(codexTurnState),
+    serializedToolsHash,
+    serializedToolsBytes,
+    missAttribution: {
+      attributed: null,
+      primary: null,
+      contributing: [],
+      missedTokens: null,
+      gapMs: null,
+      missingFields: ["previous-attempt"],
+      noiseFloorTokens: NOISE_FLOOR_TOKENS,
+    },
   };
 }
 
-// ---- trace helpers (shrink 8 duplicated traceRecord sites) ----
-function writeSummaryTrace(opts: { status: string; usage: Usage | null; started: number; seq: readonly [number, number]; revisions: number; kinds: readonly RevisionKind[] }): void {
-  writeTrace(
-    traceRecord({
-      role: "summary",
-      provider: summaryRoute.provider,
-      protocol: providerProtocol(summaryRoute.provider, summaryRoute.model),
-      model: summaryRoute.model,
-      status: opts.status,
-      storageSeqRange: opts.seq,
-      toolNames: [],
-      usage: opts.usage,
-      usd: null,
-      ttftMs: null,
-      turnMs: Date.now() - opts.started,
-      revisions: opts.revisions,
-      revisionKinds: opts.kinds,
-      wasteTokens: 0,
-      wasteCause: null,
-      systemHash: hashSystem("You compress coding-agent session history. Only output the structured handoff."),
-      cache: null,
-    }),
-  );
+// ---- trace runtime integration ----
+async function writeSummaryTrace(opts: {
+  status: string;
+  usage: Usage | null;
+  started: number;
+  seq: readonly [number, number] | null;
+  revisions: number;
+  kinds: readonly RevisionKind[];
+  attempt?: TraceAttemptState | null;
+  cache?: TraceCacheDiagnostics | null;
+  cost?: TraceRecordCostInput | null;
+  ttftMs?: number | null;
+}): Promise<void> {
+  await writeTraceAttempt(opts.attempt ?? null, {
+    status: opts.status,
+    storageSeqRange: opts.seq,
+    toolNames: [],
+    usage: opts.usage,
+    usd: opts.cost && typeof opts.cost.usd === "number" ? opts.cost.usd : null,
+    ttftMs: opts.ttftMs ?? null,
+    turnMs: opts.attempt?.ended !== null && opts.attempt?.ended !== undefined
+      ? Math.max(0, opts.attempt.ended - opts.attempt.started)
+      : Date.now() - opts.started,
+    revisions: opts.revisions,
+    revisionKinds: opts.kinds,
+    wasteTokens: 0,
+    wasteCause: null,
+    cache: opts.cache ?? null,
+    cost: opts.cost ?? traceCostForUsage(
+      opts.usage,
+      opts.attempt?.provider ?? summaryRoute.provider,
+      opts.attempt?.model ?? summaryRoute.model,
+      "summary",
+      opts.cache ?? null,
+    ),
+  });
 }
 
-function writeMainTrace(opts: { status: string; seqBefore: number; toolNames: string[]; usage: Usage | null; waste: { usd: number | null; ttftMs: number | null; turnMs: number; revisionCount: number; revisionKinds: readonly RevisionKind[]; wasteTokens: number; cause: string | null } | null; sysHash: string; cache: TraceCacheDiagnostics | null; started: number }): void {
+async function writeMainTrace(opts: {
+  status: string;
+  seqBefore: number;
+  toolNames: string[];
+  usage: Usage | null;
+  waste: {
+    usd: number | null;
+    ttftMs: number | null;
+    turnMs: number;
+    revisionCount: number;
+    revisionKinds: readonly RevisionKind[];
+    wasteTokens: number;
+    cause: string | null;
+    cost?: TraceRecordCostInput | null;
+  } | null;
+  sysHash: string;
+  cache: TraceCacheDiagnostics | null;
+  started: number;
+  attempt?: TraceAttemptState | null;
+  toolOutcomes?: readonly unknown[];
+  reclaimEvidence?: unknown;
+}): Promise<void> {
   const w = opts.waste;
-  writeTrace(
-    traceRecord({
-      role: "main",
-      provider: route.provider,
-      protocol: providerProtocol(route.provider, route.model),
-      model: route.model,
-      status: opts.status,
-      storageSeqRange: [opts.seqBefore + 1, storageSeq],
-      toolNames: opts.toolNames,
-      usage: opts.usage,
-      usd: w?.usd ?? null,
-      ttftMs: w?.ttftMs ?? null,
-      turnMs: w ? w.turnMs : Date.now() - opts.started,
-      revisions: w ? w.revisionCount : revisions,
-      revisionKinds: w ? w.revisionKinds.slice() as readonly RevisionKind[] : revisionKinds.slice(),
-      wasteTokens: w?.wasteTokens ?? 0,
-      wasteCause: w?.cause ?? null,
-      systemHash: opts.sysHash,
-      cache: opts.cache,
-    }),
-  );
+  const reclaimEvidence = opts.reclaimEvidence === undefined
+    ? pendingReclaimEvidence
+    : opts.reclaimEvidence;
+  if (opts.reclaimEvidence === undefined) pendingReclaimEvidence = null;
+  await writeTraceAttempt(opts.attempt ?? inFlightTraceAttempt, {
+    status: opts.status,
+    storageSeqRange: storageSeqRange(opts.seqBefore, storageSeq),
+    toolNames: opts.toolNames,
+    usage: opts.usage,
+    usd: w?.usd ?? null,
+    cost: w?.cost ?? traceCostForUsage(
+      opts.usage,
+      opts.attempt?.provider ?? route.provider,
+      opts.attempt?.model ?? route.model,
+      "main",
+      opts.cache,
+    ),
+    ttftMs: w?.ttftMs ?? null,
+    turnMs: opts.attempt?.ended !== null && opts.attempt?.ended !== undefined
+      ? Math.max(0, opts.attempt.ended - opts.attempt.started)
+      : w ? w.turnMs : Date.now() - opts.started,
+    revisions: w ? w.revisionCount : revisions,
+    revisionKinds: w ? w.revisionKinds.slice() as readonly RevisionKind[] : revisionKinds.slice(),
+    wasteTokens: w?.wasteTokens ?? 0,
+    wasteCause: w?.cause ?? null,
+    cache: opts.cache,
+    toolOutcomes: opts.toolOutcomes,
+    reclaimEvidence,
+  });
 }
 
 // ---- append-only session storage ----
@@ -2510,30 +3608,169 @@ interface ToolUse {
   };
 }
 
+/**
+ * Result shape shared by filesystem/process/network tools.
+ *
+ * `content` is the bounded rendering that is safe to put in the next model
+ * request.  The original stream accounting remains on `bounded`; process
+ * tools additionally keep independent stdout/stderr results and exit status.
+ * A continuation is deliberately metadata (the actionable hint is also in
+ * the bounded text marker) so it cannot leak as an unrecognised provider
+ * content block.
+ */
+export type ToolTextResult = BoundedToolResult & {
+  continuation?: string | McpContinuation | null;
+  repro?: string | null;
+  stdout?: BoundedText;
+  stderr?: BoundedText;
+  exitCode?: number | null;
+  signal?: string | null;
+};
+
+type BoundedOutcomeMetadata = Pick<
+  BoundedText,
+  "state" | "direction" | "limitBytes" | "inputBytes" | "retainedBytes" | "omittedBytes" | "outputBytes" | "truncated"
+>;
+
 interface ToolOutcome {
   result: Record<string, unknown>;
   isError: boolean;
+  /** Preserve bounded MCP accounting through the generic tool boundary. */
+  bounded?: BoundedOutcomeMetadata;
+  cancellationScope?: McpCancellationScope;
+  continuation?: string | McpContinuation | null;
+  repro?: string | null;
+  stdout?: BoundedText;
+  stderr?: BoundedText;
+  exitCode?: number | null;
+  signal?: string | null;
 }
 
 function toolResult(use: ToolUse, content: string): Record<string, unknown> {
   return { type: "tool_result", tool_use_id: use.id, content };
 }
 
-function done(use: ToolUse, content: string, isError: boolean): ToolOutcome {
-  return { result: toolResult(use, content), isError };
+function boundedMetadata(value: BoundedText): BoundedOutcomeMetadata {
+  return {
+    state: value.state,
+    direction: value.direction,
+    limitBytes: value.limitBytes,
+    inputBytes: value.inputBytes,
+    retainedBytes: value.retainedBytes,
+    omittedBytes: value.omittedBytes,
+    outputBytes: value.outputBytes,
+    truncated: value.truncated,
+  };
+}
+
+function genericToolText(content: string, isError: boolean): ToolTextResult {
+  return boundedToolResult(content, {
+    maxBytes: GREP_BYTE_CAP,
+    direction: "head",
+    marker: isError ? "" : "[output truncated — re-run the tool for the rest]",
+    state: isError ? "failed" : "complete",
+    isError,
+  });
+}
+
+/** Render an actionable continuation even when the operation itself was
+ * complete but its page/result was intentionally shortened (for example the
+ * 200-entry glob page). */
+function logicalToolText(
+  content: string,
+  opts: {
+    maxBytes: number;
+    state: CompletionState;
+    isError: boolean;
+    marker?: string | null;
+    repro?: string | null;
+    forceMarker?: boolean;
+    continuation?: string | McpContinuation | null;
+  },
+): ToolTextResult {
+  const marker = opts.marker === undefined
+    ? "[output truncated — re-run the tool for the rest]"
+    : opts.marker ?? "";
+  if (!opts.forceMarker || !marker) {
+    return Object.freeze({
+      ...boundedToolResult(content, {
+        maxBytes: opts.maxBytes,
+        direction: "head",
+        marker,
+        state: opts.state,
+        isError: opts.isError,
+      }),
+      continuation: opts.continuation ?? (marker || null),
+      repro: opts.repro ?? null,
+    });
+  }
+  const markerBytes = Buffer.byteLength(marker, "utf8");
+  const bodyLimit = Math.max(0, opts.maxBytes - markerBytes - 1);
+  const body = boundedToolResult(content, {
+    maxBytes: bodyLimit,
+    direction: "head",
+    marker: "",
+    state: opts.state,
+    isError: opts.isError,
+  });
+  const combined = body.content ? `${body.content}\n${marker}` : marker;
+  const final = boundedToolResult(combined, {
+    maxBytes: opts.maxBytes,
+    direction: "head",
+    marker: "",
+    state: opts.state,
+    isError: opts.isError,
+  });
+  return Object.freeze({
+    ...final,
+    truncated: true,
+    continuation: opts.continuation ?? marker,
+    repro: opts.repro ?? null,
+  });
+}
+
+function done(use: ToolUse, value: string | ToolTextResult, isError?: boolean): ToolOutcome {
+  const output = typeof value === "string"
+    ? Object.freeze({ ...genericToolText(value, isError === true), repro: reproFor(use) ?? null })
+    : value;
+  return {
+    result: toolResult(use, output.content),
+    isError: output.isError,
+    bounded: boundedMetadata(output),
+    continuation: output.continuation ?? null,
+    repro: output.repro ?? null,
+    ...(output.stdout ? { stdout: output.stdout } : {}),
+    ...(output.stderr ? { stderr: output.stderr } : {}),
+    ...(output.exitCode === undefined ? {} : { exitCode: output.exitCode }),
+    ...(output.signal === undefined ? {} : { signal: output.signal }),
+  };
+}
+
+function toolOutcomeTraceFields(outcome: ToolOutcome): Record<string, unknown> {
+  const fields: Record<string, unknown> = {};
+  if (outcome.bounded) fields.bounded = { ...outcome.bounded };
+  if (outcome.cancellationScope) fields.cancellationScope = outcome.cancellationScope;
+  if (outcome.continuation) fields.continuation = outcome.continuation;
+  if (outcome.repro) fields.repro = outcome.repro;
+  if (outcome.stdout) fields.stdout = { ...boundedMetadata(outcome.stdout) };
+  if (outcome.stderr) fields.stderr = { ...boundedMetadata(outcome.stderr) };
+  if (outcome.exitCode !== undefined) fields.exitCode = outcome.exitCode;
+  if (outcome.signal !== undefined) fields.signal = outcome.signal;
+  return fields;
+}
+
+function toolOutcomeTraceInput(use: ToolUse, outcome: ToolOutcome): Record<string, unknown> {
+  return {
+    toolName: use.name,
+    toolCallId: use.id,
+    isError: outcome.isError,
+    ...toolOutcomeTraceFields(outcome),
+  };
 }
 
 export function shellQuote(raw: string): string {
   const cleaned = raw.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 80);
   return `'${cleaned.replace(/'/g, `'\\''`)}'`;
-}
-
-export function capTail(text: string, maxBytes: number, repro?: string): string {
-  const buf = Buffer.from(text, "utf8");
-  if (buf.length <= maxBytes) return text;
-  const tail = buf.subarray(buf.length - maxBytes).toString("utf8");
-  const marker = `[early output truncated to ${maxBytes} bytes — reproduce: ${repro ?? ""}]`;
-  return `${marker}\n${tail}`;
 }
 
 export function reproFor(use: ToolUse): string | undefined {
@@ -2614,9 +3851,10 @@ export function formatToolFollowup(use: ToolUse, outcome: { result: Record<strin
 export function runBash(
   command: string,
   opts: { cwd: string; timeoutMs?: number; shouldStop?: () => boolean },
-): Promise<{ content: string; isError: boolean }> {
+): Promise<ToolTextResult> {
   const timeoutMs = opts.timeoutMs ?? BASH_TIMEOUT_MS;
   const repro = `bash ${shellQuote(command)}`;
+  const continuation = `Re-run the command with a narrower output or redirect noisy streams: ${repro}`;
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
@@ -2632,24 +3870,32 @@ export function runBash(
         env,
       });
     } catch (err) {
-      resolve({ content: `error: ${(err as Error).message}`, isError: true });
+      resolve(logicalToolText(`error: ${(err as Error).message}`, {
+        maxBytes: BASH_CAP_BYTES,
+        state: "failed",
+        isError: true,
+        repro,
+      }));
       return;
     }
     const pid = child.pid;
-    let stdout: Buffer = Buffer.alloc(0);
-    let stderr: Buffer = Buffer.alloc(0);
-    const takeTail = (tail: Buffer, chunk: Buffer): Buffer => {
-      const next = tail.length === 0 ? chunk : Buffer.concat([tail, chunk]);
-      const cap = BASH_CAP_BYTES + 1;
-      return next.length <= cap ? next : next.subarray(next.length - cap);
-    };
-    child.stdout?.on("data", (chunk: Buffer) => {
-      stdout = takeTail(stdout, chunk);
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderr = takeTail(stderr, chunk);
-    });
+    const stdout = new BoundedTextAccumulator({ maxBytes: BASH_CAP_BYTES, direction: "tail", marker: "" });
+    const stderr = new BoundedTextAccumulator({ maxBytes: BASH_CAP_BYTES, direction: "tail", marker: "" });
+    child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
     let settled = false;
+    let timedOut = false;
+    let interruptedByUser = false;
+    let stopCallbackFailed = false;
+    let spawnFailed = false;
+    const shouldStop = (): boolean => {
+      try {
+        return opts.shouldStop?.() === true;
+      } catch {
+        stopCallbackFailed = true;
+        return true;
+      }
+    };
     const killGroup = (): void => {
       if (process.platform !== "win32" && typeof pid === "number" && pid > 0) {
         try {
@@ -2670,20 +3916,60 @@ export function runBash(
       settled = true;
       clearTimeout(timer);
       clearInterval(poll);
-      const parts = [stdout.toString("utf8"), stderr.toString("utf8")];
-      const body = capTail(parts.filter(Boolean).join("\n") || "(no output)", BASH_CAP_BYTES, repro);
+      const state: CompletionState = timedOut
+        ? "timeout"
+        : stopCallbackFailed
+          ? "failed"
+          : interruptedByUser
+          ? "interrupted"
+          : spawnFailed
+            ? "failed"
+            : status.failed
+              ? "failed"
+              : "complete";
+      const stdoutResult = stdout.finish(state);
+      const stderrResult = stderr.finish(state);
+      const parts = [stdoutResult.text, stderrResult.text];
       const tag = typeof status.code === "number" ? String(status.code) : status.signal ?? "error";
-      resolve({
-        content: `${body}\n[exit ${tag}]`,
-        isError: status.failed,
+      let body = `${parts.filter(Boolean).join("\n") || "(no output)"}\n[exit ${tag}]`;
+      const outputTruncated = stdoutResult.truncated || stderrResult.truncated;
+      if (outputTruncated || state !== "complete") body += `\n${continuation}`;
+      const rendered = boundedToolResult(body, {
+        maxBytes: BASH_CAP_BYTES,
+        direction: "tail",
+        marker: "",
+        state,
+        isError: state !== "complete" || status.failed,
       });
+      resolve(Object.freeze({
+        ...rendered,
+        truncated: rendered.truncated || outputTruncated,
+        continuation: outputTruncated || state !== "complete" ? continuation : null,
+        repro,
+        stdout: stdoutResult,
+        stderr: stderrResult,
+        exitCode: typeof status.code === "number" ? status.code : null,
+        signal: status.signal ?? null,
+      }));
     };
-    const timer = setTimeout(killGroup, timeoutMs);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killGroup();
+    }, timeoutMs);
     const poll = setInterval(() => {
-      if (opts.shouldStop?.()) killGroup();
+      if (shouldStop()) {
+        interruptedByUser = true;
+        killGroup();
+      }
     }, 50);
-    if (opts.shouldStop?.()) killGroup();
-    child.on("error", (e) => finish({ signal: e.message, failed: true }));
+    if (shouldStop()) {
+      interruptedByUser = true;
+      killGroup();
+    }
+    child.on("error", (e) => {
+      spawnFailed = true;
+      finish({ signal: e.message, failed: true });
+    });
     child.on("close", (code, signal) => {
       finish({ code, signal, failed: !(code === 0 && !signal) });
     });
@@ -2707,18 +3993,35 @@ export function fetchUrlError(url: string): string | null {
 export async function fetchUrl(
   url: string,
   opts?: { shouldStop?: () => boolean; timeoutMs?: number },
-): Promise<{ content: string; isError: boolean }> {
+): Promise<ToolTextResult> {
   const timeoutMs = opts?.timeoutMs ?? FETCH_TIMEOUT_MS;
+  const repro = `fetch ${shellQuote(url)}`;
+  const continuation = `Re-run fetch with a narrower response or inspect the URL in smaller ranges: ${repro}`;
+  let stopCallbackFailed = false;
+  const shouldStop = (): boolean => {
+    try {
+      return opts?.shouldStop?.() === true;
+    } catch {
+      stopCallbackFailed = true;
+      return true;
+    }
+  };
+  const fail = (content: string, state: CompletionState = "failed"): ToolTextResult => logicalToolText(content, {
+    maxBytes: FETCH_CAP_BYTES,
+    state,
+    isError: true,
+    repro,
+  });
   let current = url;
   for (let hop = 0; hop <= FETCH_REDIRECT_CAP; hop++) {
     const bad = fetchUrlError(current);
-    if (bad) return { content: bad, isError: true };
+    if (bad) return fail(bad);
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), timeoutMs);
     const poll = setInterval(() => {
-      if (opts?.shouldStop?.()) ac.abort();
+      if (shouldStop()) ac.abort();
     }, 50);
-    if (opts?.shouldStop?.()) ac.abort();
+    if (shouldStop()) ac.abort();
     try {
       const res = await fetch(current, {
         method: "GET",
@@ -2729,60 +4032,106 @@ export async function fetchUrl(
       if (res.status >= 300 && res.status < 400) {
         const loc = res.headers.get("location");
         try {
-          await res.arrayBuffer();
+          await res.body?.cancel();
         } catch {
-          /* drain */
+          /* best effort: redirect bodies are never retained */
         }
-        if (!loc) return { content: "error: redirect without location", isError: true };
-        current = new URL(loc, current).href;
+        if (!loc) return fail("error: redirect without location");
+        try {
+          current = new URL(loc, current).href;
+        } catch {
+          return fail("error: invalid redirect location");
+        }
         continue;
       }
       if (!res.ok) {
-        const detail = (await res.text()).slice(0, 200);
-        return { content: `error: HTTP ${res.status}${detail ? `: ${detail}` : ""}`, isError: true };
-      }
-      if (!res.body) return { content: "", isError: false };
-      const reader = res.body.getReader();
-      const chunks: Buffer[] = [];
-      let used = 0;
-      let truncated = false;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = Buffer.from(value);
-        if (used >= FETCH_CAP_BYTES) {
-          truncated = true;
-          await reader.cancel();
-          break;
+        const detailAccumulator = new BoundedTextAccumulator({ maxBytes: 2 * 1024, direction: "head", marker: "" });
+        let detailSeen = 0;
+        if (res.body) {
+          const reader = res.body.getReader();
+          try {
+            for (;;) {
+              const next = await reader.read();
+              if (next.done) break;
+              detailAccumulator.push(next.value);
+              detailSeen += next.value.byteLength;
+              if (detailSeen > 2 * 1024) {
+                await reader.cancel();
+                break;
+              }
+            }
+          } finally {
+            reader.releaseLock();
+          }
         }
-        const piece = chunk.subarray(0, FETCH_CAP_BYTES - used);
-        chunks.push(piece);
-        used += piece.length;
-        if (chunk.length > piece.length) {
-          truncated = true;
-          await reader.cancel();
-          break;
+        const detailResult = detailAccumulator.finish();
+        const detail = detailResult.text.trim();
+        const errorBody = `error: HTTP ${res.status}${detail ? `: ${detail}` : ""}`;
+        if (detailResult.truncated) {
+          return logicalToolText(errorBody, {
+            maxBytes: FETCH_CAP_BYTES,
+            state: "failed",
+            isError: true,
+            forceMarker: true,
+            marker: continuation,
+            continuation,
+            repro,
+          });
+        }
+        return fail(errorBody);
+      }
+      const body = new BoundedTextAccumulator({ maxBytes: FETCH_CAP_BYTES, direction: "head", marker: "" });
+      let sourceTruncated = false;
+      let bodySeen = 0;
+      if (res.body) {
+        const reader = res.body.getReader();
+        try {
+          for (;;) {
+            const next = await reader.read();
+            if (next.done) break;
+            body.push(next.value);
+            bodySeen += next.value.byteLength;
+            if (bodySeen > FETCH_CAP_BYTES) {
+              sourceTruncated = true;
+              await reader.cancel();
+              break;
+            }
+          }
+        } finally {
+          reader.releaseLock();
         }
       }
-      const text = Buffer.concat(chunks).toString("utf8");
-      const repro = `fetch ${shellQuote(url)}`;
-      return {
-        content: truncated
-          ? `${text}\n[truncated at ${FETCH_CAP_BYTES} bytes — reproduce: ${repro}]`
-          : text,
+      const bodyResult = body.finish();
+      const result = logicalToolText(bodyResult.text, {
+        maxBytes: FETCH_CAP_BYTES,
+        state: "complete",
         isError: false,
-      };
+        forceMarker: sourceTruncated || bodyResult.truncated,
+        marker: continuation,
+        continuation: sourceTruncated || bodyResult.truncated ? continuation : null,
+        repro,
+      });
+      return Object.freeze({
+        ...result,
+        inputBytes: bodyResult.inputBytes,
+        retainedBytes: bodyResult.retainedBytes,
+        omittedBytes: bodyResult.omittedBytes,
+        truncated: result.truncated || sourceTruncated || bodyResult.truncated,
+      });
     } catch (err) {
-      const msg = (err as Error).name === "AbortError" || /aborted/i.test((err as Error).message)
-        ? (opts?.shouldStop?.() ? "error: interrupted" : "error: timed out")
+      const stopRequested = shouldStop();
+      const msg = stopCallbackFailed
+        ? "error: stop callback failed"
+        : (err as Error).name === "AbortError" || /aborted/i.test((err as Error).message)
+        ? stopRequested ? "error: interrupted" : "error: timed out"
         : `error: ${(err as Error).message}`;
-      return { content: msg, isError: true };
+      return fail(msg, stopCallbackFailed ? "failed" : stopRequested ? "interrupted" : /timed out/i.test(msg) ? "timeout" : "failed");
     } finally {
       clearTimeout(timer);
       clearInterval(poll);
     }
   }
-  return { content: "error: too many redirects", isError: true };
+  return fail("error: too many redirects");
 }
 
 export type PermissionMode = "always" | "dangerous" | "ask";
@@ -2808,6 +4157,16 @@ let permissionMode: PermissionMode = process.env.TERMINA_CORE_APPROVE === "all" 
 let approvalResolve: ((line: string) => void) | null = null;
 let approvalQueue = Promise.resolve();
 
+/** Resolve an in-flight permission prompt before tearing down its surface. */
+export function cancelPendingApproval(line = "/approve deny"): boolean {
+  const resolve = approvalResolve;
+  if (!resolve) return false;
+  approvalResolve = null;
+  surface?.clearChoices();
+  resolve(line);
+  return true;
+}
+
 async function confirmBashNow(command: string): Promise<boolean> {
   if (interrupted) return false;
   if (!surface?.active() || !shouldAskPermission(permissionMode, command)) return true;
@@ -2819,11 +4178,11 @@ async function confirmBashNow(command: string): Promise<boolean> {
   const line = await new Promise<string>((resolve) => {
     approvalResolve = resolve;
   });
-  approvalResolve = null;
-  surface.clearChoices();
+  if (approvalResolve) approvalResolve = null;
+  surface?.clearChoices();
   if (line === "/approve always") {
     permissionMode = "always";
-    surface.setStatus({ permissions: permissionMode });
+    surface?.setStatus({ permissions: permissionMode });
     return true;
   }
   return line === "/approve once";
@@ -2846,7 +4205,7 @@ async function confirmBash(command: string): Promise<boolean> {
 async function executeTool(use: ToolUse): Promise<ToolOutcome> {
   if (use.name === "read_file") {
     const got = readProjectFile(canonicalCwd, use.input, allowPaths);
-    return done(use, got.content, got.isError);
+    return done(use, got);
   }
   if (use.name === "write_file") {
     const got = writeProjectFile(canonicalCwd, use.input.path, use.input.content ?? "");
@@ -2864,28 +4223,44 @@ async function executeTool(use: ToolUse): Promise<ToolOutcome> {
   }
   if (use.name === "grep") {
     const out = await grepFiles(canonicalCwd, use.input, { shouldStop: () => interrupted });
-    return done(use, out, out.startsWith("error:"));
+    return done(use, out);
   }
   if (use.name === "glob") {
     const out = await globFiles(canonicalCwd, use.input.pattern ?? "", { shouldStop: () => interrupted });
-    return done(use, out, out.startsWith("error:"));
+    return done(use, out);
   }
   if (use.name === "web_search") {
     return done(use, "error: web_search is provider-executed", true);
   }
   if (use.name === "fetch") {
     const got = await fetchUrl(String(use.input.url ?? ""), { shouldStop: () => interrupted });
-    return done(use, got.content, got.isError);
+    return done(use, got);
   }
   if (use.name === "bash") {
     const command = use.input.command ?? "";
     if (!(await confirmBash(command))) return done(use, "error: bash denied", true);
     const got = await runBash(command, { cwd: canonicalCwd, shouldStop: () => interrupted });
-    return done(use, got.content, got.isError);
+    return done(use, got);
   }
   if (mcpSession?.tools.some((t) => t.name === use.name)) {
     const got = await mcpSession.call(use.name, use.input, { shouldStop: () => interrupted });
-    return done(use, got.content, got.isError);
+    return {
+      result: toolResult(use, got.content),
+      isError: got.isError,
+    bounded: {
+        state: got.state,
+        direction: got.direction,
+        limitBytes: got.limitBytes,
+        inputBytes: got.inputBytes,
+        retainedBytes: got.retainedBytes,
+        omittedBytes: got.omittedBytes,
+        outputBytes: got.outputBytes,
+        truncated: got.truncated,
+      },
+      cancellationScope: got.cancellationScope,
+      continuation: got.continuation,
+      repro: reproFor(use) ?? null,
+    };
   }
   return done(use, `error: unknown tool ${use.name}`, true);
 }
@@ -2968,19 +4343,35 @@ const TOOLS = [
 
 let clientTools: Array<Record<string, unknown>> = TOOLS.slice();
 let mcpSession: McpSession | null = null;
+let mcpBusy = false;
+let mcpGeneration = 0;
 
 async function connectMcp(): Promise<void> {
+  const generation = ++mcpGeneration;
   mcpSession?.shutdown();
   mcpSession = null;
   clientTools = TOOLS.slice();
-  const session = await startMcp(loadMcpConfigs(userMcpPath(homedir())), {
-    projectRoot: canonicalCwd,
-    confineCwd: (cwd) => jailMcpCwd(canonicalCwd, cwd),
-  });
-  mcpSession = session;
-  clientTools = mergeClientTools(TOOLS, mcpToolDefs(session.tools));
   syncIndicators();
-  for (const note of session.notes) out(`(${note})\n`);
+  try {
+    const session = await startMcp(loadMcpConfigs(userMcpPath(homedir())), {
+      projectRoot: canonicalCwd,
+      confineCwd: (cwd) => jailMcpCwd(canonicalCwd, cwd),
+    });
+    if (generation !== mcpGeneration) {
+      session.shutdown();
+      return;
+    }
+    mcpSession = session;
+    clientTools = mergeClientTools(TOOLS, mcpToolDefs(session.tools));
+    syncIndicators();
+    for (const note of session.notes) out(`(${note})\n`);
+  } catch (error) {
+    if (generation !== mcpGeneration) return;
+    mcpSession = null;
+    clientTools = TOOLS.slice();
+    syncIndicators();
+    out(`(MCP unavailable; built-in tools remain: ${error instanceof Error ? error.message : String(error)})\n`);
+  }
 }
 
 /** Provider-executed search. Same Anthropic key as the model. No Brave key. */
@@ -2992,7 +4383,7 @@ export const WEB_SEARCH_TOOL = {
 
 export type AnthropicCacheMark = { type: "ephemeral"; ttl?: "1h" };
 
-/** 1-hour TTL on the Anthropic login only. Zen and OpenRouter keep the 5-minute default. */
+/** 1-hour TTL is emitted only on the direct Anthropic route. Other routes do not use markers by default. */
 export function anthropicCacheMark(provider: ProviderId): AnthropicCacheMark {
   return provider === "anthropic" ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
 }
@@ -3006,7 +4397,26 @@ export function buildCachedPrefix(
   tools: Array<Record<string, unknown> & { cache_control?: AnthropicCacheMark }>;
 } {
   const mark = anthropicCacheMark(provider);
-  const copied = tools.map((t, i) => (i === tools.length - 1 ? { ...t, cache_control: mark } : { ...t }));
+  // Anthropic permits at most four explicit breakpoints. The system marker
+  // consumes one, leaving three for tools. Preserve existing markers in
+  // discovery order and only add the final-tool marker when budget remains.
+  let toolMarkers = 0;
+  const copied = tools.map((tool, index) => {
+    const existing = Object.prototype.hasOwnProperty.call(tool, "cache_control");
+    if (existing && toolMarkers < 3) {
+      toolMarkers++;
+      return { ...tool };
+    }
+    if (existing) {
+      const { cache_control: _cacheControl, ...withoutMarker } = tool;
+      return { ...withoutMarker };
+    }
+    if (index === tools.length - 1 && toolMarkers < 3) {
+      toolMarkers++;
+      return { ...tool, cache_control: mark };
+    }
+    return { ...tool };
+  });
   return {
     system: [{ type: "text", text: system, cache_control: mark }],
     tools: copied,
@@ -3016,15 +4426,18 @@ export function buildCachedPrefix(
 const HISTORY_CACHE_BLOCKS = new Set(["text", "tool_result", "image"]);
 
 /** Stamp cache_control on the last stable history block. Skip thinking and
- *  tool_use. This marks the current append-only prefix. */
+ *  tool_use. Only the provider's documented 20-block lookback is eligible. */
 export function stampHistoryCache(
   messages: Array<{ role: string; content: unknown }>,
   provider: ProviderId = "anthropic",
 ): Array<{ role: string; content: unknown }> {
   const mark = anthropicCacheMark(provider);
+  let lookback = 20;
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]!;
     if (typeof m.content === "string") {
+      if (lookback <= 0) break;
+      lookback--;
       if (!m.content) continue;
       const next = messages.slice();
       next[i] = {
@@ -3037,7 +4450,10 @@ export function stampHistoryCache(
     const blocks = m.content as Array<Record<string, unknown>>;
     for (let j = blocks.length - 1; j >= 0; j--) {
       const b = blocks[j]!;
+      if (lookback <= 0) return messages;
+      lookback--;
       if (typeof b.type !== "string" || !HISTORY_CACHE_BLOCKS.has(b.type)) continue;
+      if (Object.prototype.hasOwnProperty.call(b, "cache_control")) return messages;
       const next = messages.slice();
       const copied = blocks.slice();
       copied[j] = { ...b, cache_control: mark };
@@ -3327,22 +4743,6 @@ interface Message {
 
 const history: Message[] = [];
 
-function blockChars(b: ContentBlock): number {
-  if (typeof b.chars === "number") return b.chars;
-  if (b.type === "text") return String((b as { text?: string }).text ?? "").length;
-  if (b.type === "tool_result") return String((b as { content?: string }).content ?? "").length;
-  if (b.type === "tool_use") return JSON.stringify((b as { input?: unknown }).input ?? {}).length;
-  if (b.type === "thinking" || b.type === "redacted_thinking") {
-    return String((b as { thinking?: string }).thinking ?? JSON.stringify(b)).length;
-  }
-  if (b.type === "image") return 8_000;
-  return 0;
-}
-
-function isThinkingBlock(b: { type?: string }): boolean {
-  return b.type === "thinking" || b.type === "redacted_thinking";
-}
-
 function isUserPrompt(m: { role: string; content: unknown }): boolean {
   if (m.role !== "user") return false;
   if (typeof m.content === "string") return true;
@@ -3350,55 +4750,6 @@ function isUserPrompt(m: { role: string; content: unknown }): boolean {
     if (!b || typeof b !== "object") return false;
     const type = (b as { type?: unknown }).type;
     return type === "text" || type === "image";
-  });
-}
-
-function estimate(m: Message): number {
-  if (typeof m.content === "string") return tokenEstimate(m.content) + 4;
-  let sum = 4;
-  for (const b of m.content) {
-    if (b.type === "image") {
-      sum += 8_010;
-      continue;
-    }
-    const payload =
-      b.type === "tool_use" || b.type === "server_tool_use"
-        ? JSON.stringify((b as { input?: unknown }).input ?? {})
-        : b.type === "web_search_tool_result" || b.type === "thinking" || b.type === "redacted_thinking"
-          ? JSON.stringify(b)
-          : String((b as { text?: string; content?: string }).text ?? (b as { content?: string }).content ?? "");
-    sum += tokenEstimate(payload) + 10;
-  }
-  return sum;
-}
-
-const VIEW_KEYS = new Set(["chars", "tool", "repro", "stubbed"]);
-
-/** Strip view metadata. Extra keys on a content block (stubbed flags
- *  included) make the provider reject the whole request. File images
- *  expand to base64 at request time. */
-export function toProviderBlock(b: ContentBlock, imageRoots: string[] = []): Record<string, unknown> {
-  if (b.type === "context") return { type: "text", text: String(b.text ?? "") };
-  const out: Record<string, unknown> = { type: b.type };
-  for (const [k, v] of Object.entries(b)) {
-    if (k === "type" || VIEW_KEYS.has(k) || v === undefined) continue;
-    out[k] = v;
-  }
-  if (b.type === "image" && out.source && typeof out.source === "object" && !Array.isArray(out.source)) {
-    const expanded = expandFileImageSource(out.source as Record<string, unknown>, imageRoots);
-    if (expanded) out.source = expanded;
-    else return { type: "text", text: "[image missing]" };
-  }
-  return out;
-}
-
-export function toRequest(messages: Message[], imageRoots: string[] = []): Array<{ role: string; content: unknown }> {
-  return messages.map((m) => {
-    if (typeof m.content === "string") return { role: m.role, content: m.content };
-    const content = m.content
-      .map((b) => toProviderBlock(b, imageRoots))
-      .filter((b) => b.type !== "thinking" || typeof b.signature === "string");
-    return { role: m.role, content };
   });
 }
 
@@ -3413,106 +4764,34 @@ export function compactStreamBlocks<T>(slots: Array<T | undefined>): T[] {
 
 function pushMessage(role: Message["role"], content: Message["content"]): Message {
   const sseq = persist({ type: "message", message: { role, content } });
-  const m: Message = { role, content, tokens: 0, sseq };
-  m.tokens = estimate(m);
+  const m: Message = { role, content, tokens: estimateReclaimTokens(content), sseq };
   history.push(m);
   syncIndicators();
   return m;
 }
 
-export function userPromptContent(
-  prompt: string,
-  images: Array<{ name: string; mediaType: string }>,
-  workingSet = "",
-): string | ContentBlock[] {
-  if (images.length === 0 && !workingSet) return prompt;
-  return [
-    { type: "text", text: prompt },
-    ...images.map((img) => ({
-      type: "image",
-      source: { type: "file", name: img.name, media_type: img.mediaType },
-    })),
-    ...(workingSet ? [{ type: "context", text: workingSet }] : []),
-  ];
+/** Provider-neutral projection used by main and focused integration tests. */
+export function projectMainRequest(
+  messages: Message[],
+  hostContext = "",
+): { messages: RequestMessage[]; persistedMessages: RequestMessage[]; overlay: RequestOverlay | null } {
+  const projection = projectRequest({
+    messages,
+    overlay: buildRequestOverlay({ messages, hostContext }),
+  });
+  if (!projection.ok) throw new Error(projection.error);
+  return {
+    messages: projection.messages,
+    persistedMessages: projection.persistedMessages,
+    overlay: projection.overlay,
+  };
 }
 
 function pushUserPrompt(
   prompt: string,
   images: Array<{ name: string; mediaType: string }>,
-  workingSet = "",
 ): Message {
-  return pushMessage("user", userPromptContent(prompt, images, workingSet));
-}
-
-// ---- reclamation with hysteresis ----
-
-export type PruneAction = "stub" | "drop";
-export type PrunePick = { msgIndex: number; blockIndex: number; action: PruneAction };
-
-/** Pure planner: pick the oldest prunable tool results and thinking outside
- *  the protected recency window until the projected total falls under the
- *  low-water mark. */
-export function planPruneStubs(
-  messages: Array<{ role: string; content: unknown; tokens: number }>,
-  opts: { systemTokens: number; usable: number; protectTokens: number; fillTokens?: number },
-): PrunePick[] {
-  const historyTotal =
-    opts.systemTokens +
-    messages.reduce((sum, m) => sum + m.tokens, 0);
-  const fill = opts.fillTokens ?? historyTotal;
-  // Hysteresis lives on the fill level: act at the high-water mark, reclaim
-  // down to the low-water mark. Between the marks: do nothing.
-  if (fill < opts.usable * HIGH_WATER) return [];
-  const quota = historyTotal - opts.usable * LOW_WATER;
-  if (quota <= 0) return [];
-
-  // Walk from the newest message backwards marking the protected span: the
-  // last PROTECT_TURNS user prompts plus PROTECT_TOKENS of context.
-  const protectedIdx = new Set<number>();
-  let seen = 0;
-  let guarded = 0;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]!;
-    protectedIdx.add(i);
-    guarded += m.tokens;
-    if (isUserPrompt(m)) {
-      seen++;
-      if (seen >= PROTECT_TURNS) break;
-    }
-  }
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (guarded >= opts.protectTokens) break;
-    if (!protectedIdx.has(i)) {
-      protectedIdx.add(i);
-      guarded += messages[i]!.tokens;
-    }
-  }
-
-  // Oldest-first selection among unprotected bulky tool results and thinking.
-  const picks: PrunePick[] = [];
-  let reclaimed = 0;
-  for (let i = 0; i < messages.length && reclaimed < quota; i++) {
-    if (protectedIdx.has(i)) continue;
-    const m = messages[i]!;
-    if (typeof m.content === "string") continue;
-    const blocks = m.content as ContentBlock[];
-    for (let blockIndex = 0; blockIndex < blocks.length; blockIndex++) {
-      if (reclaimed >= quota) break;
-      const b = blocks[blockIndex]!;
-      const chars = blockChars(b);
-      if (chars < PRUNE_MIN_CHARS) continue;
-      if (isThinkingBlock(b)) {
-        if (blocks.filter((x) => !isThinkingBlock(x)).length === 0) continue;
-        picks.push({ msgIndex: i, blockIndex, action: "drop" });
-        reclaimed += Math.ceil(chars / 4);
-        continue;
-      }
-      if (b.type !== "tool_result" || b.stubbed) continue;
-      picks.push({ msgIndex: i, blockIndex, action: "stub" });
-      reclaimed += Math.ceil(chars / 4);
-    }
-  }
-  return picks;
+  return pushMessage("user", projectedUserPromptContent(prompt, images) as string | ContentBlock[]);
 }
 
 export type { ReplayMessage } from "./session.ts";
@@ -3524,6 +4803,7 @@ let revisionKinds: RevisionKind[] = [];
 let lastBilledTokens: number | null = null;
 let lastCacheReadShare: number | null = null;
 let lastRequestFollowedRevision = false;
+let pendingReclaimEvidence: Record<string, unknown> | null = null;
 
 export function shouldCompactForCacheCost(
   billedTokens: number | null,
@@ -3546,69 +4826,166 @@ function recordRevision(kind: RevisionKind): void {
   revisionKinds.push(kind);
 }
 
-/** Apply the planner to the live view. Storage already holds the originals. */
-function reclaim(): number {
-  const plan = planPruneStubs(
-    history.map((m) => ({ role: m.role, content: m.content, tokens: m.tokens })),
+function toolSchemaTokens(): number {
+  return estimateReclaimTokens(requestTools(clientTools, route.provider, route.model));
+}
+
+function activeOverlayTokens(): number {
+  return activeRequestOverlay ? estimateReclaimTokens(activeRequestOverlay.text) : 0;
+}
+
+function replayStateForHistory() {
+  const state = createReplayState();
+  for (const message of history) {
+    const replay = { role: message.role, content: message.content, sseq: message.sseq };
+    state.messages.push(replay);
+    state.bySeq.set(replay.sseq, replay);
+  }
+  state.lastSeq = storageSeq;
+  state.maxSeq = storageSeq;
+  return state;
+}
+
+/** Install only the canonical session replay result after its receipt is durable. */
+function installReplayedHistory(state: ReturnType<typeof createReplayState>): void {
+  const previous = new Map(history.map((message) => [message.sseq, message] as const));
+  const next = state.messages.map((replay) => {
+    const old = previous.get(replay.sseq);
+    if (!old) throw new SessionStoreError(`prune replay lost storageSeq ${replay.sseq}`);
+    return {
+      ...old,
+      role: replay.role,
+      content: replay.content as Message["content"],
+      tokens: estimateReclaimTokens(replay.content),
+    };
+  });
+  history.splice(0, history.length, ...next);
+}
+
+function reclaimTargetEvidence(
+  target: ReturnType<typeof makePruneRevision>["targets"][number],
+  state: ReturnType<typeof createReplayState>,
+): Record<string, unknown> {
+  const message = state.bySeq.get(target.sseq);
+  const replacement = target.action === "stub" && message && Array.isArray(message.content)
+    ? message.content[target.blockIndex]
+    : null;
+  const replacementBytes = replacement === null ? null : sessionBlockBytes(replacement);
+  const reclaimedBytes = target.action === "drop"
+    ? target.original.bytes
+    : replacementBytes === null
+      ? null
+      : Math.max(0, target.original.bytes - replacementBytes);
+  return {
+    sseq: target.sseq,
+    ...(target.sourceSseq === undefined ? {} : { sourceSseq: target.sourceSseq }),
+    blockIndex: target.blockIndex,
+    action: target.action,
+    original: { ...target.original },
+    originalSha256: target.original.sha256,
+    originalBytes: target.original.bytes,
+    ...(replacement === null ? {} : { stubSha256: sessionBlockHash(replacement) }),
+    reclaimedTokens: target.reclaimedTokens,
+    tool: target.recovery.tool,
+    repro: target.recovery.repro,
+    recovery: target.recovery.source,
+    fallback: { ...target.recovery },
+    result: "applied",
+    reclaimedBytes,
+  };
+}
+
+function reclaimEvidenceForRevision(
+  revision: ReturnType<typeof makePruneRevision>,
+  state: ReturnType<typeof createReplayState>,
+  applied: boolean,
+  error: string | null = null,
+): Record<string, unknown> {
+  const targets = revision.targets.map((target) => reclaimTargetEvidence(target, state));
+  const reclaimedBytes = targets.every((target) => typeof target.reclaimedBytes === "number")
+    ? targets.reduce((sum, target) => sum + (target.reclaimedBytes as number), 0)
+    : null;
+  const reclaimedTokens = targets.reduce(
+    (sum, target) => sum + (typeof target.reclaimedTokens === "number" ? target.reclaimedTokens : 0),
+    0,
+  );
+  return {
+    attempted: true,
+    planned: true,
+    applied,
+    recovered: applied,
+    revisionId: revision.revisionId,
+    targetCount: revision.targets.length,
+    reclaimedBytes,
+    reclaimedTokens,
+    source: "session-record",
+    recovery: "full-read",
+    error,
+    targets,
+  };
+}
+
+/** Plan and durably apply the canonical reclaim receipt before changing the view. */
+async function reclaim(): Promise<number> {
+  const plan = planReclaimStubs(
+    history.map((message) => ({
+      role: message.role,
+      content: message.content,
+      sseq: message.sseq,
+      tokens: message.tokens,
+    })),
     {
-      systemTokens: tokenEstimate(systemPrompt()),
+      // The overlay is not durable and is never a prune target, but it still
+      // occupies the provider window for this logical prompt.
+      systemTokens: estimateReclaimTokens(systemPrompt()) + activeOverlayTokens(),
+      toolSchemaTokens: toolSchemaTokens(),
       usable: usableTokens(),
       protectTokens: protectTokens(),
       fillTokens: lastBilledTokens ?? undefined,
     },
   );
-  const targets: Array<{ sseq: number; blockIndex: number; action: PruneAction }> = [];
-  const ordered = plan.slice().sort((a, b) => a.msgIndex - b.msgIndex || b.blockIndex - a.blockIndex);
-  for (const pick of ordered) {
-    const m = history[pick.msgIndex]!;
-    if (typeof m.content === "string") continue;
-    const blocks = m.content as ContentBlock[];
-    const b = blocks[pick.blockIndex];
-    if (!b) continue;
-    if (pick.action === "drop") {
-      if (!isThinkingBlock(b)) continue;
-      if (blocks.filter((x) => !isThinkingBlock(x)).length === 0) continue;
-      targets.push({ sseq: m.sseq, blockIndex: pick.blockIndex, action: "drop" });
-      continue;
-    }
-    if (b.type !== "tool_result" || b.stubbed) continue;
-    const c = blockChars(b);
-    if (c < PRUNE_MIN_CHARS) continue;
-    targets.push({ sseq: m.sseq, blockIndex: pick.blockIndex, action: "stub" });
+  if (plan.length === 0) {
+    pendingReclaimEvidence = {
+      attempted: false,
+      planned: false,
+      applied: false,
+      recovered: null,
+      revisionId: null,
+      targetCount: 0,
+      reclaimedBytes: 0,
+      reclaimedTokens: 0,
+      source: null,
+      recovery: null,
+      error: null,
+      targets: [],
+    };
+    return 0;
   }
-  if (targets.length === 0) return 0;
-  persist({ type: "revision", kind: "prune", targets });
-  const touched = new Set<number>();
-  let changed = 0;
-  for (const pick of ordered) {
-    const m = history[pick.msgIndex]!;
-    if (typeof m.content === "string") continue;
-    const blocks = m.content as ContentBlock[];
-    const b = blocks[pick.blockIndex];
-    if (!b) continue;
-    if (pick.action === "drop") {
-      if (!isThinkingBlock(b)) continue;
-      if (blocks.filter((x) => !isThinkingBlock(x)).length === 0) continue;
-      blocks.splice(pick.blockIndex, 1);
-      changed++;
-      touched.add(pick.msgIndex);
-      continue;
-    }
-    if (b.type !== "tool_result" || b.stubbed) continue;
-    const c = blockChars(b);
-    if (c < PRUNE_MIN_CHARS) continue;
-    const stub = formatStub({ chars: c, tool: b.tool ?? "tool", sseq: m.sseq, repro: b.repro });
-    (b as unknown as { content: string }).content = stub;
-    b.chars = stub.length;
-    b.stubbed = true;
-    changed++;
-    touched.add(pick.msgIndex);
+  const revision = makePruneRevision(`prune-${randomUUID()}`, plan as ReclaimPick[]);
+  const before = replayStateForHistory();
+  let storageSeqForRevision: number;
+  try {
+    storageSeqForRevision = persist({ ...revision });
+  } catch (error) {
+    pendingReclaimEvidence = reclaimEvidenceForRevision(
+      revision,
+      before,
+      false,
+      error instanceof Error ? error.message : String(error),
+    );
+    throw error;
   }
-  for (const i of touched) history[i]!.tokens = estimate(history[i]!);
+  const applied = applySessionRecord(before, { ...revision, storageSeq: storageSeqForRevision });
+  if (!applied.ok) {
+    pendingReclaimEvidence = reclaimEvidenceForRevision(revision, before, false, applied.error);
+    throw new SessionStoreError(`durable prune receipt could not be applied: ${applied.error}`);
+  }
+  pendingReclaimEvidence = reclaimEvidenceForRevision(revision, before, true);
+  installReplayedHistory(before);
   postRevision = true;
   recordRevision("prune");
   syncIndicators();
-  return changed;
+  return revision.targets.length;
 }
 
 /** Last resort when reclamation alone cannot fit the window: drop whole old
@@ -3638,7 +5015,7 @@ function truncate(): boolean {
 let lastHandoff: string | null = null;
 
 function totalTokens(): number {
-  return tokenEstimate(systemPrompt()) + history.reduce((s, m) => s + m.tokens, 0);
+  return estimateReclaimTokens(systemPrompt()) + toolSchemaTokens() + activeOverlayTokens() + history.reduce((s, m) => s + m.tokens, 0);
 }
 
 /** Newest-first protected span, mirroring the planner's window. Returns the
@@ -3684,52 +5061,6 @@ function serializeForSummary(messages: Message[]): string {
   return parts.join("\n").slice(0, 60_000);
 }
 
-/** Structured inventories extracted from tool calls, not prose hope. */
-const INVENTORY_CAP = 40;
-
-function formatInventoryTag(tag: string, names: Set<string>): string {
-  const list = [...names];
-  const shown = list.slice(0, INVENTORY_CAP);
-  const omitted = list.length - shown.length;
-  const extra = omitted > 0 ? `\n<!-- ${omitted} paths omitted -->` : "";
-  return `<${tag}>\n${shown.join("\n")}${extra}\n</${tag}>`;
-}
-
-function fileInventories(messages: Array<{ role: string; content: unknown }>): string {
-  const read = new Set<string>();
-  const modified = new Set<string>();
-  for (const m of messages) {
-    if (typeof m.content === "string") continue;
-    if (!Array.isArray(m.content)) continue;
-    for (const b of m.content as ContentBlock[]) {
-      if (b.type !== "tool_use") continue;
-      const input = (b as { input?: { path?: string } }).input;
-      if (!input?.path) continue;
-      if (b.name === "read_file") read.add(input.path);
-      if (b.name === "write_file" || b.name === "edit") modified.add(input.path);
-    }
-  }
-  const sections: string[] = [];
-  if (read.size > 0) sections.push(formatInventoryTag("read-files", read));
-  if (modified.size > 0) sections.push(formatInventoryTag("modified-files", modified));
-  return sections.join("\n");
-}
-
-/** Format hidden model context for the next persisted user turn. */
-export function formatWorkingSet(opts: {
-  messages: Array<{ role: string; content: unknown }>;
-  hostContext?: string;
-}): string {
-  const inventories = fileInventories(opts.messages);
-  const host = (opts.hostContext ?? "").trim();
-  if (!inventories && !host) return "";
-  const parts = ["<working-set>"];
-  if (inventories) parts.push(inventories);
-  if (host) parts.push(host);
-  parts.push("</working-set>");
-  return parts.join("\n");
-}
-
 /** Collapse old turns into one handoff message. Runs on the cheap lane.
  *  Returns false when there is nothing safely evictable or the call fails;
  *  callers fall back to truncate. */
@@ -3741,9 +5072,11 @@ async function summarize(): Promise<boolean> {
   const prompt = `${prior}<session-to-compress>\n${serializeForSummary(evicted)}\n</session-to-compress>\n\nProduce the context handoff for continuing this session: task state, decisions made, files touched, open threads. Only output the handoff.`;
   const started = Date.now();
   currentAbort ??= new AbortController();
+  let foldedResult: Awaited<ReturnType<typeof completeText>> | null = null;
   try {
     const summarySystem = "You compress coding-agent session history. Only output the structured handoff.";
     const folded = await completeText(summaryRoute.provider, summaryRoute.model, summarySystem, prompt, currentAbort.signal);
+    foldedResult = folded;
     const u = folded.usage;
     if (u) {
       accumulateUsage(u);
@@ -3752,26 +5085,66 @@ async function summarize(): Promise<boolean> {
     }
     const text = folded.text;
     if (!text) {
-      writeSummaryTrace({ status: "empty", usage: u, started, seq: [storageSeq, storageSeq], revisions: 0, kinds: [] });
+      await writeSummaryTrace({
+        status: "empty",
+        usage: u,
+        started,
+        seq: null,
+        revisions: 0,
+        kinds: [],
+        attempt: folded.traceAttempt,
+        cache: folded.cache,
+        ttftMs: folded.ttftMs,
+      });
       return false;
     }
-    const inventories = fileInventories(evicted);
+    // Reuse the canonical request inventory so summary handoffs and the
+    // provider overlay agree on ordering, escaping, and omission bounds.
+    const inventoryOverlay = buildRequestOverlay({ messages: evicted, hostContext: "" });
+    const inventoryText = inventoryOverlay?.text ?? "";
+    const inventories = inventoryText.startsWith("<working-set>\n") && inventoryText.endsWith("\n</working-set>")
+      ? inventoryText.slice("<working-set>\n".length, -"\n</working-set>".length)
+      : inventoryText;
     const handoffBody = `${text}${inventories ? `\n\n${inventories}` : ""}`;
     const handoff = `<context-handoff>\n${handoffBody}\n</context-handoff>`;
     const sseq = storageSeq + 1;
     persist({ type: "revision", kind: "summarize", evicted: boundary, summarySseq: sseq, message: { role: "user", content: handoff } });
     lastHandoff = handoffBody;
     history.splice(0, boundary);
-    const m: Message = { role: "user", content: handoff, tokens: estimate({ role: "user", content: handoff, tokens: 0, sseq }), sseq };
+    const m: Message = { role: "user", content: handoff, tokens: estimateReclaimTokens(handoff), sseq };
     history.unshift(m);
     postRevision = true;
     recordRevision("summarize");
     syncIndicators();
-    writeSummaryTrace({ status: "ok", usage: u, started, seq: [m.sseq, m.sseq], revisions: 1, kinds: ["summarize"] });
+    await writeSummaryTrace({
+      status: "ok",
+      usage: u,
+      started,
+      seq: [m.sseq, m.sseq],
+      revisions: 1,
+      kinds: ["summarize"],
+      attempt: folded.traceAttempt,
+      cache: folded.cache,
+      ttftMs: folded.ttftMs,
+    });
     out(`[context summarized: ${boundary} messages folded]\n`);
     return true;
   } catch (err) {
-    writeSummaryTrace({ status: "error", usage: null, started, seq: [storageSeq, storageSeq], revisions: 0, kinds: [] });
+    // completeText owns provider-error persistence. A storage failure after a
+    // successful provider response still needs its summary attempt record.
+    if (foldedResult?.traceAttempt && !foldedResult.traceAttempt.written) {
+      await writeSummaryTrace({
+        status: "storage-error",
+        usage: foldedResult.usage,
+        started,
+        seq: null,
+        revisions: 0,
+        kinds: [],
+        attempt: foldedResult.traceAttempt,
+        cache: foldedResult.cache,
+        ttftMs: foldedResult.ttftMs,
+      });
+    }
     if (!interrupted) out(`\n(summarization failed: ${(err as Error).message})\n`);
     return false;
   }
@@ -3786,51 +5159,59 @@ type Block =
   | { type: "server_tool_use"; id: string; name: string; input: Record<string, unknown> }
   | { type: "web_search_tool_result"; tool_use_id: string; content: unknown };
 
-interface Usage {
-  input: number;
-  cacheRead: number;
-  cacheWrite: number;
-  output: number;
-}
+type Usage = ProviderUsage;
 
 const COMPACT_TOKEN_FORMAT = new Intl.NumberFormat("en-US", {
   notation: "compact",
   maximumFractionDigits: 1,
 });
 
-function safeTokenCount(value: number): number {
-  return Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
+function safeTokenCount(value: number | null): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
 }
 
-function compactTokenCount(value: number): string {
+function compactTokenCount(value: number | null): string {
   return COMPACT_TOKEN_FORMAT.format(safeTokenCount(value));
 }
 
 export function formatUsageIndicators(
-  usage: { input: number; cacheRead: number; cacheWrite: number; output: number },
+  usage: Pick<Usage, "input" | "cacheRead" | "cacheWrite" | "output">,
   contextTokens: number,
   maxContext: number,
   usd: number | null = null,
 ): string {
   const uncachedInput = safeTokenCount(usage.input);
   const cacheRead = safeTokenCount(usage.cacheRead);
-  const input = uncachedInput + cacheRead + safeTokenCount(usage.cacheWrite);
-  const cache = input > 0 ? `${Math.round((cacheRead / input) * 100)}%` : "--";
+  const cacheWrite = safeTokenCount(usage.cacheWrite);
+  const input = uncachedInput + cacheRead + cacheWrite;
+  const inputKnown = [usage.input, usage.cacheRead, usage.cacheWrite].every(
+    (value) => typeof value === "number" && Number.isFinite(value) && value >= 0,
+  );
+  const cache = inputKnown && input > 0 ? `${Math.round((cacheRead / input) * 100)}%` : "--";
   const context = safeTokenCount(contextTokens);
   const limit = Math.max(1, safeTokenCount(maxContext));
   const contextPct = Math.round((context / limit) * 100);
   const cost = usd !== null && Number.isFinite(usd) && usd >= 0 ? ` · last $${usd.toFixed(4)}` : "";
-  return `tokens ${compactTokenCount(input)} in/${compactTokenCount(usage.output)} out · cache ${cache} · context ~${compactTokenCount(context)}/${compactTokenCount(limit)} ${contextPct}%${cost}`;
+  const inputDisplay = inputKnown ? compactTokenCount(input) : "?";
+  const outputDisplay = typeof usage.output === "number" && Number.isFinite(usage.output) && usage.output >= 0
+    ? compactTokenCount(usage.output)
+    : "?";
+  return `tokens ${inputDisplay} in/${outputDisplay} out · cache ${cache} · context ~${compactTokenCount(context)}/${compactTokenCount(limit)} ${contextPct}%${cost}`;
 }
 
-let sessionUsage: Usage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
+let sessionUsage: Usage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0 };
 let lastUsd: number | null = null;
 
+function addKnownUsage(previous: number | null, next: number | null): number | null {
+  if (previous === null || next === null) return null;
+  return previous + next;
+}
+
 function accumulateUsage(usage: Usage): void {
-  sessionUsage.input += safeTokenCount(usage.input);
-  sessionUsage.cacheRead += safeTokenCount(usage.cacheRead);
-  sessionUsage.cacheWrite += safeTokenCount(usage.cacheWrite);
-  sessionUsage.output += safeTokenCount(usage.output);
+  sessionUsage.input = addKnownUsage(sessionUsage.input, usage.input);
+  sessionUsage.cacheRead = addKnownUsage(sessionUsage.cacheRead, usage.cacheRead);
+  sessionUsage.cacheWrite = addKnownUsage(sessionUsage.cacheWrite, usage.cacheWrite);
+  sessionUsage.output = addKnownUsage(sessionUsage.output, usage.output);
 }
 
 interface CallResult {
@@ -3839,6 +5220,7 @@ interface CallResult {
   ttftMs: number | null;
   stopReason: string | null;
   cache: TraceCacheDiagnostics;
+  traceAttempt: TraceAttemptState | null;
 }
 
 let currentAbort: AbortController | null = null;
@@ -3869,6 +5251,14 @@ function endpointFor(auth: { providerId: ProviderId; baseUrl: string }, model = 
   return `${base}/chat/completions`;
 }
 
+type ProviderRetryEvent = {
+  status: number;
+  kind: "oauth-refresh" | "retryable-status";
+  retryCount: number;
+};
+
+type ProviderRetryHook = (event: ProviderRetryEvent, cache?: TraceCacheDiagnostics | null) => Promise<void>;
+
 async function providerPost(
   providerId: ProviderId,
   body: unknown,
@@ -3876,6 +5266,8 @@ async function providerPost(
   model = "",
   stream = true,
   codexAffinity = false,
+  cacheIdentity: MainCacheIdentity | null = null,
+  onRetry?: ProviderRetryHook,
 ): Promise<Response> {
   let replayed = false;
   let retries = 0;
@@ -3883,7 +5275,7 @@ async function providerPost(
     if (signal?.aborted) throw new Error("aborted");
     const auth = await resolveAuth(providerId);
     if (!auth.ok) throw new Error(auth.error);
-    let headers: Record<string, string> = { ...auth.headers, ...cacheSessionHeaders(providerId, sessionId) };
+    let headers: Record<string, string> = { ...auth.headers, ...cacheSessionHeaders(cacheIdentity) };
     if (codexAffinity && providerId === "openai-codex" && codexTurnState) {
       headers["x-codex-turn-state"] = codexTurnState;
     }
@@ -3903,8 +5295,9 @@ async function providerPost(
       if (nextTurnState) codexTurnState = nextTurnState;
     }
     if (res.status === 401) {
-      await res.text();
+      await readBoundedHttpBody(res, PROVIDER_ERROR_BODY_CAP_BYTES);
       if (auth.kind === "oauth" && !replayed) {
+        await onRetry?.({ status: 401, kind: "oauth-refresh", retryCount: retries + 1 });
         const refreshed = await refreshOauth(providerId);
         if (!refreshed.ok) throw new Error(refreshed.error);
         replayed = true;
@@ -3914,8 +5307,9 @@ async function providerPost(
     }
     const wait = retryAfter(res.status, res.headers, retries);
     if (wait != null) {
-      await res.text();
+      await readBoundedHttpBody(res, PROVIDER_ERROR_BODY_CAP_BYTES);
       retries++;
+      await onRetry?.({ status: res.status, kind: "retryable-status", retryCount: retries });
       await sleep(wait, signal);
       continue;
     }
@@ -3923,20 +5317,198 @@ async function providerPost(
   }
 }
 
-function normalizeUsage(u: Record<string, number> | undefined): Usage | null {
+/**
+ * Persist the attempt that is about to be retried, then create the linked
+ * attempt that will carry the eventual response.  Provider retries happen
+ * below the model-loop boundary, so they must be represented here rather
+ * than collapsed into one logical request record.
+ */
+async function rotateProviderRetryAttempt(
+  attempt: TraceAttemptState | null,
+  event: ProviderRetryEvent,
+  cache: TraceCacheDiagnostics | null,
+): Promise<TraceAttemptState | null> {
+  if (!attempt || attempt.written) return attempt;
+  const reason = event.kind === "oauth-refresh" ? "oauth-refresh" : `provider-${event.status}`;
+  const ended = Date.now();
+  await writeTraceAttempt(attempt, {
+    status: "retrying",
+    storageSeqRange: null,
+    toolNames: [],
+    usage: null,
+    usd: null,
+    cost: traceCostForUsage(null, attempt.provider, attempt.model, attempt.role, cache),
+    ttftMs: null,
+    turnMs: Math.max(0, ended - attempt.started),
+    revisions,
+    revisionKinds,
+    wasteTokens: null,
+    wasteCause: reason,
+    cache,
+  });
+  return beginTraceAttempt(attempt.role, {
+    parentAttemptId: attempt.attemptId,
+    retryOfAttemptId: attempt.attemptId,
+    fallbackReason: reason,
+    retryCount: event.retryCount,
+  });
+}
+
+function providerToken(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/** Normalize provider counters without turning an absent field into zero. */
+export function normalizeProviderUsage(u: Record<string, unknown> | undefined): Usage | null {
   if (!u) return null;
-  const prompt = u.input_tokens ?? u.prompt_tokens ?? 0;
-  const output = u.output_tokens ?? u.completion_tokens ?? 0;
   return {
-    input: prompt,
-    cacheRead: u.cache_read_input_tokens ?? 0,
-    cacheWrite: u.cache_creation_input_tokens ?? 0,
-    output,
+    input: providerToken(u.input_tokens ?? u.prompt_tokens),
+    cacheRead: providerToken(u.cache_read_input_tokens ?? u.cached_tokens),
+    cacheWrite: providerToken(u.cache_creation_input_tokens ?? u.cache_write_tokens),
+    output: providerToken(u.output_tokens ?? u.completion_tokens),
+    reasoning: providerToken(u.reasoning_tokens),
   };
 }
 
+function mergeProviderUsage(previous: Usage | null, next: Usage | null): Usage | null {
+  if (!previous) return next;
+  if (!next) return previous;
+  return {
+    input: next.input ?? previous.input,
+    cacheRead: next.cacheRead ?? previous.cacheRead,
+    cacheWrite: next.cacheWrite ?? previous.cacheWrite,
+    output: next.output ?? previous.output,
+    reasoning: next.reasoning ?? previous.reasoning,
+  };
+}
+
+const PROVIDER_BODY_CAP_BYTES = 256 * 1024;
+const PROVIDER_ERROR_BODY_CAP_BYTES = 64 * 1024;
+
+/** Read a response body through the shared UTF-8 bounded accumulator. */
+export async function readBoundedHttpBody(
+  res: Response,
+  maxBytes = PROVIDER_BODY_CAP_BYTES,
+): Promise<BoundedText> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new Error("response body bound must be a non-negative safe integer");
+  }
+  const marker = "[response body truncated]";
+  if (!res.body) {
+    const declared = Number(res.headers.get("content-length")?.trim() ?? "");
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      return boundedToolResult("", {
+        maxBytes,
+        marker: "[response body exceeds bound]",
+        state: "failed",
+        isError: true,
+      });
+    }
+    return boundedToolResult("", { maxBytes, marker, state: "complete", isError: false });
+  }
+  const accumulator = new BoundedTextAccumulator({ maxBytes, marker });
+  const reader = res.body.getReader();
+  let sourceBytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      sourceBytes += value.byteLength;
+      accumulator.push(value);
+      if (sourceBytes > maxBytes) {
+        try {
+          await reader.cancel();
+        } catch {
+          /* The body is already bounded; cancellation is best effort. */
+        }
+        break;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return accumulator.finish("complete");
+}
+
+async function readBoundedJson(res: Response, maxBytes = PROVIDER_BODY_CAP_BYTES): Promise<unknown> {
+  const body = await readBoundedHttpBody(res, maxBytes);
+  if (body.state !== "complete" || body.truncated) {
+    throw new Error(`response JSON exceeded ${maxBytes} bytes`);
+  }
+  try {
+    return JSON.parse(body.text) as unknown;
+  } catch {
+    throw new Error("response body was not valid JSON");
+  }
+}
+
+const ANTHROPIC_SSE_BUFFER_BYTES = 128 * 1024;
+const ANTHROPIC_EVENT_MAX_COUNT = 4_096;
+const ANTHROPIC_EVENT_MAX_BYTES = 4 * 1024 * 1024;
+const ANTHROPIC_JSON_PART_MAX_COUNT = 64;
+const ANTHROPIC_JSON_PART_MAX_BYTES = 256 * 1024;
+const ANTHROPIC_AGGREGATE_MAX_BYTES = 256 * 1024;
+const ANTHROPIC_AGGREGATE_TOTAL_BYTES = 1 * 1024 * 1024;
+const ANTHROPIC_CITATION_MAX_COUNT = 256;
+const ANTHROPIC_CITATION_MAX_BYTES = 128 * 1024;
+
+class ProviderStreamLimitError extends Error {
+  readonly traceStatus = "incomplete" as const;
+  readonly cache: TraceCacheDiagnostics | null;
+
+  constructor(message: string, cache: TraceCacheDiagnostics | null) {
+    super(`provider output incomplete: ${message}`);
+    this.name = "ProviderStreamLimitError";
+    this.cache = cache;
+  }
+}
+
+function classifyProviderStreamError(
+  error: unknown,
+  cache: TraceCacheDiagnostics | null,
+): ProviderStreamLimitError | null {
+  if (error instanceof ProviderStreamLimitError) return error;
+  if (interrupted || currentAbort?.signal.aborted) return null;
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    /provider SSE|SSE .*incomplete|incomplete EOF|partial tool JSON|malformed SSE JSON|ended before a terminal|decoded buffer|payload bytes|event count|stream chunk/i.test(message)
+  ) {
+    return new ProviderStreamLimitError(message, cache);
+  }
+  return null;
+}
+
+async function readProviderSseJson(
+  body: ReadableStream<Uint8Array>,
+  signal: AbortSignal | undefined,
+  cache: TraceCacheDiagnostics | null,
+  filter?: (event: Record<string, unknown>) => boolean,
+): Promise<Array<Record<string, unknown>>> {
+  try {
+    const events = await readSseJson(body, signal, filter);
+    if (interrupted || signal?.aborted) throw new Error("aborted");
+    return events;
+  } catch (error) {
+    if (interrupted || signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+      throw new Error("aborted");
+    }
+    throw classifyProviderStreamError(error, cache) ?? error;
+  }
+}
+
+function failProviderStream(
+  reason: string,
+  cache: TraceCacheDiagnostics | null,
+  reader?: ReadableStreamDefaultReader<Uint8Array>,
+): never {
+  if (interrupted || currentAbort?.signal.aborted) throw new Error("aborted");
+  currentAbort?.abort();
+  if (reader) void reader.cancel(reason).catch(() => undefined);
+  throw new ProviderStreamLimitError(reason, cache);
+}
+
 async function apiFailure(res: Response, hint = ""): Promise<never> {
-  const detail = (await res.text()).slice(0, 300);
+  const detail = (await readBoundedHttpBody(res, PROVIDER_ERROR_BODY_CAP_BYTES)).text.slice(0, 300);
   throw new Error(`API ${res.status}${detail ? `: ${detail}` : ""}${hint}`);
 }
 
@@ -3948,111 +5520,257 @@ function textFromStreamBlocks(blocks: Array<Record<string, unknown>>): string {
     .trim();
 }
 
+async function completeTextBody(
+  providerId: ProviderId,
+  model: string,
+  system: string,
+  prompt: string,
+  signal: AbortSignal | undefined,
+  onRetry?: ProviderRetryHook,
+  onCache?: (cache: TraceCacheDiagnostics) => void,
+): Promise<{ text: string; usage: Usage | null; ttftMs: number | null; cache: TraceCacheDiagnostics | null }> {
+  const proto = providerProtocol(providerId, model);
+  const cacheIdentity = cacheIdentityForRole("summary", providerId, model);
+  const cacheKey = cacheIdentity?.key;
+  const sendCacheKey = Boolean(cacheKey) && cacheCapabilitySupported(providerId, model, CACHE_CAPABILITY_FEATURE.promptCacheKey);
+  const sendSessionId = providerId === "openrouter" ? cacheKey || undefined : undefined;
+  if (proto === "anthropic-messages") {
+    const thinking = thinkingRequestFor(providerId, model, "off");
+    const requestBody = {
+      model,
+      max_tokens: 2048,
+      system,
+      messages: [{ role: "user", content: prompt }],
+      ...(thinking ? { thinking } : {}),
+    };
+    const requestCache = cacheDiagnosticsForRequest(
+      requestBody,
+      { provider: providerId, protocol: proto, model },
+      cacheIdentity,
+      null,
+      null,
+    );
+    onCache?.(requestCache);
+    const res = await providerPost(
+      providerId,
+      requestBody,
+      signal,
+      model,
+      true,
+      false,
+      cacheIdentity,
+      onRetry ? async (event) => onRetry(event, requestCache) : undefined,
+    );
+    if (!res.ok) await apiFailure(res);
+    const data = await readBoundedJson(res) as { usage?: Record<string, number>; content?: Array<{ type: string; text?: string }> };
+    const text = (data.content ?? []).map((c) => c.text ?? "").join("").trim();
+    return {
+      text,
+      usage: normalizeProviderUsage(data.usage),
+      ttftMs: null,
+      cache: requestCache,
+    };
+  }
+  if (proto === "google-generate") {
+    const effort = reasoningEffortFor(providerId, model, "off");
+    const requestBody = googleGenerateBody(
+      system,
+      [{ role: "user", content: prompt }],
+      [],
+      {
+        maxTokens: 2048,
+        ...(effort ? { reasoningEffort: effort, googleThinking: true } : {}),
+      },
+    );
+    const requestCache = cacheDiagnosticsForRequest(
+      requestBody,
+      { provider: providerId, protocol: proto, model },
+      cacheIdentity,
+      null,
+      null,
+    );
+    onCache?.(requestCache);
+    const res = await providerPost(
+      providerId,
+      requestBody,
+      signal,
+      model,
+      true,
+      false,
+      cacheIdentity,
+      onRetry ? async (event) => onRetry(event, requestCache) : undefined,
+    );
+    if (!res.ok) await apiFailure(res);
+    if (!res.body) throw new Error(`API ${res.status}`);
+    const events = await readProviderSseJson(res.body, signal, requestCache);
+    const parsed = googleResultFromEvents(events, () => {}, Date.now());
+    if (parsed.error) throw new Error(parsed.error);
+    return {
+      text: textFromStreamBlocks(parsed.blocks),
+      usage: parsed.usage,
+      ttftMs: parsed.ttftMs,
+      cache: requestCache,
+    };
+  }
+  if (usesResponsesApi(providerId, model)) {
+    // Codex and Zen GPT require a streaming list input. String input and stream:false return 400.
+    const requestBody = responsesBody(model, system, [{ role: "user", content: prompt }], [], {
+      ...(providerId === "openai-codex" ? {} : { maxTokens: 2048 }),
+      ...(sendCacheKey ? { cacheKey } : {}),
+      ...(sendSessionId ? { sessionId: sendSessionId } : {}),
+      includeEncryptedReasoning: false,
+    });
+    const requestCache = cacheDiagnosticsForRequest(
+      requestBody,
+      { provider: providerId, protocol: proto, model },
+      cacheIdentity,
+      null,
+      null,
+    );
+    onCache?.(requestCache);
+    const res = await providerPost(
+      providerId,
+      requestBody,
+      signal,
+      model,
+      true,
+      false,
+      cacheIdentity,
+      onRetry ? async (event) => onRetry(event, requestCache) : undefined,
+    );
+    if (!res.ok) await apiFailure(res);
+    if (!res.body) throw new Error(`API ${res.status}`);
+    const events = await readProviderSseJson(res.body, signal, requestCache);
+    const parsed = responsesResultFromEvents(events, () => {}, Date.now());
+    if (parsed.error) throw new Error(parsed.error);
+    return {
+      text: textFromStreamBlocks(parsed.blocks),
+      usage: parsed.usage,
+      ttftMs: parsed.ttftMs,
+      cache: requestCache,
+    };
+  }
+  const requestBody = {
+    model,
+    stream: false,
+    ...(providerId === "openai" ? { max_completion_tokens: 2048 } : { max_tokens: 2048 }),
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: prompt },
+    ],
+    ...(sendCacheKey ? { prompt_cache_key: cacheKey } : {}),
+    ...(sendSessionId ? { session_id: sendSessionId } : {}),
+  };
+  const requestCache = cacheDiagnosticsForRequest(
+    requestBody,
+    { provider: providerId, protocol: proto, model },
+    cacheIdentity,
+    null,
+    null,
+  );
+  onCache?.(requestCache);
+  const res = await providerPost(
+    providerId,
+    requestBody,
+    signal,
+    model,
+    false,
+    false,
+    cacheIdentity,
+    onRetry ? async (event) => onRetry(event, requestCache) : undefined,
+  );
+  if (!res.ok) await apiFailure(res);
+  const got = textFromCompletionPayload(await readBoundedJson(res));
+  return {
+    text: got.text,
+    usage: normalizeProviderUsage(got.usage),
+    ttftMs: null,
+    cache: requestCache,
+  };
+}
+
 async function completeText(
   providerId: ProviderId,
   model: string,
   system: string,
   prompt: string,
   signal: AbortSignal | undefined,
-): Promise<{ text: string; usage: Usage | null }> {
-  const proto = providerProtocol(providerId, model);
-  const cacheKey = cacheSessionKey(sessionId);
-  const sendCacheKey = Boolean(cacheKey) && usesPromptCacheKey(providerId, model);
-  const sendSessionId = providerId === "openrouter" ? cacheKey || undefined : undefined;
-  if (proto === "anthropic-messages") {
-    const thinking = thinkingRequestFor(providerId, model, "off");
-    const res = await providerPost(
+): Promise<{ text: string; usage: Usage | null; ttftMs: number | null; cache: TraceCacheDiagnostics | null; traceAttempt: TraceAttemptState | null }> {
+  let attempt = beginTraceAttempt("summary");
+  let summaryCache: TraceCacheDiagnostics | null = null;
+  const onRetry: ProviderRetryHook = async (event, cache) => {
+    summaryCache = cache ?? summaryCache;
+    attempt = await rotateProviderRetryAttempt(attempt, event, summaryCache);
+  };
+  try {
+    const result = await completeTextBody(
       providerId,
-      {
-        model,
-        max_tokens: 2048,
-        system,
-        messages: [{ role: "user", content: prompt }],
-        ...(thinking ? { thinking } : {}),
-      },
-      signal,
       model,
+      system,
+      prompt,
+      signal,
+      onRetry,
+      (cache) => { summaryCache = cache; },
     );
-    if (!res.ok) await apiFailure(res);
-    const data = (await res.json()) as { usage?: Record<string, number>; content?: Array<{ type: string; text?: string }> };
-    const text = (data.content ?? []).map((c) => c.text ?? "").join("").trim();
-    return { text, usage: normalizeUsage(data.usage) };
-  }
-  if (proto === "google-generate") {
-    const effort = reasoningEffortFor(providerId, model, "off");
-    const res = await providerPost(
-      providerId,
-      googleGenerateBody(
-        system,
-        [{ role: "user", content: prompt }],
-        [],
-        {
-          maxTokens: 2048,
-          ...(effort ? { reasoningEffort: effort, googleThinking: true } : {}),
-        },
+    if (attempt) attempt.ended = Date.now();
+    return { ...result, traceAttempt: attempt };
+  } catch (error) {
+    const streamFailure = error instanceof ProviderStreamLimitError ? error : null;
+    await writeTraceAttempt(attempt, {
+      status: streamFailure?.traceStatus ?? "error",
+      storageSeqRange: null,
+      toolNames: [],
+      usage: null,
+      usd: null,
+      ttftMs: null,
+      turnMs: Date.now() - (attempt?.started ?? Date.now()),
+      revisions: 0,
+      revisionKinds: [],
+      wasteTokens: null,
+      wasteCause: streamFailure?.message ?? null,
+      cost: traceCostForUsage(
+        null,
+        attempt?.provider ?? providerId,
+        attempt?.model ?? model,
+        "summary",
+        summaryCache,
       ),
-      signal,
-      model,
-    );
-    if (!res.ok) await apiFailure(res);
-    if (!res.body) throw new Error(`API ${res.status}`);
-    const events = await readSseJson(res.body, signal);
-    const parsed = googleResultFromEvents(events, () => {}, Date.now());
-    if (parsed.error) throw new Error(parsed.error);
-    return { text: textFromStreamBlocks(parsed.blocks), usage: parsed.usage };
+      cache: summaryCache ?? streamFailure?.cache ?? null,
+    });
+    throw error;
   }
-  if (usesResponsesApi(providerId, model)) {
-    // Codex and Zen GPT require a streaming list input. String input and stream:false return 400.
-    const res = await providerPost(
-      providerId,
-      responsesBody(model, system, [{ role: "user", content: prompt }], [], {
-        ...(providerId === "openai-codex" ? {} : { maxTokens: 2048 }),
-        ...(sendCacheKey ? { cacheKey } : {}),
-        ...(sendSessionId ? { sessionId: sendSessionId } : {}),
-        includeEncryptedReasoning: false,
-      }),
-      signal,
-      model,
-    );
-    if (!res.ok) await apiFailure(res);
-    if (!res.body) throw new Error(`API ${res.status}`);
-    const events = await readSseJson(res.body, signal);
-    const parsed = responsesResultFromEvents(events, () => {}, Date.now());
-    if (parsed.error) throw new Error(parsed.error);
-    return { text: textFromStreamBlocks(parsed.blocks), usage: parsed.usage };
-  }
-  const res = await providerPost(
-    providerId,
-    {
-      model,
-      stream: false,
-      ...(providerId === "openai" ? { max_completion_tokens: 2048 } : { max_tokens: 2048 }),
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: prompt },
-      ],
-      ...(sendCacheKey ? { prompt_cache_key: cacheKey } : {}),
-      ...(sendSessionId ? { session_id: sendSessionId } : {}),
-    },
-    signal,
-    model,
-  );
-  if (!res.ok) await apiFailure(res);
-  const got = textFromCompletionPayload(await res.json());
-  return { text: got.text, usage: normalizeUsage(got.usage) };
 }
 
-async function callModel(messages: Message[]): Promise<CallResult> {
+async function callModel(
+  messages: Message[],
+  overlay: RequestOverlay | null = activeRequestOverlay,
+  retry?: { retryOfAttemptId?: string | null; fallbackReason?: string | null; retryCount?: number },
+): Promise<CallResult> {
   nonTtyTranscriptSection = null;
   const started = Date.now();
+  let traceAttempt = beginTraceAttempt("main", {
+    retryOfAttemptId: retry?.retryOfAttemptId,
+    fallbackReason: retry?.fallbackReason,
+    retryCount: retry?.retryCount ?? (retry?.retryOfAttemptId ? 1 : 0),
+  });
   const sys = systemPrompt();
-  const prefix = buildCachedPrefix(sys, clientTools, route.provider);
   const proto = providerProtocol(route.provider, route.model);
+  const anthropicCacheSupported = cacheCapabilitySupported(route.provider, route.model, CACHE_CAPABILITY_FEATURE.anthropicCacheControl);
+  const prefix = anthropicCacheSupported
+    ? buildCachedPrefix(sys, clientTools, route.provider)
+    : { system: [{ type: "text", text: sys }], tools: clientTools.map((tool) => ({ ...tool })) };
   const imageRoots = [sessionFile ? dirname(sessionFile) : "", eventsDir].filter(Boolean);
-  const requestMessages = toRequest(messages, imageRoots);
-  const historyForProvider =
-    proto === "anthropic-messages" ? stampHistoryCache(requestMessages, route.provider) : requestMessages;
-  const providerMessages = historyForProvider;
+  const persistedProjection = projectRequest({ messages, imageRoots, overlay: null });
+  if (!persistedProjection.ok) throw new Error(`request projection failed: ${persistedProjection.error}`);
+  const persistedMessages = persistedProjection.persistedMessages;
+  const prefixMarkerCount = proto === "anthropic-messages" && anthropicCacheSupported
+    ? cacheMarkerDetails({ system: prefix.system, tools: prefix.tools, messages: persistedMessages }).count
+    : 0;
+  const stampedMessages =
+    proto === "anthropic-messages" && anthropicCacheSupported && prefixMarkerCount < 4
+      ? stampHistoryCache(persistedMessages, route.provider)
+      : persistedMessages;
+  const providerMessages = appendRequestOverlay(stampedMessages as RequestMessage[], overlay);
   const kernelMessages = providerMessages.map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content as string | Array<Record<string, unknown>>,
@@ -4063,12 +5781,12 @@ async function callModel(messages: Message[]): Promise<CallResult> {
   const thinking = thinkingRequestFor(route.provider, route.model, effortWanted);
   const adaptiveEffort = adaptiveEffortFor(route.provider, route.model, effortWanted);
   const reasoningEffort = reasoningEffortFor(route.provider, route.model, effortWanted);
-  const cacheKey = cacheSessionKey(sessionId);
-  const sendCacheKey = Boolean(cacheKey) && usesPromptCacheKey(route.provider, route.model);
+  const cacheIdentity = cacheIdentityForRole("main", route.provider, route.model);
+  const cacheKey = cacheIdentity?.key;
+  const sendCacheKey = Boolean(cacheKey) && cacheCapabilitySupported(route.provider, route.model, CACHE_CAPABILITY_FEATURE.promptCacheKey);
   const sendSessionId = route.provider === "openrouter" ? cacheKey || undefined : undefined;
-  const sendCacheControl = route.provider === "openrouter" && usesAnthropicCacheMarkers(route.provider, route.model);
-  const sendExplicitCache = usesOpenAIExplicitCache(route.model, route.provider);
-  const sendPromptCacheOptions = usesPromptCacheOptions(route.provider, route.model);
+  const sendExplicitCache = cacheCapabilitySupported(route.provider, route.model, CACHE_CAPABILITY_FEATURE.promptCacheBreakpoint);
+  const sendPromptCacheOptions = cacheCapabilitySupported(route.provider, route.model, CACHE_CAPABILITY_FEATURE.promptCacheOptions);
   const anthropicMessages =
     proto === "anthropic-messages"
       ? providerMessages.map((m) => {
@@ -4099,7 +5817,6 @@ async function callModel(messages: Message[]): Promise<CallResult> {
             ...(route.provider === "openai-codex" ? {} : { maxTokens }),
             ...(sendCacheKey ? { cacheKey } : {}),
             ...(sendSessionId ? { sessionId: sendSessionId } : {}),
-            ...(sendCacheControl ? { cacheControl: true } : {}),
             ...(sendExplicitCache
               ? {
                   explicitCacheBreakpoint: true,
@@ -4129,19 +5846,72 @@ async function callModel(messages: Message[]): Promise<CallResult> {
   let cacheDiagnostics = cacheDiagnosticsForRequest(
     body,
     { provider: route.provider, protocol: proto, model: route.model },
-    sendCacheKey ? cacheKey : null,
+    cacheIdentity,
+    overlay,
+    currentHostContext,
   );
-  let res = await providerPost(route.provider, body, currentAbort?.signal, route.model, true, true);
+  const onRetry: ProviderRetryHook = async (event) => {
+    traceAttempt = await rotateProviderRetryAttempt(traceAttempt, event, cacheDiagnostics);
+    // The retry body is byte-identical; keep that fact on the effective
+    // attempt so cache attribution can distinguish it from a new prompt.
+    cacheDiagnostics = { ...cacheDiagnostics, retryPromptIdentical: true };
+  };
+  let optionalCacheFallbackUsed = false;
+  let res = await providerPost(route.provider, body, currentAbort?.signal, route.model, true, true, cacheIdentity, onRetry);
   if (!res.ok || !res.body) {
-    const detail = (await res.text()).slice(0, 300);
-    if (res.status === 400 && /prompt_cache_(?:breakpoint|options)/i.test(detail) && usesResponsesApi(route.provider, route.model)) {
+    const detail = (await readBoundedHttpBody(res, PROVIDER_ERROR_BODY_CAP_BYTES)).text.slice(0, 300);
+    const optionalFieldsRequested = body.prompt_cache_options !== undefined || JSON.stringify(body).includes("prompt_cache_breakpoint");
+    if (
+      !optionalCacheFallbackUsed &&
+      res.status === 400 &&
+      optionalFieldsRequested &&
+      /prompt_cache_(?:breakpoint|options)/i.test(detail) &&
+      usesResponsesApi(route.provider, route.model)
+    ) {
+      optionalCacheFallbackUsed = true;
+      recordRejectedCacheFields(route.provider, route.model, body, detail);
+      const rejectedCacheDiagnostics = cacheDiagnosticsForRequest(
+        body,
+        { provider: route.provider, protocol: proto, model: route.model },
+        cacheIdentity,
+        overlay,
+        currentHostContext,
+        "unsupported-cache-field",
+        cacheDiagnostics.policy,
+      );
+      await writeTraceAttempt(traceAttempt, {
+        status: "fallback",
+        storageSeqRange: null,
+        toolNames: [],
+        usage: null,
+        usd: null,
+        ttftMs: null,
+        turnMs: Date.now() - (traceAttempt?.started ?? started),
+        revisions,
+        revisionKinds,
+        wasteTokens: null,
+        wasteCause: "cache-policy-fallback",
+        cache: rejectedCacheDiagnostics,
+      });
+      const previousAttemptId = traceAttempt?.attemptId ?? null;
+      traceAttempt = beginTraceAttempt("main", {
+        parentAttemptId: previousAttemptId,
+        retryOfAttemptId: previousAttemptId,
+        fallbackReason: "unsupported-cache-field",
+        retryCount: (traceAttempt?.retryCount ?? 0) + 1,
+      });
       body = stripResponsesBreakpoints(body);
       cacheDiagnostics = cacheDiagnosticsForRequest(
         body,
         { provider: route.provider, protocol: proto, model: route.model },
-        sendCacheKey ? cacheKey : null,
+        cacheIdentity,
+        overlay,
+        currentHostContext,
+        "unsupported-cache-field",
+        rejectedCacheDiagnostics.policy,
+        true,
       );
-      res = await providerPost(route.provider, body, currentAbort?.signal, route.model, true, true);
+      res = await providerPost(route.provider, body, currentAbort?.signal, route.model, true, true, cacheIdentity, onRetry);
     } else {
       const hint =
         proto === "anthropic-messages" && /web_search/i.test(detail)
@@ -4151,22 +5921,27 @@ async function callModel(messages: Message[]): Promise<CallResult> {
     }
   }
   if (!res.ok || !res.body) {
-    const detail = (await res.text()).slice(0, 300);
+    const detail = (await readBoundedHttpBody(res, PROVIDER_ERROR_BODY_CAP_BYTES)).text.slice(0, 300);
     throw new Error(`API ${res.status}: ${detail}`);
   }
+
+  // Retries rotate the trace attempt while the logical call remains in
+  // progress. Stream timing must therefore be measured from the attempt that
+  // produced this response, not from the outer model-loop timestamp.
+  const attemptStarted = traceAttempt?.started ?? started;
 
   if (proto !== "anthropic-messages") {
     let streamedText = "";
     let ttftMs: number | null = null;
     const viaResponses = usesResponsesApi(route.provider, route.model);
     const viaGoogle = proto === "google-generate";
-    const events = await readSseJson(res.body, currentAbort?.signal, (event) => {
+    const events = await readProviderSseJson(res.body, currentAbort?.signal, cacheDiagnostics, (event) => {
       let chunk = "";
       let keepEvent = false;
       if (viaResponses) {
         const live = responsesLiveDelta(event);
         if (live?.kind === "thinking") {
-          if (ttftMs === null) ttftMs = Date.now() - started;
+          if (ttftMs === null) ttftMs = Date.now() - attemptStarted;
           streamOut("thinking", live.text);
         }
         if (live?.kind === "text") {
@@ -4176,14 +5951,14 @@ async function callModel(messages: Message[]): Promise<CallResult> {
       } else if (viaGoogle) {
         const live = googleLiveDelta(event);
         if (live?.thinking) {
-          if (ttftMs === null) ttftMs = Date.now() - started;
+          if (ttftMs === null) ttftMs = Date.now() - attemptStarted;
           streamOut("thinking", live.thinking);
         }
         if (live?.text) chunk = live.text;
       } else {
         const live = completionLiveDelta(event);
         if (live?.thinking) {
-          if (ttftMs === null) ttftMs = Date.now() - started;
+          if (ttftMs === null) ttftMs = Date.now() - attemptStarted;
           keepEvent = true;
           streamOut("thinking", live.thinking);
         }
@@ -4197,7 +5972,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
         }
       }
       if (chunk) {
-        if (ttftMs === null) ttftMs = Date.now() - started;
+        if (ttftMs === null) ttftMs = Date.now() - attemptStarted;
         streamedText += chunk;
         streamOut("assistant", chunk);
       }
@@ -4209,37 +5984,108 @@ async function callModel(messages: Message[]): Promise<CallResult> {
       return true;
     });
     const parsed = viaResponses
-      ? responsesResultFromEvents(events, () => {}, started)
+      ? responsesResultFromEvents(events, () => {}, attemptStarted)
       : viaGoogle
-        ? googleResultFromEvents(events, () => {}, started)
-      : completionResultFromEvents(events, () => {}, started);
+        ? googleResultFromEvents(events, () => {}, attemptStarted)
+      : completionResultFromEvents(events, () => {}, attemptStarted);
     if (parsed.error) throw new Error(parsed.error);
     const blocks = parsed.blocks as Block[];
     if (streamedText && !blocks.some((b) => b.type === "text")) {
       const at = blocks.findIndex((b) => b.type !== "thinking");
       blocks.splice(at < 0 ? blocks.length : at, 0, { type: "text", text: streamedText });
     }
+    if (traceAttempt) traceAttempt.ended = Date.now();
     return {
       blocks,
       usage: parsed.usage,
       ttftMs,
       stopReason: parsed.stopReason,
       cache: cacheDiagnostics,
+      traceAttempt,
     };
   }
 
   const slots: Array<Block | undefined> = [];
-  const jsonParts = new Map<number, string>();
+  type StreamAggregate = { accumulator: BoundedTextAccumulator; bytes: number };
+  const jsonParts = new Map<number, BoundedTextAccumulator>();
+  const jsonPartBytes = new Map<number, number>();
+  let jsonPartTotalBytes = 0;
+  const textAggregates = new Map<number, StreamAggregate>();
+  const thinkingAggregates = new Map<number, StreamAggregate>();
+  const signatureAggregates = new Map<number, StreamAggregate>();
+  let aggregateTotalBytes = 0;
+  let citationCount = 0;
+  let citationBytes = 0;
+  let eventCount = 0;
+  let eventBytes = 0;
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let usage: Usage | null = null;
   let ttftMs: number | null = null;
   let stopReason: string | null = null;
+  let sawMessageStart = false;
+  let sawTerminal = false;
+  const pushAggregate = (map: Map<number, StreamAggregate>, idx: number, value: string, label: string): void => {
+    if (!value) return;
+    const bytes = Buffer.byteLength(value, "utf8");
+    const current = map.get(idx)?.bytes ?? 0;
+    if (current + bytes > ANTHROPIC_AGGREGATE_MAX_BYTES) {
+      failProviderStream(`${label} aggregate exceeded ${ANTHROPIC_AGGREGATE_MAX_BYTES} bytes`, cacheDiagnostics, reader);
+    }
+    if (aggregateTotalBytes + bytes > ANTHROPIC_AGGREGATE_TOTAL_BYTES) {
+      failProviderStream(`aggregate output exceeded ${ANTHROPIC_AGGREGATE_TOTAL_BYTES} bytes`, cacheDiagnostics, reader);
+    }
+    const entry = map.get(idx) ?? {
+      accumulator: new BoundedTextAccumulator({ maxBytes: ANTHROPIC_AGGREGATE_MAX_BYTES, marker: "" }),
+      bytes: 0,
+    };
+    entry.accumulator.push(value);
+    entry.bytes += bytes;
+    aggregateTotalBytes += bytes;
+    map.set(idx, entry);
+  };
+  const pushCitation = (target: Extract<Block, { type: "text" }>, citation: unknown): void => {
+    let serialized: string | undefined;
+    try {
+      serialized = JSON.stringify(citation);
+    } catch {
+      failProviderStream("citation aggregate could not be serialized", cacheDiagnostics, reader);
+    }
+    if (serialized === undefined) return;
+    const bytes = Buffer.byteLength(serialized, "utf8");
+    if (citationCount >= ANTHROPIC_CITATION_MAX_COUNT) {
+      failProviderStream(`citation count exceeded ${ANTHROPIC_CITATION_MAX_COUNT}`, cacheDiagnostics, reader);
+    }
+    if (citationBytes + bytes > ANTHROPIC_CITATION_MAX_BYTES) {
+      failProviderStream(`citation aggregate exceeded ${ANTHROPIC_CITATION_MAX_BYTES} bytes`, cacheDiagnostics, reader);
+    }
+    citationCount += 1;
+    citationBytes += bytes;
+    (target.citations ??= []).push(citation);
+  };
+  const finishAggregates = (): void => {
+    for (const [idx, aggregate] of textAggregates) {
+      const target = slots[idx];
+      if (target?.type === "text") target.text = aggregate.accumulator.finish("complete").text;
+    }
+    for (const [idx, aggregate] of thinkingAggregates) {
+      const target = slots[idx];
+      if (target?.type === "thinking") target.thinking = aggregate.accumulator.finish("complete").text;
+    }
+    for (const [idx, aggregate] of signatureAggregates) {
+      const target = slots[idx];
+      if (target?.type === "thinking") target.signature = aggregate.accumulator.finish("complete").text;
+    }
+  };
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+    const decoded = decoder.decode(value, { stream: true });
+    if (Buffer.byteLength(buffer, "utf8") + Buffer.byteLength(decoded, "utf8") > ANTHROPIC_SSE_BUFFER_BYTES) {
+      failProviderStream(`SSE event buffer exceeded ${ANTHROPIC_SSE_BUFFER_BYTES} bytes`, cacheDiagnostics, reader);
+    }
+    buffer += decoded;
     let nl: number;
     while ((nl = buffer.indexOf("\n")) !== -1) {
       const line = buffer.slice(0, nl).trim();
@@ -4247,22 +6093,29 @@ async function callModel(messages: Message[]): Promise<CallResult> {
       if (!line.startsWith("data: ")) continue;
       const payload = line.slice(6);
       if (payload === "[DONE]") continue;
+      const payloadBytes = Buffer.byteLength(payload, "utf8");
+      eventCount += 1;
+      eventBytes += payloadBytes;
+      if (eventCount > ANTHROPIC_EVENT_MAX_COUNT) {
+        failProviderStream(`event count exceeded ${ANTHROPIC_EVENT_MAX_COUNT}`, cacheDiagnostics, reader);
+      }
+      if (eventBytes > ANTHROPIC_EVENT_MAX_BYTES) {
+        failProviderStream(`event bytes exceeded ${ANTHROPIC_EVENT_MAX_BYTES}`, cacheDiagnostics, reader);
+      }
       let ev: Record<string, unknown>;
       try {
         ev = JSON.parse(payload);
       } catch {
-        continue;
+        failProviderStream("malformed SSE JSON", cacheDiagnostics, reader);
+      }
+      if (sawTerminal) {
+        failProviderStream("SSE event arrived after message_stop", cacheDiagnostics, reader);
       }
       switch (ev.type) {
         case "message_start": {
-          const msg = (ev.message ?? {}) as { usage?: Record<string, number> };
-          const u = msg.usage ?? {};
-          usage = {
-            input: u.input_tokens ?? 0,
-            cacheRead: u.cache_read_input_tokens ?? 0,
-            cacheWrite: u.cache_creation_input_tokens ?? 0,
-            output: u.output_tokens ?? 0,
-          };
+          sawMessageStart = true;
+          const msg = (ev.message ?? {}) as { usage?: Record<string, unknown> };
+          usage = normalizeProviderUsage(msg.usage);
           break;
         }
         case "content_block_start": {
@@ -4277,7 +6130,13 @@ async function callModel(messages: Message[]): Promise<CallResult> {
           };
           if (cb.type === "tool_use") {
             placeStreamBlock(slots, idx, { type: "tool_use", id: cb.id ?? "", name: cb.name ?? "", input: {} });
-            jsonParts.set(idx, "");
+            if (!jsonParts.has(idx)) {
+              if (jsonParts.size >= ANTHROPIC_JSON_PART_MAX_COUNT) {
+                failProviderStream(`tool JSON part count exceeded ${ANTHROPIC_JSON_PART_MAX_COUNT}`, cacheDiagnostics, reader);
+              }
+              jsonParts.set(idx, new BoundedTextAccumulator({ maxBytes: ANTHROPIC_JSON_PART_MAX_BYTES, marker: "" }));
+              jsonPartBytes.set(idx, 0);
+            }
           } else if (cb.type === "server_tool_use") {
             placeStreamBlock(slots, idx, {
               type: "server_tool_use",
@@ -4285,7 +6144,13 @@ async function callModel(messages: Message[]): Promise<CallResult> {
               name: cb.name ?? "",
               input: {},
             });
-            jsonParts.set(idx, "");
+            if (!jsonParts.has(idx)) {
+              if (jsonParts.size >= ANTHROPIC_JSON_PART_MAX_COUNT) {
+                failProviderStream(`tool JSON part count exceeded ${ANTHROPIC_JSON_PART_MAX_COUNT}`, cacheDiagnostics, reader);
+              }
+              jsonParts.set(idx, new BoundedTextAccumulator({ maxBytes: ANTHROPIC_JSON_PART_MAX_BYTES, marker: "" }));
+              jsonPartBytes.set(idx, 0);
+            }
           } else if (cb.type === "web_search_tool_result") {
             placeStreamBlock(slots, idx, {
               type: "web_search_tool_result",
@@ -4295,11 +6160,14 @@ async function callModel(messages: Message[]): Promise<CallResult> {
           } else if (cb.type === "thinking") {
             placeStreamBlock(slots, idx, { type: "thinking", thinking: "" });
           } else if (cb.type === "text") {
-            placeStreamBlock(slots, idx, {
+            const textBlock: Extract<Block, { type: "text" }> = {
               type: "text",
               text: "",
-              citations: Array.isArray(cb.citations) && cb.citations.length > 0 ? cb.citations : undefined,
-            });
+            };
+            placeStreamBlock(slots, idx, textBlock);
+            if (Array.isArray(cb.citations)) {
+              for (const citation of cb.citations) pushCitation(textBlock, citation);
+            }
           } else if (cb.type) {
             placeStreamBlock(slots, idx, { ...(ev.content_block as Block), type: cb.type } as Block);
           }
@@ -4311,76 +6179,107 @@ async function callModel(messages: Message[]): Promise<CallResult> {
           const target = slots[idx];
           if (!target) break;
           if (d.type === "text_delta" && target.type === "text") {
-            if (ttftMs === null) ttftMs = Date.now() - started;
-            target.text += d.text ?? "";
-            streamOut("assistant", d.text ?? "");
+            if (ttftMs === null) ttftMs = Date.now() - attemptStarted;
+            const chunk = typeof d.text === "string" ? d.text : "";
+            pushAggregate(textAggregates, idx, chunk, "text");
+            streamOut("assistant", chunk);
           } else if (d.type === "thinking_delta" && target.type === "thinking") {
-            const chunk = d.thinking ?? "";
-            if (chunk && ttftMs === null) ttftMs = Date.now() - started;
-            target.thinking += chunk;
+            const chunk = typeof d.thinking === "string" ? d.thinking : "";
+            if (chunk && ttftMs === null) ttftMs = Date.now() - attemptStarted;
+            pushAggregate(thinkingAggregates, idx, chunk, "thinking");
             streamOut("thinking", chunk);
           } else if (d.type === "signature_delta" && target.type === "thinking") {
-            target.signature = (target.signature ?? "") + (d.signature ?? "");
+            pushAggregate(signatureAggregates, idx, typeof d.signature === "string" ? d.signature : "", "signature");
           } else if (d.type === "citations_delta" && target.type === "text" && d.citation !== undefined) {
-            target.citations = [...(target.citations ?? []), d.citation];
+            pushCitation(target, d.citation);
           } else if (
             d.type === "input_json_delta" &&
             (target.type === "tool_use" || target.type === "server_tool_use")
           ) {
-            jsonParts.set(idx, (jsonParts.get(idx) ?? "") + (d.partial_json ?? ""));
+            const chunk = typeof d.partial_json === "string" ? d.partial_json : "";
+            const part = jsonParts.get(idx);
+            if (!part) {
+              if (jsonParts.size >= ANTHROPIC_JSON_PART_MAX_COUNT) {
+                failProviderStream(`tool JSON part count exceeded ${ANTHROPIC_JSON_PART_MAX_COUNT}`, cacheDiagnostics, reader);
+              }
+              jsonParts.set(idx, new BoundedTextAccumulator({ maxBytes: ANTHROPIC_JSON_PART_MAX_BYTES, marker: "" }));
+              jsonPartBytes.set(idx, 0);
+            }
+            const previousBytes = jsonPartBytes.get(idx) ?? 0;
+            const bytes = Buffer.byteLength(chunk, "utf8");
+            if (previousBytes + bytes > ANTHROPIC_JSON_PART_MAX_BYTES) {
+              failProviderStream(`tool JSON part exceeded ${ANTHROPIC_JSON_PART_MAX_BYTES} bytes`, cacheDiagnostics, reader);
+            }
+            if (jsonPartTotalBytes + bytes > ANTHROPIC_EVENT_MAX_BYTES) {
+              failProviderStream(`tool JSON bytes exceeded ${ANTHROPIC_EVENT_MAX_BYTES}`, cacheDiagnostics, reader);
+            }
+            jsonParts.get(idx)!.push(chunk);
+            jsonPartBytes.set(idx, previousBytes + bytes);
+            jsonPartTotalBytes += bytes;
           }
           break;
         }
         case "message_delta": {
-          const u = (ev.usage ?? {}) as Record<string, number>;
-          if (usage && typeof u.output_tokens === "number") usage.output = u.output_tokens;
+          usage = mergeProviderUsage(usage, normalizeProviderUsage(
+            ev.usage && typeof ev.usage === "object" && !Array.isArray(ev.usage)
+              ? ev.usage as Record<string, unknown>
+              : undefined,
+          ));
           const reason = (ev.delta as { stop_reason?: string } | undefined)?.stop_reason;
           if (typeof reason === "string") stopReason = reason;
           break;
         }
+        case "message_stop":
+        case "message_end":
+        case "end":
+          sawTerminal = true;
+          break;
         default:
           break;
       }
     }
   }
-  buffer += decoder.decode();
-  if (buffer.trim().startsWith("data:")) {
-    const payload = buffer.trim().slice(5).trim();
-    if (payload && payload !== "[DONE]") {
-      try {
-        const ev = JSON.parse(payload) as Record<string, unknown>;
-        if (ev.type === "message_delta") {
-          const u = (ev.usage ?? {}) as Record<string, number>;
-          if (usage && typeof u.output_tokens === "number") usage.output = u.output_tokens;
-          const reason = (ev.delta as { stop_reason?: string } | undefined)?.stop_reason;
-          if (typeof reason === "string") stopReason = reason;
-        }
-      } catch {
-        /* ignore truncated tail */
-      }
-    }
+  const tail = decoder.decode();
+  if (Buffer.byteLength(buffer, "utf8") + Buffer.byteLength(tail, "utf8") > ANTHROPIC_SSE_BUFFER_BYTES) {
+    failProviderStream(`SSE event buffer exceeded ${ANTHROPIC_SSE_BUFFER_BYTES} bytes`, cacheDiagnostics, reader);
   }
+  buffer += tail;
+  if (buffer.trim()) {
+    if (interrupted || currentAbort?.signal.aborted) throw new Error("aborted");
+    failProviderStream("nonempty incomplete SSE EOF", cacheDiagnostics, reader);
+  }
+  if (!sawMessageStart) {
+    failProviderStream("SSE stream had no message_start event", cacheDiagnostics, reader);
+  }
+  if (!sawTerminal) {
+    if (interrupted || currentAbort?.signal.aborted) throw new Error("aborted");
+    failProviderStream("SSE stream ended without message_stop", cacheDiagnostics, reader);
+  }
+  finishAggregates();
   for (const [idx, part] of jsonParts) {
     const target = slots[idx];
     if (target?.type === "tool_use" || target?.type === "server_tool_use") {
+      const parsedPart = part.finish("complete");
+      if (parsedPart.truncated) {
+        failProviderStream("partial tool JSON", cacheDiagnostics, reader);
+      }
       try {
-        target.input = JSON.parse(part || "{}") as typeof target.input;
+        target.input = JSON.parse(parsedPart.text || "{}") as typeof target.input;
       } catch {
-        target.input = {};
+        failProviderStream("partial tool JSON", cacheDiagnostics, reader);
       }
     }
   }
-  return { blocks: compactStreamBlocks(slots), usage, ttftMs, stopReason, cache: cacheDiagnostics };
+  if (traceAttempt) traceAttempt.ended = Date.now();
+  return { blocks: compactStreamBlocks(slots), usage, ttftMs, stopReason, cache: cacheDiagnostics, traceAttempt };
 }
 
 // ---- waste attribution ----
 
-let prevPrompt: { total: number; ts: number } | null = null;
-let prevCacheDiagnostics: TraceCacheDiagnostics | null = null;
+let previousCacheAttempt: CacheAttemptSnapshot | null = null;
 
 function resetUsageContinuity(): void {
-  prevPrompt = null;
-  prevCacheDiagnostics = null;
+  previousCacheAttempt = null;
   lastBilledTokens = null;
   lastCacheReadShare = null;
   lastRequestFollowedRevision = false;
@@ -4392,41 +6291,248 @@ function resetCacheContinuity(): void {
   currentWorkingSetChanged = null;
   previousWorkingSetHash = null;
   hasPreviousWorkingSet = false;
+  currentHostContext = null;
+  activeRequestOverlay = null;
   codexTurnState = "";
 }
 
-// Providers bill tokens; prices come from a local catalog (models.dev),
-// not from the API response. Rates are USD per token once divided.
-interface Rates {
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
+// Providers bill tokens; this adapter turns one complete catalog response into
+// immutable, role/route/model-scoped snapshots. `rates.ts` owns validation and
+// arithmetic so missing counters/rates remain unknown and cache-write prices
+// never fall back to input pricing.
+type CatalogCost = Record<string, unknown>;
+type CatalogModelEntry = { cost?: CatalogCost };
+type CatalogProvider = { models?: Record<string, CatalogModelEntry>; version?: unknown; updatedAt?: unknown };
+type CatalogResponse = Record<string, CatalogProvider> & { version?: unknown; updatedAt?: unknown };
+
+const RATE_CATALOG_URL = "https://models.dev/api.json";
+const RATE_FETCH_TIMEOUT_MS = 200;
+const RATE_CATALOG_BODY_CAP_BYTES = 4 * 1024 * 1024;
+const RATE_UNITS = {
+  input: "usd_per_million_tokens",
+  cacheRead: "usd_per_million_tokens",
+  cacheWrite: "usd_per_million_tokens",
+  output: "usd_per_million_tokens",
+  reasoning: "usd_per_million_tokens",
+  storage: "usd_per_gib_second",
+} as const;
+let rateSnapshotMap: ReadonlyMap<string, RateSnapshot> = new Map();
+let ratesLoadStarted = false;
+let ratesLoadPromise: Promise<void> | null = null;
+
+function catalogKey(provider: string, model: string, role: "main" | "summary"): string {
+  return `${provider}\0${model}\0${role}`;
 }
 
-let rateLookup: ((model: string) => Rates | null) | null = null;
+function catalogProviderId(provider: ProviderId): string {
+  return provider === "openai-codex" || provider === "github-copilot" ? "openai" : provider;
+}
+
+function catalogMetadata(value: unknown): string | null {
+  return typeof value === "string" && value.trim() && value.length <= 256 ? value.trim() : null;
+}
+
+function rateFromCatalog(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function freezeRateSnapshot(snapshot: RateSnapshot): RateSnapshot {
+  return Object.freeze({
+    ...snapshot,
+    scope: Object.freeze({ ...snapshot.scope }),
+    units: Object.freeze({ ...snapshot.units }),
+    rates: Object.freeze({ ...snapshot.rates }),
+  });
+}
+
+function snapshotForCatalogEntry(
+  provider: ProviderId,
+  model: string,
+  role: "main" | "summary",
+  cost: CatalogCost,
+  version: string | null,
+  lookedUpAt: string,
+): RateSnapshot | null {
+  return normalizeRateSnapshot({
+    scope: {
+      provider,
+      protocol: providerProtocol(provider, model),
+      model,
+      route: cacheRouteForProvider(provider),
+      role,
+    },
+    source: RATE_CATALOG_URL,
+    version,
+    lookedUpAt,
+    units: RATE_UNITS,
+    // A catalog entry does not document provider retention. The request's
+    // effective cache policy supplies a per-attempt TTL class later.
+    cacheWriteTtlClass: "unknown",
+    reasoningBilling: rateFromCatalog(cost.reasoning) === null ? null : "separate",
+    rates: {
+      input: rateFromCatalog(cost.input),
+      cacheRead: rateFromCatalog(cost.cache_read),
+      cacheWrite: rateFromCatalog(cost.cache_write),
+      output: rateFromCatalog(cost.output),
+      reasoning: rateFromCatalog(cost.reasoning),
+      storage: null,
+    },
+  });
+}
 
 async function loadRates(): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RATE_FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch("https://models.dev/api.json");
-    const db = (await res.json()) as Record<string, { models?: Record<string, { cost?: Record<string, number> }> }>;
-    const per = 1_000_000;
-    rateLookup = (model: string): Rates | null => {
-      const catalogId = route.provider === "openai-codex" ? "openai" : route.provider;
-      const models = db[catalogId]?.models ?? {};
-      const entry = models[model] ?? models[Object.keys(models).find((k) => k.startsWith(model + "-")) ?? ""];
-      const c = entry?.cost;
-      if (!c) return null;
-      return {
-        input: (c.input ?? 0) / per,
-        output: (c.output ?? 0) / per,
-        cacheRead: (c.cache_read ?? c.input ?? 0) / per,
-        cacheWrite: (c.cache_write ?? c.input ?? 0) / per,
-      };
-    };
+    const res = await fetch(RATE_CATALOG_URL, { signal: controller.signal });
+    if (!res.ok) return;
+    const body = await readBoundedHttpBody(res, RATE_CATALOG_BODY_CAP_BYTES);
+    if (body.state !== "complete" || body.truncated) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body.text) as unknown;
+    } catch {
+      return;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+    const db = parsed as CatalogResponse;
+    const lookedUpAt = new Date().toISOString();
+    const version = catalogMetadata(db.version) ?? catalogMetadata(db.updatedAt);
+    const next = new Map<string, RateSnapshot>();
+    for (const providerId of AUTH_PROVIDER_ORDER) {
+      const catalog = db[catalogProviderId(providerId)];
+      if (!catalog || typeof catalog !== "object" || !catalog.models || typeof catalog.models !== "object") continue;
+      for (const [model, entry] of Object.entries(catalog.models)) {
+        if (!entry || typeof entry !== "object" || !entry.cost || typeof entry.cost !== "object") continue;
+        for (const role of ["main", "summary"] as const) {
+          const snapshot = snapshotForCatalogEntry(providerId, model, role, entry.cost, version, lookedUpAt);
+          if (snapshot) next.set(catalogKey(providerId, model, role), freezeRateSnapshot(snapshot));
+        }
+      }
+    }
+    // Replace the map only after the response has been fully normalized. A
+    // logical task keeps the previous map reference and cannot observe a
+    // half-loaded or changing catalog.
+    rateSnapshotMap = next;
   } catch {
-    /* offline or catalog gone: usage records carry tokens without usd */
+    /* Offline/catalog failure leaves the scoped snapshot unknown. */
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+function ensureRatesLoading(): Promise<void> {
+  if (!ratesLoadStarted) {
+    ratesLoadStarted = true;
+    ratesLoadPromise = loadRates();
+  }
+  return ratesLoadPromise ?? Promise.resolve();
+}
+
+async function awaitInitialRates(timeoutMs = 250): Promise<void> {
+  const pending = ensureRatesLoading();
+  if (timeoutMs <= 0) return;
+  await Promise.race([
+    pending,
+    new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
+}
+
+function cacheTtlClass(cache: TraceCacheDiagnostics | null): RateSnapshotInput["cacheWriteTtlClass"] {
+  const ttlMs = cache?.policy.effectiveTtlMs ?? null;
+  if (ttlMs === 5 * 60 * 1000) return "5m";
+  if (ttlMs === 30 * 60 * 1000) return "30m";
+  if (ttlMs === 60 * 60 * 1000) return "1h";
+  return "unknown";
+}
+
+function rateSnapshotFor(
+  provider: ProviderId,
+  model: string,
+  role: "main" | "summary",
+  cache: TraceCacheDiagnostics | null,
+): RateSnapshot | null {
+  const source = activeTraceTask?.rateSnapshots ?? rateSnapshotMap;
+  const catalogProvider = catalogProviderId(provider);
+  const candidate = source.get(catalogKey(provider, model, role)) ??
+    source.get(catalogKey(provider, modelLeaf(model), role)) ??
+    source.get(catalogKey(catalogProvider, model, role)) ??
+    source.get(catalogKey(catalogProvider, modelLeaf(model), role));
+  if (!candidate) return null;
+  // Re-scope a catalog row to the exact request route/model while retaining
+  // the immutable rate/provenance payload captured for this task.
+  const scoped: RateSnapshotInput = {
+    ...candidate,
+    scope: {
+      provider,
+      protocol: providerProtocol(provider, model),
+      model,
+      route: cacheRouteForProvider(provider),
+      role,
+    },
+    // The catalog does not establish retention. The actual request policy
+    // supplies a TTL class; unknown stays unknown when no policy was sent.
+    cacheWriteTtlClass: cacheTtlClass(cache),
+  };
+  return normalizeRateSnapshot(scoped);
+}
+
+function usageTotal(usage: Usage): number | null {
+  const values = [usage.input, usage.cacheRead, usage.cacheWrite];
+  if (values.some((value) => typeof value !== "number" || !Number.isFinite(value) || value < 0)) return null;
+  return (values[0] as number) + (values[1] as number) + (values[2] as number);
+}
+
+function traceCostForUsage(
+  usage: Usage | null,
+  provider: ProviderId,
+  model: string,
+  role: "main" | "summary",
+  cache: TraceCacheDiagnostics | null,
+): TraceRecordCostInput {
+  const snapshot = rateSnapshotFor(provider, model, role, cache);
+  const scope = {
+    provider,
+    protocol: providerProtocol(provider, model),
+    model,
+    route: cacheRouteForProvider(provider),
+  };
+  // When the provider did not report reasoning, only bill it when the rate
+  // snapshot explicitly says it is separately billed. This keeps the trace
+  // honest without inventing a reasoning counter or relation.
+  const requiredFields = usage && usage.reasoning === null && snapshot?.reasoningBilling !== "separate"
+    ? (["input", "cacheRead", "cacheWrite", "output"] as const)
+    : undefined;
+  const cost = computeTraceCost({ role, scope, usage, snapshot, requiredFields });
+  const unknownReasons = cost.unknownFields.map((field) => {
+    if (field === "source" || field === "version" || field === "lookedUpAt" || field === "units") {
+      return `rate-provenance.${field}-unknown`;
+    }
+    if (field === "scope") return "rate-provenance.scope-mismatch";
+    if (field === "cacheWriteTtlClass") return "cache-write-ttl-unknown";
+    if (field === "reasoningBilling") return "reasoning-billing-relation-unknown";
+    if (field === "aggregate") return "cost-aggregate-invalid";
+    const quantity = field === "storage" ? undefined : usage?.[field as keyof Usage];
+    if (usage === null || quantity === undefined || quantity === null) return `usage.${field}-unknown`;
+    if (!snapshot) return `rate-snapshot.${field}-unknown`;
+    if (snapshot.rates[field] === null) return `rate.${field}-unknown`;
+    return `cost.${field}-unknown`;
+  });
+  return {
+    usd: cost.usd,
+    source: cost.source,
+    version: cost.version,
+    lookedUpAt: cost.lookedUpAt,
+    knownFields: cost.knownFields,
+    unknownFields: cost.unknownFields,
+    unknownReasons,
+    scope: cost.scope,
+    units: cost.units,
+    components: cost.components,
+    rates: snapshot?.rates ?? null,
+    cacheWriteTtlClass: cost.cacheWriteTtlClass,
+    reasoningBilling: cost.reasoningBilling,
+  };
 }
 
 function reportUsage(
@@ -4442,44 +6548,60 @@ function reportUsage(
   revisionCount: number;
   revisionKinds: RevisionKind[];
   wasteTokens: number;
+  cost: TraceRecordCostInput;
+  cache: TraceCacheDiagnostics;
 } {
-  const cur = usage.input + usage.cacheRead + usage.cacheWrite;
+  const cur = usageTotal(usage);
+  const snapshot: CacheAttemptSnapshot = {
+    atMs: turnStarted,
+    usage: {
+      inputTokens: usage.input,
+      cacheReadTokens: usage.cacheRead,
+      cacheWriteTokens: usage.cacheWrite,
+    },
+    diagnostics: cache,
+    postRevision,
+  };
   let waste: { tokens: number; cause: string } | null = null;
-  if (prevPrompt) {
-    const missed = Math.min(prevPrompt.total, cur) - usage.cacheRead;
-    if (missed > NOISE_FLOOR_TOKENS) {
-      const gap = Date.now() - prevPrompt.ts;
-      const cause = postRevision
-        ? "post-revision"
-        : gap > CACHE_TTL_MS
-          ? "idle-expired"
-          : prevCacheDiagnostics?.cacheKeyHash !== cache.cacheKeyHash
-            ? "cache-key-changed"
-            : prevCacheDiagnostics?.modelSettingsHash !== cache.modelSettingsHash
-              ? "model-settings-changed"
-              : prevCacheDiagnostics?.toolsHash !== cache.toolsHash
-                ? "tool-schema-changed"
-                : prevCacheDiagnostics?.stablePrefixHash !== cache.stablePrefixHash
-                  ? "stable-prefix-changed"
-                  : "backend-or-prefix-miss";
-      waste = { tokens: missed, cause };
-    }
+  const classification = classifyCacheMiss({
+    previous: previousCacheAttempt,
+    current: snapshot,
+    noiseFloorTokens: NOISE_FLOOR_TOKENS,
+    // An undocumented route has no local idle-expiry threshold.  Use a
+    // bounded numeric sentinel only to disable the cache module's legacy
+    // fallback; documented TTLs still come from the effective policy.
+    unknownRetentionGapMs:
+      cache.policy.retentionKnown === null &&
+      cache.policy.effectiveTtlMs === null &&
+      cache.policy.requestedTtlMs === null
+        ? Number.MAX_SAFE_INTEGER
+        : undefined,
+  });
+  const traceCache: TraceCacheDiagnostics = {
+    ...cache,
+    missAttribution: {
+      attributed: classification.attributed,
+      primary: classification.primary,
+      contributing: classification.contributing.slice(),
+      missedTokens: classification.missedTokens,
+      gapMs: classification.gapMs,
+      missingFields: classification.missingFields.slice(),
+      noiseFloorTokens: NOISE_FLOOR_TOKENS,
+    },
+  };
+  if (classification.missedTokens !== null && classification.missedTokens > NOISE_FLOOR_TOKENS) {
+    waste = { tokens: classification.missedTokens, cause: classification.primary ?? "unknown" };
   }
   lastRequestFollowedRevision = postRevision;
   postRevision = false;
-  prevPrompt = { total: cur, ts: Date.now() };
-  prevCacheDiagnostics = { ...cache };
+  previousCacheAttempt = { ...snapshot, diagnostics: traceCache };
   lastBilledTokens = cur;
-  lastCacheReadShare = cur > 0 ? usage.cacheRead / cur : null;
-  const rates = rateLookup?.(route.model) ?? null;
-  let usd: number | null = null;
-  if (rates) {
-    usd =
-      usage.input * rates.input +
-      usage.output * rates.output +
-      usage.cacheRead * rates.cacheRead +
-      usage.cacheWrite * rates.cacheWrite;
-  }
+  lastCacheReadShare = cur !== null && cur > 0 && usage.cacheRead !== null ? usage.cacheRead / cur : null;
+  // Keep one cost calculation and its provenance. In particular, a catalog
+  // miss must not turn a reported zero-token request into an artificial
+  // non-null price (or erase a mathematically-known zero).
+  const cost = traceCostForUsage(usage, route.provider, route.model, "main", cache);
+  const usd = typeof cost.usd === "number" && Number.isFinite(cost.usd) && cost.usd >= 0 ? cost.usd : null;
   const revisionCount = revisions;
   const kinds = revisionKinds.slice();
   const wasteTokens = waste?.tokens ?? 0;
@@ -4493,6 +6615,8 @@ function reportUsage(
     revisionCount,
     revisionKinds: kinds,
     wasteTokens,
+    cost,
+    cache: traceCache,
   };
 }
 
@@ -4509,6 +6633,11 @@ function logSettings(): void {
 }
 
 async function runPrompt(prompt: string, extraImages: Array<{ name: string; mediaType: string }> = []): Promise<void> {
+  if (shutdownRequested) return;
+  // The overlay belongs to one logical prompt.  Do not let an earlier
+  // prompt's volatile context inflate idle reclaim estimates or leak into a
+  // preflight failure before this prompt has built its own snapshot.
+  activeRequestOverlay = null;
   if (!streamPrepared) {
     try {
       ensureFreshSession();
@@ -4524,7 +6653,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   }
   running = true;
   showPrompt();
-  interrupted = false;
+  interrupted = shutdownRequested;
   currentAbort = new AbortController();
   const pendingResult = eventsDir && terminalId
     ? await pendingImageState(eventsDir, terminalId)
@@ -4609,12 +6738,20 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   }
   void refreshPendingImageCount();
   const taggedPrompt = prompt.startsWith("/") ? prompt : expandFileTags(canonicalCwd, prompt);
-  const context = eventsDir && terminalId ? readContextFiles(eventsDir, terminalId) : "";
-  const workingSet = formatWorkingSet({ messages: history, hostContext: context });
-  currentWorkingSetHash = workingSet ? hashDiagnostic(workingSet) : null;
-  currentWorkingSetChanged = hasPreviousWorkingSet ? currentWorkingSetHash !== previousWorkingSetHash : null;
-  previousWorkingSetHash = currentWorkingSetHash;
-  hasPreviousWorkingSet = true;
+  const contextResult = eventsDir && terminalId ? readContextFilesResult(eventsDir, terminalId) : null;
+  const context = contextResult?.text ?? "";
+  currentHostContext = contextResult
+    ? {
+        state: contextResult.state,
+        direction: contextResult.direction,
+        limitBytes: contextResult.limitBytes,
+        inputBytes: contextResult.inputBytes,
+        retainedBytes: contextResult.retainedBytes,
+        omittedBytes: contextResult.omittedBytes,
+        outputBytes: contextResult.outputBytes,
+        truncated: contextResult.truncated,
+      }
+    : null;
   if (eventsDir && terminalId) {
     const file = promptFileName(terminalId, bridgeId, randomUUID().slice(0, 8));
     const written = writePromptPayload(eventsDir, terminalId, file, { prompt: taggedPrompt, context, images });
@@ -4622,7 +6759,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   }
   let userMsg: Message;
   try {
-    userMsg = pushUserPrompt(taggedPrompt, images, workingSet);
+    userMsg = pushUserPrompt(taggedPrompt, images);
   } catch (err) {
     cancelPreflight();
     const message = err instanceof SessionStoreError ? err.message : err instanceof Error ? err.message : String(err);
@@ -4633,24 +6770,54 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     showPrompt();
     return;
   }
+  // Build once for this logical prompt. Retries and cache-field fallbacks
+  // reuse the same exact bytes instead of observing a changed host snapshot.
+  try {
+    activeRequestOverlay = buildRequestOverlay({ messages: history, hostContext: context });
+  } catch (err) {
+    cancelPreflight();
+    const message = err instanceof Error ? err.message : String(err);
+    out(`(the run did not start: ${message})\n`);
+    surface?.setDraft(prompt);
+    running = false;
+    currentAbort = null;
+    showPrompt();
+    return;
+  }
+  currentWorkingSetHash = activeRequestOverlay?.hash ?? null;
+  currentWorkingSetChanged = hasPreviousWorkingSet ? currentWorkingSetHash !== previousWorkingSetHash : null;
+  previousWorkingSetHash = currentWorkingSetHash;
+  hasPreviousWorkingSet = true;
+  // Rate lookup is optional and bounded. Capture the fully replaced catalog
+  // map before opening the logical task so every attempt in this run shares
+  // one immutable provenance snapshot.
+  await awaitInitialRates();
+  const traceTask = beginTraceTask();
   if (eventsDir && terminalId && claim.claimId) {
     const ackImages = await acknowledgePendingImages(eventsDir, terminalId, claim.claimId, persistedPendingNames);
     if (!ackImages.ok) out(`(host: ${ackImages.error})\n`);
   }
   logEvent({
     t: "agent_start",
+    runId: traceTask.runId,
+    taskId: traceTask.taskId,
     model: `${route.provider}/${route.model}`,
     sessionFile,
     sessionId,
     preflightRequestId: preflight?.requestId ?? null,
     preflightToken: preflight?.token ?? null,
+    hostContext: currentHostContext,
+    overlayHash: activeRequestOverlay?.hash ?? null,
+    overlayBytes: activeRequestOverlay?.bytes ?? null,
     entryId: String(userMsg.sseq),
     parentEntryId: null,
     trusted: null,
     thinkingLevel: effectiveEffortFor(route.provider, route.model, effortWanted),
   });
   let storageFailure: string | null = null;
-  if (!rateLookup && !ratesFailed) void loadRates().then(() => { ratesFailed = true; });
+  let taskFailure: string | null = null;
+  let taskOutcomeStatus = "unknown";
+  let toolErrorObserved = false;
   let retriedOverflow = false;
   let resumePaused = false;
   let lastPlanText = "";
@@ -4660,7 +6827,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     while (true) {
       if (interrupted) break;
       if (!resumePaused) {
-        reclaim();
+        await reclaim();
         // Compact an expensive cache miss before the context limit forces it.
         const shouldCompactForCost =
           !cacheCostCompactionAttempted &&
@@ -4686,24 +6853,31 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       const callStarted = Date.now();
       const seqBefore = storageSeq;
       try {
-        result = await callModel(history);
+        result = await callModel(history, activeRequestOverlay);
       } catch (err) {
+        const streamFailure = err instanceof ProviderStreamLimitError ? err : null;
+        const failedAttempt = inFlightTraceAttempt;
         // Emergency mid-turn revision: the provider
         // rejected the window; reclaim hard and retry exactly once.
         if (!retriedOverflow && /prompt is too long|maximum context|context_length/i.test(String((err as Error).message))) {
-          writeMainTrace({ status: "overflow", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: null, started: callStarted });
+          await writeMainTrace({ status: "overflow", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: streamFailure?.cache ?? null, started: callStarted, attempt: failedAttempt });
           retriedOverflow = true;
-          reclaim();
+          await reclaim();
           await summarize();
           truncate();
           try {
-            result = await callModel(history);
+            result = await callModel(history, activeRequestOverlay, {
+              retryOfAttemptId: failedAttempt?.attemptId ?? null,
+              fallbackReason: "overflow",
+              retryCount: (failedAttempt?.retryCount ?? 0) + 1,
+            });
           } catch (retryErr) {
-            writeMainTrace({ status: "overflow-retry-error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: null, started: callStarted });
+            const retryStreamFailure = retryErr instanceof ProviderStreamLimitError ? retryErr : null;
+            await writeMainTrace({ status: retryStreamFailure?.traceStatus ?? "overflow-retry-error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: retryStreamFailure?.cache ?? null, started: callStarted, attempt: inFlightTraceAttempt });
             throw retryErr;
           }
         } else {
-          writeMainTrace({ status: "error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: null, started: callStarted });
+          await writeMainTrace({ status: streamFailure?.traceStatus ?? "error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: streamFailure?.cache ?? null, started: callStarted, attempt: failedAttempt });
           throw err;
         }
       }
@@ -4719,11 +6893,14 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
             revisionCount: 0,
             revisionKinds: [],
             wasteTokens: 0,
+            cost: traceCostForUsage(null, route.provider, route.model, "main", result.cache),
+            cache: result.cache,
           };
+      const traceCache = waste.cache;
       if (result.usage) accumulateUsage(result.usage);
       lastUsd = waste.usd != null && Number.isFinite(waste.usd) && waste.usd >= 0 ? waste.usd : null;
       const assistantMsg: Message = { role: "assistant", content: result.blocks as ContentBlock[], tokens: 0, sseq: 0 };
-      assistantMsg.tokens = estimate(assistantMsg);
+      assistantMsg.tokens = estimateReclaimTokens(assistantMsg.content);
       assistantMsg.sseq = persist({ type: "message", message: { role: "assistant", content: result.blocks } });
       history.push(assistantMsg);
       syncIndicators();
@@ -4733,11 +6910,19 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         logEvent({ t: "plan", text: plan });
       }
       const serverNames = renderServerTools(result.blocks);
+      if (result.blocks.some((block) => {
+        if (block.type !== "web_search_tool_result" || !block.content || typeof block.content !== "object" || Array.isArray(block.content)) {
+          return false;
+        }
+        return (block.content as { type?: string }).type === "web_search_tool_result_error";
+      })) {
+        toolErrorObserved = true;
+      }
       const uses = (result.blocks.filter((b) => b.type === "tool_use") as Extract<Block, { type: "tool_use" }>[]).map(
         (b): ToolUse => ({ id: b.id, name: b.name, input: b.input }),
       );
       if (uses.length === 0) {
-        writeMainTrace({ status: "ok", seqBefore, toolNames: serverNames, usage: result.usage, waste, sysHash: hashSystem(sys), cache: result.cache, started: callStarted });
+        await writeMainTrace({ status: "ok", seqBefore, toolNames: serverNames, usage: result.usage, waste, sysHash: hashSystem(sys), cache: traceCache, started: callStarted, attempt: result.traceAttempt });
         if (result.stopReason === "pause_turn" && !interrupted) {
           resumePaused = true;
           continue;
@@ -4762,6 +6947,9 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           const item = settled[ci]!;
           if (item.status === "fulfilled") {
             const outcome = item.value;
+            if (outcome.isError || (outcome.bounded?.state !== undefined && outcome.bounded.state !== "complete")) {
+              toolErrorObserved = true;
+            }
             if (interrupted) {
               if (handles[ci]) surface?.finishTool(handles[ci]!, "cancelled");
             } else if (handles[ci]) {
@@ -4775,13 +6963,20 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
               if (follow) process.stdout.write(follow);
             }
             outcomes.push(outcome);
-            logEvent({ t: "tool_end", toolCallId: chunk[ci]!.id, isError: outcome.isError });
+            logEvent({
+              t: "tool_end",
+              toolCallId: chunk[ci]!.id,
+              isError: outcome.isError,
+              ...toolOutcomeTraceFields(outcome),
+            });
           } else {
             const err = item.reason;
             const message = err instanceof Error ? err.message : String(err);
             if (handles[ci]) surface?.finishTool(handles[ci]!, "error", capDisplay(message, TOOL_DISPLAY_BYTES));
-            outcomes.push({ result: toolResult(chunk[ci]!, message), isError: true });
-            logEvent({ t: "tool_end", toolCallId: chunk[ci]!.id, isError: true });
+            const outcome = done(chunk[ci]!, message, true);
+            toolErrorObserved = true;
+            outcomes.push(outcome);
+            logEvent({ t: "tool_end", toolCallId: chunk[ci]!.id, isError: true, ...toolOutcomeTraceFields(outcome) });
           }
         }
       }
@@ -4792,34 +6987,66 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       // stored pair breaks the next request.
       const answered = outcomes.length;
       for (let i = answered; i < uses.length; i++) {
-        outcomes.push({ result: toolResult(uses[i]!, "(interrupted by user)"), isError: true });
-        logEvent({ t: "tool_end", toolCallId: uses[i]!.id, isError: true });
+        const outcome = done(uses[i]!, "(interrupted by user)", true);
+        toolErrorObserved = true;
+        outcomes.push(outcome);
+        logEvent({ t: "tool_end", toolCallId: uses[i]!.id, isError: true, ...toolOutcomeTraceFields(outcome) });
       }
       const resultBlocks = outcomes.map((o, i): ContentBlock => {
         const b = o.result as ContentBlock;
         b.chars = undefined;
         b.tool = uses[i]!.name;
-        b.repro = reproFor(uses[i]!);
+        b.repro = o.repro ?? reproFor(uses[i]!);
         if (o.isError) b.is_error = true;
         return b;
       });
       pushMessage("user", resultBlocks);
-      writeMainTrace({ status: "ok", seqBefore, toolNames: [...serverNames, ...uses.map((u) => u.name)], usage: result.usage, waste, sysHash: hashSystem(sys), cache: result.cache, started: callStarted });
+      await writeMainTrace({
+        status: "ok",
+        seqBefore,
+        toolNames: [...serverNames, ...uses.map((u) => u.name)],
+        usage: result.usage,
+        waste,
+        sysHash: hashSystem(sys),
+        cache: traceCache,
+        started: callStarted,
+        attempt: result.traceAttempt,
+        toolOutcomes: outcomes.map((outcome, index) => toolOutcomeTraceInput(uses[index]!, outcome)),
+      });
       out("\n");
     }
   } catch (err) {
-    if (interrupted) out("\n(interrupted)\n");
+    if (interrupted) {
+      taskOutcomeStatus = "interrupted";
+      taskFailure = "interrupted";
+      out("\n(interrupted)\n");
+    }
     else if (err instanceof SessionStoreError) {
       storageFailure = err.message;
+      taskFailure = storageFailure;
+      taskOutcomeStatus = "failure";
       out(`\n(storage failed: ${err.message})\n`);
+    } else {
+      taskFailure = err instanceof Error ? err.message : String(err);
+      taskOutcomeStatus = "failure";
+      out(`\nerror: ${taskFailure}\n`);
     }
-    else out(`\nerror: ${(err as Error).message}\n`);
   } finally {
-    running = false;
     currentAbort = null;
-    showPrompt();
   }
-  logEvent({ t: "agent_settled", error: storageFailure });
+  if (interrupted) {
+    taskOutcomeStatus = "interrupted";
+    taskFailure ??= "interrupted";
+  } else if (toolErrorObserved && taskOutcomeStatus === "unknown") {
+    taskOutcomeStatus = "failure";
+    taskFailure ??= "tool error";
+  }
+  logEvent({
+    t: "agent_settled",
+    runId: traceTask.runId,
+    taskId: traceTask.taskId,
+    error: storageFailure ?? taskFailure,
+  });
   if (!storageFailure && eventsDir && terminalId) {
     const requestId = randomUUID();
     logEvent({
@@ -4838,6 +7065,13 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       error: ack && typeof ack.error === "string" ? ack.error : null,
     });
   }
+  await settleTraceTask(taskOutcomeStatus);
+  // Keep the engine busy until checkpointing and trace settlement finish. A
+  // second prompt must not replace `activeTraceTask` while this task's
+  // task-settled record is still being written.
+  activeRequestOverlay = null;
+  running = false;
+  syncIndicators();
   showPrompt();
 }
 
@@ -4855,11 +7089,13 @@ function abortResume(message: string): void {
     if (quarantined.ok) {
       streamPrepared = false;
       storageSeq = 0;
+      rotateCacheSession();
       return;
     }
   }
   streamPrepared = true;
   storageSeq = 0;
+  rotateCacheSession();
 }
 
 async function resumeSession(): Promise<SessionResult> {
@@ -4896,7 +7132,7 @@ async function resumeSessionBody(): Promise<SessionResult> {
   history.length = 0;
   for (const rm of replayed.messages) {
     const m: Message = { role: rm.role, content: rm.content as Message["content"], tokens: 0, sseq: rm.sseq };
-    m.tokens = estimate(m);
+    m.tokens = estimateReclaimTokens(m.content);
     history.push(m);
   }
   for (let i = history.length - 1; i >= 0; i--) {
@@ -4927,6 +7163,156 @@ let surface: AgentTui | null = null;
 let nonTtyTranscriptSection: "thinking" | "assistant" | null = null;
 let pendingImageRefresh: Promise<void> | null = null;
 let pendingImageRefreshAgain = false;
+
+export type ShutdownOptions = {
+  reason?: string;
+  timeoutMs?: number;
+};
+
+export type ShutdownResult = {
+  ok: boolean;
+  timedOut: boolean;
+  error: string | null;
+};
+
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 1_000;
+let shutdownPromise: Promise<ShutdownResult> | null = null;
+let processExitPromise: Promise<void> | null = null;
+let shutdownRequested = false;
+let processShutdownHandlersInstalled = false;
+
+function stopInteractiveResources(): void {
+  mcpSession?.shutdown();
+  mcpSession = null;
+  surface?.stop();
+  surface = null;
+}
+
+function shutdownSynchronousResources(): void {
+  stopInteractiveResources();
+  closeSessionWriter();
+}
+
+function waitForRunToSettle(deadline: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const poll = (): void => {
+      if (!running) {
+        resolve(true);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        resolve(false);
+        return;
+      }
+      setTimeout(poll, Math.min(25, Math.max(1, deadline - Date.now())));
+    };
+    poll();
+  });
+}
+
+function awaitWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<{ timedOut: boolean; value?: T; error?: unknown }> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve({ timedOut: true });
+    }, Math.max(0, timeoutMs));
+    promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ timedOut: false, value });
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ timedOut: false, error });
+      },
+    );
+  });
+}
+
+/** Stop all asynchronous resources once, waiting for in-flight work to settle. */
+export function shutdownAgentCore(options: ShutdownOptions = {}): Promise<ShutdownResult> {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownRequested = true;
+  const timeoutMs = Number.isSafeInteger(options.timeoutMs) && (options.timeoutMs as number) >= 0
+    ? options.timeoutMs as number
+    : DEFAULT_SHUTDOWN_TIMEOUT_MS;
+  const reason = options.reason?.trim() || "shutdown";
+  shutdownPromise = (async (): Promise<ShutdownResult> => {
+    const deadline = Date.now() + timeoutMs;
+    interrupted = true;
+    currentAbort?.abort();
+    cancelLogin();
+    cancelPendingApproval("/approve deny");
+    mcpGeneration++;
+    mcpBusy = false;
+    stopInteractiveResources();
+    clientTools = TOOLS.slice();
+
+    const runSettled = await waitForRunToSettle(deadline);
+    let timedOut = !runSettled;
+    if (!runSettled) {
+      logEvent({ t: "shutdown_timeout", reason, phase: "run", timeoutMs });
+    }
+    // The writer is synchronous and must only close after the run has had a
+    // bounded opportunity to finish its final session append.
+    closeSessionWriter();
+
+    let ok = true;
+    let error: string | null = null;
+    const remaining = Math.max(0, deadline - Date.now());
+    if (traceRuntime) {
+      const closed = await awaitWithin(closeTraceRuntime(), remaining);
+      if (closed.timedOut) {
+        timedOut = true;
+        ok = false;
+        error = "trace runtime close timed out";
+        logEvent({ t: "shutdown_timeout", reason, phase: "trace", timeoutMs });
+      } else if (closed.error) {
+        ok = false;
+        error = closed.error instanceof Error ? closed.error.message : String(closed.error);
+        logEvent({ t: "shutdown_failure", reason, phase: "trace", error });
+      } else if (closed.value !== true) {
+        ok = false;
+        error = "trace runtime close failed";
+        logEvent({ t: "shutdown_failure", reason, phase: "trace", error });
+      }
+    }
+    if (timedOut && error === null) error = "shutdown timed out";
+    if (timedOut || !ok) logEvent({ t: "shutdown_result", reason, ok: false, timedOut, error });
+    return { ok: ok && !timedOut, timedOut, error };
+  })();
+  return shutdownPromise;
+}
+
+function requestProcessShutdown(code: number, reason: string): void {
+  if (processExitPromise) return;
+  processExitPromise = shutdownAgentCore({ reason })
+    .then((result) => {
+      if (!result.ok) {
+        process.stderr.write(`agent-core: ${reason} incomplete${result.error ? `: ${result.error}` : ""}\n`);
+      }
+      process.exit(code);
+    })
+    .catch((error: unknown) => {
+      process.stderr.write(`agent-core: ${reason} failed: ${error instanceof Error ? error.message : String(error)}\n`);
+      process.exit(code);
+    });
+}
+
+function installProcessShutdownHandlers(): void {
+  if (processShutdownHandlersInstalled) return;
+  processShutdownHandlersInstalled = true;
+  process.once("exit", shutdownSynchronousResources);
+  process.once("SIGTERM", () => requestProcessShutdown(0, "sigterm"));
+  process.once("SIGHUP", () => requestProcessShutdown(0, "sighup"));
+  process.once("SIGINT", () => requestProcessShutdown(0, "sigint"));
+}
 
 async function refreshPendingImageCount(): Promise<void> {
   if (pendingImageRefresh) {
@@ -4979,8 +7365,7 @@ function streamOut(section: "thinking" | "assistant", text: string): void {
 }
 
 function statusContextTokens(): number {
-  const tools = requestTools(clientTools, route.provider, route.model);
-  return totalTokens() + tokenEstimate(JSON.stringify(tools));
+  return totalTokens();
 }
 
 function syncIndicators(): void {
@@ -4990,8 +7375,8 @@ function syncIndicators(): void {
 }
 
 function showPrompt(): void {
-  surface?.setBusy(running || authBusy || resumeBusy);
-  if (!surface) out("\n> ");
+  surface?.setBusy(running || authBusy || resumeBusy || mcpBusy);
+  if (!surface && !mcpBusy) out("\n> ");
 }
 
 function printSlashHelp(): void {
@@ -5036,7 +7421,6 @@ function printLoginPicker(cmd: "/login" | "/logout"): void {
 
 let running = false;
 let queuedLine: string | null = null;
-let ratesFailed = false;
 let authBusy = false;
 
 function drainQueuedLine(): void {
@@ -5048,7 +7432,7 @@ function drainQueuedLine(): void {
 }
 
 function engineBusy(): boolean {
-  return running || authBusy || resumeBusy;
+  return running || authBusy || resumeBusy || mcpBusy;
 }
 
 export function isEngineBusy(): boolean {
@@ -5056,7 +7440,7 @@ export function isEngineBusy(): boolean {
 }
 
 function submit(line: string): void {
-  if (resumeBusy) {
+  if (resumeBusy || mcpBusy) {
     out("(engine busy)\n");
     return;
   }
@@ -5372,9 +7756,8 @@ function dispatchLine(line: string): void {
     return;
   }
   if (line === "/exit" || line === "/quit") {
-    currentAbort?.abort();
-    cancelLogin();
-    process.exit(0);
+    requestProcessShutdown(0, "slash-exit");
+    return;
   }
   if (loginCodeResolve) {
     const resolve = loginCodeResolve;
@@ -5471,8 +7854,8 @@ function dispatchLine(line: string): void {
     storageSeq = 0;
     history.length = 0;
     lastHandoff = null;
-    resetCacheContinuity();
-    sessionUsage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
+    rotateCacheSession();
+    sessionUsage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0 };
     lastUsd = null;
     permissionMode = process.env.TERMINA_CORE_APPROVE === "all" ? "always" : "ask";
     postRevision = false;
@@ -5481,7 +7864,12 @@ function dispatchLine(line: string): void {
     streamPrepared = true;
     syncIndicators();
     out("(session cleared)\n");
-    void connectMcp().then(() => showPrompt());
+    mcpBusy = true;
+    showPrompt();
+    void connectMcp().finally(() => {
+      mcpBusy = false;
+      showPrompt();
+    });
     return;
   }
   if (line === "/compact") {
@@ -5492,7 +7880,7 @@ function dispatchLine(line: string): void {
     }
     void (async () => {
       try {
-        const n = reclaim();
+        const n = await reclaim();
         const summed = await summarize();
         syncIndicators();
         out(`(compacted${n ? `; reclaimed ${n}` : ""}${summed ? "; summarized" : ""})\n`);
@@ -5558,7 +7946,43 @@ function dispatchLine(line: string): void {
 }
 
 async function main(): Promise<void> {
-  resetTraces();
+  installProcessShutdownHandlers();
+  if (!traceRuntime && traceRuntimeStartupError) {
+    out(`(trace startup warning: ${traceRuntimeStartupError})\n`);
+  }
+  if (traceRuntime) {
+    try {
+      const startup = await traceRuntime.ready;
+      if (!startup.ok && startup.error) out(`(trace startup warning: ${startup.error})\n`);
+      const manifest = traceRuntime.manifest;
+      logEvent({
+        t: "trace_startup",
+        runId: traceRunId,
+        namespace: startup.namespace,
+        ok: startup.ok,
+        reset: startup.reset,
+        malformedRecords: startup.malformedRecords,
+        partialRecords: startup.partialRecords,
+        scanOmittedRecords: startup.scanOmittedRecords,
+        manifestErrors: startup.manifestErrors,
+        retainedRecords: startup.retainedRecords,
+        omittedRecords: manifest.omittedRecords,
+        writeFailures: manifest.writeFailures,
+        retentionFailures: manifest.retentionFailures,
+        manifestWriteFailures: manifest.manifestWriteFailures,
+        startupMetadata: manifest.startup,
+        error: startup.error,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      out(`(trace startup warning: ${message})\n`);
+      logEvent({ t: "trace_startup", runId: traceRunId, ok: false, error: message });
+    }
+  }
+  // The TUI is constructed before the first MCP bind so it can render the
+  // startup banner, but no prompt may be accepted until the tool schema is
+  // fixed for this session.
+  mcpBusy = true;
   freezeFrontMatter();
   await bootCatalog();
   const auth = await resolveAuth(route.provider);
@@ -5594,31 +8018,8 @@ async function main(): Promise<void> {
         } else if (authBusy) cancelLogin();
       },
       onExit: () => {
-        currentAbort?.abort();
-        cancelLogin();
-        surface?.stop();
-        surface = null;
-        process.exit(0);
+        requestProcessShutdown(0, "tui-exit");
       },
-    });
-    const teardown = (): void => {
-      mcpSession?.shutdown();
-      mcpSession = null;
-      surface?.stop();
-      surface = null;
-    };
-    process.on("exit", teardown);
-    process.on("SIGTERM", () => {
-      teardown();
-      process.exit(0);
-    });
-    process.on("SIGHUP", () => {
-      teardown();
-      process.exit(0);
-    });
-    process.on("SIGINT", () => {
-      teardown();
-      process.exit(0);
     });
     effortWanted = clampEffortLevel(route.provider, route.model, effortWanted);
     surface.setEffortLevels(supportedEffortLevels(route.provider, route.model));
@@ -5629,8 +8030,10 @@ async function main(): Promise<void> {
       permissions: permissionMode,
       usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd),
     });
+    surface.setBusy(true);
     if (!surface.start()) surface = null;
     else {
+      showPrompt();
       syncModelRows();
       void refreshPendingImageCount();
     }
@@ -5638,8 +8041,11 @@ async function main(): Promise<void> {
   if (!surface) out(banner);
   const bootList = currentCatalog();
   if (bootList && bootList.length > 0) out(`${formatModelBanner(bootList, route.model)}\n`);
-  process.on("exit", () => mcpSession?.shutdown());
-  await connectMcp();
+  try {
+    await connectMcp();
+  } finally {
+    mcpBusy = false;
+  }
   const resumeResult = process.env.TERMINA_CORE_RESUME === "1" ? await resumeSession() : { ok: true as const };
   let structured = "";
   let structuredImages: Array<{ name: string; mediaType: string }> = [];
@@ -5673,9 +8079,11 @@ async function main(): Promise<void> {
   if (printed !== null) {
     if (!printed) {
       process.stderr.write("agent-core: -p needs a prompt\n");
+      await shutdownAgentCore({ reason: "print-invalid-prompt" });
       process.exit(1);
     }
     await runPrompt(printed);
+    await shutdownAgentCore({ reason: "print" });
     process.exit(0);
   }
   if (!surface) {

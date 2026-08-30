@@ -247,23 +247,159 @@ export function zenWireProtocol(model: string): ProviderProtocol {
   return "openai-completions";
 }
 
-/**
- * Cache markers follow the selected model, not the login provider.
- * OpenRouter and OpenCode Zen host Claude, GPT, Grok, and Qwen on one credential.
- */
-export function usesAnthropicCacheMarkers(provider: ProviderId, model = ""): boolean {
-  if (provider === "anthropic") return true;
-  if (providerProtocol(provider, model) === "anthropic-messages") return true;
-  if (provider === "openrouter" && (modelLooksClaude(model) || modelLooksQwen(model))) return true;
+export const CACHE_CAPABILITY_FEATURE = {
+  anthropicCacheControl: "anthropic-cache-control",
+  promptCacheKey: "prompt_cache_key",
+  promptCacheOptions: "prompt_cache_options",
+  promptCacheBreakpoint: "prompt_cache_breakpoint",
+  xaiConversationHeader: "x-grok-conv-id",
+  googleCachedContent: "google-cached-content",
+  ttl: "cache-ttl",
+  lookback: "cache-lookback",
+} as const;
+
+export type CacheCapabilityFeature = string;
+
+export interface CacheCapabilityScope {
+  provider: ProviderId;
+  protocol: ProviderProtocol;
+  route: string;
+  model: string;
+  feature: CacheCapabilityFeature;
+}
+
+export type CacheCapabilityStatus = "supported" | "rejected" | "unknown";
+export type CacheCapabilitySource = "provider-docs" | "probe" | "unknown";
+
+export interface CacheCapabilityProvenance {
+  url: string;
+  /** Retrieval date supplied by the implementation/audit, not provider data. */
+  retrievedAt: string;
+}
+
+export interface CacheCapabilityObservation {
+  supported: boolean | null;
+  status: CacheCapabilityStatus;
+  source: CacheCapabilitySource;
+  reason: string | null;
+  provenance: CacheCapabilityProvenance | null;
+}
+
+/** Primary documentation used for direct-route capability defaults. */
+export const CACHE_POLICY_PROVENANCE = {
+  anthropicPromptCaching: {
+    url: "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
+    retrievedAt: "2026-08-30",
+  },
+  openaiPromptCaching: {
+    url: "https://developers.openai.com/api/docs/guides/prompt-caching",
+    retrievedAt: "2026-08-30",
+  },
+  openaiResponses: {
+    url: "https://developers.openai.com/api/reference/cli/resources/responses/methods/create",
+    retrievedAt: "2026-08-30",
+  },
+  xaiPromptCaching: {
+    url: "https://docs.x.ai/developers/advanced-api-usage/prompt-caching",
+    retrievedAt: "2026-08-30",
+  },
+  googleContextCaching: {
+    url: "https://ai.google.dev/gemini-api/docs/generate-content/caching",
+    retrievedAt: "2026-08-30",
+  },
+} as const;
+
+function unknownCapability(reason: string, provenance: CacheCapabilityProvenance | null = null): CacheCapabilityObservation {
+  return { supported: null, status: "unknown", source: provenance ? "provider-docs" : "unknown", reason, provenance };
+}
+
+function documentedCapability(provenance: CacheCapabilityProvenance, reason: string): CacheCapabilityObservation {
+  return {
+    supported: true,
+    status: "supported",
+    source: "provider-docs",
+    reason,
+    provenance: { ...provenance },
+  };
+}
+
+function documentedUnknown(provenance: CacheCapabilityProvenance, reason: string): CacheCapabilityObservation {
+  return unknownCapability(reason, { ...provenance });
+}
+
+function isDirectDocumentedRoute(provider: ProviderId, route: string): boolean {
+  const domain = cacheRouteDomain(route);
+  if (provider === "anthropic") return domain === "api.anthropic.com";
+  if (provider === "openai") return domain === "api.openai.com";
+  if (provider === "xai") return domain === "api.x.ai";
+  if (provider === "google") return domain === "generativelanguage.googleapis.com";
   return false;
 }
 
-/** Completions and Responses hosts that accept prompt_cache_key. Not Anthropic Messages. Not Gemini. */
-export function usesPromptCacheKey(provider: ProviderId, model = ""): boolean {
-  if (provider === "google") return false;
-  const proto = providerProtocol(provider, model);
-  if (proto === "anthropic-messages" || proto === "google-generate") return false;
-  return true;
+function isGpt56Model(model: string): boolean {
+  if (typeof model !== "string") return false;
+  const leaf = modelLeaf(model);
+  return leaf.startsWith("gpt-5.6");
+}
+
+/**
+ * Return only documentation-backed defaults. Relay, Zen, and compatibility
+ * routes intentionally remain unknown regardless of their model name.
+ */
+export function documentedCacheCapability(scope: CacheCapabilityScope): CacheCapabilityObservation {
+  if (!scope || typeof scope !== "object") return unknownCapability("invalid-capability-scope");
+  if (!isDirectDocumentedRoute(scope.provider, scope.route)) return unknownCapability("route-not-directly-documented");
+  const feature = scope.feature;
+  if (scope.provider === "anthropic" && scope.protocol === "anthropic-messages") {
+    if (feature === CACHE_CAPABILITY_FEATURE.anthropicCacheControl) {
+      return documentedCapability(CACHE_POLICY_PROVENANCE.anthropicPromptCaching, "Anthropic Messages cache_control is documented");
+    }
+    if (feature === CACHE_CAPABILITY_FEATURE.ttl) {
+      return documentedCapability(CACHE_POLICY_PROVENANCE.anthropicPromptCaching, "Anthropic cache duration field is documented; value remains policy data");
+    }
+  }
+  if (scope.provider === "openai" && scope.protocol === "openai-responses") {
+    if (feature === CACHE_CAPABILITY_FEATURE.promptCacheKey && typeof scope.model === "string" && scope.model.trim()) {
+      return documentedCapability(CACHE_POLICY_PROVENANCE.openaiPromptCaching, "OpenAI Responses prompt_cache_key is documented");
+    }
+    if (
+      (feature === CACHE_CAPABILITY_FEATURE.promptCacheBreakpoint || feature === CACHE_CAPABILITY_FEATURE.promptCacheOptions) &&
+      isGpt56Model(scope.model)
+    ) {
+      return documentedCapability(CACHE_POLICY_PROVENANCE.openaiPromptCaching, "OpenAI GPT-5.6 explicit cache field is documented");
+    }
+    if (feature === CACHE_CAPABILITY_FEATURE.ttl && isGpt56Model(scope.model)) {
+      return documentedCapability(CACHE_POLICY_PROVENANCE.openaiPromptCaching, "OpenAI GPT-5.6 cache TTL field is documented; value remains policy data");
+    }
+    if (feature === CACHE_CAPABILITY_FEATURE.promptCacheKey || feature === CACHE_CAPABILITY_FEATURE.promptCacheBreakpoint || feature === CACHE_CAPABILITY_FEATURE.promptCacheOptions) {
+      return documentedUnknown(CACHE_POLICY_PROVENANCE.openaiPromptCaching, "model-specific support is not established");
+    }
+  }
+  if (scope.provider === "xai") {
+    if (scope.protocol === "openai-responses" && feature === CACHE_CAPABILITY_FEATURE.promptCacheKey) {
+      return documentedCapability(CACHE_POLICY_PROVENANCE.xaiPromptCaching, "xAI Responses prompt_cache_key is documented");
+    }
+    if (scope.protocol === "openai-completions" && feature === CACHE_CAPABILITY_FEATURE.xaiConversationHeader) {
+      return documentedCapability(CACHE_POLICY_PROVENANCE.xaiPromptCaching, "xAI Chat conversation header is documented");
+    }
+  }
+  if (scope.provider === "google" && scope.protocol === "google-generate" && feature === CACHE_CAPABILITY_FEATURE.googleCachedContent) {
+    return documentedCapability(CACHE_POLICY_PROVENANCE.googleContextCaching, "Gemini native cached content is documented");
+  }
+  if (scope.provider === "google" && scope.protocol === "google-generate" && feature === CACHE_CAPABILITY_FEATURE.ttl) {
+    return documentedCapability(CACHE_POLICY_PROVENANCE.googleContextCaching, "Gemini native cache duration is documented; value remains policy data");
+  }
+  return unknownCapability("feature-not-documented-for-route");
+}
+
+/** Direct Anthropic Messages only; relays must prove marker support first. */
+export function usesAnthropicCacheMarkers(provider: ProviderId, model: string, route: string): boolean {
+  return documentedCacheCapability({ provider, protocol: providerProtocol(provider, model), route, model, feature: CACHE_CAPABILITY_FEATURE.anthropicCacheControl }).supported === true;
+}
+
+/** Direct documented OpenAI Responses and xAI Responses routes only. Relays probe. */
+export function usesPromptCacheKey(provider: ProviderId, model: string, route: string): boolean {
+  return documentedCacheCapability({ provider, protocol: providerProtocol(provider, model), route, model, feature: CACHE_CAPABILITY_FEATURE.promptCacheKey }).supported === true;
 }
 
 /**
@@ -271,36 +407,141 @@ export function usesPromptCacheKey(provider: ProviderId, model = ""): boolean {
  * Copilot and Codex do not support that field (Codex returns 400
  * "prompt_cache_breakpoint is not supported on this model").
  */
-export function usesOpenAIExplicitCache(model: string, provider?: ProviderId): boolean {
-  const leaf = modelLeaf(model);
-  if (!(leaf.startsWith("gpt-5.6") || leaf.includes("gpt-5.6"))) return false;
-  if (!provider) return true;
-  return provider === "openai" || provider === "openrouter" || provider === "opencode-zen";
+export function usesOpenAIExplicitCache(model: string, provider: ProviderId, route: string): boolean {
+  return documentedCacheCapability({ provider, protocol: providerProtocol(provider, model), route, model, feature: CACHE_CAPABILITY_FEATURE.promptCacheBreakpoint }).supported === true;
 }
 
 /**
- * Top-level prompt_cache_options. Official OpenAI docs: GPT-5.6+ only.
- * OpenRouter documents the field and strips it for hosts that reject it.
- * ChatGPT Codex and OpenCode Zen return 400 Unsupported parameter.
+ * Top-level prompt_cache_options on the direct OpenAI Responses route.
+ * Relays and subscription gateways must feature-probe at their route owner.
  */
-export function usesPromptCacheOptions(provider: ProviderId, model = ""): boolean {
-  if (!usesOpenAIExplicitCache(model, provider)) return false;
-  return provider === "openai" || provider === "openrouter";
+export function usesPromptCacheOptions(provider: ProviderId, model: string, route: string): boolean {
+  return documentedCacheCapability({ provider, protocol: providerProtocol(provider, model), route, model, feature: CACHE_CAPABILITY_FEATURE.promptCacheOptions }).supported === true;
 }
 
-export function cacheSessionKey(session: string): string {
-  const id = session.trim().slice(0, 256);
-  if (!id || /[\0\r\n]/.test(id)) return "";
-  return id;
+export type CacheRole = "main" | "summary";
+
+/**
+ * Inputs shared by every cache-key and provider-session serializer.
+ *
+ * `sessionSeed` is intentionally an internal seed, not a value that can be
+ * sent to a provider. Call `cacheSessionSeed` once at a logical session/run
+ * boundary and retain its result for that boundary.
+ */
+export interface CacheIdentityInputs {
+  sessionSeed: string;
+  role: CacheRole;
+  provider: ProviderId;
+  protocol: ProviderProtocol;
+  /** A stable route/domain, never a turn prompt or working-set hash. */
+  route: string;
 }
 
-/** Host-specific session pin. Body prompt_cache_key is separate. */
-export function cacheSessionHeaders(provider: ProviderId, session: string): Record<string, string> {
-  const id = cacheSessionKey(session);
-  if (!id) return {};
-  if (provider === "opencode-go" || provider === "opencode-zen") return { "x-opencode-session": id };
-  if (provider === "openrouter") return { "x-session-id": id };
-  if (provider === "xai") return { "x-grok-conv-id": id };
+/** OpenRouter documents a 256-character session id; all emitted keys stay below it. */
+export const CACHE_KEY_MAX_LENGTH = 256;
+const CACHE_KEY_PREFIX = "tc1_";
+const CACHE_IDENTITY_DOMAIN = "termina-cache-identity-v1";
+const CACHE_CONTROL_RE = /\p{Cc}/u;
+
+function normalizedCacheText(value: unknown): string | null {
+  if (typeof value !== "string" || CACHE_CONTROL_RE.test(value)) return null;
+  const normalized = value.trim().normalize("NFC");
+  return normalized || null;
+}
+
+/**
+ * Create the stable seed for one logical session/run boundary.
+ *
+ * Durable identifiers are retained only in memory and are always hashed by
+ * `deriveCacheIdentityKey`. Missing/whitespace identifiers receive a fresh
+ * process-local seed; callers must reuse it for the lifetime of the boundary
+ * and call this again after `/clear` or another new-session transition.
+ * Invalid control-bearing identifiers fail closed with an empty seed.
+ */
+export function cacheSessionSeed(session: string | null | undefined): string {
+  if (typeof session === "string" && CACHE_CONTROL_RE.test(session)) return "";
+  const normalized = typeof session === "string" ? normalizedCacheText(session) : null;
+  if (!normalized) return `ephemeral:${randomBytes(32).toString("hex")}`;
+  return `durable:${normalized}`;
+}
+
+function cacheIdentityField(label: string, value: string): string | null {
+  const normalized = normalizedCacheText(value);
+  if (!normalized) return null;
+  // Length-prefix each field so concatenation cannot create ambiguous inputs.
+  return `${label.length}:${label}${normalized.length}:${normalized}`;
+}
+
+/**
+ * Normalize a route to its non-secret domain. URL paths are intentionally not
+ * part of the value because protocol is already a separate identity field.
+ */
+export function cacheRouteDomain(route: string): string {
+  const normalized = normalizedCacheText(route);
+  if (!normalized) return "";
+  try {
+    const url = new URL(normalized);
+    if (url.hostname) return `${url.hostname.toLowerCase()}${url.port ? `:${url.port}` : ""}`;
+  } catch {
+    /* A named route such as "openrouter-responses" is already a domain. */
+  }
+  return normalized.toLowerCase();
+}
+
+/**
+ * Derive the sole provider-facing cache identity. The output is printable
+ * ASCII, bounded, and contains no raw session, terminal, or filesystem id.
+ */
+export function deriveCacheIdentityKey(input: CacheIdentityInputs): string | null {
+  if (input.role !== "main" && input.role !== "summary") return null;
+  if (!isSupportedProvider(input.provider)) return null;
+  const seed = cacheIdentityField("seed", input.sessionSeed);
+  const provider = cacheIdentityField("provider", input.provider);
+  const protocol = cacheIdentityField("protocol", input.protocol);
+  const role = cacheIdentityField("role", input.role);
+  const route = cacheIdentityField("route", cacheRouteDomain(input.route));
+  if (!seed || !provider || !protocol || !role || !route) return null;
+  const material = [CACHE_IDENTITY_DOMAIN, seed, provider, protocol, role, route].join("\0");
+  const digest = createHash("sha256").update(material, "utf8").digest("hex");
+  return `${CACHE_KEY_PREFIX}${digest}`.slice(0, CACHE_KEY_MAX_LENGTH);
+}
+
+export interface CacheIdentity {
+  sessionSeed: string;
+  key: string;
+  role: CacheRole;
+  provider: ProviderId;
+  protocol: ProviderProtocol;
+  route: string;
+}
+
+/** Build the identity object consumed by both headers and request bodies. */
+export function cacheIdentityFor(input: CacheIdentityInputs): CacheIdentity | null {
+  const route = cacheRouteDomain(input.route);
+  const key = deriveCacheIdentityKey({ ...input, route });
+  if (!key) return null;
+  // Keep the raw seed available for key verification without making it
+  // enumerable in logs, JSON, or a spread into a provider request.
+  const identity = { key, role: input.role, provider: input.provider, protocol: input.protocol, route } as CacheIdentity;
+  Object.defineProperty(identity, "sessionSeed", {
+    value: input.sessionSeed,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+  return identity;
+}
+
+/**
+ * Host-specific session pin. Verify every canonical identity input before
+ * emitting a header so a key cannot be copied across route domains.
+ */
+export function cacheSessionHeaders(identity: CacheIdentity | null): Record<string, string> {
+  if (!identity || typeof identity.key !== "string" || !identity.key || !/^[\x21-\x7e]+$/.test(identity.key) || identity.key.length > CACHE_KEY_MAX_LENGTH) return {};
+  if (deriveCacheIdentityKey(identity) !== identity.key) return {};
+  if (identity.provider === "openrouter") return { "x-session-id": identity.key };
+  // x-grok-conv-id is documented for xAI Chat Completions, not Responses.
+  if (identity.provider === "xai" && identity.protocol === "openai-completions") return { "x-grok-conv-id": identity.key };
   return {};
 }
 

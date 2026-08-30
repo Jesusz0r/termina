@@ -1877,6 +1877,7 @@ class PiEditorApp {
       shell?: string;
       engine?: "pi" | "core";
       workspaceId?: string;
+      projectId?: string;
       id?: string;
       fromTerminalId?: string;
       launch?: { cmd: string; args: string[]; env: Record<string, string | undefined> };
@@ -1888,8 +1889,10 @@ class PiEditorApp {
     const type = opts?.type ?? "agent";
     const agentEngine: "pi" | "core" | undefined = type === "agent" ? (opts?.engine === "pi" ? "pi" : "core") : undefined;
     const persist = opts?.persist ?? (!opts?.launch && !opts?.id);
-    const workspaceId = opts?.workspaceId ?? this.primaryWorkspace()?.id ?? "";
-    const owner = this.projectOfWorkspace(workspaceId) ?? this.project();
+    const requestedProject = opts?.projectId ? this.projects.get(opts.projectId) ?? null : null;
+    const workspaceId =
+      opts?.workspaceId ?? requestedProject?.workspaces.values().next().value?.id ?? this.primaryWorkspace(requestedProject ?? undefined)?.id ?? this.primaryWorkspace()?.id ?? "";
+    const owner = this.projectOfWorkspace(workspaceId) ?? requestedProject ?? this.project();
     let id = opts?.id;
     if (id && this.terminals.has(id)) {
       // Two projects both restore term-1. Keep the session; never overwrite a live pty.
@@ -4448,6 +4451,7 @@ class PiEditorApp {
     this.activeProjectId = projectId;
     const project = this.projects.get(projectId)!;
     await this.sendFolderOpened(project.cwd, project.id);
+    void this.persistOpenProjects();
   }
 
   /** Push folder:opened with a login hint flag. The renderer never reads auth.json. */
@@ -4985,9 +4989,10 @@ class PiEditorApp {
       let shell: string | undefined;
       let engine: "pi" | "core" | undefined;
       let fromTerminalId: string | undefined;
+      let projectId: string | undefined;
       if (opts !== undefined) {
         if (typeof opts !== "object" || opts === null) return { ok: false, error: "invalid terminal options" };
-        const rec = opts as { type?: unknown; shell?: unknown; engine?: unknown; fromTerminalId?: unknown };
+        const rec = opts as { type?: unknown; shell?: unknown; engine?: unknown; fromTerminalId?: unknown; projectId?: unknown };
         if (rec.type !== undefined && rec.type !== "agent" && rec.type !== "shell") {
           return { ok: false, error: "invalid terminal type" };
         }
@@ -5002,6 +5007,13 @@ class PiEditorApp {
           const id = rec.fromTerminalId.trim();
           if (id) fromTerminalId = id;
         }
+        if (rec.projectId != null) {
+          if (typeof rec.projectId !== "string" || rec.projectId.length > 64) {
+            return { ok: false, error: "invalid project" };
+          }
+          const pid = rec.projectId.trim();
+          if (pid) projectId = pid;
+        }
         type = rec.type;
         shell = rec.shell;
         engine = rec.engine;
@@ -5011,7 +5023,7 @@ class PiEditorApp {
         }
       }
       try {
-        const t = await this.createTerminal(undefined, { type, shell, engine, fromTerminalId });
+        const t = await this.createTerminal(undefined, { type, shell, engine, fromTerminalId, projectId });
         return { ok: true, id: t.id };
       } catch (err) {
         return { ok: false, error: (err as Error).message };
@@ -5438,9 +5450,12 @@ class PiEditorApp {
 
   /** Record the open projects so the next launch restores them. */
   private persistOpenProjects(): Promise<void> {
+    // Active project last → restore loop ends with the previously focused tab in front.
+    const activeRoot = this.activeProjectId ? this.projects.get(this.activeProjectId)?.canonicalRoot ?? null : null;
     const roots = [...this.projects.values()].map((p) => p.canonicalRoot);
-    if (JSON.stringify(roots) === JSON.stringify(this.preferences.openProjects)) return Promise.resolve();
-    return this.commitPreferencePatch({ openProjects: roots }, false).then(
+    const ordered = activeRoot ? [...roots.filter((r) => r !== activeRoot), activeRoot] : roots;
+    if (JSON.stringify(ordered) === JSON.stringify(this.preferences.openProjects)) return Promise.resolve();
+    return this.commitPreferencePatch({ openProjects: ordered }, false).then(
       () => undefined,
       (err) => {
         console.warn(`[main] project list save failed: ${(err as Error).message}`);

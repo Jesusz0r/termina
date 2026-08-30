@@ -8,6 +8,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { BoundedTextAccumulator, type BoundedToolResult, type CompletionState } from "./tool-output.ts";
 
 export const MAX_MCP_SERVERS = 8;
 export const MAX_MCP_TOOLS = 32;
@@ -51,6 +52,21 @@ export type McpClientTool = {
   original: string;
 };
 
+export type McpCancellationScope = "none" | "connection";
+
+export type McpContinuation = Readonly<{
+  server: string;
+  tool: string;
+  guidance: string;
+}>;
+
+export type McpCallResult = BoundedToolResult & Readonly<{
+  /** "connection" means sibling in-flight calls were aborted with this one. */
+  cancellationScope: McpCancellationScope;
+  /** Present when output was truncated or a structured payload was omitted. */
+  continuation: McpContinuation | null;
+}>;
+
 export type McpSession = {
   tools: McpClientTool[];
   notes: string[];
@@ -58,13 +74,24 @@ export type McpSession = {
     name: string,
     args: unknown,
     opts?: { shouldStop?: () => boolean; timeoutMs?: number },
-  ): Promise<{ content: string; isError: boolean }>;
+  ): Promise<McpCallResult>;
   shutdown(): void;
 };
 
 export function sanitizeMcpIdent(raw: string, max = 32): string {
   const s = raw.replace(IDENT, "_").replace(/^_+|_+$/g, "").slice(0, max);
   return s || "s";
+}
+
+/** Build a bounded, argument-free continuation descriptor for MCP output. */
+export function createMcpContinuation(server: string, tool: string): McpContinuation {
+  const safeServer = sanitizeMcpIdent(server, 32);
+  const safeTool = sanitizeMcpIdent(tool, 64);
+  return Object.freeze({
+    server: safeServer,
+    tool: safeTool,
+    guidance: `Call MCP tool ${JSON.stringify(safeTool)} on server ${JSON.stringify(safeServer)} again to retrieve the complete output; arguments are intentionally omitted.`,
+  });
 }
 
 /** Prefix mcp_<server>_<tool> and keep the Anthropic 64-char name cap. */
@@ -86,6 +113,7 @@ export function mcpToolName(server: string, tool: string): string {
 }
 
 const SCHEMA_CAP = 8 * 1024;
+const SCHEMA_MAX_DEPTH = 64;
 const HEADER_SKIP = new Set([
   "host",
   "content-length",
@@ -243,24 +271,204 @@ function encode(msg: Record<string, unknown>): string {
   return `${JSON.stringify(msg)}\n`;
 }
 
-function textFromCallResult(result: unknown): { content: string; isError: boolean } {
-  if (!result || typeof result !== "object") return { content: "(no output)", isError: true };
-  const rec = result as { content?: unknown; isError?: unknown };
+function mcpOutputMarker(details: { state: CompletionState }, continuation: McpContinuation | null): string {
+  const guidance = continuation ? ` — ${continuation.guidance}` : " — call again for complete output";
+  return details.state === "complete"
+    ? `[mcp output truncated${guidance}]`
+    : `[mcp output incomplete: ${details.state}${guidance}]`;
+}
+
+function mcpOmissionMarker(kind: string, reason: string, continuation: McpContinuation | null): string {
+  const guidance = continuation ? `; ${continuation.guidance}` : "; call the MCP tool again for the omitted payload";
+  return `[mcp ${kind} omitted: ${reason}${guidance}]`;
+}
+
+function stableOutputJson(raw: unknown): string | null {
+  try {
+    const canonical = canonicalizeJsonValue(raw, new WeakSet<object>(), 0);
+    const encoded = JSON.stringify(canonical);
+    return typeof encoded === "string" ? encoded : null;
+  } catch {
+    return null;
+  }
+}
+
+function outputTypeLabel(raw: unknown): string {
+  if (typeof raw !== "string" || !raw) return "unknown";
+  const label = raw.replace(/[^A-Za-z0-9_-]+/g, "_").slice(0, 32);
+  return label || "unknown";
+}
+
+function resourceMetadata(raw: unknown): { metadata: Record<string, unknown>; hasBlob: boolean } {
+  const source = raw && typeof raw === "object" && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : {};
+  const metadata: Record<string, unknown> = {};
+  for (const key of ["uri", "mimeType", "name", "title", "description", "text"]) {
+    if (typeof source[key] === "string") metadata[key] = source[key];
+  }
+  return { metadata, hasBlob: Object.hasOwn(source, "blob") };
+}
+
+function finishMcpOutput(
+  accumulator: BoundedTextAccumulator,
+  isError: boolean,
+  state: CompletionState = "complete",
+  cancellationScope: McpCancellationScope = "none",
+  continuation: McpContinuation | null = null,
+  omitted = false,
+): McpCallResult {
+  const bounded = accumulator.finish(state);
+  const hasOmission = omitted || bounded.truncated;
+  return Object.freeze({
+    ...bounded,
+    content: bounded.text,
+    isError,
+    cancellationScope,
+    truncated: hasOmission,
+    continuation: hasOmission ? continuation : null,
+  });
+}
+
+function mcpErrorResult(
+  content: string,
+  state: CompletionState = "failed",
+  cancellationScope: McpCancellationScope = "none",
+  continuation: McpContinuation | null = null,
+): McpCallResult {
+  const marker = (details: { state: CompletionState }): string => mcpOutputMarker(details, continuation);
+  const accumulator = new BoundedTextAccumulator({
+    maxBytes: MCP_RESULT_BYTES,
+    direction: "head",
+    marker,
+  });
+  accumulator.push(content);
+  return finishMcpOutput(accumulator, true, state, cancellationScope, continuation);
+}
+
+/** Normalize MCP text content through the shared bounded UTF-8 accumulator. */
+export function normalizeMcpCallResult(result: unknown, continuation: McpContinuation | null = null): McpCallResult {
+  const marker = (details: { state: CompletionState }): string => mcpOutputMarker(details, continuation);
+  const accumulator = new BoundedTextAccumulator({
+    maxBytes: MCP_RESULT_BYTES,
+    direction: "head",
+    marker,
+  });
+  if (!result || typeof result !== "object") {
+    accumulator.push("(no output)");
+    return finishMcpOutput(accumulator, true, "failed", "none", continuation);
+  }
+
+  const rec = result as { content?: unknown; isError?: unknown; structuredContent?: unknown };
   const isError = rec.isError === true;
-  const parts: string[] = [];
+  let structuredPart: string | null = null;
+  const jsonParts: string[] = [];
+  const resourceParts: string[] = [];
+  const resourceLinkParts: string[] = [];
+  const omittedParts: string[] = [];
+  let omitted = false;
+  let hasTextBlock = false;
+  let hasNonEmptyText = false;
+
+  if (Object.hasOwn(rec, "structuredContent") && rec.structuredContent !== undefined) {
+    const encoded = stableOutputJson(rec.structuredContent);
+    if (encoded === null) {
+      omitted = true;
+      omittedParts.push(mcpOmissionMarker("structuredContent", "not JSON-serializable", continuation));
+    }
+    else structuredPart = `[mcp structuredContent] ${encoded}`;
+  }
+
   if (Array.isArray(rec.content)) {
     for (const block of rec.content) {
       if (!block || typeof block !== "object") continue;
-      const b = block as { type?: unknown; text?: unknown };
-      if (b.type === "text" && typeof b.text === "string") parts.push(b.text);
+      const b = block as {
+        type?: unknown;
+        text?: unknown;
+        json?: unknown;
+        resource?: unknown;
+        uri?: unknown;
+        mimeType?: unknown;
+        name?: unknown;
+        title?: unknown;
+        description?: unknown;
+      };
+      if (b.type === "text" && typeof b.text === "string") {
+        hasTextBlock = true;
+        hasNonEmptyText ||= b.text.length > 0;
+      } else if (b.type === "json") {
+        const encoded = stableOutputJson(b.json);
+        if (encoded === null) {
+          omitted = true;
+          jsonParts.push(mcpOmissionMarker("json", "not JSON-serializable", continuation));
+        } else {
+          jsonParts.push(
+            `[mcp json] ${encoded}`,
+          );
+        }
+      } else if (b.type === "resource") {
+        const resource = resourceMetadata(b.resource ?? b);
+        const encoded = stableOutputJson(resource.metadata);
+        if (encoded === null) {
+          omitted = true;
+          resourceParts.push(mcpOmissionMarker("resource", "metadata unavailable", continuation));
+        } else {
+          resourceParts.push(`[mcp resource] ${encoded}`);
+        }
+        if (resource.hasBlob) {
+          omitted = true;
+          resourceParts.push(mcpOmissionMarker("resource payload", "binary blob", continuation));
+        }
+      } else if (b.type === "resource_link") {
+        const link = resourceMetadata(b);
+        const encoded = stableOutputJson(link.metadata);
+        if (encoded === null) {
+          omitted = true;
+          resourceLinkParts.push(mcpOmissionMarker("resource_link", "metadata unavailable", continuation));
+        } else {
+          resourceLinkParts.push(`[mcp resource_link] ${encoded}`);
+        }
+      } else if (b.type === "image" || b.type === "audio") {
+        const kind = outputTypeLabel(b.type);
+        const mime = typeof b.mimeType === "string"
+          ? ` (${b.mimeType.slice(0, 96).replace(/[\x00-\x1f\x7f]/g, " ")})`
+          : "";
+        omitted = true;
+        omittedParts.push(mcpOmissionMarker(kind, `binary payload${mime}`, continuation));
+      } else {
+        omitted = true;
+        omittedParts.push(mcpOmissionMarker(outputTypeLabel(b.type), "unsupported content", continuation));
+      }
     }
   } else if (typeof rec.content === "string") {
-    parts.push(rec.content);
+    hasTextBlock = true;
+    hasNonEmptyText = rec.content.length > 0;
   }
-  const text = parts.join("\n") || (isError ? "error: mcp tool failed" : "(no output)");
-  const buf = Buffer.from(text, "utf8");
-  if (buf.length <= MCP_RESULT_BYTES) return { content: text, isError };
-  return { content: buf.subarray(0, MCP_RESULT_BYTES).toString("utf8"), isError };
+
+  let outputParts = 0;
+  const pushPart = (text: string): void => {
+    if (outputParts > 0) accumulator.push("\n");
+    accumulator.push(text);
+    outputParts += 1;
+  };
+  if (structuredPart !== null) pushPart(structuredPart);
+  if (hasTextBlock && hasNonEmptyText) {
+    if (Array.isArray(rec.content)) {
+      for (const block of rec.content) {
+        if (!block || typeof block !== "object") continue;
+        const b = block as { type?: unknown; text?: unknown };
+        if (b.type === "text" && typeof b.text === "string") pushPart(b.text);
+      }
+    } else if (typeof rec.content === "string") {
+      pushPart(rec.content);
+    }
+  }
+  for (const text of [...jsonParts].sort()) pushPart(text);
+  for (const text of [...resourceParts].sort()) pushPart(text);
+  for (const text of [...resourceLinkParts].sort()) pushPart(text);
+  for (const text of [...omittedParts].sort()) pushPart(text);
+  if (outputParts === 0) pushPart(isError ? "error: mcp tool failed" : "(no output)");
+  return finishMcpOutput(accumulator, isError, "complete", "none", continuation, omitted);
 }
 
 class McpProcess {
@@ -336,8 +544,11 @@ class McpProcess {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`mcp ${this.name} timed out`));
-        this.kill();
+        const error = new Error(`mcp ${this.name} timed out`);
+        reject(error);
+        // Per-request cancellation is not available on stdio MCP, so make
+        // the same timeout reason visible to sibling pending requests.
+        this.kill(error);
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       try {
@@ -424,6 +635,11 @@ function parseSseRpc(text: string, id: number): RpcMsg {
 
 async function readCappedBody(res: Response, max: number, name: string): Promise<string> {
   if (!res.body) {
+    const declared = res.headers.get("content-length")?.trim() ?? "";
+    if (!/^\d+$/.test(declared)) throw new Error(`mcp ${name} response body cannot be bounded`);
+    const declaredBytes = Number(declared);
+    if (!Number.isSafeInteger(declaredBytes)) throw new Error(`mcp ${name} response body cannot be bounded`);
+    if (declaredBytes > max) throw new Error(`mcp ${name} response too large`);
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length > max) throw new Error(`mcp ${name} response too large`);
     return buf.toString("utf8");
@@ -553,18 +769,166 @@ function mcpEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
   return env;
 }
 
+function canonicalizeJsonValue(raw: unknown, seen: WeakSet<object>, depth: number): unknown {
+  if (raw === null || typeof raw !== "object") {
+    if (raw === undefined || typeof raw === "function" || typeof raw === "symbol") {
+      throw new Error("mcp schema contains a non-JSON value");
+    }
+    if (typeof raw === "number" && !Number.isFinite(raw)) {
+      throw new Error("mcp schema contains a non-finite number");
+    }
+    return raw;
+  }
+  if (depth > SCHEMA_MAX_DEPTH || seen.has(raw)) throw new Error("mcp schema is too deep or cyclic");
+  seen.add(raw);
+  try {
+    if (Array.isArray(raw)) {
+      return raw.map((value) => canonicalizeJsonValue(value, seen, depth + 1));
+    }
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(raw).sort()) {
+      const value = canonicalizeJsonValue((raw as Record<string, unknown>)[key], seen, depth + 1);
+      Object.defineProperty(out, key, {
+        configurable: true,
+        enumerable: true,
+        value,
+        writable: true,
+      });
+    }
+    return out;
+  } finally {
+    seen.delete(raw);
+  }
+}
+
 function normalizeInputSchema(raw: unknown): Record<string, unknown> {
   const fallback = { type: "object", properties: {} };
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fallback;
   const schema = raw as Record<string, unknown>;
   if (schema.type !== undefined && schema.type !== "object") return fallback;
-  const out: Record<string, unknown> = { ...schema, type: "object" };
   try {
-    if (JSON.stringify(out).length > SCHEMA_CAP) return fallback;
+    const source = { ...schema, type: "object" };
+    const out = canonicalizeJsonValue(source, new WeakSet<object>(), 0);
+    if (!out || typeof out !== "object" || Array.isArray(out)) return fallback;
+    const encoded = JSON.stringify(out);
+    if (typeof encoded !== "string" || Buffer.byteLength(encoded, "utf8") > SCHEMA_CAP) return fallback;
+    return out as Record<string, unknown>;
   } catch {
     return fallback;
   }
-  return out;
+}
+
+function compareStrings(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function toolIdentity(tool: McpClientTool): string {
+  return JSON.stringify([tool.server, tool.original]);
+}
+
+function toolTieBreakKey(tool: McpClientTool): string {
+  return JSON.stringify([tool.description, tool.input_schema]);
+}
+
+function compareMcpTools(a: McpClientTool, b: McpClientTool): number {
+  return (
+    compareStrings(a.server, b.server) ||
+    compareStrings(a.original, b.original) ||
+    compareStrings(toolTieBreakKey(a), toolTieBreakKey(b))
+  );
+}
+
+function mcpConflictNote(tool: McpClientTool, variants: number): string {
+  const server = JSON.stringify(tool.server.slice(0, 96));
+  const original = JSON.stringify(tool.original.slice(0, 128));
+  return `mcp tool conflict for ${server}/${original}: ${variants} definitions; using the deterministic canonical definition`;
+}
+
+function cloneMcpTool(tool: McpClientTool): McpClientTool | null {
+  if (!tool || typeof tool !== "object") return null;
+  const server = typeof tool.server === "string" ? tool.server : "";
+  const original = typeof tool.original === "string"
+    ? tool.original
+    : typeof tool.name === "string" ? tool.name : "";
+  if (!server || !original) return null;
+  return {
+    name: original,
+    description: typeof tool.description === "string" ? tool.description.slice(0, 1024) : original,
+    input_schema: normalizeInputSchema(tool.input_schema),
+    server,
+    original,
+  };
+}
+
+/**
+ * Copy and canonically order MCP discovery results before applying any caps.
+ * A server can repeat a tool across pages, and different servers can return
+ * the same page in different orders. Identity is server + original name; a
+ * deterministic descriptor tie-breaker chooses the same winner in either
+ * case.
+ */
+export function normalizeMcpTools(discovered: readonly McpClientTool[]): McpClientTool[] {
+  return normalizeMcpDiscovery(discovered).tools;
+}
+
+function normalizeMcpDiscovery(discovered: readonly McpClientTool[]): {
+  tools: McpClientTool[];
+  conflicts: string[];
+} {
+  const candidates: McpClientTool[] = [];
+  for (const raw of discovered) {
+    const copy = cloneMcpTool(raw);
+    if (copy) candidates.push(copy);
+  }
+  candidates.sort(compareMcpTools);
+
+  const tools: McpClientTool[] = [];
+  const conflicts: string[] = [];
+  for (let i = 0; i < candidates.length;) {
+    const first = candidates[i]!;
+    const identity = toolIdentity(first);
+    let end = i + 1;
+    while (end < candidates.length && toolIdentity(candidates[end]!) === identity) end++;
+    const variants = new Set<string>();
+    for (let index = i; index < end; index++) variants.add(toolTieBreakKey(candidates[index]!));
+    if (variants.size > 1) conflicts.push(mcpConflictNote(first, variants.size));
+    tools.push(first);
+    i = end;
+  }
+  return { tools, conflicts };
+}
+
+function addMcpNameSuffix(base: string, suffix: number): string {
+  if (suffix <= 1) return base;
+  const marker = `_${suffix}`;
+  const prefix = base.slice(0, Math.max(1, 64 - marker.length));
+  const out = `${prefix}${marker}`.slice(0, 64);
+  return TOOL_NAME.test(out) ? out : "mcp_tool";
+}
+
+function freezeDeep<T>(value: T, seen = new WeakSet<object>()): T {
+  if (!value || typeof value !== "object") return value;
+  const object = value as object;
+  if (seen.has(object)) return value;
+  seen.add(object);
+  if (Array.isArray(value)) {
+    for (const item of value) freezeDeep(item, seen);
+  } else {
+    for (const item of Object.values(value as Record<string, unknown>)) freezeDeep(item, seen);
+  }
+  return Object.freeze(value);
+}
+
+function providerMcpToolDef(tool: McpClientTool): Record<string, unknown> {
+  return {
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.input_schema,
+  };
+}
+
+function providerMcpToolBytes(tool: McpClientTool): number {
+  return Buffer.byteLength(JSON.stringify(providerMcpToolDef(tool)), "utf8");
 }
 
 async function handshake(proc: McpConn): Promise<McpClientTool[]> {
@@ -607,21 +971,31 @@ export function selectMcpTools(
   discovered: McpClientTool[],
   kernelNames: ReadonlySet<string> = KERNEL_TOOL_NAMES,
 ): McpClientTool[] {
+  const normalized = normalizeMcpTools(discovered);
   const out: McpClientTool[] = [];
   const used = new Set<string>(kernelNames);
   let bytes = 0;
-  for (const tool of discovered) {
+  for (const tool of normalized) {
     if (out.length >= MAX_MCP_TOOLS) break;
-    const name = mcpToolName(tool.server, tool.original);
-    if (used.has(name) || kernelNames.has(name)) continue;
-    const next = { ...tool, name };
-    const nextBytes = Buffer.byteLength(JSON.stringify(next));
+    const base = mcpToolName(tool.server, tool.original);
+    let suffix = 1;
+    let name = base;
+    while (used.has(name)) name = addMcpNameSuffix(base, ++suffix);
+    const next = {
+      name,
+      description: tool.description,
+      input_schema: normalizeInputSchema(tool.input_schema),
+      server: tool.server,
+      original: tool.original,
+    } satisfies McpClientTool;
+    freezeDeep(next);
+    const nextBytes = providerMcpToolBytes(next);
     if (bytes + nextBytes > MAX_MCP_TOOL_BYTES) continue;
     used.add(name);
     out.push(next);
     bytes += nextBytes;
   }
-  return out;
+  return Object.freeze(out) as unknown as McpClientTool[];
 }
 
 export async function startMcp(
@@ -675,7 +1049,9 @@ export async function startMcp(
     }
   }
 
-  const tools = selectMcpTools(discovered);
+  const normalized = normalizeMcpDiscovery(discovered);
+  notes.push(...normalized.conflicts);
+  const tools = selectMcpTools(normalized.tools);
   const byPrefixed = new Map<string, { proc: McpConn; original: string }>();
   for (const tool of tools) {
     const proc = byOriginal.get(`${tool.server}\0${tool.original}`);
@@ -687,8 +1063,9 @@ export async function startMcp(
     notes,
     async call(name, args, callOpts) {
       const hit = byPrefixed.get(name);
-      if (!hit) return { content: `error: unknown tool ${name}`, isError: true };
-      if (hit.proc.dead) return { content: `error: mcp ${hit.proc.name} is not running`, isError: true };
+      if (!hit) return mcpErrorResult(`error: unknown tool ${name}`);
+      const continuation = createMcpContinuation(hit.proc.name, name);
+      if (hit.proc.dead) return mcpErrorResult(`error: mcp ${hit.proc.name} is not running`, "failed", "none", continuation);
       const timeoutMs = callOpts?.timeoutMs ?? MCP_CALL_MS;
       const stop = callOpts?.shouldStop;
       let poll: ReturnType<typeof setInterval> | null = null;
@@ -701,10 +1078,16 @@ export async function startMcp(
           }, 50);
           if (stop?.()) hit.proc.kill(new Error("interrupted"));
         });
-        return textFromCallResult(result);
+        return normalizeMcpCallResult(result, continuation);
       } catch (err) {
         const why = err instanceof Error ? err.message : String(err);
-        return { content: `error: mcp ${hit.proc.name}: ${why}`, isError: true };
+        const state: CompletionState = why === "interrupted"
+          ? "interrupted"
+          : /timed out/i.test(why) ? "timeout" : "failed";
+        const cancellationScope: McpCancellationScope = state === "interrupted" || state === "timeout"
+          ? "connection"
+          : "none";
+        return mcpErrorResult(`error: mcp ${hit.proc.name}: ${why}`, state, cancellationScope, continuation);
       } finally {
         if (poll) clearInterval(poll);
       }
@@ -716,11 +1099,7 @@ export async function startMcp(
 }
 
 export function mcpToolDefs(tools: McpClientTool[]): Array<Record<string, unknown>> {
-  return tools.map((t) => ({
-    name: t.name,
-    description: t.description,
-    input_schema: t.input_schema,
-  }));
+  return tools.map(providerMcpToolDef);
 }
 
 /** Join kernel tools and MCP tools. Last client tool keeps cache_control. */

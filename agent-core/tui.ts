@@ -340,7 +340,7 @@ export function formatTuiFooter(opts: {
     const queued = opts.queued ? "  ·  queued" : "";
     return `^C stop  ·  PgUp PgDn scroll${queued}${live}`;
   }
-  return `@ · / · Tab${live}`;
+  return `↵ send  ·  @ file  ·  / cmd  ·  ⇥ complete  ·  ^J newline  ·  ^C clear${live}`;
 }
 
 const graphemeSegmenter = new Intl.Segmenter("en", { granularity: "grapheme" });
@@ -2276,12 +2276,22 @@ export class AgentTui {
     );
     const shownSlash = matches.slice(slashStart, slashStart + layout.slash);
     const view = this.visibleSlice(cols, layout.transcript, this.scroll);
-    const spin = this.busy ? `${SPIN[this.spin]!} ` : "";
+    const spin = this.busy ? SPIN[this.spin]! : "";
     const imageN = this.pendingImageCount;
-    const images = imageN > 0 ? `  ${imageN} image${imageN === 1 ? "" : "s"}` : "";
-    const perm = this.permissions ? `  ${this.permissions}` : "";
-    const queued = this.queued ? `  queued ${truncateMiddle(this.queued, 24)}` : "";
-    const title = ` termina agent-core v1  ${spin}effort ${this.effort}${perm}  ${this.model}${this.auth ? `  ${this.auth}` : ""}${images}${queued} `;
+    const images = imageN > 0 ? `${imageN} img` : "";
+    const permLabel = this.permissions ? `perm ${this.permissions}` : "";
+    const modelLabel = this.model ? `${spin ? `${spin} ` : ""}${this.model}` : spin ? `${spin} no model` : "no model";
+    const queuedLabel = this.queued ? `queued ${truncateMiddle(this.queued, 18)}` : "";
+    // Model and effort are always adjacent — keep them as one visual group.
+    const modelEffort = `${modelLabel} · ${this.effort}`;
+    const leftParts = [`▸ termina`, modelEffort];
+    if (permLabel) leftParts.push(permLabel);
+    if (images) leftParts.push(images);
+    if (queuedLabel) leftParts.push(queuedLabel);
+    const leftTitle = leftParts.join("  ·  ");
+    const rightTitle = this.auth ? this.auth : "";
+    const gap = Math.max(1, cols - cellWidth(leftTitle) - cellWidth(rightTitle) - 2);
+    const title = ` ${leftTitle}${" ".repeat(gap)}${rightTitle} `;
     const picker = matches.length > 0 && Boolean(matches[0]?.submit);
     const filePicker = picker && matches[0]?.hint === "file";
     const foot = formatTuiFooter({

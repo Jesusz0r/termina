@@ -28,6 +28,14 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const core = await import("../agent-core/main.ts");
 const host = await import("../agent-core/host.ts");
+const auth = await import("../agent-core/auth.ts");
+const compat = await import("../agent-core/openai-compat.ts");
+const projection = await import("../agent-core/request-projection.ts");
+const reclaim = await import("../agent-core/reclaim.ts");
+const session = await import("../agent-core/session.ts");
+const trace = await import("../agent-core/trace.ts");
+const toolOutput = await import("../agent-core/tool-output.ts");
+const tuiCore = await import("../agent-core/tui.ts");
 
 const {
   confinePath,
@@ -41,11 +49,8 @@ const {
   formatProjectInstructions,
   formatUserInstructions,
   formatEnvironment,
-  formatStub,
   parsePrintPrompt,
   reproFor,
-  toRequest,
-  planPruneStubs,
   readProjectFile,
   writeProjectFile,
   editProjectFile,
@@ -58,7 +63,6 @@ const {
   validateGrepPattern,
   buildCachedPrefix,
   anthropicCacheMark,
-  replaySessionRecords,
   renderHistoryTranscript,
   sidecarStartFor,
   formatToolAnnounce,
@@ -68,44 +72,22 @@ const {
   runBash,
   isDirectRun,
   tracesDirFor,
-  retainTraceFiles,
   isValidTerminalId,
-  capTail,
   readFileResult,
   FROZEN_IDENTITY,
   buildFrozenSystem,
-  traceRecord,
   isDirectRunFrom,
   hashSystem,
   WEB_SEARCH_TOOL,
   requestTools,
+  stampHistoryCache,
   placeStreamBlock,
   compactStreamBlocks,
-  toProviderBlock,
-  userPromptContent,
-  resolveSessionFile,
-  sessionRotateStamp,
-  MAX_SESSION_SEGMENT_BYTES,
-  MAX_SESSION_RECORD_BYTES,
-  isCoreSessionBundleFile,
-  isCoreSessionId,
-  prepareFreshSession,
-  SLASH_COMMANDS,
-  matchingSlashCommands,
-  completeSlashLine,
-  fileMentionAt,
-  applyFileMention,
-  completeFileMention,
-  rankFileTags,
-  subsequenceSpread,
-  formatTuiFooter,
   displayToolOutput,
   listTaggedFiles,
   collectRelativeFiles,
   parseFileTags,
   expandFileTags,
-  stampHistoryCache,
-  formatWorkingSet,
   shouldCompactForCacheCost,
   retryAfter,
   parseEffortCommand,
@@ -121,7 +103,6 @@ const {
   gpt56ReasoningContext,
   gpt5TextVerbosity,
   defaultContextWindow,
-  tokenEstimate,
   formatUsageIndicators,
   fetchUrl,
   fetchUrlError,
@@ -129,11 +110,60 @@ const {
   parseBangCommand,
 } = core;
 
+const {
+  buildRequestOverlay,
+  projectPersistedMessages,
+  appendRequestOverlay,
+  userPromptContent,
+} = projection;
+const { estimateReclaimTokens, makePruneRevision, planPruneStubs } = reclaim;
+const { createAttemptRecord, createTraceRuntime } = trace;
+const { boundText } = toolOutput;
+const {
+  formatStub,
+  replaySessionRecords,
+  resolveSessionFile,
+  sessionRotateStamp,
+  MAX_SESSION_SEGMENT_BYTES,
+  MAX_SESSION_RECORD_BYTES,
+  isCoreSessionBundleFile,
+  isCoreSessionId,
+  prepareFreshSession,
+  sessionBlockBytes,
+  sessionBlockHash,
+} = session;
+const {
+  SLASH_COMMANDS,
+  matchingSlashCommands,
+  completeSlashLine,
+  fileMentionAt,
+  applyFileMention,
+  completeFileMention,
+  rankFileTags,
+  subsequenceSpread,
+  formatTuiFooter,
+} = tuiCore;
+
 const results = [];
 const check = (name, ok, detail = "") => {
   results.push(ok);
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + String(detail).slice(0, 240) : ""}`);
 };
+
+function projectPersistedForTest(messages, imageRoots = []) {
+  const result = projectPersistedMessages({ messages, imageRoots });
+  if (!result.ok) throw new Error(result.error);
+  return result.messages;
+}
+
+function projectBlockForTest(block) {
+  const projected = projectPersistedForTest([{ role: "user", content: [block], sseq: 1, tokens: 1 }]);
+  return projected[0]?.content?.[0];
+}
+
+function workingSetForTest(opts) {
+  return buildRequestOverlay(opts)?.text ?? "";
+}
 
 const root = mkdtempSync(join(tmpdir(), "agent-core-"));
 const leftovers = [root];
@@ -299,9 +329,9 @@ check("project-local python3 is not executed", !envProbe.includes("HACKED"));
 
 writeFileSync(join(root, "hit.ts"), "alpha unique-token beta\n");
 const g = await grepFiles(root, { pattern: "unique-token" });
-check("grep matches", g.includes("unique-token") && g.includes("hit.ts"));
-check("grep skips node_modules", !(await grepFiles(root, { pattern: "secret" })).includes("hid.ts"));
-check("grep empty pattern errors", (await grepFiles(root, { pattern: "" })).startsWith("error:"));
+check("grep matches", g.content.includes("unique-token") && g.content.includes("hit.ts"));
+check("grep skips node_modules", !(await grepFiles(root, { pattern: "secret" })).content.includes("hid.ts"));
+check("grep empty pattern errors", (await grepFiles(root, { pattern: "" })).content.startsWith("error:"));
 const rgDir = mkdtempSync(join(tmpdir(), "agent-core-rg-"));
 leftovers.push(rgDir);
 writeFileSync(join(rgDir, "rg"), "#!/bin/sh\necho \"from-rg.ts:1:rg-hit\"\n");
@@ -309,23 +339,23 @@ chmodSync(join(rgDir, "rg"), 0o755);
 const prevPathForRg = process.env.PATH;
 process.env.PATH = `${rgDir}${delimiter}${prevPathForRg ?? ""}`;
 const rgHit = await grepFiles(root, { pattern: "unique-token" });
-check("grep uses trusted rg when present", rgHit.includes("from-rg.ts") && rgHit.includes("rg-hit"));
+check("grep uses trusted rg when present", rgHit.content.includes("from-rg.ts") && rgHit.content.includes("rg-hit"));
 process.env.PATH = prevPathForRg;
 const jsHit = await grepFiles(root, { pattern: "unique-token", }, { jsOnly: true });
-check("grep jsOnly fallback still matches", jsHit.includes("unique-token") && jsHit.includes("hit.ts"));
-check("grep invalid regex errors", (await grepFiles(root, { pattern: "(" })).startsWith("error:"));
+check("grep jsOnly fallback still matches", jsHit.content.includes("unique-token") && jsHit.content.includes("hit.ts"));
+check("grep invalid regex errors", (await grepFiles(root, { pattern: "(" })).content.startsWith("error:"));
 check("grep (a+)+ rejected", validateGrepPattern("(a+)+") !== null);
 check("grep (a|aa)+ rejected", validateGrepPattern("(a|aa)+") !== null);
 check("grep backref rejected", validateGrepPattern("a\\1") !== null);
 check("grep two quantifiers rejected", validateGrepPattern("a+b+") !== null);
 check("sidecar grep has no path", sidecarStartFor({ name: "grep", id: "1", input: { path: "src" } }).path === undefined);
 
-const globbed = await globFiles(root, "**/*.ts");
+const globbed = (await globFiles(root, "**/*.ts")).content;
 check("glob **/*.ts nested", globbed.includes("pkg/src/a.ts"));
 check("glob **/*.ts root-level", globbed.includes("root.ts") && globbed.includes("hit.ts"));
 check("glob ignores node_modules", !globbed.includes("hid.ts"));
-check("glob brace errors", (await globFiles(root, "{a,b}")).startsWith("error:"));
-check("glob overlong errors", (await globFiles(root, "a".repeat(300))).startsWith("error:"));
+check("glob brace errors", (await globFiles(root, "{a,b}")).content.startsWith("error:"));
+check("glob overlong errors", (await globFiles(root, "a".repeat(300))).content.startsWith("error:"));
 check("matchGlob repeated ** terminates", matchGlob("**/**/*.ts", "pkg/src/a.ts") === true);
 check("sidecar glob has no path", sidecarStartFor({ name: "glob", id: "1", input: {} }).path === undefined);
 
@@ -335,13 +365,13 @@ mkdirSync(join(root, "skipdir"), { recursive: true });
 writeFileSync(join(root, "skipdir", "x.ts"), "gitignore-secret\n");
 writeFileSync(join(root, "visible.secret"), "keep-secret\n");
 const giGrep = await grepFiles(root, { pattern: "gitignore-secret" });
-check("grep skips gitignored file", !giGrep.includes("hidden.secret"));
-check("grep skips gitignored directory", !giGrep.includes("skipdir"));
+check("grep skips gitignored file", !giGrep.content.includes("hidden.secret"));
+check("grep skips gitignored directory", !giGrep.content.includes("skipdir"));
 check(
   "grep of an explicit gitignored path still reads it",
-  (await grepFiles(root, { pattern: "gitignore-secret", path: "hidden.secret" })).includes("hidden.secret"),
+  (await grepFiles(root, { pattern: "gitignore-secret", path: "hidden.secret" })).content.includes("hidden.secret"),
 );
-const giGlob = await globFiles(root, "**/*.ts");
+const giGlob = (await globFiles(root, "**/*.ts")).content;
 check("glob skips gitignored directory", !giGlob.includes("skipdir/x.ts") && giGlob.includes("hit.ts"));
 const envGi = formatEnvironment(root, { probes: false });
 check("environment listing omits gitignored names", !envGi.includes("hidden.secret") && envGi.includes("visible.secret"));
@@ -440,7 +470,17 @@ check(
   bashPath.content.includes("/opt/homebrew/bin") && bashPath.content.includes("/usr/local/bin"),
 );
 const largeBash = await runBash(`${JSON.stringify(process.execPath)} -e 'process.stdout.write("x".repeat(30000))'`, { cwd: root });
-check("bash keeps a bounded tail with a marker", Buffer.byteLength(largeBash.content) < 22 * 1024 && largeBash.content.includes("early output truncated"));
+check(
+  "bash keeps a bounded tail with continuation metadata",
+  largeBash.isError === false &&
+    largeBash.state === "complete" &&
+    largeBash.truncated === true &&
+    largeBash.stdout?.direction === "tail" &&
+    largeBash.stdout?.truncated === true &&
+    largeBash.continuation?.includes("Re-run the command") === true &&
+    largeBash.content.includes("[exit 0]") &&
+    largeBash.outputBytes <= largeBash.limitBytes,
+);
 const t0 = Date.now();
 let stopBash = false;
 const killed = runBash("sleep 8", { cwd: root, timeoutMs: 20_000, shouldStop: () => stopBash });
@@ -557,12 +597,12 @@ check(
   "structuredStartup keeps image refs",
   structuredImg.text === "look at this" && structuredImg.images[0]?.name === "core-imgtest-img-1.png",
 );
-const imgReq = toRequest(
+const imgReq = projectPersistedForTest(
   [{ role: "user", content: [{ type: "text", text: "see" }, { type: "image", source: { type: "file", name: stored.ok ? stored.images[0].name : "", media_type: "image/png" } }], tokens: 1, sseq: 1 }],
   [imgDir],
 );
 check(
-  "toRequest expands a file image to base64",
+  "request projection expands a file image to base64",
   Array.isArray(imgReq[0].content) &&
     imgReq[0].content[1]?.type === "image" &&
     imgReq[0].content[1]?.source?.type === "base64",
@@ -1022,7 +1062,15 @@ check("fetch loopback in tests", fetched.isError === false && fetched.content ==
 const bounced = await fetchUrl(`http://127.0.0.1:${fetchPort}/go`);
 check("fetch follows a redirect", bounced.isError === false && bounced.content === "fetched-body");
 const bigFetch = await fetchUrl(`http://127.0.0.1:${fetchPort}/big`);
-check("fetch caps bytes", bigFetch.isError === false && bigFetch.content.includes("truncated") && Buffer.byteLength(bigFetch.content) < 30_000);
+check(
+  "fetch caps bytes with continuation metadata",
+  bigFetch.isError === false &&
+    bigFetch.state === "complete" &&
+    bigFetch.truncated === true &&
+    bigFetch.continuation?.includes("Re-run fetch") === true &&
+    bigFetch.outputBytes <= bigFetch.limitBytes &&
+    bigFetch.inputBytes > bigFetch.retainedBytes,
+);
 const stopped = await fetchUrl(`http://127.0.0.1:${fetchPort}/ok`, { shouldStop: () => true });
 check("fetch interrupt is an error", stopped.isError === true);
 fetchSrv.close();
@@ -1030,31 +1078,28 @@ const slots = [];
 placeStreamBlock(slots, 1, { type: "text", text: "kept" });
 check("stream compact skips holes", compactStreamBlocks(slots).length === 1 && compactStreamBlocks(slots)[0].text === "kept");
 check(
-  "toProviderBlock strips view keys only",
-  JSON.stringify(toProviderBlock({ type: "text", text: "hi", stubbed: true, chars: 2 })).includes("hi") &&
-    !JSON.stringify(toProviderBlock({ type: "text", text: "hi", stubbed: true })).includes("stubbed"),
+  "request projection strips view keys only",
+  JSON.stringify(projectBlockForTest({ type: "text", text: "hi", stubbed: true, chars: 2 })).includes("hi") &&
+    !JSON.stringify(projectBlockForTest({ type: "text", text: "hi", stubbed: true })).includes("stubbed"),
 );
 check(
-  "toProviderBlock keeps thinking",
-  toProviderBlock({ type: "thinking", thinking: "abc", signature: "sig" }).thinking === "abc",
+  "request projection keeps signed thinking",
+  projectBlockForTest({ type: "thinking", thinking: "abc", signature: "sig" }).thinking === "abc",
 );
 check(
   "hidden context becomes provider text",
-  JSON.stringify(toProviderBlock({ type: "context", text: "<working-set>x</working-set>" })) ===
+  JSON.stringify(projectBlockForTest({ type: "context", text: "<working-set>x</working-set>" })) ===
     JSON.stringify({ type: "text", text: "<working-set>x</working-set>" }),
 );
-const hiddenWorkingSet = userPromptContent("visible", [], "<working-set>hidden</working-set>");
+const hiddenWorkingSet = projectBlockForTest({ type: "context", text: "<working-set>hidden</working-set>" });
 check(
-  "working set persists separately from visible prompt text",
-  Array.isArray(hiddenWorkingSet) &&
-    hiddenWorkingSet[0]?.type === "text" &&
-    hiddenWorkingSet[0]?.text === "visible" &&
-    hiddenWorkingSet[1]?.type === "context",
+  "legacy working set projects as provider text",
+  hiddenWorkingSet?.type === "text" && hiddenWorkingSet?.text === "<working-set>hidden</working-set>",
 );
 check("plain user prompt stays a string", userPromptContent("visible", []) === "visible");
-const unsignedThinking = toRequest([{ role: "assistant", content: [{ type: "thinking", thinking: "abc" }], tokens: 1, sseq: 1 }]);
-check("toRequest drops unsigned thinking", unsignedThinking[0]?.content?.length === 0);
-const searchReq = toRequest([
+const unsignedThinking = projectPersistedForTest([{ role: "assistant", content: [{ type: "thinking", thinking: "abc" }], tokens: 1, sseq: 1 }]);
+check("request projection drops unsigned thinking", unsignedThinking[0]?.content?.length === 0);
+const searchReq = projectPersistedForTest([
   {
     role: "assistant",
     content: [
@@ -1071,9 +1116,9 @@ const searchReq = toRequest([
   },
 ]);
 const searchJson = JSON.stringify(searchReq);
-check("toRequest keeps server_tool_use", searchJson.includes("server_tool_use") && searchJson.includes("\"query\":\"x\""));
-check("toRequest keeps encrypted search content", searchJson.includes("encrypted_content"));
-check("toRequest keeps text citations", searchJson.includes("citations") && searchJson.includes("web_search_result_location"));
+check("request projection keeps server_tool_use", searchJson.includes("server_tool_use") && searchJson.includes("\"query\":\"x\""));
+check("request projection keeps encrypted search content", searchJson.includes("encrypted_content"));
+check("request projection keeps text citations", searchJson.includes("citations") && searchJson.includes("web_search_result_location"));
 check(
   "reproFor web_search quotes query",
   (reproFor({ id: "1", name: "web_search", input: { query: "foo 'bar'" } }) ?? "").includes("'\\''"),
@@ -1125,16 +1170,22 @@ check(
 
 const stub = formatStub({ chars: 12, tool: "grep", sseq: 7, repro: "grep 'x'" });
 check("formatStub includes storageSeq and repro", stub.includes("storageSeq 7") && stub.includes("reproduce: grep 'x'"));
-const req = toRequest([
+const req = projectPersistedForTest([
+  {
+    role: "assistant",
+    content: [{ type: "tool_use", id: "1", name: "grep", input: { pattern: "x" } }],
+    tokens: 1,
+    sseq: 1,
+  },
   {
     role: "user",
     content: [{ type: "tool_result", tool_use_id: "1", content: "hi", stubbed: true, repro: "x", chars: 3 }],
     tokens: 1,
-    sseq: 1,
+    sseq: 2,
   },
 ]);
 const reqJson = JSON.stringify(req);
-check("toRequest strips stubbed/repro/chars", reqJson.includes('"content":"hi"') && !reqJson.includes("stubbed"));
+check("request projection strips stubbed/repro/chars", reqJson.includes('"content":"hi"') && !reqJson.includes("stubbed"));
 check("reproFor grep includes pattern", (reproFor({ id: "1", name: "grep", input: { pattern: "abc" } }) ?? "").includes("abc"));
 check(
   "reproFor quotes apostrophe",
@@ -1147,7 +1198,7 @@ check(
 
 check(
   "planPruneStubs no-ops under high-water",
-  planPruneStubs([{ role: "user", content: "hi", tokens: 10 }], { systemTokens: 10, usable: 100_000, protectTokens: 4_000 })
+  planPruneStubs([{ role: "user", content: "hi", tokens: 10, sseq: 1 }], { systemTokens: 10, usable: 100_000, protectTokens: 4_000 })
     .length === 0,
 );
 const prunePlan = planPruneStubs(
@@ -1159,9 +1210,10 @@ const prunePlan = planPruneStubs(
         { type: "tool_result", content: "b".repeat(8_000) },
       ],
       tokens: 9_000,
+      sseq: 1,
     },
-    { role: "user", content: "recent one", tokens: 10 },
-    { role: "user", content: "recent two", tokens: 10 },
+    { role: "user", content: "recent one", tokens: 10, sseq: 2 },
+    { role: "user", content: "recent two", tokens: 10, sseq: 3 },
   ],
   { systemTokens: 0, usable: 10_000, protectTokens: 10 },
 );
@@ -1176,9 +1228,10 @@ const thinkPlan = planPruneStubs(
         { type: "text", text: "hi" },
       ],
       tokens: 9_000,
+      sseq: 1,
     },
-    { role: "user", content: "recent one", tokens: 10 },
-    { role: "user", content: "recent two", tokens: 10 },
+    { role: "user", content: "recent one", tokens: 10, sseq: 2 },
+    { role: "user", content: "recent two", tokens: 10, sseq: 3 },
   ],
   { systemTokens: 0, usable: 10_000, protectTokens: 10 },
 );
@@ -1187,13 +1240,26 @@ check(
   "planPruneStubs billed high with small history is a no-op",
   planPruneStubs(
     [
-      { role: "user", content: [{ type: "tool_result", content: "a".repeat(8_000) }], tokens: 100 },
-      { role: "user", content: "a", tokens: 10 },
-      { role: "user", content: "b", tokens: 10 },
+      { role: "user", content: [{ type: "tool_result", content: "a".repeat(8_000) }], tokens: 100, sseq: 1 },
+      { role: "user", content: "a", tokens: 10, sseq: 2 },
+      { role: "user", content: "b", tokens: 10, sseq: 3 },
     ],
     { systemTokens: 0, usable: 10_000, protectTokens: 10, fillTokens: 9_000 },
   ).length === 0,
 );
+const thinkRevision = makePruneRevision("think-rev", [{
+  sseq: 1,
+  blockIndex: 0,
+  action: "drop",
+  original: {
+    type: "thinking",
+    chars: "secret".length,
+    bytes: sessionBlockBytes({ type: "thinking", thinking: "secret" }),
+    sha256: sessionBlockHash({ type: "thinking", thinking: "secret" }),
+  },
+  reclaimedTokens: estimateReclaimTokens("secret"),
+  fallback: { source: "session-record", tool: "thinking", repro: null },
+}]);
 const thinkReplay = [
   JSON.stringify({
     storageSeq: 1,
@@ -1206,12 +1272,7 @@ const thinkReplay = [
       ],
     },
   }),
-  JSON.stringify({
-    storageSeq: 2,
-    type: "revision",
-    kind: "prune",
-    targets: [{ sseq: 1, blockIndex: 0, action: "drop" }],
-  }),
+  JSON.stringify({ storageSeq: 2, ...thinkRevision }),
 ].join("\n");
 const droppedThink = replaySessionRecords(thinkReplay);
 check(
@@ -1239,9 +1300,20 @@ check("buildCachedPrefix does not mutate tools", tools[1].cache_control === unde
 check("sidecar write maps to write", sidecarStartFor({ name: "write_file", id: "9", input: { path: "a.ts" } }).toolName === "write");
 check("sidecar read_file has no path", sidecarStartFor({ name: "read_file", id: "9", input: { path: "a.ts" } }).path === undefined);
 
-const utf = "é".repeat(30);
-const capped = capTail(utf, 8, "bash 'x'");
-check("capTail uses byte tail and repro marker", capped.includes("early output truncated") && capped.includes("reproduce:"));
+const utf = "é".repeat(40);
+const capped = boundText(utf, {
+  maxBytes: 64,
+  direction: "tail",
+  marker: "[output omitted — reproduce: bash 'x']",
+});
+check(
+  "bounded text keeps a UTF-8 tail with repro marker",
+  capped.truncated &&
+    capped.text.includes("reproduce:") &&
+    capped.text.includes("é") &&
+    capped.outputBytes <= capped.limitBytes &&
+    !capped.text.includes("\uFFFD"),
+);
 
 const handoff = "<context-handoff>\nkeep\n</context-handoff>";
 const sessionLines = [
@@ -1258,18 +1330,39 @@ const replayed = replaySessionRecords(sessionLines);
 check("summarize replay handoff first", replayed.ok && replayed.messages[0]?.content === handoff);
 check("summarize replay keeps tail", replayed.ok && replayed.messages[1]?.content === "tail");
 
+const bodyBlock = { type: "tool_result", tool_use_id: "t", content: "BODY", tool: "bash", repro: "bash x" };
+const bodyRevision = makePruneRevision("body-rev", [{
+  sseq: 2,
+  blockIndex: 0,
+  action: "stub",
+  original: {
+    type: "tool_result",
+    chars: "BODY".length,
+    bytes: sessionBlockBytes(bodyBlock),
+    sha256: sessionBlockHash(bodyBlock),
+  },
+  reclaimedTokens: estimateReclaimTokens("BODY"),
+  tool: "bash",
+  repro: "bash x",
+  fallback: { source: "session-record", tool: "bash", repro: "bash x" },
+}]);
 const pruneLines = [
   JSON.stringify({
     storageSeq: 1,
     type: "message",
+    message: { role: "user", content: [{ type: "tool_use", id: "t", name: "bash", input: { command: "x" } }] },
+  }),
+  JSON.stringify({
+    storageSeq: 2,
+    type: "message",
     message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "BODY", tool: "bash", repro: "bash x" }] },
   }),
-  JSON.stringify({ storageSeq: 2, type: "revision", kind: "prune", targets: [{ sseq: 1, blockIndex: 0, action: "stub" }] }),
+  JSON.stringify({ storageSeq: 3, ...bodyRevision }),
 ].join("\n");
 const pruned = replaySessionRecords(pruneLines);
 check(
   "prune replay uses formatStub",
-  pruned.ok && String(pruned.messages[0]?.content[0]?.content ?? "").includes("storageSeq 1"),
+  pruned.ok && String(pruned.messages.find((message) => message.sseq === 2)?.content?.[0]?.content ?? "").includes("storageSeq 2"),
 );
 
 const truncLines = [
@@ -1295,13 +1388,37 @@ check("truncated final line ignored", replaySessionRecords(`${JSON.stringify({ s
 
 check("invalid terminal id rejected", isValidTerminalId("../evil") === false);
 check("tracesDirFor invalid id is null", tracesDirFor(root, "../evil") === null);
-const tdir = join(root, "traces");
-mkdirSync(tdir);
-writeFileSync(join(tdir, "turn-10.json"), "{}");
-writeFileSync(join(tdir, "turn-2.json"), "{}");
-writeFileSync(join(tdir, "noise.txt"), "x");
-const traceKept = retainTraceFiles(tdir, 1);
-check("trace retention numeric", traceKept.includes("turn-10.json") && !traceKept.includes("turn-2.json"));
+const traceRetentionRuntime = createTraceRuntime({
+  directory: join(root, "trace-retention"),
+  namespace: "agent-core-harness-retention",
+  retentionCap: 1,
+  now: () => "2026-08-30T00:00:00.000Z",
+});
+const traceStartup = await traceRetentionRuntime.ready;
+const makeTraceAttempt = (attemptId, sequence) => createAttemptRecord({
+  runId: "run-harness-retention",
+  taskId: "task-harness-retention",
+  attemptId,
+  role: "main",
+  provider: "openai",
+  protocol: "openai-responses",
+  model: "gpt-5.6",
+  status: "ok",
+  storageSeqRange: [sequence, sequence],
+  toolNames: [],
+  usage: null,
+  cost: null,
+  cache: null,
+  revisions: { count: 0, kinds: [] },
+});
+const firstTraceWrite = await traceRetentionRuntime.writeAttempt(makeTraceAttempt("attempt-1", 1));
+const secondTraceWrite = await traceRetentionRuntime.writeAttempt(makeTraceAttempt("attempt-2", 2));
+const traceKept = readdirSync(join(root, "trace-retention"));
+check(
+  "trace retention uses canonical runtime",
+  traceStartup.ok && firstTraceWrite.ok && secondTraceWrite.ok && traceKept.includes("turn-2.json") && !traceKept.includes("turn-1.json"),
+);
+await traceRetentionRuntime.close();
 
 mkdirSync(join(root, "cycle", "a"), { recursive: true });
 try {
@@ -1310,7 +1427,7 @@ try {
   /* windows */
 }
 const cyc = await globFiles(join(root, "cycle"), "**/*");
-check("in-root symlink cycle terminates", typeof cyc === "string");
+check("in-root symlink cycle terminates", typeof cyc.content === "string");
 
 const outSkill = join(outside, "SKILL.md");
 writeFileSync(outSkill, "---\nname: out\ndescription: no\n---\n");
@@ -1365,12 +1482,12 @@ check("grep lookbehind (?<=) rejected", validateGrepPattern("a(?<=b)") !== null)
 check("grep lookbehind (?<!) rejected", validateGrepPattern("a(?<!b)") !== null);
 check(
   "grep timeout note",
-  (await grepFiles(root, { pattern: "unique-token" }, { budgetMs: 0 })).includes("timed out"),
+  (await grepFiles(root, { pattern: "unique-token" }, { budgetMs: 0 })).content.includes("timed out"),
 );
 
 writeFileSync(join(root, "many.txt"), Array.from({ length: 60 }, (_, i) => `hit-line-${i}`).join("\n"));
-check("grep caps hits", (await grepFiles(root, { pattern: "hit-line" })).split("\n").length <= 50);
-check("grep marks a per-file collect cap", (await grepFiles(root, { pattern: "hit-line" }, { jsOnly: true })).includes("50+ hits"));
+check("grep caps hits", (await grepFiles(root, { pattern: "hit-line" })).content.split("\n").length <= 50);
+check("grep marks a per-file collect cap", (await grepFiles(root, { pattern: "hit-line" }, { jsOnly: true })).content.includes("50+ hits"));
 
 const groupedRaw = [
   ...Array.from({ length: 30 }, (_, i) => `noise.ts:${i + 1}:TODO fix`),
@@ -1429,10 +1546,10 @@ writeFileSync(join(root, "noise.ts"), `${Array.from({ length: 30 }, () => "TODO-
 writeFileSync(join(root, "app-todo.ts"), "TODO-CORE-NOISE a\nTODO-CORE-NOISE b\n");
 writeFileSync(join(root, "utils-todo.ts"), "TODO-CORE-NOISE c\n");
 const jsGrouped = await grepFiles(root, { pattern: "TODO-CORE-NOISE" }, { jsOnly: true });
-check("grep js groups sparse files onto the first page", jsGrouped.includes("app-todo.ts") && jsGrouped.includes("utils-todo.ts"));
-check("grep js caps the dense file", jsGrouped.includes("noise.ts (30 hits, showing 8)"));
-check("grep js continue hint", jsGrouped.includes('path="noise.ts"'));
-const jsShown = jsGrouped.split("\n").filter((l) => l.includes("TODO-CORE-NOISE")).length;
+check("grep js groups sparse files onto the first page", jsGrouped.content.includes("app-todo.ts") && jsGrouped.content.includes("utils-todo.ts"));
+check("grep js caps the dense file", jsGrouped.content.includes("noise.ts (30 hits, showing 8)"));
+check("grep js continue hint", jsGrouped.content.includes('path="noise.ts"'));
+const jsShown = jsGrouped.content.split("\n").filter((l) => l.includes("TODO-CORE-NOISE")).length;
 check("grep js shows 11 match lines", jsShown === 11);
 
 const parentDir = mkdtempSync(join(tmpdir(), "agent-core-parent-"));
@@ -1545,7 +1662,10 @@ try {
 }
 check("empty PATH still reports node", envMissing.includes("node "));
 
-const noArgs = traceRecord({
+const noArgs = createAttemptRecord({
+  runId: "run-harness-trace",
+  taskId: "task-harness-trace",
+  attemptId: "attempt-no-args",
   role: "main",
   provider: "openai-codex",
   protocol: "openai-codex-responses",
@@ -1554,20 +1674,20 @@ const noArgs = traceRecord({
   storageSeqRange: [1, 2],
   toolNames: ["grep"],
   usage: null,
-  usd: null,
   ttftMs: 1,
   turnMs: 2,
   revisions: 0,
-  revisionKinds: [],
   wasteTokens: 0,
   wasteCause: null,
-  systemHash: hashSystem("sys"),
   cache: null,
 });
 const traceJson = JSON.stringify(noArgs);
 check("trace record has no tool arguments or paths", !traceJson.includes("args") && !traceJson.includes("pattern") && !Object.hasOwn(noArgs, "input"));
-check("trace record keeps tool names only", noArgs.toolNames[0] === "grep" && noArgs.systemHash.length === 16);
-const overflowTrace = traceRecord({
+check("trace record keeps tool names only", noArgs.toolNames[0] === "grep" && noArgs.recordType === "attempt");
+const overflowTrace = createAttemptRecord({
+  runId: "run-harness-trace",
+  taskId: "task-harness-trace",
+  attemptId: "attempt-overflow",
   role: "main",
   provider: "openai-codex",
   protocol: "openai-codex-responses",
@@ -1576,21 +1696,19 @@ const overflowTrace = traceRecord({
   storageSeqRange: [2, 2],
   toolNames: [],
   usage: null,
-  usd: 0.0123,
   ttftMs: null,
   turnMs: 3,
-  revisions: 1,
-  revisionKinds: ["prune"],
+  revisions: { count: 1, kinds: ["prune"] },
   wasteTokens: 17,
   wasteCause: "post-revision",
-  systemHash: hashSystem("sys"),
+  cost: { usd: 0.0123 },
   cache: null,
 });
 check(
   "trace record preserves overflow and revision kinds",
   overflowTrace.status === "overflow" &&
-    overflowTrace.usd === 0.0123 &&
-    overflowTrace.revisionKinds[0] === "prune" &&
+    overflowTrace.cost.usd === 0.0123 &&
+    overflowTrace.revisions.kinds[0] === "prune" &&
     overflowTrace.wasteTokens === 17 &&
     overflowTrace.wasteCause === "post-revision",
 );
@@ -1642,7 +1760,7 @@ check("sidecar bash has no path", sidecarStartFor({ name: "bash", id: "1", input
 check("sidecar write keeps path", sidecarStartFor({ name: "write_file", id: "1", input: { path: "a.ts" } }).path === "a.ts");
 
 const uniGlob = await globFiles(unicodeDir, "*");
-const uniLines = uniGlob.split("\n");
+const uniLines = uniGlob.content.split("\n");
 check(
   "bytewise unicode glob order",
   uniLines.indexOf("b.txt") !== -1 && uniLines.indexOf("ä.txt") !== -1 && uniLines.indexOf("b.txt") < uniLines.indexOf("ä.txt"),
@@ -1661,10 +1779,9 @@ check(
 );
 
 writeFileSync(join(root, "skip.bin"), Buffer.from("secret-bin\0more"));
-check("grep skips binary NUL files", !(await grepFiles(root, { pattern: "secret-bin" })).includes("skip.bin"));
+check("grep skips binary NUL files", !(await grepFiles(root, { pattern: "secret-bin" })).content.includes("skip.bin"));
 check("replay reports max storageSeq", replayed.ok && replayed.maxSeq === 4);
 
-const auth = await import("../agent-core/auth.ts");
 const {
   pickHeaders,
   needsRefresh,
@@ -1696,11 +1813,13 @@ const {
   usesPromptCacheKey,
   usesOpenAIExplicitCache,
   usesPromptCacheOptions,
-  cacheSessionKey,
   cacheSessionHeaders,
+  cacheSessionSeed,
+  cacheIdentityFor,
+  deriveCacheIdentityKey,
+  CACHE_KEY_MAX_LENGTH,
   googleNativeHeaders,
 } = auth;
-const compat = await import("../agent-core/openai-compat.ts");
 const authFile = join(root, "auth.json");
 process.env.TERMINA_AUTH_PATH = authFile;
 resetAuthCache();
@@ -1961,36 +2080,63 @@ check(
     providerProtocol("opencode-zen", "grok-4.6") === "openai-responses" &&
     providerProtocol("opencode-zen", "qwen3.7-plus") === "anthropic-messages",
 );
-check("usesPromptCacheKey xai is true", usesPromptCacheKey("xai", "grok-4.6") === true);
-check("usesPromptCacheKey google is false", usesPromptCacheKey("google", "gemini-3.7-flash") === false);
-check("usesPromptCacheKey zen gemini is false", usesPromptCacheKey("opencode-zen", "gemini-3.7-flash") === false);
-check("usesPromptCacheKey anthropic is false", usesPromptCacheKey("anthropic", "claude-sonnet-5") === false);
-check("usesPromptCacheKey zen claude is false", usesPromptCacheKey("opencode-zen", "claude-sonnet-5") === false);
-check("usesPromptCacheKey zen glm is true", usesPromptCacheKey("opencode-zen", "glm-5.1") === true);
-check("usesPromptCacheKey copilot is true", usesPromptCacheKey("github-copilot", "gpt-5.6-terra") === true);
-check("usesAnthropicCacheMarkers openrouter claude", usesAnthropicCacheMarkers("openrouter", "anthropic/claude-sonnet-5") === true);
-check("usesAnthropicCacheMarkers openrouter gpt", usesAnthropicCacheMarkers("openrouter", "openai/gpt-5.6-sol") === false);
-check("usesAnthropicCacheMarkers openrouter qwen", usesAnthropicCacheMarkers("openrouter", "qwen/qwen3.7-max") === true);
-check("usesOpenAIExplicitCache gpt-5.6", usesOpenAIExplicitCache("gpt-5.6-sol") === true);
-check("usesOpenAIExplicitCache skips Codex", usesOpenAIExplicitCache("gpt-5.6-sol", "openai-codex") === false);
-check("usesOpenAIExplicitCache skips Copilot", usesOpenAIExplicitCache("gpt-5.6-sol", "github-copilot") === false);
-check("usesOpenAIExplicitCache zen gpt-5.6", usesOpenAIExplicitCache("gpt-5.6-sol", "opencode-zen") === true);
-check("usesPromptCacheOptions openai gpt-5.6", usesPromptCacheOptions("openai", "gpt-5.6-sol") === true);
-check("usesPromptCacheOptions openrouter gpt-5.6", usesPromptCacheOptions("openrouter", "openai/gpt-5.6-sol") === true);
-check("usesPromptCacheOptions skips Codex", usesPromptCacheOptions("openai-codex", "gpt-5.6-sol") === false);
-check("usesPromptCacheOptions skips Zen", usesPromptCacheOptions("opencode-zen", "gpt-5.6-sol") === false);
-check("cacheSessionKey clamps length", cacheSessionKey(`${"a".repeat(300)}`).length === 256);
-check("cacheSessionKey rejects a control character", cacheSessionKey("core-1\nHost: x") === "");
+check("usesPromptCacheKey xai is true", usesPromptCacheKey("xai", "grok-4.6", "https://api.x.ai/v1") === true);
+check("usesPromptCacheKey google is false", usesPromptCacheKey("google", "gemini-3.7-flash", "https://generativelanguage.googleapis.com") === false);
+check("usesPromptCacheKey zen gemini is false", usesPromptCacheKey("opencode-zen", "gemini-3.7-flash", "https://opencode.ai") === false);
+check("usesPromptCacheKey anthropic is false", usesPromptCacheKey("anthropic", "claude-sonnet-5", "https://api.anthropic.com") === false);
+check("usesPromptCacheKey zen claude is false", usesPromptCacheKey("opencode-zen", "claude-sonnet-5", "https://opencode.ai") === false);
+check("usesPromptCacheKey zen glm is false", usesPromptCacheKey("opencode-zen", "glm-5.1", "https://opencode.ai") === false);
+check("usesPromptCacheKey copilot is false", usesPromptCacheKey("github-copilot", "gpt-5.6-terra", "https://api.githubcopilot.com") === false);
+check("usesAnthropicCacheMarkers direct only", usesAnthropicCacheMarkers("anthropic", "claude-sonnet-5", "https://api.anthropic.com") === true);
+check("usesAnthropicCacheMarkers openrouter is false", usesAnthropicCacheMarkers("openrouter", "anthropic/claude-sonnet-5", "https://openrouter.ai") === false);
+check("usesAnthropicCacheMarkers openrouter gpt", usesAnthropicCacheMarkers("openrouter", "openai/gpt-5.6-sol", "https://openrouter.ai") === false);
+check("usesAnthropicCacheMarkers openrouter qwen", usesAnthropicCacheMarkers("openrouter", "qwen/qwen3.7-max", "https://openrouter.ai") === false);
+check("usesOpenAIExplicitCache direct gpt-5.6", usesOpenAIExplicitCache("gpt-5.6-sol", "openai", "https://api.openai.com/v1") === true);
+check("usesOpenAIExplicitCache skips Codex", usesOpenAIExplicitCache("gpt-5.6-sol", "openai-codex", "https://chatgpt.com") === false);
+check("usesOpenAIExplicitCache skips Copilot", usesOpenAIExplicitCache("gpt-5.6-sol", "github-copilot", "https://api.githubcopilot.com") === false);
+check("usesOpenAIExplicitCache zen gpt-5.6", usesOpenAIExplicitCache("gpt-5.6-sol", "opencode-zen", "https://opencode.ai") === false);
+check("usesPromptCacheOptions openai gpt-5.6", usesPromptCacheOptions("openai", "gpt-5.6-sol", "https://api.openai.com/v1") === true);
+check("usesPromptCacheOptions openrouter gpt-5.6", usesPromptCacheOptions("openrouter", "openai/gpt-5.6-sol", "https://openrouter.ai") === false);
+check("usesPromptCacheOptions skips Codex", usesPromptCacheOptions("openai-codex", "gpt-5.6-sol", "https://chatgpt.com") === false);
+check("usesPromptCacheOptions skips Zen", usesPromptCacheOptions("opencode-zen", "gpt-5.6-sol", "https://opencode.ai") === false);
+const cacheSeed = cacheSessionSeed("core-1");
+const cacheIdentity = cacheIdentityFor({
+  sessionSeed: cacheSeed,
+  role: "main",
+  provider: "openrouter",
+  protocol: "openai-responses",
+  route: "https://openrouter.ai/api/v1",
+});
+check("derived cache identity is bounded", (cacheIdentity?.key.length ?? 0) <= CACHE_KEY_MAX_LENGTH);
+check("derived cache identity is printable", cacheIdentity !== null && /^[\x21-\x7e]+$/.test(cacheIdentity.key));
+check("cache seed rejects a control character", cacheSessionSeed("core-1\nHost: x") === "");
+check("derived cache identity rejects an invalid seed", cacheIdentityFor({
+  sessionSeed: cacheSessionSeed("core-1\nHost: x"),
+  role: "main",
+  provider: "openrouter",
+  protocol: "openai-responses",
+  route: "https://openrouter.ai/api/v1",
+}) === null);
 check(
-  "cacheSessionHeaders opencode",
-  cacheSessionHeaders("opencode-zen", "core-1")["x-opencode-session"] === "core-1",
+  "cacheSessionHeaders opencode is absent",
+  Object.keys(cacheSessionHeaders(cacheIdentity && { ...cacheIdentity, provider: "opencode-zen" })).length === 0,
 );
 check(
   "cacheSessionHeaders openrouter",
-  cacheSessionHeaders("openrouter", "core-1")["x-session-id"] === "core-1",
+  cacheSessionHeaders(cacheIdentity)["x-session-id"] === cacheIdentity?.key,
 );
-check("cacheSessionHeaders openai is empty", Object.keys(cacheSessionHeaders("openai", "core-1")).length === 0);
-check("cacheSessionHeaders xai pins grok conversation", cacheSessionHeaders("xai", "core-1")["x-grok-conv-id"] === "core-1");
+check(
+  "cacheSessionHeaders xai responses is absent",
+  Object.keys(cacheSessionHeaders(cacheIdentity && { ...cacheIdentity, provider: "xai" })).length === 0,
+);
+const xaiChatIdentity = cacheIdentityFor({
+  sessionSeed: cacheSeed,
+  role: "main",
+  provider: "xai",
+  protocol: "openai-completions",
+  route: "https://api.x.ai/v1",
+});
+check("cacheSessionHeaders xai chat pins derived key", cacheSessionHeaders(xaiChatIdentity)["x-grok-conv-id"] === xaiChatIdentity?.key);
 check(
   "googleNativeHeaders drops Bearer for Zen Gemini",
   googleNativeHeaders({ authorization: "Bearer zen-key", "content-type": "application/json" })["x-goog-api-key"] ===
@@ -3452,7 +3598,7 @@ check("defaultContextWindow zen grok is 500k", defaultContextWindow("opencode-ze
 check("includeEncryptedReasoning skips xai", includeEncryptedReasoning("xai", "grok-4.6") === false);
 check("includeEncryptedReasoning skips zen grok", includeEncryptedReasoning("opencode-zen", "grok-4.6") === false);
 check("includeEncryptedReasoning keeps openai", includeEncryptedReasoning("openai", "gpt-5.6-sol") === true);
-check("tokenEstimate is conservative", tokenEstimate("abcd") === 2);
+check("reclaim estimate is conservative", estimateReclaimTokens("abcd") === 1);
 const usageIndicators = formatUsageIndicators(
   { input: 500, cacheRead: 1_000, cacheWrite: 0, output: 250 },
   20_000,
@@ -3466,7 +3612,7 @@ check(
 check(
   "usage indicators handle unknown and invalid values",
   formatUsageIndicators({ input: Number.NaN, cacheRead: Number.POSITIVE_INFINITY, cacheWrite: -1, output: -2 }, Number.NaN, Number.POSITIVE_INFINITY, Number.NaN) ===
-    "tokens 0 in/0 out · cache -- · context ~0/1 0%",
+    "tokens ? in/? out · cache -- · context ~0/1 0%",
 );
 check("outputTokenBudget off is output cap", outputTokenBudget({ thinking: false }) === 16_384);
 check("outputTokenBudget on is a single cap", outputTokenBudget({ thinking: true }) === 64_000);
@@ -3662,19 +3808,19 @@ check(
     stampedUser[0]?.content?.[0]?.text === "hi" &&
     stampedUser[0]?.content?.[0]?.cache_control?.type === "ephemeral",
 );
-check("formatWorkingSet omits empty", formatWorkingSet({ messages: [] }) === "");
+check("request overlay omits empty", workingSetForTest({ messages: [] }) === "");
 const overlayMsgs = [
   { role: "assistant", content: [{ type: "tool_use", name: "edit", input: { path: "a.ts" } }] },
   { role: "user", content: [{ type: "tool_result", tool_use_id: "1", content: "ok" }] },
 ];
-const overlay = formatWorkingSet({ messages: overlayMsgs, hostContext: "verify failed" });
-check("formatWorkingSet includes edit path", overlay.includes("a.ts") && overlay.includes("<modified-files>"));
-check("formatWorkingSet includes host context", overlay.includes("verify failed") && overlay.startsWith("<working-set>"));
+const overlay = workingSetForTest({ messages: overlayMsgs, hostContext: "verify failed" });
+check("request overlay includes edit path", overlay.includes("a.ts") && overlay.includes("<modified-files>"));
+check("request overlay includes host context", overlay.includes("verify failed") && overlay.startsWith("<working-set>"));
 const manyReads = {
   role: "assistant",
   content: Array.from({ length: 41 }, (_, i) => ({ type: "tool_use", name: "read_file", input: { path: `f${i}.ts` } })),
 };
-check("formatWorkingSet caps inventories", formatWorkingSet({ messages: [manyReads] }).includes("<!-- 1 paths omitted -->"));
+check("request overlay caps inventories", workingSetForTest({ messages: [manyReads] }).includes("<!-- 1 paths omitted -->"));
 check("cache-cost compaction waits below 100k", shouldCompactForCacheCost(99_999, 0, 120_000, false) === false);
 check("cache-cost compaction waits on a cache hit", shouldCompactForCacheCost(120_000, 0.8, 120_000, false) === false);
 check("cache-cost compaction starts on an expensive miss", shouldCompactForCacheCost(120_000, 0.1, 120_000, false) === true);

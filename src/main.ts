@@ -1020,7 +1020,7 @@ async function focusProjectShell(): Promise<void> {
     activatePane(existing.instanceId);
     return;
   }
-  const res = await window.pi.createTerminal({ type: "shell" });
+  const res = await window.pi.createTerminal({ type: "shell", projectId: projectId ?? undefined });
   if (!res.ok) toast(res.error ?? "could not open a shell", "warning");
   else if (res.id && panes.has(res.id)) activatePane(res.id);
 }
@@ -1089,7 +1089,9 @@ async function openTerminalMenu(): Promise<void> {
     const source = activeId ? panes.get(activeId) : undefined;
     const fromTerminalId = source && !source.error && !source.exited ? source.instanceId : undefined;
     const inherit = Boolean(fromTerminalId) && opts?.type !== "shell";
-    void window.pi.createTerminal(inherit ? { ...opts, fromTerminalId } : opts).then((res) => {
+    const projectId = activeProjectId ?? undefined;
+    const withProject = projectId ? { ...opts, projectId } : opts;
+    void window.pi.createTerminal(inherit ? { ...withProject, fromTerminalId } : withProject).then((res) => {
       if (!res.ok) {
         createErrorPane(res.error ?? "could not create terminal");
         return;
@@ -2174,9 +2176,11 @@ async function boot(attempt = 0): Promise<void> {
     activateProjectPane();
     updateEditorLock();
     removeSplash();
-    // Show the correct project view (the boot instances may belong to it).
-    const bootProjectId = instances[0]?.projectId ?? activeProjectId;
-    if (bootProjectId && projectViews.has(bootProjectId)) {
+    // Keep the project that was active before quit (from projectList.active),
+    // not the first instance's project — that second override was the
+    // "reopens on second tab" bug.
+    const bootProjectId = activeProjectId ?? instances[0]?.projectId;
+    if (bootProjectId && projectViews.has(bootProjectId) && bootProjectId !== activeProjectId) {
       setActiveProject(bootProjectId);
       activateProjectPane();
     }
