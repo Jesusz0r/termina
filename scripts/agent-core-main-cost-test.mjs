@@ -118,6 +118,8 @@ try {
     .map((name) => JSON.parse(readFileSync(join(traceDir, name), "utf8")));
   const attempt = traces.find((record) => record.recordType === "attempt" && record.role === "main");
   assert.ok(attempt, "main attempt must be persisted");
+  const settlement = traces.find((record) => record.recordType === "task-settled");
+  assert.equal(settlement?.outcome?.status, "success");
   assert.equal(attempt.cost.source, "https://models.dev/api.json");
   assert.equal(attempt.cost.version, "cost-fixture-v1");
   assert.deepEqual(attempt.cost.unknownFields, []);

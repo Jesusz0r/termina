@@ -6816,7 +6816,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   });
   let storageFailure: string | null = null;
   let taskFailure: string | null = null;
-  let taskOutcomeStatus = "unknown";
+  let taskOutcomeStatus = "success";
   let toolErrorObserved = false;
   let retriedOverflow = false;
   let resumePaused = false;
@@ -7037,7 +7037,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   if (interrupted) {
     taskOutcomeStatus = "interrupted";
     taskFailure ??= "interrupted";
-  } else if (toolErrorObserved && taskOutcomeStatus === "unknown") {
+  } else if (toolErrorObserved && taskOutcomeStatus === "success") {
     taskOutcomeStatus = "failure";
     taskFailure ??= "tool error";
   }
