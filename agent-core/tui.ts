@@ -156,6 +156,189 @@ export function completeSlashLine(
   return prefix.length > line.length ? prefix : line;
 }
 
+const FILE_MENTION_PATH = /^[^\s@]+$/;
+
+function mentionTokenEnd(text: string, from: number): number {
+  let i = from;
+  while (i < text.length && !/\s/.test(text[i]!) && text[i] !== "@") i++;
+  return i;
+}
+
+/** `@` starts a file tag at the beginning of the line or after whitespace.
+ *  `query` is the text between `@` and the cursor (filter). `end` is the
+ *  end of the whole token so a pick replaces a mid-token suffix. */
+export function fileMentionAt(
+  text: string,
+  cursor: number,
+): { start: number; query: string; end: number } | null {
+  if (cursor < 1 || cursor > text.length) return null;
+  const before = text.slice(0, cursor);
+  const at = before.lastIndexOf("@");
+  if (at < 0) return null;
+  if (at > 0 && !/\s/.test(before[at - 1]!)) return null;
+  const query = before.slice(at + 1);
+  if (!FILE_MENTION_PATH.test(query) && query !== "") return null;
+  return { start: at, query, end: mentionTokenEnd(text, cursor) };
+}
+
+export function applyFileMention(
+  text: string,
+  cursor: number,
+  path: string,
+  spaced = true,
+): { text: string; cursor: number } | null {
+  const mention = fileMentionAt(text, cursor);
+  if (!mention) return null;
+  const insert = `@${path}${spaced ? " " : ""}`;
+  const next = `${text.slice(0, mention.start)}${insert}${text.slice(mention.end)}`;
+  return { text: next, cursor: mention.start + insert.length };
+}
+
+export function completeFileMention(
+  text: string,
+  cursor: number,
+  paths: readonly string[],
+): { text: string; cursor: number } | null {
+  const mention = fileMentionAt(text, cursor);
+  if (!mention || paths.length === 0) return null;
+  if (paths.length === 1) return applyFileMention(text, cursor, paths[0]!, true);
+  let prefix = paths[0]!;
+  for (const path of paths.slice(1)) {
+    let i = 0;
+    while (i < prefix.length && i < path.length && prefix[i] === path[i]) i++;
+    prefix = prefix.slice(0, i);
+  }
+  if (prefix.length <= mention.query.length) return null;
+  return applyFileMention(text, cursor, prefix, false);
+}
+
+export function rankFileTags(paths: readonly string[], query: string, cap = 50): string[] {
+  const q = query.trim().toLowerCase();
+  const scored: Array<{ path: string; score: number }> = [];
+  for (const path of paths) {
+    if (q === "") {
+      scored.push({ path, score: path.includes("/") ? 1 : 0 });
+      continue;
+    }
+    const lower = path.toLowerCase();
+    const base = lower.slice(lower.lastIndexOf("/") + 1);
+    let score = -1;
+    if (base.startsWith(q)) score = 0;
+    else {
+      const baseSpread = subsequenceSpread(base, q);
+      if (baseSpread !== null) score = 1 + baseSpread / 1000;
+      else if (lower.startsWith(q)) score = 2;
+      else if (lower.includes(q)) score = 3;
+      else {
+        const pathSpread = subsequenceSpread(lower, q);
+        if (pathSpread !== null) score = 4 + pathSpread / 1000;
+      }
+    }
+    if (score >= 0) scored.push({ path, score });
+  }
+  scored.sort((a, b) => {
+    if (a.score !== b.score) return a.score - b.score;
+    return Buffer.compare(Buffer.from(a.path, "utf8"), Buffer.from(b.path, "utf8"));
+  });
+  return scored.slice(0, Math.max(0, cap)).map((row) => row.path);
+}
+
+/** Consecutive-ish subsequence: all needle chars in order. Returns span length or null. */
+export function subsequenceSpread(haystack: string, needle: string): number | null {
+  if (!needle) return 0;
+  let i = 0;
+  let first = -1;
+  let last = -1;
+  for (let k = 0; k < haystack.length && i < needle.length; k++) {
+    if (haystack[k] === needle[i]) {
+      if (first < 0) first = k;
+      last = k;
+      i++;
+    }
+  }
+  if (i < needle.length) return null;
+  return last - first;
+}
+
+export function truncateMiddle(text: string, maxCells: number): string {
+  if (maxCells <= 0) return "";
+  if (cellWidth(text) <= maxCells) return text;
+  if (maxCells <= 1) return "…".slice(0, maxCells);
+  const ell = "…";
+  const keep = maxCells - 1;
+  const head = Math.max(1, Math.ceil(keep / 2));
+  const tail = Math.max(1, keep - head);
+  const gs = splitGraphemes(text);
+  let left = "";
+  let used = 0;
+  for (const g of gs) {
+    const w = graphemeCells(g, used);
+    if (used + w > head) break;
+    left += g;
+    used += w;
+  }
+  let right = "";
+  let rused = 0;
+  for (let i = gs.length - 1; i >= 0; i--) {
+    const g = gs[i]!;
+    const w = graphemeCells(g, 0);
+    if (rused + w > tail) break;
+    right = g + right;
+    rused += w;
+  }
+  return `${left}${ell}${right}`;
+}
+
+export function formatPickerRow(name: string, hint: string, cols: number, selected = false): string {
+  const marker = selected ? "▸ " : "  ";
+  const hintPart = hint ? `  ${hint}` : "";
+  const budget = Math.max(8, cols - marker.length - cellWidth(hintPart));
+  return `${marker}${truncateMiddle(name, budget)}${hintPart}`;
+}
+
+export const EMPTY_STATE_TEXT =
+  "⌖  Type a task and press Enter — the agent runs in this terminal.\n" +
+  "   @ file  ·  / command  ·  Ctrl+J newline  ·  /login  /models  ·  /help keys";
+
+export const TUI_SHORTCUTS: SlashCommand[] = [
+  { name: "Ctrl+L", hint: "model picker" },
+  { name: "Ctrl+P", hint: "next model" },
+  { name: "Shift+Tab", hint: "cycle effort" },
+  { name: "Ctrl+J", hint: "newline" },
+  { name: "Ctrl+R", hint: "search prompt history" },
+  { name: "End", hint: "jump to live output when scrolled up" },
+  { name: "PgUp/PgDn", hint: "scroll transcript" },
+  { name: "Cmd/Ctrl+C", hint: "copy selection" },
+  { name: "Ctrl+C", hint: "interrupt run or clear draft" },
+  { name: "Esc", hint: "close picker" },
+];
+
+export function formatTuiFooter(opts: {
+  picker?: boolean;
+  fileCount?: number;
+  fileCapped?: boolean;
+  busy?: boolean;
+  queued?: boolean;
+  scrolled?: boolean;
+  search?: string | null;
+  cols?: number;
+}): string {
+  if (opts.search !== undefined && opts.search !== null) {
+    return `(search) ${opts.search || "…"}  ·  Ctrl+R next  ·  Esc close`;
+  }
+  if (opts.picker) {
+    const n = opts.fileCount;
+    const count = typeof n === "number" && n > 0 ? `  ·  ${n}${opts.fileCapped ? "+" : ""} files` : "";
+    return `↑↓ move  ·  ↵ pick  ·  Esc close${count}`;
+  }
+  const live = opts.scrolled ? "  ·  ↓ live · End" : "";
+  if (opts.busy) {
+    const queued = opts.queued ? "  ·  queued" : "";
+    return `^C stop  ·  PgUp PgDn scroll${queued}${live}`;
+  }
+  return `↵ send  ·  @ file  ·  / cmd  ·  ⇥ complete  ·  ^J newline  ·  ^C clear${live}`;
+}
+
 const graphemeSegmenter = new Intl.Segmenter("en", { granularity: "grapheme" });
 
 export function splitGraphemes(text: string): string[] {
@@ -831,6 +1014,10 @@ export class AgentTui {
   private effort = "off";
   private usage = "";
   private pendingImageCount = 0;
+  private permissions = "";
+  private queued = "";
+  private pickerSuppressed = false;
+  private search: { query: string; idx: number } | null = null;
   private onHostRefresh: (() => void) | null = null;
   private busy = false;
   private spin = 0;
@@ -847,11 +1034,13 @@ export class AgentTui {
   private choicePrompt = "";
   private choiceRows: SlashCommand[] = [];
   private choiceDraft: { chars: string[]; cursor: number } | null = null;
+  private readonly fileMatches: ((query: string) => string[]) | null;
 
   constructor(opts: {
     stdout: TuiIO;
     stdin: TuiInput;
     commands?: SlashCommand[];
+    fileMatches?: (query: string) => string[];
     onSubmit: (line: string) => void;
     onInterrupt: () => void;
     onExit: () => void;
@@ -861,6 +1050,7 @@ export class AgentTui {
     this.out = opts.stdout;
     this.inp = opts.stdin;
     this.commands = opts.commands ?? SLASH_COMMANDS;
+    this.fileMatches = opts.fileMatches ?? null;
     this.onSubmit = opts.onSubmit;
     this.onInterrupt = opts.onInterrupt;
     this.onExit = opts.onExit;
@@ -879,11 +1069,69 @@ export class AgentTui {
     return this.started;
   }
 
-  setStatus(status: { model?: string; auth?: string; effort?: string; usage?: string }): void {
+  setStatus(status: {
+    model?: string;
+    auth?: string;
+    effort?: string;
+    usage?: string;
+    permissions?: string;
+  }): void {
     if (status.model !== undefined) this.model = status.model;
     if (status.auth !== undefined) this.auth = status.auth;
     if (status.effort !== undefined) this.effort = status.effort;
     if (status.usage !== undefined) this.usage = status.usage;
+    if (status.permissions !== undefined) this.permissions = status.permissions;
+    this.schedule();
+  }
+
+  setQueued(line: string): void {
+    const next = line.trim();
+    if (this.queued === next) return;
+    this.queued = next;
+    this.schedule();
+  }
+
+  private enterSearch(): void {
+    if (this.rawInput || this.choiceRows.length > 0) return;
+    if (!this.search) {
+      if (this.histIndex < 0) this.draft = this.chars.join("");
+      this.search = { query: "", idx: this.history.length };
+    }
+    this.findSearch(-1);
+  }
+
+  private findSearch(dir: -1 | 1): void {
+    if (!this.search || this.history.length === 0) {
+      this.schedule();
+      return;
+    }
+    const q = this.search.query.toLowerCase();
+    let i = this.search.idx + dir;
+    while (i >= 0 && i < this.history.length) {
+      if (!q || this.history[i]!.toLowerCase().includes(q)) {
+        this.search.idx = i;
+        this.chars = splitGraphemes(this.history[i]!);
+        this.cursor = this.chars.length;
+        this.histIndex = i;
+        this.schedule();
+        return;
+      }
+      i += dir;
+    }
+    this.schedule();
+  }
+
+  private exitSearch(restore: boolean): void {
+    if (!this.search) return;
+    this.search = null;
+    if (restore) {
+      this.chars = splitGraphemes(this.draft);
+      this.cursor = this.chars.length;
+      this.histIndex = -1;
+    } else {
+      this.histIndex = -1;
+      this.draft = "";
+    }
     this.schedule();
   }
 
@@ -1330,7 +1578,10 @@ export class AgentTui {
       return false;
     }
     this.started = true;
-    this.out.write("\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?7l\x1b[?1006h\x1b[?1000h");
+    // No 1000/1006 mouse tracking: that steals drag-select and copy in
+    // the host terminal. Wheel still reaches applyCsi as SGR 64/65 when
+    // the host forwards it.
+    this.out.write("\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?7l");
     this.onResize = () => this.render();
     this.onData = (chunk) => {
       try {
@@ -1372,7 +1623,7 @@ export class AgentTui {
     } catch {
       /* restore best-effort */
     }
-    this.out.write("\x1b[?2026l\x1b[?1000l\x1b[?1006l\x1b[?7h\x1b[?2004l\x1b[?25h\x1b[?1049l");
+    this.out.write("\x1b[?2026l\x1b[?7h\x1b[?2004l\x1b[?25h\x1b[?1049l");
   }
 
   /** Visible frame without tty side effects. Tests use this. */
@@ -1402,15 +1653,22 @@ export class AgentTui {
     }
     if (this.esc !== 1) return;
     this.esc = 0;
+    if (this.search) {
+      this.exitSearch(true);
+      return;
+    }
     if (this.choiceRows.length > 0) {
       this.clearChoices();
       this.onInterrupt();
-    } else if (this.matches().length > 0) {
-      this.chars = [];
-      this.cursor = 0;
+      return;
+    }
+    if (this.matches().length > 0) {
+      this.pickerSuppressed = true;
       this.slashIndex = 0;
       this.schedule();
-    } else this.onInterrupt();
+      return;
+    }
+    this.onInterrupt();
   }
 
   private size(): { cols: number; rows: number } {
@@ -1422,7 +1680,7 @@ export class AgentTui {
     this.spinTimer = setInterval(() => {
       this.spin = (this.spin + 1) % SPIN.length;
       this.render();
-    }, 80);
+    }, 180);
   }
 
   private stopSpin(): void {
@@ -1440,16 +1698,56 @@ export class AgentTui {
     }, 16);
   }
 
+  private textAndCursor(): { text: string; cursor: number } {
+    return { text: this.chars.join(""), cursor: this.chars.slice(0, this.cursor).join("").length };
+  }
+
+  private setTextCursor(text: string, cursor: number): void {
+    this.chars = splitGraphemes(text);
+    this.cursor = splitGraphemes(text.slice(0, cursor)).length;
+  }
+
+  private fileRows(): SlashCommand[] {
+    if (!this.fileMatches) return [];
+    const { text, cursor } = this.textAndCursor();
+    if (text.trimStart().startsWith("/")) return [];
+    const mention = fileMentionAt(text, cursor);
+    if (!mention) return [];
+    return this.fileMatches(mention.query).map((path) => ({ name: path, hint: "file", submit: `@${path}` }));
+  }
+
   private matches(): SlashCommand[] {
-    if (this.rawInput) return [];
+    if (this.rawInput || this.search || this.pickerSuppressed) return [];
     if (this.choiceRows.length > 0) return this.choiceRows;
-    return matchingSlashCommands(this.chars.join(""), this.commands, this.modelRows, this.effortRows);
+    const slash = matchingSlashCommands(this.chars.join(""), this.commands, this.modelRows, this.effortRows);
+    if (slash.length > 0) return slash;
+    return this.fileRows();
   }
 
   private submitLine(): void {
+    if (this.search) this.exitSearch(false);
+    this.pickerSuppressed = false;
     const typed = this.chars.join("");
     const wasChoice = this.choiceRows.length > 0;
     const matches = this.rawInput ? [] : this.matches();
+    const { text, cursor } = this.textAndCursor();
+    const mention = this.rawInput || wasChoice ? null : fileMentionAt(text, cursor);
+    const fileRows = mention ? this.fileRows() : [];
+    if (mention && matches.length > 0 && fileRows.length > 0) {
+      const picked = matches[this.slashIndex] ?? matches[0]!;
+      const token = text.slice(mention.start + 1, mention.end);
+      if (token !== picked.name) {
+        const next = applyFileMention(text, cursor, picked.name, true);
+        if (next) {
+          this.setTextCursor(next.text, next.cursor);
+          this.slashIndex = 0;
+          this.histIndex = -1;
+          this.draft = "";
+          this.schedule();
+          return;
+        }
+      }
+    }
     let line = typed.trim();
     let echo = line;
     if (matches.length > 0) {
@@ -1522,7 +1820,12 @@ export class AgentTui {
     }
     if (this.esc === 3) {
       if (ch === "H") this.cursor = this.lineStart();
-      else if (ch === "F") this.cursor = this.lineEnd();
+      else if (ch === "F") {
+        if (this.scroll > 0 && this.cursor === this.lineEnd()) {
+          this.scroll = 0;
+          this.follow = true;
+        } else this.cursor = this.lineEnd();
+      }
       this.esc = 0;
       this.schedule();
       return;
@@ -1578,21 +1881,38 @@ export class AgentTui {
       return;
     }
     if (ch === "\x7f") {
+      if (this.search) {
+        this.search.query = this.search.query.slice(0, -1);
+        this.search.idx = this.history.length;
+        this.findSearch(-1);
+        return;
+      }
       if (this.cursor > 0) {
         this.chars.splice(this.cursor - 1, 1);
         this.cursor--;
         this.slashIndex = 0;
+        this.pickerSuppressed = false;
         this.schedule();
       }
       return;
     }
+    if (ch === "\x12") {
+      if (this.search) this.findSearch(-1);
+      else this.enterSearch();
+      return;
+    }
     if (ch === "\x03") {
+      if (this.search) {
+        this.exitSearch(true);
+        return;
+      }
       if (this.busy) this.onInterrupt();
       else {
         this.chars = [];
         this.cursor = 0;
         this.slashIndex = 0;
         this.histIndex = -1;
+        this.pickerSuppressed = false;
         this.schedule();
       }
       return;
@@ -1628,7 +1948,18 @@ export class AgentTui {
     }
     if (ch === "\t") {
       if (this.rawInput) return;
-      const next = completeSlashLine(this.chars.join(""), this.commands, this.modelRows, this.effortRows);
+      const { text, cursor } = this.textAndCursor();
+      if (!text.trimStart().startsWith("/") && this.fileMatches) {
+        const mention = fileMentionAt(text, cursor);
+        if (mention) {
+          const next = completeFileMention(text, cursor, this.fileMatches(mention.query));
+          if (next) this.setTextCursor(next.text, next.cursor);
+          this.slashIndex = 0;
+          this.schedule();
+          return;
+        }
+      }
+      const next = completeSlashLine(text, this.commands, this.modelRows, this.effortRows);
       this.chars = splitGraphemes(next);
       this.cursor = this.chars.length;
       this.slashIndex = 0;
@@ -1659,6 +1990,12 @@ export class AgentTui {
       return;
     }
     if (ch < " ") return;
+    if (this.search) {
+      this.search.query += ch;
+      this.search.idx = this.history.length;
+      this.findSearch(-1);
+      return;
+    }
     this.insert(ch);
   }
 
@@ -1671,6 +2008,7 @@ export class AgentTui {
     this.cursor = prefixGs.length;
     this.slashIndex = 0;
     this.histIndex = -1;
+    this.pickerSuppressed = false;
     this.schedule();
   }
 
@@ -1708,6 +2046,8 @@ export class AgentTui {
       this.onSubmit("/models");
       return;
     }
+    this.pickerSuppressed = false;
+    this.search = null;
     this.chars = splitGraphemes("/models");
     this.cursor = this.chars.length;
     this.slashIndex = Math.max(0, this.modelRows.findIndex((row) => row.name === this.model));
@@ -1734,8 +2074,8 @@ export class AgentTui {
   private applyCsi(params: string, final: string): void {
     if (params.startsWith("<") && (final === "M" || final === "m")) {
       const btn = Number(params.slice(1).split(";")[0] || "0");
-      if (btn === 64) this.scrollBy(1);
-      else if (btn === 65) this.scrollBy(-1);
+      if (btn === 64) this.scrollLines(1);
+      else if (btn === 65) this.scrollLines(-1);
       return;
     }
     if (this.paste) {
@@ -1751,8 +2091,8 @@ export class AgentTui {
       else if (params === "3") {
         if (this.cursor < this.chars.length) this.chars.splice(this.cursor, 1);
       } else if (params === "3;3") this.deleteWord(1);
-      else if (params === "5") this.scrollBy(1);
-      else if (params === "6") this.scrollBy(-1);
+      else if (params === "5") this.scrollPages(1);
+      else if (params === "6") this.scrollPages(-1);
       this.schedule();
       return;
     }
@@ -1777,7 +2117,12 @@ export class AgentTui {
       if (word) this.moveWord(-1);
       else this.cursor = Math.max(0, this.cursor - n);
     } else if (final === "H") this.cursor = this.lineStart();
-    else if (final === "F") this.cursor = this.lineEnd();
+    else if (final === "F") {
+      if (this.scroll > 0 && this.cursor === this.lineEnd()) {
+        this.scroll = 0;
+        this.follow = true;
+      } else this.cursor = this.lineEnd();
+    }
     this.schedule();
   }
 
@@ -1849,7 +2194,7 @@ export class AgentTui {
   }
 
   private historyBy(delta: number): void {
-    if (this.history.length === 0) return;
+    if (this.search || this.history.length === 0) return;
     if (this.histIndex < 0) this.draft = this.chars.join("");
     const next = this.histIndex < 0 ? this.history.length - 1 : this.histIndex + delta;
     if (next < 0) {
@@ -1866,17 +2211,26 @@ export class AgentTui {
     this.cursor = this.chars.length;
   }
 
-  private scrollBy(pages: number): void {
+  private scrollLines(lines: number): void {
+    const { cols, rows } = this.size();
+    const matches = this.matches();
+    const inputLines = Math.max(1, wrapInput(INPUT_PREFIX, this.chars, this.cursor, cols).wrapped.length || 1);
+    const layout = layoutHeights(rows, inputLines, matches.length);
+    const extra = Math.max(1, Math.abs(lines));
+    const wrapped = this.visibleTranscript(cols, layout.transcript + this.scroll + extra + 2, 0);
+    const maxScroll = Math.max(0, wrapped.length - layout.transcript);
+    this.scroll = Math.max(0, Math.min(maxScroll, this.scroll + lines));
+    this.follow = this.scroll === 0;
+    this.schedule();
+  }
+
+  private scrollPages(pages: number): void {
     const { cols, rows } = this.size();
     const matches = this.matches();
     const inputLines = Math.max(1, wrapInput(INPUT_PREFIX, this.chars, this.cursor, cols).wrapped.length || 1);
     const layout = layoutHeights(rows, inputLines, matches.length);
     const page = Math.max(1, layout.transcript - 1);
-    const wrapped = this.visibleTranscript(cols, layout.transcript + this.scroll + page + 2, 0);
-    const maxScroll = Math.max(0, wrapped.length - layout.transcript);
-    this.scroll = Math.max(0, Math.min(maxScroll, this.scroll + pages * Math.max(1, layout.transcript - 1)));
-    this.follow = this.scroll === 0;
-    this.schedule();
+    this.scrollLines(pages * page);
   }
 
   private render(): void {
@@ -1918,37 +2272,74 @@ export class AgentTui {
     );
     const shownSlash = matches.slice(slashStart, slashStart + layout.slash);
     const view = this.visibleSlice(cols, layout.transcript, this.scroll);
-    const nameW = shownSlash.length > 0 ? Math.max(...shownSlash.map((c) => c.name.length)) : 0;
-    const spin = this.busy ? `${SPIN[this.spin]!} ` : "";
+    const spin = this.busy ? SPIN[this.spin]! : "";
     const imageN = this.pendingImageCount;
-    const images = imageN > 0 ? `  ${imageN} image${imageN === 1 ? "" : "s"}` : "";
-    const title = ` termina agent-core v1  ${spin}effort ${this.effort}  ${this.model}${this.auth ? `  ${this.auth}` : ""}${images} `;
+    const images = imageN > 0 ? `${imageN} img` : "";
+    const permLabel = this.permissions ? `perm ${this.permissions}` : "";
+    const modelLabel = this.model ? `${spin ? `${spin} ` : ""}${this.model}` : spin ? `${spin} no model` : "no model";
+    const queuedLabel = this.queued ? `queued ${truncateMiddle(this.queued, 18)}` : "";
+    // Header row 1: left = product + model + effort, right = auth/images/queued
+    const leftParts = [`▸ termina`, modelLabel, this.effort];
+    if (permLabel) leftParts.push(permLabel);
+    if (images) leftParts.push(images);
+    if (queuedLabel) leftParts.push(queuedLabel);
+    const leftTitle = leftParts.join("  ·  ");
+    const rightTitle = this.auth ? this.auth : "";
+    const gap = Math.max(1, cols - cellWidth(leftTitle) - cellWidth(rightTitle) - 2);
+    const title = ` ${leftTitle}${" ".repeat(gap)}${rightTitle} `;
     const picker = matches.length > 0 && Boolean(matches[0]?.submit);
-    const foot = picker
-      ? " ↑↓ pick · Enter select · Ctrl+C cancel "
-      : this.busy
-        ? " Ctrl+C interrupt · PgUp/PgDn scroll "
-        : " / commands · Tab complete · Ctrl+J newline · PgUp/PgDn scroll · Ctrl+C clear ";
+    const filePicker = picker && matches[0]?.hint === "file";
+    const foot = formatTuiFooter({
+      picker,
+      fileCount: filePicker ? matches.length : undefined,
+      fileCapped: filePicker && matches.length >= 50,
+      busy: this.busy,
+      queued: Boolean(this.queued),
+      scrolled: this.scroll > 0,
+      search: this.search ? this.search.query : null,
+      cols,
+    });
+
+    // Placeholder when the prompt is empty
+    const isInputEmpty = this.chars.length === 0 && !this.choicePrompt && !this.search && !this.rawInput;
+    const INPUT_PLACEHOLDER = "Type a task…  @ files  ·  / commands  ·  Ctrl+J newline";
+    let displayWrapped = inputWrapped;
+    let displayPos = pos;
+    if (isInputEmpty) {
+      displayWrapped = wrapText(INPUT_PREFIX + INPUT_PLACEHOLDER, cols);
+    }
 
     const lines: string[] = [];
-    for (let i = 0; i < layout.transcript; i++) lines.push(clip(view.rows[i] ?? "", cols));
-    const inputShown = inputWrapped.slice(0, layout.input);
+    if (this.entries.length === 0 && !this.busy && this.scroll === 0) {
+      const empty = wrapText(EMPTY_STATE_TEXT, cols);
+      for (let i = 0; i < layout.transcript; i++) lines.push(clip(empty[i] ?? "", cols));
+    } else {
+      for (let i = 0; i < layout.transcript; i++) lines.push(clip(view.rows[i] ?? "", cols));
+    }
+    const inputShown = displayWrapped.slice(0, layout.input);
     for (let i = 0; i < layout.input; i++) lines.push(clip(inputShown[i] ?? "", cols));
     for (let i = 0; i < layout.slash; i++) {
       const c = shownSlash[i];
-      const row = c ? `  ${c.name.padEnd(nameW)}  ${c.hint}` : "";
+      const selected = slashStart + i === this.slashIndex;
+      const row = c ? formatPickerRow(c.name, c.hint, cols, selected) : "";
       lines.push(clip(row, cols));
     }
     while (lines.length < rows - layout.header - 2) lines.push(clip("", cols));
     lines.push(clip("─".repeat(Math.max(0, cols)), cols));
     lines.push(clip(title, cols));
-    if (layout.header === 2) lines.push(clip(` ${this.usage}`, cols));
+    if (layout.header === 2) {
+      const usageLine = this.usage ? `  ${this.usage}` : "  idle — waiting for a task";
+      lines.push(clip(usageLine, cols));
+    }
     lines.push(clip(foot, cols));
     if (lines.length > rows) lines.length = rows;
 
     const inputTop = layout.transcript;
-    const cursorRow = Math.min(rows, Math.max(1, Math.min(inputTop + layout.input, inputTop + pos.row + 1)));
-    const cursorCol = Math.min(cols, Math.max(1, pos.col + 1));
+    // Cursor stays at column 3 when placeholder is shown (right after "> ")
+    const cursorRow = isInputEmpty
+      ? Math.min(rows, Math.max(1, inputTop + 1))
+      : Math.min(rows, Math.max(1, Math.min(inputTop + layout.input, inputTop + displayPos.row + 1)));
+    const cursorCol = isInputEmpty ? 3 : Math.min(cols, Math.max(1, displayPos.col + 1));
     const slashTop = inputTop + layout.input;
     const titleRow = rows - layout.header - 1;
     const painted: string[] = [];
@@ -1959,8 +2350,18 @@ export class AgentTui {
         painted.push(`\x1b[90m${raw}\x1b[0m`);
       } else if (i >= slashTop && i < slashTop + layout.slash) {
         const si = i - slashTop;
-        painted.push(si === this.slashIndex - slashStart ? `\x1b[30;104m${raw}\x1b[0m` : raw);
-      } else if (i < layout.transcript) painted.push(view.painted[i] ?? `\x1b[0m${raw}\x1b[0m`);
+        painted.push(si === this.slashIndex - slashStart ? `\x1b[30;104m${raw}\x1b[0m` : `\x1b[90m${raw}\x1b[0m`);
+      } else if (i === inputTop && isInputEmpty) {
+        // Dim the placeholder, keep the "> " prefix normal
+        const prefix = INPUT_PREFIX;
+        const rest = raw.slice(prefix.length);
+        painted.push(`${prefix}\x1b[90m${rest}\x1b[0m`);
+      } else if (i >= inputTop && i < inputTop + layout.input) {
+        painted.push(raw);
+      } else if (i < layout.transcript) {
+        if (this.entries.length === 0 && !this.busy) painted.push(`\x1b[90m${raw}\x1b[0m`);
+        else painted.push(view.painted[i] ?? `\x1b[0m${raw}\x1b[0m`);
+      }
       else painted.push(raw);
     }
     return { text: lines.join("\n"), painted, cursorRow, cursorCol };
