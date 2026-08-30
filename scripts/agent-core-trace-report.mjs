@@ -53,7 +53,10 @@ function withCacheChanges(records) {
     const current = record.cache && typeof record.cache === "object" ? record.cache : null;
     const changes = {};
     for (const field of CACHE_HASH_FIELDS) {
-      changes[field] = current && previous ? current[field] !== previous[field] : null;
+      changes[field] =
+        current && previous && Object.hasOwn(current, field) && Object.hasOwn(previous, field)
+          ? current[field] !== previous[field]
+          : null;
     }
     if (current) previous = current;
     return { ...record, cacheChanges: changes };

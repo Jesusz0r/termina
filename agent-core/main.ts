@@ -4664,8 +4664,12 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         // Compact an expensive cache miss before the context limit forces it.
         const shouldCompactForCost =
           !cacheCostCompactionAttempted &&
-          !lastRequestFollowedRevision &&
-          shouldCompactForCacheCost(lastBilledTokens, lastCacheReadShare, totalTokens());
+          shouldCompactForCacheCost(
+            lastBilledTokens,
+            lastCacheReadShare,
+            totalTokens(),
+            lastRequestFollowedRevision,
+          );
         if (shouldCompactForCost) cacheCostCompactionAttempted = true;
         const compactedForCost = shouldCompactForCost ? await summarize() : false;
         if (compactedForCost) {
