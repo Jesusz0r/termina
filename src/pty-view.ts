@@ -310,8 +310,17 @@ export class PtyView {
       this.reportTerminalError(result.error);
       return;
     }
-    if (result.kind === "text" && result.text) this.term.paste(result.text);
-    else if (result.kind === "image") this.sendInput("\x1b[201~");
+    if (result.kind === "text" && result.text) {
+      // Agent TUIs enable bracketed paste before the renderer attaches, so
+      // xterm can miss that mode sequence and treat multiline paste as Enter
+      // presses. Bracket it explicitly to keep the paste as one editor block.
+      if (this.engine && /[\r\n]/.test(result.text)) {
+        const text = result.text.replace(/\r?\n/g, "\r");
+        this.sendInput(`\x1b[200~${text}\x1b[201~`);
+      } else {
+        this.term.paste(result.text);
+      }
+    } else if (result.kind === "image") this.sendInput("\x1b[201~");
     if (result.kind === "image" && result.queued) toast("queued for next prompt", "info");
     if (focus) this.focus();
   }

@@ -60,6 +60,20 @@ check("terminal copy shortcut dispatches", await evaluate(`(() => {
 await sleep(100);
 check("copy shortcut updates the system clipboard", (await evaluate(`window.pi.readClipboard()`)).includes(marker));
 
+const multilinePaste = Array.from({ length: 12 }, (_, i) => `paste-line-${i + 1}`).join("\n");
+await evaluate(`window.pi.writeClipboard(${JSON.stringify(multilinePaste)})`);
+await evaluate(`window.__panes.get("term-1")?.view.pasteClipboard()`);
+await sleep(200);
+const pasteBuffer = await evaluate(`(() => {
+  const buf = window.__panes.get("term-1")?.view.getTerminal().buffer.active;
+  if (!buf) return "";
+  const lines = [];
+  for (let i = 0; i < buf.length; i++) lines.push(buf.getLine(i)?.translateToString(true) ?? "");
+  return lines.join("\\n");
+})()`);
+check("multiline paste stays one Pi editor block", /\[paste #\d+ \+12 lines\]/.test(pasteBuffer), pasteBuffer);
+await evaluate(`window.pi.writeTerminal("term-1", "\\x03")`);
+
 const cwd = process.env.TERMINA_INITIAL_CWD;
 const eventsDir = process.env.TERMINA_EVENTS_DIR;
 const fixtureDir = join(cwd, `.drop-fixture-${Date.now()}`);
