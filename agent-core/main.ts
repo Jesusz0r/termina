@@ -17,7 +17,7 @@
  * - Per-turn usage records with waste attribution and models.dev pricing
  * - Two-role routing map (main + summary), env-overridable
  * - Streaming always; tool calls run concurrently behind a small bound
- * - cwd jail; grep/glob; unique edit; interruptible bash; web_search; skill index; prefix cache_control; traces
+ * - cwd jail; grep/glob; unique edit; numbered read_file; dir listing; interruptible bash; web_search; skill index; prefix cache_control; traces
  * - last tool_result cache pin (Anthropic); session prompt_cache_key by model family; 429 retry; model-aware effort
  * - provider auth (Anthropic, OpenAI, ChatGPT Codex, xAI, Google, OpenRouter)
  */
@@ -60,6 +60,7 @@ import {
   usesAnthropicCacheMarkers,
   usesPromptCacheKey,
   usesOpenAIExplicitCache,
+  usesPromptCacheOptions,
   cacheSessionKey,
   cacheSessionHeaders,
   googleNativeHeaders,
@@ -81,8 +82,8 @@ import {
   responsesBody,
   responsesLiveDelta,
   responsesResultFromEvents,
+  stripResponsesBreakpoints,
   textFromCompletionPayload,
-  textFromResponsesPayload,
   type ToolDef,
 } from "./openai-compat.ts";
 import {
@@ -134,38 +135,42 @@ import {
   type McpSession,
 } from "./mcp.ts";
 
-export {
-  MAX_SESSION_RECORD_BYTES,
-  MAX_SESSION_SEGMENT_BYTES,
-  SessionWriter,
-  applySessionRecord,
-  clearSessionBundle,
-  coreSessionFile,
-  createReplayState,
-  ensureSessionBundle,
-  formatStub,
-  isCoreSessionBundleFile,
-  isCoreSessionId,
-  listCurrentSegments,
-  listLogicalSessions,
-  parseSessionBundlePath,
-  prepareFreshSession,
-  quarantineSessionBundle,
-  removeEmptySessionBundle,
-  removeSessionBundle,
-  replaySessionBundle,
-  replaySessionRecords,
-  resolveSessionFile,
-  sessionBundleExists,
-  sessionBundleBytes,
-  sessionBundleHasContent,
-  sessionRotateStamp,
-  writeForkedSession,
-} from "./session.ts";
-import { AgentTui, SLASH_COMMANDS, type TranscriptHandle } from "./tui.ts";
+import { AgentTui, SLASH_COMMANDS, TUI_SHORTCUTS, rankFileTags, type TranscriptHandle } from "./tui.ts";
 import { parseHideThinking } from "../shared/terminal-control.ts";
 
-export { PERMISSION_COMMANDS, SLASH_COMMANDS, completeSlashLine, matchingSlashCommands, type SlashCommand } from "./tui.ts";
+// ---- sections (single file per AGENTS.md; do not split) ----
+// 1: config/effort  2: jail/walk/grep/glob  3: skills/env  4: session/traces  5: provider/cache/waste  6: agent loop
+
+// kept for harness compat; canonical owner is session.ts — do not add more
+// ponytail: narrow re-export, full removal when harness imports session.ts directly
+export {
+  formatStub,
+  replaySessionRecords,
+  resolveSessionFile,
+  sessionRotateStamp,
+  MAX_SESSION_RECORD_BYTES,
+  MAX_SESSION_SEGMENT_BYTES,
+  isCoreSessionBundleFile,
+  isCoreSessionId,
+  prepareFreshSession,
+} from "./session.ts";
+
+export {
+  PERMISSION_COMMANDS,
+  SLASH_COMMANDS,
+  TUI_SHORTCUTS,
+  applyFileMention,
+  completeFileMention,
+  completeSlashLine,
+  fileMentionAt,
+  formatPickerRow,
+  formatTuiFooter,
+  matchingSlashCommands,
+  rankFileTags,
+  subsequenceSpread,
+  truncateMiddle,
+  type SlashCommand,
+} from "./tui.ts";
 
 /** Example starting values from docs/AGENT-CORE.md; never spec constants. */
 const MODEL_ENV = process.env.TERMINA_CORE_MODEL?.trim() || "";
@@ -220,9 +225,17 @@ const PRUNE_MIN_CHARS = 2_048;
 const READ_CAP_BYTES = 40 * 1024;
 const BASH_CAP_BYTES = 20 * 1024;
 const BASH_TIMEOUT_MS = 60_000;
+const DIR_LIST_CAP = 200;
+const LINE_NUM_WIDTH = 6;
+const EDIT_MISS_SHOW = 3;
+const EDIT_MISS_LINE_CHARS = 240;
+const READ_SCAN_MS = 2_000;
 const TOOL_CONCURRENCY = 4;
 const NOISE_FLOOR_TOKENS = 1_024;
 const CACHE_TTL_MS = 5 * 60 * 1000;
+/** Compact an expensive miss before the request reaches the context limit. */
+const CACHE_MISS_COMPACT_TOKENS = 100_000;
+const CACHE_MISS_COMPACT_SHARE = 0.5;
 const USER_AGENTS_CAP = 8_192;
 const PROJECT_AGENTS_CAP = 24_576;
 const SKILL_XML_CAP = 8_192;
@@ -267,7 +280,10 @@ export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 type EffortLevelMap = Partial<Record<EffortLevel, string | null>>;
 type ReasoningEffort = "none" | Exclude<EffortLevel, "off">;
 let effortWanted: EffortLevel = "medium";
-let hostContextSnapshot = "";
+let currentWorkingSetHash: string | null = null;
+let currentWorkingSetChanged: boolean | null = null;
+let previousWorkingSetHash: string | null = null;
+let hasPreviousWorkingSet = false;
 
 export type ThinkingRequest =
   | { type: "disabled" }
@@ -678,6 +694,34 @@ function fileHasNul(abs: string): boolean {
   }
 }
 
+// ---- walk helpers (shared between collectFiles + collectRelativeFiles) ----
+function readDirState(dirReal: string, root: string, gitignore: GitignoreRules): { names: string[]; byName: Map<string, import("node:fs").Dirent> } | null {
+  let ents;
+  try {
+    ents = readdirSync(dirReal, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const names = sortUtf8(ents.map((e) => e.name));
+  const byName = new Map(ents.map((e) => [e.name, e] as const));
+  if (byName.has(".gitignore")) {
+    try {
+      gitignore.set(posixRel(root, dirReal), parseGitignore(readFileSync(join(dirReal, ".gitignore"), "utf8")));
+    } catch {
+      /* unreadable gitignore */
+    }
+  }
+  return { names, byName };
+}
+
+function nextWalkEntry(abs: string, root: string, gitignore: GitignoreRules): { kind: "dir" | "file"; real: string; rel: string } | null {
+  const next = classifyWalkPath(abs, root);
+  if (!next) return null;
+  const rel = posixRel(root, next.real);
+  if (gitignoreSkips(gitignore, rel, next.kind === "dir")) return null;
+  return { kind: next.kind, real: next.real, rel };
+}
+
 function classifyWalkPath(abs: string, root: string): { kind: "dir" | "file"; real: string } | null {
   let lst;
   try {
@@ -760,34 +804,19 @@ export async function collectFiles(
     }
     if (visited.has(dirReal)) continue;
     visited.add(dirReal);
-    let ents;
-    try {
-      ents = readdirSync(dirReal, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    const names = sortUtf8(ents.map((e) => e.name));
-    const byName = new Map(ents.map((e) => [e.name, e]));
-    if (byName.has(".gitignore")) {
-      try {
-        gitignore.set(posixRel(root, dirReal), parseGitignore(readFileSync(join(dirReal, ".gitignore"), "utf8")));
-      } catch {
-        /* unreadable gitignore */
-      }
-    }
+    const state = readDirState(dirReal, root, gitignore);
+    if (!state) continue;
+    const { names, byName } = state;
     for (const name of names) {
       if (name === "." || name === "..") continue;
       if (IGNORED_SEGMENTS.has(name)) continue;
-      const ent = byName.get(name);
-      if (!ent) continue;
+      if (!byName.has(name)) continue;
       const abs = join(dirReal, name);
       visits++;
       if (visits > visitCap) return { files, hitCap: true, timedOut: false };
       if (visits % 25 === 0) await yieldEventLoop();
-      const next = classifyWalkPath(abs, root);
+      const next = nextWalkEntry(abs, root, gitignore);
       if (!next) continue;
-      const rel = posixRel(root, next.real);
-      if (gitignoreSkips(gitignore, rel, next.kind === "dir")) continue;
       if (next.kind === "dir") stack.push(next.real);
       else {
         if (seenFiles.has(next.real)) continue;
@@ -799,6 +828,112 @@ export async function collectFiles(
   }
   files.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
   return { files, hitCap: false, timedOut: false };
+}
+
+const FILE_TAG_VISIT_CAP = GREP_VISIT_CAP;
+const FILE_TAG_PICK_CAP = 50;
+const FILE_TAG_ATTACH_CAP = 8;
+const FILE_TAG_SCAN_MS = GREP_BUDGET_MS;
+
+const FILE_TAG_TTL_MS = 2_000;
+let fileTagIndex: { root: string; rels: string[]; at: number } | null = null;
+
+/** Relative project files for `@` tagging. Sync, ignored walks, no NUL scan. */
+export function collectRelativeFiles(cwd: string, visitCap = FILE_TAG_VISIT_CAP): string[] {
+  const root = freezeCwd(cwd);
+  const files: string[] = [];
+  const visited = new Set<string>();
+  const seenFiles = new Set<string>();
+  const gitignore: GitignoreRules = new Map();
+  const classified = classifyWalkPath(root, root);
+  if (!classified || classified.kind !== "dir") return [];
+  const stack = [classified.real];
+  let visits = 0;
+  const started = Date.now();
+  while (stack.length > 0) {
+    if (Date.now() - started >= FILE_TAG_SCAN_MS) break;
+    const dir = stack.pop()!;
+    let dirReal = dir;
+    try {
+      dirReal = realpathSync(dir);
+    } catch {
+      continue;
+    }
+    if (visited.has(dirReal)) continue;
+    visited.add(dirReal);
+    const state = readDirState(dirReal, root, gitignore);
+    if (!state) continue;
+    const { names } = state;
+    for (const name of names) {
+      if (name === "." || name === "..") continue;
+      if (IGNORED_SEGMENTS.has(name)) continue;
+      visits++;
+      if (visits > visitCap) {
+        files.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
+        return files;
+      }
+      const next = nextWalkEntry(join(dirReal, name), root, gitignore);
+      if (!next) continue;
+      if (next.kind === "dir") stack.push(next.real);
+      else if (!seenFiles.has(next.real)) {
+        seenFiles.add(next.real);
+        if (next.rel) files.push(next.rel);
+      }
+    }
+  }
+  files.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
+  return files;
+}
+
+export function listTaggedFiles(cwd: string, query: string, cap = FILE_TAG_PICK_CAP): string[] {
+  const root = freezeCwd(cwd);
+  const now = Date.now();
+  const stale = !fileTagIndex || fileTagIndex.root !== root || (query === "" && now - fileTagIndex.at >= FILE_TAG_TTL_MS);
+  if (stale) fileTagIndex = { root, rels: collectRelativeFiles(root), at: now };
+  return rankFileTags(fileTagIndex?.rels ?? [], query, cap);
+}
+
+export function parseFileTags(text: string): string[] {
+  const found: string[] = [];
+  const seen = new Set<string>();
+  const re = /(^|\s)@([^\s@]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    const path = m[2]!;
+    if (path === "." || path === ".." || path.includes("://")) continue;
+    if (seen.has(path)) continue;
+    seen.add(path);
+    found.push(path);
+  }
+  return found;
+}
+
+export function expandFileTags(cwd: string, prompt: string): string {
+  const tags = parseFileTags(prompt);
+  if (tags.length === 0) return prompt;
+  const chunks: string[] = [];
+  for (const path of tags) {
+    if (chunks.length >= FILE_TAG_ATTACH_CAP) break;
+    const confined = confinePath(cwd, path);
+    if (!confined.ok) continue;
+    let st;
+    try {
+      st = statSync(confined.abs);
+    } catch {
+      continue;
+    }
+    if (st.isDirectory()) {
+      const listing = listProjectDir(cwd, confined.abs);
+      if (listing.isError) continue;
+      chunks.push(`<file path="${xmlSafe(path)}">\n${xmlSafe(listing.content)}\n</file>`);
+      continue;
+    }
+    const got = readTextView(confined.abs, { offset: 0 });
+    if (got.isError) continue;
+    chunks.push(`<file path="${xmlSafe(path)}">\n${xmlSafe(got.content)}\n</file>`);
+  }
+  if (chunks.length === 0) return prompt;
+  return `${prompt}\n\n<tagged-files>\n${chunks.join("\n")}\n</tagged-files>`;
 }
 
 const GREP_LINE_BYTE_CAP = GREP_LINE_CHARS * 4;
@@ -1491,6 +1626,216 @@ export function parseOffset(value: unknown): number | { error: string } {
   return i;
 }
 
+export function parseLineBound(value: unknown, field: string): number | { error: string } | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n) || n > Number.MAX_SAFE_INTEGER) return { error: `error: ${field} must be a number` };
+  const i = Math.floor(n);
+  if (i < 1) return { error: `error: ${field} must be >= 1` };
+  return i;
+}
+
+function linePrefix(n: number): string {
+  const s = String(n);
+  return `${s.length >= LINE_NUM_WIDTH ? s : s.padStart(LINE_NUM_WIDTH, " ")}|`;
+}
+
+export function formatNumberedText(text: string, startLine: number): string {
+  if (text === "") return "";
+  const endsWithNl = text.endsWith("\n");
+  const parts = text.split("\n");
+  if (endsWithNl) parts.pop();
+  return parts.map((line, i) => `${linePrefix(startLine + i)}${line.replace(/\r$/, "")}`).join("\n");
+}
+
+function newlineCount(buf: Buffer): number {
+  let n = 0;
+  for (let i = 0; i < buf.length; i++) if (buf[i] === 10) n++;
+  return n;
+}
+
+function lastNewlineIndex(buf: Buffer): number {
+  for (let i = buf.length - 1; i >= 0; i--) if (buf[i] === 10) return i;
+  return -1;
+}
+
+function scanTimedOut(started: number): boolean {
+  return Date.now() - started >= READ_SCAN_MS;
+}
+
+function countNewlinesInRange(fd: number, end: number, started: number): number | { error: string } {
+  if (end <= 0) return 0;
+  const chunk = Buffer.alloc(Math.min(64 * 1024, end));
+  let pos = 0;
+  let nls = 0;
+  while (pos < end) {
+    if (scanTimedOut(started)) return { error: "error: read timed out" };
+    const want = Math.min(chunk.length, end - pos);
+    const n = readSync(fd, chunk, 0, want, pos);
+    if (n <= 0) break;
+    for (let i = 0; i < n; i++) if (chunk[i] === 10) nls++;
+    pos += n;
+  }
+  return nls;
+}
+
+/** Byte offset of the first byte of 1-based `line`, or `size` if the file is shorter. */
+function lineStartOffset(fd: number, size: number, line: number, started: number): number | { error: string } {
+  if (line <= 1) return 0;
+  const chunk = Buffer.alloc(64 * 1024);
+  let pos = 0;
+  let current = 1;
+  while (pos < size) {
+    if (scanTimedOut(started)) return { error: "error: read timed out" };
+    const n = readSync(fd, chunk, 0, Math.min(chunk.length, size - pos), pos);
+    if (n <= 0) break;
+    for (let i = 0; i < n; i++) {
+      if (chunk[i] === 10) {
+        current++;
+        if (current === line) return pos + i + 1;
+      }
+    }
+    pos += n;
+  }
+  return size;
+}
+
+function gitignoreRulesFor(root: string, dirAbs: string): GitignoreRules {
+  const rules: GitignoreRules = new Map();
+  const dirs: string[] = [];
+  let cur = dirAbs;
+  for (;;) {
+    dirs.push(cur);
+    if (cur === root) break;
+    const parent = dirname(cur);
+    if (parent === cur) break;
+    if (parent !== root && !underRoot(parent, root)) break;
+    cur = parent;
+  }
+  for (const dir of dirs.reverse()) {
+    try {
+      const gi = join(dir, ".gitignore");
+      if (!existsSync(gi)) continue;
+      const rel = dir === root ? "" : posixRel(root, dir);
+      rules.set(rel, parseGitignore(readFileSync(gi, "utf8")));
+    } catch {
+      /* unreadable gitignore */
+    }
+  }
+  return rules;
+}
+
+export function listProjectDir(cwd: string, abs: string): { content: string; isError: boolean } {
+  const root = freezeCwd(cwd);
+  let dirReal = abs;
+  try {
+    dirReal = realpathSync(abs);
+  } catch (err) {
+    return { content: `error: ${(err as Error).message}`, isError: true };
+  }
+  if (!underRoot(dirReal, root)) return { content: "error: path outside project", isError: true };
+  let ents;
+  try {
+    ents = readdirSync(dirReal, { withFileTypes: true });
+  } catch (err) {
+    return { content: `error: ${(err as Error).message}`, isError: true };
+  }
+  const names = sortUtf8(ents.map((e) => e.name));
+  const gi = gitignoreRulesFor(root, dirReal);
+  const rows: string[] = [];
+  let omitted = 0;
+  for (const name of names) {
+    if (name === "." || name === "..") continue;
+    if (IGNORED_SEGMENTS.has(name)) continue;
+    const classified = classifyWalkPath(join(dirReal, name), root);
+    if (!classified) continue;
+    const rel = posixRel(root, classified.real);
+    if (gitignoreSkips(gi, rel, classified.kind === "dir")) continue;
+    if (rows.length >= DIR_LIST_CAP) {
+      omitted++;
+      continue;
+    }
+    const cleaned = name.replace(/[\x00-\x1f\x7f]/g, " ");
+    rows.push(classified.kind === "dir" ? `${cleaned}/` : cleaned);
+  }
+  const relDir = (posixRel(root, dirReal) || ".").replace(/[\x00-\x1f\x7f]/g, " ");
+  let body = rows.length > 0 ? rows.join("\n") : "(empty directory)";
+  if (omitted > 0) body += `\n<!-- ${omitted} entries omitted -->`;
+  return { content: `[directory ${relDir}]\n${body}`, isError: false };
+}
+
+function truncationMarker(nextOffset: number, nextLine?: number): string {
+  if (nextLine !== undefined) {
+    return `[truncated at ${READ_CAP_BYTES} bytes — read_file offset ${nextOffset} — start_line ${nextLine}]`;
+  }
+  return `[truncated at ${READ_CAP_BYTES} bytes — read_file offset ${nextOffset}]`;
+}
+
+export function readTextView(
+  abs: string,
+  opts: { offset: number; startLine?: number; endLine?: number },
+): { content: string; isError: boolean } {
+  let fd: number | undefined;
+  try {
+    fd = openSync(abs, "r");
+    const st = fstatSync(fd);
+    const head = Buffer.alloc(Math.min(4096, st.size));
+    if (head.length > 0) readSync(fd, head, 0, head.length, 0);
+    if (head.includes(0)) return { content: "error: binary file", isError: true };
+    if (st.size === 0) return { content: "", isError: false };
+
+    const started = Date.now();
+    const lineMode = opts.startLine !== undefined || opts.endLine !== undefined;
+    const startLine = opts.startLine ?? 1;
+    const endLine = opts.endLine;
+    let from = opts.offset;
+    let viewStartLine = 1;
+    let until = st.size;
+    if (lineMode) {
+      const startOff = lineStartOffset(fd, st.size, startLine, started);
+      if (typeof startOff === "object") return { content: startOff.error, isError: true };
+      from = startOff;
+      viewStartLine = startLine;
+      if (endLine !== undefined) {
+        const endOff = lineStartOffset(fd, st.size, endLine + 1, started);
+        if (typeof endOff === "object") return { content: endOff.error, isError: true };
+        until = endOff;
+      }
+    } else {
+      const nls = countNewlinesInRange(fd, from, started);
+      if (typeof nls === "object") return { content: nls.error, isError: true };
+      viewStartLine = nls + 1;
+    }
+    if (from >= st.size || from >= until) return { content: "", isError: false };
+    const want = Math.min(READ_CAP_BYTES, Math.max(0, until - from));
+    const slice = Buffer.alloc(want);
+    if (want > 0) readSync(fd, slice, 0, want, from);
+    const more = from + want < until;
+    let view = slice;
+    let nextOffset = from + want;
+    let atLineBoundary = false;
+    if (more) {
+      const nl = lastNewlineIndex(slice);
+      if (nl >= 0) {
+        view = slice.subarray(0, nl + 1);
+        nextOffset = from + nl + 1;
+        atLineBoundary = true;
+      }
+    }
+    const numbered = formatNumberedText(view.toString("utf8"), viewStartLine);
+    if (nextOffset < until) {
+      const nextLine = atLineBoundary ? viewStartLine + newlineCount(view) : undefined;
+      const marker = truncationMarker(nextOffset, nextLine);
+      return { content: numbered ? `${numbered}\n${marker}` : marker, isError: false };
+    }
+    return { content: numbered, isError: false };
+  } catch (err) {
+    return { content: `error: ${(err as Error).message}`, isError: true };
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
 export function nestedAgentsPointer(cwd: string, fileAbs: string): string | null {
   const root = freezeCwd(cwd);
   let abs = fileAbs;
@@ -1547,11 +1892,21 @@ export function readFileResult(abs: string, offset: number): { content: string; 
 
 export function readProjectFile(
   cwd: string,
-  input: { path?: string; offset?: unknown },
+  input: { path?: string; offset?: unknown; start_line?: unknown; end_line?: unknown },
   allow?: ReadonlySet<string>,
 ): { content: string; isError: boolean } {
   const off = parseOffset(input.offset);
   if (typeof off !== "number") return { content: off.error, isError: true };
+  const startLine = parseLineBound(input.start_line, "start_line");
+  if (typeof startLine === "object") return { content: startLine.error, isError: true };
+  const endLine = parseLineBound(input.end_line, "end_line");
+  if (typeof endLine === "object") return { content: endLine.error, isError: true };
+  if (startLine !== undefined && endLine !== undefined && endLine < startLine) {
+    return { content: "error: end_line must be >= start_line", isError: true };
+  }
+  if (off > 0 && (startLine !== undefined || endLine !== undefined)) {
+    return { content: "error: use start_line or offset, not both", isError: true };
+  }
   const confined = confinePath(cwd, input.path ?? "", { allow });
   if (!confined.ok) return { content: confined.error, isError: true };
   let st;
@@ -1560,8 +1915,13 @@ export function readProjectFile(
   } catch (err) {
     return { content: `error: ${(err as Error).message}`, isError: true };
   }
-  if (st.isDirectory()) return { content: "error: EISDIR", isError: true };
-  const got = readFileResult(confined.abs, off);
+  if (st.isDirectory()) {
+    if (off > 0 || startLine !== undefined || endLine !== undefined) {
+      return { content: "error: path is a directory", isError: true };
+    }
+    return listProjectDir(cwd, confined.abs);
+  }
+  const got = readTextView(confined.abs, { offset: off, startLine, endLine });
   if (got.isError) return got;
   const pointer = nestedAgentsPointer(cwd, confined.abs);
   if (pointer) return { content: `${pointer}\n${got.content}`, isError: false };
@@ -1595,7 +1955,7 @@ export function writeProjectFile(cwd: string, path: string | undefined, content:
       /* use the process umask for a new file */
     }
     atomicWrite(confined.abs, content, mode);
-    return { content: `ok: wrote ${confined.abs}`, isError: false };
+    return { content: `ok: wrote ${posixRel(freezeCwd(cwd), confined.abs)}`, isError: false };
   } catch (err) {
     return { content: `error: ${(err as Error).message}`, isError: true };
   }
@@ -1609,6 +1969,33 @@ export type EditResult = {
 
 function isReplaceAll(value: unknown): boolean {
   return value === true || value === "true";
+}
+
+export function editMissDiagnostic(body: string, oldText: string): string {
+  const hits: number[] = [];
+  let count = 0;
+  let idx = 0;
+  const step = Math.max(oldText.length, 1);
+  while (idx < body.length) {
+    const at = body.indexOf(oldText, idx);
+    if (at < 0) break;
+    count++;
+    if (hits.length < EDIT_MISS_SHOW) hits.push(at);
+    idx = at + step;
+  }
+  const kind = count === 0 ? "old_text not found" : "old_text is not unique";
+  const noun = count === 1 ? "occurrence" : "occurrences";
+  const lines = [`error: ${kind} (${count} ${noun})`];
+  for (const at of hits) {
+    const lineNo = body.slice(0, at).split("\n").length;
+    const lineStart = at === 0 ? 0 : body.lastIndexOf("\n", at - 1) + 1;
+    const nl = body.indexOf("\n", at);
+    const line = body.slice(lineStart, nl < 0 ? body.length : nl).replace(/\r$/, "");
+    const clipped = line.length > EDIT_MISS_LINE_CHARS ? `${line.slice(0, EDIT_MISS_LINE_CHARS)}...` : line;
+    lines.push(`  ${lineNo}:${clipped}`);
+  }
+  if (count > hits.length) lines.push(`  (${count - hits.length} more)`);
+  return lines.join("\n");
 }
 
 /** First unique occurrence of oldText, or every occurrence when replaceAll is set.
@@ -1653,10 +2040,10 @@ export function editProjectFile(
       const at = body.indexOf(oldText, idx);
       if (at < 0) break;
       count++;
-      if (count > 1) return { content: "error: old_text is not unique", isError: true };
+      if (count > 1) return { content: editMissDiagnostic(body, oldText), isError: true };
       idx = at + oldText.length;
     }
-    if (count === 0) return { content: "error: old_text not found", isError: true };
+    if (count === 0) return { content: editMissDiagnostic(body, oldText), isError: true };
     const at = body.indexOf(oldText);
     const next = body.slice(0, at) + newText + body.slice(at + oldText.length);
     try {
@@ -1680,7 +2067,7 @@ export function editProjectFile(
     from = at + newText.length;
     n++;
   }
-  if (n === 0) return { content: "error: old_text not found", isError: true };
+  if (n === 0) return { content: editMissDiagnostic(body, oldText), isError: true };
   try {
     atomicWrite(confined.abs, next, st.mode & 0o777);
   } catch (err) {
@@ -1763,8 +2150,21 @@ function pruneTraces(): void {
   retainTraceFiles(tracesDir, TRACE_CAP);
 }
 
+export interface TraceCacheDiagnostics {
+  cacheKeyHash: string | null;
+  modelSettingsHash: string;
+  toolsHash: string;
+  stablePrefixHash: string;
+  messagePrefixHash: string;
+  workingSetHash: string | null;
+  workingSetChanged: boolean | null;
+  codexTurnStateUsed: boolean;
+}
+
 export function traceRecord(fields: {
   role: "main" | "summary";
+  provider: ProviderId;
+  protocol: string;
   model: string;
   status: string;
   storageSeqRange: readonly [number, number];
@@ -1778,8 +2178,11 @@ export function traceRecord(fields: {
   wasteTokens: number;
   wasteCause: string | null;
   systemHash: string;
+  cache: TraceCacheDiagnostics | null;
 }): {
   role: "main" | "summary";
+  provider: ProviderId;
+  protocol: string;
   model: string;
   status: string;
   storageSeqRange: readonly [number, number];
@@ -1793,9 +2196,12 @@ export function traceRecord(fields: {
   wasteTokens: number;
   wasteCause: string | null;
   systemHash: string;
+  cache: TraceCacheDiagnostics | null;
 } {
   return {
     role: fields.role,
+    provider: fields.provider,
+    protocol: fields.protocol,
     model: fields.model,
     status: fields.status,
     storageSeqRange: fields.storageSeqRange,
@@ -1816,6 +2222,7 @@ export function traceRecord(fields: {
     wasteTokens: fields.wasteTokens,
     wasteCause: fields.wasteCause,
     systemHash: fields.systemHash,
+    cache: fields.cache ? { ...fields.cache } : null,
   };
 }
 
@@ -1833,6 +2240,98 @@ function writeTrace(payload: ReturnType<typeof traceRecord>): void {
 
 export function hashSystem(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
+}
+
+const diagnosticHashSalt = randomUUID();
+
+function hashDiagnostic(value: unknown): string {
+  const text = typeof value === "string" ? value : (JSON.stringify(value) ?? "undefined");
+  return createHash("sha256").update(diagnosticHashSalt, "utf8").update("\0").update(text, "utf8").digest("hex").slice(0, 16);
+}
+
+function cacheDiagnosticsForRequest(
+  body: Record<string, unknown>,
+  identity: { provider: ProviderId; protocol: string; model: string },
+  cacheKey: string | null,
+): TraceCacheDiagnostics {
+  const settings = { ...body };
+  const tools = settings.tools ?? [];
+  delete settings.tools;
+  let stableSystem = settings.instructions ?? settings.system ?? settings.systemInstruction ?? null;
+  delete settings.instructions;
+  delete settings.system;
+  delete settings.systemInstruction;
+  let messages = settings.input ?? settings.messages ?? settings.contents ?? [];
+  delete settings.input;
+  delete settings.messages;
+  delete settings.contents;
+  if (stableSystem === null && Array.isArray(messages) && messages[0]?.role === "system") {
+    stableSystem = messages[0];
+    messages = messages.slice(1);
+  }
+  delete settings.prompt_cache_key;
+  delete settings.session_id;
+  const modelSettings = { ...identity, request: settings };
+  return {
+    cacheKeyHash: cacheKey ? hashDiagnostic(cacheKey) : null,
+    modelSettingsHash: hashDiagnostic(modelSettings),
+    toolsHash: hashDiagnostic(tools),
+    stablePrefixHash: hashDiagnostic({ system: stableSystem, tools, settings: modelSettings }),
+    messagePrefixHash: hashDiagnostic(messages),
+    workingSetHash: currentWorkingSetHash,
+    workingSetChanged: currentWorkingSetChanged,
+    codexTurnStateUsed: identity.provider === "openai-codex" && Boolean(codexTurnState),
+  };
+}
+
+// ---- trace helpers (shrink 8 duplicated traceRecord sites) ----
+function writeSummaryTrace(opts: { status: string; usage: Usage | null; started: number; seq: readonly [number, number]; revisions: number; kinds: readonly RevisionKind[] }): void {
+  writeTrace(
+    traceRecord({
+      role: "summary",
+      provider: summaryRoute.provider,
+      protocol: providerProtocol(summaryRoute.provider, summaryRoute.model),
+      model: summaryRoute.model,
+      status: opts.status,
+      storageSeqRange: opts.seq,
+      toolNames: [],
+      usage: opts.usage,
+      usd: null,
+      ttftMs: null,
+      turnMs: Date.now() - opts.started,
+      revisions: opts.revisions,
+      revisionKinds: opts.kinds,
+      wasteTokens: 0,
+      wasteCause: null,
+      systemHash: hashSystem("You compress coding-agent session history. Only output the structured handoff."),
+      cache: null,
+    }),
+  );
+}
+
+function writeMainTrace(opts: { status: string; seqBefore: number; toolNames: string[]; usage: Usage | null; waste: { usd: number | null; ttftMs: number | null; turnMs: number; revisionCount: number; revisionKinds: readonly RevisionKind[]; wasteTokens: number; cause: string | null } | null; sysHash: string; cache: TraceCacheDiagnostics | null; started: number }): void {
+  const w = opts.waste;
+  writeTrace(
+    traceRecord({
+      role: "main",
+      provider: route.provider,
+      protocol: providerProtocol(route.provider, route.model),
+      model: route.model,
+      status: opts.status,
+      storageSeqRange: [opts.seqBefore + 1, storageSeq],
+      toolNames: opts.toolNames,
+      usage: opts.usage,
+      usd: w?.usd ?? null,
+      ttftMs: w?.ttftMs ?? null,
+      turnMs: w ? w.turnMs : Date.now() - opts.started,
+      revisions: w ? w.revisionCount : revisions,
+      revisionKinds: w ? w.revisionKinds.slice() as readonly RevisionKind[] : revisionKinds.slice(),
+      wasteTokens: w?.wasteTokens ?? 0,
+      wasteCause: w?.cause ?? null,
+      systemHash: opts.sysHash,
+      cache: opts.cache,
+    }),
+  );
 }
 
 // ---- append-only session storage ----
@@ -1906,6 +2405,13 @@ function readOptional(path: string): string | null {
 
 let frozenSystem: string | null = null;
 
+/** Zone 1 identity. Do not ask in chat to edit ordinary project files.
+ *  Host notes that name a file not to touch (Mine, sibling claims) still bind. */
+export const FROZEN_IDENTITY = [
+  "You are the Termina agent-core. Be terse. Use tools to do real work in the user's project.",
+  "For clear, reversible local work, do it in the current turn instead of asking permission conversationally. Follow an explicit host instruction not to touch a file. Prefer edit on existing files, grep/glob over bash search, and read before edit.",
+].join("\n");
+
 /** Built once per process, fixed order: identity, environment, user
  *  instructions, skill index, project instructions. */
 export function buildFrozenSystem(opts: {
@@ -1935,7 +2441,7 @@ export function buildFrozenSystem(opts: {
     }
   }
   const parts = [
-    "You are the Termina agent-core. Be terse. Use tools to do real work in the user's project.",
+    FROZEN_IDENTITY,
     formatEnvironment(root, { probes: opts.probes !== false }),
   ];
   if (opts.userAgentsPath) {
@@ -1991,6 +2497,8 @@ interface ToolUse {
     command?: string;
     content?: string;
     offset?: unknown;
+    start_line?: unknown;
+    end_line?: unknown;
     pattern?: string;
     glob?: string;
     query?: string;
@@ -2082,11 +2590,11 @@ export function formatToolFollowup(use: ToolUse, outcome: { result: Record<strin
   const content = typeof outcome.result.content === "string" ? outcome.result.content : "";
   const status = outcome.isError ? "failed" : "done";
   if (use.name === "bash") {
-    const shown = capDisplay(content, TOOL_DISPLAY_BYTES);
+    const shown = displayToolOutput(content);
     return `◇ ${use.name} · ${status}${shown ? `\n${shown}` : ""}\n`;
   }
   if (outcome.isError) {
-    const shown = capDisplay(content, TOOL_DISPLAY_BYTES);
+    const shown = displayToolOutput(content);
     return `◇ ${use.name} · failed${shown ? `\n${shown}` : ""}\n`;
   }
   if (use.name === "grep" || use.name === "glob") {
@@ -2141,7 +2649,7 @@ export function runBash(
     });
     let settled = false;
     const killGroup = (): void => {
-      if (typeof pid === "number") {
+      if (process.platform !== "win32" && typeof pid === "number" && pid > 0) {
         try {
           process.kill(-pid, "SIGKILL");
           return;
@@ -2155,20 +2663,17 @@ export function runBash(
         /* already gone */
       }
     };
-    const finish = (err: { code?: number | null; signal?: string | null } | null): void => {
+    const finish = (status: { code?: number | null; signal?: string | null; failed: boolean }): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       clearInterval(poll);
       const parts = [stdout.toString("utf8"), stderr.toString("utf8")];
-      let failed = false;
-      if (err) {
-        failed = true;
-        parts.push(`[exit ${typeof err.code === "number" ? err.code : err.signal ?? "error"}]`);
-      }
+      const body = capTail(parts.filter(Boolean).join("\n") || "(no output)", BASH_CAP_BYTES, repro);
+      const tag = typeof status.code === "number" ? String(status.code) : status.signal ?? "error";
       resolve({
-        content: capTail(parts.filter(Boolean).join("\n") || "(no output)", BASH_CAP_BYTES, repro),
-        isError: failed,
+        content: `${body}\n[exit ${tag}]`,
+        isError: status.failed,
       });
     };
     const timer = setTimeout(killGroup, timeoutMs);
@@ -2176,10 +2681,9 @@ export function runBash(
       if (opts.shouldStop?.()) killGroup();
     }, 50);
     if (opts.shouldStop?.()) killGroup();
-    child.on("error", (e) => finish({ signal: e.message }));
+    child.on("error", (e) => finish({ signal: e.message, failed: true }));
     child.on("close", (code, signal) => {
-      if (code === 0 && !signal) finish(null);
-      else finish({ code, signal });
+      finish({ code, signal, failed: !(code === 0 && !signal) });
     });
   });
 }
@@ -2317,6 +2821,7 @@ async function confirmBashNow(command: string): Promise<boolean> {
   surface.clearChoices();
   if (line === "/approve always") {
     permissionMode = "always";
+    surface.setStatus({ permissions: permissionMode });
     return true;
   }
   return line === "/approve once";
@@ -2386,10 +2891,16 @@ async function executeTool(use: ToolUse): Promise<ToolOutcome> {
 const TOOLS = [
   {
     name: "read_file",
-    description: "Read a file relative to the working directory. Output caps near 40 KB. Pass offset (bytes) to continue a truncated read.",
+    description:
+      "Read a text file relative to the working directory. Each line is prefixed with its 1-based line number and a pipe; do not include those prefixes in edit old_text. Caps near 40 KB of file bytes. Optional start_line and end_line (inclusive). Pass offset (bytes) only to continue a truncated read; do not combine with start_line. A directory path lists that directory.",
     input_schema: {
       type: "object",
-      properties: { path: { type: "string" }, offset: { type: "number" } },
+      properties: {
+        path: { type: "string" },
+        offset: { type: "number" },
+        start_line: { type: "number" },
+        end_line: { type: "number" },
+      },
       required: ["path"],
     },
   },
@@ -2405,7 +2916,7 @@ const TOOLS = [
   {
     name: "edit",
     description:
-      "Replace old_text with new_text in a file. Default: one unique occurrence (fails if missing or repeated). Set replace_all to replace every occurrence. Prefer this over write_file for existing files.",
+      "Replace old_text with new_text in a file. Default: one unique occurrence (fails if missing or repeated). Set replace_all to replace every occurrence. Prefer this over write_file for existing files. Miss errors include occurrence count and nearby lines.",
     input_schema: {
       type: "object",
       properties: {
@@ -2442,7 +2953,8 @@ const TOOLS = [
   },
   {
     name: "bash",
-    description: "Run one bash command in the working directory. 60 s timeout. Combined output caps near 20 KB. Use grep or glob for file search; do not call rg.",
+    description:
+      "Run one bash command in the working directory. 60 s timeout. Combined output caps near 20 KB and always ends with [exit N]. Use grep or glob for file search; do not call rg.",
     input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
   },
   {
@@ -2502,7 +3014,7 @@ export function buildCachedPrefix(
 const HISTORY_CACHE_BLOCKS = new Set(["text", "tool_result", "image"]);
 
 /** Stamp cache_control on the last stable history block. Skip thinking and
- *  tool_use. The request overlay sits after this mark so it can change. */
+ *  tool_use. This marks the current append-only prefix. */
 export function stampHistoryCache(
   messages: Array<{ role: string; content: unknown }>,
   provider: ProviderId = "anthropic",
@@ -2601,10 +3113,16 @@ function toolTranscriptDetail(use: ToolUse): string {
   return "";
 }
 
+const TOOL_TRUNCATION_HINT = "…[truncated — re-run or read_file for the rest]";
+
+export function displayToolOutput(content: string): string {
+  if (Buffer.byteLength(content, "utf8") <= TOOL_DISPLAY_BYTES) return content;
+  return `${capDisplay(content, TOOL_DISPLAY_BYTES)}\n${TOOL_TRUNCATION_HINT}`;
+}
+
 function toolTranscriptOutput(outcome: ToolOutcome): string {
   const content = typeof outcome.result.content === "string" ? outcome.result.content : "";
-  if (Buffer.byteLength(content, "utf8") <= TOOL_DISPLAY_BYTES) return content;
-  return `${capDisplay(content, TOOL_DISPLAY_BYTES)}\n…[truncated]`;
+  return displayToolOutput(content);
 }
 
 function blockInput(block: ContentBlock): ToolUse["input"] {
@@ -2627,8 +3145,7 @@ function blockBodyText(value: unknown): string {
 }
 
 function replayToolOutput(text: string): string {
-  if (Buffer.byteLength(text, "utf8") <= TOOL_DISPLAY_BYTES) return text;
-  return `${capDisplay(text, TOOL_DISPLAY_BYTES)}\n…[truncated]`;
+  return displayToolOutput(text);
 }
 
 function replayToolState(block: ContentBlock, text: string): "success" | "error" {
@@ -2859,6 +3376,7 @@ const VIEW_KEYS = new Set(["chars", "tool", "repro", "stubbed"]);
  *  included) make the provider reject the whole request. File images
  *  expand to base64 at request time. */
 export function toProviderBlock(b: ContentBlock, imageRoots: string[] = []): Record<string, unknown> {
+  if (b.type === "context") return { type: "text", text: String(b.text ?? "") };
   const out: Record<string, unknown> = { type: b.type };
   for (const [k, v] of Object.entries(b)) {
     if (k === "type" || VIEW_KEYS.has(k) || v === undefined) continue;
@@ -2900,15 +3418,28 @@ function pushMessage(role: Message["role"], content: Message["content"]): Messag
   return m;
 }
 
-function pushUserPrompt(prompt: string, images: Array<{ name: string; mediaType: string }>): Message {
-  if (images.length === 0) return pushMessage("user", prompt);
-  return pushMessage("user", [
+export function userPromptContent(
+  prompt: string,
+  images: Array<{ name: string; mediaType: string }>,
+  workingSet = "",
+): string | ContentBlock[] {
+  if (images.length === 0 && !workingSet) return prompt;
+  return [
     { type: "text", text: prompt },
     ...images.map((img) => ({
       type: "image",
       source: { type: "file", name: img.name, media_type: img.mediaType },
     })),
-  ]);
+    ...(workingSet ? [{ type: "context", text: workingSet }] : []),
+  ];
+}
+
+function pushUserPrompt(
+  prompt: string,
+  images: Array<{ name: string; mediaType: string }>,
+  workingSet = "",
+): Message {
+  return pushMessage("user", userPromptContent(prompt, images, workingSet));
 }
 
 // ---- reclamation with hysteresis ----
@@ -2989,6 +3520,21 @@ export type RevisionKind = "prune" | "summarize" | "truncate";
 let revisions = 0;
 let revisionKinds: RevisionKind[] = [];
 let lastBilledTokens: number | null = null;
+let lastCacheReadShare: number | null = null;
+
+export function shouldCompactForCacheCost(
+  billedTokens: number | null,
+  cacheReadShare: number | null,
+  contextTokens: number,
+): boolean {
+  return (
+    billedTokens !== null &&
+    cacheReadShare !== null &&
+    billedTokens >= CACHE_MISS_COMPACT_TOKENS &&
+    contextTokens >= CACHE_MISS_COMPACT_TOKENS &&
+    cacheReadShare < CACHE_MISS_COMPACT_SHARE
+  );
+}
 
 function recordRevision(kind: RevisionKind): void {
   revisions++;
@@ -3164,8 +3710,8 @@ function fileInventories(messages: Array<{ role: string; content: unknown }>): s
   return sections.join("\n");
 }
 
-/** Request-only working set. Not stored in session JSONL. */
-export function formatOverlay(opts: {
+/** Format hidden model context for the next persisted user turn. */
+export function formatWorkingSet(opts: {
   messages: Array<{ role: string; content: unknown }>;
   hostContext?: string;
 }): string {
@@ -3201,24 +3747,7 @@ async function summarize(): Promise<boolean> {
     }
     const text = folded.text;
     if (!text) {
-      writeTrace(
-        traceRecord({
-          role: "summary",
-          model: summaryRoute.model,
-          status: "empty",
-          storageSeqRange: [storageSeq, storageSeq],
-          toolNames: [],
-          usage: u,
-          usd: null,
-          ttftMs: null,
-          turnMs: Date.now() - started,
-          revisions: 0,
-          revisionKinds: [],
-          wasteTokens: 0,
-          wasteCause: null,
-          systemHash: hashSystem("You compress coding-agent session history. Only output the structured handoff."),
-        }),
-      );
+      writeSummaryTrace({ status: "empty", usage: u, started, seq: [storageSeq, storageSeq], revisions: 0, kinds: [] });
       return false;
     }
     const inventories = fileInventories(evicted);
@@ -3233,45 +3762,11 @@ async function summarize(): Promise<boolean> {
     postRevision = true;
     recordRevision("summarize");
     syncIndicators();
-    writeTrace(
-      traceRecord({
-        role: "summary",
-        model: summaryRoute.model,
-        status: "ok",
-        storageSeqRange: [m.sseq, m.sseq],
-        toolNames: [],
-        usage: u,
-        usd: null,
-        ttftMs: null,
-        turnMs: Date.now() - started,
-        revisions: 1,
-        revisionKinds: ["summarize"],
-        wasteTokens: 0,
-        wasteCause: null,
-        systemHash: hashSystem("You compress coding-agent session history. Only output the structured handoff."),
-      }),
-    );
+    writeSummaryTrace({ status: "ok", usage: u, started, seq: [m.sseq, m.sseq], revisions: 1, kinds: ["summarize"] });
     out(`[context summarized: ${boundary} messages folded]\n`);
     return true;
   } catch (err) {
-    writeTrace(
-      traceRecord({
-        role: "summary",
-        model: summaryRoute.model,
-        status: "error",
-        storageSeqRange: [storageSeq, storageSeq],
-        toolNames: [],
-        usage: null,
-        usd: null,
-        ttftMs: null,
-        turnMs: Date.now() - started,
-        revisions: 0,
-        revisionKinds: [],
-        wasteTokens: 0,
-        wasteCause: null,
-        systemHash: hashSystem("You compress coding-agent session history. Only output the structured handoff."),
-      }),
-    );
+    writeSummaryTrace({ status: "error", usage: null, started, seq: [storageSeq, storageSeq], revisions: 0, kinds: [] });
     if (!interrupted) out(`\n(summarization failed: ${(err as Error).message})\n`);
     return false;
   }
@@ -3338,9 +3833,11 @@ interface CallResult {
   usage: Usage | null;
   ttftMs: number | null;
   stopReason: string | null;
+  cache: TraceCacheDiagnostics;
 }
 
 let currentAbort: AbortController | null = null;
+let codexTurnState = "";
 
 function endpointFor(auth: { providerId: ProviderId; baseUrl: string }, model = "", stream = true): string {
   const base = auth.baseUrl.replace(/\/$/, "");
@@ -3373,6 +3870,7 @@ async function providerPost(
   signal: AbortSignal | undefined,
   model = "",
   stream = true,
+  codexAffinity = false,
 ): Promise<Response> {
   let replayed = false;
   let retries = 0;
@@ -3380,7 +3878,10 @@ async function providerPost(
     if (signal?.aborted) throw new Error("aborted");
     const auth = await resolveAuth(providerId);
     if (!auth.ok) throw new Error(auth.error);
-    let headers = { ...auth.headers, ...cacheSessionHeaders(providerId, sessionId) };
+    let headers: Record<string, string> = { ...auth.headers, ...cacheSessionHeaders(providerId, sessionId) };
+    if (codexAffinity && providerId === "openai-codex" && codexTurnState) {
+      headers["x-codex-turn-state"] = codexTurnState;
+    }
     if (providerProtocol(providerId, model) === "google-generate") headers = googleNativeHeaders(headers);
     if (body && typeof body === "object" && (body as { stream?: unknown }).stream === true) {
       headers.accept = "text/event-stream";
@@ -3392,6 +3893,10 @@ async function providerPost(
       body: JSON.stringify(body),
       signal,
     });
+    if (res.ok && codexAffinity && providerId === "openai-codex") {
+      const nextTurnState = res.headers.get("x-codex-turn-state")?.trim();
+      if (nextTurnState) codexTurnState = nextTurnState;
+    }
     if (res.status === 401) {
       await res.text();
       if (auth.kind === "oauth" && !replayed) {
@@ -3425,6 +3930,19 @@ function normalizeUsage(u: Record<string, number> | undefined): Usage | null {
   };
 }
 
+async function apiFailure(res: Response, hint = ""): Promise<never> {
+  const detail = (await res.text()).slice(0, 300);
+  throw new Error(`API ${res.status}${detail ? `: ${detail}` : ""}${hint}`);
+}
+
+function textFromStreamBlocks(blocks: Array<Record<string, unknown>>): string {
+  return blocks
+    .filter((b) => b.type === "text" && typeof b.text === "string")
+    .map((b) => b.text as string)
+    .join("")
+    .trim();
+}
+
 async function completeText(
   providerId: ProviderId,
   model: string,
@@ -3450,7 +3968,7 @@ async function completeText(
       signal,
       model,
     );
-    if (!res.ok) throw new Error(`API ${res.status}`);
+    if (!res.ok) await apiFailure(res);
     const data = (await res.json()) as { usage?: Record<string, number>; content?: Array<{ type: string; text?: string }> };
     const text = (data.content ?? []).map((c) => c.text ?? "").join("").trim();
     return { text, usage: normalizeUsage(data.usage) };
@@ -3471,37 +3989,32 @@ async function completeText(
       signal,
       model,
     );
-    if (!res.ok || !res.body) throw new Error(`API ${res.status}`);
+    if (!res.ok) await apiFailure(res);
+    if (!res.body) throw new Error(`API ${res.status}`);
     const events = await readSseJson(res.body, signal);
     const parsed = googleResultFromEvents(events, () => {}, Date.now());
-    const text = parsed.blocks
-      .filter((b) => b.type === "text" && typeof b.text === "string")
-      .map((b) => b.text as string)
-      .join("")
-      .trim();
-    return { text, usage: parsed.usage };
+    if (parsed.error) throw new Error(parsed.error);
+    return { text: textFromStreamBlocks(parsed.blocks), usage: parsed.usage };
   }
   if (usesResponsesApi(providerId, model)) {
-    const effort = reasoningEffortFor(providerId, model, "off");
+    // Codex and Zen GPT require a streaming list input. String input and stream:false return 400.
     const res = await providerPost(
       providerId,
-      {
-        model,
-        store: false,
-        stream: false,
-        ...(providerId === "openai-codex" ? {} : { max_output_tokens: 2048 }),
-        instructions: system,
-        input: prompt,
-        ...(sendCacheKey ? { prompt_cache_key: cacheKey } : {}),
-        ...(sendSessionId ? { session_id: sendSessionId } : {}),
-        ...(effort ? { reasoning: { effort } } : {}),
-      },
+      responsesBody(model, system, [{ role: "user", content: prompt }], [], {
+        ...(providerId === "openai-codex" ? {} : { maxTokens: 2048 }),
+        ...(sendCacheKey ? { cacheKey } : {}),
+        ...(sendSessionId ? { sessionId: sendSessionId } : {}),
+        includeEncryptedReasoning: false,
+      }),
       signal,
       model,
     );
-    if (!res.ok) throw new Error(`API ${res.status}`);
-    const got = textFromResponsesPayload(await res.json());
-    return { text: got.text, usage: normalizeUsage(got.usage) };
+    if (!res.ok) await apiFailure(res);
+    if (!res.body) throw new Error(`API ${res.status}`);
+    const events = await readSseJson(res.body, signal);
+    const parsed = responsesResultFromEvents(events, () => {}, Date.now());
+    if (parsed.error) throw new Error(parsed.error);
+    return { text: textFromStreamBlocks(parsed.blocks), usage: parsed.usage };
   }
   const res = await providerPost(
     providerId,
@@ -3519,7 +4032,7 @@ async function completeText(
     signal,
     model,
   );
-  if (!res.ok) throw new Error(`API ${res.status}`);
+  if (!res.ok) await apiFailure(res);
   const got = textFromCompletionPayload(await res.json());
   return { text: got.text, usage: normalizeUsage(got.usage) };
 }
@@ -3532,11 +4045,9 @@ async function callModel(messages: Message[]): Promise<CallResult> {
   const proto = providerProtocol(route.provider, route.model);
   const imageRoots = [sessionFile ? dirname(sessionFile) : "", eventsDir].filter(Boolean);
   const requestMessages = toRequest(messages, imageRoots);
-  const overlay = formatOverlay({ messages, hostContext: hostContextSnapshot });
-  const overlayTail = overlay ? [{ role: "user" as const, content: overlay }] : [];
   const historyForProvider =
     proto === "anthropic-messages" ? stampHistoryCache(requestMessages, route.provider) : requestMessages;
-  const providerMessages = [...historyForProvider, ...overlayTail];
+  const providerMessages = historyForProvider;
   const kernelMessages = providerMessages.map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content as string | Array<Record<string, unknown>>,
@@ -3552,6 +4063,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
   const sendSessionId = route.provider === "openrouter" ? cacheKey || undefined : undefined;
   const sendCacheControl = route.provider === "openrouter" && usesAnthropicCacheMarkers(route.provider, route.model);
   const sendExplicitCache = usesOpenAIExplicitCache(route.model, route.provider);
+  const sendPromptCacheOptions = usesPromptCacheOptions(route.provider, route.model);
   const anthropicMessages =
     proto === "anthropic-messages"
       ? providerMessages.map((m) => {
@@ -3565,7 +4077,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
           };
         })
       : providerMessages;
-  const body =
+  let body =
     proto === "anthropic-messages"
       ? {
           model: route.model,
@@ -3585,11 +4097,10 @@ async function callModel(messages: Message[]): Promise<CallResult> {
             ...(sendCacheControl ? { cacheControl: true } : {}),
             ...(sendExplicitCache
               ? {
-                  promptCacheMode: "explicit" as const,
                   explicitCacheBreakpoint: true,
-                  explicitCacheSkipTail: overlayTail.length > 0,
                 }
               : {}),
+            ...(sendPromptCacheOptions ? { promptCacheMode: "explicit" as const } : {}),
             ...(reasoningEffort ? { reasoningEffort } : {}),
             ...(gpt56ReasoningContext(route.model) ? { reasoningContext: "all_turns" as const } : {}),
             ...(gpt5TextVerbosity(route.model) ? { textVerbosity: "low" as const } : {}),
@@ -3610,14 +4121,33 @@ async function callModel(messages: Message[]): Promise<CallResult> {
                 : { reasoningEffort }
               : {}),
           });
-  const res = await providerPost(route.provider, body, currentAbort?.signal, route.model);
+  let cacheDiagnostics = cacheDiagnosticsForRequest(
+    body,
+    { provider: route.provider, protocol: proto, model: route.model },
+    sendCacheKey ? cacheKey : null,
+  );
+  let res = await providerPost(route.provider, body, currentAbort?.signal, route.model, true, true);
   if (!res.ok || !res.body) {
     const detail = (await res.text()).slice(0, 300);
-    const hint =
-      proto === "anthropic-messages" && /web_search/i.test(detail)
-        ? " — enable Web search in the Anthropic console"
-        : "";
-    throw new Error(`API ${res.status}: ${detail}${hint}`);
+    if (res.status === 400 && /prompt_cache_(?:breakpoint|options)/i.test(detail) && usesResponsesApi(route.provider, route.model)) {
+      body = stripResponsesBreakpoints(body);
+      cacheDiagnostics = cacheDiagnosticsForRequest(
+        body,
+        { provider: route.provider, protocol: proto, model: route.model },
+        sendCacheKey ? cacheKey : null,
+      );
+      res = await providerPost(route.provider, body, currentAbort?.signal, route.model, true, true);
+    } else {
+      const hint =
+        proto === "anthropic-messages" && /web_search/i.test(detail)
+          ? " — enable Web search in the Anthropic console"
+          : "";
+      throw new Error(`API ${res.status}: ${detail}${hint}`);
+    }
+  }
+  if (!res.ok || !res.body) {
+    const detail = (await res.text()).slice(0, 300);
+    throw new Error(`API ${res.status}: ${detail}`);
   }
 
   if (proto !== "anthropic-messages") {
@@ -3689,6 +4219,7 @@ async function callModel(messages: Message[]): Promise<CallResult> {
       usage: parsed.usage,
       ttftMs,
       stopReason: parsed.stopReason,
+      cache: cacheDiagnostics,
     };
   }
 
@@ -3834,12 +4365,29 @@ async function callModel(messages: Message[]): Promise<CallResult> {
       }
     }
   }
-  return { blocks: compactStreamBlocks(slots), usage, ttftMs, stopReason };
+  return { blocks: compactStreamBlocks(slots), usage, ttftMs, stopReason, cache: cacheDiagnostics };
 }
 
 // ---- waste attribution ----
 
 let prevPrompt: { total: number; ts: number } | null = null;
+let prevCacheDiagnostics: TraceCacheDiagnostics | null = null;
+
+function resetUsageContinuity(): void {
+  prevPrompt = null;
+  prevCacheDiagnostics = null;
+  lastBilledTokens = null;
+  lastCacheReadShare = null;
+}
+
+function resetCacheContinuity(): void {
+  resetUsageContinuity();
+  currentWorkingSetHash = null;
+  currentWorkingSetChanged = null;
+  previousWorkingSetHash = null;
+  hasPreviousWorkingSet = false;
+  codexTurnState = "";
+}
 
 // Providers bill tokens; prices come from a local catalog (models.dev),
 // not from the API response. Rates are USD per token once divided.
@@ -3879,6 +4427,7 @@ function reportUsage(
   usage: Usage,
   ttftMs: number | null,
   turnStarted: number,
+  cache: TraceCacheDiagnostics,
 ): {
   cause: string | null;
   usd: number | null;
@@ -3898,13 +4447,25 @@ function reportUsage(
         ? "post-revision"
         : gap > CACHE_TTL_MS
           ? "idle-expired"
-          : "unexplained";
+          : prevCacheDiagnostics?.cacheKeyHash !== cache.cacheKeyHash
+            ? "cache-key-changed"
+            : prevCacheDiagnostics?.modelSettingsHash !== cache.modelSettingsHash
+              ? "model-settings-changed"
+              : prevCacheDiagnostics?.toolsHash !== cache.toolsHash
+                ? "tool-schema-changed"
+                : prevCacheDiagnostics?.stablePrefixHash !== cache.stablePrefixHash
+                  ? "stable-prefix-changed"
+                  : prevCacheDiagnostics?.workingSetHash !== cache.workingSetHash
+                    ? "working-set-changed"
+                    : "backend-or-prefix-miss";
       waste = { tokens: missed, cause };
     }
   }
   postRevision = false;
   prevPrompt = { total: cur, ts: Date.now() };
+  prevCacheDiagnostics = { ...cache };
   lastBilledTokens = cur;
+  lastCacheReadShare = cur > 0 ? usage.cacheRead / cur : null;
   const rates = rateLookup?.(route.model) ?? null;
   let usd: number | null = null;
   if (rates) {
@@ -4042,16 +4603,21 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     }
   }
   void refreshPendingImageCount();
+  const taggedPrompt = prompt.startsWith("/") ? prompt : expandFileTags(canonicalCwd, prompt);
   const context = eventsDir && terminalId ? readContextFiles(eventsDir, terminalId) : "";
-  hostContextSnapshot = context;
+  const workingSet = formatWorkingSet({ messages: history, hostContext: context });
+  currentWorkingSetHash = workingSet ? hashDiagnostic(workingSet) : null;
+  currentWorkingSetChanged = hasPreviousWorkingSet ? currentWorkingSetHash !== previousWorkingSetHash : null;
+  previousWorkingSetHash = currentWorkingSetHash;
+  hasPreviousWorkingSet = true;
   if (eventsDir && terminalId) {
     const file = promptFileName(terminalId, bridgeId, randomUUID().slice(0, 8));
-    const written = writePromptPayload(eventsDir, terminalId, file, { prompt, context, images });
+    const written = writePromptPayload(eventsDir, terminalId, file, { prompt: taggedPrompt, context, images });
     if (written) logEvent({ t: "prompt", file: written, hasPreflight: preflight !== null });
   }
   let userMsg: Message;
   try {
-    userMsg = pushUserPrompt(prompt, images);
+    userMsg = pushUserPrompt(taggedPrompt, images, workingSet);
   } catch (err) {
     cancelPreflight();
     const message = err instanceof SessionStoreError ? err.message : err instanceof Error ? err.message : String(err);
@@ -4085,14 +4651,25 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   let lastHadTools = false;
   let resumePaused = false;
   let lastPlanText = "";
+  let cacheCostCompactionAttempted = false;
+  codexTurnState = "";
   try {
     while (modelCalls < MAX_TURNS) {
       if (interrupted) break;
       if (!resumePaused) {
         reclaim();
-        // Maintenance order: reclaim first; summarize only when reclamation cannot
-        // hold the high-water line; truncate is the last resort.
-        if (totalTokens() >= usableTokens() * HIGH_WATER && !(await summarize()) && totalTokens() >= usableTokens()) {
+        // Compact an expensive cache miss before the context limit forces it.
+        const shouldCompactForCost =
+          !cacheCostCompactionAttempted &&
+          shouldCompactForCacheCost(lastBilledTokens, lastCacheReadShare, totalTokens());
+        if (shouldCompactForCost) cacheCostCompactionAttempted = true;
+        const compactedForCost = shouldCompactForCost ? await summarize() : false;
+        if (compactedForCost) {
+          lastBilledTokens = null;
+          lastCacheReadShare = null;
+        }
+        // Reclaim first. Summarize at the high-water line. Truncate last.
+        if (!compactedForCost && totalTokens() >= usableTokens() * HIGH_WATER && !(await summarize()) && totalTokens() >= usableTokens()) {
           truncate();
         }
       }
@@ -4106,24 +4683,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         // Emergency mid-turn revision: the provider
         // rejected the window; reclaim hard and retry exactly once.
         if (!retriedOverflow && /prompt is too long|maximum context|context_length/i.test(String((err as Error).message))) {
-          writeTrace(
-            traceRecord({
-              role: "main",
-              model: route.model,
-              status: "overflow",
-              storageSeqRange: [seqBefore + 1, storageSeq],
-              toolNames: [],
-              usage: null,
-              usd: null,
-              ttftMs: null,
-              turnMs: Date.now() - callStarted,
-              revisions,
-              revisionKinds: revisionKinds.slice(),
-              wasteTokens: 0,
-              wasteCause: null,
-              systemHash: hashSystem(systemPrompt()),
-            }),
-          );
+          writeMainTrace({ status: "overflow", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: null, started: callStarted });
           retriedOverflow = true;
           reclaim();
           await summarize();
@@ -4131,52 +4691,19 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           try {
             result = await callModel(history);
           } catch (retryErr) {
-            writeTrace(
-              traceRecord({
-                role: "main",
-                model: route.model,
-                status: "overflow-retry-error",
-                storageSeqRange: [seqBefore + 1, storageSeq],
-                toolNames: [],
-                usage: null,
-                usd: null,
-                ttftMs: null,
-                turnMs: Date.now() - callStarted,
-                revisions,
-                revisionKinds: revisionKinds.slice(),
-                wasteTokens: 0,
-                wasteCause: null,
-                systemHash: hashSystem(systemPrompt()),
-              }),
-            );
+            writeMainTrace({ status: "overflow-retry-error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: null, started: callStarted });
             throw retryErr;
           }
         } else {
-          writeTrace(
-            traceRecord({
-              role: "main",
-              model: route.model,
-              status: "error",
-              storageSeqRange: [seqBefore + 1, storageSeq],
-              toolNames: [],
-              usage: null,
-              usd: null,
-              ttftMs: null,
-              turnMs: Date.now() - callStarted,
-              revisions,
-              revisionKinds: revisionKinds.slice(),
-              wasteTokens: 0,
-              wasteCause: null,
-              systemHash: hashSystem(systemPrompt()),
-            }),
-          );
+          writeMainTrace({ status: "error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: null, started: callStarted });
           throw err;
         }
       }
       modelCalls++;
       const sys = systemPrompt();
+      if (!result.usage) resetUsageContinuity();
       const waste = result.usage
-        ? reportUsage(result.usage, result.ttftMs, callStarted)
+        ? reportUsage(result.usage, result.ttftMs, callStarted, result.cache)
         : {
             cause: null,
             usd: null,
@@ -4204,24 +4731,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       );
       lastHadTools = uses.length > 0 || result.stopReason === "pause_turn";
       if (uses.length === 0) {
-        writeTrace(
-          traceRecord({
-            role: "main",
-            model: route.model,
-            status: "ok",
-            storageSeqRange: [seqBefore + 1, storageSeq],
-            toolNames: serverNames,
-            usage: result.usage,
-            usd: waste.usd,
-            ttftMs: waste.ttftMs,
-            turnMs: waste.turnMs,
-            revisions: waste.revisionCount,
-            revisionKinds: waste.revisionKinds,
-            wasteTokens: waste.wasteTokens,
-            wasteCause: waste.cause,
-            systemHash: hashSystem(sys),
-          }),
-        );
+        writeMainTrace({ status: "ok", seqBefore, toolNames: serverNames, usage: result.usage, waste, sysHash: hashSystem(sys), cache: result.cache, started: callStarted });
         if (result.stopReason === "pause_turn" && !interrupted) {
           resumePaused = true;
           continue;
@@ -4276,35 +4786,19 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       // stored pair breaks the next request.
       const answered = outcomes.length;
       for (let i = answered; i < uses.length; i++) {
-        outcomes.push({ result: toolResult(uses[i]!, "(interrupted by user)"), isError: false });
-        logEvent({ t: "tool_end", toolCallId: uses[i]!.id, isError: false });
+        outcomes.push({ result: toolResult(uses[i]!, "(interrupted by user)"), isError: true });
+        logEvent({ t: "tool_end", toolCallId: uses[i]!.id, isError: true });
       }
       const resultBlocks = outcomes.map((o, i): ContentBlock => {
         const b = o.result as ContentBlock;
         b.chars = undefined;
         b.tool = uses[i]!.name;
         b.repro = reproFor(uses[i]!);
+        if (o.isError) b.is_error = true;
         return b;
       });
       pushMessage("user", resultBlocks);
-      writeTrace(
-        traceRecord({
-          role: "main",
-          model: route.model,
-          status: "ok",
-          storageSeqRange: [seqBefore + 1, storageSeq],
-          toolNames: [...serverNames, ...uses.map((u) => u.name)],
-          usage: result.usage,
-          usd: waste.usd,
-          ttftMs: waste.ttftMs,
-          turnMs: waste.turnMs,
-          revisions: waste.revisionCount,
-          revisionKinds: waste.revisionKinds,
-          wasteTokens: waste.wasteTokens,
-          wasteCause: waste.cause,
-          systemHash: hashSystem(sys),
-        }),
-      );
+      writeMainTrace({ status: "ok", seqBefore, toolNames: [...serverNames, ...uses.map((u) => u.name)], usage: result.usage, waste, sysHash: hashSystem(sys), cache: result.cache, started: callStarted });
       out("\n");
     }
     if (modelCalls >= MAX_TURNS && lastHadTools && !interrupted) {
@@ -4418,7 +4912,7 @@ async function resumeSessionBody(): Promise<SessionResult> {
     return { ok: false, error };
   }
   streamPrepared = true;
-  prevPrompt = null;
+  resetCacheContinuity();
   syncIndicators();
   renderHistoryTranscript(history, surface);
   return { ok: true };
@@ -4482,9 +4976,8 @@ function streamOut(section: "thinking" | "assistant", text: string): void {
 }
 
 function statusContextTokens(): number {
-  const overlay = formatOverlay({ messages: history, hostContext: hostContextSnapshot });
   const tools = requestTools(clientTools, route.provider, route.model);
-  return totalTokens() + tokenEstimate(overlay) + tokenEstimate(JSON.stringify(tools));
+  return totalTokens() + tokenEstimate(JSON.stringify(tools));
 }
 
 function syncIndicators(): void {
@@ -4499,7 +4992,7 @@ function showPrompt(): void {
 }
 
 function printSlashHelp(): void {
-  const rows = [...SLASH_COMMANDS, { name: "!cmd", hint: "run a bash command" }];
+  const rows = [...SLASH_COMMANDS, { name: "!cmd", hint: "run a bash command" }, ...TUI_SHORTCUTS];
   const width = Math.max(...rows.map((c) => c.name.length));
   for (const c of rows) out(`  ${c.name.padEnd(width)}  ${c.hint}\n`);
 }
@@ -4547,6 +5040,7 @@ function drainQueuedLine(): void {
   if (queuedLine === null) return;
   const next = queuedLine;
   queuedLine = null;
+  surface?.setQueued("");
   submit(next);
 }
 
@@ -4567,6 +5061,7 @@ function submit(line: string): void {
     logEvent({ t: "steer_input", behavior: "steer" });
     // Keep one typed-ahead prompt. More than one has no consumer yet.
     queuedLine = line;
+    surface?.setQueued(line);
     out("(queued — runs after the current task)\n");
     return;
   }
@@ -4761,7 +5256,7 @@ function startCatalogCommand(line: string): void {
         } else {
           route.model = listed.id;
         }
-        prevPrompt = null;
+        resetCacheContinuity();
         out(`model ${route.provider}/${route.model}\n`);
         syncStatus();
         return;
@@ -4785,7 +5280,7 @@ function startCatalogCommand(line: string): void {
       } else {
         route.model = next.model;
       }
-      prevPrompt = null;
+      resetCacheContinuity();
       out(`model ${route.provider}/${route.model}\n`);
       syncStatus();
     } finally {
@@ -4929,6 +5424,7 @@ function dispatchLine(line: string): void {
       out("(permissions must be always, dangerous, or ask)\n");
     } else {
       permissionMode = next;
+      surface?.setStatus({ permissions: permissionMode });
       out(`(permissions ${permissionMode})\n`);
     }
     showPrompt();
@@ -4972,12 +5468,10 @@ function dispatchLine(line: string): void {
     storageSeq = 0;
     history.length = 0;
     lastHandoff = null;
-    hostContextSnapshot = "";
-    lastBilledTokens = null;
+    resetCacheContinuity();
     sessionUsage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
     lastUsd = null;
     permissionMode = process.env.TERMINA_CORE_APPROVE === "all" ? "always" : "ask";
-    prevPrompt = null;
     postRevision = false;
     revisions = 0;
     revisionKinds = [];
@@ -5071,6 +5565,7 @@ async function main(): Promise<void> {
       stdin: process.stdin,
       stdout: process.stdout,
       commands: SLASH_COMMANDS,
+      fileMatches: (query) => listTaggedFiles(canonicalCwd, query),
       thinkingVisible: !parseHideThinking(process.argv),
       onHostRefresh: () => {
         void refreshPendingImageCount();
@@ -5118,12 +5613,17 @@ async function main(): Promise<void> {
       teardown();
       process.exit(0);
     });
+    process.on("SIGINT", () => {
+      teardown();
+      process.exit(0);
+    });
     effortWanted = clampEffortLevel(route.provider, route.model, effortWanted);
     surface.setEffortLevels(supportedEffortLevels(route.provider, route.model));
     surface.setStatus({
       model: `${route.provider}/${route.model}`,
       auth: authBanner(auth),
       effort: effectiveEffortFor(route.provider, route.model, effortWanted),
+      permissions: permissionMode,
       usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd),
     });
     if (!surface.start()) surface = null;

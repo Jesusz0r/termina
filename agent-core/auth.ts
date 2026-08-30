@@ -268,13 +268,24 @@ export function usesPromptCacheKey(provider: ProviderId, model = ""): boolean {
 
 /**
  * GPT-5.6 Sol/Terra/Luna accept explicit prompt_cache_breakpoint.
- * Codex and Copilot backends are not verified for that field.
+ * Copilot and Codex do not support that field (Codex returns 400
+ * "prompt_cache_breakpoint is not supported on this model").
  */
 export function usesOpenAIExplicitCache(model: string, provider?: ProviderId): boolean {
   const leaf = modelLeaf(model);
   if (!(leaf.startsWith("gpt-5.6") || leaf.includes("gpt-5.6"))) return false;
   if (!provider) return true;
   return provider === "openai" || provider === "openrouter" || provider === "opencode-zen";
+}
+
+/**
+ * Top-level prompt_cache_options. Official OpenAI docs: GPT-5.6+ only.
+ * OpenRouter documents the field and strips it for hosts that reject it.
+ * ChatGPT Codex and OpenCode Zen return 400 Unsupported parameter.
+ */
+export function usesPromptCacheOptions(provider: ProviderId, model = ""): boolean {
+  if (!usesOpenAIExplicitCache(model, provider)) return false;
+  return provider === "openai" || provider === "openrouter";
 }
 
 export function cacheSessionKey(session: string): string {

@@ -285,6 +285,9 @@ class McpProcess {
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.child = child;
+    child.stdin?.on("error", () => {});
+    child.stdout?.on("error", () => {});
+    child.stderr?.on("error", () => {});
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => this.onStdout(chunk));
     child.stderr?.on("data", (chunk: Buffer | string) => {
@@ -376,7 +379,7 @@ class McpProcess {
       /* gone */
     }
     const pid = child.pid;
-    if (typeof pid === "number") {
+    if (process.platform !== "win32" && typeof pid === "number" && pid > 0) {
       try {
         process.kill(-pid, "SIGKILL");
         return;
