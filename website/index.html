@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Termina — Mission control for your AI coding agent</title>
   <meta name="description" content="Termina runs the real pi TUI beside a live Monaco IDE. Watch every edit, test in the background, fork any moment into isolated candidates, and merge the winner back — your Git repo stays untouched.">
-  <link rel="icon" type="image/svg+xml" href="assets/icon.svg?v=0.1.18">
-  <link rel="icon" type="image/png" sizes="512x512" href="assets/icon.png?v=0.1.18">
-  <link rel="shortcut icon" href="favicon.ico?v=0.1.18">
-  <link rel="apple-touch-icon" href="assets/icon.png?v=0.1.18">
-  <link rel="stylesheet" href="styles.css?v=0.1.18">
+  <link rel="icon" type="image/svg+xml" href="assets/icon.svg?v=0.1.25">
+  <link rel="icon" type="image/png" sizes="512x512" href="assets/icon.png?v=0.1.25">
+  <link rel="shortcut icon" href="favicon.ico?v=0.1.25">
+  <link rel="apple-touch-icon" href="assets/icon.png?v=0.1.25">
+  <link rel="stylesheet" href="styles.css?v=0.1.25">
 </head>
 <body>
 
@@ -17,9 +17,9 @@
   <header class="nav">
     <div class="container nav-inner">
       <a href="#" class="brand">
-        <img src="assets/icon.svg?v=0.1.18" alt="Termina">
+        <img src="assets/icon.svg?v=0.1.25" alt="Termina">
         TERMINA
-        <span class="ver">v0.1.18</span>
+        <span class="ver">v0.1.25</span>
       </a>
       <nav class="nav-links">
         <a href="#watch">See it work</a>
@@ -69,6 +69,8 @@
         <span><i>●</i>&nbsp; APFS copy-on-write forks</span>
         <span><i>●</i>&nbsp; Crash-recovery journals</span>
         <span><i>●</i>&nbsp; Parallel dispatch workers</span>
+        <span><i>●</i>&nbsp; Four direct Challenge profiles</span>
+        <span><i>●</i>&nbsp; Deleted-file review + restore</span>
       </div>
     </div>
   </section>
@@ -123,6 +125,47 @@
           </div>
           <span style="color:var(--lime)">⌘+CLICK A DOT TO FORK</span>
         </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ LATEST ============ -->
+  <section id="latest" class="section latest-section">
+    <div class="container">
+      <div class="reveal">
+        <span class="eyebrow">Now in Termina</span>
+        <h2 class="section-title">More control at every decision point.</h2>
+        <p class="section-sub">The latest release tightens the loop from plan to review: every visible moment is restorable, challenges carry a real constraint, and even deletions stay reversible.</p>
+      </div>
+
+      <div class="latest-grid reveal">
+        <article class="latest-card latest-primary">
+          <span class="latest-key">FORK ANY MOMENT</span>
+          <h3>If you can see the dot, you can restore it.</h3>
+          <p>Run starts, tool calls, file changes, and settled boundaries appear only after Termina has both the immutable source state and matching session point. Cmd/Ctrl+Click to branch from exactly there.</p>
+          <div class="latest-proof"><span class="proof-dot"></span> source state <b>+</b> session address <b>+</b> isolated candidate</div>
+        </article>
+
+        <article class="latest-card">
+          <span class="latest-key">DIRECT CHALLENGE</span>
+          <h3>Ask for a meaningfully different answer.</h3>
+          <p>Launch a challenger with one click. The selected constraint is applied to the replayed task, then deterministic evidence compares it with the reference.</p>
+          <div class="profile-list" aria-label="Challenge profiles">
+            <span>Fewer dependencies</span><span>Preserve API</span><span>Simpler implementation</span><span>Performance-first</span>
+          </div>
+        </article>
+
+        <article class="latest-card">
+          <span class="latest-key">DELETION REVIEW</span>
+          <h3>Deleted does not mean gone.</h3>
+          <p>Open a deleted file in Change Review to see its pre-run content against an empty result. Accept the deletion, or Revert to recreate the file — including a removed parent folder.</p>
+        </article>
+
+        <article class="latest-card">
+          <span class="latest-key">PLANS + SEARCH</span>
+          <h3>Less formatting ceremony.</h3>
+          <p>Plan Board understands dash, star, plus, numbered, checked, and unchecked tasks while preserving completion state. Session Search resolves ordinary path mentions such as <code>src/main.ts</code>.</p>
+        </article>
       </div>
     </div>
   </section>
@@ -445,9 +488,9 @@
         <div class="install-pane active" data-pane="dmg">
           <p>Signed and notarized for macOS (Apple Silicon). Standalone AppImage for Linux x64. Ships its own Node runtime and the compiled Rust core — nothing else to install.</p>
           <div class="dl-row">
-            <a href="https://github.com/Jesusz0r/termina/releases/download/v0.1.18/Termina-0.1.18-arm64.dmg" class="btn btn-primary">↓ macOS .dmg (Apple Silicon)</a>
-            <a href="https://github.com/Jesusz0r/termina/releases/download/v0.1.18/Termina-0.1.18.AppImage" class="btn btn-ghost">↓ Linux AppImage (x64)</a>
-            <a href="https://github.com/Jesusz0r/termina/releases/tag/v0.1.18" target="_blank" class="btn btn-ghost">all releases ↗</a>
+            <a href="https://github.com/Jesusz0r/termina/releases/download/v0.1.25/Termina-0.1.25-arm64.dmg" class="btn btn-primary">↓ macOS .dmg (Apple Silicon)</a>
+            <a href="https://github.com/Jesusz0r/termina/releases/download/v0.1.25/Termina-0.1.25.AppImage" class="btn btn-ghost">↓ Linux AppImage (x64)</a>
+            <a href="https://github.com/Jesusz0r/termina/releases/tag/v0.1.25" target="_blank" class="btn btn-ghost">all releases ↗</a>
           </div>
           <p style="margin-top:16px; margin-bottom:0;">First launch: open a folder, then run <code>/login</code> and <code>/models</code> in the terminal to pick your provider.</p>
         </div>
@@ -480,7 +523,7 @@
       <h2>Stop reviewing blind diffs.<br><span class="hl">Start holding the timeline.</span></h2>
       <p>Your next agent run deserves an undo button, an off switch, and a second opinion. Termina ships all three.</p>
       <div class="hero-ctas">
-        <a href="https://github.com/Jesusz0r/termina/releases/download/v0.1.18/Termina-0.1.18-arm64.dmg" class="btn btn-primary">↓ Download Termina v0.1.18 — free</a>
+        <a href="https://github.com/Jesusz0r/termina/releases/download/v0.1.25/Termina-0.1.25-arm64.dmg" class="btn btn-primary">↓ Download Termina v0.1.25 — free</a>
         <a href="https://github.com/Jesusz0r/termina" target="_blank" class="btn btn-ghost">read the source ↗</a>
       </div>
     </div>

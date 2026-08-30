@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Termina — User Guide</title>
   <meta name="description" content="The Termina user guide: get started, review changes, verify with one click, fork any moment into isolated candidates, and promote the winner.">
-  <link rel="icon" type="image/svg+xml" href="assets/icon.svg?v=0.1.18">
-  <link rel="icon" type="image/png" sizes="512x512" href="assets/icon.png?v=0.1.18">
-  <link rel="shortcut icon" href="favicon.ico?v=0.1.18">
-  <link rel="apple-touch-icon" href="assets/icon.png?v=0.1.18">
-  <link rel="stylesheet" href="styles.css?v=0.1.18">
+  <link rel="icon" type="image/svg+xml" href="assets/icon.svg?v=0.1.25">
+  <link rel="icon" type="image/png" sizes="512x512" href="assets/icon.png?v=0.1.25">
+  <link rel="shortcut icon" href="favicon.ico?v=0.1.25">
+  <link rel="apple-touch-icon" href="assets/icon.png?v=0.1.25">
+  <link rel="stylesheet" href="styles.css?v=0.1.25">
 </head>
 <body>
 
@@ -17,9 +17,9 @@
   <header class="nav">
     <div class="container nav-inner">
       <a href="index.html" class="brand">
-        <img src="assets/icon.svg?v=0.1.18" alt="Termina">
+        <img src="assets/icon.svg?v=0.1.25" alt="Termina">
         TERMINA
-        <span class="ver">v0.1.18</span>
+        <span class="ver">v0.1.25</span>
       </a>
       <nav class="nav-links">
         <a href="index.html#watch">See it work</a>
@@ -187,6 +187,10 @@
         </li>
         <li>Use <b>Accept all</b> in the panel header to accept every change at once, or <b>Clear</b> to reset the list display.</li>
       </ol>
+      <p>
+        Deleted files are reviewable too: the left side shows the stored baseline and the right side is empty.
+        <b>Accept</b> keeps the deletion; <b>Revert</b> recreates the original file, including its parent folder when needed.
+      </p>
 
       <h3>Handing off to Git</h3>
       <p>Termina never writes your Git repository — no staging, no commits, no refs. After a green Verify or after you Accept changes, the status bar shows two handoff actions:</p>
@@ -254,6 +258,10 @@
       <p>
         When the agent plans multi-step work, the Plan Board (below the timeline) shows the task list with live
         progress: <code>○</code> pending, <code>◐</code> active, <code>✓</code> done.
+      </p>
+      <p>
+        Plans do not need one exact Markdown format. Dash, star, plus, and numbered bullets are recognized;
+        optional <code>[ ]</code>, <code>[x]</code>, and <code>[X]</code> checkboxes preserve pending and completed state.
       </p>
 
       <h3>Dispatching tasks</h3>
@@ -328,8 +336,8 @@
 
       <h3>Challenge Mode</h3>
       <p>
-        When candidate A has settled, the comparison header offers <b>Challenge</b>: it relaunches candidate B as an
-        automatic challenger that replays the original task under one fixed constraint:
+        When candidate A has settled, the comparison header offers four direct <b>Challenge</b> actions. Pick one to
+        relaunch candidate B as an automatic challenger that replays the original task under that constraint:
       </p>
       <table>
         <thead><tr><th>Profile</th><th>The challenger must…</th></tr></thead>
@@ -428,7 +436,8 @@
       <h3>Session Search</h3>
       <p>
         <code>Cmd/Ctrl+Shift+P</code> opens a full-text search over past pi sessions of the project. Results list the
-        matching moments; clicking one opens the file it mentions. Type at least two characters.
+        matching moments; clicking one opens the file it mentions. Backtick paths and ordinary mentions such as
+        <code>src/main.ts</code> resolve to project files. Type at least two characters.
       </p>
     </section>
 
