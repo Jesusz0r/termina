@@ -72,7 +72,9 @@ estimate reclaimed space. Provider usage is authoritative after a request.
 The fallback context window is 1,000,000 tokens for Anthropic and Google,
 500,000 for xAI, and 1,050,000 for other providers. Anthropic Haiku uses
 200,000. A live model catalog can provide another value. There is no
-1,000,000-token run cap. `MAX_TURNS` defaults to 80 model calls per prompt.
+1,000,000-token run cap and no turn cap — the run fuses on
+`totalTokens() >= usableTokens() * HIGH_WATER`,
+not on a fixed iteration count.
 
 ## P2 — Separate reclamation from summarization
 

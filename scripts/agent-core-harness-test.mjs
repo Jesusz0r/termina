@@ -3675,9 +3675,10 @@ const manyReads = {
   content: Array.from({ length: 41 }, (_, i) => ({ type: "tool_use", name: "read_file", input: { path: `f${i}.ts` } })),
 };
 check("formatWorkingSet caps inventories", formatWorkingSet({ messages: [manyReads] }).includes("<!-- 1 paths omitted -->"));
-check("cache-cost compaction waits below 100k", shouldCompactForCacheCost(99_999, 0, 120_000) === false);
-check("cache-cost compaction waits on a cache hit", shouldCompactForCacheCost(120_000, 0.8, 120_000) === false);
-check("cache-cost compaction starts on an expensive miss", shouldCompactForCacheCost(120_000, 0.1, 120_000) === true);
+check("cache-cost compaction waits below 100k", shouldCompactForCacheCost(99_999, 0, 120_000, false) === false);
+check("cache-cost compaction waits on a cache hit", shouldCompactForCacheCost(120_000, 0.8, 120_000, false) === false);
+check("cache-cost compaction starts on an expensive miss", shouldCompactForCacheCost(120_000, 0.1, 120_000, false) === true);
+check("cache-cost compaction waits after a revision", shouldCompactForCacheCost(120_000, 0.1, 120_000, true) === false);
 const stampedThenOverlay = [
   ...stampHistoryCache(overlayMsgs),
   { role: "user", content: overlay },
