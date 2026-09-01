@@ -354,6 +354,21 @@ export interface RunSummary {
   settledAt: number | null;
 }
 
+/** The lifecycle of one candidate (WORLDLINES §6.1). */
+export type WorldlineState =
+  | "creating"
+  | "ready"
+  | "running"
+  | "settled"
+  | "verifying"
+  | "promoting"
+  | "conflict"
+  | "cancelled"
+  | "error"
+  | "discarding"
+  | "discarded"
+  | "promoted";
+
 /** One worldline candidate (WORLDLINES §6.1) — metadata only. */
 export interface WorldlineSummary {
   id: string;
@@ -366,19 +381,7 @@ export interface WorldlineSummary {
   sourceRunId: string;
   terminalId: string | null;
   version: number;
-  state:
-    | "creating"
-    | "ready"
-    | "running"
-    | "settled"
-    | "verifying"
-    | "promoting"
-    | "conflict"
-    | "cancelled"
-    | "error"
-    | "discarding"
-    | "discarded"
-    | "promoted";
+  state: WorldlineState;
   error: string | null;
   root: string;
   sessionFile: string | null;

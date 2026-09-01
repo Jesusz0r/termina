@@ -48,15 +48,14 @@ import { CommandDispatcher } from "./commands";
 import { PtySequenceLedger } from "./pty-sequence-ledger";
 import {
   applyWorldlineHydration,
+  applyWorldlineRemoval,
   beginWorldlineHydration,
   clearWorldlineProjectUi,
   handleWorldlineBusy,
   handleWorldlineInstances,
-  handleWorldlineRemoved,
   refreshWorldlineCandidateTest,
   updateWorldlinePaneTab,
   worldlineEventBelongsToProject,
-  worldlineProjectEffects as composeWorldlineProjectEffects,
 } from "./worldline-project-state";
 import { CHALLENGE_PROFILES, defaultAppPreferences, pathBasename } from "../shared/types";
 import { normalizeAppPreferences } from "../shared/preferences";
@@ -370,7 +369,7 @@ let worldlineHydrationEpoch = 0;
 let worldlineHydrationTombstones: Set<string> | null = null;
 
 function worldlineProjectEffects() {
-  return composeWorldlineProjectEffects({
+  return {
     resetView: () => worldlinesView.resetForProject(),
     clearTombstones: () => {
       worldlineHydrationTombstones = null;
@@ -382,7 +381,7 @@ function worldlineProjectEffects() {
     refreshCandidateTest: (pane: Pane) => refreshCandidateTestCommand(pane),
     refreshEditorBadges: () => activeEditor().refreshBadges(),
     updateEditorLock: () => updateEditorLock(),
-  });
+  };
 }
 
 /** Rebuild the active project's worldline panel without letting a prior
@@ -2384,7 +2383,7 @@ window.pi.onWorldlineUpdate((event) => {
 });
 
 window.pi.onWorldlineRemoved((event) => {
-  handleWorldlineRemoved(activeProjectId, event, panes.values(), worldlineProjectEffects());
+  applyWorldlineRemoval(activeProjectId, event, panes.values(), worldlineProjectEffects());
 });
 
 window.pi.onEvidenceUpdate((event) => {

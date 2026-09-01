@@ -100,42 +100,10 @@ export interface WorldlineProjectEffects<TPane extends WorldlineProjectPane> {
   addTombstone(comparisonId: string): void;
   removeComparison(comparisonId: string): void;
   upsert(summary: WorldlineSummary): void;
-  updatePane(pane: TPane): void;
-  refreshCandidateTest(pane: TPane): void;
-  refreshEditorBadges(): void;
-  updateEditorLock(): void;
-}
-
-/** Renderer-side adapters used by worldline reconciliation. Keeping this
- * composition in the DOM-free owner lets focused tests exercise the exact
- * production effect object without importing the Electron entrypoint. */
-export interface WorldlineProjectEffectBindings<TPane extends WorldlineProjectPane> {
-  resetView(): void;
-  clearTombstones(): void;
-  addTombstone(comparisonId: string): void;
-  removeComparison(comparisonId: string): void;
-  upsert(summary: WorldlineSummary): void;
   updatePaneTab(pane: TPane): void;
   refreshCandidateTest(pane: TPane): void;
   refreshEditorBadges(): void;
   updateEditorLock(): void;
-}
-
-/** Compose the renderer's concrete panel/tab/editor effects once. */
-export function worldlineProjectEffects<TPane extends WorldlineProjectPane>(
-  bindings: WorldlineProjectEffectBindings<TPane>,
-): WorldlineProjectEffects<TPane> {
-  return {
-    resetView: () => bindings.resetView(),
-    clearTombstones: () => bindings.clearTombstones(),
-    addTombstone: (comparisonId) => bindings.addTombstone(comparisonId),
-    removeComparison: (comparisonId) => bindings.removeComparison(comparisonId),
-    upsert: (summary) => bindings.upsert(summary),
-    updatePane: (pane) => bindings.updatePaneTab(pane),
-    refreshCandidateTest: (pane) => bindings.refreshCandidateTest(pane),
-    refreshEditorBadges: () => bindings.refreshEditorBadges(),
-    updateEditorLock: () => bindings.updateEditorLock(),
-  };
 }
 
 export interface WorldlineTabBadge {
@@ -161,15 +129,6 @@ export function updateWorldlinePaneTab<TPane extends WorldlineLabeledPane>(
   badge.classList.toggle("a", label === "A");
   badge.classList.toggle("b", label === "B");
   return label;
-}
-
-export function handleWorldlineRemoved<TPane extends WorldlineProjectPane>(
-  activeProjectId: string | null,
-  event: { projectId: string; comparisonId: string },
-  panes: Iterable<TPane>,
-  effects: WorldlineProjectEffects<TPane>,
-): boolean {
-  return applyWorldlineRemoval(activeProjectId, event, panes, effects);
 }
 
 export interface WorldlineBusyPane {
@@ -260,7 +219,7 @@ function reconcileProject<TPane extends WorldlineProjectPane>(
 ): void {
   for (const pane of panes) {
     if (pane.projectId === projectId) {
-      effects.updatePane(pane);
+      effects.updatePaneTab(pane);
       effects.refreshCandidateTest(pane);
     }
   }
@@ -313,7 +272,7 @@ export function clearWorldlineProjectUi<TPane extends WorldlineProjectPane>(
   effects.resetView();
   effects.clearTombstones();
   for (const pane of panes) {
-    effects.updatePane(pane);
+    effects.updatePaneTab(pane);
     effects.refreshCandidateTest(pane);
   }
   effects.refreshEditorBadges();

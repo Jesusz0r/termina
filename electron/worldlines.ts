@@ -49,7 +49,7 @@ import type {
   SessionForkOpts,
   SessionForkResult,
 } from "./session-fork.js";
-import type { ChallengeProfile, DependencyChange, RunSummary, TimelineEvent, WorldlineChangedFile, WorldlineDetails } from "../shared/types.js";
+import type { ChallengeProfile, DependencyChange, RunSummary, TimelineEvent, WorldlineChangedFile, WorldlineDetails, WorldlineState, WorldlineSummary } from "../shared/types.js";
 import {
   coreSessionFile,
   parseSessionBundlePath,
@@ -65,43 +65,7 @@ import {
 } from "../shared/session-retention-lock.js";
 
 export { quoteShellArg };
-
-/** The lifecycle of one candidate (WORLDLINES §6.1). */
-export type WorldlineState =
-  | "creating"
-  | "ready"
-  | "running"
-  | "settled"
-  | "verifying"
-  | "promoting"
-  | "conflict"
-  | "cancelled"
-  | "error"
-  | "discarding"
-  | "discarded"
-  | "promoted";
-
-export interface WorldlineSummary {
-  id: string;
-  comparisonId: string;
-  label: "A" | "B";
-  role: "reference" | "alternative" | "challenge" | "moment";
-  comparisonBaseStateId: string | null;
-  promotionBaseStateId: string | null;
-  headStateId: string | null;
-  sourceRunId: string;
-  terminalId: string | null;
-  version: number;
-  state: WorldlineState;
-  error: string | null;
-  root: string;
-  sessionFile: string | null;
-  model: string | null;
-  thinkingLevel: string | null;
-  createdAt: number;
-  /** Main-owned evidence state included during project hydration. */
-  evidence?: EvidenceSummary;
-}
+export type { WorldlineState, WorldlineSummary };
 
 interface CandidateState {
   label: "A" | "B";

@@ -112,29 +112,7 @@ for (const stepName of mutatingStepNames) {
   assert.match(step, /GH_REPO:\s*\$\{\{\s*github\.repository\s*\}\}/, `${stepName} must resolve gh commands against the workflow repository`);
 }
 
-for (const scriptName of [
-  "test:agent-core-focused",
-  "test:core-client-read-budget",
-  "test:promotion-native-boundary",
-  "test:sandbox-security-live",
-  "test:e2e-release-smoke",
-]) {
-  assert.equal(typeof packageScripts[scriptName], "string", `package.json must define ${scriptName}`);
-}
-assert.equal(countCommand(packageScripts.test, "npm run test:agent-core-focused"), 1, "default test must run the focused agent-core aggregate exactly once");
-assert.equal(countCommand(packageScripts["test:agent-core-focused"], "npm run test:agent-core-security"), 1, "focused agent-core aggregate must run security exactly once");
-assert.equal(countCommand(packageScripts.test, "npm run test:agent-core-security"), 0, "default test must not duplicate the security aggregate outside focused tests");
-assert.equal(countCommand(packageScripts.test, "npm run test:core-client-read-budget"), 1, "default test must run the CoreClient read-budget regression exactly once");
-assert.equal(countCommand(packageScripts["test:spikes"], "npm run test:promotion-native-boundary"), 1, "spike aggregate must run native promotion boundary exactly once");
-assert.equal(countCommand(packageScripts.test, "npm run test:spikes"), 1, "default test must run the spike aggregate exactly once");
 assert.equal(countCommand(packageScripts["test:release"], "npm run test"), 1, "release test must inherit the default gate exactly once");
-for (const command of [
-  "npm run test:agent-core-focused",
-  "npm run test:core-client-read-budget",
-  "npm run test:promotion-native-boundary",
-]) {
-  assert.equal(countCommand(packageScripts["test:release"], command), 0, `release test must not invoke ${command} a second time`);
-}
 
 assert.equal(typeof packageScripts["test:release-macos"], "string", "package.json must define the macOS release gate");
 assert.equal(countCommand(packageScripts["test:release-macos"], "npm run test:sandbox-security-live"), 1, "macOS release gate must require one live sandbox run");

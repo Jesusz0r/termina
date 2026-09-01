@@ -6,12 +6,13 @@
  * decides whether that text is a plan and how Dispatch claims rows.
  */
 import { isAbsolute, relative } from "node:path";
-import { HAS_PLAN_TASK, PLAN_TASK_MARKER } from "../shared/plan-task.ts";
+import { HAS_PLAN_TASK, PLAN_HEADING_MARKER, PLAN_TASK_MARKER } from "../shared/plan-task.ts";
 import type { CanonicalizePath, PlanTask } from "../shared/types.ts";
 
 export { HAS_PLAN_TASK, PLAN_TASK_MARKER };
 export type { CanonicalizePath };
 
+const PLAN_HEADING_LINE = new RegExp("^" + PLAN_HEADING_MARKER + "$", "i");
 const PLAN_LINE = new RegExp("^" + PLAN_TASK_MARKER + String.raw`(.+)$`);
 const MAX_PLAN_TASKS = 20;
 const MAX_PATHS_PER_TASK = 5;
@@ -19,10 +20,20 @@ const MAX_PATHS_PER_TASK = 5;
 export const MAX_DISPATCH_WORKERS = 3;
 
 export async function parsePlanTasks(text: string, cwd: string | null, canonicalize: CanonicalizePath): Promise<PlanTask[]> {
+  const lines = text.split("\n");
+  const heading = lines.findIndex((raw) => PLAN_HEADING_LINE.test(raw.trim()));
+  if (heading < 0) return [];
+
   const tasks: PlanTask[] = [];
-  for (const raw of text.split("\n")) {
+  let started = false;
+  for (const raw of lines.slice(heading + 1)) {
+    if (!raw.trim()) {
+      if (started) break;
+      continue;
+    }
     const line = parsePlanTaskLine(raw);
-    if (!line) continue;
+    if (!line) break;
+    started = true;
     tasks.push({
       text: line.body,
       paths: await planTaskPaths(line.body, cwd, canonicalize),

@@ -7586,7 +7586,7 @@ app.on("activate", () => {
 });
 
 app.on("before-quit", (event) => {
-  if (cleanupComplete) return;
+  if (cleanupComplete || process.env.NODE_ENV === "test") return;
   event.preventDefault();
   if (cleanupStarted) return;
   if (quitConfirmed) {

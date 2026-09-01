@@ -150,5 +150,5 @@ try {
 
   console.log(JSON.stringify({ immediate: immediateEvents.map((event) => event.seq), writer: writerEvents.map((event) => event.seq), restart: afterRestart, concurrent: concurrentLines.length, gap: gapEvents }));
 } finally {
-  await rm(root, { recursive: true, force: true });
+  await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }

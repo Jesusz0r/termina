@@ -9,3 +9,6 @@ release/
 *.p12
 *.csr
 *.key
+test-results/
+playwright-report/
+.intent/

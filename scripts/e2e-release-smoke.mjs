@@ -6,7 +6,11 @@
  * caller must build first; the runner owns its per-run fixture/profile root.
  */
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
+
+const require = createRequire(import.meta.url);
+const playwrightCli = require.resolve("@playwright/test/cli.js");
 
 const supported = process.platform === "darwin" || process.platform === "linux";
 if (!supported) {
@@ -20,8 +24,7 @@ if (!/^\d+$/.test(rawTimeout) || !Number.isSafeInteger(timeoutMs) || timeoutMs <
   console.error("TERMINA_E2E_SMOKE_TIMEOUT_MS must be a positive integer");
   process.exit(2);
 }
-const runner = resolve("scripts/e2e.mjs");
-const child = spawn(process.execPath, [runner, "--skip-build", "settings-test.mjs"], {
+const child = spawn(process.execPath, [playwrightCli, "test", resolve("tests/e2e/settings.spec.ts")], {
   cwd: process.cwd(),
   env: process.env,
   stdio: "inherit",

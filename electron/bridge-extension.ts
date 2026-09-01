@@ -556,7 +556,7 @@ export default function (pi: ExtensionAPI): void {
   function hasPlanTask(text) {
     return PLAN_TASK.test(text);
   }
-  // Plan Board: first assistant message with a bullet or numbered task list.
+  // Plan Board: first assistant message with an explicit Plan heading and task list.
   pi.on("message_end", (event) => {
     if (planLogged) return;
     const message = event.message;

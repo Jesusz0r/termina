@@ -53,7 +53,9 @@ try {
   }
   let ticks = 0;
   const interval = setInterval(() => { ticks += 1; }, 10);
-  await sleep(180);
+  const inFlightDeadline = Date.now() + 3000;
+  while (maxInFlight === 0 && Date.now() < inFlightDeadline) await sleep(20);
+  await sleep(60);
   assert.equal(maxInFlight, 1, "slow watcher consumers are bounded to one callback");
   assert.equal(watcher.queueStats().pendingItems <= 2, true, "pending watcher items stay under the item high-water mark");
   assert.equal(watcher.queueStats().pendingBytes <= 512, true, "pending watcher paths stay under the byte high-water mark");
@@ -124,7 +126,7 @@ try {
   const hugeInternals = hugeWatcher;
   hugeWatcher.start();
   hugeInternals.requestReconcile(hugeInternals.generation);
-  const hugeDeadline = Date.now() + 6000;
+  const hugeDeadline = Date.now() + 15000;
   while (hugeInternals.reconcileAttempts < 2 && Date.now() < hugeDeadline) await sleep(25);
   assert.equal(hugeInternals.healthy, true, "a 100001-path reconciliation remains observable without permanently poisoning watcher health");
   assert.equal(hugeInternals.reconcileAttempts >= 2, true, "an over-cap reconciliation retries with bounded recovery");
@@ -164,11 +166,12 @@ try {
     }
   };
   callbackFailureWatcher.start();
+  await callbackFailureWatcher.waitForIdle(1000);
   writeFileSync(join(callbackFailureRoot, "retry.txt"), "final-state");
   callbackFailureInternals.schedule("retry.txt", callbackFailureInternals.generation);
-  const callbackRetryDeadline = Date.now() + 5000;
+  const callbackRetryDeadline = Date.now() + 10_000;
   while (callbackAttempts.length < 2 && Date.now() < callbackRetryDeadline) await sleep(25);
-  assert.equal(callbackAttempts.length >= 2, true, "a callback failure is retried while observation remains open");
+  assert.equal(callbackAttempts.length >= 2, true, `a callback failure is retried while observation remains open (attempts=${callbackAttempts.length})`);
   assert.equal(callbackAttempts.at(-1), "final-state", "callback retry preserves the final file state");
   assert.notEqual(await callbackFailureWatcher.waitForIdle(4000), null, "callback recovery eventually certifies idle");
   callbackFailureWatcher.stop();

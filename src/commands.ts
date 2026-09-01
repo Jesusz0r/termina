@@ -10,15 +10,9 @@ export type CommandHandler = () => void | Promise<void>;
 export class CommandDispatcher {
   private readonly handlers = new Map<CommandId, CommandHandler>();
 
-  register(command: CommandId, handler: CommandHandler): () => void {
+  register(command: CommandId, handler: CommandHandler): void {
     this.handlers.set(command, handler);
-    return () => {
-      if (this.handlers.get(command) === handler) {
-        this.handlers.delete(command);
-      }
-    };
   }
-
 
   execute(command: CommandId): void {
     const handler = this.handlers.get(command);

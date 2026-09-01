@@ -89,7 +89,7 @@ test("the registered session gate is the only session matrix owner", () => {
 
 test("ipc-navigation is wired through its isolated E2E spec runner", () => {
   const scripts = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")).scripts;
-  assert.equal(scripts["test:ipc-navigation"], "node scripts/e2e.mjs --skip-build ipc-navigation-test.mjs");
+  assert.equal(scripts["test:ipc-navigation"], "playwright test tests/e2e/ipc-navigation.spec.ts");
 });
 
 test("native read-budget failures derive their decimal byte bound", async () => {

@@ -1636,9 +1636,10 @@ export async function grepFiles(
   }
   const stateError = state !== "complete";
   if (hits.length === 0) {
+    const stateDesc = state === "timeout" ? "timed out" : state;
     const body = state === "complete"
       ? lineTruncated ? "(no matches in retained line prefixes; some lines were truncated)" : "(no matches)"
-      : `(grep ${state} after ${scanned} files)`;
+      : `(grep ${stateDesc} after ${scanned} files)`;
     const needsContinuation = stateError || lineTruncated;
     const result = logicalToolText(body, {
       maxBytes: GREP_BYTE_CAP,
@@ -1655,7 +1656,7 @@ export async function grepFiles(
   const extra: string[] = [];
   if (fileCap) extra.push("(more matching files not listed. Grep again with path or glob.)");
   if (hitCap) extra.push("(grep hit cap; more matching lines may be omitted)");
-  if (state !== "complete") extra.push(`(grep ${state} after ${scanned} files)`);
+  if (state !== "complete") extra.push(`(grep ${state === "timeout" ? "timed out" : state} after ${scanned} files)`);
   if (lineTruncated) extra.push("(some matching lines were truncated)");
   const body = extra.length > 0 ? `${formatted}\n${extra.join("\n")}` : formatted;
   const needsContinuation = stateError || fileCap || hitCap || lineTruncated;

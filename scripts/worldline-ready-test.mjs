@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { build } from "esbuild";
+import { build, stop } from "esbuild";
 
 // This composes the production WorldlineManager bundle with a deliberately
 // unbound existing root. Its readiness rejection must be observed and all
@@ -15,7 +15,7 @@ const bundle = join(root, "worldlines.mjs");
 await mkdir(worldsRoot);
 await mkdir(primaryRoot);
 await build({ entryPoints: ["electron/worldlines.ts"], bundle: true, platform: "node", format: "esm", target: "node22", outfile: bundle, logLevel: "silent" });
-const { WorldlineManager } = await import(`${pathToFileURL(bundle).href}?${Date.now()}`);
+const { WorldlineManager, disposeWorldlineCoreClient } = await import(`${pathToFileURL(bundle).href}?${Date.now()}`);
 
 const noopStore = null;
 const deps = {
@@ -79,5 +79,7 @@ try {
   console.log("worldline ready failure checks passed");
 } finally {
   process.off("unhandledRejection", onUnhandled);
+  disposeWorldlineCoreClient();
   await rm(root, { recursive: true, force: true });
+  await stop();
 }

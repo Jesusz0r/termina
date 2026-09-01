@@ -80,7 +80,7 @@ function appendStderrTail(tail: Buffer, chunk: Buffer): Buffer {
   return Buffer.concat([prefix, chunk]);
 }
 
-class CoreClient {
+export class CoreClient {
   private process: CoreProcess | null = null;
   private pending = new Map<string, PendingRequest>();
   private queue: QueuedRequest[] = [];
