@@ -3,14 +3,36 @@
  * The core replaces the old snapshot worker thread.
  */
 import { execFileSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
+
+/**
+ * Publish a complete executable under a new inode.
+ *
+ * macOS can retain the code-signing state of an executable vnode when a
+ * destination is rewritten in place. A later launch may then be killed by
+ * AMFI even though the bytes and embedded signature are valid. Copying to a
+ * sibling temporary directory and renaming the completed file keeps the
+ * destination atomic and gives every staged build a fresh vnode.
+ */
+export function stageCoreBinary(source, destination) {
+  const parent = dirname(destination);
+  mkdirSync(parent, { recursive: true });
+  const stageDir = mkdtempSync(join(parent, ".termina-core-stage-"));
+  const staged = join(stageDir, "termina-core");
+  try {
+    copyFileSync(source, staged);
+    chmodSync(staged, 0o755);
+    renameSync(staged, destination);
+  } finally {
+    rmSync(stageDir, { recursive: true, force: true });
+  }
+}
 
 /**
  * Build the core in release mode and copy it to dist-electron.
- * TERMINA_SKIP_CORE_BUILD=1 skips cargo: the binary must already exist
- * (an install script downloaded it). The app then needs no Rust toolchain.
+ * TERMINA_SKIP_CORE_BUILD=1 skips cargo only when a trusted build/release step
+ * has already placed the binary. Source installs build from the checkout.
  */
 export function buildCore() {
   mkdirSync("dist-electron", { recursive: true });
@@ -21,9 +43,8 @@ export function buildCore() {
       return;
     }
   }
-  const cargo = process.env.CARGO ?? join(homedir(), ".cargo", "bin", "cargo");
+  const cargo = process.env.CARGO ?? "cargo";
   execFileSync(cargo, ["build", "--release", "--manifest-path", "core/Cargo.toml"], { stdio: "inherit" });
-  copyFileSync("core/target/release/termina-core", "dist-electron/termina-core");
-  chmodSync("dist-electron/termina-core", 0o755);
+  stageCoreBinary("core/target/release/termina-core", "dist-electron/termina-core");
   console.log("✓ termina-core built");
 }

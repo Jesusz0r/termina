@@ -1,33 +1,27 @@
 #!/bin/sh
 # Termina install script.
 #
-# Downloads the prebuilt snapshot core from GitHub Releases and installs
-# the app dependencies. The app then needs no cargo and no git: the Rust
-# core is a binary, and every Git operation runs inside it.
+# Installs dependencies and builds the snapshot core from the reviewed source
+# checkout. Packaged releases remain the no-toolchain installation path.
 #
-# Requires node >= 22.19 (pi's engine) and npm.
-set -e
-cd "$(dirname "$0")/.."
+# Requires node >= 22.19 (pi's engine), npm, and Rust/cargo.
+set -eu
 
-OS=""
-case "$(uname -s)" in
-  Darwin) OS="darwin" ;;
-  Linux) OS="linux" ;;
-  *) echo "unsupported platform: $(uname -s)"; exit 1 ;;
+case "$0" in
+  install.sh | */install.sh) ;;
+  *)
+    echo "source installation must run as scripts/install.sh from a checked-out Termina repository" >&2
+    exit 1
+    ;;
 esac
 
-ARCH="$(uname -m)"
-case "$ARCH" in
-  arm64 | aarch64) ARCH="arm64" ;;
-  x86_64 | amd64) ARCH="x64" ;;
-  *) echo "unsupported architecture: $ARCH"; exit 1 ;;
-esac
-
-# Intel Macs get no builds: the release matrix covers darwin arm64 only.
-if [ "$OS" = "darwin" ] && [ "$ARCH" = "x64" ]; then
-  echo "unsupported platform: darwin x64 (arm64 Macs only)"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd)
+if [ ! -f "$REPO_ROOT/package.json" ] || [ ! -f "$REPO_ROOT/package-lock.json" ] || [ ! -f "$REPO_ROOT/core/Cargo.toml" ]; then
+  echo "source installation must run from a checked-out Termina repository" >&2
   exit 1
 fi
+cd "$REPO_ROOT"
 
 # pi's engine floor is node 22.19.
 if ! node -e 'const v = process.versions.node.split(".").map(Number); process.exit(v[0] > 22 || (v[0] === 22 && v[1] >= 19) ? 0 : 1)' 2>/dev/null; then
@@ -35,21 +29,30 @@ if ! node -e 'const v = process.versions.node.split(".").map(Number); process.ex
   exit 1
 fi
 
-mkdir -p dist-electron
-CORE_URL="https://github.com/Jesusz0r/termina/releases/latest/download/termina-core-${OS}-${ARCH}"
-echo "downloading the snapshot core: ${CORE_URL}"
-set -- -fsSL --retry 3 --retry-delay 2
-if curl --retry-all-errors --version >/dev/null 2>&1; then
-  set -- "$@" --retry-all-errors
+if ! command -v npm >/dev/null 2>&1; then
+  echo "npm is required" >&2
+  exit 1
 fi
-curl "$@" -o dist-electron/termina-core "$CORE_URL"
-chmod +x dist-electron/termina-core
+if [ -n "${CARGO:-}" ]; then
+  if [ ! -x "$CARGO" ]; then
+    echo "CARGO does not name an executable Rust cargo binary" >&2
+    exit 1
+  fi
+elif ! command -v cargo >/dev/null 2>&1; then
+  echo "Rust and cargo are required for a source installation (https://rustup.rs)" >&2
+  exit 1
+fi
 
-echo "installing the app dependencies (includes the pinned pi package)"
-npm install
+echo "installing locked app dependencies"
+npm ci
+
+echo "building Termina from the checked-out source"
+# Source installation must never inherit the packaged-build reuse escape.
+unset TERMINA_SKIP_CORE_BUILD
+npm run build
 
 echo
 echo "Termina installed. Start it with:"
-echo "  TERMINA_SKIP_CORE_BUILD=1 npm run dev"
+echo "  npm run dev"
 echo
 echo "Or install the packaged app from https://github.com/Jesusz0r/termina/releases"
