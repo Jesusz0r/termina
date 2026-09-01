@@ -64,7 +64,8 @@ command, including toggle-terminal.
 
 ## Install
 
-**macOS (Apple Silicon) / Linux x64 users:** download the `.dmg` (or
+Packaged releases support **macOS (Apple Silicon) and Linux x64 only**.
+Download the `.dmg` (or
 `.AppImage`) from the [releases page](https://github.com/Jesusz0r/termina/releases).
 The bundle ships the app, the Rust core, the pinned pi package, and its own
 node runtime — nothing else to install. Release builds are signed and
@@ -73,11 +74,15 @@ notarized, so Gatekeeper opens them without warnings.
 After launching, run `/login` in the terminal to configure your model
 provider.
 
-**From source (script):** needs node ≥ 22.19 and npm — no cargo, no git:
+**From source:** needs git, node ≥ 22.19, npm, and Rust/cargo. The installer
+uses the lockfile and builds the core from the checked-out source; it never
+downloads a standalone executable:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Jesusz0r/termina/master/scripts/install.sh | sh
-TERMINA_SKIP_CORE_BUILD=1 npm run dev
+git clone https://github.com/Jesusz0r/termina.git
+cd termina
+./scripts/install.sh
+npm run dev
 ```
 
 **Contributors:** node + npm + cargo (the Rust core builds from `core/`):
@@ -140,8 +145,8 @@ code conventions. Ideas and questions go in
 See **`RELEASING.md`** for the full runbook: certificate requirements,
 CI secrets, and the release checklist. Short version: bump the
 `package.json` version, then `git tag v<version> && git push origin
-v<version>` — the workflow signs and notarizes macOS builds and
-publishes every platform automatically.
+v<version>` — the workflow signs and notarizes macOS builds and publishes
+both supported platform packages together.
 
 ## License
 

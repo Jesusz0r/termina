@@ -45,12 +45,19 @@ node scripts/e2e.mjs --skip-build worldline-capture-test.mjs   # one suite
 
 E2e rules that matter:
 
-- Every suite runs against a **fresh Electron instance** on port 9222.
-  Kill leftovers first (`pkill -9 -f "pi-editor/node_modules/electron"`).
-- Suites share the app instance and the events directory — never run
-  two suites against one instance.
-- Test pollution persists on disk: reset the fixture after a suite that
-  modifies it.
+- Each runner invocation owns a fresh root containing its fixtures,
+  events, worlds, Electron user-data profiles, and a HOME with its own
+  `.pi/agent` tree. Concurrent runners do not share these paths, and the
+  host `~/.pi/agent` tree is not used or modified.
+- Electron requests an OS-assigned loopback DevTools port. The runner
+  reads `DevToolsActivePort` only from the profile it created, validates
+  that port, and passes it to the active suite.
+- The runner owns its build, Electron, and suite children. It stops and
+  waits for them before removing the run root. Keep process and profile
+  cleanup scoped to resources created by that invocation.
+- On macOS and Linux, cleanup covers the detached build, Electron, and
+  suite process groups. Windows cleanup is limited to the directly spawned
+  children.
 - Model-driven suites need a configured pi provider/model.
 
 ## Code conventions
@@ -90,6 +97,7 @@ is the client. When you add an op:
 ## Releasing
 
 Releases are tag-driven: bump `package.json`, tag `v<version>`, push.
-The workflow signs, notarizes, and publishes every platform. The full
+The workflow signs, notarizes, and publishes the supported macOS arm64 and
+Linux x64 packages. The full
 runbook — certificates, CI secrets, and the failures to avoid — is in
 `RELEASING.md`.
