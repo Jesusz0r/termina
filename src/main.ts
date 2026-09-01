@@ -45,9 +45,22 @@ import { showContextMenu, type ContextMenuItem } from "./components/context-menu
 import { SettingsView } from "./settings";
 import { emptyShortcuts, isMacPlatform, shortcutForEvent } from "./settings-shortcuts";
 import { CommandDispatcher } from "./commands";
+import { PtySequenceLedger } from "./pty-sequence-ledger";
+import {
+  applyWorldlineHydration,
+  beginWorldlineHydration,
+  clearWorldlineProjectUi,
+  handleWorldlineBusy,
+  handleWorldlineInstances,
+  handleWorldlineRemoved,
+  refreshWorldlineCandidateTest,
+  updateWorldlinePaneTab,
+  worldlineEventBelongsToProject,
+  worldlineProjectEffects as composeWorldlineProjectEffects,
+} from "./worldline-project-state";
 import { CHALLENGE_PROFILES, defaultAppPreferences, pathBasename } from "../shared/types";
 import { normalizeAppPreferences } from "../shared/preferences";
-import type { AppPreferences, AppUpdateState, ChallengeProfile, CommandId, ModifiedFile, InstanceSummary, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
+import type { AppPreferences, AppUpdateState, ChallengeProfile, CommandId, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
 
 const { EditorManager } = await import("./editor");
 const { ReviewView } = await import("./review");
@@ -56,6 +69,7 @@ const { ReviewView } = await import("./review");
 interface ProjectView {
   id: string;
   cwd: string;
+  workspaceId: string;
   tabEl: HTMLElement;
   editorMgr: InstanceType<typeof EditorManager>;
   editorEl: HTMLElement;
@@ -63,7 +77,12 @@ interface ProjectView {
 }
 
 const projectViews = new Map<string, ProjectView>();
+(window as unknown as Record<string, unknown>).__projectViews = projectViews;
 let activeProjectId: string | null = null;
+let activeProjectGeneration = 0;
+/** Highest activation epoch observed from main; stale folder pushes are inert. */
+let latestProjectActivationGeneration = 0;
+let timelineJumpEpoch = 0;
 const emptyTemplate = document.getElementById("editor-empty-template") as HTMLTemplateElement;
 const rightPaneEl = document.getElementById("right-pane")!;
 // The base editor fills the pane before any project tab exists (the
@@ -86,7 +105,7 @@ baseEditor.projectRootProvider = () => projectCwd;
 const projectTabsEl = document.getElementById("project-tabs")!;
 const btnNewProject = document.getElementById("btn-new-project") as HTMLButtonElement;
 
-function createProjectView(project: { id: string; cwd: string; needsLogin?: boolean }): ProjectView {
+function createProjectView(project: { id: string; cwd: string; workspaceId: string; needsLogin?: boolean }): ProjectView {
   const existing = projectViews.get(project.id);
   if (existing) return existing;
   // The editor wrapper: its own tab bar, container, and empty state.
@@ -135,17 +154,21 @@ function createProjectView(project: { id: string; cwd: string; needsLogin?: bool
   });
   projectTabsEl.appendChild(tabEl);
 
-  const view: ProjectView = { id: project.id, cwd: project.cwd, tabEl, editorMgr, editorEl, activePaneId: null };
+  const view: ProjectView = { id: project.id, cwd: project.cwd, workspaceId: project.workspaceId, tabEl, editorMgr, editorEl, activePaneId: null };
+  editorMgr.ownerProvider = () => {
+    const current = projectViews.get(project.id);
+    return current?.workspaceId ? { projectId: current.id, workspaceId: current.workspaceId } : null;
+  };
   projectViews.set(project.id, view);
   return view;
 }
 
 /** The editor hooks shared by every project view (mine toggle, badges). */
 function applySharedEditorHooks(editor: InstanceType<typeof EditorManager>): void {
-  editor.onToggleMine = (path) => {
+  editor.onToggleMine = (path, owner) => {
     const mine = !editor.isMine(path);
     editor.setMine(path, mine);
-    void window.pi.setMineFile(path, mine).catch(() => {
+    void window.pi.setMineFile(path, mine, owner).catch(() => {
       editor.setMine(path, !mine); // the main side failed: revert the mark
     });
   };
@@ -163,12 +186,16 @@ function removeProjectView(projectId: string): void {
   view.editorMgr.dispose();
   view.tabEl.remove();
   view.editorEl.remove();
+  const projectIds = [...projectViews.keys()];
+  const closingIndex = projectIds.indexOf(projectId);
   projectViews.delete(projectId);
   lastActivePane.delete(projectId);
   if (activeProjectId === projectId) {
     activeProjectId = null;
-    const next = projectViews.keys().next().value;
+    const remaining = [...projectViews.keys()];
+    const next = closingIndex > 0 ? (remaining[closingIndex - 1] ?? remaining[0]) : remaining[0];
     setActiveProject(next ?? null);
+    hydrateWorldlines(next ?? null);
   }
   for (const pane of [...panes.values()]) {
     if (pane.projectId === projectId) void closePane(pane.instanceId);
@@ -198,6 +225,7 @@ function placeEditorToggle(projectId: string | null): void {
 function setActiveProject(projectId: string | null): void {
   const view = projectId ? projectViews.get(projectId) : undefined;
   activeProjectId = view ? projectId : null;
+  activeProjectGeneration++;
   const baseChrome = document.getElementById("editor-chrome")!;
   const baseContainer = document.getElementById("editor-container")!;
   const noProject = !view;
@@ -219,6 +247,8 @@ function setActiveProject(projectId: string | null): void {
   syncPaneVisibility();
   collapseEditorIfIdle();
   fitPanes();
+  timelineJumpEpoch++;
+  updateEditorLock();
 }
 
 /** Show only the active project's terminals. Other project panes stay alive. */
@@ -256,9 +286,9 @@ const reviewView = new ReviewView();
 
 void reviewView;
 reviewView.bind({
-  onOpenFile: (path) => {
+  onOpenFile: (path, owner) => {
     reviewView.hide();
-    void openFileSmart(path, false);
+    void openFileSmart(path, false, owner);
   },
   onAccepted: (path) => {
     const pane = activeId ? panes.get(activeId) : undefined;
@@ -284,12 +314,31 @@ sessionSearch.bind({ onOpenFile: (path) => void openFileSmart(path, true) });
 (window as unknown as Record<string, unknown>).__sessionSearch = sessionSearch;
 
 // ---- Mine (file ownership) ----
-function refreshMine(): void {
-  activeEditor().clearMine();
-  void window.pi.getMineFiles().then((paths) => {
-    for (const p of paths) activeEditor().setMine(p, true);
-  }).catch((err) => toast(`could not load mine marks: ${(err as Error).message}`, "error"));
+let mineRequestToken = 0;
+function refreshMine(projectId: string | null = activeProjectId): void {
+  if (!projectId) return;
+  const view = projectViews.get(projectId);
+  if (!view || !view.workspaceId) return;
+  const owner: ProjectWorkspaceRef = { projectId, workspaceId: view.workspaceId };
+  const requestToken = ++mineRequestToken;
+  const requestedGeneration = activeProjectGeneration;
+  const editor = view.editorMgr;
+  editor.clearMine();
+  void window.pi.getMineFiles(owner).then((paths) => {
+    if (
+      requestToken !== mineRequestToken ||
+      requestedGeneration !== activeProjectGeneration ||
+      activeProjectId !== projectId ||
+      projectViews.get(projectId) !== view
+    ) return;
+    for (const p of paths) editor.setMine(p, true);
+  }).catch((err) => {
+    if (requestToken === mineRequestToken && requestedGeneration === activeProjectGeneration && activeProjectId === projectId) {
+      toast(`could not load mine marks: ${(err as Error).message}`, "error");
+    }
+  });
 }
+(window as unknown as Record<string, unknown>).__refreshMine = refreshMine;
 void refreshMine();
 const explorerEl = document.getElementById("explorer")!;
 explorer.bind({ onOpenFile: (path, preview) => void openFileSmart(path, preview ?? true) });
@@ -317,6 +366,56 @@ const btnDispatch = document.getElementById("btn-dispatch") as HTMLButtonElement
 const timelineView = new TimelineView(document.getElementById("timeline-strip")!);
 (window as unknown as Record<string, unknown>).__timelineView = timelineView;
 const worldlinesView = new WorldlinesView(document.getElementById("worldline-panel")!);
+let worldlineHydrationEpoch = 0;
+let worldlineHydrationTombstones: Set<string> | null = null;
+
+function worldlineProjectEffects() {
+  return composeWorldlineProjectEffects({
+    resetView: () => worldlinesView.resetForProject(),
+    clearTombstones: () => {
+      worldlineHydrationTombstones = null;
+    },
+    addTombstone: (comparisonId: string) => worldlineHydrationTombstones?.add(comparisonId),
+    removeComparison: (comparisonId: string) => worldlinesView.remove(comparisonId),
+    upsert: (summary: Parameters<WorldlinesView["upsert"]>[0]) => worldlinesView.upsert(summary),
+    updatePaneTab: (pane: Pane) => updatePaneTab(pane),
+    refreshCandidateTest: (pane: Pane) => refreshCandidateTestCommand(pane),
+    refreshEditorBadges: () => activeEditor().refreshBadges(),
+    updateEditorLock: () => updateEditorLock(),
+  });
+}
+
+/** Rebuild the active project's worldline panel without letting a prior
+ * project's delayed list overwrite the newer UI. */
+function hydrateWorldlines(projectId: string | null): void {
+  const epoch = ++worldlineHydrationEpoch;
+  if (!projectId) {
+    clearWorldlineProjectUi(panes.values(), worldlineProjectEffects());
+    return;
+  }
+  const tombstones = new Set<string>();
+  worldlineHydrationTombstones = tombstones;
+  const effects = worldlineProjectEffects();
+  beginWorldlineHydration(projectId, panes.values(), effects);
+  void window.pi.getWorldlines(projectId).then((list) => {
+    if (epoch !== worldlineHydrationEpoch) return;
+    const evidence = new Map<string, import("../shared/types").EvidenceSummary>();
+    const summaries = list.map((summary) => {
+      if (summary.evidence) evidence.set(summary.evidence.comparisonId, summary.evidence);
+      const { evidence: _evidence, ...withoutEvidence } = summary;
+      return withoutEvidence;
+    });
+    if (!applyWorldlineHydration(activeProjectId, projectId, summaries, tombstones, panes.values(), effects)) return;
+    for (const summary of evidence.values()) worldlinesView.upsertEvidence(summary);
+    if (worldlineHydrationTombstones === tombstones) worldlineHydrationTombstones = null;
+  }).catch((err) => {
+    if (worldlineHydrationTombstones === tombstones) worldlineHydrationTombstones = null;
+    if (epoch === worldlineHydrationEpoch && activeProjectId === projectId) {
+      toast(`could not load worldlines: ${(err as Error).message}`, "error");
+    }
+  });
+}
+
 worldlinesView.bind({
   onCompareBase: (comparisonId, label, relPath, absPath) => {
     void reviewView.showCandidateDiff(comparisonId, label, relPath, absPath);
@@ -355,6 +454,8 @@ const challengeRunButtons = CHALLENGE_PROFILES.map((profile) => {
 
 interface Pane {
   instanceId: string;
+  /** Live PTY generation used to fence data, acks, and close requests. */
+  generation: number;
   workspaceId: string;
   projectId: string | null;
   view: PtyView;
@@ -376,6 +477,8 @@ interface Pane {
   verify: VerifyInfo;
   timeline: TimelineEvent[];
   timelineLoaded: boolean;
+  /** Monotonic token for the current timeline/prefix load. */
+  timelineRequestToken: number;
   timelinePrefix: Pick<TimelinePrefix, "ok" | "error" | "open"> | null;
   recorderState: string;
   plan: PlanTask[];
@@ -389,6 +492,12 @@ interface Pane {
   runs: RunSummary[] | null;
   /** The candidate-local test command label, when this is a candidate. */
   testCommand: string | null;
+  /** Invalidates candidate test detection across labels/hydrations. */
+  candidateTestEpoch: number;
+  /** Last label reconciled from this pane's owning project. */
+  worldlineLabel: "A" | "B" | null;
+  /** Bounded PTY sequence admission for this pane/document generation. */
+  ptySequenceLedger: PtySequenceLedger;
 }
 
 const panes = new Map<string, Pane>();
@@ -401,6 +510,20 @@ let projectCwd: string | null = null;
 let preferences: AppPreferences = normalizeAppPreferences(await window.pi.getPreferences().catch(() => defaultAppPreferences()));
 let committedPreferences: AppPreferences = preferences;
 let preferenceGeneration = 0;
+
+function applyTerminalGeneration(pane: Pane, generation: number): void {
+  if (pane.generation === generation) return;
+  pane.generation = generation;
+  pane.ptySequenceLedger.reset();
+  // A reused terminal id gets a fresh lifecycle even when its old tab shell
+  // is still present in the renderer.
+  pane.exited = false;
+  pane.error = false;
+}
+
+function signalTerminalHydrated(pane: Pane): void {
+  if (!pane.error && pane.generation > 0) window.pi.readyTerminal(pane.instanceId, pane.generation);
+}
 
 function userPatch(prev: AppPreferences, next: AppPreferences): import("../shared/types").UserPreferencePatch {
   const patch: import("../shared/types").UserPreferencePatch = {};
@@ -526,9 +649,11 @@ function createPaneShell(instanceId: string): Pane {
       fontFamily: preferences.fontFamily,
     },
   );
+  view.setEngine("core");
 
   const pane: Pane = {
     instanceId,
+    generation: 0,
     workspaceId: "",
     projectId: null,
     view,
@@ -539,6 +664,7 @@ function createPaneShell(instanceId: string): Pane {
     cwd: null,
     busy: false,
     type: "agent",
+    engine: "core",
     shellName: undefined,
     error: false,
     exited: false,
@@ -548,6 +674,7 @@ function createPaneShell(instanceId: string): Pane {
     verify: { state: "untested", command: null, summary: null },
     timeline: [],
     timelineLoaded: false,
+    timelineRequestToken: 0,
     timelinePrefix: null,
     recorderState: "paused",
     plan: [],
@@ -558,6 +685,9 @@ function createPaneShell(instanceId: string): Pane {
     dispatchTask: undefined,
     runs: null,
     testCommand: null,
+    candidateTestEpoch: 0,
+    worldlineLabel: null,
+    ptySequenceLedger: new PtySequenceLedger(),
   };
   panes.set(instanceId, pane);
   pane.tabEl.prepend(typeEl);
@@ -711,13 +841,17 @@ for (const button of challengeRunButtons) {
 
 /** Candidate terminals detect tests from their own isolated tree. */
 function refreshCandidateTestCommand(pane: Pane): void {
-  if (!worldlinesView.labelOfTerminal(pane.instanceId)) return;
-  void window.pi.detectTest(pane.instanceId).then((t) => {
-    const p = panes.get(pane.instanceId);
-    if (!p) return;
-    p.testCommand = t?.label ?? null;
-    if (activeId === pane.instanceId) renderStatus(p);
-  }).catch((err) => toast(`could not detect tests: ${(err as Error).message}`, "error"));
+  refreshWorldlineCandidateTest(pane, {
+    activeProjectId: () => activeProjectId,
+    hydrationEpoch: () => worldlineHydrationEpoch,
+    isActivePane: (instanceId) => activeId === instanceId,
+    paneById: (instanceId) => panes.get(instanceId),
+    detectTest: (instanceId) => window.pi.detectTest(instanceId),
+    onChanged: (current) => {
+      if (activeId === current.instanceId) renderStatus(current);
+    },
+    onError: (err) => toast(`could not detect tests: ${(err as Error).message}`, "error"),
+  });
 }
 
 /** Session Timeline: show the active pane's points, fetch once per pane. */
@@ -731,24 +865,43 @@ function renderTimeline(): void {
   timelineView.setPrefix(pane.timelinePrefix);
   if (!pane.timelineLoaded) {
     const id = pane.instanceId;
+    const requestedProjectId = activeProjectId;
+    const requestedGeneration = activeProjectGeneration;
+    const requestToken = ++pane.timelineRequestToken;
     pane.timelineLoaded = true;
     void window.pi.getTimeline(id).then((events) => {
       const p = panes.get(id);
       if (!p) return;
+      if (p !== pane || p.timelineRequestToken !== requestToken) return;
+      if (activeProjectId !== requestedProjectId || activeProjectGeneration !== requestedGeneration) {
+        p.timelineLoaded = false;
+        return;
+      }
       const maxSeq = events.length ? Math.max(...events.map((e) => e.seq)) : 0;
       p.timeline = events.concat(p.timeline.filter((e) => e.seq > maxSeq)).slice(-MAX_TIMELINE_EVENTS);
       if (activeId === id) timelineView.setEvents(p.timeline);
     }).catch((err) => {
       const p = panes.get(id);
-      if (p) p.timelineLoaded = false;
+      if (!p || p !== pane || p.timelineRequestToken !== requestToken) return;
+      if (activeProjectId !== requestedProjectId || activeProjectGeneration !== requestedGeneration) {
+        p.timelineLoaded = false;
+        return;
+      }
+      p.timelineLoaded = false;
       toast(`could not load timeline: ${(err as Error).message}`, "error");
     });
     void window.pi.getTimelinePrefix(id).then((prefix) => {
       const p = panes.get(id);
-      if (!p) return;
+      if (!p || p !== pane || p.timelineRequestToken !== requestToken) return;
+      if (activeProjectId !== requestedProjectId || activeProjectGeneration !== requestedGeneration) return;
       p.timelinePrefix = prefix;
       if (activeId === id) timelineView.setPrefix(prefix);
-    }).catch((err) => toast(`could not load timeline counts: ${(err as Error).message}`, "error"));
+    }).catch((err) => {
+      const p = panes.get(id);
+      if (!p || p !== pane || p.timelineRequestToken !== requestToken) return;
+      if (activeProjectId !== requestedProjectId || activeProjectGeneration !== requestedGeneration) return;
+      toast(`could not load timeline counts: ${(err as Error).message}`, "error");
+    });
     return;
   }
   timelineView.setEvents(pane.timeline);
@@ -758,14 +911,23 @@ timelineView.bind({
   onJump: async (ev, opts) => {
     const pane = activeId ? panes.get(activeId) : undefined;
     if (!pane) return;
+    const epoch = ++timelineJumpEpoch;
+    const terminalId = pane.instanceId;
+    const projectId = activeProjectId;
+    const editor = activeEditor();
+    const isCurrent = (): boolean =>
+      epoch === timelineJumpEpoch && activeId === terminalId && activeProjectId === projectId && activeEditor() === editor;
     // Snapshots are fetched on demand — the strip/IPC never carries content.
     let res = await window.pi.getTimelineContent(pane.instanceId, ev.seq);
+    if (!isCurrent()) return;
     // A write snapshot may still be filling in (the delayed fill takes
     // 400 milliseconds) — retry
     // briefly before giving up.
     for (let i = 0; i < 5 && !res.ok; i++) {
       await new Promise((resolve) => setTimeout(resolve, 250));
+      if (!isCurrent()) return;
       res = await window.pi.getTimelineContent(pane.instanceId, ev.seq);
+      if (!isCurrent()) return;
     }
     if (!res.ok) {
       const what = ev.t === "change" ? "change" : ev.toolName ?? "event";
@@ -773,7 +935,7 @@ timelineView.bind({
       return;
     }
     const label = `${new Date(res.ts ?? ev.ts).toLocaleTimeString()} · ${res.toolName ?? ev.toolName ?? "on disk"}`;
-    activeEditor().openSnapshot(pane.instanceId, String(ev.seq), res.relPath ?? res.path ?? "", res.content ?? "", label, opts?.replay ?? false);
+    editor.openSnapshot(pane.instanceId, String(ev.seq), res.relPath ?? res.path ?? "", res.content ?? "", label, opts?.replay ?? false);
   },
   onFork: (ev) => {
     const pane = activeId ? panes.get(activeId) : undefined;
@@ -790,13 +952,19 @@ timelineView.bind({
   onProgress: (seq) => {
     const pane = activeId ? panes.get(activeId) : undefined;
     if (!pane) return Promise.resolve({ ok: false, seq });
-    return window.pi.getTimelineProgress(pane.instanceId, seq);
+    const requestedProjectId = activeProjectId;
+    const requestedGeneration = activeProjectGeneration;
+    return window.pi.getTimelineProgress(pane.instanceId, seq).then((progress) => {
+      if (activeProjectId !== requestedProjectId || activeProjectGeneration !== requestedGeneration || activeId !== pane.instanceId) return { ok: false, seq };
+      return progress;
+    });
   },
 });
 
 async function closePane(instanceId: string): Promise<void> {
   const pane = panes.get(instanceId);
   if (!pane) return;
+  const terminalGeneration = pane.generation;
   closingPanes.add(instanceId);
   panes.delete(instanceId);
   for (const [projectId, activeInstanceId] of lastActivePane) {
@@ -805,7 +973,7 @@ async function closePane(instanceId: string): Promise<void> {
   pane.view.dispose();
   pane.container.remove();
   pane.tabEl.remove();
-  await window.pi.closeTerminal(instanceId);
+  await window.pi.closeTerminal(instanceId, terminalGeneration);
   setTimeout(() => closingPanes.delete(instanceId), 3000);
   if (activeId === instanceId) {
     // Prefer another terminal of the same project. Never surface a
@@ -837,15 +1005,13 @@ function updatePaneTab(pane: Pane): void {
   pane.statusEl.classList.toggle("busy", pane.busy);
   applyTypeBadge(pane);
   // Worldline candidates carry the A/B badge on their tab.
-  const label = worldlinesView.labelOfTerminal(pane.instanceId);
   const wlineEl = pane.tabEl.querySelector(".tab-worldline") as HTMLElement;
-  if (wlineEl) {
-    wlineEl.textContent = label ?? "";
-    wlineEl.style.display = label ? "" : "none";
-    wlineEl.title = label ? `worldline candidate ${label}` : "";
-    wlineEl.classList.toggle("a", label === "A");
-    wlineEl.classList.toggle("b", label === "B");
-  }
+  updateWorldlinePaneTab(
+    activeProjectId,
+    pane,
+    (instanceId) => worldlinesView.labelOfTerminal(instanceId),
+    wlineEl,
+  );
 }
 
 function renderChrome(): void {
@@ -950,17 +1116,33 @@ function renderPlan(pane: Pane): void {
 
 /** Verify & Iterate: badge + button for the active terminal. */
 let testCommand: string | null = null;
+let testCommandRequestToken = 0;
 
-async function refreshTestCommand(): Promise<void> {
+async function refreshTestCommand(projectId: string | null = activeProjectId): Promise<void> {
+  const requestToken = ++testCommandRequestToken;
+  const requestedGeneration = activeProjectGeneration;
+  const requestedProjectId = projectId;
+  const requestedPane = activeId ? panes.get(activeId) : undefined;
+  const terminalId = requestedPane?.projectId === requestedProjectId ? requestedPane.instanceId : undefined;
+  if (!requestedProjectId || !terminalId) {
+    if (requestToken === testCommandRequestToken && requestedGeneration === activeProjectGeneration && activeProjectId === requestedProjectId) {
+      testCommand = null;
+    }
+    return;
+  }
   try {
-    const t = await window.pi.detectTest();
+    const t = await window.pi.detectTest(terminalId);
+    if (requestToken !== testCommandRequestToken || requestedGeneration !== activeProjectGeneration || activeProjectId !== requestedProjectId || activeId !== terminalId) return;
     testCommand = t?.label ?? null;
   } catch {
+    if (requestToken !== testCommandRequestToken || requestedGeneration !== activeProjectGeneration || activeProjectId !== requestedProjectId || activeId !== terminalId) return;
     testCommand = null;
   }
   const pane = activeId ? panes.get(activeId) : undefined;
   if (pane) renderStatus(pane);
 }
+(window as unknown as Record<string, unknown>).__refreshTestCommand = refreshTestCommand;
+(window as unknown as Record<string, unknown>).__getTestCommand = () => testCommand;
 
 function renderVerify(pane: Pane): void {
   const v = pane.verify;
@@ -1012,7 +1194,8 @@ function renderModified(pane: Pane): void {
     li.append(badge, path);
     li.addEventListener("click", () => {
       // The modified list is the review surface: clicking opens the diff.
-      void reviewView.show(activeId ?? "", f.path, f.relPath);
+      if (!pane.projectId || !pane.workspaceId) return;
+      void reviewView.show(pane.instanceId, f.path, f.relPath, { projectId: pane.projectId, workspaceId: pane.workspaceId });
     });
     if (pane.accepted.has(f.path)) {
       const mark = document.createElement("span");
@@ -1070,15 +1253,20 @@ async function focusProjectShell(): Promise<void> {
 
 // ---------------------------------------------------------------- commands --
 
-async function openFileSmart(path: string, preview = true): Promise<void> {
+async function openFileSmart(path: string, preview = true, requestedOwner?: ProjectWorkspaceRef): Promise<void> {
   if (reviewView.isVisible) reviewView.hide();
-  if (!activeProjectId && projectCwd) {
-    const match = [...projectViews.values()].find((view) => view.cwd === projectCwd);
-    if (match) setActiveProject(match.id);
+  const owner = requestedOwner ?? (() => {
+    const view = activeProjectId ? projectViews.get(activeProjectId) : null;
+    return view?.workspaceId ? { projectId: view.id, workspaceId: view.workspaceId } : null;
+  })();
+  const view = owner ? projectViews.get(owner.projectId) : null;
+  if (!owner || !view) {
+    toast(`could not open ${pathBasename(path)}: file owner is unavailable`, "error");
+    return;
   }
-  const abs = path.startsWith("/") ? path : projectCwd ? `${projectCwd}/${path}` : path;
+  const abs = path.startsWith("/") ? path : `${view.cwd}/${path}`;
   try {
-    await activeEditor().openFile(abs, { preview });
+    await view.editorMgr.openFile(abs, { preview, owner });
   } catch (err) {
     toast(`could not open ${pathBasename(abs)}: ${(err as Error).message}`, "error");
   }
@@ -1164,7 +1352,7 @@ async function openTerminalMenu(): Promise<void> {
     items.push({ row, run });
   };
 
-  addItem("Agent (core)", "Termina's in-house coding agent", () => makeTerminal({ type: "agent" }));
+  addItem("Agent (core)", "Termina's in-house coding agent", () => makeTerminal({ type: "agent", engine: "core" }));
   addItem("Agent (pi)", "the pi coding agent terminal", () => makeTerminal({ type: "agent", engine: "pi" }));
   for (const shell of shells) {
     addItem(shell.name, `interactive ${shell.name} shell`, () => makeTerminal({ type: "shell", shell: shell.path }));
@@ -1236,11 +1424,14 @@ btnNewTerminal.addEventListener("click", (e) => {
   if (terminalMenu) closeTerminalMenu();
   else void openTerminalMenu();
 });
-window.pi.onProjectClosed(({ projectId }) => {
+window.pi.onProjectClosed(({ projectId, activationGeneration }) => {
+  if (Number.isSafeInteger(activationGeneration) && activationGeneration > latestProjectActivationGeneration) {
+    latestProjectActivationGeneration = activationGeneration;
+  }
   removeProjectView(projectId);
   if (projectViews.size === 0) {
     projectCwd = null;
-    explorer.setProject(null);
+    explorer.setProject(null, null);
     baseEditor.setProjectOpen(false);
   }
 });
@@ -1536,9 +1727,13 @@ function runMenuEdit(kind: "undo" | "redo" | "select-all"): void {
 function runClipboardCommand(command: "copy" | "paste"): void {
   const pane = activeId ? panes.get(activeId) : undefined;
   const term = pane?.view.getTerminal();
-  if (term?.textarea && document.activeElement === term.textarea) {
-    if (command === "copy") pane?.view.copySelection();
-    else void pane?.view.pasteClipboard();
+  if (pane && term?.textarea && document.activeElement === term.textarea) {
+    if (command === "copy") {
+      if (pane.view.copySelection()) return;
+      void window.pi.writeTerminal(pane.instanceId, "\x03");
+    } else {
+      void pane.view.pasteClipboard();
+    }
     return;
   }
   void window.pi.editClipboard(command);
@@ -1853,29 +2048,84 @@ function setupTabDrag(tabEl: HTMLElement): void {
 
 // ------------------------------------------------------------ pi events ----
 
-window.pi.onPtyData(({ id, data }) => {
+function renderAcceptedPtyRecords(
+  pane: Pane,
+  records: Array<{ kind: "data"; sequence: number; data: string } | { kind: "exit"; sequence: number; code: number }>,
+  id: string,
+  generation: number,
+  windowGeneration: number,
+  rendererGeneration: number,
+): void {
+  for (const record of records) {
+    if (record.kind === "data") {
+      pane.view.write(record.data, () => {
+        window.pi.acknowledgePtyData({
+          id,
+          generation,
+          windowGeneration,
+          rendererGeneration,
+          sequence: record.sequence,
+        });
+      });
+      continue;
+    }
+    pane.exited = true;
+    pane.view.write("\r\n\x1b[90m[pi exited]\x1b[0m\r\n", () => {
+      window.pi.acknowledgePtyData({
+        id,
+        generation,
+        windowGeneration,
+        rendererGeneration,
+        sequence: record.sequence,
+      });
+    });
+  }
+}
+
+window.pi.onPtyData(({ id, generation, windowGeneration, rendererGeneration, sequence, data }) => {
   const pane = panes.get(id);
-  if (pane) pane.view.write(data);
+  if (!pane || pane.error || pane.generation !== generation) return;
+  const result = pane.ptySequenceLedger.accept({ kind: "data", sequence, data });
+  if (result.kind === "duplicate") {
+    // A replay can race a duplicate delivery in the same renderer document;
+    // acknowledge it without writing the terminal bytes twice.
+    window.pi.acknowledgePtyData({ id, generation, windowGeneration, rendererGeneration, sequence });
+    return;
+  }
+  if (result.kind !== "accepted") return;
+  renderAcceptedPtyRecords(pane, result.records, id, generation, windowGeneration, rendererGeneration);
 });
 
-window.pi.onPtyExit(({ id }) => {
+window.pi.onPtyExit(({ id, generation, windowGeneration, rendererGeneration, sequence, code }) => {
   const pane = panes.get(id);
-  if (!pane) return;
-  pane.exited = true;
-  pane.view.write("\r\n\x1b[90m[pi exited]\x1b[0m\r\n");
+  if (!pane || pane.generation !== generation) return;
+  const result = pane.ptySequenceLedger.accept({ kind: "exit", sequence, code });
+  if (result.kind === "duplicate") {
+    // A duplicate marker in one document is already rendered; retire the
+    // retained ledger record without writing the status line twice.
+    window.pi.acknowledgePtyData({ id, generation, windowGeneration, rendererGeneration, sequence });
+    return;
+  }
+  if (result.kind !== "accepted") return;
+  renderAcceptedPtyRecords(pane, result.records, id, generation, windowGeneration, rendererGeneration);
 });
 
 /** Lock the editor while a primary agent terminal of the workspace is busy.
  *  Candidate agents stay isolated: their writes cannot reach the primary. */
 function updateEditorLock(): void {
   const busy = [...panes.values()].some(
-    (p) => p.busy && p.type === "agent" && !p.error && worldlinesView.labelOfTerminal(p.instanceId) === null,
+    (p) => p.busy && p.type === "agent" && !p.error && p.projectId === activeProjectId && worldlinesView.labelOfTerminal(p.instanceId) === null,
   );
   activeEditor().setLocked(busy);
 }
 
-window.pi.onFlushRequest(({ requestId, writerId }) => {
-  void activeEditor().flushAll(writerId).then((result) => void window.pi.reportFlush(requestId, result));
+window.pi.onFlushRequest(({ requestId, writerId, projectId, workspaceId }) => {
+  const view = projectViews.get(projectId);
+  if (!view || view.workspaceId !== workspaceId) {
+    void window.pi.reportFlush(requestId, { ok: false, failed: ["project editor is unavailable"] });
+    return;
+  }
+  void view.editorMgr.flushAll(writerId).then((result) => void window.pi.reportFlush(requestId, result));
 });
 
 function applyAppUpdateState(state: AppUpdateState): void {
@@ -1920,12 +2170,16 @@ window.pi.onUpdateState(applyAppUpdateState);
 void window.pi.getUpdateState().then(applyAppUpdateState);
 
 window.pi.onBusy(({ instanceId, busy }) => {
-  const pane = panes.get(instanceId);
-  if (!pane) return;
-  pane.busy = busy;
-  updatePaneTab(pane);
-  updateEditorLock();
-  if (activeId === instanceId) renderStatus(pane);
+  handleWorldlineBusy(
+    { instanceId, busy },
+    {
+      paneById: (id) => panes.get(id),
+      updatePaneTab,
+      updateEditorLock,
+      activePaneId: () => activeId,
+      renderStatus,
+    },
+  );
 });
 
 window.pi.onVerifyState(({ terminalId, verify }) => {
@@ -1997,7 +2251,10 @@ window.pi.onPlanUpdate(({ instanceId, tasks }) => {
 });
 
 window.pi.onToolTarget((p) => {
-  void activeEditor().openFile(p.path, { preview: false }).catch((err) => {
+  const view = projectViews.get(p.projectId);
+  if (!view || view.workspaceId !== p.workspaceId) return;
+  const owner: ProjectWorkspaceRef = { projectId: p.projectId, workspaceId: p.workspaceId };
+  void view.editorMgr.openFile(p.path, { preview: false, owner }).catch((err) => {
     toast(`could not open ${pathBasename(p.path)}: ${(err as Error).message}`, "error");
   });
 });
@@ -2005,48 +2262,61 @@ window.pi.onToolTarget((p) => {
 const lastChangePush = new Map<string, { at: number; changedLines?: number[] }>();
 const largeChangeFetch = new Set<string>();
 const MAX_LAST_CHANGE_PUSH = 500;
+const changeKey = (owner: ProjectWorkspaceRef, path: string): string => `${owner.projectId}\u0000${owner.workspaceId}\u0000${path}`;
 
-function fetchLargeChange(path: string): void {
-  if (largeChangeFetch.has(path)) return;
-  largeChangeFetch.add(path);
-  const at = lastChangePush.get(path)?.at;
-  void window.pi.openFile(path).then((res) => {
-    largeChangeFetch.delete(path);
-    const latest = lastChangePush.get(path);
+function fetchLargeChange(path: string, owner: ProjectWorkspaceRef, editor: InstanceType<typeof EditorManager>): void {
+  const key = changeKey(owner, path);
+  if (largeChangeFetch.has(key)) return;
+  largeChangeFetch.add(key);
+  const at = lastChangePush.get(key)?.at;
+  void window.pi.openFile(path, owner).then((res) => {
+    largeChangeFetch.delete(key);
+    const latest = lastChangePush.get(key);
     if (latest !== undefined && latest.at !== at) {
-      fetchLargeChange(path);
+      fetchLargeChange(path, owner, editor);
       return;
     }
-    if (res.ok) activeEditor().updateContent(path, res.content, res.changedLines ?? latest?.changedLines);
+    if (res.ok && projectViews.get(owner.projectId)?.editorMgr === editor) {
+      editor.updateContent(path, res.content, res.changedLines ?? latest?.changedLines);
+    }
   }).catch(() => {
-    largeChangeFetch.delete(path);
+    largeChangeFetch.delete(key);
   });
 }
 
 window.pi.onFileChanged((p) => {
+  const view = projectViews.get(p.projectId);
+  if (!view || view.workspaceId !== p.workspaceId) return;
+  const owner: ProjectWorkspaceRef = { projectId: p.projectId, workspaceId: p.workspaceId };
+  const key = changeKey(owner, p.path);
   const at = Date.now();
-  lastChangePush.delete(p.path);
-  lastChangePush.set(p.path, { at, changedLines: p.changedLines });
+  lastChangePush.delete(key);
+  lastChangePush.set(key, { at, changedLines: p.changedLines });
   while (lastChangePush.size > MAX_LAST_CHANGE_PUSH) {
     const oldestKey = lastChangePush.keys().next().value;
     if (oldestKey === undefined) break;
     lastChangePush.delete(oldestKey);
   }
   if (p.content !== undefined) {
-    activeEditor().updateContent(p.path, p.content, p.changedLines);
+    view.editorMgr.updateContent(p.path, p.content, p.changedLines);
   } else {
     // The main process caps large pushes. Fetch once per path; a newer
     // change while a fetch is in flight starts one follow-up fetch.
-    fetchLargeChange(p.path);
+    fetchLargeChange(p.path, owner, view.editorMgr);
   }
+  if (activeProjectId !== p.projectId) return;
   explorer.handleDiskChange();
   // The open review stays in sync with the agent's writes.
-  if (reviewView.isVisible && reviewView.matchesPath(p.path)) void reviewView.refreshCurrent();
+  if (reviewView.isVisible && reviewView.matchesPath(p.path) && reviewView.matchesOwner(owner)) void reviewView.refreshCurrent();
 });
 
 window.pi.onFileDeleted((p) => {
-  lastChangePush.delete(p.path);
-  activeEditor().closeIfOpen(p.path);
+  const view = projectViews.get(p.projectId);
+  if (!view || view.workspaceId !== p.workspaceId) return;
+  const owner: ProjectWorkspaceRef = { projectId: p.projectId, workspaceId: p.workspaceId };
+  lastChangePush.delete(changeKey(owner, p.path));
+  view.editorMgr.closeIfOpen(p.path);
+  if (activeProjectId !== p.projectId) return;
   explorer.handleDiskChange();
 });
 
@@ -2058,30 +2328,32 @@ window.pi.onModifiedList((p) => {
 });
 
 window.pi.onFolderOpened((e) => {
+  if (
+    !Number.isSafeInteger(e.activationGeneration)
+    || e.activationGeneration < 1
+    || e.activationGeneration < latestProjectActivationGeneration
+  ) return;
+  latestProjectActivationGeneration = e.activationGeneration;
   projectCwd = e.cwd;
   const projectId = e.projectId;
   let view = projectViews.get(projectId);
   if (!view) {
-    view = createProjectView({ id: projectId, cwd: e.cwd, needsLogin: e.needsLogin });
+    view = createProjectView({ id: projectId, cwd: e.cwd, workspaceId: e.workspaceId, needsLogin: e.needsLogin });
   } else {
+    view.cwd = e.cwd;
+    view.workspaceId = e.workspaceId;
     view.editorMgr.setProjectOpen(true, e.needsLogin);
   }
   baseEditor.setProjectOpen(true);
   setActiveProject(view.id);
-  explorer.setProject(e.cwd);
+  explorer.setProject(projectId, e.cwd);
   reviewView.resetForProject();
-  worldlinesView.resetForProject();
-  refreshMine();
-  void refreshTestCommand();
-  setActiveProject(view.id);
+  refreshMine(projectId);
   activateProjectPane();
+  void refreshTestCommand(projectId);
   timelineView.resetForProject();
   renderTimeline();
-  // Rebuild the worldline panel for this project (pushes are per-project).
-  void window.pi.getWorldlines().then((list) => {
-    worldlinesView.resetForProject();
-    for (const summary of list) worldlinesView.upsert(summary);
-  }).catch((err) => toast(`could not load worldlines: ${(err as Error).message}`, "error"));
+  hydrateWorldlines(projectId);
 });
 
 // ---------------------------------------------------------- worldlines ----
@@ -2098,7 +2370,9 @@ window.pi.onPromotionOpened(({ terminalId }) => {
   activatePaneWhenReady(terminalId);
 });
 
-window.pi.onWorldlineUpdate((summary) => {
+window.pi.onWorldlineUpdate((event) => {
+  if (!worldlineEventBelongsToProject(activeProjectId, event)) return;
+  const { summary } = event;
   worldlinesView.upsert(summary);
   // Badges: the terminal tab and every editor tab under the candidate root.
   if (summary.terminalId) {
@@ -2106,45 +2380,38 @@ window.pi.onWorldlineUpdate((summary) => {
     if (pane) updatePaneTab(pane);
   }
   activeEditor().refreshBadges();
+  updateEditorLock();
 });
 
-window.pi.onWorldlineRemoved(({ comparisonId }) => {
-  worldlinesView.remove(comparisonId);
-  for (const p of panes.values()) updatePaneTab(p);
-  activeEditor().refreshBadges();
-  if (activeId) {
-    const pane = panes.get(activeId);
-    if (pane) refreshCandidateTestCommand(pane);
-  }
+window.pi.onWorldlineRemoved((event) => {
+  handleWorldlineRemoved(activeProjectId, event, panes.values(), worldlineProjectEffects());
 });
 
-window.pi.onEvidenceUpdate((summary) => {
-  worldlinesView.upsertEvidence(summary);
+window.pi.onEvidenceUpdate((event) => {
+  if (!worldlineEventBelongsToProject(activeProjectId, event)) return;
+  worldlinesView.upsertEvidence(event.summary);
 });
 
 window.pi.onInstances((list: InstanceSummary[]) => {
-  for (const summary of list) {
-    let pane = panes.get(summary.id);
-    if (!pane) pane = createPaneShell(summary.id); // terminal spawned after boot
-    pane.cwd = summary.cwd;
-    pane.workspaceId = summary.workspaceId ?? "";
-    pane.projectId = summary.projectId ?? null;
-    if (pane.projectId && !projectViews.has(pane.projectId) && summary.cwd) {
-      // The project view is created lazily; projectList resolves it.
-      void window.pi.projectList().then((list) => {
-        const project = list.find((p) => p.id === pane.projectId);
-        if (project && !projectViews.has(project.id)) createProjectView(project);
-      });
-    }
-    pane.busy = summary.busy;
-    pane.type = summary.type;
-    pane.engine = summary.engine;
-    pane.view.setEngine(summary.engine);
-    pane.shellName = summary.shellName;
-    pane.dispatchWorker = summary.dispatchWorker ?? false;
-    pane.dispatchTask = summary.dispatchTask;
-    if (summary.verify) pane.verify = summary.verify;
-    updatePaneTab(pane);
+  handleWorldlineInstances(list, {
+    paneById: (instanceId) => panes.get(instanceId),
+    createPane: (instanceId) => createPaneShell(instanceId),
+    updatePaneTab,
+    setEngine: (pane, engine) => pane.view.setEngine(engine),
+    onProjectDiscovered: (pane, summary) => {
+      const projectId = pane.projectId;
+      if (projectId && !projectViews.has(projectId) && summary.cwd) {
+        // The project view is created lazily; projectList resolves it.
+        void window.pi.projectList().then((list) => {
+          const project = list.find((p) => p.id === projectId);
+          if (project && !projectViews.has(project.id)) createProjectView(project);
+        });
+      }
+    },
+  });
+  for (const inst of list) {
+    const pane = panes.get(inst.id);
+    if (pane) applyTerminalGeneration(pane, inst.generation);
   }
   syncPaneVisibility();
   if (pendingActivateId) {
@@ -2157,6 +2424,12 @@ window.pi.onInstances((list: InstanceSummary[]) => {
     if (!current || current.projectId !== activeProjectId) activateProjectPane();
   }
   updateEditorLock();
+  // The pane shells, xterm instances, tabs, and project bindings now exist;
+  // only this explicit per-terminal handshake opens main's egress gate.
+  for (const inst of list) {
+    const pane = panes.get(inst.id);
+    if (pane) signalTerminalHydrated(pane);
+  }
 });
 
 // ---------------------------------------------------------------- startup --
@@ -2185,6 +2458,9 @@ async function boot(attempt = 0): Promise<void> {
     // Build the project tab bar; the active project owns the initial view.
     const projects = await window.pi.projectList();
     for (const project of projects) {
+      if (Number.isSafeInteger(project.activationGeneration)) {
+        latestProjectActivationGeneration = Math.max(latestProjectActivationGeneration, project.activationGeneration);
+      }
       createProjectView(project);
       if (project.active) activeProjectId = project.id;
     }
@@ -2192,7 +2468,7 @@ async function boot(attempt = 0): Promise<void> {
     const bootView = activeProjectId ? projectViews.get(activeProjectId) : undefined;
     if (bootView) {
       projectCwd = bootView.cwd;
-      explorer.setProject(bootView.cwd);
+      explorer.setProject(bootView.id, bootView.cwd);
     }
 
     const instances = await window.pi.getInstances();
@@ -2200,6 +2476,7 @@ async function boot(attempt = 0): Promise<void> {
     // launch with no folder stays on the open-folder placeholder.
     if (instances.length === 0 && projects.length > 0) {
       createErrorPane("no agent terminal started.");
+      window.pi.readyTerminal("renderer", 1);
       removeSplash();
       return;
     }
@@ -2207,17 +2484,35 @@ async function boot(attempt = 0): Promise<void> {
       if (!panes.has(inst.id)) createPaneShell(inst.id);
       const pane = panes.get(inst.id);
       if (pane) {
+        applyTerminalGeneration(pane, inst.generation);
         pane.cwd = inst.cwd;
         pane.workspaceId = inst.workspaceId ?? "";
         pane.projectId = inst.projectId ?? null;
         pane.type = inst.type;
+        const engine = inst.engine ?? (inst.type === "agent" ? "core" : undefined);
+        pane.engine = engine;
+        pane.view.setEngine(engine);
         pane.shellName = inst.shellName;
-        if (inst.verify) pane.verify = inst.verify;
+        // `terminals:list` is also the reload fallback when the push arrives
+        // before the invoke continuation. Reapply every main-owned field so
+        // modified/recorder/verify state cannot reset to renderer defaults.
+        pane.modified = inst.modified ?? [];
+        pane.recorderState = inst.recorderState ?? "paused";
+        pane.verify = inst.verify ?? { state: "untested", command: null, summary: null };
         updatePaneTab(pane);
       }
     }
     activateProjectPane();
     updateEditorLock();
+    // Hydrate every pane only after all terminal shells and their project
+    // bindings have been constructed for this renderer document.
+    for (const inst of instances) {
+      const pane = panes.get(inst.id);
+      if (pane) signalTerminalHydrated(pane);
+    }
+    if (instances.length === 0) {
+      window.pi.readyTerminal("renderer", 1);
+    }
     removeSplash();
     // Keep the project that was active before quit (from projectList.active),
     // not the first instance's project — that second override was the
@@ -2233,8 +2528,7 @@ async function boot(attempt = 0): Promise<void> {
 
     // Worldlines: rebuild the panel from the live list (push events keep it
     // current after this).
-    const worldlines = await window.pi.getWorldlines();
-    for (const summary of worldlines) worldlinesView.upsert(summary);
+    hydrateWorldlines(activeProjectId);
   } catch (err) {
     if (attempt < 2) {
       setTimeout(() => void boot(attempt + 1), 250 * (2 ** attempt));

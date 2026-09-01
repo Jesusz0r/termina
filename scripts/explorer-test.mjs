@@ -4,15 +4,19 @@
  *
  * Launch requirement:
  *   TERMINA_INITIAL_CWD=<fresh fixture: greeting.ts "hello", hello.txt, src/>
- *   --remote-debugging-port=9222
+ *   TERMINA_E2E_PORT=<runner-assigned DevTools port>
  */
 import http from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
+import { join } from "node:path";
+import { e2ePort } from "./e2e-port.mjs";
+const projectRoot = process.env.TERMINA_INITIAL_CWD;
+if (!projectRoot) throw new Error("TERMINA_INITIAL_CWD is required");
 const getJson = (url) => new Promise((resolve, reject) => {
   const req = http.get(url, (res) => { let d = ""; res.on("data", (c) => (d += c)); res.on("end", () => resolve(JSON.parse(d))); res.on("error", reject); });
   req.on("error", reject);
 });
-const targets = await getJson("http://localhost:9222/json");
+const targets = await getJson(`http://127.0.0.1:${e2ePort()}/json`);
 const page = targets.find((t) => t.type === "page");
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 let nextId = 1;
@@ -113,13 +117,13 @@ const submitModal = async (value) => {
 
 // ---- 0. scrub artifacts from earlier runs (suites own their pollution) --
 for (const p of [
-  "/tmp/termina-test-project/greeting copy.txt",
-  "/tmp/termina-test-project/greeting copy 2.txt",
-  "/tmp/termina-test-project/greeting copy.ts",
-  "/tmp/termina-test-project/src/greeting copy.txt",
-  "/tmp/termina-test-project/src/hello.txt",
-  "/tmp/termina-test-project/src/greeting.ts",
-  "/tmp/termina-test-project/menu-dir",
+  join(projectRoot, "greeting copy.txt"),
+  join(projectRoot, "greeting copy 2.txt"),
+  join(projectRoot, "greeting copy.ts"),
+  join(projectRoot, "src/greeting copy.txt"),
+  join(projectRoot, "src/hello.txt"),
+  join(projectRoot, "src/greeting.ts"),
+  join(projectRoot, "menu-dir"),
 ]) {
   try { rmSync(p, { recursive: true }); } catch {}
 }
@@ -213,7 +217,7 @@ await sleep(200);
 await clickMenuItem("Paste");
 await sleep(700);
 const { existsSync } = await import("node:fs");
-const pastedIntoSrc = existsSync("/tmp/termina-test-project/src/greeting.ts");
+const pastedIntoSrc = existsSync(join(projectRoot, "src/greeting.ts"));
 check("cut + paste moves greeting into src", pastedIntoSrc, String(pastedIntoSrc));
 
 // ---- 10. copy back out to the root ----
@@ -253,10 +257,10 @@ check("pasting a folder into itself is rejected",
 
 // ---- cleanup: the suite owns its fixture pollution ----
 for (const p of [
-  "/tmp/termina-test-project/hello copy.txt",
-  "/tmp/termina-test-project/hello copy 2.txt",
-  "/tmp/termina-test-project/src/hello copy.txt",
-  "/tmp/termina-test-project/menu-dir",
+  join(projectRoot, "hello copy.txt"),
+  join(projectRoot, "hello copy 2.txt"),
+  join(projectRoot, "src/hello copy.txt"),
+  join(projectRoot, "menu-dir"),
 ]) {
   try { rmSync(p, { recursive: true }); } catch {}
 }

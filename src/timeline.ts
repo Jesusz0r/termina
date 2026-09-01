@@ -22,6 +22,8 @@ export class TimelineView {
   private progressCache = new Map<number, TimelineProgress>();
   /** seqs with an in-flight progress fetch. Prevents duplicate core calls. */
   private progressInFlight = new Set<number>();
+  /** Invalidates progress requests when the visible project/timeline changes. */
+  private progressEpoch = 0;
   private hoverSeq: number | null = null;
   private hoverTimer: ReturnType<typeof setTimeout> | null = null;
   private activeSeq: number | null = null;
@@ -108,6 +110,7 @@ export class TimelineView {
 
   /** Drop evicted dots (their source states are gone). */
   evict(seqs: number[]): void {
+    if (seqs.length > 0) this.progressEpoch++;
     const gone = new Set(seqs);
     this.events = this.events.filter((e) => !gone.has(e.seq));
     for (const seq of seqs) {
@@ -121,6 +124,7 @@ export class TimelineView {
   }
 
   setEvents(events: TimelineEvent[]): void {
+    this.progressEpoch++;
     this.stopReplay();
     this.clearHover();
     this.progressCache.clear();
@@ -141,6 +145,7 @@ export class TimelineView {
         existing.className = this.dotClass(event);
         existing.title = this.tooltip(event);
         this.progressCache.delete(event.seq);
+        this.progressInFlight.delete(event.seq);
       }
       return;
     }
@@ -274,8 +279,10 @@ export class TimelineView {
       if (this.hoverSeq !== seq) return;
       if (this.progressInFlight.has(seq)) return;
       this.progressInFlight.add(seq);
+      const epoch = this.progressEpoch;
       void this.onProgress(seq).then(
         (progress) => {
+          if (this.progressEpoch !== epoch) return;
           this.progressInFlight.delete(seq);
           if (progress.ok) this.progressCache.set(seq, progress);
           if (this.hoverSeq !== seq) return;
@@ -284,6 +291,7 @@ export class TimelineView {
           if (latest && dot) dot.title = this.tooltip(latest, progress);
         },
         () => {
+          if (this.progressEpoch !== epoch) return;
           this.progressInFlight.delete(seq);
         },
       );

@@ -17,6 +17,7 @@ interface DirState {
 export class Explorer {
   private treeEl: HTMLElement;
   private dirs = new Map<string, DirState>(); // keyed by abs path
+  private projectId: string | null = null;
   private projectCwd: string | null = null;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private selected: ExplorerEntry | null = null;
@@ -62,7 +63,8 @@ export class Explorer {
   }
 
   /** Called when the project folder changes. Null clears the tree. */
-  setProject(cwd: string | null): void {
+  setProject(projectId: string | null, cwd: string | null): void {
+    this.projectId = projectId;
     this.projectCwd = cwd;
     this.dirs.clear();
     this.selected = null;
@@ -168,16 +170,18 @@ export class Explorer {
     loading.className = "explorer-empty";
     loading.textContent = "loading…";
     children.appendChild(loading);
+    const projectId = this.projectId;
+    if (!projectId) return;
     let res: { entries: ExplorerEntry[]; error?: string; truncated?: boolean };
     try {
-      res = await window.pi.listDir(entry.path);
+      res = await window.pi.listDir(projectId, entry.path);
     } catch (err) {
       if (!state.expanded || seq !== state.loadSeq) return;
       children.replaceChildren();
       toast(`could not list ${entry.name}: ${(err as Error).message}`, "error");
       return;
     }
-    if (!state.expanded || seq !== state.loadSeq) return;
+    if (!state.expanded || seq !== state.loadSeq || this.projectId !== projectId) return;
     state.loaded = true;
     if (res.error) {
       children.replaceChildren();
@@ -298,8 +302,9 @@ export class Explorer {
   /** Paste the clipboard entry under targetDir ("" is the project root). */
   private async pasteAt(targetDirRel: string): Promise<void> {
     const clip = this.clipboardEntry;
-    if (!clip) return;
-    const res = await window.pi.pasteEntry(targetDirRel, clip.relPath, clip.cut);
+    const projectId = this.projectId;
+    if (!clip || !projectId) return;
+    const res = await window.pi.pasteEntry(projectId, targetDirRel, clip.relPath, clip.cut);
     if (!res.ok) {
       toast(res.error ?? "paste failed", "error");
       return;
@@ -318,25 +323,31 @@ export class Explorer {
   }
 
   private async createAt(parentRel: string, kind: "file" | "dir"): Promise<void> {
+    const projectId = this.projectId;
+    if (!projectId) return;
     const name = await showInput(kind === "file" ? "New file" : "New folder", "name", "");
     if (name.cancelled || !name.value?.trim()) return;
     const rel = parentRel ? `${parentRel}/${name.value.trim()}` : name.value.trim();
-    this.toastIfFailed(await window.pi.createEntry(rel, kind));
+    this.toastIfFailed(await window.pi.createEntry(projectId, rel, kind));
     await this.refresh();
   }
 
   private async renameAt(entry: ExplorerEntry): Promise<void> {
+    const projectId = this.projectId;
+    if (!projectId) return;
     const res = await showInput("Rename", "new name", entry.name);
     if (res.cancelled || !res.value?.trim() || res.value.trim() === entry.name) return;
-    this.toastIfFailed(await window.pi.renameEntry(entry.relPath, res.value.trim()));
+    this.toastIfFailed(await window.pi.renameEntry(projectId, entry.relPath, res.value.trim()));
     // Renames produce watcher delete+create events; refresh covers it.
     await this.refresh();
   }
 
   private async deleteAt(entry: ExplorerEntry): Promise<void> {
+    const projectId = this.projectId;
+    if (!projectId) return;
     const ok = await showConfirm("Delete", `Delete "${entry.relPath || entry.name}"?`);
     if (!ok.confirmed) return;
-    this.toastIfFailed(await window.pi.deleteEntry(entry.relPath));
+    this.toastIfFailed(await window.pi.deleteEntry(projectId, entry.relPath));
     // The watcher fires file:deleted, which closes any open editor tab.
     await this.refresh();
   }

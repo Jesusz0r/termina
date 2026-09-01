@@ -6,7 +6,7 @@ import * as monaco from "monaco-editor";
 import { toast } from "./components/modals";
 import { languageForPath } from "./editor-language";
 import { applyMonacoTheme } from "./editor";
-import { cssFontFamily, type ThemeId } from "../shared/types";
+import { cssFontFamily, type ProjectWorkspaceRef, type ThemeId } from "../shared/types";
 
 export class ReviewView {
   private container: HTMLElement;
@@ -15,10 +15,11 @@ export class ReviewView {
   private nameEl: HTMLElement;
   private terminalId: string | null = null;
   private path: string | null = null;
+  private owner: ProjectWorkspaceRef | null = null;
   private baseline: string | null | undefined = null;
   private originalModel: monaco.editor.ITextModel | null = null;
   private modifiedModel: monaco.editor.ITextModel | null = null;
-  private onOpenFile: (path: string) => void = () => {};
+  private onOpenFile: (path: string, owner: ProjectWorkspaceRef) => void = () => {};
   private onAccepted: (path: string) => void = () => {};
   private onReverted: (path: string) => void = () => {};
   private onHidden: () => void = () => {};
@@ -44,13 +45,13 @@ export class ReviewView {
 
     document.getElementById("review-back")!.addEventListener("click", () => this.hide());
     document.getElementById("review-open")!.addEventListener("click", () => {
-      if (this.path) this.onOpenFile(this.path);
+      if (this.path && this.owner) this.onOpenFile(this.path, this.owner);
     });
     document.getElementById("review-revert")!.addEventListener("click", () => void this.revert());
     document.getElementById("review-accept")!.addEventListener("click", () => this.accept());
   }
 
-  bind(handlers: { onOpenFile: (path: string) => void; onAccepted: (path: string) => void; onReverted: (path: string) => void; onHidden?: () => void; onShown?: () => void }): void {
+  bind(handlers: { onOpenFile: (path: string, owner: ProjectWorkspaceRef) => void; onAccepted: (path: string) => void; onReverted: (path: string) => void; onHidden?: () => void; onShown?: () => void }): void {
     this.onOpenFile = handlers.onOpenFile;
     this.onAccepted = handlers.onAccepted;
     this.onReverted = handlers.onReverted;
@@ -83,11 +84,16 @@ export class ReviewView {
     return this.path === path;
   }
 
+  matchesOwner(owner: ProjectWorkspaceRef): boolean {
+    return this.owner?.projectId === owner.projectId && this.owner.workspaceId === owner.workspaceId;
+  }
+
   /** Show the diff for a file the agent changed in the given terminal. */
-  async show(terminalId: string, path: string, relPath: string): Promise<void> {
+  async show(terminalId: string, path: string, relPath: string, owner: ProjectWorkspaceRef): Promise<void> {
     const seq = ++this.loadSeq;
     this.terminalId = terminalId;
     this.path = path;
+    this.owner = owner;
     this.nameEl.textContent = relPath;
 
     const hint = document.getElementById("review-hint")!;
@@ -97,7 +103,7 @@ export class ReviewView {
     try {
       res = await window.pi.reviewBaseline(terminalId, path);
       if (seq !== this.loadSeq) return;
-      current = await window.pi.openFile(path);
+      current = await window.pi.openFile(path, owner);
     } catch (err) {
       if (seq !== this.loadSeq) return;
       hint.textContent = (err as Error).message;
@@ -144,6 +150,7 @@ export class ReviewView {
     const seq = ++this.loadSeq;
     this.terminalId = null;
     this.path = absPath;
+    this.owner = null;
     this.nameEl.textContent = `${relPath}  ·  ${label}`;
     const [base, cand] = await Promise.all([
       window.pi.getWorldlineBaseFile(comparisonId, relPath),
@@ -168,6 +175,7 @@ export class ReviewView {
     const seq = ++this.loadSeq;
     this.terminalId = null;
     this.path = aRoot ? `${aRoot}/${relPath}` : null;
+    this.owner = null;
     this.nameEl.textContent = `${relPath}  ·  A ⇄ B`;
     const [a, b] = await Promise.all([
       window.pi.getWorldlineFile(comparisonId, "A", relPath),
@@ -212,7 +220,8 @@ export class ReviewView {
     if (!this.path || !this.terminalId) return;
     const seq = this.loadSeq;
     const path = this.path;
-    const current = await window.pi.openFile(path);
+    if (!this.owner) return;
+    const current = await window.pi.openFile(path, this.owner);
     if (seq !== this.loadSeq || this.path !== path) return;
     if (!current.ok) {
       toast(`could not refresh review: ${current.error}`, "error");
@@ -252,6 +261,7 @@ export class ReviewView {
     this.originalModel = null;
     this.modifiedModel = null;
     this.path = null;
+    this.owner = null;
     this.terminalId = null;
     this.baseline = null;
     this.onHidden();

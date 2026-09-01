@@ -1,6 +1,7 @@
 /** Terminal clipboard E2E test. */
 import { mkdir, rm, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { e2ePort } from "./e2e-port.mjs";
 
 const results = [];
 const check = (name, ok, detail = "") => {
@@ -8,7 +9,7 @@ const check = (name, ok, detail = "") => {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + String(detail).slice(0, 220) : ""}`);
 };
 
-const pages = await fetch("http://127.0.0.1:9222/json").then((response) => response.json());
+const pages = await fetch(`http://127.0.0.1:${e2ePort()}/json`).then((response) => response.json());
 const page = pages.find((item) => item.type === "page");
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 await new Promise((resolve, reject) => {
@@ -59,6 +60,53 @@ check("terminal copy shortcut dispatches", await evaluate(`(() => {
 })()`));
 await sleep(100);
 check("copy shortcut updates the system clipboard", (await evaluate(`window.pi.readClipboard()`)).includes(marker));
+
+const interruptMarker = "TERMINA_COPY_INTERRUPT_OK";
+const interruptCommand = "trap 'printf \\124\\105\\122\\115\\111\\116\\101\\137\\103\\117\\120\\131\\137\\111\\116\\124\\105\\122\\122\\125\\120\\124\\137\\117\\113\\012; exit' INT; sleep 30\r";
+const interruptShell = await evaluate(`window.pi.createTerminal({ type: "shell" })`);
+for (let i = 0; i < 20 && interruptShell?.id; i++) {
+  if (await evaluate(`Boolean(window.__panes.get(${JSON.stringify(interruptShell?.id)}))`)) break;
+  await sleep(100);
+}
+await sleep(400);
+await evaluate(`(async () => {
+  const pane = window.__panes.get(${JSON.stringify(interruptShell?.id)});
+  const term = pane?.view.getTerminal();
+  if (!pane || !term?.textarea) return false;
+  pane.tabEl.click();
+  term.clearSelection();
+  term.textarea.focus();
+  await window.pi.writeTerminal(pane.instanceId, ${JSON.stringify(interruptCommand)});
+  return true;
+})()`);
+await sleep(250);
+const copyInterruptShortcut = await evaluate(`(() => {
+  const pane = window.__panes.get(${JSON.stringify(interruptShell?.id)});
+  const term = pane?.view.getTerminal();
+  if (!term?.textarea || term.hasSelection()) return { intercepted: false, focused: false, active: false };
+  const focused = document.activeElement === term.textarea;
+  const active = pane.tabEl.classList.contains("active");
+  const intercepted = !term.textarea.dispatchEvent(new KeyboardEvent("keydown", {
+    key: "c", code: "KeyC", metaKey: true, bubbles: true, cancelable: true,
+  }));
+  return { intercepted, focused, active };
+})()`);
+let interrupted = false;
+for (let i = 0; i < 20; i++) {
+  const buffer = await evaluate(`(() => {
+    const term = window.__panes.get(${JSON.stringify(interruptShell?.id)})?.view.getTerminal();
+    if (!term) return "";
+    const lines = [];
+    for (let line = 0; line < term.buffer.active.length; line++) lines.push(term.buffer.active.getLine(line)?.translateToString(true) ?? "");
+    return lines.join("\\n");
+  })()`);
+  if (buffer.includes(interruptMarker)) {
+    interrupted = true;
+    break;
+  }
+  await sleep(200);
+}
+check("unselected terminal copy shortcut sends SIGINT", copyInterruptShortcut?.intercepted && copyInterruptShortcut?.focused && copyInterruptShortcut?.active && interrupted, `intercepted=${copyInterruptShortcut?.intercepted} focused=${copyInterruptShortcut?.focused} active=${copyInterruptShortcut?.active} interrupted=${interrupted}`);
 
 const multilinePaste = Array.from({ length: 12 }, (_, i) => `paste-line-${i + 1}`).join("\n");
 await evaluate(`window.pi.writeClipboard(${JSON.stringify(multilinePaste)})`);

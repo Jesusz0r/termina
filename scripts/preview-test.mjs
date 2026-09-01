@@ -1,10 +1,11 @@
 import http from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
+import { e2ePort } from "./e2e-port.mjs";
 const getJson = (url) => new Promise((resolve, reject) => {
   const req = http.get(url, (res) => { let d = ""; res.on("data", (c) => (d += c)); res.on("end", () => resolve(JSON.parse(d))); res.on("error", reject); });
   req.on("error", reject);
 });
-const targets = await getJson("http://localhost:9222/json");
+const targets = await getJson(`http://127.0.0.1:${e2ePort()}/json`);
 const page = targets.find((t) => t.type === "page");
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 let nextId = 1;

@@ -4,15 +4,17 @@
  *
  * Launch requirement:
  *   TERMINA_INITIAL_CWD=<fresh fixture: greeting.ts "hello", hello.txt, src/>
- *   --remote-debugging-port=9222
+ *   TERMINA_E2E_PORT=<runner-assigned DevTools port>
  */
+import { e2ePort } from "./e2e-port.mjs";
+
 const results = [];
 const check = (name, ok, detail = "") => {
   results.push(ok);
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + String(detail).slice(0, 200) : ""}`);
 };
 
-const pages = await fetch("http://127.0.0.1:9222/json").then((r) => r.json());
+const pages = await fetch(`http://127.0.0.1:${e2ePort()}/json`).then((r) => r.json());
 const page = pages.find((t) => t.type === "page");
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });

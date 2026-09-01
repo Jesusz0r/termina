@@ -1,6 +1,7 @@
 /** Settings e2e test. */
 import { mkdir, rm, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { e2ePort } from "./e2e-port.mjs";
 
 const results = [];
 const check = (name, ok, detail = "") => {
@@ -8,7 +9,7 @@ const check = (name, ok, detail = "") => {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + String(detail).slice(0, 220) : ""}`);
 };
 
-const pages = await fetch("http://127.0.0.1:9222/json").then((r) => r.json());
+const pages = await fetch(`http://127.0.0.1:${e2ePort()}/json`).then((r) => r.json());
 const page = pages.find((item) => item.type === "page");
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 await new Promise((resolve, reject) => {
@@ -46,7 +47,23 @@ check("light theme changes the surface color", await evaluate(`getComputedStyle(
 check("appearance lists type controls", await evaluate(`Array.from(document.querySelectorAll(".settings-inline-control label")).map((el) => el.textContent).join("|") === "Editor font size|Terminal font size|Font family"`));
 
 await evaluate(`(() => { const input = document.querySelectorAll(".settings-inline-control input[type=range]")[1]; input.value = "16"; input.dispatchEvent(new Event("input", { bubbles: true })); document.querySelectorAll(".settings-check-row input")[0].click(); })()`);
-check("terminal font size and word wrap persist", await evaluate(`window.pi.getPreferences().then((value) => value.terminalFontSize === 16 && value.wordWrap === true)`));
+const persistedSettings = await evaluate(`(async () => {
+  const deadline = Date.now() + 2_000;
+  let value = await window.pi.getPreferences();
+  while (value.terminalFontSize !== 16 || value.wordWrap !== true) {
+    if (Date.now() >= deadline) return { settled: false, value };
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    value = await window.pi.getPreferences();
+  }
+  return { settled: true, value };
+})()`);
+check(
+  "terminal font size and word wrap persist",
+  persistedSettings?.settled === true
+    && persistedSettings.value?.terminalFontSize === 16
+    && persistedSettings.value?.wordWrap === true,
+  JSON.stringify(persistedSettings?.value),
+);
 
 await evaluate(`document.querySelectorAll(".settings-nav-item")[1].click()`);
 check("keyboard section lists shortcuts", await evaluate(`document.querySelectorAll(".settings-shortcut-row").length >= 39`));
@@ -73,7 +90,9 @@ check(
   })()`),
 );
 
-const extraRoot = "/tmp/termina-settings-extra";
+const runRoot = process.env.TERMINA_E2E_RUN_ROOT;
+if (!runRoot) throw new Error("TERMINA_E2E_RUN_ROOT is required");
+const extraRoot = join(runRoot, "termina-settings-extra");
 await rm(extraRoot, { recursive: true, force: true });
 await mkdir(extraRoot, { recursive: true });
 const raced = await evaluate(`(async () => {

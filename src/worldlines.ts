@@ -187,10 +187,11 @@ export class WorldlinesView {
   upsert(summary: WorldlineSummary): void {
     let pair = this.pairs.get(summary.comparisonId);
     if (!pair) pair = this.makePair(summary.comparisonId);
-    pair.runEl.textContent = summary.sourceRunId;
-    pair.runEl.title = `source run ${summary.sourceRunId}`;
     const card = pair.cards.get(summary.label)!;
     const prev = card.summary;
+    if (summary.version < prev.version) return;
+    pair.runEl.textContent = summary.sourceRunId;
+    pair.runEl.title = `source run ${summary.sourceRunId}`;
     card.summary = summary;
     if (summary.terminalId) this.byTerminal.set(summary.terminalId, summary.label);
     if (summary.terminalId && prev.terminalId && summary.terminalId !== prev.terminalId) {

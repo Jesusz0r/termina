@@ -1,10 +1,15 @@
 import http from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
+import { join } from "node:path";
+import { e2ePort } from "./e2e-port.mjs";
+const projectRoot = process.env.TERMINA_INITIAL_CWD;
+if (!projectRoot) throw new Error("TERMINA_INITIAL_CWD is required");
+const greetingPath = join(projectRoot, "greeting.ts");
 const getJson = (url) => new Promise((resolve, reject) => {
   const req = http.get(url, (res) => { let d = ""; res.on("data", (c) => (d += c)); res.on("end", () => resolve(JSON.parse(d))); res.on("error", reject); });
   req.on("error", reject);
 });
-const targets = await getJson("http://localhost:9222/json");
+const targets = await getJson(`http://127.0.0.1:${e2ePort()}/json`);
 const page = targets.find((t) => t.type === "page");
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 let nextId = 1;
@@ -13,6 +18,7 @@ ws.onmessage = (m) => { const msg = JSON.parse(m.data); if (msg.id && pending.ha
 await new Promise((r) => (ws.onopen = r));
 const send = (method, params = {}) => new Promise((resolve) => { const id = nextId++; pending.set(id, resolve); ws.send(JSON.stringify({ id, method, params })); });
 const evalJs = async (expression) => { const r = await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }); return r.result?.result?.value; };
+const owner = await evalJs(`window.pi.projectList().then((v) => { const p = v.find((x) => x.active); return p ? { projectId: p.id, workspaceId: p.workspaceId } : null; })`);
 const results = [];
 const check = (name, ok, detail = "") => { results.push(ok); console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + detail : ""}`); };
 
@@ -29,7 +35,7 @@ for (let i = 0; i < 150; i++) {
   if (seenWorking && !busy.includes('working')) break;
 }
 await sleep(1500);
-const diskAfter = await evalJs(`window.pi.openFile('/tmp/termina-test-project/greeting.ts')`);
+const diskAfter = await evalJs(`window.pi.openFile(${JSON.stringify(greetingPath)}, ${JSON.stringify(owner)})`);
 check("agent changed the file on disk", diskAfter.content.includes("hi there"), JSON.stringify(diskAfter.content));
 
 // 2. the modified list has greeting.ts — click it → review diff opens
@@ -62,7 +68,7 @@ check("diff shows original hello → modified hi there", originalOk && modifiedO
 // 3. revert
 await evalJs(`document.getElementById('review-revert').click()`);
 await sleep(1000);
-const afterRevert = await evalJs(`window.pi.openFile('/tmp/termina-test-project/greeting.ts')`);
+const afterRevert = await evalJs(`window.pi.openFile(${JSON.stringify(greetingPath)}, ${JSON.stringify(owner)})`);
 check("revert restores the original content", afterRevert.content.includes('"hello"') && !afterRevert.content.includes("hi there"), JSON.stringify(afterRevert.content));
 const mark = await evalJs(`JSON.stringify([...document.querySelectorAll('#modified-list li .review-mark')].map(m => m.textContent))`);
 check("reverted marker shows", mark.includes("↩"), JSON.stringify(mark));
@@ -101,13 +107,13 @@ const acceptedDelete = await evalJs(`JSON.stringify({
   marks: [...document.querySelectorAll('#modified-list li .review-mark')].map((m) => m.textContent),
   current: null,
 })`);
-const stillDeleted = await evalJs(`window.pi.openFile('/tmp/termina-test-project/greeting.ts')`);
+const stillDeleted = await evalJs(`window.pi.openFile(${JSON.stringify(greetingPath)}, ${JSON.stringify(owner)})`);
 check("accept marks a deletion reviewed without restoring it", acceptedDelete.includes("✓") && stillDeleted.ok === false, `${acceptedDelete} ${JSON.stringify(stillDeleted)}`);
 await evalJs(`(() => [...document.querySelectorAll('#modified-list li')].find(li => li.querySelector('.path')?.textContent.includes('greeting.ts'))?.click())()`);
 await sleep(600);
 await evalJs(`document.getElementById('review-revert').click()`);
 await sleep(1000);
-const restoredDelete = await evalJs(`window.pi.openFile('/tmp/termina-test-project/greeting.ts')`);
+const restoredDelete = await evalJs(`window.pi.openFile(${JSON.stringify(greetingPath)}, ${JSON.stringify(owner)})`);
 check("deleted file revert restores the baseline", restoredDelete.ok && restoredDelete.content.includes('"hello"'), JSON.stringify(restoredDelete));
 
 console.log(`\n${results.filter(Boolean).length}/${results.length} passed`);

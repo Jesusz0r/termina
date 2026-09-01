@@ -7,7 +7,7 @@
  * when idle you can edit and save with Cmd+S.
  */
 import * as monaco from "monaco-editor";
-import { cssFontFamily, pathBasename, type ThemeId } from "../shared/types";
+import { cssFontFamily, pathBasename, type ProjectWorkspaceRef, type ThemeId } from "../shared/types";
 import { languageForPath } from "./editor-language";
 import { changedLinesInAfter } from "../shared/line-diff";
 import { copyText, toast } from "./components/modals";
@@ -88,9 +88,49 @@ export function applyMonacoTheme(theme: ThemeId): void {
   );
 }
 
+interface SharedModelEntry {
+  model: monaco.editor.ITextModel;
+  refs: number;
+}
+
+/** Monaco models are global by URI; tabs are owned by each project editor. */
+const sharedFileModels = new Map<string, SharedModelEntry>();
+
+function acquireSharedFileModel(path: string): { model: monaco.editor.ITextModel; release: () => void } {
+  const uri = monaco.Uri.file(path);
+  const uriKey = uri.toString();
+  let entry = sharedFileModels.get(uriKey);
+  if (!entry || entry.model.isDisposed()) {
+    if (entry) sharedFileModels.delete(uriKey);
+    let model = monaco.editor.getModel(uri);
+    if (!model || model.isDisposed()) model = monaco.editor.createModel("", languageForPath(path), uri);
+    entry = { model, refs: 0 };
+    sharedFileModels.set(uriKey, entry);
+  }
+  entry.refs++;
+  let released = false;
+  return {
+    model: entry.model,
+    release: () => {
+      if (released) return;
+      released = true;
+      const current = sharedFileModels.get(uriKey);
+      if (!current || current.model !== entry!.model) return;
+      current.refs = Math.max(0, current.refs - 1);
+      if (current.refs === 0) {
+        sharedFileModels.delete(uriKey);
+        if (!current.model.isDisposed()) current.model.dispose();
+      }
+    },
+  };
+}
+
 interface OpenTab {
   key: string; // absolute path
   model: monaco.editor.ITextModel;
+  owner: ProjectWorkspaceRef | null;
+  releaseModel: () => void;
+  contentListener: monaco.IDisposable | null;
   dom: HTMLElement;
   dirtyDot: HTMLElement;
   /** The model version last known to match the disk content. */
@@ -137,6 +177,8 @@ export class EditorManager {
   tabBadge: (path: string) => "A" | "B" | null = () => null;
   /** The opened project root, for Copy Relative Path (null when unknown). */
   projectRootProvider: () => string | null = () => null;
+  /** The project/workspace owner for renderer-originated file mutations. */
+  ownerProvider: () => ProjectWorkspaceRef | null = () => null;
 
   constructor(container: HTMLElement, tabsEl: HTMLElement, emptyEl: HTMLElement, projectOpen = false, needsLogin = false) {
     this.tabsEl = tabsEl;
@@ -224,8 +266,10 @@ export class EditorManager {
    * With preview: true the tab is a replaceable preview (VS Code style) — a
    * new preview replaces the previous one; editing or preview: false pins it.
    */
-  async openFile(path: string, opts: { preview?: boolean } = {}): Promise<void> {
+  async openFile(path: string, opts: { preview?: boolean; owner?: ProjectWorkspaceRef } = {}): Promise<void> {
     const preview = opts.preview ?? true;
+    const owner = opts.owner ?? this.ownerProvider();
+    if (!owner) throw new Error("file owner is unavailable");
     const key = path;
     const existing = this.tabs.get(key);
     if (existing) {
@@ -238,14 +282,9 @@ export class EditorManager {
     // Keep a replacement tab in the map before closing the previous preview.
     // Closing the last tab first would collapse the editor, then expand it again.
     const replacing = preview && this.previewKey && this.previewKey !== key ? this.previewKey : null;
-    // Monaco forbids two models with the same URI. Reuse an existing model
-    // (another editor instance or a leftover URI) instead of throwing.
-    const uri = monaco.Uri.file(path);
-    let model = monaco.editor.getModel(uri);
-    if (!model || model.isDisposed()) {
-      model = monaco.editor.createModel("", languageForPath(path), uri);
-    }
-    const tab = this.makeTab(key, model);
+    const lease = acquireSharedFileModel(path);
+    const model = lease.model;
+    const tab = this.makeTab(key, model, owner, lease.release);
     if (preview) {
       this.previewKey = key;
       tab.dom.classList.add("preview");
@@ -253,7 +292,7 @@ export class EditorManager {
     // User edits pin the preview into a permanent tab. Programmatic content
     // replacements (watcher/agent live updates) come through as isFlush and
     // do not pin. The same event marks the tab unsaved.
-    model.onDidChangeContent((e) => {
+    tab.contentListener = model.onDidChangeContent((e) => {
       if (e.isFlush) return;
       this.clearAgentChanges(key);
       if (this.previewKey === key) this.pinPreview();
@@ -265,9 +304,11 @@ export class EditorManager {
     this.renderTabs();
     this.syncEmptyState();
 
-    const res = await window.pi.openFile(path);
+    const initialVersionId = model.getAlternativeVersionId();
+    const res = await window.pi.openFile(path, owner);
     if (res.ok) {
-      if (this.tabs.has(key)) {
+      const current = this.tabs.get(key);
+      if (current?.model === model && model.getAlternativeVersionId() === initialVersionId) {
         // Learn the canonical alias so watcher pushes under the canonical
         // path find this tab.
         if (res.path !== key) this.canonicalKeys.set(res.path, key);
@@ -281,12 +322,23 @@ export class EditorManager {
         } else {
           tab.agentRevealLine = null;
         }
+      } else if (current?.model === model && this.userDirty.has(key)) {
+        // The initial read lost a race with a user edit. Never replace the
+        // user's model with delayed disk bytes; surface the normal conflict.
+        if (!current.dom.classList.contains("conflict")) {
+          current.dom.classList.add("conflict");
+          current.dom.title = `${key} — changed on disk while you have unsaved edits`;
+          this.onConflict(key);
+        }
+        if (this.previewKey === key) this.pinPreview();
       }
-      this.activate(key);
-      this.onFileOpened();
+      if (this.tabs.get(key)?.model === model) {
+        this.activate(key);
+        this.onFileOpened();
+      }
       return;
     }
-    this.closeTab(key);
+    if (this.tabs.get(key)?.model === model && model.getAlternativeVersionId() === initialVersionId) this.closeTab(key);
     throw new Error(res.error);
   }
 
@@ -390,7 +442,7 @@ export class EditorManager {
   /** Paths marked as the user's own (agent off-limits). */
   private mineKeys = new Set<string>();
   /** Fired when the user clicks the mine toggle on a tab. */
-  onToggleMine: (path: string) => void = () => {};
+  onToggleMine: (path: string, owner: ProjectWorkspaceRef) => void = () => {};
 
   /** True when the path is marked as the user's own. */
   isMine(path: string): boolean {
@@ -434,7 +486,7 @@ export class EditorManager {
     for (const tab of this.tabs.values()) tab.dom.classList.remove("mine");
   }
 
-  private makeTab(key: string, model: monaco.editor.ITextModel): OpenTab {
+  private makeTab(key: string, model: monaco.editor.ITextModel, owner: ProjectWorkspaceRef | null, releaseModel: () => void): OpenTab {
     const dom = document.createElement("div");
     dom.className = "editor-tab";
     const name = document.createElement("span");
@@ -450,7 +502,7 @@ export class EditorManager {
     mine.title = "Mark as yours — the agent must not modify it";
     mine.addEventListener("click", (e) => {
       e.stopPropagation();
-      this.onToggleMine(key);
+      if (owner) this.onToggleMine(key, owner);
     });
     const wline = document.createElement("span");
     wline.className = "tab-worldline";
@@ -501,7 +553,7 @@ export class EditorManager {
     });
     dom.addEventListener("dragleave", () => this.clearDropTarget());
     dom.addEventListener("dragend", () => this.clearDrag());
-    return { key, model, dom, dirtyDot: dirty, savedVersionId: model.getAlternativeVersionId(), changeDecorations: [], agentRevealLine: null };
+    return { key, model, owner, releaseModel, contentListener: null, dom, dirtyDot: dirty, savedVersionId: model.getAlternativeVersionId(), changeDecorations: [], agentRevealLine: null };
   }
 
   private renderTabs(): void {
@@ -545,7 +597,9 @@ export class EditorManager {
     for (const [canonical, mapped] of this.canonicalKeys) {
       if (mapped === key) this.canonicalKeys.delete(canonical);
     }
-    tab.model.dispose();
+    tab.contentListener?.dispose();
+    tab.contentListener = null;
+    tab.releaseModel();
     this.tabs.delete(key);
     this.order = this.order.filter((k) => k !== key);
     this.userDirty.delete(key);
@@ -566,7 +620,11 @@ export class EditorManager {
     if (!this.activeKey || this.activeKey.startsWith("timeline:")) return;
     const tab = this.tabs.get(this.activeKey);
     if (!tab) return;
-    const res = await window.pi.saveFile(tab.key, tab.model.getValue());
+    if (!tab.owner) {
+      toast(`could not save ${pathBasename(tab.key)}: file owner is unavailable`, "error");
+      return;
+    }
+    const res = await window.pi.saveFile(tab.key, tab.model.getValue(), tab.owner);
     if (res.ok) {
       tab.savedVersionId = tab.model.getAlternativeVersionId();
       this.syncDirty(tab);
@@ -584,7 +642,13 @@ export class EditorManager {
     for (const key of [...this.userDirty]) {
       const tab = this.tabs.get(key);
       if (!tab) continue;
-      const res = writerId ? await window.pi.flushSave(tab.key, tab.model.getValue(), writerId) : await window.pi.saveFile(tab.key, tab.model.getValue());
+      if (!tab.owner) {
+        failed.push(key);
+        continue;
+      }
+      const res = writerId
+        ? await window.pi.flushSave(tab.key, tab.model.getValue(), writerId, tab.owner)
+        : await window.pi.saveFile(tab.key, tab.model.getValue(), tab.owner);
       if (res.ok) {
         tab.savedVersionId = tab.model.getAlternativeVersionId();
         this.syncDirty(tab);
@@ -736,7 +800,7 @@ export class EditorManager {
     }
     const replacingPreview = this.previewKey && this.previewKey !== key ? this.previewKey : null;
     const model = monaco.editor.createModel(content, languageForPath(relPath), monaco.Uri.parse(`timeline://${terminalId}/${encodeURIComponent(eventKey)}`));
-    const tab = this.makeTab(key, model);
+    const tab = this.makeTab(key, model, null, () => model.dispose());
     tab.dom.classList.add("timeline-tab");
     tab.dom.title = `${relPath} — ${label}`;
     this.tabs.set(key, tab);
@@ -785,7 +849,11 @@ export class EditorManager {
   dispose(): void {
     closeContextMenu();
     this.editor.dispose();
-    for (const tab of this.tabs.values()) tab.model.dispose();
+    for (const tab of this.tabs.values()) {
+      tab.contentListener?.dispose();
+      tab.contentListener = null;
+      tab.releaseModel();
+    }
     this.tabs.clear();
     this.order = [];
     this.userDirty.clear();

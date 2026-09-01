@@ -1,7 +1,7 @@
 /**
  * Verify & Iterate e2e test.
  *
- * Expects an Electron instance on :9222 with TERMINA_INITIAL_CWD set to a
+ * Expects an Electron instance on TERMINA_E2E_PORT with TERMINA_INITIAL_CWD set to a
  * project with a failing `npm run test` script (see the test project setup
  * in the README/commits). Steps:
  *   1. detectTest() reports the npm test script
@@ -13,8 +13,11 @@
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { e2ePort } from "./e2e-port.mjs";
 
-const port = 9222;
+const port = e2ePort();
+const projectRoot = process.env.TERMINA_INITIAL_CWD;
+if (!projectRoot) throw new Error("TERMINA_INITIAL_CWD is required");
 const results = [];
 const check = (name, ok, detail = "") => {
   results.push({ name, ok, detail });
@@ -65,6 +68,11 @@ const contextFile = (termId) => join(findEventsDir(), `verify-${termId}.md`);
 const detected = await evalJs(`window.pi.detectTest()`);
 check("detectTest finds the npm test script", detected?.label === "npm run test", JSON.stringify(detected));
 
+// A supplied terminal id is an ownership boundary: an exited/unknown pane
+// must not silently resolve against the active project's working directory.
+const unknownTerminal = await evalJs(`window.pi.detectTest("term-does-not-exist")`);
+check("detectTest fails closed for an unknown terminal", unknownTerminal === null, JSON.stringify(unknownTerminal));
+
 // The UI button must be ENABLED at boot when tests exist (it used to stay
 // disabled forever because the renderer never asked for the command).
 await sleep(400);
@@ -74,7 +82,7 @@ const btn = await evalJs(
 check("Verify button enabled at boot", btn.disabled === false && btn.title.includes("npm run test"), JSON.stringify(btn));
 
 // Restore the failing state (earlier runs may have fixed it).
-writeFileSync("/tmp/termina-verify-project/math.js", "exports.add = (a, b) => a + b + 1; // BUG\n");
+writeFileSync(join(projectRoot, "math.js"), "exports.add = (a, b) => a + b + 1; // BUG\n");
 
 // ---- 2. run verify → failing ----
 const run1 = await evalJs(`window.pi.runVerify("term-1")`);
@@ -105,7 +113,7 @@ check("context contains the failure output", ctx1.includes("FAIL: add"), ctx1.sl
 
 // ---- 4. fix + verify again → green ----
 // Simulate the agent fixing the bug (a real agent run does this via tools).
-writeFileSync("/tmp/termina-verify-project/math.js", "exports.add = (a, b) => a + b;\n");
+writeFileSync(join(projectRoot, "math.js"), "exports.add = (a, b) => a + b;\n");
 
 const run2 = await evalJs(`window.pi.runVerify("term-1")`);
 check("second runVerify starts ok", run2?.ok === true, JSON.stringify(run2));

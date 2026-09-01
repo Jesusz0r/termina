@@ -4,7 +4,7 @@
  * Launch requirement:
  *   TERMINA_INITIAL_CWD=<fresh fixture: greeting.ts "hello", hello.txt, src/>
  *   TERMINA_EVENTS_DIR=<events dir>
- *   --remote-debugging-port=9222
+ *   TERMINA_E2E_PORT=<runner-assigned DevTools port>
  *
  * Steps:
  *   1. The owner agent makes a plan (3 checkbox tasks with file paths) and
@@ -16,6 +16,7 @@
  */
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { e2ePort } from "./e2e-port.mjs";
 
 const results = [];
 const check = (name, ok, detail = "") => {
@@ -25,6 +26,8 @@ const check = (name, ok, detail = "") => {
 
 const eventsDir = process.env.TERMINA_EVENTS_DIR ?? "/tmp/termina-events-test";
 const worldsDir = process.env.TERMINA_WORLDS_DIR ?? "";
+const projectRoot = process.env.TERMINA_INITIAL_CWD;
+if (!projectRoot) throw new Error("TERMINA_INITIAL_CWD is required");
 
 const listMailboxFiles = (dir, acc = []) => {
   if (!dir || !existsSync(dir)) return acc;
@@ -56,7 +59,7 @@ const readDispatchContext = () => {
   return parts.join("\n");
 };
 
-const pages = await fetch("http://127.0.0.1:9222/json").then((r) => r.json());
+const pages = await fetch(`http://127.0.0.1:${e2ePort()}/json`).then((r) => r.json());
 const page = pages.find((t) => t.type === "page");
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
@@ -111,9 +114,10 @@ await sleep(1000);
 const files = await evalJs(`[...document.querySelectorAll('#modified-list .path')].map(p => p.textContent)`);
 check("worker files land in the owner's review", files.some((f) => f.includes("utils.ts")) && files.some((f) => f.includes("math.ts")), JSON.stringify(files));
 
-check("utils.ts exists on disk", existsSync("/tmp/termina-test-project/utils.ts"), "");
-check("math.ts exists on disk", existsSync("/tmp/termina-test-project/math.ts"), "");
-const greeting = existsSync("/tmp/termina-test-project/greeting.ts") ? readFileSync("/tmp/termina-test-project/greeting.ts", "utf8") : "";
+check("utils.ts exists on disk", existsSync(join(projectRoot, "utils.ts")), "");
+check("math.ts exists on disk", existsSync(join(projectRoot, "math.ts")), "");
+const greetingPath = join(projectRoot, "greeting.ts");
+const greeting = existsSync(greetingPath) ? readFileSync(greetingPath, "utf8") : "";
 check("greeting.ts was edited by its worker", greeting.includes("hi there"), greeting.slice(0, 60));
 
 const ownerMailbox = existsSync(join(eventsDir, "mailbox-term-1.md")) ? readFileSync(join(eventsDir, "mailbox-term-1.md"), "utf8") : "";

@@ -5,7 +5,7 @@
  *   TERMINA_EVENTS_DIR=/tmp/termina-events-test
  *   TERMINA_INITIAL_CWD=<project with a SLOW test script:
  *     package.json: { "scripts": { "test": "node -e 'setTimeout(()=>{},30000)'" } }>
- *   --remote-debugging-port=9222
+ *   TERMINA_E2E_PORT=<runner-assigned DevTools port>
  *
  * Steps:
  *   1. runVerify starts a background process without a worker pane.
@@ -16,6 +16,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { e2ePort } from "./e2e-port.mjs";
 
 const results = [];
 const check = (name, ok, detail = "") => {
@@ -26,7 +27,7 @@ const check = (name, ok, detail = "") => {
 const eventsDir = process.env.TERMINA_EVENTS_DIR ?? "/tmp/termina-events-test";
 const ctxFile = join(eventsDir, "verify-term-1.md");
 
-const pages = await fetch("http://127.0.0.1:9222/json").then((r) => r.json());
+const pages = await fetch(`http://127.0.0.1:${e2ePort()}/json`).then((r) => r.json());
 const page = pages.find((t) => t.type === "page");
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });

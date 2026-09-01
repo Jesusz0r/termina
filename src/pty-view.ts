@@ -325,8 +325,11 @@ export class PtyView {
     if (focus) this.focus();
   }
 
-  write(data: string): void {
-    if (!this.disposed) this.term.write(data);
+  write(data: string, onConsumed?: () => void): void {
+    if (this.disposed) return;
+    this.term.write(data, () => {
+      if (!this.disposed) onConsumed?.();
+    });
   }
 
   setTheme(theme: ThemeId): void {

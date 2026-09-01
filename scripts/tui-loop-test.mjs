@@ -1,10 +1,12 @@
 import http from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
+import { join } from "node:path";
+import { e2ePort } from "./e2e-port.mjs";
 const getJson = (url) => new Promise((resolve, reject) => {
   const req = http.get(url, (res) => { let d = ""; res.on("data", (c) => (d += c)); res.on("end", () => resolve(JSON.parse(d))); res.on("error", reject); });
   req.on("error", reject);
 });
-const targets = await getJson("http://localhost:9222/json");
+const targets = await getJson(`http://127.0.0.1:${e2ePort()}/json`);
 const page = targets.find((t) => t.type === "page");
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 let nextId = 1;
@@ -45,7 +47,10 @@ check("modified panel has the file", modified.some(m => m.includes("tui-test.txt
 
 // file on disk?
 const fs = await import("node:fs");
-const disk = fs.existsSync("/tmp/termina-test-project/tui-test.txt") ? fs.readFileSync("/tmp/termina-test-project/tui-test.txt", "utf8") : null;
+const projectRoot = process.env.TERMINA_INITIAL_CWD;
+if (!projectRoot) throw new Error("TERMINA_INITIAL_CWD is required");
+const outputPath = join(projectRoot, "tui-test.txt");
+const disk = fs.existsSync(outputPath) ? fs.readFileSync(outputPath, "utf8") : null;
 check("file created on disk", disk?.includes("hello from the tui"), JSON.stringify(disk));
 
 console.log(`\n${results.filter(Boolean).length}/${results.length} passed`);

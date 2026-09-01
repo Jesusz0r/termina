@@ -1,7 +1,7 @@
 /**
  * Session Timeline end-to-end test.
  *
- * Expects Electron on :9222 with TERMINA_INITIAL_CWD pointing at a fresh
+ * Expects Electron on TERMINA_E2E_PORT with TERMINA_INITIAL_CWD pointing at a fresh
  * project containing greeting.ts ("export const greeting = \"hello\";").
  * The agent is prompted to change it; we then assert:
  *   1. getTimeline() returns agent_start → tool → agent_settled points
@@ -9,13 +9,15 @@
  *   3. the strip renders dots in the DOM
  *   4. clicking a dot opens a read-only timeline snapshot tab in the editor
  */
+import { e2ePort } from "./e2e-port.mjs";
+
 const results = [];
 const check = (name, ok, detail = "") => {
   results.push({ name, ok });
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + String(detail).slice(0, 200) : ""}`);
 };
 
-const pages = await fetch(`http://127.0.0.1:9222/json`).then((r) => r.json());
+const pages = await fetch(`http://127.0.0.1:${e2ePort()}/json`).then((r) => r.json());
 const page = pages.find((t) => t.type === "page");
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 await new Promise((res, rej) => {
