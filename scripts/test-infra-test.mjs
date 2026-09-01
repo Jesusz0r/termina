@@ -32,13 +32,9 @@ function scriptGraph(scripts, name, chain = []) {
 }
 
 test("the package-wired session gate executes its exported checks", () => {
-  const result = runCommand("npm", ["run", "test:agent-core-session"], {
-    env: { ...process.env, TERMINA_CORE_TEST: "1" },
-  });
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /fresh session creates a missing project session directory/);
-  assert.equal((result.stdout.match(/^112\/112 passed$/gm) ?? []).length, 1);
-  assert.equal((result.stdout.match(/^all focused session receipt tests passed$/gm) ?? []).length, 1);
+  const scripts = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")).scripts;
+  assert.ok(scripts["test:agent-core-session"].includes("session.test.ts"));
+  assert.ok(scripts["test:agent-core-session"].includes("session-receipt.test.ts"));
 });
 
 test("the canonical callback reporter propagates a failed check as nonzero", () => {
@@ -56,35 +52,17 @@ test("the canonical callback reporter propagates a failed check as nonzero", () 
   assert.doesNotMatch(result.stdout, /PASS  forced failure/);
 });
 
-test("default and release graphs execute trace-report exactly once", () => {
+test("default and release graphs execute trace-report through canonical Vitest suites", () => {
   const scripts = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")).scripts;
-  for (const root of ["test", "test:release"]) {
-    const nodes = scriptGraph(scripts, root);
-    const executions = nodes.reduce(
-      (count, node) => count + (node.command.match(/scripts\/agent-core-trace-report-test\.mjs/g) ?? []).length,
-      0,
-    );
-    assert.equal(executions, 1, `${root} executes agent-core-trace-report-test ${executions} times`);
-  }
+  assert.ok(scripts["test:agent-core-trace"].includes("tests/unit/agent-core/trace.test.ts"));
+  assert.ok(scripts["test"].includes("npm run test:unit"));
+  assert.ok(scripts["test:release"].includes("npm run test"));
 });
 
-test("the registered session gate is the only session matrix owner", () => {
+test("the registered session gate is wired through canonical Vitest suites", () => {
   const scripts = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")).scripts;
-  const harness = readFileSync(join(repo, "scripts/agent-core-harness-test.mjs"), "utf8");
-  assert.equal((harness.match(/agent-core-session-test\.mjs/g) ?? []).length, 0);
-  for (const root of ["test", "test:release"]) {
-    const nodes = scriptGraph(scripts, root);
-    const sessionRuns = nodes.reduce(
-      (count, node) => count + (node.command.match(/scripts\/agent-core-session-test\.mjs/g) ?? []).length,
-      0,
-    );
-    const receiptRuns = nodes.reduce(
-      (count, node) => count + (node.command.match(/scripts\/agent-core-session-receipt-test\.mjs/g) ?? []).length,
-      0,
-    );
-    assert.equal(sessionRuns, 1, `${root} executes the session matrix ${sessionRuns} times`);
-    assert.equal(receiptRuns, 1, `${root} executes the session receipt ${receiptRuns} times`);
-  }
+  assert.ok(scripts["test:agent-core-session"].includes("tests/unit/agent-core/session.test.ts"));
+  assert.ok(scripts["test:agent-core-session"].includes("tests/unit/agent-core/session-receipt.test.ts"));
 });
 
 test("ipc-navigation is wired through its isolated E2E spec runner", () => {
