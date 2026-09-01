@@ -7,25 +7,44 @@
  * state) to sidecar files we tail — that powers auto-open of files
  * mid-run and the modified-files panel.
  */
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain as electronIpcMain, Menu, nativeTheme } from "electron";
 
 // Name the app for the macOS menu bar and user-data paths. Unpackaged runs default to "Electron".
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
-import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { access, chmod, cp, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { access, cp, lstat, mkdir, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SessionForkClient } from "./session-fork.js";
+import { SessionRetentionOwner } from "./session-retention.js";
 import { PtyTerminal } from "./pty-terminal.js";
+import {
+  isPtyDocumentCurrent,
+  isPtyFrameEventCurrent,
+  isPtyLifecycleCurrent,
+  isPtyRendererSendTargetCurrent,
+  isPtyReadyHandshakeCurrent,
+  PtyEgressScheduler,
+  sendPtyRendererMessage,
+  type PtyDocumentIdentity,
+  type PtyLifecycleIdentity,
+  type PtyRendererSendTarget,
+} from "./pty-egress.js";
 import { BRIDGE_EXTENSION } from "./bridge-extension.js";
-import { AgentStartEvent, SidecarEvent, SidecarTailer } from "./sidecar.js";
+import { AgentStartEvent, SidecarEvent, SidecarEventDelivery, SidecarEventQueue, SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
-import { SnapshotStore, MIN_WORLDS_FREE_BYTES, captureRootInRepo, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, platformHasRecursiveWatcher, platformHasSandboxExec, type SourceState } from "./worldline-git.js";
+import { SnapshotStore, MIN_WORLDS_FREE_BYTES, bindOwnedDirectory, bindOwnedEntry, boundPromotionCopyTree, boundPromotionEnsureDirectory, boundPromotionListEntries, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionReadFile, boundPromotionWriteFile, captureRootInRepo, createOwnedDirectory, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, platformHasRecursiveWatcher, platformHasSandboxExec, removeBoundOwnedDirectory, removeBoundOwnedEntry, type BoundOwnedDirectory, type BoundPromotionExpectedLeaf, type PromotionFsIdentity, type SourceState, writeBoundOwnedFile } from "./worldline-git.js";
 import { WorldlineManager, dirBytes, quoteShellArg, recoverPromotionJournals, type RunRecord } from "./worldlines.js";
-import { sandboxShellPreamble, writeEvidenceProfile } from "./sandbox.js";
+import {
+  candidateSandboxLaunch,
+  evidenceProfileContent,
+  filterCandidateEnvironment,
+  sandboxResourceLimitPreflight,
+  terminateSandboxProcessGroup,
+} from "./sandbox.js";
 import { parseFailingTests, verifyFailSummary } from "./evidence.js";
 import { coreClient } from "./core-client.js";
 import { changedLinesInAfter } from "../shared/line-diff.js";
@@ -49,9 +68,7 @@ import {
   isCoreSessionId,
   listLogicalSessions,
   parseSessionBundlePath,
-  removeEmptySessionBundle,
   sessionBundleHasContent,
-  writeForkedSession,
 } from "../agent-core/session.js";
 import {
   isAuthorizedDropSender,
@@ -90,6 +107,8 @@ import {
   type TimelineEvent,
   type TimelinePrefix,
   type TimelineProgress,
+  type ProjectWorkspaceRef,
+  type RendererIpcCapability,
   type VerifyInfo,
   type VerifyState,
 } from "../shared/types.js";
@@ -104,7 +123,6 @@ const MAX_AUTH_JSON_BYTES = 128 * 1024;
 function isChallengeProfile(value: unknown): value is ChallengeProfile {
   return typeof value === "string" && (CHALLENGE_PROFILES as readonly string[]).includes(value);
 }
-const MAX_PTY_IPC_CHUNK = 64 * 1024;
 const MAX_CLIPBOARD_BYTES = 4 * 1024 * 1024;
 const MAX_EXPLORER_ENTRIES = 2000;
 const MAX_VERIFY_OUTPUT = 200_000;
@@ -122,6 +140,8 @@ const TOOL_CHANGE_DEDUP_MS = 1500;
 /** Unowned disk writes (installs, builds, tests) inside this window refresh
  *  the last change dot instead of adding one per file. */
 const CHANGE_BURST_MS = 2000;
+/** Bound one checkpoint's watcher-idle barrier without blocking main. */
+const CHECKPOINT_IDLE_WAIT_MS = 1000;
 
 let terminalSeq = 0;
 let workspaceSeq = 0;
@@ -205,6 +225,16 @@ function cleanEnv(): Record<string, string | undefined> {
   return env;
 }
 
+/**
+ * Candidate processes get a minted environment capability, never the ordinary
+ * terminal environment. The selected provider is the only ambient credential
+ * namespace that may cross the boundary; copied auth files remain preferred.
+ */
+function candidateEnv(provider: string | null): Record<string, string | undefined> {
+  const bundledNode = join(process.resourcesPath, "node", "bin");
+  return filterCandidateEnvironment(process.env, provider, existsSync(bundledNode) ? [bundledNode] : []);
+}
+
 /** Values pi accepts for --thinking. Reject anything else at spawn. */
 const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const MAX_PI_MODEL_CHARS = 256;
@@ -213,6 +243,8 @@ const MAX_PI_MODEL_CHARS = 256;
 interface VerifyJob {
   child: ReturnType<typeof spawn>;
   interrupted: boolean;
+  /** One idempotent process-group cleanup operation for this worker. */
+  cleanup: (signal: NodeJS.Signals, graceMs?: number) => Promise<boolean>;
 }
 
 /** A file the user changed while no agent terminal was busy. */
@@ -269,8 +301,33 @@ function detectShells(): Promise<{ name: string; path: string }[]> {
   return shellsPromise;
 }
 
+/** Stop waiting for a candidate tailer when its owning startup attempt closes. */
+function awaitCandidateAbortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(new Error("candidate startup was cancelled"));
+  return new Promise<T>((resolvePromise, rejectPromise) => {
+    const onAbort = (): void => {
+      signal.removeEventListener("abort", onAbort);
+      rejectPromise(new Error("candidate startup was cancelled"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolvePromise(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        rejectPromise(error);
+      },
+    );
+  });
+}
+
 class PiTerminalInstance {
   readonly id: string;
+  /** Monotonic generation fencing this PTY from a later id reuse. */
+  readonly generation = ++terminalGenerationSeq;
   pty: PtyTerminal;
   cwd: string;
   /** The workspace this terminal works in (empty when no folder is open). */
@@ -293,6 +350,8 @@ class PiTerminalInstance {
   shellName?: string;
   /** Absolute shell binary, for roster resume. */
   shellPath?: string;
+  /** User/project teardown invalidated this terminal's pending delivery. */
+  closed = false;
   busy = false;
   modified = new Map<string, ModifiedFile>();
   /** Pre-run content per path (Change Review): string = baseline, null = created. */
@@ -382,6 +441,8 @@ interface ProjectState {
   worldlines: WorldlineManager | null;
   /** Terminal ids owned by this project (agents, shells, candidates). */
   terminalIds: Set<string>;
+  /** Activation epoch of the last folder push for this project, or zero. */
+  activationGeneration: number;
   /** Roster entries that failed to spawn this session. Keep them on disk so a later launch can retry. */
   unrestoredTerminals: TerminalRosterEntry[];
 }
@@ -446,10 +507,44 @@ function authJsonHasPiProvider(raw: unknown): boolean {
 let quitConfirmed = false;
 let cleanupComplete = false;
 let cleanupStarted = false;
+let terminalGenerationSeq = 0;
+let rendererWindowGenerationSeq = 0;
+let rendererGenerationSeq = 0;
+let rendererLoadGenerationSeq = 0;
 
 class PiEditorApp {
   private win: BrowserWindow | null = null;
   private terminals = new Map<string, PiTerminalInstance>();
+  /** True only while the current renderer can consume pushed IPC. */
+  private rendererReady = false;
+  /** BrowserWindow identity and current renderer-document generations. */
+  private rendererWindowGeneration = 0;
+  private rendererGeneration = 0;
+  /** Main-issued capability for the current renderer document. */
+  private rendererDocumentNonce = "";
+  /** Exact main-frame load/process identity for same-WebContents callbacks. */
+  private rendererLoadGeneration = 0;
+  private rendererProcessId = 0;
+  private rendererFrameRoutingId = 0;
+  private rendererLoadPending = false;
+  /** Snapshot that state-changing load callbacks must match before acting. */
+  private rendererPendingLoad: PtyLifecycleIdentity | null = null;
+  /** A crash/reload has invalidated the old document; the next main-frame
+   * navigation supplies the replacement process/routing pair. */
+  private rendererAwaitingNewFrame = false;
+  /** Exact frame pair invalidated by the most recent renderer crash. */
+  private rendererCrashedFrame: { processId: number; frameRoutingId: number } | null = null;
+  /** Only this app document may receive a privileged renderer capability. */
+  private trustedRendererProtocol: "file:" | "http:" | "https:" | null = null;
+  private trustedRendererOrigin: string | null = null;
+  private trustedRendererFilePath: string | null = null;
+  /** The single lossless PTY→renderer delivery owner. */
+  private ptyEgress = new PtyEgressScheduler({
+    send: (terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence, data) =>
+      this.sendPtyChunk(terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence, data),
+    sendExit: (terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence, code) =>
+      this.sendPtyExit(terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence, code),
+  });
 
   /** The renderer-facing project (the tab in front), or null. */
   private project(): ProjectState | null {
@@ -479,7 +574,8 @@ class PiEditorApp {
 
   /** True while the given project id is opening or closing. */
   private projectIsSwitching(projectId: string | undefined): boolean {
-    return projectId !== undefined && this.switchingProjects.has(projectId);
+    return projectId !== undefined
+      && (this.switchingProjects.has(projectId) || this.projectClosePromises.has(projectId));
   }
 
   /** A workspace by id, across all projects. Ids are globally unique. */
@@ -497,6 +593,10 @@ class PiEditorApp {
   private eventsDir = process.env.TERMINA_EVENTS_DIR ?? join(app.getPath("temp"), "termina-events");
   /** The app-private session branch workspace. */
   private sessionWorkspaceDir = join(this.eventsDir, "session-workspace");
+  /** Identity of the events root bound during this launch. */
+  private eventsDirBinding: PromotionFsIdentity | null = null;
+  /** True only when the persisted root provenance matched this launch. */
+  private eventsDirProvenanceTrusted = false;
   private tailer = new SidecarTailer(this.eventsDir);
   private paintWatchdog: ReturnType<typeof setInterval> | null = null;
   private appUpdater: AppUpdateController | null = null;
@@ -513,7 +613,7 @@ class PiEditorApp {
   private dispatchRuns = new Map<string, { ownerId: string; taskText: string }>();
   /** Dispatch mailbox notes per terminal, flushed to mailbox-<id>.md. */
   private dispatchMailbox = new Map<string, string[]>();
-  /** True after the first successful mkdir of the events directory. */
+  /** True after the native owner has bound the events directory. */
   private eventsDirReady = false;
 
   /** Files the user changed while no agent terminal was busy. The agent
@@ -526,17 +626,23 @@ class PiEditorApp {
 
   /** The app-owned worlds root. */
   private userDataDir = process.env.TERMINA_USER_DATA_DIR ?? app.getPath("userData");
+  /** Durable provenance for the launch-persistent events root. */
+  private eventsDirAnchorPath = join(this.userDataDir, "termina-events-root.json");
+  /** Durable root for core finalization artifacts, separate from launch scratch. */
+  private retainedSessionRoot = join(this.userDataDir, "retained-sessions");
+  private sessionRetention = new SessionRetentionOwner(this.retainedSessionRoot);
   private preferencesStore = new AppPreferencesStore(join(this.userDataDir, "preferences.json"));
   private preferences: AppPreferences = defaultAppPreferences();
   private preferenceCommits: Promise<void> = Promise.resolve();
   private shortcutMap: ShortcutMap = { ...DEFAULT_SHORTCUTS };
+  private worldsRootUsesDefault = process.env.TERMINA_WORLDS_DIR === undefined;
   private worldsRoot = process.env.TERMINA_WORLDS_DIR ?? join(this.userDataDir, "worlds");
   /** Input buffer for /new slash-command detection (terminals:write is per keystroke). */
   private newCommandBuffers = new Map<string, string>();
   /** Tailers for candidate events directories. */
   private worldlineTailers = new Map<string, SidecarTailer>();
-  /** Preserve event order while prompt payloads load asynchronously. */
-  private sidecarQueues = new Map<string, Promise<void>>();
+  /** Preserve event order while bounding sidecar fanout per terminal. */
+  private sidecarQueues = new Map<string, SidecarEventQueue>();
   /** One-use start preflights by token. */
   private pendingPreflights = new Map<string, PendingPreflight>();
   /** Capture and acknowledgement tasks that must finish before store teardown. */
@@ -547,8 +653,10 @@ class PiEditorApp {
   private userEditsWriteTimer: ReturnType<typeof setTimeout> | null = null;
   /** Paths the promotion is applying right now (suppress user-edit records). */
   private promotionPaths: Set<string> | null = null;
-  /** The materialized export dirs: dir path → owning project id. */
-  private exportedStateDirs = new Map<string, string | undefined>();
+  /** Materialized exports retain their parent/leaf binding until cleanup. */
+  private exportedStateDirs = new Map<string, { ownerId: string; binding: BoundOwnedDirectory }>();
+  /** Evidence homes retain the same provenance across the measurement. */
+  private evidenceHomeDirs = new Map<string, BoundOwnedDirectory>();
   private static readonly USER_EDITS_MAX = 50;
   private static readonly MAX_MODIFIED_FILES = 2000;
   private static readonly MAX_BASELINE_FILES = 2000;
@@ -567,9 +675,417 @@ class PiEditorApp {
   /** The project ids with an open or close in progress. Events of these
    *  projects wait; every other project keeps running. */
   private switchingProjects = new Set<string>();
+  /** One close confirmation/teardown transaction per project. */
+  private projectClosePromises = new Map<string, Promise<{ ok: boolean; error?: string; cancelled?: boolean }>>();
   private folderOpenPromise: Promise<{ cwd: string } | { cancelled: true }> | null = null;
+  /** Monotonic project-selection epoch carried by folder/close pushes. */
+  private projectActivationGeneration = 0;
+  /** Latest action that is allowed to claim the active-project slot. */
+  private projectSelectionAction = 0;
+  private projectSelectionActionSeq = 0;
+
+  private beginProjectSelectionAction(): number {
+    const action = ++this.projectSelectionActionSeq;
+    this.projectSelectionAction = action;
+    return action;
+  }
+
+  private nextProjectActivationGeneration(): number {
+    return ++this.projectActivationGeneration;
+  }
+
+  /** Validate the shape of a renderer capability before comparing it. */
+  private parseRendererCapability(value: unknown): RendererIpcCapability | null {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const rec = value as Record<string, unknown>;
+    const integer = (key: string): number | null => {
+      const n = rec[key];
+      return typeof n === "number" && Number.isSafeInteger(n) && n >= 1 ? n : null;
+    };
+    const windowGeneration = integer("windowGeneration");
+    const rendererGeneration = integer("rendererGeneration");
+    const loadGeneration = integer("loadGeneration");
+    const processId = integer("processId");
+    const frameRoutingId = integer("frameRoutingId");
+    const nonce = rec.nonce;
+    if (
+      windowGeneration === null
+      || rendererGeneration === null
+      || loadGeneration === null
+      || processId === null
+      || frameRoutingId === null
+      || typeof nonce !== "string"
+      || nonce.length < 16
+      || nonce.length > 128
+    ) return null;
+    return { windowGeneration, rendererGeneration, loadGeneration, nonce, processId, frameRoutingId };
+  }
+
+  /** Configure the one URL/protocol that is allowed to host the app bridge. */
+  private configureTrustedRendererTarget(devUrl: string | undefined): void {
+    this.trustedRendererProtocol = null;
+    this.trustedRendererOrigin = null;
+    this.trustedRendererFilePath = null;
+    if (devUrl) {
+      try {
+        const url = new URL(devUrl);
+        if (url.protocol !== "http:" && url.protocol !== "https:") return;
+        this.trustedRendererProtocol = url.protocol;
+        this.trustedRendererOrigin = url.origin;
+      } catch {
+        // A malformed dev URL will fail at loadURL; fail closed for IPC too.
+      }
+      return;
+    }
+    this.trustedRendererProtocol = "file:";
+    this.trustedRendererFilePath = resolve(join(__dirname, "..", "dist-renderer", "index.html"));
+  }
+
+  /** True only for the exact application origin (or packaged index file). */
+  private isTrustedRendererUrl(value: unknown): boolean {
+    if (typeof value !== "string" || !this.trustedRendererProtocol) return false;
+    try {
+      const url = new URL(value);
+      if (url.protocol !== this.trustedRendererProtocol) return false;
+      if (url.protocol === "file:") {
+        if (!this.trustedRendererFilePath || url.hostname !== "") return false;
+        return resolve(fileURLToPath(url)) === this.trustedRendererFilePath;
+      }
+      return url.origin === this.trustedRendererOrigin;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Bind capability checks to both the exact main frame and its trusted URL. */
+  private isTrustedRendererFrame(frame: Electron.WebFrameMain | null | undefined, mainFrame: Electron.WebFrameMain | null | undefined): boolean {
+    if (!frame || !mainFrame) return false;
+    try {
+      if (!this.isTrustedRendererUrl(frame.url) || !this.isTrustedRendererUrl(mainFrame.url)) return false;
+      const top = frame.top;
+      return frame.processId === mainFrame.processId
+        && frame.routingId === mainFrame.routingId
+        && !!top
+        && top.processId === mainFrame.processId
+        && top.routingId === mainFrame.routingId;
+    } catch {
+      // A frame wrapper can become invalid while a renderer is crashing or
+      // navigating. Treat that lifecycle race as an unauthorized sender.
+      return false;
+    }
+  }
+
+  /**
+   * Authenticate every renderer-originated invoke at one shared boundary.
+   * A WebContents identity alone is insufficient because Chromium can reuse
+   * it across navigations; the main-frame pair, document generations, and
+   * main-issued nonce must all match the current lifecycle.
+   */
+  private isTrustedRenderer(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent, value: unknown): boolean {
+    const win = this.win;
+    if (!win || win.isDestroyed() || event.sender !== win.webContents) return false;
+    if (win.webContents.isDestroyed()) return false;
+    try {
+      if (win.webContents.isCrashed()) return false;
+    } catch {
+      return false;
+    }
+    const frame = event.senderFrame;
+    const mainFrame = win.webContents.mainFrame;
+    // WebFrameMain wrappers are not required to be object-identical across
+    // getters. The process/routing pair is the stable frame identity and
+    // rejects subframes even when they share a renderer process.
+    if (!this.isTrustedRendererFrame(frame, mainFrame)) return false;
+    const capability = this.parseRendererCapability(value);
+    const current = this.currentPtyLifecycle();
+    const identity = this.readIpcFrameIdentity(event);
+    if (!capability || !current || !identity || this.rendererAwaitingNewFrame) return false;
+    return capability.windowGeneration === current.windowGeneration
+      && capability.rendererGeneration === current.rendererGeneration
+      && capability.loadGeneration === current.loadGeneration
+      && capability.nonce === current.nonce
+      && capability.processId === identity.processId
+      && capability.frameRoutingId === identity.frameRoutingId
+      && capability.processId === current.processId
+      && capability.frameRoutingId === current.frameRoutingId;
+  }
+
+  /** Register a privileged invoke handler behind the renderer capability gate. */
+  private handleIpc(channel: string, listener: (...args: any[]) => any): void {
+    electronIpcMain.handle(channel, (event, ...args) => {
+      const capability = args.pop();
+      if (!this.isTrustedRenderer(event, capability)) {
+        throw new Error("unauthorized renderer");
+      }
+      return listener(event, ...args);
+    });
+  }
+
+  /** Issue the current document capability only to its exact main frame. */
+  private rendererCapabilityFor(event: Electron.IpcMainEvent): RendererIpcCapability | null {
+    const win = this.win;
+    if (!win || win.isDestroyed() || event.sender !== win.webContents || win.webContents.isDestroyed()) return null;
+    const frame = event.senderFrame;
+    const mainFrame = win.webContents.mainFrame;
+    if (!this.isTrustedRendererFrame(frame, mainFrame)) return null;
+    const current = this.currentPtyLifecycle();
+    const identity = this.readIpcFrameIdentity(event);
+    if (!current || !identity || this.rendererAwaitingNewFrame) return null;
+    if (
+      identity.processId !== current.processId
+      || identity.frameRoutingId !== current.frameRoutingId
+    ) return null;
+    try {
+      if (win.webContents.isCrashed()) return null;
+    } catch {
+      return null;
+    }
+    return {
+      windowGeneration: current.windowGeneration,
+      rendererGeneration: current.rendererGeneration,
+      loadGeneration: current.loadGeneration,
+      nonce: current.nonce,
+      processId: identity.processId,
+      frameRoutingId: identity.frameRoutingId,
+    };
+  }
 
   // ---------------------------------------------------------------- window --
+
+  private currentPtyDocument(): PtyDocumentIdentity | null {
+    if (!this.win) return null;
+    return {
+      window: this.win,
+      windowGeneration: this.rendererWindowGeneration,
+      rendererGeneration: this.rendererGeneration,
+      nonce: this.rendererDocumentNonce,
+    };
+  }
+
+  private currentPtyLifecycle(): PtyLifecycleIdentity | null {
+    const document = this.currentPtyDocument();
+    if (!document) return null;
+    return {
+      ...document,
+      loadGeneration: this.rendererLoadGeneration,
+      processId: this.rendererProcessId,
+      frameRoutingId: this.rendererFrameRoutingId,
+    };
+  }
+
+  /** True only for the exact BrowserWindow and renderer document captured by a callback. */
+  private isCurrentPtyDocument(
+    win: BrowserWindow,
+    windowGeneration: number,
+    rendererGeneration: number,
+    nonce = this.rendererDocumentNonce,
+  ): boolean {
+    return isPtyDocumentCurrent(this.currentPtyDocument(), {
+      window: win,
+      windowGeneration,
+      rendererGeneration,
+      nonce,
+    });
+  }
+
+  /** True only for the exact document/load/frame process captured by a callback. */
+  private isCurrentPtyLifecycle(
+    win: BrowserWindow,
+    windowGeneration: number,
+    rendererGeneration: number,
+    nonce: string,
+    loadGeneration: number,
+    processId: number,
+    frameRoutingId: number,
+  ): boolean {
+    return isPtyLifecycleCurrent(this.currentPtyLifecycle(), {
+      window: win,
+      windowGeneration,
+      rendererGeneration,
+      nonce,
+      loadGeneration,
+      processId,
+      frameRoutingId,
+    });
+  }
+
+  private readPtyFrameIdentity(win: BrowserWindow): { processId: number; frameRoutingId: number } | null {
+    try {
+      const frame = win.webContents.mainFrame;
+      const processId = frame?.processId ?? win.webContents.getProcessId();
+      const frameRoutingId = frame?.routingId;
+      if (
+        !Number.isSafeInteger(processId)
+        || processId < 1
+        || !Number.isSafeInteger(frameRoutingId)
+        || frameRoutingId < 1
+      ) return null;
+      return { processId, frameRoutingId };
+    } catch {
+      return null;
+    }
+  }
+
+  private readNavigationFrameIdentity(
+    win: BrowserWindow,
+    details: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>,
+    frameProcessId: number,
+    frameRoutingId: number,
+  ): { processId: number; frameRoutingId: number } | null {
+    const processId = details.frame?.processId ?? frameProcessId;
+    const routingId = details.frame?.routingId ?? frameRoutingId;
+    if (
+      !Number.isSafeInteger(processId)
+      || processId < 1
+      || !Number.isSafeInteger(routingId)
+      || routingId < 1
+    ) return this.readPtyFrameIdentity(win);
+    return { processId, frameRoutingId: routingId };
+  }
+
+  private readGoneProcessIdentity(
+    win: BrowserWindow,
+    event: Electron.Event,
+  ): { processId: number; frameRoutingId: number; explicit: boolean } | null {
+    const eventRecord = event as unknown as Record<string, unknown>;
+    const senderFrame = eventRecord.senderFrame as { processId?: unknown; routingId?: unknown } | null | undefined;
+    const processId = typeof eventRecord.processId === "number"
+      ? eventRecord.processId
+      : typeof senderFrame?.processId === "number" ? senderFrame.processId : undefined;
+    const frameRoutingId = typeof eventRecord.frameRoutingId === "number"
+      ? eventRecord.frameRoutingId
+      : typeof senderFrame?.routingId === "number" ? senderFrame.routingId : undefined;
+    if (
+      typeof processId === "number"
+      && Number.isSafeInteger(processId)
+      && processId >= 1
+      && typeof frameRoutingId === "number"
+      && Number.isSafeInteger(frameRoutingId)
+      && frameRoutingId >= 1
+    ) return { processId, frameRoutingId, explicit: true };
+    if (this.rendererProcessId >= 1 && this.rendererFrameRoutingId >= 1) {
+      return {
+        processId: this.rendererProcessId,
+        frameRoutingId: this.rendererFrameRoutingId,
+        explicit: false,
+      };
+    }
+    const current = this.readPtyFrameIdentity(win);
+    if (current) return { ...current, explicit: false };
+    return null;
+  }
+
+  /** Read the exact process/frame pair that sent a renderer IPC message. */
+  private readIpcFrameIdentity(event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent): { processId: number; frameRoutingId: number } | null {
+    const processId = event.senderFrame?.processId ?? event.processId;
+    const frameRoutingId = event.senderFrame?.routingId ?? event.frameId;
+    if (
+      !Number.isSafeInteger(processId)
+      || processId < 1
+      || !Number.isSafeInteger(frameRoutingId)
+      || frameRoutingId < 1
+    ) return null;
+    return { processId, frameRoutingId };
+  }
+
+  /** Fence all queued delivery before a renderer document is replaced. */
+  private advancePtyDocument(
+    win: BrowserWindow,
+    windowGeneration: number,
+    processId = this.rendererProcessId,
+    frameRoutingId = this.rendererFrameRoutingId,
+  ): boolean {
+    if (
+      this.disposed
+      || this.win !== win
+      || this.rendererWindowGeneration !== windowGeneration
+      || win.isDestroyed()
+    ) return false;
+    this.rendererReady = false;
+    this.rendererGeneration = ++rendererGenerationSeq;
+    this.rendererDocumentNonce = randomUUID();
+    this.rendererLoadGeneration = ++rendererLoadGenerationSeq;
+    this.rendererProcessId = processId;
+    this.rendererFrameRoutingId = frameRoutingId;
+    this.rendererLoadPending = true;
+    this.rendererAwaitingNewFrame = false;
+    this.rendererCrashedFrame = null;
+    this.ptyEgress.setRendererReady(windowGeneration, this.rendererGeneration, false);
+    this.rendererPendingLoad = this.currentPtyLifecycle();
+    return true;
+  }
+
+  /**
+   * Invalidate one crashed document and wait for Chromium's next main-frame
+   * navigation to bind the replacement frame. Keeping the process/routing
+   * fields at zero is intentional: delayed callbacks from the crashed frame
+   * cannot satisfy the replacement load predicate before that navigation.
+   */
+  private invalidateCrashedPtyDocument(
+    win: BrowserWindow,
+    windowGeneration: number,
+    processId: number,
+    frameRoutingId: number,
+  ): boolean {
+    const current = this.currentPtyLifecycle();
+    if (
+      !current
+      || !this.isCurrentPtyLifecycle(
+        win,
+        windowGeneration,
+        current.rendererGeneration,
+        current.nonce,
+        current.loadGeneration,
+        processId,
+        frameRoutingId,
+      )
+    ) return false;
+    this.rendererReady = false;
+    this.rendererGeneration = ++rendererGenerationSeq;
+    this.rendererDocumentNonce = randomUUID();
+    this.rendererLoadGeneration = ++rendererLoadGenerationSeq;
+    this.rendererProcessId = 0;
+    this.rendererFrameRoutingId = 0;
+    this.rendererLoadPending = true;
+    this.rendererAwaitingNewFrame = true;
+    this.rendererCrashedFrame = { processId, frameRoutingId };
+    this.ptyEgress.setRendererReady(windowGeneration, this.rendererGeneration, false);
+    this.rendererPendingLoad = this.currentPtyLifecycle();
+    return true;
+  }
+
+  /** Begin a helper-triggered reload without borrowing the old frame pair. */
+  private beginPtyDocumentReload(win: BrowserWindow, windowGeneration: number): boolean {
+    const current = this.currentPtyLifecycle();
+    if (
+      !current
+      || !this.isCurrentPtyDocument(win, windowGeneration, current.rendererGeneration)
+      || win.isDestroyed()
+    ) return false;
+    this.rendererReady = false;
+    this.rendererGeneration = ++rendererGenerationSeq;
+    this.rendererDocumentNonce = randomUUID();
+    this.rendererLoadGeneration = ++rendererLoadGenerationSeq;
+    this.rendererProcessId = 0;
+    this.rendererFrameRoutingId = 0;
+    this.rendererLoadPending = true;
+    this.rendererAwaitingNewFrame = true;
+    this.rendererCrashedFrame = null;
+    this.ptyEgress.setRendererReady(windowGeneration, this.rendererGeneration, false);
+    this.rendererPendingLoad = this.currentPtyLifecycle();
+    return true;
+  }
+
+  /** The only path allowed to request a renderer reload. */
+  private reloadPtyDocument(win: BrowserWindow, windowGeneration: number): boolean {
+    if (!this.beginPtyDocumentReload(win, windowGeneration)) return false;
+    try {
+      win.webContents.reload();
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   async createWindow(): Promise<void> {
     // Dev runs the Electron binary, whose Dock icon is Electron's. The
@@ -590,7 +1106,7 @@ class PiEditorApp {
       atom: "#282c34",
     };
     const backgroundColor = windowBackground[this.preferences.theme];
-    this.win = new BrowserWindow({
+    const win = new BrowserWindow({
       width: 1440,
       height: 900,
       minWidth: 960,
@@ -606,23 +1122,178 @@ class PiEditorApp {
         sandbox: false,
       },
     });
-    this.win.removeMenu();
-
+    const windowGeneration = ++rendererWindowGenerationSeq;
+    const rendererGeneration = ++rendererGenerationSeq;
     const devUrl = process.env.VITE_DEV_SERVER_URL;
-    if (devUrl) {
-      await this.win.loadURL(devUrl);
-      if (process.env.TERMINA_DEVTOOLS) this.win.webContents.openDevTools({ mode: "detach" });
-    } else {
-      await this.win.loadFile(join(__dirname, "..", "dist-renderer", "index.html"));
-    }
-    this.win.on("closed", () => {
+    this.configureTrustedRendererTarget(devUrl);
+    this.win = win;
+    this.rendererWindowGeneration = windowGeneration;
+    this.rendererGeneration = rendererGeneration;
+    this.rendererDocumentNonce = randomUUID();
+    this.rendererReady = false;
+    this.rendererLoadGeneration = ++rendererLoadGenerationSeq;
+    // Do not borrow a pre-navigation frame pair. The first
+    // did-start-navigation callback binds the issued nonce to its exact
+    // main-frame process/routing identity.
+    this.rendererProcessId = 0;
+    this.rendererFrameRoutingId = 0;
+    this.rendererLoadPending = true;
+    this.rendererAwaitingNewFrame = true;
+    this.rendererCrashedFrame = null;
+    this.rendererPendingLoad = this.currentPtyLifecycle();
+    this.ptyEgress.setRendererReady(windowGeneration, rendererGeneration, false);
+    win.removeMenu();
+
+    // Attach lifecycle listeners before loading.  PTY output can arrive while
+    // the first document or a reload is still being parsed; it stays in the
+    // bounded egress queues until the new renderer has finished loading.
+    win.on("closed", () => {
+      if (this.win !== win || this.rendererWindowGeneration !== windowGeneration) return;
+      this.rendererReady = false;
+      this.rendererLoadPending = false;
+      this.rendererAwaitingNewFrame = false;
+      this.rendererCrashedFrame = null;
+      this.rendererPendingLoad = null;
+      this.ptyEgress.setRendererReady(windowGeneration, this.rendererGeneration, false);
       this.win = null;
       this.stopPaintWatchdog();
     });
-    this.win.webContents.on("render-process-gone", (_e, details) => {
-      console.warn(`[main] renderer gone: ${details.reason}`);
-      if (this.win && !this.win.isDestroyed()) this.win.reload();
+    win.webContents.on("will-frame-navigate", (details) => {
+      if (this.disposed || this.win !== win || this.rendererWindowGeneration !== windowGeneration || win.isDestroyed()) return;
+      // No subframe is part of the application bridge. Deny it before a
+      // foreign document can execute the preload, and apply the same origin
+      // boundary to main-frame navigations initiated by page content.
+      if (!details.isMainFrame || !this.isTrustedRendererUrl(details.url)) {
+        details.preventDefault();
+        return;
+      }
+      if (!this.rendererAwaitingNewFrame) this.beginPtyDocumentReload(win, windowGeneration);
     });
+    // The bridge is privileged: deny every foreign top-frame navigation
+    // before Chromium can commit it, and revoke the old document capability
+    // before an allowed app-document navigation starts.
+    win.webContents.on("will-navigate", (event, url) => {
+      if (this.disposed || this.win !== win || this.rendererWindowGeneration !== windowGeneration || win.isDestroyed()) return;
+      if (!this.isTrustedRendererUrl(url)) {
+        event.preventDefault();
+        return;
+      }
+      if (!this.rendererAwaitingNewFrame) this.beginPtyDocumentReload(win, windowGeneration);
+    });
+    win.webContents.on("will-redirect", (event, url, _isInPlace, isMainFrame) => {
+      if (this.disposed || this.win !== win || this.rendererWindowGeneration !== windowGeneration || win.isDestroyed()) return;
+      if (!isMainFrame) {
+        event.preventDefault();
+        return;
+      }
+      if (!this.isTrustedRendererUrl(url)) {
+        event.preventDefault();
+        return;
+      }
+      if (!this.rendererAwaitingNewFrame) this.beginPtyDocumentReload(win, windowGeneration);
+    });
+    win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    win.webContents.on("did-start-navigation", (details, _url, _isInPlace, _isMainFrame, frameProcessId, frameRoutingId) => {
+      if (this.disposed || this.win !== win || this.rendererWindowGeneration !== windowGeneration || win.isDestroyed()) return;
+      if (!details.isMainFrame || details.isSameDocument) return;
+      if (!this.isTrustedRendererUrl(details.url)) {
+        // will-navigate/will-redirect normally prevent this path. Keep the
+        // second guard for programmatic/redirect edge cases: once a foreign
+        // document begins, its old capability is revoked before commit.
+        if (!this.rendererAwaitingNewFrame) this.beginPtyDocumentReload(win, windowGeneration);
+        try {
+          win.webContents.stop();
+        } catch {
+          /* The navigation may already have torn down WebContents. */
+        }
+        return;
+      }
+      const identity = this.readNavigationFrameIdentity(win, details, frameProcessId, frameRoutingId);
+      if (!identity) return;
+      // Every non-same-document main-frame navigation is a new document
+      // boundary, even when Chromium reuses the same process/routing pair.
+      // The pending reload/crash path already minted its nonce before this
+      // event; bind that nonce to the first replacement frame. Generic
+      // finish/failure events below cannot mint or consume a token.
+      if (this.rendererAwaitingNewFrame) {
+        if (
+          (this.rendererCrashedFrame
+            && this.rendererCrashedFrame.processId === identity.processId
+            && this.rendererCrashedFrame.frameRoutingId === identity.frameRoutingId)
+        ) return;
+        this.rendererProcessId = identity.processId;
+        this.rendererFrameRoutingId = identity.frameRoutingId;
+        this.rendererAwaitingNewFrame = false;
+        this.rendererPendingLoad = this.currentPtyLifecycle();
+        return;
+      }
+      // A user/programmatic navigation that was not initiated by one of the
+      // helpers also replaces the document at this exact main-frame boundary.
+      this.advancePtyDocument(win, windowGeneration, identity.processId, identity.frameRoutingId);
+    });
+    win.webContents.on("did-frame-finish-load", (_event, isMainFrame, frameProcessId, frameRoutingId) => {
+      if (this.disposed || this.win !== win || this.rendererWindowGeneration !== windowGeneration || win.isDestroyed()) return;
+      if (!isMainFrame || !this.rendererLoadPending || this.rendererAwaitingNewFrame) return;
+      const current = this.currentPtyLifecycle();
+      const pending = this.rendererPendingLoad;
+      // The frame pair and current load generation are useful for rejecting
+      // unrelated frames, but this callback has no document token. Even an
+      // exact same-pair callback is ambiguous, so readiness changes only in
+      // the nonce-bearing pty:ready handler below.
+      if (!current || !pending || !isPtyFrameEventCurrent(current, pending, frameProcessId, frameRoutingId)) return;
+    });
+    win.webContents.on("did-fail-load", (_event, _errorCode, _errorDescription, _validatedURL, isMainFrame, frameProcessId, frameRoutingId) => {
+      if (this.disposed || this.win !== win || this.rendererWindowGeneration !== windowGeneration || win.isDestroyed()) return;
+      if (!isMainFrame || !this.rendererLoadPending || this.rendererAwaitingNewFrame) return;
+      const current = this.currentPtyLifecycle();
+      const pending = this.rendererPendingLoad;
+      // The pending snapshot includes the navigation/load generation. The
+      // event-specific main-frame process/routing pair must match it too;
+      // delayed failures from a prior same-WebContents document are inert.
+      // An exact same-pair failure is still ambiguous, so fail closed rather
+      // than mutating readiness; the replacement's nonce-bearing ready proof
+      // remains the only state-changing path.
+      if (!current || !pending || !isPtyFrameEventCurrent(current, pending, frameProcessId, frameRoutingId)) return;
+    });
+    win.webContents.on("render-process-gone", (event, details) => {
+      if (this.disposed || this.win !== win || this.rendererWindowGeneration !== windowGeneration || win.isDestroyed()) return;
+      const current = this.currentPtyLifecycle();
+      const identity = this.readGoneProcessIdentity(win, event);
+      if (!current || !identity || !this.isCurrentPtyLifecycle(
+        win,
+        windowGeneration,
+        this.rendererGeneration,
+        this.rendererDocumentNonce,
+        current.loadGeneration,
+        identity.processId,
+        identity.frameRoutingId,
+      )) return;
+      // Electron's public render-process-gone payload does not include a
+      // process id. In that form only a currently crashed WebContents is
+      // actionable; a delayed old-process event after a healthy replacement
+      // is ignored. Test/instrumented payloads may provide explicit ids.
+      if (!identity.explicit) {
+        try {
+          if (!win.webContents.isCrashed()) return;
+        } catch {
+          return;
+        }
+      }
+      console.warn(`[main] renderer gone: ${details.reason}`);
+      if (!this.invalidateCrashedPtyDocument(win, windowGeneration, identity.processId, identity.frameRoutingId)) return;
+      try {
+        win.webContents.reload();
+      } catch {
+        /* The crashed WebContents may already be destroyed. */
+      }
+    });
+
+    if (devUrl) {
+      await win.loadURL(devUrl);
+      if (process.env.TERMINA_DEVTOOLS) win.webContents.openDevTools({ mode: "detach" });
+    } else {
+      await win.loadFile(join(__dirname, "..", "dist-renderer", "index.html"));
+    }
     this.startPaintWatchdog();
     this.buildMenu();
   }
@@ -823,11 +1494,10 @@ class PiEditorApp {
     return null;
   }
 
-  /** The workspace a terminal works in (falls back to its project's primary). */
+  /** The workspace a terminal works in. Missing ownership fails closed. */
   private workspaceOfTerminal(inst: PiTerminalInstance): WorkspaceState | null {
     const owner = this.projectOfTerminal(inst.id);
-    if (owner) return owner.workspaces.get(inst.workspaceId) ?? null;
-    return this.primaryWorkspace();
+    return owner?.workspaces.get(inst.workspaceId) ?? null;
   }
 
   /** The user-edit map of a workspace (WORLDLINES §6.2: one per workspace). */
@@ -871,6 +1541,7 @@ class PiEditorApp {
    */
   private initRecording(project: ProjectState, ws: WorkspaceState): void {
     if (project.storePromise) return;
+    const rendererTarget = this.captureRendererSendTarget();
     const promise = (async (): Promise<SnapshotStore | null> => {
       const storeRoot = await this.canonicalPath(ws.root);
       // v2 keys the store by the opened folder. Older stores captured the
@@ -883,19 +1554,19 @@ class PiEditorApp {
       const top = await gitTopLevel(ws.root);
       if (!top) {
         ws.recordError = "the opened folder is not inside a Git repository";
-        this.pushRecorderForWorkspace(ws, "paused");
+        this.pushRecorderForWorkspace(ws, "paused", rendererTarget);
         return null;
       }
       if (!captureRootInRepo(storeRoot, await this.canonicalPath(top))) {
         ws.recordError = "the opened folder is not inside a Git repository";
-        this.pushRecorderForWorkspace(ws, "paused");
+        this.pushRecorderForWorkspace(ws, "paused", rendererTarget);
         return null;
       }
       const gitDir = await gitCommonDir(ws.root);
       const fmt = await gitObjectFormat(ws.root);
       if (!gitDir) {
         ws.recordError = "the opened folder has no Git directory";
-        this.pushRecorderForWorkspace(ws, "paused");
+        this.pushRecorderForWorkspace(ws, "paused", rendererTarget);
         return null;
       }
       // Capture the opened folder. A Git subdirectory is a valid project.
@@ -903,7 +1574,7 @@ class PiEditorApp {
       const store = await SnapshotStore.create(project.storeDir!, storeRoot, gitDir, fmt);
       const state = await store.capture(await gitHead(ws.root), null);
       ws.lastStateCommit = state.commit;
-      this.pushRecorderForWorkspace(ws, "ready");
+      this.pushRecorderForWorkspace(ws, "ready", rendererTarget);
       return store;
     })();
     ws.indexReady = promise.then(() => undefined, (err) => {
@@ -913,20 +1584,19 @@ class PiEditorApp {
   }
 
   /** Recorder state for every agent terminal of a workspace. */
-  private pushRecorderForWorkspace(ws: WorkspaceState, state: RecorderState): void {
+  private pushRecorderForWorkspace(ws: WorkspaceState, state: RecorderState, expected?: PtyRendererSendTarget | null): void {
     for (const id of ws.terminalIds) {
       const inst = this.terminals.get(id);
-      if (inst && inst.type === "agent") this.setRecorderState(inst, state);
+      if (inst && inst.type === "agent") this.setRecorderState(inst, state, expected);
     }
   }
 
   // ------------------------------------------------- trust (WORLDLINES §6.7) ----
 
   /** The trust-sensitive resource hashes, computed off the main thread. */
-  private async computeTrustHashes(): Promise<Record<string, string>> {
+  private async computeTrustHashes(project: ProjectState): Promise<Record<string, string>> {
     const agentDir = join(homedir(), ".pi", "agent");
-    const project = this.project()?.cwd ? resolve(this.project()!.cwd) : null;
-    return coreClient.trustHashes(agentDir, project);
+    return coreClient.trustHashes(agentDir, project.cwd ? resolve(project.cwd) : null);
   }
 
   /**
@@ -946,7 +1616,7 @@ class PiEditorApp {
       piBin: this.resolvePiBin(),
       agentCorePath: join(__dirname, "agent-core.mjs").replace("app.asar", "app.asar.unpacked"),
       electronExecPath: process.execPath,
-      baseEnv: cleanEnv(),
+      candidateEnv: (provider) => candidateEnv(provider),
       showThinking: () => this.preferences.showThinking,
       getStore: async () => {
         const store = await project.storePromise;
@@ -968,10 +1638,18 @@ class PiEditorApp {
         }
         return [...new Set(out)];
       },
-      forkSession: (opts) => this.sessionFork.fork(opts),
+      forkSession: (opts, callOptions) => this.sessionFork.fork(opts, callOptions),
+      forkCoreSession: (opts, callOptions) => this.sessionFork.forkCore(opts, callOptions),
+      discardCoreSession: (runId) => this.sessionRetention.discard(runId),
+      discardPiSession: (sessionFile, identity) => this.sessionFork.discardPi({
+        sessionFile,
+        sessionWorkspaceDir: this.sessionWorkspaceDir,
+        identity,
+      }),
       createCandidate: (opts) => this.createCandidate(opts),
+      terminateCandidate: (terminalId) => this.terminateCandidate(terminalId),
       createCandidateWorkspace: (root, baseStateId, comparisonId) => this.createCandidateWorkspace(project, root, baseStateId, comparisonId),
-      onUpdate: (summary) => this.send("worldline:update", summary),
+      onUpdate: (summary) => this.send("worldline:update", { projectId: project.id, summary }),
       onCandidateState: async (root, stateId) => {
         const workspace = await this.workspaceContaining(root);
         if (workspace) this.setWorkspaceState(workspace, stateId);
@@ -979,7 +1657,7 @@ class PiEditorApp {
       onRemoved: (comparisonId) => {
         this.cancelVerifyForComparison(comparisonId);
         this.removeCandidateWorkspaces(project, comparisonId);
-        this.send("worldline:removed", { comparisonId });
+        this.send("worldline:removed", { projectId: project.id, comparisonId });
       },
       // The fork preflight (WORLDLINES §4): repository, platform, disk.
       preflight: async () => {
@@ -995,6 +1673,8 @@ class PiEditorApp {
           if (!top) reasons.push("the opened folder is not inside a Git repository");
         }
         if (!platformHasSandboxExec()) reasons.push("the platform has no sandbox-exec");
+        const resourceLimitReason = sandboxResourceLimitPreflight();
+        if (resourceLimitReason) reasons.push(resourceLimitReason);
         if (!platformHasRecursiveWatcher()) reasons.push("the platform has no reliable recursive watcher");
         // A custom TERMINA_PI_BIN must match the pinned pi version
         // (WORLDLINES §5): a mismatched session format disables Worldlines.
@@ -1014,7 +1694,7 @@ class PiEditorApp {
         }
         return { ok: reasons.length === 0, reasons };
       },
-      trustHashes: async () => this.computeTrustHashes(),
+      trustHashes: async () => this.computeTrustHashes(project),
       captureHead: async (root, gitDir, parent) => {
         const store = await project.storePromise;
         if (!store) throw new Error("recording is not available");
@@ -1047,17 +1727,20 @@ class PiEditorApp {
       canonicalPath: (absPath) => this.canonicalPath(absPath),
       mineFiles: () => project.mineFiles,
       drainMineUpdates: () => project.mineCommit.catch(() => undefined),
-      runSandboxedEvidence: (cand, command, timeoutMs) => this.runSandboxedEvidence(cand, command, timeoutMs),
+      removePromptPayload: (eventsDir, fileName) => this.removePromptPayload(eventsDir, fileName),
+      runSandboxedEvidence: (cand, command, timeoutMs, signal) => this.runSandboxedEvidence(cand, command, timeoutMs, signal),
       sourceFilesOf: (root) => this.sourceFilesOf(root),
       createEvidenceHome: () => this.createEvidenceHome(),
+      removeEvidenceHome: (path) => this.removeEvidenceHome(path),
       detectTestFromState: (store, stateId) => this.detectTestFromState(store, stateId),
       benchmarkConfigFrom: (store, stateId) => this.benchmarkConfigFrom(store, stateId),
-      onEvidenceUpdate: (summary) => this.send("worldline:evidence-update", summary),
+      onEvidenceUpdate: (summary) => this.send("worldline:evidence-update", { projectId: project.id, summary }),
       onPromotionApply: (relPaths) => {
         this.promotionPaths = relPaths ? new Set(relPaths) : null;
       },
       primarySessionDir: (cwd, engine) => engine === "core" ? this.coreProjectSessionDir(cwd) : Promise.resolve(this.primarySessionDir(cwd)),
       installPromoted: async (seed) => {
+        const rendererTarget = this.captureRendererSendTarget();
         const inst = await this.createTerminal(
           seed.primaryRoot,
           seed.engine === "core"
@@ -1088,26 +1771,26 @@ class PiEditorApp {
           const abs = await this.canonicalPath(join(seed.primaryRoot, path.rel));
           const before = path.beforeExists ? await readFile(join(seed.beforeDir, path.rel)) : null;
           this.setBaseline(inst, abs, before === null ? null : before.toString("utf8"));
-          if (path.kind === "delete") await this.recordDeleted(inst, abs);
+          if (path.kind === "delete") await this.recordDeleted(inst, abs, rendererTarget);
           else await this.recordModified(inst, abs, path.beforeExists ? "modified" : "created");
         }
-        this.send("modified:list", { instanceId: inst.id, files: [...inst.modified.values()] });
+        this.send("modified:list", { instanceId: inst.id, files: [...inst.modified.values()] }, rendererTarget);
         const changedList = seed.paths.map((path) => `- \`${path.rel}\``).join("\n");
         for (const other of this.terminals.values()) {
           if (other.id === inst.id || other.workspaceId !== seed.primaryWorkspaceId || other.type !== "agent") continue;
           try {
-            mkdirSync(this.eventsDirOf(other), { recursive: true, mode: 0o700 });
-            writeFileSync(
-              join(this.eventsDirOf(other), `edits-${other.id}.md`),
-              `## Source changed by promotion (${seed.comparisonId}, candidate ${seed.label})\n\n${changedList}\n`,
-              "utf8",
+            await this.writeEventLeaf(
+              other,
+              `edits-${other.id}.md`,
+              Buffer.from(`## Source changed by promotion (${seed.comparisonId}, candidate ${seed.label})\n\n${changedList}\n`),
+              16 * 1024,
             );
           } catch {
             /* The context file is optional. */
           }
         }
-        this.sendInstances();
-        this.send("promotion:opened", { terminalId: inst.id });
+        this.sendInstances(rendererTarget);
+        this.send("promotion:opened", { terminalId: inst.id }, rendererTarget);
         return { terminalId: inst.id };
       },
     });
@@ -1117,6 +1800,47 @@ class PiEditorApp {
   private eventsDirOf(inst: PiTerminalInstance): string {
     const owner = this.projectOfTerminal(inst.id);
     return owner?.worldlines?.eventsDirOf(inst.id) ?? this.eventsDir;
+  }
+
+  /** Resolve the native identity for a terminal's private events root. */
+  private eventsBindingOf(inst: PiTerminalInstance): PromotionFsIdentity | null {
+    const owner = this.projectOfTerminal(inst.id);
+    const candidate = owner?.worldlines?.eventsBindingOf(inst.id);
+    if (candidate) return { dev: candidate.dev, ino: candidate.ino };
+    return this.eventsDirBinding;
+  }
+
+  /** Write one terminal-private event leaf below its bound events root. */
+  private async writeEventLeaf(inst: PiTerminalInstance, name: string, content: Buffer, maxBytes: number): Promise<void> {
+    const root = this.eventsBindingOf(inst);
+    if (!root) throw new Error("terminal events directory is not bound");
+    await writeBoundOwnedFile({
+      root: this.eventsDirOf(inst),
+      rootIdentity: root,
+      components: [name],
+      parentIdentity: root,
+      content,
+      mode: 0o600,
+      maxBytes,
+    });
+  }
+
+  /** Remove one terminal-private event leaf through its bound root. */
+  private async removeEventLeaf(inst: PiTerminalInstance, name: string): Promise<void> {
+    const root = this.eventsBindingOf(inst);
+    if (!root) return;
+    await this.removeBoundEventLeaf(this.eventsDirOf(inst), root, name);
+  }
+
+  private async removeBoundEventLeaf(rootPath: string, root: PromotionFsIdentity, name: string, expectedIdentity?: PromotionFsIdentity): Promise<void> {
+    try {
+      const binding = await bindOwnedEntry(join(rootPath, name), root, expectedIdentity);
+      await removeBoundOwnedEntry({ binding });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.warn(`[main] retained terminal event ${name}: ${String(error)}`);
+      }
+    }
   }
 
   /** Core tabs attach a clipboard image as a pending host file. Pi and
@@ -1193,23 +1917,55 @@ class PiEditorApp {
     workspaceId: string;
     engine?: "pi" | "core";
     launch: { cmd: string; args: string[]; env: Record<string, string | undefined> };
+    beforeSpawn?: (terminalId: string) => void;
+    signal?: AbortSignal;
   }): Promise<{ terminalId: string; pid: number }> {
-    const inst = await this.createTerminal(opts.root, {
-      type: "agent",
-      engine: opts.engine,
-      workspaceId: opts.workspaceId,
-      launch: opts.launch,
-    });
-    // The candidate's bridge writes to its own events dir: tail it.
     const eventsDir = opts.launch.env.TERMINA_EVENTS_DIR;
-    if (eventsDir && eventsDir !== this.eventsDir) {
-      const tailer = new SidecarTailer(eventsDir);
-      tailer.onEvent = (id, event) => this.enqueueSidecarEvent(id, event);
-      tailer.start();
-      tailer.watch(inst.id);
-      this.worldlineTailers.set(inst.id, tailer);
+    // Allocate the id and arm the candidate-owned tailer before constructing
+    // the PTY.  Pi/core can emit session_ready from their startup handler
+    // synchronously with process creation; installing the cursor after the
+    // spawn would make watch() treat that record as old history and drop the
+    // readiness transition.
+    const terminalId = this.allocateTerminalId();
+    if (!eventsDir) throw new Error("candidate events directory is missing");
+    const tailer = new SidecarTailer(eventsDir);
+    tailer.onEvent = (id, event) => this.enqueueSidecarEvent(id, event);
+    tailer.start();
+    this.worldlineTailers.set(terminalId, tailer);
+    try {
+      // The durable `await tailer.watchReady(terminalId)` boundary is
+      // cancellation-raced so teardown cannot leave a waiter behind.
+      if (!(await awaitCandidateAbortable(tailer.watchReady(terminalId), opts.signal))) {
+        throw new Error("candidate sidecar tailer could not establish a durable startup cursor");
+      }
+      if (opts.signal?.aborted) throw new Error("candidate startup was cancelled");
+      // Worldline routing is installed while the sidecar cursor is durable and
+      // before createTerminal can spawn a child. This is the final admission
+      // boundary for an immediate session_ready.
+      opts.beforeSpawn?.(terminalId);
+      if (opts.signal?.aborted) throw new Error("candidate startup was cancelled");
+      const inst = await this.createTerminal(opts.root, {
+        type: "agent",
+        engine: opts.engine,
+        workspaceId: opts.workspaceId,
+        launch: opts.launch,
+        id: terminalId,
+        sidecarTailer: tailer,
+        skipSidecarWatch: true,
+      });
+      if (opts.signal?.aborted) {
+        this.terminateCandidate(inst.id);
+        throw new Error("candidate startup was cancelled");
+      }
+      return { terminalId: inst.id, pid: inst.pty.pid };
+    } catch (error) {
+      if (tailer) {
+        this.worldlineTailers.delete(terminalId);
+        tailer.stopWatching(terminalId);
+        tailer.stop();
+      }
+      throw error;
     }
-    return { terminalId: inst.id, pid: inst.pty.pid };
   }
 
   /** A candidate source tree workspace (no recording, own watcher). The
@@ -1271,22 +2027,39 @@ class PiEditorApp {
 
   /** Find a workspace for a path that is already canonical. */
   private async workspaceContainingCanonical(path: string): Promise<WorkspaceState | null> {
+    let match: { workspace: WorkspaceState; rootLength: number } | null = null;
     for (const project of this.projects.values()) {
       for (const ws of project.workspaces.values()) {
         const root = await this.canonicalPath(ws.root);
         if (project.workspaces.get(ws.id) !== ws || this.workspaceOwners.get(ws.id) !== project.id) continue;
         const rel = relative(root, path);
-        if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) return ws;
+        if ((rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) && (!match || root.length > match.rootLength)) {
+          match = { workspace: ws, rootLength: root.length };
+        }
       }
     }
-    return null;
+    return match?.workspace ?? null;
   }
 
-  private async managedPath(absPath: string, primaryOnly = false): Promise<{ path: string; workspace: WorkspaceState } | null> {
+  /** Resolve a renderer-provided owner to the live project/workspace pair. */
+  private projectWorkspace(owner: unknown): { project: ProjectState; workspace: WorkspaceState } | null {
+    if (!owner || typeof owner !== "object" || Array.isArray(owner)) return null;
+    const value = owner as Partial<ProjectWorkspaceRef>;
+    if (typeof value.projectId !== "string" || typeof value.workspaceId !== "string") return null;
+    const project = this.projects.get(value.projectId);
+    if (!project || this.workspaceOwners.get(value.workspaceId) !== project.id) return null;
+    const workspace = project.workspaces.get(value.workspaceId);
+    return workspace ? { project, workspace } : null;
+  }
+
+  private async managedPath(absPath: string, workspaceId: string, primaryOnly = false): Promise<{ path: string; workspace: WorkspaceState } | null> {
     if (await this.hasDanglingSymlink(absPath)) return null;
     const path = await this.canonicalPath(absPath);
-    const workspace = await this.workspaceContainingCanonical(path);
+    const workspace = this.workspaceById(workspaceId);
     if (!workspace || (primaryOnly && !workspace.primary)) return null;
+    const root = await this.canonicalPath(workspace.root);
+    const rel = relative(root, path);
+    if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return null;
     return { path, workspace };
   }
 
@@ -1348,48 +2121,148 @@ class PiEditorApp {
 
   // ------------------------------------------------- evidence (WORLDLINES §6.8) ----
 
+  /** Create one evidence profile below the comparison's bound profiles root. */
+  private async createBoundEvidenceProfile(cand: {
+    root: string;
+    profilePath: string;
+    profileBinding?: PromotionFsIdentity;
+    profileLeaf?: BoundPromotionExpectedLeaf;
+  }): Promise<{ path: string; parentIdentity: PromotionFsIdentity }> {
+    const parentIdentity = cand.profileBinding;
+    if (!parentIdentity || !cand.profileLeaf) throw new Error("candidate evidence profile is not bound");
+    const base = await boundPromotionReadFile({
+      root: dirname(cand.profilePath),
+      rootIdentity: parentIdentity,
+      components: [basename(cand.profilePath)],
+      parentIdentity,
+      expectedIdentity: cand.profileLeaf.identity,
+      maxBytes: 2 * 1024 * 1024,
+    });
+    const generated = evidenceProfileContent(cand, base.content.toString("utf8"));
+    await writeBoundOwnedFile({
+      root: dirname(generated.path),
+      rootIdentity: parentIdentity,
+      components: [basename(generated.path)],
+      parentIdentity,
+      content: Buffer.from(generated.content),
+      mode: 0o600,
+      maxBytes: 2 * 1024 * 1024,
+    });
+    return { path: generated.path, parentIdentity };
+  }
+
+  /** Remove one generated evidence profile through its bound parent. */
+  private async removeBoundEvidenceProfile(path: string, parentIdentity: PromotionFsIdentity): Promise<void> {
+    try {
+      const binding = await bindOwnedEntry(path, parentIdentity);
+      await removeBoundOwnedEntry({ binding });
+    } catch (error) {
+      // A failed identity proof is retained for the owner/restart cleanup;
+      // pathname `rm` would risk deleting a replacement profile.
+      console.warn(`[main] evidence profile cleanup retained ${path}: ${String(error)}`);
+    }
+  }
+
   /** One sandboxed command run with bounded combined stdout and stderr. */
   private async runSandboxedEvidence(
-    cand: { root: string; profilePath: string; homeDir: string; tmpDir: string },
+    cand: { root: string; profilePath: string; homeDir: string; tmpDir: string; profileBinding?: PromotionFsIdentity; profileLeaf?: BoundPromotionExpectedLeaf },
     command: string[],
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<{ code: number; stdout: string; timedOut: boolean }> {
     const shells = await detectShells();
     const shell = shells[0] ?? { path: "/bin/zsh", name: "zsh" };
+    if (signal?.aborted) return { code: -1, stdout: "evidence worker cancelled", timedOut: false };
+    const generatedProfile = await this.createBoundEvidenceProfile(cand);
+    const profileBinding = generatedProfile.parentIdentity;
+    const profilePath = generatedProfile.path;
+    const cleanupProfile = async (): Promise<void> => {
+      await this.removeBoundEvidenceProfile(profilePath, profileBinding);
+    };
+    if (signal?.aborted) {
+      await cleanupProfile();
+      return { code: -1, stdout: "evidence worker cancelled", timedOut: false };
+    }
     return new Promise((resolvePromise) => {
       // Evidence workers run fully offline under the same deny-list profile
       // with the resource limits applied by the wrapper (WORLDLINES §6.8).
-      const profilePath = writeEvidenceProfile(cand);
-      const child = spawn("sandbox-exec", ["-f", profilePath, shell.path, "-c", `${sandboxShellPreamble()} ${command.map(quoteShellArg).join(" ")}`], {
-        cwd: cand.root,
-        env: { ...cleanEnv(), HOME: cand.homeDir, TMPDIR: cand.tmpDir },
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      let child: ReturnType<typeof spawn>;
+      try {
+        const launch = candidateSandboxLaunch(profilePath, [shell.path, "-c", command.map(quoteShellArg).join(" ")]);
+        child = spawn(launch.cmd, launch.args, {
+          cwd: cand.root,
+          env: { ...candidateEnv(null), HOME: cand.homeDir, TMPDIR: cand.tmpDir },
+          stdio: ["ignore", "pipe", "pipe"],
+          detached: process.platform !== "win32",
+        });
+      } catch (error) {
+        void cleanupProfile().then(() => resolvePromise({ code: -1, stdout: error instanceof Error ? error.message : String(error), timedOut: false }));
+        return;
+      }
       let stdout = "";
       let timedOut = false;
+      let childEnded = false;
+      let childCode = -1;
+      let cleanupPromise: Promise<boolean> | null = null;
+      let cleanupSettled = false;
+      let cleanupWaitAttached = false;
+      let cancellationRequested = false;
       const appendOutput = (d: Buffer): void => {
         if (stdout.length >= MAX_VERIFY_OUTPUT) return;
         stdout += d.toString("utf8").slice(0, MAX_VERIFY_OUTPUT - stdout.length);
       };
-      child.stdout.on("data", appendOutput);
-      child.stderr.on("data", appendOutput);
+      child.stdout?.on("data", appendOutput);
+      child.stderr?.on("data", appendOutput);
       let settled = false;
       let timer: ReturnType<typeof setTimeout>;
       const finish = (result: { code: number; stdout: string; timedOut: boolean }): void => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        void rm(profilePath, { force: true }).then(
-          () => resolvePromise(result),
-          () => resolvePromise(result),
-        );
+        signal?.removeEventListener("abort", requestCancellation);
+        void cleanupProfile().then(() => resolvePromise(result));
+      };
+      const maybeFinish = (): void => {
+        if (settled || (!childEnded && !timedOut && !cancellationRequested)) return;
+        if (!cleanupPromise) cleanupPromise = terminateSandboxProcessGroup(child, cancellationRequested || !timedOut ? "SIGTERM" : "SIGKILL");
+        if (!cleanupWaitAttached) {
+          cleanupWaitAttached = true;
+          void cleanupPromise.then(
+            () => {
+              cleanupSettled = true;
+              maybeFinish();
+            },
+            () => {
+              cleanupSettled = true;
+              maybeFinish();
+            },
+          );
+        }
+        if (!cleanupSettled) return;
+        finish({ code: cancellationRequested ? -1 : childCode, stdout, timedOut });
+      };
+      const requestCancellation = (): void => {
+        if (settled) return;
+        cancellationRequested = true;
+        maybeFinish();
       };
       timer = setTimeout(() => {
         timedOut = true;
-        child.kill("SIGKILL");
+        maybeFinish();
       }, timeoutMs);
-      child.on("error", (err) => finish({ code: -1, stdout: String(err.message), timedOut: false }));
-      child.on("close", (code) => finish({ code: code ?? -1, stdout, timedOut }));
+      signal?.addEventListener("abort", requestCancellation, { once: true });
+      if (signal?.aborted) requestCancellation();
+      child.on("error", (err) => {
+        appendOutput(Buffer.from(String(err.message)));
+        childEnded = true;
+        childCode = -1;
+        maybeFinish();
+      });
+      child.on("close", (code) => {
+        childEnded = true;
+        childCode = code ?? -1;
+        maybeFinish();
+      });
     });
   }
 
@@ -1423,20 +2296,42 @@ class PiEditorApp {
 
   /** Create a bounded evidence home from the real Pi resources. */
   private async createEvidenceHome(): Promise<string> {
-    const dir = await mkdtemp(join(this.eventsDir, "evidence-home-"));
+    const eventsBinding = this.eventsDirBinding;
+    if (!eventsBinding) throw new Error("events directory is not bound");
+    let dir: string | null = null;
+    let binding: BoundOwnedDirectory | null = null;
     let complete = false;
     try {
-      const agentDst = join(dir, ".pi", "agent");
-      await mkdir(agentDst, { recursive: true, mode: 0o700 });
+      binding = await createOwnedDirectory(this.eventsDir, eventsBinding, "evidence-home-");
+      dir = binding.path;
+      this.evidenceHomeDirs.set(dir, binding);
+      // The evidence home is allocated once by the native descriptor-bound
+      // owner. Every destination directory and file is then created below
+      // that retained capability; no awaited pathname `mkdir`/`copyFile` can
+      // be redirected to a replacement ancestor.
+      const agent = await boundPromotionPrepareDirectory({
+        root: dir,
+        rootIdentity: binding.identity,
+        components: [".pi", "agent"],
+        createMissing: true,
+      });
+      if (!agent.identity) throw new Error("evidence agent directory was not created");
       const agentSrc = join(homedir(), ".pi", "agent");
       for (const name of ["auth.json", "settings.json", "models.json", "models-store.json"]) {
         try {
           const source = join(agentSrc, name);
           const info = await stat(source);
           if (!info.isFile() || info.size > MAX_PI_RESOURCE_BYTES) continue;
-          const target = join(agentDst, name);
-          await copyFile(source, target);
-          await chmod(target, 0o600);
+          const content = await readFile(source);
+          await boundPromotionWriteFile({
+            root: dir,
+            rootIdentity: binding.identity,
+            components: [".pi", "agent", name],
+            parentIdentity: agent.identity,
+            expectedDestination: { state: { type: "missing" } },
+            content,
+            mode: 0o600,
+          });
         } catch {
           /* The resource is optional. */
         }
@@ -1445,18 +2340,58 @@ class PiEditorApp {
         const src = join(agentSrc, name);
         try {
           if ((await stat(src)).isDirectory() && (await dirBytes(src)) <= MAX_PI_RESOURCE_BYTES) {
-            await cp(src, join(agentDst, name), { recursive: true });
+            const destination = await boundPromotionPrepareDirectory({
+              root: dir,
+              rootIdentity: binding.identity,
+              components: [".pi", "agent", name],
+              createMissing: true,
+            });
+            if (!destination.identity) throw new Error("evidence resource destination was not created");
+            const sourceBinding = await bindOwnedDirectory(src);
+            await boundPromotionCopyTree({
+              sourceRoot: src,
+              sourceRootIdentity: sourceBinding.identity,
+              destinationRoot: join(dir, ".pi", "agent", name),
+              destinationRootIdentity: destination.identity,
+              maxBytes: MAX_PI_RESOURCE_BYTES,
+            });
           }
         } catch {
           /* An optional or oversized resource is omitted. */
         }
       }
-      await mkdir(join(dir, "tmp", "A"), { recursive: true, mode: 0o700 });
-      await mkdir(join(dir, "tmp", "B"), { recursive: true, mode: 0o700 });
+      for (const name of ["A", "B"]) {
+        const tmp = await boundPromotionPrepareDirectory({
+          root: dir,
+          rootIdentity: binding.identity,
+          components: ["tmp", name],
+          createMissing: true,
+        });
+        if (!tmp.identity) throw new Error(`evidence tmp/${name} directory was not created`);
+      }
       complete = true;
       return dir;
     } finally {
-      if (!complete) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+      if (!complete && dir) {
+        this.evidenceHomeDirs.delete(dir);
+        if (binding) await removeBoundOwnedDirectory({ binding }).catch(() => undefined);
+      }
+    }
+  }
+
+  /** Remove an evidence home only through the binding captured at creation. */
+  private async removeEvidenceHome(path: string): Promise<boolean> {
+    const binding = this.evidenceHomeDirs.get(path);
+    if (!binding) return false;
+    try {
+      await removeBoundOwnedDirectory({ binding });
+      this.evidenceHomeDirs.delete(path);
+      return true;
+    } catch (error) {
+      // Keep the binding so a later lifecycle/dispose cleanup can retry.  A
+      // replacement parent or leaf is deliberately retained on uncertainty.
+      console.warn(`[main] evidence home cleanup retained ${path}: ${String(error)}`);
+      return false;
     }
   }
 
@@ -1764,7 +2699,10 @@ class PiEditorApp {
   private async discardCoreSession(inst: PiTerminalInstance): Promise<void> {
     if (inst.engine !== "core" || !inst.sessionFile) return;
     if (!this.pathInside(this.coreSessionRoot(), inst.sessionFile)) return;
-    await removeEmptySessionBundle(inst.sessionFile);
+    // Empty core bundles are reclaimed by the worker's native descriptor/
+    // provenance-bound owner. The legacy unbound helper intentionally only
+    // retains evidence and is not a production discard path.
+    await this.sessionFork.discardEmptyCoreSession(inst.sessionFile);
   }
 
   private persistLive(project: ProjectState): PiTerminalInstance[] {
@@ -1887,11 +2825,20 @@ class PiEditorApp {
       id?: string;
       fromTerminalId?: string;
       launch?: { cmd: string; args: string[]; env: Record<string, string | undefined> };
+      /** Candidate-owned tailer, already watching before the PTY is spawned. */
+      sidecarTailer?: SidecarTailer;
+      /** The candidate tailer was armed before spawn; do not reset its cursor
+       * after the child has had a chance to publish session_ready. */
+      skipSidecarWatch?: boolean;
       persist?: boolean;
       skipRosterSave?: boolean;
       resume?: { sessionId: string | null; sessionFile: string | null };
     },
   ): Promise<PiTerminalInstance> {
+    // Terminal creation crosses several awaits (provider/session setup and
+    // process spawn). Preserve the requesting document so a late completion
+    // cannot publish its list into a replacement renderer.
+    const rendererTarget = this.captureRendererSendTarget();
     const type = opts?.type ?? "agent";
     const agentEngine: "pi" | "core" | undefined = type === "agent" ? (opts?.engine === "pi" ? "pi" : "core") : undefined;
     const persist = opts?.persist ?? (!opts?.launch && !opts?.id);
@@ -2004,9 +2951,18 @@ class PiEditorApp {
       if (persist && !opts?.skipRosterSave) this.saveTerminalRoster(owner);
     }
 
-    inst.pty.onData = (data) => this.sendPtyData(inst.id, data);
+    const terminalGeneration = inst.generation;
+    inst.pty.onData = (data) => this.sendPtyData(inst.id, terminalGeneration, data);
+    this.ptyEgress.register(inst.id, terminalGeneration, {
+      pause: () => inst.pty.pause(),
+      resume: () => inst.pty.resume(),
+    });
     inst.pty.onExit = async (code) => {
       console.log(`[main] terminal ${inst.id} (${inst.type}) exited code=${code}`);
+      // Keep the terminal in the live map while queued output drains.  An
+      // exit notification overtaking PTY bytes changes TUI semantics, and a
+      // renderer reload must be able to receive the retained tail.
+      await this.ptyEgress.finish(inst.id, terminalGeneration, code);
       if (inst.captureTimer) {
         clearTimeout(inst.captureTimer);
         inst.captureTimer = null;
@@ -2017,7 +2973,8 @@ class PiEditorApp {
         this.releaseWriteLease(pending.workspaceId, pending.leaseRequester);
         this.pendingPreflights.delete(token);
       }
-      this.send("pty:exit", { id: inst.id, code });
+      // The exit marker was delivered and acknowledged by PtyEgressScheduler;
+      // it is not sent through the unsequenced generic channel.
       this.closeRunOnExit(inst);
       void this.cleanupPromptPayloads(inst);
       for (const event of inst.timeline) {
@@ -2039,6 +2996,7 @@ class PiEditorApp {
       this.worldlineTailers.delete(inst.id);
       this.tailer.stopWatching(inst.id);
       this.sidecarQueues.delete(inst.id);
+      this.ptyEgress.cancel(inst.id, terminalGeneration);
       // A dispatch worker closed before settling: its task goes back to
       // pending so the board stays honest.
       const dispatchExit = this.dispatchRuns.get(inst.id);
@@ -2052,19 +3010,19 @@ class PiEditorApp {
           task.state = "pending";
           task.workerId = undefined;
           task.claimed = undefined;
-          this.sendPlan(ownerInst);
+          this.sendPlan(ownerInst, rendererTarget);
         }
       }
-      this.sendInstances();
+      this.sendInstances(rendererTarget);
     };
 
-    this.tailer.watch(inst.id);
+    if (!opts?.skipSidecarWatch) (opts?.sidecarTailer ?? this.tailer).watch(inst.id);
     if (type === "agent" && owner) {
       const mineRefresh = owner.mineCommit.catch(() => undefined).then(() => this.writeMineContext(owner));
       owner.mineCommit = mineRefresh;
       void mineRefresh.catch((err) => console.warn(`[main] could not refresh mine context: ${(err as Error).message}`));
     }
-    this.sendInstances();
+    this.sendInstances(rendererTarget);
     return inst;
   }
 
@@ -2172,6 +3130,10 @@ class PiEditorApp {
   private async runVerify(ownerId: string): Promise<{ ok: boolean; error?: string }> {
     const owner = this.terminals.get(ownerId);
     if (!owner) return { ok: false, error: "terminal not found" };
+    // The verify job can outlive several awaits (and the process itself can
+    // run for minutes). Keep its pushes owned by the document that requested
+    // it; a replacement renderer must hydrate from fresh state instead.
+    const rendererTarget = this.captureRendererSendTarget();
     const verifyOwnerId = this.projectOfTerminal(ownerId)?.id;
     if (this.disposed || this.projectIsSwitching(verifyOwnerId)) return { ok: false, error: "the project is changing" };
     if (this.verifyRuns.has(ownerId)) return { ok: false, error: "a verify run is already in progress" };
@@ -2203,16 +3165,22 @@ class PiEditorApp {
     }
 
     let child: ReturnType<typeof spawn>;
+    let verifyProfilePath: string | null = null;
+    let verifyProfileParent: PromotionFsIdentity | null = null;
     try {
       const shells = await detectShells();
       const shell = shells[0] ?? { path: "/bin/zsh", name: "zsh" };
       const cmdline = `${tc.command} ${tc.args.map(quoteShellArg).join(" ")}`;
-      const command = candidate ? "sandbox-exec" : shell.path;
-      const args = candidate
-        ? ["-f", writeEvidenceProfile(candidate), shell.path, "-c", `${sandboxShellPreamble()} ${cmdline}`]
-        : ["-c", cmdline];
+      if (candidate) {
+        const generated = await this.createBoundEvidenceProfile(candidate);
+        verifyProfilePath = generated.path;
+        verifyProfileParent = generated.parentIdentity;
+      }
+      const launch = candidate ? candidateSandboxLaunch(verifyProfilePath!, [shell.path, "-c", cmdline]) : null;
+      const command = launch?.cmd ?? shell.path;
+      const args = launch?.args ?? ["-c", cmdline];
       const env = candidate
-        ? { ...cleanEnv(), HOME: candidate.homeDir, TMPDIR: candidate.tmpDir, TERMINA_EVENTS_DIR: candidate.eventsDir }
+        ? { ...candidateEnv(null), HOME: candidate.homeDir, TMPDIR: candidate.tmpDir, TERMINA_EVENTS_DIR: candidate.eventsDir }
         : { ...cleanEnv() };
       child = spawn(command, args, {
         cwd,
@@ -2222,26 +3190,56 @@ class PiEditorApp {
         windowsHide: true,
       });
     } catch (err) {
+      if (verifyProfilePath && verifyProfileParent) {
+        await this.removeBoundEvidenceProfile(verifyProfilePath, verifyProfileParent);
+      }
       this.verifyRuns.delete(ownerId);
       return { ok: false, error: `could not start the background test: ${(err as Error).message}` };
     }
 
-    const job: VerifyJob = { child, interrupted: false };
-    this.verifyJobs.set(ownerId, job);
     let output = "";
     let finished = false;
-    let escalateTimer: ReturnType<typeof setTimeout> | null = null;
+    let timedOut = false;
+    let cleanupPromise: Promise<boolean> | null = null;
+    let cleanupDone = false;
+    let cleanupWaitAttached = false;
+    let pendingFinish: { code: number | null; how: VerifyState } | null = null;
+    const requestCleanup = (signal: NodeJS.Signals, graceMs = 1_500): Promise<boolean> => {
+      cleanupPromise ??= terminateSandboxProcessGroup(child, signal, graceMs);
+      if (!cleanupWaitAttached) {
+        cleanupWaitAttached = true;
+        void cleanupPromise.then(
+          () => {
+            cleanupDone = true;
+            finishAfterCleanup();
+          },
+          () => {
+            cleanupDone = true;
+            finishAfterCleanup();
+          },
+        );
+      }
+      return cleanupPromise;
+    };
+    const job: VerifyJob = { child, interrupted: false, cleanup: requestCleanup };
+    this.verifyJobs.set(ownerId, job);
     const appendOutput = (data: Buffer | string): void => {
       if (output.length >= MAX_VERIFY_OUTPUT) return;
       output += data.toString().slice(0, MAX_VERIFY_OUTPUT - output.length);
     };
-    const finish = (code: number | null, how: VerifyState): void => {
+    const finishNow = (code: number | null, how: VerifyState): void => {
       if (finished) return;
       finished = true;
       clearTimeout(verifyTimer);
-      if (escalateTimer) clearTimeout(escalateTimer);
       this.verifyRuns.delete(ownerId);
       this.verifyJobs.delete(ownerId);
+      if (verifyProfilePath) {
+        const profilePath = verifyProfilePath;
+        const profileParent = verifyProfileParent;
+        verifyProfilePath = null;
+        verifyProfileParent = null;
+        if (profileParent) void this.removeBoundEvidenceProfile(profilePath, profileParent);
+      }
       if (this.terminals.get(ownerId) !== owner || this.projectIsSwitching(this.projectOfTerminal(ownerId)?.id) || this.disposed) return;
       let summary = how === "pass" ? "tests green" : how === "timeout" ? "tests timed out" : how === "cancelled" ? "cancelled" : "tests failing";
       let failed: { count: number; names: string[] } | null = null;
@@ -2259,15 +3257,24 @@ class PiEditorApp {
       owner.verify = { state: how, command: tc.label, summary };
       // Do not write a result for a cancelled run. The previous context stays.
       if (how !== "cancelled") this.writeVerifyContext(ownerId, tc.label, how, code, output, failed);
-      this.send("verify:state", { terminalId: ownerId, verify: owner.verify });
+      this.send("verify:state", { terminalId: ownerId, verify: owner.verify }, rendererTarget);
+    };
+    function finishAfterCleanup(): void {
+      if (!cleanupDone || !pendingFinish || finished) return;
+      const pending = pendingFinish;
+      pendingFinish = null;
+      finishNow(pending.code, pending.how);
+    }
+    const finish = (code: number | null, how: VerifyState): void => {
+      if (finished) return;
+      pendingFinish = { code, how };
+      requestCleanup(how === "timeout" ? "SIGKILL" : "SIGTERM");
+      finishAfterCleanup();
     };
     const verifyTimer = setTimeout(() => {
       console.warn(`[main] background verify timed out after 600s for ${ownerId}`);
+      timedOut = true;
       finish(null, "timeout");
-      this.killVerifyChild(child, "SIGTERM");
-      // Escalate when the group ignores SIGTERM: a survivor keeps writing
-      // into the workspace after the run reports timed out.
-      escalateTimer = setTimeout(() => this.killVerifyChild(child, "SIGKILL"), 5000);
     }, 10 * 60 * 1000);
 
     child.stdout?.on("data", appendOutput);
@@ -2277,26 +3284,12 @@ class PiEditorApp {
       if (!finished) finish(null, job.interrupted ? "cancelled" : "fail");
     });
     child.once("close", (code) => {
-      if (!finished) finish(code, job.interrupted ? "cancelled" : code === 0 ? "pass" : "fail");
+      if (!finished) finish(code, timedOut ? "timeout" : job.interrupted ? "cancelled" : code === 0 ? "pass" : "fail");
     });
 
     owner.verify = { state: "running", command: tc.label, summary: "running…" };
-    this.send("verify:state", { terminalId: ownerId, verify: owner.verify });
+    this.send("verify:state", { terminalId: ownerId, verify: owner.verify }, rendererTarget);
     return { ok: true };
-  }
-
-  private killVerifyChild(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
-    const pid = child.pid;
-    try {
-      if (process.platform !== "win32" && pid && pid > 0) process.kill(-pid, signal);
-      else child.kill(signal);
-    } catch {
-      try {
-        child.kill(signal);
-      } catch {
-        /* The process already exited. */
-      }
-    }
   }
 
   private cancelVerifyForComparison(comparisonId: string): void {
@@ -2314,7 +3307,7 @@ class PiEditorApp {
     const job = this.verifyJobs.get(ownerId);
     if (!job || !this.verifyRuns.has(ownerId)) return { ok: false, error: "no verify run is in progress" };
     job.interrupted = true;
-    this.killVerifyChild(job.child, "SIGINT");
+    void job.cleanup("SIGINT");
     return { ok: true };
   }
 
@@ -2324,12 +3317,8 @@ class PiEditorApp {
       [...this.verifyJobs.entries()]
         .filter(([id]) => target === null || target.has(id))
         .map(([, job]) => job);
-    for (const job of matchingJobs()) this.killVerifyChild(job.child, "SIGTERM");
-    const deadline = Date.now() + timeoutMs;
-    while (matchingJobs().length > 0 && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    for (const job of matchingJobs()) this.killVerifyChild(job.child, "SIGKILL");
+    const graceMs = Math.max(25, Math.floor(timeoutMs / 2));
+    await Promise.allSettled(matchingJobs().map((job) => job.cleanup("SIGTERM", graceMs)));
     for (const id of [...this.verifyJobs.keys()]) {
       if (target === null || target.has(id)) this.verifyJobs.delete(id);
     }
@@ -2349,34 +3338,45 @@ class PiEditorApp {
   ): void {
     const owner = this.terminals.get(ownerId);
     const eventsDir = owner ? this.eventsDirOf(owner) : this.eventsDir;
-    try {
-      mkdirSync(eventsDir, { recursive: true, mode: 0o700 });
-      const stamp = new Date().toISOString();
-      const status = state === "pass" ? "✅ PASSED" : state === "timeout" ? "⏰ TIMED OUT" : "❌ FAILED";
-      const failLine =
-        failed && failed.count > 0
-          ? `**Failed:** ${failed.count} — ${failed.names.map((n) => `\`${n}\``).join(", ")}\n\n`
-          : "";
-      const body = output.trim().slice(-6000);
-      const md =
-        `## Test run — \`${label}\` — ${stamp}\n\n` +
-        `**Status:** ${status}${code !== null ? ` (exit code ${code})` : ""}\n\n` +
-        failLine +
-        (body ? `<details>\n<summary>Output</summary>\n\n\`\`\`text\n${body}\n\`\`\`\n</details>\n` : "");
-      writeFileSync(join(eventsDir, `verify-${ownerId}.md`), md, "utf8");
-    } catch (err) {
-      console.warn(`[main] could not write verify context: ${(err as Error).message}`);
-    }
+    const root = owner ? this.eventsBindingOf(owner) : this.eventsDirBinding;
+    if (!root) return;
+    const stamp = new Date().toISOString();
+    const status = state === "pass" ? "✅ PASSED" : state === "timeout" ? "⏰ TIMED OUT" : "❌ FAILED";
+    const failLine =
+      failed && failed.count > 0
+        ? `**Failed:** ${failed.count} — ${failed.names.map((n) => `\`${n}\``).join(", ")}\n\n`
+        : "";
+    const body = output.trim().slice(-6000);
+    const md =
+      `## Test run — \`${label}\` — ${stamp}\n\n` +
+      `**Status:** ${status}${code !== null ? ` (exit code ${code})` : ""}\n\n` +
+      failLine +
+      (body ? `<details>\n<summary>Output</summary>\n\n\`\`\`text\n${body}\n\`\`\`\n</details>\n` : "");
+    void writeBoundOwnedFile({
+      root: eventsDir,
+      rootIdentity: root,
+      components: [`verify-${ownerId}.md`],
+      parentIdentity: root,
+      content: Buffer.from(md),
+      mode: 0o600,
+      maxBytes: 16 * 1024,
+    }).catch((err) => {
+      console.warn(`[main] could not write verify context: ${String(err)}`);
+    });
   }
 
   // ------------------------------------------------------------ plan board --
 
   /** Send the current plan to the renderer. */
-  private sendPlan(inst: PiTerminalInstance): void {
-    this.send("plan:update", { instanceId: inst.id, tasks: inst.plan });
+  private sendPlan(inst: PiTerminalInstance, expected?: PtyRendererSendTarget | null): void {
+    this.send("plan:update", { instanceId: inst.id, tasks: inst.plan }, expected);
   }
 
-  private async applyPlanMessage(inst: PiTerminalInstance, text: string): Promise<void> {
+  private async applyPlanMessage(
+    inst: PiTerminalInstance,
+    text: string,
+    expected?: PtyRendererSendTarget | null,
+  ): Promise<void> {
     if (!inst.busy) return;
     const tasks = await parsePlanTasks(
       text,
@@ -2393,17 +3393,22 @@ class PiEditorApp {
         .filter(([, entry]) => entry.ownerId === inst.id)
         .map(([workerId, entry]) => ({ workerId, taskText: entry.taskText })),
     );
-    this.sendPlan(inst);
+    this.sendPlan(inst, expected);
   }
 
-  private async updatePlanProgress(inst: PiTerminalInstance, path: string): Promise<void> {
-    if (markPlanProgress(inst.plan, await this.rel(path))) this.sendPlan(inst);
+  private async updatePlanProgress(
+    inst: PiTerminalInstance,
+    path: string,
+    expected?: PtyRendererSendTarget | null,
+  ): Promise<void> {
+    const workspace = this.workspaceOfTerminal(inst);
+    if (workspace && markPlanProgress(inst.plan, await this.rel(path, workspace.root))) this.sendPlan(inst, expected);
   }
 
-  private finalizePlan(inst: PiTerminalInstance): void {
+  private finalizePlan(inst: PiTerminalInstance, expected?: PtyRendererSendTarget | null): void {
     if (inst.plan.length === 0) return;
     finalizePlanTasks(inst.plan, inst.touched, inst.toolOutcomes);
-    this.sendPlan(inst);
+    this.sendPlan(inst, expected);
   }
 
   // ------------------------------------------------------ session search ----
@@ -2481,7 +3486,7 @@ class PiEditorApp {
   private async isProjectFile(relPath: string, projectCwd: string): Promise<boolean> {
     if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return false;
     const abs = join(projectCwd, relPath);
-    if (!await this.withinProject(abs)) return false;
+    if (!await this.withinRoot(abs, projectCwd)) return false;
     try {
       return existsSync(abs) && statSync(abs).isFile();
     } catch {
@@ -2558,6 +3563,7 @@ class PiEditorApp {
   ): Promise<{ ok: boolean; error?: string; dispatched?: number }> {
     const owner = this.terminals.get(ownerId);
     if (!owner || owner.type !== "agent") return { ok: false, error: "terminal not found" };
+    const rendererTarget = this.captureRendererSendTarget();
     if (owner.plan.length === 0) return { ok: false, error: "the plan board is empty — ask the agent for a plan first" };
     const ownerWs = this.workspaceOfTerminal(owner);
     for (const entry of this.dispatchRuns.values()) {
@@ -2582,22 +3588,21 @@ class PiEditorApp {
     // Structured startup skips the interactive preflight. Flush once so
     // unsaved editor buffers land before the workers write.
     if (ownerWs) {
-      const flush = await this.flushDirtyModels(`dispatch:${ownerId}`, ownerWs.id);
+      const flush = await this.flushDirtyModels(`dispatch:${ownerId}`, ownerWs.id, 5000, rendererTarget);
       if (!flush.ok) return { ok: false, error: "could not save editor changes" };
     }
     const jobs = chosen.map((task) => ({ task, id: this.allocateTerminalId() }));
     try {
-      mkdirSync(this.eventsDir, { recursive: true, mode: 0o700 });
-      this.eventsDirReady = true;
+      this.ensureEventsDir();
       const briefingJobs = this.dispatchJobsForBriefing(owner, jobs);
       for (const job of jobs) {
-        this.writeDispatchBriefing(job.id, job.task, briefingJobs);
-        this.writeDispatchStartupControl(job.id, job.task.text);
+        await this.writeDispatchBriefing(job.id, job.task, briefingJobs);
+        await this.writeDispatchStartupControl(job.id, job.task.text);
       }
     } catch (err) {
       for (const job of jobs) {
         this.clearMailbox(job.id);
-        this.removeDispatchStartupControl(job.id);
+        await this.removeDispatchStartupControl(job.id);
       }
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
@@ -2619,18 +3624,18 @@ class PiEditorApp {
         dispatched++;
       } catch (err) {
         this.clearMailbox(job.id);
-        this.removeDispatchStartupControl(job.id);
+        await this.removeDispatchStartupControl(job.id);
         console.warn(`[main] dispatch worker failed: ${(err as Error).message}`);
       }
     }
     if (dispatched === 0) {
       for (const job of jobs) {
         this.clearMailbox(job.id);
-        this.removeDispatchStartupControl(job.id);
+        await this.removeDispatchStartupControl(job.id);
       }
       return { ok: false, error: "no dispatch worker started" };
     }
-    this.sendPlan(owner);
+    this.sendPlan(owner, rendererTarget);
     return { ok: true, dispatched };
   }
 
@@ -2648,39 +3653,75 @@ class PiEditorApp {
     return join(this.eventsDir, `mailbox-${terminalId}.md`);
   }
 
-  private writeDispatchBriefing(workerId: string, assigned: PlanTask, jobs: Array<{ task: PlanTask; id: string }>): void {
+  private async writeDispatchBriefing(workerId: string, assigned: PlanTask, jobs: Array<{ task: PlanTask; id: string }>): Promise<void> {
     let briefing = formatDispatchBriefing(workerId, assigned, jobs);
     if (briefing.length > PiEditorApp.MAX_MAILBOX_BYTES) {
       briefing = briefing.slice(0, PiEditorApp.MAX_MAILBOX_BYTES) + "\n…";
     }
     this.dispatchMailbox.set(workerId, [briefing]);
-    this.flushMailbox(workerId);
+    await this.flushMailbox(workerId);
   }
 
-  private writeDispatchStartupControl(workerId: string, taskText: string): void {
-    const target = join(this.eventsDir, `startup-control-${workerId}.json`);
-    const temporary = `${target}.tmp-${randomUUID()}`;
+  private async writeDispatchStartupControl(workerId: string, taskText: string): Promise<void> {
     const control = { opId: randomUUID(), action: "structured", content: [{ type: "text", text: taskText }] };
     this.ensureEventsDir();
-    writeFileSync(temporary, JSON.stringify(control), { mode: 0o600 });
-    renameSync(temporary, target);
+    const binding = this.eventsDirBinding;
+    if (!binding) throw new Error("events directory is not bound");
+    await writeBoundOwnedFile({
+      root: this.eventsDir,
+      rootIdentity: binding,
+      components: [`startup-control-${workerId}.json`],
+      parentIdentity: binding,
+      content: Buffer.from(JSON.stringify(control)),
+      mode: 0o600,
+      maxBytes: 64 * 1024,
+    });
   }
 
-  private removeDispatchStartupControl(workerId: string): void {
-    rmSync(join(this.eventsDir, `startup-control-${workerId}.json`), { force: true });
+  private async removeDispatchStartupControl(workerId: string): Promise<void> {
+    await this.removeEventsLeaf(`startup-control-${workerId}.json`);
+  }
+
+  /** Remove one launch-private events leaf using the current root binding. */
+  private async removeEventsLeaf(name: string): Promise<void> {
+    const root = this.eventsDirBinding;
+    if (!root) return;
+    await this.removeBoundEventLeaf(this.eventsDir, root, name);
+  }
+
+  /** Remove one recorded prompt payload through the matching events binding. */
+  private async removePromptPayload(eventsDir: string, fileName: string): Promise<void> {
+    if (!/^[A-Za-z0-9_.-]{1,128}$/.test(fileName)) return;
+    const requested = resolve(eventsDir);
+    let binding: PromotionFsIdentity | null = null;
+    if (requested === resolve(this.eventsDir)) {
+      binding = this.eventsDirBinding;
+    } else {
+      for (const inst of this.terminals.values()) {
+        if (resolve(this.eventsDirOf(inst)) !== requested) continue;
+        binding = this.eventsBindingOf(inst);
+        break;
+      }
+    }
+    if (!binding) return;
+    await this.removeBoundEventLeaf(eventsDir, binding, fileName);
   }
 
   /** Remove leftover dispatch control and mailbox files. The events
    *  directory persists across launches, and terminal ids restart at
    *  term-1, so a stale control would submit the old task. */
-  private cleanupStaleDispatchFiles(): void {
-    let names: string[] = [];
+  private async cleanupStaleDispatchFiles(): Promise<void> {
+    if (!this.eventsDirProvenanceTrusted) return;
+    const root = this.eventsDirBinding;
+    if (!root) return;
+    let entries: Array<{ name: string; identity: PromotionFsIdentity; kind: "directory" | "file" | "symlink" | "other" }> = [];
     try {
-      names = readdirSync(this.eventsDir);
+      entries = await boundPromotionListEntries({ root: this.eventsDir, rootIdentity: root });
     } catch {
       return;
     }
-    for (const name of names) {
+    for (const entry of entries) {
+      const { name } = entry;
       if (
         name === "startup-control.json" ||
         name.startsWith("mailbox-term-") ||
@@ -2691,7 +3732,9 @@ class PiEditorApp {
         name.startsWith("images-owner-term-") ||
         name.startsWith("images-tx-term-")
       ) {
-        rmSync(join(this.eventsDir, name), { force: true });
+        if (entry.kind === "file" || entry.kind === "symlink") {
+          await this.removeBoundEventLeaf(this.eventsDir, root, name, entry.identity);
+        }
       }
     }
   }
@@ -2705,9 +3748,118 @@ class PiEditorApp {
   }
 
   private ensureEventsDir(): void {
-    if (this.eventsDirReady) return;
-    mkdirSync(this.eventsDir, { recursive: true, mode: 0o700 });
+    if (this.eventsDirReady && this.eventsDirBinding) return;
+    throw new Error("events directory is not bound");
+  }
+
+  /** Bind the launch-persistent events root before any scratch cleanup. */
+  private async prepareEventsDir(): Promise<void> {
+    const parentPath = dirname(resolve(this.eventsDir));
+    const parentInfo = await lstat(parentPath, { bigint: true });
+    if (!parentInfo.isDirectory() || parentInfo.isSymbolicLink()) throw new Error("events parent is not a real directory");
+    const parentIdentity = await boundPromotionOpenDirectory({
+      path: parentPath,
+      expectedIdentity: { dev: String(parentInfo.dev), ino: String(parentInfo.ino) },
+    });
+    const eventsName = basename(resolve(this.eventsDir));
+    if (!eventsName || eventsName === "." || eventsName === ".." || eventsName.includes("/") || eventsName.includes("\\")) {
+      throw new Error("events directory name is invalid");
+    }
+    let currentIdentity: PromotionFsIdentity | undefined;
+    try {
+      const currentInfo = await lstat(this.eventsDir, { bigint: true });
+      if (!currentInfo.isDirectory() || currentInfo.isSymbolicLink()) throw new Error("events directory is not a real directory");
+      currentIdentity = { dev: String(currentInfo.dev), ino: String(currentInfo.ino) };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    let prior: PromotionFsIdentity | null = null;
+    try {
+      const raw = JSON.parse(await readFile(this.eventsDirAnchorPath, "utf8")) as Record<string, unknown>;
+      const path = raw.path;
+      const dev = raw.dev;
+      const ino = raw.ino;
+      if (path === resolve(this.eventsDir) && typeof dev === "string" && /^\d+$/.test(dev) && typeof ino === "string" && /^\d+$/.test(ino)) {
+        prior = { dev, ino };
+      }
+    } catch {
+      /* A missing/corrupt anchor makes prior-launch cleanup untrusted. */
+    }
+    let binding: PromotionFsIdentity;
+    let trusted = false;
+    if (prior) {
+      try {
+        binding = await boundPromotionOpenDirectory({ path: this.eventsDir, expectedIdentity: prior });
+        trusted = binding.dev === prior.dev && binding.ino === prior.ino;
+      } catch {
+        // Rebind the current root for this launch, but do not touch scratch
+        // from the prior root after an ancestor/root replacement.
+        if (!currentIdentity) {
+          binding = await boundPromotionEnsureDirectory({
+            path: this.eventsDir,
+            trustedParent: { path: parentPath, identity: parentIdentity, name: eventsName },
+          });
+        } else {
+          binding = await boundPromotionEnsureDirectory({
+            path: this.eventsDir,
+            expectedIdentity: currentIdentity,
+            trustedParent: { path: parentPath, identity: parentIdentity, name: eventsName },
+          });
+        }
+      }
+    } else {
+      binding = currentIdentity
+        ? await boundPromotionEnsureDirectory({
+          path: this.eventsDir,
+          expectedIdentity: currentIdentity,
+          trustedParent: { path: parentPath, identity: parentIdentity, name: eventsName },
+        })
+        : await boundPromotionEnsureDirectory({
+          path: this.eventsDir,
+          trustedParent: { path: parentPath, identity: parentIdentity, name: eventsName },
+        });
+    }
+    this.eventsDirBinding = binding;
+    this.eventsDirProvenanceTrusted = trusted;
     this.eventsDirReady = true;
+    const anchorParentPath = dirname(this.eventsDirAnchorPath);
+    const anchorParentInfo = await lstat(anchorParentPath, { bigint: true });
+    if (!anchorParentInfo.isDirectory() || anchorParentInfo.isSymbolicLink()) throw new Error("events anchor parent is not a real directory");
+    const anchorParent = await boundPromotionOpenDirectory({
+      path: anchorParentPath,
+      expectedIdentity: { dev: String(anchorParentInfo.dev), ino: String(anchorParentInfo.ino) },
+    });
+    await writeBoundOwnedFile({
+      root: anchorParentPath,
+      rootIdentity: anchorParent,
+      components: [basename(this.eventsDirAnchorPath)],
+      parentIdentity: anchorParent,
+      content: Buffer.from(JSON.stringify({ path: resolve(this.eventsDir), dev: binding.dev, ino: binding.ino, type: "directory" })),
+      mode: 0o600,
+      maxBytes: 16 * 1024,
+    });
+    if (!trusted) return;
+    try {
+      const workspace = await bindOwnedDirectory(this.sessionWorkspaceDir, binding);
+      await removeBoundOwnedDirectory({ binding: workspace });
+    } catch (error) {
+      // Missing scratch is normal.  Identity/type/ancestor failures retain
+      // the path and keep the main process moving without path recursion.
+      console.warn(`[main] session workspace cleanup retained ${this.sessionWorkspaceDir}: ${String(error)}`);
+    }
+
+    // Ensure the worker never has to perform a first-create pathname mkdir.
+    // If prior provenance was untrusted or the fixed name was retained, use a
+    // fresh native-owned leaf and pass that exact path to the session worker.
+    try {
+      await boundPromotionEnsureDirectory({
+        path: this.sessionWorkspaceDir,
+        trustedParent: { path: this.eventsDir, identity: binding, name: basename(this.sessionWorkspaceDir) },
+      });
+    } catch {
+      const workspace = await createOwnedDirectory(this.eventsDir, binding, "session-workspace-");
+      this.sessionWorkspaceDir = workspace.path;
+    }
   }
 
   private appendMailboxNote(terminalId: string, note: string): void {
@@ -2716,16 +3868,16 @@ class PiEditorApp {
     notes.push(note);
     while (notes.length > PiEditorApp.MAX_MAILBOX_NOTES) notes.shift();
     this.dispatchMailbox.set(terminalId, notes);
-    this.flushMailbox(terminalId);
+    void this.flushMailbox(terminalId);
   }
 
-  private flushMailbox(terminalId: string): void {
+  private async flushMailbox(terminalId: string): Promise<void> {
     const path = this.mailboxFile(terminalId);
     if (!path) return;
     const notes = this.dispatchMailbox.get(terminalId) ?? [];
     try {
       if (notes.length === 0) {
-        rmSync(path, { force: true });
+        await this.removeEventsLeaf(basename(path));
         return;
       }
       let body = notes.join("\n\n---\n\n");
@@ -2735,7 +3887,17 @@ class PiEditorApp {
       }
       if (body.length > PiEditorApp.MAX_MAILBOX_BYTES) body = body.slice(0, PiEditorApp.MAX_MAILBOX_BYTES) + "\n…";
       this.ensureEventsDir();
-      writeFileSync(path, body, { encoding: "utf8", mode: 0o600 });
+      const binding = this.eventsDirBinding;
+      if (!binding) throw new Error("events directory is not bound");
+      await writeBoundOwnedFile({
+        root: this.eventsDir,
+        rootIdentity: binding,
+        components: [basename(path)],
+        parentIdentity: binding,
+        content: Buffer.from(body, "utf8"),
+        mode: 0o600,
+        maxBytes: PiEditorApp.MAX_MAILBOX_BYTES + 64,
+      });
     } catch (err) {
       console.warn(`[main] could not write mailbox context: ${(err as Error).message}`);
     }
@@ -2746,11 +3908,7 @@ class PiEditorApp {
     this.dispatchMailbox.delete(terminalId);
     const path = this.mailboxFile(terminalId);
     if (path) {
-      try {
-        rmSync(path, { force: true });
-      } catch {
-        /* ignore */
-      }
+      void this.removeEventsLeaf(basename(path));
     }
   }
 
@@ -2772,7 +3930,11 @@ class PiEditorApp {
   }
 
   /** Copy a finished worker's files and baselines into the owner's review. */
-  private collectWorker(worker: PiTerminalInstance, owner: PiTerminalInstance): void {
+  private collectWorker(
+    worker: PiTerminalInstance,
+    owner: PiTerminalInstance,
+    expected?: PtyRendererSendTarget | null,
+  ): void {
     let changed = false;
     for (const [p, f] of worker.modified) {
       if (!owner.modified.has(p)) {
@@ -2783,19 +3945,21 @@ class PiEditorApp {
     for (const [p, b] of worker.baselines) {
       if (!owner.baselines.has(p)) this.setBaseline(owner, p, b);
     }
-    if (changed) this.send("modified:list", { instanceId: owner.id, files: [...owner.modified.values()] });
+    if (changed) this.send("modified:list", { instanceId: owner.id, files: [...owner.modified.values()] }, expected);
   }
 
   // ----------------------------------------------------------------- mine ----
 
   /** Mark a file as the user's own (or clear the mark). */
-  private setMineFile(path: string, mine: boolean): Promise<void> {
-    const project = this.project();
+  private setMineFile(path: string, mine: boolean, owner: unknown): Promise<void> {
+    const target = this.projectWorkspace(owner);
+    const project = target?.project ?? null;
+    const workspace = target?.workspace ?? null;
     if (typeof path !== "string" || typeof mine !== "boolean") return Promise.reject(new Error("invalid Mine update"));
-    if (!project || this.disposed || this.projectIsSwitching(project.id)) return Promise.reject(new Error("project is not available"));
+    if (!project || !workspace || !workspace.primary || this.disposed || this.projectIsSwitching(project.id)) return Promise.reject(new Error("project is not available"));
     const commit = project.mineCommit.catch(() => undefined).then(async () => {
-      const managed = await this.managedPath(path, true);
-      if (!managed || this.projectOfWorkspace(managed.workspace.id) !== project) throw new Error("path is outside the active project");
+      const managed = await this.managedPath(path, workspace.id, true);
+      if (!managed || managed.workspace.id !== workspace.id) throw new Error("path is outside the project workspace");
       const blocked = this.assertWorkspaceWritable(managed.workspace.id);
       if (blocked) throw new Error(blocked);
       const p = managed.path;
@@ -2828,9 +3992,7 @@ class PiEditorApp {
     const agents = [...this.terminals.values()].filter((inst) => inst.type === "agent" && this.projectOfTerminal(inst.id) === project);
     const writes = await Promise.allSettled(
       agents.map(async (inst) => {
-        const eventsDir = this.eventsDirOf(inst);
-        await mkdir(eventsDir, { recursive: true });
-        await this.writeFileAtomically(join(eventsDir, `mine-${inst.id}.md`), md);
+        await this.writeEventLeaf(inst, `mine-${inst.id}.md`, Buffer.from(md), 16 * 1024);
       }),
     );
     const failed = writes.find((result): result is PromiseRejectedResult => result.status === "rejected");
@@ -2850,7 +4012,7 @@ class PiEditorApp {
     project.mineFiles.clear();
     const agents = [...this.terminals.values()].filter((inst) => inst.type === "agent" && this.projectOfTerminal(inst.id) === project);
     await Promise.all(
-      agents.map((inst) => rm(join(this.eventsDirOf(inst), `mine-${inst.id}.md`), { force: true }).catch(() => undefined)),
+      agents.map((inst) => this.removeEventLeaf(inst, `mine-${inst.id}.md`)),
     );
   }
 
@@ -2869,8 +4031,9 @@ class PiEditorApp {
         for (const p of list) {
           if (project.mineFiles.size >= PiEditorApp.MAX_MINE_FILES) break;
           if (typeof p !== "string") continue;
-          const managed = await this.managedPath(p, true);
-          if (managed && this.projectOfWorkspace(managed.workspace.id) === project) project.mineFiles.add(managed.path);
+          const workspace = this.primaryWorkspace(project);
+          const managed = workspace ? await this.managedPath(p, workspace.id, true) : null;
+          if (managed && managed.workspace.id === workspace?.id) project.mineFiles.add(managed.path);
         }
       }
     } catch {
@@ -2880,20 +4043,17 @@ class PiEditorApp {
 
   /** Save the marks so a restart restores the ownership. */
   private async saveMineFiles(project: ProjectState): Promise<void> {
-    await mkdir(this.eventsDir, { recursive: true });
-    await this.writeFileAtomically(await this.mineFilePath(project), JSON.stringify([...project.mineFiles]));
-  }
-
-  /** Replace one app-owned file without exposing a partial write. */
-  private async writeFileAtomically(target: string, content: string): Promise<void> {
-    const temporary = `${target}.tmp-${randomUUID()}`;
-    try {
-      await writeFile(temporary, content, { encoding: "utf8", mode: 0o600 });
-      await fsRename(temporary, target);
-    } catch (err) {
-      await rm(temporary, { force: true }).catch(() => undefined);
-      throw err;
-    }
+    const root = this.eventsDirBinding;
+    if (!root) throw new Error("events directory is not bound");
+    await writeBoundOwnedFile({
+      root: this.eventsDir,
+      rootIdentity: root,
+      components: [basename(await this.mineFilePath(project))],
+      parentIdentity: root,
+      content: Buffer.from(JSON.stringify([...project.mineFiles])),
+      mode: 0o600,
+      maxBytes: 256 * 1024,
+    });
   }
 
   // --------------------------------------------------------- user edits ----
@@ -2935,13 +4095,9 @@ class PiEditorApp {
   }
 
   /** Write the edits context file for every agent terminal. */
-  private writeUserEditsContext(): void {
+  private async writeUserEditsContext(): Promise<void> {
     if (this.userEditsByWorkspace.size === 0) return;
-    try {
-      mkdirSync(this.eventsDir, { recursive: true });
-    } catch {
-      return;
-    }
+    const writes: Promise<void>[] = [];
     for (const inst of this.terminals.values()) {
       if (inst.type !== "agent") continue;
       const ws = this.workspaceOfTerminal(inst);
@@ -2949,13 +4105,11 @@ class PiEditorApp {
       const edits = this.userEditsOf(ws);
       if (edits.size === 0) continue;
       const md = this.buildUserEditsMarkdown(edits);
-      const eventsDir = this.eventsDirOf(inst);
-      try {
-        writeFileSync(join(eventsDir, `edits-${inst.id}.md`), md, "utf8");
-      } catch (err) {
+      writes.push(this.writeEventLeaf(inst, `edits-${inst.id}.md`, Buffer.from(md), 16 * 1024).catch((err) => {
         console.warn(`[main] could not write edits context: ${(err as Error).message}`);
-      }
+      }));
     }
+    await Promise.all(writes);
   }
 
   /** Build the context markdown: one section per file with before/after. */
@@ -3008,19 +4162,29 @@ class PiEditorApp {
     for (const id of ws.terminalIds) {
       const inst = this.terminals.get(id);
       if (inst?.type !== "agent") continue;
-      try {
-        // Remove from the terminal's OWN events dir: a candidate's bridge
-        // reads its candidate dir, not the primary's.
-        rmSync(join(this.eventsDirOf(inst), `edits-${id}.md`), { force: true });
-      } catch {
-        /* ignore */
-      }
+      // Remove from the terminal's OWN events dir: a candidate's bridge
+      // reads its candidate dir, not the primary's.
+      void this.removeEventLeaf(inst, `edits-${id}.md`);
     }
+  }
+
+  /** Close one candidate by its exact terminal identity after a failed
+   * startup handshake. Worldline has already removed its routing, so any
+   * late sidecar records from this process are intentionally ignored. */
+  private terminateCandidate(id: string): void {
+    this.terminals.get(id)?.pty.killGroup();
+    this.closeTerminal(id);
   }
 
   private closeTerminal(id: string): void {
     const inst = this.terminals.get(id);
     if (!inst) return;
+    // A user close invalidates queued output.  The PTY exit callback may run
+    // later, but its stale tail must not leak into a newly opened terminal
+    // that happens to reuse the same renderer tab.
+    inst.closed = true;
+    this.ptyEgress.cancel(id, inst.generation);
+    inst.pty.cancelOutput();
     this.newCommandBuffers.delete(id);
     if (inst.captureTimer) {
       clearTimeout(inst.captureTimer);
@@ -3050,6 +4214,7 @@ class PiEditorApp {
   private instanceList(): InstanceSummary[] {
     return [...this.terminals.values()].map((t) => ({
       id: t.id,
+      generation: t.generation,
       cwd: t.cwd,
       busy: t.busy,
       type: t.type,
@@ -3059,12 +4224,14 @@ class PiEditorApp {
       projectId: t.projectId ?? undefined,
       dispatchWorker: this.dispatchWorkers.has(t.id),
       dispatchTask: this.dispatchWorkers.get(t.id),
+      modified: [...t.modified.values()],
+      recorderState: t.recorderState,
       verify: t.type === "agent" ? t.verify : null,
     }));
   }
 
-  private sendInstances(): void {
-    this.send("instances:list", this.instanceList());
+  private sendInstances(expected?: PtyRendererSendTarget | null): void {
+    this.send("instances:list", this.instanceList(), expected);
   }
 
   // -------------------------------------------------------------- sidecar ---
@@ -3083,34 +4250,70 @@ class PiEditorApp {
     }
   }
 
-  private async drainSidecarQueues(): Promise<void> {
-    while (this.sidecarQueues.size > 0) {
-      await Promise.all([...this.sidecarQueues.values()].map((task) => task.catch(() => undefined)));
+  private async drainSidecarQueues(ids?: Iterable<string>): Promise<void> {
+    const target = ids === undefined ? null : new Set(ids);
+    while (true) {
+      const pending = [...this.sidecarQueues]
+        .filter(([id]) => target === null || target.has(id))
+        .filter(([, queue]) => {
+          const stats = queue.stats();
+          return stats.items > 0 || stats.inFlight > 0;
+        })
+        .map(([, queue]) => queue.drain());
+      if (pending.length === 0) return;
+      await Promise.all(pending);
     }
   }
 
-  private enqueueSidecarEvent(terminalId: string, event: SidecarEvent): void {
-    if (this.disposed) return;
-    if (this.projectIsSwitching(this.projectOfTerminal(terminalId)?.id)) return;
-    const previous = this.sidecarQueues.get(terminalId) ?? Promise.resolve();
-    const next = previous
-      .catch(() => undefined)
-      .then(() => this.handleSidecarEvent(terminalId, event))
-      .finally(() => {
-        if (this.sidecarQueues.get(terminalId) === next) this.sidecarQueues.delete(terminalId);
-      });
-    this.sidecarQueues.set(terminalId, next);
+  private clearSidecarQueues(ids?: Iterable<string>): void {
+    if (ids === undefined) {
+      this.sidecarQueues.clear();
+      return;
+    }
+    for (const id of ids) this.sidecarQueues.delete(id);
+  }
+
+  private enqueueSidecarEvent(terminalId: string, event: SidecarEvent): SidecarEventDelivery {
+    if (this.disposed) return { accepted: false };
+    // A candidate's PTY can publish session_ready during the synchronous
+    // spawn inside createTerminal, before that method has installed its
+    // PiTerminalInstance in the live map. Keep the durable sidecar record at
+    // the tailer's cursor until the instance exists; accepting it here would
+    // make handleSidecarEvent drop the startup boundary as "terminal closed".
+    if (!this.terminals.has(terminalId)) return { accepted: false };
+    // A project switch is a temporary admission stop.  Returning without
+    // accepting would make the tailer advance past a boundary event, so the
+    // caller must retry the same durable record instead.
+    if (this.projectIsSwitching(this.projectOfTerminal(terminalId)?.id)) return { accepted: false };
+    let queue = this.sidecarQueues.get(terminalId);
+    if (!queue) {
+      queue = new SidecarEventQueue(
+        (queuedEvent) => this.handleSidecarEvent(terminalId, queuedEvent),
+        {
+          onError: (error, failedEvent) => console.warn(`[main] sidecar ${failedEvent.t} failed: ${error.message}`),
+        },
+      );
+      this.sidecarQueues.set(terminalId, queue);
+    }
+    // SidecarTailer treats false as backpressure and keeps this event on disk.
+    return queue.enqueueTracked(event);
   }
 
   private async handleSidecarEvent(terminalId: string, event: SidecarEvent): Promise<void> {
     if (this.disposed) return;
     const inst = this.terminals.get(terminalId);
     if (!inst) return;
-    if (this.projectIsSwitching(this.projectOfTerminal(terminalId)?.id)) return;
+    // A sidecar callback can yield across store/file work. Keep every push
+    // from this event tied to the document that admitted it.
+    const rendererTarget = this.captureRendererSendTarget();
     switch (event.t) {
       // ---- run-boundary events (WORLDLINES §6.3) ----
       case "preflight_request":
-        this.trackRecordingTask(this.handlePreflightRequest(inst, String(event.requestId ?? "")));
+        {
+          const task = this.handlePreflightRequest(inst, String(event.requestId ?? ""), rendererTarget);
+          this.trackRecordingTask(task);
+          await task;
+        }
         break;
       case "preflight_cancel": {
         const pending = event.token ? this.pendingPreflights.get(event.token) : undefined;
@@ -3135,7 +4338,7 @@ class PiEditorApp {
             images: Array.isArray(payload.images) ? payload.images.length : 0,
           };
           if (inst.pendingPrompt.text && this.isNewCommand(inst.pendingPrompt.text)) {
-            this.clearForNewSession(terminalId);
+            this.clearForNewSession(terminalId, rendererTarget);
           }
         } catch {
           inst.pendingPrompt = null;
@@ -3152,7 +4355,17 @@ class PiEditorApp {
         }
         break;
       case "checkpoint_request":
-        this.trackRecordingTask(this.handleCheckpointRequest(inst, String(event.requestId ?? ""), String(event.kind ?? "settled"), String(event.entryId ?? "")));
+        {
+          const task = this.handleCheckpointRequest(
+            inst,
+            String(event.requestId ?? ""),
+            String(event.kind ?? "settled"),
+            String(event.entryId ?? ""),
+            rendererTarget,
+          );
+          this.trackRecordingTask(task);
+          await task;
+        }
         break;
       case "checkpoint_result":
         // Informational; the run record carries the result already.
@@ -3160,7 +4373,12 @@ class PiEditorApp {
       case "session_ready": {
         // The bridge consumed the candidate startup control.
         const readyOk = event.ok === true;
-        this.projectOfTerminal(terminalId)?.worldlines?.onSessionReady(terminalId, readyOk, event.error ?? null);
+        this.projectOfTerminal(terminalId)?.worldlines?.onSessionReady(terminalId, readyOk, event.error ?? null, {
+          bridgeId: event.bridgeId,
+          seq: event.seq,
+          generation: event.generation,
+          opId: event.opId,
+        });
         break;
       }
       case "agent_settings":
@@ -3186,8 +4404,8 @@ class PiEditorApp {
         inst.touched = new Set();
         inst.pendingFileTools = new Map();
         inst.toolOutcomes = new Map();
-        this.sendPlan(inst);
-        this.sendTimelinePrefix(inst);
+        this.sendPlan(inst, rendererTarget);
+        this.sendTimelinePrefix(inst, rendererTarget);
         // Baseline for Change Review: snapshot the watcher's content cache so
         // diffs compare the run's start state against the current files.
         this.resetBaselines(inst, startWs?.watcher?.lastContents);
@@ -3201,7 +4419,7 @@ class PiEditorApp {
         const startWs2 = this.workspaceOfTerminal(inst);
         void agentOwner?.storePromise?.then((s) => {
           if (!this.disposed && !this.projectIsSwitching(agentOwner?.id) && this.terminals.has(inst.id)) {
-            this.setRecorderState(inst, !s ? "paused" : startWs2?.indexReady ? "indexing" : "ready");
+            this.setRecorderState(inst, !s ? "paused" : startWs2?.indexReady ? "indexing" : "ready", rendererTarget);
           }
         });
         // Couple the run to its start preflight when the token matches. Publish
@@ -3215,7 +4433,7 @@ class PiEditorApp {
             entryId: event.parentEntryId ?? event.entryId ?? null,
             model: inst.currentRun.model,
             runStartStateId: inst.currentRun.startStateId,
-          });
+          }, rendererTarget);
         }
         // A dispatch worker started: mark its task active on the owner board.
         const dispatchStart = this.dispatchRuns.get(inst.id);
@@ -3224,11 +4442,11 @@ class PiEditorApp {
           const task = ownerInst ? findTaskByText(ownerInst.plan, dispatchStart.taskText) : undefined;
           if (ownerInst && task) {
             task.state = "active";
-            this.sendPlan(ownerInst);
+            this.sendPlan(ownerInst, rendererTarget);
           }
         }
-        this.send("busy", { instanceId: inst.id, busy: true });
-        this.sendInstances();
+        this.send("busy", { instanceId: inst.id, busy: true }, rendererTarget);
+        this.sendInstances(rendererTarget);
         // Push invalidation after the busy state. The renderer must not start
         // evidence from the stale idle view between these two updates.
         if (candHit) this.markCandidateEvidenceStale(candHit.comparisonId);
@@ -3241,9 +4459,9 @@ class PiEditorApp {
           inst.currentRun.reason = `session storage failed: ${event.error}`;
           inst.currentRun.settledAt = Date.now();
           inst.currentRun = null;
-          this.send("worldline:runs-changed", { terminalId: inst.id });
+          this.send("worldline:runs-changed", { terminalId: inst.id }, rendererTarget);
         }
-        this.finalizePlan(inst);
+        this.finalizePlan(inst, rendererTarget);
         // A dispatch worker finished: mark the owner task done only when
         // the worker's last file-tool outcomes cover that task's paths.
         const dispatchEnd = this.dispatchRuns.get(inst.id);
@@ -3253,40 +4471,34 @@ class PiEditorApp {
           const task = ownerInst ? findTaskByText(ownerInst.plan, dispatchEnd.taskText) : undefined;
           if (ownerInst) {
             if (task && taskIsComplete(task.paths, inst.touched, inst.toolOutcomes)) task.state = "done";
-            this.sendPlan(ownerInst);
-            this.collectWorker(inst, ownerInst);
+            this.sendPlan(ownerInst, rendererTarget);
+            this.collectWorker(inst, ownerInst, rendererTarget);
           }
           // The run entry goes; the tab label stays until the terminal exits.
           this.dispatchRuns.delete(inst.id);
         }
         // The settled marker is published by the checkpoint handler only after
         // its immutable source state has been captured.
-        this.send("busy", { instanceId: inst.id, busy: false });
-        this.send("modified:list", { instanceId: inst.id, files: [...inst.modified.values()] });
-        this.sendInstances();
+        this.send("busy", { instanceId: inst.id, busy: false }, rendererTarget);
+        this.send("modified:list", { instanceId: inst.id, files: [...inst.modified.values()] }, rendererTarget);
+        this.sendInstances(rendererTarget);
         break;
       case "plan": {
-        await this.applyPlanMessage(inst, String(event.text ?? ""));
+        await this.applyPlanMessage(inst, String(event.text ?? ""), rendererTarget);
         break;
       }
       case "tool": {
         const rawPath = String(event.path ?? "");
-        // Candidate tool paths resolve against the candidate root; the
-        // within-project guard applies to the primary only (nested moments).
+        // Resolve every sidecar path from the terminal's own workspace. Never
+        // consult the active project for hidden terminals or malformed state.
         const toolWs = this.workspaceOfTerminal(inst);
-        const toolBase = toolWs?.root ?? this.projectOfTerminal(inst.id)?.cwd ?? null;
-        const path = await this.canonicalPath(isAbsolute(rawPath) ? rawPath : toolBase ? join(toolBase, rawPath) : rawPath);
+        const toolProject = this.projectOfTerminal(inst.id);
+        if (!toolWs || !toolProject) return;
+        const path = await this.canonicalPath(isAbsolute(rawPath) ? rawPath : join(toolWs.root, rawPath));
         if (!path) return;
-        const isCandidateTerminal = !!this.projectOfTerminal(inst.id)?.worldlines?.eventsDirOf(inst.id);
-        if (isCandidateTerminal) {
-          // Reject file-tool paths that resolve outside the candidate root
-          // (WORLDLINES §5): the sandbox blocks the write, the guard keeps
-          // the timeline and baselines truthful.
-          const root = toolWs?.root ? await this.canonicalPath(toolWs.root) : null;
-          if (!root || !(path === root || path.startsWith(root + "/"))) return;
-        } else if (!await this.withinProject(path)) {
-          return;
-        }
+        // Reject file-tool paths outside this workspace (including symlink
+        // escapes); the sandbox is defense in depth, not the owner lookup.
+        if (!await this.withinRoot(path, toolWs.root)) return;
         const toolName = String(event.toolName ?? "");
         // Pre-run baseline capture. The rules:
         // - agent_start snapshots the watcher cache (best source when present).
@@ -3295,17 +4507,21 @@ class PiEditorApp {
         //   invalid baseline from a first-touch write without cached content.
         // - write/create_file defer to the watcher change event, which knows
         //   the authoritative status and carries prev when available.
+        // A bounded producer preview is diagnostic only; applying it would
+        // manufacture a partial baseline. The watcher/file remains the
+        // authority for that state-mutating tool.
+        const eventEdits = event.editsTruncated === true ? undefined : event.edits;
         if (toolName === "edit" || toolName === "apply_patch") {
           const current = inst.baselines.get(path);
           if (current === undefined) {
             const status = inst.modified.get(path)?.status;
             if (status !== "created") {
-              const baseline = (await this.reconstructBaseline(path, event.edits)) ?? this.workspaceOfTerminal(inst)?.watcher?.lastContents.get(path);
+              const baseline = (await this.reconstructBaseline(path, eventEdits)) ?? this.workspaceOfTerminal(inst)?.watcher?.lastContents.get(path);
               if (baseline !== undefined) this.setBaseline(inst, path, baseline);
             }
             // A file created this run stays undefined until the watcher confirms it.
           } else if (current === null && inst.modified.get(path)?.status === "modified") {
-            const baseline = await this.reconstructBaseline(path, event.edits);
+            const baseline = await this.reconstructBaseline(path, eventEdits);
             if (baseline !== undefined) this.setBaseline(inst, path, baseline);
           }
         }
@@ -3314,13 +4530,13 @@ class PiEditorApp {
         if ((toolName === "write" || toolName === "create_file") && !inst.baselines.has(path)) {
           this.trackRecordingTask(this.fillBaseline(inst, path, status));
         }
-        const rel = await this.rel(path);
+        const rel = await this.rel(path, toolWs!.root);
         inst.touched.add(rel);
         const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId.trim() : "";
         if (toolCallId && rel) inst.pendingFileTools.set(toolCallId, rel);
-        await this.updatePlanProgress(inst, path);
-        this.sendTimelinePrefix(inst);
-        this.send("tool:target", { path, relPath: await this.rel(path), toolName });
+        await this.updatePlanProgress(inst, path, rendererTarget);
+        this.sendTimelinePrefix(inst, rendererTarget);
+        this.send("tool:target", { projectId: toolProject.id, workspaceId: toolWs.id, path, relPath: rel, toolName }, rendererTarget);
         // Session Timeline: snapshot the file as of this tool call. Create
         // the event object first so a delayed content fill can find it later.
         // The tool call and entry ids make the dot a forkable moment.
@@ -3328,15 +4544,15 @@ class PiEditorApp {
           t: "tool",
           toolName,
           path,
-          relPath: await this.rel(path, toolWs?.root ?? null),
+          relPath: await this.rel(path, toolWs!.root),
           toolCallId: event.toolCallId ?? null,
           entryId: event.entryId ?? null,
           model: inst.currentRun?.model ?? null,
         };
-        const snapshot = this.toolSnapshot(inst, path, toolName, event.edits, ev);
+        const snapshot = this.toolSnapshot(inst, path, toolName, eventEdits, ev);
         if (snapshot?.content !== undefined) ev.content = snapshot.content;
         if (snapshot?.status) ev.status = snapshot.status;
-        this.pushTimeline(inst, ev);
+        this.pushTimeline(inst, ev, rendererTarget);
         break;
       }
       case "tool_end": {
@@ -3347,9 +4563,9 @@ class PiEditorApp {
           // Ignore ends with no matching file-tool start (read, bash, orphan).
           if (rel !== undefined) inst.toolOutcomes.set(rel, event.isError === true ? "error" : "ok");
         }
-        this.sendTimelinePrefix(inst);
+        this.sendTimelinePrefix(inst, rendererTarget);
         // The tool finished: schedule the moment capture for its dots.
-        if (inst.currentRun) this.scheduleMomentCapture(inst);
+        if (inst.currentRun) this.scheduleMomentCapture(inst, rendererTarget);
         break;
       }
     }
@@ -3368,35 +4584,53 @@ class PiEditorApp {
   /** Write an acknowledgement file for the bridge to consume exactly once. */
   private writeAck(terminalId: string, requestId: string, payload: Record<string, unknown>): void {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
-    try {
-      // The ack must land in the terminal's OWN events dir: a candidate's
-      // bridge polls its candidate events dir, not the primary's.
-      const inst = this.terminals.get(terminalId);
-      const dir = inst ? this.eventsDirOf(inst) : this.eventsDir;
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      const target = join(dir, `ack-${terminalId}-${requestId}.json`);
-      const temporary = `${target}.tmp-${randomUUID()}`;
-      writeFileSync(temporary, JSON.stringify(payload), { mode: 0o600 });
-      renameSync(temporary, target);
-    } catch (err) {
-      console.warn(`[main] could not write ack: ${(err as Error).message}`);
-    }
+    // The ack must land in the terminal's OWN events dir: a candidate's
+    // bridge polls its candidate events dir, not the primary's. Native
+    // creation keeps this sync-looking protocol edge off the main thread and
+    // refuses a replacement root/leaf instead of reopening a pathname.
+    const inst = this.terminals.get(terminalId);
+    const root = inst ? this.eventsBindingOf(inst) : this.eventsDirBinding;
+    const dir = inst ? this.eventsDirOf(inst) : this.eventsDir;
+    if (!root) return;
+    void writeBoundOwnedFile({
+      root: dir,
+      rootIdentity: root,
+      components: [`ack-${terminalId}-${requestId}.json`],
+      parentIdentity: root,
+      content: Buffer.from(JSON.stringify(payload)),
+      mode: 0o600,
+      maxBytes: 64 * 1024,
+    }).catch((error) => {
+      console.warn(`[main] could not write ack: ${String(error)}`);
+    });
   }
 
   /** Ask the renderer to save every dirty model. Bounded wait. The workspace
    *  id scopes the waiter to its project on teardown. */
-  private flushDirtyModels(writerId: string, workspaceId: string, timeoutMs = 5000): Promise<{ ok: boolean; failed: string[] }> {
+  private flushDirtyModels(
+    writerId: string,
+    workspaceId: string,
+    timeoutMs = 5000,
+    expected?: PtyRendererSendTarget | null,
+  ): Promise<{ ok: boolean; failed: string[] }> {
+    const project = this.projectOfWorkspace(workspaceId);
+    if (!project) return Promise.resolve({ ok: false, failed: ["workspace is no longer owned by a project"] });
     return new Promise((resolve) => {
       const requestId = `flush-${++this.flushSeq}`;
+      const timer = setTimeout(() => {
+        this.flushWaiters.delete(requestId);
+        resolve({ ok: false, failed: ["renderer did not answer the flush request"] });
+      }, timeoutMs);
       this.flushWaiters.set(requestId, {
         workspaceId,
         resolve,
-        timer: setTimeout(() => {
-          this.flushWaiters.delete(requestId);
-          resolve({ ok: false, failed: ["renderer did not answer the flush request"] });
-        }, timeoutMs),
+        timer,
       });
-      this.send("editor:flush-request", { requestId, writerId });
+      const sent = this.send("editor:flush-request", { requestId, writerId, projectId: project.id, workspaceId }, expected);
+      if (sent) return;
+      clearTimeout(timer);
+      this.flushWaiters.delete(requestId);
+      resolve({ ok: false, failed: ["renderer is unavailable"] });
     });
   }
 
@@ -3405,7 +4639,11 @@ class PiEditorApp {
    * the start state, then answer the bridge with a one-use token. The lease
    * stays held until agent_start consumes the token.
    */
-  private async handlePreflightRequest(inst: PiTerminalInstance, requestId: string): Promise<void> {
+  private async handlePreflightRequest(
+    inst: PiTerminalInstance,
+    requestId: string,
+    expected?: PtyRendererSendTarget | null,
+  ): Promise<void> {
     if (!requestId) return;
     const ws = this.workspaceOfTerminal(inst);
     if (!ws) {
@@ -3418,21 +4656,36 @@ class PiEditorApp {
       this.writeAck(inst.id, requestId, { ok: true, token: null });
       return;
     }
+    const preflightOwner = this.projectOfTerminal(inst.id);
+    if (!preflightOwner || preflightOwner.workspaces.get(ws.id) !== ws) {
+      this.writeAck(inst.id, requestId, { ok: false, error: "terminal project ownership is unavailable" });
+      return;
+    }
     const leaseRequester = `preflight:${inst.id}:${requestId}`;
     const lease = await this.acquireWriteLease(ws.id, leaseRequester, 12000);
     if (!lease.ok) {
       this.writeAck(inst.id, requestId, { ok: false, error: lease.error ?? "the workspace is busy" });
       return;
     }
-    const flush = await this.flushDirtyModels(leaseRequester, ws.id);
+    const flush = await this.flushDirtyModels(leaseRequester, ws.id, 5000, expected);
     if (!flush.ok) {
       this.releaseWriteLease(ws.id, leaseRequester);
       this.writeAck(inst.id, requestId, { ok: false, error: "could not save editor changes" });
       return;
     }
-    const preflightOwner = this.projectOfTerminal(inst.id);
-    const store = await preflightOwner?.storePromise;
-    await ws.indexReady;
+    let store: SnapshotStore | null;
+    try {
+      store = await preflightOwner.storePromise;
+      await ws.indexReady;
+    } catch (err) {
+      // Store/index bootstrap can fail after the lease is acquired (for
+      // example when the Rust core exits). Never strand that workspace lease:
+      // a hidden project's failed preflight must not block later mutations in
+      // either project.
+      this.releaseWriteLease(ws.id, leaseRequester);
+      this.writeAck(inst.id, requestId, { ok: false, error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
     if (!store) {
       // Recording unavailable (no Git): the run proceeds without a token.
       this.releaseWriteLease(ws.id, leaseRequester);
@@ -3443,7 +4696,7 @@ class PiEditorApp {
       // The retained-blob budget (WORLDLINES §9): no new states past it.
       if ((ws.retainedBlobBytes ?? 0) > 256 * 1024 * 1024) {
         this.releaseWriteLease(ws.id, leaseRequester);
-        this.setRecorderState(inst, "budget");
+        this.setRecorderState(inst, "budget", expected);
         this.writeAck(inst.id, requestId, { ok: true, token: null });
         return;
       }
@@ -3464,7 +4717,7 @@ class PiEditorApp {
         leaseRequester,
         expiresAt: Date.now() + 60000,
         timer: setTimeout(() => this.expirePreflight(token), 60000),
-        trustHashes: await this.computeTrustHashes(),
+        trustHashes: await this.computeTrustHashes(preflightOwner),
       };
       this.pendingPreflights.set(token, pending);
       this.writeAck(inst.id, requestId, { ok: true, token });
@@ -3512,6 +4765,8 @@ class PiEditorApp {
         settledEntryId: null,
         sessionFile: event.sessionFile ?? null,
         sessionBranchFile: null,
+        sessionBranchIdentity: null,
+        uncertainSessionFile: null,
         trusted: typeof event.trusted === "boolean" ? event.trusted : null,
         trustHashes: pending ? pending.trustHashes : null,
         model: event.model ?? null,
@@ -3558,6 +4813,8 @@ class PiEditorApp {
         settledEntryId: null,
         sessionFile: event.sessionFile ?? null,
         sessionBranchFile: null,
+        sessionBranchIdentity: null,
+        uncertainSessionFile: null,
         trusted: typeof event.trusted === "boolean" ? event.trusted : null,
         trustHashes: pending ? pending.trustHashes : null,
         model: event.model ?? null,
@@ -3628,9 +4885,16 @@ class PiEditorApp {
   private async cleanupPromptPayloads(inst: PiTerminalInstance): Promise<void> {
     const keep = this.projectOfTerminal(inst.id)?.worldlines?.promptPayloadsOf(inst.id) ?? new Set<string>();
     const dir = this.eventsDirOf(inst);
+    const root = this.eventsBindingOf(inst);
+    if (!root) return;
     try {
-      for (const file of await readdir(dir)) {
-        if (file.startsWith(`prompt-${inst.id}-`) && !keep.has(file)) await rm(join(dir, file), { force: true });
+      const entries = await boundPromotionListEntries({ root: dir, rootIdentity: root });
+      for (const entry of entries) {
+        const file = entry.name;
+        if (entry.kind !== "file" && entry.kind !== "symlink") continue;
+        if (file.startsWith(`prompt-${inst.id}-`) && !keep.has(file)) {
+          await this.removeBoundEventLeaf(dir, root, file, entry.identity);
+        }
       }
     } catch {
       /* The events directory can be absent. */
@@ -3642,7 +4906,13 @@ class PiEditorApp {
    * generation check, atomic acknowledgement. Attaches the settled state
    * to the open run.
    */
-  private async handleCheckpointRequest(inst: PiTerminalInstance, requestId: string, kind: string, entryId: string): Promise<void> {
+  private async handleCheckpointRequest(
+    inst: PiTerminalInstance,
+    requestId: string,
+    kind: string,
+    entryId: string,
+    expected?: PtyRendererSendTarget | null,
+  ): Promise<void> {
     if (!requestId) return;
     const ws = this.workspaceOfTerminal(inst);
     if (!ws || !ws.lastStateCommit) {
@@ -3669,18 +4939,14 @@ class PiEditorApp {
       if (kind === "settled" && inst.currentRun && !inst.currentRun.settledAt) {
         const runStartStateId = inst.currentRun.startStateId;
         const model = inst.currentRun.model;
-        await this.finalizeRun(inst, state, entryId);
+        await this.finalizeRun(inst, state, entryId, expected);
         this.pushTimeline(inst, {
           t: "agent_settled",
           stateId: state.commit,
           entryId: entryId || null,
           model,
           runStartStateId,
-        });
-      }
-      // Fork Any Moment: the settled state is the last moment of the run.
-      if (kind === "settled" && inst.momentDots.length > 0) {
-        this.attachMomentState(inst, state.commit);
+        }, expected);
       }
     } catch (err) {
       this.writeAck(inst.id, requestId, { ok: false, error: err instanceof Error ? err.message : String(err) });
@@ -3690,20 +4956,23 @@ class PiEditorApp {
   }
 
   /**
-   * Capture only when the source is quiet: a short quiet window before and
-   * a generation check after. One bounded retry on a concurrent change.
+   * Capture only after the watcher reports a debounced idle boundary, then
+   * reject any raw activity or generation change across capture. Two bounded
+   * attempts prevent a continuously changing source from waiting forever.
    */
   private async captureStable(store: SnapshotStore, ws: WorkspaceState): Promise<SourceState> {
     for (let attempt = 0; attempt < 2; attempt++) {
+      const watcher = ws.watcher;
+      if (!watcher) throw new Error("source watcher is not available");
+      const idleRevision = await watcher.waitForIdle(CHECKPOINT_IDLE_WAIT_MS);
+      if (idleRevision === null) continue;
       const gen = ws.generation;
-      await new Promise((r) => setTimeout(r, 100)); // quiet window
-      if (ws.generation !== gen) continue;
       if ((ws.retainedBlobBytes ?? 0) > 256 * 1024 * 1024) {
         throw new Error("the retained-blob budget is exhausted");
       }
       const state = await store.capture(await gitHead(ws.root), ws.lastStateCommit ?? null);
       ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
-      if (ws.generation === gen) return state;
+      if (ws.generation === gen && watcher.isIdleAt(idleRevision)) return state;
     }
     throw new Error("the source changed during capture");
   }
@@ -3725,7 +4994,7 @@ class PiEditorApp {
   }
 
   /** Debounce a moment capture: sibling tools coalesce into one state. */
-  private scheduleMomentCapture(inst: PiTerminalInstance): void {
+  private scheduleMomentCapture(inst: PiTerminalInstance, expected?: PtyRendererSendTarget | null): void {
     if (!inst.currentRun) return;
     const ws = this.workspaceOfTerminal(inst);
     // Candidate workspaces record moments too (nested worldlines): their
@@ -3735,7 +5004,8 @@ class PiEditorApp {
     inst.captureTimer = setTimeout(() => {
       inst.captureTimer = null;
       if (this.disposed || this.projectIsSwitching(this.projectOfTerminal(inst.id)?.id)) return;
-      this.trackRecordingTask(this.runMomentCapture(inst, ws));
+      const rendererTarget = expected === undefined ? this.captureRendererSendTarget() : expected;
+      this.trackRecordingTask(this.runMomentCapture(inst, ws, rendererTarget));
     }, 200);
   }
 
@@ -3743,12 +5013,16 @@ class PiEditorApp {
    * One incremental capture for the dots since the last one. The watcher
    * hints are the delta; the watcher cache reconciles missed events.
    */
-  private runMomentCapture(inst: PiTerminalInstance, ws: WorkspaceState): Promise<void> {
+  private runMomentCapture(
+    inst: PiTerminalInstance,
+    ws: WorkspaceState,
+    expected?: PtyRendererSendTarget | null,
+  ): Promise<void> {
     const previous = inst.momentCapturePromise ?? Promise.resolve();
     let current: Promise<void>;
     current = previous
       .catch(() => undefined)
-      .then(() => this.captureMomentNow(inst, ws))
+      .then(() => this.captureMomentNow(inst, ws, expected))
       .finally(() => {
         if (inst.momentCapturePromise === current) inst.momentCapturePromise = null;
       });
@@ -3756,20 +5030,24 @@ class PiEditorApp {
     return current;
   }
 
-  private async captureMomentNow(inst: PiTerminalInstance, ws: WorkspaceState): Promise<void> {
+  private async captureMomentNow(
+    inst: PiTerminalInstance,
+    ws: WorkspaceState,
+    expected?: PtyRendererSendTarget | null,
+  ): Promise<void> {
     if (inst.momentDots.length === 0 && inst.pendingHints.size === 0) return;
     const batch = inst.momentDots;
     inst.momentDots = [];
     const momentOwner = this.projectOfTerminal(inst.id);
     const store = await momentOwner?.storePromise;
     if (!store || !ws.lastStateCommit) {
-      this.setRecorderState(inst, "paused");
+      this.setRecorderState(inst, "paused", expected);
       inst.momentDots.unshift(...batch);
       return;
     }
     // The retained-blob budget (WORLDLINES §9): pause recording beyond it.
     if ((ws.retainedBlobBytes ?? 0) > 256 * 1024 * 1024) {
-      this.setRecorderState(inst, "budget");
+      this.setRecorderState(inst, "budget", expected);
       inst.pendingHints.clear();
       return;
     }
@@ -3798,17 +5076,22 @@ class PiEditorApp {
       this.setWorkspaceState(ws, state.commit);
       ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
       if (!ws.primary) await momentOwner?.worldlines?.updateHeadState(inst.id, state.commit);
-      this.attachMomentState(inst, state.commit, batch);
-      this.setRecorderState(inst, "ready");
+      this.attachMomentState(inst, state.commit, batch, expected);
+      this.setRecorderState(inst, "ready", expected);
     } catch (err) {
       console.warn(`[main] moment capture failed: ${(err as Error).message}`);
       // Failed batches remain internal and are never published as dots.
-      this.setRecorderState(inst, "degraded");
+      this.setRecorderState(inst, "degraded", expected);
     }
   }
 
   /** Attach the captured state to every dot of the batch and push it. */
-  private attachMomentState(inst: PiTerminalInstance, stateId: string, batch = inst.momentDots): void {
+  private attachMomentState(
+    inst: PiTerminalInstance,
+    stateId: string,
+    batch = inst.momentDots,
+    expected?: PtyRendererSendTarget | null,
+  ): void {
     if (batch === inst.momentDots) inst.momentDots = [];
     const liveSeqs = new Set(inst.timeline.map((event) => event.seq));
     const liveBatch = batch.filter((event) => liveSeqs.has(event.seq));
@@ -3816,12 +5099,12 @@ class PiEditorApp {
       ev.stateId = stateId;
       if (ev.runStartStateId === undefined) ev.runStartStateId = inst.currentRun?.startStateId ?? null;
     }
-    this.evictForkPoints(inst);
+    this.evictForkPoints(inst, expected);
     for (const ev of liveBatch) {
       if (!ev.entryId || !ev.stateId || ev.evicted) continue;
       const pub = { ...ev };
       delete (pub as Partial<TimelineEvent>).content;
-      this.send("timeline:event", { terminalId: inst.id, event: pub });
+      this.send("timeline:event", { terminalId: inst.id, event: pub }, expected);
     }
   }
 
@@ -3829,7 +5112,7 @@ class PiEditorApp {
    * Budget: keep at most 100 forkable points per terminal. Evicted dots
    * lose their dots and their store states together.
    */
-  private evictForkPoints(inst: PiTerminalInstance): void {
+  private evictForkPoints(inst: PiTerminalInstance, expected?: PtyRendererSendTarget | null): void {
     const forkable = inst.timeline.filter((e) => e.stateId);
     if (forkable.length <= PiEditorApp.MAX_FORK_POINTS) return;
     let excess = forkable.length - PiEditorApp.MAX_FORK_POINTS;
@@ -3845,16 +5128,16 @@ class PiEditorApp {
       e.evicted = true;
     }
     if (evicted.length > 0) {
-      this.send("timeline:evict", { terminalId: inst.id, seqs: evicted });
-      this.setRecorderState(inst, "budget");
+      this.send("timeline:evict", { terminalId: inst.id, seqs: evicted }, expected);
+      this.setRecorderState(inst, "budget", expected);
     }
   }
 
   /** Push the recorder state label (WORLDLINES §6). */
-  private setRecorderState(inst: PiTerminalInstance, state: RecorderState): void {
+  private setRecorderState(inst: PiTerminalInstance, state: RecorderState, expected?: PtyRendererSendTarget | null): void {
     if (inst.recorderState === state) return;
     inst.recorderState = state;
-    this.send("timeline:recorder-state", { terminalId: inst.id, state });
+    this.send("timeline:recorder-state", { terminalId: inst.id, state }, expected);
   }
 
   private ignoredSegmentIn(rel: string): boolean {
@@ -3862,7 +5145,12 @@ class PiEditorApp {
   }
 
   /** Attach the settled state, copy the session branch, mark eligibility. */
-  private async finalizeRun(inst: PiTerminalInstance, state: SourceState, entryId: string): Promise<void> {
+  private async finalizeRun(
+    inst: PiTerminalInstance,
+    state: SourceState,
+    entryId: string,
+    expected?: PtyRendererSendTarget | null,
+  ): Promise<void> {
     const run = inst.currentRun;
     if (!run) return;
     run.settledStateId = state.commit;
@@ -3885,17 +5173,40 @@ class PiEditorApp {
     // Materialize the session branch into app-private storage.
     if (run.sessionFile) {
       try {
-        mkdirSync(this.sessionWorkspaceDir, { recursive: true, mode: 0o700 });
         let target: string;
         if (run.engine === "core") {
           const through = Number(entryId);
           if (!Number.isInteger(through) || through < 1) throw new Error("the settled session address is missing");
-          target = bundleSessionFile(this.sessionWorkspaceDir, run.id);
-          const forked = await writeForkedSession(run.sessionFile, target, through);
-          if (!forked.ok) throw new Error(forked.error);
+          // Core uncertainty is recovery evidence: it lives outside the
+          // launch scratch directory, which start() is allowed to remove.
+          const reserveBytes = await this.sessionRetention.estimateForkedSessionBytes(run.sessionFile!);
+          const transaction = await this.sessionRetention.transact(run.id, (destinationSessionFile, retentionLease) =>
+            this.sessionFork.forkCore({
+              sourceSessionFile: run.sessionFile!,
+              destinationSessionFile,
+              throughSeq: through,
+              retentionLease,
+            }),
+            { reserveBytes },
+          );
+          target = transaction.destinationSessionFile;
+          const forked = transaction.result;
+          if (!forked.ok) {
+            run.uncertainSessionFile = forked.sessionFile;
+            throw new Error(`commit uncertain at ${forked.sessionFile}: ${forked.error}`);
+          }
         } else {
-          target = join(this.sessionWorkspaceDir, `${run.id}.jsonl`);
-          await copyFile(run.sessionFile, target, constants.COPYFILE_EXCL);
+          // Pi finalization uses the same worker-side admission boundary as
+          // candidate forks. It reserves the destination before reading any
+          // source bytes, so a large session cannot consume unbounded scratch
+          // I/O before eligibility is evaluated.
+          const copied = await this.sessionFork.copyPi({
+            sourceSessionFile: run.sessionFile,
+            sessionWorkspaceDir: this.sessionWorkspaceDir,
+          });
+          if (!copied.ok) throw new Error(copied.error);
+          target = copied.sessionFile;
+          run.sessionBranchIdentity = copied.identity;
         }
         run.sessionBranchFile = target;
       } catch (err) {
@@ -3914,7 +5225,7 @@ class PiEditorApp {
     inst.currentRun = null;
     // The run record is complete now: the renderer refreshes its Fork Run
     // button from this push (the settle timeline event arrives earlier).
-    this.send("worldline:runs-changed", { terminalId: inst.id });
+    this.send("worldline:runs-changed", { terminalId: inst.id }, expected);
   }
 
   /** The descendant pids of a process, from one ps snapshot. Null when the
@@ -4044,12 +5355,12 @@ class PiEditorApp {
     return { terminalId: inst.id, ok, error, open: inst.pendingFileTools.size };
   }
 
-  private sendTimelinePrefix(inst: PiTerminalInstance): void {
+  private sendTimelinePrefix(inst: PiTerminalInstance, expected?: PtyRendererSendTarget | null): void {
     const payload = this.timelinePrefixOf(inst);
     const key = `${payload.ok}:${payload.error}:${payload.open}`;
     if (inst.lastTimelinePrefixKey === key) return;
     inst.lastTimelinePrefixKey = key;
-    this.send("timeline:prefix", payload);
+    this.send("timeline:prefix", payload, expected);
   }
 
   private isNewCommand(text: string): boolean {
@@ -4060,7 +5371,7 @@ class PiEditorApp {
   /**
    * Reset session-scoped state for a slash-command reset (/new). The
    * timeline, plan, and worldline comparisons reflect the abandoned run;\n   * the workspace source and modified files reflect real disk changes and\n   * persist.\n   */
-  private clearForNewSession(terminalId: string): void {
+  private clearForNewSession(terminalId: string, expected?: PtyRendererSendTarget | null): void {
     const inst = this.terminals.get(terminalId);
     if (!inst) return;
     // Timeline: drop every dot and release its captured state.
@@ -4075,14 +5386,14 @@ class PiEditorApp {
     inst.runSnapshots.clear();
     inst.runSnapshotBytes = 0;
     inst.lastTimelinePrefixKey = "";
-    this.send("timeline:clear", { terminalId });
-    this.sendTimelinePrefix(inst);
+    this.send("timeline:clear", { terminalId }, expected);
+    this.sendTimelinePrefix(inst, expected);
     // Plan: fresh board for the new session.
     inst.plan = [];
     inst.touched = new Set();
     inst.pendingFileTools.clear();
     inst.toolOutcomes.clear();
-    this.sendPlan(inst);
+    this.sendPlan(inst, expected);
     // The open run is abandoned by /new. Mark it non-replayable so a later
     // token-less agent_start does not treat it as a retry.
     if (inst.currentRun && !inst.currentRun.settledAt) {
@@ -4172,7 +5483,11 @@ class PiEditorApp {
    *  receive their captured source state with the next moment capture.
    *  Mutate the passed event object so a delayed fill can find it by
    *  reference in the timeline array. */
-  private pushTimeline(inst: PiTerminalInstance, ev: Omit<TimelineEvent, "seq" | "ts">): TimelineEvent {
+  private pushTimeline(
+    inst: PiTerminalInstance,
+    ev: Omit<TimelineEvent, "seq" | "ts">,
+    expected?: PtyRendererSendTarget | null,
+  ): TimelineEvent {
     const event = ev as TimelineEvent;
     event.seq = ++inst.timelineSeq;
     event.ts = Date.now();
@@ -4187,7 +5502,7 @@ class PiEditorApp {
       }
       // Hidden failed captures still consume the internal cap. Explicitly
       // remove any displaced visible dots so renderer and main cannot diverge.
-      this.send("timeline:evict", { terminalId: inst.id, seqs });
+      this.send("timeline:evict", { terminalId: inst.id, seqs }, expected);
     }
     this.trimTimelineContent(inst);
     if (inst.currentRun && (event.t === "tool" || event.t === "change")) {
@@ -4195,10 +5510,10 @@ class PiEditorApp {
       if (inst.momentDots.length > MAX_TIMELINE_EVENTS) inst.momentDots.shift();
       event.runStartStateId = inst.currentRun.startStateId;
     }
-    if (event.stateId) this.evictForkPoints(inst);
+    if (event.stateId) this.evictForkPoints(inst, expected);
     if (event.stateId && event.entryId && !event.evicted) {
       const { content: _content, ...pub } = event;
-      this.send("timeline:event", { terminalId: inst.id, event: pub });
+      this.send("timeline:event", { terminalId: inst.id, event: pub }, expected);
     }
     return event;
   }
@@ -4347,11 +5662,17 @@ class PiEditorApp {
       // existed before the first change it ever saw for this path.
       existing.status = status;
     } else {
-      this.setBounded(inst.modified, p, { path: p, relPath: await this.rel(p), status }, PiEditorApp.MAX_MODIFIED_FILES);
+      const workspace = this.workspaceOfTerminal(inst);
+      if (!workspace) return;
+      this.setBounded(inst.modified, p, { path: p, relPath: await this.rel(p, workspace.root), status }, PiEditorApp.MAX_MODIFIED_FILES);
     }
   }
 
-  private async recordDeleted(inst: PiTerminalInstance, absPath: string): Promise<void> {
+  private async recordDeleted(
+    inst: PiTerminalInstance,
+    absPath: string,
+    expected?: PtyRendererSendTarget | null,
+  ): Promise<void> {
     const p = await this.canonicalPath(absPath);
     const baseline = inst.baselines.get(p);
     if (baseline !== undefined && baseline !== null) {
@@ -4361,13 +5682,15 @@ class PiEditorApp {
       if (entry) {
         entry.status = "deleted";
       } else {
-        this.setBounded(inst.modified, p, { path: p, relPath: await this.rel(p), status: "deleted" }, PiEditorApp.MAX_MODIFIED_FILES);
+        const workspace = this.workspaceOfTerminal(inst);
+        if (!workspace) return;
+        this.setBounded(inst.modified, p, { path: p, relPath: await this.rel(p, workspace.root), status: "deleted" }, PiEditorApp.MAX_MODIFIED_FILES);
       }
     } else {
       // Nothing to restore (created this run, or no baseline): drop the entry.
       inst.modified.delete(p);
     }
-    this.send("modified:list", { instanceId: inst.id, files: [...inst.modified.values()] });
+    this.send("modified:list", { instanceId: inst.id, files: [...inst.modified.values()] }, expected);
   }
 
   // ------------------------------------------------------------- project -----
@@ -4415,6 +5738,7 @@ class PiEditorApp {
   }
 
   private async performOpenFolder(): Promise<{ cwd: string } | { cancelled: true }> {
+    const rendererTarget = this.captureRendererSendTarget();
     if (!this.win || this.win.isDestroyed()) return { cancelled: true };
     const result = await dialog.showOpenDialog(this.win, {
       title: "Open a project folder",
@@ -4422,33 +5746,45 @@ class PiEditorApp {
     });
     if (result.canceled || result.filePaths.length === 0) return { cancelled: true };
     const cwd = result.filePaths[0];
+    // Claim the selection slot as soon as the user chooses a folder. Path
+    // canonicalization can yield; a later activation/close must fence this
+    // request rather than allowing it to reclaim the active project.
+    const selectionAction = this.beginProjectSelectionAction();
     // One tab per folder: reactivate an already-open project.
     const canonical = await this.canonicalPath(cwd);
     for (const existing of this.projects.values()) {
       if (existing.canonicalRoot === canonical) {
-        await this.activateProject(existing.id);
-        return { cwd };
+        return (await this.activateProject(existing.id, rendererTarget, selectionAction)) ? { cwd } : { cancelled: true };
       }
     }
-    const project = await this.openProject(cwd);
+    const project = await this.openProject(cwd, selectionAction, rendererTarget);
     return project ? { cwd } : { cancelled: true };
   }
 
   /** Open or reactivate the project at a path (the dialog-free path). */
   private async openProjectAt(cwd: string): Promise<{ cwd: string } | { cancelled: true }> {
+    const rendererTarget = this.captureRendererSendTarget();
+    // Reserve the selection slot before any path I/O. A later open/activate
+    // action therefore fences this request even when canonicalPath resolves
+    // in the opposite order.
+    const selectionAction = this.beginProjectSelectionAction();
     const canonical = await this.canonicalPath(cwd);
     for (const existing of this.projects.values()) {
       if (existing.canonicalRoot === canonical) {
-        await this.activateProject(existing.id);
-        return { cwd };
+        return (await this.activateProject(existing.id, rendererTarget, selectionAction)) ? { cwd } : { cancelled: true };
       }
     }
-    const project = await this.openProject(cwd);
+    const project = await this.openProject(cwd, selectionAction, rendererTarget);
     return project ? { cwd } : { cancelled: true };
   }
 
   /** Create a project, start its watcher and store, and activate it. */
-  private async openProject(cwd: string): Promise<ProjectState | null> {
+  private async openProject(
+    cwd: string,
+    selectionAction = this.beginProjectSelectionAction(),
+    expected?: PtyRendererSendTarget | null,
+  ): Promise<ProjectState | null> {
+    const rendererTarget = expected === undefined ? this.captureRendererSendTarget() : expected;
     const id = `proj-${++projectSeq}`;
     this.switchingProjects.add(id);
     try {
@@ -4464,22 +5800,60 @@ class PiEditorApp {
         worldlines: null,
         terminalIds: new Set(),
         unrestoredTerminals: [],
+        activationGeneration: 0,
       };
       this.projects.set(id, project);
-      this.activeProjectId = id;
+      // Project construction may overlap a newer selection. Only the latest
+      // request may claim the active slot and receive a folder push.
+      const activationGeneration = this.projectSelectionAction === selectionAction
+        ? this.nextProjectActivationGeneration()
+        : 0;
+      if (activationGeneration > 0) {
+        this.activeProjectId = id;
+        project.activationGeneration = activationGeneration;
+      }
       this.ensureAppBridge();
       this.removeLegacyProjectBridge(cwd);
       // Finish or roll back any pending promotion journal BEFORE the
       // primary watcher starts: the restored bytes must not attribute to
       // a user edit.
-      await recoverPromotionJournals(this.worldsRoot);
+      await recoverPromotionJournals(this.worldsRoot, {
+        primaryRoot: project.canonicalRoot,
+        piSessionRoot: this.primarySessionDir(project.canonicalRoot),
+        coreSessionRoot: await this.coreProjectSessionDir(project.canonicalRoot),
+        // Existing default user-data roots predate persisted root provenance.
+        // Custom roots remain strict because their ownership is not app-known.
+        bootstrapExistingWorldsRoot: this.worldsRootUsesDefault,
+        // Opening/restoring a project is its explicit admission boundary.
+        bootstrapExistingPrimaryRoot: true,
+      });
       this.createWorkspace(project, cwd, true);
       await this.loadMineFiles(project);
       this.initWorldlines(project);
       // Spawn the terminal before folder:opened so the renderer can show
       // that pane when it switches the project view.
       await this.restoreProjectTerminals(project);
-      await this.sendFolderOpened(cwd, id);
+      // A close can select this project as the replacement while its own
+      // asynchronous open is still restoring terminals. In that ordering
+      // close's immediate folder push has no workspace yet; publish once the
+      // workspace exists, using the newer selection epoch rather than the
+      // stale open request's action.
+      const publishGeneration = activationGeneration > 0
+        ? activationGeneration
+        : this.activeProjectId === id && project.activationGeneration === this.projectActivationGeneration
+          ? project.activationGeneration
+          : 0;
+      const publishAction = activationGeneration > 0 ? selectionAction : this.projectSelectionAction;
+      if (publishGeneration > 0) {
+        await this.sendFolderOpened(
+          cwd,
+          id,
+          this.primaryWorkspace(project)?.id ?? "",
+          publishGeneration,
+          publishAction,
+          rendererTarget,
+        );
+      }
       this.persistOpenProjects();
       return project;
     } finally {
@@ -4488,17 +5862,56 @@ class PiEditorApp {
   }
 
   /** Switch the renderer to another open project. Nothing is torn down. */
-  private async activateProject(projectId: string): Promise<void> {
-    if (!this.projects.has(projectId)) return;
+  private async activateProject(
+    projectId: string,
+    expected?: PtyRendererSendTarget | null,
+    expectedSelectionAction?: number,
+  ): Promise<boolean> {
+    const rendererTarget = expected === undefined ? this.captureRendererSendTarget() : expected;
+    const project = this.projects.get(projectId);
+    if (!project || this.projectIsSwitching(projectId)) return false;
+    const selectionAction = expectedSelectionAction ?? this.beginProjectSelectionAction();
+    if (expectedSelectionAction !== undefined && this.projectSelectionAction !== expectedSelectionAction) return false;
+    const activationGeneration = this.nextProjectActivationGeneration();
     this.activeProjectId = projectId;
-    const project = this.projects.get(projectId)!;
-    await this.sendFolderOpened(project.cwd, project.id);
-    void this.persistOpenProjects();
+    project.activationGeneration = activationGeneration;
+    const sent = await this.sendFolderOpened(
+      project.cwd,
+      project.id,
+      this.primaryWorkspace(project)?.id ?? "",
+      activationGeneration,
+      selectionAction,
+      rendererTarget,
+    );
+    if (sent) void this.persistOpenProjects();
+    return sent;
   }
 
   /** Push folder:opened with a login hint flag. The renderer never reads auth.json. */
-  private async sendFolderOpened(cwd: string, projectId: string): Promise<void> {
-    this.send("folder:opened", { cwd, projectId, needsLogin: await this.piNeedsLogin() });
+  private async sendFolderOpened(
+    cwd: string,
+    projectId: string,
+    workspaceId: string,
+    activationGeneration: number,
+    selectionAction = this.projectSelectionAction,
+    expected?: PtyRendererSendTarget | null,
+  ): Promise<boolean> {
+    const rendererTarget = expected === undefined ? this.captureRendererSendTarget() : expected;
+    const project = this.projects.get(projectId);
+    const current = () => !this.disposed
+      && !!workspaceId
+      && this.projects.get(projectId) === project
+      && this.activeProjectId === projectId
+      && project?.activationGeneration === activationGeneration
+      && this.projectActivationGeneration === activationGeneration
+      && this.projectSelectionAction === selectionAction;
+    if (!current()) return false;
+    const needsLogin = await this.piNeedsLogin();
+    // Auth I/O is asynchronous. Re-check every active-project fence before
+    // publishing; an earlier request must never resurrect a closed/hidden tab.
+    if (!current()) return false;
+    this.send("folder:opened", { cwd, projectId, workspaceId, activationGeneration, needsLogin }, rendererTarget);
+    return true;
   }
 
   /**
@@ -4530,21 +5943,75 @@ class PiEditorApp {
     }
   }
 
+  /** Coalesce one project's close confirmation and teardown transaction. */
+  private closeProject(projectId: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean }> {
+    const pending = this.projectClosePromises.get(projectId);
+    if (pending) return pending;
+    const promise = this.closeProjectOnce(projectId);
+    this.projectClosePromises.set(projectId, promise);
+    void promise.then(
+      () => {
+        if (this.projectClosePromises.get(projectId) === promise) this.projectClosePromises.delete(projectId);
+      },
+      () => {
+        if (this.projectClosePromises.get(projectId) === promise) this.projectClosePromises.delete(projectId);
+      },
+    );
+    return promise;
+  }
+
   /** Tear down one project: manager, terminals, watchers, and store. */
-  private async closeProject(projectId: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean }> {
+  private async closeProjectOnce(projectId: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean }> {
     const project = this.projects.get(projectId);
     if (!project) return { ok: false, error: "project not found" };
-    if (!(await this.confirmDiscardActiveCandidates(projectId))) return { ok: false, cancelled: true };
+    const rendererTarget = this.captureRendererSendTarget();
+    // An opening project is not teardown-safe yet. Let that request finish so
+    // close cannot delete a partially initialized project that its opener is
+    // still mutating.
+    if (this.projectIsSwitching(projectId)) return { ok: false, error: "project is still opening" };
+    const wasActiveAtStart = this.activeProjectId === projectId;
+    const closeSelectionAction = wasActiveAtStart ? this.beginProjectSelectionAction() : this.projectSelectionAction;
+    const closeActivationGeneration = wasActiveAtStart
+      ? this.nextProjectActivationGeneration()
+      : this.projectActivationGeneration;
+    const restoreActive = async (): Promise<void> => {
+      if (!wasActiveAtStart || this.projects.get(projectId) !== project || this.activeProjectId !== projectId) return;
+      if (this.projectSelectionAction !== closeSelectionAction || this.projectActivationGeneration !== closeActivationGeneration) return;
+      project.activationGeneration = closeActivationGeneration;
+      await this.sendFolderOpened(
+        project.cwd,
+        project.id,
+        this.primaryWorkspace(project)?.id ?? "",
+        closeActivationGeneration,
+        closeSelectionAction,
+        rendererTarget,
+      );
+    };
+    if (!(await this.confirmDiscardActiveCandidates(projectId))) {
+      await restoreActive();
+      return { ok: false, cancelled: true };
+    }
     this.switchingProjects.add(projectId);
     // Capture the project's ids before teardown removes candidate workspaces
     // and exited terminals leave the sets.
     const closingWorkspaceIds = new Set(project.workspaces.keys());
     const closingRoots = await Promise.all([...project.workspaces.values()].map((ws) => this.canonicalPath(ws.root)));
     const closingIds = [...project.terminalIds];
+    const closeLeaseRequester = `close:${projectId}`;
+    let closeLeaseWorkspaceId: string | null = null;
     try {
       await this.drainVerifyJobs(closingIds);
-      await this.drainSidecarQueues();
+      await this.drainSidecarQueues(closingIds);
       await project.mineCommit.catch(() => undefined);
+      const primary = this.primaryWorkspace(project);
+      if (primary) {
+        const lease = await this.acquireWriteLease(primary.id, closeLeaseRequester, 8000);
+        if (!lease.ok) {
+          await restoreActive();
+          return { ok: false, error: lease.error ?? "the project workspace is busy" };
+        }
+        closeLeaseWorkspaceId = primary.id;
+      }
       await project.worldlines?.drainEvidence();
       await project.worldlines?.dispose().catch(() => undefined);
       project.worldlines = null;
@@ -4557,8 +6024,8 @@ class PiEditorApp {
         this.closeTerminal(id);
       }
       await this.drainTerminals(closingIds);
-      await this.drainSidecarQueues();
-      this.sidecarQueues.clear();
+      await this.drainSidecarQueues(closingIds);
+      this.clearSidecarQueues(closingIds);
       for (const ws of project.workspaces.values()) ws.watcher?.stop();
       for (const wsId of project.workspaces.keys()) this.workspaceOwners.delete(wsId);
       project.workspaces.clear();
@@ -4577,18 +6044,55 @@ class PiEditorApp {
         this.dispatchRuns.delete(id);
         this.clearMailbox(id);
       }
-      await this.teardownRecording(project, closingWorkspaceIds);
-      this.cleanupExportedStates(projectId);
+      await this.teardownRecording(project, closingWorkspaceIds, closingIds);
+      await this.cleanupExportedStates(projectId);
+      const projectIds = [...this.projects.keys()];
+      const closingIndex = projectIds.indexOf(projectId);
       this.projects.delete(projectId);
       this.persistOpenProjects();
-      this.send("project:closed", { projectId });
+      let nextSelectionAction = closeSelectionAction;
+      let nextActivationGeneration = closeActivationGeneration;
       if (this.activeProjectId === projectId) {
-        const next = this.projects.keys().next().value;
+        const remaining = [...this.projects.keys()];
+        const next = closingIndex > 0 ? (remaining[closingIndex - 1] ?? remaining[0]) : remaining[0];
+        // If another selection happened while teardown was in flight, the
+        // target project may have become active after close was requested.
+        // Its removal still needs a fresh recovery epoch, and the old send
+        // must remain fenced.
+        if (
+          !wasActiveAtStart
+          || this.projectSelectionAction !== closeSelectionAction
+          || this.projectActivationGeneration !== closeActivationGeneration
+        ) {
+          nextSelectionAction = this.beginProjectSelectionAction();
+          nextActivationGeneration = this.nextProjectActivationGeneration();
+        }
         this.activeProjectId = next ?? null;
-        if (next) await this.sendFolderOpened(this.projects.get(next)!.cwd, next);
+        if (next) {
+          const nextProject = this.projects.get(next)!;
+          nextProject.activationGeneration = nextActivationGeneration;
+        }
+      }
+      // The close event advances the renderer's stale-event watermark even
+      // when no replacement project exists. It is emitted before the next
+      // folder push to preserve the existing teardown ordering.
+      this.send("project:closed", { projectId, activationGeneration: nextActivationGeneration }, rendererTarget);
+      if (this.activeProjectId) {
+        const nextProject = this.projects.get(this.activeProjectId);
+        if (nextProject) {
+          await this.sendFolderOpened(
+            nextProject.cwd,
+            nextProject.id,
+            this.primaryWorkspace(nextProject)?.id ?? "",
+            nextActivationGeneration,
+            nextSelectionAction,
+            rendererTarget,
+          );
+        }
       }
       return { ok: true };
     } finally {
+      if (closeLeaseWorkspaceId) this.releaseWriteLease(closeLeaseWorkspaceId, closeLeaseRequester);
       this.switchingProjects.delete(projectId);
     }
   }
@@ -4597,7 +6101,7 @@ class PiEditorApp {
    * Tear down the snapshot store and worker of the previous project.
    * The store is app-owned and deleted with its project session.
    */
-  private async teardownRecording(project: ProjectState, closingWorkspaceIds: Set<string>): Promise<void> {
+  private async teardownRecording(project: ProjectState, closingWorkspaceIds: Set<string>, closingTerminalIds: Iterable<string>): Promise<void> {
     for (const [token, pending] of [...this.pendingPreflights]) {
       if (!closingWorkspaceIds.has(pending.workspaceId)) continue;
       clearTimeout(pending.timer);
@@ -4628,9 +6132,20 @@ class PiEditorApp {
         console.warn(`[main] snapshot store removal failed: ${String(err)}`);
       }
     }
+    const ackPrefixes = [...closingTerminalIds].map((id) => `ack-${id}-`);
     try {
-      for (const f of await readdir(this.eventsDir)) {
-        if (f.startsWith("ack-")) await rm(join(this.eventsDir, f), { force: true });
+      const root = this.eventsDirBinding;
+      if (root) {
+        const entries = await boundPromotionListEntries({ root: this.eventsDir, rootIdentity: root });
+        for (const entry of entries) {
+          const f = entry.name;
+          if (!ackPrefixes.some((prefix) => f.startsWith(prefix))) continue;
+          // The primary root is still owned by this app. Candidate roots are
+          // cleaned by their worldline binding before its manager is released.
+          if (entry.kind === "file" || entry.kind === "symlink") {
+            await this.removeBoundEventLeaf(this.eventsDir, root, f, entry.identity);
+          }
+        }
       }
     } catch {
       /* The events directory can be absent. */
@@ -4639,12 +6154,19 @@ class PiEditorApp {
 
   /** Remove the materialized export dirs. Pass a project id to remove only
    *  that project's exports; no id removes every export (app quit). */
-  private cleanupExportedStates(projectId?: string): void {
-    for (const [dir, ownerId] of [...this.exportedStateDirs]) {
-      if (projectId !== undefined && ownerId !== projectId) continue;
-      this.exportedStateDirs.delete(dir);
-      void rm(dir, { recursive: true, force: true }).catch(() => undefined);
-    }
+  private async cleanupExportedStates(projectId?: string): Promise<void> {
+    const pending = [...this.exportedStateDirs.entries()]
+      .filter(([, entry]) => projectId === undefined || entry.ownerId === projectId);
+    await Promise.all(pending.map(async ([dir, entry]) => {
+      try {
+        await removeBoundOwnedDirectory({ binding: entry.binding });
+        this.exportedStateDirs.delete(dir);
+      } catch (error) {
+        // A replacement parent/leaf is retained rather than recursively
+        // deleting an object that no longer belongs to this export.
+        console.warn(`[main] exported state cleanup retained ${dir}: ${String(error)}`);
+      }
+    }));
   }
 
   /** Wait until the given killed terminals have exited. A terminal that
@@ -4712,7 +6234,9 @@ class PiEditorApp {
     const workspaceTerminals = (): PiTerminalInstance[] =>
       [...ws.terminalIds].map((id) => this.terminals.get(id)).filter((t): t is PiTerminalInstance => t !== undefined);
     watcher.onChange = async (change) => {
-      if (this.disposed || this.projectIsSwitching(this.projectOfWorkspace(ws.id)?.id)) return;
+      const rendererTarget = this.captureRendererSendTarget();
+      const owner = this.projectOfWorkspace(ws.id);
+      if (this.disposed || !owner || this.projectIsSwitching(owner.id)) return;
       const path = await this.canonicalPath(change.path);
       const relPath = relative(await this.canonicalPath(ws.root), path);
       if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return;
@@ -4777,7 +6301,7 @@ class PiEditorApp {
           await this.recordModified(inst, path, change.status);
           // Fork Any Moment: the path joins the terminal's next capture.
           this.addPendingHint(inst, relPath);
-          this.scheduleMomentCapture(inst);
+          this.scheduleMomentCapture(inst, rendererTarget);
           const last = inst.timeline.at(-1);
           if (last && last.t === "tool" && last.path === path && this.contentSizeOk(change.content)) {
             last.content = change.content;
@@ -4788,7 +6312,7 @@ class PiEditorApp {
         for (const inst of unowned) {
           await this.recordModified(inst, path, change.status);
           this.addPendingHint(inst, relPath);
-          this.scheduleMomentCapture(inst);
+          this.scheduleMomentCapture(inst, rendererTarget);
           // An unowned change during a run is manual provenance: it marks
           // the run collaborative (WORLDLINES §6.5).
           if (inst.currentRun) inst.currentRun.unownedEdits++;
@@ -4805,9 +6329,9 @@ class PiEditorApp {
             if (content !== undefined) last.content = content;
             last.ts = now;
             const { content: _burstContent, ...pub } = last;
-            this.send("timeline:event", { terminalId: inst.id, event: pub });
+            this.send("timeline:event", { terminalId: inst.id, event: pub }, rendererTarget);
           } else {
-            this.pushTimeline(inst, { t: "change", path, relPath, content, status: change.status });
+            this.pushTimeline(inst, { t: "change", path, relPath, content, status: change.status }, rendererTarget);
           }
         }
       }
@@ -4823,10 +6347,11 @@ class PiEditorApp {
       } else {
         ws.changeLines.delete(path);
       }
-      this.send("file:changed", { path, relPath, content: liveContent, status: change.status, changedLines });
+      this.send("file:changed", { projectId: owner.id, workspaceId: ws.id, path, relPath, content: liveContent, status: change.status, changedLines }, rendererTarget);
     };
     watcher.onFileTouched = async (path, status) => {
-      if (this.disposed || this.projectIsSwitching(this.projectOfWorkspace(ws.id)?.id)) return;
+      const owner = this.projectOfWorkspace(ws.id);
+      if (this.disposed || !owner || this.projectIsSwitching(owner.id)) return;
       const canonical = await this.canonicalPath(path);
       const relPath = relative(await this.canonicalPath(ws.root), canonical);
       if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return;
@@ -4837,14 +6362,16 @@ class PiEditorApp {
       }
     };
     watcher.onFileDeleted = async (path) => {
-      if (this.disposed || this.projectIsSwitching(this.projectOfWorkspace(ws.id)?.id)) return;
+      const rendererTarget = this.captureRendererSendTarget();
+      const owner = this.projectOfWorkspace(ws.id);
+      if (this.disposed || !owner || this.projectIsSwitching(owner.id)) return;
       const p = await this.canonicalPath(path);
       const relPath = relative(await this.canonicalPath(ws.root), p);
       if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return;
       ws.generation++;
       this.markCandidateEvidenceStale(ws.comparisonId);
-      this.send("file:deleted", { path: p });
-      for (const inst of workspaceTerminals()) await this.recordDeleted(inst, p);
+      this.send("file:deleted", { projectId: owner.id, workspaceId: ws.id, path: p }, rendererTarget);
+      for (const inst of workspaceTerminals()) await this.recordDeleted(inst, p, rendererTarget);
       // A user-side deletion makes the recorded edit moot: drop the entry so
       // the context never points at a file that no longer exists. An empty
       // map must remove the file itself — the writer skips empty maps.
@@ -4877,24 +6404,63 @@ class PiEditorApp {
     }
   }
 
-  private async withinProject(absPath: string): Promise<boolean> {
-    if (!this.project()?.cwd) return false;
-    const rel = relative(await this.canonicalPath(this.project()!.cwd), await this.canonicalPath(absPath));
+  private async withinRoot(absPath: string, root: string): Promise<boolean> {
+    if (!root) return false;
+    const rel = relative(await this.canonicalPath(root), await this.canonicalPath(absPath));
     return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
   }
 
-  private async rel(absPath: string, root: string | null = this.project()?.cwd ?? null): Promise<string> {
+  private async rel(absPath: string, root: string): Promise<string> {
     const p = await this.canonicalPath(absPath);
-    return root ? relative(await this.canonicalPath(root), p) : p;
+    return relative(await this.canonicalPath(root), p);
   }
 
-  private async projectAbs(relPath: string): Promise<string> {
-    const cwd = this.project()?.cwd;
-    if (!cwd) throw new Error("open a project folder first");
-    const abs = isAbsolute(relPath) ? relPath : join(cwd, relPath);
-    const managed = await this.managedPath(abs, true);
-    if (!managed || managed.path === await this.canonicalPath(cwd)) throw new Error(`path outside project: ${relPath}`);
-    return managed.path;
+  private explorerWorkspace(projectId: unknown): { project: ProjectState; workspace: WorkspaceState } | { error: string } {
+    if (typeof projectId !== "string") return { error: "invalid project" };
+    const project = this.projects.get(projectId);
+    if (!project || this.projectIsSwitching(projectId)) return { error: "project is not open" };
+    const workspace = this.primaryWorkspace(project);
+    if (!workspace) return { error: "project workspace is not available" };
+    return { project, workspace };
+  }
+
+  /** The project/workspace must still be owned and open before a write commits. */
+  private explorerWorkspaceIsLive(projectId: string, project: ProjectState, workspace: WorkspaceState, requester: string): boolean {
+    return !this.projectIsSwitching(projectId)
+      && this.projects.get(projectId) === project
+      && project.workspaces.get(workspace.id) === workspace
+      && this.workspaceOwners.get(workspace.id) === projectId
+      && workspace.writerId === requester;
+  }
+
+  /** Serialize one Explorer mutation with capture, close, and other writers. */
+  private async mutateExplorer(
+    projectId: unknown,
+    mutation: (workspace: WorkspaceState, live: () => boolean) => Promise<{ ok: boolean; error?: string; name?: string }>,
+  ): Promise<{ ok: boolean; error?: string; name?: string }> {
+    const target = this.explorerWorkspace(projectId);
+    if ("error" in target) return { ok: false, error: target.error };
+    const requester = `explorer:${target.project.id}:${randomUUID()}`;
+    const lease = await this.acquireWriteLease(target.workspace.id, requester, 5000);
+    if (!lease.ok) return { ok: false, error: lease.error ?? "the project workspace is busy" };
+    try {
+      const live = () => this.explorerWorkspaceIsLive(target.project.id, target.project, target.workspace, requester);
+      if (!live()) return { ok: false, error: "project is not open" };
+      return await mutation(target.workspace, live);
+    } finally {
+      this.releaseWriteLease(target.workspace.id, requester);
+    }
+  }
+
+  private async projectAbs(workspace: WorkspaceState, relPath: string): Promise<string> {
+    const abs = isAbsolute(relPath) ? relPath : join(workspace.root, relPath);
+    if (await this.hasDanglingSymlink(abs)) throw new Error(`path outside project: ${relPath}`);
+    const [root, path] = await Promise.all([this.canonicalPath(workspace.root), this.canonicalPath(abs)]);
+    const rel = relative(root, path);
+    if (!rel || rel.startsWith("..") || isAbsolute(rel)) {
+      throw new Error(`path outside project: ${relPath}`);
+    }
+    return path;
   }
 
   /** Path under dirAbs that does not exist. Collisions use " copy" then " copy N". */
@@ -4911,11 +6477,18 @@ class PiEditorApp {
     return null;
   }
 
-  private async listDir(absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }> {
-    const managed = await this.managedPath(absPath, true);
-    if (!managed) return { entries: [], error: "path outside the project workspace" };
+  private async listDir(projectId: unknown, absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }> {
+    const target = this.explorerWorkspace(projectId);
+    if ("error" in target) return { entries: [], error: target.error };
     try {
-      const dirents = await readdir(managed.path, { withFileTypes: true });
+      if (await this.hasDanglingSymlink(absPath)) return { entries: [], error: "path outside the project workspace" };
+      const [rootCanon, dir] = await Promise.all([
+        this.canonicalPath(target.workspace.root),
+        this.canonicalPath(absPath),
+      ]);
+      const dirRel = relative(rootCanon, dir);
+      if (dirRel.startsWith("..") || isAbsolute(dirRel)) return { entries: [], error: "path outside the project workspace" };
+      const dirents = await readdir(dir, { withFileTypes: true });
       const visible = dirents.filter((ent) => !IGNORED_SEGMENTS.has(ent.name) && !ent.name.startsWith("."));
       visible.sort((a, b) => {
         const aDir = a.isDirectory() ? 0 : 1;
@@ -4923,7 +6496,6 @@ class PiEditorApp {
         if (aDir !== bDir) return aDir - bDir;
         return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
       });
-      const rootCanon = await this.canonicalPath(managed.workspace.root);
       const entries: ExplorerEntry[] = [];
       let truncated = false;
       for (const ent of visible) {
@@ -4931,13 +6503,15 @@ class PiEditorApp {
           truncated = true;
           break;
         }
-        const full = join(managed.path, ent.name);
-        const child = await this.managedPath(full, true);
-        if (!child || child.workspace.id !== managed.workspace.id) continue;
+        const full = join(dir, ent.name);
+        if (await this.hasDanglingSymlink(full)) continue;
+        const child = await this.canonicalPath(full);
+        const relPath = relative(rootCanon, child);
+        if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) continue;
         entries.push({
           name: ent.name,
-          path: child.path,
-          relPath: relative(rootCanon, child.path),
+          path: child,
+          relPath,
           type: ent.isDirectory() ? "dir" : "file",
         });
       }
@@ -4949,31 +6523,185 @@ class PiEditorApp {
 
   // ------------------------------------------------------------------ IPC ---
 
-  private send(channel: string, payload: unknown): void {
-    if (this.win && !this.win.isDestroyed()) this.win.webContents.send(channel, payload);
+  /** Capture the exact outbound owner before an async callback yields. */
+  private captureRendererSendTarget(): PtyRendererSendTarget | null {
+    const win = this.win;
+    if (!win) return null;
+    try {
+      if (win.isDestroyed() || win.webContents.isDestroyed()) return null;
+      return {
+        window: win,
+        webContents: win.webContents,
+        windowGeneration: this.rendererWindowGeneration,
+        rendererGeneration: this.rendererGeneration,
+        nonce: this.rendererDocumentNonce,
+      };
+    } catch {
+      // BrowserWindow/WebContents teardown can race target capture. A
+      // missing target is safer than handing an async callback a partial one.
+      return null;
+    }
   }
 
-  /** Keep terminal output inter-process communication messages bounded. */
-  private sendPtyData(id: string, data: string): void {
-    if (data.length <= MAX_PTY_IPC_CHUNK) {
-      this.send("pty:data", { id, data });
-      return;
+  /**
+   * Push one generic state update only to the document that owns it. A caller
+   * that crosses an await captures its target before yielding; a synchronous
+   * send failure is contained and cannot escape a watcher/menu callback.
+   */
+  private send(channel: string, payload: unknown, expected?: PtyRendererSendTarget | null): boolean {
+    // `undefined` means a synchronous caller wants the current document;
+    // an explicit null is a captured teardown and must stay a no-op rather
+    // than accidentally retargeting a replacement document.
+    const target = expected === undefined ? this.captureRendererSendTarget() : expected;
+    if (!target) return false;
+    const current = this.captureRendererSendTarget();
+    const sent = sendPtyRendererMessage(current, target, this.rendererReady, channel, payload);
+    if (sent) return true;
+    if (!current) {
+      // A destroyed current WebContents may make target capture return null.
+      // Fence only when the target is still the app's exact document; an
+      // old callback must never mutate a replacement renderer's scheduler.
+      try {
+        if (
+          this.win === target.window
+          && this.rendererWindowGeneration === target.windowGeneration
+          && this.rendererGeneration === target.rendererGeneration
+        ) {
+          this.rendererReady = false;
+          this.ptyEgress.setRendererReady(target.windowGeneration, target.rendererGeneration, false);
+        }
+      } catch {
+        /* Teardown already fenced the document. */
+      }
+      return false;
     }
-    for (let offset = 0; offset < data.length; offset += MAX_PTY_IPC_CHUNK) {
-      this.send("pty:data", { id, data: data.slice(offset, offset + MAX_PTY_IPC_CHUNK) });
+    // A stale target or a renderer that is already fenced is a no-op. In
+    // particular, this branch must not reload or otherwise touch replacement
+    // document state.
+    if (!isPtyRendererSendTargetCurrent(current, target) || !this.rendererReady) return false;
+
+    // Keep the PTY replay gate aligned with a current-document failure. The
+    // Lifecycle listeners own normal crash handling; this branch fences and
+    // reloads the current PTY document when WebContents.send failed before
+    // Chromium delivered its render-process-gone event. A stale target never
+    // reaches this branch, so an old callback cannot reload a replacement.
+    try {
+      if (!target.window.isDestroyed() && !target.webContents.isDestroyed()) {
+        this.rendererReady = false;
+        this.ptyEgress.setRendererReady(target.windowGeneration, target.rendererGeneration, false);
+        this.reloadPtyDocument(target.window as BrowserWindow, target.windowGeneration);
+      }
+    } catch {
+      /* Teardown already fenced the document. */
     }
+    return false;
+  }
+
+  /** Deliver one bounded PTY chunk only to the current loaded renderer. */
+  private sendPtyChunk(
+    id: string,
+    terminalGeneration: number,
+    windowGeneration: number,
+    rendererGeneration: number,
+    sequence: number,
+    data: string,
+  ): boolean {
+    const win = this.win;
+    if (
+      !win
+      || !this.rendererReady
+      || !this.isCurrentPtyDocument(win, windowGeneration, rendererGeneration)
+    ) return false;
+    try {
+      if (win.isDestroyed() || win.webContents.isDestroyed()) return false;
+      if (win.webContents.isCrashed()) {
+        this.reloadPtyDocument(win, windowGeneration);
+        return false;
+      }
+      win.webContents.send("pty:data", {
+        id,
+        generation: terminalGeneration,
+        windowGeneration,
+        rendererGeneration,
+        sequence,
+        data,
+      });
+      return true;
+    } catch {
+      // render-process-gone/destroy can race the readiness check. Returning
+      // false leaves the chunk queued; invalidate the exact current document
+      // and let its replacement navigation mint the next frame/nonce pair.
+      this.reloadPtyDocument(win, windowGeneration);
+      return false;
+    }
+  }
+
+  /** Deliver the sequenced natural-exit marker through the same ledger as data. */
+  private sendPtyExit(
+    id: string,
+    terminalGeneration: number,
+    windowGeneration: number,
+    rendererGeneration: number,
+    sequence: number,
+    code: number,
+  ): boolean {
+    const win = this.win;
+    if (
+      !win
+      || !this.rendererReady
+      || !this.isCurrentPtyDocument(win, windowGeneration, rendererGeneration)
+    ) return false;
+    try {
+      if (win.isDestroyed() || win.webContents.isDestroyed()) return false;
+      if (win.webContents.isCrashed()) {
+        this.reloadPtyDocument(win, windowGeneration);
+        return false;
+      }
+      win.webContents.send("pty:exit", {
+        id,
+        generation: terminalGeneration,
+        windowGeneration,
+        rendererGeneration,
+        sequence,
+        code,
+      });
+      return true;
+    } catch {
+      this.reloadPtyDocument(win, windowGeneration);
+      return false;
+    }
+  }
+
+  /** Enqueue PTY output in the single fair, lossless delivery path. */
+  private sendPtyData(id: string, terminalGeneration: number, data: string): boolean {
+    const inst = this.terminals.get(id);
+    if (this.disposed || !inst || inst.closed || inst.generation !== terminalGeneration) return false;
+    return this.ptyEgress.enqueue(id, terminalGeneration, data);
   }
 
   private registerIpc(): void {
+    // Keep the existing registration surface, but make every invoke handler
+    // pass through the one capability gate. `on` remains available only for
+    // the PTY handshake messages, which apply the same gate explicitly below.
+    const ipcMain = {
+      handle: (channel: string, listener: (...args: any[]) => any) => this.handleIpc(channel, listener),
+      on: electronIpcMain.on.bind(electronIpcMain),
+    };
+    electronIpcMain.on("renderer:capability", (event) => {
+      event.returnValue = this.rendererCapabilityFor(event);
+    });
+
     // ---- Project tabs ----
     ipcMain.handle("project:list", async () => {
       const needsLogin = await this.piNeedsLogin();
       return [...this.projects.values()].map((p) => ({
         id: p.id,
         cwd: p.cwd,
+        workspaceId: this.primaryWorkspace(p)?.id ?? "",
         active: p.id === this.activeProjectId,
         terminals: p.terminalIds.size,
         needsLogin,
+        activationGeneration: p.activationGeneration,
       }));
     });
     ipcMain.handle("project:open", () => this.openFolder());
@@ -4989,8 +6717,7 @@ class PiEditorApp {
     });
     ipcMain.handle("project:activate", async (_e, projectId: unknown) => {
       if (typeof projectId !== "string" || !this.projects.has(projectId)) return { ok: false };
-      await this.activateProject(projectId);
-      return { ok: true };
+      return { ok: await this.activateProject(projectId) };
     });
     ipcMain.handle("project:close", async (_e, projectId: unknown) => {
       if (typeof projectId !== "string") return { ok: false, error: "invalid project" };
@@ -5076,7 +6803,84 @@ class PiEditorApp {
       const available = await this.checkPiAvailable();
       return { available, bin: this.resolvePiBin(), message: available ? undefined : this.piMissingMessage() };
     });
-    ipcMain.handle("terminals:close", (_e, id: string) => this.closeTerminal(id));
+    // PTY delivery control is deliberately a single typed preload path. The
+    // sender and capability checks fence delayed messages from a renderer that
+    // has crashed or been replaced, while the terminal generation fences id reuse.
+    ipcMain.on("pty:ready", (event, id: unknown, generation: unknown, capability: unknown) => {
+      if (!this.isTrustedRenderer(event, capability)) return;
+      if (typeof id !== "string" || typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 1) return;
+      const rendererCapability = this.parseRendererCapability(capability);
+      const frameIdentity = this.readIpcFrameIdentity(event);
+      const current = this.currentPtyLifecycle();
+      // A ready message is a capability proof for one concrete document and
+      // one concrete main frame. A stale process/frame pair cannot borrow the
+      // new document's nonce through the same WebContents.
+      if (
+        this.rendererAwaitingNewFrame
+        || !frameIdentity
+        || !current
+        || !rendererCapability
+        || current.processId < 1
+        || current.frameRoutingId < 1
+        || !isPtyReadyHandshakeCurrent(
+          current,
+          current,
+          rendererCapability.nonce,
+          frameIdentity.processId,
+          frameIdentity.frameRoutingId,
+        )
+      ) return;
+      // The preload's nonce is issued by main for this exact document. It is
+      // a stronger final proof than a frame-finish callback (which has no
+      // document token), so a delayed failure/finish callback cannot strand a
+      // valid replacement before hydration.
+      if (this.rendererLoadPending || !this.rendererReady) {
+        this.rendererLoadPending = false;
+        this.rendererPendingLoad = null;
+        this.rendererReady = true;
+        this.ptyEgress.setRendererReady(this.rendererWindowGeneration, this.rendererGeneration, true);
+      }
+      this.ptyEgress.hydrateTerminal(
+        id,
+        generation,
+        this.rendererWindowGeneration,
+        this.rendererGeneration,
+      );
+    });
+    ipcMain.on("pty:ack", (event, payload: unknown, capability: unknown) => {
+      if (!this.isTrustedRenderer(event, capability)) return;
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
+      const p = payload as Record<string, unknown>;
+      if (
+        typeof p.id !== "string"
+        || typeof p.generation !== "number"
+        || !Number.isSafeInteger(p.generation)
+        || p.generation < 1
+        || typeof p.windowGeneration !== "number"
+        || !Number.isSafeInteger(p.windowGeneration)
+        || p.windowGeneration < 1
+        || typeof p.rendererGeneration !== "number"
+        || !Number.isSafeInteger(p.rendererGeneration)
+        || p.rendererGeneration < 1
+        || typeof p.sequence !== "number"
+        || !Number.isSafeInteger(p.sequence)
+        || p.sequence < 1
+      ) return;
+      this.ptyEgress.acknowledge(
+        p.id,
+        p.generation,
+        p.windowGeneration,
+        p.rendererGeneration,
+        p.sequence,
+      );
+    });
+    ipcMain.handle("terminals:close", (event, id: unknown, generation: unknown) => {
+      if (event.sender !== this.win?.webContents) return;
+      if (typeof id !== "string" || typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 1) return;
+      const inst = this.terminals.get(id);
+      if (!inst || inst.generation !== generation) return;
+      this.closeTerminal(id);
+    });
     ipcMain.handle("terminals:write", (_e, id: unknown, data: unknown) => {
       if (typeof id !== "string" || typeof data !== "string") return;
       const inst = this.terminals.get(id);
@@ -5125,7 +6929,10 @@ class PiEditorApp {
     });
 
     // ---- Worldlines: candidates (WORLDLINES §6.5, §6.6) ----
-    ipcMain.handle("worldline:list", () => this.project()?.worldlines?.list() ?? []);
+    ipcMain.handle("worldline:list", (_e, projectId: unknown) => {
+      if (typeof projectId !== "string") return [];
+      return this.projects.get(projectId)?.worldlines?.listWithEvidence() ?? [];
+    });
     ipcMain.handle("worldline:promote", (_e, comparisonId: string, label: "A" | "B", force?: boolean) => {
       if (force !== undefined && force !== true && force !== false) return { ok: false, error: "invalid force" };
       const manager = this.projectOfComparison(comparisonId)?.worldlines;
@@ -5179,12 +6986,32 @@ class PiEditorApp {
       if (!stateId) return { ok: false, error: `no ${kind} state` };
       const store = await project.storePromise;
       if (!store) return { ok: false, error: "recording is not available" };
+      let dir: string | null = null;
       try {
-        const dir = await mkdtemp(join(app.getPath("temp"), "termina-state-"));
-        this.exportedStateDirs.set(dir, project.id);
-        await store.materialize(stateId, dir);
+        const tempRoot = app.getPath("temp");
+        const tempInfo = await lstat(tempRoot, { bigint: true });
+        if (!tempInfo.isDirectory() || tempInfo.isSymbolicLink()) throw new Error("temporary export root is not a real directory");
+        const tempBinding = await boundPromotionOpenDirectory({
+          path: tempRoot,
+          expectedIdentity: { dev: String(tempInfo.dev), ino: String(tempInfo.ino) },
+        });
+        const binding = await createOwnedDirectory(tempRoot, tempBinding, "termina-state-");
+        dir = binding.path;
+        this.exportedStateDirs.set(dir, { ownerId: project.id, binding });
+        await store.materialize(stateId, dir, { boundRootIdentity: binding.identity });
         return { ok: true, dir };
       } catch (err) {
+        if (dir) {
+          const entry = this.exportedStateDirs.get(dir);
+          if (entry) {
+            try {
+              await removeBoundOwnedDirectory({ binding: entry.binding });
+              this.exportedStateDirs.delete(dir);
+            } catch (cleanupError) {
+              console.warn(`[main] failed to clean rejected export ${dir}: ${String(cleanupError)}`);
+            }
+          }
+        }
         return { ok: false, error: (err as Error).message };
       }
     });
@@ -5200,10 +7027,12 @@ class PiEditorApp {
       waiter.resolve(result);
     });
     /** The flush saves go through the lease holder (the preflight). */
-    ipcMain.handle("file:flush-save", async (_e, absPath: string, content: string, writerId: string) => {
+    ipcMain.handle("file:flush-save", async (_e, absPath: string, content: string, writerId: string, owner: unknown) => {
       if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > MAX_OPEN_FILE_SIZE) return { ok: false, error: "file content is too large" };
-      const managed = await this.managedPath(absPath);
-      if (!managed) return { ok: false, error: "path is outside a managed workspace" };
+      const target = this.projectWorkspace(owner);
+      if (!target) return { ok: false, error: "invalid project workspace" };
+      const managed = await this.managedPath(absPath, target.workspace.id);
+      if (!managed || managed.workspace.id !== target.workspace.id) return { ok: false, error: "path is outside the project workspace" };
       if (managed.workspace.writerId !== writerId) return { ok: false, error: "the flush does not hold the write lease" };
       try {
         const info = await stat(managed.path);
@@ -5224,9 +7053,10 @@ class PiEditorApp {
     // ---- Verify & Iterate ----
     ipcMain.handle("verify:detect", (_e, terminalId?: string) => {
       // A candidate terminal detects from its own isolated tree.
-      if (terminalId && this.terminals.has(terminalId)) {
-        const inst = this.terminals.get(terminalId)!;
-        return this.detectTestCommand(inst.cwd);
+      if (terminalId !== undefined) {
+        if (typeof terminalId !== "string") return null;
+        const inst = this.terminals.get(terminalId);
+        return inst ? this.detectTestCommand(inst.cwd) : null;
       }
       return this.detectTestCommand(this.terminalCwd());
     });
@@ -5234,8 +7064,12 @@ class PiEditorApp {
     ipcMain.handle("verify:cancel", (_e, terminalId: string) => this.cancelVerify(terminalId));
 
     // ---- Mine ----
-    ipcMain.handle("mine:set", (_e, path: string, mine: boolean) => this.setMineFile(path, mine));
-    ipcMain.handle("mine:list", () => [...(this.project()?.mineFiles ?? [])]);
+    ipcMain.handle("mine:set", (_e, path: string, mine: boolean, owner: unknown) => this.setMineFile(path, mine, owner));
+    ipcMain.handle("mine:list", (_e, owner: unknown) => {
+      const target = this.projectWorkspace(owner);
+      if (!target || !target.workspace.primary) return [];
+      return [...target.project.mineFiles];
+    });
 
     // ---- Dispatch ----
     ipcMain.handle("dispatch:run", (_e, terminalId: string, taskText?: string) =>
@@ -5283,7 +7117,7 @@ class PiEditorApp {
     // ---- Change Review ----
     ipcMain.handle("review:baseline", async (_e, terminalId: string, path: string) => {
       const inst = this.terminals.get(terminalId);
-      const managed = inst ? await this.managedPath(path) : null;
+      const managed = inst ? await this.managedPath(path, inst.workspaceId) : null;
       if (!inst || !managed || managed.workspace.id !== inst.workspaceId) return { status: "modified", baseline: undefined };
       // A lazy capture can still be in flight when the user clicks the
       // modified entry. Wait for it so the diff does not show a false
@@ -5303,7 +7137,7 @@ class PiEditorApp {
       if (!inst) return { ok: false, error: "terminal not found" };
       const blocked = this.assertWorkspaceWritable(inst.workspaceId);
       if (blocked) return { ok: false, error: blocked };
-      const managed = await this.managedPath(path);
+      const managed = await this.managedPath(path, inst.workspaceId);
       if (!managed || managed.workspace.id !== inst.workspaceId) return { ok: false, error: "path is outside the terminal workspace" };
       const p = managed.path;
       const b = inst.baselines.get(p);
@@ -5324,15 +7158,17 @@ class PiEditorApp {
       }
     });
 
-    ipcMain.handle("file:open", (_e, absPath: unknown) => {
+    ipcMain.handle("file:open", (_e, absPath: unknown, owner: unknown) => {
       if (typeof absPath !== "string") return { ok: false, path: "", error: "invalid path" };
-      return this.openFileInEditor(absPath);
+      return this.openFileInEditor(absPath, owner);
     });
-    ipcMain.handle("file:save", async (_e, absPath: unknown, content: unknown) => {
+    ipcMain.handle("file:save", async (_e, absPath: unknown, content: unknown, owner: unknown) => {
       if (typeof absPath !== "string") return { ok: false, error: "invalid path" };
       if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > MAX_OPEN_FILE_SIZE) return { ok: false, error: "file content is too large" };
-      const managed = await this.managedPath(absPath);
-      if (!managed) return { ok: false, error: "path is outside a managed workspace" };
+      const target = this.projectWorkspace(owner);
+      if (!target) return { ok: false, error: "invalid project workspace" };
+      const managed = await this.managedPath(absPath, target.workspace.id);
+      if (!managed || managed.workspace.id !== target.workspace.id) return { ok: false, error: "path is outside the project workspace" };
       const blocked = this.assertWorkspaceWritable(managed.workspace.id);
       if (blocked) return { ok: false, error: blocked };
       try {
@@ -5345,75 +7181,63 @@ class PiEditorApp {
       }
     });
 
-    ipcMain.handle("explorer:list-dir", (_e, absPath: unknown) => {
-      if (typeof absPath !== "string") return { entries: [], error: "invalid path" };
-      return this.listDir(absPath);
+    ipcMain.handle("explorer:list-dir", (_e, projectId: unknown, absPath: unknown) => {
+      if (typeof projectId !== "string" || typeof absPath !== "string") return { entries: [], error: "invalid path" };
+      return this.listDir(projectId, absPath);
     });
-    ipcMain.handle("explorer:create", async (_e, relPath: unknown, kind: unknown) => {
+    ipcMain.handle("explorer:create", async (_e, projectId: unknown, relPath: unknown, kind: unknown) => {
       if (typeof relPath !== "string") return { ok: false, error: "invalid path" };
       if (kind !== "file" && kind !== "dir") return { ok: false, error: "kind must be file or dir" };
-      const blocked = this.assertWorkspaceWritable(this.primaryWorkspace()?.id ?? "");
-      if (blocked) return { ok: false, error: blocked };
-      try {
-        const abs = await this.projectAbs(relPath);
+      return this.mutateExplorer(projectId, async (workspace, live) => {
+        const abs = await this.projectAbs(workspace, relPath);
+        if (!live()) return { ok: false, error: "project is not open" };
         if (kind === "dir") {
           await mkdir(abs, { recursive: true });
         } else {
           await mkdir(dirname(abs), { recursive: true });
+          if (!live()) return { ok: false, error: "project is not open" };
           await writeFile(abs, "", "utf8");
         }
         return { ok: true };
-      } catch (err) {
-        return { ok: false, error: (err as Error).message };
-      }
+      }).catch((err) => ({ ok: false, error: (err as Error).message }));
     });
-    ipcMain.handle("explorer:rename", async (_e, relPath: unknown, newName: unknown) => {
-      const blocked = this.assertWorkspaceWritable(this.primaryWorkspace()?.id ?? "");
-      if (blocked) return { ok: false, error: blocked };
-      try {
-        if (typeof relPath !== "string") return { ok: false, error: "invalid path" };
-        if (typeof newName !== "string" || !newName || newName.includes("/") || newName === "." || newName === "..") {
-          return { ok: false, error: "invalid name" };
-        }
-        const abs = await this.projectAbs(relPath);
+    ipcMain.handle("explorer:rename", async (_e, projectId: unknown, relPath: unknown, newName: unknown) => {
+      if (typeof relPath !== "string") return { ok: false, error: "invalid path" };
+      if (typeof newName !== "string" || !newName || newName.includes("/") || newName === "." || newName === "..") {
+        return { ok: false, error: "invalid name" };
+      }
+      return this.mutateExplorer(projectId, async (workspace, live) => {
+        const abs = await this.projectAbs(workspace, relPath);
+        if (!live()) return { ok: false, error: "project is not open" };
         await fsRename(abs, join(dirname(abs), newName));
         return { ok: true };
-      } catch (err) {
-        return { ok: false, error: (err as Error).message };
-      }
+      }).catch((err) => ({ ok: false, error: (err as Error).message }));
     });
-    ipcMain.handle("explorer:delete", async (_e, relPath: unknown) => {
+    ipcMain.handle("explorer:delete", async (_e, projectId: unknown, relPath: unknown) => {
       if (typeof relPath !== "string") return { ok: false, error: "invalid path" };
-      const blocked = this.assertWorkspaceWritable(this.primaryWorkspace()?.id ?? "");
-      if (blocked) return { ok: false, error: blocked };
-      try {
-        const abs = await this.projectAbs(relPath);
+      return this.mutateExplorer(projectId, async (workspace, live) => {
+        const abs = await this.projectAbs(workspace, relPath);
+        if (!live()) return { ok: false, error: "project is not open" };
         await rm(abs, { recursive: true, force: true });
         return { ok: true };
-      } catch (err) {
-        return { ok: false, error: (err as Error).message };
-      }
+      }).catch((err) => ({ ok: false, error: (err as Error).message }));
     });
 
     // Explorer clipboard paste. Copies (or moves, for a cut entry) the source
     // under the target directory; a name collision gets " copy" / " copy N".
     // An empty targetDirRel means the project root itself.
-    ipcMain.handle("explorer:paste", async (_e, targetDirRel: unknown, srcRel: unknown, move: unknown) => {
+    ipcMain.handle("explorer:paste", async (_e, projectId: unknown, targetDirRel: unknown, srcRel: unknown, move: unknown) => {
       if (typeof targetDirRel !== "string" || typeof srcRel !== "string" || typeof move !== "boolean") {
         return { ok: false, error: "invalid arguments" };
       }
       if (!srcRel || srcRel === ".") return { ok: false, error: "invalid source" };
-      const blocked = this.assertWorkspaceWritable(this.primaryWorkspace()?.id ?? "");
-      if (blocked) return { ok: false, error: blocked };
-      try {
-        const src = await this.projectAbs(srcRel);
+      return this.mutateExplorer(projectId, async (workspace, live) => {
+        const src = await this.projectAbs(workspace, srcRel);
         let dirAbs: string;
         if (targetDirRel === "" || targetDirRel === ".") {
-          const cwd = this.project()?.cwd;
-          if (!cwd) return { ok: false, error: "open a project folder first" };
-          dirAbs = await this.canonicalPath(cwd);
+          dirAbs = await this.canonicalPath(workspace.root);
         } else {
-          dirAbs = await this.projectAbs(targetDirRel);
+          dirAbs = await this.projectAbs(workspace, targetDirRel);
         }
         // The paste target must be a directory.
         if (!existsSync(dirAbs) || !statSync(dirAbs).isDirectory()) {
@@ -5425,17 +7249,18 @@ class PiEditorApp {
         }
         const dest = this.unusedCopyDest(dirAbs, basename(src));
         if (!dest) return { ok: false, error: "destination already exists" };
+        if (!live()) return { ok: false, error: "project is not open" };
         if (move) await fsRename(src, dest);
         else await cp(src, dest, { recursive: true });
         return { ok: true, name: basename(dest) };
-      } catch (err) {
-        return { ok: false, error: (err as Error).message };
-      }
+      }).catch((err) => ({ ok: false, error: (err as Error).message }));
     });
   }
 
-  private async openFileInEditor(absPath: string): Promise<{ ok: true; path: string; content: string; changedLines?: number[] } | { ok: false; path: string; error: string }> {
-    const managed = await this.managedPath(absPath);
+  private async openFileInEditor(absPath: string, owner: unknown): Promise<{ ok: true; path: string; content: string; changedLines?: number[] } | { ok: false; path: string; error: string }> {
+    const target = this.projectWorkspace(owner);
+    if (!target) return { ok: false, path: absPath, error: "invalid project workspace" };
+    const managed = await this.managedPath(absPath, target.workspace.id);
     if (!managed) return { ok: false, path: absPath, error: "path is outside a managed workspace" };
     try {
       const st = await stat(managed.path);
@@ -5461,10 +7286,10 @@ class PiEditorApp {
     });
     this.registerIpc();
     void detectShells();
-    // The session workspace is per-launch scratch: run ids restart at
-    // run-1, and stale copies from a previous launch would collide.
-    rmSync(this.sessionWorkspaceDir, { recursive: true, force: true });
-    this.cleanupStaleDispatchFiles();
+    // The launch scratch cleanup is native-bound and asynchronous.  A
+    // changed events root/ancestor is retained until provenance is repaired.
+    await this.prepareEventsDir();
+    await this.cleanupStaleDispatchFiles();
     // Tests set TERMINA_INITIAL_CWD so the fixture is open before the
     // window loads. A normal launch has no folder until the user picks one.
     const initial = process.env.TERMINA_INITIAL_CWD;
@@ -5475,26 +7300,27 @@ class PiEditorApp {
     // the CLI extension option on every agent launch, with or without a
     // project folder.
     this.ensureAppBridge();
-    await this.createWindow();
-    this.appUpdater.start();
     if (initialCwd) {
       await this.openProject(initialCwd);
-      return;
-    }
-    // Restore the projects from the last session. Missing or non-directory
-    // paths are skipped: they may be unmounted volumes or hand-edited entries.
-    for (const root of this.preferences.openProjects) {
-      try {
-        if (!statSync(root).isDirectory()) continue;
-      } catch {
-        continue;
+    } else {
+      // Restore the projects from the last session before the window loads.
+      // Missing or non-directory paths are skipped: they may be unmounted
+      // volumes or hand-edited entries.
+      for (const root of this.preferences.openProjects) {
+        try {
+          if (!statSync(root).isDirectory()) continue;
+        } catch {
+          continue;
+        }
+        try {
+          await this.openProject(root);
+        } catch (err) {
+          console.warn(`[main] could not restore project ${root}: ${(err as Error).message}`);
+        }
       }
-      try {
-        await this.openProject(root);
-      } catch (err) {
-        console.warn(`[main] could not restore project ${root}: ${(err as Error).message}`);
-      }
     }
+    await this.createWindow();
+    this.appUpdater.start();
     // A normal launch has no folder. The renderer shows the open-folder
     // placeholder until the user picks one. Tests set TERMINA_INITIAL_CWD.
   }
@@ -5558,6 +7384,9 @@ class PiEditorApp {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    // Shutdown is an intentional cancellation boundary: no queued bytes or
+    // exit notifications may be delivered after the app has begun teardown.
+    this.ptyEgress.dispose();
     this.appUpdater?.dispose();
     await this.persistOpenProjects();
     await this.preferenceCommits;
@@ -5568,9 +7397,26 @@ class PiEditorApp {
     this.sidecarQueues.clear();
     await Promise.all([...this.projects.values()].map((project) => project.mineCommit.catch(() => undefined)));
     await Promise.all([...this.projects.values()].map((project) => project.worldlines?.drainEvidence() ?? Promise.resolve()));
-    this.cleanupExportedStates();
+    // Finalization can enqueue a core session fork; settle those recording
+    // tasks and the shared worker before worldline teardown removes any dirs.
+    await this.drainRecordingTasks();
+    await this.sessionRetention.drain();
+    await Promise.all([...this.projects.values()].map((project) => project.worldlines?.drainSessionForks() ?? Promise.resolve()));
+    // Worldline disposal clears completed runs and therefore may enqueue the
+    // identity-bound Pi branch discards. Keep the session worker alive until
+    // those exact cleanup requests have drained; disposing it first would
+    // silently retain every finalized Pi branch at app shutdown.
+    await Promise.all([...this.projects.values()].map((project) => project.worldlines?.dispose().catch(() => undefined) ?? Promise.resolve()));
+    await this.sessionFork.dispose();
+    await this.cleanupExportedStates();
+    for (const [path, binding] of [...this.evidenceHomeDirs]) {
+      if (await this.removeEvidenceHome(path)) continue;
+      // The failed identity proof intentionally retains the replacement.
+      // Drop only the in-memory retry handle during final app teardown.
+      this.evidenceHomeDirs.delete(path);
+      void binding;
+    }
     for (const project of this.projects.values()) {
-      await project.worldlines?.dispose().catch(() => undefined);
       project.worldlines = null;
       for (const ws of project.workspaces.values()) ws.watcher?.stop();
     }
@@ -5580,7 +7426,6 @@ class PiEditorApp {
         inst.captureTimer = null;
       }
     }
-    await this.drainRecordingTasks();
     await Promise.all([...this.projects.values()].map((project) => project.storePromise?.catch(() => null) ?? Promise.resolve(null)));
     coreClient.dispose();
     for (const inst of this.terminals.values()) {
@@ -5609,7 +7454,6 @@ class PiEditorApp {
     this.terminals.clear();
     for (const tailer of this.worldlineTailers.values()) tailer.stop();
     this.worldlineTailers.clear();
-    this.sessionFork.dispose();
     this.stopPaintWatchdog();
   }
 
@@ -5621,7 +7465,9 @@ class PiEditorApp {
   }
 
   reloadWindow(): void {
-    if (this.win && !this.win.isDestroyed()) this.win.webContents.reload();
+    const win = this.win;
+    if (!win || win.isDestroyed()) return;
+    this.reloadPtyDocument(win, this.rendererWindowGeneration);
   }
 
   private startPaintWatchdog(): void {
@@ -5632,6 +7478,10 @@ class PiEditorApp {
     this.paintWatchdog = setInterval(() => {
       const win = this.win;
       if (!win || win.isDestroyed() || win.isMinimized() || !win.isVisible()) return;
+      const windowGeneration = this.rendererWindowGeneration;
+      const rendererGeneration = this.rendererGeneration;
+      const nonce = this.rendererDocumentNonce;
+      if (!this.isCurrentPtyDocument(win, windowGeneration, rendererGeneration, nonce)) return;
       // A blank first paint is a startup problem. Check every 3 seconds
       // until the window paints content once. Then check every 15 seconds
       // to catch a stalled renderer.
@@ -5640,6 +7490,7 @@ class PiEditorApp {
       if (now - lastCheck < cadence) return;
       lastCheck = now;
       void (async () => {
+        if (!this.isCurrentPtyDocument(win, windowGeneration, rendererGeneration, nonce) || win.webContents.isDestroyed()) return;
         let img: Electron.NativeImage | null = null;
         try {
           img = await Promise.race([
@@ -5649,6 +7500,10 @@ class PiEditorApp {
         } catch {
           img = null;
         }
+        // capturePage is asynchronous; the window or document may have been
+        // replaced while it was in flight. Never let that stale callback
+        // update watchdog state or reload the replacement.
+        if (!this.isCurrentPtyDocument(win, windowGeneration, rendererGeneration, nonce) || win.webContents.isDestroyed()) return;
         let uniform = img === null;
         if (img && !img.isEmpty()) {
           // Downscale before sampling: a full-window bitmap is megabytes; a
@@ -5670,7 +7525,7 @@ class PiEditorApp {
           blankCount++;
           if (blankCount >= 4) {
             console.warn("[main] paint watchdog: window not painting — reloading");
-            win.webContents.reload();
+            this.reloadPtyDocument(win, windowGeneration);
             blankCount = 0;
           }
         } else {
@@ -5719,7 +7574,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on("second-instance", () => appState.focusWindow());
   // Boot the app when Electron is ready. Without this line the window
   // never opens: every handler above only reacts to events.
-  app.whenReady().then(() => void appState.start());
+  app.whenReady().then(() => void appState.start().catch((err) => console.error("[main] fatal startup error:", err)));
 }
 
 app.on("window-all-closed", () => {

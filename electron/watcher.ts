@@ -48,9 +48,72 @@ interface FileChange {
 const MAX_FILE_SIZE = 2 * 1024 * 1024; // do not read huge files into Monaco
 const DEBOUNCE_MS = 120;
 
+/** Admission bounds for pending watcher paths and callback fanout. */
+export const WATCHER_EVENT_QUEUE_HIGH_WATER_ITEMS = 2000;
+export const WATCHER_EVENT_QUEUE_HIGH_WATER_BYTES = 4 * 1024 * 1024;
+export const WATCHER_EVENT_IN_FLIGHT_HIGH_WATER = 8;
+
+export interface ProjectWatcherAdmissionLimits {
+  maxPendingItems?: number;
+  maxPendingBytes?: number;
+  maxInFlight?: number;
+}
+
+export interface ProjectWatcherQueueStats {
+  pendingItems: number;
+  pendingBytes: number;
+  inFlight: number;
+}
+
+type WatcherReadDirectory = (
+  path: string,
+  options: { withFileTypes: true },
+) => Promise<Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>>;
+
+interface FailedWatcherPath {
+  generation: number;
+  reconcile: boolean;
+  attempts: number;
+}
+
 export class ProjectWatcher {
   private watcher: FSWatcher | null = null;
   private timers = new Map<string, NodeJS.Timeout>();
+  /** Bytes retained by debounce timers. */
+  private timerBytes = 0;
+  /** Ready paths waiting for a bounded callback slot. */
+  private ready = new Map<string, { generation: number; reconcile: boolean; bytes: number }>();
+  private readyBytes = 0;
+  private activePaths = new Set<string>();
+  /** Paths whose callback or final-state read failed and must be retried. */
+  private failedPaths = new Map<string, FailedWatcherPath>();
+  private failedRetryTimers = new Map<string, NodeJS.Timeout>();
+  private failedBytes = 0;
+  private readonly maxPendingItems: number;
+  private readonly maxPendingBytes: number;
+  private readonly maxInFlight: number;
+  private overflowed = false;
+  private reconcileRunning = false;
+  private watcherPaused = false;
+  /** Relevant native notifications observed while a scan is overlapping. */
+  private reconcileJournal = new Set<string>();
+  private reconcileJournalBytes = 0;
+  private reconcileJournalOverflowed = false;
+  private reconcileRetryTimer: NodeJS.Timeout | null = null;
+  private reconcileAttempts = 0;
+  /** Diagnostic count: paths visited by the bounded reconciliation walker. */
+  private reconciledPathCount = 0;
+  private readonly readDirectory: WatcherReadDirectory;
+  private capacityWaiters: Array<{ generation: number; relPath?: string; bytes: number; resolve: (ok: boolean) => void }> = [];
+  private drainWaiters: Array<{ generation: number; resolve: (ok: boolean) => void }> = [];
+  /** Increments on every relevant raw fs notification, before debounce. */
+  private rawRevision = 0;
+  /** Changes whenever watcher observation becomes available or unavailable. */
+  private healthRevision = 0;
+  /** A failed watcher must never certify a checkpoint as stable. */
+  private healthy = false;
+  /** Debounced emits still running their callbacks. */
+  private emitting = 0;
   private seen = new Set<string>();
   /** Rules of every loaded .gitignore, keyed by directory. */
   private gitignoreRules: GitignoreRules = new Map();
@@ -69,8 +132,6 @@ export class ProjectWatcher {
   private static readonly CACHE_LIMIT = 5000;
   /** Byte budget for the cache — count alone can reach gigabytes with big files. */
   private static readonly CACHE_BYTES = 64 * 1024 * 1024;
-  /** The debounce map cap for change bursts. */
-  private static readonly MAX_PENDING_TIMERS = 2000;
   private cacheBytes = 0;
   private generation = 0;
 
@@ -89,26 +150,82 @@ export class ProjectWatcher {
   constructor(
     private root: string,
     private canonicalize?: (p: string) => string | Promise<string>,
-  ) {}
+    private watchTree: typeof watch = watch,
+    limits: ProjectWatcherAdmissionLimits = {},
+    readDirectory: WatcherReadDirectory = readdir as unknown as WatcherReadDirectory,
+  ) {
+    this.maxPendingItems = limits.maxPendingItems ?? WATCHER_EVENT_QUEUE_HIGH_WATER_ITEMS;
+    this.maxPendingBytes = limits.maxPendingBytes ?? WATCHER_EVENT_QUEUE_HIGH_WATER_BYTES;
+    this.maxInFlight = limits.maxInFlight ?? WATCHER_EVENT_IN_FLIGHT_HIGH_WATER;
+    this.readDirectory = readDirectory;
+    if (!Number.isSafeInteger(this.maxPendingItems) || this.maxPendingItems < 1) throw new Error("invalid watcher item high-water mark");
+    if (!Number.isSafeInteger(this.maxPendingBytes) || this.maxPendingBytes < 1) throw new Error("invalid watcher byte high-water mark");
+    if (!Number.isSafeInteger(this.maxInFlight) || this.maxInFlight < 1) throw new Error("invalid watcher in-flight high-water mark");
+  }
 
   start(): void {
     this.stop();
     const generation = this.generation;
-    // macOS/Windows support recursive watching; on Linux this throws and we degrade.
-    try {
-      this.watcher = watch(this.root, { recursive: true }, (_event, filename) => {
-        if (filename) this.schedule(filename.toString(), generation);
-      });
-    } catch (err) {
-      console.warn(`[watcher] recursive watch unavailable: ${(err as Error).message}`);
-    }
+    this.armWatcher(generation);
     // Seed the seen-set with existing files so the first real edit reads as
     // "modified" rather than "created" (files the agent creates are new to us).
     void this.seedExisting(generation);
   }
 
+  private armWatcher(generation: number, announceHealth = true): void {
+    // macOS/Windows support recursive watching; on Linux this throws and we degrade.
+    try {
+      const watcher = this.watchTree(this.root, { recursive: true }, (_event, filename) => {
+        if (generation !== this.generation) return;
+        // Node can report a native change without a usable filename. It is
+        // still raw activity: invalidate any idle barrier, but never invent a
+        // path or read a made-up file.
+        this.rawRevision++;
+        const rawFilename: unknown = filename;
+        if (typeof rawFilename === "string") {
+          if (rawFilename) this.schedule(rawFilename, generation, true);
+          return;
+        }
+        if (!Buffer.isBuffer(rawFilename) || rawFilename.length === 0) return;
+        const relPath = rawFilename.toString("utf8");
+        if (!relPath || !Buffer.from(relPath, "utf8").equals(rawFilename)) return;
+        this.schedule(relPath, generation, true);
+      });
+      watcher.on("error", (err) => {
+        if (this.watcher !== watcher) return;
+        try {
+          watcher.close();
+        } catch {
+          /* already closed */
+        }
+        this.watcher = null;
+        this.markUnhealthy();
+        console.warn(`[watcher] watch failed: ${(err as Error).message}`);
+      });
+      this.watcher = watcher;
+      this.watcherPaused = false;
+      if (announceHealth) this.markHealthy();
+      else this.healthy = true;
+    } catch (err) {
+      this.watcher = null;
+      this.markUnhealthy();
+      console.warn(`[watcher] recursive watch unavailable: ${(err as Error).message}`);
+    }
+  }
+
   stop(): void {
     this.generation++;
+    this.rawRevision++;
+    this.healthy = false;
+    this.healthRevision++;
+    this.overflowed = false;
+    this.reconcileRunning = false;
+    this.watcherPaused = false;
+    if (this.reconcileRetryTimer) clearTimeout(this.reconcileRetryTimer);
+    this.reconcileRetryTimer = null;
+    this.clearReconcileJournal();
+    this.reconcileJournalOverflowed = false;
+    this.reconciledPathCount = 0;
     this.seen.clear();
     this.lastContents.clear();
     this.lastOids.clear();
@@ -116,6 +233,15 @@ export class ProjectWatcher {
     this.gitignoreRules.clear();
     for (const t of this.timers.values()) clearTimeout(t);
     this.timers.clear();
+    this.timerBytes = 0;
+    this.ready.clear();
+    this.readyBytes = 0;
+    for (const timer of this.failedRetryTimers.values()) clearTimeout(timer);
+    this.failedRetryTimers.clear();
+    this.failedPaths.clear();
+    this.failedBytes = 0;
+    this.resolveCapacityWaiters(false);
+    this.resolveDrainWaiters(false);
     if (this.watcher) {
       try {
         this.watcher.close();
@@ -126,29 +252,459 @@ export class ProjectWatcher {
     }
   }
 
-  private schedule(relPath: string, generation: number): void {
+  private schedule(relPath: string, generation: number, rawObserved = false): void {
     if (generation !== this.generation || this.isIgnored(relPath)) return;
-    // Bound the debounce map: a build storm must not hold thousands of
-    // timers. Flush the oldest entry first so no change gets lost.
-    if (!this.timers.has(relPath) && this.timers.size >= ProjectWatcher.MAX_PENDING_TIMERS) {
-      const oldest = this.timers.keys().next().value;
-      if (oldest !== undefined) {
-        const timer = this.timers.get(oldest);
-        if (timer) clearTimeout(timer);
-        this.timers.delete(oldest);
-        void this.emit(oldest, generation).catch((err) => console.warn(`[watcher] change failed: ${(err as Error).message}`));
-      }
+    if (!rawObserved) this.rawRevision++;
+    if (this.reconcileRunning || this.overflowed) {
+      this.recordReconcileNotification(relPath);
+      return;
     }
+    const failed = this.failedPaths.get(relPath);
+    if (failed) {
+      failed.reconcile = true;
+      return;
+    }
+    const pathBytes = this.pathBytes(relPath);
+
+    // A newer notification supersedes a ready-but-not-started notification of
+    // the same path.  Re-arm its debounce window without adding another item.
+    const ready = this.ready.get(relPath);
+    if (ready) {
+      this.ready.delete(relPath);
+      this.readyBytes -= ready.bytes;
+      this.armPathTimer(relPath, generation, pathBytes);
+    }
+
+    const existing = this.timers.get(relPath);
+    if (existing) {
+      clearTimeout(existing);
+      this.timers.set(relPath, this.createPathTimer(relPath, generation));
+      return;
+    }
+
+    // Do not evict a path when the admission budget is full.  Pause native
+    // notifications and reconcile the final filesystem state after the
+    // bounded emitter drains, so every path still reaches its latest state.
+    if (!this.hasPendingCapacity(pathBytes)) {
+      this.requestReconcile(generation);
+      return;
+    }
+
+    this.armPathTimer(relPath, generation, pathBytes);
+  }
+
+  private pathBytes(relPath: string): number {
+    return Buffer.byteLength(relPath, "utf8") + 1;
+  }
+
+  private createPathTimer(relPath: string, generation: number): NodeJS.Timeout {
+    return setTimeout(() => {
+      if (generation !== this.generation) return;
+      this.timers.delete(relPath);
+      this.timerBytes -= this.pathBytes(relPath);
+      this.enqueueReady(relPath, generation, false);
+    }, DEBOUNCE_MS);
+  }
+
+  private armPathTimer(relPath: string, generation: number, pathBytes: number): void {
     const existing = this.timers.get(relPath);
     if (existing) clearTimeout(existing);
-    this.timers.set(
-      relPath,
-      setTimeout(() => {
+    if (!existing) this.timerBytes += pathBytes;
+    this.timers.set(relPath, this.createPathTimer(relPath, generation));
+  }
+
+  private enqueueReady(relPath: string, generation: number, reconcile: boolean): boolean {
+    if (generation !== this.generation) return false;
+    const existing = this.ready.get(relPath);
+    if (existing) {
+      existing.reconcile ||= reconcile;
+      return true;
+    }
+    const bytes = this.pathBytes(relPath);
+    if (!this.hasPendingCapacity(bytes, relPath)) {
+      this.requestReconcile(generation);
+      return false;
+    }
+    this.ready.set(relPath, { generation, reconcile, bytes });
+    this.readyBytes += bytes;
+    this.pumpEmitter();
+    return true;
+  }
+
+  private hasPendingCapacity(additionalBytes = 0, replacingFailedPath?: string): boolean {
+    let pendingItems = this.timers.size + this.ready.size + this.failedPaths.size;
+    let pendingBytes = this.timerBytes + this.readyBytes + this.failedBytes;
+    for (const [relPath, failed] of this.failedPaths) {
+      if (!failed || !this.ready.has(relPath)) continue;
+      pendingItems--;
+      pendingBytes -= this.pathBytes(relPath);
+    }
+    if (replacingFailedPath && this.failedPaths.has(replacingFailedPath) && !this.ready.has(replacingFailedPath)) {
+      pendingItems--;
+      pendingBytes -= this.pathBytes(replacingFailedPath);
+    }
+    return pendingItems < this.maxPendingItems && pendingBytes + additionalBytes <= this.maxPendingBytes;
+  }
+
+  private requestReconcile(generation: number): void {
+    if (generation !== this.generation) return;
+    if (!this.overflowed) {
+      this.overflowed = true;
+      this.pauseWatcher();
+    }
+    this.maybeStartReconcile();
+  }
+
+  private pauseWatcher(): void {
+    this.watcherPaused = true;
+    // Keep the native observer open during reconciliation. Closing it creates
+    // a scan/re-arm gap in which a mutation can be neither journaled nor
+    // rediscovered. The callback below journals overlapping notifications;
+    // the bounded two-pass scan also catches files whose native notification
+    // arrives after the directory snapshot.
+  }
+
+  private recordReconcileNotification(relPath: string): void {
+    if (this.reconcileJournal.has(relPath)) return;
+    const limit = Math.max(1024, this.maxPendingItems * 4);
+    const bytes = this.pathBytes(relPath);
+    if (this.reconcileJournal.size >= limit || this.reconcileJournalBytes + bytes > this.maxPendingBytes) {
+      this.reconcileJournalOverflowed = true;
+      return;
+    }
+    this.reconcileJournal.add(relPath);
+    this.reconcileJournalBytes += bytes;
+  }
+
+  private clearReconcileJournal(): void {
+    this.reconcileJournal.clear();
+    this.reconcileJournalBytes = 0;
+  }
+
+  private pumpEmitter(): void {
+    while (this.emitting < this.maxInFlight && this.ready.size > 0) {
+      let selected: [string, { generation: number; reconcile: boolean; bytes: number }] | undefined;
+      for (const entry of this.ready) {
+        if (!this.activePaths.has(entry[0])) {
+          selected = entry;
+          break;
+        }
+      }
+      if (!selected) break;
+      const [relPath, pending] = selected;
+      this.ready.delete(relPath);
+      this.readyBytes -= pending.bytes;
+      this.activePaths.add(relPath);
+      this.emitting++;
+      void this.emit(relPath, pending.generation, pending.reconcile)
+        .then(() => {
+          if (pending.generation !== this.generation) return;
+          this.clearFailedPath(relPath, pending.generation);
+          // A transient callback/read failure is recoverable while the native
+          // observer remains open. Restore health only after the retry has
+          // actually completed.
+          if (this.watcher && !this.healthy) this.markHealthy();
+        })
+        .catch((err) => {
+          if (pending.generation === this.generation) {
+            this.markUnhealthy();
+            this.scheduleFailedPath(relPath, pending.generation, pending.reconcile);
+          }
+          console.warn(`[watcher] change failed: ${(err as Error).message}`);
+        })
+        .finally(() => {
+          this.activePaths.delete(relPath);
+          this.emitting--;
+          this.resolveCapacityWaiters(true);
+          this.resolveDrainWaiters(true);
+          this.pumpEmitter();
+          this.maybeStartReconcile();
+        });
+    }
+    this.resolveCapacityWaiters(true);
+    this.resolveDrainWaiters(true);
+    this.maybeStartReconcile();
+  }
+
+  private scheduleFailedPath(relPath: string, generation: number, reconcile: boolean): void {
+    if (generation !== this.generation) return;
+    const previous = this.failedPaths.get(relPath);
+    if (!previous && (this.failedPaths.size >= this.maxPendingItems || this.failedBytes + this.pathBytes(relPath) > this.maxPendingBytes)) {
+      // Keep the failed path observable through the overlap scan instead of
+      // growing a second unbounded retry map. The filesystem is authoritative
+      // and the overflow journal/scan will rediscover its final state.
+      this.requestReconcile(generation);
+      return;
+    }
+    const failed: FailedWatcherPath = {
+      generation,
+      reconcile: previous?.reconcile === true || reconcile,
+      attempts: (previous?.attempts ?? 0) + 1,
+    };
+    this.failedPaths.set(relPath, failed);
+    if (!previous) this.failedBytes += this.pathBytes(relPath);
+    this.rawRevision++;
+    if (this.failedRetryTimers.has(relPath)) return;
+    const delay = Math.min(2000, 100 * 2 ** Math.min(failed.attempts - 1, 4));
+    const timer = setTimeout(() => {
+      this.failedRetryTimers.delete(relPath);
+      if (generation !== this.generation || !this.failedPaths.has(relPath)) return;
+      if (!this.enqueueReady(relPath, generation, true)) this.requestReconcile(generation);
+    }, delay);
+    this.failedRetryTimers.set(relPath, timer);
+  }
+
+  private clearFailedPath(relPath: string, generation: number): void {
+    const failed = this.failedPaths.get(relPath);
+    if (!failed || failed.generation !== generation) return;
+    this.failedPaths.delete(relPath);
+    this.failedBytes = Math.max(0, this.failedBytes - this.pathBytes(relPath));
+    const timer = this.failedRetryTimers.get(relPath);
+    if (timer) clearTimeout(timer);
+    this.failedRetryTimers.delete(relPath);
+  }
+
+  private markHealthy(): void {
+    this.healthy = true;
+    this.healthRevision++;
+    this.rawRevision++;
+  }
+
+  private markUnhealthy(): void {
+    this.healthy = false;
+    this.healthRevision++;
+    this.rawRevision++;
+  }
+
+  /**
+   * Wait for a full debounce interval with no relevant raw notification, and
+   * for every queued callback to complete. The returned revision lets a
+   * caller reject a capture if new raw activity starts after this barrier.
+   */
+  async waitForIdle(timeoutMs: number): Promise<number | null> {
+    if (!this.healthy) return null;
+    const deadline = Date.now() + timeoutMs;
+    let revision = this.rawRevision;
+    const healthRevision = this.healthRevision;
+    while (true) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return null;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(DEBOUNCE_MS, remaining)));
+      if (!this.healthy || this.healthRevision !== healthRevision) return null;
+      if (this.rawRevision !== revision) {
+        revision = this.rawRevision;
+        continue;
+      }
+      if (this.timers.size === 0 && this.ready.size === 0 && this.emitting === 0 && this.failedPaths.size === 0 && !this.reconcileRunning && !this.overflowed) return revision;
+    }
+  }
+
+  /** True only if no raw event, debounce timer, or callback started since an idle barrier. */
+  isIdleAt(revision: number): boolean {
+    return this.healthy
+      && this.rawRevision === revision
+      && this.timers.size === 0
+      && this.ready.size === 0
+      && this.emitting === 0
+      && this.failedPaths.size === 0
+      && !this.reconcileRunning
+      && !this.overflowed;
+  }
+
+  /** True while native notifications are paused for overflow recovery. */
+  isPaused(): boolean {
+    return this.watcherPaused;
+  }
+
+  queueStats(): ProjectWatcherQueueStats {
+    let duplicateFailed = 0;
+    let duplicateFailedBytes = 0;
+    for (const relPath of this.failedPaths.keys()) {
+      if (!this.ready.has(relPath)) continue;
+      duplicateFailed++;
+      duplicateFailedBytes += this.pathBytes(relPath);
+    }
+    return {
+      pendingItems: this.timers.size + this.ready.size + this.failedPaths.size - duplicateFailed,
+      pendingBytes: this.timerBytes + this.readyBytes + this.failedBytes - duplicateFailedBytes,
+      inFlight: this.emitting,
+    };
+  }
+
+  private resolveCapacityWaiters(ok: boolean): void {
+    if (this.capacityWaiters.length === 0) return;
+    const waiting = this.capacityWaiters;
+    this.capacityWaiters = [];
+    for (const waiter of waiting) {
+      if (waiter.generation !== this.generation) waiter.resolve(false);
+      else if (ok && this.hasPendingCapacity(waiter.bytes, waiter.relPath)) waiter.resolve(true);
+      else this.capacityWaiters.push(waiter);
+    }
+  }
+
+  private resolveDrainWaiters(ok: boolean): void {
+    if (this.drainWaiters.length === 0) return;
+    const waiting = this.drainWaiters;
+    this.drainWaiters = [];
+    for (const waiter of waiting) {
+      if (waiter.generation !== this.generation) waiter.resolve(false);
+      else if (!ok || (this.timers.size === 0 && this.ready.size === 0 && this.emitting === 0)) {
+        waiter.resolve(ok);
+      }
+      else this.drainWaiters.push(waiter);
+    }
+  }
+
+  private waitForCapacity(generation: number, bytes: number, relPath?: string): Promise<boolean> {
+    if (generation !== this.generation) return Promise.resolve(false);
+    if (bytes > this.maxPendingBytes) return Promise.resolve(false);
+    if (this.hasPendingCapacity(bytes, relPath)) return Promise.resolve(true);
+    return new Promise<boolean>((resolve) => this.capacityWaiters.push({ generation, relPath, bytes, resolve }));
+  }
+
+  private waitForDrain(generation: number): Promise<boolean> {
+    if (generation !== this.generation) return Promise.resolve(false);
+    if (this.timers.size === 0 && this.ready.size === 0 && this.emitting === 0) {
+      return Promise.resolve(true);
+    }
+    return new Promise<boolean>((resolve) => this.drainWaiters.push({ generation, resolve }));
+  }
+
+  private maybeStartReconcile(): void {
+    if (!this.overflowed || this.reconcileRunning || this.reconcileRetryTimer || this.timers.size !== 0 || this.ready.size !== 0 || this.emitting !== 0) return;
+    const generation = this.generation;
+    if (!this.watcher) this.armWatcher(generation, false);
+    this.reconcileRunning = true;
+    this.reconcileAttempts++;
+    // Native observation remains open while the scan overlaps it. Do not
+    // clear overflow until the post-scan quiet barrier proves the final
+    // state was observed.
+    void this.reconcile(generation)
+      .then((recovered) => {
         if (generation !== this.generation) return;
-        this.timers.delete(relPath);
-        void this.emit(relPath, generation).catch((err) => console.warn(`[watcher] change failed: ${(err as Error).message}`));
-      }, DEBOUNCE_MS),
-    );
+        if (recovered) {
+          this.overflowed = false;
+          this.watcherPaused = false;
+          this.clearReconcileJournal();
+          this.reconcileJournalOverflowed = false;
+          return;
+        }
+        this.overflowed = true;
+        this.scheduleReconcileRetry(generation);
+      })
+      .catch((error: unknown) => {
+        if (generation !== this.generation) return;
+        this.overflowed = true;
+        this.markUnhealthy();
+        console.warn(`[watcher] overflow reconciliation failed: ${error instanceof Error ? error.message : String(error)}`);
+        this.scheduleReconcileRetry(generation);
+      })
+      .finally(() => {
+        if (generation !== this.generation) return;
+        this.reconcileRunning = false;
+        this.resolveCapacityWaiters(true);
+        this.resolveDrainWaiters(true);
+        this.pumpEmitter();
+      });
+  }
+
+  private scheduleReconcileRetry(generation: number): void {
+    if (generation !== this.generation || this.reconcileRetryTimer) return;
+    const delay = Math.min(2000, 100 * Math.max(1, Math.min(this.reconcileAttempts, 20)));
+    this.reconcileRetryTimer = setTimeout(() => {
+      this.reconcileRetryTimer = null;
+      if (generation === this.generation) this.maybeStartReconcile();
+    }, delay);
+  }
+
+  /** Reconcile final filesystem state after an overflow without retaining a
+   *  second unbounded event list.  The ready emitter remains the sole fanout
+   *  path and waits for capacity between scan entries. */
+  private async reconcile(generation: number): Promise<boolean> {
+    // Three complete passes provide an overlap window even when a platform
+    // watcher coalesces or omits a notification. The native watcher remains
+    // open, and every notification during a pass is journaled by schedule().
+    const passCount = 3;
+    for (let pass = 0; pass < passCount; pass++) {
+      if (generation !== this.generation) return false;
+      const scanRevision = this.rawRevision;
+      this.clearReconcileJournal();
+      this.reconcileJournalOverflowed = false;
+      const observed = new Set<string>();
+      let observedLimitExceeded = false;
+      let scanAborted = false;
+      const walk = async (dir: string): Promise<void> => {
+        if (generation !== this.generation || scanAborted) return;
+        const entries = await this.readDirectory(dir, { withFileTypes: true });
+        for (const ent of entries) {
+          if (generation !== this.generation || scanAborted) return;
+          if (IGNORED_SEGMENTS.has(ent.name)) continue;
+          const full = join(dir, ent.name);
+          if (ent.isDirectory()) {
+            await walk(full);
+            continue;
+          }
+          if (!ent.isFile()) continue;
+          const relPath = relative(this.root, full);
+          if (!relPath || this.isIgnored(relPath)) continue;
+          this.reconciledPathCount++;
+          // Keep the deletion set bounded. Every final path still goes
+          // through the bounded emitter; above the cap we fail closed for
+          // deletion certification and retry instead of becoming unhealthy.
+          if (observed.size < 100_000) observed.add(relPath);
+          else observedLimitExceeded = true;
+          const bytes = this.pathBytes(relPath);
+          if (!(await this.waitForCapacity(generation, bytes, relPath))) {
+            scanAborted = true;
+            return;
+          }
+          if (!this.enqueueReady(relPath, generation, true)) {
+            scanAborted = true;
+            return;
+          }
+        }
+      };
+      await walk(this.root);
+      if (generation !== this.generation) return false;
+      // A path larger than the pending-byte budget (or a generation stop)
+      // must never turn an incomplete scan into a false healthy/idle result.
+      if (scanAborted) return false;
+      if (!observedLimitExceeded) {
+        for (const relPath of this.seen) {
+          if (observed.has(relPath)) continue;
+          const bytes = this.pathBytes(relPath);
+          if (!(await this.waitForCapacity(generation, bytes, relPath))) return false;
+          if (!this.enqueueReady(relPath, generation, true)) return false;
+        }
+      }
+      if (!(await this.waitForDrain(generation))) return false;
+      if (generation !== this.generation) return false;
+      if (observedLimitExceeded) {
+        return false;
+      }
+
+      // A scan is not a certification point until the native journal and a
+      // full debounce interval are both quiet. The follow-up passes are
+      // deliberate: they catch mutations made by an onChange callback after
+      // an earlier pass has read its directory but before its drain completes.
+      if (this.rawRevision !== scanRevision || this.reconcileJournal.size > 0 || this.reconcileJournalOverflowed) {
+        continue;
+      }
+      await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_MS));
+      if (generation !== this.generation) return false;
+      if (this.rawRevision !== scanRevision || this.reconcileJournal.size > 0 || this.reconcileJournalOverflowed) {
+        continue;
+      }
+      if (pass === passCount - 1) {
+        if (this.failedPaths.size > 0) return false;
+        if (!this.watcher) return false;
+        if (!this.healthy) this.markHealthy();
+        return true;
+      }
+    }
+    // Repeated activity during every bounded pass never certifies idle. Keep
+    // overflow asserted so the retry/backoff path remains observable.
+    return false;
   }
 
   private isIgnored(relPath: string): boolean {
@@ -177,7 +733,7 @@ export class ProjectWatcher {
     this.gitignoreRules.set(this.gitignoreDirKey(relPath), parseGitignore(source));
   }
 
-  private async emit(relPath: string, generation: number): Promise<void> {
+  private async emit(relPath: string, generation: number, reconcileOnly = false): Promise<void> {
     if (generation !== this.generation) return;
     const abs = this.root.endsWith(sep) ? this.root + relPath : `${this.root}${sep}${relPath}`;
 
@@ -185,13 +741,16 @@ export class ProjectWatcher {
     let st;
     try {
       st = await stat(abs);
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
       if (generation === this.generation && this.seen.has(relPath)) {
-        this.seen.delete(relPath);
-        if (relPath.split(sep).pop() === ".gitignore") {
-          this.gitignoreRules.delete(this.gitignoreDirKey(relPath));
-        }
         await this.onFileDeleted(abs);
+        if (generation === this.generation) {
+          this.seen.delete(relPath);
+          if (relPath.split(sep).pop() === ".gitignore") {
+            this.gitignoreRules.delete(this.gitignoreDirKey(relPath));
+          }
+        }
       }
       return;
     }
@@ -217,8 +776,8 @@ export class ProjectWatcher {
       // string: valid text can contain the replacement character.
       if (buf.includes(0)) return;
       content = buf.toString("utf8");
-    } catch {
-      return; // transient read error — leave as-is
+    } catch (error) {
+      throw error;
     }
     if (generation !== this.generation) return;
 
@@ -228,16 +787,22 @@ export class ProjectWatcher {
     if (baseName === ".gitignore") await this.loadGitignore(abs, relPath, generation);
     if (generation !== this.generation) return;
 
-    const status: "created" | "modified" = this.seen.has(relPath) ? "modified" : "created";
-    this.seen.add(relPath);
+    const wasSeen = this.seen.has(relPath);
+    const status: "created" | "modified" = wasSeen ? "modified" : "created";
     // Update the rolling content cache (evict oldest when over the limit).
     // Keys are canonicalized so lookups from anywhere in the app hit.
     const key = this.canonicalize ? await this.canonicalize(abs) : abs;
     const prev = this.lastContents.get(key); // pre-change content, for baselines
-    this.putCached(key, content);
+    // Reconciliation walks every final path, so an unchanged file must not
+    // fan out another editor/baseline notification.
+    if (reconcileOnly && wasSeen && prev === content) return;
     const change: FileChange = { path: abs, relPath, content, status, prev };
     await this.onChange(change);
     if (generation === this.generation) await this.onFileTouched(abs, status);
+    if (generation === this.generation) {
+      this.seen.add(relPath);
+      this.putCached(key, content);
+    }
   }
 
   /** Add one file version to the content cache and evict when over budget. */

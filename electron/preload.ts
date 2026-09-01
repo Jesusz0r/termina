@@ -1,7 +1,7 @@
 /**
  * Preload script: exposes the typed `window.pi` bridge to the renderer.
  */
-import { contextBridge, ipcRenderer, webUtils } from "electron";
+import { contextBridge, ipcRenderer as electronIpcRenderer, webUtils } from "electron";
 import type {
   MenuCommand,
   PiBridge,
@@ -15,25 +15,56 @@ import type {
   ExplorerEntry,
   RecorderState,
   VerifyInfo,
-  EvidenceSummary,
   TimelineEvent,
   TimelinePrefix,
   PlanPayload,
-  WorldlineSummary,
+  WorldlineUpdatePayload,
+  WorldlineRemovedPayload,
+  WorldlineEvidencePayload,
   AppPreferences,
   PreferenceUpdate,
   ShortcutMap,
   FolderOpenedPayload,
   AppUpdateState,
+  ProjectWorkspaceRef,
+  PtyDataPayload,
+  PtyExitPayload,
+  RendererIpcCapability,
 } from "../shared/types.js";
+
+// Main issues this capability synchronously for the exact main frame that is
+// running this preload. Keep it in the preload closure so renderer code cannot
+// substitute a nonce/generation from another document. Every invoke/send below
+// goes through the local facade, which appends this proof as an internal final
+// argument; the renderer never receives a way to mint or update it.
+const rendererCapability = electronIpcRenderer.sendSync("renderer:capability") as RendererIpcCapability | null;
+const ipcRenderer = {
+  invoke: (channel: string, ...args: unknown[]) => {
+    try {
+      return electronIpcRenderer.invoke(channel, ...args, rendererCapability);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  },
+  send: (channel: string, ...args: unknown[]) => {
+    try {
+      electronIpcRenderer.send(channel, ...args, rendererCapability);
+    } catch {
+      // A destroyed/replaced renderer cannot complete an IPC send. The main
+      // process owns replay for PTY output; generic state pushes are safely
+      // dropped at this document boundary.
+    }
+  },
+  on: electronIpcRenderer.on.bind(electronIpcRenderer),
+};
 
 const bridge: PiBridge = {
   // ---- push events ----
   onPtyData: (cb) => {
-    ipcRenderer.on("pty:data", (_e, p: { id: string; data: string }) => cb(p));
+    ipcRenderer.on("pty:data", (_e, p: PtyDataPayload) => cb(p));
   },
   onPtyExit: (cb) => {
-    ipcRenderer.on("pty:exit", (_e, p: { id: string; code: number }) => cb(p));
+    ipcRenderer.on("pty:exit", (_e, p: PtyExitPayload) => cb(p));
   },
   onMenuCommand: (cb) => {
     ipcRenderer.on("menu:command", (_e, cmd: { command: MenuCommand }) => cb(cmd));
@@ -78,7 +109,7 @@ const bridge: PiBridge = {
     ipcRenderer.on("folder:opened", (_e, e: FolderOpenedPayload) => cb(e));
   },
   onFlushRequest: (cb) => {
-    ipcRenderer.on("editor:flush-request", (_e, p: { requestId: string; writerId: string }) => cb(p));
+    ipcRenderer.on("editor:flush-request", (_e, p: { requestId: string; writerId: string; projectId: string; workspaceId: string }) => cb(p));
   },
   onUpdateState: (cb) => {
     ipcRenderer.on("update:state", (_e, state: AppUpdateState) => cb(state));
@@ -91,7 +122,9 @@ const bridge: PiBridge = {
   createTerminal: (opts) => ipcRenderer.invoke("terminals:create", opts),
   getShells: () => ipcRenderer.invoke("terminals:shells"),
   getPiStatus: () => ipcRenderer.invoke("app:pi-status"),
-  closeTerminal: (id) => ipcRenderer.invoke("terminals:close", id),
+  readyTerminal: (id, generation) => ipcRenderer.send("pty:ready", id, generation),
+  acknowledgePtyData: (payload) => ipcRenderer.send("pty:ack", payload),
+  closeTerminal: (id, generation) => ipcRenderer.invoke("terminals:close", id, generation),
   writeTerminal: (id, data) => ipcRenderer.invoke("terminals:write", id, data),
   resizeTerminal: (id, cols, rows) => ipcRenderer.invoke("terminals:resize", id, cols, rows),
   getInstances: (): Promise<InstanceSummary[]> => ipcRenderer.invoke("terminals:list"),
@@ -128,8 +161,8 @@ const bridge: PiBridge = {
   getRuns: (terminalId) => ipcRenderer.invoke("worldline:runs", terminalId),
   exportState: (runId, kind) => ipcRenderer.invoke("worldline:export-state", runId, kind),
   reportFlush: (requestId, result) => ipcRenderer.invoke("editor:flush-report", requestId, result),
-  flushSave: (path, content, writerId) => ipcRenderer.invoke("file:flush-save", path, content, writerId),
-  getWorldlines: () => ipcRenderer.invoke("worldline:list"),
+  flushSave: (path, content, writerId, owner: ProjectWorkspaceRef) => ipcRenderer.invoke("file:flush-save", path, content, writerId, owner),
+  getWorldlines: (projectId) => ipcRenderer.invoke("worldline:list", projectId),
   getWorldlineDetails: (comparisonId, label) => ipcRenderer.invoke("worldline:details", comparisonId, label),
   getWorldlineFile: (comparisonId, label, relPath) => ipcRenderer.invoke("worldline:file", comparisonId, label, relPath),
   getWorldlineBaseFile: (comparisonId, relPath) => ipcRenderer.invoke("worldline:base-file", comparisonId, relPath),
@@ -143,23 +176,23 @@ const bridge: PiBridge = {
   runEvidence: (comparisonId) => ipcRenderer.invoke("worldline:evidence", comparisonId),
   promoteWorldline: (comparisonId, label, force) => ipcRenderer.invoke("worldline:promote", comparisonId, label, force),
   onWorldlineUpdate: (cb) => {
-    ipcRenderer.on("worldline:update", (_e, summary: WorldlineSummary) => cb(summary));
+    ipcRenderer.on("worldline:update", (_e, event: WorldlineUpdatePayload) => cb(event));
   },
   onWorldlineRemoved: (cb) => {
-    ipcRenderer.on("worldline:removed", (_e, e: { comparisonId: string }) => cb(e));
+    ipcRenderer.on("worldline:removed", (_e, event: WorldlineRemovedPayload) => cb(event));
   },
   onWorldlineRunsChanged: (cb) => {
     ipcRenderer.on("worldline:runs-changed", (_e, e: { terminalId: string }) => cb(e));
   },
   onEvidenceUpdate: (cb) => {
-    ipcRenderer.on("worldline:evidence-update", (_e, e: EvidenceSummary) => cb(e));
+    ipcRenderer.on("worldline:evidence-update", (_e, event: WorldlineEvidencePayload) => cb(event));
   },
   onPromotionOpened: (cb) => {
     ipcRenderer.on("promotion:opened", (_e, e: { terminalId: string }) => cb(e));
   },
   dispatchRun: (terminalId, taskText) => ipcRenderer.invoke("dispatch:run", terminalId, taskText),
-  setMineFile: (path, mine) => ipcRenderer.invoke("mine:set", path, mine),
-  getMineFiles: () => ipcRenderer.invoke("mine:list"),
+  setMineFile: (path, mine, owner: ProjectWorkspaceRef) => ipcRenderer.invoke("mine:set", path, mine, owner),
+  getMineFiles: (owner: ProjectWorkspaceRef) => ipcRenderer.invoke("mine:list", owner),
   getTimelineContent: (terminalId, seq) => ipcRenderer.invoke("timeline:content", terminalId, seq),
   clearModified: (terminalId) => ipcRenderer.invoke("modified:clear", terminalId),
   reviewBaseline: (terminalId, path) => ipcRenderer.invoke("review:baseline", terminalId, path),
@@ -170,22 +203,25 @@ const bridge: PiBridge = {
   projectOpen: () => ipcRenderer.invoke("project:open"),
   projectOpenPath: (cwd) => ipcRenderer.invoke("project:open-path", cwd),
   onProjectClosed: (cb) => {
-    ipcRenderer.on("project:closed", (_e, p: { projectId: string }) => cb(p));
+    ipcRenderer.on("project:closed", (_e, p: { projectId: string; activationGeneration: number }) => cb(p));
   },
   projectActivate: (projectId) => ipcRenderer.invoke("project:activate", projectId),
   projectClose: (projectId) => ipcRenderer.invoke("project:close", projectId),
-  openFile: (path) => ipcRenderer.invoke("file:open", path),
-  saveFile: (path, content) => ipcRenderer.invoke("file:save", path, content),
+  openFile: (path, owner: ProjectWorkspaceRef) => ipcRenderer.invoke("file:open", path, owner),
+  saveFile: (path, content, owner: ProjectWorkspaceRef) => ipcRenderer.invoke("file:save", path, content, owner),
 
   // ---- file explorer ----
-  listDir: (absPath): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }> => ipcRenderer.invoke("explorer:list-dir", absPath),
-  createEntry: (relPath, kind) => ipcRenderer.invoke("explorer:create", relPath, kind),
-  renameEntry: (relPath, newName) => ipcRenderer.invoke("explorer:rename", relPath, newName),
-  deleteEntry: (relPath) => ipcRenderer.invoke("explorer:delete", relPath),
-  pasteEntry: (targetDirRel, srcRel, move) => ipcRenderer.invoke("explorer:paste", targetDirRel, srcRel, move),
+  listDir: (projectId, absPath): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }> => ipcRenderer.invoke("explorer:list-dir", projectId, absPath),
+  createEntry: (projectId, relPath, kind) => ipcRenderer.invoke("explorer:create", projectId, relPath, kind),
+  renameEntry: (projectId, relPath, newName) => ipcRenderer.invoke("explorer:rename", projectId, relPath, newName),
+  deleteEntry: (projectId, relPath) => ipcRenderer.invoke("explorer:delete", projectId, relPath),
+  pasteEntry: (projectId, targetDirRel, srcRel, move) => ipcRenderer.invoke("explorer:paste", projectId, targetDirRel, srcRel, move),
   getUpdateState: (): Promise<AppUpdateState> => ipcRenderer.invoke("update:get"),
   checkUpdate: (): Promise<AppUpdateState> => ipcRenderer.invoke("update:check"),
   installUpdate: () => ipcRenderer.invoke("update:install"),
 };
 
-contextBridge.exposeInMainWorld("pi", bridge);
+// A foreign or stale document may still execute this preload during a
+// navigation race, but it must not receive even a callable bridge surface.
+// Main has already failed closed by returning no capability for that frame.
+if (rendererCapability) contextBridge.exposeInMainWorld("pi", bridge);
