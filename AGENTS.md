@@ -84,5 +84,5 @@ Run = one agent session (`agent_start` → `agent_settled`). Sidecar = JSONL per
 ## Conventions & verification
 
 - IPC `area:action` (`verify:run`, `timeline:get`), terminals `term-N`, commits `termina <dev@termina.local>`, tags `v<version>`.
-- `npm run dev` · `npx tsc --noEmit` · `node scripts/build.mjs` · e2e on port 9222 (fresh instance, `pkill -f scripts/dev.mjs; pkill -9 -f electron; pkill -f vite`). Keep suites green.
+- `npm run dev` · `npx tsc --noEmit` · `node scripts/build.mjs` · `npm run test:e2e`. Each E2E invocation owns a fresh run root for fixtures, events, worlds, Electron user data, and a HOME with its own `.pi/agent` tree; the host `~/.pi/agent` tree is not used or modified. Electron requests an OS-assigned loopback DevTools port, and the runner discovers it only through that profile's `DevToolsActivePort`. The runner terminates and waits for its own build, Electron, and suite children; cleanup stays scoped to resources created by that invocation. Keep suites green.
 - Gotchas: `@lydell/node-pty` external; cargo needed for `core/`; packaged app ships its own `node` (`cleanEnv` prepends `resourcesPath/node/bin`); macOS paths canonical (`/tmp` → `/private/tmp`); events dir is `app.getPath("temp")/termina-events`; bridge is app-owned in user-data dir.
