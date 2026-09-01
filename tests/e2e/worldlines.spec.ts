@@ -31,7 +31,7 @@ test.describe("Worldlines IPC & State Management E2E", () => {
   test("rejects invalid worldline actions gracefully", async ({ page }) => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
 
-    // Calling forkRun with a nonexistent run ID must return ok: false or error
+    // Calling forkRun with a nonexistent run ID must return ok: false or fail safely
     const forkResult = await page.evaluate(async () => {
       try {
         return await (window as any).pi.forkRun("nonexistent-run-id");
@@ -39,7 +39,6 @@ test.describe("Worldlines IPC & State Management E2E", () => {
         return { ok: false, error: err.message };
       }
     });
-
     expect(forkResult.ok).toBe(false);
 
     // Calling discardWorldline with a nonexistent comparison ID must return ok: false or fail safely
@@ -50,7 +49,70 @@ test.describe("Worldlines IPC & State Management E2E", () => {
         return { ok: false, error: err.message };
       }
     });
-
     expect(discardResult.ok).toBe(false);
+
+    // Calling cancelWorldline with a nonexistent comparison ID
+    const cancelResult = await page.evaluate(async () => {
+      try {
+        return await (window as any).pi.cancelWorldline("nonexistent-comparison");
+      } catch (err: any) {
+        return { ok: false, error: err.message };
+      }
+    });
+    expect(cancelResult.ok).toBe(false);
+
+    // Calling forkPoint with invalid sequence
+    const forkPointResult = await page.evaluate(async () => {
+      try {
+        return await (window as any).pi.forkPoint("term-1", 999999);
+      } catch (err: any) {
+        return { ok: false, error: err.message };
+      }
+    });
+    expect(forkPointResult.ok).toBe(false);
+
+    // Calling promoteWorldline on invalid comparison
+    const promoteResult = await page.evaluate(async () => {
+      try {
+        return await (window as any).pi.promoteWorldline("nonexistent-comparison", "A", false);
+      } catch (err: any) {
+        return { ok: false, error: err.message };
+      }
+    });
+    expect(promoteResult.ok).toBe(false);
+  });
+
+  test("handles candidate details and base file queries safely", async ({ page }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+
+    // Querying non-existent details returns { ok: false } or null without crashing
+    const details = await page.evaluate(async () => {
+      try {
+        return await (window as any).pi.getWorldlineDetails("nonexistent-comparison", "A");
+      } catch (err: any) {
+        return { ok: false, error: err.message };
+      }
+    });
+    expect(details === null || details.ok === false).toBe(true);
+
+    // Querying non-existent file
+    const fileContent = await page.evaluate(async () => {
+      try {
+        return await (window as any).pi.getWorldlineFile("nonexistent-comparison", "A", "test.txt");
+      } catch (err: any) {
+        return { ok: false, error: err.message };
+      }
+    });
+    expect(fileContent === null || fileContent.ok === false).toBe(true);
+
+    // Querying non-existent base file
+    const baseContent = await page.evaluate(async () => {
+      try {
+        return await (window as any).pi.getWorldlineBaseFile("nonexistent-comparison", "test.txt");
+      } catch (err: any) {
+        return { ok: false, error: err.message };
+      }
+    });
+    expect(baseContent === null || baseContent.ok === false).toBe(true);
   });
 });

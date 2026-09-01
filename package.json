@@ -52,7 +52,6 @@
     "test:release": "npm run test && npm run test:release-core && npm run test:agent-core-main && npm run test:release-workflow",
     "test": "npm run typecheck && npm run test:unit && npm run test:e2e",
     "test:spikes": "npm run spike -- capture && npm run spike -- merge && npm run spike -- session-fork && npm run spike -- platform && npm run spike -- tree-delta && npm run spike -- gitignore && npm run spike -- terminal-roster && npm run spike -- core-session-promotion && npm run spike -- promotion-transaction && npm run spike -- watcher-idle && npm run test:promotion-native-boundary",
-    "test:loop": "node scripts/tui-loop-test.mjs",
     "test:e2e": "playwright test",
     "test:e2e:watch": "playwright test --ui",
     "spike": "node scripts/spike.mjs",

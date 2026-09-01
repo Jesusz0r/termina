@@ -121,15 +121,14 @@ export const test = base.extend<TerminaE2EFixtures>({
   page: async ({ electronApp }, use) => {
     let page = electronApp.windows()[0];
     if (!page) {
-      const deadline = Date.now() + 10_000;
-      while (!page && Date.now() < deadline) {
+      try {
+        page = await electronApp.firstWindow({ timeout: 30_000 });
+      } catch {
         page = electronApp.windows()[0];
-        if (page) break;
-        await new Promise((r) => setTimeout(r, 50));
       }
     }
     if (!page) {
-      page = await electronApp.firstWindow({ timeout: 15_000 });
+      throw new Error("Electron window was not created within deadline");
     }
     await page.waitForLoadState("domcontentloaded");
     await use(page);
