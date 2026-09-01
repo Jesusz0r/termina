@@ -1,7 +1,7 @@
 /**
  * Phase 3 e2e: Fork Run pair creation.
  *
- * Expects Electron on :9222 with:
+ * Expects Electron on TERMINA_E2E_PORT with:
  *   TERMINA_INITIAL_CWD=<Git repo with greeting.ts "hello">
  *   TERMINA_EVENTS_DIR=<clean dedicated dir>
  *   TERMINA_WORLDS_DIR=<clean dedicated worlds root>
@@ -23,8 +23,9 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { realpathSync } from "node:fs";
 import { waitFor as waitUntil } from "./wait-for.mjs";
+import { e2ePort } from "./e2e-port.mjs";
 
-const port = 9222;
+const port = e2ePort();
 const results = [];
 const check = (name, ok, detail = "") => {
   results.push({ name, ok });
@@ -59,6 +60,7 @@ const evalJs = async (expr) => {
   return r.result?.result?.value;
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const getWorldlines = () => evalJs(`window.pi.projectList().then((projects) => window.pi.getWorldlines(projects.find((project) => project.active)?.id ?? ""))`);
 
 const PROJ = process.env.TERMINA_INITIAL_CWD ?? "/tmp/termina-wline-project";
 const EVENTS = process.env.TERMINA_EVENTS_DIR ?? "/tmp/termina-wline-events";
@@ -94,7 +96,7 @@ const comparisonId = fork.comparisonId;
 
 // Both candidates become ready through the bridge session_ready events.
 const ready = await waitFor(async () => {
-  const list = (await evalJs(`window.pi.getWorldlines()`)) ?? [];
+  const list = (await getWorldlines()) ?? [];
   if (list.some((w) => w.comparisonId === comparisonId && w.state === "error")) {
     return { error: list.find((w) => w.comparisonId === comparisonId && w.state === "error")?.error ?? "error" };
   }
@@ -186,7 +188,7 @@ const disc = await evalJs(`window.pi.discardWorldline(${JSON.stringify(compariso
 check("discard ok", disc?.ok === true, JSON.stringify(disc));
 await sleep(1500);
 check("comparison dir removed", !existsSync(join(WORLDS, comparisonId)));
-const listAfter = await evalJs(`window.pi.getWorldlines()`);
+const listAfter = await getWorldlines();
 const oursLeft = (listAfter ?? []).filter((w) => w.comparisonId === comparisonId);
 check("worldline list is empty", oursLeft.length === 0, JSON.stringify(oursLeft));
 

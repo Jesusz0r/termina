@@ -1,7 +1,7 @@
 /**
  * Phase 4 e2e: comparison and Verify for Fork Run candidates.
  *
- * Expects Electron on :9222 with:
+ * Expects Electron on TERMINA_E2E_PORT with:
  *   TERMINA_INITIAL_CWD=<Git repo with greeting.ts "hello", package.json
  *     with a test script, and test.js that requires "hi there">
  *   TERMINA_EVENTS_DIR=<clean dedicated dir>
@@ -22,8 +22,9 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { realpathSync } from "node:fs";
 import { waitFor as waitUntil } from "./wait-for.mjs";
+import { e2ePort } from "./e2e-port.mjs";
 
-const port = 9222;
+const port = e2ePort();
 const results = [];
 const check = (name, ok, detail = "") => {
   results.push({ name, ok });
@@ -58,6 +59,7 @@ const evalJs = async (expr) => {
   return r.result?.result?.value;
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const getWorldlines = () => evalJs(`window.pi.projectList().then((projects) => window.pi.getWorldlines(projects.find((project) => project.active)?.id ?? ""))`);
 
 const PROJ = process.env.TERMINA_INITIAL_CWD ?? "/tmp/termina-wline2-project";
 const EVENTS = process.env.TERMINA_EVENTS_DIR ?? "/tmp/termina-wline2-events";
@@ -106,7 +108,7 @@ const btn = await waitFor(async () => {
 check("Fork Run button enabled with the run", btn !== null, JSON.stringify(btn));
 await evalJs(`document.getElementById('btn-fork-run').click()`);
 const comparisonId = await waitFor(async () => {
-  const list = (await evalJs(`window.pi.getWorldlines()`)) ?? [];
+  const list = (await getWorldlines()) ?? [];
   // Match the pair to the run just forked: a stale pair left by a crashed
   // prior run must not hijack the suite.
   const pair = list.filter((w) => w.sourceRunId === run.id);
@@ -118,7 +120,7 @@ if (!comparisonId) process.exit(1);
 
 // --------------------------------------------------- candidates become ready
 const ready = await waitFor(async () => {
-  const list = (await evalJs(`window.pi.getWorldlines()`)) ?? [];
+  const list = (await getWorldlines()) ?? [];
   if (list.some((w) => w.comparisonId === comparisonId && w.state === "error")) {
     return { error: list.find((w) => w.comparisonId === comparisonId && w.state === "error")?.error ?? "error" };
   }
@@ -218,7 +220,7 @@ check("no verify artifacts in the primary", !existsSync(join(PROJ, "test-output.
 const disc = await evalJs(`window.pi.discardWorldline(${JSON.stringify(comparisonId)})`);
 check("discard ok", disc?.ok === true, JSON.stringify(disc));
 await sleep(1500);
-const listAfter = await evalJs(`window.pi.getWorldlines()`);
+const listAfter = await getWorldlines();
 check("worldline list is empty after discard", (listAfter ?? []).filter((w) => w.comparisonId === comparisonId).length === 0, JSON.stringify(listAfter));
 
 const passed = results.filter((r) => r.ok).length;

@@ -1,7 +1,7 @@
 /**
  * Phase 8 e2e: candidate isolation (WORLDLINES §10 worldline-isolation-test).
  *
- * Expects Electron on :9222 with:
+ * Expects Electron on TERMINA_E2E_PORT with:
  *   TERMINA_INITIAL_CWD=<Git repo: greeting.ts "hello", hello.txt "first">
  *   TERMINA_EVENTS_DIR=<clean dedicated dir>
  *   TERMINA_WORLDS_DIR=<clean dedicated worlds root>
@@ -24,8 +24,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { realpathSync } from "node:fs";
 import { waitFor as waitUntil } from "./wait-for.mjs";
+import { e2ePort } from "./e2e-port.mjs";
 
-const port = 9222;
+const port = e2ePort();
 const results = [];
 const check = (name, ok, detail = "") => {
   results.push({ name, ok });
@@ -60,6 +61,7 @@ const evalJs = async (expr) => {
   return r.result?.result?.value;
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const getWorldlines = () => evalJs(`window.pi.projectList().then((projects) => window.pi.getWorldlines(projects.find((project) => project.active)?.id ?? ""))`);
 
 const PROJ = process.env.TERMINA_INITIAL_CWD ?? "/tmp/termina-wline7-project";
 const WORLDS = process.env.TERMINA_WORLDS_DIR ?? "/tmp/termina-wline7-worlds";
@@ -98,7 +100,7 @@ check("fork-run starts", fork?.ok === true, JSON.stringify(fork));
 if (!fork?.ok) process.exit(1);
 const comparisonId = fork.comparisonId;
 const ready = await waitFor(async () => {
-  const list = (await evalJs(`window.pi.getWorldlines()`)) ?? [];
+  const list = (await getWorldlines()) ?? [];
   const pair = list.filter((w) => w.comparisonId === comparisonId);
   if (pair.length === 2 && pair.every((w) => w.state === "ready")) return { pair };
   return null;
@@ -165,7 +167,7 @@ check("nested fork-point starts", nestedFork?.ok === true, JSON.stringify(nested
 if (!nestedFork?.ok) process.exit(1);
 const ncmp = nestedFork.comparisonId;
 const nested = await waitFor(async () => {
-  const list = (await evalJs(`window.pi.getWorldlines()`)) ?? [];
+  const list = (await getWorldlines()) ?? [];
   const w = list.find((x) => x.comparisonId === ncmp);
   return w && w.state === "ready" ? w : null;
 }, 180000);

@@ -46,8 +46,24 @@ const request = (op, params) => {
   });
 };
 const storeDir = join(dir, "store");
-await request("store-create", { storeDir, sourceGitDir: join(fixture, ".git"), objectFormat: "sha1" });
-let parent = (await request("capture", { storeDir, sourceRoot: fixture, head: execFileSync("git", ["rev-parse", "HEAD"], { cwd: fixture, encoding: "utf8" }).trim(), objectFormat: "sha1" })).state.commit;
+const created = await request("store-create", { storeDir, sourceGitDir: join(fixture, ".git"), objectFormat: "sha1" });
+const storeRequest = (op, params = {}) => request(op, {
+  ...params,
+  storeDir,
+  sourceRoot: fixture,
+  sourceGitDir: join(fixture, ".git"),
+  objectFormat: "sha1",
+  storeGeneration: created.storeGeneration,
+  storeIdentity: created.storeIdentity,
+  storeGitIdentity: created.storeGitIdentity,
+  storeGitObjectsIdentity: created.storeGitObjectsIdentity,
+  storeGitObjectsInfoIdentity: created.storeGitObjectsInfoIdentity,
+  storeGitObjectsPackIdentity: created.storeGitObjectsPackIdentity,
+  storeGitRefsIdentity: created.storeGitRefsIdentity,
+  storeGitRefsHeadsIdentity: created.storeGitRefsHeadsIdentity,
+  storeGitRefsTagsIdentity: created.storeGitRefsTagsIdentity,
+});
+let parent = (await storeRequest("capture", { head: execFileSync("git", ["rev-parse", "HEAD"], { cwd: fixture, encoding: "utf8" }).trim() })).state.commit;
 
 async function timedInc(hintCount) {
   const t0 = performance.now();
@@ -58,7 +74,7 @@ async function timedInc(hintCount) {
       hints.push(`file-${k}.ts`);
     }
   }
-  const res = await request("capture-incremental", { storeDir, sourceRoot: fixture, parentCommit: parent, hints, objectFormat: "sha1" });
+  const res = await storeRequest("capture-incremental", { parentCommit: parent, hints });
   parent = res.state.commit;
   return performance.now() - t0;
 }

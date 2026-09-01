@@ -4,7 +4,7 @@
  * Launch requirement:
  *   TERMINA_EVENTS_DIR=/tmp/termina-events-test
  *   TERMINA_INITIAL_CWD=<fresh fixture: greeting.ts "hello", hello.txt, src/>
- *   --remote-debugging-port=9222
+ *   TERMINA_E2E_PORT=<runner-assigned DevTools port>
  *
  * Steps:
  *   1. A user edit while idle writes the edits-<id>.md context file with
@@ -14,10 +14,11 @@
  *   3. The run consumes the context: the file is cleared after settle.
  *   4. A user edit DURING a busy run is not recorded (no file after settle).
  */
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { e2ePort } from "./e2e-port.mjs";
 
 const results = [];
 const check = (name, ok, detail = "") => {
@@ -27,15 +28,26 @@ const check = (name, ok, detail = "") => {
 
 const eventsDir = process.env.TERMINA_EVENTS_DIR ?? "/tmp/termina-events-test";
 const editsFile = join(eventsDir, "edits-term-1.md");
-const greeting = "/tmp/termina-test-project/greeting.ts";
+const projectRoot = process.env.TERMINA_INITIAL_CWD;
+if (!projectRoot) throw new Error("TERMINA_INITIAL_CWD is required");
+const greeting = join(projectRoot, "greeting.ts");
+const sessionSlug = `--${realpathSync(projectRoot).replace(/^[/\\]+/, "").replace(/[/\\]+$/, "").replace(/[/\\:]/g, "-")}--`;
+const sessionDir = join(homedir(), ".pi", "agent", "sessions", sessionSlug);
+const latestSessionFile = () => {
+  if (!existsSync(sessionDir)) return "";
+  return readdirSync(sessionDir)
+    .filter((name) => name.endsWith(".jsonl"))
+    .map((name) => join(sessionDir, name))
+    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0] ?? "";
+};
 // The fixture project gains a test script whose run writes a file (test
 // output). The write must NOT be recorded as a user edit.
 writeFileSync(
-  "/tmp/termina-test-project/package.json",
+  join(projectRoot, "package.json"),
   JSON.stringify({ name: "edits-fixture", scripts: { test: "node -e \"require('fs').writeFileSync('from-test.txt','x');setTimeout(()=>{},5000)\"" } }),
 );
 
-const pages = await fetch("http://127.0.0.1:9222/json").then((r) => r.json());
+const pages = await fetch(`http://127.0.0.1:${e2ePort()}/json`).then((r) => r.json());
 const page = pages.find((t) => t.type === "page");
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
@@ -94,8 +106,7 @@ check(
 
 // ---- 2. the agent receives the context ----
 await promptAgent("Read greeting.ts and report what it says.");
-const sessionDir = execSync(`ls -td ${process.env.HOME}/.pi/agent/sessions/--private-tmp-termina-test-project--/ 2>/dev/null | head -1`).toString().trim();
-const sessionFile = execSync(`ls -t "${sessionDir}"*.jsonl 2>/dev/null | head -1`).toString().trim();
+const sessionFile = latestSessionFile();
 const session = sessionFile ? readFileSync(sessionFile, "utf8") : "";
 check("session record contains the injected edits context", session.includes("Your edits") && session.includes("greeting.ts"), session.slice(0, 80));
 
@@ -122,7 +133,7 @@ let sequence = 0;
 const emit = (event) => appendFileSync(sidecar, JSON.stringify({ bridgeId, seq: ++sequence, ...event }) + "\n");
 emit({ t: "agent_start" });
 await sleep(600);
-writeFileSync("/tmp/termina-test-project/hello.txt", "user edit mid-run\n");
+writeFileSync(join(projectRoot, "hello.txt"), "user edit mid-run\n");
 await sleep(1200); // watcher debounce + edit debounce + context write
 emit({ t: "agent_settled" });
 await sleep(600);

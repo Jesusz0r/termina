@@ -70,25 +70,42 @@ const timeOp = async (label, fn) => {
 };
 
 // store create
-await request("store-create", { storeDir: join(dir, "store"), sourceGitDir: join(fixture, ".git"), objectFormat: "sha1" });
+const storeDir = join(dir, "store");
+const created = await request("store-create", { storeDir, sourceGitDir: join(fixture, ".git"), objectFormat: "sha1" });
+const storeRequest = (op, params = {}) => request(op, {
+  ...params,
+  storeDir,
+  sourceRoot: fixture,
+  sourceGitDir: join(fixture, ".git"),
+  objectFormat: "sha1",
+  storeGeneration: created.storeGeneration,
+  storeIdentity: created.storeIdentity,
+  storeGitIdentity: created.storeGitIdentity,
+  storeGitObjectsIdentity: created.storeGitObjectsIdentity,
+  storeGitObjectsInfoIdentity: created.storeGitObjectsInfoIdentity,
+  storeGitObjectsPackIdentity: created.storeGitObjectsPackIdentity,
+  storeGitRefsIdentity: created.storeGitRefsIdentity,
+  storeGitRefsHeadsIdentity: created.storeGitRefsHeadsIdentity,
+  storeGitRefsTagsIdentity: created.storeGitRefsTagsIdentity,
+});
 console.log("store created");
 
 // Baseline: a full capture round trip.
 await timeOp("full capture first-pass", () =>
-  request("capture", { storeDir: join(dir, "store"), sourceRoot: fixture, head, objectFormat: "sha1" }));
+  storeRequest("capture", { head }));
 
 // Warm full capture.
 await timeOp("full capture (stat-cache)", () =>
-  request("capture", { storeDir: join(dir, "store"), sourceRoot: fixture, head, objectFormat: "sha1" }));
+  storeRequest("capture", { head }));
 
 // Chain incrementals.
-let state = await request("capture", { storeDir: join(dir, "store"), sourceRoot: fixture, head, objectFormat: "sha1" });
+let state = await storeRequest("capture", { head });
 let parent = state.state.commit;
 const incTime = async () => {
   for (let k = 0; k < 10; k++) writeFileSync(join(fixture, `file-${k}.ts`), `export const v${k} = ${Math.random()};\n`);
   const hints = Array.from({ length: 10 }, (_, k) => `file-${k}.ts`);
   const t0 = performance.now();
-  const res = await request("capture-incremental", { storeDir: join(dir, "store"), sourceRoot: fixture, parentCommit: parent, hints, objectFormat: "sha1" });
+  const res = await storeRequest("capture-incremental", { parentCommit: parent, hints });
   const dt = performance.now() - t0;
   parent = res.state.commit;
   return dt;

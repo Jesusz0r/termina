@@ -1,7 +1,7 @@
 /**
  * Phase 6 e2e: Fork Any Moment.
  *
- * Expects Electron on :9222 with:
+ * Expects Electron on TERMINA_E2E_PORT with:
  *   TERMINA_INITIAL_CWD=<Git repo: greeting.ts "hello", hello.txt "first">
  *   TERMINA_EVENTS_DIR=<clean dedicated dir>
  *   TERMINA_WORLDS_DIR=<clean dedicated worlds root>
@@ -24,8 +24,9 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { waitFor as waitUntil } from "./wait-for.mjs";
+import { e2ePort } from "./e2e-port.mjs";
 
-const port = 9222;
+const port = e2ePort();
 const results = [];
 const check = (name, ok, detail = "") => {
   results.push({ name, ok });
@@ -60,6 +61,7 @@ const evalJs = async (expr) => {
   return r.result?.result?.value;
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const getWorldlines = () => evalJs(`window.pi.projectList().then((projects) => window.pi.getWorldlines(projects.find((project) => project.active)?.id ?? ""))`);
 
 const PROJ = process.env.TERMINA_INITIAL_CWD ?? "/tmp/termina-wline5-project";
 const WORLDS = process.env.TERMINA_WORLDS_DIR ?? "/tmp/termina-wline5-worlds";
@@ -128,7 +130,7 @@ check("fork at the greeting moment starts", fork1?.ok === true, JSON.stringify(f
 if (!fork1?.ok) process.exit(1);
 const cmp1 = fork1.comparisonId;
 const moment1 = await waitFor(async () => {
-  const list = (await evalJs(`window.pi.getWorldlines()`)) ?? [];
+  const list = (await getWorldlines()) ?? [];
   const w = list.find((x) => x.comparisonId === cmp1 && x.role === "moment");
   return w && w.state === "ready" ? w : null;
 }, 180000);
@@ -147,7 +149,7 @@ check("fork at the hello moment starts", fork2?.ok === true, JSON.stringify(fork
 if (!fork2?.ok) process.exit(1);
 const cmp2 = fork2.comparisonId;
 const moment2 = await waitFor(async () => {
-  const list = (await evalJs(`window.pi.getWorldlines()`)) ?? [];
+  const list = (await getWorldlines()) ?? [];
   const w = list.find((x) => x.comparisonId === cmp2 && x.role === "moment");
   return w && w.state === "ready" ? w : null;
 }, 180000);
@@ -167,7 +169,7 @@ const d1 = await evalJs(`window.pi.discardWorldline(${JSON.stringify(cmp1)})`);
 const d2 = await evalJs(`window.pi.discardWorldline(${JSON.stringify(cmp2)})`);
 check("discards ok", d1?.ok === true && d2?.ok === true, JSON.stringify({ d1, d2 }));
 await sleep(1500);
-const left = await evalJs(`window.pi.getWorldlines()`);
+const left = await getWorldlines();
 check("no moment candidates remain", (left ?? []).filter((w) => w.role === "moment").length === 0, JSON.stringify(left));
 
 // The primary repo is untouched (only the two agent runs' edits).

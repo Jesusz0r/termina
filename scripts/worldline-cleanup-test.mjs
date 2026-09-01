@@ -1,7 +1,7 @@
 /**
  * Phase 9 e2e: cleanup and lifecycle (WORLDLINES §10 worldline-cleanup-test).
  *
- * Expects Electron on :9222 with:
+ * Expects Electron on TERMINA_E2E_PORT with:
  *   TERMINA_INITIAL_CWD=<Git repo: greeting.ts "hello">
  *   TERMINA_EVENTS_DIR=<clean dedicated dir>
  *   TERMINA_WORLDS_DIR=<worlds root pre-seeded by the launcher with:
@@ -20,8 +20,9 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { waitFor as waitUntil } from "./wait-for.mjs";
+import { e2ePort } from "./e2e-port.mjs";
 
-const port = 9222;
+const port = e2ePort();
 const results = [];
 const check = (name, ok, detail = "") => {
   results.push({ name, ok });
@@ -56,6 +57,7 @@ const evalJs = async (expr) => {
   return r.result?.result?.value;
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const getWorldlines = () => evalJs(`window.pi.projectList().then((projects) => window.pi.getWorldlines(projects.find((project) => project.active)?.id ?? ""))`);
 
 const PROJ = process.env.TERMINA_INITIAL_CWD ?? "/tmp/termina-wline11-project";
 const WORLDS = process.env.TERMINA_WORLDS_DIR ?? "/tmp/termina-wline11-worlds";
@@ -96,7 +98,7 @@ const cancel = await evalJs(`window.pi.cancelWorldline(${JSON.stringify(comparis
 check("cancelling pair creation removes the comparison", cancel?.ok === true, JSON.stringify(cancel));
 await sleep(1500);
 check("the comparison dir is gone", !existsSync(join(WORLDS, comparisonId)), "");
-const left1 = await evalJs(`window.pi.getWorldlines()`);
+const left1 = await getWorldlines();
 check("the worldline list is empty after cancel", (left1 ?? []).filter((w) => w.comparisonId === comparisonId).length === 0, JSON.stringify(left1));
 
 // ------------------------------------------------- close without discard ----
@@ -105,7 +107,7 @@ check("second fork starts", fork2?.ok === true, JSON.stringify(fork2));
 if (!fork2?.ok) process.exit(1);
 const comparisonId2 = fork2.comparisonId;
 const ready = await waitFor(async () => {
-  const list = (await evalJs(`window.pi.getWorldlines()`)) ?? [];
+  const list = (await getWorldlines()) ?? [];
   const pair = list.filter((w) => w.comparisonId === comparisonId2);
   if (pair.length === 2 && pair.every((w) => w.state === "ready")) return { pair };
   return null;
@@ -118,7 +120,7 @@ const a = ready.pair.find((w) => w.label === "A");
 const closed = await evalJs(`window.pi.closeTerminal(${JSON.stringify(a.terminalId)})`);
 check("closing a candidate terminal ok", closed === undefined || closed === null, String(closed));
 await sleep(1500);
-const afterClose = await evalJs(`window.pi.getWorldlines()`);
+const afterClose = await getWorldlines();
 check("the candidate survives a terminal close", (afterClose ?? []).some((w) => w.comparisonId === comparisonId2 && w.label === "A"), JSON.stringify(afterClose?.map((w) => `${w.label}:${w.state}`)));
 // Reopen it: the candidate session continues.
 const reopened = await evalJs(`window.pi.openWorldlineTerminal(${JSON.stringify(comparisonId2)}, "A")`);
@@ -129,7 +131,7 @@ const disc = await evalJs(`window.pi.discardWorldline(${JSON.stringify(compariso
 check("discard ok", disc?.ok === true, JSON.stringify(disc));
 await sleep(2000);
 check("the comparison dir is gone after discard", !existsSync(join(WORLDS, comparisonId2)), "");
-const left2 = await evalJs(`window.pi.getWorldlines()`);
+const left2 = await getWorldlines();
 check("the worldline list is empty after discard", (left2 ?? []).filter((w) => w.comparisonId === comparisonId2).length === 0, JSON.stringify(left2));
 
 // No candidate processes survive: the candidate pids are gone.

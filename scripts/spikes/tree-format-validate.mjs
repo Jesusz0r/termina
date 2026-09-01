@@ -4,7 +4,7 @@
  * executables, symlinks), then asks `git ls-tree -r` to parse it.
  */
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync, chmodSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -54,23 +54,36 @@ const request = (op, params) => {
 };
 
 const storeDir = join(dir, "store");
-await request("store-create", { storeDir, sourceGitDir: join(fixture, ".git"), objectFormat: "sha1" });
+const created = await request("store-create", { storeDir, sourceGitDir: join(fixture, ".git"), objectFormat: "sha1" });
+const storeRequest = (op, params = {}) => request(op, {
+  ...params,
+  storeDir,
+  sourceRoot: fixture,
+  sourceGitDir: join(fixture, ".git"),
+  objectFormat: "sha1",
+  storeGeneration: created.storeGeneration,
+  storeIdentity: created.storeIdentity,
+  storeGitIdentity: created.storeGitIdentity,
+  storeGitObjectsIdentity: created.storeGitObjectsIdentity,
+  storeGitObjectsInfoIdentity: created.storeGitObjectsInfoIdentity,
+  storeGitObjectsPackIdentity: created.storeGitObjectsPackIdentity,
+  storeGitRefsIdentity: created.storeGitRefsIdentity,
+  storeGitRefsHeadsIdentity: created.storeGitRefsHeadsIdentity,
+  storeGitRefsTagsIdentity: created.storeGitRefsTagsIdentity,
+});
 
 // Capture the initial state.
 const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: fixture, encoding: "utf8" }).trim();
-const s1 = await request("capture", { storeDir, sourceRoot: fixture, head, objectFormat: "sha1" });
+const s1 = await storeRequest("capture", { head });
 console.log("captured:", s1.state.commit, "paths:", s1.state.pathCount);
 
 // Mutate: modify one file, create one file, delete nothing.
 writeFileSync(join(fixture, "src/main.ts"), "export const main = 2;\n");
 writeFileSync(join(fixture, "docs/new.md"), "new\n");
 let parent = s1.state.commit;
-const s2 = await request("capture-incremental", {
-  storeDir,
-  sourceRoot: fixture,
+const s2 = await storeRequest("capture-incremental", {
   parentCommit: parent,
   hints: ["src/main.ts", "docs/new.md"],
-  objectFormat: "sha1",
 });
 parent = s2.state.commit;
 console.log("incremental:", parent);
@@ -79,7 +92,12 @@ console.log("incremental:", parent);
 const target = join(dir, "materialized");
 mkdirSync(target, { recursive: true });
 execFileSync("git", ["init", "-q"], { cwd: target });
-await request("apply-state", { storeDir, stateId: parent, targetDir: target, objectFormat: "sha1" });
+const targetStat = lstatSync(target, { bigint: true });
+await storeRequest("apply-state", {
+  stateId: parent,
+  targetDir: target,
+  boundRootIdentity: { dev: String(targetStat.dev), ino: String(targetStat.ino) },
+});
 
 // The independent judge: the real Git CLI.
 const gitDir = join(storeDir, "git");

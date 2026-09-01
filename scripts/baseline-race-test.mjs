@@ -4,7 +4,7 @@
  * Launch requirement:
  *   TERMINA_EVENTS_DIR=/tmp/termina-events-test
  *   TERMINA_INITIAL_CWD=<fresh fixture: greeting.ts "hello", hello.txt, src/>
- *   --remote-debugging-port=9222
+ *   TERMINA_E2E_PORT=<runner-assigned DevTools port>
  *
  * The suite injects synthetic sidecar events (same shape as the bridge
  * extension writes) to exercise main's baseline logic deterministically.
@@ -23,6 +23,7 @@ import { appendFileSync, existsSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { e2ePort } from "./e2e-port.mjs";
 
 const results = [];
 const check = (name, ok, detail = "") => {
@@ -32,6 +33,8 @@ const check = (name, ok, detail = "") => {
 
 // The events dir is overridable via TERMINA_EVENTS_DIR (set by the launcher).
 const eventsDir = process.env.TERMINA_EVENTS_DIR ?? "/tmp/termina-events-test";
+const projectRoot = process.env.TERMINA_INITIAL_CWD;
+if (!projectRoot) throw new Error("TERMINA_INITIAL_CWD is required");
 const { mkdirSync } = await import("node:fs");
 mkdirSync(eventsDir, { recursive: true });
 const sidecar = join(eventsDir, "term-1.jsonl");
@@ -39,7 +42,7 @@ const bridgeId = "synthetic-baseline";
 let sequence = 0;
 const emit = (obj) => appendFileSync(sidecar, JSON.stringify({ bridgeId, seq: ++sequence, ...obj }) + "\n");
 
-const pages = await fetch("http://127.0.0.1:9222/json").then((r) => r.json());
+const pages = await fetch(`http://127.0.0.1:${e2ePort()}/json`).then((r) => r.json());
 const page = pages.find((t) => t.type === "page");
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
@@ -66,7 +69,7 @@ emit({ t: "tool", toolName: "edit", path: "greeting.ts", edits: [{ oldText: 'exp
 await sleep(600);
 emit({ t: "agent_settled" });
 await sleep(600);
-const b1 = await evalJs(`window.pi.reviewBaseline('term-1', '/tmp/termina-test-project/greeting.ts')`);
+const b1 = await evalJs(`window.pi.reviewBaseline('term-1', ${JSON.stringify(join(projectRoot, "greeting.ts"))})`);
 check("edit baseline reconstructed (landed ordering)", b1?.baseline === 'export const greeting = "hello";\n', JSON.stringify(b1));
 
 // ---- 2b. write to existing file → watcher cache provides the baseline ----
@@ -76,7 +79,7 @@ await sleep(500);
 // for content). The seeded watcher cache carries the pre-change content, so
 // the baseline is exact and revert restores it.
 const { writeFileSync, readFileSync } = await import("node:fs");
-const helloPath = "/tmp/termina-test-project/hello.txt";
+const helloPath = join(projectRoot, "hello.txt");
 const helloBefore = readFileSync(helloPath, "utf8");
 writeFileSync(helloPath, helloBefore + "extra line\n");
 await sleep(700);
@@ -88,9 +91,10 @@ await sleep(400);
 // ---- 2c. created file → null (revert deletes) ----
 emit({ t: "agent_start" });
 await sleep(400);
-writeFileSync("/tmp/termina-test-project/new-file.txt", "content\n");
+const newFilePath = join(projectRoot, "new-file.txt");
+writeFileSync(newFilePath, "content\n");
 await sleep(700);
-const b3 = await evalJs(`window.pi.reviewBaseline('term-1', '/tmp/termina-test-project/new-file.txt')`);
+const b3 = await evalJs(`window.pi.reviewBaseline('term-1', ${JSON.stringify(newFilePath)})`);
 check("created file: baseline null (revert deletes)", b3?.baseline === null && b3?.status === "created", JSON.stringify(b3));
 emit({ t: "agent_settled" });
 await sleep(400);
@@ -111,7 +115,7 @@ check("hello.txt shows M (modified)", !!helloBadge && helloBadge.text === "M", J
 // Establish a fresh baseline for greeting.ts (each agent_start re-baselines),
 // then delete the file on disk: the watcher reports the deletion; the entry
 // must stay with a D badge and revert must restore the file.
-const greetingPath = "/tmp/termina-test-project/greeting.ts";
+const greetingPath = join(projectRoot, "greeting.ts");
 const { rmSync } = await import("node:fs");
 emit({ t: "agent_start" });
 await sleep(500);

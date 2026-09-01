@@ -77,7 +77,7 @@ export interface EvidenceDeps {
   /** Capture a candidate head off the main thread. */
   captureHead(root: string, gitDir: string, parent: string | null): Promise<{ commit: string; tree: string }>;
   /** Run a shell command inside the candidate sandbox; bounded combined output. */
-  runSandboxed(cand: CandidateFacts, command: string[], timeoutMs: number): Promise<{ code: number; stdout: string; timedOut: boolean }>;
+  runSandboxed(cand: CandidateFacts, command: string[], timeoutMs: number, signal?: AbortSignal): Promise<{ code: number; stdout: string; timedOut: boolean }>;
   /** The test command of the shared base (from its package manifest). */
   baseTestCommand(): { command: string; args: string[]; label: string } | null;
   /** The benchmark harness config of the shared base, or null. */

@@ -1,7 +1,7 @@
 /**
  * Phase 5 e2e: promotion with rollback-ready journaling.
  *
- * Expects Electron on :9222 with:
+ * Expects Electron on TERMINA_E2E_PORT with:
  *   TERMINA_INITIAL_CWD=<Git repo: greeting.ts "hello", other.txt "other">
  *   TERMINA_EVENTS_DIR=<clean dedicated dir>
  *   TERMINA_WORLDS_DIR=<clean dedicated worlds root>
@@ -27,8 +27,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { realpathSync } from "node:fs";
 import { waitFor as waitUntil } from "./wait-for.mjs";
+import { e2ePort } from "./e2e-port.mjs";
 
-const port = 9222;
+const port = e2ePort();
 const results = [];
 const check = (name, ok, detail = "") => {
   results.push({ name, ok });
@@ -63,10 +64,12 @@ const evalJs = async (expr) => {
   return r.result?.result?.value;
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const getWorldlines = () => evalJs(`window.pi.projectList().then((projects) => window.pi.getWorldlines(projects.find((project) => project.active)?.id ?? ""))`);
 
 const PROJ = process.env.TERMINA_INITIAL_CWD ?? "/tmp/termina-wline3-project";
 const EVENTS = process.env.TERMINA_EVENTS_DIR ?? "/tmp/termina-wline3-events";
 const WORLDS = process.env.TERMINA_WORLDS_DIR ?? "/tmp/termina-wline3-worlds";
+const owner = await evalJs(`window.pi.projectList().then((v) => { const p = v.find((x) => x.active); return p ? { projectId: p.id, workspaceId: p.workspaceId } : null; })`);
 const git = (args) => execFileSync("git", args, { cwd: PROJ, encoding: "utf8" }).trim();
 const sha256 = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
 const repoState = () => ({ head: git(["rev-parse", "HEAD"]), refs: git(["for-each-ref"]), indexSha: sha256(join(PROJ, ".git", "index")) });
@@ -104,7 +107,7 @@ check("fork-run starts", fork?.ok === true, JSON.stringify(fork));
 if (!fork?.ok) process.exit(1);
 const comparisonId = fork.comparisonId;
 const ready = await waitFor(async () => {
-  const list = (await evalJs(`window.pi.getWorldlines()`)) ?? [];
+  const list = (await getWorldlines()) ?? [];
   if (list.some((w) => w.comparisonId === comparisonId && w.state === "error")) return { error: true };
   const pair = list.filter((w) => w.comparisonId === comparisonId);
   if (pair.length === 2 && pair.every((w) => w.state === "ready")) return { pair };
@@ -115,10 +118,10 @@ if (!ready || "error" in ready) process.exit(1);
 const a = ready.pair.find((w) => w.label === "A");
 
 // -------------------------------------------------- Mine enforcement ----
-await evalJs(`window.pi.setMineFile(${JSON.stringify(join(PROJ, "greeting.ts"))}, true)`);
+await evalJs(`window.pi.setMineFile(${JSON.stringify(join(PROJ, "greeting.ts"))}, true, ${JSON.stringify(owner)})`);
 const mineReject = await evalJs(`window.pi.promoteWorldline(${JSON.stringify(comparisonId)}, "A")`);
 check("promotion rejects a Mine path", mineReject?.ok === false && String(mineReject?.error ?? "").includes("you own"), JSON.stringify(mineReject));
-await evalJs(`window.pi.setMineFile(${JSON.stringify(join(PROJ, "greeting.ts"))}, false)`);
+await evalJs(`window.pi.setMineFile(${JSON.stringify(join(PROJ, "greeting.ts"))}, false, ${JSON.stringify(owner)})`);
 await sleep(800);
 
 // --------------------------------------------------- conflict rejection ----
@@ -126,7 +129,7 @@ writeFileSync(join(PROJ, "greeting.ts"), 'export const greeting = "user conflict
 await sleep(1200);
 const conflictReject = await evalJs(`window.pi.promoteWorldline(${JSON.stringify(comparisonId)}, "A")`);
 check("promotion rejects a text conflict", conflictReject?.ok === false && String(conflictReject?.error ?? "").includes("conflict"), JSON.stringify(conflictReject));
-const stillThere = await evalJs(`window.pi.getWorldlines()`);
+const stillThere = await getWorldlines();
 check("the pair stays usable after rejection", (stillThere ?? []).some((w) => w.comparisonId === comparisonId && w.label === "A" && w.state === "ready"), JSON.stringify(stillThere));
 writeFileSync(join(PROJ, "greeting.ts"), 'export const greeting = "hello";\n');
 await sleep(1200);
@@ -204,7 +207,7 @@ const after = repoState();
 check("HEAD unchanged", before.head === after.head);
 check("refs unchanged", before.refs === after.refs);
 check("index unchanged", before.indexSha === after.indexSha);
-const listAfter = await evalJs(`window.pi.getWorldlines()`);
+const listAfter = await getWorldlines();
 check("the comparison is torn down after promotion", (listAfter ?? []).filter((w) => w.comparisonId === comparisonId).length === 0, JSON.stringify(listAfter));
 
 const passed = results.filter((r) => r.ok).length;

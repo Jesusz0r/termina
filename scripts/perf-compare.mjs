@@ -36,9 +36,9 @@ const entry = join(dir, "perf-entry.mjs");
 writeFileSync(
   entry,
   `
-import { SnapshotStore } from "${join(import.meta.dirname, "..", "electron", "worldline-git.ts")}";
+import { SnapshotStore, boundPromotionOpenDirectory } from "${join(import.meta.dirname, "..", "electron", "worldline-git.ts")}";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { lstatSync, mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 const fixture = ${JSON.stringify(join(dir, "fixture"))};
@@ -84,6 +84,12 @@ const stats = (arr) => {
     p95: +sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)].toFixed(1),
     samples: arr.map((v) => +v.toFixed(1)),
   };
+};
+const materializeState = async (state, target) => {
+  mkdirSync(target, { recursive: true, mode: 0o700 });
+  const targetInfo = lstatSync(target, { bigint: true });
+  const binding = await boundPromotionOpenDirectory({ path: target, expectedIdentity: { dev: String(targetInfo.dev), ino: String(targetInfo.ino) } });
+  return store.materialize(state, target, { boundRootIdentity: binding });
 };
 /**
  * Measure one tool per pure block and swap the block order on every
@@ -192,7 +198,7 @@ const extractArchive = () => {
 };
 // Warm-up plus output validation.
 rmSync(matA, { recursive: true, force: true });
-await store.materialize(coldState.commit, matA);
+await materializeState(coldState.commit, matA);
 if (!existsSync(join(matA, \`file-\${FILE_COUNT - 1}.ts\`))) throw new Error("termina materialize incomplete");
 rmSync(matB, { recursive: true, force: true });
 extractArchive();
@@ -201,7 +207,7 @@ const matRow = await phased(
   MATERIALIZE_BLOCKS,
   async () => {
     rmSync(matA, { recursive: true, force: true });
-    return timed(() => store.materialize(coldState.commit, matA));
+    return timed(() => materializeState(coldState.commit, matA));
   },
   async () => {
     rmSync(matB, { recursive: true, force: true });

@@ -8,7 +8,25 @@ export interface ModifiedFile {
   status: "created" | "modified" | "deleted";
 }
 
+/** The only identity accepted for renderer-originated file state mutations. */
+export interface ProjectWorkspaceRef {
+  projectId: string;
+  workspaceId: string;
+}
+
+/** Main-issued capability bound to one renderer document and its main frame. */
+export interface RendererIpcCapability {
+  windowGeneration: number;
+  rendererGeneration: number;
+  loadGeneration: number;
+  nonce: string;
+  processId: number;
+  frameRoutingId: number;
+}
+
 export interface FileChangedPayload {
+  projectId: string;
+  workspaceId: string;
   path: string;
   relPath: string;
   /** Present only when the file fits the live-sync budget. Fetch large
@@ -21,12 +39,16 @@ export interface FileChangedPayload {
 }
 
 export interface ToolTargetPayload {
+  projectId: string;
+  workspaceId: string;
   path: string;
   relPath: string;
   toolName: string;
 }
 
 export interface FileDeletedPayload {
+  projectId: string;
+  workspaceId: string;
   path: string;
 }
 
@@ -145,8 +167,36 @@ export interface VerifyInfo {
   summary: string | null;
 }
 
+/** One lossless, sequenced PTY egress quantum. */
+export interface PtyDataPayload {
+  id: string;
+  /** Generation of the live PTY, never just the reusable tab id. */
+  generation: number;
+  /** BrowserWindow identity generation. */
+  windowGeneration: number;
+  /** Renderer document generation (changes on reload/crash recovery). */
+  rendererGeneration: number;
+  /** Monotonic sequence within one terminal generation. */
+  sequence: number;
+  data: string;
+}
+
+export interface PtyExitPayload {
+  id: string;
+  generation: number;
+  /** BrowserWindow identity generation. */
+  windowGeneration: number;
+  /** Renderer document generation (changes on reload/crash recovery). */
+  rendererGeneration: number;
+  /** Ordered sequence in the same PTY ledger as data chunks. */
+  sequence: number;
+  code: number;
+}
+
 export interface InstanceSummary {
   id: string;
+  /** PTY generation used by the egress handshake and close fence. */
+  generation: number;
   cwd: string;
   busy: boolean;
   type: "agent" | "shell";
@@ -161,6 +211,10 @@ export interface InstanceSummary {
   dispatchWorker?: boolean;
   /** The dispatched task text (for the tab title). */
   dispatchTask?: string;
+  /** Main-owned change-review state, replayed during renderer hydration. */
+  modified: ModifiedFile[];
+  /** Main-owned timeline recorder state, replayed during renderer hydration. */
+  recorderState: RecorderState;
   /** Verify state for agent terminals; null for plain shells. */
   verify?: VerifyInfo | null;
 }
@@ -270,6 +324,20 @@ export interface RunSummary {
   sessionFile: string | null;
   /** The app-private copy of the session branch. */
   sessionBranchFile: string | null;
+  /** Identity/provenance required to replay or discard the Pi branch copy. */
+  sessionBranchIdentity: {
+    dev: string;
+    ino: string;
+    nlink?: string;
+    size?: string;
+    mtimeNs?: string;
+    ctimeNs?: string;
+    rootDev?: string;
+    rootIno?: string;
+    rootBirthtimeNs?: string;
+  } | null;
+  /** A core branch destination whose commit could not be proven. */
+  uncertainSessionFile: string | null;
   /** True when Fork Run may offer this run. */
   replayable: boolean;
   /** Why the run is not replayable, when it is not. */
@@ -320,6 +388,8 @@ export interface WorldlineSummary {
   thinkingLevel: string | null;
   /** When the comparison pair started (ms epoch). */
   createdAt: number;
+  /** Main-owned evidence state included during project hydration. */
+  evidence?: EvidenceSummary;
 }
 
 /** One file a candidate changed against its comparison base. */
@@ -369,6 +439,15 @@ export interface EvidenceSummary {
   stale?: boolean;
 }
 
+export type WorldlineUpdatePayload = { projectId: string; summary: WorldlineSummary };
+export type WorldlineRemovedPayload = { projectId: string; comparisonId: string };
+export type WorldlineEvidencePayload = { projectId: string; summary: EvidenceSummary };
+
+/** True when a Worldline push belongs to the renderer's visible project. */
+export function worldlineEventBelongsToProject(activeProjectId: string | null, event: { projectId: string }): boolean {
+  return activeProjectId !== null && event.projectId === activeProjectId;
+}
+
 /** Candidate details, computed on demand (WORLDLINES §6.9). */
 export interface WorldlineDetails {
   id: string;
@@ -405,6 +484,9 @@ export interface WorldlineDetails {
 export interface FolderOpenedPayload {
   cwd: string;
   projectId: string;
+  workspaceId: string;
+  /** Monotonic main-side project activation epoch. */
+  activationGeneration: number;
   /** True when pi has no provider in auth.json or in the process environment. */
   needsLogin: boolean;
 }
@@ -412,9 +494,12 @@ export interface FolderOpenedPayload {
 export interface ProjectListItem {
   id: string;
   cwd: string;
+  workspaceId: string;
   active: boolean;
   terminals: number;
   needsLogin: boolean;
+  /** Current main-side project activation epoch at listing time. */
+  activationGeneration: number;
 }
 
 export type TerminalPasteResult =
@@ -424,8 +509,8 @@ export type TerminalPasteResult =
 
 export interface PiBridge {
   // push events (main → renderer)
-  onPtyData(cb: (e: { id: string; data: string }) => void): void;
-  onPtyExit(cb: (e: { id: string; code: number }) => void): void;
+  onPtyData(cb: (e: PtyDataPayload) => void): void;
+  onPtyExit(cb: (e: PtyExitPayload) => void): void;
   onMenuCommand(cb: (cmd: { command: MenuCommand }) => void): void;
   onToolTarget(cb: (p: ToolTargetPayload) => void): void;
   onFileChanged(cb: (p: FileChangedPayload) => void): void;
@@ -446,14 +531,18 @@ export interface PiBridge {
   onFolderOpened(cb: (e: FolderOpenedPayload) => void): void;
   onInstances(cb: (list: InstanceSummary[]) => void): void;
   /** Main asks the renderer to save every dirty model (run-start preflight). */
-  onFlushRequest(cb: (p: { requestId: string; writerId: string }) => void): void;
+  onFlushRequest(cb: (p: { requestId: string; writerId: string; projectId: string; workspaceId: string }) => void): void;
   onUpdateState(cb: (state: AppUpdateState) => void): void;
 
   // terminals (agent = pi TUI, shell = a real shell like zsh)
   createTerminal(opts?: { type?: "agent" | "shell"; shell?: string; engine?: "pi" | "core"; fromTerminalId?: string; projectId?: string }): Promise<{ ok: boolean; id?: string; error?: string }>;
   getShells(): Promise<{ name: string; path: string }[]>;
   getPiStatus(): Promise<{ available: boolean; bin: string; message?: string }>;
-  closeTerminal(id: string): Promise<void>;
+  /** Complete the renderer-side pane hydration fence for this PTY generation. */
+  readyTerminal(id: string, generation: number): void;
+  /** Retire one PTY sequence after xterm has consumed it. */
+  acknowledgePtyData(payload: Pick<PtyDataPayload, "id" | "generation" | "windowGeneration" | "rendererGeneration" | "sequence">): void;
+  closeTerminal(id: string, generation: number): Promise<void>;
   writeTerminal(id: string, data: string): Promise<void>;
   resizeTerminal(id: string, cols: number, rows: number): Promise<void>;
   getInstances(): Promise<InstanceSummary[]>;
@@ -502,11 +591,11 @@ export interface PiBridge {
   /** The renderer's answer to a flush request. */
   reportFlush(requestId: string, result: { ok: boolean; failed: string[] }): Promise<void>;
   /** Save a dirty model on behalf of the write-lease holder (the flush). */
-  flushSave(path: string, content: string, writerId: string): Promise<{ ok: boolean; error?: string }>;
+  flushSave(path: string, content: string, writerId: string, owner: ProjectWorkspaceRef): Promise<{ ok: boolean; error?: string }>;
 
   // Worldlines: candidates
   /** The live worldline candidates. */
-  getWorldlines(): Promise<WorldlineSummary[]>;
+  getWorldlines(projectId: string): Promise<WorldlineSummary[]>;
   /** Fork a completed run into Candidate A and Candidate B. */
   forkRun(runId: string): Promise<{ ok: boolean; comparisonId?: string; error?: string }>;
   /** Cancel pair creation (all-or-nothing cleanup). */
@@ -524,13 +613,13 @@ export interface PiBridge {
   /** Compute evidence for both candidates of a comparison. */
   runEvidence(comparisonId: string): Promise<{ ok: boolean; error?: string }>;
   /** Push: the evidence summary of a comparison changed. */
-  onEvidenceUpdate(cb: (e: EvidenceSummary) => void): void;
+  onEvidenceUpdate(cb: (e: WorldlineEvidencePayload) => void): void;
   /** Promote a candidate into the primary project (WORLDLINES §6.10). */
   promoteWorldline(comparisonId: string, label: "A" | "B", force?: boolean): Promise<{ ok: boolean; error?: string; terminalId?: string; confirm?: string }>;
   /** Push: one worldline changed. */
-  onWorldlineUpdate(cb: (summary: WorldlineSummary) => void): void;
+  onWorldlineUpdate(cb: (e: WorldlineUpdatePayload) => void): void;
   /** Push: a comparison was removed. */
-  onWorldlineRemoved(cb: (e: { comparisonId: string }) => void): void;
+  onWorldlineRemoved(cb: (e: WorldlineRemovedPayload) => void): void;
   /** Push: a terminal's run records changed (Fork Run refresh). */
   onWorldlineRunsChanged(cb: (e: { terminalId: string }) => void): void;
   /** Push: a promotion opened its primary terminal. */
@@ -542,9 +631,9 @@ export interface PiBridge {
 
   // Mine (file ownership)
   /** Mark a file as the user's own (the agent is told not to modify it). */
-  setMineFile(path: string, mine: boolean): Promise<void>;
+  setMineFile(path: string, mine: boolean, owner: ProjectWorkspaceRef): Promise<void>;
   /** The absolute paths of the files marked as the user's own. */
-  getMineFiles(): Promise<string[]>;
+  getMineFiles(owner: ProjectWorkspaceRef): Promise<string[]>;
   /** Fetch a snapshot's content on demand (only when a dot is clicked). */
   getTimelineContent(
     terminalId: string,
@@ -564,18 +653,18 @@ export interface PiBridge {
   projectOpenPath(cwd: string): Promise<{ cwd: string } | { cancelled: true }>;
   projectActivate(projectId: string): Promise<{ ok: boolean }>;
   projectClose(projectId: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean }>;
-  onProjectClosed(cb: (e: { projectId: string }) => void): void;
-  openFile(path: string): Promise<{ ok: true; path: string; content: string; changedLines?: number[] } | { ok: false; path: string; error: string }>;
-  saveFile(path: string, content: string): Promise<{ ok: boolean; error?: string }>;
+  onProjectClosed(cb: (e: { projectId: string; activationGeneration: number }) => void): void;
+  openFile(path: string, owner: ProjectWorkspaceRef): Promise<{ ok: true; path: string; content: string; changedLines?: number[] } | { ok: false; path: string; error: string }>;
+  saveFile(path: string, content: string, owner: ProjectWorkspaceRef): Promise<{ ok: boolean; error?: string }>;
 
   // file explorer
-  listDir(absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }>;
-  createEntry(relPath: string, kind: "file" | "dir"): Promise<{ ok: boolean; error?: string }>;
-  renameEntry(relPath: string, newName: string): Promise<{ ok: boolean; error?: string }>;
-  deleteEntry(relPath: string): Promise<{ ok: boolean; error?: string }>;
+  listDir(projectId: string, absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }>;
+  createEntry(projectId: string, relPath: string, kind: "file" | "dir"): Promise<{ ok: boolean; error?: string }>;
+  renameEntry(projectId: string, relPath: string, newName: string): Promise<{ ok: boolean; error?: string }>;
+  deleteEntry(projectId: string, relPath: string): Promise<{ ok: boolean; error?: string }>;
   /** Explorer clipboard paste: copy (or move, for a cut entry) srcRel under
    *  the target directory. Collisions get a " copy" / " copy N" suffix. */
-  pasteEntry(targetDirRel: string, srcRel: string, move: boolean): Promise<{ ok: boolean; error?: string; name?: string }>;
+  pasteEntry(projectId: string, targetDirRel: string, srcRel: string, move: boolean): Promise<{ ok: boolean; error?: string; name?: string }>;
   getUpdateState(): Promise<AppUpdateState>;
   checkUpdate(): Promise<AppUpdateState>;
   installUpdate(): Promise<{ ok: boolean; error?: string }>;

@@ -1,7 +1,7 @@
 /**
  * Phase 7 e2e: Challenge Mode.
  *
- * Expects Electron on :9222 with:
+ * Expects Electron on TERMINA_E2E_PORT with:
  *   TERMINA_INITIAL_CWD=<Git repo: greeting.ts "hello", package.json with
  *     a test script that requires "hi there">
  *   TERMINA_EVENTS_DIR=<clean dedicated dir>
@@ -21,8 +21,9 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { waitFor as waitUntil } from "./wait-for.mjs";
+import { e2ePort } from "./e2e-port.mjs";
 
-const port = 9222;
+const port = e2ePort();
 const results = [];
 const check = (name, ok, detail = "") => {
   results.push({ name, ok });
@@ -57,9 +58,11 @@ const evalJs = async (expr) => {
   return r.result?.result?.value;
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const getWorldlines = () => evalJs(`window.pi.projectList().then((projects) => window.pi.getWorldlines(projects.find((project) => project.active)?.id ?? ""))`);
 
 const PROJ = process.env.TERMINA_INITIAL_CWD ?? "/tmp/termina-wline6-project";
 const WORLDS = process.env.TERMINA_WORLDS_DIR ?? "/tmp/termina-wline6-worlds";
+const owner = await evalJs(`window.pi.projectList().then((v) => { const p = v.find((x) => x.active); return p ? { projectId: p.id, workspaceId: p.workspaceId } : null; })`);
 const git = (args) => execFileSync("git", args, { cwd: PROJ, encoding: "utf8" }).trim();
 const sha256 = (p) => createHash("sha256").update(readFileSync(p)).digest("hex");
 const repoState = () => ({ head: git(["rev-parse", "HEAD"]), refs: git(["for-each-ref"]), indexSha: sha256(join(PROJ, ".git", "index")) });
@@ -74,7 +77,7 @@ async function typePrompt(text) {
 const waitFor = (predicate, timeoutMs = 120000) => waitUntil(predicate, timeoutMs, 1000);
 
 // The renderer stores the latest evidence summary for the test.
-await evalJs(`window.__lastEvidence = null; window.pi.onEvidenceUpdate((s) => { window.__lastEvidence = s; });`);
+await evalJs(`window.__lastEvidence = null; window.pi.onEvidenceUpdate((event) => { window.__lastEvidence = event.summary; });`);
 
 // ---------------------------------------------------------------- run 1 ----
 const before = repoState();
@@ -97,7 +100,7 @@ const comparisonId = chal.comparisonId;
 // B auto-submits the original task, works, and settles (its terminal stays
 // open, so the busy flag is the completion signal).
 const settled = await waitFor(async () => {
-  const list = (await evalJs(`window.pi.getWorldlines()`)) ?? [];
+  const list = (await getWorldlines()) ?? [];
   if (list.some((w) => w.comparisonId === comparisonId && w.state === "error")) {
     return { error: list.find((w) => w.comparisonId === comparisonId && w.state === "error")?.error ?? "error" };
   }
@@ -161,7 +164,7 @@ const dom = await waitFor(async () => {
 check("verdict chips render in the panel", dom !== null, JSON.stringify(dom));
 
 // -------------------------------------------------- mine ineligibility ----
-await evalJs(`window.pi.setMineFile(${JSON.stringify(join(PROJ, "greeting.ts"))}, true)`);
+await evalJs(`window.pi.setMineFile(${JSON.stringify(join(PROJ, "greeting.ts"))}, true, ${JSON.stringify(owner)})`);
 await sleep(500);
 await evalJs(`window.__lastEvidence = null;`);
 const ev2 = await evalJs(`window.pi.runEvidence(${JSON.stringify(comparisonId)})`);
@@ -172,7 +175,7 @@ const summary2 = await waitFor(async () => {
 }, 120000);
 const mineElig = summary2?.profiles.find((p) => p.profile === "fewer-dependencies")?.eligibility?.A ?? "";
 check("a Mine change makes the candidate ineligible", typeof mineElig === "string" && mineElig.includes("you own"), JSON.stringify(mineElig));
-await evalJs(`window.pi.setMineFile(${JSON.stringify(join(PROJ, "greeting.ts"))}, false)`);
+await evalJs(`window.pi.setMineFile(${JSON.stringify(join(PROJ, "greeting.ts"))}, false, ${JSON.stringify(owner)})`);
 
 // ------------------------------------------------- primary stays clean ----
 const after = repoState();
@@ -184,7 +187,7 @@ check("index unchanged", before.indexSha === after.indexSha);
 const disc = await evalJs(`window.pi.discardWorldline(${JSON.stringify(comparisonId)})`);
 check("discard ok", disc?.ok === true, JSON.stringify(disc));
 await sleep(1500);
-const left = await evalJs(`window.pi.getWorldlines()`);
+const left = await getWorldlines();
 check("no candidates remain", (left ?? []).filter((w) => w.comparisonId === comparisonId).length === 0, JSON.stringify(left));
 
 const passed = results.filter((r) => r.ok).length;

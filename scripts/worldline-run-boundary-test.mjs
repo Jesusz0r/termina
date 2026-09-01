@@ -1,7 +1,7 @@
 /**
  * Phase 2 e2e: run-boundary recording.
  *
- * Expects Electron on :9222 with TERMINA_INITIAL_CWD set to a Git repo
+ * Expects Electron on TERMINA_E2E_PORT with TERMINA_INITIAL_CWD set to a Git repo
  * containing greeting.ts ("export const greeting = \"hello\";") and
  * TERMINA_EVENTS_DIR set to a clean dedicated directory.
  *
@@ -19,8 +19,9 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { waitFor } from "./wait-for.mjs";
+import { e2ePort } from "./e2e-port.mjs";
 
-const port = 9222;
+const port = e2ePort();
 const results = [];
 const check = (name, ok, detail = "") => {
   results.push({ name, ok });
