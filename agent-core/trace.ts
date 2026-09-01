@@ -1758,8 +1758,16 @@ export class TraceRuntime {
     return count;
   }
 
-  private buildLinkIndex(): TraceLinkIndex {
-    const attempts = [...this.attempts.values()]
+  private buildLinkIndex(updatedAt = timestamp(this.now)): TraceLinkIndex {
+    return this.buildLinkIndexFrom(this.attempts.values(), this.settlements.values(), updatedAt);
+  }
+
+  private buildLinkIndexFrom(
+    attemptEntries: Iterable<TraceAttemptIndexEntry>,
+    settlementEntries: Iterable<TraceSettlementIndexEntry>,
+    updatedAt = timestamp(this.now),
+  ): TraceLinkIndex {
+    const attempts = [...attemptEntries]
       .sort((left, right) => compositeKey(left.runId, left.attemptId).localeCompare(compositeKey(right.runId, right.attemptId)))
       .map((attempt) => ({
         runId: attempt.runId,
@@ -1770,7 +1778,7 @@ export class TraceRuntime {
         traceTurn: attempt.traceTurn,
         unknown: attempt.unknown,
       }));
-    const settlements = [...this.settlements.values()]
+    const settlements = [...settlementEntries]
       .sort((left, right) => taskKey(left.runId, left.taskId).localeCompare(taskKey(right.runId, right.taskId)))
       .map((settlement) => ({
         runId: settlement.runId,
@@ -1786,10 +1794,90 @@ export class TraceRuntime {
       schemaVersion: TRACE_SCHEMA_VERSION,
       kind: "trace-link-index",
       complete: this.linkIndexComplete,
-      updatedAt: timestamp(this.now),
+      updatedAt,
       attempts,
       settlements,
     });
+  }
+
+  private prospectiveLinkIndex(record: FrozenTraceAttempt | FrozenTraceTaskSettled, updatedAt = timestamp(this.now)): TraceLinkIndex {
+    const attempts = new Map<string, TraceAttemptIndexEntry>();
+    const settlements = new Map<string, TraceSettlementIndexEntry>();
+    for (const attempt of this.attempts.values()) attempts.set(compositeKey(attempt.runId, attempt.attemptId), { ...attempt });
+    for (const settlement of this.settlements.values()) settlements.set(taskKey(settlement.runId, settlement.taskId), {
+      ...settlement,
+      attemptIds: settlement.attemptIds.slice(),
+      summaryAttemptIds: settlement.summaryAttemptIds.slice(),
+    });
+    if (record.recordType === "attempt") {
+      attempts.set(compositeKey(record.runId, record.attemptId), {
+        runId: record.runId,
+        taskId: record.taskId,
+        attemptId: record.attemptId,
+        role: record.role,
+        retained: true,
+        traceTurn: this.nextTraceTurn,
+        unknown: false,
+      });
+      if (this.linkIndexComplete === false) {
+        for (const parentId of [record.parentAttemptId, record.retryOfAttemptId]) {
+          if (parentId === null) continue;
+          const key = compositeKey(record.runId, parentId);
+          if (!attempts.has(key)) attempts.set(key, {
+            runId: record.runId,
+            taskId: record.taskId,
+            attemptId: parentId,
+            role: "main",
+            retained: false,
+            traceTurn: null,
+            unknown: true,
+          });
+        }
+      }
+    } else {
+      for (const attemptId of record.attemptIds) {
+        const key = compositeKey(record.runId, attemptId);
+        if (!attempts.has(key)) attempts.set(key, {
+          runId: record.runId,
+          taskId: record.taskId,
+          attemptId,
+          role: "main",
+          retained: false,
+          traceTurn: null,
+          unknown: true,
+        });
+      }
+      for (const attemptId of record.summaryAttemptIds) {
+        const key = compositeKey(record.runId, attemptId);
+        const current = attempts.get(key);
+        if (current === undefined) {
+          attempts.set(key, {
+            runId: record.runId,
+            taskId: record.taskId,
+            attemptId,
+            role: "summary",
+            retained: false,
+            traceTurn: null,
+            unknown: true,
+          });
+        } else if (current.unknown) {
+          attempts.set(key, { ...current, role: "summary" });
+        }
+      }
+      const unknown = record.attemptIds.some((attemptId) => attempts.get(compositeKey(record.runId, attemptId))?.unknown === true) ||
+        record.summaryAttemptIds.some((attemptId) => attempts.get(compositeKey(record.runId, attemptId))?.unknown === true);
+      settlements.set(taskKey(record.runId, record.taskId), {
+        runId: record.runId,
+        taskId: record.taskId,
+        attemptIds: record.attemptIds.slice(),
+        summaryAttemptIds: record.summaryAttemptIds.slice(),
+        finalAttemptId: record.finalAttemptId,
+        retained: true,
+        traceTurn: this.nextTraceTurn,
+        unknown,
+      });
+    }
+    return this.buildLinkIndexFrom(attempts.values(), settlements.values(), updatedAt);
   }
 
   private async readPreviousIndex(): Promise<{ index: TraceLinkIndex | null; error: string | null }> {
@@ -2005,40 +2093,286 @@ export class TraceRuntime {
     });
   }
 
-  private indexCapacityFor(record: FrozenTraceAttempt | FrozenTraceTaskSettled): { ok: true } | { ok: false; error: string } {
-    let additions = 0;
-    if (record.recordType === "attempt") {
-      if (!this.attempts.has(compositeKey(record.runId, record.attemptId))) additions++;
-      if (this.linkIndexComplete === false) {
-        for (const parentId of [record.parentAttemptId, record.retryOfAttemptId]) {
-          if (parentId !== null && !this.attempts.has(compositeKey(record.runId, parentId))) additions++;
-        }
-      }
-    } else {
-      if (!this.settlements.has(taskKey(record.runId, record.taskId))) additions++;
-      const seen = new Set<string>();
-      for (const attemptId of [...record.attemptIds, ...record.summaryAttemptIds]) {
-        const key = compositeKey(record.runId, attemptId);
-        if (seen.has(key) || this.attempts.has(key)) continue;
-        seen.add(key);
-        additions++;
-      }
-    }
-    if (this.attempts.size + this.settlements.size + additions > MAX_TRACE_INDEX_ENTRIES) {
-      return { ok: false, error: `trace link index exceeds ${MAX_TRACE_INDEX_ENTRIES} entries` };
-    }
-    return { ok: true };
+  private attemptIndexEntry(attempt: TraceAttemptIndexEntry): TraceAttemptIndexEntry {
+    return {
+      runId: attempt.runId,
+      taskId: attempt.taskId,
+      attemptId: attempt.attemptId,
+      role: attempt.role,
+      retained: attempt.retained,
+      traceTurn: attempt.traceTurn,
+      unknown: attempt.unknown,
+    };
   }
 
-  private async persistLinkIndex(): Promise<{ ok: true } | { ok: false; kind: "index-write-failure" | "index-full"; error: string }> {
-    const capacity = this.indexCapacityForCurrentMaps();
-    if (!capacity.ok) return capacity;
+  private settlementIndexEntry(settlement: TraceSettlementIndexEntry): TraceSettlementIndexEntry {
+    return {
+      runId: settlement.runId,
+      taskId: settlement.taskId,
+      attemptIds: settlement.attemptIds.slice(),
+      summaryAttemptIds: settlement.summaryAttemptIds.slice(),
+      finalAttemptId: settlement.finalAttemptId,
+      retained: settlement.retained,
+      traceTurn: settlement.traceTurn,
+      unknown: settlement.unknown,
+    };
+  }
+
+  private reservationPlan(record: FrozenTraceAttempt | FrozenTraceTaskSettled | null): {
+    attemptUpdates: Map<string, TraceAttemptIndexEntry>;
+    settlementUpdates: Map<string, TraceSettlementIndexEntry>;
+    protectedTasks: Set<string>;
+  } {
+    const attemptUpdates = new Map<string, TraceAttemptIndexEntry>();
+    const settlementUpdates = new Map<string, TraceSettlementIndexEntry>();
+    const protectedTasks = new Set<string>();
+    if (record === null) return { attemptUpdates, settlementUpdates, protectedTasks };
+    protectedTasks.add(taskKey(record.runId, record.taskId));
+    const protectKnownAttempt = (attemptId: string): void => {
+      const existing = this.attempts.get(compositeKey(record.runId, attemptId));
+      if (existing !== undefined) protectedTasks.add(taskKey(existing.runId, existing.taskId));
+    };
+    if (record.recordType === "attempt") {
+      const key = compositeKey(record.runId, record.attemptId);
+      attemptUpdates.set(key, {
+        runId: record.runId,
+        taskId: record.taskId,
+        attemptId: record.attemptId,
+        role: record.role,
+        retained: true,
+        traceTurn: this.nextTraceTurn,
+        unknown: false,
+      });
+      for (const parentId of [record.parentAttemptId, record.retryOfAttemptId]) {
+        if (parentId === null) continue;
+        protectKnownAttempt(parentId);
+        const parentKey = compositeKey(record.runId, parentId);
+        if (this.linkIndexComplete === false && !this.attempts.has(parentKey)) attemptUpdates.set(parentKey, {
+          runId: record.runId,
+          taskId: record.taskId,
+          attemptId: parentId,
+          role: "main",
+          retained: false,
+          traceTurn: null,
+          unknown: true,
+        });
+      }
+    } else {
+      for (const attemptId of record.attemptIds) {
+        protectKnownAttempt(attemptId);
+        const key = compositeKey(record.runId, attemptId);
+        if (!this.attempts.has(key)) attemptUpdates.set(key, {
+          runId: record.runId,
+          taskId: record.taskId,
+          attemptId,
+          role: "main",
+          retained: false,
+          traceTurn: null,
+          unknown: true,
+        });
+      }
+      for (const attemptId of record.summaryAttemptIds) {
+        protectKnownAttempt(attemptId);
+        const key = compositeKey(record.runId, attemptId);
+        const current = attemptUpdates.get(key) ?? this.attempts.get(key);
+        if (current === undefined) {
+          attemptUpdates.set(key, {
+            runId: record.runId,
+            taskId: record.taskId,
+            attemptId,
+            role: "summary",
+            retained: false,
+            traceTurn: null,
+            unknown: true,
+          });
+        } else if (current.unknown) {
+          attemptUpdates.set(key, { ...current, role: "summary" });
+        }
+      }
+      const unknown = record.attemptIds.some((attemptId) => attemptUpdates.get(compositeKey(record.runId, attemptId))?.unknown === true ||
+        this.attempts.get(compositeKey(record.runId, attemptId))?.unknown === true) ||
+        record.summaryAttemptIds.some((attemptId) => attemptUpdates.get(compositeKey(record.runId, attemptId))?.unknown === true ||
+          this.attempts.get(compositeKey(record.runId, attemptId))?.unknown === true);
+      settlementUpdates.set(taskKey(record.runId, record.taskId), {
+        runId: record.runId,
+        taskId: record.taskId,
+        attemptIds: record.attemptIds.slice(),
+        summaryAttemptIds: record.summaryAttemptIds.slice(),
+        finalAttemptId: record.finalAttemptId,
+        retained: true,
+        traceTurn: this.nextTraceTurn,
+        unknown,
+      });
+    }
+    return { attemptUpdates, settlementUpdates, protectedTasks };
+  }
+
+  private indexSummary(plan: ReturnType<TraceRuntime["reservationPlan"]>, updatedAt: string): {
+    attempts: number;
+    settlements: number;
+    attemptBytes: number;
+    settlementBytes: number;
+    bytes: number;
+  } {
+    let attempts = 0;
+    let settlements = 0;
+    let attemptBytes = 0;
+    let settlementBytes = 0;
+    for (const [key, attempt] of this.attempts) {
+      attempts++;
+      attemptBytes += Buffer.byteLength(JSON.stringify(plan.attemptUpdates.get(key) ?? this.attemptIndexEntry(attempt)), "utf8");
+    }
+    for (const [key, attempt] of plan.attemptUpdates) {
+      if (this.attempts.has(key)) continue;
+      attempts++;
+      attemptBytes += Buffer.byteLength(JSON.stringify(attempt), "utf8");
+    }
+    for (const [key, settlement] of this.settlements) {
+      settlements++;
+      settlementBytes += Buffer.byteLength(JSON.stringify(plan.settlementUpdates.get(key) ?? this.settlementIndexEntry(settlement)), "utf8");
+    }
+    for (const [key, settlement] of plan.settlementUpdates) {
+      if (this.settlements.has(key)) continue;
+      settlements++;
+      settlementBytes += Buffer.byteLength(JSON.stringify(settlement), "utf8");
+    }
+    const emptyIndexBytes = Buffer.byteLength(JSON.stringify({
+      schemaVersion: TRACE_SCHEMA_VERSION,
+      kind: "trace-link-index",
+      complete: this.linkIndexComplete,
+      updatedAt,
+      attempts: [],
+      settlements: [],
+    }), "utf8");
+    return {
+      attempts,
+      settlements,
+      attemptBytes,
+      settlementBytes,
+      bytes: emptyIndexBytes + attemptBytes + settlementBytes + Math.max(0, attempts - 1) + Math.max(0, settlements - 1),
+    };
+  }
+
+  private compactionCandidates(protectedTasks: ReadonlySet<string>): Array<{
+    key: string;
+    attempts: TraceAttemptIndexEntry[];
+    settlement: TraceSettlementIndexEntry;
+    attemptBytes: number;
+    settlementBytes: number;
+    oldestTurn: number;
+  }> {
+    const groups = new Map<string, {
+      attempts: TraceAttemptIndexEntry[];
+      attemptIds: Set<string>;
+      settlement: TraceSettlementIndexEntry | null;
+      attemptBytes: number;
+      settlementBytes: number;
+      oldestTurn: number;
+    }>();
+    const groupFor = (runId: string, taskId: string) => {
+      const key = taskKey(runId, taskId);
+      let group = groups.get(key);
+      if (group === undefined) {
+        group = { attempts: [], attemptIds: new Set(), settlement: null, attemptBytes: 0, settlementBytes: 0, oldestTurn: Number.MAX_SAFE_INTEGER };
+        groups.set(key, group);
+      }
+      return { key, group };
+    };
+    for (const attempt of this.attempts.values()) {
+      const { group } = groupFor(attempt.runId, attempt.taskId);
+      const entry = this.attemptIndexEntry(attempt);
+      group.attempts.push(entry);
+      group.attemptIds.add(entry.attemptId);
+      group.attemptBytes += Buffer.byteLength(JSON.stringify(entry), "utf8");
+      group.oldestTurn = Math.min(group.oldestTurn, entry.traceTurn ?? Number.MAX_SAFE_INTEGER);
+    }
+    for (const settlement of this.settlements.values()) {
+      const { group } = groupFor(settlement.runId, settlement.taskId);
+      const entry = this.settlementIndexEntry(settlement);
+      group.settlement = entry;
+      group.settlementBytes = Buffer.byteLength(JSON.stringify(entry), "utf8");
+      group.oldestTurn = Math.min(group.oldestTurn, entry.traceTurn ?? Number.MAX_SAFE_INTEGER);
+    }
+    return [...groups].flatMap(([key, group]) => {
+      const settlement = group.settlement;
+      if (settlement === null || protectedTasks.has(key) || settlement.retained || settlement.unknown ||
+        !settlement.attemptIds.every((attemptId) => group.attemptIds.has(attemptId)) ||
+        !settlement.summaryAttemptIds.every((attemptId) => group.attemptIds.has(attemptId)) ||
+        !group.attempts.every((attempt) => !attempt.retained && !attempt.unknown)) return [];
+      return [{ key, attempts: group.attempts, settlement, attemptBytes: group.attemptBytes, settlementBytes: group.settlementBytes, oldestTurn: group.oldestTurn }];
+    }).sort((left, right) => left.oldestTurn - right.oldestTurn || left.key.localeCompare(right.key));
+  }
+
+  private removeCandidateFromSummary(
+    summary: { attempts: number; settlements: number; attemptBytes: number; settlementBytes: number; bytes: number },
+    candidate: { attempts: TraceAttemptIndexEntry[]; attemptBytes: number; settlementBytes: number },
+  ): void {
+    const attemptCommas = Math.max(0, summary.attempts - 1) - Math.max(0, summary.attempts - candidate.attempts.length - 1);
+    const settlementCommas = Math.max(0, summary.settlements - 1) - Math.max(0, summary.settlements - 2);
+    summary.attempts -= candidate.attempts.length;
+    summary.settlements--;
+    summary.attemptBytes -= candidate.attemptBytes;
+    summary.settlementBytes -= candidate.settlementBytes;
+    summary.bytes -= candidate.attemptBytes + candidate.settlementBytes + attemptCommas + settlementCommas;
+  }
+
+  private summaryExceedsCapacity(summary: { attempts: number; settlements: number; bytes: number }): boolean {
+    return summary.attempts + summary.settlements > MAX_TRACE_INDEX_ENTRIES || summary.bytes > MAX_TRACE_INDEX_BYTES;
+  }
+
+  private summaryCapacityError(summary: { attempts: number; settlements: number; bytes: number }): string {
+    return summary.attempts + summary.settlements > MAX_TRACE_INDEX_ENTRIES
+      ? `trace link index exceeds ${MAX_TRACE_INDEX_ENTRIES} entries`
+      : `trace link index exceeds ${MAX_TRACE_INDEX_BYTES} bytes`;
+  }
+
+  private indexCapacityError(index: TraceLinkIndex): string | null {
+    if (index.attempts.length + index.settlements.length > MAX_TRACE_INDEX_ENTRIES) {
+      return `trace link index exceeds ${MAX_TRACE_INDEX_ENTRIES} entries`;
+    }
+    if (Buffer.byteLength(JSON.stringify(index), "utf8") > MAX_TRACE_INDEX_BYTES) {
+      return `trace link index exceeds ${MAX_TRACE_INDEX_BYTES} bytes`;
+    }
+    return null;
+  }
+
+  private reserveLinkIndexCapacity(
+    record: FrozenTraceAttempt | FrozenTraceTaskSettled | null,
+    updatedAt: string,
+  ): { ok: true } | { ok: false; error: string } {
+    const plan = this.reservationPlan(record);
+    const summary = this.indexSummary(plan, updatedAt);
+    if (!this.summaryExceedsCapacity(summary)) return { ok: true };
+    const initialError = this.summaryCapacityError(summary);
+    const candidates = this.compactionCandidates(plan.protectedTasks);
+    const selected: typeof candidates = [];
+    for (const candidate of candidates) {
+      if (selected.length === 0 && this.linkIndexComplete) summary.bytes++;
+      this.removeCandidateFromSummary(summary, candidate);
+      selected.push(candidate);
+      if (!this.summaryExceedsCapacity(summary)) break;
+    }
+    if (this.summaryExceedsCapacity(summary)) return { ok: false, error: initialError };
+    for (const candidate of selected) {
+      for (const attempt of candidate.attempts) this.attempts.delete(compositeKey(attempt.runId, attempt.attemptId));
+      this.settlements.delete(candidate.key);
+    }
+    this.linkIndexComplete = false;
+    this.linkIndexError = null;
+    const final = record === null ? this.buildLinkIndex(updatedAt) : this.prospectiveLinkIndex(record, updatedAt);
+    const error = this.indexCapacityError(final);
+    return error === null ? { ok: true } : { ok: false, error };
+  }
+
+  private async persistLinkIndex(updatedAt = timestamp(this.now)): Promise<{ ok: true } | { ok: false; kind: "index-write-failure" | "index-full"; error: string }> {
+    const capacity = this.reserveLinkIndexCapacity(null, updatedAt);
+    if (!capacity.ok) return { ...capacity, kind: "index-full" };
     if (!this.initialized && this.lockHandle === null) {
       return { ok: false, kind: "index-write-failure", error: "trace runtime is not initialized" };
     }
     let json: string;
     try {
-      json = JSON.stringify(this.buildLinkIndex());
+      json = JSON.stringify(this.buildLinkIndex(updatedAt));
     } catch (error) {
       this.recordIndexFailure(stableError(error));
       return { ok: false, kind: "index-write-failure", error: stableError(error) };
@@ -2046,7 +2380,7 @@ export class TraceRuntime {
     if (Buffer.byteLength(json, "utf8") > MAX_TRACE_INDEX_BYTES) {
       this.linkIndexError = `trace link index exceeds ${MAX_TRACE_INDEX_BYTES} bytes`;
       this.refreshManifestLinkIndex(this.linkIndexError);
-      return { ok: false, kind: "index-full", error: `trace link index exceeds ${MAX_TRACE_INDEX_BYTES} bytes` };
+      return { ok: false, kind: "index-full", error: this.linkIndexError };
     }
     const result = await atomicWrite(this.indexPath, json);
     if (!result.ok) {
@@ -2055,13 +2389,6 @@ export class TraceRuntime {
     }
     this.linkIndexError = null;
     this.refreshManifestLinkIndex(null);
-    return { ok: true };
-  }
-
-  private indexCapacityForCurrentMaps(): { ok: true } | { ok: false; kind: "index-full"; error: string } {
-    if (this.attempts.size + this.settlements.size > MAX_TRACE_INDEX_ENTRIES) {
-      return { ok: false, kind: "index-full", error: `trace link index exceeds ${MAX_TRACE_INDEX_ENTRIES} entries` };
-    }
     return { ok: true };
   }
 
@@ -2262,8 +2589,6 @@ export class TraceRuntime {
     }
     const validation = this.validateRecord(record);
     if (validation !== null) return validation;
-    const capacity = this.indexCapacityFor(record);
-    if (!capacity.ok) return this.writeFailure("index-full", capacity.error, record);
     let json: string;
     try {
       json = JSON.stringify(record);
@@ -2276,6 +2601,9 @@ export class TraceRuntime {
       await this.accountWriteFailure();
       return this.writeFailure("record-too-large", `record is ${bytes} bytes; maximum is ${this.maxRecordBytes}`, record);
     }
+    const indexUpdatedAt = timestamp(this.now);
+    const capacity = this.reserveLinkIndexCapacity(record, indexUpdatedAt);
+    if (!capacity.ok) return this.writeFailure("index-full", capacity.error, record);
     const traceTurn = this.nextTraceTurn;
     const path = join(this.directory, `turn-${traceTurn}.json`);
     const result = await atomicWrite(path, json);
@@ -2288,23 +2616,24 @@ export class TraceRuntime {
       if (result.renamed) {
         this.nextTraceTurn = traceTurn + 1;
         this.registerRecord(record, traceTurn);
-        return this.finalizePersistedRecord(record, traceTurn, path, result.error, "write-failure");
+        return this.finalizePersistedRecord(record, traceTurn, path, indexUpdatedAt, result.error, "write-failure");
       }
       return this.writeFailure("write-failure", result.error, record, path, null, false);
     }
     this.nextTraceTurn = traceTurn + 1;
     this.registerRecord(record, traceTurn);
-    return this.finalizePersistedRecord(record, traceTurn, path);
+    return this.finalizePersistedRecord(record, traceTurn, path, indexUpdatedAt);
   }
 
   private async finalizePersistedRecord(
     record: FrozenTraceAttempt | FrozenTraceTaskSettled,
     traceTurn: number,
     path: string,
+    indexUpdatedAt: string,
     initialError: string | null = null,
     initialKind: "write-failure" | null = null,
   ): Promise<TraceWriteOutcome> {
-    const indexResult = await this.persistLinkIndex();
+    const indexResult = await this.persistLinkIndex(indexUpdatedAt);
     if (!indexResult.ok) {
       const manifestResult = await this.persistManifest();
       const detail = [initialError, indexResult.error, manifestResult.ok ? null : manifestResult.error]
@@ -2313,7 +2642,7 @@ export class TraceRuntime {
       return this.writeFailure(initialKind ?? indexResult.kind, detail || "trace link index write failed", record, path, traceTurn, true);
     }
     const retention = await this.applyRetention();
-    const retainedIndex = await this.persistLinkIndex();
+    const retainedIndex = await this.persistLinkIndex(indexUpdatedAt);
     const manifestResult = await this.persistManifest();
     if (initialKind !== null || !retention.ok || !retainedIndex.ok || !manifestResult.ok) {
       const failureKind: TraceWriteFailureKind = initialKind !== null

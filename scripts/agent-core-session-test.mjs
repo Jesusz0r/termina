@@ -3,23 +3,33 @@
  * Imported by scripts/agent-core-harness-test.mjs.
  */
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
+  rmdirSync,
+  rmSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runExportedChecks } from "./test-support.mjs";
 
 const session = await import("../agent-core/session.ts");
 const host = await import("../agent-core/host.ts");
 const {
+  MAX_RETAINED_TEMP_BUNDLES,
+  MAX_RETAINED_TEMP_BYTES,
+  MAX_SESSION_BUNDLE_BYTES,
   MAX_SESSION_RECORD_BYTES,
   MAX_SESSION_SEGMENT_BYTES,
   SessionWriter,
@@ -66,6 +76,45 @@ function appendMsg(writer, sseq, role, content) {
 function fillRecord(sseq, bytes) {
   const pad = "x".repeat(Math.max(1, bytes));
   return { storageSeq: sseq, type: "message", message: { role: "user", content: pad } };
+}
+
+function rollCleanupProbe(root, id, mutate) {
+  const paths = bundlePaths(root, id);
+  mkdirSync(paths.currentDir, { recursive: true, mode: 0o700 });
+  let writer;
+  const opened = SessionWriter.open(paths.sessionFile, 0, {
+    testHooks: {
+      beforeSegmentRollRename(partPath) {
+        mutate({ paths, partPath });
+      },
+    },
+  });
+  if (!opened.ok) throw new Error(opened.error);
+  writer = opened.writer;
+  let seq = 0;
+  while (writer.activeSize < MAX_SESSION_SEGMENT_BYTES - 64 * 1024) {
+    seq += 1;
+    const appended = writer.appendRecord(fillRecord(seq, 48 * 1024));
+    if (!appended.ok) throw new Error(appended.error);
+  }
+  seq += 1;
+  const failed = writer.appendRecord(fillRecord(seq, 80 * 1024));
+  writer.close();
+  return { paths, failed };
+}
+
+function childDirWithIdentity(parent, identity) {
+  if (!identity || !existsSync(parent)) return null;
+  for (const name of readdirSync(parent)) {
+    const path = join(parent, name);
+    try {
+      const info = lstatSync(path);
+      if (info.isDirectory() && info.dev === identity.dev && info.ino === identity.ino) return path;
+    } catch {
+      /* the raced child may have been moved again */
+    }
+  }
+  return null;
 }
 
 function canonicalStubReceipt(revisionId, sseq, block) {
@@ -168,6 +217,48 @@ export async function run({ check, leftovers }) {
   rolled = afterRoll.ok && afterRoll.parts.length === 1 && afterRoll.active && afterRoll.active.size === encodedRoll;
   check("rollover happens before the segment budget", rolledAppend.ok && rolled);
 
+  const rollCleanupLeafMarker = "roll-cleanup-leaf-competitor";
+  const rollCleanupLeaf = rollCleanupProbe(root, "roll-cleanup-leaf", ({ paths, partPath }) => {
+    renameSync(paths.sessionFile, `${paths.sessionFile}.original`);
+    writeFileSync(partPath, rollCleanupLeafMarker, { mode: 0o600 });
+  });
+  check(
+    "roll failure retains a leaf replacement instead of unlinking it",
+    rollCleanupLeaf.failed.ok === false &&
+      existsSync(join(rollCleanupLeaf.paths.currentDir, "part-000001.jsonl")) &&
+      readFileSync(join(rollCleanupLeaf.paths.currentDir, "part-000001.jsonl"), "utf8") === rollCleanupLeafMarker,
+  );
+
+  let rollCleanupAbaReplacement;
+  const rollCleanupAba = rollCleanupProbe(root, "roll-cleanup-aba", ({ paths, partPath }) => {
+    renameSync(paths.sessionFile, `${paths.sessionFile}.original`);
+    const original = `${partPath}.original`;
+    rollCleanupAbaReplacement = `${partPath}.replacement`;
+    renameSync(partPath, original);
+    writeFileSync(partPath, "roll-cleanup-aba-competitor", { mode: 0o600 });
+    renameSync(partPath, rollCleanupAbaReplacement);
+    renameSync(original, partPath);
+  });
+  check(
+    "roll failure retains the original claim across an ABA replacement",
+    rollCleanupAba.failed.ok === false &&
+      existsSync(join(rollCleanupAba.paths.currentDir, "part-000001.jsonl")) &&
+      readFileSync(join(rollCleanupAba.paths.currentDir, "part-000001.jsonl"), "utf8") === "",
+  );
+
+  const rollCleanupAncestorMarker = "roll-cleanup-ancestor-competitor";
+  const rollCleanupAncestor = rollCleanupProbe(root, "roll-cleanup-ancestor", ({ paths, partPath }) => {
+    renameSync(paths.currentDir, `${paths.currentDir}.original`);
+    mkdirSync(paths.currentDir, { recursive: false, mode: 0o700 });
+    writeFileSync(partPath, rollCleanupAncestorMarker, { mode: 0o600 });
+  });
+  check(
+    "roll failure retains a replacement after an ancestor swap",
+    rollCleanupAncestor.failed.ok === false &&
+      existsSync(join(rollCleanupAncestor.paths.currentDir, "part-000001.jsonl")) &&
+      readFileSync(join(rollCleanupAncestor.paths.currentDir, "part-000001.jsonl"), "utf8") === rollCleanupAncestorMarker,
+  );
+
   function recordWithEncodedSize(sseq, targetBytes) {
     const rec = { storageSeq: sseq, type: "message", message: { role: "user", content: "" } };
     const overhead = Buffer.byteLength(`${JSON.stringify(rec)}\n`);
@@ -183,6 +274,134 @@ export async function run({ check, leftovers }) {
     }
     return rec;
   }
+
+  check("core session bundle limit is the canonical 64 MiB budget", MAX_SESSION_BUNDLE_BYTES === 64 * 1024 * 1024);
+  const testBundleLimit = 32 * 1024;
+  const budgeted = bundlePaths(root, "bundle-budget");
+  mkdirSync(budgeted.currentDir, { recursive: true, mode: 0o700 });
+  const budgetPart = Buffer.from(`${JSON.stringify(recordWithEncodedSize(1, testBundleLimit / 2))}\n`);
+  const budgetActive = Buffer.from(`${JSON.stringify(recordWithEncodedSize(2, testBundleLimit / 2))}\n`);
+  writeFileSync(join(budgeted.currentDir, "part-000001.jsonl"), budgetPart, { mode: 0o600 });
+  writeFileSync(budgeted.sessionFile, budgetActive, { mode: 0o600 });
+  const budgetBoundary = await replaySessionBundle(budgeted.sessionFile, { testOnlyMaxBundleBytes: testBundleLimit });
+  check("aggregate session bundle accepts its exact byte boundary", budgetBoundary.ok && budgetBoundary.maxSeq === 2);
+  writeFileSync(budgeted.sessionFile, Buffer.concat([budgetActive, Buffer.from("\n")]));
+  const budgetOver = await replaySessionBundle(budgeted.sessionFile, { testOnlyMaxBundleBytes: testBundleLimit });
+  check(
+    "aggregate multi-part session bundle rejects one byte over budget before decoding",
+    budgetOver.ok === false && String(budgetOver.error).includes("MAX_SESSION_BUNDLE_BYTES"),
+  );
+  const budgetForkDest = bundlePaths(root, "bundle-budget-fork");
+  const budgetFork = await writeForkedSession(
+    budgeted.sessionFile,
+    budgetForkDest.sessionFile,
+    undefined,
+    { testOnlyMaxBundleBytes: testBundleLimit },
+  );
+  check(
+    "over-budget core fork rejects without installing its destination",
+    budgetFork.ok === false && !existsSync(budgetForkDest.bundleDir),
+  );
+  const budgetEmptyDest = bundlePaths(root, "bundle-budget-empty-fork");
+  const budgetEmptyFork = await writeForkedSession(
+    budgeted.sessionFile,
+    budgetEmptyDest.sessionFile,
+    0,
+    { testOnlyMaxBundleBytes: testBundleLimit },
+  );
+  check(
+    "sequence-zero fork still rejects an over-budget source before destination installation",
+    budgetEmptyFork.ok === false && !existsSync(budgetEmptyDest.bundleDir),
+  );
+
+  const growthRace = bundlePaths(root, "bundle-growth-race");
+  mkdirSync(growthRace.currentDir, { recursive: true, mode: 0o700 });
+  writeFileSync(growthRace.sessionFile, `${JSON.stringify(recordWithEncodedSize(1, 8 * 1024))}\n`, { mode: 0o600 });
+  let grewOpenedPart = false;
+  const growthDest = bundlePaths(root, "bundle-growth-race-dest");
+  const growthFork = await writeForkedSession(growthRace.sessionFile, growthDest.sessionFile, 0, {
+    testOnlyMaxBundleBytes: 16 * 1024,
+    testHooks: {
+      afterSegmentsOpened(paths) {
+        if (grewOpenedPart) return;
+        grewOpenedPart = true;
+        appendFileSync(paths[0], "x".repeat(16 * 1024));
+      },
+    },
+  });
+  check(
+    "retained descriptors reject part growth before sequence-zero decode or install",
+    growthFork.ok === false && !existsSync(growthDest.bundleDir),
+  );
+
+  const truncationRace = bundlePaths(root, "bundle-truncation-race");
+  mkdirSync(truncationRace.currentDir, { recursive: true, mode: 0o700 });
+  writeFileSync(
+    truncationRace.sessionFile,
+    `${JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "stable" } })}\n`,
+    { mode: 0o600 },
+  );
+  let postOpenTruncations = 0;
+  const truncationDest = bundlePaths(root, "bundle-truncation-race-dest");
+  const truncationFork = await writeForkedSession(truncationRace.sessionFile, truncationDest.sessionFile, 0, {
+    testHooks: {
+      afterSegmentsOpened(paths) {
+        const info = lstatSync(paths[0]);
+        if (info.size < 1) return;
+        postOpenTruncations += 1;
+        truncateSync(paths[0], info.size - 1);
+      },
+    },
+  });
+  check(
+    "retained descriptors reject repeated post-open truncation before decoding or install",
+    truncationFork.ok === false && postOpenTruncations === 3 && !existsSync(truncationDest.bundleDir),
+  );
+
+  const leafRace = bundlePaths(root, "bundle-leaf-race");
+  mkdirSync(leafRace.currentDir, { recursive: true, mode: 0o700 });
+  writeFileSync(leafRace.sessionFile, `${JSON.stringify({ storageSeq: 1, type: "checkpoint" })}\n`, { mode: 0o600 });
+  const leafOutside = join(root, "leaf-race-outside.jsonl");
+  writeFileSync(leafOutside, `${JSON.stringify({ storageSeq: 1, type: "checkpoint" })}\n`, { mode: 0o600 });
+  let replacedLeaf = false;
+  const leafRaceDest = bundlePaths(root, "bundle-leaf-race-dest");
+  const leafRaceFork = await writeForkedSession(leafRace.sessionFile, leafRaceDest.sessionFile, 0, {
+    testHooks: {
+      beforeSegmentOpen(path) {
+        if (replacedLeaf) return;
+        replacedLeaf = true;
+        renameSync(path, `${path}.saved`);
+        symlinkSync(leafOutside, path);
+      },
+    },
+  });
+  check(
+    "no-follow segment open rejects a leaf symlink replacement before install",
+    leafRaceFork.ok === false && !existsSync(leafRaceDest.bundleDir),
+  );
+
+  const ancestorRace = bundlePaths(root, "bundle-ancestor-race");
+  mkdirSync(ancestorRace.currentDir, { recursive: true, mode: 0o700 });
+  writeFileSync(ancestorRace.sessionFile, `${JSON.stringify({ storageSeq: 1, type: "checkpoint" })}\n`, { mode: 0o600 });
+  const outsideCurrent = join(root, "ancestor-race-outside");
+  mkdirSync(outsideCurrent, { recursive: true, mode: 0o700 });
+  writeFileSync(join(outsideCurrent, "session.jsonl"), `${JSON.stringify({ storageSeq: 1, type: "checkpoint" })}\n`, { mode: 0o600 });
+  let replacedAncestor = false;
+  const ancestorDest = bundlePaths(root, "bundle-ancestor-race-dest");
+  const ancestorFork = await writeForkedSession(ancestorRace.sessionFile, ancestorDest.sessionFile, 0, {
+    testHooks: {
+      beforeSegmentOpen() {
+        if (replacedAncestor) return;
+        replacedAncestor = true;
+        renameSync(ancestorRace.currentDir, `${ancestorRace.currentDir}.saved`);
+        symlinkSync(outsideCurrent, ancestorRace.currentDir, "dir");
+      },
+    },
+  });
+  check(
+    "anchored source directories reject ancestor symlink replacement before install",
+    ancestorFork.ok === false && !existsSync(ancestorDest.bundleDir),
+  );
 
   const bound = bundlePaths(root, "bound-1");
   mkdirSync(bound.currentDir, { recursive: true, mode: 0o700 });
@@ -413,6 +632,32 @@ export async function run({ check, leftovers }) {
       revReplay.messages.length === 1 &&
       revReplay.messages[0]?.content === "tail" &&
       String(revReplay.messages[0]?.content ?? "").includes("BODY") === false,
+  );
+  const recoveryRace = bundlePaths(root, "recovery-race");
+  mkdirSync(recoveryRace.currentDir, { recursive: true, mode: 0o700 });
+  const recoveryRaceBlock = { type: "tool_result", tool_use_id: "rr", content: "RESTORE", tool: "bash", repro: "bash rr" };
+  const recoveryRaceReceipt = canonicalStubReceipt("recovery-race", 1, recoveryRaceBlock);
+  writeFileSync(
+    recoveryRace.sessionFile,
+    [
+      JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: [recoveryRaceBlock] } }),
+      JSON.stringify({ storageSeq: 2, type: "revision", kind: "prune", ...recoveryRaceReceipt }),
+    ].join("\n") + "\n",
+    { mode: 0o600 },
+  );
+  let recoveryOpenCount = 0;
+  const recoveryRaceDest = bundlePaths(root, "recovery-race-dest");
+  const recoveryRaceFork = await writeForkedSession(recoveryRace.sessionFile, recoveryRaceDest.sessionFile, 2, {
+    testHooks: {
+      afterSegmentsOpened(paths) {
+        recoveryOpenCount += 1;
+        if (recoveryOpenCount === 2) appendFileSync(paths[0], "\n");
+      },
+    },
+  });
+  check(
+    "recovery scan retains and revalidates source descriptors before materialization",
+    recoveryRaceFork.ok === false && recoveryOpenCount >= 2 && !existsSync(recoveryRaceDest.bundleDir),
   );
   const pruneBlock = { type: "tool_result", tool_use_id: "t", content: "BODY", tool: "bash", repro: "bash x" };
   const pruneReceipt = canonicalStubReceipt("rev-memory", 1, pruneBlock);
@@ -699,6 +944,391 @@ export async function run({ check, leftovers }) {
   ckptW.close();
   check("next append after a checkpoint uses the preserved sequence", ckptNext.ok && ckptNext.storageSeq === 6);
 
+  const tempAttackOutside = join(root, "temp-attack-outside");
+  mkdirSync(tempAttackOutside, { recursive: true, mode: 0o700 });
+  writeFileSync(join(tempAttackOutside, "marker"), "safe");
+  // A symlink replacement is retained as intentionally unreadable evidence;
+  // keep its poisoned admission root separate from later probes.
+  const tempAttackDest = bundlePaths(join(root, "temp-attack-root"), "temp-attack-dest");
+  const tempAttack = await writeForkedSession(sumSrc.sessionFile, tempAttackDest.sessionFile, 4, {
+    testHooks: {
+      afterTempCreated(path) {
+        rmSync(path, { recursive: true, force: true });
+        symlinkSync(tempAttackOutside, path, "dir");
+      },
+    },
+  });
+  check(
+    "exclusive random staging rejects a replaced temp directory without traversing its symlink",
+    tempAttack.ok === false && !existsSync(tempAttackDest.bundleDir) && readFileSync(join(tempAttackOutside, "marker"), "utf8") === "safe",
+  );
+
+  const tempReplacementDest = bundlePaths(root, "temp-replacement-dest");
+  let tempReplacementIdentity = null;
+  const tempReplacement = await writeForkedSession(sumSrc.sessionFile, tempReplacementDest.sessionFile, 4, {
+    testHooks: {
+      afterTempCreated(path) {
+        renameSync(path, `${path}.original`);
+        mkdirSync(path, { recursive: false, mode: 0o700 });
+        writeFileSync(join(path, "competitor.txt"), "competitor-temp-bytes", { mode: 0o600 });
+        const info = lstatSync(path);
+        tempReplacementIdentity = { dev: info.dev, ino: info.ino };
+      },
+    },
+  });
+  const survivingTempReplacement = childDirWithIdentity(dirname(tempReplacementDest.bundleDir), tempReplacementIdentity);
+  check(
+    "failed staging retains a replacement inserted before temp identity cleanup",
+    tempReplacement.ok === false &&
+      tempReplacementIdentity !== null &&
+      survivingTempReplacement !== null &&
+      existsSync(join(survivingTempReplacement, "competitor.txt")) &&
+      readFileSync(join(survivingTempReplacement, "competitor.txt"), "utf8") === "competitor-temp-bytes",
+  );
+
+  const tempFinallyDest = bundlePaths(root, "temp-finally-replacement-dest");
+  let tempFinallyReplacementIdentity = null;
+  const tempFinallyReplacement = await writeForkedSession(sumSrc.sessionFile, tempFinallyDest.sessionFile, 4, {
+    testHooks: {
+      beforeDestinationCurrentInstall() {
+        throw new Error("injected failure before temporary disposal");
+      },
+      beforeTemporaryCleanupMutation(path) {
+        renameSync(path, `${path}.original`);
+        mkdirSync(path, { recursive: false, mode: 0o700 });
+        writeFileSync(join(path, "competitor.txt"), "competitor-finally-bytes", { mode: 0o600 });
+        const info = lstatSync(path);
+        tempFinallyReplacementIdentity = { dev: info.dev, ino: info.ino };
+      },
+    },
+  });
+  const survivingTempFinallyReplacement = childDirWithIdentity(dirname(tempFinallyDest.bundleDir), tempFinallyReplacementIdentity);
+  check(
+    "finally cleanup retains a replacement inserted after temp descriptors close",
+    tempFinallyReplacement.ok === false &&
+      tempFinallyReplacement.commit === "uncertain" &&
+      tempFinallyReplacementIdentity !== null &&
+      survivingTempFinallyReplacement !== null &&
+      existsSync(join(survivingTempFinallyReplacement, "competitor.txt")) &&
+      readFileSync(join(survivingTempFinallyReplacement, "competitor.txt"), "utf8") === "competitor-finally-bytes",
+  );
+
+  const tempFinallyAbaProject = join(root, "temp-finally-aba-project");
+  mkdirSync(tempFinallyAbaProject, { recursive: true, mode: 0o700 });
+  const tempFinallyAbaDest = bundlePaths(tempFinallyAbaProject, "destination");
+  let tempFinallyAbaIdentity = null;
+  const tempFinallyAba = await writeForkedSession(sumSrc.sessionFile, tempFinallyAbaDest.sessionFile, 4, {
+    testHooks: {
+      beforeDestinationCurrentInstall() {
+        throw new Error("injected temporary ABA cleanup failure");
+      },
+      beforeTemporaryCleanupMutation(path) {
+        const original = `${path}.aba-original`;
+        const replacement = `${path}.aba-replacement`;
+        renameSync(path, original);
+        mkdirSync(path, { recursive: false, mode: 0o700 });
+        writeFileSync(join(path, "competitor.txt"), "competitor-temp-aba", { mode: 0o600 });
+        renameSync(path, replacement);
+        renameSync(original, path);
+        renameSync(path, `${path}.aba-original-late`);
+        renameSync(replacement, path);
+        const info = lstatSync(path);
+        tempFinallyAbaIdentity = { dev: info.dev, ino: info.ino };
+      },
+    },
+  });
+  const survivingTempFinallyAba = childDirWithIdentity(dirname(tempFinallyAbaDest.bundleDir), tempFinallyAbaIdentity);
+  check(
+    "finally cleanup retains a replacement across a temporary ABA generation",
+    tempFinallyAba.ok === false &&
+      tempFinallyAba.commit === "uncertain" &&
+      tempFinallyAbaIdentity !== null &&
+      survivingTempFinallyAba !== null &&
+      readFileSync(join(survivingTempFinallyAba, "competitor.txt"), "utf8") === "competitor-temp-aba",
+  );
+
+  const tempFinallyAncestorBase = join(root, "temp-finally-ancestor-base");
+  const tempFinallyAncestorProject = join(tempFinallyAncestorBase, "project");
+  mkdirSync(tempFinallyAncestorProject, { recursive: true, mode: 0o700 });
+  const tempFinallyAncestorDest = bundlePaths(tempFinallyAncestorProject, "destination");
+  let tempFinallyAncestorReplacementPath = null;
+  const tempFinallyAncestor = await writeForkedSession(sumSrc.sessionFile, tempFinallyAncestorDest.sessionFile, 4, {
+    testHooks: {
+      beforeDestinationCurrentInstall() {
+        throw new Error("injected temporary ancestor cleanup failure");
+      },
+      beforeTemporaryCleanupMutation(path) {
+        const project = dirname(path);
+        renameSync(project, `${project}.original`);
+        mkdirSync(project, { recursive: false, mode: 0o700 });
+        mkdirSync(path, { recursive: false, mode: 0o700 });
+        writeFileSync(join(path, "competitor.txt"), "competitor-temp-ancestor", { mode: 0o600 });
+        tempFinallyAncestorReplacementPath = path;
+      },
+    },
+  });
+  check(
+    "finally cleanup retains a replacement after a temporary ancestor swap",
+    tempFinallyAncestor.ok === false &&
+      tempFinallyAncestor.commit === "uncertain" &&
+      tempFinallyAncestorReplacementPath !== null &&
+      existsSync(join(tempFinallyAncestorReplacementPath, "competitor.txt")) &&
+      readFileSync(join(tempFinallyAncestorReplacementPath, "competitor.txt"), "utf8") === "competitor-temp-ancestor",
+  );
+
+  const destinationClaimRaceDest = bundlePaths(root, "destination-claim-race-dest");
+  let competitorClaimIdentity = null;
+  const destinationClaimRace = await writeForkedSession(sumSrc.sessionFile, destinationClaimRaceDest.sessionFile, 4, {
+    testHooks: {
+      beforeDestinationClaim(path) {
+        mkdirSync(path, { recursive: false, mode: 0o700 });
+        const info = lstatSync(path);
+        competitorClaimIdentity = { dev: info.dev, ino: info.ino };
+      },
+    },
+  });
+  const survivingClaim = existsSync(destinationClaimRaceDest.bundleDir)
+    ? lstatSync(destinationClaimRaceDest.bundleDir)
+    : null;
+  check(
+    "atomic destination claim never replaces an intervening empty competitor directory",
+    destinationClaimRace.ok === false &&
+      competitorClaimIdentity !== null &&
+      survivingClaim?.isDirectory() === true &&
+      survivingClaim.dev === competitorClaimIdentity.dev &&
+      survivingClaim.ino === competitorClaimIdentity.ino &&
+      readdirSync(destinationClaimRaceDest.bundleDir).length === 0,
+  );
+
+  const currentCollisionDest = bundlePaths(root, "destination-current-collision-dest");
+  const currentCollisionMarker = join(currentCollisionDest.currentDir, "competitor.txt");
+  const currentCollision = await writeForkedSession(sumSrc.sessionFile, currentCollisionDest.sessionFile, 4, {
+    testHooks: {
+      afterDestinationClaim(path) {
+        mkdirSync(join(path, "current"), { recursive: false, mode: 0o700 });
+        writeFileSync(currentCollisionMarker, "competitor-current-bytes", { mode: 0o600 });
+      },
+    },
+  });
+  check(
+    "failed current install preserves unexpected content inside the claimed destination",
+    currentCollision.ok === false &&
+      currentCollision.commit === "uncertain" &&
+      existsSync(currentCollisionMarker) &&
+      readFileSync(currentCollisionMarker, "utf8") === "competitor-current-bytes",
+  );
+
+  const emptyClaimCleanupDest = bundlePaths(root, "empty-claim-cleanup-dest");
+  const emptyClaimCleanup = await writeForkedSession(sumSrc.sessionFile, emptyClaimCleanupDest.sessionFile, 4, {
+    testHooks: {
+      beforeDestinationCurrentInstall() {
+        throw new Error("injected precommit current-install failure");
+      },
+    },
+  });
+  check(
+    "uncontended precommit cleanup fails closed and retains the empty claim",
+    emptyClaimCleanup.ok === false &&
+      emptyClaimCleanup.commit === "uncertain" &&
+      existsSync(emptyClaimCleanupDest.bundleDir) &&
+      readdirSync(emptyClaimCleanupDest.bundleDir).length === 0,
+  );
+
+  const cleanupSwapDest = bundlePaths(root, "cleanup-identity-swap-dest");
+  const cleanupSwapMarker = join(cleanupSwapDest.bundleDir, "competitor.txt");
+  let cleanupSwapIdentity = null;
+  const cleanupSwap = await writeForkedSession(sumSrc.sessionFile, cleanupSwapDest.sessionFile, 4, {
+    testHooks: {
+      beforeDestinationCurrentInstall() {
+        throw new Error("injected precommit cleanup path");
+      },
+      afterDestinationCleanupIdentityProof(path) {
+        rmdirSync(path);
+        mkdirSync(path, { recursive: false, mode: 0o700 });
+        writeFileSync(cleanupSwapMarker, "competitor-after-proof", { mode: 0o600 });
+        const info = lstatSync(path);
+        cleanupSwapIdentity = { dev: info.dev, ino: info.ino };
+      },
+    },
+  });
+  const survivingCleanupSwap = existsSync(cleanupSwapDest.bundleDir)
+    ? lstatSync(cleanupSwapDest.bundleDir)
+    : null;
+  check(
+    "empty-claim cleanup rechecks identity after proof and preserves a replacement root",
+    cleanupSwap.ok === false &&
+      cleanupSwap.commit === "uncertain" &&
+      cleanupSwapIdentity !== null &&
+      survivingCleanupSwap?.isDirectory() === true &&
+      survivingCleanupSwap.dev === cleanupSwapIdentity.dev &&
+      survivingCleanupSwap.ino === cleanupSwapIdentity.ino &&
+      existsSync(cleanupSwapMarker) &&
+      readFileSync(cleanupSwapMarker, "utf8") === "competitor-after-proof",
+  );
+
+  const cleanupFinalSwapDest = bundlePaths(root, "cleanup-final-swap-dest");
+  let cleanupFinalSwapIdentity = null;
+  const cleanupFinalSwap = await writeForkedSession(sumSrc.sessionFile, cleanupFinalSwapDest.sessionFile, 4, {
+    testHooks: {
+      beforeDestinationCurrentInstall() {
+        throw new Error("injected final cleanup race");
+      },
+      beforeDestinationCleanupMutation(path) {
+        rmdirSync(path);
+        mkdirSync(path, { recursive: false, mode: 0o700 });
+        const info = lstatSync(path);
+        cleanupFinalSwapIdentity = { dev: info.dev, ino: info.ino };
+      },
+    },
+  });
+  const survivingCleanupFinalSwap = existsSync(cleanupFinalSwapDest.bundleDir)
+    ? lstatSync(cleanupFinalSwapDest.bundleDir)
+    : null;
+  check(
+    "cleanup fails closed when a leaf is replaced after the final identity proof",
+    cleanupFinalSwap.ok === false &&
+      cleanupFinalSwap.commit === "uncertain" &&
+      cleanupFinalSwapIdentity !== null &&
+      survivingCleanupFinalSwap?.isDirectory() === true &&
+      survivingCleanupFinalSwap.dev === cleanupFinalSwapIdentity.dev &&
+      survivingCleanupFinalSwap.ino === cleanupFinalSwapIdentity.ino,
+  );
+
+  const cleanupAbaDest = bundlePaths(root, "cleanup-aba-dest");
+  let cleanupAbaReplacement = null;
+  let cleanupAbaIdentity = null;
+  const cleanupAba = await writeForkedSession(sumSrc.sessionFile, cleanupAbaDest.sessionFile, 4, {
+    testHooks: {
+      beforeDestinationCurrentInstall() {
+        throw new Error("injected cleanup ABA race");
+      },
+      afterDestinationCleanupIdentityProof(path) {
+        const original = `${path}.aba-original`;
+        cleanupAbaReplacement = `${path}.aba-replacement`;
+        renameSync(path, original);
+        mkdirSync(path, { recursive: false, mode: 0o700 });
+        renameSync(path, cleanupAbaReplacement);
+        renameSync(original, path);
+      },
+      beforeDestinationCleanupMutation(path) {
+        const original = `${path}.aba-original-late`;
+        renameSync(path, original);
+        renameSync(cleanupAbaReplacement, path);
+        const info = lstatSync(path);
+        cleanupAbaIdentity = { dev: info.dev, ino: info.ino };
+      },
+    },
+  });
+  const survivingCleanupAba = existsSync(cleanupAbaDest.bundleDir)
+    ? lstatSync(cleanupAbaDest.bundleDir)
+    : null;
+  check(
+    "cleanup fails closed across an ABA leaf generation after the final identity proof",
+    cleanupAba.ok === false &&
+      cleanupAba.commit === "uncertain" &&
+      cleanupAbaIdentity !== null &&
+      survivingCleanupAba?.isDirectory() === true &&
+      survivingCleanupAba.dev === cleanupAbaIdentity.dev &&
+      survivingCleanupAba.ino === cleanupAbaIdentity.ino,
+  );
+
+  const cleanupAncestorBase = join(root, "cleanup-ancestor-base");
+  const cleanupAncestorProject = join(cleanupAncestorBase, "project");
+  mkdirSync(cleanupAncestorProject, { recursive: true, mode: 0o700 });
+  const cleanupAncestorDest = bundlePaths(cleanupAncestorProject, "session");
+  let cleanupAncestorIdentity = null;
+  const cleanupAncestor = await writeForkedSession(sumSrc.sessionFile, cleanupAncestorDest.sessionFile, 4, {
+    testHooks: {
+      beforeDestinationCurrentInstall() {
+        throw new Error("injected cleanup ancestor race");
+      },
+      beforeDestinationCleanupMutation(path) {
+        const project = dirname(path);
+        renameSync(project, `${project}.original`);
+        mkdirSync(project, { recursive: false, mode: 0o700 });
+        mkdirSync(path, { recursive: false, mode: 0o700 });
+        const info = lstatSync(path);
+        cleanupAncestorIdentity = { dev: info.dev, ino: info.ino };
+      },
+    },
+  });
+  const survivingCleanupAncestor = existsSync(cleanupAncestorDest.bundleDir)
+    ? lstatSync(cleanupAncestorDest.bundleDir)
+    : null;
+  check(
+    "cleanup fails closed when its destination ancestor is swapped after proof",
+    cleanupAncestor.ok === false &&
+      cleanupAncestor.commit === "uncertain" &&
+      cleanupAncestorIdentity !== null &&
+      survivingCleanupAncestor?.isDirectory() === true &&
+      survivingCleanupAncestor.dev === cleanupAncestorIdentity.dev &&
+      survivingCleanupAncestor.ino === cleanupAncestorIdentity.ino,
+  );
+
+  const rollbackReplacementDest = bundlePaths(root, "rollback-replacement-dest");
+  const rollbackReplacementMarker = join(rollbackReplacementDest.bundleDir, "competitor.txt");
+  let rollbackReplacementIdentity = null;
+  const rollbackReplacement = await writeForkedSession(sumSrc.sessionFile, rollbackReplacementDest.sessionFile, 4, {
+    testHooks: {
+      beforeDestinationParentSync(path) {
+        rmSync(path, { recursive: true, force: true });
+        mkdirSync(path, { recursive: false, mode: 0o700 });
+        writeFileSync(rollbackReplacementMarker, "competitor-owned-bytes", { mode: 0o600 });
+        const info = lstatSync(path);
+        rollbackReplacementIdentity = { dev: info.dev, ino: info.ino };
+        throw new Error("injected failure after destination replacement");
+      },
+    },
+  });
+  const survivingReplacement = existsSync(rollbackReplacementDest.bundleDir)
+    ? lstatSync(rollbackReplacementDest.bundleDir)
+    : null;
+  check(
+    "rollback never deletes a replacement destination and reports an uncertain commit",
+    rollbackReplacement.ok === false &&
+      rollbackReplacement.commit === "uncertain" &&
+      rollbackReplacementIdentity !== null &&
+      survivingReplacement?.isDirectory() === true &&
+      survivingReplacement.dev === rollbackReplacementIdentity.dev &&
+      survivingReplacement.ino === rollbackReplacementIdentity.ino &&
+      readFileSync(rollbackReplacementMarker, "utf8") === "competitor-owned-bytes",
+  );
+
+  const postRenameSyncDest = bundlePaths(root, "post-rename-sync-dest");
+  const postRenameExtra = join(postRenameSyncDest.bundleDir, "competitor-extra.txt");
+  const postRenameSync = await writeForkedSession(sumSrc.sessionFile, postRenameSyncDest.sessionFile, 4, {
+    testHooks: {
+      beforeDestinationParentSync() {
+        writeFileSync(postRenameExtra, "competitor-post-commit", { mode: 0o600 });
+        throw new Error("injected post-rename sync failure");
+      },
+    },
+  });
+  const postRenameSyncReplay = await replaySessionBundle(postRenameSyncDest.sessionFile);
+  check(
+    "post-commit failure preserves the installed session and every unexpected child",
+    postRenameSync.ok === false &&
+      postRenameSync.commit === "uncertain" &&
+      postRenameSyncReplay.ok &&
+      existsSync(postRenameExtra) &&
+      readFileSync(postRenameExtra, "utf8") === "competitor-post-commit",
+  );
+
+  const postRenameVerifyDest = bundlePaths(root, "post-rename-verify-dest");
+  const postRenameVerify = await writeForkedSession(sumSrc.sessionFile, postRenameVerifyDest.sessionFile, 4, {
+    testHooks: {
+      beforeDestinationVerify(path) {
+        chmodSync(path, 0o755);
+      },
+    },
+  });
+  check(
+    "post-rename verification failure preserves the committed destination as uncertain",
+    postRenameVerify.ok === false &&
+      postRenameVerify.commit === "uncertain" &&
+      existsSync(postRenameVerifyDest.sessionFile),
+  );
+
   const failForkSrc = bundlePaths(root, "fail-fork-src");
   mkdirSync(failForkSrc.currentDir, { recursive: true, mode: 0o700 });
   writeFileSync(
@@ -713,8 +1343,36 @@ export async function run({ check, leftovers }) {
   const failDest = bundlePaths(root, "fail-fork-dst");
   const failFork = await writeForkedSession(failForkSrc.sessionFile, failDest.sessionFile, 1);
   check("failed fork does not leave a destination bundle", failFork.ok === false && !existsSync(failDest.bundleDir));
-  const leftoversTmp = readdirSync(root).filter((n) => n.includes(".tmp-"));
-  check("failed fork removes the temporary sibling", leftoversTmp.length === 0);
+  const leftoversTmp = readdirSync(root).filter((n) => /^t-[0-9a-f]{32}$/.test(n));
+  check("failed fork retains temporary siblings when cleanup is not descriptor-bound", leftoversTmp.length > 0);
+
+  const retainedTempCapRoot = join(root, "retained-temp-cap");
+  mkdirSync(retainedTempCapRoot, { recursive: true, mode: 0o700 });
+  for (let i = 0; i < MAX_RETAINED_TEMP_BUNDLES; i++) {
+    mkdirSync(join(retainedTempCapRoot, `t-${String(i).padStart(32, "0")}`), { mode: 0o700 });
+  }
+  const retainedTempCapDest = bundlePaths(retainedTempCapRoot, "capacity-dest");
+  const retainedTempCapFork = await writeForkedSession(sumSrc.sessionFile, retainedTempCapDest.sessionFile, 4);
+  check(
+    "retained temporary session count is durably bounded",
+    retainedTempCapFork.ok === false &&
+      retainedTempCapFork.error.includes(`${MAX_RETAINED_TEMP_BUNDLES}`) &&
+      readdirSync(retainedTempCapRoot).filter((name) => /^t-[0-9a-f]{32}$/.test(name)).length === MAX_RETAINED_TEMP_BUNDLES,
+  );
+
+  const retainedTempBytesRoot = join(root, "retained-temp-bytes");
+  mkdirSync(retainedTempBytesRoot, { recursive: true, mode: 0o700 });
+  const retainedTempBytesDir = join(retainedTempBytesRoot, `t-${"f".repeat(32)}`);
+  mkdirSync(retainedTempBytesDir, { mode: 0o700 });
+  const retainedTempBytesFile = join(retainedTempBytesDir, "retained.bin");
+  writeFileSync(retainedTempBytesFile, "", { mode: 0o600 });
+  truncateSync(retainedTempBytesFile, MAX_RETAINED_TEMP_BYTES);
+  const retainedTempBytesDest = bundlePaths(retainedTempBytesRoot, "bytes-dest");
+  const retainedTempBytesFork = await writeForkedSession(sumSrc.sessionFile, retainedTempBytesDest.sessionFile, 4);
+  check(
+    "retained temporary session bytes are durably bounded",
+    retainedTempBytesFork.ok === false && retainedTempBytesFork.error.includes(`${MAX_RETAINED_TEMP_BYTES}`),
+  );
 
   const imgSrc = bundlePaths(root, "img-src");
   mkdirSync(imgSrc.currentDir, { recursive: true, mode: 0o700 });
@@ -741,6 +1399,25 @@ export async function run({ check, leftovers }) {
   check("fork copies a referenced image", imgFork.ok && existsSync(join(imgDst.currentDir, "session-img-1.png")));
   check("fork skips an unreferenced image", !existsSync(join(imgDst.currentDir, "session-img-2.png")));
   check("fork skips a sibling image name", !existsSync(join(imgDst.currentDir, "other-img-1.png")));
+
+  const imageRaceOutside = join(root, "image-race-outside.png");
+  writeFileSync(imageRaceOutside, Buffer.from("outside"));
+  const imageRaceDest = bundlePaths(root, "img-race-dest");
+  let replacedImage = false;
+  const imageRaceFork = await writeForkedSession(imgSrc.sessionFile, imageRaceDest.sessionFile, 1, {
+    testHooks: {
+      beforeImageOpen(path) {
+        if (replacedImage) return;
+        replacedImage = true;
+        renameSync(path, `${path}.saved`);
+        symlinkSync(imageRaceOutside, path);
+      },
+    },
+  });
+  check(
+    "no-follow image copy rejects replacement and installs no destination",
+    imageRaceFork.ok === false && !existsSync(imageRaceDest.bundleDir),
+  );
 
   const badImg = bundlePaths(root, "img-bad");
   mkdirSync(badImg.currentDir, { recursive: true, mode: 0o700 });
@@ -811,8 +1488,87 @@ export async function run({ check, leftovers }) {
   emptyWriter.close();
   const removedEmpty = await removeEmptySessionBundle(emptyRemovable.sessionFile);
   check(
-    "empty-session cleanup removes a bundle with only an empty current",
-    removedEmpty.ok && removedEmpty.removed === true && !existsSync(emptyRemovable.bundleDir),
+    "empty-session cleanup retains a bundle when removal is not descriptor-bound",
+    removedEmpty.ok && removedEmpty.removed === false && existsSync(emptyRemovable.bundleDir),
+  );
+
+  const emptyCleanupRace = bundlePaths(root, "empty-cleanup-race");
+  const emptyRaceWriter = openWriter(emptyCleanupRace.sessionFile);
+  emptyRaceWriter.close();
+  let emptyCleanupReplacementIdentity = null;
+  const emptyCleanupResult = await removeEmptySessionBundle(emptyCleanupRace.sessionFile, {
+    testHooks: {
+      beforeEmptySessionCleanupMutation(path) {
+        renameSync(path, `${path}.original`);
+        mkdirSync(path, { recursive: false, mode: 0o700 });
+        mkdirSync(join(path, "current"), { recursive: false, mode: 0o700 });
+        writeFileSync(join(path, "current", "session.jsonl"), "", { mode: 0o600 });
+        writeFileSync(join(path, "competitor.txt"), "competitor-empty-cleanup", { mode: 0o600 });
+        const info = lstatSync(path);
+        emptyCleanupReplacementIdentity = { dev: info.dev, ino: info.ino };
+      },
+    },
+  });
+  check(
+    "empty-session cleanup retains a replacement inserted after final shape proof",
+    emptyCleanupResult.ok &&
+      emptyCleanupResult.removed === false &&
+      emptyCleanupReplacementIdentity !== null &&
+      lstatSync(emptyCleanupRace.bundleDir).ino === emptyCleanupReplacementIdentity.ino &&
+      existsSync(join(emptyCleanupRace.bundleDir, "competitor.txt")) &&
+      readFileSync(join(emptyCleanupRace.bundleDir, "competitor.txt"), "utf8") === "competitor-empty-cleanup",
+  );
+
+  const emptyCleanupAba = bundlePaths(root, "empty-cleanup-aba");
+  const emptyAbaWriter = openWriter(emptyCleanupAba.sessionFile);
+  emptyAbaWriter.close();
+  const emptyCleanupAbaResult = await removeEmptySessionBundle(emptyCleanupAba.sessionFile, {
+    testHooks: {
+      beforeEmptySessionCleanupMutation(path) {
+        const original = `${path}.original`;
+        const replacement = `${path}.replacement`;
+        renameSync(path, original);
+        mkdirSync(path, { recursive: false, mode: 0o700 });
+        mkdirSync(join(path, "current"), { recursive: false, mode: 0o700 });
+        writeFileSync(join(path, "current", "session.jsonl"), "", { mode: 0o600 });
+        renameSync(path, replacement);
+        renameSync(original, path);
+      },
+    },
+  });
+  check(
+    "empty-session cleanup retains the original bundle across an ABA replacement",
+    emptyCleanupAbaResult.ok &&
+      emptyCleanupAbaResult.removed === false &&
+      existsSync(emptyCleanupAba.bundleDir) &&
+      existsSync(emptyCleanupAba.sessionFile),
+  );
+
+  const emptyCleanupAncestorBase = join(root, "empty-cleanup-ancestor-base");
+  const emptyCleanupAncestorProject = join(emptyCleanupAncestorBase, "project");
+  mkdirSync(emptyCleanupAncestorProject, { recursive: true, mode: 0o700 });
+  const emptyCleanupAncestor = bundlePaths(emptyCleanupAncestorProject, "session");
+  const emptyAncestorWriter = openWriter(emptyCleanupAncestor.sessionFile);
+  emptyAncestorWriter.close();
+  const emptyCleanupAncestorResult = await removeEmptySessionBundle(emptyCleanupAncestor.sessionFile, {
+    testHooks: {
+      beforeEmptySessionCleanupMutation(path) {
+        const project = dirname(path);
+        renameSync(project, `${project}.original`);
+        mkdirSync(project, { recursive: false, mode: 0o700 });
+        mkdirSync(path, { recursive: false, mode: 0o700 });
+        mkdirSync(join(path, "current"), { recursive: false, mode: 0o700 });
+        writeFileSync(join(path, "current", "session.jsonl"), "", { mode: 0o600 });
+        writeFileSync(join(path, "competitor.txt"), "competitor-empty-ancestor", { mode: 0o600 });
+      },
+    },
+  });
+  check(
+    "empty-session cleanup retains a replacement after an ancestor swap",
+    emptyCleanupAncestorResult.ok &&
+      emptyCleanupAncestorResult.removed === false &&
+      existsSync(join(emptyCleanupAncestor.bundleDir, "competitor.txt")) &&
+      readFileSync(join(emptyCleanupAncestor.bundleDir, "competitor.txt"), "utf8") === "competitor-empty-ancestor",
   );
 
   const fresh = bundlePaths(root, "fresh-1");
@@ -896,4 +1652,9 @@ export async function run({ check, leftovers }) {
   check("sessionBundleExists is not stat(sessionFile) alone", sessionBundleExists(roll.sessionFile) === true);
   writeFileSync(roll.sessionFile, "");
   check("sessionBundleHasContent sees numbered parts when active is empty", sessionBundleHasContent(roll.sessionFile) === true);
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const result = await runExportedChecks(run, { label: "agent-core session" });
+  process.exitCode = result.exitCode;
 }

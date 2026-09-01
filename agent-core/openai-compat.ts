@@ -870,6 +870,40 @@ export function completionLiveDelta(
   return text || thinking ? { text, thinking } : null;
 }
 
+const TOOL_CALL_ARGUMENT_ERROR = "provider protocol error: tool call arguments must be a JSON object";
+const TOOL_CALL_IDENTITY_ERROR = "provider protocol error: tool call identity is missing";
+const TOOL_CALL_SHAPE_ERROR = "provider protocol error: malformed tool call";
+const TOOL_CALL_INDEX_ERROR = "provider protocol error: malformed tool call index";
+const MAX_TOOL_CALL_INDEX = 10_000;
+
+function toolCallIdentityError(id: unknown, name: unknown): string | null {
+  return typeof id !== "string" || !id.trim() || typeof name !== "string" || !name.trim()
+    ? TOOL_CALL_IDENTITY_ERROR
+    : null;
+}
+
+function toolCallIndex(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= MAX_TOOL_CALL_INDEX
+    ? value
+    : null;
+}
+
+function decodeToolCallArguments(
+  raw: unknown,
+  jsonEncoded: boolean,
+): { input: Record<string, unknown>; error?: undefined } | { input?: undefined; error: string } {
+  let parsed = raw;
+  if (jsonEncoded) {
+    if (typeof raw !== "string") return { error: TOOL_CALL_ARGUMENT_ERROR };
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { error: TOOL_CALL_ARGUMENT_ERROR };
+    }
+  }
+  return isRecord(parsed) ? { input: parsed } : { error: TOOL_CALL_ARGUMENT_ERROR };
+}
+
 export function completionResultFromEvents(
   events: Array<Record<string, unknown>>,
   onText: (text: string) => void,
@@ -877,11 +911,13 @@ export function completionResultFromEvents(
 ): CallResultLike {
   let text = "";
   let thinking = "";
-  const calls = new Map<number, { id: string; name: string; args: string }>();
+  const calls = new Map<number, { id: string; name: string; type?: "function"; args: string }>();
+  const indicesById = new Map<string, number>();
   let usage: CallResultLike["usage"] = null;
   let rawUsage: Record<string, unknown> | undefined;
   let ttftMs: number | null = null;
   let stopReason: string | null = null;
+  let toolError: string | undefined;
   for (const ev of events) {
     if (ev.usage && typeof ev.usage === "object" && !Array.isArray(ev.usage)) {
       rawUsage = mergeUsageRecords(rawUsage, ev.usage as Record<string, unknown>);
@@ -903,32 +939,116 @@ export function completionResultFromEvents(
       thinking += live.thinking;
     }
     const toolCalls = delta.tool_calls;
+    if (toolCalls !== undefined && !Array.isArray(toolCalls)) toolError ??= TOOL_CALL_SHAPE_ERROR;
     if (Array.isArray(toolCalls)) {
+      const indicesInEvent = new Set<number>();
       for (const raw of toolCalls) {
-        if (!raw || typeof raw !== "object") continue;
-        const tc = raw as { index?: number; id?: string; function?: { name?: string; arguments?: string } };
-        const idx = typeof tc.index === "number" ? tc.index : 0;
-        const cur = calls.get(idx) ?? { id: "", name: "", args: "" };
-        if (typeof tc.id === "string" && tc.id) cur.id = tc.id;
-        if (typeof tc.function?.name === "string" && tc.function.name) cur.name = tc.function.name;
-        if (typeof tc.function?.arguments === "string") cur.args += tc.function.arguments;
-        calls.set(idx, cur);
+        if (!isRecord(raw)) {
+          toolError ??= TOOL_CALL_SHAPE_ERROR;
+          continue;
+        }
+        const tc = raw as { index?: unknown; id?: unknown; type?: unknown; function?: unknown };
+        if (!("index" in tc)) {
+          toolError ??= TOOL_CALL_INDEX_ERROR;
+          continue;
+        }
+        const idx = toolCallIndex(tc.index);
+        if (idx === null) {
+          toolError ??= TOOL_CALL_INDEX_ERROR;
+          continue;
+        }
+        if (indicesInEvent.has(idx)) {
+          toolError ??= `${TOOL_CALL_INDEX_ERROR}: duplicate index in one delta`;
+          continue;
+        }
+        indicesInEvent.add(idx);
+        const cur = calls.get(idx);
+        if (tc.type !== undefined && tc.type !== null && tc.type !== "function") {
+          toolError ??= TOOL_CALL_SHAPE_ERROR;
+          continue;
+        }
+        if (tc.type === null && (!cur || cur.type === undefined)) {
+          toolError ??= TOOL_CALL_SHAPE_ERROR;
+          continue;
+        }
+        if (tc.id !== undefined && tc.id !== null && typeof tc.id !== "string") {
+          toolError ??= TOOL_CALL_IDENTITY_ERROR;
+          continue;
+        }
+        if (tc.id === null && !cur) {
+          toolError ??= TOOL_CALL_IDENTITY_ERROR;
+          continue;
+        }
+        if (tc.function !== undefined && !isRecord(tc.function)) {
+          toolError ??= TOOL_CALL_SHAPE_ERROR;
+          continue;
+        }
+        const fn = isRecord(tc.function) ? tc.function : {};
+        if (fn.name !== undefined && fn.name !== null && typeof fn.name !== "string") {
+          toolError ??= TOOL_CALL_IDENTITY_ERROR;
+          continue;
+        }
+        if (fn.name === null && (!cur || !cur.name)) {
+          toolError ??= TOOL_CALL_IDENTITY_ERROR;
+          continue;
+        }
+        if (fn.arguments !== undefined && typeof fn.arguments !== "string") {
+          toolError ??= TOOL_CALL_ARGUMENT_ERROR;
+          continue;
+        }
+        const id = typeof tc.id === "string" ? tc.id : "";
+        const name = typeof fn.name === "string" ? fn.name : "";
+        const type = tc.type === "function" ? tc.type : undefined;
+        const args = typeof fn.arguments === "string" ? fn.arguments : "";
+        if (!cur) {
+          if (!id || !name) {
+            toolError ??= TOOL_CALL_IDENTITY_ERROR;
+            continue;
+          }
+          const priorIndex = indicesById.get(id);
+          if (priorIndex !== undefined && priorIndex !== idx) {
+            toolError ??= `${TOOL_CALL_IDENTITY_ERROR}: call id changed index`;
+            continue;
+          }
+          calls.set(idx, { id, name, ...(type ? { type } : {}), args });
+          indicesById.set(id, idx);
+          continue;
+        }
+        if ((id && id !== cur.id) || (name && name !== cur.name)) {
+          toolError ??= `${TOOL_CALL_IDENTITY_ERROR}: call identity changed`;
+          continue;
+        }
+        if (type && cur.type && type !== cur.type) {
+          toolError ??= `${TOOL_CALL_SHAPE_ERROR}: call type changed`;
+          continue;
+        }
+        if (type) cur.type = type;
+        if (id) {
+          const priorIndex = indicesById.get(id);
+          if (priorIndex !== undefined && priorIndex !== idx) {
+            toolError ??= `${TOOL_CALL_IDENTITY_ERROR}: call id changed index`;
+            continue;
+          }
+          indicesById.set(id, idx);
+        }
+        cur.args += args;
       }
     }
   }
   const blocks: Array<Record<string, unknown>> = [];
   if (thinking) blocks.push({ type: "thinking", thinking });
   if (text) blocks.push({ type: "text", text });
+  if (toolError) return { blocks, usage, ttftMs, stopReason, error: toolError };
   const ordered = [...calls.entries()].sort((a, b) => a[0] - b[0]);
+  const decoded: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
   for (const [, call] of ordered) {
-    let input: unknown = {};
-    try {
-      input = JSON.parse(call.args || "{}");
-    } catch {
-      input = {};
-    }
-    blocks.push({ type: "tool_use", id: call.id, name: call.name, input });
+    const identityError = toolCallIdentityError(call.id, call.name);
+    if (identityError) return { blocks, usage, ttftMs, stopReason, error: identityError };
+    const args = decodeToolCallArguments(call.args, true);
+    if ("error" in args) return { blocks, usage, ttftMs, stopReason, error: args.error };
+    decoded.push({ id: call.id, name: call.name, input: args.input });
   }
+  blocks.push(...decoded.map((call) => ({ type: "tool_use", ...call })));
   return { blocks, usage, ttftMs, stopReason };
 }
 
@@ -977,8 +1097,9 @@ export function googleResultFromEvents(
   let text = "";
   const thoughts: Array<{ thinking: string; signature: string }> = [];
   const thoughtKeys = new Set<string>();
-  const calls: Array<{ id: string; name: string; args: string }> = [];
+  const calls: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
   const callKeys = new Set<string>();
+  let toolError: string | undefined;
   let usage: CallResultLike["usage"] = null;
   let rawUsage: Record<string, unknown> | undefined;
   let ttftMs: number | null = null;
@@ -1009,16 +1130,28 @@ export function googleResultFromEvents(
         thoughts.push({ thinking, signature });
         continue;
       }
+      if (!("functionCall" in part)) continue;
       const call = part.functionCall;
-      if (!call || typeof call !== "object") continue;
+      if (!isRecord(call)) {
+        toolError ??= TOOL_CALL_SHAPE_ERROR;
+        continue;
+      }
       const fn = call as { name?: unknown; args?: unknown };
       const name = typeof fn.name === "string" ? fn.name : "";
-      if (!name) continue;
-      const args = JSON.stringify(fn.args ?? {});
-      const key = `${name}:${args}`;
+      const identityError = toolCallIdentityError(`call_${calls.length + 1}`, name);
+      if (identityError) {
+        toolError ??= identityError;
+        continue;
+      }
+      const args = decodeToolCallArguments(fn.args, false);
+      if ("error" in args) {
+        toolError ??= args.error;
+        continue;
+      }
+      const key = `${name}:${JSON.stringify(args.input)}`;
       if (callKeys.has(key)) continue;
       callKeys.add(key);
-      calls.push({ id: `call_${calls.length + 1}`, name, args });
+      calls.push({ id: `call_${calls.length + 1}`, name, input: args.input });
     }
   }
   const blocks: Array<Record<string, unknown>> = [];
@@ -1026,15 +1159,8 @@ export function googleResultFromEvents(
     blocks.push({ type: "thinking", thinking: thought.thinking, signature: thought.signature });
   }
   if (text) blocks.push({ type: "text", text });
-  for (const call of calls) {
-    let input: unknown = {};
-    try {
-      input = JSON.parse(call.args || "{}");
-    } catch {
-      input = {};
-    }
-    blocks.push({ type: "tool_use", id: call.id, name: call.name, input });
-  }
+  if (toolError) return { blocks, usage, ttftMs, stopReason, error: toolError };
+  blocks.push(...calls.map((call) => ({ type: "tool_use", ...call })));
   return { blocks, usage, ttftMs, stopReason };
 }
 
@@ -1111,8 +1237,17 @@ export function responsesResultFromEvents(
   started: number,
 ): CallResultLike {
   let text = "";
-  const byKey = new Map<string, { id: string; name: string; args: string }>();
-  const order: Array<{ id: string; name: string; args: string }> = [];
+  type ResponseToolCall = {
+    id: string;
+    itemId: string;
+    callId: string;
+    name: string;
+    args: string;
+    outputIndex?: number;
+  };
+  const byKey = new Map<string, ResponseToolCall>();
+  const byIndex = new Map<number, ResponseToolCall>();
+  const order: ResponseToolCall[] = [];
   const reasoning = new Map<string, { id: string; thinking: string; signature?: string }>();
   const reasoningOrder: string[] = [];
   let usage: CallResultLike["usage"] = null;
@@ -1120,10 +1255,136 @@ export function responsesResultFromEvents(
   let ttftMs: number | null = null;
   let stopReason: string | null = null;
   let error: string | undefined;
-  const lookup = (ev: Record<string, unknown>): { id: string; name: string; args: string } | undefined => {
-    const callId = typeof ev.call_id === "string" ? ev.call_id : "";
-    const itemId = typeof ev.item_id === "string" ? ev.item_id : "";
-    return (callId && byKey.get(callId)) || (itemId && byKey.get(itemId)) || undefined;
+  let toolError: string | undefined;
+  const toolProtocolError = (message: string): string => error ? `${message}; provider error: ${error}` : message;
+  const optionalText = (value: unknown): string | undefined | null => {
+    if (value === undefined) return undefined;
+    return typeof value === "string" ? value : null;
+  };
+  const optionalIndex = (value: unknown): number | undefined | null => {
+    if (value === undefined) return undefined;
+    return toolCallIndex(value);
+  };
+  const conflict = (message: string): void => {
+    toolError ??= `provider protocol error: ${message}`;
+  };
+  const bindKey = (key: string, call: ResponseToolCall): boolean => {
+    if (!key) return true;
+    const existing = byKey.get(key);
+    if (existing && existing !== call) {
+      conflict("conflicting tool call identity");
+      return false;
+    }
+    byKey.set(key, call);
+    return true;
+  };
+  const resolveCall = (
+    callId: string,
+    itemId: string,
+    outputIndex: number | undefined,
+  ): ResponseToolCall | null => {
+    const matches = new Set<ResponseToolCall>();
+    if (callId) {
+      const call = byKey.get(callId);
+      if (call) matches.add(call);
+    }
+    if (itemId) {
+      const call = byKey.get(itemId);
+      if (call) matches.add(call);
+    }
+    if (outputIndex !== undefined) {
+      const call = byIndex.get(outputIndex);
+      if (call) matches.add(call);
+    }
+    if (matches.size > 1) {
+      conflict("tool call identity or output index changed");
+      return null;
+    }
+    let call = matches.values().next().value as ResponseToolCall | undefined;
+    if (!call) {
+      if (!callId && !itemId) {
+        toolError ??= TOOL_CALL_IDENTITY_ERROR;
+        return null;
+      }
+      call = {
+        id: callId || itemId,
+        itemId,
+        callId,
+        name: "",
+        args: "",
+        ...(outputIndex === undefined ? {} : { outputIndex }),
+      };
+      order.push(call);
+    }
+    if (outputIndex !== undefined) {
+      const existing = byIndex.get(outputIndex);
+      if (existing && existing !== call) {
+        conflict("tool call output index was reused");
+        return null;
+      }
+      if (call.outputIndex !== undefined && call.outputIndex !== outputIndex) {
+        conflict("tool call output index changed");
+        return null;
+      }
+      call.outputIndex = outputIndex;
+      byIndex.set(outputIndex, call);
+    }
+    if (itemId) {
+      if (call.itemId && call.itemId !== itemId) {
+        conflict("tool call item id changed");
+        return null;
+      }
+      call.itemId = itemId;
+      if (!bindKey(itemId, call)) return null;
+    }
+    if (callId) {
+      if (call.callId && call.callId !== callId) {
+        conflict("tool call id changed");
+        return null;
+      }
+      call.callId = callId;
+      call.id = callId;
+      if (!bindKey(callId, call)) return null;
+    }
+    return call;
+  };
+  const takeFunctionCall = (item: Record<string, unknown>, outputIndex: number | undefined): void => {
+    if (item.type !== "function_call") return;
+    const itemId = optionalText(item.id);
+    const callId = optionalText(item.call_id);
+    const name = optionalText(item.name);
+    const args = optionalText(item.arguments);
+    if (itemId === null || callId === null) {
+      toolError ??= TOOL_CALL_IDENTITY_ERROR;
+      return;
+    }
+    if (name === null) {
+      toolError ??= TOOL_CALL_IDENTITY_ERROR;
+      return;
+    }
+    if (args === null) {
+      toolError ??= TOOL_CALL_ARGUMENT_ERROR;
+      return;
+    }
+    const call = resolveCall(callId ?? "", itemId ?? "", outputIndex);
+    if (!call) return;
+    if (name) {
+      if (call.name && call.name !== name) {
+        conflict("tool call name changed");
+        return;
+      }
+      call.name = name;
+    }
+    if (args !== undefined) {
+      if (!call.args) call.args = args;
+      else if (args === call.args || call.args.startsWith(args)) {
+        /* The stream already contains this complete or more granular prefix. */
+      } else if (args.startsWith(call.args)) {
+        call.args = args;
+      } else {
+        conflict("tool call arguments changed");
+      }
+    }
   };
   const takeReasoning = (item: {
     type?: string;
@@ -1142,34 +1403,6 @@ export function responsesResultFromEvents(
     if (id) prev.id = id;
     if (!reasoning.has(key)) reasoningOrder.push(key);
     reasoning.set(key, prev);
-  };
-  const takeFunctionCall = (item: {
-    type?: string;
-    call_id?: string;
-    id?: string;
-    name?: string;
-    arguments?: string;
-  }): void => {
-    if (item.type !== "function_call") return;
-    const realCallId = typeof item.call_id === "string" && item.call_id ? item.call_id : "";
-    const id = realCallId || String(item.id ?? "");
-    if (!id) return;
-    let call = (realCallId ? byKey.get(realCallId) : undefined) || (item.id ? byKey.get(item.id) : undefined) || byKey.get(id);
-    if (!call) {
-      call = { id, name: String(item.name ?? ""), args: typeof item.arguments === "string" ? item.arguments : "" };
-      order.push(call);
-      if (realCallId) byKey.set(realCallId, call);
-      if (item.id) byKey.set(item.id, call);
-      if (!byKey.has(id)) byKey.set(id, call);
-      return;
-    }
-    if (realCallId && call.id !== realCallId) {
-      call.id = realCallId;
-      byKey.set(realCallId, call);
-    }
-    if (item.id && !byKey.has(item.id)) byKey.set(item.id, call);
-    if (item.name) call.name = String(item.name);
-    if (typeof item.arguments === "string" && item.arguments.length >= call.args.length) call.args = item.arguments;
   };
   for (const ev of events) {
     const failed = errorFromEvent(ev);
@@ -1205,26 +1438,27 @@ export function responsesResultFromEvents(
         summary?: unknown;
       };
       takeReasoning(item);
-      takeFunctionCall(item);
+      const outputIndex = optionalIndex(ev.output_index);
+      if (outputIndex === null) {
+        toolError ??= TOOL_CALL_INDEX_ERROR;
+      } else {
+        takeFunctionCall(item as Record<string, unknown>, outputIndex);
+      }
     }
     if (type === "response.function_call_arguments.delta") {
-      let call = lookup(ev);
-      const callId = typeof ev.call_id === "string" && ev.call_id ? ev.call_id : "";
-      const itemId = typeof ev.item_id === "string" && ev.item_id ? ev.item_id : "";
-      if (!call) {
-        const id = callId || itemId || "";
-        call = { id, name: "", args: "" };
-        order.push(call);
-        if (callId) byKey.set(callId, call);
-        if (itemId) byKey.set(itemId, call);
+      const callId = optionalText(ev.call_id);
+      const itemId = optionalText(ev.item_id);
+      const outputIndex = optionalIndex(ev.output_index);
+      if (callId === null || itemId === null) {
+        toolError ??= TOOL_CALL_IDENTITY_ERROR;
+      } else if (outputIndex === null) {
+        toolError ??= TOOL_CALL_INDEX_ERROR;
+      } else if (typeof ev.delta !== "string") {
+        toolError ??= TOOL_CALL_ARGUMENT_ERROR;
       } else {
-        if (callId && call.id !== callId) {
-          call.id = callId;
-          byKey.set(callId, call);
-        }
-        if (itemId && !byKey.has(itemId)) byKey.set(itemId, call);
+        const call = resolveCall(callId ?? "", itemId ?? "", outputIndex);
+        if (call) call.args += ev.delta;
       }
-      call.args += deltaText(ev.delta);
     }
     if (type === "response.completed" && ev.response && typeof ev.response === "object") {
       const response = ev.response as {
@@ -1249,7 +1483,7 @@ export function responsesResultFromEvents(
           summary?: unknown;
         };
         takeReasoning(rec);
-        takeFunctionCall(rec);
+        takeFunctionCall(rec, undefined);
       }
     }
     if (typeof ev.usage === "object" && ev.usage && !Array.isArray(ev.usage)) {
@@ -1269,18 +1503,18 @@ export function responsesResultFromEvents(
     });
   }
   if (text) blocks.push({ type: "text", text });
-  const seen = new Set<{ id: string; name: string; args: string }>();
+  if (toolError) return { blocks, usage, ttftMs, stopReason, error: toolProtocolError(toolError) };
+  const decoded: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
   for (const call of order) {
-    if (seen.has(call)) continue;
-    seen.add(call);
-    let input: unknown = {};
-    try {
-      input = JSON.parse(call.args || "{}");
-    } catch {
-      input = {};
+    const identityError = toolCallIdentityError(call.id, call.name);
+    if (identityError) return { blocks, usage, ttftMs, stopReason, error: toolProtocolError(identityError) };
+    const args = decodeToolCallArguments(call.args, true);
+    if ("error" in args) {
+      return { blocks, usage, ttftMs, stopReason, error: toolProtocolError(args.error ?? TOOL_CALL_ARGUMENT_ERROR) };
     }
-    blocks.push({ type: "tool_use", id: call.id, name: call.name, input });
+    decoded.push({ id: call.id, name: call.name, input: args.input });
   }
+  blocks.push(...decoded.map((call) => ({ type: "tool_use", ...call })));
   return { blocks, usage, ttftMs, stopReason, error };
 }
 
@@ -1315,6 +1549,7 @@ type SseParseState = {
   eventCount: number;
   payloadBytes: number;
   terminalSeen: boolean;
+  terminalAllowsUsage: boolean;
 };
 
 type SseBufferState = {
@@ -1326,6 +1561,21 @@ const SSE_ENCODER = new TextEncoder();
 
 function sseUtf8Bytes(value: string): number {
   return SSE_ENCODER.encode(value).byteLength;
+}
+
+function isSseChoiceTerminal(event: Record<string, unknown>): boolean {
+  if (
+    Array.isArray(event.choices) && event.choices[0] && typeof event.choices[0] === "object"
+  ) {
+    const finishReason = (event.choices[0] as Record<string, unknown>).finish_reason;
+    if (typeof finishReason === "string" && finishReason.trim()) return true;
+  }
+  const candidates = event.candidates;
+  if (Array.isArray(candidates) && candidates[0] && typeof candidates[0] === "object") {
+    const finishReason = (candidates[0] as Record<string, unknown>).finishReason;
+    if (typeof finishReason === "string" && finishReason.trim()) return true;
+  }
+  return false;
 }
 
 function isSseTerminalEvent(event: Record<string, unknown>): boolean {
@@ -1342,18 +1592,18 @@ function isSseTerminalEvent(event: Record<string, unknown>): boolean {
     type === "completion.done" ||
     type === "error"
   ) return true;
+  return isSseChoiceTerminal(event);
+}
 
+function isSseUsageOnlyTrailer(event: Record<string, unknown>): boolean {
+  if (typeof event.type === "string" && event.type) return false;
   const choices = event.choices;
   if (Array.isArray(choices) && choices[0] && typeof choices[0] === "object") {
-    const finishReason = (choices[0] as Record<string, unknown>).finish_reason;
-    if (typeof finishReason === "string" && finishReason.trim()) return true;
+    return false;
   }
-  const candidates = event.candidates;
-  if (Array.isArray(candidates) && candidates[0] && typeof candidates[0] === "object") {
-    const finishReason = (candidates[0] as Record<string, unknown>).finishReason;
-    if (typeof finishReason === "string" && finishReason.trim()) return true;
-  }
-  return false;
+  return Array.isArray(choices) && choices.length === 0 &&
+    event.usage !== undefined && event.usage !== null &&
+    typeof event.usage === "object" && !Array.isArray(event.usage);
 }
 
 function takeSseEvents(
@@ -1392,6 +1642,7 @@ function pushSseLine(
   if (!payload) return;
   if (payload === "[DONE]") {
     state.terminalSeen = true;
+    state.terminalAllowsUsage = false;
     return;
   }
   state.eventCount += 1;
@@ -1413,7 +1664,18 @@ function pushSseLine(
     throw new Error("provider SSE event must be a JSON object");
   }
   const event = parsed as Record<string, unknown>;
-  if (isSseTerminalEvent(event)) state.terminalSeen = true;
+  const usageTrailer = state.terminalSeen && state.terminalAllowsUsage && isSseUsageOnlyTrailer(event);
+  if (state.terminalSeen && !usageTrailer) {
+    throw new Error("provider SSE event arrived after terminal event");
+  }
+  if (usageTrailer) state.terminalAllowsUsage = false;
+  if (isSseChoiceTerminal(event)) {
+    state.terminalSeen = true;
+    state.terminalAllowsUsage = true;
+  } else if (isSseTerminalEvent(event)) {
+    state.terminalSeen = true;
+    state.terminalAllowsUsage = false;
+  }
   if (!filter || filter(event)) state.events.push(event);
 }
 
@@ -1426,7 +1688,13 @@ export async function readSseJson(
   const decoder = new TextDecoder();
   let buffer = "";
   let bufferBytes = 0;
-  const state: SseParseState = { events: [], eventCount: 0, payloadBytes: 0, terminalSeen: false };
+  const state: SseParseState = {
+    events: [],
+    eventCount: 0,
+    payloadBytes: 0,
+    terminalSeen: false,
+    terminalAllowsUsage: false,
+  };
   try {
     for (;;) {
       if (signal?.aborted) {

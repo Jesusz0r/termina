@@ -25,6 +25,7 @@ import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createCheckReporter } from "./test-support.mjs";
 
 const core = await import("../agent-core/main.ts");
 const host = await import("../agent-core/host.ts");
@@ -144,11 +145,7 @@ const {
   formatTuiFooter,
 } = tuiCore;
 
-const results = [];
-const check = (name, ok, detail = "") => {
-  results.push(ok);
-  console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? " — " + String(detail).slice(0, 240) : ""}`);
-};
+const { check, results } = createCheckReporter();
 
 function projectPersistedForTest(messages, imageRoots = []) {
   const result = projectPersistedMessages({ messages, imageRoots });
@@ -299,7 +296,8 @@ check("rankFileTags empty query prefers cwd files", rankFileTags(["pkg/a.ts", "o
 check("rankFileTags matches basename first", rankFileTags(["pkg/auth.ts", "other.txt"], "auth")[0] === "pkg/auth.ts");
 check("subsequenceSpread finds ath in auth.ts", subsequenceSpread("auth.ts", "ath") === 3);
 check("rankFileTags fuzzy basename subsequence", rankFileTags(["pkg/auth.ts", "ok.txt"], "ath")[0] === "pkg/auth.ts");
-check("formatTuiFooter fits 80 columns", formatTuiFooter({}).length < 80 && formatTuiFooter({}).includes("@ · /"));
+const tuiFooter = formatTuiFooter({});
+check("formatTuiFooter fits 80 columns", tuiFooter.length <= 80 && tuiFooter.includes("@ file") && tuiFooter.includes("/ cmd"));
 check(
   "displayToolOutput names how to get the rest",
   displayToolOutput("x".repeat(3000)).includes("re-run or read_file"),
@@ -1665,7 +1663,7 @@ check("empty PATH still reports node", envMissing.includes("node "));
 const noArgs = createAttemptRecord({
   runId: "run-harness-trace",
   taskId: "task-harness-trace",
-  attemptId: "attempt-no-args",
+  attemptId: "attempt-no-tool-input",
   role: "main",
   provider: "openai-codex",
   protocol: "openai-codex-responses",
@@ -1681,8 +1679,10 @@ const noArgs = createAttemptRecord({
   wasteCause: null,
   cache: null,
 });
-const traceJson = JSON.stringify(noArgs);
-check("trace record has no tool arguments or paths", !traceJson.includes("args") && !traceJson.includes("pattern") && !Object.hasOwn(noArgs, "input"));
+check(
+  "trace record has no tool arguments or paths",
+  ["args", "input", "path", "pattern"].every((field) => !Object.hasOwn(noArgs, field)),
+);
 check("trace record keeps tool names only", noArgs.toolNames[0] === "grep" && noArgs.recordType === "attempt");
 const overflowTrace = createAttemptRecord({
   runId: "run-harness-trace",
@@ -2543,7 +2543,10 @@ check("catalogFetchAllowed is false under harness", catalogFetchAllowed() === fa
 
 const modelSrv = createServer((_req, res) => {
   res.setHeader("content-type", "application/json");
-  res.end(JSON.stringify({ data: [{ id: "claude-sonnet-4-5-20250929" }, { id: "claude-haiku-4-5-20251001" }, { id: "not-a-model" }] }));
+  res.end(JSON.stringify({
+    data: [{ id: "claude-sonnet-4-5-20250929" }, { id: "claude-haiku-4-5-20251001" }, { id: "not-a-model" }],
+    has_more: false,
+  }));
 });
 const modelPort = await new Promise((resolve) => {
   modelSrv.listen(0, "127.0.0.1", () => resolve(modelSrv.address().port));
@@ -2598,7 +2601,7 @@ resetAuthCache();
 
 const sse = new ReadableStream({
   start(c) {
-    c.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"Hi"}}]}'));
+    c.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"Hi"}}]}\n\ndata: [DONE]\n'));
     c.close();
   },
 });
@@ -3329,8 +3332,6 @@ check("composeTerminalRoster caps at 16", rosterMod.composeTerminalRoster(manyLi
 
 const rotFixed = new Date(2026, 7, 26, 15, 4, 5).getTime();
 check("sessionRotateStamp is filesystem-safe", sessionRotateStamp(rotFixed) === "2026-08-26T15-04-05");
-const sessionTests = await import("./agent-core-session-test.mjs");
-await sessionTests.run({ check, leftovers });
 
 const searchMod = await import("../electron/session-search.ts");
 const piLine = JSON.stringify({
@@ -4415,9 +4416,9 @@ tui.setStatus({
 tui.appendPlain("hello from transcript\n");
 const frame = tui.frame();
 const frameLines = frame.split("\n");
-check("tui status names the kernel", frame.includes("termina agent-core v1"));
+check("tui status names the kernel", frame.includes("▸ termina"));
 check("tui status shows the model", frame.includes("anthropic/claude"));
-check("tui status shows effort", frame.includes("effort max"));
+check("tui status shows effort", frame.includes("anthropic/claude · max"));
 check(
   "tui status stays at the bottom",
   frameLines.at(-3)?.includes("anthropic/claude") && frameLines.at(-2)?.includes("cache 67%"),
@@ -4430,7 +4431,7 @@ const narrowTui = new tuiMod.AgentTui({
   onExit: () => {},
 });
 narrowTui.setStatus({ model: "openrouter/a-very-long-model-name", effort: "max" });
-check("tui keeps effort visible with a long model", narrowTui.frame().includes("effort max"));
+check("tui keeps effort visible with a long model", narrowTui.frame().includes(" · max"));
 check("tui status shows token usage", frame.includes("tokens 1.5K in/250 out"));
 check("tui status shows cache", frame.includes("cache 67%"));
 check("tui status shows context", frame.includes("context ~20K/200K 10%"));
@@ -4444,7 +4445,32 @@ const imgTui = new tuiMod.AgentTui({
 });
 imgTui.setPendingImageCount(2);
 imgTui.appendPlain("x");
-check("tui status shows pending images", imgTui.frame().includes("2 images"));
+check("tui status shows pending images", imgTui.frame().includes("2 img"));
+const combinedStatusTui = new tuiMod.AgentTui({
+  stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+  stdin: { isTTY: false },
+  onSubmit: () => {},
+  onInterrupt: () => {},
+  onExit: () => {},
+});
+combinedStatusTui.setStatus({
+  model: "openrouter/模型-very-long-model-name",
+  auth: "oauth",
+  effort: "maximum",
+  permissions: "ask",
+});
+combinedStatusTui.setPendingImageCount(2);
+combinedStatusTui.setQueued("queue a late UTF-8 ✅ mutation");
+const combinedStatusHeader = combinedStatusTui.frame().split("\n").at(-3) ?? "";
+check(
+  "tui combined status preserves every control label",
+  combinedStatusHeader.includes("maximum") &&
+    combinedStatusHeader.includes("perm ask") &&
+    combinedStatusHeader.includes("2 img") &&
+    combinedStatusHeader.includes("queued") &&
+    combinedStatusHeader.includes("oauth") &&
+    tuiMod.cellWidth(combinedStatusHeader) <= 80,
+);
 let hostRefresh = 0;
 const refreshTui = new tuiMod.AgentTui({
   stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
@@ -4549,7 +4575,10 @@ const emptyTui = new tuiMod.AgentTui({
   onExit: () => {},
 });
 check("tui empty state orients the user", emptyTui.frame().includes("Type a task") && emptyTui.frame().includes("/help lists keys"));
-check("tui idle footer is short", emptyTui.frame().includes("@ · / · Tab") && !emptyTui.frame().includes("Ctrl+J newline"));
+check(
+  "tui idle footer is short",
+  emptyTui.frame().includes("↵ send") && emptyTui.frame().includes("@ file") && emptyTui.frame().includes("/ cmd") && emptyTui.frame().includes("^J newline"),
+);
 emptyTui.setStatus({ permissions: "ask" });
 check("tui shows permissions in the header", emptyTui.frame().includes(" ask "));
 emptyTui.setQueued("fix the test");

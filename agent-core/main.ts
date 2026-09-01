@@ -24,10 +24,10 @@
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  appendFileSync,
   closeSync,
   existsSync,
   fstatSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -39,6 +39,7 @@ import {
   rmSync,
   statSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { createInterface } from "node:readline";
@@ -2599,6 +2600,65 @@ export function editProjectFile(
 
 // ---- sidecar (the bridge contract) ----
 
+/** Keep producer edit previews below the tailer's durable record limit. The
+ * tool boundary and a digest/count remain even when the preview is clipped;
+ * the file on disk remains the authority for the state mutation. */
+export const SIDECAR_TOOL_EDIT_PREVIEW_BYTES = 512 * 1024;
+const SIDECAR_TOOL_EDIT_FIELD_BYTES = 128 * 1024;
+
+function utf8Prefix(value: string, maxBytes: number): string {
+  const source = Buffer.from(value, "utf8");
+  if (source.length <= maxBytes) return value;
+  let end = Math.max(0, maxBytes);
+  while (end > 0 && (source[end]! & 0xc0) === 0x80) end--;
+  return source.subarray(0, end).toString("utf8");
+}
+
+export function boundedSidecarEdits(value: unknown): Record<string, unknown> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const serialized = JSON.stringify(value) ?? "[]";
+  const editsBytes = Buffer.byteLength(serialized, "utf8");
+  const editsSha256 = createHash("sha256").update(serialized, "utf8").digest("hex");
+  const edits: Array<Record<string, string>> = [];
+  let retainedBytes = 2;
+  let editsTruncated = false;
+  for (const item of value) {
+    if (!item || typeof item !== "object") {
+      editsTruncated = true;
+      continue;
+    }
+    const rec = item as Record<string, unknown>;
+    const oldText = typeof rec.oldText === "string" ? rec.oldText : typeof rec.old_text === "string" ? rec.old_text : undefined;
+    const newText = typeof rec.newText === "string" ? rec.newText : typeof rec.new_text === "string" ? rec.new_text : undefined;
+    if (oldText === undefined && newText === undefined) {
+      editsTruncated = true;
+      continue;
+    }
+    const preview: Record<string, string> = {};
+    if (oldText !== undefined) {
+      preview.oldText = utf8Prefix(oldText, SIDECAR_TOOL_EDIT_FIELD_BYTES);
+      if (Buffer.byteLength(preview.oldText, "utf8") !== Buffer.byteLength(oldText, "utf8")) editsTruncated = true;
+    }
+    if (newText !== undefined) {
+      preview.newText = utf8Prefix(newText, SIDECAR_TOOL_EDIT_FIELD_BYTES);
+      if (Buffer.byteLength(preview.newText, "utf8") !== Buffer.byteLength(newText, "utf8")) editsTruncated = true;
+    }
+    const candidateBytes = Buffer.byteLength(JSON.stringify(preview), "utf8") + (edits.length === 0 ? 0 : 1);
+    if (retainedBytes + candidateBytes > SIDECAR_TOOL_EDIT_PREVIEW_BYTES) {
+      editsTruncated = true;
+      break;
+    }
+    edits.push(preview);
+    retainedBytes += candidateBytes;
+  }
+  if (edits.length < value.length) editsTruncated = true;
+  return {
+    ...(edits.length > 0 ? { edits } : {}),
+    ...(editsTruncated ? { editsTruncated: true } : {}),
+    ...(editsTruncated ? { editsBytes, editsCount: value.length, editsSha256 } : {}),
+  };
+}
+
 export function tracesDirFor(events: string, id: string): string | null {
   if (!events || !isValidTerminalId(id)) return null;
   return join(events, `${id}.traces`);
@@ -2613,6 +2673,247 @@ let cacheSeed = cacheSessionSeed(sessionId);
 const bridgeId = `core-${randomUUID()}`;
 const traceRunId = `run-${randomUUID()}`;
 let seq = 0;
+// Every record carries the immutable generation of the producer-owned
+// inode. A marker without this binding cannot authorize retirement.
+let writerGeneration = randomUUID();
+const sidecarBackpressureCell = new Int32Array(new SharedArrayBuffer(4));
+const SIDECAR_MAX_BYTES = 8 * 1024 * 1024;
+const SIDECAR_SEALED_SUFFIX = ".sealed";
+const SIDECAR_SEALED_PROOF_SUFFIX = ".owner";
+const SIDECAR_QUARANTINE_PREFIX = ".quarantine-";
+const SIDECAR_MAX_LEGACY_SOURCES = 2;
+const SIDECAR_MAX_BACKPRESSURE_POLLS = 80;
+const SIDECAR_APPEND_RETRY_MS = 25;
+const SIDECAR_MAX_APPEND_RETRIES = 80;
+const SIDECAR_MAX_PENDING_EVENTS = 256;
+function syncFile(path: string): void {
+  const fd = openSync(path, "r");
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+}
+function syncDirectory(path: string): void {
+  const fd = openSync(dirname(path), "r");
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+}
+function writeDurableMarker(path: string, content: string): void {
+  const temp = `${path}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temp, content, { flag: "wx", mode: 0o600 });
+    syncFile(temp);
+    renameSync(temp, path);
+    syncDirectory(path);
+  } catch (error) {
+    try { rmSync(temp, { force: true }); } catch { /* best effort */ }
+    throw error;
+  }
+}
+function waitForSidecarBackpressure(): boolean {
+  if (!eventsDir || !terminalId) return true;
+  const marker = join(eventsDir, `.backpressure-${terminalId}`);
+  let polls = 0;
+  while (existsSync(marker)) {
+    if (hasQuarantineSidecar()) return false;
+    if (++polls > SIDECAR_MAX_BACKPRESSURE_POLLS) {
+      quarantineAdmission("sidecar backpressure did not clear within the bounded admission budget");
+      return false;
+    }
+    try {
+      Atomics.wait(sidecarBackpressureCell, 0, 0, 25);
+    } catch {
+      // A runtime that cannot block synchronously must fail closed rather
+      // than append past the bounded durable spool.
+      return false;
+    }
+  }
+  return true;
+}
+const activeSidecarPath = eventsDir && terminalId ? join(eventsDir, terminalId + ".jsonl") : "";
+function hasQuarantineSidecar(): boolean {
+  return !!eventsDir && !!terminalId && existsSync(join(eventsDir, SIDECAR_QUARANTINE_PREFIX + terminalId));
+}
+function hasLegacyAdmissionOverflow(): boolean {
+  if (!eventsDir || !terminalId) return false;
+  try {
+    const prefix = "." + terminalId + ".jsonl.segment.legacy-";
+    return readdirSync(eventsDir).filter((name) => name.startsWith(prefix)).length > SIDECAR_MAX_LEGACY_SOURCES;
+  } catch {
+    return false;
+  }
+}
+function hasRetainedSidecar(): boolean {
+  if (!eventsDir || !terminalId) return false;
+  try {
+    const prefix = "." + terminalId + ".jsonl.";
+    return readdirSync(eventsDir).some((name) =>
+      name.startsWith(prefix)
+      && (name.includes(".retained-")
+        || name.includes(".draining-")
+        || name.includes(".final-"))
+    );
+  } catch {
+    return false;
+  }
+}
+function quarantineAdmission(reason: string): void {
+  try {
+    if (!hasQuarantineSidecar()) {
+      writeDurableMarker(
+        join(eventsDir, SIDECAR_QUARANTINE_PREFIX + terminalId),
+        JSON.stringify({ version: 1, state: "quarantined", terminalId, reason }) + "\n",
+      );
+    }
+  } catch {
+    /* The caller still fails closed if the diagnostic cannot be published. */
+  }
+}
+/** Append one exact record idempotently. If a write/fsync throws after the
+ * kernel accepted the bytes, the next attempt recognizes that same line and
+ * only commits its reserved sequence once durability succeeds. */
+function appendDurable(path: string, line: string): void {
+  const payload = Buffer.from(line, "utf8");
+  const fd = openSync(path, "a+", 0o600);
+  try {
+    const size = fstatSync(fd).size;
+    const tailSize = Math.min(size, SIDECAR_MAX_BYTES + payload.length);
+    const tail = Buffer.alloc(tailSize);
+    if (tailSize > 0) readSync(fd, tail, 0, tailSize, size - tailSize);
+    if (tail.indexOf(payload) < 0) {
+      // Recover a prefix accepted by a failed write without emitting the
+      // pending identity a second time. O_APPEND keeps each syscall at EOF.
+      let prefix = 0;
+      const maxPrefix = Math.min(payload.length - 1, tail.length);
+      for (let length = maxPrefix; length > 0; length--) {
+        let equal = true;
+        const start = tail.length - length;
+        for (let i = 0; i < length; i++) {
+          if (tail[start + i] !== payload[i]) { equal = false; break; }
+        }
+        if (equal) { prefix = length; break; }
+      }
+      let written = prefix;
+      while (written < payload.length) {
+        const count = writeSync(fd, payload, written, payload.length - written, undefined);
+        if (!Number.isInteger(count) || count <= 0) throw new Error("sidecar append made no progress");
+        written += count;
+      }
+    }
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+/** Publish a sealed generation from the producer side. Publication records
+ * the active inode identity and durable close state; the tailer will not trust
+ * a marker that is merely present or bound to another generation. */
+function sealBeforeAppend(lineBytes: number, lastSeq: number): boolean {
+  if (!activeSidecarPath) return false;
+  if (hasQuarantineSidecar()) return false;
+  if (hasLegacyAdmissionOverflow()) {
+    quarantineAdmission("legacy sidecar anchor admission exceeded");
+    return false;
+  }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let activeStats: ReturnType<typeof statSync>;
+    try {
+      activeStats = statSync(activeSidecarPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        try {
+          const activeFd = openSync(activeSidecarPath, "a", 0o600);
+          try { fsyncSync(activeFd); } finally { closeSync(activeFd); }
+          syncDirectory(activeSidecarPath);
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      return false;
+    }
+    if (activeStats.size === 0 || activeStats.size + lineBytes <= SIDECAR_MAX_BYTES) return true;
+    // A retained/unproven inode may continue draining while this active
+    // generation has room. Once rotation is required, admission stops at
+    // the bounded quarantine boundary instead of creating an overtaking
+    // generation that could lose sequence order.
+    if (hasRetainedSidecar()) {
+      quarantineAdmission("unproven sidecar generation blocked a safe rotation");
+      return false;
+    }
+    // Let an already-published canonical generation retire before creating
+    // another one. This wait is only on the rotation boundary; ordinary
+    // active appends continue while an older retained inode drains.
+    let sealedPolls = 0;
+    let sealedPending = false;
+    try {
+      const prefix = "." + terminalId + ".jsonl.";
+      sealedPending = readdirSync(eventsDir).some((name) => name.startsWith(prefix) && name.endsWith(SIDECAR_SEALED_SUFFIX));
+    } catch {}
+    while (sealedPending) {
+      if (++sealedPolls > SIDECAR_MAX_BACKPRESSURE_POLLS) {
+        quarantineAdmission("sealed sidecar generation did not retire within the bounded admission budget");
+        return false;
+      }
+      if (!waitForSidecarBackpressure()) return false;
+      try { Atomics.wait(sidecarBackpressureCell, 0, 0, 25); } catch { return false; }
+      if (hasQuarantineSidecar()) return false;
+      if (hasRetainedSidecar()) {
+        quarantineAdmission("unproven sidecar generation blocked a safe rotation");
+        return false;
+      }
+      try {
+        const prefix = "." + terminalId + ".jsonl.";
+        sealedPending = readdirSync(eventsDir).some((name) => name.startsWith(prefix) && name.endsWith(SIDECAR_SEALED_SUFFIX));
+      } catch {
+        sealedPending = false;
+      }
+    }
+    let proofPath: string | undefined;
+    try {
+      const sealedPath = activeSidecarPath + "." + Date.now().toString(36) + "-" + process.pid + "-" + randomUUID() + SIDECAR_SEALED_SUFFIX;
+      proofPath = sealedPath + SIDECAR_SEALED_PROOF_SUFFIX;
+      const sealedName = basename(sealedPath);
+      const identity = String(activeStats.dev) + ":" + String(activeStats.ino);
+      // The synchronous append path has no descriptor that survives this
+      // call. Flush and revalidate the active inode immediately before the
+      // publication boundary; a concurrent legacy replacement must not be
+      // described by this writer's close proof.
+      syncFile(activeSidecarPath);
+      const beforeRename = statSync(activeSidecarPath);
+      if (String(beforeRename.dev) + ":" + String(beforeRename.ino) !== identity || beforeRename.size !== activeStats.size) continue;
+      renameSync(activeSidecarPath, sealedPath);
+      syncFile(sealedPath);
+      const activeFd = openSync(activeSidecarPath, "a", 0o600);
+      try { fsyncSync(activeFd); } finally { closeSync(activeFd); }
+      syncDirectory(sealedPath);
+      // Publish the close proof last. If a crash interrupts any prior
+      // rename/file/parent durability step, restart sees an unproven sealed
+      // inode and keeps an anchor instead of trusting an orphan marker.
+      writeDurableMarker(proofPath, JSON.stringify({
+        version: 2,
+        state: "closed",
+        writerId: bridgeId,
+        bridgeId,
+        generation: writerGeneration,
+        sealedName,
+        identity,
+        lastSeq,
+      }) + "\n");
+      writerGeneration = randomUUID();
+      return true;
+    } catch (error) {
+      // A failed publish may have written a proof after the sealed pathname
+      // was published but before the complete operation returned. Removing
+      // it makes restart use the conservative retained-anchor path.
+      if (proofPath) {
+        try {
+          rmSync(proofPath, { force: true });
+          syncDirectory(proofPath);
+        } catch { /* best effort */ }
+      }
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") continue;
+      return false;
+    }
+  }
+  return false;
+}
 const canonicalCwd = freezeCwd(process.cwd());
 let allowPaths = new Set<string>();
 const tracesDir = tracesDirFor(eventsDir, terminalId) ?? "";
@@ -2788,15 +3089,80 @@ function rotateCacheSession(): void {
   resetCacheContinuity();
 }
 
-function logEvent(body: Record<string, unknown>): void {
-  if (!eventsDir || !terminalId) return;
-  try {
-    mkdirSync(eventsDir, { recursive: true });
-    const line = JSON.stringify({ bridgeId, seq: ++seq, ...body }) + "\n";
-    appendFileSync(join(eventsDir, terminalId + ".jsonl"), line, { mode: 0o600 });
-  } catch {
-    /* the tailer tolerates gaps; never crash the loop on log failure */
+type PendingSidecarWrite = {
+  body: Record<string, unknown>;
+  seq: number;
+  generation: string | null;
+  line: string | null;
+  attempts: number;
+};
+
+let sidecarWriteStopped = false;
+const pendingSidecarWrites: PendingSidecarWrite[] = [];
+let sidecarRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleSidecarRetry(): void {
+  if (sidecarWriteStopped || sidecarRetryTimer !== null) return;
+  sidecarRetryTimer = setTimeout(() => {
+    sidecarRetryTimer = null;
+    // The queue head may have committed while this timer was pending; retry
+    // whichever exact identity is now blocking the FIFO.
+    flushPendingSidecar();
+  }, SIDECAR_APPEND_RETRY_MS);
+}
+
+function failPendingSidecar(pending: PendingSidecarWrite, error: unknown): void {
+  pending.attempts++;
+  if (pending.attempts >= SIDECAR_MAX_APPEND_RETRIES) {
+    sidecarWriteStopped = true;
+    quarantineAdmission("sidecar append did not become durable within the bounded retry budget");
+    console.warn(`[sidecar] event append stopped after bounded retries: ${error instanceof Error ? error.message : String(error)}`);
+    return;
   }
+  scheduleSidecarRetry();
+}
+
+function flushPendingSidecar(): boolean {
+  if (pendingSidecarWrites.length === 0 || sidecarWriteStopped) return false;
+  while (pendingSidecarWrites.length > 0) {
+    const pending = pendingSidecarWrites[0]!;
+    try {
+      mkdirSync(eventsDir, { recursive: true });
+      if (!waitForSidecarBackpressure()) throw new Error("sidecar admission is paused");
+      if (pending.line === null) {
+        const draft = JSON.stringify({ ...pending.body, bridgeId, seq: pending.seq, generation: writerGeneration }) + "\n";
+        if (!sealBeforeAppend(Buffer.byteLength(draft, "utf8"), seq)) throw new Error("sidecar generation is not publishable");
+        // Rotation changes the active inode generation. Freeze the post-rotation
+        // line so every retry addresses this exact event identity.
+        pending.generation = writerGeneration;
+        pending.line = JSON.stringify({ ...pending.body, bridgeId, seq: pending.seq, generation: pending.generation }) + "\n";
+      }
+      appendDurable(activeSidecarPath, pending.line);
+      // The sequence is committed only after append + fsync succeed.
+      seq = pending.seq;
+      pendingSidecarWrites.shift();
+      pending.attempts = 0;
+    } catch (error) {
+      failPendingSidecar(pending, error);
+      return false;
+    }
+  }
+  return true;
+}
+
+function logEvent(body: Record<string, unknown>): void {
+  if (!eventsDir || !terminalId || sidecarWriteStopped) return;
+  // Reserve in call order even while an earlier append is retrying. Later
+  // records stay queued behind the exact failed identity instead of being
+  // silently dropped by a transient filesystem error.
+  if (pendingSidecarWrites.length >= SIDECAR_MAX_PENDING_EVENTS) {
+    sidecarWriteStopped = true;
+    quarantineAdmission("sidecar pending event queue exceeded its bounded admission");
+    console.warn("[sidecar] event append stopped after pending queue overflow");
+    return;
+  }
+  pendingSidecarWrites.push({ body, seq: seq + pendingSidecarWrites.length + 1, generation: null, line: null, attempts: 0 });
+  void flushPendingSidecar();
 }
 
 export interface TraceCacheDiagnostics extends CacheRequestDiagnostics {
@@ -3367,7 +3733,9 @@ async function writeSummaryTrace(opts: {
       : Date.now() - opts.started,
     revisions: opts.revisions,
     revisionKinds: opts.kinds,
-    wasteTokens: 0,
+    // Summary attempts do not run cache-miss attribution. Absence of evidence
+    // is unknown, not proof that the attempt wasted zero tokens.
+    wasteTokens: null,
     wasteCause: null,
     cache: opts.cache ?? null,
     cost: opts.cost ?? traceCostForUsage(
@@ -3391,7 +3759,7 @@ async function writeMainTrace(opts: {
     turnMs: number;
     revisionCount: number;
     revisionKinds: readonly RevisionKind[];
-    wasteTokens: number;
+    wasteTokens: number | null;
     cause: string | null;
     cost?: TraceRecordCostInput | null;
   } | null;
@@ -3426,7 +3794,7 @@ async function writeMainTrace(opts: {
       : w ? w.turnMs : Date.now() - opts.started,
     revisions: w ? w.revisionCount : revisions,
     revisionKinds: w ? w.revisionKinds.slice() as readonly RevisionKind[] : revisionKinds.slice(),
-    wasteTokens: w?.wasteTokens ?? 0,
+    wasteTokens: w?.wasteTokens ?? null,
     wasteCause: w?.cause ?? null,
     cache: opts.cache,
     toolOutcomes: opts.toolOutcomes,
@@ -3800,7 +4168,7 @@ export function sidecarStartFor(use: {
       toolCallId: use.id,
     };
     if (!isReplaceAll(use.input.replace_all)) {
-      start.edits = [{ oldText: use.input.old_text ?? "", newText: use.input.new_text ?? "" }];
+      Object.assign(start, boundedSidecarEdits([{ oldText: use.input.old_text ?? "", newText: use.input.new_text ?? "" }]));
     }
     return start;
   }
@@ -4169,7 +4537,8 @@ export function cancelPendingApproval(line = "/approve deny"): boolean {
 
 async function confirmBashNow(command: string): Promise<boolean> {
   if (interrupted) return false;
-  if (!surface?.active() || !shouldAskPermission(permissionMode, command)) return true;
+  if (!shouldAskPermission(permissionMode, command)) return true;
+  if (!surface?.active()) return false;
   surface.setChoices(`Approve bash? ${command.slice(0, 160)}`, [
     { name: "Deny", hint: "reject this command", submit: "/approve deny" },
     { name: "Approve once", hint: "run this command", submit: "/approve once" },
@@ -5159,6 +5528,25 @@ type Block =
   | { type: "server_tool_use"; id: string; name: string; input: Record<string, unknown> }
   | { type: "web_search_tool_result"; tool_use_id: string; content: unknown };
 
+/** Final provider-to-kernel admission invariant. Provider decoders should
+ * reject first; this backstop prevents malformed executable calls from being
+ * made durable if a decoder regresses. */
+export function providerToolAdmissionError(blocks: readonly Record<string, unknown>[]): string | null {
+  for (const block of blocks) {
+    if (block.type !== "tool_use") continue;
+    if (
+      typeof block.id !== "string" || !block.id.trim() ||
+      typeof block.name !== "string" || !block.name.trim()
+    ) {
+      return "provider protocol error: tool call identity is missing";
+    }
+    if (!block.input || typeof block.input !== "object" || Array.isArray(block.input)) {
+      return "provider protocol error: tool call arguments must be an object";
+    }
+  }
+  return null;
+}
+
 type Usage = ProviderUsage;
 
 const COMPACT_TOKEN_FORMAT = new Intl.NumberFormat("en-US", {
@@ -5273,7 +5661,7 @@ async function providerPost(
   let retries = 0;
   for (;;) {
     if (signal?.aborted) throw new Error("aborted");
-    const auth = await resolveAuth(providerId);
+    const auth = await resolveAuth(providerId, signal);
     if (!auth.ok) throw new Error(auth.error);
     let headers: Record<string, string> = { ...auth.headers, ...cacheSessionHeaders(cacheIdentity) };
     if (codexAffinity && providerId === "openai-codex" && codexTurnState) {
@@ -5298,7 +5686,7 @@ async function providerPost(
       await readBoundedHttpBody(res, PROVIDER_ERROR_BODY_CAP_BYTES);
       if (auth.kind === "oauth" && !replayed) {
         await onRetry?.({ status: 401, kind: "oauth-refresh", retryCount: retries + 1 });
-        const refreshed = await refreshOauth(providerId);
+        const refreshed = await refreshOauth(providerId, signal);
         if (!refreshed.ok) throw new Error(refreshed.error);
         replayed = true;
         continue;
@@ -5445,6 +5833,7 @@ async function readBoundedJson(res: Response, maxBytes = PROVIDER_BODY_CAP_BYTES
 const ANTHROPIC_SSE_BUFFER_BYTES = 128 * 1024;
 const ANTHROPIC_EVENT_MAX_COUNT = 4_096;
 const ANTHROPIC_EVENT_MAX_BYTES = 4 * 1024 * 1024;
+const ANTHROPIC_CONTENT_BLOCK_MAX_INDEX = 10_000;
 const ANTHROPIC_JSON_PART_MAX_COUNT = 64;
 const ANTHROPIC_JSON_PART_MAX_BYTES = 256 * 1024;
 const ANTHROPIC_AGGREGATE_MAX_BYTES = 256 * 1024;
@@ -6007,6 +6396,8 @@ async function callModel(
 
   const slots: Array<Block | undefined> = [];
   type StreamAggregate = { accumulator: BoundedTextAccumulator; bytes: number };
+  type ContentBlockLifecycle = { block: Block; state: "open" | "closed"; tool: boolean };
+  const blockLifecycles = new Map<number, ContentBlockLifecycle>();
   const jsonParts = new Map<number, BoundedTextAccumulator>();
   const jsonPartBytes = new Map<number, number>();
   let jsonPartTotalBytes = 0;
@@ -6026,6 +6417,22 @@ async function callModel(
   let stopReason: string | null = null;
   let sawMessageStart = false;
   let sawTerminal = false;
+  const eventIndex = (raw: unknown): number => {
+    if (
+      typeof raw !== "number" || !Number.isInteger(raw) ||
+      raw < 0 || raw > ANTHROPIC_CONTENT_BLOCK_MAX_INDEX
+    ) {
+      failProviderStream("content block event index is invalid", cacheDiagnostics, reader);
+    }
+    return raw;
+  };
+  const openLifecycle = (idx: number): ContentBlockLifecycle => {
+    const lifecycle = blockLifecycles.get(idx);
+    if (!lifecycle) failProviderStream("content block event has no matching start", cacheDiagnostics, reader);
+    if (lifecycle.state !== "open") failProviderStream("content block event arrived after stop", cacheDiagnostics, reader);
+    if (slots[idx] !== lifecycle.block) failProviderStream("content block slot was overwritten", cacheDiagnostics, reader);
+    return lifecycle;
+  };
   const pushAggregate = (map: Map<number, StreamAggregate>, idx: number, value: string, label: string): void => {
     if (!value) return;
     const bytes = Buffer.byteLength(value, "utf8");
@@ -6119,7 +6526,10 @@ async function callModel(
           break;
         }
         case "content_block_start": {
-          const idx = Number(ev.index);
+          const idx = eventIndex(ev.index);
+          if (blockLifecycles.has(idx) || slots[idx] !== undefined) {
+            failProviderStream("duplicate content block start", cacheDiagnostics, reader);
+          }
           const cb = (ev.content_block ?? {}) as {
             type?: string;
             id?: string;
@@ -6128,83 +6538,84 @@ async function callModel(
             citations?: unknown[];
             content?: unknown;
           };
+          let block: Block;
+          let tool = false;
           if (cb.type === "tool_use") {
-            placeStreamBlock(slots, idx, { type: "tool_use", id: cb.id ?? "", name: cb.name ?? "", input: {} });
-            if (!jsonParts.has(idx)) {
-              if (jsonParts.size >= ANTHROPIC_JSON_PART_MAX_COUNT) {
-                failProviderStream(`tool JSON part count exceeded ${ANTHROPIC_JSON_PART_MAX_COUNT}`, cacheDiagnostics, reader);
-              }
-              jsonParts.set(idx, new BoundedTextAccumulator({ maxBytes: ANTHROPIC_JSON_PART_MAX_BYTES, marker: "" }));
-              jsonPartBytes.set(idx, 0);
+            if (typeof cb.id !== "string" || !cb.id.trim() || typeof cb.name !== "string" || !cb.name.trim()) {
+              failProviderStream("tool call identity is missing", cacheDiagnostics, reader);
             }
+            block = { type: "tool_use", id: cb.id, name: cb.name, input: {} };
+            tool = true;
           } else if (cb.type === "server_tool_use") {
-            placeStreamBlock(slots, idx, {
-              type: "server_tool_use",
-              id: cb.id ?? "",
-              name: cb.name ?? "",
-              input: {},
-            });
-            if (!jsonParts.has(idx)) {
-              if (jsonParts.size >= ANTHROPIC_JSON_PART_MAX_COUNT) {
-                failProviderStream(`tool JSON part count exceeded ${ANTHROPIC_JSON_PART_MAX_COUNT}`, cacheDiagnostics, reader);
-              }
-              jsonParts.set(idx, new BoundedTextAccumulator({ maxBytes: ANTHROPIC_JSON_PART_MAX_BYTES, marker: "" }));
-              jsonPartBytes.set(idx, 0);
+            if (typeof cb.id !== "string" || !cb.id.trim() || typeof cb.name !== "string" || !cb.name.trim()) {
+              failProviderStream("tool call identity is missing", cacheDiagnostics, reader);
             }
+            block = { type: "server_tool_use", id: cb.id, name: cb.name, input: {} };
+            tool = true;
           } else if (cb.type === "web_search_tool_result") {
-            placeStreamBlock(slots, idx, {
-              type: "web_search_tool_result",
-              tool_use_id: cb.tool_use_id ?? "",
-              content: cb.content,
-            });
+            block = { type: "web_search_tool_result", tool_use_id: cb.tool_use_id ?? "", content: cb.content };
           } else if (cb.type === "thinking") {
-            placeStreamBlock(slots, idx, { type: "thinking", thinking: "" });
+            block = { type: "thinking", thinking: "" };
           } else if (cb.type === "text") {
-            const textBlock: Extract<Block, { type: "text" }> = {
-              type: "text",
-              text: "",
-            };
-            placeStreamBlock(slots, idx, textBlock);
-            if (Array.isArray(cb.citations)) {
-              for (const citation of cb.citations) pushCitation(textBlock, citation);
-            }
+            block = { type: "text", text: "" };
           } else if (cb.type) {
-            placeStreamBlock(slots, idx, { ...(ev.content_block as Block), type: cb.type } as Block);
+            block = { ...(ev.content_block as Block), type: cb.type } as Block;
+          } else {
+            failProviderStream("content block start is malformed", cacheDiagnostics, reader);
+          }
+          slots[idx] = block;
+          blockLifecycles.set(idx, { block, state: "open", tool });
+          if (tool) {
+            if (jsonParts.size >= ANTHROPIC_JSON_PART_MAX_COUNT) {
+              failProviderStream(`tool JSON part count exceeded ${ANTHROPIC_JSON_PART_MAX_COUNT}`, cacheDiagnostics, reader);
+            }
+            jsonParts.set(idx, new BoundedTextAccumulator({ maxBytes: ANTHROPIC_JSON_PART_MAX_BYTES, marker: "" }));
+            jsonPartBytes.set(idx, 0);
+          }
+          if (block.type === "text" && Array.isArray(cb.citations)) {
+            for (const citation of cb.citations) pushCitation(block, citation);
           }
           break;
         }
         case "content_block_delta": {
-          const d = ev.delta as { type: string; text?: string; partial_json?: string; citation?: unknown; thinking?: string; signature?: string };
-          const idx = Number(ev.index);
-          const target = slots[idx];
-          if (!target) break;
-          if (d.type === "text_delta" && target.type === "text") {
+          const idx = eventIndex(ev.index);
+          const lifecycle = openLifecycle(idx);
+          const target = lifecycle.block;
+          if (!ev.delta || typeof ev.delta !== "object" || Array.isArray(ev.delta)) {
+            failProviderStream("content block delta is malformed", cacheDiagnostics, reader);
+          }
+          const d = ev.delta as { type?: unknown; text?: unknown; partial_json?: unknown; citation?: unknown; thinking?: unknown; signature?: unknown };
+          if (typeof d.type !== "string") {
+            failProviderStream("content block delta is malformed", cacheDiagnostics, reader);
+          }
+          if (d.type === "text_delta") {
+            if (target.type !== "text") failProviderStream("content block delta type does not match start", cacheDiagnostics, reader);
             if (ttftMs === null) ttftMs = Date.now() - attemptStarted;
             const chunk = typeof d.text === "string" ? d.text : "";
             pushAggregate(textAggregates, idx, chunk, "text");
             streamOut("assistant", chunk);
-          } else if (d.type === "thinking_delta" && target.type === "thinking") {
+          } else if (d.type === "thinking_delta") {
+            if (target.type !== "thinking") failProviderStream("content block delta type does not match start", cacheDiagnostics, reader);
             const chunk = typeof d.thinking === "string" ? d.thinking : "";
             if (chunk && ttftMs === null) ttftMs = Date.now() - attemptStarted;
             pushAggregate(thinkingAggregates, idx, chunk, "thinking");
             streamOut("thinking", chunk);
-          } else if (d.type === "signature_delta" && target.type === "thinking") {
+          } else if (d.type === "signature_delta") {
+            if (target.type !== "thinking") failProviderStream("content block delta type does not match start", cacheDiagnostics, reader);
             pushAggregate(signatureAggregates, idx, typeof d.signature === "string" ? d.signature : "", "signature");
-          } else if (d.type === "citations_delta" && target.type === "text" && d.citation !== undefined) {
-            pushCitation(target, d.citation);
-          } else if (
-            d.type === "input_json_delta" &&
-            (target.type === "tool_use" || target.type === "server_tool_use")
-          ) {
-            const chunk = typeof d.partial_json === "string" ? d.partial_json : "";
-            const part = jsonParts.get(idx);
-            if (!part) {
-              if (jsonParts.size >= ANTHROPIC_JSON_PART_MAX_COUNT) {
-                failProviderStream(`tool JSON part count exceeded ${ANTHROPIC_JSON_PART_MAX_COUNT}`, cacheDiagnostics, reader);
-              }
-              jsonParts.set(idx, new BoundedTextAccumulator({ maxBytes: ANTHROPIC_JSON_PART_MAX_BYTES, marker: "" }));
-              jsonPartBytes.set(idx, 0);
+          } else if (d.type === "citations_delta") {
+            if (target.type !== "text") failProviderStream("content block delta type does not match start", cacheDiagnostics, reader);
+            if (d.citation !== undefined) pushCitation(target, d.citation);
+          } else if (d.type === "input_json_delta") {
+            if (!lifecycle.tool || (target.type !== "tool_use" && target.type !== "server_tool_use")) {
+              failProviderStream("content block delta type does not match start", cacheDiagnostics, reader);
             }
+            if (typeof d.partial_json !== "string") {
+              failProviderStream("tool JSON fragment is malformed", cacheDiagnostics, reader);
+            }
+            const chunk = d.partial_json;
+            const part = jsonParts.get(idx);
+            if (!part) failProviderStream("tool JSON accumulator is not bound to its content block", cacheDiagnostics, reader);
             const previousBytes = jsonPartBytes.get(idx) ?? 0;
             const bytes = Buffer.byteLength(chunk, "utf8");
             if (previousBytes + bytes > ANTHROPIC_JSON_PART_MAX_BYTES) {
@@ -6213,10 +6624,16 @@ async function callModel(
             if (jsonPartTotalBytes + bytes > ANTHROPIC_EVENT_MAX_BYTES) {
               failProviderStream(`tool JSON bytes exceeded ${ANTHROPIC_EVENT_MAX_BYTES}`, cacheDiagnostics, reader);
             }
-            jsonParts.get(idx)!.push(chunk);
+            part.push(chunk);
             jsonPartBytes.set(idx, previousBytes + bytes);
             jsonPartTotalBytes += bytes;
           }
+          break;
+        }
+        case "content_block_stop": {
+          const idx = eventIndex(ev.index);
+          const lifecycle = openLifecycle(idx);
+          lifecycle.state = "closed";
           break;
         }
         case "message_delta": {
@@ -6255,20 +6672,50 @@ async function callModel(
     if (interrupted || currentAbort?.signal.aborted) throw new Error("aborted");
     failProviderStream("SSE stream ended without message_stop", cacheDiagnostics, reader);
   }
+  let toolLifecycleCount = 0;
+  for (const [idx, lifecycle] of blockLifecycles) {
+    if (lifecycle.state !== "closed") {
+      failProviderStream("content block ended without a matching stop", cacheDiagnostics, reader);
+    }
+    if (slots[idx] !== lifecycle.block) {
+      failProviderStream("content block slot was overwritten", cacheDiagnostics, reader);
+    }
+    if (lifecycle.tool) {
+      toolLifecycleCount += 1;
+      if (!jsonParts.has(idx) || !jsonPartBytes.has(idx)) {
+        failProviderStream("tool JSON accumulator is not bound to its content block", cacheDiagnostics, reader);
+      }
+    } else if (jsonParts.has(idx) || jsonPartBytes.has(idx)) {
+      failProviderStream("tool JSON accumulator is not bound to a tool block", cacheDiagnostics, reader);
+    }
+  }
+  if (jsonParts.size !== toolLifecycleCount || jsonPartBytes.size !== toolLifecycleCount) {
+    failProviderStream("tool JSON accumulator lifecycle mismatch", cacheDiagnostics, reader);
+  }
   finishAggregates();
   for (const [idx, part] of jsonParts) {
-    const target = slots[idx];
-    if (target?.type === "tool_use" || target?.type === "server_tool_use") {
-      const parsedPart = part.finish("complete");
-      if (parsedPart.truncated) {
-        failProviderStream("partial tool JSON", cacheDiagnostics, reader);
-      }
-      try {
-        target.input = JSON.parse(parsedPart.text || "{}") as typeof target.input;
-      } catch {
-        failProviderStream("partial tool JSON", cacheDiagnostics, reader);
-      }
+    const lifecycle = blockLifecycles.get(idx);
+    if (!lifecycle || !lifecycle.tool || lifecycle.state !== "closed") {
+      failProviderStream("tool JSON accumulator is not bound to exactly one final tool block", cacheDiagnostics, reader);
     }
+    const target = lifecycle.block;
+    if (slots[idx] !== target || (target.type !== "tool_use" && target.type !== "server_tool_use")) {
+      failProviderStream("tool JSON accumulator is not bound to exactly one final tool block", cacheDiagnostics, reader);
+    }
+    const parsedPart = part.finish("complete");
+    if (parsedPart.truncated) {
+      failProviderStream("partial tool JSON", cacheDiagnostics, reader);
+    }
+    let input: unknown;
+    try {
+      input = JSON.parse(parsedPart.text);
+    } catch {
+      failProviderStream("partial tool JSON", cacheDiagnostics, reader);
+    }
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      failProviderStream("tool call arguments must be an object", cacheDiagnostics, reader);
+    }
+    target.input = input as typeof target.input;
   }
   if (traceAttempt) traceAttempt.ended = Date.now();
   return { blocks: compactStreamBlocks(slots), usage, ttftMs, stopReason, cache: cacheDiagnostics, traceAttempt };
@@ -6547,7 +6994,7 @@ function reportUsage(
   ttftMs: number | null;
   revisionCount: number;
   revisionKinds: RevisionKind[];
-  wasteTokens: number;
+  wasteTokens: number | null;
   cost: TraceRecordCostInput;
   cache: TraceCacheDiagnostics;
 } {
@@ -6604,7 +7051,7 @@ function reportUsage(
   const usd = typeof cost.usd === "number" && Number.isFinite(cost.usd) && cost.usd >= 0 ? cost.usd : null;
   const revisionCount = revisions;
   const kinds = revisionKinds.slice();
-  const wasteTokens = waste?.tokens ?? 0;
+  const wasteTokens = classification.missedTokens === null ? null : waste?.tokens ?? 0;
   revisions = 0;
   revisionKinds = [];
   return {
@@ -6881,6 +7328,8 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           throw err;
         }
       }
+      const admissionError = providerToolAdmissionError(result.blocks);
+      if (admissionError) throw new Error(admissionError);
       const sys = systemPrompt();
       if (!result.usage) resetUsageContinuity();
       const waste = result.usage
@@ -7478,9 +7927,11 @@ export function isDirectRun(): boolean {
 
 let loginCodeResolve: ((code: string) => void) | null = null;
 let loginAbort: AbortController | null = null;
+let catalogAbort: AbortController | null = null;
 
 function cancelLogin(): void {
   loginAbort?.abort();
+  catalogAbort?.abort();
   if (loginCodeResolve) {
     loginCodeResolve("");
     loginCodeResolve = null;
@@ -7519,14 +7970,18 @@ function syncModelRows(): void {
   surface?.setModelRows(modelPickerRows());
 }
 
-async function loadCatalog(provider: ProviderId, adopt: boolean): Promise<{ ok: true } | { ok: false; error: string }> {
+async function loadCatalog(
+  provider: ProviderId,
+  adopt: boolean,
+  signal?: AbortSignal,
+): Promise<{ ok: true } | { ok: false; error: string }> {
   if (!catalogFetchAllowed()) return { ok: false, error: "catalog fetch skipped in tests" };
+  const got = await loadProviderModels(provider, signal);
+  if (!got.ok) return got;
   if (adopt && provider !== route.provider) {
     route = { provider, model: DEFAULT_MODELS[provider].main };
     retargetSummary(provider);
   }
-  const got = await loadProviderModels(provider);
-  if (!got.ok) return got;
   catalogs.set(provider, got.models);
   syncModelRows();
   if (provider !== route.provider) return { ok: true };
@@ -7542,14 +7997,14 @@ async function loadCatalog(provider: ProviderId, adopt: boolean): Promise<{ ok: 
   return { ok: true };
 }
 
-async function loadAuthenticatedCatalogs(refresh: boolean): Promise<string[]> {
+async function loadAuthenticatedCatalogs(refresh: boolean, signal?: AbortSignal): Promise<string[]> {
   if (!catalogFetchAllowed()) return [];
   const ids = AUTH_PROVIDER_ORDER.filter((id) => hasStoredCredential(id) || hasEnvCredential(id));
   const errors: string[] = [];
   await Promise.all(
     ids.map(async (id) => {
       if (!refresh && catalogs.has(id)) return;
-      const got = await loadProviderModels(id);
+      const got = await loadProviderModels(id, signal);
       if (!got.ok) errors.push(`${id}: ${got.error}`);
       else catalogs.set(id, got.models);
     }),
@@ -7601,17 +8056,22 @@ function startCatalogCommand(line: string): void {
       return;
     }
     const refresh = /\brefresh\b/.test(line);
+    const abort = new AbortController();
+    catalogAbort = abort;
     authBusy = true;
     showPrompt();
     void (async () => {
       try {
-        const errors = await loadAuthenticatedCatalogs(refresh || catalogs.size === 0);
+        const errors = await loadAuthenticatedCatalogs(refresh || catalogs.size === 0, abort.signal);
         for (const err of errors) out(`(${err})\n`);
         const listed = allCatalogModels();
         if (listed.length > 0) out(`${formatCatalogLines(listed, route.provider, route.model)}\n`);
         else out("(no model list — run /login)\n");
       } finally {
-        authBusy = false;
+        if (catalogAbort === abort) {
+          catalogAbort = null;
+          authBusy = false;
+        }
         showPrompt();
       }
     })();
@@ -7629,6 +8089,8 @@ function startCatalogCommand(line: string): void {
     showPrompt();
     return;
   }
+  const abort = new AbortController();
+  catalogAbort = abort;
   authBusy = true;
   showPrompt();
   void (async () => {
@@ -7649,14 +8111,17 @@ function startCatalogCommand(line: string): void {
         return;
       }
       const next = parseModelSwitch(rest, route.provider);
-      const auth = await resolveAuth(next.provider);
+      const auth = await resolveAuth(next.provider, abort.signal);
       if (!auth.ok) {
-        out(`(${auth.error})\n`);
+        out(`(${abort.signal.aborted ? "models request cancelled" : auth.error})\n`);
         return;
       }
       if (next.provider !== route.provider) {
-        const got = await loadCatalog(next.provider, true);
-        if (!got.ok) out(`(${got.error})\n`);
+        const got = await loadCatalog(next.provider, true, abort.signal);
+        if (!got.ok) {
+          out(`(${got.error})\n`);
+          return;
+        }
         const loaded = currentCatalog();
         if (loaded?.some((m) => m.id === next.model || m.id.startsWith(`${next.model}-`))) {
           const pick = pickDefaultModel(loaded, next.model);
@@ -7671,7 +8136,10 @@ function startCatalogCommand(line: string): void {
       out(`model ${route.provider}/${route.model}\n`);
       syncStatus();
     } finally {
-      authBusy = false;
+      if (catalogAbort === abort) {
+        catalogAbort = null;
+        authBusy = false;
+      }
       showPrompt();
     }
   })();
@@ -7716,13 +8184,16 @@ function startAuthCommand(line: string): void {
       out(result.ok ? `${result.summary}\n` : `(${result.error})\n`);
       if (!result.ok) return;
       if (!isSupportedProvider(parsed.provider)) return;
-      const got = await loadCatalog(parsed.provider, !PINNED_ROUTE);
-      if (!got.ok) out(`(${got.error})\n`);
+      const got = await loadCatalog(parsed.provider, !PINNED_ROUTE, abort.signal);
+      if (!got.ok) {
+        out(`(${got.error})\n`);
+        return;
+      }
       const listed = catalogs.get(parsed.provider);
       if (got.ok && listed && listed.length > 0 && parsed.provider === route.provider) {
         out(`${formatModelBanner(listed, route.model)}\n`);
       }
-      const nextAuth = await resolveAuth(route.provider);
+      const nextAuth = await resolveAuth(route.provider, abort.signal);
       syncStatus(nextAuth.ok ? authBanner(nextAuth) : undefined);
     })
     .catch((err: unknown) => {

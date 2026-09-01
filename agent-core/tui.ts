@@ -2281,15 +2281,31 @@ export class AgentTui {
     const images = imageN > 0 ? `${imageN} img` : "";
     const permLabel = this.permissions ? `perm ${this.permissions}` : "";
     const modelLabel = this.model ? `${spin ? `${spin} ` : ""}${this.model}` : spin ? `${spin} no model` : "no model";
-    const queuedLabel = this.queued ? `queued ${truncateMiddle(this.queued, 18)}` : "";
-    // Model and effort are always adjacent — keep them as one visual group.
-    const modelEffort = `${modelLabel} · ${this.effort}`;
-    const leftParts = [`▸ termina`, modelEffort];
-    if (permLabel) leftParts.push(permLabel);
-    if (images) leftParts.push(images);
-    if (queuedLabel) leftParts.push(queuedLabel);
-    const leftTitle = leftParts.join("  ·  ");
+    let queuedLabel = this.queued ? `queued ${truncateMiddle(this.queued, 18)}` : "";
     const rightTitle = this.auth ? this.auth : "";
+    // Model and effort are one visual group. Reserve the effort suffix before
+    // truncating a long model so narrow terminals never hide the active level.
+    let extraParts = [permLabel, images, queuedLabel].filter(Boolean);
+    const separator = "  ·  ";
+    const modelSuffix = ` · ${this.effort}`;
+    const fixedTitleCells = (parts: string[]): number =>
+      cellWidth("▸ termina") +
+      cellWidth(separator) +
+      cellWidth(modelSuffix) +
+      parts.reduce((sum, part) => sum + cellWidth(separator) + cellWidth(part), 0) +
+      cellWidth(rightTitle) +
+      3; // outer spaces plus the minimum left/right gap
+    let fixedCells = fixedTitleCells(extraParts);
+    // Queued text is context, while the queued state and auth label are
+    // controls. Collapse the summary before it can clip either control.
+    if (queuedLabel && fixedCells >= cols) {
+      queuedLabel = "queued";
+      extraParts = [permLabel, images, queuedLabel].filter(Boolean);
+      fixedCells = fixedTitleCells(extraParts);
+    }
+    const visibleModel = truncateMiddle(modelLabel, Math.max(1, cols - fixedCells));
+    const leftParts = [`▸ termina`, `${visibleModel}${modelSuffix}`, ...extraParts];
+    const leftTitle = leftParts.join(separator);
     const gap = Math.max(1, cols - cellWidth(leftTitle) - cellWidth(rightTitle) - 2);
     const title = ` ${leftTitle}${" ".repeat(gap)}${rightTitle} `;
     const picker = matches.length > 0 && Boolean(matches[0]?.submit);

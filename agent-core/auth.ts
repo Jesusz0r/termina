@@ -11,20 +11,29 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
+  ftruncateSync,
+  fsyncSync,
+  lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
+  rmdirSync,
   statSync,
   unlinkSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { execFileSync, spawn } from "node:child_process";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
-import { spawn } from "node:child_process";
+import { basename, dirname, join, resolve } from "node:path";
+import { TextDecoder } from "node:util";
+import { readSystemProcessIdentity } from "../shared/process-identity.js";
 
 export const SUPPORTED_PROVIDERS = [
   "anthropic",
@@ -97,6 +106,15 @@ const COPILOT_HEADERS = {
 const EXPIRE_MARGIN_MS = 300_000;
 const OAT_MARK = "sk-ant-oat";
 const DEFAULT_ANTHROPIC_BASE = "https://api.anthropic.com";
+
+/** Token responses are normally only a few KiB; 256 KiB leaves ample room
+ * for provider metadata and error details without permitting unbounded reads. */
+const AUTH_HTTP_MAX_RESPONSE_BYTES = 256 * 1024;
+const AUTH_HTTP_TIMEOUT_MS = 30_000;
+const AUTH_REQUEST_CANCELLED = "auth request cancelled";
+const AUTH_REQUEST_TIMED_OUT = "auth request timed out";
+const AUTH_RESPONSE_TOO_LARGE = "auth response too large";
+const AUTH_RESPONSE_INVALID_UTF8 = "auth response is not valid UTF-8";
 
 export function isSupportedProvider(id: string): id is ProviderId {
   return (SUPPORTED_PROVIDERS as readonly string[]).includes(id);
@@ -571,12 +589,34 @@ export function authPath(): string {
 }
 
 function testOverride(name: string): string | undefined {
+  if (process.env.TERMINA_CORE_TEST !== "1") return undefined;
   const raw = process.env[name]?.trim();
   return raw || undefined;
 }
 
+function testLoopbackOverride(name: string): string | undefined {
+  const raw = testOverride(name);
+  if (!raw) return undefined;
+  try {
+    const url = new URL(raw);
+    const host = url.hostname.replace(/^\[|\]$/g, "");
+    const octets = host.split(".");
+    const loopback = host === "::1" || (
+      octets.length === 4 &&
+      octets[0] === "127" &&
+      octets.slice(1).every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+    );
+    if (!loopback || (url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || url.hash) {
+      return undefined;
+    }
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
 function authorizeUrl(id: ProviderId): string {
-  const test = testOverride("TERMINA_TEST_AUTHORIZE_URL");
+  const test = testLoopbackOverride("TERMINA_TEST_AUTHORIZE_URL");
   if (test) return test;
   if (id === "openai-codex") return OPENAI_CODEX_AUTHORIZE;
   if (id === "openrouter") return OPENROUTER_AUTHORIZE;
@@ -584,7 +624,7 @@ function authorizeUrl(id: ProviderId): string {
 }
 
 function tokenUrl(id: ProviderId): string {
-  const test = testOverride("TERMINA_TEST_TOKEN_URL");
+  const test = testLoopbackOverride("TERMINA_TEST_TOKEN_URL");
   if (test) return test;
   if (id === "openai-codex") return OPENAI_CODEX_TOKEN;
   if (id === "xai") return XAI_TOKEN_URL;
@@ -593,11 +633,11 @@ function tokenUrl(id: ProviderId): string {
 }
 
 function deviceUrl(): string {
-  return testOverride("TERMINA_TEST_DEVICE_URL") || XAI_DEVICE_URL;
+  return testLoopbackOverride("TERMINA_TEST_DEVICE_URL") || XAI_DEVICE_URL;
 }
 
 export function redirectPort(id: ProviderId = "anthropic"): number {
-  const raw = process.env.TERMINA_TEST_REDIRECT_PORT;
+  const raw = process.env.TERMINA_CORE_TEST === "1" ? process.env.TERMINA_TEST_REDIRECT_PORT : undefined;
   if (raw) {
     const n = Number(raw);
     if (Number.isInteger(n) && n >= 1 && n <= 65535) return n;
@@ -770,7 +810,7 @@ export function validateCopilotApiUrl(raw: string): string | null {
   if (!trimmed) return null;
   try {
     const url = new URL(trimmed);
-    if (testOverride("TERMINA_TEST_COPILOT_TOKEN_URL")) return `${url.origin}${url.pathname}`.replace(/\/$/, "");
+    if (testLoopbackOverride("TERMINA_TEST_COPILOT_TOKEN_URL")) return `${url.origin}${url.pathname}`.replace(/\/$/, "");
     if (url.protocol !== "https:") return null;
     const host = url.hostname;
     if (host !== "api.githubcopilot.com" && !host.endsWith(".githubcopilot.com")) return null;
@@ -778,10 +818,6 @@ export function validateCopilotApiUrl(raw: string): string | null {
   } catch {
     return null;
   }
-}
-
-function sleep(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 function sleepAsync(ms: number, signal?: AbortSignal): Promise<void> {
@@ -804,42 +840,717 @@ function sleepAsync(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function withLock<T>(fn: () => T): T {
-  const lock = `${authPath()}.lock`;
-  mkdirSync(dirname(lock), { recursive: true, mode: 0o700 });
-  const start = Date.now();
-  for (;;) {
-    try {
-      const fd = openSync(lock, "wx");
+const MAX_AUTH_LOCK_BYTES = 1024;
+const AUTH_LOCK_EMPTY_GRACE_MS = 250;
+const AUTH_LOCK_CANDIDATE_PREFIX = ".auth-lock-candidate-";
+
+const CURRENT_AUTH_PROCESS_IDENTITY = readSystemProcessIdentity(process.pid)
+  ?? `self:${randomBytes(16).toString("hex")}`;
+
+function observedAuthProcessIdentity(pid: number): string | null {
+  return pid === process.pid ? CURRENT_AUTH_PROCESS_IDENTITY : readSystemProcessIdentity(pid);
+}
+
+type AuthLockOwner = {
+  pid: number;
+  token: string;
+  startedAt: number;
+  processIdentity: string;
+  dev: number;
+  ino: number;
+};
+
+type AuthLockDirectory = {
+  dev: number;
+  ino: number;
+};
+
+type AuthLockHandle = {
+  owner: AuthLockOwner;
+  directory: AuthLockDirectory;
+  ownerPath: string;
+  guardPath: string;
+  witnessFd: number | null;
+  guardPresent: boolean;
+};
+
+type AuthLockTransitionPhase = "released" | "recovered";
+
+type AuthLockTransition = {
+  phase: AuthLockTransitionPhase;
+  owner: AuthLockOwner;
+  directory: AuthLockDirectory;
+  recordPath: string;
+  guardPath: string;
+  guardPresent: boolean;
+};
+
+function lockErrorCode(error: unknown): string | null {
+  return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : null;
+}
+
+function authLockOwner(value: unknown): AuthLockOwner | null {
+  if (!isObject(value)) return null;
+  const pid = value.pid;
+  const token = value.token;
+  const startedAt = value.startedAt;
+  const processIdentity = value.processIdentity;
+  const dev = value.dev;
+  const ino = value.ino;
+  if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) return null;
+  if (typeof token !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(token)) return null;
+  if (typeof startedAt !== "number" || !Number.isSafeInteger(startedAt) || startedAt < 0) return null;
+  if (typeof processIdentity !== "string" || !/^[\x20-\x7e]{1,256}$/.test(processIdentity)) return null;
+  if (typeof dev !== "number" || !Number.isSafeInteger(dev) || dev < 0) return null;
+  if (typeof ino !== "number" || !Number.isSafeInteger(ino) || ino < 0) return null;
+  return { pid, token, startedAt, processIdentity, dev, ino };
+}
+
+function authLockOwnerEntry(owner: Pick<AuthLockOwner, "token" | "dev" | "ino">): string {
+  return `.record-${owner.token}-${owner.dev}-${owner.ino}`;
+}
+
+function authLockOwnerPath(lock: string, owner: Pick<AuthLockOwner, "token" | "dev" | "ino">): string {
+  return join(lock, authLockOwnerEntry(owner));
+}
+
+function authLockGuardPath(lock: string, owner: Pick<AuthLockOwner, "token" | "dev" | "ino">): string {
+  return join(lock, `.owner-${owner.token}-${owner.dev}-${owner.ino}`);
+}
+
+function authLockWitnessPath(lock: string, owner: Pick<AuthLockOwner, "token" | "dev" | "ino">): string {
+  return join(authLockGuardPath(lock, owner), "witness");
+}
+
+function authLockCandidatePath(lock: string, token: string): string {
+  return join(dirname(lock), `${AUTH_LOCK_CANDIDATE_PREFIX}${process.pid}-${token}`);
+}
+
+function authLockNoFollowFlags(base: number): number {
+  const noFollow = fsConstants.O_NOFOLLOW;
+  if (typeof noFollow !== "number") throw new Error("auth lock requires O_NOFOLLOW support");
+  return base | noFollow;
+}
+
+function authDirectoryOpenFlags(): number {
+  const directory = fsConstants.O_DIRECTORY;
+  if (typeof directory !== "number") throw new Error("auth lock requires directory descriptor support");
+  return authLockNoFollowFlags(fsConstants.O_RDONLY | directory);
+}
+
+type AuthLockGuardState = "missing" | "empty" | "present" | "invalid";
+
+function authLockGuardState(path: string): AuthLockGuardState {
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return "invalid";
+    const entries = readdirSync(path);
+    if (entries.length === 0) return "empty";
+    if (entries.length !== 1 || entries[0] !== "witness") return "invalid";
+    const witness = lstatSync(join(path, "witness"));
+    if (
+      !witness.isFIFO()
+      || witness.isSymbolicLink()
+      || witness.nlink !== 1
+      || (witness.mode & 0o777) !== 0o600
+    ) return "invalid";
+    return "present";
+  } catch (error) {
+    return lockErrorCode(error) === "ENOENT" || lockErrorCode(error) === "ENOTDIR" ? "missing" : "invalid";
+  }
+}
+
+function authLockTransitionGuardPath(
+  lock: string,
+  phase: AuthLockTransitionPhase,
+  owner: Pick<AuthLockOwner, "token" | "dev" | "ino">,
+): string {
+  return join(lock, `.${phase}-holder-${owner.token}-${owner.dev}-${owner.ino}`);
+}
+
+function removeAuthLockWitness(guardPath: string): void {
+  const witnessPath = join(guardPath, "witness");
+  const witness = lstatSync(witnessPath);
+  if (
+    !witness.isFIFO()
+    || witness.isSymbolicLink()
+    || witness.nlink !== 1
+    || (witness.mode & 0o777) !== 0o600
+  ) throw new Error("auth lock witness changed while releasing");
+  unlinkSync(witnessPath);
+}
+
+function createAuthLockWitness(path: string): number {
+  execFileSync("/usr/bin/mkfifo", ["-m", "0600", path], { stdio: "ignore" });
+  let fd: number | null = null;
+  let keep = false;
+  try {
+    fd = openSync(path, authLockNoFollowFlags(fsConstants.O_RDONLY | fsConstants.O_NONBLOCK));
+    const descriptor = fstatSync(fd);
+    const entry = lstatSync(path);
+    if (
+      !descriptor.isFIFO()
+      || !entry.isFIFO()
+      || entry.isSymbolicLink()
+      || (descriptor.mode & 0o777) !== 0o600
+      || (entry.mode & 0o777) !== 0o600
+      || descriptor.dev !== entry.dev
+      || descriptor.ino !== entry.ino
+    ) throw new Error("auth lock witness is not a private FIFO");
+    const result = fd;
+    fd = null;
+    keep = true;
+    return result;
+  } finally {
+    if (fd !== null) closeSync(fd);
+    if (!keep) {
       try {
-        writeSync(fd, String(process.pid));
-        return fn();
-      } finally {
-        closeSync(fd);
-        try {
-          unlinkSync(lock);
-        } catch {
-          /* ignore */
-        }
+        const entry = lstatSync(path);
+        if (entry.isFIFO() && entry.nlink === 1 && (entry.mode & 0o777) === 0o600) unlinkSync(path);
+      } catch {
+        /* Leave an unproven witness in place rather than unlinking another object. */
       }
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code !== "EEXIST") throw err;
-      if (Date.now() - start > 4000) {
-        try {
-          unlinkSync(lock);
-        } catch {
-          /* ignore */
-        }
-      }
-      if (Date.now() - start > 6000) throw new Error("auth file busy");
-      sleep(50);
     }
   }
 }
 
+function probeAuthLockWitnessPath(path: string): boolean | null {
+  try {
+    const entry = lstatSync(path);
+    if (
+      !entry.isFIFO()
+      || entry.isSymbolicLink()
+      || entry.nlink !== 1
+      || (entry.mode & 0o777) !== 0o600
+    ) return null;
+    const fd = openSync(path, authLockNoFollowFlags(fsConstants.O_WRONLY | fsConstants.O_NONBLOCK));
+    try {
+      const descriptor = fstatSync(fd);
+      return descriptor.isFIFO() && descriptor.dev === entry.dev && descriptor.ino === entry.ino;
+    } finally {
+      closeSync(fd);
+    }
+  } catch (error) {
+    const code = lockErrorCode(error);
+    if (code === "ENOENT" || code === "ENOTDIR" || code === "ENXIO") return false;
+    return null;
+  }
+}
+
+function probeAuthLockWitness(
+  lock: string,
+  owner: AuthLockOwner,
+  guardPath = authLockGuardPath(lock, owner),
+): boolean | null {
+  return probeAuthLockWitnessPath(join(guardPath, "witness"));
+}
+
+function authLockTransitionEntry(
+  phase: AuthLockTransitionPhase,
+  owner: Pick<AuthLockOwner, "token" | "dev" | "ino">,
+): string {
+  return `.${phase}-${owner.token}-${owner.dev}-${owner.ino}`;
+}
+
+function authLockTransitionPath(
+  lock: string,
+  phase: AuthLockTransitionPhase,
+  owner: Pick<AuthLockOwner, "token" | "dev" | "ino">,
+): string {
+  return join(lock, authLockTransitionEntry(phase, owner));
+}
+
+function parseAuthLockOwnerEntry(name: string): Pick<AuthLockOwner, "token" | "dev" | "ino"> | null {
+  const match = /^\.record-([A-Za-z0-9_-]{1,128})-(\d+)-(\d+)$/.exec(name);
+  if (match === null) return null;
+  const dev = Number(match[2]);
+  const ino = Number(match[3]);
+  if (!Number.isSafeInteger(dev) || dev < 0 || !Number.isSafeInteger(ino) || ino < 0) return null;
+  return { token: match[1], dev, ino };
+}
+
+function parseAuthLockTransitionEntry(name: string): {
+  phase: AuthLockTransitionPhase;
+  token: string | null;
+  dev: number | null;
+  ino: number | null;
+  entry: string;
+} | null {
+  if (name.startsWith(".released-holder-") || name.startsWith(".recovered-holder-")) return null;
+  const generation = /^\.(released|recovered)-([A-Za-z0-9_-]{1,128})-(\d+)-(\d+)$/.exec(name);
+  if (generation !== null) {
+    const dev = Number(generation[3]);
+    const ino = Number(generation[4]);
+    if (!Number.isSafeInteger(dev) || dev < 0 || !Number.isSafeInteger(ino) || ino < 0) return null;
+    return { phase: generation[1] as AuthLockTransitionPhase, token: generation[2], dev, ino, entry: name };
+  }
+  // Older interrupted releases used a random suffix; accept only that exact
+  // shape and still bind the recovered owner to the record and directory.
+  const legacy = /^\.(released|recovered)-([0-9a-f]{32})$/.exec(name);
+  if (legacy === null) return null;
+  return { phase: legacy[1] as AuthLockTransitionPhase, token: null, dev: null, ino: null, entry: name };
+}
+
+function authLockDirectory(lock: string): AuthLockDirectory | null {
+  try {
+    const stat = lstatSync(lock);
+    return stat.isDirectory() ? { dev: stat.dev, ino: stat.ino } : null;
+  } catch {
+    return null;
+  }
+}
+
+function readAuthLockOwner(path: string): AuthLockOwner | null {
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_AUTH_LOCK_BYTES) return null;
+    const raw = readFileSync(path, "utf8");
+    if (Buffer.byteLength(raw, "utf8") > MAX_AUTH_LOCK_BYTES) return null;
+    return authLockOwner(JSON.parse(raw) as unknown);
+  } catch {
+    return null;
+  }
+}
+
+function inspectAuthLock(lock: string): AuthLockHandle | null {
+  const directory = authLockDirectory(lock);
+  if (directory === null) return null;
+  try {
+    const entries = readdirSync(lock).sort();
+    const ownerEntries = entries.map(parseAuthLockOwnerEntry).filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+    if (ownerEntries.length !== 1) return null;
+    const ownerEntry = ownerEntries[0];
+    const ownerPath = authLockOwnerPath(lock, ownerEntry);
+    const owner = readAuthLockOwner(ownerPath);
+    const guardPath = authLockGuardPath(lock, ownerEntry);
+    const guardEntry = guardPath.slice(lock.length + 1);
+    const guardPresent =
+      entries.length === 2
+      && entries.includes(guardEntry)
+      && authLockGuardState(guardPath) === "present";
+    if (
+      owner === null
+      || owner.token !== ownerEntry.token
+      || owner.dev !== ownerEntry.dev
+      || owner.ino !== ownerEntry.ino
+      || owner.dev !== directory.dev
+      || owner.ino !== directory.ino
+      || !guardPresent
+    ) return null;
+    return { owner, directory, ownerPath, guardPath, witnessFd: null, guardPresent };
+  } catch {
+    return null;
+  }
+}
+
+function inspectAuthLockTransition(lock: string): AuthLockTransition | null {
+  const directory = authLockDirectory(lock);
+  if (directory === null) return null;
+  try {
+    const entries = readdirSync(lock).sort();
+    const transitions = entries.map(parseAuthLockTransitionEntry).filter(
+      (entry): entry is NonNullable<typeof entry> => entry !== null,
+    );
+    if (transitions.length !== 1) return null;
+    const transition = transitions[0];
+    const recordPath = join(lock, transition.entry);
+    const owner = readAuthLockOwner(recordPath);
+    if (owner === null || owner.dev !== directory.dev || owner.ino !== directory.ino) return null;
+    if (
+      transition.token !== null
+      && (owner.token !== transition.token || owner.dev !== transition.dev || owner.ino !== transition.ino)
+    ) return null;
+    const guardPath = authLockGuardPath(lock, owner);
+    const holderPath = authLockTransitionGuardPath(lock, transition.phase, owner);
+    const guardCandidates = [guardPath, holderPath].filter((candidate) => entries.includes(candidate.slice(lock.length + 1)));
+    if (entries.length === 1) {
+      return { phase: transition.phase, owner, directory, recordPath, guardPath, guardPresent: false };
+    }
+    if (entries.length !== 2 || guardCandidates.length !== 1) return null;
+    const actualGuardPath = guardCandidates[0];
+    const guardState = authLockGuardState(actualGuardPath);
+    if (guardState !== "present" && guardState !== "empty") return null;
+    return {
+      phase: transition.phase,
+      owner,
+      directory,
+      recordPath,
+      guardPath: actualGuardPath,
+      guardPresent: guardState === "present",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function sameAuthLockOwner(left: AuthLockOwner, right: AuthLockOwner): boolean {
+  return (
+    left.pid === right.pid
+    && left.token === right.token
+    && left.startedAt === right.startedAt
+    && left.processIdentity === right.processIdentity
+    && left.dev === right.dev
+    && left.ino === right.ino
+  );
+}
+
+function sameAuthLockDirectory(left: AuthLockDirectory, right: AuthLockDirectory): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function authLockOwnerAlive(
+  lock: string,
+  owner: AuthLockOwner,
+  guardPath = authLockGuardPath(lock, owner),
+): boolean {
+  try {
+    process.kill(owner.pid, 0);
+  } catch (error) {
+    return lockErrorCode(error) !== "ESRCH";
+  }
+  const actualIdentity = observedAuthProcessIdentity(owner.pid);
+  // An unreadable birth identity is uncertainty, not proof of death.
+  if (actualIdentity === null) return true;
+  if (actualIdentity !== owner.processIdentity) return false;
+  // The process-birth token is only a coarse fallback on macOS (ps lstart has
+  // one-second resolution). A holder FIFO is the generation-bound proof that
+  // this process still owns this exact lock; a reused PID cannot satisfy it.
+  const witness = probeAuthLockWitness(lock, owner, guardPath);
+  return witness !== false;
+}
+
+type AuthLockCrashStage =
+  | "release-before-guard-removal"
+  | "release-after-guard-removal"
+  | "recover-before-guard-removal"
+  | "recover-after-guard-removal";
+
+function maybeCrashAuthLock(stage: AuthLockCrashStage): void {
+  if (process.env.TERMINA_CORE_TEST !== "1" || process.env.TERMINA_AUTH_LOCK_CRASH !== stage) return;
+  process.kill(process.pid, "SIGKILL");
+}
+
+function maybePauseAuthLock(stage: "before-publish"): void {
+  if (process.env.TERMINA_CORE_TEST !== "1" || process.env.TERMINA_AUTH_LOCK_PAUSE !== stage) return;
+  const marker = process.env.TERMINA_AUTH_LOCK_PAUSED?.trim();
+  const resume = process.env.TERMINA_AUTH_LOCK_RESUME?.trim();
+  if (!marker || !resume) throw new Error("auth lock pause requires marker and resume paths");
+  writeFileSync(marker, "paused\n", { mode: 0o600, flag: "wx" });
+  while (!existsSync(resume)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+}
+
+function removeEmptyAuthLock(lock: string, directory: AuthLockDirectory): boolean {
+  const currentDirectory = authLockDirectory(lock);
+  if (currentDirectory === null) return true;
+  if (!sameAuthLockDirectory(currentDirectory, directory)) return false;
+  try {
+    if (readdirSync(lock).length !== 0) return false;
+    rmdirSync(lock);
+    return true;
+  } catch (error) {
+    return lockErrorCode(error) === "ENOENT";
+  }
+}
+
+function recoverEmptyAuthLock(lock: string): boolean {
+  const directory = authLockDirectory(lock);
+  if (directory === null) return false;
+  let birthtimeMs: number;
+  let ctimeMs: number;
+  try {
+    const initial = lstatSync(lock);
+    if (!initial.isDirectory() || initial.isSymbolicLink() || readdirSync(lock).length !== 0) return false;
+    birthtimeMs = initial.birthtimeMs;
+    ctimeMs = initial.ctimeMs;
+    if (!Number.isFinite(birthtimeMs) || !Number.isFinite(ctimeMs)) return false;
+    const age = Date.now() - Math.max(birthtimeMs, ctimeMs);
+    if (age < AUTH_LOCK_EMPTY_GRACE_MS) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, AUTH_LOCK_EMPTY_GRACE_MS - Math.max(0, age));
+    }
+  } catch {
+    return false;
+  }
+  try {
+    const current = lstatSync(lock);
+    if (
+      !current.isDirectory()
+      || current.isSymbolicLink()
+      || current.dev !== directory.dev
+      || current.ino !== directory.ino
+      || current.birthtimeMs !== birthtimeMs
+      || current.ctimeMs !== ctimeMs
+      || readdirSync(lock).length !== 0
+    ) return false;
+  } catch {
+    return false;
+  }
+  return removeEmptyAuthLock(lock, directory);
+}
+
+function cleanupAuthLockTransition(lock: string, expected: AuthLockTransition, witnessFd: number | null = null): boolean {
+  const current = inspectAuthLockTransition(lock);
+  if (
+    current === null
+    || current.phase !== expected.phase
+    || !sameAuthLockDirectory(current.directory, expected.directory)
+    || !sameAuthLockOwner(current.owner, expected.owner)
+    || current.recordPath !== expected.recordPath
+  ) return false;
+  let heldWitnessFd = witnessFd;
+  try {
+    const guardState = authLockGuardState(current.guardPath);
+    if (guardState === "present") {
+      removeAuthLockWitness(current.guardPath);
+      if (heldWitnessFd !== null) {
+        closeSync(heldWitnessFd);
+        heldWitnessFd = null;
+      }
+      rmdirSync(current.guardPath);
+    } else if (guardState === "empty") {
+      if (heldWitnessFd !== null) {
+        closeSync(heldWitnessFd);
+        heldWitnessFd = null;
+      }
+      rmdirSync(current.guardPath);
+    } else if (guardState !== "missing") {
+      return false;
+    }
+    const afterGuard = inspectAuthLockTransition(lock);
+    if (afterGuard === null) return removeEmptyAuthLock(lock, expected.directory);
+    if (
+      afterGuard.guardPresent
+      || authLockGuardState(afterGuard.guardPath) !== "missing"
+      || afterGuard.phase !== expected.phase
+      || !sameAuthLockDirectory(afterGuard.directory, expected.directory)
+      || !sameAuthLockOwner(afterGuard.owner, expected.owner)
+      || afterGuard.recordPath !== expected.recordPath
+    ) return false;
+    unlinkSync(afterGuard.recordPath);
+    return removeEmptyAuthLock(lock, expected.directory);
+  } catch (error) {
+    return lockErrorCode(error) === "ENOENT" && removeEmptyAuthLock(lock, expected.directory);
+  } finally {
+    if (heldWitnessFd !== null) {
+      try { closeSync(heldWitnessFd); } catch { /* best effort after a failed cleanup */ }
+    }
+  }
+}
+
+function resumeAuthLock(lock: string): boolean {
+  const transition = inspectAuthLockTransition(lock);
+  if (transition !== null) {
+    if (authLockOwnerAlive(lock, transition.owner, transition.guardPath)) return false;
+    return cleanupAuthLockTransition(lock, transition);
+  }
+  return recoverEmptyAuthLock(lock);
+}
+
+function releaseAuthLock(lock: string, handle: AuthLockHandle): void {
+  const { owner, directory } = handle;
+  try {
+    const current = inspectAuthLock(lock);
+    if (
+      current === null
+      || !sameAuthLockDirectory(current.directory, directory)
+      || !sameAuthLockOwner(current.owner, owner)
+      || current.ownerPath !== handle.ownerPath
+    ) return;
+    if (!current.guardPresent) {
+      unlinkSync(current.ownerPath);
+      removeEmptyAuthLock(lock, directory);
+      return;
+    }
+    const releasedOwner = authLockTransitionPath(lock, "released", owner);
+    renameSync(current.ownerPath, releasedOwner);
+    const moved = readAuthLockOwner(releasedOwner);
+    if (moved === null || !sameAuthLockOwner(moved, owner)) return;
+    const transition: AuthLockTransition = {
+      phase: "released",
+      owner,
+      directory,
+      recordPath: releasedOwner,
+      guardPath: authLockTransitionGuardPath(lock, "released", owner),
+      guardPresent: true,
+    };
+    maybeCrashAuthLock("release-before-guard-removal");
+    renameSync(current.guardPath, transition.guardPath);
+    maybeCrashAuthLock("release-after-guard-removal");
+    handle.guardPresent = true;
+    cleanupAuthLockTransition(lock, transition, handle.witnessFd);
+    handle.witnessFd = null;
+  } catch {
+    /* A replacement or extra entry leaves the lock in place. */
+  }
+}
+
+function recoverAuthLock(lock: string, stale: AuthLockHandle): boolean {
+  if (!sameAuthLockDirectory(authLockDirectory(lock) ?? { dev: -1, ino: -1 }, stale.directory)) return false;
+  const recoveredOwner = authLockTransitionPath(lock, "recovered", stale.owner);
+  try {
+    renameSync(stale.ownerPath, recoveredOwner);
+  } catch (error) {
+    return lockErrorCode(error) === "ENOENT";
+  }
+  const moved = readAuthLockOwner(recoveredOwner);
+  const currentDirectory = authLockDirectory(lock);
+  if (
+    moved === null
+    || !sameAuthLockOwner(moved, stale.owner)
+    || currentDirectory === null
+    || !sameAuthLockDirectory(currentDirectory, stale.directory)
+  ) return false;
+  const transition: AuthLockTransition = {
+    phase: "recovered",
+    owner: stale.owner,
+    directory: stale.directory,
+    recordPath: recoveredOwner,
+    guardPath: authLockTransitionGuardPath(lock, "recovered", stale.owner),
+    guardPresent: stale.guardPresent,
+  };
+  try {
+    maybeCrashAuthLock("recover-before-guard-removal");
+    if (stale.guardPresent) renameSync(stale.guardPath, transition.guardPath);
+    maybeCrashAuthLock("recover-after-guard-removal");
+  } catch {
+    return false;
+  }
+  return cleanupAuthLockTransition(lock, transition);
+}
+
+function cleanupAuthLockCandidate(
+  candidate: string,
+  directory: AuthLockDirectory,
+  owner: AuthLockOwner,
+  witnessFd: number | null,
+): void {
+  if (witnessFd !== null) {
+    try { closeSync(witnessFd); } catch { /* best effort before exact path cleanup */ }
+  }
+  try {
+    const currentDirectory = authLockDirectory(candidate);
+    if (currentDirectory === null || !sameAuthLockDirectory(currentDirectory, directory)) return;
+    const guardPath = authLockGuardPath(candidate, owner);
+    const guardState = authLockGuardState(guardPath);
+    if (guardState === "present") removeAuthLockWitness(guardPath);
+    if (guardState === "present" || guardState === "empty") rmdirSync(guardPath);
+    const ownerPath = authLockOwnerPath(candidate, owner);
+    const currentOwner = readAuthLockOwner(ownerPath);
+    if (currentOwner !== null && sameAuthLockOwner(currentOwner, owner)) unlinkSync(ownerPath);
+    removeEmptyAuthLock(candidate, directory);
+  } catch {
+    /* Never remove a path whose ownership cannot be proven. */
+  }
+}
+
+function tryAcquireAuthLock(lock: string, binding: AuthPathBinding): AuthLockHandle | null {
+  let candidate: string;
+  let candidateToken: string;
+  for (;;) {
+    candidateToken = randomBytes(16).toString("hex");
+    candidate = authLockCandidatePath(lock, candidateToken);
+    try {
+      mkdirSync(candidate, { mode: 0o700 });
+      break;
+    } catch (error) {
+      if (lockErrorCode(error) === "EEXIST") continue;
+      throw error;
+    }
+  }
+
+  const directory = authLockDirectory(candidate);
+  if (directory === null) throw new Error("auth file busy");
+  const owner: AuthLockOwner = {
+    pid: process.pid,
+    token: randomBytes(16).toString("hex"),
+    startedAt: Date.now(),
+    processIdentity: CURRENT_AUTH_PROCESS_IDENTITY,
+    dev: directory.dev,
+    ino: directory.ino,
+  };
+  const ownerPath = authLockOwnerPath(candidate, owner);
+  const guardPath = authLockGuardPath(candidate, owner);
+  let witnessFd: number | null = null;
+  let published = false;
+  let handedOff = false;
+  try {
+    validateAuthPathBinding(binding);
+    writeFileSync(ownerPath, JSON.stringify(owner), { mode: 0o600, flag: "wx" });
+    mkdirSync(guardPath, { mode: 0o700 });
+    witnessFd = createAuthLockWitness(authLockWitnessPath(candidate, owner));
+    maybePauseAuthLock("before-publish");
+    validateAuthPathBinding(binding);
+    try {
+      renameSync(candidate, lock);
+    } catch (error) {
+      const code = lockErrorCode(error);
+      if (code === "EEXIST" || code === "ENOTEMPTY" || code === "EISDIR" || code === "ENOTDIR") return null;
+      throw error;
+    }
+    published = true;
+    const inspected = inspectAuthLock(lock);
+    if (
+      inspected === null
+      || !sameAuthLockDirectory(inspected.directory, directory)
+      || !sameAuthLockOwner(inspected.owner, owner)
+    ) throw new Error("auth file busy");
+    handedOff = true;
+    return {
+      owner,
+      directory,
+      ownerPath: authLockOwnerPath(lock, owner),
+      guardPath: authLockGuardPath(lock, owner),
+      witnessFd,
+      guardPresent: true,
+    };
+  } finally {
+    if (!handedOff) {
+      if (!published) {
+        cleanupAuthLockCandidate(candidate, directory, owner, witnessFd);
+      } else if (witnessFd !== null) {
+        try { closeSync(witnessFd); } catch { /* leave the published generation fail-closed */ }
+      }
+      witnessFd = null;
+    }
+  }
+}
+
+function withLock<T>(fn: (binding: AuthPathBinding) => T): T {
+  const path = resolve(authPath());
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const binding = authPathBinding(path);
+  const lock = `${path}.lock`;
+  for (;;) {
+    try {
+      validateAuthPathBinding(binding);
+      const acquired = tryAcquireAuthLock(lock, binding);
+      if (acquired !== null) {
+        try {
+          return fn(binding);
+        } finally {
+          releaseAuthLock(lock, acquired);
+        }
+      }
+    } catch (error) {
+      if (lockErrorCode(error) !== null || error instanceof Error) {
+        if (!(error instanceof Error) || error.message !== "auth file busy") throw error;
+      } else {
+        throw error;
+      }
+    }
+    const inspected = inspectAuthLock(lock);
+    if (inspected === null) {
+      if (resumeAuthLock(lock)) continue;
+      throw new Error("auth file busy");
+    }
+    if (inspected.owner.pid === process.pid || authLockOwnerAlive(lock, inspected.owner)) {
+      throw new Error("auth file busy");
+    }
+    if (!recoverAuthLock(lock, inspected)) throw new Error("auth file busy");
+  }
+}
+
 export function readAuth(): { ok: true; data: AuthFile } | { ok: false; reason: "missing" | "corrupt" } {
-  const path = authPath();
+  const path = resolve(authPath());
   if (!existsSync(path)) {
     cached = null;
     return { ok: false, reason: "missing" };
@@ -860,12 +1571,256 @@ export function readAuth(): { ok: true; data: AuthFile } | { ok: false; reason: 
   }
 }
 
-function writeAuth(data: AuthFile): void {
-  const path = authPath();
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
-  renameSync(tmp, path);
+type AuthPathIdentity = {
+  dev: number;
+  ino: number;
+};
+
+type AuthPathBinding = {
+  path: string;
+  parent: string;
+  root: string;
+  parentIdentity: AuthPathIdentity;
+  rootIdentity: AuthPathIdentity;
+};
+
+function authPathDirectoryIdentity(path: string, label: string): AuthPathIdentity {
+  const stat = lstatSync(path);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`auth ${label} must be a real directory`);
+  return { dev: stat.dev, ino: stat.ino };
+}
+
+function sameAuthPathIdentity(left: AuthPathIdentity, right: AuthPathIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function authPathBinding(path: string): AuthPathBinding {
+  const absolute = resolve(path);
+  const parent = dirname(absolute);
+  const root = dirname(parent);
+  return {
+    path: absolute,
+    parent,
+    root,
+    parentIdentity: authPathDirectoryIdentity(parent, "parent"),
+    rootIdentity: authPathDirectoryIdentity(root, "root"),
+  };
+}
+
+function validateAuthPathBinding(binding: AuthPathBinding): void {
+  const parentIdentity = authPathDirectoryIdentity(binding.parent, "parent");
+  const rootIdentity = authPathDirectoryIdentity(binding.root, "root");
+  if (
+    !sameAuthPathIdentity(parentIdentity, binding.parentIdentity)
+    || !sameAuthPathIdentity(rootIdentity, binding.rootIdentity)
+  ) throw new Error("auth path parent changed while writing");
+}
+
+type AuthPathAnchors = {
+  rootFd: number;
+  parentFd: number;
+  rootIdentity: AuthPathIdentity;
+  parentIdentity: AuthPathIdentity;
+};
+
+function authDescriptorPath(fd: number): string {
+  if (process.platform === "linux") return `/proc/self/fd/${fd}`;
+  if (process.platform === "darwin") return `/dev/fd/${fd}`;
+  throw new Error("auth path descriptor anchoring is unavailable");
+}
+
+function authAnchoredChildPath(fd: number, child: string): string {
+  const directory = authDescriptorPath(fd);
+  return child ? join(directory, child) : directory;
+}
+
+function authChildPath(binding: AuthPathBinding, anchors: AuthPathAnchors, child: string): string {
+  // Linux exposes a traversable procfs descriptor namespace. macOS's fdescfs
+  // permits duplicating /dev/fd/N but does not permit traversing it, so retain
+  // the parent descriptor and revalidate the pathname around each operation.
+  return process.platform === "linux"
+    ? authAnchoredChildPath(anchors.parentFd, child)
+    : join(binding.parent, child);
+}
+
+function authDirectoryDescriptorIdentity(fd: number, label: string): AuthPathIdentity {
+  const stat = fstatSync(fd);
+  if (!stat.isDirectory()) throw new Error(`auth ${label} descriptor is not a directory`);
+  return { dev: stat.dev, ino: stat.ino };
+}
+
+function validateAuthPathAnchors(binding: AuthPathBinding, anchors: AuthPathAnchors): void {
+  const rootDescriptor = authDirectoryDescriptorIdentity(anchors.rootFd, "root");
+  const parentDescriptor = authDirectoryDescriptorIdentity(anchors.parentFd, "parent");
+  const rootPath = authPathDirectoryIdentity(binding.root, "root");
+  const parentPath = authPathDirectoryIdentity(binding.parent, "parent");
+  const parentFromRootStat = lstatSync(
+    process.platform === "linux"
+      ? authAnchoredChildPath(anchors.rootFd, basename(binding.parent))
+      : binding.parent,
+  );
+  if (
+    !sameAuthPathIdentity(rootDescriptor, binding.rootIdentity)
+    || !sameAuthPathIdentity(parentDescriptor, binding.parentIdentity)
+    || !sameAuthPathIdentity(rootPath, binding.rootIdentity)
+    || !sameAuthPathIdentity(parentPath, binding.parentIdentity)
+    || !parentFromRootStat.isDirectory()
+    || parentFromRootStat.isSymbolicLink()
+    || parentFromRootStat.dev !== binding.parentIdentity.dev
+    || parentFromRootStat.ino !== binding.parentIdentity.ino
+  ) throw new Error("auth path parent changed while writing");
+}
+
+function openAuthPathAnchors(binding: AuthPathBinding): AuthPathAnchors {
+  let rootFd: number | null = null;
+  let parentFd: number | null = null;
+  try {
+    rootFd = openSync(binding.root, authDirectoryOpenFlags());
+    const rootIdentity = authDirectoryDescriptorIdentity(rootFd, "root");
+    parentFd = openSync(
+      process.platform === "linux"
+        ? authAnchoredChildPath(rootFd, basename(binding.parent))
+        : binding.parent,
+      authDirectoryOpenFlags(),
+    );
+    const parentIdentity = authDirectoryDescriptorIdentity(parentFd, "parent");
+    const anchors = { rootFd, parentFd, rootIdentity, parentIdentity };
+    validateAuthPathAnchors(binding, anchors);
+    return anchors;
+  } catch (error) {
+    if (parentFd !== null) closeSync(parentFd);
+    if (rootFd !== null) closeSync(rootFd);
+    throw error;
+  }
+}
+
+function closeAuthPathAnchors(anchors: AuthPathAnchors): void {
+  try { closeSync(anchors.parentFd); } finally { closeSync(anchors.rootFd); }
+}
+
+function validateAuthTempDescriptor(
+  fd: number,
+  tempPath: string,
+  binding: AuthPathBinding,
+  anchors: AuthPathAnchors,
+  expected: AuthPathIdentity | null,
+): AuthPathIdentity {
+  validateAuthPathAnchors(binding, anchors);
+  const descriptor = fstatSync(fd);
+  if (!descriptor.isFile()) throw new Error("auth temporary file is not regular");
+  if (descriptor.nlink !== 1) throw new Error("auth temp has unexpected hard links");
+  if ((descriptor.mode & 0o777) !== 0o600) throw new Error("auth temporary file permissions changed");
+  const identity = { dev: descriptor.dev, ino: descriptor.ino };
+  if (expected !== null && !sameAuthPathIdentity(identity, expected)) {
+    throw new Error("auth temporary file changed while writing");
+  }
+  const entry = lstatSync(tempPath);
+  if (
+    !entry.isFile()
+    || entry.isSymbolicLink()
+    || entry.nlink !== 1
+    || (entry.mode & 0o777) !== 0o600
+    || entry.dev !== identity.dev
+    || entry.ino !== identity.ino
+  ) throw new Error("auth temporary file changed while writing");
+  return identity;
+}
+
+function truncateAuthDescriptor(fd: number): void {
+  try {
+    ftruncateSync(fd, 0);
+    fsyncSync(fd);
+  } catch {
+    /* Keep the original descriptor open for exact cleanup; callers fail closed. */
+  }
+}
+
+type AuthWriteTestStage = "after-open" | "after-fsync" | "after-temp";
+
+function maybeCrashAuthWrite(stage: AuthWriteTestStage): void {
+  if (process.env.TERMINA_CORE_TEST !== "1" || process.env.TERMINA_AUTH_WRITE_CRASH !== stage) return;
+  process.kill(process.pid, "SIGKILL");
+}
+
+function maybePauseAuthWrite(stage: AuthWriteTestStage): void {
+  if (process.env.TERMINA_CORE_TEST !== "1" || process.env.TERMINA_AUTH_WRITE_PAUSE !== stage) return;
+  const marker = process.env.TERMINA_AUTH_WRITE_PAUSED?.trim();
+  const resume = process.env.TERMINA_AUTH_WRITE_RESUME?.trim();
+  if (!marker || !resume) throw new Error("auth write pause requires marker and resume paths");
+  writeFileSync(marker, "paused\n", { mode: 0o600, flag: "wx" });
+  while (!existsSync(resume)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+}
+
+function writeAuth(data: AuthFile, binding: AuthPathBinding): void {
+  const path = binding.path;
+  validateAuthPathBinding(binding);
+  const tmp = join(binding.parent, `.${basename(path)}.tmp-${process.pid}-${randomBytes(16).toString("hex")}`);
+  const anchoredTempName = basename(tmp);
+  const anchoredDestinationName = basename(path);
+  const bytes = Buffer.from(`${JSON.stringify(data, null, 2)}\n`, "utf8");
+  const anchors = openAuthPathAnchors(binding);
+  const tempPath = authChildPath(binding, anchors, anchoredTempName);
+  const destinationPath = authChildPath(binding, anchors, anchoredDestinationName);
+  let fd: number | null = null;
+  let tempCreated = false;
+  let tempIdentity: AuthPathIdentity | null = null;
+  let published = false;
+  try {
+    fd = openSync(
+      tempPath,
+      authLockNoFollowFlags(fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL),
+      0o600,
+    );
+    tempCreated = true;
+    tempIdentity = validateAuthTempDescriptor(fd, tempPath, binding, anchors, null);
+    maybePauseAuthWrite("after-open");
+    tempIdentity = validateAuthTempDescriptor(fd, tempPath, binding, anchors, tempIdentity);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const written = writeSync(fd, bytes, offset, bytes.length - offset);
+      if (written <= 0) throw new Error("auth temporary file write made no progress");
+      offset += written;
+    }
+    fsyncSync(fd);
+    maybeCrashAuthWrite("after-fsync");
+    maybePauseAuthWrite("after-temp");
+    validateAuthTempDescriptor(fd, tempPath, binding, anchors, tempIdentity);
+    renameSync(tempPath, destinationPath);
+    validateAuthPathAnchors(binding, anchors);
+    const destination = lstatSync(destinationPath);
+    const afterPublish = fstatSync(fd);
+    if (
+      !destination.isFile()
+      || destination.isSymbolicLink()
+      || destination.nlink !== 1
+      || (destination.mode & 0o777) !== 0o600
+      || tempIdentity === null
+      || destination.dev !== tempIdentity.dev
+      || destination.ino !== tempIdentity.ino
+      || !afterPublish.isFile()
+      || afterPublish.nlink !== 1
+      || afterPublish.dev !== tempIdentity.dev
+      || afterPublish.ino !== tempIdentity.ino
+    ) throw new Error("auth published file identity changed");
+    published = true;
+  } finally {
+    if (fd !== null && !published) truncateAuthDescriptor(fd);
+    if (tempCreated && !published && tempIdentity !== null) {
+      try {
+        const current = lstatSync(tempPath);
+        if (
+          current.isFile()
+          && !current.isSymbolicLink()
+          && current.dev === tempIdentity.dev
+          && current.ino === tempIdentity.ino
+        ) unlinkSync(tempPath);
+      } catch {
+        /* Leave an unproven residue in place rather than unlinking another object. */
+      }
+    }
+    if (fd !== null) closeSync(fd);
+    closeAuthPathAnchors(anchors);
+  }
   try {
     const st = statSync(path);
     cached = { path, mtimeMs: st.mtimeMs, data };
@@ -875,7 +1830,7 @@ function writeAuth(data: AuthFile): void {
 }
 
 export function modifyProvider(id: string, fn: (current: unknown) => unknown | null): void {
-  withLock(() => {
+  withLock((binding) => {
     const got = readAuth();
     if (!got.ok && got.reason === "corrupt") {
       throw new Error("auth.json is unreadable — refusing to write");
@@ -884,7 +1839,7 @@ export function modifyProvider(id: string, fn: (current: unknown) => unknown | n
     const next = fn(data[id]);
     if (next === null) delete data[id];
     else data[id] = next;
-    writeAuth(data);
+    writeAuth(data, binding);
   });
 }
 
@@ -1064,46 +2019,191 @@ function missingCredentialError(id: ProviderId): string {
   return `no ${id} credential — run /login ${id}`;
 }
 
+class AuthHttpError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AuthHttpError";
+  }
+}
+
+function authHttpError(error: unknown): string | null {
+  return error instanceof AuthHttpError ? error.message : null;
+}
+
+function isAuthHttpFailure(message: string): boolean {
+  return (
+    message === AUTH_REQUEST_CANCELLED ||
+    message === AUTH_REQUEST_TIMED_OUT ||
+    message === AUTH_RESPONSE_TOO_LARGE ||
+    message === AUTH_RESPONSE_INVALID_UTF8
+  );
+}
+
+function authHttpTimeoutMs(): number {
+  if (process.env.TERMINA_CORE_TEST === "1") {
+    const raw = process.env.TERMINA_TEST_AUTH_HTTP_TIMEOUT_MS?.trim();
+    const parsed = raw ? Number(raw) : Number.NaN;
+    if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+  }
+  return AUTH_HTTP_TIMEOUT_MS;
+}
+
+type AuthRequestSignal = {
+  signal: AbortSignal;
+  abortError: () => AuthHttpError | null;
+  cleanup: () => void;
+};
+
+function authRequestSignal(callerSignal?: AbortSignal): AuthRequestSignal {
+  const controller = new AbortController();
+  let reason: "cancelled" | "timed-out" | null = null;
+  const abortForCaller = () => {
+    if (reason !== null) return;
+    reason = "cancelled";
+    controller.abort();
+  };
+  if (callerSignal?.aborted) abortForCaller();
+  else callerSignal?.addEventListener("abort", abortForCaller, { once: true });
+  const timer = setTimeout(() => {
+    if (reason !== null) return;
+    reason = "timed-out";
+    controller.abort();
+  }, authHttpTimeoutMs());
+  timer.unref?.();
+  return {
+    signal: controller.signal,
+    abortError: () =>
+      reason === "cancelled"
+        ? new AuthHttpError(AUTH_REQUEST_CANCELLED)
+        : reason === "timed-out"
+          ? new AuthHttpError(AUTH_REQUEST_TIMED_OUT)
+          : null,
+    cleanup: () => {
+      clearTimeout(timer);
+      callerSignal?.removeEventListener("abort", abortForCaller);
+    },
+  };
+}
+
+async function cancelAuthBody(body: ReadableStream<Uint8Array> | null): Promise<void> {
+  if (!body) return;
+  try {
+    await body.cancel(AUTH_RESPONSE_TOO_LARGE);
+  } catch {
+    /* The request may already have closed while cancellation was delivered. */
+  }
+}
+
+async function readAuthResponse(
+  response: Response,
+): Promise<{ ok: boolean; status: number; payload: unknown; raw: string }> {
+  const declaredRaw = response.headers.get("content-length")?.trim() ?? "";
+  const declared = /^\d+$/.test(declaredRaw) ? Number(declaredRaw) : Number.NaN;
+  if (Number.isSafeInteger(declared) && declared > AUTH_HTTP_MAX_RESPONSE_BYTES) {
+    await cancelAuthBody(response.body);
+    throw new AuthHttpError(AUTH_RESPONSE_TOO_LARGE);
+  }
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  if (response.body) {
+    const reader = response.body.getReader();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > AUTH_HTTP_MAX_RESPONSE_BYTES) {
+          try {
+            await reader.cancel(AUTH_RESPONSE_TOO_LARGE);
+          } catch {
+            /* The stream may already have closed while cancellation was delivered. */
+          }
+          throw new AuthHttpError(AUTH_RESPONSE_TOO_LARGE);
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  let raw: string;
+  try {
+    raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new AuthHttpError(AUTH_RESPONSE_INVALID_UTF8);
+  }
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    payload = null;
+  }
+  return { ok: response.ok, status: response.status, payload, raw };
+}
+
+async function authFetch(
+  url: string,
+  init: Omit<RequestInit, "signal">,
+  callerSignal?: AbortSignal,
+): Promise<{ ok: boolean; status: number; payload: unknown; raw: string }> {
+  const request = authRequestSignal(callerSignal);
+  try {
+    const response = await fetch(url, { ...init, signal: request.signal });
+    const result = await readAuthResponse(response);
+    const aborted = request.abortError();
+    if (aborted) throw aborted;
+    return result;
+  } catch (error) {
+    const aborted = request.abortError();
+    if (aborted) throw aborted;
+    throw error;
+  } finally {
+    request.cleanup();
+  }
+}
+
 async function postJson(
   url: string,
   body: unknown,
   signal?: AbortSignal,
   extraHeaders?: Record<string, string>,
 ): Promise<{ ok: boolean; status: number; payload: unknown; raw: string }> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json", ...extraHeaders },
-    body: JSON.stringify(body),
+  return authFetch(
+    url,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json", ...extraHeaders },
+      body: JSON.stringify(body),
+    },
     signal,
-  });
-  const raw = await res.text();
-  let payload: unknown;
-  try {
-    payload = JSON.parse(raw);
-  } catch {
-    payload = null;
-  }
-  return { ok: res.ok, status: res.status, payload, raw };
+  );
 }
 
-async function postForm(url: string, fields: Record<string, string>, signal?: AbortSignal): Promise<{ ok: boolean; status: number; payload: unknown; raw: string }> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      accept: "application/json",
-      "content-type": "application/x-www-form-urlencoded",
+async function postForm(
+  url: string,
+  fields: Record<string, string>,
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; status: number; payload: unknown; raw: string }> {
+  return authFetch(
+    url,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams(fields).toString(),
     },
-    body: new URLSearchParams(fields).toString(),
     signal,
-  });
-  const raw = await res.text();
-  let payload: unknown;
-  try {
-    payload = JSON.parse(raw);
-  } catch {
-    payload = null;
-  }
-  return { ok: res.ok, status: res.status, payload, raw };
+  );
 }
 
 function persistOauth(
@@ -1146,81 +2246,112 @@ function persistApiKey(providerId: ProviderId, key: string): { ok: true } | { ok
   return { ok: true };
 }
 
-export async function refreshOauth(providerId: string): Promise<{ ok: true } | { ok: false; error: string }> {
-  if (!isSupportedProvider(providerId)) return { ok: false, error: `unsupported provider: ${providerId}` };
-  const inflight = refreshFlights.get(providerId);
-  if (inflight) return inflight;
-  const run: Promise<{ ok: true } | { ok: false; error: string }> = (async () => {
-    try {
-      try {
-        const got = readAuth();
-        if (!got.ok) return { ok: false, error: "auth expired — run /login" };
-        const entry = got.data[providerId];
-        if (!isObject(entry) || entry.type !== "oauth" || typeof entry.refresh !== "string") {
-          return { ok: false, error: "auth expired — run /login" };
-        }
-        let parsed: ReturnType<typeof parseOauthToken>;
-        let extra: Record<string, unknown> = entry;
-        if (providerId === "anthropic") {
-          const res = await postJson(tokenUrl(providerId), {
-            grant_type: "refresh_token",
-            refresh_token: entry.refresh,
-            client_id: ANTHROPIC_CLIENT_ID,
-          });
-          parsed = parseTokenResponse(res.payload);
-        } else if (providerId === "openai-codex") {
-          const res = await postForm(tokenUrl(providerId), {
-            grant_type: "refresh_token",
-            refresh_token: entry.refresh,
-            client_id: OPENAI_CODEX_CLIENT_ID,
-          });
-          parsed = parseTokenResponse(res.payload);
-        } else if (providerId === "xai") {
-          const res = await postForm(tokenUrl(providerId), {
-            grant_type: "refresh_token",
-            refresh_token: entry.refresh,
-            client_id: XAI_CLIENT_ID,
-          });
-          parsed = parseOauthToken(res.payload, Date.now(), {
-            requireRefresh: false,
-            previousRefresh: entry.refresh,
-            defaultExpiresIn: 3600,
-          });
-        } else if (providerId === "github-copilot") {
-          const session = await exchangeGithubCopilotToken(entry.refresh);
-          if (!session.ok) return { ok: false, error: "auth expired — run /login" };
-          parsed = {
-            ok: true,
-            access: session.access,
-            refresh: entry.refresh,
-            expires: session.expires,
-          };
-          extra = { ...(isObject(entry) ? entry : {}), apiUrl: session.apiUrl };
-        } else {
-          return { ok: true };
-        }
-        if (!parsed.ok) return { ok: false, error: "auth expired — run /login" };
-        const stored = persistOauth(providerId, parsed, extra);
-        if (!stored.ok) return { ok: false, error: "auth expired — run /login" };
-        return { ok: true };
-      } catch {
-        return { ok: false, error: "auth expired — run /login" };
-      }
-    } finally {
-      refreshFlights.delete(providerId);
+type RefreshResult = { ok: true } | { ok: false; error: string };
+
+async function runRefreshOauth(providerId: ProviderId): Promise<RefreshResult> {
+  try {
+    const got = readAuth();
+    if (!got.ok) return { ok: false, error: "auth expired — run /login" };
+    const entry = got.data[providerId];
+    if (!isObject(entry) || entry.type !== "oauth" || typeof entry.refresh !== "string") {
+      return { ok: false, error: "auth expired — run /login" };
     }
-  })();
-  refreshFlights.set(providerId, run);
-  return run;
+    let parsed: ReturnType<typeof parseOauthToken>;
+    let extra: Record<string, unknown> = entry;
+    if (providerId === "anthropic") {
+      const res = await postJson(tokenUrl(providerId), {
+        grant_type: "refresh_token",
+        refresh_token: entry.refresh,
+        client_id: ANTHROPIC_CLIENT_ID,
+      });
+      parsed = parseTokenResponse(res.payload);
+    } else if (providerId === "openai-codex") {
+      const res = await postForm(tokenUrl(providerId), {
+        grant_type: "refresh_token",
+        refresh_token: entry.refresh,
+        client_id: OPENAI_CODEX_CLIENT_ID,
+      });
+      parsed = parseTokenResponse(res.payload);
+    } else if (providerId === "xai") {
+      const res = await postForm(tokenUrl(providerId), {
+        grant_type: "refresh_token",
+        refresh_token: entry.refresh,
+        client_id: XAI_CLIENT_ID,
+      });
+      parsed = parseOauthToken(res.payload, Date.now(), {
+        requireRefresh: false,
+        previousRefresh: entry.refresh,
+        defaultExpiresIn: 3600,
+      });
+    } else if (providerId === "github-copilot") {
+      const session = await exchangeGithubCopilotToken(entry.refresh);
+      if (!session.ok) {
+        return isAuthHttpFailure(session.error) ? session : { ok: false, error: "auth expired — run /login" };
+      }
+      parsed = {
+        ok: true,
+        access: session.access,
+        refresh: entry.refresh,
+        expires: session.expires,
+      };
+      extra = { ...entry, apiUrl: session.apiUrl };
+    } else {
+      return { ok: true };
+    }
+    if (!parsed.ok) return { ok: false, error: "auth expired — run /login" };
+    const stored = persistOauth(providerId, parsed, extra);
+    if (!stored.ok) return { ok: false, error: "auth expired — run /login" };
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: authHttpError(error) ?? "auth expired — run /login" };
+  }
 }
 
-export async function resolveAuth(providerId: string = "anthropic"): Promise<ResolvedAuth> {
+function waitForRefresh(flight: Promise<RefreshResult>, signal?: AbortSignal): Promise<RefreshResult> {
+  if (!signal) return flight;
+  if (signal.aborted) return Promise.resolve({ ok: false, error: AUTH_REQUEST_CANCELLED });
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result: RefreshResult) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      resolve(result);
+    };
+    const onAbort = () => finish({ ok: false, error: AUTH_REQUEST_CANCELLED });
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    void flight.then(finish, () => finish({ ok: false, error: "auth expired — run /login" }));
+  });
+}
+
+/** A caller signal cancels only that wait. The provider-keyed refresh remains
+ * internally time-bounded so another caller can safely share the same flight. */
+export async function refreshOauth(providerId: string, signal?: AbortSignal): Promise<RefreshResult> {
   if (!isSupportedProvider(providerId)) return { ok: false, error: `unsupported provider: ${providerId}` };
+  if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
+  let flight = refreshFlights.get(providerId);
+  if (!flight) {
+    flight = runRefreshOauth(providerId);
+    refreshFlights.set(providerId, flight);
+    const cleanup = () => {
+      if (refreshFlights.get(providerId) === flight) refreshFlights.delete(providerId);
+    };
+    void flight.then(cleanup, cleanup);
+  }
+  return waitForRefresh(flight, signal);
+}
+
+/** Resolve stored/env credentials, allowing the caller to stop waiting for a
+ * required shared OAuth refresh without cancelling other callers. */
+export async function resolveAuth(providerId: string = "anthropic", signal?: AbortSignal): Promise<ResolvedAuth> {
+  if (!isSupportedProvider(providerId)) return { ok: false, error: `unsupported provider: ${providerId}` };
+  if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
   const got = readAuth();
   if (got.ok) {
     const stored = fromStored(providerId, got.data[providerId]);
     if (stored && "needsOauthRefresh" in stored) {
-      const refreshed = await refreshOauth(providerId);
+      const refreshed = await refreshOauth(providerId, signal);
       if (!refreshed.ok) return { ok: false, error: refreshed.error };
       const again = readAuth();
       if (again.ok) {
@@ -1291,45 +2422,82 @@ function buildOpenRouterAuthorizeUrl(challenge: string, callback: string): strin
   return u.toString();
 }
 
-async function exchangeAnthropic(code: string, verifier: string, port: number): Promise<{ ok: true } | { ok: false; error: string }> {
-  const res = await postJson(tokenUrl("anthropic"), {
-    grant_type: "authorization_code",
-    code,
-    redirect_uri: redirectUri("anthropic", port),
-    client_id: ANTHROPIC_CLIENT_ID,
-    code_verifier: verifier,
-  });
-  const parsed = parseTokenResponse(res.payload);
-  if (!parsed.ok) return { ok: false, error: `login failed: ${parsed.error}` };
-  return persistOauth("anthropic", parsed);
+async function exchangeAnthropic(
+  code: string,
+  verifier: string,
+  port: number,
+  signal?: AbortSignal,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const res = await postJson(
+      tokenUrl("anthropic"),
+      {
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: redirectUri("anthropic", port),
+        client_id: ANTHROPIC_CLIENT_ID,
+        code_verifier: verifier,
+      },
+      signal,
+    );
+    const parsed = parseTokenResponse(res.payload);
+    if (!parsed.ok) return { ok: false, error: `login failed: ${parsed.error}` };
+    if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
+    return persistOauth("anthropic", parsed);
+  } catch (error) {
+    return { ok: false, error: authHttpError(error) ?? "login failed: Anthropic token exchange failed" };
+  }
 }
 
-async function exchangeCodex(code: string, verifier: string, port: number): Promise<{ ok: true } | { ok: false; error: string }> {
-  const res = await postForm(tokenUrl("openai-codex"), {
-    grant_type: "authorization_code",
-    client_id: OPENAI_CODEX_CLIENT_ID,
-    code,
-    code_verifier: verifier,
-    redirect_uri: redirectUri("openai-codex", port),
-  });
-  const parsed = parseTokenResponse(res.payload);
-  if (!parsed.ok) return { ok: false, error: `login failed: ${parsed.error}` };
-  const rec = isObject(res.payload) ? res.payload : {};
-  const idToken = typeof rec.id_token === "string" ? rec.id_token : "";
-  const accountId = extractAccountId(parsed.access) || extractAccountId(idToken) || undefined;
-  return persistOauth("openai-codex", parsed, accountId ? { accountId } : {});
+async function exchangeCodex(
+  code: string,
+  verifier: string,
+  port: number,
+  signal?: AbortSignal,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const res = await postForm(
+      tokenUrl("openai-codex"),
+      {
+        grant_type: "authorization_code",
+        client_id: OPENAI_CODEX_CLIENT_ID,
+        code,
+        code_verifier: verifier,
+        redirect_uri: redirectUri("openai-codex", port),
+      },
+      signal,
+    );
+    const parsed = parseTokenResponse(res.payload);
+    if (!parsed.ok) return { ok: false, error: `login failed: ${parsed.error}` };
+    if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
+    const rec = isObject(res.payload) ? res.payload : {};
+    const idToken = typeof rec.id_token === "string" ? rec.id_token : "";
+    const accountId = extractAccountId(parsed.access) || extractAccountId(idToken) || undefined;
+    return persistOauth("openai-codex", parsed, accountId ? { accountId } : {});
+  } catch (error) {
+    return { ok: false, error: authHttpError(error) ?? "login failed: OpenAI token exchange failed" };
+  }
 }
 
-async function exchangeOpenRouter(code: string, verifier: string, signal?: AbortSignal): Promise<{ ok: true } | { ok: false; error: string }> {
-  const res = await postJson(
-    tokenUrl("openrouter"),
-    { code, code_verifier: verifier, code_challenge_method: "S256" },
-    signal,
-  );
-  const rec = isObject(res.payload) ? res.payload : {};
-  const key = typeof rec.key === "string" ? rec.key : "";
-  if (!res.ok || !key) return { ok: false, error: "login failed: OpenRouter key exchange failed" };
-  return persistApiKey("openrouter", key);
+async function exchangeOpenRouter(
+  code: string,
+  verifier: string,
+  signal?: AbortSignal,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    const res = await postJson(
+      tokenUrl("openrouter"),
+      { code, code_verifier: verifier, code_challenge_method: "S256" },
+      signal,
+    );
+    const rec = isObject(res.payload) ? res.payload : {};
+    const key = typeof rec.key === "string" ? rec.key : "";
+    if (!res.ok || !key) return { ok: false, error: "login failed: OpenRouter key exchange failed" };
+    if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
+    return persistApiKey("openrouter", key);
+  } catch (error) {
+    return { ok: false, error: authHttpError(error) ?? "login failed: OpenRouter key exchange failed" };
+  }
 }
 
 function parseAuthorizationInput(input: string): { code?: string; state?: string } {
@@ -1360,13 +2528,15 @@ function isOauthCancelError(err: string): boolean {
 }
 
 function loginCallbackTimeoutMs(): number | null {
-  const raw = process.env.TERMINA_TEST_LOGIN_TIMEOUT_MS?.trim();
-  if (raw === "0") return null;
-  if (raw) {
-    const n = Number(raw);
-    if (Number.isFinite(n) && n > 0) return n;
+  if (process.env.TERMINA_CORE_TEST === "1") {
+    const raw = process.env.TERMINA_TEST_LOGIN_TIMEOUT_MS?.trim();
+    if (raw === "0") return null;
+    if (raw) {
+      const n = Number(raw);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+    return null;
   }
-  if (process.env.TERMINA_CORE_TEST === "1") return null;
   return 3 * 60 * 1000;
 }
 
@@ -1555,7 +2725,7 @@ function validateVerificationUri(raw: string): string {
   } catch {
     throw new Error("Untrusted verification URI in xAI OAuth response");
   }
-  if (url.protocol !== "https:" && !testOverride("TERMINA_TEST_DEVICE_URL")) {
+  if (url.protocol !== "https:" && !testLoopbackOverride("TERMINA_TEST_DEVICE_URL")) {
     throw new Error("Untrusted verification URI in xAI OAuth response");
   }
   return url.href;
@@ -1605,7 +2775,7 @@ export async function requestXaiDeviceCode(signal?: AbortSignal): Promise<{
     intervalMs: intervalMs(
       res.payload.interval,
       XAI_DEFAULT_INTERVAL_MS,
-      testOverride("TERMINA_TEST_DEVICE_URL") ? 0 : XAI_MIN_INTERVAL_MS,
+      testLoopbackOverride("TERMINA_TEST_DEVICE_URL") ? 0 : XAI_MIN_INTERVAL_MS,
     ),
     expiresMs: positiveMs(res.payload.expires_in, XAI_DEFAULT_EXPIRES_MS),
   };
@@ -1618,7 +2788,7 @@ export async function pollXaiDeviceToken(
   const deadline = Date.now() + device.expiresMs;
   let intervalMs = device.intervalMs;
   while (Date.now() < deadline) {
-    const wait = Math.min(intervalMs + (testOverride("TERMINA_TEST_DEVICE_URL") ? 0 : XAI_POLL_MARGIN_MS), Math.max(0, deadline - Date.now()));
+    const wait = Math.min(intervalMs + (testLoopbackOverride("TERMINA_TEST_DEVICE_URL") ? 0 : XAI_POLL_MARGIN_MS), Math.max(0, deadline - Date.now()));
     if (wait > 0) await sleepAsync(wait, signal);
     const res = await postForm(
       tokenUrl("xai"),
@@ -1670,15 +2840,15 @@ async function loginXaiDevice(io: LoginIo): Promise<{ ok: true } | { ok: false; 
 }
 
 function githubDeviceUrl(): string {
-  return testOverride("TERMINA_TEST_DEVICE_URL") || GITHUB_DEVICE_URL;
+  return testLoopbackOverride("TERMINA_TEST_DEVICE_URL") || GITHUB_DEVICE_URL;
 }
 
 function githubAccessUrl(): string {
-  return testOverride("TERMINA_TEST_TOKEN_URL") || GITHUB_ACCESS_TOKEN_URL;
+  return testLoopbackOverride("TERMINA_TEST_TOKEN_URL") || GITHUB_ACCESS_TOKEN_URL;
 }
 
 function copilotSessionUrl(): string {
-  return testOverride("TERMINA_TEST_COPILOT_TOKEN_URL") || GITHUB_COPILOT_TOKEN_URL;
+  return testLoopbackOverride("TERMINA_TEST_COPILOT_TOKEN_URL") || GITHUB_COPILOT_TOKEN_URL;
 }
 
 function validateGithubVerificationUri(raw: string): string {
@@ -1688,10 +2858,10 @@ function validateGithubVerificationUri(raw: string): string {
   } catch {
     throw new Error("Untrusted verification URI in GitHub OAuth response");
   }
-  if (url.protocol !== "https:" && !testOverride("TERMINA_TEST_DEVICE_URL")) {
+  if (url.protocol !== "https:" && !testLoopbackOverride("TERMINA_TEST_DEVICE_URL")) {
     throw new Error("Untrusted verification URI in GitHub OAuth response");
   }
-  if (!testOverride("TERMINA_TEST_DEVICE_URL") && url.hostname !== "github.com" && !url.hostname.endsWith(".github.com")) {
+  if (!testLoopbackOverride("TERMINA_TEST_DEVICE_URL") && url.hostname !== "github.com" && !url.hostname.endsWith(".github.com")) {
     throw new Error("Untrusted verification URI in GitHub OAuth response");
   }
   return url.href;
@@ -1723,7 +2893,7 @@ export async function requestGithubDeviceCode(signal?: AbortSignal): Promise<{
     deviceCode,
     userCode,
     verificationUri: validateGithubVerificationUri(verification),
-    intervalMs: intervalMs(res.payload.interval, 5_000, testOverride("TERMINA_TEST_DEVICE_URL") ? 0 : 1_000),
+    intervalMs: intervalMs(res.payload.interval, 5_000, testLoopbackOverride("TERMINA_TEST_DEVICE_URL") ? 0 : 1_000),
     expiresMs: positiveMs(res.payload.expires_in, 15 * 60 * 1000),
   };
 }
@@ -1767,35 +2937,37 @@ export async function exchangeGithubCopilotToken(
   githubToken: string,
   signal?: AbortSignal,
 ): Promise<{ ok: true; access: string; expires: number; apiUrl: string } | { ok: false; error: string }> {
-  const res = await fetch(copilotSessionUrl(), {
-    method: "GET",
-    headers: {
-      ...COPILOT_HEADERS,
-      authorization: `Bearer ${githubToken}`,
-    },
-    signal,
-  });
-  const raw = await res.text();
-  let payload: unknown;
   try {
-    payload = JSON.parse(raw);
-  } catch {
-    payload = null;
+    const res = await authFetch(
+      copilotSessionUrl(),
+      {
+        method: "GET",
+        headers: {
+          ...COPILOT_HEADERS,
+          authorization: `Bearer ${githubToken}`,
+        },
+      },
+      signal,
+    );
+    const payload = res.payload;
+    if (!res.ok || !isObject(payload) || typeof payload.token !== "string" || !payload.token) {
+      return { ok: false, error: `Copilot session token failed (HTTP ${res.status})` };
+    }
+    if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
+    const endpoints = isObject(payload.endpoints) ? payload.endpoints : {};
+    const reported = typeof endpoints.api === "string" ? endpoints.api : "";
+    const apiUrl = validateCopilotApiUrl(reported) || DEFAULT_BASE["github-copilot"];
+    let expires = Date.now() + 25 * 60 * 1000;
+    const expiresAt = payload.expires_at;
+    if (typeof expiresAt === "number" && Number.isFinite(expiresAt) && expiresAt > 0) {
+      expires = (expiresAt > 1_000_000_000_000 ? expiresAt : expiresAt * 1000) - EXPIRE_MARGIN_MS;
+    } else if (typeof payload.refresh_in === "number" && payload.refresh_in > 0) {
+      expires = Date.now() + payload.refresh_in * 1000 - EXPIRE_MARGIN_MS;
+    }
+    return { ok: true, access: payload.token, expires, apiUrl };
+  } catch (error) {
+    return { ok: false, error: authHttpError(error) ?? "Copilot session token failed" };
   }
-  if (!res.ok || !isObject(payload) || typeof payload.token !== "string" || !payload.token) {
-    return { ok: false, error: `Copilot session token failed (HTTP ${res.status})` };
-  }
-  const endpoints = isObject(payload.endpoints) ? payload.endpoints : {};
-  const reported = typeof endpoints.api === "string" ? endpoints.api : "";
-  const apiUrl = validateCopilotApiUrl(reported) || DEFAULT_BASE["github-copilot"];
-  let expires = Date.now() + 25 * 60 * 1000;
-  const expiresAt = payload.expires_at;
-  if (typeof expiresAt === "number" && Number.isFinite(expiresAt) && expiresAt > 0) {
-    expires = (expiresAt > 1_000_000_000_000 ? expiresAt : expiresAt * 1000) - EXPIRE_MARGIN_MS;
-  } else if (typeof payload.refresh_in === "number" && payload.refresh_in > 0) {
-    expires = Date.now() + payload.refresh_in * 1000 - EXPIRE_MARGIN_MS;
-  }
-  return { ok: true, access: payload.token, expires, apiUrl };
 }
 
 async function loginGithubCopilot(io: LoginIo): Promise<{ ok: true } | { ok: false; error: string }> {
@@ -1833,8 +3005,9 @@ async function loginGithubCopilotKey(io: LoginIo): Promise<{ ok: true } | { ok: 
 
 async function finishResolved(
   providerId: ProviderId,
+  signal?: AbortSignal,
 ): Promise<{ ok: true; summary: string } | { ok: false; error: string }> {
-  const resolved = await resolveAuth(providerId);
+  const resolved = await resolveAuth(providerId, signal);
   if (!resolved.ok) return { ok: false, error: resolved.error };
   return { ok: true, summary: authBanner(resolved) };
 }
@@ -1851,22 +3024,22 @@ export async function runLogin(
   if (providerId === "github-copilot") {
     const stored = chosen === "key" ? await loginGithubCopilotKey(io) : await loginGithubCopilot(io);
     if (!stored.ok) return stored;
-    return finishResolved(providerId);
+    return finishResolved(providerId, io.signal);
   }
   if (chosen === "key" || (chosen === "browser" && defaultLoginMode(providerId) === "key")) {
     const stored = await loginKey(providerId, io);
     if (!stored.ok) return stored;
-    return finishResolved(providerId);
+    return finishResolved(providerId, io.signal);
   }
   if (providerId === "xai") {
     const stored = await loginXaiDevice(io);
     if (!stored.ok) return stored;
-    return finishResolved(providerId);
+    return finishResolved(providerId, io.signal);
   }
   if (providerId === "openai" || providerId === "google") {
     const stored = await loginKey(providerId, io);
     if (!stored.ok) return stored;
-    return finishResolved(providerId);
+    return finishResolved(providerId, io.signal);
   }
   const port = redirectPort(providerId);
   const { verifier, challenge, state } = pkce();
@@ -1876,22 +3049,22 @@ export async function runLogin(
     if (!code.ok) return code;
     const exchanged = await exchangeOpenRouter(code.code, verifier, io.signal);
     if (!exchanged.ok) return exchanged;
-    return finishResolved(providerId);
+    return finishResolved(providerId, io.signal);
   }
   if (providerId === "openai-codex") {
     const url = buildCodexAuthorizeUrl(challenge, state, port);
     const code = await collectCode(providerId, chosen === "code" ? "code" : "browser", url, state, io);
     if (!code.ok) return code;
-    const exchanged = await exchangeCodex(code.code, verifier, port);
+    const exchanged = await exchangeCodex(code.code, verifier, port, io.signal);
     if (!exchanged.ok) return exchanged;
-    return finishResolved(providerId);
+    return finishResolved(providerId, io.signal);
   }
   const url = buildAnthropicAuthorizeUrl(challenge, state, port);
   const code = await collectCode("anthropic", chosen === "code" ? "code" : "browser", url, state, io);
   if (!code.ok) return code;
-  const exchanged = await exchangeAnthropic(code.code, verifier, port);
+  const exchanged = await exchangeAnthropic(code.code, verifier, port, io.signal);
   if (!exchanged.ok) return exchanged;
-  return finishResolved(providerId);
+  return finishResolved(providerId, io.signal);
 }
 
 export function runLogout(providerId: string): { ok: true; summary: string } | { ok: false; error: string } {

@@ -634,31 +634,59 @@ function parseSseRpc(text: string, id: number): RpcMsg {
 }
 
 async function readCappedBody(res: Response, max: number, name: string): Promise<string> {
-  if (!res.body) {
-    const declared = res.headers.get("content-length")?.trim() ?? "";
-    if (!/^\d+$/.test(declared)) throw new Error(`mcp ${name} response body cannot be bounded`);
-    const declaredBytes = Number(declared);
-    if (!Number.isSafeInteger(declaredBytes)) throw new Error(`mcp ${name} response body cannot be bounded`);
-    if (declaredBytes > max) throw new Error(`mcp ${name} response too large`);
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length > max) throw new Error(`mcp ${name} response too large`);
-    return buf.toString("utf8");
+  const declared = res.headers.get("content-length")?.trim() ?? "";
+  const declaredBytes = /^\d+$/.test(declared) ? Number(declared) : null;
+  if (declaredBytes !== null && !Number.isSafeInteger(declaredBytes)) {
+    throw new Error(`mcp ${name} response body cannot be bounded`);
   }
+  if (declaredBytes !== null && declaredBytes > max) {
+    try {
+      await res.body?.cancel(`mcp ${name} response too large`);
+    } catch {
+      /* The size error remains authoritative. */
+    }
+    throw new Error(`mcp ${name} response too large`);
+  }
+  if (!res.body) {
+    // A body convenience method can allocate without regard to Content-Length.
+    // Only a body that is provably empty is safe when no stream is exposed.
+    if (declaredBytes === 0 || res.status === 204 || res.status === 205 || res.status === 304) return "";
+    throw new Error(`mcp ${name} response body cannot be bounded`);
+  }
+
   const reader = res.body.getReader();
   const chunks: Buffer[] = [];
   let used = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    const chunk = Buffer.from(value);
-    if (used + chunk.length > max) {
-      await reader.cancel();
-      throw new Error(`mcp ${name} response too large`);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!(value instanceof Uint8Array)) throw new Error(`mcp ${name} response returned non-byte data`);
+      if (used + value.byteLength > max) {
+        try {
+          await reader.cancel(`mcp ${name} response too large`);
+        } catch {
+          /* The size error remains authoritative. */
+        }
+        throw new Error(`mcp ${name} response too large`);
+      }
+      chunks.push(Buffer.from(value));
+      used += value.byteLength;
     }
-    chunks.push(chunk);
-    used += chunk.length;
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* A cancelled or failed reader may already be detached. */
+    }
   }
-  return Buffer.concat(chunks).toString("utf8");
+  // Do not require Content-Length to equal decoded stream bytes: fetch may
+  // transparently decompress a response while preserving its wire length.
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, used));
+  } catch {
+    throw new Error(`mcp ${name} response is not valid UTF-8`);
+  }
 }
 
 class McpHttp implements McpConn {
@@ -747,6 +775,15 @@ class McpHttp implements McpConn {
       signal: ac.signal,
       redirect: "manual",
     })
+      .then(async (res) => {
+        // Notifications have no result to parse. Cancel the response stream so
+        // a server cannot leave an unread or endless body attached to the session.
+        try {
+          await res.body?.cancel("MCP notification response is not consumed");
+        } catch {
+          /* ignore notify cleanup failures */
+        }
+      })
       .catch(() => {
         /* ignore notify failures */
       })

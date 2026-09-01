@@ -184,8 +184,8 @@ check("invalid MCP results are explicitly incomplete", () => {
   assert.ok(Object.isFrozen(result));
 });
 
-// A fetch implementation without a streaming body must provide a bounded
-// declared length; otherwise MCP startup must fail closed before arrayBuffer.
+// A fetch implementation without a streaming body must be provably empty;
+// Content-Length alone cannot make an allocating body convenience method safe.
 try {
   const previousFetch = globalThis.fetch;
   globalThis.fetch = async (_input, init = {}) => {
@@ -213,6 +213,64 @@ try {
 } catch (error) {
   failures.push({ name: "bodyless MCP responses fail closed without a declared bound", error });
   console.log(`FAIL  bodyless MCP responses fail closed without a declared bound — ${error instanceof Error ? error.message : String(error)}`);
+}
+
+try {
+  const previousFetch = globalThis.fetch;
+  let convenienceRead = false;
+  globalThis.fetch = async (_input, init = {}) => {
+    const request = JSON.parse(String(init.body ?? "{}"));
+    const bytes = Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }), "utf8");
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "application/json", "content-length": String(bytes.length) }),
+      body: null,
+      arrayBuffer: async () => {
+        convenienceRead = true;
+        return bytes;
+      },
+    };
+  };
+  try {
+    const session = await startMcp(
+      [{ name: "bodyless", args: [], env: {}, url: "https://mcp.invalid/session" }],
+      { projectRoot: ".", confineCwd: () => "." },
+    );
+    assert.equal(session.tools.length, 0);
+    assert.equal(convenienceRead, false);
+    assert.ok(session.notes.some((note) => /body cannot be bounded/i.test(note)));
+    session.shutdown();
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  console.log("PASS  declared bodyless MCP responses never use allocating body helpers");
+} catch (error) {
+  failures.push({ name: "declared bodyless MCP responses never use allocating body helpers", error });
+  console.log(`FAIL  declared bodyless MCP responses never use allocating body helpers — ${error instanceof Error ? error.message : String(error)}`);
+}
+
+try {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(Uint8Array.from([0x7b, 0x22, 0x80, 0x22, 0x7d]), {
+    status: 200,
+    headers: { "content-type": "application/json", "content-length": "5" },
+  });
+  try {
+    const session = await startMcp(
+      [{ name: "invalid-utf8", args: [], env: {}, url: "https://mcp.invalid/session" }],
+      { projectRoot: ".", confineCwd: () => "." },
+    );
+    assert.equal(session.tools.length, 0);
+    assert.ok(session.notes.some((note) => /not valid UTF-8/i.test(note)));
+    session.shutdown();
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+  console.log("PASS  MCP HTTP responses reject malformed UTF-8 without replacement bytes");
+} catch (error) {
+  failures.push({ name: "MCP HTTP responses reject malformed UTF-8 without replacement bytes", error });
+  console.log(`FAIL  MCP HTTP responses reject malformed UTF-8 without replacement bytes — ${error instanceof Error ? error.message : String(error)}`);
 }
 
 try {

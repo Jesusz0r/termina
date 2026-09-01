@@ -185,6 +185,39 @@ function makeAttempt(index, overrides = {}) {
   });
 }
 
+function traceIndexAttempt(runId, taskId, attemptId, retained = false, traceTurn = null) {
+  return { runId, taskId, attemptId, role: "main", retained, traceTurn, unknown: false };
+}
+
+function traceIndexSettlement(runId, taskId, attemptId, retained = false, traceTurn = null) {
+  return {
+    runId,
+    taskId,
+    attemptIds: [attemptId],
+    summaryAttemptIds: [],
+    finalAttemptId: attemptId,
+    retained,
+    traceTurn,
+    unknown: false,
+  };
+}
+
+function writeTraceIndex(directory, attempts, settlements, complete = true, updatedAt = "2026-08-30T00:00:00.000Z") {
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, "trace-index.json"), JSON.stringify({
+    schemaVersion: TRACE_SCHEMA_VERSION,
+    kind: "trace-link-index",
+    complete,
+    updatedAt,
+    attempts,
+    settlements,
+  }));
+}
+
+function longTraceId(prefix, index) {
+  return `${prefix}-${index}-${"x".repeat(480)}`;
+}
+
 const settled = createTaskSettledRecord({
   runId: "run-runtime",
   taskId: "task-runtime",
@@ -515,6 +548,263 @@ assert.equal((await linkRetentionRestarted.ready).ok, true);
 assert.equal(linkRetentionRestarted.manifest.linkIndex.complete, true);
 assert.equal((await linkRetentionRestarted.writeTaskSettled(postRetentionSettlement)).kind, "duplicate-settlement");
 await linkRetentionRestarted.close();
+
+const exhaustedTombstones = join(root, "exhausted-tombstones.traces");
+const tombstoneAttempts = [];
+const tombstoneSettlements = [];
+for (let index = 0; index < 2_048; index++) {
+  const runId = `run-tombstone-${index}`;
+  const taskId = `task-tombstone-${index}`;
+  const attemptId = `attempt-tombstone-${index}`;
+  tombstoneAttempts.push(traceIndexAttempt(runId, taskId, attemptId, false, index * 2 + 1));
+  tombstoneSettlements.push(traceIndexSettlement(runId, taskId, attemptId, false, index * 2 + 2));
+}
+writeTraceIndex(exhaustedTombstones, tombstoneAttempts, tombstoneSettlements);
+const tombstoneRuntime = createTraceRuntime({
+  directory: exhaustedTombstones,
+  namespace: "namespace-exhausted-tombstones",
+  retentionCap: 10,
+  now: () => "2026-08-30T00:00:00.000Z",
+});
+assert.equal((await tombstoneRuntime.ready).ok, true);
+assert.equal((await tombstoneRuntime.writeAttempt(makeAttempt(1, {
+  runId: "run-after-tombstones",
+  taskId: "task-after-tombstones",
+  attemptId: "attempt-after-tombstones",
+  retryOfAttemptId: null,
+}))).ok, true);
+assert.equal(tombstoneRuntime.manifest.linkIndex.complete, false);
+assert.equal(tombstoneRuntime.manifest.linkIndex.attempts, 2_048);
+assert.equal(tombstoneRuntime.manifest.linkIndex.settlements, 2_047);
+const compactedTombstoneIndex = JSON.parse(readFileSync(join(exhaustedTombstones, "trace-index.json"), "utf8"));
+assert.equal(compactedTombstoneIndex.attempts.some((entry) => entry.attemptId === "attempt-tombstone-0"), false);
+assert.equal(compactedTombstoneIndex.attempts.some((entry) => entry.attemptId === "attempt-after-tombstones"), true);
+assert.equal((await tombstoneRuntime.writeAttempt(makeAttempt(1, {
+  runId: "run-tombstone-1",
+  taskId: "task-tombstone-1",
+  attemptId: "attempt-tombstone-1",
+  retryOfAttemptId: null,
+}))).kind, "duplicate-attempt");
+assert.equal((await tombstoneRuntime.writeTaskSettled(createTaskSettledRecord({
+  runId: "run-tombstone-1",
+  taskId: "task-tombstone-1",
+  attemptCount: 1,
+  finalAttemptId: "attempt-tombstone-1",
+  attemptIds: ["attempt-tombstone-1"],
+  summaryAttemptIds: [],
+  outcome: { status: "success" },
+}))).kind, "duplicate-settlement");
+assert.equal((await tombstoneRuntime.writeAttempt(makeAttempt(1, {
+  runId: "run-tombstone-0",
+  taskId: "task-tombstone-0",
+  attemptId: "attempt-tombstone-0",
+  retryOfAttemptId: null,
+}))).ok, true);
+await tombstoneRuntime.close();
+
+const protectedLinkCapacity = join(root, "protected-link-capacity.traces");
+const protectedLinkAttempts = [];
+const protectedLinkSettlements = [];
+for (let index = 0; index < 2_047; index++) {
+  const runId = `run-protected-link-${index}`;
+  const taskId = `task-protected-link-${index}`;
+  const attemptId = `attempt-protected-link-${index}`;
+  protectedLinkAttempts.push(traceIndexAttempt(runId, taskId, attemptId, false, index * 2 + 1));
+  protectedLinkSettlements.push(traceIndexSettlement(runId, taskId, attemptId, false, index * 2 + 2));
+}
+protectedLinkAttempts.push(traceIndexAttempt("run-protected-unsettled", "task-protected-unsettled", "attempt-protected-unsettled"));
+writeTraceIndex(protectedLinkCapacity, protectedLinkAttempts, protectedLinkSettlements, false);
+const protectedLinkRuntime = createTraceRuntime({
+  directory: protectedLinkCapacity,
+  namespace: "namespace-protected-link-capacity",
+  retentionCap: 10,
+  now: () => "2026-08-30T00:00:00.000Z",
+});
+assert.equal((await protectedLinkRuntime.ready).ok, true);
+assert.equal((await protectedLinkRuntime.writeAttempt(makeAttempt(1, {
+  runId: "run-protected-link-0",
+  taskId: "task-protected-link-0",
+  attemptId: "attempt-after-protected-link",
+  parentAttemptId: "unknown-parent-after-protected-link",
+  retryOfAttemptId: "attempt-protected-link-0",
+}))).ok, true);
+const protectedLinkIndex = JSON.parse(readFileSync(join(protectedLinkCapacity, "trace-index.json"), "utf8"));
+assert.equal(protectedLinkIndex.attempts.some((entry) => entry.attemptId === "attempt-protected-link-0" && entry.unknown === false), true);
+assert.equal(protectedLinkIndex.settlements.some((entry) => entry.taskId === "task-protected-link-0"), true);
+assert.equal(protectedLinkIndex.attempts.some((entry) => entry.attemptId === "attempt-protected-link-1"), false);
+await protectedLinkRuntime.close();
+
+const protectedHistoryCapacity = join(root, "protected-history-capacity.traces");
+const protectedHistoryAttempts = [];
+const protectedHistorySettlements = [];
+for (let index = 0; index < 2_045; index++) {
+  const runId = `run-history-tombstone-${index}`;
+  const taskId = `task-history-tombstone-${index}`;
+  const attemptId = `attempt-history-tombstone-${index}`;
+  protectedHistoryAttempts.push(traceIndexAttempt(runId, taskId, attemptId, false, index * 2 + 10));
+  protectedHistorySettlements.push(traceIndexSettlement(runId, taskId, attemptId, false, index * 2 + 11));
+}
+protectedHistoryAttempts.push(
+  traceIndexAttempt("run-history-retained", "task-history-retained", "attempt-history-retained", true),
+  traceIndexAttempt("run-history-unsettled", "task-history-unsettled", "attempt-history-unsettled"),
+  { ...traceIndexAttempt("run-history-unknown", "task-history-unknown", "attempt-history-unknown"), unknown: true },
+  traceIndexAttempt("run-history-unsettled-2", "task-history-unsettled-2", "attempt-history-unsettled-2"),
+);
+protectedHistorySettlements.push(traceIndexSettlement(
+  "run-history-retained",
+  "task-history-retained",
+  "attempt-history-retained",
+  true,
+));
+writeTraceIndex(protectedHistoryCapacity, protectedHistoryAttempts, protectedHistorySettlements, false);
+const protectedHistoryRuntime = createTraceRuntime({
+  directory: protectedHistoryCapacity,
+  namespace: "namespace-protected-history-capacity",
+  retentionCap: 10,
+  now: () => "2026-08-30T00:00:00.000Z",
+});
+assert.equal((await protectedHistoryRuntime.ready).ok, true);
+assert.equal((await protectedHistoryRuntime.writeAttempt(makeAttempt(1, {
+  runId: "run-history-admission",
+  taskId: "task-history-admission",
+  attemptId: "attempt-history-admission",
+  parentAttemptId: "unknown-parent-after-history-admission",
+  retryOfAttemptId: null,
+}))).ok, true);
+const protectedHistoryIndex = JSON.parse(readFileSync(join(protectedHistoryCapacity, "trace-index.json"), "utf8"));
+assert.equal(protectedHistoryIndex.attempts.some((entry) => entry.attemptId === "attempt-history-retained" && entry.retained), true);
+assert.equal(protectedHistoryIndex.settlements.some((entry) => entry.taskId === "task-history-retained" && entry.retained), true);
+assert.equal(protectedHistoryIndex.attempts.some((entry) => entry.attemptId === "attempt-history-unsettled"), true);
+assert.equal(protectedHistoryIndex.attempts.some((entry) => entry.attemptId === "attempt-history-unsettled-2"), true);
+assert.equal(protectedHistoryIndex.attempts.some((entry) => entry.attemptId === "attempt-history-unknown" && entry.unknown), true);
+await protectedHistoryRuntime.close();
+
+const byteExhausted = join(root, "byte-exhausted.traces");
+const byteAttempts = [];
+const byteSettlements = [];
+const nextRunId = longTraceId("run-next", 0);
+const nextTaskId = longTraceId("task-next", 0);
+const nextAttemptId = longTraceId("attempt-next", 0);
+const nextIndexAttempt = traceIndexAttempt(nextRunId, nextTaskId, nextAttemptId);
+while (true) {
+  const index = byteAttempts.length;
+  const runId = longTraceId("run-byte", index);
+  const taskId = longTraceId("task-byte", index);
+  const attemptId = longTraceId("attempt-byte", index);
+  const prospectiveBytes = Buffer.byteLength(JSON.stringify({
+    schemaVersion: TRACE_SCHEMA_VERSION,
+    kind: "trace-link-index",
+    complete: true,
+    updatedAt: "2026-08-30T00:00:00.000Z",
+    attempts: [...byteAttempts, nextIndexAttempt],
+    settlements: byteSettlements,
+  }), "utf8");
+  if (prospectiveBytes > 1 * 1024 * 1024) break;
+  byteAttempts.push(traceIndexAttempt(runId, taskId, attemptId));
+  byteSettlements.push(traceIndexSettlement(runId, taskId, attemptId));
+}
+writeTraceIndex(byteExhausted, byteAttempts, byteSettlements);
+const byteRuntime = createTraceRuntime({
+  directory: byteExhausted,
+  namespace: "namespace-byte-exhausted",
+  retentionCap: 10,
+  now: () => "2026-08-30T00:00:00.000Z",
+});
+assert.equal((await byteRuntime.ready).ok, true);
+const byteAdmission = await byteRuntime.writeAttempt(makeAttempt(1, {
+  runId: nextRunId,
+  taskId: nextTaskId,
+  attemptId: nextAttemptId,
+  retryOfAttemptId: null,
+}));
+assert.equal(byteAdmission.ok, true);
+assert.equal(byteAdmission.persisted, true);
+assert.equal(byteRuntime.manifest.linkIndex.complete, false);
+assert.equal(readdirSync(byteExhausted).filter((name) => /^turn-\d+\.json$/.test(name)).length, 1);
+await byteRuntime.close();
+
+const variableTimestampBoundary = join(root, "variable-timestamp-boundary.traces");
+const shortIndexTimestamp = "s";
+const longIndexTimestamp = "l".repeat(512);
+const timestampBoundaryAttempts = [];
+const timestampBoundarySettlements = [];
+let timestampBoundaryRecord = null;
+for (let index = 0; timestampBoundaryRecord === null; index++) {
+  const boundaryRecordFor = (length) => {
+    const suffix = "n".repeat(length);
+    return {
+      runId: `run-timestamp-boundary-${suffix}`,
+      taskId: `task-timestamp-boundary-${suffix}`,
+      attemptId: `attempt-timestamp-boundary-${suffix}`,
+    };
+  };
+  const boundaryBytes = (record, updatedAt) => Buffer.byteLength(JSON.stringify({
+    schemaVersion: TRACE_SCHEMA_VERSION,
+    kind: "trace-link-index",
+    complete: true,
+    updatedAt,
+    attempts: [...timestampBoundaryAttempts, traceIndexAttempt(record.runId, record.taskId, record.attemptId)],
+    settlements: timestampBoundarySettlements,
+  }), "utf8");
+  const smallestRecord = boundaryRecordFor(1);
+  const largestRecord = boundaryRecordFor(480);
+  if (boundaryBytes(smallestRecord, shortIndexTimestamp) <= 1 * 1024 * 1024 &&
+    boundaryBytes(largestRecord, longIndexTimestamp) > 1 * 1024 * 1024) {
+    for (let length = 1; length <= 480; length++) {
+      const record = boundaryRecordFor(length);
+      const shortBytes = boundaryBytes(record, shortIndexTimestamp);
+      const longBytes = boundaryBytes(record, longIndexTimestamp);
+      if (shortBytes <= 1 * 1024 * 1024 && longBytes > 1 * 1024 * 1024) {
+        timestampBoundaryRecord = record;
+        break;
+      }
+    }
+  }
+  if (timestampBoundaryRecord !== null) break;
+  const runId = `run-timestamp-seed-${index}-${"x".repeat(120)}`;
+  const taskId = `task-timestamp-seed-${index}-${"x".repeat(120)}`;
+  const attemptId = `attempt-timestamp-seed-${index}-${"x".repeat(120)}`;
+  timestampBoundaryAttempts.push(traceIndexAttempt(runId, taskId, attemptId));
+  assert.ok(timestampBoundaryAttempts.length + timestampBoundarySettlements.length < 4_096);
+}
+assert.notEqual(timestampBoundaryRecord, null);
+const timestampBoundaryIndexBase = {
+  schemaVersion: TRACE_SCHEMA_VERSION,
+  kind: "trace-link-index",
+  complete: true,
+  attempts: [...timestampBoundaryAttempts, traceIndexAttempt(
+    timestampBoundaryRecord.runId,
+    timestampBoundaryRecord.taskId,
+    timestampBoundaryRecord.attemptId,
+  )],
+  settlements: timestampBoundarySettlements,
+};
+assert.ok(Buffer.byteLength(JSON.stringify({ ...timestampBoundaryIndexBase, updatedAt: shortIndexTimestamp }), "utf8") <= 1 * 1024 * 1024);
+assert.ok(Buffer.byteLength(JSON.stringify({ ...timestampBoundaryIndexBase, updatedAt: longIndexTimestamp }), "utf8") > 1 * 1024 * 1024);
+writeTraceIndex(variableTimestampBoundary, timestampBoundaryAttempts, timestampBoundarySettlements, true, shortIndexTimestamp);
+let timestampBoundaryWrite = false;
+let timestampBoundaryNowCalls = 0;
+const variableTimestampRuntime = createTraceRuntime({
+  directory: variableTimestampBoundary,
+  namespace: "namespace-variable-timestamp-boundary",
+  retentionCap: 10,
+  now: () => {
+    if (!timestampBoundaryWrite) return shortIndexTimestamp;
+    timestampBoundaryNowCalls++;
+    return timestampBoundaryNowCalls <= 3 ? shortIndexTimestamp : longIndexTimestamp;
+  },
+});
+assert.equal((await variableTimestampRuntime.ready).ok, true);
+timestampBoundaryWrite = true;
+assert.equal((await variableTimestampRuntime.writeAttempt(makeAttempt(1, {
+  ...timestampBoundaryRecord,
+  retryOfAttemptId: null,
+}))).ok, true);
+const variableTimestampIndex = readFileSync(join(variableTimestampBoundary, "trace-index.json"), "utf8");
+assert.ok(Buffer.byteLength(variableTimestampIndex, "utf8") <= 1 * 1024 * 1024);
+assert.equal(JSON.parse(variableTimestampIndex).updatedAt, shortIndexTimestamp);
+timestampBoundaryWrite = false;
+await variableTimestampRuntime.close();
 
 const resetRuntime = createTraceRuntime({
   directory: traces,
