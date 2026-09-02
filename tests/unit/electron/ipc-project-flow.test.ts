@@ -1,17 +1,21 @@
+import { describe, it } from "vitest";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+
+describe("IPC Capability & Project Flow Security Invariants", () => {
+  it("enforces all 22 renderer capability and project activation fences", async () => {
 /**
  * Deterministic source-level probes for the renderer capability and project
  * activation fences. The real Electron multiproject suite covers the public
  * UI path; this probe covers adversarial sender shapes and the async reorder
  * contract without needing a live display server.
  */
-import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 
-const main = readFileSync(new URL("../electron/main.ts", import.meta.url), "utf8");
-const preload = readFileSync(new URL("../electron/preload.ts", import.meta.url), "utf8");
-const renderer = readFileSync(new URL("../src/main.ts", import.meta.url), "utf8");
-const rendererState = readFileSync(new URL("../src/worldline-project-state.ts", import.meta.url), "utf8");
-const types = readFileSync(new URL("../shared/types.ts", import.meta.url), "utf8");
+const main = readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8");
+const preload = readFileSync(new URL("../../../electron/preload.ts", import.meta.url), "utf8");
+const renderer = readFileSync(new URL("../../../src/main.ts", import.meta.url), "utf8");
+const rendererState = readFileSync(new URL("../../../src/worldline-project-state.ts", import.meta.url), "utf8");
+const types = readFileSync(new URL("../../../shared/types.ts", import.meta.url), "utf8");
 
 const checks = [];
 function check(name, value) {
@@ -231,4 +235,7 @@ check("close pushes advance the stale-event watermark", main.includes('this.send
 check("shared project contracts expose activation generations", types.includes("interface RendererIpcCapability")
   && types.includes("activationGeneration: number"));
 
-console.log(`ipc/project flow probes: ${checks.length}/${checks.length} passed`);
+assert.equal(checks.length, 22);
+
+  });
+});

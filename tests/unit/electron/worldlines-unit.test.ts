@@ -318,10 +318,7 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
     disposeWorldlineCoreClient();
   });
 
-  it("passes ipc/project flow probes", async () => {
-    const { stdout } = await runScript("ipc-project-flow-test.mjs");
-    expect(stdout).toContain("22/22 passed");
-  });
+
 
   it("passes core client read budget gate", async () => {
     const { stdout } = await runScript("core-client-read-budget-test.mjs");
