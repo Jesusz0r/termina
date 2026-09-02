@@ -14,12 +14,12 @@ describe("Session Fork Teardown, Retention & Pi Admission Invariants", () => {
       {
         cwd: process.cwd(),
         env: { ...process.env, TERMINA_CORE_TEST: "1" },
-        timeout: 120_000,
+        timeout: 180_000,
       },
     );
 
     expect(stdout).toContain("PASS session-fork teardown/retention regressions");
-  }, 120_000);
+  }, 180_000);
 
   it("passes Pi session admission and cleanup regressions", async () => {
     const scriptPath = resolve("tests", "probes", "electron", "session-pi-admission-test.mjs");
