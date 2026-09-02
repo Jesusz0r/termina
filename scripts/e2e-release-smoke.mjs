@@ -10,7 +10,13 @@ import { createRequire } from "node:module";
 import { resolve } from "node:path";
 
 const require = createRequire(import.meta.url);
-const playwrightCli = require.resolve("@playwright/test/cli.js");
+const playwrightCli = (() => {
+  try {
+    return require.resolve("@playwright/test/cli");
+  } catch {
+    return require.resolve("@playwright/test/cli.js");
+  }
+})();
 
 const supported = process.platform === "darwin" || process.platform === "linux";
 if (!supported) {
