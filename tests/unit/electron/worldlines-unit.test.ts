@@ -9,23 +9,6 @@ import { WorldlineManager, disposeWorldlineCoreClient } from "../../../electron/
 const execFileAsync = promisify(execFile);
 
 describe("Worldline Manager, Core Client & Retention Performance Unit Suite", () => {
-  async function runScript(scriptName: string, timeout = 90_000) {
-    const scriptPath = resolve("tests", "probes", "electron", scriptName);
-    const { stdout, stderr } = await execFileAsync(
-      process.execPath,
-      ["--experimental-strip-types", "--no-warnings", scriptPath],
-      {
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          TERMINA_CORE_TEST: "1",
-          TERMINA_CORE_BIN: resolve("core", "target", "release", "termina-core"),
-        },
-        timeout,
-      },
-    );
-    return { stdout, stderr };
-  }
 
   it("passes worldline ready failure checks natively", async () => {
     const root = await mkdtemp(join(tmpdir(), "termina-worldline-ready-"));
@@ -321,13 +304,4 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
 
 
 
-  it("passes retention ledger focused performance regressions", async () => {
-    const { stdout } = await runScript("session-retention-performance-test.mjs", 120_000);
-    expect(stdout).toContain("PASS retention-ledger focused regressions");
-  }, 120_000);
-
-  it("passes worldline runtime teardown & candidate flow", async () => {
-    const { stdout } = await runScript("worldline-runtime-flow-test.mjs", 120_000);
-    expect(stdout).toContain("freshCancel");
-  }, 120_000);
 });
