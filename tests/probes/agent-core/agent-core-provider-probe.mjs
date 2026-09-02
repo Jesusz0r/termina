@@ -19,9 +19,9 @@ import { resolve } from "node:path";
 // Keep probe serialization, identity derivation, and usage parsing aligned
 // with the canonical agent-core owners. The repository's existing script
 // tests load these .ts modules with Node's strip-types support.
-import * as auth from "../agent-core/auth.ts";
-import * as compat from "../agent-core/openai-compat.ts";
-import * as trace from "../agent-core/trace.ts";
+import * as auth from "../../../agent-core/auth.ts";
+import * as compat from "../../../agent-core/openai-compat.ts";
+import * as trace from "../../../agent-core/trace.ts";
 
 export const PROBE_SCHEMA_VERSION = 1;
 export const FIXTURE_ID = "agent-core-provider-probe-v1";

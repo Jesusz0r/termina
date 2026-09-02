@@ -27,16 +27,16 @@ import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createCheckReporter } from "./test-support.mjs";
 
-const core = await import("../agent-core/main.ts");
-const host = await import("../agent-core/host.ts");
-const auth = await import("../agent-core/auth.ts");
-const compat = await import("../agent-core/openai-compat.ts");
-const projection = await import("../agent-core/request-projection.ts");
-const reclaim = await import("../agent-core/reclaim.ts");
-const session = await import("../agent-core/session.ts");
-const trace = await import("../agent-core/trace.ts");
-const toolOutput = await import("../agent-core/tool-output.ts");
-const tuiCore = await import("../agent-core/tui.ts");
+const core = await import("../../../agent-core/main.ts");
+const host = await import("../../../agent-core/host.ts");
+const auth = await import("../../../agent-core/auth.ts");
+const compat = await import("../../../agent-core/openai-compat.ts");
+const projection = await import("../../../agent-core/request-projection.ts");
+const reclaim = await import("../../../agent-core/reclaim.ts");
+const session = await import("../../../agent-core/session.ts");
+const trace = await import("../../../agent-core/trace.ts");
+const toolOutput = await import("../../../agent-core/tool-output.ts");
+const tuiCore = await import("../../../agent-core/tui.ts");
 
 const {
   confinePath,
@@ -1448,7 +1448,7 @@ const listing = formatEnvironment(unicodeDir, { probes: false });
 check("unicode listing present", listing.includes("ä.txt") && listing.includes("b.txt"));
 
 const here = dirname(fileURLToPath(import.meta.url));
-const src = join(here, "..", "agent-core", "main.ts");
+const src = join(here, "..", "..", "..", "agent-core", "main.ts");
 const banner = await new Promise((resolve) => {
   const child = spawn(process.execPath, ["--experimental-strip-types", "--no-warnings", src], {
     env: { ...process.env, TERMINA_CORE_TEST: "1" },
@@ -1718,7 +1718,7 @@ writeFileSync(fakeEntry, "");
 check("isDirectRunFrom same entry is direct", isDirectRunFrom(pathToFileURL(fakeEntry).href, fakeEntry) === true);
 check("isDirectRunFrom different entry is not", isDirectRunFrom(pathToFileURL(fakeEntry).href, join(root, "other.mjs")) === false);
 
-const bundled = join(here, "..", "dist-electron", "agent-core.mjs");
+const bundled = join(here, "..", "..", "..", "dist-electron", "agent-core.mjs");
 if (existsSync(bundled)) {
   const bundledBanner = await new Promise((resolve) => {
     const child = spawn(process.execPath, [bundled], {
@@ -2428,7 +2428,7 @@ if (prevTok2 === undefined) delete process.env.TERMINA_TEST_TOKEN_URL;
 else process.env.TERMINA_TEST_TOKEN_URL = prevTok2;
 deviceSrv.close();
 
-const modelsMod = await import("../agent-core/models.ts");
+const modelsMod = await import("../../../agent-core/models.ts");
 const {
   parseModelsPayload,
   isChatModel,
@@ -2994,7 +2994,7 @@ check("isCoreSessionId rejects a parent segment", isCoreSessionId("..") === fals
 check("MAX_SESSION_SEGMENT_BYTES is 8 MiB", MAX_SESSION_SEGMENT_BYTES === 8 * 1024 * 1024);
 check("MAX_SESSION_RECORD_BYTES is 1 MiB", MAX_SESSION_RECORD_BYTES === 1 * 1024 * 1024);
 
-const mcp = await import("../agent-core/mcp.ts");
+const mcp = await import("../../../agent-core/mcp.ts");
 check("KERNEL_TOOL_NAMES includes fetch", mcp.KERNEL_TOOL_NAMES.has("fetch"));
 check("mcpToolName prefixes server and tool", mcp.mcpToolName("github", "list_issues") === "mcp_github_list_issues");
 check("mcpToolName stays within 64 chars", mcp.mcpToolName("very-long-server-name-here", "very_long_tool_name_that_exceeds").length <= 64);
@@ -3289,7 +3289,7 @@ httpStub.close();
 writeFileSync(join(mcpDir, "bad.json"), "{not json");
 check("invalid mcp json loads as no servers", mcp.parseMcpConfig(null).length === 0 && mcp.loadMcpConfigs(join(mcpDir, "bad.json")).length === 0);
 
-const rosterMod = await import("../electron/terminal-roster.ts");
+const rosterMod = await import("../../../electron/terminal-roster.ts");
 check("parseTerminalRoster empty", rosterMod.parseTerminalRoster(null).length === 0);
 check(
   "parseTerminalRoster keeps engine and session",
@@ -3333,7 +3333,7 @@ check("composeTerminalRoster caps at 16", rosterMod.composeTerminalRoster(manyLi
 const rotFixed = new Date(2026, 7, 26, 15, 4, 5).getTime();
 check("sessionRotateStamp is filesystem-safe", sessionRotateStamp(rotFixed) === "2026-08-26T15-04-05");
 
-const searchMod = await import("../electron/session-search.ts");
+const searchMod = await import("../../../electron/session-search.ts");
 const piLine = JSON.stringify({
   type: "message",
   message: {
@@ -3933,23 +3933,23 @@ check("slash ignores prompts", matchingSlashCommands("hello").length === 0);
 check("slash Tab /m completes to /model", completeSlashLine("/m") === "/model");
 check("slash Tab /ex completes to /exit", completeSlashLine("/ex") === "/exit");
 check("slash Tab /foo is unchanged", completeSlashLine("/foo") === "/foo");
-const terminalControl = await import("../shared/terminal-control.ts");
+const terminalControl = await import("../../../shared/terminal-control.ts");
 check("thinkingStartupArgs is empty when thinking is shown", terminalControl.thinkingStartupArgs(true).length === 0);
 check(
   "thinkingStartupArgs hides thinking",
   terminalControl.thinkingStartupArgs(false).length === 1 && terminalControl.thinkingStartupArgs(false)[0] === "--hide-thinking",
 );
 check("parseHideThinking reads the core flag", terminalControl.parseHideThinking(["node", "agent-core.mjs", "--hide-thinking"]) === true);
-const commandsMod = await import("../shared/commands.ts");
+const commandsMod = await import("../../../shared/commands.ts");
 check(
   "showThinking defaults to true",
-  /showThinking:\s*true/.test(readFileSync(new URL("../shared/types.ts", import.meta.url), "utf8")),
+  /showThinking:\s*true/.test(readFileSync(new URL("../../../shared/types.ts", import.meta.url), "utf8")),
 );
 check(
   "toggle-thinking is registered",
   commandsMod.COMMAND_DEFINITIONS.some((c) => c.command === "toggle-thinking" && c.label === "Toggle Thinking" && c.defaultShortcut === "CmdOrCtrl+Shift+H"),
 );
-const themesMod = await import("../src/terminal-themes.ts");
+const themesMod = await import("../../../src/terminal-themes.ts");
 function luminance(hex) {
   const n = Number.parseInt(hex.slice(1), 16);
   const rgb = [n >> 16, (n >> 8) & 255, n & 255].map((c) => {
@@ -3987,7 +3987,7 @@ for (const theme of Object.keys(themesMod.TERMINAL_THEMES)) {
   );
 }
 
-const tuiMod = await import("../agent-core/tui.ts");
+const tuiMod = await import("../../../agent-core/tui.ts");
 check("wrapText splits on width", tuiMod.wrapText("abcdef", 3).join("|") === "abc|def");
 check("wrapText keeps newlines", tuiMod.wrapText("ab\ncd", 10).join("|") === "ab|cd");
 check("wrapText keeps emoji graphemes", tuiMod.wrapText("👍👍", 1).join("|") === "👍|👍");

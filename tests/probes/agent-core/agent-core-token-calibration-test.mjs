@@ -117,10 +117,11 @@ assert.match(human, /provider usage is authoritative/i);
 assert.match(human, /unknown denominators excluded/i);
 assert.match(human, /safety factor: unbounded/i);
 
+const cliBin = new URL("./agent-core-token-calibration.mjs", import.meta.url).pathname;
 const cli = spawnSync(process.execPath, [
   "--experimental-strip-types",
   "--no-warnings",
-  "./scripts/agent-core-token-calibration.mjs",
+  cliBin,
   "--json",
   traceFile,
 ], { encoding: "utf8" });
@@ -132,7 +133,7 @@ writeFileSync(duplicateFile, JSON.stringify({ samples: [fixture.samples[0], fixt
 const duplicate = spawnSync(process.execPath, [
   "--experimental-strip-types",
   "--no-warnings",
-  "./scripts/agent-core-token-calibration.mjs",
+  cliBin,
   duplicateFile,
 ], { encoding: "utf8" });
 assert.notEqual(duplicate.status, 0);

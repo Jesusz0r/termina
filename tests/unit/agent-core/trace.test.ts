@@ -7,7 +7,7 @@ const execFileAsync = promisify(execFile);
 
 describe("Agent Core Telemetry & Execution Traces", () => {
   async function runScript(scriptName: string, timeout = 60_000) {
-    const scriptPath = resolve("scripts", scriptName);
+    const scriptPath = resolve("tests", "probes", "agent-core", scriptName);
     const { stdout, stderr } = await execFileAsync(
       process.execPath,
       ["--experimental-strip-types", "--no-warnings", scriptPath],

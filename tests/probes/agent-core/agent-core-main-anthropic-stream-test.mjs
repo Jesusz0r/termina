@@ -4,7 +4,7 @@ process.env.TERMINA_CORE_TEST = "1";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 
-const mainUrl = new URL("../agent-core/main.ts", import.meta.url).href;
+const mainUrl = new URL("../../../agent-core/main.ts", import.meta.url).href;
 const childScript = `
   const huge = "x".repeat(300_000);
   globalThis.fetch = async (input) => {

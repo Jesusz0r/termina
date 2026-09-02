@@ -4,7 +4,7 @@ process.env.TERMINA_CORE_TEST = "1";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 
-const mainUrl = new URL("../agent-core/main.ts", import.meta.url).href;
+const mainUrl = new URL("../../../agent-core/main.ts", import.meta.url).href;
 const start = { type: "message_start", message: { usage: {} } };
 const textStart = { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } };
 const textDelta = { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } };

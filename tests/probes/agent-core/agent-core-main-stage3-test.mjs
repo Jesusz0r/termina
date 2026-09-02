@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const main = await import("../agent-core/main.ts");
+const main = await import("../../../agent-core/main.ts");
 
 const root = mkdtempSync(join(tmpdir(), "agent-core-main-stage3-"));
 try {

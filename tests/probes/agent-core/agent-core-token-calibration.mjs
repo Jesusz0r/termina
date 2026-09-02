@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 
 // This is deliberately the only estimator used by the calibration report.
 // Provider usage remains authoritative; this script never supplies a tokenizer.
-const { estimateReclaimTokens } = await import("../agent-core/reclaim.ts");
+const { estimateReclaimTokens } = await import("../../../agent-core/reclaim.ts");
 
 export const CALIBRATION_SCHEMA_VERSION = 1;
 export const CALIBRATION_RECORD_TYPE = "calibration-sample";

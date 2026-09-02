@@ -24,9 +24,9 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const auth = await import("../agent-core/auth.ts");
-const compat = await import("../agent-core/openai-compat.ts");
-const coreLoad = await import("../agent-core/main.ts")
+const auth = await import("../../../agent-core/auth.ts");
+const compat = await import("../../../agent-core/openai-compat.ts");
+const coreLoad = await import("../../../agent-core/main.ts")
   .then((module) => ({ module, error: null }))
   .catch((error) => ({ module: null, error }));
 const core = coreLoad.module;
@@ -114,7 +114,7 @@ async function runLocalProvider({ provider, model, baseEnv, providerBaseUrl, sce
   };
   if (providerBaseUrl) delete env[baseEnv.key];
   else env[baseEnv.key] = baseUrl;
-  const mainUrl = new URL("../agent-core/main.ts", import.meta.url).href;
+  const mainUrl = new URL("../../../agent-core/main.ts", import.meta.url).href;
   const childScript = `
     import fs from "node:fs";
     const mainUrl = ${JSON.stringify(mainUrl)};

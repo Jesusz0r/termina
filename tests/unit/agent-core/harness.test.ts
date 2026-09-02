@@ -7,7 +7,7 @@ const execFileAsync = promisify(execFile);
 
 describe("Agent Core Kernel & TUI Harness Suite", () => {
   it("passes all 874 kernel harness assertions", async () => {
-    const scriptPath = resolve("scripts", "agent-core-harness-test.mjs");
+    const scriptPath = resolve("tests", "probes", "agent-core", "agent-core-harness-test.mjs");
     const { stdout } = await execFileAsync(
       process.execPath,
       ["--experimental-strip-types", "--no-warnings", scriptPath],

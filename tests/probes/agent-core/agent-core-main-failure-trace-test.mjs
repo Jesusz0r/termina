@@ -25,7 +25,7 @@ const events = join(root, "events");
 const terminalId = "term-main-failure";
 mkdirSync(events, { recursive: true, mode: 0o700 });
 const providerBase = "https://api.openai.com/v1";
-const mainUrl = new URL("../agent-core/main.ts", import.meta.url).href;
+const mainUrl = new URL("../../../agent-core/main.ts", import.meta.url).href;
 const childScript = `
   globalThis.fetch = async (input) => {
     if (String(input) === "https://models.dev/api.json") {

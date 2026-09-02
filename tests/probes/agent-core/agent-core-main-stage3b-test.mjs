@@ -33,7 +33,7 @@ const terminalId = "term-main-retry";
 const requestLog = join(root, "provider-requests.jsonl");
 mkdirSync(events, { recursive: true, mode: 0o700 });
 const providerBase = "https://api.openai.com/v1";
-const mainUrl = new URL("../agent-core/main.ts", import.meta.url).href;
+const mainUrl = new URL("../../../agent-core/main.ts", import.meta.url).href;
 const childScript = `
   import fs from "node:fs";
   const providerBase = ${JSON.stringify(providerBase)};

@@ -24,8 +24,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runExportedChecks } from "./test-support.mjs";
 
-const session = await import("../agent-core/session.ts");
-const host = await import("../agent-core/host.ts");
+const session = await import("../../../agent-core/session.ts");
+const host = await import("../../../agent-core/host.ts");
 const {
   MAX_RETAINED_TEMP_BUNDLES,
   MAX_RETAINED_TEMP_BYTES,
@@ -141,12 +141,13 @@ function canonicalStubReceipt(revisionId, sseq, block) {
 }
 
 function spawnCore(env, args = [], stdinLines = [], opts = {}) {
-  const src = join(dirname(fileURLToPath(import.meta.url)), "..", "agent-core", "main.ts");
+  const src = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "agent-core", "main.ts");
   return new Promise((resolve) => {
     const child = spawn(process.execPath, ["--experimental-strip-types", "--no-warnings", src, ...args], {
       env: { ...process.env, TERMINA_CORE_TEST: "1", ...env },
       stdio: ["pipe", "pipe", "pipe"],
     });
+    child.stdin.on("error", () => {});
     let out = "";
     let err = "";
     child.stdout.on("data", (d) => {

@@ -7,7 +7,7 @@ const execFileAsync = promisify(execFile);
 
 describe("Agent Core Main Loop, Streaming, Tool Call & Shutdown Contracts", () => {
   async function runScript(scriptName: string, timeout = 60_000) {
-    const scriptPath = resolve("scripts", scriptName);
+    const scriptPath = resolve("tests", "probes", "agent-core", scriptName);
     try {
       const { stdout, stderr } = await execFileAsync(
         process.execPath,

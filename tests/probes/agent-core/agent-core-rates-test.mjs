@@ -13,7 +13,7 @@ globalThis.fetch = async (...args) => {
 
 let rates;
 try {
-  rates = await import("../agent-core/rates.ts");
+  rates = await import("../../../agent-core/rates.ts");
 } catch (error) {
   assert.fail(`rates module must load without provider I/O: ${error instanceof Error ? error.message : String(error)}`);
 } finally {

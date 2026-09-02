@@ -14,7 +14,7 @@ import {
   createAttemptRecord,
   createTaskSettledRecord,
   createTraceRuntime,
-} from "../agent-core/trace.ts";
+} from "../../../agent-core/trace.ts";
 import { readTraceDirectory, summarizeTraces } from "./agent-core-trace-report.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "termina-trace-runtime-"));

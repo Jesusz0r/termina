@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const main = await import("../agent-core/main.ts");
+const main = await import("../../../agent-core/main.ts");
 
 assert.deepEqual(
   main.traceWriteDisposition({ ok: false, persisted: false, retryable: true }),

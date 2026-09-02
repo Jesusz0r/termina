@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { spawn } from "@lydell/node-pty";
 
 const cwd = process.cwd();
-const mainPath = new URL("../agent-core/main.ts", import.meta.url).pathname;
+const mainPath = new URL("../../../agent-core/main.ts", import.meta.url).pathname;
 const event = (value) => `data: ${JSON.stringify(value)}\n\n`;
 const functionCall = {
   type: "function_call",
@@ -27,7 +27,7 @@ const childScript = `
     headers: { "content-type": "text/event-stream" },
   });
   process.argv = [process.execPath, ${JSON.stringify(mainPath)}];
-  await import(${JSON.stringify(new URL("../agent-core/main.ts", import.meta.url).href)});
+  await import(${JSON.stringify(new URL("../../../agent-core/main.ts", import.meta.url).href)});
 `;
 
 const pty = spawn(

@@ -19,8 +19,8 @@ import { join } from "node:path";
 import test from "node:test";
 
 const root = mkdtempSync(join(tmpdir(), "termina-main-catalog-cancel-"));
-const mainPath = new URL("../agent-core/main.ts", import.meta.url).pathname;
-const mainUrl = new URL("../agent-core/main.ts", import.meta.url).href;
+const mainPath = new URL("../../../agent-core/main.ts", import.meta.url).pathname;
+const mainUrl = new URL("../../../agent-core/main.ts", import.meta.url).href;
 const scenarios = new Map();
 
 const server = createServer((req, res) => {

@@ -7,7 +7,7 @@ process.env.TERMINA_CORE_TEST = "1";
 
 import assert from "node:assert/strict";
 
-const core = await import("../agent-core/main.ts");
+const core = await import("../../../agent-core/main.ts");
 
 const failures = [];
 function check(name, fn) {
