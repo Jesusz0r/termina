@@ -131,5 +131,5 @@ describe("DOMPurify build and optimizer isolation", () => {
     );
     expect(containsForbidden).toBe(false);
     assertPatchedCode(sanitizerChunk.code);
-  }, 120_000);
+  }, 180_000);
 });

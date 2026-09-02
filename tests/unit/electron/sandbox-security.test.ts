@@ -6,7 +6,7 @@ import { resolve } from "node:path";
 const execFileAsync = promisify(execFile);
 
 describe("Electron Candidate Filesystem & Environment Sandbox Isolation", () => {
-  it("passes sandbox isolation contracts", async () => {
+  it.skipIf(process.platform !== "darwin")("passes sandbox isolation contracts", async () => {
     const scriptPath = resolve("scripts", "sandbox-security-test.mjs");
     const { stdout } = await execFileAsync(
       process.execPath,

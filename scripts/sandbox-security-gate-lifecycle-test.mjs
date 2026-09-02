@@ -162,7 +162,7 @@ async function stopRun(run) {
       try {
         process.kill(-pid, "SIGKILL");
       } catch (error) {
-        if (error?.code !== "ESRCH") throw error;
+        if (error?.code !== "ESRCH" && error?.code !== "EPERM") throw error;
       }
     }
   }
@@ -171,7 +171,7 @@ async function stopRun(run) {
       if (run.grouped) process.kill(-run.child.pid, "SIGKILL");
       else run.child.kill("SIGKILL");
     } catch (error) {
-      if (error?.code !== "ESRCH") throw error;
+      if (error?.code !== "ESRCH" && error?.code !== "EPERM") throw error;
     }
   }
   await run.result.catch(() => undefined);

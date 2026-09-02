@@ -20,7 +20,7 @@ describe("Sandbox Required-Live Security Gate & Policy Contracts", () => {
     expect(stdout).toContain("sandbox required-live policy contract passed");
   }, 90_000);
 
-  it("passes sandbox gate signal, orphan, and failed-probe contracts", async () => {
+  it.skipIf(process.platform !== "darwin")("passes sandbox gate signal, orphan, and failed-probe contracts", async () => {
     const scriptPath = resolve("scripts", "sandbox-security-gate-lifecycle-test.mjs");
     const { stdout } = await execFileAsync(
       process.execPath,

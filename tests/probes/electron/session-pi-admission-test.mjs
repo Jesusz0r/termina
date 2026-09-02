@@ -198,7 +198,7 @@ try {
   const boundedResult = await copyPiSessionFile(source, boundedDestination, { workspaceDir: workspace, testOnlyMaxBytes: 32 });
   check(!boundedResult.ok && /bound|bytes/i.test(boundedResult.error), "Pi admission counts image and unknown scratch files");
 
-  const workLimited = await copyPiSessionFile(source, join(workspace, "work-limited.jsonl"), { workspaceDir: workspace, testOnlyMaxBytes: 1024, testOnlyMaxWorkBytes: 300 });
+  const workLimited = await copyPiSessionFile(source, join(workspace, "work-limited.jsonl"), { workspaceDir: workspace, testOnlyMaxBytes: 1024, testOnlyMaxWorkBytes: 150 });
   check(!workLimited.ok && /work|bound/i.test(workLimited.error), "Pi admission applies a pre-copy work bound");
 
   const countWorkspace = join(work, "count-workspace");
