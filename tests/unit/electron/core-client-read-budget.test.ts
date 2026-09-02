@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, s
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { coreClient } from "../../../electron/core-client.ts";
-import { parseNativeByteBound } from "../../test-support.mjs";
+import { parseNativeByteBound } from "../../test-support.ts";
 
 process.env.TERMINA_CORE_BIN ??= resolve("core/target/release/termina-core");
 
