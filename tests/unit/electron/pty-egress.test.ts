@@ -1,43 +1,8 @@
-/** Focused lossless PTY egress regressions. */
-
+import { describe, it, expect } from "vitest";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
-import { build } from "esbuild";
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const waitFor = async (predicate, message) => {
-  const deadline = Date.now() + 5000;
-  while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error(message);
-    await sleep(0);
-  }
-};
-
-const root = await mkdtemp(join(tmpdir(), "termina-pty-egress-"));
-const bundle = join(root, "pty-egress.mjs");
-const sequenceBundle = join(root, "pty-sequence-ledger.mjs");
-await build({
-  entryPoints: ["electron/pty-egress.ts"],
-  bundle: true,
-  platform: "node",
-  format: "esm",
-  outfile: bundle,
-  logLevel: "silent",
-});
-await build({
-  entryPoints: ["src/pty-sequence-ledger.ts"],
-  bundle: true,
-  platform: "browser",
-  format: "esm",
-  outfile: sequenceBundle,
-  logLevel: "silent",
-});
-
-const {
+import { readFile } from "node:fs/promises";
+import {
   PtyEgressScheduler,
   PTY_EGRESS_CHUNK_BYTES,
   PTY_EGRESS_QUEUE_HIGH_WATER_BYTES,
@@ -50,11 +15,21 @@ const {
   isPtyRendererSendTargetCurrent,
   sendPtyRendererMessage,
   splitPtyData,
-} = await import(`${pathToFileURL(bundle).href}?${Date.now()}`);
-const {
+} from "../../../electron/pty-egress.ts";
+import {
   PtySequenceLedger,
   PTY_RENDERER_SEQUENCE_GAP_WINDOW,
-} = await import(`${pathToFileURL(sequenceBundle).href}?${Date.now()}`);
+} from "../../../src/pty-sequence-ledger.ts";
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const waitFor = async (predicate: () => boolean, message: string) => {
+  const deadline = Date.now() + 5000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(message);
+    await sleep(0);
+  }
+};
+
 
 function source() {
   return {
@@ -92,7 +67,9 @@ function acknowledgeAll(scheduler, payloads) {
   }
 }
 
-try {
+
+describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
+  it("enforces egress queue limits, scheduler lifecycle, and sequence deduplication", async () => {
   // Generic renderer pushes use the exact BrowserWindow/WebContents/document
   // identity and turn both preflight races and synchronous send throws into a
   // harmless false result.
@@ -933,6 +910,5 @@ try {
     maxQueueChunks: PTY_EGRESS_QUEUE_HIGH_WATER_CHUNKS,
     slowAcceptedBytes: slowSends.reduce((sum, item) => sum + Buffer.byteLength(item.data), 0),
   }));
-} finally {
-  await rm(root, { recursive: true, force: true });
-}
+  }, 30_000);
+});
