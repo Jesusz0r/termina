@@ -33,7 +33,7 @@ describe("Electron CoreClient Bounded Queue & Stderr Isolation", () => {
   }
 
   it("enforces high water marks, rejects overflow, and preserves FIFO ordering", async () => {
-    const core = createClient("scripts/core-client-admission-shim.mjs");
+    const core = createClient("tests/unit/electron/fixtures/core-client-admission-shim.mjs");
     const requests: Promise<any>[] = [];
     const total = CORE_REQUEST_QUEUE_HIGH_WATER_ITEMS + 1;
     for (let i = 0; i < total; i += 1) {
@@ -63,7 +63,7 @@ describe("Electron CoreClient Bounded Queue & Stderr Isolation", () => {
   });
 
   it("handles stderr larger than pipe capacity and isolates stderr across requests", async () => {
-    const core = createClient("scripts/core-client-stderr-shim.mjs");
+    const core = createClient("tests/unit/electron/fixtures/core-client-stderr-shim.mjs");
 
     const flood = await within(core.request({ op: "stderr-flood", marker: "success-tail" }), "stderr-flood request");
     expect(flood).toEqual({ value: "drained" });
