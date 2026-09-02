@@ -7,7 +7,7 @@ const execFileAsync = promisify(execFile);
 
 describe("Session Fork Teardown, Retention & Pi Admission Invariants", () => {
   it("passes session fork teardown and retention regressions", async () => {
-    const scriptPath = resolve("scripts", "session-fork-retention-test.mjs");
+    const scriptPath = resolve("tests", "probes", "electron", "session-fork-retention-test.mjs");
     const { stdout } = await execFileAsync(
       process.execPath,
       ["--experimental-strip-types", "--no-warnings", scriptPath],
@@ -22,7 +22,7 @@ describe("Session Fork Teardown, Retention & Pi Admission Invariants", () => {
   }, 120_000);
 
   it("passes Pi session admission and cleanup regressions", async () => {
-    const scriptPath = resolve("scripts", "session-pi-admission-test.mjs");
+    const scriptPath = resolve("tests", "probes", "electron", "session-pi-admission-test.mjs");
     const { stdout } = await execFileAsync(
       process.execPath,
       ["--experimental-strip-types", "--no-warnings", scriptPath],

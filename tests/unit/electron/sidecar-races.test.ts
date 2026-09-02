@@ -7,7 +7,7 @@ const execFileAsync = promisify(execFile);
 
 describe("Sidecar Concurrency & Race Condition Invariants", () => {
   async function runScript(scriptName: string) {
-    const scriptPath = resolve("scripts", scriptName);
+    const scriptPath = resolve("tests", "probes", "electron", scriptName);
     const { stdout, stderr } = await execFileAsync(
       process.execPath,
       ["--no-warnings", scriptPath],

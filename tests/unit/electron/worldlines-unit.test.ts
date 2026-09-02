@@ -10,7 +10,7 @@ const execFileAsync = promisify(execFile);
 
 describe("Worldline Manager, Core Client & Retention Performance Unit Suite", () => {
   async function runScript(scriptName: string, timeout = 90_000) {
-    const scriptPath = resolve("scripts", scriptName);
+    const scriptPath = resolve("tests", "probes", "electron", scriptName);
     const { stdout, stderr } = await execFileAsync(
       process.execPath,
       ["--experimental-strip-types", "--no-warnings", scriptPath],
