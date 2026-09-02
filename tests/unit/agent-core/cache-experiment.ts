@@ -4,7 +4,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { readTraceDirectory } from "./agent-core-trace-report.mjs";
+import { readTraceDirectory } from "./trace-report.ts";
 
 const SCHEMA_VERSION = 1;
 const TRACE_SCHEMA_VERSION = 2;

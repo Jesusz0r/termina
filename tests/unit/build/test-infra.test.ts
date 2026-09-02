@@ -19,7 +19,7 @@ function runNode(args: string[], options = {}) {
 describe("Test Infrastructure & Gate Invariants", () => {
   it("verifies package-wired session gate executes canonical Vitest targets", () => {
     const scripts = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")).scripts;
-    expect(scripts["test:agent-core-session"]).toContain("session.test.ts");
+    expect(scripts["test:agent-core-session"]).toContain("session-segmented.test.ts");
     expect(scripts["test:agent-core-session"]).toContain("session-receipt.test.ts");
   });
 

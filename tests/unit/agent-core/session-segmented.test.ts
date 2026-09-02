@@ -1,3 +1,5 @@
+import { describe, it, expect } from "vitest";
+process.env.TERMINA_CORE_TEST = "1";
 /**
  * Focused harness for segmented agent-core session bundles.
  * Imported by scripts/agent-core-harness-test.mjs.
@@ -1655,7 +1657,12 @@ export async function run({ check, leftovers }) {
   check("sessionBundleHasContent sees numbered parts when active is empty", sessionBundleHasContent(roll.sessionFile) === true);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const result = await runExportedChecks(run, { label: "agent-core session" });
-  process.exitCode = result.exitCode;
-}
+
+
+describe("Agent Core Segmented Session Bundles", () => {
+  it("passes segmented session bundle tests", async () => {
+    const result = await runExportedChecks(run, { label: "agent-core session" });
+    expect(result.exitCode).toBe(0);
+    expect(result.failed).toBe(0);
+  }, 120_000);
+});
