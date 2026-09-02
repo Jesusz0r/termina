@@ -39,7 +39,7 @@ describe("Release Workflow & CI Publication Invariants", () => {
     expect(testJob).toMatch(/- run: npm run test:release\b/);
     expect(buildJob).toMatch(/needs:\s*(?:test|\[\s*test\s*\])\b/);
     expect(buildJob).toMatch(/strategy:\s*\n\s+fail-fast:\s*false\s*\n\s+matrix:/);
-    expect(buildJob).toMatch(/os:\s*macos-14\b/);
+    expect(buildJob).toMatch(/os:\s*macos-15\b/);
     expect(buildJob).toMatch(/os:\s*ubuntu-22\.04\b/);
 
     expect(buildJob).not.toMatch(/--publish\s+always\b/);
@@ -125,6 +125,6 @@ describe("Release Workflow & CI Publication Invariants", () => {
     expect(packageStep).toBeGreaterThanOrEqual(0);
     expect(macGateRun).toBeLessThan(packageStep);
     const macGateStep = buildJob.slice(buildJob.lastIndexOf("\n      -", macGateRun), packageStep);
-    expect(macGateStep).toMatch(/if:\s*matrix\.os\s*==\s*['"]macos-14['"]/);
+    expect(macGateStep).toMatch(/if:\s*matrix\.os\s*==\s*['"]macos-15['"]/);
   });
 });

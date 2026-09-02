@@ -36,7 +36,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             artifact: mac-arm64
             core-asset: termina-core-darwin-arm64
           - os: ubuntu-22.04
@@ -62,7 +62,7 @@ jobs:
       # Stages the bundled node runtime and the core binary.
       - run: node scripts/prepare-resources.mjs
       - name: Run macOS release gate
-        if: matrix.os == 'macos-14'
+        if: matrix.os == 'macos-15'
         run: npm run test:release-macos
       - name: Package
         # Signs and notarizes when the Apple credentials exist as secrets;
