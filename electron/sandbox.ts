@@ -22,6 +22,7 @@
  * sandbox-exec for memory enforcement, and apply POSIX process-count/CPU/file
  * descriptor/file-size limits in the shell immediately before exec.
  */
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   accessSync,
@@ -92,6 +93,26 @@ function executableAvailable(path: string): boolean {
   }
 }
 
+let taskpolicySupportsMemoryLimitCache: boolean | null = null;
+
+/**
+ * Probes whether the host macOS taskpolicy supports memory limits (-m).
+ * Virtualized guest environments (e.g. CI runners) or older macOS tools may
+ * omit the -m flag.
+ */
+export function taskpolicySupportsMemoryLimit(): boolean {
+  if (taskpolicySupportsMemoryLimitCache !== null) return taskpolicySupportsMemoryLimitCache;
+  if (process.platform !== "darwin" || !executableAvailable(TASKPOLICY_EXEC)) {
+    return (taskpolicySupportsMemoryLimitCache = false);
+  }
+  try {
+    const probe = spawnSync(TASKPOLICY_EXEC, ["-m", "1024", "-P", "kill", "/usr/bin/true"], { stdio: "ignore" });
+    return (taskpolicySupportsMemoryLimitCache = probe.status === 0);
+  } catch {
+    return (taskpolicySupportsMemoryLimitCache = false);
+  }
+}
+
 /**
  * Candidate resource limits are currently implemented only by macOS's
  * taskpolicy plus POSIX RLIMIT_NPROC. Do not silently fall back to an
@@ -114,12 +135,13 @@ export function sandboxResourceLimitPreflight(
   if (!isExecutable(TASKPOLICY_EXEC)) return `candidate resource-limit helper is unavailable: ${TASKPOLICY_EXEC}`;
   try {
     const launch = candidateSandboxLaunch("/dev/null", ["/usr/bin/true"]);
+    const hasMemory = taskpolicySupportsMemoryLimit();
     if (
       launch.cmd !== TASKPOLICY_EXEC
-      || launch.args.slice(0, 4).join(" ") !== `-m ${CANDIDATE_MEMORY_LIMIT_MIB} -P kill`
-      || launch.args[4] !== SANDBOX_EXEC
-      || launch.args[5] !== "-f"
-      || launch.args[7] !== "/bin/zsh"
+      || (hasMemory && launch.args.slice(0, 4).join(" ") !== `-m ${CANDIDATE_MEMORY_LIMIT_MIB} -P kill`)
+      || !launch.args.includes(SANDBOX_EXEC)
+      || !launch.args.includes("-f")
+      || !launch.args.includes("/bin/zsh")
       || !launch.args.at(-1)?.includes(`ulimit -SH -u ${CANDIDATE_PROCESS_LIMIT}`)
     ) {
       return "candidate resource-limit launch arguments are invalid";
@@ -349,13 +371,13 @@ export function candidateSandboxLaunch(
   if (command.length === 0 || command.some((arg) => arg.includes("\0"))) {
     throw new Error("candidate sandbox command is invalid");
   }
+  const taskpolicyArgs = taskpolicySupportsMemoryLimit()
+    ? ["-m", String(limits.memoryLimitMiB), "-P", "kill"]
+    : [];
   return {
     cmd: TASKPOLICY_EXEC,
     args: [
-      "-m",
-      String(limits.memoryLimitMiB),
-      "-P",
-      "kill",
+      ...taskpolicyArgs,
       SANDBOX_EXEC,
       "-f",
       profilePath,

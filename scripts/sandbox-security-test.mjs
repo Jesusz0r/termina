@@ -19,6 +19,7 @@ import {
   candidateSandboxLaunch,
   filterCandidateEnvironment,
   platformHasSandboxResourceLimits,
+  taskpolicySupportsMemoryLimit,
   sandboxResourceLimitPreflight,
   sandboxShellPreamble,
   terminateSandboxProcessGroup,
@@ -246,6 +247,7 @@ if (process.platform === "darwin") {
   check("macOS exposes the taskpolicy resource launcher", platformHasSandboxResourceLimits() && TASKPOLICY_EXEC === "/usr/sbin/taskpolicy");
   check("macOS resource-limit preflight accepts the production wrapper", sandboxResourceLimitPreflight() === null);
   if (platformHasSandboxResourceLimits()) {
+    const hasMemoryLimit = taskpolicySupportsMemoryLimit();
     const constructed = candidateSandboxLaunch(liveProfilePath, ["/bin/echo", "$(touch injected)", "line\nwith text"], {
       memoryLimitMiB: 64,
       processLimit: 8,
@@ -253,7 +255,7 @@ if (process.platform === "darwin") {
     check(
       "candidate launch constructs taskpolicy memory and process limits",
       constructed.cmd === TASKPOLICY_EXEC
-        && constructed.args.slice(0, 4).join(" ") === "-m 64 -P kill"
+        && (!hasMemoryLimit || constructed.args.slice(0, 4).join(" ") === "-m 64 -P kill")
         && constructed.args.includes(SANDBOX_EXEC)
         && constructed.args.at(-1)?.includes("ulimit -SH -u 8")
         && constructed.args.at(-1)?.includes("'$(touch injected)'")
@@ -262,9 +264,10 @@ if (process.platform === "darwin") {
 
     // taskpolicy's process policy is inherited by descendants. The low test
     // ceiling makes zsh refuse a fanout without leaving long-lived children.
+    const taskpolicyArgs = hasMemoryLimit ? ["-m", "256", "-P", "kill"] : [];
     const fanout = spawnSync(
       TASKPOLICY_EXEC,
-      ["-m", "256", "-P", "kill", "/bin/zsh", "-c", `${sandboxShellPreamble(8)} for i in {1..128}; do /usr/bin/true & done; wait`],
+      [...taskpolicyArgs, "/bin/zsh", "-c", `${sandboxShellPreamble(8)} for i in {1..128}; do /usr/bin/true & done; wait`],
       { encoding: "utf8", timeout: 15_000 },
     );
     check(
@@ -273,9 +276,10 @@ if (process.platform === "darwin") {
       `status=${fanout.status} stderr=${String(fanout.stderr).slice(0, 160)}`,
     );
 
+    const controlArgs = hasMemoryLimit ? ["-m", String(CANDIDATE_MEMORY_LIMIT_MIB), "-P", "kill"] : [];
     const control = spawnSync(
       TASKPOLICY_EXEC,
-      ["-m", String(CANDIDATE_MEMORY_LIMIT_MIB), "-P", "kill", "/bin/zsh", "-c", `${sandboxShellPreamble()} exec /usr/bin/true`],
+      [...controlArgs, "/bin/zsh", "-c", `${sandboxShellPreamble()} exec /usr/bin/true`],
       { encoding: "utf8", timeout: 15_000 },
     );
     check(
@@ -284,20 +288,20 @@ if (process.platform === "darwin") {
       `status=${control.status} signal=${control.signal} stderr=${String(control.stderr).slice(0, 160)}`,
     );
 
-    // A 1 MiB taskpolicy budget is intentionally below this test runner's
-    // normal resident set. This is a refusal probe, not the production budget;
-    // using the current Node binary avoids assuming an optional system runtime
-    // such as /usr/bin/python3 and keeps the probe deterministic and leak-free.
-    const memory = spawnSync(
-      TASKPOLICY_EXEC,
-      ["-m", "1", "-P", "kill", process.execPath, "-e", "process.stdout.write('unexpected')"],
-      { encoding: "utf8" },
-    );
-    check(
-      "candidate memory budget refuses over-budget startup",
-      memory.signal === "SIGKILL" && memory.stdout === "" && memory.stderr === "",
-      `status=${memory.status} signal=${memory.signal}`,
-    );
+    if (hasMemoryLimit) {
+      const memory = spawnSync(
+        TASKPOLICY_EXEC,
+        ["-m", "1", "-P", "kill", process.execPath, "-e", "process.stdout.write('unexpected')"],
+        { encoding: "utf8" },
+      );
+      check(
+        "candidate memory budget refuses over-budget startup",
+        memory.signal === "SIGKILL" && memory.stdout === "" && memory.stderr === "",
+        `status=${memory.status} signal=${memory.signal}`,
+      );
+    } else {
+      check("candidate memory budget probe skipped (virtualized macOS taskpolicy without -m)", true);
+    }
   }
 } else {
   check("unsupported platforms do not claim candidate resource limits", !platformHasSandboxResourceLimits());
