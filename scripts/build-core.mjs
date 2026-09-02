@@ -5,6 +5,7 @@
 import { execFileSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /**
  * Publish a complete executable under a new inode.
@@ -47,4 +48,8 @@ export function buildCore() {
   execFileSync(cargo, ["build", "--release", "--manifest-path", "core/Cargo.toml"], { stdio: "inherit" });
   stageCoreBinary("core/target/release/termina-core", "dist-electron/termina-core");
   console.log("✓ termina-core built");
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  buildCore();
 }

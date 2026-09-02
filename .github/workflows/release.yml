@@ -25,6 +25,7 @@ jobs:
         with:
           toolchain: 1.97.1
       - run: npm ci
+      - run: npm run build
       - run: npm run test:release
 
   build:

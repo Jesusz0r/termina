@@ -166,8 +166,14 @@ describe("Agent Core Auth Atomic Writes & Security", () => {
     expect(existsSync(join(parent, "auth.json"))).toBe(false);
 
     const oldTemps = readdirSync(oldParent).filter((name) => name.startsWith(".auth.json.tmp-"));
-    expect(oldTemps.length).toBe(1);
-    expect(readFileSync(join(oldParent, oldTemps[0]), "utf8")).toBe("");
+    // On Linux, /proc/self/fd allows cleanup through the parent descriptor even after rename.
+    // On macOS, fdescfs cannot traverse descriptors, leaving the truncated 0-byte residue in place.
+    if (process.platform === "linux") {
+      expect(oldTemps.length).toBe(0);
+    } else {
+      expect(oldTemps.length).toBe(1);
+      expect(readFileSync(join(oldParent, oldTemps[0]), "utf8")).toBe("");
+    }
   });
 
   it("handles concurrent writers safely without transaction theft or corruption", async () => {
