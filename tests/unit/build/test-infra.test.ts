@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { parseNativeByteBound } from "../../../scripts/test-support.mjs";
+import { parseNativeByteBound } from "../../test-support.mjs";
 
 const repo = process.cwd();
 
@@ -24,7 +24,7 @@ describe("Test Infrastructure & Gate Invariants", () => {
   });
 
   it("propagates a failed check as nonzero in canonical callback reporter", () => {
-    const supportUrl = pathToFileURL(join(repo, "scripts/test-support.mjs")).href;
+    const supportUrl = pathToFileURL(join(repo, "tests/test-support.mjs")).href;
     const source = [
       `import { runExportedChecks } from ${JSON.stringify(supportUrl)};`,
       'const result = await runExportedChecks(({ check }) => check("forced failure", false), { label: "forced" });',

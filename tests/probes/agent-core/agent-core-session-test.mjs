@@ -22,7 +22,7 @@ import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runExportedChecks } from "./test-support.mjs";
+import { runExportedChecks } from "../../test-support.mjs";
 
 const session = await import("../../../agent-core/session.ts");
 const host = await import("../../../agent-core/host.ts");

@@ -25,7 +25,7 @@ import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { createCheckReporter } from "./test-support.mjs";
+import { createCheckReporter } from "../../test-support.mjs";
 
 const core = await import("../../../agent-core/main.ts");
 const host = await import("../../../agent-core/host.ts");
