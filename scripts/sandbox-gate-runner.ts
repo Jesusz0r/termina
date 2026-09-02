@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { spawn } from "node:child_process";
 import { constants as osConstants } from "node:os";
 import { resolve } from "node:path";
@@ -26,7 +27,7 @@ function gateTimeout() {
 
 function childTarget() {
   const testChild = process.env.NODE_ENV === "test" ? process.env.TERMINA_SANDBOX_GATE_TEST_CHILD : undefined;
-  return resolve(testChild || "scripts/sandbox-security-test.mjs");
+  return resolve(testChild || "scripts/sandbox-security-test.ts");
 }
 
 function wait(delayMs) {

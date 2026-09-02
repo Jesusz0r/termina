@@ -1,5 +1,6 @@
+// @ts-nocheck
 /** Require the live OS sandbox probes for a release-platform gate. */
-import { runSandboxGate } from "./sandbox-gate-runner.mjs";
+import { runSandboxGate } from "./sandbox-gate-runner.ts";
 
 const result = await runSandboxGate();
 if (result.error) console.error(`live sandbox gate failed to start: ${result.error.message}`);

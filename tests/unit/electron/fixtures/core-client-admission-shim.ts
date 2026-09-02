@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S node --experimental-strip-types
 import readline from "node:readline";
 
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });

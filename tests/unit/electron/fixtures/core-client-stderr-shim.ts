@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S node --experimental-strip-types
 /** A JSON-lines core fixture which will block on stderr unless its parent drains it. */
 import readline from "node:readline";
 import { spawn } from "node:child_process";

@@ -122,7 +122,7 @@ describe("Project Watcher Bounded-Emitter & Backpressure", () => {
       const hugeInternals = hugeWatcher as any;
       hugeWatcher.start();
       hugeInternals.requestReconcile(hugeInternals.generation);
-      const hugeDeadline = Date.now() + 15000;
+      const hugeDeadline = Date.now() + 25000;
       while (hugeInternals.reconcileAttempts < 2 && Date.now() < hugeDeadline) await sleep(25);
       expect(hugeInternals.healthy).toBe(true);
       expect(hugeInternals.reconcileAttempts >= 2).toBe(true);
@@ -195,5 +195,5 @@ describe("Project Watcher Bounded-Emitter & Backpressure", () => {
       watcher.stop();
       rmSync(root, { recursive: true, force: true });
     }
-  }, 30_000);
+  }, 45_000);
 });

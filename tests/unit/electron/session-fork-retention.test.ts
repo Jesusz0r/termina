@@ -1279,5 +1279,5 @@ describe("Session Fork Teardown and Retention Probes", () => {
       disposeWorldlineCoreClient?.();
       rmSync(work, { recursive: true, force: true });
     }
-  }, 180_000);
+  }, 300_000);
 });

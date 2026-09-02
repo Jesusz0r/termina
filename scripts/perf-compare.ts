@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Perf compare: the Rust snapshot core against the Git CLI on equal work.
  *

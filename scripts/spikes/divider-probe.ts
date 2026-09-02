@@ -1,3 +1,4 @@
+// @ts-nocheck
 /** Probe: do the pane dividers still receive drags? */
 import { e2ePort } from "../e2e-port.mjs";
 

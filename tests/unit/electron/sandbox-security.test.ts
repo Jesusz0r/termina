@@ -7,7 +7,7 @@ const execFileAsync = promisify(execFile);
 
 describe("Electron Candidate Filesystem & Environment Sandbox Isolation", () => {
   it.skipIf(process.platform !== "darwin")("passes sandbox isolation contracts", async () => {
-    const scriptPath = resolve("scripts", "sandbox-security-test.mjs");
+    const scriptPath = resolve("scripts", "sandbox-security-test.ts");
     const { stdout } = await execFileAsync(
       process.execPath,
       ["--experimental-strip-types", "--no-warnings", scriptPath],

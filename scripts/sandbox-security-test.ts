@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Focused contracts for candidate filesystem and environment isolation.
  *

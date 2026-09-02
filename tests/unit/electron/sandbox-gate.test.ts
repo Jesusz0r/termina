@@ -7,10 +7,10 @@ const execFileAsync = promisify(execFile);
 
 describe("Sandbox Required-Live Security Gate & Policy Contracts", () => {
   it("passes sandbox required-live policy contract", async () => {
-    const scriptPath = resolve("scripts", "sandbox-security-policy-test.mjs");
+    const scriptPath = resolve("scripts", "sandbox-security-policy-test.ts");
     const { stdout } = await execFileAsync(
       process.execPath,
-      ["--no-warnings", scriptPath],
+      ["--experimental-strip-types", "--no-warnings", scriptPath],
       {
         cwd: process.cwd(),
         timeout: 90_000,
@@ -21,10 +21,10 @@ describe("Sandbox Required-Live Security Gate & Policy Contracts", () => {
   }, 90_000);
 
   it.skipIf(process.platform !== "darwin")("passes sandbox gate signal, orphan, and failed-probe contracts", async () => {
-    const scriptPath = resolve("scripts", "sandbox-security-gate-lifecycle-test.mjs");
+    const scriptPath = resolve("scripts", "sandbox-security-gate-lifecycle-test.ts");
     const { stdout } = await execFileAsync(
       process.execPath,
-      ["--no-warnings", scriptPath],
+      ["--experimental-strip-types", "--no-warnings", scriptPath],
       {
         cwd: process.cwd(),
         timeout: 90_000,

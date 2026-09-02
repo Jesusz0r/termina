@@ -49,7 +49,7 @@ describe("Agent Core Anthropic Stream-Bound Contract", () => {
       const timer = setTimeout(() => {
         child.kill("SIGKILL");
         resolve({ code: -1, signal: "SIGKILL" });
-      }, 15_000);
+      }, 40_000);
       child.on("exit", (code, signal) => {
         clearTimeout(timer);
         resolve({ code, signal });

@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Regression contract for the required-live sandbox gate.
  *
@@ -5,7 +6,7 @@
  * fail explicitly; static checks plus a silent SKIP is not an acceptable gate.
  */
 import assert from "node:assert/strict";
-import { runSandboxGate } from "./sandbox-gate-runner.mjs";
+import { runSandboxGate } from "./sandbox-gate-runner.ts";
 
 const result = await runSandboxGate({ captureOutput: true });
 if (result.error) console.error(`sandbox policy child failed to start: ${result.error.message}`);

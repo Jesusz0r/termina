@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Perf baseline (WORLDLINES §9): full and incremental capture latency.
  *

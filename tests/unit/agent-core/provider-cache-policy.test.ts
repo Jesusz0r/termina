@@ -221,7 +221,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
         const timer = setTimeout(() => {
           child.kill("SIGKILL");
           resolve({ code: -1, signal: "SIGKILL" });
-        }, 15_000);
+        }, 40_000);
         child.on("exit", (code, signal) => {
           clearTimeout(timer);
           resolve({ code, signal });

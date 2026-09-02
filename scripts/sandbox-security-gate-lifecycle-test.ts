@@ -1,3 +1,4 @@
+// @ts-nocheck
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -6,12 +7,12 @@ import { join, resolve } from "node:path";
 
 const workspace = process.cwd();
 const scratch = await mkdtemp(join(tmpdir(), "termina-sandbox-gate-test-"));
-const fakeChild = resolve("scripts/sandbox-security-gate-test-child.mjs");
+const fakeChild = resolve("scripts/sandbox-security-gate-test-child.ts");
 const wrappers = [
-  { name: "live", path: resolve("scripts/sandbox-security-live-gate.mjs") },
-  { name: "policy", path: resolve("scripts/sandbox-security-policy-test.mjs") },
+  { name: "live", path: resolve("scripts/sandbox-security-live-gate.ts") },
+  { name: "policy", path: resolve("scripts/sandbox-security-policy-test.ts") },
 ];
-const innerSandbox = resolve("scripts/sandbox-security-test.mjs");
+const innerSandbox = resolve("scripts/sandbox-security-test.ts");
 const signals = [
   ["SIGINT", 130],
   ["SIGTERM", 143],
@@ -94,7 +95,7 @@ async function waitForGroupGone(pid, label, timeoutMs = 5_000) {
 
 function spawnWrapper(wrapper, mode, tag) {
   const marker = join(scratch, `${tag}.json`);
-  const child = spawn(process.execPath, [wrapper.path], {
+  const child = spawn(process.execPath, ["--experimental-strip-types", wrapper.path], {
     cwd: workspace,
     env: {
       ...process.env,
@@ -123,7 +124,7 @@ function spawnRealWrapper(wrapper, tag) {
   };
   delete env.TERMINA_SANDBOX_GATE_TEST_CHILD;
   delete env.TERMINA_SANDBOX_GATE_TEST_MODE;
-  const child = spawn(process.execPath, [wrapper.path], {
+  const child = spawn(process.execPath, ["--experimental-strip-types", wrapper.path], {
     cwd: workspace,
     env,
     stdio: ["ignore", "pipe", "pipe"],

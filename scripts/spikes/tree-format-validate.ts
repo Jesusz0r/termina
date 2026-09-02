@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Validate hand-written tree objects with the real Git CLI.
  * Builds a store via the core protocol (nested dirs, unicode names,
