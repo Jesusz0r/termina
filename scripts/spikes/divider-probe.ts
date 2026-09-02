@@ -1,6 +1,6 @@
 // @ts-nocheck
 /** Probe: do the pane dividers still receive drags? */
-import { e2ePort } from "../e2e-port.mjs";
+import { e2ePort } from "../e2e-port.ts";
 
 const pages = await fetch(`http://127.0.0.1:${e2ePort()}/json`).then((r) => r.json());
 const page = pages.find((t) => t.type === "page");
