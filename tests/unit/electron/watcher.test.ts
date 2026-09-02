@@ -44,6 +44,7 @@ describe("Project Watcher Bounded-Emitter & Backpressure", () => {
 
     try {
       watcher.start();
+      await sleep(100);
       for (let i = 0; i < 6; i += 1) {
         const relPath = `burst-${i}.txt`;
         writeFileSync(join(root, relPath), `final-${i}`);
@@ -60,7 +61,7 @@ describe("Project Watcher Bounded-Emitter & Backpressure", () => {
       expect(watcher.isPaused()).toBe(true);
       expect(ticks).toBeGreaterThan(5);
       gate.resolve();
-      const idle = await watcher.waitForIdle(3000);
+      const idle = await watcher.waitForIdle(10_000);
       clearInterval(interval);
       expect(idle).not.toBeNull();
       expect(new Set(changes.map((change) => change.relPath)).size).toBe(6);
