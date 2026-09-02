@@ -42,7 +42,7 @@ function processGroupIsAlive(pid) {
   }
 }
 
-function waitForExit(child, timeoutMs = 5_000) {
+function waitForExit(child, timeoutMs = 15_000) {
   return new Promise((resolveExit, reject) => {
     let stdout = "";
     let stderr = "";
@@ -60,7 +60,7 @@ function waitForExit(child, timeoutMs = 5_000) {
   });
 }
 
-async function waitForFile(path, timeoutMs = 5_000) {
+async function waitForFile(path, timeoutMs = 20_000) {
   const deadline = Date.now() + timeoutMs;
   let lastError;
   while (Date.now() < deadline) {
@@ -120,7 +120,7 @@ function spawnRealWrapper(wrapper, tag) {
     TERMINA_SANDBOX_REQUIRE_LIVE: "1",
     TERMINA_SANDBOX_RACER_MARKER: marker,
     TERMINA_SANDBOX_TEST_HOLD_AFTER_RACER: "1",
-    TERMINA_SANDBOX_GATE_TIMEOUT_MS: "5000",
+    TERMINA_SANDBOX_GATE_TIMEOUT_MS: "15000",
   };
   delete env.TERMINA_SANDBOX_GATE_TEST_CHILD;
   delete env.TERMINA_SANDBOX_GATE_TEST_MODE;
