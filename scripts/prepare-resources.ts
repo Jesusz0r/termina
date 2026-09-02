@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Prepare the packaged resources: the node runtime and the core binary.
  *
@@ -17,7 +18,7 @@ import { open } from "node:fs/promises";
 import { platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { buildCore, stageCoreBinary } from "./build-core.mjs";
+import { buildCore, stageCoreBinary } from "./build-core.ts";
 import { readSystemProcessIdentity } from "../shared/process-identity.js";
 
 const RESOURCES = join(process.cwd(), "resources");

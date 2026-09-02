@@ -60,7 +60,7 @@ jobs:
       # Builds the Rust core, main + preload, and the renderer.
       - run: npm run build
       # Stages the bundled node runtime and the core binary.
-      - run: node scripts/prepare-resources.mjs
+      - run: node --experimental-strip-types scripts/prepare-resources.ts
       - name: Run macOS release gate
         if: matrix.os == 'macos-15'
         run: npm run test:release-macos

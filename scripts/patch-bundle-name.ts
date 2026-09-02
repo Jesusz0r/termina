@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Names the Electron bundle so the macOS menu bar shows the app name.
  *

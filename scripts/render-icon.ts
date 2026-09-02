@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Render build/icon.svg to a 1024x1024 PNG with real transparency.
  *

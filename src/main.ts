@@ -2144,7 +2144,7 @@ function appUpdateButtonLabel(
 ): { text: string; title: string } {
   switch (state.status) {
     case "available":
-      return { text: "↑", title: `Termina ${state.version} is available` };
+      return { text: "↑", title: `Termina ${state.version} is available (downloading…)` };
     case "downloading":
       return { text: `${state.percent}%`, title: `Downloading Termina ${state.version} (${state.percent}%)` };
     case "ready":
@@ -2160,9 +2160,16 @@ btnAppUpdate.addEventListener("click", () => {
       void window.pi.checkUpdate();
       return;
     }
-    void window.pi.installUpdate().then((res) => {
-      if (!res.ok) toast(res.error ?? "could not install the update", "warning");
-    });
+    if (state.status === "ready") {
+      void window.pi.installUpdate().then((res) => {
+        if (!res.ok) toast(res.error ?? "could not install the update", "warning");
+      });
+      return;
+    }
+    if (state.status === "downloading" || state.status === "available") {
+      toast(`Downloading Termina ${state.version}…`, "info");
+      return;
+    }
   });
 });
 window.pi.onUpdateState(applyAppUpdateState);

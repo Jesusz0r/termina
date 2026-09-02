@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * Build the Rust snapshot core and copy the binary next to the main bundle.
  * The core replaces the old snapshot worker thread.

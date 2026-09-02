@@ -16,7 +16,7 @@ import {
 import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { stageCoreBinary } from "../../../scripts/build-core.mjs";
+import { stageCoreBinary } from "../../../scripts/build-core.ts";
 
 const CORE_REQUEST_TIMEOUT_MS = 5_000;
 const CORE_RESPONSE_MAX_BYTES = 64 * 1024;

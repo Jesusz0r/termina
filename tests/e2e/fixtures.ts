@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { patchBundleName } from "../../scripts/patch-bundle-name.mjs";
+import { patchBundleName } from "../../scripts/patch-bundle-name.ts";
 
 export interface TerminaE2EFixtures {
   electronApp: ElectronApplication;

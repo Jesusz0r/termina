@@ -1309,11 +1309,9 @@ class PiEditorApp {
         label: "Termina",
         submenu: [
           { role: "about" },
-          { type: "separator" },
-          { label: update.status, id: "app-update-status", enabled: false },
           {
-            id: "app-update-action",
-            label: update.action,
+            id: "app-update",
+            label: update.label,
             enabled: update.enabled,
             click: () => void this.handleUpdateMenuAction(),
           },
@@ -1419,19 +1417,7 @@ class PiEditorApp {
   }
 
   private applyUpdateMenu(): void {
-    const copy = updateMenuCopy(
-      this.appUpdater?.getState() ?? { status: "disabled", currentVersion: app.getVersion() },
-    );
-    const menu = Menu.getApplicationMenu();
-    const statusItem = menu?.getMenuItemById("app-update-status");
-    const actionItem = menu?.getMenuItemById("app-update-action");
-    if (!statusItem || !actionItem) {
-      this.buildMenu();
-      return;
-    }
-    statusItem.label = copy.status;
-    actionItem.label = copy.action;
-    actionItem.enabled = copy.enabled;
+    this.buildMenu();
   }
 
   private handleUpdateMenuAction(): void {
@@ -6747,9 +6733,8 @@ class PiEditorApp {
     );
     ipcMain.handle("settings:shortcuts", (_e, shortcuts: unknown) => this.setKeyboardShortcuts(shortcuts));
     ipcMain.handle("update:get", () => this.appUpdater?.getState() ?? { status: "disabled" as const, currentVersion: app.getVersion() });
-    ipcMain.handle("update:check", () => {
-      this.appUpdater?.check();
-      return this.appUpdater?.getState() ?? { status: "disabled" as const, currentVersion: app.getVersion() };
+    ipcMain.handle("update:check", async () => {
+      return (await this.appUpdater?.check()) ?? { status: "disabled" as const, currentVersion: app.getVersion() };
     });
     ipcMain.handle("update:install", () => this.installAppUpdate());
 
@@ -7341,19 +7326,62 @@ class PiEditorApp {
   }
 
   private async checkAppUpdateFromMenu(): Promise<void> {
+    const win = this.win && !this.win.isDestroyed() ? this.win : undefined;
     if (!app.isPackaged) {
       const payload = {
         type: "info" as const,
-        title: "Updates",
-        message: "This launch does not auto-update.",
-        detail: "Install Termina from GitHub Releases to receive in-app updates. A source or npm run dev launch stays on the code you built.",
+        title: "Check for Updates",
+        message: `Termina ${app.getVersion()} is up to date`,
+        detail: "This launch does not auto-update. Install Termina from GitHub Releases to receive packaged updates.",
       };
-      const win = this.win;
-      if (win && !win.isDestroyed()) await dialog.showMessageBox(win, payload);
+      if (win) await dialog.showMessageBox(win, payload);
       else await dialog.showMessageBox(payload);
       return;
     }
-    this.appUpdater?.check();
+
+    const state = await this.appUpdater?.check();
+    if (!state) return;
+    if (state.status === "current") {
+      const payload = {
+        type: "info" as const,
+        title: "Check for Updates",
+        message: "You're up to date!",
+        detail: `Termina ${state.currentVersion} is currently the newest version available.`,
+      };
+      if (win) await dialog.showMessageBox(win, payload);
+      else await dialog.showMessageBox(payload);
+    } else if (state.status === "available" || state.status === "downloading") {
+      const payload = {
+        type: "info" as const,
+        title: "Update Available",
+        message: `Termina ${state.version} is available`,
+        detail: "Downloading update in the background…",
+      };
+      if (win) await dialog.showMessageBox(win, payload);
+      else await dialog.showMessageBox(payload);
+    } else if (state.status === "ready") {
+      const res = await dialog.showMessageBox(win ?? ({} as Electron.BrowserWindow), {
+        type: "info",
+        title: "Update Ready",
+        message: `Termina ${state.version} is ready to install`,
+        detail: "Restart Termina to apply the update.",
+        buttons: ["Restart and Install", "Later"],
+        defaultId: 0,
+        cancelId: 1,
+      });
+      if (res.response === 0) {
+        void this.installAppUpdate();
+      }
+    } else if (state.status === "error") {
+      const payload = {
+        type: "warning" as const,
+        title: "Check for Updates",
+        message: "Could not check for updates",
+        detail: state.message,
+      };
+      if (win) await dialog.showMessageBox(win, payload);
+      else await dialog.showMessageBox(payload);
+    }
   }
 
   private async installAppUpdate(): Promise<{ ok: boolean; error?: string }> {

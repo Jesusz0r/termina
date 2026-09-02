@@ -11,7 +11,10 @@ import type { AppUpdater, ProgressInfo, UpdateInfo } from "electron-updater";
 import type { AppUpdateState } from "../shared/types.js";
 
 const require = createRequire(import.meta.url);
-const { autoUpdater } = require("electron-updater") as { autoUpdater: AppUpdater };
+
+function getAutoUpdater(): AppUpdater {
+  return (require("electron-updater") as { autoUpdater: AppUpdater }).autoUpdater;
+}
 
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const CHECK_TIMEOUT_MS = 60 * 1000;
@@ -20,7 +23,7 @@ const PROGRESS_THROTTLE_MS = 400;
 export type AppUpdateController = ReturnType<typeof createAppUpdater>;
 
 function currentVersion(): string {
-  return app.getVersion();
+  return typeof app?.getVersion === "function" ? app.getVersion() : "0.0.0";
 }
 
 function statesEqual(a: AppUpdateState, b: AppUpdateState): boolean {
@@ -40,14 +43,14 @@ function isUpdateInFlight(state: AppUpdateState): boolean {
 
 export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }) {
   let state: AppUpdateState = app.isPackaged
-    ? { status: "checking", currentVersion: currentVersion() }
+    ? { status: "current", currentVersion: currentVersion() }
     : { status: "disabled", currentVersion: currentVersion() };
   let version = "";
   let checkTimer: ReturnType<typeof setInterval> | null = null;
   let checkTimeout: ReturnType<typeof setTimeout> | null = null;
+  let checkPromise: Promise<AppUpdateState> | null = null;
   let lastProgressAt = 0;
   let started = false;
-  let checkInFlight = false;
   let checkSeq = 0;
 
   const setState = (next: AppUpdateState): void => {
@@ -56,49 +59,60 @@ export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }
     opts.send(next);
   };
 
-  const check = (): void => {
-    if (!started) return;
+  const check = (): Promise<AppUpdateState> => {
     if (!app.isPackaged) {
       setState({ status: "disabled", currentVersion: currentVersion() });
-      return;
+      return Promise.resolve(state);
     }
-    if (checkInFlight || isUpdateInFlight(state)) return;
-    checkInFlight = true;
+    if (checkPromise) return checkPromise;
+    if (isUpdateInFlight(state)) return Promise.resolve(state);
     const seq = ++checkSeq;
     setState({ status: "checking", currentVersion: currentVersion() });
-    checkTimeout = setTimeout(() => {
-      checkTimeout = null;
-      if (seq !== checkSeq) return;
-      checkInFlight = false;
-      if (state.status === "checking") {
-        setState({
-          status: "error",
-          currentVersion: currentVersion(),
-          message: "The update check timed out.",
-        });
-      }
-    }, CHECK_TIMEOUT_MS);
-    void autoUpdater
-      .checkForUpdates()
-      .then((result) => {
-        if (seq !== checkSeq || state.status !== "checking") return;
-        const found = result != null && typeof result === "object" && "isUpdateAvailable" in result
-          ? Boolean((result as { isUpdateAvailable?: boolean }).isUpdateAvailable)
-          : false;
-        if (found) return;
-        setState({ status: "current", currentVersion: currentVersion() });
-      })
-      .catch((err: Error) => {
-        if (seq !== checkSeq) return;
-        console.warn(`[update] check failed: ${err.message}`);
-        setState({ status: "error", currentVersion: currentVersion(), message: err.message });
-      })
-      .finally(() => {
-        if (seq !== checkSeq) return;
-        if (checkTimeout) clearTimeout(checkTimeout);
+
+    checkPromise = new Promise<AppUpdateState>((resolve) => {
+      checkTimeout = setTimeout(() => {
         checkTimeout = null;
-        checkInFlight = false;
-      });
+        if (seq !== checkSeq) return resolve(state);
+        if (state.status === "checking") {
+          setState({
+            status: "error",
+            currentVersion: currentVersion(),
+            message: "The update check timed out.",
+          });
+        }
+        resolve(state);
+      }, CHECK_TIMEOUT_MS);
+
+      void getAutoUpdater()
+        .checkForUpdates()
+        .then((result) => {
+          if (seq !== checkSeq) return resolve(state);
+          const found = result != null && typeof result === "object" && "isUpdateAvailable" in result
+            ? Boolean((result as { isUpdateAvailable?: boolean }).isUpdateAvailable)
+            : false;
+          if (found && result && "updateInfo" in result && (result as { updateInfo?: { version?: string } }).updateInfo?.version) {
+            version = (result as { updateInfo: { version: string } }).updateInfo.version;
+            setState({ status: "available", currentVersion: currentVersion(), version });
+          } else if (!found) {
+            setState({ status: "current", currentVersion: currentVersion() });
+          }
+          resolve(state);
+        })
+        .catch((err: Error) => {
+          if (seq !== checkSeq) return resolve(state);
+          console.warn(`[update] check failed: ${err.message}`);
+          setState({ status: "error", currentVersion: currentVersion(), message: err.message });
+          resolve(state);
+        })
+        .finally(() => {
+          if (seq !== checkSeq) return;
+          if (checkTimeout) clearTimeout(checkTimeout);
+          checkTimeout = null;
+          checkPromise = null;
+        });
+    });
+
+    return checkPromise;
   };
 
   const onUpdateAvailable = (info: UpdateInfo): void => {
@@ -153,107 +167,97 @@ export function createAppUpdater(opts: { send: (state: AppUpdateState) => void }
     },
 
     quitAndInstall() {
-      autoUpdater.quitAndInstall(false, true);
+      getAutoUpdater().quitAndInstall(false, true);
     },
 
     start() {
       if (started) return;
       started = true;
-      if (!app.isPackaged) {
+      if (!app?.isPackaged) {
         opts.send(state);
         return;
       }
-      autoUpdater.autoDownload = true;
-      autoUpdater.autoInstallOnAppQuit = true;
-      autoUpdater.disableWebInstaller = true;
-      autoUpdater.allowPrerelease = false;
-      autoUpdater.logger = null;
+      const updater = getAutoUpdater();
+      updater.autoDownload = true;
+      updater.autoInstallOnAppQuit = true;
+      updater.disableWebInstaller = true;
+      updater.allowPrerelease = false;
+      updater.logger = null;
 
-      autoUpdater.on("update-available", onUpdateAvailable);
-      autoUpdater.on("update-not-available", onUpdateNotAvailable);
-      autoUpdater.on("download-progress", onDownloadProgress);
-      autoUpdater.on("update-downloaded", onUpdateDownloaded);
-      autoUpdater.on("error", onError);
+      updater.on("update-available", onUpdateAvailable);
+      updater.on("update-not-available", onUpdateNotAvailable);
+      updater.on("download-progress", onDownloadProgress);
+      updater.on("update-downloaded", onUpdateDownloaded);
+      updater.on("error", onError);
 
-      check();
-      checkTimer = setInterval(check, CHECK_INTERVAL_MS);
+      void check();
+      checkTimer = setInterval(() => void check(), CHECK_INTERVAL_MS);
     },
 
     dispose() {
       started = false;
       checkSeq++;
-      checkInFlight = false;
+      checkPromise = null;
       if (checkTimer) clearInterval(checkTimer);
       checkTimer = null;
       if (checkTimeout) clearTimeout(checkTimeout);
       checkTimeout = null;
-      autoUpdater.off("update-available", onUpdateAvailable);
-      autoUpdater.off("update-not-available", onUpdateNotAvailable);
-      autoUpdater.off("download-progress", onDownloadProgress);
-      autoUpdater.off("update-downloaded", onUpdateDownloaded);
-      autoUpdater.off("error", onError);
+      if (app?.isPackaged) {
+        const updater = getAutoUpdater();
+        updater.off("update-available", onUpdateAvailable);
+        updater.off("update-not-available", onUpdateNotAvailable);
+        updater.off("download-progress", onDownloadProgress);
+        updater.off("update-downloaded", onUpdateDownloaded);
+        updater.off("error", onError);
+      }
     },
   };
 }
 
 /** Labels for the Termina application menu. */
 export function updateMenuCopy(state: AppUpdateState): {
-  status: string;
-  action: string;
+  label: string;
   enabled: boolean;
   kind: "check" | "install" | "none";
 } {
   switch (state.status) {
     case "disabled":
+    case "current":
       return {
-        status: `Termina ${state.currentVersion} — this install is up to date (source)`,
-        action: "Check for Updates…",
+        label: "Check for Updates…",
         enabled: true,
         kind: "check",
       };
     case "checking":
       return {
-        status: `Termina ${state.currentVersion} — checking…`,
-        action: "Check for Updates…",
+        label: "Checking for Updates…",
         enabled: false,
         kind: "none",
       };
-    case "current":
-      return {
-        status: `Termina ${state.currentVersion} — this install is up to date`,
-        action: "Check for Updates…",
-        enabled: true,
-        kind: "check",
-      };
     case "available":
       return {
-        status: `Termina ${state.version} is available`,
-        action: "Downloading Update…",
+        label: `Downloading Termina ${state.version}…`,
         enabled: false,
         kind: "none",
       };
     case "downloading":
       return {
-        status: `Downloading Termina ${state.version} (${state.percent}%)`,
-        action: "Downloading Update…",
+        label: `Downloading Termina ${state.version} (${state.percent}%)…`,
         enabled: false,
         kind: "none",
       };
     case "ready":
       return {
-        status: `Termina ${state.version} is ready to install`,
-        action: "Restart and Install Update…",
+        label: `Restart and Install Update (Termina ${state.version})…`,
         enabled: true,
         kind: "install",
       };
-    case "error": {
-      const message = state.message.length > 80 ? `${state.message.slice(0, 77)}…` : state.message;
+    case "error":
       return {
-        status: message ? `Could not check for updates: ${message}` : "Could not check for updates",
-        action: "Check for Updates…",
+        label: "Check for Updates…",
         enabled: true,
         kind: "check",
       };
-    }
   }
 }
+

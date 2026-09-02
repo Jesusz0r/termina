@@ -1,7 +1,8 @@
+// @ts-nocheck
 // Build the Electron main process and preload script with esbuild.
 // Renderer is built separately by Vite (vite build).
 import { build } from "esbuild";
-import { buildCore } from "./build-core.mjs";
+import { buildCore } from "./build-core.ts";
 
 const shared = {
   bundle: true,

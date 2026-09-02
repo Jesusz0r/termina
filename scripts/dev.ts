@@ -1,11 +1,12 @@
+// @ts-nocheck
 // Dev workflow: build main+preload with esbuild, start the Vite dev server,
 // then launch Electron pointing at it. Restarts Electron when it exits.
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { build } from "esbuild";
 import { createServer } from "vite";
-import { patchBundleName } from "./patch-bundle-name.mjs";
-import { buildCore } from "./build-core.mjs";
+import { patchBundleName } from "./patch-bundle-name.ts";
+import { buildCore } from "./build-core.ts";
 
 const require = createRequire(import.meta.url);
 // Under plain Node, `require("electron")` resolves to the path of the Electron binary.

@@ -24,7 +24,7 @@ import { dirname, join, resolve } from "node:path";
 
 describe("Node Runtime Staging & Preparation Invariants", () => {
   it("verifies fail-closed staging invariants", async () => {
-const sourceUrl = new URL("../../../scripts/prepare-resources.mjs", import.meta.url);
+const sourceUrl = new URL("../../../scripts/prepare-resources.ts", import.meta.url);
 const {
   PINNED_NODE_VERSION,
   downloadVerifiedArchive,
