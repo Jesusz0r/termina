@@ -36,7 +36,7 @@
     "test:watcher-and-pty": "vitest run tests/unit/electron/watcher.test.ts tests/unit/electron/pty-egress.test.ts",
     "test:ipc-project-flow": "vitest run tests/unit/electron/ipc-project-flow.test.ts",
     "test:ipc-navigation": "playwright test tests/e2e/ipc-navigation.spec.ts",
-    "test:core-client-read-budget": "vitest run tests/unit/electron/worldlines-unit.test.ts",
+    "test:core-client-read-budget": "vitest run tests/unit/electron/core-client-read-budget.test.ts",
     "test:session-fork-worker": "vitest run tests/unit/electron/session-fork-worker.test.ts",
     "test:session-retention": "vitest run tests/unit/electron/session-retention.test.ts",
     "test:session-fork-migration": "vitest run tests/unit/electron/session-fork-migration.test.ts",

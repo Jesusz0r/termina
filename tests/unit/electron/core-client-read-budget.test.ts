@@ -1,21 +1,17 @@
-/**
- * Read-delivery cap regression through the JSON-lines CoreClient.
- *
- * Run with:
- *   TERMINA_CORE_BIN=core/target/debug/termina-core \
- *   node --experimental-strip-types --no-warnings scripts/core-client-read-budget-test.mjs
- */
+import { describe, it, expect } from "vitest";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
-import { parseNativeByteBound } from "./test-support.mjs";
+import { coreClient } from "../../../electron/core-client.ts";
+import { parseNativeByteBound } from "../../../scripts/test-support.mjs";
 
-process.env.TERMINA_CORE_BIN ??= resolve("core/target/debug/termina-core");
-const { coreClient } = await import(pathToFileURL(resolve("electron/core-client.ts")).href);
-const root = mkdtempSync(join(tmpdir(), "termina-core-read-budget-"));
+process.env.TERMINA_CORE_BIN ??= resolve("core/target/release/termina-core");
+
+describe("Core Client Read Budget & Native Bound Invariants", () => {
+  it("enforces native read budget limits and fails closed on overflow", async () => {
+    const root = mkdtempSync(join(tmpdir(), "termina-core-read-budget-"));
 const repo = join(root, "repo");
 const store = join(root, "store");
 const rawAtNativeLimit = 47 * 1024 * 1024;
@@ -241,8 +237,9 @@ try {
     relPath: "payload.txt",
   }));
   assert.equal(Buffer.from(retainedAncestor.content, "base64").toString(), "ancestor-A\n");
-  console.log("PASS ancestor replacement fails closed without overwriting persisted evidence");
-} finally {
-  coreClient.dispose();
-  rmSync(root, { recursive: true, force: true });
-}
+    } finally {
+      coreClient.dispose();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 90_000);
+});

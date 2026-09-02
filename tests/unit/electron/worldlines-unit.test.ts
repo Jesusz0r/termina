@@ -320,10 +320,6 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
 
 
 
-  it("passes core client read budget gate", async () => {
-    const { stdout } = await runScript("core-client-read-budget-test.mjs");
-    expect(stdout).toContain("PASS");
-  });
 
   it("passes retention ledger focused performance regressions", async () => {
     const { stdout } = await runScript("session-retention-performance-test.mjs", 120_000);
