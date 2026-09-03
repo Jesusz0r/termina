@@ -39,7 +39,7 @@ import {
   type PromotionFsIdentity,
   type SnapshotStore,
 } from "./worldline-git.js";
-import { EvidenceEngine, dependencyDiff, mineChangeReason, rankProfiles, type EvidenceDeps, type EvidenceRecord, type EvidenceSummary } from "./evidence.js";
+import { EvidenceEngine, dependencyDiff, mineChangeReason, rankProfiles, type EvidenceDeps } from "./evidence.js";
 import type {
   CoreSessionForkOpts,
   CoreSessionForkResult,
@@ -49,7 +49,7 @@ import type {
   SessionForkOpts,
   SessionForkResult,
 } from "./session-fork.js";
-import type { ChallengeProfile, DependencyChange, RunSummary, TimelineEvent, WorldlineChangedFile, WorldlineDetails, WorldlineState, WorldlineSummary } from "../shared/types.js";
+import type { ChallengeProfile, DependencyChange, EvidenceRecord, EvidenceSummary, RunSummary, TimelineEvent, WorldlineChangedFile, WorldlineDetails, WorldlineState, WorldlineSummary } from "../shared/types.js";
 import {
   coreSessionFile,
   parseSessionBundlePath,

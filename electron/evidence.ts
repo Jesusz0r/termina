@@ -11,9 +11,9 @@ import { readFile, realpath as fsRealpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { SnapshotStore } from "./worldline-git.js";
 import { MAX_SIDECAR_BYTES, parseSidecarRecord, sidecarEventFromRecord } from "./sidecar.js";
-import type { ChallengeProfile } from "../shared/types.js";
+import type { EvidenceRecord, ProfileVerdict } from "../shared/types.js";
 
-export type EvidenceKind = "verify" | "dependencies" | "api" | "footprint" | "benchmark" | "trajectory";
+type EvidenceKind = "verify" | "dependencies" | "api" | "footprint" | "benchmark" | "trajectory";
 
 /** Wall-clock budget for all evidence Verify attempts of one candidate. */
 const VERIFY_BUDGET_MS = 300_000;
@@ -21,41 +21,6 @@ const VERIFY_BUDGET_MS = 300_000;
 const MAX_VERIFY_RUNS = 5;
 /** Do not start another attempt with less remaining time than this. */
 const MIN_VERIFY_REPEAT_MS = 1_000;
-
-/** One measured result for one candidate. */
-export interface EvidenceRecord {
-  kind: EvidenceKind;
-  /** The candidate head state this evidence measures. */
-  stateId: string;
-  /** The shared base state (R) of the comparison. */
-  baseStateId: string;
-  status: "pass" | "fail" | "unavailable";
-  result: Record<string, unknown>;
-  reason: string | null;
-}
-
-/** The verdict of one fixed profile. */
-export interface ProfileVerdict {
-  profile: ChallengeProfile;
-  winner: "A" | "B" | "tie" | "unavailable";
-  /** The exact reason for the verdict. */
-  reason: string;
-  /** Per-candidate eligibility reasons ("" when eligible). */
-  eligibility: Record<string, string>;
-}
-
-export interface EvidenceSummary {
-  comparisonId: string;
-  ts: number;
-  /** One record per candidate per kind (missing kinds are absent). */
-  byCandidate: Record<"A" | "B", EvidenceRecord[]>;
-  /** One verdict per fixed profile. */
-  profiles: ProfileVerdict[];
-  /** Why the whole computation is unavailable, when it is. */
-  error: string | null;
-  /** True when a candidate ran again after the evidence (stale). */
-  stale?: boolean;
-}
 
 interface CandidateFacts {
   root: string;
