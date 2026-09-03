@@ -322,6 +322,7 @@ export function formatTuiFooter(opts: {
   queued?: boolean;
   scrolled?: boolean;
   search?: string | null;
+  bash?: boolean;
   cols?: number;
 }): string {
   if (opts.search !== undefined && opts.search !== null) {
@@ -340,6 +341,7 @@ export function formatTuiFooter(opts: {
     const queued = opts.queued ? "  ·  queued" : "";
     return `^C stop  ·  PgUp PgDn scroll${queued}${live}`;
   }
+  if (opts.bash) return `BASH  ·  ↵ run  ·  ^J newline  ·  ^C clear${live}`;
   return `↵ send  ·  @ file  ·  / cmd  ·  ⇥ complete  ·  ^J newline  ·  ^C clear${live}`;
 }
 
@@ -2310,6 +2312,7 @@ export class AgentTui {
     const title = ` ${leftTitle}${" ".repeat(gap)}${rightTitle} `;
     const picker = matches.length > 0 && Boolean(matches[0]?.submit);
     const filePicker = picker && matches[0]?.hint === "file";
+    const bashInput = this.chars[0] === "!" && !this.choicePrompt && !this.rawInput;
     const foot = formatTuiFooter({
       choice: Boolean(this.choicePrompt),
       picker,
@@ -2319,12 +2322,13 @@ export class AgentTui {
       queued: Boolean(this.queued),
       scrolled: this.scroll > 0,
       search: this.search ? this.search.query : null,
+      bash: bashInput,
       cols,
     });
 
     // Placeholder when the prompt is empty
     const isInputEmpty = this.chars.length === 0 && !this.choicePrompt && !this.search && !this.rawInput;
-    const INPUT_PLACEHOLDER = "Type a task…  @ files  ·  / commands";
+    const INPUT_PLACEHOLDER = "Type a task…  @ files  ·  / commands  ·  ! bash";
     let displayWrapped = inputWrapped;
     let displayPos = pos;
     if (isInputEmpty) {
@@ -2379,7 +2383,9 @@ export class AgentTui {
         const rest = raw.slice(prefix.length);
         painted.push(`${prefix}\x1b[90m${rest}\x1b[0m`);
       } else if (i >= inputTop && i < inputTop + layout.input) {
-        painted.push(raw);
+        // Bang commands are local shell execution, not agent prompts. Give the
+        // whole composer a distinct amber treatment while the command is typed.
+        painted.push(bashInput ? `\x1b[1;38;5;229;48;5;58m${raw}\x1b[0m` : raw);
       } else if (i < layout.transcript) {
         if (this.entries.length === 0 && !this.busy) painted.push(`\x1b[90m${raw}\x1b[0m`);
         else painted.push(view.painted[i] ?? `\x1b[0m${raw}\x1b[0m`);

@@ -4582,6 +4582,13 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       "tui idle footer is short",
       emptyTui.frame().includes("↵ send") && emptyTui.frame().includes("@ file") && emptyTui.frame().includes("/ cmd") && emptyTui.frame().includes("^J newline"),
     );
+    emptyTui.feed("!echo hello");
+    check(
+      "tui marks bang commands as bash input",
+      emptyTui.frame().includes("BASH") && emptyTui.frame().includes("↵ run") && emptyTui.frame().includes("> !echo hello"),
+    );
+    emptyTui.feed("\x15");
+    check("tui leaves bash mode when bang input is cleared", !emptyTui.frame().includes("BASH"));
     emptyTui.setStatus({ permissions: "ask" });
     check("tui shows permissions in the header", emptyTui.frame().includes(" ask "));
     emptyTui.setQueued("fix the test");
