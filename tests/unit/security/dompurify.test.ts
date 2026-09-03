@@ -24,7 +24,8 @@ const vendoredDomPurify = join(
 );
 const installedDomPurify = join(repoRoot, "node_modules/dompurify/dist/purify.es.mjs");
 const packageJson = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
-const packageLock = JSON.parse(readFileSync(join(repoRoot, "package-lock.json"), "utf8"));
+const pnpmWorkspace = readFileSync(join(repoRoot, "pnpm-workspace.yaml"), "utf8");
+const pnpmLock = readFileSync(join(repoRoot, "pnpm-lock.yaml"), "utf8");
 
 function collectJavaScript(root: string): string {
   const chunks: string[] = [];
@@ -65,16 +66,16 @@ describe("DOMPurify build and optimizer isolation", () => {
     rmSync(testRoot, { recursive: true, force: true });
   });
 
-  it("pins DOMPurify version and override in package.json", () => {
+  it("pins DOMPurify version and override", () => {
     expect(packageJson.dependencies?.dompurify).toBe(expectedVersion);
-    expect(packageJson.overrides?.dompurify).toBe(expectedVersion);
+    // The override lives in pnpm-workspace.yaml (pnpm 11 no longer reads
+    // the npm `overrides` field); it must pin the same version.
+    expect(pnpmWorkspace).toMatch(new RegExp(`^\\s*dompurify:\\s*["']?${expectedVersion}["']?\\s*$`, "m"));
   });
 
-  it("ensures package-lock contains only the patched DOMPurify", () => {
-    const lockedDomPurify = Object.entries(packageLock.packages ?? {})
-      .filter(([path]) => path === "node_modules/dompurify" || path.endsWith("/node_modules/dompurify"))
-      .map(([path, entry]) => [path, (entry as { version?: string }).version]);
-    expect(lockedDomPurify).toEqual([["node_modules/dompurify", expectedVersion]]);
+  it("ensures pnpm-lock contains only the patched DOMPurify", () => {
+    const lockedVersions = [...new Set([...pnpmLock.matchAll(/dompurify@(\d+\.\d+\.\d+)/g)].map((m) => m[1]))];
+    expect(lockedVersions).toEqual([expectedVersion]);
   });
 
   it("verifies installed DOMPurify is 3.4.14 and Monaco imports it", () => {

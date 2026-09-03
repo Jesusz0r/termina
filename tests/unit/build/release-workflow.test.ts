@@ -36,7 +36,9 @@ describe("Release Workflow & CI Publication Invariants", () => {
     expect(publishJob).toMatch(/permissions:\s*\n\s+contents:\s*write\b/);
     expect(testJob).not.toMatch(/contents:\s*write\b/);
     expect(buildJob).not.toMatch(/contents:\s*write\b/);
-    expect(testJob).toMatch(/- run: npm run test:release\b/);
+    expect(testJob).toMatch(/- run: pnpm run test:release\b/);
+    expect(testJob).toMatch(/pnpm install --frozen-lockfile/);
+    expect(buildJob).toMatch(/pnpm install --frozen-lockfile/);
     expect(buildJob).toMatch(/needs:\s*(?:test|\[\s*test\s*\])\b/);
     expect(buildJob).toMatch(/strategy:\s*\n\s+fail-fast:\s*false\s*\n\s+matrix:/);
     expect(buildJob).toMatch(/os:\s*macos-15\b/);
@@ -47,7 +49,7 @@ describe("Release Workflow & CI Publication Invariants", () => {
     expect(buildJob).not.toMatch(/draft=false/);
     expect(buildJob).not.toMatch(/uses:\s*[^\n]*(?:gh-?release|release-action|publish-release)/i);
 
-    const builderCommands = [...buildJob.matchAll(/^\s*(?:npx\s+)?electron-builder\b.*$/gm)].map((match) => match[0]);
+    const builderCommands = [...buildJob.matchAll(/^\s*(?:pnpm\s+exec\s+)?electron-builder\b.*$/gm)].map((match) => match[0]);
     expect(builderCommands.length).toBeGreaterThanOrEqual(1);
     for (const command of builderCommands) {
       expect(command).toMatch(/--publish\s+never\b/);
@@ -114,12 +116,12 @@ describe("Release Workflow & CI Publication Invariants", () => {
       expect(step).toMatch(/GH_REPO:\s*\$\{\{\s*github\.repository\s*\}\}/);
     }
 
-    expect(countCommand(packageScripts["test:release"], "npm run test")).toBe(1);
+    expect(countCommand(packageScripts["test:release"], "pnpm run test")).toBe(1);
     expect(typeof packageScripts["test:release-macos"]).toBe("string");
-    expect(countCommand(packageScripts["test:release-macos"], "npm run test:sandbox-security-live")).toBe(1);
-    expect(countCommand(packageScripts["test:release-macos"], "npm run test:e2e-release-smoke")).toBe(1);
+    expect(countCommand(packageScripts["test:release-macos"], "pnpm run test:sandbox-security-live")).toBe(1);
+    expect(countCommand(packageScripts["test:release-macos"], "pnpm run test:e2e-release-smoke")).toBe(1);
 
-    const macGateRun = buildJob.indexOf("run: npm run test:release-macos");
+    const macGateRun = buildJob.indexOf("run: pnpm run test:release-macos");
     const packageStep = buildJob.indexOf("name: Package");
     expect(macGateRun).toBeGreaterThanOrEqual(0);
     expect(packageStep).toBeGreaterThanOrEqual(0);

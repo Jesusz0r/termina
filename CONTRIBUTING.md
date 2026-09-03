@@ -5,13 +5,13 @@ the rules the project lives by.
 
 ## Development setup
 
-Requirements: node >= 22.19, npm, and cargo (the Rust snapshot core
+Requirements: node >= 22.19, pnpm, and cargo (the Rust snapshot core
 builds from `core/`). No git CLI is needed to run the app — every Git
 operation runs inside the Rust core.
 
 ```bash
-npm install
-npm run dev   # builds the Rust core + main + preload, starts Vite, launches Electron
+pnpm install
+pnpm run dev   # builds the Rust core + main + preload, starts Vite, launches Electron
 ```
 
 ## First run
@@ -36,10 +36,10 @@ process pushes. The terminal stays the source of truth.
 ## Running the tests
 
 ```bash
-npx tsc --noEmit              # typecheck
-npm run build                 # production build
-npm run test:spikes           # plain-node spike suites (capture, merge, session-fork, platform)
-npm run test:e2e              # the full Electron e2e matrix
+pnpm exec tsc --noEmit        # typecheck
+pnpm run build                # production build
+pnpm run test:spikes          # plain-node spike suites (capture, merge, session-fork, platform)
+pnpm run test:e2e              # the full Electron e2e matrix
 node scripts/e2e.mjs --skip-build worldline-capture-test.mjs   # one suite
 ```
 
@@ -82,14 +82,14 @@ is the client. When you add an op:
 1. Implement it in `core/src/main.rs` and register it in `dispatch`.
 2. Add the typed client method in `electron/core-client.ts` (or a
    `SnapshotStore` method in `electron/worldline-git.ts`).
-3. Run the spike suites (`npm run test:spikes`) — they exercise the
+3. Run the spike suites (`pnpm run test:spikes`) — they exercise the
    store byte-for-byte through the real binary.
 4. Keep `cargo clippy` and `cargo fmt --check` clean.
 
 ## Submitting changes
 
 1. Branch off `master`, keep changes focused.
-2. Run `npx tsc --noEmit`, `npm run build`, the spike suites, and the
+2. Run `pnpm exec tsc --noEmit`, `pnpm run build`, the spike suites, and the
    e2e suites that touch your change.
 3. Commit with the repo identity: `termina <dev@termina.local>`.
 4. Open a pull request; describe what changed and what you verified.

@@ -74,7 +74,7 @@ notarized, so Gatekeeper opens them without warnings.
 After launching, run `/login` in the terminal to configure your model
 provider.
 
-**From source:** needs git, node ≥ 22.19, npm, and Rust/cargo. The installer
+**From source:** needs git, node ≥ 22.19, pnpm, and Rust/cargo. The installer
 uses the lockfile and builds the core from the checked-out source; it never
 downloads a standalone executable:
 
@@ -82,28 +82,28 @@ downloads a standalone executable:
 git clone https://github.com/Jesusz0r/termina.git
 cd termina
 ./scripts/install.sh
-npm run dev
+pnpm run dev
 ```
 
-**Contributors:** node + npm + cargo (the Rust core builds from `core/`):
+**Contributors:** node + pnpm + cargo (the Rust core builds from `core/`):
 
 ```bash
-npm install
-npm run dev   # builds the Rust core + main + preload, starts Vite, launches Electron
+pnpm install
+pnpm run dev   # builds the Rust core + main + preload, starts Vite, launches Electron
 ```
 
 ## Development
 
 ```bash
-npm run typecheck                   # tsc --noEmit
-npm run test:agent-core             # agent-core kernel harness tests (no Electron)
-npm run build                       # production build (Electron main + renderer)
-npm run spike -- capture            # one plain-node store spike suite
-npm run test:spikes                 # capture · merge · session-fork · platform · tree-delta
-node scripts/perf-baseline.mjs      # capture latency baselines
-node scripts/perf-compare.mjs       # compare a run against a baseline
-npm run test:e2e                    # the full Electron e2e matrix (fresh instances)
-npm test                            # typecheck + agent-core + build + spikes
+pnpm run typecheck                 # tsc --noEmit
+pnpm run test:agent-core           # agent-core kernel harness tests (no Electron)
+pnpm run build                     # production build (Electron main + renderer)
+pnpm run spike -- capture          # one plain-node store spike suite
+pnpm run test:spikes               # capture · merge · session-fork · platform · tree-delta
+node scripts/perf-baseline.mjs    # capture latency baselines
+node scripts/perf-compare.mjs     # compare a run against a baseline
+pnpm run test:e2e                  # the full Electron e2e matrix (fresh instances)
+pnpm test                          # typecheck + agent-core + build + spikes
 ```
 
 A new folder opens an **Agent (core)** tab. **Agent (pi)** remains in the

@@ -1,4 +1,6 @@
 node_modules/
+# npm is not the package manager; never track its lockfile.
+package-lock.json
 dist-electron/
 dist-renderer/
 *.log

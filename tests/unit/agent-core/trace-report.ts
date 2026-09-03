@@ -1469,7 +1469,7 @@ function defaultDirectories(env) {
 }
 
 function usage() {
-  return "usage: npm run report:agent-core -- [--json] [trace-directory ...]";
+  return "usage: pnpm run report:agent-core -- [--json] [trace-directory ...]";
 }
 
 export function run(argv = process.argv.slice(2), env = process.env) {

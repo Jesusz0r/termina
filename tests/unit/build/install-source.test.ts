@@ -32,11 +32,11 @@ describe("Source Installer Invariants", () => {
       if (repo) {
         mkdirSync(join(checkout, "core"), { recursive: true });
         writeFileSync(join(checkout, "package.json"), "{}\n");
-        writeFileSync(join(checkout, "package-lock.json"), "{}\n");
+        writeFileSync(join(checkout, "pnpm-lock.yaml"), "{}\n");
         writeFileSync(join(checkout, "core", "Cargo.toml"), "[package]\nname='fixture'\nversion='0.0.0'\n");
       }
       executable(join(bin, "node"), `printf 'node:%s:%s\\n' "$PWD" "$*" >> "$TERMINA_INSTALL_TEST_LOG"`);
-      executable(join(bin, "npm"), `printf 'npm:%s:%s:skip=%s\\n' "$PWD" "$*" "\${TERMINA_SKIP_CORE_BUILD-unset}" >> "$TERMINA_INSTALL_TEST_LOG"`);
+      executable(join(bin, "pnpm"), `printf 'pnpm:%s:%s:skip=%s\\n' "$PWD" "$*" "\${TERMINA_SKIP_CORE_BUILD-unset}" >> "$TERMINA_INSTALL_TEST_LOG"`);
       if (cargo) executable(join(bin, "cargo"), ":");
       return { root, checkout, bin, log };
     }
@@ -62,8 +62,8 @@ describe("Source Installer Invariants", () => {
       const result = runFixture(good);
       expect(result.status).toBe(0);
       const log = readFileSync(good.log, "utf8");
-      expect(log).toMatch(new RegExp(`npm:${good.checkout.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:ci`));
-      expect(log).toMatch(new RegExp(`npm:${good.checkout.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:run build:skip=unset`));
+      expect(log).toMatch(new RegExp(`pnpm:${good.checkout.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:install --frozen-lockfile`));
+      expect(log).toMatch(new RegExp(`pnpm:${good.checkout.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:run build:skip=unset`));
 
       const missingRepo = fixture("missing-repo", { repo: false });
       const missingRepoResult = runFixture(missingRepo);

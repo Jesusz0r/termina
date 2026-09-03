@@ -1,0 +1,9 @@
+allowBuilds:
+  '@google/genai': true
+  electron: true
+  electron-winstaller: true
+  esbuild: true
+  protobufjs: true
+
+overrides:
+  dompurify: 3.4.14

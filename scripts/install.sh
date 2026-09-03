@@ -4,7 +4,7 @@
 # Installs dependencies and builds the snapshot core from the reviewed source
 # checkout. Packaged releases remain the no-toolchain installation path.
 #
-# Requires node >= 22.19 (pi's engine), npm, and Rust/cargo.
+# Requires node >= 22.19 (pi's engine), pnpm, and Rust/cargo.
 set -eu
 
 case "$0" in
@@ -17,7 +17,7 @@ esac
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd)
-if [ ! -f "$REPO_ROOT/package.json" ] || [ ! -f "$REPO_ROOT/package-lock.json" ] || [ ! -f "$REPO_ROOT/core/Cargo.toml" ]; then
+if [ ! -f "$REPO_ROOT/package.json" ] || [ ! -f "$REPO_ROOT/pnpm-lock.yaml" ] || [ ! -f "$REPO_ROOT/core/Cargo.toml" ]; then
   echo "source installation must run from a checked-out Termina repository" >&2
   exit 1
 fi
@@ -29,8 +29,8 @@ if ! node -e 'const v = process.versions.node.split(".").map(Number); process.ex
   exit 1
 fi
 
-if ! command -v npm >/dev/null 2>&1; then
-  echo "npm is required" >&2
+if ! command -v pnpm >/dev/null 2>&1; then
+  echo "pnpm is required (https://pnpm.io/installation)" >&2
   exit 1
 fi
 if [ -n "${CARGO:-}" ]; then
@@ -44,15 +44,15 @@ elif ! command -v cargo >/dev/null 2>&1; then
 fi
 
 echo "installing locked app dependencies"
-npm ci
+pnpm install --frozen-lockfile
 
 echo "building Termina from the checked-out source"
 # Source installation must never inherit the packaged-build reuse escape.
 unset TERMINA_SKIP_CORE_BUILD
-npm run build
+pnpm run build
 
 echo
 echo "Termina installed. Start it with:"
-echo "  npm run dev"
+echo "  pnpm run dev"
 echo
 echo "Or install the packaged app from https://github.com/Jesusz0r/termina/releases"

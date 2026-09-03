@@ -9,6 +9,7 @@
   },
   "type": "module",
   "main": "dist-electron/main.mjs",
+  "packageManager": "pnpm@11.13.1",
   "scripts": {
     "dev": "node --experimental-strip-types scripts/dev.ts",
     "build": "node --experimental-strip-types scripts/build.ts && vite build",
@@ -47,18 +48,18 @@
     "test:worldline-project-ownership": "vitest run tests/unit/ui/worldline-project-ownership.test.ts",
     "test:worldline-recovery": "playwright test tests/e2e/worldlines.spec.ts",
     "test:release-workflow": "vitest run tests/unit/build/release-workflow.test.ts",
-    "test:promotion-native-boundary": "npm run spike -- promotion-native-boundary",
-    "test:release-macos": "npm run test:sandbox-security-live && npm run test:e2e-release-smoke",
-    "test:release": "npm run test && npm run test:release-core && npm run test:agent-core-main && npm run test:release-workflow",
-    "test": "npm run typecheck && npm run test:unit",
-    "test:spikes": "npm run spike -- capture && npm run spike -- merge && npm run spike -- session-fork && npm run spike -- platform && npm run spike -- tree-delta && npm run spike -- gitignore && npm run spike -- terminal-roster && npm run spike -- core-session-promotion && npm run spike -- promotion-transaction && npm run spike -- watcher-idle && npm run test:promotion-native-boundary",
+    "test:promotion-native-boundary": "pnpm run spike -- promotion-native-boundary",
+    "test:release-macos": "pnpm run test:sandbox-security-live && pnpm run test:e2e-release-smoke",
+    "test:release": "pnpm run test && pnpm run test:release-core && pnpm run test:agent-core-main && pnpm run test:release-workflow",
+    "test": "pnpm run typecheck && pnpm run test:unit",
+    "test:spikes": "pnpm run spike -- capture && pnpm run spike -- merge && pnpm run spike -- session-fork && pnpm run spike -- platform && pnpm run spike -- tree-delta && pnpm run spike -- gitignore && pnpm run spike -- terminal-roster && pnpm run spike -- core-session-promotion && pnpm run spike -- promotion-transaction && pnpm run spike -- watcher-idle && pnpm run test:promotion-native-boundary",
     "test:e2e": "playwright test",
     "test:e2e:cache-live": "playwright test tests/e2e/cache-trace.spec.ts --grep \"live Core cache probe\"",
     "test:e2e:watch": "playwright test --ui",
     "spike": "node --experimental-strip-types scripts/spike.ts",
-    "dist": "npm run build && node --experimental-strip-types scripts/prepare-resources.ts && electron-builder",
-    "dist:dir": "npm run build && node --experimental-strip-types scripts/prepare-resources.ts && electron-builder --dir",
-    "dist:mac": "npm run build && node --experimental-strip-types scripts/prepare-resources.ts && electron-builder --mac"
+    "dist": "pnpm run build && node --experimental-strip-types scripts/prepare-resources.ts && electron-builder",
+    "dist:dir": "pnpm run build && node --experimental-strip-types scripts/prepare-resources.ts && electron-builder --dir",
+    "dist:mac": "pnpm run build && node --experimental-strip-types scripts/prepare-resources.ts && electron-builder --mac"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.84.3",
@@ -78,8 +79,5 @@
     "typescript": "^5.8.0",
     "vite": "^7.0.0",
     "vitest": "^4.1.11"
-  },
-  "overrides": {
-    "dompurify": "3.4.14"
   }
 }

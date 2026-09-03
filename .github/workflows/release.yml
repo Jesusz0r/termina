@@ -20,13 +20,15 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22.23.2
-          cache: npm
+          cache: pnpm
       - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # v1.2.0
         with:
           toolchain: 1.97.1
-      - run: npm ci
-      - run: npm run build
-      - run: npm run test:release
+      # packageManager pins pnpm; corepack activates that exact version.
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - run: pnpm run test:release
 
   build:
     needs: test
@@ -51,19 +53,21 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22.23.2
-          cache: npm
+          cache: pnpm
       - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # v1.2.0
         with:
           toolchain: 1.97.1
-      - run: npm ci
-      - run: npx tsc --noEmit
+      # packageManager pins pnpm; corepack activates that exact version.
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec tsc --noEmit
       # Builds the Rust core, main + preload, and the renderer.
-      - run: npm run build
+      - run: pnpm run build
       # Stages the bundled node runtime and the core binary.
       - run: node --experimental-strip-types scripts/prepare-resources.ts
       - name: Run macOS release gate
         if: matrix.os == 'macos-15'
-        run: npm run test:release-macos
+        run: pnpm run test:release-macos
       - name: Package
         # Signs and notarizes when the Apple credentials exist as secrets;
         # otherwise the build stays unsigned. Retries once: the electron
@@ -75,9 +79,9 @@ jobs:
           if [ "$(uname -s)" = "Darwin" ] && [ -n "${CSC_LINK}" ] && [ -n "${APPLE_ID}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD}" ] && [ -n "${APPLE_TEAM_ID}" ]; then
             EXTRA="-c.mac.notarize=true"
           fi
-          npx electron-builder $EXTRA --publish never || {
+          pnpm exec electron-builder $EXTRA --publish never || {
             echo "Packaging failed; retrying once"
-            npx electron-builder $EXTRA --publish never
+            pnpm exec electron-builder $EXTRA --publish never
           }
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}

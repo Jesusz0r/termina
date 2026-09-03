@@ -41,8 +41,8 @@ describe("Test Infrastructure & Gate Invariants", () => {
   it("wires default and release graphs through canonical Vitest suites", () => {
     const scripts = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")).scripts;
     expect(scripts["test:agent-core-trace"]).toContain("tests/unit/agent-core/trace-*.test.ts");
-    expect(scripts["test"]).toContain("npm run test:unit");
-    expect(scripts["test:release"]).toContain("npm run test");
+    expect(scripts["test"]).toContain("pnpm run test:unit");
+    expect(scripts["test:release"]).toContain("pnpm run test");
   });
 
   it("wires ipc-navigation through its isolated E2E spec runner", () => {

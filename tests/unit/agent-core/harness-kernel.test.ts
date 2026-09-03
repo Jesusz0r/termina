@@ -3,7 +3,7 @@ import { describe, it, expect } from "vitest";
  * Kernel tests for agent-core harness upgrades.
  * No Electron, no API key, no scripts/build.mjs.
  *
- *   npm run test:agent-core
+ *   pnpm run test:agent-core
  */
 process.env.TERMINA_CORE_TEST = "1";
 

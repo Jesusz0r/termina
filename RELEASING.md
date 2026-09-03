@@ -111,4 +111,4 @@ them the builds stay unsigned.
   GitHub release. No other installation is needed; users run `/login`
   in the terminal to configure their model provider.
 - **From source:** `scripts/install.sh` downloads the prebuilt core and
-  runs `npm install`; no cargo and no git required.
+  runs `pnpm install`; no cargo and no git required.
