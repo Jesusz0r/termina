@@ -746,15 +746,23 @@ function activatePane(instanceId: string): void {
   removeSplash();
   activeId = instanceId;
   if (pane.projectId) lastActivePane.set(pane.projectId, instanceId);
+  // Scope to this project: background projects keep their own active tab so
+  // returning to them shows a pane instead of a blank frame (flicker).
   for (const p of panes.values()) {
+    if (p.projectId !== pane.projectId) continue;
     const on = p.instanceId === instanceId;
     p.container.classList.toggle("active", on);
     p.tabEl.classList.toggle("active", on);
-    if (on) p.container.style.display = "";
+    p.container.style.display = on ? "" : "none";
   }
   if (pendingActivateId === instanceId) pendingActivateId = null;
-  pane.view.fit();
+  // Measure after layout: fitting synchronously here reads the pre-toggle
+  // size, resizes the pty, then the ResizeObserver resizes again — that
+  // double SIGWINCH is the tab-switch flicker/size jump.
   pane.view.focus();
+  requestAnimationFrame(() => {
+    if (activeId === instanceId) pane.view.fit();
+  });
   renderChrome();
   renderTimeline();
   loadRuns(pane);
@@ -1582,7 +1590,11 @@ function fitPanes(): void {
   // frame at the old cell grid, then snaps — that is the occupancy flicker.
   void splitEl.getBoundingClientRect();
   activeEditor().layout();
-  for (const p of panes.values()) p.view.fit();
+  // Only the visible pane: hidden panes measure 0 and skip anyway, but
+  // fitting each of them on every layout change spams pty resizes when
+  // they become visible with stale grids. They fit on activation instead.
+  const active = activeId ? panes.get(activeId) : undefined;
+  if (active && active.projectId === activeProjectId) active.view.fit();
 }
 
 function setExplorerHidden(hidden: boolean): void {
