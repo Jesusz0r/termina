@@ -88,19 +88,30 @@ const rightPaneEl = document.getElementById("right-pane")!;
 // no-project boot). Project views take over once a folder opens.
 const baseEmptyEl = emptyTemplate.content.firstElementChild!.cloneNode(true) as HTMLElement;
 rightPaneEl.appendChild(baseEmptyEl);
-const baseEditor = new EditorManager(
-  document.getElementById("editor-container")!,
-  document.getElementById("editor-tabs")!,
-  baseEmptyEl,
-);
-baseEditor.onConflict = (path) => {
-  toast(`${pathBasename(path)} changed on disk — you have unsaved edits`, "warning");
-};
-applySharedEditorHooks(baseEditor);
-// The pre-project editor computes relative paths against the opened folder.
-baseEditor.projectRootProvider = () => projectCwd;
+
+let baseEditorInstance: InstanceType<typeof EditorManager> | null = null;
+function getBaseEditor(): InstanceType<typeof EditorManager> {
+  if (!baseEditorInstance) {
+    baseEditorInstance = new EditorManager(
+      document.getElementById("editor-container")!,
+      document.getElementById("editor-tabs")!,
+      baseEmptyEl,
+    );
+    baseEditorInstance.onConflict = (path) => {
+      toast(`${pathBasename(path)} changed on disk — you have unsaved edits`, "warning");
+    };
+    applySharedEditorHooks(baseEditorInstance);
+    baseEditorInstance.projectRootProvider = () => projectCwd;
+    applyEditorPreferences(baseEditorInstance, preferences);
+  }
+  return baseEditorInstance;
+}
+
 // The e2e suites drive the active editor through this hook.
-(window as unknown as Record<string, unknown>).__editorMgr = baseEditor;
+Object.defineProperty(window, "__editorMgr", {
+  get: () => activeEditor(),
+  configurable: true,
+});
 const projectTabsEl = document.getElementById("project-tabs")!;
 const btnNewProject = document.getElementById("btn-new-project") as HTMLButtonElement;
 
@@ -206,9 +217,7 @@ function activeEditor(): InstanceType<typeof EditorManager> {
   const view = activeProjectId ? projectViews.get(activeProjectId) : null;
   // Never open files in a hidden project editor. The first map entry can
   // be display:none while the base pane is what the user sees.
-  const editor = view?.editorMgr ?? baseEditor;
-  (window as unknown as Record<string, unknown>).__editorMgr = editor;
-  return editor;
+  return view?.editorMgr ?? getBaseEditor();
 }
 
 function placeEditorToggle(projectId: string | null): void {
@@ -232,10 +241,10 @@ function setActiveProject(projectId: string | null): void {
   baseContainer.style.display = noProject ? "" : "none";
   // The base overlay sits on #right-pane. Hide it while a project view is shown.
   if (!noProject) {
-    baseEditor.setProjectOpen(true);
+    baseEditorInstance?.setProjectOpen(true);
     baseEmptyEl.hidden = true;
   } else {
-    baseEditor.setProjectOpen(false);
+    getBaseEditor().setProjectOpen(false);
   }
   for (const item of projectViews.values()) {
     const active = item.id === activeProjectId;
@@ -539,7 +548,7 @@ function userPatch(prev: AppPreferences, next: AppPreferences): import("../share
 
 function paintPreferences(prefs: AppPreferences): void {
   document.documentElement.dataset.theme = prefs.theme;
-  applyEditorPreferences(baseEditor, prefs);
+  if (baseEditorInstance) applyEditorPreferences(baseEditorInstance, prefs);
   for (const view of projectViews.values()) applyEditorPreferences(view.editorMgr, prefs);
   reviewView.setTheme(prefs.theme);
   reviewView.setFontSize(prefs.editorFontSize);
@@ -1439,7 +1448,7 @@ window.pi.onProjectClosed(({ projectId, activationGeneration }) => {
   if (projectViews.size === 0) {
     projectCwd = null;
     explorer.setProject(null, null);
-    baseEditor.setProjectOpen(false);
+    getBaseEditor().setProjectOpen(false);
   }
 });
 btnNewProject.addEventListener("click", () => void window.pi.projectOpen());
@@ -2362,7 +2371,7 @@ window.pi.onFolderOpened((e) => {
     view.workspaceId = e.workspaceId;
     view.editorMgr.setProjectOpen(true, e.needsLogin);
   }
-  baseEditor.setProjectOpen(true);
+  baseEditorInstance?.setProjectOpen(true);
   setActiveProject(view.id);
   explorer.setProject(projectId, e.cwd);
   reviewView.resetForProject();

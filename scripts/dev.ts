@@ -16,52 +16,52 @@ patchBundleName();
 buildCore();
 
 const run = async () => {
-  await build({
-    bundle: true,
-    sourcemap: true,
-    target: "node22",
-    external: ["electron", "electron-updater", "@lydell/node-pty", "@lydell/node-pty-darwin-arm64", "@lydell/node-pty-win32-x64", "@lydell/node-pty-linux-x64"],
-    logLevel: "info",
-    entryPoints: ["electron/main.ts"],
-    platform: "node",
-    format: "esm",
-    outfile: "dist-electron/main.mjs",
-  });
-  await build({
-    bundle: true,
-    sourcemap: true,
-    target: "node22",
-    external: ["electron", "electron-updater", "@lydell/node-pty", "@lydell/node-pty-darwin-arm64", "@lydell/node-pty-win32-x64", "@lydell/node-pty-linux-x64"],
-    logLevel: "info",
-    entryPoints: ["electron/preload.ts"],
-    platform: "node",
-    format: "cjs",
-    outfile: "dist-electron/preload.cjs",
-  });
-
-  await build({
-    bundle: true,
-    sourcemap: true,
-    target: "node22",
-    external: ["electron", "@lydell/node-pty", "@lydell/node-pty-darwin-arm64", "@lydell/node-pty-win32-x64", "@lydell/node-pty-linux-x64", "@earendil-works/pi-coding-agent"],
-    logLevel: "info",
-    entryPoints: ["electron/session-worker.ts"],
-    platform: "node",
-    format: "esm",
-    outfile: "dist-electron/session-worker.mjs",
-  });
-
-  await build({
-    bundle: true,
-    sourcemap: true,
-    target: "node22",
-    external: ["electron", "@lydell/node-pty", "@lydell/node-pty-darwin-arm64", "@lydell/node-pty-win32-x64", "@lydell/node-pty-linux-x64", "@earendil-works/pi-coding-agent"],
-    logLevel: "info",
-    entryPoints: ["agent-core/main.ts"],
-    platform: "node",
-    format: "esm",
-    outfile: "dist-electron/agent-core.mjs",
-  });
+  await Promise.all([
+    build({
+      bundle: true,
+      sourcemap: true,
+      target: "node22",
+      external: ["electron", "electron-updater", "@lydell/node-pty", "@lydell/node-pty-darwin-arm64", "@lydell/node-pty-win32-x64", "@lydell/node-pty-linux-x64"],
+      logLevel: "info",
+      entryPoints: ["electron/main.ts"],
+      platform: "node",
+      format: "esm",
+      outfile: "dist-electron/main.mjs",
+    }),
+    build({
+      bundle: true,
+      sourcemap: true,
+      target: "node22",
+      external: ["electron", "electron-updater", "@lydell/node-pty", "@lydell/node-pty-darwin-arm64", "@lydell/node-pty-win32-x64", "@lydell/node-pty-linux-x64"],
+      logLevel: "info",
+      entryPoints: ["electron/preload.ts"],
+      platform: "node",
+      format: "cjs",
+      outfile: "dist-electron/preload.cjs",
+    }),
+    build({
+      bundle: true,
+      sourcemap: true,
+      target: "node22",
+      external: ["electron", "@lydell/node-pty", "@lydell/node-pty-darwin-arm64", "@lydell/node-pty-win32-x64", "@lydell/node-pty-linux-x64", "@earendil-works/pi-coding-agent"],
+      logLevel: "info",
+      entryPoints: ["electron/session-worker.ts"],
+      platform: "node",
+      format: "esm",
+      outfile: "dist-electron/session-worker.mjs",
+    }),
+    build({
+      bundle: true,
+      sourcemap: true,
+      target: "node22",
+      external: ["electron", "@lydell/node-pty", "@lydell/node-pty-darwin-arm64", "@lydell/node-pty-win32-x64", "@lydell/node-pty-linux-x64", "@earendil-works/pi-coding-agent"],
+      logLevel: "info",
+      entryPoints: ["agent-core/main.ts"],
+      platform: "node",
+      format: "esm",
+      outfile: "dist-electron/agent-core.mjs",
+    }),
+  ]);
 
   const server = await createServer({
     configFile: "vite.config.ts",

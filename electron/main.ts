@@ -516,6 +516,8 @@ let rendererLoadGenerationSeq = 0;
 class PiEditorApp {
   private win: BrowserWindow | null = null;
   private terminals = new Map<string, PiTerminalInstance>();
+  /** In-flight initial project/terminal restoration on app boot. */
+  private initialRestorePromise: Promise<void> | null = null;
   /** True only while the current renderer can consume pushed IPC. */
   private rendererReady = false;
   /** BrowserWindow identity and current renderer-document generations. */
@@ -2594,6 +2596,17 @@ class PiEditorApp {
     if (this.piAvailable === false && now - this.piCheckedAt < 5000) return false;
     this.piCheckedAt = now;
     const bin = this.resolvePiBin();
+    // Fast path: for pinned package or absolute path, verify file existence directly without spawning node.
+    if (isAbsolute(bin)) {
+      try {
+        if (existsSync(bin)) {
+          this.piAvailable = true;
+          return true;
+        }
+      } catch {
+        /* proceed to fallback */
+      }
+    }
     if (await this.spawnPiVersionCheck(bin)) {
       this.piAvailable = true;
       return true;
@@ -5994,6 +6007,7 @@ class PiEditorApp {
 
   /** Open or reactivate the project at a path (the dialog-free path). */
   async openProjectAt(cwd: string): Promise<{ cwd: string } | { cancelled: true }> {
+    if (this.initialRestorePromise) await this.initialRestorePromise;
     const rendererTarget = this.captureRendererSendTarget();
     // Reserve the selection slot before any path I/O. A later open/activate
     // action therefore fences this request even when canonicalPath resolves
@@ -6906,6 +6920,7 @@ class PiEditorApp {
 
     // ---- Project tabs ----
     ipcMain.handle("project:list", async () => {
+      if (this.initialRestorePromise) await this.initialRestorePromise;
       const needsLogin = await this.piNeedsLogin();
       return [...this.projects.values()].map((p) => ({
         id: p.id,
@@ -6917,8 +6932,12 @@ class PiEditorApp {
         activationGeneration: p.activationGeneration,
       }));
     });
-    ipcMain.handle("project:open", () => this.openFolder());
+    ipcMain.handle("project:open", async () => {
+      if (this.initialRestorePromise) await this.initialRestorePromise;
+      return this.openFolder();
+    });
     ipcMain.handle("project:open-path", async (_e, cwd: unknown) => {
+      if (this.initialRestorePromise) await this.initialRestorePromise;
       if (app.isPackaged && process.env.TERMINA_E2E !== "1") return { cancelled: true };
       if (typeof cwd !== "string") return { cancelled: true };
       try {
@@ -7113,7 +7132,8 @@ class PiEditorApp {
       if (typeof id !== "string" || !Number.isFinite(cols) || !Number.isFinite(rows)) return;
       this.terminals.get(id)?.pty.resize(Math.max(2, Math.floor(Number(cols))), Math.max(2, Math.floor(Number(rows))));
     });
-    ipcMain.handle("terminals:list", () => {
+    ipcMain.handle("terminals:list", async () => {
+      if (this.initialRestorePromise) await this.initialRestorePromise;
       this.sendInstances();
       return this.instanceList();
     });
@@ -7466,44 +7486,52 @@ class PiEditorApp {
     // the CLI extension option on every agent launch, with or without a
     // project folder.
     this.ensureAppBridge();
-    if (initialCwd) {
-      if (process.env.TERMINA_INITIAL_CWD && !cliTarget) {
-        await this.openProject(initialCwd);
+    // Open the window early so the user immediately sees the splash and UI skeleton.
+    await this.createWindow();
+    this.appUpdater.start();
+    this.initialRestorePromise = this.restoreInitialProjects(initialCwd, cliTarget);
+  }
+
+  /** Asynchronously restore open projects and their terminals on boot. */
+  private async restoreInitialProjects(initialCwd: string | null, cliTarget: string | null): Promise<void> {
+    try {
+      if (initialCwd) {
+        if (process.env.TERMINA_INITIAL_CWD && !cliTarget) {
+          await this.openProject(initialCwd);
+        } else {
+          const canonicalInitial = await this.canonicalPath(initialCwd);
+          for (const root of this.preferences.openProjects) {
+            try {
+              if (!statSync(root).isDirectory()) continue;
+              const canonicalRoot = await this.canonicalPath(root);
+              if (canonicalRoot === canonicalInitial) continue;
+              await this.openProject(root);
+            } catch {
+              continue;
+            }
+          }
+          await this.openProject(initialCwd);
+        }
       } else {
-        const canonicalInitial = await this.canonicalPath(initialCwd);
+        // Restore the projects from the last session before the window loads.
+        // Missing or non-directory paths are skipped: they may be unmounted
+        // volumes or hand-edited entries.
         for (const root of this.preferences.openProjects) {
           try {
             if (!statSync(root).isDirectory()) continue;
-            const canonicalRoot = await this.canonicalPath(root);
-            if (canonicalRoot === canonicalInitial) continue;
-            await this.openProject(root);
           } catch {
             continue;
           }
-        }
-        await this.openProject(initialCwd);
-      }
-    } else {
-      // Restore the projects from the last session before the window loads.
-      // Missing or non-directory paths are skipped: they may be unmounted
-      // volumes or hand-edited entries.
-      for (const root of this.preferences.openProjects) {
-        try {
-          if (!statSync(root).isDirectory()) continue;
-        } catch {
-          continue;
-        }
-        try {
-          await this.openProject(root);
-        } catch (err) {
-          console.warn(`[main] could not restore project ${root}: ${(err as Error).message}`);
+          try {
+            await this.openProject(root);
+          } catch (err) {
+            console.warn(`[main] could not restore project ${root}: ${(err as Error).message}`);
+          }
         }
       }
+    } finally {
+      this.sendInstances();
     }
-    await this.createWindow();
-    this.appUpdater.start();
-    // A normal launch has no folder. The renderer shows the open-folder
-    // placeholder until the user picks one. Tests set TERMINA_INITIAL_CWD.
   }
 
   /** Record the open projects so the next launch restores them. */
@@ -7608,6 +7636,9 @@ class PiEditorApp {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.initialRestorePromise) {
+      await this.initialRestorePromise.catch(() => undefined);
+    }
     // Shutdown is an intentional cancellation boundary: no queued bytes or
     // exit notifications may be delivered after the app has begun teardown.
     this.ptyEgress.dispose();
