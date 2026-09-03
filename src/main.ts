@@ -2399,6 +2399,10 @@ window.pi.onEvidenceUpdate((event) => {
 });
 
 window.pi.onInstances((list: InstanceSummary[]) => {
+  // Main normally removes a user-closed terminal from this authoritative list
+  // immediately. Also fence an older queued roster push so it cannot recreate
+  // the pane while the close IPC is in flight.
+  list = list.filter((instance) => !closingPanes.has(instance.id));
   handleWorldlineInstances(list, {
     paneById: (instanceId) => panes.get(instanceId),
     createPane: (instanceId) => createPaneShell(instanceId),
@@ -2478,14 +2482,8 @@ async function boot(attempt = 0): Promise<void> {
     }
 
     const instances = await window.pi.getInstances();
-    // A project with no terminals: show why the default agent failed. A
-    // launch with no folder stays on the open-folder placeholder.
-    if (instances.length === 0 && projects.length > 0) {
-      createErrorPane("no agent terminal started.");
-      window.pi.readyTerminal("renderer", 1);
-      removeSplash();
-      return;
-    }
+    // Zero terminals is valid: the user may have closed the project's last
+    // tab before quitting. Keep the project UI usable so they can add one.
     for (const inst of instances) {
       if (!panes.has(inst.id)) createPaneShell(inst.id);
       const pane = panes.get(inst.id);

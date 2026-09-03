@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 describe("IPC Capability & Project Flow Security Invariants", () => {
-  it("enforces all 22 renderer capability and project activation fences", async () => {
+  it("enforces renderer capability, project activation, and terminal restoration fences", async () => {
 /**
  * Deterministic source-level probes for the renderer capability and project
  * activation fences. The real Electron multiproject suite covers the public
@@ -235,7 +235,24 @@ check("close pushes advance the stale-event watermark", main.includes('this.send
 check("shared project contracts expose activation generations", types.includes("interface RendererIpcCapability")
   && types.includes("activationGeneration: number"));
 
-assert.equal(checks.length, 22);
+// An existing empty roster means the user closed the project's last terminal;
+// only a missing roster gets a first-launch default. Every restore is bound to
+// its project before createTerminal crosses asynchronous setup.
+check("empty terminal rosters survive restart", main.includes("{ exists: boolean; entries: TerminalRosterEntry[] }")
+  && main.includes("if (!loaded.exists)")
+  && main.includes("empty roster is the durable result"));
+check("restored terminals bind to their source project", main.includes("projectId: project.id")
+  && main.includes("workspaceId: this.primaryWorkspace(project)?.id"));
+
+// Closing is durable before PTY exit, and neither main nor a stale queued push
+// may advertise the closing process as a live pane.
+check("terminal close persists before process exit", main.includes("saveTerminalRoster excludes the now-closed live instance")
+  && main.includes("!inst?.persist || inst.closed")
+  && main.includes("this.saveTerminalRoster(owner)"));
+check("closing terminals cannot be rehydrated", main.includes("filter((t) => !t.closed)")
+  && renderer.includes("list.filter((instance) => !closingPanes.has(instance.id))"));
+
+assert.equal(checks.length, 26);
 
   });
 });

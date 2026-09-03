@@ -2688,15 +2688,18 @@ class PiEditorApp {
     return join(this.userDataDir, "terminal-rosters", `${this.sanitizeSessionDir(project.canonicalRoot)}.json`);
   }
 
-  private loadTerminalRoster(project: ProjectState): TerminalRosterEntry[] {
+  private loadTerminalRoster(project: ProjectState): { exists: boolean; entries: TerminalRosterEntry[] } {
+    const path = this.terminalRosterPath(project);
+    if (!existsSync(path)) return { exists: false, entries: [] };
     try {
-      const path = this.terminalRosterPath(project);
       const info = statSync(path);
-      if (!info.isFile() || info.size > MAX_ROSTER_BYTES) return [];
+      if (!info.isFile() || info.size > MAX_ROSTER_BYTES) return { exists: true, entries: [] };
       const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
-      return parseTerminalRoster(raw);
+      return { exists: true, entries: parseTerminalRoster(raw) };
     } catch {
-      return [];
+      // A present but unreadable roster must not be mistaken for first launch:
+      // doing so would create and persist a terminal the user did not request.
+      return { exists: true, entries: [] };
     }
   }
 
@@ -2713,7 +2716,7 @@ class PiEditorApp {
     const live: TerminalRosterEntry[] = [];
     for (const id of project.terminalIds) {
       const inst = this.terminals.get(id);
-      if (!inst?.persist) continue;
+      if (!inst?.persist || inst.closed) continue;
       live.push(this.rosterEntryFor(inst));
     }
     const entries = composeTerminalRoster(live, project.unrestoredTerminals);
@@ -2780,24 +2783,31 @@ class PiEditorApp {
     const out: PiTerminalInstance[] = [];
     for (const id of project.terminalIds) {
       const inst = this.terminals.get(id);
-      if (inst?.persist) out.push(inst);
+      if (inst?.persist && !inst.closed) out.push(inst);
     }
     return out;
   }
 
   private async restoreProjectTerminals(project: ProjectState): Promise<void> {
-    const roster = this.loadTerminalRoster(project);
-    if (roster.length === 0) {
-      try {
-        await this.createTerminal(project.cwd);
-      } catch {
-        /* Pi can be unavailable while the folder still opens. */
+    const loaded = this.loadTerminalRoster(project);
+    if (loaded.entries.length === 0) {
+      // Only a genuinely new project gets a default terminal. An existing
+      // empty roster is the durable result of closing the project's last tab.
+      if (!loaded.exists) {
+        try {
+          await this.createTerminal(project.cwd, {
+            projectId: project.id,
+            workspaceId: this.primaryWorkspace(project)?.id,
+          });
+        } catch {
+          /* The agent can be unavailable while the folder still opens. */
+        }
       }
       return;
     }
     const unrestored: TerminalRosterEntry[] = [];
     const spawned: { rec: TerminalRosterEntry; id: string }[] = [];
-    for (const rec of roster) {
+    for (const rec of loaded.entries) {
       this.noteTerminalId(rec.id);
       try {
         const inst = await this.createTerminal(project.cwd, {
@@ -2805,6 +2815,8 @@ class PiEditorApp {
           type: rec.type,
           engine: rec.engine,
           shell: rec.shell,
+          projectId: project.id,
+          workspaceId: this.primaryWorkspace(project)?.id,
           persist: true,
           skipRosterSave: true,
           resume: { sessionId: rec.sessionId ?? null, sessionFile: rec.sessionFile ?? null },
@@ -2818,13 +2830,9 @@ class PiEditorApp {
     for (const item of spawned) {
       if (!this.terminals.get(item.id)?.persist) unrestored.push(item.rec);
     }
-    if (this.persistLive(project).length === 0) {
-      try {
-        await this.createTerminal(project.cwd, { persist: true, skipRosterSave: true });
-      } catch {
-        /* Pi can be unavailable while the folder still opens. */
-      }
-    }
+    // A non-empty roster is authoritative. Do not replace failed restores
+    // with a fresh core tab: retaining both would make the old tab appear as
+    // a phantom if it becomes launchable on a later restart.
     project.unrestoredTerminals = unrestored;
     this.saveTerminalRoster(project);
   }
@@ -4266,9 +4274,31 @@ class PiEditorApp {
     // pty.onExit removes it from the map
   }
 
+  private closeUserTerminal(id: string): void {
+    const inst = this.terminals.get(id);
+    if (!inst || inst.closed) return;
+    const owner = this.projectOfTerminal(id);
+    this.closeTerminal(id);
+    // Persist the user's close intent immediately. Waiting for the process
+    // exit callback loses it when the app quits while PTY teardown is still
+    // in flight. saveTerminalRoster excludes the now-closed live instance.
+    if (inst.persist && owner && !this.projectIsSwitching(owner.id)) {
+      // Failed restores have no visible pane to close. Closing the last live
+      // tab is therefore also the only explicit way to clear those hidden
+      // retry entries and persist a genuinely empty project roster.
+      owner.unrestoredTerminals = this.persistLive(owner).length === 0
+        ? []
+        : owner.unrestoredTerminals.filter((entry) => entry.id !== id);
+      this.saveTerminalRoster(owner);
+    }
+    // Closed terminals remain in the process map until ordered PTY output
+    // drains, but must disappear from the authoritative renderer roster now.
+    this.sendInstances();
+  }
+
   private closeActiveTerminal(): void {
     const inst = this.activeProjectTerminals().at(-1);
-    if (inst) this.closeTerminal(inst.id);
+    if (inst) this.closeUserTerminal(inst.id);
   }
 
   private async abortActive(): Promise<void> {
@@ -4279,11 +4309,11 @@ class PiEditorApp {
   /** The terminals of the active project, in creation order. */
   private activeProjectTerminals(): PiTerminalInstance[] {
     const project = this.project();
-    return [...this.terminals.values()].filter((inst) => !project || project.terminalIds.has(inst.id));
+    return [...this.terminals.values()].filter((inst) => !inst.closed && (!project || project.terminalIds.has(inst.id)));
   }
 
   private instanceList(): InstanceSummary[] {
-    return [...this.terminals.values()].map((t) => ({
+    return [...this.terminals.values()].filter((t) => !t.closed).map((t) => ({
       id: t.id,
       generation: t.generation,
       cwd: t.cwd,
@@ -7081,7 +7111,7 @@ class PiEditorApp {
       if (typeof id !== "string" || typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 1) return;
       const inst = this.terminals.get(id);
       if (!inst || inst.generation !== generation) return;
-      this.closeTerminal(id);
+      this.closeUserTerminal(id);
     });
     ipcMain.handle("terminals:write", (_e, id: unknown, data: unknown) => {
       if (typeof id !== "string" || typeof data !== "string") return;
