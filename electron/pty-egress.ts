@@ -12,11 +12,9 @@
 export const PTY_EGRESS_CHUNK_BYTES = 64 * 1024;
 export const PTY_EGRESS_QUEUE_HIGH_WATER_BYTES = 2 * 1024 * 1024;
 export const PTY_EGRESS_QUEUE_HIGH_WATER_CHUNKS = 128;
-export const PTY_EGRESS_QUEUE_LOW_WATER_BYTES = Math.floor(PTY_EGRESS_QUEUE_HIGH_WATER_BYTES / 2);
-export const PTY_EGRESS_QUEUE_LOW_WATER_CHUNKS = Math.floor(PTY_EGRESS_QUEUE_HIGH_WATER_CHUNKS / 2);
 /** Maximum work sent by one scheduler turn before yielding to Electron. */
-export const PTY_EGRESS_BATCH_BYTES = 256 * 1024;
-export const PTY_EGRESS_BATCH_CHUNKS = 16;
+const PTY_EGRESS_BATCH_BYTES = 256 * 1024;
+const PTY_EGRESS_BATCH_CHUNKS = 16;
 
 /** Identity captured by a renderer lifecycle callback. */
 export interface PtyDocumentIdentity {

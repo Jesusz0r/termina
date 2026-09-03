@@ -14,10 +14,10 @@ import { cleanPlanPathToken, looksLikePath } from "./plan-board.ts";
 import { listCurrentSegments } from "../agent-core/session.ts";
 import type { CanonicalizePath, SessionHit } from "../shared/types.ts";
 
-export const MAX_SESSION_SEARCH_FILES = 50;
-export const MAX_SESSION_SEARCH_HITS = 50;
-export const MAX_SESSION_SEARCH_FILE_BYTES = 10 * 1024 * 1024;
-export const MAX_SESSION_SEARCH_LINES = 10_000;
+const MAX_SESSION_SEARCH_FILES = 50;
+const MAX_SESSION_SEARCH_HITS = 50;
+const MAX_SESSION_SEARCH_FILE_BYTES = 10 * 1024 * 1024;
+const MAX_SESSION_SEARCH_LINES = 10_000;
 
 export type SessionMessageParse = { role: string; text: string; paths: string[] };
 
@@ -106,11 +106,11 @@ export function sessionTimestampFromName(file: string): number {
   return Number.isFinite(ms) ? ms : 0;
 }
 
-export function sessionFileTime(fileName: string, mtimeMs: number): number {
+function sessionFileTime(fileName: string, mtimeMs: number): number {
   return sessionTimestampFromName(fileName) || mtimeMs;
 }
 
-export function formatSessionHitSnippet(role: string, text: string, matchIdx: number, matchLen: number): string {
+function formatSessionHitSnippet(role: string, text: string, matchIdx: number, matchLen: number): string {
   const prefix = `[${role}] `;
   if (text.length <= 300) return prefix + text;
   const start = Math.max(0, matchIdx - 60);
@@ -119,7 +119,7 @@ export function formatSessionHitSnippet(role: string, text: string, matchIdx: nu
   return prefix + snippet;
 }
 
-export async function resolveSessionHitPath(
+async function resolveSessionHitPath(
   parsed: SessionMessageParse,
   projectCwd: string,
   canonicalize: CanonicalizePath,

@@ -654,8 +654,6 @@ class PiEditorApp {
   private userEditsWriteTimer: ReturnType<typeof setTimeout> | null = null;
   /** Paths the promotion is applying right now (suppress user-edit records). */
   private promotionPaths: Set<string> | null = null;
-  /** Materialized exports retain their parent/leaf binding until cleanup. */
-  private exportedStateDirs = new Map<string, { ownerId: string; binding: BoundOwnedDirectory }>();
   /** Evidence homes retain the same provenance across the measurement. */
   private evidenceHomeDirs = new Map<string, BoundOwnedDirectory>();
   private static readonly USER_EDITS_MAX = 50;
@@ -6278,7 +6276,6 @@ class PiEditorApp {
         this.clearMailbox(id);
       }
       await this.teardownRecording(project, closingWorkspaceIds, closingIds);
-      await this.cleanupExportedStates(projectId);
       const projectIds = [...this.projects.keys()];
       const closingIndex = projectIds.indexOf(projectId);
       this.projects.delete(projectId);
@@ -6383,23 +6380,6 @@ class PiEditorApp {
     } catch {
       /* The events directory can be absent. */
     }
-  }
-
-  /** Remove the materialized export dirs. Pass a project id to remove only
-   *  that project's exports; no id removes every export (app quit). */
-  private async cleanupExportedStates(projectId?: string): Promise<void> {
-    const pending = [...this.exportedStateDirs.entries()]
-      .filter(([, entry]) => projectId === undefined || entry.ownerId === projectId);
-    await Promise.all(pending.map(async ([dir, entry]) => {
-      try {
-        await removeBoundOwnedDirectory({ binding: entry.binding });
-        this.exportedStateDirs.delete(dir);
-      } catch (error) {
-        // A replacement parent/leaf is retained rather than recursively
-        // deleting an object that no longer belongs to this export.
-        console.warn(`[main] exported state cleanup retained ${dir}: ${String(error)}`);
-      }
-    }));
   }
 
   /** Wait until the given killed terminals have exited. A terminal that
@@ -7031,10 +7011,6 @@ class PiEditorApp {
       }
     });
     ipcMain.handle("terminals:shells", () => detectShells());
-    ipcMain.handle("app:pi-status", async () => {
-      const available = await this.checkPiAvailable();
-      return { available, bin: this.resolvePiBin(), message: available ? undefined : this.piMissingMessage() };
-    });
     // PTY delivery control is deliberately a single typed preload path. The
     // sender and capability checks fence delayed messages from a renderer that
     // has crashed or been replaced, while the terminal generation fences id reuse.
@@ -7199,45 +7175,6 @@ class PiEditorApp {
     ipcMain.handle("worldline:open-terminal", (_e, comparisonId: string, label: "A" | "B") =>
       wlOf(comparisonId)?.openTerminal(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" },
     );
-    /** Materialize a run's start or settled state for inspection. */
-    ipcMain.handle("worldline:export-state", async (_e, runId: string, kind: "start" | "settled") => {
-      const project = this.projectForRun(runId);
-      const run = project?.worldlines?.runOf(runId);
-      if (!project || !run) return { ok: false, error: "run not found" };
-      const stateId = kind === "start" ? run.startStateId : run.settledStateId;
-      if (!stateId) return { ok: false, error: `no ${kind} state` };
-      const store = await project.storePromise;
-      if (!store) return { ok: false, error: "recording is not available" };
-      let dir: string | null = null;
-      try {
-        const tempRoot = app.getPath("temp");
-        const tempInfo = await lstat(tempRoot, { bigint: true });
-        if (!tempInfo.isDirectory() || tempInfo.isSymbolicLink()) throw new Error("temporary export root is not a real directory");
-        const tempBinding = await boundPromotionOpenDirectory({
-          path: tempRoot,
-          expectedIdentity: { dev: String(tempInfo.dev), ino: String(tempInfo.ino) },
-        });
-        const binding = await createOwnedDirectory(tempRoot, tempBinding, "termina-state-");
-        dir = binding.path;
-        this.exportedStateDirs.set(dir, { ownerId: project.id, binding });
-        await store.materialize(stateId, dir, { boundRootIdentity: binding.identity });
-        return { ok: true, dir };
-      } catch (err) {
-        if (dir) {
-          const entry = this.exportedStateDirs.get(dir);
-          if (entry) {
-            try {
-              await removeBoundOwnedDirectory({ binding: entry.binding });
-              this.exportedStateDirs.delete(dir);
-            } catch (cleanupError) {
-              console.warn(`[main] failed to clean rejected export ${dir}: ${String(cleanupError)}`);
-            }
-          }
-        }
-        return { ok: false, error: (err as Error).message };
-      }
-    });
-
     // ---- Editor flush (run-start preflight) ----
     ipcMain.handle("editor:flush-report", (_e, requestId: unknown, result: unknown) => {
       if (typeof requestId !== "string") return;
@@ -7264,12 +7201,6 @@ class PiEditorApp {
       } catch (err) {
         return { ok: false, error: (err as Error).message };
       }
-    });
-    ipcMain.handle("terminals:abort", (_e, id: string) => {
-      const inst = this.terminals.get(id);
-      if (!inst) return;
-      inst.interruptedAt = Date.now();
-      inst.pty.interrupt();
     });
 
     // ---- Verify & Iterate ----
@@ -7701,7 +7632,6 @@ class PiEditorApp {
     // silently retain every finalized Pi branch at app shutdown.
     await Promise.all([...this.projects.values()].map((project) => project.worldlines?.dispose().catch(() => undefined) ?? Promise.resolve()));
     await this.sessionFork.dispose();
-    await this.cleanupExportedStates();
     for (const [path, binding] of [...this.evidenceHomeDirs]) {
       if (await this.removeEvidenceHome(path)) continue;
       // The failed identity proof intentionally retains the replacement.

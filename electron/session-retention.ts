@@ -47,7 +47,7 @@ import {
 export const MAX_RETAINED_SESSION_BUNDLES = 128;
 export const MAX_RETAINED_SESSION_BYTES = 4 * 1024 * 1024 * 1024;
 export const MAX_RETAINED_SESSION_BUNDLE_BYTES = 64 * 1024 * 1024;
-export const RETAINED_SESSION_ROOT_MARKER = ".termina-retained-session-root";
+const RETAINED_SESSION_ROOT_MARKER = ".termina-retained-session-root";
 /** Atomic per-root usage ledger. The file itself is never counted as evidence. */
 export const RETAINED_SESSION_USAGE_LEDGER = ".termina-retained-session-usage.json";
 

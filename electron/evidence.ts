@@ -152,7 +152,7 @@ export function dependencyDiff(baseText: string, headText: string): { added: str
 }
 
 /** The public roots of a package (exports values plus main). */
-export function publicRoots(pkgText: string): string[] {
+function publicRoots(pkgText: string): string[] {
   try {
     const pkg = JSON.parse(pkgText) as { main?: unknown; exports?: unknown };
     const out = new Set<string>();
@@ -171,7 +171,7 @@ export function publicRoots(pkgText: string): string[] {
 }
 
 /** Normalize a declaration file: strip comments, trim, drop blank lines. */
-export function normalizeSignature(text: string): string {
+function normalizeSignature(text: string): string {
   const lines = text
     .split("\n")
     .map((l) => l.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/, "").replace(/\s+$/g, ""))
@@ -180,7 +180,7 @@ export function normalizeSignature(text: string): string {
 }
 
 /** The declared dependency names of a package text. */
-export function declaredNames(pkgText: string): Set<string> {
+function declaredNames(pkgText: string): Set<string> {
   const names = new Set<string>();
   for (const section of Object.values(parseDeps(pkgText))) {
     for (const name of Object.keys(section)) names.add(name);
@@ -215,7 +215,7 @@ const NODE_BUILTINS = new Set([
   "node:trace_events", "node:tty", "node:wasi", "node:diagnostics_channel", "node:test", "node:sea", "node:sqlite",
 ]);
 
-export function referencedPackages(sourceFiles: Array<{ relPath: string; content: string }>): Set<string> {
+function referencedPackages(sourceFiles: Array<{ relPath: string; content: string }>): Set<string> {
   const refs = new Set<string>();
   for (const f of sourceFiles) {
     if (!/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(f.relPath)) continue;
@@ -735,7 +735,7 @@ export interface TrajectorySignals {
  * Parse one sidecar text. Counts the last agent_start run. Shell
  * commands are not logged; a missing test label is not a fail.
  */
-export function parseTrajectoryLog(text: string, testLabel: string | null): TrajectorySignals {
+function parseTrajectoryLog(text: string, testLabel: string | null): TrajectorySignals {
   const lines = text.split("\n");
   let start = 0;
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -801,7 +801,7 @@ function trajectoryReason(parsed: TrajectorySignals): string {
 }
 
 /** Parse one "name value unit" line from a benchmark run. */
-export function parseBenchmarkValue(stdout: string, unit: string): number | null {
+function parseBenchmarkValue(stdout: string, unit: string): number | null {
   for (const line of stdout.split("\n")) {
     const m = /^\s*[\w./-]+\s+([0-9.]+)\s*([a-zA-Z]+)?\s*$/.exec(line);
     if (!m) continue;

@@ -5,7 +5,7 @@ export const PLAN_HEADING_MARKER = String.raw`(?:#{1,6}[ \t]+)?plan[ \t]*:?[ \t]
 export const PLAN_TASK_MARKER = String.raw`(?:[-*+]|\d+[.)])[ \t]+(?:\[([ xX])\][ \t]*)?`;
 
 /** A checkbox task item specifically (e.g. - [ ] task). */
-export const CHECKBOX_TASK_MARKER = String.raw`(?:[-*+]|\d+[.)])[ \t]+\[([ xX])\][ \t]*`;
+const CHECKBOX_TASK_MARKER = String.raw`(?:[-*+]|\d+[.)])[ \t]+\[([ xX])\][ \t]*`;
 
 /** An explicit Plan heading followed by task items, or a checkbox task item. */
 export const HAS_PLAN_TASK = new RegExp(

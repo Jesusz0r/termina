@@ -23,8 +23,8 @@ const REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
  * ambiguous and a bounded queue must fail closed rather than grow forever.
  */
 export const CORE_REQUEST_QUEUE_HIGH_WATER_ITEMS = 64;
-export const CORE_REQUEST_QUEUE_HIGH_WATER_BYTES = 32 * 1024 * 1024;
-export const CORE_REQUEST_IN_FLIGHT_HIGH_WATER = 1;
+const CORE_REQUEST_QUEUE_HIGH_WATER_BYTES = 32 * 1024 * 1024;
+const CORE_REQUEST_IN_FLIGHT_HIGH_WATER = 1;
 
 /** Retain only enough core stderr for a useful failure diagnostic. */
 const STDERR_TAIL_BYTES = 8 * 1024;

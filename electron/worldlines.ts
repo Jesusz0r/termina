@@ -340,7 +340,7 @@ const MAX_PROMOTION_JOURNAL_OVERHEAD_BYTES = 32 * 1024 * 1024;
 const MAX_PROMOTION_OPERATION_BYTES = MAX_TEMPLATE_BYTES * 2 + MAX_SESSION_BYTES + MAX_PROMOTION_JOURNAL_OVERHEAD_BYTES;
 const MAX_PROMOTION_JOURNAL_ROOT_ENTRIES = MAX_PROMOTION_JOURNALS * 4;
 /** Durable, root-scoped admission state for promotion journals. */
-export const PROMOTION_JOURNAL_USAGE_LEDGER = ".termina-promotion-journal-usage.json";
+const PROMOTION_JOURNAL_USAGE_LEDGER = ".termina-promotion-journal-usage.json";
 const PROMOTION_JOURNAL_USAGE_LEDGER_VERSION = 1;
 /** Uncertain comparisons are recovery evidence; never auto-delete at this bound. */
 const MAX_UNCERTAIN_COMPARISONS = 128;
@@ -5643,7 +5643,7 @@ async function copyBoundPrivateFile(
 }
 
 /** Create every missing tail component below a read-only discovered root. */
-export async function ensureBoundDirectory(
+async function ensureBoundDirectory(
   path: string,
   field: string,
   provenanceDirectory?: BoundPromotionDirectory,

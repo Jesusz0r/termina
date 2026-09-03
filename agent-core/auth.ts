@@ -35,7 +35,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { TextDecoder } from "node:util";
 import { readSystemProcessIdentity } from "../shared/process-identity.js";
 
-export const SUPPORTED_PROVIDERS = [
+const SUPPORTED_PROVIDERS = [
   "anthropic",
   "openai",
   "openai-codex",
@@ -136,7 +136,7 @@ export const AUTH_PROVIDER_ORDER: ProviderId[] = [
 export type LoginKind = "oauth" | "key";
 
 /** One row per login method. `/login openai oauth` is Codex; `/login openai key` is the API key. */
-export const LOGIN_METHODS: {
+const LOGIN_METHODS: {
   group: string;
   id: ProviderId;
   kind: LoginKind;
@@ -160,7 +160,7 @@ export const LOGIN_METHODS: {
 ];
 
 /** OAuth rows use the provider name. API-key rows add (key). */
-export function loginPickerLabel(method: { name: string; kind: LoginKind }): string {
+function loginPickerLabel(method: { name: string; kind: LoginKind }): string {
   return method.kind === "key" ? `${method.name} (key)` : method.name;
 }
 
@@ -186,7 +186,7 @@ function loginKindFromWord(word: string): LoginKind | null {
   return null;
 }
 
-export function resolveLoginPick(
+function resolveLoginPick(
   groupOrId: string,
   kindWord?: string,
 ): { provider: ProviderId; mode: LoginMode } | { error: string } {

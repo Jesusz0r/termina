@@ -232,7 +232,7 @@ export const THEME_IDS = ["dark", "light", "high-contrast", "atom"] as const;
 export type ThemeId = (typeof THEME_IDS)[number];
 
 /** Fallback stack used when a chosen family is missing on the machine. */
-export const DEFAULT_CODE_FONT_STACK = "'Departure Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
+const DEFAULT_CODE_FONT_STACK = "'Departure Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
 
 /** Named families the settings window offers. Empty means the default stack. */
 export const CODE_FONT_FAMILIES = [
@@ -540,7 +540,6 @@ export interface PiBridge {
   // terminals (agent = pi TUI, shell = a real shell like zsh)
   createTerminal(opts?: { type?: "agent" | "shell"; shell?: string; engine?: "pi" | "core"; fromTerminalId?: string; projectId?: string }): Promise<{ ok: boolean; id?: string; error?: string }>;
   getShells(): Promise<{ name: string; path: string }[]>;
-  getPiStatus(): Promise<{ available: boolean; bin: string; message?: string }>;
   /** Complete the renderer-side pane hydration fence for this PTY generation. */
   readyTerminal(id: string, generation: number): void;
   /** Retire one PTY sequence after xterm has consumed it. */
@@ -549,7 +548,6 @@ export interface PiBridge {
   writeTerminal(id: string, data: string): Promise<void>;
   resizeTerminal(id: string, cols: number, rows: number): Promise<void>;
   getInstances(): Promise<InstanceSummary[]>;
-  abortTerminal(id: string): Promise<void>; // sends Ctrl+C into the pty
   writeClipboard(text: string): Promise<{ ok: boolean; error?: string }>;
   readClipboard(): Promise<string>;
   editClipboard(command: "copy" | "paste"): Promise<void>;
@@ -589,8 +587,6 @@ export interface PiBridge {
   getWorldlineFile(comparisonId: string, label: "A" | "B", relPath: string): Promise<{ ok: boolean; content?: string; error?: string }>;
   /** Read one file from the comparison base (shared by A and B). */
   getWorldlineBaseFile(comparisonId: string, relPath: string): Promise<{ ok: boolean; content?: string; error?: string }>;
-  /** Materialize a run's start or settled source state for inspection. */
-  exportState(runId: string, kind: "start" | "settled"): Promise<{ ok: boolean; dir?: string; error?: string }>;
   /** The renderer's answer to a flush request. */
   reportFlush(requestId: string, result: { ok: boolean; failed: string[] }): Promise<void>;
   /** Save a dirty model on behalf of the write-lease holder (the flush). */

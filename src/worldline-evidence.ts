@@ -1,6 +1,6 @@
 import type { EvidenceRecord, EvidenceSummary, ProfileVerdict } from "../shared/types";
 
-export const PROFILE_LABEL: Record<ProfileVerdict["profile"], string> = {
+const PROFILE_LABEL: Record<ProfileVerdict["profile"], string> = {
   "fewer-dependencies": "fewer deps",
   "preserve-api": "api",
   "simpler-implementation": "footprint",

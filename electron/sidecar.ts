@@ -13,16 +13,16 @@ import { basename, dirname, join } from "node:path";
 export const MAX_SIDECAR_BYTES = 8 * 1024 * 1024;
 /** A complete JSONL record may span bounded tail reads, but never grows
  *  without a decision. Records above this cap are explicitly skipped. */
-export const MAX_SIDECAR_RECORD_BYTES = MAX_SIDECAR_BYTES;
-export const SIDECAR_TAIL_READ_BYTES = 1024 * 1024;
+const MAX_SIDECAR_RECORD_BYTES = MAX_SIDECAR_BYTES;
+const SIDECAR_TAIL_READ_BYTES = 1024 * 1024;
 /** Producer-side flow-control marker; writers wait while it exists. */
-export const SIDECAR_BACKPRESSURE_FILE_PREFIX = ".backpressure-";
+const SIDECAR_BACKPRESSURE_FILE_PREFIX = ".backpressure-";
 /** Terminal-local fail-closed admission marker for unrecoverable legacy ABA. */
-export const SIDECAR_QUARANTINE_FILE_PREFIX = ".quarantine-";
+const SIDECAR_QUARANTINE_FILE_PREFIX = ".quarantine-";
 /** Legacy tailer-owned suffix. It is read for compatibility but never retired. */
-export const SIDECAR_ROTATED_FILE_SUFFIX = ".segment";
+const SIDECAR_ROTATED_FILE_SUFFIX = ".segment";
 /** Canonical writer-owned sealed generation suffix. */
-export const SIDECAR_SEALED_FILE_SUFFIX = ".sealed";
+const SIDECAR_SEALED_FILE_SUFFIX = ".sealed";
 /** Marker published by a canonical writer after it has closed the old
  * pathname and created the next active inode.  A sealed generation without
  * this marker is legacy/unproven and must retain an inode anchor. */
@@ -99,9 +99,9 @@ export type AgentStartEvent = Extract<SidecarEvent, { t: "agent_start" }>;
  * replace adjacent progress snapshots, but a full queue rejects admission so
  * the tailer can leave the record on disk and retry it later.
  */
-export const SIDECAR_EVENT_QUEUE_HIGH_WATER_ITEMS = 256;
-export const SIDECAR_EVENT_QUEUE_HIGH_WATER_BYTES = 32 * 1024 * 1024;
-export const SIDECAR_EVENT_QUEUE_IN_FLIGHT_HIGH_WATER = 1;
+const SIDECAR_EVENT_QUEUE_HIGH_WATER_ITEMS = 256;
+const SIDECAR_EVENT_QUEUE_HIGH_WATER_BYTES = 32 * 1024 * 1024;
+const SIDECAR_EVENT_QUEUE_IN_FLIGHT_HIGH_WATER = 1;
 
 export type SidecarEventClass = "boundary" | "replaceable";
 
@@ -112,7 +112,7 @@ const REPLACEABLE_SIDECAR_KINDS = new Set<SidecarEvent["t"]>([
   "plan",
 ]);
 
-export function sidecarEventClass(event: SidecarEvent): SidecarEventClass {
+function sidecarEventClass(event: SidecarEvent): SidecarEventClass {
   return REPLACEABLE_SIDECAR_KINDS.has(event.t) ? "replaceable" : "boundary";
 }
 

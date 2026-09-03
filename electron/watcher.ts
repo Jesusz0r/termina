@@ -49,9 +49,9 @@ const MAX_FILE_SIZE = 2 * 1024 * 1024; // do not read huge files into Monaco
 const DEBOUNCE_MS = 120;
 
 /** Admission bounds for pending watcher paths and callback fanout. */
-export const WATCHER_EVENT_QUEUE_HIGH_WATER_ITEMS = 2000;
-export const WATCHER_EVENT_QUEUE_HIGH_WATER_BYTES = 4 * 1024 * 1024;
-export const WATCHER_EVENT_IN_FLIGHT_HIGH_WATER = 8;
+const WATCHER_EVENT_QUEUE_HIGH_WATER_ITEMS = 2000;
+const WATCHER_EVENT_QUEUE_HIGH_WATER_BYTES = 4 * 1024 * 1024;
+const WATCHER_EVENT_IN_FLIGHT_HIGH_WATER = 8;
 
 export interface ProjectWatcherAdmissionLimits {
   maxPendingItems?: number;
