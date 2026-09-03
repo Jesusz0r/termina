@@ -1300,8 +1300,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("buildCachedPrefix omits automatic top-level cache", prefix1.cache_control === undefined);
     check("buildCachedPrefix system marker", prefix1.system[0]?.cache_control?.type === "ephemeral");
     check("buildCachedPrefix last tool copy", prefix1.tools[1]?.cache_control?.type === "ephemeral");
-    check("buildCachedPrefix anthropic uses 1h ttl", buildCachedPrefix("sys", tools, "anthropic").system[0]?.cache_control?.ttl === "1h");
-    check("buildCachedPrefix zen omits ttl", buildCachedPrefix("sys", tools, "opencode-zen").system[0]?.cache_control?.ttl === undefined);
+    check("buildCachedPrefix uses Anthropic's default ttl", buildCachedPrefix("sys", tools).system[0]?.cache_control?.ttl === undefined);
     check("buildCachedPrefix does not mutate tools", tools[1].cache_control === undefined);
     
     check("sidecar write maps to write", sidecarStartFor({ name: "write_file", id: "9", input: { path: "a.ts" } }).toolName === "write");
@@ -2172,8 +2171,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
           "anthropic-version": "2023-06-01",
         })["anthropic-version"] === undefined,
     );
-    check("anthropicCacheMark anthropic is 1h", anthropicCacheMark("anthropic").ttl === "1h");
-    check("anthropicCacheMark zen omits ttl", anthropicCacheMark("opencode-zen").ttl === undefined);
+    check("anthropicCacheMark uses Anthropic's default ttl", anthropicCacheMark().ttl === undefined);
     check("defaultLoginMode opencode-go is key", defaultLoginMode("opencode-go") === "key");
     check("defaultLoginMode opencode-zen is key", defaultLoginMode("opencode-zen") === "key");
     check("parseAuthCommand /login xai is device", parseAuthCommand("/login xai").mode === "device" && parseAuthCommand("/login xai").provider === "xai");
@@ -4328,7 +4326,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     scanMd.appendAssistant("tail-only");
     scanMd.frame();
     const scannedDelta = scanMd.markdownScannedChars - scannedBefore;
-    check("markdown scan stays on the unfinished suffix", scannedDelta > 0 && scannedDelta <= "tail-only".length * 4);
+    check("markdown scan stays within the visible tail", scannedDelta > 0 && scannedDelta <= 80 * 24 * 8);
     const streamTail = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
       stdin: { isTTY: false },

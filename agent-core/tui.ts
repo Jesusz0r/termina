@@ -364,7 +364,9 @@ function forEachGrapheme(text: string, visit: (grapheme: string) => boolean | vo
 
 export function splitGraphemes(text: string): string[] {
   const out: string[] = [];
-  forEachGrapheme(text, (grapheme) => out.push(grapheme));
+  forEachGrapheme(text, (grapheme) => {
+    out.push(grapheme);
+  });
   return out;
 }
 
