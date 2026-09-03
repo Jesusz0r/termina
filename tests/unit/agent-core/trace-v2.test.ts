@@ -50,6 +50,7 @@ describe("Agent Core Trace V2 Invariants", () => {
       sessionLengthBucket = null,
       missPrimary = null,
       missContributors = [],
+      missGapMs = null,
       toolOutcomes = [],
       reclaimEvidence = null,
     }) {
@@ -114,7 +115,9 @@ describe("Agent Core Trace V2 Invariants", () => {
           },
           retryPromptIdentical,
           codexTurnStateUsed: false,
-          miss: missPrimary === null ? null : { primary: missPrimary, contributors: missContributors },
+          miss: missPrimary === null && missGapMs === null
+            ? null
+            : { primary: missPrimary, contributors: missContributors, gapMs: missGapMs },
         },
         revisions: { count: 0, kinds: [] },
         toolOutcomes,
@@ -154,6 +157,7 @@ describe("Agent Core Trace V2 Invariants", () => {
         markerCount: 0,
         markerPositions: [],
         retryPromptIdentical: true,
+        missGapMs: 60_000,
       }),
       // The final main attempt succeeds with an effective explicit policy.
       attempt({
@@ -174,6 +178,7 @@ describe("Agent Core Trace V2 Invariants", () => {
         sessionLengthBucket: "short",
         missPrimary: "working-set",
         missContributors: ["stable-prefix", "working-set"],
+        missGapMs: 10 * 60 * 1000,
         toolOutcomes: [
           { name: "read_file", status: "ok", complete: true, bytes: 10 },
           { name: "edit", status: "truncated", complete: false, bytes: 20 },
@@ -224,6 +229,7 @@ describe("Agent Core Trace V2 Invariants", () => {
         markerCount: null,
         markerPositions: [],
         sessionLengthBucket: "long",
+        missGapMs: 2 * 60 * 60 * 1000,
       }),
       {
         schemaVersion: 2,
@@ -338,6 +344,32 @@ describe("Agent Core Trace V2 Invariants", () => {
       assert.equal(report.usage.main.partialSamples, 1);
       assert.equal(report.usage.main.unknownSamples, 1);
       assert.equal(report.usage.main.cachedInputShare, 70 / 285);
+      assert.deepEqual(report.usage.cold, {
+        turns: 1,
+        completeSamples: 0,
+        partialSamples: 1,
+        unknownSamples: 0,
+        input: 100,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalInput: 0,
+        cachedInputShare: null,
+      });
+      assert.equal(report.usage.warm.turns, 3);
+      assert.equal(report.usage.warm.cachedInputShare, 70 / 285);
+      assert.deepEqual(report.cache.idleGaps, {
+        transitions: 3,
+        known: 3,
+        unknown: 0,
+        within5Minutes: 1,
+        between5MinutesAnd1Hour: 1,
+        over1Hour: 1,
+        ttlComparison: {
+          fiveMinuteEligibleTransitions: 1,
+          oneHourEligibleTransitions: 2,
+          oneHourOnlyTransitions: 1,
+        },
+      });
     }, failures);
     check("unknown cost and price provenance are explicit", () => {
       assert.deepEqual(report.cost.main, {

@@ -3593,6 +3593,7 @@ function cachePolicyFromBody(
   const effectiveMode = requestedMode;
   let requestedTtlMs: number | null = null;
   if (hasExplicitOptions && (options as Record<string, unknown>).ttl === "30m") requestedTtlMs = 30 * 60 * 1000;
+  else if (identity.provider === "anthropic" && markers.count > 0) requestedTtlMs = markers.ttlMs ?? 5 * 60 * 1000;
   else if (markers.ttlMs !== null) requestedTtlMs = markers.ttlMs;
   const effectiveTtlMs = fallbackReason ? null : requestedTtlMs;
   const retentionKnown =
@@ -4751,22 +4752,21 @@ export const WEB_SEARCH_TOOL = {
   max_uses: 5,
 } as const;
 
-export type AnthropicCacheMark = { type: "ephemeral"; ttl?: "1h" };
+export type AnthropicCacheMark = { type: "ephemeral" };
 
-/** 1-hour TTL is emitted only on the direct Anthropic route. Other routes do not use markers by default. */
-export function anthropicCacheMark(provider: ProviderId): AnthropicCacheMark {
-  return provider === "anthropic" ? { type: "ephemeral", ttl: "1h" } : { type: "ephemeral" };
+/** Anthropic's default five-minute TTL is sliding and avoids the 1-hour write premium. */
+export function anthropicCacheMark(): AnthropicCacheMark {
+  return { type: "ephemeral" };
 }
 
 export function buildCachedPrefix(
   system: string,
   tools: Array<Record<string, unknown>>,
-  provider: ProviderId = "anthropic",
 ): {
   system: Array<{ type: "text"; text: string; cache_control: AnthropicCacheMark }>;
   tools: Array<Record<string, unknown> & { cache_control?: AnthropicCacheMark }>;
 } {
-  const mark = anthropicCacheMark(provider);
+  const mark = anthropicCacheMark();
   // Anthropic permits at most four explicit breakpoints. The system marker
   // consumes one, leaving three for tools. Preserve existing markers in
   // discovery order and only add the final-tool marker when budget remains.
@@ -4799,9 +4799,8 @@ const HISTORY_CACHE_BLOCKS = new Set(["text", "tool_result", "image"]);
  *  tool_use. Only the provider's documented 20-block lookback is eligible. */
 export function stampHistoryCache(
   messages: Array<{ role: string; content: unknown }>,
-  provider: ProviderId = "anthropic",
 ): Array<{ role: string; content: unknown }> {
-  const mark = anthropicCacheMark(provider);
+  const mark = anthropicCacheMark();
   let lookback = 20;
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]!;
@@ -6147,7 +6146,7 @@ async function callModel(
   const proto = providerProtocol(route.provider, route.model);
   const anthropicCacheSupported = cacheCapabilitySupported(route.provider, route.model, CACHE_CAPABILITY_FEATURE.anthropicCacheControl);
   const prefix = anthropicCacheSupported
-    ? buildCachedPrefix(sys, clientTools, route.provider)
+    ? buildCachedPrefix(sys, clientTools)
     : { system: [{ type: "text", text: sys }], tools: clientTools.map((tool) => ({ ...tool })) };
   const imageRoots = [sessionFile ? dirname(sessionFile) : "", eventsDir].filter(Boolean);
   const persistedProjection = projectRequest({ messages, imageRoots, overlay: null });
@@ -6158,7 +6157,7 @@ async function callModel(
     : 0;
   const stampedMessages =
     proto === "anthropic-messages" && anthropicCacheSupported && prefixMarkerCount < 4
-      ? stampHistoryCache(persistedMessages, route.provider)
+      ? stampHistoryCache(persistedMessages)
       : persistedMessages;
   const providerMessages = appendRequestOverlay(stampedMessages as RequestMessage[], overlay);
   const kernelMessages = providerMessages.map((m) => ({

@@ -661,15 +661,30 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       const openai = compat.responsesBody(
         "gpt-5.6-sol",
         "sys",
-        [{ role: "user", content: "stable" }, { role: "user", content: "tail" }],
+        ["one", "two", "three", "four", "five"].map((content) => ({ role: "user" as const, content })),
         [],
         { ...opts, provider: "openai" },
       );
       assert.equal(openai.prompt_cache_key, opts.cacheKey);
       assert.equal(openai.prompt_cache_options?.mode, "explicit");
-      assert.equal(openai.input.at(-1)?.content?.[0]?.prompt_cache_breakpoint?.mode, "explicit");
+      assert.deepEqual(
+        openai.input.map((item: any) => item.content?.[0]?.prompt_cache_breakpoint?.mode ?? null),
+        [null, "explicit", "explicit", "explicit", "explicit"],
+      );
       assert.equal(openai.session_id, undefined);
-    
+
+      const stableHistory = compat.responsesBody(
+        "gpt-5.6-sol",
+        "sys",
+        ["one", "two", "three", "four", "volatile-current-prompt"].map((content) => ({ role: "user" as const, content })),
+        [],
+        { ...opts, provider: "openai", explicitCacheSkipTail: true },
+      );
+      assert.deepEqual(
+        stableHistory.input.map((item: any) => item.content?.[0]?.prompt_cache_breakpoint?.mode ?? null),
+        ["explicit", "explicit", "explicit", "explicit", null],
+      );
+
       const xai = compat.responsesBody(
         "grok-4.6",
         "sys",
@@ -750,7 +765,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       for (let i = 0; i < 20; i++) {
         history.push({ role: "assistant", content: [{ type: "thinking", thinking: `thought-${i}` }] });
       }
-      const stamped = requireCore().stampHistoryCache(history, "anthropic");
+      const stamped = requireCore().stampHistoryCache(history);
       assert.equal(allCacheMarkers(stamped).length, 0);
     });
     
@@ -761,8 +776,10 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
         input_schema: { type: "object" },
         ...(i < 4 ? { cache_control: { type: "ephemeral" } } : {}),
       }));
-      const prefix = requireCore().buildCachedPrefix("system", premarkedTools, "anthropic");
-      assert.ok(allCacheMarkers(prefix).length <= 4);
+      const prefix = requireCore().buildCachedPrefix("system", premarkedTools);
+      const markers = allCacheMarkers(prefix);
+      assert.ok(markers.length <= 4);
+      assert.ok(markers.every((entry) => entry.cache_control?.ttl === undefined));
     });
     
     await test("route capability defaults do not claim OpenCode Zen GPT explicit caching", () => {

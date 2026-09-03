@@ -167,41 +167,44 @@ export function toCompletionsMessages(system: string, messages: KernelMessage[])
   return out;
 }
 
-/** Stamp the last input_text part. Assistant output_text is not a valid OpenAI breakpoint. */
-export function markLastInputText(
+const OPENAI_MAX_EXPLICIT_BREAKPOINTS = 4;
+
+/**
+ * Stamp the latest eligible message boundaries. Preserving historical markers
+ * lets an append-only conversation read the longest prefix written by a prior
+ * turn instead of rewriting the entire growing prompt on every request.
+ */
+function markLatestInputTexts(
   input: Array<Record<string, unknown>>,
   extra: Record<string, unknown>,
+  limit: number,
 ): Array<Record<string, unknown>> {
-  for (let i = input.length - 1; i >= 0; i--) {
-    const item = input[i]!;
+  const next = input.slice();
+  let marked = 0;
+  for (let i = next.length - 1; i >= 0 && marked < limit; i--) {
+    const item = next[i]!;
     const content = item.content;
     if (!Array.isArray(content)) continue;
     for (let j = content.length - 1; j >= 0; j--) {
       const part = content[j] as Record<string, unknown>;
       if (!part || part.type !== "input_text" || typeof part.text !== "string") continue;
-      const next = input.slice();
       const parts = content.slice() as Array<Record<string, unknown>>;
       parts[j] = { ...part, ...extra };
       next[i] = { ...item, content: parts };
-      return next;
+      marked += 1;
+      break;
     }
   }
-  return input;
-}
-
-/** Mark the last user input_text. Used before a volatile overlay. */
-export function markResponsesPrefixBreakpoint(
-  input: Array<Record<string, unknown>>,
-): Array<Record<string, unknown>> {
-  return markLastInputText(input, { prompt_cache_breakpoint: { mode: "explicit" as const } });
+  return marked > 0 ? next : input;
 }
 
 function markPrefixThenTail(
   input: Array<Record<string, unknown>>,
   extra: Record<string, unknown>,
+  limit = 1,
 ): Array<Record<string, unknown>> {
   if (input.length < 2) return input;
-  return [...markLastInputText(input.slice(0, -1), extra), input[input.length - 1]!];
+  return [...markLatestInputTexts(input.slice(0, -1), extra, limit), input[input.length - 1]!];
 }
 
 /** Strip prompt_cache_breakpoint and prompt_cache_options when a model rejects explicit caching. */
@@ -765,7 +768,9 @@ export function responsesBody(
   if (opts?.explicitCacheBreakpoint && explicitRoute) {
     const extra = { prompt_cache_breakpoint: { mode: "explicit" as const } };
     body.input =
-      opts.explicitCacheSkipTail === false ? markLastInputText(input, extra) : markPrefixThenTail(input, extra);
+      opts.explicitCacheSkipTail === false
+        ? markLatestInputTexts(input, extra, OPENAI_MAX_EXPLICIT_BREAKPOINTS)
+        : markPrefixThenTail(input, extra, OPENAI_MAX_EXPLICIT_BREAKPOINTS);
   } else if (opts?.cacheControl && !geminiRoute && (opts.provider === undefined || opts.provider === "openrouter")) {
     // OpenRouter converts a block cache_control onto Anthropic. Do not put
     // cache_control on the Responses root: that field is a chat-completions shape.

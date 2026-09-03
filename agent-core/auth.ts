@@ -456,7 +456,7 @@ export interface CacheIdentityInputs {
 }
 
 /** OpenRouter documents a 256-character session id; all emitted keys stay below it. */
-export const CACHE_KEY_MAX_LENGTH = 256;
+export const CACHE_KEY_MAX_LENGTH = 64;
 const CACHE_KEY_PREFIX = "tc1_";
 const CACHE_IDENTITY_DOMAIN = "termina-cache-identity-v1";
 const CACHE_CONTROL_RE = /\p{Cc}/u;

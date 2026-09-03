@@ -576,6 +576,41 @@ function aggregateV2Usage(attempts) {
   return result;
 }
 
+function summarizeCachePhase(attempts) {
+  const usage = aggregateV2Usage(attempts);
+  return {
+    turns: attempts.length,
+    completeSamples: usage.completeSamples,
+    partialSamples: usage.partialSamples,
+    unknownSamples: usage.unknownSamples,
+    input: usage.input.total,
+    cacheRead: usage.cacheRead.total,
+    cacheWrite: usage.cacheWrite.total,
+    totalInput: usage.cacheShareDenominator.totalInput,
+    cachedInputShare: usage.cachedInputShare,
+  };
+}
+
+function summarizeIdleGaps(attempts) {
+  const gaps = attempts.slice(1).map((attempt) => attempt.cache.missAttribution.gapMs);
+  const known = gaps.filter((gap) => gap !== null);
+  const within5Minutes = known.filter((gap) => gap <= 5 * 60 * 1000).length;
+  const between5MinutesAnd1Hour = known.filter((gap) => gap > 5 * 60 * 1000 && gap <= 60 * 60 * 1000).length;
+  return {
+    transitions: gaps.length,
+    known: known.length,
+    unknown: gaps.length - known.length,
+    within5Minutes,
+    between5MinutesAnd1Hour,
+    over1Hour: known.filter((gap) => gap > 60 * 60 * 1000).length,
+    ttlComparison: {
+      fiveMinuteEligibleTransitions: within5Minutes,
+      oneHourEligibleTransitions: within5Minutes + between5MinutesAnd1Hour,
+      oneHourOnlyTransitions: between5MinutesAnd1Hour,
+    },
+  };
+}
+
 function v2CostValue(record) {
   const value = record.cost && typeof record.cost === "object" ? record.cost.usd : record.usd;
   return nullableNonnegative(value);
@@ -1108,10 +1143,12 @@ function summarizeV2Traces(records, label) {
     return [key, attempt];
   }).sort(([a], [b]) => compareStable(a, b)));
   const taskStatuses = [...taskGroups.values()].filter((group) => group.settled).map((group) => group.outcomeStatus ?? "unknown");
-  const usageMain = aggregateV2Usage(rawAttempts.filter((record) => (nonemptyString(record.role) ?? "unknown") === "main"));
-  const usageSummary = aggregateV2Usage(rawAttempts.filter((record) => (nonemptyString(record.role) ?? "unknown") === "summary"));
-  const costMain = aggregateV2Cost(rawAttempts.filter((record) => (nonemptyString(record.role) ?? "unknown") === "main"));
-  const costSummary = aggregateV2Cost(rawAttempts.filter((record) => (nonemptyString(record.role) ?? "unknown") === "summary"));
+  const rawMainAttempts = rawAttempts.filter((record) => (nonemptyString(record.role) ?? "unknown") === "main");
+  const rawSummaryAttempts = rawAttempts.filter((record) => (nonemptyString(record.role) ?? "unknown") === "summary");
+  const usageMain = aggregateV2Usage(rawMainAttempts);
+  const usageSummary = aggregateV2Usage(rawSummaryAttempts);
+  const costMain = aggregateV2Cost(rawMainAttempts);
+  const costSummary = aggregateV2Cost(rawSummaryAttempts);
   const costMainDetails = aggregateV2CostDetails(mainAttempts);
   const costSummaryDetails = aggregateV2CostDetails(summaryAttempts);
   const tools = mainAttempts.flatMap((attempt) => attempt.toolNames);
@@ -1142,6 +1179,8 @@ function summarizeV2Traces(records, label) {
     missingTurns: mainAttempts.filter((record) => record.usage.input === null && record.usage.output === null).length,
     totalInput,
     cachedInputShare: usageMain.cachedInputShare,
+    cold: summarizeCachePhase(rawMainAttempts.slice(0, 1)),
+    warm: summarizeCachePhase(rawMainAttempts.slice(1)),
   };
   const cost = {
     main: costMain,
@@ -1307,6 +1346,7 @@ function summarizeV2Traces(records, label) {
       byWorkingSetChange: v2CacheGroups(attempts, "workingSetChanged"),
       byMissPrimary,
       byMissContributor,
+      idleGaps: summarizeIdleGaps(mainAttempts),
     },
     cost,
     waste: {

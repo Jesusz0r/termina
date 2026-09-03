@@ -53,8 +53,8 @@ describe("Agent Core Cache", () => {
     it("derives bounded, ASCII, stable identity keys", () => {
       const mainKey = deriveCacheIdentityKey(base);
       expect(typeof mainKey).toBe("string");
-      expect(mainKey!.length).toBeGreaterThan(0);
-      expect(mainKey!.length).toBeLessThanOrEqual(CACHE_KEY_MAX_LENGTH);
+      expect(CACHE_KEY_MAX_LENGTH).toBe(64);
+      expect(mainKey).toHaveLength(64);
       expect(/^[\x21-\x7e]+$/.test(mainKey!)).toBe(true);
       expect(mainKey).toBe(deriveCacheIdentityKey(base));
 

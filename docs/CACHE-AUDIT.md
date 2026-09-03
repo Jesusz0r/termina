@@ -37,7 +37,7 @@
 | **Correct breakpoint placement** | Anthropic tail marker is on the **last stable** history block, not on the new user prompt. Docs explicitly warn: putting the breakpoint on the varying block (timestamp / new user message) creates a new hash every turn and never hits. Our backward walk + `HISTORY_CACHE_BLOCKS` skip does the right thing. |
 | **Hierarchy respected** | `tools → system → messages` order matches Anthropic's prefix order. Changing `tools` invalidates everything after, so pinning the last tool is cheaper than pinning the first. |
 | **Budget discipline** | 3 explicit markers vs 4 max → no 400 `no slots left`. Single history tail vs per-message markers → the 20-block lookback window stays useful (docs: lookback is 20 positions per breakpoint). |
-| **TTL choice** | `1h` on direct Anthropic (`anthropicCacheMark`) keeps a session alive across the 5-minute default TTL, matching the harness's long-lived terminal. On relays (`zen`, `openrouter`) we stay at 5m default, which is what those hosts bill. |
+| **TTL choice** | Direct Anthropic uses the sliding 5-minute default, avoiding the 1-hour write premium during rapid interactive sessions. Trace reports bucket observed idle gaps so production data can show whether 5–60 minute resumptions justify moving to 1 hour. |
 | **Session pin** | `prompt_cache_key = sessionId` stabilizes routing for OpenAI-family hosts (docs: key influences shard hash, mitigates overflow misses at >15 rpm). Same key also drives `x-session-id` / `x-opencode-session` / `x-grok-conv-id` headers per host contract. |
 | **Explicit-only for GPT-5.6** | Uses the provider's newest knob (`prompt_cache_options.mode: explicit` + manual breakpoint) only where docs say it exists (GPT-5.6 Sol/Terra/Luna). Avoids implicit breakpoint pollution and extra 1.25× write charge on stable prefixes. Correctly skips `prompt_cache_options` on Codex/Zen that return 400 `Unsupported parameter`. |
 | **Prefix-vs-tail split** (`markPrefixThenTail`) | Keeps the volatile last input out of the cached prefix, so the previous turn's prefix can hit. Mirrors OpenAI guidance: stable instructions first, dynamic suffix after the breakpoint. |
@@ -64,7 +64,7 @@
 
 ### 3.3 Low-signal / polish
 
-8. **TTL is binary, not adaptive.** `1h` on Anthropic is right for the TUI (5-minute gaps are common while the user reads), but for a burst of 30s turns the 5m entry would suffice at half the write cost. A heuristic (`gap < 4m → 5m, else 1h`) would match spend to interactivity.
+8. **TTL should follow observed idle gaps.** The 5-minute default is cheapest for bursts, while 1 hour only helps resumptions after 5–60 minutes and doubles write cost. Trace reports now expose those idle-gap windows; change the default only when production evidence supports it.
 9. **No cache-hit rate dashboard.** Data exists in `usage.cacheRead / total` per turn and `lastCacheReadShare` but the TUI only shows `tokens in/out · cache 42%`. A sparkline or `hit < 80%` warning would surface regressions faster than scanning `traces.ndjson`.
 10. **Tests cover prefix shape, not cost.** `reportUsage`, `retryAfter`, etc. have unit coverage; the 20-block lookback + TTL + minimum-length interaction does not.
 
@@ -77,7 +77,7 @@
 - **Limit 4 breakpoints** — we use 3. Correct. Recommends: keep explicit breakpoints on *stable* prefix.
 - **Order `tools → system → messages`** — we follow it. Docs stress changing `tools` invalidates later layers; we pay one `cache_write` for tools each time tools change — expected.
 - **Lookback 20 per breakpoint** — see §3.1.1. With one history marker we have one 20-wide window. Docs example with a 25-block gap misses at 20; a second marker fixes it.
-- **TTL** `ephemeral` 5m default, `ephemeral + ttl: 1h` beta. Our `anthropicCacheMark` maps `provider === anthropic → 1h` else 5m. Correct per docs. Cost: 25% surcharge (5m), 2× for 1h on Anthropic; our traces should verify `cacheWrite > 0` before staying on 1h.
+- **TTL** `ephemeral` defaults to 5m; `ephemeral + ttl: 1h` costs more. `anthropicCacheMark` intentionally omits `ttl`, using the sliding 5-minute lifetime. Reports separate cold/warm shares and bucket idle gaps into ≤5m, 5–60m, and >1h windows before any future TTL decision.
 - **Auto caching** exists on every platform except legacy Bedrock (uses explicit only). We use explicit — fine, avoids Bedrock 400 `top-level cache_control` error docs call out.
 - **Pricing note** — if both `cache_creation` and `cache_read` are 0, prompt was below minimum. We do not yet suppress stamping in that case.
 
