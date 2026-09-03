@@ -5833,7 +5833,7 @@ class PiEditorApp {
   }
 
   /** Open or reactivate the project at a path (the dialog-free path). */
-  private async openProjectAt(cwd: string): Promise<{ cwd: string } | { cancelled: true }> {
+  async openProjectAt(cwd: string): Promise<{ cwd: string } | { cancelled: true }> {
     const rendererTarget = this.captureRendererSendTarget();
     // Reserve the selection slot before any path I/O. A later open/activate
     // action therefore fences this request even when canonicalPath resolves
