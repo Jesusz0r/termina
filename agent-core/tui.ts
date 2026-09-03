@@ -347,9 +347,25 @@ export function formatTuiFooter(opts: {
 
 const graphemeSegmenter = new Intl.Segmenter("en", { granularity: "grapheme" });
 
+function forEachGrapheme(text: string, visit: (grapheme: string) => boolean | void): void {
+  // Intl.Segmenter is disproportionately expensive on the several-thousand
+  // character ASCII tail repainted during streaming. ASCII code units are
+  // already grapheme-safe and can be visited without a temporary array.
+  if (!/[^\x00-\x7f]/.test(text)) {
+    for (let i = 0; i < text.length; i++) {
+      if (visit(text[i]!) === false) break;
+    }
+    return;
+  }
+  for (const part of graphemeSegmenter.segment(text)) {
+    if (visit(part.segment) === false) break;
+  }
+}
+
 export function splitGraphemes(text: string): string[] {
-  if (!text) return [];
-  return [...graphemeSegmenter.segment(text)].map((part) => part.segment);
+  const out: string[] = [];
+  forEachGrapheme(text, (grapheme) => out.push(grapheme));
+  return out;
 }
 
 function isCombiningCode(cp: number): boolean {
@@ -400,7 +416,9 @@ function graphemeCells(g: string, column: number): number {
 
 export function cellWidth(text: string, startColumn = 0): number {
   let col = Math.max(0, startColumn);
-  for (const g of splitGraphemes(text)) col += graphemeCells(g, col);
+  forEachGrapheme(text, (grapheme) => {
+    col += graphemeCells(grapheme, col);
+  });
   return col - Math.max(0, startColumn);
 }
 
@@ -408,28 +426,27 @@ export function wrapText(text: string, width: number): string[] {
   const cols = Math.max(1, width);
   const out: string[] = [];
   for (const raw of text.split("\n")) {
-    const gs = splitGraphemes(raw);
-    if (gs.length === 0) {
+    if (raw.length === 0) {
       out.push("");
       continue;
     }
     let line = "";
     let used = 0;
-    for (const g of gs) {
+    forEachGrapheme(raw, (g) => {
       const cells = graphemeCells(g, used);
       if (cells === 0) {
         line += g;
-        continue;
+        return;
       }
       if (used > 0 && used + cells > cols) {
         out.push(line);
         line = g;
         used = graphemeCells(g, 0);
-        continue;
+        return;
       }
       line += g;
       used += cells;
-    }
+    });
     out.push(line);
   }
   return out;
@@ -442,6 +459,7 @@ function displayBudget(cols: number, maxRows: number): number {
 function graphemeSafeTail(text: string, maxChars: number): string {
   if (maxChars <= 0) return "";
   if (text.length <= maxChars) return text;
+  if (!/[^\x00-\x7f]/.test(text)) return text.slice(text.length - maxChars);
   let start = text.length - maxChars;
   const lead = text.charCodeAt(start);
   if (lead >= 0xdc00 && lead <= 0xdfff) start += 1;
@@ -459,12 +477,6 @@ function sourceTail(text: string, maxChars: number): { text: string; sliced: boo
   const nl = slice.indexOf("\n");
   if (nl >= 0 && nl + 1 < slice.length) slice = slice.slice(nl + 1);
   return { text: slice, sliced: true };
-}
-
-function spanTextLen(spans: StyledSpan[]): number {
-  let n = 0;
-  for (const span of spans) n += span.text.length;
-  return n;
 }
 
 function tailSpans(spans: StyledSpan[], maxChars: number): StyledSpan[] {
@@ -515,9 +527,7 @@ function wrapSpans(spans: StyledSpan[], width: number): Array<{ frags: StyledSpa
     else row.push({ text: g, style });
     used += placed;
   };
-  for (const span of spans) {
-    for (const g of splitGraphemes(span.text)) add(g, span.style);
-  }
+  for (const span of spans) forEachGrapheme(span.text, (g) => add(g, span.style));
   rows.push({ frags: row, cells: used });
   return rows;
 }
@@ -601,15 +611,15 @@ export function layoutHeights(
 }
 
 function clip(text: string, cols: number): string {
-  const gs = splitGraphemes(text);
   let used = 0;
   let out = "";
-  for (const g of gs) {
+  forEachGrapheme(text, (g) => {
+    if (used >= cols) return false;
     const cells = graphemeCells(g, used);
-    if (used + cells > cols) break;
+    if (used + cells > cols) return false;
     out += g;
     used += cells;
-  }
+  });
   if (used < cols) out += " ".repeat(cols - used);
   return out;
 }
@@ -640,6 +650,9 @@ function wrapInput(
 
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const MAX_TRANSCRIPT = 400_000;
+/** Leave headroom so an active response is not recopied on every token once
+ *  it reaches the transcript cap. */
+const TRANSCRIPT_TRIM_TARGET = MAX_TRANSCRIPT - 16 * 1024;
 const MAX_TRANSCRIPT_ENTRIES = 2_000;
 const MAX_HISTORY = 100;
 const MAX_CSI = 32;
@@ -770,6 +783,21 @@ function closeSanitize(input: string, start: SanitizerState): string {
 type StyleId = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
 type StyledSpan = { text: string; style: StyleId };
 
+type MarkdownBoundary = {
+  /** Start and first three characters of the current incomplete source line. */
+  lineStart: number;
+  linePrefix: string;
+  /** Source length already checked for newline boundaries. */
+  checked: number;
+  fence: boolean;
+  fenceStart: number;
+  completeEnd: number;
+};
+
+function freshMarkdownBoundary(): MarkdownBoundary {
+  return { lineStart: 0, linePrefix: "", checked: 0, fence: false, fenceStart: 0, completeEnd: 0 };
+}
+
 type EntryKind = "plain" | "assistant" | "thinking" | "tool" | "error";
 type ToolUiState = "running" | "success" | "error" | "cancelled";
 type TranscriptEntry = {
@@ -783,7 +811,9 @@ type TranscriptEntry = {
   sanitizer: SanitizerState;
   revision: number;
   mdPrefixLen: number;
+  mdPrefixChars: number;
   mdPrefixSpans: StyledSpan[];
+  mdBoundary: MarkdownBoundary;
   cache: {
     revision: number;
     width: number;
@@ -873,31 +903,6 @@ function listDepth(line: string): number {
   const m = /^(\s*)(?:[-*]|\d+\.)\s+/.exec(line);
   if (!m) return 0;
   return Math.floor((m[1] ?? "").length / 2) + 1;
-}
-
-function unfinishedStart(text: string): number {
-  let fence = false;
-  let fenceStart = 0;
-  let completeEnd = 0;
-  let lineStart = 0;
-  for (let i = 0; i <= text.length; i++) {
-    if (i < text.length && text[i] !== "\n") continue;
-    const line = text.slice(lineStart, i);
-    if (line.startsWith("```")) {
-      if (!fence) {
-        fence = true;
-        fenceStart = lineStart;
-      } else {
-        fence = false;
-        completeEnd = i + 1;
-      }
-    } else if (!fence && i < text.length) {
-      completeEnd = i + 1;
-    }
-    lineStart = i + 1;
-  }
-  if (fence) return fenceStart;
-  return Math.min(completeEnd, text.length);
 }
 
 function parseMarkdown(text: string, scanned: { n: number }): StyledSpan[] {
@@ -1252,7 +1257,9 @@ export class AgentTui {
       sanitizer: freshSanitizer(),
       revision: 1,
       mdPrefixLen: 0,
+      mdPrefixChars: 0,
       mdPrefixSpans: [],
+      mdBoundary: freshMarkdownBoundary(),
       cache: null,
     });
     this.toolHandles.set(handleId, id);
@@ -1280,8 +1287,7 @@ export class AgentTui {
     entry.settled = true;
     entry.text = closeSanitize(output ?? "", freshSanitizer());
     entry.revision += 1;
-    entry.mdPrefixLen = 0;
-    entry.mdPrefixSpans = [];
+    this.resetMarkdown(entry);
     entry.cache = null;
     this.transcriptChars += entryChars(entry);
     this.toolHandles.delete(handleId as number);
@@ -1327,7 +1333,9 @@ export class AgentTui {
         sanitizer: freshSanitizer(),
         revision: 1,
         mdPrefixLen: 0,
+        mdPrefixChars: 0,
         mdPrefixSpans: [],
+        mdBoundary: freshMarkdownBoundary(),
         cache: null,
       };
       this.entries.push(entry);
@@ -1338,7 +1346,9 @@ export class AgentTui {
     if (!entry) return;
     const next = sanitizeText(text, entry.sanitizer);
     entry.sanitizer = next.state;
+    const appendAt = entry.text.length;
     entry.text += next.text;
+    this.advanceMarkdownBoundary(entry, next.text, appendAt);
     entry.revision += 1;
     entry.cache = null;
     this.transcriptChars += next.text.length;
@@ -1361,7 +1371,9 @@ export class AgentTui {
       sanitizer: freshSanitizer(),
       revision: 1,
       mdPrefixLen: 0,
+      mdPrefixChars: 0,
       mdPrefixSpans: [],
+      mdBoundary: freshMarkdownBoundary(),
       cache: null,
     });
     this.transcriptChars += clean.length;
@@ -1374,15 +1386,14 @@ export class AgentTui {
     if (this.transcriptChars <= MAX_TRANSCRIPT) return;
     if (this.activeStream?.entryId !== entry.id) return;
     const others = this.transcriptChars - entryChars(entry);
-    const budget = Math.max(0, MAX_TRANSCRIPT - others - TRUNCATION_MARKER.length);
+    const budget = Math.max(0, TRANSCRIPT_TRIM_TARGET - others - TRUNCATION_MARKER.length);
     let tail = entry.text.length > budget ? graphemeSafeTail(entry.text, budget) : entry.text;
     const nl = tail.indexOf("\n");
     if (nl >= 0 && nl + 1 < tail.length) tail = tail.slice(nl + 1);
     const next = TRUNCATION_MARKER + tail;
     this.transcriptChars -= entryChars(entry);
     entry.text = next;
-    entry.mdPrefixLen = 0;
-    entry.mdPrefixSpans = [];
+    this.resetMarkdown(entry);
     entry.revision += 1;
     entry.cache = null;
     this.transcriptChars += entryChars(entry);
@@ -1420,16 +1431,69 @@ export class AgentTui {
     return this.entryTailSpans(entry, Number.MAX_SAFE_INTEGER).spans;
   }
 
-  private ensureMdPrefix(entry: TranscriptEntry, start: number): void {
-    if (entry.mdPrefixLen > start) {
-      entry.mdPrefixLen = 0;
-      entry.mdPrefixSpans = [];
+  private resetMarkdown(entry: TranscriptEntry): void {
+    entry.mdPrefixLen = 0;
+    entry.mdPrefixChars = 0;
+    entry.mdPrefixSpans = [];
+    entry.mdBoundary = freshMarkdownBoundary();
+  }
+
+  /** Advance markdown boundaries from the new chunk, never by searching the
+   *  growing response string (which forces V8 to flatten its string rope). */
+  private advanceMarkdownBoundary(entry: TranscriptEntry, chunk: string, offset: number): void {
+    if (!chunk) return;
+    if (entry.mdBoundary.checked !== offset) {
+      this.resetMarkdown(entry);
+      chunk = entry.text;
+      offset = 0;
     }
+    const state = entry.mdBoundary;
+    for (let i = 0; i < chunk.length; i++) {
+      const ch = chunk[i]!;
+      if (ch !== "\n") {
+        if (state.linePrefix.length < 3) state.linePrefix += ch;
+        continue;
+      }
+      const nl = offset + i;
+      if (state.linePrefix === "```") {
+        if (!state.fence) {
+          state.fence = true;
+          state.fenceStart = state.lineStart;
+        } else {
+          state.fence = false;
+          state.completeEnd = nl + 1;
+        }
+      } else if (!state.fence) {
+        state.completeEnd = nl + 1;
+      }
+      state.lineStart = nl + 1;
+      state.linePrefix = "";
+    }
+    state.checked = offset + chunk.length;
+    this.markdownScannedChars += chunk.length;
+  }
+
+  private unfinishedStart(entry: TranscriptEntry): number {
+    if (entry.mdBoundary.checked !== entry.text.length) {
+      this.advanceMarkdownBoundary(entry, entry.text.slice(entry.mdBoundary.checked), entry.mdBoundary.checked);
+    }
+    const state = entry.mdBoundary;
+    if (state.fence) return state.fenceStart;
+    // An incomplete opening fence is not a stable parsed prefix yet.
+    if (state.linePrefix === "```") return state.lineStart;
+    return state.completeEnd;
+  }
+
+  private ensureMdPrefix(entry: TranscriptEntry, start: number): void {
+    if (entry.mdPrefixLen > start) this.resetMarkdown(entry);
     if (entry.mdPrefixLen >= start) return;
     const scanned = { n: 0 };
     const extra = parseMarkdown(entry.text.slice(entry.mdPrefixLen, start), scanned);
     this.markdownScannedChars += scanned.n;
-    for (const span of extra) entry.mdPrefixSpans.push(span);
+    for (const span of extra) {
+      entry.mdPrefixSpans.push(span);
+      entry.mdPrefixChars += span.text.length;
+    }
     entry.mdPrefixLen = start;
   }
 
@@ -1442,7 +1506,16 @@ export class AgentTui {
         complete: !tail.sliced,
       };
     }
-    const start = unfinishedStart(entry.text);
+    const start = this.unfinishedStart(entry);
+    // A truncation resets prefix metadata. Do not eagerly rebuild hundreds of
+    // thousands of off-screen markdown characters just to paint the live tail.
+    if (entry.mdPrefixLen === 0 && start > maxChars) {
+      const tail = sourceTail(entry.text, maxChars);
+      const scanned = { n: 0 };
+      const spans = parseMarkdown(tail.text, scanned);
+      this.markdownScannedChars += scanned.n;
+      return { spans, complete: false };
+    }
     const suffix = entry.text.slice(start);
     if (suffix.length > maxChars) {
       const tail = sourceTail(suffix, maxChars);
@@ -1456,7 +1529,7 @@ export class AgentTui {
     const parsed = parseMarkdown(suffix, scanned);
     this.markdownScannedChars += scanned.n;
     const prefix = entry.mdPrefixSpans;
-    if (spanTextLen(prefix) + suffix.length <= maxChars) {
+    if (entry.mdPrefixChars + suffix.length <= maxChars) {
       return { spans: prefix.length ? prefix.concat(parsed) : parsed, complete: true };
     }
     return {

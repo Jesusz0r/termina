@@ -28,6 +28,7 @@ export class PtyView {
   private wheelTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly container: HTMLElement;
   private dragDepth = 0;
+  private readonly onMouseDown = () => this.focus();
   private dropInFlight = false;
   private readonly onDragEnter = (event: DragEvent) => this.handleDragEnter(event);
   private readonly onDragOver = (event: DragEvent) => this.handleDragOver(event);
@@ -65,7 +66,7 @@ export class PtyView {
     this.term.loadAddon(this.fitAddon);
     this.term.loadAddon(new CanvasAddon());
     this.term.open(container);
-    container.addEventListener("mousedown", () => this.focus());
+    container.addEventListener("mousedown", this.onMouseDown);
     container.addEventListener("dragenter", this.onDragEnter);
     container.addEventListener("dragover", this.onDragOver);
     container.addEventListener("dragleave", this.onDragLeave);
@@ -437,6 +438,7 @@ export class PtyView {
   dispose(): void {
     this.disposed = true;
     this.clearDropTarget();
+    this.container.removeEventListener("mousedown", this.onMouseDown);
     this.container.removeEventListener("dragenter", this.onDragEnter);
     this.container.removeEventListener("dragover", this.onDragOver);
     this.container.removeEventListener("dragleave", this.onDragLeave);
