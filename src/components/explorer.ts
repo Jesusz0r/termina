@@ -2,6 +2,8 @@
  * File explorer: shows the project folder tree, opens files in the
  * project editor, and supports create / rename / delete of files and folders.
  * Directories load lazily on expand; the tree refreshes from watcher events.
+ * Entries drag onto folders to move (cut + paste); the move itself reuses
+ * the explorer:paste backend, so no new IPC exists for drag-drop.
  */
 import { pathBasename, type CommandId, type ExplorerEntry } from "../../shared/types";
 import { showContextMenu, closeContextMenu, type ContextMenuItem } from "./context-menu";
@@ -23,6 +25,10 @@ export class Explorer {
   private selected: ExplorerEntry | null = null;
   /** Project-relative entry waiting for Paste. */
   private clipboardEntry: { relPath: string; cut: boolean } | null = null;
+  /** Entry being dragged; null outside a drag. Drop validity reads this. */
+  private dragSrc: ExplorerEntry | null = null;
+  /** Pending auto-expand of a collapsed folder hovered mid-drag. */
+  private expandTimer: ReturnType<typeof setTimeout> | null = null;
 
   private onOpenFile: (absPath: string, preview?: boolean) => void = () => {};
 
@@ -70,6 +76,8 @@ export class Explorer {
     this.selected = null;
     // Clipboard entries are project-relative: they never survive a switch.
     this.clipboardEntry = null;
+    this.dragSrc = null;
+    this.clearExpandTimer();
     closeContextMenu();
     void this.renderRoot();
   }
@@ -149,10 +157,12 @@ export class Explorer {
       void this.renderChildren(children, entry, state);
     });
     this.bindRowMenu(row, entry);
+    this.setupDragSource(row, entry);
 
     const children = document.createElement("div");
     children.className = "explorer-children";
     node.append(row, children);
+    this.setupDirDrop(row, children, entry, state, arrow);
     if (state.expanded) {
       void this.renderChildren(children, entry, state);
     }
@@ -220,6 +230,9 @@ export class Explorer {
       this.onOpenFile(entry.path, false);
     });
     this.bindRowMenu(row, entry);
+    this.setupDragSource(row, entry);
+    // Dropping onto a file moves alongside it (into its parent folder).
+    this.setupFileDrop(row, entry);
     return row;
   }
 
@@ -230,6 +243,160 @@ export class Explorer {
       this.select(entry, row);
       showContextMenu(this.entryMenuItems(entry), e.clientX, e.clientY);
     });
+  }
+
+  // ------------------------------------------------------------ drag-drop --
+
+  /** The root never moves; every other row is a drag source. */
+  private setupDragSource(row: HTMLElement, entry: ExplorerEntry): void {
+    if (!entry.relPath) return;
+    row.draggable = true;
+    row.addEventListener("dragstart", (e) => {
+      closeContextMenu();
+      this.dragSrc = entry;
+      try {
+        e.dataTransfer?.setData("text/plain", entry.relPath);
+      } catch {
+        /* some browsers throw when no data; validity uses dragSrc */
+      }
+      if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+      row.classList.add("dragging");
+    });
+    row.addEventListener("dragend", () => {
+      this.dragSrc = null;
+      row.classList.remove("dragging");
+      this.clearDropHighlight();
+    });
+  }
+
+  /** A folder row (plus its children block, so empty folders accept drops). */
+  private setupDirDrop(
+    row: HTMLElement,
+    children: HTMLElement,
+    entry: ExplorerEntry,
+    state: DirState,
+    arrow: HTMLElement,
+  ): void {
+    const target = entry.relPath;
+    const over = (e: DragEvent) => {
+      if (!this.canDrop(target)) return;
+      // Invalid inner targets return early WITHOUT stopping propagation,
+      // so an outer folder can still accept the drop. A valid inner target
+      // claims the event so ancestors don't highlight alongside it.
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+      row.classList.add("drop-target");
+      // Hovering a collapsed folder mid-drag expands it, like VS Code.
+      if (!state.expanded && !this.expandTimer) {
+        this.expandTimer = setTimeout(() => {
+          this.expandTimer = null;
+          if (!this.dragSrc || state.expanded) return;
+          state.expanded = true;
+          arrow.textContent = "▾";
+          void this.renderChildren(children, entry, state);
+        }, 600);
+      }
+    };
+    const leave = (e: DragEvent) => {
+      // dragover/leaves fire between row and children; keep the highlight
+      // while the pointer is still inside either one.
+      const to = e.relatedTarget as Node | null;
+      if (to && (row.contains(to) || children.contains(to))) return;
+      row.classList.remove("drop-target");
+      this.clearExpandTimer();
+    };
+    const drop = (e: DragEvent) => {
+      if (!this.canDrop(target)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const src = this.dragSrc;
+      this.dragSrc = null;
+      row.classList.remove("drop-target");
+      this.clearExpandTimer();
+      // Pre-expand a collapsed target: the post-move refresh rebuilds the
+      // tree (detaching these nodes), so expansion must live in dir state,
+      // which survives refresh and renders the moved entry visible.
+      if (src) {
+        state.expanded = true;
+        void this.moveDragged(src, target);
+      }
+    };
+    row.addEventListener("dragover", over);
+    row.addEventListener("dragenter", over);
+    row.addEventListener("dragleave", leave);
+    row.addEventListener("drop", drop);
+    children.addEventListener("dragover", over);
+    children.addEventListener("dragenter", over);
+    children.addEventListener("dragleave", leave);
+    children.addEventListener("drop", drop);
+  }
+
+  private setupFileDrop(row: HTMLElement, entry: ExplorerEntry): void {
+    const target = parentRel(entry.relPath);
+    row.addEventListener("dragover", (e) => {
+      if (!this.canDrop(target)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+      row.classList.add("drop-target");
+    });
+    row.addEventListener("dragenter", (e) => {
+      if (!this.canDrop(target)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      row.classList.add("drop-target");
+    });
+    row.addEventListener("dragleave", (e) => {
+      const to = e.relatedTarget as Node | null;
+      if (to && row.contains(to)) return;
+      row.classList.remove("drop-target");
+    });
+    row.addEventListener("drop", (e) => {
+      if (!this.canDrop(target)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const src = this.dragSrc;
+      this.dragSrc = null;
+      row.classList.remove("drop-target");
+      if (src) void this.moveDragged(src, target);
+    });
+  }
+
+  /** False for no-ops the backend would turn into " copy" duplicates. */
+  private canDrop(targetDirRel: string): boolean {
+    const src = this.dragSrc;
+    if (!src || !src.relPath) return false;
+    if (targetDirRel === parentRel(src.relPath)) return false;
+    if (src.type === "dir" && (targetDirRel === src.relPath || targetDirRel.startsWith(`${src.relPath}/`))) return false;
+    return true;
+  }
+
+  private clearExpandTimer(): void {
+    if (this.expandTimer) {
+      clearTimeout(this.expandTimer);
+      this.expandTimer = null;
+    }
+  }
+
+  private clearDropHighlight(): void {
+    this.clearExpandTimer();
+    for (const r of this.treeEl.querySelectorAll(".explorer-row.drop-target")) {
+      r.classList.remove("drop-target");
+    }
+  }
+
+  /** Drag-drop is a cut + paste move; collisions keep the backend suffix. */
+  private async moveDragged(src: ExplorerEntry, targetDirRel: string): Promise<boolean> {
+    const projectId = this.projectId;
+    if (!projectId) return false;
+    const res = await window.pi.pasteEntry(projectId, targetDirRel, src.relPath, true);
+    if (!res.ok) {
+      toast(res.error ?? "move failed", "error");
+      return false;
+    }
+    await this.refresh();
+    return true;
   }
 
   /** Highlight the selected row; keeps it as the rename/delete target. */
@@ -356,6 +523,11 @@ export class Explorer {
 /** Folder that receives Paste for this row. Files paste into their parent. */
 function pasteTargetRel(entry: ExplorerEntry): string {
   if (entry.type === "dir") return entry.relPath;
-  const at = entry.relPath.lastIndexOf("/");
-  return at === -1 ? "" : entry.relPath.slice(0, at);
+  return parentRel(entry.relPath);
+}
+
+/** Parent folder of a project-relative path; "" is the project root. */
+function parentRel(relPath: string): string {
+  const at = relPath.lastIndexOf("/");
+  return at === -1 ? "" : relPath.slice(0, at);
 }

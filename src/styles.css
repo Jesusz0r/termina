@@ -362,6 +362,15 @@ body {
   box-shadow: inset 2px 0 var(--accent);
 }
 
+.explorer-row.dragging {
+  opacity: 0.5;
+}
+
+.explorer-row.drop-target {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  box-shadow: inset 2px 0 var(--accent);
+}
+
 .explorer-arrow {
   width: 12px;
   flex: 0 0 auto;
