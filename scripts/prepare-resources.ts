@@ -773,9 +773,23 @@ export function prepareCore() {
   console.log("✓ termina-core staged");
 }
 
+/** Stage the CLI launcher into resources/bin/termina. */
+export function prepareBin(resourcesDir = RESOURCES) {
+  const binDir = join(resourcesDir, "bin");
+  mkdirSync(binDir, { recursive: true });
+  const src = join(process.cwd(), "bin", "termina");
+  const dest = join(binDir, "termina");
+  if (existsSync(src)) {
+    copyFileSync(src, dest);
+    chmodSync(dest, 0o755);
+    console.log("✓ bin/termina staged");
+  }
+}
+
 async function main() {
   await prepareNode();
   prepareCore();
+  prepareBin();
   console.log(`resources ready in ${RESOURCES}`);
 }
 

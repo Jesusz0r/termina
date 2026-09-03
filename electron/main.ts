@@ -49,6 +49,7 @@ import { parseFailingTests, verifyFailSummary } from "./evidence.js";
 import { coreClient } from "./core-client.js";
 import { changedLinesInAfter } from "../shared/line-diff.js";
 import { createAppUpdater, updateMenuCopy, type AppUpdateController } from "./app-update.js";
+import { installCliCommand, uninstallCliCommand, isCliCommandInstalled, parseTargetCwdFromArgv } from "./cli-install.js";
 import {
   MAX_DISPATCH_WORKERS,
   findTaskByText,
@@ -1315,6 +1316,11 @@ class PiEditorApp {
             enabled: update.enabled,
             click: () => void this.handleUpdateMenuAction(),
           },
+          {
+            id: "cli-install",
+            label: "Install 'termina' command in PATH…",
+            click: () => void this.handleInstallCli(),
+          },
           { type: "separator" },
           { label: "Settings…", accelerator: shortcut("open-settings"), click: send("open-settings") },
           { type: "separator" },
@@ -1426,6 +1432,85 @@ class PiEditorApp {
     );
     if (copy.kind === "install") void this.installAppUpdate();
     else if (copy.kind === "check") void this.checkAppUpdateFromMenu();
+  }
+
+  private async handleInstallCli(): Promise<void> {
+    const win = this.win && !this.win.isDestroyed() ? this.win : undefined;
+    if (isCliCommandInstalled()) {
+      const choice = await dialog.showMessageBox(win ?? ({} as Electron.BrowserWindow), {
+        type: "question",
+        title: "Termina CLI Launcher",
+        message: "The 'termina' command is already installed in your PATH.",
+        detail: "Would you like to reinstall/repair the launcher or remove it from your PATH?",
+        buttons: ["Reinstall / Repair", "Uninstall", "Cancel"],
+        defaultId: 0,
+        cancelId: 2,
+      });
+      if (choice.response === 0) {
+        const res = installCliCommand();
+        if (res.ok) {
+          const payload = {
+            type: "info" as const,
+            title: "Shell Command Reinstalled",
+            message: "The 'termina' command was reinstalled successfully.",
+            detail: `Installed in ${res.path ?? "/usr/local/bin/termina"}.\n\nYou can open any folder in Termina by running:\n  termina .\nin your terminal.`,
+          };
+          if (win) await dialog.showMessageBox(win, payload);
+          else await dialog.showMessageBox(payload);
+        } else {
+          const payload = {
+            type: "error" as const,
+            title: "Install Failed",
+            message: "Could not reinstall 'termina' command in PATH.",
+            detail: res.error ?? "Unknown error",
+          };
+          if (win) await dialog.showMessageBox(win, payload);
+          else await dialog.showMessageBox(payload);
+        }
+      } else if (choice.response === 1) {
+        const res = uninstallCliCommand();
+        if (res.ok) {
+          const payload = {
+            type: "info" as const,
+            title: "Shell Command Uninstalled",
+            message: "The 'termina' command was removed from PATH.",
+          };
+          if (win) await dialog.showMessageBox(win, payload);
+          else await dialog.showMessageBox(payload);
+        } else {
+          const payload = {
+            type: "error" as const,
+            title: "Uninstall Failed",
+            message: "Could not remove 'termina' command from PATH.",
+            detail: res.error ?? "Unknown error",
+          };
+          if (win) await dialog.showMessageBox(win, payload);
+          else await dialog.showMessageBox(payload);
+        }
+      }
+      return;
+    }
+
+    const res = installCliCommand();
+    if (res.ok) {
+      const payload = {
+        type: "info" as const,
+        title: "Shell Command Installed",
+        message: "The 'termina' command was installed successfully.",
+        detail: `Installed in ${res.path ?? "/usr/local/bin/termina"}.\n\nYou can now open any folder in Termina by running:\n  termina .\nin your terminal.`,
+      };
+      if (win) await dialog.showMessageBox(win, payload);
+      else await dialog.showMessageBox(payload);
+    } else {
+      const payload = {
+        type: "error" as const,
+        title: "Install Failed",
+        message: "Could not install 'termina' command in PATH.",
+        detail: res.error ?? "Unknown error",
+      };
+      if (win) await dialog.showMessageBox(win, payload);
+      else await dialog.showMessageBox(payload);
+    }
   }
 
   private setKeyboardShortcuts(raw: unknown): ShortcutMap {
@@ -7258,6 +7343,14 @@ class PiEditorApp {
     }
   }
 
+  /**
+   * Parse a folder or file argument passed via CLI (e.g. `termina .` or `termina /path/to/folder`).
+   * Ignores Electron switches and macOS process flags (e.g. -psn_...).
+   */
+  parseTargetCwdFromArgv(argv: string[], fallbackCwd = process.cwd()): string | null {
+    return parseTargetCwdFromArgv(argv, fallbackCwd, app.isPackaged);
+  }
+
   // ---------------------------------------------------------------- boot ----
 
   async start(): Promise<void> {
@@ -7275,9 +7368,10 @@ class PiEditorApp {
     // changed events root/ancestor is retained until provenance is repaired.
     await this.prepareEventsDir();
     await this.cleanupStaleDispatchFiles();
-    // Tests set TERMINA_INITIAL_CWD so the fixture is open before the
-    // window loads. A normal launch has no folder until the user picks one.
-    const initial = process.env.TERMINA_INITIAL_CWD;
+    // Check if a directory was passed via CLI (`termina .`), open-file, or test fixture.
+    const cliTarget = this.parseTargetCwdFromArgv(process.argv);
+    const initial = cliTarget ?? pendingOpenPath ?? process.env.TERMINA_INITIAL_CWD;
+    pendingOpenPath = null;
     const initialCwd = initial && existsSync(initial) ? initial : null;
     this.tailer.onEvent = (id, event) => this.enqueueSidecarEvent(id, event);
     this.tailer.start();
@@ -7286,7 +7380,22 @@ class PiEditorApp {
     // project folder.
     this.ensureAppBridge();
     if (initialCwd) {
-      await this.openProject(initialCwd);
+      if (process.env.TERMINA_INITIAL_CWD && !cliTarget) {
+        await this.openProject(initialCwd);
+      } else {
+        const canonicalInitial = await this.canonicalPath(initialCwd);
+        for (const root of this.preferences.openProjects) {
+          try {
+            if (!statSync(root).isDirectory()) continue;
+            const canonicalRoot = await this.canonicalPath(root);
+            if (canonicalRoot === canonicalInitial) continue;
+            await this.openProject(root);
+          } catch {
+            continue;
+          }
+        }
+        await this.openProject(initialCwd);
+      }
     } else {
       // Restore the projects from the last session before the window loads.
       // Missing or non-directory paths are skipped: they may be unmounted
@@ -7596,10 +7705,35 @@ app.on("child-process-gone", (_e, details) => {
   }
 });
 
+let pendingOpenPath: string | null = null;
+
+app.on("open-file", (event, filePath) => {
+  event.preventDefault();
+  try {
+    const target = existsSync(filePath) && statSync(filePath).isFile() ? dirname(filePath) : filePath;
+    if (existsSync(target) && statSync(target).isDirectory()) {
+      if (app.isReady()) {
+        appState.focusWindow();
+        void appState.openProjectAt(target);
+      } else {
+        pendingOpenPath = target;
+      }
+    }
+  } catch {
+    // Ignore unresolvable paths
+  }
+});
+
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on("second-instance", () => appState.focusWindow());
+  app.on("second-instance", (_event, argv, workingDirectory) => {
+    appState.focusWindow();
+    const targetCwd = appState.parseTargetCwdFromArgv(argv, workingDirectory);
+    if (targetCwd) {
+      void appState.openProjectAt(targetCwd);
+    }
+  });
   // Boot the app when Electron is ready. Without this line the window
   // never opens: every handler above only reacts to events.
   app.whenReady().then(() => void appState.start().catch((err) => console.error("[main] fatal startup error:", err)));

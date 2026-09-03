@@ -21,6 +21,8 @@ extraResources:
     to: termina-core
   - from: resources/node
     to: node
+  - from: resources/bin
+    to: bin
 mac:
   target:
     - dmg

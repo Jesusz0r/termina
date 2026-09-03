@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# CLI launcher for Termina.
+# Opens the given directory or file in Termina, defaulting to opening the app.
+set -eu
+
+resolve_app_path() {
+  if [ -n "${TERMINA_APP_PATH:-}" ] && [ -d "$TERMINA_APP_PATH" ]; then
+    echo "$TERMINA_APP_PATH"
+    return 0
+  fi
+  if [ -d "/Applications/Termina.app" ]; then
+    echo "/Applications/Termina.app"
+    return 0
+  fi
+  if [ -d "$HOME/Applications/Termina.app" ]; then
+    echo "$HOME/Applications/Termina.app"
+    return 0
+  fi
+  local script_source="$0"
+  if [ -L "$script_source" ]; then
+    local link
+    link="$(readlink "$script_source" 2>/dev/null || true)"
+    if [ -n "$link" ]; then
+      script_source="$link"
+    fi
+  fi
+  local script_dir
+  script_dir="$(CDPATH= cd -- "$(dirname -- "$script_source")" 2>/dev/null && pwd)"
+  local candidate
+  candidate="$(CDPATH= cd -- "$script_dir/../../.." 2>/dev/null && pwd)"
+  if [ -d "$candidate" ] && [[ "$candidate" == *.app ]]; then
+    echo "$candidate"
+    return 0
+  fi
+  echo "/Applications/Termina.app"
+}
+
+print_help() {
+  echo "Usage: termina [options] [path]"
+  echo
+  echo "Open a directory or file in Termina."
+  echo
+  echo "Arguments:"
+  echo "  path           Path to directory or file to open (e.g. 'termina .')"
+  echo
+  echo "Options:"
+  echo "  -h, --help     Show this help message"
+  echo "  -v, --version  Show version"
+}
+
+print_version() {
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    local app_path
+    app_path="$(resolve_app_path)"
+    if [ -f "$app_path/Contents/Info.plist" ]; then
+      local ver
+      ver="$(defaults read "$app_path/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null || true)"
+      if [ -n "$ver" ]; then
+        echo "Termina $ver"
+        return 0
+      fi
+    fi
+  fi
+  local script_dir
+  script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)"
+  if [ -f "$script_dir/../package.json" ]; then
+    local ver
+    ver="$(grep '"version":' "$script_dir/../package.json" | head -n 1 | awk -F'"' '{print $4}' || true)"
+    if [ -n "$ver" ]; then
+      echo "Termina $ver"
+      return 0
+    fi
+  fi
+  echo "Termina"
+}
+
+case "${1:-}" in
+  -h|--help)
+    print_help
+    exit 0
+    ;;
+  -v|--version)
+    print_version
+    exit 0
+    ;;
+esac
+
+if [[ "$OSTYPE" == "darwin"* ]]; then
+  APP_PATH="$(resolve_app_path)"
+
+  if [ ! -d "$APP_PATH" ]; then
+    echo "Error: Termina.app not found at $APP_PATH" >&2
+    echo "Please install Termina in /Applications or set TERMINA_APP_PATH." >&2
+    exit 1
+  fi
+
+  if [ "$#" -eq 0 ]; then
+    # Launch or focus Termina without changing the active folder
+    open -a "$APP_PATH"
+    exit 0
+  fi
+
+  TARGET="$1"
+  if [ -d "$TARGET" ]; then
+    ABSOLUTE_PATH="$(cd "$TARGET" 2>/dev/null && pwd)"
+  elif [ -f "$TARGET" ]; then
+    DIR="$(cd "$(dirname "$TARGET")" 2>/dev/null && pwd)"
+    ABSOLUTE_PATH="$DIR/$(basename "$TARGET")"
+  else
+    ABSOLUTE_PATH="$(pwd)/$TARGET"
+  fi
+
+  open -a "$APP_PATH" --args "$ABSOLUTE_PATH"
+else
+  if [ "$#" -eq 0 ]; then
+    if command -v termina >/dev/null 2>&1; then
+      exec termina
+    elif [ -n "${TERMINA_BIN:-}" ] && [ -x "$TERMINA_BIN" ]; then
+      exec "$TERMINA_BIN"
+    else
+      echo "Error: Termina executable not found in PATH" >&2
+      exit 1
+    fi
+  fi
+
+  TARGET="$1"
+  if [ -d "$TARGET" ]; then
+    ABSOLUTE_PATH="$(cd "$TARGET" 2>/dev/null && pwd)"
+  elif [ -f "$TARGET" ]; then
+    DIR="$(cd "$(dirname "$TARGET")" 2>/dev/null && pwd)"
+    ABSOLUTE_PATH="$DIR/$(basename "$TARGET")"
+  else
+    ABSOLUTE_PATH="$(pwd)/$TARGET"
+  fi
+
+  if command -v termina >/dev/null 2>&1; then
+    exec termina "$ABSOLUTE_PATH"
+  elif [ -n "${TERMINA_BIN:-}" ] && [ -x "$TERMINA_BIN" ]; then
+    exec "$TERMINA_BIN" "$ABSOLUTE_PATH"
+  else
+    echo "Error: Termina executable not found in PATH" >&2
+    exit 1
+  fi
+fi
