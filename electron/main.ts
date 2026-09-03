@@ -12,7 +12,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain as electronIpcMain, Menu
 // Name the app for the macOS menu bar and user-data paths. Unpackaged runs default to "Electron".
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { access, cp, lstat, mkdir, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
@@ -4381,14 +4381,18 @@ class PiEditorApp {
       // ---- run-boundary events (WORLDLINES §6.3) ----
       case "preflight_request":
         {
-          const task = this.handlePreflightRequest(inst, String(event.requestId ?? ""), rendererTarget);
+          const task = this.handlePreflightRequest(inst, String(event.requestId ?? ""), Number(event.deadlineAt), rendererTarget);
           this.trackRecordingTask(task);
           await task;
         }
         break;
       case "preflight_cancel": {
-        const pending = event.token ? this.pendingPreflights.get(event.token) : undefined;
-        if (pending?.terminalId === inst.id) this.expirePreflight(event.token!);
+        const requestId = String(event.requestId ?? "");
+        for (const [token, pending] of this.pendingPreflights) {
+          if (pending.terminalId !== inst.id || pending.requestId !== requestId) continue;
+          this.expirePreflight(token);
+          break;
+        }
         break;
       }
       case "prompt": {
@@ -4656,24 +4660,31 @@ class PiEditorApp {
   private writeAck(terminalId: string, requestId: string, payload: Record<string, unknown>): void {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
     // The ack must land in the terminal's OWN events dir: a candidate's
-    // bridge polls its candidate events dir, not the primary's. Native
-    // creation keeps this sync-looking protocol edge off the main thread and
-    // refuses a replacement root/leaf instead of reopening a pathname.
+    // bridge polls its candidate events dir, not the primary's. This write
+    // is identity-checked but not queued through the snapshot core: a
+    // capture in flight would otherwise delay the ack past the 15s wait.
     const inst = this.terminals.get(terminalId);
     const root = inst ? this.eventsBindingOf(inst) : this.eventsDirBinding;
     const dir = inst ? this.eventsDirOf(inst) : this.eventsDir;
     if (!root) return;
-    void writeBoundOwnedFile({
-      root: dir,
-      rootIdentity: root,
-      components: [`ack-${terminalId}-${requestId}.json`],
-      parentIdentity: root,
-      content: Buffer.from(JSON.stringify(payload)),
-      mode: 0o600,
-      maxBytes: 64 * 1024,
-    }).catch((error) => {
+    const name = `ack-${terminalId}-${requestId}.json`;
+    try {
+      const st = lstatSync(dir);
+      if (!st.isDirectory() || String(st.dev) !== String(root.dev) || String(st.ino) !== String(root.ino)) {
+        throw new Error("events directory identity changed");
+      }
+      const target = join(dir, name);
+      const temp = `${target}.${randomUUID()}.tmp`;
+      try {
+        writeFileSync(temp, JSON.stringify(payload), { flag: "wx", mode: 0o600 });
+        renameSync(temp, target);
+      } catch (error) {
+        try { rmSync(temp, { force: true }); } catch { /* best effort */ }
+        throw error;
+      }
+    } catch (error) {
       console.warn(`[main] could not write ack: ${String(error)}`);
-    });
+    }
   }
 
   /** Ask the renderer to save every dirty model. Bounded wait. The workspace
@@ -4713,54 +4724,103 @@ class PiEditorApp {
   private async handlePreflightRequest(
     inst: PiTerminalInstance,
     requestId: string,
+    deadlineAt: number,
     expected?: PtyRendererSendTarget | null,
   ): Promise<void> {
     if (!requestId) return;
+    const startedAt = Date.now();
+    let stageStartedAt = startedAt;
+    const timings: Record<string, number> = {};
+    const markStage = (stage: string): void => {
+      const now = Date.now();
+      timings[stage] = now - stageStartedAt;
+      stageStartedAt = now;
+    };
+    const report = (outcome: "ok" | "failed"): void => {
+      const totalMs = Date.now() - startedAt;
+      if (outcome === "failed" || totalMs >= 1000) {
+        console.info(`[main] preflight ${outcome} terminal=${inst.id} request=${requestId} totalMs=${totalMs} remainingMs=${deadlineAt - Date.now()} stages=${JSON.stringify(timings)}`);
+      }
+    };
+    const acknowledgeFailure = (error: string): void => {
+      this.writeAck(inst.id, requestId, { ok: false, error });
+      report("failed");
+    };
+    if (!Number.isFinite(deadlineAt)) {
+      acknowledgeFailure("preflight deadline is missing");
+      return;
+    }
+    // Leave enough time for the descriptor-bound acknowledgement write and
+    // the producer's 50 ms poll. Work that misses this shared deadline must
+    // release its lease rather than creating an orphaned one-use token.
+    const remainingBudget = (): number => deadlineAt - Date.now() - 250;
     const ws = this.workspaceOfTerminal(inst);
     if (!ws) {
       // No workspace: nothing to record. The run proceeds without a token.
       this.writeAck(inst.id, requestId, { ok: true, token: null });
+      report("ok");
       return;
     }
     if (!ws.primary) {
       // A candidate run: Release 1 records primary runs only.
       this.writeAck(inst.id, requestId, { ok: true, token: null });
+      report("ok");
       return;
     }
     const preflightOwner = this.projectOfTerminal(inst.id);
     if (!preflightOwner || preflightOwner.workspaces.get(ws.id) !== ws) {
-      this.writeAck(inst.id, requestId, { ok: false, error: "terminal project ownership is unavailable" });
+      acknowledgeFailure("terminal project ownership is unavailable");
+      return;
+    }
+    if (remainingBudget() <= 0) {
+      acknowledgeFailure("preflight deadline expired before admission");
       return;
     }
     const leaseRequester = `preflight:${inst.id}:${requestId}`;
-    const lease = await this.acquireWriteLease(ws.id, leaseRequester, 12000);
+    const lease = await this.acquireWriteLease(ws.id, leaseRequester, Math.min(12000, Math.max(0, remainingBudget() - 4000)));
+    markStage("lease");
     if (!lease.ok) {
-      this.writeAck(inst.id, requestId, { ok: false, error: lease.error ?? "the workspace is busy" });
+      acknowledgeFailure(lease.error ?? "the workspace is busy");
       return;
     }
-    const flush = await this.flushDirtyModels(leaseRequester, ws.id, 5000, expected);
-    if (!flush.ok) {
+    const failHeldPreflight = (error: string): void => {
       this.releaseWriteLease(ws.id, leaseRequester);
-      this.writeAck(inst.id, requestId, { ok: false, error: "could not save editor changes" });
+      acknowledgeFailure(error);
+    };
+    if (remainingBudget() <= 0) {
+      failHeldPreflight("preflight deadline exceeded while acquiring the workspace lease");
+      return;
+    }
+    const flush = await this.flushDirtyModels(leaseRequester, ws.id, Math.min(5000, remainingBudget()), expected);
+    markStage("flush");
+    if (!flush.ok) {
+      failHeldPreflight("could not save editor changes");
+      return;
+    }
+    if (remainingBudget() <= 0) {
+      failHeldPreflight("preflight deadline exceeded while saving editor changes");
       return;
     }
     let store: SnapshotStore | null;
     try {
       store = await preflightOwner.storePromise;
       await ws.indexReady;
+      markStage("store");
     } catch (err) {
       // Store/index bootstrap can fail after the lease is acquired (for
-      // example when the Rust core exits). Never strand that workspace lease:
-      // a hidden project's failed preflight must not block later mutations in
-      // either project.
-      this.releaseWriteLease(ws.id, leaseRequester);
-      this.writeAck(inst.id, requestId, { ok: false, error: err instanceof Error ? err.message : String(err) });
+      // example when the Rust core exits). Never strand that workspace lease.
+      failHeldPreflight(err instanceof Error ? err.message : String(err));
+      return;
+    }
+    if (remainingBudget() <= 0) {
+      failHeldPreflight("preflight deadline exceeded while waiting for the snapshot store");
       return;
     }
     if (!store) {
       // Recording unavailable (no Git): the run proceeds without a token.
       this.releaseWriteLease(ws.id, leaseRequester);
       this.writeAck(inst.id, requestId, { ok: true, token: null });
+      report("ok");
       return;
     }
     try {
@@ -4769,11 +4829,44 @@ class PiEditorApp {
         this.releaseWriteLease(ws.id, leaseRequester);
         this.setRecorderState(inst, "budget", expected);
         this.writeAck(inst.id, requestId, { ok: true, token: null });
+        report("ok");
         return;
       }
-      const state = await store.capture(await gitHead(ws.root), ws.lastStateCommit ?? null);
+      const capturePromise = store.capture(await gitHead(ws.root), ws.lastStateCommit ?? null);
+      const budgetMs = Math.max(0, remainingBudget());
+      const captured = await Promise.race([
+        capturePromise.then((state) => ({ ok: true as const, state })),
+        new Promise<{ ok: false }>((resolve) => {
+          setTimeout(() => resolve({ ok: false }), budgetMs);
+        }),
+      ]);
+      if (!captured.ok) {
+        // Answer the producer now so the tailer can drop backpressure. The
+        // in-flight capture keeps the lease until it returns; it must not
+        // hold the sidecar queue or appends stall and the engine quarantines.
+        acknowledgeFailure("preflight deadline exceeded while capturing the workspace");
+        this.trackRecordingTask(capturePromise.then(
+          () => undefined,
+          () => undefined,
+        ).then(() => {
+          this.releaseWriteLease(ws.id, leaseRequester);
+        }));
+        return;
+      }
+      const state = captured.state;
+      markStage("capture");
       this.setWorkspaceState(ws, state.commit);
       ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
+      if (remainingBudget() <= 0) {
+        failHeldPreflight("preflight deadline exceeded while capturing the workspace");
+        return;
+      }
+      const trustHashes = await this.computeTrustHashes(preflightOwner);
+      markStage("trust");
+      if (remainingBudget() <= 0) {
+        failHeldPreflight("preflight deadline exceeded while hashing trust-sensitive files");
+        return;
+      }
       const token = randomUUID();
       const pending: PendingPreflight = {
         requestId,
@@ -4788,13 +4881,13 @@ class PiEditorApp {
         leaseRequester,
         expiresAt: Date.now() + 60000,
         timer: setTimeout(() => this.expirePreflight(token), 60000),
-        trustHashes: await this.computeTrustHashes(preflightOwner),
+        trustHashes,
       };
       this.pendingPreflights.set(token, pending);
       this.writeAck(inst.id, requestId, { ok: true, token });
+      report("ok");
     } catch (err) {
-      this.releaseWriteLease(ws.id, leaseRequester);
-      this.writeAck(inst.id, requestId, { ok: false, error: err instanceof Error ? err.message : String(err) });
+      failHeldPreflight(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -5010,14 +5103,18 @@ class PiEditorApp {
       if (kind === "settled" && inst.currentRun && !inst.currentRun.settledAt) {
         const runStartStateId = inst.currentRun.startStateId;
         const model = inst.currentRun.model;
-        await this.finalizeRun(inst, state, entryId, expected);
-        this.pushTimeline(inst, {
-          t: "agent_settled",
-          stateId: state.commit,
-          entryId: entryId || null,
-          model,
-          runStartStateId,
-        }, expected);
+        // Session-branch copy can outlive the sidecar ack. Do not hold the
+        // tailer's in-flight slot (and producer backpressure) on it.
+        this.trackRecordingTask((async () => {
+          await this.finalizeRun(inst, state, entryId, expected);
+          this.pushTimeline(inst, {
+            t: "agent_settled",
+            stateId: state.commit,
+            entryId: entryId || null,
+            model,
+            runStartStateId,
+          }, expected);
+        })());
       }
     } catch (err) {
       this.writeAck(inst.id, requestId, { ok: false, error: err instanceof Error ? err.message : String(err) });
@@ -5437,6 +5534,28 @@ class PiEditorApp {
   private isNewCommand(text: string): boolean {
     const t = text.trim();
     return t === "/new" || t.startsWith("/new ");
+  }
+
+  /** Track only interactive-sized input for /new detection. Bulk input is a
+   * paste, not a slash command, and must not synchronously split/scan MBs. */
+  private trackNewCommandInput(id: string, data: string): void {
+    if (data.length > 1024 || data.includes("\x1b[200~")) {
+      this.newCommandBuffers.set(id, "");
+      return;
+    }
+    const buf = (this.newCommandBuffers.get(id) ?? "") + data;
+    if (buf.includes("\r") || buf.includes("\n")) {
+      const lines = buf.split(/\r|\n/);
+      this.newCommandBuffers.set(id, (lines.pop() ?? "").slice(-200));
+      for (const line of lines) {
+        if (this.isNewCommand(line)) {
+          this.clearForNewSession(id);
+          break;
+        }
+      }
+      return;
+    }
+    this.newCommandBuffers.set(id, buf.slice(-200));
   }
 
   /**
@@ -6958,28 +7077,18 @@ class PiEditorApp {
       // Detect /new slash command before it reaches the pty. The bridge also
       // catches it via the prompt payload, but /new may reset the session
       // without a prompt/before_agent_start cycle.
-      if (inst.type === "agent") {
-        const buf = (this.newCommandBuffers.get(id) ?? "") + data;
-        if (buf.includes("\r") || buf.includes("\n")) {
-          const lines = buf.split(/\r|\n/);
-          this.newCommandBuffers.set(id, lines.pop() ?? "");
-          for (const line of lines) {
-            if (this.isNewCommand(line)) { this.clearForNewSession(id); break; }
-          }
-        } else {
-          this.newCommandBuffers.set(id, buf.length > 200 ? buf.slice(-200) : buf);
-        }
-        if ((this.newCommandBuffers.get(id)?.length ?? 0) > 200) {
-          this.newCommandBuffers.set(id, (this.newCommandBuffers.get(id) ?? "").slice(-200));
-        }
-      }
+      if (inst.type === "agent") this.trackNewCommandInput(id, data);
       // Keystrokes are tiny. Skip the UTF-8 scan until the payload is large.
       let text = data;
       if (data.length > 4096 && Buffer.byteLength(data, "utf8") > MAX_CLIPBOARD_BYTES) {
         text = capUtf8(data, MAX_CLIPBOARD_BYTES);
       }
-      if (text === "\x03") inst.interruptedAt = Date.now();
-      inst.pty.write(text);
+      if (text === "\x03") {
+        inst.interruptedAt = Date.now();
+        inst.pty.interrupt();
+      } else {
+        inst.pty.write(text);
+      }
     });
     ipcMain.handle("terminals:resize", (_e, id: unknown, cols: unknown, rows: unknown) => {
       if (typeof id !== "string" || !Number.isFinite(cols) || !Number.isFinite(rows)) return;
@@ -7117,7 +7226,7 @@ class PiEditorApp {
       const inst = this.terminals.get(id);
       if (!inst) return;
       inst.interruptedAt = Date.now();
-      inst.pty.write("\x03");
+      inst.pty.interrupt();
     });
 
     // ---- Verify & Iterate ----
@@ -7354,6 +7463,10 @@ class PiEditorApp {
   // ---------------------------------------------------------------- boot ----
 
   async start(): Promise<void> {
+    // Core session admission is descriptor-bound and intentionally refuses to
+    // create its own root. Establish the app-owned root before any restored
+    // core terminal or session fork can inspect it.
+    await mkdir(this.coreSessionRoot(), { recursive: true, mode: 0o700 });
     this.preferences = await this.preferencesStore.load();
     this.shortcutMap = { ...this.preferences.shortcuts };
     this.appUpdater = createAppUpdater({

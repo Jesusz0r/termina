@@ -121,8 +121,7 @@ export default function (pi: ExtensionAPI): void {
     while (existsSync(marker)) {
       if (hasQuarantineSidecar()) return false;
       if (++polls > SIDECAR_MAX_BACKPRESSURE_POLLS) {
-        quarantineAdmission("sidecar backpressure did not clear within the bounded admission budget");
-        return false;
+        return true;
       }
       try {
         Atomics.wait(sidecarBackpressureCell, 0, 0, 25);
@@ -498,9 +497,12 @@ export default function (pi: ExtensionAPI): void {
     }
     if (!text && images.length === 0) return { action: "continue" };
     const requestId = randomUUID();
-    log({ t: "preflight_request", requestId, hasImages: images.length > 0 });
-    const ack = await waitForAck(requestId, 15000);
+    const timeoutMs = 15000;
+    log({ t: "preflight_request", requestId, hasImages: images.length > 0, deadlineAt: Date.now() + timeoutMs });
+    const ack = await waitForAck(requestId, timeoutMs);
     if (!ack || ack.ok !== true) {
+      // A timeout has no token, so cancel by the durable request identity.
+      log({ t: "preflight_cancel", requestId });
       const err = String((ack as { error?: unknown })?.error ?? "preflight timed out");
       // Keep the draft editable: restore the raw text and do not start.
       if (text) ctx.ui.setEditorText(String(event.text ?? ""));

@@ -2714,8 +2714,10 @@ function waitForSidecarBackpressure(): boolean {
   while (existsSync(marker)) {
     if (hasQuarantineSidecar()) return false;
     if (++polls > SIDECAR_MAX_BACKPRESSURE_POLLS) {
-      quarantineAdmission("sidecar backpressure did not clear within the bounded admission budget");
-      return false;
+      // Checkpoint/preflight handlers can outlive this poll budget. Treat
+      // the marker as advisory so a slow consumer cannot quarantine the
+      // producer and permanently stall the terminal.
+      return true;
     }
     try {
       Atomics.wait(sidecarBackpressureCell, 0, 0, 25);
@@ -7116,16 +7118,31 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   const hasImages = pendingResult.hasImages || extraImages.length > 0;
   let preflight: { requestId: string; token: string | null } | null = null;
   const cancelPreflight = (): void => {
-    if (preflight?.token) logEvent({ t: "preflight_cancel", token: preflight.token });
+    if (preflight) logEvent({ t: "preflight_cancel", requestId: preflight.requestId });
     preflight = null;
   };
   if (eventsDir && terminalId) {
+    if (sidecarWriteStopped) {
+      out("(the run did not start: sidecar admission is paused)\n");
+      surface?.setDraft(prompt);
+      running = false;
+      currentAbort = null;
+      showPrompt();
+      return;
+    }
     const requestId = randomUUID();
-    logEvent({ t: "preflight_request", requestId, hasImages });
-    const ack = await waitForAck(eventsDir, terminalId, requestId, 15_000, bridgeId, {
+    const timeoutMs = 15_000;
+    logEvent({ t: "preflight_request", requestId, hasImages, deadlineAt: Date.now() + timeoutMs });
+    const ack = await waitForAck(eventsDir, terminalId, requestId, timeoutMs, bridgeId, {
       shouldStop: () => interrupted,
     });
     if (!ack || ack.ok !== true) {
+      // Cancellation is request-addressed because a timed-out client never
+      // received the token. The app processes this durable event after any
+      // in-flight capture and cannot strand the late preflight lease.
+      // A concrete ack already finished the request; do not append cancel
+      // while the tailer may still be holding backpressure for capture.
+      if (!ack) logEvent({ t: "preflight_cancel", requestId });
       const err = String(ack && typeof ack.error === "string" ? ack.error : "preflight timed out");
       out(`(the run did not start: ${err})\n`);
       surface?.setDraft(prompt);
@@ -7841,6 +7858,10 @@ export function parseBangCommand(line: string): { command: string } | { error: s
   return { command };
 }
 
+export function bangCommandContext(command: string, output: string): string {
+  return `<local-shell-command>\n${command}\n</local-shell-command>\n<local-shell-output>\n${output}\n</local-shell-output>`;
+}
+
 async function runBangCommand(command: string): Promise<void> {
   running = true;
   interrupted = false;
@@ -7853,6 +7874,10 @@ async function runBangCommand(command: string): Promise<void> {
     const got = await runBash(command, { cwd: canonicalCwd, shouldStop: () => interrupted });
     out(got.content.endsWith("\n") ? got.content : `${got.content}\n`);
     if (interrupted) out("(interrupted)\n");
+    // A direct ! command runs outside the model's tool loop. Persist its
+    // command and bounded result so the next prompt can reason about it.
+    ensureFreshSession();
+    pushMessage("user", bangCommandContext(command, got.content));
   } finally {
     running = false;
     interrupted = false;

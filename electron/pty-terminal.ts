@@ -24,6 +24,10 @@ export class PtyTerminal {
   private pendingOutput: Array<{ data: string; offset: number }> = [];
   private pendingExitCode: number | null = null;
   private exitDelivered = false;
+  /** Ordered PTY input. Large pastes are written in yielded chunks so they
+   * cannot monopolize Electron's main thread or flood node-pty in one call. */
+  private pendingInput: Array<{ data: string; offset: number }> = [];
+  private inputScheduled = false;
 
   onData: (data: string) => boolean | void = () => {};
   onExit: (code: number) => void = () => {};
@@ -66,6 +70,7 @@ export class PtyTerminal {
     });
     this.pty.onExit(({ exitCode }) => {
       this.exited = true;
+      this.pendingInput.length = 0;
       this.pendingExitCode = exitCode;
       // A native exit can race the final source pause. Keep feeding the
       // already-read tail through the bounded egress owner before announcing
@@ -120,12 +125,55 @@ export class PtyTerminal {
   }
 
   write(data: string): void {
+    if (this.exited || !this.pty || data.length === 0) return;
+    this.pendingInput.push({ data, offset: 0 });
+    this.scheduleInput();
+  }
+
+  /** Cancel queued input and deliver Ctrl+C without waiting behind a paste. */
+  interrupt(): void {
     if (this.exited || !this.pty) return;
+    this.pendingInput.length = 0;
     try {
-      this.pty.write(data);
+      this.pty.write("\x03");
     } catch {
       /* ignore */
     }
+  }
+
+  private scheduleInput(): void {
+    if (this.inputScheduled || this.exited || !this.pty || this.pendingInput.length === 0) return;
+    this.inputScheduled = true;
+    setImmediate(() => {
+      this.inputScheduled = false;
+      this.flushInputChunk();
+    });
+  }
+
+  private flushInputChunk(): void {
+    if (this.exited || !this.pty) {
+      this.pendingInput.length = 0;
+      return;
+    }
+    const pending = this.pendingInput[0];
+    if (!pending) return;
+    const maxEnd = Math.min(pending.data.length, pending.offset + 16 * 1024);
+    // Never hand node-pty half of a surrogate pair; separate writes are
+    // encoded independently by its native boundary.
+    const end = maxEnd < pending.data.length
+      && pending.data.charCodeAt(maxEnd - 1) >= 0xd800
+      && pending.data.charCodeAt(maxEnd - 1) <= 0xdbff
+      ? maxEnd - 1
+      : maxEnd;
+    try {
+      this.pty.write(pending.data.slice(pending.offset, end));
+    } catch {
+      this.pendingInput.length = 0;
+      return;
+    }
+    pending.offset = end;
+    if (pending.offset >= pending.data.length) this.pendingInput.shift();
+    this.scheduleInput();
   }
 
   resize(cols: number, rows: number): void {
@@ -139,6 +187,7 @@ export class PtyTerminal {
 
   kill(signal?: string): void {
     if (this.exited || !this.pty) return;
+    this.pendingInput.length = 0;
     try {
       this.pty.kill(signal);
     } catch {

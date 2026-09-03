@@ -1,5 +1,5 @@
 import { test as base, expect, _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -10,9 +10,40 @@ export interface TerminaE2EFixtures {
   page: Page;
   projectRoot: string;
   runRoot: string;
+  terminalEngine: "pi" | "core";
+  closeElectron: () => Promise<void>;
+}
+
+async function stopElectron(app: ElectronApplication): Promise<void> {
+  const child = app.process();
+  if (child.exitCode !== null || child.signalCode !== null) return;
+
+  await new Promise<void>((resolveDone) => {
+    const forceKill = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* The exit listener still owns completion. */
+      }
+    }, 3_000);
+
+    child.once("exit", () => {
+      clearTimeout(forceKill);
+      resolveDone();
+    });
+
+    app.close().catch(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* The exit listener still owns completion. */
+      }
+    });
+  });
 }
 
 export const test = base.extend<TerminaE2EFixtures>({
+  terminalEngine: ["pi", { option: true }],
   runRoot: async ({}, use) => {
     const runRoot = mkdtempSync(join(tmpdir(), "termina-playwright-"));
     await use(runRoot);
@@ -43,7 +74,7 @@ export const test = base.extend<TerminaE2EFixtures>({
     await use(root);
   },
 
-  electronApp: async ({ runRoot, projectRoot }, use) => {
+  electronApp: async ({ runRoot, projectRoot, terminalEngine }, use) => {
     const eventsDir = join(runRoot, "events");
     const worldsDir = join(runRoot, "worlds");
     const userData = join(runRoot, "user-data");
@@ -51,13 +82,14 @@ export const test = base.extend<TerminaE2EFixtures>({
     mkdirSync(userData, { recursive: true });
     mkdirSync(homeDir, { recursive: true });
 
-    // Seed Pi agent roster so term-1 is an agent terminal with active sidecar tailing
-    const slug = `--${projectRoot.replace(/^[/\\]+/, "").replace(/[/\\]+$/, "").replace(/[/\\:]/g, "-")}--`;
+    // Seed the requested agent engine so term-1 has active sidecar tailing.
+    const canonicalProjectRoot = realpathSync(projectRoot);
+    const slug = `--${canonicalProjectRoot.replace(/^[/\\]+/, "").replace(/[/\\]+$/, "").replace(/[/\\:]/g, "-")}--`;
     const rosterDir = join(userData, "terminal-rosters");
     mkdirSync(rosterDir, { recursive: true });
     writeFileSync(
       join(rosterDir, `${slug}.json`),
-      JSON.stringify({ terminals: [{ id: "term-1", type: "agent", engine: "pi" }] }) + "\n",
+      JSON.stringify({ terminals: [{ id: "term-1", type: "agent", engine: terminalEngine }] }) + "\n",
     );
 
     patchBundleName();
@@ -73,6 +105,7 @@ export const test = base.extend<TerminaE2EFixtures>({
       TERMINA_E2E_RUN_ROOT: runRoot,
       NODE_ENV: "test",
     };
+    delete env.ELECTRON_RUN_AS_NODE;
 
     const app = await electron.launch({
       args: [
@@ -90,32 +123,11 @@ export const test = base.extend<TerminaE2EFixtures>({
     });
 
     await use(app);
+    await stopElectron(app);
+  },
 
-    await new Promise<void>((resolve) => {
-      const child = app.process();
-      if (child.exitCode !== null || child.signalCode !== null) return resolve();
-      const timer = setTimeout(() => {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          /* ignore */
-        }
-        resolve();
-      }, 3_000);
-
-      child.once("exit", () => {
-        clearTimeout(timer);
-        setTimeout(resolve, 300);
-      });
-
-      app.close().catch(() => {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          /* ignore */
-        }
-      });
-    });
+  closeElectron: async ({ electronApp }, use) => {
+    await use(() => stopElectron(electronApp));
   },
 
   page: async ({ electronApp }, use) => {

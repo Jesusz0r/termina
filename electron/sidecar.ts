@@ -55,8 +55,8 @@ interface SidecarMeta {
 }
 
 export type SidecarEvent =
-  | (SidecarMeta & { t: "preflight_request"; requestId?: string; hasImages?: boolean })
-  | (SidecarMeta & { t: "preflight_cancel"; token?: string })
+  | (SidecarMeta & { t: "preflight_request"; requestId?: string; hasImages?: boolean; deadlineAt?: number })
+  | (SidecarMeta & { t: "preflight_cancel"; requestId?: string })
   | (SidecarMeta & { t: "prompt"; file?: string; hasPreflight?: boolean })
   | (SidecarMeta & { t: "steer_input"; behavior?: string })
   | (SidecarMeta & { t: "checkpoint_request"; requestId?: string; kind?: string; entryId?: string | null })
@@ -390,9 +390,15 @@ function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>): Side
   if (typeof t !== "string" || !isSidecarKind(t)) return null;
   switch (t) {
     case "preflight_request":
-      return { ...meta, t: "preflight_request", requestId: optionalString(rec.requestId), hasImages: optionalBoolean(rec.hasImages) };
+      return {
+        ...meta,
+        t: "preflight_request",
+        requestId: optionalString(rec.requestId),
+        hasImages: optionalBoolean(rec.hasImages),
+        deadlineAt: optionalSafeInteger(rec.deadlineAt),
+      };
     case "preflight_cancel":
-      return { ...meta, t: "preflight_cancel", token: optionalString(rec.token) };
+      return { ...meta, t: "preflight_cancel", requestId: optionalString(rec.requestId) };
     case "prompt":
       return { ...meta, t: "prompt", file: optionalString(rec.file), hasPreflight: optionalBoolean(rec.hasPreflight) };
     case "steer_input":
@@ -954,7 +960,19 @@ export class SidecarTailer {
     this.pendingDeliveries.delete(id);
     this.backlogOverflowed.delete(id);
     if (persistedQuarantine || this.legacySourceOverflow.has(id)) {
-      this.quarantine(id, generation, persistedQuarantine ? "persisted compatibility quarantine" : "legacy source admission exceeded the bounded anchor set");
+      const compatibilityHazard = this.legacySourceOverflow.has(id)
+        || legacySources.length > 0
+        || retainedNames.length > 0;
+      if (compatibilityHazard) {
+        this.quarantine(id, generation, persistedQuarantine ? "persisted compatibility quarantine" : "legacy source admission exceeded the bounded anchor set");
+      } else {
+        // Producer-side admission stops (backpressure) must not permanently
+        // kill a terminal. A new watch lifecycle rechecks sources; with no
+        // legacy/retained hazard the durable marker is stale.
+        this.quarantined.delete(id);
+        void this.clearQuarantineMarker(id);
+        void this.clearBackpressureMarker(id, generation);
+      }
     }
     void this.checkBacklog(id, undefined, generation);
     const resumeTimer = this.resumeTimers.get(id);
@@ -2229,7 +2247,6 @@ export class SidecarTailer {
           delivery = this.onEvent(id, event);
           if (delivery && typeof delivery === "object" && "then" in delivery && typeof delivery.then === "function") {
             this.pendingDeliveries.add(id);
-            void this.setBackpressureMarker(id, Math.max(0, size - state.offset), generation);
           }
           delivery = await Promise.resolve(delivery);
         } catch {
@@ -2249,7 +2266,6 @@ export class SidecarTailer {
         }
         if (typeof delivery === "object" && delivery !== null && delivery.completed) {
           this.pendingDeliveries.add(id);
-          void this.setBackpressureMarker(id, Math.max(0, size - state.offset), generation);
           try {
             await delivery.completed;
           } catch {
@@ -2602,7 +2618,7 @@ export class SidecarTailer {
       }
     }
     if (!this.isLive(id, generation)) return undefined;
-    const holdProducer = this.paused.has(id) || this.quarantined.has(id) || this.pendingDeliveries.has(id);
+    const holdProducer = this.paused.has(id) || this.quarantined.has(id);
     if (holdProducer) void this.setBackpressureMarker(id, retained, generation);
     if (retained > this.maxBacklogBytes) this.reportBacklogOverflow(id, retained, generation);
     else if (!holdProducer) {

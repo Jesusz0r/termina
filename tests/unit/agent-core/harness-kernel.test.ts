@@ -112,6 +112,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       fetchUrlError,
       trustedPath,
       parseBangCommand,
+      bangCommandContext,
     } = core;
     
     const {
@@ -463,6 +464,11 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("parseBangCommand rejects a bare bang", parseBangCommand("!")?.error === "empty command");
     check("parseBangCommand rejects whitespace", parseBangCommand("!   ")?.error === "empty command");
     check("parseBangCommand ignores prompts", parseBangCommand("hello") === null);
+    const bangContext = bangCommandContext("printf hello", "hello\n[exit 0]");
+    check(
+      "bang command context carries command and result to the model",
+      bangContext.includes("printf hello") && bangContext.includes("hello\n[exit 0]"),
+    );
     const echo = await runBash("echo hello-core", { cwd: root });
     check("bash echo succeeds", echo.isError === false && echo.content.includes("hello-core") && echo.content.includes("[exit 0]"));
     const bashPath = await runBash("printf %s \"$PATH\"", { cwd: root });
