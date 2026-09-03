@@ -4481,9 +4481,11 @@ class PiEditorApp {
         inst.toolOutcomes = new Map();
         this.sendPlan(inst, rendererTarget);
         this.sendTimelinePrefix(inst, rendererTarget);
-        // Baseline for Change Review: snapshot the watcher's content cache so
-        // diffs compare the run's start state against the current files.
-        this.resetBaselines(inst, startWs?.watcher?.lastContents);
+        // Refresh untouched-file baselines from the run start, but retain the
+        // original baseline of every file already in Change Review. The
+        // modified list spans turns, so replacing those baselines here would
+        // make earlier files appear unchanged after the next prompt.
+        this.prepareRunBaselines(inst, startWs?.watcher?.lastContents);
         inst.runSnapshots.clear();
         inst.runSnapshotBytes = 0;
         inst.lastToolAt.clear();
@@ -5591,12 +5593,9 @@ class PiEditorApp {
       inst.currentRun.reason = inst.currentRun.reason ?? "session reset by /new";
       inst.currentRun = null;
     }
-    // Baselines and user-edit context: cleared so a new run starts clean,
-    // matching the agent_start reset even when /new skipped a prompt cycle.
-    // Modified files are intentionally kept (agent_start also preserves them)
-    // as they reflect real workspace changes on disk.
-    inst.baselines.clear();
-    inst.baselineBytes = 0;
+    // Modified files and their original baselines intentionally survive /new:
+    // they describe real workspace changes still present on disk. The next
+    // agent_start refreshes baselines only for files not already in the list.
     const ws = this.workspaceOfTerminal(inst);
     if (ws) this.clearUserEdits(ws);
     this.clearMailbox(terminalId);
@@ -5767,11 +5766,24 @@ class PiEditorApp {
     }
   }
 
-  private resetBaselines(inst: PiTerminalInstance, source: Map<string, string> | undefined): void {
+  private prepareRunBaselines(inst: PiTerminalInstance, source: Map<string, string> | undefined): void {
+    // A terminal's modified list is cumulative until the user clears it. Keep
+    // those files anchored to their first pre-change content across turns.
+    const retained = new Map<string, string | null>();
+    for (const path of inst.modified.keys()) {
+      if (inst.baselines.has(path)) retained.set(path, inst.baselines.get(path)!);
+    }
+
     inst.baselines.clear();
     inst.baselineBytes = 0;
-    if (!source) return;
-    for (const [path, content] of source) this.setBaseline(inst, path, content);
+    if (source) {
+      for (const [path, content] of source) {
+        if (!inst.modified.has(path)) this.setBaseline(inst, path, content);
+      }
+    }
+    // Insert retained entries last so the bounded cache evicts speculative
+    // untouched-file snapshots before baselines backing visible review items.
+    for (const [path, content] of retained) this.setBaseline(inst, path, content);
   }
 
   private setBaseline(inst: PiTerminalInstance, path: string, value: string | null): void {
@@ -5848,9 +5860,10 @@ class PiEditorApp {
     const p = await this.canonicalPath(absPath);
     const existing = inst.modified.get(p);
     if (existing) {
-      // The watcher status is authoritative: it knows whether the file
-      // existed before the first change it ever saw for this path.
-      existing.status = status;
+      // Status is relative to the cumulative review baseline, not merely the
+      // latest watcher transition. A file created earlier in the session
+      // remains "created" when a later turn modifies it again.
+      existing.status = inst.baselines.get(p) === null || existing.status === "created" ? "created" : "modified";
     } else {
       const workspace = this.workspaceOfTerminal(inst);
       if (!workspace) return;
