@@ -102,6 +102,11 @@ describe("Agent Core Cache", () => {
       const identity = cacheIdentityFor(base)!;
       expect(identity.key).toBe(mainKey);
       expect(cacheSessionHeaders(identity)["x-session-id"]).toBe(mainKey);
+
+      const goIdentity = cacheIdentityFor({ ...base, provider: "opencode-go", protocol: "openai-completions", route: "opencode.ai" })!;
+      const zenIdentity = cacheIdentityFor({ ...base, provider: "opencode-zen", protocol: "anthropic-messages", route: "opencode.ai" })!;
+      expect(cacheSessionHeaders(goIdentity)["x-opencode-session"]).toBe(goIdentity.key);
+      expect(cacheSessionHeaders(zenIdentity)["x-opencode-session"]).toBe(zenIdentity.key);
       expect(Object.keys(cacheSessionHeaders({ ...identity, provider: "opencode-zen" })).length).toBe(0);
       expect(Object.keys(cacheSessionHeaders({ ...identity, provider: "xai", protocol: "openai-responses" })).length).toBe(0);
 

@@ -279,9 +279,10 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       const zenIdentity = identityFor("opencode-zen", "https://opencode.ai/zen/v1");
       const xaiIdentity = identityFor("xai", "https://api.x.ai/v1", "openai-completions");
       const openrouter = auth.cacheSessionHeaders(openrouterIdentity)["x-session-id"];
+      const zen = auth.cacheSessionHeaders(zenIdentity)["x-opencode-session"];
       const xai = auth.cacheSessionHeaders(xaiIdentity)["x-grok-conv-id"];
-      assert.ok(openrouter && xai);
-      assert.equal(auth.cacheSessionHeaders(zenIdentity)["x-opencode-session"], undefined);
+      assert.ok(openrouter && zen && xai);
+      assert.equal(zen, zenIdentity?.key);
       assert.notEqual(openrouter, xai);
     });
     

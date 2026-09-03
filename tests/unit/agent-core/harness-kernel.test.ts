@@ -2126,9 +2126,16 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       protocol: "openai-responses",
       route: "https://openrouter.ai/api/v1",
     }) === null);
+    const zenCacheIdentity = cacheIdentityFor({
+      sessionSeed: cacheSeed,
+      role: "main",
+      provider: "opencode-zen",
+      protocol: "openai-responses",
+      route: "https://opencode.ai/zen/v1",
+    });
     check(
-      "cacheSessionHeaders opencode is absent",
-      Object.keys(cacheSessionHeaders(cacheIdentity && { ...cacheIdentity, provider: "opencode-zen" })).length === 0,
+      "cacheSessionHeaders opencode pins derived key",
+      cacheSessionHeaders(zenCacheIdentity)["x-opencode-session"] === zenCacheIdentity?.key,
     );
     check(
       "cacheSessionHeaders openrouter",

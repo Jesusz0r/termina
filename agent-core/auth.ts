@@ -558,6 +558,9 @@ export function cacheSessionHeaders(identity: CacheIdentity | null): Record<stri
   if (!identity || typeof identity.key !== "string" || !identity.key || !/^[\x21-\x7e]+$/.test(identity.key) || identity.key.length > CACHE_KEY_MAX_LENGTH) return {};
   if (deriveCacheIdentityKey(identity) !== identity.key) return {};
   if (identity.provider === "openrouter") return { "x-session-id": identity.key };
+  if (identity.provider === "opencode-go" || identity.provider === "opencode-zen") {
+    return { "x-opencode-session": identity.key };
+  }
   // x-grok-conv-id is documented for xAI Chat Completions, not Responses.
   if (identity.provider === "xai" && identity.protocol === "openai-completions") return { "x-grok-conv-id": identity.key };
   return {};
