@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { readFileSync, readdirSync, rmSync, mkdtempSync } from "node:fs";
+import { readFileSync, readdirSync, realpathSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,6 +34,18 @@ function collectJavaScript(root: string): string {
     else if (entry.isFile() && entry.name.endsWith(".js")) chunks.push(readFileSync(path, "utf8"));
   }
   return chunks.join("\n");
+}
+
+/** Canonical module path for comparisons. pnpm symlinks top-level
+ *  node_modules entries into its content store, so strict path equality
+ *  breaks under pnpm even when the resolved file is identical. */
+function canonicalModuleId(id: string): string {
+  const normalized = normalizePath(id.split("?", 1)[0]);
+  try {
+    return normalizePath(realpathSync(normalized));
+  } catch {
+    return normalized;
+  }
 }
 
 function assertPatchedCode(code: string) {
@@ -86,9 +98,7 @@ describe("DOMPurify build and optimizer isolation", () => {
         monacoSanitizer,
       );
       expect(resolved).toBeTruthy();
-      expect(normalizePath(resolved!.id.split("?", 1)[0])).toBe(
-        normalizePath(installedDomPurify),
-      );
+      expect(canonicalModuleId(resolved!.id)).toBe(canonicalModuleId(installedDomPurify));
     } finally {
       await server.close();
     }
@@ -118,16 +128,16 @@ describe("DOMPurify build and optimizer isolation", () => {
     });
     const outputs = Array.isArray(buildResult) ? buildResult : [buildResult];
     const chunks = outputs.flatMap((output) => (output as any).output).filter((item) => item.type === "chunk");
-    const expectedModule = normalizePath(installedDomPurify);
-    const forbiddenModule = normalizePath(vendoredDomPurify);
+    const expectedModule = canonicalModuleId(installedDomPurify);
+    const forbiddenModule = canonicalModuleId(vendoredDomPurify);
     const sanitizerChunk = chunks.find((chunk) =>
-      Object.keys(chunk.modules).some((id) => normalizePath(id.split("?", 1)[0]) === expectedModule),
+      Object.keys(chunk.modules).some((id) => canonicalModuleId(id) === expectedModule),
     );
 
     expect(sanitizerChunk).toBeTruthy();
     expect(sanitizerChunk.fileName).toMatch(/(?:^|\/)monaco(?:-|\.)/);
     const containsForbidden = chunks.some((chunk) =>
-      Object.keys(chunk.modules).some((id) => normalizePath(id.split("?", 1)[0]) === forbiddenModule),
+      Object.keys(chunk.modules).some((id) => canonicalModuleId(id) === forbiddenModule),
     );
     expect(containsForbidden).toBe(false);
     assertPatchedCode(sanitizerChunk.code);
