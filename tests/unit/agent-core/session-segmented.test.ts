@@ -784,9 +784,18 @@ export async function run({ check, leftovers }) {
     { autoAck: true, ackPayload: { token: "lease-token" } },
   );
   const cancelledSidecar = readFileSync(join(pendingEvents, "term-cancel.jsonl"), "utf8");
+  // Cancellation is request-addressed: a timed-out client never received the
+  // token, so the cancel carries the preflight request id instead.
+  const cancelledRecords = cancelledSidecar
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const cancelRequestId = cancelledRecords.find((record) => record.t === "preflight_request")?.requestId;
   check(
     "pre-start storage failure cancels its preflight lease",
-    cancelledRun.out.includes("did not start") && cancelledSidecar.includes('"t":"preflight_cancel"') && cancelledSidecar.includes('"token":"lease-token"'),
+    cancelledRun.out.includes("did not start") &&
+      typeof cancelRequestId === "string" &&
+      cancelledRecords.some((record) => record.t === "preflight_cancel" && record.requestId === cancelRequestId),
     pendingSidecar.slice(-120),
   );
 
