@@ -363,7 +363,7 @@ describe("Sidecar Retirement Race & Restart Invariants", () => {
         const boundedRestart = makeTailer();
         boundedRestart.watch(boundedId);
         try {
-          await waitFor(() => boundedRestart.isPaused(boundedId) && existsSync(join(eventsDir, `.quarantine-${boundedId}`)), "compatibility quarantine did not survive restart");
+          await waitFor(() => boundedRestart.isPaused(boundedId) && existsSync(join(eventsDir, `.quarantine-${boundedId}`)), "source quarantine did not survive restart");
         } finally {
           boundedRestart.stop();
         }

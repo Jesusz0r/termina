@@ -74,8 +74,8 @@ const PROMOTION_DIRECTORY_MAX_DEPTH: usize = 64;
 /// rejected before any response array is materialized.
 const PROMOTION_RECOVERY_ROOT_MAX_ENTRIES: usize = 128;
 /// The retained-session root binder is deliberately stricter than the
-/// general promotion directory helper. It validates the complete legacy
-/// retained shape while the parent and leaf descriptors are still held.
+/// general promotion directory helper. It validates the complete retained
+/// shape while the parent and leaf descriptors are still held.
 const RETAINED_ROOT_MAX_ENTRIES: usize = 128 * 4;
 const RETAINED_ROOT_MAX_SCAN_ENTRIES: usize = 250_000;
 const RETAINED_ROOT_MAX_SCAN_DEPTH: usize = 64;
@@ -1384,7 +1384,7 @@ fn write_blob(
 /// Publish one object through the request transaction. The ODB existence
 /// check covers canonical loose/packed objects and alternates. Ownership is
 /// based only on the no-overwrite canonical loose publish, so rollback cannot
-/// remove a pre-existing or concurrently adopted object.
+/// remove a pre-existing or concurrently replaced object.
 fn write_transaction_object(
     transaction: &mut StoreObjectTransaction,
     repo: &Repository,
@@ -3944,7 +3944,7 @@ fn op_promotion_bound_list_entries(req: &Value) -> Result<Value, String> {
 /// a preflight probe: it reports the first absent component without asking
 /// Electron to resolve a mutable pathname.  A later create request can pass
 /// that index as `expectedMissingAt`, making an unexpected pre-created
-/// component a conflict instead of silently adopting it.
+/// component a conflict instead of silently accepting it.
 fn op_promotion_bound_prepare_directory(req: &Value) -> Result<Value, String> {
     let root_path = s(req, "root")?;
     let (root, _root_identity, _capability) =
@@ -4195,11 +4195,10 @@ struct RetainedRootScan {
     entries: usize,
     bytes: u64,
     work_bytes: u64,
-    has_data: bool,
 }
 
-/// Validate an existing legacy retained tree while every directory component
-/// is opened relative to the already-bound root descriptor.  This is a
+/// Validate an existing retained tree while every directory component is
+/// opened relative to the already-bound root descriptor. This is a
 /// bounded structural proof only; Electron still performs the schema-aware
 /// usage measurement before admission.  The walk is iterative so an
 /// adversarial deep tree cannot consume native call-stack space.
@@ -4260,8 +4259,8 @@ fn promotion_validate_retained_directory(
         if scan.work_bytes > RETAINED_ROOT_MAX_SCAN_WORK_BYTES {
             return Err("retained root scan exceeded its work bound".to_string());
         }
-        if frame.root_level && retained_root_top_level_name(&name)? {
-            scan.has_data = true;
+        if frame.root_level {
+            retained_root_top_level_name(&name)?;
         }
         scan.entries = scan
             .entries
@@ -4406,7 +4405,7 @@ struct PromotionRootState {
 }
 
 /// Read one small private metadata file through the already-bound parent
-/// descriptor. This is deliberately shared by the adoption tombstone and
+/// descriptor. This is deliberately shared by the binding tombstone and
 /// provenance paths so a pathname replacement cannot change the bytes between
 /// the identity check and the read.
 fn promotion_read_private_bounded_file(
@@ -5170,7 +5169,7 @@ fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, String> {
                     ) => {}
                 Ok(_) => return Err("promotion root provenance is not a bounded private regular file".to_string()),
                 Err(error) if missing_path(&error) => {
-                    return Err("promotion root provenance was deleted after adoption".to_string())
+                    return Err("promotion root provenance was deleted after binding".to_string())
                 }
                 Err(error) => return Err(format!("stat promotion root provenance failed: {error}")),
             }
@@ -5231,23 +5230,18 @@ fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, String> {
         promotion_test_pause(req, "retained-root-created")?;
     }
 
-    // Prove an unproven existing legacy tree before creating its durable
-    // state. A marker-only copied directory is rejected without leaving a
-    // resumable adoption record that could later be abused.
+    // Validate the retained tree before creating durable state. A copied
+    // marker cannot establish root identity.
     if marker.is_some() {
         let mut scan = RetainedRootScan {
             entries: 1,
             bytes: 0,
             work_bytes: path.len() as u64,
-            has_data: false,
         };
         if scan.work_bytes > RETAINED_ROOT_MAX_SCAN_WORK_BYTES {
             return Err("retained root path exceeds its work bound".to_string());
         }
         promotion_validate_retained_directory(&directory, 0, true, &mut scan)?;
-        if !created && expected.is_none() && !scan.has_data {
-            return Err("existing retained root has no legacy app-owned evidence".to_string());
-        }
     }
 
     let mut state_identity = existing_state.as_ref().map(|state| state.identity);
@@ -5265,7 +5259,7 @@ fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, String> {
             Some((req, "retained-root-before-state-rename")),
         )?);
         // The pending tombstone is the first durable proof that this exact
-        // root identity is being created/adopted. A restart after this point
+        // root identity is being bound. A restart after this point
         // resumes the same identity-bound transaction rather than inferring
         // trust again from the mutable marker/tree.
         promotion_test_pause(req, "retained-root-state-persisted")?;
@@ -5280,8 +5274,8 @@ fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, String> {
         };
         // A pending state is the native transaction's durable recovery proof.
         // It permits completing a marker write interrupted after the root was
-        // opened, but never permits a marker-only legacy adoption: an
-        // unproven existing root is rejected before pending state is created.
+        // opened, but never permits marker-only admission: an unproven
+        // existing root is rejected before pending state is created.
         let create_marker = created
             || (marker_missing
                 && existing_state
@@ -5409,11 +5403,26 @@ fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, String> {
 }
 
 /// Ensure an absolute directory chain using only descriptor-relative
-/// operations from the native root descriptor. This replaces the old
-/// TypeScript walk that selected a mutable pathname as the trusted root.
+/// operations from the native root descriptor.
 fn op_promotion_bound_ensure_directory(req: &Value) -> Result<Value, String> {
-    if req.get("bootstrapExisting").is_some() {
-        return Err("unknown promotion directory field: bootstrapExisting".to_string());
+    let object = req
+        .as_object()
+        .ok_or("promotion directory request must be an object")?;
+    for field in object.keys() {
+        if !matches!(
+            field.as_str(),
+            "op"
+                | "requestId"
+                | "path"
+                | "expectedIdentity"
+                | "capability"
+                | "trustedParent"
+                | "provenance"
+                | "marker"
+                | "testHook"
+        ) {
+            return Err("promotion directory request contains an unknown field".to_string());
+        }
     }
     // Requests carrying provenance state use the single native create/bind
     // transaction. Already-proven roots use the ordinary identity opener.
@@ -7449,7 +7458,7 @@ fn promotion_quarantine_tree_usage(dir: &fs::File) -> Result<(usize, u64, u64), 
 
 /// Scan all app-created quarantine containers under the descriptor-bound
 /// grandparent.  Containers are deliberately fresh: an existing pathname is
-/// never adopted as a trust root, and the aggregate scan makes retention
+/// never accepted as a trust root, and the aggregate scan makes retention
 /// bounded across process restarts.
 struct PromotionQuarantineUsage {
     containers: usize,

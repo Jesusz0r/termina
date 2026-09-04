@@ -686,7 +686,7 @@ export class SidecarTailer {
   private segmentIdentities = new Map<string, string>();
   /** Published writer-owned generation currently being drained. */
   private sealedSegments = new Map<string, string>();
-  /** A compatibility source is not restart-safe or exceeds the anchor cap. */
+  /** A source is quarantined when it is not restart-safe or exceeds the anchor cap. */
   private quarantined = new Set<string>();
   /** Every retired pathname retains one durable identity anchor: POSIX cannot
    * prove that an escaped descriptor will not append after verification. */
@@ -820,9 +820,9 @@ export class SidecarTailer {
     // Cursor writes remain serialized in cursorWrites, but their generation
     // check prevents a late completion from repopulating these maps.
     this.clearSegmentState(id);
-    // A marker left by a previous process is itself durable evidence that an
-    // unsafe compatibility transition was observed. Keep this lifecycle
-    // fail-closed until the source set is explicitly replaced/cleaned.
+    // A marker left by a previous process is durable evidence that an unsafe
+    // source transition was observed. Keep this lifecycle fail-closed until
+    // the source set is explicitly replaced or cleaned.
     const persistedQuarantine = this.hasQuarantineMarkerSync(id) || wasQuarantined;
     this.sealedSegments.delete(id);
     this.retainedSegments.delete(id);
@@ -967,8 +967,8 @@ export class SidecarTailer {
     this.resumeTimers.delete(id);
     this.paused.delete(id);
     void this.clearBackpressureMarker(id, generation, true);
-    // A compatibility quarantine is durable admission state. Keep its
-    // marker across lifecycle teardown so a restart cannot resume after an
+    // Quarantine is durable admission state. Keep its marker across lifecycle
+    // teardown so a restart cannot resume after an
     // identity-bound source was lost; normal terminals have no marker.
     if (!wasQuarantined) void this.clearQuarantineMarker(id);
   }
@@ -1095,7 +1095,7 @@ export class SidecarTailer {
     if (!this.isLive(id, generation) || this.quarantined.has(id)) return;
     let retainedNames = await this.listRetainedSegments(id);
     if (retainedNames.length > 0) {
-      const retainedName = await this.adoptRetainedAnchor(id, generation, retainedNames);
+      const retainedName = await this.bindRetainedAnchor(id, generation, retainedNames);
       if (retainedName === false || !this.isLive(id, generation) || this.quarantined.has(id)) return;
     }
     const retainedName = this.retainedSegments.get(id)
@@ -1363,7 +1363,7 @@ export class SidecarTailer {
    * the terminal. The surviving alias is then the sole descriptor-safe source
    * used by the normal retained drain path.
    */
-  private async adoptRetainedAnchor(id: string, generation: number, names: string[]): Promise<string | false | null> {
+  private async bindRetainedAnchor(id: string, generation: number, names: string[]): Promise<string | false | null> {
     if (names.length === 0) return null;
     if (!this.isLive(id, generation)) return false;
     if (names.some((name) => this.retainedBaseName(id, name) === null)) {
@@ -1830,8 +1830,8 @@ export class SidecarTailer {
     }
     if (!this.isLive(id, generation)) return;
 
-    // Active-path compatibility may skip an over-cap line once its newline is
-    // observed. Segment identities use the fail-closed branches below instead
+    // The active path may skip an over-cap line once its newline is observed.
+    // Segment identities use the fail-closed branches below instead
     // of advancing a durable cursor without delivering an event.
     let data = oversized ? chunk : (partial.length > 0 ? Buffer.concat([partial, chunk]) : chunk);
     let baseOffset = state.offset;
@@ -2050,7 +2050,7 @@ export class SidecarTailer {
   }
 
   /**
-   * Permanently stop this terminal's compatibility admission for the current
+   * Permanently stop this terminal's source admission for the current
    * lifecycle. A missing identity-bound anchor cannot be repaired by polling;
    * retaining the active cursor would be a silent data-loss choice. The
    * terminal-local marker lets synchronous producers fail fast rather than
@@ -2066,7 +2066,7 @@ export class SidecarTailer {
       const marker = this.quarantinePath(id);
       void durableAtomicWrite(marker, JSON.stringify({ version: 1, state: "quarantined", terminalId: id, reason: reason.slice(0, 256) }) + "\n").catch((error) => {
         if (this.isLive(id, generation)) {
-          console.warn(`[sidecar] could not publish ${id} compatibility quarantine: ${error instanceof Error ? error.message : String(error)}`);
+          console.warn(`[sidecar] could not publish ${id} quarantine: ${error instanceof Error ? error.message : String(error)}`);
         }
       });
     }

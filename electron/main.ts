@@ -13,7 +13,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain as electronIpcMain, Menu
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { access, cp, lstat, mkdir, open as fsOpen, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
+import { access, cp, lstat, mkdir, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -37,7 +37,7 @@ import { BRIDGE_EXTENSION } from "./bridge-extension.js";
 import { AgentStartEvent, SidecarEvent, SidecarEventDelivery, SidecarEventQueue, SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
 import { SnapshotStore, MIN_WORLDS_FREE_BYTES, bindOwnedDirectory, bindOwnedEntry, boundPromotionCopyTree, boundPromotionEnsureDirectory, boundPromotionListEntries, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionReadFile, boundPromotionWriteFile, captureRootInRepo, createOwnedDirectory, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, platformHasRecursiveWatcher, platformHasSandboxExec, removeBoundOwnedDirectory, removeBoundOwnedEntry, type BoundOwnedDirectory, type BoundPromotionExpectedLeaf, type PromotionFsIdentity, type SourceState, writeBoundOwnedFile } from "./worldline-git.js";
-import { WorldlineManager, dirBytes, migrateDurablePromotionRoots, quoteShellArg, recoverPromotionJournals, type RunRecord } from "./worldlines.js";
+import { WorldlineManager, dirBytes, quoteShellArg, recoverPromotionJournals, type RunRecord } from "./worldlines.js";
 import {
   candidateSandboxLaunch,
   evidenceProfileContent,
@@ -120,9 +120,6 @@ const MAX_PROMPT_BYTES = 20 * 1024 * 1024;
 const MAX_PI_RESOURCE_BYTES = 200 * 1024 * 1024;
 /** Bound for ~/.pi/agent/auth.json when checking whether a provider exists. */
 const MAX_AUTH_JSON_BYTES = 128 * 1024;
-const DURABLE_STATE_FORMAT_VERSION = 1;
-const DURABLE_STATE_MARKER = "termina-durable-state.json";
-const MAX_DURABLE_STATE_MARKER_BYTES = 512;
 
 function isChallengeProfile(value: unknown): value is ChallengeProfile {
   return typeof value === "string" && (CHALLENGE_PROFILES as readonly string[]).includes(value);
@@ -638,8 +635,6 @@ class PiEditorApp {
 
   /** The app-owned worlds root. */
   private userDataDir = process.env.TERMINA_USER_DATA_DIR ?? app.getPath("userData");
-  /** One-shot gate proving all app-known durable roots crossed the provenance cutover. */
-  private durableStateMarkerPath = join(this.userDataDir, DURABLE_STATE_MARKER);
   /** Durable provenance for the launch-persistent events root. */
   private eventsDirAnchorPath = join(this.userDataDir, "termina-events-root.json");
   /** Durable root for core finalization artifacts, separate from launch scratch. */
@@ -651,7 +646,6 @@ class PiEditorApp {
   /** Per-roster async commit tails preserve close/open ordering off the main loop. */
   private terminalRosterCommits = new Map<string, Promise<void>>();
   private shortcutMap: ShortcutMap = { ...DEFAULT_SHORTCUTS };
-  private worldsRootUsesDefault = process.env.TERMINA_WORLDS_DIR === undefined;
   private worldsRoot = process.env.TERMINA_WORLDS_DIR ?? join(this.userDataDir, "worlds");
   /** Input buffer for /new slash-command detection (terminals:write is per keystroke). */
   private newCommandBuffers = new Map<string, string>();
@@ -2822,8 +2816,7 @@ class PiEditorApp {
     if (inst.engine !== "core" || !inst.sessionFile) return;
     if (!this.pathInside(this.coreSessionRoot(), inst.sessionFile)) return;
     // Empty core bundles are reclaimed by the worker's native descriptor/
-    // provenance-bound owner. The legacy unbound helper intentionally only
-    // retains evidence and is not a production discard path.
+    // provenance-bound owner.
     await this.sessionFork.discardEmptyCoreSession(inst.sessionFile);
   }
 
@@ -6130,7 +6123,6 @@ class PiEditorApp {
         project.activationGeneration = activationGeneration;
       }
       await this.ensureAppBridge();
-      await this.removeLegacyProjectBridge(cwd);
       // Finish or roll back any pending promotion journal BEFORE the
       // primary watcher starts: the restored bytes must not attribute to
       // a user edit.
@@ -6512,20 +6504,6 @@ class PiEditorApp {
       }
     } catch (err) {
       console.warn(`[main] could not write the app bridge: ${(err as Error).message}`);
-    }
-  }
-
-  /**
-   * Remove the legacy generated bridge from a project. A user file that
-   * only shares the name stays untouched (the marker check is the proof).
-   */
-  private async removeLegacyProjectBridge(cwd: string): Promise<void> {
-    const p = join(cwd, ".pi", "extensions", "termina-bridge.ts");
-    try {
-      const content = await readFile(p, "utf8");
-      if (content.includes("Termina bridge extension — auto-generated")) await rm(p, { force: true });
-    } catch {
-      /* absent or unreadable — nothing to remove */
     }
   }
 
@@ -7541,70 +7519,12 @@ class PiEditorApp {
 
   // ---------------------------------------------------------------- boot ----
 
-  private async durableStateMigrationComplete(): Promise<boolean> {
-    try {
-      const info = await lstat(this.durableStateMarkerPath);
-      if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_DURABLE_STATE_MARKER_BYTES) {
-        throw new Error("durable state marker is not a bounded regular file");
-      }
-      const value = JSON.parse(await readFile(this.durableStateMarkerPath, "utf8")) as unknown;
-      if (
-        !value
-        || typeof value !== "object"
-        || Array.isArray(value)
-        || Object.keys(value).length !== 1
-        || (value as { formatVersion?: unknown }).formatVersion !== DURABLE_STATE_FORMAT_VERSION
-      ) {
-        throw new Error("durable state marker has an unsupported format");
-      }
-      return true;
-    } catch (error) {
-      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return false;
-      throw error;
-    }
-  }
-
-  private async publishDurableStateMarker(): Promise<void> {
-    const content = JSON.stringify({ formatVersion: DURABLE_STATE_FORMAT_VERSION });
-    const temporary = `${this.durableStateMarkerPath}.tmp-${randomUUID()}`;
-    let handle: Awaited<ReturnType<typeof fsOpen>> | null = null;
-    try {
-      handle = await fsOpen(temporary, "wx", 0o600);
-      await handle.writeFile(content, "utf8");
-      await handle.sync();
-      await handle.close();
-      handle = null;
-      await fsRename(temporary, this.durableStateMarkerPath);
-      const parent = await fsOpen(this.userDataDir, "r");
-      try {
-        await parent.sync();
-      } finally {
-        await parent.close();
-      }
-    } finally {
-      if (handle) await handle.close().catch(() => undefined);
-      await rm(temporary, { force: true }).catch(() => undefined);
-    }
-  }
-
-  private async migrateDurableState(): Promise<void> {
-    if (await this.durableStateMigrationComplete()) return;
-    await migrateDurablePromotionRoots(
-      this.worldsRoot,
-      this.worldsRootUsesDefault,
-      this.preferences.openProjects,
-    );
-    await this.sessionRetention.migrateRoot();
-    await this.publishDurableStateMarker();
-  }
-
   async start(): Promise<void> {
     // Core session admission is descriptor-bound and intentionally refuses to
     // create its own root. Establish the app-owned root before any restored
     // core terminal or session fork can inspect it.
     await mkdir(this.coreSessionRoot(), { recursive: true, mode: 0o700 });
     this.preferences = await this.preferencesStore.load();
-    await this.migrateDurableState();
     this.shortcutMap = { ...this.preferences.shortcuts };
     this.appUpdater = createAppUpdater({
       send: (state) => {

@@ -3677,7 +3677,7 @@ export class WorldlineManager {
       // descriptor before any mutable pathname preflight.  Missing tails are
       // recorded as an expected absence and can only be materialized later by
       // Core with that exact missing index; a same-UID pre-creation is then a
-      // conflict instead of an adopted replacement tree.
+      // conflict instead of an accepted replacement tree.
       const pPaths = await store.treePaths(pState.commit);
       const parentPlans = new Map<string, PromotionDirectoryPlan>();
       const parentPaths = new Set<string>();
@@ -4533,8 +4533,8 @@ export class WorldlineManager {
     const pending = this.pendingCandidateReadies.get(terminalId);
     if (pending) {
       // Only the startup-control operation created for this reopen can settle
-      // it. Canonical sidecar metadata is required so a legacy/replayed line
-      // cannot impersonate the new producer generation.
+      // it. Canonical sidecar metadata is required so a replayed line cannot
+      // impersonate the new producer generation.
       const eventGeneration = event.generation;
       const eventSeq = event.seq;
       if (
@@ -5498,8 +5498,8 @@ async function trustedPromotionParent(path: string, field: string): Promise<{ pa
  * Establish a retained-root parent from the nearest existing ancestor.  The
  * ancestor identity is only a discovery hint; native prepare reopens it with
  * that exact identity and creates the missing tail descriptor-relatively.
- * This keeps the legacy `mkdir -p` behavior without making a mutable
- * pathname the trust anchor for the retained root transaction.
+ * This preserves recursive parent creation without making a mutable pathname
+ * the trust anchor for the retained root transaction.
  */
 async function ensureRetainedRootParent(path: string, field: string): Promise<BoundPromotionDirectory> {
   let current = resolve(path);
@@ -5756,43 +5756,6 @@ async function existingPromotionDirectoryIdentity(path: string, field: string): 
   }
 }
 
-/** Bind app-known durable roots before publishing the current format gate. */
-export async function migrateDurablePromotionRoots(
-  worldsRoot: string,
-  migrateExistingWorldsRoot: boolean,
-  primaryRoots: readonly string[],
-): Promise<void> {
-  const worldsIdentity = migrateExistingWorldsRoot
-    ? await existingPromotionDirectoryIdentity(resolve(worldsRoot), "worlds root migration")
-    : undefined;
-  const worldsRootBinding = await ensureBoundDirectory(
-    worldsRoot,
-    "worlds root migration",
-    undefined,
-    worldsIdentity ? { initialIdentity: worldsIdentity } : {},
-  );
-  const seen = new Set<string>();
-  for (const path of primaryRoots) {
-    let canonical: string;
-    try {
-      canonical = await filesystemCanonicalPath(path);
-    } catch (error) {
-      if (errnoCode(error) === "ENOENT") continue;
-      throw error;
-    }
-    if (seen.has(canonical)) continue;
-    seen.add(canonical);
-    const identity = await existingPromotionDirectoryIdentity(canonical, "primary root migration");
-    if (!identity) continue;
-    await ensureBoundDirectory(
-      canonical,
-      "primary root migration",
-      worldsRootBinding,
-      { initialIdentity: identity },
-    );
-  }
-}
-
 /**
  * Bind the retained-session root through the native create/bind transaction.
  * The retained marker is mutable evidence, not provenance: the native
@@ -5804,7 +5767,6 @@ export async function ensureBoundRetainedRoot(
   field: string,
   marker: { name: string; content: Buffer; mode?: number },
   testHook?: { stage: string; readyPath: string; releasePath: string },
-  initialIdentity?: PromotionFsIdentity,
 ): Promise<BoundPromotionDirectory> {
   const requested = resolve(path);
   const parentBinding = await ensureRetainedRootParent(dirname(requested), field);
@@ -5817,7 +5779,7 @@ export async function ensureBoundRetainedRoot(
   const provenance = await readPromotionRootProvenance(absolute, trustedParent, field);
   const identity = await boundPromotionEnsureDirectory({
     path: absolute,
-    ...(provenance ? { expectedIdentity: provenance.root } : initialIdentity ? { expectedIdentity: initialIdentity } : {}),
+    ...(provenance ? { expectedIdentity: provenance.root } : {}),
     trustedParent,
     provenance: {
       name: basename(provenancePath),
@@ -6044,12 +6006,11 @@ function validatePromotionJournalPaths(journal: Record<string, unknown>): Promot
   return journal.paths.map((value, index) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`invalid promotion path record ${index}`);
     const record = value as Record<string, unknown>;
-    const legacy = exactObjectKeys(record, ["rel", "kind", "beforeHash", "afterHash", "beforeExists"]);
     const current = exactObjectKeys(record, ["rel", "kind", "beforeHash", "afterHash", "beforeExists", "beforeState", "afterState"]);
     const currentWithRetained = exactObjectKeys(record, ["rel", "kind", "beforeHash", "afterHash", "beforeExists", "beforeState", "afterState", "retainedName"]);
     const currentWithBeforeImage = exactObjectKeys(record, ["rel", "kind", "beforeHash", "afterHash", "beforeExists", "beforeState", "afterState", "beforeImageIdentity", "beforeImageSize"]);
     const currentWithRetainedBeforeImage = exactObjectKeys(record, ["rel", "kind", "beforeHash", "afterHash", "beforeExists", "beforeState", "afterState", "retainedName", "beforeImageIdentity", "beforeImageSize"]);
-    if (!legacy && !current && !currentWithRetained && !currentWithBeforeImage && !currentWithRetainedBeforeImage) throw new Error(`invalid promotion path schema ${index}`);
+    if (!current && !currentWithRetained && !currentWithBeforeImage && !currentWithRetainedBeforeImage) throw new Error(`invalid promotion path schema ${index}`);
     if (
       typeof record.rel !== "string"
       || !isSafePromotionRelativePath(record.rel)
@@ -6081,17 +6042,10 @@ function validatePromotionJournalPaths(journal: Record<string, unknown>): Promot
     if (seen.has(record.rel)) throw new Error(`duplicate promotion path: ${record.rel}`);
     seen.add(record.rel);
 
-    let beforeState: PromotionEntryState;
-    let afterState: PromotionEntryState;
-    if (current || currentWithRetained) {
-      beforeState = parsePromotionJournalState(record.beforeState, record.rel, "before");
-      afterState = parsePromotionJournalState(record.afterState, record.rel, "after");
-      if (!isRestorablePromotionState(beforeState) || !isRestorablePromotionState(afterState)) {
-        throw new Error(`unsupported promotion state at ${record.rel}`);
-      }
-    } else {
-      beforeState = record.beforeExists ? { type: "file", hash: record.beforeHash } : { type: "missing" };
-      afterState = record.kind === "write" ? { type: "file", hash: record.afterHash } : { type: "missing" };
+    const beforeState = parsePromotionJournalState(record.beforeState, record.rel, "before");
+    const afterState = parsePromotionJournalState(record.afterState, record.rel, "after");
+    if (!isRestorablePromotionState(beforeState) || !isRestorablePromotionState(afterState)) {
+      throw new Error(`unsupported promotion state at ${record.rel}`);
     }
     if ((beforeState.type !== "missing") !== record.beforeExists || promotionStateHash(beforeState) !== record.beforeHash) {
       throw new Error(`inconsistent before-state at ${record.rel}`);
@@ -6545,8 +6499,8 @@ export async function recoverPromotionJournals(worldsRoot: string, context: Prom
  *
  * This deliberately delegates to the same strict binder used by startup and
  * recovery: missing leaves are created below a trusted parent and receive a
- * persisted identity; an existing unproven leaf is rejected rather than
- * adopted. Production startup never calls this setup helper.
+ * persisted identity; an existing unproven leaf is rejected. Production
+ * startup never calls this setup helper.
  */
 export async function ensurePromotionRoots(worldsRoot: string, primaryRoot: string): Promise<void> {
   return withPromotionTransaction(async () => {

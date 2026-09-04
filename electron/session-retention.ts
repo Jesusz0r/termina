@@ -263,12 +263,11 @@ const retainedRootBindingPromises = new Map<string, Promise<RetainedRootBinding>
 function bindRetainedRoot(
   rootPath: string,
   testHook?: { stage: string; readyPath: string; releasePath: string },
-  initialIdentity?: PromotionFsIdentity,
 ): Promise<RetainedRootBinding> {
   const key = resolve(rootPath);
   const existing = retainedRootBindingPromises.get(key);
   if (existing) return existing;
-  const promise = bindRetainedRootOnce(rootPath, testHook, initialIdentity);
+  const promise = bindRetainedRootOnce(rootPath, testHook);
   retainedRootBindingPromises.set(key, promise);
   void promise.catch(() => {
     if (retainedRootBindingPromises.get(key) === promise) retainedRootBindingPromises.delete(key);
@@ -279,7 +278,6 @@ function bindRetainedRoot(
 async function bindRetainedRootOnce(
   rootPath: string,
   testHook?: { stage: string; readyPath: string; releasePath: string },
-  initialIdentity?: PromotionFsIdentity,
 ): Promise<RetainedRootBinding> {
   const bound = await ensureBoundRetainedRoot(
     rootPath,
@@ -290,7 +288,6 @@ async function bindRetainedRootOnce(
       mode: 0o600,
     },
     testHook,
-    initialIdentity,
   );
   return { path: bound.path, identity: { dev: bound.dev, ino: bound.ino, ...(bound.capability ? { capability: bound.capability } : {}) } };
 }
@@ -1288,21 +1285,7 @@ export class SessionRetentionOwner {
     this.testHooks = options.testHooks;
   }
 
-  /** Bind an app-known existing root before the current format gate is published. */
-  async migrateRoot(): Promise<void> {
-    let initialIdentity: PromotionFsIdentity | undefined;
-    try {
-      const info = await lstat(this.rootPath, { bigint: true });
-      if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("retained session root is not a real directory");
-      initialIdentity = { dev: String(info.dev), ino: String(info.ino) };
-    } catch (error) {
-      if (errorCode(error) !== "ENOENT") throw error;
-    }
-    this.rootBindingPromise ??= bindRetainedRoot(this.rootPath, this.testHooks?.beforeRootBinding, initialIdentity);
-    await this.rootBindingPromise;
-  }
-
-  /** Re-open the descriptor-bound root; an old core capability may expire on restart. */
+  /** Re-open the descriptor-bound root because issued capabilities expire on restart. */
   private async rootBinding(): Promise<RetainedRootBinding> {
     this.rootBindingPromise ??= bindRetainedRoot(this.rootPath, this.testHooks?.beforeRootBinding);
     const bound = await this.rootBindingPromise;

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-describe("SessionFork Architecture & Migration Boundary Contracts", () => {
+describe("SessionFork Architecture Contracts", () => {
   const root = process.cwd();
   const main = readFileSync(join(root, "electron", "main.ts"), "utf8");
   const worldlines = readFileSync(join(root, "electron", "worldlines.ts"), "utf8");
@@ -43,13 +43,10 @@ describe("SessionFork Architecture & Migration Boundary Contracts", () => {
     expect(!/export async function removeSessionBundle/.test(session)).toBe(true);
   });
 
-  it("gates durable-root migration before normal startup", () => {
-    const migration = methodBody(main, "private async migrateDurableState(", "  async start(");
-    expect(/durableStateMigrationComplete/.test(migration)).toBe(true);
-    expect(/migrateDurablePromotionRoots/.test(migration) && /sessionRetention\.migrateRoot/.test(migration)).toBe(true);
-    expect(migration.indexOf("migrateDurablePromotionRoots")).toBeLessThan(migration.indexOf("publishDurableStateMarker"));
-    expect(/await this\.migrateDurableState\(\)/.test(main)).toBe(true);
-    expect(/initialIdentity/.test(worldlines) && !/bootstrapExisting/.test(worldlines)).toBe(true);
+  it("contains no durable-root migration or removed admission path", () => {
+    expect(/durableStateMigration|migrateDurablePromotionRoots|publishDurableStateMarker/.test(main + worldlines)).toBe(false);
+    expect(/migrateRoot/.test(retention)).toBe(false);
+    expect(/bootstrapExisting/.test(main + worldlines + worldlineGit + core)).toBe(false);
   });
 
   it("routes core forks and retained session transactions in finalizeRun", () => {
@@ -60,9 +57,9 @@ describe("SessionFork Architecture & Migration Boundary Contracts", () => {
     expect(/this\.sessionRetention\.transact\(run\.id/.test(finalize)).toBe(true);
     expect(/MAX_RETAINED_SESSION_BUNDLES/.test(retention) && /MAX_RETAINED_SESSION_BYTES/.test(retention)).toBe(true);
     expect(/RETAINED_SESSION_ADMISSION_LOCK/.test(retention) && /queueTail/.test(retention)).toBe(true);
-    expect(/ensureBoundRetainedRoot/.test(retention) && /migrateRoot/.test(retention)).toBe(true);
-    expect(/bootstrapExisting/.test(main) || /bootstrapExisting/.test(worldlines) || /bootstrapExisting/.test(worldlineGit)).toBe(false);
-    expect(/unknown promotion directory field: bootstrapExisting/.test(core)).toBe(true);
+    expect(/ensureBoundRetainedRoot/.test(retention) && !/migrateRoot/.test(retention)).toBe(true);
+    expect(/bootstrapExisting/.test(main + worldlines + worldlineGit + core)).toBe(false);
+    expect(/promotion directory request contains an unknown field/.test(core)).toBe(true);
     expect(/retainedSessionRoot/.test(main) && !/rmSync\(this\.retainedSessionRoot/.test(main)).toBe(true);
   });
 

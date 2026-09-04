@@ -261,7 +261,7 @@ export default function (pi: ExtensionAPI): void {
         const identity = String(activeStats.dev) + ":" + String(activeStats.ino);
         // The synchronous append path has no descriptor that survives this
         // call. Flush and revalidate the active inode immediately before the
-        // publication boundary; a concurrent legacy replacement must not be
+        // publication boundary; a concurrent replacement must not be
         // described by this writer's close proof.
         syncFile(activeSidecarPath);
         const beforeRename = statSync(activeSidecarPath);

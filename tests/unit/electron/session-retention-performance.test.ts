@@ -193,51 +193,13 @@ describe("Session Retention Performance Probes", () => {
       writeFileSync(deepClaim, JSON.stringify({ runId: "deep-scan", createdAt: Date.now() }), { mode: 0o600 });
       await assert.rejects(deepOwner.list(), /depth|too many|unreadable|evidence/i, "deep retained claim scan fails closed");
     
-      // Normal runtime rejects an existing unproven retained root. The explicit
-      // durable-format migration binds its captured identity and publishes
-      // outside-root provenance that remains valid after a native-core restart.
-      const legacyRoot = join(work, "retained-migration");
-      mkdirSync(legacyRoot, { recursive: true, mode: 0o700 });
-      writeFileSync(join(legacyRoot, ".termina-retained-session-root"), ".termina-retained-session-root\n", { mode: 0o600 });
-      writeBundle(join(legacyRoot, "migration-session", "current", "session.jsonl"), 2);
-      const legacyAbsolute = realpathSync(legacyRoot);
-      const strictOwner = new SessionRetentionOwner(legacyRoot);
-      await assert.rejects(strictOwner.list(), /previously trusted expectedIdentity/, "normal runtime rejects an unproven retained root");
-      const legacyOwner = new SessionRetentionOwner(legacyRoot);
-      await legacyOwner.migrateRoot();
-      await assert.doesNotReject(legacyOwner.list(), "the format migration binds the captured retained-root identity");
-      const legacyProvenance = readdirSync(dirname(legacyRoot)).find((name) => {
-        if (!name.startsWith(".termina-promotion-root-") || !name.endsWith(".json")) return false;
-        try {
-          return JSON.parse(readFileSync(join(dirname(legacyRoot), name), "utf8")).path === legacyAbsolute;
-        } catch {
-          return false;
-        }
-      });
-      assert.ok(legacyProvenance, "format migration persists provenance outside the retained root");
-      const legacyProvenanceRecord = JSON.parse(readFileSync(join(dirname(legacyRoot), legacyProvenance), "utf8"));
-      assert.equal(legacyProvenanceRecord.version, 1, "migrated provenance uses the canonical durable version");
-      assert.equal(legacyProvenanceRecord.path, legacyAbsolute, "migrated provenance binds the exact retained root path");
-      assert.equal(legacyProvenanceRecord.root.dev, String(lstatSync(legacyRoot, { bigint: true }).dev), "migrated provenance binds the root device");
-      assert.equal(legacyProvenanceRecord.root.ino, String(lstatSync(legacyRoot, { bigint: true }).ino), "migrated provenance binds the root inode");
-      const legacyState = join(dirname(legacyRoot), `${legacyProvenance}.state`);
-      assert.equal(existsSync(legacyState), true, "format migration leaves a durable outside-root state tombstone");
-      const legacyRestart = spawnSync(process.execPath, ["--no-warnings", "--input-type=module", "-e", `
-        const { SessionRetentionOwner, disposeSessionRetentionCoreClient } = await import(process.env.TERMINA_RETENTION_BUNDLE);
-        const owner = new SessionRetentionOwner(process.env.TERMINA_RETENTION_ROOT);
-        await owner.list();
-        disposeSessionRetentionCoreClient();
-      `], {
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          TERMINA_CORE_TEST: "1",
-          TERMINA_RETENTION_BUNDLE: pathToFileURL(retentionBundle).href,
-          TERMINA_RETENTION_ROOT: legacyRoot,
-        },
-        encoding: "utf8",
-      });
-      assert.equal(legacyRestart.status, 0, `adopted legacy root survives native core restart: ${legacyRestart.stderr}`);
+      // Runtime rejects an existing retained root without current provenance.
+      const unprovenRoot = join(work, "retained-unproven");
+      mkdirSync(unprovenRoot, { recursive: true, mode: 0o700 });
+      writeFileSync(join(unprovenRoot, ".termina-retained-session-root"), ".termina-retained-session-root\n", { mode: 0o600 });
+      writeBundle(join(unprovenRoot, "unproven-session", "current", "session.jsonl"), 2);
+      const strictOwner = new SessionRetentionOwner(unprovenRoot);
+      await assert.rejects(strictOwner.list(), /previously trusted expectedIdentity/, "runtime rejects an unproven retained root");
     
       function freshRetentionList(rootPath) {
         return spawnSync(process.execPath, ["--no-warnings", "--input-type=module", "-e", `
@@ -267,25 +229,40 @@ describe("Session Retention Performance Probes", () => {
       // one same-user alias would let an unrelated pathname mutate the bytes
       // after the descriptor-bound read. The native readers reject the alias
       // before the root is admitted.
-      const legacyMarkerHardlink = join(dirname(legacyRoot), `${legacyProvenance}.marker-hardlink`);
-      linkSync(join(legacyRoot, ".termina-retained-session-root"), legacyMarkerHardlink);
-      const hardlinkedMarkerRestart = freshRetentionList(legacyRoot);
+      const boundRoot = join(work, "retained-bound-hardlinks");
+      await new SessionRetentionOwner(boundRoot).list();
+      const boundAbsolute = realpathSync(boundRoot);
+      const boundProvenance = readdirSync(dirname(boundRoot)).find((name) => {
+        if (!name.startsWith(".termina-promotion-root-") || !name.endsWith(".json")) return false;
+        try {
+          return JSON.parse(readFileSync(join(dirname(boundRoot), name), "utf8")).path === boundAbsolute;
+        } catch {
+          return false;
+        }
+      });
+      assert.ok(boundProvenance, "current root binding persists provenance outside the retained root");
+      const boundState = join(dirname(boundRoot), `${boundProvenance}.state`);
+      assert.equal(existsSync(boundState), true, "current root binding persists durable root state");
+
+      const markerHardlink = join(dirname(boundRoot), `${boundProvenance}.marker-hardlink`);
+      linkSync(join(boundRoot, ".termina-retained-session-root"), markerHardlink);
+      const hardlinkedMarkerRestart = freshRetentionList(boundRoot);
       const hardlinkedMarkerOutput = `${hardlinkedMarkerRestart.stdout}\n${hardlinkedMarkerRestart.stderr}`;
       assert.equal(hardlinkedMarkerRestart.error, undefined, `hardlinked retained marker restart failed to spawn: ${hardlinkedMarkerOutput}`);
       assert.notEqual(hardlinkedMarkerRestart.status, 0, `hardlinked retained marker fails closed: ${hardlinkedMarkerOutput}`);
       assert.match(hardlinkedMarkerOutput, /private|regular|link|marker|root/i, "hardlinked marker rejection identifies the untrusted metadata");
-      rmSync(legacyMarkerHardlink, { force: true });
-      const legacyProvenanceHardlink = join(dirname(legacyRoot), `${legacyProvenance}.hardlink`);
-      linkSync(join(dirname(legacyRoot), legacyProvenance), legacyProvenanceHardlink);
-      const hardlinkedProvenanceRestart = freshRetentionList(legacyRoot);
+      rmSync(markerHardlink, { force: true });
+      const provenanceHardlink = join(dirname(boundRoot), `${boundProvenance}.hardlink`);
+      linkSync(join(dirname(boundRoot), boundProvenance), provenanceHardlink);
+      const hardlinkedProvenanceRestart = freshRetentionList(boundRoot);
       const hardlinkedProvenanceOutput = `${hardlinkedProvenanceRestart.stdout}\n${hardlinkedProvenanceRestart.stderr}`;
       assert.equal(hardlinkedProvenanceRestart.error, undefined, `hardlinked retained provenance restart failed to spawn: ${hardlinkedProvenanceOutput}`);
       assert.notEqual(hardlinkedProvenanceRestart.status, 0, `hardlinked retained provenance fails closed: ${hardlinkedProvenanceOutput}`);
       assert.match(hardlinkedProvenanceOutput, /private|regular|link|provenance|root/i, "hardlinked provenance rejection identifies the untrusted metadata");
-      rmSync(legacyProvenanceHardlink, { force: true });
+      rmSync(provenanceHardlink, { force: true });
     
       // A deterministic pending-state temporary is still untrusted metadata: a
-      // same-user hardlink must not be adopted as the transaction's recovery
+      // same-user hardlink must not be accepted as the transaction's recovery
       // record. This exercises the initial state publisher before a final state
       // exists, not only the already-bound provenance path above.
       const hardlinkedTempRoot = join(work, "retained-hardlinked-temp");
@@ -307,33 +284,12 @@ describe("Session Retention Performance Probes", () => {
       rmSync(hardlinkedStateTemp, { force: true });
       rmSync(hardlinkedSeed, { force: true });
     
-      // Losing the final provenance sidecar must not reopen the one-time legacy
-      // adoption path. A fresh owner process must fail closed even though the
-      // mutable marker and app-owned evidence are still present.
-      rmSync(join(dirname(legacyRoot), legacyProvenance), { force: true });
-      assert.equal(existsSync(legacyState), true, "provenance deletion does not remove the durable state tombstone");
-      const legacyAfterProvenanceLoss = spawnSync(process.execPath, ["--no-warnings", "--input-type=module", "-e", `
-        const { SessionRetentionOwner, disposeSessionRetentionCoreClient } = await import(process.env.TERMINA_RETENTION_BUNDLE);
-        try {
-          await new SessionRetentionOwner(process.env.TERMINA_RETENTION_ROOT).list();
-          process.exitCode = 0;
-        } catch (error) {
-          console.error(error instanceof Error ? error.message : String(error));
-          process.exitCode = 17;
-        } finally {
-          disposeSessionRetentionCoreClient();
-        }
-      `], {
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          TERMINA_CORE_TEST: "1",
-          TERMINA_RETENTION_BUNDLE: pathToFileURL(retentionBundle).href,
-          TERMINA_RETENTION_ROOT: legacyRoot,
-        },
-        encoding: "utf8",
-      });
-      assert.notEqual(legacyAfterProvenanceLoss.status, 0, `provenance loss never re-enters legacy adoption: ${legacyAfterProvenanceLoss.stdout} ${legacyAfterProvenanceLoss.stderr}`);
+      // Losing the final provenance sidecar makes the existing root inaccessible.
+      // A fresh owner process must fail closed even though durable state remains.
+      rmSync(join(dirname(boundRoot), boundProvenance), { force: true });
+      assert.equal(existsSync(boundState), true, "provenance deletion does not remove durable root state");
+      const afterProvenanceLoss = freshRetentionList(boundRoot);
+      assert.notEqual(afterProvenanceLoss.status, 0, `provenance loss fails closed: ${afterProvenanceLoss.stdout} ${afterProvenanceLoss.stderr}`);
     
       // Killing a native binder at each durable transaction seam must leave a
       // restartable pending state, never a marker-only root that strands the
@@ -443,7 +399,7 @@ describe("Session Retention Performance Probes", () => {
       await assert.rejects(copiedMarkerOwner.list(), /provenance|marker|identity|root/i, "copied-marker retained root fails closed without external provenance");
       await provenanceOwner.list();
     
-      // The native create/adopt transaction must not publish into a pathname
+      // The native root-binding transaction must not publish into a pathname
       // replaced at any phase. The test hook pauses with the exact descriptors
       // held, then swaps both the leaf and its ancestor before the next native
       // step. Every phase must fail closed and leave the replacement untrusted.
