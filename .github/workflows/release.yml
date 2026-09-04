@@ -159,10 +159,10 @@ jobs:
       - name: Create or reuse draft release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         run: |
-          existing_draft="$(gh release view "${GITHUB_REF_NAME}" --json isDraft --jq '.isDraft' 2>/dev/null || true)"
-          if [ -n "$existing_draft" ]; then
-            if [ "$existing_draft" != "true" ]; then
-              echo "Refusing to mutate an already-public release: ${GITHUB_REF_NAME}" >&2
+          read -r is_draft asset_count < <(gh release view "${GITHUB_REF_NAME}" --json isDraft,assets --jq '[.isDraft, (.assets | length)] | @tsv' 2>/dev/null || echo "")
+          if [ -n "$is_draft" ]; then
+            if [ "$is_draft" != "true" ] && [ "${asset_count:-0}" -gt 0 ]; then
+              echo "Refusing to mutate an already-public release with existing assets: ${GITHUB_REF_NAME}" >&2
               exit 1
             fi
           else

@@ -96,6 +96,7 @@ describe("Release Workflow & CI Publication Invariants", () => {
 
     expect(publishJob).toMatch(/gh\s+release\s+create[^\n]*--draft\b[^\n]*--verify-tag\b/);
     expect(publishJob).toMatch(/isDraft/);
+    expect(publishJob).toMatch(/\.assets\s*\|\s*length/);
     expect((workflow.match(/\bgh\s+release\s+create\b/g) ?? []).length).toBe(1);
     expect((workflow.match(/\bgh\s+release\s+upload\b/g) ?? []).length).toBe(1);
     expect(publishJob).toMatch(/gh\s+release\s+upload[^\n]*release-assets\/\*/);
