@@ -597,7 +597,7 @@ class PiEditorApp {
   private workspaceOwners = new Map<string, string>();
   /** Last auth.json check. A matching mtime and size skip the parse. */
   private loginHint: { mtimeMs: number; size: number; needsLogin: boolean } | null = null;
-  private eventsDir = process.env.TERMINA_EVENTS_DIR ?? join(app.getPath("temp"), "termina-events");
+  private eventsDir = process.env.TERMINA_EVENTS_DIR ?? join(app.getPath("temp"), "termina-sidecars");
   /** The app-private session branch workspace. */
   private sessionWorkspaceDir = join(this.eventsDir, "session-workspace");
   /** Identity of the events root bound during this launch. */
