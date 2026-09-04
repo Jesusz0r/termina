@@ -936,6 +936,10 @@ class UncertainComparisonAdmissionOwner {
     return () => this.participants.delete(participant);
   }
 
+  hasParticipants(): boolean {
+    return this.participants.size > 0;
+  }
+
   private safeIds(): Set<string> {
     const safeIds = new Set<string>();
     for (const participant of this.participants) {
@@ -1128,6 +1132,15 @@ function uncertainComparisonAdmissionOwnerFor(rootBinding: BoundPromotionDirecto
   return owner;
 }
 
+function releaseUncertainComparisonAdmissionOwner(owner: UncertainComparisonAdmissionOwner): void {
+  if (owner.hasParticipants()) return;
+  for (const [root, current] of uncertainComparisonAdmissionOwners) {
+    if (current !== owner) continue;
+    uncertainComparisonAdmissionOwners.delete(root);
+    return;
+  }
+}
+
 /** The logical size of a directory tree (`du`, in a child process). */
 export async function dirBytes(dir: string): Promise<number> {
   return new Promise((resolvePromise) => {
@@ -1252,8 +1265,23 @@ type PromotionJournalAdmissionResult =
  */
 class PromotionJournalAdmissionOwner {
   private queueTail: Promise<void> = Promise.resolve();
+  private participants = 0;
 
   constructor(private rootBinding: BoundPromotionDirectory) {}
+
+  register(): () => void {
+    this.participants += 1;
+    let registered = true;
+    return () => {
+      if (!registered) return;
+      registered = false;
+      this.participants -= 1;
+    };
+  }
+
+  hasParticipants(): boolean {
+    return this.participants > 0;
+  }
 
   private async currentUsage(root: string): Promise<PromotionRetentionUsage> {
     const rootInfo = await lstatPath(root, { bigint: true });
@@ -1395,6 +1423,15 @@ function promotionJournalAdmissionOwnerFor(rootBinding: BoundPromotionDirectory)
   return owner;
 }
 
+function releasePromotionJournalAdmissionOwner(owner: PromotionJournalAdmissionOwner): void {
+  if (owner.hasParticipants()) return;
+  for (const [root, current] of promotionJournalAdmissionOwners) {
+    if (current !== owner) continue;
+    promotionJournalAdmissionOwners.delete(root);
+    return;
+  }
+}
+
 function promotionRetentionBytes(bytes: bigint): string {
   return `${Number(bytes / 1_048_576n).toLocaleString()} MiB`;
 }
@@ -1496,6 +1533,7 @@ export class WorldlineManager {
   /** One root-scoped owner for promotion journal count/byte admission. */
   private promotionAdmissionOwner: PromotionJournalAdmissionOwner | null = null;
   private releaseUncertainAdmissionParticipant: (() => void) | null = null;
+  private releasePromotionAdmissionParticipant: (() => void) | null = null;
   private retainedSessionDiscards = new Set<Promise<unknown>>();
   private closingComparisons = new Set<string>();
   private terminalToComparison = new Map<string, { comparisonId: string; label: "A" | "B"; startupAttemptId?: string }>();
@@ -1525,6 +1563,7 @@ export class WorldlineManager {
       this.uncertainAdmissionOwner = uncertainComparisonAdmissionOwnerFor(worldsRootBinding);
       this.promotionAdmissionOwner = promotionJournalAdmissionOwnerFor(worldsRootBinding);
       this.releaseUncertainAdmissionParticipant = this.uncertainAdmissionOwner.register(() => this.safeUncertainComparisonIds());
+      this.releasePromotionAdmissionParticipant = this.promotionAdmissionOwner.register();
       // Constructing a manager is the explicit admission boundary for the
       // user-selected project. Bind that existing tree natively, then persist
       // its identity below the already bound worlds root.
@@ -1537,11 +1576,23 @@ export class WorldlineManager {
       await this.sweepStale();
     })().catch((error: unknown) => {
       this.readyError = error instanceof Error ? error : new Error(String(error));
+      this.releaseAdmissionOwnership();
       throw this.readyError;
     });
     // Every manager observes readiness even when no later operation awaits it.
     // Public reads use readyError to fail closed after bootstrap fails.
     void this.ready.catch(() => undefined);
+  }
+
+  private releaseAdmissionOwnership(): void {
+    this.releaseUncertainAdmissionParticipant?.();
+    this.releaseUncertainAdmissionParticipant = null;
+    this.releasePromotionAdmissionParticipant?.();
+    this.releasePromotionAdmissionParticipant = null;
+    if (this.uncertainAdmissionOwner) releaseUncertainComparisonAdmissionOwner(this.uncertainAdmissionOwner);
+    if (this.promotionAdmissionOwner) releasePromotionJournalAdmissionOwner(this.promotionAdmissionOwner);
+    this.uncertainAdmissionOwner = null;
+    this.promotionAdmissionOwner = null;
   }
 
   /** Track worker-backed session operations so teardown cannot race a write. */
@@ -5105,8 +5156,8 @@ export class WorldlineManager {
     // materialization. Wait for the root-scoped owner lease to release so
     // shutdown cannot finish while that continuation still owns worldsRoot.
     await this.uncertainAdmissionOwner?.drain();
-    this.releaseUncertainAdmissionParticipant?.();
-    this.releaseUncertainAdmissionParticipant = null;
+    await this.promotionAdmissionOwner?.drain();
+    this.releaseAdmissionOwnership();
     this.clearRuns();
     await this.drainRetainedSessionDiscards();
   }
@@ -6456,7 +6507,13 @@ export async function recoverPromotionJournals(worldsRoot: string, context: Prom
     { bootstrapExisting: context.bootstrapExistingWorldsRoot === true },
   );
   const owner = promotionJournalAdmissionOwnerFor(binding);
-  return withPromotionTransaction(() => owner.withLock(() => recoverPromotionJournalsUnderTransaction(worldsRoot, context)));
+  const releaseOwner = owner.register();
+  try {
+    return await withPromotionTransaction(() => owner.withLock(() => recoverPromotionJournalsUnderTransaction(worldsRoot, context)));
+  } finally {
+    releaseOwner();
+    releasePromotionJournalAdmissionOwner(owner);
+  }
 }
 
 /**

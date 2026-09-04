@@ -123,6 +123,15 @@ export class Explorer {
     return state;
   }
 
+  /** A collapsed branch no longer needs expansion state for hidden descendants. */
+  private pruneCollapsedDescendants(absPath: string): void {
+    const slashPrefix = `${absPath}/`;
+    const backslashPrefix = `${absPath}\\`;
+    for (const path of this.dirs.keys()) {
+      if (path.startsWith(slashPrefix) || path.startsWith(backslashPrefix)) this.dirs.delete(path);
+    }
+  }
+
   private makeDirRow(entry: ExplorerEntry, forceOpen = false): HTMLElement {
     const state = this.dirState(entry.path);
     if (forceOpen) {
@@ -153,6 +162,10 @@ export class Explorer {
     row.addEventListener("click", () => {
       this.select(entry, row);
       state.expanded = !state.expanded;
+      if (!state.expanded) {
+        state.loadSeq += 1;
+        this.pruneCollapsedDescendants(entry.path);
+      }
       arrow.textContent = state.expanded ? "▾" : "▸";
       void this.renderChildren(children, entry, state);
     });

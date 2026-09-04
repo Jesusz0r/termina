@@ -12,7 +12,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain as electronIpcMain, Menu
 // Name the app for the macOS menu bar and user-data paths. Unpackaged runs default to "Electron".
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
-import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { access, cp, lstat, mkdir, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
@@ -355,6 +355,8 @@ class PiTerminalInstance {
   shellPath?: string;
   /** User/project teardown invalidated this terminal's pending delivery. */
   closed = false;
+  /** Fences forced timeout cleanup from a late native PTY exit callback. */
+  exitHandled = false;
   busy = false;
   modified = new Map<string, ModifiedFile>();
   /** Pre-run content per path (Change Review): string = baseline, null = created. */
@@ -639,6 +641,8 @@ class PiEditorApp {
   private preferencesStore = new AppPreferencesStore(join(this.userDataDir, "preferences.json"));
   private preferences: AppPreferences = defaultAppPreferences();
   private preferenceCommits: Promise<void> = Promise.resolve();
+  /** Per-roster async commit tails preserve close/open ordering off the main loop. */
+  private terminalRosterCommits = new Map<string, Promise<void>>();
   private shortcutMap: ShortcutMap = { ...DEFAULT_SHORTCUTS };
   private worldsRootUsesDefault = process.env.TERMINA_WORLDS_DIR === undefined;
   private worldsRoot = process.env.TERMINA_WORLDS_DIR ?? join(this.userDataDir, "worlds");
@@ -650,8 +654,10 @@ class PiEditorApp {
   private sidecarQueues = new Map<string, SidecarEventQueue>();
   /** One-use start preflights by token. */
   private pendingPreflights = new Map<string, PendingPreflight>();
-  /** Capture and acknowledgement tasks that must finish before store teardown. */
+  /** Capture tasks that must finish before store teardown. */
   private recordingTasks = new Set<Promise<unknown>>();
+  /** Asynchronous bridge acknowledgements accepted from sidecar events. */
+  private ackWrites = new Set<Promise<void>>();
   /** Renderer flush requests awaiting their report. */
   private flushWaiters = new Map<string, { workspaceId: string; resolve: (r: { ok: boolean; failed: string[] }) => void; timer: ReturnType<typeof setTimeout> }>();
   private flushSeq = 0;
@@ -2738,15 +2744,31 @@ class PiEditorApp {
       live.push(this.rosterEntryFor(inst));
     }
     const entries = composeTerminalRoster(live, project.unrestoredTerminals);
-    try {
-      const dir = join(this.userDataDir, "terminal-rosters");
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      const path = this.terminalRosterPath(project);
-      const tmp = `${path}.${process.pid}.tmp`;
-      writeFileSync(tmp, `${JSON.stringify({ terminals: entries })}\n`, { mode: 0o600 });
-      renameSync(tmp, path);
-    } catch (err) {
+    const dir = join(this.userDataDir, "terminal-rosters");
+    const path = this.terminalRosterPath(project);
+    const previous = this.terminalRosterCommits.get(path) ?? Promise.resolve();
+    const commit = previous.then(async () => {
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(tmp, `${JSON.stringify({ terminals: entries })}\n`, { flag: "wx", mode: 0o600 });
+        await fsRename(tmp, path);
+      } finally {
+        await rm(tmp, { force: true }).catch(() => undefined);
+      }
+    });
+    const settled = commit.catch((err) => {
       console.warn(`[main] could not save terminal roster: ${(err as Error).message}`);
+    });
+    this.terminalRosterCommits.set(path, settled);
+    void settled.then(() => {
+      if (this.terminalRosterCommits.get(path) === settled) this.terminalRosterCommits.delete(path);
+    });
+  }
+
+  private async drainTerminalRosterCommits(): Promise<void> {
+    while (this.terminalRosterCommits.size > 0) {
+      await Promise.all(this.terminalRosterCommits.values());
     }
   }
 
@@ -3055,6 +3077,8 @@ class PiEditorApp {
       resume: () => inst.pty.resume(),
     });
     inst.pty.onExit = async (code) => {
+      if (inst.exitHandled) return;
+      inst.exitHandled = true;
       console.log(`[main] terminal ${inst.id} (${inst.type}) exited code=${code}`);
       // Keep the terminal in the live map while queued output drains.  An
       // exit notification overtaking PTY bytes changes TUI semantics, and a
@@ -3082,7 +3106,9 @@ class PiEditorApp {
       const exitOwner = this.projectOfTerminal(inst.id);
       const persistOwner = inst.persist && exitOwner && !this.disposed && !this.projectIsSwitching(exitOwner.id) ? exitOwner : null;
       if (persistOwner) {
-        await this.discardCoreSession(inst);
+        await this.discardCoreSession(inst).catch((error) => {
+          console.warn(`[main] could not discard exited core session ${inst.id}: ${(error as Error).message}`);
+        });
       }
       this.terminals.delete(inst.id);
       this.busyAgents.delete(inst.id);
@@ -4276,7 +4302,7 @@ class PiEditorApp {
 
   private closeTerminal(id: string): void {
     const inst = this.terminals.get(id);
-    if (!inst) return;
+    if (!inst || inst.closed) return;
     // A user close invalidates queued output.  The PTY exit callback may run
     // later, but its stale tail must not leak into a newly opened terminal
     // that happens to reuse the same renderer tab.
@@ -4292,18 +4318,26 @@ class PiEditorApp {
     if (this.verifyRuns.has(id)) this.cancelVerify(id);
     inst.pty.killGroup("SIGTERM");
     inst.pty.kill("SIGTERM");
+    const existingOnExit = inst.pty.onExit;
     const killWatchdog = setTimeout(() => {
-      if (this.terminals.has(id)) {
-        try { inst.pty.killGroup("SIGKILL"); } catch {}
-        try { inst.pty.kill("SIGKILL"); } catch {}
+      if (!this.terminals.has(id) || inst.exitHandled) return;
+      try { inst.pty.killGroup("SIGKILL"); } catch {}
+      try { inst.pty.kill("SIGKILL"); } catch {}
+      // Native PTY exit delivery is best-effort after forced termination. Run
+      // the same fenced cleanup path so stale terminal state cannot survive.
+      if (existingOnExit) {
+        try {
+          existingOnExit(137);
+        } catch (error) {
+          console.warn(`[main] forced terminal cleanup failed for ${id}: ${(error as Error).message}`);
+        }
       }
     }, 2000);
-    const existingOnExit = inst.pty.onExit;
     inst.pty.onExit = async (code) => {
       clearTimeout(killWatchdog);
       if (existingOnExit) await existingOnExit(code);
     };
-    // pty.onExit removes it from the map
+    // Native exit or the hard-timeout fallback removes it from the map.
   }
 
   private closeUserTerminal(id: string): void {
@@ -4732,23 +4766,26 @@ class PiEditorApp {
     const dir = inst ? this.eventsDirOf(inst) : this.eventsDir;
     if (!root) return;
     const name = `ack-${terminalId}-${requestId}.json`;
-    try {
-      const st = lstatSync(dir);
-      if (!st.isDirectory() || String(st.dev) !== String(root.dev) || String(st.ino) !== String(root.ino)) {
-        throw new Error("events directory identity changed");
-      }
-      const target = join(dir, name);
-      const temp = `${target}.${randomUUID()}.tmp`;
+    const task = (async () => {
       try {
-        writeFileSync(temp, JSON.stringify(payload), { flag: "wx", mode: 0o600 });
-        renameSync(temp, target);
+        const st = await lstat(dir);
+        if (!st.isDirectory() || String(st.dev) !== String(root.dev) || String(st.ino) !== String(root.ino)) {
+          throw new Error("events directory identity changed");
+        }
+        const target = join(dir, name);
+        const temp = `${target}.${randomUUID()}.tmp`;
+        try {
+          await writeFile(temp, JSON.stringify(payload), { flag: "wx", mode: 0o600 });
+          await fsRename(temp, target);
+        } finally {
+          await rm(temp, { force: true }).catch(() => undefined);
+        }
       } catch (error) {
-        try { rmSync(temp, { force: true }); } catch { /* best effort */ }
-        throw error;
+        console.warn(`[main] could not write ack: ${String(error)}`);
       }
-    } catch (error) {
-      console.warn(`[main] could not write ack: ${String(error)}`);
-    }
+    })();
+    this.ackWrites.add(task);
+    void task.then(() => this.ackWrites.delete(task));
   }
 
   /** Ask the renderer to save every dirty model. Bounded wait. The workspace
@@ -6078,8 +6115,8 @@ class PiEditorApp {
         this.activeProjectId = id;
         project.activationGeneration = activationGeneration;
       }
-      this.ensureAppBridge();
-      this.removeLegacyProjectBridge(cwd);
+      await this.ensureAppBridge();
+      await this.removeLegacyProjectBridge(cwd);
       // Finish or roll back any pending promotion journal BEFORE the
       // primary watcher starts: the restored bytes must not attribute to
       // a user edit.
@@ -6448,16 +6485,22 @@ class PiEditorApp {
   }
 
   /** Write the bridge to the app user-data directory when it changed. */
-  private ensureAppBridge(): void {
+  private async ensureAppBridge(): Promise<void> {
     try {
       const p = this.bridgePath();
       try {
-        if (readFileSync(p, "utf8") === BRIDGE_EXTENSION) return; // already current
+        if (await readFile(p, "utf8") === BRIDGE_EXTENSION) return; // already current
       } catch {
         /* missing — write it */
       }
-      mkdirSync(dirname(p), { recursive: true });
-      writeFileSync(p, BRIDGE_EXTENSION, "utf8");
+      await mkdir(dirname(p), { recursive: true });
+      const temp = `${p}.${process.pid}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(temp, BRIDGE_EXTENSION, { flag: "wx", mode: 0o600 });
+        await fsRename(temp, p);
+      } finally {
+        await rm(temp, { force: true }).catch(() => undefined);
+      }
     } catch (err) {
       console.warn(`[main] could not write the app bridge: ${(err as Error).message}`);
     }
@@ -6467,11 +6510,11 @@ class PiEditorApp {
    * Remove the legacy generated bridge from a project. A user file that
    * only shares the name stays untouched (the marker check is the proof).
    */
-  private removeLegacyProjectBridge(cwd: string): void {
+  private async removeLegacyProjectBridge(cwd: string): Promise<void> {
     const p = join(cwd, ".pi", "extensions", "termina-bridge.ts");
     try {
-      const content = readFileSync(p, "utf8");
-      if (content.includes("Termina bridge extension — auto-generated")) rmSync(p, { force: true });
+      const content = await readFile(p, "utf8");
+      if (content.includes("Termina bridge extension — auto-generated")) await rm(p, { force: true });
     } catch {
       /* absent or unreadable — nothing to remove */
     }
@@ -7518,7 +7561,7 @@ class PiEditorApp {
     // Write the bridge before the first terminal starts: pi loads it with
     // the CLI extension option on every agent launch, with or without a
     // project folder.
-    this.ensureAppBridge();
+    await this.ensureAppBridge();
     // Open the window early so the user immediately sees the splash and UI skeleton.
     await this.createWindow();
     this.appUpdater.start();
@@ -7672,6 +7715,7 @@ class PiEditorApp {
     if (this.initialRestorePromise) {
       await this.initialRestorePromise.catch(() => undefined);
     }
+    await this.drainTerminalRosterCommits();
     // Shutdown is an intentional cancellation boundary: no queued bytes or
     // exit notifications may be delivered after the app has begun teardown.
     this.ptyEgress.dispose();
@@ -7683,6 +7727,7 @@ class PiEditorApp {
     this.tailer.stop();
     await this.drainSidecarQueues();
     this.sidecarQueues.clear();
+    await Promise.all(this.ackWrites);
     await Promise.all([...this.projects.values()].map((project) => project.mineCommit.catch(() => undefined)));
     await Promise.all([...this.projects.values()].map((project) => project.worldlines?.drainEvidence() ?? Promise.resolve()));
     // Finalization can enqueue a core session fork; settle those recording

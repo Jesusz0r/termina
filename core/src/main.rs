@@ -3238,6 +3238,7 @@ struct PromotionRootCapability {
     identity: PromotionIdentity,
 }
 
+const MAX_PROMOTION_ROOT_CAPABILITIES: usize = 4_096;
 static PROMOTION_ROOT_CAPABILITIES: OnceLock<Mutex<HashMap<String, PromotionRootCapability>>> =
     OnceLock::new();
 static PROMOTION_ROOT_CAPABILITY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -3246,20 +3247,86 @@ fn promotion_root_capabilities() -> &'static Mutex<HashMap<String, PromotionRoot
     PROMOTION_ROOT_CAPABILITIES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn issue_promotion_root_capability(path: &str, identity: PromotionIdentity) -> String {
+fn issue_promotion_root_capability(
+    path: &str,
+    identity: PromotionIdentity,
+) -> Result<String, String> {
+    let mut capabilities = promotion_root_capabilities()
+        .lock()
+        .map_err(|_| "promotion root capability registry poisoned".to_string())?;
+    if let Some((token, _)) = capabilities
+        .iter()
+        .find(|(_, capability)| capability.path == path && capability.identity == identity)
+    {
+        return Ok(token.clone());
+    }
+    if capabilities.len() >= MAX_PROMOTION_ROOT_CAPABILITIES {
+        return Err(format!(
+            "promotion root capability registry is at capacity ({MAX_PROMOTION_ROOT_CAPABILITIES}); restart core to rebind trusted roots"
+        ));
+    }
     let sequence = PROMOTION_ROOT_CAPABILITY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let token = format!("promotion-root-{sequence:016x}-{}", std::process::id());
-    promotion_root_capabilities()
-        .lock()
-        .expect("promotion root capability registry poisoned")
-        .insert(
-            token.clone(),
-            PromotionRootCapability {
-                path: path.to_string(),
-                identity,
-            },
+    capabilities.insert(
+        token.clone(),
+        PromotionRootCapability {
+            path: path.to_string(),
+            identity,
+        },
+    );
+    Ok(token)
+}
+
+#[cfg(test)]
+mod promotion_root_capability_tests {
+    use super::*;
+
+    #[test]
+    fn registry_is_bounded_without_replacing_reused_capabilities() {
+        let mut registry = promotion_root_capabilities()
+            .lock()
+            .expect("promotion root capability registry poisoned");
+        registry.clear();
+        drop(registry);
+
+        let active_identity = PromotionIdentity { dev: 1, ino: 1 };
+        let active = issue_promotion_root_capability("/active", active_identity).unwrap();
+        for index in 1..MAX_PROMOTION_ROOT_CAPABILITIES {
+            issue_promotion_root_capability(
+                &format!("/root-{index}"),
+                PromotionIdentity {
+                    dev: 1,
+                    ino: index as u64 + 1,
+                },
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            issue_promotion_root_capability("/active", active_identity).unwrap(),
+            active
         );
-    token
+        assert!(issue_promotion_root_capability(
+            "/overflow",
+            PromotionIdentity {
+                dev: 2,
+                ino: 1,
+            },
+        )
+        .is_err());
+        assert_eq!(
+            promotion_root_capabilities()
+                .lock()
+                .expect("promotion root capability registry poisoned")
+                .len(),
+            MAX_PROMOTION_ROOT_CAPABILITIES
+        );
+
+        promotion_root_capabilities()
+            .lock()
+            .expect("promotion root capability registry poisoned")
+            .clear();
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -3747,7 +3814,7 @@ fn open_promotion_bound_root_values(
     })?;
     let directory = open_promotion_absolute_directory(&requested_path, path_field)?;
     promotion_directory_identity_matches(&directory, expected, path_field)?;
-    let token = issue_promotion_root_capability(&requested_path, expected);
+    let token = issue_promotion_root_capability(&requested_path, expected)?;
     Ok((directory, expected, token))
 }
 
@@ -4039,7 +4106,7 @@ fn op_promotion_bound_prepare_directory(req: &Value) -> Result<Value, String> {
     let capability = issue_promotion_root_capability(
         &promotion_path_with_components(&root_path, &components),
         prepared_identity,
-    );
+    )?;
     Ok(json!({
         "result": {
             "identity": {
@@ -5339,7 +5406,7 @@ fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, String> {
     {
         return Err("promotion root state changed during binding".to_string());
     }
-    let capability = issue_promotion_root_capability(&path, root_identity);
+    let capability = issue_promotion_root_capability(&path, root_identity)?;
     Ok(json!({
         "result": promotion_directory_capability_result(root_identity, &capability)
     }))
@@ -5448,7 +5515,7 @@ fn op_promotion_bound_ensure_directory(req: &Value) -> Result<Value, String> {
             dev: identity.dev,
             ino: identity.ino,
         },
-    );
+    )?;
     Ok(json!({
         "result": promotion_directory_capability_result(
             PromotionIdentity { dev: identity.dev, ino: identity.ino },
@@ -6612,7 +6679,7 @@ fn op_promotion_bound_create_directory(req: &Value) -> Result<Value, String> {
     let capability = issue_promotion_root_capability(
         &promotion_path_with_components(&root_path, &components),
         leaf_identity,
-    );
+    )?;
     Ok(json!({
         "result": {
             "identity": {
