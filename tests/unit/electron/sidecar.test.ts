@@ -108,14 +108,51 @@ describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
         const deadline = Date.now() + 3000;
         while (received.length < 1 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
         expect(received.map((event) => event.bridgeId)).toEqual(["current"]);
+        await expect.poll(async () => JSON.parse(await readFile(cursor, "utf8"))).toMatchObject({ version: 1, bridgeId: "current", sequence: 1 });
         const durable = JSON.parse(await readFile(cursor, "utf8"));
-        expect(durable).toMatchObject({ version: 1, bridgeId: "current", sequence: 1 });
         expect(durable).not.toHaveProperty("segmentOffset");
         expect(durable).not.toHaveProperty("segmentIdentity");
         expect(durable).not.toHaveProperty("segmentSources");
       } finally {
         tailer.stop();
       }
+    });
+
+    it("rejects a child session takeover while allowing reloads and concurrent terminals", async () => {
+      const tailer = new SidecarTailer(eventsDir, () => Object.assign(new EventEmitter(), { close() {} }));
+      const received: any[] = [];
+      tailer.onEvent = (id, event) => { received.push({ id, ...event }); };
+      tailer.start();
+      tailer.watch("term-owner");
+      tailer.watch("term-other");
+      const record = (bridgeId: string, seq: number, producerPid: number | undefined, t: string) =>
+        JSON.stringify({ bridgeId, seq, producerPid, t }) + "\n";
+      try {
+        await appendFile(join(eventsDir, "term-owner.jsonl"),
+          record("parent", 1, 100, "session_ready") +
+          record("child", 1, 200, "session_ready") +
+          record("child", 2, 200, "preflight_request") +
+          record("legacy-child", 1, undefined, "session_ready") +
+          record("parent", 2, 100, "preflight_request") +
+          record("reload", 1, 100, "session_ready") +
+          record("reload", 2, 100, "preflight_request"));
+        await appendFile(join(eventsDir, "term-other.jsonl"),
+          record("other", 1, 200, "session_ready") + record("other", 2, 200, "preflight_request"));
+        await expect.poll(() => received.filter(e => e.id === "term-owner").map(e => e.bridgeId)).toEqual(["parent", "parent", "reload", "reload"]);
+        await expect.poll(() => received.filter(e => e.id === "term-other").map(e => e.bridgeId)).toEqual(["other", "other"]);
+        // Replacing/truncating the file is not authority to replace its process.
+        await writeFile(join(eventsDir, "term-owner.jsonl"),
+          record("child-after-truncate", 1, 200, "session_ready") +
+          record("reload", 3, 100, "preflight_request"));
+        await expect.poll(() => received.filter(e => e.id === "term-owner").map(e => e.bridgeId)).toEqual(["parent", "parent", "reload", "reload", "reload"]);
+        // Main can authorize a newly launched process after draining old records.
+        tailer.setExpectedProducer("term-owner", 300);
+        await appendFile(join(eventsDir, "term-owner.jsonl"),
+          record("restart", 1, 300, "session_ready") +
+          record("child", 3, 200, "session_ready") +
+          record("restart", 2, 300, "preflight_request"));
+        await expect.poll(() => received.filter(e => e.id === "term-owner").slice(-2).map(e => e.bridgeId)).toEqual(["restart", "restart"]);
+      } finally { tailer.stop(); }
     });
 
     it("follows active streams and honors replacement bridge ownership", async () => {

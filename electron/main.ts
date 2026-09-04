@@ -3140,7 +3140,9 @@ class PiEditorApp {
       this.sendInstances(rendererTarget);
     };
 
-    if (!opts?.skipSidecarWatch) (opts?.sidecarTailer ?? this.tailer).watch(inst.id);
+    const sidecarTailer = opts?.sidecarTailer ?? this.tailer;
+    if (!opts?.skipSidecarWatch) sidecarTailer.watch(inst.id);
+    if (type === "agent") sidecarTailer.setExpectedProducer(inst.id, inst.pty.pid);
     if (type === "agent" && owner) {
       const mineRefresh = owner.mineCommit.catch(() => undefined).then(() => this.writeMineContext(owner));
       owner.mineCommit = mineRefresh;

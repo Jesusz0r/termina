@@ -45,6 +45,8 @@ export type ToolEdits = Array<{ oldText?: string; newText?: string }>;
 
 interface SidecarMeta {
   bridgeId: string;
+  /** Process owning this terminal; bridge reloads keep the same PID. */
+  producerPid?: number;
   seq: number;
   /** Immutable producer generation, present on canonical records. */
   generation?: string;
@@ -367,6 +369,8 @@ function sidecarEnvelope(rec: Record<string, unknown>): SidecarMeta | null {
   return {
     bridgeId,
     seq,
+    ...(typeof rec.producerPid === "number" && Number.isSafeInteger(rec.producerPid) && rec.producerPid > 0
+      ? { producerPid: rec.producerPid } : {}),
     ...(typeof generation === "string" && generation.length > 0 && generation.length <= 256 ? { generation } : {}),
   };
 }
@@ -696,6 +700,9 @@ export class SidecarTailer {
   private segmentDrainPaths = new Map<string, string>();
   private durableCursors = new Map<string, DurableSidecarCursor>();
   private streams = new Map<string, StreamState>();
+  /** Bound for the watch lifecycle, even if the active file is truncated. */
+  private producerPids = new Map<string, number>();
+  private expectedProducerPids = new Map<string, number>();
   private bridgeIds = new Map<string, Set<string>>();
   private partialRecords = new Map<string, Buffer>();
   private segmentPartialRecords = new Map<string, Buffer>();
@@ -795,6 +802,11 @@ export class SidecarTailer {
         if (this.isLive(id, generation)) void this.tail(id, generation);
       }, 10),
     );
+  }
+
+  /** Only main's launched process may replace a recovered producer. */
+  setExpectedProducer(id: string, pid: number): void {
+    if (Number.isSafeInteger(pid) && pid > 0) this.expectedProducerPids.set(id, pid);
   }
 
   /** Start tailing a terminal's event file. Events written before this call
@@ -898,6 +910,8 @@ export class SidecarTailer {
       this.cursorInitializations.delete(id);
     }
     this.streams.delete(id);
+    this.producerPids.delete(id);
+    this.expectedProducerPids.delete(id);
     this.bridgeIds.delete(id);
     const cursorSequence = cursor?.sequence;
     if (cursor?.bridgeId && cursorSequence !== undefined && Number.isSafeInteger(cursorSequence) && cursorSequence >= 1) {
@@ -952,6 +966,8 @@ export class SidecarTailer {
     this.segmentDrainPaths.delete(id);
     this.durableCursors.delete(id);
     this.streams.delete(id);
+    this.producerPids.delete(id);
+    this.expectedProducerPids.delete(id);
     this.bridgeIds.delete(id);
     this.partialRecords.delete(id);
     this.oversizedRecords.delete(id);
@@ -1001,6 +1017,8 @@ export class SidecarTailer {
     this.segmentDrainPaths.clear();
     this.durableCursors.clear();
     this.streams.clear();
+    this.producerPids.clear();
+    this.expectedProducerPids.clear();
     this.bridgeIds.clear();
     this.partialRecords.clear();
     this.segmentPartialRecords.clear();
@@ -2617,25 +2635,24 @@ export class SidecarTailer {
 
   private acceptEvent(id: string, envelope: SidecarMeta, kind: unknown): boolean {
     if (!this.canAcceptEvent(id, envelope, kind)) return false;
-    const previous = this.streams.get(id);
     const known = this.bridgeIds.get(id) ?? new Set<string>();
-    if (previous?.bridgeId !== envelope.bridgeId) {
-      if (known.has(envelope.bridgeId)) return false;
-      // A terminal stream has one active bridge. Child processes can inherit
-      // the sidecar environment and append diagnostics with another bridgeId;
-      // only the protocol's session boundary may take ownership.
-      if (previous && kind !== "session_ready") return false;
-    }
-    if (previous?.bridgeId === envelope.bridgeId && envelope.seq <= previous.sequence) return false;
     known.add(envelope.bridgeId);
     while (known.size > 8) known.delete(known.values().next().value!);
     this.bridgeIds.set(id, known);
     this.streams.set(id, { bridgeId: envelope.bridgeId, sequence: envelope.seq });
+    if (envelope.producerPid !== undefined) this.producerPids.set(id, envelope.producerPid);
     return true;
   }
 
   private canAcceptEvent(id: string, envelope: SidecarMeta, kind: unknown): boolean {
     const previous = this.streams.get(id);
+    // A session_ready from a child is not authority to replace the live
+    // producer. Older on-disk records may lack a PID; once bound, require it.
+    const producerPid = this.producerPids.get(id);
+    if (producerPid !== undefined && envelope.producerPid !== producerPid) {
+      if (kind !== "session_ready" || envelope.producerPid === undefined
+        || envelope.producerPid !== this.expectedProducerPids.get(id)) return false;
+    }
     const known = this.bridgeIds.get(id) ?? new Set<string>();
     if (previous?.bridgeId !== envelope.bridgeId) {
       if (known.has(envelope.bridgeId)) return false;

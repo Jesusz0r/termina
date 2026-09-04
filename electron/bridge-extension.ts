@@ -4,6 +4,7 @@
  * Pi loads this file through the CLI extension option. agent-core writes
  * the same sidecar protocol. `electron/sidecar.ts` is the only parser.
  */
+import { consumeAgentSessionEnvironment } from "../shared/agent-environment.js";
 import { HAS_PLAN_TASK } from "./plan-board.js";
 
 export const BRIDGE_EXTENSION = `
@@ -122,9 +123,12 @@ function canonicalMutationPath(cwd, value) {
   try { return realpathSync(candidate); } catch { return candidate; }
 }
 
+${consumeAgentSessionEnvironment.toString()}
+
 export default function (pi: ExtensionAPI): void {
-  const dir = process.env.TERMINA_EVENTS_DIR;
-  const id = process.env.TERMINA_TERMINAL_ID;
+  const sessionEnvironment = consumeAgentSessionEnvironment();
+  const dir = sessionEnvironment.TERMINA_EVENTS_DIR;
+  const id = sessionEnvironment.TERMINA_TERMINAL_ID;
   if (!dir || !id) return;
   // One random bridge instance id per extension load. Main accepts a
   // sequence reset only after a new instance id (WORLDLINES §6.3).
@@ -354,12 +358,12 @@ export default function (pi: ExtensionAPI): void {
         mkdirSync(dir, { recursive: true, mode: 0o700 });
         if (!waitForSidecarBackpressure()) throw new Error("sidecar admission is paused");
         if (pending.line === null) {
-          const draft = JSON.stringify({ ...pending.event, bridgeId, seq: pending.seq, generation: writerGeneration }) + "\\n";
+          const draft = JSON.stringify({ ...pending.event, bridgeId, producerPid: process.pid, seq: pending.seq, generation: writerGeneration }) + "\\n";
           if (!sealBeforeAppend(Buffer.byteLength(draft, "utf8"), seq)) throw new Error("sidecar generation is not publishable");
           // Rotation assigns the next active inode a fresh generation. Keep the
           // post-rotation bytes as the pending identity for every retry.
           pending.generation = writerGeneration;
-          pending.line = JSON.stringify({ ...pending.event, bridgeId, seq: pending.seq, generation: pending.generation }) + "\\n";
+          pending.line = JSON.stringify({ ...pending.event, bridgeId, producerPid: process.pid, seq: pending.seq, generation: pending.generation }) + "\\n";
         }
         appendDurable(activeSidecarPath, pending.line);
         // Commit only after the exact reserved line has been durably appended.

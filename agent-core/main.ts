@@ -21,6 +21,7 @@
  * - last tool_result cache pin (Anthropic); session prompt_cache_key by model family; 429 retry; model-aware effort
  * - provider auth (Anthropic, OpenAI, ChatGPT Codex, xAI, Google, OpenRouter)
  */
+import { consumeAgentSessionEnvironment } from "../shared/agent-environment.ts";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -2666,10 +2667,11 @@ export function tracesDirFor(events: string, id: string): string | null {
   return join(events, `${id}.traces`);
 }
 
-const eventsDir = process.env.TERMINA_EVENTS_DIR ?? "";
-const rawTerminalId = process.env.TERMINA_TERMINAL_ID ?? "";
+const sessionEnvironment = consumeAgentSessionEnvironment();
+const eventsDir = sessionEnvironment.TERMINA_EVENTS_DIR ?? "";
+const rawTerminalId = sessionEnvironment.TERMINA_TERMINAL_ID ?? "";
 const terminalId = isValidTerminalId(rawTerminalId) ? rawTerminalId : "";
-const sessionId = process.env.TERMINA_CORE_SESSION_ID?.trim() || terminalId;
+const sessionId = sessionEnvironment.TERMINA_CORE_SESSION_ID?.trim() || terminalId;
 /** Stable for one logical session boundary; rotated by /clear/quarantine. */
 let cacheSeed = cacheSessionSeed(sessionId);
 const bridgeId = `core-${randomUUID()}`;
@@ -3120,12 +3122,12 @@ function flushPendingSidecar(): boolean {
       mkdirSync(eventsDir, { recursive: true });
       if (!waitForSidecarBackpressure()) throw new Error("sidecar admission is paused");
       if (pending.line === null) {
-        const draft = JSON.stringify({ ...pending.body, bridgeId, seq: pending.seq, generation: writerGeneration }) + "\n";
+        const draft = JSON.stringify({ ...pending.body, bridgeId, producerPid: process.pid, seq: pending.seq, generation: writerGeneration }) + "\n";
         if (!sealBeforeAppend(Buffer.byteLength(draft, "utf8"), seq)) throw new Error("sidecar generation is not publishable");
         // Rotation changes the active inode generation. Freeze the post-rotation
         // line so every retry addresses this exact event identity.
         pending.generation = writerGeneration;
-        pending.line = JSON.stringify({ ...pending.body, bridgeId, seq: pending.seq, generation: pending.generation }) + "\n";
+        pending.line = JSON.stringify({ ...pending.body, bridgeId, producerPid: process.pid, seq: pending.seq, generation: pending.generation }) + "\n";
       }
       appendDurable(activeSidecarPath, pending.line);
       // The sequence is committed only after append + fsync succeed.
@@ -3795,7 +3797,7 @@ async function writeMainTrace(opts: {
 
 // ---- append-only session storage ----
 
-const sessionFile = resolveSessionFile(eventsDir, sessionId, process.env.TERMINA_CORE_SESSION_FILE);
+const sessionFile = resolveSessionFile(eventsDir, sessionId, sessionEnvironment.TERMINA_CORE_SESSION_FILE);
 let storageSeq = 0;
 let sessionWriter: SessionWriter | null = null;
 let resumeBusy = false;
@@ -8548,7 +8550,7 @@ async function main(): Promise<void> {
   } finally {
     mcpBusy = false;
   }
-  const resumeResult = process.env.TERMINA_CORE_RESUME === "1" ? await resumeSession() : { ok: true as const };
+  const resumeResult = sessionEnvironment.TERMINA_CORE_RESUME === "1" ? await resumeSession() : { ok: true as const };
   let structured = "";
   let structuredImages: Array<{ name: string; mediaType: string }> = [];
   if (eventsDir && terminalId) {
