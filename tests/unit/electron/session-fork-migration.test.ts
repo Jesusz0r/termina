@@ -6,6 +6,8 @@ describe("SessionFork Architecture & Migration Boundary Contracts", () => {
   const root = process.cwd();
   const main = readFileSync(join(root, "electron", "main.ts"), "utf8");
   const worldlines = readFileSync(join(root, "electron", "worldlines.ts"), "utf8");
+  const worldlineGit = readFileSync(join(root, "electron", "worldline-git.ts"), "utf8");
+  const core = readFileSync(join(root, "core", "src", "main.rs"), "utf8");
   const worker = readFileSync(join(root, "electron", "session-worker.ts"), "utf8");
   const retention = readFileSync(join(root, "electron", "session-retention.ts"), "utf8");
   const session = readFileSync(join(root, "agent-core", "session.ts"), "utf8");
@@ -41,6 +43,15 @@ describe("SessionFork Architecture & Migration Boundary Contracts", () => {
     expect(!/export async function removeSessionBundle/.test(session)).toBe(true);
   });
 
+  it("gates durable-root migration before normal startup", () => {
+    const migration = methodBody(main, "private async migrateDurableState(", "  async start(");
+    expect(/durableStateMigrationComplete/.test(migration)).toBe(true);
+    expect(/migrateDurablePromotionRoots/.test(migration) && /sessionRetention\.migrateRoot/.test(migration)).toBe(true);
+    expect(migration.indexOf("migrateDurablePromotionRoots")).toBeLessThan(migration.indexOf("publishDurableStateMarker"));
+    expect(/await this\.migrateDurableState\(\)/.test(main)).toBe(true);
+    expect(/initialIdentity/.test(worldlines) && !/bootstrapExisting/.test(worldlines)).toBe(true);
+  });
+
   it("routes core forks and retained session transactions in finalizeRun", () => {
     const finalize = methodBody(main, "private async finalizeRun(", "  /** The descendant pids");
     expect(/this\.sessionFork\.forkCore\(/.test(finalize)).toBe(true);
@@ -49,7 +60,9 @@ describe("SessionFork Architecture & Migration Boundary Contracts", () => {
     expect(/this\.sessionRetention\.transact\(run\.id/.test(finalize)).toBe(true);
     expect(/MAX_RETAINED_SESSION_BUNDLES/.test(retention) && /MAX_RETAINED_SESSION_BYTES/.test(retention)).toBe(true);
     expect(/RETAINED_SESSION_ADMISSION_LOCK/.test(retention) && /queueTail/.test(retention)).toBe(true);
-    expect(/ensureBoundRetainedRoot/.test(retention) && /bootstrapExisting:\s*true/.test(worldlines)).toBe(true);
+    expect(/ensureBoundRetainedRoot/.test(retention) && /migrateRoot/.test(retention)).toBe(true);
+    expect(/bootstrapExisting/.test(main) || /bootstrapExisting/.test(worldlines) || /bootstrapExisting/.test(worldlineGit)).toBe(false);
+    expect(/unknown promotion directory field: bootstrapExisting/.test(core)).toBe(true);
     expect(/retainedSessionRoot/.test(main) && !/rmSync\(this\.retainedSessionRoot/.test(main)).toBe(true);
   });
 

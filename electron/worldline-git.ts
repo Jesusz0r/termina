@@ -725,8 +725,7 @@ export async function boundPromotionEnsureDirectory(options: {
   expectedIdentity?: PromotionFsIdentity;
   capability?: string;
   trustedParent?: { path: string; identity: PromotionFsIdentity; name: string };
-  /** Explicit legacy/new-root transaction state; never inferred from a path. */
-  bootstrapExisting?: boolean;
+  /** Explicit descriptor-bound root transaction state; never inferred from a path. */
   provenance?: {
     name: string;
     parent: { path: string; identity: PromotionFsIdentity };
@@ -747,7 +746,6 @@ export async function boundPromotionEnsureDirectory(options: {
         ...(options.trustedParent.identity.capability ? { capability: options.trustedParent.identity.capability } : {}),
       },
     } : {}),
-    ...(options.bootstrapExisting === undefined ? {} : { bootstrapExisting: options.bootstrapExisting }),
     ...(options.provenance ? {
       provenance: {
         name: options.provenance.name,

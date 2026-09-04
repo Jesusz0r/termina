@@ -193,17 +193,19 @@ describe("Session Retention Performance Probes", () => {
       writeFileSync(deepClaim, JSON.stringify({ runId: "deep-scan", createdAt: Date.now() }), { mode: 0o600 });
       await assert.rejects(deepOwner.list(), /depth|too many|unreadable|evidence/i, "deep retained claim scan fails closed");
     
-      // A pre-provenance retained root is adoptable only when the native
-      // descriptor-bound bootstrap sees the real app-owned retained shape. The
-      // adoption must leave durable provenance outside the mutable root and
-      // remain valid after the native core restarts.
-      const legacyRoot = join(work, "retained-legacy");
+      // Normal runtime rejects an existing unproven retained root. The explicit
+      // durable-format migration binds its captured identity and publishes
+      // outside-root provenance that remains valid after a native-core restart.
+      const legacyRoot = join(work, "retained-migration");
       mkdirSync(legacyRoot, { recursive: true, mode: 0o700 });
       writeFileSync(join(legacyRoot, ".termina-retained-session-root"), ".termina-retained-session-root\n", { mode: 0o600 });
-      writeBundle(join(legacyRoot, "legacy-session", "current", "session.jsonl"), 2);
+      writeBundle(join(legacyRoot, "migration-session", "current", "session.jsonl"), 2);
       const legacyAbsolute = realpathSync(legacyRoot);
+      const strictOwner = new SessionRetentionOwner(legacyRoot);
+      await assert.rejects(strictOwner.list(), /previously trusted expectedIdentity/, "normal runtime rejects an unproven retained root");
       const legacyOwner = new SessionRetentionOwner(legacyRoot);
-      await assert.doesNotReject(legacyOwner.list(), "a valid pre-provenance retained root is adopted once");
+      await legacyOwner.migrateRoot();
+      await assert.doesNotReject(legacyOwner.list(), "the format migration binds the captured retained-root identity");
       const legacyProvenance = readdirSync(dirname(legacyRoot)).find((name) => {
         if (!name.startsWith(".termina-promotion-root-") || !name.endsWith(".json")) return false;
         try {
@@ -212,14 +214,14 @@ describe("Session Retention Performance Probes", () => {
           return false;
         }
       });
-      assert.ok(legacyProvenance, "legacy adoption persists provenance outside the retained root");
+      assert.ok(legacyProvenance, "format migration persists provenance outside the retained root");
       const legacyProvenanceRecord = JSON.parse(readFileSync(join(dirname(legacyRoot), legacyProvenance), "utf8"));
-      assert.equal(legacyProvenanceRecord.version, 1, "legacy provenance uses the canonical durable version");
-      assert.equal(legacyProvenanceRecord.path, legacyAbsolute, "legacy provenance binds the exact retained root path");
-      assert.equal(legacyProvenanceRecord.root.dev, String(lstatSync(legacyRoot, { bigint: true }).dev), "legacy provenance binds the adopted root device");
-      assert.equal(legacyProvenanceRecord.root.ino, String(lstatSync(legacyRoot, { bigint: true }).ino), "legacy provenance binds the adopted root inode");
+      assert.equal(legacyProvenanceRecord.version, 1, "migrated provenance uses the canonical durable version");
+      assert.equal(legacyProvenanceRecord.path, legacyAbsolute, "migrated provenance binds the exact retained root path");
+      assert.equal(legacyProvenanceRecord.root.dev, String(lstatSync(legacyRoot, { bigint: true }).dev), "migrated provenance binds the root device");
+      assert.equal(legacyProvenanceRecord.root.ino, String(lstatSync(legacyRoot, { bigint: true }).ino), "migrated provenance binds the root inode");
       const legacyState = join(dirname(legacyRoot), `${legacyProvenance}.state`);
-      assert.equal(existsSync(legacyState), true, "legacy adoption leaves a durable outside-root state tombstone");
+      assert.equal(existsSync(legacyState), true, "format migration leaves a durable outside-root state tombstone");
       const legacyRestart = spawnSync(process.execPath, ["--no-warnings", "--input-type=module", "-e", `
         const { SessionRetentionOwner, disposeSessionRetentionCoreClient } = await import(process.env.TERMINA_RETENTION_BUNDLE);
         const owner = new SessionRetentionOwner(process.env.TERMINA_RETENTION_ROOT);

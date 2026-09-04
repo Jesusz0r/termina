@@ -5028,9 +5028,9 @@ fn promotion_final_bound_child_check(
     Ok(())
 }
 
-/// One descriptor-bound create/adopt transaction.  This is used by retained
-/// roots and by the narrow explicit bootstrap path for existing promotion
-/// roots. The child, marker, and external provenance are all authenticated
+/// One descriptor-bound create/bind transaction. Existing roots require an
+/// expected identity captured at their explicit admission boundary. The child,
+/// marker, and external provenance are all authenticated
 /// and durably written before any capability is returned.
 fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, String> {
     let path = s(req, "path")?;
@@ -5179,10 +5179,6 @@ fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, String> {
 
     promotion_test_pause(req, "retained-root-parent-open")?;
 
-    let bootstrap_existing = req
-        .get("bootstrapExisting")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     let (directory, created) = match open_at(
         parent.as_raw_fd(),
         &c_name,
@@ -5194,7 +5190,7 @@ fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, String> {
                 if identity.dev != expected.dev || identity.ino != expected.ino {
                     return Err("promotion root identity mismatch".to_string());
                 }
-            } else if !bootstrap_existing {
+            } else {
                 return Err("existing promotion directory requires a previously trusted expectedIdentity".to_string());
             }
             (existing, false)
@@ -5416,13 +5412,12 @@ fn op_promotion_bound_root_transaction(req: &Value) -> Result<Value, String> {
 /// operations from the native root descriptor. This replaces the old
 /// TypeScript walk that selected a mutable pathname as the trusted root.
 fn op_promotion_bound_ensure_directory(req: &Value) -> Result<Value, String> {
-    // Any request carrying explicit provenance/legacy-bootstrap state uses
-    // the single native create/adopt transaction. The ordinary capability or
-    // expected-identity opener remains available for already-proven roots.
-    if req.get("provenance").is_some()
-        || req.get("marker").is_some()
-        || req.get("bootstrapExisting").is_some()
-    {
+    if req.get("bootstrapExisting").is_some() {
+        return Err("unknown promotion directory field: bootstrapExisting".to_string());
+    }
+    // Requests carrying provenance state use the single native create/bind
+    // transaction. Already-proven roots use the ordinary identity opener.
+    if req.get("provenance").is_some() || req.get("marker").is_some() {
         return op_promotion_bound_root_transaction(req);
     }
     let path = s(req, "path")?;

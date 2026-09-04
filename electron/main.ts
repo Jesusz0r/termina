@@ -13,7 +13,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain as electronIpcMain, Menu
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { access, cp, lstat, mkdir, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
+import { access, cp, lstat, mkdir, open as fsOpen, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -37,7 +37,7 @@ import { BRIDGE_EXTENSION } from "./bridge-extension.js";
 import { AgentStartEvent, SidecarEvent, SidecarEventDelivery, SidecarEventQueue, SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
 import { SnapshotStore, MIN_WORLDS_FREE_BYTES, bindOwnedDirectory, bindOwnedEntry, boundPromotionCopyTree, boundPromotionEnsureDirectory, boundPromotionListEntries, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionReadFile, boundPromotionWriteFile, captureRootInRepo, createOwnedDirectory, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, platformHasRecursiveWatcher, platformHasSandboxExec, removeBoundOwnedDirectory, removeBoundOwnedEntry, type BoundOwnedDirectory, type BoundPromotionExpectedLeaf, type PromotionFsIdentity, type SourceState, writeBoundOwnedFile } from "./worldline-git.js";
-import { WorldlineManager, dirBytes, quoteShellArg, recoverPromotionJournals, type RunRecord } from "./worldlines.js";
+import { WorldlineManager, dirBytes, migrateDurablePromotionRoots, quoteShellArg, recoverPromotionJournals, type RunRecord } from "./worldlines.js";
 import {
   candidateSandboxLaunch,
   evidenceProfileContent,
@@ -120,6 +120,9 @@ const MAX_PROMPT_BYTES = 20 * 1024 * 1024;
 const MAX_PI_RESOURCE_BYTES = 200 * 1024 * 1024;
 /** Bound for ~/.pi/agent/auth.json when checking whether a provider exists. */
 const MAX_AUTH_JSON_BYTES = 128 * 1024;
+const DURABLE_STATE_FORMAT_VERSION = 1;
+const DURABLE_STATE_MARKER = "termina-durable-state.json";
+const MAX_DURABLE_STATE_MARKER_BYTES = 512;
 
 function isChallengeProfile(value: unknown): value is ChallengeProfile {
   return typeof value === "string" && (CHALLENGE_PROFILES as readonly string[]).includes(value);
@@ -431,6 +434,8 @@ interface ProjectState {
   cwd: string;
   /** The canonical project root (the Git top level). */
   canonicalRoot: string;
+  /** Identity captured at the explicit project-open admission boundary. */
+  primaryRootIdentity: PromotionFsIdentity;
   /** One workspace per source tree: the primary plus candidates. */
   workspaces: Map<string, WorkspaceState>;
   /** The app-owned snapshot store of this project, or null. */
@@ -633,6 +638,8 @@ class PiEditorApp {
 
   /** The app-owned worlds root. */
   private userDataDir = process.env.TERMINA_USER_DATA_DIR ?? app.getPath("userData");
+  /** One-shot gate proving all app-known durable roots crossed the provenance cutover. */
+  private durableStateMarkerPath = join(this.userDataDir, DURABLE_STATE_MARKER);
   /** Durable provenance for the launch-persistent events root. */
   private eventsDirAnchorPath = join(this.userDataDir, "termina-events-root.json");
   /** Durable root for core finalization artifacts, separate from launch scratch. */
@@ -1688,6 +1695,7 @@ class PiEditorApp {
       worldsRoot: this.worldsRoot,
       // The canonical primary root: the sandbox compares canonical paths.
       primaryRoot: realpathSync(this.primaryWorkspace(project)?.root ?? project.cwd ?? homedir()),
+      primaryRootIdentity: project.primaryRootIdentity,
       realHome: homedir(),
       userData: this.userDataDir,
       primaryEventsDir: this.eventsDir,
@@ -6091,10 +6099,16 @@ class PiEditorApp {
     const id = `proj-${++projectSeq}`;
     this.switchingProjects.add(id);
     try {
+      const canonicalRoot = await this.canonicalPath(cwd);
+      const primaryRootInfo = await lstat(canonicalRoot, { bigint: true });
+      if (!primaryRootInfo.isDirectory() || primaryRootInfo.isSymbolicLink()) {
+        throw new Error("project root is not a real directory");
+      }
       const project: ProjectState = {
         id,
         cwd,
-        canonicalRoot: await this.canonicalPath(cwd),
+        canonicalRoot,
+        primaryRootIdentity: { dev: String(primaryRootInfo.dev), ino: String(primaryRootInfo.ino) },
         workspaces: new Map(),
         storePromise: null,
         storeDir: null,
@@ -6124,11 +6138,6 @@ class PiEditorApp {
         primaryRoot: project.canonicalRoot,
         piSessionRoot: this.primarySessionDir(project.canonicalRoot),
         coreSessionRoot: await this.coreProjectSessionDir(project.canonicalRoot),
-        // Existing default user-data roots predate persisted root provenance.
-        // Custom roots remain strict because their ownership is not app-known.
-        bootstrapExistingWorldsRoot: this.worldsRootUsesDefault,
-        // Opening/restoring a project is its explicit admission boundary.
-        bootstrapExistingPrimaryRoot: true,
       });
       this.createWorkspace(project, cwd, true);
       await this.loadMineFiles(project);
@@ -7532,12 +7541,70 @@ class PiEditorApp {
 
   // ---------------------------------------------------------------- boot ----
 
+  private async durableStateMigrationComplete(): Promise<boolean> {
+    try {
+      const info = await lstat(this.durableStateMarkerPath);
+      if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_DURABLE_STATE_MARKER_BYTES) {
+        throw new Error("durable state marker is not a bounded regular file");
+      }
+      const value = JSON.parse(await readFile(this.durableStateMarkerPath, "utf8")) as unknown;
+      if (
+        !value
+        || typeof value !== "object"
+        || Array.isArray(value)
+        || Object.keys(value).length !== 1
+        || (value as { formatVersion?: unknown }).formatVersion !== DURABLE_STATE_FORMAT_VERSION
+      ) {
+        throw new Error("durable state marker has an unsupported format");
+      }
+      return true;
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return false;
+      throw error;
+    }
+  }
+
+  private async publishDurableStateMarker(): Promise<void> {
+    const content = JSON.stringify({ formatVersion: DURABLE_STATE_FORMAT_VERSION });
+    const temporary = `${this.durableStateMarkerPath}.tmp-${randomUUID()}`;
+    let handle: Awaited<ReturnType<typeof fsOpen>> | null = null;
+    try {
+      handle = await fsOpen(temporary, "wx", 0o600);
+      await handle.writeFile(content, "utf8");
+      await handle.sync();
+      await handle.close();
+      handle = null;
+      await fsRename(temporary, this.durableStateMarkerPath);
+      const parent = await fsOpen(this.userDataDir, "r");
+      try {
+        await parent.sync();
+      } finally {
+        await parent.close();
+      }
+    } finally {
+      if (handle) await handle.close().catch(() => undefined);
+      await rm(temporary, { force: true }).catch(() => undefined);
+    }
+  }
+
+  private async migrateDurableState(): Promise<void> {
+    if (await this.durableStateMigrationComplete()) return;
+    await migrateDurablePromotionRoots(
+      this.worldsRoot,
+      this.worldsRootUsesDefault,
+      this.preferences.openProjects,
+    );
+    await this.sessionRetention.migrateRoot();
+    await this.publishDurableStateMarker();
+  }
+
   async start(): Promise<void> {
     // Core session admission is descriptor-bound and intentionally refuses to
     // create its own root. Establish the app-owned root before any restored
     // core terminal or session fork can inspect it.
     await mkdir(this.coreSessionRoot(), { recursive: true, mode: 0o700 });
     this.preferences = await this.preferencesStore.load();
+    await this.migrateDurableState();
     this.shortcutMap = { ...this.preferences.shortcuts };
     this.appUpdater = createAppUpdater({
       send: (state) => {

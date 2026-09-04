@@ -239,6 +239,7 @@ export interface PromoteSeed {
 export interface WorldlineDeps {
   worldsRoot: string;
   primaryRoot: string;
+  primaryRootIdentity: PromotionFsIdentity;
   realHome: string;
   userData: string;
   primaryEventsDir: string;
@@ -1564,14 +1565,11 @@ export class WorldlineManager {
       this.promotionAdmissionOwner = promotionJournalAdmissionOwnerFor(worldsRootBinding);
       this.releaseUncertainAdmissionParticipant = this.uncertainAdmissionOwner.register(() => this.safeUncertainComparisonIds());
       this.releasePromotionAdmissionParticipant = this.promotionAdmissionOwner.register();
-      // Constructing a manager is the explicit admission boundary for the
-      // user-selected project. Bind that existing tree natively, then persist
-      // its identity below the already bound worlds root.
       this.primaryRootBinding = await ensureBoundDirectory(
         this.deps.primaryRoot,
         "primary root",
         worldsRootBinding,
-        { bootstrapExisting: true },
+        { initialIdentity: this.deps.primaryRootIdentity },
       );
       await this.sweepStale();
     })().catch((error: unknown) => {
@@ -5698,7 +5696,7 @@ async function ensureBoundDirectory(
   path: string,
   field: string,
   provenanceDirectory?: BoundPromotionDirectory,
-  options: { bootstrapExisting?: boolean; initialIdentity?: PromotionFsIdentity } = {},
+  options: { initialIdentity?: PromotionFsIdentity } = {},
 ): Promise<BoundPromotionDirectory> {
   const requested = resolve(path);
   const canonicalParent = await filesystemCanonicalPath(dirname(requested));
@@ -5730,16 +5728,10 @@ async function ensureBoundDirectory(
   const provenanceParentIdentity = rootProvenanceDirectory
     ? promotionIdentityOf(rootProvenanceDirectory)
     : trustedParent.identity;
-  // The sole migration path for pre-provenance app data. The native
-  // descriptor-bound transaction creates a missing leaf exclusively or, only
-  // when this explicit option is set, adopts an existing legacy leaf below
-  // the verified parent. It persists external provenance while both
-  // descriptors remain held, so a pathname replacement cannot be published.
   const identity = await boundPromotionEnsureDirectory({
     path: absolute,
     ...(options.initialIdentity ? { expectedIdentity: options.initialIdentity } : {}),
     trustedParent,
-    ...(options.bootstrapExisting ? { bootstrapExisting: true } : {}),
     provenance: {
       name: basename(provenancePath),
       parent: {
@@ -5753,8 +5745,56 @@ async function ensureBoundDirectory(
   return { path: absolute, dev: identity.dev, ino: identity.ino, capability: identity.capability };
 }
 
+async function existingPromotionDirectoryIdentity(path: string, field: string): Promise<PromotionFsIdentity | undefined> {
+  try {
+    const info = await lstatPath(path, { bigint: true });
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`${field} is not a real directory`);
+    return { dev: String(info.dev), ino: String(info.ino) };
+  } catch (error) {
+    if (errnoCode(error) === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+/** Bind app-known durable roots before publishing the current format gate. */
+export async function migrateDurablePromotionRoots(
+  worldsRoot: string,
+  migrateExistingWorldsRoot: boolean,
+  primaryRoots: readonly string[],
+): Promise<void> {
+  const worldsIdentity = migrateExistingWorldsRoot
+    ? await existingPromotionDirectoryIdentity(resolve(worldsRoot), "worlds root migration")
+    : undefined;
+  const worldsRootBinding = await ensureBoundDirectory(
+    worldsRoot,
+    "worlds root migration",
+    undefined,
+    worldsIdentity ? { initialIdentity: worldsIdentity } : {},
+  );
+  const seen = new Set<string>();
+  for (const path of primaryRoots) {
+    let canonical: string;
+    try {
+      canonical = await filesystemCanonicalPath(path);
+    } catch (error) {
+      if (errnoCode(error) === "ENOENT") continue;
+      throw error;
+    }
+    if (seen.has(canonical)) continue;
+    seen.add(canonical);
+    const identity = await existingPromotionDirectoryIdentity(canonical, "primary root migration");
+    if (!identity) continue;
+    await ensureBoundDirectory(
+      canonical,
+      "primary root migration",
+      worldsRootBinding,
+      { initialIdentity: identity },
+    );
+  }
+}
+
 /**
- * Bind the retained-session root through the native create/adopt transaction.
+ * Bind the retained-session root through the native create/bind transaction.
  * The retained marker is mutable evidence, not provenance: the native
  * operation validates or creates it while the exact parent/leaf descriptors
  * remain open, and persists the external identity record in the same call.
@@ -5764,6 +5804,7 @@ export async function ensureBoundRetainedRoot(
   field: string,
   marker: { name: string; content: Buffer; mode?: number },
   testHook?: { stage: string; readyPath: string; releasePath: string },
+  initialIdentity?: PromotionFsIdentity,
 ): Promise<BoundPromotionDirectory> {
   const requested = resolve(path);
   const parentBinding = await ensureRetainedRootParent(dirname(requested), field);
@@ -5776,12 +5817,8 @@ export async function ensureBoundRetainedRoot(
   const provenance = await readPromotionRootProvenance(absolute, trustedParent, field);
   const identity = await boundPromotionEnsureDirectory({
     path: absolute,
-    ...(provenance ? { expectedIdentity: provenance.root } : {}),
+    ...(provenance ? { expectedIdentity: provenance.root } : initialIdentity ? { expectedIdentity: initialIdentity } : {}),
     trustedParent,
-    // A retained root is the one narrow legacy-disk bootstrap. The native
-    // validator requires a real retained child for an existing unproven root,
-    // so a copied marker/empty pathname can never be adopted.
-    bootstrapExisting: true,
     provenance: {
       name: basename(provenancePath),
       parent: {
@@ -5878,10 +5915,6 @@ export type PromotionRecoveryContext = {
   primaryRoot: string;
   piSessionRoot: string;
   coreSessionRoot: string;
-  /** One-time migration for the default app-owned worlds directory only. */
-  bootstrapExistingWorldsRoot?: boolean;
-  /** Admit the user-selected project root on its first provenance bind. */
-  bootstrapExistingPrimaryRoot?: boolean;
 };
 type PromotionRecoveryTestHook = (stage: "after-journal-validation", journalDir: string) => void | Promise<void>;
 let promotionRecoveryTestHook: PromotionRecoveryTestHook | null = null;
@@ -6496,16 +6529,7 @@ async function rollbackPromotion(
 
 /** Startup recovery: finish or roll back every pending promotion journal. */
 export async function recoverPromotionJournals(worldsRoot: string, context: PromotionRecoveryContext): Promise<void> {
-  // The context is the only explicit migration authority. An unconditional
-  // bootstrap here would adopt an existing unproven worlds root before the
-  // strict inner recovery bind gets a chance to reject missing/corrupt
-  // outside-root provenance.
-  const binding = await ensureBoundDirectory(
-    worldsRoot,
-    "worlds root",
-    undefined,
-    { bootstrapExisting: context.bootstrapExistingWorldsRoot === true },
-  );
+  const binding = await ensureBoundDirectory(worldsRoot, "worlds root");
   const owner = promotionJournalAdmissionOwnerFor(binding);
   const releaseOwner = owner.register();
   try {
@@ -6544,17 +6568,17 @@ async function recoverPromotionJournalsUnderTransaction(worldsRoot: string, cont
     // Bind the app-owned worlds root from its trusted parent first. The
     // recovery journal itself is then opened as a child of that capability;
     // no first identity is accepted from a mutable journal pathname.
-    const worldsRootBinding = await ensureBoundDirectory(
-      worldsRoot,
-      "worlds root",
-      undefined,
-      { bootstrapExisting: context.bootstrapExistingWorldsRoot === true },
+    const worldsRootBinding = await ensureBoundDirectory(worldsRoot, "worlds root");
+    const primaryIdentity = await existingPromotionDirectoryIdentity(
+      context.primaryRoot,
+      "promotion recovery primary root",
     );
+    if (!primaryIdentity) throw new Error("promotion recovery primary root is missing");
     primaryRootBinding = await ensureBoundDirectory(
       context.primaryRoot,
       "promotion recovery primary root",
       worldsRootBinding,
-      { bootstrapExisting: context.bootstrapExistingPrimaryRoot === true },
+      { initialIdentity: primaryIdentity },
     );
     const rootPath = join(worldsRootBinding.path, "promotion-journal");
     const identity = await boundPromotionPrepareDirectory({

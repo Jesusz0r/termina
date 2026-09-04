@@ -263,11 +263,12 @@ const retainedRootBindingPromises = new Map<string, Promise<RetainedRootBinding>
 function bindRetainedRoot(
   rootPath: string,
   testHook?: { stage: string; readyPath: string; releasePath: string },
+  initialIdentity?: PromotionFsIdentity,
 ): Promise<RetainedRootBinding> {
   const key = resolve(rootPath);
   const existing = retainedRootBindingPromises.get(key);
   if (existing) return existing;
-  const promise = bindRetainedRootOnce(rootPath, testHook);
+  const promise = bindRetainedRootOnce(rootPath, testHook, initialIdentity);
   retainedRootBindingPromises.set(key, promise);
   void promise.catch(() => {
     if (retainedRootBindingPromises.get(key) === promise) retainedRootBindingPromises.delete(key);
@@ -278,6 +279,7 @@ function bindRetainedRoot(
 async function bindRetainedRootOnce(
   rootPath: string,
   testHook?: { stage: string; readyPath: string; releasePath: string },
+  initialIdentity?: PromotionFsIdentity,
 ): Promise<RetainedRootBinding> {
   const bound = await ensureBoundRetainedRoot(
     rootPath,
@@ -288,6 +290,7 @@ async function bindRetainedRootOnce(
       mode: 0o600,
     },
     testHook,
+    initialIdentity,
   );
   return { path: bound.path, identity: { dev: bound.dev, ino: bound.ino, ...(bound.capability ? { capability: bound.capability } : {}) } };
 }
@@ -1276,18 +1279,32 @@ async function addRetainedTransactionEntries(root: string, ledger: RetainedUsage
 export class SessionRetentionOwner {
   private queueTail: Promise<void> = Promise.resolve();
   private readonly testHooks?: SessionRetentionOwnerOptions["testHooks"];
-  private readonly rootBindingPromise: Promise<RetainedRootBinding>;
+  private rootBindingPromise: Promise<RetainedRootBinding> | null = null;
 
   constructor(private readonly rootPath: string, options: SessionRetentionOwnerOptions = {}) {
     if (options.testHooks && process.env.TERMINA_CORE_TEST !== "1") {
       throw new Error("test-only session retention controls are unavailable");
     }
     this.testHooks = options.testHooks;
-    this.rootBindingPromise = bindRetainedRoot(this.rootPath, options.testHooks?.beforeRootBinding);
+  }
+
+  /** Bind an app-known existing root before the current format gate is published. */
+  async migrateRoot(): Promise<void> {
+    let initialIdentity: PromotionFsIdentity | undefined;
+    try {
+      const info = await lstat(this.rootPath, { bigint: true });
+      if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("retained session root is not a real directory");
+      initialIdentity = { dev: String(info.dev), ino: String(info.ino) };
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") throw error;
+    }
+    this.rootBindingPromise ??= bindRetainedRoot(this.rootPath, this.testHooks?.beforeRootBinding, initialIdentity);
+    await this.rootBindingPromise;
   }
 
   /** Re-open the descriptor-bound root; an old core capability may expire on restart. */
   private async rootBinding(): Promise<RetainedRootBinding> {
+    this.rootBindingPromise ??= bindRetainedRoot(this.rootPath, this.testHooks?.beforeRootBinding);
     const bound = await this.rootBindingPromise;
     try {
       const identity = await boundPromotionOpenDirectory({

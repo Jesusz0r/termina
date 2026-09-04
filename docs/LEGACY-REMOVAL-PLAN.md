@@ -25,24 +25,15 @@ Run migration before the strict application starts. Each migration must either c
 
 ### 1.1 Promotion roots and retained sessions
 
-Migrate existing unproven roots with the current native descriptor-bound validation and provenance transaction:
+The startup format gate now binds app-known durable roots through the native descriptor-bound provenance transaction before publishing `termina-durable-state.json`:
 
-- worlds root,
-- project primary roots,
-- retained-session root.
+- the default app-owned worlds root,
+- previously opened project primary roots,
+- the retained-session root.
 
-Record completion using one application-format marker. New installations must create provenance when creating each root and must never enter migration.
+The marker is published only after every root is bound. Subsequent startup and normal runtime use provenance or an identity captured at the explicit project-open boundary. Existing unproven custom worlds roots and retained roots fail closed.
 
-After migration, remove:
-
-- `PromotionRecoveryContext.bootstrapExistingWorldsRoot`,
-- `PromotionRecoveryContext.bootstrapExistingPrimaryRoot`,
-- `ensureBoundDirectory(...bootstrapExisting)`,
-- unconditional legacy adoption in `ensureBoundRetainedRoot()`,
-- `boundPromotionEnsureDirectory.bootstrapExisting`,
-- Rust `bootstrapExisting` request handling,
-- Rust legacy retained-tree adoption and validation branches,
-- tests and protocol types dedicated to those options.
+The old promotion-root admission option and all of its TypeScript context fields, request serialization, runtime branches, and tests have been removed. The Rust request boundary explicitly rejects that removed field.
 
 ### 1.2 Promotion journals
 
