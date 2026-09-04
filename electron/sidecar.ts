@@ -5,7 +5,7 @@
  * module is the only parser and the only tailer of sidecar JSONL.
  */
 import { watch, type FSWatcher } from "node:fs";
-import { existsSync, linkSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { link as linkFile, open as openFile, readdir as readDirectory, rename as renameFile, stat as statFile, unlink as unlinkFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
@@ -17,30 +17,26 @@ const MAX_SIDECAR_RECORD_BYTES = MAX_SIDECAR_BYTES;
 const SIDECAR_TAIL_READ_BYTES = 1024 * 1024;
 /** Producer-side flow-control marker; writers wait while it exists. */
 const SIDECAR_BACKPRESSURE_FILE_PREFIX = ".backpressure-";
-/** Terminal-local fail-closed admission marker for unrecoverable legacy ABA. */
+/** Terminal-local fail-closed admission marker for unrecoverable source races. */
 const SIDECAR_QUARANTINE_FILE_PREFIX = ".quarantine-";
-/** Legacy tailer-owned suffix. It is read for compatibility but never retired. */
-const SIDECAR_ROTATED_FILE_SUFFIX = ".segment";
 /** Canonical writer-owned sealed generation suffix. */
 const SIDECAR_SEALED_FILE_SUFFIX = ".sealed";
 /** Marker published by a canonical writer after it has closed the old
  * pathname and created the next active inode.  A sealed generation without
- * this marker is legacy/unproven and must retain an inode anchor. */
+ * this marker is unproven and must retain an inode anchor. */
 export const SIDECAR_SEALED_PROOF_SUFFIX = ".owner";
 /** A retained inode whose producer provenance is unknown. */
 const SIDECAR_RETAINED_FILE_TOKEN = ".retained-";
 const SIDECAR_DRAIN_FILE_TOKEN = ".draining-";
 const SIDECAR_FINAL_GUARD_FILE_TOKEN = ".final-";
-const SIDECAR_LEGACY_ANCHOR_TOKEN = ".legacy-";
-const SIDECAR_MAX_LEGACY_SOURCES = 2;
-const SIDECAR_MAX_CURSOR_SOURCES = 4;
+const SIDECAR_CURSOR_VERSION = 1;
 /** Owner metadata is protocol-generated and intentionally tiny. */
 const SIDECAR_PROOF_MAX_BYTES = 64 * 1024;
 /** Verification never allocates beyond one bounded sidecar generation. */
 const SIDECAR_VERIFY_READ_CHUNK_BYTES = 64 * 1024;
 /** A hostile short-read/append loop must not monopolize the async tail. */
 const SIDECAR_VERIFY_MAX_READS = 4096;
-/** A missing legacy sequence is never guessed closed. After this bounded
+/** A missing sequence is never guessed closed. After this bounded
  * retry budget the terminal is quarantined instead of allowing a later
  * source to overtake it forever. */
 const SIDECAR_MAX_SEQUENCE_GAP_POLLS = 80;
@@ -522,24 +518,19 @@ interface OversizedRecord {
 }
 
 interface DurableSidecarCursor {
+  version: typeof SIDECAR_CURSOR_VERSION;
   offset: number;
   bridgeId?: string;
   sequence?: number;
-  /** Offset in the retained pre-rotation inode, when one exists. */
-  segmentOffset?: number;
-  /** Published writer-owned generation currently being drained. */
   sealedSegment?: string;
-  /** Device/inode identity for the segment cursor. */
-  segmentIdentity?: string;
-  /** All fixed-name legacy generations retained across ABA replacement. */
-  segmentSources?: Array<{ name: string; identity: string; offset: number }>;
+  sealedOffset?: number;
+  sealedIdentity?: string;
 }
 
-type DurableSidecarCursorUpdate = Omit<DurableSidecarCursor, "segmentOffset" | "sealedSegment" | "segmentIdentity" | "segmentSources"> & {
-  segmentOffset?: number | null;
+type DurableSidecarCursorUpdate = Omit<DurableSidecarCursor, "version" | "sealedSegment" | "sealedOffset" | "sealedIdentity"> & {
   sealedSegment?: string | null;
-  segmentIdentity?: string | null;
-  segmentSources?: Array<{ name: string; identity: string; offset: number }> | null;
+  sealedOffset?: number | null;
+  sealedIdentity?: string | null;
 };
 
 interface SourceState {
@@ -561,15 +552,8 @@ interface MarkerState {
   waiters: Array<{ present: boolean; resolve: (ok: boolean) => void }>;
 }
 
-interface LegacySegmentSource {
-  name: string;
-  identity: string;
-  anchored: boolean;
-}
-
 interface SegmentCandidate {
   name: string;
-  legacy: boolean;
   /** A canonical identity anchor retained after publication verification. */
   retained?: boolean;
   /** The live pathname is a candidate too; source order is global. */
@@ -651,15 +635,6 @@ async function syncParentDirectory(path: string): Promise<void> {
   }
 }
 
-async function syncFileContents(path: string): Promise<void> {
-  const file = await openFile(path, "r");
-  try {
-    await file.sync();
-  } finally {
-    await file.close();
-  }
-}
-
 /** Read a file incrementally with a hard post-TOCTOU byte cap. */
 async function readBoundedText(path: string, maxBytes: number): Promise<string> {
   const handle = await openFile(path, "r");
@@ -711,16 +686,8 @@ export class SidecarTailer {
   private segmentIdentities = new Map<string, string>();
   /** Published writer-owned generation currently being drained. */
   private sealedSegments = new Map<string, string>();
-  /** Legacy tailer-owned files have completed their initial drain. */
-  private legacySegmentsDrained = new Set<string>();
-  /** Legacy fixed-path generations, oldest first. Capped for ABA safety. */
-  private legacySources = new Map<string, LegacySegmentSource[]>();
-  /** A third replacement cannot be anchored without unbounded quarantine. */
-  private legacySourceOverflow = new Set<string>();
   /** A compatibility source is not restart-safe or exceeds the anchor cap. */
   private quarantined = new Set<string>();
-  /** Parent-directory durability of newly-created legacy anchors. */
-  private legacyAnchorDurability = new Map<string, Promise<boolean>>();
   /** Every retired pathname retains one durable identity anchor: POSIX cannot
    * prove that an escaped descriptor will not append after verification. */
   private retainedSegments = new Map<string, string>();
@@ -805,8 +772,8 @@ export class SidecarTailer {
         if (!name) return;
         const fileName = String(name);
         const active = fileName.match(/^([^.]+)\.jsonl$/);
-        const generation = fileName.match(/^\.([^.]+)\.jsonl\.(?:sealed|segment|retained-|draining-|final-)|^\.([^.]+)\.jsonl\.segment\.legacy-/);
-        const id = active?.[1] ?? generation?.[1] ?? generation?.[2];
+        const generation = fileName.match(/^\.([^.]+)\.jsonl\.(?:sealed|retained-|draining-|final-)/);
+        const id = active?.[1] ?? generation?.[1];
         if (id && this.offsets.has(id)) this.schedule(id);
       });
     } catch {
@@ -858,7 +825,6 @@ export class SidecarTailer {
     // fail-closed until the source set is explicitly replaced/cleaned.
     const persistedQuarantine = this.hasQuarantineMarkerSync(id) || wasQuarantined;
     this.sealedSegments.delete(id);
-    this.legacySegmentsDrained.delete(id);
     this.retainedSegments.delete(id);
     this.segmentDrainPaths.delete(id);
     this.pendingSegmentCursorClears.delete(id);
@@ -869,13 +835,11 @@ export class SidecarTailer {
     const sealedNames = this.listSealedSegmentsSync(id);
     const retainedNames = this.listRetainedSegmentsSync(id);
     const cursor = this.loadCursor(id);
-    const legacySources = this.initializeLegacySources(id, cursor);
     const cursorSource = cursor?.sealedSegment
       ? sealedNames.find((name) => name === cursor.sealedSegment)
         ?? retainedNames.find((name) => this.isRetainedAliasFor(name, cursor.sealedSegment!))
-        ?? legacySources.find((source) => source.name === cursor.sealedSegment || this.isLegacyAliasFor(source.name, cursor.sealedSegment!))?.name
       : undefined;
-    const selectedSegment = cursorSource ?? sealedNames[0] ?? retainedNames[0] ?? legacySources[0]?.name;
+    const selectedSegment = cursorSource ?? sealedNames[0] ?? retainedNames[0];
     const selectedSource = selectedSegment;
     let segmentSize: number | null = null;
     let segmentIdentity: string | undefined;
@@ -895,11 +859,8 @@ export class SidecarTailer {
     }
     const cursorFitsActive = cursor && cursor.offset >= 0 && cursor.offset <= fileSize;
     if (segmentSize !== null) {
-      const sourceCursor = cursor?.segmentSources?.find((source) => source.name === selectedSource);
-      const identityMatches = sourceCursor
-        ? sourceCursor.identity === segmentIdentity
-        : !cursor?.segmentIdentity || cursor.segmentIdentity === segmentIdentity;
-      const segmentStart = Math.min(segmentSize, Math.max(0, identityMatches ? sourceCursor?.offset ?? cursor?.segmentOffset ?? cursor?.offset ?? 0 : 0));
+      const identityMatches = !cursor?.sealedIdentity || cursor.sealedIdentity === segmentIdentity;
+      const segmentStart = Math.min(segmentSize, Math.max(0, identityMatches ? cursor?.sealedOffset ?? 0 : 0));
       const sourceKey = this.segmentStateKey(id, selectedSource!);
       this.segmentOffsets.set(sourceKey, segmentStart);
       if (segmentIdentity) this.segmentIdentities.set(sourceKey, segmentIdentity);
@@ -916,34 +877,23 @@ export class SidecarTailer {
       start = fileSize;
     }
     this.offsets.set(id, start);
-    const initialCursor = segmentSize !== null
+    const initialCursor: DurableSidecarCursor = segmentSize !== null
       ? {
+        version: SIDECAR_CURSOR_VERSION,
         offset: start,
-        segmentOffset: this.segmentOffset(id, selectedSource),
+        sealedOffset: this.segmentOffset(id, selectedSource),
         sealedSegment: selectedSource,
-        segmentIdentity,
-        segmentSources: this.segmentCursorEntries(id),
+        sealedIdentity: segmentIdentity,
       }
-      : { offset: start };
+      : { version: SIDECAR_CURSOR_VERSION, offset: start };
     const durable = cursorFitsActive ? cursor! : initialCursor;
     this.durableCursors.set(id, durable);
     if (!cursorFitsActive || (segmentSize !== null && (
-      cursor?.segmentOffset === undefined
+      cursor?.sealedOffset === undefined
       || !this.cursorMatchesSegment(cursor.sealedSegment, selectedSource)
-      || (cursor.segmentIdentity !== undefined && cursor.segmentIdentity !== segmentIdentity)
-      || !cursor?.segmentSources
+      || (cursor.sealedIdentity !== undefined && cursor.sealedIdentity !== segmentIdentity)
     ))) {
-      // The cursor must not become the only durable reference to a new
-      // compatibility anchor before that anchor's parent directory is synced.
-      // Otherwise a crash can leave a cursor pointing at an inode that restart
-      // cannot reach, even though the fixed path still contains its bytes.
-      const initial = (async (): Promise<boolean> => {
-        for (const source of legacySources) {
-          if (!(await this.awaitLegacyAnchor(source))) return false;
-        }
-        return this.persistCursor(id, initialCursor, generation);
-      })();
-      this.cursorInitializations.set(id, initial);
+      this.cursorInitializations.set(id, this.persistCursor(id, initialCursor, generation));
     } else {
       this.cursorInitializations.delete(id);
     }
@@ -959,16 +909,10 @@ export class SidecarTailer {
     this.paused.delete(id);
     this.pendingDeliveries.delete(id);
     this.backlogOverflowed.delete(id);
-    if (persistedQuarantine || this.legacySourceOverflow.has(id)) {
-      const compatibilityHazard = this.legacySourceOverflow.has(id)
-        || legacySources.length > 0
-        || retainedNames.length > 0;
-      if (compatibilityHazard) {
-        this.quarantine(id, generation, persistedQuarantine ? "persisted compatibility quarantine" : "legacy source admission exceeded the bounded anchor set");
+    if (persistedQuarantine) {
+      if (retainedNames.length > 0 || sealedNames.length > 0) {
+        this.quarantine(id, generation, "persisted sidecar quarantine");
       } else {
-        // Producer-side admission stops (backpressure) must not permanently
-        // kill a terminal. A new watch lifecycle rechecks sources; with no
-        // legacy/retained hazard the durable marker is stale.
         this.quarantined.delete(id);
         void this.clearQuarantineMarker(id);
         void this.clearBackpressureMarker(id, generation);
@@ -1004,7 +948,6 @@ export class SidecarTailer {
     this.clearSegmentState(id);
     this.quarantined.delete(id);
     this.sealedSegments.delete(id);
-    this.legacySegmentsDrained.delete(id);
     this.retainedSegments.delete(id);
     this.segmentDrainPaths.delete(id);
     this.durableCursors.delete(id);
@@ -1054,10 +997,6 @@ export class SidecarTailer {
     this.segmentOffsets.clear();
     this.segmentIdentities.clear();
     this.sealedSegments.clear();
-    this.legacySegmentsDrained.clear();
-    this.legacySources.clear();
-    this.legacySourceOverflow.clear();
-    this.legacyAnchorDurability.clear();
     this.retainedSegments.clear();
     this.segmentDrainPaths.clear();
     this.durableCursors.clear();
@@ -1128,8 +1067,7 @@ export class SidecarTailer {
         this.cursorInitializations.delete(id);
         if (!this.isLive(id, generation)) return;
         if (!durable) {
-          if ((this.legacySources.get(id) ?? []).length > 0) this.quarantine(id, generation, "legacy source cursor initialization was not durable");
-          else this.pause(id, generation);
+          this.pause(id, generation);
           return;
         }
       }
@@ -1137,10 +1075,9 @@ export class SidecarTailer {
       if (pendingClear !== undefined) {
         if (!(await this.persistCursor(id, {
           offset: this.offsets.get(id) ?? pendingClear,
-          segmentOffset: null,
-          segmentIdentity: null,
+          sealedOffset: null,
+          sealedIdentity: null,
           sealedSegment: null,
-          segmentSources: null,
         }, generation))) {
           this.pause(id, generation);
           return;
@@ -1179,36 +1116,18 @@ export class SidecarTailer {
       }
     }
 
-    // Reconcile every fixed-name compatibility identity before choosing any
-    // retained, sealed, or active candidate. Selection below is global: a
-    // later legacy seq4 can fill the gap after a retained canonical seq3,
-    // while an active seq2 can still win when it is the next expected record.
-    if (!(await this.reconcileLegacySources(id, generation))) return;
-    if (this.legacySourceOverflow.has(id)) {
-      this.quarantine(id, generation, "legacy sidecar anchor admission exceeded");
-      await this.checkBacklog(id, undefined, generation);
-      return;
-    }
     const candidates: SegmentCandidate[] = [];
-    const legacySources = this.legacySources.get(id) ?? [];
-    for (const source of legacySources) {
-      if (!(await this.awaitLegacyAnchor(source))) {
-        this.pause(id, generation);
-        return;
-      }
-      candidates.push({ name: source.name, legacy: true });
-    }
     retainedNames = await this.listRetainedSegments(id);
     const retainedCandidateName = this.retainedSegments.get(id) ?? retainedName;
     if (retainedCandidateName && !retainedNames.includes(retainedCandidateName)) retainedNames.push(retainedCandidateName);
-    for (const name of retainedNames) candidates.push({ name, legacy: false, retained: true });
+    for (const name of retainedNames) candidates.push({ name, retained: true });
     for (const sealedName of await this.listSealedSegments(id)) {
-      candidates.push({ name: sealedName, legacy: false });
+      candidates.push({ name: sealedName });
     }
     // Active is a first-class candidate so source ordering is global rather
     // than segmented by pathname class. A final active read below still
     // catches an append racing the peek phase.
-    candidates.push({ name: `${id}.jsonl`, legacy: false, active: true });
+    candidates.push({ name: `${id}.jsonl`, active: true });
     this.sequenceGapDeferred.delete(id);
     await this.drainSegmentCandidates(id, candidates, generation);
     if (!this.isLive(id, generation) || this.quarantined.has(id)) return;
@@ -1224,7 +1143,6 @@ export class SidecarTailer {
       await this.checkBacklog(id, undefined, generation);
       return;
     }
-    if (legacySources.length > 0) this.legacySegmentsDrained.add(id);
     if (!this.isLive(id, generation)) return;
 
     await this.readSource(id, false, undefined, generation);
@@ -1234,10 +1152,6 @@ export class SidecarTailer {
       return;
     }
     await this.checkBacklog(id, undefined, generation);
-  }
-
-  private legacySegmentPath(id: string): string {
-    return join(this.dir, `.${id}.jsonl${SIDECAR_ROTATED_FILE_SUFFIX}`);
   }
 
   private segmentStateKey(id: string, name: string): string {
@@ -1271,212 +1185,10 @@ export class SidecarTailer {
       }
     }
     this.sequenceGapDeferred.delete(id);
-    this.legacySources.delete(id);
-    this.legacySourceOverflow.delete(id);
-    for (const [name] of this.legacyAnchorDurability) {
-      if (name.startsWith(`${this.dir}/.${id}.jsonl${SIDECAR_ROTATED_FILE_SUFFIX}.`)) this.legacyAnchorDurability.delete(name);
-    }
   }
 
   private fileIdentity(stats: { dev: unknown; ino: unknown }): string {
     return `${String(stats.dev)}:${String(stats.ino)}`;
-  }
-
-  private isLegacyAnchorName(id: string, name: string): boolean {
-    return name.startsWith(`.${id}.jsonl${SIDECAR_ROTATED_FILE_SUFFIX}${SIDECAR_LEGACY_ANCHOR_TOKEN}`);
-  }
-
-  private legacyAnchorPath(id: string): string {
-    return join(this.dir, `.${id}.jsonl${SIDECAR_ROTATED_FILE_SUFFIX}${SIDECAR_LEGACY_ANCHOR_TOKEN}${randomUUID()}`);
-  }
-
-  private createLegacyAnchorSync(id: string, sourcePath: string, identity: string): LegacySegmentSource | null {
-    const anchorPath = this.legacyAnchorPath(id);
-    try {
-      linkSync(sourcePath, anchorPath);
-    } catch {
-      return null;
-    }
-    let anchoredIdentity: string;
-    try {
-      anchoredIdentity = this.fileIdentity(statSync(anchorPath));
-    } catch {
-      try { unlinkSync(anchorPath); } catch { /* best effort for our new link */ }
-      return null;
-    }
-    if (anchoredIdentity !== identity) {
-      // The source was replaced between stat() and link(). Do not retain a
-      // name whose provenance is ambiguous; the caller will quarantine.
-      try { unlinkSync(anchorPath); } catch { /* best effort for our new link */ }
-      return null;
-    }
-    const durable = syncFileContents(anchorPath)
-      .then(() => syncParentDirectory(anchorPath))
-      .then(() => true)
-      .catch(() => false);
-    this.legacyAnchorDurability.set(anchorPath, durable);
-    return { name: basename(anchorPath), identity: anchoredIdentity, anchored: true };
-  }
-
-  private listLegacyAnchorsSync(id: string): string[] {
-    try {
-      return readdirSync(this.dir)
-        .filter((name) => this.isLegacyAnchorName(id, name))
-        .sort();
-    } catch {
-      return [];
-    }
-  }
-
-  private initializeLegacySources(id: string, cursor: DurableSidecarCursor | null): LegacySegmentSource[] {
-    const fixedPath = this.legacySegmentPath(id);
-    const cursorSources = (cursor?.segmentSources ?? []).filter((source) => this.isLegacyAnchorName(id, source.name));
-    const cursorNames = new Set(cursorSources.map((source) => source.name));
-    if (cursorSources.length > SIDECAR_MAX_LEGACY_SOURCES) this.legacySourceOverflow.add(id);
-    const candidateNames = [
-      ...cursorNames,
-      ...this.listLegacyAnchorsSync(id),
-    ];
-    const sources: LegacySegmentSource[] = [];
-    for (const name of candidateNames) {
-      if (sources.some((source) => source.name === name)) continue;
-      try {
-        const stats = statSync(join(this.dir, name));
-        const identity = this.fileIdentity(stats);
-        // Multiple hard links to one inode are one source. Distinct inodes
-        // are separate fixed-name generations and must all be admitted or
-        // the terminal is quarantined before active bytes can overtake one.
-        if (sources.some((source) => source.identity === identity)) continue;
-        if (sources.length >= SIDECAR_MAX_LEGACY_SOURCES) {
-          this.legacySourceOverflow.add(id);
-          continue;
-        }
-        sources.push({ name, identity, anchored: true });
-      } catch {
-        // A cursor-listed anchor is the only durable pathname for that
-        // generation. If it vanished, continuing with the active file would
-        // silently skip data, so fail closed. Names discovered only from a
-        // directory scan can simply be stale and are ignored.
-        if (cursorNames.has(name)) this.legacySourceOverflow.add(id);
-      }
-    }
-    if (candidateNames.some((name) => !sources.some((source) => source.name === name) && !cursorNames.has(name))) {
-      // The physical directory contained more distinct anchors than the
-      // bounded source set could retain. Do not silently drop an inode.
-      const physicalAnchorCount = this.listLegacyAnchorsSync(id).filter((name) => !sources.some((source) => source.name === name)).length;
-      if (physicalAnchorCount > 0 && sources.length >= SIDECAR_MAX_LEGACY_SOURCES) this.legacySourceOverflow.add(id);
-    }
-    let fixedIdentity: string | undefined;
-    try {
-      fixedIdentity = this.fileIdentity(statSync(fixedPath));
-    } catch {
-      /* The legacy producer may not have created its fixed path yet. */
-    }
-    if (fixedIdentity && !sources.some((source) => source.identity === fixedIdentity)) {
-      if (sources.length < SIDECAR_MAX_LEGACY_SOURCES) {
-        const anchored = this.createLegacyAnchorSync(id, fixedPath, fixedIdentity);
-        if (anchored) sources.push(anchored);
-        else this.legacySourceOverflow.add(id);
-      } else {
-        this.legacySourceOverflow.add(id);
-      }
-    }
-    if (sources.some((source) => !source.anchored)) this.legacySourceOverflow.add(id);
-    this.legacySources.set(id, sources);
-    return sources;
-  }
-
-  private async reconcileLegacySources(id: string, generation: number): Promise<boolean> {
-    if (!this.isLive(id, generation)) return false;
-    const fixedPath = this.legacySegmentPath(id);
-    let stats: { size: number; dev: unknown; ino: unknown };
-    try {
-      stats = await statFile(fixedPath);
-    } catch {
-      return true;
-    }
-    const identity = this.fileIdentity(stats);
-    let sources = this.legacySources.get(id) ?? [];
-    const current = sources.at(-1);
-    if (current?.identity === identity) return true;
-    if (sources.some((source) => source.identity === identity)) {
-      // The fixed path was restored to an already-anchored inode. Keep the
-      // existing source order and let its durable cursor resume it.
-      return true;
-    }
-    if (current && !current.anchored) {
-      // The old source was never made restart-safe; once its pathname changes
-      // there is no recoverable inode to read. Stop before active bytes can
-      // overtake the unknown generation.
-      this.legacySourceOverflow.add(id);
-      this.quarantine(id, generation, "legacy source lost its durable inode anchor");
-      return false;
-    }
-    if (sources.length >= SIDECAR_MAX_LEGACY_SOURCES) {
-      this.legacySourceOverflow.add(id);
-      this.quarantine(id, generation, "legacy source anchor cap reached");
-      return false;
-    }
-    const anchored = this.createLegacyAnchorSync(id, fixedPath, identity);
-    if (!anchored) {
-      this.legacySourceOverflow.add(id);
-      this.quarantine(id, generation, "legacy source could not be anchored");
-      return false;
-    }
-    sources = [...sources, anchored];
-    this.legacySources.set(id, sources);
-    if (!(await this.awaitLegacyAnchor(anchored))) {
-      this.quarantine(id, generation, "legacy source anchor could not be made durable");
-      return false;
-    }
-    if (!(await this.persistCursor(id, {
-      offset: this.offsets.get(id) ?? 0,
-      segmentSources: this.segmentCursorEntries(id),
-    }, generation)) || !this.isLive(id, generation)) {
-      this.quarantine(id, generation, "legacy source cursor could not be persisted");
-      return false;
-    }
-    return true;
-  }
-
-  private async awaitLegacyAnchor(source: LegacySegmentSource): Promise<boolean> {
-    const path = join(this.dir, source.name);
-    const pending = this.legacyAnchorDurability.get(path);
-    if (!pending) return true;
-    const durable = await pending;
-    this.legacyAnchorDurability.delete(path);
-    return durable;
-  }
-
-  private legacySourceEntries(id: string): Array<{ name: string; identity: string; offset: number }> {
-    const entries = new Map<string, { name: string; identity: string; offset: number }>();
-    for (const source of this.legacySources.get(id) ?? []) {
-      const key = this.segmentStateKey(id, source.name);
-      entries.set(source.name, {
-        name: source.name,
-        identity: source.identity,
-        offset: this.segmentOffsets.get(key) ?? 0,
-      });
-    }
-    return [...entries.values()];
-  }
-
-  private segmentCursorEntries(
-    id: string,
-    updated?: { name: string; identity: string; offset: number },
-  ): Array<{ name: string; identity: string; offset: number }> {
-    const entries = new Map<string, { name: string; identity: string; offset: number }>();
-    const durable = this.durableCursors.get(id);
-    for (const source of durable?.segmentSources ?? []) entries.set(source.name, source);
-    const selected = this.sealedSegments.get(id);
-    if (selected) {
-      const key = this.segmentStateKey(id, selected);
-      const identity = this.segmentIdentities.get(key);
-      if (identity) entries.set(selected, { name: selected, identity, offset: this.segmentOffsets.get(key) ?? 0 });
-    }
-    for (const source of this.legacySourceEntries(id)) entries.set(source.name, source);
-    if (updated) entries.set(updated.name, updated);
-    return [...entries.values()].slice(-SIDECAR_MAX_CURSOR_SOURCES);
   }
 
   private isSealedSegmentName(id: string, name: string): boolean {
@@ -1494,16 +1206,12 @@ export class SidecarTailer {
     if (!cursorName || !selectedName) return false;
     return cursorName === selectedName
       || this.isRetainedAliasFor(selectedName, cursorName)
-      || this.isLegacyAliasFor(selectedName, cursorName);
+;
   }
 
   private isRetainedAliasFor(name: string, sourceName: string): boolean {
     return [SIDECAR_RETAINED_FILE_TOKEN, SIDECAR_DRAIN_FILE_TOKEN, SIDECAR_FINAL_GUARD_FILE_TOKEN]
       .some((token) => name.startsWith(`${sourceName}${token}`));
-  }
-
-  private isLegacyAliasFor(name: string, sourceName: string): boolean {
-    return name.startsWith(`${sourceName}${SIDECAR_LEGACY_ANCHOR_TOKEN}`);
   }
 
   private sealedProofPath(name: string): string {
@@ -1684,9 +1392,9 @@ export class SidecarTailer {
     const selectedKey = this.segmentStateKey(id, selected);
     const priorName = this.sealedSegments.get(id);
     // `sealedSegments` is also the scheduler's last-selected source. A
-    // legacy identity may be selected after a retained canonical anchor has
+    // retired identity may be selected after a retained canonical anchor has
     // already delivered its records; it is not an ABA replacement of that
-    // retained inode and must not invalidate the legacy cursor.
+    // retained inode and must not invalidate the retired cursor.
     const priorIsRetained = priorName !== undefined && this.isRetainedSegmentName(id, priorName);
     const priorKey = priorIsRetained ? this.segmentStateKey(id, priorName) : undefined;
     const priorIdentity = priorKey ? this.segmentIdentities.get(priorKey) : undefined;
@@ -1696,10 +1404,8 @@ export class SidecarTailer {
     }
     if (!this.segmentOffsets.has(selectedKey)) {
       const cursor = this.durableCursors.get(id);
-      const sourceCursor = cursor?.segmentSources?.find((source) => source.name === selected);
-      const offset = sourceCursor?.offset
-        ?? (priorKey ? this.segmentOffsets.get(priorKey) : undefined)
-        ?? (cursor?.sealedSegment && this.cursorMatchesSegment(cursor.sealedSegment, selected) ? cursor.segmentOffset : undefined)
+      const offset = (priorKey ? this.segmentOffsets.get(priorKey) : undefined)
+        ?? (cursor?.sealedSegment && this.cursorMatchesSegment(cursor.sealedSegment, selected) ? cursor.sealedOffset : undefined)
         ?? 0;
       this.segmentOffsets.set(selectedKey, offset);
       const priorPartial = priorKey ? this.segmentPartialRecords.get(priorKey) : undefined;
@@ -1757,14 +1463,9 @@ export class SidecarTailer {
     }
     if (!(await this.persistCursor(id, {
       offset: this.offsets.get(id) ?? 0,
-      segmentOffset: this.segmentOffsets.get(selectedKey) ?? 0,
-      segmentIdentity: identity,
+      sealedOffset: this.segmentOffsets.get(selectedKey) ?? 0,
+      sealedIdentity: identity,
       sealedSegment: selected,
-      segmentSources: this.segmentCursorEntries(id, {
-        name: selected,
-        identity,
-        offset: this.segmentOffsets.get(selectedKey) ?? 0,
-      }),
     }, generation))) {
       this.quarantine(id, generation, "retained sidecar cursor could not be persisted");
       return false;
@@ -1775,8 +1476,8 @@ export class SidecarTailer {
   private sourcePath(id: string, name: string): string {
     const drainPath = this.segmentDrainPaths.get(id);
     const retainedName = this.retainedSegments.get(id);
-    // A retained canonical inode and legacy ABA anchors can coexist. Only
-    // the retained name resolves through the drain link; candidate legacy
+    // A retained canonical inode and retired ABA anchors can coexist. Only
+    // the retained name resolves through the drain link; candidate retired
     // names must continue to resolve to their own identity-bound path.
     if (drainPath && (name === retainedName || (!retainedName && name === this.sealedSegments.get(id)))) return drainPath;
     return join(this.dir, name);
@@ -1922,7 +1623,7 @@ export class SidecarTailer {
     }
     while (pending.size > 0) {
       if (!this.isLive(id, generation) || this.quarantined.has(id)) return;
-      if (this.segmentDrainPaths.has(id) && [...pending.values()].some((candidate) => !candidate.legacy && !candidate.retained && !candidate.active)) {
+      if (this.segmentDrainPaths.has(id) && [...pending.values()].some((candidate) => !candidate.retained && !candidate.active)) {
         // A retained identity is already the last safe anchor for an older
         // canonical generation. A later sealed pathname cannot be admitted
         // beside it without proving both identities and their order; keep the
@@ -1966,7 +1667,6 @@ export class SidecarTailer {
         const leftSeq = left.peek.envelope?.seq ?? Number.MAX_SAFE_INTEGER;
         const rightSeq = right.peek.envelope?.seq ?? Number.MAX_SAFE_INTEGER;
         if (leftSeq !== rightSeq) return leftSeq - rightSeq;
-        if (left.candidate.legacy !== right.candidate.legacy) return left.candidate.legacy ? -1 : 1;
         if (left.candidate.retained !== right.candidate.retained) return left.candidate.retained ? -1 : 1;
         return left.candidate.name < right.candidate.name ? -1 : left.candidate.name > right.candidate.name ? 1 : 0;
       });
@@ -1975,7 +1675,7 @@ export class SidecarTailer {
         await this.readSource(id, false, undefined, generation, false);
       } else {
         this.sealedSegments.set(id, chosen.name);
-        await this.readSource(id, true, chosen.name, generation, !chosen.legacy && !chosen.retained);
+        await this.readSource(id, true, chosen.name, generation, !chosen.retained);
       }
       if (!this.isLive(id, generation) || this.quarantined.has(id)) return;
       const chosenKey = chosen.active ? `${id}\u0000<active>` : this.segmentStateKey(id, chosen.name);
@@ -1987,7 +1687,7 @@ export class SidecarTailer {
         return;
       }
       pending.delete(chosen.name);
-      if (this.segmentDrainPaths.has(id) && [...pending.values()].some((candidate) => !candidate.legacy && !candidate.retained && !candidate.active)) {
+      if (this.segmentDrainPaths.has(id) && [...pending.values()].some((candidate) => !candidate.retained && !candidate.active)) {
         // A second canonical generation beside a retained identity cannot be
         // ordered or safely discarded. Preserve it and stop admission.
         this.quarantine(id, generation, "canonical generation appeared beside a retained identity anchor");
@@ -2014,10 +1714,12 @@ export class SidecarTailer {
     reclaim = true,
   ): Promise<void> {
     if (!this.isLive(id, generation)) return;
-    const resolvedSegmentName = segmentName ?? this.sealedSegments.get(id) ?? basename(this.legacySegmentPath(id));
-    const file = segment ? this.sourcePath(id, resolvedSegmentName) : join(this.dir, `${id}.jsonl`);
-    const segmentKey = segment ? this.segmentStateKey(id, resolvedSegmentName) : undefined;
-    const state = this.sourceState(id, segment, resolvedSegmentName);
+    const resolvedSegmentName = segmentName ?? this.sealedSegments.get(id);
+    if (segment && !resolvedSegmentName) return;
+    const sourceName = resolvedSegmentName ?? "";
+    const file = segment ? this.sourcePath(id, sourceName) : join(this.dir, `${id}.jsonl`);
+    const segmentKey = segment ? this.segmentStateKey(id, sourceName) : undefined;
+    const state = this.sourceState(id, segment, sourceName);
     let size: number;
     let identity: string | undefined;
     try {
@@ -2029,19 +1731,19 @@ export class SidecarTailer {
         // A segment/anchor disappearing is not evidence that it was drained:
         // an external cleanup may have removed the only name for an inode.
         // Never clear its cursor and advance active bytes in that case.
-        this.quarantine(id, generation, `sidecar source ${resolvedSegmentName} disappeared`);
+        this.quarantine(id, generation, `sidecar source ${sourceName} disappeared`);
       }
       return;
     }
     if (segment && identity) {
       const priorIdentity = this.segmentIdentities.get(segmentKey!);
       if (priorIdentity && priorIdentity !== identity) {
-        if (this.isLegacyAnchorName(id, resolvedSegmentName) || this.isRetainedSegmentName(id, resolvedSegmentName) || this.isSealedSegmentName(id, resolvedSegmentName)) {
+        if (this.isRetainedSegmentName(id, sourceName) || this.isSealedSegmentName(id, sourceName)) {
           // An anchor pathname changing identity is an ABA replacement of the
           // very provenance record that made the cursor restart-safe. Resetting
           // it by size would skip an entire generation; stop before active
           // bytes can overtake the unknown inode.
-          this.quarantine(id, generation, `sidecar anchor ${resolvedSegmentName} changed identity`);
+          this.quarantine(id, generation, `sidecar anchor ${sourceName} changed identity`);
           return;
         }
         state.offset = 0;
@@ -2063,7 +1765,7 @@ export class SidecarTailer {
         // A canonical rotation replaces the active pathname while its prior
         // identity is still being drained. Keep stream sequence ownership in
         // that case; resetting it would let active seq4 overtake a retained
-        // legacy/canonical seq3. A truncation without any segment state is a
+        // retired/canonical seq3. A truncation without any segment state is a
         // genuine new active stream and may reset ownership.
         if (!this.hasSegmentState(id)) {
           this.streams.delete(id);
@@ -2076,16 +1778,11 @@ export class SidecarTailer {
         }
       } else if (!(await this.persistCursor(id, {
         offset: this.offsets.get(id) ?? 0,
-        segmentOffset: 0,
-        segmentIdentity: identity,
-        sealedSegment: resolvedSegmentName,
-        segmentSources: this.segmentCursorEntries(id, {
-          name: resolvedSegmentName,
-          identity: identity!,
-          offset: 0,
-        }),
+        sealedOffset: 0,
+        sealedIdentity: identity,
+        sealedSegment: sourceName,
       }, generation))) {
-        this.storeSourceState(id, true, state, resolvedSegmentName);
+        this.storeSourceState(id, true, state, sourceName);
         this.pause(id, generation);
         return;
       }
@@ -2125,9 +1822,9 @@ export class SidecarTailer {
         return;
       }
     } else if (partial.length === 0 && !oversized) {
-      this.storeSourceState(id, segment, state, resolvedSegmentName);
-      if (segment && reclaim && !this.segmentDrainPaths.has(id) && !this.isRetainedSegmentName(id, resolvedSegmentName) && this.isSealedSegmentName(id, resolvedSegmentName)) {
-        await this.maybeReclaimSegment(id, resolvedSegmentName, state.offset, generation);
+      this.storeSourceState(id, segment, state, sourceName);
+      if (segment && reclaim && !this.segmentDrainPaths.has(id) && !this.isRetainedSegmentName(id, sourceName) && this.isSealedSegmentName(id, sourceName)) {
+        await this.maybeReclaimSegment(id, sourceName, state.offset, generation);
       }
       return;
     }
@@ -2145,8 +1842,8 @@ export class SidecarTailer {
         oversized.bytes += data.length;
         state.offset += data.length;
         this.reportOversizedRecord(id, oversized);
-        this.storeSourceState(id, segment, state, resolvedSegmentName);
-        if (segment) this.quarantine(id, generation, `sidecar source ${resolvedSegmentName} exceeded the ${this.maxRecordBytes}-byte record cap without a bounded terminating newline`);
+        this.storeSourceState(id, segment, state, sourceName);
+        if (segment) this.quarantine(id, generation, `sidecar source ${sourceName} exceeded the ${this.maxRecordBytes}-byte record cap without a bounded terminating newline`);
         return;
       }
       oversized.bytes += newline + 1;
@@ -2155,8 +1852,8 @@ export class SidecarTailer {
         // not turn a delayed newline into permission to advance a durable
         // segment cursor or admit active records.
         this.reportOversizedRecord(id, oversized);
-        this.storeSourceState(id, true, state, resolvedSegmentName);
-        this.quarantine(id, generation, `sidecar source ${resolvedSegmentName} exceeded the ${this.maxRecordBytes}-byte record cap`);
+        this.storeSourceState(id, true, state, sourceName);
+        this.quarantine(id, generation, `sidecar source ${sourceName} exceeded the ${this.maxRecordBytes}-byte record cap`);
         return;
       }
       state.offset += newline + 1;
@@ -2174,14 +1871,14 @@ export class SidecarTailer {
       const recordBytes = lineBytes.length + 1;
       if (recordBytes > this.maxRecordBytes) {
         if (segment) {
-          // Segment identities are the only recoverable source for a legacy
+          // Segment identities are the only recoverable source for a retired
           // or retired generation. An over-cap complete line has no safe
           // sequence semantics; retain its cursor at the line start and
           // quarantine the identity rather than silently advancing past it.
           state.oversized = { bytes: recordBytes, diagnosticEmitted: false };
           this.reportOversizedRecord(id, state.oversized);
-          this.storeSourceState(id, true, state, resolvedSegmentName);
-          this.quarantine(id, generation, `sidecar source ${resolvedSegmentName} exceeded the ${this.maxRecordBytes}-byte record cap`);
+          this.storeSourceState(id, true, state, sourceName);
+          this.quarantine(id, generation, `sidecar source ${sourceName} exceeded the ${this.maxRecordBytes}-byte record cap`);
           return;
         }
         this.reportOversizedRecord(id, { bytes: recordBytes, diagnosticEmitted: false });
@@ -2219,19 +1916,19 @@ export class SidecarTailer {
         // old descriptor's append becomes visible. There is no safe way to
         // infer that an external descriptor is closed, so quarantine after a
         // bounded retry budget instead of retrying forever.
-        const gapKey = segment ? this.segmentStateKey(id, resolvedSegmentName) : `${id}\u0000<active>`;
+        const gapKey = segment ? this.segmentStateKey(id, sourceName) : `${id}\u0000<active>`;
         const gapPolls = (this.sequenceGapPolls.get(gapKey) ?? 0) + 1;
         this.sequenceGapPolls.set(gapKey, gapPolls);
         this.sequenceGapDeferred.add(id);
         state.partial = data.subarray(cursor);
-        this.storeSourceState(id, segment, state, resolvedSegmentName);
+        this.storeSourceState(id, segment, state, sourceName);
         if (gapPolls >= SIDECAR_MAX_SEQUENCE_GAP_POLLS) {
-          this.quarantine(id, generation, "legacy source sequence gap did not close within the bounded retry budget");
+          this.quarantine(id, generation, "retired source sequence gap did not close within the bounded retry budget");
           return;
         }
         return;
       }
-      const gapKey = segment ? this.segmentStateKey(id, resolvedSegmentName) : `${id}\u0000<active>`;
+      const gapKey = segment ? this.segmentStateKey(id, sourceName) : `${id}\u0000<active>`;
       this.sequenceGapPolls.delete(gapKey);
       this.sequenceGapDeferred.delete(id);
       if (disposition === "skip") {
@@ -2260,7 +1957,7 @@ export class SidecarTailer {
           this.pendingDeliveries.delete(id);
           if (!this.isLive(id, generation)) return;
           state.partial = data.subarray(cursor);
-          this.storeSourceState(id, segment, state, resolvedSegmentName);
+          this.storeSourceState(id, segment, state, sourceName);
           this.pause(id, generation);
           return;
         }
@@ -2272,7 +1969,7 @@ export class SidecarTailer {
             this.pendingDeliveries.delete(id);
             if (!this.isLive(id, generation)) return;
             state.partial = data.subarray(cursor);
-            this.storeSourceState(id, segment, state, resolvedSegmentName);
+            this.storeSourceState(id, segment, state, sourceName);
             this.pause(id, generation);
             return;
           }
@@ -2285,20 +1982,17 @@ export class SidecarTailer {
       if (!this.isLive(id, generation)) return;
       const cursorNext: DurableSidecarCursor = segment
         ? {
+          version: SIDECAR_CURSOR_VERSION,
           offset: this.offsets.get(id) ?? 0,
-          segmentOffset: nextOffset,
-          segmentIdentity: identity,
-          segmentSources: this.segmentCursorEntries(id, {
-            name: resolvedSegmentName,
-            identity: identity!,
-            offset: nextOffset,
-          }),
+          sealedOffset: nextOffset,
+          sealedIdentity: identity,
           bridgeId: envelope.bridgeId,
           sequence: envelope.seq,
         }
         : {
+          version: SIDECAR_CURSOR_VERSION,
           offset: nextOffset,
-          ...(this.hasSegmentState(id) ? { segmentOffset: this.segmentOffset(id) } : {}),
+          ...(this.hasSegmentState(id) ? { sealedOffset: this.segmentOffset(id) } : {}),
           bridgeId: envelope.bridgeId,
           sequence: envelope.seq,
         };
@@ -2308,7 +2002,7 @@ export class SidecarTailer {
       }, generation))) {
         if (!this.isLive(id, generation)) return;
         state.partial = data.subarray(cursor);
-        this.storeSourceState(id, segment, state, resolvedSegmentName);
+        this.storeSourceState(id, segment, state, sourceName);
         this.pause(id, generation);
         return;
       }
@@ -2336,10 +2030,10 @@ export class SidecarTailer {
       }
     }
     if (!this.isLive(id, generation)) return;
-    this.storeSourceState(id, segment, state, resolvedSegmentName);
+    this.storeSourceState(id, segment, state, sourceName);
 
-    if (segment && reclaim && !state.partial.length && !state.oversized && !this.segmentDrainPaths.has(id) && !this.isRetainedSegmentName(id, resolvedSegmentName) && this.isSealedSegmentName(id, resolvedSegmentName)) {
-      await this.maybeReclaimSegment(id, resolvedSegmentName, state.offset, generation);
+    if (segment && reclaim && !state.partial.length && !state.oversized && !this.segmentDrainPaths.has(id) && !this.isRetainedSegmentName(id, sourceName) && this.isSealedSegmentName(id, sourceName)) {
+      await this.maybeReclaimSegment(id, sourceName, state.offset, generation);
     }
   }
 
@@ -2392,7 +2086,7 @@ export class SidecarTailer {
    * durable identity anchor. A temporary hard link keeps the inode reachable
    * while the original link is removed, and the retained link is never
    * removed because POSIX cannot prove that an escaped descriptor will not
-   * append after a verification read. Legacy `.segment` files never enter
+   * append after a verification read. Retired `.segment` files never enter
    * this method and are intentionally left in place.
    */
   private async maybeReclaimSegment(id: string, name: string, offset: number, generation: number): Promise<boolean> {
@@ -2434,10 +2128,9 @@ export class SidecarTailer {
       }
       if (!(await this.persistCursor(id, {
         offset: this.offsets.get(id) ?? 0,
-        segmentOffset: after,
-        segmentIdentity: identity,
+        sealedOffset: after,
+        sealedIdentity: identity,
         sealedSegment: name,
-        segmentSources: this.segmentCursorEntries(id, { name, identity, offset: after }),
       }, generation)) || !this.isLive(id, generation)) return false;
 
       // link() is the proof that the inode remains reachable after the
@@ -2452,7 +2145,7 @@ export class SidecarTailer {
       if (!this.isLive(id, generation)) return false;
 
       // The delayed-unlink window is deliberately drained through the hard
-      // link. This also catches an append from a legacy descriptor which was
+      // link. This also catches an append from a retired descriptor which was
       // opened before the writer published the sealed generation.
       await this.readSource(id, true, name, generation, false);
       if (!this.isLive(id, generation)) return false;
@@ -2472,10 +2165,9 @@ export class SidecarTailer {
       if (this.segmentPartialRecords.has(segmentKey) || this.segmentOversizedRecords.has(segmentKey)) return false;
       if (!(await this.persistCursor(id, {
         offset: this.offsets.get(id) ?? 0,
-        segmentOffset: finalOffset,
-        segmentIdentity: identity,
+        sealedOffset: finalOffset,
+        sealedIdentity: identity,
         sealedSegment: name,
-        segmentSources: this.segmentCursorEntries(id, { name, identity, offset: finalOffset }),
       }, generation)) || !this.isLive(id, generation)) return false;
 
       // A final guard link ensures the first retirement unlink cannot make an
@@ -2533,14 +2225,9 @@ export class SidecarTailer {
       // late append, including one that happens after verification returns.
       if (!(await this.persistCursor(id, {
         offset: this.offsets.get(id) ?? 0,
-        segmentOffset: retainedOffset,
-        segmentIdentity: identity,
+        sealedOffset: retainedOffset,
+        sealedIdentity: identity,
         sealedSegment: retainedName,
-        segmentSources: this.segmentCursorEntries(id, {
-          name: retainedName,
-          identity,
-          offset: retainedOffset,
-        }),
       }, generation))) {
         this.pause(id, generation);
       }
@@ -2613,9 +2300,6 @@ export class SidecarTailer {
       }
       const drainPath = this.segmentDrainPaths.get(id);
       if (drainPath) await count(drainPath, this.segmentOffset(id, activeSegment) ?? 0);
-      for (const source of this.legacySources.get(id) ?? []) {
-        await count(join(this.dir, source.name), this.segmentOffset(id, source.name) ?? 0);
-      }
     }
     if (!this.isLive(id, generation)) return undefined;
     const holdProducer = this.paused.has(id) || this.quarantined.has(id);
@@ -2641,12 +2325,8 @@ export class SidecarTailer {
     } catch {
       /* Diagnostics must never break the durable tail. */
     }
-    // A legacy descriptor can ignore the advisory marker. Once its bounded
-    // compatibility budget is exhausted, stop admission for this terminal
-    // rather than allocating another anchor or allowing active records to
-    // overtake bytes that may still arrive on the old inode.
-    if (this.retainedSegments.has(id) || (this.legacySources.get(id)?.length ?? 0) > 0) {
-      this.quarantine(id, generation, "legacy compatibility source exceeded bounded backlog");
+    if (this.retainedSegments.has(id)) {
+      this.quarantine(id, generation, "retained sidecar source exceeded bounded backlog");
     }
   }
 
@@ -2826,35 +2506,46 @@ export class SidecarTailer {
   private loadCursor(id: string): DurableSidecarCursor | null {
     try {
       const raw = JSON.parse(readFileSync(this.cursorPath(id), "utf8")) as Record<string, unknown>;
-      if (!raw || typeof raw !== "object" || typeof raw.offset !== "number" || !Number.isSafeInteger(raw.offset) || raw.offset < 0) return null;
-      const cursor: DurableSidecarCursor = { offset: Number(raw.offset) };
-      if (typeof raw.bridgeId === "string" && raw.bridgeId.length > 0) cursor.bridgeId = raw.bridgeId;
-      if (typeof raw.sequence === "number" && Number.isSafeInteger(raw.sequence) && raw.sequence >= 1) cursor.sequence = raw.sequence;
-      if (typeof raw.segmentOffset === "number" && Number.isSafeInteger(raw.segmentOffset) && raw.segmentOffset >= 0) cursor.segmentOffset = raw.segmentOffset;
-      if (typeof raw.sealedSegment === "string" && raw.sealedSegment.length > 0 && raw.sealedSegment.length <= 256 && !raw.sealedSegment.includes("/")) {
-        cursor.sealedSegment = raw.sealedSegment;
-      }
-      if (typeof raw.segmentIdentity === "string" && raw.segmentIdentity.length > 0 && raw.segmentIdentity.length <= 256) {
-        cursor.segmentIdentity = raw.segmentIdentity;
-      }
-      if (Array.isArray(raw.segmentSources) && raw.segmentSources.length <= SIDECAR_MAX_CURSOR_SOURCES) {
-        const sources = raw.segmentSources.filter((source): source is { name: string; identity: string; offset: number } => {
-          if (!source || typeof source !== "object") return false;
-          const value = source as Record<string, unknown>;
-          return typeof value.name === "string"
-            && value.name.length > 0
-            && value.name.length <= 256
-            && !value.name.includes("/")
-            && typeof value.identity === "string"
-            && value.identity.length > 0
-            && value.identity.length <= 256
-            && typeof value.offset === "number"
-            && Number.isSafeInteger(value.offset)
-            && value.offset >= 0;
-        });
-        if (sources.length === raw.segmentSources.length) cursor.segmentSources = sources;
-      }
-      return cursor;
+      const allowed = new Set(["version", "offset", "bridgeId", "sequence", "sealedSegment", "sealedOffset", "sealedIdentity"]);
+      if (
+        !raw
+        || typeof raw !== "object"
+        || Object.keys(raw).some((key) => !allowed.has(key))
+        || raw.version !== SIDECAR_CURSOR_VERSION
+        || typeof raw.offset !== "number"
+        || !Number.isSafeInteger(raw.offset)
+        || raw.offset < 0
+      ) return null;
+      const hasStream = raw.bridgeId !== undefined || raw.sequence !== undefined;
+      if (hasStream && (
+        typeof raw.bridgeId !== "string"
+        || raw.bridgeId.length === 0
+        || raw.bridgeId.length > 256
+        || typeof raw.sequence !== "number"
+        || !Number.isSafeInteger(raw.sequence)
+        || raw.sequence < 1
+      )) return null;
+      const hasSealed = raw.sealedSegment !== undefined || raw.sealedOffset !== undefined || raw.sealedIdentity !== undefined;
+      if (hasSealed && (
+        typeof raw.sealedSegment !== "string"
+        || (!this.isSealedSegmentName(id, raw.sealedSegment) && !this.isRetainedSegmentName(id, raw.sealedSegment))
+        || typeof raw.sealedOffset !== "number"
+        || !Number.isSafeInteger(raw.sealedOffset)
+        || raw.sealedOffset < 0
+        || typeof raw.sealedIdentity !== "string"
+        || raw.sealedIdentity.length === 0
+        || raw.sealedIdentity.length > 256
+      )) return null;
+      return {
+        version: SIDECAR_CURSOR_VERSION,
+        offset: raw.offset,
+        ...(hasStream ? { bridgeId: raw.bridgeId as string, sequence: raw.sequence as number } : {}),
+        ...(hasSealed ? {
+          sealedSegment: raw.sealedSegment as string,
+          sealedOffset: raw.sealedOffset as number,
+          sealedIdentity: raw.sealedIdentity as string,
+        } : {}),
+      };
     } catch {
       return null;
     }
@@ -2870,35 +2561,19 @@ export class SidecarTailer {
     const write = previousWrite.catch(() => false).then(async () => {
       if (!this.isLive(id, generation)) return false;
       const previous = this.durableCursors.get(id);
-      const segmentOffset = next.segmentOffset === null
+      const sealedOffset = next.sealedOffset === null ? undefined : next.sealedOffset ?? previous?.sealedOffset;
+      const sealedIdentity = next.sealedIdentity === null || next.sealedSegment === null
         ? undefined
-        : next.segmentOffset !== undefined
-          ? next.segmentOffset
-          : previous?.segmentOffset;
-      const segmentIdentity = next.segmentIdentity === null || next.sealedSegment === null
-        ? undefined
-        : next.segmentIdentity !== undefined
-          ? next.segmentIdentity
-          : previous?.segmentIdentity;
-      const segmentSources = next.segmentSources === null || (next.sealedSegment === null && next.segmentSources === undefined)
-        ? undefined
-        : next.segmentSources !== undefined
-          ? next.segmentSources.slice(-SIDECAR_MAX_CURSOR_SOURCES)
-          : previous?.segmentSources;
+        : next.sealedIdentity ?? previous?.sealedIdentity;
+      const sealedSegment = next.sealedSegment === null ? undefined : next.sealedSegment ?? previous?.sealedSegment;
       const cursor: DurableSidecarCursor = {
+        version: SIDECAR_CURSOR_VERSION,
         offset: next.offset,
         ...(next.bridgeId ? { bridgeId: next.bridgeId } : previous?.bridgeId ? { bridgeId: previous.bridgeId } : {}),
         ...(next.sequence !== undefined ? { sequence: next.sequence } : previous?.sequence !== undefined ? { sequence: previous.sequence } : {}),
-        ...(segmentOffset !== undefined ? { segmentOffset } : {}),
-        ...(segmentIdentity !== undefined ? { segmentIdentity } : {}),
-        ...(segmentSources && segmentSources.length > 0 ? { segmentSources } : {}),
-        ...(next.sealedSegment === null
-          ? {}
-          : next.sealedSegment !== undefined
-            ? { sealedSegment: next.sealedSegment }
-            : previous?.sealedSegment
-              ? { sealedSegment: previous.sealedSegment }
-              : {}),
+        ...(sealedSegment ? { sealedSegment } : {}),
+        ...(sealedOffset !== undefined ? { sealedOffset } : {}),
+        ...(sealedIdentity ? { sealedIdentity } : {}),
       };
       try {
         await durableAtomicWrite(this.cursorPath(id), JSON.stringify(cursor));
@@ -2928,7 +2603,7 @@ export class SidecarTailer {
   ): "accept" | "skip" | "defer" {
     if (!this.canAcceptEvent(id, envelope, kind)) return "skip";
     const previous = this.streams.get(id);
-    // A retained/legacy inode is the only durable source that can fill a
+    // A retained/retired inode is the only durable source that can fill a
     // sequence gap in the active inode. Leave the active line at its cursor
     // until that source has been scanned; otherwise a late descriptor append
     // could be skipped after the active boundary advances.

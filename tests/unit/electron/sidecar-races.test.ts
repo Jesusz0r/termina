@@ -286,21 +286,6 @@ describe("Sidecar Concurrency & Race Condition Invariants", () => {
       expect(concurrentLines.length).toBe(128);
       expect(new Set(concurrentLines.map((event) => `${event.bridgeId}:${event.seq}`)).size).toBe(128);
 
-      const gapDir = join(root, "gap");
-      await mkdir(gapDir, { mode: 0o700 });
-      const gapFile = join(gapDir, "term-gap.jsonl");
-      const legacyFile = join(gapDir, ".term-gap.jsonl.segment");
-      await writeFile(legacyFile, `${JSON.stringify(record("gap", 1, "agent_start"))}\n`);
-      await writeFile(gapFile, `${JSON.stringify(record("gap", 2, "agent_settled"))}\n${JSON.stringify(record("gap", 2, "agent_settled"))}\n${JSON.stringify(record("gap", 3, "checkpoint_result", { ok: true }))}\n`);
-      const gapEvents: number[] = [];
-      const gapTailer = new SidecarTailer(gapDir, fakeWatch);
-      gapTailer.onEvent = (_id: string, event: any) => { gapEvents.push(event.seq); return true; };
-      gapTailer.start();
-      gapTailer.watch("term-gap");
-      await waitFor(() => gapEvents.length === 3);
-      expect(gapEvents).toEqual([1, 2, 3]);
-      expect(gapTailer.isPaused("term-gap")).toBe(false);
-      gapTailer.stop();
     } finally {
       await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }

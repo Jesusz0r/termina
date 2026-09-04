@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -89,6 +89,35 @@ describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
   });
 
   describe("SidecarTailer Stream Ownership & Switching", () => {
+    it("ignores removed sidecar files and rejects old cursor schemas", async () => {
+      const id = "term-strict-sidecar";
+      const active = join(eventsDir, `${id}.jsonl`);
+      const removedSegment = join(eventsDir, `.${id}.jsonl.segment`);
+      const cursor = join(eventsDir, `.cursor-${id}.json`);
+      await writeFile(removedSegment, `${JSON.stringify({ bridgeId: "removed", seq: 1, t: "agent_start" })}\n`);
+      await writeFile(active, `${JSON.stringify({ bridgeId: "old-active", seq: 1, t: "agent_start" })}\n`);
+      await writeFile(cursor, JSON.stringify({ offset: 0, segmentOffset: 0, sealedSegment: `.${id}.jsonl.segment` }));
+
+      const tailer = new SidecarTailer(eventsDir, () => Object.assign(new EventEmitter(), { close() {} }));
+      const received: any[] = [];
+      tailer.onEvent = (_terminalId, event) => received.push(event);
+      tailer.start();
+      tailer.watch(id);
+      try {
+        await appendFile(active, `${JSON.stringify({ bridgeId: "current", seq: 1, t: "session_ready", ok: true })}\n`);
+        const deadline = Date.now() + 3000;
+        while (received.length < 1 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(received.map((event) => event.bridgeId)).toEqual(["current"]);
+        const durable = JSON.parse(await readFile(cursor, "utf8"));
+        expect(durable).toMatchObject({ version: 1, bridgeId: "current", sequence: 1 });
+        expect(durable).not.toHaveProperty("segmentOffset");
+        expect(durable).not.toHaveProperty("segmentIdentity");
+        expect(durable).not.toHaveProperty("segmentSources");
+      } finally {
+        tailer.stop();
+      }
+    });
+
     it("follows active streams and honors replacement bridge ownership", async () => {
       const termFile = join(eventsDir, "term-tailer.jsonl");
       await writeFile(termFile, "");
