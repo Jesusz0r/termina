@@ -127,8 +127,6 @@ export type SessionTestHooks = {
   beforePiWorkspaceCreate?: (path: string) => void;
   beforePiCopyDestinationOpen?: (path: string) => void;
   afterDestinationReservation?: (path: string) => void;
-  /** Focused Pi-copy cleanup seam, rejected outside TERMINA_CORE_TEST. */
-  beforePiCopyCleanup?: (path: string) => void;
   /** Focused first-project admission seam, rejected outside TERMINA_CORE_TEST. */
   afterSessionProjectCreated?: (path: string) => void;
   /** Focused first-empty-bundle publication seam, rejected outside TERMINA_CORE_TEST. */
@@ -157,7 +155,7 @@ export type PiSessionCopyOptions = {
   testOnlyMaxBytes?: number;
   testOnlyMaxCount?: number;
   testOnlyMaxWorkBytes?: number;
-  testHooks?: Pick<SessionTestHooks, "beforePiWorkspaceCreate" | "beforePiCopyDestinationOpen" | "afterDestinationReservation" | "beforePiCopyCleanup">;
+  testHooks?: Pick<SessionTestHooks, "beforePiWorkspaceCreate" | "beforePiCopyDestinationOpen" | "afterDestinationReservation">;
 };
 
 export type PiSessionCopyIdentity = {
@@ -2746,7 +2744,6 @@ function removePiSessionCopyLocked(
   root: DirectoryAnchor,
   lock: SessionRetentionLock,
   expectedIdentity: PiSessionCopyIdentity | undefined,
-  options?: Pick<PiSessionCopyOptions, "testHooks">,
 ): SessionResult<{ removed: boolean }> {
   const rootStable = piCopyRootStable(root, lock);
   if (!rootStable.ok) return rootStable;
@@ -2792,13 +2789,8 @@ function removePiSessionCopyLocked(
   ) {
     return { ok: false, error: "Pi session copy cleanup target metadata changed; retained" };
   }
-  try {
-    options?.testHooks?.beforePiCopyCleanup?.(path);
-  } catch (err) {
-    return { ok: false, error: errMsg(err) };
-  }
-  const rootAfterHook = piCopyRootStable(root, lock);
-  if (!rootAfterHook.ok) return rootAfterHook;
+  const rootBeforeRemove = piCopyRootStable(root, lock);
+  if (!rootBeforeRemove.ok) return rootBeforeRemove;
   let after: BigIntStats;
   try {
     after = lstatSync(path, { bigint: true });
@@ -2934,40 +2926,10 @@ function openPiWorkspaceTransaction(
 }
 
 /**
- * Remove one ephemeral Pi worker copy. A missing or changed target is not a
- * success signal: the caller retains the path for later bounded recovery.
- */
-export async function removePiSessionCopy(
-  path: string,
-  workspaceDir: string,
-  expectedIdentity?: PiSessionCopyIdentity,
-  options?: Pick<PiSessionCopyOptions, "testHooks">,
-): Promise<SessionResult<{ removed: boolean }>> {
-  if (options?.testHooks && process.env.TERMINA_CORE_TEST !== "1") {
-    return { ok: false, error: "test-only Pi session cleanup controls are unavailable" };
-  }
-  const workspace = resolve(workspaceDir);
-  const target = resolve(path);
-  if (dirname(target) !== workspace) return { ok: false, error: "Pi session copy cleanup escaped its workspace" };
-  const transaction = openPiWorkspaceTransaction(workspace, expectedIdentity && {
-    dev: expectedIdentity.rootDev ?? "",
-    ino: expectedIdentity.rootIno ?? "",
-    ...(expectedIdentity.rootBirthtimeNs === undefined ? {} : { birthtimeNs: expectedIdentity.rootBirthtimeNs }),
-  }, false);
-  if (!transaction.ok) return transaction;
-  try {
-    return removePiSessionCopyLocked(target, transaction.anchor, transaction.lock, expectedIdentity, options);
-  } finally {
-    closeSync(transaction.anchor.fd);
-    releaseSessionRetentionLock(transaction.lock);
-  }
-}
-
-/**
  * Copy one Pi session into an app-private workspace with pre-copy admission.
  * The destination is exclusively created and sized before source bytes are
  * read; that file is the durable reservation visible to concurrent/restarted
- * owners. The caller may later remove it through removePiSessionCopy().
+ * owners. The worker later hands its identity to native bound cleanup.
  */
 export async function copyPiSessionFile(
   sourcePath: string,
@@ -3164,7 +3126,7 @@ export async function copyPiSessionFile(
         try { closeSync(destinationFd); } catch { /* cleanup below owns the path */ }
         destinationFd = null;
       }
-      const cleaned = removePiSessionCopyLocked(target, rootAnchor, lock, destinationIdentity, options);
+      const cleaned = removePiSessionCopyLocked(target, rootAnchor, lock, destinationIdentity);
       if (!cleaned.ok) return { ok: false, error: `${error}; Pi session copy cleanup retained: ${cleaned.error}`, path: target, commit: "uncertain" };
     }
     return { ok: false, error };

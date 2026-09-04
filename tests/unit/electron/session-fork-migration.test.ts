@@ -33,6 +33,8 @@ describe("SessionFork Architecture & Migration Boundary Contracts", () => {
     expect(/sessionBranchIdentity/.test(worldlines) && /sourceSessionIdentity/.test(worldlines)).toBe(true);
     expect(!/rm\(run\.sessionBranchFile/.test(worldlines)).toBe(true);
     expect(/discardPiSession:\s*\(sessionFile, identity\)\s*=>\s*this\.sessionFork\.discardPi/.test(main)).toBe(true);
+    expect(/boundPromotionRemoveTree/.test(worker) && !/\bremovePiSessionCopy\b/.test(worker)).toBe(true);
+    expect(!/export async function removePiSessionCopy/.test(session)).toBe(true);
     expect(/discardEmptyCoreSession/.test(main) && /inspectEmptySessionBundle/.test(worker) && /boundPromotionRemoveTree/.test(worker)).toBe(true);
     expect(/MAX_RETAINED_EMPTY_SESSION_BUNDLES/.test(session) && /admitNewEmptySessionBundle/.test(session)).toBe(true);
     expect(!/\bremoveSessionBundle\b/.test(worldlines)).toBe(true);

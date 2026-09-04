@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 /**
- * Focused Pi-session copy admission and cleanup probes.
+ * Focused Pi-session copy admission probes.
  *
  * Run with:
  *   TERMINA_CORE_TEST=1 node --experimental-strip-types --no-warnings scripts/session-pi-admission-test.mjs
@@ -16,10 +16,8 @@ import {
   mkdtempSync,
   openSync,
   readdirSync,
-  readFileSync,
   renameSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { once } from "node:events";
@@ -27,8 +25,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-describe("Pi Session Admission and Cleanup Probes", () => {
-  it("passes Pi session admission and cleanup regressions natively", async () => {
+describe("Pi Session Admission Probes", () => {
+  it("passes Pi session admission regressions natively", async () => {
     process.env.TERMINA_CORE_TEST = "1";
     const work = mkdtempSync(join(tmpdir(), "termina-pi-admission-"));
     const sessionBundle = join(work, "session.mjs");
@@ -115,7 +113,6 @@ describe("Pi Session Admission and Cleanup Probes", () => {
       const {
         MAX_PI_SESSION_BYTES,
         copyPiSessionFile,
-        removePiSessionCopy,
       } = session;
       check(Number.isSafeInteger(MAX_PI_SESSION_BYTES), "Pi admission API exposes a finite source bound");
     
@@ -125,22 +122,19 @@ describe("Pi Session Admission and Cleanup Probes", () => {
       const workspace = join(work, "workspace");
       mkdirSync(workspace, { recursive: true, mode: 0o700 });
     
-      // A direct first use must establish the workspace through its parent
-      // transaction, then return provenance for the later identity-bound remove.
+      // A direct first use establishes the workspace through its parent
+      // transaction and returns provenance for native bound cleanup.
       const firstCreateWorkspace = join(work, "first-create-workspace");
       const firstCreate = await copyPiSessionFile(source, join(firstCreateWorkspace, "first.jsonl"), {
         workspaceDir: firstCreateWorkspace,
       });
-      check(firstCreate.ok && existsSync(firstCreate.sessionFile), "Pi first-use workspace creation publishes one bound copy");
-      if (firstCreate.ok) {
-        const firstRemoved = await removePiSessionCopy(firstCreate.sessionFile, firstCreateWorkspace, firstCreate.identity);
-        check(
-          process.platform === "linux"
-            ? firstRemoved.ok && !existsSync(firstCreate.sessionFile)
-            : !firstRemoved.ok && existsSync(firstCreate.sessionFile),
-          "Pi first-use workspace returns an identity for exact consume or bounded retention",
-        );
-      }
+      check(
+        firstCreate.ok
+          && existsSync(firstCreate.sessionFile)
+          && firstCreate.identity.rootDev !== undefined
+          && firstCreate.identity.rootIno !== undefined,
+        "Pi first-use workspace publishes one copy with native cleanup provenance",
+      );
     
       const missingParentWorkspace = join(work, "missing-parent", "workspace");
       const missingParent = await copyPiSessionFile(source, join(missingParentWorkspace, "copy.jsonl"), {
@@ -300,99 +294,7 @@ describe("Pi Session Admission and Cleanup Probes", () => {
         "cancelled Pi copy releases or retains its durable reservation exactly",
       );
     
-      const cleanupWorkspace = join(work, "cleanup-workspace");
-      mkdirSync(cleanupWorkspace, { recursive: true, mode: 0o700 });
-      const copied = await copyPiSessionFile(source, join(cleanupWorkspace, "copy.jsonl"), { workspaceDir: cleanupWorkspace });
-      if (!copied.ok) throw new Error(copied.error);
-      const held = join(cleanupWorkspace, "copy-held.jsonl");
-      let cleanupHookRan = false;
-      const cleanupAba = await removePiSessionCopy(copied.sessionFile, cleanupWorkspace, copied.identity, {
-        testHooks: { beforePiCopyCleanup: (path) => {
-          cleanupHookRan = true;
-          renameSync(path, held);
-          writeFileSync(path, "replacement\n", { mode: 0o600 });
-        } },
-      });
-      check(
-        !cleanupAba.ok
-          && existsSync(copied.sessionFile)
-          && (process.platform === "linux"
-            ? cleanupHookRan && existsSync(held)
-            : !cleanupHookRan),
-        "Pi cleanup retains both sides of a leaf ABA replacement",
-      );
-    
-      const { linkSync } = await import("node:fs");
-      const leafHardlinkWorkspace = join(work, "leaf-hardlink-workspace");
-      mkdirSync(leafHardlinkWorkspace, { recursive: true, mode: 0o700 });
-      const leafHardlinkCopy = await copyPiSessionFile(source, join(leafHardlinkWorkspace, "copy.jsonl"), { workspaceDir: leafHardlinkWorkspace });
-      if (!leafHardlinkCopy.ok) throw new Error(leafHardlinkCopy.error);
-      const leafHardlinkHeld = join(leafHardlinkWorkspace, "copy-held.jsonl");
-      let leafHardlinkHookRan = false;
-      const leafHardlinkCleanup = await removePiSessionCopy(leafHardlinkCopy.sessionFile, leafHardlinkWorkspace, leafHardlinkCopy.identity, {
-        testHooks: { beforePiCopyCleanup: (path) => {
-          leafHardlinkHookRan = true;
-          renameSync(path, leafHardlinkHeld);
-          linkSync(leafHardlinkHeld, path);
-        } },
-      });
-      check(
-        !leafHardlinkCleanup.ok
-          && existsSync(leafHardlinkCopy.sessionFile)
-          && (process.platform === "linux"
-            ? leafHardlinkHookRan && existsSync(leafHardlinkHeld)
-            : !leafHardlinkHookRan),
-        "Pi cleanup rejects a same-inode hardlink replacement",
-      );
-    
-      const ancestorWorkspace = join(work, "ancestor-workspace");
-      mkdirSync(ancestorWorkspace, { recursive: true, mode: 0o700 });
-      const ancestorCopy = await copyPiSessionFile(source, join(ancestorWorkspace, "copy.jsonl"), { workspaceDir: ancestorWorkspace });
-      if (!ancestorCopy.ok) throw new Error(ancestorCopy.error);
-      const parked = join(work, "ancestor-workspace-parked");
-      renameSync(ancestorWorkspace, parked);
-      mkdirSync(ancestorWorkspace, { recursive: true, mode: 0o700 });
-      const ancestorCleanup = await removePiSessionCopy(ancestorCopy.sessionFile, ancestorWorkspace, ancestorCopy.identity);
-      check(!ancestorCleanup.ok && existsSync(join(parked, "copy.jsonl")), "Pi cleanup fails closed across an ancestor replacement");
-    
-      const hardlinkAncestorWorkspace = join(work, "hardlink-ancestor-workspace");
-      mkdirSync(hardlinkAncestorWorkspace, { recursive: true, mode: 0o700 });
-      const hardlinkAncestorCopy = await copyPiSessionFile(source, join(hardlinkAncestorWorkspace, "copy.jsonl"), { workspaceDir: hardlinkAncestorWorkspace });
-      if (!hardlinkAncestorCopy.ok) throw new Error(hardlinkAncestorCopy.error);
-      const hardlinkAncestorParked = join(work, "hardlink-ancestor-parked");
-      renameSync(hardlinkAncestorWorkspace, hardlinkAncestorParked);
-      mkdirSync(hardlinkAncestorWorkspace, { recursive: true, mode: 0o700 });
-      linkSync(join(hardlinkAncestorParked, "copy.jsonl"), join(hardlinkAncestorWorkspace, "copy.jsonl"));
-      const hardlinkAncestorCleanup = await removePiSessionCopy(
-        join(hardlinkAncestorWorkspace, "copy.jsonl"),
-        hardlinkAncestorWorkspace,
-        hardlinkAncestorCopy.identity,
-      );
-      check(
-        !hardlinkAncestorCleanup.ok
-          && existsSync(join(hardlinkAncestorParked, "copy.jsonl"))
-          && existsSync(join(hardlinkAncestorWorkspace, "copy.jsonl")),
-        "Pi cleanup rejects a hardlink below an ancestor replacement",
-      );
-    
-      const symlinkWorkspace = join(work, "symlink-workspace");
-      mkdirSync(symlinkWorkspace, { recursive: true, mode: 0o700 });
-      const outside = join(work, "outside.txt");
-      writeFileSync(outside, "outside\n", { mode: 0o600 });
-      symlinkSync(outside, join(symlinkWorkspace, "copy.jsonl"));
-      const symlinkCleanup = await removePiSessionCopy(join(symlinkWorkspace, "copy.jsonl"), symlinkWorkspace, { dev: "0", ino: "0" });
-      check(!symlinkCleanup.ok && readFileSync(outside, "utf8") === "outside\n", "Pi cleanup never follows a symlink leaf");
-    
-      const hardlinkWorkspace = join(work, "hardlink-workspace");
-      mkdirSync(hardlinkWorkspace, { recursive: true, mode: 0o700 });
-      const hardlinkOutside = join(work, "hardlink-outside.txt");
-      writeFileSync(hardlinkOutside, "hardlink-outside\n", { mode: 0o600 });
-      // A replacement hard link is deliberately not trusted by the expected copy identity.
-      linkSync(hardlinkOutside, join(hardlinkWorkspace, "copy.jsonl"));
-      const hardlinkCleanup = await removePiSessionCopy(join(hardlinkWorkspace, "copy.jsonl"), hardlinkWorkspace, { dev: "0", ino: "0" });
-      check(!hardlinkCleanup.ok && existsSync(hardlinkOutside), "Pi cleanup preserves a hardlink replacement");
-    
-      console.log("PASS Pi session admission/cleanup regressions");
+      console.log("PASS Pi session admission regressions");
     } finally {
       for (const child of children) {
         if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");

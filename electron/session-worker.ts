@@ -18,7 +18,6 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   copyPiSessionFile,
   inspectEmptySessionBundle,
-  removePiSessionCopy,
   writeForkedSession,
   type PiSessionCopyIdentity,
   type PiSessionCopyResult,
@@ -61,15 +60,10 @@ function samePiCopyLeaf(info: BigIntStats, expected: PiSessionCopyIdentity): boo
 }
 
 /**
- * Node's descriptor-relative unlink is Linux-only. On other hosts the
- * canonical session owner deliberately retains the file; use the existing
- * native bound quarantine primitive when the worker has enough provenance to
- * hand cleanup back to the Rust owner. Any proof failure leaves evidence.
+ * Reclaim a Pi worker copy only through the native descriptor-bound owner.
+ * Any missing provenance or proof failure leaves bounded evidence.
  */
 async function cleanupPiCopy(path: string, workspaceDir: string, expected: PiSessionCopyIdentity): Promise<CleanupResult> {
-  const cleanup = await removePiSessionCopy(path, workspaceDir, expected);
-  if (cleanup.ok) return cleanup;
-  if (!cleanup.error.includes("descriptor-bound Pi session cleanup is unavailable")) return cleanup;
   if (expected.rootDev === undefined || expected.rootIno === undefined) {
     return { ok: false, error: "Pi session copy cleanup has no workspace provenance; retained" };
   }
