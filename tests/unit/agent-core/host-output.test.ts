@@ -20,6 +20,27 @@ describe("Agent Core Host Output & Context Bounding", () => {
     for (const kind of ["verify", "edits", "mine", "mailbox"]) {
       rmSync(join(root, `${kind}-${terminalId}.md`), { force: true, recursive: true });
     }
+    rmSync(join(root, `mine-${terminalId}.json`), { force: true, recursive: true });
+  });
+
+  it("keeps Mine policy out of model context and reads it for tool gates", () => {
+    const protectedFile = join(root, "protected.ts");
+    writeFileSync(join(root, `mine-${terminalId}.md`), "legacy prompt instruction");
+    writeFileSync(join(root, `mine-${terminalId}.json`), JSON.stringify([protectedFile]));
+
+    expect(host.readContextFiles(root, terminalId)).toBe("");
+    expect([...host.readProtectedPaths(root, terminalId)]).toEqual([protectedFile]);
+  });
+
+  it("fails closed on malformed or linked Mine policy files", () => {
+    const policy = join(root, `mine-${terminalId}.json`);
+    writeFileSync(policy, "not-json");
+    expect(host.readProtectedPaths(root, terminalId).size).toBe(0);
+    rmSync(policy, { force: true });
+    const target = join(root, "mine-policy-target.json");
+    writeFileSync(target, JSON.stringify([join(root, "protected.ts")]));
+    symlinkSync(target, policy);
+    expect(host.readProtectedPaths(root, terminalId).size).toBe(0);
   });
 
   it("preserves complete UTF-8 text below the cap", () => {

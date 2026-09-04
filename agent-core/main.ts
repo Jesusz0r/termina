@@ -12,8 +12,8 @@
  * - Reclamation with high-water/low-water hysteresis; chained
  *       summarization on the cheap lane; emergency overflow revision
  *       mid-turn; last-resort truncate at prompt boundaries
- * - Stubs carry the reproducing command; structured file inventories
- *       survive summarization as data
+ * - Stubs carry the reproducing command; tool history remains the canonical
+ *       record of file reads and mutations
  * - Per-turn usage records with waste attribution and models.dev pricing
  * - Two-role routing map (main + summary), env-overridable
  * - Streaming always; tool calls run concurrently behind a small bound
@@ -135,6 +135,7 @@ import {
   persistLoadedImages,
   promptFileName,
   readContextFilesResult,
+  readProtectedPaths,
   structuredStartup,
   visibleAssistantText,
   waitForAck,
@@ -4514,6 +4515,7 @@ export function shouldAskPermission(mode: PermissionMode, command: string): bool
 let permissionMode: PermissionMode = process.env.TERMINA_CORE_APPROVE === "all" ? "always" : "ask";
 let approvalResolve: ((line: string) => void) | null = null;
 let approvalQueue = Promise.resolve();
+const protectedTaskApprovals = new Set<string>();
 
 /** Resolve an in-flight permission prompt before tearing down its surface. */
 export function cancelPendingApproval(line = "/approve deny"): boolean {
@@ -4547,7 +4549,7 @@ async function confirmBashNow(command: string): Promise<boolean> {
   return line === "/approve once";
 }
 
-async function confirmBash(command: string): Promise<boolean> {
+async function queueApproval(confirm: () => Promise<boolean>): Promise<boolean> {
   const previous = approvalQueue;
   let release!: () => void;
   approvalQueue = new Promise<void>((resolve) => {
@@ -4555,10 +4557,41 @@ async function confirmBash(command: string): Promise<boolean> {
   });
   await previous;
   try {
-    return await confirmBashNow(command);
+    return await confirm();
   } finally {
     release();
   }
+}
+
+async function confirmBash(command: string): Promise<boolean> {
+  return queueApproval(() => confirmBashNow(command));
+}
+
+async function confirmProtectedMutationNow(inputPath: string | undefined): Promise<boolean> {
+  if (interrupted) return false;
+  if (!eventsDir || !terminalId) return true;
+  const confined = confinePath(canonicalCwd, inputPath);
+  if (!confined.ok) return true;
+  const target = confined.abs;
+  if (!readProtectedPaths(eventsDir, terminalId).has(target) || protectedTaskApprovals.has(target)) return true;
+  if (!surface?.active()) return false;
+  const label = relative(canonicalCwd, target) || target;
+  surface.setChoices(`Approve protected file edit? ${label}`, [
+    { name: "Deny", hint: "leave this file unchanged", submit: "/approve deny" },
+    { name: "Approve", hint: "allow edits to this file for this task", submit: "/approve protected" },
+  ]);
+  const line = await new Promise<string>((resolve) => {
+    approvalResolve = resolve;
+  });
+  if (approvalResolve) approvalResolve = null;
+  surface?.clearChoices();
+  if (line !== "/approve protected") return false;
+  protectedTaskApprovals.add(target);
+  return true;
+}
+
+async function confirmProtectedMutation(inputPath: string | undefined): Promise<boolean> {
+  return queueApproval(() => confirmProtectedMutationNow(inputPath));
 }
 
 async function executeTool(use: ToolUse): Promise<ToolOutcome> {
@@ -4567,10 +4600,12 @@ async function executeTool(use: ToolUse): Promise<ToolOutcome> {
     return done(use, got);
   }
   if (use.name === "write_file") {
+    if (!(await confirmProtectedMutation(use.input.path))) return done(use, "error: protected file edit denied", true);
     const got = writeProjectFile(canonicalCwd, use.input.path, use.input.content ?? "");
     return done(use, got.content, got.isError);
   }
   if (use.name === "edit") {
+    if (!(await confirmProtectedMutation(use.input.path))) return done(use, "error: protected file edit denied", true);
     const got = editProjectFile(
       canonicalCwd,
       use.input.path,
@@ -5455,14 +5490,7 @@ async function summarize(): Promise<boolean> {
       });
       return false;
     }
-    // Reuse the canonical request inventory so summary handoffs and the
-    // provider overlay agree on ordering, escaping, and omission bounds.
-    const inventoryOverlay = buildRequestOverlay({ messages: evicted, hostContext: "" });
-    const inventoryText = inventoryOverlay?.text ?? "";
-    const inventories = inventoryText.startsWith("<working-set>\n") && inventoryText.endsWith("\n</working-set>")
-      ? inventoryText.slice("<working-set>\n".length, -"\n</working-set>".length)
-      : inventoryText;
-    const handoffBody = `${text}${inventories ? `\n\n${inventories}` : ""}`;
+    const handoffBody = text;
     const handoff = `<context-handoff>\n${handoffBody}\n</context-handoff>`;
     const sseq = storageSeq + 1;
     persist({ type: "revision", kind: "summarize", evicted: boundary, summarySseq: sseq, message: { role: "user", content: handoff } });
@@ -7064,6 +7092,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   // prompt's volatile context inflate idle reclaim estimates or leak into a
   // preflight failure before this prompt has built its own snapshot.
   activeRequestOverlay = null;
+  protectedTaskApprovals.clear();
   if (!streamPrepared) {
     try {
       ensureFreshSession();

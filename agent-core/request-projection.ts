@@ -11,7 +11,6 @@ import { createHash } from "node:crypto";
 import { expandFileImageSource } from "./host.ts";
 
 const DEFAULT_OVERLAY_BYTES = 64 * 1024;
-const INVENTORY_CAP = 40;
 const VIEW_KEYS = new Set(["chars", "tool", "repro", "stubbed"]);
 const TOOL_USE_TYPES = new Set(["tool_use", "server_tool_use"]);
 const TOOL_RESULT_TYPES = new Set(["tool_result", "web_search_tool_result"]);
@@ -68,32 +67,8 @@ export type ProjectPersistedResult =
   | { ok: true; messages: RequestMessage[] }
   | { ok: false; error: string };
 
-type Inventory = {
-  read: string[];
-  modified: string[];
-};
-
-function compareUtf8(a: string, b: string): number {
-  return Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
-}
-
 function stripXmlControls(value: string): string {
   return value.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, "");
-}
-
-function xmlSafe(value: string): string {
-  return stripXmlControls(value)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-function inventoryPathSafe(value: string): string {
-  // Newlines in a filename must not create extra inventory rows or inject
-  // closing/opening tags.  Remove CR/LF at the inventory boundary; the
-  // surrounding overlay framing retains its own deterministic newlines.
-  return xmlSafe(value.replace(/[\r\n]/g, ""));
 }
 
 function hostContextSafe(value: string): string {
@@ -141,130 +116,37 @@ function takeUtf8Prefix(text: string, maxBytes: number): string {
   return source.subarray(0, end).toString("utf8");
 }
 
-function blockInput(block: ProjectionBlock): Record<string, unknown> | null {
-  const input = block.input;
-  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
-  return input as Record<string, unknown>;
-}
-
-function fileInventories(messages: readonly ProjectionMessage[]): Inventory {
-  const read = new Set<string>();
-  const modified = new Set<string>();
-  for (const message of messages) {
-    if (typeof message.content === "string" || !Array.isArray(message.content)) continue;
-    for (const block of message.content) {
-      if (!block || typeof block !== "object" || block.type !== "tool_use") continue;
-      const input = blockInput(block);
-      const path = input?.path;
-      if (typeof path !== "string" || path.length === 0) continue;
-      const framedPath = stripXmlControls(path).replace(/[\r\n]/g, "");
-      if (!framedPath) continue;
-      if (block.name === "read_file") read.add(framedPath);
-      if (block.name === "write_file" || block.name === "edit") modified.add(framedPath);
-    }
-  }
-  return {
-    read: [...read].sort(compareUtf8),
-    modified: [...modified].sort(compareUtf8),
-  };
-}
-
-function sectionText(tag: string, paths: readonly string[], limit = INVENTORY_CAP): string {
-  const shown = paths.slice(0, limit).map(inventoryPathSafe);
-  const omitted = paths.length - shown.length;
-  if (omitted > 0) shown.push(`<!-- ${omitted} paths omitted -->`);
-  return `<${tag}>\n${shown.join("\n")}\n</${tag}>`;
-}
-
-function fullOverlayText(inventory: Inventory, hostContext: string): string {
-  const sections: string[] = [];
-  if (inventory.read.length > 0) sections.push(sectionText("read-files", inventory.read));
-  if (inventory.modified.length > 0) sections.push(sectionText("modified-files", inventory.modified));
+function fullOverlayText(hostContext: string): string {
   const host = hostContextSafe(hostContext);
-  if (host) sections.push(host);
-  if (sections.length === 0) return "";
-  return `<working-set>\n${sections.join("\n")}\n</working-set>`;
+  return host ? `<working-set>\n${host}\n</working-set>` : "";
 }
 
-function minimalOverlayText(): string {
-  return "<working-set>\n<!-- context omitted: request overlay byte cap -->\n</working-set>";
-}
-
-function truncateHostOverlay(inventory: Inventory, hostContext: string, maxBytes: number): string | null {
-  const minimum = minimalOverlayText();
-  if (Buffer.byteLength(minimum, "utf8") > maxBytes) return null;
-
-  // Keep inventory structure and deterministic entries first.  Host context is
-  // the least stable part of the overlay, so it is the first part reduced.
-  const sections: string[] = [];
-  if (inventory.read.length > 0) sections.push(sectionText("read-files", inventory.read));
-  if (inventory.modified.length > 0) sections.push(sectionText("modified-files", inventory.modified));
-  const inventoryOnly = sections.length > 0 ? `<working-set>\n${sections.join("\n")}\n</working-set>` : "";
-  const hostMarker = "<!-- host context omitted -->";
-
-  const withHost = (host: string): string => {
-    const body = [...sections, host].filter(Boolean).join("\n");
-    return `<working-set>\n${body}\n</working-set>`;
-  };
-
-  if (sections.length === 0) {
-    const host = hostContextSafe(hostContext);
-    const opening = "<working-set>\n";
-    const closing = `\n${hostMarker}\n</working-set>`;
-    const fixed = `${opening}${hostMarker}\n</working-set>`;
-    const remaining = maxBytes - Buffer.byteLength(opening + closing, "utf8");
-    if (remaining <= 0) return fixed;
-    const prefix = takeUtf8Prefix(host, remaining);
-    const text = prefix ? `${opening}${prefix}${closing}` : fixed;
-    return Buffer.byteLength(text, "utf8") <= maxBytes ? text : fixed;
-  }
-
-  if (inventoryOnly && Buffer.byteLength(inventoryOnly, "utf8") <= maxBytes) {
-    const markerText = withHost(hostMarker);
-    if (Buffer.byteLength(markerText, "utf8") <= maxBytes) {
-      const remaining = maxBytes - Buffer.byteLength(markerText, "utf8");
-      const host = takeUtf8Prefix(hostContextSafe(hostContext), remaining);
-      const text = withHost(host ? `${host}\n${hostMarker}` : hostMarker);
-      if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
-    }
-    return inventoryOnly;
-  }
-
-  // The inventory itself can exceed the cap.  Reduce entries in sorted order,
-  // retaining an explicit omission marker and complete XML framing.
-  const all = [
-    ...(inventory.read.length > 0 ? [{ tag: "read-files", paths: inventory.read }] : []),
-    ...(inventory.modified.length > 0 ? [{ tag: "modified-files", paths: inventory.modified }] : []),
-  ];
-  for (let visible = INVENTORY_CAP; visible >= 0; visible--) {
-    const reduced: string[] = [];
-    for (const item of all) {
-      const shown = item.paths.slice(0, visible).map(inventoryPathSafe);
-      const omitted = item.paths.length - shown.length;
-      if (omitted > 0) shown.push(`<!-- ${omitted} paths omitted -->`);
-      reduced.push(`<${item.tag}>\n${shown.join("\n")}\n</${item.tag}>`);
-    }
-    const body = reduced.join("\n");
-    const text = `<working-set>\n${body}\n${hostMarker}\n</working-set>`;
-    if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
-  }
-  return minimum;
+function truncateHostOverlay(hostContext: string, maxBytes: number): string | null {
+  const host = hostContextSafe(hostContext);
+  if (!host) return null;
+  const opening = "<working-set>\n";
+  const marker = "<!-- host context omitted -->";
+  const closing = `\n${marker}\n</working-set>`;
+  const fixed = `${opening}${marker}\n</working-set>`;
+  if (Buffer.byteLength(fixed, "utf8") > maxBytes) return null;
+  const remaining = maxBytes - Buffer.byteLength(opening + closing, "utf8");
+  if (remaining <= 0) return fixed;
+  const prefix = takeUtf8Prefix(host, remaining);
+  const text = prefix ? `${opening}${prefix}${closing}` : fixed;
+  return Buffer.byteLength(text, "utf8") <= maxBytes ? text : fixed;
 }
 
 /**
- * Build the volatile working-set overlay.  The cap is applied to the fully
- * wrapped, escaped UTF-8 representation, and the returned hash is over those
- * exact bytes rather than over an unescaped inventory or an estimate.
+ * Build the volatile host-context overlay. Tool history already records every
+ * file operation, so request overlays never duplicate read/modified paths.
  */
 export function buildRequestOverlay(opts: BuildRequestOverlayOptions): RequestOverlay | null {
+  void opts.messages;
   const maxBytes = overlayByteCap(opts.maxBytes);
-  const inventory = fileInventories(opts.messages);
   const host = opts.hostContext ?? "";
-  const full = fullOverlayText(inventory, host);
+  const full = fullOverlayText(host);
   if (!full) return null;
-  const text = Buffer.byteLength(full, "utf8") <= maxBytes
-    ? full
-    : truncateHostOverlay(inventory, host, maxBytes);
+  const text = Buffer.byteLength(full, "utf8") <= maxBytes ? full : truncateHostOverlay(host, maxBytes);
   return text ? overlayFromText(text) : null;
 }
 
@@ -431,4 +313,3 @@ export function userPromptContent(prompt: string, images: readonly PromptImage[]
 }
 
 export const REQUEST_OVERLAY_BYTES = DEFAULT_OVERLAY_BYTES;
-export const REQUEST_INVENTORY_CAP = INVENTORY_CAP;

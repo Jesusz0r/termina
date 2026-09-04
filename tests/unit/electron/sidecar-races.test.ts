@@ -237,6 +237,31 @@ describe("Sidecar Concurrency & Race Condition Invariants", () => {
       const pi = { on(name: string, handler: Function) { handlers.set(name, handler); }, appendEntry() {} };
       const extension = await import(`${pathToFileURL(extensionFile).href}?${Date.now()}`);
       extension.default(pi);
+
+      const protectedFile = join(writerDir, "protected.ts");
+      await writeFile(join(writerDir, "mine-term-writer.json"), JSON.stringify([protectedFile]));
+      let confirmResolve: ((approved: boolean) => void) | undefined;
+      let confirmCalls = 0;
+      const toolContext = {
+        cwd: writerDir,
+        ui: {
+          confirm: () => {
+            confirmCalls++;
+            return new Promise<boolean>((resolve) => { confirmResolve = resolve; });
+          },
+        },
+      };
+      let approvalSettled = false;
+      const approval = handlers.get("tool_call")!({ toolName: "write", input: { path: protectedFile } }, toolContext)
+        .then((result: unknown) => { approvalSettled = true; return result; });
+      await sleep(25);
+      expect(approvalSettled).toBe(false);
+      confirmResolve!(true);
+      expect(await approval).toBeUndefined();
+      expect(confirmCalls).toBe(1);
+      expect(await handlers.get("tool_call")!({ toolName: "edit", input: { path: protectedFile } }, toolContext)).toBeUndefined();
+      expect(confirmCalls).toBe(1);
+
       await mkdir(writerFile);
       handlers.get("session_start")!({}, { model: { id: "model", provider: "test" }, thinkingLevel: "low" });
       await rm(writerFile, { recursive: true, force: true });

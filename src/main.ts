@@ -100,7 +100,7 @@ function getBaseEditor(): InstanceType<typeof EditorManager> {
     baseEditorInstance.onConflict = (path) => {
       toast(`${pathBasename(path)} changed on disk — you have unsaved edits`, "warning");
     };
-    applySharedEditorHooks(baseEditorInstance);
+    applySharedEditorHooks(baseEditorInstance, null);
     baseEditorInstance.projectRootProvider = () => projectCwd;
     applyEditorPreferences(baseEditorInstance, preferences);
   }
@@ -139,7 +139,7 @@ function createProjectView(project: { id: string; cwd: string; workspaceId: stri
   editorMgr.onConflict = (path) => {
     toast(`${pathBasename(path)} changed on disk — you have unsaved edits`, "warning");
   };
-  applySharedEditorHooks(editorMgr);
+  applySharedEditorHooks(editorMgr, project.id);
   // Relative paths must resolve against THIS project, not the active one.
   editorMgr.projectRootProvider = () => project.cwd;
   applyEditorPreferences(editorMgr, preferences);
@@ -174,7 +174,7 @@ function createProjectView(project: { id: string; cwd: string; workspaceId: stri
 }
 
 /** The editor hooks shared by every project view (mine toggle, badges). */
-function applySharedEditorHooks(editor: InstanceType<typeof EditorManager>): void {
+function applySharedEditorHooks(editor: InstanceType<typeof EditorManager>, projectId: string | null): void {
   editor.onToggleMine = (path, owner) => {
     const mine = !editor.isMine(path);
     editor.setMine(path, mine);
@@ -183,7 +183,10 @@ function applySharedEditorHooks(editor: InstanceType<typeof EditorManager>): voi
     });
   };
   editor.tabBadge = (path) => worldlinesView.labelOfPath(path);
-  editor.onFileOpened = () => revealEditor();
+  editor.onFileOpened = () => {
+    if (projectId !== null && activeProjectId !== projectId) return;
+    revealEditor();
+  };
   editor.onBecameEmpty = () => collapseEditorIfIdle();
 }
 
@@ -2343,7 +2346,7 @@ window.pi.onPlanUpdate(({ instanceId, tasks }) => {
 
 window.pi.onToolTarget((p) => {
   const view = projectViews.get(p.projectId);
-  if (!view || view.workspaceId !== p.workspaceId) return;
+  if (!view || view.workspaceId !== p.workspaceId || activeProjectId !== p.projectId) return;
   const owner: ProjectWorkspaceRef = { projectId: p.projectId, workspaceId: p.workspaceId };
   void view.editorMgr.openFile(p.path, { preview: false, owner }).catch((err) => {
     toast(`could not open ${pathBasename(p.path)}: ${(err as Error).message}`, "error");

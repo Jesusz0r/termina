@@ -142,38 +142,22 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
     expect(tampered.error).toMatch(/bytes\/hash/);
   });
 
-  it("emits deterministic sorted paths and escapes XML in inventory", () => {
+  it("does not duplicate file inventories into model requests", () => {
     const paths = ["z.ts", "a&b.ts", "m/<tag>.ts", "unicode/árbol.ts"];
-    const overlay = overlayFor(inventoryMessages([...paths].reverse()), "");
+    const messages = inventoryMessages(paths);
+    expect(overlayFor(messages, "")).toBeNull();
+
+    const overlay = overlayFor(messages, "fresh host state");
     expect(overlay).toBeTruthy();
-    const readSection = overlay.text.match(/<read-files>\n([\s\S]*?)\n<\/read-files>/)?.[1] ?? "";
-    const rows = readSection.split("\n").filter((row: string) => row && !row.startsWith("<!--"));
-    expect(rows).toEqual(["a&amp;b.ts", "m/&lt;tag&gt;.ts", "unicode/árbol.ts", "z.ts"]);
-    expect(overlay.text).not.toContain("a&b.ts");
-    expect(overlay.text).not.toContain("m/<tag>.ts");
+    expect(overlay.text).toContain("fresh host state");
+    expect(overlay.text).not.toContain("read-files");
+    expect(overlay.text).not.toContain("modified-files");
+    for (const path of paths) expect(overlay.text).not.toContain(path);
   });
 
-  it("retains all 40 entries at boundary without omission marker", () => {
-    const paths = Array.from({ length: 40 }, (_, i) => `src/file-${String(i).padStart(2, "0")}.ts`).reverse();
-    const overlay = overlayFor(inventoryMessages(paths), "");
-    expect(overlay).toBeTruthy();
-    const section = overlay.text.match(/<read-files>\n([\s\S]*?)\n<\/read-files>/)?.[1] ?? "";
-    const rows = section.split("\n").filter(Boolean);
-    expect(rows.length).toBe(40);
-    expect(section).not.toContain("paths omitted");
-    expect(rows).toEqual(paths.slice().sort());
-  });
-
-  it("marks exactly the 41st entry after sorted first 40", () => {
-    const paths = Array.from({ length: 41 }, (_, i) => `src/file-${String(i).padStart(2, "0")}.ts`).reverse();
-    const overlay = overlayFor(inventoryMessages(paths), "");
-    expect(overlay).toBeTruthy();
-    const section = overlay.text.match(/<read-files>\n([\s\S]*?)\n<\/read-files>/)?.[1] ?? "";
-    const rows = section.split("\n").filter((row: string) => row && !row.startsWith("<!--"));
-    expect(rows.length).toBe(40);
-    expect(section).toContain("<!-- 1 paths omitted -->");
-    expect(rows).toEqual(paths.slice().sort().slice(0, 40));
-    expect(section).not.toContain("src/file-40.ts");
+  it("does not inject empty host context sections", () => {
+    expect(overlayFor([], "")).toBeNull();
+    expect(overlayFor([], " \n\t ")).toBeNull();
   });
 
   it("places overlay after complete tool-call/tool-result sequence", () => {
@@ -247,21 +231,12 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
     expect(orphanResult.error).toMatch(/no matching call/);
   });
 
-  it("strips C1 controls from host and inventory content without altering framing", () => {
+  it("strips C1 controls from host context without altering framing", () => {
     const host = "before\u0085after\u009f\nnext";
     const hostOverlay = overlayFor([], host);
     expect(hostOverlay).toBeTruthy();
     expect(hostOverlay.text).not.toContain("\u0085");
     expect(hostOverlay.text).not.toContain("\u009f");
     expect(hostOverlay.text).toContain("beforeafter\nnext");
-
-    const messages = [
-      message("assistant", [toolUse("c1", "read_file", "safe\u0085<path>.ts")], 1),
-      message("user", [toolResult("c1")], 2),
-    ];
-    const inventoryOverlay = overlayFor(messages, "");
-    expect(inventoryOverlay).toBeTruthy();
-    const section = inventoryOverlay.text.match(/<read-files>\n([\s\S]*?)\n<\/read-files>/)?.[1] ?? "";
-    expect(section.split("\n")).toEqual(["safe&lt;path&gt;.ts"]);
   });
 });

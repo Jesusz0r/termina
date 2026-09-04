@@ -2,7 +2,7 @@
  * Termina host adapter for agent-core.
  *
  * Same sidecar file names as the app bridge: ack, prompt payload,
- * verify/edits/mine/mailbox context, startup-control. The parser stays
+ * verify/edits/mailbox context, machine-only Mine policy, startup-control. The parser stays
  * electron/sidecar.ts. This module is the kernel writer of that protocol.
  */
 import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, rmSync, writeFileSync, constants as fsConstants } from "node:fs";
@@ -14,7 +14,8 @@ import type { FileHandle } from "node:fs/promises";
 import { BoundedTextAccumulator, type BoundedText, type BoundedTextMarkerDetails, type CompletionState } from "./tool-output.ts";
 
 const ACK_ID = /^[A-Za-z0-9_-]{1,128}$/;
-const CONTEXT_FILES = ["verify", "edits", "mine", "mailbox"] as const;
+const CONTEXT_FILES = ["verify", "edits", "mailbox"] as const;
+const PROTECTED_PATHS_BYTES = 64 * 1024;
 const PLAN_TEXT_CAP = 4000;
 export const HOST_CONTEXT_BYTES = 64 * 1024;
 const HOST_CONTEXT_READ_CHUNK_BYTES = 16 * 1024;
@@ -229,6 +230,38 @@ export function readContextFilesResult(
 /** Existing bridge contract: callers that only need text get the bounded view. */
 export function readContextFiles(eventsDir: string, terminalId: string): string {
   return readContextFilesResult(eventsDir, terminalId).text;
+}
+
+/** Read the machine-only Mine policy used by mutation tool gates. */
+export function readProtectedPaths(eventsDir: string, terminalId: string): ReadonlySet<string> {
+  const paths = new Set<string>();
+  if (!eventsDir || !ACK_ID.test(terminalId) || OPEN_NOFOLLOW_READ === null) return paths;
+  let fd: number | undefined;
+  try {
+    fd = openSync(join(eventsDir, `mine-${terminalId}.json`), OPEN_NOFOLLOW_READ);
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size <= 0 || info.size > PROTECTED_PATHS_BYTES) return paths;
+    const data = Buffer.allocUnsafe(info.size);
+    let offset = 0;
+    while (offset < data.length) {
+      const count = readSync(fd, data, offset, data.length - offset, offset);
+      if (count <= 0) return new Set();
+      offset += count;
+    }
+    if (fstatSync(fd).size !== info.size) return new Set();
+    const parsed = JSON.parse(data.toString("utf8"));
+    if (!Array.isArray(parsed)) return paths;
+    for (const value of parsed) {
+      if (typeof value === "string" && isAbsolute(value) && value.length <= 4096) paths.add(value);
+    }
+  } catch {
+    return new Set();
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* best effort */ }
+    }
+  }
+  return paths;
 }
 
 export function writePromptPayload(

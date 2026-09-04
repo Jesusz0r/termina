@@ -4110,30 +4110,22 @@ class PiEditorApp {
     return commit;
   }
 
-  /** Write the mine context file for the agent terminals of one project. */
+  /** Publish machine-only Mine policy for each terminal's mutation tools. */
   private async writeMineContext(project: ProjectState): Promise<void> {
-    const md = await this.buildMineMarkdown(project);
     const agents = [...this.terminals.values()].filter((inst) => inst.type === "agent" && this.projectOfTerminal(inst.id) === project);
+    const content = Buffer.from(JSON.stringify([...project.mineFiles].sort()));
     const writes = await Promise.allSettled(
       agents.map(async (inst) => {
-        await this.writeEventLeaf(inst, `mine-${inst.id}.md`, Buffer.from(md), 16 * 1024);
+        await this.removeEventLeaf(inst, `mine-${inst.id}.md`);
+        if (project.mineFiles.size === 0) {
+          await this.removeEventLeaf(inst, `mine-${inst.id}.json`);
+          return;
+        }
+        await this.writeEventLeaf(inst, `mine-${inst.id}.json`, content, 64 * 1024);
       }),
     );
     const failed = writes.find((result): result is PromiseRejectedResult => result.status === "rejected");
     if (failed) throw failed.reason;
-  }
-
-  /** Build the mine context markdown: one protected file per line. */
-  private async buildMineMarkdown(project: ProjectState): Promise<string> {
-    if (project.mineFiles.size === 0) return "";
-    const out: string[] = [
-      "## Protected user files",
-      "",
-      "Only the files listed below require approval before modification. Ask once per task; an explicit user request or prior approval for that task is sufficient.",
-      "",
-    ];
-    for (const p of project.mineFiles) out.push(`- \`${await this.rel(p, project.cwd)}\``);
-    return out.join("\n");
   }
 
   /** Clear the marks and their context files (project switch). The saved
@@ -4142,7 +4134,10 @@ class PiEditorApp {
     project.mineFiles.clear();
     const agents = [...this.terminals.values()].filter((inst) => inst.type === "agent" && this.projectOfTerminal(inst.id) === project);
     await Promise.all(
-      agents.map((inst) => this.removeEventLeaf(inst, `mine-${inst.id}.md`)),
+      agents.flatMap((inst) => [
+        this.removeEventLeaf(inst, `mine-${inst.id}.md`),
+        this.removeEventLeaf(inst, `mine-${inst.id}.json`),
+      ]),
     );
   }
 

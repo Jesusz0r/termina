@@ -10,12 +10,13 @@ export const BRIDGE_EXTENSION = `
 /**
  * Termina bridge extension — auto-generated, do not edit.
  */
-import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const FILE_TOOLS = new Set(["write", "edit", "apply_patch", "create_file", "insert"]);
+const ORDINARY_EDIT_INSTRUCTION = "For clear, reversible local work, proceed in the current turn instead of asking permission conversationally. Protected files are enforced by Termina's tool approval UI.";
 const SIDECAR_TOOL_EDIT_PREVIEW_BYTES = 512 * 1024;
 const SIDECAR_TOOL_EDIT_FIELD_BYTES = 128 * 1024;
 const SIDECAR_MAX_BYTES = 8 * 1024 * 1024;
@@ -102,6 +103,25 @@ function boundedSidecarEdits(value) {
 }
 
 
+function readProtectedPaths(dir, id) {
+  try {
+    const file = join(dir, "mine-" + id + ".json");
+    const info = lstatSync(file);
+    if (!info.isFile() || info.isSymbolicLink() || info.size <= 0 || info.size > 64 * 1024) return new Set();
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((value) => typeof value === "string" && value.length <= 4096));
+  } catch {
+    return new Set();
+  }
+}
+
+function canonicalMutationPath(cwd, value) {
+  if (typeof value !== "string" || !value) return null;
+  const candidate = resolve(cwd, value);
+  try { return realpathSync(candidate); } catch { return candidate; }
+}
+
 export default function (pi: ExtensionAPI): void {
   const dir = process.env.TERMINA_EVENTS_DIR;
   const id = process.env.TERMINA_TERMINAL_ID;
@@ -110,6 +130,8 @@ export default function (pi: ExtensionAPI): void {
   // sequence reset only after a new instance id (WORLDLINES §6.3).
   const bridgeId = randomUUID();
   let seq = 0;
+  const approvedProtectedPaths = new Set<string>();
+  let protectedApprovalQueue = Promise.resolve();
   // Every record carries the immutable generation of the producer-owned
   // inode. A marker without this binding cannot authorize retirement.
   let writerGeneration = randomUUID();
@@ -558,12 +580,14 @@ export default function (pi: ExtensionAPI): void {
   // Feed the latest context files (test results, user edits) into the
   // agent's next turn. Capture the effective expanded prompt and images in
   // an app-private payload file first.
-  pi.on("before_agent_start", async (event) => {
+  pi.on("before_agent_start", async (event, ctx) => {
+    approvedProtectedPaths.clear();
+    const systemPrompt = ctx.getSystemPrompt() + "\\n\\n" + ORDINARY_EDIT_INSTRUCTION;
     let context = "";
-    for (const name of [\`verify-\${id}.md\`, \`edits-\${id}.md\`, \`mine-\${id}.md\`, \`mailbox-\${id}.md\`]) {
+    for (const name of [\`verify-\${id}.md\`, \`edits-\${id}.md\`, \`mailbox-\${id}.md\`]) {
       try {
         const text = readFileSync(join(dir, name), "utf8");
-        if (text) context += (context ? "\\n\\n---\\n\\n" : "") + text;
+        if (text.trim()) context += (context ? "\\n\\n---\\n\\n" : "") + text;
       } catch {}
     }
     try {
@@ -571,10 +595,31 @@ export default function (pi: ExtensionAPI): void {
       writeFileSync(join(dir, file), JSON.stringify({ prompt: event.prompt, images: event.images ?? [], context }), { mode: 0o600 });
       log({ t: "prompt", file, hasPreflight: preflight !== null });
     } catch {}
-    if (!context) return;
+    if (!context) return { systemPrompt };
     return {
+      systemPrompt,
       message: { customType: "termina-context", content: context, display: false },
     };
+  });
+  pi.on("tool_call", async (event, ctx) => {
+    if (!FILE_TOOLS.has(event.toolName)) return;
+    const args = (event.input ?? event.args ?? {}) as { path?: unknown; filePath?: unknown };
+    const rawPath = typeof args.path === "string" ? args.path : typeof args.filePath === "string" ? args.filePath : null;
+    const target = canonicalMutationPath(ctx.cwd, rawPath);
+    if (!target || approvedProtectedPaths.has(target) || !readProtectedPaths(dir, id).has(target)) return;
+
+    const previous = protectedApprovalQueue;
+    let release;
+    protectedApprovalQueue = new Promise((resolve) => { release = resolve; });
+    await previous;
+    try {
+      if (approvedProtectedPaths.has(target) || !readProtectedPaths(dir, id).has(target)) return;
+      const approved = await ctx.ui.confirm("Protected file", "Allow editing " + rawPath + " for this task?");
+      if (!approved) return { block: true, reason: "Protected file edit denied" };
+      approvedProtectedPaths.add(target);
+    } finally {
+      release();
+    }
   });
   pi.on("tool_execution_start", async (event, ctx) => {
     if (!FILE_TOOLS.has(event.toolName)) return;
