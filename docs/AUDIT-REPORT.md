@@ -247,10 +247,10 @@ async destroy(): Promise<void> {
 
 ---
 
-### 3.7. PTY Egress High-Throughput UI Stutter (Medium)
-- **Location:** [`electron/pty-egress.ts:45-78`](file:///Users/jesusmendoza/Desktop/proyectos/pi-editor/electron/pty-egress.ts#L45-L78)
-- **Root Cause:** Fast console output (e.g. `cat 10MB.log` or dense build logs) streams data chunks every few milliseconds directly across `webContents.send('terminal:data')`. This saturates the Electron Chromium IPC channel, resulting in frame drops and renderer UI queue starvation.
-- **Fix:** Batch egress writes using an adaptive micro-batching buffer (e.g. flush at most once every 16ms / 60fps frame or when buffer exceeds 64KB).
+### 3.7. PTY Egress Frame Pacing (Resolved)
+- **Location:** [`electron/pty-egress.ts`](file:///Users/jesusmendoza/Desktop/proyectos/pi-editor/electron/pty-egress.ts)
+- **Resolution:** Adjacent PTY output quanta coalesce up to 64 KiB, delivery runs on a 16ms frame cadence, and each terminal emits at most one IPC message per frame. Existing retained-byte/chunk limits, renderer acknowledgements, replay ordering, and source backpressure remain authoritative.
+- **Benchmark:** The previous scheduler emitted 128 small quanta as 128 IPC messages in 10.74ms (11,920 messages/sec). The framed scheduler emits the same 8 KiB as one IPC message after 17.09ms. A saturated 2 MiB run emits 32 × 64 KiB messages with at most one per 16.7ms bucket and 15.16ms minimum observed spacing.
 
 ---
 
@@ -370,11 +370,11 @@ graph TD
 - [x] **Rust Capability Eviction:** Added capacity bound (`MAX_PROMOTION_CAPABILITIES = 256`) and FIFO eviction to `PROMOTION_ROOT_CAPABILITIES` in [`core/src/main.rs:3249`](file:///Users/jesusmendoza/Desktop/proyectos/pi-editor/core/src/main.rs#L3249).
 - [x] **Monaco Snapshot Tab Eviction:** Enforced `MAX_OPEN_SNAPSHOT_TABS = 10` LRU eviction in [`src/editor.ts:812`](file:///Users/jesusmendoza/Desktop/proyectos/pi-editor/src/editor.ts#L812).
 
-### Phase 2: Main-Thread Latency & Sidecar Cleanup (Short-Term) — IN PROGRESS
+### Phase 2: Main-Thread Latency & Sidecar Cleanup (Short-Term) — COMPLETED
 - [x] **Async Directory Fsync:** Converted `syncDirectorySync` in [`electron/session-retention.ts`](file:///Users/jesusmendoza/Desktop/proyectos/pi-editor/electron/session-retention.ts) to asynchronous `syncDirectory` with `handle.sync()`.
 - [x] **Symlink Traversal Optimization:** Optimized [`electron/main.ts:listDir`](file:///Users/jesusmendoza/Desktop/proyectos/pi-editor/electron/main.ts) to avoid redundant upward ancestor checks per entry, testing only direct symlinks.
-- [ ] **PTY Backpressure Buffer:** Implement micro-batching in `electron/pty-egress.ts` to cap IPC message frequency to 60fps.
-- [ ] **Strip Legacy Code:** Remove legacy `.segment` and fallback logic from `electron/sidecar.ts`.
+- [x] **PTY Backpressure Buffer:** Coalesced adjacent output to 64 KiB and paced each terminal to at most one IPC message per 16ms frame in `electron/pty-egress.ts`.
+- [x] **Strip Legacy Code:** Removed legacy `.segment` and fallback logic from `electron/sidecar.ts`.
 
 ### Phase 3: Monolithic Modularization (Medium-Term)
 1. [x] **Canonical Core TS Client:** Keep `worldline-git.ts` as the sole public interface, with process/protocol plumbing private under `electron/worldline-git/`.

@@ -12,7 +12,9 @@
 export const PTY_EGRESS_CHUNK_BYTES = 64 * 1024;
 export const PTY_EGRESS_QUEUE_HIGH_WATER_BYTES = 2 * 1024 * 1024;
 export const PTY_EGRESS_QUEUE_HIGH_WATER_CHUNKS = 128;
-/** Maximum work sent by one scheduler turn before yielding to Electron. */
+/** One renderer delivery window. Adjacent source quanta coalesce until it fires. */
+export const PTY_EGRESS_FRAME_MS = 16;
+/** Maximum work sent by one frame before yielding to Electron. */
 const PTY_EGRESS_BATCH_BYTES = 256 * 1024;
 const PTY_EGRESS_BATCH_CHUNKS = 16;
 
@@ -180,8 +182,8 @@ export interface PtyEgressSchedulerOptions {
   lowWaterChunks?: number;
   batchBytes?: number;
   batchChunks?: number;
-  /** Delay before the next bounded batch. Zero still yields a macrotask. */
-  yieldMs?: number;
+  /** Delay between renderer delivery frames. Zero is reserved for focused tests. */
+  flushIntervalMs?: number;
 }
 
 export interface PtyEgressQueueStats {
@@ -286,7 +288,7 @@ export class PtyEgressScheduler {
   private readonly lowWaterChunks: number;
   private readonly batchBytes: number;
   private readonly batchChunks: number;
-  private readonly yieldMs: number;
+  private readonly flushIntervalMs: number;
   private readonly queues = new Map<string, TerminalQueue>();
   private order: string[] = [];
   private cursor = 0;
@@ -311,9 +313,9 @@ export class PtyEgressScheduler {
     }
     this.batchBytes = asPositiveInteger(options.batchBytes, PTY_EGRESS_BATCH_BYTES, "batch byte budget");
     this.batchChunks = asPositiveInteger(options.batchChunks, PTY_EGRESS_BATCH_CHUNKS, "batch chunk budget");
-    const yieldMs = options.yieldMs ?? 0;
-    if (!Number.isSafeInteger(yieldMs) || yieldMs < 0) throw new Error("invalid PTY egress yield delay");
-    this.yieldMs = yieldMs;
+    const flushIntervalMs = options.flushIntervalMs ?? PTY_EGRESS_FRAME_MS;
+    if (!Number.isSafeInteger(flushIntervalMs) || flushIntervalMs < 0) throw new Error("invalid PTY egress flush interval");
+    this.flushIntervalMs = flushIntervalMs;
   }
 
   /** Register exactly one source owner for a terminal id/generation pair. */
@@ -369,13 +371,22 @@ export class PtyEgressScheduler {
       return false;
     }
     const bytes = Buffer.byteLength(data, "utf8");
+    const tail = queue.chunks.at(-1);
+    const coalesces = this.flushIntervalMs > 0
+      && tail?.kind === "data"
+      && tail.bytes + bytes <= PTY_EGRESS_CHUNK_BYTES;
     const retainedBytes = this.retainedBytes(queue);
     const retainedChunks = this.retainedChunks(queue);
-    if (retainedBytes + bytes > this.maxQueueBytes || retainedChunks + 1 > this.maxQueueChunks) {
+    if (retainedBytes + bytes > this.maxQueueBytes || retainedChunks + (coalesces ? 0 : 1) > this.maxQueueChunks) {
       this.pauseSource(queue);
       return false;
     }
-    queue.chunks.push({ kind: "data", data, bytes, sequence: queue.nextSequence++ });
+    if (coalesces) {
+      tail.data += data;
+      tail.bytes += bytes;
+    } else {
+      queue.chunks.push({ kind: "data", data, bytes, sequence: queue.nextSequence++ });
+    }
     queue.queuedBytes += bytes;
     if (this.retainedBytes(queue) >= this.maxQueueBytes || this.retainedChunks(queue) >= this.maxQueueChunks) {
       this.pauseSource(queue);
@@ -629,7 +640,7 @@ export class PtyEgressScheduler {
     this.pumpTimer = setTimeout(() => {
       this.pumpTimer = null;
       this.pump();
-    }, this.yieldMs);
+    }, this.flushIntervalMs);
   }
 
   private pump(): void {
@@ -637,10 +648,12 @@ export class PtyEgressScheduler {
     this.pumping = true;
     let sentBytes = 0;
     let sentChunks = 0;
+    const sentTerminals = this.flushIntervalMs > 0 ? new Set<string>() : null;
     try {
       while (sentChunks < this.batchChunks && this.rendererReady) {
-        const queue = this.nextQueuedQueue();
+        const queue = this.nextQueuedQueue(sentTerminals);
         if (!queue || !this.canDeliver(queue)) break;
+        sentTerminals?.add(queue.id);
         const record = queue.chunks.shift();
         if (!record) break;
         if (sentChunks > 0 && sentBytes + record.bytes > this.batchBytes) {
@@ -708,14 +721,14 @@ export class PtyEgressScheduler {
     if (this.rendererReady && this.hasDeliverableChunks()) this.schedulePump();
   }
 
-  private nextQueuedQueue(): TerminalQueue | null {
+  private nextQueuedQueue(excluded: ReadonlySet<string> | null): TerminalQueue | null {
     if (this.order.length === 0) return null;
     const count = this.order.length;
     for (let offset = 0; offset < count; offset += 1) {
       if (this.order.length === 0) return null;
       const index = (this.cursor + offset) % this.order.length;
       const queue = this.queues.get(this.order[index]!);
-      if (queue && queue.chunks.length > 0 && this.canDeliver(queue)) {
+      if (queue && !excluded?.has(queue.id) && queue.chunks.length > 0 && this.canDeliver(queue)) {
         this.cursor = (index + 1) % this.order.length;
         return queue;
       }
