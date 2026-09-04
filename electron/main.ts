@@ -4123,9 +4123,15 @@ class PiEditorApp {
     if (failed) throw failed.reason;
   }
 
-  /** Build the mine context markdown: one file per line. */
+  /** Build the mine context markdown: one protected file per line. */
   private async buildMineMarkdown(project: ProjectState): Promise<string> {
-    const out: string[] = ["## Your files", "", "These files belong to the user. Do not modify them without asking first.", ""];
+    if (project.mineFiles.size === 0) return "";
+    const out: string[] = [
+      "## Protected user files",
+      "",
+      "Only the files listed below require approval before modification. Ask once per task; an explicit user request or prior approval for that task is sufficient.",
+      "",
+    ];
     for (const p of project.mineFiles) out.push(`- \`${await this.rel(p, project.cwd)}\``);
     return out.join("\n");
   }
