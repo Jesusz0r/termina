@@ -5,7 +5,7 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { cssFontFamily, type TerminalPasteResult, type ThemeId } from "../shared/types";
-import { CanvasAddon } from "@xterm/addon-canvas";
+import { WebglAddon } from "@xterm/addon-webgl";
 import { terminalTheme } from "./terminal-themes";
 import { isMacPlatform } from "./settings-shortcuts";
 import { toast } from "./components/modals";
@@ -14,7 +14,7 @@ import { createTerminalLinkProvider } from "./terminal-links";
 export class PtyView {
   private term: Terminal;
   private fitAddon: FitAddon;
-  private canvasAddon: CanvasAddon | null = null;
+  private webglAddon: WebglAddon | null = null;
   private linkProviderDisposable: { dispose(): void } | null = null;
   private readonly sendInput: (data: string) => void;
   private disposed = false;
@@ -68,8 +68,17 @@ export class PtyView {
     });
     this.fitAddon = new FitAddon();
     this.term.loadAddon(this.fitAddon);
-    this.canvasAddon = new CanvasAddon();
-    this.term.loadAddon(this.canvasAddon);
+    this.webglAddon = new WebglAddon();
+    this.webglAddon.onContextLoss(() => {
+      if (this.disposed) return;
+      try {
+        this.term.refresh(0, this.term.rows - 1);
+        this.lastRender = Date.now();
+      } catch {
+        /* ignore */
+      }
+    });
+    this.term.loadAddon(this.webglAddon);
     if (this.onOpenFile) {
       this.linkProviderDisposable = this.term.registerLinkProvider(
         createTerminalLinkProvider(this.term, (link) => {
@@ -405,7 +414,7 @@ export class PtyView {
     }
     if (refreshFont) {
       try {
-        this.term.clearTextureAtlas();
+        this.webglAddon?.clearTextureAtlas();
         this.term.refresh(0, this.term.rows - 1);
         this.lastRender = Date.now();
       } catch {
@@ -472,9 +481,9 @@ export class PtyView {
       this.linkProviderDisposable.dispose();
       this.linkProviderDisposable = null;
     }
-    if (this.canvasAddon) {
-      this.canvasAddon.dispose();
-      this.canvasAddon = null;
+    if (this.webglAddon) {
+      this.webglAddon.dispose();
+      this.webglAddon = null;
     }
     this.fitAddon?.dispose();
     this.term.dispose();
