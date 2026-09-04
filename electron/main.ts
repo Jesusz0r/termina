@@ -4787,7 +4787,7 @@ class PiEditorApp {
           await rm(temp, { force: true }).catch(() => undefined);
         }
       } catch (error) {
-        console.warn(`[main] could not write ack: ${String(error)}`);
+        console.error(`[main] could not write ack terminal=${terminalId} request=${requestId}: ${String(error)}`);
       }
     })();
     this.ackWrites.add(task);
@@ -4910,8 +4910,32 @@ class PiEditorApp {
     }
     let store: SnapshotStore | null;
     try {
-      store = await preflightOwner.storePromise;
-      await ws.indexReady;
+      // The store/index bootstrap has no deadline of its own: race it
+      // against the shared preflight budget so a slow initial index can
+      // never burn the bridge's 15 s wait without an answer.
+      const readyPromise = (async (): Promise<SnapshotStore | null> => {
+        const ready = await preflightOwner.storePromise;
+        await ws.indexReady;
+        return ready;
+      })();
+      const readyBudgetMs = Math.max(0, remainingBudget());
+      const ready = await Promise.race([
+        readyPromise.then((readyStore) => ({ ok: true as const, readyStore })),
+        new Promise<{ ok: false }>((resolve) => {
+          setTimeout(() => resolve({ ok: false }), readyBudgetMs);
+        }),
+      ]);
+      if (!ready.ok) {
+        // The bootstrap keeps running without the lease; its outcome
+        // reaches later preflights through storePromise/indexReady.
+        readyPromise.then(
+          () => undefined,
+          () => undefined,
+        );
+        failHeldPreflight("preflight deadline exceeded while waiting for the snapshot store");
+        return;
+      }
+      store = ready.readyStore;
       markStage("store");
     } catch (err) {
       // Store/index bootstrap can fail after the lease is acquired (for
@@ -4939,7 +4963,9 @@ class PiEditorApp {
         report("ok");
         return;
       }
-      const capturePromise = store.capture(await gitHead(ws.root), ws.lastStateCommit ?? null);
+      // gitHead is a single-flight core op: awaiting it outside the race
+      // would let a busy core burn the bridge's wait with the lease held.
+      const capturePromise = (async () => store.capture(await gitHead(ws.root), ws.lastStateCommit ?? null))();
       const budgetMs = Math.max(0, remainingBudget());
       const captured = await Promise.race([
         capturePromise.then((state) => ({ ok: true as const, state })),
@@ -4968,7 +4994,26 @@ class PiEditorApp {
         failHeldPreflight("preflight deadline exceeded while capturing the workspace");
         return;
       }
-      const trustHashes = await this.computeTrustHashes(preflightOwner);
+      // Trust hashing queues behind every other core op on the shared
+      // single-flight client: bound it so a busy core cannot burn the
+      // bridge's wait without an answer either.
+      const trustPromise = this.computeTrustHashes(preflightOwner);
+      const trustBudgetMs = Math.max(0, remainingBudget());
+      const trusted = await Promise.race([
+        trustPromise.then((hashes) => ({ ok: true as const, hashes })),
+        new Promise<{ ok: false }>((resolve) => {
+          setTimeout(() => resolve({ ok: false }), trustBudgetMs);
+        }),
+      ]);
+      if (!trusted.ok) {
+        trustPromise.then(
+          () => undefined,
+          () => undefined,
+        );
+        failHeldPreflight("preflight deadline exceeded while hashing trust-sensitive files");
+        return;
+      }
+      const trustHashes = trusted.hashes;
       markStage("trust");
       if (remainingBudget() <= 0) {
         failHeldPreflight("preflight deadline exceeded while hashing trust-sensitive files");
