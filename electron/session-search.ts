@@ -192,21 +192,20 @@ export async function sessionFileEntry(path: string): Promise<SessionFileEntry |
 /** Newest first. Unique by path string. Caps at MAX_SESSION_SEARCH_FILES. */
 export function mergeSessionFiles(groups: SessionFileEntry[][]): SessionFileEntry[] {
   const seen = new Set<string>();
-  const all: SessionFileEntry[] = [];
+  const all: Array<{ entry: SessionFileEntry; time: number }> = [];
   for (const group of groups) {
     for (const entry of group) {
       if (seen.has(entry.path)) continue;
       seen.add(entry.path);
-      all.push(entry);
+      // Parse each timestamp once: the comparator below runs O(n log n) times.
+      all.push({ entry, time: sessionFileTime(entry.name, entry.mtimeMs) });
     }
   }
   all.sort((a, b) => {
-    const tb = sessionFileTime(b.name, b.mtimeMs);
-    const ta = sessionFileTime(a.name, a.mtimeMs);
-    if (tb !== ta) return tb - ta;
-    return b.name < a.name ? -1 : b.name > a.name ? 1 : 0;
+    if (b.time !== a.time) return b.time - a.time;
+    return b.entry.name < a.entry.name ? -1 : b.entry.name > a.entry.name ? 1 : 0;
   });
-  return all.slice(0, MAX_SESSION_SEARCH_FILES);
+  return all.slice(0, MAX_SESSION_SEARCH_FILES).map(({ entry }) => entry);
 }
 
 export async function searchSessionFiles(opts: {

@@ -64,7 +64,7 @@ export class PtyView {
       convertEol: true,
       theme: terminalTheme(appearance.theme),
       cursorBlink: true,
-      scrollback: 8000,
+      scrollback: 3000,
     });
     this.fitAddon = new FitAddon();
     this.term.loadAddon(this.fitAddon);
@@ -97,6 +97,9 @@ export class PtyView {
     });
     this.watchdog = setInterval(() => {
       if (this.disposed) return;
+      // Hidden panes never fire onRender; without this guard each one
+      // would take a full refresh() every tick forever.
+      if (this.container.clientWidth === 0 || this.container.clientHeight === 0) return;
       if (Date.now() - this.lastRender > 1500 && this.term.buffer.active.length > 0) {
         try {
           this.term.refresh(0, this.term.rows - 1);
