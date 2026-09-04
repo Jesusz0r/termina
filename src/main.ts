@@ -1903,8 +1903,13 @@ function runTerminalFind(next: boolean): void {
       findCount.textContent = count === 0 ? "no matches" : index < 0 ? `${count}+` : `${index + 1}/${count}`;
     });
   }
-  if (next) pane.view.findNext(term);
-  else pane.view.findPrevious(term);
+  // A throwing search backend shows "error", never a silent no-match.
+  try {
+    if (next) pane.view.findNext(term);
+    else pane.view.findPrevious(term);
+  } catch {
+    if (findCount) findCount.textContent = "error";
+  }
 }
 
 function closeTerminalFind(refocus = true): void {

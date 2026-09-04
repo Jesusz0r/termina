@@ -71,6 +71,12 @@ export class PtyView {
     });
     this.fitAddon = new FitAddon();
     this.term.loadAddon(this.fitAddon);
+    // WebGL is the only renderer: xterm 6 removed canvas. When WebGL2 is
+    // absent (headless CI, no GPU) the addon throws inside term.open(),
+    // xterm swallows it and installs its built-in DOM renderer, and the
+    // pane works fully — minus GPU acceleration. Deliberately no fallback
+    // branch here: probing for WebGL2 ourselves would just reimplement
+    // xterm's own fallback with a second configuration to support.
     this.webglAddon = new WebglAddon();
     this.webglAddon.onContextLoss(() => {
       if (this.disposed) return;
@@ -277,26 +283,25 @@ export class PtyView {
     };
   }
 
+  /**
+   * Plain-text scrollback search. Returns false only for an empty term
+   * or no match — a broken search backend throws so the caller can say
+   * so instead of silently showing no results.
+   */
   findNext(term: string): boolean {
     if (this.disposed || !term) return false;
-    try {
-      return this.searchAddon?.findNext(term, this.searchOptions()) ?? false;
-    } catch {
-      return false;
-    }
+    return this.searchAddon?.findNext(term, this.searchOptions()) ?? false;
   }
 
+  /** Same contract as findNext: no match is false, failure throws. */
   findPrevious(term: string): boolean {
     if (this.disposed || !term) return false;
-    try {
-      return this.searchAddon?.findPrevious(term, this.searchOptions()) ?? false;
-    } catch {
-      return false;
-    }
+    return this.searchAddon?.findPrevious(term, this.searchOptions()) ?? false;
   }
 
   clearFind(): void {
     if (this.disposed) return;
+    // Best-effort cleanup: nothing observable depends on it succeeding.
     try {
       this.searchAddon?.clearDecorations();
     } catch {
