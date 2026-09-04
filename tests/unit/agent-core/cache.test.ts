@@ -289,6 +289,26 @@ describe("Agent Core Cache", () => {
         current: { ...prior, atMs: 31 * 60 * 1000, usage: { inputTokens: 10_000, cacheReadTokens: 0, cacheWriteTokens: 0 } },
       });
       expect(idle.primary).toBe("idle-expired");
+
+      const unknownRetention = diagnostics({
+        policy: {
+          ...diagnostics().policy,
+          requestedTtlMs: null,
+          effectiveTtlMs: null,
+          retentionKnown: null,
+        },
+      });
+      const unknownIdle = cache.classifyCacheMiss({
+        previous: { ...prior, diagnostics: unknownRetention },
+        current: {
+          ...prior,
+          atMs: 24 * 60 * 60 * 1000,
+          usage: { inputTokens: 10_000, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          diagnostics: unknownRetention,
+        },
+      });
+      expect(unknownIdle.primary).toBe("backend-or-unknown");
+      expect(unknownIdle.attributed).toBe(false);
     });
   });
 });

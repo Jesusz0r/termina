@@ -24,7 +24,7 @@ benchmarks are complete.
 | Private ownership | `main.ts` is currently 8,103 lines, while the distinct cache, request-projection, reclaim, trace, rates, and bounded-output lifecycles have private modules imported by the integration owner. | **Complete for the named seams.** Keep one behavioral owner; extract further only for a distinct lifecycle/test surface, not to create another path. |
 | Traces | `trace.ts` writes schema-v2 attempt and task-settled records with stable run/task/attempt links, retry/fallback fields, nullable usage, cache diagnostics, tool/reclaim evidence, cost provenance, manifests, bounded retention, and a link index. | **Deterministic implementation complete.** Correctness is still caller-supplied/null and the controlled task corpus, quality, price, and long-session benchmark remain pending. |
 | Cache identity | `auth.ts` derives a private ASCII key from a process-local session seed, role, provider, protocol, and route domain; it validates the key before emitting OpenRouter or xAI headers. | **Deterministic identity complete.** Provider field acceptance and the OpenAI 50-vs-80 limit conflict remain route/model evidence gates; neither number is hardcoded. |
-| Request projection | `request-projection.ts` separates durable prompt/images from a sorted, escaped, UTF-8-bounded overlay; validates complete tool-call/result sequences; main snapshots and appends the overlay once per logical request, including retries. | **Deterministic projection complete.** Legacy replay is narrow and explicit; corpus-level quality and provider-prefix behavior remain pending. |
+| Request projection | `request-projection.ts` separates durable prompt/images from a sorted, escaped, UTF-8-bounded overlay; validates complete tool-call/result sequences; main snapshots and appends the overlay once per logical request, including retries. | **Deterministic projection complete.** Persisted generated context is rejected; corpus-level quality and provider-prefix behavior remain pending. |
 | Tool output | `tool-output.ts`, `host.ts`, `main.ts`, and `mcp.ts` use bounded UTF-8 accumulation, explicit completion states, omission markers, continuations, independent streams, and glob lookahead. | **Deterministic bounds complete.** Exhaustive stress and task-quality effects remain pending; no provider savings are implied. |
 | Reclamation | `reclaim.ts` plans bounded targets with original bytes/chars/hashes and recovery metadata; `session.ts` durably validates/applies receipts, replays source records, and maps recovery across forks before main changes its view. Last-resort truncate still persists only a dropped-count revision. | **Receipt-based prune recovery complete.** Truncate/summarize recovery semantics, reclaim ranking, billed-token savings, p95 recovery calls, and the full resume/fork corpus remain pending. |
 | MCP tools | `mcp.ts` canonicalizes schemas, normalizes/deduplicates discoveries before caps, freezes selected tools; main gates `/clear` with `mcpBusy` and a generation token and falls back to built-ins on failure. | **Deterministic ordering/boundary complete.** Real-server reconnect behavior and cache/quality effects remain pending. |
@@ -120,8 +120,8 @@ and `session.ts` persistence.
 context and file inventories; `callModel` projects durable messages with
 `projectRequest`, stamps provider-specific reusable content, and appends that
 same overlay snapshot exactly once. `request-projection.ts` handles escaping,
-ordering, UTF-8 byte caps, complete tool sequences, and narrow legacy context
-replay.
+ordering, UTF-8 byte caps, complete tool sequences, and strict rejection of
+persisted generated context.
 
 Implement this data model:
 
@@ -149,26 +149,22 @@ Implement this data model:
   preserve the protocol serializer's ordering and leave the volatile tail
   outside the reusable breakpoint. Keep images and missing-image placeholders
   in their original user-turn order.
-- Treat an existing persisted `<working-set>` block as legacy historical user
-  content during resume/fork: preserve the stored record and replay semantics,
-  include each stored legacy block once at its original position, and never
-  regenerate it as the new overlay.
-  New turns must not create such a block. This is a narrow projection rule,
-  not a broad compatibility layer or a rewrite of old session files.
+- Reject any persisted generated-context block during request projection.
+  Generated host context exists only in the bounded per-request overlay.
 
 **Validation:** For a new session, assert that the JSONL has no generated
 `<working-set>` block while each outgoing request contains the overlay exactly
 once. Cover no overlay, host-only context, inventories, `@` expansion, images,
 missing images, Unicode paths, resume, fork, compaction, retry, and two
-consecutive prompts. Use a legacy session fixture and verify that replay is
-unchanged, the legacy block is not duplicated, and the fresh overlay is not
-inserted between tool calls and results. Compare Anthropic, Responses,
-Completions, and Google projections.
+consecutive prompts. Verify that persisted generated context fails closed and
+that the fresh overlay is not inserted between tool calls and results. Compare
+Anthropic, Responses, Completions, and Google projections.
 
 **Current status:** The request-only projection seam and retry-stable overlay
 are implemented; a focused TypeScript check passes the overlay byte/hash,
-tool-sequence, and final-position invariants. The full legacy/resume/fork/
-compaction corpus and provider quality comparison remain pending.
+tool-sequence, strict persisted-context rejection, and final-position
+invariants. The full resume/fork/compaction corpus and provider quality
+comparison remain pending.
 
 ### 2. Make trace data truthful and freeze a reproducible baseline
 
@@ -727,8 +723,8 @@ resolution alone.
    provider eviction, a 429 retry, an overflow retry, and an explicit-cache
    fallback?
 7. Are requested and effective cache mode, TTL, markers, and fallback traced?
-8. Is the working set absent from new persisted records, present exactly once
-   in the request, and handled narrowly for legacy sessions?
+8. Is the working set absent from persisted records, present exactly once in
+   the request, and rejected if found in durable history?
 9. Can the overlay be inserted only after a complete tool-call/tool-result
    sequence, including after resume, fork, compaction, and interruption?
 10. Does every cap distinguish complete, visit-cap, timeout, interruption,

@@ -66,12 +66,12 @@ describe("Agent Core Auth Atomic Writes & Security", () => {
   it("does not follow or delete predictable temp symlinks", () => {
     const outside = join(root, "outside.txt");
     writeFileSync(outside, "untouched\n", { mode: 0o600 });
-    const legacyTemp = `${authPath}.${process.pid}.tmp`;
-    symlinkSync(outside, legacyTemp);
+    const preexistingTemp = `${authPath}.${process.pid}.tmp`;
+    symlinkSync(outside, preexistingTemp);
     modifyProvider("anthropic", () => ({ type: "api_key", key: "must-not-leak" }));
 
     expect(readFileSync(outside, "utf8")).toBe("untouched\n");
-    expect(lstatSync(legacyTemp).isSymbolicLink()).toBe(true);
+    expect(lstatSync(preexistingTemp).isSymbolicLink()).toBe(true);
     expect(JSON.parse(readFileSync(authPath, "utf8")).anthropic.key).toBe("must-not-leak");
   });
 

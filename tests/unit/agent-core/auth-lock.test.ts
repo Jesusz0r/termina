@@ -10,6 +10,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -289,6 +290,19 @@ describe("Agent Core Auth Lock & Crash Recovery", () => {
       expect(readFileSync(ownerRecordPath(), "utf8")).toBe(lock);
       expect(readFileSync(authPath, "utf8")).toBe(baseline);
     }
+  });
+
+  it("rejects transition records without the current owner generation", () => {
+    const deadOwner = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" });
+    expect(deadOwner.status).toBe(0);
+    writeDirectoryLock({ pid: Number(deadOwner.stdout), token: "removed-transition-owner", startedAt: 1 });
+    const record = ownerRecordPath();
+    renameSync(record, join(lockPath, `.released-${"a".repeat(32)}`));
+
+    const result = contender();
+    expect(result).toEqual({ ok: false, error: "auth file busy" });
+    expect(readFileSync(authPath, "utf8")).toBe(baseline);
+    expect(existsSync(join(lockPath, `.released-${"a".repeat(32)}`))).toBe(true);
   });
 
   it("treats EPERM owner as alive and unknown identity fails closed", () => {

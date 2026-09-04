@@ -57,8 +57,6 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
     message("assistant", [{ type: "text", text: "I inspected it." }], 4),
   ];
 
-  const legacyBlock = "<working-set>\n<read-files>legacy.ts</read-files>\n</working-set>";
-
   beforeAll(async () => {
     process.env.TERMINA_CORE_TEST = "1";
     const mod = await import("../../../agent-core/request-projection.ts");
@@ -86,7 +84,7 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
   };
 
   it("persists submitted prompt but not volatile overlay", () => {
-    const persistedContent = userPromptContent("open the file", [], "ignored legacy argument");
+    const persistedContent = userPromptContent("open the file", [], "ignored host argument");
     expect(JSON.stringify(persistedContent)).not.toContain("working-set");
     const persisted = [message("user", persistedContent, 1)];
     const overlay = overlayFor(persisted);
@@ -191,22 +189,12 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
     expect(overlayAt).toBeGreaterThan(resultAt);
   });
 
-  it("replays legacy persisted working-set once and keeps it before fresh overlay", () => {
-    const legacyRecords = [
-      { storageSeq: 1, type: "message", message: { role: "user", content: [{ type: "text", text: "resume" }, { type: "context", text: legacyBlock }] } },
-      { storageSeq: 2, type: "message", message: { role: "assistant", content: [toolUse("legacy-call", "read_file", "legacy.ts")] } },
-      { storageSeq: 3, type: "message", message: { role: "user", content: [toolResult("legacy-call", "legacy source")] } },
-    ];
-    const replayed = session.replaySessionRecords(legacyRecords.map((r) => JSON.stringify(r)).join("\n") + "\n");
-    expect(replayed.ok).toBe(true);
-    const overlay = overlayFor(replayed.messages, "fresh host state");
-    expect(overlay).toBeTruthy();
-    const request = requestMessages(projection({ messages: replayed.messages, overlay }));
-    const serialized = JSON.stringify(request);
-    expect(countText(serialized, legacyBlock)).toBe(1);
-    expect(countText(serialized, overlay.text)).toBe(1);
-    expect(indexText(serialized, legacyBlock)).toBeLessThan(indexText(serialized, overlay.text));
-    expect(JSON.stringify(replayed.messages)).not.toContain("fresh host state");
+  it("rejects persisted context blocks", () => {
+    const persistedContext = "<working-set>\n<read-files>stale.ts</read-files>\n</working-set>";
+    const result = projectPersistedMessages({
+      messages: [message("user", [{ type: "text", text: "resume" }, { type: "context", text: persistedContext }], 1)],
+    });
+    expect(result).toEqual({ ok: false, error: "persisted context block at message 0 is unsupported" });
   });
 
   it("survives resume, fork, and image materialization without projection duplication", async () => {
@@ -220,9 +208,9 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
       const opened = session.SessionWriter.open(source, 0);
       expect(opened.ok).toBe(true);
       const records = [
-        { storageSeq: 1, type: "message", message: { role: "user", content: [{ type: "text", text: "resume" }, { type: "context", text: legacyBlock }, { type: "image", source: { type: "file", name: "resume-img-1.png", media_type: "image/png" } }] } },
-        { storageSeq: 2, type: "message", message: { role: "assistant", content: [toolUse("fork-call", "read_file", "legacy.ts")] } },
-        { storageSeq: 3, type: "message", message: { role: "user", content: [toolResult("fork-call", "legacy source")] } },
+        { storageSeq: 1, type: "message", message: { role: "user", content: [{ type: "text", text: "resume" }, { type: "image", source: { type: "file", name: "resume-img-1.png", media_type: "image/png" } }] } },
+        { storageSeq: 2, type: "message", message: { role: "assistant", content: [toolUse("fork-call", "read_file", "current.ts")] } },
+        { storageSeq: 3, type: "message", message: { role: "user", content: [toolResult("fork-call", "current source")] } },
       ];
       for (const record of records) expect(opened.writer.appendRecord(record).ok).toBe(true);
       opened.writer.close();
@@ -238,8 +226,8 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
       const overlay = overlayFor(forkReplay.messages, "fresh host state");
       expect(overlay).toBeTruthy();
       const request = requestMessages(projection({ messages: forkReplay.messages, overlay }));
-      expect(countText(JSON.stringify(request), legacyBlock)).toBe(1);
       expect(countText(JSON.stringify(request), overlay.text)).toBe(1);
+      expect(JSON.stringify(request)).toContain("current source");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -262,7 +262,7 @@ describe("Agent Core Trace V2 Invariants", () => {
     // malformed input for the frozen v2 reader and must be counted separately
     // from retention omissions and writer failures.
     writeFileSync(join(traces, "turn-8.json"), "{\"schemaVersion\":2");
-    writeFileSync(join(traces, "turn-9.json"), JSON.stringify({ schemaVersion: 1, recordType: "attempt", taskId: "legacy" }));
+    writeFileSync(join(traces, "turn-9.json"), JSON.stringify({ schemaVersion: 1, recordType: "attempt", taskId: "unsupported-version" }));
     writeFileSync(join(traces, "trace-manifest.json"), JSON.stringify({
       schemaVersion: 2,
       kind: "trace-manifest",
@@ -303,8 +303,7 @@ describe("Agent Core Trace V2 Invariants", () => {
         lastTraceTurn: 7,
         readerOmittedRecords: 0,
         manifestErrors: 0,
-        mixedSchemas: false,
-        schemaRecords: { legacy: 0, v2: records.length },
+        schemaRecords: { current: records.length },
       });
     }, failures);
     
@@ -445,7 +444,7 @@ describe("Agent Core Trace V2 Invariants", () => {
       assert.equal(outcomeReport.billing.unsettled.taskCount, 1);
     }, failures);
     
-    check("an explicit unknown cost is not filled from a legacy field", () => {
+    check("an explicit unknown cost is not inferred from another field", () => {
       const explicitUnknown = {
         ...records[0],
         attemptId: "explicit-unknown-cost",
@@ -627,36 +626,25 @@ describe("Agent Core Trace V2 Invariants", () => {
       assert.equal(badSource.diagnostics.manifestErrors, 2);
     }, failures);
     
-    check("mixed legacy records are explicitly separated", () => {
-      const orphan = { ...records[0], taskId: "orphan-task", attemptId: "orphan-attempt" };
-      const mixed = summarizeTraces([
-        ...source.records,
-        orphan,
-        { role: "main", status: "ok", usage: null, model: "legacy" },
-      ], "mixed");
-      assert.equal(mixed.schemaVersion, 2);
-      assert.equal(mixed.ignoredLegacyRecords, 1);
-      assert.equal(mixed.diagnostics.mixedSchemas, true);
-      assert.equal(mixed.tasks.correctness.unknown, 2);
+    check("summarizer rejects schemaless records", () => {
+      assert.throws(
+        () => summarizeTraces([...source.records, { role: "main", status: "ok", usage: null, model: "unsupported" }], "strict"),
+        /current schema/,
+      );
     }, failures);
     
-    const legacyShape = join(root, "term-legacy-shape.traces");
-    mkdirSync(legacyShape);
-    writeFileSync(join(legacyShape, "turn-1.json"), "{}");
-    writeFileSync(join(legacyShape, "turn-0.json"), "{}");
-    writeFileSync(join(legacyShape, "turn-9007199254740992.json"), "{}");
-    writeFileSync(join(legacyShape, "turn-2.json"), JSON.stringify({
-      role: "main",
-      status: "ok",
-      model: "legacy-model",
-      usage: null,
-    }));
+    const invalidShape = join(root, "term-invalid-shape.traces");
+    mkdirSync(invalidShape);
+    writeFileSync(join(invalidShape, "turn-1.json"), "{}");
+    writeFileSync(join(invalidShape, "turn-0.json"), "{}");
+    writeFileSync(join(invalidShape, "turn-9007199254740992.json"), "{}");
+    writeFileSync(join(invalidShape, "turn-2.json"), JSON.stringify({ role: "main", status: "ok", model: "unsupported", usage: null }));
     check("reader rejects arbitrary schemaless objects", () => {
-      const legacySource = readTraceDirectory(legacyShape);
-      assert.equal(legacySource.records.length, 1);
-      assert.equal(legacySource.matchedFiles, 2);
-      assert.equal(legacySource.diagnostics.malformedRecords, 1);
-      assert.equal(legacySource.diagnostics.partialRecords, 0);
+      const invalidSource = readTraceDirectory(invalidShape);
+      assert.equal(invalidSource.records.length, 0);
+      assert.equal(invalidSource.matchedFiles, 2);
+      assert.equal(invalidSource.diagnostics.malformedRecords, 2);
+      assert.equal(invalidSource.diagnostics.partialRecords, 0);
     }, failures);
     
     check("dimension keys use byte-stable ordering for Unicode labels", () => {

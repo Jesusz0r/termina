@@ -1081,17 +1081,11 @@ function parseAuthLockTransitionEntry(name: string): {
 } | null {
   if (name.startsWith(".released-holder-") || name.startsWith(".recovered-holder-")) return null;
   const generation = /^\.(released|recovered)-([A-Za-z0-9_-]{1,128})-(\d+)-(\d+)$/.exec(name);
-  if (generation !== null) {
-    const dev = Number(generation[3]);
-    const ino = Number(generation[4]);
-    if (!Number.isSafeInteger(dev) || dev < 0 || !Number.isSafeInteger(ino) || ino < 0) return null;
-    return { phase: generation[1] as AuthLockTransitionPhase, token: generation[2], dev, ino, entry: name };
-  }
-  // Older interrupted releases used a random suffix; accept only that exact
-  // shape and still bind the recovered owner to the record and directory.
-  const legacy = /^\.(released|recovered)-([0-9a-f]{32})$/.exec(name);
-  if (legacy === null) return null;
-  return { phase: legacy[1] as AuthLockTransitionPhase, token: null, dev: null, ino: null, entry: name };
+  if (generation === null) return null;
+  const dev = Number(generation[3]);
+  const ino = Number(generation[4]);
+  if (!Number.isSafeInteger(dev) || dev < 0 || !Number.isSafeInteger(ino) || ino < 0) return null;
+  return { phase: generation[1] as AuthLockTransitionPhase, token: generation[2], dev, ino, entry: name };
 }
 
 function authLockDirectory(lock: string): AuthLockDirectory | null {

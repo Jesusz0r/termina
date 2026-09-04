@@ -208,7 +208,7 @@ const OUTPUT_CAP = 16_384;
 const THINKING_OUTPUT_CAP = 64_000;
 const OUTPUT_RESERVE = THINKING_OUTPUT_CAP;
 /** Fixed-budget thinking on Claude 4.5 and earlier. Must stay below THINKING_OUTPUT_CAP. */
-const LEGACY_THINK_BUDGET = 16_384;
+const FIXED_THINK_BUDGET = 16_384;
 const HIGH_WATER = 0.8;
 const LOW_WATER = 0.6;
 /** Trailing tool-output span never reclaimed (fraction of usable, clamped). */
@@ -466,9 +466,9 @@ export function thinkingRequestFor(
     minimal: 1_024,
     low: 2_048,
     medium: 8_192,
-    high: LEGACY_THINK_BUDGET,
-    xhigh: LEGACY_THINK_BUDGET,
-    max: LEGACY_THINK_BUDGET,
+    high: FIXED_THINK_BUDGET,
+    xhigh: FIXED_THINK_BUDGET,
+    max: FIXED_THINK_BUDGET,
   };
   return { type: "enabled", budget_tokens: budgets[actual] };
 }
@@ -2862,8 +2862,8 @@ function sealBeforeAppend(lineBytes: number, lastSeq: number): boolean {
       const identity = String(activeStats.dev) + ":" + String(activeStats.ino);
       // The synchronous append path has no descriptor that survives this
       // call. Flush and revalidate the active inode immediately before the
-      // publication boundary; a concurrent legacy replacement must not be
-      // described by this writer's close proof.
+      // publication boundary; a concurrent replacement must not be described
+      // by this writer's close proof.
       syncFile(activeSidecarPath);
       const beforeRename = statSync(activeSidecarPath);
       if (String(beforeRename.dev) + ":" + String(beforeRename.ino) !== identity || beforeRename.size !== activeStats.size) continue;
@@ -7002,15 +7002,6 @@ function reportUsage(
     previous: previousCacheAttempt,
     current: snapshot,
     noiseFloorTokens: NOISE_FLOOR_TOKENS,
-    // An undocumented route has no local idle-expiry threshold.  Use a
-    // bounded numeric sentinel only to disable the cache module's legacy
-    // fallback; documented TTLs still come from the effective policy.
-    unknownRetentionGapMs:
-      cache.policy.retentionKnown === null &&
-      cache.policy.effectiveTtlMs === null &&
-      cache.policy.requestedTtlMs === null
-        ? Number.MAX_SAFE_INTEGER
-        : undefined,
   });
   const traceCache: TraceCacheDiagnostics = {
     ...cache,

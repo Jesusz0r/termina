@@ -78,12 +78,6 @@ function validTraceRecord(record) {
   if (!record || typeof record !== "object" || Array.isArray(record)) {
     throw new Error("root is not an object");
   }
-  if (record.schemaVersion === undefined) {
-    if ((record.role !== "main" && record.role !== "summary") || !nonemptyString(record.status) || !nonemptyString(record.model)) {
-      throw new Error("legacy trace record is missing required role, status, or model");
-    }
-    return;
-  }
   if (record.schemaVersion !== TRACE_SCHEMA_VERSION) {
     throw new Error(`unsupported trace schema version: ${String(record.schemaVersion)}`);
   }
@@ -375,8 +369,7 @@ export function readTraceDirectory(path) {
     return manifest[field];
   };
   const schemaRecords = {
-    legacy: records.filter((record) => record.schemaVersion === undefined).length,
-    v2: records.filter((record) => record.schemaVersion === TRACE_SCHEMA_VERSION).length,
+    current: records.filter((record) => record.schemaVersion === TRACE_SCHEMA_VERSION).length,
   };
   const retainedRecords = manifestCount("retainedRecords");
   const omittedRecords = manifestCount("omittedRecords");
@@ -399,7 +392,6 @@ export function readTraceDirectory(path) {
     lastTraceTurn,
     readerOmittedRecords: candidateNames.length - names.length,
     manifestErrors: manifestErrors.length,
-    mixedSchemas: schemaRecords.legacy > 0 && schemaRecords.v2 > 0,
     schemaRecords,
   };
   Object.defineProperty(records, "traceDiagnostics", { value: diagnostics, enumerable: false });
@@ -410,102 +402,6 @@ export function readTraceDirectory(path) {
     matchedFiles: candidateNames.length,
     retainedFiles: names.length,
     diagnostics,
-  };
-}
-
-function summarizeLegacyTraces(records, label = "traces") {
-  const main = withCacheChanges(records.filter((record) => record.role === "main"));
-  const summaries = records.filter((record) => record.role === "summary");
-  const withUsage = main.filter((record) => record.usage && typeof record.usage === "object");
-  const ttft = main.map((record) => record.ttftMs).filter((value) => typeof value === "number" && Number.isFinite(value) && value >= 0);
-  const turn = main.map((record) => record.turnMs).filter((value) => typeof value === "number" && Number.isFinite(value) && value >= 0);
-  const usage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
-  for (const record of withUsage) {
-    usage.input += finiteNonnegative(record.usage.input);
-    usage.cacheRead += finiteNonnegative(record.usage.cacheRead);
-    usage.cacheWrite += finiteNonnegative(record.usage.cacheWrite);
-    usage.output += finiteNonnegative(record.usage.output);
-  }
-  const totalInput = usage.input + usage.cacheRead + usage.cacheWrite;
-  const knownCostTurns = main.filter((record) => typeof record.usd === "number" && Number.isFinite(record.usd) && record.usd >= 0);
-  const wasteByCause = Object.create(null);
-  for (const record of main) {
-    const waste = finiteNonnegative(record.wasteTokens);
-    if (waste === 0) continue;
-    const cause = typeof record.wasteCause === "string" && record.wasteCause ? record.wasteCause : "unknown";
-    wasteByCause[cause] = (wasteByCause[cause] ?? 0) + waste;
-  }
-  const tools = main.flatMap((record) => Array.isArray(record.toolNames) ? record.toolNames.filter((name) => typeof name === "string") : []);
-  const perTurnCache = main.map((record, index) => ({
-    turn: Number.isInteger(record.traceTurn) ? record.traceTurn : index + 1,
-    status: typeof record.status === "string" ? record.status : "unknown",
-    provider: typeof record.provider === "string" ? record.provider : "unknown",
-    protocol: typeof record.protocol === "string" ? record.protocol : "unknown",
-    totalInput: finiteNonnegative(record.usage?.input) + finiteNonnegative(record.usage?.cacheRead) + finiteNonnegative(record.usage?.cacheWrite),
-    cacheRead: finiteNonnegative(record.usage?.cacheRead),
-    cachedInputShare: cacheShare(record),
-    workingSetChanged: typeof record.cache?.workingSetChanged === "boolean" ? record.cache.workingSetChanged : null,
-    cacheKeyHash: typeof record.cache?.cacheKeyHash === "string" ? record.cache.cacheKeyHash : null,
-    stablePrefixHash: typeof record.cache?.stablePrefixHash === "string" ? record.cache.stablePrefixHash : null,
-    toolsHash: typeof record.cache?.toolsHash === "string" ? record.cache.toolsHash : null,
-    modelSettingsHash: typeof record.cache?.modelSettingsHash === "string" ? record.cache.modelSettingsHash : null,
-    messagePrefixHash: typeof record.cache?.messagePrefixHash === "string" ? record.cache.messagePrefixHash : null,
-    workingSetHash: typeof record.cache?.workingSetHash === "string" ? record.cache.workingSetHash : null,
-    cacheKeyChanged: record.cacheChanges.cacheKeyHash,
-    modelSettingsChanged: record.cacheChanges.modelSettingsHash,
-    toolsChanged: record.cacheChanges.toolsHash,
-    stablePrefixChanged: record.cacheChanges.stablePrefixHash,
-    messagePrefixChanged: record.cacheChanges.messagePrefixHash,
-    workingSetHashChanged: record.cacheChanges.workingSetHash,
-    codexTurnStateUsed: record.cache?.codexTurnStateUsed === true,
-  }));
-  return {
-    label,
-    records: records.length,
-    mainTurns: main.length,
-    summaryCalls: summaries.length,
-    statuses: counts(main.map((record) => typeof record.status === "string" ? record.status : "unknown")),
-    models: counts(main.map((record) => typeof record.model === "string" ? record.model : "unknown")),
-    systemHashes: new Set(main.map((record) => record.systemHash).filter((hash) => typeof hash === "string" && hash)).size,
-    latency: {
-      ttftSamples: ttft.length,
-      p50TtftMs: percentile(ttft, 0.5),
-      p95TtftMs: percentile(ttft, 0.95),
-      turnSamples: turn.length,
-      p50TurnMs: percentile(turn, 0.5),
-      p95TurnMs: percentile(turn, 0.95),
-    },
-    usage: {
-      measuredTurns: withUsage.length,
-      missingTurns: main.length - withUsage.length,
-      ...usage,
-      totalInput,
-      cachedInputShare: totalInput > 0 ? usage.cacheRead / totalInput : null,
-    },
-    cache: {
-      perTurn: perTurnCache,
-      byProvider: cacheGroups(withUsage, (record) => typeof record.provider === "string" ? record.provider : "unknown"),
-      byProtocol: cacheGroups(withUsage, (record) => typeof record.protocol === "string" ? record.protocol : "unknown"),
-      byWorkingSetChange: cacheGroups(
-        withUsage,
-        (record) => typeof record.cache?.workingSetChanged === "boolean" ? String(record.cache.workingSetChanged) : "unknown",
-      ),
-      byCacheKeyChange: cacheGroups(withUsage, (record) => String(record.cacheChanges.cacheKeyHash ?? "unknown")),
-      byModelSettingsChange: cacheGroups(withUsage, (record) => String(record.cacheChanges.modelSettingsHash ?? "unknown")),
-      byToolsChange: cacheGroups(withUsage, (record) => String(record.cacheChanges.toolsHash ?? "unknown")),
-      byStablePrefixChange: cacheGroups(withUsage, (record) => String(record.cacheChanges.stablePrefixHash ?? "unknown")),
-    },
-    cost: {
-      usd: knownCostTurns.reduce((sum, record) => sum + record.usd, 0),
-      measuredTurns: knownCostTurns.length,
-      missingTurns: main.length - knownCostTurns.length,
-    },
-    waste: {
-      tokens: Object.values(wasteByCause).reduce((sum, value) => sum + value, 0),
-      byCause: Object.fromEntries(Object.entries(wasteByCause).sort(([a], [b]) => compareStable(a, b))),
-    },
-    revisions: main.reduce((sum, record) => sum + finiteNonnegative(record.revisions), 0),
-    tools: { calls: tools.length, byName: counts(tools) },
   };
 }
 
@@ -1051,14 +947,12 @@ function v2Diagnostics(records) {
       lastTraceTurn: null,
       readerOmittedRecords: 0,
       manifestErrors: 0,
-      mixedSchemas: false,
-      schemaRecords: { legacy: 0, v2: records.length },
+      schemaRecords: { current: records.length },
     };
 }
 
 function summarizeV2Traces(records, label) {
   const v2Records = records.filter(isV2Record);
-  const legacyRecords = records.filter((record) => record && typeof record === "object" && record.schemaVersion === undefined);
   const rawAttempts = v2Records.filter((record) => record.recordType === "attempt");
   const settlements = v2Records.filter((record) => record.recordType === "task-settled");
   const attempts = rawAttempts.map(normalizeV2Attempt);
@@ -1369,20 +1263,16 @@ function summarizeV2Traces(records, label) {
     bySessionLengthBucket: groups.bySessionLengthBucket,
     byMissPrimary,
     byMissContributor,
-    ignoredLegacyRecords: legacyRecords.length,
     diagnostics: {
       ...v2Diagnostics(records),
-      mixedSchemas: legacyRecords.length > 0,
-      schemaRecords: {
-        legacy: legacyRecords.length,
-        v2: v2Records.length,
-      },
+      schemaRecords: { current: v2Records.length },
     },
   };
 }
 
 export function summarizeTraces(records, label = "traces") {
-  return records.some(isV2Record) ? summarizeV2Traces(records, label) : summarizeLegacyTraces(records, label);
+  if (!records.every(isV2Record)) throw new Error("trace records must use the current schema");
+  return summarizeV2Traces(records, label);
 }
 
 function formatMs(value) {

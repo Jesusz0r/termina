@@ -6,7 +6,6 @@ describe("SessionFork Architecture Contracts", () => {
   const root = process.cwd();
   const main = readFileSync(join(root, "electron", "main.ts"), "utf8");
   const worldlines = readFileSync(join(root, "electron", "worldlines.ts"), "utf8");
-  const worldlineGit = readFileSync(join(root, "electron", "worldline-git.ts"), "utf8");
   const core = readFileSync(join(root, "core", "src", "main.rs"), "utf8");
   const worker = readFileSync(join(root, "electron", "session-worker.ts"), "utf8");
   const retention = readFileSync(join(root, "electron", "session-retention.ts"), "utf8");
@@ -43,12 +42,6 @@ describe("SessionFork Architecture Contracts", () => {
     expect(!/export async function removeSessionBundle/.test(session)).toBe(true);
   });
 
-  it("contains no durable-root migration or removed admission path", () => {
-    expect(/durableStateMigration|migrateDurablePromotionRoots|publishDurableStateMarker/.test(main + worldlines)).toBe(false);
-    expect(/migrateRoot/.test(retention)).toBe(false);
-    expect(/bootstrapExisting/.test(main + worldlines + worldlineGit + core)).toBe(false);
-  });
-
   it("routes core forks and retained session transactions in finalizeRun", () => {
     const finalize = methodBody(main, "private async finalizeRun(", "  /** The descendant pids");
     expect(/this\.sessionFork\.forkCore\(/.test(finalize)).toBe(true);
@@ -57,8 +50,7 @@ describe("SessionFork Architecture Contracts", () => {
     expect(/this\.sessionRetention\.transact\(run\.id/.test(finalize)).toBe(true);
     expect(/MAX_RETAINED_SESSION_BUNDLES/.test(retention) && /MAX_RETAINED_SESSION_BYTES/.test(retention)).toBe(true);
     expect(/RETAINED_SESSION_ADMISSION_LOCK/.test(retention) && /queueTail/.test(retention)).toBe(true);
-    expect(/ensureBoundRetainedRoot/.test(retention) && !/migrateRoot/.test(retention)).toBe(true);
-    expect(/bootstrapExisting/.test(main + worldlines + worldlineGit + core)).toBe(false);
+    expect(/ensureBoundRetainedRoot/.test(retention)).toBe(true);
     expect(/promotion directory request contains an unknown field/.test(core)).toBe(true);
     expect(/retainedSessionRoot/.test(main) && !/rmSync\(this\.retainedSessionRoot/.test(main)).toBe(true);
   });

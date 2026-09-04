@@ -78,7 +78,7 @@
 - **Order `tools → system → messages`** — we follow it. Docs stress changing `tools` invalidates later layers; we pay one `cache_write` for tools each time tools change — expected.
 - **Lookback 20 per breakpoint** — see §3.1.1. With one history marker we have one 20-wide window. Docs example with a 25-block gap misses at 20; a second marker fixes it.
 - **TTL** `ephemeral` defaults to 5m; `ephemeral + ttl: 1h` costs more. `anthropicCacheMark` intentionally omits `ttl`, using the sliding 5-minute lifetime. Reports separate cold/warm shares and bucket idle gaps into ≤5m, 5–60m, and >1h windows before any future TTL decision.
-- **Auto caching** exists on every platform except legacy Bedrock (uses explicit only). We use explicit — fine, avoids Bedrock 400 `top-level cache_control` error docs call out.
+- **Auto caching** is unavailable on Bedrock routes that require explicit caching. We use explicit caching, avoiding the documented Bedrock 400 for top-level `cache_control`.
 - **Pricing note** — if both `cache_creation` and `cache_read` are 0, prompt was below minimum. We do not yet suppress stamping in that case.
 
 ### OpenAI (`api.openai.com` — live doc: `developers.openai.com/api/docs/guides/prompt-caching`)

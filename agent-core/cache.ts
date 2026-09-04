@@ -21,7 +21,6 @@ import type {
 const DIAGNOSTIC_INLINE_STRING_CHARS = 16_384;
 const DIAGNOSTIC_ARRAY_ITEMS = 512;
 const DIAGNOSTIC_DEPTH = 12;
-const UNKNOWN_RETENTION_GAP_MS = 5 * 60 * 1000;
 const CAPABILITY_SCOPE_PART_CHARS = 512;
 const CAPABILITY_KEY_PREFIX = "cap1_";
 
@@ -497,7 +496,6 @@ export function classifyCacheMiss(input: {
   previous: CacheAttemptSnapshot | null;
   current: CacheAttemptSnapshot;
   noiseFloorTokens?: number;
-  unknownRetentionGapMs?: number;
 }): CacheMissClassification {
   if (!input.previous) {
     return { attributed: false, primary: null, contributing: [], missedTokens: 0, gapMs: null, missingFields: [] };
@@ -562,13 +560,10 @@ export function classifyCacheMiss(input: {
 
   const effectiveTtl = finiteNonnegative(input.current.diagnostics.policy.effectiveTtlMs);
   const requestedTtl = finiteNonnegative(input.current.diagnostics.policy.requestedTtlMs);
-  const unknownGap = finiteNonnegative(input.unknownRetentionGapMs) ?? UNKNOWN_RETENTION_GAP_MS;
   if (gapMs !== null) {
     if (effectiveTtl !== null && gapMs > effectiveTtl) {
       causes.push(input.current.diagnostics.policy.retentionKnown === true ? "idle-expired" : "possible-idle-expiry");
     } else if (effectiveTtl === null && requestedTtl !== null && gapMs > requestedTtl) {
-      causes.push("possible-idle-expiry");
-    } else if (effectiveTtl === null && requestedTtl === null && gapMs > unknownGap) {
       causes.push("possible-idle-expiry");
     }
   }

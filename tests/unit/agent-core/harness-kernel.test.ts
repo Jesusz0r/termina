@@ -1093,15 +1093,12 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       "request projection keeps signed thinking",
       projectBlockForTest({ type: "thinking", thinking: "abc", signature: "sig" }).thinking === "abc",
     );
+    const persistedContext = projectPersistedMessages({
+      messages: [{ role: "user", content: [{ type: "context", text: "<working-set>x</working-set>" }], sseq: 1, tokens: 1 }],
+    });
     check(
-      "hidden context becomes provider text",
-      JSON.stringify(projectBlockForTest({ type: "context", text: "<working-set>x</working-set>" })) ===
-        JSON.stringify({ type: "text", text: "<working-set>x</working-set>" }),
-    );
-    const hiddenWorkingSet = projectBlockForTest({ type: "context", text: "<working-set>hidden</working-set>" });
-    check(
-      "legacy working set projects as provider text",
-      hiddenWorkingSet?.type === "text" && hiddenWorkingSet?.text === "<working-set>hidden</working-set>",
+      "persisted context fails strict request projection",
+      persistedContext.ok === false && /persisted context block/.test(persistedContext.error),
     );
     check("plain user prompt stays a string", userPromptContent("visible", []) === "visible");
     const unsignedThinking = projectPersistedForTest([{ role: "assistant", content: [{ type: "thinking", thinking: "abc" }], tokens: 1, sseq: 1 }]);
@@ -3561,7 +3558,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       supportedEffortLevels("anthropic", "claude-sonnet-5").join(" ") === "off minimal low medium high xhigh max",
     );
     check(
-      "legacy claude omits extended effort",
+      "fixed-budget claude omits extended effort",
       supportedEffortLevels("anthropic", "claude-sonnet-4-5").join(" ") === "off minimal low medium high",
     );
     check(
@@ -3644,16 +3641,16 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("adaptive sonnet 5 keeps max", adaptiveEffortFor("anthropic", "claude-sonnet-5", "max") === "max");
     check("adaptive effort maps minimal to low", adaptiveEffortFor("anthropic", "claude-sonnet-5", "minimal") === "low");
     check(
-      "thinkingRequestFor legacy sonnet uses low budget",
+      "thinkingRequestFor fixed-budget sonnet uses low budget",
       JSON.stringify(thinkingRequestFor("anthropic", "claude-sonnet-4-5", "low")) ===
         JSON.stringify({ type: "enabled", budget_tokens: 2_048 }),
     );
     check(
-      "thinkingRequestFor legacy sonnet uses high budget",
+      "thinkingRequestFor fixed-budget sonnet uses high budget",
       JSON.stringify(thinkingRequestFor("anthropic", "claude-sonnet-4-5", "high")) ===
         JSON.stringify({ type: "enabled", budget_tokens: 16_384 }),
     );
-    check("thinkingRequestFor legacy sonnet off is omitted", thinkingRequestFor("anthropic", "claude-sonnet-4-5", "off") === undefined);
+    check("thinkingRequestFor fixed-budget sonnet off is omitted", thinkingRequestFor("anthropic", "claude-sonnet-4-5", "off") === undefined);
     check(
       "thinkingRequestFor haiku uses a budget",
       JSON.stringify(thinkingRequestFor("anthropic", "claude-haiku-4-5", "low")) ===

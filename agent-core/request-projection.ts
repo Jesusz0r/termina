@@ -285,6 +285,7 @@ function validateToolSequences(messages: readonly ProjectionMessage[]): string |
     if (typeof message.content === "string" || !Array.isArray(message.content)) continue;
     for (const block of message.content) {
       if (!block || typeof block !== "object" || typeof block.type !== "string") continue;
+      if (block.type === "context") return `persisted context block at message ${messageIndex} is unsupported`;
       if (TOOL_USE_TYPES.has(block.type)) {
         const id = toolId(block);
         if (!id) return `tool call at message ${messageIndex} has no id`;
@@ -307,7 +308,6 @@ function validateToolSequences(messages: readonly ProjectionMessage[]): string |
 }
 
 function providerBlock(block: ProjectionBlock, imageRoots: readonly string[]): Record<string, unknown> {
-  if (block.type === "context") return { type: "text", text: String(block.text ?? "") };
   const out: Record<string, unknown> = { type: block.type };
   for (const [key, value] of Object.entries(block)) {
     if (key === "type" || VIEW_KEYS.has(key) || value === undefined) continue;
