@@ -266,7 +266,7 @@ export class EditorManager {
    * With preview: true the tab is a replaceable preview (VS Code style) — a
    * new preview replaces the previous one; editing or preview: false pins it.
    */
-  async openFile(path: string, opts: { preview?: boolean; owner?: ProjectWorkspaceRef } = {}): Promise<void> {
+  async openFile(path: string, opts: { preview?: boolean; owner?: ProjectWorkspaceRef; line?: number; column?: number } = {}): Promise<void> {
     const preview = opts.preview ?? true;
     const owner = opts.owner ?? this.ownerProvider();
     if (!owner) throw new Error("file owner is unavailable");
@@ -277,6 +277,9 @@ export class EditorManager {
       if (!preview && this.previewKey === key) this.pinPreview();
       this.onFileOpened();
       this.activate(key);
+      if (typeof opts.line === "number" && opts.line > 0) {
+        this.revealPosition(opts.line, opts.column);
+      }
       return;
     }
     // Keep a replacement tab in the map before closing the previous preview.
@@ -335,6 +338,9 @@ export class EditorManager {
       if (this.tabs.get(key)?.model === model) {
         this.activate(key);
         this.onFileOpened();
+        if (typeof opts.line === "number" && opts.line > 0) {
+          this.revealPosition(opts.line, opts.column);
+        }
       }
       return;
     }
@@ -584,6 +590,14 @@ export class EditorManager {
     this.editor.layout();
   }
 
+  /** Move cursor to line/column, scroll line into center, and focus the editor. */
+  revealPosition(line: number, column?: number): void {
+    const col = typeof column === "number" && column > 0 ? column : 1;
+    this.editor.setPosition({ lineNumber: line, column: col });
+    this.editor.revealPositionInCenter({ lineNumber: line, column: col });
+    this.focusEditor();
+  }
+
   /** Focus the editor without scrolling the terminal pane. */
   private focusEditor(): void {
     const textarea = this.editor.getDomNode()?.querySelector("textarea");
@@ -797,6 +811,14 @@ export class EditorManager {
       this.lastTimelineKey = key;
       if (replay && prevKey && prevKey !== key && this.tabs.has(prevKey)) this.closeTab(prevKey);
       return;
+    }
+    const MAX_OPEN_SNAPSHOT_TABS = 10;
+    if (!replay) {
+      const openSnapshots = this.order.filter((k) => k.startsWith("timeline:"));
+      if (openSnapshots.length >= MAX_OPEN_SNAPSHOT_TABS) {
+        const oldest = openSnapshots[0];
+        if (oldest && oldest !== key && this.tabs.has(oldest)) this.closeTab(oldest);
+      }
     }
     const replacingPreview = this.previewKey && this.previewKey !== key ? this.previewKey : null;
     const model = monaco.editor.createModel(content, languageForPath(relPath), monaco.Uri.parse(`timeline://${terminalId}/${encodeURIComponent(eventKey)}`));

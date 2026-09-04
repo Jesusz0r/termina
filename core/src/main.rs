@@ -3246,12 +3246,19 @@ fn promotion_root_capabilities() -> &'static Mutex<HashMap<String, PromotionRoot
     PROMOTION_ROOT_CAPABILITIES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+const MAX_PROMOTION_CAPABILITIES: usize = 256;
+
 fn issue_promotion_root_capability(path: &str, identity: PromotionIdentity) -> String {
     let sequence = PROMOTION_ROOT_CAPABILITY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let token = format!("promotion-root-{sequence:016x}-{}", std::process::id());
     let mut capabilities = promotion_root_capabilities()
         .lock()
         .expect("promotion root capability registry poisoned");
+    if capabilities.len() >= MAX_PROMOTION_CAPABILITIES {
+        if let Some(oldest) = capabilities.keys().next().cloned() {
+            capabilities.remove(&oldest);
+        }
+    }
     capabilities.insert(
         token.clone(),
         PromotionRootCapability {

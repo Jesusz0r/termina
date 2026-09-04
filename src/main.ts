@@ -656,6 +656,16 @@ function createPaneShell(instanceId: string): Pane {
       fontSize: preferences.terminalFontSize,
       fontFamily: preferences.fontFamily,
     },
+    (filePath, line, column) => {
+      const targetProjectId = pane.projectId ?? activeProjectId;
+      if (targetProjectId && targetProjectId !== activeProjectId) {
+        setActiveProject(targetProjectId);
+      }
+      const owner = targetProjectId && pane.workspaceId
+        ? { projectId: targetProjectId, workspaceId: pane.workspaceId }
+        : undefined;
+      void openFileSmart(filePath, false, owner, line, column);
+    },
   );
   view.setEngine("core");
 
@@ -1269,20 +1279,74 @@ async function focusProjectShell(): Promise<void> {
 
 // ---------------------------------------------------------------- commands --
 
-async function openFileSmart(path: string, preview = true, requestedOwner?: ProjectWorkspaceRef): Promise<void> {
+function normalizePath(inputPath: string): string {
+  const isAbs = inputPath.startsWith("/");
+  const segments = inputPath.split("/");
+  const resolved: string[] = [];
+  for (const seg of segments) {
+    if (!seg || seg === ".") continue;
+    if (seg === "..") {
+      if (resolved.length > 0 && resolved[resolved.length - 1] !== "..") {
+        resolved.pop();
+      } else if (!isAbs) {
+        resolved.push("..");
+      }
+    } else {
+      resolved.push(seg);
+    }
+  }
+  return (isAbs ? "/" : "") + resolved.join("/");
+}
+
+async function openFileSmart(
+  path: string,
+  preview = true,
+  requestedOwner?: ProjectWorkspaceRef,
+  line?: number,
+  column?: number,
+): Promise<void> {
   if (reviewView.isVisible) reviewView.hide();
-  const owner = requestedOwner ?? (() => {
+  revealEditor();
+  let owner = requestedOwner ?? (() => {
     const view = activeProjectId ? projectViews.get(activeProjectId) : null;
     return view?.workspaceId ? { projectId: view.id, workspaceId: view.workspaceId } : null;
   })();
+
+  let cleanPath = path;
+  if (cleanPath.startsWith("file://")) {
+    cleanPath = cleanPath.slice("file://".length);
+    if (cleanPath.startsWith("localhost/")) {
+      cleanPath = cleanPath.slice("localhost".length);
+    }
+  }
+  try {
+    cleanPath = decodeURIComponent(cleanPath);
+  } catch {
+    // Keep raw string if URI decoding fails
+  }
+  cleanPath = normalizePath(cleanPath);
+
+  // If path is absolute, route to the project that owns it
+  if (cleanPath.startsWith("/")) {
+    for (const [projId, projView] of projectViews.entries()) {
+      if (cleanPath === projView.cwd || cleanPath.startsWith(projView.cwd + "/")) {
+        owner = { projectId: projId, workspaceId: projView.workspaceId };
+        if (activeProjectId !== projId) {
+          setActiveProject(projId);
+        }
+        break;
+      }
+    }
+  }
+
   const view = owner ? projectViews.get(owner.projectId) : null;
   if (!owner || !view) {
     toast(`could not open ${pathBasename(path)}: file owner is unavailable`, "error");
     return;
   }
-  const abs = path.startsWith("/") ? path : `${view.cwd}/${path}`;
+  const abs = cleanPath.startsWith("/") ? cleanPath : normalizePath(`${view.cwd}/${cleanPath}`);
   try {
-    await view.editorMgr.openFile(abs, { preview, owner });
+    await view.editorMgr.openFile(abs, { preview, owner, line, column });
   } catch (err) {
     toast(`could not open ${pathBasename(abs)}: ${(err as Error).message}`, "error");
   }
@@ -2424,6 +2488,26 @@ window.pi.onInstances((list: InstanceSummary[]) => {
   // immediately. Also fence an older queued roster push so it cannot recreate
   // the pane while the close IPC is in flight.
   list = list.filter((instance) => !closingPanes.has(instance.id));
+  const liveIds = new Set(list.map((inst) => inst.id));
+
+  // Reconcile and prune deceased background panes (candidates, dispatch workers, exited panes)
+  for (const [id, pane] of [...panes.entries()]) {
+    if (!liveIds.has(id)) {
+      if (pane.dispatchWorker || pane.worldlineLabel !== null || pane.exited || closingPanes.has(id)) {
+        panes.delete(id);
+        for (const [projId, activeInstId] of lastActivePane) {
+          if (activeInstId === id) lastActivePane.delete(projId);
+        }
+        pane.view.dispose();
+        pane.container.remove();
+        pane.tabEl.remove();
+        if (activeId === id) {
+          activeId = null;
+        }
+      }
+    }
+  }
+
   handleWorldlineInstances(list, {
     paneById: (instanceId) => panes.get(instanceId),
     createPane: (instanceId) => createPaneShell(instanceId),

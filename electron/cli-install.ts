@@ -8,7 +8,10 @@
 import { app } from "electron";
 import { existsSync, lstatSync, readlinkSync, symlinkSync, unlinkSync, mkdirSync, statSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const CLI_TARGET_DIR = "/usr/local/bin";
 const CLI_TARGET_PATH = join(CLI_TARGET_DIR, "termina");
@@ -62,7 +65,7 @@ export function isCliCommandInstalled(): boolean {
   }
 }
 
-export function installCliCommand(): { ok: boolean; path?: string; error?: string } {
+export async function installCliCommand(): Promise<{ ok: boolean; path?: string; error?: string }> {
   const source = getCliSourcePath();
   if (!existsSync(source)) {
     return { ok: false, error: `CLI launcher not found at ${source}` };
@@ -89,7 +92,7 @@ export function installCliCommand(): { ok: boolean; path?: string; error?: strin
   if (process.platform === "darwin") {
     try {
       const command = `mkdir -p '${CLI_TARGET_DIR}' && ln -sf '${source}' '${CLI_TARGET_PATH}'`;
-      execFileSync("osascript", ["-e", `do shell script "${command}" with administrator privileges`]);
+      await execFileAsync("osascript", ["-e", `do shell script "${command}" with administrator privileges`]);
       return { ok: true, path: CLI_TARGET_PATH };
     } catch (err) {
       const msg = (err as Error).message;
@@ -103,7 +106,7 @@ export function installCliCommand(): { ok: boolean; path?: string; error?: strin
   return { ok: false, error: `Permission denied writing to ${CLI_TARGET_PATH}. Run: sudo ln -sf "${source}" "${CLI_TARGET_PATH}"` };
 }
 
-export function uninstallCliCommand(): { ok: boolean; error?: string } {
+export async function uninstallCliCommand(): Promise<{ ok: boolean; error?: string }> {
   try {
     lstatSync(CLI_TARGET_PATH);
   } catch {
@@ -123,7 +126,7 @@ export function uninstallCliCommand(): { ok: boolean; error?: string } {
   if (process.platform === "darwin") {
     try {
       const command = `rm -f '${CLI_TARGET_PATH}'`;
-      execFileSync("osascript", ["-e", `do shell script "${command}" with administrator privileges`]);
+      await execFileAsync("osascript", ["-e", `do shell script "${command}" with administrator privileges`]);
       return { ok: true };
     } catch (err) {
       const msg = (err as Error).message;

@@ -512,30 +512,30 @@ export type TerminalPasteResult =
 
 export interface PiBridge {
   // push events (main → renderer)
-  onPtyData(cb: (e: PtyDataPayload) => void): void;
-  onPtyExit(cb: (e: PtyExitPayload) => void): void;
-  onMenuCommand(cb: (cmd: { command: MenuCommand }) => void): void;
-  onToolTarget(cb: (p: ToolTargetPayload) => void): void;
-  onFileChanged(cb: (p: FileChangedPayload) => void): void;
-  onFileDeleted(cb: (p: FileDeletedPayload) => void): void;
-  onModifiedList(cb: (p: ModifiedListPayload) => void): void;
-  onBusy(cb: (p: BusyPayload) => void): void;
-  onPlanUpdate(cb: (p: PlanPayload) => void): void;
-  onTimelineEvent(cb: (p: { terminalId: string; event: TimelineEvent }) => void): void;
+  onPtyData(cb: (e: PtyDataPayload) => void): () => void;
+  onPtyExit(cb: (e: PtyExitPayload) => void): () => void;
+  onMenuCommand(cb: (cmd: { command: MenuCommand }) => void): () => void;
+  onToolTarget(cb: (p: ToolTargetPayload) => void): () => void;
+  onFileChanged(cb: (p: FileChangedPayload) => void): () => void;
+  onFileDeleted(cb: (p: FileDeletedPayload) => void): () => void;
+  onModifiedList(cb: (p: ModifiedListPayload) => void): () => void;
+  onBusy(cb: (p: BusyPayload) => void): () => void;
+  onPlanUpdate(cb: (p: PlanPayload) => void): () => void;
+  onTimelineEvent(cb: (p: { terminalId: string; event: TimelineEvent }) => void): () => void;
   /** Push: dots whose source states were evicted (budget). */
-  onTimelineEvict(cb: (p: { terminalId: string; seqs: number[] }) => void): void;
+  onTimelineEvict(cb: (p: { terminalId: string; seqs: number[] }) => void): () => void;
   /** Push: timeline cleared for a fresh session (e.g. /new). */
-  onTimelineClear(cb: (p: { terminalId: string }) => void): void;
+  onTimelineClear(cb: (p: { terminalId: string }) => void): () => void;
   /** Push: last-tool counts for the Timeline header. */
-  onTimelinePrefix(cb: (p: TimelinePrefix) => void): void;
+  onTimelinePrefix(cb: (p: TimelinePrefix) => void): () => void;
   /** Push: the recorder state of a terminal's timeline. */
-  onRecorderState(cb: (p: { terminalId: string; state: RecorderState }) => void): void;
-  onVerifyState(cb: (p: { terminalId: string; verify: VerifyInfo }) => void): void;
-  onFolderOpened(cb: (e: FolderOpenedPayload) => void): void;
-  onInstances(cb: (list: InstanceSummary[]) => void): void;
+  onRecorderState(cb: (p: { terminalId: string; state: RecorderState }) => void): () => void;
+  onVerifyState(cb: (p: { terminalId: string; verify: VerifyInfo }) => void): () => void;
+  onFolderOpened(cb: (e: FolderOpenedPayload) => void): () => void;
+  onInstances(cb: (list: InstanceSummary[]) => void): () => void;
   /** Main asks the renderer to save every dirty model (run-start preflight). */
-  onFlushRequest(cb: (p: { requestId: string; writerId: string; projectId: string; workspaceId: string }) => void): void;
-  onUpdateState(cb: (state: AppUpdateState) => void): void;
+  onFlushRequest(cb: (p: { requestId: string; writerId: string; projectId: string; workspaceId: string }) => void): () => void;
+  onUpdateState(cb: (state: AppUpdateState) => void): () => void;
 
   // terminals (agent = pi TUI, shell = a real shell like zsh)
   createTerminal(opts?: { type?: "agent" | "shell"; shell?: string; engine?: "pi" | "core"; fromTerminalId?: string; projectId?: string }): Promise<{ ok: boolean; id?: string; error?: string }>;
@@ -612,17 +612,17 @@ export interface PiBridge {
   /** Compute evidence for both candidates of a comparison. */
   runEvidence(comparisonId: string): Promise<{ ok: boolean; error?: string }>;
   /** Push: the evidence summary of a comparison changed. */
-  onEvidenceUpdate(cb: (e: WorldlineEvidencePayload) => void): void;
+  onEvidenceUpdate(cb: (e: WorldlineEvidencePayload) => void): () => void;
   /** Promote a candidate into the primary project (WORLDLINES §6.10). */
   promoteWorldline(comparisonId: string, label: "A" | "B", force?: boolean): Promise<{ ok: boolean; error?: string; terminalId?: string; confirm?: string }>;
   /** Push: one worldline changed. */
-  onWorldlineUpdate(cb: (e: WorldlineUpdatePayload) => void): void;
+  onWorldlineUpdate(cb: (e: WorldlineUpdatePayload) => void): () => void;
   /** Push: a comparison was removed. */
-  onWorldlineRemoved(cb: (e: WorldlineRemovedPayload) => void): void;
+  onWorldlineRemoved(cb: (e: WorldlineRemovedPayload) => void): () => void;
   /** Push: a terminal's run records changed (Fork Run refresh). */
-  onWorldlineRunsChanged(cb: (e: { terminalId: string }) => void): void;
+  onWorldlineRunsChanged(cb: (e: { terminalId: string }) => void): () => void;
   /** Push: a promotion opened its primary terminal. */
-  onPromotionOpened(cb: (e: { terminalId: string }) => void): void;
+  onPromotionOpened(cb: (e: { terminalId: string }) => void): () => void;
 
   // Dispatch (parallel agents)
   /** Dispatch plan tasks to parallel workers. Pass task text to send one row. */
@@ -652,7 +652,7 @@ export interface PiBridge {
   projectOpenPath(cwd: string): Promise<{ cwd: string } | { cancelled: true }>;
   projectActivate(projectId: string): Promise<{ ok: boolean }>;
   projectClose(projectId: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean }>;
-  onProjectClosed(cb: (e: { projectId: string; activationGeneration: number }) => void): void;
+  onProjectClosed(cb: (e: { projectId: string; activationGeneration: number }) => void): () => void;
   openFile(path: string, owner: ProjectWorkspaceRef): Promise<{ ok: true; path: string; content: string; changedLines?: number[] } | { ok: false; path: string; error: string }>;
   saveFile(path: string, content: string, owner: ProjectWorkspaceRef): Promise<{ ok: boolean; error?: string }>;
 

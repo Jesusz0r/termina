@@ -429,6 +429,11 @@ async function forkCoreSession(msg: CoreSessionForkRequest): Promise<void> {
   }
 }
 
+let workerQueue: Promise<void> = Promise.resolve();
+function enqueueWorkerOp(op: () => Promise<void>): void {
+  workerQueue = workerQueue.then(op, op);
+}
+
 parentPort?.on("message", (msg: SessionWorkerRequest) => {
   if (msg.op === "shutdown") {
     coreClient.dispose();
@@ -444,17 +449,17 @@ parentPort?.on("message", (msg: SessionWorkerRequest) => {
   if (msg.op === "fork") {
     const controller = new AbortController();
     activePiForks.set(msg.requestId, controller);
-    void forkPiSession(msg, controller).finally(() => activePiForks.delete(msg.requestId));
+    enqueueWorkerOp(() => forkPiSession(msg, controller).finally(() => activePiForks.delete(msg.requestId)));
     return;
   }
   if (msg.op === "copy-pi") {
     const controller = new AbortController();
     activePiCopies.set(msg.requestId, controller);
-    void copyPiSession(msg, controller);
+    enqueueWorkerOp(() => copyPiSession(msg, controller));
     return;
   }
   if (msg.op === "discard-pi") {
-    void (async () => {
+    enqueueWorkerOp(async () => {
       const result = await cleanupPiCopy(msg.sessionFile, msg.sessionWorkspaceDir, msg.identity);
       if (result.ok) {
         post({ op: "discard-pi-result", requestId: msg.requestId, ok: true, removed: result.removed });
@@ -466,12 +471,14 @@ parentPort?.on("message", (msg: SessionWorkerRequest) => {
           error: { code: "failed", message: result.error },
         });
       }
-    })();
+    });
     return;
   }
   if (msg.op === "discard-core-empty") {
-    void discardCoreEmptySession(msg);
+    enqueueWorkerOp(() => discardCoreEmptySession(msg));
     return;
   }
-  if (msg.op === "fork-core") void forkCoreSession(msg);
+  if (msg.op === "fork-core") {
+    enqueueWorkerOp(() => forkCoreSession(msg));
+  }
 });

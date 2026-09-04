@@ -3,32 +3,15 @@
  */
 import { contextBridge, ipcRenderer as electronIpcRenderer, webUtils } from "electron";
 import type {
-  MenuCommand,
   PiBridge,
   TerminalPasteResult,
-  FileChangedPayload,
-  ToolTargetPayload,
-  FileDeletedPayload,
-  ModifiedListPayload,
-  BusyPayload,
   InstanceSummary,
   ExplorerEntry,
-  RecorderState,
-  VerifyInfo,
-  TimelineEvent,
-  TimelinePrefix,
-  PlanPayload,
-  WorldlineUpdatePayload,
-  WorldlineRemovedPayload,
-  WorldlineEvidencePayload,
   AppPreferences,
   PreferenceUpdate,
   ShortcutMap,
-  FolderOpenedPayload,
   AppUpdateState,
   ProjectWorkspaceRef,
-  PtyDataPayload,
-  PtyExitPayload,
   RendererIpcCapability,
 } from "../shared/types.js";
 
@@ -58,65 +41,35 @@ const ipcRenderer = {
   on: electronIpcRenderer.on.bind(electronIpcRenderer),
 };
 
+function bindPushEvent<T>(channel: string, cb: (payload: T) => void): () => void {
+  const handler = (_e: unknown, p: T) => cb(p);
+  electronIpcRenderer.on(channel, handler);
+  return () => {
+    electronIpcRenderer.removeListener(channel, handler);
+  };
+}
+
 const bridge: PiBridge = {
   // ---- push events ----
-  onPtyData: (cb) => {
-    ipcRenderer.on("pty:data", (_e, p: PtyDataPayload) => cb(p));
-  },
-  onPtyExit: (cb) => {
-    ipcRenderer.on("pty:exit", (_e, p: PtyExitPayload) => cb(p));
-  },
-  onMenuCommand: (cb) => {
-    ipcRenderer.on("menu:command", (_e, cmd: { command: MenuCommand }) => cb(cmd));
-  },
-  onToolTarget: (cb) => {
-    ipcRenderer.on("tool:target", (_e, p: ToolTargetPayload) => cb(p));
-  },
-  onFileChanged: (cb) => {
-    ipcRenderer.on("file:changed", (_e, p: FileChangedPayload) => cb(p));
-  },
-  onFileDeleted: (cb) => {
-    ipcRenderer.on("file:deleted", (_e, p: FileDeletedPayload) => cb(p));
-  },
-  onModifiedList: (cb) => {
-    ipcRenderer.on("modified:list", (_e, p: ModifiedListPayload) => cb(p));
-  },
-  onBusy: (cb) => {
-    ipcRenderer.on("busy", (_e, p: BusyPayload) => cb(p));
-  },
-  onPlanUpdate: (cb) => {
-    ipcRenderer.on("plan:update", (_e, p: PlanPayload) => cb(p));
-  },
-  onVerifyState: (cb) => {
-    ipcRenderer.on("verify:state", (_e, p: { terminalId: string; verify: VerifyInfo }) => cb(p));
-  },
-  onTimelineEvent: (cb) => {
-    ipcRenderer.on("timeline:event", (_e, p: { terminalId: string; event: TimelineEvent }) => cb(p));
-  },
-  onTimelineEvict: (cb) => {
-    ipcRenderer.on("timeline:evict", (_e, p: { terminalId: string; seqs: number[] }) => cb(p));
-  },
-  onTimelineClear: (cb) => {
-    ipcRenderer.on("timeline:clear", (_e, p: { terminalId: string }) => cb(p));
-  },
-  onTimelinePrefix: (cb) => {
-    ipcRenderer.on("timeline:prefix", (_e, p: TimelinePrefix) => cb(p));
-  },
-  onRecorderState: (cb) => {
-    ipcRenderer.on("timeline:recorder-state", (_e, p: { terminalId: string; state: RecorderState }) => cb(p));
-  },
-  onFolderOpened: (cb) => {
-    ipcRenderer.on("folder:opened", (_e, e: FolderOpenedPayload) => cb(e));
-  },
-  onFlushRequest: (cb) => {
-    ipcRenderer.on("editor:flush-request", (_e, p: { requestId: string; writerId: string; projectId: string; workspaceId: string }) => cb(p));
-  },
-  onUpdateState: (cb) => {
-    ipcRenderer.on("update:state", (_e, state: AppUpdateState) => cb(state));
-  },
-  onInstances: (cb) => {
-    ipcRenderer.on("instances:list", (_e, list: InstanceSummary[]) => cb(list));
-  },
+  onPtyData: (cb) => bindPushEvent("pty:data", cb),
+  onPtyExit: (cb) => bindPushEvent("pty:exit", cb),
+  onMenuCommand: (cb) => bindPushEvent("menu:command", cb),
+  onToolTarget: (cb) => bindPushEvent("tool:target", cb),
+  onFileChanged: (cb) => bindPushEvent("file:changed", cb),
+  onFileDeleted: (cb) => bindPushEvent("file:deleted", cb),
+  onModifiedList: (cb) => bindPushEvent("modified:list", cb),
+  onBusy: (cb) => bindPushEvent("busy", cb),
+  onPlanUpdate: (cb) => bindPushEvent("plan:update", cb),
+  onVerifyState: (cb) => bindPushEvent("verify:state", cb),
+  onTimelineEvent: (cb) => bindPushEvent("timeline:event", cb),
+  onTimelineEvict: (cb) => bindPushEvent("timeline:evict", cb),
+  onTimelineClear: (cb) => bindPushEvent("timeline:clear", cb),
+  onTimelinePrefix: (cb) => bindPushEvent("timeline:prefix", cb),
+  onRecorderState: (cb) => bindPushEvent("timeline:recorder-state", cb),
+  onFolderOpened: (cb) => bindPushEvent("folder:opened", cb),
+  onFlushRequest: (cb) => bindPushEvent("editor:flush-request", cb),
+  onUpdateState: (cb) => bindPushEvent("update:state", cb),
+  onInstances: (cb) => bindPushEvent("instances:list", cb),
 
   // ---- terminals ----
   createTerminal: (opts) => ipcRenderer.invoke("terminals:create", opts),
@@ -172,21 +125,11 @@ const bridge: PiBridge = {
   challengeCandidate: (comparisonId, label, profile) => ipcRenderer.invoke("worldline:challenge-candidate", comparisonId, label, profile),
   runEvidence: (comparisonId) => ipcRenderer.invoke("worldline:evidence", comparisonId),
   promoteWorldline: (comparisonId, label, force) => ipcRenderer.invoke("worldline:promote", comparisonId, label, force),
-  onWorldlineUpdate: (cb) => {
-    ipcRenderer.on("worldline:update", (_e, event: WorldlineUpdatePayload) => cb(event));
-  },
-  onWorldlineRemoved: (cb) => {
-    ipcRenderer.on("worldline:removed", (_e, event: WorldlineRemovedPayload) => cb(event));
-  },
-  onWorldlineRunsChanged: (cb) => {
-    ipcRenderer.on("worldline:runs-changed", (_e, e: { terminalId: string }) => cb(e));
-  },
-  onEvidenceUpdate: (cb) => {
-    ipcRenderer.on("worldline:evidence-update", (_e, event: WorldlineEvidencePayload) => cb(event));
-  },
-  onPromotionOpened: (cb) => {
-    ipcRenderer.on("promotion:opened", (_e, e: { terminalId: string }) => cb(e));
-  },
+  onWorldlineUpdate: (cb) => bindPushEvent("worldline:update", cb),
+  onWorldlineRemoved: (cb) => bindPushEvent("worldline:removed", cb),
+  onWorldlineRunsChanged: (cb) => bindPushEvent("worldline:runs-changed", cb),
+  onEvidenceUpdate: (cb) => bindPushEvent("worldline:evidence-update", cb),
+  onPromotionOpened: (cb) => bindPushEvent("promotion:opened", cb),
   dispatchRun: (terminalId, taskText) => ipcRenderer.invoke("dispatch:run", terminalId, taskText),
   setMineFile: (path, mine, owner: ProjectWorkspaceRef) => ipcRenderer.invoke("mine:set", path, mine, owner),
   getMineFiles: (owner: ProjectWorkspaceRef) => ipcRenderer.invoke("mine:list", owner),
@@ -199,9 +142,7 @@ const bridge: PiBridge = {
   projectList: () => ipcRenderer.invoke("project:list"),
   projectOpen: () => ipcRenderer.invoke("project:open"),
   projectOpenPath: (cwd) => ipcRenderer.invoke("project:open-path", cwd),
-  onProjectClosed: (cb) => {
-    ipcRenderer.on("project:closed", (_e, p: { projectId: string; activationGeneration: number }) => cb(p));
-  },
+  onProjectClosed: (cb) => bindPushEvent("project:closed", cb),
   projectActivate: (projectId) => ipcRenderer.invoke("project:activate", projectId),
   projectClose: (projectId) => ipcRenderer.invoke("project:close", projectId),
   openFile: (path, owner: ProjectWorkspaceRef) => ipcRenderer.invoke("file:open", path, owner),

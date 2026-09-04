@@ -189,6 +189,11 @@ export class PtyTerminal {
     if (this.exited || !this.pty) return;
     this.pendingInput.length = 0;
     try {
+      this.killGroup(signal ?? "SIGTERM");
+    } catch {
+      /* ignore */
+    }
+    try {
       this.pty.kill(signal);
     } catch {
       /* ignore */

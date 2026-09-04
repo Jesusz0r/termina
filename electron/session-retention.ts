@@ -7,14 +7,10 @@
  * eviction is performed here: unproven evidence is never deleted.
  */
 import {
-  closeSync,
-  constants as fsConstants,
   createReadStream,
-  fsyncSync,
   lstatSync,
-  openSync,
 } from "node:fs";
-import { lstat, opendir, readFile } from "node:fs/promises";
+import { lstat, opendir, readFile, open } from "node:fs/promises";
 import type { BigIntStats, Stats } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
@@ -248,12 +244,12 @@ async function inspectPath(path: string): Promise<BigIntStats | null> {
   }
 }
 
-function syncDirectorySync(path: string): void {
-  const fd = openSync(path, fsConstants.O_RDONLY);
+async function syncDirectory(path: string): Promise<void> {
+  const handle = await open(path, "r");
   try {
-    fsyncSync(fd);
+    await handle.sync();
   } finally {
-    closeSync(fd);
+    await handle.close();
   }
 }
 type RetainedRootBinding = {
@@ -408,7 +404,7 @@ async function removeRetainedEntry(
     expectedIdentity: { dev: String(expectedIdentity.dev), ino: String(expectedIdentity.ino) },
     ...(testHook ? { testHook } : {}),
   });
-  syncDirectorySync(root);
+  await syncDirectory(root);
 }
 
 async function writeRetainedClaim(root: string, runId: string, retentionLock: SessionRetentionLock, rootBinding: RetainedRootBinding): Promise<string> {

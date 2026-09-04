@@ -160,6 +160,8 @@ interface WorkspaceState {
   generation: number;
   /** The id of the current write-lease holder, or null. */
   writerId: string | null;
+  /** Re-entrancy depth for nested write lease acquisition. */
+  leaseDepth?: number;
   watcher: ProjectWatcher | null;
   terminalIds: Set<string>;
   /** The last captured state commit (the lineage parent). */
@@ -1447,7 +1449,7 @@ class PiEditorApp {
         cancelId: 2,
       });
       if (choice.response === 0) {
-        const res = installCliCommand();
+        const res = await installCliCommand();
         if (res.ok) {
           const payload = {
             type: "info" as const,
@@ -1468,7 +1470,7 @@ class PiEditorApp {
           else await dialog.showMessageBox(payload);
         }
       } else if (choice.response === 1) {
-        const res = uninstallCliCommand();
+        const res = await uninstallCliCommand();
         if (res.ok) {
           const payload = {
             type: "info" as const,
@@ -1491,7 +1493,7 @@ class PiEditorApp {
       return;
     }
 
-    const res = installCliCommand();
+    const res = await installCliCommand();
     if (res.ok) {
       const payload = {
         type: "info" as const,
@@ -2069,7 +2071,11 @@ class PiEditorApp {
   /** Release a workspace write lease. Only the holder can release it. */
   private releaseWriteLease(wsId: string, requesterId: string): void {
     const ws = this.workspaceById(wsId);
-    if (ws && ws.writerId === requesterId) ws.writerId = null;
+    if (!ws || ws.writerId !== requesterId) return;
+    ws.leaseDepth = Math.max(0, (ws.leaseDepth ?? 1) - 1);
+    if (ws.leaseDepth === 0) {
+      ws.writerId = null;
+    }
   }
 
   /**
@@ -2084,6 +2090,7 @@ class PiEditorApp {
       if (!ws) return { ok: false, generation: 0, error: "workspace not found" };
       if (ws.writerId === null || ws.writerId === requesterId) {
         ws.writerId = requesterId;
+        ws.leaseDepth = (ws.leaseDepth ?? 0) + 1;
         return { ok: true, generation: ws.generation };
       }
       if (Date.now() >= deadline) return { ok: false, generation: ws.generation, error: `another writer holds the lease: ${ws.writerId}` };
@@ -3078,6 +3085,7 @@ class PiEditorApp {
         await this.discardCoreSession(inst);
       }
       this.terminals.delete(inst.id);
+      this.busyAgents.delete(inst.id);
       exitOwner?.workspaces.get(inst.workspaceId)?.terminalIds.delete(inst.id);
       exitOwner?.terminalIds.delete(inst.id);
       if (persistOwner) this.saveTerminalRoster(persistOwner);
@@ -4276,12 +4284,25 @@ class PiEditorApp {
     this.ptyEgress.cancel(id, inst.generation);
     inst.pty.cancelOutput();
     this.newCommandBuffers.delete(id);
+    this.busyAgents.delete(id);
     if (inst.captureTimer) {
       clearTimeout(inst.captureTimer);
       inst.captureTimer = null;
     }
     if (this.verifyRuns.has(id)) this.cancelVerify(id);
-    inst.pty.kill();
+    inst.pty.killGroup("SIGTERM");
+    inst.pty.kill("SIGTERM");
+    const killWatchdog = setTimeout(() => {
+      if (this.terminals.has(id)) {
+        try { inst.pty.killGroup("SIGKILL"); } catch {}
+        try { inst.pty.kill("SIGKILL"); } catch {}
+      }
+    }, 2000);
+    const existingOnExit = inst.pty.onExit;
+    inst.pty.onExit = async (code) => {
+      clearTimeout(killWatchdog);
+      if (existingOnExit) await existingOnExit(code);
+    };
     // pty.onExit removes it from the map
   }
 
@@ -6412,7 +6433,10 @@ class PiEditorApp {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     for (const inst of [...this.terminals.values()]) {
-      if (target === null || target.has(inst.id)) inst.pty.kill("SIGKILL");
+      if (target === null || target.has(inst.id)) {
+        inst.pty.killGroup("SIGKILL");
+        inst.pty.kill("SIGKILL");
+      }
     }
   }
 
@@ -6731,7 +6755,16 @@ class PiEditorApp {
           break;
         }
         const full = join(dir, ent.name);
-        if (await this.hasDanglingSymlink(full)) continue;
+        let isDir = ent.isDirectory();
+        if (ent.isSymbolicLink()) {
+          try {
+            await fsRealpath(full);
+            const st = await stat(full);
+            isDir = st.isDirectory();
+          } catch {
+            continue;
+          }
+        }
         const child = await this.canonicalPath(full);
         const relPath = relative(rootCanon, child);
         if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) continue;
@@ -6739,7 +6772,7 @@ class PiEditorApp {
           name: ent.name,
           path: child,
           relPath,
-          type: ent.isDirectory() ? "dir" : "file",
+          type: isDir ? "dir" : "file",
         });
       }
       return truncated ? { entries, truncated: true } : { entries };
@@ -7683,6 +7716,7 @@ class PiEditorApp {
     await Promise.all([...this.projects.values()].map((project) => project.storePromise?.catch(() => null) ?? Promise.resolve(null)));
     coreClient.dispose();
     for (const inst of this.terminals.values()) {
+      inst.pty.killGroup("SIGTERM");
       inst.pty.kill();
     }
     await this.drainTerminals(null);
@@ -7891,4 +7925,28 @@ app.on("before-quit", (event) => {
       quitConfirmed = true;
       app.quit();
     });
+});
+
+const handleTerminationSignal = (signal: string) => {
+  if (cleanupStarted) return;
+  cleanupStarted = true;
+  console.log(`[main] received ${signal}, initiating cleanup...`);
+  void appState
+    .dispose()
+    .catch((err) => {
+      console.warn(`[main] dispose failed on ${signal}: ${(err as Error).message}`);
+    })
+    .finally(() => {
+      process.exit(0);
+    });
+};
+
+process.on("SIGINT", () => handleTerminationSignal("SIGINT"));
+process.on("SIGTERM", () => handleTerminationSignal("SIGTERM"));
+
+process.on("unhandledRejection", (reason) => {
+  console.warn("[main] unhandled rejection:", reason);
+});
+process.on("uncaughtException", (error) => {
+  console.error("[main] uncaught exception:", error);
 });

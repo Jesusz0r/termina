@@ -9,10 +9,13 @@ import { CanvasAddon } from "@xterm/addon-canvas";
 import { terminalTheme } from "./terminal-themes";
 import { isMacPlatform } from "./settings-shortcuts";
 import { toast } from "./components/modals";
+import { createTerminalLinkProvider } from "./terminal-links";
 
 export class PtyView {
   private term: Terminal;
   private fitAddon: FitAddon;
+  private canvasAddon: CanvasAddon | null = null;
+  private linkProviderDisposable: { dispose(): void } | null = null;
   private readonly sendInput: (data: string) => void;
   private disposed = false;
   private watchdog: ReturnType<typeof setInterval> | null = null;
@@ -48,6 +51,7 @@ export class PtyView {
     private readonly reportTerminalError: (message: string) => void,
     private readonly dropFromHost: (files: File[]) => Promise<TerminalPasteResult>,
     appearance: { theme: ThemeId; fontSize: number; fontFamily: string },
+    private readonly onOpenFile?: (path: string, line?: number, column?: number) => void,
   ) {
     this.container = container;
     this.sendInput = onInput;
@@ -64,7 +68,15 @@ export class PtyView {
     });
     this.fitAddon = new FitAddon();
     this.term.loadAddon(this.fitAddon);
-    this.term.loadAddon(new CanvasAddon());
+    this.canvasAddon = new CanvasAddon();
+    this.term.loadAddon(this.canvasAddon);
+    if (this.onOpenFile) {
+      this.linkProviderDisposable = this.term.registerLinkProvider(
+        createTerminalLinkProvider(this.term, (link) => {
+          this.onOpenFile?.(link.path, link.line, link.column);
+        }),
+      );
+    }
     this.term.open(container);
     container.addEventListener("mousedown", this.onMouseDown);
     container.addEventListener("dragenter", this.onDragEnter);
@@ -453,6 +465,15 @@ export class PtyView {
     this.wheelTimer = null;
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
+    if (this.linkProviderDisposable) {
+      this.linkProviderDisposable.dispose();
+      this.linkProviderDisposable = null;
+    }
+    if (this.canvasAddon) {
+      this.canvasAddon.dispose();
+      this.canvasAddon = null;
+    }
+    this.fitAddon?.dispose();
     this.term.dispose();
   }
 }
