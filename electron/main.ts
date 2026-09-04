@@ -1383,6 +1383,7 @@ class PiEditorApp {
           { type: "separator" },
           { label: "Next Terminal", accelerator: shortcut("next-terminal"), click: send("next-terminal") },
           { label: "Previous Terminal", accelerator: shortcut("previous-terminal"), click: send("previous-terminal") },
+          { label: "Find in Terminal…", accelerator: shortcut("terminal-find"), click: send("terminal-find") },
           { type: "separator" },
           { label: "Send Ctrl+C (abort)", accelerator: shortcut("abort-terminal"), click: () => void this.abortActive() },
           {

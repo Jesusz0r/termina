@@ -612,6 +612,56 @@ body {
 }
 
 /* terminal-type chooser menu */
+.terminal-find {
+  position: fixed;
+  z-index: 95;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.terminal-find[hidden] {
+  display: none;
+}
+
+.terminal-find input[type="text"] {
+  width: 180px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.terminal-find-count {
+  min-width: 48px;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.terminal-find button {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.terminal-find button:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
 .terminal-menu {
   position: fixed;
   z-index: 95;

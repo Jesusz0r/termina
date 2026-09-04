@@ -854,15 +854,16 @@ export class EditorManager {
   }
 
   /**
-   * Run a menu edit command on the editor. Return false when the editor is
+   * Run a menu command on the editor. Return false when the editor is
    * not focused. The caller can then use the terminal or the browser.
    */
-  runMenuEdit(kind: "undo" | "redo" | "select-all"): boolean {
+  runMenuEdit(kind: "undo" | "redo" | "select-all" | "find"): boolean {
     if (!this.editor.hasTextFocus()) return false;
     const actions = {
       undo: "editor.action.undo",
       redo: "editor.action.redo",
       "select-all": "editor.action.selectAll",
+      find: "actions.find",
     } as const;
     this.editor.trigger("menu", actions[kind], null);
     return true;

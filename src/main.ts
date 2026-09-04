@@ -1862,6 +1862,128 @@ commands.register("toggle-thinking", () => {
 });
 commands.register("next-project", () => cycleProjects(1));
 commands.register("previous-project", () => cycleProjects(-1));
+commands.register("terminal-find", () => {
+  if (activeEditor().runMenuEdit("find")) return;
+  openTerminalFind();
+});
+
+// ---- terminal find ----
+// One global bar searching the active pane's scrollback. Search state
+// (decorations, result index) lives in each pane's SearchAddon; this
+// controller only tracks which pane's decorations are currently live so
+// switching panes never leaves stale highlights behind.
+let findBar: HTMLElement | null = null;
+let findInput: HTMLInputElement | null = null;
+let findCount: HTMLElement | null = null;
+let findPaneId: string | null = null;
+let findResultsSub: { dispose(): void } | null = null;
+
+function findPane(): Pane | undefined {
+  const pane = activeId ? panes.get(activeId) : undefined;
+  return pane && !pane.error ? pane : undefined;
+}
+
+function clearFindDecorations(): void {
+  if (findPaneId) panes.get(findPaneId)?.view.clearFind();
+  findPaneId = null;
+  findResultsSub?.dispose();
+  findResultsSub = null;
+  if (findCount) findCount.textContent = "";
+}
+
+function runTerminalFind(next: boolean): void {
+  const pane = findPane();
+  const term = findInput?.value ?? "";
+  if (!pane || !term) return;
+  if (findPaneId !== pane.instanceId) {
+    clearFindDecorations();
+    findPaneId = pane.instanceId;
+    findResultsSub = pane.view.onFindResults((index, count) => {
+      if (!findCount) return;
+      findCount.textContent = count === 0 ? "no matches" : index < 0 ? `${count}+` : `${index + 1}/${count}`;
+    });
+  }
+  if (next) pane.view.findNext(term);
+  else pane.view.findPrevious(term);
+}
+
+function closeTerminalFind(refocus = true): void {
+  clearFindDecorations();
+  if (findBar) findBar.hidden = true;
+  if (refocus) findPane()?.view.focus();
+}
+
+function positionTerminalFindBar(): void {
+  if (!findBar) return;
+  const rect = termContainer.getBoundingClientRect();
+  findBar.style.top = `${rect.top + 8}px`;
+  findBar.style.left = `${Math.max(8, rect.right - 328)}px`;
+}
+
+function buildTerminalFindBar(): void {
+  const bar = document.createElement("div");
+  bar.className = "terminal-find";
+  bar.hidden = true;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "Find in terminal";
+  input.setAttribute("aria-label", "Find in terminal");
+  const count = document.createElement("span");
+  count.className = "terminal-find-count";
+  const prev = document.createElement("button");
+  prev.type = "button";
+  prev.textContent = "↑";
+  prev.title = "Previous match (Shift+Enter)";
+  const next = document.createElement("button");
+  next.type = "button";
+  next.textContent = "↓";
+  next.title = "Next match (Enter)";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.textContent = "×";
+  close.title = "Close (Esc)";
+  input.addEventListener("input", () => runTerminalFind(true));
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      runTerminalFind(!e.shiftKey);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeTerminalFind();
+    }
+  });
+  prev.addEventListener("click", () => {
+    runTerminalFind(false);
+    input.focus();
+  });
+  next.addEventListener("click", () => {
+    runTerminalFind(true);
+    input.focus();
+  });
+  close.addEventListener("click", () => closeTerminalFind());
+  bar.append(input, count, prev, next, close);
+  document.body.appendChild(bar);
+  findBar = bar;
+  findInput = input;
+  findCount = count;
+}
+
+function openTerminalFind(): void {
+  const pane = findPane();
+  if (!pane) return;
+  if (!findBar) buildTerminalFindBar();
+  if (findPaneId !== pane.instanceId) clearFindDecorations();
+  findBar!.hidden = false;
+  positionTerminalFindBar();
+  if (findInput) {
+    const selection = pane.view.getTerminal().getSelection().trim().split("\n")[0] ?? "";
+    if (selection) findInput.value = selection;
+    findInput.focus();
+    findInput.select();
+  }
+  if (findInput?.value) runTerminalFind(true);
+}
 
 // ---- tab cycling ----
 // Tab order is DOM order: drag reorder moves nodes without touching the

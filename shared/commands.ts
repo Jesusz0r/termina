@@ -34,6 +34,7 @@ export const COMMAND_DEFINITIONS = [
   { command: "abort-terminal", label: "Abort terminal", category: "Terminal", description: "Send an interrupt to the active terminal", defaultShortcut: "CmdOrCtrl+.", scope: "main" },
   { command: "toggle-thinking", label: "Toggle Thinking", category: "Terminal", description: "Show or hide provider thinking in core terminals", defaultShortcut: "CmdOrCtrl+Shift+H", scope: "renderer" },
   { command: "next-terminal", label: "Next terminal", category: "Terminal", description: "Activate the next terminal tab", defaultShortcut: "Ctrl+Tab", scope: "renderer" },
+  { command: "terminal-find", label: "Find in terminal", category: "Terminal", description: "Search the active terminal's scrollback", defaultShortcut: "CmdOrCtrl+F", scope: "renderer" },
   { command: "previous-terminal", label: "Previous terminal", category: "Terminal", description: "Activate the previous terminal tab", defaultShortcut: "Ctrl+Shift+Tab", scope: "renderer" },
   { command: "fullscreen", label: "Terminal fullscreen", category: "View", description: "Show only the terminal", defaultShortcut: "CmdOrCtrl+Shift+F", scope: "renderer" },
   { command: "layout-terminal-left", label: "Terminal left", category: "View", description: "Place the terminal on the left", defaultShortcut: "", scope: "renderer" },

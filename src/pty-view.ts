@@ -6,6 +6,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { cssFontFamily, type TerminalPasteResult, type ThemeId } from "../shared/types";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { SearchAddon, type ISearchOptions } from "@xterm/addon-search";
 import { terminalTheme } from "./terminal-themes";
 import { isMacPlatform } from "./settings-shortcuts";
 import { toast } from "./components/modals";
@@ -15,6 +16,7 @@ export class PtyView {
   private term: Terminal;
   private fitAddon: FitAddon;
   private webglAddon: WebglAddon | null = null;
+  private searchAddon: SearchAddon | null = null;
   private linkProviderDisposable: { dispose(): void } | null = null;
   private readonly sendInput: (data: string) => void;
   private disposed = false;
@@ -62,6 +64,7 @@ export class PtyView {
       fontSize: appearance.fontSize,
       fontFamily: cssFontFamily(appearance.fontFamily),
       convertEol: true,
+      allowProposedApi: true,
       theme: terminalTheme(appearance.theme),
       cursorBlink: true,
       scrollback: 3000,
@@ -79,6 +82,8 @@ export class PtyView {
       }
     });
     this.term.loadAddon(this.webglAddon);
+    this.searchAddon = new SearchAddon();
+    this.term.loadAddon(this.searchAddon);
     if (this.onOpenFile) {
       this.linkProviderDisposable = this.term.registerLinkProvider(
         createTerminalLinkProvider(this.term, (link) => {
@@ -252,6 +257,56 @@ export class PtyView {
     if (this.disposed || !this.term.hasSelection()) return false;
     this.writeClipboard(this.term.getSelection());
     return true;
+  }
+
+  /** Plain-text scrollback search; decorations use the current theme. */
+  private searchOptions(): ISearchOptions {
+    const theme = terminalTheme(this.themeId, this.engine);
+    const match = theme.selectionBackground ?? "#333c26";
+    const active = theme.cursor ?? "#b8f04a";
+    return {
+      regex: false,
+      caseSensitive: false,
+      wholeWord: false,
+      decorations: {
+        matchBackground: match,
+        matchOverviewRuler: match,
+        activeMatchBackground: active,
+        activeMatchColorOverviewRuler: active,
+      },
+    };
+  }
+
+  findNext(term: string): boolean {
+    if (this.disposed || !term) return false;
+    try {
+      return this.searchAddon?.findNext(term, this.searchOptions()) ?? false;
+    } catch {
+      return false;
+    }
+  }
+
+  findPrevious(term: string): boolean {
+    if (this.disposed || !term) return false;
+    try {
+      return this.searchAddon?.findPrevious(term, this.searchOptions()) ?? false;
+    } catch {
+      return false;
+    }
+  }
+
+  clearFind(): void {
+    if (this.disposed) return;
+    try {
+      this.searchAddon?.clearDecorations();
+    } catch {
+      /* ignore */
+    }
+  }
+
+  onFindResults(cb: (resultIndex: number, resultCount: number) => void): { dispose(): void } | null {
+    if (this.disposed || !this.searchAddon) return null;
+    return this.searchAddon.onDidChangeResults((e) => cb(e.resultIndex, e.resultCount));
   }
 
   async pasteClipboard(): Promise<void> {
@@ -484,6 +539,10 @@ export class PtyView {
     if (this.webglAddon) {
       this.webglAddon.dispose();
       this.webglAddon = null;
+    }
+    if (this.searchAddon) {
+      this.searchAddon.dispose();
+      this.searchAddon = null;
     }
     this.fitAddon?.dispose();
     this.term.dispose();
