@@ -22,7 +22,6 @@ const SIDECAR_MAX_BYTES = 8 * 1024 * 1024;
 const SIDECAR_SEALED_SUFFIX = ".sealed";
 const SIDECAR_SEALED_PROOF_SUFFIX = ".owner";
 const SIDECAR_QUARANTINE_PREFIX = ".quarantine-";
-const SIDECAR_MAX_LEGACY_SOURCES = 2;
 const SIDECAR_MAX_BACKPRESSURE_POLLS = 80;
 const SIDECAR_APPEND_RETRY_MS = 25;
 const SIDECAR_MAX_APPEND_RETRIES = 80;
@@ -135,14 +134,6 @@ export default function (pi: ExtensionAPI): void {
   };
   const activeSidecarPath = join(dir, id + ".jsonl");
   const hasQuarantineSidecar = (): boolean => existsSync(join(dir, SIDECAR_QUARANTINE_PREFIX + id));
-  const hasLegacyAdmissionOverflow = (): boolean => {
-    try {
-      const prefix = "." + id + ".jsonl.segment.legacy-";
-      return readdirSync(dir).filter((name) => name.startsWith(prefix)).length > SIDECAR_MAX_LEGACY_SOURCES;
-    } catch {
-      return false;
-    }
-  };
   const hasRetainedSidecar = (): boolean => {
     try {
       const prefix = "." + id + ".jsonl.";
@@ -208,10 +199,6 @@ export default function (pi: ExtensionAPI): void {
    * marker that is merely present or bound to another generation. */
   const sealBeforeAppend = (lineBytes, lastSeq) => {
     if (hasQuarantineSidecar()) return false;
-    if (hasLegacyAdmissionOverflow()) {
-      quarantineAdmission("legacy sidecar anchor admission exceeded");
-      return false;
-    }
     for (let attempt = 0; attempt < 2; attempt++) {
       let activeStats;
       try {

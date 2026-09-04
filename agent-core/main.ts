@@ -2682,7 +2682,6 @@ const SIDECAR_MAX_BYTES = 8 * 1024 * 1024;
 const SIDECAR_SEALED_SUFFIX = ".sealed";
 const SIDECAR_SEALED_PROOF_SUFFIX = ".owner";
 const SIDECAR_QUARANTINE_PREFIX = ".quarantine-";
-const SIDECAR_MAX_LEGACY_SOURCES = 2;
 const SIDECAR_MAX_BACKPRESSURE_POLLS = 80;
 const SIDECAR_APPEND_RETRY_MS = 25;
 const SIDECAR_MAX_APPEND_RETRIES = 80;
@@ -2732,15 +2731,6 @@ function waitForSidecarBackpressure(): boolean {
 const activeSidecarPath = eventsDir && terminalId ? join(eventsDir, terminalId + ".jsonl") : "";
 function hasQuarantineSidecar(): boolean {
   return !!eventsDir && !!terminalId && existsSync(join(eventsDir, SIDECAR_QUARANTINE_PREFIX + terminalId));
-}
-function hasLegacyAdmissionOverflow(): boolean {
-  if (!eventsDir || !terminalId) return false;
-  try {
-    const prefix = "." + terminalId + ".jsonl.segment.legacy-";
-    return readdirSync(eventsDir).filter((name) => name.startsWith(prefix)).length > SIDECAR_MAX_LEGACY_SOURCES;
-  } catch {
-    return false;
-  }
 }
 function hasRetainedSidecar(): boolean {
   if (!eventsDir || !terminalId) return false;
@@ -2810,10 +2800,6 @@ function appendDurable(path: string, line: string): void {
 function sealBeforeAppend(lineBytes: number, lastSeq: number): boolean {
   if (!activeSidecarPath) return false;
   if (hasQuarantineSidecar()) return false;
-  if (hasLegacyAdmissionOverflow()) {
-    quarantineAdmission("legacy sidecar anchor admission exceeded");
-    return false;
-  }
   for (let attempt = 0; attempt < 2; attempt++) {
     let activeStats: ReturnType<typeof statSync>;
     try {
