@@ -6,16 +6,59 @@
  * objects through a read-only alternate. It never writes the user's Git
  * directory.
  *
- * Every operation runs in the Rust snapshot core (core-client.ts). This
- * module keeps only the paths, the object format, and the request
- * plumbing. It never spawns Git.
+ * Every operation runs in the Rust snapshot core. This module is the sole
+ * public TypeScript interface to that core; process and protocol plumbing
+ * stays private under electron/worldline-git/. It never spawns Git.
  */
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
-import { coreClient } from "./core-client.js";
+import { coreClient } from "./worldline-git/core-process.js";
 import { SANDBOX_EXEC } from "./sandbox.js";
+
+export type GitFileChange = { relPath: string; status: "created" | "modified" | "deleted" };
+export type GitTreeEntry = { path: string; mode: string; size: number };
+
+/** Hash the trust-sensitive agent and project resources in the native core. */
+export function trustResourceHashes(agentDir: string, projectRoot: string | null): Promise<Record<string, string>> {
+  return coreClient.trustHashes(agentDir, projectRoot);
+}
+
+/** List source paths tracked by Git. */
+export function gitTrackedFiles(root: string): Promise<string[]> {
+  return coreClient.lsTracked(root);
+}
+
+/** List ignored, untracked candidate paths according to Git. */
+export function gitIgnoredFiles(root: string): Promise<string[]> {
+  return coreClient.lsIgnored(root);
+}
+
+/** Read working-tree changes, including staged and untracked paths. */
+export function gitWorkingChanges(root: string): Promise<GitFileChange[]> {
+  return coreClient.repoStatus(root);
+}
+
+/** Read committed changes between two revisions. */
+export function gitCommittedChanges(root: string, from: string, to: string): Promise<GitFileChange[]> {
+  return coreClient.repoDiff(root, from, to);
+}
+
+/** Read the recursive file tree of a commit. */
+export function gitCommitTree(root: string, commit: string): Promise<GitTreeEntry[]> {
+  return coreClient.repoTree(root, commit);
+}
+
+/** Read one committed file, or null when it is absent. */
+export function gitCommitFile(root: string, commit: string, path: string): Promise<Buffer | null> {
+  return coreClient.repoFile(root, commit, path);
+}
+
+/** Stop this process's shared native core helper. */
+export function disposeWorldlineGitCore(): void {
+  coreClient.dispose();
+}
 
 /** One captured source state in the store. */
 export interface SourceState {

@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SnapshotStore, type SnapshotStoreLifecycle } from "../../electron/worldline-git.js";
-import { coreClient } from "../../electron/core-client.js";
+import { coreClient } from "../../electron/worldline-git/core-process.js";
 
 type Lifecycle = SnapshotStoreLifecycle;
 

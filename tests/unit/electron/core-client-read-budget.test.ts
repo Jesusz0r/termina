@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { coreClient } from "../../../electron/core-client.ts";
+import { coreClient } from "../../../electron/worldline-git/core-process.ts";
 import { parseNativeByteBound } from "../../test-support.ts";
 
 process.env.TERMINA_CORE_BIN ??= resolve("core/target/release/termina-core");

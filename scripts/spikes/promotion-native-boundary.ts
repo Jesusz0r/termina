@@ -17,7 +17,7 @@ import {
   boundPromotionTransition,
   SnapshotStore,
 } from "../../electron/worldline-git.js";
-import { coreClient } from "../../electron/core-client.js";
+import { disposeWorldlineGitCore } from "../../electron/worldline-git.js";
 
 // The native pause/release seam is test-only and must be enabled by this
 // spike itself so the race regressions cannot silently become no-ops.
@@ -1555,6 +1555,6 @@ export default async function run(log: (message: string) => void): Promise<void>
     for (const child of freshCoreChildren) child.kill();
     freshCoreChildren.clear();
     rmSync(root, { recursive: true, force: true });
-    coreClient.dispose();
+    disposeWorldlineGitCore();
   }
 }

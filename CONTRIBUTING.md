@@ -76,12 +76,13 @@ E2e rules that matter:
 
 ## Changing the Rust core
 
-`core/` speaks a JSON-lines protocol over stdio; `electron/core-client.ts`
-is the client. When you add an op:
+`core/` speaks a JSON-lines protocol over stdio; `electron/worldline-git.ts`
+is its sole public TypeScript client. Process and protocol plumbing is private
+under `electron/worldline-git/`. When you add an op:
 
 1. Implement it in `core/src/main.rs` and register it in `dispatch`.
-2. Add the typed client method in `electron/core-client.ts` (or a
-   `SnapshotStore` method in `electron/worldline-git.ts`).
+2. Add the typed operation or `SnapshotStore` method in
+   `electron/worldline-git.ts`.
 3. Run the spike suites (`pnpm run test:spikes`) — they exercise the
    store byte-for-byte through the real binary.
 4. Keep `cargo clippy` and `cargo fmt --check` clean.

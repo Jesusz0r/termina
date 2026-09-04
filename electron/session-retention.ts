@@ -26,10 +26,10 @@ import {
   boundPromotionOpenDirectory,
   boundPromotionRemoveTree,
   boundPromotionWriteJsonFile,
+  disposeWorldlineGitCore,
   type PromotionFsIdentity,
 } from "./worldline-git.js";
 import { ensureBoundRetainedRoot } from "./worldlines.js";
-import { coreClient } from "./core-client.js";
 import {
   MAX_SESSION_BUNDLE_BYTES,
   SESSION_ACTIVE_NAME,
@@ -1608,5 +1608,5 @@ export class SessionRetentionOwner {
 
 /** Stop the shared native helper when a focused retention harness exits. */
 export function disposeSessionRetentionCoreClient(): void {
-  coreClient.dispose();
+  disposeWorldlineGitCore();
 }

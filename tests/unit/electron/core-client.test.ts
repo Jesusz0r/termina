@@ -1,9 +1,20 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { resolve } from "node:path";
-import { CoreClient, CORE_REQUEST_QUEUE_HIGH_WATER_ITEMS } from "../../../electron/core-client.ts";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
+import { CoreClient, CORE_REQUEST_QUEUE_HIGH_WATER_ITEMS } from "../../../electron/worldline-git/core-process.ts";
 
 describe("Electron CoreClient Bounded Queue & Stderr Isolation", () => {
   let client: CoreClient | null = null;
+
+  function sourceFiles(root: string): string[] {
+    const files: string[] = [];
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      const child = join(root, entry.name);
+      if (entry.isDirectory()) files.push(...sourceFiles(child));
+      else if (entry.isFile() && entry.name.endsWith(".ts")) files.push(child);
+    }
+    return files;
+  }
 
   function createClient(shimPath: string) {
     process.env.TERMINA_CORE_BIN = resolve(shimPath);
@@ -31,6 +42,19 @@ describe("Electron CoreClient Bounded Queue & Stderr Isolation", () => {
       clearTimeout(timer);
     }
   }
+
+  it("keeps core process plumbing behind the worldline-git public owner", () => {
+    const electronRoot = resolve("electron");
+    const publicOwner = resolve(electronRoot, "worldline-git.ts");
+    const privateTransport = resolve(electronRoot, "worldline-git", "core-process.ts");
+    const directImports = sourceFiles(electronRoot)
+      .filter((file) => file !== publicOwner && file !== privateTransport)
+      .filter((file) => /worldline-git\/core-process/.test(readFileSync(file, "utf8")))
+      .map((file) => relative(process.cwd(), file));
+
+    expect(existsSync(resolve(electronRoot, "core-client.ts"))).toBe(false);
+    expect(directImports).toEqual([]);
+  });
 
   it("enforces high water marks, rejects overflow, and preserves FIFO ordering", async () => {
     const core = createClient("tests/unit/electron/fixtures/core-client-admission-shim.ts");

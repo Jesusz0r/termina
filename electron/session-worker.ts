@@ -22,11 +22,11 @@ import {
   type PiSessionCopyIdentity,
   type PiSessionCopyResult,
 } from "../agent-core/session.js";
-import { coreClient } from "./core-client.js";
 import {
   boundPromotionCreateDirectory,
   boundPromotionOpenDirectory,
   boundPromotionRemoveTree,
+  disposeWorldlineGitCore,
 } from "./worldline-git.js";
 import type {
   CoreSessionForkRequest,
@@ -430,7 +430,7 @@ function enqueueWorkerOp(op: () => Promise<void>): void {
 
 parentPort?.on("message", (msg: SessionWorkerRequest) => {
   if (msg.op === "shutdown") {
-    coreClient.dispose();
+    disposeWorldlineGitCore();
     parentPort?.close();
     return;
   }

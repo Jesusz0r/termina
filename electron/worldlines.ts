@@ -14,7 +14,6 @@ import type { BigIntStats } from "node:fs";
 import { lstat as lstatPath, open as openFile, opendir, readFile, readlink, realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { buildSandboxProfile, candidateSandboxLaunch, type SandboxPaths } from "./sandbox.js";
-import { coreClient } from "./core-client.js";
 import {
   boundPromotionCopyFile,
   boundPromotionCreateDirectory,
@@ -31,9 +30,15 @@ import {
   boundPromotionWriteJsonFile,
   boundPromotionReadFile,
   captureRootInRepo,
+  disposeWorldlineGitCore,
+  gitCommitFile,
+  gitCommittedChanges,
+  gitCommitTree,
   gitCommonDir,
   gitHead,
+  gitIgnoredFiles,
   gitTopLevel,
+  gitWorkingChanges,
   readBoundPromotionJournal,
   type BoundPromotionExpectedLeaf,
   type PromotionFsIdentity,
@@ -2243,7 +2248,7 @@ export class WorldlineManager {
     const cand = cmp?.candidates.get(label);
     if (!cmp || !cand) return { count: 0, bytes: 0 };
     try {
-      const ignored = await coreClient.lsIgnored(cand.dir);
+      const ignored = await gitIgnoredFiles(cand.dir);
       let count = 0;
       let bytes = 0;
       for (const p of ignored) {
@@ -2269,7 +2274,7 @@ export class WorldlineManager {
       for (const cand of cmp.candidates.values()) {
         if (cand.state === "discarded" || cand.state === "error" || cand.state === "promoted") continue;
         try {
-          const changes = await coreClient.repoStatus(cand.dir);
+          const changes = await gitWorkingChanges(cand.dir);
           if (changes.length > 0) {
             active++;
             continue;
@@ -2413,7 +2418,7 @@ export class WorldlineManager {
     if (!this.isSafeRelativePath(relPath)) return { ok: false, error: "invalid base path" };
     const anyCand = cmp.candidates.get("A") ?? cmp.candidates.get("B");
     if (!anyCand) return { ok: false, error: "candidate not found" };
-    const res = await coreClient.repoFile(anyCand.dir, cmp.baseCommit!, relPath);
+    const res = await gitCommitFile(anyCand.dir, cmp.baseCommit!, relPath);
     if (res === null) return { ok: false, error: "file not in the base" };
     if (res.byteLength > MAX_WORLDLINE_FILE_BYTES) return { ok: false, error: "the base file is too large" };
     return { ok: true, content: res.toString() };
@@ -2426,11 +2431,11 @@ export class WorldlineManager {
   /** Files differing from the base plus head-tree source statistics. */
   private async changedFiles(cmp: ComparisonState, cand: CandidateState): Promise<{ files: WorldlineChangedFile[]; sourceFiles: number; sourceBytes: number }> {
     // Working tree vs HEAD: staged, unstaged, and untracked changes.
-    const status = await coreClient.repoStatus(cand.dir);
+    const status = await gitWorkingChanges(cand.dir);
     // Committed changes since the shared base (A's settled apply and any
     // agent commits; B usually has none).
-    const committed = await coreClient.repoDiff(cand.dir, cmp.baseCommit!, "HEAD");
-    const tree = await coreClient.repoTree(cand.dir, "HEAD");
+    const committed = await gitCommittedChanges(cand.dir, cmp.baseCommit!, "HEAD");
+    const tree = await gitCommitTree(cand.dir, "HEAD");
     const byPath = new Map<string, WorldlineChangedFile>();
     const set = (relPath: string, status: "created" | "modified" | "deleted"): void => {
       const prev = byPath.get(relPath);
@@ -2459,7 +2464,7 @@ export class WorldlineManager {
     const out: DependencyChange[] = [];
     for (const file of ["package.json", "pyproject.toml"]) {
       try {
-        const base = await coreClient.repoFile(cand.dir, cmp.baseCommit!, file);
+        const base = await gitCommitFile(cand.dir, cmp.baseCommit!, file);
         const head = await this.fileOf(cmp.id, cand.label, file);
         if (base === null || !head.ok || head.content === undefined) continue;
         const diff = this.dependencyChangeOf(file, base.toString(), head.content);
@@ -6511,7 +6516,7 @@ export async function ensurePromotionRoots(worldsRoot: string, primaryRoot: stri
 
 /** Stop the shared native helper when a focused Worldline harness exits. */
 export function disposeWorldlineCoreClient(): void {
-  coreClient.dispose();
+  disposeWorldlineGitCore();
 }
 
 async function recoverPromotionJournalsUnderTransaction(worldsRoot: string, context: PromotionRecoveryContext): Promise<void> {

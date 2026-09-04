@@ -36,7 +36,7 @@ import {
 import { BRIDGE_EXTENSION } from "./bridge-extension.js";
 import { AgentStartEvent, SidecarEvent, SidecarEventDelivery, SidecarEventQueue, SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
-import { SnapshotStore, MIN_WORLDS_FREE_BYTES, bindOwnedDirectory, bindOwnedEntry, boundPromotionCopyTree, boundPromotionEnsureDirectory, boundPromotionListEntries, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionReadFile, boundPromotionWriteFile, captureRootInRepo, createOwnedDirectory, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, platformHasRecursiveWatcher, platformHasSandboxExec, removeBoundOwnedDirectory, removeBoundOwnedEntry, type BoundOwnedDirectory, type BoundPromotionExpectedLeaf, type PromotionFsIdentity, type SourceState, writeBoundOwnedFile } from "./worldline-git.js";
+import { SnapshotStore, MIN_WORLDS_FREE_BYTES, bindOwnedDirectory, bindOwnedEntry, boundPromotionCopyTree, boundPromotionEnsureDirectory, boundPromotionListEntries, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionReadFile, boundPromotionWriteFile, captureRootInRepo, createOwnedDirectory, disposeWorldlineGitCore, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, gitTrackedFiles, platformHasRecursiveWatcher, platformHasSandboxExec, removeBoundOwnedDirectory, removeBoundOwnedEntry, trustResourceHashes, type BoundOwnedDirectory, type BoundPromotionExpectedLeaf, type PromotionFsIdentity, type SourceState, writeBoundOwnedFile } from "./worldline-git.js";
 import { WorldlineManager, dirBytes, quoteShellArg, recoverPromotionJournals, type RunRecord } from "./worldlines.js";
 import {
   candidateSandboxLaunch,
@@ -46,7 +46,6 @@ import {
   terminateSandboxProcessGroup,
 } from "./sandbox.js";
 import { parseFailingTests, verifyFailSummary } from "./evidence.js";
-import { coreClient } from "./core-client.js";
 import { changedLinesInAfter } from "../shared/line-diff.js";
 import { createAppUpdater, updateMenuCopy, type AppUpdateController } from "./app-update.js";
 import { installCliCommand, uninstallCliCommand, isCliCommandInstalled, parseTargetCwdFromArgv } from "./cli-install.js";
@@ -1676,7 +1675,7 @@ class PiEditorApp {
   /** The trust-sensitive resource hashes, computed off the main thread. */
   private async computeTrustHashes(project: ProjectState): Promise<Record<string, string>> {
     const agentDir = join(homedir(), ".pi", "agent");
-    return coreClient.trustHashes(agentDir, project.cwd ? resolve(project.cwd) : null);
+    return trustResourceHashes(agentDir, project.cwd ? resolve(project.cwd) : null);
   }
 
   /**
@@ -2357,7 +2356,7 @@ class PiEditorApp {
     const out: Array<{ relPath: string; content: string }> = [];
     try {
       const canonicalRoot = await fsRealpath(root);
-      const tracked = await coreClient.lsTracked(root);
+      const tracked = await gitTrackedFiles(root);
       let bytes = 0;
       for (const rel of tracked) {
         if (!rel || out.length >= 2000 || bytes >= 8 * 1024 * 1024) continue;
@@ -7746,7 +7745,7 @@ class PiEditorApp {
       }
     }
     await Promise.all([...this.projects.values()].map((project) => project.storePromise?.catch(() => null) ?? Promise.resolve(null)));
-    coreClient.dispose();
+    disposeWorldlineGitCore();
     for (const inst of this.terminals.values()) {
       inst.pty.killGroup("SIGTERM");
       inst.pty.kill();
