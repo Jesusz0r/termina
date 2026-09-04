@@ -84,14 +84,17 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
       },
       sendExit: () => true,
     });
-    scheduler.register("framed", 1, source());
+    const framedSource = source();
+    scheduler.register("framed", 1, framedSource);
     ready(scheduler, "framed", 1);
 
     for (let i = 0; i < 128; i += 1) assert.equal(scheduler.enqueue("framed", 1, "x".repeat(64)), true);
+    assert.equal(scheduler.stats("framed").retainedChunks, 1);
     await waitFor(() => sends.length === 1, "coalesced frame was not delivered");
     assert.equal(sends[0].data, "x".repeat(128 * 64));
     assert.equal(scheduler.stats("framed").inFlightChunks, 1);
     acknowledgeAll(scheduler, sends);
+    assert.equal(framedSource.paused, false);
     await scheduler.drain("framed");
 
     const firstPacedIndex = sends.length;
@@ -105,6 +108,71 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
     acknowledgeAll(scheduler, sends.slice(firstPacedIndex));
     await scheduler.drain("framed");
     scheduler.cancel("framed", 1);
+  });
+
+  it("preserves coalesced replay and exit ordering with frame pacing enabled", async () => {
+    const events = [];
+    const scheduler = new PtyEgressScheduler({
+      send: (id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data) => {
+        events.push({ kind: "data", id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data });
+        return true;
+      },
+      sendExit: (id, terminalGeneration, windowGeneration, rendererGeneration, sequence, code) => {
+        events.push({ kind: "exit", id, terminalGeneration, windowGeneration, rendererGeneration, sequence, code });
+        return true;
+      },
+    });
+    scheduler.register("replay-framed", 1, source());
+    ready(scheduler, "replay-framed", 1);
+    assert.equal(scheduler.enqueue("replay-framed", 1, "one"), true);
+    assert.equal(scheduler.enqueue("replay-framed", 1, "two"), true);
+    const finished = scheduler.finish("replay-framed", 1, 7);
+
+    await waitFor(() => events.length === 1, "coalesced data was not delivered before exit");
+    assert.deepEqual(events.map((event) => [event.kind, event.data]), [["data", "onetwo"]]);
+
+    assert.equal(scheduler.setRendererReady(1, 1, false), true);
+    assert.equal(scheduler.setRendererReady(1, 2, true), true);
+    assert.equal(scheduler.hydrateTerminal("replay-framed", 1, 1, 2), true);
+    await waitFor(() => events.length === 2, "coalesced data was not replayed");
+    assert.equal(events[1].kind, "data");
+    assert.equal(events[1].sequence, events[0].sequence);
+    assert.equal(events[1].data, "onetwo");
+    acknowledgeAll(scheduler, [events[1]]);
+
+    await waitFor(() => events.length === 3, "exit marker overtook or did not follow replayed data");
+    assert.equal(events[2].kind, "exit");
+    assert.equal(events[2].code, 7);
+    acknowledgeAll(scheduler, [events[2]]);
+    assert.equal(await finished, true);
+  });
+
+  it("keeps same-generation replay payloads immutable when output resumes", async () => {
+    const sends = [];
+    const scheduler = new PtyEgressScheduler({
+      send: (id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data) => {
+        sends.push({ id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data });
+        return true;
+      },
+      sendExit: () => true,
+    });
+    scheduler.register("sealed-replay", 1, source());
+    ready(scheduler, "sealed-replay", 1);
+    assert.equal(scheduler.enqueue("sealed-replay", 1, "old"), true);
+    await waitFor(() => sends.length === 1, "initial record was not delivered");
+
+    assert.equal(scheduler.setRendererReady(1, 1, false), true);
+    assert.equal(scheduler.setRendererReady(1, 1, true), true);
+    assert.equal(scheduler.hydrateTerminal("sealed-replay", 1, 1, 1), true);
+    assert.equal(scheduler.enqueue("sealed-replay", 1, "new"), true);
+
+    await waitFor(() => sends.length === 3, "replay and resumed output were not delivered separately");
+    assert.deepEqual(sends.map((send) => send.data), ["old", "old", "new"]);
+    assert.equal(sends[1].sequence, sends[0].sequence);
+    assert.ok(sends[2].sequence > sends[1].sequence);
+    acknowledgeAll(scheduler, sends.slice(1));
+    await scheduler.drain("sealed-replay");
+    scheduler.cancel("sealed-replay", 1);
   });
 
   it("enforces egress queue limits, scheduler lifecycle, and sequence deduplication", async () => {

@@ -146,6 +146,6 @@ For the PTY frame-pacing change:
 - PTY egress and IPC project-flow unit tests passed.
 - `git diff --check` passed.
 - Electron main and preload builds completed successfully.
-- The subsequent Vite renderer build attempt was terminated by `SIGKILL` during transformation; no renderer source changed in that patch, but a complete renderer build should be rerun with adequate resources before release.
+- A subsequent full Vite renderer production build completed successfully (1,277 modules transformed in 57.46s); only the existing large-chunk advisory was reported.
 
 The audit is now a current-state document: resolved defects are recorded as completed work, and unchecked items represent remaining implementation work rather than stale historical findings.

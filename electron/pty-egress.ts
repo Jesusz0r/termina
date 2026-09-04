@@ -206,8 +206,11 @@ export interface PtyEgressQueueStats {
 
 interface QueuedChunk {
   kind: "data";
-  data: string;
+  /** Fixed-capacity in paced mode, preventing tiny source quanta from building string ropes. */
+  data: Buffer;
   bytes: number;
+  /** Sent records are immutable because renderer sequence deduplication keys only by sequence. */
+  sealed: boolean;
   sequence: number;
 }
 
@@ -364,16 +367,18 @@ export class PtyEgressScheduler {
       || typeof data !== "string"
     ) return false;
     if (data.length === 0) return true;
-    if (Buffer.byteLength(data, "utf8") > PTY_EGRESS_CHUNK_BYTES) {
+    const encoded = Buffer.from(data, "utf8");
+    const bytes = encoded.byteLength;
+    if (bytes > PTY_EGRESS_CHUNK_BYTES) {
       // The source adapter owns splitting. Rejecting rather than admitting
       // this quantum is what keeps one callback from bypassing high-water.
       this.pauseSource(queue);
       return false;
     }
-    const bytes = Buffer.byteLength(data, "utf8");
     const tail = queue.chunks.at(-1);
     const coalesces = this.flushIntervalMs > 0
       && tail?.kind === "data"
+      && !tail.sealed
       && tail.bytes + bytes <= PTY_EGRESS_CHUNK_BYTES;
     const retainedBytes = this.retainedBytes(queue);
     const retainedChunks = this.retainedChunks(queue);
@@ -382,10 +387,12 @@ export class PtyEgressScheduler {
       return false;
     }
     if (coalesces) {
-      tail.data += data;
+      encoded.copy(tail.data, tail.bytes);
       tail.bytes += bytes;
     } else {
-      queue.chunks.push({ kind: "data", data, bytes, sequence: queue.nextSequence++ });
+      const buffer = this.flushIntervalMs > 0 ? Buffer.allocUnsafe(PTY_EGRESS_CHUNK_BYTES) : encoded;
+      if (buffer !== encoded) encoded.copy(buffer);
+      queue.chunks.push({ kind: "data", data: buffer, bytes, sealed: false, sequence: queue.nextSequence++ });
     }
     queue.queuedBytes += bytes;
     if (this.retainedBytes(queue) >= this.maxQueueBytes || this.retainedChunks(queue) >= this.maxQueueChunks) {
@@ -661,6 +668,7 @@ export class PtyEgressScheduler {
           break;
         }
         queue.queuedBytes -= record.bytes;
+        if (record.kind === "data") record.sealed = true;
         // Move into retained in-flight storage before calling transport so a
         // synchronous acknowledgement is valid and a reentrant crash can
         // replay this exact sequence or exit marker without loss.
@@ -685,7 +693,7 @@ export class PtyEgressScheduler {
               this.windowGeneration,
               this.rendererGeneration,
               record.sequence,
-              record.data,
+              record.data.toString("utf8", 0, record.bytes),
             ) !== false;
         } catch {
           sent = false;
