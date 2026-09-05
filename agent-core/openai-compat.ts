@@ -183,16 +183,19 @@ function markLatestInputTexts(
   let marked = 0;
   for (let i = next.length - 1; i >= 0 && marked < limit; i--) {
     const item = next[i]!;
-    const content = item.content;
-    if (!Array.isArray(content)) continue;
-    for (let j = content.length - 1; j >= 0; j--) {
-      const part = content[j] as Record<string, unknown>;
-      if (!part || part.type !== "input_text" || typeof part.text !== "string") continue;
-      const parts = content.slice() as Array<Record<string, unknown>>;
-      parts[j] = { ...part, ...extra };
-      next[i] = { ...item, content: parts };
-      marked += 1;
-      break;
+    for (const field of ["content", "output"] as const) {
+      const partsValue = item[field];
+      if (!Array.isArray(partsValue)) continue;
+      for (let j = partsValue.length - 1; j >= 0; j--) {
+        const part = partsValue[j] as Record<string, unknown>;
+        if (!part || part.type !== "input_text" || typeof part.text !== "string") continue;
+        const parts = partsValue.slice() as Array<Record<string, unknown>>;
+        parts[j] = { ...part, ...extra };
+        next[i] = { ...item, [field]: parts };
+        marked += 1;
+        break;
+      }
+      if (marked > 0 && next[i] !== item) break;
     }
   }
   return marked > 0 ? next : input;
@@ -204,6 +207,9 @@ function markPrefixThenTail(
   limit = 1,
 ): Array<Record<string, unknown>> {
   if (input.length < 2) return input;
+  if (input[input.length - 1]?.type === "function_call_output") {
+    return markLatestInputTexts(input, extra, limit);
+  }
   return [...markLatestInputTexts(input.slice(0, -1), extra, limit), input[input.length - 1]!];
 }
 
@@ -213,16 +219,20 @@ export function stripResponsesBreakpoints(body: Record<string, unknown>): Record
   delete next.prompt_cache_options;
   if (Array.isArray(next.input)) {
     next.input = next.input.map((item) => {
-      if (!item || typeof item !== "object" || !Array.isArray((item as Record<string, unknown>).content)) return item;
+      if (!item || typeof item !== "object") return item;
       const rec = item as Record<string, unknown>;
-      return {
-        ...rec,
-        content: (rec.content as Array<Record<string, unknown>>).map((part) => {
+      const strip = (value: unknown): unknown => {
+        if (!Array.isArray(value)) return value;
+        return value.map((part) => {
           if (!part || typeof part !== "object" || !("prompt_cache_breakpoint" in part)) return part;
-          const { prompt_cache_breakpoint: _, ...rest } = part;
+          const { prompt_cache_breakpoint: _, ...rest } = part as Record<string, unknown>;
           return rest;
-        }),
+        });
       };
+      const stripped = { ...rec };
+      if (Array.isArray(rec.content)) stripped.content = strip(rec.content);
+      if (Array.isArray(rec.output)) stripped.output = strip(rec.output);
+      return stripped;
     });
   }
   return next;
@@ -238,7 +248,7 @@ export function toResponsesInput(messages: KernelMessage[]): Array<Record<string
       out.push({
         type: "function_call_output",
         call_id: callId,
-        output: "(interrupted)",
+        output: [{ type: "input_text", text: "(interrupted)" }],
       });
     }
   };
@@ -303,7 +313,7 @@ export function toResponsesInput(messages: KernelMessage[]): Array<Record<string
         out.push({
           type: "function_call_output",
           call_id: callId,
-          output: blockText(b),
+          output: [{ type: "input_text", text: blockText(b) }],
         });
       } else if (b.type === "text") {
         parts.push({ type: "input_text", text: blockText(b) });
@@ -771,10 +781,11 @@ export function responsesBody(
       opts.explicitCacheSkipTail === false
         ? markLatestInputTexts(input, extra, OPENAI_MAX_EXPLICIT_BREAKPOINTS)
         : markPrefixThenTail(input, extra, OPENAI_MAX_EXPLICIT_BREAKPOINTS);
-  } else if (opts?.cacheControl && !geminiRoute && (opts.provider === undefined || opts.provider === "openrouter")) {
-    // OpenRouter converts a block cache_control onto Anthropic. Do not put
-    // cache_control on the Responses root: that field is a chat-completions shape.
-    body.input = markPrefixThenTail(input, { cache_control: { type: "ephemeral" as const } });
+  } else if (opts?.cacheControl && opts.provider === "openrouter") {
+    // OpenRouter's Responses API exposes prompt_cache_breakpoint and
+    // translates it to a provider-specific breakpoint when needed. The
+    // Anthropic cache_control shape is not exposed inside Responses input.
+    body.input = markPrefixThenTail(input, { prompt_cache_breakpoint: { mode: "explicit" as const } });
   }
   if (opts?.reasoningEffort || opts?.reasoningContext) {
     body.reasoning = {
@@ -807,12 +818,14 @@ function mergeDetailRecords(...values: unknown[]): Record<string, unknown> | nul
   return merged;
 }
 
-function uncachedInput(total: number | null, cacheRead: number | null): number | null {
+function uncachedInput(total: number | null, cacheRead: number | null, cacheWrite: number | null): number | null {
   if (total === null) return null;
-  // A provider-reported cache read cannot exceed its total input. Preserve an
-  // explicit anomaly as unknown instead of manufacturing a zero-token miss.
-  if (cacheRead !== null && cacheRead > total) return null;
-  return cacheRead === null ? total : Math.max(0, total - cacheRead);
+  // OpenAI defines ordinary input as total input minus both cached reads and
+  // cache writes. Preserve an impossible provider report as unknown instead
+  // of manufacturing a zero-token miss.
+  const accounted = (cacheRead ?? 0) + (cacheWrite ?? 0);
+  if (accounted > total) return null;
+  return Math.max(0, total - accounted);
 }
 
 function mergeUsageRecords(
@@ -838,7 +851,7 @@ function mergeUsageRecords(
   return merged;
 }
 
-function usageFromOpenAI(u: Record<string, unknown> | undefined): CallResultLike["usage"] {
+export function usageFromOpenAI(u: Record<string, unknown> | undefined): CallResultLike["usage"] {
   if (!u) return null;
   const prompt = firstToken(u.input_tokens, u.prompt_tokens);
   const output = firstToken(u.output_tokens, u.completion_tokens);
@@ -848,7 +861,7 @@ function usageFromOpenAI(u: Record<string, unknown> | undefined): CallResultLike
   const cacheWrite = firstToken(promptDetails?.cache_write_tokens, u.cache_write_tokens);
   const reasoning = firstToken(completionDetails?.reasoning_tokens, u.reasoning_tokens);
   return {
-    input: uncachedInput(prompt, cached),
+    input: uncachedInput(prompt, cached, cacheWrite),
     cacheRead: cached,
     cacheWrite,
     output,
@@ -1064,7 +1077,7 @@ function usageFromGoogle(u: Record<string, unknown> | undefined): CallResultLike
   const cached = tokenCount(u.cachedContentTokenCount);
   const reasoning = tokenCount(u.thoughtsTokenCount);
   return {
-    input: uncachedInput(prompt, cached),
+    input: uncachedInput(prompt, cached, null),
     cacheRead: cached,
     cacheWrite: null,
     output,
@@ -1523,20 +1536,20 @@ export function responsesResultFromEvents(
   return { blocks, usage, ttftMs, stopReason, error };
 }
 
-export function textFromCompletionPayload(data: unknown): { text: string; usage?: Record<string, number> } {
+export function textFromCompletionPayload(data: unknown): { text: string; usage?: Record<string, unknown> } {
   if (!data || typeof data !== "object") return { text: "" };
-  const rec = data as { choices?: Array<{ message?: { content?: unknown } }>; usage?: Record<string, number> };
+  const rec = data as { choices?: Array<{ message?: { content?: unknown } }>; usage?: Record<string, unknown> };
   const content = rec.choices?.[0]?.message?.content;
   const text = typeof content === "string" ? content : "";
   return { text: text.trim(), usage: rec.usage };
 }
 
-export function textFromResponsesPayload(data: unknown): { text: string; usage?: Record<string, number> } {
+export function textFromResponsesPayload(data: unknown): { text: string; usage?: Record<string, unknown> } {
   if (!data || typeof data !== "object") return { text: "" };
   const rec = data as {
     output_text?: unknown;
     output?: Array<{ type?: string; content?: Array<{ type?: string; text?: string }> }>;
-    usage?: Record<string, number>;
+    usage?: Record<string, unknown>;
   };
   if (typeof rec.output_text === "string" && rec.output_text.trim()) return { text: rec.output_text.trim(), usage: rec.usage };
   const parts: string[] = [];
@@ -1555,6 +1568,7 @@ type SseParseState = {
   payloadBytes: number;
   terminalSeen: boolean;
   terminalAllowsUsage: boolean;
+  terminalSummary: string | null;
 };
 
 type SseBufferState = {
@@ -1637,6 +1651,62 @@ function takeSseEvents(
   return { buffer, bytes: Math.max(0, bufferBytes) };
 }
 
+function summarizeSseEvent(event: Record<string, unknown>): string {
+  const keys = Object.keys(event).slice(0, 8).join(",");
+  const type = typeof event.type === "string" ? event.type : "";
+  const extras: string[] = [];
+  const choice = Array.isArray(event.choices) ? event.choices[0] : null;
+  if (choice && typeof choice === "object") {
+    const rec = choice as Record<string, unknown>;
+    if (typeof rec.finish_reason === "string" && rec.finish_reason) extras.push(`finish_reason=${rec.finish_reason}`);
+    if (rec.delta && typeof rec.delta === "object" && !Array.isArray(rec.delta)) {
+      extras.push(`deltaKeys=${Object.keys(rec.delta).slice(0, 6).join("+")}`);
+    }
+    if (rec.message && typeof rec.message === "object") extras.push("message=yes");
+  }
+  if (event.usage !== undefined) extras.push("usage=yes");
+  return `type=${type || "-"} keys=${keys}${extras.length ? ` ${extras.join(" ")}` : ""}`.slice(0, 220);
+}
+
+/** Late stream content after the terminal event (deltas, output items,
+ *  tool calls) is rejected: pre-terminal events already hold the result, so
+ *  a stray chunk would silently fork the turn. Benign trailers (keepalive
+ *  pings, duplicate terminals, usage-only events) are stored for
+ *  downstream result parsing. */
+function carriesLateStreamContent(event: Record<string, unknown>): boolean {
+  const choice = Array.isArray(event.choices) ? event.choices[0] : null;
+  if (choice && typeof choice === "object") {
+    const rec = choice as Record<string, unknown>;
+    const delta = rec.delta;
+    if (delta && typeof delta === "object" && !Array.isArray(delta) && Object.keys(delta).length > 0) return true;
+    const message = rec.message;
+    if (message && typeof message === "object" && !Array.isArray(message)) {
+      const content = (message as Record<string, unknown>).content;
+      if (typeof content === "string" ? content !== "" : content !== undefined && content !== null) return true;
+      if ((message as Record<string, unknown>).tool_calls !== undefined) return true;
+    }
+  }
+  const candidates = event.candidates;
+  if (Array.isArray(candidates) && candidates[0] && typeof candidates[0] === "object") {
+    const content = (candidates[0] as Record<string, unknown>).content;
+    if (content && typeof content === "object" && !Array.isArray(content)) {
+      const parts = (content as Record<string, unknown>).parts;
+      if (Array.isArray(parts) && parts.length > 0) return true;
+    }
+  }
+  const type = typeof event.type === "string" ? event.type : "";
+  if (
+    type === "response.output_item.added" ||
+    type === "response.output_item.done" ||
+    type === "response.content_part.added" ||
+    type === "response.content_part.done" ||
+    type === "response.output_text.done" ||
+    type === "response.function_call_arguments.delta" ||
+    type === "response.function_call_arguments.done"
+  ) return true;
+  return responsesLiveDelta(event) !== null;
+}
+
 function pushSseLine(
   line: string,
   state: SseParseState,
@@ -1648,6 +1718,7 @@ function pushSseLine(
   if (payload === "[DONE]") {
     state.terminalSeen = true;
     state.terminalAllowsUsage = false;
+    state.terminalSummary = "[DONE]";
     return;
   }
   state.eventCount += 1;
@@ -1670,16 +1741,18 @@ function pushSseLine(
   }
   const event = parsed as Record<string, unknown>;
   const usageTrailer = state.terminalSeen && state.terminalAllowsUsage && isSseUsageOnlyTrailer(event);
-  if (state.terminalSeen && !usageTrailer) {
+  if (state.terminalSeen && !usageTrailer && carriesLateStreamContent(event)) {
     throw new Error("provider SSE event arrived after terminal event");
   }
   if (usageTrailer) state.terminalAllowsUsage = false;
   if (isSseChoiceTerminal(event)) {
     state.terminalSeen = true;
     state.terminalAllowsUsage = true;
+    state.terminalSummary = summarizeSseEvent(event);
   } else if (isSseTerminalEvent(event)) {
     state.terminalSeen = true;
     state.terminalAllowsUsage = false;
+    state.terminalSummary = summarizeSseEvent(event);
   }
   if (!filter || filter(event)) state.events.push(event);
 }
@@ -1699,6 +1772,7 @@ export async function readSseJson(
     payloadBytes: 0,
     terminalSeen: false,
     terminalAllowsUsage: false,
+    terminalSummary: null,
   };
   try {
     for (;;) {

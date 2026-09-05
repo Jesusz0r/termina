@@ -325,6 +325,10 @@ export const CACHE_POLICY_PROVENANCE = {
     url: "https://ai.google.dev/gemini-api/docs/generate-content/caching",
     retrievedAt: "2026-08-30",
   },
+  openrouterPromptCaching: {
+    url: "https://openrouter.ai/docs/guides/best-practices/prompt-caching",
+    retrievedAt: "2026-09-04",
+  },
 } as const;
 
 function unknownCapability(reason: string, provenance: CacheCapabilityProvenance | null = null): CacheCapabilityObservation {
@@ -349,20 +353,29 @@ function isDirectDocumentedRoute(provider: ProviderId, route: string): boolean {
   const domain = cacheRouteDomain(route);
   if (provider === "anthropic") return domain === "api.anthropic.com";
   if (provider === "openai") return domain === "api.openai.com";
+  if (provider === "openrouter") return domain === "openrouter.ai";
   if (provider === "xai") return domain === "api.x.ai";
   if (provider === "google") return domain === "generativelanguage.googleapis.com";
   return false;
 }
 
-function isGpt56Model(model: string): boolean {
+function isGpt56OrLaterModel(model: string): boolean {
   if (typeof model !== "string") return false;
   const leaf = modelLeaf(model);
-  return leaf.startsWith("gpt-5.6");
+  const match = /^gpt-(\d+)(?:\.(\d+))?(?:[.-]|$)/.exec(leaf);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = match[2] === undefined ? 0 : Number(match[2]);
+  return major > 5 || (major === 5 && minor >= 6);
+}
+
+function openrouterBreakpointModel(model: string): boolean {
+  return isGpt56OrLaterModel(model) || modelLooksClaude(model) || modelLooksGemini(model);
 }
 
 /**
- * Return only documentation-backed defaults. Relay, Zen, and compatibility
- * routes intentionally remain unknown regardless of their model name.
+ * Return only documentation-backed defaults. Custom relay, Zen, and
+ * compatibility routes intentionally remain unknown regardless of model name.
  */
 export function documentedCacheCapability(scope: CacheCapabilityScope): CacheCapabilityObservation {
   if (!scope || typeof scope !== "object") return unknownCapability("invalid-capability-scope");
@@ -382,15 +395,35 @@ export function documentedCacheCapability(scope: CacheCapabilityScope): CacheCap
     }
     if (
       (feature === CACHE_CAPABILITY_FEATURE.promptCacheBreakpoint || feature === CACHE_CAPABILITY_FEATURE.promptCacheOptions) &&
-      isGpt56Model(scope.model)
+      isGpt56OrLaterModel(scope.model)
     ) {
-      return documentedCapability(CACHE_POLICY_PROVENANCE.openaiPromptCaching, "OpenAI GPT-5.6 explicit cache field is documented");
+      return documentedCapability(CACHE_POLICY_PROVENANCE.openaiPromptCaching, "OpenAI GPT-5.6 and later explicit cache field is documented");
     }
-    if (feature === CACHE_CAPABILITY_FEATURE.ttl && isGpt56Model(scope.model)) {
-      return documentedCapability(CACHE_POLICY_PROVENANCE.openaiPromptCaching, "OpenAI GPT-5.6 cache TTL field is documented; value remains policy data");
+    if (feature === CACHE_CAPABILITY_FEATURE.ttl && isGpt56OrLaterModel(scope.model)) {
+      return documentedCapability(CACHE_POLICY_PROVENANCE.openaiPromptCaching, "OpenAI GPT-5.6 and later cache TTL field is documented; value remains policy data");
     }
     if (feature === CACHE_CAPABILITY_FEATURE.promptCacheKey || feature === CACHE_CAPABILITY_FEATURE.promptCacheBreakpoint || feature === CACHE_CAPABILITY_FEATURE.promptCacheOptions) {
       return documentedUnknown(CACHE_POLICY_PROVENANCE.openaiPromptCaching, "model-specific support is not established");
+    }
+  }
+  if (scope.provider === "openrouter" && scope.protocol === "openai-responses") {
+    if (feature === CACHE_CAPABILITY_FEATURE.promptCacheKey && typeof scope.model === "string" && scope.model.trim()) {
+      return documentedCapability(CACHE_POLICY_PROVENANCE.openrouterPromptCaching, "OpenRouter Responses accepts prompt_cache_key for sticky routing");
+    }
+    if (feature === CACHE_CAPABILITY_FEATURE.promptCacheBreakpoint && openrouterBreakpointModel(scope.model)) {
+      return documentedCapability(CACHE_POLICY_PROVENANCE.openrouterPromptCaching, "OpenRouter Responses prompt_cache_breakpoint is documented and translates to supported provider breakpoints");
+    }
+    if (feature === CACHE_CAPABILITY_FEATURE.promptCacheOptions && isGpt56OrLaterModel(scope.model)) {
+      return documentedCapability(CACHE_POLICY_PROVENANCE.openrouterPromptCaching, "OpenRouter documents prompt_cache_options for OpenAI GPT-5.6 and later");
+    }
+    if (feature === CACHE_CAPABILITY_FEATURE.ttl && isGpt56OrLaterModel(scope.model)) {
+      return documentedCapability(CACHE_POLICY_PROVENANCE.openrouterPromptCaching, "OpenRouter documents the OpenAI Responses cache TTL option for GPT-5.6 and later; value remains policy data");
+    }
+    if (feature === CACHE_CAPABILITY_FEATURE.promptCacheBreakpoint) {
+      return documentedUnknown(CACHE_POLICY_PROVENANCE.openrouterPromptCaching, "OpenRouter breakpoint translation is documented for GPT-5.6+ and Anthropic/Gemini model families");
+    }
+    if (feature === CACHE_CAPABILITY_FEATURE.promptCacheOptions || feature === CACHE_CAPABILITY_FEATURE.ttl) {
+      return documentedUnknown(CACHE_POLICY_PROVENANCE.openrouterPromptCaching, "OpenRouter prompt_cache_options support is documented only for OpenAI GPT-5.6 and later");
     }
   }
   if (scope.provider === "xai") {
@@ -415,23 +448,22 @@ export function usesAnthropicCacheMarkers(provider: ProviderId, model: string, r
   return documentedCacheCapability({ provider, protocol: providerProtocol(provider, model), route, model, feature: CACHE_CAPABILITY_FEATURE.anthropicCacheControl }).supported === true;
 }
 
-/** Direct documented OpenAI Responses and xAI Responses routes only. Relays probe. */
+/** Direct documented OpenAI, OpenRouter, and xAI Responses routes only. */
 export function usesPromptCacheKey(provider: ProviderId, model: string, route: string): boolean {
   return documentedCacheCapability({ provider, protocol: providerProtocol(provider, model), route, model, feature: CACHE_CAPABILITY_FEATURE.promptCacheKey }).supported === true;
 }
 
 /**
- * GPT-5.6 Sol/Terra/Luna accept explicit prompt_cache_breakpoint.
- * Copilot and Codex do not support that field (Codex returns 400
- * "prompt_cache_breakpoint is not supported on this model").
+ * Direct OpenAI GPT-5.6+ and the documented OpenRouter Responses route accept
+ * explicit prompt_cache_breakpoint. Copilot and Codex do not support it.
  */
 export function usesOpenAIExplicitCache(model: string, provider: ProviderId, route: string): boolean {
   return documentedCacheCapability({ provider, protocol: providerProtocol(provider, model), route, model, feature: CACHE_CAPABILITY_FEATURE.promptCacheBreakpoint }).supported === true;
 }
 
 /**
- * Top-level prompt_cache_options on the direct OpenAI Responses route.
- * Relays and subscription gateways must feature-probe at their route owner.
+ * Top-level prompt_cache_options on direct OpenAI Responses and the
+ * documented OpenRouter Responses route. Other relays must feature-probe.
  */
 export function usesPromptCacheOptions(provider: ProviderId, model: string, route: string): boolean {
   return documentedCacheCapability({ provider, protocol: providerProtocol(provider, model), route, model, feature: CACHE_CAPABILITY_FEATURE.promptCacheOptions }).supported === true;

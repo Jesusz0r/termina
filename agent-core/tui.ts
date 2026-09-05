@@ -14,7 +14,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/model", hint: "show or switch the model" },
   { name: "/models", hint: "list live models" },
   { name: "/resume", hint: "replay the stored session" },
-  { name: "/clear", hint: "start a new empty session" },
+  { name: "/clear (new)", hint: "start a new empty session", submit: "/clear" },
   { name: "/compact", hint: "reclaim and summarize context" },
   { name: "/effort", hint: "show or set reasoning effort" },
   { name: "/permissions", hint: "set bash approval policy" },
@@ -216,21 +216,24 @@ export function rankFileTags(paths: readonly string[], query: string, cap = 50):
   const q = query.trim().toLowerCase();
   const scored: Array<{ path: string; score: number }> = [];
   for (const path of paths) {
+    const stripped = path.endsWith("/") && path.length > 1 ? path.slice(0, -1) : path;
     if (q === "") {
-      scored.push({ path, score: path.includes("/") ? 1 : 0 });
+      scored.push({ path, score: stripped.includes("/") ? 1 : 0 });
       continue;
     }
-    const lower = path.toLowerCase();
+    const lower = stripped.toLowerCase();
+    const fullLower = path.toLowerCase();
     const base = lower.slice(lower.lastIndexOf("/") + 1);
+    const qb = q.endsWith("/") && q.length > 1 ? q.slice(0, -1) : q;
     let score = -1;
-    if (base.startsWith(q)) score = 0;
+    if (qb !== "" && base.startsWith(qb)) score = 0;
     else {
-      const baseSpread = subsequenceSpread(base, q);
+      const baseSpread = subsequenceSpread(base, qb);
       if (baseSpread !== null) score = 1 + baseSpread / 1000;
-      else if (lower.startsWith(q)) score = 2;
-      else if (lower.includes(q)) score = 3;
+      else if (fullLower.startsWith(q)) score = 2;
+      else if (fullLower.includes(q)) score = 3;
       else {
-        const pathSpread = subsequenceSpread(lower, q);
+        const pathSpread = subsequenceSpread(fullLower, q);
         if (pathSpread !== null) score = 4 + pathSpread / 1000;
       }
     }
@@ -1794,7 +1797,7 @@ export class AgentTui {
     if (text.trimStart().startsWith("/")) return [];
     const mention = fileMentionAt(text, cursor);
     if (!mention) return [];
-    return this.fileMatches(mention.query).map((path) => ({ name: path, hint: "file", submit: `@${path}` }));
+    return this.fileMatches(mention.query).map((path) => ({ name: path, hint: path.endsWith("/") ? "dir" : "file", submit: `@${path}` }));
   }
 
   private matches(): SlashCommand[] {

@@ -948,7 +948,36 @@ function v2Diagnostics(records) {
       readerOmittedRecords: 0,
       manifestErrors: 0,
       schemaRecords: { current: records.length },
-    };
+  };
+}
+
+const V2_INTEGRITY_FIELDS = [
+  "omittedRecords",
+  "writeFailures",
+  "malformedRecords",
+  "partialRecords",
+  "retentionFailures",
+  "manifestWriteFailures",
+  "readerOmittedRecords",
+  "manifestErrors",
+];
+
+function v2TraceIntegrity(records, diagnostics) {
+  if (!records?.traceDiagnostics || typeof records.traceDiagnostics !== "object") {
+    return { status: "not-provided", complete: false, reasons: ["reader-diagnostics-not-provided"] };
+  }
+  const reasons = [];
+  for (const field of V2_INTEGRITY_FIELDS) {
+    const value = diagnostics[field];
+    if (!Number.isSafeInteger(value) || value < 0) reasons.push(`${field}-unknown`);
+    else if (value > 0) reasons.push(`${field}>0`);
+  }
+  const uniqueReasons = [...new Set(reasons)].sort(compareStable);
+  return {
+    status: uniqueReasons.length === 0 ? "complete" : "incomplete",
+    complete: uniqueReasons.length === 0,
+    reasons: uniqueReasons,
+  };
 }
 
 function summarizeV2Traces(records, label) {
@@ -1043,8 +1072,10 @@ function summarizeV2Traces(records, label) {
   const usageSummary = aggregateV2Usage(rawSummaryAttempts);
   const costMain = aggregateV2Cost(rawMainAttempts);
   const costSummary = aggregateV2Cost(rawSummaryAttempts);
+  const costAll = aggregateV2Cost(attempts);
   const costMainDetails = aggregateV2CostDetails(mainAttempts);
   const costSummaryDetails = aggregateV2CostDetails(summaryAttempts);
+  const costAllDetails = aggregateV2CostDetails(attempts);
   const tools = mainAttempts.flatMap((attempt) => attempt.toolNames);
   const wasteByCause = Object.create(null);
   let wasteUnknownSamples = 0;
@@ -1079,11 +1110,7 @@ function summarizeV2Traces(records, label) {
   const cost = {
     main: costMain,
     summary: costSummary,
-    usd: costMain.totalUsd,
-    measuredTurns: costMain.knownSamples,
-    missingTurns: costMain.unknownSamples,
-    components: costMainDetails.components,
-    unknownReasons: costMainDetails.unknownReasons,
+    all: { ...costAll, ...costAllDetails },
     details: {
       main: costMainDetails,
       summary: costSummaryDetails,
@@ -1100,58 +1127,60 @@ function summarizeV2Traces(records, label) {
     bySessionLengthBucket: aggregateV2Dimension(attempts, (attempt) => attempt.sessionLengthBucket),
   };
   const settledGroups = [...taskGroups.values()].filter((group) => group.settled);
+  const diagnostics = v2Diagnostics(records);
+  const integrity = v2TraceIntegrity(records, diagnostics);
   const billing = {
     successfulSettled: aggregateV2BillingAttempts(
-      mainAttempts,
+      attempts,
       taskGroups,
       (group) => group?.outcomeClass === "success",
       () => true,
       true,
     ),
     failedSettled: aggregateV2BillingAttempts(
-      mainAttempts,
+      attempts,
       taskGroups,
       (group) => group?.outcomeClass === "failure",
       () => true,
       true,
     ),
     interrupted: aggregateV2BillingAttempts(
-      mainAttempts,
+      attempts,
       taskGroups,
       (group) => group?.outcomeClass === "interrupted",
       () => true,
       true,
     ),
     cancelled: aggregateV2BillingAttempts(
-      mainAttempts,
+      attempts,
       taskGroups,
       (group) => group?.outcomeClass === "cancelled",
       () => true,
       true,
     ),
     storageError: aggregateV2BillingAttempts(
-      mainAttempts,
+      attempts,
       taskGroups,
       (group) => group?.outcomeClass === "storage-error",
       () => true,
       true,
     ),
     unknown: aggregateV2BillingAttempts(
-      mainAttempts,
+      attempts,
       taskGroups,
       (group) => group?.outcomeClass === "unknown",
       () => true,
       true,
     ),
     unsettled: aggregateV2BillingAttempts(
-      mainAttempts,
+      attempts,
       taskGroups,
       (group) => group?.outcomeClass === "unsettled",
       () => true,
       true,
     ),
     retries: aggregateV2BillingAttempts(
-      mainAttempts,
+      attempts,
       taskGroups,
       () => true,
       (attempt) => (attempt.retryCount ?? 0) > 0 || attempt.retryOfAttemptId !== null,
@@ -1252,6 +1281,7 @@ function summarizeV2Traces(records, label) {
     revisionKinds,
     tools: { calls: tools.length, byName: counts(tools), outcomes: toolOutcomes },
     reclaim,
+    integrity,
     billing,
     groups,
     byRole: groups.byRole,
@@ -1320,7 +1350,7 @@ function formatV2TraceSummary(summary, sourceErrors = []) {
     `  latency: TTFT p50 ${formatMs(summary.latency.p50TtftMs)}, p95 ${formatMs(summary.latency.p95TtftMs)}; turn p50 ${formatMs(summary.latency.p50TurnMs)}, p95 ${formatMs(summary.latency.p95TurnMs)}`,
     `  tokens: input ${formatV2Metric(main.input)}, cache-read ${formatV2Metric(main.cacheRead)}, cache-write ${formatV2Metric(main.cacheWrite)}, output ${formatV2Metric(main.output)}, reasoning ${formatV2Metric(main.reasoning)}; cache ${cache}`,
     `  cost: $${summary.cost.main.totalUsd.toFixed(6)} (${summary.cost.main.knownSamples}/${summary.attempts.main} main attempts measured)`,
-    `  diagnostics: retained=${diagnostics.retainedRecords ?? "--"}, omitted=${diagnostics.omittedRecords ?? "--"}, partial=${diagnostics.partialRecords ?? "--"}, malformed=${diagnostics.malformedRecords ?? "--"}, retention-failures=${diagnostics.retentionFailures ?? "--"}, write-failures=${diagnostics.writeFailures ?? "--"}, manifest-write-failures=${diagnostics.manifestWriteFailures ?? "--"}`,
+    `  diagnostics: integrity=${summary.integrity.status}, retained=${diagnostics.retainedRecords ?? "--"}, omitted=${diagnostics.omittedRecords ?? "--"}, partial=${diagnostics.partialRecords ?? "--"}, malformed=${diagnostics.malformedRecords ?? "--"}, retention-failures=${diagnostics.retentionFailures ?? "--"}, write-failures=${diagnostics.writeFailures ?? "--"}, manifest-write-failures=${diagnostics.manifestWriteFailures ?? "--"}`,
     `  efficiency: ${summary.tools.calls} tool calls, ${summary.revisions} revisions`,
   ];
   if (sourceErrors.length > 0) lines.push(`  warning: ${sourceErrors.length} trace files could not be read`);

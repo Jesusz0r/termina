@@ -87,6 +87,7 @@ import {
   responsesResultFromEvents,
   stripResponsesBreakpoints,
   textFromCompletionPayload,
+  usageFromOpenAI,
   type ProviderUsage,
   type ToolDef,
 } from "./openai-compat.ts";
@@ -155,6 +156,7 @@ import {
   planPruneStubs as planReclaimStubs,
   type PrunePick as ReclaimPick,
 } from "./reclaim.ts";
+import { formatSkillIndex as formatCompactSkillIndex, type SkillIndexSkill } from "./skill-index.ts";
 import {
   createTraceRuntime,
   DEFAULT_TRACE_RETENTION_CAP,
@@ -197,20 +199,31 @@ import { parseHideThinking } from "../shared/terminal-control.ts";
 /** Example starting values from docs/AGENT-CORE.md; never spec constants. */
 const MODEL_ENV = process.env.TERMINA_CORE_MODEL?.trim() || "";
 const PROVIDER_ENV = process.env.TERMINA_CORE_PROVIDER?.trim() || "";
-const PINNED_ROUTE = Boolean(MODEL_ENV || PROVIDER_ENV);
-let route = parseModelRef(MODEL_ENV || DEFAULT_MODELS.anthropic.main, PROVIDER_ENV || undefined);
+/** An env pin only counts for an authenticated provider: a stale remembered
+ *  (or hand-set) pin must fall back to the default route instead of
+ *  hijacking fresh sessions with an unreachable provider. */
+const ENV_ROUTE = (() => {
+  if (!MODEL_ENV && !PROVIDER_ENV) return null;
+  const probe = parseModelRef(MODEL_ENV || DEFAULT_MODELS.anthropic.main, PROVIDER_ENV || undefined);
+  return hasStoredCredential(probe.provider) || hasEnvCredential(probe.provider) ? probe : null;
+})();
+const PINNED_ROUTE = ENV_ROUTE !== null;
+let route = ENV_ROUTE ?? parseModelRef(DEFAULT_MODELS.anthropic.main, undefined);
 /** Routing map, role → model. Mechanical work rides the cheap lane. */
 let summaryRoute = parseModelRef(
   process.env.TERMINA_CORE_SUMMARY_MODEL ?? DEFAULT_MODELS[route.provider].summary,
   process.env.TERMINA_CORE_SUMMARY_MODEL ? undefined : route.provider,
 );
 const catalogs = new Map<ProviderId, ModelInfo[]>();
+/** Set only after a successful catalog proves the configured/default model is unavailable. */
+let modelAvailabilityError: string | null = null;
 /** Leave room for thinking output. Thinking counts against max_tokens. */
 const OUTPUT_CAP = 16_384;
 const THINKING_OUTPUT_CAP = 64_000;
-const OUTPUT_RESERVE = THINKING_OUTPUT_CAP;
 /** Fixed-budget thinking on Claude 4.5 and earlier. Must stay below THINKING_OUTPUT_CAP. */
 const FIXED_THINK_BUDGET = 16_384;
+/** Bound server-tool continuation requests so a provider cannot loop forever. */
+const MAX_PAUSE_TURN_CONTINUATIONS = 5;
 const HIGH_WATER = 0.8;
 const LOW_WATER = 0.6;
 /** Trailing tool-output span never reclaimed (fraction of usable, clamped). */
@@ -234,7 +247,8 @@ function contextWindow(): number {
 }
 
 function usableTokens(): number {
-  return Math.max(8_000, contextWindow() - OUTPUT_RESERVE);
+  const thinking = effectiveEffortFor(route.provider, route.model, effortWanted) !== "off";
+  return Math.max(8_000, contextWindow() - outputTokenBudget({ thinking }));
 }
 
 function protectTokens(): number {
@@ -259,7 +273,6 @@ const CACHE_MISS_COMPACT_SHARE = 0.5;
 const USER_AGENTS_CAP = 8_192;
 const PROJECT_AGENTS_CAP = 24_576;
 const SKILL_XML_CAP = 8_192;
-const SKILL_COUNT_CAP = 32;
 const GREP_HIT_CAP = 50;
 const GREP_SHOW_PER_FILE = 8;
 const GREP_SHOW_HITS = 20;
@@ -321,23 +334,103 @@ function thinkingLockedOn(model: string): boolean {
   return id.includes("fable") || id.includes("mythos");
 }
 
-function openAiFamilyModel(model: string): boolean {
+/**
+ * Model families with a known Responses `reasoning.effort` contract, matched
+ * against the lowercased id (prefix included, so `openai/o3` still matches).
+ * A new family is one row here — not a new predicate. Anchored entries
+ * (gpt-[5-9], o-series) stay regexes so older or foreign models can't
+ * smuggle in on a substring.
+ */
+const RESPONSES_REASONING_FAMILIES: readonly RegExp[] = [
+  /gpt-[5-9]/,
+  /gpt-oss/,
+  /codex/,
+  /grok/,
+  /muse-spark/,
+  /(?:^|\/)o[0-9]/,
+];
+
+function responsesReasoningFamily(model: string): boolean {
   const id = model.toLowerCase();
-  return /gpt-[5-9]/.test(id) || id.includes("gpt-oss") || id.includes("codex") || id.includes("grok") || /(?:^|\/)o[0-9]/.test(id);
+  return RESPONSES_REASONING_FAMILIES.some((family) => family.test(id));
 }
 
 function responsesReasoningModel(model: string): boolean {
   const id = model.toLowerCase();
-  return openAiFamilyModel(model) || claudeThinkingApi(model) !== "none" || /gemini-[3-9]/.test(id);
+  return responsesReasoningFamily(model) || claudeThinkingApi(model) !== "none" || /gemini-[3-9]/.test(id);
 }
 
 function gemini3Model(model: string): boolean {
   return /gemini-[3-9]/.test(model.toLowerCase());
 }
 
-function glm52Model(model: string): boolean {
+/**
+ * Per-model Gemini level rejections observed as provider 400s. Newer
+ * generations (live Zen docs already list up to 3.8 Flash) get the full
+ * range unless a row below proves otherwise — rows only hide levels, so a
+ * missing row fails loud (400) instead of hiding a working level.
+ */
+type GeminiEffortQuirk = {
+  match: RegExp;
+  unless?: RegExp;
+  hide: readonly EffortLevel[];
+};
+
+const GEMINI_EFFORT_QUIRKS: readonly GeminiEffortQuirk[] = [
+  // gemini-3-pro (no minor) rejects minimal; 3.1 Pro and later accept medium.
+  { match: /gemini-3(?:\.\d+)?-pro/, hide: ["minimal"] },
+  { match: /gemini-3-pro/, unless: /gemini-3\.\d+-pro/, hide: ["medium"] },
+  // Gemini 3.7 Flash returns 400 on thinking_level minimal.
+  { match: /gemini-3\.7.*flash/, unless: /lite/, hide: ["minimal"] },
+];
+
+/**
+ * Zhipu GLM reasoning lineage (live Zen docs list 5, 5.1, 5.2; Go also
+ * serves 5.3). Members share one contract — restricted level subset, xhigh
+ * on Responses / max on Completions — so a new generation is one row here,
+ * not a new predicate.
+ */
+const GLM_REASONING_FAMILIES: readonly RegExp[] = [/glm-5/];
+
+function glmReasoningFamily(model: string): boolean {
   const id = model.toLowerCase();
-  return /glm-5[.-]2/.test(id) || id.includes("glm-5p2");
+  return GLM_REASONING_FAMILIES.some((family) => family.test(id));
+}
+
+/**
+ * OpenCode relays serve third-party reasoning models behind an
+ * OpenAI-compatible chat/completions endpoint: Zen lists deepseek, minimax,
+ * glm, kimi, big-pickle, mimo, ling, and nemotron on /v1/chat/completions,
+ * and opencode-go serves the same families plus longcat, hy, qwen, and
+ * muse-spark there. Zen publishes no per-model effort metadata, so capability
+ * comes from this owned family table and levels are the
+ * OpenAI/OpenRouter/xAI-documented core subset, sent verbatim as Chat
+ * Completions `reasoning_effort`.
+ */
+const RELAY_COMPLETIONS_FAMILIES = [
+  "big-pickle",
+  "deepseek",
+  "glm",
+  "kimi",
+  "ling",
+  "longcat",
+  "mimo",
+  "minimax",
+  "muse-spark",
+  "nemotron",
+  "qwen",
+] as const;
+
+function relayCompletionsFamily(leaf: string): boolean {
+  if (RELAY_COMPLETIONS_FAMILIES.some((family) => leaf.startsWith(family))) return true;
+  return /^hy[34](?:[.-]|$)/.test(leaf);
+}
+
+/** Relay chat/completions models with a known reasoning contract. */
+function usesRelayCompletionsEffort(provider: ProviderId, model: string): boolean {
+  if (provider !== "opencode-zen" && provider !== "opencode-go") return false;
+  if (providerProtocol(provider, model) !== "openai-completions") return false;
+  return relayCompletionsFamily(modelLeaf(model));
 }
 
 /** Anthropic thinking fields belong on Messages + a Claude model, not on the login id. */
@@ -352,7 +445,8 @@ function usesModelEffort(provider: ProviderId, model: string): boolean {
   if (gemini3Model(model) && (provider === "google" || providerProtocol(provider, model) === "google-generate")) {
     return true;
   }
-  return glm52Model(model);
+  if (usesRelayCompletionsEffort(provider, model)) return true;
+  return glmReasoningFamily(model);
 }
 
 function effortLevelMap(provider: ProviderId, model: string): EffortLevelMap {
@@ -360,13 +454,11 @@ function effortLevelMap(provider: ProviderId, model: string): EffortLevelMap {
   const map: EffortLevelMap = {};
   if (gemini3Model(model) && (provider === "google" || providerProtocol(provider, model) === "google-generate")) {
     map.off = null;
-    if (/gemini-3(?:\.\d+)?-pro/.test(id)) {
-      map.minimal = null;
-      // gemini-3-pro (no minor) rejects medium. 3.1 Pro and later accept it.
-      if (!/gemini-3\.\d+-pro/.test(id)) map.medium = null;
+    for (const quirk of GEMINI_EFFORT_QUIRKS) {
+      if (quirk.match.test(id) && !(quirk.unless && quirk.unless.test(id))) {
+        for (const level of quirk.hide) map[level] = null;
+      }
     }
-    // Gemini 3.7 Flash returns 400 on thinking_level minimal.
-    if (/gemini-3\.7/.test(id) && id.includes("flash") && !id.includes("lite")) map.minimal = null;
     return map;
   }
   if (claudeThinkingApi(model) === "adaptive") {
@@ -376,7 +468,7 @@ function effortLevelMap(provider: ProviderId, model: string): EffortLevelMap {
     if (thinkingLockedOn(model)) map.off = null;
     return map;
   }
-  if (glm52Model(model)) {
+  if (glmReasoningFamily(model)) {
     map.off = null;
     map.minimal = null;
     map.low = null;
@@ -385,7 +477,15 @@ function effortLevelMap(provider: ProviderId, model: string): EffortLevelMap {
     else map.max = "max";
     return map;
   }
-  if (!openAiFamilyModel(model)) return map;
+  if (usesRelayCompletionsEffort(provider, model)) {
+    // Core subset only: the relay publishes no per-model metadata, so
+    // minimal and xhigh stay hidden rather than risking a provider 400.
+    map.minimal = null;
+    map.xhigh = null;
+    map.max = "max";
+    return map;
+  }
+  if (!responsesReasoningFamily(model)) return map;
   if (id.includes("grok")) {
     if (!id.includes("4.3")) map.off = null;
     map.minimal = null;
@@ -398,15 +498,20 @@ function effortLevelMap(provider: ProviderId, model: string): EffortLevelMap {
     map.minimal = null;
     return map;
   }
-  if (/gpt-5\.[3-6]|codex/.test(id)) {
+  if (/gpt-(?:5\.[3-6]|[6-9])|codex/.test(id)) {
     if (provider === "openai-codex" || provider === "github-copilot") map.minimal = "low";
     else map.minimal = null;
-    if (provider === "github-copilot" || (id.includes("codex") && provider !== "openrouter" && !id.includes("5.6"))) {
+    if (
+      provider === "github-copilot" ||
+      // GPT-6 Astra rejects reasoning none with HTTP 400 (live model page).
+      /gpt-[6-9]/.test(id) ||
+      (id.includes("codex") && provider !== "openrouter" && !id.includes("5.6"))
+    ) {
       map.off = null;
     }
     map.xhigh = "xhigh";
   }
-  if (id.includes("5.6")) map.max = "max";
+  if (id.includes("5.6") || /gpt-[6-9]/.test(id)) map.max = "max";
   return map;
 }
 
@@ -942,7 +1047,7 @@ function relativeFilesResult(
 
 let fileTagIndex: { root: string; scan: RelativeFilesResult; at: number } | null = null;
 
-/** Relative project files for `@` tagging. Sync, ignored walks, no NUL scan. */
+/** Relative project files and folders for `@` tagging. Sync, ignored walks, no NUL scan. */
 export function collectRelativeFiles(
   cwd: string,
   visitCap = FILE_TAG_VISIT_CAP,
@@ -1022,8 +1127,13 @@ export function collectRelativeFiles(
       }
       const rel = posixRel(root, candidate.real);
       if (gitignoreSkips(gitignore, rel, candidate.kind === "dir")) continue;
-      if (candidate.kind === "dir") stack.push(candidate.real);
-      else if (!seenFiles.has(candidate.real)) {
+      if (candidate.kind === "dir") {
+        stack.push(candidate.real);
+        if (!seenFiles.has(candidate.real)) {
+          seenFiles.add(candidate.real);
+          if (rel) files.push(rel.endsWith("/") ? rel : `${rel}/`);
+        }
+      } else if (!seenFiles.has(candidate.real)) {
         seenFiles.add(candidate.real);
         if (rel) files.push(rel);
       }
@@ -1722,11 +1832,7 @@ export async function globFiles(
   return Object.freeze({ ...result, truncated: result.truncated || needsContinuation });
 }
 
-export interface Skill {
-  name: string;
-  description: string;
-  abs: string;
-}
+export type Skill = SkillIndexSkill;
 
 function parseFrontmatter(text: string): Record<string, string> {
   if (!text.startsWith("---")) return {};
@@ -1835,24 +1941,7 @@ export function scanSkills(dirs: string[]): { skills: Skill[]; capped: boolean }
 }
 
 export function formatSkillIndex(skills: Skill[], opts?: { capped?: boolean }): string {
-  if (skills.length === 0 && !opts?.capped) return "";
-  const lines = ["<skill-index>"];
-  let n = 0;
-  let omitted = 0;
-  for (const s of skills) {
-    const tag = `<skill name="${xmlSafe(s.name)}" path="${xmlSafe(s.abs)}">${xmlSafe(s.description)}</skill>`;
-    const trial = [...lines, tag, "</skill-index>"].join("\n");
-    if (n >= SKILL_COUNT_CAP || Buffer.byteLength(trial) > SKILL_XML_CAP) {
-      omitted = skills.length - n;
-      break;
-    }
-    lines.push(tag);
-    n++;
-  }
-  if (omitted > 0) lines.push(`<!-- ${omitted} skills omitted -->`);
-  if (opts?.capped) lines.push("<!-- skill scan capped -->");
-  lines.push("</skill-index>");
-  return lines.join("\n");
+  return formatCompactSkillIndex(skills, { capBytes: SKILL_XML_CAP, capped: opts?.capped });
 }
 
 function capParagraph(md: string, max: number): { text: string; omitted: number } {
@@ -2076,9 +2165,20 @@ function countNewlinesInRange(fd: number, end: number, started: number): number 
   return nls;
 }
 
-/** Byte offset of the first byte of 1-based `line`, or `size` if the file is shorter. */
-function lineStartOffset(fd: number, size: number, line: number, started: number): number | { error: string } {
-  if (line <= 1) return 0;
+/** Find both line boundaries in one pass, or `size` when a requested line is
+ * beyond EOF. A range read must not rescan the file prefix for its end line. */
+function lineRangeOffsets(
+  fd: number,
+  size: number,
+  startLine: number,
+  endLine: number | undefined,
+  started: number,
+): { start: number; end: number } | { error: string } {
+  const startTarget = Math.max(1, startLine);
+  const endTarget = endLine === undefined ? undefined : Math.max(1, endLine + 1);
+  let start = startTarget <= 1 ? 0 : -1;
+  let end = endTarget === undefined ? size : -1;
+  if (start === 0 && endTarget === undefined) return { start, end };
   const chunk = Buffer.alloc(64 * 1024);
   let pos = 0;
   let current = 1;
@@ -2089,12 +2189,17 @@ function lineStartOffset(fd: number, size: number, line: number, started: number
     for (let i = 0; i < n; i++) {
       if (chunk[i] === 10) {
         current++;
-        if (current === line) return pos + i + 1;
+        const offset = pos + i + 1;
+        if (start < 0 && current === startTarget) start = offset;
+        if (end < 0 && endTarget !== undefined && current === endTarget) {
+          end = offset;
+          if (start >= 0) return { start, end };
+        }
       }
     }
     pos += n;
   }
-  return size;
+  return { start: start < 0 ? size : start, end: end < 0 ? size : end };
 }
 
 function gitignoreRulesFor(root: string, dirAbs: string): GitignoreRules {
@@ -2221,15 +2326,11 @@ export function readTextView(
     let viewStartLine = 1;
     let until = st.size;
     if (lineMode) {
-      const startOff = lineStartOffset(fd, st.size, startLine, started);
-      if (typeof startOff === "object") return fail(startOff.error, startOff.error.includes("timed out") ? "timeout" : "failed");
-      from = startOff;
+      const offsets = lineRangeOffsets(fd, st.size, startLine, endLine, started);
+      if ("error" in offsets) return fail(offsets.error, offsets.error.includes("timed out") ? "timeout" : "failed");
+      from = offsets.start;
       viewStartLine = startLine;
-      if (endLine !== undefined) {
-        const endOff = lineStartOffset(fd, st.size, endLine + 1, started);
-        if (typeof endOff === "object") return fail(endOff.error, endOff.error.includes("timed out") ? "timeout" : "failed");
-        until = endOff;
-      }
+      until = offsets.end;
     } else {
       const nls = countNewlinesInRange(fd, from, started);
       if (typeof nls === "object") return fail(nls.error, nls.error.includes("timed out") ? "timeout" : "failed");
@@ -3917,7 +4018,11 @@ export function buildFrozenSystem(opts: {
       parts.push(formatUserInstructions(userMd, abs));
     }
   }
-  const skillXml = formatSkillIndex(scanned.skills, { capped: scanned.capped });
+  const skillXml = formatCompactSkillIndex(scanned.skills, {
+    roots: skillDirs,
+    capBytes: SKILL_XML_CAP,
+    capped: scanned.capped,
+  });
   if (skillXml) parts.push(skillXml);
   const projPath = join(root, "AGENTS.md");
   try {
@@ -5437,19 +5542,43 @@ function evictionBoundary(): number {
   return boundary;
 }
 
-function serializeForSummary(messages: Message[]): string {
+function summaryValue(value: unknown, maxChars: number): string {
+  if (typeof value === "string") return value.slice(0, maxChars);
+  try {
+    const encoded = JSON.stringify(value);
+    return (typeof encoded === "string" ? encoded : String(value)).slice(0, maxChars);
+  } catch {
+    return String(value).slice(0, maxChars);
+  }
+}
+
+/** Remove the previous handoff from the next eviction input. The handoff is
+ * sent once in the explicit `<previous-handoff>` section below. */
+export function messagesForSummary(messages: readonly Message[], lastHandoffBody: string | null): Message[] {
+  const prior = lastHandoffBody === null
+    ? null
+    : `<context-handoff>\n${lastHandoffBody}\n</context-handoff>`;
+  return messages.filter((message) => message.content !== prior);
+}
+
+export function serializeForSummary(messages: readonly Message[]): string {
   const parts: string[] = [];
   for (const m of messages) {
+    const role = m.role === "assistant" ? "Assistant" : "User";
     if (typeof m.content === "string") {
-      parts.push(`[User]: ${m.content.slice(0, 2_000)}`);
+      parts.push(`[${role}]: ${m.content.slice(0, 2_000)}`);
       continue;
     }
     for (const b of m.content as ContentBlock[]) {
-      if (b.type === "text") parts.push(`[Assistant]: ${String(b.text ?? "").slice(0, 2_000)}`);
+      if (b.type === "text") parts.push(`[${role}]: ${String(b.text ?? "").slice(0, 2_000)}`);
       else if (b.type === "tool_use" || b.type === "server_tool_use")
-        parts.push(`[Tool call]: ${b.name}(${JSON.stringify(b.input).slice(0, 300)})`);
+        parts.push(`[${role} tool call]: ${b.name}(${summaryValue(b.input, 300)})`);
       else if (b.type === "tool_result" && !b.stubbed)
-        parts.push(`[Tool result]: ${String(b.content ?? "").slice(0, 500)}`);
+        parts.push(`[Tool result]: ${summaryValue(b.content, 500)}`);
+      else if (b.type === "web_search_tool_result")
+        parts.push(`[Search evidence]: ${summaryValue((b as unknown as Record<string, unknown>).content, 800)}`);
+      else if (b.type === "image")
+        parts.push(`[${role} image]: ${summaryValue((b as unknown as Record<string, unknown>).source, 160)}`);
     }
   }
   return parts.join("\n").slice(0, 60_000);
@@ -5461,9 +5590,9 @@ function serializeForSummary(messages: Message[]): string {
 async function summarize(): Promise<boolean> {
   const boundary = evictionBoundary();
   if (boundary <= 0) return false;
-  const evicted = history.slice(0, boundary);
+  const evicted = messagesForSummary(history.slice(0, boundary), lastHandoff);
   const prior = lastHandoff ? `<previous-handoff>\n${lastHandoff}\n</previous-handoff>\n\n` : "";
-  const prompt = `${prior}<session-to-compress>\n${serializeForSummary(evicted)}\n</session-to-compress>\n\nProduce the context handoff for continuing this session: task state, decisions made, files touched, open threads. Only output the handoff.`;
+  const prompt = `${prior}<session-to-compress>\n${serializeForSummary(evicted)}\n</session-to-compress>\n\nProduce the context handoff for continuing this session: task state, decisions made, files touched, open threads, and a compact evidence inventory of tool outcomes and search references. Only output the handoff.`;
   const started = Date.now();
   currentAbort ??= new AbortController();
   let foldedResult: Awaited<ReturnType<typeof completeText>> | null = null;
@@ -5618,6 +5747,7 @@ function accumulateUsage(usage: Usage): void {
   sessionUsage.cacheRead = addKnownUsage(sessionUsage.cacheRead, usage.cacheRead);
   sessionUsage.cacheWrite = addKnownUsage(sessionUsage.cacheWrite, usage.cacheWrite);
   sessionUsage.output = addKnownUsage(sessionUsage.output, usage.output);
+  sessionUsage.reasoning = addKnownUsage(sessionUsage.reasoning, usage.reasoning);
 }
 
 interface CallResult {
@@ -6022,6 +6152,7 @@ async function completeTextBody(
   if (usesResponsesApi(providerId, model)) {
     // Codex and Zen GPT require a streaming list input. String input and stream:false return 400.
     const requestBody = responsesBody(model, system, [{ role: "user", content: prompt }], [], {
+      provider: providerId,
       ...(providerId === "openai-codex" ? {} : { maxTokens: 2048 }),
       ...(sendCacheKey ? { cacheKey } : {}),
       ...(sendSessionId ? { sessionId: sendSessionId } : {}),
@@ -6090,7 +6221,7 @@ async function completeTextBody(
   const got = textFromCompletionPayload(await readBoundedJson(res));
   return {
     text: got.text,
-    usage: normalizeProviderUsage(got.usage),
+    usage: usageFromOpenAI(got.usage),
     ttftMs: null,
     cache: requestCache,
   };
@@ -6221,6 +6352,7 @@ async function callModel(
         }
       : usesResponsesApi(route.provider, route.model)
         ? responsesBody(route.model, sys, kernelMessages, toolsForProvider, {
+            provider: route.provider,
             ...(route.provider === "openai-codex" ? {} : { maxTokens }),
             ...(sendCacheKey ? { cacheKey } : {}),
             ...(sendSessionId ? { sessionId: sendSessionId } : {}),
@@ -6241,6 +6373,7 @@ async function callModel(
               ...(reasoningEffort ? { reasoningEffort, googleThinking: true } : {}),
             })
         : completionsBody(route.model, sys, kernelMessages, toolsForProvider, "max_tokens", {
+            provider: route.provider,
             maxTokens,
             ...(sendCacheKey ? { cacheKey } : {}),
             ...(sendSessionId ? { sessionId: sendSessionId } : {}),
@@ -7090,6 +7223,12 @@ function logSettings(): void {
 
 async function runPrompt(prompt: string, extraImages: Array<{ name: string; mediaType: string }> = []): Promise<void> {
   if (shutdownRequested) return;
+  if (modelAvailabilityError) {
+    out(`(the run did not start: ${modelAvailabilityError}; choose an available model with /models or /model)\n`);
+    surface?.setDraft(prompt);
+    showPrompt();
+    return;
+  }
   // The overlay belongs to one logical prompt.  Do not let an earlier
   // prompt's volatile context inflate idle reclaim estimates or leak into a
   // preflight failure before this prompt has built its own snapshot.
@@ -7292,6 +7431,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   let toolErrorObserved = false;
   let retriedOverflow = false;
   let resumePaused = false;
+  let pauseTurnContinuations = 0;
   let lastPlanText = "";
   let cacheCostCompactionAttempted = false;
   codexTurnState = "";
@@ -7396,8 +7536,27 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         (b): ToolUse => ({ id: b.id, name: b.name, input: b.input }),
       );
       if (uses.length === 0) {
-        await writeMainTrace({ status: "ok", seqBefore, toolNames: serverNames, usage: result.usage, waste, sysHash: hashSystem(sys), cache: traceCache, started: callStarted, attempt: result.traceAttempt });
-        if (result.stopReason === "pause_turn" && !interrupted) {
+        const pauseTurn = result.stopReason === "pause_turn" && !interrupted;
+        const pauseLimitReached = pauseTurn && pauseTurnContinuations >= MAX_PAUSE_TURN_CONTINUATIONS;
+        await writeMainTrace({
+          status: pauseLimitReached ? "pause-limit" : "ok",
+          seqBefore,
+          toolNames: serverNames,
+          usage: result.usage,
+          waste,
+          sysHash: hashSystem(sys),
+          cache: traceCache,
+          started: callStarted,
+          attempt: result.traceAttempt,
+        });
+        if (pauseLimitReached) {
+          taskFailure = `server-tool continuation limit reached after ${MAX_PAUSE_TURN_CONTINUATIONS} continuations`;
+          taskOutcomeStatus = "failure";
+          out(`\n(${taskFailure})\n`);
+          break;
+        }
+        if (pauseTurn) {
+          pauseTurnContinuations += 1;
           resumePaused = true;
           continue;
         }
@@ -8023,10 +8182,14 @@ async function loadCatalog(
       ? route.model
       : DEFAULT_MODELS[provider].main;
   const pick = pickDefaultModel(got.models, preferred);
-  if (pick) {
-    if (!PINNED_ROUTE || !MODEL_ENV) route.model = pick;
-    else if (pick === route.model || pick.startsWith(`${route.model}-`)) route.model = pick;
+  if (!pick) {
+    const error = `configured model ${provider}/${preferred} is unavailable in the live catalog`;
+    modelAvailabilityError = error;
+    return { ok: false, error };
   }
+  if (!PINNED_ROUTE || !MODEL_ENV) route.model = pick;
+  else if (pick === route.model || pick.startsWith(`${route.model}-`)) route.model = pick;
+  modelAvailabilityError = null;
   return { ok: true };
 }
 
@@ -8057,20 +8220,8 @@ async function bootCatalog(): Promise<void> {
         retargetSummary(id);
       }
     }
-    const loaded = await loadProviderModels(route.provider);
-    if (loaded.ok) catalogs.set(route.provider, loaded.models);
-    const current = currentCatalog();
-    if (current && current.length > 0) {
-      const preferred =
-        MODEL_ENV && route.provider === parseModelRef(MODEL_ENV, PROVIDER_ENV || undefined).provider
-          ? route.model
-          : DEFAULT_MODELS[route.provider].main;
-      const pick = pickDefaultModel(current, preferred);
-      if (pick) {
-        if (!PINNED_ROUTE || !MODEL_ENV) route.model = pick;
-        else if (pick === route.model || pick.startsWith(`${route.model}-`)) route.model = pick;
-      }
-    }
+    const loaded = await loadCatalog(route.provider, false);
+    if (!loaded.ok) process.stderr.write(`agent-core: ${loaded.error}\n`);
   } catch (err) {
     process.stderr.write(`agent-core: model list failed: ${(err as Error).message}\n`);
   }
@@ -8138,6 +8289,7 @@ function startCatalogCommand(line: string): void {
         } else {
           route.model = listed.id;
         }
+        modelAvailabilityError = null;
         resetCacheContinuity();
         out(`model ${route.provider}/${route.model}\n`);
         syncStatus();
@@ -8165,6 +8317,7 @@ function startCatalogCommand(line: string): void {
       } else {
         route.model = next.model;
       }
+      modelAvailabilityError = null;
       resetCacheContinuity();
       out(`model ${route.provider}/${route.model}\n`);
       syncStatus();

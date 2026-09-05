@@ -82,6 +82,8 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       buildFrozenSystem,
       isDirectRunFrom,
       hashSystem,
+      messagesForSummary,
+      serializeForSummary,
       WEB_SEARCH_TOOL,
       requestTools,
       stampHistoryCache,
@@ -1332,6 +1334,31 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const replayed = replaySessionRecords(sessionLines);
     check("summarize replay handoff first", replayed.ok && replayed.messages[0]?.content === handoff);
     check("summarize replay keeps tail", replayed.ok && replayed.messages[1]?.content === "tail");
+    const summaryPriorBody = "previous decision";
+    const summaryInput = [
+      { role: "user", content: `<context-handoff>\n${summaryPriorBody}\n</context-handoff>`, tokens: 1, sseq: 1 },
+      { role: "user", content: "new request", tokens: 1, sseq: 2 },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_result", content: { stdout: "changed file" } },
+          { type: "web_search_tool_result", content: [{ title: "evidence", url: "https://example.com" }] },
+          { type: "image", source: { type: "file", name: "proof.png" } },
+        ],
+        tokens: 1,
+        sseq: 3,
+      },
+    ] as any;
+    const dedupedSummary = messagesForSummary(summaryInput, summaryPriorBody);
+    const serializedSummary = serializeForSummary(dedupedSummary);
+    check("summary input emits prior handoff once", dedupedSummary.length === 2 && !serializedSummary.includes(summaryPriorBody));
+    check(
+      "summary input preserves role-aware evidence",
+      serializedSummary.includes("[User]: new request") &&
+        serializedSummary.includes("[Tool result]") &&
+        serializedSummary.includes("[Search evidence]") &&
+        serializedSummary.includes("[Assistant image]"),
+    );
     
     const bodyBlock = { type: "tool_result", tool_use_id: "t", content: "BODY", tool: "bash", repro: "bash x" };
     const bodyRevision = makePruneRevision("body-rev", [{
@@ -2101,7 +2128,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("usesOpenAIExplicitCache skips Copilot", usesOpenAIExplicitCache("gpt-5.6-sol", "github-copilot", "https://api.githubcopilot.com") === false);
     check("usesOpenAIExplicitCache zen gpt-5.6", usesOpenAIExplicitCache("gpt-5.6-sol", "opencode-zen", "https://opencode.ai") === false);
     check("usesPromptCacheOptions openai gpt-5.6", usesPromptCacheOptions("openai", "gpt-5.6-sol", "https://api.openai.com/v1") === true);
-    check("usesPromptCacheOptions openrouter gpt-5.6", usesPromptCacheOptions("openrouter", "openai/gpt-5.6-sol", "https://openrouter.ai") === false);
+    check("usesPromptCacheOptions openrouter gpt-5.6", usesPromptCacheOptions("openrouter", "openai/gpt-5.6-sol", "https://openrouter.ai") === true);
     check("usesPromptCacheOptions skips Codex", usesPromptCacheOptions("openai-codex", "gpt-5.6-sol", "https://chatgpt.com") === false);
     check("usesPromptCacheOptions skips Zen", usesPromptCacheOptions("opencode-zen", "gpt-5.6-sol", "https://opencode.ai") === false);
     const cacheSeed = cacheSessionSeed("core-1");
@@ -2483,6 +2510,10 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       "pickDefaultModel prefix match",
       pickDefaultModel(anthList, "claude-sonnet-4-5") === "claude-sonnet-4-5-20250929",
     );
+    check(
+      "pickDefaultModel missing preferred stays unavailable",
+      pickDefaultModel(parseModelsPayload({ data: [{ id: "gpt-5.4" }, { id: "gpt-5.6-sol" }] }, "openai"), "gpt-6-astra") === null,
+    );
     check("pickDefaultModel empty is null", pickDefaultModel([], "gpt-5") === null);
     check("parseModelSwitch prefix changes provider", parseModelSwitch("xai/grok-4.6", "anthropic").provider === "xai");
     check(
@@ -2734,15 +2765,15 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         { role: "user", content: "overlay" },
       ],
       [],
-      { cacheKey: "sess-1", sessionId: "sess-1", cacheControl: true, includeEncryptedReasoning: false },
+      { provider: "openrouter", cacheKey: "sess-1", sessionId: "sess-1", cacheControl: true, includeEncryptedReasoning: false },
     );
     check(
-      "openrouter claude responses pin session and cache_control",
+      "openrouter claude responses pin session and documented breakpoint",
       bodyOrClaude.prompt_cache_key === "sess-1" &&
         bodyOrClaude.session_id === "sess-1" &&
         bodyOrClaude.cache_control === undefined &&
-        bodyOrClaude.input[0]?.content?.[0]?.cache_control?.type === "ephemeral" &&
-        bodyOrClaude.input.at(-1)?.content?.[0]?.cache_control === undefined,
+        bodyOrClaude.input[0]?.content?.[0]?.prompt_cache_breakpoint?.mode === "explicit" &&
+        bodyOrClaude.input.at(-1)?.content?.[0]?.prompt_cache_breakpoint === undefined,
     );
     const bodyGpt56 = compat.responsesBody(
       "gpt-5.6-sol",
@@ -2921,9 +2952,11 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         partialAnswer[0]?.call_id === "call_A" &&
         partialAnswer[1]?.call_id === "call_B" &&
         partialAnswer[2]?.call_id === "call_A" &&
-        partialAnswer[2]?.output === "file.txt" &&
+        partialAnswer[2]?.output?.[0]?.type === "input_text" &&
+        partialAnswer[2]?.output?.[0]?.text === "file.txt" &&
         partialAnswer[3]?.call_id === "call_B" &&
-        partialAnswer[3]?.output === "(interrupted)",
+        partialAnswer[3]?.output?.[0]?.type === "input_text" &&
+        partialAnswer[3]?.output?.[0]?.text === "(interrupted)",
     );
     const deltaThenDone = compat.responsesResultFromEvents(
       [
@@ -3524,7 +3557,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("ordinary active appends do not discard logical-session hits", appendChecks > 0 && appendHits.length === 1);
     check("slash menu puts help first", SLASH_COMMANDS[0]?.name === "/help");
     check("slash menu puts exit last", SLASH_COMMANDS.at(-1)?.name === "/exit");
-    check("slash /clear is listed", SLASH_COMMANDS.some((c) => c.name === "/clear"));
+    check("slash /clear is marked new", SLASH_COMMANDS.some((c) => c.name === "/clear (new)" && c.submit === "/clear"));
     check("slash /compact is listed", SLASH_COMMANDS.some((c) => c.name === "/compact"));
     check("slash /effort is listed", SLASH_COMMANDS.some((c) => c.name === "/effort"));
     check(
@@ -3682,6 +3715,16 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       supportedEffortLevels("opencode-zen", "gpt-5.6-sol").join(" ") === "off low medium high xhigh max",
     );
     check(
+      "GPT-6 Astra exposes the documented effort set",
+      supportedEffortLevels("openai", "gpt-6-astra").join(" ") === "low medium high xhigh max",
+    );
+    check("GPT-6 off clamps to low, never none", clampEffortLevel("openai", "gpt-6-astra", "off") === "low");
+    check("reasoningEffortFor GPT-6 off is low", reasoningEffortFor("openai", "gpt-6-astra", "off") === "low");
+    const bodyGpt6 = compat.responsesBody("gpt-6-astra", "sys", [], [], {
+      reasoningEffort: reasoningEffortFor("openai", "gpt-6-astra", "max"),
+    });
+    check("GPT-6 responses set reasoning effort", bodyGpt6.reasoning?.effort === "max");
+    check(
       "reasoningEffortFor zen Claude is omitted",
       reasoningEffortFor("opencode-zen", "claude-sonnet-5", "high") === undefined,
     );
@@ -3694,6 +3737,10 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       supportedEffortLevels("opencode-zen", "gemini-3.7-flash").join(" ") === "low medium high",
     );
     check("reasoningEffortFor zen Gemini is high", reasoningEffortFor("opencode-zen", "gemini-3.7-flash", "high") === "high");
+    check(
+      "Newer Gemini generations get the full range without a quirk row",
+      supportedEffortLevels("google", "gemini-3.8-flash").join(" ") === "minimal low medium high",
+    );
     const bodyZenGemini = compat.googleGenerateBody("sys", [{ role: "user", content: "hi" }], [], {
       maxTokens: 64_000,
       reasoningEffort: "high",
@@ -3780,8 +3827,49 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     check("reasoningEffortFor zen GLM is high", reasoningEffortFor("opencode-zen", "glm-5.2", "high") === "high");
     check(
+      "Zen Muse Spark exposes Responses effort",
+      supportedEffortLevels("opencode-zen", "muse-spark-1.3-contributor-free").join(" ") === "off minimal low medium high" &&
+        supportedEffortLevels("opencode-zen", "opencode-zen/muse-spark-1.3-contributor-free").join(" ") ===
+          "off minimal low medium high",
+    );
+    check(
+      "reasoningEffortFor zen Muse Spark is sent",
+      reasoningEffortFor("opencode-zen", "muse-spark-1.3-contributor-free", "high") === "high",
+    );
+    const bodyZenSpark = compat.responsesBody("muse-spark-1.3-contributor-free", "sys", [], [], {
+      reasoningEffort: reasoningEffortFor("opencode-zen", "muse-spark-1.3-contributor-free", "high"),
+    });
+    check("Zen Muse Spark responses set reasoning effort", bodyZenSpark.reasoning?.effort === "high");
+    check(
+      "Zen relay completions expose the core effort subset",
+      supportedEffortLevels("opencode-zen", "deepseek-v4-pro").join(" ") === "off low medium high max" &&
+        supportedEffortLevels("opencode-zen", "kimi-k2.7-code").join(" ") === "off low medium high max",
+    );
+    check(
+      "Go relay completions expose the core effort subset",
+      supportedEffortLevels("opencode-go", "deepseek-v4-flash").join(" ") === "off low medium high max" &&
+        supportedEffortLevels("opencode-go", "qwen3.8-max").join(" ") === "off low medium high max",
+    );
+    check(
+      "Unknown relay completions models stay off",
+      supportedEffortLevels("opencode-zen", "some-unknown-model").join(" ") === "off",
+    );
+    check("relay minimal clamps up to low", clampEffortLevel("opencode-zen", "deepseek-v4-pro", "minimal") === "low");
+    check("reasoningEffortFor zen relay is sent", reasoningEffortFor("opencode-zen", "deepseek-v4-pro", "high") === "high");
+    check("reasoningEffortFor go relay off is none", reasoningEffortFor("opencode-go", "kimi-k3", "off") === "none");
+    const bodyZenRelay = compat.completionsBody("deepseek-v4-pro", "sys", [], [], "max_tokens", {
+      reasoningEffort: reasoningEffortFor("opencode-zen", "deepseek-v4-pro", "high"),
+    });
+    check("Zen relay completions send reasoning_effort", bodyZenRelay.reasoning_effort === "high");
+    check(
       "OpenRouter GLM 5.2 maps max onto xhigh",
       supportedEffortLevels("openrouter", "z-ai/glm-5.2").join(" ") === "high xhigh",
+    );
+    check(
+      "GLM lineage shares one contract beyond 5.2",
+      supportedEffortLevels("opencode-zen", "glm-5.1").join(" ") === "high max" &&
+        supportedEffortLevels("opencode-go", "glm-5.3").join(" ") === "high max" &&
+        supportedEffortLevels("openrouter", "z-ai/glm-5.3").join(" ") === "high xhigh",
     );
     check("fable off clamps to minimal", effectiveEffortFor("anthropic", "claude-fable-5", "off") === "minimal");
     check(

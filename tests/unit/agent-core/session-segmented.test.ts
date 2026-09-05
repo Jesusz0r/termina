@@ -361,6 +361,56 @@ export async function run({ check, leftovers }) {
     truncationFork.ok === false && postOpenTruncations === 3 && !existsSync(truncationDest.bundleDir),
   );
 
+  const postReplayContentRace = bundlePaths(root, "bundle-post-replay-content-race");
+  mkdirSync(postReplayContentRace.currentDir, { recursive: true, mode: 0o700 });
+  writeFileSync(
+    postReplayContentRace.sessionFile,
+    `${JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "stable" } })}\n`,
+    { mode: 0o600 },
+  );
+  let postReplayContentMutations = 0;
+  const postReplayContentDest = bundlePaths(root, "bundle-post-replay-content-race-dest");
+  const postReplayContentFork = await writeForkedSession(postReplayContentRace.sessionFile, postReplayContentDest.sessionFile, 0, {
+    testHooks: {
+      afterReplayRead(paths) {
+        const path = paths[0]!;
+        const before = readFileSync(path, "utf8");
+        const after = before.replace("stable", "mutate");
+        if (after.length !== before.length) throw new Error("same-size replay race fixture changed length");
+        writeFileSync(path, after, { mode: 0o600 });
+        postReplayContentMutations += 1;
+      },
+    },
+  });
+  check(
+    "independent post-replay fingerprint rejects a same-size content rewrite",
+    postReplayContentFork.ok === false && postReplayContentMutations === 3 && !existsSync(postReplayContentDest.bundleDir),
+  );
+
+  const postReplayIdentityRace = bundlePaths(root, "bundle-post-replay-identity-race");
+  mkdirSync(postReplayIdentityRace.currentDir, { recursive: true, mode: 0o700 });
+  writeFileSync(
+    postReplayIdentityRace.sessionFile,
+    `${JSON.stringify({ storageSeq: 1, type: "checkpoint" })}\n`,
+    { mode: 0o600 },
+  );
+  let postReplayIdentityMutations = 0;
+  const postReplayIdentityDest = bundlePaths(root, "bundle-post-replay-identity-race-dest");
+  const postReplayIdentityFork = await writeForkedSession(postReplayIdentityRace.sessionFile, postReplayIdentityDest.sessionFile, 0, {
+    testHooks: {
+      afterReplayRead(paths) {
+        const path = paths[0]!;
+        renameSync(path, `${path}.replaced-${postReplayIdentityMutations}`);
+        writeFileSync(path, `${JSON.stringify({ storageSeq: 1, type: "checkpoint" })}\n`, { mode: 0o600 });
+        postReplayIdentityMutations += 1;
+      },
+    },
+  });
+  check(
+    "independent post-replay identity validation rejects a segment replacement",
+    postReplayIdentityFork.ok === false && postReplayIdentityMutations === 3 && !existsSync(postReplayIdentityDest.bundleDir),
+  );
+
   const leafRace = bundlePaths(root, "bundle-leaf-race");
   mkdirSync(leafRace.currentDir, { recursive: true, mode: 0o700 });
   writeFileSync(leafRace.sessionFile, `${JSON.stringify({ storageSeq: 1, type: "checkpoint" })}\n`, { mode: 0o600 });

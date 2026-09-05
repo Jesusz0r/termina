@@ -203,8 +203,8 @@ describe("Agent Core Trace V2 Invariants", () => {
         model: "summary-model",
         status: "ok",
         usage: { input: 40, cacheRead: null, cacheWrite: null, output: 8, reasoning: null },
-        usd: null,
-        price: null,
+        usd: 0.001,
+        price: knownPrice,
         requestedMode: "implicit",
         requestedTtlMs: null,
         effectiveMode: "implicit",
@@ -377,17 +377,20 @@ describe("Agent Core Trace V2 Invariants", () => {
         unknownSamples: 2,
         byPriceSource: { "models.dev": 2 },
       });
+      assert.equal(report.cost.summary.totalUsd, 0.001);
+      assert.equal(report.cost.all.totalUsd, 0.006);
     }, failures);
     
     check("billing uses successful settled tasks as the primary denominator", () => {
       assert.equal(report.billing.successfulSettled.taskCount, 1);
-      assert.equal(report.billing.successfulSettled.attempts, 3);
-      assert.equal(report.billing.successfulSettled.usage.input.total, 300);
-      assert.equal(report.billing.successfulSettled.cost.totalUsd, 0.005);
+      assert.equal(report.billing.successfulSettled.attempts, 4);
+      assert.equal(report.billing.successfulSettled.usage.input.total, 340);
+      assert.equal(report.billing.successfulSettled.cost.totalUsd, 0.006);
       assert.equal(report.billing.failedSettled.taskCount, 1);
       assert.equal(report.billing.failedSettled.attempts, 1);
       assert.equal(report.billing.unsettled.taskCount, 0);
       assert.equal(report.billing.retries.attempts, 2);
+      assert.equal(report.integrity.status, "incomplete");
     }, failures);
     
     check("non-success outcomes never become successful tasks", () => {

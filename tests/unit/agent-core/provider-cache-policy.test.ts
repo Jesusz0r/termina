@@ -308,7 +308,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
         () => {},
         Date.now(),
       );
-      assert.equal(usageField(result.usage, "input"), 30);
+      assert.equal(usageField(result.usage, "input"), 27);
       assert.equal(usageField(result.usage, "cacheRead"), 20);
       assert.equal(usageField(result.usage, "cacheWrite"), 3);
       assert.equal(usageField(result.usage, "output"), 4);
@@ -333,7 +333,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
         () => {},
         Date.now(),
       );
-      assert.equal(usageField(result.usage, "input"), 30);
+      assert.equal(usageField(result.usage, "input"), 18);
       assert.equal(usageField(result.usage, "cacheRead"), 100);
       assert.equal(usageField(result.usage, "cacheWrite"), 12);
       assert.equal(usageField(result.usage, "output"), 20);
@@ -698,6 +698,47 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       assert.equal(xai.input[0]?.content?.[0]?.prompt_cache_breakpoint, undefined);
       assert.equal(xai.input[0]?.content?.[0]?.cache_control, undefined);
       assert.equal(xai.session_id, undefined);
+    });
+
+    await test("OpenRouter Responses uses documented breakpoint translation and marks tool results", () => {
+      const body = compat.responsesBody(
+        "anthropic/claude-sonnet-4.6",
+        "sys",
+        [
+          { role: "user", content: "read the file" },
+          { role: "assistant", content: [{ type: "tool_use", id: "call-1", name: "read", input: { path: "README.md" } }] },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "call-1", content: "file contents" }] },
+        ],
+        [],
+        {
+          provider: "openrouter",
+          cacheKey: "derived-private-key",
+          sessionId: "openrouter-session",
+          cacheControl: true,
+        },
+      );
+      const output = body.input.find((item: any) => item.type === "function_call_output");
+      assert.deepEqual(output?.output, [{
+        type: "input_text",
+        text: "file contents",
+        prompt_cache_breakpoint: { mode: "explicit" },
+      }]);
+      assert.equal(body.prompt_cache_key, "derived-private-key");
+      assert.equal(body.session_id, "openrouter-session");
+      assert.equal(body.prompt_cache_options, undefined);
+      assert.equal(JSON.stringify(body).includes("cache_control"), false);
+      const stripped = compat.stripResponsesBreakpoints(body);
+      const strippedOutput = stripped.input.find((item: any) => item.type === "function_call_output");
+      assert.deepEqual(strippedOutput?.output, [{ type: "input_text", text: "file contents" }]);
+    });
+
+    await test("OpenRouter cache capabilities are route and model scoped", () => {
+      assert.equal(auth.usesOpenAIExplicitCache("gpt-6-astra", "openai", "https://api.openai.com/v1"), true);
+      assert.equal(auth.usesPromptCacheKey("openrouter", "openai/gpt-5.6-terra", "https://openrouter.ai/api/v1"), true);
+      assert.equal(auth.usesOpenAIExplicitCache("openai/gpt-5.6-terra", "openrouter", "https://openrouter.ai/api/v1"), true);
+      assert.equal(auth.usesPromptCacheOptions("openrouter", "openai/gpt-5.6-terra", "https://openrouter.ai/api/v1"), true);
+      assert.equal(auth.usesPromptCacheOptions("openrouter", "anthropic/claude-sonnet-4.6", "https://openrouter.ai/api/v1"), false);
+      assert.equal(auth.usesOpenAIExplicitCache("openai/gpt-5.6-terra", "openrouter", "https://api.openrouter.ai/api/v1"), false);
     });
     
     await test("OpenAI usage marks impossible cache totals unknown", () => {

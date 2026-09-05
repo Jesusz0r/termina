@@ -201,6 +201,7 @@ describe("Agent Core Provider Probe Invariants", () => {
         assert.equal(mock.requests[0].body.tools[0].strict, false);
         assert.equal(result.attempts[1].effectivePolicy.cacheFields.length, 0);
         assert.equal(result.attempts[1].stablePrefixByteIdentical, true);
+        assert.equal(result.attempts[1].usage.input, 6);
         assert.equal(result.attempts[1].usage.cacheRead, 4);
         assert.equal(result.attempts[1].usage.cacheWrite, 2);
         assert.equal(result.attempts[1].usage.output, 3);
@@ -232,6 +233,31 @@ describe("Agent Core Provider Probe Invariants", () => {
       } finally {
         /* The in-memory mock has no socket to close. */
       }
+    });
+
+    await test("OpenRouter Responses probe requests use documented fields", async () => {
+      const openaiPlan = buildProbePlan(config({
+        endpoint: "https://openrouter.ai/api/v1/responses",
+        provider: "openrouter",
+        model: "openai/gpt-5.6",
+        protocol: "openai-responses",
+        sourceUrl: SOURCE_URLS.openrouter,
+      }));
+      assert.equal(openaiPlan.requestPlan.requestedPolicy.cacheFields.includes("prompt_cache_key"), true);
+      assert.equal(openaiPlan.requestPlan.requestedPolicy.cacheFields.includes("prompt_cache_options"), true);
+      assert.equal(openaiPlan.requestPlan.requestedPolicy.cacheFields.includes("prompt_cache_breakpoint"), true);
+      assert.equal(openaiPlan.requestPlan.requestedPolicy.cacheFields.includes("session_id"), true);
+      assert.equal(openaiPlan.requestPlan.headers["x-session-id"], "[REDACTED]");
+
+      const anthropicPlan = buildProbePlan(config({
+        endpoint: "https://openrouter.ai/api/v1/responses",
+        provider: "openrouter",
+        model: "anthropic/claude-sonnet-4.6",
+        protocol: "openai-responses",
+        sourceUrl: SOURCE_URLS.openrouter,
+      }));
+      assert.equal(anthropicPlan.requestPlan.requestedPolicy.cacheFields.includes("prompt_cache_breakpoint"), true);
+      assert.equal(anthropicPlan.requestPlan.requestedPolicy.cacheFields.includes("prompt_cache_options"), false);
     });
     
     await test("a repeated optional-field rejection is not retried a second time", async () => {

@@ -283,14 +283,103 @@ function mcpOmissionMarker(kind: string, reason: string, continuation: McpContin
   return `[mcp ${kind} omitted: ${reason}${guidance}]`;
 }
 
-function stableOutputJson(raw: unknown): string | null {
+type StableOutputJson = Readonly<{
+  encoded: string | null;
+  reason: "too-large" | "not-json-serializable" | null;
+}>;
+
+const OUTPUT_JSON_TOO_LARGE = Symbol("mcp output JSON too large");
+
+/**
+ * Canonically encode an MCP result value without doing work beyond the
+ * provider-visible result budget. This intentionally does not reuse schema
+ * canonicalization: result values can be server-controlled and much larger
+ * than tool schemas.
+ */
+function stableOutputJson(raw: unknown, maxBytes = MCP_RESULT_BYTES): StableOutputJson {
+  const chunks: string[] = [];
+  let bytes = 0;
+  const push = (part: string): void => {
+    const partBytes = Buffer.byteLength(part, "utf8");
+    if (bytes + partBytes > maxBytes) throw OUTPUT_JSON_TOO_LARGE;
+    chunks.push(part);
+    bytes += partBytes;
+  };
+  const pushString = (value: string): void => {
+    // JSON encoding cannot be shorter than the UTF-8 input, so avoid creating
+    // an escaped copy of a string that cannot fit before the final check.
+    if (Buffer.byteLength(value, "utf8") > maxBytes - bytes) throw OUTPUT_JSON_TOO_LARGE;
+    const encoded = JSON.stringify(value);
+    if (typeof encoded !== "string") throw new Error("mcp output is not JSON-serializable");
+    push(encoded);
+  };
+  const visit = (value: unknown, seen: WeakSet<object>, depth: number): void => {
+    if (value === null) {
+      push("null");
+      return;
+    }
+    switch (typeof value) {
+      case "string":
+        pushString(value);
+        return;
+      case "boolean":
+        push(value ? "true" : "false");
+        return;
+      case "number":
+        if (!Number.isFinite(value)) throw new Error("mcp output contains a non-finite number");
+        push(JSON.stringify(value));
+        return;
+      case "object":
+        break;
+      default:
+        throw new Error("mcp output is not JSON-serializable");
+    }
+    if (depth > SCHEMA_MAX_DEPTH || seen.has(value)) throw new Error("mcp output is too deep or cyclic");
+    seen.add(value);
+    try {
+      if (Array.isArray(value)) {
+        push("[");
+        for (let index = 0; index < value.length; index += 1) {
+          if (index > 0) push(",");
+          visit(value[index], seen, depth + 1);
+        }
+        push("]");
+      } else {
+        push("{");
+        const keys: string[] = [];
+        for (const key in value as Record<string, unknown>) {
+          if (!Object.hasOwn(value, key)) continue;
+          keys.push(key);
+          if (keys.length > maxBytes) throw OUTPUT_JSON_TOO_LARGE;
+        }
+        keys.sort();
+        for (let index = 0; index < keys.length; index += 1) {
+          if (index > 0) push(",");
+          const key = keys[index]!;
+          pushString(key);
+          push(":");
+          visit((value as Record<string, unknown>)[key], seen, depth + 1);
+        }
+        push("}");
+      }
+    } finally {
+      seen.delete(value);
+    }
+  };
+
   try {
-    const canonical = canonicalizeJsonValue(raw, new WeakSet<object>(), 0);
-    const encoded = JSON.stringify(canonical);
-    return typeof encoded === "string" ? encoded : null;
-  } catch {
-    return null;
+    visit(raw, new WeakSet<object>(), 0);
+    return Object.freeze({ encoded: chunks.join(""), reason: null });
+  } catch (err) {
+    return Object.freeze({
+      encoded: null,
+      reason: err === OUTPUT_JSON_TOO_LARGE ? "too-large" : "not-json-serializable",
+    });
   }
+}
+
+function stableOutputFailure(result: StableOutputJson): string {
+  return result.reason === "too-large" ? "too large" : "not JSON-serializable";
 }
 
 function outputTypeLabel(raw: unknown): string {
@@ -362,21 +451,24 @@ export function normalizeMcpCallResult(result: unknown, continuation: McpContinu
   const rec = result as { content?: unknown; isError?: unknown; structuredContent?: unknown };
   const isError = rec.isError === true;
   let structuredPart: string | null = null;
+  let structuredCanonical: string | null = null;
   const jsonParts: string[] = [];
   const resourceParts: string[] = [];
   const resourceLinkParts: string[] = [];
   const omittedParts: string[] = [];
   let omitted = false;
-  let hasTextBlock = false;
-  let hasNonEmptyText = false;
+  const textParts: string[] = [];
 
   if (Object.hasOwn(rec, "structuredContent") && rec.structuredContent !== undefined) {
     const encoded = stableOutputJson(rec.structuredContent);
-    if (encoded === null) {
+    if (encoded.encoded === null) {
       omitted = true;
-      omittedParts.push(mcpOmissionMarker("structuredContent", "not JSON-serializable", continuation));
+      omittedParts.push(mcpOmissionMarker("structuredContent", stableOutputFailure(encoded), continuation));
     }
-    else structuredPart = `[mcp structuredContent] ${encoded}`;
+    else {
+      structuredCanonical = encoded.encoded;
+      structuredPart = `[mcp structuredContent] ${encoded.encoded}`;
+    }
   }
 
   if (Array.isArray(rec.content)) {
@@ -394,26 +486,25 @@ export function normalizeMcpCallResult(result: unknown, continuation: McpContinu
         description?: unknown;
       };
       if (b.type === "text" && typeof b.text === "string") {
-        hasTextBlock = true;
-        hasNonEmptyText ||= b.text.length > 0;
+        textParts.push(b.text);
       } else if (b.type === "json") {
         const encoded = stableOutputJson(b.json);
-        if (encoded === null) {
+        if (encoded.encoded === null) {
           omitted = true;
-          jsonParts.push(mcpOmissionMarker("json", "not JSON-serializable", continuation));
+          jsonParts.push(mcpOmissionMarker("json", stableOutputFailure(encoded), continuation));
         } else {
           jsonParts.push(
-            `[mcp json] ${encoded}`,
+            `[mcp json] ${encoded.encoded}`,
           );
         }
       } else if (b.type === "resource") {
         const resource = resourceMetadata(b.resource ?? b);
         const encoded = stableOutputJson(resource.metadata);
-        if (encoded === null) {
+        if (encoded.encoded === null) {
           omitted = true;
-          resourceParts.push(mcpOmissionMarker("resource", "metadata unavailable", continuation));
+          resourceParts.push(mcpOmissionMarker("resource", encoded.reason === "too-large" ? "too large" : "metadata unavailable", continuation));
         } else {
-          resourceParts.push(`[mcp resource] ${encoded}`);
+          resourceParts.push(`[mcp resource] ${encoded.encoded}`);
         }
         if (resource.hasBlob) {
           omitted = true;
@@ -422,11 +513,11 @@ export function normalizeMcpCallResult(result: unknown, continuation: McpContinu
       } else if (b.type === "resource_link") {
         const link = resourceMetadata(b);
         const encoded = stableOutputJson(link.metadata);
-        if (encoded === null) {
+        if (encoded.encoded === null) {
           omitted = true;
-          resourceLinkParts.push(mcpOmissionMarker("resource_link", "metadata unavailable", continuation));
+          resourceLinkParts.push(mcpOmissionMarker("resource_link", encoded.reason === "too-large" ? "too large" : "metadata unavailable", continuation));
         } else {
-          resourceLinkParts.push(`[mcp resource_link] ${encoded}`);
+          resourceLinkParts.push(`[mcp resource_link] ${encoded.encoded}`);
         }
       } else if (b.type === "image" || b.type === "audio") {
         const kind = outputTypeLabel(b.type);
@@ -441,8 +532,7 @@ export function normalizeMcpCallResult(result: unknown, continuation: McpContinu
       }
     }
   } else if (typeof rec.content === "string") {
-    hasTextBlock = true;
-    hasNonEmptyText = rec.content.length > 0;
+    textParts.push(rec.content);
   }
 
   let outputParts = 0;
@@ -452,16 +542,27 @@ export function normalizeMcpCallResult(result: unknown, continuation: McpContinu
     outputParts += 1;
   };
   if (structuredPart !== null) pushPart(structuredPart);
-  if (hasTextBlock && hasNonEmptyText) {
-    if (Array.isArray(rec.content)) {
-      for (const block of rec.content) {
-        if (!block || typeof block !== "object") continue;
-        const b = block as { type?: unknown; text?: unknown };
-        if (b.type === "text" && typeof b.text === "string") pushPart(b.text);
+  const equivalentTextIndexes = new Set<number>();
+  if (structuredCanonical !== null) {
+    for (let index = 0; index < textParts.length; index += 1) {
+      const text = textParts[index]!;
+      if (!text.trim()) continue;
+      // A giant textual block cannot be a useful duplicate after the
+      // provider-visible result cap. Avoid reparsing transport-sized text;
+      // preserving it as a distinct summary is safer than guessing.
+      if (Buffer.byteLength(text, "utf8") > MCP_RESULT_BYTES) continue;
+      try {
+        const parsed = JSON.parse(text) as unknown;
+        const canonical = stableOutputJson(parsed);
+        if (canonical.encoded === structuredCanonical) equivalentTextIndexes.add(index);
+      } catch {
+        // A textual summary that merely contains JSON remains meaningful.
       }
-    } else if (typeof rec.content === "string") {
-      pushPart(rec.content);
     }
+  }
+  for (let index = 0; index < textParts.length; index += 1) {
+    const text = textParts[index]!;
+    if (text.length > 0 && !equivalentTextIndexes.has(index)) pushPart(text);
   }
   for (const text of [...jsonParts].sort()) pushPart(text);
   for (const text of [...resourceParts].sort()) pushPart(text);
@@ -1004,6 +1105,9 @@ async function handshake(proc: McpConn): Promise<McpClientTool[]> {
   return out;
 }
 
+// Keep the complete capped discovery frozen for a session. A deferred MCP
+// catalog would need a provider-facing search protocol and a new-session/cache
+// boundary in main; tools/list is the canonical discovery surface today.
 export function selectMcpTools(
   discovered: McpClientTool[],
   kernelNames: ReadonlySet<string> = KERNEL_TOOL_NAMES,

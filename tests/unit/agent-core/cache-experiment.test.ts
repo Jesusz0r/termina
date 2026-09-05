@@ -23,6 +23,9 @@ describe("Agent Core Cache Experiment Invariants", () => {
         cacheReadPerToken: 0.000001,
         cacheWritePerToken: 0.000012,
         storagePerTokenHour: 0,
+        cacheWriteTtlClass: "5m",
+        reasoningBilling: "included-in-output",
+        reasoningPerToken: null,
       },
     ];
     
@@ -32,6 +35,7 @@ describe("Agent Core Cache Experiment Invariants", () => {
       attemptId,
       variant,
       corpusId = "corpus-1",
+      replicateId = null,
       role = "main",
       provider = "openai",
       protocol = "openai-responses",
@@ -59,6 +63,7 @@ describe("Agent Core Cache Experiment Invariants", () => {
       model,
       taskClass: "tool-heavy",
       corpusId,
+      replicateId,
       variant,
       status: "ok",
       retryCount,
@@ -219,7 +224,19 @@ describe("Agent Core Cache Experiment Invariants", () => {
       outcome: { status: "success", correctness: "unknown" },
     });
     
-    const report = analyzeCacheExperiment(records, { rateSnapshots: rates });
+    const cleanReaderDiagnostics = [{
+      source: "fixture",
+      retainedRecords: records.length,
+      omittedRecords: 0,
+      writeFailures: 0,
+      malformedRecords: 0,
+      partialRecords: 0,
+      retentionFailures: 0,
+      manifestWriteFailures: 0,
+      readerOmittedRecords: 0,
+      manifestErrors: 0,
+    }];
+    const report = analyzeCacheExperiment(records, { rateSnapshots: rates, readerDiagnostics: cleanReaderDiagnostics });
     
     assert.equal(report.schemaVersion, 1);
     assert.equal(report.attempts.total, 8);
@@ -342,7 +359,133 @@ describe("Agent Core Cache Experiment Invariants", () => {
     const futureRateReport = analyzeCacheExperiment([records[0]], { rateSnapshots: [futureRate] });
     assert.equal(futureRateReport.cost.knownRateSamples, 0);
     assert.equal(futureRateReport.cost.unknownRateSamples, 1);
-    
+
+    const separateReasoningRate = {
+      ...rates[0],
+      reasoningBilling: "separate",
+      reasoningPerToken: 0.000003,
+    };
+    const reasoningRecord = attempt({
+      runId: "run-reasoning",
+      taskId: "task-reasoning",
+      attemptId: "reasoning-1",
+      variant: "probe",
+      atMs: 0,
+      usage: { input: 100, cacheRead: 0, cacheWrite: 0, output: 10, reasoning: 5 },
+    });
+    const separateReasoningReport = analyzeCacheExperiment([reasoningRecord], { rateSnapshots: [separateReasoningRate] });
+    assert.equal(separateReasoningReport.cost.knownSamples, 1);
+    assert.ok(Math.abs(separateReasoningReport.cost.totalUsd - 0.001215) < 1e-12);
+    const canonicalReasoningReport = analyzeCacheExperiment([reasoningRecord], {
+      rateSnapshots: [{
+        scope: {
+          provider: "openai",
+          protocol: "openai-responses",
+          model: "gpt-5.6-sol",
+          route: "https://api.openai.com/v1/responses",
+          role: "main",
+        },
+        source: "fixture-canonical-rates",
+        version: "v1",
+        lookedUpAt: "2026-08-30T00:00:00.000Z",
+        units: {
+          input: "usd_per_million_tokens",
+          cacheRead: "usd_per_million_tokens",
+          cacheWrite: "usd_per_million_tokens",
+          output: "usd_per_million_tokens",
+          reasoning: "usd_per_million_tokens",
+          storage: "usd_per_gib_second",
+        },
+        cacheWriteTtlClass: "5m",
+        reasoningBilling: "separate",
+        rates: { input: 10, cacheRead: 1, cacheWrite: 12, output: 20, reasoning: 3, storage: null },
+      }],
+    });
+    assert.equal(canonicalReasoningReport.cost.knownSamples, 1);
+    assert.ok(Math.abs(canonicalReasoningReport.cost.totalUsd - 0.001215) < 1e-12);
+    const ttlMismatchReport = analyzeCacheExperiment([records[0]], {
+      rateSnapshots: [{ ...rates[0], cacheWriteTtlClass: "1h" }],
+    });
+    assert.equal(ttlMismatchReport.cost.knownSamples, 0);
+    const storageUnitMismatchReport = analyzeCacheExperiment([records[0]], {
+      rateSnapshots: [{
+        ...rates[0],
+        storagePerTokenHour: 0.000001,
+        units: {
+          input: "usd_per_token",
+          cacheRead: "usd_per_token",
+          cacheWrite: "usd_per_token",
+          output: "usd_per_token",
+          reasoning: "usd_per_token",
+          storage: "usd_per_gib_second",
+        },
+      }],
+    });
+    assert.equal(storageUnitMismatchReport.cost.knownSamples, 0);
+    const unknownReasoningReport = analyzeCacheExperiment([reasoningRecord], {
+      rateSnapshots: [{ ...rates[0], reasoningBilling: null, reasoningPerToken: null }],
+    });
+    assert.equal(unknownReasoningReport.cost.knownSamples, 0);
+    assert.equal(unknownReasoningReport.cost.unknownSamples, 1);
+
+    const replicateRecords = [];
+    for (const replicateId of ["r1", "r2", "r3"]) {
+      replicateRecords.push(
+        attempt({
+          runId: `run-baseline-${replicateId}`,
+          taskId: "task-replicated",
+          attemptId: `baseline-${replicateId}`,
+          variant: "baseline",
+          replicateId,
+          atMs: 0,
+          usage: { input: 100, cacheRead: 0, cacheWrite: 0, output: 10, reasoning: 0 },
+        }),
+        {
+          schemaVersion: 2,
+          recordType: "task-settled",
+          runId: `run-baseline-${replicateId}`,
+          taskId: "task-replicated",
+          replicateId,
+          attemptIds: [`baseline-${replicateId}`],
+          summaryAttemptIds: [],
+          finalAttemptId: `baseline-${replicateId}`,
+          outcome: { status: "success", correctness: "correct" },
+        },
+        attempt({
+          runId: `run-candidate-${replicateId}`,
+          taskId: "task-replicated",
+          attemptId: `candidate-${replicateId}`,
+          variant: "candidate",
+          replicateId,
+          atMs: 0,
+          usage: { input: 50, cacheRead: 0, cacheWrite: 0, output: 10, reasoning: 0 },
+        }),
+        {
+          schemaVersion: 2,
+          recordType: "task-settled",
+          runId: `run-candidate-${replicateId}`,
+          taskId: "task-replicated",
+          replicateId,
+          attemptIds: [`candidate-${replicateId}`],
+          summaryAttemptIds: [],
+          finalAttemptId: `candidate-${replicateId}`,
+          outcome: { status: "success", correctness: "correct" },
+        },
+      );
+    }
+    const replicateReport = analyzeCacheExperiment(replicateRecords, {
+      rateSnapshots: rates,
+      readerDiagnostics: cleanReaderDiagnostics,
+      efficiencyGate: { minimumCostReduction: 0.1, minimumKnownCostCoverage: 1 },
+    });
+    assert.equal(replicateReport.quality.paired.taskPairs, 3);
+    assert.equal(replicateReport.quality.pairedSuccessfulTasks.correctPairs, 3);
+    assert.equal(replicateReport.quality.efficiency.status, "pass");
+    assert.equal(replicateReport.quality.efficiency.knownCoverage, 1);
+
+    assert.equal(withReaderDiagnostics.quality.gates.traceIntegrity.status, "insufficient-data");
+    assert.equal(withReaderDiagnostics.quality.successfulTasks.knownCostTasks, 0);
+
     const unknownSourceBreakEven = breakEvenFromRateSnapshot({ ...rates[0], source: undefined }, 100);
     assert.ok(unknownSourceBreakEven.unknowns.includes("source"));
     const storageBreakEven = breakEvenFromRateSnapshot({ ...rates[0], storagePerTokenHour: 0.000001 }, { prefixTokens: 100, storageTtlMs: 3_600_000 });
@@ -351,7 +494,7 @@ describe("Agent Core Cache Experiment Invariants", () => {
     assert.ok(Math.abs(storageBreakEven.costAtReads[0].cachedUsd - 0.0013) < 1e-12);
     
     const first = JSON.stringify(report);
-    assert.equal(first, JSON.stringify(analyzeCacheExperiment(records.slice().reverse(), { rateSnapshots: rates })));
+    assert.equal(first, JSON.stringify(analyzeCacheExperiment(records.slice().reverse(), { rateSnapshots: rates, readerDiagnostics: cleanReaderDiagnostics })));
     
     console.log("agent-core cache experiment tests passed");
     

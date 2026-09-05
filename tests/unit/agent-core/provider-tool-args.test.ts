@@ -204,6 +204,42 @@ describe("Agent Core Provider Tool Arguments Contract", () => {
       }
     });
 
+    it("tolerates benign keepalive and duplicate trailers after terminal completion", async () => {
+      const completed = {
+        type: "response.completed",
+        sequence_number: 3,
+        response: { status: "completed", output: [] },
+      };
+      const events = await compat.readSseJson(sseStream([
+        completed,
+        { type: "ping", cost: 1 },
+        completed,
+      ]));
+      expect(events.length).toBe(3);
+      const parsed = compat.responsesResultFromEvents(events as any, () => {}, 0);
+      expect(parsed.error).toBeUndefined();
+      expect(parsed.stopReason).toBe("stop");
+      const chatTerminal = { choices: [{ finish_reason: "stop" }] };
+      const chat = await compat.readSseJson(sseStream([
+        chatTerminal,
+        { choices: [], usage: { prompt_tokens: 1 } },
+        { type: "ping" },
+      ]));
+      expect(chat.length).toBe(3);
+      await expect(
+        compat.readSseJson(sseStream([
+          completed,
+          { type: "response.output_text.delta", delta: "late" },
+        ])),
+      ).rejects.toThrow(/after terminal/);
+      await expect(
+        compat.readSseJson(sseStream([
+          chatTerminal,
+          { choices: [{ delta: { content: "late" } }] },
+        ])),
+      ).rejects.toThrow(/after terminal/);
+    });
+
     it("exposes core provider tool admission invariant", () => {
       expect(typeof core.providerToolAdmissionError).toBe("function");
       expect(

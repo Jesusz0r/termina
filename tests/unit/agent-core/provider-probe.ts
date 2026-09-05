@@ -39,7 +39,7 @@ const OPTIONAL_BODY_FIELDS = new Set([
   "session_id",
 ]);
 const OPTIONAL_HEADERS = new Set(["x-grok-conv-id", "x-session-id"]);
-const SENSITIVE_HEADERS = /^(authorization|proxy-authorization|x-api-key|api-key|cookie|set-cookie)$/i;
+const SENSITIVE_HEADERS = /^(authorization|proxy-authorization|x-api-key|api-key|cookie|set-cookie|x-session-id|x-opencode-session|x-grok-conv-id)$/i;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 
 const SOURCE_URLS = Object.freeze({
@@ -321,8 +321,18 @@ function strippedHeaders(headers) {
   );
 }
 
-function modelIsGpt56(model) {
-  return /(?:^|\/)gpt-5\.6(?:[-/]|$)/i.test(model.trim());
+function modelIsGpt56OrLater(model) {
+  const leaf = model.trim().toLowerCase().split("/").at(-1) ?? "";
+  const match = /^gpt-(\d+)(?:\.(\d+))?(?:[.-]|$)/.exec(leaf);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = match[2] === undefined ? 0 : Number(match[2]);
+  return major > 5 || (major === 5 && minor >= 6);
+}
+
+function modelSupportsOpenRouterBreakpoint(model) {
+  const normalized = model.trim().toLowerCase();
+  return modelIsGpt56OrLater(normalized) || normalized.includes("claude") || normalized.includes("gemini");
 }
 
 function anthropicMessages(fixture) {
@@ -379,15 +389,22 @@ function buildRequest(config, includeOptional = true) {
     const options = {
       provider: config.provider,
       maxTokens: 16,
-      ...(includeOptional && config.provider === "openai" && modelIsGpt56(config.model)
+      ...(includeOptional && config.provider === "openai" && modelIsGpt56OrLater(config.model)
         ? {
           cacheKey: key,
           promptCacheMode: "explicit",
           explicitCacheBreakpoint: true,
         }
         : {}),
+      ...(includeOptional && config.provider === "openrouter"
+        ? {
+          cacheKey: key,
+          sessionId: key,
+          ...(modelSupportsOpenRouterBreakpoint(config.model) ? { explicitCacheBreakpoint: true } : {}),
+          ...(modelIsGpt56OrLater(config.model) ? { promptCacheMode: "explicit" } : {}),
+        }
+        : {}),
       ...(includeOptional && config.provider === "xai" ? { cacheKey: key } : {}),
-      ...(includeOptional && config.provider === "openrouter" ? { sessionId: key } : {}),
     };
     body = compat.responsesBody(
       config.model,

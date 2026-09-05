@@ -4,6 +4,10 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import {
+  computeTraceCost,
+  normalizeRateSnapshot as normalizeCanonicalRateSnapshot,
+} from "../../../agent-core/rates.ts";
 import { readTraceDirectory } from "./trace-report.ts";
 
 const SCHEMA_VERSION = 1;
@@ -16,6 +20,9 @@ const DEFAULT_TTL_BUCKETS = [
 const UNKNOWN_RETENTION_BUCKET = "unknown-retention";
 const UNKNOWN_GAP_BUCKET = "unknown-gap";
 const RATE_PER_MILLION = 1_000_000;
+const TOKEN_RATE_PER_TOKEN_UNITS = new Set(["usd_per_token", "usd-per-token", "per-token", "perToken", "usd/token"]);
+const TOKEN_RATE_PER_MILLION_UNITS = new Set(["usd-per-million-tokens", "usd_per_million_tokens", "per-million-tokens", "perMillionTokens"]);
+const STORAGE_PER_TOKEN_HOUR_UNITS = new Set(["usd_per_token_hour", "usd-per-token-hour", "per-token-hour", "perTokenHour"]);
 
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -210,6 +217,13 @@ function variantFromRecord(record) {
     ?? nonempty(record?.experiment?.variant);
 }
 
+function replicateFromRecord(record) {
+  return nonempty(record?.replicateId)
+    ?? nonempty(record?.replicate)
+    ?? nonempty(record?.metadata?.replicateId)
+    ?? nonempty(record?.experiment?.replicateId);
+}
+
 function corpusFromRecord(record) {
   return {
     id: nonempty(record?.corpusId)
@@ -260,6 +274,7 @@ function normalizeAttempt(record) {
     corpusId: corpus.id,
     corpusSource: corpus.source,
     variant: variantFromRecord(record),
+    replicateId: replicateFromRecord(record),
     status: nonempty(record.status) ?? "unknown",
     atMs: recordTimeMs(record),
     observedAtMs: absoluteRecordTimeMs(record),
@@ -284,6 +299,7 @@ function normalizeSettlement(record) {
     taskId,
     corpusId: corpus.id,
     corpusSource: corpus.source,
+    replicateId: replicateFromRecord(record),
     status: nonempty(outcome.status),
     correctness: nonempty(outcome.correctness),
     finalAttemptId: nonempty(record.finalAttemptId),
@@ -443,21 +459,33 @@ function usageAggregate(attempts) {
   return result;
 }
 
-function normalizeRateNumber(value, unit) {
+function normalizeRateNumber(value, unit, kind = "token") {
   const number = finiteNonnegative(value);
   if (number === null) return null;
-  if (unit === "usd-per-million-tokens" || unit === "per-million-tokens" || unit === "perMillionTokens") return number / RATE_PER_MILLION;
-  return number;
+  if (kind === "storage") {
+    return unit === null || unit === undefined || STORAGE_PER_TOKEN_HOUR_UNITS.has(unit) ? number : null;
+  }
+  if (unit === null || unit === undefined || TOKEN_RATE_PER_TOKEN_UNITS.has(unit)) return number;
+  return TOKEN_RATE_PER_MILLION_UNITS.has(unit) ? number / RATE_PER_MILLION : null;
 }
 
 function normalizeRateSnapshot(snapshot) {
   if (!isObject(snapshot)) return null;
   const nested = isObject(snapshot.rates) ? snapshot.rates : snapshot;
+  const units = isObject(snapshot.units) ? snapshot.units : null;
   const unit = nested.unit ?? snapshot.unit;
+  const unitFor = (name) => units?.[name] ?? units?.[name.replace(/PerToken(?:Hour)?$/, "")] ?? unit;
   const field = (name, ...aliases) => {
     for (const key of [name, ...aliases]) {
-      if (Object.hasOwn(nested, key)) return normalizeRateNumber(nested[key], unit);
-      if (Object.hasOwn(snapshot, key)) return normalizeRateNumber(snapshot[key], unit);
+      if (Object.hasOwn(nested, key)) return normalizeRateNumber(nested[key], unitFor(name));
+      if (Object.hasOwn(snapshot, key)) return normalizeRateNumber(snapshot[key], unitFor(name));
+    }
+    return null;
+  };
+  const storageField = (name, ...aliases) => {
+    for (const key of [name, ...aliases]) {
+      if (Object.hasOwn(nested, key)) return normalizeRateNumber(nested[key], unitFor(name), "storage");
+      if (Object.hasOwn(snapshot, key)) return normalizeRateNumber(snapshot[key], unitFor(name), "storage");
     }
     return null;
   };
@@ -477,7 +505,14 @@ function normalizeRateSnapshot(snapshot) {
     outputPerToken: field("outputPerToken", "output", "output_rate"),
     cacheReadPerToken: field("cacheReadPerToken", "cacheRead", "cache_read", "cache_read_rate"),
     cacheWritePerToken: field("cacheWritePerToken", "cacheWrite", "cache_write", "cache_write_rate"),
-    storagePerTokenHour: field("storagePerTokenHour", "storage", "storage_rate", "storage_per_token_hour"),
+    reasoningPerToken: field("reasoningPerToken", "reasoning", "reasoning_rate"),
+    storagePerTokenHour: storageField("storagePerTokenHour", "storage", "storage_rate", "storage_per_token_hour"),
+    cacheWriteTtlClass: ["unknown", "provider-default", "5m", "30m", "1h", "custom"].includes(snapshot.cacheWriteTtlClass)
+      ? snapshot.cacheWriteTtlClass
+      : null,
+    reasoningBilling: snapshot.reasoningBilling === "separate" || snapshot.reasoningBilling === "included-in-output"
+      ? snapshot.reasoningBilling
+      : null,
   };
 }
 
@@ -504,6 +539,93 @@ function traceCostAvailableAtAttempt(attempt) {
   return Number.isFinite(retrievedAtMs) && retrievedAtMs <= attempt.observedAtMs;
 }
 
+function cacheWriteTtlClass(attempt) {
+  const ttlMs = attempt.cache.effective.ttlMs ?? attempt.cache.requested.ttlMs;
+  if (ttlMs === null) return "unknown";
+  if (ttlMs === 5 * 60 * 1000) return "5m";
+  if (ttlMs === 30 * 60 * 1000) return "30m";
+  if (ttlMs === 60 * 60 * 1000) return "1h";
+  return "custom";
+}
+
+function cacheWriteTtlCompatible(snapshot, attempt) {
+  if (attempt.usage.cacheWrite === null || attempt.usage.cacheWrite === 0) return true;
+  const rateClass = snapshot.cacheWriteTtlClass;
+  const attemptClass = cacheWriteTtlClass(attempt);
+  if (rateClass === null || rateClass === "unknown" || attemptClass === "unknown") return false;
+  return rateClass === attemptClass;
+}
+
+function canonicalSnapshotForAttempt(snapshot, attempt) {
+  if (!snapshot) return null;
+  return normalizeCanonicalRateSnapshot({
+    scope: {
+      provider: attempt.provider,
+      protocol: attempt.protocol,
+      model: attempt.model,
+      route: attempt.route,
+      role: attempt.role === "summary" ? "summary" : "main",
+    },
+    source: snapshot.source,
+    version: snapshot.version,
+    lookedUpAt: snapshot.retrievedAt,
+    units: {
+      input: "usd_per_token",
+      cacheRead: "usd_per_token",
+      cacheWrite: "usd_per_token",
+      output: "usd_per_token",
+      reasoning: "usd_per_token",
+      storage: "usd_per_gib_second",
+    },
+    cacheWriteTtlClass: snapshot.cacheWriteTtlClass,
+    reasoningBilling: snapshot.reasoningBilling,
+    rates: {
+      input: snapshot.inputPerToken,
+      cacheRead: snapshot.cacheReadPerToken,
+      cacheWrite: snapshot.cacheWritePerToken,
+      output: snapshot.outputPerToken,
+      reasoning: snapshot.reasoningPerToken,
+      storage: null,
+    },
+  });
+}
+
+function rateFingerprint(snapshot) {
+  if (!snapshot) return null;
+  return JSON.stringify({
+    source: snapshot.source,
+    version: snapshot.version,
+    retrievedAt: snapshot.retrievedAt,
+    provider: snapshot.provider,
+    protocol: snapshot.protocol,
+    route: snapshot.route,
+    model: snapshot.model,
+    role: snapshot.role,
+    inputPerToken: snapshot.inputPerToken,
+    outputPerToken: snapshot.outputPerToken,
+    cacheReadPerToken: snapshot.cacheReadPerToken,
+    cacheWritePerToken: snapshot.cacheWritePerToken,
+    reasoningPerToken: snapshot.reasoningPerToken,
+    storagePerTokenHour: snapshot.storagePerTokenHour,
+    cacheWriteTtlClass: snapshot.cacheWriteTtlClass,
+    reasoningBilling: snapshot.reasoningBilling,
+  });
+}
+
+function traceCostFingerprint(attempt) {
+  if (!attempt.cost.source || !attempt.cost.retrievedAt) return null;
+  return `trace:${JSON.stringify({
+    source: attempt.cost.source,
+    version: attempt.cost.version,
+    retrievedAt: attempt.cost.retrievedAt,
+    provider: attempt.provider,
+    protocol: attempt.protocol,
+    route: attempt.route,
+    model: attempt.model,
+    role: attempt.role,
+  })}`;
+}
+
 function chooseRateSnapshot(attempt, snapshots) {
   const candidates = snapshots
     .map((snapshot) => ({ snapshot, specificity: rateSnapshotSpecificity(snapshot, attempt) }))
@@ -519,18 +641,14 @@ function chooseRateSnapshot(attempt, snapshots) {
   return candidates[0]?.snapshot ?? null;
 }
 
-function requiredRateFieldsKnown(snapshot) {
-  return snapshot !== null && snapshot.source !== null && snapshot.retrievedAt !== null && snapshot.inputPerToken !== null
-    && snapshot.cacheReadPerToken !== null && snapshot.cacheWritePerToken !== null && snapshot.outputPerToken !== null;
-}
-
 function storageCostForAttempt(attempt, snapshot) {
   if (snapshot === null) return { usd: null, known: false, reason: "missing-rate-snapshot" };
-  if (snapshot.storagePerTokenHour === null) return { usd: null, known: false, reason: "missing-storage-rate" };
   if (attempt.usage.cacheWrite === null) return { usd: null, known: false, reason: "missing-cache-write" };
-  if (snapshot.storagePerTokenHour === 0 || attempt.usage.cacheWrite === 0) {
+  if (attempt.usage.cacheWrite === 0) {
     return { usd: 0, known: true, reason: null };
   }
+  if (snapshot.storagePerTokenHour === null) return { usd: null, known: false, reason: "missing-storage-rate" };
+  if (snapshot.storagePerTokenHour === 0) return { usd: 0, known: true, reason: null };
   const ttlMs = attempt.cache.effective.ttlMs ?? attempt.cache.requested.ttlMs;
   if (ttlMs === null) return { usd: null, known: false, reason: "missing-storage-ttl" };
   return {
@@ -544,22 +662,59 @@ function costForAttempt(attempt, snapshots) {
   const usage = attempt.usage;
   const rateSnapshot = chooseRateSnapshot(attempt, snapshots);
   const storage = storageCostForAttempt(attempt, rateSnapshot);
-  if (rateSnapshot && requiredRateFieldsKnown(rateSnapshot)
-    && usage.input !== null && usage.cacheRead !== null && usage.cacheWrite !== null && usage.output !== null
-    && storage.known) {
+  if (rateSnapshot && storage.known && cacheWriteTtlCompatible(rateSnapshot, attempt)) {
+    const canonical = canonicalSnapshotForAttempt(rateSnapshot, attempt);
+    const requiredFields = rateSnapshot.reasoningBilling === "included-in-output"
+      ? ["input", "cacheRead", "cacheWrite", "output"]
+      : ["input", "cacheRead", "cacheWrite", "output", "reasoning"];
+    const computed = computeTraceCost({
+      role: attempt.role === "summary" ? "summary" : "main",
+      scope: {
+        provider: attempt.provider,
+        protocol: attempt.protocol,
+        model: attempt.model,
+        route: attempt.route,
+      },
+      usage,
+      snapshot: canonical,
+      requiredFields,
+    });
+    if (computed.usd !== null) {
+      return {
+        usd: computed.usd + storage.usd,
+        source: computed.source,
+        version: computed.version,
+        retrievedAt: computed.lookedUpAt,
+        rateSnapshot,
+        storage,
+        rateFingerprint: rateFingerprint(rateSnapshot),
+        known: true,
+        reason: null,
+      };
+    }
+    if (attempt.cost.usd !== null && attempt.cost.source !== null && traceCostAvailableAtAttempt(attempt)) {
+      return {
+        usd: attempt.cost.usd,
+        source: attempt.cost.source,
+        version: attempt.cost.version,
+        retrievedAt: attempt.cost.retrievedAt,
+        rateSnapshot,
+        storage: { usd: null, known: null, reason: "included-in-trace-cost" },
+        rateFingerprint: traceCostFingerprint(attempt),
+        known: true,
+        reason: "trace-cost",
+      };
+    }
     return {
-      usd: usage.input * rateSnapshot.inputPerToken
-        + usage.cacheRead * rateSnapshot.cacheReadPerToken
-        + usage.cacheWrite * rateSnapshot.cacheWritePerToken
-        + usage.output * rateSnapshot.outputPerToken
-        + storage.usd,
-      source: rateSnapshot.source,
-      version: rateSnapshot.version,
-      retrievedAt: rateSnapshot.retrievedAt,
+      usd: null,
+      source: computed.source ?? rateSnapshot.source,
+      version: computed.version ?? rateSnapshot.version,
+      retrievedAt: computed.lookedUpAt ?? rateSnapshot.retrievedAt,
       rateSnapshot,
       storage,
-      known: true,
-      reason: null,
+      rateFingerprint: rateFingerprint(rateSnapshot),
+      known: false,
+      reason: computed.unknownFields.join(",") || "incomplete-rate-or-usage",
     };
   }
   if (attempt.cost.usd !== null && attempt.cost.source !== null && traceCostAvailableAtAttempt(attempt)) {
@@ -570,6 +725,7 @@ function costForAttempt(attempt, snapshots) {
       retrievedAt: attempt.cost.retrievedAt,
       rateSnapshot,
       storage: { usd: null, known: null, reason: "included-in-trace-cost" },
+      rateFingerprint: traceCostFingerprint(attempt),
       known: true,
       reason: "trace-cost",
     };
@@ -581,6 +737,7 @@ function costForAttempt(attempt, snapshots) {
     retrievedAt: rateSnapshot?.retrievedAt ?? attempt.cost.retrievedAt,
     rateSnapshot,
     storage,
+    rateFingerprint: rateFingerprint(rateSnapshot),
     known: false,
     reason: rateSnapshot ? storage.reason ?? "incomplete-rate-or-usage" : "missing-rate-snapshot",
   };
@@ -891,11 +1048,13 @@ function taskModel(attempts, settlements) {
       taskId: attempt.taskId,
       corpusIds: new Set(),
       corpusSources: new Set(),
+      replicateIds: new Set(),
       attempts: [],
       settlement: null,
     };
     if (attempt.corpusId) group.corpusIds.add(attempt.corpusId);
     if (attempt.corpusSource) group.corpusSources.add(attempt.corpusSource);
+    if (attempt.replicateId) group.replicateIds.add(attempt.replicateId);
     group.attempts.push(attempt);
     groups.set(key, group);
   }
@@ -906,19 +1065,23 @@ function taskModel(attempts, settlements) {
       taskId: settlement.taskId,
       corpusIds: new Set(),
       corpusSources: new Set(),
+      replicateIds: new Set(),
       attempts: [],
       settlement: null,
     };
     if (settlement.corpusId) group.corpusIds.add(settlement.corpusId);
     if (settlement.corpusSource) group.corpusSources.add(settlement.corpusSource);
+    if (settlement.replicateId) group.replicateIds.add(settlement.replicateId);
     group.settlement = settlement;
     groups.set(key, group);
   }
   for (const group of groups.values()) {
     group.corpusId = group.corpusIds.size === 1 ? [...group.corpusIds][0] : null;
     group.corpusSource = group.corpusSources.size === 1 ? [...group.corpusSources][0] : null;
+    group.replicateId = group.replicateIds.size === 1 ? [...group.replicateIds][0] : null;
     delete group.corpusIds;
     delete group.corpusSources;
+    delete group.replicateIds;
   }
   return [...groups.values()].sort((left, right) => stableCompare(compositeKey(left.runId, left.taskId), compositeKey(right.runId, right.taskId)));
 }
@@ -931,11 +1094,13 @@ function taskVariant(group) {
 function taskAccounting(group, snapshots) {
   const inputValues = group.attempts.map((attempt) => completeInputUsage(attempt.usage));
   const costs = group.attempts.map((attempt) => costForAttempt(attempt, snapshots));
+  const rateFingerprints = [...new Set(costs.map((value) => value.rateFingerprint).filter(Boolean))].sort(stableCompare);
   return {
     inputKnown: inputValues.every((value) => value !== null),
     inputTotal: inputValues.every((value) => value !== null) ? inputValues.reduce((sum, value) => sum + value, 0) : null,
     costKnown: costs.every((value) => value.known),
     costTotal: costs.every((value) => value.known) ? costs.reduce((sum, value) => sum + value.usd, 0) : null,
+    rateFingerprints,
   };
 }
 
@@ -948,6 +1113,99 @@ function sumKnownReaderField(diagnostics, field) {
   return values.length && values.every((value) => value !== null)
     ? values.reduce((sum, value) => sum + value, 0)
     : null;
+}
+
+const TRACE_INTEGRITY_FIELDS = [
+  "omittedRecords",
+  "writeFailures",
+  "malformedRecords",
+  "partialRecords",
+  "retentionFailures",
+  "manifestWriteFailures",
+  "readerOmittedRecords",
+  "manifestErrors",
+];
+
+function traceIntegrity(invalidRecords, readerDiagnostics) {
+  const reasons = [];
+  if (invalidRecords.length > 0) reasons.push("invalid-records");
+  if (readerDiagnostics.length === 0) reasons.push("reader-diagnostics-not-provided");
+  for (const diagnostic of readerDiagnostics) {
+    for (const field of TRACE_INTEGRITY_FIELDS) {
+      const value = finiteNonnegative(diagnostic?.[field]);
+      if (value === null) reasons.push(`${field}-unknown`);
+      else if (value > 0) reasons.push(`${field}>0`);
+    }
+  }
+  const uniqueReasons = [...new Set(reasons)].sort(stableCompare);
+  return {
+    status: uniqueReasons.length === 0 ? "complete" : "incomplete",
+    complete: uniqueReasons.length === 0,
+    reasons: uniqueReasons,
+    denominator: "validated-records-with-clean-reader-diagnostics",
+  };
+}
+
+function sameRateProvenance(left, right) {
+  const leftRates = [...(left?.rateFingerprints ?? [])].sort(stableCompare);
+  const rightRates = [...(right?.rateFingerprints ?? [])].sort(stableCompare);
+  return leftRates.length > 0 && leftRates.length === rightRates.length
+    && leftRates.every((value, index) => value === rightRates[index]);
+}
+
+function efficiencyGate(pairedCorrectAccounting, eligibleCorrectPairs, options) {
+  const configured = isObject(options) && (Object.hasOwn(options, "minimumCostReduction") || Object.hasOwn(options, "minimumKnownCostCoverage"));
+  if (!configured) {
+    return {
+      status: "not-evaluated",
+      reason: "efficiency-thresholds-not-configured",
+      denominator: eligibleCorrectPairs.length,
+      knownPairs: pairedCorrectAccounting.length,
+      knownCoverage: eligibleCorrectPairs.length > 0 ? pairedCorrectAccounting.length / eligibleCorrectPairs.length : null,
+      minimumCostReduction: null,
+      minimumKnownCostCoverage: null,
+      baselineMedianCostUsd: null,
+      candidateMedianCostUsd: null,
+      medianCostReduction: null,
+    };
+  }
+  const minimumCostReduction = finiteNonnegative(options.minimumCostReduction) ?? 0;
+  const minimumKnownCostCoverage = Math.min(1, finiteNonnegative(options.minimumKnownCostCoverage) ?? 1);
+  const knownCoverage = eligibleCorrectPairs.length > 0 ? pairedCorrectAccounting.length / eligibleCorrectPairs.length : null;
+  if (knownCoverage === null || knownCoverage < minimumKnownCostCoverage) {
+    return {
+      status: "insufficient-data",
+      reason: "known-cost-coverage-below-threshold",
+      denominator: eligibleCorrectPairs.length,
+      knownPairs: pairedCorrectAccounting.length,
+      knownCoverage,
+      minimumCostReduction,
+      minimumKnownCostCoverage,
+      baselineMedianCostUsd: null,
+      candidateMedianCostUsd: null,
+      medianCostReduction: null,
+    };
+  }
+  const baselineCosts = pairedCorrectAccounting.map((pair) => pair.baseline.costTotal);
+  const candidateCosts = pairedCorrectAccounting.map((pair) => pair.candidate.costTotal);
+  const baselineMedianCostUsd = percentile(baselineCosts, 0.5);
+  const candidateMedianCostUsd = percentile(candidateCosts, 0.5);
+  const medianCostReduction = baselineMedianCostUsd > 0
+    ? 1 - candidateMedianCostUsd / baselineMedianCostUsd
+    : null;
+  const status = medianCostReduction !== null && medianCostReduction >= minimumCostReduction ? "pass" : "fail";
+  return {
+    status,
+    reason: status === "pass" ? null : "median-cost-reduction-below-threshold",
+    denominator: eligibleCorrectPairs.length,
+    knownPairs: pairedCorrectAccounting.length,
+    knownCoverage,
+    minimumCostReduction,
+    minimumKnownCostCoverage,
+    baselineMedianCostUsd,
+    candidateMedianCostUsd,
+    medianCostReduction,
+  };
 }
 
 function pairedTaskGroups(taskGroups) {
@@ -964,7 +1222,7 @@ function pairedTaskGroups(taskGroups) {
       unknownCorpusTasks++;
       continue;
     }
-    const key = `${group.corpusId}\u0000${group.taskId}`;
+    const key = `${group.corpusId}\u0000${group.taskId}\u0000${group.replicateId ?? "unknown"}`;
     const tasks = byVariant.get(variant) ?? new Map();
     const matches = tasks.get(key) ?? [];
     matches.push(group);
@@ -987,12 +1245,17 @@ function pairedTaskGroups(taskGroups) {
   return { pairs, ambiguous, unpaired, unknownCorpusTasks, unknownVariantTasks };
 }
 
-function qualitySummary(taskGroups, snapshots) {
+function qualitySummary(taskGroups, snapshots, integrity, efficiencyOptions) {
+  const accountingEligible = integrity?.complete !== false;
   const successful = taskGroups.filter((group) => group.settlement?.status === "success");
   const settled = taskGroups.filter((group) => group.settlement !== null);
   const accounting = new Map(taskGroups.map((group) => [compositeKey(group.runId, group.taskId), taskAccounting(group, snapshots)]));
-  const knownInput = successful.map((group) => accounting.get(compositeKey(group.runId, group.taskId))).filter((value) => value?.inputKnown);
-  const knownCost = successful.map((group) => accounting.get(compositeKey(group.runId, group.taskId))).filter((value) => value?.costKnown);
+  const knownInput = accountingEligible
+    ? successful.map((group) => accounting.get(compositeKey(group.runId, group.taskId))).filter((value) => value?.inputKnown)
+    : [];
+  const knownCost = accountingEligible
+    ? successful.map((group) => accounting.get(compositeKey(group.runId, group.taskId))).filter((value) => value?.costKnown)
+    : [];
   const correctness = {
     correct: settled.filter((group) => group.settlement.correctness === "correct").length,
     incorrect: settled.filter((group) => group.settlement.correctness === "incorrect").length,
@@ -1026,18 +1289,23 @@ function qualitySummary(taskGroups, snapshots) {
   const pairedSuccessful = pairedOutcomes.filter((pair) => pair.baseline.settlement.status === "success" && pair.candidate.settlement.status === "success");
   const pairedCorrectness = pairedSuccessful.filter((pair) => [pair.baseline.settlement.correctness, pair.candidate.settlement.correctness]
     .every((value) => value === "correct" || value === "incorrect"));
+  const pairedCorrectTasks = pairedSuccessful.filter((pair) => pair.baseline.settlement.correctness === "correct" && pair.candidate.settlement.correctness === "correct");
   const baselinePairedSuccesses = pairedOutcomes.filter((pair) => pair.baseline.settlement.status === "success").length;
   const candidatePairedSuccesses = pairedOutcomes.filter((pair) => pair.candidate.settlement.status === "success").length;
   const baselinePairedFailures = pairedOutcomes.filter((pair) => pair.baseline.settlement.status === "failure").length;
   const candidatePairedFailures = pairedOutcomes.filter((pair) => pair.candidate.settlement.status === "failure").length;
   const baselineCorrect = pairedCorrectness.filter((pair) => pair.baseline.settlement.correctness === "correct").length;
   const candidateCorrect = pairedCorrectness.filter((pair) => pair.candidate.settlement.correctness === "correct").length;
-  const pairedAccounting = pairedSuccessful.map((pair) => ({
+  const pairedAccounting = pairedCorrectTasks.map((pair) => ({
     baseline: accounting.get(compositeKey(pair.baseline.runId, pair.baseline.taskId)),
     candidate: accounting.get(compositeKey(pair.candidate.runId, pair.candidate.taskId)),
   }));
-  const pairedKnownInput = pairedAccounting.filter((pair) => pair.baseline?.inputKnown && pair.candidate?.inputKnown);
-  const pairedKnownCost = pairedAccounting.filter((pair) => pair.baseline?.costKnown && pair.candidate?.costKnown);
+  const eligiblePairedAccounting = accountingEligible ? pairedAccounting : [];
+  const pairedKnownInput = eligiblePairedAccounting.filter((pair) => pair.baseline?.inputKnown && pair.candidate?.inputKnown);
+  const pairedKnownCost = eligiblePairedAccounting.filter((pair) =>
+    pair.baseline?.costKnown && pair.candidate?.costKnown && sameRateProvenance(pair.baseline, pair.candidate));
+  const pairedRateMismatches = eligiblePairedAccounting.filter((pair) =>
+    pair.baseline?.costKnown && pair.candidate?.costKnown && !sameRateProvenance(pair.baseline, pair.candidate)).length;
   const pairingAvailable = pairing.pairs.length > 0 && pairedOutcomes.length > 0;
   const successGate = !pairingAvailable
     ? { status: "insufficient-data", reason: "paired-baseline-candidate-outcomes-required", denominator: pairedOutcomes.length }
@@ -1050,14 +1318,22 @@ function qualitySummary(taskGroups, snapshots) {
     : boundedRate(candidateCorrect, pairedCorrectness.length) >= boundedRate(baselineCorrect, pairedCorrectness.length)
       ? { status: "pass", reason: null, denominator: pairedCorrectness.length }
       : { status: "fail", reason: "candidate-correctness-rate-regressed", denominator: pairedCorrectness.length };
-  const gateStatuses = [successGate.status, correctnessGate.status];
+  const traceGate = integrity?.complete === false
+    ? { status: "insufficient-data", reason: "trace-integrity-incomplete", denominator: 0 }
+    : { status: "pass", reason: null, denominator: taskGroups.length };
+  const rateGate = pairedRateMismatches > 0
+    ? { status: "insufficient-data", reason: "paired-rate-provenance-mismatch", denominator: pairedKnownCost.length }
+    : { status: "pass", reason: null, denominator: pairedKnownCost.length };
+  const efficiency = efficiencyGate(pairedKnownCost, pairedCorrectTasks, efficiencyOptions);
+  const gateStatuses = [successGate.status, correctnessGate.status, traceGate.status, rateGate.status,
+    ...(efficiency.status === "not-evaluated" ? [] : [efficiency.status])];
   const overallStatus = gateStatuses.includes("fail") ? "fail" : gateStatuses.includes("insufficient-data") ? "insufficient-data" : "pass";
   const pairedCorrectnessSummary = {
     samples: pairedCorrectness.length,
     unknownSamples: pairedSuccessful.length - pairedCorrectness.length,
     baselineCorrect: baselineCorrect,
     candidateCorrect: candidateCorrect,
-    denominator: "paired-successful-identical-corpus-and-task-id",
+    denominator: "paired-successful-identical-corpus-and-task-id-and-replicate",
     baselineRate: boundedRate(baselineCorrect, pairedCorrectness.length),
     candidateRate: boundedRate(candidateCorrect, pairedCorrectness.length),
   };
@@ -1083,27 +1359,37 @@ function qualitySummary(taskGroups, snapshots) {
       unpairedTasks: pairing.unpaired,
       unknownCorpusTasks: pairing.unknownCorpusTasks,
       unknownVariantTasks: pairing.unknownVariantTasks,
-      denominator: "paired-identical-corpus-and-task-id",
+      denominator: "paired-identical-corpus-and-task-id-and-replicate",
     },
     pairedSuccessfulTasks: {
       count: pairedSuccessful.length,
+      correctPairs: pairedCorrectTasks.length,
       knownInputPairs: pairedKnownInput.length,
-      unknownInputPairs: pairedSuccessful.length - pairedKnownInput.length,
+      unknownInputPairs: pairedCorrectTasks.length - pairedKnownInput.length,
       knownCostPairs: pairedKnownCost.length,
-      unknownCostPairs: pairedSuccessful.length - pairedKnownCost.length,
-      denominator: "paired-successful-identical-corpus-and-task-id",
+      unknownCostPairs: pairedCorrectTasks.length - pairedKnownCost.length,
+      denominator: "paired-correct-successful-identical-corpus-and-task-id-and-replicate",
       baselineMedianInputTokens: percentile(pairedKnownInput.map((pair) => pair.baseline.inputTotal), 0.5),
       candidateMedianInputTokens: percentile(pairedKnownInput.map((pair) => pair.candidate.inputTotal), 0.5),
       baselineMedianCostUsd: percentile(pairedKnownCost.map((pair) => pair.baseline.costTotal), 0.5),
       candidateMedianCostUsd: percentile(pairedKnownCost.map((pair) => pair.candidate.costTotal), 0.5),
     },
     correctness: pairedCorrectnessSummary,
+    traceIntegrity: integrity ?? { status: "complete", complete: true, reasons: [], denominator: "validated-records" },
+    rateProvenance: {
+      mismatchedPairs: pairedRateMismatches,
+      denominator: "paired-correct-successful-known-cost-tasks",
+    },
+    efficiency,
     allCorrectness,
     variants: variantStats,
     gates: {
       status: overallStatus,
       successRate: successGate,
       correctness: correctnessGate,
+      traceIntegrity: traceGate,
+      rateProvenance: rateGate,
+      efficiency,
     },
   };
 }
@@ -1215,6 +1501,7 @@ export function analyzeCacheExperiment(records, options = {}) {
       ? [records.traceDiagnostics]
       : [];
   const { attempts, settlements, invalidRecords } = normalizeRecords(sourceRecords);
+  const integrity = traceIntegrity(invalidRecords, inheritedReaderDiagnostics);
   const usage = usageAggregate(attempts);
   const taskGroups = taskModel(attempts, settlements);
   const ttlComparisons = continuityGroups(attempts).map(([, group]) => compareTtlBuckets(group, { buckets: normalizedOptions.ttlBuckets }));
@@ -1307,7 +1594,7 @@ export function analyzeCacheExperiment(records, options = {}) {
     ttl,
     breakpoints: breakpointDeltas(attempts),
     breakEven: analyzeBreakEven(normalizedRates, normalizedOptions),
-    quality: qualitySummary(taskGroups, normalizedRates),
+    quality: qualitySummary(taskGroups, normalizedRates, integrity, normalizedOptions.efficiencyGate),
     unknowns: {
       usageAttempts: attempts.filter((attempt) => completeInputUsage(attempt.usage) === null).length,
       costAttempts: cost.unknownSamples,
@@ -1328,9 +1615,13 @@ export function analyzeCacheExperiment(records, options = {}) {
         omittedRecords: sumKnownReaderField(inheritedReaderDiagnostics, "omittedRecords"),
         writeFailures: sumKnownReaderField(inheritedReaderDiagnostics, "writeFailures"),
         malformedRecords: sumKnownReaderField(inheritedReaderDiagnostics, "malformedRecords"),
+        partialRecords: sumKnownReaderField(inheritedReaderDiagnostics, "partialRecords"),
+        retentionFailures: sumKnownReaderField(inheritedReaderDiagnostics, "retentionFailures"),
+        manifestWriteFailures: sumKnownReaderField(inheritedReaderDiagnostics, "manifestWriteFailures"),
         readerOmittedRecords: sumKnownReaderField(inheritedReaderDiagnostics, "readerOmittedRecords"),
         manifestErrors: sumKnownReaderField(inheritedReaderDiagnostics, "manifestErrors"),
       },
+      integrity,
     },
   };
 }

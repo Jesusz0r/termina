@@ -151,14 +151,11 @@ export function parseModelsPayload(payload: unknown, provider: ProviderId): Mode
 }
 
 export function pickDefaultModel(models: ModelInfo[], preferred?: string): string | null {
-  if (models.length === 0) return null;
-  if (preferred) {
-    const exact = models.find((m) => m.id === preferred);
-    if (exact) return exact.id;
-    const prefixed = models.find((m) => m.id.startsWith(`${preferred}-`));
-    if (prefixed) return prefixed.id;
-  }
-  return models[0].id;
+  if (models.length === 0 || !preferred) return null;
+  const exact = models.find((m) => m.id === preferred);
+  if (exact) return exact.id;
+  const prefixed = models.find((m) => m.id.startsWith(`${preferred}-`));
+  return prefixed?.id ?? null;
 }
 
 export function formatModelBanner(models: ModelInfo[], current: string): string {

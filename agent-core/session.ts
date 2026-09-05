@@ -32,7 +32,7 @@ import {
   writeSync,
 } from "node:fs";
 import type { BigIntStats } from "node:fs";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, type Hash } from "node:crypto";
 import { readdir, rename, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import {
@@ -111,6 +111,8 @@ export type SessionTestHooks = {
   beforeSegmentOpen?: (path: string, index: number) => void;
   beforeSegmentRollRename?: (path: string) => void;
   afterSegmentsOpened?: (paths: readonly string[]) => void;
+  /** Focused replay race seam, rejected outside TERMINA_CORE_TEST. */
+  afterReplayRead?: (paths: readonly string[]) => void;
   beforeImageOpen?: (path: string) => void;
   afterTempCreated?: (path: string) => void;
   beforeTemporaryCleanupMutation?: (path: string) => void;
@@ -1078,12 +1080,26 @@ function fingerprintOpenSessionBundle(bundle: OpenSessionBundle, limit: number):
     }
     const stableAfter = validateOpenSegmentAccess(bundle, segment);
     if (!stableAfter.ok) return stableAfter;
-    const id = segment.identity;
-    fingerprints.push(`${segment.name}:${id.dev}:${id.ino}:${id.size}:${id.mtimeNs}:${id.ctimeNs}:${hash.digest("hex")}`);
+    fingerprints.push(formatSegmentFingerprint(segment, hash.digest("hex")));
   }
   const stableAfterBundle = validateOpenSessionBundle(bundle);
   if (!stableAfterBundle.ok) return stableAfterBundle;
   return { ok: true, fingerprint: fingerprints.join("\n") };
+}
+
+function formatSegmentFingerprint(segment: OpenSessionSegment, digest: string): string {
+  const id = segment.identity;
+  return `${segment.name}:${id.dev}:${id.ino}:${id.size}:${id.mtimeNs}:${id.ctimeNs}:${digest}`;
+}
+
+function combinedSegmentFingerprint(bundle: OpenSessionBundle, digests: readonly string[]): SessionResult<{ fingerprint: string }> {
+  const stable = validateOpenSessionBundle(bundle);
+  if (!stable.ok) return stable;
+  if (digests.length !== bundle.segments.length) return { ok: false, error: "session segment fingerprint count changed" };
+  return {
+    ok: true,
+    fingerprint: bundle.segments.map((segment, index) => formatSegmentFingerprint(segment, digests[index]!)).join("\n"),
+  };
 }
 
 export function sessionBundleExists(sessionFile: string): boolean {
@@ -2030,6 +2046,8 @@ async function readSegmentIntoState(
   throughSeq?: number,
   onRecord?: (record: unknown) => void,
   signal?: AbortSignal,
+  hash?: Hash,
+  skipRecords = false,
 ): Promise<SessionResult<{ bytes: number; records: number; stop: boolean }>> {
   const cancelledBeforeRead = cancellation(signal);
   if (cancelledBeforeRead) return cancelledBeforeRead;
@@ -2042,7 +2060,7 @@ async function readSegmentIntoState(
   let records = 0;
   let sinceYieldBytes = 0;
   let sinceYieldRecords = 0;
-  let stop = false;
+  let stop = skipRecords;
   for (;;) {
     const cancelledBeforeChunk = cancellation(signal);
     if (cancelledBeforeChunk) return cancelledBeforeChunk;
@@ -2058,10 +2076,11 @@ async function readSegmentIntoState(
       if (n < 1) return { ok: false, error: `session segment changed while reading: ${segment.name}` };
       position += n;
       readBudget.remaining -= n;
+      hash?.update(chunk.subarray(0, n));
     }
     const atEnd = position === segment.size;
-    if (n > 0) pending = Buffer.concat([pending, chunk.subarray(0, n)]);
-    for (;;) {
+    if (!stop && n > 0) pending = Buffer.concat([pending, chunk.subarray(0, n)]);
+    for (; !stop;) {
       const nl = pending.indexOf(0x0a);
       if (atEnd && nl < 0 && pending.length > 0) {
         if (pending.length > MAX_SESSION_RECORD_BYTES) {
@@ -2115,7 +2134,7 @@ async function readSegmentIntoState(
       }
       if (taken.done) break;
     }
-    if (stop || atEnd) break;
+    if (atEnd) break;
   }
   const stableAfterRead = validateOpenSegmentAccess(bundle, segment);
   if (!stableAfterRead.ok) return stableAfterRead;
@@ -2190,18 +2209,13 @@ export async function replaySessionBundle(
       return opened;
     }
     try {
-      const identity = fingerprintOpenSessionBundle(opened.bundle, limit.limit);
-      if (!identity.ok) {
-        if (identity.error.includes("MAX_SESSION_BUNDLE_BYTES")) return identity;
-        lastRaceError = identity.error;
-        if (attempt < 2) continue;
-        return identity;
-      }
       const state = createReplayState();
       const readBudget = { remaining: limit.limit };
+      const segmentFingerprints: string[] = [];
       let stopped = false;
       let retry = false;
       for (const segment of opened.bundle.segments) {
+        const hash = createHash("sha256");
         const got = await readSegmentIntoState(
           opened.bundle,
           segment,
@@ -2210,6 +2224,8 @@ export async function replaySessionBundle(
           opts?.throughSeq,
           undefined,
           opts?.signal,
+          hash,
+          stopped,
         );
         if (!got.ok) {
           if (opts?.signal?.aborted) return got;
@@ -2219,14 +2235,23 @@ export async function replaySessionBundle(
           else return got;
           break;
         }
-        if (got.stop) {
-          stopped = true;
-          break;
-        }
+        segmentFingerprints.push(hash.digest("hex"));
+        stopped ||= got.stop;
       }
       if (retry) continue;
+      const parsedIdentity = combinedSegmentFingerprint(opened.bundle, segmentFingerprints);
+      if (!parsedIdentity.ok) {
+        if (parsedIdentity.error.includes("MAX_SESSION_BUNDLE_BYTES")) return parsedIdentity;
+        lastRaceError = parsedIdentity.error;
+        if (attempt < 2) continue;
+        return parsedIdentity;
+      }
+      opts?.testHooks?.afterReplayRead?.(opened.bundle.segments.map((segment) => segment.path));
       const cancelledBeforeFinalFingerprint = cancellation(opts?.signal);
       if (cancelledBeforeFinalFingerprint) return cancelledBeforeFinalFingerprint;
+      // Keep this independent post-read pass.  Parsing and hashing the same
+      // bytes does not prove that no same-size rewrite happened after the
+      // parser consumed them; the final pass closes that TOCTOU window.
       const afterIdentity = fingerprintOpenSessionBundle(opened.bundle, limit.limit);
       if (!afterIdentity.ok) {
         if (afterIdentity.error.includes("MAX_SESSION_BUNDLE_BYTES")) return afterIdentity;
@@ -2234,14 +2259,14 @@ export async function replaySessionBundle(
         if (attempt < 2) continue;
         return afterIdentity;
       }
-      if (identity.fingerprint === afterIdentity.fingerprint) {
+      if (parsedIdentity.fingerprint === afterIdentity.fingerprint) {
         return {
           ok: true,
           messages: state.messages,
           maxSeq: state.maxSeq,
           state,
           stopped,
-          sourceFingerprint: identity.fingerprint,
+          sourceFingerprint: parsedIdentity.fingerprint,
         };
       }
       lastRaceError = "session segments changed during replay";
@@ -3151,6 +3176,8 @@ type TempBundle = {
   path: string;
   currentDir: string;
   sessionFile: string;
+  /** Bytes measured after exclusive staging admission; updated for own image writes. */
+  retainedBytes: number;
   parent: DirectoryAnchor;
   temp: DirectoryAnchor;
   current: DirectoryAnchor;
@@ -3488,6 +3515,7 @@ function createSecureTempBundle(dest: SessionBundlePaths, options?: SessionOpera
       path,
       currentDir,
       sessionFile: join(currentDir, ACTIVE_NAME),
+      retainedBytes: retainedAfterCreate.bytes,
       parent: parent.anchor,
       temp: tempAnchor.anchor,
       current: currentAnchor.anchor,
@@ -3576,9 +3604,7 @@ async function copyReferencedImages(
         const sourceStillStable = validateDirectoryAnchor(source.anchor);
         if (!sourceStillStable.ok) throw new Error(sourceStillStable.error);
         const size = Number(before.size);
-        const retained = retainedTempUsage(dirname(temp.path));
-        if (!retained.ok) throw new Error(retained.error);
-        if (retained.bytes > MAX_RETAINED_TEMP_BYTES - size) {
+        if (temp.retainedBytes > MAX_RETAINED_TEMP_BYTES - size) {
           throw new Error(`retained temporary sessions would exceed ${MAX_RETAINED_TEMP_BYTES} bytes`);
         }
         destinationFd = openSync(
@@ -3606,6 +3632,7 @@ async function copyReferencedImages(
         if (finalPath.isSymbolicLink() || !sameVersion(identity, statIdentity(finalPath))) {
           throw new Error(`referenced image changed while reading: ${name}`);
         }
+        temp.retainedBytes += size;
       } catch (err) {
         return { ok: false, error: errMsg(err) };
       } finally {
@@ -3868,6 +3895,14 @@ async function materializeVisibleFork(
     }
     const stableAfterWrite = validateTempBundle(temp);
     if (!stableAfterWrite.ok) return stableAfterWrite;
+    if (imageNames.length > 0) {
+      // Session records were written after the admission scan. Refresh the
+      // lock-scoped baseline once before image copies so their aggregate
+      // check includes the staged session bytes without rescanning per image.
+      const retainedBeforeImages = retainedTempUsage(dest.projectDir);
+      if (!retainedBeforeImages.ok) return retainedBeforeImages;
+      temp.retainedBytes = retainedBeforeImages.bytes;
+    }
     const copied = await copyReferencedImages(source.currentDir, temp, imageNames, options);
     if (!copied.ok) {
       return copied;
