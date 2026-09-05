@@ -4,7 +4,7 @@ Take the only Meta-Harness lessons that belong in the kernel: freeze and cache t
 
 Learn Harness Engineering ([walkinglabs/learn-harness-engineering](https://github.com/walkinglabs/learn-harness-engineering)) is a third layer. It does not replace this plan. It confirms the kernel moves and names artifacts that must **not** land in `agent-core`.
 
-The full rationale for the searcher ban, the inventory of what this change set shipped, and the next inner-harness ACI work live in `docs/AGENT-CORE-HARNESS.md`. Do not fold that track back into this file.
+The full rationale for the searcher ban, the inventory of what this change set shipped, and the next inner-harness ACI work live in `docs/active/AGENT-CORE-HARNESS.md`. Do not fold that track back into this file.
 
 Termina lets the user pick a terminal engine. Those engines are independent:
 
@@ -14,7 +14,7 @@ Termina lets the user pick a terminal engine. Those engines are independent:
 
 This work builds **agent-core only**. It does not change Pi, does not share Pi's home directory or skill paths, and does not defer kernel behavior to Pi.
 
-The kernel owns its instruction files, skill scan, tools, cache, stubs, and traces. `agent-core` stays one process, one file (`agent-core/main.ts`). Termina's pty, sidecar, timeline, and modified list stay the host contract so an Agent (core) tab still shows up in the app. `termina-core` stays the snapshot/Git owner. `docs/AUTH-PLAN.md` stays a separate track.
+The kernel owns its instruction files, skill scan, tools, cache, stubs, and traces. `agent-core` stays one process, one file (`agent-core/main.ts`). Termina's pty, sidecar, timeline, and modified list stay the host contract so an Agent (core) tab still shows up in the app. `termina-core` stays the snapshot/Git owner. `docs/archive/agent-core/AUTH-PLAN.md` stays a separate track.
 
 ## Three layers (do not mix)
 
@@ -80,7 +80,7 @@ Shrinking Termina's 878-line `AGENTS.md` into a directory page is optional hygie
 
 **Why those paper/course items stay out (not sequencing):**
 
-- **Outer-loop proposer that rewrites `agent-core/main.ts`.** That is a second product: a searcher over harness source. This kernel is the coding engine the user selected. Traces in this change set are the diagnostic filesystem that search would need; they do not run the search. A loop that mutates the engine while the user is coding is not an inner-harness upgrade. Canonical write-up: `docs/AGENT-CORE-HARNESS.md` (product boundary, P1 freeze, wrong-domain policies, isolation already in worldlines/Dispatch, unconstrained search overfits and often hurts). An *offline* searcher that reads traces and patches via worldline or CI is allowed later; it must not run inside `runPrompt()`.
+- **Outer-loop proposer that rewrites `agent-core/main.ts`.** That is a second product: a searcher over harness source. This kernel is the coding engine the user selected. Traces in this change set are the diagnostic filesystem that search would need; they do not run the search. A loop that mutates the engine while the user is coding is not an inner-harness upgrade. Canonical write-up: `docs/active/AGENT-CORE-HARNESS.md` (product boundary, P1 freeze, wrong-domain policies, isolation already in worldlines/Dispatch, unconstrained search overfits and often hurts). An *offline* searcher that reads traces and patches via worldline or CI is allowed later; it must not run inside `runPrompt()`.
 - **Pareto search, BM25 math routes, ACE/MCE memory banks, draft-verify classifiers.** Those are the paper's *discovered policies for classification and olympiad math*, not coding-agent mechanics. Copying them would stuff the wrong procedure into zone 1. Skills + `grep` are the coding form of retrieve-don't-stuff.
 - **TerminalBench completion checklist as a kernel state machine.** KIRA's checklist is prompt text plus a "don't stop" rubric for that benchmark. A kernel state machine of done-criteria is a second verifier. Done-criteria belong in the opened project's `AGENTS.md` (runnable tests). The loop already stops when the model emits no tool calls.
 - **Plugin / hook surface.** Hooks are user scripts on the tool lifecycle; plugins are a loader. That is a platform. This kernel is one file. Kernel-owned policy later (permissions) is not a plugin API. Skills cover "how to do X" without a second runtime. Stdio and HTTP/SSE MCP share one frozen tool client (`agent-core/mcp.ts`); a marketplace and hot-reload stay out.
@@ -327,7 +327,7 @@ Focused gate: `npm run test:agent-core`. Typecheck: `npm run typecheck`. Normal 
 | File | Change |
 |---|---|
 | `agent-core/main.ts` | jail, grep/glob, skill index, user-global + project AGENTS.md overflow notes, nested pointer, env snapshot, request-time cache_control, canonical sidecar tool mapping + tool_end, shared formatStub, exact session replay, usage traces reset-on-start, main() guard, per-prompt turn cap, exports. Rewrite the file header: this is Termina's agent-core engine, not a stand-in for another terminal. |
-| `docs/AGENT-CORE.md` | status; skill index is zone 1; bodies load via `read_file`; user-global `~/.agents/AGENTS.md` then cwd `AGENTS.md`; skills from `~/.agents/skills` then `<cwd>/.agents/skills`; no ancestor walk; no snapshot-store claim |
+| `docs/reference/AGENT-CORE.md` | status; skill index is zone 1; bodies load via `read_file`; user-global `~/.agents/AGENTS.md` then cwd `AGENTS.md`; skills from `~/.agents/skills` then `<cwd>/.agents/skills`; no ancestor walk; no snapshot-store claim |
 | `scripts/agent-core-harness-test.mjs` | new |
 | `package.json` | add `test:agent-core`; include it in `npm test` |
 | `README.md` | list the focused agent-core harness gate and update the `npm test` description |

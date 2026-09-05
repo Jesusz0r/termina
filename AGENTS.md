@@ -4,33 +4,33 @@ Hybrid coding tool: left = real pi TUI in a pty, right = Monaco + file explorer.
 
 ## Decision priority (when rules conflict)
 
-1. Correctness / data integrity (source trees, snapshots, write leases, session files)
+1. Correctness / data integrity / main-process responsiveness (source trees, snapshots, write leases, session files)
 2. Security / process isolation (main vs renderer, env sanitization, sandboxes)
 3. Explicit task requirements
-4. Main-process responsiveness and hot-path performance
+4. Hot-path performance
 5. Existing public contracts (IPC `area:action`, sidecar events, release tags)
 6. Established architecture and conventions
 7. Simplicity / reuse / locality
 8. Developer convenience
 
-Never trade a higher priority for a lower one. Main-process latency is correctness — never block it.
+Use this order for implementation tradeoffs. If a task requires changing a data-integrity or security invariant, surface the conflict before changing it. Keep blocking or expensive work off the main-process event loop.
 
 ## One canonical implementation
 
 One responsibility → one owner. Reuse, extend, or replace — never add a parallel path. When replacing: update all callers, delete the old, remove dead IPC/types/tests/docs.
 
-- `core/` owns every Git/snapshot operation. Don't spawn `git` CLI.
-- `electron/worldline-git.ts` — only TS client for `core/`.
+- `core/` owns application Git/snapshot operations, including capture, hashing, and merge. Application code must not spawn the `git` CLI; this does not prohibit developer Git commands or isolated test-fixture setup.
+- `electron/worldline-git.ts` — only public TS client for `core/`; private process/protocol helpers live in `electron/worldline-git/`.
 - `electron/session-fork.ts` → `electron/session-worker.ts` — only session fork path.
 - `shared/preferences.ts` — only prefs validator; `electron/preferences.ts` — only file store.
 - `electron/plan-board.ts` — Plan Board parse/progress/dispatch. `electron/worldlines.ts` — comparisons/promotion/evidence/runs. `electron/evidence.ts` only measures.
 - `electron/sidecar.ts` owns sidecar parse/tail. Only writers: `electron/bridge-extension.ts` + `agent-core/host.ts` + `logEvent` in `agent-core/main.ts`.
 - `electron/session-search.ts` owns Session Search walk. `electron/sandbox.ts` owns sandbox profiles.
-- Main owns app state; renderer only renders what main pushes. `core/` + `electron/worldline-git.ts` stay request plumbing; don't thicken `pty-terminal.ts` / `session-fork.ts`.
+- `electron/main.ts` owns terminal/workspace lifecycle and IPC. Main owns authoritative app state; `src/` owns rendering and transient UI state, and requests privileged operations through preload. Keep orchestration out of the core client, `pty-terminal.ts`, and `session-fork.ts`.
 
-Ownership is per responsibility, not per file. One responsibility = one *directory* owner, not one file. Private helpers may live next to the owner — public API stays single.
+An owner may be a module or a directory with private helpers; its public API stays single. The paths above are entry points, not a requirement to put all implementation in one file.
 
-Extract when: `>800` lines, distinct lifecycle/test surface, or a `// ---- section` has a second reason to change. Example: `agent-core/cache.ts` + `agent-core/reclaim.ts` remain owned by the `agent-core` area; `electron/worldlines/` stays one owner as a directory. Don't use `// ---- sections` to keep a 5k-line file intact.
+When a touched file exceeds 800 lines, assess extraction. Extract cohesive responsibilities with a distinct lifecycle, test surface, or reason to change; keep helpers with their owner. Line count is a review trigger, not a reason for unrelated refactoring. Section comments do not replace module boundaries.
 
 ## Rules
 
@@ -40,15 +40,13 @@ Extract when: `>800` lines, distinct lifecycle/test surface, or a `// ---- secti
 
 **Reuse before inventing.** Search first. Reuse if semantics match. Don't duplicate business rules to avoid an abstraction; incidental syntax duplication is okay, duplicated responsibility is not.
 
-**Keep behavior local.** Snapshot/Git in `core/` + `worldline-git.ts`, session fork in `session-fork.ts`/`session-worker.ts`, terminal/workspace/IPC in `electron/main.ts`, UI in `src/`, prefs validation in `shared/preferences.ts`. Call the canonical owner instead of duplicating locally.
-
 **Dependencies must earn their cost:** language → stdlib → Electron/Vite/Monaco/xterm/node-pty → existing deps → Rust core → small local impl → new dep. `@lydell/node-pty` stays external in esbuild. Don't reimplement snapshot/merge in TS.
 
 **Product:** sensible defaults over config; progressive disclosure; terminal stays source of truth; never expose sidecars/leases/core protocol in UI.
 
 ## Process isolation
 
-Renderer never talks to the agent, never does privileged fs/pty/snapshot work. Preload exposes only the typed `window.pi` bridge. Write leases prevent two writers on one tree — don't bypass. Candidate sandboxes / offline evidence profile are the only isolation. Sanitize `PI_SESSION_*` env vars for `pi` — don't remove that.
+Renderer never talks directly to the agent or performs privileged fs/pty/snapshot work. Preload exposes only the typed `window.pi` bridge; validate privileged requests in main. Write leases prevent two writers on one tree — don't bypass. Use the existing candidate sandboxes / offline evidence profile for isolation; a separate process or tree alone is not a sandbox. Preserve `PI_SESSION_*` env sanitization when launching `pi`.
 
 ## Performance
 
@@ -67,22 +65,21 @@ Session memory is not truth. Before editing `agent-core/` for model ids, context
 - Gemini: `https://ai.google.dev/gemini-api/docs`
 - xAI: `https://docs.x.ai` · Zen: `https://opencode.ai/docs/zen` · OpenRouter: `https://openrouter.ai/docs`
 
-Change the canonical owner (`agent-core/auth.ts`, `agent-core/main.ts`, `agent-core/openai-compat.ts`). Don't add a second catalog/cache/protocol mapper.
+Follow the existing owner for the behavior: `agent-core/auth.ts` (auth/provider policy), `agent-core/models.ts` (live catalog), `agent-core/main.ts` / `agent-core/openai-compat.ts` (requests), and `agent-core/cache.ts` (cache diagnostics). Don't add a second catalog/cache/protocol mapper. Include the relevant documentation URLs in the change summary; if docs are unavailable, state that limitation and do not invent provider behavior.
 
 ## Glossary
 
-Run = one agent session (`agent_start` → `agent_settled`). Sidecar = JSONL per terminal in `TERMINA_EVENTS_DIR`. Baseline = file at run start. Snapshot = file at a moment. Dot = timeline point. Worker = one dispatched plan task. Fork point = timeline event + Pi session entry + immutable source state. Worldline = isolated candidate tree + session. Candidate/Reference(A)/Alternative(B)/Challenge/Evidence contract/Write lease/Workspace — see `docs/AGENT-CORE.md`.
-
-## File map (short)
-
-`electron/main.ts` (terminals, workspaces, IPC) · `core/` (Rust snapshot store) · `electron/worldline-git.ts`/`worldlines.ts`/`evidence.ts`/`sidecar.ts`/`bridge-extension.ts`/`session-fork.ts` · `agent-core/` (kernel, `host.ts`, `session.ts`, `mcp.ts`) · `shared/preferences.ts` & `shared/types.ts` · `src/` (pty-view, editor, timeline, explorer, styles) · `scripts/build-core.mjs`, `prepare-resources.mjs`, `electron-builder.yml`.
+Run = one agent session (`agent_start` → `agent_settled`). Sidecar = JSONL per terminal in `TERMINA_EVENTS_DIR`. Baseline = file at run start. Snapshot = file at a moment. Dot = timeline point. Worker = one dispatched plan task. Fork point = timeline event + Pi session entry + immutable source state. Worldline = isolated candidate tree + session. Candidate/Reference(A)/Alternative(B)/Challenge/Evidence contract/Write lease/Workspace — see `docs/reference/AGENT-CORE.md`.
 
 ## Event flow
 
-1. Agent runs a tool in TUI → 2. Bridge logs to sidecar → 3. Main tails sidecar every 300ms → 4. Main pushes IPC → 5. Renderer renders. Renderer never talks to the agent directly.
+Agent runs a tool → the engine's sidecar writer records it → main tails the sidecar → main pushes typed IPC → renderer updates the UI.
 
 ## Conventions & verification
 
-- IPC `area:action` (`verify:run`, `timeline:get`), terminals `term-N`, commits `termina <dev@termina.local>`, tags `v<version>`.
-- `pnpm run dev` · `pnpm exec tsc --noEmit` · `node scripts/build.mjs` · `pnpm run test:e2e`. Each E2E invocation owns a fresh run root for fixtures, events, worlds, Electron user data, and a HOME with its own `.pi/agent` tree; the host `~/.pi/agent` tree is not used or modified. Electron requests an OS-assigned loopback DevTools port, and the runner discovers it only through that profile's `DevToolsActivePort`. The runner terminates and waits for its own build, Electron, and suite children; cleanup stays scoped to resources created by that invocation. Keep suites green.
+- IPC `area:action` (`verify:run`, `timeline:get`), terminals `term-N`, app-created snapshot commits `termina <dev@termina.local>`, release tags `v<version>`.
+- Preserve unrelated working-tree changes. Keep edits scoped to the task; when changing a contract, migrate its callers and remove obsolete artifacts together.
+- Use `package.json` as the source for commands. Development: `pnpm run dev`. Typecheck: `pnpm run typecheck`. Unit tests: `pnpm run test:unit` (or a relevant focused script). Build: `pnpm run build`. Rust: `cargo test --manifest-path core/Cargo.toml`.
+- For code changes, run typecheck and relevant tests. Run the build for bundling/packaging changes and Rust tests for `core/` changes. For Electron/UI integration changes, build first, then run the relevant Playwright suite with `pnpm run test:e2e`. Documentation-only changes need path/command checks, not an application test run. Report checks run and any failures or checks not run.
+- E2E isolation is defined in `tests/e2e/fixtures.ts`: fresh roots for projects, events, worlds, Electron user data, and a HOME with its own `.pi/agent` tree. Never use or modify the host `~/.pi/agent` tree. Use Playwright's Electron launcher; keep process termination and cleanup scoped to resources the test owns, and wait for children to exit before deleting their files.
 - Gotchas: `@lydell/node-pty` external; cargo needed for `core/`; packaged app ships its own `node` (`cleanEnv` prepends `resourcesPath/node/bin`); macOS paths canonical (`/tmp` → `/private/tmp`); events dir is `app.getPath("temp")/termina-events`; bridge is app-owned in user-data dir.

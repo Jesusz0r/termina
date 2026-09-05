@@ -1,5 +1,7 @@
 # Agent Core — Context Efficiency Principles
 
+> **Status:** current architecture reference; implemented behavior is summarized below.
+
 Design invariants for a self-owned agent kernel (`agent-core`). Stated as
 principles, not implementations: each principle names the invariant, the rule
 that follows from it, and how to verify it. Where a number appears it is an
@@ -22,9 +24,8 @@ are overflow-recoverable. The kernel does not call the snapshot store.
 `termina-core` stays the snapshot/Git owner. Credentials live in
 `~/.termina/agent/auth.json` (`/login`, `/logout`). Providers: Anthropic,
 OpenAI, ChatGPT Codex OAuth, GitHub Copilot, xAI, Google, OpenRouter,
-OpenCode Go, OpenCode Zen. The implementation plan is `docs/AGENT-CORE-PLAN.md`.
-Segmented session bundles are implemented; the record is
-`docs/AGENT-CORE-SESSION-STORAGE-PLAN.md`. Auth details: `docs/AUTH-PLAN.md`.
+OpenCode Go, OpenCode Zen. The completed implementation records are archived
+under `docs/archive/agent-core/`.
 
 ## Why this document exists
 
@@ -231,7 +232,7 @@ authenticated provider on demand and prints `provider` and `id`; typing
 selects one. `/permissions` opens a picker for `Always approve`, `Ask on dangerous requests`,
 or `Always ask`. Bash approval prompts also use arrow-key selection instead of typed letters.
 The dangerous mode recognizes destructive command patterns; it is not a shell sandbox.
-The file is not Pi's `auth.json`. See `docs/AUTH-PLAN.md`.
+The file is not Pi's `auth.json`. See `docs/archive/agent-core/AUTH-PLAN.md`.
 
 The host owns session resume. `TERMINA_CORE_SESSION_FILE` is the stable
 `<session-id>/current/session.jsonl` address under the app user-data

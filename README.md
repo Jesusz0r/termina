@@ -20,10 +20,10 @@ records byte-exact source states in an app-owned snapshot store and never
 writes your Git repository.
 
 ![Termina — the pi TUI on the left, the live Monaco editor with the
-modified list and session timeline on the right](docs/screenshot.png)
+modified list and session timeline on the right](docs/assets/screenshot.png)
 
 ![Worldlines — a forked run with candidates A and B, and the plan
-board showing the completed tasks](docs/screenshot-worldlines.png)
+board showing the completed tasks](docs/assets/screenshot-worldlines.png)
 
 Screenshots are from an earlier 0.1.x build. Settings now include Atom,
 terminal font, and word wrap; first launch is empty until you open a
@@ -31,7 +31,7 @@ folder; the Plan Board shows Dispatch assignments.
 
 ## User guide
 
-New to Termina? Read **[`docs/USER-GUIDE.md`](docs/USER-GUIDE.md)** — a walkthrough of every feature: Change Review, Verify & Iterate, the Session Timeline, Plan Board dispatch, and Worldlines.
+New to Termina? Read **[`docs/reference/USER-GUIDE.md`](docs/reference/USER-GUIDE.md)** — a walkthrough of every feature: Change Review, Verify & Iterate, the Session Timeline, Plan Board dispatch, and Worldlines. The complete maintained-document index is [`docs/README.md`](docs/README.md).
 
 ## Features
 
@@ -131,8 +131,8 @@ Termina terminal before running model-driven e2e suites.
 - `shared/` — types, commands, and the preferences validator shared by
   main, preload, and renderer.
 - `scripts/` — the e2e suites, the launcher, and the build steps.
-- The detailed design lives in `docs/WORLDLINES.md` with per-phase
-  records in `docs/PHASE0.md` … `PHASE8.md`.
+- The maintained design lives in `docs/reference/WORLDLINES.md`; completed phase
+  records are archived under `docs/archive/worldlines/`.
 
 ## Contributing
 

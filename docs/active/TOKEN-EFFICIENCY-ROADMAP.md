@@ -1,5 +1,7 @@
 # Token-efficiency roadmap
 
+> **Status:** active — deterministic foundations are implemented; evidence gates and explicitly pending items remain open.
+>
 > Goal: reduce provider-billed input, output, and reasoning tokens without
 > reducing task success, correctness, or recoverability.
 
@@ -21,7 +23,7 @@ benchmarks are complete.
 
 | Area | What `agent-core/` does today | Status / remaining evidence |
 |---|---|---|
-| Private ownership | `main.ts` is currently 8,103 lines, while the distinct cache, request-projection, reclaim, trace, rates, and bounded-output lifecycles have private modules imported by the integration owner. | **Complete for the named seams.** Keep one behavioral owner; extract further only for a distinct lifecycle/test surface, not to create another path. |
+| Private ownership | `main.ts` is currently 8,605 lines, while the distinct cache, request-projection, reclaim, trace, rates, and bounded-output lifecycles have private modules imported by the integration owner. | **Complete for the named seams.** Keep one behavioral owner; extract further only for a distinct lifecycle/test surface, not to create another path. |
 | Traces | `trace.ts` writes schema-v2 attempt and task-settled records with stable run/task/attempt links, retry/fallback fields, nullable usage, cache diagnostics, tool/reclaim evidence, cost provenance, manifests, bounded retention, and a link index. | **Deterministic implementation complete.** Correctness is still caller-supplied/null and the controlled task corpus, quality, price, and long-session benchmark remain pending. |
 | Cache identity | `auth.ts` derives a private ASCII key from a process-local session seed, role, provider, protocol, and route domain; it validates the key before emitting OpenRouter or xAI headers. | **Deterministic identity complete.** Provider field acceptance and the OpenAI 50-vs-80 limit conflict remain route/model evidence gates; neither number is hardcoded. |
 | Request projection | `request-projection.ts` separates durable prompt/images from a sorted, escaped, UTF-8-bounded overlay; validates complete tool-call/result sequences; main snapshots and appends the overlay once per logical request, including retries. | **Deterministic projection complete.** Persisted generated context is rejected; corpus-level quality and provider-prefix behavior remain pending. |

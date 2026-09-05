@@ -272,9 +272,9 @@ providers do not get a second search implementation.
 | `agent-core/openai-compat.ts` | Completions and Codex Responses translators |
 | `agent-core/models.ts` | Live GET `/models`, parse, pick default, `/models` `/model` helpers |
 | `agent-core/main.ts` | Provider post, 401 retry-once, protocol switch, `/login` `/logout`, banner, catalog |
-| `docs/AGENT-CORE.md` | Commands and precedence |
+| `docs/reference/AGENT-CORE.md` | Commands and precedence |
 | `scripts/agent-core-harness-test.mjs` | auth and translator cases via `TERMINA_AUTH_PATH` |
-| `docs/AUTH-PLAN.md` | this file |
+| `docs/archive/agent-core/AUTH-PLAN.md` | this file |
 
 No Electron, preload, renderer, or Pi package changes. The kernel process
 reads its own file. The host env already passes provider keys through

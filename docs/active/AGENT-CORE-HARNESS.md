@@ -3,8 +3,8 @@
 What belongs in Termina's `agent-core` kernel, what does not, and the next
 ACI work that would actually raise coding-agent quality.
 
-Status: living. Principles stay in `docs/AGENT-CORE.md`. The original kernel
-change set is `docs/AGENT-CORE-PLAN.md`. This file is the next kernel
+Status: living. Principles stay in `docs/reference/AGENT-CORE.md`. The original kernel
+change set is archived at `docs/archive/agent-core/AGENT-CORE-PLAN.md`. This file is the next kernel
 track: inner-harness mechanics only.
 
 ## Three layers (do not mix)

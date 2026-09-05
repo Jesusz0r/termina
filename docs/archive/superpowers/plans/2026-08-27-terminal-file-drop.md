@@ -8,7 +8,7 @@
 
 **Tech Stack:** Electron 37, TypeScript 5.8, xterm 5.5, Node.js filesystem promises, existing Node/Electron test scripts.
 
-**Spec:** `docs/superpowers/specs/2026-08-27-terminal-images-semantic-transcript-design.md`
+**Spec:** `docs/archive/superpowers/specs/2026-08-27-terminal-images-semantic-transcript-design.md`
 
 ## Global Constraints
 
@@ -22,7 +22,7 @@
 - Keep lock, manifest, claim, quarantine, owner, producer-transaction, and staging records below the canonical events directory; use strict names, no-follow regular-file reads, capped schemas, and bounded cleanup.
 - Do not add a dependency, binary IPC payload, general path resolver, new sidecar schema, or renderer filesystem access.
 - Route path insertion through xterm's bracketed-paste behavior and never append Enter.
-- Preserve the user's existing uncommitted changes in `agent-core/main.ts`, `agent-core/tui.ts`, `docs/AGENT-CORE.md`, `scripts/agent-core-harness-test.mjs`, and `src/terminal-themes.ts`.
+- Preserve the user's existing uncommitted changes in `agent-core/main.ts`, `agent-core/tui.ts`, `docs/reference/AGENT-CORE.md`, `scripts/agent-core-harness-test.mjs`, and `src/terminal-themes.ts`.
 - Use ASD-STE100 comments for new or changed comments.
 
 ---
@@ -392,7 +392,7 @@
 ### Task 6: Full verification and documentation alignment
 
 **Files:**
-- Modify: `docs/AGENT-CORE.md`
+- Modify: `docs/reference/AGENT-CORE.md`
 - Verify: all files changed in Tasks 1-5
 
 **Interfaces:**
@@ -429,9 +429,9 @@
 
 - [x] **Step 5: Document and commit the canonical drop behavior**
 
-  Document Finder image attachment, path-only terminal quoting, four-image/4 MiB limits, and durable claim recovery in `docs/AGENT-CORE.md`. Do not document lock-file names as user-facing API.
+  Document Finder image attachment, path-only terminal quoting, four-image/4 MiB limits, and durable claim recovery in `docs/reference/AGENT-CORE.md`. Do not document lock-file names as user-facing API.
 
   ```bash
-  git add docs/AGENT-CORE.md
+  git add docs/reference/AGENT-CORE.md
   git commit -m "docs: describe terminal image drops"
   ```

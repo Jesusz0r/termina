@@ -1,5 +1,7 @@
 # Termina User Guide
 
+> **Status:** current product reference.
+
 Termina is a hybrid coding cockpit. The left side runs **pi**, the real
 interactive coding agent, in a terminal. The right side is a Monaco (VS Code)
 editor that watches the agent work live. You review what changed, verify it,

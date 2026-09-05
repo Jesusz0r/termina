@@ -8,9 +8,9 @@
 
 **Tech Stack:** TypeScript 5.8, Node.js, ANSI/xterm 5.5, Electron menus and IPC, existing agent-core harness and Electron E2E scripts.
 
-**Spec:** `docs/superpowers/specs/2026-08-27-terminal-images-semantic-transcript-design.md`
+**Spec:** `docs/archive/superpowers/specs/2026-08-27-terminal-images-semantic-transcript-design.md`
 
-**Prerequisite:** Complete `docs/superpowers/plans/2026-08-27-terminal-file-drop.md` first. Both plans touch `agent-core/main.ts`, `agent-core/tui.ts`, `electron/main.ts`, `src/main.ts`, and shared bridge types; this order keeps their canonical migrations linear.
+**Prerequisite:** Complete `docs/archive/superpowers/plans/2026-08-27-terminal-file-drop.md` first. Both plans touch `agent-core/main.ts`, `agent-core/tui.ts`, `electron/main.ts`, `src/main.ts`, and shared bridge types; this order keeps their canonical migrations linear.
 
 ## Global Constraints
 
@@ -50,7 +50,7 @@
 - Modify `scripts/agent-core-harness-test.mjs`: transcript, sanitizer, Markdown, width, tools, CSI, bounds, and non-TTY coverage.
 - Modify `scripts/settings-test.mjs`: preference, command, menu, race, and persistence coverage.
 - Modify `scripts/terminal-clipboard-test.mjs`: engine-scoped palette and late engine application coverage.
-- Modify `docs/AGENT-CORE.md`: semantic transcript and thinking-control behavior.
+- Modify `docs/reference/AGENT-CORE.md`: semantic transcript and thinking-control behavior.
 
 ### Task 1: Introduce the private semantic transcript and bounded sanitizer
 
@@ -410,7 +410,7 @@
 ### Task 7: Full regression, visual inspection, and documentation
 
 **Files:**
-- Modify: `docs/AGENT-CORE.md`
+- Modify: `docs/reference/AGENT-CORE.md`
 - Verify: all files changed in Tasks 1-6
 
 **Interfaces:**
@@ -457,6 +457,6 @@
   Then:
 
   ```bash
-  git add docs/AGENT-CORE.md
+  git add docs/reference/AGENT-CORE.md
   git commit -m "docs: describe semantic agent transcript"
   ```
