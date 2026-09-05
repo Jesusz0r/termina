@@ -576,9 +576,11 @@ export function layoutHeights(
   let slash = Math.max(0, slashCount);
   let input = Math.max(1, inputLines);
   const budget = Math.max(4, rows);
-  while (header + sep + minTranscript + input + slash > budget && slash > 0) slash--;
-  while (header + sep + minTranscript + input + slash > budget && input > 1) input--;
-  const used = header + sep + input + slash;
+  // The composer box adds a top and bottom border around the input rows.
+  const chrome = BOX_CHROME_ROWS;
+  while (header + sep + minTranscript + input + slash + chrome > budget && slash > 0) slash--;
+  while (header + sep + minTranscript + input + slash + chrome > budget && input > 1) input--;
+  const used = header + sep + input + slash + chrome;
   return { header, transcript: Math.max(minTranscript, budget - used), input, slash };
 }
 
@@ -597,6 +599,23 @@ function clip(text: string, cols: number): string {
 }
 
 const INPUT_PREFIX = "> ";
+// The composer renders as a bordered box separated from the transcript.
+// Borders occupy two cells on each side ("│ " and " │").
+const BOX_CHROME_COLS = 4;
+const BOX_CHROME_ROWS = 2;
+
+function inputWrapWidth(cols: number): number {
+  return Math.max(8, cols - BOX_CHROME_COLS);
+}
+
+function boxBorderRow(cols: number, left: string, fill: string, right: string): string {
+  return clip(left + fill.repeat(Math.max(0, cols - 2)) + right, cols);
+}
+
+function boxContentRow(content: string, cols: number): string {
+  const inner = clip(content, inputWrapWidth(cols));
+  return clip(`│ ${inner} │`, cols);
+}
 
 export function cursorRowCol(prefix: string, chars: string[], cursor: number, cols: number): { row: number; col: number } {
   const width = Math.max(1, cols);
@@ -1199,8 +1218,8 @@ export class AgentTui {
     }
     const { cols, rows } = this.size();
     const inputLines = this.choicePrompt
-      ? wrapText(this.choicePrompt, cols).length
-      : wrapInput(INPUT_PREFIX, this.chars, this.cursor, cols).wrapped.length;
+      ? wrapText(this.choicePrompt, inputWrapWidth(cols)).length
+      : wrapInput(INPUT_PREFIX, this.chars, this.cursor, inputWrapWidth(cols)).wrapped.length;
     const layout = layoutHeights(rows, Math.max(1, inputLines), this.matches().length);
     const anchor = this.topVisibleEntryId(cols, layout.transcript, this.scroll);
     this.thinkingVisible = visible;
@@ -2265,7 +2284,7 @@ export class AgentTui {
   private scrollLines(lines: number): void {
     const { cols, rows } = this.size();
     const matches = this.matches();
-    const inputLines = Math.max(1, wrapInput(INPUT_PREFIX, this.chars, this.cursor, cols).wrapped.length || 1);
+    const inputLines = Math.max(1, wrapInput(INPUT_PREFIX, this.chars, this.cursor, inputWrapWidth(cols)).wrapped.length || 1);
     const layout = layoutHeights(rows, inputLines, matches.length);
     const extra = Math.max(1, Math.abs(lines));
     const wrapped = this.visibleTranscript(cols, layout.transcript + this.scroll + extra + 2, 0);
@@ -2278,7 +2297,7 @@ export class AgentTui {
   private scrollPages(pages: number): void {
     const { cols, rows } = this.size();
     const matches = this.matches();
-    const inputLines = Math.max(1, wrapInput(INPUT_PREFIX, this.chars, this.cursor, cols).wrapped.length || 1);
+    const inputLines = Math.max(1, wrapInput(INPUT_PREFIX, this.chars, this.cursor, inputWrapWidth(cols)).wrapped.length || 1);
     const layout = layoutHeights(rows, inputLines, matches.length);
     const page = Math.max(1, layout.transcript - 1);
     this.scrollLines(pages * page);
@@ -2313,8 +2332,8 @@ export class AgentTui {
     const matches = this.matches();
     if (this.slashIndex >= matches.length) this.slashIndex = Math.max(0, matches.length - 1);
     const input = this.choicePrompt
-      ? { wrapped: wrapText(this.choicePrompt, cols), pos: { row: 0, col: Math.min(cols - 1, cellWidth(this.choicePrompt)) } }
-      : wrapInput(INPUT_PREFIX, this.chars, this.cursor, cols);
+      ? { wrapped: wrapText(this.choicePrompt, inputWrapWidth(cols)), pos: { row: 0, col: Math.min(inputWrapWidth(cols) - 1, cellWidth(this.choicePrompt)) } }
+      : wrapInput(INPUT_PREFIX, this.chars, this.cursor, inputWrapWidth(cols));
     const { wrapped: inputWrapped, pos } = input;
     const layout = layoutHeights(rows, Math.max(1, inputWrapped.length), matches.length);
     const slashStart = Math.max(
@@ -2363,7 +2382,7 @@ export class AgentTui {
     let displayWrapped = inputWrapped;
     let displayPos = pos;
     if (isInputEmpty) {
-      displayWrapped = wrapText(INPUT_PREFIX + INPUT_PLACEHOLDER, cols);
+      displayWrapped = wrapText(INPUT_PREFIX + INPUT_PLACEHOLDER, inputWrapWidth(cols));
     }
 
     const lines: string[] = [];
@@ -2373,8 +2392,14 @@ export class AgentTui {
     } else {
       for (let i = 0; i < layout.transcript; i++) lines.push(clip(view.rows[i] ?? "", cols));
     }
+    // The composer is a bordered box: top border, content rows, bottom
+    // border. It reads as one textbox separated from the transcript above
+    // and the slash menu, title, and usage below.
+    const inputTop = layout.transcript;
     const inputShown = displayWrapped.slice(0, layout.input);
-    for (let i = 0; i < layout.input; i++) lines.push(clip(inputShown[i] ?? "", cols));
+    lines.push(boxBorderRow(cols, "┌", "─", "┐"));
+    for (let i = 0; i < layout.input; i++) lines.push(boxContentRow(inputShown[i] ?? "", cols));
+    lines.push(boxBorderRow(cols, "└", "─", "┘"));
     for (let i = 0; i < layout.slash; i++) {
       const c = shownSlash[i];
       const selected = slashStart + i === this.slashIndex;
@@ -2390,13 +2415,14 @@ export class AgentTui {
     }
     if (lines.length > rows) lines.length = rows;
 
-    const inputTop = layout.transcript;
-    // Cursor stays at column 3 when placeholder is shown (right after "> ")
+    const contentTop = inputTop + 1;
+    // Content sits inside "│ ": cursor columns shift two cells right, rows
+    // one row down. Placeholder caret stays right after "> ".
     const cursorRow = isInputEmpty
-      ? Math.min(rows, Math.max(1, inputTop + 1))
-      : Math.min(rows, Math.max(1, Math.min(inputTop + layout.input, inputTop + displayPos.row + 1)));
-    const cursorCol = isInputEmpty ? 3 : Math.min(cols, Math.max(1, displayPos.col + 1));
-    const slashTop = inputTop + layout.input;
+      ? Math.min(rows, Math.max(1, contentTop + 1))
+      : Math.min(rows, Math.max(1, Math.min(contentTop + layout.input - 1, contentTop + displayPos.row + 1)));
+    const cursorCol = isInputEmpty ? 5 : Math.min(cols, Math.max(1, displayPos.col + 3));
+    const slashTop = contentTop + layout.input + 1;
     const titleRow = rows - layout.header - 1;
     const painted: string[] = [];
     for (let i = 0; i < rows; i++) {
@@ -2404,15 +2430,16 @@ export class AgentTui {
       if (i === titleRow) painted.push(`\x1b[30;104m${raw}\x1b[0m`);
       else if (i === rows - 1 || i === titleRow - 1 || (layout.header === 2 && i === titleRow + 1)) {
         painted.push(`\x1b[90m${raw}\x1b[0m`);
+      } else if (i === inputTop || i === contentTop + layout.input) {
+        // Composer box borders.
+        painted.push(`\x1b[90m${raw}\x1b[0m`);
       } else if (i >= slashTop && i < slashTop + layout.slash) {
         const si = i - slashTop;
         painted.push(si === this.slashIndex - slashStart ? `\x1b[30;104m${raw}\x1b[0m` : `\x1b[90m${raw}\x1b[0m`);
-      } else if (i === inputTop && isInputEmpty) {
-        // Dim the placeholder, keep the "> " prefix normal
-        const prefix = INPUT_PREFIX;
-        const rest = raw.slice(prefix.length);
-        painted.push(`${prefix}\x1b[90m${rest}\x1b[0m`);
-      } else if (i >= inputTop && i < inputTop + layout.input) {
+      } else if (i === contentTop && isInputEmpty) {
+        // Dim the placeholder row inside the box.
+        painted.push(`\x1b[90m${raw}\x1b[0m`);
+      } else if (i >= contentTop && i < contentTop + layout.input) {
         // Bang commands are local shell execution, not agent prompts. Give the
         // whole composer a distinct amber treatment while the command is typed.
         painted.push(bashInput ? `\x1b[1;38;5;229;48;5;58m${raw}\x1b[0m` : raw);
