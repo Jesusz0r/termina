@@ -67,6 +67,13 @@ Session memory is not truth. Before editing `agent-core/` for model ids, context
 
 Follow the existing owner for the behavior: `agent-core/auth.ts` (auth/provider policy), `agent-core/models.ts` (live catalog), `agent-core/main.ts` / `agent-core/openai-compat.ts` (requests), and `agent-core/cache.ts` (cache diagnostics). Don't add a second catalog/cache/protocol mapper. Include the relevant documentation URLs in the change summary; if docs are unavailable, state that limitation and do not invent provider behavior.
 
+## Session routine
+
+- Clock in: read `docs/active/PROGRESS.md` (Next section) before starting.
+- One task active at a time (WIP=1); finish + verify before starting the next.
+- Done = evidence, in order: typecheck → unit → build/e2e. No skipping layers.
+- Clock out: update PROGRESS.md, leave build green, remove debug code.
+
 ## Glossary
 
 Run = one agent session (`agent_start` → `agent_settled`). Sidecar = JSONL per terminal in `TERMINA_EVENTS_DIR`. Baseline = file at run start. Snapshot = file at a moment. Dot = timeline point. Worker = one dispatched plan task. Fork point = timeline event + Pi session entry + immutable source state. Worldline = isolated candidate tree + session. Candidate/Reference(A)/Alternative(B)/Challenge/Evidence contract/Write lease/Workspace — see `docs/reference/AGENT-CORE.md`.
