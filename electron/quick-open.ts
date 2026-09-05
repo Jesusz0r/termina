@@ -98,7 +98,7 @@ export async function searchProjectFiles(
     for (const ent of dirents) {
       if (!visibleDirent(ent.name)) continue;
       const full = join(dir, ent.name);
-      let isDir = ent.isDirectory();
+      const isDir = ent.isDirectory();
       if (ent.isSymbolicLink()) {
         let real: string;
         try {

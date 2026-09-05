@@ -152,8 +152,12 @@ export class QuickOpen {
 
   private renderActions(query: string): void {
     const q = query.trim().toLowerCase();
+    // Renderer handlers only exist for renderer-scope commands; main-scope
+    // commands stay in the menu (executing them here would silently no-op).
     this.rows = COMMAND_DEFINITIONS.filter(
-      (d) => !q || d.label.toLowerCase().includes(q) || d.command.includes(q) || d.description.toLowerCase().includes(q),
+      (d) =>
+        d.scope === "renderer" &&
+        (!q || d.label.toLowerCase().includes(q) || d.command.includes(q) || d.description.toLowerCase().includes(q)),
     ).map((d) => {
       const shortcut = this.getShortcut(d.command as CommandId);
       return { key: d.command, label: d.label, detail: shortcut ? `${d.category} · ${shortcut}` : d.category };

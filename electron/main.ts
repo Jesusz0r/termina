@@ -3650,7 +3650,8 @@ class PiEditorApp {
     return truncated ? { entries, truncated: true } : { entries };
   }
 
-  /** Extra Pi sessions from live tabs and unrestored roster entries. */  private async extraSessionFiles(project: ProjectState): Promise<SessionFileEntry[]> {
+  /** Extra Pi sessions from live tabs and unrestored roster entries. */
+  private async extraSessionFiles(project: ProjectState): Promise<SessionFileEntry[]> {
     const paths: string[] = [];
     for (const id of project.terminalIds) {
       const inst = this.terminals.get(id);
