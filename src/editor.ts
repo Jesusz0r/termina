@@ -522,7 +522,12 @@ export class EditorManager {
     });
     dom.append(dirty, name, mine, wline, close);
     if (this.mineKeys.has(key)) dom.classList.add("mine");
-    dom.addEventListener("click", () => this.activate(key));
+    dom.addEventListener("click", () => {
+      // A direct editor gesture: this is the one activation path that
+      // takes focus. Programmatic opens never steal terminal focus.
+      this.activate(key);
+      this.focusEditor();
+    });
     dom.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -578,7 +583,8 @@ export class EditorManager {
     for (const t of this.tabs.values()) t.dom.classList.toggle("active", t.key === key);
     this.syncEmptyState();
     this.layout();
-    this.focusEditor();
+    // No focus here: opening or switching tabs must not steal terminal
+    // focus. Only a direct click on the tab chrome focuses (see makeTab).
     if (tab.agentRevealLine !== null) {
       this.revealAgentChange(tab.agentRevealLine);
       tab.agentRevealLine = null;
@@ -590,12 +596,12 @@ export class EditorManager {
     this.editor.layout();
   }
 
-  /** Move cursor to line/column, scroll line into center, and focus the editor. */
+  /** Move cursor to line/column and scroll it into center. Never focuses:
+   *  navigation from the terminal, search, or review must not steal focus. */
   revealPosition(line: number, column?: number): void {
     const col = typeof column === "number" && column > 0 ? column : 1;
     this.editor.setPosition({ lineNumber: line, column: col });
     this.editor.revealPositionInCenter({ lineNumber: line, column: col });
-    this.focusEditor();
   }
 
   /** Focus the editor without scrolling the terminal pane. */
