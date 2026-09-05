@@ -151,7 +151,10 @@ export class ActivityTabs {
       this.deps.panels[tab]?.classList.toggle("tab-active", this.state.active === tab);
       const button = this.buttons.get(tab);
       button?.classList.toggle("active", this.state.active === tab);
-      if (button) button.hidden = !this.state.visible[tab];
+      if (button) {
+        button.hidden = !this.state.visible[tab];
+        button.setAttribute("aria-selected", this.state.active === tab ? "true" : "false");
+      }
     }
   }
 }

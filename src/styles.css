@@ -905,6 +905,13 @@ body {
   display: none;
 }
 
+/* The tab bar already separates the terminal from the panels. */
+#timeline-strip,
+#plan-panel,
+#worldline-panel {
+  border-top: none;
+}
+
 /* -------------------------------------------------------- timeline strip */
 
 #timeline-strip {
