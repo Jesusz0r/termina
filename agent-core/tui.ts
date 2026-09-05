@@ -316,38 +316,6 @@ export const TUI_SHORTCUTS: SlashCommand[] = [
   { name: "Esc", hint: "close picker" },
 ];
 
-export function formatTuiFooter(opts: {
-  choice?: boolean;
-  picker?: boolean;
-  fileCount?: number;
-  fileCapped?: boolean;
-  busy?: boolean;
-  queued?: boolean;
-  scrolled?: boolean;
-  search?: string | null;
-  bash?: boolean;
-  cols?: number;
-}): string {
-  if (opts.search !== undefined && opts.search !== null) {
-    return `(search) ${opts.search || "…"}  ·  Ctrl+R next  ·  Esc close`;
-  }
-  if (opts.choice) {
-    return "↑↓ · Enter";
-  }
-  if (opts.picker) {
-    const n = opts.fileCount;
-    const count = typeof n === "number" && n > 0 ? `  ·  ${n}${opts.fileCapped ? "+" : ""} files` : "";
-    return `↑↓ move  ·  ↵ pick  ·  Esc close${count}`;
-  }
-  const live = opts.scrolled ? "  ·  ↓ live · End" : "";
-  if (opts.busy) {
-    const queued = opts.queued ? "  ·  queued" : "";
-    return `^C stop  ·  PgUp PgDn scroll${queued}${live}`;
-  }
-  if (opts.bash) return `BASH  ·  ↵ run  ·  ^J newline  ·  ^C clear${live}`;
-  return `↵ send  ·  @ file  ·  / cmd  ·  ⇥ complete  ·  ^J newline  ·  ^C clear${live}`;
-}
-
 const graphemeSegmenter = new Intl.Segmenter("en", { granularity: "grapheme" });
 
 function forEachGrapheme(text: string, visit: (grapheme: string) => boolean | void): void {
@@ -603,15 +571,15 @@ export function layoutHeights(
   slashCount: number,
 ): { header: number; transcript: number; input: number; slash: number; footer: number } {
   const header = rows >= 6 ? 2 : 1;
-  const footer = 1;
+  const footer = 0;
   const sep = 1;
   const minTranscript = 1;
   let slash = Math.max(0, slashCount);
   let input = Math.max(1, inputLines);
   const budget = Math.max(4, rows);
-  while (header + sep + minTranscript + input + slash + footer > budget && slash > 0) slash--;
-  while (header + sep + minTranscript + input + slash + footer > budget && input > 1) input--;
-  const used = header + sep + input + slash + footer;
+  while (header + sep + minTranscript + input + slash > budget && slash > 0) slash--;
+  while (header + sep + minTranscript + input + slash > budget && input > 1) input--;
+  const used = header + sep + input + slash;
   return { header, transcript: Math.max(minTranscript, budget - used), input, slash, footer };
 }
 
@@ -2388,21 +2356,7 @@ export class AgentTui {
     const leftTitle = leftParts.join(separator);
     const gap = Math.max(1, cols - cellWidth(leftTitle) - cellWidth(rightTitle) - 2);
     const title = ` ${leftTitle}${" ".repeat(gap)}${rightTitle} `;
-    const picker = matches.length > 0 && Boolean(matches[0]?.submit);
-    const filePicker = picker && matches[0]?.hint === "file";
     const bashInput = this.chars[0] === "!" && !this.choicePrompt && !this.rawInput;
-    const foot = formatTuiFooter({
-      choice: Boolean(this.choicePrompt),
-      picker,
-      fileCount: filePicker ? matches.length : undefined,
-      fileCapped: filePicker && matches.length >= 50,
-      busy: this.busy,
-      queued: Boolean(this.queued),
-      scrolled: this.scroll > 0,
-      search: this.search ? this.search.query : null,
-      bash: bashInput,
-      cols,
-    });
 
     // Placeholder when the prompt is empty
     const isInputEmpty = this.chars.length === 0 && !this.choicePrompt && !this.search && !this.rawInput;
@@ -2435,7 +2389,6 @@ export class AgentTui {
       const usageLine = this.usage ? `  ${this.usage}` : "  idle — waiting for a task";
       lines.push(clip(usageLine, cols));
     }
-    lines.push(clip(foot, cols));
     if (lines.length > rows) lines.length = rows;
 
     const inputTop = layout.transcript;

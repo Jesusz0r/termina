@@ -148,7 +148,6 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       completeFileMention,
       rankFileTags,
       subsequenceSpread,
-      formatTuiFooter,
     } = tuiCore;
     
     const { check, results } = createCheckReporter();
@@ -302,8 +301,6 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("rankFileTags matches basename first", rankFileTags(["pkg/auth.ts", "other.txt"], "auth")[0] === "pkg/auth.ts");
     check("subsequenceSpread finds ath in auth.ts", subsequenceSpread("auth.ts", "ath") === 3);
     check("rankFileTags fuzzy basename subsequence", rankFileTags(["pkg/auth.ts", "ok.txt"], "ath")[0] === "pkg/auth.ts");
-    const tuiFooter = formatTuiFooter({});
-    check("formatTuiFooter fits 80 columns", tuiFooter.length <= 80 && tuiFooter.includes("@ file") && tuiFooter.includes("/ cmd"));
     check(
       "displayToolOutput names how to get the rest",
       displayToolOutput("x".repeat(3000)).includes("re-run or read_file"),
@@ -4516,7 +4513,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("tui status shows effort", frame.includes("anthropic/claude · max"));
     check(
       "tui status stays at the bottom",
-      frameLines.at(-3)?.includes("anthropic/claude") && frameLines.at(-2)?.includes("cache 67%"),
+      frameLines.at(-2)?.includes("anthropic/claude") && frameLines.at(-1)?.includes("cache 67%"),
     );
     const narrowTui = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 40, rows: 24, isTTY: false },
@@ -4556,7 +4553,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     });
     combinedStatusTui.setPendingImageCount(2);
     combinedStatusTui.setQueued("queue a late UTF-8 ✅ mutation");
-    const combinedStatusHeader = combinedStatusTui.frame().split("\n").at(-3) ?? "";
+    const combinedStatusHeader = combinedStatusTui.frame().split("\n").at(-2) ?? "";
     check(
       "tui combined status preserves every control label",
       combinedStatusHeader.includes("maximum") &&
@@ -4623,7 +4620,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     permissionTui.setBusy(true);
     check(
       "tui approval is selectable while busy",
-      permissionTui.frame().includes("Approve bash? rm -rf build") && permissionTui.frame().includes("↑↓ · Enter"),
+      permissionTui.frame().includes("Approve bash? rm -rf build"),
     );
     permissionTui.feed("\r");
     check("tui approval defaults to deny", permissionPicks[1] === "/approve deny");
@@ -4671,13 +4668,13 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     });
     check("tui empty state orients the user", emptyTui.frame().includes("Type a task") && emptyTui.frame().includes("/help lists keys"));
     check(
-      "tui idle footer is short",
-      emptyTui.frame().includes("↵ send") && emptyTui.frame().includes("@ file") && emptyTui.frame().includes("/ cmd") && emptyTui.frame().includes("^J newline"),
+      "tui shows no footer hint bar",
+      !emptyTui.frame().includes("↵ send") && !emptyTui.frame().includes("⇥ complete") && !emptyTui.frame().includes("^J newline") && !emptyTui.frame().includes("^C clear"),
     );
     emptyTui.feed("!echo hello");
     check(
       "tui marks bang commands as bash input",
-      emptyTui.frame().includes("BASH") && emptyTui.frame().includes("↵ run") && emptyTui.frame().includes("> !echo hello"),
+      emptyTui.frame().includes("> !echo hello") && !emptyTui.frame().includes("↵ run"),
     );
     emptyTui.feed("\x15");
     check("tui leaves bash mode when bang input is cleared", !emptyTui.frame().includes("BASH"));
@@ -4712,7 +4709,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     histTuiSearch.feed("beta two\r");
     histTuiSearch.feed("\x12");
     histTuiSearch.feed("beta");
-    check("Ctrl+R searches prompt history", histTuiSearch.frame().includes("beta two") && histTuiSearch.frame().includes("(search)"));
+    check("Ctrl+R searches prompt history", histTuiSearch.frame().includes("beta two"));
     tui.feed("/");
     check("tui slash menu lists help and exit", tui.frame().includes("/help") && tui.frame().includes("/exit"));
     const tagSubmitted = [];
