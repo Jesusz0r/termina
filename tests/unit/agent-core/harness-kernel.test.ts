@@ -4088,6 +4088,36 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("cursorRowCol treats newline as a wrap break", tuiMod.cursorRowCol("> ", ["a", "\n", "b"], 2, 80).row === 1);
     check("cursorRowCol places the caret on the next line", tuiMod.cursorRowCol("> ", ["a", "\n", "b"], 3, 80).col === 1);
     check("cursorRowCol stays on the first line before the break", tuiMod.cursorRowCol("> ", ["a", "\n", "b"], 1, 80).row === 0);
+    const boxTui = new tuiMod.AgentTui({
+      stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+      stdin: { isTTY: false },
+      onSubmit: () => {},
+      onInterrupt: () => {},
+      onExit: () => {},
+    });
+    const boxAny = boxTui as unknown as {
+      chars: string[];
+      cursor: number;
+      buildFrame(size: { cols: number; rows: number }): { text: string; cursorRow: number; cursorCol: number };
+    };
+    boxAny.chars = ["h", "e", "l", "l", "o"];
+    boxAny.cursor = 5;
+    const boxBuilt = boxAny.buildFrame({ cols: 80, rows: 24 });
+    const boxRows = boxBuilt.text.split("\n");
+    check(
+      "box cursor sits on the input row, not the top border",
+      boxRows[boxBuilt.cursorRow - 1]?.startsWith("│ > hello") === true,
+    );
+    const long = `abcdefghijklmnopqrstuvwxyz0123456789`.repeat(4);
+    boxAny.chars = [...long];
+    boxAny.cursor = boxAny.chars.length;
+    const wrapBuilt = boxAny.buildFrame({ cols: 40, rows: 24 });
+    const wrapRows = wrapBuilt.text.split("\n");
+    const wrapContent = wrapRows.filter((r) => r.startsWith("│"));
+    check(
+      "box cursor follows wrapped input to the last content row",
+      wrapRows[wrapBuilt.cursorRow - 1] === wrapContent[wrapContent.length - 1] && wrapContent.length > 1,
+    );
     const semanticTui = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
       stdin: { isTTY: false },

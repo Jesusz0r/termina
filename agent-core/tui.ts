@@ -2412,10 +2412,11 @@ export class AgentTui {
 
     const contentTop = inputTop + 1;
     // Content sits inside "│ ": cursor columns shift two cells right, rows
-    // one row down. Placeholder caret stays right after "> ".
+    // one row down. Placeholder caret stays right after "> ". cursorRow is a
+    // 1-based terminal row: the last content row is contentTop + layout.input.
     const cursorRow = isInputEmpty
       ? Math.min(rows, Math.max(1, contentTop + 1))
-      : Math.min(rows, Math.max(1, Math.min(contentTop + layout.input - 1, contentTop + displayPos.row + 1)));
+      : Math.min(rows, Math.max(1, Math.min(contentTop + layout.input, contentTop + displayPos.row + 1)));
     const cursorCol = isInputEmpty ? 5 : Math.min(cols, Math.max(1, displayPos.col + 3));
     const slashTop = contentTop + layout.input + 1;
     const titleRow = rows - layout.header - 1;
