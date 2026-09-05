@@ -2345,7 +2345,6 @@ export class AgentTui {
     const permLabel = this.permissions ? `perm ${this.permissions}` : "";
     const modelLabel = this.model ? `${spin ? `${spin} ` : ""}${this.model}` : spin ? `${spin} no model` : "no model";
     let queuedLabel = this.queued ? `queued ${truncateMiddle(this.queued, 18)}` : "";
-    const rightTitle = "";
     // Model and effort are one visual group. Reserve the effort suffix before
     // truncating a long model so narrow terminals never hide the active level.
     let extraParts = [permLabel, images, queuedLabel].filter(Boolean);
@@ -2356,11 +2355,10 @@ export class AgentTui {
       cellWidth(separator) +
       cellWidth(modelSuffix) +
       parts.reduce((sum, part) => sum + cellWidth(separator) + cellWidth(part), 0) +
-      cellWidth(rightTitle) +
       3; // outer spaces plus the minimum left/right gap
     let fixedCells = fixedTitleCells(extraParts);
-    // Queued text is context, while the queued state and auth label are
-    // controls. Collapse the summary before it can clip either control.
+    // Queued text is context, while the queued state is a control. Collapse
+    // the summary before it can clip the control.
     if (queuedLabel && fixedCells >= cols) {
       queuedLabel = "queued";
       extraParts = [permLabel, images, queuedLabel].filter(Boolean);
@@ -2369,8 +2367,8 @@ export class AgentTui {
     const visibleModel = truncateMiddle(modelLabel, Math.max(1, cols - fixedCells));
     const leftParts = [`▸ termina`, `${visibleModel}${modelSuffix}`, ...extraParts];
     const leftTitle = leftParts.join(separator);
-    const gap = Math.max(1, cols - cellWidth(leftTitle) - cellWidth(rightTitle) - 2);
-    const title = ` ${leftTitle}${" ".repeat(gap)}${rightTitle} `;
+    const gap = Math.max(1, cols - cellWidth(leftTitle) - 2);
+    const title = ` ${leftTitle}${" ".repeat(gap)} `;
     const bashInput = this.chars[0] === "!" && !this.choicePrompt && !this.rawInput;
 
     // Placeholder when the prompt is empty
