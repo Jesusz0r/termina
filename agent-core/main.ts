@@ -4655,10 +4655,13 @@ async function requestHostBashApproval(command: string): Promise<boolean | null>
   return true;
 }
 
-async function confirmBashNow(command: string): Promise<boolean> {
+async function confirmBashNow(command: string, viaHost: boolean): Promise<boolean> {
   if (interrupted) return false;
   if (!shouldAskPermission(permissionMode, command)) return true;
-  if (eventsDir && terminalId) {
+  // User-typed ! commands carry explicit user intent; only model-initiated
+  // tool calls escalate to the host dialog. This preserves the pre-host-gate
+  // behavior for direct keystrokes.
+  if (viaHost && eventsDir && terminalId) {
     const host = await requestHostBashApproval(command);
     if (host !== null) return host;
   }
@@ -4695,8 +4698,8 @@ async function queueApproval(confirm: () => Promise<boolean>): Promise<boolean> 
   }
 }
 
-async function confirmBash(command: string): Promise<boolean> {
-  return queueApproval(() => confirmBashNow(command));
+async function confirmBash(command: string, viaHost = true): Promise<boolean> {
+  return queueApproval(() => confirmBashNow(command, viaHost));
 }
 
 async function confirmProtectedMutationNow(inputPath: string | undefined): Promise<boolean> {
@@ -8059,7 +8062,7 @@ async function runBangCommand(command: string): Promise<void> {
   interrupted = false;
   showPrompt();
   try {
-    if (!(await confirmBash(command))) {
+    if (!(await confirmBash(command, false))) {
       out("(bash denied)\n");
       return;
     }
