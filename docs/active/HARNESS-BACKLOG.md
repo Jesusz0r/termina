@@ -26,8 +26,10 @@ Needs: a one-line summary in the header when a comparison is active.
 
 Touches: `electron/worldlines.ts` wiring.
 
-## 4. Terminal theme sync on hot reload
+## 4. Terminal theme sync on hot reload — implemented
 
-`pty-view.ts` already does `setTheme`/`setFontFamily`, but font load races on first paint.
-
-Needs: `document.fonts.ready` debounce (already partially there).
+`src/pty-view.ts` coalesces fits through `scheduleFit()` (one rAF) and
+explicitly `document.fonts.load()`s the active family at the current
+size before fitting — constructor, `setFontSize`, and `setFontFamily`.
+`document.fonts.ready` stays as a backstop only: it doesn't cover a
+family chosen after startup, which was the reload race.

@@ -30,6 +30,7 @@ export class PtyView {
   private themeId: ThemeId;
   private engine: "pi" | "core" | undefined;
   private refreshFont = false;
+  private fitScheduled = false;
   private wheelDelta = 0;
   private wheelTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly container: HTMLElement;
@@ -116,19 +117,22 @@ export class PtyView {
     this.term.onRender(() => {
       this.lastRender = Date.now();
     });
-    requestAnimationFrame(() => this.fit());
+    requestAnimationFrame(() => this.scheduleFit());
     // The first fit can run before the terminal font is ready; the cell
     // measurement then differs from later fits and the row count jumps.
-    // Fit again once the fonts load so every terminal shares one size.
+    // document.fonts.ready only tracks families loading at startup, so
+    // explicitly load the initial family too (hot reload re-applies a
+    // persisted family after ready has resolved) and keep ready as backstop.
+    void this.ensureFamilyLoaded(this.fontFamily, this.fontSize).then(() => this.scheduleFit());
     if (typeof document !== "undefined" && document.fonts?.ready) {
-      void document.fonts.ready.then(() => this.fit()).catch(() => undefined);
+      void document.fonts.ready.then(() => this.scheduleFit()).catch(() => undefined);
     }
     try {
       this.resizeObserver = new ResizeObserver(() => {
         if (this.resizeTimer) clearTimeout(this.resizeTimer);
         this.resizeTimer = setTimeout(() => {
           this.resizeTimer = null;
-          this.fit();
+          this.scheduleFit();
         }, 50);
       });
       this.resizeObserver.observe(container);
@@ -420,7 +424,8 @@ export class PtyView {
     this.fontSize = size;
     this.term.options.fontSize = size;
     this.refreshFont = true;
-    this.fit();
+    this.scheduleFit();
+    void this.ensureFamilyLoaded(this.fontFamily, size).then(() => this.scheduleFit());
   }
 
   setFontFamily(family: string): void {
@@ -428,18 +433,31 @@ export class PtyView {
     this.fontFamily = family;
     this.term.options.fontFamily = cssFontFamily(family);
     this.refreshFont = true;
-    this.fit();
-    this.loadFamilyThenFit(family);
-  }
-
-  private loadFamilyThenFit(family: string): void {
-    if (!family || !document.fonts?.load) return;
-    // document.fonts.ready does not wait for a family chosen after startup.
-    void document.fonts.load(`${this.fontSize}px "${family}"`).then(() => {
+    this.scheduleFit();
+    void this.ensureFamilyLoaded(family, this.fontSize).then(() => {
       if (this.disposed || this.fontFamily !== family) return;
       this.refreshFont = true;
+      this.scheduleFit();
+    });
+  }
+
+  /** Coalesce fit bursts (reload, resize, font loads) into one frame. */
+  private scheduleFit(): void {
+    if (this.disposed || this.fitScheduled) return;
+    this.fitScheduled = true;
+    requestAnimationFrame(() => {
+      this.fitScheduled = false;
       this.fit();
-    }).catch(() => undefined);
+    });
+  }
+
+  private ensureFamilyLoaded(family: string, size: number): Promise<void> {
+    if (!family || typeof document === "undefined" || !document.fonts?.load) return Promise.resolve();
+    // document.fonts.ready does not wait for a family chosen after startup.
+    return document.fonts.load(`${size}px "${family}"`).then(
+      () => undefined,
+      () => undefined,
+    );
   }
 
   fit(): void {
