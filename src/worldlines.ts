@@ -21,6 +21,8 @@ interface ViewHandlers {
   onOpenTerminal(terminalId: string): void;
   /** True when this terminal still has a live pane. */
   isLiveTerminal(terminalId: string): boolean;
+  /** Content arrival for the Worldlines tab badge + auto-switch. */
+  onContent?(has: boolean, count: number): void;
 }
 
 function actionButton(className: string, label: string, title: string, onClick: () => void): HTMLButtonElement {
@@ -113,6 +115,7 @@ export class WorldlinesView {
   private refreshCount(): void {
     this.countEl.textContent = this.pairs.size ? `(${this.pairs.size})` : "";
     this.panel.classList.toggle("collapsed", this.pairs.size === 0);
+    this.handlers.onContent?.(this.pairs.size > 0, this.pairs.size);
   }
 
   /** One evidence summary arrived (challenge ranking). */

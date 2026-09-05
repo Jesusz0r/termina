@@ -39,6 +39,7 @@ import { PtyView } from "./pty-view";
 import { TimelineView } from "./timeline";
 import { SessionSearch } from "./session-search";
 import { QuickOpen } from "./quick-open";
+import { ActivityTabs } from "./activity-tabs";
 import { WorldlinesView } from "./worldlines";
 import { Explorer } from "./components/explorer";
 import { toast } from "./components/modals";
@@ -433,6 +434,22 @@ const btnDispatch = document.getElementById("btn-dispatch") as HTMLButtonElement
 const timelineView = new TimelineView(document.getElementById("timeline-strip")!);
 (window as unknown as Record<string, unknown>).__timelineView = timelineView;
 const worldlinesView = new WorldlinesView(document.getElementById("worldline-panel")!);
+const activityTabs = new ActivityTabs({
+  bar: document.getElementById("activity-tabbar")!,
+  panels: {
+    timeline: document.getElementById("timeline-strip")!,
+    plan: planPanel,
+    worldlines: document.getElementById("worldline-panel")!,
+    modified: modifiedPanel,
+  },
+  counts: {
+    timeline: null,
+    plan: planCount,
+    worldlines: document.getElementById("worldline-count"),
+    modified: modifiedCount,
+  },
+  storage: localStorage,
+});
 let worldlineHydrationEpoch = 0;
 let worldlineHydrationTombstones: Set<string> | null = null;
 
@@ -496,8 +513,17 @@ worldlinesView.bind({
     const pane = panes.get(terminalId);
     return !!pane && !pane.error && !pane.exited;
   },
+  onContent: (has, count) => {
+    // The first report reflects pre-existing state, not an arrival:
+    // sync it quietly so a stored tab survives reload.
+    if (!worldlinesSynced) {
+      worldlinesSynced = true;
+      activityTabs.syncContent("worldlines", has, count);
+    } else activityTabs.setHasContent("worldlines", has, count);
+  },
 });
 const btnForkRun = document.getElementById("btn-fork-run") as HTMLButtonElement;
+let worldlinesSynced = false;
 const challengeRunLabels: Record<ChallengeProfile, string> = {
   "fewer-dependencies": "Deps",
   "preserve-api": "API",
@@ -1121,8 +1147,8 @@ function renderChrome(): void {
     return;
   }
   renderStatus(pane);
-  renderPlan(pane);
-  renderModified(pane);
+  renderPlan(pane, false);
+  renderModified(pane, false);
 }
 
 /** Status bar and Verify only. Busy ticks must not rebuild the plan or modified lists. */
@@ -1135,7 +1161,7 @@ function renderStatus(pane: Pane): void {
 }
 
 /** Plan Board: the current run's tasks with live progress. */
-function renderPlan(pane: Pane): void {
+function renderPlan(pane: Pane, announce = true): void {
   if (!pane.planLoaded) {
     pane.planLoaded = true;
     const versionAtStart = pane.planVersion;
@@ -1145,7 +1171,7 @@ function renderPlan(pane: Pane): void {
       if (p.planVersion !== versionAtStart) return; // a push won the race
       p.plan = tasks;
       p.planLoadAttempts = 0;
-      if (activeId === pane.instanceId) renderPlan(p);
+      if (activeId === pane.instanceId) renderPlan(p, announce);
     }).catch((err) => {
       const p = panes.get(pane.instanceId);
       if (!p || p.planVersion !== versionAtStart) return;
@@ -1155,7 +1181,7 @@ function renderPlan(pane: Pane): void {
         const delay = 250 * (2 ** (p.planLoadAttempts - 1));
         setTimeout(() => {
           const current = panes.get(p.instanceId);
-          if (current === p && current.planVersion === versionAtStart && activeId === current.instanceId) renderPlan(current);
+          if (current === p && current.planVersion === versionAtStart && activeId === current.instanceId) renderPlan(current, announce);
         }, delay);
         return;
       }
@@ -1200,6 +1226,8 @@ function renderPlan(pane: Pane): void {
     planList.appendChild(li);
   }
   planPanel.classList.toggle("collapsed", pane.plan.length === 0);
+  if (announce) activityTabs.setHasContent("plan", pane.plan.length > 0, pane.plan.length);
+  else activityTabs.syncContent("plan", pane.plan.length > 0, pane.plan.length);
   // Dispatch is possible when the plan has tasks. The button label shows
   // whether a dispatch is running (main re-sends the plan on settle).
   btnDispatch.hidden = pane.plan.length === 0;
@@ -1270,7 +1298,7 @@ function renderVerify(pane: Pane): void {
     v.state === "running" ? "Click to cancel verification" : v.state === "fail" && v.summary ? v.summary : v.command ?? "";
 }
 
-function renderModified(pane: Pane): void {
+function renderModified(pane: Pane, announce = true): void {
   modifiedCount.textContent = pane.modified.length ? `(${pane.modified.length})` : "";
   if (modifiedRenderedPaneId !== pane.instanceId) {
     modifiedList.replaceChildren();
@@ -1331,6 +1359,8 @@ function renderModified(pane: Pane): void {
     if (!seen.has(path)) row.remove();
   }
   modifiedPanel.classList.toggle("collapsed", pane.modified.length === 0);
+  if (announce) activityTabs.setHasContent("modified", pane.modified.length > 0, pane.modified.length);
+  else activityTabs.syncContent("modified", pane.modified.length > 0, pane.modified.length);
 }
 
 /** Show the Git handoff after a green Verify or an Accept. Termina never writes Git. */
@@ -1855,6 +1885,7 @@ function syncPaneToggle(button: HTMLButtonElement, minimized: boolean, label: st
 
 function setModifiedVisible(visible: boolean): void {
   modifiedPanelEl.style.display = visible ? "" : "none";
+  activityTabs.setTabVisible("modified", visible);
   localStorage.setItem(MODIFIED_KEY, visible ? "1" : "0");
 }
 

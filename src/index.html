@@ -87,7 +87,13 @@
               <button type="button" id="btn-min-terminal" class="pane-toggle" title="Minimize terminal" aria-label="Minimize terminal">–</button>
             </div>
             <div id="terminal-container"></div>
-            <div id="timeline-strip">
+            <div id="activity-tabbar" role="tablist" aria-label="Activity panels">
+              <button type="button" class="activity-tab" data-tab="timeline" role="tab">Timeline <span class="activity-count" data-count="timeline"></span></button>
+              <button type="button" class="activity-tab" data-tab="plan" role="tab">Plan <span class="activity-count" data-count="plan"></span></button>
+              <button type="button" class="activity-tab" data-tab="worldlines" role="tab">Worldlines <span class="activity-count" data-count="worldlines"></span></button>
+              <button type="button" class="activity-tab" data-tab="modified" role="tab">Modified <span class="activity-count" data-count="modified"></span></button>
+            </div>
+            <div id="timeline-strip" class="tab-active">
               <div class="timeline-header">
                 <span class="timeline-label">Timeline</span>
                 <span id="timeline-count" class="muted"></span>

@@ -483,6 +483,7 @@ body {
 }
 
 #left-pane.minimized #terminal-container,
+#left-pane.minimized #activity-tabbar,
 #left-pane.minimized #timeline-strip,
 #left-pane.minimized #plan-panel,
 #left-pane.minimized #worldline-panel,
@@ -856,6 +857,52 @@ body {
   background: var(--bg-panel);
   overflow: hidden;
   position: relative;
+}
+
+/* ------------------------------------------------------- activity tabs */
+
+/* HARNESS-BACKLOG #1: one activity panel shows at a time so the terminal
+ * keeps its height. Inactive panels are display:none via .tab-active. */
+#activity-tabbar {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 2px;
+  padding: 4px 8px 0;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.activity-tab {
+  font-size: 11px;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.activity-tab:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.activity-tab.active {
+  color: var(--text);
+  background: var(--bg);
+  border-color: var(--border);
+}
+
+.activity-tab .activity-count {
+  font-size: 10px;
+}
+
+#timeline-strip:not(.tab-active),
+#plan-panel:not(.tab-active),
+#worldline-panel:not(.tab-active),
+#modified-panel:not(.tab-active) {
+  display: none;
 }
 
 /* -------------------------------------------------------- timeline strip */

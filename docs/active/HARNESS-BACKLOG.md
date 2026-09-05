@@ -4,13 +4,15 @@
 >
 > Captured 2026-05-11 from the TUI/harness audit. Add only when measured or when a concrete need appears. Each item is one focused PR.
 
-## 1. Left pane is a stack of 4 panels — vertical crowding
+## 1. Left pane is a stack of 4 panels — vertical crowding — implemented
 
-The pty sits above Timeline, Plan, Worldlines, and Modified. On a small laptop the terminal gets squeezed. This is the #1 harness pain.
-
-Lazy fix: tabs (`Activity | Plan | Worldlines`) or a collapsible accordion with persisted height.
-
-Touches: `src/main.ts` layout + `localStorage` + tests. Do as one focused PR.
+The terminal is followed by an activity tab bar (Timeline | Plan |
+Worldlines | Modified); one panel shows at a time with count badges.
+New plan/worldline/modified content auto-switches on the empty →
+non-empty edge (timeline dots never yank); re-renders for terminal or
+project switches sync badges without switching. Active tab persists in
+`localStorage`. Owner: `src/activity-tabs.ts` (pure reducer + thin DOM
+glue).
 
 ## 2. No command palette / quick-open — implemented
 
