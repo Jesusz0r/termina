@@ -4634,9 +4634,34 @@ export function cancelPendingApproval(line = "/approve deny"): boolean {
   return true;
 }
 
+/** Ask the Termina host (main process dialog, outside the pty) for bash approval. */
+async function requestHostBashApproval(command: string): Promise<boolean | null> {
+  if (!eventsDir || !terminalId || sidecarWriteStopped) return null;
+  const requestId = randomUUID();
+  logEvent({
+    t: "bash_approval_request",
+    requestId,
+    command: command.slice(0, 2000),
+    dangerous: isDangerousBash(command),
+  });
+  const ack = await waitForAck(eventsDir, terminalId, requestId, 300_000, bridgeId, {
+    shouldStop: () => interrupted,
+  });
+  if (!ack || ack.ok !== true) return false;
+  if (ack.always === true) {
+    permissionMode = "always";
+    surface?.setStatus({ permissions: permissionMode });
+  }
+  return true;
+}
+
 async function confirmBashNow(command: string): Promise<boolean> {
   if (interrupted) return false;
   if (!shouldAskPermission(permissionMode, command)) return true;
+  if (eventsDir && terminalId) {
+    const host = await requestHostBashApproval(command);
+    if (host !== null) return host;
+  }
   if (!surface?.active()) return false;
   surface.setChoices(`Approve bash? ${command.slice(0, 160)}`, [
     { name: "Deny", hint: "reject this command", submit: "/approve deny" },

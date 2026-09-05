@@ -215,11 +215,15 @@ no file-permission tool; chat was the accidental substitute. Host edit
 notes must stay informational (partial working-tree facts), not a stop.
 Mine and dispatch mailbox stay do-not-touch rules.
 
-### 8. Real bash approval (host + kernel)
+### 8. Real bash approval (host + kernel) — implemented (v1: native host dialog)
 
-`/permissions` is policy, not a sandbox. A deny-list is bypassable
-(`python -c`, `bash -c`). A real gate needs UI and IPC. Do not add
-theater in the kernel alone.
+Kernel `agent-core/main.ts` requests approval over the sidecar
+(`bash_approval_request` + ack file) when host-managed; standalone CLI
+keeps the TUI fallback. Host `electron/main.ts` enforces with a native
+dialog outside the pty (Deny / Approve once / Always approve),
+fail-closed on dismiss/timeout/close. `isDangerousBash` is a risk hint
+only. Primary terminals never set `TERMINA_CORE_APPROVE=all`; sandboxed
+worldline candidates alone auto-approve.
 
 ## Stay out (still)
 

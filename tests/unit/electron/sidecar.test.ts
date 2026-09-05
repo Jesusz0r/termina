@@ -3,7 +3,7 @@ import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/pro
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SidecarEventQueue, SidecarTailer } from "../../../electron/sidecar.ts";
+import { SidecarEventQueue, SidecarTailer, sidecarEventFromRecord } from "../../../electron/sidecar.ts";
 import { boundedSidecarEdits, SIDECAR_TOOL_EDIT_PREVIEW_BYTES } from "../../../agent-core/main.ts";
 
 describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
@@ -204,5 +204,24 @@ describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
         tailer.stop();
       }
     });
+  });
+});
+
+describe("bash_approval_request", () => {
+  it("parses the host approval request with command and risk hint", () => {
+    const event = sidecarEventFromRecord({
+      bridgeId: "core-1",
+      seq: 1,
+      t: "bash_approval_request",
+      requestId: "req-1",
+      command: "rm -rf /tmp/x",
+      dangerous: true,
+    });
+    expect(event).toMatchObject({ t: "bash_approval_request", requestId: "req-1", command: "rm -rf /tmp/x", dangerous: true });
+  });
+
+  it("drops non-string command payloads", () => {
+    const event = sidecarEventFromRecord({ bridgeId: "core-1", seq: 1, t: "bash_approval_request", requestId: "req-1", command: 42 });
+    expect(event).toMatchObject({ t: "bash_approval_request", requestId: "req-1", command: undefined });
   });
 });
