@@ -12,11 +12,14 @@ Lazy fix: tabs (`Activity | Plan | Worldlines`) or a collapsible accordion with 
 
 Touches: `src/main.ts` layout + `localStorage` + tests. Do as one focused PR.
 
-## 2. No command palette / quick-open
+## 2. No command palette / quick-open — implemented
 
-`Cmd+P` for files and `Cmd+K` for actions would cut explorer hunting.
-
-Needs: fuzzy matcher + new IPC `file:search`. Existing `SessionSearch` is for history, not workspace.
+`Cmd+P` opens Quick Open (fuzzy file search over the active project);
+`Cmd+K` opens the Command Palette (all registered commands, `Enter` to
+run). New `file:search` IPC backed by `electron/quick-open.ts` (bounded
+walk, same ignore rules as the explorer, per-query matching so payloads
+stay small). Menu entries under View; shortcuts user-remappable like the
+rest.
 
 ## 3. Worldline compare is buried
 

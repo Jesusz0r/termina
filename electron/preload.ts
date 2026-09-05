@@ -109,6 +109,7 @@ const bridge: PiBridge = {
   getTimelineProgress: (terminalId, seq) => ipcRenderer.invoke("timeline:progress", terminalId, seq),
   getPlan: (terminalId) => ipcRenderer.invoke("plan:get", terminalId),
   searchSessions: (query) => ipcRenderer.invoke("session:search", query),
+  searchFiles: (query) => ipcRenderer.invoke("file:search", query),
   getRuns: (terminalId) => ipcRenderer.invoke("worldline:runs", terminalId),
   reportFlush: (requestId, result) => ipcRenderer.invoke("editor:flush-report", requestId, result),
   flushSave: (path, content, writerId, owner: ProjectWorkspaceRef) => ipcRenderer.invoke("file:flush-save", path, content, writerId, owner),

@@ -584,6 +584,8 @@ export interface PiBridge {
   getPlan(terminalId: string): Promise<PlanTask[]>;
   /** Full-text search over the project's past sessions. */
   searchSessions(query: string): Promise<SessionHit[]>;
+  /** Fuzzy file search over the active project tree (quick open). */
+  searchFiles(query: string): Promise<{ entries: Array<{ relPath: string }>; truncated?: boolean }>;
 
   // Worldlines: run records
   /** The recorded runs of a terminal (or every terminal). */

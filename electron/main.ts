@@ -62,6 +62,7 @@ import {
 } from "./plan-board.js";
 import { AppPreferencesStore } from "./preferences.js";
 import { listSessionJsonl, mergeSessionFiles, searchSessionFiles, sessionFileEntry, type SessionFileEntry } from "./session-search.js";
+import { searchProjectFiles } from "./quick-open.js";
 import { appendPendingImages, MAX_PENDING_IMAGES, pendingImageState } from "../agent-core/host.js";
 import {
   coreSessionFile as bundleSessionFile,
@@ -1420,6 +1421,8 @@ class PiEditorApp {
           { label: "Next Project", accelerator: shortcut("next-project"), click: send("next-project") },
           { label: "Previous Project", accelerator: shortcut("previous-project"), click: send("previous-project") },
           { label: "Search Sessions…", accelerator: shortcut("session-search"), click: send("session-search") },
+          { label: "Quick Open…", accelerator: shortcut("quick-open"), click: send("quick-open") },
+          { label: "Command Palette…", accelerator: shortcut("command-palette"), click: send("command-palette") },
           { type: "separator" },
           { label: "Toggle DevTools", accelerator: "Alt+Cmd+I", role: "toggleDevTools" },
           { label: "Reload", accelerator: "CmdOrCtrl+R", role: "reload" },
@@ -3630,8 +3633,24 @@ class PiEditorApp {
     return seq === this.searchSessionsSeq ? hits : [];
   }
 
-  /** Extra Pi sessions from live tabs and unrestored roster entries. */
-  private async extraSessionFiles(project: ProjectState): Promise<SessionFileEntry[]> {
+  /**
+   * Quick Open file search over the active project tree. Per-query walk
+   * keeps IPC payloads small; caps in quick-open.ts bound main-thread work.
+   */
+  private async searchProjectFiles(
+    query: string,
+  ): Promise<{ entries: Array<{ relPath: string }>; truncated?: boolean }> {
+    const project = this.project();
+    const cwd = project?.cwd ?? null;
+    if (!project || !cwd) return { entries: [] };
+    const root = await this.canonicalPath(cwd);
+    const { entries, truncated } = await searchProjectFiles(root, query, {
+      shouldStop: () => this.disposed,
+    });
+    return truncated ? { entries, truncated: true } : { entries };
+  }
+
+  /** Extra Pi sessions from live tabs and unrestored roster entries. */  private async extraSessionFiles(project: ProjectState): Promise<SessionFileEntry[]> {
     const paths: string[] = [];
     for (const id of project.terminalIds) {
       const inst = this.terminals.get(id);
@@ -7478,6 +7497,7 @@ class PiEditorApp {
 
     // ---- Session Search ----
     ipcMain.handle("session:search", (_e, query: unknown) => this.searchSessions(typeof query === "string" ? query : ""));
+    ipcMain.handle("file:search", (_e, query: unknown) => this.searchProjectFiles(typeof query === "string" ? query : ""));
 
     // ---- Plan Board ----
     ipcMain.handle("plan:get", (_e, terminalId: string) => this.terminals.get(terminalId)?.plan ?? []);

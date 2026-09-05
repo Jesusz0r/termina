@@ -38,6 +38,7 @@ import "@xterm/xterm/css/xterm.css";
 import { PtyView } from "./pty-view";
 import { TimelineView } from "./timeline";
 import { SessionSearch } from "./session-search";
+import { QuickOpen } from "./quick-open";
 import { WorldlinesView } from "./worldlines";
 import { Explorer } from "./components/explorer";
 import { toast } from "./components/modals";
@@ -376,6 +377,7 @@ const explorer = new Explorer(document.getElementById("explorer")!);
 const sessionSearch = new SessionSearch();
 sessionSearch.bind({ onOpenFile: (path) => void openFileSmart(path, true) });
 (window as unknown as Record<string, unknown>).__sessionSearch = sessionSearch;
+const quickOpen = new QuickOpen();
 
 // ---- Mine (file ownership) ----
 let mineRequestToken = 0;
@@ -2201,6 +2203,13 @@ commands.register("toggle-terminal", () => requestMinimize("terminal"));
 commands.register("toggle-editor", () => requestMinimize("editor"));
 commands.register("toggle-modified", () => setModifiedVisible(modifiedPanelEl.style.display === "none"));
 commands.register("session-search", () => sessionSearch.open());
+quickOpen.bind({
+  onOpenFile: (relPath) => void openFileSmart(relPath, true),
+  onExecuteCommand: (command) => commands.execute(command),
+  getShortcut: (command) => preferences.shortcuts[command] ?? "",
+});
+commands.register("quick-open", () => quickOpen.open("files"));
+commands.register("command-palette", () => quickOpen.open("actions"));
 
 // Settings
 commands.register("open-settings", () => settingsView.open(preferences));

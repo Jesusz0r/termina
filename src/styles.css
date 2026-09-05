@@ -2133,6 +2133,11 @@ body {
   cursor: pointer;
 }
 
+.search-hit.selected {
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+
 .search-when {
   flex: 0 0 auto;
   color: var(--text-dim);
