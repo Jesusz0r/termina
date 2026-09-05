@@ -8250,6 +8250,17 @@ async function bootCatalog(): Promise<void> {
     }
     const loaded = await loadCatalog(route.provider, false);
     if (!loaded.ok) process.stderr.write(`agent-core: ${loaded.error}\n`);
+    // The active provider blocks startup (availability check above); the
+    // rest fill in behind it so the first /models already lists every
+    // authenticated provider. Failures surface on demand, not here.
+    void loadAuthenticatedCatalogs(false).then(
+      (errors) => {
+        for (const err of errors) process.stderr.write(`agent-core: catalog ${err}\n`);
+      },
+      (err) => {
+        process.stderr.write(`agent-core: catalog background load failed: ${(err as Error).message}\n`);
+      },
+    );
   } catch (err) {
     process.stderr.write(`agent-core: model list failed: ${(err as Error).message}\n`);
   }
@@ -8267,7 +8278,7 @@ function startCatalogCommand(line: string): void {
       showPrompt();
       return;
     }
-    const refresh = /\brefresh\b/.test(line);
+    const refresh = /\brefresh\b|\breload\b/.test(line);
     const abort = new AbortController();
     catalogAbort = abort;
     authBusy = true;

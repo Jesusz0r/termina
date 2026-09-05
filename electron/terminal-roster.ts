@@ -20,6 +20,8 @@ export type TerminalRosterEntry = {
   shell?: string;
   sessionId?: string | null;
   sessionFile?: string | null;
+  /** Provider-qualified model the session last used (core resume pin). */
+  model?: string;
 };
 
 function isAbsPath(value: string): boolean {
@@ -29,6 +31,14 @@ function isAbsPath(value: string): boolean {
 
 export function isRosterSessionId(value: string): boolean {
   return value.length <= MAX_SESSION_ID && SESSION_ID.test(value);
+}
+
+/** provider/model without whitespace or control characters. The model part
+ *  may itself contain slashes; the split is on the first one. */
+export function isRosterModel(value: string): boolean {
+  if (value.length < 3 || value.length > 200 || /[\x00-\x1f\x7f\s]/.test(value)) return false;
+  const cut = value.indexOf("/");
+  return cut > 0 && cut < value.length - 1;
 }
 
 export function parseTerminalRoster(raw: unknown): TerminalRosterEntry[] {
@@ -59,6 +69,12 @@ export function parseTerminalRoster(raw: unknown): TerminalRosterEntry[] {
     }
     if (entry.engine !== "core" && typeof rec.sessionFile === "string" && isAbsPath(rec.sessionFile)) {
       entry.sessionFile = rec.sessionFile;
+    }
+    // The session's own last model, so resume restores it instead of the
+    // global last-used one. Entries written before this field exist stay
+    // valid without it. Same shape rule as the spawn-time model flag.
+    if (entry.type === "agent" && typeof rec.model === "string" && isRosterModel(rec.model)) {
+      entry.model = rec.model;
     }
     seen.add(entry.id);
     out.push(entry);

@@ -2740,6 +2740,13 @@ class PiEditorApp {
     if (inst.type === "shell" && inst.shellPath) entry.shell = inst.shellPath;
     if (inst.sessionId) entry.sessionId = inst.sessionId;
     if (inst.sessionFile) entry.sessionFile = inst.sessionFile;
+    // The session's own last model (tracked from sidecar agent_settings /
+    // agent_start). Resume restores it; without it a restart falls back to
+    // the global last-used model or the provider default.
+    const lastModel = this.usablePiModel(inst.model);
+    if (inst.type === "agent" && inst.engine === "core" && lastModel) {
+      entry.model = lastModel;
+    }
     return entry;
   }
 
@@ -2866,6 +2873,7 @@ class PiEditorApp {
           persist: true,
           skipRosterSave: true,
           resume: { sessionId: rec.sessionId ?? null, sessionFile: rec.sessionFile ?? null },
+          model: rec.model ?? null,
         });
         spawned.push({ rec, id: inst.id });
       } catch (err) {
@@ -2983,6 +2991,8 @@ class PiEditorApp {
       persist?: boolean;
       skipRosterSave?: boolean;
       resume?: { sessionId: string | null; sessionFile: string | null };
+      /** Roster-pinned model for core resume: the session's own last model. */
+      model?: string | null;
     },
   ): Promise<PiTerminalInstance> {
     // Terminal creation crosses several awaits (provider/session setup and
@@ -3071,10 +3081,16 @@ class PiEditorApp {
       if (resuming) env.TERMINA_CORE_RESUME = "1";
       else delete env.TERMINA_CORE_RESUME;
       const coreModel = this.copiedCoreModel(opts?.fromTerminalId);
+      const resumeModel = this.usablePiModel(opts?.model);
       if (coreModel) {
         const cut = coreModel.indexOf("/");
         env.TERMINA_CORE_PROVIDER = coreModel.slice(0, cut);
         env.TERMINA_CORE_MODEL = coreModel.slice(cut + 1);
+      } else if (resumeModel) {
+        // Roster resume: the session's own last model beats the global one.
+        const cut = resumeModel.indexOf("/");
+        env.TERMINA_CORE_PROVIDER = resumeModel.slice(0, cut);
+        env.TERMINA_CORE_MODEL = resumeModel.slice(cut + 1);
       } else if (!resuming) {
         // Fresh session without a source tab: reopen on the last-used model.
         // agent-core ignores the pin when that provider is no longer authenticated.

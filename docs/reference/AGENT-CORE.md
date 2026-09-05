@@ -226,8 +226,9 @@ are paste-key logins (`/login key opencode-go`, `/login key opencode-zen`).
 Agent-core stores credentials in `~/.termina/agent/auth.json` (mode 0600).
 A stored credential wins over that provider's env key. OAuth tokens refresh
 once on expiry or 401. After login the kernel loads that provider's live
-model list. Startup loads only the active provider. `/models` loads every
-authenticated provider on demand and prints `provider` and `id`; typing
+model list. Startup loads the active provider first and fills in the rest
+behind it, so the first `/models` already lists every authenticated
+provider. `/models refresh` (or `reload`) forces a refetch; typing
 `/models` in the TUI lists them. `/model <id>` or `/model <provider>/<id>`
 selects one. `/permissions` opens a picker for `Always approve`, `Ask on dangerous requests`,
 or `Always ask`. Bash approval prompts also use arrow-key selection instead of typed letters.
