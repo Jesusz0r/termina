@@ -8373,7 +8373,7 @@ function startAuthCommand(line: string): void {
       syncModelRows();
     }
     out(result.ok ? `${result.summary}\n` : `(${result.error})\n`);
-    if (result.ok && parsed.provider === route.provider) syncStatus("");
+    if (result.ok && parsed.provider === route.provider) syncStatus();
     showPrompt();
     return;
   }
@@ -8407,8 +8407,8 @@ function startAuthCommand(line: string): void {
       if (got.ok && listed && listed.length > 0 && parsed.provider === route.provider) {
         out(`${formatModelBanner(listed, route.model)}\n`);
       }
-      const nextAuth = await resolveAuth(route.provider, abort.signal);
-      syncStatus(nextAuth.ok ? authBanner(nextAuth) : undefined);
+      await resolveAuth(route.provider, abort.signal);
+      syncStatus();
     })
     .catch((err: unknown) => {
       out(`(login failed: ${(err as Error).message})\n`);
@@ -8423,12 +8423,11 @@ function startAuthCommand(line: string): void {
     });
 }
 
-function syncStatus(authText?: string): void {
+function syncStatus(): void {
   effortWanted = clampEffortLevel(route.provider, route.model, effortWanted);
   surface?.setEffortLevels(supportedEffortLevels(route.provider, route.model));
   surface?.setStatus({
     model: `${route.provider}/${route.model}`,
-    auth: authText,
     effort: effectiveEffortFor(route.provider, route.model, effortWanted),
     usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd),
   });
@@ -8710,7 +8709,6 @@ async function main(): Promise<void> {
     surface.setEffortLevels(supportedEffortLevels(route.provider, route.model));
     surface.setStatus({
       model: `${route.provider}/${route.model}`,
-      auth: authBanner(auth),
       effort: effectiveEffortFor(route.provider, route.model, effortWanted),
       permissions: permissionMode,
       usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd),

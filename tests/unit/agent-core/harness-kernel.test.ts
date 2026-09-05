@@ -4560,7 +4560,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         combinedStatusHeader.includes("perm ask") &&
         combinedStatusHeader.includes("2 img") &&
         combinedStatusHeader.includes("queued") &&
-        combinedStatusHeader.includes("oauth") &&
+        !combinedStatusHeader.includes("oauth") &&
         tuiMod.cellWidth(combinedStatusHeader) <= 80,
     );
     let hostRefresh = 0;

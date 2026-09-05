@@ -1012,7 +1012,6 @@ export class AgentTui {
   private pasteCR = false;
   private rawInput = false;
   private model = "";
-  private auth = "";
   private effort = "off";
   private usage = "";
   private pendingImageCount = 0;
@@ -1073,13 +1072,11 @@ export class AgentTui {
 
   setStatus(status: {
     model?: string;
-    auth?: string;
     effort?: string;
     usage?: string;
     permissions?: string;
   }): void {
     if (status.model !== undefined) this.model = status.model;
-    if (status.auth !== undefined) this.auth = status.auth;
     if (status.effort !== undefined) this.effort = status.effort;
     if (status.usage !== undefined) this.usage = status.usage;
     if (status.permissions !== undefined) this.permissions = status.permissions;
@@ -2348,7 +2345,7 @@ export class AgentTui {
     const permLabel = this.permissions ? `perm ${this.permissions}` : "";
     const modelLabel = this.model ? `${spin ? `${spin} ` : ""}${this.model}` : spin ? `${spin} no model` : "no model";
     let queuedLabel = this.queued ? `queued ${truncateMiddle(this.queued, 18)}` : "";
-    const rightTitle = this.auth ? this.auth : "";
+    const rightTitle = "";
     // Model and effort are one visual group. Reserve the effort suffix before
     // truncating a long model so narrow terminals never hide the active level.
     let extraParts = [permLabel, images, queuedLabel].filter(Boolean);
