@@ -127,11 +127,16 @@ tail cap and repro marker. No kernel test runner.
 `write_file` receipts use the same project-relative path spelling as
 `edit`.
 
-### 6. Measure cache-read share before touching caps
+### 6. Measure cache-read share before touching caps — measured
 
-Do not lower the 24,576-character project `AGENTS.md` cap, and do not
-grow zone 1, until traces show cache-read vs miss on real Agent (core)
-sessions. P5 is the gate: dollars above the cache-read rate, attributed.
+`term-39.traces` (51 main turns, real sessions): ~4.55M cache-read vs
+~192K fresh input, roughly a 96% read share — the frozen prefix is hot
+and stable. Cost reads `$0.000000` because the route is
+`muse-spark-1.3-contributor-free`: $0 is correct, not a missing rate
+snapshot, so the dollar half of P5 is N/A on free routes by
+construction. A priced 10-turn single-model run is still required
+before claiming any cost saving on a paid route. Until then: no
+`AGENTS.md` cap cuts, no zone-1 growth.
 
 #### Offline trace report
 
