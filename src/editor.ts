@@ -389,8 +389,8 @@ export class EditorManager {
       return;
     }
     const model = tab.model;
-    if (model.getValue() === content) return;
     const before = model.getValue();
+    if (before === content) return;
     // setValue fires with isFlush=true; the model's change handler uses that
     // to tell programmatic pushes from user edits.
     model.setValue(content);

@@ -21,6 +21,7 @@ export class PtyView {
   private readonly sendInput: (data: string) => void;
   private disposed = false;
   private watchdog: ReturnType<typeof setInterval> | null = null;
+  private visible = false;
   private lastRender = 0;
   private resizeObserver: ResizeObserver | null = null;
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -115,21 +116,6 @@ export class PtyView {
     this.term.onRender(() => {
       this.lastRender = Date.now();
     });
-    this.watchdog = setInterval(() => {
-      if (this.disposed) return;
-      // Hidden panes never fire onRender; without this guard each one
-      // would take a full refresh() every tick forever.
-      if (this.container.clientWidth === 0 || this.container.clientHeight === 0) return;
-      if (Date.now() - this.lastRender > 1500 && this.term.buffer.active.length > 0) {
-        try {
-          this.term.refresh(0, this.term.rows - 1);
-          this.lastRender = Date.now();
-        } catch {
-          /* ignore */
-        }
-      }
-    }, 1500);
-
     requestAnimationFrame(() => this.fit());
     // The first fit can run before the terminal font is ready; the cell
     // measurement then differs from later fits and the row count jumps.
@@ -512,6 +498,30 @@ export class PtyView {
     return this.term;
   }
 
+  /** Arm repaint recovery only while this pane is the visible terminal. */
+  setVisible(visible: boolean): void {
+    if (this.disposed || this.visible === visible) return;
+    this.visible = visible;
+    if (!visible) {
+      if (this.watchdog) clearInterval(this.watchdog);
+      this.watchdog = null;
+      return;
+    }
+    this.lastRender = Date.now();
+    this.watchdog = setInterval(() => {
+      if (this.disposed || !this.visible) return;
+      if (this.container.clientWidth === 0 || this.container.clientHeight === 0) return;
+      if (Date.now() - this.lastRender > 1500 && this.term.buffer.active.length > 0) {
+        try {
+          this.term.refresh(0, this.term.rows - 1);
+          this.lastRender = Date.now();
+        } catch {
+          /* ignore */
+        }
+      }
+    }, 1500);
+  }
+
   focus(): void {
     if (this.disposed) return;
     const textarea = this.term.textarea;
@@ -529,6 +539,7 @@ export class PtyView {
     this.container.removeEventListener("drop", this.onDrop);
     this.container.removeEventListener("dragend", this.onDragEnd);
     window.removeEventListener("blur", this.onWindowBlur);
+    this.visible = false;
     if (this.watchdog) clearInterval(this.watchdog);
     this.watchdog = null;
     if (this.resizeTimer) clearTimeout(this.resizeTimer);

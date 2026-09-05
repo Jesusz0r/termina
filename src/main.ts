@@ -61,8 +61,19 @@ import { CHALLENGE_PROFILES, defaultAppPreferences, pathBasename } from "../shar
 import { normalizeAppPreferences } from "../shared/preferences";
 import type { AppPreferences, AppUpdateState, ChallengeProfile, CommandId, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
 
-const { EditorManager } = await import("./editor");
-const { ReviewView } = await import("./review");
+type EditorManagerInstance = import("./editor").EditorManager;
+type ReviewViewInstance = import("./review").ReviewView;
+type EditorModule = typeof import("./editor");
+let editorModule: EditorModule | null = null;
+let editorModulePromise: Promise<EditorModule> | null = null;
+function ensureEditorModule(): Promise<EditorModule> {
+  if (editorModule) return Promise.resolve(editorModule);
+  editorModulePromise ??= import("./editor").then((module) => {
+    editorModule = module;
+    return module;
+  });
+  return editorModulePromise;
+}
 
 /** One open project tab: its editor view and its tab element. */
 interface ProjectView {
@@ -70,8 +81,12 @@ interface ProjectView {
   cwd: string;
   workspaceId: string;
   tabEl: HTMLElement;
-  editorMgr: InstanceType<typeof EditorManager>;
+  editorMgr: EditorManagerInstance | null;
   editorEl: HTMLElement;
+  tabsEl: HTMLElement;
+  containerEl: HTMLElement;
+  emptyEl: HTMLElement;
+  needsLogin: boolean;
   activePaneId: string | null;
 }
 
@@ -89,10 +104,11 @@ const rightPaneEl = document.getElementById("right-pane")!;
 const baseEmptyEl = emptyTemplate.content.firstElementChild!.cloneNode(true) as HTMLElement;
 rightPaneEl.appendChild(baseEmptyEl);
 
-let baseEditorInstance: InstanceType<typeof EditorManager> | null = null;
-function getBaseEditor(): InstanceType<typeof EditorManager> {
+let baseEditorInstance: EditorManagerInstance | null = null;
+function getBaseEditor(): EditorManagerInstance {
   if (!baseEditorInstance) {
-    baseEditorInstance = new EditorManager(
+    if (!editorModule) throw new Error("editor module is not loaded");
+    baseEditorInstance = new editorModule.EditorManager(
       document.getElementById("editor-container")!,
       document.getElementById("editor-tabs")!,
       baseEmptyEl,
@@ -134,15 +150,6 @@ function createProjectView(project: { id: string; cwd: string; workspaceId: stri
   editorEl.style.display = "none";
   rightPaneEl.insertBefore(editorEl, rightPaneEl.firstElementChild);
 
-  const editorMgr = new EditorManager(containerEl, tabsEl, emptyEl, true, project.needsLogin === true);
-  // A disk write reached a model with unsaved edits: never replace silently.
-  editorMgr.onConflict = (path) => {
-    toast(`${pathBasename(path)} changed on disk — you have unsaved edits`, "warning");
-  };
-  applySharedEditorHooks(editorMgr, project.id);
-  // Relative paths must resolve against THIS project, not the active one.
-  editorMgr.projectRootProvider = () => project.cwd;
-  applyEditorPreferences(editorMgr, preferences);
   const tabEl = document.createElement("div");
   tabEl.className = "project-tab";
   const nameEl = document.createElement("span");
@@ -164,17 +171,44 @@ function createProjectView(project: { id: string; cwd: string; workspaceId: stri
   });
   projectTabsEl.appendChild(tabEl);
 
-  const view: ProjectView = { id: project.id, cwd: project.cwd, workspaceId: project.workspaceId, tabEl, editorMgr, editorEl, activePaneId: null };
-  editorMgr.ownerProvider = () => {
-    const current = projectViews.get(project.id);
-    return current?.workspaceId ? { projectId: current.id, workspaceId: current.workspaceId } : null;
+  const view: ProjectView = {
+    id: project.id,
+    cwd: project.cwd,
+    workspaceId: project.workspaceId,
+    tabEl,
+    editorMgr: null,
+    editorEl,
+    tabsEl,
+    containerEl,
+    emptyEl,
+    needsLogin: project.needsLogin === true,
+    activePaneId: null,
   };
   projectViews.set(project.id, view);
   return view;
 }
 
+/** Create Monaco only when a project becomes active or receives an open-file request. */
+function ensureProjectEditor(view: ProjectView): EditorManagerInstance {
+  if (view.editorMgr) return view.editorMgr;
+  if (!editorModule) throw new Error("editor module is not loaded");
+  const editorMgr = new editorModule.EditorManager(view.containerEl, view.tabsEl, view.emptyEl, true, view.needsLogin);
+  editorMgr.onConflict = (path) => {
+    toast(`${pathBasename(path)} changed on disk — you have unsaved edits`, "warning");
+  };
+  applySharedEditorHooks(editorMgr, view.id);
+  editorMgr.projectRootProvider = () => view.cwd;
+  editorMgr.ownerProvider = () => {
+    const current = projectViews.get(view.id);
+    return current?.workspaceId ? { projectId: current.id, workspaceId: current.workspaceId } : null;
+  };
+  applyEditorPreferences(editorMgr, preferences);
+  view.editorMgr = editorMgr;
+  return editorMgr;
+}
+
 /** The editor hooks shared by every project view (mine toggle, badges). */
-function applySharedEditorHooks(editor: InstanceType<typeof EditorManager>, projectId: string | null): void {
+function applySharedEditorHooks(editor: EditorManagerInstance, projectId: string | null): void {
   editor.onToggleMine = (path, owner) => {
     const mine = !editor.isMine(path);
     editor.setMine(path, mine);
@@ -196,7 +230,7 @@ function removeProjectView(projectId: string): void {
   if (!view) return;
   const editorToggle = document.getElementById("btn-min-editor");
   if (editorToggle && view.editorEl.contains(editorToggle)) placeEditorToggle(null);
-  view.editorMgr.dispose();
+  view.editorMgr?.dispose();
   view.tabEl.remove();
   view.editorEl.remove();
   const projectIds = [...projectViews.keys()];
@@ -216,11 +250,11 @@ function removeProjectView(projectId: string): void {
 }
 
 /** The active project's editor manager (the tab in front). */
-function activeEditor(): InstanceType<typeof EditorManager> {
+function activeEditor(): EditorManagerInstance {
   const view = activeProjectId ? projectViews.get(activeProjectId) : null;
   // Never open files in a hidden project editor. The first map entry can
   // be display:none while the base pane is what the user sees.
-  return view?.editorMgr ?? getBaseEditor();
+  return view ? ensureProjectEditor(view) : getBaseEditor();
 }
 
 function placeEditorToggle(projectId: string | null): void {
@@ -236,6 +270,7 @@ function placeEditorToggle(projectId: string | null): void {
 function setActiveProject(projectId: string | null): void {
   const view = projectId ? projectViews.get(projectId) : undefined;
   activeProjectId = view ? projectId : null;
+  if (view) ensureProjectEditor(view);
   activeProjectGeneration++;
   const baseChrome = document.getElementById("editor-chrome")!;
   const baseContainer = document.getElementById("editor-container")!;
@@ -268,6 +303,7 @@ function syncPaneVisibility(): void {
     const on = pane.projectId === activeProjectId;
     pane.tabEl.style.display = on ? "" : "none";
     pane.container.style.display = on ? "" : "none";
+    pane.view.setVisible(on && pane.instanceId === activeId);
   }
 }
 
@@ -293,32 +329,49 @@ function activateProjectPane(): void {
   }
 }
 
-const reviewView = new ReviewView();
+let reviewView: ReviewViewInstance | null = null;
+let reviewModulePromise: Promise<typeof import("./review")> | null = null;
+function ensureReviewView(): Promise<ReviewViewInstance> {
+  if (reviewView) return Promise.resolve(reviewView);
+  reviewModulePromise ??= import("./review");
+  return reviewModulePromise.then(({ ReviewView }) => {
+    if (reviewView) return reviewView;
+    const view = new ReviewView();
+    view.bind({
+      onOpenFile: (path, owner) => {
+        view.hide();
+        void openFileSmart(path, false, owner);
+      },
+      onAccepted: (path) => {
+        const pane = activeId ? panes.get(activeId) : undefined;
+        if (!pane) return;
+        pane.accepted.add(path);
+        pane.reverted.delete(path);
+        renderModified(pane);
+        renderHandoff(pane);
+      },
+      onReverted: (path) => {
+        const pane = activeId ? panes.get(activeId) : undefined;
+        if (!pane) return;
+        pane.reverted.add(path);
+        pane.accepted.delete(path);
+        renderModified(pane);
+      },
+      onHidden: () => collapseEditorIfIdle(),
+      onShown: () => revealEditor(),
+    });
+    reviewView = view;
+    applyReviewPreferences(view, preferences);
+    return view;
+  });
+}
 
-void reviewView;
-reviewView.bind({
-  onOpenFile: (path, owner) => {
-    reviewView.hide();
-    void openFileSmart(path, false, owner);
-  },
-  onAccepted: (path) => {
-    const pane = activeId ? panes.get(activeId) : undefined;
-    if (!pane) return;
-    pane.accepted.add(path);
-    pane.reverted.delete(path);
-    renderModified(pane);
-    renderHandoff(pane);
-  },
-  onReverted: (path) => {
-    const pane = activeId ? panes.get(activeId) : undefined;
-    if (!pane) return;
-    pane.reverted.add(path);
-    pane.accepted.delete(path);
-    renderModified(pane);
-  },
-  onHidden: () => collapseEditorIfIdle(),
-  onShown: () => revealEditor(),
-});
+function applyReviewPreferences(view: ReviewViewInstance, prefs: AppPreferences): void {
+  view.setTheme(prefs.theme);
+  view.setFontSize(prefs.editorFontSize);
+  view.setFontFamily(prefs.fontFamily);
+  view.setWordWrap(prefs.wordWrap);
+}
 const explorer = new Explorer(document.getElementById("explorer")!);
 const sessionSearch = new SessionSearch();
 sessionSearch.bind({ onOpenFile: (path) => void openFileSmart(path, true) });
@@ -333,7 +386,7 @@ function refreshMine(projectId: string | null = activeProjectId): void {
   const owner: ProjectWorkspaceRef = { projectId, workspaceId: view.workspaceId };
   const requestToken = ++mineRequestToken;
   const requestedGeneration = activeProjectGeneration;
-  const editor = view.editorMgr;
+  const editor = ensureProjectEditor(view);
   editor.clearMine();
   void window.pi.getMineFiles(owner).then((paths) => {
     if (
@@ -366,6 +419,7 @@ const btnAppUpdate = document.getElementById("btn-app-update") as HTMLButtonElem
 const modifiedList = document.getElementById("modified-list")!;
 const modifiedPanel = document.getElementById("modified-panel")!;
 const modifiedCount = document.getElementById("modified-count")!;
+let modifiedRenderedPaneId: string | null = null;
 const btnClearModified = document.getElementById("btn-clear-modified") as HTMLButtonElement;
 const btnAcceptAll = document.getElementById("btn-accept-all") as HTMLButtonElement;
 const btnCopySubject = document.getElementById("btn-copy-subject") as HTMLButtonElement;
@@ -429,10 +483,10 @@ function hydrateWorldlines(projectId: string | null): void {
 
 worldlinesView.bind({
   onCompareBase: (comparisonId, label, relPath, absPath) => {
-    void reviewView.showCandidateDiff(comparisonId, label, relPath, absPath);
+    void ensureReviewView().then((view) => view.showCandidateDiff(comparisonId, label, relPath, absPath));
   },
   onCompareAB: (comparisonId, relPath) => {
-    void reviewView.showABDiff(comparisonId, relPath, worldlinesView.rootOf(comparisonId, "A"));
+    void ensureReviewView().then((view) => view.showABDiff(comparisonId, relPath, worldlinesView.rootOf(comparisonId, "A")));
   },
   onOpenFile: (absPath) => void openFileSmart(absPath, false),
   onOpenTerminal: (terminalId) => activatePaneWhenReady(terminalId),
@@ -552,11 +606,15 @@ function userPatch(prev: AppPreferences, next: AppPreferences): import("../share
 function paintPreferences(prefs: AppPreferences): void {
   document.documentElement.dataset.theme = prefs.theme;
   if (baseEditorInstance) applyEditorPreferences(baseEditorInstance, prefs);
-  for (const view of projectViews.values()) applyEditorPreferences(view.editorMgr, prefs);
-  reviewView.setTheme(prefs.theme);
-  reviewView.setFontSize(prefs.editorFontSize);
-  reviewView.setFontFamily(prefs.fontFamily);
-  reviewView.setWordWrap(prefs.wordWrap);
+  for (const view of projectViews.values()) {
+    if (view.editorMgr) applyEditorPreferences(view.editorMgr, prefs);
+  }
+  if (reviewView) {
+    reviewView.setTheme(prefs.theme);
+    reviewView.setFontSize(prefs.editorFontSize);
+    reviewView.setFontFamily(prefs.fontFamily);
+    reviewView.setWordWrap(prefs.wordWrap);
+  }
   for (const pane of panes.values()) applyTerminalPreferences(pane.view, prefs);
 }
 
@@ -591,7 +649,7 @@ function applyPreferences(next: AppPreferences, persist: boolean, activateShortc
   }
 }
 
-function applyEditorPreferences(editor: InstanceType<typeof EditorManager>, prefs: AppPreferences): void {
+function applyEditorPreferences(editor: EditorManagerInstance, prefs: AppPreferences): void {
   editor.setTheme(prefs.theme);
   editor.setFontSize(prefs.editorFontSize);
   editor.setFontFamily(prefs.fontFamily);
@@ -776,6 +834,7 @@ function activatePane(instanceId: string): void {
     p.container.classList.toggle("active", on);
     p.tabEl.classList.toggle("active", on);
     p.container.style.display = on ? "" : "none";
+    p.view.setVisible(on);
   }
   if (pendingActivateId === instanceId) pendingActivateId = null;
   // Measure after layout: fitting synchronously here reads the pre-toggle
@@ -1054,6 +1113,7 @@ function renderChrome(): void {
     planList.replaceChildren();
     planPanel.classList.add("collapsed");
     modifiedList.replaceChildren();
+    modifiedRenderedPaneId = null;
     btnCopySubject.hidden = true;
     btnOpenShell.hidden = true;
     return;
@@ -1210,22 +1270,47 @@ function renderVerify(pane: Pane): void {
 
 function renderModified(pane: Pane): void {
   modifiedCount.textContent = pane.modified.length ? `(${pane.modified.length})` : "";
-  modifiedList.replaceChildren();
+  if (modifiedRenderedPaneId !== pane.instanceId) {
+    modifiedList.replaceChildren();
+    modifiedRenderedPaneId = pane.instanceId;
+  }
+  const existing = new Map<string, HTMLLIElement>();
+  for (const row of modifiedList.querySelectorAll<HTMLLIElement>("li[data-path]")) {
+    const path = row.dataset.path;
+    if (path) existing.set(path, row);
+  }
+  const seen = new Set<string>();
   for (const f of pane.modified) {
-    const li = document.createElement("li");
-    const badge = document.createElement("span");
+    const current = existing.get(f.path);
+    const isNew = !current;
+    const li = current ?? document.createElement("li");
+    li.dataset.path = f.path;
+    li.dataset.relPath = f.relPath;
+    let badge = li.querySelector<HTMLElement>(".status-badge");
+    let path = li.querySelector<HTMLElement>(".path");
+    if (!badge || !path) {
+      li.replaceChildren();
+      badge = document.createElement("span");
+      path = document.createElement("span");
+      badge.className = "status-badge";
+      path.className = "path";
+      li.append(badge, path);
+    }
     badge.className = `status-badge ${f.status}`;
     badge.textContent = f.status === "created" ? "A" : f.status === "deleted" ? "D" : "M";
-    const path = document.createElement("span");
-    path.className = "path";
     path.textContent = f.relPath;
     path.title = f.path;
-    li.append(badge, path);
-    li.addEventListener("click", () => {
-      // The modified list is the review surface: clicking opens the diff.
-      if (!pane.projectId || !pane.workspaceId) return;
-      void reviewView.show(pane.instanceId, f.path, f.relPath, { projectId: pane.projectId, workspaceId: pane.workspaceId });
-    });
+    for (const mark of li.querySelectorAll(".review-mark")) mark.remove();
+    if (isNew) {
+      li.addEventListener("click", () => {
+        // The modified list is the review surface: clicking opens the diff.
+        const projectId = pane.projectId;
+        const workspaceId = pane.workspaceId;
+        if (!projectId || !workspaceId) return;
+        const owner = { projectId, workspaceId };
+        void ensureReviewView().then((view) => view.show(pane.instanceId, li.dataset.path ?? f.path, li.dataset.relPath ?? f.relPath, owner));
+      });
+    }
     if (pane.accepted.has(f.path)) {
       const mark = document.createElement("span");
       mark.className = "review-mark accepted";
@@ -1238,6 +1323,10 @@ function renderModified(pane: Pane): void {
       li.appendChild(mark);
     }
     modifiedList.appendChild(li);
+    seen.add(f.path);
+  }
+  for (const [path, row] of existing) {
+    if (!seen.has(path)) row.remove();
   }
   modifiedPanel.classList.toggle("collapsed", pane.modified.length === 0);
 }
@@ -1308,7 +1397,7 @@ async function openFileSmart(
   line?: number,
   column?: number,
 ): Promise<void> {
-  if (reviewView.isVisible) reviewView.hide();
+  if (reviewView?.isVisible) reviewView.hide();
   revealEditor();
   let owner = requestedOwner ?? (() => {
     const view = activeProjectId ? projectViews.get(activeProjectId) : null;
@@ -1349,7 +1438,7 @@ async function openFileSmart(
   }
   const abs = cleanPath.startsWith("/") ? cleanPath : normalizePath(`${view.cwd}/${cleanPath}`);
   try {
-    await view.editorMgr.openFile(abs, { preview, owner, line, column });
+    await ensureProjectEditor(view).openFile(abs, { preview, owner, line, column });
   } catch (err) {
     toast(`could not open ${pathBasename(abs)}: ${(err as Error).message}`, "error");
   }
@@ -1665,7 +1754,7 @@ function fitPanes(): void {
   // Flush the new flex sizes before measuring. A delayed fit paints one
   // frame at the old cell grid, then snaps — that is the occupancy flicker.
   void splitEl.getBoundingClientRect();
-  activeEditor().layout();
+  if (editorModule) activeEditor().layout();
   // Only the visible pane: hidden panes measure 0 and skip anyway, but
   // fitting each of them on every layout change spams pty resizes when
   // they become visible with stale grids. They fit on activation instead.
@@ -1711,7 +1800,9 @@ function setMinimizedWork(pane: WorkPane | null): void {
 }
 
 function editorPaneOccupied(): boolean {
-  return reviewView.isVisible || activeEditor().hasOpenTabs();
+  if (reviewView?.isVisible === true) return true;
+  if (activeProjectId) return projectViews.get(activeProjectId)?.editorMgr?.hasOpenTabs() === true;
+  return baseEditorInstance?.hasOpenTabs() === true;
 }
 
 function collapseEditorIfIdle(): void {
@@ -2327,6 +2418,7 @@ window.pi.onPtyExit(({ id, generation, windowGeneration, rendererGeneration, seq
 /** Lock the editor while a primary agent terminal of the workspace is busy.
  *  Candidate agents stay isolated: their writes cannot reach the primary. */
 function updateEditorLock(): void {
+  if (!editorModule) return;
   const busy = [...panes.values()].some(
     (p) => p.busy && p.type === "agent" && !p.error && p.projectId === activeProjectId && worldlinesView.labelOfTerminal(p.instanceId) === null,
   );
@@ -2337,6 +2429,10 @@ window.pi.onFlushRequest(({ requestId, writerId, projectId, workspaceId }) => {
   const view = projectViews.get(projectId);
   if (!view || view.workspaceId !== workspaceId) {
     void window.pi.reportFlush(requestId, { ok: false, failed: ["project editor is unavailable"] });
+    return;
+  }
+  if (!view.editorMgr) {
+    void window.pi.reportFlush(requestId, { ok: true, failed: [] });
     return;
   }
   void view.editorMgr.flushAll(writerId).then((result) => void window.pi.reportFlush(requestId, result));
@@ -2475,7 +2571,7 @@ window.pi.onToolTarget((p) => {
   const view = projectViews.get(p.projectId);
   if (!view || view.workspaceId !== p.workspaceId || activeProjectId !== p.projectId) return;
   const owner: ProjectWorkspaceRef = { projectId: p.projectId, workspaceId: p.workspaceId };
-  void view.editorMgr.openFile(p.path, { preview: false, owner }).catch((err) => {
+  void ensureProjectEditor(view).openFile(p.path, { preview: false, owner }).catch((err) => {
     toast(`could not open ${pathBasename(p.path)}: ${(err as Error).message}`, "error");
   });
 });
@@ -2485,7 +2581,7 @@ const largeChangeFetch = new Set<string>();
 const MAX_LAST_CHANGE_PUSH = 500;
 const changeKey = (owner: ProjectWorkspaceRef, path: string): string => `${owner.projectId}\u0000${owner.workspaceId}\u0000${path}`;
 
-function fetchLargeChange(path: string, owner: ProjectWorkspaceRef, editor: InstanceType<typeof EditorManager>): void {
+function fetchLargeChange(path: string, owner: ProjectWorkspaceRef, editor: EditorManagerInstance): void {
   const key = changeKey(owner, path);
   if (largeChangeFetch.has(key)) return;
   largeChangeFetch.add(key);
@@ -2519,16 +2615,16 @@ window.pi.onFileChanged((p) => {
     lastChangePush.delete(oldestKey);
   }
   if (p.content !== undefined) {
-    view.editorMgr.updateContent(p.path, p.content, p.changedLines);
+    if (view.editorMgr) view.editorMgr.updateContent(p.path, p.content, p.changedLines);
   } else {
     // The main process caps large pushes. Fetch once per path; a newer
     // change while a fetch is in flight starts one follow-up fetch.
-    fetchLargeChange(p.path, owner, view.editorMgr);
+    if (view.editorMgr) fetchLargeChange(p.path, owner, view.editorMgr);
   }
   if (activeProjectId !== p.projectId) return;
-  explorer.handleDiskChange();
+  explorer.handleDiskChange(p.path);
   // The open review stays in sync with the agent's writes.
-  if (reviewView.isVisible && reviewView.matchesPath(p.path) && reviewView.matchesOwner(owner)) void reviewView.refreshCurrent();
+  if (reviewView?.isVisible && reviewView.matchesPath(p.path) && reviewView.matchesOwner(owner)) void reviewView.refreshCurrent(p.content);
 });
 
 window.pi.onFileDeleted((p) => {
@@ -2536,9 +2632,9 @@ window.pi.onFileDeleted((p) => {
   if (!view || view.workspaceId !== p.workspaceId) return;
   const owner: ProjectWorkspaceRef = { projectId: p.projectId, workspaceId: p.workspaceId };
   lastChangePush.delete(changeKey(owner, p.path));
-  view.editorMgr.closeIfOpen(p.path);
+  view.editorMgr?.closeIfOpen(p.path);
   if (activeProjectId !== p.projectId) return;
-  explorer.handleDiskChange();
+  explorer.handleDiskChange(p.path);
 });
 
 window.pi.onModifiedList((p) => {
@@ -2563,12 +2659,13 @@ window.pi.onFolderOpened((e) => {
   } else {
     view.cwd = e.cwd;
     view.workspaceId = e.workspaceId;
-    view.editorMgr.setProjectOpen(true, e.needsLogin);
+    view.needsLogin = e.needsLogin === true;
+    view.editorMgr?.setProjectOpen(true, e.needsLogin);
   }
   baseEditorInstance?.setProjectOpen(true);
   setActiveProject(view.id);
   explorer.setProject(projectId, e.cwd);
-  reviewView.resetForProject();
+  reviewView?.resetForProject();
   refreshMine(projectId);
   activateProjectPane();
   void refreshTestCommand(projectId);
@@ -2709,6 +2806,7 @@ async function boot(attempt = 0): Promise<void> {
       createProjectView(project);
       if (project.active) activeProjectId = project.id;
     }
+    await ensureEditorModule();
     setActiveProject(activeProjectId);
     const bootView = activeProjectId ? projectViews.get(activeProjectId) : undefined;
     if (bootView) {
@@ -2741,6 +2839,9 @@ async function boot(attempt = 0): Promise<void> {
         updatePaneTab(pane);
       }
     }
+    // Panes are created visible; hide other projects' panes now that
+    // every projectId is assigned (setActiveProject ran while empty).
+    syncPaneVisibility();
     activateProjectPane();
     updateEditorLock();
     // Hydrate every pane only after all terminal shells and their project

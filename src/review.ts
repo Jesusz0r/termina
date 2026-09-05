@@ -26,6 +26,18 @@ export class ReviewView {
   private onShown: () => void = () => {};
   /** Bumped on every show/hide. A stale load applies to nothing. */
   private loadSeq = 0;
+  /** Latest live-file refresh requested for the open review. */
+  private refreshVersion = 0;
+  private pendingRefresh: {
+    version: number;
+    loadSeq: number;
+    terminalId: string;
+    path: string;
+    owner: ProjectWorkspaceRef;
+    content?: string;
+    waiters: Array<() => void>;
+  } | null = null;
+  private refreshRunning = false;
 
   constructor() {
     this.container = document.getElementById("review-container") as HTMLElement;
@@ -215,20 +227,77 @@ export class ReviewView {
     };
   }
 
-  /** Refresh the modified side (for example after a revert changed the file). */
-  async refreshCurrent(): Promise<void> {
-    if (!this.path || !this.terminalId) return;
-    const seq = this.loadSeq;
+  /** Refresh the modified side, coalescing rapid watcher pushes. */
+  refreshCurrent(content?: string): Promise<void> {
+    if (!this.path || !this.terminalId || !this.owner) return Promise.resolve();
+    const version = ++this.refreshVersion;
     const path = this.path;
-    if (!this.owner) return;
-    const current = await window.pi.openFile(path, this.owner);
-    if (seq !== this.loadSeq || this.path !== path) return;
-    if (!current.ok) {
-      toast(`could not refresh review: ${current.error}`, "error");
-      return;
+    const terminalId = this.terminalId;
+    const owner = this.owner;
+    const pending = this.pendingRefresh;
+    const sameReview = pending !== null
+      && pending.loadSeq === this.loadSeq
+      && pending.terminalId === terminalId
+      && pending.path === path
+      && pending.owner.projectId === owner.projectId
+      && pending.owner.workspaceId === owner.workspaceId;
+    const request = sameReview
+      ? pending
+      : { version, loadSeq: this.loadSeq, terminalId, path, owner, content, waiters: [] };
+    request.version = version;
+    request.content = content;
+    this.pendingRefresh = request;
+    let resolveRefresh!: () => void;
+    const result = new Promise<void>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    request.waiters.push(resolveRefresh);
+    void this.drainRefreshes();
+    return result;
+  }
+
+  private async drainRefreshes(): Promise<void> {
+    if (this.refreshRunning) return;
+    this.refreshRunning = true;
+    try {
+      while (this.pendingRefresh) {
+        const request = this.pendingRefresh;
+        this.pendingRefresh = null;
+        const sameReview = (): boolean => this.loadSeq === request.loadSeq
+          && this.terminalId === request.terminalId
+          && this.path === request.path
+          && this.owner?.projectId === request.owner.projectId
+          && this.owner.workspaceId === request.owner.workspaceId;
+        if (!sameReview()) {
+          request.waiters.forEach((resolve) => resolve());
+          continue;
+        }
+        let current: { ok: true; content: string } | { ok: false; error?: string };
+        try {
+          current = request.content !== undefined
+            ? { ok: true, content: request.content }
+            : await window.pi.openFile(request.path, request.owner);
+        } catch (err) {
+          if (request.version === this.refreshVersion && sameReview()) {
+            toast(`could not refresh review: ${(err as Error).message}`, "error");
+          }
+          request.waiters.forEach((resolve) => resolve());
+          continue;
+        }
+        if (request.version === this.refreshVersion && sameReview()) {
+          if (!current.ok) {
+            toast(`could not refresh review: ${current.error}`, "error");
+          } else {
+            this.modifiedModel?.setValue(current.content);
+            (document.getElementById("review-open") as HTMLButtonElement).disabled = false;
+          }
+        }
+        request.waiters.forEach((resolve) => resolve());
+      }
+    } finally {
+      this.refreshRunning = false;
+      if (this.pendingRefresh) void this.drainRefreshes();
     }
-    this.modifiedModel?.setValue(current.content);
-    (document.getElementById("review-open") as HTMLButtonElement).disabled = false;
   }
 
   async revert(): Promise<void> {
@@ -253,6 +322,7 @@ export class ReviewView {
 
   hide(): void {
     this.loadSeq++;
+    this.refreshVersion++;
     this.container.style.display = "none";
     this.coverEditors(false);
     this.diffEditor.setModel(null);

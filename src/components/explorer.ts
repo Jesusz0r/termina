@@ -16,12 +16,22 @@ interface DirState {
   loadSeq: number;
 }
 
+interface DirView {
+  entry: ExplorerEntry;
+  state: DirState;
+  node: HTMLElement;
+  children: HTMLElement;
+}
+
 export class Explorer {
   private treeEl: HTMLElement;
   private dirs = new Map<string, DirState>(); // keyed by abs path
+  /** Mounted directory nodes, so watcher refreshes can target one branch. */
+  private dirViews = new Map<string, DirView>();
   private projectId: string | null = null;
   private projectCwd: string | null = null;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingChanges = new Set<string>();
   private selected: ExplorerEntry | null = null;
   /** Project-relative entry waiting for Paste. */
   private clipboardEntry: { relPath: string; cut: boolean } | null = null;
@@ -70,9 +80,15 @@ export class Explorer {
 
   /** Called when the project folder changes. Null clears the tree. */
   setProject(projectId: string | null, cwd: string | null): void {
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
+    }
     this.projectId = projectId;
     this.projectCwd = cwd;
     this.dirs.clear();
+    this.dirViews.clear();
+    this.pendingChanges.clear();
     this.selected = null;
     // Clipboard entries are project-relative: they never survive a switch.
     this.clipboardEntry = null;
@@ -83,24 +99,57 @@ export class Explorer {
   }
 
   /** A file/dir changed on disk (watcher events) — refresh lazily. */
-  handleDiskChange(): void {
+  handleDiskChange(path?: string): void {
+    if (path) this.pendingChanges.add(path);
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
     this.refreshTimer = setTimeout(() => {
       this.refreshTimer = null;
-      void this.refresh();
+      const changes = [...this.pendingChanges];
+      this.pendingChanges.clear();
+      void this.refresh(changes);
     }, 250);
   }
 
-  async refresh(): Promise<void> {
-    if (this.projectCwd) await this.renderRoot();
+  async refresh(changedPaths?: string[]): Promise<void> {
+    if (!this.projectCwd) return;
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
+    }
+    if (!changedPaths) this.pendingChanges.clear();
+    if (!changedPaths || changedPaths.length === 0) {
+      await this.renderRoot(true);
+      return;
+    }
+    await this.renderRoot(false);
+    const directories = new Set<string>();
+    for (const path of changedPaths) {
+      if (!path || !this.projectCwd) continue;
+      let directory: string = path === this.projectCwd ? path : parentPath(path);
+      // If an ancestor is collapsed, its descendants are not mounted. Mark
+      // the nearest mounted ancestor stale so the branch reloads on expand.
+      while (!this.dirViews.has(directory) && directory !== this.projectCwd) {
+        const parent = parentPath(directory);
+        if (parent === directory) break;
+        directory = parent;
+      }
+      directories.add(directory);
+    }
+    for (const path of directories) {
+      const view = this.dirViews.get(path);
+      if (!view) continue;
+      if (view.state.expanded) await this.renderChildren(view.children, view.entry, view.state, true);
+      else view.state.loaded = false;
+    }
   }
 
   // ------------------------------------------------------------- rendering --
 
-  private async renderRoot(): Promise<void> {
+  private async renderRoot(forceReload = false): Promise<void> {
     const cwd = this.projectCwd;
-    this.treeEl.replaceChildren();
     if (!cwd) {
+      this.dirViews.clear();
+      this.treeEl.replaceChildren();
       const empty = document.createElement("button");
       empty.type = "button";
       empty.className = "explorer-empty";
@@ -110,8 +159,13 @@ export class Explorer {
       return;
     }
     const name = pathBasename(cwd);
-    const node = this.makeDirRow({ name, path: cwd, relPath: "", type: "dir" }, true);
-    this.treeEl.appendChild(node);
+    const existing = this.dirViews.get(cwd);
+    const node = existing?.node ?? this.makeDirRow({ name, path: cwd, relPath: "", type: "dir" }, true);
+    if (!node.parentElement) this.treeEl.replaceChildren(node);
+    const view = this.dirViews.get(cwd);
+    if (view?.state.expanded && (forceReload || !view.state.loaded)) {
+      await this.renderChildren(view.children, view.entry, view.state, forceReload);
+    }
   }
 
   private dirState(absPath: string): DirState {
@@ -128,15 +182,42 @@ export class Explorer {
     const slashPrefix = `${absPath}/`;
     const backslashPrefix = `${absPath}\\`;
     for (const path of this.dirs.keys()) {
-      if (path.startsWith(slashPrefix) || path.startsWith(backslashPrefix)) this.dirs.delete(path);
+      if (path.startsWith(slashPrefix) || path.startsWith(backslashPrefix)) {
+        this.dirs.delete(path);
+        this.dirViews.delete(path);
+      }
     }
+  }
+
+  /**
+   * Drop expansion state for the mounted descendants of a collapsed branch.
+   * The nodes carry their own paths, so this stays exact where prefix
+   * matching cannot: the root key may be non-canonical (/var vs
+   * /private/var) and a prefix prune then silently misses every descendant,
+   * leaving stale expanded+loaded states behind detached nodes that never
+   * reload on re-expand.
+   */
+  private forgetMountedDescendants(children: HTMLElement): void {
+    for (const el of children.querySelectorAll<HTMLElement>("[data-path]")) {
+      const path = el.dataset.path;
+      if (path) {
+        this.dirs.delete(path);
+        this.dirViews.delete(path);
+      }
+    }
+  }
+
+  /** Drop state for a directory that disappeared from its parent's listing. */
+  private forgetDirectory(absPath: string): void {
+    this.dirs.delete(absPath);
+    this.dirViews.delete(absPath);
+    this.pruneCollapsedDescendants(absPath);
   }
 
   private makeDirRow(entry: ExplorerEntry, forceOpen = false): HTMLElement {
     const state = this.dirState(entry.path);
     if (forceOpen) {
       state.expanded = true;
-      state.loaded = false; // root always re-lists
     }
 
     // VS Code style: a node is a row, with the children indented BELOW it.
@@ -164,7 +245,8 @@ export class Explorer {
       state.expanded = !state.expanded;
       if (!state.expanded) {
         state.loadSeq += 1;
-        this.pruneCollapsedDescendants(entry.path);
+        state.loaded = false;
+        this.forgetMountedDescendants(children);
       }
       arrow.textContent = state.expanded ? "▾" : "▸";
       void this.renderChildren(children, entry, state);
@@ -175,59 +257,86 @@ export class Explorer {
     const children = document.createElement("div");
     children.className = "explorer-children";
     node.append(row, children);
+    node.dataset.path = entry.path;
+    node.dataset.type = entry.type;
+    this.dirViews.set(entry.path, { entry, state, node, children });
     this.setupDirDrop(row, children, entry, state, arrow);
-    if (state.expanded) {
-      void this.renderChildren(children, entry, state);
-    }
     return node;
   }
 
-  private async renderChildren(children: HTMLElement, entry: ExplorerEntry, state: DirState): Promise<void> {
+  private async renderChildren(children: HTMLElement, entry: ExplorerEntry, state: DirState, force = false): Promise<void> {
     if (!state.expanded) {
       children.replaceChildren();
       return;
     }
+    if (state.loaded && !force) return;
     const seq = ++state.loadSeq;
-    children.replaceChildren();
-    const loading = document.createElement("div");
-    loading.className = "explorer-empty";
-    loading.textContent = "loading…";
-    children.appendChild(loading);
+    const hadContent = state.loaded;
+    if (!hadContent) {
+      children.replaceChildren();
+      const loading = document.createElement("div");
+      loading.className = "explorer-empty";
+      loading.textContent = "loading…";
+      children.appendChild(loading);
+    }
     const projectId = this.projectId;
+    const cwd = this.projectCwd;
     if (!projectId) return;
     let res: { entries: ExplorerEntry[]; error?: string; truncated?: boolean };
     try {
       res = await window.pi.listDir(projectId, entry.path);
     } catch (err) {
-      if (!state.expanded || seq !== state.loadSeq) return;
-      children.replaceChildren();
+      if (!state.expanded || seq !== state.loadSeq || this.projectCwd !== cwd) return;
+      state.loaded = false;
+      if (!hadContent) children.replaceChildren();
       toast(`could not list ${entry.name}: ${(err as Error).message}`, "error");
       return;
     }
-    if (!state.expanded || seq !== state.loadSeq || this.projectId !== projectId) return;
+    if (!state.expanded || seq !== state.loadSeq || this.projectId !== projectId || this.projectCwd !== cwd) return;
     state.loaded = true;
     if (res.error) {
-      children.replaceChildren();
+      state.loaded = false;
+      if (!hadContent) children.replaceChildren();
       toast(res.error, "error");
       return;
     }
-    children.replaceChildren();
+    const current = new Map<string, HTMLElement>();
+    for (const node of children.querySelectorAll<HTMLElement>(":scope > [data-path]")) {
+      const path = node.dataset.path;
+      if (path) current.set(path, node);
+    }
+    const nextDirPaths = new Set(res.entries.filter((child) => child.type === "dir").map((child) => child.path));
+    for (const [path, node] of current) {
+      if (node.dataset.type === "dir" && !nextDirPaths.has(path)) this.forgetDirectory(path);
+    }
+    const next: HTMLElement[] = [];
     if (res.truncated) {
       const note = document.createElement("div");
       note.className = "explorer-empty";
       note.textContent = "folder truncated (too many entries)";
-      children.appendChild(note);
+      next.push(note);
     }
     for (const child of res.entries) {
-      const node = child.type === "dir" ? this.makeDirRow(child) : this.makeFileRow(child);
-      children.appendChild(node);
+      const existing = current.get(child.path);
+      const node = existing && existing.dataset.type === child.type
+        ? existing
+        : child.type === "dir" ? this.makeDirRow(child) : this.makeFileRow(child);
+      if (child.type === "dir") {
+        const view = this.dirViews.get(child.path);
+        if (view) view.entry = child;
+      }
+      node.dataset.path = child.path;
+      node.dataset.type = child.type;
+      next.push(node);
     }
+    children.replaceChildren(...next);
   }
 
   private makeFileRow(entry: ExplorerEntry): HTMLElement {
     const row = document.createElement("div");
     row.className = "explorer-row file";
     row.dataset.path = entry.path;
+    row.dataset.type = entry.type;
     const icon = document.createElement("span");
     icon.className = "explorer-icon file-icon";
     const name = document.createElement("span");
@@ -543,4 +652,14 @@ function pasteTargetRel(entry: ExplorerEntry): string {
 function parentRel(relPath: string): string {
   const at = relPath.lastIndexOf("/");
   return at === -1 ? "" : relPath.slice(0, at);
+}
+
+/** Parent directory for watcher paths, preserving the platform separator. */
+function parentPath(path: string): string {
+  const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  if (slash <= 0) return path.slice(0, Math.max(1, slash));
+  // Keep the separator after a Windows drive letter: `C:\\file` belongs to
+  // `C:\\`, whereas slicing at the separator would produce `C:`.
+  if (slash === 2 && path[1] === ":") return path.slice(0, 3);
+  return path.slice(0, slash);
 }

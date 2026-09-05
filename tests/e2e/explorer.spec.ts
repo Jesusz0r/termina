@@ -43,6 +43,26 @@ test.describe("Explorer File Tree & Actions", () => {
     await expect(explorerTree.getByText("created-file.ts")).toBeVisible({ timeout: 10_000 });
   });
 
+  test("recovers subfolders after collapsing and re-expanding the project root", async ({ page }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+
+    const explorerTree = page.locator("#explorer-tree");
+    const srcFolder = explorerTree.locator(".explorer-row").filter({ hasText: "src" });
+    const rootRow = explorerTree.locator(".explorer-row").filter({ hasText: "test-project" });
+
+    // Expand src so it holds expanded+loaded state, then cycle the root.
+    await srcFolder.click();
+    await expect(explorerTree.getByText("index.ts")).toBeVisible({ timeout: 10_000 });
+    await rootRow.click();
+    await expect(explorerTree.getByText("greeting.ts")).toBeHidden({ timeout: 10_000 });
+    await rootRow.click();
+    await expect(explorerTree.getByText("greeting.ts")).toBeVisible({ timeout: 10_000 });
+
+    // The subfolder must load its content again instead of sticking empty.
+    await srcFolder.click();
+    await expect(explorerTree.getByText("index.ts")).toBeVisible({ timeout: 10_000 });
+  });
+
   test("opens file from explorer into editor on click", async ({ page }) => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
 

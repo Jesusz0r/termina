@@ -6,7 +6,7 @@ const renderer = readFileSync(new URL("../../../src/main.ts", import.meta.url), 
 describe("multi-project editor event routing", () => {
   it("does not auto-open files or reveal the editor for a background project", () => {
     expect(renderer).toContain("applySharedEditorHooks(baseEditorInstance, null)");
-    expect(renderer).toContain("applySharedEditorHooks(editorMgr, project.id)");
+    expect(renderer).toContain("applySharedEditorHooks(editorMgr, view.id)");
     expect(renderer).toContain("if (projectId !== null && activeProjectId !== projectId) return;");
 
     const handlerStart = renderer.indexOf("window.pi.onToolTarget((p) => {");
@@ -15,6 +15,6 @@ describe("multi-project editor event routing", () => {
     expect(handlerEnd).toBeGreaterThan(handlerStart);
     const handler = renderer.slice(handlerStart, handlerEnd);
     expect(handler).toContain("activeProjectId !== p.projectId");
-    expect(handler.indexOf("activeProjectId !== p.projectId")).toBeLessThan(handler.indexOf("editorMgr.openFile"));
+    expect(handler.indexOf("activeProjectId !== p.projectId")).toBeLessThan(handler.indexOf("ensureProjectEditor(view).openFile"));
   });
 });
