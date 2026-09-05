@@ -5,6 +5,7 @@ import {
   defaultAppPreferences,
   type AppPreferences,
   type CodeFontFamily,
+  type RecentModel,
   type ShortcutCommand,
   type ShortcutMap,
   type ThemeId,
@@ -94,6 +95,44 @@ function sanitizeOpenProjects(value: unknown): string[] {
   return result;
 }
 
+const MAX_RECENT_MODELS = 12;
+const MAX_PROVIDER_ID_LENGTH = 64;
+const MAX_MODEL_ID_LENGTH = 256;
+
+/** Last-used models, most recent first. Main owns writes; validation still
+ *  guards the file against a hand-edited entry. */
+function sanitizeRecentModels(value: unknown): RecentModel[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const result: RecentModel[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    if (typeof record.provider !== "string" || typeof record.model !== "string") continue;
+    const provider = record.provider.trim();
+    const model = record.model.trim();
+    if (provider.length === 0 || provider.length > MAX_PROVIDER_ID_LENGTH) continue;
+    if (provider.includes("/")) continue;
+    if (model.length === 0 || model.length > MAX_MODEL_ID_LENGTH) continue;
+    if (seen.has(provider)) continue;
+    seen.add(provider);
+    result.push({ provider, model });
+    if (result.length >= MAX_RECENT_MODELS) break;
+  }
+  return result;
+}
+
+/** Move a provider's last-used model to the front, dropping malformed
+ *  entries. Pure so the recording rule stays unit-testable. */
+export function recordRecentModel(previous: readonly RecentModel[], provider: string, model: string): RecentModel[] {
+  const cleanProvider = provider.trim();
+  const cleanModel = model.trim();
+  if (cleanProvider.length === 0 || cleanProvider.includes("/") || cleanModel.length === 0) {
+    return sanitizeRecentModels(previous);
+  }
+  return sanitizeRecentModels([{ provider: cleanProvider, model: cleanModel }, ...previous]);
+}
+
 export function normalizeAppPreferences(raw: unknown): AppPreferences {
   const defaults = defaultAppPreferences();
   const input = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
@@ -107,6 +146,7 @@ export function normalizeAppPreferences(raw: unknown): AppPreferences {
     shortcuts: sanitizeShortcutMap(input.shortcuts, defaults.shortcuts),
     openProjects: sanitizeOpenProjects(input.openProjects),
     showThinking: typeof input.showThinking === "boolean" ? input.showThinking : defaults.showThinking,
+    recentModels: sanitizeRecentModels(input.recentModels),
   };
 }
 

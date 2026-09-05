@@ -287,9 +287,17 @@ export interface AppPreferences {
   openProjects: string[];
   /** Show provider-supplied thinking in core terminals. */
   showThinking: boolean;
+  /** Last-used models, most recent first. Main owns this field. */
+  recentModels: RecentModel[];
 }
 
-export type UserPreferencePatch = Partial<Omit<AppPreferences, "openProjects">>;
+/** One remembered model: provider id plus the provider-local model id. */
+export interface RecentModel {
+  provider: string;
+  model: string;
+}
+
+export type UserPreferencePatch = Partial<Omit<AppPreferences, "openProjects" | "recentModels">>;
 export type PreferenceUpdate = { patch: UserPreferencePatch; activateShortcuts: boolean };
 
 export function defaultAppPreferences(): AppPreferences {
@@ -303,6 +311,7 @@ export function defaultAppPreferences(): AppPreferences {
     shortcuts: { ...DEFAULT_SHORTCUTS },
     openProjects: [],
     showThinking: true,
+    recentModels: [],
   };
 }
 

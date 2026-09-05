@@ -85,7 +85,7 @@ import {
   parseTerminalRoster,
   type TerminalRosterEntry,
 } from "./terminal-roster.js";
-import { normalizeAppPreferences, normalizeUserPreferencePatch, sanitizeShortcutMap } from "../shared/preferences.js";
+import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
 import { HIDE_THINKING_CSI, SHOW_THINKING_CSI, thinkingStartupArgs } from "../shared/terminal-control.js";
 import {
   DEFAULT_SHORTCUTS,
@@ -2929,9 +2929,34 @@ class PiEditorApp {
 
   private applyAgentSettings(inst: PiTerminalInstance, model: string | null | undefined, thinkingLevel: string | null | undefined): void {
     const nextModel = this.usablePiModel(model);
-    if (nextModel) inst.model = nextModel;
+    if (nextModel) {
+      inst.model = nextModel;
+      this.rememberModel(nextModel);
+    }
     const nextThinking = this.usablePiThinking(thinkingLevel);
     if (nextThinking) inst.thinkingLevel = nextThinking;
+  }
+
+  /** Silently remember the last-used model per provider so fresh sessions
+   *  reopen on it instead of the provider default. */
+  private rememberModel(full: string): void {
+    const cut = full.indexOf("/");
+    if (cut < 1 || cut === full.length - 1) return;
+    const next = recordRecentModel(this.preferences.recentModels ?? [], full.slice(0, cut), full.slice(cut + 1));
+    if (JSON.stringify(next) === JSON.stringify(this.preferences.recentModels ?? [])) return;
+    this.commitPreferencePatch({ recentModels: next }, false).then(
+      () => undefined,
+      (err) => {
+        console.warn(`[main] recent model save failed: ${(err as Error).message}`);
+      },
+    );
+  }
+
+  /** Most recently used model for a fresh session without a source tab. */
+  private rememberedAgentSettings(): { model: string | null; thinkingLevel: null } | null {
+    const [first] = this.preferences.recentModels ?? [];
+    if (!first) return null;
+    return { model: `${first.provider}/${first.model}`, thinkingLevel: null };
   }
 
   private async createTerminal(
@@ -2981,6 +3006,10 @@ class PiEditorApp {
     }
     const copied = agentEngine === "pi" && !opts?.launch && !opts?.resume
       ? this.copiedAgentSettings(opts?.fromTerminalId)
+      : null;
+    // A fresh session without a usable copied model reopens on the last-used one.
+    const remembered = agentEngine === "pi" && !opts?.launch && !opts?.resume && !this.usablePiModel(copied?.model)
+      ? this.rememberedAgentSettings()
       : null;
     let cmd: string;
     let args: string[];
@@ -3033,13 +3062,23 @@ class PiEditorApp {
       else delete env.TERMINA_CORE_SESSION_FILE;
       if (sessionId) env.TERMINA_CORE_SESSION_ID = sessionId;
       else delete env.TERMINA_CORE_SESSION_ID;
-      if (sessionFile && sessionBundleHasContent(sessionFile)) env.TERMINA_CORE_RESUME = "1";
+      const resuming = Boolean(sessionFile && sessionBundleHasContent(sessionFile));
+      if (resuming) env.TERMINA_CORE_RESUME = "1";
       else delete env.TERMINA_CORE_RESUME;
       const coreModel = this.copiedCoreModel(opts?.fromTerminalId);
       if (coreModel) {
         const cut = coreModel.indexOf("/");
         env.TERMINA_CORE_PROVIDER = coreModel.slice(0, cut);
         env.TERMINA_CORE_MODEL = coreModel.slice(cut + 1);
+      } else if (!resuming) {
+        // Fresh session without a source tab: reopen on the last-used model.
+        // agent-core ignores the pin when that provider is no longer authenticated.
+        const remembered = this.rememberedAgentSettings()?.model;
+        const cut = remembered?.indexOf("/") ?? -1;
+        if (remembered && cut > 0) {
+          env.TERMINA_CORE_PROVIDER = remembered.slice(0, cut);
+          env.TERMINA_CORE_MODEL = remembered.slice(cut + 1);
+        }
       }
       if (!persist) env.TERMINA_CORE_APPROVE = "all";
     } else {
@@ -3050,7 +3089,7 @@ class PiEditorApp {
       const trusted = this.trustedPiSessionFile(sessionFile);
       sessionFile = trusted && !this.sessionFileInUse(trusted) ? trusted : null;
       const sessionArgs = sessionFile ? ["--session", sessionFile] : [];
-      args = ["-e", this.bridgePath(), ...sessionArgs, ...this.piFlagsFromSettings(copied)];
+      args = ["-e", this.bridgePath(), ...sessionArgs, ...this.piFlagsFromSettings(copied ?? remembered)];
       env = { ...cleanEnv(), TERMINA_TERMINAL_ID: id, TERMINA_EVENTS_DIR: this.eventsDir };
     }
     if (persist && owner && this.persistLive(owner).length >= MAX_TERMINAL_ROSTER) {
@@ -3613,9 +3652,14 @@ class PiEditorApp {
   private async isProjectFile(relPath: string, projectCwd: string): Promise<boolean> {
     if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return false;
     const abs = join(projectCwd, relPath);
-    if (!await this.withinRoot(abs, projectCwd)) return false;
+    // searchSessions canonicalizes projectCwd once. Canonicalize only the
+    // candidate so symlink escapes are rejected without a synchronous stat or
+    // a second realpath of the trusted project root.
+    const canonicalAbs = await this.canonicalPath(abs);
+    const checkedRel = relative(projectCwd, canonicalAbs);
+    if (!checkedRel || checkedRel.startsWith("..") || isAbsolute(checkedRel)) return false;
     try {
-      return existsSync(abs) && statSync(abs).isFile();
+      return (await stat(canonicalAbs)).isFile();
     } catch {
       return false;
     }
@@ -5378,10 +5422,15 @@ class PiEditorApp {
     const oids = ws.watcher?.lastOids;
     const reconcile: Array<{ relPath: string; oid: string }> = [];
     const hinted = new Set(hints);
+    // ProjectWatcher stores canonical absolute paths. Resolve the workspace
+    // root once for this bounded walk instead of realpath'ing it for every
+    // cached file.
+    const canonicalRoot = await this.canonicalPath(ws.root);
     let walked = 0;
     for (const [path, pair] of oids ?? []) {
-      if (walked++ > 2000) break;
-      const rel = await this.rel(path, ws.root);
+      if (walked >= 2000) break;
+      walked++;
+      const rel = relative(canonicalRoot, path);
       if (!rel || rel.startsWith("..") || isAbsolute(rel)) continue;
       if (hinted.has(rel)) continue;
       if (this.ignoredSegmentIn(rel)) continue;
@@ -6560,6 +6609,10 @@ class PiEditorApp {
   /** Start the watcher of one workspace. Returns the watcher. */
   private startWatcher(ws: WorkspaceState): ProjectWatcher {
     const watcher = new ProjectWatcher(ws.root, (p) => this.canonicalPath(p));
+    // The workspace root is stable for the lifetime of this watcher. Keep its
+    // canonical form in flight once so each filesystem event only resolves the
+    // changed path.
+    const canonicalRootPromise = this.canonicalPath(ws.root);
     const workspaceTerminals = (): PiTerminalInstance[] =>
       [...ws.terminalIds].map((id) => this.terminals.get(id)).filter((t): t is PiTerminalInstance => t !== undefined);
     watcher.onChange = async (change) => {
@@ -6567,7 +6620,7 @@ class PiEditorApp {
       const owner = this.projectOfWorkspace(ws.id);
       if (this.disposed || !owner || this.projectIsSwitching(owner.id)) return;
       const path = await this.canonicalPath(change.path);
-      const relPath = relative(await this.canonicalPath(ws.root), path);
+      const relPath = relative(await canonicalRootPromise, path);
       if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return;
       ws.generation++;
       this.markCandidateEvidenceStale(ws.comparisonId);
