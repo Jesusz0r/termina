@@ -131,7 +131,13 @@ export function matchingSlashCommands(
     return exact ? [exact] : PERMISSION_COMMANDS.filter((c) => pickerRowMatches(line, c));
   }
   if (space >= 0) return [];
-  return commands.filter((c) => c.name.startsWith(line));
+  // "/new" is a hidden alias for /clear: "/n", "/ne", "/new" offer the reset row.
+  if ("/new".startsWith(line)) {
+    const prefixed = commands.filter((c) => c.name.startsWith(line));
+    const aliased = commands.filter((c) => c.submit === "/clear" && !prefixed.includes(c));
+    if (aliased.length > 0) return [...prefixed, ...aliased];
+  }
+  return commands.filter((c) => c.name.startsWith(line) || (c.submit?.startsWith(line) ?? false));
 }
 
 export function completeSlashLine(

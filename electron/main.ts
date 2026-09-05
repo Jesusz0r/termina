@@ -647,7 +647,7 @@ class PiEditorApp {
   private terminalRosterCommits = new Map<string, Promise<void>>();
   private shortcutMap: ShortcutMap = { ...DEFAULT_SHORTCUTS };
   private worldsRoot = process.env.TERMINA_WORLDS_DIR ?? join(this.userDataDir, "worlds");
-  /** Input buffer for /new slash-command detection (terminals:write is per keystroke). */
+  /** Input buffer for /clear (/new alias) slash-command detection (terminals:write is per keystroke). */
   private newCommandBuffers = new Map<string, string>();
   /** Tailers for candidate events directories. */
   private worldlineTailers = new Map<string, SidecarTailer>();
@@ -5831,10 +5831,10 @@ class PiEditorApp {
 
   private isNewCommand(text: string): boolean {
     const t = text.trim();
-    return t === "/new" || t.startsWith("/new ");
+    return t === "/clear" || t.startsWith("/clear ") || t === "/new" || t.startsWith("/new ");
   }
 
-  /** Track only interactive-sized input for /new detection. Bulk input is a
+  /** Track only interactive-sized input for /clear (/new alias) detection. Bulk input is a
    * paste, not a slash command, and must not synchronously split/scan MBs. */
   private trackNewCommandInput(id: string, data: string): void {
     if (data.length > 1024 || data.includes("\x1b[200~")) {
@@ -5857,7 +5857,7 @@ class PiEditorApp {
   }
 
   /**
-   * Reset session-scoped state for a slash-command reset (/new). The
+   * Reset session-scoped state for a slash-command reset (/clear, alias /new). The
    * timeline, plan, and worldline comparisons reflect the abandoned run;\n   * the workspace source and modified files reflect real disk changes and\n   * persist.\n   */
   private clearForNewSession(terminalId: string, expected?: PtyRendererSendTarget | null): void {
     const inst = this.terminals.get(terminalId);
@@ -5882,14 +5882,14 @@ class PiEditorApp {
     inst.pendingFileTools.clear();
     inst.toolOutcomes.clear();
     this.sendPlan(inst, expected);
-    // The open run is abandoned by /new. Mark it non-replayable so a later
+    // The open run is abandoned by /clear. Mark it non-replayable so a later
     // token-less agent_start does not treat it as a retry.
     if (inst.currentRun && !inst.currentRun.settledAt) {
       inst.currentRun.replayable = false;
-      inst.currentRun.reason = inst.currentRun.reason ?? "session reset by /new";
+      inst.currentRun.reason = inst.currentRun.reason ?? "session reset by /clear";
       inst.currentRun = null;
     }
-    // Modified files and their original baselines intentionally survive /new:
+    // Modified files and their original baselines intentionally survive /clear:
     // they describe real workspace changes still present on disk. The next
     // agent_start refreshes baselines only for files not already in the list.
     const ws = this.workspaceOfTerminal(inst);
@@ -7375,8 +7375,8 @@ class PiEditorApp {
       if (typeof id !== "string" || typeof data !== "string") return;
       const inst = this.terminals.get(id);
       if (!inst) return;
-      // Detect /new slash command before it reaches the pty. The bridge also
-      // catches it via the prompt payload, but /new may reset the session
+      // Detect /clear (/new alias) slash command before it reaches the pty. The bridge also
+      // catches it via the prompt payload, but /clear may reset the session
       // without a prompt/before_agent_start cycle.
       if (inst.type === "agent") this.trackNewCommandInput(id, data);
       // Keystrokes are tiny. Skip the UTF-8 scan until the payload is large.

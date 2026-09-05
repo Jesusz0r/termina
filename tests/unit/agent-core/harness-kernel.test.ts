@@ -3555,6 +3555,9 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("slash menu puts help first", SLASH_COMMANDS[0]?.name === "/help");
     check("slash menu puts exit last", SLASH_COMMANDS.at(-1)?.name === "/exit");
     check("slash /clear is marked new", SLASH_COMMANDS.some((c) => c.name === "/clear (new)" && c.submit === "/clear"));
+    check("slash /new aliases /clear", matchingSlashCommands("/new").some((c) => c.submit === "/clear"));
+    check("slash /n offers /clear", matchingSlashCommands("/n").some((c) => c.submit === "/clear"));
+    check("slash /clear still matches", matchingSlashCommands("/clear").some((c) => c.submit === "/clear"));
     check("slash /compact is listed", SLASH_COMMANDS.some((c) => c.name === "/compact"));
     check("slash /effort is listed", SLASH_COMMANDS.some((c) => c.name === "/effort"));
     check(

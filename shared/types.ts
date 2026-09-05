@@ -533,7 +533,7 @@ export interface PiBridge {
   onTimelineEvent(cb: (p: { terminalId: string; event: TimelineEvent }) => void): () => void;
   /** Push: dots whose source states were evicted (budget). */
   onTimelineEvict(cb: (p: { terminalId: string; seqs: number[] }) => void): () => void;
-  /** Push: timeline cleared for a fresh session (e.g. /new). */
+  /** Push: timeline cleared for a fresh session (e.g. /clear). */
   onTimelineClear(cb: (p: { terminalId: string }) => void): () => void;
   /** Push: last-tool counts for the Timeline header. */
   onTimelinePrefix(cb: (p: TimelinePrefix) => void): () => void;

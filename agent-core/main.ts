@@ -8523,7 +8523,7 @@ function dispatchLine(line: string): void {
     showPrompt();
     return;
   }
-  if (line === "/clear") {
+  if (line === "/clear" || line === "/new") {
     if (engineBusy()) {
       out("(engine busy)\n");
       showPrompt();
