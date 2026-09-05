@@ -1296,14 +1296,22 @@ export default async function run(log: (msg: string) => void) {
   });
   const ancestorCaptured = ancestorError.error === "no error thrown";
   check("full capture survives an ancestor ABA swap without mixed Git state", ancestorCaptured, ancestorError.error);
+  const ancestorResponseState = ancestorError.response?.state as { commit?: string } | undefined;
+  const ancestorCommit = typeof ancestorResponseState?.commit === "string" ? ancestorResponseState.commit : null;
   let ancestorBytes: Buffer | null = null;
-  if (ancestorCaptured) {
-    const responseState = ancestorError.response?.state as { commit?: string } | undefined;
-    if (responseState?.commit) ancestorBytes = await ancestorStore.readBlob(responseState.commit, "payload.txt");
-  }
+  if (ancestorCommit) ancestorBytes = await ancestorStore.readBlob(ancestorCommit, "payload.txt");
+  const ancestorObjectsAfter = looseObjectSet(ancestorStore);
+  const ancestorRefsAfter = storeRefSet(ancestorStore);
+  const ancestorPriorObjectsPreserved = ancestorState.objects.every((oid) => ancestorObjectsAfter.includes(oid));
+  const ancestorPriorRefsPreserved = ancestorState.refs.every((ref) => ancestorRefsAfter.includes(ref));
+  const ancestorStateRefVisible = ancestorCommit !== null && ancestorRefsAfter.includes(`refs/termina/state/${ancestorCommit}:${ancestorCommit}`);
   check(
     "ancestor ABA evidence remains the original source state",
-    ancestorBytes?.equals(Buffer.from("ancestor-A\n")) === true && bindingEvidenceUnchanged(ancestorStore, ancestorState),
+    ancestorCaptured &&
+      ancestorBytes?.equals(Buffer.from("ancestor-A\n")) === true &&
+      ancestorPriorObjectsPreserved &&
+      ancestorPriorRefsPreserved &&
+      ancestorStateRefVisible,
     ancestorError.error,
   );
 

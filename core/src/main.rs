@@ -1367,8 +1367,9 @@ fn write_blob(
     bytes: &[u8],
     current_bytes: u64,
     max_new_blob_bytes: u64,
+    verified_oid: Option<Oid>,
 ) -> Result<(Oid, u64), String> {
-    let oid = object_oid(repo, "blob", bytes);
+    let oid = verified_oid.unwrap_or_else(|| object_oid(repo, "blob", bytes));
     let blob_bytes = u64::try_from(bytes.len()).map_err(|_| "blob length does not fit u64")?;
     ensure_blob_budget(
         transaction,
@@ -1378,7 +1379,7 @@ fn write_blob(
         current_bytes,
         max_new_blob_bytes,
     )?;
-    write_transaction_object(transaction, repo, "blob", bytes)
+    write_transaction_object_with_oid(transaction, repo, "blob", bytes, oid)
 }
 
 /// Publish one object through the request transaction. The ODB existence
@@ -1392,6 +1393,19 @@ fn write_transaction_object(
     content: &[u8],
 ) -> Result<(Oid, u64), String> {
     let oid = object_oid(repo, kind, content);
+    write_transaction_object_with_oid(transaction, repo, kind, content, oid)
+}
+
+/// Publish an object when the caller already computed and, where required,
+/// verified its object id. Keeping the oid separate avoids hashing large blob
+/// contents again before the transaction's existence check.
+fn write_transaction_object_with_oid(
+    transaction: &mut StoreObjectTransaction,
+    repo: &Repository,
+    kind: &str,
+    content: &[u8],
+    oid: Oid,
+) -> Result<(Oid, u64), String> {
     let loose = loose_path(repo, oid).ok_or("oid length does not match the object format")?;
     if loose.exists() || transaction.contains(oid) {
         return Ok((oid, 0));
@@ -2300,7 +2314,7 @@ fn write_nested_tree_for_ref(
     let entries = build_tree_entries(transaction, repo, root)?;
     let content = tree_object_content(&entries);
     let oid = object_oid(repo, "tree", &content);
-    let written = write_transaction_object(transaction, repo, "tree", &content)?.0;
+    let written = write_transaction_object_with_oid(transaction, repo, "tree", &content, oid)?.0;
     if written != oid {
         return Err("merged root tree oid changed while staged".to_string());
     }
@@ -2350,7 +2364,29 @@ fn write_tree_delta(
         };
         per_dir.entry(dir).or_default().insert(name, entry.clone());
     }
-    write_dir_delta(transaction, repo, parent_tree, "", &per_dir)
+    // Index the changed directory paths once.  The recursive writer only
+    // needs direct child directories for the current level; rescanning every
+    // `per_dir` key at every level turns a large sparse delta into O(D^2)
+    // work.
+    let mut child_dirs: HashMap<String, Vec<String>> = HashMap::new();
+    for dir in per_dir.keys() {
+        if dir.is_empty() {
+            continue;
+        }
+        let (parent, child) = match dir.rsplit_once('/') {
+            Some((parent, child)) => (parent, child),
+            None => ("", dir.as_str()),
+        };
+        child_dirs
+            .entry(parent.to_string())
+            .or_default()
+            .push(child.to_string());
+    }
+    for children in child_dirs.values_mut() {
+        children.sort_unstable();
+        children.dedup();
+    }
+    write_dir_delta(transaction, repo, parent_tree, "", &per_dir, &child_dirs)
 }
 
 /// The existing entries of one directory inside the parent root tree.
@@ -2396,6 +2432,7 @@ fn write_dir_delta(
     parent_root: Oid,
     dir_rel: &str,
     per_dir: &HashMap<String, HashMap<String, Option<FlatEntry>>>,
+    child_dirs: &HashMap<String, Vec<String>>,
 ) -> Result<Option<Oid>, String> {
     let mut entries = dir_entries(repo, parent_root, dir_rel)?;
     // Descend first: children are patched against the parent state, then
@@ -2407,29 +2444,16 @@ fn write_dir_delta(
     } else {
         format!("{dir_rel}/")
     };
-    let mut child_names: Vec<&str> = Vec::new();
-    for key in per_dir.keys() {
-        if key.as_str() == dir_rel {
-            continue;
-        }
-        let Some(rest) = key.strip_prefix(prefix.as_str()) else {
-            continue;
-        };
-        if let Some(child) = rest.split('/').next() {
-            if !child.is_empty() && !child_names.contains(&child) {
-                child_names.push(child);
-            }
-        }
-    }
-    for child in child_names {
+    for child in child_dirs.get(dir_rel).into_iter().flatten() {
         let child_oid = write_dir_delta(
             transaction,
             repo,
             parent_root,
             &format!("{prefix}{child}"),
             per_dir,
+            child_dirs,
         )?;
-        entries.retain(|e| e.name != child);
+        entries.retain(|e| e.name != child.as_str());
         if let Some(oid) = child_oid {
             entries.push(TreeEntry {
                 mode: 0o040000,
@@ -2487,15 +2511,34 @@ fn build_tree_entries(
 
 /// Sort tree entries byte-wise; directories compare as if their name
 /// carried a trailing slash.
-fn sort_git_entries(entries: &mut [TreeEntry]) {
-    let sort_key = |e: &TreeEntry| {
-        if e.mode == 0o040000 {
-            format!("{}/", e.name)
-        } else {
-            e.name.clone()
+fn compare_git_entry_names(left: &TreeEntry, right: &TreeEntry) -> std::cmp::Ordering {
+    let left_name = left.name.as_bytes();
+    let right_name = right.name.as_bytes();
+    let common = left_name.len().min(right_name.len());
+    for index in 0..common {
+        let ordering = left_name[index].cmp(&right_name[index]);
+        if ordering != std::cmp::Ordering::Equal {
+            return ordering;
         }
-    };
-    entries.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
+    }
+    let left_tail = left_name
+        .get(common)
+        .copied()
+        .or_else(|| (left.mode == 0o040000).then_some(b'/'));
+    let right_tail = right_name
+        .get(common)
+        .copied()
+        .or_else(|| (right.mode == 0o040000).then_some(b'/'));
+    match (left_tail, right_tail) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (Some(left_byte), Some(right_byte)) => left_byte.cmp(&right_byte),
+    }
+}
+
+fn sort_git_entries(entries: &mut [TreeEntry]) {
+    entries.sort_by(compare_git_entry_names);
 }
 
 /// The canonical Git tree object bytes for sorted entries.
@@ -2821,7 +2864,7 @@ fn commit_tree(
         .commit_create_buffer(&signature, &signature, message, &tree_obj, &parent_refs)
         .map_err(|e| format!("commit buffer failed: {e}"))?;
     let oid = object_oid(repo, "commit", content.as_ref());
-    let written = write_transaction_object(transaction, repo, "commit", content.as_ref())?.0;
+    let written = write_transaction_object_with_oid(transaction, repo, "commit", content.as_ref(), oid)?.0;
     if written != oid {
         return Err("state commit oid changed while staged".to_string());
     }
@@ -8401,6 +8444,7 @@ fn hash_path(
             &bytes,
             current_new_blob_bytes,
             max_new_blob_bytes,
+            None,
         )?;
         return Ok(Some((0o120000, oid, new_bytes)));
     }
@@ -8474,6 +8518,7 @@ fn hash_path(
         &bytes,
         current_new_blob_bytes,
         max_new_blob_bytes,
+        None,
     )?;
     Ok(Some((mode, oid, new_bytes)))
 }
@@ -8619,6 +8664,7 @@ fn op_capture(req: &Value) -> Result<Value, String> {
                     blob,
                     new_blob_bytes,
                     max_new_blob_bytes,
+                    Some(oid),
                 )?;
                 if owned_oid != oid {
                     return Err(format!(
