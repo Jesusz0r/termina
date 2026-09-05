@@ -1506,6 +1506,8 @@ type EvidenceAttempt = {
   promise: Promise<{ ok: boolean; error?: string }> | null;
 };
 
+const EVIDENCE_QUEUE_HIGH_WATER = 64;
+
 type PendingCandidateReady = {
   comparisonId: string;
   label: "A" | "B";
@@ -1553,6 +1555,7 @@ export class WorldlineManager {
   private challengeInFlight = new Set<string>();
   private evidenceByComparison = new Map<string, EvidenceSummary>();
   private evidenceQueue: Promise<unknown> = Promise.resolve();
+  private evidenceQueueDepth = 0;
   /** Every queued/running evidence operation is owned by its comparison. */
   private evidenceAttempts = new Map<string, EvidenceAttempt>();
   private runsByTerminal = new Map<string, RunRecord[]>();
@@ -3294,6 +3297,11 @@ export class WorldlineManager {
       promise: null,
     };
     this.evidenceAttempts.set(attempt.id, attempt);
+    if (this.evidenceQueueDepth >= EVIDENCE_QUEUE_HIGH_WATER) {
+      this.evidenceAttempts.delete(attempt.id);
+      return Promise.resolve({ ok: false, error: "evidence queue is at its high-water mark; retry after pending work drains" });
+    }
+    this.evidenceQueueDepth += 1;
     const run = this.evidenceQueue.then(() => {
       if (attempt.controller.signal.aborted || this.closingComparisons.has(comparisonId)) {
         return { ok: false, error: "evidence was cancelled" };
@@ -3301,6 +3309,7 @@ export class WorldlineManager {
       return this.runEvidence(comparisonId, attempt);
     });
     const tracked = run.finally(() => {
+      this.evidenceQueueDepth -= 1;
       if (this.evidenceAttempts.get(attempt.id) === attempt) this.evidenceAttempts.delete(attempt.id);
     });
     attempt.promise = tracked;

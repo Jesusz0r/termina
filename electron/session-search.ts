@@ -18,6 +18,7 @@ const MAX_SESSION_SEARCH_FILES = 50;
 const MAX_SESSION_SEARCH_HITS = 50;
 const MAX_SESSION_SEARCH_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_SESSION_SEARCH_LINES = 10_000;
+const MAX_PROJECT_FILE_MEMO_ENTRIES = 4096;
 
 export type SessionMessageParse = { role: string; text: string; paths: string[] };
 
@@ -219,6 +220,18 @@ export async function searchSessionFiles(opts: {
   const needle = opts.query.trim().toLowerCase();
   if (needle.length < 2) return [];
   const hits: SessionHit[] = [];
+  // A single message can expose the same candidate through tool arguments,
+  // backticks, and ordinary tokens.  Keep the bounded search from repeating
+  // the main-process existence/stat check for those candidates.
+  const projectFileMemo = new Map<string, Promise<boolean>>();
+  const isProjectFile = (relPath: string, projectCwd: string): Promise<boolean> => {
+    const key = `${projectCwd}\0${relPath}`;
+    const cached = projectFileMemo.get(key);
+    if (cached) return cached;
+    const result = Promise.resolve().then(() => opts.isProjectFile(relPath, projectCwd));
+    if (projectFileMemo.size < MAX_PROJECT_FILE_MEMO_ENTRIES) projectFileMemo.set(key, result);
+    return result;
+  };
 
   for (const file of opts.files) {
     if (opts.shouldStop?.()) return [];
@@ -252,7 +265,7 @@ export async function searchSessionFiles(opts: {
             if (parsed) {
               const matchIdx = parsed.text.toLowerCase().indexOf(needle);
               if (matchIdx !== -1) {
-                const hitPath = await resolveSessionHitPath(parsed, opts.projectCwd, opts.canonicalize, opts.isProjectFile);
+                const hitPath = await resolveSessionHitPath(parsed, opts.projectCwd, opts.canonicalize, isProjectFile);
                 hits.push({
                   sessionFile: file.name,
                   line: lineNum,

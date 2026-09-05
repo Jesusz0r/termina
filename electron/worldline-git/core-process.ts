@@ -60,7 +60,8 @@ type PendingRequest = {
 };
 
 type QueuedRequest = {
-  payload: Record<string, unknown>;
+  requestId: string;
+  encoded: string;
   bytes: number;
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
@@ -181,9 +182,13 @@ export class CoreClient {
    */
   request(payload: Record<string, unknown>): Promise<unknown> {
     if (this.disposed) return Promise.reject(new Error("snapshot core is disposed"));
+    const requestId = `cap-${++this.seq}`;
     let encoded: string;
     try {
-      encoded = JSON.stringify(payload);
+      // Include the id before admission so the exact wire payload is retained
+      // and written once.  The queue byte bound therefore covers the payload
+      // that the core actually receives, rather than a pre-id estimate.
+      encoded = JSON.stringify({ ...payload, requestId });
     } catch (error) {
       return Promise.reject(new Error(`snapshot core request payload is not serializable: ${error instanceof Error ? error.message : String(error)}`));
     }
@@ -199,7 +204,7 @@ export class CoreClient {
       return Promise.reject(new Error("snapshot core request queue is at its high-water mark; retry after pending work drains"));
     }
     return new Promise((resolve, reject) => {
-      this.queue.push({ payload, bytes, resolve, reject });
+      this.queue.push({ requestId, encoded, bytes, resolve, reject });
       this.queuedBytes += bytes;
       this.pump();
     });
@@ -220,7 +225,7 @@ export class CoreClient {
       this.queuedBytes -= request.bytes;
       this.inFlight++;
       this.inFlightBytes += request.bytes;
-      void this.dispatch(request.payload).then(request.resolve, request.reject).finally(() => {
+      void this.dispatch(request).then(request.resolve, request.reject).finally(() => {
         this.inFlight--;
         this.inFlightBytes -= request.bytes;
         this.pump();
@@ -228,11 +233,11 @@ export class CoreClient {
     }
   }
 
-  private dispatch(payload: Record<string, unknown>): Promise<unknown> {
+  private dispatch(request: QueuedRequest): Promise<unknown> {
     if (this.disposed) return Promise.reject(new Error("snapshot core is disposed"));
     return new Promise((resolve, reject) => {
       const process = this.ensure();
-      const requestId = `cap-${++this.seq}`;
+      const { requestId } = request;
       // A hung core must not stall the queue forever. Kill it on timeout:
       // the exit handler rejects pending requests and the next op respawns.
       const timer = setTimeout(() => {
@@ -254,7 +259,7 @@ export class CoreClient {
       });
       try {
         // The payload carries its own op (capture, template, apply-state).
-        process.child.stdin?.write(JSON.stringify({ ...payload, requestId }) + "\n");
+        process.child.stdin?.write(`${request.encoded}\n`);
       } catch (err) {
         clearTimeout(timer);
         this.pending.delete(requestId);

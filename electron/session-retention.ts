@@ -63,6 +63,8 @@ const MAX_RETAINED_SCAN_PENDING = MAX_RETAINED_BUNDLE_ENTRIES;
 const MAX_RETAINED_SCAN_WORK_BYTES = 128 * 1024 * 1024;
 const RETAINED_USAGE_LEDGER_VERSION = 1;
 const RETAINED_USAGE_LEDGER_TEMP = /^\.termina-retained-session-usage\.json\.tmp-[A-Za-z0-9-]+$/;
+/** Bound serialized admission closures while a retention operation is slow. */
+const RETENTION_QUEUE_HIGH_WATER = 128;
 
 type RetainedClaimRecord = {
   runId: string;
@@ -1275,6 +1277,7 @@ async function addRetainedTransactionEntries(root: string, ledger: RetainedUsage
 
 export class SessionRetentionOwner {
   private queueTail: Promise<void> = Promise.resolve();
+  private queuedOperations = 0;
   private readonly testHooks?: SessionRetentionOwnerOptions["testHooks"];
   private rootBindingPromise: Promise<RetainedRootBinding> | null = null;
 
@@ -1312,12 +1315,19 @@ export class SessionRetentionOwner {
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.queuedOperations >= RETENTION_QUEUE_HIGH_WATER) {
+      return Promise.reject(new Error("session retention queue is at its high-water mark; retry after pending work drains"));
+    }
+    this.queuedOperations += 1;
     const run = this.queueTail.then(operation, operation);
-    this.queueTail = run.then(
+    const settled = run.finally(() => {
+      this.queuedOperations -= 1;
+    });
+    this.queueTail = settled.then(
       () => undefined,
       () => undefined,
     );
-    return run;
+    return settled;
   }
 
   /**

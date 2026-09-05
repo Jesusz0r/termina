@@ -15,6 +15,8 @@ import type { PiSessionCopyIdentity } from "../agent-core/session.js";
 export type { PiSessionCopyIdentity } from "../agent-core/session.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
+/** Bound retained operations so a slow worker cannot retain an unbounded chain of closures. */
+const SESSION_WORKER_QUEUE_HIGH_WATER = 128;
 
 export interface SessionForkOpts {
   sourceSessionFile: string;
@@ -163,6 +165,7 @@ export class SessionForkClient {
   private worker: Worker | null = null;
   private pending = new Map<string, PendingRequest>();
   private queue: Promise<void> = Promise.resolve();
+  private queuedOperations = 0;
   private seq = 0;
   private disposed = false;
   private disposePromise: Promise<void> | null = null;
@@ -211,15 +214,22 @@ export class SessionForkClient {
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
     if (this.disposed) return Promise.reject(new Error("session worker disposed"));
+    if (this.queuedOperations >= SESSION_WORKER_QUEUE_HIGH_WATER) {
+      return Promise.reject(new Error("session worker queue is at its high-water mark; retry after pending work drains"));
+    }
+    this.queuedOperations += 1;
     const run = this.queue.then(() => {
       if (this.disposed) throw new Error("session worker disposed");
       return operation();
     });
-    this.queue = run.then(
+    const settled = run.finally(() => {
+      this.queuedOperations -= 1;
+    });
+    this.queue = settled.then(
       () => undefined,
       () => undefined,
     );
-    return run;
+    return settled;
   }
 
   private dispatchPi(payload: SessionForkOpts, signal?: AbortSignal): Promise<SessionForkResult> {

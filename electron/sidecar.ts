@@ -564,6 +564,11 @@ interface SegmentCandidate {
   active?: boolean;
 }
 
+interface SidecarSegmentNames {
+  sealed: string[];
+  retained: string[];
+}
+
 interface PeekedSegmentRecord {
   envelope: SidecarMeta | null;
   hasBytes: boolean;
@@ -1135,11 +1140,12 @@ export class SidecarTailer {
     }
 
     const candidates: SegmentCandidate[] = [];
-    retainedNames = await this.listRetainedSegments(id);
+    const segmentNames = await this.listSegmentNames(id);
+    retainedNames = segmentNames.retained;
     const retainedCandidateName = this.retainedSegments.get(id) ?? retainedName;
     if (retainedCandidateName && !retainedNames.includes(retainedCandidateName)) retainedNames.push(retainedCandidateName);
     for (const name of retainedNames) candidates.push({ name, retained: true });
-    for (const sealedName of await this.listSealedSegments(id)) {
+    for (const sealedName of segmentNames.sealed) {
       candidates.push({ name: sealedName });
     }
     // Active is a first-class candidate so source ordering is global rather
@@ -1347,21 +1353,23 @@ export class SidecarTailer {
   }
 
   private async listSealedSegments(id: string): Promise<string[]> {
+    return (await this.listSegmentNames(id)).sealed;
+  }
+
+  private async listSegmentNames(id: string): Promise<SidecarSegmentNames> {
     try {
       const names = await readDirectory(this.dir);
-      return names.filter((name) => this.isSealedSegmentName(id, name)).sort();
+      return {
+        sealed: names.filter((name) => this.isSealedSegmentName(id, name)).sort(),
+        retained: names.filter((name) => this.isRetainedSegmentName(id, name)).sort(),
+      };
     } catch {
-      return [];
+      return { sealed: [], retained: [] };
     }
   }
 
   private async listRetainedSegments(id: string): Promise<string[]> {
-    try {
-      const names = await readDirectory(this.dir);
-      return names.filter((name) => this.isRetainedSegmentName(id, name)).sort();
-    } catch {
-      return [];
-    }
+    return (await this.listSegmentNames(id)).retained;
   }
 
   private retainedBaseName(id: string, name: string): string | null {
@@ -2310,10 +2318,11 @@ export class SidecarTailer {
       };
       await count(join(this.dir, `${id}.jsonl`), this.offsets.get(id) ?? 0);
       const activeSegment = this.sealedSegments.get(id);
-      for (const name of await this.listSealedSegments(id)) {
+      const segmentNames = await this.listSegmentNames(id);
+      for (const name of segmentNames.sealed) {
         await count(join(this.dir, name), name === activeSegment ? (this.segmentOffset(id, name) ?? 0) : 0);
       }
-      for (const name of await this.listRetainedSegments(id)) {
+      for (const name of segmentNames.retained) {
         await count(join(this.dir, name), name === activeSegment ? (this.segmentOffset(id, name) ?? 0) : 0);
       }
       const drainPath = this.segmentDrainPaths.get(id);
