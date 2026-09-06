@@ -8,7 +8,7 @@
  */
 import { CHALLENGE_PROFILES, type ChallengeProfile, type WorldlineSummary, type WorldlineDetails, type WorldlineChangedFile, type EvidenceSummary } from "../shared/types";
 import { showConfirm, showFileListModal, toast } from "./components/modals";
-import { KIND_LABEL, chipText, evidenceLineDetail, formatBytes, profileCaption, recordOf } from "./worldline-evidence";
+import { KIND_LABEL, chipText, evidenceLineDetail, formatBytes, profileCaption, recordOf, worldlineHeaderSummary } from "./worldline-evidence";
 
 interface ViewHandlers {
   /** Open a base-to-candidate diff in Change Review. */
@@ -65,8 +65,13 @@ interface PairView {
 export class WorldlinesView {
   private listEl: HTMLElement;
   private countEl: HTMLElement;
+  private summaryEl: HTMLElement;
   private panel: HTMLElement;
   private pairs = new Map<string, PairView>();
+  /** Most recently touched comparison; the header summarizes it. */
+  private lastTouched: string | null = null;
+  /** True while hydration replays state: count DOM updates, no arrival events. */
+  private quiet = false;
   /** terminalId → label, for terminal tab badges. */
   private byTerminal = new Map<string, "A" | "B">();
   /** candidate root → label, for editor tab badges. */
@@ -87,6 +92,7 @@ export class WorldlinesView {
     this.panel = panel;
     this.listEl = panel.querySelector("#worldline-list")!;
     this.countEl = panel.querySelector("#worldline-count")!;
+    this.summaryEl = panel.querySelector("#worldline-summary")!;
     panel.querySelector(".panel-header")?.addEventListener("click", () => panel.classList.toggle("collapsed"));
   }
 
@@ -97,6 +103,17 @@ export class WorldlinesView {
   /** The candidate label of a terminal, or null. */
   labelOfTerminal(terminalId: string): "A" | "B" | null {
     return this.byTerminal.get(terminalId) ?? null;
+  }
+
+  /** Live comparison count, for a post-hydration badge sync. */
+  get size(): number {
+    return this.pairs.size;
+  }
+
+  /** Suppress content-arrival events while hydration replays remove/re-add.
+   *  The caller re-enables and syncs the badge once after. */
+  setQuiet(quiet: boolean): void {
+    this.quiet = quiet;
   }
 
   /** The candidate label owning a path, or null. */
@@ -115,17 +132,40 @@ export class WorldlinesView {
   private refreshCount(): void {
     this.countEl.textContent = this.pairs.size ? `(${this.pairs.size})` : "";
     this.panel.classList.toggle("collapsed", this.pairs.size === 0);
-    this.handlers.onContent?.(this.pairs.size > 0, this.pairs.size);
+    if (!this.quiet) this.handlers.onContent?.(this.pairs.size > 0, this.pairs.size);
+    this.refreshSummary();
+  }
+
+  /** The latest touched pair, falling back to the most recently added. */
+  private latestPair(): PairView | undefined {
+    return (this.lastTouched && this.pairs.get(this.lastTouched)) || [...this.pairs.values()].at(-1);
+  }
+
+  /** One-line header summary of the active comparison. Empty when none. */
+  private refreshSummary(): void {
+    const pair = this.latestPair();
+    const line = pair
+      ? worldlineHeaderSummary(
+        pair.comparisonId,
+        pair.cards.get("A")?.summary.state ?? "…",
+        pair.cards.get("B")?.summary.state ?? "…",
+        profileCaption(pair.evidence?.profiles),
+      )
+      : "";
+    this.summaryEl.textContent = line;
+    this.summaryEl.title = line;
   }
 
   /** One evidence summary arrived (challenge ranking). */
   upsertEvidence(summary: EvidenceSummary): void {
     this.evidenceByCmp.set(summary.comparisonId, summary);
+    this.lastTouched = summary.comparisonId;
     const pair = this.pairs.get(summary.comparisonId);
     if (!pair) return;
     pair.evidence = summary;
     this.renderVerdicts(pair);
     for (const card of pair.cards.values()) this.renderCard(card);
+    this.refreshSummary();
   }
 
   /** The profile verdicts strip of a comparison. */
@@ -190,6 +230,7 @@ export class WorldlinesView {
   upsert(summary: WorldlineSummary): void {
     let pair = this.pairs.get(summary.comparisonId);
     if (!pair) pair = this.makePair(summary.comparisonId);
+    this.lastTouched = summary.comparisonId;
     const card = pair.cards.get(summary.label)!;
     const prev = card.summary;
     if (summary.version < prev.version) return;
@@ -202,6 +243,7 @@ export class WorldlinesView {
     }
     this.byRoot.set(summary.root, summary.label);
     this.renderCard(card);
+    this.refreshSummary();
   }
 
   /** Remove every comparison when the project changes. */

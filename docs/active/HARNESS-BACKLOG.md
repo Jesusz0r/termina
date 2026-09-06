@@ -23,13 +23,14 @@ walk, same ignore rules as the explorer, per-query matching so payloads
 stay small). Menu entries under View; shortcuts user-remappable like the
 rest.
 
-## 3. Worldline compare is buried
+## 3. Worldline compare is buried — implemented
 
-Candidate cards and `A`/`B` badges are powerful, but discoverability is low.
-
-Needs: a one-line summary in the header when a comparison is active.
-
-Touches: `electron/worldlines.ts` wiring.
+The Worldlines panel header carries a one-line summary of the latest
+active comparison (`cmp-N · A <state> · B <state>`, plus the evidence
+caption once ranked); full text in the title attr, truncated with
+ellipsis. The pure line builder lives beside `profileCaption` in
+`src/worldline-evidence.ts`; `src/worldlines.ts` refreshes it on
+upsert/evidence/remove. Owner: `src/worldlines.ts`.
 
 ## 4. Terminal theme sync on hot reload — implemented
 

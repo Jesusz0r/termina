@@ -206,22 +206,3 @@ describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
     });
   });
 });
-
-describe("bash_approval_request", () => {
-  it("parses the host approval request with command and risk hint", () => {
-    const event = sidecarEventFromRecord({
-      bridgeId: "core-1",
-      seq: 1,
-      t: "bash_approval_request",
-      requestId: "req-1",
-      command: "rm -rf /tmp/x",
-      dangerous: true,
-    });
-    expect(event).toMatchObject({ t: "bash_approval_request", requestId: "req-1", command: "rm -rf /tmp/x", dangerous: true });
-  });
-
-  it("drops non-string command payloads", () => {
-    const event = sidecarEventFromRecord({ bridgeId: "core-1", seq: 1, t: "bash_approval_request", requestId: "req-1", command: 42 });
-    expect(event).toMatchObject({ t: "bash_approval_request", requestId: "req-1", command: undefined });
-  });
-});

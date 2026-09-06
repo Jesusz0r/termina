@@ -862,40 +862,52 @@ body {
 /* ------------------------------------------------------- activity tabs */
 
 /* HARNESS-BACKLOG #1: one activity panel shows at a time so the terminal
- * keeps its height. Inactive panels are display:none via .tab-active. */
+ * keeps its height. Inactive panels are display:none via .tab-active.
+ * Tabs follow the terminal-tabs chip language: floating pills on a 30px
+ * bar, active is raised with a border. Folder tabs (project-bar) can't
+ * merge here because the panels share the bar's bg-panel background. */
 #activity-tabbar {
-  flex: 0 0 auto;
+  flex: 0 0 30px;
   display: flex;
-  gap: 2px;
-  padding: 4px 8px 0;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  min-height: 30px;
+  max-height: 30px;
+  padding: 0 8px;
+  overflow-x: auto;
   border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
 }
 
 .activity-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 11px;
-  padding: 3px 8px;
+  padding: 3px 10px;
   border: 1px solid transparent;
-  border-bottom: none;
-  border-radius: 4px 4px 0 0;
+  border-radius: 4px;
   background: transparent;
   color: var(--text-dim);
+  white-space: nowrap;
   cursor: pointer;
 }
 
 .activity-tab:hover {
-  color: var(--text);
   background: var(--bg-hover);
 }
 
 .activity-tab.active {
   color: var(--text);
-  background: var(--bg);
+  background: var(--bg-raised);
   border-color: var(--border);
 }
 
 .activity-tab .activity-count {
   font-size: 10px;
+  opacity: 0.75;
 }
 
 #timeline-strip:not(.tab-active),
@@ -905,7 +917,7 @@ body {
   display: none;
 }
 
-/* The tab bar already separates the terminal from the panels. */
+/* Single separator at each junction: the bar carries both lines. */
 #timeline-strip,
 #plan-panel,
 #worldline-panel {
@@ -1215,6 +1227,17 @@ body {
 
 .panel-header:hover {
   color: var(--text);
+}
+
+/* One-line active-comparison summary: truncated, full text in title. */
+#worldline-summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 #modified-list {

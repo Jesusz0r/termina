@@ -4634,37 +4634,10 @@ export function cancelPendingApproval(line = "/approve deny"): boolean {
   return true;
 }
 
-/** Ask the Termina host (main process dialog, outside the pty) for bash approval. */
-async function requestHostBashApproval(command: string): Promise<boolean | null> {
-  if (!eventsDir || !terminalId || sidecarWriteStopped) return null;
-  const requestId = randomUUID();
-  logEvent({
-    t: "bash_approval_request",
-    requestId,
-    command: command.slice(0, 2000),
-    dangerous: isDangerousBash(command),
-  });
-  const ack = await waitForAck(eventsDir, terminalId, requestId, 300_000, bridgeId, {
-    shouldStop: () => interrupted,
-  });
-  if (!ack || ack.ok !== true) return false;
-  if (ack.always === true) {
-    permissionMode = "always";
-    surface?.setStatus({ permissions: permissionMode });
-  }
-  return true;
-}
-
-async function confirmBashNow(command: string, viaHost: boolean): Promise<boolean> {
+/** Approve bash in the TUI, where the command and its context already live. */
+async function confirmBashNow(command: string): Promise<boolean> {
   if (interrupted) return false;
   if (!shouldAskPermission(permissionMode, command)) return true;
-  // User-typed ! commands carry explicit user intent; only model-initiated
-  // tool calls escalate to the host dialog. This preserves the pre-host-gate
-  // behavior for direct keystrokes.
-  if (viaHost && eventsDir && terminalId) {
-    const host = await requestHostBashApproval(command);
-    if (host !== null) return host;
-  }
   if (!surface?.active()) return false;
   surface.setChoices(`Approve bash? ${command.slice(0, 160)}`, [
     { name: "Deny", hint: "reject this command", submit: "/approve deny" },
@@ -4698,8 +4671,8 @@ async function queueApproval(confirm: () => Promise<boolean>): Promise<boolean> 
   }
 }
 
-async function confirmBash(command: string, viaHost = true): Promise<boolean> {
-  return queueApproval(() => confirmBashNow(command, viaHost));
+async function confirmBash(command: string): Promise<boolean> {
+  return queueApproval(() => confirmBashNow(command));
 }
 
 async function confirmProtectedMutationNow(inputPath: string | undefined): Promise<boolean> {
@@ -8062,7 +8035,7 @@ async function runBangCommand(command: string): Promise<void> {
   interrupted = false;
   showPrompt();
   try {
-    if (!(await confirmBash(command, false))) {
+    if (!(await confirmBash(command))) {
       out("(bash denied)\n");
       return;
     }

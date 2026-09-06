@@ -376,7 +376,7 @@ function applyReviewPreferences(view: ReviewViewInstance, prefs: AppPreferences)
 }
 const explorer = new Explorer(document.getElementById("explorer")!);
 const sessionSearch = new SessionSearch();
-sessionSearch.bind({ onOpenFile: (path) => void openFileSmart(path, true) });
+sessionSearch.bind({ onOpenFile: (path) => void openFileSmart(path, true).then(() => activeEditor().focusEditor()) });
 (window as unknown as Record<string, unknown>).__sessionSearch = sessionSearch;
 const quickOpen = new QuickOpen();
 
@@ -470,11 +470,19 @@ function worldlineProjectEffects() {
 }
 
 /** Rebuild the active project's worldline panel without letting a prior
- * project's delayed list overwrite the newer UI. */
+ * project's delayed list overwrite the newer UI. Content arrivals stay
+ * quiet during the replay; the badge syncs once at the end. */
 function hydrateWorldlines(projectId: string | null): void {
   const epoch = ++worldlineHydrationEpoch;
+  worldlinesView.setQuiet(true);
+  const finish = (): void => {
+    if (epoch !== worldlineHydrationEpoch) return;
+    worldlinesView.setQuiet(false);
+    activityTabs.syncContent("worldlines", worldlinesView.size > 0, worldlinesView.size);
+  };
   if (!projectId) {
     clearWorldlineProjectUi(panes.values(), worldlineProjectEffects());
+    finish();
     return;
   }
   const tombstones = new Set<string>();
@@ -489,14 +497,19 @@ function hydrateWorldlines(projectId: string | null): void {
       const { evidence: _evidence, ...withoutEvidence } = summary;
       return withoutEvidence;
     });
-    if (!applyWorldlineHydration(activeProjectId, projectId, summaries, tombstones, panes.values(), effects)) return;
+    if (!applyWorldlineHydration(activeProjectId, projectId, summaries, tombstones, panes.values(), effects)) {
+      finish();
+      return;
+    }
     for (const summary of evidence.values()) worldlinesView.upsertEvidence(summary);
     if (worldlineHydrationTombstones === tombstones) worldlineHydrationTombstones = null;
+    finish();
   }).catch((err) => {
     if (worldlineHydrationTombstones === tombstones) worldlineHydrationTombstones = null;
     if (epoch === worldlineHydrationEpoch && activeProjectId === projectId) {
       toast(`could not load worldlines: ${(err as Error).message}`, "error");
     }
+    finish();
   });
 }
 
@@ -2235,7 +2248,9 @@ commands.register("toggle-editor", () => requestMinimize("editor"));
 commands.register("toggle-modified", () => setModifiedVisible(modifiedPanelEl.style.display === "none"));
 commands.register("session-search", () => sessionSearch.open());
 quickOpen.bind({
-  onOpenFile: (relPath) => void openFileSmart(relPath, true),
+  // An explicit modal pick is a direct gesture: take editor focus so the
+  // keyboard flow (Cmd+P, Enter, type) works without an extra click.
+  onOpenFile: (relPath) => void openFileSmart(relPath, true).then(() => activeEditor().focusEditor()),
   onExecuteCommand: (command) => commands.execute(command),
   getShortcut: (command) => preferences.shortcuts[command] ?? "",
 });

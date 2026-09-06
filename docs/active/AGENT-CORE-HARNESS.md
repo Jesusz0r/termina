@@ -220,15 +220,13 @@ no file-permission tool; chat was the accidental substitute. Host edit
 notes must stay informational (partial working-tree facts), not a stop.
 Mine and dispatch mailbox stay do-not-touch rules.
 
-### 8. Real bash approval (host + kernel) — implemented (v1: native host dialog)
+### 8. Real bash approval (TUI) — implemented
 
-Kernel `agent-core/main.ts` requests approval over the sidecar
-(`bash_approval_request` + ack file) when host-managed; standalone CLI
-keeps the TUI fallback. Host `electron/main.ts` enforces with a native
-dialog outside the pty (Deny / Approve once / Always approve),
-fail-closed on dismiss/timeout/close. `isDangerousBash` is a risk hint
-only. Primary terminals never set `TERMINA_CORE_APPROVE=all`; sandboxed
-worldline candidates alone auto-approve.
+Kernel `agent-core/main.ts` approves bash in the TUI choice picker, where
+the command and its context already live (Deny / Approve once / Always
+approve), fail-closed when no surface is active. `isDangerousBash` is a
+risk hint only. `TERMINA_CORE_APPROVE=all` (dispatch, sandboxed worldline
+candidates) skips the prompt; nothing else auto-approves.
 
 ## Stay out (still)
 

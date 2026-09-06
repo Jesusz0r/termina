@@ -165,3 +165,14 @@ export function formatBytes(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} kB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+/** One-line header summary for the latest active comparison. */
+export function worldlineHeaderSummary(
+  comparisonId: string,
+  aState: string,
+  bState: string,
+  caption: string | null,
+): string {
+  const base = `${comparisonId} · A ${aState} · B ${bState}`;
+  return caption ? `${base} · ${caption}` : base;
+}

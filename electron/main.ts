@@ -662,8 +662,9 @@ class PiEditorApp {
   /** Renderer flush requests awaiting their report. */
   private flushWaiters = new Map<string, { workspaceId: string; resolve: (r: { ok: boolean; failed: string[] }) => void; timer: ReturnType<typeof setTimeout> }>();
   private flushSeq = 0;
-  /** Terminals where the user chose "always approve" for agent-core bash. */
-  private bashAlwaysApprove = new Set<string>();
+  /** Latest file:search generation; older walks abort so fast typing
+   *  never stacks full-tree walks. */
+  private fileSearchSeq = 0;
   private userEditsWriteTimer: ReturnType<typeof setTimeout> | null = null;
   /** Paths the promotion is applying right now (suppress user-edit records). */
   private promotionPaths: Set<string> | null = null;
@@ -3157,7 +3158,6 @@ class PiEditorApp {
         this.releaseWriteLease(pending.workspaceId, pending.leaseRequester);
         this.pendingPreflights.delete(token);
       }
-      this.bashAlwaysApprove.delete(inst.id);
       // The exit marker was delivered and acknowledged by PtyEgressScheduler;
       // it is not sent through the unsequenced generic channel.
       this.closeRunOnExit(inst);
@@ -3660,8 +3660,9 @@ class PiEditorApp {
     const cwd = project?.cwd ?? null;
     if (!project || !cwd) return { entries: [] };
     const root = await this.canonicalPath(cwd);
+    const seq = ++this.fileSearchSeq;
     const { entries, truncated } = await searchProjectFiles(root, query, {
-      shouldStop: () => this.disposed,
+      shouldStop: () => this.disposed || seq !== this.fileSearchSeq,
     });
     return truncated ? { entries, truncated: true } : { entries };
   }
@@ -4630,18 +4631,6 @@ class PiEditorApp {
       case "checkpoint_result":
         // Informational; the run record carries the result already.
         break;
-      case "bash_approval_request":
-        // Detached: the host dialog can wait minutes for the user while the
-        // kernel holds its own 300 s ack wait. Awaiting here would stall this
-        // terminal's sidecar queue (timeline, steering, checkpoints) behind
-        // one approval. The ack file correlates the answer later.
-        void this.handleBashApprovalRequest(
-          inst,
-          String(event.requestId ?? ""),
-          String(event.command ?? ""),
-          event.dangerous === true,
-        ).catch((error) => console.warn(`[main] bash approval failed: ${String(error)}`));
-        break;
       case "session_ready": {
         // The bridge consumed the candidate startup control.
         const readyOk = event.ok === true;
@@ -4923,52 +4912,6 @@ class PiEditorApp {
    * the start state, then answer the bridge with a one-use token. The lease
    * stays held until agent_start consumes the token.
    */
-  private async handleBashApprovalRequest(
-    inst: PiTerminalInstance,
-    requestId: string,
-    command: string,
-    dangerous: boolean,
-  ): Promise<void> {
-    if (!requestId) return;
-    if (inst.closed) {
-      this.writeAck(inst.id, requestId, { ok: false, error: "terminal is closed" });
-      return;
-    }
-    if (this.bashAlwaysApprove.has(inst.id)) {
-      this.writeAck(inst.id, requestId, { ok: true, always: true });
-      return;
-    }
-    // Sandboxed worldline candidates stay auto-approved: the sandbox-exec
-    // profile (not a dialog) is their enforcement boundary. Answering here
-    // also avoids a 300 s hang when a candidate kernel asks without APPROVE=all.
-    const owner = this.projectOfTerminal(inst.id);
-    const candHit = (owner?.worldlines?.list() ?? []).find((w) => w.terminalId === inst.id);
-    if (candHit) {
-      this.writeAck(inst.id, requestId, { ok: true });
-      return;
-    }
-    const win = this.win && !this.win.isDestroyed() ? this.win : undefined;
-    const preview = command.length > 1200 ? `${command.slice(0, 1200)}…` : command;
-    try {
-      const choice = await dialog.showMessageBox(win ?? ({} as Electron.BrowserWindow), {
-        type: "question",
-        title: "Approve bash command?",
-        message: `Agent in ${inst.id} wants to run bash.`,
-        detail: `${`Working directory: ${inst.cwd}\n\n`}${dangerous ? "Recognized as potentially destructive.\n\n" : ""}${preview || "(empty command)"}\n\nDeny-list matching is a hint only; the host decision enforces the run.`,
-        buttons: ["Deny", "Approve once", "Always approve"],
-        defaultId: 0,
-        cancelId: 0,
-      });
-      if (choice.response === 1) this.writeAck(inst.id, requestId, { ok: true });
-      else if (choice.response === 2) {
-        if (!inst.closed) this.bashAlwaysApprove.add(inst.id);
-        this.writeAck(inst.id, requestId, { ok: true, always: true });
-      } else this.writeAck(inst.id, requestId, { ok: false, error: "bash denied" });
-    } catch (error) {
-      this.writeAck(inst.id, requestId, { ok: false, error: String(error) });
-    }
-  }
-
   private async handlePreflightRequest(
     inst: PiTerminalInstance,
     requestId: string,

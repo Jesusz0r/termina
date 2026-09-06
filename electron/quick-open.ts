@@ -73,6 +73,7 @@ export async function searchProjectFiles(
   let truncated = false;
   const seen = new Set<string>([root]);
   const queue: string[] = [root];
+  let head = 0;
   const push = (relPath: string): void => {
     if (query) {
       const score = fuzzyScore(query, relPath);
@@ -82,9 +83,9 @@ export async function searchProjectFiles(
       plain.push(relPath);
     }
   };
-  while (queue.length > 0) {
+  while (head < queue.length) {
     if (opts?.shouldStop?.()) return { entries: [], truncated: false };
-    const dir = queue.shift()!;
+    const dir = queue[head++]!;
     if (++dirs > MAX_QUICK_OPEN_DIRS) {
       truncated = true;
       break;

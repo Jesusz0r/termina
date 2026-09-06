@@ -604,8 +604,10 @@ export class EditorManager {
     this.editor.revealPositionInCenter({ lineNumber: line, column: col });
   }
 
-  /** Focus the editor without scrolling the terminal pane. */
-  private focusEditor(): void {
+  /** Focus the editor without scrolling the terminal pane. Direct
+   *  gestures (tab click, modal file pick) take focus; programmatic
+   *  opens never steal it. */
+  focusEditor(): void {
     const textarea = this.editor.getDomNode()?.querySelector("textarea");
     if (textarea) textarea.focus({ preventScroll: true });
     else this.editor.focus();

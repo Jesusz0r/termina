@@ -59,7 +59,6 @@ export type SidecarEvent =
   | (SidecarMeta & { t: "steer_input"; behavior?: string })
   | (SidecarMeta & { t: "checkpoint_request"; requestId?: string; kind?: string; entryId?: string | null })
   | (SidecarMeta & { t: "checkpoint_result"; requestId?: string; ok?: boolean; error?: string | null })
-  | (SidecarMeta & { t: "bash_approval_request"; requestId?: string; command?: string; dangerous?: boolean })
   | (SidecarMeta & { t: "session_ready"; opId?: string; ok?: boolean; error?: string | null })
   | (SidecarMeta & {
       t: "agent_start";
@@ -339,7 +338,6 @@ const SIDECAR_KINDS = new Set<SidecarEvent["t"]>([
   "steer_input",
   "checkpoint_request",
   "checkpoint_result",
-  "bash_approval_request",
   "session_ready",
   "agent_start",
   "agent_settled",
@@ -420,14 +418,6 @@ function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>): Side
         requestId: optionalString(rec.requestId),
         ok: optionalBoolean(rec.ok),
         error: optionalStringOrNull(rec.error),
-      };
-    case "bash_approval_request":
-      return {
-        ...meta,
-        t: "bash_approval_request",
-        requestId: optionalString(rec.requestId),
-        command: optionalString(rec.command),
-        dangerous: optionalBoolean(rec.dangerous),
       };
     case "session_ready":
       return {
