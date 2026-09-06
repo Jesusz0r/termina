@@ -15,10 +15,11 @@ import {
   resolveAuth,
   type ProviderId,
 } from "./auth.ts";
+import { providerDefinition } from "./auth/providers/index.ts";
 
 export { firstAuthenticatedProvider } from "./auth.ts";
 
-export type ModelInfo = { id: string; name?: string; context?: number };
+export type ModelInfo = { id: string; name?: string; context?: number; supportedEndpoints?: string[] };
 
 export const MODEL_LIST_CAP = 200;
 const CATALOG_TIMEOUT_MS = 10_000;
@@ -71,16 +72,7 @@ export function isChatModel(id: string, provider: ProviderId): boolean {
   const n = id.toLowerCase();
   if (!n || n.length > 200) return false;
   if (SKIP_CHAT.test(n)) return false;
-  if (provider === "anthropic") return n.includes("claude") || n.includes("haiku");
-  if (provider === "xai") return n.includes("grok");
-  if (provider === "google") return n.includes("gemini") || n.includes("gemma");
-  if (provider === "openai-codex") return /^(gpt-|o[0-9]|codex)/.test(n);
-  if (provider === "github-copilot") return /^(gpt-|o[0-9]|claude|gemini|copilot)/.test(n);
-  if (provider === "openrouter") return n.includes("/");
-  if (provider === "opencode-go" || provider === "opencode-zen") return true;
-  return /^(gpt-|o[0-9]|chatgpt|claude|grok|gemini|gemma|deepseek|mistral|llama|qwen|kimi|minimax|command|glm|moonshot)/.test(
-    n,
-  );
+  return providerDefinition(provider).catalog.acceptsId(n);
 }
 
 function stripModelsPrefix(id: string): string {
@@ -99,7 +91,7 @@ function requireAnthropicModelsEnvelope(payload: unknown): Record<string, unknow
   return rec;
 }
 
-function rowId(row: Record<string, unknown>): { id: string; name?: string } | null {
+function rowId(row: Record<string, unknown>, provider: ProviderId): ModelInfo | null {
   const raw =
     typeof row.id === "string"
       ? row.id
@@ -120,9 +112,12 @@ function rowId(row: Record<string, unknown>): { id: string; name?: string } | nu
         : typeof row.name === "string" && row.name !== raw
           ? row.name
           : undefined;
-  const contextRaw = Number(row.context_length ?? row.context_window ?? row.max_input_tokens ?? row.context);
+  const policy = providerDefinition(provider).catalog;
+  const contextRaw = Number(row.context_length ?? row.context_window ?? row.max_input_tokens ?? row.context
+    ?? policy.contextFallback?.(row));
   const context = Number.isFinite(contextRaw) && contextRaw >= 8_000 ? Math.floor(contextRaw) : undefined;
-  return { id, ...(name ? { name } : {}), ...(context ? { context } : {}) };
+  const supportedEndpoints = policy.supportedEndpoints?.(row);
+  return { id, ...(name ? { name } : {}), ...(context ? { context } : {}), ...(supportedEndpoints ? { supportedEndpoints } : {}) };
 }
 
 export function parseModelsPayload(payload: unknown, provider: ProviderId): ModelInfo[] {
@@ -141,7 +136,8 @@ export function parseModelsPayload(payload: unknown, provider: ProviderId): Mode
   for (const item of rawList) {
     const row = asRecord(item);
     if (!row) continue;
-    const parsed = rowId(row);
+    if (providerDefinition(provider).catalog.acceptsRow?.(row) === false) continue;
+    const parsed = rowId(row, provider);
     if (!parsed || seen.has(parsed.id) || !isChatModel(parsed.id, provider)) continue;
     seen.add(parsed.id);
     out.push(parsed);

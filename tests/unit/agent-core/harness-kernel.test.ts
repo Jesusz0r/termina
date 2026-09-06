@@ -31,6 +31,8 @@ import { createCheckReporter } from "../../test-support.ts";
 describe("Agent Core Kernel & TUI Harness Suite", () => {
   it("passes all kernel harness assertions natively", async () => {
     const core = await import("../../../agent-core/main.ts");
+    const { defaultContextWindow, supportedEffortLevels, clampEffortLevel, thinkingEnabledFor, thinkingRequestFor, adaptiveEffortFor, effectiveEffortFor, reasoningEffortFor, includeEncryptedReasoning } = await import("../../../agent-core/models/capabilities.ts");
+    const { gpt56ReasoningContext, gpt5TextVerbosity } = await import("../../../agent-core/models/families/openai.ts");
     const host = await import("../../../agent-core/host.ts");
     const auth = await import("../../../agent-core/auth.ts");
     const compat = await import("../../../agent-core/openai-compat.ts");
@@ -97,18 +99,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       shouldCompactForCacheCost,
       retryAfter,
       parseEffortCommand,
-      supportedEffortLevels,
-      clampEffortLevel,
-      thinkingEnabledFor,
-      thinkingRequestFor,
-      adaptiveEffortFor,
-      effectiveEffortFor,
-      reasoningEffortFor,
       outputTokenBudget,
-      includeEncryptedReasoning,
-      gpt56ReasoningContext,
-      gpt5TextVerbosity,
-      defaultContextWindow,
       formatUsageIndicators,
       fetchUrl,
       fetchUrlError,
@@ -2089,7 +2080,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("providerProtocol xai is responses", providerProtocol("xai") === "openai-responses");
     check("providerProtocol openai is responses", providerProtocol("openai") === "openai-responses");
     check("providerProtocol google is completions", providerProtocol("google") === "openai-completions");
-    check("providerProtocol copilot is responses", providerProtocol("github-copilot") === "openai-responses");
+    check("providerProtocol copilot follows endpoint metadata", providerProtocol("github-copilot", "gpt-5.6-terra", ["/responses"]) === "openai-responses");
     check("providerProtocol openai-codex is responses", providerProtocol("openai-codex") === "openai-codex-responses");
     check("providerProtocol opencode-go is completions", providerProtocol("opencode-go") === "openai-completions");
     check("zenWireProtocol claude is messages", zenWireProtocol("claude-sonnet-4-5") === "anthropic-messages");
@@ -3572,68 +3563,68 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("parseEffortCommand rejects junk", typeof parseEffortCommand("/effort ultra")?.error === "string");
     check(
       "gpt 5.6 exposes its direct API levels",
-      supportedEffortLevels("openai", "gpt-5.6-sol").join(" ") === "off low medium high xhigh max",
+      supportedEffortLevels("openai", "gpt-5.6-sol", auth.providerProtocol("openai", "gpt-5.6-sol")).join(" ") === "off low medium high xhigh max",
     );
     check(
       "gpt 5.4 exposes xhigh but not minimal or max",
-      supportedEffortLevels("openai", "gpt-5.4").join(" ") === "off low medium high xhigh",
+      supportedEffortLevels("openai", "gpt-5.4", auth.providerProtocol("openai", "gpt-5.4")).join(" ") === "off low medium high xhigh",
     );
     check(
       "Codex GPT 5.6 keeps its mapped minimal level",
-      supportedEffortLevels("openai-codex", "gpt-5.6-sol").join(" ") === "off minimal low medium high xhigh max",
+      supportedEffortLevels("openai-codex", "gpt-5.6-sol", auth.providerProtocol("openai-codex", "gpt-5.6-sol")).join(" ") === "off minimal low medium high xhigh max",
     );
     check(
       "claude opus 4.6 exposes max but not xhigh",
-      supportedEffortLevels("anthropic", "claude-opus-4-6").join(" ") === "off minimal low medium high max",
+      supportedEffortLevels("anthropic", "claude-opus-4-6", auth.providerProtocol("anthropic", "claude-opus-4-6")).join(" ") === "off minimal low medium high max",
     );
     check(
       "claude sonnet 5 exposes xhigh and max",
-      supportedEffortLevels("anthropic", "claude-sonnet-5").join(" ") === "off minimal low medium high xhigh max",
+      supportedEffortLevels("anthropic", "claude-sonnet-5", auth.providerProtocol("anthropic", "claude-sonnet-5")).join(" ") === "off minimal low medium high xhigh max",
     );
     check(
       "fixed-budget claude omits extended effort",
-      supportedEffortLevels("anthropic", "claude-sonnet-4-5").join(" ") === "off minimal low medium high",
+      supportedEffortLevels("anthropic", "claude-sonnet-4-5", auth.providerProtocol("anthropic", "claude-sonnet-4-5")).join(" ") === "off minimal low medium high",
     );
     check(
       "OpenRouter Claude exposes model effort",
-      supportedEffortLevels("openrouter", "anthropic/claude-sonnet-4.6").join(" ") === "off minimal low medium high max",
+      supportedEffortLevels("openrouter", "anthropic/claude-sonnet-4.6", auth.providerProtocol("openrouter", "anthropic/claude-sonnet-4.6")).join(" ") === "off minimal low medium high max",
     );
     check(
       "OpenRouter Claude dot versions expose extended effort",
-      supportedEffortLevels("openrouter", "anthropic/claude-opus-4.7").join(" ") === "off minimal low medium high xhigh max",
+      supportedEffortLevels("openrouter", "anthropic/claude-opus-4.7", auth.providerProtocol("openrouter", "anthropic/claude-opus-4.7")).join(" ") === "off minimal low medium high xhigh max",
     );
     check(
       "OpenRouter Gemini exposes model effort",
-      supportedEffortLevels("openrouter", "google/gemini-3.7-flash").join(" ") === "off minimal low medium high",
+      supportedEffortLevels("openrouter", "google/gemini-3.7-flash", auth.providerProtocol("openrouter", "google/gemini-3.7-flash")).join(" ") === "off minimal low medium high",
     );
-    check("unsupported max clamps down to xhigh", clampEffortLevel("openai", "gpt-5.4", "max") === "xhigh");
-    check("grok off clamps up to low", clampEffortLevel("xai", "grok-4.6", "off") === "low");
-    check("thinkingEnabledFor default off", thinkingEnabledFor("anthropic", "claude-sonnet-5", "off") === false);
-    check("thinkingEnabledFor sonnet high", thinkingEnabledFor("anthropic", "claude-sonnet-5", "high") === true);
-    check("thinkingEnabledFor haiku supports effort", thinkingEnabledFor("anthropic", "claude-haiku-4-5", "high") === true);
-    check("thinkingEnabledFor gpt high", thinkingEnabledFor("openai", "gpt-5.6-sol", "high") === true);
-    check("GitHub GPT reasoning cannot turn off", clampEffortLevel("github-copilot", "gpt-5.6-terra", "off") === "minimal");
-    check("thinkingEnabledFor Gemini 3", thinkingEnabledFor("google", "gemini-3.7-flash", "high") === true);
+    check("unsupported max clamps down to xhigh", clampEffortLevel("openai", "gpt-5.4", "max", auth.providerProtocol("openai", "gpt-5.4")) === "xhigh");
+    check("grok off clamps up to low", clampEffortLevel("xai", "grok-4.6", "off", auth.providerProtocol("xai", "grok-4.6")) === "low");
+    check("thinkingEnabledFor default off", thinkingEnabledFor("anthropic", "claude-sonnet-5", "off", auth.providerProtocol("anthropic", "claude-sonnet-5")) === false);
+    check("thinkingEnabledFor sonnet high", thinkingEnabledFor("anthropic", "claude-sonnet-5", "high", auth.providerProtocol("anthropic", "claude-sonnet-5")) === true);
+    check("thinkingEnabledFor haiku supports effort", thinkingEnabledFor("anthropic", "claude-haiku-4-5", "high", auth.providerProtocol("anthropic", "claude-haiku-4-5")) === true);
+    check("thinkingEnabledFor gpt high", thinkingEnabledFor("openai", "gpt-5.6-sol", "high", auth.providerProtocol("openai", "gpt-5.6-sol")) === true);
+    check("GitHub effort stays off without advertised Responses support", clampEffortLevel("github-copilot", "gpt-5.6-terra", "off", auth.providerProtocol("github-copilot", "gpt-5.6-terra")) === "off");
+    check("thinkingEnabledFor Gemini 3", thinkingEnabledFor("google", "gemini-3.7-flash", "high", auth.providerProtocol("google", "gemini-3.7-flash")) === true);
     check(
       "Gemini 3.7 Flash omits unsupported minimal",
-      supportedEffortLevels("google", "gemini-3.7-flash").join(" ") === "low medium high",
+      supportedEffortLevels("google", "gemini-3.7-flash", auth.providerProtocol("google", "gemini-3.7-flash")).join(" ") === "low medium high",
     );
     check(
       "Gemini 3.1 Pro keeps medium",
-      supportedEffortLevels("google", "gemini-3.1-pro").join(" ") === "low medium high",
+      supportedEffortLevels("google", "gemini-3.1-pro", auth.providerProtocol("google", "gemini-3.1-pro")).join(" ") === "low medium high",
     );
-    check("unsupported Gemini 2.5 stays off", thinkingEnabledFor("google", "gemini-2.5-flash", "high") === false);
-    check("thinkingEnabledFor gpt 4 stays off", thinkingEnabledFor("openai", "gpt-4.1", "high") === false);
-    check("thinkingEnabledFor fable stays on", thinkingEnabledFor("anthropic", "claude-fable-5", "off") === true);
-    check("reasoningEffortFor gpt off is none", reasoningEffortFor("openai", "gpt-5.6-sol", "off") === "none");
-    check("reasoningEffortFor gpt minimal maps low", reasoningEffortFor("openai", "gpt-5.6-sol", "minimal") === "low");
-    check("reasoningEffortFor gpt max stays max", reasoningEffortFor("openai", "gpt-5.6-sol", "max") === "max");
-    check("reasoningEffortFor grok off is low", reasoningEffortFor("xai", "grok-4.6", "off") === "low");
-    check("reasoningEffortFor o-series off is low", reasoningEffortFor("openai", "o3", "off") === "low");
-    check("reasoningEffortFor direct Claude is omitted", reasoningEffortFor("anthropic", "claude-sonnet-5", "high") === undefined);
+    check("unsupported Gemini 2.5 stays off", thinkingEnabledFor("google", "gemini-2.5-flash", "high", auth.providerProtocol("google", "gemini-2.5-flash")) === false);
+    check("thinkingEnabledFor gpt 4 stays off", thinkingEnabledFor("openai", "gpt-4.1", "high", auth.providerProtocol("openai", "gpt-4.1")) === false);
+    check("thinkingEnabledFor fable stays on", thinkingEnabledFor("anthropic", "claude-fable-5", "off", auth.providerProtocol("anthropic", "claude-fable-5")) === true);
+    check("reasoningEffortFor gpt off is none", reasoningEffortFor("openai", "gpt-5.6-sol", "off", auth.providerProtocol("openai", "gpt-5.6-sol")) === "none");
+    check("reasoningEffortFor gpt minimal maps low", reasoningEffortFor("openai", "gpt-5.6-sol", "minimal", auth.providerProtocol("openai", "gpt-5.6-sol")) === "low");
+    check("reasoningEffortFor gpt max stays max", reasoningEffortFor("openai", "gpt-5.6-sol", "max", auth.providerProtocol("openai", "gpt-5.6-sol")) === "max");
+    check("reasoningEffortFor grok off is low", reasoningEffortFor("xai", "grok-4.6", "off", auth.providerProtocol("xai", "grok-4.6")) === "low");
+    check("reasoningEffortFor o-series off is low", reasoningEffortFor("openai", "o3", "off", auth.providerProtocol("openai", "o3")) === "low");
+    check("reasoningEffortFor direct Claude is omitted", reasoningEffortFor("anthropic", "claude-sonnet-5", "high", auth.providerProtocol("anthropic", "claude-sonnet-5")) === undefined);
     check(
       "reasoningEffortFor OpenRouter Claude is sent",
-      reasoningEffortFor("openrouter", "anthropic/claude-sonnet-4.6", "high") === "high",
+      reasoningEffortFor("openrouter", "anthropic/claude-sonnet-4.6", "high", auth.providerProtocol("openrouter", "anthropic/claude-sonnet-4.6")) === "high",
     );
     check("defaultContextWindow anthropic is 1M", defaultContextWindow("anthropic", "claude-sonnet-5") === 1_000_000);
     check("defaultContextWindow haiku is 200k", defaultContextWindow("anthropic", "claude-haiku-4-5") === 200_000);
@@ -3663,83 +3654,83 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("outputTokenBudget on is a single cap", outputTokenBudget({ thinking: true }) === 64_000);
     check(
       "thinkingRequestFor sonnet 5 off is disabled",
-      JSON.stringify(thinkingRequestFor("anthropic", "claude-sonnet-5", "off")) === JSON.stringify({ type: "disabled" }),
+      JSON.stringify(thinkingRequestFor("anthropic", "claude-sonnet-5", "off", auth.providerProtocol("anthropic", "claude-sonnet-5"))) === JSON.stringify({ type: "disabled" }),
     );
     check(
       "thinkingRequestFor sonnet 5 high is adaptive",
-      JSON.stringify(thinkingRequestFor("anthropic", "claude-sonnet-5", "high")) ===
+      JSON.stringify(thinkingRequestFor("anthropic", "claude-sonnet-5", "high", auth.providerProtocol("anthropic", "claude-sonnet-5"))) ===
         JSON.stringify({ type: "adaptive", display: "summarized" }),
     );
-    check("adaptive sonnet 5 keeps xhigh", adaptiveEffortFor("anthropic", "claude-sonnet-5", "xhigh") === "xhigh");
-    check("adaptive sonnet 5 keeps max", adaptiveEffortFor("anthropic", "claude-sonnet-5", "max") === "max");
-    check("adaptive effort maps minimal to low", adaptiveEffortFor("anthropic", "claude-sonnet-5", "minimal") === "low");
+    check("adaptive sonnet 5 keeps xhigh", adaptiveEffortFor("anthropic", "claude-sonnet-5", "xhigh", auth.providerProtocol("anthropic", "claude-sonnet-5")) === "xhigh");
+    check("adaptive sonnet 5 keeps max", adaptiveEffortFor("anthropic", "claude-sonnet-5", "max", auth.providerProtocol("anthropic", "claude-sonnet-5")) === "max");
+    check("adaptive effort maps minimal to low", adaptiveEffortFor("anthropic", "claude-sonnet-5", "minimal", auth.providerProtocol("anthropic", "claude-sonnet-5")) === "low");
     check(
       "thinkingRequestFor fixed-budget sonnet uses low budget",
-      JSON.stringify(thinkingRequestFor("anthropic", "claude-sonnet-4-5", "low")) ===
+      JSON.stringify(thinkingRequestFor("anthropic", "claude-sonnet-4-5", "low", auth.providerProtocol("anthropic", "claude-sonnet-4-5"))) ===
         JSON.stringify({ type: "enabled", budget_tokens: 2_048 }),
     );
     check(
       "thinkingRequestFor fixed-budget sonnet uses high budget",
-      JSON.stringify(thinkingRequestFor("anthropic", "claude-sonnet-4-5", "high")) ===
+      JSON.stringify(thinkingRequestFor("anthropic", "claude-sonnet-4-5", "high", auth.providerProtocol("anthropic", "claude-sonnet-4-5"))) ===
         JSON.stringify({ type: "enabled", budget_tokens: 16_384 }),
     );
-    check("thinkingRequestFor fixed-budget sonnet off is omitted", thinkingRequestFor("anthropic", "claude-sonnet-4-5", "off") === undefined);
+    check("thinkingRequestFor fixed-budget sonnet off is omitted", thinkingRequestFor("anthropic", "claude-sonnet-4-5", "off", auth.providerProtocol("anthropic", "claude-sonnet-4-5")) === undefined);
     check(
       "thinkingRequestFor haiku uses a budget",
-      JSON.stringify(thinkingRequestFor("anthropic", "claude-haiku-4-5", "low")) ===
+      JSON.stringify(thinkingRequestFor("anthropic", "claude-haiku-4-5", "low", auth.providerProtocol("anthropic", "claude-haiku-4-5"))) ===
         JSON.stringify({ type: "enabled", budget_tokens: 2_048 }),
     );
-    check("thinkingRequestFor gpt is omitted", thinkingRequestFor("openai", "gpt-5.6-sol", "high") === undefined);
+    check("thinkingRequestFor gpt is omitted", thinkingRequestFor("openai", "gpt-5.6-sol", "high", auth.providerProtocol("openai", "gpt-5.6-sol")) === undefined);
     check(
       "thinkingRequestFor zen sonnet 5 is adaptive",
-      JSON.stringify(thinkingRequestFor("opencode-zen", "claude-sonnet-5", "high")) ===
+      JSON.stringify(thinkingRequestFor("opencode-zen", "claude-sonnet-5", "high", auth.providerProtocol("opencode-zen", "claude-sonnet-5"))) ===
         JSON.stringify({ type: "adaptive", display: "summarized" }),
     );
-    check("thinkingRequestFor zen qwen is omitted", thinkingRequestFor("opencode-zen", "qwen3.7-max", "high") === undefined);
+    check("thinkingRequestFor zen qwen is omitted", thinkingRequestFor("opencode-zen", "qwen3.7-max", "high", auth.providerProtocol("opencode-zen", "qwen3.7-max")) === undefined);
     check(
       "thinkingRequestFor openrouter claude is omitted",
-      thinkingRequestFor("openrouter", "anthropic/claude-sonnet-5", "high") === undefined,
+      thinkingRequestFor("openrouter", "anthropic/claude-sonnet-5", "high", auth.providerProtocol("openrouter", "anthropic/claude-sonnet-5")) === undefined,
     );
     check(
       "adaptiveEffortFor zen sonnet 5",
-      adaptiveEffortFor("opencode-zen", "claude-sonnet-5", "high") === "high",
+      adaptiveEffortFor("opencode-zen", "claude-sonnet-5", "high", auth.providerProtocol("opencode-zen", "claude-sonnet-5")) === "high",
     );
-    check("adaptiveEffortFor zen qwen is omitted", adaptiveEffortFor("opencode-zen", "qwen3.7-max", "high") === undefined);
+    check("adaptiveEffortFor zen qwen is omitted", adaptiveEffortFor("opencode-zen", "qwen3.7-max", "high", auth.providerProtocol("opencode-zen", "qwen3.7-max")) === undefined);
     check(
       "Zen Claude exposes the same effort levels as Anthropic",
-      supportedEffortLevels("opencode-zen", "claude-sonnet-5").join(" ") ===
-        supportedEffortLevels("anthropic", "claude-sonnet-5").join(" "),
+      supportedEffortLevels("opencode-zen", "claude-sonnet-5", auth.providerProtocol("opencode-zen", "claude-sonnet-5")).join(" ") ===
+        supportedEffortLevels("anthropic", "claude-sonnet-5", auth.providerProtocol("anthropic", "claude-sonnet-5")).join(" "),
     );
     check(
       "Zen GPT 5.6 hides unsupported minimal",
-      supportedEffortLevels("opencode-zen", "gpt-5.6-sol").join(" ") === "off low medium high xhigh max",
+      supportedEffortLevels("opencode-zen", "gpt-5.6-sol", auth.providerProtocol("opencode-zen", "gpt-5.6-sol")).join(" ") === "off low medium high xhigh max",
     );
     check(
       "GPT-6 Astra exposes the documented effort set",
-      supportedEffortLevels("openai", "gpt-6-astra").join(" ") === "low medium high xhigh max",
+      supportedEffortLevels("openai", "gpt-6-astra", auth.providerProtocol("openai", "gpt-6-astra")).join(" ") === "low medium high xhigh max",
     );
-    check("GPT-6 off clamps to low, never none", clampEffortLevel("openai", "gpt-6-astra", "off") === "low");
-    check("reasoningEffortFor GPT-6 off is low", reasoningEffortFor("openai", "gpt-6-astra", "off") === "low");
+    check("GPT-6 off clamps to low, never none", clampEffortLevel("openai", "gpt-6-astra", "off", auth.providerProtocol("openai", "gpt-6-astra")) === "low");
+    check("reasoningEffortFor GPT-6 off is low", reasoningEffortFor("openai", "gpt-6-astra", "off", auth.providerProtocol("openai", "gpt-6-astra")) === "low");
     const bodyGpt6 = compat.responsesBody("gpt-6-astra", "sys", [], [], {
-      reasoningEffort: reasoningEffortFor("openai", "gpt-6-astra", "max"),
+      reasoningEffort: reasoningEffortFor("openai", "gpt-6-astra", "max", auth.providerProtocol("openai", "gpt-6-astra")),
     });
     check("GPT-6 responses set reasoning effort", bodyGpt6.reasoning?.effort === "max");
     check(
       "reasoningEffortFor zen Claude is omitted",
-      reasoningEffortFor("opencode-zen", "claude-sonnet-5", "high") === undefined,
+      reasoningEffortFor("opencode-zen", "claude-sonnet-5", "high", auth.providerProtocol("opencode-zen", "claude-sonnet-5")) === undefined,
     );
     check(
       "reasoningEffortFor zen GPT is sent",
-      reasoningEffortFor("opencode-zen", "gpt-5.6-sol", "high") === "high",
+      reasoningEffortFor("opencode-zen", "gpt-5.6-sol", "high", auth.providerProtocol("opencode-zen", "gpt-5.6-sol")) === "high",
     );
     check(
       "Zen Gemini exposes Google thinking levels",
-      supportedEffortLevels("opencode-zen", "gemini-3.7-flash").join(" ") === "low medium high",
+      supportedEffortLevels("opencode-zen", "gemini-3.7-flash", auth.providerProtocol("opencode-zen", "gemini-3.7-flash")).join(" ") === "low medium high",
     );
-    check("reasoningEffortFor zen Gemini is high", reasoningEffortFor("opencode-zen", "gemini-3.7-flash", "high") === "high");
+    check("reasoningEffortFor zen Gemini is high", reasoningEffortFor("opencode-zen", "gemini-3.7-flash", "high", auth.providerProtocol("opencode-zen", "gemini-3.7-flash")) === "high");
     check(
       "Newer Gemini generations get the full range without a quirk row",
-      supportedEffortLevels("google", "gemini-3.8-flash").join(" ") === "minimal low medium high",
+      supportedEffortLevels("google", "gemini-3.8-flash", auth.providerProtocol("google", "gemini-3.8-flash")).join(" ") === "minimal low medium high",
     );
     const bodyZenGemini = compat.googleGenerateBody("sys", [{ role: "user", content: "hi" }], [], {
       maxTokens: 64_000,
@@ -3823,58 +3814,58 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     check(
       "Zen GLM 5.2 exposes Completions effort",
-      supportedEffortLevels("opencode-zen", "glm-5.2").join(" ") === "high max",
+      supportedEffortLevels("opencode-zen", "glm-5.2", auth.providerProtocol("opencode-zen", "glm-5.2")).join(" ") === "high max",
     );
-    check("reasoningEffortFor zen GLM is high", reasoningEffortFor("opencode-zen", "glm-5.2", "high") === "high");
+    check("reasoningEffortFor zen GLM is high", reasoningEffortFor("opencode-zen", "glm-5.2", "high", auth.providerProtocol("opencode-zen", "glm-5.2")) === "high");
     check(
       "Zen Muse Spark exposes Responses effort",
-      supportedEffortLevels("opencode-zen", "muse-spark-1.3-contributor-free").join(" ") === "off minimal low medium high" &&
-        supportedEffortLevels("opencode-zen", "opencode-zen/muse-spark-1.3-contributor-free").join(" ") ===
+      supportedEffortLevels("opencode-zen", "muse-spark-1.3-contributor-free", auth.providerProtocol("opencode-zen", "muse-spark-1.3-contributor-free")).join(" ") === "off minimal low medium high" &&
+        supportedEffortLevels("opencode-zen", "opencode-zen/muse-spark-1.3-contributor-free", auth.providerProtocol("opencode-zen", "opencode-zen/muse-spark-1.3-contributor-free")).join(" ") ===
           "off minimal low medium high",
     );
     check(
       "reasoningEffortFor zen Muse Spark is sent",
-      reasoningEffortFor("opencode-zen", "muse-spark-1.3-contributor-free", "high") === "high",
+      reasoningEffortFor("opencode-zen", "muse-spark-1.3-contributor-free", "high", auth.providerProtocol("opencode-zen", "muse-spark-1.3-contributor-free")) === "high",
     );
     const bodyZenSpark = compat.responsesBody("muse-spark-1.3-contributor-free", "sys", [], [], {
-      reasoningEffort: reasoningEffortFor("opencode-zen", "muse-spark-1.3-contributor-free", "high"),
+      reasoningEffort: reasoningEffortFor("opencode-zen", "muse-spark-1.3-contributor-free", "high", auth.providerProtocol("opencode-zen", "muse-spark-1.3-contributor-free")),
     });
     check("Zen Muse Spark responses set reasoning effort", bodyZenSpark.reasoning?.effort === "high");
     check(
       "Zen relay completions expose the core effort subset",
-      supportedEffortLevels("opencode-zen", "deepseek-v4-pro").join(" ") === "off low medium high max" &&
-        supportedEffortLevels("opencode-zen", "kimi-k2.7-code").join(" ") === "off low medium high max",
+      supportedEffortLevels("opencode-zen", "deepseek-v4-pro", auth.providerProtocol("opencode-zen", "deepseek-v4-pro")).join(" ") === "off low medium high max" &&
+        supportedEffortLevels("opencode-zen", "kimi-k2.7-code", auth.providerProtocol("opencode-zen", "kimi-k2.7-code")).join(" ") === "off low medium high max",
     );
     check(
       "Go relay completions expose the core effort subset",
-      supportedEffortLevels("opencode-go", "deepseek-v4-flash").join(" ") === "off low medium high max" &&
-        supportedEffortLevels("opencode-go", "qwen3.8-max").join(" ") === "off low medium high max",
+      supportedEffortLevels("opencode-go", "deepseek-v4-flash", auth.providerProtocol("opencode-go", "deepseek-v4-flash")).join(" ") === "off low medium high max" &&
+        supportedEffortLevels("opencode-go", "qwen3.8-max", auth.providerProtocol("opencode-go", "qwen3.8-max")).join(" ") === "off low medium high max",
     );
     check(
       "Unknown relay completions models stay off",
-      supportedEffortLevels("opencode-zen", "some-unknown-model").join(" ") === "off",
+      supportedEffortLevels("opencode-zen", "some-unknown-model", auth.providerProtocol("opencode-zen", "some-unknown-model")).join(" ") === "off",
     );
-    check("relay minimal clamps up to low", clampEffortLevel("opencode-zen", "deepseek-v4-pro", "minimal") === "low");
-    check("reasoningEffortFor zen relay is sent", reasoningEffortFor("opencode-zen", "deepseek-v4-pro", "high") === "high");
-    check("reasoningEffortFor go relay off is none", reasoningEffortFor("opencode-go", "kimi-k3", "off") === "none");
+    check("relay minimal clamps up to low", clampEffortLevel("opencode-zen", "deepseek-v4-pro", "minimal", auth.providerProtocol("opencode-zen", "deepseek-v4-pro")) === "low");
+    check("reasoningEffortFor zen relay is sent", reasoningEffortFor("opencode-zen", "deepseek-v4-pro", "high", auth.providerProtocol("opencode-zen", "deepseek-v4-pro")) === "high");
+    check("reasoningEffortFor go relay off is none", reasoningEffortFor("opencode-go", "kimi-k3", "off", auth.providerProtocol("opencode-go", "kimi-k3")) === "none");
     const bodyZenRelay = compat.completionsBody("deepseek-v4-pro", "sys", [], [], "max_tokens", {
-      reasoningEffort: reasoningEffortFor("opencode-zen", "deepseek-v4-pro", "high"),
+      reasoningEffort: reasoningEffortFor("opencode-zen", "deepseek-v4-pro", "high", auth.providerProtocol("opencode-zen", "deepseek-v4-pro")),
     });
     check("Zen relay completions send reasoning_effort", bodyZenRelay.reasoning_effort === "high");
     check(
       "OpenRouter GLM 5.2 maps max onto xhigh",
-      supportedEffortLevels("openrouter", "z-ai/glm-5.2").join(" ") === "high xhigh",
+      supportedEffortLevels("openrouter", "z-ai/glm-5.2", auth.providerProtocol("openrouter", "z-ai/glm-5.2")).join(" ") === "high xhigh",
     );
     check(
       "GLM lineage shares one contract beyond 5.2",
-      supportedEffortLevels("opencode-zen", "glm-5.1").join(" ") === "high max" &&
-        supportedEffortLevels("opencode-go", "glm-5.3").join(" ") === "high max" &&
-        supportedEffortLevels("openrouter", "z-ai/glm-5.3").join(" ") === "high xhigh",
+      supportedEffortLevels("opencode-zen", "glm-5.1", auth.providerProtocol("opencode-zen", "glm-5.1")).join(" ") === "high max" &&
+        supportedEffortLevels("opencode-go", "glm-5.3", auth.providerProtocol("opencode-go", "glm-5.3")).join(" ") === "high max" &&
+        supportedEffortLevels("openrouter", "z-ai/glm-5.3", auth.providerProtocol("openrouter", "z-ai/glm-5.3")).join(" ") === "high xhigh",
     );
-    check("fable off clamps to minimal", effectiveEffortFor("anthropic", "claude-fable-5", "off") === "minimal");
+    check("fable off clamps to minimal", effectiveEffortFor("anthropic", "claude-fable-5", "off", auth.providerProtocol("anthropic", "claude-fable-5")) === "minimal");
     check(
       "thinkingRequestFor fable off stays adaptive",
-      JSON.stringify(thinkingRequestFor("anthropic", "claude-fable-5", "off")) ===
+      JSON.stringify(thinkingRequestFor("anthropic", "claude-fable-5", "off", auth.providerProtocol("anthropic", "claude-fable-5"))) ===
         JSON.stringify({ type: "adaptive", display: "summarized" }),
     );
     

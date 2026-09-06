@@ -3023,10 +3023,6 @@ class PiEditorApp {
     const copied = agentEngine === "pi" && !opts?.launch && !opts?.resume
       ? this.copiedAgentSettings(opts?.fromTerminalId)
       : null;
-    // A fresh session without a usable copied model reopens on the last-used one.
-    const remembered = agentEngine === "pi" && !opts?.launch && !opts?.resume && !this.usablePiModel(copied?.model)
-      ? this.rememberedAgentSettings()
-      : null;
     let cmd: string;
     let args: string[];
     let shellName: string | undefined;
@@ -3113,7 +3109,9 @@ class PiEditorApp {
       const trusted = this.trustedPiSessionFile(sessionFile);
       sessionFile = trusted && !this.sessionFileInUse(trusted) ? trusted : null;
       const sessionArgs = sessionFile ? ["--session", sessionFile] : [];
-      args = ["-e", this.bridgePath(), ...sessionArgs, ...this.piFlagsFromSettings(copied ?? remembered)];
+      // Global recent models include Core-only providers (e.g. opencode-zen)
+      // that make Pi exit at startup. Without a Pi source, use Pi's defaults.
+      args = ["-e", this.bridgePath(), ...sessionArgs, ...this.piFlagsFromSettings(copied)];
       env = { ...cleanEnv(), TERMINA_TERMINAL_ID: id, TERMINA_EVENTS_DIR: this.eventsDir };
     }
     if (persist && owner && this.persistLive(owner).length >= MAX_TERMINAL_ROSTER) {

@@ -763,7 +763,7 @@ export function responsesBody(
     instructions: system || "You are a coding agent.",
     input: toResponsesInput(messages),
     tools: toResponsesTools(tools),
-    tool_choice: "auto",
+    ...(tools.length > 0 ? { tool_choice: "auto" } : {}),
     parallel_tool_calls: true,
   };
   if (opts?.maxTokens !== undefined) body.max_output_tokens = opts.maxTokens;

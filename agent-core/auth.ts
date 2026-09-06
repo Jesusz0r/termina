@@ -35,25 +35,19 @@ import { basename, dirname, join, resolve } from "node:path";
 import { TextDecoder } from "node:util";
 import { readSystemProcessIdentity } from "../shared/process-identity.js";
 
-const SUPPORTED_PROVIDERS = [
-  "anthropic",
-  "openai",
-  "openai-codex",
-  "github-copilot",
-  "xai",
-  "google",
-  "openrouter",
-  "opencode-go",
-  "opencode-zen",
-] as const;
-export type ProviderId = (typeof SUPPORTED_PROVIDERS)[number];
-export type ProviderProtocol =
-  | "anthropic-messages"
-  | "openai-completions"
-  | "openai-codex-responses"
-  | "openai-responses"
-  | "google-generate";
-export type LoginMode = "browser" | "code" | "key" | "device";
+import { SUPPORTED_PROVIDERS, type ProviderId, type ProviderProtocol, type LoginMode } from "./auth/providers/types.ts";
+export type { ProviderId, ProviderProtocol, LoginMode } from "./auth/providers/types.ts";
+export { protocolEndpoint } from "./auth/providers/endpoints.ts";
+import { providerDefinition } from "./auth/providers/index.ts";
+import { bearerHeaders } from "./auth/providers/shared.ts";
+export { isOAuthToken, pickHeaders } from "./auth/providers/anthropic.ts";
+import { extractAccountId, OPENAI_CODEX_ORIGINATOR, OPENAI_CODEX_CLIENT_VERSION } from "./auth/providers/openai-codex.ts";
+export { extractAccountId } from "./auth/providers/openai-codex.ts";
+import { COPILOT_HEADERS } from "./auth/providers/github-copilot.ts";
+export { zenWireProtocol } from "./auth/providers/opencode-zen.ts";
+import { modelLeaf } from "./models/families/identity.ts";
+import { modelLooksClaude } from "./models/families/anthropic.ts";
+import { modelLooksGemini } from "./models/families/google.ts";
 
 const ANTHROPIC_AUTHORIZE = "https://claude.ai/oauth/authorize";
 const ANTHROPIC_TOKEN = "https://platform.claude.com/v1/oauth/token";
@@ -68,10 +62,6 @@ const OPENAI_CODEX_TOKEN = "https://auth.openai.com/oauth/token";
 const OPENAI_CODEX_SCOPES = "openid profile email offline_access";
 const OPENAI_CODEX_REDIRECT_PORT = 1455;
 const OPENAI_CODEX_REDIRECT_PATH = "/auth/callback";
-/** ChatGPT's Codex backend gates on this originator. */
-const OPENAI_CODEX_ORIGINATOR = "codex_cli_rs";
-const OPENAI_CODEX_CLIENT_VERSION = "1.0.0";
-const OPENAI_JWT_AUTH = "https://api.openai.com/auth";
 
 const XAI_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828";
 const XAI_SCOPE = "openid profile email offline_access grok-cli:access api:access";
@@ -94,18 +84,7 @@ const GITHUB_DEVICE_URL = "https://github.com/login/device/code";
 const GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token";
 const GITHUB_COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token";
 const GITHUB_DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
-const COPILOT_HEADERS = {
-  accept: "application/json",
-  "content-type": "application/json",
-  "user-agent": "GitHubCopilotChat/0.35.0",
-  "editor-version": "vscode/1.107.0",
-  "editor-plugin-version": "copilot-chat/0.35.0",
-  "copilot-integration-id": "vscode-chat",
-} as const;
-
 const EXPIRE_MARGIN_MS = 300_000;
-const OAT_MARK = "sk-ant-oat";
-const DEFAULT_ANTHROPIC_BASE = "https://api.anthropic.com";
 
 /** Token responses are normally only a few KiB; 256 KiB leaves ample room
  * for provider metadata and error details without permitting unbounded reads. */
@@ -219,50 +198,6 @@ function resolveLoginPick(
   if (kindWord === "device") return { provider: picked.id, mode: "device" };
   if (kindWord === "browser") return { provider: picked.id, mode: "browser" };
   return { provider: picked.id, mode: picked.mode };
-}
-
-/** Last path segment of a vendor/model id. */
-export function modelLeaf(model: string): string {
-  const n = model.trim().toLowerCase();
-  const slash = n.lastIndexOf("/");
-  return slash >= 0 ? n.slice(slash + 1) : n;
-}
-
-function modelLooksClaude(model: string): boolean {
-  const n = model.toLowerCase();
-  return modelLeaf(model).includes("claude") || n.includes("claude");
-}
-
-function modelLooksQwen(model: string): boolean {
-  const leaf = modelLeaf(model);
-  const n = model.toLowerCase();
-  return leaf.startsWith("qwen") || n.includes("/qwen");
-}
-
-function modelLooksGemini(model: string): boolean {
-  const leaf = modelLeaf(model);
-  const n = model.toLowerCase();
-  return leaf.startsWith("gemini") || n.includes("/gemini");
-}
-
-/**
- * OpenCode Zen picks an existing kernel protocol from the model id.
- * Claude and Qwen use Messages. GPT, Codex, Grok, and Muse Spark use Responses.
- * Gemini uses Google generateContent on /models/{id}.
- */
-export function zenWireProtocol(model: string): ProviderProtocol {
-  const leaf = modelLeaf(model);
-  if (modelLooksClaude(model) || modelLooksQwen(model)) return "anthropic-messages";
-  if (modelLooksGemini(model)) return "google-generate";
-  if (
-    /^(gpt-|o[0-9]|chatgpt)/.test(leaf) ||
-    leaf.includes("codex") ||
-    leaf.startsWith("grok") ||
-    leaf.startsWith("muse-spark")
-  ) {
-    return "openai-responses";
-  }
-  return "openai-completions";
 }
 
 export const CACHE_CAPABILITY_FEATURE = {
@@ -598,23 +533,17 @@ export function cacheSessionHeaders(identity: CacheIdentity | null): Record<stri
   return {};
 }
 
-export function providerProtocol(id: ProviderId, model = ""): ProviderProtocol {
-  if (id === "anthropic") return "anthropic-messages";
-  if (id === "openai-codex") return "openai-codex-responses";
-  if (id === "google" || id === "opencode-go") return "openai-completions";
-  if (id === "opencode-zen") return zenWireProtocol(model);
-  return "openai-responses";
+export function providerProtocol(id: ProviderId, model = "", supportedEndpoints?: readonly string[]): ProviderProtocol {
+  return providerDefinition(id).protocol(model, supportedEndpoints);
 }
 
-export function usesResponsesApi(id: ProviderId, model = ""): boolean {
-  const proto = providerProtocol(id, model);
+export function usesResponsesApi(id: ProviderId, model = "", supportedEndpoints?: readonly string[]): boolean {
+  const proto = providerProtocol(id, model, supportedEndpoints);
   return proto === "openai-codex-responses" || proto === "openai-responses";
 }
 
 export function defaultLoginMode(id: ProviderId): LoginMode {
-  if (id === "xai" || id === "github-copilot") return "device";
-  if (id === "openai" || id === "google" || id === "opencode-go" || id === "opencode-zen") return "key";
-  return "browser";
+  return providerDefinition(id).loginMode;
 }
 
 export function authPath(): string {
@@ -694,82 +623,17 @@ function redirectUri(id: ProviderId, port: number): string {
   return `http://${redirectHost(id)}:${port}${redirectPath(id)}`;
 }
 
-export function isOAuthToken(token: string): boolean {
-  return token.includes(OAT_MARK);
-}
-
-export function pickHeaders(token: string): Record<string, string> {
-  const headers: Record<string, string> = {
-    "content-type": "application/json",
-    "anthropic-version": "2023-06-01",
-  };
-  if (isOAuthToken(token)) {
-    headers.authorization = `Bearer ${token}`;
-    headers["anthropic-beta"] = "claude-code-20250219,oauth-2025-04-20";
-    headers["user-agent"] = "termina-agent-core/1";
-    headers["x-app"] = "cli";
-  } else {
-    headers["x-api-key"] = token;
-  }
-  return headers;
-}
-
 export function openaiCodexClientVersion(): string {
   return OPENAI_CODEX_CLIENT_VERSION;
 }
 
-export function extractAccountId(token: string): string | null {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3) return null;
-    const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-    const payload = JSON.parse(Buffer.from(b64, "base64").toString("utf8")) as Record<string, unknown>;
-    const nested = payload[OPENAI_JWT_AUTH];
-    const fromNested =
-      nested && typeof nested === "object" && !Array.isArray(nested)
-        ? (nested as { chatgpt_account_id?: unknown }).chatgpt_account_id
-        : undefined;
-    const raw = fromNested ?? payload.chatgpt_account_id;
-    return typeof raw === "string" && raw ? raw : null;
-  } catch {
-    return null;
-  }
+export function requestHeaders(providerId: ProviderId, token: string, extra?: Record<string, unknown>): Record<string, string> {
+  return providerDefinition(providerId).headers?.(token, extra) ?? bearerHeaders(token);
 }
 
-export function requestHeaders(
-  providerId: ProviderId,
-  token: string,
-  extra?: Record<string, unknown>,
-): Record<string, string> {
-  if (providerId === "anthropic") return pickHeaders(token);
-  const headers: Record<string, string> = {
-    "content-type": "application/json",
-    authorization: `Bearer ${token}`,
-    "user-agent": "termina-agent-core/1",
-  };
-  if (providerId === "openai-codex") {
-    const account =
-      (typeof extra?.accountId === "string" && extra.accountId) || extractAccountId(token) || "";
-    if (account) headers["chatgpt-account-id"] = account;
-    headers.originator = OPENAI_CODEX_ORIGINATOR;
-    headers["user-agent"] = `codex_cli_rs/${OPENAI_CODEX_CLIENT_VERSION}`;
-    headers["openai-beta"] = "responses=experimental";
-  }
-  if (providerId === "openrouter") {
-    headers["http-referer"] = "https://termina.local";
-    headers["x-title"] = "Termina agent-core";
-  }
-  if (providerId === "github-copilot") {
-    headers["editor-version"] = COPILOT_HEADERS["editor-version"];
-    headers["editor-plugin-version"] = COPILOT_HEADERS["editor-plugin-version"];
-    headers["copilot-integration-id"] = COPILOT_HEADERS["copilot-integration-id"];
-    headers["user-agent"] = COPILOT_HEADERS["user-agent"];
-  }
-  if (providerId === "opencode-go" || providerId === "opencode-zen") {
-    headers["x-api-key"] = token;
-    headers["anthropic-version"] = "2023-06-01";
-  }
-  return headers;
+export function providerProtocolHeaders(provider: ProviderId, headers: Record<string, string>, protocol: ProviderProtocol): Record<string, string> {
+  const next = providerDefinition(provider).protocolHeaders?.(headers, protocol) ?? headers;
+  return protocol === "google-generate" ? googleNativeHeaders(next) : next;
 }
 
 /** Zen Gemini generateContent forwards Bearer to Vertex and 401s. Use only the Google key header. */
@@ -1885,48 +1749,9 @@ export type ResolvedAuth =
     }
   | { ok: false; error: string };
 
-const DEFAULT_BASE: Record<ProviderId, string> = {
-  anthropic: DEFAULT_ANTHROPIC_BASE,
-  openai: "https://api.openai.com/v1",
-  "openai-codex": "https://chatgpt.com/backend-api",
-  "github-copilot": "https://api.individual.githubcopilot.com",
-  xai: "https://api.x.ai/v1",
-  google: "https://generativelanguage.googleapis.com/v1beta/openai",
-  openrouter: "https://openrouter.ai/api/v1",
-  "opencode-go": "https://opencode.ai/zen/go/v1",
-  "opencode-zen": "https://opencode.ai/zen/v1",
-};
-
-const BASE_ENV: Partial<Record<ProviderId, string>> = {
-  anthropic: "ANTHROPIC_BASE_URL",
-  openai: "OPENAI_BASE_URL",
-  xai: "XAI_BASE_URL",
-  openrouter: "OPENROUTER_BASE_URL",
-};
-
-const ENV_KEYS: Record<ProviderId, string[]> = {
-  anthropic: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
-  openai: ["OPENAI_API_KEY"],
-  "openai-codex": [],
-  "github-copilot": [],
-  xai: ["XAI_API_KEY"],
-  google: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-  openrouter: ["OPENROUTER_API_KEY"],
-  "opencode-go": ["OPENCODE_GO_API_KEY"],
-  "opencode-zen": ["OPENCODE_API_KEY"],
-};
-
-export const DEFAULT_MODELS: Record<ProviderId, { main: string; summary: string }> = {
-  anthropic: { main: "claude-sonnet-5", summary: "claude-haiku-4-5" },
-  openai: { main: "gpt-5.6-sol", summary: "gpt-5.6-luna" },
-  "openai-codex": { main: "gpt-5.6-sol", summary: "gpt-5.6-luna" },
-  "github-copilot": { main: "gpt-5.6-terra", summary: "gpt-5.6-luna" },
-  xai: { main: "grok-4.6", summary: "grok-4.6" },
-  google: { main: "gemini-3.7-flash", summary: "gemini-3.5-flash-lite" },
-  openrouter: { main: "openai/gpt-5.6-terra", summary: "openai/gpt-5.6-luna" },
-  "opencode-go": { main: "glm-5.1", summary: "glm-5.1" },
-  "opencode-zen": { main: "gpt-5.6-sol", summary: "gpt-5.6-luna" },
-};
+export const DEFAULT_MODELS = Object.fromEntries(
+  SUPPORTED_PROVIDERS.map((id) => [id, providerDefinition(id).defaultModels]),
+) as Record<ProviderId, { main: string; summary: string }>;
 
 export function parseModelRef(
   raw: string,
@@ -1953,16 +1778,16 @@ export function parseModelRef(
 }
 
 function baseUrl(id: ProviderId): string {
-  const envName = BASE_ENV[id];
+  const envName = providerDefinition(id).baseEnv;
   if (envName) {
     const raw = process.env[envName]?.trim();
     if (raw) return raw.replace(/\/$/, "");
   }
-  return DEFAULT_BASE[id];
+  return providerDefinition(id).baseUrl;
 }
 
 function envToken(id: ProviderId): { token: string; envName: string } | null {
-  for (const name of ENV_KEYS[id]) {
+  for (const name of providerDefinition(id).envKeys) {
     const value = process.env[name]?.trim();
     if (value) return { token: value, envName: name };
   }
@@ -2037,13 +1862,13 @@ function fromStored(
 export function authBanner(auth: ResolvedAuth): string {
   if (!auth.ok) return "auth: none";
   const who = auth.providerId === "anthropic" ? "" : `${auth.providerId} `;
-  if (auth.source === "env") return `auth: ${who}env ${auth.envName ?? ENV_KEYS[auth.providerId][0] ?? "API_KEY"}`.replace("  ", " ");
+  if (auth.source === "env") return `auth: ${who}env ${auth.envName ?? providerDefinition(auth.providerId).envKeys[0] ?? "API_KEY"}`.replace("  ", " ");
   if (auth.source === "oauth") return `auth: ${who}oauth (${maskSecret(auth.token)})`.replace("  ", " ");
   return `auth: ${who}api_key (auth.json)`.replace("  ", " ");
 }
 
 function missingCredentialError(id: ProviderId): string {
-  const env = ENV_KEYS[id][0];
+  const env = providerDefinition(id).envKeys[0];
   if (env) return `no ${id} credential — run /login ${id} or set ${env}`;
   return `no ${id} credential — run /login ${id}`;
 }
@@ -2848,7 +2673,7 @@ export async function pollXaiDeviceToken(
 
 async function loginKey(providerId: ProviderId, io: LoginIo): Promise<{ ok: true } | { ok: false; error: string }> {
   if (!io.waitForCode) return { ok: false, error: "login failed: no key input" };
-  const env = ENV_KEYS[providerId][0] ?? "API_KEY";
+  const env = providerDefinition(providerId).envKeys[0] ?? "API_KEY";
   io.write(`paste the ${providerId} API key (${env}), then press enter\n`);
   const key = (await io.waitForCode()).trim();
   if (!key) return { ok: false, error: "login failed: empty key" };
@@ -2985,7 +2810,7 @@ export async function exchangeGithubCopilotToken(
     if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
     const endpoints = isObject(payload.endpoints) ? payload.endpoints : {};
     const reported = typeof endpoints.api === "string" ? endpoints.api : "";
-    const apiUrl = validateCopilotApiUrl(reported) || DEFAULT_BASE["github-copilot"];
+    const apiUrl = validateCopilotApiUrl(reported) || providerDefinition("github-copilot").baseUrl;
     let expires = Date.now() + 25 * 60 * 1000;
     const expiresAt = payload.expires_at;
     if (typeof expiresAt === "number" && Number.isFinite(expiresAt) && expiresAt > 0) {

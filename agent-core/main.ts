@@ -21,6 +21,21 @@
  * - last tool_result cache pin (Anthropic); session prompt_cache_key by model family; 429 retry; model-aware effort
  * - provider auth (Anthropic, OpenAI, ChatGPT Codex, xAI, Google, OpenRouter)
  */
+import {
+  EFFORT_LEVELS,
+  defaultContextWindow,
+  supportedEffortLevels,
+  clampEffortLevel,
+  thinkingRequestFor,
+  adaptiveEffortFor,
+  effectiveEffortFor,
+  reasoningEffortFor,
+  includeEncryptedReasoning,
+  type EffortLevel,
+} from "./models/capabilities.ts";
+import { gpt56ReasoningContext, gpt5TextVerbosity } from "./models/families/openai.ts";
+import { modelLeaf } from "./models/families/identity.ts";
+import { claudeThinkingApi } from "./models/families/anthropic.ts";
 import { consumeAgentSessionEnvironment } from "../shared/agent-environment.ts";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -57,8 +72,8 @@ import {
   loginPickerItems,
   parseAuthCommand,
   parseModelRef,
-  providerProtocol,
-  usesResponsesApi,
+  providerProtocol as configuredProviderProtocol,
+  usesResponsesApi as configuredUsesResponsesApi,
   CACHE_CAPABILITY_FEATURE,
   documentedCacheCapability,
   cacheRouteDomain,
@@ -66,8 +81,8 @@ import {
   cacheIdentityFor,
   cacheSessionSeed,
   cacheSessionHeaders,
-  googleNativeHeaders,
-  modelLeaf,
+  protocolEndpoint,
+  providerProtocolHeaders,
   refreshOauth,
   resolveAuth,
   runLogin,
@@ -215,13 +230,21 @@ let summaryRoute = parseModelRef(
   process.env.TERMINA_CORE_SUMMARY_MODEL ? undefined : route.provider,
 );
 const catalogs = new Map<ProviderId, ModelInfo[]>();
+
+// Resolve model metadata from the existing catalog for every request role,
+// endpoint, serializer, and effort decision. auth.ts remains the mapper.
+function providerProtocol(provider: ProviderId, model = "") {
+  return configuredProviderProtocol(provider, model, catalogs.get(provider)?.find((entry) => entry.id === model)?.supportedEndpoints);
+}
+
+function usesResponsesApi(provider: ProviderId, model = "") {
+  return configuredUsesResponsesApi(provider, model, catalogs.get(provider)?.find((entry) => entry.id === model)?.supportedEndpoints);
+}
 /** Set only after a successful catalog proves the configured/default model is unavailable. */
 let modelAvailabilityError: string | null = null;
 /** Leave room for thinking output. Thinking counts against max_tokens. */
 const OUTPUT_CAP = 16_384;
 const THINKING_OUTPUT_CAP = 64_000;
-/** Fixed-budget thinking on Claude 4.5 and earlier. Must stay below THINKING_OUTPUT_CAP. */
-const FIXED_THINK_BUDGET = 16_384;
 /** Bound server-tool continuation requests so a provider cannot loop forever. */
 const MAX_PAUSE_TURN_CONTINUATIONS = 5;
 const HIGH_WATER = 0.8;
@@ -229,14 +252,6 @@ const LOW_WATER = 0.6;
 /** Trailing tool-output span never reclaimed (fraction of usable, clamped). */
 const PROTECT_MIN = 4_000;
 const PROTECT_MAX = 40_000;
-
-export function defaultContextWindow(provider: ProviderId, model: string): number {
-  const id = model.toLowerCase();
-  if (id.includes("haiku")) return 200_000;
-  if (provider === "xai" || modelLeaf(model).startsWith("grok")) return 500_000;
-  if (provider === "anthropic" || provider === "google") return 1_000_000;
-  return 1_050_000;
-}
 
 function contextWindow(): number {
   const env = Number(process.env.TERMINA_CORE_CONTEXT ?? "");
@@ -247,7 +262,7 @@ function contextWindow(): number {
 }
 
 function usableTokens(): number {
-  const thinking = effectiveEffortFor(route.provider, route.model, effortWanted) !== "off";
+  const thinking = effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)) !== "off";
   return Math.max(8_000, contextWindow() - outputTokenBudget({ thinking }));
 }
 
@@ -299,10 +314,6 @@ export function parsePrintPrompt(argv: string[]): string | null {
   return argv.slice(i + 1).join(" ").trim();
 }
 
-export const EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-export type EffortLevel = (typeof EFFORT_LEVELS)[number];
-type EffortLevelMap = Partial<Record<EffortLevel, string | null>>;
-type ReasoningEffort = "none" | Exclude<EffortLevel, "off">;
 let effortWanted: EffortLevel = "medium";
 let currentWorkingSetHash: string | null = null;
 let currentWorkingSetChanged: boolean | null = null;
@@ -315,306 +326,8 @@ type HostContextTrace = Pick<
 let currentHostContext: HostContextTrace | null = null;
 let activeRequestOverlay: RequestOverlay | null = null;
 
-export type ThinkingRequest =
-  | { type: "disabled" }
-  | { type: "adaptive"; display: "summarized" }
-  | { type: "enabled"; budget_tokens: number };
-
-/** Claude 5 and 4.6+ reject a fixed thinking budget. */
-function claudeThinkingApi(model: string): "adaptive" | "budget" | "none" {
-  const id = model.toLowerCase();
-  if (!id.includes("claude") || /claude-[1-3](?:-|$)/.test(id)) return "none";
-  if (/(?:sonnet|opus|fable|mythos)-5(?:$|[^0-9])/.test(id)) return "adaptive";
-  if (/4[.-][6-8]/.test(id)) return "adaptive";
-  return "budget";
-}
-
-function thinkingLockedOn(model: string): boolean {
-  const id = model.toLowerCase();
-  return id.includes("fable") || id.includes("mythos");
-}
-
-/**
- * Model families with a known Responses `reasoning.effort` contract, matched
- * against the lowercased id (prefix included, so `openai/o3` still matches).
- * A new family is one row here — not a new predicate. Anchored entries
- * (gpt-[5-9], o-series) stay regexes so older or foreign models can't
- * smuggle in on a substring.
- */
-const RESPONSES_REASONING_FAMILIES: readonly RegExp[] = [
-  /gpt-[5-9]/,
-  /gpt-oss/,
-  /codex/,
-  /grok/,
-  /muse-spark/,
-  /(?:^|\/)o[0-9]/,
-];
-
-function responsesReasoningFamily(model: string): boolean {
-  const id = model.toLowerCase();
-  return RESPONSES_REASONING_FAMILIES.some((family) => family.test(id));
-}
-
-function responsesReasoningModel(model: string): boolean {
-  const id = model.toLowerCase();
-  return responsesReasoningFamily(model) || claudeThinkingApi(model) !== "none" || /gemini-[3-9]/.test(id);
-}
-
-function gemini3Model(model: string): boolean {
-  return /gemini-[3-9]/.test(model.toLowerCase());
-}
-
-/**
- * Per-model Gemini level rejections observed as provider 400s. Newer
- * generations (live Zen docs already list up to 3.8 Flash) get the full
- * range unless a row below proves otherwise — rows only hide levels, so a
- * missing row fails loud (400) instead of hiding a working level.
- */
-type GeminiEffortQuirk = {
-  match: RegExp;
-  unless?: RegExp;
-  hide: readonly EffortLevel[];
-};
-
-const GEMINI_EFFORT_QUIRKS: readonly GeminiEffortQuirk[] = [
-  // gemini-3-pro (no minor) rejects minimal; 3.1 Pro and later accept medium.
-  { match: /gemini-3(?:\.\d+)?-pro/, hide: ["minimal"] },
-  { match: /gemini-3-pro/, unless: /gemini-3\.\d+-pro/, hide: ["medium"] },
-  // Gemini 3.7 Flash returns 400 on thinking_level minimal.
-  { match: /gemini-3\.7.*flash/, unless: /lite/, hide: ["minimal"] },
-];
-
-/**
- * Zhipu GLM reasoning lineage (live Zen docs list 5, 5.1, 5.2; Go also
- * serves 5.3). Members share one contract — restricted level subset, xhigh
- * on Responses / max on Completions — so a new generation is one row here,
- * not a new predicate.
- */
-const GLM_REASONING_FAMILIES: readonly RegExp[] = [/glm-5/];
-
-function glmReasoningFamily(model: string): boolean {
-  const id = model.toLowerCase();
-  return GLM_REASONING_FAMILIES.some((family) => family.test(id));
-}
-
-/**
- * OpenCode relays serve third-party reasoning models behind an
- * OpenAI-compatible chat/completions endpoint: Zen lists deepseek, minimax,
- * glm, kimi, big-pickle, mimo, ling, and nemotron on /v1/chat/completions,
- * and opencode-go serves the same families plus longcat, hy, qwen, and
- * muse-spark there. Zen publishes no per-model effort metadata, so capability
- * comes from this owned family table and levels are the
- * OpenAI/OpenRouter/xAI-documented core subset, sent verbatim as Chat
- * Completions `reasoning_effort`.
- */
-const RELAY_COMPLETIONS_FAMILIES = [
-  "big-pickle",
-  "deepseek",
-  "glm",
-  "kimi",
-  "ling",
-  "longcat",
-  "mimo",
-  "minimax",
-  "muse-spark",
-  "nemotron",
-  "qwen",
-] as const;
-
-function relayCompletionsFamily(leaf: string): boolean {
-  if (RELAY_COMPLETIONS_FAMILIES.some((family) => leaf.startsWith(family))) return true;
-  return /^hy[34](?:[.-]|$)/.test(leaf);
-}
-
-/** Relay chat/completions models with a known reasoning contract. */
-function usesRelayCompletionsEffort(provider: ProviderId, model: string): boolean {
-  if (provider !== "opencode-zen" && provider !== "opencode-go") return false;
-  if (providerProtocol(provider, model) !== "openai-completions") return false;
-  return relayCompletionsFamily(modelLeaf(model));
-}
-
-/** Anthropic thinking fields belong on Messages + a Claude model, not on the login id. */
-function usesAnthropicThinking(provider: ProviderId, model: string): boolean {
-  return providerProtocol(provider, model) === "anthropic-messages" && claudeThinkingApi(model) !== "none";
-}
-
-/** Effort that this protocol actually sends. Login id is not enough. */
-function usesModelEffort(provider: ProviderId, model: string): boolean {
-  if (usesAnthropicThinking(provider, model)) return true;
-  if (usesResponsesApi(provider, model) && responsesReasoningModel(model)) return true;
-  if (gemini3Model(model) && (provider === "google" || providerProtocol(provider, model) === "google-generate")) {
-    return true;
-  }
-  if (usesRelayCompletionsEffort(provider, model)) return true;
-  return glmReasoningFamily(model);
-}
-
-function effortLevelMap(provider: ProviderId, model: string): EffortLevelMap {
-  const id = model.toLowerCase();
-  const map: EffortLevelMap = {};
-  if (gemini3Model(model) && (provider === "google" || providerProtocol(provider, model) === "google-generate")) {
-    map.off = null;
-    for (const quirk of GEMINI_EFFORT_QUIRKS) {
-      if (quirk.match.test(id) && !(quirk.unless && quirk.unless.test(id))) {
-        for (const level of quirk.hide) map[level] = null;
-      }
-    }
-    return map;
-  }
-  if (claudeThinkingApi(model) === "adaptive") {
-    map.minimal = "low";
-    map.max = "max";
-    if (/(?:opus-4[.-][78]|(?:sonnet|opus|fable)-5)(?:$|[^0-9])/.test(id)) map.xhigh = "xhigh";
-    if (thinkingLockedOn(model)) map.off = null;
-    return map;
-  }
-  if (glmReasoningFamily(model)) {
-    map.off = null;
-    map.minimal = null;
-    map.low = null;
-    map.medium = null;
-    if (usesResponsesApi(provider, model)) map.xhigh = "xhigh";
-    else map.max = "max";
-    return map;
-  }
-  if (usesRelayCompletionsEffort(provider, model)) {
-    // Core subset only: the relay publishes no per-model metadata, so
-    // minimal and xhigh stay hidden rather than risking a provider 400.
-    map.minimal = null;
-    map.xhigh = null;
-    map.max = "max";
-    return map;
-  }
-  if (!responsesReasoningFamily(model)) return map;
-  if (id.includes("grok")) {
-    if (!id.includes("4.3")) map.off = null;
-    map.minimal = null;
-    if (id.includes("4.6")) map.xhigh = "xhigh";
-    map.max = null;
-    return map;
-  }
-  if (/(?:^|\/)o[0-9]/.test(id)) {
-    map.off = null;
-    map.minimal = null;
-    return map;
-  }
-  if (/gpt-(?:5\.[3-6]|[6-9])|codex/.test(id)) {
-    if (provider === "openai-codex" || provider === "github-copilot") map.minimal = "low";
-    else map.minimal = null;
-    if (
-      provider === "github-copilot" ||
-      // GPT-6 Astra rejects reasoning none with HTTP 400 (live model page).
-      /gpt-[6-9]/.test(id) ||
-      (id.includes("codex") && provider !== "openrouter" && !id.includes("5.6"))
-    ) {
-      map.off = null;
-    }
-    map.xhigh = "xhigh";
-  }
-  if (id.includes("5.6") || /gpt-[6-9]/.test(id)) map.max = "max";
-  return map;
-}
-
-export function supportedEffortLevels(provider: ProviderId, model: string): EffortLevel[] {
-  if (!usesModelEffort(provider, model)) return ["off"];
-  const map = effortLevelMap(provider, model);
-  return EFFORT_LEVELS.filter((level) => {
-    const mapped = map[level];
-    if (mapped === null) return false;
-    if (level === "xhigh" || level === "max") return mapped !== undefined;
-    return true;
-  });
-}
-
-export function clampEffortLevel(provider: ProviderId, model: string, effort: EffortLevel): EffortLevel {
-  const available = supportedEffortLevels(provider, model);
-  if (available.includes(effort)) return effort;
-  const requested = EFFORT_LEVELS.indexOf(effort);
-  for (let i = requested; i < EFFORT_LEVELS.length; i++) {
-    if (available.includes(EFFORT_LEVELS[i]!)) return EFFORT_LEVELS[i]!;
-  }
-  for (let i = requested - 1; i >= 0; i--) {
-    if (available.includes(EFFORT_LEVELS[i]!)) return EFFORT_LEVELS[i]!;
-  }
-  return "off";
-}
-
-export function thinkingEnabledFor(provider: ProviderId, model: string, effort: EffortLevel): boolean {
-  return clampEffortLevel(provider, model, effort) !== "off";
-}
-
-export function reasoningEffortFor(
-  provider: ProviderId,
-  model: string,
-  effort: EffortLevel,
-): ReasoningEffort | undefined {
-  if (usesAnthropicThinking(provider, model) || !usesModelEffort(provider, model)) return undefined;
-  const actual = clampEffortLevel(provider, model, effort);
-  const mapped = effortLevelMap(provider, model)[actual];
-  if (typeof mapped === "string") return mapped as ReasoningEffort;
-  return actual === "off" ? "none" : actual;
-}
-
-export function thinkingRequestFor(
-  provider: ProviderId,
-  model: string,
-  effort: EffortLevel,
-): ThinkingRequest | undefined {
-  if (!usesAnthropicThinking(provider, model)) return undefined;
-  const api = claudeThinkingApi(model);
-  if (api === "none") return undefined;
-  const actual = clampEffortLevel(provider, model, effort);
-  if (api === "adaptive") {
-    if (actual === "off") return { type: "disabled" };
-    return { type: "adaptive", display: "summarized" };
-  }
-  if (actual === "off") return undefined;
-  const budgets: Record<Exclude<EffortLevel, "off">, number> = {
-    minimal: 1_024,
-    low: 2_048,
-    medium: 8_192,
-    high: FIXED_THINK_BUDGET,
-    xhigh: FIXED_THINK_BUDGET,
-    max: FIXED_THINK_BUDGET,
-  };
-  return { type: "enabled", budget_tokens: budgets[actual] };
-}
-
-export function adaptiveEffortFor(provider: ProviderId, model: string, effort: EffortLevel): ReasoningEffort | undefined {
-  if (!usesAnthropicThinking(provider, model) || claudeThinkingApi(model) !== "adaptive") return undefined;
-  const actual = clampEffortLevel(provider, model, effort);
-  if (actual === "off") return undefined;
-  const mapped = effortLevelMap(provider, model)[actual];
-  return (typeof mapped === "string" ? mapped : actual) as ReasoningEffort;
-}
-
-export function effectiveEffortFor(provider: ProviderId, model: string, effort: EffortLevel): EffortLevel {
-  return clampEffortLevel(provider, model, effort);
-}
-
 export function outputTokenBudget(opts: { thinking: boolean }): number {
   return opts.thinking ? THINKING_OUTPUT_CAP : OUTPUT_CAP;
-}
-
-/** Grok rejects OpenAI encrypted-reasoning include, including on Zen and OpenRouter. */
-export function includeEncryptedReasoning(provider: ProviderId, model: string): boolean {
-  if (provider === "xai") return false;
-  if (modelLeaf(model).startsWith("grok")) return false;
-  return true;
-}
-
-export function gpt56ReasoningContext(model: string): "all_turns" | undefined {
-  const leaf = modelLeaf(model);
-  if (!(leaf.startsWith("gpt-5.6") || leaf.includes("gpt-5.6"))) return undefined;
-  return "all_turns";
-}
-
-/** GPT-5 coding requests keep short answers. Pro and Codex keep provider defaults. */
-export function gpt5TextVerbosity(model: string): "low" | undefined {
-  const leaf = modelLeaf(model);
-  if (!leaf.startsWith("gpt-5")) return undefined;
-  if (leaf.includes("pro") || leaf.includes("codex")) return undefined;
-  return "low";
 }
 
 export function parseEffortCommand(
@@ -3535,8 +3248,8 @@ async function writeTraceAttempt(
     taskClass: attempt.task.taskClass,
     requestedEffort: attempt.role === "summary" ? "off" : effortWanted,
     effectiveEffort: attempt.role === "summary"
-      ? effectiveEffortFor(summaryRoute.provider, summaryRoute.model, "off")
-      : effectiveEffortFor(route.provider, route.model, effortWanted),
+      ? effectiveEffortFor(summaryRoute.provider, summaryRoute.model, "off", providerProtocol(summaryRoute.provider, summaryRoute.model))
+      : effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)),
     status: fields.status,
     retryCount: attempt.retryCount,
     fallbackReason: attempt.fallbackReason,
@@ -5763,31 +5476,6 @@ interface CallResult {
 let currentAbort: AbortController | null = null;
 let codexTurnState = "";
 
-function endpointFor(auth: { providerId: ProviderId; baseUrl: string }, model = "", stream = true): string {
-  const base = auth.baseUrl.replace(/\/$/, "");
-  const proto = providerProtocol(auth.providerId, model);
-  if (proto === "anthropic-messages") {
-    if (base.endsWith("/v1")) return `${base}/messages`;
-    return `${base}/v1/messages`;
-  }
-  if (proto === "openai-codex-responses") {
-    if (base.endsWith("/codex/responses")) return base;
-    if (base.endsWith("/codex")) return `${base}/responses`;
-    return `${base}/codex/responses`;
-  }
-  if (proto === "openai-responses") {
-    if (base.endsWith("/responses")) return base;
-    return `${base}/responses`;
-  }
-  if (proto === "google-generate") {
-    const leaf = modelLeaf(model) || "gemini-3.7-flash";
-    return stream
-      ? `${base}/models/${leaf}:streamGenerateContent?alt=sse`
-      : `${base}/models/${leaf}:generateContent`;
-  }
-  return `${base}/chat/completions`;
-}
-
 type ProviderRetryEvent = {
   status: number;
   kind: "oauth-refresh" | "retryable-status";
@@ -5812,16 +5500,16 @@ async function providerPost(
     if (signal?.aborted) throw new Error("aborted");
     const auth = await resolveAuth(providerId, signal);
     if (!auth.ok) throw new Error(auth.error);
-    let headers: Record<string, string> = { ...auth.headers, ...cacheSessionHeaders(cacheIdentity) };
+    const protocol = providerProtocol(providerId, model);
+    const headers = providerProtocolHeaders(providerId, { ...auth.headers, ...cacheSessionHeaders(cacheIdentity) }, protocol);
     if (codexAffinity && providerId === "openai-codex" && codexTurnState) {
       headers["x-codex-turn-state"] = codexTurnState;
     }
-    if (providerProtocol(providerId, model) === "google-generate") headers = googleNativeHeaders(headers);
     if (body && typeof body === "object" && (body as { stream?: unknown }).stream === true) {
       headers.accept = "text/event-stream";
     }
-    if (stream && providerProtocol(providerId, model) === "google-generate") headers.accept = "text/event-stream";
-    const res = await fetch(endpointFor(auth, model, stream), {
+    if (stream && protocol === "google-generate") headers.accept = "text/event-stream";
+    const res = await fetch(protocolEndpoint(auth.baseUrl, model, protocol, stream), {
       method: "POST",
       headers,
       body: JSON.stringify(body),
@@ -6073,7 +5761,7 @@ async function completeTextBody(
   const sendCacheKey = Boolean(cacheKey) && cacheCapabilitySupported(providerId, model, CACHE_CAPABILITY_FEATURE.promptCacheKey);
   const sendSessionId = providerId === "openrouter" ? cacheKey || undefined : undefined;
   if (proto === "anthropic-messages") {
-    const thinking = thinkingRequestFor(providerId, model, "off");
+    const thinking = thinkingRequestFor(providerId, model, "off", providerProtocol(providerId, model));
     const requestBody = {
       model,
       max_tokens: 2048,
@@ -6110,7 +5798,7 @@ async function completeTextBody(
     };
   }
   if (proto === "google-generate") {
-    const effort = reasoningEffortFor(providerId, model, "off");
+    const effort = reasoningEffortFor(providerId, model, "off", providerProtocol(providerId, model));
     const requestBody = googleGenerateBody(
       system,
       [{ role: "user", content: prompt }],
@@ -6315,11 +6003,11 @@ async function callModel(
     content: m.content as string | Array<Record<string, unknown>>,
   }));
   const toolsForProvider = clientTools as ToolDef[];
-  const actualEffort = effectiveEffortFor(route.provider, route.model, effortWanted);
+  const actualEffort = effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));
   const maxTokens = outputTokenBudget({ thinking: actualEffort !== "off" });
-  const thinking = thinkingRequestFor(route.provider, route.model, effortWanted);
-  const adaptiveEffort = adaptiveEffortFor(route.provider, route.model, effortWanted);
-  const reasoningEffort = reasoningEffortFor(route.provider, route.model, effortWanted);
+  const thinking = thinkingRequestFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));
+  const adaptiveEffort = adaptiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));
+  const reasoningEffort = reasoningEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));
   const cacheIdentity = cacheIdentityForRole("main", route.provider, route.model);
   const cacheKey = cacheIdentity?.key;
   const sendCacheKey = Boolean(cacheKey) && cacheCapabilitySupported(route.provider, route.model, CACHE_CAPABILITY_FEATURE.promptCacheKey);
@@ -7218,7 +6906,7 @@ function logSettings(): void {
   logEvent({
     t: "agent_settings",
     model: `${route.provider}/${route.model}`,
-    thinkingLevel: effectiveEffortFor(route.provider, route.model, effortWanted),
+    thinkingLevel: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)),
   });
 }
 
@@ -7424,7 +7112,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     entryId: String(userMsg.sseq),
     parentEntryId: null,
     trusted: null,
-    thinkingLevel: effectiveEffortFor(route.provider, route.model, effortWanted),
+    thinkingLevel: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)),
   });
   let storageFailure: string | null = null;
   let taskFailure: string | null = null;
@@ -8408,11 +8096,11 @@ function startAuthCommand(line: string): void {
 }
 
 function syncStatus(): void {
-  effortWanted = clampEffortLevel(route.provider, route.model, effortWanted);
-  surface?.setEffortLevels(supportedEffortLevels(route.provider, route.model));
+  effortWanted = clampEffortLevel(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));
+  surface?.setEffortLevels(supportedEffortLevels(route.provider, route.model, providerProtocol(route.provider, route.model)));
   surface?.setStatus({
     model: `${route.provider}/${route.model}`,
-    effort: effectiveEffortFor(route.provider, route.model, effortWanted),
+    effort: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)),
     usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd),
   });
   logSettings();
@@ -8572,15 +8260,15 @@ function dispatchLine(line: string): void {
       showPrompt();
       return;
     }
-    const available = supportedEffortLevels(route.provider, route.model);
+    const available = supportedEffortLevels(route.provider, route.model, providerProtocol(route.provider, route.model));
     if ("show" in effortCmd) {
-      const actual = effectiveEffortFor(route.provider, route.model, effortWanted);
+      const actual = effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));
       out(`(effort ${actual}; available: ${available.join(", ")})\n`);
       showPrompt();
       return;
     }
     const requested = effortCmd.effort;
-    effortWanted = clampEffortLevel(route.provider, route.model, requested);
+    effortWanted = clampEffortLevel(route.provider, route.model, requested, providerProtocol(route.provider, route.model));
     out(effortWanted === requested ? `(effort ${effortWanted})\n` : `(effort ${effortWanted}; ${requested} is unavailable)\n`);
     syncStatus();
     showPrompt();
@@ -8689,11 +8377,11 @@ async function main(): Promise<void> {
         requestProcessShutdown(0, "tui-exit");
       },
     });
-    effortWanted = clampEffortLevel(route.provider, route.model, effortWanted);
-    surface.setEffortLevels(supportedEffortLevels(route.provider, route.model));
+    effortWanted = clampEffortLevel(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));
+    surface.setEffortLevels(supportedEffortLevels(route.provider, route.model, providerProtocol(route.provider, route.model)));
     surface.setStatus({
       model: `${route.provider}/${route.model}`,
-      effort: effectiveEffortFor(route.provider, route.model, effortWanted),
+      effort: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)),
       permissions: permissionMode,
       usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd),
     });
