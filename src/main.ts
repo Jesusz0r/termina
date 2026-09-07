@@ -294,7 +294,7 @@ function setActiveProject(projectId: string | null): void {
   }
   placeEditorToggle(activeProjectId);
   syncPaneVisibility();
-  collapseEditorIfIdle();
+  syncEditorMinimizedForProject();
   drainPendingToolTargets(activeProjectId);
   fitPanes();
   timelineJumpEpoch++;
@@ -1872,6 +1872,17 @@ function editorPaneOccupied(): boolean {
   return baseEditorInstance?.hasOpenTabs() === true;
 }
 
+/** Project switches share one minimize bar but occupancy is per-project: an
+ *  empty project auto-collapses the editor, and returning to a project with
+ *  open tabs restores it. An explicit terminal minimize is never clobbered. */
+function syncEditorMinimizedForProject(): void {
+  if (editorPaneOccupied()) {
+    if (minimizedWork === "editor") setMinimizedWork(null);
+    return;
+  }
+  if (minimizedWork === null) setMinimizedWork("editor");
+}
+
 function collapseEditorIfIdle(): void {
   if (editorPaneOccupied()) return;
   if (minimizedWork !== "editor") setMinimizedWork("editor");
@@ -2319,6 +2330,29 @@ window.addEventListener("mouseup", () => {
 
 // explorer ↔ editor divider
 let exploring = false;
+function finishExplorerDrag(): void {
+  exploring = false;
+  suppressNativeDrag(false);
+  document.body.style.cursor = "";
+}
+// File rows are native drag sources (`draggable=true` in explorer.ts): a grab
+// that lands even 1px left of the 4px divider starts a file drag instead of a
+// resize, and its mousemoves never reach the window. Projects with dense trees
+// fill the grab row, so the divider feels broken there and fine in sparse
+// projects. This capture-phase redirect claims near-miss presses before any
+// row sees them.
+const EXPLORER_GRAB_PX = 8;
+window.addEventListener("mousedown", (e) => {
+  if (e.button !== 0 || exploring || explorerMinimized) return;
+  const box = explorerDividerEl.getBoundingClientRect();
+  if (box.width === 0) return;
+  if (Math.abs(e.clientX - (box.left + box.width / 2)) > EXPLORER_GRAB_PX) return;
+  e.preventDefault();
+  e.stopPropagation();
+  exploring = true;
+  suppressNativeDrag(true);
+  document.body.style.cursor = "col-resize";
+}, true);
 explorerDividerEl.addEventListener("mousedown", (e) => {
   if (explorerMinimized) return;
   e.preventDefault();
@@ -2328,14 +2362,18 @@ explorerDividerEl.addEventListener("mousedown", (e) => {
 });
 window.addEventListener("mousemove", (e) => {
   if (!exploring) return;
+  // Released outside the window: no mouseup arrives, so heal here instead of
+  // leaving the flag stuck (same pattern as the modified-list resize).
+  if (e.buttons === 0) {
+    finishExplorerDrag();
+    return;
+  }
   const rect = document.getElementById("main")!.getBoundingClientRect();
   const w = Math.min(420, Math.max(140, e.clientX - rect.left));
   explorerEl.style.width = `${w}px`;
 });
 window.addEventListener("mouseup", () => {
-  exploring = false;
-  suppressNativeDrag(false);
-  document.body.style.cursor = "";
+  finishExplorerDrag();
 });
 
 /** A native file drag started from a near-miss press steals the gesture
@@ -2908,7 +2946,7 @@ async function boot(attempt = 0): Promise<void> {
   minimizedWork = storedWork === "terminal" || storedWork === "editor" ? storedWork : null;
   if (isSplitLayout(layout)) lastSplitLayout = layout;
   applyLayout(layout);
-  if (minimizedWork !== "editor" && !editorPaneOccupied()) setMinimizedWork("editor");
+  if (minimizedWork !== "editor" && !editorPaneOccupied()) syncEditorMinimizedForProject();
   if (localStorage.getItem(MODIFIED_KEY) === "0") setModifiedVisible(false);
   restoreModifiedListHeight();
   void refreshTestCommand();

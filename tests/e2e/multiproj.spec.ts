@@ -40,4 +40,33 @@ test.describe("Multi-Project Tabs & Workspace Switching", () => {
     await tabB.locator(".tab-close").click();
     await expect(page.locator(".project-tab")).toHaveCount(2);
   });
+
+  test("editor collapse on an empty project does not stick to a project with open tabs", async ({ page, runRoot }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+
+    const projA = join(runRoot, "collapse-a");
+    const projB = join(runRoot, "collapse-b");
+    mkdirSync(projA, { recursive: true });
+    mkdirSync(projB, { recursive: true });
+    writeFileSync(join(projA, "file-in-a.txt"), "hello from A\n");
+
+    await page.evaluate((dir) => (window as any).pi.projectOpenPath(dir), projA);
+    const tabA = page.locator(".project-tab").filter({ hasText: "collapse-a" });
+    await expect(tabA).toHaveClass(/active/, { timeout: 10_000 });
+    await page.locator("#explorer-tree").getByText("file-in-a.txt").click();
+    await expect(page.locator(".editor-tab").getByText("file-in-a.txt")).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("#right-pane.minimized")).toHaveCount(0);
+
+    // B has no open files, so the editor auto-collapses when it activates.
+    await page.evaluate((dir) => (window as any).pi.projectOpenPath(dir), projB);
+    const tabB = page.locator(".project-tab").filter({ hasText: "collapse-b" });
+    await expect(tabB).toHaveClass(/active/, { timeout: 10_000 });
+    await expect(page.locator("#right-pane.minimized")).toHaveCount(1);
+
+    // Back to A: the open tab restores the editor instead of staying a bar.
+    await tabA.click();
+    await expect(tabA).toHaveClass(/active/, { timeout: 10_000 });
+    await expect(page.locator("#right-pane.minimized")).toHaveCount(0);
+    await expect(page.locator(".editor-tab").getByText("file-in-a.txt")).toBeVisible({ timeout: 10_000 });
+  });
 });

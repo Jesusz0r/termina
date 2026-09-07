@@ -15,6 +15,22 @@ test.describe("pane resize dividers", () => {
     expect(after - before).toBeGreaterThan(40);
   });
 
+  test("near-miss grab left of the explorer divider still resizes", async ({ page }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+    const before = await page.locator("#explorer").evaluate((el) => el.getBoundingClientRect().width);
+    const box = await page.locator("#explorer-divider").boundingBox();
+    expect(box).not.toBeNull();
+    // 6px left of the divider lands on the tree (often a draggable file row):
+    // without the capture redirect this starts a file drag, not a resize.
+    const y = box!.y + 100;
+    await page.mouse.move(box!.x - 6, y);
+    await page.mouse.down();
+    await page.mouse.move(box!.x + 74, y);
+    await page.mouse.up();
+    const after = await page.locator("#explorer").evaluate((el) => el.getBoundingClientRect().width);
+    expect(after - before).toBeGreaterThan(40);
+  });
+
   test("split divider drag changes the terminal share", async ({ page }) => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
     await page.locator("#explorer-tree").getByText("greeting.ts").click();
