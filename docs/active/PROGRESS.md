@@ -4,7 +4,7 @@
 
 ## In progress
 
-- Uncommitted working tree (2026-09-05): `agent-core/main.ts`, `agent-core/tui.ts`, `electron/main.ts`, `shared/types.ts`, `src/editor.ts`, `tests/unit/agent-core/harness-kernel.test.ts` — reconcile on clock-in.
+- None — working tree clean as of 2026-09-07.
 
 ## Next
 
