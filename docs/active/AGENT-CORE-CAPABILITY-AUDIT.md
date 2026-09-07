@@ -22,13 +22,13 @@ Native Azure, Bedrock, Vertex, Mistral, DeepSeek, and local-server provider defi
 
 ## Findings, ordered by impact
 
-### 1. P1 — Direct Gemini drops required tool-call thought signatures
+### 1. P1 — Direct Gemini drops required tool-call thought signatures — fixed 2026-09-07
 
 `agent-core/auth/providers/google.ts` selects Completions. `completionResultFromEvents` in `agent-core/openai-compat.ts:942` keeps tool ID/name/arguments but drops `extra_content.google.thought_signature`. `toCompletionsMessages` at line 99 also reconstructs calls without that field. A synthetic signed tool event passed through both functions loses its signature. Subsequent Gemini tool turns can fail validation. Native Google serialization elsewhere does not repair the direct provider's Completions path.
 
 [Google documents exact signature replay, including the OpenAI-compatible tool-call field](https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures). Fix the canonical parse → persist/project → serialize path and verify two consecutive tool turns, including parallel calls.
 
-### 2. P1 — Context fallback can be eight times the actual model limit
+### 2. P1 — Context fallback can be eight times the actual model limit — fixed 2026-09-07 (OpenAI → 128k; output-cap clamping still open)
 
 `agent-core/models/capabilities.ts` returns 1,050,000 for OpenAI models without catalog context. A direct call for `gpt-4o` reproduced that value; [its documented context is 128,000](https://developers.openai.com/api/docs/models/gpt-4o). `main.ts:256` uses this value for admission, reclaim, and summarization thresholds. This delays compaction until well beyond the actual window; the overflow retry cannot make an incorrect capacity correct.
 

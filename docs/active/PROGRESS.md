@@ -8,7 +8,8 @@
 
 ## Next
 
-- Capability-audit repairs: two P1s (Gemini `thought_signature` loss, 1M context fallback) then four P2s — see AGENT-CORE-CAPABILITY-AUDIT.md.
+- P1 repairs (2026-09-07): Gemini `thought_signature` now round-trips on the Completions path (parse → `tool_use.thought_signature` → `extra_content` replay; mid-stream change rejected; two-turn parallel-call test in `provider-tool-args.test.ts`). OpenAI context fallback 1.05M → 128k (`capabilities.ts`, documented floor); harness assertion updated. Typecheck green, tool-args 10/10, harness 1/1.
+- Capability-audit repairs: four P2s remain — see AGENT-CORE-CAPABILITY-AUDIT.md.
 - Token-roadmap evidence gates (TOKEN-EFFICIENCY-ROADMAP.md); audit §3.2 unassessed files (`openai-compat`, `session-retention`, `worldline-git`, `host`, `mcp`).
 
 ## Done (recent)
