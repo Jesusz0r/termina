@@ -3839,7 +3839,12 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check(
       "Go relay completions expose the core effort subset",
       supportedEffortLevels("opencode-go", "deepseek-v4-flash", auth.providerProtocol("opencode-go", "deepseek-v4-flash")).join(" ") === "off low medium high max" &&
-        supportedEffortLevels("opencode-go", "qwen3.8-max", auth.providerProtocol("opencode-go", "qwen3.8-max")).join(" ") === "off low medium high max",
+        supportedEffortLevels("opencode-go", "kimi-k2.7-code", auth.providerProtocol("opencode-go", "kimi-k2.7-code")).join(" ") === "off low medium high max",
+    );
+    check(
+      "Go qwen matches Zen Messages effort",
+      supportedEffortLevels("opencode-go", "qwen3.8-max", auth.providerProtocol("opencode-go", "qwen3.8-max")).join(" ") ===
+        supportedEffortLevels("opencode-zen", "qwen3.8-max", auth.providerProtocol("opencode-zen", "qwen3.8-max")).join(" "),
     );
     check(
       "Unknown relay completions models stay off",
