@@ -8097,6 +8097,10 @@ function startCatalogCommand(line: string): void {
       modelAvailabilityError = null;
       resetCacheContinuity();
       out(`model ${route.provider}/${route.model}\n`);
+      const switched = catalogs.get(route.provider)?.find((m) => m.id === route.model);
+      if (switched && catalogSupportsTools(switched) === false) {
+        out(`(warning: ${route.provider}/${route.model} does not advertise tool support)\n`);
+      }
       syncStatus();
     } finally {
       if (catalogAbort === abort) {
