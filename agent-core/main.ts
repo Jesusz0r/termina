@@ -90,6 +90,7 @@ import {
   runLogin,
   runLogout,
   type ProviderId,
+  type ProviderProtocol,
 } from "./auth.ts";
 import {
   completionsBody,
@@ -5760,6 +5761,30 @@ function textFromStreamBlocks(blocks: Array<Record<string, unknown>>): string {
     .trim();
 }
 
+export function summaryRequestPolicy(providerId: ProviderId, model: string): {
+  protocol: ProviderProtocol;
+  effort: EffortLevel;
+  reasoning: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | undefined;
+  maxTokens: number;
+} {
+  const proto = providerProtocol(providerId, model);
+  // Lowest supported effort: "off" where the route disables reasoning, the
+  // clamped floor (e.g. Grok low) where it cannot, undefined where the route
+  // takes no effort control and the provider default applies.
+  const effort = clampEffortLevel(providerId, model, "off", proto);
+  const reasoning = reasoningEffortFor(providerId, model, "off", proto);
+  const catalogLimit = catalogOutputLimit(catalogs.get(providerId)?.find((m) => m.id === model));
+  const thinkingBudget = outputTokenBudget({ thinking: effort !== "off" });
+  // Keep the small fixed cap for non-reasoning summaries; give reasoning
+  // summaries room for handoff text, bounded by the catalog ceiling.
+  const maxTokens = effort === "off"
+    ? 2048
+    : catalogLimit === null
+      ? thinkingBudget
+      : Math.max(2048, Math.min(thinkingBudget, catalogLimit));
+  return { protocol: proto, effort, reasoning, maxTokens };
+}
+
 async function completeTextBody(
   providerId: ProviderId,
   model: string,
@@ -5770,6 +5795,8 @@ async function completeTextBody(
   onCache?: (cache: TraceCacheDiagnostics) => void,
 ): Promise<{ text: string; usage: Usage | null; ttftMs: number | null; cache: TraceCacheDiagnostics | null }> {
   const proto = providerProtocol(providerId, model);
+  const { reasoning: summaryReasoning, maxTokens: summaryMaxTokens } =
+    summaryRequestPolicy(providerId, model);
   const cacheIdentity = cacheIdentityForRole("summary", providerId, model);
   const cacheKey = cacheIdentity?.key;
   const sendCacheKey = Boolean(cacheKey) && cacheCapabilitySupported(providerId, model, CACHE_CAPABILITY_FEATURE.promptCacheKey);
@@ -5778,7 +5805,7 @@ async function completeTextBody(
     const thinking = thinkingRequestFor(providerId, model, "off", providerProtocol(providerId, model));
     const requestBody = {
       model,
-      max_tokens: 2048,
+      max_tokens: summaryMaxTokens,
       system,
       messages: [{ role: "user", content: prompt }],
       ...(thinking ? { thinking } : {}),
@@ -5818,7 +5845,7 @@ async function completeTextBody(
       [{ role: "user", content: prompt }],
       [],
       {
-        maxTokens: 2048,
+        maxTokens: summaryMaxTokens,
         ...(effort ? { reasoningEffort: effort, googleThinking: true } : {}),
       },
     );
@@ -5856,10 +5883,11 @@ async function completeTextBody(
     // Codex and Zen GPT require a streaming list input. String input and stream:false return 400.
     const requestBody = responsesBody(model, system, [{ role: "user", content: prompt }], [], {
       provider: providerId,
-      ...(providerId === "openai-codex" ? {} : { maxTokens: 2048 }),
+      ...(providerId === "openai-codex" ? {} : { maxTokens: summaryMaxTokens }),
       ...(sendCacheKey ? { cacheKey } : {}),
       ...(sendSessionId ? { sessionId: sendSessionId } : {}),
       includeEncryptedReasoning: false,
+      ...(summaryReasoning ? { reasoningEffort: summaryReasoning } : {}),
     });
     const requestCache = cacheDiagnosticsForRequest(
       requestBody,
@@ -5894,7 +5922,8 @@ async function completeTextBody(
   const requestBody = {
     model,
     stream: false,
-    ...(providerId === "openai" ? { max_completion_tokens: 2048 } : { max_tokens: 2048 }),
+    ...(providerId === "openai" ? { max_completion_tokens: summaryMaxTokens } : { max_tokens: summaryMaxTokens }),
+    ...(summaryReasoning ? { reasoning_effort: summaryReasoning } : {}),
     messages: [
       { role: "system", content: system },
       { role: "user", content: prompt },

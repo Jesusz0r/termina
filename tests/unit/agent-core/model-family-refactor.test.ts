@@ -63,4 +63,18 @@ describe("shared model capabilities across provider protocols", () => {
     expect(supportedEffortLevels("opencode-go", "minimax-m2.5", "anthropic-messages"))
       .toEqual(["off"]);
   });
+
+  it("gives reasoning summaries room while keeping non-reasoning summaries small", async () => {
+    const { summaryRequestPolicy } = await import("../../../agent-core/main.ts");
+    const grok = summaryRequestPolicy("xai", "grok-4.6");
+    expect(grok.effort).toBe("low");
+    expect(grok.reasoning).toBe("low");
+    expect(grok.maxTokens).toBe(64_000);
+    const plain = summaryRequestPolicy("openai", "gpt-4o");
+    expect(plain.effort).toBe("off");
+    expect(plain.maxTokens).toBe(2048);
+    const unknown = summaryRequestPolicy("openrouter", "deepseek/deepseek-r1");
+    expect(unknown.reasoning).toBeUndefined();
+    expect(unknown.maxTokens).toBe(2048);
+  });
 });
