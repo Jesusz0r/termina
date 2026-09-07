@@ -93,11 +93,18 @@ interface SharedModelEntry {
   refs: number;
 }
 
-/** Monaco models are global by URI; tabs are owned by each project editor. */
+/** Monaco models are global by URI; tabs are owned by each project editor.
+ *  Scoped by project so the same absolute path open in two projects never
+ *  shares dirty/conflict/decoration state. */
 const sharedFileModels = new Map<string, SharedModelEntry>();
 
-function acquireSharedFileModel(path: string): { model: monaco.editor.ITextModel; release: () => void } {
-  const uri = monaco.Uri.file(path);
+function acquireSharedFileModel(
+  path: string,
+  owner?: ProjectWorkspaceRef | null,
+): { model: monaco.editor.ITextModel; release: () => void } {
+  const baseUri = monaco.Uri.file(path);
+  const scope = owner?.projectId ?? "";
+  const uri = scope ? baseUri.with({ query: `project=${encodeURIComponent(scope)}` }) : baseUri;
   const uriKey = uri.toString();
   let entry = sharedFileModels.get(uriKey);
   if (!entry || entry.model.isDisposed()) {
@@ -285,7 +292,7 @@ export class EditorManager {
     // Keep a replacement tab in the map before closing the previous preview.
     // Closing the last tab first would collapse the editor, then expand it again.
     const replacing = preview && this.previewKey && this.previewKey !== key ? this.previewKey : null;
-    const lease = acquireSharedFileModel(path);
+    const lease = acquireSharedFileModel(path, owner);
     const model = lease.model;
     const tab = this.makeTab(key, model, owner, lease.release);
     if (preview) {

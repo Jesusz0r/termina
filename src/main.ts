@@ -239,6 +239,7 @@ function removeProjectView(projectId: string): void {
   const closingIndex = projectIds.indexOf(projectId);
   projectViews.delete(projectId);
   lastActivePane.delete(projectId);
+  pendingToolTargets.delete(projectId);
   if (activeProjectId === projectId) {
     activeProjectId = null;
     const remaining = [...projectViews.keys()];
@@ -294,9 +295,27 @@ function setActiveProject(projectId: string | null): void {
   placeEditorToggle(activeProjectId);
   syncPaneVisibility();
   collapseEditorIfIdle();
+  drainPendingToolTargets(activeProjectId);
   fitPanes();
   timelineJumpEpoch++;
   updateEditorLock();
+}
+
+/** Open queued agent auto-opens for a project that just became active. */
+function drainPendingToolTargets(projectId: string | null): void {
+  if (!projectId) return;
+  const queued = pendingToolTargets.get(projectId);
+  if (!queued || queued.length === 0) return;
+  pendingToolTargets.delete(projectId);
+  const view = projectViews.get(projectId);
+  if (!view) return;
+  for (const target of queued) {
+    if (view.workspaceId !== target.workspaceId) continue;
+    const owner: ProjectWorkspaceRef = { projectId, workspaceId: target.workspaceId };
+    void ensureProjectEditor(view).openFile(target.path, { preview: false, owner }).catch((err) => {
+      toast(`could not open ${pathBasename(target.path)}: ${(err as Error).message}`, "error");
+    });
+  }
 }
 
 /** Show only the active project's terminals. Other project panes stay alive. */
@@ -605,6 +624,10 @@ interface Pane {
 const panes = new Map<string, Pane>();
 /** Last active terminal per project. Returning to a project restores it. */
 const lastActivePane = new Map<string, string>();
+/** Agent auto-opens that arrived while their project was in the background.
+ *  Drained (pinned, not preview) when the project becomes active again. */
+const pendingToolTargets = new Map<string, Array<{ path: string; workspaceId: string }>>();
+const MAX_PENDING_TOOL_TARGETS = 20;
 (window as unknown as Record<string, unknown>).__panes = panes;
 const closingPanes = new Set<string>();
 let activeId: string | null = null;
@@ -1439,7 +1462,6 @@ async function openFileSmart(
   column?: number,
 ): Promise<void> {
   if (reviewView?.isVisible) reviewView.hide();
-  revealEditor();
   let owner = requestedOwner ?? (() => {
     const view = activeProjectId ? projectViews.get(activeProjectId) : null;
     return view?.workspaceId ? { projectId: view.id, workspaceId: view.workspaceId } : null;
@@ -1478,6 +1500,9 @@ async function openFileSmart(
     return;
   }
   const abs = cleanPath.startsWith("/") ? cleanPath : normalizePath(`${view.cwd}/${cleanPath}`);
+  // Expand the editor only once the target project is known and in front:
+  // revealing before routing resizes the terminal twice on cross-project opens.
+  revealEditor();
   try {
     await ensureProjectEditor(view).openFile(abs, { preview, owner, line, column });
   } catch (err) {
@@ -2620,8 +2645,18 @@ window.pi.onPlanUpdate(({ instanceId, tasks }) => {
 
 window.pi.onToolTarget((p) => {
   const view = projectViews.get(p.projectId);
-  if (!view || view.workspaceId !== p.workspaceId || activeProjectId !== p.projectId) return;
+  if (!view || view.workspaceId !== p.workspaceId) return;
   const owner: ProjectWorkspaceRef = { projectId: p.projectId, workspaceId: p.workspaceId };
+  if (activeProjectId !== p.projectId) {
+    // Background agent's file: queue it and open on return instead of dropping it.
+    const queued = pendingToolTargets.get(p.projectId) ?? [];
+    const at = queued.findIndex((t) => t.path === p.path);
+    if (at !== -1) queued.splice(at, 1);
+    queued.push({ path: p.path, workspaceId: p.workspaceId });
+    while (queued.length > MAX_PENDING_TOOL_TARGETS) queued.shift();
+    pendingToolTargets.set(p.projectId, queued);
+    return;
+  }
   void ensureProjectEditor(view).openFile(p.path, { preview: false, owner }).catch((err) => {
     toast(`could not open ${pathBasename(p.path)}: ${(err as Error).message}`, "error");
   });
