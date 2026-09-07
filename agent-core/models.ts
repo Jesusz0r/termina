@@ -19,7 +19,18 @@ import { providerDefinition } from "./auth/providers/index.ts";
 
 export { firstAuthenticatedProvider } from "./auth.ts";
 
-export type ModelInfo = { id: string; name?: string; context?: number; supportedEndpoints?: string[] };
+export type ModelInfo = {
+  id: string;
+  name?: string;
+  context?: number;
+  supportedEndpoints?: string[];
+  /** Max completion tokens, from provider-reported metadata (OpenRouter `top_provider`). */
+  outputLimit?: number;
+  /** Wire reasoning-level values, from provider-reported metadata (Codex `supported_reasoning_levels`). */
+  reasoningLevels?: string[];
+  /** Raw provider-reported parameter list (OpenRouter `supported_parameters`). */
+  supportedParameters?: string[];
+};
 
 export const MODEL_LIST_CAP = 200;
 const CATALOG_TIMEOUT_MS = 10_000;
@@ -117,7 +128,36 @@ function rowId(row: Record<string, unknown>, provider: ProviderId): ModelInfo | 
     ?? policy.contextFallback?.(row));
   const context = Number.isFinite(contextRaw) && contextRaw >= 8_000 ? Math.floor(contextRaw) : undefined;
   const supportedEndpoints = policy.supportedEndpoints?.(row);
-  return { id, ...(name ? { name } : {}), ...(context ? { context } : {}), ...(supportedEndpoints ? { supportedEndpoints } : {}) };
+  // Doc-confirmed metadata only: OpenRouter `top_provider.max_completion_tokens`
+  // and `supported_parameters` (https://openrouter.ai/docs/guides/overview/models.md);
+  // Codex `supported_reasoning_levels[].effort`
+  // (https://github.com/openai/codex/blob/main/codex-rs/protocol/src/openai_models.rs).
+  // Anthropic's docs page is a JS shell with no extractable schema, so no
+  // Anthropic-specific keys are read here.
+  const topProvider = asRecord(row.top_provider);
+  const outputRaw = Number(topProvider?.max_completion_tokens);
+  const outputLimit = Number.isFinite(outputRaw) && outputRaw >= 1_000 ? Math.floor(outputRaw) : undefined;
+  const reasoningLevels = Array.isArray(row.supported_reasoning_levels)
+    ? row.supported_reasoning_levels
+        .map((preset) => {
+          const rec = asRecord(preset);
+          const effort = rec && typeof rec.effort === "string" ? rec.effort.trim().toLowerCase() : "";
+          return effort || null;
+        })
+        .filter((effort): effort is string => effort !== null)
+    : undefined;
+  const supportedParameters = Array.isArray(row.supported_parameters)
+    ? row.supported_parameters.filter((param): param is string => typeof param === "string")
+    : undefined;
+  return {
+    id,
+    ...(name ? { name } : {}),
+    ...(context ? { context } : {}),
+    ...(supportedEndpoints ? { supportedEndpoints } : {}),
+    ...(outputLimit ? { outputLimit } : {}),
+    ...(reasoningLevels?.length ? { reasoningLevels } : {}),
+    ...(supportedParameters?.length ? { supportedParameters } : {}),
+  };
 }
 
 export function parseModelsPayload(payload: unknown, provider: ProviderId): ModelInfo[] {

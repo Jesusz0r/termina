@@ -23,6 +23,7 @@
  */
 import {
   EFFORT_LEVELS,
+  catalogOutputLimit,
   defaultContextWindow,
   supportedEffortLevels,
   clampEffortLevel,
@@ -6016,7 +6017,10 @@ async function callModel(
   }));
   const toolsForProvider = clientTools as ToolDef[];
   const actualEffort = effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));
-  const maxTokens = outputTokenBudget({ thinking: actualEffort !== "off" });
+  const catalogLimit = catalogOutputLimit(catalogs.get(route.provider)?.find((m) => m.id === route.model));
+  const budgeted = outputTokenBudget({ thinking: actualEffort !== "off" });
+  // Never request more output than the catalog-reported completion ceiling.
+  const maxTokens = catalogLimit === null ? budgeted : Math.max(1_024, Math.min(budgeted, catalogLimit));
   const thinking = thinkingRequestFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));
   const adaptiveEffort = adaptiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));
   const reasoningEffort = reasoningEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));

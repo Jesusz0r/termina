@@ -1,6 +1,7 @@
 import { grokEffortLevelMap, nonReasoningGrok } from "./families/xai.ts";
 import { openaiEffortLevelMap } from "./families/openai.ts";
 import type { ProviderId, ProviderProtocol } from "../auth.ts";
+import type { ModelInfo } from "../models.ts";
 import { modelLeaf } from "./families/identity.ts";
 import { claudeThinkingApi, claudeEffortLevelMap } from "./families/anthropic.ts";
 import { gemini3Model, geminiEffortLevelMap } from "./families/google.ts";
@@ -197,6 +198,26 @@ export function includeEncryptedReasoning(provider: ProviderId, model: string): 
   if (provider === "xai") return false;
   if (modelLeaf(model).startsWith("grok")) return false;
   return true;
+}
+
+/** Catalog-reported max completion tokens, or null when the catalog is silent. */
+export function catalogOutputLimit(entry: ModelInfo | undefined): number | null {
+  if (!entry || typeof entry.outputLimit !== "number" || !Number.isFinite(entry.outputLimit) || entry.outputLimit < 1_000) {
+    return null;
+  }
+  return Math.floor(entry.outputLimit);
+}
+
+/** Catalog-reported wire reasoning levels, or null when the catalog is silent. */
+export function catalogReasoningLevels(entry: ModelInfo | undefined): string[] | null {
+  if (!entry || !Array.isArray(entry.reasoningLevels) || entry.reasoningLevels.length === 0) return null;
+  return [...entry.reasoningLevels];
+}
+
+/** Catalog-reported tool support, or null when the catalog is silent. */
+export function catalogSupportsTools(entry: ModelInfo | undefined): boolean | null {
+  if (!entry || !Array.isArray(entry.supportedParameters)) return null;
+  return entry.supportedParameters.includes("tools");
 }
 
 export function defaultContextWindow(provider: ProviderId, model: string): number {

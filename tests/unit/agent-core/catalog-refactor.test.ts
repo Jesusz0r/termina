@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MODEL_LIST_CAP, parseModelsPayload } from "../../../agent-core/models.ts";
+import { catalogOutputLimit, catalogReasoningLevels, catalogSupportsTools } from "../../../agent-core/models/capabilities.ts";
 
 describe("catalog provider policy composition", () => {
   it("keeps Copilot metadata scoped to Copilot and preserves top-level context precedence", () => {
@@ -23,6 +24,48 @@ describe("catalog provider policy composition", () => {
       { id: "gpt-empty", supportedEndpoints: [] }, { id: "gpt-absent" },
       { id: "gpt-prompt", context: 32000 },
     ]);
+  });
+
+  it("retains doc-confirmed OpenRouter and Codex capability metadata", () => {
+    const openrouter = {
+      id: "deepseek/deepseek-r1",
+      name: "DeepSeek R1",
+      context_length: 128000,
+      top_provider: { context_length: 128000, max_completion_tokens: 64000, is_moderated: false },
+      supported_parameters: ["tools", "temperature", "reasoning"],
+    };
+    expect(parseModelsPayload([openrouter], "openrouter")).toEqual([
+      {
+        id: "deepseek/deepseek-r1",
+        name: "DeepSeek R1",
+        context: 128000,
+        outputLimit: 64000,
+        supportedParameters: ["tools", "temperature", "reasoning"],
+      },
+    ]);
+    const codex = {
+      id: "gpt-5.6",
+      supported_reasoning_levels: [
+        { effort: "low", description: "fast" },
+        { effort: "  MEDIUM ", description: "balanced" },
+        { effort: 42, description: "junk" },
+      ],
+    };
+    expect(parseModelsPayload([codex], "openai-codex")).toEqual([
+      { id: "gpt-5.6", reasoningLevels: ["low", "medium"] },
+    ]);
+  });
+
+  it("resolves catalog metadata with silence distinct from zero", () => {
+    expect(catalogOutputLimit(undefined)).toBeNull();
+    expect(catalogOutputLimit({ id: "m" })).toBeNull();
+    expect(catalogOutputLimit({ id: "m", outputLimit: 64000 })).toBe(64000);
+    expect(catalogReasoningLevels(undefined)).toBeNull();
+    expect(catalogReasoningLevels({ id: "m", reasoningLevels: ["low", "medium"] })).toEqual(["low", "medium"]);
+    expect(catalogSupportsTools(undefined)).toBeNull();
+    expect(catalogSupportsTools({ id: "m" })).toBeNull();
+    expect(catalogSupportsTools({ id: "m", supportedParameters: ["tools", "temperature"] })).toBe(true);
+    expect(catalogSupportsTools({ id: "m", supportedParameters: ["temperature"] })).toBe(false);
   });
 
   it("applies generic filtering, duplicate handling and caps with permissive provider policies", () => {
