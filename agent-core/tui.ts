@@ -14,6 +14,7 @@ import {
   forEachGrapheme,
   formatPickerRow,
   graphemeCells,
+  cursorRowCol,
   matchingSlashCommands,
   splitGraphemes,
   truncateMiddle,
@@ -212,16 +213,6 @@ function boxBorderRow(cols: number, left: string, fill: string, right: string): 
 function boxContentRow(content: string, cols: number): string {
   const inner = clip(content, inputWrapWidth(cols));
   return clip(`│ ${inner} │`, cols);
-}
-
-export function cursorRowCol(prefix: string, chars: string[], cursor: number, cols: number): { row: number; col: number } {
-  const width = Math.max(1, cols);
-  const text = prefix + chars.slice(0, Math.max(0, cursor)).join("");
-  const lines = wrapText(text, width);
-  const row = Math.max(0, lines.length - 1);
-  const col = cellWidth(lines[row] ?? "");
-  if (col >= width) return { row: row + 1, col: 0 };
-  return { row, col };
 }
 
 function wrapInput(

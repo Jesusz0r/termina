@@ -204,5 +204,9 @@ export function defaultContextWindow(provider: ProviderId, model: string): numbe
   if (id.includes("haiku")) return 200_000;
   if (provider === "xai" || modelLeaf(model).startsWith("grok")) return 500_000;
   if (provider === "anthropic" || provider === "google") return 1_000_000;
+  // Conservative documented floor for OpenAI models without catalog context
+  // (gpt-4o/gpt-4o-mini are 128k; larger-context models report real metadata).
+  // https://developers.openai.com/api/docs/models/gpt-4o
+  if (provider === "openai") return 128_000;
   return 1_050_000;
 }

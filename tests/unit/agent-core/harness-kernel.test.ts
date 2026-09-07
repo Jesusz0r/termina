@@ -139,7 +139,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       completeFileMention,
       rankFileTags,
       subsequenceSpread,
-    } = tuiCore;
+    } = await import("../../../agent-core/tui-text.ts");
     
     const { check, results } = createCheckReporter();
     
@@ -3628,7 +3628,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     check("defaultContextWindow anthropic is 1M", defaultContextWindow("anthropic", "claude-sonnet-5") === 1_000_000);
     check("defaultContextWindow haiku is 200k", defaultContextWindow("anthropic", "claude-haiku-4-5") === 200_000);
-    check("defaultContextWindow openai is 1.05M", defaultContextWindow("openai", "gpt-5.6-sol") === 1_050_000);
+    check("defaultContextWindow openai is 128k", defaultContextWindow("openai", "gpt-4o") === 128_000);
     check("defaultContextWindow xai is 500k", defaultContextWindow("xai", "grok-4.6") === 500_000);
     check("defaultContextWindow zen grok is 500k", defaultContextWindow("opencode-zen", "grok-4.6") === 500_000);
     check("includeEncryptedReasoning skips xai", includeEncryptedReasoning("xai", "grok-4.6") === false);
@@ -4079,14 +4079,15 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     }
     
     const tuiMod = await import("../../../agent-core/tui.ts");
-    check("wrapText splits on width", tuiMod.wrapText("abcdef", 3).join("|") === "abc|def");
-    check("wrapText keeps newlines", tuiMod.wrapText("ab\ncd", 10).join("|") === "ab|cd");
-    check("wrapText keeps emoji graphemes", tuiMod.wrapText("👍👍", 1).join("|") === "👍|👍");
-    check("cellWidth treats CJK as two cells", tuiMod.cellWidth("界") === 2);
-    check("cellWidth treats combining marks as one cell", tuiMod.cellWidth("e\u0301") === 1);
-    check("cursorRowCol treats newline as a wrap break", tuiMod.cursorRowCol("> ", ["a", "\n", "b"], 2, 80).row === 1);
-    check("cursorRowCol places the caret on the next line", tuiMod.cursorRowCol("> ", ["a", "\n", "b"], 3, 80).col === 1);
-    check("cursorRowCol stays on the first line before the break", tuiMod.cursorRowCol("> ", ["a", "\n", "b"], 1, 80).row === 0);
+    const tuiText = await import("../../../agent-core/tui-text.ts");
+    check("wrapText splits on width", tuiText.wrapText("abcdef", 3).join("|") === "abc|def");
+    check("wrapText keeps newlines", tuiText.wrapText("ab\ncd", 10).join("|") === "ab|cd");
+    check("wrapText keeps emoji graphemes", tuiText.wrapText("👍👍", 1).join("|") === "👍|👍");
+    check("cellWidth treats CJK as two cells", tuiText.cellWidth("界") === 2);
+    check("cellWidth treats combining marks as one cell", tuiText.cellWidth("e\u0301") === 1);
+    check("cursorRowCol treats newline as a wrap break", tuiText.cursorRowCol("> ", ["a", "\n", "b"], 2, 80).row === 1);
+    check("cursorRowCol places the caret on the next line", tuiText.cursorRowCol("> ", ["a", "\n", "b"], 3, 80).col === 1);
+    check("cursorRowCol stays on the first line before the break", tuiText.cursorRowCol("> ", ["a", "\n", "b"], 1, 80).row === 0);
     const boxTui = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
       stdin: { isTTY: false },
@@ -4590,7 +4591,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         combinedStatusHeader.includes("2 img") &&
         combinedStatusHeader.includes("queued") &&
         !combinedStatusHeader.includes("oauth") &&
-        tuiMod.cellWidth(combinedStatusHeader) <= 80,
+        tuiText.cellWidth(combinedStatusHeader) <= 80,
     );
     let hostRefresh = 0;
     const refreshTui = new tuiMod.AgentTui({
