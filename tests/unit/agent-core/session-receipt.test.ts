@@ -282,4 +282,31 @@ describe("Agent Core Session Settings Records", () => {
     expect(replayed.ok).toBe(true);
     if (replayed.ok) expect(replayed.effort).toBeNull();
   });
+
+  it("survives a bundle round-trip with messages around it", async () => {
+    const roundRoot = mkdtempSync(join(tmpdir(), "agent-core-session-settings-"));
+    try {
+      const roundFile = session.coreSessionFile(roundRoot, "round");
+      mkdirSync(dirname(roundFile), { recursive: true, mode: 0o700 });
+      writeFileSync(roundFile, text([
+        { storageSeq: 1, type: "message", message: { role: "user", content: "hi" } },
+        { storageSeq: 2, type: "settings", effort: "low" },
+        { storageSeq: 3, type: "message", message: { role: "assistant", content: "hello" } },
+      ]), { mode: 0o600 });
+      const replayed = await session.replaySessionBundle(roundFile);
+      expect(replayed.ok).toBe(true);
+      if (replayed.ok) {
+        expect(replayed.state.effort).toBe("low");
+        expect(replayed.messages).toHaveLength(2);
+      }
+    } finally {
+      rmSync(roundRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects settings records that smuggle a message", () => {
+    expect(session.replaySessionRecords(text([
+      { storageSeq: 1, type: "settings", effort: "low", message: { role: "user", content: "x" } },
+    ])).ok).toBe(false);
+  });
 });

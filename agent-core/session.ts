@@ -1950,6 +1950,7 @@ export function applySessionRecord(state: ReplayState, rec: unknown): SessionRes
   if (e.type === "settings") {
     // Opaque kernel setting; the owner validates the value on apply.
     // Bound the string so a corrupt bundle cannot smuggle bulk data here.
+    if ("message" in e) return { ok: false, error: "settings contains a message" };
     if (typeof e.effort !== "string" || e.effort.length < 1 || e.effort.length > 64) {
       return { ok: false, error: "invalid settings effort" };
     }
