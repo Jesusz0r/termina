@@ -8,7 +8,8 @@
 
 ## Next
 
-- Coverage gaps: live probes for the 5 credential-less providers, full monolithic harness (OOM on this box).
+- Capability-audit repairs: two P1s (Gemini `thought_signature` loss, 1M context fallback) then four P2s — see AGENT-CORE-CAPABILITY-AUDIT.md.
+- Token-roadmap evidence gates (TOKEN-EFFICIENCY-ROADMAP.md); audit §3.2 unassessed files (`openai-compat`, `session-retention`, `worldline-git`, `host`, `mcp`).
 
 ## Done (recent)
 
