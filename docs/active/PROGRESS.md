@@ -8,11 +8,12 @@
 
 ## Next
 
-- Capability-audit remainder: P2 #6 account-aware endpoint + paging; token-roadmap evidence gates (TOKEN-EFFICIENCY-ROADMAP.md); audit §3.2 unassessed files (`openai-compat`, `session-retention`, `worldline-git`, `host`, `mcp`).
+- Token-roadmap evidence gates (live providers, benchmarks, corpora — see TOKEN-EFFICIENCY-ROADMAP.md).
 - Token-roadmap evidence gates (TOKEN-EFFICIENCY-ROADMAP.md); audit §3.2 unassessed files (`openai-compat`, `session-retention`, `worldline-git`, `host`, `mcp`).
 
 ## Done (recent)
 
+- P2 #6 remainder (2026-09-07): `/models <query>` substring search across provider/id/name with explicit no-match message; displayed lists cap at `MODELS_DISPLAY_CAP` with a `(+N more)` refinement marker; verified catalog fetches already send auth headers. Catalog filter/truncation tests 6/6.
 - Full agent-core suite green (2026-09-07): 45/45 files, 249/249 tests with `--maxWorkers=2`. Root-caused the two "pre-existing environment" failures to a stale empty admission-lock dir (`$TMPDIR/.termina-retained-session-admission.lock`, Sep 5 crash between mkdir and owner write) — removed; fixtures now canonicalize tmpdir (macOS `/var` symlink) and retry transient lock states per existing precedent; 2.5 effort assertion updated to the explicit-control contract.
 - P2 repairs (2026-09-07): #3 catalog retains OpenRouter `max_completion_tokens`/`supported_parameters` and Codex `supported_reasoning_levels` (live-doc verified; Anthropic docs JS-shell, no keys invented), main-request output clamped to the catalog ceiling; #4 Gemini 2.5 effort control on the direct provider + `effortControlFor` with truthful `/effort` display; #5 summaries use lowest supported effort with reasoning-aware budget via testable `summaryRequestPolicy`; #6 explicitly-toolless entries filtered from the listing/selection funnel with metadata carried on `CatalogModel`. Typecheck green; catalog 5/5, family 9/9.
 - P1 repairs (2026-09-07): Gemini `thought_signature` now round-trips on the Completions path (parse → `tool_use.thought_signature` → `extra_content` replay; mid-stream change rejected; two-turn parallel-call test in `provider-tool-args.test.ts`). OpenAI context fallback 1.05M → 128k (`capabilities.ts`, documented floor); harness assertion updated. Typecheck green, tool-args 10/10, harness 1/1.

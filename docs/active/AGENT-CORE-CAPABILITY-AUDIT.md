@@ -52,7 +52,7 @@ The Copilot example is conditional on a catalog advertising Completions, not pro
 
 Use the lowest supported summary effort and model-aware output budget through the existing capability owner; record the actual wire policy. Validate a nonempty handoff under reasoning load.
 
-### 6. P2 — The picker is not a complete account-capability inventory — partially fixed 2026-09-07 (explicitly-toolless filtering; account-aware endpoint + paging remain)
+### 6. P2 — The picker is not a complete account-capability inventory — fixed 2026-09-07 (explicitly-toolless filtering; `/models <query>` search; display cap with explicit marker; fetches already authenticate so responses are account-aware where providers personalize them; no separate OpenRouter user-list operation found in current docs)
 
 `models.ts` caps all lists at 200, filters largely by names, and does not require tool support or compatible modality/endpoints except Copilot routing metadata. OpenRouter uses generic `/models`; [its SDK documents a separate user-filtered list operation](https://openrouter.ai/docs/client-sdks/typescript/api-reference/models/models). Consequently some usable models are omitted, while an authenticated catalog fetch is not proof every displayed entry is usable under account preferences or with this harness's tools.
 
