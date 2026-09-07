@@ -137,6 +137,7 @@ import {
 } from "./cache.ts";
 import {
   catalogFetchAllowed,
+  filterCatalogModels,
   formatCatalogLines,
   formatModelBanner,
   loadProviderModels,
@@ -8009,6 +8010,12 @@ function startCatalogCommand(line: string): void {
       return;
     }
     const refresh = /\brefresh\b|\breload\b/.test(line);
+    const query = line
+      .slice("/models".length)
+      .split(/\s+/)
+      .map((word) => word.trim())
+      .filter((word) => word && !/^(refresh|reload)$/i.test(word))
+      .join(" ");
     const abort = new AbortController();
     catalogAbort = abort;
     authBusy = true;
@@ -8017,8 +8024,9 @@ function startCatalogCommand(line: string): void {
       try {
         const errors = await loadAuthenticatedCatalogs(refresh || catalogs.size === 0, abort.signal);
         for (const err of errors) out(`(${err})\n`);
-        const listed = allCatalogModels();
+        const listed = filterCatalogModels(allCatalogModels(), query);
         if (listed.length > 0) out(`${formatCatalogLines(listed, route.provider, route.model)}\n`);
+        else if (query) out(`(no models match "${query}")\n`);
         else out("(no model list — run /login)\n");
       } finally {
         if (catalogAbort === abort) {

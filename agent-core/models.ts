@@ -33,6 +33,8 @@ export type ModelInfo = {
 };
 
 export const MODEL_LIST_CAP = 200;
+/** No displayed model list exceeds this many rows; the rest get an explicit marker. */
+export const MODELS_DISPLAY_CAP = 200;
 const CATALOG_TIMEOUT_MS = 10_000;
 const CATALOG_BODY_LIMIT = 1_048_576;
 const CATALOG_REDIRECT_LIMIT = 3;
@@ -216,14 +218,26 @@ export function formatCatalogLines(
   currentModel: string,
 ): string {
   if (models.length === 0) return "";
-  const pw = Math.max(...models.map((m) => m.provider.length));
-  return models
-    .map((m) => {
-      const mark = m.provider === currentProvider && m.id === currentModel ? "*" : " ";
-      const extra = m.name && m.name !== m.id ? `  ${m.name}` : "";
-      return `${mark} ${m.provider.padEnd(pw)}  ${m.id}${extra}`;
-    })
-    .join("\n");
+  const shown = models.slice(0, MODELS_DISPLAY_CAP);
+  const pw = Math.max(...shown.map((m) => m.provider.length));
+  const lines = shown.map((m) => {
+    const mark = m.provider === currentProvider && m.id === currentModel ? "*" : " ";
+    const extra = m.name && m.name !== m.id ? `  ${m.name}` : "";
+    return `${mark} ${m.provider.padEnd(pw)}  ${m.id}${extra}`;
+  });
+  if (models.length > shown.length) {
+    lines.push(`  (+${models.length - shown.length} more — refine with /models <query>)`);
+  }
+  return lines.join("\n");
+}
+
+/** Case-insensitive substring filter across provider, id, and display name. */
+export function filterCatalogModels(models: CatalogModel[], query: string): CatalogModel[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return models;
+  return models.filter((m) =>
+    `${m.provider}/${m.id} ${m.name ?? ""}`.toLowerCase().includes(q),
+  );
 }
 
 export function parseModelSwitch(

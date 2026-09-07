@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MODEL_LIST_CAP, parseModelsPayload } from "../../../agent-core/models.ts";
+import { MODELS_DISPLAY_CAP, MODEL_LIST_CAP, filterCatalogModels, formatCatalogLines, parseModelsPayload } from "../../../agent-core/models.ts";
 import { catalogOutputLimit, catalogReasoningLevels, catalogSupportsTools } from "../../../agent-core/models/capabilities.ts";
 
 describe("catalog provider policy composition", () => {
@@ -54,6 +54,24 @@ describe("catalog provider policy composition", () => {
     expect(parseModelsPayload([codex], "openai-codex")).toEqual([
       { id: "gpt-5.6", reasoningLevels: ["low", "medium"] },
     ]);
+  });
+
+  it("filters the catalog by query and marks truncated lists explicitly", () => {
+    const rows = [
+      { provider: "openai", id: "gpt-4o", name: "GPT-4o" },
+      { provider: "anthropic", id: "claude-sonnet-4-5" },
+      { provider: "xai", id: "grok-4.6" },
+    ] as const;
+    expect(filterCatalogModels([...rows], "grok").map((m) => m.id)).toEqual(["grok-4.6"]);
+    expect(filterCatalogModels([...rows], "ANTHROPIC/claude").map((m) => m.id)).toEqual(["claude-sonnet-4-5"]);
+    expect(filterCatalogModels([...rows], "GPT").map((m) => m.id)).toEqual(["gpt-4o"]);
+    expect(filterCatalogModels([...rows], "  ")).toHaveLength(3);
+    expect(filterCatalogModels([...rows], "zzz")).toHaveLength(0);
+    const many = Array.from({ length: MODELS_DISPLAY_CAP + 5 }, (_, i) => ({ provider: "p", id: `m-${i}` }));
+    const text = formatCatalogLines(many, "p", "m-0");
+    expect(text.split("\n")).toHaveLength(MODELS_DISPLAY_CAP + 1);
+    expect(text).toMatch(/\(\+5 more/);
+    expect(formatCatalogLines([...rows], "xai", "grok-4.6")).not.toMatch(/more/);
   });
 
   it("resolves catalog metadata with silence distinct from zero", () => {
