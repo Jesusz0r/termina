@@ -1814,6 +1814,7 @@ function clearSplitSizes(): void {
   leftPane.style.width = "";
   leftPane.style.height = "";
   leftPane.style.flexBasis = "";
+  leftPane.style.flex = "";
 }
 
 function fitPanes(): void {
@@ -2289,9 +2290,11 @@ window.pi.onMenuCommand((cmd) => {
 
 const divider = document.getElementById("divider")!;
 let dragging = false;
-divider.addEventListener("mousedown", () => {
+divider.addEventListener("mousedown", (e) => {
   if (workPaneCollapsed()) return;
+  e.preventDefault();
   dragging = true;
+  suppressNativeDrag(true);
   document.body.style.cursor = isColumnLayout() ? "row-resize" : "col-resize";
 });
 window.addEventListener("mousemove", (e) => {
@@ -2301,20 +2304,26 @@ window.addEventListener("mousemove", (e) => {
     const pct = ((e.clientY - rect.top) / rect.height) * 100;
     leftPane.style.flexBasis = `${Math.min(75, Math.max(25, pct))}%`;
   } else {
+    // flex-basis (not width) drives the split: #left-pane is a flex item
+    // whose flex-basis overrides width. Grow stays on so the right pane
+    // absorbs free space and the left lands exactly on the dragged share.
     const pct = ((e.clientX - rect.left) / rect.width) * 100;
-    leftPane.style.width = `${Math.min(70, Math.max(30, pct))}%`;
+    leftPane.style.flex = `0 1 ${Math.min(70, Math.max(30, pct))}%`;
   }
 });
 window.addEventListener("mouseup", () => {
   dragging = false;
+  suppressNativeDrag(false);
   document.body.style.cursor = "";
 });
 
 // explorer ↔ editor divider
 let exploring = false;
-explorerDividerEl.addEventListener("mousedown", () => {
+explorerDividerEl.addEventListener("mousedown", (e) => {
   if (explorerMinimized) return;
+  e.preventDefault();
   exploring = true;
+  suppressNativeDrag(true);
   document.body.style.cursor = "col-resize";
 });
 window.addEventListener("mousemove", (e) => {
@@ -2325,6 +2334,28 @@ window.addEventListener("mousemove", (e) => {
 });
 window.addEventListener("mouseup", () => {
   exploring = false;
+  suppressNativeDrag(false);
+  document.body.style.cursor = "";
+});
+
+/** A native file drag started from a near-miss press steals the gesture
+ *  (moves arrive as drag events, plus pointercancel) and can leave a pane
+ *  drag flag stuck. Suppress dragstart while any divider drag is active. */
+let nativeDragSuppressed = false;
+function suppressNativeDrag(on: boolean): void {
+  if (on === nativeDragSuppressed) return;
+  nativeDragSuppressed = on;
+  if (on) window.addEventListener("dragstart", cancelNativeDrag, true);
+  else window.removeEventListener("dragstart", cancelNativeDrag, true);
+}
+function cancelNativeDrag(e: Event): void {
+  e.preventDefault();
+  e.stopPropagation();
+}
+window.addEventListener("pointercancel", () => {
+  dragging = false;
+  exploring = false;
+  suppressNativeDrag(false);
   document.body.style.cursor = "";
 });
 

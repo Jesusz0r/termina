@@ -169,6 +169,11 @@ body {
   flex: 0 0 5px;
 }
 
+#main-split.layout-terminal-top #divider::before,
+#main-split.layout-terminal-bottom #divider::before {
+  inset: -4px 0;
+}
+
 #main-split.layout-terminal-bottom #left-pane {
   border-bottom: none;
   border-top: 1px solid var(--border);
@@ -426,6 +431,15 @@ body {
   cursor: col-resize;
   background: color-mix(in srgb, var(--accent) 18%, var(--border));
   flex: 0 0 4px;
+  position: relative;
+}
+
+/* Wider grab hitbox without changing the visual width. */
+#explorer-divider::before,
+#divider::before {
+  content: "";
+  position: absolute;
+  inset: 0 -4px;
 }
 
 #explorer-divider:hover {
@@ -441,6 +455,7 @@ body {
   cursor: col-resize;
   background: color-mix(in srgb, var(--accent) 18%, var(--border));
   flex: 0 0 5px;
+  position: relative;
 }
 
 #divider:hover {
