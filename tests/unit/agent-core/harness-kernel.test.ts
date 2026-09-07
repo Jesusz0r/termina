@@ -3613,7 +3613,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       "Gemini 3.1 Pro keeps medium",
       supportedEffortLevels("google", "gemini-3.1-pro", auth.providerProtocol("google", "gemini-3.1-pro")).join(" ") === "low medium high",
     );
-    check("unsupported Gemini 2.5 stays off", thinkingEnabledFor("google", "gemini-2.5-flash", "high", auth.providerProtocol("google", "gemini-2.5-flash")) === false);
+    check("Gemini 2.5 effort is explicit on the direct provider", thinkingEnabledFor("google", "gemini-2.5-flash", "high", auth.providerProtocol("google", "gemini-2.5-flash")) === true);
     check("thinkingEnabledFor gpt 4 stays off", thinkingEnabledFor("openai", "gpt-4.1", "high", auth.providerProtocol("openai", "gpt-4.1")) === false);
     check("thinkingEnabledFor fable stays on", thinkingEnabledFor("anthropic", "claude-fable-5", "off", auth.providerProtocol("anthropic", "claude-fable-5")) === true);
     check("reasoningEffortFor gpt off is none", reasoningEffortFor("openai", "gpt-5.6-sol", "off", auth.providerProtocol("openai", "gpt-5.6-sol")) === "none");

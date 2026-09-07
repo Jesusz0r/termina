@@ -11,6 +11,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   readFileSync,
   readdirSync,
   renameSync,
@@ -66,9 +67,17 @@ function bundlePaths(root, id) {
 }
 
 function openWriter(sessionFile, lastStorageSeq = 0) {
-  const opened = SessionWriter.open(sessionFile, lastStorageSeq);
-  if (!opened.ok) throw new Error(opened.error);
-  return opened.writer;
+  // Session admission locks are transient under parallel workers; retry
+  // like session-retention-admission.test.ts before failing.
+  const deadline = Date.now() + 2000;
+  for (;;) {
+    const opened = SessionWriter.open(sessionFile, lastStorageSeq);
+    if (opened.ok) return opened.writer;
+    if (!/busy|admission lock is unreadable/i.test(opened.error || "") || Date.now() >= deadline) {
+      throw new Error(opened.error);
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+  }
 }
 
 function appendMsg(writer, sseq, role, content) {
@@ -190,7 +199,7 @@ function spawnCore(env, args = [], stdinLines = [], opts = {}) {
 }
 
 export async function run({ check, leftovers }) {
-  const root = mkdtempSync(join(tmpdir(), "agent-core-session-"));
+  const root = mkdtempSync(join(realpathSync(tmpdir()), "agent-core-session-"));
   leftovers.push(root);
 
   const firstSession = coreSessionFile(join(root, "first-project"), "first-session");
@@ -769,7 +778,7 @@ export async function run({ check, leftovers }) {
   const failReplay = await replaySessionBundle(fail.sessionFile);
   check("storage failure does not persist a later record", failAppend.ok === false && failReplay.ok && failReplay.maxSeq === 1);
 
-  const events = mkdtempSync(join(tmpdir(), "agent-core-events-"));
+  const events = mkdtempSync(join(realpathSync(tmpdir()), "agent-core-events-"));
   leftovers.push(events);
   const storeId = "store-1";
   const storeFile = coreSessionFile(events, storeId);
@@ -796,7 +805,7 @@ export async function run({ check, leftovers }) {
     !sidecar.includes('"t":"agent_start"') && stored.out.includes("did not start"),
   );
 
-  const pendingEvents = mkdtempSync(join(tmpdir(), "agent-core-pending-store-"));
+  const pendingEvents = mkdtempSync(join(realpathSync(tmpdir()), "agent-core-pending-store-"));
   leftovers.push(pendingEvents);
   const pendingId = "pending-store-1";
   const terminalId = "term-1";
@@ -849,7 +858,7 @@ export async function run({ check, leftovers }) {
     pendingSidecar.slice(-120),
   );
 
-  const resumeDir = mkdtempSync(join(tmpdir(), "agent-core-resume-"));
+  const resumeDir = mkdtempSync(join(realpathSync(tmpdir()), "agent-core-resume-"));
   leftovers.push(resumeDir);
   const resumeId = "resume-1";
   const resumeFile = coreSessionFile(resumeDir, resumeId);

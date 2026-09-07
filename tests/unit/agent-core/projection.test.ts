@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import * as session from "../../../agent-core/session.ts";
@@ -182,11 +182,18 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
   });
 
   it("survives resume, fork, and image materialization without projection duplication", async () => {
-    const root = mkdtempSync(join(tmpdir(), "agent-core-projection-"));
+    const root = mkdtempSync(join(realpathSync(tmpdir()), "agent-core-projection-"));
     try {
       const source = session.coreSessionFile(root, "source");
       const dest = session.coreSessionFile(root, "fork");
-      const prepared = session.prepareFreshSession(source);
+      // Session admission locks are transient under parallel workers; retry
+      // like session-retention-admission.test.ts before failing.
+      let prepared = session.prepareFreshSession(source);
+      const deadline = Date.now() + 2000;
+      while (!prepared.ok && /busy|admission lock is unreadable/i.test(prepared.error || "") && Date.now() < deadline) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+        prepared = session.prepareFreshSession(source);
+      }
       expect(prepared.ok).toBe(true);
       writeFileSync(join(dirname(source), "resume-img-1.png"), Buffer.from("image-bytes"), { mode: 0o600 });
       const opened = session.SessionWriter.open(source, 0);
