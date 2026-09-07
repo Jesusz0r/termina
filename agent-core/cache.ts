@@ -377,6 +377,12 @@ export interface CacheUsageSnapshot {
   inputTokens: number | null;
   cacheReadTokens: number | null;
   cacheWriteTokens: number | null;
+  /**
+   * False when the route's usage schema has no write component, so a null
+   * cacheWriteTokens is exact rather than unknown. Absent or null keeps the
+   * strict behavior: a missing component never becomes a zero.
+   */
+  cacheWriteSupported?: boolean | null;
 }
 
 export interface CacheAttemptSnapshot {
@@ -416,16 +422,20 @@ function missingUsageFields(usage: CacheUsageSnapshot): string[] {
   const missing: string[] = [];
   if (finiteNonnegative(usage.inputTokens) === null) missing.push("inputTokens");
   if (finiteNonnegative(usage.cacheReadTokens) === null) missing.push("cacheReadTokens");
-  if (finiteNonnegative(usage.cacheWriteTokens) === null) missing.push("cacheWriteTokens");
+  if (usage.cacheWriteSupported !== false && finiteNonnegative(usage.cacheWriteTokens) === null) {
+    missing.push("cacheWriteTokens");
+  }
   return missing;
 }
 
 function totalUsage(usage: CacheUsageSnapshot): number | null {
   const missing = missingUsageFields(usage);
   if (missing.length) return null;
+  const cacheWrite = finiteNonnegative(usage.cacheWriteTokens) ?? (usage.cacheWriteSupported === false ? 0 : null);
+  if (cacheWrite === null) return null;
   return (
     finiteNonnegative(usage.inputTokens) as number
-  ) + (finiteNonnegative(usage.cacheReadTokens) as number) + (finiteNonnegative(usage.cacheWriteTokens) as number);
+  ) + (finiteNonnegative(usage.cacheReadTokens) as number) + cacheWrite;
 }
 
 function metadataMissing(previous: CacheRequestDiagnostics, current: CacheRequestDiagnostics): string[] {

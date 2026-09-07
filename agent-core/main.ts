@@ -3489,7 +3489,11 @@ function cacheDiagnosticsForRequest(
     stablePrefix: { system: stableSystem, tools, settings: modelSettings },
     reusablePrefix: persistedMessages,
     messagePrefix: messages,
-    workingSet: overlay?.text,
+    // An absent overlay is complete evidence (no working set was sent), so
+    // report it as an explicit null that hashes to a stable sentinel. Only
+    // an undefined value stays unknown, as for routes where the prefix
+    // cannot be reconstructed after serialization.
+    workingSet: overlay ? overlay.text : null,
     workingSetChanged: currentWorkingSetChanged,
     markerCount: policyDetails.markers.count,
     markerPositions: policyDetails.markers.positions,
@@ -6845,6 +6849,10 @@ function reportUsage(
       inputTokens: usage.input,
       cacheReadTokens: usage.cacheRead,
       cacheWriteTokens: usage.cacheWrite,
+      // xAI usage reports cached reads only; its schema has no write
+      // component, so a null write count is exact. A reported count means
+      // support trivially; other providers stay strict (unknown).
+      cacheWriteSupported: usage.cacheWrite !== null ? true : route.provider === "xai" ? false : null,
     },
     diagnostics: cache,
     postRevision,
