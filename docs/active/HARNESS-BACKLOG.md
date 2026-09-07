@@ -1,8 +1,7 @@
 # Harness backlog — high-signal, not yet built
 
-> **Status:** active — all listed items are unimplemented unless marked otherwise.
->
-> Captured 2026-05-11 from the TUI/harness audit. Add only when measured or when a concrete need appears. Each item is one focused PR.
+> **Status:** done — all four items below are implemented. Kept as a record;
+> add new items only when measured or when a concrete need appears.
 
 ## 1. Left pane is a stack of 4 panels — vertical crowding — implemented
 

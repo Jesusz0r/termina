@@ -159,9 +159,9 @@ export class WorldlinesView {
   /** One evidence summary arrived (challenge ranking). */
   upsertEvidence(summary: EvidenceSummary): void {
     this.evidenceByCmp.set(summary.comparisonId, summary);
-    this.lastTouched = summary.comparisonId;
     const pair = this.pairs.get(summary.comparisonId);
     if (!pair) return;
+    this.lastTouched = summary.comparisonId;
     pair.evidence = summary;
     this.renderVerdicts(pair);
     for (const card of pair.cards.values()) this.renderCard(card);
@@ -230,10 +230,10 @@ export class WorldlinesView {
   upsert(summary: WorldlineSummary): void {
     let pair = this.pairs.get(summary.comparisonId);
     if (!pair) pair = this.makePair(summary.comparisonId);
-    this.lastTouched = summary.comparisonId;
     const card = pair.cards.get(summary.label)!;
     const prev = card.summary;
     if (summary.version < prev.version) return;
+    this.lastTouched = summary.comparisonId;
     pair.runEl.textContent = summary.sourceRunId;
     pair.runEl.title = `source run ${summary.sourceRunId}`;
     card.summary = summary;

@@ -23,18 +23,20 @@ benchmarks are complete.
 
 | Area | What `agent-core/` does today | Status / remaining evidence |
 |---|---|---|
-| Private ownership | `main.ts` is currently 8,605 lines, while the distinct cache, request-projection, reclaim, trace, rates, and bounded-output lifecycles have private modules imported by the integration owner. | **Complete for the named seams.** Keep one behavioral owner; extract further only for a distinct lifecycle/test surface, not to create another path. |
+| Private ownership | `main.ts` is currently 8,458 lines, while the distinct cache, request-projection, reclaim, trace, rates, and bounded-output lifecycles have private modules imported by the integration owner. | **Complete for the named seams.** Keep one behavioral owner; extract further only for a distinct lifecycle/test surface, not to create another path. |
 | Traces | `trace.ts` writes schema-v2 attempt and task-settled records with stable run/task/attempt links, retry/fallback fields, nullable usage, cache diagnostics, tool/reclaim evidence, cost provenance, manifests, bounded retention, and a link index. | **Deterministic implementation complete.** Correctness is still caller-supplied/null and the controlled task corpus, quality, price, and long-session benchmark remain pending. |
 | Cache identity | `auth.ts` derives a private ASCII key from a process-local session seed, role, provider, protocol, and route domain; it validates the key before emitting OpenRouter or xAI headers. | **Deterministic identity complete.** Provider field acceptance and the OpenAI 50-vs-80 limit conflict remain route/model evidence gates; neither number is hardcoded. |
 | Request projection | `request-projection.ts` separates durable prompt/images from a sorted, escaped, UTF-8-bounded overlay; validates complete tool-call/result sequences; main snapshots and appends the overlay once per logical request, including retries. | **Deterministic projection complete.** Persisted generated context is rejected; corpus-level quality and provider-prefix behavior remain pending. |
 | Tool output | `tool-output.ts`, `host.ts`, `main.ts`, and `mcp.ts` use bounded UTF-8 accumulation, explicit completion states, omission markers, continuations, independent streams, and glob lookahead. | **Deterministic bounds complete.** Exhaustive stress and task-quality effects remain pending; no provider savings are implied. |
 | Reclamation | `reclaim.ts` plans bounded targets with original bytes/chars/hashes and recovery metadata; `session.ts` durably validates/applies receipts, replays source records, and maps recovery across forks before main changes its view. Last-resort truncate still persists only a dropped-count revision. | **Receipt-based prune recovery complete.** Truncate/summarize recovery semantics, reclaim ranking, billed-token savings, p95 recovery calls, and the full resume/fork corpus remain pending. |
 | MCP tools | `mcp.ts` canonicalizes schemas, normalizes/deduplicates discoveries before caps, freezes selected tools; main gates `/clear` with `mcpBusy` and a generation token and falls back to built-ins on failure. | **Deterministic ordering/boundary complete.** Real-server reconnect behavior and cache/quality effects remain pending. |
-| Provider capabilities | `auth.ts` records route/model-scoped documentation provenance and unknowns; `cache.ts` bounds capability observations; `openai-compat.ts` owns serializers and has a native Gemini `cachedContent` lifecycle seam. Main enables only documented direct-route fields; Gemini native caching is not enabled by default. | **Field gating/trace seam complete; activation remains evidence-gated.** Live provider probes, TTL/price/quality benchmarks, and relay behavior remain pending. |
+| Provider capabilities | Per-provider policy lives in `auth/providers/`, shared family rules in `models/families/`, and protocol-aware composition in `models/capabilities.ts`; `auth.ts` remains the public auth owner (credential persistence, login/refresh) and `openai-compat.ts` owns serializers with a native Gemini `cachedContent` lifecycle seam. Main enables only documented direct-route fields; Gemini native caching is not enabled by default. | **Field gating/trace seam complete; activation remains evidence-gated.** Live provider probes, TTL/price/quality benchmarks, and relay behavior remain pending. |
 | Estimates and prices | `reclaim.ts` uses the shared conservative `/4` byte estimate including tool-schema accounting; `rates.ts` validates immutable role/route/model snapshots and main captures bounded catalog provenance. | **Arithmetic/provenance seam complete.** Factors, live price snapshots, storage/TTL billing, and cost savings remain uncalibrated/pending. |
 
 Provider behavior was validated against the primary sources listed at the end
-on 2026-08-30. Billing, retention, model support, and field limits remain
+on 2026-08-30, and re-checked in the September provider audits
+(`PROVIDER-CONFIGURATION-AUDIT.md`, `OPENCODE-GO-AUDIT.md`,
+`PROVIDER-REFACTOR.md`). Billing, retention, model support, and field limits remain
 external contracts rather than repository facts; preserve their source and
 retrieval date in the baseline and re-check them immediately before shipping.
 
@@ -76,7 +78,7 @@ trace truth gates below pass.
 **Owners:** the relevant sections currently in `agent-core/main.ts`, with
 existing canonical owners retained.
 
-At this audit, `main.ts` is an 8,103-line integration file containing several
+At this audit, `main.ts` is an 8,458-line integration file containing several
 independent lifecycles. The named behavior-preserving private extractions are
 now present; keep the rule below for any remaining lifecycle/test surface:
 
@@ -94,8 +96,9 @@ contract. `trace.ts` owns trace persistence and `rates.ts` owns rate validation
 and arithmetic; `tool-output.ts` owns shared UTF-8 bounds. `session.ts` remains
 the sole append/replay/fork owner;
 `openai-compat.ts` remains the sole OpenAI/Google protocol serializer;
-`mcp.ts` remains the MCP owner; and `auth.ts` remains the provider identity and
-capability owner. Migrate callers and remove the moved implementation. Do not
+`mcp.ts` remains the MCP owner; `auth.ts` remains the public auth owner with
+per-provider policy in `auth/providers/`; and capability composition lives in
+`models/capabilities.ts` over `models/families/` rules. Migrate callers and remove the moved implementation. Do not
 add aliases, feature flags, duplicate formatters, a second cache engine, or a
 second snapshot store.
 

@@ -527,16 +527,12 @@ worldlinesView.bind({
     return !!pane && !pane.error && !pane.exited;
   },
   onContent: (has, count) => {
-    // The first report reflects pre-existing state, not an arrival:
-    // sync it quietly so a stored tab survives reload.
-    if (!worldlinesSynced) {
-      worldlinesSynced = true;
-      activityTabs.syncContent("worldlines", has, count);
-    } else activityTabs.setHasContent("worldlines", has, count);
+    // Hydration replays stay quiet in the view and sync once at the end,
+    // so every report that reaches here is a live arrival worth announcing.
+    activityTabs.setHasContent("worldlines", has, count);
   },
 });
 const btnForkRun = document.getElementById("btn-fork-run") as HTMLButtonElement;
-let worldlinesSynced = false;
 const challengeRunLabels: Record<ChallengeProfile, string> = {
   "fewer-dependencies": "Deps",
   "preserve-api": "API",

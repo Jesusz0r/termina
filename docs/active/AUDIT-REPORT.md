@@ -84,30 +84,32 @@ The benchmark measures scheduler admission and transport calls, not Chromium ren
 
 ### 3.1. Priority targets
 
+Counts refreshed 2026-09-07 against the working tree.
+
 | Priority | File | Current lines | Required direction |
 | :---: | :--- | ---: | :--- |
-| 1 | `electron/main.ts` | 8,029 | Extract coherent terminal/IPC/window lifecycle owners while keeping app state in main and avoiding a second routing path. |
-| 2 | `electron/worldlines.ts` | 6,628 | Move coherent comparison, promotion, evidence/run, and lifecycle units under one `electron/worldlines/` owner with one public API. |
-| 3 | `core/src/main.rs` | 11,164 | Split protocol, Git, snapshot, promotion, and storage internals into Rust modules without moving Git behavior into TypeScript. |
+| 1 | `electron/main.ts` | 8,126 | Extract coherent terminal/IPC/window lifecycle owners while keeping app state in main and avoiding a second routing path. |
+| 2 | `electron/worldlines.ts` | 6,637 | Move coherent comparison, promotion, evidence/run, and lifecycle units under one `electron/worldlines/` owner with one public API. |
+| 3 | `core/src/main.rs` | 11,210 | Split protocol, Git, snapshot, promotion, and storage internals into Rust modules without moving Git behavior into TypeScript. |
 
 ### 3.2. Other files above the extraction threshold
 
 | File | Current lines | Primary concern |
 | :--- | ---: | :--- |
-| `agent-core/main.ts` | 8,605 | CLI/runtime orchestration, provider streaming, tool execution, sidecar logging, and subagents remain concentrated. |
-| `agent-core/session.ts` | 3,977 | Session serialization, compaction, timeline, and branch state remain concentrated. |
-| `agent-core/auth.ts` | 3,112 | Multi-provider authentication and token lifecycle remain concentrated. |
+| `agent-core/main.ts` | 8,458 | CLI/runtime orchestration, provider streaming, tool execution, sidecar logging, and subagents remain concentrated. |
+| `agent-core/session.ts` | 4,012 | Session serialization, compaction, timeline, and branch state remain concentrated. |
+| `agent-core/auth.ts` | 2,969 | Public auth owner; per-provider policy extracted to `auth/providers/`, family rules to `models/families/`, capability composition to `models/capabilities.ts`. Credential persistence and login/refresh orchestration remain concentrated. |
 | `agent-core/trace.ts` | 2,775 | Trace graph, span lifecycle, formatting, and reduction remain concentrated. |
-| `src/main.ts` | 2,654 | Renderer composition, panes, shortcuts, project tabs, and synchronization remain concentrated. |
-| `electron/sidecar.ts` | 2,647 | Current-schema parsing, tailing, validation, and lifecycle remain concentrated despite compatibility removal. |
-| `agent-core/tui.ts` | 2,472 | ANSI rendering and interactive terminal UI behavior remain concentrated. |
-| `agent-core/openai-compat.ts` | 1,750 | Provider serializers and protocol-specific stream conversion need private module boundaries without creating another protocol mapper. |
-| `electron/session-retention.ts` | 1,612 | Retention admission, locking, reconciliation, and cleanup remain concentrated. |
+| `src/main.ts` | 2,933 | Renderer composition, panes, shortcuts, project tabs, and synchronization remain concentrated. |
+| `electron/sidecar.ts` | 2,673 | Current-schema parsing, tailing, validation, and lifecycle remain concentrated despite compatibility removal. |
+| `agent-core/tui.ts` | 2,456 | ANSI rendering and interactive terminal UI behavior remain concentrated. |
+| `agent-core/openai-compat.ts` | 1,824 | Provider serializers and protocol-specific stream conversion need private module boundaries without creating another protocol mapper. |
+| `electron/session-retention.ts` | 1,622 | Retention admission, locking, reconciliation, and cleanup remain concentrated. |
 | `electron/worldline-git.ts` | 1,370 | The public core interface is canonical, but additional private request plumbing can move beside `core-process.ts`. |
 | `agent-core/host.ts` | 1,287 | Host image queues, sidecar exchange, and lifecycle handling remain concentrated. |
-| `agent-core/mcp.ts` | 1,152 | MCP transport, discovery, normalization, and request lifecycle remain concentrated. |
+| `agent-core/mcp.ts` | 1,256 | MCP transport, discovery, normalization, and request lifecycle remain concentrated. |
 | `electron/evidence.ts` | 974 | Evidence measurement remains canonical but exceeds the extraction threshold. |
-| `src/editor.ts` | 884 | Monaco model, tab, and editor interaction responsibilities remain concentrated. |
+| `src/editor.ts` | 893 | Monaco model, tab, and editor interaction responsibilities remain concentrated. |
 | `electron/watcher.ts` | 874 | Watch lifecycle and visibility reconciliation remain concentrated. |
 | `electron/pty-egress.ts` | 852 | The canonical PTY delivery owner is bounded and cohesive but remains just above the extraction threshold. |
 

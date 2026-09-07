@@ -1229,7 +1229,8 @@ body {
   color: var(--text);
 }
 
-/* One-line active-comparison summary: truncated, full text in title. */
+/* One-line active-comparison summary: truncated, full text in title.
+ * It takes the header's free space; the spacer is redundant here. */
 #worldline-summary {
   flex: 1;
   min-width: 0;
@@ -1238,6 +1239,10 @@ body {
   white-space: nowrap;
   text-transform: none;
   letter-spacing: 0;
+}
+
+#worldline-panel .panel-header .spacer {
+  display: none;
 }
 
 #modified-list {
