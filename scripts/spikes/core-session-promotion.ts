@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { SessionWriter, coreSessionFile, writeForkedSession } from "../../agent-core/session.js";
-import { recoverPromotionJournals } from "../../electron/worldlines.js";
+import { recoverPromotionJournals } from "../../electron/worldlines/index.js";
 
 function artifactManifest(path: string) {
   const entries: Array<{ rel: string; dev: number; ino: number; state: Record<string, unknown> }> = [];

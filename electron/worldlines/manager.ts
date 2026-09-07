@@ -1,21 +1,37 @@
 /**
- * Worldline manager (WORLDLINES §6.5, §6.6).
- *
- * Fork Run creates two isolated candidates from a completed run:
- * Candidate A preserves the settled source state and session; Candidate B
- * restores the run-start source state and the effective task. Pair
- * creation is all-or-nothing: any failure cancels both candidates and
- * removes every app-owned resource.
+ * Worldline comparison lifecycle owner (`electron/worldlines/`).
+ * Owns comparisons, candidates, runs, evidence orchestration, and promotion
+ * dispatch; durability primitives live in the sibling modules.
  */
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import type { BigIntStats } from "node:fs";
 import { lstat as lstatPath, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { buildSandboxProfile, candidateSandboxLaunch, type SandboxPaths } from "./sandbox.js";
-import { boundPromotionCreateDirectory, boundPromotionCopyTree, boundPromotionInstallDirectory, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionRemoveTree, boundPromotionTransition, boundPromotionWriteFile, captureRootInRepo, gitCommitFile, gitCommittedChanges, gitCommitTree, gitCommonDir, gitHead, gitIgnoredFiles, gitTopLevel, gitWorkingChanges, type BoundPromotionExpectedLeaf, type PromotionFsIdentity, type SnapshotStore } from "./worldline-git.js";
-import { EvidenceEngine, dependencyDiff, mineChangeReason, rankProfiles, type EvidenceDeps } from "./evidence.js";
+import { buildSandboxProfile, candidateSandboxLaunch, type SandboxPaths } from "../sandbox.js";
+import {
+  SnapshotStore,
+  boundPromotionCopyTree,
+  boundPromotionCreateDirectory,
+  boundPromotionInstallDirectory,
+  boundPromotionOpenDirectory,
+  boundPromotionPrepareDirectory,
+  boundPromotionRemoveTree,
+  boundPromotionTransition,
+  boundPromotionWriteFile,
+  captureRootInRepo,
+  gitCommitFile,
+  gitCommitTree,
+  gitCommittedChanges,
+  gitCommonDir,
+  gitHead,
+  gitIgnoredFiles,
+  gitTopLevel,
+  gitWorkingChanges,
+  type BoundPromotionExpectedLeaf,
+  type PromotionFsIdentity,
+} from "../worldline-git.js";
+import { EvidenceEngine, dependencyDiff, mineChangeReason, rankProfiles, type EvidenceDeps } from "../evidence.js";
 import type {
   CoreSessionForkOpts,
   CoreSessionForkResult,
@@ -24,45 +40,101 @@ import type {
   SessionForkCallOptions,
   SessionForkOpts,
   SessionForkResult,
-} from "./session-fork.js";
-import type { ChallengeProfile, DependencyChange, EvidenceRecord, EvidenceSummary, RunSummary, TimelineEvent, WorldlineChangedFile, WorldlineDetails, WorldlineState, WorldlineSummary } from "../shared/types.js";
+} from "../session-fork.js";
+import type {
+  ChallengeProfile,
+  DependencyChange,
+  EvidenceRecord,
+  EvidenceSummary,
+  RunSummary,
+  TimelineEvent,
+  WorldlineChangedFile,
+  WorldlineDetails,
+  WorldlineState,
+  WorldlineSummary,
+} from "../../shared/types.js";
 import {
   coreSessionFile,
   parseSessionBundlePath,
   sessionBundleBytes,
   sessionBundleHasContent,
-} from "../agent-core/session.js";
-import { MAX_MCP_JSON_BYTES } from "../agent-core/mcp.js";
-import { quoteShellArg, thinkingStartupArgs } from "../shared/terminal-control.js";
-
-export { quoteShellArg };
-export type { WorldlineState, WorldlineSummary };
-import type {
-  CandidateState,
-  ComparisonState,
-  ComparisonManifest,
-  UncertainComparisonAdmissionLease,
-  PromotionJournalAdmissionResult,
-  TrackedSessionFork,
-  CandidateReadyEvent,
-  CandidateLaunchAttempt,
-  EvidenceAttempt,
-  PendingCandidateReady,
-  PromotionDirectoryPlan,
-  PromotionJournalBinding,
-  PromotionJournalPath,
-  BoundPromotionDirectory,
-} from "./_worldlines/types.js";
-import type { UncertainComparisonAdmissionOwner } from "./_worldlines/uncertain-comparison.js";
-export type { BoundPromotionDirectory, PromotionRecoveryContext } from "./_worldlines/types.js";
+} from "../../agent-core/session.js";
+import { MAX_MCP_JSON_BYTES } from "../../agent-core/mcp.js";
+import { thinkingStartupArgs } from "../../shared/terminal-control.js";
 import {
+  UncertainComparisonAdmissionOwner,
   boundedWorldlineEntries,
   comparisonManifestFor,
   parseComparisonManifest,
   releaseUncertainComparisonAdmissionOwner,
   uncertainComparisonAdmissionOwnerFor,
-} from "./_worldlines/uncertain-comparison.js";
-export { UNCERTAIN_COMPARISON_USAGE_LEDGER } from "./_worldlines/limits.js";
+} from "./uncertain-comparison.js";
+import {
+  PromotionJournalAdmissionOwner,
+  createPromotionOperationBudget,
+  dirBytes,
+  promotionJournalAdmissionOwnerFor,
+  releasePromotionJournalAdmissionOwner,
+  reservePromotionOperationBytes,
+} from "./promotion-journal.js";
+import {
+  awaitAbortable,
+  boundPromotionExpectedLeaf,
+  copyBoundBeforeImage,
+  copyBoundPrivateFile,
+  createPromotionArtifactManifest,
+  createSnapshotTemplateDirectory,
+  ensureBoundChildDirectory,
+  ensureBoundDirectory,
+  isMaterializedPromotionState,
+  isRestorablePromotionState,
+  materializePromotionDirectoryPlan,
+  probePromotionDirectory,
+  processStartMatches,
+  promotionDestination,
+  promotionDestinationComponents,
+  promotionParentIdentity,
+  promotionSourceComponents,
+  promotionStateHash,
+  promotionStatesEqual,
+  readComparisonManifestBound,
+  readProcessStart,
+  readPromotionEntry,
+  refreshComparisonBindings,
+  rollbackPromotion,
+  sha256Hex,
+  waitBounded,
+  withPromotionTransaction,
+  writeComparisonManifestBound,
+  writeComparisonMarkerBound,
+  writePromotionJournal,
+} from "./promotion-recovery.js";
+import {
+  promotionIdentityOf,
+  refreshBoundPromotionDirectory,
+} from "./bindings.js";
+import {
+  isInside,
+  parseStorageSeq,
+} from "./guards.js";
+import {
+  type BoundPromotionDirectory,
+  type CandidateLaunchAttempt,
+  type CandidateReadyEvent,
+  type CandidateState,
+  type ComparisonManifest,
+  type ComparisonState,
+  type EvidenceAttempt,
+  type PendingCandidateReady,
+  type PromoteSeed,
+  type PromotionDirectoryPlan,
+  type PromotionJournalAdmissionResult,
+  type PromotionJournalBinding,
+  type PromotionJournalPath,
+  type RunRecord,
+  type TrackedSessionFork,
+  type UncertainComparisonAdmissionLease,
+} from "./types.js";
 import {
   CANDIDATE_CLEANUP_TIMEOUT_MS,
   MARKER,
@@ -80,85 +152,7 @@ import {
   MAX_WORLDLINE_FILE_BYTES,
   READY_TIMEOUT_MS,
   RUNTIME_ALLOWLIST,
-} from "./_worldlines/limits.js";
-import {
-  createPromotionOperationBudget,
-  promotionJournalAdmissionOwnerFor,
-  releasePromotionJournalAdmissionOwner,
-  reservePromotionOperationBytes,
-} from "./_worldlines/promotion-journal.js";
-import type { PromotionJournalAdmissionOwner } from "./_worldlines/promotion-journal.js";
-import {
-  boundPromotionExpectedLeaf,
-  copyBoundBeforeImage,
-  copyBoundPrivateFile,
-  createPromotionArtifactManifest,
-  createSnapshotTemplateDirectory,
-  ensureBoundChildDirectory,
-  ensureBoundDirectory,
-  isMaterializedPromotionState,
-  isRestorablePromotionState,
-  materializePromotionDirectoryPlan,
-  probePromotionDirectory,
-  promotionDestination,
-  promotionDestinationComponents,
-  promotionParentIdentity,
-  promotionSourceComponents,
-  promotionStateHash,
-  promotionStatesEqual,
-  readComparisonManifestBound,
-  readPromotionEntry,
-  refreshComparisonBindings,
-  rollbackPromotion,
-  sha256Hex,
-  withPromotionTransaction,
-  writeComparisonManifestBound,
-  writeComparisonMarkerBound,
-  writePromotionJournal,
-  awaitAbortable,
-  processStartMatches,
-  readProcessStart,
-  waitBounded,
-} from "./_worldlines/promotion-recovery.js";
-export { disposeWorldlineCoreClient, ensureBoundRetainedRoot, ensurePromotionRoots, recoverPromotionJournals, setPromotionRecoveryTestHookForTest } from "./_worldlines/promotion-recovery.js";
-import { isInside, parseStorageSeq } from "./_worldlines/guards.js";
-import { promotionIdentityOf, refreshBoundPromotionDirectory } from "./_worldlines/bindings.js";
-
-/** One recorded run (WORLDLINES §6.5). */
-/** One recorded run (WORLDLINES §6.5). */
-export interface RunRecord {
-  id: string;
-  terminalId: string;
-  workspaceId: string;
-  startStateId: string | null;
-  settledStateId: string | null;
-  promptPayloadFile: string | null;
-  promptEventsDir: string | null;
-  promptText: string | null;
-  promptEntryId: string | null;
-  promptParentEntryId: string | null;
-  settledEntryId: string | null;
-  sessionFile: string | null;
-  sessionBranchFile: string | null;
-  /** Exact identity/provenance of the finalized Pi branch copy. */
-  sessionBranchIdentity: PiSessionCopyIdentity | null;
-  /** A core branch destination whose commit could not be proven. */
-  uncertainSessionFile: string | null;
-  trusted: boolean | null;
-  model: string | null;
-  thinkingLevel: string | null;
-  replayable: boolean;
-  reason: string | null;
-  interrupted: boolean;
-  steering: boolean;
-  overlap: boolean;
-  unownedEdits: number;
-  startedAt: number;
-  settledAt: number | null;
-  trustHashes: Record<string, string> | null;
-  engine?: "pi" | "core";
-}
-
+} from "./limits.js";
 function runEngine(run: { engine?: "pi" | "core" }): "pi" | "core" {
   return run.engine === "core" ? "core" : "pi";
 }
@@ -172,17 +166,6 @@ const CHALLENGE_CONSTRAINTS: Record<ChallengeProfile, string> = {
 
 function challengedPrompt(text: string, profile: ChallengeProfile): string {
   return `${text}\n\nChallenge constraint (${profile}): ${CHALLENGE_CONSTRAINTS[profile]}`;
-}
-
-export interface PromoteSeed {
-  paths: Array<{ rel: string; kind: "write" | "delete"; beforeExists: boolean }>;
-  beforeDir: string;
-  installedSession: string;
-  primaryRoot: string;
-  primaryWorkspaceId: string;
-  comparisonId: string;
-  label: "A" | "B";
-  engine: "pi" | "core";
 }
 
 export interface WorldlineDeps {
@@ -268,29 +251,6 @@ export interface WorldlineDeps {
   primarySessionDir(cwd: string, engine: "pi" | "core"): Promise<string>;
   installPromoted(seed: PromoteSeed): Promise<{ terminalId: string }>;
 }
-
-
-
-
-/** The logical size of a directory tree (`du`, in a child process). */
-export async function dirBytes(dir: string): Promise<number> {
-  return new Promise((resolvePromise) => {
-    const child = spawn("du", ["-sk", dir], { stdio: ["ignore", "pipe", "ignore"] });
-    let out = "";
-    let overflow = false;
-    child.stdout.on("data", (data: Buffer) => {
-      if (out.length < 128) out += data.toString("utf8").slice(0, 128 - out.length);
-      else overflow = true;
-    });
-    child.on("error", () => resolvePromise(Number.POSITIVE_INFINITY));
-    child.on("close", (code) => {
-      const m = /^(\d+)/.exec(out.trim());
-      resolvePromise(code === 0 && !overflow && m ? Number(m[1]) * 1024 : Number.POSITIVE_INFINITY);
-    });
-  });
-}
-
-
 
 const EVIDENCE_QUEUE_HIGH_WATER = 64;
 
@@ -3949,4 +3909,3 @@ export class WorldlineManager {
     await this.drainRetainedSessionDiscards();
   }
 }
-

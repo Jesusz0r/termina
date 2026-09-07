@@ -29,7 +29,7 @@ import {
   disposeWorldlineGitCore,
   type PromotionFsIdentity,
 } from "./worldline-git.js";
-import { ensureBoundRetainedRoot } from "./worldlines.js";
+import { ensureBoundRetainedRoot } from "./worldlines/index.js";
 import {
   MAX_SESSION_BUNDLE_BYTES,
   SESSION_ACTIVE_NAME,

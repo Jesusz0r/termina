@@ -310,5 +310,43 @@ describe("Agent Core Cache", () => {
       expect(unknownIdle.primary).toBe("backend-or-unknown");
       expect(unknownIdle.attributed).toBe(false);
     });
+    it("classifies misses when the provider reports no cache writes", () => {
+      const xaiPrior = {
+        atMs: 0,
+        usage: { inputTokens: 2_655, cacheReadTokens: 62_464, cacheWriteTokens: null, cacheWriteSupported: false },
+        diagnostics: diagnostics(),
+        postRevision: false,
+      };
+      const miss = cache.classifyCacheMiss({
+        previous: xaiPrior,
+        current: {
+          ...xaiPrior,
+          atMs: 7_000,
+          usage: { inputTokens: 46_191, cacheReadTokens: 0, cacheWriteTokens: null, cacheWriteSupported: false },
+          diagnostics: diagnostics({ reusablePrefix: "grown-prefix" }),
+        },
+        noiseFloorTokens: 1_024,
+      });
+      expect(miss.attributed).toBe(true);
+      expect(miss.primary).toBe("stable-prefix-changed");
+      expect(miss.missedTokens).toBe(46_191);
+      expect(miss.missingFields).not.toContain("previous.cacheWriteTokens");
+      expect(miss.missingFields).not.toContain("current.cacheWriteTokens");
+
+      const strict = cache.classifyCacheMiss({
+        previous: { ...xaiPrior, usage: { ...xaiPrior.usage, cacheWriteSupported: null } },
+        current: {
+          ...xaiPrior,
+          atMs: 7_000,
+          usage: { inputTokens: 46_191, cacheReadTokens: 0, cacheWriteTokens: null, cacheWriteSupported: null },
+          diagnostics: diagnostics({ reusablePrefix: "grown-prefix" }),
+        },
+        noiseFloorTokens: 1_024,
+      });
+      expect(strict.attributed).toBe(false);
+      expect(strict.primary).toBe("unknown");
+      expect(strict.missingFields).toContain("previous.cacheWriteTokens");
+      expect(strict.missingFields).toContain("current.cacheWriteTokens");
+    });
   });
 });

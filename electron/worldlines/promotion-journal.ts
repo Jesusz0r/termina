@@ -3,6 +3,8 @@
  * Tree measurement, retention accounting, and the admission owner that
  * bounds retained promotion evidence per worlds root.
  */
+import { spawn } from "node:child_process";
+
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { lstat as lstatPath, opendir } from "node:fs/promises";
@@ -317,4 +319,22 @@ export function reservePromotionOperationBytes(budget: PromotionOperationBudget,
     throw new Error(`promotion recovery evidence for ${label} exceeds its ${promotionRetentionBytes(budget.max)} bound; resolve retained evidence before retrying`);
   }
   budget.used = next;
+}
+
+/** The logical size of a directory tree (`du`, in a child process). */
+export async function dirBytes(dir: string): Promise<number> {
+  return new Promise((resolvePromise) => {
+    const child = spawn("du", ["-sk", dir], { stdio: ["ignore", "pipe", "ignore"] });
+    let out = "";
+    let overflow = false;
+    child.stdout.on("data", (data: Buffer) => {
+      if (out.length < 128) out += data.toString("utf8").slice(0, 128 - out.length);
+      else overflow = true;
+    });
+    child.on("error", () => resolvePromise(Number.POSITIVE_INFINITY));
+    child.on("close", (code) => {
+      const m = /^(\d+)/.exec(out.trim());
+      resolvePromise(code === 0 && !overflow && m ? Number(m[1]) * 1024 : Number.POSITIVE_INFINITY);
+    });
+  });
 }

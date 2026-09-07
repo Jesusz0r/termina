@@ -195,7 +195,7 @@ describe("Sidecar Concurrency & Race Condition Invariants", () => {
       const candidateSpawn = mainSource.indexOf("await this.createTerminal(opts.root", candidateStart);
       expect(candidateStart >= 0 && candidateTailerReady > candidateStart && candidateTailerReady < candidateSpawn).toBe(true);
       expect(mainSource.slice(candidateSpawn, candidateSpawn + 500)).toMatch(/skipSidecarWatch: true/);
-      const worldlinesSource = await readFile("electron/worldlines.ts", "utf8");
+      const worldlinesSource = await readFile("electron/worldlines/manager.ts", "utf8");
       const launchStart = worldlinesSource.indexOf("private async launchCandidate");
       const mapping = worldlinesSource.indexOf("this.terminalToComparison.set(terminalId", launchStart);
       const processLookup = worldlinesSource.indexOf("cand.lstart = await readProcessStart(pid)", launchStart);

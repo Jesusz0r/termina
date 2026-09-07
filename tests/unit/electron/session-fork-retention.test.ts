@@ -342,7 +342,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
     
     try {
       await build({
-        entryPoints: ["electron/worldlines.ts"],
+        entryPoints: ["electron/worldlines/index.ts"],
         bundle: true,
         platform: "node",
         format: "esm",

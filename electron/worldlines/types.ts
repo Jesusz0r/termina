@@ -5,6 +5,7 @@
  */
 import type { BoundPromotionExpectedLeaf, PromotionFsIdentity } from "../worldline-git.js";
 import type { WorldlineState } from "../../shared/types.js";
+import type { PiSessionCopyIdentity } from "../session-fork.js";
 
 export interface CandidateState {
   label: "A" | "B";
@@ -297,3 +298,49 @@ export type PromotionRecoveryContext = {
   coreSessionRoot: string;
 };
 export type PromotionRecoveryTestHook = (stage: "after-journal-validation", journalDir: string) => void | Promise<void>;
+
+export interface PromoteSeed {
+  paths: Array<{ rel: string; kind: "write" | "delete"; beforeExists: boolean }>;
+  beforeDir: string;
+  installedSession: string;
+  primaryRoot: string;
+  primaryWorkspaceId: string;
+  comparisonId: string;
+  label: "A" | "B";
+  engine: "pi" | "core";
+}
+
+/** One recorded run (WORLDLINES §6.5). */
+/** One recorded run (WORLDLINES §6.5). */
+export interface RunRecord {
+  id: string;
+  terminalId: string;
+  workspaceId: string;
+  startStateId: string | null;
+  settledStateId: string | null;
+  promptPayloadFile: string | null;
+  promptEventsDir: string | null;
+  promptText: string | null;
+  promptEntryId: string | null;
+  promptParentEntryId: string | null;
+  settledEntryId: string | null;
+  sessionFile: string | null;
+  sessionBranchFile: string | null;
+  /** Exact identity/provenance of the finalized Pi branch copy. */
+  sessionBranchIdentity: PiSessionCopyIdentity | null;
+  /** A core branch destination whose commit could not be proven. */
+  uncertainSessionFile: string | null;
+  trusted: boolean | null;
+  model: string | null;
+  thinkingLevel: string | null;
+  replayable: boolean;
+  reason: string | null;
+  interrupted: boolean;
+  steering: boolean;
+  overlap: boolean;
+  unownedEdits: number;
+  startedAt: number;
+  settledAt: number | null;
+  trustHashes: Record<string, string> | null;
+  engine?: "pi" | "core";
+}

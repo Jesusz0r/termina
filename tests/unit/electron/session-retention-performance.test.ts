@@ -50,7 +50,7 @@ describe("Session Retention Performance Probes", () => {
     try {
       await Promise.all([
         build({ entryPoints: ["electron/session-retention.ts"], bundle: true, platform: "node", format: "esm", target: "node22", outfile: retentionBundle, logLevel: "silent" }),
-        build({ entryPoints: ["electron/worldlines.ts"], bundle: true, platform: "node", format: "esm", target: "node22", outfile: worldlineBundle, logLevel: "silent" }),
+        build({ entryPoints: ["electron/worldlines/index.ts"], bundle: true, platform: "node", format: "esm", target: "node22", outfile: worldlineBundle, logLevel: "silent" }),
       ]);
       const { SessionRetentionOwner, RETAINED_SESSION_USAGE_LEDGER, disposeSessionRetentionCoreClient } = await import(pathToFileURL(retentionBundle).href);
       assert.equal(typeof RETAINED_SESSION_USAGE_LEDGER, "string");

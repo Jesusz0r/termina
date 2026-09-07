@@ -37,7 +37,7 @@ import { BRIDGE_EXTENSION } from "./bridge-extension.js";
 import { AgentStartEvent, SidecarEvent, SidecarEventDelivery, SidecarEventQueue, SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
 import { SnapshotStore, MIN_WORLDS_FREE_BYTES, bindOwnedDirectory, bindOwnedEntry, boundPromotionCopyTree, boundPromotionEnsureDirectory, boundPromotionListEntries, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionReadFile, boundPromotionWriteFile, captureRootInRepo, createOwnedDirectory, disposeWorldlineGitCore, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, gitTrackedFiles, platformHasRecursiveWatcher, platformHasSandboxExec, removeBoundOwnedDirectory, removeBoundOwnedEntry, trustResourceHashes, type BoundOwnedDirectory, type BoundPromotionExpectedLeaf, type PromotionFsIdentity, type SourceState, writeBoundOwnedFile } from "./worldline-git.js";
-import { WorldlineManager, dirBytes, quoteShellArg, recoverPromotionJournals, type RunRecord } from "./worldlines.js";
+import { WorldlineManager, dirBytes, quoteShellArg, recoverPromotionJournals, type RunRecord } from "./worldlines/index.js";
 import {
   candidateSandboxLaunch,
   evidenceProfileContent,

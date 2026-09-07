@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import * as worldlines from "../../electron/worldlines.js";
+import * as worldlines from "../../electron/worldlines/index.js";
 
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
 

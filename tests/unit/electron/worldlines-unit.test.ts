@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import { resolve, join } from "node:path";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { WorldlineManager, disposeWorldlineCoreClient } from "../../../electron/worldlines.ts";
+import { WorldlineManager, disposeWorldlineCoreClient } from "../../../electron/worldlines/index.ts";
 
 const execFileAsync = promisify(execFile);
 

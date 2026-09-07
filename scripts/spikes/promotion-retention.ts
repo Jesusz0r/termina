@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { WorldlineManager } from "../../electron/worldlines.js";
+import { WorldlineManager } from "../../electron/worldlines/index.js";
 
 function managerFor(worldsRoot: string): WorldlineManager {
   const manager = new WorldlineManager({ worldsRoot, primaryRoot: join(worldsRoot, "primary") } as never);

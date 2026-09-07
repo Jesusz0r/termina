@@ -16,7 +16,7 @@ describe("Worldline Runtime Flow Suite", () => {
     const root = await mkdtemp(join(tmpdir(), "termina-worldline-runtime-flow-"));
     const worldlineBundle = join(root, "worldlines.mjs");
     const sandboxBundle = join(root, "sandbox.mjs");
-    await build({ entryPoints: ["electron/worldlines.ts"], bundle: true, platform: "node", format: "esm", target: "node22", outfile: worldlineBundle, logLevel: "silent" });
+    await build({ entryPoints: ["electron/worldlines/index.ts"], bundle: true, platform: "node", format: "esm", target: "node22", outfile: worldlineBundle, logLevel: "silent" });
     await build({ entryPoints: ["electron/sandbox.ts"], bundle: true, platform: "node", format: "esm", target: "node22", outfile: sandboxBundle, logLevel: "silent" });
     const { WorldlineManager, disposeWorldlineCoreClient, ensurePromotionRoots } = await import(`${pathToFileURL(worldlineBundle).href}?${Date.now()}`);
     const { terminateSandboxProcessGroup } = await import(`${pathToFileURL(sandboxBundle).href}?${Date.now()}`);
@@ -193,7 +193,7 @@ describe("Worldline Runtime Flow Suite", () => {
     
       // The attempt fence is source-visible and replacement-safe: cleanup uses the
       // captured attempt identity/start time, never a later CandidateState pid.
-      const worldlinesSource = await (await import("node:fs/promises")).readFile("electron/worldlines.ts", "utf8");
+      const worldlinesSource = await (await import("node:fs/promises")).readFile("electron/worldlines/manager.ts", "utf8");
       assert.match(worldlinesSource, /candidateLaunchAttempts/);
       assert.match(worldlinesSource, /awaitAbortable\(identity, attempt\.controller\.signal\)/);
       assert.match(worldlinesSource, /terminateCandidateGroup\(attempt\.pid, lstart\)/);
