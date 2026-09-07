@@ -8,10 +8,16 @@
 
 ## Next
 
-- AUDIT-REPORT §3 modularization (`electron/main.ts`, `electron/worldlines.ts`, `core/src/main.rs` first).
-- Coverage gaps: full harness, provider-change E2E, Rust suite, live probes for the 5 credential-less providers.
+- Core bound-fs domain module (capture engine + promotion-boundary helpers together; op-by-op moves relocate entanglement — see AUDIT-REPORT §3).
+- Coverage gaps: live probes for the 5 credential-less providers, full monolithic harness (OOM on this box).
 
 ## Done (recent)
+
+- Release v0.1.35: v0.1.34 gate failed on a stale Go-relay effort expectation (qwen is Messages on Go); fixed the harness, deleted the stillborn tag, released v0.1.35 — CI success, published.
+- Core split: `trust.rs`, `repo.rs`, `store.rs`, `store_tx.rs` extracted from `core/src/main.rs` (11,210 → 9,603); zero-warning build, `cargo test` green, e2e 3/3.
+- Worldlines owner split: `electron/worldlines.ts` (6,637) → `electron/worldlines/` (manager + 8 lifecycle modules, public `index.ts`).
+- `electron/main.ts` assessed: no honest seam (thin IPC adapters over owned app state) — documented, not split.
+- xAI provider-reported cost (2026-09-07, uncommitted): xAI returns exact billed cost per request (`cost_in_usd_ticks`, 1e10 ticks = $1, per https://docs.x.ai/developers/cost-tracking, checked live) but agent-core priced only from its rate catalog, leaving xAI turns at `usd: null`. `ProviderUsage` gains optional `reportedUsd`; `usageFromOpenAI` converts ticks (all accumulation paths funnel through it; `stream_options.include_usage` already set); `mergeProviderUsage` carries it; exported `providerReportedUsd` gates finite ≥ 0; `traceCostForUsage` prefers it over the catalog estimate (source `provider-reported`, components as computed). Session totals and status-line cost light up automatically via existing `cost.usd` aggregation. Tests: ticks round-trip + invalid/absent cases in `provider-cache-policy.test.ts`, helper gates in `main-p0.test.ts`. Typecheck green, focused 12/12, agent-core suite 241/243 (2 pre-existing), esbuild + `vite build` green.
 
 - xAI cache-miss attribution (2026-09-07, uncommitted): `classifyCacheMiss` returned `unknown` on every xAI turn because its usage schema has no write component (`cacheWriteTokens` null) and no overlay meant `workingSetHash` null. `cache.ts` accepts `CacheUsageSnapshot.cacheWriteSupported`; `false` treats a null write count as exact, absent/null stays strict. `main.ts` sets it `false` for `xai` (null write = exact per xAI usage shape), `true` when reported, else null; absent overlay now hashes to a stable sentinel instead of null. Regression test in `cache.test.ts` (miss classifies `stable-prefix-changed` + strict-unknown control). Typecheck green, `cache.test.ts` 9/9, agent-core suite 241/243 (2 failures = pre-existing `projection`/`session-segmented`, confirmed on clean tree), esbuild + `vite build` green (existing chunk-size warning). Audit replay: real Sep-6 turn-8 → turn-9 pair through the new classifier now yields attributed `stable-prefix-changed`, 30,236 missed tokens (was `unknown`); only residual `missingFields` is the pre-fix null `workingSetHash` in that old trace.
 
