@@ -8,7 +8,6 @@
 
 ## Next
 
-- Core bound-fs domain module (capture engine + promotion-boundary helpers together; op-by-op moves relocate entanglement — see AUDIT-REPORT §3).
 - Coverage gaps: live probes for the 5 credential-less providers, full monolithic harness (OOM on this box).
 
 ## Done (recent)
