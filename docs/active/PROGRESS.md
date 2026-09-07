@@ -8,12 +8,12 @@
 
 ## Next
 
-- P1 repairs (2026-09-07): Gemini `thought_signature` now round-trips on the Completions path (parse → `tool_use.thought_signature` → `extra_content` replay; mid-stream change rejected; two-turn parallel-call test in `provider-tool-args.test.ts`). OpenAI context fallback 1.05M → 128k (`capabilities.ts`, documented floor); harness assertion updated. Typecheck green, tool-args 10/10, harness 1/1.
 - Capability-audit repairs: four P2s remain — see AGENT-CORE-CAPABILITY-AUDIT.md.
 - Token-roadmap evidence gates (TOKEN-EFFICIENCY-ROADMAP.md); audit §3.2 unassessed files (`openai-compat`, `session-retention`, `worldline-git`, `host`, `mcp`).
 
 ## Done (recent)
 
+- P1 repairs (2026-09-07): Gemini `thought_signature` now round-trips on the Completions path (parse → `tool_use.thought_signature` → `extra_content` replay; mid-stream change rejected; two-turn parallel-call test in `provider-tool-args.test.ts`). OpenAI context fallback 1.05M → 128k (`capabilities.ts`, documented floor); harness assertion updated. Typecheck green, tool-args 10/10, harness 1/1.
 - Cross-project editor inconsistencies (2026-09-07): Monaco file models now scoped per project (`acquireSharedFileModel(path, owner)` with a `project=` URI query — same abs path in two projects no longer shares dirty/conflict/decoration state); background agent auto-opens (`onToolTarget`) queue per project (deduped, capped at 20, workspace-checked) and replay pinned on activation via `drainPendingToolTargets` in `setActiveProject` instead of being dropped; `openFileSmart` reveals the editor only after routing/validation, removing the extra expand/collapse on cross-project opens. Evidence: typecheck green, `project-editor-routing.test.ts` 1 → 4, ui suite 31/31, `vite build` green (existing chunk-size warning).
 - TUI text extraction (2026-09-07): `agent-core/tui.ts` (2,456) → `tui.ts` (2,047) + `tui-text.ts` (426, pure completion/text, no terminal IO); `main.ts` imports `SLASH_COMMANDS`/`TUI_SHORTCUTS`/`rankFileTags` from the new owner. No exported symbols lost; typecheck green, tui perf test 2/2.
 - Full agent-core suite without OOM (2026-09-07): `tests/unit/agent-core/` with `--maxWorkers=2` completes in ~75s test time — 241/243, the 2 failures (`projection`, `session-segmented`) are the known pre-existing environment issue. Credential-less provider surface (probe, protocol, auth-http, family refactor) 53/53; no API keys in env so live inference remains impossible.
