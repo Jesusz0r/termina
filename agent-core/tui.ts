@@ -1287,6 +1287,12 @@ export class AgentTui {
     return this.buildFrame(this.size()).text;
   }
 
+  /** Styled rows without tty side effects. Tests use this. */
+  paintedFrame(): string[] {
+    this.flushBareEscape();
+    return this.buildFrame(this.size()).painted;
+  }
+
   feed(text: string): void {
     if (this.escTimer) {
       clearTimeout(this.escTimer);
@@ -2007,7 +2013,7 @@ export class AgentTui {
       : Math.min(rows, Math.max(1, Math.min(contentTop + layout.input, contentTop + displayPos.row + 1)));
     const cursorCol = isInputEmpty ? 5 : Math.min(cols, Math.max(1, displayPos.col + 3));
     const slashTop = contentTop + layout.input + 1;
-    const titleRow = rows - layout.header - 1;
+    const titleRow = lines.length - layout.header;
     const painted: string[] = [];
     for (let i = 0; i < rows; i++) {
       const raw = lines[i] ?? clip("", cols);
