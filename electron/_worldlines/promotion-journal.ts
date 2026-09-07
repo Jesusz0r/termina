@@ -34,7 +34,8 @@ import type {
   PromotionOperationBudget,
   PromotionRetentionUsage,
 } from "./types.js";
-import { boundedWorldlineEntries, errnoCode } from "./uncertain-comparison.js";
+import { boundedWorldlineEntries } from "./uncertain-comparison.js";
+import { errnoCode } from "./guards.js";
 import { promotionIdentityOf, refreshBoundPromotionDirectory } from "./bindings.js";
 
 async function measurePromotionTreeBytes(path: string, limit: bigint): Promise<bigint> {

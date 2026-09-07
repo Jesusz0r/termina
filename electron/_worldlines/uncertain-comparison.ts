@@ -3,6 +3,8 @@
  * Manifest parsing, tree measurement, usage ledgers, and the admission
  * owner that bounds recovery evidence per worlds root. Never auto-deletes.
  */
+import { errnoCode, objectRecord } from "./guards.js";
+
 import { randomUUID, createHash } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import type { BigIntStats } from "node:fs";
@@ -49,16 +51,8 @@ import type {
 /**
  * Extract the errno code from an unknown caught value, or null.
  */
-export function errnoCode(error: unknown): string | null {
-  return typeof error === "object" && error !== null && "code" in error && typeof (error as { code?: unknown }).code === "string"
-    ? (error as { code: string }).code
-    : null;
-}
 
 /** Parse only a complete manifest shape; null is deliberately fail-closed. */
-function objectRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
-}
 
 /** Parse only a complete manifest shape; null is deliberately fail-closed. */
 export function parseComparisonManifest(value: unknown): ComparisonManifest | null {
