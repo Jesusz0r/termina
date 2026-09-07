@@ -34,25 +34,25 @@ Native Azure, Bedrock, Vertex, Mistral, DeepSeek, and local-server provider defi
 
 `ModelInfo` also omits output limits, while `main.ts:245`/`:329` use fixed 16,384 or 64,000 output caps for main requests (Codex omits the wire cap). Those values are not clamped to model limits. Preserve input/output metadata, use documented conservative fallbacks where metadata is absent, and handle unknown limits explicitly.
 
-### 3. P2 — Dynamic discovery throws away capability metadata
+### 3. P2 — Dynamic discovery throws away capability metadata — fixed 2026-09-07
 
 `agent-core/models.ts:24` and `rowId` retain ID/name/context/endpoints only. A synthetic Anthropic row with output limits and effort support retained only ID/context. [Anthropic's Models API exposes effort capabilities and input/output limits](https://platform.claude.com/docs/en/api/http/models). [Codex's official schema exposes supported reasoning levels and their default](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/openai_models.rs). [OpenRouter exposes supported parameters](https://openrouter.ai/docs/guides/overview/models).
 
 Carry this metadata through the existing catalog owner into the existing capability resolver, picker, and serializer. Keep provider/protocol constraints explicit; do not infer every capability of a new model from its name. No second catalog is needed.
 
-### 4. P2 — The effort control can say “off” while provider reasoning remains enabled
+### 4. P2 — The effort control can say “off” while provider reasoning remains enabled — fixed 2026-09-07
 
 Local function probes returned only `["off"]` and no wire effort for Google `gemini-2.5-flash`, OpenRouter `deepseek/deepseek-r1`, and a Copilot GPT reasoning model on Completions. `usesModelEffort` excludes these routes/families. [Google explicitly supports Gemini 2.5 reasoning budgets through `reasoning_effort`](https://ai.google.dev/gemini-api/docs/openai); omitting the field selects provider defaults, not disabled thinking.
 
 The Copilot example is conditional on a catalog advertising Completions, not proof that a particular account currently routes that model there. Qwen/MiniMax on Messages likewise have no non-Claude thinking policy; relay-specific support needs verification before adding fields. Represent unknown/default separately from explicitly disabled and cover effort at the resolved protocol boundary.
 
-### 5. P2 — Summary requests do not consistently request economical effort
+### 5. P2 — Summary requests do not consistently request economical effort — fixed 2026-09-07
 
 `main.ts:5851` constructs Responses summaries without `reasoningEffort`; the Completions summary branch also omits effort. Trace metadata records summary requested/effective effort as off, even where the provider uses a reasoning default. [xAI documents high as the default and disallows disabling reasoning on Grok 4.6](https://docs.x.ai/developers/model-capabilities/text/reasoning). Since xAI's default summary model is also Grok 4.6, an economical summary is not guaranteed. The 2,048 output cap can also leave little room for visible handoff text when reasoning consumes the budget; Codex summaries omit that cap.
 
 Use the lowest supported summary effort and model-aware output budget through the existing capability owner; record the actual wire policy. Validate a nonempty handoff under reasoning load.
 
-### 6. P2 — The picker is not a complete account-capability inventory
+### 6. P2 — The picker is not a complete account-capability inventory — partially fixed 2026-09-07 (explicitly-toolless filtering; account-aware endpoint + paging remain)
 
 `models.ts` caps all lists at 200, filters largely by names, and does not require tool support or compatible modality/endpoints except Copilot routing metadata. OpenRouter uses generic `/models`; [its SDK documents a separate user-filtered list operation](https://openrouter.ai/docs/client-sdks/typescript/api-reference/models/models). Consequently some usable models are omitted, while an authenticated catalog fetch is not proof every displayed entry is usable under account preferences or with this harness's tools.
 

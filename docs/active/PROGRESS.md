@@ -8,11 +8,12 @@
 
 ## Next
 
-- Capability-audit repairs: four P2s remain — see AGENT-CORE-CAPABILITY-AUDIT.md.
+- Capability-audit remainder: P2 #6 account-aware endpoint + paging; token-roadmap evidence gates (TOKEN-EFFICIENCY-ROADMAP.md); audit §3.2 unassessed files (`openai-compat`, `session-retention`, `worldline-git`, `host`, `mcp`).
 - Token-roadmap evidence gates (TOKEN-EFFICIENCY-ROADMAP.md); audit §3.2 unassessed files (`openai-compat`, `session-retention`, `worldline-git`, `host`, `mcp`).
 
 ## Done (recent)
 
+- P2 repairs (2026-09-07): #3 catalog retains OpenRouter `max_completion_tokens`/`supported_parameters` and Codex `supported_reasoning_levels` (live-doc verified; Anthropic docs JS-shell, no keys invented), main-request output clamped to the catalog ceiling; #4 Gemini 2.5 effort control on the direct provider + `effortControlFor` with truthful `/effort` display; #5 summaries use lowest supported effort with reasoning-aware budget via testable `summaryRequestPolicy`; #6 explicitly-toolless entries filtered from the listing/selection funnel with metadata carried on `CatalogModel`. Typecheck green; catalog 5/5, family 9/9.
 - P1 repairs (2026-09-07): Gemini `thought_signature` now round-trips on the Completions path (parse → `tool_use.thought_signature` → `extra_content` replay; mid-stream change rejected; two-turn parallel-call test in `provider-tool-args.test.ts`). OpenAI context fallback 1.05M → 128k (`capabilities.ts`, documented floor); harness assertion updated. Typecheck green, tool-args 10/10, harness 1/1.
 - Cross-project editor inconsistencies (2026-09-07): Monaco file models now scoped per project (`acquireSharedFileModel(path, owner)` with a `project=` URI query — same abs path in two projects no longer shares dirty/conflict/decoration state); background agent auto-opens (`onToolTarget`) queue per project (deduped, capped at 20, workspace-checked) and replay pinned on activation via `drainPendingToolTargets` in `setActiveProject` instead of being dropped; `openFileSmart` reveals the editor only after routing/validation, removing the extra expand/collapse on cross-project opens. Evidence: typecheck green, `project-editor-routing.test.ts` 1 → 4, ui suite 31/31, `vite build` green (existing chunk-size warning).
 - TUI text extraction (2026-09-07): `agent-core/tui.ts` (2,456) → `tui.ts` (2,047) + `tui-text.ts` (426, pure completion/text, no terminal IO); `main.ts` imports `SLASH_COMMANDS`/`TUI_SHORTCUTS`/`rankFileTags` from the new owner. No exported symbols lost; typecheck green, tui perf test 2/2.
