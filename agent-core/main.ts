@@ -208,7 +208,8 @@ import {
   type McpSession,
 } from "./mcp.ts";
 
-import { AgentTui, SLASH_COMMANDS, TUI_SHORTCUTS, rankFileTags, type TranscriptHandle } from "./tui.ts";
+import { AgentTui, type TranscriptHandle } from "./tui.ts";
+import { SLASH_COMMANDS, TUI_SHORTCUTS, rankFileTags } from "./tui-text.ts";
 import { parseHideThinking } from "../shared/terminal-control.ts";
 
 /** Example starting values from docs/AGENT-CORE.md; never spec constants. */
