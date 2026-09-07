@@ -89,7 +89,7 @@ Counts refreshed 2026-09-07 against the working tree.
 | Priority | File | Current lines | Required direction |
 | :---: | :--- | ---: | :--- |
 | 1 | `electron/main.ts` | 8,126 | Extract coherent terminal/IPC/window lifecycle owners while keeping app state in main and avoiding a second routing path. |
-| 2 | `electron/worldlines.ts` | 6,637 | Move coherent comparison, promotion, evidence/run, and lifecycle units under one `electron/worldlines/` owner with one public API. |
+| 2 | `electron/worldlines/` | 3,911 (manager) + 8 lifecycle modules | ✅ Done — monolith split into one owner directory with a public `index.ts`: manager, types, limits, guards, bindings, uncertain-comparison, promotion-journal, promotion-recovery. |
 | 3 | `core/src/main.rs` | 11,210 | Split protocol, Git, snapshot, promotion, and storage internals into Rust modules without moving Git behavior into TypeScript. |
 
 ### 3.2. Other files above the extraction threshold
