@@ -55,6 +55,16 @@ describe("Agent Core Main P0 Invariants", () => {
       assert.match(text, /cache --/);
     });
     
+    check("provider-reported cost gates on finite nonnegative dollars", () => {
+      assert.equal(core.providerReportedUsd({ reportedUsd: 0.0037756 }), 0.0037756);
+      assert.equal(core.providerReportedUsd({ reportedUsd: 0 }), 0);
+      assert.equal(core.providerReportedUsd({ reportedUsd: null }), null);
+      assert.equal(core.providerReportedUsd({}), null);
+      assert.equal(core.providerReportedUsd(null), null);
+      assert.equal(core.providerReportedUsd({ reportedUsd: -1 }), null);
+      assert.equal(core.providerReportedUsd({ reportedUsd: Number.NaN }), null);
+    });
+
     check("trace integration keeps failed writes retryable", () => {
       assert.equal(typeof core.traceWriteDisposition, "function");
       assert.deepEqual(core.traceWriteDisposition({ ok: false, persisted: false, retryable: true }), {

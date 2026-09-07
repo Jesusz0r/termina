@@ -5608,7 +5608,14 @@ function mergeProviderUsage(previous: Usage | null, next: Usage | null): Usage |
     cacheWrite: next.cacheWrite ?? previous.cacheWrite,
     output: next.output ?? previous.output,
     reasoning: next.reasoning ?? previous.reasoning,
+    reportedUsd: next.reportedUsd ?? previous.reportedUsd,
   };
+}
+
+/** Exact billed total when the provider reported one; otherwise null. */
+export function providerReportedUsd(usage: Pick<Usage, "reportedUsd"> | null): number | null {
+  const value = usage?.reportedUsd;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 const PROVIDER_BODY_CAP_BYTES = 256 * 1024;
@@ -6795,8 +6802,7 @@ function traceCostForUsage(
     ? (["input", "cacheRead", "cacheWrite", "output"] as const)
     : undefined;
   const cost = computeTraceCost({ role, scope, usage, snapshot, requiredFields });
-  const unknownReasons = cost.unknownFields.map((field) => {
-    if (field === "source" || field === "version" || field === "lookedUpAt" || field === "units") {
+  const unknownReasons = cost.unknownFields.map((field) => {    if (field === "source" || field === "version" || field === "lookedUpAt" || field === "units") {
       return `rate-provenance.${field}-unknown`;
     }
     if (field === "scope") return "rate-provenance.scope-mismatch";
@@ -6809,9 +6815,12 @@ function traceCostForUsage(
     if (snapshot.rates[field] === null) return `rate.${field}-unknown`;
     return `cost.${field}-unknown`;
   });
+  // A provider-reported total is billed truth (post-discount); it wins over
+  // any catalog estimate. Components stay as computed (possibly unpriced).
+  const reportedUsd = providerReportedUsd(usage);
   return {
-    usd: cost.usd,
-    source: cost.source,
+    usd: reportedUsd ?? cost.usd,
+    source: reportedUsd !== null ? "provider-reported" : cost.source,
     version: cost.version,
     lookedUpAt: cost.lookedUpAt,
     knownFields: cost.knownFields,

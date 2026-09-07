@@ -365,6 +365,42 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       assert.equal(reasoningField(result.usage), 0);
     });
     
+    await test("xAI usage carries provider-reported cost in ticks", () => {
+      const result = compat.responsesResultFromEvents(
+        [{
+          type: "response.completed",
+          response: {
+            status: "completed",
+            output: [],
+            usage: {
+              input_tokens: 199,
+              output_tokens: 1,
+              total_tokens: 200,
+              cost_in_usd_ticks: 158500,
+            },
+          },
+        }],
+        () => {},
+        Date.now(),
+      );
+      assert.equal(usageField(result.usage, "reportedUsd"), 158500 / 10_000_000_000);
+    });
+
+    await test("usage without valid provider cost leaves reportedUsd null", () => {
+      const missing = compat.completionResultFromEvents(
+        [{ usage: { prompt_tokens: 100, completion_tokens: 5 } }],
+        () => {},
+        Date.now(),
+      );
+      assert.equal(usageField(missing.usage, "reportedUsd"), null);
+      const invalid = compat.completionResultFromEvents(
+        [{ usage: { prompt_tokens: 100, completion_tokens: 5, cost_in_usd_ticks: -3 } }],
+        () => {},
+        Date.now(),
+      );
+      assert.equal(usageField(invalid.usage, "reportedUsd"), null);
+    });
+
     await test("Google usage preserves unknown fields and records thoughtsTokenCount", () => {
       const result = compat.googleResultFromEvents(
         [{ usageMetadata: { promptTokenCount: 50, cachedContentTokenCount: 20, candidatesTokenCount: 10, thoughtsTokenCount: 6 } }],

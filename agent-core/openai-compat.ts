@@ -25,6 +25,11 @@ export type ProviderUsage = {
   cacheWrite: number | null;
   output: number | null;
   reasoning: number | null;
+  /**
+   * Exact billed USD as reported by the provider (xAI `cost_in_usd_ticks`).
+   * Absent when the provider reports no cost.
+   */
+  reportedUsd?: number | null;
 };
 
 /** Maximum unconsumed decoded SSE text retained between line boundaries. */
@@ -851,6 +856,17 @@ function mergeUsageRecords(
   return merged;
 }
 
+/** Ticks per USD, per https://docs.x.ai/developers/cost-tracking. */
+const USD_TICKS_PER_USD = 10_000_000_000;
+
+/** Exact billed cost from an xAI-style usage payload; null when unreported. */
+function reportedCostUsd(u: Record<string, unknown>): number | null {
+  const ticks = u.cost_in_usd_ticks;
+  if (typeof ticks !== "number" || !Number.isFinite(ticks) || ticks < 0) return null;
+  const usd = ticks / USD_TICKS_PER_USD;
+  return Number.isFinite(usd) && usd >= 0 ? usd : null;
+}
+
 export function usageFromOpenAI(u: Record<string, unknown> | undefined): CallResultLike["usage"] {
   if (!u) return null;
   const prompt = firstToken(u.input_tokens, u.prompt_tokens);
@@ -866,6 +882,7 @@ export function usageFromOpenAI(u: Record<string, unknown> | undefined): CallRes
     cacheWrite,
     output,
     reasoning,
+    reportedUsd: reportedCostUsd(u),
   };
 }
 

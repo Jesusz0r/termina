@@ -13,6 +13,9 @@
 
 ## Done (recent)
 
+- Cross-project editor inconsistencies (2026-09-07): Monaco file models now scoped per project (`acquireSharedFileModel(path, owner)` with a `project=` URI query — same abs path in two projects no longer shares dirty/conflict/decoration state); background agent auto-opens (`onToolTarget`) queue per project (deduped, capped at 20, workspace-checked) and replay pinned on activation via `drainPendingToolTargets` in `setActiveProject` instead of being dropped; `openFileSmart` reveals the editor only after routing/validation, removing the extra expand/collapse on cross-project opens. Evidence: typecheck green, `project-editor-routing.test.ts` 1 → 4, ui suite 31/31, `vite build` green (existing chunk-size warning).
+- Agent-core capability/efficiency audit (2026-09-06): nine provider integrations and authenticated catalog loading confirmed; fresh docs and pure-function probes found direct Gemini tool-signature loss, unsafe context fallbacks, discarded capability/output metadata, effort gaps, summary effort mismatch, and incomplete account/model filtering. Report and repair order: [AGENT-CORE-CAPABILITY-AUDIT.md](AGENT-CORE-CAPABILITY-AUDIT.md). Documentation only; existing code edits preserved. Installed TypeScript passed and 40 focused tests passed after pnpm's automatic reinstall attempt aborted without a TTY. No fresh live inference, full harness, build/E2E, or Rust tests performed.
+
 - Release v0.1.35: v0.1.34 gate failed on a stale Go-relay effort expectation (qwen is Messages on Go); fixed the harness, deleted the stillborn tag, released v0.1.35 — CI success, published.
 - Core split: `trust.rs`, `repo.rs`, `store.rs`, `store_tx.rs` extracted from `core/src/main.rs` (11,210 → 9,603); zero-warning build, `cargo test` green, e2e 3/3.
 - Worldlines owner split: `electron/worldlines.ts` (6,637) → `electron/worldlines/` (manager + 8 lifecycle modules, public `index.ts`).
