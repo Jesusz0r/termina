@@ -50,7 +50,12 @@ export type CallResultLike = {
 type CompletionMessage = {
   role: string;
   content?: string | null | Array<Record<string, unknown>>;
-  tool_calls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>;
+  tool_calls?: Array<{
+    id: string;
+    type: "function";
+    function: { name: string; arguments: string };
+    extra_content?: { google: { thought_signature: string } };
+  }>;
   tool_call_id?: string;
 };
 
@@ -128,10 +133,12 @@ export function toCompletionsMessages(system: string, messages: KernelMessage[])
           const id = String(b.id ?? "");
           if (!id) continue;
           openToolCalls.push(id);
+          const signature = typeof b.thought_signature === "string" ? b.thought_signature : "";
           toolCalls.push({
             id,
             type: "function",
             function: { name: String(b.name ?? ""), arguments: JSON.stringify(b.input ?? {}) },
+            ...(signature ? { extra_content: { google: { thought_signature: signature } } } : {}),
           });
         }
       }
@@ -946,7 +953,7 @@ export function completionResultFromEvents(
 ): CallResultLike {
   let text = "";
   let thinking = "";
-  const calls = new Map<number, { id: string; name: string; type?: "function"; args: string }>();
+  const calls = new Map<number, { id: string; name: string; type?: "function"; args: string; thoughtSignature?: string }>();
   const indicesById = new Map<string, number>();
   let usage: CallResultLike["usage"] = null;
   let rawUsage: Record<string, unknown> | undefined;
@@ -982,7 +989,7 @@ export function completionResultFromEvents(
           toolError ??= TOOL_CALL_SHAPE_ERROR;
           continue;
         }
-        const tc = raw as { index?: unknown; id?: unknown; type?: unknown; function?: unknown };
+        const tc = raw as { index?: unknown; id?: unknown; type?: unknown; function?: unknown; extra_content?: unknown };
         if (!("index" in tc)) {
           toolError ??= TOOL_CALL_INDEX_ERROR;
           continue;
@@ -1035,6 +1042,10 @@ export function completionResultFromEvents(
         const name = typeof fn.name === "string" ? fn.name : "";
         const type = tc.type === "function" ? tc.type : undefined;
         const args = typeof fn.arguments === "string" ? fn.arguments : "";
+        const extra = isRecord(tc.extra_content) ? (tc.extra_content as Record<string, unknown>) : null;
+        const googleExtra = extra && isRecord(extra.google) ? (extra.google as Record<string, unknown>) : null;
+        const thoughtSignature =
+          googleExtra && typeof googleExtra.thought_signature === "string" ? googleExtra.thought_signature : "";
         if (!cur) {
           if (!id || !name) {
             toolError ??= TOOL_CALL_IDENTITY_ERROR;
@@ -1045,7 +1056,7 @@ export function completionResultFromEvents(
             toolError ??= `${TOOL_CALL_IDENTITY_ERROR}: call id changed index`;
             continue;
           }
-          calls.set(idx, { id, name, ...(type ? { type } : {}), args });
+          calls.set(idx, { id, name, ...(type ? { type } : {}), args, ...(thoughtSignature ? { thoughtSignature } : {}) });
           indicesById.set(id, idx);
           continue;
         }
@@ -1053,6 +1064,11 @@ export function completionResultFromEvents(
           toolError ??= `${TOOL_CALL_IDENTITY_ERROR}: call identity changed`;
           continue;
         }
+        if (thoughtSignature && cur.thoughtSignature && cur.thoughtSignature !== thoughtSignature) {
+          toolError ??= `${TOOL_CALL_IDENTITY_ERROR}: call signature changed`;
+          continue;
+        }
+        if (thoughtSignature) cur.thoughtSignature = thoughtSignature;
         if (type && cur.type && type !== cur.type) {
           toolError ??= `${TOOL_CALL_SHAPE_ERROR}: call type changed`;
           continue;
@@ -1075,13 +1091,18 @@ export function completionResultFromEvents(
   if (text) blocks.push({ type: "text", text });
   if (toolError) return { blocks, usage, ttftMs, stopReason, error: toolError };
   const ordered = [...calls.entries()].sort((a, b) => a[0] - b[0]);
-  const decoded: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
+  const decoded: Array<{ id: string; name: string; input: Record<string, unknown>; thoughtSignature?: string }> = [];
   for (const [, call] of ordered) {
     const identityError = toolCallIdentityError(call.id, call.name);
     if (identityError) return { blocks, usage, ttftMs, stopReason, error: identityError };
     const args = decodeToolCallArguments(call.args, true);
     if ("error" in args) return { blocks, usage, ttftMs, stopReason, error: args.error };
-    decoded.push({ id: call.id, name: call.name, input: args.input });
+    decoded.push({
+      id: call.id,
+      name: call.name,
+      input: args.input,
+      ...(call.thoughtSignature ? { thought_signature: call.thoughtSignature } : {}),
+    });
   }
   blocks.push(...decoded.map((call) => ({ type: "tool_use", ...call })));
   return { blocks, usage, ttftMs, stopReason };

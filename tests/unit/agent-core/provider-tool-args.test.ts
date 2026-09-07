@@ -240,8 +240,49 @@ describe("Agent Core Provider Tool Arguments Contract", () => {
       ).rejects.toThrow(/after terminal/);
     });
 
-    it("exposes core provider tool admission invariant", () => {
-      expect(typeof core.providerToolAdmissionError).toBe("function");
+    it("round-trips Gemini thought signatures across two tool turns", () => {
+      const turn1 = compat.completionResultFromEvents([
+        { choices: [{ delta: { tool_calls: [
+          { index: 0, id: "call-1", type: "function", function: { name: "read_file", arguments: "{\"path\":" }, extra_content: { google: { thought_signature: "sig-1" } } },
+          { index: 1, id: "call-2", type: "function", function: { name: "bash", arguments: "{}" } },
+        ] } }] },
+        { choices: [{ delta: { tool_calls: [
+          { index: 0, id: null, type: null, function: { name: null, arguments: "\"a.txt\"}" } },
+          { index: 1, id: null, type: null, function: { name: null, arguments: "" }, extra_content: { google: { thought_signature: "sig-2" } } },
+        ] }, finish_reason: "tool_calls" }] },
+      ] as any, () => {}, 0);
+      expect(turn1.error).toBeUndefined();
+      const calls = turn1.blocks.filter((block: any) => block.type === "tool_use");
+      expect(calls.map((call: any) => [call.id, call.thought_signature])).toEqual([
+        ["call-1", "sig-1"],
+        ["call-2", "sig-2"],
+      ]);
+
+      const turn2 = compat.toCompletionsMessages("", [
+        { role: "assistant", content: turn1.blocks },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "call-1", output: "contents" }] },
+      ]);
+      const replayed = turn2.find((message: any) => message.role === "assistant")?.tool_calls;
+      expect(replayed?.[0]?.extra_content).toEqual({ google: { thought_signature: "sig-1" } });
+      expect(replayed?.[1]?.extra_content).toEqual({ google: { thought_signature: "sig-2" } });
+
+      const plain = compat.toCompletionsMessages("", [
+        { role: "assistant", content: [{ type: "tool_use", id: "call-3", name: "bash", input: {} }] },
+      ]);
+      expect(plain.find((message: any) => message.role === "assistant")?.tool_calls?.[0]).not.toHaveProperty("extra_content");
+
+      const changed = compat.completionResultFromEvents([
+        { choices: [{ delta: { tool_calls: [
+          { index: 0, id: "call-1", type: "function", function: { name: "bash", arguments: "{}" }, extra_content: { google: { thought_signature: "sig-1" } } },
+        ] } }] },
+        { choices: [{ delta: { tool_calls: [
+          { index: 0, id: null, type: null, function: { name: null, arguments: "" }, extra_content: { google: { thought_signature: "sig-other" } } },
+        ] }, finish_reason: "tool_calls" }] },
+      ] as any, () => {}, 0);
+      expect(changed.error ?? "").toMatch(/signature changed/i);
+    });
+
+    it("exposes core provider tool admission invariant", () => {      expect(typeof core.providerToolAdmissionError).toBe("function");
       expect(
         core.providerToolAdmissionError([{ type: "tool_use", id: "call-1", name: "bash", input: [] }] as any) ?? "",
       ).toMatch(/tool call arguments.*object/i);
