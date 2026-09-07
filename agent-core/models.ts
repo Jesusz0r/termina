@@ -201,7 +201,14 @@ export function formatModelBanner(models: ModelInfo[], current: string): string 
   return `models: ${models.length}${cap} · ${names.join(", ")}${more}`;
 }
 
-export type CatalogModel = { provider: ProviderId; id: string; name?: string };
+export type CatalogModel = {
+  provider: ProviderId;
+  id: string;
+  name?: string;
+  /** Resolved tool support: true/false from provider metadata, null when silent. */
+  supportsTools?: boolean | null;
+  outputLimit?: number;
+};
 
 export function formatCatalogLines(
   models: CatalogModel[],

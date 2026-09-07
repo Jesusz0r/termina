@@ -64,8 +64,7 @@ describe("shared model capabilities across provider protocols", () => {
       .toEqual(["off"]);
   });
 
-  it("gives reasoning summaries room while keeping non-reasoning summaries small", async () => {
-    const { summaryRequestPolicy } = await import("../../../agent-core/main.ts");
+  it("gives reasoning summaries room while keeping non-reasoning summaries small", async () => {    const { summaryRequestPolicy } = await import("../../../agent-core/main.ts");
     const grok = summaryRequestPolicy("xai", "grok-4.6");
     expect(grok.effort).toBe("low");
     expect(grok.reasoning).toBe("low");
@@ -76,5 +75,17 @@ describe("shared model capabilities across provider protocols", () => {
     const unknown = summaryRequestPolicy("openrouter", "deepseek/deepseek-r1");
     expect(unknown.reasoning).toBeUndefined();
     expect(unknown.maxTokens).toBe(2048);
+  });
+
+  it("drops explicitly toolless catalog entries while keeping silent ones", async () => {
+    const { toSelectableCatalog } = await import("../../../agent-core/main.ts");
+    const listed = toSelectableCatalog("openrouter", [
+      { id: "with-tools", supportedParameters: ["tools", "temperature"] },
+      { id: "no-tools", supportedParameters: ["temperature"] },
+      { id: "silent" },
+    ]);
+    expect(listed.map((m) => m.id)).toEqual(["with-tools", "silent"]);
+    expect(listed.find((m) => m.id === "with-tools")?.supportsTools).toBe(true);
+    expect(listed.find((m) => m.id === "silent")?.supportsTools).toBeNull();
   });
 });

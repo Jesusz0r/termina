@@ -24,6 +24,7 @@
 import {
   EFFORT_LEVELS,
   catalogOutputLimit,
+  catalogSupportsTools,
   defaultContextWindow,
   effortControlFor,
   supportedEffortLevels,
@@ -7877,12 +7878,28 @@ function retargetSummary(provider: ProviderId): void {
   summaryRoute = parseModelRef(DEFAULT_MODELS[provider].summary, provider);
 }
 
+export function toSelectableCatalog(provider: ProviderId, models: ModelInfo[]): CatalogModel[] {
+  const out: CatalogModel[] = [];
+  for (const m of models) {
+    // Explicitly toolless entries cannot drive this harness; silent stays.
+    if (catalogSupportsTools(m) === false) continue;
+    out.push({
+      provider,
+      id: m.id,
+      ...(m.name ? { name: m.name } : {}),
+      supportsTools: catalogSupportsTools(m),
+      ...(typeof m.outputLimit === "number" ? { outputLimit: m.outputLimit } : {}),
+    });
+  }
+  return out;
+}
+
 function allCatalogModels(): CatalogModel[] {
   const out: CatalogModel[] = [];
   for (const id of AUTH_PROVIDER_ORDER) {
     const models = catalogs.get(id);
     if (!models) continue;
-    for (const m of models) out.push({ provider: id, id: m.id, name: m.name });
+    out.push(...toSelectableCatalog(id, models));
   }
   return out;
 }
