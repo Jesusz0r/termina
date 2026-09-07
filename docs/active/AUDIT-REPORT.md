@@ -103,11 +103,11 @@ Counts refreshed 2026-09-07 against the working tree.
 | `src/main.ts` | 2,968 | Assessed 2026-09-07: renderer composition owner (AGENTS.md: `src/` owns rendering/transient UI state). Project views, panes, and sync share view lifecycle — splitting would create a second rendering owner. Do not split. |
 | `electron/sidecar.ts` | 2,673 | Assessed 2026-09-07: canonical sidecar parse/tail owner (AGENTS.md). Queue, parser, and tailer share the event schema — do not split. |
 | `agent-core/tui.ts` | 2,456 → 2,047 | ✅ Done 2026-09-07 — pure completion/text helpers extracted to `agent-core/tui-text.ts` (426 lines, no terminal IO); `tui.ts` keeps rendering and `AgentTui`. No exported symbols lost; typecheck + tui perf test green. |
-| `agent-core/openai-compat.ts` | 1,824 | Provider serializers and protocol-specific stream conversion need private module boundaries without creating another protocol mapper. |
-| `electron/session-retention.ts` | 1,622 | Retention admission, locking, reconciliation, and cleanup remain concentrated. |
-| `electron/worldline-git.ts` | 1,370 | The public core interface is canonical, but additional private request plumbing can move beside `core-process.ts`. |
-| `agent-core/host.ts` | 1,287 | Host image queues, sidecar exchange, and lifecycle handling remain concentrated. |
-| `agent-core/mcp.ts` | 1,256 | MCP transport, discovery, normalization, and request lifecycle remain concentrated. |
+| `agent-core/openai-compat.ts` | 1,824 | Assessed 2026-09-07: canonical protocol-serialization owner (AGENTS.md). 7 importers + dense shared helpers; splitting by protocol family would read as a second protocol mapper. Do not split. |
+| `electron/session-retention.ts` | 1,622 | Assessed 2026-09-07: single retention-accounting owner (ledger validation, accounting, claims share schema). Do not split. |
+| `electron/worldline-git.ts` | 1,370 | Assessed 2026-09-07: only public TS client for `core/` (AGENTS.md) — thin typed wrappers, one per op. Splitting violates the single-client rule. Do not split. |
+| `agent-core/host.ts` | 1,287 | Assessed 2026-09-07: sidecar-exchange owner (AGENTS.md writer); image queue is part of that exchange lifecycle. Do not split. |
+| `agent-core/mcp.ts` | 1,256 | Assessed 2026-09-07: single MCP lifecycle owner (config, transport, output share types and one request flow). Do not split. |
 | `electron/evidence.ts` | 974 | Evidence measurement remains canonical but exceeds the extraction threshold. |
 | `src/editor.ts` | 893 | Monaco model, tab, and editor interaction responsibilities remain concentrated. |
 | `electron/watcher.ts` | 874 | Watch lifecycle and visibility reconciliation remain concentrated. |
