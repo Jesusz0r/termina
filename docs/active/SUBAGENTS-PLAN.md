@@ -22,9 +22,9 @@ spawn_subagent(task: string, model?: string, effort?: EffortLevel, budget?: { ma
 ```
 
 - `task` is the complete subtask brief: goal, relevant file paths, decisions already made, done-criteria. Children start context-fresh (Anthropic rule); nothing is inherited except what is written here.
-- `model` overrides the parent route; default inherits it.
-- `effort` defaults to the parent's clamped floor, not its level: cheap lane unless asked.
-- The tool returns immediately with a run id (background always). Result delivery is via tool-result injection when the run settles, plus timeline/toast (layer 3).
+- `model` accepts a full `provider/id` ref (`openai-codex/gpt-6-astra`, `xai/grok-4.6`, `opencode-go/muse-spark-1.3-contributor`) resolved through the existing `parseModelRef` + `resolveAuth` path, or a bare id resolved against the parent's provider. Default inherits the parent route. An unauthenticated or unknown provider is a spawn-time error (fail closed, suggest `/login`) — never a silent fallback to another model.
+- `effort` accepts any `EffortLevel` and is clamped to the child route with the existing `clampEffortLevel` (a `low` request on a route without `low` lands on the nearest supported level; unsupported routes report `provider-default`). Default is the parent's clamped floor, not its level: cheap lane unless asked.
+- The tool returns immediately with a run id (background always). Result delivery is via tool-result injection when the run settles, plus timeline/toast (layer 3). Run records carry provider/model/effort for per-run cost attribution.
 
 `message_subagent(run_id: string, text: string)` pushes parent text into a running child (answers, redirects, cancellation reason). Unknown/finished run ids are errors, not silent drops.
 
