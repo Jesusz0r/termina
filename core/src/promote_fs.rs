@@ -9,10 +9,12 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path};
 use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{
     BUDGET_MAX_FILE_BYTES, PROMOTION_COMPONENT_ARRAY_MAX_ENTRIES,
@@ -76,6 +78,16 @@ pub(crate) fn issue_promotion_root_capability(
         },
     );
     Ok(token)
+}
+
+pub(crate) fn promotion_directory_capability_result(identity: PromotionIdentity, capability: &str) -> Value {
+    json!({
+        "identity": {
+            "dev": identity.dev.to_string(),
+            "ino": identity.ino.to_string(),
+        },
+        "capability": capability,
+    })
 }
 
 #[cfg(test)]
@@ -974,4 +986,150 @@ pub(crate) fn promotion_directory_identity_matches(
         return Err(format!("promotion {field} identity mismatch"));
     }
     Ok(())
+}
+
+pub(crate) fn stat_promotion_journal_file(file: &fs::File) -> io::Result<PromotionJournalFileIdentity> {
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let rc = unsafe { libc::fstat(file.as_raw_fd(), st.as_mut_ptr()) };
+    if rc == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        let st = unsafe { st.assume_init() };
+        Ok(PromotionJournalFileIdentity {
+            file: FileIdentity::from_stat(&st),
+            uid: st.st_uid as u64,
+            links: st.st_nlink as u64,
+        })
+    }
+}
+
+pub(crate) fn stat_promotion_private_at(parent: RawFd, name: &CStr) -> io::Result<PromotionJournalFileIdentity> {
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let rc = unsafe {
+        libc::fstatat(
+            parent,
+            name.as_ptr(),
+            st.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        let st = unsafe { st.assume_init() };
+        Ok(PromotionJournalFileIdentity {
+            file: FileIdentity::from_stat(&st),
+            uid: st.st_uid as u64,
+            links: st.st_nlink as u64,
+        })
+    }
+}
+
+pub(crate) fn promotion_private_identity_valid(
+    identity: PromotionJournalFileIdentity,
+    mode: Option<u32>,
+    max_bytes: usize,
+) -> bool {
+    identity.file.is_file()
+        && identity.uid == unsafe { libc::geteuid() as u64 }
+        && identity.links == 1
+        && identity.file.mode & 0o077 == 0
+        && mode.is_none_or(|expected| identity.file.mode & 0o777 == expected)
+        && identity.file.len <= max_bytes as u64
+}
+
+pub(crate) fn promotion_test_pause(req: &Value, stage: &str) -> Result<(), String> {
+    if std::env::var_os("TERMINA_CORE_TEST").is_none() {
+        return Ok(());
+    }
+    let Some(hook) = req.get("testHook").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    if hook.get("stage").and_then(Value::as_str) != Some(stage) {
+        return Ok(());
+    }
+    let ready = hook
+        .get("readyPath")
+        .and_then(Value::as_str)
+        .ok_or("promotion test hook readyPath is missing")?;
+    let release = hook
+        .get("releasePath")
+        .and_then(Value::as_str)
+        .ok_or("promotion test hook releasePath is missing")?;
+    promotion_absolute_path(ready, "test hook readyPath")?;
+    promotion_absolute_path(release, "test hook releasePath")?;
+    fs::write(ready, b"ready")
+        .map_err(|error| format!("write promotion test hook failed: {error}"))?;
+    loop {
+        match fs::symlink_metadata(release) {
+            Ok(_) => break,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                thread::sleep(Duration::from_millis(1))
+            }
+            Err(error) => return Err(format!("read promotion test hook failed: {error}")),
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn promotion_rename_noreplace(
+    source_parent: RawFd,
+    source: &CStr,
+    destination_parent: RawFd,
+    destination: &CStr,
+) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let rc = unsafe {
+            libc::renameat2(
+                source_parent,
+                source.as_ptr(),
+                destination_parent,
+                destination.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if rc == -1 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let rc = unsafe {
+            libc::renameatx_np(
+                source_parent,
+                source.as_ptr(),
+                destination_parent,
+                destination.as_ptr(),
+                libc::RENAME_EXCL,
+            )
+        };
+        if rc == -1 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (source_parent, source, destination_parent, destination);
+        Err(io::Error::from_raw_os_error(libc::ENOTSUP))
+    }
+}
+
+pub(crate) fn promotion_mode(value: Option<&Value>, field: &str, default: u32) -> Result<u32, String> {
+    let mode = value.and_then(Value::as_u64).unwrap_or(u64::from(default));
+    if mode > 0o777 {
+        return Err(format!("{field} is invalid"));
+    }
+    Ok(mode as u32)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PromotionJournalFileIdentity {
+    pub(crate) file: FileIdentity,
+    pub(crate) uid: u64,
+    pub(crate) links: u64,
 }
