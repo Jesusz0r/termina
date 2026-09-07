@@ -28,14 +28,14 @@ use crate::{
     sync_directory_nofollow, validate_store_lifecycle, write_blob, write_transaction_object,
     write_transaction_object_with_oid,
 };
-use crate::{
+use crate::promote_fs::{
     PromotionCwd, PromotionDirectoryStream, PromotionIdentity, open_or_create_promotion_parent,
     open_promotion_bound_root, promotion_add_work, promotion_bound_path_matches,
-    promotion_child_relative, promotion_cleanup_same_namespace_identity, promotion_component,
-    promotion_directory_identity_matches, promotion_directory_is_empty, promotion_path_work_bytes,
-    promotion_set_mode, promotion_symlink_at, promotion_test_pause, promotion_unlink_at_field,
-    promotion_write_all,
+    promotion_child_relative, promotion_component, promotion_directory_identity_matches,
+    promotion_directory_is_empty, promotion_path_work_bytes, promotion_set_mode,
+    promotion_symlink_at, promotion_test_pause, promotion_unlink_at_field, promotion_write_all,
 };
+use crate::promotion_files::promotion_cleanup_same_namespace_identity;
 
 use std::thread;
 use std::time::Duration;

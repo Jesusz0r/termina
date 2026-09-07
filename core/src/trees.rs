@@ -19,9 +19,7 @@ use crate::{
     materialize_state_bound, nested_from_flat, pause_at_hook, publish_transaction_ref,
     resolve_tree, state_entries, tree_lookup, write_nested_tree_for_ref, FlatEntry,
 };
-use crate::{
-    open_promotion_bound_root,
-};
+use crate::promote_fs::open_promotion_bound_root;
 use crate::capture::TreeLookupKind;
 
 /// many seconds.

@@ -12,11 +12,12 @@ use crate::{
     missing_path, open_at, open_at_mode, stat_at, stat_file,
 };
 use crate::FileIdentity;
-use crate::{
+use crate::promote_fs::{
     PromotionDirectoryStream, PromotionIdentity, PromotionObservedLeaf, PromotionObservedState,
     promotion_child_relative, promotion_identity_from_value, promotion_mkdir_at,
-    promotion_set_mode, promotion_symlink_at, read_link_at,
+    promotion_set_mode, promotion_symlink_at,
 };
+use crate::capture::read_link_at;
 
 /// Copy the contents of one identity-bound directory into another.  Every
 /// source and destination component is opened relative to a descriptor and
