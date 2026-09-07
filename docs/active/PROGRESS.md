@@ -13,6 +13,7 @@
 
 ## Done (recent)
 
+- Effort persistence (2026-09-07): `/resume` restored messages only — effort died with the process. `/effort` now writes a validated `settings` record through the persist funnel (on change only); resume restores, clamps to the route, and refreshes status. Session tests 8/8, full agent-core 253/253.
 - Release v0.1.36: pushed 57 commits, tagged v0.1.36 — CI success (test gate + macOS/Linux builds), Developer ID signing + notarization in the macOS job log (same identity as v0.1.35), published with assets.
 - Pane divider repair (2026-09-07): split divider set `width` on a flex item whose `flex-basis` overrides it, so editor/terminal drags did nothing — now sets `flex` and clears it with the other split sizes. Near-miss explorer presses started native file drags that starved divider mousemoves (pointercancel left flags stuck): mousedown preventDefault, dragstart suppression during drags, pointercancel cancel, wider invisible grab hitboxes. E2E `resize.spec.ts` (real-mouse drags) green after rebuild.
 - Picker highlight fix (2026-09-07): `titleRow` pointed one row above the title, so the title highlight landed on the separator and the last picker option (bash approval "Always approve", `/permissions` "ask", etc.) could never highlight — the dim branch ran first. Title row now derives from the finished line buffer; verified at 24/12/8 rows with a `paintedFrame` regression test. Shared paint path, so all selectors fixed.
