@@ -3100,7 +3100,7 @@ class PiEditorApp {
       }
       // No TERMINA_CORE_APPROVE bypass here: primary terminals ask the host
       // (dialog outside the pty) for every bash run. Sandboxed worldline
-      // candidates alone auto-approve via electron/worldlines.ts.
+      // candidates alone auto-approve via electron/worldlines/.
     } else {
       cmd = this.resolvePiBin();
       // The app-owned bridge loads through the CLI option, not project

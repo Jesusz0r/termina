@@ -144,9 +144,9 @@ Line counts are a prioritization signal, not permission to create parallel publi
 
 - [x] Keep `electron/worldline-git.ts` as the sole public TypeScript core interface
 - [x] Keep watcher/context visibility separate from native Git ignore semantics
-- [ ] Decompose `electron/main.ts`
-- [ ] Decompose `electron/worldlines.ts`
-- [ ] Modularize `core/src/main.rs`
+- [x] Decompose `electron/worldlines.ts` → `electron/worldlines/` owner directory
+- [x] Modularize `core/src/main.rs` → 14 modules, `main.rs` keeps constants/dispatch/loop
+- [ ] Decompose `electron/main.ts` (assessed: no honest seam — thin IPC adapters over owned app state)
 - [ ] Continue with the secondary oversized files after the three priority owners
 
 ---

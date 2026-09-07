@@ -1,12 +1,23 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 describe("SessionFork Architecture Contracts", () => {
   const root = process.cwd();
   const main = readFileSync(join(root, "electron", "main.ts"), "utf8");
-  const worldlines = readFileSync(join(root, "electron", "worldlines.ts"), "utf8");
-  const core = readFileSync(join(root, "core", "src", "main.rs"), "utf8");
+  // The worldlines owner is a directory; read every module so the contracts
+  // below cover the whole owner instead of one file.
+  const worldlines = readdirSync(join(root, "electron", "worldlines"))
+    .filter((name) => name.endsWith(".ts"))
+    .sort()
+    .map((name) => readFileSync(join(root, "electron", "worldlines", name), "utf8"))
+    .join("\n");
+  // The Rust core is split into modules; read them all for the same reason.
+  const core = readdirSync(join(root, "core", "src"))
+    .filter((name) => name.endsWith(".rs"))
+    .sort()
+    .map((name) => readFileSync(join(root, "core", "src", name), "utf8"))
+    .join("\n");
   const worker = readFileSync(join(root, "electron", "session-worker.ts"), "utf8");
   const retention = readFileSync(join(root, "electron", "session-retention.ts"), "utf8");
   const session = readFileSync(join(root, "agent-core", "session.ts"), "utf8");

@@ -6,7 +6,7 @@
  *   node --experimental-strip-types --no-warnings scripts/sandbox-security-test.mjs
  */
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -206,7 +206,11 @@ check(
 const repoRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const mainSource = readFileSync(join(repoRoot, "electron", "main.ts"), "utf8");
 const sandboxSource = readFileSync(join(repoRoot, "electron", "sandbox.ts"), "utf8");
-const worldlinesSource = readFileSync(join(repoRoot, "electron", "worldlines.ts"), "utf8");
+const worldlinesSource = readdirSync(join(repoRoot, "electron", "worldlines"))
+  .filter((name) => name.endsWith(".ts"))
+  .sort()
+  .map((name) => readFileSync(join(repoRoot, "electron", "worldlines", name), "utf8"))
+  .join("\n");
 const preflightSource = readFileSync(join(repoRoot, "electron", "worldline-git.ts"), "utf8");
 check("evidence and Verify launch the absolute constant", !mainSource.includes('spawn("sandbox-exec"') && !mainSource.includes('? "sandbox-exec" :'));
 check(
