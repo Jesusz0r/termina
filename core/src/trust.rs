@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::{opt_s, s};
+use crate::util::{opt_s, s};
 
 /// The trust-hash walk stops after this many files.
 const TRUST_MAX_FILES: usize = 10_000;

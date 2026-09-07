@@ -8,7 +8,7 @@ use std::os::fd::AsRawFd;
 use base64::Engine as _;
 use serde_json::{Value, json};
 
-use crate::{missing_path, open_at, open_at_mode, s, stat_at, stat_at_owned, stat_file, stat_file_owned};
+use crate::util::{missing_path, open_at, open_at_mode, s, stat_at, stat_at_owned, stat_file, stat_file_owned};
 use crate::FileIdentity;
 use crate::PROMOTION_COMPONENT_MAX_BYTES;
 use crate::promote_fs::{

@@ -8,8 +8,16 @@ use std::os::fd::AsRawFd;
 use serde_json::{Value, json};
 
 use crate::{
-    PROMOTION_COMPONENT_MAX_BYTES, PROMOTION_DIRECTORY_MAX_DEPTH, PROMOTION_PATH_MAX_BYTES,
-    missing_path, open_at, open_at_mode, stat_at, stat_file,
+    PROMOTION_COMPONENT_MAX_BYTES,
+    PROMOTION_DIRECTORY_MAX_DEPTH,
+    PROMOTION_PATH_MAX_BYTES,
+};
+use crate::util::{
+    missing_path,
+    open_at,
+    open_at_mode,
+    stat_at,
+    stat_file,
 };
 use crate::FileIdentity;
 use crate::promote_fs::{

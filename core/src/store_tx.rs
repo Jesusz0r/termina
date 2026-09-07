@@ -11,7 +11,8 @@ use git2::{Oid, Repository};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{BLOB_COMPRESSION, exact_ref_target, loose_path, object_oid, oid_ext, sync_exact_transaction_ref, validate_transaction_ref};
+use crate::{BLOB_COMPRESSION, exact_ref_target, sync_exact_transaction_ref, validate_transaction_ref};
+use crate::util::{loose_path, object_oid, oid_ext};
 
 use super::store::{
     durable_write, ensure_real_directory, read_regular_file_nofollow, same_regular_file,

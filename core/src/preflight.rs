@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
-use crate::{open_repo, opt_s, s};
+use crate::util::{open_repo, opt_s, s};
 
 /// True when the attributes text contains a content-transforming pattern.
 /// Git LFS `filter=lfs` is not a transform here: capture hashes working-tree

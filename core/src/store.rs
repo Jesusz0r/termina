@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-use crate::{open_at, s, stat_file};
+use crate::util::{open_at, s, stat_file};
 
 
 pub(crate) const STORE_GENERATION_FILE: &str = "termina-store-generation";

@@ -10,8 +10,17 @@ use git2::{Oid, Repository};
 use serde_json::{Value, json};
 
 use crate::{
-    PROMOTION_PATH_MAX_BYTES, READ_BLOB_MAX_BYTES, git_blob_bytes_bounded, has_git_segment,
-    is_safe_relative, now_ms, oid_ext, open_store, s,
+    PROMOTION_PATH_MAX_BYTES,
+    READ_BLOB_MAX_BYTES,
+    git_blob_bytes_bounded,
+    open_store,
+};
+use crate::util::{
+    has_git_segment,
+    is_safe_relative,
+    now_ms,
+    oid_ext,
+    s,
 };
 use crate::recover_store_transaction;
 use crate::{StoreMutationLock, StoreObjectTransaction};

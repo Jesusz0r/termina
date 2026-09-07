@@ -8,9 +8,20 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 
 use crate::{
-    GitTreeBudget, PROMOTION_DIRECTORY_MAX_DEPTH, PROMOTION_PATH_MAX_BYTES, READ_BLOB_MAX_BYTES,
-    TreeLookupKind, git_blob_bytes_bounded, git_blob_size_bounded, git_tree_entry_path,
-    git_tree_object_bounded, open_repo, s, tree_lookup,
+    GitTreeBudget,
+    PROMOTION_DIRECTORY_MAX_DEPTH,
+    PROMOTION_PATH_MAX_BYTES,
+    READ_BLOB_MAX_BYTES,
+    TreeLookupKind,
+    git_blob_bytes_bounded,
+    git_blob_size_bounded,
+    git_tree_entry_path,
+    git_tree_object_bounded,
+    tree_lookup,
+};
+use crate::util::{
+    open_repo,
+    s,
 };
 
 pub(crate) fn op_git_head(req: &Value) -> Result<Value, String> {

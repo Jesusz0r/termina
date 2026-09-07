@@ -11,9 +11,20 @@ use git2::{Repository, RepositoryInitOptions};
 use serde_json::{Value, json};
 
 use crate::{
-    STORE_DESTROY_SEQUENCE, object_format, open_absolute_directory_nofollow, open_at, open_store,
-    s, store_lifecycle_at_root, store_node_at, store_node_at_optional,
-    store_node_file, store_node_matches, validate_store_lifecycle,
+    STORE_DESTROY_SEQUENCE,
+    open_store,
+    store_lifecycle_at_root,
+    store_node_at,
+    store_node_at_optional,
+    store_node_file,
+    store_node_matches,
+    validate_store_lifecycle,
+};
+use crate::util::{
+    object_format,
+    open_absolute_directory_nofollow,
+    open_at,
+    s,
 };
 use crate::{
     StoreMutationLock, StoreNodeIdentity,
