@@ -248,6 +248,8 @@ export type ReplayState = {
   recoveries: Map<string, ReplayRecovery>;
   /** Revision ids are durable identities and cannot be reused in one bundle. */
   receiptRevisionIds: Set<string>;
+  /** Last-writer-wins kernel setting from `settings` records (e.g. effort). */
+  effort: string | null;
   lastSeq: number;
   maxSeq: number;
 };
@@ -1794,6 +1796,7 @@ export function createReplayState(): ReplayState {
     bySeq: new Map(),
     recoveries: new Map(),
     receiptRevisionIds: new Set(),
+    effort: null,
     lastSeq: 0,
     maxSeq: 0,
   };
@@ -1931,6 +1934,7 @@ export function applySessionRecord(state: ReplayState, rec: unknown): SessionRes
     dropped?: unknown;
     evicted?: unknown;
     summarySseq?: unknown;
+    effort?: unknown;
   };
   if (typeof e.storageSeq !== "number" || !Number.isInteger(e.storageSeq) || e.storageSeq < 1) {
     return { ok: false, error: "invalid storageSeq" };
@@ -1940,6 +1944,16 @@ export function applySessionRecord(state: ReplayState, rec: unknown): SessionRes
   }
   if (e.type === "checkpoint") {
     if ("message" in e) return { ok: false, error: "checkpoint contains a message" };
+    commitSequence(state, e.storageSeq);
+    return { ok: true };
+  }
+  if (e.type === "settings") {
+    // Opaque kernel setting; the owner validates the value on apply.
+    // Bound the string so a corrupt bundle cannot smuggle bulk data here.
+    if (typeof e.effort !== "string" || e.effort.length < 1 || e.effort.length > 64) {
+      return { ok: false, error: "invalid settings effort" };
+    }
+    state.effort = e.effort;
     commitSequence(state, e.storageSeq);
     return { ok: true };
   }
@@ -2148,7 +2162,7 @@ function applyFramed(state: ReplayState, framed: FramedRecord): SessionResult | 
   return applySessionRecord(state, framed.rec);
 }
 
-export function replaySessionRecords(text: string): SessionResult<{ messages: ReplayMessage[]; maxSeq: number }> {
+export function replaySessionRecords(text: string): SessionResult<{ messages: ReplayMessage[]; maxSeq: number; effort: string | null }> {
   const state = createReplayState();
   const buf = Buffer.from(text, "utf8");
   let pending: Buffer = buf;
@@ -2166,7 +2180,7 @@ export function replaySessionRecords(text: string): SessionResult<{ messages: Re
     const applied = applyFramed(state, parsed);
     if (applied !== "skip" && !applied.ok) return applied;
   }
-  return { ok: true, messages: state.messages, maxSeq: state.maxSeq };
+  return { ok: true, messages: state.messages, maxSeq: state.maxSeq, effort: state.effort };
 }
 
 export async function replaySessionBundle(

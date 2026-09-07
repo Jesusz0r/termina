@@ -7519,6 +7519,10 @@ async function resumeSessionBody(): Promise<SessionResult> {
     }
   }
   storageSeq = Math.max(storageSeq, replayed.maxSeq);
+  const savedEffort = replayed.state.effort;
+  if (typeof savedEffort === "string" && (EFFORT_LEVELS as readonly string[]).includes(savedEffort)) {
+    effortWanted = clampEffortLevel(route.provider, route.model, savedEffort as EffortLevel, providerProtocol(route.provider, route.model));
+  }
   try {
     openSessionWriter();
   } catch (err) {
@@ -7528,7 +7532,7 @@ async function resumeSessionBody(): Promise<SessionResult> {
   }
   streamPrepared = true;
   resetCacheContinuity();
-  syncIndicators();
+  syncStatus();
   renderHistoryTranscript(history, surface);
   return { ok: true };
 }
@@ -8353,7 +8357,18 @@ function dispatchLine(line: string): void {
       return;
     }
     const requested = effortCmd.effort;
+    const prev = effortWanted;
     effortWanted = clampEffortLevel(route.provider, route.model, requested, providerProtocol(route.provider, route.model));
+    if (effortWanted !== prev) {
+      try {
+        persist({ type: "settings", effort: effortWanted });
+      } catch (err) {
+        out(`(effort ${effortWanted}; setting not persisted: ${(err as Error).message})\n`);
+        syncStatus();
+        showPrompt();
+        return;
+      }
+    }
     out(effortWanted === requested ? `(effort ${effortWanted})\n` : `(effort ${effortWanted}; ${requested} is unavailable)\n`);
     syncStatus();
     showPrompt();

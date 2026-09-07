@@ -243,3 +243,43 @@ describe("Agent Core Session Durable Reclaim Receipts & Block Recovery", () => {
     }
   });
 });
+
+describe("Agent Core Session Settings Records", () => {
+  const text = (records: unknown[]) => records.map((r) => `${JSON.stringify(r)}\n`).join("");
+
+  it("round-trips the last settings effort and rejects malformed values", () => {
+    const good = session.replaySessionRecords(text([
+      { storageSeq: 1, type: "message", message: { role: "user", content: "hi" } },
+      { storageSeq: 2, type: "settings", effort: "low" },
+      { storageSeq: 3, type: "settings", effort: "high" },
+    ]));
+    expect(good.ok).toBe(true);
+    if (good.ok) {
+      expect(good.effort).toBe("high");
+      expect(good.messages).toHaveLength(1);
+    }
+    expect(session.replaySessionRecords(text([
+      { storageSeq: 1, type: "settings" },
+    ])).ok).toBe(false);
+    expect(session.replaySessionRecords(text([
+      { storageSeq: 1, type: "settings", effort: "" },
+    ])).ok).toBe(false);
+    expect(session.replaySessionRecords(text([
+      { storageSeq: 1, type: "settings", effort: "x".repeat(65) },
+    ])).ok).toBe(false);
+    expect(session.replaySessionRecords(text([
+      { storageSeq: 1, type: "settings", effort: 42 },
+    ])).ok).toBe(false);
+    expect(session.replaySessionRecords(text([
+      { storageSeq: 1, type: "frobnicate" },
+    ])).ok).toBe(false);
+  });
+
+  it("reports null effort when no settings record exists", () => {
+    const replayed = session.replaySessionRecords(text([
+      { storageSeq: 1, type: "message", message: { role: "user", content: "hi" } },
+    ]));
+    expect(replayed.ok).toBe(true);
+    if (replayed.ok) expect(replayed.effort).toBeNull();
+  });
+});
