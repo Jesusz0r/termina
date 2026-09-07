@@ -401,6 +401,21 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       assert.equal(usageField(invalid.usage, "reportedUsd"), null);
     });
 
+    await test("writeless relay routes treat a null cache write as exact", () => {
+      const core = requireCore();
+      assert.equal(typeof core.cacheWriteSupportedFor, "function");
+      for (const provider of ["xai", "opencode-go", "opencode-zen"]) {
+        assert.equal(core.cacheWriteSupportedFor(provider, null), false);
+      }
+      for (const provider of ["openai-codex", "openai", "anthropic", "google", "openrouter"]) {
+        assert.equal(core.cacheWriteSupportedFor(provider, null), null);
+      }
+      for (const provider of ["xai", "opencode-go", "opencode-zen", "openai-codex"]) {
+        assert.equal(core.cacheWriteSupportedFor(provider, 0), true);
+        assert.equal(core.cacheWriteSupportedFor(provider, 12), true);
+      }
+    });
+
     await test("Google usage preserves unknown fields and records thoughtsTokenCount", () => {
       const result = compat.googleResultFromEvents(
         [{ usageMetadata: { promptTokenCount: 50, cachedContentTokenCount: 20, candidatesTokenCount: 10, thoughtsTokenCount: 6 } }],

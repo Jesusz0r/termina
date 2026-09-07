@@ -6641,8 +6641,16 @@ type CatalogProvider = { models?: Record<string, CatalogModelEntry>; version?: u
 type CatalogResponse = Record<string, CatalogProvider> & { version?: unknown; updatedAt?: unknown };
 
 const RATE_CATALOG_URL = "https://models.dev/api.json";
-const RATE_FETCH_TIMEOUT_MS = 200;
-const RATE_CATALOG_BODY_CAP_BYTES = 4 * 1024 * 1024;
+// Background budget only: run startup races this load with a short wait
+// (awaitInitialRates), so a generous timeout never blocks the terminal.
+// The catalog body is ~4.5MB and growing; first byte alone can take ~200ms.
+const RATE_FETCH_TIMEOUT_MS = 30_000;
+const RATE_CATALOG_BODY_CAP_BYTES = 16 * 1024 * 1024;
+// A transient boot-network failure must not pin an empty map forever: retry
+// a bounded number of times inside the background load, then let the next
+// run re-kick it via ensureRatesLoading.
+const RATE_LOAD_MAX_ATTEMPTS = 3;
+const RATE_LOAD_RETRY_DELAY_MS = 2_000;
 const RATE_UNITS = {
   input: "usd_per_million_tokens",
   cacheRead: "usd_per_million_tokens",
@@ -6652,7 +6660,6 @@ const RATE_UNITS = {
   storage: "usd_per_gib_second",
 } as const;
 let rateSnapshotMap: ReadonlyMap<string, RateSnapshot> = new Map();
-let ratesLoadStarted = false;
 let ratesLoadPromise: Promise<void> | null = null;
 
 function catalogKey(provider: string, model: string, role: "main" | "summary"): string {
@@ -6715,21 +6722,21 @@ function snapshotForCatalogEntry(
   });
 }
 
-async function loadRates(): Promise<void> {
+async function loadRates(): Promise<boolean> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), RATE_FETCH_TIMEOUT_MS);
   try {
     const res = await fetch(RATE_CATALOG_URL, { signal: controller.signal });
-    if (!res.ok) return;
+    if (!res.ok) return false;
     const body = await readBoundedHttpBody(res, RATE_CATALOG_BODY_CAP_BYTES);
-    if (body.state !== "complete" || body.truncated) return;
+    if (body.state !== "complete" || body.truncated) return false;
     let parsed: unknown;
     try {
       parsed = JSON.parse(body.text) as unknown;
     } catch {
-      return;
+      return false;
     }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
     const db = parsed as CatalogResponse;
     const lookedUpAt = new Date().toISOString();
     const version = catalogMetadata(db.version) ?? catalogMetadata(db.updatedAt);
@@ -6749,19 +6756,37 @@ async function loadRates(): Promise<void> {
     // logical task keeps the previous map reference and cannot observe a
     // half-loaded or changing catalog.
     rateSnapshotMap = next;
+    return true;
   } catch {
     /* Offline/catalog failure leaves the scoped snapshot unknown. */
+    return false;
   } finally {
     clearTimeout(timer);
   }
 }
 
-function ensureRatesLoading(): Promise<void> {
-  if (!ratesLoadStarted) {
-    ratesLoadStarted = true;
-    ratesLoadPromise = loadRates();
+async function loadRatesWithRetry(): Promise<boolean> {
+  for (let attempt = 1; ; attempt++) {
+    if (await loadRates()) return true;
+    if (attempt >= RATE_LOAD_MAX_ATTEMPTS) return false;
+    await sleep(RATE_LOAD_RETRY_DELAY_MS * attempt);
   }
-  return ratesLoadPromise ?? Promise.resolve();
+}
+
+function ensureRatesLoading(): Promise<void> {
+  if (!ratesLoadPromise) {
+    ratesLoadPromise = loadRatesWithRetry().then(
+      (ok) => {
+        // A failed background load must not pin the failed state: the next
+        // run retries instead of serving an empty map forever.
+        if (!ok) ratesLoadPromise = null;
+      },
+      () => {
+        ratesLoadPromise = null;
+      },
+    );
+  }
+  return ratesLoadPromise;
 }
 
 async function awaitInitialRates(timeoutMs = 250): Promise<void> {
@@ -6872,6 +6897,19 @@ function traceCostForUsage(
   };
 }
 
+/**
+ * Whether a null cache-write count is exact for one provider route. xAI
+ * and the OpenCode relays report cached reads only (255 Go+Zen turns on
+ * 2026-09-07 carried reads up to 451k tokens without a single write
+ * count, and the usage parser probes `cache_write_tokens` in two places
+ * without ever finding it there), so null means no write component. A
+ * reported count means support trivially; other providers stay strict.
+ */
+export function cacheWriteSupportedFor(provider: ProviderId, cacheWrite: number | null): boolean | null {
+  if (cacheWrite !== null) return true;
+  return provider === "xai" || provider === "opencode-go" || provider === "opencode-zen" ? false : null;
+}
+
 function reportUsage(
   usage: Usage,
   ttftMs: number | null,
@@ -6895,10 +6933,7 @@ function reportUsage(
       inputTokens: usage.input,
       cacheReadTokens: usage.cacheRead,
       cacheWriteTokens: usage.cacheWrite,
-      // xAI usage reports cached reads only; its schema has no write
-      // component, so a null write count is exact. A reported count means
-      // support trivially; other providers stay strict (unknown).
-      cacheWriteSupported: usage.cacheWrite !== null ? true : route.provider === "xai" ? false : null,
+      cacheWriteSupported: cacheWriteSupportedFor(route.provider, usage.cacheWrite),
     },
     diagnostics: cache,
     postRevision,
