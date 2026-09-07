@@ -11,6 +11,15 @@ export function gemini3Model(model: string): boolean {
 }
 
 /**
+ * Gemini 2.5 supports reasoning budgets through `reasoning_effort` on the
+ * OpenAI-compatible endpoint, like generation 3+.
+ * https://ai.google.dev/gemini-api/docs/openai
+ */
+export function gemini25Model(model: string): boolean {
+  return /gemini-2\.5/.test(model.toLowerCase());
+}
+
+/**
  * Per-model Gemini level rejections observed as provider 400s. Newer
  * generations (live Zen docs already list up to 3.8 Flash) get the full
  * range unless a row below proves otherwise — rows only hide levels, so a

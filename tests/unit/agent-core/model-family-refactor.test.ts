@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   adaptiveEffortFor,
+  effortControlFor,
   reasoningEffortFor,
   supportedEffortLevels,
   thinkingRequestFor,
@@ -47,8 +48,17 @@ describe("shared model capabilities across provider protocols", () => {
     expect(reasoningEffortFor("openai-codex", "gpt-5.6-sol", "minimal", "openai-codex-responses")).toBe("low");
   });
 
-  it("keeps relay effort scoped to Completions while Go MiniMax uses Messages", () => {
-    expect(supportedEffortLevels("opencode-zen", "minimax-m2.5", "openai-completions"))
+  it("controls Gemini 2.5 effort on the direct provider and marks unverified routes provider-default", () => {
+    expect(supportedEffortLevels("google", "gemini-2.5-flash", "openai-completions"))
+      .toEqual(["minimal", "low", "medium", "high"]);
+    expect(effortControlFor("google", "gemini-2.5-flash", "openai-completions")).toBe("explicit");
+    expect(effortControlFor("openrouter", "deepseek/deepseek-r1", "openai-completions"))
+      .toBe("provider-default");
+    expect(supportedEffortLevels("openrouter", "deepseek/deepseek-r1", "openai-completions"))
+      .toEqual(["off"]);
+  });
+
+  it("keeps relay effort scoped to Completions while Go MiniMax uses Messages", () => {    expect(supportedEffortLevels("opencode-zen", "minimax-m2.5", "openai-completions"))
       .toEqual(["off", "low", "medium", "high", "max"]);
     expect(supportedEffortLevels("opencode-go", "minimax-m2.5", "anthropic-messages"))
       .toEqual(["off"]);

@@ -25,6 +25,7 @@ import {
   EFFORT_LEVELS,
   catalogOutputLimit,
   defaultContextWindow,
+  effortControlFor,
   supportedEffortLevels,
   clampEffortLevel,
   thinkingRequestFor,
@@ -8285,7 +8286,11 @@ function dispatchLine(line: string): void {
     const available = supportedEffortLevels(route.provider, route.model, providerProtocol(route.provider, route.model));
     if ("show" in effortCmd) {
       const actual = effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model));
-      out(`(effort ${actual}; available: ${available.join(", ")})\n`);
+      if (effortControlFor(route.provider, route.model, providerProtocol(route.provider, route.model)) === "provider-default") {
+        out(`(effort provider-default; this route sends no effort control)\n`);
+      } else {
+        out(`(effort ${actual}; available: ${available.join(", ")})\n`);
+      }
       showPrompt();
       return;
     }

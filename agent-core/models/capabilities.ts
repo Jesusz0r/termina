@@ -4,7 +4,7 @@ import type { ProviderId, ProviderProtocol } from "../auth.ts";
 import type { ModelInfo } from "../models.ts";
 import { modelLeaf } from "./families/identity.ts";
 import { claudeThinkingApi, claudeEffortLevelMap } from "./families/anthropic.ts";
-import { gemini3Model, geminiEffortLevelMap } from "./families/google.ts";
+import { gemini25Model, gemini3Model, geminiEffortLevelMap } from "./families/google.ts";
 import { glmReasoningFamily, relayCompletionsFamily } from "./families/relay.ts";
 
 export const EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -61,17 +61,26 @@ export function usesAnthropicThinking(_provider: ProviderId, model: string, prot
 export function usesModelEffort(provider: ProviderId, model: string, protocol: ProviderProtocol): boolean {
   if (usesAnthropicThinking(provider, model, protocol)) return true;
   if ((protocol === "openai-responses" || protocol === "openai-codex-responses") && responsesReasoningModel(model)) return true;
-  if (gemini3Model(model) && (provider === "google" || protocol === "google-generate")) {
+  if ((gemini3Model(model) || gemini25Model(model)) && (provider === "google" || protocol === "google-generate")) {
     return true;
   }
   if (usesRelayCompletionsEffort(provider, model, protocol)) return true;
   return glmReasoningFamily(model);
 }
 
+/**
+ * Whether the harness controls reasoning on this route ("explicit") or the
+ * provider applies its own default with no wire control ("provider-default").
+ * Never presented as disabled: unknown is not off.
+ */
+export function effortControlFor(provider: ProviderId, model: string, protocol: ProviderProtocol): "explicit" | "provider-default" {
+  return usesModelEffort(provider, model, protocol) ? "explicit" : "provider-default";
+}
+
 function effortLevelMap(provider: ProviderId, model: string, protocol: ProviderProtocol): EffortLevelMap {
   const id = model.toLowerCase();
   const map: EffortLevelMap = {};
-  if (gemini3Model(model) && (provider === "google" || protocol === "google-generate")) {
+  if ((gemini3Model(model) || gemini25Model(model)) && (provider === "google" || protocol === "google-generate")) {
     return geminiEffortLevelMap(model);
   }
 
