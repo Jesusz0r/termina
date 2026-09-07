@@ -9,7 +9,7 @@
  */
 import { execFile, spawn } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
-import { constants as fsConstants, existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { constants as fsConstants, existsSync, lstatSync, realpathSync } from "node:fs";
 import type { BigIntStats } from "node:fs";
 import { lstat as lstatPath, open as openFile, opendir, readFile, readlink, realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -71,103 +71,77 @@ import {
 
 export { quoteShellArg };
 export type { WorldlineState, WorldlineSummary };
+import type {
+  CandidateState,
+  ComparisonState,
+  ComparisonManifest,
+  UncertainComparisonAdmissionLease,
+  PromotionRetentionUsage,
+  PromotionJournalUsageLedger,
+  PromotionJournalAdmissionResult,
+  PromotionOperationBudget,
+  TrackedSessionFork,
+  CandidateReadyEvent,
+  CandidateLaunchAttempt,
+  EvidenceAttempt,
+  PendingCandidateReady,
+  PromotionArtifactEntry,
+  PromotionArtifactManifest,
+  PromotionRootProvenance,
+  PromotionDirectoryPlan,
+  PromotionJournalBinding,
+  PromotionEntryState,
+  PromotionJournalPath,
+  CanonicalPath,
+  PromotionRecoveryTestHook,
+  BoundPromotionDirectory,
+  PromotionRecoveryContext,
+} from "./_worldlines/types.js";
+import type { UncertainComparisonAdmissionOwner } from "./_worldlines/uncertain-comparison.js";
+export type { BoundPromotionDirectory, PromotionRecoveryContext } from "./_worldlines/types.js";
+import {
+  boundedWorldlineEntries,
+  comparisonManifestFor,
+  parseComparisonManifest,
+  releaseUncertainComparisonAdmissionOwner,
+  uncertainComparisonAdmissionOwnerFor,
+} from "./_worldlines/uncertain-comparison.js";
+export { UNCERTAIN_COMPARISON_USAGE_LEDGER } from "./_worldlines/limits.js";
+import {
+  CANDIDATE_CLEANUP_TIMEOUT_MS,
+  MARKER,
+  MAX_CANDIDATE_BYTES,
+  MAX_IGNORED_BYTES,
+  MAX_IGNORED_FILES,
+  MAX_PI_RESOURCE_BYTES,
+  MAX_PROMOTION_JOURNALS,
+  MAX_PROMOTION_JOURNAL_BYTES,
+  MAX_PROMOTION_JOURNAL_OVERHEAD_BYTES,
+  MAX_PROMOTION_JOURNAL_ROOT_ENTRIES,
+  MAX_PROMOTION_OPERATION_BYTES,
+  MAX_PROMOTION_SCAN_DEPTH,
+  MAX_PROMOTION_SCAN_ENTRIES,
+  MAX_PROMOTION_SCAN_PENDING,
+  MAX_PROMOTION_SCAN_WORK_BYTES,
+  MAX_PROMPT_BYTES,
+  MAX_RETAINED_RUNS,
+  MAX_RUNS_PER_TERMINAL,
+  MAX_SESSION_BYTES,
+  MAX_STALE_SWEEP_BYTES,
+  MAX_TEMPLATE_BYTES,
+  MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES,
+  MAX_WORLDLINE_FILE_BYTES,
+  PROMOTION_JOURNAL_USAGE_LEDGER,
+  PROMOTION_JOURNAL_USAGE_LEDGER_VERSION,
+  READY_TIMEOUT_MS,
+  RUNTIME_ALLOWLIST,
+} from "./_worldlines/limits.js";
+import { errnoCode } from "./_worldlines/uncertain-comparison.js";
+import { promotionIdentityOf, refreshBoundPromotionDirectory } from "./_worldlines/bindings.js";
 
-interface CandidateState {
-  label: "A" | "B";
-  role: "reference" | "alternative" | "challenge" | "moment";
-  dir: string;
-  supportDir: string;
-  /** Native identity of the allocated candidate root. */
-  rootIdentity?: PromotionFsIdentity;
-  /** Descriptor identity retained for every candidate-owned mutation. */
-  rootBinding?: BoundPromotionDirectory;
-  supportBinding?: BoundPromotionDirectory;
-  homeBinding?: BoundPromotionDirectory;
-  sessionBinding?: BoundPromotionDirectory;
-  eventsBinding?: BoundPromotionDirectory;
-  tmpBinding?: BoundPromotionDirectory;
-  cacheBinding?: BoundPromotionDirectory;
-  controlLeaf?: BoundPromotionExpectedLeaf;
-  profileLeaf?: BoundPromotionExpectedLeaf;
-  homeDir: string;
-  sessionDir: string;
-  eventsDir: string;
-  tmpDir: string;
-  cacheDir: string;
-  profilePath: string;
-  sessionFile: string | null;
-  /** The shared base state for this comparison. */
-  comparisonBaseStateId: string | null;
-  /** The root state used for promotion. */
-  promotionBaseStateId: string | null;
-  /** The latest captured state of this candidate. */
-  headStateId: string | null;
-  /** Serializes head updates with the matching workspace state. */
-  headCommit: Promise<void>;
-  terminalId: string | null;
-  pid: number | null;
-  lstart: string | null;
-  /** One-shot reopen attempt identity; never persisted in the manifest. */
-  startupAttemptId?: string;
-  /** In-memory startup generation paired with startupAttemptId. */
-  startupGeneration?: number;
-  /** The startup control operation consumed by a fresh candidate, if any. */
-  startupControlOpId?: string;
-  state: WorldlineState;
-  version: number;
-  error: string | null;
-}
 
-interface ComparisonState {
-  id: string;
-  dir: string;
-  /** Native identity of the allocated comparison root. */
-  rootIdentity?: PromotionFsIdentity;
-  /** Descriptor identity retained for every comparison-owned mutation. */
-  rootBinding?: BoundPromotionDirectory;
-  templateDir: string;
-  /** Native identity of the descriptor-bound template root. */
-  templateIdentity?: PromotionFsIdentity;
-  templateBinding?: BoundPromotionDirectory;
-  profilesBinding?: BoundPromotionDirectory;
-  sessionWorkspaceDir: string;
-  sessionWorkspaceBinding?: BoundPromotionDirectory;
-  markerLeaf?: BoundPromotionExpectedLeaf;
-  manifestLeaf?: BoundPromotionExpectedLeaf;
-  sourceRunId: string;
-  /** The source Git common dir, resolved at fork time. */
-  sourceGitDir: string;
-  /** The primary project root, resolved at fork time. */
-  primaryRoot: string;
-  /** The shared comparison base commit inside the candidate repos. */
-  baseCommit: string | null;
-  /** The store-side shared base (R) of the lineage. */
-  baseStateId: string | null;
-  /** Candidates inherit one-process trust when the source was trusted. */
-  inheritTrust: boolean;
-  /** The model and thinking level of the source run. */
-  model: string | null;
-  thinkingLevel: string | null;
-  /** Which engine produced the source run. */
-  engine: "pi" | "core";
-  /** Number of candidate launch records required before stale deletion is safe. */
-  expectedCandidates: 1 | 2;
-  /** A destination that may have committed after a core fork became uncertain. */
-  uncertainSessionArtifacts: Array<{ path: string; error: string }>;
-  /** The manifest could not be durably updated; retain the comparison. */
-  manifestWriteFailed: boolean;
-  /** Teardown has closed admission and is draining worker-backed forks. */
-  teardownPromise: Promise<void> | null;
-  /** Admission lease held while this comparison is being created. */
-  uncertainAdmissionLease: UncertainComparisonAdmissionLease | null;
-  removeUncertainRequested: boolean;
-  /** When the pair started (ms epoch). */
-  createdAt: number;
-  candidates: Map<"A" | "B", CandidateState>;
-  phase: "creating" | "running" | "error";
-  error: string | null;
-  readyTimer: ReturnType<typeof setTimeout> | null;
-}
+
+
 
 /** One recorded run (WORLDLINES §6.5). */
 export interface RunRecord {
@@ -325,827 +299,8 @@ export interface WorldlineDeps {
   installPromoted(seed: PromoteSeed): Promise<{ terminalId: string }>;
 }
 
-const RUNTIME_ALLOWLIST = ["node_modules", ".venv", "venv"];
-const MAX_SESSION_BYTES = 64 * 1024 * 1024;
-const MAX_PROMPT_BYTES = 20 * 1024 * 1024;
-const MAX_TEMPLATE_BYTES = 2 * 1024 * 1024 * 1024;
-const MAX_CANDIDATE_BYTES = 1024 * 1024 * 1024;
-const READY_TIMEOUT_MS = 90000;
-/** Bound candidate cleanup when a startup hook ignores cancellation. */
-const CANDIDATE_CLEANUP_TIMEOUT_MS = 2500;
-const MAX_PI_RESOURCE_BYTES = 200 * 1024 * 1024;
-const MAX_WORLDLINE_FILE_BYTES = 2 * 1024 * 1024;
-const MAX_RUNS_PER_TERMINAL = 20;
-const MAX_RETAINED_RUNS = 200;
-const MAX_IGNORED_FILES = 5000;
-const MAX_IGNORED_BYTES = 200 * 1024 * 1024;
-/** Retained promotion evidence is never auto-deleted; admission is bounded. */
-const MAX_PROMOTION_JOURNALS = 32;
-const MAX_PROMOTION_JOURNAL_BYTES = 8 * 1024 * 1024 * 1024;
-const MAX_PROMOTION_JOURNAL_OVERHEAD_BYTES = 32 * 1024 * 1024;
-const MAX_PROMOTION_OPERATION_BYTES = MAX_TEMPLATE_BYTES * 2 + MAX_SESSION_BYTES + MAX_PROMOTION_JOURNAL_OVERHEAD_BYTES;
-const MAX_PROMOTION_JOURNAL_ROOT_ENTRIES = MAX_PROMOTION_JOURNALS * 4;
-/** Durable, root-scoped admission state for promotion journals. */
-const PROMOTION_JOURNAL_USAGE_LEDGER = ".termina-promotion-journal-usage.json";
-const PROMOTION_JOURNAL_USAGE_LEDGER_VERSION = 1;
-/** Uncertain comparisons are recovery evidence; never auto-delete at this bound. */
-const MAX_UNCERTAIN_COMPARISONS = 128;
-const MAX_UNCERTAIN_COMPARISON_BYTES = 4 * 1024 * 1024 * 1024;
-const MAX_UNCERTAIN_COMPARISON_ENTRIES = 250_000;
-/** Bound startup enumeration/accounting for adjacent stale world roots. */
-const MAX_STALE_SWEEP_BYTES = MAX_UNCERTAIN_COMPARISON_BYTES;
-/** Minimum durable session envelope reserved for every creator transaction. */
-const MIN_UNCERTAIN_COMPARISON_RESERVATION_BYTES = MAX_SESSION_BYTES;
-/** Atomic root-scoped usage ledger for uncertain comparison evidence. */
-export const UNCERTAIN_COMPARISON_USAGE_LEDGER = ".termina-uncertain-comparison-usage.json";
-const UNCERTAIN_COMPARISON_USAGE_LEDGER_VERSION = 1;
-const MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES = MAX_UNCERTAIN_COMPARISONS * 4;
-const MAX_PROMOTION_SCAN_ENTRIES = MAX_UNCERTAIN_COMPARISON_ENTRIES;
-const MAX_PROMOTION_SCAN_DEPTH = 64;
-const MAX_PROMOTION_SCAN_PENDING = MAX_PROMOTION_SCAN_ENTRIES;
-const MAX_PROMOTION_SCAN_WORK_BYTES = 128 * 1024 * 1024;
-const MAX_UNCERTAIN_SCAN_DEPTH = 64;
-const MAX_UNCERTAIN_SCAN_PENDING = MAX_UNCERTAIN_COMPARISON_ENTRIES;
-const MAX_UNCERTAIN_SCAN_WORK_BYTES = 128 * 1024 * 1024;
 
-/** The app-owned marker that proves a worlds dir belongs to the app. */
-const MARKER = ".termina-world";
 
-type ComparisonManifestStatus = "creating" | "complete" | "uncertain";
-type ComparisonManifestCandidate = { pid: number | null; lstart: string | null; paths: string[] };
-type ComparisonManifest = {
-  id: string;
-  sourceRunId: string;
-  createdAt: number;
-  status: ComparisonManifestStatus;
-  expectedCandidates: 1 | 2;
-  candidates: Record<string, ComparisonManifestCandidate>;
-  uncertainSessionArtifacts: Array<{ path: string; error: string }>;
-};
-
-function objectRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
-}
-
-/** Parse only a complete manifest shape; null is deliberately fail-closed. */
-function parseComparisonManifest(value: unknown): ComparisonManifest | null {
-  const record = objectRecord(value);
-  if (!record || typeof record.id !== "string" || record.id.length === 0 || typeof record.sourceRunId !== "string" || record.sourceRunId.length === 0) return null;
-  if (typeof record.createdAt !== "number" || !Number.isFinite(record.createdAt) || record.createdAt <= 0) return null;
-  if (record.status !== "creating" && record.status !== "complete" && record.status !== "uncertain") return null;
-  if (record.expectedCandidates !== 1 && record.expectedCandidates !== 2) return null;
-  const candidatesRecord = objectRecord(record.candidates);
-  if (!candidatesRecord) return null;
-  const candidates: Record<string, ComparisonManifestCandidate> = {};
-  for (const [label, rawCandidate] of Object.entries(candidatesRecord)) {
-    if (label !== "A" && label !== "B") return null;
-    const candidate = objectRecord(rawCandidate);
-    if (!candidate || (typeof candidate.pid !== "number" && candidate.pid !== null) || (typeof candidate.pid === "number" && (!Number.isInteger(candidate.pid) || candidate.pid < 0))) return null;
-    if (typeof candidate.lstart !== "string" && candidate.lstart !== null) return null;
-    if (!Array.isArray(candidate.paths) || candidate.paths.length === 0 || candidate.paths.some((path) => typeof path !== "string" || !isAbsolute(path))) return null;
-    candidates[label] = { pid: candidate.pid as number | null, lstart: candidate.lstart as string | null, paths: [...candidate.paths] as string[] };
-  }
-  if (Object.keys(candidates).length > record.expectedCandidates) return null;
-  if (!Array.isArray(record.uncertainSessionArtifacts)) return null;
-  const uncertainSessionArtifacts: Array<{ path: string; error: string }> = [];
-  for (const rawArtifact of record.uncertainSessionArtifacts) {
-    const artifact = objectRecord(rawArtifact);
-    if (!artifact || typeof artifact.path !== "string" || !isAbsolute(artifact.path) || artifact.path.length === 0 || typeof artifact.error !== "string" || artifact.error.length === 0) return null;
-    uncertainSessionArtifacts.push({ path: artifact.path, error: artifact.error });
-  }
-  if (record.status === "complete" && (Object.keys(candidates).length !== record.expectedCandidates || uncertainSessionArtifacts.length > 0)) return null;
-  if (record.status === "uncertain" && uncertainSessionArtifacts.length === 0) return null;
-  return {
-    id: record.id,
-    sourceRunId: record.sourceRunId,
-    createdAt: record.createdAt,
-    status: record.status,
-    expectedCandidates: record.expectedCandidates,
-    candidates,
-    uncertainSessionArtifacts,
-  };
-}
-
-function comparisonManifestFor(cmp: ComparisonState, status: ComparisonManifestStatus = "creating"): ComparisonManifest {
-  const candidates: Record<string, ComparisonManifestCandidate> = {};
-  for (const [label, cand] of cmp.candidates) {
-    candidates[label] = { pid: cand.pid, lstart: cand.lstart, paths: [cand.dir, cand.supportDir] };
-  }
-  return {
-    id: cmp.id,
-    sourceRunId: cmp.sourceRunId,
-    createdAt: cmp.createdAt,
-    status,
-    expectedCandidates: cmp.expectedCandidates,
-    candidates,
-    uncertainSessionArtifacts: [...cmp.uncertainSessionArtifacts],
-  };
-}
-
-function readComparisonManifest(dir: string): ComparisonManifest | null {
-  try {
-    return parseComparisonManifest(JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8")));
-  } catch {
-    return null;
-  }
-}
-
-type UncertainComparisonMeasurement =
-  | { ok: true; bytes: number; entries: number; proof: string }
-  | { ok: false; error: string };
-
-type UncertainComparisonUsage = { count: number; bytes: number; entries: number };
-
-type UncertainComparisonIdentity = {
-  dev: string;
-  ino: string;
-  size: string;
-  mtimeNs: string;
-  ctimeNs: string;
-};
-
-type UncertainComparisonLedgerEntry = {
-  name: string;
-  identity: UncertainComparisonIdentity;
-  counted: boolean;
-  bytes: number;
-  entries: number;
-  /** Metadata Merkle proof for every owned node, including nested children. */
-  proof: string;
-};
-
-type UncertainComparisonLedgerReservation = {
-  token: string;
-  pid: number;
-  bytes: number;
-};
-
-type UncertainComparisonUsageLedger = {
-  version: 1;
-  root: { dev: string; ino: string };
-  entries: UncertainComparisonLedgerEntry[];
-  reservations: UncertainComparisonLedgerReservation[];
-  usage: UncertainComparisonUsage;
-};
-
-type UncertainComparisonAdmissionLease = {
-  release(): void;
-  bind?(comparisonId: string): void;
-};
-
-/** Count every entry in an uncertain comparison tree, including files that
- * are not part of the normal candidate/session schema. Symlinks, special
- * entries, unreadable paths, and arithmetic overflow fail closed. */
-async function measureUncertainComparisonTree(root: string): Promise<UncertainComparisonMeasurement> {
-  const digest = createHash("sha256");
-  const initialWorkBytes = Buffer.byteLength(root, "utf8") + 1;
-  if (initialWorkBytes > MAX_UNCERTAIN_SCAN_WORK_BYTES) {
-    return { ok: false, error: "uncertain comparison evidence path exceeds its bounded work budget; explicitly discard or export it before retrying" };
-  }
-  const pending: Array<{ path: string; relative: string; depth: number; workBytes: number }> = [{ path: root, relative: ".", depth: 0, workBytes: initialWorkBytes }];
-  let pendingWorkBytes = initialWorkBytes;
-  let entries = 0;
-  let bytes = 0n;
-  const limit = BigInt(MAX_UNCERTAIN_COMPARISON_BYTES);
-  while (pending.length > 0) {
-    const current = pending.pop()!;
-    pendingWorkBytes -= current.workBytes;
-    if (current.depth > MAX_UNCERTAIN_SCAN_DEPTH) {
-      return { ok: false, error: "uncertain comparison evidence exceeds its depth bound; explicitly discard or export it before retrying" };
-    }
-    let info;
-    try {
-      info = await lstatPath(current.path, { bigint: true });
-    } catch {
-      return { ok: false, error: "uncertain comparison evidence is unreadable or partial; explicitly discard or export it before retrying" };
-    }
-    entries++;
-    if (entries > MAX_UNCERTAIN_COMPARISON_ENTRIES) {
-      return { ok: false, error: "uncertain comparison evidence contains too many entries; explicitly discard or export it before retrying" };
-    }
-    if (info.isSymbolicLink()) {
-      return { ok: false, error: "uncertain comparison evidence contains a symbolic link; explicitly discard or export it before retrying" };
-    }
-    if (!info.isDirectory() && !info.isFile()) {
-      return { ok: false, error: "uncertain comparison evidence contains an unsupported entry; explicitly discard or export it before retrying" };
-    }
-    bytes += info.size;
-    if (bytes > limit) {
-      return { ok: false, error: "uncertain comparison evidence exceeds its 4 GB bound; explicitly discard or export it before retrying" };
-    }
-    digest.update(`${current.relative}\0${info.isDirectory() ? "d" : "f"}\0${JSON.stringify(uncertainIdentityOf(info))}\n`);
-    if (!info.isDirectory()) {
-      if ((entries & 63) === 0) await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
-      continue;
-    }
-    let directory;
-    try {
-      directory = await opendir(current.path);
-    } catch {
-      return { ok: false, error: "uncertain comparison evidence is unreadable or partial; explicitly discard or export it before retrying" };
-    }
-    try {
-      const children: string[] = [];
-      let childNameBytes = 0;
-      for await (const child of directory) {
-        const nameBytes = Buffer.byteLength(child.name, "utf8");
-        if (childNameBytes > MAX_UNCERTAIN_SCAN_WORK_BYTES - nameBytes) {
-          return { ok: false, error: "uncertain comparison evidence scan exceeded its bounded work budget; explicitly discard or export it before retrying" };
-        }
-        childNameBytes += nameBytes;
-        children.push(child.name);
-        if (children.length > MAX_UNCERTAIN_COMPARISON_ENTRIES) {
-          return { ok: false, error: "uncertain comparison evidence contains too many entries; explicitly discard or export it before retrying" };
-        }
-      }
-      children.sort().reverse();
-      for (const name of children) {
-        if (pending.length >= MAX_UNCERTAIN_SCAN_PENDING) {
-          return { ok: false, error: "uncertain comparison evidence contains too many pending entries; explicitly discard or export it before retrying" };
-        }
-        const childPath = join(current.path, name);
-        const childRelative = current.relative === "." ? name : `${current.relative}/${name}`;
-        const workBytes = Buffer.byteLength(childPath, "utf8") + Buffer.byteLength(childRelative, "utf8");
-        if (workBytes > MAX_UNCERTAIN_SCAN_WORK_BYTES || pendingWorkBytes > MAX_UNCERTAIN_SCAN_WORK_BYTES - workBytes) {
-          return { ok: false, error: "uncertain comparison evidence scan exceeded its bounded work budget; explicitly discard or export it before retrying" };
-        }
-        pending.push({
-          path: childPath,
-          relative: childRelative,
-          depth: current.depth + 1,
-          workBytes,
-        });
-        pendingWorkBytes += workBytes;
-      }
-    } catch {
-      return { ok: false, error: "uncertain comparison evidence is unreadable or partial; explicitly discard or export it before retrying" };
-    } finally {
-      try {
-        await directory.close();
-      } catch {
-        /* iterator close is best effort */
-      }
-    }
-  }
-  if (bytes > BigInt(Number.MAX_SAFE_INTEGER)) {
-    return { ok: false, error: "uncertain comparison evidence byte count overflow; explicitly discard or export it before retrying" };
-  }
-  return { ok: true, bytes: Number(bytes), entries, proof: digest.digest("hex") };
-}
-
-async function boundedWorldlineEntries(path: string, limit: number, message: string): Promise<string[]> {
-  let directory;
-  try {
-    directory = await opendir(path);
-  } catch {
-    throw new Error(message);
-  }
-  const names: string[] = [];
-  let nameBytes = 0;
-  try {
-    for await (const entry of directory) {
-      const addedNameBytes = Buffer.byteLength(entry.name, "utf8");
-      if (nameBytes > MAX_PROMOTION_SCAN_WORK_BYTES - addedNameBytes) throw new Error(message);
-      nameBytes += addedNameBytes;
-      names.push(entry.name);
-      if (names.length > limit) throw new Error(message);
-      if ((names.length & 63) === 0) await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
-    }
-    return names;
-  } catch (error) {
-    if (error instanceof Error && error.message === message) throw error;
-    throw new Error(message);
-  } finally {
-    try {
-      await directory.close();
-    } catch {
-      /* iterator close is best effort */
-    }
-  }
-}
-
-function isSafeComparisonId(value: string): boolean {
-  return value.length > 0 && value.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
-}
-
-function uncertainIdentityOf(info: BigIntStats): UncertainComparisonIdentity {
-  return {
-    dev: String(info.dev),
-    ino: String(info.ino),
-    size: String(info.size),
-    mtimeNs: String(info.mtimeNs),
-    ctimeNs: String(info.ctimeNs),
-  };
-}
-
-function sameUncertainIdentity(left: UncertainComparisonIdentity, right: UncertainComparisonIdentity): boolean {
-  return left.dev === right.dev
-    && left.ino === right.ino
-    && left.size === right.size
-    && left.mtimeNs === right.mtimeNs
-    && left.ctimeNs === right.ctimeNs;
-}
-
-async function uncertainComparisonRootNames(root: string): Promise<string[]> {
-  const names = await boundedWorldlineEntries(
-    root,
-    MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES,
-    `uncertain comparison evidence root contains too many entries (${MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES}); explicitly discard retained recovery evidence before retrying`,
-  );
-  const marked: string[] = [];
-  for (const name of names) {
-    const dir = join(root, name);
-    let info: BigIntStats;
-    try {
-      info = await lstatPath(dir, { bigint: true });
-    } catch (error) {
-      if (errnoCode(error) === "ENOENT") continue;
-      throw new Error("uncertain comparison evidence root is unreadable; explicitly discard retained recovery evidence before retrying");
-    }
-    if (!info.isDirectory() || info.isSymbolicLink()) continue;
-    try {
-      await lstatPath(join(dir, MARKER), { bigint: true });
-      marked.push(name);
-    } catch (error) {
-      if (errnoCode(error) !== "ENOENT") throw new Error("uncertain comparison marker is unreadable; explicitly discard retained recovery evidence before retrying");
-    }
-  }
-  return marked.sort();
-}
-
-function uncertainComparisonIsSafe(root: string, name: string, safeIds: ReadonlySet<string>): boolean {
-  if (!safeIds.has(name)) return false;
-  const dir = join(root, name);
-  let marker;
-  try {
-    marker = lstatSync(join(dir, MARKER));
-  } catch {
-    return false;
-  }
-  if (!marker.isFile() || marker.isSymbolicLink()) return false;
-  const manifest = readComparisonManifest(dir);
-  return manifest !== null && manifest.status !== "uncertain" && manifest.uncertainSessionArtifacts.length === 0;
-}
-
-async function buildUncertainComparisonLedgerEntry(root: string, name: string, safeIds: ReadonlySet<string>): Promise<UncertainComparisonLedgerEntry | null> {
-  let info: BigIntStats;
-  try {
-    info = await lstatPath(join(root, name), { bigint: true });
-  } catch (error) {
-    if (errnoCode(error) === "ENOENT") return null;
-    throw new Error("uncertain comparison evidence is unreadable or partial; explicitly discard retained recovery evidence before retrying");
-  }
-  if (!info.isDirectory() || info.isSymbolicLink()) return null;
-  try {
-    await lstatPath(join(root, name, MARKER), { bigint: true });
-  } catch (error) {
-    if (errnoCode(error) === "ENOENT") return null;
-    throw new Error("uncertain comparison marker is unreadable; explicitly discard retained recovery evidence before retrying");
-  }
-  if (uncertainComparisonIsSafe(root, name, safeIds)) {
-    return { name, identity: uncertainIdentityOf(info), counted: false, bytes: 0, entries: 0, proof: "0".repeat(64) };
-  }
-  const measured = await measureUncertainComparisonTree(join(root, name));
-  if (!measured.ok) throw new Error(measured.error);
-  return { name, identity: uncertainIdentityOf(info), counted: true, bytes: measured.bytes, entries: measured.entries, proof: measured.proof };
-}
-
-function uncertainComparisonUsageFromEntries(entries: readonly UncertainComparisonLedgerEntry[]): UncertainComparisonUsage {
-  let count = 0;
-  let bytes = 0;
-  let entryCount = 0;
-  for (const entry of entries) {
-    if (!entry.counted) continue;
-    count++;
-    if (!Number.isSafeInteger(entry.bytes) || entry.bytes < 0 || bytes > MAX_UNCERTAIN_COMPARISON_BYTES - entry.bytes) {
-      throw new Error("uncertain comparison evidence exceeds its 4 GB bound; explicitly discard retained recovery evidence before retrying");
-    }
-    bytes += entry.bytes;
-    if (!Number.isSafeInteger(entry.entries) || entry.entries < 0 || entryCount > MAX_UNCERTAIN_COMPARISON_ENTRIES - entry.entries) {
-      throw new Error("uncertain comparison evidence contains too many entries; explicitly discard retained recovery evidence before retrying");
-    }
-    entryCount += entry.entries;
-  }
-  if (count > MAX_UNCERTAIN_COMPARISONS) {
-    throw new Error(`uncertain comparisons are at capacity (${MAX_UNCERTAIN_COMPARISONS}); explicitly discard retained recovery evidence before retrying`);
-  }
-  return { count, bytes, entries: entryCount };
-}
-
-function validUncertainLedgerIdentity(value: unknown): value is UncertainComparisonIdentity {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  return ["dev", "ino", "size", "mtimeNs", "ctimeNs"].every((key) => typeof record[key] === "string" && /^\d+$/.test(record[key] as string));
-}
-
-function validUncertainLedgerEntry(value: unknown): value is UncertainComparisonLedgerEntry {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  if (typeof record.name !== "string"
-    || !isSafeComparisonId(record.name)
-    || !validUncertainLedgerIdentity(record.identity)
-    || typeof record.counted !== "boolean"
-    || typeof record.bytes !== "number"
-    || !Number.isSafeInteger(record.bytes)
-    || record.bytes < 0
-    || record.bytes > MAX_UNCERTAIN_COMPARISON_BYTES
-    || typeof record.entries !== "number"
-    || !Number.isSafeInteger(record.entries)
-    || record.entries < 0
-    || record.entries > MAX_UNCERTAIN_COMPARISON_ENTRIES
-    || typeof record.proof !== "string"
-    || !/^[0-9a-f]{64}$/.test(record.proof)) return false;
-  return record.counted
-    ? (record.bytes > 0 || record.entries > 0)
-    : record.bytes === 0 && record.entries === 0;
-}
-
-function validUncertainLedgerReservation(value: unknown): value is UncertainComparisonLedgerReservation {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  return typeof record.token === "string"
-    && record.token.length > 0
-    && record.token.length <= 128
-    && typeof record.pid === "number"
-    && Number.isSafeInteger(record.pid)
-    && record.pid > 0
-    && typeof record.bytes === "number"
-    && Number.isSafeInteger(record.bytes)
-    && record.bytes >= 0
-    && record.bytes <= MAX_UNCERTAIN_COMPARISON_BYTES;
-}
-
-function validUncertainUsage(value: unknown): value is UncertainComparisonUsage {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  return typeof record.count === "number" && Number.isSafeInteger(record.count) && record.count >= 0 && record.count <= MAX_UNCERTAIN_COMPARISONS
-    && typeof record.bytes === "number" && Number.isSafeInteger(record.bytes) && record.bytes >= 0 && record.bytes <= MAX_UNCERTAIN_COMPARISON_BYTES
-    && typeof record.entries === "number" && Number.isSafeInteger(record.entries) && record.entries >= 0 && record.entries <= MAX_UNCERTAIN_COMPARISON_ENTRIES;
-}
-
-async function writeUncertainComparisonUsageLedger(root: BoundPromotionDirectory, ledger: UncertainComparisonUsageLedger): Promise<void> {
-  await boundPromotionWriteJsonFile({
-    root: root.path,
-    rootIdentity: promotionIdentityOf(root),
-    components: [UNCERTAIN_COMPARISON_USAGE_LEDGER],
-    parentIdentity: promotionIdentityOf(root),
-    value: ledger,
-    maxBytes: 8 * 1024 * 1024,
-    mode: 0o600,
-  });
-}
-
-async function readUncertainComparisonUsageLedger(root: string, safeIds: ReadonlySet<string>): Promise<UncertainComparisonUsageLedger | null> {
-  const path = join(root, UNCERTAIN_COMPARISON_USAGE_LEDGER);
-  let info: BigIntStats;
-  try {
-    info = await lstatPath(path, { bigint: true });
-  } catch (error) {
-    if (errnoCode(error) === "ENOENT") return null;
-    return null;
-  }
-  if (!info.isFile() || info.isSymbolicLink() || info.size > 8n * 1024n * 1024n) return null;
-  let value: unknown;
-  try {
-    value = JSON.parse(await readFile(path, "utf8")) as unknown;
-  } catch {
-    return null;
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as Record<string, unknown>;
-  if (record.version !== UNCERTAIN_COMPARISON_USAGE_LEDGER_VERSION
-    || !record.root || typeof record.root !== "object" || Array.isArray(record.root)
-    || typeof (record.root as Record<string, unknown>).dev !== "string"
-    || !/^\d+$/.test((record.root as Record<string, unknown>).dev as string)
-    || typeof (record.root as Record<string, unknown>).ino !== "string"
-    || !/^\d+$/.test((record.root as Record<string, unknown>).ino as string)
-    || !Array.isArray(record.entries)
-    || record.entries.length > MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES
-    || !record.entries.every(validUncertainLedgerEntry)
-    || !Array.isArray(record.reservations)
-    || record.reservations.length > 1
-    || !record.reservations.every(validUncertainLedgerReservation)
-    || record.reservations.length !== 0
-    || !validUncertainUsage(record.usage)) return null;
-  const entries = record.entries as UncertainComparisonLedgerEntry[];
-  if (new Set(entries.map((entry) => entry.name)).size !== entries.length) return null;
-  let usage: UncertainComparisonUsage;
-  try {
-    usage = uncertainComparisonUsageFromEntries(entries);
-  } catch {
-    return null;
-  }
-  if (JSON.stringify(usage) !== JSON.stringify(record.usage)) return null;
-  const rootInfo = await lstatPath(root, { bigint: true });
-  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) return null;
-  const rootRecord = record.root as Record<string, unknown>;
-  if (String(rootInfo.dev) !== rootRecord.dev || String(rootInfo.ino) !== rootRecord.ino) return null;
-  const markedNames = await uncertainComparisonRootNames(root);
-  if (JSON.stringify(markedNames) !== JSON.stringify(entries.map((entry) => entry.name).sort())) return null;
-  for (const entry of entries) {
-    let current: BigIntStats;
-    try {
-      current = await lstatPath(join(root, entry.name), { bigint: true });
-    } catch {
-      return null;
-    }
-    const safe = uncertainComparisonIsSafe(root, entry.name, safeIds);
-    if (entry.counted !== !safe) return null;
-    if (!entry.counted) {
-      if (entry.proof !== "0".repeat(64)) return null;
-      continue;
-    }
-    if (!sameUncertainIdentity(uncertainIdentityOf(current), entry.identity)) return null;
-    const measured = await measureUncertainComparisonTree(join(root, entry.name));
-    if (!measured.ok || measured.bytes !== entry.bytes || measured.entries !== entry.entries || measured.proof !== entry.proof) return null;
-  }
-  return {
-    version: 1,
-    root: { dev: rootRecord.dev as string, ino: rootRecord.ino as string },
-    entries,
-    reservations: [],
-    usage,
-  };
-}
-
-async function buildUncertainComparisonUsageLedger(root: string, safeIds: ReadonlySet<string>, rootBinding: BoundPromotionDirectory, persist = true): Promise<UncertainComparisonUsageLedger> {
-  const rootInfo = await lstatPath(root, { bigint: true });
-  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("uncertain comparison evidence root is not an owned directory");
-  const names = await uncertainComparisonRootNames(root);
-  const entries: UncertainComparisonLedgerEntry[] = [];
-  for (const name of names) {
-    const entry = await buildUncertainComparisonLedgerEntry(root, name, safeIds);
-    if (entry) entries.push(entry);
-  }
-  const usage = uncertainComparisonUsageFromEntries(entries);
-  const ledger: UncertainComparisonUsageLedger = {
-    version: 1,
-    root: { dev: String(rootInfo.dev), ino: String(rootInfo.ino) },
-    entries,
-    reservations: [],
-    usage,
-  };
-  if (persist) await writeUncertainComparisonUsageLedger(rootBinding, ledger);
-  return ledger;
-}
-
-async function loadUncertainComparisonUsageLedger(
-  root: string,
-  safeIds: ReadonlySet<string>,
-  rootBinding: BoundPromotionDirectory,
-  options: { persist?: boolean } = {},
-): Promise<UncertainComparisonUsageLedger> {
-  const existing = await readUncertainComparisonUsageLedger(root, safeIds);
-  return existing ?? buildUncertainComparisonUsageLedger(root, safeIds, rootBinding, options.persist !== false);
-}
-
-async function uncertainLedgerFileIdentity(root: string): Promise<UncertainComparisonIdentity | null> {
-  try {
-    return uncertainIdentityOf(await lstatPath(join(root, UNCERTAIN_COMPARISON_USAGE_LEDGER), { bigint: true }));
-  } catch (error) {
-    if (errnoCode(error) === "ENOENT") return null;
-    throw error;
-  }
-}
-
-function sameUncertainLedgerFileIdentity(left: UncertainComparisonIdentity | null, right: UncertainComparisonIdentity | null): boolean {
-  if (left === null || right === null) return left === right;
-  return sameUncertainIdentity(left, right);
-}
-
-type UncertainComparisonAdmissionOwnerLease = {
-  release(): void;
-  bind?(comparisonId: string): void;
-};
-
-type UncertainComparisonAdmissionOwnerResult =
-  | { ok: true; lease: UncertainComparisonAdmissionOwnerLease }
-  | { ok: false; error: string };
-
-type UncertainComparisonParticipant = () => ReadonlySet<string>;
-
-/**
- * One admission owner for one worlds root. The queue is shared by every
- * WorldlineManager in this process and the durable generation lock extends
- * the same transaction across a second process. A manager contributes only
- * its known live, uncertainty-free comparison ids; every other marked tree,
- * including an orphan or malformed manifest, remains accounted fail-closed.
- */
-class UncertainComparisonAdmissionOwner {
-  private queueTail: Promise<void> = Promise.resolve();
-  private participants = new Set<UncertainComparisonParticipant>();
-
-  constructor(private rootBinding: BoundPromotionDirectory) {}
-
-  register(participant: UncertainComparisonParticipant): () => void {
-    this.participants.add(participant);
-    return () => this.participants.delete(participant);
-  }
-
-  hasParticipants(): boolean {
-    return this.participants.size > 0;
-  }
-
-  private safeIds(): Set<string> {
-    const safeIds = new Set<string>();
-    for (const participant of this.participants) {
-      for (const id of participant()) safeIds.add(id);
-    }
-    return safeIds;
-  }
-
-  async acquire(isClosing: () => boolean): Promise<UncertainComparisonAdmissionOwnerResult> {
-    const previous = this.queueTail;
-    let releaseGate!: () => void;
-    const gate = new Promise<void>((resolveGate) => {
-      releaseGate = resolveGate;
-    });
-    this.queueTail = previous.then(() => gate, () => gate);
-    await previous;
-    const finishWithoutLease = () => releaseGate();
-    if (isClosing()) {
-      finishWithoutLease();
-      return { ok: false, error: "worldline manager disposed" };
-    }
-    let lock: SessionRetentionLock;
-    let rootBinding: BoundPromotionDirectory;
-    let preparedLedger: UncertainComparisonUsageLedger;
-    let preparedFileIdentity: UncertainComparisonIdentity | null;
-    try {
-      rootBinding = await refreshBoundPromotionDirectory(this.rootBinding);
-      this.rootBinding = rootBinding;
-      const safeIds = this.safeIds();
-      // Rebuild/prove outside the global lock. If another process commits
-      // while this work is in flight, the ledger file identity check below
-      // selects its already-durable result instead of rescanning under lock.
-      preparedFileIdentity = await uncertainLedgerFileIdentity(rootBinding.path);
-      preparedLedger = await loadUncertainComparisonUsageLedger(rootBinding.path, safeIds, rootBinding, { persist: false });
-    } catch (error) {
-      finishWithoutLease();
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
-    }
-    try {
-      // The lock is held until the returned lease is released. No second
-      // manager/process can publish against a stale root binding.
-      lock = acquireSessionRetentionLock(rootBinding.path);
-      if (String(lock.rootIdentity.dev) !== rootBinding.dev || String(lock.rootIdentity.ino) !== rootBinding.ino) {
-        throw new Error("uncertain comparison worlds root identity changed before admission");
-      }
-    } catch (error) {
-      finishWithoutLease();
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
-    }
-    let held = true;
-    const releaseLock = () => {
-      if (!held) return;
-      held = false;
-      releaseSessionRetentionLock(lock);
-    };
-    try {
-      const currentFileIdentity = await uncertainLedgerFileIdentity(rootBinding.path);
-      const ledger = sameUncertainLedgerFileIdentity(preparedFileIdentity, currentFileIdentity)
-        ? preparedLedger
-        : await loadUncertainComparisonUsageLedger(rootBinding.path, this.safeIds(), rootBinding);
-      const usage = ledger.usage;
-      if (usage.count >= MAX_UNCERTAIN_COMPARISONS) {
-        releaseLock();
-        finishWithoutLease();
-        return { ok: false, error: `uncertain comparisons are at capacity (${MAX_UNCERTAIN_COMPARISONS}); explicitly discard retained recovery evidence before retrying` };
-      }
-      if (usage.bytes > MAX_UNCERTAIN_COMPARISON_BYTES - MIN_UNCERTAIN_COMPARISON_RESERVATION_BYTES) {
-        releaseLock();
-        finishWithoutLease();
-        return { ok: false, error: "uncertain comparison evidence exceeds its 4 GB bound; explicitly discard retained recovery evidence before retrying" };
-      }
-      const token = randomUUID();
-      const reservation: UncertainComparisonLedgerReservation = {
-        token,
-        pid: process.pid,
-        bytes: MIN_UNCERTAIN_COMPARISON_RESERVATION_BYTES,
-      };
-      const reservedLedger: UncertainComparisonUsageLedger = {
-        ...ledger,
-        reservations: [reservation],
-      };
-      await writeUncertainComparisonUsageLedger(rootBinding, reservedLedger);
-      let boundComparisonId: string | null = null;
-      let released = false;
-      const release = (): void => {
-        if (released) return;
-        released = true;
-        void this.reconcileRelease(rootBinding, ledger, reservation, () => boundComparisonId, this.safeIds())
-          .catch(() => undefined)
-          .finally(() => {
-            releaseLock();
-            finishWithoutLease();
-          });
-      };
-      return {
-        ok: true,
-        lease: {
-          bind: (comparisonId: string) => {
-            if (!released && isSafeComparisonId(comparisonId)) boundComparisonId = comparisonId;
-          },
-          release,
-        },
-      };
-    } catch (error) {
-      releaseLock();
-      finishWithoutLease();
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
-    }
-  }
-
-  private async reconcileRelease(
-    initialRootBinding: BoundPromotionDirectory,
-    base: UncertainComparisonUsageLedger,
-    reservation: UncertainComparisonLedgerReservation,
-    boundId: () => string | null,
-    safeIds: ReadonlySet<string>,
-  ): Promise<void> {
-    const rootBinding = await refreshBoundPromotionDirectory(initialRootBinding);
-    this.rootBinding = rootBinding;
-    const root = rootBinding.path;
-    const names = await uncertainComparisonRootNames(root);
-    const entriesByName = new Map(base.entries.map((entry) => [entry.name, entry]));
-    const id = boundId();
-    // A lease that is not bound to a manager-created comparison is the
-    // low-level recovery seam used during crash/ABA checks. Re-measure every
-    // existing uncertain tree there so out-of-band evidence changes cannot be
-    // hidden behind a shallow directory identity. Normal creators bind their
-    // newly allocated id; only that new tree is measured at release.
-    const rescanExisting = id === null;
-    if (id !== null) {
-      const entry = await buildUncertainComparisonLedgerEntry(root, id, safeIds);
-      if (entry) entriesByName.set(id, entry);
-    }
-    for (const name of names) {
-      const existing = entriesByName.get(name);
-      if (!existing) {
-        const entry = await buildUncertainComparisonLedgerEntry(root, name, safeIds);
-        if (entry) entriesByName.set(name, entry);
-        continue;
-      }
-      if (name === id) continue;
-      let current: BigIntStats;
-      try {
-        current = await lstatPath(join(root, name), { bigint: true });
-      } catch {
-        entriesByName.delete(name);
-        continue;
-      }
-      const safe = uncertainComparisonIsSafe(root, name, safeIds);
-      if (safe) {
-        entriesByName.set(name, { name, identity: uncertainIdentityOf(current), counted: false, bytes: 0, entries: 0, proof: "0".repeat(64) });
-      } else if (rescanExisting || !existing.counted || !sameUncertainIdentity(uncertainIdentityOf(current), existing.identity)) {
-        const entry = await buildUncertainComparisonLedgerEntry(root, name, safeIds);
-        if (entry) entriesByName.set(name, entry);
-        else entriesByName.delete(name);
-      }
-    }
-    for (const name of [...entriesByName.keys()]) {
-      if (!names.includes(name)) entriesByName.delete(name);
-    }
-    const entries = [...entriesByName.values()].sort((left, right) => left.name.localeCompare(right.name));
-    const next: UncertainComparisonUsageLedger = {
-      version: 1,
-      root: base.root,
-      entries,
-      reservations: [],
-      usage: uncertainComparisonUsageFromEntries(entries),
-    };
-    // The reservation is intentionally consumed only after the committed
-    // comparison has been reconciled. If this write fails, the old durable
-    // reservation remains and the next admission rebuilds fail-closed.
-    void reservation;
-    await writeUncertainComparisonUsageLedger(rootBinding, next);
-  }
-
-  async drain(): Promise<void> {
-    await this.queueTail;
-  }
-}
-
-const uncertainComparisonAdmissionOwners = new Map<string, UncertainComparisonAdmissionOwner>();
-
-function uncertainComparisonAdmissionOwnerFor(rootBinding: BoundPromotionDirectory): UncertainComparisonAdmissionOwner {
-  const root = realpathSync(resolve(rootBinding.path));
-  let owner = uncertainComparisonAdmissionOwners.get(root);
-  if (!owner) {
-    owner = new UncertainComparisonAdmissionOwner(rootBinding);
-    uncertainComparisonAdmissionOwners.set(root, owner);
-  }
-  return owner;
-}
-
-function releaseUncertainComparisonAdmissionOwner(owner: UncertainComparisonAdmissionOwner): void {
-  if (owner.hasParticipants()) return;
-  for (const [root, current] of uncertainComparisonAdmissionOwners) {
-    if (current !== owner) continue;
-    uncertainComparisonAdmissionOwners.delete(root);
-    return;
-  }
-}
 
 /** The logical size of a directory tree (`du`, in a child process). */
 export async function dirBytes(dir: string): Promise<number> {
@@ -1165,7 +320,6 @@ export async function dirBytes(dir: string): Promise<number> {
   });
 }
 
-type PromotionRetentionUsage = { journalCount: number; bytes: bigint };
 
 async function measurePromotionTreeBytes(path: string, limit: bigint): Promise<bigint> {
   let bytes = 0n;
@@ -1246,20 +400,6 @@ async function measurePromotionRetention(worldsRoot: string): Promise<PromotionR
   return { journalCount: entries.length, bytes };
 }
 
-type PromotionJournalUsageLedger = {
-  version: 1;
-  root: { dev: string; ino: string };
-  usage: { journalCount: number; bytes: string };
-  reservation: { token: string; pid: number; journalCount: number; bytes: string } | null;
-};
-
-type PromotionJournalAdmissionLease = {
-  release(): Promise<void>;
-};
-
-type PromotionJournalAdmissionResult =
-  | { ok: true; lease: PromotionJournalAdmissionLease }
-  | { ok: false; error: string };
 
 /**
  * One admission owner for one worlds root. The in-process queue prevents
@@ -1442,7 +582,6 @@ function promotionRetentionBytes(bytes: bigint): string {
   return `${Number(bytes / 1_048_576n).toLocaleString()} MiB`;
 }
 
-type PromotionOperationBudget = { used: bigint; max: bigint };
 
 /** Reserve the new promotion's bounded merged tree/session/evidence envelope. */
 async function createPromotionOperationBudget(mergedDir: string): Promise<PromotionOperationBudget> {
@@ -1463,62 +602,12 @@ function reservePromotionOperationBytes(budget: PromotionOperationBudget, bytes:
   budget.used = next;
 }
 
-type TrackedSessionFork = {
-  comparisonId: string;
-  controller: AbortController;
-  promise: Promise<unknown>;
-};
 
-type CandidateReadyEvent = {
-  bridgeId?: string;
-  seq?: number;
-  generation?: string;
-  opId?: string;
-};
 
-type CandidateLaunchAttempt = {
-  comparisonId: string;
-  label: "A" | "B";
-  /** Fresh local operation identity; never persisted in the manifest. */
-  opId: string;
-  /** Exact startup-control opId, when the control was durably written. */
-  controlOpId: string | null;
-  /** Manager generation, distinct from the sidecar writer generation. */
-  generation: number;
-  controller: AbortController;
-  terminalId: string | null;
-  pid: number | null;
-  lstart: string | null;
-  identityPromise: Promise<string | null> | null;
-  cancelled: boolean;
-  cleanupPromise: Promise<void> | null;
-  fallbackRequested: boolean;
-  directCleanupRequested: boolean;
-  sessionReady: boolean;
-  sidecarGeneration: string | null;
-  operation: Promise<void> | null;
-};
 
-type EvidenceAttempt = {
-  id: string;
-  comparisonId: string;
-  controller: AbortController;
-  promise: Promise<{ ok: boolean; error?: string }> | null;
-};
 
 const EVIDENCE_QUEUE_HIGH_WATER = 64;
 
-type PendingCandidateReady = {
-  comparisonId: string;
-  label: "A" | "B";
-  terminalId: string;
-  expectedOpId: string;
-  state: "pending" | "accepted" | "failed";
-  timer: ReturnType<typeof setTimeout>;
-  promise: Promise<void>;
-  resolve: () => void;
-  reject: (error: Error) => void;
-};
 
 export class WorldlineManager {
   private comparisons = new Map<string, ComparisonState>();
@@ -5260,10 +4349,6 @@ export async function withPromotionTransaction<T>(operation: () => Promise<T>): 
   }
 }
 
-type PromotionArtifactEntry = { rel: string; dev: number; ino: number; state: PromotionEntryState };
-type PromotionArtifactManifest =
-  | { status: "planned"; path: string }
-  | { status: "created"; path: string; entries: PromotionArtifactEntry[] };
 
 async function createPromotionArtifactManifest(path: string): Promise<PromotionArtifactManifest> {
   const entries: PromotionArtifactEntry[] = [];
@@ -5347,29 +4432,9 @@ async function writePromotionJournal(binding: PromotionJournalBinding, journal: 
   });
 }
 
-export type BoundPromotionDirectory = { path: string; dev: string; ino: string; capability?: string };
 const PROMOTION_ROOT_PROVENANCE_VERSION = 1;
 const PROMOTION_ROOT_PROVENANCE_PREFIX = ".termina-promotion-root-";
 const PROMOTION_ROOT_PROVENANCE_MAX_BYTES = 4096;
-type PromotionRootProvenance = {
-  version: 1;
-  path: string;
-  parent: { dev: string; ino: string };
-  root: { dev: string; ino: string };
-};
-type PromotionDirectoryPlan = {
-  path: string;
-  components: string[];
-  identity: PromotionFsIdentity | null;
-  missingAt: number | null;
-  prefixIdentities: PromotionFsIdentity[];
-};
-type PromotionJournalBinding = {
-  root: BoundPromotionDirectory;
-  directory: BoundPromotionDirectory;
-  name: string;
-  journalFile: BoundPromotionExpectedLeaf | null;
-};
 
 async function writeComparisonManifestBound(
   root: BoundPromotionDirectory,
@@ -5422,26 +4487,6 @@ async function readComparisonManifestBound(
   };
 }
 
-async function refreshBoundPromotionDirectory(bound: BoundPromotionDirectory): Promise<BoundPromotionDirectory> {
-  let identity: PromotionFsIdentity;
-  try {
-    identity = await boundPromotionOpenDirectory({
-      path: bound.path,
-      expectedIdentity: { dev: bound.dev, ino: bound.ino },
-      ...(bound.capability ? { capability: bound.capability } : {}),
-    });
-  } catch {
-    // The native core may have restarted and forgotten its in-memory token.
-    // Rebind only with the persisted identity; a replacement root still
-    // fails this check before any ledger or admission write is attempted.
-    identity = await boundPromotionOpenDirectory({
-      path: bound.path,
-      expectedIdentity: { dev: bound.dev, ino: bound.ino },
-    });
-  }
-  return { path: bound.path, dev: identity.dev, ino: identity.ino, capability: identity.capability };
-}
-
 /** Rebind every retained comparison root after a native core restart. */
 async function refreshComparisonBindings(cmp: ComparisonState): Promise<void> {
   if (cmp.rootBinding) {
@@ -5469,14 +4514,6 @@ async function refreshComparisonBindings(cmp: ComparisonState): Promise<void> {
 function assertBoundPromotionDirectory(bound: BoundPromotionDirectory): void {
   const info = lstatSync(bound.path, { bigint: true });
   if (!info.isDirectory() || info.isSymbolicLink() || String(info.dev) !== bound.dev || String(info.ino) !== bound.ino) throw new Error(`promotion journal directory changed: ${bound.path}`);
-}
-
-function promotionIdentityOf(bound: BoundPromotionDirectory): PromotionFsIdentity {
-  return {
-    dev: bound.dev,
-    ino: bound.ino,
-    ...(bound.capability ? { capability: bound.capability } : {}),
-  };
 }
 
 /** Create a new template root below the natively allocated comparison. */
@@ -5867,32 +4904,6 @@ async function ensureBoundRelativeDirectory(root: BoundPromotionDirectory, compo
   return current;
 }
 
-type PromotionEntryState =
-  | { type: "missing" }
-  | { type: "file"; mode?: number; hash: string }
-  | { type: "symlink"; target: string }
-  | { type: "directory"; mode: number }
-  | { type: "other"; mode: number };
-
-type PromotionJournalPath = {
-  rel: string;
-  kind: "write" | "delete";
-  beforeHash: string;
-  afterHash: string;
-  beforeExists: boolean;
-  retainedName?: string;
-  beforeImageIdentity?: PromotionFsIdentity;
-  beforeImageSize?: string;
-  beforeState?: PromotionEntryState;
-  afterState?: PromotionEntryState;
-};
-type CanonicalPath = (absPath: string) => Promise<string>;
-export type PromotionRecoveryContext = {
-  primaryRoot: string;
-  piSessionRoot: string;
-  coreSessionRoot: string;
-};
-type PromotionRecoveryTestHook = (stage: "after-journal-validation", journalDir: string) => void | Promise<void>;
 let promotionRecoveryTestHook: PromotionRecoveryTestHook | null = null;
 
 /** Test-only deterministic interleaving seam; never exposed through IPC. */
@@ -5911,11 +4922,6 @@ type PromotionParentIdentity = { path: string; dev: number; ino: number; capabil
 const EMPTY_PROMOTION_HASH = sha256Hex(Buffer.alloc(0));
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
-function errnoCode(error: unknown): string | null {
-  return typeof error === "object" && error !== null && "code" in error && typeof (error as { code?: unknown }).code === "string"
-    ? (error as { code: string }).code
-    : null;
-}
 
 function statIdentityEqual(a: { dev: number; ino: number; mode: number; size: number; mtimeMs: number }, b: { dev: number; ino: number; mode: number; size: number; mtimeMs: number }): boolean {
   return a.dev === b.dev && a.ino === b.ino && a.mode === b.mode && a.size === b.size && a.mtimeMs === b.mtimeMs;
