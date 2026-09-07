@@ -96,13 +96,13 @@ Counts refreshed 2026-09-07 against the working tree.
 
 | File | Current lines | Primary concern |
 | :--- | ---: | :--- |
-| `agent-core/main.ts` | 8,458 | CLI/runtime orchestration, provider streaming, tool execution, sidecar logging, and subagents remain concentrated. |
-| `agent-core/session.ts` | 4,012 | Session serialization, compaction, timeline, and branch state remain concentrated. |
-| `agent-core/auth.ts` | 2,969 | Public auth owner; per-provider policy extracted to `auth/providers/`, family rules to `models/families/`, capability composition to `models/capabilities.ts`. Credential persistence and login/refresh orchestration remain concentrated. |
-| `agent-core/trace.ts` | 2,775 | Trace graph, span lifecycle, formatting, and reduction remain concentrated. |
-| `src/main.ts` | 2,933 | Renderer composition, panes, shortcuts, project tabs, and synchronization remain concentrated. |
-| `electron/sidecar.ts` | 2,673 | Current-schema parsing, tailing, validation, and lifecycle remain concentrated despite compatibility removal. |
-| `agent-core/tui.ts` | 2,456 | ANSI rendering and interactive terminal UI behavior remain concentrated. |
+| `agent-core/main.ts` | 8,475 | Assessed 2026-09-07: kernel owner (CLI/runtime orchestration, streaming, tools, sidecar, subagents). 260 top-level exports with dense cross-calls; any cut relocates entanglement op-by-op (same finding as the core bound-fs proposal). No honest seam — do not split without a dedicated session. |
+| `agent-core/session.ts` | 4,012 | Assessed 2026-09-07: single session-serialization owner (bundle ops, replay, recovery, pi-copy, fork share types and lifecycle). No honest seam — do not split. |
+| `agent-core/auth.ts` | 2,969 | Assessed 2026-09-07: canonical auth/policy owner (per AGENTS.md). Per-provider policy, family rules, and capability composition already extracted. Credential persistence + login/refresh orchestration is the remaining core — do not split. |
+| `agent-core/trace.ts` | 2,775 | Assessed 2026-09-07: `TraceRuntime` + pure record constructors share span types and lifecycle; record fns have 3 test importers, making extraction churn without a distinct owner. Do not split. |
+| `src/main.ts` | 2,968 | Assessed 2026-09-07: renderer composition owner (AGENTS.md: `src/` owns rendering/transient UI state). Project views, panes, and sync share view lifecycle — splitting would create a second rendering owner. Do not split. |
+| `electron/sidecar.ts` | 2,673 | Assessed 2026-09-07: canonical sidecar parse/tail owner (AGENTS.md). Queue, parser, and tailer share the event schema — do not split. |
+| `agent-core/tui.ts` | 2,456 → 2,047 | ✅ Done 2026-09-07 — pure completion/text helpers extracted to `agent-core/tui-text.ts` (426 lines, no terminal IO); `tui.ts` keeps rendering and `AgentTui`. No exported symbols lost; typecheck + tui perf test green. |
 | `agent-core/openai-compat.ts` | 1,824 | Provider serializers and protocol-specific stream conversion need private module boundaries without creating another protocol mapper. |
 | `electron/session-retention.ts` | 1,622 | Retention admission, locking, reconciliation, and cleanup remain concentrated. |
 | `electron/worldline-git.ts` | 1,370 | The public core interface is canonical, but additional private request plumbing can move beside `core-process.ts`. |
