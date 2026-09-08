@@ -8,7 +8,7 @@
 
 ## Next
 
-- Token-roadmap evidence gates (live providers, benchmarks, corpora — see TOKEN-EFFICIENCY-ROADMAP.md).
+- (open — token-roadmap probe phase recorded in Done; corpus comparison and zen price wire-up remain in TOKEN-EFFICIENCY-ROADMAP.md when wanted)
 
 ## Done (recent)
 
