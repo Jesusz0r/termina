@@ -66,6 +66,48 @@ test.describe("pane resize dividers", () => {
     await expect.poll(() => page.locator("#explorer").evaluate((el) => el.getBoundingClientRect().width)).toBeCloseTo(400, 0);
   });
 
+  test("agent auto-open keeps the explorer width exact", async ({ page }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+    // Narrow window + wide explorer + visible editor overflows the layout:
+    // as a shrinkable flex item the explorer used to absorb the overflow
+    // (worse the wider it was), so after an agent auto-open revealed the
+    // editor the divider stopped tracking the pointer.
+    await page.setViewportSize({ width: 900, height: 600 });
+    await page.locator("#explorer-tree").getByText("greeting.ts").click();
+    await expect(page.locator(".editor-tab").getByText("greeting.ts")).toBeVisible();
+    const width = () => page.locator("#explorer").evaluate((el) => el.getBoundingClientRect().width);
+    const dragTo = async (target: number): Promise<void> => {
+      const box = (await page.locator("#explorer-divider").boundingBox())!;
+      const main = (await page.locator("#main").boundingBox())!;
+      await page.mouse.move(box.x + 2, box.y + 100);
+      await page.mouse.down();
+      await page.mouse.move(main.x + target, box.y + 100, { steps: 10 });
+      await page.mouse.up();
+    };
+    await dragTo(420);
+    await expect.poll(width).toBeCloseTo(420, 0);
+    // The agent auto-open path (onToolTarget / drainPendingToolTargets):
+    // EditorManager.openFile with preview:false, which reveals the editor.
+    // Close first so the editor collapses, then auto-open reveals it again.
+    // The path comes from the explorer root: projectList cwd may be the
+    // non-canonical /var alias, which would open a second same-named tab.
+    await page.evaluate(() => (window as any).__editorMgr.closeAllTabs());
+    await page.evaluate(async () => {
+      const w = window as any;
+      const root = document.querySelector<HTMLElement>("#explorer-tree [data-path]")!.dataset.path!;
+      const list = await w.pi.projectList();
+      const proj = list.find((p: any) => p.active) ?? list[0];
+      await w.__editorMgr.openFile(`${root}/greeting.ts`, {
+        preview: false,
+        owner: { projectId: proj.id, workspaceId: proj.workspaceId },
+      });
+    });
+    await expect(page.locator(".editor-tab").getByText("greeting.ts").first()).toBeVisible();
+    await expect.poll(width).toBeCloseTo(420, 0);
+    await dragTo(300);
+    await expect.poll(width).toBeCloseTo(300, 0);
+  });
+
   test("project tab clicks above the divider do not start an explorer resize", async ({ page, runRoot }) => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
     const other = join(runRoot, "resize-other");

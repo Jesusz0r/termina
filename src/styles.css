@@ -220,6 +220,12 @@ body {
   width: 220px;
   min-width: 140px;
   max-width: 420px;
+  /* Fixed sidebar: the divider drag sets width inline and it must hold
+   * exactly. As a shrinkable flex item the explorer absorbed layout
+   * overflow (worse the wider it was dragged), so after the editor
+   * revealed itself on an agent auto-open the divider stopped tracking
+   * the pointer. Overflow pressure belongs on #main-split (min-width: 0). */
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   background: var(--bg-panel);
