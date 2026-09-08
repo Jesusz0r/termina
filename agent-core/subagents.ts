@@ -11,6 +11,8 @@
  * exactly-once invariant is already enforced here and covered by tests.
  */
 
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   isSupportedProvider,
   parseModelRef,
@@ -140,6 +142,241 @@ export function subagentDepthFromEnv(env: NodeJS.ProcessEnv = process.env): numb
 export function visibleSubagentTools(depth: number): Array<Record<string, unknown>> {
   if (depth >= MAX_SUBAGENT_DEPTH) return SUBAGENT_TOOL_DEFS.filter((d) => d.name !== "spawn_subagent");
   return SUBAGENT_TOOL_DEFS.slice();
+}
+
+// ---- Phase 2 contract: parent → host handoff and host → parent results ----
+//
+// The spawn tool runs inside the parent core process, but the headless child
+// is launched by the Electron host (`electron/subagents.ts`), which never
+// sees the subtask brief. The parent therefore writes a task file and emits
+// a `subagent_spawn` sidecar record on its own (tailed) stream; the host
+// launches the child from the task file and writes one durable result file
+// per run, which the parent reconciles on its next turn. Mailbox notes carry
+// the human-readable result; result files carry the exact outcome.
+
+/** Sidecar record kind announcing a validated spawn (parsed by `electron/sidecar.ts`). */
+export const SUBAGENT_SPAWN_RECORD = "subagent_spawn";
+export const SUBAGENT_TASK_VERSION = 1;
+export const SUBAGENT_RESULT_VERSION = 1;
+/** Bound one handoff/result file: the brief is already capped, this is slack for fields. */
+const MAX_SUBAGENT_FILE_BYTES = 64 * 1024;
+
+function subagentFileName(runId: string, suffix: "task.json" | "result.json"): string | null {
+  if (!/^bg-\d{1,10}$/.test(runId)) return null;
+  return `subagent-${runId}.${suffix}`;
+}
+
+export function subagentTaskFileName(runId: string): string | null {
+  return subagentFileName(runId, "task.json");
+}
+
+export function subagentResultFileName(runId: string): string | null {
+  return subagentFileName(runId, "result.json");
+}
+
+export interface SubagentTaskFile {
+  version: typeof SUBAGENT_TASK_VERSION;
+  runId: string;
+  task: string;
+  provider: ProviderId;
+  model: string;
+  protocol: ProviderProtocol;
+  effort: EffortLevel;
+  maxTurns: number;
+  paths: string[];
+  permissionMode: SubagentPermissionMode;
+  parentTerminalId: string;
+  cwd: string;
+  depth: number;
+  createdAt: number;
+}
+
+export function parseSubagentTaskFile(raw: unknown): { ok: true; file: SubagentTaskFile } | { ok: false; error: string } {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "subagent task file is not an object" };
+  const v = raw as Record<string, unknown>;
+  if (v.version !== SUBAGENT_TASK_VERSION) return { ok: false, error: "subagent task file has an unsupported version" };
+  if (typeof v.runId !== "string" || !subagentTaskFileName(v.runId)) return { ok: false, error: "subagent task file has a bad run id" };
+  if (typeof v.task !== "string" || !v.task.trim() || v.task.length > MAX_SUBAGENT_TASK_CHARS) {
+    return { ok: false, error: "subagent task file has a bad task" };
+  }
+  if (typeof v.provider !== "string" || !isSupportedProvider(v.provider)) {
+    return { ok: false, error: "subagent task file has a bad provider" };
+  }
+  if (typeof v.model !== "string" || !v.model) return { ok: false, error: "subagent task file has a bad model" };
+  if (typeof v.effort !== "string" || !(EFFORT_LEVELS as readonly string[]).includes(v.effort)) {
+    return { ok: false, error: "subagent task file has a bad effort" };
+  }
+  if (!Number.isInteger(v.maxTurns) || (v.maxTurns as number) < 1 || (v.maxTurns as number) > MAX_SUBAGENT_TURNS) {
+    return { ok: false, error: "subagent task file has a bad turn budget" };
+  }
+  if (!Array.isArray(v.paths) || v.paths.length > MAX_SUBAGENT_CLAIM_PATHS) {
+    return { ok: false, error: "subagent task file has bad paths" };
+  }
+  const paths: string[] = [];
+  for (const p of v.paths) {
+    const norm = normalizeClaimPath(p);
+    if (!norm.ok) return { ok: false, error: `subagent task file has a bad path: ${norm.error}` };
+    paths.push(norm.path);
+  }
+  if (v.permissionMode !== "always" && v.permissionMode !== "dangerous" && v.permissionMode !== "ask") {
+    return { ok: false, error: "subagent task file has a bad permission mode" };
+  }
+  if (typeof v.parentTerminalId !== "string" || !v.parentTerminalId) {
+    return { ok: false, error: "subagent task file has a bad parent terminal" };
+  }
+  if (typeof v.cwd !== "string" || !v.cwd) return { ok: false, error: "subagent task file has a bad cwd" };
+  if (!Number.isInteger(v.depth) || (v.depth as number) < 1 || (v.depth as number) > MAX_SUBAGENT_DEPTH) {
+    return { ok: false, error: "subagent task file has a bad depth" };
+  }
+  return {
+    ok: true,
+    file: {
+      version: SUBAGENT_TASK_VERSION,
+      runId: v.runId,
+      task: v.task,
+      provider: v.provider,
+      model: v.model,
+      protocol: (typeof v.protocol === "string" ? v.protocol : configuredProviderProtocol(v.provider, v.model)) as ProviderProtocol,
+      effort: v.effort as EffortLevel,
+      maxTurns: v.maxTurns as number,
+      paths,
+      permissionMode: v.permissionMode,
+      parentTerminalId: v.parentTerminalId,
+      cwd: v.cwd,
+      depth: v.depth as number,
+      createdAt: typeof v.createdAt === "number" ? v.createdAt : Date.now(),
+    },
+  };
+}
+
+/** Write the host handoff before emitting the sidecar spawn record (file lands first). */
+export function writeSubagentTaskFile(
+  eventsDir: string,
+  run: SubagentRun,
+  opts: { parentTerminalId: string; cwd: string },
+): { ok: true; file: string } | { ok: false; error: string } {
+  const name = subagentTaskFileName(run.id);
+  if (!name) return { ok: false, error: `bad subagent run id: ${run.id}` };
+  if (!eventsDir || !opts.parentTerminalId || !opts.cwd) {
+    return { ok: false, error: "subagent handoff needs an events dir, parent terminal, and cwd" };
+  }
+  const body = JSON.stringify({
+    version: SUBAGENT_TASK_VERSION,
+    runId: run.id,
+    task: run.task,
+    provider: run.provider,
+    model: run.model,
+    protocol: run.protocol,
+    effort: run.effort,
+    maxTurns: run.maxTurns,
+    paths: run.paths,
+    permissionMode: run.permissionMode,
+    parentTerminalId: opts.parentTerminalId,
+    cwd: opts.cwd,
+    depth: run.depth,
+    createdAt: run.createdAt,
+  });
+  try {
+    writeFileSync(join(eventsDir, name), body, { mode: 0o600 });
+  } catch (err) {
+    return { ok: false, error: `subagent task file write failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  return { ok: true, file: name };
+}
+
+export type SubagentOutcome = Extract<SubagentRunState, "settled" | "failed" | "killed">;
+
+export interface SubagentResultFile {
+  version: typeof SUBAGENT_RESULT_VERSION;
+  runId: string;
+  outcome: SubagentOutcome;
+  result: string;
+  flags: string[];
+  settledAt: number;
+}
+
+export function parseSubagentResultFile(
+  runId: string,
+  raw: unknown,
+): { ok: true; file: SubagentResultFile } | { ok: false; error: string } {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "subagent result is not an object" };
+  const v = raw as Record<string, unknown>;
+  if (v.version !== SUBAGENT_RESULT_VERSION) return { ok: false, error: "subagent result has an unsupported version" };
+  if (v.runId !== runId) return { ok: false, error: "subagent result is for another run" };
+  if (v.outcome !== "settled" && v.outcome !== "failed" && v.outcome !== "killed") {
+    return { ok: false, error: "subagent result has a bad outcome" };
+  }
+  if (typeof v.result !== "string" || Buffer.byteLength(v.result, "utf8") > MAX_SUBAGENT_RESULT_CHARS) {
+    return { ok: false, error: "subagent result has a bad payload" };
+  }
+  if (!Array.isArray(v.flags) || v.flags.some((f) => typeof f !== "string")) {
+    return { ok: false, error: "subagent result has bad flags" };
+  }
+  return {
+    ok: true,
+    file: {
+      version: SUBAGENT_RESULT_VERSION,
+      runId,
+      outcome: v.outcome,
+      result: v.result,
+      flags: v.flags as string[],
+      settledAt: typeof v.settledAt === "number" ? v.settledAt : Date.now(),
+    },
+  };
+}
+
+type SubagentResultRead =
+  | { status: "missing" }
+  | { status: "invalid"; error: string }
+  | { status: "ok"; file: SubagentResultFile };
+
+/** Read one host-written result. Invalid files never settle a run; the host owns the repair. */
+export function readSubagentResultFile(eventsDir: string, runId: string): SubagentResultRead {
+  const name = subagentResultFileName(runId);
+  if (!name || !eventsDir) return { status: "missing" };
+  const path = join(eventsDir, name);
+  if (!existsSync(path)) return { status: "missing" };
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return { status: "invalid", error: "subagent result is unreadable" };
+  }
+  if (Buffer.byteLength(raw, "utf8") > MAX_SUBAGENT_FILE_BYTES) {
+    return { status: "invalid", error: "subagent result exceeds its file budget" };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { status: "invalid", error: "subagent result is not JSON" };
+  }
+  const checked = parseSubagentResultFile(runId, parsed);
+  if (!checked.ok) return { status: "invalid", error: checked.error };
+  return { status: "ok", file: checked.file };
+}
+
+/**
+ * Settle locally active runs whose host result files landed. Runs once per
+ * parent turn next to the mailbox read; frees slots and claim holds. The
+ * human-readable result arrives via the host mailbox note; this only
+ * reconciles registry truth.
+ */
+export function reconcileSubagentRuns(eventsDir: string, registry: SubagentRegistry): SubagentRun[] {
+  if (!eventsDir) return [];
+  const settled: SubagentRun[] = [];
+  for (const run of registry.activeRuns()) {
+    const read = readSubagentResultFile(eventsDir, run.id);
+    if (read.status !== "ok") continue;
+    const done = registry.settleRun(run.id, read.file.result, read.file.outcome);
+    if (done.ok) settled.push(done.run);
+  }
+  return settled;
+}
+
+/** Sidecar body announcing a validated spawn; the host launches from the task file. */
+export function subagentSpawnSidecarRecord(runId: string, taskFile: string): Record<string, unknown> {
+  return { t: SUBAGENT_SPAWN_RECORD, runId, taskFile };
 }
 
 function normalizeClaimPath(raw: unknown): { ok: true; path: string } | { ok: false; error: string } {

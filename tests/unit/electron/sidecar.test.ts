@@ -204,5 +204,20 @@ describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
         tailer.stop();
       }
     });
+
+    it("parses the subagent spawn announcement", () => {
+      const event = sidecarEventFromRecord({
+        bridgeId: "core-1",
+        seq: 9,
+        t: "subagent_spawn",
+        runId: "bg-1",
+        taskFile: "subagent-bg-1.task.json",
+      });
+      expect(event?.t).toBe("subagent_spawn");
+      if (event?.t !== "subagent_spawn") return;
+      expect(event.runId).toBe("bg-1");
+      expect(event.taskFile).toBe("subagent-bg-1.task.json");
+      expect(sidecarEventFromRecord({ bridgeId: "core-1", seq: 10, t: "nope" })).toBeNull();
+    });
   });
 });

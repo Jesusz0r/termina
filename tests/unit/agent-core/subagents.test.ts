@@ -1,12 +1,23 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterAll } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   MAX_SUBAGENT_RUNS,
   SUBAGENT_TOOL_DEFS,
   SubagentRegistry,
+  parseSubagentResultFile,
+  parseSubagentTaskFile,
+  readSubagentResultFile,
+  reconcileSubagentRuns,
   scanSubagentOutput,
   subagentDepthFromEnv,
   subagentPathsOverlap,
+  subagentResultFileName,
+  subagentSpawnSidecarRecord,
+  subagentTaskFileName,
   visibleSubagentTools,
+  writeSubagentTaskFile,
   type SubagentParent,
 } from "../../../agent-core/subagents.ts";
 import { supportedEffortLevels } from "../../../agent-core/models/capabilities.ts";
@@ -255,5 +266,112 @@ describe("subagents Phase 1 registry", () => {
     expect(subagentPathsOverlap("src", "src/a.ts")).toBe(true);
     expect(subagentPathsOverlap("src/a.ts", "src")).toBe(true);
     expect(subagentPathsOverlap("src/ab.ts", "src/a.ts")).toBe(false);
+  });
+});
+
+describe("subagents Phase 2 handoff contract", () => {
+  const roots: string[] = [];
+  afterAll(() => {
+    for (const r of roots) rmSync(r, { recursive: true, force: true });
+  });
+  function events(): string {
+    const dir = mkdtempSync(join(tmpdir(), "subagent-handoff-"));
+    roots.push(dir);
+    return dir;
+  }
+
+  function writeResult(dir: string, runId: string, body: unknown): void {
+    const name = subagentResultFileName(runId);
+    expect(name).not.toBeNull();
+    writeFileSync(join(dir, name!), typeof body === "string" ? body : JSON.stringify(body), { mode: 0o600 });
+  }
+
+  it("names handoff files only for bg-N run ids", () => {
+    expect(subagentTaskFileName("bg-1")).toBe("subagent-bg-1.task.json");
+    expect(subagentResultFileName("bg-12")).toBe("subagent-bg-12.result.json");
+    expect(subagentTaskFileName("../x")).toBeNull();
+    expect(subagentTaskFileName("term-1")).toBeNull();
+    expect(subagentTaskFileName("bg-")).toBeNull();
+  });
+
+  it("round-trips the task file", async () => {
+    const reg = registry();
+    const spawned = await reg.spawn({ task: "do it", paths: ["src/a.ts"], parent });
+    expect(spawned.ok).toBe(true);
+    if (!spawned.ok) return;
+    const dir = events();
+    const written = writeSubagentTaskFile(dir, spawned.run, { parentTerminalId: "term-7", cwd: "/proj" });
+    expect(written.ok).toBe(true);
+    if (!written.ok) return;
+    expect(written.file).toBe("subagent-bg-1.task.json");
+    const { readFileSync: read } = await import("node:fs");
+    const parsed = parseSubagentTaskFile(JSON.parse(read(join(dir, written.file), "utf8")));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.file.runId).toBe("bg-1");
+    expect(parsed.file.task).toBe("do it");
+    expect(parsed.file.paths).toEqual(["src/a.ts"]);
+    expect(parsed.file.parentTerminalId).toBe("term-7");
+    expect(parsed.file.permissionMode).toBe("ask");
+  });
+
+  it("fails the handoff write closed", async () => {
+    const reg = registry();
+    const spawned = await reg.spawn({ task: "t", parent });
+    expect(spawned.ok).toBe(true);
+    if (!spawned.ok) return;
+    expect(writeSubagentTaskFile("/nonexistent-subagent-dir-xyz", spawned.run, { parentTerminalId: "t", cwd: "/p" }).ok).toBe(false);
+    const dir = events();
+    expect(writeSubagentTaskFile(dir, spawned.run, { parentTerminalId: "", cwd: "/p" }).ok).toBe(false);
+    expect(writeSubagentTaskFile(dir, spawned.run, { parentTerminalId: "t", cwd: "" }).ok).toBe(false);
+  });
+
+  it("rejects malformed task and result files", () => {
+    expect(parseSubagentTaskFile(null).ok).toBe(false);
+    expect(parseSubagentTaskFile({ version: 99 }).ok).toBe(false);
+    expect(parseSubagentResultFile("bg-1", null).ok).toBe(false);
+    expect(parseSubagentResultFile("bg-1", { version: 1, runId: "bg-2", outcome: "settled", result: "x", flags: [] }).ok).toBe(false);
+    expect(parseSubagentResultFile("bg-1", { version: 1, runId: "bg-1", outcome: "exploded", result: "x", flags: [] }).ok).toBe(false);
+    expect(parseSubagentResultFile("bg-1", { version: 1, runId: "bg-1", outcome: "settled", result: "x", flags: "nope" }).ok).toBe(false);
+  });
+
+  it("reconciles landed results and frees their claims", async () => {
+    const reg = registry();
+    const dir = events();
+    const one = await reg.spawn({ task: "one", paths: ["src/a.ts"], parent });
+    const two = await reg.spawn({ task: "two", paths: ["src/b.ts"], parent });
+    expect(one.ok && two.ok).toBe(true);
+    if (!one.ok || !two.ok) return;
+    writeResult(dir, one.run.id, { version: 1, runId: one.run.id, outcome: "failed", result: "crashed", flags: [], settledAt: 1 });
+    const settled = reconcileSubagentRuns(dir, reg);
+    expect(settled.map((r) => r.id)).toEqual([one.run.id]);
+    expect(reg.get(one.run.id)?.state).toBe("failed");
+    expect(reg.get(one.run.id)?.result).toBe("crashed");
+    expect(reg.get(two.run.id)?.state).toBe("active");
+    // Freed claims are reusable; disjoint claims still held.
+    expect((await reg.spawn({ task: "reuse", paths: ["src/a.ts"], parent })).ok).toBe(true);
+    expect((await reg.spawn({ task: "clash", paths: ["src/b.ts"], parent })).ok).toBe(false);
+  });
+
+  it("ignores missing and malformed results without settling", async () => {
+    const reg = registry();
+    const dir = events();
+    const spawned = await reg.spawn({ task: "t", parent });
+    expect(spawned.ok).toBe(true);
+    if (!spawned.ok) return;
+    expect(reconcileSubagentRuns(dir, reg)).toEqual([]);
+    writeResult(dir, spawned.run.id, "not json{{{");
+    expect(reconcileSubagentRuns(dir, reg)).toEqual([]);
+    expect(reg.get(spawned.run.id)?.state).toBe("active");
+    expect(reconcileSubagentRuns("", reg)).toEqual([]);
+    expect(readSubagentResultFile(dir, spawned.run.id).status).toBe("invalid");
+  });
+
+  it("builds the spawn sidecar record", () => {
+    expect(subagentSpawnSidecarRecord("bg-3", "subagent-bg-3.task.json")).toEqual({
+      t: "subagent_spawn",
+      runId: "bg-3",
+      taskFile: "subagent-bg-3.task.json",
+    });
   });
 });

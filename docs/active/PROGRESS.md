@@ -4,7 +4,7 @@
 
 ## In progress
 
-- None — subagents Phase 1 landed; tree built + tested 2026-09-08.
+- Subagents Phase 2 slice 1 landed (contract + parent half); Electron spawner next. Tree built + tested 2026-09-08.
 
 ## Next
 
@@ -14,6 +14,7 @@
 
 ## Done (recent)
 
+- Subagents Phase 2 slice 1 (2026-09-08): cross-process contract + parent half. Parent writes `subagent-bg-N.task.json` (validated format owned by `agent-core/subagents.ts`) before emitting the `subagent_spawn` sidecar record (new parsed variant in `electron/sidecar.ts`; host dispatch case deferred to slice 2); handoff failure settles the run failed exactly once. Host results return via `subagent-bg-N.result.json`, reconciled per parent turn (`reconcileSubagentRuns` frees slots + claims; display rides the host mailbox note in slice 2). Typecheck green, subagents 30/30, sidecar suites green, `vite build` green. Next: `electron/subagents.ts` spawner (piped stdio, `bg-N` tailing, settle/kill/retry, mailbox note, env sanitization).
 - Subagents Phase 1 (2026-09-08): `spawn_subagent`/`message_subagent` tool surface + `agent-core/subagents.ts` registry owner (ids `bg-N`, state, path claims, caps: 4 parallel / depth 1 / turn budget / 50-msg inbox). Model via `parseModelRef` + `resolveAuth` (fail closed, `/login` hint), effort clamped with cheap-lane default, `permissionMode` inherited with no widen path, child-output scanning at the boundary. Children never receive `spawn_subagent`. Audit fixes: raw budget/paths forwarded for fail-closed validation (no silent lease drops), claim normalization (`./`, `//`, `/.`), single `/login` hint, leading-slash model rejected. Typecheck green, `subagents.test.ts` 22/22; targeted 60/60 across kernel/p0/provider/catalog/mcp. Full agent-core 274/274 pre-audit; post-audit full rerun OOM-killed twice by concurrent E2E memory pressure (67MB free), still pending. `vite build` green pre-audit (existing chunk-size warning). Phases 2–5 pending; AGENT-CORE-HARNESS ownership-note update deferred to Phase 5.
 - Release v0.1.37: bumped package.json, pushed master + tag. CI green (test gate, macOS/Linux builds, notarization successful); publish job first failed on a transient GitHub HTTP 500 creating the draft, succeeded on `--failed` rerun. Full local unit 84/84 files, 398/398 tests. Released with assets (dmg, AppImage, core binaries).
 - Codex cache-key probe (2026-09-07): built `scripts/codex-cache-probe.ts` (own key namespace, store:false, real auth/body path) and ran 4 live trials (~$0.15). ACCEPTED is solid: HTTP 200 every time, field tolerated, never a 400. Efficacy unproven: same-key back-to-back ~2.5k-token prefix repeats read 0 in 3/4 trials (single- and multi-message shapes); one stray 2432-token hit is better explained by content-hash routing colliding with a prior run's entry than by the key. Backend returned no `x-codex-turn-state` on minimal requests. Conclusion: safe to send, benefit doubtful — recommend wiring the key (docs-aligned, enables cacheKeyHash diagnostics) with before/after trace measurement, not as a proven fix. No send-path change made.

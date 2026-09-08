@@ -172,8 +172,11 @@ import {
 } from "./tool-output.ts";
 import {
   SubagentRegistry,
+  reconcileSubagentRuns,
   subagentDepthFromEnv,
+  subagentSpawnSidecarRecord,
   visibleSubagentTools,
+  writeSubagentTaskFile,
 } from "./subagents.ts";
 import {
   estimateReclaimTokens,
@@ -4492,6 +4495,15 @@ async function executeTool(use: ToolUse): Promise<ToolOutcome> {
       },
     });
     if (!got.ok) return done(use, `error: ${got.error}`, true);
+    // Hand the validated run to the host: task file first (it lands before
+    // the queued sidecar record), then announce. A failed handoff fails the
+    // run exactly once so the slot and claims release.
+    const handoff = writeSubagentTaskFile(eventsDir, got.run, { parentTerminalId: terminalId, cwd: canonicalCwd });
+    if (!handoff.ok) {
+      subagentRegistry.settleRun(got.run.id, `host handoff failed: ${handoff.error}`, "failed");
+      return done(use, `error: ${handoff.error}`, true);
+    }
+    logEvent(subagentSpawnSidecarRecord(got.run.id, handoff.file));
     return done(use, JSON.stringify({ runId: got.run.id }));
   }
   if (use.name === "message_subagent") {
@@ -7169,6 +7181,9 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   void refreshPendingImageCount();
   const taggedPrompt = prompt.startsWith("/") ? prompt : expandFileTags(canonicalCwd, prompt);
   const contextResult = eventsDir && terminalId ? readContextFilesResult(eventsDir, terminalId) : null;
+  // Free subagent slots whose host result files landed. Display rides the
+  // host mailbox note; this only reconciles registry truth.
+  if (eventsDir && terminalId) reconcileSubagentRuns(eventsDir, subagentRegistry);
   const context = contextResult?.text ?? "";
   currentHostContext = contextResult
     ? {

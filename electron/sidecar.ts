@@ -88,7 +88,8 @@ export type SidecarEvent =
       toolCallId?: string;
       entryId?: string | null;
     })
-  | (SidecarMeta & { t: "tool_end"; toolCallId?: string; isError?: boolean });
+  | (SidecarMeta & { t: "tool_end"; toolCallId?: string; isError?: boolean })
+  | (SidecarMeta & { t: "subagent_spawn"; runId?: string; taskFile?: string });
 
 export type AgentStartEvent = Extract<SidecarEvent, { t: "agent_start" }>;
 
@@ -345,6 +346,7 @@ const SIDECAR_KINDS = new Set<SidecarEvent["t"]>([
   "plan",
   "tool",
   "tool_end",
+  "subagent_spawn",
 ]);
 
 /** One JSONL object. Arrays, primitives, and malformed JSON are not records. */
@@ -468,6 +470,8 @@ function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>): Side
       };
     case "tool_end":
       return { ...meta, t: "tool_end", toolCallId: optionalString(rec.toolCallId), isError: optionalBoolean(rec.isError) };
+    case "subagent_spawn":
+      return { ...meta, t: "subagent_spawn", runId: optionalString(rec.runId), taskFile: optionalString(rec.taskFile) };
   }
 }
 
