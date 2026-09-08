@@ -6,14 +6,21 @@ import {
   MAX_SUBAGENT_RUNS,
   SUBAGENT_TOOL_DEFS,
   SubagentRegistry,
+  appendSubagentInboxMessage,
   formatSubagentResultFrame,
   isSubagentManagedFile,
+  parseSubagentApprovalName,
   parseSubagentResultFile,
   parseSubagentResultFrame,
   parseSubagentTaskFile,
+  readSubagentApprovalRequest,
+  readSubagentInbox,
   readSubagentResultFile,
   reconcileSubagentRuns,
   scanSubagentOutput,
+  subagentApprovalRequestName,
+  subagentApprovalTimeoutMs,
+  subagentChildTid,
   subagentDepthFromEnv,
   subagentPathsOverlap,
   subagentResultFileName,
@@ -21,6 +28,8 @@ import {
   subagentTaskFileName,
   truncateUtf8,
   visibleSubagentTools,
+  writeSubagentAckFile,
+  writeSubagentApprovalRequest,
   writeSubagentTaskFile,
   type SubagentParent,
 } from "../../../agent-core/subagents.ts";
@@ -429,6 +438,9 @@ describe("subagents Phase 2 handoff contract", () => {
     expect(isSubagentManagedFile("subagent-term-7-bg-12.result.json")).toBe(true);
     expect(isSubagentManagedFile("subagent-term-7-bg-1.result.json.abc-123.tmp")).toBe(true);
     expect(isSubagentManagedFile("sub-term-7-bg-1.jsonl")).toBe(true);
+    expect(isSubagentManagedFile("subagent-term-7-bg-1.approval-appr-abc123.json")).toBe(true);
+    expect(isSubagentManagedFile("subagent-term-7-bg-1.inbox.json")).toBe(true);
+    expect(isSubagentManagedFile("ack-sub-term-7-bg-1-appr-abc123.json")).toBe(true);
     expect(isSubagentManagedFile(".cursor-sub-term-7-bg-1.json")).toBe(true);
     expect(isSubagentManagedFile(".sub-term-7-bg-1.jsonl.sealed-abc")).toBe(true);
     expect(isSubagentManagedFile("term-7.jsonl")).toBe(false);
@@ -437,5 +449,59 @@ describe("subagents Phase 2 handoff contract", () => {
     expect(isSubagentManagedFile("subagent--bg-.task.json")).toBe(false);
     expect(isSubagentManagedFile("subagent-term-7-bg-1.task.json ")).toBe(false);
     expect(isSubagentManagedFile("sub-foo.jsonl")).toBe(false);
+  });
+
+  it("parses approval request names", () => {
+    expect(parseSubagentApprovalName("term-7", "subagent-term-7-bg-1.approval-appr-1.json")).toEqual({ runId: "bg-1", reqId: "appr-1" });
+    expect(parseSubagentApprovalName("term-7", "subagent-term-9-bg-1.approval-appr-1.json")).toBeNull();
+    expect(parseSubagentApprovalName("term-7", "subagent-term-7-bg-1.inbox.json")).toBeNull();
+    expect(parseSubagentApprovalName("term-7", "subagent-term-7-bg-1.approval-.json")).toBeNull();
+  });
+
+  it("names child streams deterministically", () => {
+    expect(subagentChildTid("term-7", "bg-1")).toBe("sub-term-7-bg-1");
+    expect(subagentChildTid("../x", "bg-1")).toBeNull();
+    expect(subagentChildTid("term-7", "bg-")).toBeNull();
+    expect(subagentChildTid("", "bg-1")).toBeNull();
+  });
+
+  it("clamps the approval timeout", () => {
+    expect(subagentApprovalTimeoutMs({})).toBe(120_000);
+    expect(subagentApprovalTimeoutMs({ TERMINA_SUBAGENT_APPROVAL_TIMEOUT_MS: "5000" })).toBe(5000);
+    expect(subagentApprovalTimeoutMs({ TERMINA_SUBAGENT_APPROVAL_TIMEOUT_MS: "50" })).toBe(120_000);
+    expect(subagentApprovalTimeoutMs({ TERMINA_SUBAGENT_APPROVAL_TIMEOUT_MS: "nope" })).toBe(120_000);
+  });
+
+  it("round-trips approval requests and rejects malformed ones", () => {
+    const dir = mkdtempSync(join(tmpdir(), "subagent-appr-"));
+    roots.push(dir);
+    expect(subagentApprovalRequestName("term-7", "bg-1", "appr-1")).toBe("subagent-term-7-bg-1.approval-appr-1.json");
+    expect(subagentApprovalRequestName("../x", "bg-1", "appr-1")).toBeNull();
+    const written = writeSubagentApprovalRequest(dir, "term-7", "bg-1", { reqId: "appr-1", kind: "bash", text: "rm -rf /" });
+    expect(written.ok).toBe(true);
+    if (!written.ok) return;
+    const read = readSubagentApprovalRequest(join(dir, written.file));
+    expect(read.ok).toBe(true);
+    if (!read.ok) return;
+    expect(read.file).toMatchObject({ runId: "bg-1", kind: "bash", text: "rm -rf /" });
+    expect(writeSubagentApprovalRequest(dir, "term-7", "bg-1", { reqId: "appr-2", kind: "protected", text: "  " }).ok).toBe(false);
+    expect(readSubagentApprovalRequest(join(dir, "missing.json")).ok).toBe(false);
+    expect(writeSubagentAckFile(dir, "sub-term-7-bg-1", "appr-1", { ok: true })).toBe(true);
+    expect(writeSubagentAckFile(dir, "../x", "appr-1", { ok: true })).toBe(false);
+  });
+
+  it("appends inbox messages with sequence numbers and a cap", () => {
+    const dir = mkdtempSync(join(tmpdir(), "subagent-inbox-"));
+    roots.push(dir);
+    const first = appendSubagentInboxMessage(dir, "term-7", "bg-1", "hello");
+    expect(first).toEqual({ ok: true, seq: 1 });
+    const second = appendSubagentInboxMessage(dir, "term-7", "bg-1", "again");
+    expect(second).toEqual({ ok: true, seq: 2 });
+    expect(appendSubagentInboxMessage(dir, "term-7", "bg-1", "  ").ok).toBe(false);
+    const inbox = readSubagentInbox(dir, "term-7", "bg-1");
+    expect(inbox?.messages.map((m) => [m.seq, m.text])).toEqual([[1, "hello"], [2, "again"]]);
+    expect(readSubagentInbox(dir, "term-7", "bg-404")).toBeNull();
+    for (let i = 0; i < 60; i++) appendSubagentInboxMessage(dir, "term-7", "bg-1", `m${i}`);
+    expect(readSubagentInbox(dir, "term-7", "bg-1")?.messages.length).toBe(50);
   });
 });

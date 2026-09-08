@@ -172,18 +172,25 @@ import {
 } from "./tool-output.ts";
 import {
   SubagentRegistry,
+  appendSubagentInboxMessage,
   formatSubagentResultFrame,
+  parseSubagentApprovalName,
   parseSubagentTaskFile,
+  readSubagentApprovalRequest,
+  readSubagentInbox,
   reconcileSubagentRuns,
+  subagentApprovalTimeoutMs,
+  subagentChildTid,
   subagentDepthFromEnv,
   subagentSpawnSidecarRecord,
   truncateUtf8,
   visibleSubagentTools,
+  writeSubagentAckFile,
+  writeSubagentApprovalRequest,
   writeSubagentTaskFile,
   MAX_SUBAGENT_RESULT_CHARS,
   type SubagentTaskFile,
-} from "./subagents.ts";
-import {
+} from "./subagents.ts";import {
   estimateReclaimTokens,
   makePruneRevision,
   planPruneStubs as planReclaimStubs,
@@ -342,7 +349,7 @@ export function parseSubagentTaskFlag(argv: string[]): string | null {
 }
 
 /** Active headless child run. Null everywhere except `--subagent-task`. */
-let activeSubagent: { task: SubagentTaskFile; turns: number; partial: boolean } | null = null;
+let activeSubagent: { task: SubagentTaskFile; turns: number; partial: boolean; inboxSeq: number } | null = null;
 /** Last settled run outcome, for the subagent result frame. Set at the single settle point. */
 let lastRunOutcome: { status: string; failure: string | null } | null = null;
 
@@ -4399,9 +4406,33 @@ export function cancelPendingApproval(line = "/approve deny"): boolean {
 }
 
 /** Approve bash in the TUI, where the command and its context already live. */
+/**
+ * Headless child approval (Phase 3): ask the parent through the approval
+ * file channel and wait for the ack. Anything but an explicit `{ok: true}`
+ * ack — timeout, missing channel, stale run — denies. Approval is strictly
+ * once-only: the child can never grant itself (or its parent) `always`.
+ */
+let subagentApprovalSeq = 0;
+async function requestParentApproval(kind: "bash" | "protected", text: string): Promise<boolean> {
+  const run = activeSubagent;
+  if (!run || !eventsDir) return false;
+  const parentTid = run.task.parentTerminalId;
+  const childTid = subagentChildTid(parentTid, run.task.runId);
+  if (!childTid) return false;
+  subagentApprovalSeq += 1;
+  const reqId = `appr-${Date.now().toString(36)}-${subagentApprovalSeq}`;
+  const written = writeSubagentApprovalRequest(eventsDir, parentTid, run.task.runId, { reqId, kind, text });
+  if (!written.ok) return false;
+  const ack = await waitForAck(eventsDir, childTid, reqId, subagentApprovalTimeoutMs(), childTid, {
+    shouldStop: () => interrupted,
+  });
+  return ack?.ok === true;
+}
+
 async function confirmBashNow(command: string): Promise<boolean> {
   if (interrupted) return false;
   if (!shouldAskPermission(permissionMode, command)) return true;
+  if (activeSubagent && !surface?.active()) return requestParentApproval("bash", command);
   if (!surface?.active()) return false;
   surface.setChoices(`Approve bash? ${command.slice(0, 160)}`, [
     { name: "Deny", hint: "reject this command", submit: "/approve deny" },
@@ -4435,6 +4466,103 @@ async function queueApproval(confirm: () => Promise<boolean>): Promise<boolean> 
   }
 }
 
+/** Approval requests already queued or answered this session (no double pickers). */
+const pendingSubagentApprovals = new Set<string>();
+
+/**
+ * Parent side of child approvals (Phase 3). Once per turn, surface fresh
+ * requests from live runs in the parent's own choice picker — Deny and
+ * Approve once only, never Always, so a child can never escalate either
+ * side to auto-approve. Stale requests, runs that already settled, and
+ * headless parents (no picker surface) resolve to a fast deny ack instead
+ * of making the child hang the full timeout.
+ */
+function pollSubagentApprovals(): void {
+  if (!eventsDir || !terminalId || subagentRegistry.activeRuns().length === 0) return;
+  let names: string[];
+  try {
+    names = readdirSync(eventsDir);
+  } catch {
+    return;
+  }
+  const timeout = subagentApprovalTimeoutMs();
+  for (const name of names) {
+    const parsed = parseSubagentApprovalName(terminalId, name);
+    if (!parsed) continue;
+    const runId = parsed.runId;
+    const reqId = parsed.reqId;
+    const key = `${runId}/${reqId}`;
+    if (pendingSubagentApprovals.has(key)) continue;
+    const run = subagentRegistry.get(runId);
+    const req = readSubagentApprovalRequest(join(eventsDir, name));
+    const fresh = req.ok && Date.now() - req.file.createdAt < timeout;
+    if (!run || run.state !== "active" || !fresh) {
+      try {
+        rmSync(join(eventsDir, name));
+      } catch {
+        /* Dead letter stays for the startup sweep. */
+      }
+      continue;
+    }
+    const childTid = subagentChildTid(terminalId, runId);
+    if (!childTid) continue;
+    pendingSubagentApprovals.add(key);
+    if (!surface?.active()) {
+      writeSubagentAckFile(eventsDir, childTid, reqId, { ok: false });
+      try {
+        rmSync(join(eventsDir, name));
+      } catch {
+        /* Dead letter stays for the startup sweep. */
+      }
+      pendingSubagentApprovals.delete(key);
+      continue;
+    }
+    const kind = req.file.kind;
+    const text = req.file.text;
+    void queueApproval(async () => {
+      const question = kind === "bash"
+        ? `Subagent ${runId} asks to run bash: ${text.slice(0, 160)}`
+        : `Subagent ${runId} asks to edit protected file: ${text.slice(0, 160)}`;
+      surface!.setChoices(question, [
+        { name: "Deny", hint: "reject this request", submit: "/approve deny" },
+        { name: "Approve once", hint: "allow this once", submit: "/approve once" },
+      ]);
+      const line = await new Promise<string>((resolve) => {
+        approvalResolve = resolve;
+      });
+      if (approvalResolve) approvalResolve = null;
+      surface?.clearChoices();
+      const ok = line === "/approve once";
+      writeSubagentAckFile(eventsDir, childTid, reqId, { ok });
+      try {
+        rmSync(join(eventsDir, name));
+      } catch {
+        /* Dead letter stays for the startup sweep. */
+      }
+      pendingSubagentApprovals.delete(key);
+      return ok;
+    });
+  }
+}
+
+/**
+ * Child side of parent messaging (Phase 3): inject newly arrived parent
+ * inbox entries as one user turn per model turn. Retried attempts may
+ * re-inject older entries; entries carry sequence numbers so repeats are
+ * recognizable.
+ */
+function drainSubagentInbox(): void {
+  const run = activeSubagent;
+  if (!run || !eventsDir) return;
+  const inbox = readSubagentInbox(eventsDir, run.task.parentTerminalId, run.task.runId);
+  if (!inbox) return;
+  const fresh = inbox.messages.filter((m) => m.seq > run.inboxSeq);
+  if (fresh.length === 0) return;
+  run.inboxSeq = fresh[fresh.length - 1]!.seq;
+  const lines = fresh.map((m) => `Parent message (seq ${m.seq}): ${m.text}`);
+  pushMessage("user", [{ type: "text", text: lines.join("\n") }]);
+}
+
 async function confirmBash(command: string): Promise<boolean> {
   return queueApproval(() => confirmBashNow(command));
 }
@@ -4445,9 +4573,13 @@ async function confirmProtectedMutationNow(inputPath: string | undefined): Promi
   const confined = confinePath(canonicalCwd, inputPath);
   if (!confined.ok) return true;
   const target = confined.abs;
-  if (!readProtectedPaths(eventsDir, terminalId).has(target) || protectedTaskApprovals.has(target)) return true;
-  if (!surface?.active()) return false;
+  // A headless child enforces its parent's Mine marks: user-owned files stay
+  // off-limits across the process boundary with no channel to widen them.
+  const policyTid = activeSubagent ? activeSubagent.task.parentTerminalId : terminalId;
+  if (!readProtectedPaths(eventsDir, policyTid).has(target) || protectedTaskApprovals.has(target)) return true;
   const label = relative(canonicalCwd, target) || target;
+  if (activeSubagent && !surface?.active()) return requestParentApproval("protected", label);
+  if (!surface?.active()) return false;
   surface.setChoices(`Approve protected file edit? ${label}`, [
     { name: "Deny", hint: "leave this file unchanged", submit: "/approve deny" },
     { name: "Approve", hint: "allow edits to this file for this task", submit: "/approve protected" },
@@ -4538,8 +4670,17 @@ async function executeTool(use: ToolUse): Promise<ToolOutcome> {
     return done(use, JSON.stringify({ runId: got.run.id }));
   }
   if (use.name === "message_subagent") {
-    const got = subagentRegistry.message(String(use.input.run_id ?? ""), String(use.input.text ?? ""));
+    const runId = String(use.input.run_id ?? "");
+    const text = String(use.input.text ?? "");
+    const got = subagentRegistry.message(runId, text);
     if (!got.ok) return done(use, `error: ${got.error}`, true);
+    // Mirror accepted messages to the inbox file the child drains. A failed
+    // mirror errors (fail closed) so the parent never believes an undelivered
+    // message landed.
+    if (eventsDir && terminalId) {
+      const mirrored = appendSubagentInboxMessage(eventsDir, terminalId, runId, text);
+      if (!mirrored.ok) return done(use, `error: ${mirrored.error}`, true);
+    }
     return done(use, JSON.stringify({ ok: true }));
   }
   if (mcpSession?.tools.some((t) => t.name === use.name)) {
@@ -7129,9 +7270,11 @@ async function runSubagentTask(taskPath: string): Promise<never> {
   if (!process.env.TERMINA_CORE_SUMMARY_MODEL) {
     summaryRoute = parseModelRef(DEFAULT_MODELS[task.provider].summary, task.provider);
   }
-  activeSubagent = { task, turns: 0, partial: false };
+  activeSubagent = { task, turns: 0, partial: false, inboxSeq: 0 };
   lastRunOutcome = null;
-  await runPrompt(task.task);
+  await runPrompt(
+    `[Subagent ${task.runId}: you are a background subagent. Your final reply is delivered to your parent as the run result. Parent messages arrive as "Parent message (seq N): ..." user turns — follow redirections, answer questions in your result. Bash approvals ask your parent and default to deny; keep commands minimal and non-interactive.]\n\n${task.task}`,
+  );
   // `as`: the settle-point assignment inside runPrompt is invisible to flow
   // analysis, which would otherwise keep the pre-run `null` narrowing.
   const outcome = lastRunOutcome as { status: string; failure: string | null } | null;
@@ -7371,6 +7514,10 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   try {
     while (true) {
       if (interrupted) break;
+      drainSubagentInbox();
+      // Child approval requests arrive mid-run; poll every model turn so a
+      // picker (or fast deny) lands within a turn, not a user turn.
+      pollSubagentApprovals();
       if (!resumePaused) {
         await reclaim();
         // Compact an expensive cache miss before the context limit forces it.

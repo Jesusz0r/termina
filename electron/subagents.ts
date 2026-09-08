@@ -22,6 +22,7 @@ import {
   parseSubagentTaskFile,
   parseSubagentResultFrame,
   scanSubagentOutput,
+  subagentChildTid,
   subagentResultFileName,
   truncateUtf8,
   type SubagentOutcome,
@@ -295,7 +296,11 @@ export class SubagentHost {
       await this.finishFailed(sourceTerminalId, runId, task, "subagent cwd unavailable");
       return;
     }
-    const childTid = `sub-${sourceTerminalId.slice(0, 64)}-${runId}`;
+    const childTid = subagentChildTid(sourceTerminalId, runId);
+    if (!childTid) {
+      await this.finishFailed(sourceTerminalId, runId, task, "bad subagent stream identity");
+      return;
+    }
     const run: HostRun = {
       key,
       parentTerminalId: sourceTerminalId,
