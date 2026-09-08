@@ -8,7 +8,7 @@
 
 ## Next
 
-- (open — token-roadmap probe phase recorded in Done; corpus comparison and zen price wire-up remain in TOKEN-EFFICIENCY-ROADMAP.md when wanted)
+- (open — token-roadmap probe phase recorded in Done; owner decision 2026-09-09: no corpus will be built, gates rest on retained-trace baselines + live probes; zen price wire-up when the catalog settles)
 
 ## Done (recent)
 

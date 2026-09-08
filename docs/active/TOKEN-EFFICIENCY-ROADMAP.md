@@ -4,6 +4,11 @@
 >
 > Goal: reduce provider-billed input, output, and reasoning tokens without
 > reducing task success, correctness, or recoverability.
+>
+> Owner decision 2026-09-09: no controlled corpus will be built. Ship gates
+> below that named an evaluation corpus now rest on retained-trace baselines
+> (via `scripts/trace-baseline.ts`) and live route probes instead. Anything
+> that cannot be decided from that evidence stays pending rather than assumed.
 
 This version is grounded in the current `agent-core/` implementation. It is an
 evidence-gated implementation plan, not a list of assumed savings. A change
@@ -24,11 +29,11 @@ benchmarks are complete.
 | Area | What `agent-core/` does today | Status / remaining evidence |
 |---|---|---|
 | Private ownership | `main.ts` is currently 8,458 lines, while the distinct cache, request-projection, reclaim, trace, rates, and bounded-output lifecycles have private modules imported by the integration owner. | **Complete for the named seams.** Keep one behavioral owner; extract further only for a distinct lifecycle/test surface, not to create another path. |
-| Traces | `trace.ts` writes schema-v2 attempt and task-settled records with stable run/task/attempt links, retry/fallback fields, nullable usage, cache diagnostics, tool/reclaim evidence, cost provenance, manifests, bounded retention, and a link index. | **Deterministic implementation complete.** Correctness is still caller-supplied/null and the controlled task corpus, quality, price, and long-session benchmark remain pending. |
+| Traces | `trace.ts` writes schema-v2 attempt and task-settled records with stable run/task/attempt links, retry/fallback fields, nullable usage, cache diagnostics, tool/reclaim evidence, cost provenance, manifests, bounded retention, and a link index. | **Deterministic implementation complete.** Correctness is still caller-supplied/null and task quality, price, and long-session benchmark remain pending. |
 | Cache identity | `auth.ts` derives a private ASCII key from a process-local session seed, role, provider, protocol, and route domain; it validates the key before emitting OpenRouter or xAI headers. | **Deterministic identity complete.** Provider field acceptance and OpenAI breakpoint acceptance on supporting routes remain route/model evidence gates; GPT-5.6+ documents first-2 + latest-50 (2026-09-09), never hardcoded. |
-| Request projection | `request-projection.ts` separates durable prompt/images from a sorted, escaped, UTF-8-bounded overlay; validates complete tool-call/result sequences; main snapshots and appends the overlay once per logical request, including retries. | **Deterministic projection complete.** Persisted generated context is rejected; corpus-level quality and provider-prefix behavior remain pending. |
+| Request projection | `request-projection.ts` separates durable prompt/images from a sorted, escaped, UTF-8-bounded overlay; validates complete tool-call/result sequences; main snapshots and appends the overlay once per logical request, including retries. | **Deterministic projection complete.** Persisted generated context is rejected; quality comparison on retained traces and provider-prefix behavior remain pending. |
 | Tool output | `tool-output.ts`, `host.ts`, `main.ts`, and `mcp.ts` use bounded UTF-8 accumulation, explicit completion states, omission markers, continuations, independent streams, and glob lookahead. | **Deterministic bounds complete.** Exhaustive stress and task-quality effects remain pending; no provider savings are implied. |
-| Reclamation | `reclaim.ts` plans bounded targets with original bytes/chars/hashes and recovery metadata; `session.ts` durably validates/applies receipts, replays source records, and maps recovery across forks before main changes its view. Last-resort truncate still persists only a dropped-count revision. | **Receipt-based prune recovery complete.** Truncate/summarize recovery semantics, reclaim ranking, billed-token savings, p95 recovery calls, and the full resume/fork corpus remain pending. |
+| Reclamation | `reclaim.ts` plans bounded targets with original bytes/chars/hashes and recovery metadata; `session.ts` durably validates/applies receipts, replays source records, and maps recovery across forks before main changes its view. Last-resort truncate still persists only a dropped-count revision. | **Receipt-based prune recovery complete.** Truncate/summarize recovery semantics, reclaim ranking, billed-token savings, p95 recovery calls, and resume/fork recovery evidence on retained traces remain pending. |
 | MCP tools | `mcp.ts` canonicalizes schemas, normalizes/deduplicates discoveries before caps, freezes selected tools; main gates `/clear` with `mcpBusy` and a generation token and falls back to built-ins on failure. | **Deterministic ordering/boundary complete.** Real-server reconnect behavior and cache/quality effects remain pending. |
 | Provider capabilities | Per-provider policy lives in `auth/providers/`, shared family rules in `models/families/`, and protocol-aware composition in `models/capabilities.ts`; `auth.ts` remains the public auth owner (credential persistence, login/refresh) and `openai-compat.ts` owns serializers with a native Gemini `cachedContent` lifecycle seam. Main enables only documented direct-route fields; Gemini native caching is not enabled by default. | **Field gating/trace seam complete; activation remains evidence-gated.** Live provider probes, TTL/price/quality benchmarks, and relay behavior remain pending. |
 | Estimates and prices | `reclaim.ts` uses the shared conservative `/4` byte estimate including tool-schema accounting; `rates.ts` validates immutable role/route/model snapshots and main captures bounded catalog provenance. | **Arithmetic/provenance seam complete.** Factors, live price snapshots, storage/TTL billing, and cost savings remain uncalibrated/pending. |
@@ -50,7 +55,7 @@ requests must not become additional successful tasks.
 | Metric | Current baseline | Ship gate |
 |---|---:|---:|
 | Task success and correctness | `task-settled` records now link the attempts and record runtime outcome status; correctness and evaluator criteria remain caller-supplied, with correctness currently null in the main settlement path. | No statistically meaningful regression and zero new correctness or data-integrity failures. |
-| Billed input tokens per successful task | Not established. | At least 10% lower median on the same evaluation corpus and model. |
+| Billed input tokens per successful task | Not established. | At least 10% lower median on the same model across comparable retained-trace baselines and probe replays. |
 | Cost per successful task | Cost is computed only from an immutable, role/route/model-scoped rate snapshot with source/version/time; unknown rates or counters remain null. | At least 10% lower median using one price snapshot and known costs only. |
 | Cached-input share on eligible steady-state calls | Per-attempt usage and cache fields are nullable; display/session accumulation may show zeros for presentation but trace denominators do not coerce absent provider fields. | Improve over a measured route baseline; do not use a universal 95% target. |
 | Summary calls and summary tokens | Summary attempts are linked to the parent task and carry usage, cache, cost, and TTFT when available; missing values remain unknown. | Zero on short tasks; no increase on long tasks unless success or recovery improves. |
@@ -168,8 +173,8 @@ Anthropic, Responses, Completions, and Google projections.
 **Current status:** The request-only projection seam and retry-stable overlay
 are implemented; a focused TypeScript check passes the overlay byte/hash,
 tool-sequence, strict persisted-context rejection, and final-position
-invariants. The full resume/fork/compaction corpus and provider quality
-comparison remain pending.
+invariants. Resume/fork/compaction coverage on retained traces and provider
+quality comparison remain pending.
 
 ### 2. Make trace data truthful and freeze a reproducible baseline
 
@@ -196,7 +201,7 @@ Add measurement without changing the task contract:
 - Keep provider, protocol, model, requested and effective effort, task class,
   route, status, retry count, fallback reason, revision count/kinds, tool names,
   timing, and task outcome distinct. Supply task class and success criteria
-  from controlled corpus/run metadata rather than heuristically classifying
+  from run metadata where recorded rather than heuristically classifying
   raw prompts. If correctness is evaluated outside `agent-core`, join that
   evaluator result by task id instead of inferring it from provider-call
   status. A successful provider call is not a successful task.
@@ -220,10 +225,11 @@ Add measurement without changing the task contract:
 - Count trace write failures, malformed/partial files, and records omitted by
   retention separately; a best-effort writer must not make an incomplete
   baseline look complete.
-- Build a corpus containing short, tool-heavy, long-context, image, MCP,
-  resume, compaction, idle-gap, retry, and fallback cases. Record success
-  criteria and expected file outcomes, and compare only successful tasks while
-  reporting failure rate separately.
+- Compare retained-trace baselines across short, tool-heavy, long-context,
+  image, MCP, resume, compaction, idle-gap, retry, and fallback cases as they
+  occur in real traffic. Record success criteria and expected file outcomes
+  where known, and compare only successful tasks while reporting failure
+  rate separately.
 
 **Validation:** Re-running the consumer on the same immutable trace fixture
 produces byte-identical JSON. Malformed, oversized, partial, missing-usage,
@@ -237,7 +243,7 @@ nullable usage and task settlement. The `scripts/trace-baseline.ts` consumer
 (fixture-tested for the one-task/three-attempt case, malformed/partial
 counting, and byte-identical reruns) reports tasks, attempts, usage, cache,
 and cost with unknown-denominator accounting. Runtime retention/failure
-fixtures, caller-supplied correctness, and the controlled success corpus
+fixtures, caller-supplied correctness, and retained-trace coverage
 remain pending before any efficiency denominator is trusted.
 
 ### 3. Make cache identity valid, stable, private, and role/route scoped
@@ -429,8 +435,8 @@ Keep prune, summarize, truncate, resume, and fork semantics explicit. A
 revision must be durable before the in-memory view changes, and stale or
 missing receipts must fail safely rather than hide content.
 
-**Ship gate:** At least 10% lower median billed input on the affected successful
-corpus, no optimization-induced extra tool call at p95 (explicit recovery
+**Ship gate:** At least 10% lower median billed input on comparable
+retained-trace baselines, no optimization-induced extra tool call at p95 (explicit recovery
 fallbacks are measured separately), and successful recovery after resume,
 compaction, fork, external file modification, a stale base hash, and a missing
 or truncated source record.
@@ -438,8 +444,8 @@ or truncated source record.
 **Current status:** Receipt-based prune planning, durable application, hash
 verification, and fork mapping are implemented; focused reclaim/session checks
 pass the bounded receipt invariants. Ranking repeated payloads, truncate/
-summarize recovery, p95 recovery calls, billed-token savings, and the full
-resume/fork corpus remain pending.
+summarize recovery, p95 recovery calls, billed-token savings, and resume/fork
+recovery evidence on retained traces remain pending.
 
 ### 7. Prove tool-schema byte stability and define MCP reconnect semantics
 
@@ -517,15 +523,15 @@ these facts revalidation-required external contracts.
   and the volatile overlay placement from section 1.
 
 **Ship gate:** Synthetic 19/20/21-block fixtures for Anthropic's documented
-20-block lookback (and route-appropriate boundary fixtures elsewhere) plus a
-representative corpus show fewer full-prefix misses without more provider
+20-block lookback (and route-appropriate boundary fixtures elsewhere) plus
+retained-trace baselines show fewer full-prefix misses without more provider
 errors or higher median cache-write cost. Use the documented first-2 +
 latest-50 boundaries for GPT-5.6+ fixtures; establish any other route/model
 boundary with the current contract and live response. The numeric fixtures are not
 repository facts.
 
 **Current status:** Deterministic marker placement, four-marker capping, and
-trace marker metadata are implemented. Live 2026-09-09 (`scripts/codex-breakpoint-probe.ts`): the Codex backend-api route rejects even one explicit marker (400, not supported on this model), so the 50-vs-80 question is moot there and the serializer correctly withholds markers. Eligible-block effectiveness, provider acceptance elsewhere, OpenAI breakpoint acceptance on supporting routes, and cache-write/cost impact remain live route/model and corpus evidence gates.
+trace marker metadata are implemented. Live 2026-09-09 (`scripts/codex-breakpoint-probe.ts`): the Codex backend-api route rejects even one explicit marker (400, not supported on this model), so the 50-vs-80 question is moot there and the serializer correctly withholds markers. Eligible-block effectiveness, provider acceptance elsewhere, OpenAI breakpoint acceptance on supporting routes, and cache-write/cost impact remain live route/model and trace evidence gates.
 
 ### 9. Treat cache thresholds and TTLs as experiments, not constants
 
@@ -560,13 +566,13 @@ cache-write TTL class, billing relation, and missing price fields explicit.
   at the canonical protocol owner and trace the effective policy after a
   rejection.
 
-**Ship gate:** Lower measured cost on the same successful task corpus after
+**Ship gate:** Lower measured cost on comparable retained-trace baselines after
 including cache writes, reads, storage charges where applicable, idle misses,
 and unknown-cost exclusions. Revalidate provider fields, prices, thresholds,
 and retention immediately before any activation or shipping.
 
 **Current status:** Deterministic route gating, nullable usage mapping, and
-rate-provenance plumbing are implemented. Live 2026-09-09 (`scripts/xai-cache-probe.ts`, grok-4.6): the `x-grok-conv-id` session header is accepted and effective — a repeated ~2.3k-token prefix billed input 2261→85 with cacheRead 640→2816, still warm after a 30s gap; cacheWrite stays null. TTL acceptance beyond 30s, cache-write/storage pricing, live price snapshots, and cost reduction remain pending external and corpus evidence.
+rate-provenance plumbing are implemented. Live 2026-09-09 (`scripts/xai-cache-probe.ts`, grok-4.6): the `x-grok-conv-id` session header is accepted and effective — a repeated ~2.3k-token prefix billed input 2261→85 with cacheRead 640→2816, still warm after a 30s gap; cacheWrite stays null. TTL acceptance beyond 30s, cache-write/storage pricing, live price snapshots, and cost reduction remain pending external and trace evidence.
 
 ## P2 — frontier work only after profiling
 
@@ -596,7 +602,7 @@ main-role cache fragmentation.
 
 **Current status:** Summary attempt linkage and role-scoped trace plumbing are
 implemented. Repeated summary-prefix hit rate, summary cost, and recovery or
-quality impact remain pending corpus/provider evidence.
+quality impact remain pending trace/provider evidence.
 
 ### 11. Calibrate token estimates before adding a tokenizer
 
@@ -622,7 +628,7 @@ the provider tokenizer is unavailable.
 
 **Current status:** Estimate consistency and tool-schema accounting are
 implemented. Calibration by model/content class, tokenizer adoption, overflow
-reduction, and billed-cost impact remain pending corpus/provider evidence.
+reduction, and billed-cost impact remain pending trace/provider evidence.
 
 ### 12. Investigate provider-specific caching separately
 
@@ -665,7 +671,7 @@ the serializer seam.
 
 **Ship gate:** Each provider route has a documented, tested effective policy;
 unsupported fields do not cause repeated hidden retries; and any savings are
-measured on the same successful task corpus.
+measured on comparable retained-trace baselines.
 
 **Current status:** Direct-route capability provenance, bounded observations,
 effective-policy tracing, and fallback handling are implemented. Live
@@ -685,7 +691,7 @@ implementation map for the remaining work and its deterministic checks.
 | Responsibility | Canonical owner | Current deterministic check | Still pending |
 |---|---|---|---|
 | Cache identity and capability observations | `auth.ts` and `cache.ts` | `cacheSessionSeed`, `deriveCacheIdentityKey`, capability-cache bounds, and nullable miss diagnostics | Live route/model field acceptance, retention, and OpenAI breakpoint acceptance |
-| Request projection and provider payloads | `request-projection.ts` and `main.ts`; serializers in `openai-compat.ts` | Overlay escaping/order/byte hash, complete tool sequences, retry reuse, and provider projection invariants | Full resume/fork/compaction corpus and quality comparison |
+| Request projection and provider payloads | `request-projection.ts` and `main.ts`; serializers in `openai-compat.ts` | Overlay escaping/order/byte hash, complete tool sequences, retry reuse, and provider projection invariants | Resume/fork/compaction coverage on retained traces and quality comparison |
 | Trace and cost provenance | `trace.ts`, `rates.ts`, and `main.ts` | Immutable attempt/task records, nullable usage/cost, atomic writes, link index, and bounded manifests | Evaluator correctness, long-session retention benchmark, live prices, and cost savings |
 | Reclaim and recovery | `reclaim.ts` and `session.ts`; orchestration in `main.ts` | Receipt validation, original/stub hashes, durable-before-view application, source-record recovery, and fork mapping | Truncate/summarize recovery, p95 recovery calls, and billed-token impact |
 | Bounded tool output | `tool-output.ts`, `host.ts`, `main.ts`, and `mcp.ts` | UTF-8 boundary, cap/state/marker, split-chunk, independent stream, and continuation invariants | Exhaustive filesystem/command stress and task-quality impact |
@@ -695,7 +701,7 @@ Focused module checks currently pass via `npx tsx --eval` harnesses over the
 exported projection, bounded-output, cache-identity, MCP, and trace seams.
 `npx tsc --noEmit` remains the type-check command, and `node scripts/build.mjs`
 is the build smoke check. Neither command establishes provider billing,
-retention, TTL acceptance, price accuracy, task quality, or corpus savings.
+retention, TTL acceptance, price accuracy, task quality, or retained-trace savings.
 
 ## Dependency-aware implementation order
 
@@ -717,7 +723,7 @@ resolution alone.
    focused tests disjoint.
 4. Integrate reclaim receipts and recovery evidence in dependency order, then
    rerun the complete harness after each integration batch. Run route-specific
-   live probes and the controlled corpus only after deterministic fixtures pass;
+   live probes and retain trace baselines only after deterministic fixtures pass;
    keep empirical results separate by provider/protocol/model and do not share
    mutable sessions between probes.
 5. Apply P1/P2 optimizations only after P0's gates are green; a subagent may
