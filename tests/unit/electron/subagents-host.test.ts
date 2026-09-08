@@ -375,6 +375,28 @@ describe("SubagentHost", () => {
     expect(body.touched).toEqual(["/proj/shared.ts", "/proj/own.ts"]);
   });
 
+  it("forgets settled history when the owner is killed", async () => {
+    const s = setup();
+    const name = "subagent-term-7-bg-1.task.json";
+    s.writeTask(validTask({ paths: [] }));
+    await s.host.handleSpawn("term-7", "bg-1", name);
+    s.host.noteChildEvent("sub-term-7-bg-1", "tool", "/proj/shared.ts");
+    s.procs[0]!.out(`SUBAGENT_RESULT {"ok":true,"result":"one"}\n`);
+    s.procs[0]!.exit(0);
+    await until(() => existsSync(join(s.dir, "subagent-term-7-bg-1.result.json")));
+    expect(s.host.killOwner("term-7", "terminal cleared")).toBe(0);
+    // A new run touching the same file must not merge-note against the
+    // cleared session's history.
+    const name2 = "subagent-term-7-bg-2.task.json";
+    writeFileSync(join(s.dir, name2), JSON.stringify(validTask({ runId: "bg-2", paths: [] })), { mode: 0o600 });
+    await s.host.handleSpawn("term-7", "bg-2", name2);
+    s.host.noteChildEvent("sub-term-7-bg-2", "tool", "/proj/shared.ts");
+    s.procs[1]!.out(`SUBAGENT_RESULT {"ok":true,"result":"two"}\n`);
+    s.procs[1]!.exit(0);
+    await until(() => existsSync(join(s.dir, "subagent-term-7-bg-2.result.json")));
+    expect(s.notes.at(-1)!.note).not.toContain("Merge needed");
+  });
+
   it("takes the last result frame", () => {
     expect(lastResultFrame("no frame here")).toBeNull();
     const two = `SUBAGENT_RESULT {"ok":true,"result":"first"}\nlog\nSUBAGENT_RESULT {"ok":false,"error":"last"}\n`;
@@ -406,8 +428,7 @@ describe("SubagentHost", () => {
     expect(s.unwatched).toEqual(["sub-term-7-bg-1"]);
   });
 
-  it("kills one owner's runs and keeps the other's", async () => {
-    const s = setup();
+  it("kills one owner's runs and keeps the other's", async () => {    const s = setup();
     for (const [term, run] of [["term-7", "bg-1"], ["term-7", "bg-2"], ["term-9", "bg-1"]] as const) {
       const name = `subagent-${term}-${run}.task.json`;
       writeFileSync(join(s.dir, name), JSON.stringify(validTask({ runId: run, parentTerminalId: term })), { mode: 0o600 });

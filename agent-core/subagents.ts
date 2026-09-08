@@ -516,6 +516,8 @@ export function truncateUtf8(text: string, maxBytes: number): string {
 
 function normalizeClaimPath(raw: unknown): { ok: true; path: string } | { ok: false; error: string } {
   if (typeof raw !== "string") return { ok: false, error: "spawn_subagent paths must be strings" };
+  // Control characters would break the brief markdown and overlap matching.
+  if (/[\0-\x1f\x7f]/.test(raw)) return { ok: false, error: "claim paths must not contain control characters" };
   // Collapse duplicate slashes and resolve `.` segments so `./x`, `a//b`,
   // and `a/./b` cannot evade overlap detection against `x` / `a/b`.
   const collapsed = raw.trim().replace(/\/{2,}/g, "/").replace(/\/+$/, "");

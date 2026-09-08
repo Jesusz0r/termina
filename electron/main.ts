@@ -12,7 +12,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain as electronIpcMain, Menu
 // Name the app for the macOS menu bar and user-data paths. Unpackaged runs default to "Electron".
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { access, cp, lstat, mkdir, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
@@ -3217,6 +3217,9 @@ class PiEditorApp {
       this.tailer.stopWatching(inst.id);
       this.sidecarQueues.delete(inst.id);
       this.ptyEgress.cancel(inst.id, terminalGeneration);
+      // A closed owner takes its background runs with it: no API burns for
+      // a dead terminal, and no orphan results land nowhere.
+      this.subagents.killOwner(inst.id, "terminal closed");
       // A dispatch worker closed before settling: its task goes back to
       // pending so the board stays honest.
       const dispatchExit = this.dispatchRuns.get(inst.id);
@@ -5868,6 +5871,19 @@ class PiEditorApp {
     // Their killed-result notes still land in the mailbox so the new
     // session sees what happened instead of waiting on dead runs.
     this.subagents.killOwner(terminalId, "terminal cleared");
+    // Cancel spawns that have not launched yet: a sidecar record queued
+    // just before this clear would otherwise launch into the new session.
+    // (A clear landing between the host's task read and child launch stays
+    // a visible, attributable stray — accepted, not silent.)
+    try {
+      for (const name of readdirSync(this.eventsDirOf(inst))) {
+        if (name.startsWith(`subagent-${terminalId}-`) && name.endsWith(".task.json")) {
+          void this.removeEventLeaf(inst, name).catch(() => undefined);
+        }
+      }
+    } catch {
+      /* Best-effort pre-launch cancellation. */
+    }
     // Timeline: drop every dot and release its captured state.
     for (const ev of inst.timeline) {
       if (ev.stateId) void this.releaseStateIfUnused(ev.stateId, terminalId, ev.seq);

@@ -169,6 +169,8 @@ describe("subagents Phase 1 registry", () => {
     expect((await reg.spawn({ task: "t", paths: ["/etc/passwd"], parent })).ok).toBe(false);
     expect((await reg.spawn({ task: "t", paths: ["../outside"], parent })).ok).toBe(false);
     expect((await reg.spawn({ task: "t", paths: [""], parent })).ok).toBe(false);
+    expect((await reg.spawn({ task: "t", paths: ["a\nb"], parent })).ok).toBe(false);
+    expect((await reg.spawn({ task: "t", paths: ["a\tb"], parent })).ok).toBe(false);
   });
 
   it("rejects overlapping claims and reuses paths after settle", async () => {

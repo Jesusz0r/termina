@@ -177,7 +177,7 @@ export class SubagentHost {
   /** Child sidecar streams tailed for liveness (booted/activity). No UI surface in v1. */
   private readonly streams = new Map<string, { key: string; booted: boolean; lastActivityAt: number }>();
   /** Settled runs' touched paths for sibling merge detection (bounded, same-parent only). */
-  private readonly pastTouched: Array<{ key: string; runId: string; parentTerminalId: string; touched: string[] }> = [];
+  private pastTouched: Array<{ runId: string; parentTerminalId: string; touched: string[] }> = [];
   private readonly launch: SubagentLauncher;
   private readonly wallMs: number;
   private readonly maxChildren: number;
@@ -276,6 +276,9 @@ export class SubagentHost {
     for (const run of [...this.runs.values()]) {
       if (run.parentTerminalId === parentTerminalId && this.kill(parentTerminalId, run.runId, reason)) count += 1;
     }
+    // A cleared session starts a new main task: old touched history would
+    // merge-note against unrelated new runs.
+    this.pastTouched = this.pastTouched.filter((p) => p.parentTerminalId !== parentTerminalId);
     return count;
   }
 
@@ -603,7 +606,6 @@ export class SubagentHost {
       if (hit.length > 0) merges.push({ runId: prev.runId, paths: hit });
     }
     this.pastTouched.push({
-      key: run.key,
       runId: run.runId,
       parentTerminalId: run.parentTerminalId,
       touched: [...run.touched],
