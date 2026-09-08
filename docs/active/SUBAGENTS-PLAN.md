@@ -82,7 +82,7 @@ A subagent telling its parent to widen permissions must never work.
 
 1. No: `permissionMode` inherited with no setter (test), picker offers Deny/Approve-once only, Mine marks inherit (engine test), approvals once-only.
 2. Yes: every host path funnels through one `finish()`; registry `settleRun` is exactly-once; crashes/timeouts retry bounded, then report failure.
-3. No: registry overlap (same parent), host cross-parent overlap, dispatch veto both directions (tests); brief warnings advisory; merge notes on actual overlap.
+3. No: registry overlap, host cross-parent overlap, and dispatch veto carry unit tests; dispatch refusing subagent-claimed rows is pinned by wiring probes (PiEditorApp has no unit harness); brief warnings advisory; merge notes on actual overlap.
 4. Yes: registry holds no streams; inbox/approval traffic never enters parent context; mailbox carries final results + merge notes.
 5. Open: no credentials in this environment. Mocked-provider engine tests cover approve/deny/Mine/brief; a real engine child reaches a failed result. Run on two live providers before claiming the contract.
 

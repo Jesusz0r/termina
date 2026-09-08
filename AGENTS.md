@@ -26,6 +26,8 @@ One responsibility → one owner. Reuse, extend, or replace — never add a para
 - `electron/plan-board.ts` — Plan Board parse/progress/dispatch. `electron/worldlines.ts` — comparisons/promotion/evidence/runs. `electron/evidence.ts` only measures.
 - `electron/sidecar.ts` owns sidecar parse/tail. Only writers: `electron/bridge-extension.ts` + `agent-core/host.ts` + `logEvent` in `agent-core/main.ts`.
 - `electron/session-search.ts` owns Session Search walk. `electron/sandbox.ts` owns sandbox profiles.
+- `agent-core/subagents.ts` — background-subagent registry and host contract (spawn validation, claims, handoff/result formats, scanning). The tool surface stays in `agent-core/main.ts`; the headless entry is `--subagent-task`.
+- `electron/subagents.ts` — headless child lifecycle (spawn, settle/kill/retry, result files, mailbox notes). Piped stdio, never node-pty; only spawner of `--subagent-task` children.
 - `electron/main.ts` owns terminal/workspace lifecycle and IPC. Main owns authoritative app state; `src/` owns rendering and transient UI state, and requests privileged operations through preload. Keep orchestration out of the core client, `pty-terminal.ts`, and `session-fork.ts`.
 
 An owner may be a module or a directory with private helpers; its public API stays single. The paths above are entry points, not a requirement to put all implementation in one file.
