@@ -1,6 +1,29 @@
 import { test, expect } from "./fixtures.ts";
 
 test.describe("Editor Tab Actions & Lifecycle", () => {
+  test("tab strips hide scrollbars but retain horizontal wheel scrolling", async ({ page }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+    await page.locator("#explorer-tree .explorer-row").filter({ hasText: "greeting.ts" }).dblclick();
+
+    for (const selector of ["#terminal-tabs-list", ".project-editor .editor-tabs:visible"]) {
+      const strip = page.locator(selector);
+      // Exercise overflow without launching dozens of agent processes.
+      await strip.evaluate((element) => {
+        const tab = element.firstElementChild!;
+        for (let i = 0; i < 30; i++) element.appendChild(tab.cloneNode(true));
+        element.scrollLeft = 0;
+      });
+      expect(await strip.evaluate((element) => ({
+        overflow: getComputedStyle(element).overflowX,
+        scrollbar: getComputedStyle(element).scrollbarWidth,
+        overflowing: element.scrollWidth > element.clientWidth,
+      }))).toEqual({ overflow: "auto", scrollbar: "none", overflowing: true });
+      await strip.hover();
+      await page.mouse.wheel(250, 0);
+      await expect.poll(() => strip.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+    }
+  });
+
   test("supports preview replacement on single click and pinning on double click", async ({ page }) => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
 

@@ -283,10 +283,14 @@ export interface AppPreferences {
   wordWrap: boolean;
   minimap: boolean;
   shortcuts: ShortcutMap;
-  /** Canonical project roots to reopen on launch. Main owns this field. */
+  /** Canonical project roots to reopen on launch, in tab order. Main owns this field. */
   openProjects: string[];
+  /** Canonical root of the focused project. Main owns this field. */
+  activeProject: string | null;
   /** Show provider-supplied thinking in core terminals. */
   showThinking: boolean;
+  /** Open a file in the editor when an agent starts editing it. */
+  autoOpenAgentFiles: boolean;
   /** Last-used models, most recent first. Main owns this field. */
   recentModels: RecentModel[];
 }
@@ -297,7 +301,7 @@ export interface RecentModel {
   model: string;
 }
 
-export type UserPreferencePatch = Partial<Omit<AppPreferences, "openProjects" | "recentModels">>;
+export type UserPreferencePatch = Partial<Omit<AppPreferences, "openProjects" | "activeProject" | "recentModels">>;
 export type PreferenceUpdate = { patch: UserPreferencePatch; activateShortcuts: boolean };
 
 export function defaultAppPreferences(): AppPreferences {
@@ -310,7 +314,9 @@ export function defaultAppPreferences(): AppPreferences {
     minimap: true,
     shortcuts: { ...DEFAULT_SHORTCUTS },
     openProjects: [],
+    activeProject: null,
     showThinking: true,
+    autoOpenAgentFiles: true,
     recentModels: [],
   };
 }
@@ -559,7 +565,7 @@ export interface PiBridge {
   getInstances(): Promise<InstanceSummary[]>;
   writeClipboard(text: string): Promise<{ ok: boolean; error?: string }>;
   readClipboard(): Promise<string>;
-  editClipboard(command: "copy" | "paste"): Promise<void>;
+  editClipboard(command: "copy" | "cut" | "paste"): Promise<void>;
   /** Paste into a terminal. Core tabs attach clipboard images as files. */
   pasteTerminal(id: string): Promise<TerminalPasteResult>;
   /** Drop Finder files into a terminal. Core tabs attach images; others paste quoted paths. */

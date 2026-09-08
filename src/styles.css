@@ -24,6 +24,9 @@
   --red: #ff7a6b;
   --orange: #d9a05b;
   --purple: #7cc4ff;
+  /* One monospace family across the app chrome. Preferences swap this when
+   * the font family changes; the editor/terminal canvases set their own. */
+  --font-chrome: "Departure Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   --badge-add-bg: color-mix(in srgb, var(--green) 22%, var(--bg));
   --badge-mod-bg: color-mix(in srgb, var(--yellow) 22%, var(--bg));
   --badge-del-bg: color-mix(in srgb, var(--red) 22%, var(--bg));
@@ -96,7 +99,7 @@ body {
   background: var(--bg);
   color: var(--text);
   /* Termina uses one monospace family across the app chrome. */
-  font-family: "Departure Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--font-chrome);
   user-select: none;
 }
 
@@ -315,7 +318,7 @@ body {
   flex: 1;
   overflow-y: auto;
   padding: 4px 0;
-  font-family: "Departure Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: var(--font-chrome);
   font-size: 12px;
   -webkit-app-region: no-drag;
 }
@@ -464,24 +467,7 @@ body {
 
 #left-pane.minimized,
 #right-pane.minimized {
-  flex: 0 0 34px;
-  width: 34px;
-  min-width: 34px;
-  max-width: 34px;
-  overflow: hidden;
-}
-
-#main-split.layout-terminal-top #left-pane.minimized,
-#main-split.layout-terminal-bottom #left-pane.minimized,
-#main-split.layout-terminal-top #right-pane.minimized,
-#main-split.layout-terminal-bottom #right-pane.minimized {
-  width: auto;
-  max-width: none;
-  min-width: 0;
-  height: 34px;
-  min-height: 34px;
-  max-height: 34px;
-  flex: 0 0 34px;
+  display: none;
 }
 
 #main-split:has(#left-pane.minimized) #divider,
@@ -495,51 +481,6 @@ body {
   width: auto;
   min-width: 0;
   min-height: 0;
-}
-
-#left-pane.minimized #terminal-container,
-#left-pane.minimized #activity-tabbar,
-#left-pane.minimized #timeline-strip,
-#left-pane.minimized #plan-panel,
-#left-pane.minimized #worldline-panel,
-#left-pane.minimized #modified-panel,
-#left-pane.minimized #terminal-tabs-list,
-#left-pane.minimized #btn-new-terminal {
-  display: none;
-}
-
-#left-pane.minimized #terminal-tabs {
-  flex: 0 0 34px;
-  height: 34px;
-  min-height: 34px;
-  max-height: 34px;
-  justify-content: center;
-  padding: 0 3px;
-}
-
-#left-pane.minimized .pane-toggle {
-  margin-left: 0;
-}
-
-#right-pane.minimized #editor-tabs,
-#right-pane.minimized #editor-container,
-#right-pane.minimized #review-container,
-#right-pane.minimized .editor-tab,
-#right-pane.minimized .project-editor .editor-container,
-#right-pane.minimized .editor-empty {
-  display: none !important;
-}
-
-#right-pane.minimized .project-editor {
-  flex: 0 0 34px;
-  min-height: 34px;
-  max-height: 34px;
-}
-
-#right-pane.minimized .pane-chrome {
-  flex: 0 0 34px;
-  justify-content: center;
-  padding: 0 3px;
 }
 
 /* --------------------------------------------------------------- terminal */
@@ -706,7 +647,7 @@ body {
 }
 
 .terminal-menu-name {
-  font-family: "Departure Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: var(--font-chrome);
   font-size: 12px;
   color: var(--text);
   white-space: nowrap;
@@ -1275,7 +1216,7 @@ body {
   padding: 4px 8px;
   border-radius: 4px;
   cursor: pointer;
-  font-family: "Departure Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: var(--font-chrome);
   font-size: 12px;
 }
 
@@ -2247,7 +2188,7 @@ body {
 
 .search-text {
   flex: 1 1 auto;
-  font-family: "Departure Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: var(--font-chrome);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2256,7 +2197,7 @@ body {
 .search-path {
   flex: 0 0 auto;
   color: var(--accent);
-  font-family: "Departure Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: var(--font-chrome);
   font-size: 11px;
 }
 
@@ -2884,7 +2825,7 @@ body {
 }
 
 .review-filename {
-  font-family: "Departure Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: var(--font-chrome);
   font-size: 11px;
   color: var(--text);
 }
@@ -2967,11 +2908,21 @@ body {
   background: transparent;
 }
 
+#project-tabs {
+  scrollbar-width: thin;
+}
+
+/* Tab strips stay scrollable without reserving space for a scrollbar. */
 #terminal-tabs-list,
-#project-tabs,
 #editor-tabs,
 .project-editor .editor-tabs {
-  scrollbar-width: thin;
+  scrollbar-width: none;
+}
+
+#terminal-tabs-list::-webkit-scrollbar,
+#editor-tabs::-webkit-scrollbar,
+.project-editor .editor-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 @keyframes blink {

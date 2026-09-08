@@ -1399,12 +1399,15 @@ class PiEditorApp {
       {
         label: "Edit",
         submenu: [
-          // Copy and Paste route through the terminal when it has focus.
-          // System roles cannot read the terminal's canvas selection.
           { label: "Undo", accelerator: shortcut("undo"), click: send("undo") },
           { label: "Redo", accelerator: shortcut("redo"), click: send("redo") },
           { type: "separator" },
-          { role: "cut" },
+          // Cut/Copy/Paste route through the focused surface: the terminal
+          // owns a canvas selection no system role can read, and Monaco's
+          // EditContext renderer has no focused textarea for a native
+          // cut/copy/paste to act on. System roles would eat the keystroke
+          // and then no-op in the editor.
+          { label: "Cut", accelerator: shortcut("cut"), click: send("cut") },
           { label: "Copy", accelerator: shortcut("copy"), click: send("copy") },
           { label: "Paste", accelerator: shortcut("paste"), click: send("paste") },
           { role: "pasteAndMatchStyle" },
@@ -1573,6 +1576,9 @@ class PiEditorApp {
       const candidate = normalizeAppPreferences({ ...this.preferences, ...patch });
       if (!Object.prototype.hasOwnProperty.call(patch, "openProjects")) {
         candidate.openProjects = this.preferences.openProjects;
+      }
+      if (!Object.prototype.hasOwnProperty.call(patch, "activeProject")) {
+        candidate.activeProject = this.preferences.activeProject;
       }
       await this.preferencesStore.save(candidate);
       const thinkingChanged = this.preferences.showThinking !== candidate.showThinking;
@@ -6570,7 +6576,6 @@ class PiEditorApp {
       const projectIds = [...this.projects.keys()];
       const closingIndex = projectIds.indexOf(projectId);
       this.projects.delete(projectId);
-      this.persistOpenProjects();
       let nextSelectionAction = closeSelectionAction;
       let nextActivationGeneration = closeActivationGeneration;
       if (this.activeProjectId === projectId) {
@@ -6594,6 +6599,9 @@ class PiEditorApp {
           nextProject.activationGeneration = nextActivationGeneration;
         }
       }
+      // Persist after the replacement is fronted: the stored focus must be
+      // the tab the user actually sees, not the project being torn down.
+      this.persistOpenProjects();
       // The close event advances the renderer's stale-event watermark even
       // when no replacement project exists. It is emitted before the next
       // folder push to preserve the existing teardown ordering.
@@ -7251,6 +7259,7 @@ class PiEditorApp {
     ipcMain.handle("clipboard:edit", (_e, command: unknown) => {
       if (!this.win || this.win.isDestroyed()) return;
       if (command === "copy") this.win.webContents.copy();
+      else if (command === "cut") this.win.webContents.cut();
       else if (command === "paste") this.win.webContents.paste();
     });
     ipcMain.handle("terminals:paste", (_e, id: unknown) => this.pasteTerminal(id));
@@ -7786,22 +7795,48 @@ class PiEditorApp {
           await this.openProject(initialCwd);
         } else {
           const canonicalInitial = await this.canonicalPath(initialCwd);
+          const stored: { root: string; canonical: string }[] = [];
           for (const root of this.preferences.openProjects) {
             try {
               if (!statSync(root).isDirectory()) continue;
-              const canonicalRoot = await this.canonicalPath(root);
-              if (canonicalRoot === canonicalInitial) continue;
-              await this.openProject(root);
+              stored.push({ root, canonical: await this.canonicalPath(root) });
             } catch {
               continue;
             }
           }
-          await this.openProject(initialCwd);
+          if (stored.some((s) => s.canonical === canonicalInitial)) {
+            // Reopen in stored order so tab order survives, then refocus the target.
+            for (const s of stored) {
+              try {
+                await this.openProject(s.root);
+              } catch {
+                continue;
+              }
+            }
+            const focus = [...this.projects.values()].find((p) => p.canonicalRoot === canonicalInitial);
+            if (focus && focus.id !== this.activeProjectId) {
+              try {
+                await this.activateProject(focus.id);
+              } catch (err) {
+                console.warn(`[main] could not refocus project ${focus.id}: ${(err as Error).message}`);
+              }
+            }
+          } else {
+            for (const s of stored) {
+              try {
+                await this.openProject(s.root);
+              } catch {
+                continue;
+              }
+            }
+            await this.openProject(initialCwd);
+          }
         }
       } else {
         // Restore the projects from the last session before the window loads.
         // Missing or non-directory paths are skipped: they may be unmounted
-        // volumes or hand-edited entries.
+        // volumes or hand-edited entries. Tabs reopen in stored order; the
+        // stored focus is applied afterwards so order and focus stay stable.
         for (const root of this.preferences.openProjects) {
           try {
             if (!statSync(root).isDirectory()) continue;
@@ -7814,6 +7849,17 @@ class PiEditorApp {
             console.warn(`[main] could not restore project ${root}: ${(err as Error).message}`);
           }
         }
+        const focusRoot = this.preferences.activeProject;
+        if (focusRoot) {
+          const focus = [...this.projects.values()].find((p) => p.canonicalRoot === focusRoot);
+          if (focus && focus.id !== this.activeProjectId) {
+            try {
+              await this.activateProject(focus.id);
+            } catch (err) {
+              console.warn(`[main] could not refocus project ${focusRoot}: ${(err as Error).message}`);
+            }
+          }
+        }
       }
     } finally {
       this.sendInstances();
@@ -7822,12 +7868,12 @@ class PiEditorApp {
 
   /** Record the open projects so the next launch restores them. */
   private persistOpenProjects(): Promise<void> {
-    // Active project last → restore loop ends with the previously focused tab in front.
+    // Stored in tab order; focus rides separately so a relaunch keeps both.
     const activeRoot = this.activeProjectId ? this.projects.get(this.activeProjectId)?.canonicalRoot ?? null : null;
-    const roots = [...this.projects.values()].map((p) => p.canonicalRoot);
-    const ordered = activeRoot ? [...roots.filter((r) => r !== activeRoot), activeRoot] : roots;
-    if (JSON.stringify(ordered) === JSON.stringify(this.preferences.openProjects)) return Promise.resolve();
-    return this.commitPreferencePatch({ openProjects: ordered }, false).then(
+    const ordered = [...this.projects.values()].map((p) => p.canonicalRoot);
+    if (JSON.stringify(ordered) === JSON.stringify(this.preferences.openProjects)
+      && activeRoot === this.preferences.activeProject) return Promise.resolve();
+    return this.commitPreferencePatch({ openProjects: ordered, activeProject: activeRoot }, false).then(
       () => undefined,
       (err) => {
         console.warn(`[main] project list save failed: ${(err as Error).message}`);

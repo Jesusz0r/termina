@@ -1,6 +1,22 @@
 import { describe, it, expect } from "vitest";
 import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentModel } from "../../../shared/preferences.ts";
 
+describe("autoOpenAgentFiles preference", () => {
+  it("defaults to true", () => {
+    expect(normalizeAppPreferences({}).autoOpenAgentFiles).toBe(true);
+  });
+
+  it("keeps an explicit false and falls back on garbage", () => {
+    expect(normalizeAppPreferences({ autoOpenAgentFiles: false }).autoOpenAgentFiles).toBe(false);
+    expect(normalizeAppPreferences({ autoOpenAgentFiles: "no" }).autoOpenAgentFiles).toBe(true);
+  });
+
+  it("is user-patchable", () => {
+    const patch = normalizeUserPreferencePatch({ autoOpenAgentFiles: false });
+    expect(patch.autoOpenAgentFiles).toBe(false);
+  });
+});
+
 describe("recentModels preferences", () => {
   it("defaults to an empty list", () => {
     expect(normalizeAppPreferences({}).recentModels).toEqual([]);

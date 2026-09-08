@@ -26,6 +26,7 @@ export const COMMAND_DEFINITIONS = [
   { command: "close-window", label: "Close window", category: "File", description: "Close the application window", defaultShortcut: "CmdOrCtrl+W", scope: "main" },
   { command: "undo", label: "Undo", category: "Edit", description: "Undo in the focused surface", defaultShortcut: "CmdOrCtrl+Z", scope: "renderer" },
   { command: "redo", label: "Redo", category: "Edit", description: "Redo in the focused surface", defaultShortcut: "Shift+CmdOrCtrl+Z", scope: "renderer" },
+  { command: "cut", label: "Cut", category: "Edit", description: "Cut from the focused surface", defaultShortcut: "CmdOrCtrl+X", scope: "renderer" },
   { command: "copy", label: "Copy", category: "Edit", description: "Copy from the focused surface", defaultShortcut: "CmdOrCtrl+C", scope: "renderer" },
   { command: "paste", label: "Paste", category: "Edit", description: "Paste into the focused surface", defaultShortcut: "CmdOrCtrl+V", scope: "renderer" },
   { command: "select-all", label: "Select all", category: "Edit", description: "Select all in the focused surface", defaultShortcut: "CmdOrCtrl+A", scope: "renderer" },

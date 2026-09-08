@@ -71,10 +71,9 @@ Follow the existing owner for the behavior: `agent-core/auth.ts` (auth/provider 
 
 ## Session routine
 
-- Clock in: read `docs/active/PROGRESS.md` (Next section) before starting.
 - One task active at a time (WIP=1); finish + verify before starting the next.
 - Done = evidence, in order: typecheck → unit → build/e2e. No skipping layers.
-- Clock out: update PROGRESS.md, leave build green, remove debug code.
+- Leave build green, remove debug code.
 
 ## Glossary
 

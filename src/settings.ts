@@ -27,7 +27,7 @@ const THEME_OPTIONS: Array<{ id: ThemeId; label: string; description: string }> 
 export class SettingsView {
   private preferences: AppPreferences;
   private backdrop: HTMLElement | null = null;
-  private activeSection: "appearance" | "shortcuts" = "appearance";
+  private activeSection: "general" | "appearance" | "shortcuts" = "appearance";
   private recording: ShortcutCommand | null = null;
   private captureError: string | null = null;
 
@@ -120,11 +120,11 @@ export class SettingsView {
     body.className = "settings-body";
     const nav = document.createElement("nav");
     nav.className = "settings-nav";
-    for (const section of ["appearance", "shortcuts"] as const) {
+    for (const section of ["general", "appearance", "shortcuts"] as const) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = `settings-nav-item${this.activeSection === section ? " active" : ""}`;
-      button.textContent = section === "appearance" ? "Appearance" : "Keyboard";
+      button.textContent = section === "general" ? "General" : section === "appearance" ? "Appearance" : "Keyboard";
       button.addEventListener("click", () => {
         this.activeSection = section;
         this.captureError = null;
@@ -134,7 +134,8 @@ export class SettingsView {
     }
     const main = document.createElement("main");
     main.className = "settings-content";
-    if (this.activeSection === "appearance") this.renderAppearance(main);
+    if (this.activeSection === "general") this.renderGeneral(main);
+    else if (this.activeSection === "appearance") this.renderAppearance(main);
     else this.renderShortcuts(main);
     body.append(nav, main);
     modal.appendChild(body);
@@ -157,6 +158,31 @@ export class SettingsView {
     });
     footer.append(hint, reset);
     modal.appendChild(footer);
+  }
+
+  private renderGeneral(content: HTMLElement): void {
+    content.appendChild(this.sectionHeading("General", "Behavior that applies across projects."));
+    content.appendChild(this.checkRow(
+      "autoOpenAgentFiles",
+      "Open files the agent edits",
+      "Automatically open a file in the editor when an agent starts editing it.",
+    ));
+  }
+
+  private checkRow(key: "autoOpenAgentFiles", title: string, description: string): HTMLElement {
+    const row = document.createElement("label");
+    row.className = "settings-check-row";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = this.preferences[key];
+    box.addEventListener("change", () => {
+      this.preferences[key] = box.checked;
+      this.notify();
+    });
+    const text = document.createElement("span");
+    text.innerHTML = `<strong>${title}</strong><small>${description}</small>`;
+    row.append(box, text);
+    return row;
   }
 
   private renderAppearance(content: HTMLElement): void {

@@ -59,7 +59,7 @@ import {
   updateWorldlinePaneTab,
   worldlineEventBelongsToProject,
 } from "./worldline-project-state";
-import { CHALLENGE_PROFILES, defaultAppPreferences, pathBasename } from "../shared/types";
+import { CHALLENGE_PROFILES, cssFontFamily, defaultAppPreferences, pathBasename } from "../shared/types";
 import { normalizeAppPreferences } from "../shared/preferences";
 import type { AppPreferences, AppUpdateState, ChallengeProfile, CommandId, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
 
@@ -307,6 +307,7 @@ function drainPendingToolTargets(projectId: string | null): void {
   const queued = pendingToolTargets.get(projectId);
   if (!queued || queued.length === 0) return;
   pendingToolTargets.delete(projectId);
+  if (!preferences.autoOpenAgentFiles) return;
   const view = projectViews.get(projectId);
   if (!view) return;
   for (const target of queued) {
@@ -660,11 +661,15 @@ function userPatch(prev: AppPreferences, next: AppPreferences): import("../share
   if (prev.minimap !== next.minimap) patch.minimap = next.minimap;
   if (JSON.stringify(prev.shortcuts) !== JSON.stringify(next.shortcuts)) patch.shortcuts = next.shortcuts;
   if (prev.showThinking !== next.showThinking) patch.showThinking = next.showThinking;
+  if (prev.autoOpenAgentFiles !== next.autoOpenAgentFiles) patch.autoOpenAgentFiles = next.autoOpenAgentFiles;
   return patch;
 }
 
 function paintPreferences(prefs: AppPreferences): void {
   document.documentElement.dataset.theme = prefs.theme;
+  // The app chrome (explorer, tabs, menus) inherits this token; canvases
+  // set their own families directly below.
+  document.documentElement.style.setProperty("--font-chrome", cssFontFamily(prefs.fontFamily));
   if (baseEditorInstance) applyEditorPreferences(baseEditorInstance, prefs);
   for (const view of projectViews.values()) {
     if (view.editorMgr) applyEditorPreferences(view.editorMgr, prefs);
@@ -1981,16 +1986,20 @@ function runMenuEdit(kind: "undo" | "redo" | "select-all"): void {
   else document.execCommand(kind);
 }
 
-function runClipboardCommand(command: "copy" | "paste"): void {
+function runClipboardCommand(command: "copy" | "cut" | "paste"): void {
+  // The Electron menu eats the keystroke before Monaco sees it, so route
+  // the focused editor through its clipboard actions first.
+  if (activeEditor().runMenuEdit(command)) return;
   const pane = activeId ? panes.get(activeId) : undefined;
   const term = pane?.view.getTerminal();
   if (pane && term?.textarea && document.activeElement === term.textarea) {
-    if (command === "copy") {
+    if (command === "copy" || command === "cut") {
+      // A terminal has no cuttable text: cutting copies the selection.
       if (pane.view.copySelection()) return;
-      void window.pi.writeTerminal(pane.instanceId, "\x03");
-    } else {
-      void pane.view.pasteClipboard();
+      if (command === "copy") void window.pi.writeTerminal(pane.instanceId, "\x03");
+      return;
     }
+    void pane.view.pasteClipboard();
     return;
   }
   void window.pi.editClipboard(command);
@@ -2013,6 +2022,7 @@ commands.register("save-all", () => {
 // Edit commands
 commands.register("undo", () => runMenuEdit("undo"));
 commands.register("redo", () => runMenuEdit("redo"));
+commands.register("cut", () => runClipboardCommand("cut"));
 commands.register("copy", () => runClipboardCommand("copy"));
 commands.register("paste", () => runClipboardCommand("paste"));
 commands.register("select-all", () => runMenuEdit("select-all"));
@@ -2345,7 +2355,8 @@ const EXPLORER_GRAB_PX = 8;
 window.addEventListener("mousedown", (e) => {
   if (e.button !== 0 || exploring || explorerMinimized) return;
   const box = explorerDividerEl.getBoundingClientRect();
-  if (box.width === 0) return;
+  // Only claim the divider's vertical span, not project tabs above it.
+  if (box.width === 0 || e.clientY < box.top || e.clientY >= box.bottom) return;
   if (Math.abs(e.clientX - (box.left + box.width / 2)) > EXPLORER_GRAB_PX) return;
   e.preventDefault();
   e.stopPropagation();
@@ -2715,6 +2726,7 @@ window.pi.onPlanUpdate(({ instanceId, tasks }) => {
 window.pi.onToolTarget((p) => {
   const view = projectViews.get(p.projectId);
   if (!view || view.workspaceId !== p.workspaceId) return;
+  if (!preferences.autoOpenAgentFiles) return;
   const owner: ProjectWorkspaceRef = { projectId: p.projectId, workspaceId: p.workspaceId };
   if (activeProjectId !== p.projectId) {
     // Background agent's file: queue it and open on return instead of dropping it.

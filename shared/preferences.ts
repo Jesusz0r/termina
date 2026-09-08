@@ -95,6 +95,12 @@ function sanitizeOpenProjects(value: unknown): string[] {
   return result;
 }
 
+/** Canonical root of the focused project. Main owns writes; validation
+ *  still guards the file against a hand-edited entry. */
+function sanitizeActiveProject(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 && value.length <= 1024 ? value : null;
+}
+
 const MAX_RECENT_MODELS = 12;
 const MAX_PROVIDER_ID_LENGTH = 64;
 const MAX_MODEL_ID_LENGTH = 256;
@@ -145,7 +151,9 @@ export function normalizeAppPreferences(raw: unknown): AppPreferences {
     minimap: typeof input.minimap === "boolean" ? input.minimap : defaults.minimap,
     shortcuts: sanitizeShortcutMap(input.shortcuts, defaults.shortcuts),
     openProjects: sanitizeOpenProjects(input.openProjects),
+    activeProject: sanitizeActiveProject(input.activeProject),
     showThinking: typeof input.showThinking === "boolean" ? input.showThinking : defaults.showThinking,
+    autoOpenAgentFiles: typeof input.autoOpenAgentFiles === "boolean" ? input.autoOpenAgentFiles : defaults.autoOpenAgentFiles,
     recentModels: sanitizeRecentModels(input.recentModels),
   };
 }
@@ -159,6 +167,7 @@ const USER_PATCH_KEYS = [
   "minimap",
   "shortcuts",
   "showThinking",
+  "autoOpenAgentFiles",
 ] as const satisfies ReadonlyArray<keyof UserPreferencePatch>;
 
 export function normalizeUserPreferencePatch(raw: unknown): UserPreferencePatch {

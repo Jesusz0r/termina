@@ -24,8 +24,7 @@ are overflow-recoverable. The kernel does not call the snapshot store.
 `termina-core` stays the snapshot/Git owner. Credentials live in
 `~/.termina/agent/auth.json` (`/login`, `/logout`). Providers: Anthropic,
 OpenAI, ChatGPT Codex OAuth, GitHub Copilot, xAI, Google, OpenRouter,
-OpenCode Go, OpenCode Zen. The completed implementation records are archived
-under `docs/archive/agent-core/`.
+OpenCode Go, OpenCode Zen.
 
 ## Why this document exists
 
@@ -233,7 +232,7 @@ provider. `/models refresh` (or `reload`) forces a refetch; typing
 selects one. `/permissions` opens a picker for `Always approve`, `Ask on dangerous requests`,
 or `Always ask`. Bash approval prompts also use arrow-key selection instead of typed letters.
 The dangerous mode recognizes destructive command patterns; it is not a shell sandbox.
-The file is not Pi's `auth.json`. See `docs/archive/agent-core/AUTH-PLAN.md`.
+The file is not Pi's `auth.json`.
 
 The host owns session resume. `TERMINA_CORE_SESSION_FILE` is the stable
 `<session-id>/current/session.jsonl` address under the app user-data

@@ -74,6 +74,21 @@ describe("catalog provider policy composition", () => {
     expect(formatCatalogLines([...rows], "xai", "grok-4.6")).not.toMatch(/more/);
   });
 
+  it("fuzzy-matches model abbreviations and unordered words across catalog fields", () => {
+    const rows = [
+      { provider: "anthropic", id: "claude-sonnet-4-5" },
+      { provider: "openai", id: "gpt-4o", name: "Flagship Omni" },
+      { provider: "xai", id: "sonnet45" },
+    ];
+    expect(filterCatalogModels(rows, " SONNET45 ")).toEqual([rows[2], rows[0]]);
+    expect(filterCatalogModels(rows, "son45 ANTH")).toEqual([rows[0]]);
+    expect(filterCatalogModels(rows, "flgom")).toEqual([rows[1]]);
+    expect(filterCatalogModels(rows, "sonnet missing")).toEqual([]);
+    expect(filterCatalogModels(rows, "54tennos")).toEqual([]);
+    expect(filterCatalogModels(rows, "  \t ")).toBe(rows);
+    expect(rows.map((m) => m.provider)).toEqual(["anthropic", "openai", "xai"]);
+  });
+
   it("resolves catalog metadata with silence distinct from zero", () => {
     expect(catalogOutputLimit(undefined)).toBeNull();
     expect(catalogOutputLimit({ id: "m" })).toBeNull();

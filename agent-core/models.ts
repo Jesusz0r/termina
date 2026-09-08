@@ -16,6 +16,7 @@ import {
   type ProviderId,
 } from "./auth.ts";
 import { providerDefinition } from "./auth/providers/index.ts";
+import { subsequenceSpread } from "./tui-text.ts";
 
 export { firstAuthenticatedProvider } from "./auth.ts";
 
@@ -231,13 +232,32 @@ export function formatCatalogLines(
   return lines.join("\n");
 }
 
-/** Case-insensitive substring filter across provider, id, and display name. */
+/** Case-insensitive fuzzy search; every query word must match, in any order. */
 export function filterCatalogModels(models: CatalogModel[], query: string): CatalogModel[] {
   const q = query.trim().toLowerCase();
   if (!q) return models;
-  return models.filter((m) =>
-    `${m.provider}/${m.id} ${m.name ?? ""}`.toLowerCase().includes(q),
-  );
+  const words = q.split(/\s+/);
+  const ranked: Array<{ model: CatalogModel; fuzzy: number; spread: number }> = [];
+  for (const model of models) {
+    const text = `${model.provider}/${model.id} ${model.name ?? ""}`.toLowerCase();
+    let fuzzy = 0;
+    let spread = 0;
+    let matches = true;
+    for (const word of words) {
+      if (text.includes(word)) continue;
+      const span = subsequenceSpread(text, word);
+      if (span === null) {
+        matches = false;
+        break;
+      }
+      fuzzy++;
+      spread += span;
+    }
+    if (matches) ranked.push({ model, fuzzy, spread });
+  }
+  // Stable ties preserve the catalog's order; rank before the display cap is applied.
+  ranked.sort((a, b) => a.fuzzy - b.fuzzy || a.spread - b.spread);
+  return ranked.map(({ model }) => model);
 }
 
 export function parseModelSwitch(

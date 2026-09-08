@@ -613,11 +613,12 @@ export class EditorManager {
 
   /** Focus the editor without scrolling the terminal pane. Direct
    *  gestures (tab click, modal file pick) take focus; programmatic
-   *  opens never steal it. */
+   *  opens never steal it. Goes through the editor API: with the
+   *  EditContext renderer the first textarea in the DOM is the IME
+   *  one, and focusing it leaves the editor without text focus, so
+   *  typing and menu edit commands silently go nowhere. */
   focusEditor(): void {
-    const textarea = this.editor.getDomNode()?.querySelector("textarea");
-    if (textarea) textarea.focus({ preventScroll: true });
-    else this.editor.focus();
+    this.editor.focus();
   }
 
   closeTab(key: string): void {
@@ -871,14 +872,23 @@ export class EditorManager {
   /**
    * Run a menu command on the editor. Return false when the editor is
    * not focused. The caller can then use the terminal or the browser.
+   * Undo/redo use the core command ids: the `editor.action.undo` /
+   * `editor.action.redo` aliases no longer exist in current Monaco, so
+   * triggering them is a silent no-op. Clipboard goes through Monaco's
+   * clipboard actions: the Electron menu eats the keystroke, and with
+   * the EditContext renderer there is no focused textarea for a native
+   * cut/copy/paste to act on.
    */
-  runMenuEdit(kind: "undo" | "redo" | "select-all" | "find"): boolean {
+  runMenuEdit(kind: "undo" | "redo" | "select-all" | "find" | "copy" | "cut" | "paste"): boolean {
     if (!this.editor.hasTextFocus()) return false;
     const actions = {
-      undo: "editor.action.undo",
-      redo: "editor.action.redo",
+      undo: "undo",
+      redo: "redo",
       "select-all": "editor.action.selectAll",
       find: "actions.find",
+      copy: "editor.action.clipboardCopyAction",
+      cut: "editor.action.clipboardCutAction",
+      paste: "editor.action.clipboardPasteAction",
     } as const;
     this.editor.trigger("menu", actions[kind], null);
     return true;
