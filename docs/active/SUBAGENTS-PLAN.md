@@ -93,4 +93,4 @@ A subagent telling its parent to widen permissions must never work.
 - Case-insensitive filesystems can spell the same file two ways past string overlap checks (same as dispatch). Trigger: a real collision; fix must cover dispatch too, not subagents alone.
 - Cross-owner dispatch-vs-subagent overlap (different main tasks) is unchecked; same-owner is covered both directions. Trigger: shared-tree multi-terminal workflows colliding.
 - Parent messages arriving while a child waits on approval deliver after the wait resolves. No loss, just latency.
-- Full agent-core suite (46 files) and the vite build could not run post-change under concurrent-E2E memory pressure; targeted suites, typecheck, and esbuild bundles are green. Re-run both green before release.
+- Full agent-core suite and vite build re-ran green 2026-09-09 (47 files / 304 tests; build with the pre-existing chunk-size warning only) once E2E memory pressure cleared.
