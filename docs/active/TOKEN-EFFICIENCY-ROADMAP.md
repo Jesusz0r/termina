@@ -668,9 +668,14 @@ unsupported fields do not cause repeated hidden retries; and any savings are
 measured on the same successful task corpus.
 
 **Current status:** Direct-route capability provenance, bounded observations,
-effective-policy tracing, and fallback handling are implemented. Gemini native
-cache activation, relay probes, provider retention/billing, and measured route
-savings remain pending external evidence.
+effective-policy tracing, and fallback handling are implemented. Live
+2026-09-09 (`scripts/opencode-cache-probe.ts`, glm-5.1 on the Go relay):
+`x-opencode-session` accepted and upstream caching surfaced — repeated
+~2.3k-token prefix billed input 2258->7 with cacheRead 2268; usage carries no
+price (cost stays unknown). Zen publishes per-model cached-read prices
+(GLM 5.1 $1.40/$4.40/$0.26 per 1M), still to wire once catalog work settles.
+Gemini native cache activation, relay probes elsewhere, provider
+retention/billing, and measured route savings remain pending external evidence.
 
 ## Canonical owners and verification
 
@@ -773,7 +778,7 @@ baseline before shipping.
 | Gemini `generateContent` | Named `cachedContent` is the documented cache object; compatibility with `prompt_cache_key` is not established. | Treat `cachedContent` as a separate lifecycle and do not send `prompt_cache_key` without route proof. | TTLs, minimums, implicit behavior, and write billing for this kernel's route. |
 | xAI | Confirmed 2026-09-09: stable key (`x-grok-conv-id`, or `prompt_cache_key` on Responses) routes to one server; no fixed TTL — entries evictable anytime; usage reports `prompt_tokens_details.cached_tokens`; live probe shows repeat-prefix billed input 2261->85, warm after 30s. | Keep the stable key; classify retention as unknown or possible idle expiry; never modify earlier messages, only append. | Marker/breakpoint support and write/storage billing (no write charge documented). |
 | OpenRouter | A 256-character session id and 10-minute sticky-session behavior are documented separately from prompt caching. | Bound the session header to 256 characters and never count stickiness as a prompt-cache hit; probe upstream model caching separately. | Upstream model/provider cache limits, TTLs, and billing. |
-| OpenCode Zen | The source validates protocol routing by model; no cache contract was validated. | Use Zen for protocol selection only; do not send cache-specific fields or claim cache savings without a route contract. | All cache limits, TTLs, billing, and model support. |
+| OpenCode Zen | Live 2026-09-09: docs define endpoint-per-model routing with per-model cached-read prices (no cache-behavior contract); probe on the Go relay (glm-5.1) shows the session header accepted and upstream caching surfaced (repeat prefix billed input 2258->7). | Use Zen for protocol selection; keep the session header and measure per route/model — do not assume TTLs or cross-model behavior. | Retention, write billing, and per-model variance. |
 
 Primary sources (retrieved 2026-08-30):
 
