@@ -11,7 +11,7 @@
  * exactly-once invariant is already enforced here and covered by tests.
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   isSupportedProvider,
@@ -161,17 +161,21 @@ export const SUBAGENT_RESULT_VERSION = 1;
 /** Bound one handoff/result file: the brief is already capped, this is slack for fields. */
 const MAX_SUBAGENT_FILE_BYTES = 64 * 1024;
 
-function subagentFileName(runId: string, suffix: "task.json" | "result.json"): string | null {
+function subagentFileName(parentTerminalId: string, runId: string, suffix: "task.json" | "result.json"): string | null {
+  // Namespaced by parent terminal: bg-N ids are per-process, and the events
+  // dir is shared, so two parents spawning bg-1 must not share files (a
+  // parent would otherwise settle with another parent's result).
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(parentTerminalId)) return null;
   if (!/^bg-\d{1,10}$/.test(runId)) return null;
-  return `subagent-${runId}.${suffix}`;
+  return `subagent-${parentTerminalId}-${runId}.${suffix}`;
 }
 
-export function subagentTaskFileName(runId: string): string | null {
-  return subagentFileName(runId, "task.json");
+export function subagentTaskFileName(parentTerminalId: string, runId: string): string | null {
+  return subagentFileName(parentTerminalId, runId, "task.json");
 }
 
-export function subagentResultFileName(runId: string): string | null {
-  return subagentFileName(runId, "result.json");
+export function subagentResultFileName(parentTerminalId: string, runId: string): string | null {
+  return subagentFileName(parentTerminalId, runId, "result.json");
 }
 
 export interface SubagentTaskFile {
@@ -195,7 +199,9 @@ export function parseSubagentTaskFile(raw: unknown): { ok: true; file: SubagentT
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "subagent task file is not an object" };
   const v = raw as Record<string, unknown>;
   if (v.version !== SUBAGENT_TASK_VERSION) return { ok: false, error: "subagent task file has an unsupported version" };
-  if (typeof v.runId !== "string" || !subagentTaskFileName(v.runId)) return { ok: false, error: "subagent task file has a bad run id" };
+  if (typeof v.runId !== "string" || !/^bg-\d{1,10}$/.test(v.runId)) {
+    return { ok: false, error: "subagent task file has a bad run id" };
+  }
   if (typeof v.task !== "string" || !v.task.trim() || v.task.length > MAX_SUBAGENT_TASK_CHARS) {
     return { ok: false, error: "subagent task file has a bad task" };
   }
@@ -255,8 +261,8 @@ export function writeSubagentTaskFile(
   run: SubagentRun,
   opts: { parentTerminalId: string; cwd: string },
 ): { ok: true; file: string } | { ok: false; error: string } {
-  const name = subagentTaskFileName(run.id);
-  if (!name) return { ok: false, error: `bad subagent run id: ${run.id}` };
+  const name = subagentTaskFileName(opts.parentTerminalId, run.id);
+  if (!name) return { ok: false, error: `bad subagent handoff identity: ${opts.parentTerminalId}/${run.id}` };
   if (!eventsDir || !opts.parentTerminalId || !opts.cwd) {
     return { ok: false, error: "subagent handoff needs an events dir, parent terminal, and cwd" };
   }
@@ -331,8 +337,12 @@ type SubagentResultRead =
   | { status: "ok"; file: SubagentResultFile };
 
 /** Read one host-written result. Invalid files never settle a run; the host owns the repair. */
-export function readSubagentResultFile(eventsDir: string, runId: string): SubagentResultRead {
-  const name = subagentResultFileName(runId);
+export function readSubagentResultFile(
+  eventsDir: string,
+  parentTerminalId: string,
+  runId: string,
+): SubagentResultRead {
+  const name = subagentResultFileName(parentTerminalId, runId);
   if (!name || !eventsDir) return { status: "missing" };
   const path = join(eventsDir, name);
   if (!existsSync(path)) return { status: "missing" };
@@ -360,16 +370,32 @@ export function readSubagentResultFile(eventsDir: string, runId: string): Subage
  * Settle locally active runs whose host result files landed. Runs once per
  * parent turn next to the mailbox read; frees slots and claim holds. The
  * human-readable result arrives via the host mailbox note; this only
- * reconciles registry truth.
+ * reconciles registry truth. Consumed result files are deleted best-effort:
+ * the scanned outcome already lives on the run record, and a crash between
+ * settle and delete is harmless (the run is no longer active, so a second
+ * read can never re-settle it).
  */
-export function reconcileSubagentRuns(eventsDir: string, registry: SubagentRegistry): SubagentRun[] {
-  if (!eventsDir) return [];
+export function reconcileSubagentRuns(
+  eventsDir: string,
+  parentTerminalId: string,
+  registry: SubagentRegistry,
+): SubagentRun[] {
+  if (!eventsDir || !parentTerminalId) return [];
   const settled: SubagentRun[] = [];
   for (const run of registry.activeRuns()) {
-    const read = readSubagentResultFile(eventsDir, run.id);
+    const read = readSubagentResultFile(eventsDir, parentTerminalId, run.id);
     if (read.status !== "ok") continue;
     const done = registry.settleRun(run.id, read.file.result, read.file.outcome);
-    if (done.ok) settled.push(done.run);
+    if (!done.ok) continue;
+    const name = subagentResultFileName(parentTerminalId, run.id);
+    if (name) {
+      try {
+        rmSync(join(eventsDir, name));
+      } catch {
+        /* The run record already holds the outcome; a leftover is host evidence. */
+      }
+    }
+    settled.push(done.run);
   }
   return settled;
 }

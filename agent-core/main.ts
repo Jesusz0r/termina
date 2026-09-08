@@ -7183,7 +7183,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   const contextResult = eventsDir && terminalId ? readContextFilesResult(eventsDir, terminalId) : null;
   // Free subagent slots whose host result files landed. Display rides the
   // host mailbox note; this only reconciles registry truth.
-  if (eventsDir && terminalId) reconcileSubagentRuns(eventsDir, subagentRegistry);
+  if (eventsDir && terminalId) reconcileSubagentRuns(eventsDir, terminalId, subagentRegistry);
   const context = contextResult?.text ?? "";
   currentHostContext = contextResult
     ? {

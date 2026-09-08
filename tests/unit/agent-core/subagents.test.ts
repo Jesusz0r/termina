@@ -280,18 +280,20 @@ describe("subagents Phase 2 handoff contract", () => {
     return dir;
   }
 
-  function writeResult(dir: string, runId: string, body: unknown): void {
-    const name = subagentResultFileName(runId);
+  function writeResult(dir: string, terminalId: string, runId: string, body: unknown): void {
+    const name = subagentResultFileName(terminalId, runId);
     expect(name).not.toBeNull();
     writeFileSync(join(dir, name!), typeof body === "string" ? body : JSON.stringify(body), { mode: 0o600 });
   }
 
-  it("names handoff files only for bg-N run ids", () => {
-    expect(subagentTaskFileName("bg-1")).toBe("subagent-bg-1.task.json");
-    expect(subagentResultFileName("bg-12")).toBe("subagent-bg-12.result.json");
-    expect(subagentTaskFileName("../x")).toBeNull();
-    expect(subagentTaskFileName("term-1")).toBeNull();
-    expect(subagentTaskFileName("bg-")).toBeNull();
+  it("names handoff files per parent terminal, only for bg-N run ids", () => {
+    expect(subagentTaskFileName("term-7", "bg-1")).toBe("subagent-term-7-bg-1.task.json");
+    expect(subagentResultFileName("term-7", "bg-12")).toBe("subagent-term-7-bg-12.result.json");
+    expect(subagentTaskFileName("term-7", "../x")).toBeNull();
+    expect(subagentTaskFileName("term-7", "term-1")).toBeNull();
+    expect(subagentTaskFileName("../evil", "bg-1")).toBeNull();
+    expect(subagentTaskFileName("term-7/../../e", "bg-1")).toBeNull();
+    expect(subagentTaskFileName("", "bg-1")).toBeNull();
   });
 
   it("round-trips the task file", async () => {
@@ -303,7 +305,7 @@ describe("subagents Phase 2 handoff contract", () => {
     const written = writeSubagentTaskFile(dir, spawned.run, { parentTerminalId: "term-7", cwd: "/proj" });
     expect(written.ok).toBe(true);
     if (!written.ok) return;
-    expect(written.file).toBe("subagent-bg-1.task.json");
+    expect(written.file).toBe("subagent-term-7-bg-1.task.json");
     const { readFileSync: read } = await import("node:fs");
     const parsed = parseSubagentTaskFile(JSON.parse(read(join(dir, written.file), "utf8")));
     expect(parsed.ok).toBe(true);
@@ -342,8 +344,8 @@ describe("subagents Phase 2 handoff contract", () => {
     const two = await reg.spawn({ task: "two", paths: ["src/b.ts"], parent });
     expect(one.ok && two.ok).toBe(true);
     if (!one.ok || !two.ok) return;
-    writeResult(dir, one.run.id, { version: 1, runId: one.run.id, outcome: "failed", result: "crashed", flags: [], settledAt: 1 });
-    const settled = reconcileSubagentRuns(dir, reg);
+    writeResult(dir, "term-7", one.run.id, { version: 1, runId: one.run.id, outcome: "failed", result: "crashed", flags: [], settledAt: 1 });
+    const settled = reconcileSubagentRuns(dir, "term-7", reg);
     expect(settled.map((r) => r.id)).toEqual([one.run.id]);
     expect(reg.get(one.run.id)?.state).toBe("failed");
     expect(reg.get(one.run.id)?.result).toBe("crashed");
@@ -359,19 +361,40 @@ describe("subagents Phase 2 handoff contract", () => {
     const spawned = await reg.spawn({ task: "t", parent });
     expect(spawned.ok).toBe(true);
     if (!spawned.ok) return;
-    expect(reconcileSubagentRuns(dir, reg)).toEqual([]);
-    writeResult(dir, spawned.run.id, "not json{{{");
-    expect(reconcileSubagentRuns(dir, reg)).toEqual([]);
+    expect(reconcileSubagentRuns(dir, "term-7", reg)).toEqual([]);
+    writeResult(dir, "term-7", spawned.run.id, "not json{{{");
+    expect(reconcileSubagentRuns(dir, "term-7", reg)).toEqual([]);
     expect(reg.get(spawned.run.id)?.state).toBe("active");
-    expect(reconcileSubagentRuns("", reg)).toEqual([]);
-    expect(readSubagentResultFile(dir, spawned.run.id).status).toBe("invalid");
+    expect(reconcileSubagentRuns("", "term-7", reg)).toEqual([]);
+    expect(reconcileSubagentRuns(dir, "", reg)).toEqual([]);
+    expect(readSubagentResultFile(dir, "term-7", spawned.run.id).status).toBe("invalid");
+  });
+
+  it("never settles one parent with another parent's result", async () => {
+    const reg = registry();
+    const dir = events();
+    const spawned = await reg.spawn({ task: "t", parent });
+    expect(spawned.ok).toBe(true);
+    if (!spawned.ok) return;
+    // Same bg-N id, other parent's namespace: invisible to this reconcile.
+    writeResult(dir, "term-999", spawned.run.id, { version: 1, runId: spawned.run.id, outcome: "settled", result: "foreign", flags: [], settledAt: 1 });
+    expect(reconcileSubagentRuns(dir, "term-7", reg)).toEqual([]);
+    expect(reg.get(spawned.run.id)?.state).toBe("active");
+    // Own result settles and the consumed file is deleted.
+    writeResult(dir, "term-7", spawned.run.id, { version: 1, runId: spawned.run.id, outcome: "settled", result: "mine", flags: [], settledAt: 2 });
+    expect(reconcileSubagentRuns(dir, "term-7", reg).map((r) => r.id)).toEqual([spawned.run.id]);
+    expect(reg.get(spawned.run.id)?.result).toBe("mine");
+    const { existsSync } = await import("node:fs");
+    expect(existsSync(join(dir, "subagent-term-7-bg-1.result.json"))).toBe(false);
+    // A second reconcile cannot re-settle.
+    expect(reconcileSubagentRuns(dir, "term-7", reg)).toEqual([]);
   });
 
   it("builds the spawn sidecar record", () => {
-    expect(subagentSpawnSidecarRecord("bg-3", "subagent-bg-3.task.json")).toEqual({
+    expect(subagentSpawnSidecarRecord("bg-3", "subagent-term-7-bg-3.task.json")).toEqual({
       t: "subagent_spawn",
       runId: "bg-3",
-      taskFile: "subagent-bg-3.task.json",
+      taskFile: "subagent-term-7-bg-3.task.json",
     });
   });
 });
