@@ -14,15 +14,18 @@
 import { spawn as spawnProcess, type ChildProcess } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { coreSessionFile } from "../agent-core/session.js";
 import {
   MAX_SUBAGENT_RESULT_CHARS,
+  MAX_SUBAGENT_TOUCHED,
   SUBAGENT_RESULT_PREFIX,
+  anchorClaimPath,
   parseSubagentTaskFile,
   parseSubagentResultFrame,
   scanSubagentOutput,
   subagentChildTid,
+  subagentPathsOverlap,
   subagentResultFileName,
   truncateUtf8,
   type SubagentOutcome,
@@ -59,6 +62,10 @@ export interface SubagentHostSinks {
   watchStream(terminalId: string): void;
   /** Release a child sidecar stream (stop tailing, drop its queue). */
   releaseStream(terminalId: string): void;
+  /** Canonical in-flight dispatch path keys plus their root (spawn-time veto). */
+  dispatchKeysFor(ownerId: string): Promise<{ keys: Set<string>; root: string }>;
+  /** Canonical absolute path (total: resolves existing prefixes, never throws). */
+  canonicalPath(p: string): Promise<string>;
 }
 
 export interface SubagentChildEvents {
@@ -108,7 +115,12 @@ interface HostRun {
   stdoutTruncated: boolean;
   stderr: string;
   settled: boolean;
+  /** Absolute touched paths from tailed tool events (merge evidence). */
+  touched: Set<string>;
 }
+
+/** Settled-run touched memory for sibling merge detection (bounded). */
+const MAX_SUBAGENT_PAST_TOUCHED = 20;
 
 function defaultLauncher(cmd: string, args: string[], opts: { cwd: string; env: Record<string, string | undefined> }): SubagentChild {
   const child: ChildProcess = spawnProcess(cmd, args, {
@@ -164,6 +176,8 @@ export class SubagentHost {
   private readonly runs = new Map<string, HostRun>();
   /** Child sidecar streams tailed for liveness (booted/activity). No UI surface in v1. */
   private readonly streams = new Map<string, { key: string; booted: boolean; lastActivityAt: number }>();
+  /** Settled runs' touched paths for sibling merge detection (bounded, same-parent only). */
+  private readonly pastTouched: Array<{ key: string; runId: string; parentTerminalId: string; touched: string[] }> = [];
   private readonly launch: SubagentLauncher;
   private readonly wallMs: number;
   private readonly maxChildren: number;
@@ -195,11 +209,31 @@ export class SubagentHost {
   }
 
   /** Liveness signal from the shared tailer. Unknown streams are ignored. */
-  noteChildEvent(childTid: string, kind: string): void {
+  noteChildEvent(childTid: string, kind: string, path?: string): void {
     const stream = this.streams.get(childTid);
     if (!stream) return;
     stream.lastActivityAt = this.now();
     if (kind === "agent_start") stream.booted = true;
+    // Touched paths are merge evidence, not a manifest: tool records carry
+    // file paths for file tools only (bash side effects are untracked).
+    // Relative paths anchor at the run cwd so siblings compare identically.
+    if (kind === "tool" && typeof path === "string" && path) {
+      const run = this.runs.get(stream.key);
+      if (run && run.touched.size < MAX_SUBAGENT_TOUCHED) {
+        const clean = path.replace(/\/{2,}/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+        if (clean) run.touched.add(isAbsolute(clean) ? clean : join(run.task.cwd, clean));
+      }
+    }
+  }
+
+  /** Live claim holds for dispatch overlap checks (Phase 4 unified claims). */
+  claimsForOwner(parentTerminalId: string): Array<{ path: string; cwd: string }> {
+    const out: Array<{ path: string; cwd: string }> = [];
+    for (const run of this.runs.values()) {
+      if (run.parentTerminalId !== parentTerminalId) continue;
+      for (const p of run.task.paths) out.push({ path: p, cwd: run.task.cwd });
+    }
+    return out;
   }
 
   streamInfo(childTid: string): { runId: string; parentTerminalId: string; booted: boolean; lastActivityAt: number } | null {
@@ -282,6 +316,40 @@ export class SubagentHost {
       await this.finishFailed(sourceTerminalId, runId, task, "subagent task parent mismatch");
       return;
     }
+    // Cross-terminal sibling overlap: registries are per-process, so two
+    // parents on one tree can claim the same paths. Same canonical cwd plus
+    // overlapping relpaths rejects, exactly like the single-parent rule.
+    const cwdKey = await this.sinks.canonicalPath(task.cwd).catch(() => task.cwd);
+    for (const other of this.runs.values()) {
+      const otherCwd = await this.sinks.canonicalPath(other.task.cwd).catch(() => other.task.cwd);
+      if (otherCwd !== cwdKey) continue;
+      for (const p of task.paths) {
+        const hit = other.task.paths.find((q) => subagentPathsOverlap(p, q));
+        if (hit) {
+          await this.finishFailed(
+            sourceTerminalId,
+            runId,
+            task,
+            `paths overlap running subagent ${other.runId} (${hit})`,
+          );
+          return;
+        }
+      }
+    }
+    // Dispatch interplay (unified claims): a live dispatch worker on an
+    // overlapping path fails the spawn before any child exists. Both sides
+    // anchor at the dispatch root so subdir terminals key identically.
+    const dispatch = await this.sinks.dispatchKeysFor(sourceTerminalId).catch(() => ({ keys: new Set<string>(), root: "" }));
+    if (dispatch.keys.size > 0 && task.paths.length > 0) {
+      for (const p of task.paths) {
+        const anchored = anchorClaimPath(task.cwd, p, dispatch.root || task.cwd);
+        const key = await this.sinks.canonicalPath(join(anchored.root, anchored.rel)).catch(() => "");
+        if (key && dispatch.keys.has(key)) {
+          await this.finishFailed(sourceTerminalId, runId, task, `path overlaps a dispatch worker (${p})`);
+          return;
+        }
+      }
+    }
     if (this.runs.size >= this.maxChildren) {
       await this.finishFailed(sourceTerminalId, runId, task, `subagent host at capacity (${this.maxChildren} runs)`);
       return;
@@ -317,6 +385,7 @@ export class SubagentHost {
       stdoutTruncated: false,
       stderr: "",
       settled: false,
+      touched: new Set<string>(),
     };
     this.runs.set(key, run);
     await this.startAttempt(run);
@@ -524,7 +593,23 @@ export class SubagentHost {
     } catch {
       /* Leftovers are startup-sweep evidence. */
     }
-    await this.writeResult(run.parentTerminalId, run.runId, outcome, result, flags, error, run.task);
+    // Sibling merge detection: compare this run's touched paths against
+    // settled siblings of the same parent. Same-tree absolute paths match
+    // exactly (different trees never collide); the parent merges.
+    const merges: Array<{ runId: string; paths: string[] }> = [];
+    for (const prev of this.pastTouched) {
+      if (prev.parentTerminalId !== run.parentTerminalId) continue;
+      const hit = [...run.touched].filter((p) => prev.touched.includes(p)).slice(0, 10);
+      if (hit.length > 0) merges.push({ runId: prev.runId, paths: hit });
+    }
+    this.pastTouched.push({
+      key: run.key,
+      runId: run.runId,
+      parentTerminalId: run.parentTerminalId,
+      touched: [...run.touched],
+    });
+    while (this.pastTouched.length > MAX_SUBAGENT_PAST_TOUCHED) this.pastTouched.shift();
+    await this.writeResult(run.parentTerminalId, run.runId, outcome, result, flags, error, run.task, [...run.touched], merges);
   }
 
   private async writeResult(
@@ -535,6 +620,8 @@ export class SubagentHost {
     flags: string[],
     error: string | null,
     task: SubagentTaskFile | null,
+    touched: string[] = [],
+    merges: Array<{ runId: string; paths: string[] }> = [],
   ): Promise<void> {
     const dir = this.sinks.eventsDirFor(parentTerminalId);
     const name = subagentResultFileName(parentTerminalId, runId);
@@ -544,6 +631,7 @@ export class SubagentHost {
       outcome,
       result,
       flags,
+      touched: touched.slice(0, MAX_SUBAGENT_TOUCHED),
       settledAt: this.now(),
     });
     if (dir && name) {
@@ -574,6 +662,11 @@ export class SubagentHost {
       if (flags.length > 0) lines.push("", `Scan flags: ${flags.join(", ")}`);
     } else if (error) {
       lines.push(`${outcome === "killed" ? "Reason" : "Error"}: ${error.slice(0, 1000)}`);
+    }
+    // Parent merge task: siblings that touched the same files. The parent
+    // merges; siblings never negotiate with each other.
+    for (const merge of merges) {
+      lines.push("", `## Merge needed: ${merge.paths.map((p) => `\`${p}\``).join(", ")} also touched by ${merge.runId} — merge both results before trusting either.`);
     }
     try {
       this.sinks.appendMailboxNote(parentTerminalId, lines.join("\n"));

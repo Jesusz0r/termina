@@ -12,7 +12,7 @@
  */
 
 import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import {
   isSupportedProvider,
   parseModelRef,
@@ -34,6 +34,10 @@ export const MAX_SUBAGENT_RUNS = 4;
 export const MAX_SUBAGENT_DEPTH = 1;
 /** Bound the parent-written subtask brief kept on the run record. */
 export const MAX_SUBAGENT_TASK_CHARS = 8_000;
+/** Bound the child-facing brief (task plus sibling-claim section). */
+export const MAX_SUBAGENT_BRIEF_CHARS = 12_000;
+/** Bound touched paths carried per run (merge detection, not a full manifest). */
+export const MAX_SUBAGENT_TOUCHED = 200;
 /** Bound one parent-to-child message. */
 export const MAX_SUBAGENT_MESSAGE_CHARS = 8_000;
 /** Bound one child result held for parent fan-in. */
@@ -182,6 +186,8 @@ export interface SubagentTaskFile {
   version: typeof SUBAGENT_TASK_VERSION;
   runId: string;
   task: string;
+  /** Child-facing brief: the task plus the sibling-claim section. The child runs this. */
+  brief: string;
   provider: ProviderId;
   model: string;
   protocol: ProviderProtocol;
@@ -195,6 +201,32 @@ export interface SubagentTaskFile {
   createdAt: number;
 }
 
+/**
+ * Append sibling claims to the child-facing brief (mirrors the dispatch
+ * briefing's sibling section). The task itself is never truncated; the
+ * sibling list caps at 20 entries with a "+N more" marker so the brief
+ * always fits MAX_SUBAGENT_BRIEF_CHARS.
+ */
+export function formatSubagentBrief(task: string, siblingPaths: string[]): string {
+  if (task.length >= MAX_SUBAGENT_BRIEF_CHARS) return task;
+  const unique = [...new Set(siblingPaths.map((p) => p.trim()).filter(Boolean))].sort();
+  if (unique.length === 0) return task;
+  const header = "Sibling path claims (do not edit these files; a sibling run owns them):";
+  let shown = unique.slice(0, 20);
+  const build = (): string => {
+    const lines = ["", header, ...shown.map((p) => `- \`${p}\``)];
+    const hidden = unique.length - shown.length;
+    if (hidden > 0) lines.push(`- (+${hidden} more)`);
+    return `${task}\n${lines.join("\n")}`;
+  };
+  let brief = build();
+  while (brief.length > MAX_SUBAGENT_BRIEF_CHARS && shown.length > 0) {
+    shown = shown.slice(0, -1);
+    brief = build();
+  }
+  return brief;
+}
+
 export function parseSubagentTaskFile(raw: unknown): { ok: true; file: SubagentTaskFile } | { ok: false; error: string } {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "subagent task file is not an object" };
   const v = raw as Record<string, unknown>;
@@ -204,6 +236,9 @@ export function parseSubagentTaskFile(raw: unknown): { ok: true; file: SubagentT
   }
   if (typeof v.task !== "string" || !v.task.trim() || v.task.length > MAX_SUBAGENT_TASK_CHARS) {
     return { ok: false, error: "subagent task file has a bad task" };
+  }
+  if (typeof v.brief !== "string" || !v.brief.trim() || v.brief.length > MAX_SUBAGENT_BRIEF_CHARS) {
+    return { ok: false, error: "subagent task file has a bad brief" };
   }
   if (typeof v.provider !== "string" || !isSupportedProvider(v.provider)) {
     return { ok: false, error: "subagent task file has a bad provider" };
@@ -240,6 +275,7 @@ export function parseSubagentTaskFile(raw: unknown): { ok: true; file: SubagentT
       version: SUBAGENT_TASK_VERSION,
       runId: v.runId,
       task: v.task,
+      brief: v.brief,
       provider: v.provider,
       model: v.model,
       protocol: (typeof v.protocol === "string" ? v.protocol : configuredProviderProtocol(v.provider, v.model)) as ProviderProtocol,
@@ -259,17 +295,22 @@ export function parseSubagentTaskFile(raw: unknown): { ok: true; file: SubagentT
 export function writeSubagentTaskFile(
   eventsDir: string,
   run: SubagentRun,
-  opts: { parentTerminalId: string; cwd: string },
+  opts: { parentTerminalId: string; cwd: string; brief?: string },
 ): { ok: true; file: string } | { ok: false; error: string } {
   const name = subagentTaskFileName(opts.parentTerminalId, run.id);
   if (!name) return { ok: false, error: `bad subagent handoff identity: ${opts.parentTerminalId}/${run.id}` };
   if (!eventsDir || !opts.parentTerminalId || !opts.cwd) {
     return { ok: false, error: "subagent handoff needs an events dir, parent terminal, and cwd" };
   }
+  const brief = opts.brief ?? run.task;
+  if (!brief.trim() || brief.length > MAX_SUBAGENT_BRIEF_CHARS) {
+    return { ok: false, error: "subagent brief exceeds its budget" };
+  }
   const body = JSON.stringify({
     version: SUBAGENT_TASK_VERSION,
     runId: run.id,
     task: run.task,
+    brief,
     provider: run.provider,
     model: run.model,
     protocol: run.protocol,
@@ -298,6 +339,8 @@ export interface SubagentResultFile {
   outcome: SubagentOutcome;
   result: string;
   flags: string[];
+  /** Absolute touched paths (bounded) for sibling merge detection. */
+  touched: string[];
   settledAt: number;
 }
 
@@ -318,6 +361,15 @@ export function parseSubagentResultFile(
   if (!Array.isArray(v.flags) || v.flags.some((f) => typeof f !== "string")) {
     return { ok: false, error: "subagent result has bad flags" };
   }
+  // Touched is advisory merge evidence: absent (older writers) means none,
+  // malformed means the whole file is untrusted.
+  let touched: string[] = [];
+  if (v.touched !== undefined) {
+    if (!Array.isArray(v.touched) || v.touched.length > MAX_SUBAGENT_TOUCHED || v.touched.some((p) => typeof p !== "string")) {
+      return { ok: false, error: "subagent result has bad touched paths" };
+    }
+    touched = v.touched as string[];
+  }
   return {
     ok: true,
     file: {
@@ -326,6 +378,7 @@ export function parseSubagentResultFile(
       outcome: v.outcome,
       result: v.result,
       flags: v.flags as string[],
+      touched,
       settledAt: typeof v.settledAt === "number" ? v.settledAt : Date.now(),
     },
   };
@@ -485,6 +538,21 @@ function normalizeClaimPath(raw: unknown): { ok: true; path: string } | { ok: fa
 export function subagentPathsOverlap(a: string, b: string): boolean {
   if (a === b) return true;
   return a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
+
+/**
+ * Anchor a cwd-relative claim path at a root (Phase 4 unified claims).
+ * Dispatch keys live at the workspace root while claims are cwd-relative;
+ * joining a cwd-relative path to the root miskeys whenever cwd is a
+ * subdirectory. Returns the root-anchored pair when cwd sits under root,
+ * else the original pair (which then matches nothing — fail closed toward
+ * no false overlap).
+ */
+export function anchorClaimPath(cwd: string, relPath: string, root: string): { rel: string; root: string } {
+  const abs = join(cwd, relPath);
+  const rel = relative(root, abs);
+  if (rel && !rel.startsWith("..") && !isAbsolute(rel)) return { rel, root };
+  return { rel: relPath, root: cwd };
 }
 
 export type SubagentScan = { text: string; flags: string[] };

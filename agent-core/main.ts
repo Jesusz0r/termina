@@ -174,6 +174,7 @@ import {
   SubagentRegistry,
   appendSubagentInboxMessage,
   clearSubagentApprovalFiles,
+  formatSubagentBrief,
   formatSubagentResultFrame,
   parseSubagentApprovalName,
   parseSubagentTaskFile,
@@ -191,7 +192,8 @@ import {
   writeSubagentTaskFile,
   MAX_SUBAGENT_RESULT_CHARS,
   type SubagentTaskFile,
-} from "./subagents.ts";import {
+} from "./subagents.ts";
+import {
   estimateReclaimTokens,
   makePruneRevision,
   planPruneStubs as planReclaimStubs,
@@ -4687,8 +4689,15 @@ async function executeTool(use: ToolUse): Promise<ToolOutcome> {
     if (!got.ok) return done(use, `error: ${got.error}`, true);
     // Hand the validated run to the host: task file first (it lands before
     // the queued sidecar record), then announce. A failed handoff fails the
-    // run exactly once so the slot and claims release.
-    const handoff = writeSubagentTaskFile(eventsDir, got.run, { parentTerminalId: terminalId, cwd: canonicalCwd });
+    // run exactly once so the slot and claims release. The child-facing
+    // brief carries live sibling claims (Phase 4 coordination); the run
+    // record keeps the original task.
+    const siblingPaths = subagentRegistry
+      .activeRuns()
+      .filter((r) => r.id !== got.run.id)
+      .flatMap((r) => r.paths);
+    const brief = formatSubagentBrief(got.run.task, siblingPaths);
+    const handoff = writeSubagentTaskFile(eventsDir, got.run, { parentTerminalId: terminalId, cwd: canonicalCwd, brief });
     if (!handoff.ok) {
       subagentRegistry.settleRun(got.run.id, `host handoff failed: ${handoff.error}`, "failed");
       return done(use, `error: ${handoff.error}`, true);
@@ -7300,7 +7309,7 @@ async function runSubagentTask(taskPath: string): Promise<never> {
   activeSubagent = { task, turns: 0, partial: false, inboxSeq: 0 };
   lastRunOutcome = null;
   await runPrompt(
-    `[Subagent ${task.runId}: you are a background subagent. Your final reply is delivered to your parent as the run result. Parent messages arrive as "Parent message (seq N): ..." user turns — follow redirections, answer questions in your result. Bash approvals ask your parent and default to deny; keep commands minimal and non-interactive.]\n\n${task.task}`,
+    `[Subagent ${task.runId}: you are a background subagent. Your final reply is delivered to your parent as the run result. Parent messages arrive as "Parent message (seq N): ..." user turns — follow redirections, answer questions in your result. Bash approvals ask your parent and default to deny; keep commands minimal and non-interactive.]\n\n${task.brief}`,
   );
   // `as`: the settle-point assignment inside runPrompt is invisible to flow
   // analysis, which would otherwise keep the pre-run `null` narrowing.

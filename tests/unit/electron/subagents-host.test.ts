@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SubagentHost, lastResultFrame, type SubagentChild, type SubagentLauncher } from "../../../electron/subagents.ts";
@@ -58,6 +58,7 @@ function validTask(overrides: Record<string, unknown> = {}): Record<string, unkn
     version: 1,
     runId: "bg-1",
     task: "do the thing",
+    brief: "do the thing",
     provider: "anthropic",
     model: "claude-sonnet-4-5",
     protocol: "anthropic-messages",
@@ -73,8 +74,9 @@ function validTask(overrides: Record<string, unknown> = {}): Record<string, unkn
   };
 }
 
-function setup(opts: { wallMs?: number; maxAttempts?: number; backoffMs?: number[] } = {}) {
+function setup(opts: { wallMs?: number; maxAttempts?: number; backoffMs?: number[]; dispatch?: { keys: Set<string>; root: string } } = {}) {
   const dir = tmp();
+  const { dispatch, ...hostOpts } = opts;
   const notes: Array<{ terminalId: string; note: string }> = [];
   const watched: string[] = [];
   const unwatched: string[] = [];
@@ -95,8 +97,16 @@ function setup(opts: { wallMs?: number; maxAttempts?: number; backoffMs?: number
       appendMailboxNote: (terminalId, note) => { notes.push({ terminalId, note }); },
       watchStream: (id) => { watched.push(id); },
       releaseStream: (id) => { unwatched.push(id); },
+      dispatchKeysFor: async () => dispatch ?? { keys: new Set<string>(), root: "" },
+      canonicalPath: async (p) => {
+        try {
+          return realpathSync(p);
+        } catch {
+          return p;
+        }
+      },
     },
-    { launch, backoffMs: [5, 5], ...opts },
+    { launch, backoffMs: [5, 5], ...hostOpts },
   );
   const taskFile = `subagent-term-7-bg-1.task.json`;
   const writeTask = (body: unknown = validTask(), name = taskFile) => {
@@ -247,6 +257,8 @@ describe("SubagentHost", () => {
         appendMailboxNote: (_t, note) => { notes.push(note); },
         watchStream: () => {},
         releaseStream: () => {},
+        dispatchKeysFor: async () => new Set<string>(),
+        canonicalPath: async (p) => p,
       },
       {
         wallMs: 20000,
@@ -280,6 +292,88 @@ describe("SubagentHost", () => {
     expect(["failed", "killed"]).toContain(body.outcome);
     expect(notes.length).toBe(1);
   }, 60000);
+
+  it("rejects claims overlapping another parent's live run", async () => {
+    const s = setup();
+    const proj = tmp();
+    s.writeTask(validTask({ cwd: proj, paths: ["src/a.ts"] }));
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    expect(s.host.activeCount()).toBe(1);
+    expect(s.host.claimsForOwner("term-7")).toEqual([{ path: "src/a.ts", cwd: proj }]);
+    expect(s.host.claimsForOwner("term-9")).toEqual([]);
+    // Same tree, overlapping claim, other parent: rejected like a sibling.
+    const other = "subagent-term-9-bg-1.task.json";
+    writeFileSync(join(s.dir, other), JSON.stringify(validTask({ runId: "bg-1", parentTerminalId: "term-9", cwd: proj, paths: ["src"] })), { mode: 0o600 });
+    await s.host.handleSpawn("term-9", "bg-1", other);
+    expect(s.procs.length).toBe(1);
+    const body = JSON.parse(readFileSync(join(s.dir, "subagent-term-9-bg-1.result.json"), "utf8"));
+    expect(body.outcome).toBe("failed");
+    // Same relative path under another root proceeds.
+    const elsewhere = "subagent-term-9-bg-2.task.json";
+    writeFileSync(join(s.dir, elsewhere), JSON.stringify(validTask({ runId: "bg-2", parentTerminalId: "term-9", cwd: tmp(), paths: ["src/a.ts"] })), { mode: 0o600 });
+    await s.host.handleSpawn("term-9", "bg-2", elsewhere);
+    expect(s.procs.length).toBe(2);
+  });
+
+  it("vetoes spawns overlapping dispatch workers", async () => {
+    const proj = tmp();
+    mkdirSync(join(proj, "src"), { recursive: true });
+    writeFileSync(join(proj, "src", "a.ts"), "x");
+    const key = realpathSync(join(proj, "src", "a.ts"));
+    const s = setup({ dispatch: { keys: new Set([key]), root: realpathSync(proj) } });
+    s.writeTask(validTask({ cwd: proj, paths: ["src/a.ts"] }));
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    expect(s.procs.length).toBe(0);
+    expect(s.readResult().outcome).toBe("failed");
+    const free = setup({ dispatch: { keys: new Set([key]), root: realpathSync(proj) } });
+    free.writeTask(validTask({ cwd: proj, paths: ["src/b.ts"] }));
+    await free.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    expect(free.procs.length).toBe(1);
+  });
+
+  it("vetoes through a subdirectory anchor", async () => {
+    // Terminal cwd is a subdir of the dispatch root: keys must still meet.
+    const proj = tmp();
+    const sub = join(proj, "pkg");
+    mkdirSync(join(sub, "src"), { recursive: true });
+    writeFileSync(join(sub, "src", "a.ts"), "x");
+    const key = realpathSync(join(sub, "src", "a.ts"));
+    const s = setup({ dispatch: { keys: new Set([key]), root: realpathSync(proj) } });
+    s.writeTask(validTask({ cwd: realpathSync(sub), paths: ["src/a.ts"] }));
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    expect(s.procs.length).toBe(0);
+    expect(s.readResult().outcome).toBe("failed");
+  });
+
+  it("reports merge needs when siblings touch the same files", async () => {
+    const s = setup();
+    for (const run of ["bg-1", "bg-2"] as const) {
+      const name = `subagent-term-7-${run}.task.json`;
+      writeFileSync(join(s.dir, name), JSON.stringify(validTask({ runId: run, paths: [] })), { mode: 0o600 });
+      await s.host.handleSpawn("term-7", run, name);
+    }
+    expect(s.procs.length).toBe(2);
+    s.host.noteChildEvent("sub-term-7-bg-1", "tool", "/proj/shared.ts");
+    s.host.noteChildEvent("sub-term-7-bg-1", "agent_start");
+    s.host.noteChildEvent("sub-term-7-bg-2", "tool", "/proj/shared.ts");
+    s.host.noteChildEvent("sub-term-7-bg-2", "tool", "/proj/own.ts");
+    s.host.noteChildEvent("nope", "tool", "/proj/shared.ts");
+    s.procs[0]!.out(`SUBAGENT_RESULT {"ok":true,"result":"one"}\n`);
+    s.procs[0]!.exit(0);
+    await until(() => existsSync(join(s.dir, "subagent-term-7-bg-1.result.json")));
+    expect(s.notes.at(-1)!.note).not.toContain("Merge needed");
+    s.procs[1]!.out(`SUBAGENT_RESULT {"ok":true,"result":"two"}\n`);
+    s.procs[1]!.exit(0);
+    await until(() => existsSync(join(s.dir, "subagent-term-7-bg-2.result.json")));
+    const note = s.notes.at(-1)!.note;
+    expect(note).toContain("Merge needed");
+    expect(note).toContain("bg-1");
+    expect(note).toContain("/proj/shared.ts");
+    expect(note).not.toContain("/proj/own.ts");
+    const body = JSON.parse(readFileSync(join(s.dir, "subagent-term-7-bg-2.result.json"), "utf8"));
+    expect(parseSubagentResultFile("bg-2", body).ok).toBe(true);
+    expect(body.touched).toEqual(["/proj/shared.ts", "/proj/own.ts"]);
+  });
 
   it("takes the last result frame", () => {
     expect(lastResultFrame("no frame here")).toBeNull();

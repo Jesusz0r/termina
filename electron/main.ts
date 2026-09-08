@@ -62,7 +62,7 @@ import {
 } from "./plan-board.js";
 import { AppPreferencesStore } from "./preferences.js";
 import { SubagentHost } from "./subagents.js";
-import { isSubagentManagedFile } from "../agent-core/subagents.js";
+import { anchorClaimPath, isSubagentManagedFile } from "../agent-core/subagents.js";
 import { listSessionJsonl, mergeSessionFiles, searchSessionFiles, sessionFileEntry, type SessionFileEntry } from "./session-search.js";
 import { searchProjectFiles } from "./quick-open.js";
 import { appendPendingImages, MAX_PENDING_IMAGES, pendingImageState } from "../agent-core/host.js";
@@ -632,6 +632,14 @@ class PiEditorApp {
       this.tailer.stopWatching(terminalId);
       this.sidecarQueues.delete(terminalId);
     },
+    dispatchKeysFor: async (ownerId) => {
+      const owner = this.terminals.get(ownerId);
+      if (!owner) return { keys: new Set<string>(), root: "" };
+      const ws = this.workspaceOfTerminal(owner);
+      const root = ws?.root ?? owner.cwd;
+      return { keys: await this.dispatchPathKeysInFlight(ownerId, root), root };
+    },
+    canonicalPath: (p) => this.canonicalPath(p),
   });
   private paintWatchdog: ReturnType<typeof setInterval> | null = null;
   private appUpdater: AppUpdateController | null = null;
@@ -3770,6 +3778,14 @@ class PiEditorApp {
       if (!task) continue;
       for (const p of task.paths) used.add(await this.taskPathKey(p, root));
     }
+    // Unified claims (Phase 4): live subagent runs hold path claims on the
+    // same tree, so dispatch refuses overlapping rows exactly like it does
+    // for dispatch workers. Claims anchor at their own cwd (subdirectory
+    // terminals key identically through the shared anchor rule).
+    for (const claim of this.subagents.claimsForOwner(ownerId)) {
+      const anchored = anchorClaimPath(claim.cwd, claim.path, root);
+      used.add(await this.taskPathKey(anchored.rel, anchored.root));
+    }
     return used;
   }
 
@@ -4586,10 +4602,10 @@ class PiEditorApp {
   private async handleSidecarEvent(terminalId: string, event: SidecarEvent): Promise<void> {
     if (this.disposed) return;
     if (this.subagents.hasStream(terminalId)) {
-      // Child liveness only (booted/activity for future routing and stuck
-      // diagnosis). Settlement stays exit-authoritative; no dots are
-      // fabricated onto any terminal timeline.
-      this.subagents.noteChildEvent(terminalId, event.t);
+      // Child liveness only (booted/activity/touched for merge evidence).
+      // Settlement stays exit-authoritative; no dots are fabricated onto
+      // any terminal timeline.
+      this.subagents.noteChildEvent(terminalId, event.t, event.t === "tool" ? event.path : undefined);
       return;
     }
     const inst = this.terminals.get(terminalId);

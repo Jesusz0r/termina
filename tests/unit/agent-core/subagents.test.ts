@@ -6,8 +6,10 @@ import {
   MAX_SUBAGENT_RUNS,
   SUBAGENT_TOOL_DEFS,
   SubagentRegistry,
+  anchorClaimPath,
   appendSubagentInboxMessage,
   clearSubagentApprovalFiles,
+  formatSubagentBrief,
   formatSubagentResultFrame,
   isSubagentManagedFile,
   parseSubagentApprovalName,
@@ -281,6 +283,13 @@ describe("subagents Phase 1 registry", () => {
     expect(subagentPathsOverlap("src/a.ts", "src")).toBe(true);
     expect(subagentPathsOverlap("src/ab.ts", "src/a.ts")).toBe(false);
   });
+
+  it("anchors claims at the dispatch root", () => {
+    expect(anchorClaimPath("/proj", "src/a.ts", "/proj")).toEqual({ rel: "src/a.ts", root: "/proj" });
+    expect(anchorClaimPath("/proj/pkg", "src/a.ts", "/proj")).toEqual({ rel: "pkg/src/a.ts", root: "/proj" });
+    // Outside the root: no false overlap, keep the original pair.
+    expect(anchorClaimPath("/other", "src/a.ts", "/proj")).toEqual({ rel: "src/a.ts", root: "/other" });
+  });
 });
 
 describe("subagents Phase 2 handoff contract", () => {
@@ -310,7 +319,22 @@ describe("subagents Phase 2 handoff contract", () => {
     expect(subagentTaskFileName("", "bg-1")).toBeNull();
   });
 
-  it("round-trips the task file", async () => {
+  it("formats sibling claims into the brief without touching the task", () => {
+    expect(formatSubagentBrief("do it", [])).toBe("do it");
+    const brief = formatSubagentBrief("do it", ["src/b.ts", "src/a.ts", "src/a.ts", " "]);
+    expect(brief).toContain("do it");
+    expect(brief).toContain("`src/a.ts`");
+    expect(brief.indexOf("src/a.ts")).toBeLessThan(brief.indexOf("src/b.ts"));
+    // Adversarial claims always fit: the task survives intact.
+    const long = Array.from({ length: 60 }, (_, i) => `src/${"x".repeat(200)}-${i}.ts`);
+    const capped = formatSubagentBrief("do it", long);
+    expect(capped.startsWith("do it\n")).toBe(true);
+    expect(capped.length).toBeLessThanOrEqual(12_000);
+    expect(capped).toContain("more");
+    expect(formatSubagentBrief("x".repeat(12_000), ["src/a.ts"])).toBe("x".repeat(12_000));
+  });
+
+  it("round-trips the brief through the task file", async () => {
     const reg = registry();
     const spawned = await reg.spawn({ task: "do it", paths: ["src/a.ts"], parent });
     expect(spawned.ok).toBe(true);
@@ -329,6 +353,25 @@ describe("subagents Phase 2 handoff contract", () => {
     expect(parsed.file.paths).toEqual(["src/a.ts"]);
     expect(parsed.file.parentTerminalId).toBe("term-7");
     expect(parsed.file.permissionMode).toBe("ask");
+  });
+
+  it("defaults the brief to the task and rejects oversized briefs", async () => {
+    const reg = registry();
+    const spawned = await reg.spawn({ task: "do it", parent });
+    expect(spawned.ok).toBe(true);
+    if (!spawned.ok) return;
+    const dir = mkdtempSync(join(tmpdir(), "subagent-brief-"));
+    roots.push(dir);
+    const plain = writeSubagentTaskFile(dir, spawned.run, { parentTerminalId: "term-7", cwd: "/proj" });
+    expect(plain.ok).toBe(true);
+    if (!plain.ok) return;
+    const { readFileSync: read } = await import("node:fs");
+    const back = parseSubagentTaskFile(JSON.parse(read(join(dir, plain.file), "utf8")));
+    expect(back.ok).toBe(true);
+    if (!back.ok) return;
+    expect(back.file.brief).toBe("do it");
+    const big = writeSubagentTaskFile(dir, spawned.run, { parentTerminalId: "term-7", cwd: "/proj", brief: "x".repeat(12_001) });
+    expect(big.ok).toBe(false);
   });
 
   it("fails the handoff write closed", async () => {

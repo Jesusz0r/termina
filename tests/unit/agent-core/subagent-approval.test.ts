@@ -78,6 +78,7 @@ describe("Subagent Approval Engine Contract", () => {
         version: 1,
         runId,
         task: "do the approved thing",
+        brief: "do the approved thing",
         provider: "anthropic",
         model: "claude-sonnet-4-5",
         protocol: "anthropic-messages",
@@ -209,6 +210,85 @@ describe("Subagent Approval Engine Contract", () => {
     expect(r.exit).toBe(1);
     expect(existsSync(sentinel)).toBe(false);
     expect(r.output).toMatch(/bash denied/i);
+  });
+
+  it("includes sibling claims in later spawns' briefs", async () => {
+    const dir = join(root, "rt-brief-run");
+    mkdirSync(dir, { recursive: true });
+    const sessionId = "term-brief-session";
+    const sessionFile = join(dir, sessionId, "current", "session.jsonl");
+    const spawnBody = (id: string, task: string, paths: string[]) => toolCallBody(id, "spawn_subagent", JSON.stringify({ task, paths }));
+    const bodies = [
+      spawnBody("call-1", "first job", ["a-claim.ts"]),
+      spawnBody("call-2", "second job", ["b-claim.ts"]),
+      finalBody("parent done"),
+    ];
+    const childScript = `
+      globalThis.fetch = async (input) => {
+        if (String(input) === "https://models.dev/api.json") {
+          return new Response(JSON.stringify({}), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        globalThis.__n = (globalThis.__n ?? 0) + 1;
+        const parts = ${JSON.stringify(bodies)};
+        return new Response(parts[Math.min(globalThis.__n, parts.length) - 1], {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      };
+      process.argv = [process.execPath, ${JSON.stringify(mainTs)}, "-p", "do two things"];
+      await import(${JSON.stringify(mainUrl)});
+    `;
+    const child = spawn(
+      process.execPath,
+      ["--input-type=module", "--experimental-strip-types", "--no-warnings", "-e", childScript],
+      {
+        cwd: dir,
+        env: {
+          ...process.env,
+          TERMINA_CORE_TEST: "1",
+          TERMINA_CORE_PROVIDER: "anthropic",
+          TERMINA_CORE_MODEL: "claude-sonnet-4-5",
+          ANTHROPIC_API_KEY: "subagent-brief-test-key",
+          TERMINA_EVENTS_DIR: dir,
+          TERMINA_TERMINAL_ID: "term-brief",
+          TERMINA_CORE_SESSION_ID: sessionId,
+          TERMINA_CORE_SESSION_FILE: sessionFile,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let output = "";
+    child.stdout.on("data", (chunk) => { output += chunk; });
+    child.stderr.on("data", (chunk) => { output += chunk; });
+    const ackTimer = setInterval(() => {
+      try {
+        const rows = readFileSync(join(dir, "term-brief.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+        for (const row of rows) {
+          if ((row.t === "preflight_request" || row.t === "checkpoint_request") && row.requestId) {
+            writeFileSync(join(dir, `ack-term-brief-${row.requestId}.json`), JSON.stringify({ ok: true }), { mode: 0o600 });
+          }
+        }
+      } catch {
+        /* Wait for the sidecar. */
+      }
+    }, 10);
+    const exit = await new Promise<number | null>((resolve) => {
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        resolve(-1);
+      }, 55000);
+      child.on("exit", (code) => {
+        clearTimeout(timer);
+        clearInterval(ackTimer);
+        resolve(code);
+      });
+    });
+    expect(exit).toBe(0);
+    const first = readFileSync(join(dir, "subagent-term-brief-bg-1.task.json"), "utf8");
+    const second = readFileSync(join(dir, "subagent-term-brief-bg-2.task.json"), "utf8");
+    expect(first).not.toContain("Sibling path claims");
+    expect(second).toContain("Sibling path claims");
+    expect(second).toContain("a-claim.ts");
   });
 
   it("enforces the parent's Mine marks in the child", async () => {
