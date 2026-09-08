@@ -47,7 +47,13 @@ Concrete reasons, not sequencing:
    run that search.
 6. **Isolation already exists.** Dispatch workers and worldlines are the
    isolate layer. A kernel `spawn_agent` / self-rewrite loop duplicates
-   that and couples it to the prompt cache.
+   that and couples it to the prompt cache. Background subagents
+   (`spawn_subagent`, SUBAGENTS-PLAN, implemented 2026-09-08) are not
+   this: a parent decomposes one task into briefs, headless children run
+   them with inherited route and permission mode at depth 1, results fan
+   back in. No nesting, no engine mutation, no search over harness
+   source. Registry and contract live in `agent-core/subagents.ts`; the
+   process host in `electron/subagents.ts`.
 7. **Unconstrained search overfits and often hurts.** Harbor's Codex
    case: extra self-eval / Reflexion / observation compression *dropped*
    Terminal-Bench. LangChain's hill-climb recipe exists because agents
@@ -73,7 +79,7 @@ Do not rebuild these. They are the inner harness.
 | Environment snapshot | `formatEnvironment` | Skip 2–4 exploratory `ls` / `uname` turns |
 | Skill index, bodies on demand | `scanSkills` + `read_file` | Retrieve, don't stuff |
 | Overflow-recoverable `AGENTS.md` | `formatProjectInstructions` / `formatUserInstructions` | Truncation is SELECT-able |
-| ACI tools | `read_file`, `write_file`, unique `edit`, `grep` (rg), `glob`, `bash`, `fetch`, provider `web_search` | Fitted surface, not raw bash |
+| ACI tools | `read_file`, `write_file`, unique `edit`, `grep` (rg), `glob`, `bash`, `fetch`, provider `web_search`, `spawn_subagent`, `message_subagent` | Fitted surface, not raw bash |
 | Cwd jail + allow set | `confinePath` | Reads stay in project (plus frozen skills) |
 | Reclaim then summarize | P2 / P3 | Cheap eviction before expensive handoff |
 | Executable stubs | `formatStub` / `reproFor` | Lossy bytes, lossless structure |
@@ -81,6 +87,7 @@ Do not rebuild these. They are the inner harness.
 | Concurrent tools, stream always | `runPrompt` | P7 |
 | Traces | `<terminalId>.traces/turn-N.json` | Diagnostics for a later outer loop |
 | Host Verify, Plan Board, worldlines | Electron, not kernel | Isolation and done-criteria stay out of zone 1 |
+| Background subagent runs | `agent-core/subagents.ts` (registry, contract) + `electron/subagents.ts` (host); surface in `main.ts` | Parallel subtasks of one task without new terminals; depth 1; results fan in |
 
 Identity in zone 1 is short: terse, use tools, work in the project, and
 do clear reversible local work in the current turn instead of asking in
@@ -226,14 +233,37 @@ Kernel `agent-core/main.ts` approves bash in the TUI choice picker, where
 the command and its context already live (Deny / Approve once / Always
 approve), fail-closed when no surface is active. `isDangerousBash` is a
 risk hint only. `TERMINA_CORE_APPROVE=all` (dispatch, sandboxed worldline
-candidates) skips the prompt; nothing else auto-approves.
+candidates) skips the prompt; nothing else auto-approves. Child
+subagent approvals route to the parent's picker as Deny / Approve once
+only (never Always) and fail closed on timeout or no surface; a
+headless child enforces its parent's Mine marks.
+
+### 9. Background subagents — implemented, with recorded zone-1 debt
+
+`spawn_subagent` / `message_subagent` (SUBAGENTS-PLAN, 2026-09-08):
+spawn validation + registry in `agent-core/subagents.ts`, tool surface
+in `main.ts`, headless children (`--subagent-task`, piped stdio, never
+pty) owned by `electron/subagents.ts`. Approvals route to the parent
+picker (Deny / Approve once); Mine marks inherit; path claims unify
+with dispatch; merge needs surface as mailbox notes.
+
+Debt, stated plainly: zone 1 grew by two tool schemas without the
+measured cache miss §6 demands — no live traffic existed to measure
+against. Follow-up gate before any further zone-1 growth: compare
+per-turn cache share on identical priced tasks against the
+pre-subagents baseline and confirm stable-prefix hashes and reuse do
+not regress.
+
+Limits kept: max depth 1, no runs panel (timeline + mailbox only).
+Revisit triggers: real sessions hitting depth 1 with genuinely
+independent sub-subtasks, or concurrent runs getting noisy in practice.
 
 ## Stay out (still)
 
 - Outer-loop proposer / Pareto search over `agent-core` source
 - In-process self-rewrite of the harness
 - Plugin / hook / extension loader
-- `spawn_agent`, LangGraph, extra roles (P6: routing changes cost, never behavior)
+- `spawn_agent` as a kernel primitive, LangGraph, extra roles (P6: routing changes cost, never behavior). The implemented `spawn_subagent` tool is the narrow exception: background-only, depth-1, owned by `agent-core/subagents.ts` + `electron/subagents.ts` (see §9).
 - Kernel completion checklists or "don't stop" state machines
 - Kernel test runner, `init.sh`, `progress.md`, `feature_list.json`
 - Stuffed skill bodies in zone 1

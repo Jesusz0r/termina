@@ -1,6 +1,6 @@
 # Background Subagents Plan — 2026-09-07
 
-> Status: Phase 1 implemented (registry + tool surface, 2026-09-08); Phases 2–5 pending. Sources: [Anthropic Agent SDK subagents](https://code.claude.com/docs/en/agent-sdk/subagents) (verified 2026-09-07), OpenAI Agents SDK manager pattern (docs nav; page bodies are JS shells), Qwen-Agent README (no subagent primitive — verified 2026-09-07). Gemini/xAI/Meta are model APIs with no delegation primitives.
+> Status: complete 2026-09-08 (Phases 1–5; 9 commits). Sources: [Anthropic Agent SDK subagents](https://code.claude.com/docs/en/agent-sdk/subagents) (verified 2026-09-07), OpenAI Agents SDK manager pattern (docs nav; page bodies are JS shells), Qwen-Agent README (no subagent primitive — verified 2026-09-07). Gemini/xAI/Meta are model APIs with no delegation primitives.
 
 ## Goal
 
@@ -68,7 +68,7 @@ A subagent telling its parent to widen permissions must never work.
 2. **Headless run mode** (implemented 2026-09-08 — slices 1–2b): engine entry, host spawner, sidecar tailing under `bg-N`, settle/kill/retry. Tests: settle delivers a tool result; kill terminates the process group; crash reports failure. Every path (settle/kill/crash/rate-limit/`/clear`) resolves through `settleRun` exactly once; run ids are process-local so a forked session messaging them fails closed with unknown-run.
 3. **Approvals + messaging** (implemented 2026-09-08): permissionMode inheritance, choice-picker routing, timeout-deny, `message_subagent` delivery. Tests: approval round-trip, deny-by-default, scanning markers.
 4. **Claims + merge** (implemented 2026-09-08): path-scoped claims at spawn, conflict rejection, parent merge flow. Tests: overlapping claims rejected; disjoint claims run parallel.
-5. **Docs + limits review**: update AGENT-CORE-HARNESS ownership notes; revisit depth-1 and panel-need after real usage.
+5. **Docs + limits review** (implemented 2026-09-08): AGENT-CORE-HARNESS ownership notes updated (§9 records the zone-1 debt); depth-1 and no-panel kept — no real usage exists to argue otherwise, triggers recorded below.
 
 ## Validation questions for every phase
 
@@ -77,3 +77,20 @@ A subagent telling its parent to widen permissions must never work.
 3. Do two siblings ever write the same path? (Must be no, with a test.)
 4. Does the parent context receive only final child results, never intermediate tool streams?
 5. Do live-provider probes (where credentials exist) show the same spawn/settle/message contract across at least two providers?
+
+## Final validation (2026-09-08)
+
+1. No: `permissionMode` inherited with no setter (test), picker offers Deny/Approve-once only, Mine marks inherit (engine test), approvals once-only.
+2. Yes: every host path funnels through one `finish()`; registry `settleRun` is exactly-once; crashes/timeouts retry bounded, then report failure.
+3. No: registry overlap (same parent), host cross-parent overlap, dispatch veto both directions (tests); brief warnings advisory; merge notes on actual overlap.
+4. Yes: registry holds no streams; inbox/approval traffic never enters parent context; mailbox carries final results + merge notes.
+5. Open: no credentials in this environment. Mocked-provider engine tests cover approve/deny/Mine/brief; a real engine child reaches a failed result. Run on two live providers before claiming the contract.
+
+## Known limitations (v1, do not fix without a trigger)
+
+- Toasts need a new main→renderer IPC channel; deferred under the existing-surfaces rule. Trigger: settle announcements getting lost in practice.
+- Orphaned child session bundles on host crash (bounded by turn budget). Trigger: measurable accumulation; belongs in a retention pass.
+- Case-insensitive filesystems can spell the same file two ways past string overlap checks (same as dispatch). Trigger: a real collision; fix must cover dispatch too, not subagents alone.
+- Cross-owner dispatch-vs-subagent overlap (different main tasks) is unchecked; same-owner is covered both directions. Trigger: shared-tree multi-terminal workflows colliding.
+- Parent messages arriving while a child waits on approval deliver after the wait resolves. No loss, just latency.
+- Full agent-core suite (46 files) and the vite build could not run post-change under concurrent-E2E memory pressure; targeted suites, typecheck, and esbuild bundles are green. Re-run both green before release.

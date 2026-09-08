@@ -4,16 +4,16 @@
 
 ## In progress
 
-- Subagents Phase 4 done (claims/merge); Phase 5 docs next. Built + tested 2026-09-08.
+- None — subagents plan complete 2026-09-08 (Phases 1–5).
 
 ## Next
 
-- Subagents Phase 2: headless run mode (`electron/subagents.ts`, engine entry, `bg-N` tailing, settle/kill/retry).
 - Token-roadmap evidence gates (live providers, benchmarks, corpora — see TOKEN-EFFICIENCY-ROADMAP.md).
 - Token-roadmap evidence gates (TOKEN-EFFICIENCY-ROADMAP.md); audit §3.2 unassessed files (`openai-compat`, `session-retention`, `worldline-git`, `host`, `mcp`).
 
 ## Done (recent)
 
+- Subagents Phase 5 (2026-09-08): docs + limits review. AGENT-CORE-HARNESS ownership notes updated (reason 6 distinguishes the implemented tool from the forbidden searcher, ACI surface + kernel table list the runs, §8 covers child approvals, stay-out qualifies `spawn_agent`, new §9 records the zone-1 debt with a follow-up cache gate). Limits kept for lack of counter-evidence: depth-1, no runs panel, with revisit triggers. Plan closed with final validation answers and a known-limitations register. Docs-only change: paths and commands cited verified, no application test run per routine.
 - Subagents Phase 4 (2026-09-08): claims + merge. Unified claim surface: spawn-time overlap rejection now spans processes (host rejects cross-parent overlaps on the same canonical tree), spawns veto overlapping dispatch workers and dispatch refuses rows overlapping live subagent claims (shared anchor rule for subdir terminals). Child briefs carry live sibling claims. Host collects touched paths from tailed tool events into the result file; sibling overlaps surface as `## Merge needed` mailbox notes for the parent to merge. Audit fixes: root-anchored keying, touched absolutization/normalization. Typecheck green; 58/58 subagents+host, approval, plan-board, kernel, execution green; esbuild bundles green. Remaining: Phase 5 docs.
 - Subagents Phase 3 (2026-09-08): approvals + messaging. Child bash/protected approvals round-trip through approval-request files + the ack channel: parent surfaces them in its own choice picker (Deny / Approve once — never Always, so neither side can escalate), stale/missing/surfaceless cases deny fast or on timeout. `message_subagent` mirrors to a per-run inbox file the child drains every model turn as parent-message turns. Child enforces the parent's Mine marks across the process boundary. First turn briefs the child on its run id and conventions. Evidence: typecheck; transport 41/41; real-engine round-trip (ack runs command + inbox delivered), deny-by-default, and Mine-denial tests green; kernel/p0/execution/host suites green; esbuild bundles green. Remaining: Phase 4 claims/merge, Phase 5 docs.
 - Subagents Phase 2 slice 2b (2026-09-08): child streams, clear kills, sweeps. Host tails bg-N streams on the shared tailer (booted/activity liveness; settlement stays exit-authoritative, no dots fabricated). `/clear`+`/new` funnel (`clearForNewSession`) kills the owner's runs; killed-result notes still land so the new session sees what happened. Startup sweep deletes orphaned subagent handoff/stream files via `isSubagentManagedFile` (task/result/tmp, sidecars, cursors, sealed companions). Audit fixes: per-terminal namespacing (no cross-settle), single-watch across retries with queue release, sweep rejects non-leaf names, result-tmp cleanup. Typecheck green; 53/53 across subagents/host/sidecar/kernel; esbuild bundles green. Toasts need a new IPC channel — deferred per v1 existing-surfaces rule. Remaining: Phase 3 approvals/messaging, Phase 4 claims/merge, Phase 5 docs.
