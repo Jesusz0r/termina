@@ -115,6 +115,14 @@ export class ProjectWatcher {
   /** Debounced emits still running their callbacks. */
   private emitting = 0;
   private seen = new Set<string>();
+  /**
+   * Directories known to exist, root-relative like `seen`. Files alone cannot
+   * report a folder deletion: `emit` stats the path, and a vanished directory
+   * is ENOENT without a `seen` entry, so the event was silently dropped and
+   * the explorer kept the stale row. Directory entries carry no content or
+   * created/modified semantics — they exist only to fire `onFileDeleted`.
+   */
+  private seenDirs = new Set<string>();
   /** Rules of every loaded .gitignore, keyed by directory. */
   private gitignoreRules: GitignoreRules = new Map();
 
@@ -227,6 +235,7 @@ export class ProjectWatcher {
     this.reconcileJournalOverflowed = false;
     this.reconciledPathCount = 0;
     this.seen.clear();
+    this.seenDirs.clear();
     this.lastContents.clear();
     this.lastOids.clear();
     this.cacheBytes = 0;
@@ -751,10 +760,28 @@ export class ProjectWatcher {
             this.gitignoreRules.delete(this.gitignoreDirKey(relPath));
           }
         }
+      } else if (generation === this.generation && this.seenDirs.has(relPath)) {
+        // A tracked directory vanished: report it so the explorer drops the
+        // row. Descendant files report through their own events when the
+        // platform delivers them; prune descendant directory entries here so
+        // a recreated tree cannot inherit stale existence.
+        await this.onFileDeleted(abs);
+        if (generation === this.generation) {
+          this.seenDirs.delete(relPath);
+          const prefix = `${relPath}${sep}`;
+          for (const dir of this.seenDirs) {
+            if (dir.startsWith(prefix)) this.seenDirs.delete(dir);
+          }
+        }
       }
       return;
     }
-    if (generation !== this.generation || !st.isFile()) return;
+    if (generation !== this.generation) return;
+    if (st.isDirectory()) {
+      if (this.seenDirs.size < 100_000) this.seenDirs.add(relPath);
+      return;
+    }
+    if (!st.isFile()) return;
     if (st.size > MAX_FILE_SIZE) {
       // A file can grow past the cap. Mark it seen so a later small read
       // reports "modified", and drop the stale cached content.
@@ -836,10 +863,12 @@ export class ProjectWatcher {
       }
       if (!active()) return;
       for (const ent of entries) {
-        if (!active() || this.seen.size > 100_000) return;
+        if (!active() || this.seen.size + this.seenDirs.size > 100_000) return;
         if (IGNORED_SEGMENTS.has(ent.name)) continue;
         const full = join(dir, ent.name);
         if (ent.isDirectory()) {
+          const relPath = relative(this.root, full);
+          if (relPath) this.seenDirs.add(relPath);
           await walk(full);
         } else if (ent.isFile()) {
           const relPath = relative(this.root, full);

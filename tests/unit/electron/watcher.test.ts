@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ProjectWatcher } from "../../../electron/watcher.ts";
@@ -196,4 +196,47 @@ describe("Project Watcher Bounded-Emitter & Backpressure", () => {
       rmSync(root, { recursive: true, force: true });
     }
   }, 45_000);
+
+  it("reports deleted directories so the explorer drops the row", async () => {
+    const root = mkdtempSync(join(tmpdir(), "termina-watcher-dirdelete-"));
+    mkdirSync(join(root, "sub"));
+    writeFileSync(join(root, "sub", "inner.txt"), "x");
+    const fakeWatch = (...args: any[]) => {
+      if (typeof args[2] === "function") return Object.assign(new EventEmitter(), { close() {} }) as any;
+      return Object.assign(new EventEmitter(), { close() {} }) as any;
+    };
+    const watcher = new ProjectWatcher(root, undefined, fakeWatch as any, {
+      maxPendingItems: 8,
+      maxPendingBytes: 4096,
+      maxInFlight: 2,
+    });
+    const internals = watcher as any;
+    const deleted: string[] = [];
+    watcher.onFileDeleted = async (path: string) => {
+      deleted.push(path);
+    };
+    const waitFor = async (pred: () => boolean, ms: number): Promise<boolean> => {
+      const deadline = Date.now() + ms;
+      while (!pred() && Date.now() < deadline) await sleep(25);
+      return pred();
+    };
+    try {
+      watcher.start();
+      // A seeded subdirectory vanishes: the delete must fire, not drop silently.
+      expect(await waitFor(() => internals.seenDirs.has("sub"), 5000)).toBe(true);
+      rmSync(join(root, "sub"), { recursive: true, force: true });
+      internals.schedule("sub", internals.generation);
+      expect(await waitFor(() => deleted.includes(join(root, "sub")), 5000)).toBe(true);
+      // A directory created after start is tracked the same way.
+      mkdirSync(join(root, "fresh"));
+      internals.schedule("fresh", internals.generation);
+      expect(await waitFor(() => internals.seenDirs.has("fresh"), 5000)).toBe(true);
+      rmSync(join(root, "fresh"), { recursive: true, force: true });
+      internals.schedule("fresh", internals.generation);
+      expect(await waitFor(() => deleted.includes(join(root, "fresh")), 5000)).toBe(true);
+    } finally {
+      watcher.stop();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
