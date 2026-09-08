@@ -108,6 +108,42 @@ test.describe("pane resize dividers", () => {
     await expect.poll(width).toBeCloseTo(300, 0);
   });
 
+  test("custom split ratio survives minimize and review open", async ({ page }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+    await page.locator("#explorer-tree").getByText("greeting.ts").click();
+    await expect(page.locator(".editor-tab").getByText("greeting.ts").first()).toBeVisible();
+    const leftWidth = () => page.locator("#left-pane").evaluate((el) => el.getBoundingClientRect().width);
+    const box = (await page.locator("#divider").boundingBox())!;
+    const y = box.y + box.height / 2;
+    await page.mouse.move(box.x + 2, y);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 122, y, { steps: 10 });
+    await page.mouse.up();
+    const custom = await leftWidth();
+    expect(custom).toBeGreaterThan(620);
+    // Minimize the editor with tabs open, then open a modified file: the
+    // review reveal restores the editor, and must restore the ratio too —
+    // not reset to 50/50. The minimize takeover itself still clears the
+    // inline sizes (inline flex would beat the full-width rule).
+    await page.locator("#btn-min-editor").click();
+    // A real modified row through the pane object + Accept-all re-render,
+    // then the row click opens the genuine review path.
+    await page.evaluate(() => {
+      const w = window as any;
+      const panes = w.__panes as Map<string, any>;
+      const pane = [...panes.values()].find((p: any) => !p.error && !p.exited) ?? [...panes.values()][0];
+      const root = (document.querySelector("#explorer-tree [data-path]") as HTMLElement).dataset.path!;
+      pane.modified.push({ path: `${root}/greeting.ts`, relPath: "greeting.ts", status: "modified" });
+    });
+    await page.locator(".activity-tab[data-tab='modified']").click();
+    await page.locator("#btn-accept-all").click();
+    await page.locator("#modified-list li").first().click();
+    await expect(page.locator("#review-container")).toBeVisible();
+    await expect.poll(leftWidth).toBeCloseTo(custom, 0);
+    await page.locator("#review-back").click();
+    await expect.poll(leftWidth).toBeCloseTo(custom, 0);
+  });
+
   test("project tab clicks above the divider do not start an explorer resize", async ({ page, runRoot }) => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
     const other = join(runRoot, "resize-other");

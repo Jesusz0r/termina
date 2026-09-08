@@ -37,4 +37,19 @@ describe("explorer divider grab", () => {
     expect(setActive).toContain("syncEditorMinimizedForProject()");
     expect(setActive).not.toContain("collapseEditorIfIdle()");
   });
+
+  it("preserves the split ratio across minimize/restore", () => {
+    // The minimize takeover must clear the inline sizes (inline flex beats
+    // the full-width rule), so the ratio is stashed on minimize and
+    // re-applied on restore. Explicit layout changes drop the stash.
+    expect(renderer).toContain("stashedSplit");
+    const setMinStart = renderer.indexOf("function setMinimizedWork(");
+    const setMin = renderer.slice(setMinStart, setMinStart + 600);
+    expect(setMin).toContain("stashSplitSizes()");
+    expect(setMin).toContain("restoreSplitSizes()");
+    const stashStart = renderer.indexOf("function stashSplitSizes()");
+    const stash = renderer.slice(stashStart, stashStart + 500);
+    expect(stash).toContain("leftPane.style.flex");
+    expect(stash).toContain("leftPane.style.flexBasis");
+  });
 });

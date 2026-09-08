@@ -1811,6 +1811,7 @@ function applyLayout(layout: Layout): void {
     applyWorkMinimized();
   }
   clearSplitSizes();
+  stashedSplit = null;
   localStorage.setItem(LAYOUT_KEY, layout);
   fitPanes();
 }
@@ -1820,6 +1821,29 @@ function clearSplitSizes(): void {
   leftPane.style.height = "";
   leftPane.style.flexBasis = "";
   leftPane.style.flex = "";
+}
+
+/** The user's split-divider ratio, stashed while a work pane is minimized
+ *  and re-applied on restore. The minimize takeover needs the inline sizes
+ *  cleared (inline flex would beat the full-width CSS rule), but without
+ *  the stash every minimize/restore cycle — minimize button, review reveal,
+ *  project switch to an empty project — silently reset the ratio. Explicit
+ *  layout changes drop the stash: a new geometry starts from 50/50. */
+let stashedSplit: { flex: string; flexBasis: string } | null = null;
+
+function stashSplitSizes(): void {
+  // Only a real divider drag overwrites: swapping which pane is minimized
+  // must keep the earlier stash, not replace it with cleared inline sizes.
+  const flex = leftPane.style.flex;
+  const flexBasis = leftPane.style.flexBasis;
+  if (flex || flexBasis) stashedSplit = { flex, flexBasis };
+}
+
+function restoreSplitSizes(): void {
+  if (!stashedSplit) return;
+  if (stashedSplit.flex) leftPane.style.flex = stashedSplit.flex;
+  if (stashedSplit.flexBasis) leftPane.style.flexBasis = stashedSplit.flexBasis;
+  stashedSplit = null;
 }
 
 function fitPanes(): void {
@@ -1866,8 +1890,10 @@ function setMinimizedWork(pane: WorkPane | null): void {
   minimizedWork = pane;
   if (pane) localStorage.setItem(WORKPANE_KEY, pane);
   else localStorage.removeItem(WORKPANE_KEY);
+  if (pane) stashSplitSizes();
   applyWorkMinimized();
   clearSplitSizes();
+  if (!pane) restoreSplitSizes();
   fitPanes();
 }
 
