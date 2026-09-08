@@ -693,3 +693,33 @@ export class SubagentRegistry {
     this.nextId = 1;
   }
 }
+
+/** Child sidecar id shape: `sub-<parent>-<bgN>` (see electron/subagents.ts). */
+const SUBAGENT_STREAM_RE = /^sub-[A-Za-z0-9_-]{1,64}-bg-\d{1,10}$/;
+
+/**
+ * Every file the subagent system may leave in the events dir: namespaced
+ * task/result handoffs (plus result-write temps), child sidecar streams,
+ * and their cursor/sealed/quarantine companions. The Electron startup sweep
+ * removes these orphans; nothing else in the events dir matches.
+ */
+export function isSubagentManagedFile(name: string): boolean {
+  // The sweep deletes matches: reject anything that is not a plain leaf.
+  if (!name || name.includes("/") || name.includes("\\") || name.includes("\0")) return false;
+  if (
+    /^subagent-[A-Za-z0-9_-]{1,128}-bg-\d{1,10}\.(task|result)\.json(\..*)?$/.test(name)
+  ) return true;
+  const stream = name.startsWith(".") ? name.slice(1) : name;
+  if (stream.startsWith("cursor-")) {
+    return SUBAGENT_STREAM_RE.test(stream.slice("cursor-".length).replace(/\.json$/, ""));
+  }
+  if (stream.startsWith("quarantine-")) return SUBAGENT_STREAM_RE.test(stream.slice("quarantine-".length));
+  const dot = stream.indexOf(".jsonl");
+  if (dot > 0) {
+    const id = stream.slice(0, dot);
+    const rest = stream.slice(dot);
+    if (!SUBAGENT_STREAM_RE.test(id)) return false;
+    return rest === ".jsonl" || rest.startsWith(".jsonl.");
+  }
+  return false;
+}

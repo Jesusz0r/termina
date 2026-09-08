@@ -7,6 +7,7 @@ import {
   SUBAGENT_TOOL_DEFS,
   SubagentRegistry,
   formatSubagentResultFrame,
+  isSubagentManagedFile,
   parseSubagentResultFile,
   parseSubagentResultFrame,
   parseSubagentTaskFile,
@@ -421,5 +422,20 @@ describe("subagents Phase 2 handoff contract", () => {
     const cut = truncateUtf8("ab😀cd", 5);
     expect(cut).toBe("ab");
     expect(Buffer.byteLength(cut, "utf8")).toBeLessThanOrEqual(5);
+  });
+
+  it("recognizes exactly the managed events-dir files", () => {
+    expect(isSubagentManagedFile("subagent-term-7-bg-1.task.json")).toBe(true);
+    expect(isSubagentManagedFile("subagent-term-7-bg-12.result.json")).toBe(true);
+    expect(isSubagentManagedFile("subagent-term-7-bg-1.result.json.abc-123.tmp")).toBe(true);
+    expect(isSubagentManagedFile("sub-term-7-bg-1.jsonl")).toBe(true);
+    expect(isSubagentManagedFile(".cursor-sub-term-7-bg-1.json")).toBe(true);
+    expect(isSubagentManagedFile(".sub-term-7-bg-1.jsonl.sealed-abc")).toBe(true);
+    expect(isSubagentManagedFile("term-7.jsonl")).toBe(false);
+    expect(isSubagentManagedFile("mailbox-term-7.md")).toBe(false);
+    expect(isSubagentManagedFile("subagent-term-7-bg-1.task.json.evil/x")).toBe(false);
+    expect(isSubagentManagedFile("subagent--bg-.task.json")).toBe(false);
+    expect(isSubagentManagedFile("subagent-term-7-bg-1.task.json ")).toBe(false);
+    expect(isSubagentManagedFile("sub-foo.jsonl")).toBe(false);
   });
 });

@@ -62,6 +62,7 @@ import {
 } from "./plan-board.js";
 import { AppPreferencesStore } from "./preferences.js";
 import { SubagentHost } from "./subagents.js";
+import { isSubagentManagedFile } from "../agent-core/subagents.js";
 import { listSessionJsonl, mergeSessionFiles, searchSessionFiles, sessionFileEntry, type SessionFileEntry } from "./session-search.js";
 import { searchProjectFiles } from "./quick-open.js";
 import { appendPendingImages, MAX_PENDING_IMAGES, pendingImageState } from "../agent-core/host.js";
@@ -626,6 +627,11 @@ class PiEditorApp {
     coreBinary: () => coreEngineBinary(),
     sessionRootFor: (cwd) => this.coreProjectSessionDir(cwd),
     appendMailboxNote: (terminalId, note) => this.appendMailboxNote(terminalId, note),
+    watchStream: (terminalId) => this.tailer.watch(terminalId),
+    releaseStream: (terminalId) => {
+      this.tailer.stopWatching(terminalId);
+      this.sidecarQueues.delete(terminalId);
+    },
   });
   private paintWatchdog: ReturnType<typeof setInterval> | null = null;
   private appUpdater: AppUpdateController | null = null;
@@ -3957,6 +3963,7 @@ class PiEditorApp {
         name === "startup-control.json" ||
         name.startsWith("mailbox-term-") ||
         name.startsWith("startup-control-term-") ||
+        isSubagentManagedFile(name) ||
         name.startsWith("image-term-") ||
         name.startsWith("images-term-") ||
         name.startsWith("images-claim-term-") ||
@@ -4555,7 +4562,9 @@ class PiEditorApp {
     // PiTerminalInstance in the live map. Keep the durable sidecar record at
     // the tailer's cursor until the instance exists; accepting it here would
     // make handleSidecarEvent drop the startup boundary as "terminal closed".
-    if (!this.terminals.has(terminalId)) return { accepted: false };
+    // Child subagent streams are tailed on the shared tailer but owned by
+    // the subagent host, not by a terminal. Unknown ids stay on disk.
+    if (!this.terminals.has(terminalId) && !this.subagents.hasStream(terminalId)) return { accepted: false };
     // A project switch is a temporary admission stop.  Returning without
     // accepting would make the tailer advance past a boundary event, so the
     // caller must retry the same durable record instead.
@@ -4576,6 +4585,13 @@ class PiEditorApp {
 
   private async handleSidecarEvent(terminalId: string, event: SidecarEvent): Promise<void> {
     if (this.disposed) return;
+    if (this.subagents.hasStream(terminalId)) {
+      // Child liveness only (booted/activity for future routing and stuck
+      // diagnosis). Settlement stays exit-authoritative; no dots are
+      // fabricated onto any terminal timeline.
+      this.subagents.noteChildEvent(terminalId, event.t);
+      return;
+    }
     const inst = this.terminals.get(terminalId);
     if (!inst) return;
     // A sidecar callback can yield across store/file work. Keep every push
@@ -5832,6 +5848,10 @@ class PiEditorApp {
   private clearForNewSession(terminalId: string, expected?: PtyRendererSendTarget | null): void {
     const inst = this.terminals.get(terminalId);
     if (!inst) return;
+    // A fresh session orphans the owner's background runs: terminate them.
+    // Their killed-result notes still land in the mailbox so the new
+    // session sees what happened instead of waiting on dead runs.
+    this.subagents.killOwner(terminalId, "terminal cleared");
     // Timeline: drop every dot and release its captured state.
     for (const ev of inst.timeline) {
       if (ev.stateId) void this.releaseStateIfUnused(ev.stateId, terminalId, ev.seq);

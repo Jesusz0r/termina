@@ -54,6 +54,10 @@ export interface SubagentHostSinks {
   sessionRootFor(cwd: string): Promise<string>;
   /** Existing owner-mailbox path. The host never writes mailbox files itself. */
   appendMailboxNote(terminalId: string, note: string): void;
+  /** Tail a child sidecar stream on the shared tailer. */
+  watchStream(terminalId: string): void;
+  /** Release a child sidecar stream (stop tailing, drop its queue). */
+  releaseStream(terminalId: string): void;
 }
 
 export interface SubagentChildEvents {
@@ -157,6 +161,8 @@ function appendCapped(current: string, chunk: Buffer, cap: number): { text: stri
 
 export class SubagentHost {
   private readonly runs = new Map<string, HostRun>();
+  /** Child sidecar streams tailed for liveness (booted/activity). No UI surface in v1. */
+  private readonly streams = new Map<string, { key: string; booted: boolean; lastActivityAt: number }>();
   private readonly launch: SubagentLauncher;
   private readonly wallMs: number;
   private readonly maxChildren: number;
@@ -180,6 +186,27 @@ export class SubagentHost {
 
   activeCount(): number {
     return this.runs.size;
+  }
+
+  /** True while a child stream is tailed (admission for the shared tailer). */
+  hasStream(childTid: string): boolean {
+    return this.streams.has(childTid);
+  }
+
+  /** Liveness signal from the shared tailer. Unknown streams are ignored. */
+  noteChildEvent(childTid: string, kind: string): void {
+    const stream = this.streams.get(childTid);
+    if (!stream) return;
+    stream.lastActivityAt = this.now();
+    if (kind === "agent_start") stream.booted = true;
+  }
+
+  streamInfo(childTid: string): { runId: string; parentTerminalId: string; booted: boolean; lastActivityAt: number } | null {
+    const stream = this.streams.get(childTid);
+    if (!stream) return null;
+    const run = this.runs.get(stream.key);
+    if (!run) return null;
+    return { runId: run.runId, parentTerminalId: run.parentTerminalId, booted: stream.booted, lastActivityAt: stream.lastActivityAt };
   }
 
   /** Terminate one run. The exit handler writes the killed result; no retry. */
@@ -337,6 +364,20 @@ export class SubagentHost {
     }
     // The task file was consumed at spawn; attempts rebuild from the run.
     run.child = child;
+    if (!this.streams.has(run.childTid)) {
+      this.streams.set(run.childTid, { key: run.key, booted: false, lastActivityAt: this.now() });
+      try {
+        this.sinks.watchStream(run.childTid);
+      } catch {
+        /* Tailing is liveness only; the piped exit stays authoritative. */
+      }
+    } else {
+      // Retry in the same stream: a new process, so boot state resets but
+      // the tail cursor (owned by the shared tailer) keeps flowing.
+      const stream = this.streams.get(run.childTid)!;
+      stream.booted = false;
+      stream.lastActivityAt = this.now();
+    }
     child.stdout.onData((chunk) => {
       const next = appendCapped(run.stdout, chunk, SUBAGENT_STDOUT_CAP_BYTES);
       run.stdout = next.text;
@@ -463,9 +504,15 @@ export class SubagentHost {
       run.wallTimer = null;
     }
     this.runs.delete(run.key);
+    this.streams.delete(run.childTid);
+    try {
+      this.sinks.releaseStream(run.childTid);
+    } catch {
+      /* Best-effort tailer release. */
+    }
     // The task file served every attempt; remove it so a stale handoff can
     // never launch a second run. A host crash before this leaves an orphan
-    // for the startup sweep (slice 2b).
+    // for the startup sweep.
     try {
       const dir = this.sinks.eventsDirFor(run.parentTerminalId);
       if (dir) rmSync(join(dir, run.taskFile));
@@ -495,13 +542,18 @@ export class SubagentHost {
       settledAt: this.now(),
     });
     if (dir && name) {
+      const target = join(dir, name);
+      const temp = `${target}.${randomUUID()}.tmp`;
       try {
-        const target = join(dir, name);
-        const temp = `${target}.${randomUUID()}.tmp`;
         writeFileSync(temp, body, { mode: 0o600 });
         renameSync(temp, target);
       } catch {
         /* The mailbox note below still carries the outcome. */
+        try {
+          rmSync(temp);
+        } catch {
+          /* Orphaned temps match the sweep predicate. */
+        }
       }
     }
     const headline = outcome === "settled"

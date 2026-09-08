@@ -76,6 +76,8 @@ function validTask(overrides: Record<string, unknown> = {}): Record<string, unkn
 function setup(opts: { wallMs?: number; maxAttempts?: number; backoffMs?: number[] } = {}) {
   const dir = tmp();
   const notes: Array<{ terminalId: string; note: string }> = [];
+  const watched: string[] = [];
+  const unwatched: string[] = [];
   const procs: FakeProc[] = [];
   const launches: Array<{ cmd: string; args: string[]; env: Record<string, string | undefined> }> = [];
   const launch: SubagentLauncher = (cmd, args, launchOpts) => {
@@ -91,6 +93,8 @@ function setup(opts: { wallMs?: number; maxAttempts?: number; backoffMs?: number
       coreBinary: () => "/fake/agent-core.mjs",
       sessionRootFor: async (cwd) => join(dir, "sessions", Buffer.from(cwd).toString("hex").slice(0, 16)),
       appendMailboxNote: (terminalId, note) => { notes.push({ terminalId, note }); },
+      watchStream: (id) => { watched.push(id); },
+      releaseStream: (id) => { unwatched.push(id); },
     },
     { launch, backoffMs: [5, 5], ...opts },
   );
@@ -100,7 +104,7 @@ function setup(opts: { wallMs?: number; maxAttempts?: number; backoffMs?: number
   };
   const resultFile = join(dir, "subagent-term-7-bg-1.result.json");
   const readResult = () => JSON.parse(readFileSync(resultFile, "utf8"));
-  return { dir, host, notes, procs, launches, writeTask, resultFile, readResult };
+  return { dir, host, notes, watched, unwatched, procs, launches, writeTask, resultFile, readResult };
 }
 
 describe("SubagentHost", () => {
@@ -197,6 +201,8 @@ describe("SubagentHost", () => {
     const body = s.readResult();
     expect(body.outcome).toBe("failed");
     expect(s.procs.length).toBe(3);
+    // Retries reuse the same stream: watched once, released once.
+    expect(s.watched).toEqual(["sub-term-7-bg-1"]);
   });
 
   it("kills terminate without retry", async () => {
@@ -239,6 +245,8 @@ describe("SubagentHost", () => {
         coreBinary: () => "unused",
         sessionRootFor: async () => join(dir, "sessions"),
         appendMailboxNote: (_t, note) => { notes.push(note); },
+        watchStream: () => {},
+        releaseStream: () => {},
       },
       {
         wallMs: 20000,
@@ -278,5 +286,50 @@ describe("SubagentHost", () => {
     const two = `SUBAGENT_RESULT {"ok":true,"result":"first"}\nlog\nSUBAGENT_RESULT {"ok":false,"error":"last"}\n`;
     expect(lastResultFrame(two)).toEqual({ ok: false, error: "last" });
     expect(lastResultFrame(`SUBAGENT_RESULT {broken\n`)).toBeNull();
+  });
+
+  it("tracks child streams for liveness and releases them on finish", async () => {
+    const s = setup();
+    expect(s.host.hasStream("sub-term-7-bg-1")).toBe(false);
+    s.host.noteChildEvent("sub-term-7-bg-1", "agent_start");
+    expect(s.host.streamInfo("sub-term-7-bg-1")).toBeNull();
+    s.writeTask();
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    expect(s.host.hasStream("sub-term-7-bg-1")).toBe(true);
+    expect(s.watched).toEqual(["sub-term-7-bg-1"]);
+    const before = s.host.streamInfo("sub-term-7-bg-1");
+    expect(before?.booted).toBe(false);
+    expect(before?.runId).toBe("bg-1");
+    s.host.noteChildEvent("sub-term-7-bg-1", "agent_start");
+    s.host.noteChildEvent("sub-term-7-bg-1", "tool");
+    const after = s.host.streamInfo("sub-term-7-bg-1");
+    expect(after?.booted).toBe(true);
+    expect(after!.lastActivityAt).toBeGreaterThanOrEqual(before!.lastActivityAt);
+    s.procs[0]!.out(`SUBAGENT_RESULT {"ok":true,"result":"done"}\n`);
+    s.procs[0]!.exit(0);
+    await until(() => existsSync(s.resultFile));
+    expect(s.host.hasStream("sub-term-7-bg-1")).toBe(false);
+    expect(s.unwatched).toEqual(["sub-term-7-bg-1"]);
+  });
+
+  it("kills one owner's runs and keeps the other's", async () => {
+    const s = setup();
+    for (const [term, run] of [["term-7", "bg-1"], ["term-7", "bg-2"], ["term-9", "bg-1"]] as const) {
+      const name = `subagent-${term}-${run}.task.json`;
+      writeFileSync(join(s.dir, name), JSON.stringify(validTask({ runId: run, parentTerminalId: term })), { mode: 0o600 });
+      await s.host.handleSpawn(term, run, name);
+    }
+    expect(s.host.activeCount()).toBe(3);
+    expect(s.host.killOwner("term-7", "terminal cleared")).toBe(2);
+    // Runs stay active until their children exit; the survivor is untouched.
+    expect(s.host.activeCount()).toBe(3);
+    expect(s.procs.filter((p) => p.kills.includes("group:SIGTERM")).length).toBe(2);
+    // Exit both cleared children; only the survivor keeps running.
+    for (const proc of s.procs) proc.exit(null, "SIGTERM");
+    await until(() => existsSync(join(s.dir, "subagent-term-7-bg-1.result.json")));
+    await until(() => existsSync(join(s.dir, "subagent-term-7-bg-2.result.json")));
+    await until(() => s.host.activeCount() === 1);
+    expect(existsSync(join(s.dir, "subagent-term-9-bg-1.result.json"))).toBe(false);
+    expect(s.host.killOwner("term-unknown", "x")).toBe(0);
   });
 });
