@@ -233,9 +233,12 @@ report one task, three attempts, and the correct outcome.
 
 **Current status:** The trace schema, writer lifecycle, attempt linkage, and
 unknown-value handling are implemented; focused construction checks pass for
-nullable usage and task settlement. Runtime retention/failure fixtures,
-caller-supplied correctness, and the controlled success corpus remain pending
-before any efficiency denominator is trusted.
+nullable usage and task settlement. The `scripts/trace-baseline.ts` consumer
+(fixture-tested for the one-task/three-attempt case, malformed/partial
+counting, and byte-identical reruns) reports tasks, attempts, usage, cache,
+and cost with unknown-denominator accounting. Runtime retention/failure
+fixtures, caller-supplied correctness, and the controlled success corpus
+remain pending before any efficiency denominator is trusted.
 
 ### 3. Make cache identity valid, stable, private, and role/route scoped
 
