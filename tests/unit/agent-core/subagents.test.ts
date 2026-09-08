@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -7,6 +7,7 @@ import {
   SUBAGENT_TOOL_DEFS,
   SubagentRegistry,
   appendSubagentInboxMessage,
+  clearSubagentApprovalFiles,
   formatSubagentResultFrame,
   isSubagentManagedFile,
   parseSubagentApprovalName,
@@ -488,6 +489,21 @@ describe("subagents Phase 2 handoff contract", () => {
     expect(readSubagentApprovalRequest(join(dir, "missing.json")).ok).toBe(false);
     expect(writeSubagentAckFile(dir, "sub-term-7-bg-1", "appr-1", { ok: true })).toBe(true);
     expect(writeSubagentAckFile(dir, "../x", "appr-1", { ok: true })).toBe(false);
+  });
+
+  it("clears one terminal's approval files and nothing else", () => {
+    const dir = mkdtempSync(join(tmpdir(), "subagent-clear-"));
+    roots.push(dir);
+    writeFileSync(join(dir, "subagent-term-7-bg-1.approval-appr-1.json"), "{}");
+    writeFileSync(join(dir, "subagent-term-7-bg-1.task.json"), "{}");
+    writeFileSync(join(dir, "subagent-term-9-bg-1.approval-appr-1.json"), "{}");
+    expect(clearSubagentApprovalFiles(dir, "term-7")).toBe(1);
+    expect(existsSync(join(dir, "subagent-term-7-bg-1.approval-appr-1.json"))).toBe(false);
+    expect(existsSync(join(dir, "subagent-term-7-bg-1.task.json"))).toBe(true);
+    expect(existsSync(join(dir, "subagent-term-9-bg-1.approval-appr-1.json"))).toBe(true);
+    expect(clearSubagentApprovalFiles(dir, "term-7")).toBe(0);
+    expect(clearSubagentApprovalFiles("/nonexistent-xyz", "term-7")).toBe(0);
+    expect(clearSubagentApprovalFiles(dir, "../x")).toBe(0);
   });
 
   it("appends inbox messages with sequence numbers and a cap", () => {

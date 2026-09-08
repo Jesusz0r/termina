@@ -11,7 +11,7 @@
  * exactly-once invariant is already enforced here and covered by tests.
  */
 
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   isSupportedProvider,
@@ -710,9 +710,9 @@ export function isSubagentManagedFile(name: string): boolean {
     /^subagent-[A-Za-z0-9_-]{1,128}-bg-\d{1,10}\.(task|result)\.json(\..*)?$/.test(name)
   ) return true;
   if (
-    /^subagent-[A-Za-z0-9_-]{1,128}-bg-\d{1,10}\.(approval-[A-Za-z0-9_-]{1,64}\.json|inbox\.json)$/.test(name)
+    /^subagent-[A-Za-z0-9_-]{1,128}-bg-\d{1,10}\.(approval-[A-Za-z0-9_-]{1,64}\.json|inbox\.json)(\..*)?$/.test(name)
   ) return true;
-  if (/^ack-sub-[A-Za-z0-9_-]{1,64}-bg-\d{1,10}-appr-[A-Za-z0-9_-]{1,64}\.json$/.test(name)) return true;
+  if (/^ack-sub-[A-Za-z0-9_-]{1,64}-bg-\d{1,10}-appr-[A-Za-z0-9_-]{1,64}\.json(\..*)?$/.test(name)) return true;
   const stream = name.startsWith(".") ? name.slice(1) : name;
   if (stream.startsWith("cursor-")) {
     return SUBAGENT_STREAM_RE.test(stream.slice("cursor-".length).replace(/\.json$/, ""));
@@ -786,6 +786,34 @@ export interface SubagentApprovalRequest {
 export function subagentApprovalRequestName(parentTerminalId: string, runId: string, reqId: string): string | null {
   if (!TERMINAL_RE.test(parentTerminalId) || !RUN_RE.test(runId) || !REQ_RE.test(reqId)) return null;
   return `subagent-${parentTerminalId}-${runId}.approval-${reqId}.json`;
+}
+
+/**
+ * Delete one terminal's approval request files (called on `/clear` so a new
+ * session never re-offers approvals for killed children). Returns the count
+ * removed. Runs themselves stay for reconcile to settle via killed results.
+ */
+export function clearSubagentApprovalFiles(dir: string, terminalId: string): number {
+  if (!dir || !TERMINAL_RE.test(terminalId)) return 0;
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  const prefix = `subagent-${terminalId}-`;
+  let removed = 0;
+  for (const name of names) {
+    if (!name.startsWith(prefix) || !name.includes(".approval-")) continue;
+    if (!parseSubagentApprovalName(terminalId, name)) continue;
+    try {
+      rmSync(join(dir, name));
+      removed += 1;
+    } catch {
+      /* Dead letter stays for the startup sweep. */
+    }
+  }
+  return removed;
 }
 
 /** Parse one approval request filename. Pure and unit-tested. */

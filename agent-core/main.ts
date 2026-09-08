@@ -173,6 +173,7 @@ import {
 import {
   SubagentRegistry,
   appendSubagentInboxMessage,
+  clearSubagentApprovalFiles,
   formatSubagentResultFrame,
   parseSubagentApprovalName,
   parseSubagentTaskFile,
@@ -4420,7 +4421,10 @@ async function requestParentApproval(kind: "bash" | "protected", text: string): 
   const childTid = subagentChildTid(parentTid, run.task.runId);
   if (!childTid) return false;
   subagentApprovalSeq += 1;
-  const reqId = `appr-${Date.now().toString(36)}-${subagentApprovalSeq}`;
+  // The pid separates retried attempts (fresh processes reset the counter);
+  // without it two attempts in the same millisecond could share a reqId and
+  // the parent's pending-set would hide the second request forever.
+  const reqId = `appr-${process.pid.toString(36)}-${Date.now().toString(36)}-${subagentApprovalSeq}`;
   const written = writeSubagentApprovalRequest(eventsDir, parentTid, run.task.runId, { reqId, kind, text });
   if (!written.ok) return false;
   const ack = await waitForAck(eventsDir, childTid, reqId, subagentApprovalTimeoutMs(), childTid, {
@@ -4468,6 +4472,16 @@ async function queueApproval(confirm: () => Promise<boolean>): Promise<boolean> 
 
 /** Approval requests already queued or answered this session (no double pickers). */
 const pendingSubagentApprovals = new Set<string>();
+
+/** Drop this session's approval queue state (called on `/clear`). Runs stay
+ *  for reconcile to settle via their killed results; only the picker queue
+ *  and dead request files go, so a cleared session never re-offers approvals
+ *  for children the host just killed. */
+function clearSubagentApprovals(): void {
+  pendingSubagentApprovals.clear();
+  if (!eventsDir || !terminalId) return;
+  clearSubagentApprovalFiles(eventsDir, terminalId);
+}
 
 /**
  * Parent side of child approvals (Phase 3). Once per turn, surface fresh
@@ -4519,7 +4533,20 @@ function pollSubagentApprovals(): void {
     }
     const kind = req.file.kind;
     const text = req.file.text;
+    const createdAt = req.file.createdAt;
     void queueApproval(async () => {
+      // Re-check freshness: a request queued behind other pickers may have
+      // outlived the child's wait. Asking about a dead request wastes
+      // attention and writes an orphan ack.
+      if (Date.now() - createdAt >= timeout) {
+        try {
+          rmSync(join(eventsDir, name));
+        } catch {
+          /* Dead letter stays for the startup sweep. */
+        }
+        pendingSubagentApprovals.delete(key);
+        return false;
+      }
       const question = kind === "bash"
         ? `Subagent ${runId} asks to run bash: ${text.slice(0, 160)}`
         : `Subagent ${runId} asks to edit protected file: ${text.slice(0, 160)}`;
@@ -8681,6 +8708,7 @@ function dispatchLine(line: string): void {
     storageSeq = 0;
     history.length = 0;
     lastHandoff = null;
+    clearSubagentApprovals();
     rotateCacheSession();
     sessionUsage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0 };
     lastUsd = null;
