@@ -405,6 +405,62 @@ export function subagentSpawnSidecarRecord(runId: string, taskFile: string): Rec
   return { t: SUBAGENT_SPAWN_RECORD, runId, taskFile };
 }
 
+// ---- Phase 2 slice 2a: child result framing (engine stdout → host) ----
+//
+// The headless child prints its full transcript on stdout (like `-p`) and,
+// last, exactly one framed line. The host takes the LAST framed line, so
+// model text can never collide with it: nothing is printed after it unless
+// the child crashes, in which case there is no frame and the run fails.
+
+/** stdout sentinel starting the child's final framed line. */
+export const SUBAGENT_RESULT_PREFIX = "SUBAGENT_RESULT ";
+
+export interface SubagentResultFrame {
+  ok: boolean;
+  result?: string;
+  error?: string;
+}
+
+export function formatSubagentResultFrame(frame: SubagentResultFrame): string {
+  return `${SUBAGENT_RESULT_PREFIX}${JSON.stringify(frame)}`;
+}
+
+export function parseSubagentResultFrame(line: string): SubagentResultFrame | null {
+  if (!line.startsWith(SUBAGENT_RESULT_PREFIX)) return null;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(line.slice(SUBAGENT_RESULT_PREFIX.length));
+  } catch {
+    return null;
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const v = raw as Record<string, unknown>;
+  if (typeof v.ok !== "boolean") return null;
+  if (v.result !== undefined && typeof v.result !== "string") return null;
+  if (v.error !== undefined && typeof v.error !== "string") return null;
+  return { ok: v.ok, ...(typeof v.result === "string" ? { result: v.result } : {}), ...(typeof v.error === "string" ? { error: v.error } : {}) };
+}
+
+/** Cut text at a UTF-8 boundary so byte caps never split a character. */
+export function truncateUtf8(text: string, maxBytes: number): string {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= maxBytes) return text;
+  let end = maxBytes;
+  // Back over continuation bytes to the lead byte of the cut character.
+  while (end > 0 && (buf[end]! & 0xc0) === 0x80) end -= 1;
+  if (end > 0 && (buf[end]! & 0x80) !== 0) {
+    // Drop the cut character unless its full encoding fits the budget.
+    const lead = buf[end]!;
+    const width = lead < 0x80 ? 1 : lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4;
+    if (end + width > maxBytes) {
+      // end already excludes it: [0, end) holds only complete characters.
+    } else {
+      end += width;
+    }
+  }
+  return buf.toString("utf8", 0, end);
+}
+
 function normalizeClaimPath(raw: unknown): { ok: true; path: string } | { ok: false; error: string } {
   if (typeof raw !== "string") return { ok: false, error: "spawn_subagent paths must be strings" };
   // Collapse duplicate slashes and resolve `.` segments so `./x`, `a//b`,

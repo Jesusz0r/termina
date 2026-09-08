@@ -61,6 +61,7 @@ import {
   taskIsComplete,
 } from "./plan-board.js";
 import { AppPreferencesStore } from "./preferences.js";
+import { SubagentHost } from "./subagents.js";
 import { listSessionJsonl, mergeSessionFiles, searchSessionFiles, sessionFileEntry, type SessionFileEntry } from "./session-search.js";
 import { searchProjectFiles } from "./quick-open.js";
 import { appendPendingImages, MAX_PENDING_IMAGES, pendingImageState } from "../agent-core/host.js";
@@ -226,6 +227,14 @@ function cleanEnv(): Record<string, string | undefined> {
   // the user to upgrade, but that command cannot change the pin.
   env.PI_SKIP_VERSION_CHECK = "1";
   return env;
+}
+
+/**
+ * Bundled agent-core entry. ELECTRON_RUN_AS_NODE cannot read inside the
+ * asar; spawn the unpacked copy (same rule as pi's cli.js).
+ */
+function coreEngineBinary(): string {
+  return join(__dirname, "agent-core.mjs").replace("app.asar", "app.asar.unpacked");
 }
 
 /**
@@ -607,6 +616,17 @@ class PiEditorApp {
   /** True only when the persisted root provenance matched this launch. */
   private eventsDirProvenanceTrusted = false;
   private tailer = new SidecarTailer(this.eventsDir);
+  /** Headless background subagent runs (SUBAGENTS-PLAN.md Phase 2). */
+  private subagents = new SubagentHost({
+    eventsDirFor: (terminalId) => {
+      const inst = this.terminals.get(terminalId);
+      return inst ? this.eventsDirOf(inst) : null;
+    },
+    baseEnv: () => cleanEnv(),
+    coreBinary: () => coreEngineBinary(),
+    sessionRootFor: (cwd) => this.coreProjectSessionDir(cwd),
+    appendMailboxNote: (terminalId, note) => this.appendMailboxNote(terminalId, note),
+  });
   private paintWatchdog: ReturnType<typeof setInterval> | null = null;
   private appUpdater: AppUpdateController | null = null;
   private installingUpdate = false;
@@ -1701,7 +1721,7 @@ class PiEditorApp {
       primaryEventsDir: this.eventsDir,
       bridgePath: this.bridgePath(),
       piBin: this.resolvePiBin(),
-      agentCorePath: join(__dirname, "agent-core.mjs").replace("app.asar", "app.asar.unpacked"),
+      agentCorePath: coreEngineBinary(),
       electronExecPath: process.execPath,
       candidateEnv: (provider) => candidateEnv(provider),
       showThinking: () => this.preferences.showThinking,
@@ -1714,7 +1734,7 @@ class PiEditorApp {
         const out: string[] = [dirname(dirname(dirname(dirname(this.resolvePiBin()))))];
         out.push(process.execPath);
         out.push(dirname(dirname(process.execPath)));
-        const corePath = join(__dirname, "agent-core.mjs").replace("app.asar", "app.asar.unpacked");
+        const corePath = coreEngineBinary();
         out.push(corePath, dirname(corePath));
         const node = this.findOnPath("node") ?? process.execPath;
         out.push(node, dirname(node));
@@ -3050,7 +3070,7 @@ class PiEditorApp {
       // as pi's cli.js).
       cmd = process.execPath;
       args = [
-        join(__dirname, "agent-core.mjs").replace("app.asar", "app.asar.unpacked"),
+        coreEngineBinary(),
         ...thinkingStartupArgs(this.preferences.showThinking),
       ];
       if (persist) {
@@ -4827,6 +4847,15 @@ class PiEditorApp {
         this.sendTimelinePrefix(inst, rendererTarget);
         // The tool finished: schedule the moment capture for its dots.
         if (inst.currentRun) this.scheduleMomentCapture(inst, rendererTarget);
+        break;
+      }
+      case "subagent_spawn": {
+        // The parent validated the spawn; the host owns everything after.
+        // Unknown terminals were already rejected at admission, so this is
+        // always a live owner. Never blocks the sidecar queue.
+        const runId = typeof event.runId === "string" ? event.runId : "";
+        const taskFile = typeof event.taskFile === "string" ? event.taskFile : "";
+        if (runId && taskFile) void this.subagents.handleSpawn(terminalId, runId, taskFile);
         break;
       }
     }

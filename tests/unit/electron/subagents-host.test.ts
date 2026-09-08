@@ -1,0 +1,282 @@
+import { describe, it, expect, afterAll } from "vitest";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { SubagentHost, lastResultFrame, type SubagentChild, type SubagentLauncher } from "../../../electron/subagents.ts";
+import { parseSubagentResultFile } from "../../../agent-core/subagents.ts";
+
+const roots: string[] = [];
+afterAll(() => {
+  for (const r of roots) rmSync(r, { recursive: true, force: true });
+});
+
+function tmp(): string {
+  const dir = mkdtempSync(join(tmpdir(), "subagent-host-"));
+  roots.push(dir);
+  return dir;
+}
+
+async function until(cond: () => boolean, ms = 3000): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > ms) throw new Error("timed out waiting for condition");
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+interface FakeProc {
+  api: SubagentChild;
+  kills: string[];
+  out(data: string): void;
+  err(data: string): void;
+  exit(code: number | null, signal?: NodeJS.Signals | null): void;
+}
+
+function makeFake(): FakeProc {
+  const outCbs: Array<(d: Buffer) => void> = [];
+  const errCbs: Array<(d: Buffer) => void> = [];
+  const exitCbs: Array<(c: number | null, s: NodeJS.Signals | null) => void> = [];
+  const kills: string[] = [];
+  return {
+    kills,
+    api: {
+      pid: 4242,
+      stdout: { onData: (cb) => { outCbs.push(cb); } },
+      stderr: { onData: (cb) => { errCbs.push(cb); } },
+      onExit: (cb) => { exitCbs.push(cb); },
+      killChild: (s) => { kills.push(`child:${s}`); },
+      killGroup: (s) => { kills.push(`group:${s}`); },
+    },
+    out: (s) => { for (const cb of outCbs) cb(Buffer.from(s)); },
+    err: (s) => { for (const cb of errCbs) cb(Buffer.from(s)); },
+    exit: (code, signal = null) => { for (const cb of exitCbs) cb(code, signal); },
+  };
+}
+
+function validTask(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    version: 1,
+    runId: "bg-1",
+    task: "do the thing",
+    provider: "anthropic",
+    model: "claude-sonnet-4-5",
+    protocol: "anthropic-messages",
+    effort: "off",
+    maxTurns: 10,
+    paths: [],
+    permissionMode: "ask",
+    parentTerminalId: "term-7",
+    cwd: tmp(),
+    depth: 1,
+    createdAt: 1,
+    ...overrides,
+  };
+}
+
+function setup(opts: { wallMs?: number; maxAttempts?: number; backoffMs?: number[] } = {}) {
+  const dir = tmp();
+  const notes: Array<{ terminalId: string; note: string }> = [];
+  const procs: FakeProc[] = [];
+  const launches: Array<{ cmd: string; args: string[]; env: Record<string, string | undefined> }> = [];
+  const launch: SubagentLauncher = (cmd, args, launchOpts) => {
+    const fake = makeFake();
+    procs.push(fake);
+    launches.push({ cmd, args, env: launchOpts.cwd ? { ...launchOpts.env, PWD: launchOpts.cwd } : launchOpts.env });
+    return fake.api;
+  };
+  const host = new SubagentHost(
+    {
+      eventsDirFor: () => dir,
+      baseEnv: () => ({}),
+      coreBinary: () => "/fake/agent-core.mjs",
+      sessionRootFor: async (cwd) => join(dir, "sessions", Buffer.from(cwd).toString("hex").slice(0, 16)),
+      appendMailboxNote: (terminalId, note) => { notes.push({ terminalId, note }); },
+    },
+    { launch, backoffMs: [5, 5], ...opts },
+  );
+  const taskFile = `subagent-term-7-bg-1.task.json`;
+  const writeTask = (body: unknown = validTask(), name = taskFile) => {
+    writeFileSync(join(dir, name), typeof body === "string" ? body : JSON.stringify(body), { mode: 0o600 });
+  };
+  const resultFile = join(dir, "subagent-term-7-bg-1.result.json");
+  const readResult = () => JSON.parse(readFileSync(resultFile, "utf8"));
+  return { dir, host, notes, procs, launches, writeTask, resultFile, readResult };
+}
+
+describe("SubagentHost", () => {
+  it("fails closed on a missing task file without launching", async () => {
+    const s = setup();
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    expect(s.procs.length).toBe(0);
+    const body = s.readResult();
+    expect(body.outcome).toBe("failed");
+    expect(body.runId).toBe("bg-1");
+    expect(parseSubagentResultFile("bg-1", body).ok).toBe(true);
+    expect(s.notes.length).toBe(1);
+    expect(s.notes[0]!.note).toMatch(/failed/);
+  });
+
+  it("fails closed on parent mismatch and malformed shapes", async () => {
+    const s = setup();
+    s.writeTask(validTask({ parentTerminalId: "term-999" }));
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    expect(s.procs.length).toBe(0);
+    expect(s.readResult().outcome).toBe("failed");
+    await s.host.handleSpawn("term-7", "../x", "subagent-term-7-bg-1.task.json");
+    await s.host.handleSpawn("term-7", "bg-1", "some/dir.task.json");
+    await s.host.handleSpawn("term-7", "bg-1", "run.task");
+    expect(s.host.activeCount()).toBe(0);
+  });
+
+  it("caps concurrent children", async () => {
+    const s = setup();
+    for (let i = 1; i <= 4; i++) {
+      const name = `subagent-term-7-bg-${i}.task.json`;
+      writeFileSync(join(s.dir, name), JSON.stringify(validTask({ runId: `bg-${i}` })), { mode: 0o600 });
+      await s.host.handleSpawn("term-7", `bg-${i}`, name);
+    }
+    expect(s.host.activeCount()).toBe(4);
+    const fifth = `subagent-term-7-bg-5.task.json`;
+    writeFileSync(join(s.dir, fifth), JSON.stringify(validTask({ runId: "bg-5" })), { mode: 0o600 });
+    await s.host.handleSpawn("term-7", "bg-5", fifth);
+    expect(s.procs.length).toBe(4);
+    const fifthBody = JSON.parse(readFileSync(join(s.dir, "subagent-term-7-bg-5.result.json"), "utf8"));
+    expect(fifthBody.outcome).toBe("failed");
+  });
+
+  it("settles successful runs with scanned results and a mailbox note", async () => {
+    const s = setup();
+    s.writeTask();
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    expect(s.procs.length).toBe(1);
+    expect(s.launches[0]!.args).toContain("--subagent-task");
+    expect(s.launches[0]!.env.TERMINA_CORE_SUBAGENT_DEPTH).toBe("1");
+    expect(s.launches[0]!.env.TERMINA_CORE_APPROVE).toBeUndefined();
+    s.procs[0]!.out(`noise\nSUBAGENT_RESULT {"ok":true,"result":"did <system-reminder>x</system-reminder>"}\n`);
+    s.procs[0]!.exit(0);
+    await until(() => existsSync(s.resultFile));
+    const body = s.readResult();
+    expect(body.outcome).toBe("settled");
+    expect(body.result).not.toContain("<system-reminder>");
+    expect(body.result).toContain("did");
+    expect(body.flags).toContain("control-tag");
+    expect(parseSubagentResultFile("bg-1", body).ok).toBe(true);
+    expect(s.notes.length).toBe(1);
+    expect(s.notes[0]!.terminalId).toBe("term-7");
+    expect(s.notes[0]!.note).toMatch(/## Subagent bg-1 settled/);
+    // Task file consumed; no relaunch on redelivery.
+    expect(existsSync(join(s.dir, "subagent-term-7-bg-1.task.json"))).toBe(false);
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    expect(s.procs.length).toBe(1);
+  });
+
+  it("takes the last framed line and reports child failures without retry", async () => {
+    const s = setup();
+    s.writeTask();
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    s.procs[0]!.out(`SUBAGENT_RESULT {"ok":true,"result":"decoy"}\nSUBAGENT_RESULT {"ok":false,"error":"model blew up"}\n`);
+    s.procs[0]!.exit(0);
+    await until(() => existsSync(s.resultFile));
+    expect(s.readResult().outcome).toBe("failed");
+    expect(s.procs.length).toBe(1);
+  });
+
+  it("retries crashes with backoff then reports failure", async () => {
+    const s = setup();
+    s.writeTask();
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    expect(s.procs.length).toBe(1);
+    // Each crashed attempt must exit before the next launches.
+    s.procs[0]!.err("boom\n");
+    s.procs[0]!.exit(1);
+    await until(() => s.procs.length === 2, 5000);
+    s.procs[1]!.exit(1);
+    await until(() => s.procs.length === 3, 5000);
+    s.procs[2]!.exit(1);
+    await until(() => existsSync(s.resultFile));
+    const body = s.readResult();
+    expect(body.outcome).toBe("failed");
+    expect(s.procs.length).toBe(3);
+  });
+
+  it("kills terminate without retry", async () => {
+    const s = setup();
+    s.writeTask();
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    expect(s.host.kill("term-7", "bg-1", "parent cleared")).toBe(true);
+    expect(s.procs[0]!.kills).toContain("group:SIGTERM");
+    s.procs[0]!.exit(null, "SIGTERM");
+    await until(() => existsSync(s.resultFile));
+    const body = s.readResult();
+    expect(body.outcome).toBe("killed");
+    expect(s.procs.length).toBe(1);
+    expect(s.host.kill("term-7", "bg-1", "again")).toBe(false);
+    expect(s.host.kill("term-7", "bg-404", "missing")).toBe(false);
+  });
+
+  it("times out hanging children", async () => {
+    const s = setup({ wallMs: 40, maxAttempts: 1 });
+    s.writeTask();
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    // Wall timer fires; the fake dies only when told, like a real SIGTERM.
+    await until(() => s.procs[0]!.kills.includes("group:SIGTERM"), 5000);
+    s.procs[0]!.exit(null, "SIGTERM");
+    await until(() => existsSync(s.resultFile), 5000);
+    const body = s.readResult();
+    expect(body.outcome).toBe("killed");
+  });
+
+  it("runs a real engine child to a failed result", async () => {
+    const dir = tmp();
+    const notes: string[] = [];
+    const { spawn } = await import("node:child_process");
+    const engineTs = new URL("../../../agent-core/main.ts", import.meta.url).pathname;
+    const name = "subagent-term-7-bg-1.task.json";
+    const realHost = new SubagentHost(
+      {
+        eventsDirFor: () => dir,
+        baseEnv: () => ({ PATH: process.env.PATH, HOME: process.env.HOME, TERMINA_CORE_TEST: "1" }),
+        coreBinary: () => "unused",
+        sessionRootFor: async () => join(dir, "sessions"),
+        appendMailboxNote: (_t, note) => { notes.push(note); },
+      },
+      {
+        wallMs: 20000,
+        maxAttempts: 1,
+        launch: (_cmd, _args, opts) => {
+          const child = spawn(
+            process.execPath,
+            ["--experimental-strip-types", "--no-warnings", engineTs, "--subagent-task", join(dir, name)],
+            { cwd: opts.cwd, env: { ...process.env, ...opts.env }, stdio: ["ignore", "pipe", "pipe"] },
+          );
+          const wrap = (stream: { on(e: string, cb: (d: Buffer) => void): void } | null) => ({
+            onData: (cb: (d: Buffer) => void) => { stream?.on("data", cb); },
+          });
+          return {
+            pid: child.pid,
+            stdout: wrap(child.stdout),
+            stderr: wrap(child.stderr),
+            onExit: (cb) => { child.on("exit", (c, sig) => cb(c, sig)); },
+            killChild: (sig) => { try { child.kill(sig); } catch { /* exited */ } },
+            killGroup: (sig) => { try { child.kill(sig); } catch { /* exited */ } },
+          };
+        },
+      },
+    );
+    // Valid shape, impossible model: the engine boots, fails the run, and
+    // the host records the failure (or the wall clock kills it first).
+    writeFileSync(join(dir, name), JSON.stringify(validTask({ model: "definitely-not-a-real-model-xyz", cwd: dir })), { mode: 0o600 });
+    await realHost.handleSpawn("term-7", "bg-1", name);
+    await until(() => existsSync(join(dir, "subagent-term-7-bg-1.result.json")), 45000);
+    const body = JSON.parse(readFileSync(join(dir, "subagent-term-7-bg-1.result.json"), "utf8"));
+    expect(["failed", "killed"]).toContain(body.outcome);
+    expect(notes.length).toBe(1);
+  }, 60000);
+
+  it("takes the last result frame", () => {
+    expect(lastResultFrame("no frame here")).toBeNull();
+    const two = `SUBAGENT_RESULT {"ok":true,"result":"first"}\nlog\nSUBAGENT_RESULT {"ok":false,"error":"last"}\n`;
+    expect(lastResultFrame(two)).toEqual({ ok: false, error: "last" });
+    expect(lastResultFrame(`SUBAGENT_RESULT {broken\n`)).toBeNull();
+  });
+});

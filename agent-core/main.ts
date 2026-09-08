@@ -172,11 +172,16 @@ import {
 } from "./tool-output.ts";
 import {
   SubagentRegistry,
+  formatSubagentResultFrame,
+  parseSubagentTaskFile,
   reconcileSubagentRuns,
   subagentDepthFromEnv,
   subagentSpawnSidecarRecord,
+  truncateUtf8,
   visibleSubagentTools,
   writeSubagentTaskFile,
+  MAX_SUBAGENT_RESULT_CHARS,
+  type SubagentTaskFile,
 } from "./subagents.ts";
 import {
   estimateReclaimTokens,
@@ -327,6 +332,18 @@ export function parsePrintPrompt(argv: string[]): string | null {
   if (i < 0) return null;
   return argv.slice(i + 1).join(" ").trim();
 }
+
+/** Headless subagent child mode: `--subagent-task <task-file>` (Phase 2). */
+export function parseSubagentTaskFlag(argv: string[]): string | null {
+  const i = argv.findIndex((a) => a === "--subagent-task");
+  if (i < 0) return null;
+  return (argv[i + 1] ?? "").trim();
+}
+
+/** Active headless child run. Null everywhere except `--subagent-task`. */
+let activeSubagent: { task: SubagentTaskFile; turns: number; partial: boolean } | null = null;
+/** Last settled run outcome, for the subagent result frame. Set at the single settle point. */
+let lastRunOutcome: { status: string; failure: string | null } | null = null;
 
 let effortWanted: EffortLevel = "medium";
 let currentWorkingSetHash: string | null = null;
@@ -3029,6 +3046,15 @@ export function isTerminalTraceAttemptStatus(status: string): boolean {
   return status !== "retrying" && status !== "fallback" && status !== "overflow";
 }
 
+/**
+ * Bare provider stream terminations (observed as `response.failed` with the
+ * message `terminated`, e.g. on the Codex relay) carry no actionable detail
+ * and are worth exactly one immediate retry with identical bytes.
+ */
+export function isRetriableProviderTermination(message: string): boolean {
+  return /^terminated$/i.test(message.trim());
+}
+
 type TraceTaskState = {
   runId: string;
   taskId: string;
@@ -3238,6 +3264,7 @@ async function writeTraceAttempt(
     cache: TraceCacheDiagnostics | null;
     toolOutcomes?: readonly unknown[];
     reclaimEvidence?: unknown;
+    providerError?: string | null;
   },
 ): Promise<void> {
   if (!attempt || attempt.traceWriteComplete) return;
@@ -3281,6 +3308,7 @@ async function writeTraceAttempt(
     revisions: { count: fields.revisions, kinds: fields.revisionKinds },
     wasteTokens: fields.wasteTokens,
     wasteCause: fields.wasteCause,
+    providerError: fields.providerError ?? null,
   };
   try {
     let outcome = await traceRuntime.writeAttempt(input);
@@ -3594,6 +3622,7 @@ async function writeMainTrace(opts: {
   attempt?: TraceAttemptState | null;
   toolOutcomes?: readonly unknown[];
   reclaimEvidence?: unknown;
+  providerError?: string | null;
 }): Promise<void> {
   const w = opts.waste;
   const reclaimEvidence = opts.reclaimEvidence === undefined
@@ -3624,6 +3653,7 @@ async function writeMainTrace(opts: {
     cache: opts.cache,
     toolOutcomes: opts.toolOutcomes,
     reclaimEvidence,
+    providerError: opts.providerError ?? null,
   });
 }
 
@@ -7052,6 +7082,72 @@ function logSettings(): void {
   });
 }
 
+/** Final assistant text of the run, for the subagent result frame. */
+function lastAssistantText(): string {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i]!;
+    if (m.role === "assistant") return visibleAssistantText(m.content as Array<{ type?: string; text?: string }>);
+  }
+  return "";
+}
+
+/**
+ * Headless subagent child entry (Phase 2): configure the route from the
+ * validated task file, run to settlement, print exactly one framed result
+ * line on stdout, and exit. Stdout keeps the full `-p`-style transcript;
+ * the host takes the LAST framed line, so model text cannot collide with it.
+ */
+async function runSubagentTask(taskPath: string): Promise<never> {
+  const fail = async (message: string): Promise<never> => {
+    process.stderr.write(`agent-core: subagent task failed: ${message}\n`);
+    try {
+      await shutdownAgentCore({ reason: "subagent-invalid" });
+    } catch {
+      /* Shutdown is best-effort on a failed start. */
+    }
+    process.exit(2);
+  };
+  if (!taskPath) await fail("missing task file path");
+  let raw: string;
+  try {
+    raw = readFileSync(taskPath, "utf8");
+  } catch (err) {
+    await fail(`cannot read task file: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw!);
+  } catch {
+    await fail("task file is not JSON");
+  }
+  const checked = parseSubagentTaskFile(parsed);
+  if (!checked.ok) await fail(checked.error);
+  const task = (checked as { ok: true; file: SubagentTaskFile }).file;
+  route = { provider: task.provider, model: task.model };
+  effortWanted = task.effort;
+  if (!process.env.TERMINA_CORE_SUMMARY_MODEL) {
+    summaryRoute = parseModelRef(DEFAULT_MODELS[task.provider].summary, task.provider);
+  }
+  activeSubagent = { task, turns: 0, partial: false };
+  lastRunOutcome = null;
+  await runPrompt(task.task);
+  // `as`: the settle-point assignment inside runPrompt is invisible to flow
+  // analysis, which would otherwise keep the pre-run `null` narrowing.
+  const outcome = lastRunOutcome as { status: string; failure: string | null } | null;
+  const frame = outcome && outcome.status === "success"
+    ? {
+      ok: true as const,
+      result: truncateUtf8(
+        `${activeSubagent.partial ? `[partial: turn budget reached after ${activeSubagent.turns} model turns]\n\n` : ""}${lastAssistantText()}`,
+        MAX_SUBAGENT_RESULT_CHARS,
+      ),
+    }
+    : { ok: false as const, error: outcome?.failure ?? "no settlement" };
+  process.stdout.write(`${formatSubagentResultFrame(frame)}\n`);
+  await shutdownAgentCore({ reason: "subagent" });
+  process.exit(frame.ok ? 0 : 1);
+}
+
 async function runPrompt(prompt: string, extraImages: Array<{ name: string; mediaType: string }> = []): Promise<void> {
   if (shutdownRequested) return;
   if (modelAvailabilityError) {
@@ -7264,6 +7360,8 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   let taskOutcomeStatus = "success";
   let toolErrorObserved = false;
   let retriedOverflow = false;
+  let retriedProviderTermination = false;
+  let terminatedDiagnostics: string | null = null;
   let resumePaused = false;
   let pauseTurnContinuations = 0;
   let lastPlanText = "";
@@ -7303,9 +7401,11 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       } catch (err) {
         const streamFailure = err instanceof ProviderStreamLimitError ? err : null;
         const failedAttempt = inFlightTraceAttempt;
+        const providerMessage = err instanceof Error ? err.message : String(err);
+        const failedTurnMs = Math.max(0, Date.now() - callStarted);
         // Emergency mid-turn revision: the provider
         // rejected the window; reclaim hard and retry exactly once.
-        if (!retriedOverflow && /prompt is too long|maximum context|context_length/i.test(String((err as Error).message))) {
+        if (!retriedOverflow && /prompt is too long|maximum context|context_length/i.test(providerMessage)) {
           await writeMainTrace({ status: "overflow", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: streamFailure?.cache ?? null, started: callStarted, attempt: failedAttempt });
           retriedOverflow = true;
           await reclaim();
@@ -7329,6 +7429,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       }
       const admissionError = providerToolAdmissionError(result.blocks);
       if (admissionError) throw new Error(admissionError);
+      if (activeSubagent) activeSubagent.turns += 1;
       const sys = systemPrompt();
       if (!result.usage) resetUsageContinuity();
       const waste = result.usage
@@ -7369,6 +7470,18 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       const uses = (result.blocks.filter((b) => b.type === "tool_use") as Extract<Block, { type: "tool_use" }>[]).map(
         (b): ToolUse => ({ id: b.id, name: b.name, input: b.input }),
       );
+      if (activeSubagent && uses.length > 0 && !interrupted && activeSubagent.turns >= activeSubagent.task.maxTurns) {
+        // Turn budget trip: answer the open calls so the persisted session
+        // stays well-formed, mark partial, and settle. The child session is
+        // disposable; the marking tells the parent what happened.
+        activeSubagent.partial = true;
+        out(`\n(subagent turn budget reached after ${activeSubagent.turns} model turns; settling partial)\n`);
+        pushMessage(
+          "user",
+          uses.map((u) => done(u, "(subagent turn budget reached; settle with what you have)", true).result as ContentBlock),
+        );
+        break;
+      }
       if (uses.length === 0) {
         const pauseTurn = result.stopReason === "pause_turn" && !interrupted;
         const pauseLimitReached = pauseTurn && pauseTurnContinuations >= MAX_PAUSE_TURN_CONTINUATIONS;
@@ -7514,6 +7627,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     taskId: traceTask.taskId,
     error: storageFailure ?? taskFailure,
   });
+  lastRunOutcome = { status: taskOutcomeStatus, failure: storageFailure ?? taskFailure };
   if (!storageFailure && eventsDir && terminalId) {
     const requestId = randomUUID();
     logEvent({
@@ -8619,6 +8733,11 @@ async function main(): Promise<void> {
         out(`\nengine error: ${(err as Error).message}\n`);
         showPrompt();
       });
+    return;
+  }
+  const subagentTaskPath = parseSubagentTaskFlag(process.argv);
+  if (subagentTaskPath !== null) {
+    await runSubagentTask(subagentTaskPath);
     return;
   }
   const printed = parsePrintPrompt(process.argv);

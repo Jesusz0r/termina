@@ -6,7 +6,9 @@ import {
   MAX_SUBAGENT_RUNS,
   SUBAGENT_TOOL_DEFS,
   SubagentRegistry,
+  formatSubagentResultFrame,
   parseSubagentResultFile,
+  parseSubagentResultFrame,
   parseSubagentTaskFile,
   readSubagentResultFile,
   reconcileSubagentRuns,
@@ -16,6 +18,7 @@ import {
   subagentResultFileName,
   subagentSpawnSidecarRecord,
   subagentTaskFileName,
+  truncateUtf8,
   visibleSubagentTools,
   writeSubagentTaskFile,
   type SubagentParent,
@@ -396,5 +399,27 @@ describe("subagents Phase 2 handoff contract", () => {
       runId: "bg-3",
       taskFile: "subagent-term-7-bg-3.task.json",
     });
+  });
+
+  it("frames results on one line and rejects garbage", () => {
+    const line = formatSubagentResultFrame({ ok: true, result: "a\nb" });
+    expect(line.startsWith("SUBAGENT_RESULT ")).toBe(true);
+    expect(line).not.toContain("\n");
+    expect(parseSubagentResultFrame(line)).toEqual({ ok: true, result: "a\nb" });
+    expect(parseSubagentResultFrame("SUBAGENT_RESULT {broken")).toBeNull();
+    expect(parseSubagentResultFrame("noise")).toBeNull();
+    expect(parseSubagentResultFrame("SUBAGENT_RESULT []")).toBeNull();
+  });
+
+  it("truncates at UTF-8 boundaries", () => {
+    expect(truncateUtf8("hello", 10)).toBe("hello");
+    expect(truncateUtf8("hello world", 5)).toBe("hello");
+    // "é" is 2 bytes: a 3-byte budget keeps nothing rather than half a char.
+    expect(truncateUtf8("aé", 2)).toBe("a");
+    expect(truncateUtf8("aé", 3)).toBe("aé");
+    // Emoji is 4 bytes.
+    const cut = truncateUtf8("ab😀cd", 5);
+    expect(cut).toBe("ab");
+    expect(Buffer.byteLength(cut, "utf8")).toBeLessThanOrEqual(5);
   });
 });
