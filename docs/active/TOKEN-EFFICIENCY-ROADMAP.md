@@ -518,9 +518,7 @@ with the current contract and live response. The numeric fixtures are not
 repository facts.
 
 **Current status:** Deterministic marker placement, four-marker capping, and
-trace marker metadata are implemented. Eligible-block effectiveness, provider
-acceptance, OpenAI's unresolved 50-vs-80 limit, and cache-write/cost impact
-remain live route/model and corpus evidence gates.
+trace marker metadata are implemented. Live 2026-09-09 (`scripts/codex-breakpoint-probe.ts`): the Codex backend-api route rejects even one explicit marker (400, not supported on this model), so the 50-vs-80 question is moot there and the serializer correctly withholds markers. Eligible-block effectiveness, provider acceptance elsewhere, OpenAI's unresolved 50-vs-80 limit on supporting routes, and cache-write/cost impact remain live route/model and corpus evidence gates.
 
 ### 9. Treat cache thresholds and TTLs as experiments, not constants
 
@@ -561,9 +559,7 @@ and unknown-cost exclusions. Revalidate provider fields, prices, thresholds,
 and retention immediately before any activation or shipping.
 
 **Current status:** Deterministic route gating, nullable usage mapping, and
-rate-provenance plumbing are implemented. TTL acceptance, cache-write/storage
-pricing, live price snapshots, and cost reduction remain pending external and
-corpus evidence.
+rate-provenance plumbing are implemented. Live 2026-09-09 (`scripts/xai-cache-probe.ts`, grok-4.6): the `x-grok-conv-id` session header is accepted and effective — a repeated ~2.3k-token prefix billed input 2261→85 with cacheRead 640→2816, still warm after a 30s gap; cacheWrite stays null. TTL acceptance beyond 30s, cache-write/storage pricing, live price snapshots, and cost reduction remain pending external and corpus evidence.
 
 ## P2 — frontier work only after profiling
 
