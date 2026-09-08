@@ -25,7 +25,7 @@ benchmarks are complete.
 |---|---|---|
 | Private ownership | `main.ts` is currently 8,458 lines, while the distinct cache, request-projection, reclaim, trace, rates, and bounded-output lifecycles have private modules imported by the integration owner. | **Complete for the named seams.** Keep one behavioral owner; extract further only for a distinct lifecycle/test surface, not to create another path. |
 | Traces | `trace.ts` writes schema-v2 attempt and task-settled records with stable run/task/attempt links, retry/fallback fields, nullable usage, cache diagnostics, tool/reclaim evidence, cost provenance, manifests, bounded retention, and a link index. | **Deterministic implementation complete.** Correctness is still caller-supplied/null and the controlled task corpus, quality, price, and long-session benchmark remain pending. |
-| Cache identity | `auth.ts` derives a private ASCII key from a process-local session seed, role, provider, protocol, and route domain; it validates the key before emitting OpenRouter or xAI headers. | **Deterministic identity complete.** Provider field acceptance and the OpenAI 50-vs-80 limit conflict remain route/model evidence gates; neither number is hardcoded. |
+| Cache identity | `auth.ts` derives a private ASCII key from a process-local session seed, role, provider, protocol, and route domain; it validates the key before emitting OpenRouter or xAI headers. | **Deterministic identity complete.** Provider field acceptance and OpenAI breakpoint acceptance on supporting routes remain route/model evidence gates; GPT-5.6+ documents first-2 + latest-50 (2026-09-09), never hardcoded. |
 | Request projection | `request-projection.ts` separates durable prompt/images from a sorted, escaped, UTF-8-bounded overlay; validates complete tool-call/result sequences; main snapshots and appends the overlay once per logical request, including retries. | **Deterministic projection complete.** Persisted generated context is rejected; corpus-level quality and provider-prefix behavior remain pending. |
 | Tool output | `tool-output.ts`, `host.ts`, `main.ts`, and `mcp.ts` use bounded UTF-8 accumulation, explicit completion states, omission markers, continuations, independent streams, and glob lookahead. | **Deterministic bounds complete.** Exhaustive stress and task-quality effects remain pending; no provider savings are implied. |
 | Reclamation | `reclaim.ts` plans bounded targets with original bytes/chars/hashes and recovery metadata; `session.ts` durably validates/applies receipts, replays source records, and maps recovery across forks before main changes its view. Last-resort truncate still persists only a dropped-count revision. | **Receipt-based prune recovery complete.** Truncate/summarize recovery semantics, reclaim ranking, billed-token savings, p95 recovery calls, and the full resume/fork corpus remain pending. |
@@ -264,8 +264,9 @@ same derivation so unrelated cache families do not share a bucket. Do not
 include per-turn prompts, working-set hashes, effort changes, or other values
 that would fragment normal cache affinity. The main and summary namespaces
 must use this one algorithm and owner; a separate summary namespace is not a
-second cache engine. The OpenAI 50-vs-80 external limit conflict is unresolved
-for implementation purposes: do not hardcode either value; use a conservative
+second cache engine. The OpenAI breakpoint boundary is documented for GPT-5.6+
+(first-2 + latest-50, 2026-09-09) but unverified on any other route: do not
+hardcode it outside capability-gated GPT-5.6+ paths; use a conservative
 bounded representation until the route/model contract is verified.
 
 Reject control characters and never send a raw terminal, session, filesystem,
@@ -282,13 +283,14 @@ character set, stability within one run, separation across unrelated runs and
 roles, route separation, and no raw identifier in the outgoing body or headers.
 Verify the same canonical derivation feeds OpenRouter/OpenCode/xAI session
 headers and supported cache-key fields, with role and protocol/route supplied
-to both header and body derivations. Do not make the OpenAI 50-vs-80 conflict a
+to both header and body derivations. Do not make any breakpoint boundary a
 test constant; test the route's accepted limit instead.
 
 **Current status:** Deterministic identity derivation, privacy checks, role/
 route separation, and `/clear` rotation are implemented; a focused TypeScript
 check passes the bounded printable-key invariant. Provider field acceptance,
-relay behavior, and the OpenAI 50-vs-80 limit remain live route/model gates.
+relay behavior, and OpenAI breakpoint acceptance on non-GPT-5.6+ routes remain
+live route/model gates.
 
 ### 4. Attribute cache misses using effective route policy
 
@@ -305,7 +307,9 @@ Anthropic's 5-minute default and 1-hour option, with model-specific minimum
 cacheable lengths; the OpenAI 30-minute option is for supported GPT-5.6+ routes
 and usage fields may be nullable; xAI has a stable key but no fixed TTL; and
 OpenRouter's 10-minute sticky-session behavior is not prompt-cache evidence.
-Zen has no validated cache contract. `messagePrefixHash` remains diagnostic;
+Live docs re-checked 2026-09-09 resolve the OpenAI breakpoint conflict for
+GPT-5.6+ (first-2 + latest-50 lookup boundaries, max 4 writes) and confirm
+xAI's evict-anytime retention. Zen has no validated cache contract. `messagePrefixHash` remains diagnostic;
 miss continuity uses the reusable-prefix hash instead of the whole growing
 history hash.
 
@@ -492,8 +496,11 @@ the client-tool marker.
 
 External validation on 2026-08-30 gives Anthropic-specific bounds of at most
 4 breakpoints and a 20-block lookback, alongside its 5-minute/1-hour policies
-and model-specific minimum cacheable lengths. OpenAI sources conflict on a
-50-vs-80 breakpoint/lookback limit; do not hardcode either number. Content-block
+and model-specific minimum cacheable lengths. The OpenAI breakpoint question
+is resolved for GPT-5.6+ by live docs (2026-09-09): first-2 + latest-50
+explicit-breakpoint lookup boundaries with max 4 cache writes per request —
+apply only to supporting routes (the Codex backend-api route rejects explicit
+markers outright) and never to Anthropic's 4/20 numbers. Content-block
 eligibility and whether server/tool markers consume a limit remain
 route-specific. Do not apply one provider's rule to another, and keep all of
 these facts revalidation-required external contracts.
@@ -505,20 +512,20 @@ these facts revalidation-required external contracts.
   the provider's lookback window; adding it after a miss cannot repair that
   request. Stay within the route's externally documented breakpoint limit,
   including automatic/server markers; for OpenAI, probe the route/model instead
-  of selecting 50 or 80 as a constant.
+  of selecting a breakpoint count as a constant.
 - Test mixed TTL ordering, provider rejection, images, tool-result sequences,
   and the volatile overlay placement from section 1.
 
 **Ship gate:** Synthetic 19/20/21-block fixtures for Anthropic's documented
 20-block lookback (and route-appropriate boundary fixtures elsewhere) plus a
 representative corpus show fewer full-prefix misses without more provider
-errors or higher median cache-write cost. Do not turn the OpenAI 50-vs-80
-conflict into a fixture constant; establish the accepted route/model boundary
-with the current contract and live response. The numeric fixtures are not
+errors or higher median cache-write cost. Use the documented first-2 +
+latest-50 boundaries for GPT-5.6+ fixtures; establish any other route/model
+boundary with the current contract and live response. The numeric fixtures are not
 repository facts.
 
 **Current status:** Deterministic marker placement, four-marker capping, and
-trace marker metadata are implemented. Live 2026-09-09 (`scripts/codex-breakpoint-probe.ts`): the Codex backend-api route rejects even one explicit marker (400, not supported on this model), so the 50-vs-80 question is moot there and the serializer correctly withholds markers. Eligible-block effectiveness, provider acceptance elsewhere, OpenAI's unresolved 50-vs-80 limit on supporting routes, and cache-write/cost impact remain live route/model and corpus evidence gates.
+trace marker metadata are implemented. Live 2026-09-09 (`scripts/codex-breakpoint-probe.ts`): the Codex backend-api route rejects even one explicit marker (400, not supported on this model), so the 50-vs-80 question is moot there and the serializer correctly withholds markers. Eligible-block effectiveness, provider acceptance elsewhere, OpenAI breakpoint acceptance on supporting routes, and cache-write/cost impact remain live route/model and corpus evidence gates.
 
 ### 9. Treat cache thresholds and TTLs as experiments, not constants
 
@@ -537,7 +544,7 @@ cache-write TTL class, billing relation, and missing price fields explicit.
 - Apply the validated external contracts narrowly: Anthropic's 5-minute default,
   1-hour option, and model-specific minimums; OpenAI's 30-minute explicit mode
   only on supported GPT-5.6+ routes with nullable usage preserved and no
-  hardcoded 50-vs-80 limit; Gemini's
+  hardcoded breakpoint boundary; Gemini's
   named `cachedContent` lifecycle; xAI's stable key with no fixed TTL; and
   OpenRouter's 256-character session header with 10-minute stickiness treated
   separately from prompt caching. Zen is protocol routing only and has no
@@ -638,7 +645,7 @@ sticky-session behavior, neither of which proves a prompt-cache hit; and Zen
 defines protocol routing only, with no validated cache contract. Anthropic's
 4/20 breakpoint/lookback and 5-minute/1-hour policies are model- and route-
 dependent, while OpenAI's 30-minute explicit mode is limited to supported
-GPT-5.6+ routes and its 50-vs-80 limit conflict must not be hardcoded.
+GPT-5.6+ routes and their breakpoint boundary must come from the route contract, not a constant.
 
 `openai-compat.ts` contains a separate native Gemini `cachedContent` request,
 parse, update, and delete lifecycle seam. The current main request path does
@@ -672,7 +679,7 @@ implementation map for the remaining work and its deterministic checks.
 
 | Responsibility | Canonical owner | Current deterministic check | Still pending |
 |---|---|---|---|
-| Cache identity and capability observations | `auth.ts` and `cache.ts` | `cacheSessionSeed`, `deriveCacheIdentityKey`, capability-cache bounds, and nullable miss diagnostics | Live route/model field acceptance, retention, and the OpenAI 50-vs-80 boundary |
+| Cache identity and capability observations | `auth.ts` and `cache.ts` | `cacheSessionSeed`, `deriveCacheIdentityKey`, capability-cache bounds, and nullable miss diagnostics | Live route/model field acceptance, retention, and OpenAI breakpoint acceptance |
 | Request projection and provider payloads | `request-projection.ts` and `main.ts`; serializers in `openai-compat.ts` | Overlay escaping/order/byte hash, complete tool sequences, retry reuse, and provider projection invariants | Full resume/fork/compaction corpus and quality comparison |
 | Trace and cost provenance | `trace.ts`, `rates.ts`, and `main.ts` | Immutable attempt/task records, nullable usage/cost, atomic writes, link index, and bounded manifests | Evaluator correctness, long-session retention benchmark, live prices, and cost savings |
 | Reclaim and recovery | `reclaim.ts` and `session.ts`; orchestration in `main.ts` | Receipt validation, original/stub hashes, durable-before-view application, source-record recovery, and fork mapping | Truncate/summarize recovery, p95 recovery calls, and billed-token impact |
@@ -749,20 +756,22 @@ resolution alone.
 If any answer is unknown, add instrumentation or a controlled experiment before
 adding the optimization.
 
-## Provider documentation validated 2026-08-30 — revalidate before shipping
+## Provider documentation validated 2026-08-30, revalidated 2026-09-09 — revalidate before shipping
 
 The following facts were checked against the listed primary sources on
-2026-08-30. They are external contracts, not facts inferred from
+2026-08-30. OpenAI, xAI, and Anthropic caching pages were re-checked
+2026-09-09 (see row notes for what changed); Gemini/OpenRouter/Zen rows
+below are still 2026-08-30. They are external contracts, not facts inferred from
 `agent-core`; prices, support, limits, and responses can change. Re-check each
 route and record the source URL and retrieval time in the implementation
 baseline before shipping.
 
 | Route | Validated external fact | Safe roadmap assumption | Still unknown / do not assume |
 |---|---|---|---|
-| Anthropic Messages | Up to 4 breakpoints; a 20-block lookback; 5-minute default and 1-hour option; minimum cacheable length is model-specific. | Test 4/20 and 5-minute/1-hour behavior only on routes that accept the fields; keep model minimums route-specific. | Billing, eviction, exact model minimums, and relay behavior until live responses and current docs verify them. |
-| OpenAI Responses | Sources conflict on a 50-vs-80 breakpoint/lookback number; usage/cache fields may be nullable or absent; explicit 30-minute mode is for supported GPT-5.6+ routes. | Do not hardcode 50 or 80. Preserve nullable usage and send 30-minute explicit mode only when route/model capability says supported. | Which limit applies to a particular route/model; write/storage billing; unsupported-route behavior. |
+| Anthropic Messages | Reconfirmed 2026-09-09: 5-minute default and 1-hour option; lifetime measured from request start (stream time counts); writes 1.25x/2x, reads 0.1x (per-model exceptions exist); automatic top-level `cache_control` now documented alongside explicit breakpoints. Up to 4 breakpoints and 20-block lookback per the 2026-08-30 validation (not re-fetched). | Test 4/20 and 5-minute/1-hour behavior only on routes that accept the fields; keep model minimums route-specific. | Billing, eviction, exact model minimums, and relay behavior until live responses and current docs verify them. |
+| OpenAI Responses | Resolved 2026-09-09 (was a 50-vs-80 conflict): GPT-5.6+ lookup boundaries are the first 2 and latest 50 explicit breakpoints, max 4 cache writes per request, 1,024-token minimum, write 1.25x / read 0.1x, TTL 30m only and default; `prompt_cache_key` influences routing without pinning or guaranteeing hits. | Send 30-minute explicit mode only when route/model capability says supported; the first-2 + latest-50 boundaries apply to GPT-5.6+ direct routes, not the Codex backend-api route (rejects explicit markers outright). | Write/storage billing; unsupported-route behavior; pre-5.6 interval rules. |
 | Gemini `generateContent` | Named `cachedContent` is the documented cache object; compatibility with `prompt_cache_key` is not established. | Treat `cachedContent` as a separate lifecycle and do not send `prompt_cache_key` without route proof. | TTLs, minimums, implicit behavior, and write billing for this kernel's route. |
-| xAI | A stable cache/session key is supported; no fixed TTL was validated. | Keep a stable key if the route accepts it; classify retention as unknown or possible idle expiry. | TTL, marker/breakpoint support, and write/storage billing. |
+| xAI | Confirmed 2026-09-09: stable key (`x-grok-conv-id`, or `prompt_cache_key` on Responses) routes to one server; no fixed TTL — entries evictable anytime; usage reports `prompt_tokens_details.cached_tokens`; live probe shows repeat-prefix billed input 2261->85, warm after 30s. | Keep the stable key; classify retention as unknown or possible idle expiry; never modify earlier messages, only append. | Marker/breakpoint support and write/storage billing (no write charge documented). |
 | OpenRouter | A 256-character session id and 10-minute sticky-session behavior are documented separately from prompt caching. | Bound the session header to 256 characters and never count stickiness as a prompt-cache hit; probe upstream model caching separately. | Upstream model/provider cache limits, TTLs, and billing. |
 | OpenCode Zen | The source validates protocol routing by model; no cache contract was validated. | Use Zen for protocol selection only; do not send cache-specific fields or claim cache savings without a route contract. | All cache limits, TTLs, billing, and model support. |
 
