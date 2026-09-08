@@ -171,6 +171,11 @@ import {
   type CompletionState,
 } from "./tool-output.ts";
 import {
+  SubagentRegistry,
+  subagentDepthFromEnv,
+  visibleSubagentTools,
+} from "./subagents.ts";
+import {
   estimateReclaimTokens,
   makePruneRevision,
   planPruneStubs as planReclaimStubs,
@@ -4003,6 +4008,8 @@ export function formatToolAnnounce(use: ToolUse): string {
   else if (use.name === "grep") detail = use.input.pattern ?? "";
   else if (use.name === "glob") detail = use.input.pattern ?? "";
   else if (use.name === "fetch") detail = String(use.input.url ?? "");
+  else if (use.name === "spawn_subagent") detail = String(use.input.task ?? "").slice(0, 80);
+  else if (use.name === "message_subagent") detail = String(use.input.run_id ?? "");
   return `◆ Tool · ${use.name}${detail ? `\n  ${detail}` : ""}`;
 }
 
@@ -4467,6 +4474,31 @@ async function executeTool(use: ToolUse): Promise<ToolOutcome> {
     const got = await runBash(command, { cwd: canonicalCwd, shouldStop: () => interrupted });
     return done(use, got);
   }
+  if (use.name === "spawn_subagent") {
+    // Forward budget/paths raw: the registry validates them so malformed
+    // input fails closed instead of silently dropping lease protection.
+    const got = await subagentRegistry.spawn({
+      task: String(use.input.task ?? ""),
+      ...(use.input.model === undefined ? {} : { model: String(use.input.model) }),
+      ...(use.input.effort === undefined ? {} : { effort: String(use.input.effort) }),
+      ...(use.input.budget === undefined ? {} : { budget: use.input.budget }),
+      ...(use.input.paths === undefined ? {} : { paths: use.input.paths }),
+      parent: {
+        provider: route.provider,
+        model: route.model,
+        protocol: providerProtocol(route.provider, route.model),
+        permissionMode,
+        depth: SUBAGENT_DEPTH,
+      },
+    });
+    if (!got.ok) return done(use, `error: ${got.error}`, true);
+    return done(use, JSON.stringify({ runId: got.run.id }));
+  }
+  if (use.name === "message_subagent") {
+    const got = subagentRegistry.message(String(use.input.run_id ?? ""), String(use.input.text ?? ""));
+    if (!got.ok) return done(use, `error: ${got.error}`, true);
+    return done(use, JSON.stringify({ ok: true }));
+  }
   if (mcpSession?.tools.some((t) => t.name === use.name)) {
     const got = await mcpSession.call(use.name, use.input, { shouldStop: () => interrupted });
     return {
@@ -4490,7 +4522,7 @@ async function executeTool(use: ToolUse): Promise<ToolOutcome> {
   return done(use, `error: unknown tool ${use.name}`, true);
 }
 
-const TOOLS = [
+const TOOLS: Array<Record<string, unknown>> = [
   {
     name: "read_file",
     description:
@@ -4565,6 +4597,15 @@ const TOOLS = [
     input_schema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
   },
 ];
+
+/**
+ * Background subagents (SUBAGENTS-PLAN.md Phase 1: tool surface + registry).
+ * Depth comes from the environment so headless children (Phase 2) inherit it;
+ * children never receive `spawn_subagent` (max depth 1).
+ */
+const SUBAGENT_DEPTH = subagentDepthFromEnv(process.env);
+for (const def of visibleSubagentTools(SUBAGENT_DEPTH)) TOOLS.push(def);
+const subagentRegistry = new SubagentRegistry();
 
 let clientTools: Array<Record<string, unknown>> = TOOLS.slice();
 let mcpSession: McpSession | null = null;

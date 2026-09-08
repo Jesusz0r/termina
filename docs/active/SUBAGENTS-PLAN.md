@@ -1,6 +1,6 @@
 # Background Subagents Plan — 2026-09-07
 
-> Status: planned, not started. Sources: [Anthropic Agent SDK subagents](https://code.claude.com/docs/en/agent-sdk/subagents) (verified 2026-09-07), OpenAI Agents SDK manager pattern (docs nav; page bodies are JS shells), Qwen-Agent README (no subagent primitive — verified 2026-09-07). Gemini/xAI/Meta are model APIs with no delegation primitives.
+> Status: Phase 1 implemented (registry + tool surface, 2026-09-08); Phases 2–5 pending. Sources: [Anthropic Agent SDK subagents](https://code.claude.com/docs/en/agent-sdk/subagents) (verified 2026-09-07), OpenAI Agents SDK manager pattern (docs nav; page bodies are JS shells), Qwen-Agent README (no subagent primitive — verified 2026-09-07). Gemini/xAI/Meta are model APIs with no delegation primitives.
 
 ## Goal
 
@@ -65,7 +65,7 @@ A subagent telling its parent to widen permissions must never work.
 ## Phases
 
 1. **Spawn tool + registry**: `spawn_subagent`/`message_subagent` tool definitions, run registry (ids, state, claims), caps. Tests: validation, unknown-run errors, claim overlap rejection.
-2. **Headless run mode**: engine entry, host spawner, sidecar tailing under `bg-N`, settle/kill/retry. Tests: settle delivers a tool result; kill terminates the process group; crash reports failure.
+2. **Headless run mode**: engine entry, host spawner, sidecar tailing under `bg-N`, settle/kill/retry. Tests: settle delivers a tool result; kill terminates the process group; crash reports failure. Every path (settle/kill/crash/rate-limit/`/clear`) resolves through `settleRun` exactly once; run ids are process-local so a forked session messaging them fails closed with unknown-run.
 3. **Approvals + messaging**: permissionMode inheritance, choice-picker routing, timeout-deny, `message_subagent` delivery. Tests: approval round-trip, deny-by-default, scanning markers.
 4. **Claims + merge**: path-scoped claims at spawn, conflict rejection, parent merge flow. Tests: overlapping claims rejected; disjoint claims run parallel.
 5. **Docs + limits review**: update AGENT-CORE-HARNESS ownership notes; revisit depth-1 and panel-need after real usage.
