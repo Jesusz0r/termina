@@ -193,6 +193,7 @@ import { formatSkillIndex as formatCompactSkillIndex, type SkillIndexSkill } fro
 import {
   createTraceRuntime,
   DEFAULT_TRACE_RETENTION_CAP,
+  sanitizeProviderError,
   type TraceAttemptInput,
   type TraceCacheInput,
   type TraceCostInput as TraceRecordCostInput,
@@ -7419,11 +7420,41 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
             });
           } catch (retryErr) {
             const retryStreamFailure = retryErr instanceof ProviderStreamLimitError ? retryErr : null;
-            await writeMainTrace({ status: retryStreamFailure?.traceStatus ?? "overflow-retry-error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: retryStreamFailure?.cache ?? null, started: callStarted, attempt: inFlightTraceAttempt });
+            const retryMessage = retryErr instanceof Error ? retryErr.message : String(retryErr);
+            await writeMainTrace({ status: retryStreamFailure?.traceStatus ?? "overflow-retry-error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: retryStreamFailure?.cache ?? null, started: callStarted, attempt: inFlightTraceAttempt, providerError: retryMessage });
+            throw retryErr;
+          }
+        } else if (!retriedProviderTermination && !interrupted && isRetriableProviderTermination(providerMessage)) {
+          // Bare provider termination: the stream died before producing a
+          // first token. Retry once with identical bytes, then let the
+          // failure settle with diagnostics on the trace and the terminal.
+          retriedProviderTermination = true;
+          await writeMainTrace({ status: "error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: streamFailure?.cache ?? null, started: callStarted, attempt: failedAttempt, providerError: providerMessage });
+          if (interrupted) throw err;
+          out(`(provider terminated the stream after ${(failedTurnMs / 1000).toFixed(0)}s with no first token; retrying once)\n`);
+          try {
+            result = await callModel(history, activeRequestOverlay, {
+              retryOfAttemptId: failedAttempt?.attemptId ?? null,
+              fallbackReason: "provider-terminated",
+              retryCount: (failedAttempt?.retryCount ?? 0) + 1,
+            });
+          } catch (retryErr) {
+            const retryStreamFailure = retryErr instanceof ProviderStreamLimitError ? retryErr : null;
+            const retryMessage = retryErr instanceof Error ? retryErr.message : String(retryErr);
+            const retryTurnMs = Math.max(0, Date.now() - callStarted);
+            // The retry can fail differently (abort, HTTP); only claim a
+            // double termination when the retry message agrees.
+            terminatedDiagnostics = isRetriableProviderTermination(retryMessage)
+              ? `stream ended twice before first token (${(retryTurnMs / 1000).toFixed(0)}s observed; see trace providerError)`
+              : `stream ended before first token (${(failedTurnMs / 1000).toFixed(0)}s observed; retry failed: ${sanitizeProviderError(retryMessage)?.slice(0, 200) ?? "(unreadable)"}; see trace providerError)`;
+            await writeMainTrace({ status: retryStreamFailure?.traceStatus ?? "error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: retryStreamFailure?.cache ?? null, started: callStarted, attempt: inFlightTraceAttempt, providerError: retryMessage });
             throw retryErr;
           }
         } else {
-          await writeMainTrace({ status: streamFailure?.traceStatus ?? "error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: streamFailure?.cache ?? null, started: callStarted, attempt: failedAttempt });
+          if (isRetriableProviderTermination(providerMessage)) {
+            terminatedDiagnostics = `stream ended before first token (${(failedTurnMs / 1000).toFixed(0)}s observed; see trace providerError)`;
+          }
+          await writeMainTrace({ status: streamFailure?.traceStatus ?? "error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: streamFailure?.cache ?? null, started: callStarted, attempt: failedAttempt, providerError: providerMessage });
           throw err;
         }
       }
@@ -7609,7 +7640,10 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     } else {
       taskFailure = err instanceof Error ? err.message : String(err);
       taskOutcomeStatus = "failure";
-      out(`\nerror: ${taskFailure}\n`);
+      // Bare provider terminations say nothing on their own; the sidecar
+      // keeps the raw message for contract stability while the terminal
+      // shows what was observed (elapsed, no first token, trace detail).
+      out(`\nerror: ${taskFailure}${terminatedDiagnostics ? ` (${terminatedDiagnostics})` : ""}\n`);
     }
   } finally {
     currentAbort = null;

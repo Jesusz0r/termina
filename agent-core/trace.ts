@@ -235,6 +235,8 @@ export interface TraceAttempt {
   readonly revisions: TraceRevisions;
   readonly wasteTokens: number | null;
   readonly wasteCause: string | null;
+  /** Raw provider failure message for this attempt; null when not observed. */
+  readonly providerError: string | null;
 }
 
 export interface TraceTaskOutcome {
@@ -361,6 +363,8 @@ export interface TraceAttemptInput {
   readonly revisions?: TraceRevisionsInput | number | null;
   readonly wasteTokens?: unknown;
   readonly wasteCause?: string | null;
+  /** Raw provider failure message for this attempt; null when not observed. */
+  readonly providerError?: string | null;
 }
 
 export interface TraceTaskSettledInput {
@@ -848,6 +852,18 @@ function revisions(value: TraceRevisionsInput | number | null | undefined): Trac
   });
 }
 
+/**
+ * Collapse a raw provider failure message to one printable line (max 500
+ * chars). Returns null when nothing printable remains — control/binary junk
+ * must not reach the trace file or the terminal.
+ */
+export function sanitizeProviderError(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const collapsed = value.trim().replace(/\s+/g, " ").replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+  const sliced = collapsed.slice(0, 500).trim();
+  return sliced || null;
+}
+
 /** Construct one immutable provider-call attempt without inventing task facts. */
 export function createAttemptRecord(input: TraceAttemptInput): FrozenTraceAttempt {
   if (input.role !== "main" && input.role !== "summary") {
@@ -886,6 +902,7 @@ export function createAttemptRecord(input: TraceAttemptInput): FrozenTraceAttemp
     revisions: revisions(input.revisions),
     wasteTokens: nullableNumber(input.wasteTokens),
     wasteCause: input.wasteCause === null || input.wasteCause === undefined ? null : text(input.wasteCause, "wasteCause"),
+    providerError: optionalText(sanitizeProviderError(input.providerError), "providerError"),
   };
   return freezeDeep(record);
 }

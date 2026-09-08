@@ -872,4 +872,41 @@ describe("Agent Core Trace Runtime Invariants", () => {
     
     console.log("agent-core trace runtime tests passed");
   }, 60_000);
+
+  it("persists providerError diagnostics on failed attempts", () => {
+    const base = {
+      runId: "run-provider-error",
+      taskId: "task-provider-error",
+      role: "main",
+      provider: "openai-codex",
+      protocol: "openai-codex-responses",
+      model: "gpt-6-astra",
+      status: "error",
+    } as const;
+    const failed = createAttemptRecord({ ...base, attemptId: "attempt-terminated", providerError: "terminated" });
+    assert.equal(failed.providerError, "terminated");
+    assert.equal(failed.status, "error");
+    assert.equal(failed.ttftMs, null);
+    const absent = createAttemptRecord({ ...base, attemptId: "attempt-ok", status: "ok" });
+    assert.equal(absent.providerError, null);
+    const capped = createAttemptRecord({ ...base, attemptId: "attempt-long", providerError: `x${"y".repeat(600)}` });
+    assert.equal(capped.providerError?.length, 500);
+    const control = createAttemptRecord({ ...base, attemptId: "attempt-control", providerError: "fail\x00ed" });
+    assert.equal(control.providerError, "failed");
+    const binary = createAttemptRecord({ ...base, attemptId: "attempt-binary", providerError: "\x00\x01\x02" });
+    assert.equal(binary.providerError, null);
+    const multiline = createAttemptRecord({ ...base, attemptId: "attempt-multiline", providerError: "API 500:\n  { boom }\n" });
+    assert.equal(multiline.providerError, "API 500: { boom }");
+  });
+
+  it("retries bare provider terminations exactly once", async () => {
+    process.env.TERMINA_CORE_TEST = "1";
+    const core = await import("../../../agent-core/main.ts");
+    assert.equal(core.isRetriableProviderTermination("terminated"), true);
+    assert.equal(core.isRetriableProviderTermination("  Terminated  "), true);
+    assert.equal(core.isRetriableProviderTermination("terminated (extra)"), false);
+    assert.equal(core.isRetriableProviderTermination("API 500: terminated"), false);
+    assert.equal(core.isRetriableProviderTermination("aborted"), false);
+    assert.equal(core.isRetriableProviderTermination(""), false);
+  });
 });
