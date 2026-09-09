@@ -201,7 +201,7 @@ export interface InstanceSummary {
   busy: boolean;
   type: "agent" | "shell";
   /** The agent harness. Unset for shells. */
-  engine?: "pi" | "core";
+  engine?: "core";
   shellName?: string;
   /** The workspace this terminal works in ("" when no folder is open). */
   workspaceId: string;
@@ -345,18 +345,6 @@ export interface RunSummary {
   sessionFile: string | null;
   /** The app-private copy of the session branch. */
   sessionBranchFile: string | null;
-  /** Identity/provenance required to replay or discard the Pi branch copy. */
-  sessionBranchIdentity: {
-    dev: string;
-    ino: string;
-    nlink?: string;
-    size?: string;
-    mtimeNs?: string;
-    ctimeNs?: string;
-    rootDev?: string;
-    rootIno?: string;
-    rootBirthtimeNs?: string;
-  } | null;
   /** A core branch destination whose commit could not be proven. */
   uncertainSessionFile: string | null;
   /** True when Fork Run may offer this run. */
@@ -367,7 +355,6 @@ export interface RunSummary {
   steering: boolean;
   overlap: boolean;
   unownedEdits: number;
-  trusted: boolean | null;
   /** The selected model and thinking level of the run. */
   model: string | null;
   thinkingLevel: string | null;
@@ -531,7 +518,7 @@ export type TerminalPasteResult =
   | { ok: true; kind: "image"; count: number; queued: boolean }
   | { ok: false; error: string };
 
-export interface PiBridge {
+export interface TerminaBridge {
   // push events (main → renderer)
   onPtyData(cb: (e: PtyDataPayload) => void): () => void;
   onPtyExit(cb: (e: PtyExitPayload) => void): () => void;
@@ -558,8 +545,8 @@ export interface PiBridge {
   onFlushRequest(cb: (p: { requestId: string; writerId: string; projectId: string; workspaceId: string }) => void): () => void;
   onUpdateState(cb: (state: AppUpdateState) => void): () => void;
 
-  // terminals (agent = pi TUI, shell = a real shell like zsh)
-  createTerminal(opts?: { type?: "agent" | "shell"; shell?: string; engine?: "pi" | "core"; fromTerminalId?: string; projectId?: string }): Promise<{ ok: boolean; id?: string; error?: string }>;
+  // terminals (agent = core TUI, shell = a real shell like zsh)
+  createTerminal(opts?: { type?: "agent" | "shell"; shell?: string; engine?: "core"; fromTerminalId?: string; projectId?: string }): Promise<{ ok: boolean; id?: string; error?: string }>;
   getShells(): Promise<{ name: string; path: string }[]>;
   /** Complete the renderer-side pane hydration fence for this PTY generation. */
   readyTerminal(id: string, generation: number): void;
@@ -638,6 +625,7 @@ export interface PiBridge {
   onEvidenceUpdate(cb: (e: WorldlineEvidencePayload) => void): () => void;
   /** Promote a candidate into the primary project (WORLDLINES §6.10). */
   promoteWorldline(comparisonId: string, label: "A" | "B", force?: boolean): Promise<{ ok: boolean; error?: string; terminalId?: string; confirm?: string }>;
+  exportWorldline(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; path?: string; error?: string }>;
   /** Push: one worldline changed. */
   onWorldlineUpdate(cb: (e: WorldlineUpdatePayload) => void): () => void;
   /** Push: a comparison was removed. */

@@ -226,7 +226,7 @@ check("close-to-opening replacement receives a ready folder push", replacementOp
 // the renderer must carry the same epoch watermark through close events.
 check("folder pushes carry an activation epoch and re-check after auth I/O", main.includes("activationGeneration")
   && main.includes("this.projectSelectionAction === selectionAction")
-  && main.includes("const needsLogin = await this.piNeedsLogin()")
+  && main.includes("const needsLogin = await this.agentNeedsLogin()")
   && main.includes("if (!current()) return false")
   && main.includes('this.send("folder:opened", { cwd, projectId, workspaceId, activationGeneration, needsLogin }, rendererTarget)'));
 check("close pushes advance the stale-event watermark", main.includes('this.send("project:closed", { projectId, activationGeneration: nextActivationGeneration }, rendererTarget)')

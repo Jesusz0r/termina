@@ -148,3 +148,83 @@ export async function searchProjectFiles(
   plain.sort();
   return { entries: plain.slice(0, MAX_QUICK_OPEN_RESULTS).map((relPath) => ({ relPath })), truncated };
 }
+
+/** Snapshot entries for one agent turn: most projects fit, huge ones truncate. */
+export const MAX_PROJECT_SNAPSHOT_ENTRIES = 400;
+/** Directory visits per snapshot: empty-dir trees cannot force a full walk. */
+const MAX_PROJECT_SNAPSHOT_DIRS = 2000;
+
+/**
+ * Breadth-first project inventory for the per-turn project snapshot:
+ * directories with a trailing slash, files as relative paths, top levels
+ * first. Same visibility rule as search: hidden segments, dotfiles, and
+ * escaping/cyclic symlinks are skipped. Stops early at the entry cap so a
+ * huge tree costs one shallow walk, not a full one.
+ */
+export async function listProjectSnapshot(
+  root: string,
+  opts?: { maxEntries?: number; shouldStop?: () => boolean },
+): Promise<{ entries: string[]; truncated: boolean }> {
+  const maxEntries = opts?.maxEntries ?? MAX_PROJECT_SNAPSHOT_ENTRIES;
+  const entries: string[] = [];
+  let truncated = false;
+  let dirs = 0;
+  const seen = new Set<string>([root]);
+  const queue: string[] = [root];
+  let head = 0;
+  while (head < queue.length) {
+    if (opts?.shouldStop?.()) return { entries: [], truncated: false };
+    const dir = queue[head++]!;
+    if (++dirs > MAX_PROJECT_SNAPSHOT_DIRS) {
+      truncated = true;
+      break;
+    }
+    let dirents;
+    try {
+      dirents = await readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    dirents.sort((a, b) => (a.name < b.name ? -1 : 1));
+    for (const ent of dirents) {
+      if (entries.length >= maxEntries) {
+        truncated = true;
+        break;
+      }
+      if (!visibleDirent(ent.name)) continue;
+      const full = join(dir, ent.name);
+      if (ent.isSymbolicLink()) {
+        let real: string;
+        try {
+          real = await fsRealpath(full);
+        } catch {
+          continue;
+        }
+        const rel = relative(root, real);
+        if (!rel || rel.startsWith("..") || rel.startsWith(sep)) continue;
+        if (seen.has(real)) continue;
+        let realIsDir: boolean;
+        try {
+          realIsDir = (await stat(real)).isDirectory();
+        } catch {
+          continue;
+        }
+        if (!realIsDir) {
+          entries.push(relative(root, full));
+          continue;
+        }
+        seen.add(real);
+        queue.push(real);
+        continue;
+      }
+      if (ent.isDirectory()) {
+        entries.push(`${relative(root, full)}/`);
+        queue.push(full);
+        continue;
+      }
+      entries.push(relative(root, full));
+    }
+    if (truncated) break;
+  }
+  return { entries, truncated };
+}

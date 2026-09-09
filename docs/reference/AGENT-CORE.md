@@ -232,7 +232,8 @@ provider. `/models refresh` (or `reload`) forces a refetch; typing
 selects one. `/permissions` opens a picker for `Always approve`, `Ask on dangerous requests`,
 or `Always ask`. Bash approval prompts also use arrow-key selection instead of typed letters.
 The dangerous mode recognizes destructive command patterns; it is not a shell sandbox.
-The file is not Pi's `auth.json`.
+The file uses the core credential shape (`api_key` with a key, or `oauth`
+with access and refresh tokens), independent of any other agent's format.
 
 The host owns session resume. `TERMINA_CORE_SESSION_FILE` is the stable
 `<session-id>/current/session.jsonl` address under the app user-data
@@ -255,7 +256,7 @@ prompt. On submit the kernel claims that list, copies persisted files into
 the bundle's `current/` directory (`<session-id>-img-N.png`), and only then acknowledges
 the claim. A crash before persistence leaves the claim in place so the
 next prompt recovers the bytes. The prompt payload keeps refs, not bytes.
-Pi and shell terminals do not attach image bytes; a drop inserts
+Shell terminals do not attach image bytes; a drop inserts
 POSIX-quoted absolute paths through xterm paste and does not submit them.
 
 The TUI transcript keeps assistant, thinking, tool, and error entries.

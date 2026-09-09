@@ -1,9 +1,9 @@
 /**
  * Electron main process — terminal-first architecture.
  *
- * Left side: real pi interactive TUI instances running in ptys (node-pty).
+ * Left side: real agent-core interactive TUI instances running in ptys (node-pty).
  * Right side: Monaco IDE + explorer, live-synced by the file watcher.
- * An app-owned bridge extension streams agent events (tool calls, busy
+ * The agent-core host streams agent events (tool calls, busy
  * state) to sidecar files we tail — that powers auto-open of files
  * mid-run and the modified-files panel.
  */
@@ -33,11 +33,10 @@ import {
   type PtyLifecycleIdentity,
   type PtyRendererSendTarget,
 } from "./pty-egress.js";
-import { BRIDGE_EXTENSION } from "./bridge-extension.js";
 import { AgentStartEvent, SidecarEvent, SidecarEventDelivery, SidecarEventQueue, SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
-import { SnapshotStore, MIN_WORLDS_FREE_BYTES, bindOwnedDirectory, bindOwnedEntry, boundPromotionCopyTree, boundPromotionEnsureDirectory, boundPromotionListEntries, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionReadFile, boundPromotionWriteFile, captureRootInRepo, createOwnedDirectory, disposeWorldlineGitCore, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, gitTrackedFiles, platformHasRecursiveWatcher, platformHasSandboxExec, removeBoundOwnedDirectory, removeBoundOwnedEntry, trustResourceHashes, type BoundOwnedDirectory, type BoundPromotionExpectedLeaf, type PromotionFsIdentity, type SourceState, writeBoundOwnedFile } from "./worldline-git.js";
-import { WorldlineManager, dirBytes, quoteShellArg, recoverPromotionJournals, type RunRecord } from "./worldlines/index.js";
+import { SnapshotStore, MIN_WORLDS_FREE_BYTES, bindOwnedDirectory, bindOwnedEntry, boundPromotionEnsureDirectory, boundPromotionListEntries, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionReadFile, boundPromotionWriteFile, captureRootInRepo, createOwnedDirectory, disposeWorldlineGitCore, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, gitTrackedFiles, platformHasRecursiveWatcher, platformHasSandboxExec, removeBoundOwnedDirectory, removeBoundOwnedEntry, trustResourceHashes, type BoundOwnedDirectory, type BoundPromotionExpectedLeaf, type PromotionFsIdentity, type SourceState, writeBoundOwnedFile } from "./worldline-git.js";
+import { WorldlineManager, quoteShellArg, recoverPromotionJournals, type RunRecord } from "./worldlines/index.js";
 import {
   candidateSandboxLaunch,
   evidenceProfileContent,
@@ -51,11 +50,14 @@ import { createAppUpdater, updateMenuCopy, type AppUpdateController } from "./ap
 import { installCliCommand, uninstallCliCommand, isCliCommandInstalled, parseTargetCwdFromArgv } from "./cli-install.js";
 import {
   MAX_DISPATCH_WORKERS,
+  SCHEDULE_TICK_MS,
   findTaskByText,
   finalizePlanTasks,
   formatDispatchBriefing,
   markPlanProgress,
+  nextScheduleRun,
   parsePlanTasks,
+  parseScheduleMarker,
   pickDispatchTasks,
   reattachDispatchAssignments,
   taskIsComplete,
@@ -63,8 +65,8 @@ import {
 import { AppPreferencesStore } from "./preferences.js";
 import { SubagentHost } from "./subagents.js";
 import { anchorClaimPath, isSubagentManagedFile } from "../agent-core/subagents.js";
-import { listSessionJsonl, mergeSessionFiles, searchSessionFiles, sessionFileEntry, type SessionFileEntry } from "./session-search.js";
-import { searchProjectFiles } from "./quick-open.js";
+import { listSessionJsonl, mergeSessionFiles, searchSessionFiles } from "./session-search.js";
+import { listProjectSnapshot, searchProjectFiles } from "./quick-open.js";
 import { appendPendingImages, MAX_PENDING_IMAGES, pendingImageState } from "../agent-core/host.js";
 import {
   coreSessionFile as bundleSessionFile,
@@ -82,8 +84,9 @@ import {
 } from "./terminal-drop.js";
 import {
   composeTerminalRoster,
-  isRosterSessionId,
+  fitTerminalRoster,
   MAX_ROSTER_BYTES,
+  MAX_ROSTER_PLAN_TASKS,
   MAX_TERMINAL_ROSTER,
   parseTerminalRoster,
   type TerminalRosterEntry,
@@ -119,8 +122,8 @@ import {
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MAX_OPEN_FILE_SIZE = 2 * 1024 * 1024;
 const MAX_PROMPT_BYTES = 20 * 1024 * 1024;
-const MAX_PI_RESOURCE_BYTES = 200 * 1024 * 1024;
-/** Bound for ~/.pi/agent/auth.json when checking whether a provider exists. */
+const MAX_AGENT_RESOURCE_BYTES = 200 * 1024 * 1024;
+/** Bound for ~/.termina/agent/auth.json when checking whether a provider exists. */
 const MAX_AUTH_JSON_BYTES = 128 * 1024;
 
 function isChallengeProfile(value: unknown): value is ChallengeProfile {
@@ -129,6 +132,18 @@ function isChallengeProfile(value: unknown): value is ChallengeProfile {
 const MAX_CLIPBOARD_BYTES = 4 * 1024 * 1024;
 const MAX_EXPLORER_ENTRIES = 2000;
 const MAX_VERIFY_OUTPUT = 200_000;
+/** Bound for one diagnostics run's captured output. */
+const MAX_DIAGNOSTICS_OUTPUT = 32 * 1024;
+/** Bound for one diagnostics context file. */
+const MAX_DIAGNOSTICS_CONTEXT_BYTES = 6 * 1024;
+/** Background typecheck budget per run; slower suites stay manual. */
+const DIAGNOSTICS_TIMEOUT_MS = 120_000;
+/** Cap for cached workspace diagnostics state (project open/close churn). */
+const MAX_DIAGNOSTICS_WORKSPACES = 64;
+/** Bound for one project snapshot context file (tree listing for a turn). */
+const MAX_PROJECT_SNAPSHOT_BYTES = 12 * 1024;
+/** Debounce for snapshot refresh after watcher bursts. */
+const PROJECT_SNAPSHOT_DEBOUNCE_MS = 5000;
 /** Timeline snapshots bigger than this are dropped (dot stays, no content). */
 const MAX_SNAPSHOT_SIZE = 100_000;
 /** file:changed pushes the content only up to this byte budget. The
@@ -195,8 +210,8 @@ interface PendingPreflight {
 }
 
 /**
- * Host agent session variables. The app's pi TUI must start clean — a pinned
- * session file or model makes the TUI crash or hang at startup.
+ * Host agent session variables. The app's agent TUI must start clean — a pinned
+ * session file or model makes the TUI attach to the wrong session or hang.
  */
 const AGENT_ENV_BLOCKLIST = new Set([
   "PI_SESSION_FILE",
@@ -212,27 +227,24 @@ const AGENT_ENV_BLOCKLIST = new Set([
   "TERMINA_CORE_RESUME",
 ]);
 
-/** The environment for a pi process: the host env minus session pins. */
+/** The environment for an agent process: the host env minus session pins. */
 function cleanEnv(): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (!AGENT_ENV_BLOCKLIST.has(key)) env[key] = value;
   }
-  // The packaged bundle ships its own node for pi. Put it first on PATH so
-  // the cli.js shebang and pi's own child processes resolve it.
+  // The packaged bundle ships its own node for the agent. Put it first on
+  // PATH so the agent binary and its child processes resolve it.
   const bundledNode = join(process.resourcesPath, "node", "bin");
   if (existsSync(bundledNode)) {
     env.PATH = `${bundledNode}${env.PATH ? `:${env.PATH}` : ""}`;
   }
-  // Termina launches a pinned pi package. The TUI update check would tell
-  // the user to upgrade, but that command cannot change the pin.
-  env.PI_SKIP_VERSION_CHECK = "1";
   return env;
 }
 
 /**
  * Bundled agent-core entry. ELECTRON_RUN_AS_NODE cannot read inside the
- * asar; spawn the unpacked copy (same rule as pi's cli.js).
+ * asar; spawn the unpacked copy.
  */
 function coreEngineBinary(): string {
   return join(__dirname, "agent-core.mjs").replace("app.asar", "app.asar.unpacked");
@@ -248,9 +260,9 @@ function candidateEnv(provider: string | null): Record<string, string | undefine
   return filterCandidateEnvironment(process.env, provider, existsSync(bundledNode) ? [bundledNode] : []);
 }
 
-/** Values pi accepts for --thinking. Reject anything else at spawn. */
-const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-const MAX_PI_MODEL_CHARS = 256;
+/** Thinking levels the agent accepts. Reject anything else at spawn. */
+const AGENT_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const MAX_AGENT_MODEL_CHARS = 256;
 
 /** One background process that runs a test command. */
 interface VerifyJob {
@@ -337,7 +349,7 @@ function awaitCandidateAbortable<T>(promise: Promise<T>, signal?: AbortSignal): 
   });
 }
 
-class PiTerminalInstance {
+class AgentTerminalInstance {
   readonly id: string;
   /** Monotonic generation fencing this PTY from a later id reuse. */
   readonly generation = ++terminalGenerationSeq;
@@ -349,7 +361,7 @@ class PiTerminalInstance {
   projectId: string | null = null;
   type: "agent" | "shell";
   /** The engine for an agent terminal. Shells leave this unset. */
-  engine?: "pi" | "core";
+  engine?: "core";
   /** Persist this tab in the project roster (user terminals, not dispatch or candidates). */
   persist = true;
   /** Harness session id for resume. */
@@ -470,8 +482,8 @@ interface ProjectState {
   unrestoredTerminals: TerminalRosterEntry[];
 }
 
-/** Env vars pi treats as a provider credential (see pi providers.md). */
-const PI_PROVIDER_ENV = [
+/** Env vars the agent treats as a provider credential (see agent-core providers). */
+const AGENT_PROVIDER_ENV = [
   "ANTHROPIC_API_KEY",
   "ANT_LING_API_KEY",
   "AZURE_OPENAI_API_KEY",
@@ -506,23 +518,24 @@ const PI_PROVIDER_ENV = [
   "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
 ] as const;
 
-/** True when process env already supplies a pi provider key. */
-function envHasPiProvider(env: NodeJS.Dict<string | undefined>): boolean {
-  for (const key of PI_PROVIDER_ENV) {
+/** True when process env already supplies an agent provider key. */
+function envHasAgentProvider(env: NodeJS.Dict<string | undefined>): boolean {
+  for (const key of AGENT_PROVIDER_ENV) {
     if (env[key]) return true;
   }
   return false;
 }
 
-/** True when auth.json holds at least one provider credential. */
-function authJsonHasPiProvider(raw: unknown): boolean {
+/** True when core auth.json holds at least one provider credential
+ *  (api_key with a key, or oauth with a refresh token). */
+function authJsonHasCoreCredential(raw: unknown): boolean {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
   for (const value of Object.values(raw as Record<string, unknown>)) {
     if (!value || typeof value !== "object" || Array.isArray(value)) continue;
     const entry = value as Record<string, unknown>;
     const type = typeof entry.type === "string" ? entry.type : "";
-    if (type === "oauth") return true;
-    if (typeof entry.key === "string" && entry.key.length > 0) return true;
+    if (type === "oauth" && typeof entry.refresh === "string" && entry.refresh.length > 0) return true;
+    if (type === "api_key" && typeof entry.key === "string" && entry.key.length > 0) return true;
   }
   return false;
 }
@@ -537,7 +550,7 @@ let rendererLoadGenerationSeq = 0;
 
 class PiEditorApp {
   private win: BrowserWindow | null = null;
-  private terminals = new Map<string, PiTerminalInstance>();
+  private terminals = new Map<string, AgentTerminalInstance>();
   /** In-flight initial project/terminal restoration on app boot. */
   private initialRestorePromise: Promise<void> | null = null;
   /** True only while the current renderer can consume pushed IPC. */
@@ -652,6 +665,15 @@ class PiEditorApp {
   private installingUpdate = false;
   /** In-flight background verify runs by owner terminal id. */
   private verifyRuns = new Set<string>();
+  /** Workspaces with an in-flight background diagnostics run. */
+  private diagnosticsRuns = new Set<string>();
+  /** Last diagnostics run per workspace: proven-clean generation and start
+   *  time. Failures keep the old generation so the next settle retries. */
+  private lastDiagnostics = new Map<string, { generation: number; atMs: number }>();
+  /** Minimum gap between diagnostics runs of one workspace. */
+  private static readonly MIN_DIAGNOSTICS_INTERVAL_MS = 60_000;
+  /** Debounced snapshot refresh timers by workspace id. */
+  private projectSnapshotTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Background test processes by owner terminal id. */
   private verifyJobs = new Map<string, VerifyJob>();
   /** Busy agent terminal ids: concurrent runs in one workspace overlap. */
@@ -662,6 +684,20 @@ class PiEditorApp {
   private dispatchRuns = new Map<string, { ownerId: string; taskText: string }>();
   /** Dispatch mailbox notes per terminal, flushed to mailbox-<id>.md. */
   private dispatchMailbox = new Map<string, string[]>();
+  /** Scheduled task key (`ownerId\ntaskText`) → next run epoch ms. */
+  private scheduledNextRuns = new Map<string, number>();
+  /** Background schedule tick. Cleared on dispose. */
+  private scheduleTimer: ReturnType<typeof setInterval> | null = null;
+  /** Owner terminal id → task text awaiting an automatic verify after a
+   *  dispatch worker settled with its task done. Consumed once by the
+   *  verify finish path; never retried. */
+  private autoVerifyTasks = new Map<string, string>();
+  /** Owner terminal id → consecutive failed verifies (manual or auto).
+   *  Seeded by any failure, consumed by the loop below. Pass, cancel, or
+   *  terminal close clears it. */
+  private autoVerifyFailures = new Map<string, number>();
+  /** Consecutive failed verifies before the automatic loop stops. */
+  private static readonly MAX_AUTO_VERIFY_ATTEMPTS = 3;
   /** True after the native owner has bound the events directory. */
   private eventsDirReady = false;
 
@@ -670,7 +706,7 @@ class PiEditorApp {
    *  One map per workspace. */
   private userEditsByWorkspace = new Map<string, Map<string, UserEdit>>();
 
-  /** The session-fork client. SessionManager work runs in the worker. */
+  /** The session-fork client. Bundle forks run in the worker. */
   private sessionFork = new SessionForkClient();
 
   /** The app-owned worlds root. */
@@ -1595,7 +1631,7 @@ class PiEditorApp {
       if (thinkingChanged) {
         const seq = candidate.showThinking ? SHOW_THINKING_CSI : HIDE_THINKING_CSI;
         for (const inst of this.terminals.values()) {
-          if (inst.engine === "core") inst.pty.write(seq);
+          if (inst.type === "agent") inst.pty.write(seq);
         }
       }
       return { ...candidate, shortcuts: { ...candidate.shortcuts } };
@@ -1627,7 +1663,7 @@ class PiEditorApp {
   }
 
   /** The workspace a terminal works in. Missing ownership fails closed. */
-  private workspaceOfTerminal(inst: PiTerminalInstance): WorkspaceState | null {
+  private workspaceOfTerminal(inst: AgentTerminalInstance): WorkspaceState | null {
     const owner = this.projectOfTerminal(inst.id);
     return owner?.workspaces.get(inst.workspaceId) ?? null;
   }
@@ -1727,7 +1763,7 @@ class PiEditorApp {
 
   /** The trust-sensitive resource hashes, computed off the main thread. */
   private async computeTrustHashes(project: ProjectState): Promise<Record<string, string>> {
-    const agentDir = join(homedir(), ".pi", "agent");
+    const agentDir = join(homedir(), ".termina", "agent");
     return trustResourceHashes(agentDir, project.cwd ? resolve(project.cwd) : null);
   }
 
@@ -1745,8 +1781,6 @@ class PiEditorApp {
       realHome: homedir(),
       userData: this.userDataDir,
       primaryEventsDir: this.eventsDir,
-      bridgePath: this.bridgePath(),
-      piBin: this.resolvePiBin(),
       agentCorePath: coreEngineBinary(),
       electronExecPath: process.execPath,
       candidateEnv: (provider) => candidateEnv(provider),
@@ -1755,9 +1789,10 @@ class PiEditorApp {
         const store = await project.storePromise;
         return store;
       },
-      // The sandboxed pi loads the pinned package and the node binary.
+      // The sandboxed core loads the app-owned agent-core copy, the
+      // electron binary, and the node binary.
       appReadPaths: () => {
-        const out: string[] = [dirname(dirname(dirname(dirname(this.resolvePiBin()))))];
+        const out: string[] = [];
         out.push(process.execPath);
         out.push(dirname(dirname(process.execPath)));
         const corePath = coreEngineBinary();
@@ -1771,14 +1806,8 @@ class PiEditorApp {
         }
         return [...new Set(out)];
       },
-      forkSession: (opts, callOptions) => this.sessionFork.fork(opts, callOptions),
       forkCoreSession: (opts, callOptions) => this.sessionFork.forkCore(opts, callOptions),
       discardCoreSession: (runId) => this.sessionRetention.discard(runId),
-      discardPiSession: (sessionFile, identity) => this.sessionFork.discardPi({
-        sessionFile,
-        sessionWorkspaceDir: this.sessionWorkspaceDir,
-        identity,
-      }),
       createCandidate: (opts) => this.createCandidate(opts),
       terminateCandidate: (terminalId) => this.terminateCandidate(terminalId),
       createCandidateWorkspace: (root, baseStateId, comparisonId) => this.createCandidateWorkspace(project, root, baseStateId, comparisonId),
@@ -1809,18 +1838,6 @@ class PiEditorApp {
         const resourceLimitReason = sandboxResourceLimitPreflight();
         if (resourceLimitReason) reasons.push(resourceLimitReason);
         if (!platformHasRecursiveWatcher()) reasons.push("the platform has no reliable recursive watcher");
-        // A custom TERMINA_PI_BIN must match the pinned pi version
-        // (WORLDLINES §5): a mismatched session format disables Worldlines.
-        if (process.env.TERMINA_PI_BIN) {
-          const override = realpathSync(process.env.TERMINA_PI_BIN);
-          const pinned = realpathSync(this.pinnedPiBin());
-          if (override !== pinned) {
-            const [overrideV, pinnedV] = await Promise.all([this.piVersionOf(override), this.piVersionOf(pinned)]);
-            if (overrideV !== pinnedV) {
-              reasons.push(`TERMINA_PI_BIN is a different pi version (${overrideV ?? "unknown"} vs ${pinnedV ?? "unknown"})`);
-            }
-          }
-        }
         const free = await freeDiskBytes(this.worldsRoot);
         if (free !== null && free < MIN_WORLDS_FREE_BYTES) {
           reasons.push(`free disk space is below the 512 MB minimum (${Math.floor(free / (1024 * 1024))} MB)`);
@@ -1871,34 +1888,24 @@ class PiEditorApp {
       onPromotionApply: (relPaths) => {
         this.promotionPaths = relPaths ? new Set(relPaths) : null;
       },
-      primarySessionDir: (cwd, engine) => engine === "core" ? this.coreProjectSessionDir(cwd) : Promise.resolve(this.primarySessionDir(cwd)),
+      primarySessionDir: (cwd) => this.coreProjectSessionDir(cwd),
       installPromoted: async (seed) => {
         const rendererTarget = this.captureRendererSendTarget();
         const inst = await this.createTerminal(
           seed.primaryRoot,
-          seed.engine === "core"
-            ? await (async () => {
-                const parsed = parseSessionBundlePath(seed.installedSession);
-                if (!parsed || resolve(parsed.projectDir) !== resolve(await this.coreProjectSessionDir(seed.primaryRoot))) {
-                  throw new Error("the promoted core session path is invalid");
-                }
-                return {
-                  type: "agent" as const,
-                  engine: "core" as const,
-                  workspaceId: seed.primaryWorkspaceId,
-                  resume: { sessionId: parsed.sessionId, sessionFile: parsed.sessionFile },
-                };
-              })()
-            : {
-                type: "agent",
-                engine: "pi" as const,
-                workspaceId: seed.primaryWorkspaceId,
-                launch: {
-                  cmd: this.resolvePiBin(),
-                  args: ["-e", this.bridgePath(), "--session", seed.installedSession],
-                  env: { ...cleanEnv(), TERMINA_EVENTS_DIR: this.eventsDir },
-                },
-              },
+          await (async () => {
+            if (seed.engine !== "core") throw new Error("pi promotions are removed; core is the only engine");
+            const parsed = parseSessionBundlePath(seed.installedSession);
+            if (!parsed || resolve(parsed.projectDir) !== resolve(await this.coreProjectSessionDir(seed.primaryRoot))) {
+              throw new Error("the promoted core session path is invalid");
+            }
+            return {
+              type: "agent" as const,
+              engine: "core" as const,
+              workspaceId: seed.primaryWorkspaceId,
+              resume: { sessionId: parsed.sessionId, sessionFile: parsed.sessionFile },
+            };
+          })(),
         );
         for (const path of seed.paths) {
           const abs = await this.canonicalPath(join(seed.primaryRoot, path.rel));
@@ -1930,13 +1937,13 @@ class PiEditorApp {
   }
 
   /** The events dir a terminal's bridge reads (candidates have their own). */
-  private eventsDirOf(inst: PiTerminalInstance): string {
+  private eventsDirOf(inst: AgentTerminalInstance): string {
     const owner = this.projectOfTerminal(inst.id);
     return owner?.worldlines?.eventsDirOf(inst.id) ?? this.eventsDir;
   }
 
   /** Resolve the native identity for a terminal's private events root. */
-  private eventsBindingOf(inst: PiTerminalInstance): PromotionFsIdentity | null {
+  private eventsBindingOf(inst: AgentTerminalInstance): PromotionFsIdentity | null {
     const owner = this.projectOfTerminal(inst.id);
     const candidate = owner?.worldlines?.eventsBindingOf(inst.id);
     if (candidate) return { dev: candidate.dev, ino: candidate.ino };
@@ -1944,7 +1951,7 @@ class PiEditorApp {
   }
 
   /** Write one terminal-private event leaf below its bound events root. */
-  private async writeEventLeaf(inst: PiTerminalInstance, name: string, content: Buffer, maxBytes: number): Promise<void> {
+  private async writeEventLeaf(inst: AgentTerminalInstance, name: string, content: Buffer, maxBytes: number): Promise<void> {
     const root = this.eventsBindingOf(inst);
     if (!root) throw new Error("terminal events directory is not bound");
     await writeBoundOwnedFile({
@@ -1959,7 +1966,7 @@ class PiEditorApp {
   }
 
   /** Remove one terminal-private event leaf through its bound root. */
-  private async removeEventLeaf(inst: PiTerminalInstance, name: string): Promise<void> {
+  private async removeEventLeaf(inst: AgentTerminalInstance, name: string): Promise<void> {
     const root = this.eventsBindingOf(inst);
     if (!root) return;
     await this.removeBoundEventLeaf(this.eventsDirOf(inst), root, name);
@@ -1976,13 +1983,13 @@ class PiEditorApp {
     }
   }
 
-  /** Core tabs attach a clipboard image as a pending host file. Pi and
-   *  shell tabs only paste text: a PNG cannot travel through the pty. */
+  /** Core tabs attach a clipboard image as a pending host file. Shell
+   *  tabs only paste text: a PNG cannot travel through the pty. */
   private async pasteTerminal(id: unknown): Promise<TerminalPasteResult> {
     const text = (): TerminalPasteResult => ({ ok: true, kind: "text", text: capUtf8(clipboard.readText(), MAX_CLIPBOARD_BYTES) });
     if (typeof id !== "string") return text();
     const captured = this.terminals.get(id);
-    if (!captured || captured.engine !== "core") return text();
+    if (!captured || captured.type !== "agent") return text();
     const image = clipboard.readImage();
     if (image.isEmpty()) return text();
     let png: Buffer;
@@ -2011,7 +2018,7 @@ class PiEditorApp {
     if (!captured) return { ok: false, error: "terminal closed" };
     const normalized = normalizeDroppedPaths(raw);
     if (!normalized.ok) return normalized;
-    if (captured.engine === "core") {
+    if (captured.type === "agent") {
       const eventsDir = this.eventsDirOf(captured);
       const state = await pendingImageState(eventsDir, captured.id);
       if (!state.ok) return { ok: false, error: state.error };
@@ -2048,14 +2055,14 @@ class PiEditorApp {
   private async createCandidate(opts: {
     root: string;
     workspaceId: string;
-    engine?: "pi" | "core";
+    engine?: "core";
     launch: { cmd: string; args: string[]; env: Record<string, string | undefined> };
     beforeSpawn?: (terminalId: string) => void;
     signal?: AbortSignal;
   }): Promise<{ terminalId: string; pid: number }> {
     const eventsDir = opts.launch.env.TERMINA_EVENTS_DIR;
     // Allocate the id and arm the candidate-owned tailer before constructing
-    // the PTY.  Pi/core can emit session_ready from their startup handler
+    // the PTY.  Core can emit session_ready from its startup handler
     // synchronously with process creation; installing the cursor after the
     // spawn would make watch() treat that record as old history and drop the
     // readiness transition.
@@ -2239,13 +2246,6 @@ class PiEditorApp {
   }
 
   // ------------------------------------------------- promotion (WORLDLINES §6.10) ----
-
-  /** The promoted session installs into the primary session directory. */
-  private primarySessionDir(cwd: string): string {
-    // pi canonicalizes the cwd for its session dir (realpath); the install
-    // must land in the same directory the session picker reads.
-    return join(homedir(), ".pi", "agent", "sessions", this.sanitizeSessionDir(realpathSync(cwd)));
-  }
 
   /** The project that owns a comparison, or null. */
   private projectOfComparison(comparisonId: string): ProjectState | null {
@@ -2432,7 +2432,7 @@ class PiEditorApp {
     return out;
   }
 
-  /** Create a bounded evidence home from the real Pi resources. */
+  /** Create a bounded evidence home from the real agent resources. */
   private async createEvidenceHome(): Promise<string> {
     const eventsBinding = this.eventsDirBinding;
     if (!eventsBinding) throw new Error("events directory is not bound");
@@ -2450,21 +2450,21 @@ class PiEditorApp {
       const agent = await boundPromotionPrepareDirectory({
         root: dir,
         rootIdentity: binding.identity,
-        components: [".pi", "agent"],
+        components: [".termina", "agent"],
         createMissing: true,
       });
       if (!agent.identity) throw new Error("evidence agent directory was not created");
-      const agentSrc = join(homedir(), ".pi", "agent");
-      for (const name of ["auth.json", "settings.json", "models.json", "models-store.json"]) {
+      const agentSrc = join(homedir(), ".termina", "agent");
+      for (const name of ["auth.json", "mcp.json"]) {
         try {
           const source = join(agentSrc, name);
           const info = await stat(source);
-          if (!info.isFile() || info.size > MAX_PI_RESOURCE_BYTES) continue;
+          if (!info.isFile() || info.size > MAX_AGENT_RESOURCE_BYTES) continue;
           const content = await readFile(source);
           await boundPromotionWriteFile({
             root: dir,
             rootIdentity: binding.identity,
-            components: [".pi", "agent", name],
+            components: [".termina", "agent", name],
             parentIdentity: agent.identity,
             expectedDestination: { state: { type: "missing" } },
             content,
@@ -2472,30 +2472,6 @@ class PiEditorApp {
           });
         } catch {
           /* The resource is optional. */
-        }
-      }
-      for (const name of ["skills", "prompts", "themes", "extensions"]) {
-        const src = join(agentSrc, name);
-        try {
-          if ((await stat(src)).isDirectory() && (await dirBytes(src)) <= MAX_PI_RESOURCE_BYTES) {
-            const destination = await boundPromotionPrepareDirectory({
-              root: dir,
-              rootIdentity: binding.identity,
-              components: [".pi", "agent", name],
-              createMissing: true,
-            });
-            if (!destination.identity) throw new Error("evidence resource destination was not created");
-            const sourceBinding = await bindOwnedDirectory(src);
-            await boundPromotionCopyTree({
-              sourceRoot: src,
-              sourceRootIdentity: sourceBinding.identity,
-              destinationRoot: join(dir, ".pi", "agent", name),
-              destinationRootIdentity: destination.identity,
-              maxBytes: MAX_PI_RESOURCE_BYTES,
-            });
-          }
-        } catch {
-          /* An optional or oversized resource is omitted. */
         }
       }
       for (const name of ["A", "B"]) {
@@ -2576,147 +2552,6 @@ class PiEditorApp {
     if (previous && previous !== stateId) void this.releaseStateIfUnused(previous);
   }
 
-  private resolvePiBin(): string {
-    if (process.env.TERMINA_PI_BIN) return process.env.TERMINA_PI_BIN;
-    return this.pinnedPiBin();
-  }
-
-  /** The pi binary of the pinned package (ignores TERMINA_PI_BIN). */
-  private pinnedPiBin(): string {
-    // Launch the pi binary shipped with the pinned package (WORLDLINES
-    // §6.7). The package entry resolves to dist/index.js; the CLI sits
-    // next to it. The exports map has only an import condition, so use
-    // import.meta.resolve, not require.resolve.
-    try {
-      const entry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
-      // The packaged bundle unpacks this package: spawn the real files,
-      // not the asar archive (node-pty cannot open asar paths). The
-      // resolver may already return the unpacked path; never remap twice.
-      const real = entry.includes("app.asar.unpacked") ? entry : entry.replace("app.asar/", "app.asar.unpacked/");
-      return join(dirname(real), "cli.js");
-    } catch (err) {
-      // Packaged: the ESM resolver cannot read inside app.asar, but the
-      // unpacked copy is a real path.
-      const unpacked = join(
-        process.resourcesPath,
-        "app.asar.unpacked",
-        "node_modules",
-        "@earendil-works",
-        "pi-coding-agent",
-        "dist",
-        "cli.js",
-      );
-      if (existsSync(unpacked)) return unpacked;
-      console.warn(`[main] pinned pi package not found: ${(err as Error).message}`);
-      return "pi";
-    }
-  }
-
-  /** The version of a pi binary, bounded (pi --version can update-check). */
-  private async piVersionOf(bin: string): Promise<string | null> {
-    try {
-      const out = await new Promise<string>((resolvePromise) => {
-        const child = spawn(bin, ["--version"], { stdio: ["ignore", "pipe", "ignore"] });
-        let text = "";
-        child.stdout.on("data", (d: Buffer) => {
-          if (text.length < 256) text += d.toString("utf8");
-        });
-        const timer = setTimeout(() => child.kill("SIGKILL"), 4000);
-        child.on("error", () => {
-          clearTimeout(timer);
-          resolvePromise("");
-        });
-        child.on("close", () => {
-          clearTimeout(timer);
-          resolvePromise(text.trim());
-        });
-      });
-      return out ? out : null;
-    } catch {
-      return null;
-    }
-  }
-
-  private piAvailable: boolean | null = null;
-  private piCheckedAt = 0;
-  private piCheckInFlight: Promise<boolean> | null = null;
-
-  /**
-   * Whether the pi binary exists and runs. Success is cached; a FAILURE is
-   * only trusted for a few seconds. A transient spawn error must not disable
-   * the app for its full lifetime. Run the check asynchronously: the CLI
-   * update check can stall for seconds and must not block the main process.
-   * Concurrent callers share one in-flight check.
-   */
-  private checkPiAvailable(): Promise<boolean> {
-    if (this.piCheckInFlight) return this.piCheckInFlight;
-    const run = this.performPiCheck().finally(() => {
-      if (this.piCheckInFlight === run) this.piCheckInFlight = null;
-    });
-    this.piCheckInFlight = run;
-    return run;
-  }
-
-  private async performPiCheck(): Promise<boolean> {
-    const now = Date.now();
-    if (this.piAvailable === true) return true;
-    if (this.piAvailable === false && now - this.piCheckedAt < 5000) return false;
-    this.piCheckedAt = now;
-    const bin = this.resolvePiBin();
-    // Fast path: for pinned package or absolute path, verify file existence directly without spawning node.
-    if (isAbsolute(bin)) {
-      try {
-        if (existsSync(bin)) {
-          this.piAvailable = true;
-          return true;
-        }
-      } catch {
-        /* proceed to fallback */
-      }
-    }
-    if (await this.spawnPiVersionCheck(bin)) {
-      this.piAvailable = true;
-      return true;
-    }
-    // Fallback: manual PATH scan (spawn can miss it when PATH is odd).
-    const found = this.findOnPath(bin);
-    if (found && found !== bin && (await this.spawnPiVersionCheck(found))) {
-      this.piAvailable = true;
-      return true;
-    }
-    this.piAvailable = false;
-    return false;
-  }
-
-  /** Run `bin --version` without blocking. True when it exits with code 0. */
-  private spawnPiVersionCheck(bin: string): Promise<boolean> {
-    return new Promise((resolve) => {
-      let child: ReturnType<typeof spawn> | null = null;
-      try {
-        child = spawn(bin, ["--version"], { stdio: "ignore", env: cleanEnv() });
-      } catch (err) {
-        console.warn(`[main] pi check threw: ${(err as Error).message}`);
-        resolve(false);
-        return;
-      }
-      // The CLI runs an update check that can stall for many seconds.
-      const timer = setTimeout(() => {
-        child?.kill();
-        console.warn("[main] pi check timed out after 15 s");
-        resolve(false);
-      }, 15000);
-      child.on("error", (err) => {
-        clearTimeout(timer);
-        console.warn(`[main] pi check failed: ${(err as NodeJS.ErrnoException).code ?? "?"} ${err.message}`);
-        resolve(false);
-      });
-      child.on("exit", (code) => {
-        clearTimeout(timer);
-        resolve(code === 0);
-      });
-    });
-  }
-
   private findOnPath(name: string): string | null {
     for (const dir of (process.env.PATH ?? "").split(":")) {
       if (!dir) continue;
@@ -2731,12 +2566,6 @@ class PiEditorApp {
       }
     }
     return null;
-  }
-
-  private piMissingMessage(): string {
-    return (
-      "pi is not installed.\n\nInstall it with:\n  npm install -g @earendil-works/pi-coding-agent\n\nor set TERMINA_PI_BIN to the pi binary path."
-    );
   }
 
   private allocateTerminalId(): string {
@@ -2781,18 +2610,32 @@ class PiEditorApp {
     }
   }
 
-  private rosterEntryFor(inst: PiTerminalInstance): TerminalRosterEntry {
+  private rosterEntryFor(inst: AgentTerminalInstance): TerminalRosterEntry {
     const entry: TerminalRosterEntry = { id: inst.id, type: inst.type };
-    if (inst.type === "agent") entry.engine = inst.engine === "core" ? "core" : "pi";
+    if (inst.type === "agent") entry.engine = "core";
     if (inst.type === "shell" && inst.shellPath) entry.shell = inst.shellPath;
     if (inst.sessionId) entry.sessionId = inst.sessionId;
     if (inst.sessionFile) entry.sessionFile = inst.sessionFile;
     // The session's own last model (tracked from sidecar agent_settings /
     // agent_start). Resume restores it; without it a restart falls back to
     // the global last-used model or the provider default.
-    const lastModel = this.usablePiModel(inst.model);
-    if (inst.type === "agent" && inst.engine === "core" && lastModel) {
+    const lastModel = this.usableAgentModel(inst.model);
+    if (inst.type === "agent" && lastModel) {
       entry.model = lastModel;
+    }
+    if (inst.type === "agent") {
+      // Handoff: board tasks (assignments never survive — workers are gone)
+      // and the last settled verdict. A running verify restores as untested.
+      if (inst.plan.length > 0) {
+        entry.plan = inst.plan.slice(0, MAX_ROSTER_PLAN_TASKS).map((t) => ({
+          text: t.text.slice(0, 500),
+          paths: t.paths.slice(0, 100),
+          state: t.state,
+        }));
+      }
+      if (inst.verify.state !== "untested" && inst.verify.state !== "running") {
+        entry.verify = { state: inst.verify.state, command: inst.verify.command, summary: inst.verify.summary };
+      }
     }
     return entry;
   }
@@ -2804,7 +2647,7 @@ class PiEditorApp {
       if (!inst?.persist || inst.closed) continue;
       live.push(this.rosterEntryFor(inst));
     }
-    const entries = composeTerminalRoster(live, project.unrestoredTerminals);
+    const entries = fitTerminalRoster(composeTerminalRoster(live, project.unrestoredTerminals));
     const dir = join(this.userDataDir, "terminal-rosters");
     const path = this.terminalRosterPath(project);
     const previous = this.terminalRosterCommits.get(path) ?? Promise.resolve();
@@ -2833,15 +2676,6 @@ class PiEditorApp {
     }
   }
 
-  private sessionFileExists(path: string | null | undefined): boolean {
-    if (!path) return false;
-    try {
-      return statSync(path).isFile();
-    } catch {
-      return false;
-    }
-  }
-
   /** True when `target` resolves inside `parent`. Neither path needs to exist. */
   private pathInside(parent: string, target: string): boolean {
     const rel = relative(resolve(parent), resolve(target));
@@ -2856,31 +2690,18 @@ class PiEditorApp {
     return false;
   }
 
-  /** Pi `--session` only accepts a jsonl file under ~/.pi/agent/sessions. */
-  private trustedPiSessionFile(path: string | null | undefined): string | null {
-    if (!path || !path.endsWith(".jsonl") || !this.sessionFileExists(path)) return null;
-    try {
-      const real = realpathSync(path);
-      const root = realpathSync(join(homedir(), ".pi", "agent", "sessions"));
-      if (!this.pathInside(root, real)) return null;
-      return real;
-    } catch {
-      return null;
-    }
-  }
-
   /** Delete an empty agent-core bundle. Keep a bundle with content so
    *  Session Search can read it after the tab closes. */
-  private async discardCoreSession(inst: PiTerminalInstance): Promise<void> {
-    if (inst.engine !== "core" || !inst.sessionFile) return;
+  private async discardCoreSession(inst: AgentTerminalInstance): Promise<void> {
+    if (!inst.sessionFile) return;
     if (!this.pathInside(this.coreSessionRoot(), inst.sessionFile)) return;
     // Empty core bundles are reclaimed by the worker's native descriptor/
     // provenance-bound owner.
     await this.sessionFork.discardEmptyCoreSession(inst.sessionFile);
   }
 
-  private persistLive(project: ProjectState): PiTerminalInstance[] {
-    const out: PiTerminalInstance[] = [];
+  private persistLive(project: ProjectState): AgentTerminalInstance[] {
+    const out: AgentTerminalInstance[] = [];
     for (const id of project.terminalIds) {
       const inst = this.terminals.get(id);
       if (inst?.persist && !inst.closed) out.push(inst);
@@ -2913,15 +2734,30 @@ class PiEditorApp {
         const inst = await this.createTerminal(project.cwd, {
           id: rec.id,
           type: rec.type,
-          engine: rec.engine,
+          engine: "core",
           shell: rec.shell,
           projectId: project.id,
           workspaceId: this.primaryWorkspace(project)?.id,
           persist: true,
           skipRosterSave: true,
-          resume: { sessionId: rec.sessionId ?? null, sessionFile: rec.sessionFile ?? null },
+          resume: { sessionId: rec.sessionId ?? null, sessionFile: null },
           model: rec.model ?? null,
         });
+        // Handoff: restore the board and the last verdict. Worker assignments
+        // never survive — dispatched tasks return to pending without claims.
+        if (rec.type === "agent") {
+          if (rec.plan && rec.plan.length > 0) {
+            inst.plan = rec.plan.map((t) => ({
+              text: t.text,
+              paths: t.paths,
+              state: t.state === "done" ? "done" : "pending",
+            }));
+            this.sendPlan(inst);
+          }
+          if (rec.verify) {
+            inst.verify = { state: rec.verify.state, command: rec.verify.command, summary: rec.verify.summary };
+          }
+        }
         spawned.push({ rec, id: inst.id });
       } catch (err) {
         unrestored.push(rec);
@@ -2938,62 +2774,38 @@ class PiEditorApp {
     this.saveTerminalRoster(project);
   }
 
-  /** Live model and thinking of a pi agent tab, for copying onto a new tab. */
-  private copiedAgentSettings(fromTerminalId: string | undefined): { model: string | null; thinkingLevel: string | null } | null {
-    if (!fromTerminalId) return null;
-    const source = this.terminals.get(fromTerminalId);
-    if (!source || source.type !== "agent" || source.engine === "core") return null;
-    return {
-      model: source.model ?? source.currentRun?.model ?? null,
-      thinkingLevel: source.thinkingLevel ?? source.currentRun?.thinkingLevel ?? null,
-    };
-  }
-
   /** Provider-qualified model of a core tab, for TERMINA_CORE_* env. */
   private copiedCoreModel(fromTerminalId: string | undefined): string | null {
     if (!fromTerminalId) return null;
     const source = this.terminals.get(fromTerminalId);
-    if (!source || source.type !== "agent" || source.engine !== "core") return null;
+    if (!source || source.type !== "agent") return null;
     const model = source.model ?? source.currentRun?.model ?? null;
     return typeof model === "string" && model.includes("/") ? model : null;
   }
 
   /** Provider-qualified model id that is safe to pass as --model. */
-  private usablePiModel(model: string | null | undefined): string | null {
+  private usableAgentModel(model: string | null | undefined): string | null {
     if (typeof model !== "string") return null;
     const next = model.trim();
-    if (next.length < 3 || next.length > MAX_PI_MODEL_CHARS) return null;
+    if (next.length < 3 || next.length > MAX_AGENT_MODEL_CHARS) return null;
     if (!next.includes("/")) return null;
     if (/[\x00-\x1f]/.test(next)) return null;
     return next;
   }
 
-  private usablePiThinking(level: string | null | undefined): string | null {
+  private usableAgentThinking(level: string | null | undefined): string | null {
     if (typeof level !== "string") return null;
     const next = level.trim().toLowerCase();
-    return PI_THINKING_LEVELS.has(next) ? next : null;
+    return AGENT_THINKING_LEVELS.has(next) ? next : null;
   }
 
-  /** CLI flags that pin a new pi process to another tab's live model. */
-  private piFlagsFromSettings(settings: { model: string | null; thinkingLevel: string | null } | null): string[] {
-    if (!settings) return [];
-    const model = this.usablePiModel(settings.model);
-    if (!model) return [];
-    const extra = ["--model", model];
-    const thinking = this.usablePiThinking(settings.thinkingLevel);
-    // Do not pin thinking onto a different default model when the copy
-    // of the model itself cannot be applied.
-    if (thinking) extra.push("--thinking", thinking);
-    return extra;
-  }
-
-  private applyAgentSettings(inst: PiTerminalInstance, model: string | null | undefined, thinkingLevel: string | null | undefined): void {
-    const nextModel = this.usablePiModel(model);
+  private applyAgentSettings(inst: AgentTerminalInstance, model: string | null | undefined, thinkingLevel: string | null | undefined): void {
+    const nextModel = this.usableAgentModel(model);
     if (nextModel) {
       inst.model = nextModel;
       this.rememberModel(nextModel);
     }
-    const nextThinking = this.usablePiThinking(thinkingLevel);
+    const nextThinking = this.usableAgentThinking(thinkingLevel);
     if (nextThinking) {
       inst.thinkingLevel = nextThinking;
       this.rememberEffort(inst, nextThinking);
@@ -3018,7 +2830,7 @@ class PiEditorApp {
   /** Silently remember the last-used effort so fresh sessions reopen on it
    *  instead of the core default. Worldline candidates run explicit specs;
    *  their levels never become the user default. */
-  private rememberEffort(inst: PiTerminalInstance, level: string): void {
+  private rememberEffort(inst: AgentTerminalInstance, level: string): void {
     if (this.worldlineTailers.has(inst.id)) return;
     if ((this.preferences.defaultEffort ?? null) === level) return;
     this.commitPreferencePatch({ defaultEffort: level }, false).then(
@@ -3039,7 +2851,7 @@ class PiEditorApp {
     opts?: {
       type?: "agent" | "shell";
       shell?: string;
-      engine?: "pi" | "core";
+      engine?: "core";
       workspaceId?: string;
       projectId?: string;
       id?: string;
@@ -3056,13 +2868,12 @@ class PiEditorApp {
       /** Roster-pinned model for core resume: the session's own last model. */
       model?: string | null;
     },
-  ): Promise<PiTerminalInstance> {
+  ): Promise<AgentTerminalInstance> {
     // Terminal creation crosses several awaits (provider/session setup and
     // process spawn). Preserve the requesting document so a late completion
     // cannot publish its list into a replacement renderer.
     const rendererTarget = this.captureRendererSendTarget();
     const type = opts?.type ?? "agent";
-    const agentEngine: "pi" | "core" | undefined = type === "agent" ? (opts?.engine === "pi" ? "pi" : "core") : undefined;
     const persist = opts?.persist ?? (!opts?.launch && !opts?.id);
     const requestedProject = opts?.projectId ? this.projects.get(opts.projectId) ?? null : null;
     const workspaceId =
@@ -3078,12 +2889,9 @@ class PiEditorApp {
     } else {
       id = this.allocateTerminalId();
     }
-    if (agentEngine === "pi" && !(await this.checkPiAvailable())) {
-      throw new Error(this.piMissingMessage());
+    if (opts?.engine !== undefined && opts.engine !== "core") {
+      throw new Error("pi agent terminals are removed; core is the only engine");
     }
-    const copied = agentEngine === "pi" && !opts?.launch && !opts?.resume
-      ? this.copiedAgentSettings(opts?.fromTerminalId)
-      : null;
     let cmd: string;
     let args: string[];
     let shellName: string | undefined;
@@ -3092,7 +2900,7 @@ class PiEditorApp {
     let sessionId = persist ? opts?.resume?.sessionId ?? null : null;
     let sessionFile = persist ? opts?.resume?.sessionFile ?? null : null;
     if (opts?.launch) {
-      // A worldline candidate: the sandbox wraps the pinned pi binary.
+      // A worldline candidate: the sandbox wraps the core binary.
       cmd = opts.launch.cmd;
       args = opts.launch.args;
       env = { ...opts.launch.env, TERMINA_TERMINAL_ID: id };
@@ -3104,11 +2912,10 @@ class PiEditorApp {
       shellName = chosen.name;
       shellPath = chosen.path;
       env = { ...process.env };
-    } else if (agentEngine === "core") {
-      // In-house engine. Same sidecar contract as the Pi bridge, so
-      // timeline and modified list work unchanged. ELECTRON_RUN_AS_NODE
-      // cannot read inside the asar; spawn the unpacked copy (same rule
-      // as pi's cli.js).
+    } else if (type === "agent") {
+      // In-house engine. Timeline and modified list consume its sidecar
+      // contract. ELECTRON_RUN_AS_NODE cannot read inside the asar; spawn
+      // the unpacked copy.
       cmd = process.execPath;
       args = [
         coreEngineBinary(),
@@ -3140,11 +2947,11 @@ class PiEditorApp {
       else delete env.TERMINA_CORE_RESUME;
       // Fresh sessions reopen on the last-used effort; resumed bundles keep
       // their own saved level, and agent-core clamps per model regardless.
-      const defaultEffort = this.usablePiThinking(this.preferences.defaultEffort ?? null);
+      const defaultEffort = this.usableAgentThinking(this.preferences.defaultEffort ?? null);
       if (defaultEffort) env.TERMINA_CORE_EFFORT = defaultEffort;
       else delete env.TERMINA_CORE_EFFORT;
       const coreModel = this.copiedCoreModel(opts?.fromTerminalId);
-      const resumeModel = this.usablePiModel(opts?.model);
+      const resumeModel = this.usableAgentModel(opts?.model);
       if (coreModel) {
         const cut = coreModel.indexOf("/");
         env.TERMINA_CORE_PROVIDER = coreModel.slice(0, cut);
@@ -3168,29 +2975,18 @@ class PiEditorApp {
       // (dialog outside the pty) for every bash run. Sandboxed worldline
       // candidates alone auto-approve via electron/worldlines/.
     } else {
-      cmd = this.resolvePiBin();
-      // The app-owned bridge loads through the CLI option, not project
-      // trust (WORLDLINES §6.3). A new tab copies model and thinking
-      // from the focused agent so session-scoped picks survive.
-      const trusted = this.trustedPiSessionFile(sessionFile);
-      sessionFile = trusted && !this.sessionFileInUse(trusted) ? trusted : null;
-      const sessionArgs = sessionFile ? ["--session", sessionFile] : [];
-      // Global recent models include Core-only providers (e.g. opencode-zen)
-      // that make Pi exit at startup. Without a Pi source, use Pi's defaults.
-      args = ["-e", this.bridgePath(), ...sessionArgs, ...this.piFlagsFromSettings(copied)];
-      env = { ...cleanEnv(), TERMINA_TERMINAL_ID: id, TERMINA_EVENTS_DIR: this.eventsDir };
+      throw new Error("pi agent terminals are removed; core is the only engine");
     }
     if (persist && owner && this.persistLive(owner).length >= MAX_TERMINAL_ROSTER) {
       throw new Error("this project already has the maximum number of saved terminals");
     }
-    const inst = new PiTerminalInstance(id, cwd ?? this.terminalCwd(), workspaceId, type, shellName, cmd, args, env, 80, 24);
+    const inst = new AgentTerminalInstance(id, cwd ?? this.terminalCwd(), workspaceId, type, shellName, cmd, args, env, 80, 24);
     inst.projectId = owner?.id ?? null;
     inst.persist = persist;
     inst.shellPath = shellPath;
     inst.sessionId = sessionId;
     inst.sessionFile = sessionFile;
-    if (type === "agent") inst.engine = agentEngine === "core" ? "core" : "pi";
-    if (copied) this.applyAgentSettings(inst, copied.model, copied.thinkingLevel);
+    if (type === "agent") inst.engine = "core";
     this.terminals.set(inst.id, inst);
     if (owner) {
       owner.workspaces.get(workspaceId)?.terminalIds.add(id);
@@ -3240,6 +3036,8 @@ class PiEditorApp {
       }
       this.terminals.delete(inst.id);
       this.busyAgents.delete(inst.id);
+      this.autoVerifyTasks.delete(inst.id);
+      this.autoVerifyFailures.delete(inst.id);
       exitOwner?.workspaces.get(inst.workspaceId)?.terminalIds.delete(inst.id);
       exitOwner?.terminalIds.delete(inst.id);
       if (persistOwner) this.saveTerminalRoster(persistOwner);
@@ -3279,11 +3077,135 @@ class PiEditorApp {
       owner.mineCommit = mineRefresh;
       void mineRefresh.catch((err) => console.warn(`[main] could not refresh mine context: ${(err as Error).message}`));
     }
+    // Orient the first turn without discovery tool calls. Refreshes follow
+    // watcher bursts through scheduleProjectSnapshot.
+    if (type === "agent") void this.writeProjectSnapshot(inst);
     this.sendInstances(rendererTarget);
     return inst;
   }
 
   // ------------------------------------------------------------- verify ----
+
+  /**
+   * Detect a fast static diagnostics command: TypeScript via the project's
+   * own compiler. Other stacks stay manual until a cheap probe exists.
+   */
+  private async detectDiagnosticsCommand(cwd: string): Promise<{ command: string; args: string[]; label: string } | null> {
+    try {
+      const root = await fsRealpath(cwd);
+      await stat(join(root, "tsconfig.json"));
+      const tsc = join(root, "node_modules", ".bin", "tsc");
+      const info = await stat(tsc);
+      if (!info.isFile()) return null;
+      return { command: tsc, args: ["--noEmit", "-p", join(root, "tsconfig.json")], label: "tsc --noEmit" };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Run static diagnostics in the background after an agent settles.
+   * TypeScript-only v1, primary workspaces only. Skipped when the workspace
+   * generation has not moved since the last clean run, and at most once a
+   * minute per workspace. Silent: the capped result lands in the diagnostics
+   * context file for the next turn. Never throws.
+   */
+  private async runDiagnostics(inst: AgentTerminalInstance): Promise<void> {
+    const ws = this.workspaceById(inst.workspaceId);
+    if (!ws || !ws.primary || this.disposed) return;
+    const owner = this.projectOfWorkspace(ws.id);
+    if (!owner || this.projectIsSwitching(owner.id)) return;
+    if (this.diagnosticsRuns.has(ws.id)) return;
+    const startGeneration = ws.generation;
+    const last = this.lastDiagnostics.get(ws.id);
+    if (last && last.generation >= startGeneration) return;
+    if (last && Date.now() - last.atMs < PiEditorApp.MIN_DIAGNOSTICS_INTERVAL_MS) return;
+    const cwd = ws.root;
+    let tc: { command: string; args: string[]; label: string } | null;
+    try {
+      tc = await this.detectDiagnosticsCommand(cwd);
+    } catch {
+      return;
+    }
+    if (!tc) return;
+    if (this.terminals.get(inst.id) !== inst || inst.closed || this.disposed) return;
+    this.diagnosticsRuns.add(ws.id);
+    // Refresh recency: re-setting a Map key keeps its original position.
+    this.lastDiagnostics.delete(ws.id);
+    this.lastDiagnostics.set(ws.id, { generation: last?.generation ?? -1, atMs: Date.now() });
+    if (this.lastDiagnostics.size > MAX_DIAGNOSTICS_WORKSPACES) {
+      const oldest = this.lastDiagnostics.keys().next().value;
+      if (oldest !== undefined && oldest !== ws.id) this.lastDiagnostics.delete(oldest);
+    }
+    let child: ReturnType<typeof spawn> | null = null;
+    let output = "";
+    let finished = false;
+    const finish = (code: number | null, timedOut: boolean): void => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      this.diagnosticsRuns.delete(ws.id);
+      if (this.terminals.get(inst.id) !== inst || inst.closed || this.disposed) return;
+      const pass = !timedOut && code === 0;
+      // A passing run proves the start generation clean. Failures and
+      // timeouts keep the old watermark (plus the fresh timestamp above) so
+      // the next settle retries after the interval.
+      if (pass) {
+        const current = this.lastDiagnostics.get(ws.id);
+        this.lastDiagnostics.set(ws.id, { generation: startGeneration, atMs: current?.atMs ?? Date.now() });
+      }
+      const body = output.trim().slice(-MAX_DIAGNOSTICS_CONTEXT_BYTES);
+      const md =
+        `## Diagnostics — \`${tc.label}\` — ${new Date().toISOString()}\n\n` +
+        `**Status:** ${pass ? "✅ clean" : timedOut ? "⏰ timed out" : "❌ errors"}\n\n` +
+        (body && !pass ? `<details>\n<summary>Output</summary>\n\n\`\`\`text\n${body}\n\`\`\`\n</details>\n` : "");
+      const eventsDir = this.eventsDirOf(inst);
+      const binding = this.eventsBindingOf(inst);
+      if (!binding) return;
+      void writeBoundOwnedFile({
+        root: eventsDir,
+        rootIdentity: binding,
+        components: [`diagnostics-${inst.id}.md`],
+        parentIdentity: binding,
+        content: Buffer.from(md, "utf8"),
+        mode: 0o600,
+        maxBytes: MAX_DIAGNOSTICS_CONTEXT_BYTES + 1024,
+      }).catch((err) => {
+        console.warn(`[main] could not write diagnostics context: ${String(err)}`);
+      });
+    };
+    const timer = setTimeout(() => {
+      if (child) {
+        try {
+          terminateSandboxProcessGroup(child, "SIGKILL", 1500);
+        } catch {
+          /* The close handler owns the result. */
+        }
+      }
+      finish(null, true);
+    }, DIAGNOSTICS_TIMEOUT_MS);
+    try {
+      child = spawn(tc.command, tc.args, {
+        cwd,
+        detached: process.platform !== "win32",
+        env: { ...cleanEnv() },
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      });
+    } catch {
+      clearTimeout(timer);
+      this.diagnosticsRuns.delete(ws.id);
+      return;
+    }
+    child.stdout?.on("data", (data: Buffer | string) => {
+      if (output.length < MAX_DIAGNOSTICS_OUTPUT) output += data.toString().slice(0, MAX_DIAGNOSTICS_OUTPUT - output.length);
+    });
+    child.stderr?.on("data", (data: Buffer | string) => {
+      if (output.length < MAX_DIAGNOSTICS_OUTPUT) output += data.toString().slice(0, MAX_DIAGNOSTICS_OUTPUT - output.length);
+    });
+    child.once("error", () => finish(null, false));
+    child.once("close", (code) => finish(code, false));
+  }
 
   /**
    * Detect the project's test command: package.json scripts (prefer `test`,
@@ -3382,6 +3304,47 @@ class PiEditorApp {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Start one automatic verify after a dispatch worker settled with its task
+   * done. Only when the owner is idle and no sibling worker is still running:
+   * a running agent must not have tests execute under its edits. One shot per
+   * settle; never retried, cancellable through the normal verify path. A task
+   * that settles while siblings run is still marked done on the board; the
+   * last settling worker triggers the single verify covering all of them.
+   */
+  private maybeAutoVerify(owner: AgentTerminalInstance, taskText: string | null): void {
+    if (!taskText || owner.busy || owner.closed) return;
+    if (this.verifyRuns.has(owner.id) || this.autoVerifyTasks.has(owner.id)) return;
+    for (const id of this.dispatchGroupIds(owner.id)) {
+      if (id === owner.id) continue;
+      const sibling = this.terminals.get(id);
+      if (sibling && !sibling.closed && sibling.busy) return;
+    }
+    this.autoVerifyTasks.set(owner.id, taskText);
+    void this.runVerify(owner.id).then((result) => {
+      if (!result.ok) this.autoVerifyTasks.delete(owner.id);
+    });
+  }
+
+  /**
+   * Re-verify after the owner's own run settled with a failing verify on
+   * record. Same idle/sibling/overlap guards as the worker path; the finish
+   * path counts the attempt and stops the loop at the cap.
+   */
+  private maybeAutoReverify(owner: AgentTerminalInstance): void {
+    const attempts = this.autoVerifyFailures.get(owner.id);
+    if (attempts === undefined || owner.busy || owner.closed) return;
+    if (this.verifyRuns.has(owner.id) || this.autoVerifyTasks.has(owner.id)) return;
+    for (const id of this.dispatchGroupIds(owner.id)) {
+      if (id === owner.id) continue;
+      const sibling = this.terminals.get(id);
+      if (sibling && !sibling.closed && sibling.busy) return;
+    }
+    void this.runVerify(owner.id).then((result) => {
+      if (!result.ok) this.autoVerifyTasks.delete(owner.id);
+    });
   }
 
   private async runVerify(ownerId: string): Promise<{ ok: boolean; error?: string }> {
@@ -3490,6 +3453,9 @@ class PiEditorApp {
       clearTimeout(verifyTimer);
       this.verifyRuns.delete(ownerId);
       this.verifyJobs.delete(ownerId);
+      const autoTask = this.autoVerifyTasks.get(ownerId) ?? null;
+      this.autoVerifyTasks.delete(ownerId);
+      const wasLooping = this.autoVerifyFailures.has(ownerId);
       if (verifyProfilePath) {
         const profilePath = verifyProfilePath;
         const profileParent = verifyProfileParent;
@@ -3512,8 +3478,37 @@ class PiEditorApp {
         }
       }
       owner.verify = { state: how, command: tc.label, summary };
+      this.savePlanRoster(owner);
       // Do not write a result for a cancelled run. The previous context stays.
       if (how !== "cancelled") this.writeVerifyContext(ownerId, tc.label, how, code, output, failed);
+      if (autoTask && how !== "cancelled") {
+        const verdict = how === "pass" ? "✅ auto-verify passed" : how === "timeout" ? "⏰ auto-verify timed out" : "❌ auto-verify failed";
+        this.appendMailboxNote(ownerId, `## Auto-verify\n\nTask: ${autoTask}\nResult: ${verdict} — \`${summary}\``);
+      }
+      if (how === "pass" || how === "cancelled") {
+        this.autoVerifyFailures.delete(ownerId);
+        if (how === "pass" && wasLooping && !autoTask) {
+          this.appendMailboxNote(ownerId, `## Auto-verify\n\nResult: ✅ verify passed — \`${summary}\``);
+        }
+      } else if (how === "timeout") {
+        // A timed-out suite usually hangs again; retrying would burn up to
+        // three 10-minute runs. Report it and stop the loop.
+        this.autoVerifyFailures.delete(ownerId);
+        if (!autoTask) {
+          this.appendMailboxNote(ownerId, `## Verify timed out\n\n\`${summary}\` — automatic re-verify is disabled for timeouts; run Verify manually when the suite is responsive again.`);
+        }
+      } else {
+        const attempts = (this.autoVerifyFailures.get(ownerId) ?? 0) + 1;
+        if (attempts >= PiEditorApp.MAX_AUTO_VERIFY_ATTEMPTS) {
+          this.autoVerifyFailures.delete(ownerId);
+          this.appendMailboxNote(ownerId, `## Auto-verify stopped\n\n${attempts} consecutive failed verifies — needs attention before another automatic run.`);
+        } else {
+          this.autoVerifyFailures.set(ownerId, attempts);
+          if (!autoTask) {
+            this.appendMailboxNote(ownerId, `## Verify failed\n\n\`${summary}\` — will automatically re-verify when your next run settles (attempt ${attempts} of ${PiEditorApp.MAX_AUTO_VERIFY_ATTEMPTS}).`);
+          }
+        }
+      }
       this.send("verify:state", { terminalId: ownerId, verify: owner.verify }, rendererTarget);
     };
     function finishAfterCleanup(): void {
@@ -3622,15 +3617,104 @@ class PiEditorApp {
     });
   }
 
+  /**
+   * Write the per-turn project snapshot for one agent terminal: a bounded
+   * tree inventory so the run starts oriented without spending tool calls
+   * on discovery. Stamped so the agent treats it as a hint; file tools see
+   * live state. Skipped silently without an events binding.
+   */
+  private async writeProjectSnapshot(inst: AgentTerminalInstance): Promise<void> {
+    if (inst.type !== "agent" || inst.closed) return;
+    const ws = this.workspaceById(inst.workspaceId);
+    const root = ws?.root ?? inst.cwd;
+    if (!root) return;
+    const eventsDir = this.eventsDirOf(inst);
+    const binding = this.eventsBindingOf(inst);
+    if (!binding) return;
+    let snapshot: { entries: string[]; truncated: boolean };
+    try {
+      snapshot = await listProjectSnapshot(root);
+    } catch {
+      return;
+    }
+    if (this.terminals.get(inst.id) !== inst || inst.closed) return;
+    if (snapshot.entries.length === 0) {
+      await this.removeEventLeaf(inst, `project-${inst.id}.md`);
+      return;
+    }
+    const stamp = new Date().toISOString();
+    const build = (lines: string[], truncated: boolean): string =>
+      `## Project snapshot — \`${basename(root)}\` — ${stamp}\n\n` +
+      "Top-level tree first; `…(truncated)` means the listing hit a bound.\n" +
+      "A hint only — file tools see live state.\n\n" +
+      "```text\n" +
+      `${lines.join("\n")}\n` +
+      (truncated ? "…(truncated)\n" : "") +
+      "```\n";
+    // Shrink from the deepest levels until the file fits its byte bound, so
+    // medium projects keep a useful head instead of no snapshot at all.
+    let lines = snapshot.entries;
+    let truncated = snapshot.truncated;
+    let md = build(lines, truncated);
+    while (Buffer.byteLength(md, "utf8") > MAX_PROJECT_SNAPSHOT_BYTES && lines.length > 0) {
+      lines = lines.slice(0, Math.max(0, lines.length - 50));
+      truncated = true;
+      md = build(lines, truncated);
+    }
+    if (lines.length === 0) return;
+    const content = Buffer.from(md, "utf8");
+    await writeBoundOwnedFile({
+      root: eventsDir,
+      rootIdentity: binding,
+      components: [`project-${inst.id}.md`],
+      parentIdentity: binding,
+      content,
+      mode: 0o600,
+      maxBytes: MAX_PROJECT_SNAPSHOT_BYTES,
+    }).catch((err) => {
+      console.warn(`[main] could not write project snapshot: ${String(err)}`);
+    });
+  }
+
+  /** Refresh snapshots for every agent terminal of a workspace, debounced
+   *  across watcher bursts. The timer fires once; a missing workspace or a
+   *  closing project skips silently. */
+  private scheduleProjectSnapshot(workspaceId: string): void {
+    const pending = this.projectSnapshotTimers.get(workspaceId);
+    if (pending) clearTimeout(pending);
+    this.projectSnapshotTimers.set(
+      workspaceId,
+      setTimeout(() => {
+        this.projectSnapshotTimers.delete(workspaceId);
+        if (this.disposed) return;
+        const ws = this.workspaceById(workspaceId);
+        const owner = ws ? this.projectOfWorkspace(workspaceId) : null;
+        if (!ws || !owner || this.projectIsSwitching(owner.id)) return;
+        for (const id of ws.terminalIds) {
+          const inst = this.terminals.get(id);
+          if (inst && inst.type === "agent" && !inst.closed) void this.writeProjectSnapshot(inst);
+        }
+      }, PROJECT_SNAPSHOT_DEBOUNCE_MS),
+    );
+  }
+
   // ------------------------------------------------------------ plan board --
 
   /** Send the current plan to the renderer. */
-  private sendPlan(inst: PiTerminalInstance, expected?: PtyRendererSendTarget | null): void {
+  private sendPlan(inst: AgentTerminalInstance, expected?: PtyRendererSendTarget | null): void {
     this.send("plan:update", { instanceId: inst.id, tasks: inst.plan }, expected);
   }
 
+  /** Persist board/verdict handoff after a mutation. Skipped for transient
+   *  terminals and mid-switch projects; the save itself is serialized. */
+  private savePlanRoster(inst: AgentTerminalInstance): void {
+    if (!inst.persist) return;
+    const project = this.projectOfTerminal(inst.id);
+    if (project && !this.projectIsSwitching(project.id)) this.saveTerminalRoster(project);
+  }
+
   private async applyPlanMessage(
-    inst: PiTerminalInstance,
+    inst: AgentTerminalInstance,
     text: string,
     expected?: PtyRendererSendTarget | null,
   ): Promise<void> {
@@ -3642,6 +3726,7 @@ class PiEditorApp {
     );
     if (tasks.length === 0) return;
     inst.plan = tasks;
+    this.savePlanRoster(inst);
     // Do not reset touched or tool outcomes. The plan can arrive after
     // the first tool events, and their progress must count.
     reattachDispatchAssignments(
@@ -3654,17 +3739,21 @@ class PiEditorApp {
   }
 
   private async updatePlanProgress(
-    inst: PiTerminalInstance,
+    inst: AgentTerminalInstance,
     path: string,
     expected?: PtyRendererSendTarget | null,
   ): Promise<void> {
     const workspace = this.workspaceOfTerminal(inst);
-    if (workspace && markPlanProgress(inst.plan, await this.rel(path, workspace.root))) this.sendPlan(inst, expected);
+    if (workspace && markPlanProgress(inst.plan, await this.rel(path, workspace.root))) {
+      this.savePlanRoster(inst);
+      this.sendPlan(inst, expected);
+    }
   }
 
-  private finalizePlan(inst: PiTerminalInstance, expected?: PtyRendererSendTarget | null): void {
+  private finalizePlan(inst: AgentTerminalInstance, expected?: PtyRendererSendTarget | null): void {
     if (inst.plan.length === 0) return;
     finalizePlanTasks(inst.plan, inst.touched, inst.toolOutcomes);
+    this.savePlanRoster(inst);
     this.sendPlan(inst, expected);
   }
 
@@ -3681,9 +3770,10 @@ class PiEditorApp {
   private searchSessionsSeq = 0;
 
   /**
-   * Search past session files for the active project (Pi and core).
-   * Streams lines asynchronously so the main process stays responsive.
-   * Bounded to the 50 newest sessions and 50 total hits.
+   * Search past session files for the active project (core bundles plus
+   * read-only Pi history left in ~/.pi). Streams lines asynchronously so
+   * the main process stays responsive. Bounded to the 50 newest sessions
+   * and 50 total hits. History search never spawns an agent.
    */
   private async searchSessions(query: string): Promise<SessionHit[]> {
     const project = this.project();
@@ -3694,7 +3784,7 @@ class PiEditorApp {
     const piDir = join(homedir(), ".pi", "agent", "sessions", key);
     const coreDir = join(this.coreSessionRoot(), key);
     const seq = ++this.searchSessionsSeq;
-    const [coreSessions, extra] = await Promise.all([listLogicalSessions(coreDir), this.extraSessionFiles(project)]);
+    const coreSessions = await listLogicalSessions(coreDir);
     const files = mergeSessionFiles([
       await listSessionJsonl(piDir),
       coreSessions.map((entry) => ({
@@ -3703,7 +3793,6 @@ class PiEditorApp {
         mtimeMs: entry.mtimeMs,
         segments: entry.segments,
       })),
-      extra,
     ]);
     const hits = await searchSessionFiles({
       query,
@@ -3732,30 +3821,6 @@ class PiEditorApp {
       shouldStop: () => this.disposed || seq !== this.fileSearchSeq,
     });
     return truncated ? { entries, truncated: true } : { entries };
-  }
-
-  /** Extra Pi sessions from live tabs and unrestored roster entries. */
-  private async extraSessionFiles(project: ProjectState): Promise<SessionFileEntry[]> {
-    const paths: string[] = [];
-    for (const id of project.terminalIds) {
-      const inst = this.terminals.get(id);
-      if (inst?.persist && inst.engine !== "core" && inst.sessionFile) paths.push(inst.sessionFile);
-    }
-    for (const rec of project.unrestoredTerminals) {
-      if (rec.engine !== "core" && rec.sessionFile) paths.push(rec.sessionFile);
-    }
-    const out: SessionFileEntry[] = [];
-    for (const path of paths) {
-      let real = path;
-      try {
-        real = realpathSync(path);
-      } catch {
-        /* keep the unresolved path */
-      }
-      const entry = await sessionFileEntry(real);
-      if (entry) out.push(entry);
-    }
-    return out;
   }
 
   private async isProjectFile(relPath: string, projectCwd: string): Promise<boolean> {
@@ -3826,7 +3891,7 @@ class PiEditorApp {
 
   /** Live workers plus the jobs about to start. Briefings list sibling claims. */
   private dispatchJobsForBriefing(
-    owner: PiTerminalInstance,
+    owner: AgentTerminalInstance,
     extra: Array<{ task: PlanTask; id: string }>,
   ): Array<{ task: PlanTask; id: string }> {
     const jobs: Array<{ task: PlanTask; id: string }> = [];
@@ -3843,6 +3908,64 @@ class PiEditorApp {
       jobs.push(job);
     }
     return jobs;
+  }
+
+  /**
+   * Fire due scheduled plan tasks (`@every` / `@at` markers). One tick per
+   * minute across projects: prune dead entries, skip busy owners and full
+   * dispatch boards, and dispatch through the normal worker path so briefing,
+   * settle notes, and auto-verify apply unchanged. Never throws.
+   */
+  private async tickSchedules(now: number = Date.now()): Promise<void> {
+    if (this.disposed) return;
+    try {
+      const live = new Set<string>();
+      for (const project of this.projects.values()) {
+        for (const id of project.terminalIds) {
+          const inst = this.terminals.get(id);
+          if (!inst || inst.type !== "agent" || inst.closed) continue;
+          for (const task of inst.plan) {
+            if (task.state !== "pending") continue;
+            const spec = parseScheduleMarker(task.text);
+            if (!spec) continue;
+            const key = `${inst.id}\n${task.text}`;
+            live.add(key);
+            const next = this.scheduledNextRuns.get(key);
+            if (next === undefined) {
+              this.scheduledNextRuns.set(key, nextScheduleRun(spec, now, true));
+              continue;
+            }
+            if (next > now) continue;
+            // Reschedule first: a slow dispatch must not pile up ticks.
+            this.scheduledNextRuns.set(key, nextScheduleRun(spec, now, false));
+            if (inst.busy) continue;
+            const result = await this.dispatchRun(inst.id, task.text);
+            if (!result.ok) {
+              console.warn(`[main] scheduled dispatch skipped: ${result.error}`);
+            }
+          }
+        }
+      }
+      for (const key of [...this.scheduledNextRuns.keys()]) {
+        if (!live.has(key)) this.scheduledNextRuns.delete(key);
+      }
+    } catch (err) {
+      console.warn(`[main] schedule tick failed: ${(err as Error).message}`);
+    }
+  }
+
+  private startScheduleTick(): void {
+    if (this.scheduleTimer) return;
+    this.scheduleTimer = setInterval(() => {
+      void this.tickSchedules();
+    }, SCHEDULE_TICK_MS);
+  }
+
+  private stopScheduleTick(): void {
+    if (this.scheduleTimer) {
+      clearInterval(this.scheduleTimer);
+      this.scheduleTimer = null;
+    }
   }
 
   private async dispatchRun(
@@ -3899,7 +4022,7 @@ class PiEditorApp {
       try {
         const worker = await this.createTerminal(undefined, {
           type: "agent",
-          engine: owner.engine === "core" ? "core" : "pi",
+          engine: "core",
           workspaceId: owner.workspaceId,
           id: job.id,
           fromTerminalId: ownerId,
@@ -4201,7 +4324,7 @@ class PiEditorApp {
     }
   }
 
-  private writeDispatchSettleNote(worker: PiTerminalInstance, status: "settled" | "exited"): void {
+  private writeDispatchSettleNote(worker: AgentTerminalInstance, status: "settled" | "exited"): void {
     const dispatch = this.dispatchRuns.get(worker.id);
     if (!dispatch) return;
     const touched = [...worker.touched].map((p) => `\`${p}\``).join(", ");
@@ -4220,8 +4343,8 @@ class PiEditorApp {
 
   /** Copy a finished worker's files and baselines into the owner's review. */
   private collectWorker(
-    worker: PiTerminalInstance,
-    owner: PiTerminalInstance,
+    worker: AgentTerminalInstance,
+    owner: AgentTerminalInstance,
     expected?: PtyRendererSendTarget | null,
   ): void {
     let changed = false;
@@ -4477,6 +4600,8 @@ class PiEditorApp {
     inst.pty.cancelOutput();
     this.newCommandBuffers.delete(id);
     this.busyAgents.delete(id);
+    this.autoVerifyTasks.delete(id);
+    this.autoVerifyFailures.delete(id);
     if (inst.captureTimer) {
       clearTimeout(inst.captureTimer);
       inst.captureTimer = null;
@@ -4539,7 +4664,7 @@ class PiEditorApp {
   }
 
   /** The terminals of the active project, in creation order. */
-  private activeProjectTerminals(): PiTerminalInstance[] {
+  private activeProjectTerminals(): AgentTerminalInstance[] {
     const project = this.project();
     return [...this.terminals.values()].filter((inst) => !inst.closed && (!project || project.terminalIds.has(inst.id)));
   }
@@ -4611,7 +4736,7 @@ class PiEditorApp {
     if (this.disposed) return { accepted: false };
     // A candidate's PTY can publish session_ready during the synchronous
     // spawn inside createTerminal, before that method has installed its
-    // PiTerminalInstance in the live map. Keep the durable sidecar record at
+    // AgentTerminalInstance in the live map. Keep the durable sidecar record at
     // the tailer's cursor until the instance exists; accepting it here would
     // make handleSidecarEvent drop the startup boundary as "terminal closed".
     // Child subagent streams are tailed on the shared tailer but owned by
@@ -4791,6 +4916,7 @@ class PiEditorApp {
           const task = ownerInst ? findTaskByText(ownerInst.plan, dispatchStart.taskText) : undefined;
           if (ownerInst && task) {
             task.state = "active";
+            this.savePlanRoster(ownerInst);
             this.sendPlan(ownerInst, rendererTarget);
           }
         }
@@ -4820,11 +4946,20 @@ class PiEditorApp {
           const task = ownerInst ? findTaskByText(ownerInst.plan, dispatchEnd.taskText) : undefined;
           if (ownerInst) {
             if (task && taskIsComplete(task.paths, inst.touched, inst.toolOutcomes)) task.state = "done";
+            this.savePlanRoster(ownerInst);
             this.sendPlan(ownerInst, rendererTarget);
             this.collectWorker(inst, ownerInst, rendererTarget);
+            this.maybeAutoVerify(ownerInst, task?.state === "done" ? task.text : null);
           }
           // The run entry goes; the tab label stays until the terminal exits.
           this.dispatchRuns.delete(inst.id);
+        } else if (inst.type === "agent") {
+          // The owner's own run settled with a failing verify on record:
+          // re-verify the fix automatically, bounded by the attempt cap.
+          this.maybeAutoReverify(inst);
+          // Refresh static diagnostics in the background when the tree moved.
+          // Generation-cached and silent; the result lands in context.
+          void this.runDiagnostics(inst);
         }
         // The settled marker is published by the checkpoint handler only after
         // its immutable source state has been captured.
@@ -5008,7 +5143,7 @@ class PiEditorApp {
    * stays held until agent_start consumes the token.
    */
   private async handlePreflightRequest(
-    inst: PiTerminalInstance,
+    inst: AgentTerminalInstance,
     requestId: string,
     deadlineAt: number,
     expected?: PtyRendererSendTarget | null,
@@ -5235,7 +5370,7 @@ class PiEditorApp {
    * agent_start: consume the preflight token and open the run record.
    * A token-less agent_start is a retry or compaction of the open run.
    */
-  private async coupleRunStart(inst: PiTerminalInstance, event: AgentStartEvent): Promise<void> {
+  private async coupleRunStart(inst: AgentTerminalInstance, event: AgentStartEvent): Promise<void> {
     const token = String(event.preflightToken ?? "");
     const pending = token ? this.pendingPreflights.get(token) : undefined;
     const ws = this.workspaceOfTerminal(inst);
@@ -5260,9 +5395,7 @@ class PiEditorApp {
         settledEntryId: null,
         sessionFile: event.sessionFile ?? null,
         sessionBranchFile: null,
-        sessionBranchIdentity: null,
         uncertainSessionFile: null,
-        trusted: typeof event.trusted === "boolean" ? event.trusted : null,
         trustHashes: pending ? pending.trustHashes : null,
         model: event.model ?? null,
         thinkingLevel: event.thinkingLevel ?? null,
@@ -5274,7 +5407,7 @@ class PiEditorApp {
         unownedEdits: 0,
         startedAt: Date.now(),
         settledAt: null,
-        engine: inst.engine === "core" ? "core" : "pi",
+        engine: "core",
       };
       // The source must not have changed between preflight and start.
       if (ws && ws.generation !== pending.generation) {
@@ -5308,9 +5441,7 @@ class PiEditorApp {
         settledEntryId: null,
         sessionFile: event.sessionFile ?? null,
         sessionBranchFile: null,
-        sessionBranchIdentity: null,
         uncertainSessionFile: null,
-        trusted: typeof event.trusted === "boolean" ? event.trusted : null,
         trustHashes: pending ? pending.trustHashes : null,
         model: event.model ?? null,
         thinkingLevel: event.thinkingLevel ?? null,
@@ -5322,27 +5453,20 @@ class PiEditorApp {
         unownedEdits: 0,
         startedAt: Date.now(),
         settledAt: null,
-        engine: inst.engine === "core" ? "core" : "pi",
+        engine: "core",
       };
       this.markOverlappingAgents(inst, run);
       this.pushRun(inst, run, manager);
     }
-    const startedSessionFile = String(event.sessionFile ?? "") || inst.sessionFile;
     const startedSessionId = String(event.sessionId ?? "") || inst.sessionId;
-    if (inst.engine === "core") {
-      if (inst.persist) {
-        if (startedSessionId && isCoreSessionId(startedSessionId)) {
-          const startedCoreFile = await this.coreSessionFile(startedSessionId, inst.cwd);
-          if (startedSessionId === inst.sessionId || !this.sessionFileInUse(startedCoreFile)) {
-            inst.sessionId = startedSessionId;
-            inst.sessionFile = startedCoreFile;
-          }
+    if (inst.persist) {
+      if (startedSessionId && isCoreSessionId(startedSessionId)) {
+        const startedCoreFile = await this.coreSessionFile(startedSessionId, inst.cwd);
+        if (startedSessionId === inst.sessionId || !this.sessionFileInUse(startedCoreFile)) {
+          inst.sessionId = startedSessionId;
+          inst.sessionFile = startedCoreFile;
         }
       }
-    } else {
-      const trusted = this.trustedPiSessionFile(startedSessionFile) ?? this.trustedPiSessionFile(inst.sessionFile);
-      if (trusted && (trusted === inst.sessionFile || !this.sessionFileInUse(trusted))) inst.sessionFile = trusted;
-      if (startedSessionId && isRosterSessionId(startedSessionId)) inst.sessionId = startedSessionId;
     }
     const rosterOwner = this.projectOfTerminal(inst.id);
     if (inst.persist && rosterOwner) this.saveTerminalRoster(rosterOwner);
@@ -5352,7 +5476,7 @@ class PiEditorApp {
   }
 
   /** Mark this run and every other open agent in the same workspace. */
-  private markOverlappingAgents(inst: PiTerminalInstance, run: RunRecord): void {
+  private markOverlappingAgents(inst: AgentTerminalInstance, run: RunRecord): void {
     if (inst.type !== "agent") return;
     for (const otherId of this.busyAgents) {
       if (otherId === inst.id) continue;
@@ -5372,12 +5496,12 @@ class PiEditorApp {
   }
 
   /** Store a run record on the live terminal and on the project catalog. */
-  private pushRun(inst: PiTerminalInstance, run: RunRecord, manager: WorldlineManager | null): void {
+  private pushRun(inst: AgentTerminalInstance, run: RunRecord, manager: WorldlineManager | null): void {
     inst.currentRun = run;
     manager?.recordRun(run);
   }
 
-  private async cleanupPromptPayloads(inst: PiTerminalInstance): Promise<void> {
+  private async cleanupPromptPayloads(inst: AgentTerminalInstance): Promise<void> {
     const keep = this.projectOfTerminal(inst.id)?.worldlines?.promptPayloadsOf(inst.id) ?? new Set<string>();
     const dir = this.eventsDirOf(inst);
     const root = this.eventsBindingOf(inst);
@@ -5402,7 +5526,7 @@ class PiEditorApp {
    * to the open run.
    */
   private async handleCheckpointRequest(
-    inst: PiTerminalInstance,
+    inst: AgentTerminalInstance,
     requestId: string,
     kind: string,
     entryId: string,
@@ -5483,7 +5607,7 @@ class PiEditorApp {
 
 
 
-  private addPendingHint(inst: PiTerminalInstance, relPath: string): void {
+  private addPendingHint(inst: AgentTerminalInstance, relPath: string): void {
     if (inst.pendingHints.has(relPath)) return;
     if (inst.pendingHints.size >= PiEditorApp.MAX_PENDING_HINTS) {
       const oldest = inst.pendingHints.values().next().value;
@@ -5493,7 +5617,7 @@ class PiEditorApp {
   }
 
   /** Debounce a moment capture: sibling tools coalesce into one state. */
-  private scheduleMomentCapture(inst: PiTerminalInstance, expected?: PtyRendererSendTarget | null): void {
+  private scheduleMomentCapture(inst: AgentTerminalInstance, expected?: PtyRendererSendTarget | null): void {
     if (!inst.currentRun) return;
     const ws = this.workspaceOfTerminal(inst);
     // Candidate workspaces record moments too (nested worldlines): their
@@ -5513,7 +5637,7 @@ class PiEditorApp {
    * hints are the delta; the watcher cache reconciles missed events.
    */
   private runMomentCapture(
-    inst: PiTerminalInstance,
+    inst: AgentTerminalInstance,
     ws: WorkspaceState,
     expected?: PtyRendererSendTarget | null,
   ): Promise<void> {
@@ -5530,7 +5654,7 @@ class PiEditorApp {
   }
 
   private async captureMomentNow(
-    inst: PiTerminalInstance,
+    inst: AgentTerminalInstance,
     ws: WorkspaceState,
     expected?: PtyRendererSendTarget | null,
   ): Promise<void> {
@@ -5607,7 +5731,7 @@ class PiEditorApp {
 
   /** Attach the captured state to every dot of the batch and push it. */
   private attachMomentState(
-    inst: PiTerminalInstance,
+    inst: AgentTerminalInstance,
     stateId: string,
     batch = inst.momentDots,
     expected?: PtyRendererSendTarget | null,
@@ -5632,7 +5756,7 @@ class PiEditorApp {
    * Budget: keep at most 100 forkable points per terminal. Evicted dots
    * lose their dots and their store states together.
    */
-  private evictForkPoints(inst: PiTerminalInstance, expected?: PtyRendererSendTarget | null): void {
+  private evictForkPoints(inst: AgentTerminalInstance, expected?: PtyRendererSendTarget | null): void {
     const forkable = inst.timeline.filter((e) => e.stateId);
     if (forkable.length <= PiEditorApp.MAX_FORK_POINTS) return;
     let excess = forkable.length - PiEditorApp.MAX_FORK_POINTS;
@@ -5654,7 +5778,7 @@ class PiEditorApp {
   }
 
   /** Push the recorder state label (WORLDLINES §6). */
-  private setRecorderState(inst: PiTerminalInstance, state: RecorderState, expected?: PtyRendererSendTarget | null, detail?: string | null): void {
+  private setRecorderState(inst: AgentTerminalInstance, state: RecorderState, expected?: PtyRendererSendTarget | null, detail?: string | null): void {
     if (state === "degraded" && detail !== undefined) inst.recorderDetail = detail;
     if (state !== "degraded") inst.recorderDetail = null;
     // Degraded resends: each failed batch carries the latest error for the
@@ -5671,7 +5795,7 @@ class PiEditorApp {
 
   /** Attach the settled state, copy the session branch, mark eligibility. */
   private async finalizeRun(
-    inst: PiTerminalInstance,
+    inst: AgentTerminalInstance,
     state: SourceState,
     entryId: string,
     expected?: PtyRendererSendTarget | null,
@@ -5698,40 +5822,26 @@ class PiEditorApp {
     // Materialize the session branch into app-private storage.
     if (run.sessionFile) {
       try {
-        let target: string;
-        if (run.engine === "core") {
-          const through = Number(entryId);
-          if (!Number.isInteger(through) || through < 1) throw new Error("the settled session address is missing");
-          // Core uncertainty is recovery evidence: it lives outside the
-          // launch scratch directory, which start() is allowed to remove.
-          const reserveBytes = await this.sessionRetention.estimateForkedSessionBytes(run.sessionFile!);
-          const transaction = await this.sessionRetention.transact(run.id, (destinationSessionFile, retentionLease) =>
-            this.sessionFork.forkCore({
-              sourceSessionFile: run.sessionFile!,
-              destinationSessionFile,
-              throughSeq: through,
-              retentionLease,
-            }),
-            { reserveBytes },
-          );
-          target = transaction.destinationSessionFile;
-          const forked = transaction.result;
-          if (!forked.ok) {
-            run.uncertainSessionFile = forked.sessionFile;
-            throw new Error(`commit uncertain at ${forked.sessionFile}: ${forked.error}`);
-          }
-        } else {
-          // Pi finalization uses the same worker-side admission boundary as
-          // candidate forks. It reserves the destination before reading any
-          // source bytes, so a large session cannot consume unbounded scratch
-          // I/O before eligibility is evaluated.
-          const copied = await this.sessionFork.copyPi({
-            sourceSessionFile: run.sessionFile,
-            sessionWorkspaceDir: this.sessionWorkspaceDir,
-          });
-          if (!copied.ok) throw new Error(copied.error);
-          target = copied.sessionFile;
-          run.sessionBranchIdentity = copied.identity;
+        if (run.engine !== "core") throw new Error("pi runs are removed; core is the only engine");
+        const through = Number(entryId);
+        if (!Number.isInteger(through) || through < 1) throw new Error("the settled session address is missing");
+        // Core uncertainty is recovery evidence: it lives outside the
+        // launch scratch directory, which start() is allowed to remove.
+        const reserveBytes = await this.sessionRetention.estimateForkedSessionBytes(run.sessionFile!);
+        const transaction = await this.sessionRetention.transact(run.id, (destinationSessionFile, retentionLease) =>
+          this.sessionFork.forkCore({
+            sourceSessionFile: run.sessionFile!,
+            destinationSessionFile,
+            throughSeq: through,
+            retentionLease,
+          }),
+          { reserveBytes },
+        );
+        const target = transaction.destinationSessionFile;
+        const forked = transaction.result;
+        if (!forked.ok) {
+          run.uncertainSessionFile = forked.sessionFile;
+          throw new Error(`commit uncertain at ${forked.sessionFile}: ${forked.error}`);
         }
         run.sessionBranchFile = target;
       } catch (err) {
@@ -5791,7 +5901,7 @@ class PiEditorApp {
   /**
    * A terminal that exits mid-run never settles. Mark the open run.
    */
-  private closeRunOnExit(inst: PiTerminalInstance): void {
+  private closeRunOnExit(inst: AgentTerminalInstance): void {
     const run = inst.currentRun;
     if (run && !run.settledAt) {
       run.replayable = false;
@@ -5802,7 +5912,7 @@ class PiEditorApp {
   }
 
   private toolSnapshot(
-    inst: PiTerminalInstance,
+    inst: AgentTerminalInstance,
     path: string,
     toolName: string,
     edits: unknown,
@@ -5848,7 +5958,7 @@ class PiEditorApp {
   }
 
   /** Content of a path before this run's first touch (baseline or cache). */
-  private preRunContent(inst: PiTerminalInstance, path: string): string | null | undefined {
+  private preRunContent(inst: AgentTerminalInstance, path: string): string | null | undefined {
     const b = inst.baselines.get(path);
     if (b !== undefined) return b;
     return this.workspaceOfTerminal(inst)?.watcher?.lastContents.get(path);
@@ -5869,7 +5979,7 @@ class PiEditorApp {
   }
 
   /** Last-tool counts for the Timeline header. Tiny payload. Not ranking. */
-  private timelinePrefixOf(inst: PiTerminalInstance | undefined): TimelinePrefix {
+  private timelinePrefixOf(inst: AgentTerminalInstance | undefined): TimelinePrefix {
     if (!inst) return { terminalId: "", ok: 0, error: 0, open: 0 };
     let ok = 0;
     let error = 0;
@@ -5880,7 +5990,7 @@ class PiEditorApp {
     return { terminalId: inst.id, ok, error, open: inst.pendingFileTools.size };
   }
 
-  private sendTimelinePrefix(inst: PiTerminalInstance, expected?: PtyRendererSendTarget | null): void {
+  private sendTimelinePrefix(inst: AgentTerminalInstance, expected?: PtyRendererSendTarget | null): void {
     const payload = this.timelinePrefixOf(inst);
     const key = `${payload.ok}:${payload.error}:${payload.open}`;
     if (inst.lastTimelinePrefixKey === key) return;
@@ -5984,7 +6094,7 @@ class PiEditorApp {
    * joined the capture batch. Do not use the live currentRun: a later
    * agent_start would make old dots diff against the new run.
    */
-  private startStateForMoment(inst: PiTerminalInstance, ev: TimelineEvent): string | null {
+  private startStateForMoment(inst: AgentTerminalInstance, ev: TimelineEvent): string | null {
     if (ev.runStartStateId) return ev.runStartStateId;
     if (ev.runStartStateId === null) return null;
     const run = this.projectOfTerminal(inst.id)?.worldlines?.runCovering(inst.id, ev.ts);
@@ -6045,7 +6155,7 @@ class PiEditorApp {
    *  Mutate the passed event object so a delayed fill can find it by
    *  reference in the timeline array. */
   private pushTimeline(
-    inst: PiTerminalInstance,
+    inst: AgentTerminalInstance,
     ev: Omit<TimelineEvent, "seq" | "ts">,
     expected?: PtyRendererSendTarget | null,
   ): TimelineEvent {
@@ -6081,7 +6191,7 @@ class PiEditorApp {
 
   /** Keep snapshot memory bounded per terminal: drop content from the OLDEST
    *  events first (the dots remain; clicking them explains why). */
-  private trimTimelineContent(inst: PiTerminalInstance): void {
+  private trimTimelineContent(inst: AgentTerminalInstance): void {
     let bytes = 0;
     for (const e of inst.timeline) bytes += e.content ? Buffer.byteLength(e.content, "utf8") : 0;
     if (bytes <= MAX_TIMELINE_CONTENT_BYTES) return;
@@ -6138,7 +6248,7 @@ class PiEditorApp {
     }
   }
 
-  private prepareRunBaselines(inst: PiTerminalInstance, source: Map<string, string> | undefined): void {
+  private prepareRunBaselines(inst: AgentTerminalInstance, source: Map<string, string> | undefined): void {
     // A terminal's modified list is cumulative until the user clears it. Keep
     // those files anchored to their first pre-change content across turns.
     const retained = new Map<string, string | null>();
@@ -6158,7 +6268,7 @@ class PiEditorApp {
     for (const [path, content] of retained) this.setBaseline(inst, path, content);
   }
 
-  private setBaseline(inst: PiTerminalInstance, path: string, value: string | null): void {
+  private setBaseline(inst: AgentTerminalInstance, path: string, value: string | null): void {
     const previous = inst.baselines.get(path);
     if (previous !== undefined && previous !== null) inst.baselineBytes -= Buffer.byteLength(previous, "utf8");
     inst.baselines.set(path, value);
@@ -6170,13 +6280,13 @@ class PiEditorApp {
     }
   }
 
-  private deleteBaseline(inst: PiTerminalInstance, path: string): void {
+  private deleteBaseline(inst: AgentTerminalInstance, path: string): void {
     const previous = inst.baselines.get(path);
     if (previous !== undefined && previous !== null) inst.baselineBytes -= Buffer.byteLength(previous, "utf8");
     inst.baselines.delete(path);
   }
 
-  private setRunSnapshot(inst: PiTerminalInstance, path: string, content: string): void {
+  private setRunSnapshot(inst: AgentTerminalInstance, path: string, content: string): void {
     const previous = inst.runSnapshots.get(path);
     if (previous !== undefined) inst.runSnapshotBytes -= Buffer.byteLength(previous, "utf8");
     inst.runSnapshots.set(path, content);
@@ -6192,7 +6302,7 @@ class PiEditorApp {
 
   /** Run one lazy baseline capture and remember it. Change Review waits
    *  for the fill so an early diff open does not show a missing baseline. */
-  private fillBaseline(inst: PiTerminalInstance, path: string, status: "created" | "modified"): Promise<void> {
+  private fillBaseline(inst: AgentTerminalInstance, path: string, status: "created" | "modified"): Promise<void> {
     const task = this.fillBaselineFromState(inst, path, status)
       .catch(() => undefined)
       .finally(() => {
@@ -6202,7 +6312,7 @@ class PiEditorApp {
     return task;
   }
 
-  private async fillBaselineFromState(inst: PiTerminalInstance, path: string, status: "created" | "modified"): Promise<void> {
+  private async fillBaselineFromState(inst: AgentTerminalInstance, path: string, status: "created" | "modified"): Promise<void> {
     if (inst.baselines.has(path) || status === "created") {
       if (status === "created" && !inst.baselines.has(path)) this.setBaseline(inst, path, null);
       return;
@@ -6228,7 +6338,7 @@ class PiEditorApp {
     }
   }
 
-  private async recordModified(inst: PiTerminalInstance, absPath: string, status: "created" | "modified"): Promise<void> {
+  private async recordModified(inst: AgentTerminalInstance, absPath: string, status: "created" | "modified"): Promise<void> {
     const p = await this.canonicalPath(absPath);
     const existing = inst.modified.get(p);
     if (existing) {
@@ -6244,7 +6354,7 @@ class PiEditorApp {
   }
 
   private async recordDeleted(
-    inst: PiTerminalInstance,
+    inst: AgentTerminalInstance,
     absPath: string,
     expected?: PtyRendererSendTarget | null,
   ): Promise<void> {
@@ -6394,14 +6504,11 @@ class PiEditorApp {
         this.activeProjectId = id;
         project.activationGeneration = activationGeneration;
       }
-      await this.ensureAppBridge();
       // Finish or roll back any pending promotion journal BEFORE the
       // primary watcher starts: the restored bytes must not attribute to
       // a user edit.
       await recoverPromotionJournals(this.worldsRoot, {
         primaryRoot: project.canonicalRoot,
-        piSessionRoot: this.primarySessionDir(project.canonicalRoot),
-        coreSessionRoot: await this.coreProjectSessionDir(project.canonicalRoot),
       });
       this.createWorkspace(project, cwd, true);
       await this.loadMineFiles(project);
@@ -6482,7 +6589,7 @@ class PiEditorApp {
       && this.projectActivationGeneration === activationGeneration
       && this.projectSelectionAction === selectionAction;
     if (!current()) return false;
-    const needsLogin = await this.piNeedsLogin();
+    const needsLogin = await this.agentNeedsLogin();
     // Auth I/O is asynchronous. Re-check every active-project fence before
     // publishing; an earlier request must never resurrect a closed/hidden tab.
     if (!current()) return false;
@@ -6491,12 +6598,12 @@ class PiEditorApp {
   }
 
   /**
-   * True when pi has no provider in auth.json or in the process environment.
+   * True when the agent has no provider in core auth.json or in the process environment.
    * The check is boolean only. It never sends credentials to the renderer.
    */
-  private async piNeedsLogin(): Promise<boolean> {
-    if (envHasPiProvider(process.env)) return false;
-    const authPath = join(homedir(), ".pi", "agent", "auth.json");
+  private async agentNeedsLogin(): Promise<boolean> {
+    if (envHasAgentProvider(process.env)) return false;
+    const authPath = join(homedir(), ".termina", "agent", "auth.json");
     try {
       const info = await stat(authPath);
       if (!info.isFile() || info.size === 0) {
@@ -6510,7 +6617,7 @@ class PiEditorApp {
       if (this.loginHint && this.loginHint.mtimeMs === info.mtimeMs && this.loginHint.size === info.size) {
         return this.loginHint.needsLogin;
       }
-      const needsLogin = !authJsonHasPiProvider(JSON.parse(await readFile(authPath, "utf8")));
+      const needsLogin = !authJsonHasCoreCredential(JSON.parse(await readFile(authPath, "utf8")));
       this.loginHint = { mtimeMs: info.mtimeMs, size: info.size, needsLogin };
       return needsLogin;
     } catch {
@@ -6752,35 +6859,6 @@ class PiEditorApp {
     }
   }
 
-  // ---------------------------------------------------------- app bridge ----
-
-  /** The app-owned bridge file, passed to pi with the CLI extension option. */
-  private bridgePath(): string {
-    return join(this.userDataDir, "termina-bridge.ts");
-  }
-
-  /** Write the bridge to the app user-data directory when it changed. */
-  private async ensureAppBridge(): Promise<void> {
-    try {
-      const p = this.bridgePath();
-      try {
-        if (await readFile(p, "utf8") === BRIDGE_EXTENSION) return; // already current
-      } catch {
-        /* missing — write it */
-      }
-      await mkdir(dirname(p), { recursive: true });
-      const temp = `${p}.${process.pid}.${randomUUID()}.tmp`;
-      try {
-        await writeFile(temp, BRIDGE_EXTENSION, { flag: "wx", mode: 0o600 });
-        await fsRename(temp, p);
-      } finally {
-        await rm(temp, { force: true }).catch(() => undefined);
-      }
-    } catch (err) {
-      console.warn(`[main] could not write the app bridge: ${(err as Error).message}`);
-    }
-  }
-
   // -------------------------------------------------------------- watcher ---
 
   /** Start the watcher of one workspace. Returns the watcher. */
@@ -6790,8 +6868,8 @@ class PiEditorApp {
     // canonical form in flight once so each filesystem event only resolves the
     // changed path.
     const canonicalRootPromise = this.canonicalPath(ws.root);
-    const workspaceTerminals = (): PiTerminalInstance[] =>
-      [...ws.terminalIds].map((id) => this.terminals.get(id)).filter((t): t is PiTerminalInstance => t !== undefined);
+    const workspaceTerminals = (): AgentTerminalInstance[] =>
+      [...ws.terminalIds].map((id) => this.terminals.get(id)).filter((t): t is AgentTerminalInstance => t !== undefined);
     watcher.onChange = async (change) => {
       const rendererTarget = this.captureRendererSendTarget();
       const owner = this.projectOfWorkspace(ws.id);
@@ -6818,6 +6896,9 @@ class PiEditorApp {
         if (oldest !== undefined) this.lastWatchChange.delete(oldest);
       }
       if (isDupWatch) return;
+      // Keep per-turn project snapshots near live state without a walk per
+      // event: one debounced refresh per burst.
+      this.scheduleProjectSnapshot(ws.id);
       // A change with no busy agent terminal belongs to the user — unless a
       // verify run is running in this workspace: test outputs (snapshots,
       // coverage, fixtures) are automated writes, not user edits. The agent
@@ -6848,8 +6929,8 @@ class PiEditorApp {
       // this path owns it (attach the authoritative disk content to its tool
       // point — no extra dot). If nobody claims it (bash-driven or external),
       // broadcast a change point to every busy terminal.
-      const owners: PiTerminalInstance[] = [];
-      const unowned: PiTerminalInstance[] = [];
+      const owners: AgentTerminalInstance[] = [];
+      const unowned: AgentTerminalInstance[] = [];
       for (const inst of busy) {
         const at = inst.lastToolAt.get(path);
         const mine = at !== undefined && now - at < TOOL_CHANGE_DEDUP_MS;
@@ -7262,7 +7343,7 @@ class PiEditorApp {
     // ---- Project tabs ----
     ipcMain.handle("project:list", async () => {
       if (this.initialRestorePromise) await this.initialRestorePromise;
-      const needsLogin = await this.piNeedsLogin();
+      const needsLogin = await this.agentNeedsLogin();
       return [...this.projects.values()].map((p) => ({
         id: p.id,
         cwd: p.cwd,
@@ -7329,7 +7410,7 @@ class PiEditorApp {
     ipcMain.handle("terminals:create", async (_e, opts?: unknown) => {
       let type: "agent" | "shell" | undefined;
       let shell: string | undefined;
-      let engine: "pi" | "core" | undefined;
+      let engine: "core" | undefined;
       let fromTerminalId: string | undefined;
       let projectId: string | undefined;
       if (opts !== undefined) {
@@ -7338,7 +7419,7 @@ class PiEditorApp {
         if (rec.type !== undefined && rec.type !== "agent" && rec.type !== "shell") {
           return { ok: false, error: "invalid terminal type" };
         }
-        if (rec.engine !== undefined && rec.engine !== "pi" && rec.engine !== "core") {
+        if (rec.engine !== undefined && rec.engine !== "core") {
           return { ok: false, error: "invalid agent engine" };
         }
         if (rec.shell !== undefined && typeof rec.shell !== "string") return { ok: false, error: "invalid shell" };
@@ -7498,6 +7579,12 @@ class PiEditorApp {
       const manager = this.projectOfComparison(comparisonId)?.worldlines;
       if (!manager) return Promise.resolve({ ok: false, error: "candidate not found" });
       return manager.promote(comparisonId, label, force === true);
+    });
+    ipcMain.handle("worldline:export", (_e, comparisonId: string, label: "A" | "B") => {
+      if (label !== "A" && label !== "B") return { ok: false, error: "invalid candidate" };
+      const manager = this.projectOfComparison(comparisonId)?.worldlines;
+      if (!manager) return Promise.resolve({ ok: false, error: "candidate not found" });
+      return manager.exportCandidate(comparisonId, label);
     });
     ipcMain.handle("worldline:challenge", async (_e, runId: string, profile: unknown) => {
       if (!isChallengeProfile(profile)) return { ok: false, error: "invalid challenge profile" };
@@ -7825,10 +7912,7 @@ class PiEditorApp {
     const initialCwd = initial && existsSync(initial) ? initial : null;
     this.tailer.onEvent = (id, event) => this.enqueueSidecarEvent(id, event);
     this.tailer.start();
-    // Write the bridge before the first terminal starts: pi loads it with
-    // the CLI extension option on every agent launch, with or without a
-    // project folder.
-    await this.ensureAppBridge();
+    this.startScheduleTick();
     // Open the window early so the user immediately sees the splash and UI skeleton.
     await this.createWindow();
     this.appUpdater.start();
@@ -8024,6 +8108,7 @@ class PiEditorApp {
     // exit notifications may be delivered after the app has begun teardown.
     this.ptyEgress.dispose();
     this.appUpdater?.dispose();
+    this.stopScheduleTick();
     await this.persistOpenProjects();
     await this.preferenceCommits;
     await this.preferencesStore.flush();
@@ -8039,10 +8124,10 @@ class PiEditorApp {
     await this.drainRecordingTasks();
     await this.sessionRetention.drain();
     await Promise.all([...this.projects.values()].map((project) => project.worldlines?.drainSessionForks() ?? Promise.resolve()));
-    // Worldline disposal clears completed runs and therefore may enqueue the
-    // identity-bound Pi branch discards. Keep the session worker alive until
+    // Worldline disposal clears completed runs and therefore may enqueue
+    // retained session-bundle discards. Keep the session worker alive until
     // those exact cleanup requests have drained; disposing it first would
-    // silently retain every finalized Pi branch at app shutdown.
+    // silently retain every finalized branch at app shutdown.
     await Promise.all([...this.projects.values()].map((project) => project.worldlines?.dispose().catch(() => undefined) ?? Promise.resolve()));
     await this.sessionFork.dispose();
     for (const [path, binding] of [...this.evidenceHomeDirs]) {

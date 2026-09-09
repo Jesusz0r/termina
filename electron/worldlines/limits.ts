@@ -10,7 +10,7 @@ export const MAX_CANDIDATE_BYTES = 1024 * 1024 * 1024;
 export const READY_TIMEOUT_MS = 90000;
 /** Bound candidate cleanup when a startup hook ignores cancellation. */
 export const CANDIDATE_CLEANUP_TIMEOUT_MS = 2500;
-export const MAX_PI_RESOURCE_BYTES = 200 * 1024 * 1024;
+export const MAX_AGENT_RESOURCE_BYTES = 200 * 1024 * 1024;
 export const MAX_WORLDLINE_FILE_BYTES = 2 * 1024 * 1024;
 export const MAX_RUNS_PER_TERMINAL = 20;
 export const MAX_RETAINED_RUNS = 200;

@@ -24,7 +24,7 @@ import {
 } from "../worldline-git.js";
 import {
   MARKER,
-  MAX_PI_RESOURCE_BYTES,
+  MAX_AGENT_RESOURCE_BYTES,
   MAX_PROMOTION_OPERATION_BYTES,
   MAX_PROMOTION_SCAN_DEPTH,
   MAX_PROMOTION_SCAN_ENTRIES,
@@ -510,7 +510,7 @@ export async function copyBoundPrivateFile(
     rootIdentity: sourceParent,
     components: [basename(sourcePath)],
     parentIdentity: sourceParent,
-    maxBytes: MAX_PI_RESOURCE_BYTES,
+    maxBytes: MAX_AGENT_RESOURCE_BYTES,
   });
   if (source.content.byteLength !== Number(sourceInfo.size)) throw new Error("private resource changed while reading");
   await boundPromotionCopyFile({
@@ -1422,7 +1422,7 @@ async function recoverPromotionJournalsUnderTransaction(worldsRoot: string, cont
       if (rolledBack) {
         // Do not delete installed sessions, rollback temps, or the journal in
         // recovery. Journal-provided paths/manifests are not sufficient
-        // provenance to destroy a live Pi/core session, and Node cannot make
+        // provenance to destroy a live agent session, and Node cannot make
         // the final remove sink descriptor-relative.
         console.warn(`[worldline] promotion journal recovered with artifacts retained: ${dir.path}`);
       } else {

@@ -1,5 +1,5 @@
 /**
- * Session Search: a modal that searches the project's past Pi and core
+ * Session Search: a modal that searches the project's past agent
  * sessions and opens the files the hits mention. Triggered by View →
  * Search Sessions.
  */
@@ -84,7 +84,7 @@ export class SessionSearch {
     }
     let hits;
     try {
-      hits = await window.pi.searchSessions(query);
+      hits = await window.termina.searchSessions(query);
     } catch (err) {
       if (seq !== this.searchSeq || (this.input?.value ?? "") !== query) return;
       if (list) {

@@ -16,9 +16,9 @@ pnpm run dev   # builds the Rust core + main + preload, starts Vite, launches El
 
 ## First run
 
-Termina is a client for pi. Run `/login` in the app's terminal and set
+Termina runs its in-house agent. Run `/login` in the app's terminal and set
 your default provider and model before testing anything model-driven.
-Termina uses the pi configuration in `~/.pi/agent`.
+Termina uses the agent configuration in `~/.termina/agent`.
 
 ## Project layout
 
@@ -38,7 +38,7 @@ process pushes. The terminal stays the source of truth.
 ```bash
 pnpm exec tsc --noEmit        # typecheck
 pnpm run build                # production build
-pnpm run test:spikes          # plain-node spike suites (capture, merge, session-fork, platform)
+pnpm run test:spikes          # plain-node spike suites (capture, merge, platform)
 pnpm run test:e2e              # the full Electron e2e matrix
 node scripts/e2e.mjs --skip-build worldline-capture-test.mjs   # one suite
 ```
@@ -47,8 +47,8 @@ E2e rules that matter:
 
 - Each runner invocation owns a fresh root containing its fixtures,
   events, worlds, Electron user-data profiles, and a HOME with its own
-  `.pi/agent` tree. Concurrent runners do not share these paths, and the
-  host `~/.pi/agent` tree is not used or modified.
+  `.termina/agent` tree. Concurrent runners do not share these paths, and the
+  host `~/.termina/agent` tree is not used or modified.
 - Electron requests an OS-assigned loopback DevTools port. The runner
   reads `DevToolsActivePort` only from the profile it created, validates
   that port, and passes it to the active suite.
@@ -58,7 +58,7 @@ E2e rules that matter:
 - On macOS and Linux, cleanup covers the detached build, Electron, and
   suite process groups. Windows cleanup is limited to the directly spawned
   children.
-- Model-driven suites need a configured pi provider/model.
+- Model-driven suites need a configured agent provider/model.
 
 ## Code conventions
 

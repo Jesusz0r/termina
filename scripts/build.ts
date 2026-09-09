@@ -23,15 +23,13 @@ await build({
 // The Rust snapshot core replaces the old snapshot worker thread.
 buildCore();
 
-// The session worker runs SessionManager work off the main thread.
-// The pi package stays external: it resolves from node_modules at runtime.
+// The session worker runs core session-bundle work off the main thread.
 await build({
   ...shared,
   entryPoints: ["electron/session-worker.ts"],
   platform: "node",
   format: "esm",
   outfile: "dist-electron/session-worker.mjs",
-  external: [...shared.external, "@earendil-works/pi-coding-agent"],
 });
 
 await build({

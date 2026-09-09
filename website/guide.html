@@ -41,7 +41,7 @@
       <span class="eyebrow">User guide</span>
       <h1>Master the <span class="hl">cockpit.</span></h1>
       <p class="section-sub">
-        Termina is a hybrid coding cockpit: the real pi TUI in a terminal on the left, a live Monaco IDE on the
+        Termina is a hybrid coding cockpit: the real agent TUI in a terminal on the left, a live Monaco IDE on the
         right. This guide walks through everything the app can do — reviewed against the source, not the marketing.
       </p>
     </div>
@@ -78,7 +78,7 @@
       <p>
         Download the signed <code>.dmg</code> (macOS Apple Silicon) or <code>.AppImage</code> (Linux x64) from the
         <a class="link" href="index.html#install">releases page</a>. The bundle ships everything: the app, the Rust
-        snapshot core, the pinned pi package, and its own node runtime. Nothing else to install.
+        snapshot core, the in-house agent, and its own node runtime. Nothing else to install.
       </p>
       <p>Packaged builds check GitHub Releases for updates and install them when you quit the app.</p>
 
@@ -89,9 +89,9 @@
         <li>In the terminal, run <code>/login</code> to configure your model provider.</li>
         <li>Run <code>/models</code> to pick the default model.</li>
       </ol>
-      <p>The empty editor tells you about <code>/login</code> and <code>/models</code> when pi has no provider configured yet.</p>
+      <p>The empty editor tells you about <code>/login</code> and <code>/models</code> when the agent has no provider configured yet.</p>
       <p>
-        Opening a folder creates one project tab and starts one pi agent terminal in it. Your open project tabs
+        Opening a folder creates one project tab and starts one agent terminal in it. Your open project tabs
         restore on the next launch.
       </p>
 
@@ -133,7 +133,7 @@
       <h3>Terminals</h3>
       <p>Click <code>＋</code> next to the terminal tabs to open the terminal chooser:</p>
       <ul>
-        <li><b>pi agent</b> — a real pi TUI session in your project.</li>
+        <li><b>Agent (core)</b> — Termina's in-house coding agent.</li>
         <li><b>Shells</b> — any shell detected on your system (<code>zsh</code>, <code>bash</code>, …).</li>
       </ul>
       <p>Shell tabs show the shell name as a badge. <code>Cmd/Ctrl+T</code> opens the chooser.</p>
@@ -143,9 +143,9 @@
         cycles its tabs.
       </p>
 
-      <h3>Talking to pi</h3>
+      <h3>Talking to the agent</h3>
       <p>
-        The terminal is a full pi TUI. Everything pi can do, you can do here: <code>/settings</code>,
+        The terminal is a full agent TUI. Everything the agent can do, you can do here: <code>/settings</code>,
         <code>/login</code>, <code>/models</code>, plan mode, completions, and so on.
       </p>
       <p>Multi-line input works everywhere:</p>
@@ -266,7 +266,7 @@
 
       <h3>Dispatching tasks</h3>
       <ul>
-        <li><b>Click any pending task</b> to send it to a parallel worker — a separate pi agent that works on the same project simultaneously. A toast confirms the dispatch.</li>
+        <li><b>Click any pending task</b> to send it to a parallel worker — a separate agent that works on the same project simultaneously. A toast confirms the dispatch.</li>
         <li><b>⇉ Dispatch</b> sends the plan's tasks out.</li>
       </ul>
       <p>
@@ -281,7 +281,7 @@
       <h2>9 · Worldlines: fork, compare, promote</h2>
       <p>
         Worldlines answer one question: <i>what if the agent had done it differently?</i> A completed run can be
-        forked into isolated candidates — full copies of the project with their own pi sessions — that run side by
+        forked into isolated candidates — full copies of the project with their own agent sessions — that run side by
         side with the original.
       </p>
       <p>
@@ -296,7 +296,7 @@
         <li><b>Candidate B — Alternative</b>: the project at the run's start, with the original prompt loaded. Text prompts arrive editable, so you can change the instructions and get a different implementation of the same task.</li>
       </ul>
       <p>
-        Both candidates open as real pi terminals (badged <code>A</code> and <code>B</code>). They are fully isolated:
+        Both candidates open as real agent terminals (badged <code>A</code> and <code>B</code>). They are fully isolated:
         their own source trees, sessions, homes, and process groups, with network access denied except the model
         provider.
       </p>
@@ -435,7 +435,7 @@
 
       <h3>Session Search</h3>
       <p>
-        <code>Cmd/Ctrl+Shift+P</code> opens a full-text search over past pi sessions of the project. Results list the
+        <code>Cmd/Ctrl+Shift+P</code> opens a full-text search over past agent sessions of the project. Results list the
         matching moments; clicking one opens the file it mentions. Backtick paths and ordinary mentions such as
         <code>src/main.ts</code> resolve to project files. Type at least two characters.
       </p>
@@ -448,7 +448,7 @@
         <li><b>Local first.</b> Sessions, snapshots, preferences, and events live on your machine. The only network traffic is your chosen model provider (and the update check in packaged builds).</li>
         <li><b>Your Git is read-only to Termina.</b> Snapshots live in an app-owned store outside your repository. Promotion writes files, never Git history.</li>
         <li><b>Renderer isolation.</b> The editor UI never talks to the agent directly; it renders state the main process pushes.</li>
-        <li><b>Clean environments.</b> Host <code>PI_*</code> session variables are stripped before pi starts, so a host session can never attach to a terminal.</li>
+        <li><b>Clean environments.</b> Host <code>PI_*</code> session variables are stripped before the agent starts, so a host session can never attach to a terminal.</li>
         <li><b>Candidate sandboxes.</b> Worldline candidates, Verify, and evidence runs execute under OS-level profiles that deny writes outside their own tree and deny network except the model provider. Evidence runs are fully offline.</li>
         <li><b>External effects are not isolated.</b> Filesystem isolation does not cover remote services: a command inside a sandbox can still affect an allowed cloud account or deployed service.</li>
       </ul>
@@ -459,7 +459,7 @@
       <h2>14 · Troubleshooting</h2>
 
       <p><b>The editor says to run <code>/login</code> and <code>/models</code>.</b><br>
-      pi has no provider configured yet. Run <code>/login</code> in the terminal, then pick a model with <code>/models</code>.</p>
+      the agent has no provider configured yet. Run <code>/login</code> in the terminal, then pick a model with <code>/models</code>.</p>
 
       <p><b>Worldlines is unavailable.</b><br>
       The opened folder must be inside a Git repository, and the platform must support the sandbox. Submodules,

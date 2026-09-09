@@ -5,8 +5,8 @@ test.describe("Privileged Renderer IPC Navigation Isolation", () => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
 
     const status = await page.evaluate(() => ({
-      hasBridge: typeof (window as any).pi === "object",
-      canList: typeof (window as any).pi?.projectList === "function",
+      hasBridge: typeof (window as any).termina === "object",
+      canList: typeof (window as any).termina?.projectList === "function",
     }));
 
     expect(status.hasBridge).toBe(true);
@@ -23,7 +23,7 @@ test.describe("Privileged Renderer IPC Navigation Isolation", () => {
     // Navigating away from the app should either be blocked or strip the bridge
     try {
       await page.goto(foreignUrl, { timeout: 3_000 });
-      const foreignBridge = await page.evaluate(() => typeof (window as any).pi);
+      const foreignBridge = await page.evaluate(() => typeof (window as any).termina);
       expect(foreignBridge).toBe("undefined");
     } catch {
       // Navigation blocked by Electron security policies (fail closed) is also a pass

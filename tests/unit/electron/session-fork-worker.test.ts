@@ -15,7 +15,6 @@ import {
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 describe("Electron Session Fork Worker & Multi-Process Isolation", () => {
   let work: string;
@@ -80,57 +79,6 @@ describe("Electron Session Fork Worker & Multi-Process Isolation", () => {
     rmSync(work, { recursive: true, force: true });
   });
 
-  it("handles Pi session forks, pre-aborted cancellations, and scratch release", async () => {
-    const piSourceDir = join(work, "pi-source");
-    const piSource = SessionManager.create(join(work, "pi-primary"), piSourceDir);
-    piSource.appendMessage({ role: "user", content: "keep the existing Pi fork path", timestamp: Date.now() });
-    piSource.appendMessage({
-      role: "assistant",
-      content: [{ type: "text", text: "Pi fork ready." }],
-      api: "anthropic",
-      provider: "anthropic",
-      model: "test-model",
-      usage: {
-        input: 1,
-        output: 1,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 2,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-      },
-      stopReason: "stop",
-      timestamp: Date.now(),
-    });
-
-    const preAbortedPi = new AbortController();
-    preAbortedPi.abort();
-    let preAbortedPiRejected = false;
-    try {
-      await client.fork(
-        {
-          sourceSessionFile: piSource.getSessionFile(),
-          entryId: null,
-          sessionWorkspaceDir: join(work, "pre-aborted-pi-workspace"),
-          candidateRoot: join(work, "pre-aborted-pi-candidate"),
-          candidateSessionDir: join(work, "pre-aborted-pi-sessions"),
-        },
-        { signal: preAbortedPi.signal },
-      );
-    } catch (error: any) {
-      preAbortedPiRejected = error instanceof Error && error.name === "AbortError";
-    }
-    expect(preAbortedPiRejected).toBe(true);
-
-    const piFork = await client.fork({
-      sourceSessionFile: piSource.getSessionFile(),
-      entryId: null,
-      sessionWorkspaceDir: join(work, "pi-workspace"),
-      candidateRoot: join(work, "pi-candidate"),
-      candidateSessionDir: join(work, "pi-candidate-sessions"),
-    });
-    expect(piFork.ok && piFork.entryCount === 2 && !!piFork.sessionFile).toBe(true);
-  });
-
   it("discards empty core sessions via native identity-bound cleanup", async () => {
     const emptyCore = destinationSession("empty-core-project", "empty-core");
     const emptyCoreOpened = SessionWriter.open(emptyCore, 0);
@@ -157,6 +105,19 @@ describe("Electron Session Fork Worker & Multi-Process Isolation", () => {
       expect(appended.ok).toBe(true);
     }
     opened.writer.close();
+
+    const preAborted = new AbortController();
+    preAborted.abort();
+    let preAbortedRejected = false;
+    try {
+      await client.forkCore(
+        { sourceSessionFile: source, destinationSessionFile: destinationSession("pre-aborted-project", "pre-aborted") },
+        { signal: preAborted.signal },
+      );
+    } catch (error: any) {
+      preAbortedRejected = error instanceof Error && error.name === "AbortError";
+    }
+    expect(preAbortedRejected).toBe(true);
 
     const destination = destinationSession("destination-project", "destination");
     let timerTicks = 0;

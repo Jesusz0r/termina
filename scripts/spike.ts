@@ -12,8 +12,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const name = process.argv[2];
-const saveTo = process.argv[3] === "--save" ? process.argv[4] : null;
+const rawArgs = process.argv.slice(2);
+const args = rawArgs[0] === "--" ? rawArgs.slice(1) : rawArgs;
+const name = args[0];
+const saveTo = args[1] === "--save" ? args[2] : null;
 if (!name || !/^[a-z0-9-]+$/.test(name)) {
   console.error("usage: node scripts/spike.mjs <spike-name> [--save <file>]");
   process.exit(2);

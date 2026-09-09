@@ -19,6 +19,50 @@ const MAX_PATHS_PER_TASK = 5;
 
 export const MAX_DISPATCH_WORKERS = 3;
 
+/** Minimum schedule interval: background ticks must not hot-loop workers. */
+export const MIN_SCHEDULE_INTERVAL_MS = 5 * 60_000;
+/** Scheduler tick: due schedules are checked this often. */
+export const SCHEDULE_TICK_MS = 60_000;
+
+const SCHEDULE_EVERY = /@every\s+(\d+)\s*([smhd])\b/i;
+const SCHEDULE_AT = /@at\s+(\d{1,2}):(\d{2})\b/;
+
+export type ScheduleSpec = { kind: "every"; intervalMs: number } | { kind: "at"; hour: number; minute: number };
+
+/**
+ * A trailing `@every 30m` / `@at 09:30` marker makes a plan task recurring.
+ * First marker wins. Intervals below the minimum are rejected.
+ */
+export function parseScheduleMarker(text: string): ScheduleSpec | null {
+  const every = SCHEDULE_EVERY.exec(text);
+  if (every) {
+    const amount = Number(every[1]);
+    const unit = (every[2] ?? "m").toLowerCase();
+    const factor = unit === "s" ? 1000 : unit === "h" ? 3_600_000 : unit === "d" ? 86_400_000 : 60_000;
+    const intervalMs = amount * factor;
+    if (!Number.isSafeInteger(intervalMs) || intervalMs < MIN_SCHEDULE_INTERVAL_MS) return null;
+    return { kind: "every", intervalMs };
+  }
+  const at = SCHEDULE_AT.exec(text);
+  if (at) {
+    const hour = Number(at[1]);
+    const minute = Number(at[2]);
+    if (hour > 23 || minute > 59) return null;
+    return { kind: "at", hour, minute };
+  }
+  return null;
+}
+
+/** Next run after `fromMs` for a schedule (first `@every` fires immediately). */
+export function nextScheduleRun(spec: ScheduleSpec, fromMs: number, first: boolean): number {
+  if (spec.kind === "every") return first ? fromMs : fromMs + spec.intervalMs;
+  const date = new Date(fromMs);
+  const next = new Date(date);
+  next.setHours(spec.hour, spec.minute, 0, 0);
+  if (next.getTime() <= fromMs) next.setDate(next.getDate() + 1);
+  return next.getTime();
+}
+
 export async function parsePlanTasks(text: string, cwd: string | null, canonicalize: CanonicalizePath): Promise<PlanTask[]> {
   const lines = text.split("\n");
   const heading = lines.findIndex((raw) => PLAN_HEADING_LINE.test(raw.trim()));
@@ -117,7 +161,7 @@ export function formatDispatchBriefing(
   const lines: string[] = [
     "## Dispatch briefing",
     "",
-    "You are one of several Pi workers on the same project. Do not edit files claimed by a sibling.",
+    "You are one of several agent workers on the same project. Do not edit files claimed by a sibling.",
     "",
     "### Your assignment",
     assigned.text,

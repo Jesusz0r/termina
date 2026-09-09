@@ -7599,7 +7599,6 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     overlayBytes: activeRequestOverlay?.bytes ?? null,
     entryId: String(userMsg.sseq),
     parentEntryId: null,
-    trusted: null,
     thinkingLevel: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)),
   });
   let storageFailure: string | null = null;

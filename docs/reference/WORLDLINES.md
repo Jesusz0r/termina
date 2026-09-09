@@ -1,16 +1,20 @@
 # Worldlines — Executable Timeline plan
 
-> **Status:** implemented and maintained
+> **Status:** implemented and maintained. Engine migration complete:
+> terminals, forks, candidates, promotion, sandboxing, and trust are core-only
+> (the in-house agent). Historical phase records below still name the previous
+> engine (“Pi”, “bridge”, “SessionManager”); the normative sections (§1–§9
+> invariants, eligibility, and architecture) are core-accurate.
 >
 > **Product promise:** Fork a recorded agent moment into isolated, runnable
-> projects with matching Pi conversations. Compare the futures with measured
+> projects with matching agent conversations. Compare the futures with measured
 > evidence, then promote one without losing the others.
 
 ## 1. Product invariants
 
 A fork point is valid only when Termina has both:
 
-1. the exact persisted Pi session entry for that point; and
+1. the exact persisted agent session entry for that point; and
 2. the exact captured project source state for that point.
 
 In this document, **exact source state** means the path, file type, bytes,
@@ -43,18 +47,18 @@ project. Promotion must be recoverable after a process or application crash.
 Fork a completed run into two isolated candidates:
 
 - **Candidate A — Reference:** the original run's settled source state and
-  settled Pi session.
-- **Candidate B — Alternative:** the run-start source state and the Pi session
+  settled agent session.
+- **Candidate B — Alternative:** the run-start source state and the agent session
   immediately before the original effective prompt.
 
-For a text-only prompt, Termina puts the effective prompt in Candidate B's Pi
+For a text-only prompt, Termina puts the effective prompt in Candidate B's agent editor
 editor without submitting it. The user can change it or submit it unchanged.
 For a structured prompt with images, Release 1 offers **Run unchanged** and
 preserves the original content blocks. It does not pretend that the TUI can edit
 image attachments.
 
 Both candidates live outside the primary project and have independent Git
-metadata, process groups, homes, temporary directories, Pi sessions, watchers,
+metadata, process groups, homes, temporary directories, agent sessions, watchers,
 and runtime copies. Candidate A preserves the original implementation even if
 the primary project changes later. Candidate B provides a clean alternate
 future from the shared base.
@@ -77,12 +81,12 @@ Make every visible timeline event a real fork point:
 
 - persist incremental content-addressed file blobs;
 - persist an immutable source state for each event;
-- link each event to its exact persisted Pi session entry;
+- link each event to its exact persisted agent session entry;
 - materialize any selected event as a runnable candidate; and
 - continue a new future from that event.
 
 Release 2 changes timeline semantics. Publish dots only for stable action
-boundaries with both a Pi entry and a source state. Transient tool starts still
+boundaries with both a session sequence and a source state. Transient tool starts still
 drive live auto-open and ownership attribution, but they do not create dots.
 Parallel sibling tools become one stable batch event. Disk writes during a Bash
 command become forkable only after the matching tool result is persisted and
@@ -127,8 +131,8 @@ correct or objectively better.
 3. Click **Fork Run**.
 4. Termina creates Candidate A from the settled run and Candidate B from the
    run start.
-5. Two real Pi terminals open in two isolated candidates.
-6. Candidate B receives the original effective prompt through the app bridge.
+5. Two real agent terminals open in two isolated candidates.
+6. Candidate B receives the original effective prompt through startup control.
 7. Run Verify in both candidates.
 8. Compare evidence and diffs.
 9. Click **Promote** on the preferred candidate.
@@ -202,7 +206,6 @@ fails. Do not add a weaker fallback.
 - The platform cannot enforce filesystem writes, process signaling, inherited
   descriptors, and child-process containment for the required sandbox.
 - Available disk space is below the 512 MB pair-creation reserve.
-- The running Pi binary does not exactly match Termina's pinned Pi package.
 
 Phase 0 can remove a restriction only after a byte-exact, isolation, cleanup,
 and performance test proves support. Do not add compatibility branches based on
@@ -227,14 +230,14 @@ assumptions.
 
 ### What exactly can be reconstructed?
 
-Termina reconstructs the captured source domain and the persisted Pi session
+Termina reconstructs the captured source domain and the persisted agent session
 branch. It does not claim to reconstruct ignored caches, operating-system state,
 shell state, clocks, random seeds, services, or network responses. The UI must
 say **source state** instead of the broader **workspace state**.
 
 ### Can a candidate modify the primary project through an absolute path or a symlink?
 
-Not when Worldlines is enabled. Run the whole candidate Pi process, its built-in
+Not when Worldlines is enabled. Run the whole candidate agent process, its built-in
 file tools, custom extensions, Bash children, Verify workers, and descendants
 inside an operating-system policy that allows writes only to candidate-owned
 paths. Also reject file-tool paths that resolve outside the candidate root,
@@ -292,10 +295,10 @@ cannot be replayed fairly.
 
 ### Can the original prompt be replayed exactly?
 
-Capture the effective prompt and image content from `before_agent_start`, after
-skill and prompt-template expansion. Capture the one-shot Termina context that
-the bridge injected. Store both in app-private files, not renderer state.
-Text-only Fork Run prompts can be edited in Pi. Structured prompts can run
+Capture the effective prompt and image content at run start, after
+skill and prompt-template expansion. Capture the one-shot Termina context
+injected for the turn. Store both in app-private files, not renderer state.
+Text-only Fork Run prompts can be edited in the agent editor. Structured prompts can run
 unchanged. Steering messages and follow-ups make Release 1 replay ineligible.
 
 Dynamic system-prompt changes from unrelated extensions are outside the
@@ -304,36 +307,35 @@ claim that the model request itself was reproduced byte-for-byte.
 
 ### What happens to the selected conversation after promotion?
 
-Promote the selected Pi branch with the source. Before primary writes begin,
+Promote the selected session branch with the source. Before primary writes begin,
 create a self-contained target session for the primary cwd from the candidate's
 current leaf. After source apply succeeds, install that session in the primary
-Pi session directory and open a new primary terminal on it. If the original
+session directory and open a new primary terminal on it. If the original
 primary terminal now represents another future, mark it out of date and inject
 a source-change notice before its next run. Do not discard the only matching
 conversation after promoting its source.
 
-### Can a Pi session fork use a different Pi version?
+### Can a session fork use a different agent version?
 
-No. Launch the Pi binary shipped with the same pinned
-`@earendil-works/pi-coding-agent` package used by the session worker. A custom
-`TERMINA_PI_BIN` disables Worldlines unless its exact version matches. Do not
-maintain a session-format compatibility layer.
+No. Candidates run the same in-house agent build as the primary terminal.
+Do not maintain a session-format compatibility layer.
 
 ### Will candidate project extensions trigger a new trust prompt or run unreviewed code?
 
-Load the Termina bridge as an app-owned CLI extension. It is available before
-project trust. Inherit project trust for one process only when the source Pi
-session was trusted and every trust-sensitive project resource still matches
-the trusted base hash. Never persist candidate paths in `trust.json`. If a run
-changed trust-sensitive project resources or resolved Pi user resources, require
-explicit review and do not auto-launch Challenge Mode.
+Candidates start with no project trust: the agent's startup control is
+app-owned and available before project trust. Inherit project trust for one
+process only when the source session was trusted and every trust-sensitive
+project resource still matches the trusted base hash. Never persist candidate
+paths in `trust.json`. If a run changed trust-sensitive project resources or
+resolved agent user resources, require explicit review and do not auto-launch
+Challenge Mode.
 
 ### Are ignored dependencies fair and isolated?
 
 Create one runtime template at comparison start, then copy-on-write clone that
 same template into A and B. Copy only a fixed detected allowlist such as
 `node_modules`, `.venv`, and required local environment files. Preserve modes
-and reject sockets or escaping write targets. Resolve runtime and Pi-resource
+and reject sockets or escaping write targets. Resolve runtime and agent-resource
 symlinks that read from an external package store into the template, or disable
 the feature when they cannot be isolated. Do not leave read-through links into
 real home or primary runtime directories. The sandbox blocks writes through
@@ -403,9 +405,9 @@ isolation as a full security sandbox for external systems.
 
 Add these terms to `AGENTS.md` when implementation starts:
 
-- **Fork point:** one visible timeline event coupled to a Pi session entry and
+- **Fork point:** one visible timeline event coupled to a agent session entry and
   immutable source state.
-- **Worldline:** one isolated candidate source tree and matching Pi session.
+- **Worldline:** one isolated candidate source tree and matching agent session.
 - **Candidate:** a worldline that participates in one comparison.
 - **Reference:** Candidate A, which preserves the original future.
 - **Alternative:** Candidate B, which starts from the shared base.
@@ -508,68 +510,67 @@ to detect them. If the primary root disappears, unmounts, or resolves to a new
 repository identity, mark comparisons detached and disable promotion. Re-enable
 only after the same canonical repository identity returns.
 
-### 6.3 App bridge and coupled timeline events
+### 6.3 Agent host and coupled timeline events
 
-Move the generated Termina bridge out of project `.pi/extensions`. Keep one
-app-owned bridge file and pass it with Pi's CLI extension option for primary and
-candidate terminals. This removes the generated bridge from source capture and
-makes bridge startup independent of project trust.
+The in-house agent (`agent-core`) writes the sidecar protocol itself; there
+is no injected bridge file and no project-trust interaction. The sidecar
+writer lives in the agent host (`agent-core/host.ts`, `logEvent` in
+`agent-core/main.ts`); `electron/sidecar.ts` is the only parser. Nothing
+agent-owned enters source capture.
 
-Extend bridge events with:
+Host events carry:
 
 - session file and session id;
-- current and parent entry ids;
+- storage sequence and prompt/parent sequence ids;
 - tool call id and sibling batch id where applicable;
 - run id;
-- effective prompt entry id;
+- effective prompt sequence id;
 - source terminal and workspace ids;
-- random bridge-instance id;
-- monotonic event sequence within that bridge instance; and
+- random host-instance id;
+- monotonic event sequence within that host instance; and
 - random checkpoint request id.
 
 Use app-private directories with mode `0700` and files with mode `0600`. Consume
 control requests exactly once. Treat sidecar records as untrusted hints: verify
-the claimed session file, entry id, parent chain, role, active branch, terminal,
-workspace, bridge instance, run, sequence, and operation id in a worker before
-publishing a fork point. Resolve session files only inside the registered
-primary or candidate session directory; never open an arbitrary sidecar path.
-Accept a sequence reset only after an explicit `session_start` or bridge reload
-introduces a new instance id.
+the claimed session file, sequence chain, terminal, workspace, host instance,
+run, sequence, and operation id in a worker before publishing a fork point.
+Resolve session files only inside the registered primary or candidate session
+directory; never open an arbitrary sidecar path. Accept a sequence reset only
+after an explicit `session_ready` with a new instance id.
 
-A run start uses three Pi hooks. `input` can stop submission when save fails,
-`before_agent_start` sees the effective expanded prompt and injects context, and
-`agent_start` exposes the persisted run state:
+A run start uses the host preflight. The host can stop submission when save
+fails, captures the effective expanded prompt and images, and reports the
+persisted run state:
 
-1. For an idle initial message, the bridge `input` handler requests start
-   preflight and waits.
+1. For an idle initial message, the host emits `preflight_request` and waits.
 2. Main acquires the workspace write lease and flushes dirty editor models.
-3. If save or acknowledgement fails, the bridge stores a one-use recovery
-   draft, returns `handled`, restores the editable text when possible, notifies
-   the user, and does not start the agent.
+3. If save or acknowledgement fails, the host keeps a one-use recovery
+   draft, restores the editable text when possible, notifies the user, and
+   does not start the agent.
 4. Main regenerates user-edit context and captures the start source state.
-5. Main returns a one-use preflight token, and `input` continues.
-6. In `before_agent_start`, the bridge captures the effective expanded prompt
-   and images, then reads and injects the final one-shot context.
-7. In `agent_start`, the bridge reports the persisted prompt and leaf entry ids
-   with the preflight token.
-8. Main verifies that generation did not change, couples the entry to the
-   captured source state, consumes the token, and releases the lease.
+5. Main returns a one-use preflight token, and submission continues.
+6. The host captures the effective expanded prompt and images, then reads
+   and injects the final one-shot context.
+7. In `agent_start`, the host reports the persisted prompt and leaf
+   sequences with the preflight token.
+8. Main verifies that generation did not change, couples the sequences to
+   the captured source state, consumes the token, and releases the lease.
 
-A run that reaches `before_agent_start` without a valid preflight token can
+A run that reaches the agent loop without a valid preflight token can
 continue normally but is not eligible for Fork Run. The token creates one
-high-level run id. Consume it on the first `agent_start`; later low-level
+high-level run id. Consume it on the first `agent_start`; later
 `agent_start` events caused by retry or compaction stay in that run and do not
 reset its base. `agent_settled` closes the run.
 
 Other stable boundaries use one checkpoint request:
 
-1. The bridge emits the request and waits up to the budget.
+1. The host emits the request and waits up to the budget.
 2. Main acquires the workspace write lease.
 3. The snapshot worker reconciles watcher hints against the temporary index.
 4. Main waits for a short watcher quiet window.
 5. Main accepts the state only when the workspace generation is unchanged.
 6. Main writes an atomic acknowledgement and releases the lease.
-7. The bridge continues the agent loop.
+7. The host continues the agent loop.
 
 Release a stranded start lease on cancellation, extension error, terminal exit,
 or timeout.
@@ -669,7 +670,7 @@ This captures working-tree bytes. It does not copy the user's index stages.
 
 Git blobs provide content-addressed incremental storage. Identical bytes reuse
 one object. When no source path changes, reuse the previous `sourceStateId` and
-tree while linking the new Pi entry. This keeps valid evidence current across
+tree while linking the new session sequence. This keeps valid evidence current across
 conversation-only events.
 
 Pin source states used by a visible dot, candidate, comparison, evidence result,
@@ -685,11 +686,11 @@ A run record stores:
 
 - start source state;
 - effective prompt content and images;
-- app-bridge context injected for the turn;
+- one-shot host context injected for the turn;
 - prompt entry and its parent;
 - source session branch snapshot;
 - selected model and thinking level;
-- resolved Pi resource and project-trust hashes;
+- resolved agent resource and project-trust hashes;
 - settled source state and settled entry;
 - interruption and stop reason;
 - overlapping writer ids; and
@@ -697,14 +698,14 @@ A run record stores:
 
 Offer Release 1 Fork Run only when:
 
-- the Pi session is persisted;
+- the agent session is persisted;
 - start and settled source checkpoints are valid;
 - the run settled without interruption or terminal loss and left no live
   mutating descendant process;
 - no other agent, Verify worker, promotion, or dispatch worker overlapped the
   same source workspace;
 - the run has one initial user prompt and no steering or follow-up user message;
-- trust-sensitive project resources and resolved Pi user resources still match
+- trust-sensitive project resources and resolved agent user resources still match
   their captured hashes; and
 - the source repository identity still matches.
 
@@ -715,13 +716,13 @@ because those actions are not replayed.
 `Fork Run` creates both candidates concurrently:
 
 - Candidate A receives the settled source state and session at the settled
-  entry.
+  sequence.
 - Candidate B receives the start source state and session at the parent of the
-  effective prompt. If the prompt is the root entry, create an empty candidate
+  effective prompt. If the prompt is the root sequence, create an empty candidate
   session and restore the captured model and thinking level before replay.
-- Text-only Candidate B receives editable text through `ctx.ui.setEditorText`.
+- Text-only Candidate B receives editable text through the startup prefill control.
 - Structured Candidate B receives a one-click unchanged replay through
-  `pi.sendUserMessage` with the original content blocks.
+  the structured startup control with the original content blocks.
 
 Pair creation is all-or-nothing. If either candidate fails, cancel both process
 groups, remove both directories and sessions, release all pins, and report one
@@ -748,15 +749,14 @@ Create one immutable comparison template:
 6. Fetch all app-snapshot objects needed by the candidate into its local object
    store, then remove access to the app snapshot store.
 7. Copy the fixed runtime allowlist into the template with copy-on-write clones.
-8. Create an isolated home, temporary directory, cache directory, Pi session
+8. Create an isolated home, temporary directory, cache directory, session
    directory, and event directory.
-9. Copy the resolved Pi settings, model configuration, context files, user
-   extensions, skills, prompts, themes, and installed Pi package code used by
-   the source session.
+9. Copy the resolved agent settings, model configuration, MCP config, user
+   skills, and auth material used by the source session.
    Exclude unrelated sessions, logs, caches, and credentials.
-10. Copy only the required Pi authentication material with mode `0600`. Let
+10. Copy only the required agent authentication material with mode `0600`. Let
     token refresh change only that copy.
-11. Make copied Pi resources read-only and disable package auto-install.
+11. Make copied agent resources read-only (except the auth file).
 12. Start no process in the template.
 
 Copy-on-write clone the complete template into A and B. Each clone gets
@@ -764,12 +764,12 @@ independent Git metadata and runtime files. Apply Candidate A's settled source
 state after cloning. Candidate B remains at the shared base. Delete the template
 only after both candidates validate successfully.
 
-Run candidate Pi, shell, dispatch, Verify, and child processes under one policy:
+Run candidate agent, shell, dispatch, Verify, and child processes under one policy:
 
 - allow read and write inside that candidate except paths marked immutable for
   runtime or evidence;
 - allow write to its app-owned home, session, event, cache, and temporary paths;
-- use only the copied, hashed Pi resources and model credentials;
+- use only the copied, hashed agent resources and model credentials;
 - deny read of the real home and unrelated secrets such as SSH, cloud, and
   signing credentials;
 - allow read-only access only to the source Git object directory, not its refs,
@@ -790,7 +790,7 @@ actual write boundary. Verify and evidence workers use the same filesystem and
 process policy with network fully denied unless the immutable evidence contract
 explicitly grants a domain.
 
-Clone ignored project runtime data and resolved Pi resources from one source
+Clone ignored project runtime data and resolved agent resources from one source
 into the comparison template so A and B receive identical inputs. Make
 dependency directories and local environment inputs read-only inside the
 candidate sandbox. Give build output,
@@ -802,24 +802,20 @@ cannot reset or measure.
 Record runtime creation time and fingerprints for diagnostics, but never store
 ignored content in Git, IPC, source diffs, or promotion.
 
-### 6.7 Pi session fork, prompt delivery, and trust
+### 6.7 Core session fork, prompt delivery, and trust
 
-Pin `@earendil-works/pi-coding-agent` as an application dependency and launch
-the Pi binary from that same package. Perform all `SessionManager` work in a
-worker process.
+Candidates run the same in-house agent build as the primary terminal.
+Perform all session-bundle forks in the session worker (`forkCoreSession`
+→ `writeForkedSession` with a `throughSeq` bound).
 
-Before branching, copy the complete source session file to an app-private
-session workspace. Open the copy, verify the requested entry and parent chain,
-then:
+Forking never touches the live source bundle: the worker materializes the
+sequence slice into a fresh destination bundle inside the candidate session
+directory. Reference A forks through the settled sequence; alternative B
+forks through the prompt-parent sequence (or zero for the root-prompt case).
+Moment candidates fork through the dot's sequence.
 
-1. call `createBranchedSession(sessionEntryId)` to extract the selected path;
-2. call `SessionManager.forkFrom(extractedSession, candidateRoot,
-   candidateSessionDir)`; and
-3. start Pi with `--session <candidate-session>` and the app bridge as a CLI
-   extension.
-
-Do not create intermediate or candidate sessions under the user's normal Pi
-session directory. Delete app-owned session copies with the candidate.
+Do not create intermediate or candidate sessions under any user-owned
+session directory. Discard app-owned session bundles with the candidate.
 
 The startup control file contains an operation id and one action:
 
@@ -828,19 +824,19 @@ The startup control file contains an operation id and one action:
 - send Challenge prompt; or
 - start with no prompt.
 
-The app bridge atomically consumes the control before applying it. Record a
-one-shot custom entry so reload cannot submit it twice. Emit `session_ready`
+The agent host atomically consumes the control before applying it. Record a
+one-shot prompt entry so reload cannot submit it twice. Emit `session_ready`
 only after the control action succeeds or returns a terminal error. Do not use a
 fixed startup delay or raw terminal paste for prompt delivery.
 
 Candidate A receives a hidden relocation note that maps historical absolute
 source paths to the candidate cwd. Candidate B receives the captured one-shot
-Termina context before its effective prompt. Keep prompt content, images, and
+context before its effective prompt. Keep prompt content, images, and
 context out of renderer list payloads and delete startup controls after use.
 
-The CLI bridge handles `project_trust` before candidate project resources load.
-Use Pi's complete trust-sensitive set: project settings, extensions, skills,
-prompts, themes, system prompt files, and project `.agents/skills`.
+Trust is fail-closed. The native trust hashes cover the agent directory and
+the project root; a comparison records them at fork time and re-checks them
+before ranking or promotion:
 
 - inherit one-process trust only when the source session was trusted and the
   candidate's trust-sensitive resources match the approved base hashes;
@@ -1046,7 +1042,7 @@ For a clean merge:
    app-private staging directory.
 2. Validate canonical destinations and use an intermediate name for case-only
    renames.
-3. Create a self-contained promoted Pi session from the candidate's current
+3. Create a self-contained promoted agent session from the candidate's current
    leaf with the primary cwd. Append one hidden relocation message that maps
    candidate paths back to primary paths. Keep the session staged outside the
    normal session picker.
@@ -1054,7 +1050,7 @@ For a clean merge:
    output paths, staged session path, and phase.
 5. Recheck primary generation and expected `P`.
 6. Apply staged outputs with atomic per-path renames.
-7. Install the promoted session atomically in the primary Pi session directory.
+7. Install the promoted session atomically in the primary agent session directory.
 8. Update and sync the journal after each phase.
 9. Roll back source and remove the staged or installed promoted session on a
    handled failure.
@@ -1068,17 +1064,17 @@ For a clean merge:
 13. Mark older primary agent terminals out of date and write their one-shot
     source-change context before releasing the primary write lease.
 14. Open the result in primary Change Review and open a new primary terminal on
-    the promoted Pi session.
+    the promoted agent session.
 
 Promotion must not stage files, move the user's branch, write user Git refs, or
-run project hooks. Writing the self-contained selected Pi session to the normal
+run project hooks. Writing the self-contained selected agent session to the normal
 primary session directory is part of the explicit promotion.
 
 ### 6.11 Lifecycle and cleanup
 
 Closing a terminal does not silently discard its candidate. It stops that
 terminal and leaves the candidate recoverable during the current app session.
-The candidate card can reopen Pi with the same candidate session. Discard is a
+The candidate card can reopen the agent with the same candidate session. Discard is a
 comparison action.
 
 Before project switch or normal app quit, ask for confirmation when a candidate
@@ -1132,11 +1128,11 @@ Build disposable command-line spikes and remove them after recording results.
 - Prove candidates cannot signal, inspect, or inherit writable descriptors for
   primary and main-process resources.
 - Prove process-group cleanup kills grandchildren.
-- Prove each chosen Pi lifecycle hook observes the expected persisted
-  `SessionManager` entry and map retry, compaction, queued follow-up, and settled
+- Prove each chosen agent lifecycle hook observes the expected persisted
+  session-bundle sequence and map retry, compaction, queued follow-up, and settled
   events to one high-level Run correctly.
-- Fork copied Pi sessions into app-owned candidate session directories.
-- Prefill text and send structured prompts through the CLI bridge exactly once.
+- Fork copied agent sessions into app-owned candidate session directories.
+- Prefill text and send structured prompts through startup control exactly once.
 - Test temporary project trust and changed trust-sensitive resources.
 - Test clean, binary, mode, symlink, rename, file-directory, and conflicted
   merges without running hooks or custom drivers.
@@ -1147,7 +1143,7 @@ Build disposable command-line spikes and remove them after recording results.
 **Gate:** Do not start UI work unless source capture is byte-exact, isolation is
 enforced, cleanup is complete, and measured latency fits section 9.
 
-### Phase 1 — make workspaces and Pi ownership first-class
+### Phase 1 — make workspaces and session ownership first-class
 
 Files expected to change:
 
@@ -1164,7 +1160,7 @@ Files expected to change:
 
 Work:
 
-- Launch the pinned app Pi binary.
+- Launch the bundled agent binary.
 - Move the bridge to an app-owned CLI extension.
 - Remove the old project bridge when it has Termina's generated marker. Never
   delete a user-owned file that only shares the name.
@@ -1227,8 +1223,8 @@ Work:
 - Copy-on-write clone Candidate A and Candidate B.
 - Apply settled source and session to A.
 - Apply base source and pre-prompt session to B.
-- Deliver text or structured prompts through one-shot bridge controls.
-- Launch both Pi terminals inside independent sandboxes and process groups.
+- Deliver text or structured prompts through one-shot startup controls.
+- Launch both agent terminals inside independent sandboxes and process groups.
 - Treat pair creation as all-or-nothing.
 - Clean every partial resource on failure or cancellation.
 
@@ -1301,7 +1297,7 @@ Files expected to change:
 
 Work:
 
-- Buffer watcher hints until stable Pi boundaries.
+- Buffer watcher hints until stable agent boundaries.
 - Reconcile and persist incremental raw Git blobs.
 - Correlate tool results by tool call and batch ids.
 - Coalesce parallel sibling tools.
@@ -1314,7 +1310,7 @@ Work:
 - Keep the root promotion base unchanged across every nested worldline.
 
 **Release 2 gate:** Every visible dot creates a runnable candidate with that
-exact captured source state and persisted Pi context.
+exact captured source state and persisted session context.
 
 ### Phase 7 — Challenge Mode
 
@@ -1362,6 +1358,17 @@ Use the existing `area:action` convention.
 - `worldline:cancel`
 - `worldline:promote`
 - `worldline:discard`
+- `worldline:export`
+
+### Export
+
+A live candidate exports to a bundle under `worlds/exports/<comparison>-<label>`:
+`candidate.patch` (unified diff, base commit → candidate head, stubbed past
+256 KiB or binary), `pr-body.md` (summary with evidence verdicts), and
+`metadata.json`. Only the newest 20 bundles are retained; extra changed files
+past 200 stay listed in the summary but leave the patch. The bundle never
+touches the user's Git history — apply it with `git apply` or paste the body
+into a PR.
 
 ### Pushes
 
@@ -1388,7 +1395,7 @@ Phase 0 must record real baselines. Initial targets:
 - Run-boundary capture under 200 ms at p95 on the medium fixture repository.
 - Incremental capture under 100 ms at p95 when ten or fewer files change.
 - Checkpoint quiet window of 100 ms, with one bounded retry.
-- Pair materialization under 5 seconds at p95, excluding Pi provider startup.
+- Pair materialization under 5 seconds at p95, excluding agent provider startup.
 - One candidate materialization under 3 seconds at p95.
 - Timeline and worldline push payload under 10 KB.
 - At most three live worldlines.
@@ -1396,7 +1403,7 @@ Phase 0 must record real baselines. Initial targets:
 - At most 100 retained fork points per terminal.
 - At most 100,000 captured source paths and 64 MB for one source file.
 - At most 256 MB of new retained source blobs per project session.
-- At most 64 MB for one copied source Pi session file and 20 MB for one
+- At most 64 MB for one copied source agent session file and 20 MB for one
   structured prompt payload.
 - At most 2 GB of logical runtime data per comparison template.
 - At most 1 GB of new candidate-local data per candidate before automatic
@@ -1422,7 +1429,7 @@ a dedicated `TERMINA_WORLDS_DIR` on the fixture's filesystem for every suite.
 - Reject a non-Git folder, app-owned candidate root, sparse checkout,
   partial/promisor clone, source object alternate, unresolved index, submodule,
   nested repository, unsupported file type, content filter (not Git LFS),
-  unreliable recursive watcher, missing sandbox, low disk, and mismatched Pi
+  unreliable recursive watcher, missing sandbox, and low disk,
   version. A Git subdirectory is a valid project. Copy-on-write clones are
   preferred; a plain recursive copy is the fallback.
 - Support an unborn repository and the source repository's Git object format.
@@ -1465,8 +1472,8 @@ a dedicated `TERMINA_WORLDS_DIR` on the fixture's filesystem for every suite.
 
 - Create A from the settled run and B from the start.
 - Assert a shared base and independent candidate heads.
-- Reconstruct the copied Pi branches in candidate session directories.
-- Prefill text once after bridge readiness.
+- Reconstruct the copied agent branches in candidate session directories.
+- Prefill text once after session_ready.
 - Replay structured content unchanged once.
 - Preserve captured one-shot context.
 - Reject interruption, steering, follow-up, overlap, session loss, oversized
@@ -1477,7 +1484,7 @@ a dedicated `TERMINA_WORLDS_DIR` on the fixture's filesystem for every suite.
 
 ### `scripts/worldline-any-moment-test.mjs`
 
-- Assert that every visible dot has a Pi entry and source state.
+- Assert that every visible dot has a session sequence and source state.
 - Fork before a later edit and exclude that edit.
 - Promote a nested worldline against its root promotion base and include all
   ancestor changes.
@@ -1530,7 +1537,7 @@ a dedicated `TERMINA_WORLDS_DIR` on the fixture's filesystem for every suite.
 
 ### `scripts/worldline-trust-test.mjs`
 
-- Load the app bridge before project trust.
+- Start the agent without project trust.
 - Inherit one-process trust only from a trusted matching base.
 - Do not write candidate paths to `trust.json`.
 - Keep an untrusted source untrusted.
@@ -1543,7 +1550,7 @@ a dedicated `TERMINA_WORLDS_DIR` on the fixture's filesystem for every suite.
 - Confirm before project switch or normal quit with candidate source or session
   activity.
 - Discard a live comparison.
-- Recover from killed Pi, session worker, snapshot worker, Verify, and benchmark
+- Recover from killed agent, session worker, snapshot worker, Verify, and benchmark
   processes.
 - Simulate process-id reuse and confirm stale cleanup does not signal the new
   process.
@@ -1574,7 +1581,7 @@ Also run:
 - Candidate processes cannot write primary, sibling, real-home, or user Git
   state.
 - Both candidates Verify in equivalent isolated environments.
-- Promotion preserves the selected Pi branch in a self-contained primary-cwd
+- Promotion preserves the selected agent branch in a self-contained primary-cwd
   session.
 - Clean promotion preserves unrelated concurrent primary edits.
 - Conflict detection writes no primary path.
@@ -1585,7 +1592,7 @@ Also run:
 
 ### Release 2 — Fork Any Moment
 
-- Every visible timeline dot has a coupled persisted Pi entry and source state.
+- Every visible timeline dot has a coupled persisted session sequence and source state.
 - Incremental raw blobs reconstruct every retained event byte-for-byte inside
   the declared capture domain.
 - Parallel tools, Bash writes, watcher misses, and concurrent changes produce
@@ -1606,4 +1613,4 @@ Also run:
 
 Worldlines is complete when all three release gates pass and terminal, review,
 timeline, dispatch, user-edit, Mine, and Verify behavior remains green after the
-intentional bridge and timeline changes.
+intentional sidecar and timeline changes.

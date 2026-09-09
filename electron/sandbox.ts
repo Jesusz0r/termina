@@ -6,11 +6,12 @@
  * The profile denies writes and reads of the primary project (except the
  * read-only source object directory), the real home, the app snapshot
  * store, the sibling candidate, and the app-owned worlds root. The copied
- * Pi resources are write-denied except the auth file (token refresh).
+ * core resources are write-denied except the auth file (token refresh).
  *
  * The profile is defense in depth for file-tool paths; the operating
  * system policy is the actual write boundary. Process-inspection denial
- * is a documented gap: it breaks the pi TUI bootstrap.
+ * is a documented gap: it can break the agent TUI bootstrap (the node
+ * runtime needs process info for its own startup).
  *
  * Network: the sandbox language only accepts `*` or `localhost` as the
  * remote host, so a per-provider allowlist is not expressible. Candidates
@@ -153,7 +154,7 @@ export function sandboxResourceLimitPreflight(
 }
 
 /**
- * Environment capabilities recognized by the bundled Pi and agent-core
+ * Environment capabilities recognized by the bundled agent-core
  * providers. A live candidate receives values only for its selected provider;
  * unknown/custom providers must use their copied auth/config files.
  *
@@ -253,7 +254,6 @@ export function filterCandidateEnvironment(
 ): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = {
     PATH: candidatePath(hostEnv.PATH, pathPrefixes),
-    PI_SKIP_VERSION_CHECK: "1",
   };
   for (const key of CANDIDATE_RUNTIME_ENV) {
     const value = hostEnv[key];
@@ -290,12 +290,11 @@ export interface SandboxPaths {
   primaryEventsDir: string;
   /** The app user-data directory (denied except the worlds root). */
   userData: string;
-  /** The exact immutable app bridge loaded by candidate Pi. */
-  bridgePath: string;
-  /** Read-only paths the sandboxed pi must load: the app package code
-   *  and the node binary. These usually live inside the real home. */
+  /** Read-only app load paths the sandboxed core must load: the app-owned
+   *  agent-core copy, the electron binary, and the node binary. These
+   *  usually live inside the real home. */
   appReadPaths: string[];
-  /** The candidate home's .pi/agent dir (the copied Pi resources). */
+  /** The candidate home's .termina/agent dir (the copied core resources). */
   agentHomeDir: string;
   /** True for evidence and Verify processes: network fully denied. */
   denyNetwork: boolean;
@@ -453,7 +452,6 @@ export async function terminateSandboxProcessGroup(
 export function buildSandboxProfile(p: SandboxPaths): string {
   const deny = (kind: string, path?: string): string => (path ? `(deny ${kind} (subpath ${quote(path)}))` : `(deny ${kind})`);
   const allow = (kind: string, path: string): string => `(allow ${kind} (subpath ${quote(path)}))`;
-  const allowExact = (kind: string, path: string): string => `(allow ${kind} (literal ${quote(path)}))`;
   const candidateRoot = sandboxPath(p.candidateRoot);
   const candidateSupport = sandboxPath(p.candidateSupport);
   // A candidate may replace files below its support directory between
@@ -472,14 +470,14 @@ export function buildSandboxProfile(p: SandboxPaths): string {
     deny("file-write*", sandboxPath(p.realHome)),
     deny("file-read*", sandboxPath(p.realHome)),
     allow("file-read-metadata", sandboxPath(p.realHome)),
-    // The sandboxed pi must load the pinned package code and node.
+    // The sandboxed core must load the app-owned agent-core copy,
+    // the electron binary, and node.
     ...p.appReadPaths.map((loadPath) => allow("file-read*", sandboxPath(loadPath))),
     // App-private state is unreadable. Metadata remains available only so
-    // path resolution can reach the exact bridge and candidate exceptions.
+    // path resolution can reach the candidate exceptions.
     deny("file-write*", sandboxPath(p.userData)),
     deny("file-read*", sandboxPath(p.userData)),
     allow("file-read-metadata", sandboxPath(p.userData)),
-    allowExact("file-read*", sandboxPath(p.bridgePath)),
     // Every comparison/session/journal below the worlds root is denied. The
     // current candidate's two directories are re-opened after all denies.
     deny("file-write*", sandboxPath(p.worldsRoot)),
@@ -499,16 +497,10 @@ export function buildSandboxProfile(p: SandboxPaths): string {
     allow("file-read*", candidateSupport),
     allow("file-write*", candidateRoot),
     allow("file-write*", candidateSupport),
-    // The copied Pi resources are immutable inputs: no writes except the
+    // The copied core resources are immutable inputs: no writes except the
     // auth file, whose token refresh changes only that copy (§6.6). The
-    // rest of the home (npm logs, caches) stays writable for tooling.
-    deny("file-write*", join(agentHomeDir, "settings.json")),
-    deny("file-write*", join(agentHomeDir, "models.json")),
-    deny("file-write*", join(agentHomeDir, "models-store.json")),
-    deny("file-write*", join(agentHomeDir, "skills")),
-    deny("file-write*", join(agentHomeDir, "prompts")),
-    deny("file-write*", join(agentHomeDir, "themes")),
-    deny("file-write*", join(agentHomeDir, "extensions")),
+    // rest of the home (logs, caches) stays writable for tooling.
+    deny("file-write*", join(agentHomeDir, "mcp.json")),
     allow("file-write*", join(agentHomeDir, "auth.json")),
     // Evidence and Verify processes run fully offline (WORLDLINES §6.8).
     ...(p.denyNetwork ? ["(deny network*)"] : []),
@@ -517,7 +509,7 @@ export function buildSandboxProfile(p: SandboxPaths): string {
     // inherited memory policy.
     `(deny file-read* (literal ${quote(TASKPOLICY_EXEC)}))`,
     `(deny process-exec (literal ${quote(TASKPOLICY_EXEC)}))`,
-    // Process inspection denial breaks the pi TUI bootstrap (the node
+    // Process inspection denial can break the agent TUI bootstrap (the node
     // runtime needs process info for its own startup). Documented gap.
     "(import \"system.sb\")",
     "",

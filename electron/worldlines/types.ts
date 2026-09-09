@@ -5,7 +5,6 @@
  */
 import type { BoundPromotionExpectedLeaf, PromotionFsIdentity } from "../worldline-git.js";
 import type { WorldlineState } from "../../shared/types.js";
-import type { PiSessionCopyIdentity } from "../session-fork.js";
 
 export interface CandidateState {
   label: "A" | "B";
@@ -65,7 +64,6 @@ export interface ComparisonState {
   templateIdentity?: PromotionFsIdentity;
   templateBinding?: BoundPromotionDirectory;
   profilesBinding?: BoundPromotionDirectory;
-  sessionWorkspaceDir: string;
   sessionWorkspaceBinding?: BoundPromotionDirectory;
   markerLeaf?: BoundPromotionExpectedLeaf;
   manifestLeaf?: BoundPromotionExpectedLeaf;
@@ -78,13 +76,11 @@ export interface ComparisonState {
   baseCommit: string | null;
   /** The store-side shared base (R) of the lineage. */
   baseStateId: string | null;
-  /** Candidates inherit one-process trust when the source was trusted. */
-  inheritTrust: boolean;
   /** The model and thinking level of the source run. */
   model: string | null;
   thinkingLevel: string | null;
-  /** Which engine produced the source run. */
-  engine: "pi" | "core";
+  /** Which engine produced the source run. Core is the only engine. */
+  engine: "core";
   /** Number of candidate launch records required before stale deletion is safe. */
   expectedCandidates: 1 | 2;
   /** A destination that may have committed after a core fork became uncertain. */
@@ -294,8 +290,6 @@ export type CanonicalPath = (absPath: string) => Promise<string>;
 
 export type PromotionRecoveryContext = {
   primaryRoot: string;
-  piSessionRoot: string;
-  coreSessionRoot: string;
 };
 export type PromotionRecoveryTestHook = (stage: "after-journal-validation", journalDir: string) => void | Promise<void>;
 
@@ -307,7 +301,7 @@ export interface PromoteSeed {
   primaryWorkspaceId: string;
   comparisonId: string;
   label: "A" | "B";
-  engine: "pi" | "core";
+  engine: "core";
 }
 
 /** One recorded run (WORLDLINES §6.5). */
@@ -326,11 +320,8 @@ export interface RunRecord {
   settledEntryId: string | null;
   sessionFile: string | null;
   sessionBranchFile: string | null;
-  /** Exact identity/provenance of the finalized Pi branch copy. */
-  sessionBranchIdentity: PiSessionCopyIdentity | null;
   /** A core branch destination whose commit could not be proven. */
   uncertainSessionFile: string | null;
-  trusted: boolean | null;
   model: string | null;
   thinkingLevel: string | null;
   replayable: boolean;
@@ -342,5 +333,5 @@ export interface RunRecord {
   startedAt: number;
   settledAt: number | null;
   trustHashes: Record<string, string> | null;
-  engine?: "pi" | "core";
+  engine?: "core";
 }

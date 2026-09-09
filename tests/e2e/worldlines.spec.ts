@@ -6,7 +6,7 @@ test.describe("Worldlines IPC & State Management E2E", () => {
 
     // 1. Get active project ID
     const activeProject = await page.evaluate(async () => {
-      const projects = await (window as any).pi.projectList();
+      const projects = await (window as any).termina.projectList();
       return projects.find((p: any) => p.active) ?? projects[0];
     });
 
@@ -15,14 +15,14 @@ test.describe("Worldlines IPC & State Management E2E", () => {
 
     // 2. Query worldlines for active project
     const worldlines = await page.evaluate(async (projectId) => {
-      return (window as any).pi.getWorldlines(projectId);
+      return (window as any).termina.getWorldlines(projectId);
     }, activeProject.id);
 
     expect(Array.isArray(worldlines)).toBe(true);
 
     // 3. Query runs for terminal
     const runs = await page.evaluate(async () => {
-      return (window as any).pi.getRuns("term-1");
+      return (window as any).termina.getRuns("term-1");
     });
 
     expect(Array.isArray(runs)).toBe(true);
@@ -34,7 +34,7 @@ test.describe("Worldlines IPC & State Management E2E", () => {
     // Calling forkRun with a nonexistent run ID must return ok: false or fail safely
     const forkResult = await page.evaluate(async () => {
       try {
-        return await (window as any).pi.forkRun("nonexistent-run-id");
+        return await (window as any).termina.forkRun("nonexistent-run-id");
       } catch (err: any) {
         return { ok: false, error: err.message };
       }
@@ -44,7 +44,7 @@ test.describe("Worldlines IPC & State Management E2E", () => {
     // Calling discardWorldline with a nonexistent comparison ID must return ok: false or fail safely
     const discardResult = await page.evaluate(async () => {
       try {
-        return await (window as any).pi.discardWorldline("nonexistent-comparison");
+        return await (window as any).termina.discardWorldline("nonexistent-comparison");
       } catch (err: any) {
         return { ok: false, error: err.message };
       }
@@ -54,7 +54,7 @@ test.describe("Worldlines IPC & State Management E2E", () => {
     // Calling cancelWorldline with a nonexistent comparison ID
     const cancelResult = await page.evaluate(async () => {
       try {
-        return await (window as any).pi.cancelWorldline("nonexistent-comparison");
+        return await (window as any).termina.cancelWorldline("nonexistent-comparison");
       } catch (err: any) {
         return { ok: false, error: err.message };
       }
@@ -64,7 +64,7 @@ test.describe("Worldlines IPC & State Management E2E", () => {
     // Calling forkPoint with invalid sequence
     const forkPointResult = await page.evaluate(async () => {
       try {
-        return await (window as any).pi.forkPoint("term-1", 999999);
+        return await (window as any).termina.forkPoint("term-1", 999999);
       } catch (err: any) {
         return { ok: false, error: err.message };
       }
@@ -74,7 +74,7 @@ test.describe("Worldlines IPC & State Management E2E", () => {
     // Calling promoteWorldline on invalid comparison
     const promoteResult = await page.evaluate(async () => {
       try {
-        return await (window as any).pi.promoteWorldline("nonexistent-comparison", "A", false);
+        return await (window as any).termina.promoteWorldline("nonexistent-comparison", "A", false);
       } catch (err: any) {
         return { ok: false, error: err.message };
       }
@@ -88,7 +88,7 @@ test.describe("Worldlines IPC & State Management E2E", () => {
     // Querying non-existent details returns { ok: false } or null without crashing
     const details = await page.evaluate(async () => {
       try {
-        return await (window as any).pi.getWorldlineDetails("nonexistent-comparison", "A");
+        return await (window as any).termina.getWorldlineDetails("nonexistent-comparison", "A");
       } catch (err: any) {
         return { ok: false, error: err.message };
       }
@@ -98,7 +98,7 @@ test.describe("Worldlines IPC & State Management E2E", () => {
     // Querying non-existent file
     const fileContent = await page.evaluate(async () => {
       try {
-        return await (window as any).pi.getWorldlineFile("nonexistent-comparison", "A", "test.txt");
+        return await (window as any).termina.getWorldlineFile("nonexistent-comparison", "A", "test.txt");
       } catch (err: any) {
         return { ok: false, error: err.message };
       }
@@ -108,7 +108,7 @@ test.describe("Worldlines IPC & State Management E2E", () => {
     // Querying non-existent base file
     const baseContent = await page.evaluate(async () => {
       try {
-        return await (window as any).pi.getWorldlineBaseFile("nonexistent-comparison", "test.txt");
+        return await (window as any).termina.getWorldlineBaseFile("nonexistent-comparison", "test.txt");
       } catch (err: any) {
         return { ok: false, error: err.message };
       }

@@ -40,7 +40,7 @@ test.describe("pane resize dividers", () => {
     const other = join(runRoot, "resize-other");
     mkdirSync(other);
     writeFileSync(join(other, "other.txt"), "other\n".repeat(100));
-    await page.evaluate((dir) => window.pi.projectOpenPath(dir), other);
+    await page.evaluate((dir) => window.termina.projectOpenPath(dir), other);
     await expect(page.locator("#explorer-tree").getByText("other.txt")).toBeVisible();
 
     for (const project of ["resize-other", "test-project", "resize-other"]) {
@@ -148,7 +148,7 @@ test.describe("pane resize dividers", () => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
     const other = join(runRoot, "resize-other");
     mkdirSync(other);
-    await page.evaluate((dir) => window.pi.projectOpenPath(dir), other);
+    await page.evaluate((dir) => window.termina.projectOpenPath(dir), other);
     const firstTab = page.locator(".project-tab").filter({ hasText: "test-project" });
     const tabBox = (await firstTab.boundingBox())!;
     // Put the explorer divider under the first tab, away from its close button.

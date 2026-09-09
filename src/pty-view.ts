@@ -1,6 +1,6 @@
 /**
  * Minimal xterm view wired to a pty: output streams in, keystrokes flow out.
- * This is the real-terminal experience — no chat rendering, just pi's TUI.
+ * This is the real-terminal experience — no chat rendering, just the agent TUI.
  */
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -28,7 +28,7 @@ export class PtyView {
   private fontSize: number;
   private fontFamily: string;
   private themeId: ThemeId;
-  private engine: "pi" | "core" | undefined;
+  private engine: "core" | undefined;
   private refreshFont = false;
   private fitScheduled = false;
   private wheelDelta = 0;
@@ -188,12 +188,12 @@ export class PtyView {
     // candidates fires modified Enter keydowns that must reach the
     // composition buffer, never the pty.
     if (event.type !== "keydown" || event.isComposing) return true;
-    // Enter inserts a newline in pi's editor on the platform's primary
+    // Enter inserts a newline in the agent editor on the platform's primary
     // modifier — Cmd on macOS, Alt elsewhere — plus Shift and Ctrl
     // everywhere (OpenCode-style: every conventional newline chord).
     // xterm.js drops the Shift modifier on Enter, and macOS treats
     // Option as a level-3 shift, so neither reaches the pty correctly
-    // without synthesis. The CSI-u shift+Enter sequence is what pi's
+    // without synthesis. The CSI-u shift+Enter sequence is what the agent
     // decoder reads as its newLine binding in every protocol.
     const mac = isMacPlatform();
     const newlineCombo = event.key === "Enter" && !event.altKey &&
@@ -413,7 +413,7 @@ export class PtyView {
     this.term.options.theme = terminalTheme(theme, this.engine);
   }
 
-  setEngine(engine: "pi" | "core" | undefined): void {
+  setEngine(engine: "core" | undefined): void {
     if (this.disposed || this.engine === engine) return;
     this.engine = engine;
     this.term.options.theme = terminalTheme(this.themeId, this.engine);

@@ -1,9 +1,9 @@
 /**
  * Renderer entry — terminal-first architecture.
  *
- * Left: multiple terminal panes, each running real pi TUI in a pty.
+ * Left: multiple terminal panes, each running the real agent TUI in a pty.
  * Right: per-project Monaco editor + file explorer, live-synced via the watcher.
- * The bridge extension's sidecar events drive auto-open and the modified list.
+ * The agent's sidecar events drive auto-open and the modified list.
  */
 import editorWorker from "monaco-editor/editor/editor.worker?worker";
 import tsWorker from "monaco-editor/language/typescript/ts.worker?worker";
@@ -162,11 +162,14 @@ function createProjectView(project: { id: string; cwd: string; workspaceId: stri
   closeEl.className = "tab-close";
   closeEl.textContent = "×";
   closeEl.title = "Close this project";
-  tabEl.append(nameEl, closeEl);
-  tabEl.addEventListener("click", () => void window.pi.projectActivate(project.id));
+  const statusEl = document.createElement("span");
+  statusEl.className = "tab-status";
+  statusEl.title = "unseen verify failure";
+  tabEl.append(statusEl, nameEl, closeEl);
+  tabEl.addEventListener("click", () => void window.termina.projectActivate(project.id));
   closeEl.addEventListener("click", (e) => {
     e.stopPropagation();
-    void window.pi.projectClose(project.id).then((res) => {
+    void window.termina.projectClose(project.id).then((res) => {
       if (res.ok) removeProjectView(project.id);
       else if (!res.cancelled) toast(res.error ?? "could not close the project", "warning");
     });
@@ -214,7 +217,7 @@ function applySharedEditorHooks(editor: EditorManagerInstance, projectId: string
   editor.onToggleMine = (path, owner) => {
     const mine = !editor.isMine(path);
     editor.setMine(path, mine);
-    void window.pi.setMineFile(path, mine, owner).catch(() => {
+    void window.termina.setMineFile(path, mine, owner).catch(() => {
       editor.setMine(path, !mine); // the main side failed: revert the mark
     });
   };
@@ -291,6 +294,7 @@ function setActiveProject(projectId: string | null): void {
     const active = item.id === activeProjectId;
     item.tabEl.classList.toggle("active", active);
     item.editorEl.style.display = active ? "" : "none";
+    updateProjectAttention(item.id);
   }
   placeEditorToggle(activeProjectId);
   syncPaneVisibility();
@@ -411,7 +415,7 @@ function refreshMine(projectId: string | null = activeProjectId): void {
   const requestedGeneration = activeProjectGeneration;
   const editor = ensureProjectEditor(view);
   editor.clearMine();
-  void window.pi.getMineFiles(owner).then((paths) => {
+  void window.termina.getMineFiles(owner).then((paths) => {
     if (
       requestToken !== mineRequestToken ||
       requestedGeneration !== activeProjectGeneration ||
@@ -509,7 +513,7 @@ function hydrateWorldlines(projectId: string | null): void {
   worldlineHydrationTombstones = tombstones;
   const effects = worldlineProjectEffects();
   beginWorldlineHydration(projectId, panes.values(), effects);
-  void window.pi.getWorldlines(projectId).then((list) => {
+  void window.termina.getWorldlines(projectId).then((list) => {
     if (epoch !== worldlineHydrationEpoch) return;
     const evidence = new Map<string, import("../shared/types").EvidenceSummary>();
     const summaries = list.map((summary) => {
@@ -588,7 +592,7 @@ interface Pane {
   cwd: string | null;
   busy: boolean;
   type: "agent" | "shell";
-  engine?: "pi" | "core";
+  engine?: "core";
   shellName: string | undefined;
   error: boolean;
   /** True after pty:exit. The pane remains until the user closes the tab. */
@@ -597,6 +601,9 @@ interface Pane {
   accepted: Set<string>;
   reverted: Set<string>;
   verify: VerifyInfo;
+  /** True while a failed/timed-out verify awaits its first view. Cleared on
+   *  activate and on every non-fail verify state. Transient UI state. */
+  verifyAttention: boolean;
   timeline: TimelineEvent[];
   timelineLoaded: boolean;
   /** Monotonic token for the current timeline/prefix load. */
@@ -634,7 +641,7 @@ const MAX_PENDING_TOOL_TARGETS = 20;
 const closingPanes = new Set<string>();
 let activeId: string | null = null;
 let projectCwd: string | null = null;
-let preferences: AppPreferences = normalizeAppPreferences(await window.pi.getPreferences().catch(() => defaultAppPreferences()));
+let preferences: AppPreferences = normalizeAppPreferences(await window.termina.getPreferences().catch(() => defaultAppPreferences()));
 let committedPreferences: AppPreferences = preferences;
 let preferenceGeneration = 0;
 
@@ -649,7 +656,7 @@ function applyTerminalGeneration(pane: Pane, generation: number): void {
 }
 
 function signalTerminalHydrated(pane: Pane): void {
-  if (!pane.error && pane.generation > 0) window.pi.readyTerminal(pane.instanceId, pane.generation);
+  if (!pane.error && pane.generation > 0) window.termina.readyTerminal(pane.instanceId, pane.generation);
 }
 
 function userPatch(prev: AppPreferences, next: AppPreferences): import("../shared/types").UserPreferencePatch {
@@ -692,7 +699,7 @@ function applyPreferences(next: AppPreferences, persist: boolean, activateShortc
   if (persist) {
     const patch = userPatch(committedPreferences, preview);
     if (Object.keys(patch).length > 0) {
-      void window.pi.updatePreferences({ patch, activateShortcuts }).then((saved) => {
+      void window.termina.updatePreferences({ patch, activateShortcuts }).then((saved) => {
         const normalized = normalizeAppPreferences(saved);
         committedPreferences = normalized;
         if (generation !== preferenceGeneration) return;
@@ -705,12 +712,12 @@ function applyPreferences(next: AppPreferences, persist: boolean, activateShortc
         toast("Could not save settings", "error");
       });
     } else if (activateShortcuts) {
-      void window.pi.setKeyboardShortcuts(committedPreferences.shortcuts).catch(() => undefined);
+      void window.termina.setKeyboardShortcuts(committedPreferences.shortcuts).catch(() => undefined);
     }
   } else {
     committedPreferences = preview;
     if (activateShortcuts) {
-      void window.pi.setKeyboardShortcuts(preferences.shortcuts).catch(() => undefined);
+      void window.termina.setKeyboardShortcuts(preferences.shortcuts).catch(() => undefined);
     }
   }
 }
@@ -731,7 +738,7 @@ function applyTerminalPreferences(view: PtyView, prefs: AppPreferences): void {
 
 const settingsView = new SettingsView({
   onChange: (next) => applyPreferences(next, true, false),
-  onOpen: () => void window.pi.setKeyboardShortcuts(emptyShortcuts()),
+  onOpen: () => void window.termina.setKeyboardShortcuts(emptyShortcuts()),
   onClose: (next) => applyPreferences(next, true, true),
 });
 
@@ -772,12 +779,12 @@ function createPaneShell(instanceId: string): Pane {
 
   const view = new PtyView(
     container,
-    (data) => void window.pi.writeTerminal(instanceId, data),
-    (cols, rows) => void window.pi.resizeTerminal(instanceId, cols, rows),
-    (text) => void window.pi.writeClipboard(text).catch(() => undefined),
-    () => window.pi.pasteTerminal(instanceId),
+    (data) => void window.termina.writeTerminal(instanceId, data),
+    (cols, rows) => void window.termina.resizeTerminal(instanceId, cols, rows),
+    (text) => void window.termina.writeClipboard(text).catch(() => undefined),
+    () => window.termina.pasteTerminal(instanceId),
     (message) => toast(message, "error"),
-    (files) => window.pi.dropTerminalFiles(instanceId, files),
+    (files) => window.termina.dropTerminalFiles(instanceId, files),
     {
       theme: preferences.theme,
       fontSize: preferences.terminalFontSize,
@@ -817,6 +824,7 @@ function createPaneShell(instanceId: string): Pane {
     accepted: new Set(),
     reverted: new Set(),
     verify: { state: "untested", command: null, summary: null },
+    verifyAttention: false,
     timeline: [],
     timelineLoaded: false,
     timelineRequestToken: 0,
@@ -855,7 +863,7 @@ function createPaneShell(instanceId: string): Pane {
   return pane;
 }
 
-/** A terminal tab that shows a message instead of a live pty (pi missing). */
+/** A terminal tab that shows a message instead of a live pty (agent failed to start). */
 let errorSeq = 0;
 function createErrorPane(message: string): void {
   const id = `term-error-${++errorSeq}`;
@@ -887,11 +895,35 @@ function activatePaneWhenReady(instanceId: string): void {
   if (pane && !pane.exited) activatePane(instanceId);
 }
 
+/** Mirror unseen verify failures onto the project tab so background
+ *  projects nudge too. The active project shows its own terminal dots. */
+function updateProjectAttention(projectId: string | null): void {
+  if (!projectId) return;
+  const view = projectViews.get(projectId);
+  const dot = view?.tabEl.querySelector(".tab-status") as HTMLElement | null;
+  if (!view || !dot) return;
+  let fail = false;
+  for (const pane of panes.values()) {
+    if (pane.projectId !== projectId || !pane.verifyAttention) continue;
+    if (pane.verify.state === "fail" || pane.verify.state === "timeout") {
+      fail = true;
+      break;
+    }
+  }
+  dot.classList.toggle("verify-fail", fail && projectId !== activeProjectId);
+}
+
 function activatePane(instanceId: string): void {
   const pane = panes.get(instanceId);
   if (!pane) return;
   removeSplash();
   activeId = instanceId;
+  // Viewing clears the unseen-failure nudge.
+  if (pane.verifyAttention) {
+    pane.verifyAttention = false;
+    updatePaneTab(pane);
+  }
+  updateProjectAttention(pane.projectId);
   if (pane.projectId) lastActivePane.set(pane.projectId, instanceId);
   // Scope to this project: background projects keep their own active tab so
   // returning to them shows a pane instead of a blank frame (flicker).
@@ -925,7 +957,7 @@ function loadRuns(pane: Pane): void {
     updateForkRunButton(pane);
     return;
   }
-  void window.pi.getRuns(pane.instanceId).then((runs) => {
+  void window.termina.getRuns(pane.instanceId).then((runs) => {
     const p = panes.get(pane.instanceId);
     if (!p) return;
     p.runs = runs;
@@ -971,7 +1003,7 @@ btnForkRun.addEventListener("click", () => {
     toast(`Fork Run unavailable: ${run.reason ?? "the run is not replayable"}`, "warning");
     return;
   }
-  void window.pi.forkRun(run.id).then((res) => {
+  void window.termina.forkRun(run.id).then((res) => {
     if (!res.ok) toast(`Fork Run failed: ${res.error ?? "unknown error"}`, "warning");
     else toast(`forked ${run.id} — candidates ${res.comparisonId ?? ""} are starting`, "info");
   });
@@ -987,7 +1019,7 @@ for (const button of challengeRunButtons) {
       toast(`Challenge unavailable: ${run.reason ?? "the run is not replayable"}`, "warning");
       return;
     }
-    void window.pi.challengeRun(run.id, profile).then((res) => {
+    void window.termina.challengeRun(run.id, profile).then((res) => {
       if (!res.ok) toast(`Challenge failed: ${res.error ?? "unknown error"}`, "warning");
       else toast(`${profile} challenger ${res.comparisonId ?? ""} is starting`, "info");
     });
@@ -1001,7 +1033,7 @@ function refreshCandidateTestCommand(pane: Pane): void {
     hydrationEpoch: () => worldlineHydrationEpoch,
     isActivePane: (instanceId) => activeId === instanceId,
     paneById: (instanceId) => panes.get(instanceId),
-    detectTest: (instanceId) => window.pi.detectTest(instanceId),
+    detectTest: (instanceId) => window.termina.detectTest(instanceId),
     onChanged: (current) => {
       if (activeId === current.instanceId) renderStatus(current);
     },
@@ -1024,7 +1056,7 @@ function renderTimeline(): void {
     const requestedGeneration = activeProjectGeneration;
     const requestToken = ++pane.timelineRequestToken;
     pane.timelineLoaded = true;
-    void window.pi.getTimeline(id).then((events) => {
+    void window.termina.getTimeline(id).then((events) => {
       const p = panes.get(id);
       if (!p) return;
       if (p !== pane || p.timelineRequestToken !== requestToken) return;
@@ -1045,7 +1077,7 @@ function renderTimeline(): void {
       p.timelineLoaded = false;
       toast(`could not load timeline: ${(err as Error).message}`, "error");
     });
-    void window.pi.getTimelinePrefix(id).then((prefix) => {
+    void window.termina.getTimelinePrefix(id).then((prefix) => {
       const p = panes.get(id);
       if (!p || p !== pane || p.timelineRequestToken !== requestToken) return;
       if (activeProjectId !== requestedProjectId || activeProjectGeneration !== requestedGeneration) return;
@@ -1073,7 +1105,7 @@ timelineView.bind({
     const isCurrent = (): boolean =>
       epoch === timelineJumpEpoch && activeId === terminalId && activeProjectId === projectId && activeEditor() === editor;
     // Snapshots are fetched on demand — the strip/IPC never carries content.
-    let res = await window.pi.getTimelineContent(pane.instanceId, ev.seq);
+    let res = await window.termina.getTimelineContent(pane.instanceId, ev.seq);
     if (!isCurrent()) return;
     // A write snapshot may still be filling in (the delayed fill takes
     // 400 milliseconds) — retry
@@ -1081,7 +1113,7 @@ timelineView.bind({
     for (let i = 0; i < 5 && !res.ok; i++) {
       await new Promise((resolve) => setTimeout(resolve, 250));
       if (!isCurrent()) return;
-      res = await window.pi.getTimelineContent(pane.instanceId, ev.seq);
+      res = await window.termina.getTimelineContent(pane.instanceId, ev.seq);
       if (!isCurrent()) return;
     }
     if (!res.ok) {
@@ -1099,7 +1131,7 @@ timelineView.bind({
       toast("this moment is not forkable yet", "warning");
       return;
     }
-    void window.pi.forkPoint(pane.instanceId, ev.seq).then((res) => {
+    void window.termina.forkPoint(pane.instanceId, ev.seq).then((res) => {
       if (!res.ok) toast(`fork at this moment failed: ${res.error ?? "unknown error"}`, "warning");
       else toast(`forked this moment — candidate ${res.comparisonId ?? ""} is starting`, "info");
     });
@@ -1109,7 +1141,7 @@ timelineView.bind({
     if (!pane) return Promise.resolve({ ok: false, seq });
     const requestedProjectId = activeProjectId;
     const requestedGeneration = activeProjectGeneration;
-    return window.pi.getTimelineProgress(pane.instanceId, seq).then((progress) => {
+    return window.termina.getTimelineProgress(pane.instanceId, seq).then((progress) => {
       if (activeProjectId !== requestedProjectId || activeProjectGeneration !== requestedGeneration || activeId !== pane.instanceId) return { ok: false, seq };
       return progress;
     });
@@ -1128,7 +1160,7 @@ async function closePane(instanceId: string): Promise<void> {
   pane.view.dispose();
   pane.container.remove();
   pane.tabEl.remove();
-  await window.pi.closeTerminal(instanceId, terminalGeneration);
+  await window.termina.closeTerminal(instanceId, terminalGeneration);
   setTimeout(() => closingPanes.delete(instanceId), 3000);
   if (activeId === instanceId) {
     // Prefer another terminal of the same project. Never surface a
@@ -1153,11 +1185,15 @@ function updatePaneTab(pane: Pane): void {
     : `${pane.cwd ?? "?"}${
         pane.type === "shell" && pane.shellName
           ? ` · ${pane.shellName} shell`
-          : pane.engine === "core"
-            ? " · core agent"
-            : " · pi agent"
+          : " · core agent"
       }`;
   pane.statusEl.classList.toggle("busy", pane.busy);
+  // Unseen verify failures hold the tab dot until first view; any newer
+  // verify state clears them.
+  const failDot = pane.verifyAttention && pane.verify.state === "fail";
+  const timeoutDot = pane.verifyAttention && pane.verify.state === "timeout";
+  pane.statusEl.classList.toggle("verify-fail", failDot);
+  pane.statusEl.classList.toggle("verify-timeout", timeoutDot);
   applyTypeBadge(pane);
   // Worldline candidates carry the A/B badge on their tab.
   const wlineEl = pane.tabEl.querySelector(".tab-worldline") as HTMLElement;
@@ -1204,7 +1240,7 @@ function renderPlan(pane: Pane, announce = true): void {
   if (!pane.planLoaded) {
     pane.planLoaded = true;
     const versionAtStart = pane.planVersion;
-    void window.pi.getPlan(pane.instanceId).then((tasks) => {
+    void window.termina.getPlan(pane.instanceId).then((tasks) => {
       const p = panes.get(pane.instanceId);
       if (!p) return;
       if (p.planVersion !== versionAtStart) return; // a push won the race
@@ -1256,7 +1292,7 @@ function renderPlan(pane: Pane, announce = true): void {
           activatePane(task.workerId);
           return;
         }
-        void window.pi.dispatchRun(pane.instanceId, task.text).then((res) => {
+        void window.termina.dispatchRun(pane.instanceId, task.text).then((res) => {
           if (!res.ok) toast(res.error ?? "dispatch failed", "warning");
           else toast("dispatched 1 task to a parallel agent", "info");
         });
@@ -1289,7 +1325,7 @@ async function refreshTestCommand(projectId: string | null = activeProjectId): P
     return;
   }
   try {
-    const t = await window.pi.detectTest(terminalId);
+    const t = await window.termina.detectTest(terminalId);
     if (requestToken !== testCommandRequestToken || requestedGeneration !== activeProjectGeneration || activeProjectId !== requestedProjectId || activeId !== terminalId) return;
     testCommand = t?.label ?? null;
   } catch {
@@ -1419,9 +1455,9 @@ function commitSubjectFromPrompt(text: string | null | undefined): string {
 async function copyCommitSubject(): Promise<void> {
   const pane = activeId ? panes.get(activeId) : undefined;
   if (!pane) return;
-  if (!pane.runs) pane.runs = await window.pi.getRuns(pane.instanceId);
+  if (!pane.runs) pane.runs = await window.termina.getRuns(pane.instanceId);
   const subject = commitSubjectFromPrompt(lastCompletedRun(pane)?.promptText);
-  const res = await window.pi.writeClipboard(subject);
+  const res = await window.termina.writeClipboard(subject);
   if (res.ok) toast("Copied commit subject — Termina does not write Git", "info");
   else toast(res.error ?? "could not copy", "warning");
 }
@@ -1435,7 +1471,7 @@ async function focusProjectShell(): Promise<void> {
     activatePane(existing.instanceId);
     return;
   }
-  const res = await window.pi.createTerminal({ type: "shell", projectId: projectId ?? undefined });
+  const res = await window.termina.createTerminal({ type: "shell", projectId: projectId ?? undefined });
   if (!res.ok) toast(res.error ?? "could not open a shell", "warning");
   else if (res.id && panes.has(res.id)) activatePane(res.id);
 }
@@ -1528,7 +1564,7 @@ let shellsPromise: Promise<{ name: string; path: string }[]> | null = null;
 async function getAvailableShells(): Promise<{ name: string; path: string }[]> {
   if (shellsCache) return shellsCache;
   if (!shellsPromise) {
-    shellsPromise = window.pi.getShells().catch(() => []);
+    shellsPromise = window.termina.getShells().catch(() => []);
   }
   shellsCache = await shellsPromise;
   return shellsCache;
@@ -1561,13 +1597,13 @@ async function openTerminalMenu(): Promise<void> {
     items[selectedIndex]?.row.scrollIntoView({ block: "nearest" });
   };
 
-  const makeTerminal = (opts?: { type?: "agent" | "shell"; shell?: string; engine?: "pi" | "core" }) => {
+  const makeTerminal = (opts?: { type?: "agent" | "shell"; shell?: string; engine?: "core" }) => {
     const source = activeId ? panes.get(activeId) : undefined;
     const fromTerminalId = source && !source.error && !source.exited ? source.instanceId : undefined;
     const inherit = Boolean(fromTerminalId) && opts?.type !== "shell";
     const projectId = activeProjectId ?? undefined;
     const withProject = projectId ? { ...opts, projectId } : opts;
-    void window.pi.createTerminal(inherit ? { ...withProject, fromTerminalId } : withProject).then((res) => {
+    void window.termina.createTerminal(inherit ? { ...withProject, fromTerminalId } : withProject).then((res) => {
       if (!res.ok) {
         createErrorPane(res.error ?? "could not create terminal");
         return;
@@ -1598,7 +1634,6 @@ async function openTerminalMenu(): Promise<void> {
   };
 
   addItem("Agent (core)", "Termina's in-house coding agent", () => makeTerminal({ type: "agent", engine: "core" }));
-  addItem("Agent (pi)", "the pi coding agent terminal", () => makeTerminal({ type: "agent", engine: "pi" }));
   for (const shell of shells) {
     addItem(shell.name, `interactive ${shell.name} shell`, () => makeTerminal({ type: "shell", shell: shell.path }));
   }
@@ -1669,7 +1704,7 @@ btnNewTerminal.addEventListener("click", (e) => {
   if (terminalMenu) closeTerminalMenu();
   else void openTerminalMenu();
 });
-window.pi.onProjectClosed(({ projectId, activationGeneration }) => {
+window.termina.onProjectClosed(({ projectId, activationGeneration }) => {
   if (Number.isSafeInteger(activationGeneration) && activationGeneration > latestProjectActivationGeneration) {
     latestProjectActivationGeneration = activationGeneration;
   }
@@ -1680,16 +1715,16 @@ window.pi.onProjectClosed(({ projectId, activationGeneration }) => {
     getBaseEditor().setProjectOpen(false);
   }
 });
-btnNewProject.addEventListener("click", () => void window.pi.projectOpen());
+btnNewProject.addEventListener("click", () => void window.termina.projectOpen());
 document.getElementById("right-pane")!.addEventListener("click", (event) => {
   const target = event.target;
   if (!(target instanceof HTMLElement) || !target.closest(".empty-open-folder")) return;
-  void window.pi.projectOpen();
+  void window.termina.projectOpen();
 });
 // Double-click on the empty bar area opens a new project tab.
 projectTabsEl.addEventListener("dblclick", (e) => {
   if ((e.target as HTMLElement).closest(".project-tab, #btn-new-project")) return;
-  void window.pi.projectOpen();
+  void window.termina.projectOpen();
 });
 
 window.addEventListener("click", () => closeTerminalMenu());
@@ -1699,7 +1734,7 @@ btnOpenShell.addEventListener("click", () => void focusProjectShell());
 btnVerify.addEventListener("click", () => {
   const id = activeId;
   if (!id) return;
-  void window.pi.runVerify(id).then((res) => {
+  void window.termina.runVerify(id).then((res) => {
     if (!res.ok) toast(res.error ?? "verify failed to start", "warning");
   });
 });
@@ -1707,7 +1742,7 @@ verifyBadge.addEventListener("click", () => {
   const pane = activeId ? panes.get(activeId) : undefined;
   if (!pane) return;
   if (pane.verify.state === "running") {
-    void window.pi.cancelVerify(pane.instanceId).then((res) => {
+    void window.termina.cancelVerify(pane.instanceId).then((res) => {
       if (!res.ok) toast(res.error ?? "verify could not be cancelled", "warning");
     });
     return;
@@ -1719,7 +1754,7 @@ btnClearModified.addEventListener("click", (e) => {
   const pane = activeId ? panes.get(activeId) : undefined;
   if (!pane) return;
   // Main owns the list: clear it there or the next push resurrects it.
-  void window.pi.clearModified(pane.instanceId).then((res) => {
+  void window.termina.clearModified(pane.instanceId).then((res) => {
     if (!res.ok) toast(res.error ?? "could not clear the list", "warning");
   });
 });
@@ -1746,7 +1781,7 @@ planPanel.querySelector(".panel-header")?.addEventListener("click", (e) => {
 btnDispatch.addEventListener("click", () => {
   const id = activeId;
   if (!id) return;
-  void window.pi.dispatchRun(id).then((res) => {
+  void window.termina.dispatchRun(id).then((res) => {
     if (!res.ok) toast(res.error ?? "dispatch failed", "warning");
     else toast(`dispatched ${res.dispatched ?? 0} task(s) to parallel agents`, "info");
   });
@@ -2022,13 +2057,13 @@ function runClipboardCommand(command: "copy" | "cut" | "paste"): void {
     if (command === "copy" || command === "cut") {
       // A terminal has no cuttable text: cutting copies the selection.
       if (pane.view.copySelection()) return;
-      if (command === "copy") void window.pi.writeTerminal(pane.instanceId, "\x03");
+      if (command === "copy") void window.termina.writeTerminal(pane.instanceId, "\x03");
       return;
     }
     void pane.view.pasteClipboard();
     return;
   }
-  void window.pi.editClipboard(command);
+  void window.termina.editClipboard(command);
 }
 
 const commands = new CommandDispatcher();
@@ -2062,7 +2097,7 @@ commands.register("next-terminal", () => cycleTerminals(1));
 commands.register("previous-terminal", () => cycleTerminals(-1));
 commands.register("toggle-thinking", () => {
   const next = !committedPreferences.showThinking;
-  void window.pi.updatePreferences({ patch: { showThinking: next }, activateShortcuts: false }).then((saved) => {
+  void window.termina.updatePreferences({ patch: { showThinking: next }, activateShortcuts: false }).then((saved) => {
     applyPreferences(saved, false, false);
   }).catch(() => toast("Could not save settings", "error"));
 });
@@ -2236,12 +2271,12 @@ function cycleProjects(delta: 1 | -1): void {
   if (ids.length < 2) return;
   const index = activeProjectId ? ids.indexOf(activeProjectId) : -1;
   const next = ids[(index + delta + ids.length) % ids.length];
-  if (next) void window.pi.projectActivate(next);
+  if (next) void window.termina.projectActivate(next);
 }
 
 function activateProjectByIndex(index: number): void {
   const id = orderedProjectIds()[index];
-  if (id) void window.pi.projectActivate(id);
+  if (id) void window.termina.projectActivate(id);
 }
 
 for (let i = 1; i <= 9; i++) {
@@ -2329,7 +2364,7 @@ commands.register("command-palette", () => quickOpen.open("actions"));
 // Settings
 commands.register("open-settings", () => settingsView.open(preferences));
 
-window.pi.onMenuCommand((cmd) => {
+window.termina.onMenuCommand((cmd) => {
   commands.execute(cmd.command);
 });
 
@@ -2533,7 +2568,7 @@ function setupTabDrag(tabEl: HTMLElement): void {
   });
 }
 
-// ------------------------------------------------------------ pi events ----
+// -------------------------------------------------------- agent events ----
 
 function renderAcceptedPtyRecords(
   pane: Pane,
@@ -2546,7 +2581,7 @@ function renderAcceptedPtyRecords(
   for (const record of records) {
     if (record.kind === "data") {
       pane.view.write(record.data, () => {
-        window.pi.acknowledgePtyData({
+        window.termina.acknowledgePtyData({
           id,
           generation,
           windowGeneration,
@@ -2557,8 +2592,8 @@ function renderAcceptedPtyRecords(
       continue;
     }
     pane.exited = true;
-    pane.view.write("\r\n\x1b[90m[pi exited]\x1b[0m\r\n", () => {
-      window.pi.acknowledgePtyData({
+    pane.view.write("\r\n\x1b[90m[agent exited]\x1b[0m\r\n", () => {
+      window.termina.acknowledgePtyData({
         id,
         generation,
         windowGeneration,
@@ -2569,28 +2604,28 @@ function renderAcceptedPtyRecords(
   }
 }
 
-window.pi.onPtyData(({ id, generation, windowGeneration, rendererGeneration, sequence, data }) => {
+window.termina.onPtyData(({ id, generation, windowGeneration, rendererGeneration, sequence, data }) => {
   const pane = panes.get(id);
   if (!pane || pane.error || pane.generation !== generation) return;
   const result = pane.ptySequenceLedger.accept({ kind: "data", sequence, data });
   if (result.kind === "duplicate") {
     // A replay can race a duplicate delivery in the same renderer document;
     // acknowledge it without writing the terminal bytes twice.
-    window.pi.acknowledgePtyData({ id, generation, windowGeneration, rendererGeneration, sequence });
+    window.termina.acknowledgePtyData({ id, generation, windowGeneration, rendererGeneration, sequence });
     return;
   }
   if (result.kind !== "accepted") return;
   renderAcceptedPtyRecords(pane, result.records, id, generation, windowGeneration, rendererGeneration);
 });
 
-window.pi.onPtyExit(({ id, generation, windowGeneration, rendererGeneration, sequence, code }) => {
+window.termina.onPtyExit(({ id, generation, windowGeneration, rendererGeneration, sequence, code }) => {
   const pane = panes.get(id);
   if (!pane || pane.generation !== generation) return;
   const result = pane.ptySequenceLedger.accept({ kind: "exit", sequence, code });
   if (result.kind === "duplicate") {
     // A duplicate marker in one document is already rendered; retire the
     // retained ledger record without writing the status line twice.
-    window.pi.acknowledgePtyData({ id, generation, windowGeneration, rendererGeneration, sequence });
+    window.termina.acknowledgePtyData({ id, generation, windowGeneration, rendererGeneration, sequence });
     return;
   }
   if (result.kind !== "accepted") return;
@@ -2607,17 +2642,17 @@ function updateEditorLock(): void {
   activeEditor().setLocked(busy);
 }
 
-window.pi.onFlushRequest(({ requestId, writerId, projectId, workspaceId }) => {
+window.termina.onFlushRequest(({ requestId, writerId, projectId, workspaceId }) => {
   const view = projectViews.get(projectId);
   if (!view || view.workspaceId !== workspaceId) {
-    void window.pi.reportFlush(requestId, { ok: false, failed: ["project editor is unavailable"] });
+    void window.termina.reportFlush(requestId, { ok: false, failed: ["project editor is unavailable"] });
     return;
   }
   if (!view.editorMgr) {
-    void window.pi.reportFlush(requestId, { ok: true, failed: [] });
+    void window.termina.reportFlush(requestId, { ok: true, failed: [] });
     return;
   }
-  void view.editorMgr.flushAll(writerId).then((result) => void window.pi.reportFlush(requestId, result));
+  void view.editorMgr.flushAll(writerId).then((result) => void window.termina.reportFlush(requestId, result));
 });
 
 function applyAppUpdateState(state: AppUpdateState): void {
@@ -2648,13 +2683,13 @@ function appUpdateButtonLabel(
 }
 
 btnAppUpdate.addEventListener("click", () => {
-  void window.pi.getUpdateState().then((state) => {
+  void window.termina.getUpdateState().then((state) => {
     if (state.status === "error") {
-      void window.pi.checkUpdate();
+      void window.termina.checkUpdate();
       return;
     }
     if (state.status === "ready") {
-      void window.pi.installUpdate().then((res) => {
+      void window.termina.installUpdate().then((res) => {
         if (!res.ok) toast(res.error ?? "could not install the update", "warning");
       });
       return;
@@ -2665,10 +2700,10 @@ btnAppUpdate.addEventListener("click", () => {
     }
   });
 });
-window.pi.onUpdateState(applyAppUpdateState);
-void window.pi.getUpdateState().then(applyAppUpdateState);
+window.termina.onUpdateState(applyAppUpdateState);
+void window.termina.getUpdateState().then(applyAppUpdateState);
 
-window.pi.onBusy(({ instanceId, busy }) => {
+window.termina.onBusy(({ instanceId, busy }) => {
   handleWorldlineBusy(
     { instanceId, busy },
     {
@@ -2681,14 +2716,23 @@ window.pi.onBusy(({ instanceId, busy }) => {
   );
 });
 
-window.pi.onVerifyState(({ terminalId, verify }) => {
+window.termina.onVerifyState(({ terminalId, verify }) => {
   const pane = panes.get(terminalId);
   if (!pane) return;
   pane.verify = verify;
+  // Nudge only for failures the user hasn't seen: a fail/timeout that lands
+  // while another pane is in front dots this tab until first view.
+  if (verify.state === "fail" || verify.state === "timeout") {
+    pane.verifyAttention = activeId !== terminalId;
+  } else {
+    pane.verifyAttention = false;
+  }
+  updatePaneTab(pane);
+  updateProjectAttention(pane.projectId);
   if (activeId === terminalId) renderStatus(pane);
 });
 
-window.pi.onTimelineEvent(({ terminalId, event }) => {
+window.termina.onTimelineEvent(({ terminalId, event }) => {
   const pane = panes.get(terminalId);
   if (!pane) return;
   // Updates from main re-use the seq — replace in place, never duplicate.
@@ -2704,14 +2748,14 @@ window.pi.onTimelineEvent(({ terminalId, event }) => {
   }
 });
 
-window.pi.onTimelineEvict(({ terminalId, seqs }) => {
+window.termina.onTimelineEvict(({ terminalId, seqs }) => {
   const pane = panes.get(terminalId);
   if (!pane) return;
   pane.timeline = pane.timeline.filter((e) => !seqs.includes(e.seq));
   if (activeId === terminalId) timelineView.evict(seqs);
 });
 
-window.pi.onTimelineClear(({ terminalId }) => {
+window.termina.onTimelineClear(({ terminalId }) => {
   const pane = panes.get(terminalId);
   if (!pane) return;
   pane.timeline = [];
@@ -2725,14 +2769,14 @@ window.pi.onTimelineClear(({ terminalId }) => {
   }
 });
 
-window.pi.onTimelinePrefix((p) => {
+window.termina.onTimelinePrefix((p) => {
   const pane = panes.get(p.terminalId);
   if (!pane) return;
   pane.timelinePrefix = p;
   if (activeId === p.terminalId) timelineView.setPrefix(p);
 });
 
-window.pi.onRecorderState(({ terminalId, state, detail }) => {
+window.termina.onRecorderState(({ terminalId, state, detail }) => {
   const pane = panes.get(terminalId);
   if (!pane) return;
   pane.recorderState = state;
@@ -2740,7 +2784,7 @@ window.pi.onRecorderState(({ terminalId, state, detail }) => {
   if (activeId === terminalId) timelineView.setRecorder(state, detail ?? null);
 });
 
-window.pi.onPlanUpdate(({ instanceId, tasks }) => {
+window.termina.onPlanUpdate(({ instanceId, tasks }) => {
   const pane = panes.get(instanceId);
   if (!pane) return;
   pane.planVersion++;
@@ -2750,7 +2794,7 @@ window.pi.onPlanUpdate(({ instanceId, tasks }) => {
   if (activeId === instanceId) renderPlan(pane);
 });
 
-window.pi.onToolTarget((p) => {
+window.termina.onToolTarget((p) => {
   const view = projectViews.get(p.projectId);
   if (!view || view.workspaceId !== p.workspaceId) return;
   if (!preferences.autoOpenAgentFiles) return;
@@ -2780,7 +2824,7 @@ function fetchLargeChange(path: string, owner: ProjectWorkspaceRef, editor: Edit
   if (largeChangeFetch.has(key)) return;
   largeChangeFetch.add(key);
   const at = lastChangePush.get(key)?.at;
-  void window.pi.openFile(path, owner).then((res) => {
+  void window.termina.openFile(path, owner).then((res) => {
     largeChangeFetch.delete(key);
     const latest = lastChangePush.get(key);
     if (latest !== undefined && latest.at !== at) {
@@ -2795,7 +2839,7 @@ function fetchLargeChange(path: string, owner: ProjectWorkspaceRef, editor: Edit
   });
 }
 
-window.pi.onFileChanged((p) => {
+window.termina.onFileChanged((p) => {
   const view = projectViews.get(p.projectId);
   if (!view || view.workspaceId !== p.workspaceId) return;
   const owner: ProjectWorkspaceRef = { projectId: p.projectId, workspaceId: p.workspaceId };
@@ -2821,7 +2865,7 @@ window.pi.onFileChanged((p) => {
   if (reviewView?.isVisible && reviewView.matchesPath(p.path) && reviewView.matchesOwner(owner)) void reviewView.refreshCurrent(p.content);
 });
 
-window.pi.onFileDeleted((p) => {
+window.termina.onFileDeleted((p) => {
   const view = projectViews.get(p.projectId);
   if (!view || view.workspaceId !== p.workspaceId) return;
   const owner: ProjectWorkspaceRef = { projectId: p.projectId, workspaceId: p.workspaceId };
@@ -2831,14 +2875,14 @@ window.pi.onFileDeleted((p) => {
   explorer.handleDiskChange(p.path);
 });
 
-window.pi.onModifiedList((p) => {
+window.termina.onModifiedList((p) => {
   const pane = panes.get(p.instanceId);
   if (!pane) return;
   pane.modified = p.files;
   if (activeId === pane.instanceId) renderModified(pane);
 });
 
-window.pi.onFolderOpened((e) => {
+window.termina.onFolderOpened((e) => {
   if (
     !Number.isSafeInteger(e.activationGeneration)
     || e.activationGeneration < 1
@@ -2870,7 +2914,7 @@ window.pi.onFolderOpened((e) => {
 
 // ---------------------------------------------------------- worldlines ----
 
-window.pi.onWorldlineRunsChanged(({ terminalId }) => {
+window.termina.onWorldlineRunsChanged(({ terminalId }) => {
   const pane = panes.get(terminalId);
   if (!pane) return;
   pane.runs = null;
@@ -2878,11 +2922,11 @@ window.pi.onWorldlineRunsChanged(({ terminalId }) => {
 });
 
 // A promotion opens its primary terminal: bring it to the front.
-window.pi.onPromotionOpened(({ terminalId }) => {
+window.termina.onPromotionOpened(({ terminalId }) => {
   activatePaneWhenReady(terminalId);
 });
 
-window.pi.onWorldlineUpdate((event) => {
+window.termina.onWorldlineUpdate((event) => {
   if (!worldlineEventBelongsToProject(activeProjectId, event)) return;
   const { summary } = event;
   worldlinesView.upsert(summary);
@@ -2895,16 +2939,16 @@ window.pi.onWorldlineUpdate((event) => {
   updateEditorLock();
 });
 
-window.pi.onWorldlineRemoved((event) => {
+window.termina.onWorldlineRemoved((event) => {
   applyWorldlineRemoval(activeProjectId, event, panes.values(), worldlineProjectEffects());
 });
 
-window.pi.onEvidenceUpdate((event) => {
+window.termina.onEvidenceUpdate((event) => {
   if (!worldlineEventBelongsToProject(activeProjectId, event)) return;
   worldlinesView.upsertEvidence(event.summary);
 });
 
-window.pi.onInstances((list: InstanceSummary[]) => {
+window.termina.onInstances((list: InstanceSummary[]) => {
   // Main normally removes a user-closed terminal from this authoritative list
   // immediately. Also fence an older queued roster push so it cannot recreate
   // the pane while the close IPC is in flight.
@@ -2938,7 +2982,7 @@ window.pi.onInstances((list: InstanceSummary[]) => {
       const projectId = pane.projectId;
       if (projectId && !projectViews.has(projectId) && summary.cwd) {
         // The project view is created lazily; projectList resolves it.
-        void window.pi.projectList().then((list) => {
+        void window.termina.projectList().then((list) => {
           const project = list.find((p) => p.id === projectId);
           if (project && !projectViews.has(project.id)) createProjectView(project);
         });
@@ -2992,7 +3036,7 @@ async function boot(attempt = 0): Promise<void> {
 
   try {
     // Build the project tab bar; the active project owns the initial view.
-    const projects = await window.pi.projectList();
+    const projects = await window.termina.projectList();
     for (const project of projects) {
       if (Number.isSafeInteger(project.activationGeneration)) {
         latestProjectActivationGeneration = Math.max(latestProjectActivationGeneration, project.activationGeneration);
@@ -3008,7 +3052,7 @@ async function boot(attempt = 0): Promise<void> {
       explorer.setProject(bootView.id, bootView.cwd);
     }
 
-    const instances = await window.pi.getInstances();
+    const instances = await window.termina.getInstances();
     // Zero terminals is valid: the user may have closed the project's last
     // tab before quitting. Keep the project UI usable so they can add one.
     for (const inst of instances) {
@@ -3046,7 +3090,7 @@ async function boot(attempt = 0): Promise<void> {
       if (pane) signalTerminalHydrated(pane);
     }
     if (instances.length === 0) {
-      window.pi.readyTerminal("renderer", 1);
+      window.termina.readyTerminal("renderer", 1);
     }
     removeSplash();
     // Keep the project that was active before quit (from projectList.active),

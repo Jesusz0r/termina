@@ -39,10 +39,10 @@
   <!-- ============ HERO ============ -->
   <section class="hero">
     <div class="container">
-      <span class="eyebrow">Mission control for pi agents</span>
+      <span class="eyebrow">Mission control for coding agents</span>
       <h1>Your agent writes the code.<br>You hold the <span class="hl">timeline.</span></h1>
       <p class="hero-sub">
-        Termina runs the <b>real pi TUI</b> in a terminal on the left and a <b>live Monaco IDE</b> on the right.
+        Termina runs a <b>real agent TUI</b> in a terminal on the left and a <b>live Monaco IDE</b> on the right.
         Every edit streams in as it happens. Test in the background, fork any moment into an isolated
         candidate, and merge only the run that earns it.
       </p>
@@ -93,9 +93,9 @@
         </div>
 
         <div class="mock-body">
-          <!-- left: pi TUI -->
+          <!-- left: agent TUI -->
           <div class="tui">
-            <div class="pane-label"><span>pi — interactive tui (pty)</span><span>gemini-2.5-pro</span></div>
+            <div class="pane-label"><span>agent — interactive tui (pty)</span><span>gemini-2.5-pro</span></div>
             <div class="tui-screen" id="tui-screen"></div>
             <div class="tui-input"><b>&gt;</b> add token caching to the auth middleware<span class="caret"></span></div>
           </div>
@@ -212,7 +212,7 @@
 
       <!-- architecture flow diagram -->
       <div class="flow-wrap reveal">
-        <svg class="flow-svg" viewBox="0 0 980 300" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Architecture flow: you prompt the pi TUI, events flow through Termina main to the live Monaco IDE above and the Rust snapshot core below">
+        <svg class="flow-svg" viewBox="0 0 980 300" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Architecture flow: you prompt the agent TUI, events flow through Termina main to the live Monaco IDE above and the Rust snapshot core below">
           <defs>
             <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
               <path d="M0 0L10 5L0 10z" fill="#5f6a51"/>
@@ -233,7 +233,7 @@
           <!-- PI TUI -->
           <rect class="fnode" x="200" y="110" width="170" height="80" rx="10"/>
           <text class="fk" x="285" y="136" text-anchor="middle">PTY · REAL TUI</text>
-          <text class="flabel" x="285" y="157" text-anchor="middle">pi agent</text>
+          <text class="flabel" x="285" y="157" text-anchor="middle">agent</text>
           <text class="fnote" x="285" y="176" text-anchor="middle">any provider · plan mode</text>
 
           <!-- TERMINA MAIN -->

@@ -8,9 +8,9 @@ files:
   # Mach-O inside app.asar is dead weight and cannot be spawned.
   - "!dist-electron/termina-core"
   - dist-renderer/**/*
-# pi and node-pty load native code and spawn real files: keep every
-# dependency outside the asar archive. Electron redirects app.asar paths
-# to app.asar.unpacked for require and fs automatically.
+# Native modules and node-pty load native code and spawn real files: keep
+# every dependency outside the asar archive. Electron redirects app.asar
+# paths to app.asar.unpacked for require and fs automatically.
 asarUnpack:
   - node_modules/**/*
   # agent-core runs under ELECTRON_RUN_AS_NODE, which cannot read inside

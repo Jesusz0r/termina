@@ -315,7 +315,7 @@ export class EditorManager {
     this.syncEmptyState();
 
     const initialVersionId = model.getAlternativeVersionId();
-    const res = await window.pi.openFile(path, owner);
+    const res = await window.termina.openFile(path, owner);
     if (res.ok) {
       const current = this.tabs.get(key);
       if (current?.model === model && model.getAlternativeVersionId() === initialVersionId) {
@@ -654,7 +654,7 @@ export class EditorManager {
       toast(`could not save ${pathBasename(tab.key)}: file owner is unavailable`, "error");
       return;
     }
-    const res = await window.pi.saveFile(tab.key, tab.model.getValue(), tab.owner);
+    const res = await window.termina.saveFile(tab.key, tab.model.getValue(), tab.owner);
     if (res.ok) {
       tab.savedVersionId = tab.model.getAlternativeVersionId();
       this.syncDirty(tab);
@@ -677,8 +677,8 @@ export class EditorManager {
         continue;
       }
       const res = writerId
-        ? await window.pi.flushSave(tab.key, tab.model.getValue(), writerId, tab.owner)
-        : await window.pi.saveFile(tab.key, tab.model.getValue(), tab.owner);
+        ? await window.termina.flushSave(tab.key, tab.model.getValue(), writerId, tab.owner)
+        : await window.termina.saveFile(tab.key, tab.model.getValue(), tab.owner);
       if (res.ok) {
         tab.savedVersionId = tab.model.getAlternativeVersionId();
         this.syncDirty(tab);

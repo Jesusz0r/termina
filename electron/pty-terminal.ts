@@ -1,5 +1,5 @@
 /**
- * A real pi terminal: runs the pi TUI inside a pty (node-pty).
+ * A real agent terminal: runs the agent TUI inside a pty (node-pty).
  * Output streams to the renderer's xterm; keys flow back into the pty.
  */
 import { spawn, type IPty } from "@lydell/node-pty";

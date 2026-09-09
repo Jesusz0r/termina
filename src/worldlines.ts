@@ -371,8 +371,9 @@ export class WorldlinesView {
     const promoteBtn = actionButton("cand-promote", "Promote", "Merge this candidate into the primary project", () => void this.promote(comparisonId, label));
     const verifyBtn = actionButton("cand-verify", "Verify", "Run the detected tests inside the candidate sandbox", () => void this.verify(comparisonId, label));
     const compareBtn = actionButton("cand-compare", "Compare", "Diff the candidate head against the shared base", () => void this.openBaseCompare(comparisonId, label));
-    const openBtn = actionButton("cand-open", "Open", "Reopen the candidate Pi terminal", () => void this.reopen(comparisonId, label));
-    actions.append(promoteBtn, verifyBtn, compareBtn, openBtn);
+    const openBtn = actionButton("cand-open", "Open", "Reopen the candidate agent terminal", () => void this.reopen(comparisonId, label));
+    const exportBtn = actionButton("cand-export", "Export", "Write a patch bundle with the evidence summary for a PR", () => void this.export(comparisonId, label));
+    actions.append(promoteBtn, verifyBtn, compareBtn, openBtn, exportBtn);
 
     el.append(head, meta, detailsBody, actions);
 
@@ -453,14 +454,14 @@ export class WorldlinesView {
       `Candidate B replays the original task against the run start with the ${profile} constraint. Candidate A stays the reference. This comparison is replaced by the challenge pair.`,
     ).then(async (r) => {
       if (!r.confirmed) return;
-      const res = await window.pi.challengeCandidate(comparisonId, "A", profile);
+      const res = await window.termina.challengeCandidate(comparisonId, "A", profile);
       if (!res.ok) toast(`challenge failed: ${res.error ?? "unknown error"}`, "warning");
       else toast(`challenger launched — ${res.comparisonId ?? ""}`, "info");
     });
   }
 
   private async evidence(comparisonId: string): Promise<void> {
-    const res = await window.pi.runEvidence(comparisonId);
+    const res = await window.termina.runEvidence(comparisonId);
     if (!res.ok) toast(`evidence failed: ${res.error ?? "unknown error"}`, "warning");
   }
 
@@ -478,7 +479,7 @@ export class WorldlinesView {
   }
 
   private async runPromote(comparisonId: string, label: "A" | "B", force: boolean): Promise<void> {
-    const res = await window.pi.promoteWorldline(comparisonId, label, force);
+    const res = await window.termina.promoteWorldline(comparisonId, label, force);
     if (res.confirm) {
       const again = await showConfirm("Promote candidate", res.confirm);
       if (!again.confirmed) return;
@@ -497,7 +498,7 @@ export class WorldlinesView {
     if (!card) return;
     let terminalId = card.summary.terminalId;
     if (!terminalId || !this.handlers.isLiveTerminal(terminalId)) {
-      const opened = await window.pi.openWorldlineTerminal(comparisonId, label);
+      const opened = await window.termina.openWorldlineTerminal(comparisonId, label);
       if (!opened.ok || !opened.terminalId) {
         toast(opened.error ?? "open the candidate terminal before Verify", "warning");
         return;
@@ -505,8 +506,14 @@ export class WorldlinesView {
       terminalId = opened.terminalId;
       this.handlers.onOpenTerminal(terminalId);
     }
-    const res = await window.pi.runVerify(terminalId);
+    const res = await window.termina.runVerify(terminalId);
     if (!res.ok) toast(res.error ?? "verify failed to start", "warning");
+  }
+
+  private async export(comparisonId: string, label: "A" | "B"): Promise<void> {
+    const res = await window.termina.exportWorldline(comparisonId, label);
+    if (!res.ok) toast(res.error ?? "export failed", "warning");
+    else toast(`candidate ${label} exported — ${res.path ?? "bundle written"}`, "info");
   }
 
   private async reopen(comparisonId: string, label: "A" | "B"): Promise<void> {
@@ -516,7 +523,7 @@ export class WorldlinesView {
       this.handlers.onOpenTerminal(liveId);
       return;
     }
-    const res = await window.pi.openWorldlineTerminal(comparisonId, label);
+    const res = await window.termina.openWorldlineTerminal(comparisonId, label);
     if (!res.ok) toast(res.error ?? "could not reopen the candidate", "warning");
     else {
       toast(`candidate ${label} reopened`, "info");
@@ -527,7 +534,7 @@ export class WorldlinesView {
   private confirmDiscard(comparisonId: string): void {
     void showConfirm("Discard worldline", `Remove comparison ${comparisonId} and every app-owned candidate resource?`).then((r) => {
       if (!r.confirmed) return;
-      void window.pi.discardWorldline(comparisonId).then((res) => {
+      void window.termina.discardWorldline(comparisonId).then((res) => {
         if (!res.ok) toast(res.error ?? "discard failed", "warning");
       });
     });
@@ -577,7 +584,7 @@ export class WorldlinesView {
       const version = card.summary.version;
       let res: { ok: boolean; details?: WorldlineDetails; error?: string };
       try {
-        res = await window.pi.getWorldlineDetails(comparisonId, label);
+        res = await window.termina.getWorldlineDetails(comparisonId, label);
       } catch (err) {
         // A rejected IPC call is final; retrying cannot fix it.
         return { ok: false, error: (err as Error).message };

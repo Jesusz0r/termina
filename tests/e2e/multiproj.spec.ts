@@ -20,12 +20,12 @@ test.describe("Multi-Project Tabs & Workspace Switching", () => {
     await expect(initialTabs).toHaveCount(1);
 
     // Open project A
-    await page.evaluate((dir) => (window as any).pi.projectOpenPath(dir), projA);
+    await page.evaluate((dir) => (window as any).termina.projectOpenPath(dir), projA);
     await expect(page.locator(".project-tab")).toHaveCount(2, { timeout: 10_000 });
     await expect(page.locator("#explorer-tree").getByText("file-in-a.txt")).toBeVisible({ timeout: 10_000 });
 
     // Open project B
-    await page.evaluate((dir) => (window as any).pi.projectOpenPath(dir), projB);
+    await page.evaluate((dir) => (window as any).termina.projectOpenPath(dir), projB);
     await expect(page.locator(".project-tab")).toHaveCount(3, { timeout: 10_000 });
     await expect(page.locator("#explorer-tree").getByText("file-in-b.txt")).toBeVisible({ timeout: 10_000 });
 
@@ -50,7 +50,7 @@ test.describe("Multi-Project Tabs & Workspace Switching", () => {
     mkdirSync(projB, { recursive: true });
     writeFileSync(join(projA, "file-in-a.txt"), "hello from A\n");
 
-    await page.evaluate((dir) => (window as any).pi.projectOpenPath(dir), projA);
+    await page.evaluate((dir) => (window as any).termina.projectOpenPath(dir), projA);
     const tabA = page.locator(".project-tab").filter({ hasText: "collapse-a" });
     await expect(tabA).toHaveClass(/active/, { timeout: 10_000 });
     await page.locator("#explorer-tree").getByText("file-in-a.txt").click();
@@ -58,7 +58,7 @@ test.describe("Multi-Project Tabs & Workspace Switching", () => {
     await expect(page.locator("#right-pane.minimized")).toHaveCount(0);
 
     // B has no open files, so the editor auto-collapses when it activates.
-    await page.evaluate((dir) => (window as any).pi.projectOpenPath(dir), projB);
+    await page.evaluate((dir) => (window as any).termina.projectOpenPath(dir), projB);
     const tabB = page.locator(".project-tab").filter({ hasText: "collapse-b" });
     await expect(tabB).toHaveClass(/active/, { timeout: 10_000 });
     await expect(page.locator("#right-pane.minimized")).toHaveCount(1);

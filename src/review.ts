@@ -113,9 +113,9 @@ export class ReviewView {
     let res;
     let current;
     try {
-      res = await window.pi.reviewBaseline(terminalId, path);
+      res = await window.termina.reviewBaseline(terminalId, path);
       if (seq !== this.loadSeq) return;
-      current = await window.pi.openFile(path, owner);
+      current = await window.termina.openFile(path, owner);
     } catch (err) {
       if (seq !== this.loadSeq) return;
       hint.textContent = (err as Error).message;
@@ -165,8 +165,8 @@ export class ReviewView {
     this.owner = null;
     this.nameEl.textContent = `${relPath}  ·  ${label}`;
     const [base, cand] = await Promise.all([
-      window.pi.getWorldlineBaseFile(comparisonId, relPath),
-      window.pi.getWorldlineFile(comparisonId, label, relPath),
+      window.termina.getWorldlineBaseFile(comparisonId, relPath),
+      window.termina.getWorldlineFile(comparisonId, label, relPath),
     ]);
     if (seq !== this.loadSeq) return;
     this.setDiff(base.ok && base.content !== undefined ? base.content : "", cand.ok && cand.content !== undefined ? cand.content : "");
@@ -190,8 +190,8 @@ export class ReviewView {
     this.owner = null;
     this.nameEl.textContent = `${relPath}  ·  A ⇄ B`;
     const [a, b] = await Promise.all([
-      window.pi.getWorldlineFile(comparisonId, "A", relPath),
-      window.pi.getWorldlineFile(comparisonId, "B", relPath),
+      window.termina.getWorldlineFile(comparisonId, "A", relPath),
+      window.termina.getWorldlineFile(comparisonId, "B", relPath),
     ]);
     if (seq !== this.loadSeq) return;
     this.setDiff(a.ok && a.content !== undefined ? a.content : "", b.ok && b.content !== undefined ? b.content : "");
@@ -276,7 +276,7 @@ export class ReviewView {
         try {
           current = request.content !== undefined
             ? { ok: true, content: request.content }
-            : await window.pi.openFile(request.path, request.owner);
+            : await window.termina.openFile(request.path, request.owner);
         } catch (err) {
           if (request.version === this.refreshVersion && sameReview()) {
             toast(`could not refresh review: ${(err as Error).message}`, "error");
@@ -302,7 +302,7 @@ export class ReviewView {
 
   async revert(): Promise<void> {
     if (!this.terminalId || !this.path) return;
-    const res = await window.pi.reviewRevert(this.terminalId, this.path);
+    const res = await window.termina.reviewRevert(this.terminalId, this.path);
     if (!res.ok) {
       toast(res.error ?? "revert failed", "error");
       return;

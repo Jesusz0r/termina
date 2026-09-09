@@ -22,10 +22,11 @@ function seed(worlds: string, primaryRoot: string, name: string, rel: string): s
   mkdirSync(join(dir, "before"), { recursive: true, mode: 0o700 });
   writeFileSync(join(primaryRoot, rel), applied);
   writeFileSync(join(dir, "before", rel), before);
+  const fileState = (content: string) => ({ type: "file", mode: 0o644, hash: hash(content) });
   writeFileSync(join(dir, "journal.json"), JSON.stringify({
     phase: "applying",
     primaryRoot,
-    paths: [{ rel, kind: "write", beforeExists: true, beforeHash: hash(before), afterHash: hash(applied) }],
+    paths: [{ rel, kind: "write", beforeExists: true, beforeHash: hash(before), afterHash: hash(applied), beforeState: fileState(before), afterState: fileState(applied) }],
   }));
   return dir;
 }
@@ -35,15 +36,12 @@ export default async function run(log: (message: string) => void): Promise<void>
   try {
     const worlds = join(root, "worlds");
     const primary = join(root, "primary");
-    const piSessionRoot = join(root, "pi-sessions");
-    const coreSessionRoot = join(root, "core-sessions");
-    mkdirSync(piSessionRoot, { recursive: true });
-    mkdirSync(coreSessionRoot, { recursive: true });
+    mkdirSync(primary, { recursive: true, mode: 0o700 });
     // Let the canonical recovery binder create both app-owned roots on their
     // first trusted bind and persist their leaf identities before any journal
     // fixture is materialized. An existing root without that sidecar must be
     // rejected rather than adopted as a fresh trust anchor.
-    const recoveryContext = { primaryRoot: primary, piSessionRoot: realpathSync(piSessionRoot), coreSessionRoot: realpathSync(coreSessionRoot) };
+    const recoveryContext = { primaryRoot: primary };
     await worldlines.recoverPromotionJournals(worlds, recoveryContext);
     recoveryContext.primaryRoot = realpathSync(primary);
     const withLock = (worldlines as unknown as { withPromotionTransaction?: <T>(operation: () => Promise<T>) => Promise<T> }).withPromotionTransaction;
@@ -86,7 +84,7 @@ export default async function run(log: (message: string) => void): Promise<void>
     writeFileSync(join(deleteRollbackDir, "journal.json"), JSON.stringify({
       phase: "applying",
       primaryRoot: recoveryContext.primaryRoot,
-      paths: [{ rel: "deleted.txt", kind: "delete", beforeExists: true, beforeHash: hash("delete-before\n"), afterHash: hash("") }],
+      paths: [{ rel: "deleted.txt", kind: "delete", beforeExists: true, beforeHash: hash("delete-before\n"), afterHash: hash(""), beforeState: { type: "file", mode: 0o644, hash: hash("delete-before\n") }, afterState: { type: "missing" } }],
     }));
     await worldlines.recoverPromotionJournals(worlds, recoveryContext);
     if (readFileSync(join(primary, "deleted.txt"), "utf8") !== "delete-before\n" || !existsSync(deleteRollbackDir)) {
@@ -97,7 +95,7 @@ export default async function run(log: (message: string) => void): Promise<void>
     const leftoversDir = join(worlds, "promotion-journal", "leftovers");
     const canonicalPrimary = realpathSync(primary);
     const rollbackTemp = join(canonicalPrimary, ".termina-promotion-leftover.tmp");
-    const installDir = piSessionRoot;
+    const installDir = join(root, "installed");
     const installedSession = join(installDir, "promoted.jsonl");
     const installedSessionTemp = join(installDir, ".promoted.jsonl.tmp");
     mkdirSync(leftoversDir, { recursive: true, mode: 0o700 });
@@ -208,14 +206,14 @@ export default async function run(log: (message: string) => void): Promise<void>
     writeFileSync(join(outsideJournal, "journal.json"), JSON.stringify({ phase: "applying", engine: "pi", primaryRoot: recoveryContext.primaryRoot, paths: [], installedSession: outsideSession, installedSessionManifest: fileManifest(outsideSession) }));
 
     const symlinkTarget = join(outsideSessionRoot, "symlink-target.jsonl");
-    const symlinkSession = join(recoveryContext.piSessionRoot, "2026-08-30T12-00-00-000Z_00000000-0000-4000-8000-000000000011.jsonl");
+    const symlinkSession = join(outsideSessionRoot, "2026-08-30T12-00-00-000Z_00000000-0000-4000-8000-000000000011.jsonl");
     writeFileSync(symlinkTarget, "target\n");
     symlinkSync(symlinkTarget, symlinkSession);
     const symlinkJournal = join(worlds, "promotion-journal", "symlink-session");
     mkdirSync(symlinkJournal, { recursive: true });
     writeFileSync(join(symlinkJournal, "journal.json"), JSON.stringify({ phase: "applying", engine: "pi", primaryRoot: recoveryContext.primaryRoot, paths: [], installedSession: symlinkSession, installedSessionManifest: fileManifest(symlinkSession) }));
 
-    const replacedSession = join(recoveryContext.piSessionRoot, "2026-08-30T12-00-00-000Z_00000000-0000-4000-8000-000000000012.jsonl");
+    const replacedSession = join(outsideSessionRoot, "2026-08-30T12-00-00-000Z_00000000-0000-4000-8000-000000000012.jsonl");
     writeFileSync(replacedSession, "original\n");
     const replacedManifest = fileManifest(replacedSession);
     rmSync(replacedSession);
@@ -288,8 +286,10 @@ export default async function run(log: (message: string) => void): Promise<void>
     log("PASS planned rollback-temp crash states retain journal evidence");
 
     const validDir = join(worlds, "promotion-journal", "valid-retention");
-    const validInstalled = join(recoveryContext.piSessionRoot, "2026-08-30T12-00-00-000Z_00000000-0000-4000-8000-000000000001.jsonl");
-    const validTemp = join(recoveryContext.piSessionRoot, `.${join(validInstalled).split("/").pop()}.tmp`);
+    const validSessionRoot = join(root, "installed");
+    mkdirSync(validSessionRoot, { recursive: true, mode: 0o700 });
+    const validInstalled = join(validSessionRoot, "2026-08-30T12-00-00-000Z_00000000-0000-4000-8000-000000000001.jsonl");
+    const validTemp = join(validSessionRoot, `.${join(validInstalled).split("/").pop()}.tmp`);
     const validRollback = join(canonicalPrimary, ".termina-promotion-valid.tmp");
     mkdirSync(validDir, { recursive: true });
     writeFileSync(validInstalled, "installed\n");

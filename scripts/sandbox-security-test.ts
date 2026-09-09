@@ -84,8 +84,7 @@ const storeDir = join(userData, "worldlines");
 // Primary events normally live in app.getPath("temp"), outside home/userData.
 // Keep this fixture disjoint so another broad deny cannot mask its contract.
 const primaryEventsDir = join(externalFixture, "events");
-const bridgePath = join(userData, 'termina-bridge-"quoted"\\path.ts');
-const agentHomeDir = join(candidateSupport, "home", ".pi", "agent");
+const agentHomeDir = join(candidateSupport, "home", ".termina", "agent");
 for (const path of [
   candidateRoot,
   candidateSupport,
@@ -103,9 +102,8 @@ for (const path of [
 ]) {
   mkdirSync(path, { recursive: true });
 }
-writeFileSync(bridgePath, "export default true;\n");
 writeFileSync(join(agentHomeDir, "auth.json"), "{}\n");
-writeFileSync(join(agentHomeDir, "settings.json"), "{}\n");
+writeFileSync(join(agentHomeDir, "mcp.json"), "{}\n");
 const primaryEventsSecret = join(primaryEventsDir, "primary-sidecar.jsonl");
 writeFileSync(primaryEventsSecret, "primary event secret\n");
 const primarySentinel = join(primaryRoot, "primary-sentinel.txt");
@@ -133,7 +131,6 @@ const paths = {
   storeDir,
   primaryEventsDir,
   userData,
-  bridgePath,
   appReadPaths: ["/bin", "/usr"],
   agentHomeDir,
   denyNetwork: false,
@@ -147,7 +144,6 @@ check("worlds root has a write deny", profile.includes(`(deny file-write* (subpa
 check("user data has a read deny", profile.includes(`(deny file-read* (subpath "${canonicalUserData}"))`));
 check("external primary events have a read deny", profile.includes(`(deny file-read* (subpath "${canonicalPrimaryEvents}"))`));
 check("external primary events have a write deny", profile.includes(`(deny file-write* (subpath "${canonicalPrimaryEvents}"))`));
-check("bridge uses an exact read exception", profile.includes("(allow file-read* (literal ") && profile.includes('\\"quoted\\"\\\\path.ts'));
 check("broad user-data read exception is absent", !profile.includes(`(allow file-read* (subpath "${canonicalUserData}"))`));
 check(
   "candidate cannot replace its inherited memory policy",
@@ -161,7 +157,7 @@ symlinkSync(preference, authPath);
 const hostileAuthProfile = buildSandboxProfile(paths);
 check(
   "auth exception does not follow a candidate-planted symlink",
-  hostileAuthProfile.includes(`(allow file-write* (subpath "${join(realpathSync(candidateSupport), "home", ".pi", "agent", "auth.json")}"))`)
+  hostileAuthProfile.includes(`(allow file-write* (subpath "${join(realpathSync(candidateSupport), "home", ".termina", "agent", "auth.json")}"))`)
     && !hostileAuthProfile.includes(`(allow file-write* (subpath "${realpathSync(preference)}"))`),
 );
 rmSync(authPath);
@@ -430,10 +426,6 @@ if (process.platform === "darwin") {
     const profilePath = writeSandboxProfile(liveProfilePath, paths);
     check("live profile uses the app-owned comparison profile directory", profilePath === liveProfilePath && !profilePath.startsWith(`${candidateRoot}/`) && !profilePath.startsWith(`${candidateSupport}/`));
     const probe = (path) => spawnSync(SANDBOX_EXEC, ["-f", profilePath, "/bin/cat", path], { encoding: "utf8" });
-    const bridge = probe(bridgePath);
-    check("macOS sandbox reads the exact immutable bridge", bridge.status === 0 && bridge.stdout.includes("export default"), bridge.stderr);
-    const bridgeWrite = spawnSync(SANDBOX_EXEC, ["-f", profilePath, "/usr/bin/touch", bridgePath], { encoding: "utf8" });
-    check("macOS sandbox keeps the bridge immutable", bridgeWrite.status !== 0, `status=${bridgeWrite.status}`);
     for (const [name, path] of [["preferences", preference], ["roster", roster], ["primary session", primarySession], ["sibling session", siblingSecret]]) {
       const result = probe(path);
       check(`macOS sandbox blocks ${name}`, result.status !== 0, `status=${result.status}`);
@@ -460,9 +452,9 @@ if (process.platform === "darwin") {
     const writeSupport = spawnSync(SANDBOX_EXEC, ["-f", profilePath, "/bin/zsh", "-c", `echo support > ${JSON.stringify(supportOwn)}`], { encoding: "utf8" });
     check("macOS sandbox permits candidate support writes", writeSupport.status === 0 && readFileSync(supportOwn, "utf8").trim() === "support", writeSupport.stderr);
     const authWrite = spawnSync(SANDBOX_EXEC, ["-f", profilePath, "/bin/zsh", "-c", `echo refreshed > ${JSON.stringify(join(agentHomeDir, "auth.json"))}`], { encoding: "utf8" });
-    const settingsWrite = spawnSync(SANDBOX_EXEC, ["-f", profilePath, "/bin/zsh", "-c", `echo changed > ${JSON.stringify(join(agentHomeDir, "settings.json"))}`], { encoding: "utf8" });
+    const mcpWrite = spawnSync(SANDBOX_EXEC, ["-f", profilePath, "/bin/zsh", "-c", `echo changed > ${JSON.stringify(join(agentHomeDir, "mcp.json"))}`], { encoding: "utf8" });
     check("macOS sandbox permits copied auth refresh", authWrite.status === 0 && readFileSync(join(agentHomeDir, "auth.json"), "utf8").includes("refreshed"), authWrite.stderr);
-    check("macOS sandbox keeps copied settings immutable", settingsWrite.status !== 0 && readFileSync(join(agentHomeDir, "settings.json"), "utf8") === "{}\n", settingsWrite.stderr);
+    check("macOS sandbox keeps copied mcp config immutable", mcpWrite.status !== 0 && readFileSync(join(agentHomeDir, "mcp.json"), "utf8") === "{}\n", mcpWrite.stderr);
 
     // A live candidate may poison every .sb it can write, including the old
     // predictable locations, while Evidence/Verify derives and loads a new

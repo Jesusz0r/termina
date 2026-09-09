@@ -138,7 +138,7 @@ export class QuickOpen {
     }
     let res;
     try {
-      res = await window.pi.searchFiles(query);
+      res = await window.termina.searchFiles(query);
     } catch (err) {
       if (seq !== this.searchSeq) return;
       this.showEmpty((err as Error).message);

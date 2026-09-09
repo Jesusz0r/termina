@@ -1,9 +1,9 @@
 /**
- * Preload script: exposes the typed `window.pi` bridge to the renderer.
+ * Preload script: exposes the typed `window.termina` bridge to the renderer.
  */
 import { contextBridge, ipcRenderer as electronIpcRenderer, webUtils } from "electron";
 import type {
-  PiBridge,
+  TerminaBridge,
   TerminalPasteResult,
   InstanceSummary,
   ExplorerEntry,
@@ -49,7 +49,7 @@ function bindPushEvent<T>(channel: string, cb: (payload: T) => void): () => void
   };
 }
 
-const bridge: PiBridge = {
+const bridge: TerminaBridge = {
   // ---- push events ----
   onPtyData: (cb) => bindPushEvent("pty:data", cb),
   onPtyExit: (cb) => bindPushEvent("pty:exit", cb),
@@ -126,6 +126,7 @@ const bridge: PiBridge = {
   challengeCandidate: (comparisonId, label, profile) => ipcRenderer.invoke("worldline:challenge-candidate", comparisonId, label, profile),
   runEvidence: (comparisonId) => ipcRenderer.invoke("worldline:evidence", comparisonId),
   promoteWorldline: (comparisonId, label, force) => ipcRenderer.invoke("worldline:promote", comparisonId, label, force),
+  exportWorldline: (comparisonId, label) => ipcRenderer.invoke("worldline:export", comparisonId, label),
   onWorldlineUpdate: (cb) => bindPushEvent("worldline:update", cb),
   onWorldlineRemoved: (cb) => bindPushEvent("worldline:removed", cb),
   onWorldlineRunsChanged: (cb) => bindPushEvent("worldline:runs-changed", cb),
@@ -163,4 +164,4 @@ const bridge: PiBridge = {
 // A foreign or stale document may still execute this preload during a
 // navigation race, but it must not receive even a callable bridge surface.
 // Main has already failed closed by returning no capability for that frame.
-if (rendererCapability) contextBridge.exposeInMainWorld("pi", bridge);
+if (rendererCapability) contextBridge.exposeInMainWorld("termina", bridge);

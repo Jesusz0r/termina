@@ -1,7 +1,7 @@
 /**
  * Sidecar protocol: JSONL events the engine writes and the app tails.
  *
- * Two writers emit this protocol: the Pi bridge and agent-core. This
+ * Two writers emit this protocol: agent-core primary and candidate hosts. This
  * module is the only parser and the only tailer of sidecar JSONL.
  */
 import { watch, type FSWatcher } from "node:fs";
@@ -68,7 +68,6 @@ export type SidecarEvent =
       sessionId?: string | null;
       entryId?: string | null;
       parentEntryId?: string | null;
-      trusted?: boolean;
       model?: string | null;
       thinkingLevel?: string | null;
     })
@@ -439,7 +438,6 @@ function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>): Side
         sessionId: optionalStringOrNull(rec.sessionId),
         entryId: optionalStringOrNull(rec.entryId),
         parentEntryId: optionalStringOrNull(rec.parentEntryId),
-        trusted: optionalBoolean(rec.trusted),
         model: optionalStringOrNull(rec.model),
         thinkingLevel: optionalStringOrNull(rec.thinkingLevel),
       };
