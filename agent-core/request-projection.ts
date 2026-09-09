@@ -78,13 +78,12 @@ function hostContextSafe(value: string): string {
   return stripXmlControls(value).trim();
 }
 
-function hashUtf8(text: string): string {
-  return createHash("sha256").update(Buffer.from(text, "utf8")).digest("hex");
+function overlayFromEncoded(text: string, encoded: Buffer): RequestOverlay {
+  return { text, bytes: encoded.length, hash: createHash("sha256").update(encoded).digest("hex") };
 }
 
 function overlayFromText(text: string): RequestOverlay {
-  const bytes = Buffer.byteLength(text, "utf8");
-  return { text, bytes, hash: hashUtf8(text) };
+  return overlayFromEncoded(text, Buffer.from(text, "utf8"));
 }
 
 function overlayByteCap(value: unknown): number {
@@ -146,7 +145,9 @@ export function buildRequestOverlay(opts: BuildRequestOverlayOptions): RequestOv
   const host = opts.hostContext ?? "";
   const full = fullOverlayText(host);
   if (!full) return null;
-  const text = Buffer.byteLength(full, "utf8") <= maxBytes ? full : truncateHostOverlay(host, maxBytes);
+  const encoded = Buffer.from(full, "utf8");
+  if (encoded.length <= maxBytes) return overlayFromEncoded(full, encoded);
+  const text = truncateHostOverlay(host, maxBytes);
   return text ? overlayFromText(text) : null;
 }
 

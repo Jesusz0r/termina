@@ -246,4 +246,14 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
     expect(hostOverlay.text).not.toContain("\u009f");
     expect(hostOverlay.text).toContain("beforeafter\nnext");
   });
+
+  it("keeps overlay bytes/hash single-pass consistent on multi-byte truncation", () => {
+    const host = "😀".repeat(1024);
+    const overlay = overlayFor([], host, 1024);
+    expect(overlay).toBeTruthy();
+    expect(overlay.bytes).toBe(Buffer.byteLength(overlay.text, "utf8"));
+    expect(overlay.bytes).toBeLessThanOrEqual(1024);
+    expect(overlay.hash).toBe(createHash("sha256").update(Buffer.from(overlay.text, "utf8")).digest("hex"));
+    expect(overlay.text).not.toContain("�");
+  });
 });
