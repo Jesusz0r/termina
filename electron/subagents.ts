@@ -683,8 +683,14 @@ export class SubagentHost {
       const text = result.length > SUBAGENT_NOTE_RESULT_CHARS ? `${result.slice(0, SUBAGENT_NOTE_RESULT_CHARS)}\n…[truncated]` : result;
       lines.push(text);
       if (flags.length > 0) lines.push("", `Scan flags: ${flags.join(", ")}`);
+      // Force grounding: the parent must digest this result before continuing,
+      // never poll a finished run or duplicate its work.
+      lines.push("", "Summarize this result and state your next step explicitly. The result above is complete; do not poll the run.");
     } else if (error) {
       lines.push(`${outcome === "killed" ? "Reason" : "Error"}: ${error.slice(0, 1000)}`);
+      // An identical brief will fail identically: rewrite the task or dismiss
+      // the run instead of respawning it unchanged.
+      lines.push("", "Do not respawn this exact brief. Rewrite the task or dismiss the run.");
     }
     // Parent merge task: siblings that touched the same files. The parent
     // merges; siblings never negotiate with each other.

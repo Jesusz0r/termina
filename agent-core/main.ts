@@ -4633,26 +4633,57 @@ async function confirmProtectedMutation(inputPath: string | undefined): Promise<
   return queueApproval(() => confirmProtectedMutationNow(inputPath));
 }
 
+/** Per-file promise chains so concurrent batch tools never interleave mutations. */
+const fileMutationChains = new Map<string, Promise<void>>();
+
+export function fileMutationKey(cwd: string, inputPath: string | undefined): string | null {
+  const confined = confinePath(cwd, inputPath);
+  return confined.ok ? confined.abs : null;
+}
+
+/** Run fn after the previous mutation on key settles. Null keys run unserialized. */
+export async function withFileMutation<T>(key: string | null, fn: () => Promise<T>): Promise<T> {
+  if (key === null) return fn();
+  const prev = fileMutationChains.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const mine = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const chained = prev.then(() => mine);
+  fileMutationChains.set(key, chained);
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (fileMutationChains.get(key) === chained) fileMutationChains.delete(key);
+  }
+}
+
 async function executeTool(use: ToolUse): Promise<ToolOutcome> {
   if (use.name === "read_file") {
     const got = readProjectFile(canonicalCwd, use.input, allowPaths);
     return done(use, got);
   }
   if (use.name === "write_file") {
-    if (!(await confirmProtectedMutation(use.input.path))) return done(use, "error: protected file edit denied", true);
-    const got = writeProjectFile(canonicalCwd, use.input.path, use.input.content ?? "");
-    return done(use, got.content, got.isError);
+    return withFileMutation(fileMutationKey(canonicalCwd, use.input.path), async () => {
+      if (!(await confirmProtectedMutation(use.input.path))) return done(use, "error: protected file edit denied", true);
+      const got = writeProjectFile(canonicalCwd, use.input.path, use.input.content ?? "");
+      return done(use, got.content, got.isError);
+    });
   }
   if (use.name === "edit") {
-    if (!(await confirmProtectedMutation(use.input.path))) return done(use, "error: protected file edit denied", true);
-    const got = editProjectFile(
-      canonicalCwd,
-      use.input.path,
-      use.input.old_text ?? "",
-      use.input.new_text ?? "",
-      isReplaceAll(use.input.replace_all),
-    );
-    return done(use, got.content, got.isError);
+    return withFileMutation(fileMutationKey(canonicalCwd, use.input.path), async () => {
+      if (!(await confirmProtectedMutation(use.input.path))) return done(use, "error: protected file edit denied", true);
+      const got = editProjectFile(
+        canonicalCwd,
+        use.input.path,
+        use.input.old_text ?? "",
+        use.input.new_text ?? "",
+        isReplaceAll(use.input.replace_all),
+      );
+      return done(use, got.content, got.isError);
+    });
   }
   if (use.name === "grep") {
     const out = await grepFiles(canonicalCwd, use.input, { shouldStop: () => interrupted });
