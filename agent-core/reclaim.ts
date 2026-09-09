@@ -202,7 +202,11 @@ export function planPruneStubs(messages: ReclaimMessage[], opts: ReclaimPlanOpti
 
   const historyTotal = opts.systemTokens + (opts.toolSchemaTokens ?? 0) +
     normalized.reduce((sum, message) => sum + message.messageTokens, 0);
-  const fill = opts.fillTokens ?? historyTotal;
+  // Billed truth wins when the local byte heuristic undercounts the provider
+  // tokenizer (e.g. Gemini reports 507k while bytes/4 estimates far less).
+  // Gate on the larger so a stale/small fill cannot skip reclaim; quota stays
+  // on historyTotal so a high billed total alone cannot prune a small history.
+  const fill = Math.max(historyTotal, opts.fillTokens ?? historyTotal);
   if (fill < opts.usable * HIGH_WATER) return [];
   const quota = historyTotal - opts.usable * LOW_WATER;
   if (quota <= 0) return [];
