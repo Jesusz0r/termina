@@ -70,6 +70,12 @@ export interface SubagentSpawnRequest {
   budget?: unknown;
   /** Raw provider JSON: validated here so a malformed claim errors instead of silently dropping lease protection. */
   paths?: unknown;
+  /**
+   * Raw run id (bg-N) of a settled sibling run to continue. The child replays
+   * that run's session and treats this task as a follow-up. Must name a
+   * non-active run; anything else fails closed.
+   */
+  resume?: unknown;
   parent: SubagentParent;
 }
 
@@ -85,6 +91,8 @@ export interface SubagentRun {
   depth: number;
   paths: string[];
   maxTurns: number;
+  /** Settled sibling run this run continues, if any. */
+  resumeRunId: string | null;
   state: SubagentRunState;
   /** Parent-to-child texts in arrival order (answers, redirects). */
   inbox: string[];
@@ -102,13 +110,14 @@ export const SUBAGENT_TOOL_DEFS: Array<Record<string, unknown>> = [
   {
     name: "spawn_subagent",
     description:
-      "Spawn one background subagent for an independent subtask of the current task. The brief must be complete (goal, file paths, decisions, done-criteria): children start context-fresh. Returns a run id immediately; the final result arrives as a tool result when the run settles. Siblings never share a subtask; pass paths to reserve them.",
+      "Spawn one background subagent for an independent subtask of the current task. The brief must be complete (goal, file paths, decisions, done-criteria): children start context-fresh. Returns a run id immediately; the final result arrives as a tool result when the run settles. Siblings never share a subtask; pass paths to reserve them. Pass resume with a settled sibling run id to continue it: the child replays that run's session and treats the brief as a follow-up.",
     input_schema: {
       type: "object",
       properties: {
         task: { type: "string" },
         model: { type: "string" },
         effort: { type: "string" },
+        resume: { type: "string" },
         budget: {
           type: "object",
           properties: { maxTurns: { type: "number" } },
@@ -188,6 +197,10 @@ export interface SubagentTaskFile {
   task: string;
   /** Child-facing brief: the task plus the sibling-claim section. The child runs this. */
   brief: string;
+  /** Settled sibling run to continue, if any. The host resolves this to that
+   *  run's session bundle, which the child replays before running the brief
+   *  as a follow-up. Null starts a fresh session. */
+  resumeRunId: string | null;
   provider: ProviderId;
   model: string;
   protocol: ProviderProtocol;
@@ -234,6 +247,13 @@ export function parseSubagentTaskFile(raw: unknown): { ok: true; file: SubagentT
   if (typeof v.runId !== "string" || !/^bg-\d{1,10}$/.test(v.runId)) {
     return { ok: false, error: "subagent task file has a bad run id" };
   }
+  if (v.resumeRunId !== null && v.resumeRunId !== undefined) {
+    if (typeof v.resumeRunId !== "string" || !/^bg-\d{1,10}$/.test(v.resumeRunId)) {
+      return { ok: false, error: "subagent task file has a bad resume run id" };
+    }
+    if (v.resumeRunId === v.runId) return { ok: false, error: "subagent task file resumes itself" };
+  }
+  const resumeRunId: string | null = typeof v.resumeRunId === "string" ? v.resumeRunId : null;
   if (typeof v.task !== "string" || !v.task.trim() || v.task.length > MAX_SUBAGENT_TASK_CHARS) {
     return { ok: false, error: "subagent task file has a bad task" };
   }
@@ -276,6 +296,7 @@ export function parseSubagentTaskFile(raw: unknown): { ok: true; file: SubagentT
       runId: v.runId,
       task: v.task,
       brief: v.brief,
+      resumeRunId,
       provider: v.provider,
       model: v.model,
       protocol: (typeof v.protocol === "string" ? v.protocol : configuredProviderProtocol(v.provider, v.model)) as ProviderProtocol,
@@ -311,6 +332,7 @@ export function writeSubagentTaskFile(
     runId: run.id,
     task: run.task,
     brief,
+    resumeRunId: run.resumeRunId,
     provider: run.provider,
     model: run.model,
     protocol: run.protocol,
@@ -650,12 +672,27 @@ export class SubagentRegistry {
     if (task.length > MAX_SUBAGENT_TASK_CHARS) {
       return { ok: false, error: `spawn_subagent task exceeds ${MAX_SUBAGENT_TASK_CHARS} chars` };
     }
+    // Resume target must be a settled sibling run: continuing an active run
+    // would fork its session, and an unknown id can never resolve to one.
+    let resumeRunId: string | null = null;
+    if (req.resume !== undefined && req.resume !== null) {
+      if (typeof req.resume !== "string") return { ok: false, error: "spawn_subagent resume must be a run id" };
+      const resumeRaw = req.resume.trim();
+      if (!/^bg-\d{1,10}$/.test(resumeRaw)) return { ok: false, error: "spawn_subagent resume must be a run id" };
+      const prior = this.runs.get(resumeRaw);
+      if (!prior) return { ok: false, error: `unknown subagent run: ${resumeRaw}` };
+      if (prior.state === "active") return { ok: false, error: `subagent run ${resumeRaw} is still active` };
+      resumeRunId = resumeRaw;
+    }
     // An identical brief that already failed empty-handed will fail the same
     // way: the child never delivered anything, so there is nothing to iterate
-    // on. Fail closed here instead of burning another identical boot.
-    for (const prior of this.runs.values()) {
-      if (prior.state === "failed" && !prior.result?.trim() && prior.task === task) {
-        return { ok: false, error: `identical brief already failed as ${prior.id} with an empty result — rewrite the task instead of respawning it unchanged` };
+    // on. Fail closed here instead of burning another identical boot. An
+    // explicit resume is exempt: it is the sanctioned retry-with-context.
+    if (resumeRunId === null) {
+      for (const prior of this.runs.values()) {
+        if (prior.state === "failed" && !prior.result?.trim() && prior.task === task) {
+          return { ok: false, error: `identical brief already failed as ${prior.id} with an empty result — rewrite the task instead of respawning it unchanged` };
+        }
       }
     }
     let maxTurns = 50;
@@ -731,6 +768,7 @@ export class SubagentRegistry {
     const run: SubagentRun = {
       id: `bg-${this.nextId++}`,
       task,
+      resumeRunId,
       provider,
       model,
       protocol,

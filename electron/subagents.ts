@@ -15,7 +15,7 @@ import { spawn as spawnProcess, type ChildProcess } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join } from "node:path";
-import { coreSessionFile } from "../agent-core/session.js";
+import { coreSessionFile, parseSessionBundlePath } from "../agent-core/session.js";
 import {
   MAX_SUBAGENT_RESULT_CHARS,
   MAX_SUBAGENT_TOUCHED,
@@ -117,9 +117,14 @@ interface HostRun {
   stdoutTruncated: boolean;
   stderr: string;
   settled: boolean;
+  /** Latest attempt's session bundle, retained after settle for resume. */
+  sessionFile: string | null;
   /** Absolute touched paths from tailed tool events (merge evidence). */
   touched: Set<string>;
 }
+
+/** Settled-run session bundles available for resume (bounded, same-parent only). */
+const MAX_SUBAGENT_PAST_SESSIONS = 32;
 
 /** Settled-run touched memory for sibling merge detection (bounded). */
 const MAX_SUBAGENT_PAST_TOUCHED = 20;
@@ -180,6 +185,8 @@ export class SubagentHost {
   private readonly streams = new Map<string, { key: string; booted: boolean; lastActivityAt: number }>();
   /** Settled runs' touched paths for sibling merge detection (bounded, same-parent only). */
   private pastTouched: Array<{ runId: string; parentTerminalId: string; touched: string[] }> = [];
+  /** Settled runs' session bundles for resume (bounded, keyed by parent/run). */
+  private pastSessions = new Map<string, string>();
   private readonly launch: SubagentLauncher;
   private readonly wallMs: number;
   private readonly maxChildren: number;
@@ -390,6 +397,7 @@ export class SubagentHost {
       stdoutTruncated: false,
       stderr: "",
       settled: false,
+      sessionFile: null,
       touched: new Set<string>(),
     };
     this.runs.set(key, run);
@@ -407,21 +415,58 @@ export class SubagentHost {
     run.stdoutTruncated = false;
     run.stderr = "";
     run.stop = null;
+    // A resume replays the prior run's bundle instead of starting a fresh
+    // session. The bundle must still exist (host restart or cleanup drops
+    // it); otherwise fail closed without spawning — retrying cannot help.
+    let resumeFile: string | null = null;
+    if (run.task.resumeRunId) {
+      const retained = this.pastSessions.get(this.runKey(run.parentTerminalId, run.task.resumeRunId));
+      if (!retained) {
+        await this.finishFailed(
+          run.parentTerminalId,
+          run.runId,
+          run.task,
+          `cannot resume ${run.task.resumeRunId}: its session is gone; spawn a fresh brief instead`,
+        );
+        return;
+      }
+      resumeFile = retained;
+    }
     const sessionId = `core-${randomUUID()}`;
     let sessionFile: string;
-    try {
-      const root = await this.sinks.sessionRootFor(run.task.cwd);
-      sessionFile = coreSessionFile(root, sessionId);
-      mkdirSync(dirname(sessionFile), { recursive: true });
-    } catch (err) {
-      await this.finishFailed(run.parentTerminalId, run.runId, run.task, `subagent session unavailable: ${err instanceof Error ? err.message : String(err)}`);
-      return;
+    let resumeSessionId: string | null = null;
+    if (resumeFile) {
+      sessionFile = resumeFile;
+      // Keep addressing coherent with the bundle being replayed: the session
+      // id seeds the child's cache identity, so a resumed child must reuse
+      // the prior id rather than minting a cold one.
+      resumeSessionId = parseSessionBundlePath(resumeFile)?.sessionId ?? null;
+      if (!resumeSessionId) {
+        await this.finishFailed(
+          run.parentTerminalId,
+          run.runId,
+          run.task,
+          `cannot resume ${run.task.resumeRunId}: its session address is invalid; spawn a fresh brief instead`,
+        );
+        return;
+      }
+    } else {      try {
+        const root = await this.sinks.sessionRootFor(run.task.cwd);
+        sessionFile = coreSessionFile(root, sessionId);
+        mkdirSync(dirname(sessionFile), { recursive: true });
+      } catch (err) {
+        await this.finishFailed(run.parentTerminalId, run.runId, run.task, `subagent session unavailable: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
     }
+    run.sessionFile = sessionFile;
     const env: Record<string, string | undefined> = { ...this.sinks.baseEnv() };
     env.TERMINA_TERMINAL_ID = run.childTid;
     env.TERMINA_EVENTS_DIR = dir;
-    env.TERMINA_CORE_SESSION_ID = sessionId;
+    env.TERMINA_CORE_SESSION_ID = resumeSessionId ?? sessionId;
     env.TERMINA_CORE_SESSION_FILE = sessionFile;
+    if (resumeFile) env.TERMINA_CORE_RESUME = "1";
+    else delete env.TERMINA_CORE_RESUME;
     env.TERMINA_CORE_SUBAGENT_DEPTH = String(run.task.depth);
     env.ELECTRON_RUN_AS_NODE = "1";
     delete env.TERMINA_CORE_MODEL;
@@ -585,6 +630,16 @@ export class SubagentHost {
   ): Promise<void> {
     if (run.settled) return;
     run.settled = true;
+    // Retain the bundle for resume: a later sibling run can replay it as a
+    // follow-up. Bounded and same-parent keyed; a host restart drops it all.
+    if (run.sessionFile) {
+      this.pastSessions.set(this.runKey(run.parentTerminalId, run.runId), run.sessionFile);
+      while (this.pastSessions.size > MAX_SUBAGENT_PAST_SESSIONS) {
+        const oldest = this.pastSessions.keys().next().value as string | undefined;
+        if (oldest === undefined) break;
+        this.pastSessions.delete(oldest);
+      }
+    }
     if (run.retryTimer) {
       clearTimeout(run.retryTimer);
       run.retryTimer = null;
@@ -679,6 +734,7 @@ export class SubagentHost {
         : task.task;
       lines.push(`Task: ${brief}`, "");
     }
+    if (task?.resumeRunId) lines.push(`Continued from ${task.resumeRunId}; its session history was replayed.`, "");
     if (outcome === "settled") {
       const text = result.length > SUBAGENT_NOTE_RESULT_CHARS ? `${result.slice(0, SUBAGENT_NOTE_RESULT_CHARS)}\n…[truncated]` : result;
       lines.push(text);

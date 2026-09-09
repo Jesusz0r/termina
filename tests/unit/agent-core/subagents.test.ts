@@ -267,6 +267,34 @@ describe("subagents Phase 1 registry", () => {
     expect((await reg.spawn({ task: "third", parent })).ok).toBe(true);
   });
 
+  it("resumes settled runs and rejects bad resume targets", async () => {
+    const reg = registry();
+    const first = await reg.spawn({ task: "explore", parent });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(reg.settleRun(first.run.id, "found it").ok).toBe(true);
+    expect((await reg.spawn({ task: "follow up", resume: "bg-99", parent })).ok).toBe(false);
+    const active = await reg.spawn({ task: "parallel work", parent });
+    expect(active.ok).toBe(true);
+    if (!active.ok) return;
+    const resumeActive = await reg.spawn({ task: "follow up", resume: active.run.id, parent });
+    expect(resumeActive.ok).toBe(false);
+    if (!resumeActive.ok) expect(resumeActive.error).toMatch(/still active/);
+    expect((await reg.spawn({ task: "follow up", resume: "nope", parent })).ok).toBe(false);
+    expect((await reg.spawn({ task: "follow up", resume: 42, parent })).ok).toBe(false);
+    const resumed = await reg.spawn({ task: "follow up", resume: first.run.id, parent });
+    expect(resumed.ok).toBe(true);
+    if (!resumed.ok) return;
+    expect(resumed.run.resumeRunId).toBe(first.run.id);
+    // Resume is the sanctioned retry: the identical-brief guard exempts it.
+    const sameTask = await reg.spawn({ task: "explore", parent });
+    expect(sameTask.ok).toBe(true);
+    if (!sameTask.ok) return;
+    expect(reg.settleRun(sameTask.run.id, "", "failed").ok).toBe(true);
+    const resumeSame = await reg.spawn({ task: "explore", resume: sameTask.run.id, parent });
+    expect(resumeSame.ok).toBe(true);
+  });
+
   it("settles exactly once and scans the result", async () => {
     const reg = registry();
     const spawned = await reg.spawn({ task: "t", parent });
@@ -377,6 +405,73 @@ describe("subagents Phase 2 handoff contract", () => {
     expect(capped.length).toBeLessThanOrEqual(12_000);
     expect(capped).toContain("more");
     expect(formatSubagentBrief("x".repeat(12_000), ["src/a.ts"])).toBe("x".repeat(12_000));
+  });
+
+  it("round-trips the brief through the task file", async () => {
+    const reg = registry();
+    const spawned = await reg.spawn({ task: "do it", paths: ["src/a.ts"], parent });
+    expect(spawned.ok).toBe(true);
+    if (!spawned.ok) return;
+    const dir = events();
+    const written = writeSubagentTaskFile(dir, spawned.run, { parentTerminalId: "term-7", cwd: "/proj" });
+    expect(written.ok).toBe(true);
+    if (!written.ok) return;
+    expect(written.file).toBe("subagent-term-7-bg-1.task.json");
+    const { readFileSync: readBrief } = await import("node:fs");
+    const parsedBrief = parseSubagentTaskFile(JSON.parse(readBrief(join(dir, written.file), "utf8")));
+    expect(parsedBrief.ok).toBe(true);
+    if (!parsedBrief.ok) return;
+    expect(parsedBrief.file.runId).toBe("bg-1");
+    expect(parsedBrief.file.task).toBe("do it");
+    expect(parsedBrief.file.paths).toEqual(["src/a.ts"]);
+    expect(parsedBrief.file.parentTerminalId).toBe("term-7");
+    expect(parsedBrief.file.permissionMode).toBe("ask");
+    expect(parsedBrief.file.resumeRunId).toBe(null);
+  });
+
+  it("round-trips a resume pointer through the task file", async () => {
+    const reg = registry();
+    const first = await reg.spawn({ task: "do it", parent });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(reg.settleRun(first.run.id, "done").ok).toBe(true);
+    const resumed = await reg.spawn({ task: "follow up", resume: first.run.id, parent });
+    expect(resumed.ok).toBe(true);
+    if (!resumed.ok) return;
+    const dir = events();
+    const written = writeSubagentTaskFile(dir, resumed.run, { parentTerminalId: "term-7", cwd: "/proj" });
+    expect(written.ok).toBe(true);
+    if (!written.ok) return;
+    const { readFileSync: read } = await import("node:fs");
+    const parsed = parseSubagentTaskFile(JSON.parse(read(join(dir, written.file), "utf8")));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.file.resumeRunId).toBe(first.run.id);
+  });
+
+  it("rejects malformed resume pointers", () => {
+    const base = {
+      version: 1,
+      runId: "bg-2",
+      task: "t",
+      brief: "t",
+      provider: "anthropic",
+      model: "claude-sonnet-4-5",
+      protocol: "anthropic-messages",
+      effort: "off",
+      maxTurns: 10,
+      paths: [],
+      permissionMode: "ask",
+      parentTerminalId: "term-7",
+      cwd: "/proj",
+      depth: 1,
+      createdAt: 1,
+    };
+    expect(parseSubagentTaskFile({ ...base, resumeRunId: "bg-1" }).ok).toBe(true);
+    expect(parseSubagentTaskFile({ ...base }).ok).toBe(true);
+    expect(parseSubagentTaskFile({ ...base, resumeRunId: "nope" }).ok).toBe(false);
+    expect(parseSubagentTaskFile({ ...base, resumeRunId: 42 }).ok).toBe(false);
+    expect(parseSubagentTaskFile({ ...base, resumeRunId: "bg-2" }).ok).toBe(false);
   });
 
   it("round-trips the brief through the task file", async () => {

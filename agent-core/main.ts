@@ -4725,6 +4725,7 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
       ...(use.input.effort === undefined ? {} : { effort: String(use.input.effort) }),
       ...(use.input.budget === undefined ? {} : { budget: use.input.budget }),
       ...(use.input.paths === undefined ? {} : { paths: use.input.paths }),
+      ...(use.input.resume === undefined ? {} : { resume: use.input.resume }),
       parent: {
         provider: route.provider,
         model: route.model,
@@ -5349,6 +5350,34 @@ function replayStateForHistory() {
   state.lastSeq = storageSeq;
   state.maxSeq = storageSeq;
   return state;
+}
+
+/** Install a replayed prior-run bundle into a resuming headless child, so the
+ *  new brief runs as a follow-up instead of a fresh session. Mirrors the
+ *  core of resumeSessionBody without interactive output: the task file pins
+ *  the effort for this run, so a saved effort is intentionally not restored.
+ *  Marks the stream prepared so runPrompt cannot rotate the bundle away. */
+export function installResumedSubagentHistory(replayed: {
+  messages: ReadonlyArray<{ role: "user" | "assistant"; content: unknown; sseq: number }>;
+  maxSeq: number;
+}): void {
+  history.length = 0;
+  for (const rm of replayed.messages) {
+    const m: Message = { role: rm.role, content: rm.content as Message["content"], tokens: 0, sseq: rm.sseq };
+    m.tokens = estimateReclaimTokens(m.content);
+    history.push(m);
+  }
+  for (let i = history.length - 1; i >= 0; i--) {
+    const c = history[i]!.content;
+    if (typeof c === "string" && c.startsWith("<context-handoff>")) {
+      lastHandoff = c.replace(/<\/?context-handoff>/g, "").trim();
+      break;
+    }
+  }
+  storageSeq = Math.max(storageSeq, replayed.maxSeq);
+  openSessionWriter();
+  streamPrepared = true;
+  resetCacheContinuity();
 }
 
 /** Install only the canonical session replay result after its receipt is durable. */
@@ -7320,8 +7349,34 @@ async function runSubagentTask(taskPath: string): Promise<never> {
   }
   activeSubagent = { task, turns: 0, partial: false, inboxSeq: 0 };
   lastRunOutcome = null;
+  const roleLine = task.resumeRunId
+    ? `[Subagent ${task.runId}: continuing ${task.resumeRunId}. Its session history is replayed above; treat the brief below as a follow-up, not a fresh task. Your final reply is delivered to your parent as the run result.`
+    : `[Subagent ${task.runId}: you are a background subagent. Your final reply is delivered to your parent as the run result.`;
+  if (task.resumeRunId) {
+    // The host points TERMINA_CORE_SESSION_FILE at the prior run's bundle.
+    // Replay it so the brief runs as a follow-up; a missing or broken bundle
+    // fails closed here (exit 2 skips the host retry gate, like a bad task).
+    // Note: `await fail()` does not narrow for flow analysis in this file
+    // (see the `raw!` idiom above), so this uses positive-branch narrowing.
+    if (!sessionFile) await fail("resumed session address is missing");
+    let replayed: Awaited<ReturnType<typeof replaySessionBundle>> | null = null;
+    try {
+      replayed = await replaySessionBundle(sessionFile!);
+    } catch {
+      replayed = null;
+    }
+    if (replayed !== null && replayed.ok) {
+      try {
+        installResumedSubagentHistory(replayed);
+      } catch (err) {
+        await fail(`cannot resume ${task.resumeRunId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    } else {
+      await fail(`cannot resume ${task.resumeRunId}: ${replayed === null ? "replay failed" : replayed.error}`);
+    }
+  }
   await runPrompt(
-    `[Subagent ${task.runId}: you are a background subagent. Your final reply is delivered to your parent as the run result. Parent messages arrive as "Parent message (seq N): ..." user turns — follow redirections, answer questions in your result. Bash approvals ask your parent and default to deny; keep commands minimal and non-interactive.]\n\n${task.brief}`,
+    `${roleLine} Parent messages arrive as "Parent message (seq N): ..." user turns — follow redirections, answer questions in your result. Bash approvals ask your parent and default to deny; keep commands minimal and non-interactive.]\n\n${task.brief}`,
   );
   // `as`: the settle-point assignment inside runPrompt is invisible to flow
   // analysis, which would otherwise keep the pre-run `null` narrowing.

@@ -494,4 +494,42 @@ describe("SubagentHost", () => {
     await until(() => existsSync(s.resultFile));
     expect(s.notes[0]!.note).toContain("…[truncated]");
   });
+
+  it("fails a resume without launching when the prior session is gone", async () => {
+    const s = setup();
+    const task = { ...validTask({ runId: "bg-2", task: "follow up" }), resumeRunId: "bg-1" };
+    writeFileSync(join(s.dir, "subagent-term-7-bg-2.task.json"), JSON.stringify(task));
+    await s.host.handleSpawn("term-7", "bg-2", "subagent-term-7-bg-2.task.json");
+    // No bg-1 ever ran on this host: no bundle to replay, so no child boots.
+    expect(s.procs.length).toBe(0);
+    await until(() => existsSync(join(s.dir, "subagent-term-7-bg-2.result.json")));
+    const body = JSON.parse(readFileSync(join(s.dir, "subagent-term-7-bg-2.result.json"), "utf8"));
+    expect(body.outcome).toBe("failed");
+    expect(s.notes.at(-1)!.note).toMatch(/cannot resume bg-1/);
+  });
+
+  it("replays the prior bundle on resume", async () => {
+    const s = setup();
+    s.writeTask();
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    s.procs[0]!.out(`SUBAGENT_RESULT {"ok":true,"result":"done"}\n`);
+    s.procs[0]!.exit(0);
+    await until(() => existsSync(s.resultFile));
+    expect(s.readResult().outcome).toBe("settled");
+    const firstEnv = s.launches[0]!.env;
+    expect(firstEnv.TERMINA_CORE_RESUME).toBeUndefined();
+    const second = "subagent-term-7-bg-2.task.json";
+    const task = { ...validTask({ runId: "bg-2", task: "follow up" }), resumeRunId: "bg-1" };
+    writeFileSync(join(s.dir, second), JSON.stringify(task));
+    await s.host.handleSpawn("term-7", "bg-2", second);
+    await until(() => s.procs.length === 2, 5000);
+    const secondEnv = s.launches[1]!.env;
+    expect(secondEnv.TERMINA_CORE_SESSION_FILE).toBe(firstEnv.TERMINA_CORE_SESSION_FILE);
+    expect(secondEnv.TERMINA_CORE_RESUME).toBe("1");
+    expect(secondEnv.TERMINA_CORE_SESSION_ID).toBe(firstEnv.TERMINA_CORE_SESSION_ID);
+    s.procs[1]!.out(`SUBAGENT_RESULT {"ok":true,"result":"continued"}\n`);
+    s.procs[1]!.exit(0);
+    await until(() => existsSync(join(s.dir, "subagent-term-7-bg-2.result.json")));
+    expect(s.notes.at(-1)!.note).toContain("Continued from bg-1");
+  });
 });
