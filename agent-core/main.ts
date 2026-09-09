@@ -138,6 +138,14 @@ import {
   type CacheRequestDiagnostics,
 } from "./cache.ts";
 import {
+  evictionBoundary,
+  messagesForSummary,
+  serializeForSummary,
+  shouldCompactForCacheCost,
+  summaryPrompt,
+  truncateCut,
+} from "./compaction.ts";
+import {
   catalogFetchAllowed,
   filterCatalogModels,
   formatCatalogLines,
@@ -301,8 +309,6 @@ function usableTokens(): number {
 function protectTokens(): number {
   return Math.min(PROTECT_MAX, Math.max(PROTECT_MIN, Math.floor(usableTokens() * 0.25)));
 }
-/** Newest user turns whose messages are never touched. */
-const PROTECT_TURNS = 2;
 /** Tool results below this size are never worth a stub. */
 const READ_CAP_BYTES = 40 * 1024;
 const BASH_CAP_BYTES = 20 * 1024;
@@ -316,9 +322,6 @@ const TOOL_CONCURRENCY = 4;
 const NOISE_FLOOR_TOKENS = 1_024;
 /** Consecutive identical tool turns (same calls, same results) before the run settles stalled. */
 export const STALL_TURNS = 3;
-/** Compact an expensive miss before the request reaches the context limit. */
-const CACHE_MISS_COMPACT_TOKENS = 100_000;
-const CACHE_MISS_COMPACT_SHARE = 0.5;
 const USER_AGENTS_CAP = 8_192;
 const PROJECT_AGENTS_CAP = 24_576;
 const SKILL_XML_CAP = 8_192;
@@ -5271,16 +5274,6 @@ interface Message {
 
 const history: Message[] = [];
 
-function isUserPrompt(m: { role: string; content: unknown }): boolean {
-  if (m.role !== "user") return false;
-  if (typeof m.content === "string") return true;
-  return Array.isArray(m.content) && m.content.some((b) => {
-    if (!b || typeof b !== "object") return false;
-    const type = (b as { type?: unknown }).type;
-    return type === "text" || type === "image";
-  });
-}
-
 export function placeStreamBlock<T>(slots: Array<T | undefined>, index: unknown, block: T): void {
   if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index > 10_000) return;
   slots[index] = block;
@@ -5332,22 +5325,6 @@ let lastBilledTokens: number | null = null;
 let lastCacheReadShare: number | null = null;
 let lastRequestFollowedRevision = false;
 let pendingReclaimEvidence: Record<string, unknown> | null = null;
-
-export function shouldCompactForCacheCost(
-  billedTokens: number | null,
-  cacheReadShare: number | null,
-  contextTokens: number,
-  followedRevision: boolean,
-): boolean {
-  return (
-    !followedRevision &&
-    billedTokens !== null &&
-    cacheReadShare !== null &&
-    billedTokens >= CACHE_MISS_COMPACT_TOKENS &&
-    contextTokens >= CACHE_MISS_COMPACT_TOKENS &&
-    cacheReadShare < CACHE_MISS_COMPACT_SHARE
-  );
-}
 
 function recordRevision(kind: RevisionKind): void {
   revisions++;
@@ -5519,20 +5496,22 @@ async function reclaim(): Promise<number> {
 /** Last resort when reclamation alone cannot fit the window: drop whole old
  *  turns, cutting only at real prompts. Storage keeps every dropped byte. */
 function truncate(): boolean {
-  let total = totalTokens();
-  if (total < usableTokens()) return false;
-  let cut = 0;
-  for (let i = 0; i < history.length; i++) {
-    const m = history[i]!;
-    if (isUserPrompt(m)) cut = i;
-    total -= m.tokens;
-    if (i === cut && total < usableTokens() * LOW_WATER) break;
-  }
+  const estimate = totalTokens();
+  const effective = Math.max(estimate, lastBilledTokens ?? 0);
+  if (effective < usableTokens()) return false;
+  // Walk in one scale: billed truth and the byte heuristic disagree by a
+  // ratio, so decrement each message's estimate share scaled to the effective
+  // total. Without this a billed-high/estimate-low window walks the whole
+  // history and drops everything but the tail.
+  const scale = estimate > 0 ? effective / estimate : 1;
+  const cut = truncateCut(history, effective, usableTokens(), usableTokens() * LOW_WATER, scale);
   if (cut <= 0) return false;
   persist({ type: "revision", kind: "truncate", dropped: cut });
   history.splice(0, cut);
   postRevision = true;
   recordRevision("truncate");
+  lastBilledTokens = null;
+  lastCacheReadShare = null;
   syncIndicators();
   return true;
 }
@@ -5546,82 +5525,33 @@ function totalTokens(): number {
   return estimateReclaimTokens(systemPrompt()) + toolSchemaTokens() + activeOverlayTokens() + history.reduce((s, m) => s + m.tokens, 0);
 }
 
-/** Newest-first protected span, mirroring the planner's window. Returns the
- *  index where the evicted span ends, adjusted back to a prompt boundary so
- *  the surviving tail starts a clean turn. */
-function evictionBoundary(): number {
-  let guarded = 0;
-  let seen = 0;
-  let boundary = 0;
-  for (let i = history.length - 1; i >= 0; i--) {
-    boundary = i;
-    guarded += history[i]!.tokens;
-    if (isUserPrompt(history[i]!)) {
-      seen++;
-      if (seen >= PROTECT_TURNS && guarded >= Math.min(protectTokens(), usableTokens() / 4)) break;
-    }
-  }
-  // The tail must start at a real prompt; walk forward past orphan results.
-  while (
-    boundary < history.length &&
-    !isUserPrompt(history[boundary]!)
-  ) {
-    boundary++;
-  }
-  return boundary;
+/**
+ * Compaction decisions use billed truth when the provider reported it: the
+ * local bytes/4 heuristic undercounts some tokenizers, so gating only on the
+ * estimate lets a 507k-token request pass an 80% high-water check and then
+ * fail with `maximum prompt length`. Take the larger of estimate and last
+ * billed total; display paths keep using totalTokens().
+ */
+function effectiveTotalTokens(): number {
+  return Math.max(totalTokens(), lastBilledTokens ?? 0);
 }
 
-function summaryValue(value: unknown, maxChars: number): string {
-  if (typeof value === "string") return value.slice(0, maxChars);
-  try {
-    const encoded = JSON.stringify(value);
-    return (typeof encoded === "string" ? encoded : String(value)).slice(0, maxChars);
-  } catch {
-    return String(value).slice(0, maxChars);
-  }
-}
-
-/** Remove the previous handoff from the next eviction input. The handoff is
- * sent once in the explicit `<previous-handoff>` section below. */
-export function messagesForSummary(messages: readonly Message[], lastHandoffBody: string | null): Message[] {
-  const prior = lastHandoffBody === null
-    ? null
-    : `<context-handoff>\n${lastHandoffBody}\n</context-handoff>`;
-  return messages.filter((message) => message.content !== prior);
-}
-
-export function serializeForSummary(messages: readonly Message[]): string {
-  const parts: string[] = [];
-  for (const m of messages) {
-    const role = m.role === "assistant" ? "Assistant" : "User";
-    if (typeof m.content === "string") {
-      parts.push(`[${role}]: ${m.content.slice(0, 2_000)}`);
-      continue;
-    }
-    for (const b of m.content as ContentBlock[]) {
-      if (b.type === "text") parts.push(`[${role}]: ${String(b.text ?? "").slice(0, 2_000)}`);
-      else if (b.type === "tool_use" || b.type === "server_tool_use")
-        parts.push(`[${role} tool call]: ${b.name}(${summaryValue(b.input, 300)})`);
-      else if (b.type === "tool_result" && !b.stubbed)
-        parts.push(`[Tool result]: ${summaryValue(b.content, 500)}`);
-      else if (b.type === "web_search_tool_result")
-        parts.push(`[Search evidence]: ${summaryValue((b as unknown as Record<string, unknown>).content, 800)}`);
-      else if (b.type === "image")
-        parts.push(`[${role} image]: ${summaryValue((b as unknown as Record<string, unknown>).source, 160)}`);
-    }
-  }
-  return parts.join("\n").slice(0, 60_000);
+/** Provider window-overflow shapes across Anthropic/OpenAI/Gemini/xAI. Tested
+ * only against provider-thrown request errors, never user text. Generic nouns
+ * stay verb-guarded so benign messages (e.g. "context window info") cannot
+ * trigger a destructive summarize/truncate. */
+export function isContextOverflowMessage(message: string): boolean {
+  return /prompt is too long|maximum context|maximum prompt|context_length|request_too_large|request too large|too many tokens|tokens?\s+(exceed|exceeds|exceeded)|exceed.*tokens?|tokens?.*exceed|request contains .*tokens|input.*too long|prompt.*too (long|large|big)|context.*too (long|large|big)|context.*exceed|exceed.*context|token limit|context limit/i.test(message);
 }
 
 /** Collapse old turns into one handoff message. Runs on the cheap lane.
  *  Returns false when there is nothing safely evictable or the call fails;
  *  callers fall back to truncate. */
 async function summarize(): Promise<boolean> {
-  const boundary = evictionBoundary();
+  const boundary = evictionBoundary(history, Math.min(protectTokens(), usableTokens() / 4));
   if (boundary <= 0) return false;
   const evicted = messagesForSummary(history.slice(0, boundary), lastHandoff);
-  const prior = lastHandoff ? `<previous-handoff>\n${lastHandoff}\n</previous-handoff>\n\n` : "";
-  const prompt = `${prior}<session-to-compress>\n${serializeForSummary(evicted)}\n</session-to-compress>\n\nProduce the context handoff for continuing this session: task state, decisions made, files touched, open threads, and a compact evidence inventory of tool outcomes and search references. Only output the handoff.`;
+  const prompt = summaryPrompt(lastHandoff, serializeForSummary(evicted));
   const started = Date.now();
   currentAbort ??= new AbortController();
   let foldedResult: Awaited<ReturnType<typeof completeText>> | null = null;
@@ -5660,6 +5590,10 @@ async function summarize(): Promise<boolean> {
     history.unshift(m);
     postRevision = true;
     recordRevision("summarize");
+    // History no longer matches the last billed request; drop billed truth so
+    // the next turn re-bills instead of compacting against a stale-high total.
+    lastBilledTokens = null;
+    lastCacheReadShare = null;
     syncIndicators();
     await writeSummaryTrace({
       status: "ok",
@@ -7641,7 +7575,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           shouldCompactForCacheCost(
             lastBilledTokens,
             lastCacheReadShare,
-            totalTokens(),
+            effectiveTotalTokens(),
             lastRequestFollowedRevision,
           );
         if (shouldCompactForCost) cacheCostCompactionAttempted = true;
@@ -7651,8 +7585,17 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           lastCacheReadShare = null;
         }
         // Reclaim first. Summarize at the high-water line. Truncate last.
-        if (!compactedForCost && totalTokens() >= usableTokens() * HIGH_WATER && !(await summarize()) && totalTokens() >= usableTokens()) {
-          truncate();
+        // Gate on billed truth when available: the local estimate undercounts.
+        // A successful summarize/truncate invalidates the last billed total
+        // (it describes pre-revision history), so clear it instead of letting
+        // the post-revision check below re-fire on a stale-high value.
+        if (!compactedForCost && effectiveTotalTokens() >= usableTokens() * HIGH_WATER) {
+          if (await summarize()) {
+            lastBilledTokens = null;
+            lastCacheReadShare = null;
+          } else if (effectiveTotalTokens() >= usableTokens()) {
+            truncate();
+          }
         }
       }
       resumePaused = false;
@@ -7668,7 +7611,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         const failedTurnMs = Math.max(0, Date.now() - callStarted);
         // Emergency mid-turn revision: the provider
         // rejected the window; reclaim hard and retry exactly once.
-        if (!retriedOverflow && /prompt is too long|maximum context|context_length/i.test(providerMessage)) {
+        if (!retriedOverflow && isContextOverflowMessage(providerMessage)) {
           await writeMainTrace({ status: "overflow", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: streamFailure?.cache ?? null, started: callStarted, attempt: failedAttempt });
           retriedOverflow = true;
           await reclaim();

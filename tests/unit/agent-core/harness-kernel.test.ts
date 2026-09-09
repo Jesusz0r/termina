@@ -38,6 +38,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const compat = await import("../../../agent-core/openai-compat.ts");
     const projection = await import("../../../agent-core/request-projection.ts");
     const reclaim = await import("../../../agent-core/reclaim.ts");
+    const compaction = await import("../../../agent-core/compaction.ts");
     const session = await import("../../../agent-core/session.ts");
     const trace = await import("../../../agent-core/trace.ts");
     const toolOutput = await import("../../../agent-core/tool-output.ts");
@@ -84,8 +85,6 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       buildFrozenSystem,
       isDirectRunFrom,
       hashSystem,
-      messagesForSummary,
-      serializeForSummary,
       WEB_SEARCH_TOOL,
       requestTools,
       stampHistoryCache,
@@ -96,7 +95,6 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       collectRelativeFiles,
       parseFileTags,
       expandFileTags,
-      shouldCompactForCacheCost,
       retryAfter,
       parseEffortCommand,
       outputTokenBudget,
@@ -107,6 +105,11 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       parseBangCommand,
       bangCommandContext,
     } = core;
+    const {
+      messagesForSummary,
+      serializeForSummary,
+      shouldCompactForCacheCost,
+    } = compaction;
     
     const {
       buildRequestOverlay,
