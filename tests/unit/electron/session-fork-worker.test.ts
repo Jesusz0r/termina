@@ -79,57 +79,6 @@ describe("Electron Session Fork Worker & Multi-Process Isolation", () => {
     rmSync(work, { recursive: true, force: true });
   });
 
-  it("handles Pi session forks, pre-aborted cancellations, and scratch release", async () => {
-    const piSourceDir = join(work, "pi-source");
-    const piSource = SessionManager.create(join(work, "pi-primary"), piSourceDir);
-    piSource.appendMessage({ role: "user", content: "keep the existing Pi fork path", timestamp: Date.now() });
-    piSource.appendMessage({
-      role: "assistant",
-      content: [{ type: "text", text: "Pi fork ready." }],
-      api: "anthropic",
-      provider: "anthropic",
-      model: "test-model",
-      usage: {
-        input: 1,
-        output: 1,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 2,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-      },
-      stopReason: "stop",
-      timestamp: Date.now(),
-    });
-
-    const preAbortedPi = new AbortController();
-    preAbortedPi.abort();
-    let preAbortedPiRejected = false;
-    try {
-      await client.fork(
-        {
-          sourceSessionFile: piSource.getSessionFile(),
-          entryId: null,
-          sessionWorkspaceDir: join(work, "pre-aborted-pi-workspace"),
-          candidateRoot: join(work, "pre-aborted-pi-candidate"),
-          candidateSessionDir: join(work, "pre-aborted-pi-sessions"),
-        },
-        { signal: preAbortedPi.signal },
-      );
-    } catch (error: any) {
-      preAbortedPiRejected = error instanceof Error && error.name === "AbortError";
-    }
-    expect(preAbortedPiRejected).toBe(true);
-
-    const piFork = await client.fork({
-      sourceSessionFile: piSource.getSessionFile(),
-      entryId: null,
-      sessionWorkspaceDir: join(work, "pi-workspace"),
-      candidateRoot: join(work, "pi-candidate"),
-      candidateSessionDir: join(work, "pi-candidate-sessions"),
-    });
-    expect(piFork.ok && piFork.entryCount === 2 && !!piFork.sessionFile).toBe(true);
-  });
-
   it("discards empty core sessions via native identity-bound cleanup", async () => {
     const emptyCore = destinationSession("empty-core-project", "empty-core");
     const emptyCoreOpened = SessionWriter.open(emptyCore, 0);

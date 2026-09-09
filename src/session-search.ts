@@ -84,7 +84,7 @@ export class SessionSearch {
     }
     let hits;
     try {
-      hits = await window.pi.searchSessions(query);
+      hits = await window.termina.searchSessions(query);
     } catch (err) {
       if (seq !== this.searchSeq || (this.input?.value ?? "") !== query) return;
       if (list) {

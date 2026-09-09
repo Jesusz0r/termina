@@ -68,7 +68,6 @@ export type SidecarEvent =
       sessionId?: string | null;
       entryId?: string | null;
       parentEntryId?: string | null;
-      trusted?: boolean;
       model?: string | null;
       thinkingLevel?: string | null;
     })
@@ -439,7 +438,6 @@ function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>): Side
         sessionId: optionalStringOrNull(rec.sessionId),
         entryId: optionalStringOrNull(rec.entryId),
         parentEntryId: optionalStringOrNull(rec.parentEntryId),
-        trusted: optionalBoolean(rec.trusted),
         model: optionalStringOrNull(rec.model),
         thinkingLevel: optionalStringOrNull(rec.thinkingLevel),
       };

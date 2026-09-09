@@ -150,7 +150,6 @@ describe("Session Fork Teardown and Retention Probes", () => {
         rootIdentity,
         rootBinding: { path: rootPath, ...rootIdentity },
         templateDir: join(dir, "template"),
-        sessionWorkspaceDir: join(dir, "session-workspace"),
         sourceRunId: "run-test",
         sourceGitDir: dir,
         primaryRoot: dir,

@@ -1,8 +1,8 @@
-import type { PiBridge } from "../shared/types";
+import type { TerminaBridge } from "../shared/types";
 
 declare global {
   interface Window {
-    pi: PiBridge;
+    termina: TerminaBridge;
   }
 }
 

@@ -16,30 +16,6 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 /** Bound retained operations so a slow worker cannot retain an unbounded chain of closures. */
 const SESSION_WORKER_QUEUE_HIGH_WATER = 128;
 
-export interface SessionForkOpts {
-  sourceSessionFile: string;
-  /** Identity published with a finalized Pi branch; required for replay. */
-  sourceSessionIdentity?: PiSessionCopyIdentity;
-  /** The entry to branch at. Null forks the whole leaf (promotion). */
-  entryId: string | null;
-  sessionWorkspaceDir: string;
-  candidateRoot: string;
-  candidateSessionDir: string;
-  relocationNote?: string;
-  contextText?: string;
-  /** Focused smaller bound for Pi copy admission tests. */
-  testOnlyMaxBytes?: number;
-  testOnlyMaxCount?: number;
-  testOnlyMaxWorkBytes?: number;
-}
-
-export interface SessionForkResult {
-  ok: boolean;
-  sessionFile: string | null;
-  entryCount: number;
-  leafId: string | null;
-}
-
 export interface CoreSessionForkOpts {
   sourceSessionFile: string;
   destinationSessionFile: string;
@@ -50,47 +26,17 @@ export interface CoreSessionForkOpts {
   retentionLease?: SessionRetentionLock;
 }
 
-export interface PiSessionCopyOpts {
-  sourceSessionFile: string;
-  sessionWorkspaceDir: string;
-  /** Optional direct child destination; the worker generates a unique one by default. */
-  destinationSessionFile?: string;
-  /** Focused smaller bounds; unavailable outside TERMINA_CORE_TEST. */
-  testOnlyMaxBytes?: number;
-  testOnlyMaxCount?: number;
-  testOnlyMaxWorkBytes?: number;
-}
-
-export interface PiSessionDiscardOpts {
-  sessionFile: string;
-  sessionWorkspaceDir: string;
-  identity: PiSessionCopyIdentity;
-}
-
 export interface CoreSessionDiscardOpts {
   sessionFile: string;
 }
-
-export type PiSessionCopyResult =
-  | { ok: true; sessionFile: string; bytes: number; workBytes: number; identity: PiSessionCopyIdentity }
-  | { ok: false; error: string; path?: string; commit?: "uncertain" };
 
 export type CoreSessionForkResult =
   | { ok: true; sessionFile: string; kept: number }
   | { ok: false; sessionFile: string; commit: "uncertain"; error: string };
 
-export type PiSessionDiscardResult =
-  | { ok: true; removed: boolean }
-  | { ok: false; error: string };
-
 export type CoreSessionDiscardResult =
   | { ok: true; removed: boolean }
   | { ok: false; error: string };
-
-export interface SessionForkRequest extends SessionForkOpts {
-  op: "fork";
-  requestId: string;
-}
 
 export interface CoreSessionForkRequest extends CoreSessionForkOpts {
   op: "fork-core";

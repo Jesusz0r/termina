@@ -456,7 +456,6 @@ export class WorldlineManager {
       steering: r.steering,
       overlap: r.overlap,
       unownedEdits: r.unownedEdits,
-      trusted: r.trusted,
       model: r.model,
       thinkingLevel: r.thinkingLevel,
       startedAt: r.startedAt,
@@ -796,7 +795,6 @@ export class WorldlineManager {
       rootIdentity,
       rootBinding,
       templateDir: join(dir, "template"),
-      sessionWorkspaceDir: join(dir, "session-workspace"),
       markerLeaf,
       manifestLeaf,
       sourceRunId: cmp.sourceRunId,
@@ -866,59 +864,33 @@ export class WorldlineManager {
       await store.applyState({ stateId: wHead.commit, targetDir: nA.dir, preserveTopLevel: RUNTIME_ALLOWLIST, boundRootIdentity: promotionIdentityOf(nA.rootBinding) });
       // A's session continues from the candidate leaf; B's session branches
       // at the pre-task anchor (the original run's prompt parent).
-      if (ncmp.engine === "core") {
-        if (!cand.sessionFile) throw new Error("could not fork the reference session");
-        const destA = coreSessionFile(nA.sessionDir, "session");
-        const destB = coreSessionFile(nB.sessionDir, "session");
-        const forkA = await this.forkCoreSession(ncmp, {
-          sourceSessionFile: cand.sessionFile,
-          destinationSessionFile: destA,
-        });
-        if (!forkA.ok) {
-          const uncertain = await this.recordUncertainSession(ncmp, forkA.sessionFile, forkA.error);
-          throw new Error(`could not fork the reference session: ${uncertain}`);
-        }
-        this.ensureComparisonLive(ncmp);
-        const throughB = parseStorageSeq(run.promptParentEntryId) ?? 0;
-        const sourceB = run.sessionBranchFile ?? run.sessionFile ?? cand.sessionFile;
-        const forkB = await this.forkCoreSession(ncmp, {
-          sourceSessionFile: sourceB,
-          destinationSessionFile: destB,
-          throughSeq: throughB,
-        });
-        if (!forkB.ok) {
-          const uncertain = await this.recordUncertainSession(ncmp, forkB.sessionFile, forkB.error);
-          throw new Error(`could not fork the challenger session: ${uncertain}`);
-        }
-        this.ensureComparisonLive(ncmp);
-        nA.sessionFile = destA;
-        nB.sessionFile = destB;
-        await this.copyCoreResources(ncmp);
-      } else {
-        const forkA = await this.forkSession(ncmp, {
-          sourceSessionFile: cand.sessionFile,
-          entryId: null,
-          sessionWorkspaceDir: ncmp.sessionWorkspaceDir,
-          candidateRoot: nA.dir,
-          candidateSessionDir: nA.sessionDir,
-          relocationNote: `The source project lived at ${this.deps.primaryRoot}. In this candidate, that path maps to ${nA.dir}.`,
-        });
-        if (!forkA.ok || !forkA.sessionFile) throw new Error("could not fork the reference session");
-        const forkB = await this.forkSession(ncmp, {
-          sourceSessionFile: run.sessionBranchFile ?? run.sessionFile ?? cand.sessionFile,
-          ...(run.sessionBranchFile && run.sessionBranchIdentity ? { sourceSessionIdentity: run.sessionBranchIdentity } : {}),
-          entryId: run.promptParentEntryId,
-          sessionWorkspaceDir: ncmp.sessionWorkspaceDir,
-          candidateRoot: nB.dir,
-          candidateSessionDir: nB.sessionDir,
-          contextText: payload.context || undefined,
-        });
-        if (!forkB.ok || !forkB.sessionFile) throw new Error("could not fork the challenger session");
-        this.ensureComparisonLive(ncmp);
-        nA.sessionFile = forkA.sessionFile;
-        nB.sessionFile = forkB.sessionFile;
-        await this.copyPiResources(ncmp);
+      if (!cand.sessionFile) throw new Error("could not fork the reference session");
+      const destA = coreSessionFile(nA.sessionDir, "session");
+      const destB = coreSessionFile(nB.sessionDir, "session");
+      const forkA = await this.forkCoreSession(ncmp, {
+        sourceSessionFile: cand.sessionFile,
+        destinationSessionFile: destA,
+      });
+      if (!forkA.ok) {
+        const uncertain = await this.recordUncertainSession(ncmp, forkA.sessionFile, forkA.error);
+        throw new Error(`could not fork the reference session: ${uncertain}`);
       }
+      this.ensureComparisonLive(ncmp);
+      const throughB = parseStorageSeq(run.promptParentEntryId) ?? 0;
+      const sourceB = run.sessionBranchFile ?? run.sessionFile ?? cand.sessionFile;
+      const forkB = await this.forkCoreSession(ncmp, {
+        sourceSessionFile: sourceB,
+        destinationSessionFile: destB,
+        throughSeq: throughB,
+      });
+      if (!forkB.ok) {
+        const uncertain = await this.recordUncertainSession(ncmp, forkB.sessionFile, forkB.error);
+        throw new Error(`could not fork the challenger session: ${uncertain}`);
+      }
+      this.ensureComparisonLive(ncmp);
+      nA.sessionFile = destA;
+      nB.sessionFile = destB;
+      await this.copyCoreResources(ncmp);
       this.ensureComparisonLive(ncmp);
       // B replays the original task automatically (structured control).
       await this.writeControl(nA, { opId: randomUUID(), action: "none" });
@@ -1470,7 +1442,6 @@ export class WorldlineManager {
       rootIdentity,
       rootBinding,
       templateDir: join(dir, "template"),
-      sessionWorkspaceDir: join(dir, "session-workspace"),
       markerLeaf,
       manifestLeaf,
       sourceRunId: run.id,
@@ -1478,10 +1449,9 @@ export class WorldlineManager {
       primaryRoot: this.deps.primaryRoot,
       baseCommit: null,
       baseStateId: run.startStateId,
-      inheritTrust: run.trusted === true && run.trustHashes !== null,
       model: run.model,
       thinkingLevel: run.thinkingLevel,
-      engine: runEngine(run),
+      engine: "core",
       expectedCandidates: 2,
       uncertainSessionArtifacts: [],
       manifestWriteFailed: false,
@@ -1603,38 +1573,10 @@ export class WorldlineManager {
     await store.applyState({ stateId: run.settledStateId!, targetDir: a.dir, preserveTopLevel: RUNTIME_ALLOWLIST, boundRootIdentity: promotionIdentityOf(a.rootBinding) });
   }
 
-  /** Fork both sessions. Pi uses SessionManager; core materializes bundles. */
+  /** Fork both session bundles through the session worker. */
   private async forkSessions(cmp: ComparisonState, run: RunRecord): Promise<void> {
-    if (cmp.engine === "core") {
-      await this.forkCoreSessions(cmp, run);
-      return;
-    }
-    const payload = await this.readPromptPayload(run);
-    const a = cmp.candidates.get("A")!;
-    const b = cmp.candidates.get("B")!;
-    const forkA = await this.forkSession(cmp, {
-      sourceSessionFile: run.sessionBranchFile!,
-      sourceSessionIdentity: run.sessionBranchIdentity!,
-      entryId: run.settledEntryId,
-      sessionWorkspaceDir: cmp.sessionWorkspaceDir,
-      candidateRoot: a.dir,
-      candidateSessionDir: a.sessionDir,
-      relocationNote: `The source project lived at ${this.deps.primaryRoot}. In this candidate, that path maps to ${a.dir}.`,
-    });
-    if (!forkA.ok || !forkA.sessionFile) throw new Error("could not fork the reference session");
-    const forkB = await this.forkSession(cmp, {
-      sourceSessionFile: run.sessionBranchFile!,
-      sourceSessionIdentity: run.sessionBranchIdentity!,
-      entryId: run.promptParentEntryId,
-      sessionWorkspaceDir: cmp.sessionWorkspaceDir,
-      candidateRoot: b.dir,
-      candidateSessionDir: b.sessionDir,
-      contextText: payload.context || undefined,
-    });
-    if (!forkB.ok || !forkB.sessionFile) throw new Error("could not fork the alternative session");
-    this.ensureComparisonLive(cmp);
-    a.sessionFile = forkA.sessionFile;
-    b.sessionFile = forkB.sessionFile;
+    if (cmp.engine !== "core") throw new Error("pi candidates are removed; core is the only engine");
+    await this.forkCoreSessions(cmp, run);
   }
 
   private async forkCoreSessions(cmp: ComparisonState, run: RunRecord): Promise<void> {
@@ -2606,18 +2548,6 @@ export class WorldlineManager {
         }
         this.ensureComparisonLive(comparison);
         journal.stagedSession = staged;
-      } else {
-        const fork = await this.forkSession(comparison, {
-          sourceSessionFile: target.sessionFile,
-          entryId: null,
-          sessionWorkspaceDir: sessionDir,
-          candidateRoot: this.deps.primaryRoot,
-          candidateSessionDir: sessionDir,
-          relocationNote: `The candidate project lived at ${target.root}. In this promoted session, that path maps to ${this.deps.primaryRoot}.`,
-        });
-        if (!fork.sessionFile) throw new Error("the promoted session fork produced no file");
-        this.ensureComparisonLive(comparison);
-        journal.stagedSession = fork.sessionFile;
       }
       await writePromotionJournal(journalBinding!, journal);
 
@@ -2839,7 +2769,6 @@ export class WorldlineManager {
       sessionFile,
       sourceRunId: rootRun.id,
       baseStateId: rootRun.startStateId,
-      inheritTrust: rootRun.trusted === true,
     };
     if (this.liveWorldlineCount() + 1 > 3) return { ok: false, error: "the live worldline budget is exhausted" };
     const store = await this.deps.getStore();
@@ -2877,7 +2806,6 @@ export class WorldlineManager {
       rootIdentity,
       rootBinding,
       templateDir: join(dir, "template"),
-      sessionWorkspaceDir: join(dir, "session-workspace"),
       markerLeaf,
       manifestLeaf,
       sourceRunId: opts.sourceRunId,
@@ -2950,19 +2878,6 @@ export class WorldlineManager {
         this.ensureComparisonLive(cmp);
         cand.sessionFile = dest;
         await this.copyCoreResources(cmp);
-      } else {
-        const fork = await this.forkSession(cmp, {
-          sourceSessionFile: opts.sessionFile,
-          entryId: opts.entryId,
-          sessionWorkspaceDir: cmp.sessionWorkspaceDir,
-          candidateRoot: cand.dir,
-          candidateSessionDir: cand.sessionDir,
-          relocationNote: `The source project lived at ${this.deps.primaryRoot}. In this candidate, that path maps to ${cand.dir}.`,
-        });
-        if (!fork.ok || !fork.sessionFile) throw new Error("could not fork the moment session");
-        this.ensureComparisonLive(cmp);
-        cand.sessionFile = fork.sessionFile;
-        await this.copyPiResources(cmp);
       }
       this.ensureComparisonLive(cmp);
       // A moment candidate starts with no prompt: the user continues it.
@@ -3764,7 +3679,6 @@ export class WorldlineManager {
       id: manifest.id,
       dir,
       templateDir: join(dir, "template"),
-      sessionWorkspaceDir: join(dir, "session-workspace"),
       sourceRunId: manifest.sourceRunId,
       sourceGitDir: this.deps.primaryRoot,
       primaryRoot: this.deps.primaryRoot,

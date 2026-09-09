@@ -349,7 +349,6 @@ export interface RunSummary {
   steering: boolean;
   overlap: boolean;
   unownedEdits: number;
-  trusted: boolean | null;
   /** The selected model and thinking level of the run. */
   model: string | null;
   thinkingLevel: string | null;
@@ -513,7 +512,7 @@ export type TerminalPasteResult =
   | { ok: true; kind: "image"; count: number; queued: boolean }
   | { ok: false; error: string };
 
-export interface PiBridge {
+export interface TerminaBridge {
   // push events (main → renderer)
   onPtyData(cb: (e: PtyDataPayload) => void): () => void;
   onPtyExit(cb: (e: PtyExitPayload) => void): () => void;

@@ -22,8 +22,8 @@ test.describe("Terminal Clipboard & Selection Integration", () => {
 
     await page.waitForTimeout(300);
 
-    // Verify clipboard content via window.pi.readClipboard()
-    const clipboardContent = await page.evaluate(() => (window as any).pi.readClipboard());
+    // Verify clipboard content via window.termina.readClipboard()
+    const clipboardContent = await page.evaluate(() => (window as any).termina.readClipboard());
     expect(clipboardContent).toContain(marker);
   });
 });

@@ -60,7 +60,6 @@ describe("Worldline Runtime Flow Suite", () => {
       id,
       dir: join(rootPath, id),
       templateDir: join(rootPath, `${id}-template`),
-      sessionWorkspaceDir: join(rootPath, `${id}-sessions`),
       sourceRunId: `run-${id}`,
       sourceGitDir: rootPath,
       primaryRoot: rootPath,

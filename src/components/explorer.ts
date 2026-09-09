@@ -154,7 +154,7 @@ export class Explorer {
       empty.type = "button";
       empty.className = "explorer-empty";
       empty.textContent = "Open folder";
-      empty.addEventListener("click", () => void window.pi.projectOpen());
+      empty.addEventListener("click", () => void window.termina.projectOpen());
       this.treeEl.appendChild(empty);
       return;
     }
@@ -284,7 +284,7 @@ export class Explorer {
     if (!projectId) return;
     let res: { entries: ExplorerEntry[]; error?: string; truncated?: boolean };
     try {
-      res = await window.pi.listDir(projectId, entry.path);
+      res = await window.termina.listDir(projectId, entry.path);
     } catch (err) {
       if (!state.expanded || seq !== state.loadSeq || this.projectCwd !== cwd) return;
       state.loaded = false;
@@ -512,7 +512,7 @@ export class Explorer {
   private async moveDragged(src: ExplorerEntry, targetDirRel: string): Promise<boolean> {
     const projectId = this.projectId;
     if (!projectId) return false;
-    const res = await window.pi.pasteEntry(projectId, targetDirRel, src.relPath, true);
+    const res = await window.termina.pasteEntry(projectId, targetDirRel, src.relPath, true);
     if (!res.ok) {
       toast(res.error ?? "move failed", "error");
       return false;
@@ -593,7 +593,7 @@ export class Explorer {
     const clip = this.clipboardEntry;
     const projectId = this.projectId;
     if (!clip || !projectId) return;
-    const res = await window.pi.pasteEntry(projectId, targetDirRel, clip.relPath, clip.cut);
+    const res = await window.termina.pasteEntry(projectId, targetDirRel, clip.relPath, clip.cut);
     if (!res.ok) {
       toast(res.error ?? "paste failed", "error");
       return;
@@ -617,7 +617,7 @@ export class Explorer {
     const name = await showInput(kind === "file" ? "New file" : "New folder", "name", "");
     if (name.cancelled || !name.value?.trim()) return;
     const rel = parentRel ? `${parentRel}/${name.value.trim()}` : name.value.trim();
-    this.toastIfFailed(await window.pi.createEntry(projectId, rel, kind));
+    this.toastIfFailed(await window.termina.createEntry(projectId, rel, kind));
     await this.refresh();
   }
 
@@ -626,7 +626,7 @@ export class Explorer {
     if (!projectId) return;
     const res = await showInput("Rename", "new name", entry.name);
     if (res.cancelled || !res.value?.trim() || res.value.trim() === entry.name) return;
-    this.toastIfFailed(await window.pi.renameEntry(projectId, entry.relPath, res.value.trim()));
+    this.toastIfFailed(await window.termina.renameEntry(projectId, entry.relPath, res.value.trim()));
     // Renames produce watcher delete+create events; refresh covers it.
     await this.refresh();
   }
@@ -636,7 +636,7 @@ export class Explorer {
     if (!projectId) return;
     const ok = await showConfirm("Delete", `Delete "${entry.relPath || entry.name}"?`);
     if (!ok.confirmed) return;
-    this.toastIfFailed(await window.pi.deleteEntry(projectId, entry.relPath));
+    this.toastIfFailed(await window.termina.deleteEntry(projectId, entry.relPath));
     // The watcher fires file:deleted, which closes any open editor tab.
     await this.refresh();
   }

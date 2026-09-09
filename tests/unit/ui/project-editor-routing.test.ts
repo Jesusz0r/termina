@@ -10,7 +10,7 @@ describe("multi-project editor event routing", () => {
     expect(renderer).toContain("applySharedEditorHooks(editorMgr, view.id)");
     expect(renderer).toContain("if (projectId !== null && activeProjectId !== projectId) return;");
 
-    const handlerStart = renderer.indexOf("window.pi.onToolTarget((p) => {");
+    const handlerStart = renderer.indexOf("window.termina.onToolTarget((p) => {");
     const handlerEnd = renderer.indexOf("const lastChangePush", handlerStart);
     expect(handlerStart).toBeGreaterThanOrEqual(0);
     expect(handlerEnd).toBeGreaterThan(handlerStart);
@@ -20,7 +20,7 @@ describe("multi-project editor event routing", () => {
   });
 
   it("queues background agent auto-opens and replays them on project activation", () => {
-    const handlerStart = renderer.indexOf("window.pi.onToolTarget((p) => {");
+    const handlerStart = renderer.indexOf("window.termina.onToolTarget((p) => {");
     const handlerEnd = renderer.indexOf("const lastChangePush", handlerStart);
     const handler = renderer.slice(handlerStart, handlerEnd);
     expect(handler).toContain("pendingToolTargets");

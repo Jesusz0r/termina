@@ -197,7 +197,6 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
       id: "comparison-reopen",
       dir: join(root, "comparison"),
       templateDir: join(root, "template"),
-      sessionWorkspaceDir: join(root, "session-workspace"),
       sourceRunId: "run-reopen",
       sourceGitDir: join(root, "worlds"),
       primaryRoot: join(root, "worlds"),
