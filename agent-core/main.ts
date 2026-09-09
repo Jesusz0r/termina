@@ -128,6 +128,7 @@ import {
   cacheRequestDiagnostics,
   classifyCacheMiss,
   createCapabilityCache,
+  hashCacheDiagnostic,
   queryCapability,
   recordCapability,
   type CapabilityCacheRecord,
@@ -312,6 +313,8 @@ const EDIT_MISS_LINE_CHARS = 240;
 const READ_SCAN_MS = 2_000;
 const TOOL_CONCURRENCY = 4;
 const NOISE_FLOOR_TOKENS = 1_024;
+/** Consecutive identical tool turns (same calls, same results) before the run settles stalled. */
+export const STALL_TURNS = 3;
 /** Compact an expensive miss before the request reaches the context limit. */
 const CACHE_MISS_COMPACT_TOKENS = 100_000;
 const CACHE_MISS_COMPACT_SHARE = 0.5;
@@ -6877,6 +6880,40 @@ async function callModel(
 
 let previousCacheAttempt: CacheAttemptSnapshot | null = null;
 
+/** Consecutive identical tool-turn evidence for stall detection. */
+export interface StallTracker {
+  fingerprint: string | null;
+  repeats: number;
+}
+
+export function emptyStallTracker(): StallTracker {
+  return { fingerprint: null, repeats: 0 };
+}
+
+let stallTracker: StallTracker = emptyStallTracker();
+
+/**
+ * Fingerprint one model turn's tool calls plus their results. Tool-call ids
+ * differ every turn, so only names, canonical inputs, and result payloads
+ * participate. Null when the turn made no tool calls: a text-only turn is
+ * different behavior, not a repetition.
+ */
+export function stallTurnFingerprint(
+  calls: ReadonlyArray<{ name: string; input: unknown; result: unknown }>,
+): string | null {
+  if (calls.length === 0) return null;
+  return hashCacheDiagnostic(calls.map((call) => ({ name: call.name, input: call.input, result: call.result })));
+}
+
+/** Fold one turn fingerprint into the tracker. Any change (or text-only turn) resets the count. */
+export function trackStallTurn(prev: StallTracker, fingerprint: string | null): StallTracker {
+  if (fingerprint === null) return emptyStallTracker();
+  if (prev.fingerprint !== null && prev.fingerprint === fingerprint) {
+    return { fingerprint, repeats: prev.repeats + 1 };
+  }
+  return { fingerprint, repeats: 1 };
+}
+
 function resetUsageContinuity(): void {
   previousCacheAttempt = null;
   lastBilledTokens = null;
@@ -7549,6 +7586,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   let pauseTurnContinuations = 0;
   let lastPlanText = "";
   let cacheCostCompactionAttempted = false;
+  stallTracker = emptyStallTracker();
   codexTurnState = "";
   try {
     while (true) {
@@ -7798,8 +7836,17 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         return b;
       });
       pushMessage("user", resultBlocks);
+      stallTracker = trackStallTurn(
+        stallTracker,
+        stallTurnFingerprint(uses.map((use, index) => ({
+          name: use.name,
+          input: use.input,
+          result: outcomes[index]?.result ?? null,
+        }))),
+      );
+      const stalled = stallTracker.repeats >= STALL_TURNS;
       await writeMainTrace({
-        status: "ok",
+        status: stalled ? "stalled" : "ok",
         seqBefore,
         toolNames: [...serverNames, ...uses.map((u) => u.name)],
         usage: result.usage,
@@ -7810,6 +7857,12 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         attempt: result.traceAttempt,
         toolOutcomes: outcomes.map((outcome, index) => toolOutcomeTraceInput(uses[index]!, outcome)),
       });
+      if (stalled) {
+        taskFailure = `stalled: same tool call ${STALL_TURNS} times with unchanged results (${uses.map((u) => u.name).join(", ")})`;
+        taskOutcomeStatus = "failure";
+        out(`\n(${taskFailure})\n`);
+        break;
+      }
       out("\n");
     }
   } catch (err) {

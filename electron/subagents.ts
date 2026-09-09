@@ -46,6 +46,8 @@ export const SUBAGENT_STDOUT_CAP_BYTES = 256 * 1024;
 export const SUBAGENT_STDERR_CAP_BYTES = 8 * 1024;
 /** Result text carried in the mailbox note; the file holds the full text. */
 export const SUBAGENT_NOTE_RESULT_CHARS = 4000;
+/** Task text carried in the mailbox note; the file holds the full task. */
+export const SUBAGENT_NOTE_TASK_CHARS = 2000;
 
 export interface SubagentHostSinks {
   /** Owning terminal's events dir; null when the terminal is gone. */
@@ -436,7 +438,7 @@ export class SubagentHost {
         env,
       });
     } catch (err) {
-      await this.resolveCrash(run, `spawn failed: ${err instanceof Error ? err.message : String(err)}`);
+      await this.resolveCrash(run, `spawn failed: ${err instanceof Error ? err.message : String(err)}`, true);
       return;
     }
     // The task file was consumed at spawn; attempts rebuild from the run.
@@ -492,7 +494,7 @@ export class SubagentHost {
         return;
       }
       if (run.stop?.kind === "timeout") {
-        await this.resolveCrash(run, "wall timeout exceeded");
+        await this.resolveCrash(run, "wall timeout exceeded", true);
         return;
       }
       await this.finishFailed(
@@ -512,15 +514,26 @@ export class SubagentHost {
       return;
     }
     if (run.stop?.kind === "timeout" || signal !== null) {
-      await this.resolveCrash(run, run.stop?.kind === "timeout" ? "wall timeout exceeded" : `crashed (${signal ?? "signal"})`);
+      await this.resolveCrash(run, run.stop?.kind === "timeout" ? "wall timeout exceeded" : `crashed (${signal ?? "signal"})`, true);
       return;
     }
-    await this.resolveCrash(run, `exit ${code ?? "?"}${run.stderr ? `: ${tailLines(run.stderr, 3)}` : ""}`);
+    const booted = this.streams.get(run.childTid)?.booted ?? false;
+    await this.resolveCrash(run, `exit ${code ?? "?"}${run.stderr ? `: ${tailLines(run.stderr, 3)}` : ""}`, booted);
   }
 
-  /** Crashes (and timeouts) retry with backoff; clean exits never retry. */
-  private async resolveCrash(run: HostRun, reason: string): Promise<void> {
+  /**
+   * Crashes (and timeouts) retry with backoff; clean exits never retry. A
+   * child that exits fast without ever booting (no agent_start) fails
+   * deterministically — same task file, same env — so it settles failed
+   * immediately instead of burning attempts on identical boots. Timeouts,
+   * signal crashes, and launch failures still retry: those may be transient.
+   */
+  private async resolveCrash(run: HostRun, reason: string, started: boolean): Promise<void> {
     if (run.settled) return;
+    if (!started) {
+      await this.finishFailed(run.parentTerminalId, run.runId, run.task, reason);
+      return;
+    }
     if (run.attempts < this.maxAttempts) {
       const wait = this.backoffMs[Math.min(run.attempts - 1, this.backoffMs.length - 1)] ?? 1000;
       await this.sleep(wait);
@@ -657,7 +670,15 @@ export class SubagentHost {
         ? `## Subagent ${runId} killed`
         : `## Subagent ${runId} failed`;
     const lines = [headline, ""];
-    if (task) lines.push(`Task: ${task.task.slice(0, 200)}`, "");
+    if (task) {
+      // Quote the full brief up to a bounded budget. A hard cut once made a
+      // complete brief read as a truncated spawn ("...cd apps/backend\n3"),
+      // and the parent diagnosed the spawn instead of the failure.
+      const brief = task.task.length > SUBAGENT_NOTE_TASK_CHARS
+        ? `${task.task.slice(0, SUBAGENT_NOTE_TASK_CHARS)}\n…[truncated]`
+        : task.task;
+      lines.push(`Task: ${brief}`, "");
+    }
     if (outcome === "settled") {
       const text = result.length > SUBAGENT_NOTE_RESULT_CHARS ? `${result.slice(0, SUBAGENT_NOTE_RESULT_CHARS)}\n…[truncated]` : result;
       lines.push(text);

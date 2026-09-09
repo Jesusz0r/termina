@@ -200,13 +200,13 @@ describe("SubagentHost", () => {
     s.writeTask();
     await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
     expect(s.procs.length).toBe(1);
-    // Each crashed attempt must exit before the next launches.
-    s.procs[0]!.err("boom\n");
-    s.procs[0]!.exit(1);
-    await until(() => s.procs.length === 2, 5000);
-    s.procs[1]!.exit(1);
-    await until(() => s.procs.length === 3, 5000);
-    s.procs[2]!.exit(1);
+    // Each crashed attempt must boot (agent_start) then exit before the next launches.
+    for (let i = 0; i < 3; i++) {
+      s.host.noteChildEvent("sub-term-7-bg-1", "agent_start");
+      s.procs[i]!.err("boom\n");
+      s.procs[i]!.exit(1);
+      if (i < 2) await until(() => s.procs.length === i + 2, 5000);
+    }
     await until(() => existsSync(s.resultFile));
     const body = s.readResult();
     expect(body.outcome).toBe("failed");
@@ -446,5 +446,52 @@ describe("SubagentHost", () => {
     await until(() => s.host.activeCount() === 1);
     expect(existsSync(join(s.dir, "subagent-term-9-bg-1.result.json"))).toBe(false);
     expect(s.host.killOwner("term-unknown", "x")).toBe(0);
+  });
+
+  it("settles a never-booted child without retrying", async () => {
+    const s = setup();
+    s.writeTask();
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    // Exit before agent_start: same task+env would fail identically, so no retry.
+    s.procs[0]!.exit(1);
+    await until(() => existsSync(s.resultFile));
+    expect(s.readResult().outcome).toBe("failed");
+    expect(s.procs.length).toBe(1);
+  });
+
+  it("retries a child that crashes after booting", async () => {
+    const s = setup();
+    s.writeTask();
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    s.host.noteChildEvent("sub-term-7-bg-1", "agent_start");
+    s.procs[0]!.exit(1);
+    await until(() => s.procs.length === 2, 5000);
+    // Second attempt never boots: settles failed without a third launch.
+    s.procs[1]!.exit(1);
+    await until(() => existsSync(s.resultFile));
+    expect(s.readResult().outcome).toBe("failed");
+    expect(s.procs.length).toBe(2);
+  });
+
+  it("quotes the full task in the mailbox failure note", async () => {
+    const s = setup();
+    const tail = "node_modules/.bin/vitest run src/platform/database/x.integration.test.ts --reporter=dot";
+    s.writeTask(validTask({ task: `${"step text. ".repeat(30)}\n3. ${tail}` }));
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    s.procs[0]!.exit(1);
+    await until(() => existsSync(s.resultFile));
+    expect(s.notes.length).toBe(1);
+    expect(s.notes[0]!.note).toContain("## Subagent bg-1 failed");
+    expect(s.notes[0]!.note).toContain(tail);
+    expect(s.notes[0]!.note).not.toContain("…[truncated]");
+  });
+
+  it("marks an over-budget task quote as truncated", async () => {
+    const s = setup();
+    s.writeTask(validTask({ task: `x${"y".repeat(3000)}` }));
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    s.procs[0]!.exit(1);
+    await until(() => existsSync(s.resultFile));
+    expect(s.notes[0]!.note).toContain("…[truncated]");
   });
 });
