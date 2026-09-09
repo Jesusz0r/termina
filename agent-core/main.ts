@@ -129,9 +129,12 @@ import {
   cacheRequestDiagnostics,
   classifyCacheMiss,
   createCapabilityCache,
+  emptyCacheFlipTally,
   hashCacheDiagnostic,
   queryCapability,
   recordCapability,
+  tallyCacheFlip,
+  type CacheFlipTally,
   type CapabilityCacheRecord,
   type CacheAttemptSnapshot,
   type CachePolicyDiagnostics,
@@ -2559,6 +2562,10 @@ const SIDECAR_MAX_BACKPRESSURE_POLLS = 80;
 const SIDECAR_APPEND_RETRY_MS = 25;
 const SIDECAR_MAX_APPEND_RETRIES = 80;
 const SIDECAR_MAX_PENDING_EVENTS = 256;
+/** Idempotency look-behind for sidecar appends. Dup detection only matters
+ * at EOF (see appendDurable); the window beyond one payload length exists
+ * solely for interleaved foreign bytes. */
+const SIDECAR_DUP_WINDOW_BYTES = 64 * 1024;
 function syncFile(path: string): void {
   const fd = openSync(path, "r");
   try { fsyncSync(fd); } finally { closeSync(fd); }
@@ -2639,7 +2646,12 @@ function appendDurable(path: string, line: string): void {
   const fd = openSync(path, "a+", 0o600);
   try {
     const size = fstatSync(fd).size;
-    const tailSize = Math.min(size, SIDECAR_MAX_BYTES + payload.length);
+    // The writer is a single FIFO, so a retried line is always at (or
+    // partially at) EOF: one payload length covers the full-duplicate check
+    // and the longest recoverable prefix. The extra window only absorbs
+    // interleaved foreign bytes; a full-file scan would re-read megabytes
+    // per tool event for no additional safety.
+    const tailSize = Math.min(size, payload.length + SIDECAR_DUP_WINDOW_BYTES);
     const tail = Buffer.alloc(tailSize);
     if (tailSize > 0) readSync(fd, tail, 0, tailSize, size - tailSize);
     if (tail.indexOf(payload) < 0) {
@@ -6945,11 +6957,19 @@ export function trackStallTurn(prev: StallTracker, fingerprint: string | null): 
   return { fingerprint, repeats: 1 };
 }
 
+let cacheFlipTally: CacheFlipTally = emptyCacheFlipTally();
+
 function resetUsageContinuity(): void {
   previousCacheAttempt = null;
   lastBilledTokens = null;
   lastCacheReadShare = null;
   lastRequestFollowedRevision = false;
+  cacheFlipTally = emptyCacheFlipTally();
+}
+
+/** Aggregate prefix-flip rate for this run's cache continuity window. */
+export function cacheFlipStats(): CacheFlipTally {
+  return { ...cacheFlipTally };
 }
 
 function resetCacheContinuity(): void {
@@ -7276,6 +7296,9 @@ function reportUsage(
     current: snapshot,
     noiseFloorTokens: NOISE_FLOOR_TOKENS,
   });
+  if (previousCacheAttempt !== null) {
+    cacheFlipTally = tallyCacheFlip(cacheFlipTally, classification, cache.workingSetChanged);
+  }
   const traceCache: TraceCacheDiagnostics = {
     ...cache,
     missAttribution: {

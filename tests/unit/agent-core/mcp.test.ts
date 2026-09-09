@@ -164,6 +164,28 @@ describe("Agent Core MCP Protocol, Stability & Bounded Output", () => {
       ]);
     });
 
+    it("freezes merged client tool order across discovery mutation", () => {
+      const kernel = [
+        { name: "read_file", description: "read", input_schema: { type: "object" } },
+        { name: "edit", description: "edit", input_schema: { type: "object" } },
+      ];
+      const discovered = [
+        tool({ server: "b-server", original: "echo" }),
+        tool({ server: "a-server", original: "run" }),
+      ];
+      const defs = mcpToolDefs(selectMcpTools(discovered));
+      const merged = mcp.mergeClientTools(kernel, defs);
+      const names = merged.map((row: any) => row.name);
+      // Kernel tools first, MCP tail in canonical server order.
+      expect(names.slice(0, 2)).toEqual(["read_file", "edit"]);
+      expect(names.slice(2)).toEqual(["mcp_a-server_run", "mcp_b-server_echo"]);
+      const before = JSON.stringify(merged);
+      // Late discovery churn must not leak into the already-merged request tools.
+      discovered.reverse();
+      (discovered[0] as any).original = "late-mutation";
+      expect(JSON.stringify(mcp.mergeClientTools(kernel, defs))).toBe(before);
+    });
+
     it("snapshots tool records instead of retaining discovery objects", () => {
       const discovered = [tool({ server: "snapshot-server", original: "snapshot-tool" })];
       const selected = selectMcpTools(discovered);

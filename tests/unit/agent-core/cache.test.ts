@@ -269,6 +269,16 @@ describe("Agent Core Cache", () => {
       expect(fromText.serializedToolsBytes).toBe(Buffer.byteLength(text, "utf8"));
     });
 
+    it("tallies prefix flips and working-set changes per evaluation", () => {
+      let tally = cache.emptyCacheFlipTally();
+      tally = cache.tallyCacheFlip(tally, { primary: null, contributing: [] }, null);
+      expect(tally).toEqual({ evaluations: 1, prefixFlips: 0, workingSetChanges: 0 });
+      tally = cache.tallyCacheFlip(tally, { primary: "message-prefix-changed", contributing: ["working-set-changed"] }, true);
+      expect(tally).toEqual({ evaluations: 2, prefixFlips: 1, workingSetChanges: 1 });
+      tally = cache.tallyCacheFlip(tally, { primary: "backend-or-unknown", contributing: ["message-prefix-changed"] }, false);
+      expect(tally).toEqual({ evaluations: 3, prefixFlips: 2, workingSetChanges: 1 });
+    });
+
     it("classifies cache misses accurately across all causes", () => {
       const hit = cache.classifyCacheMiss({
         previous: prior,

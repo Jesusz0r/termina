@@ -603,3 +603,29 @@ export function classifyCacheMiss(input: {
     missingFields,
   };
 }
+
+/** Run-aggregated stable-prefix flip counts. Per-attempt attribution already
+ * records causes; the tally turns them into a rate for regression detection. */
+export interface CacheFlipTally {
+  evaluations: number;
+  prefixFlips: number;
+  workingSetChanges: number;
+}
+
+export function emptyCacheFlipTally(): CacheFlipTally {
+  return { evaluations: 0, prefixFlips: 0, workingSetChanges: 0 };
+}
+
+/** Fold one classified attempt into the tally. Pure; the caller owns reset. */
+export function tallyCacheFlip(
+  tally: CacheFlipTally,
+  classification: Pick<CacheMissClassification, "primary" | "contributing">,
+  workingSetChanged: boolean | null,
+): CacheFlipTally {
+  const causes = [classification.primary, ...classification.contributing];
+  return {
+    evaluations: tally.evaluations + 1,
+    prefixFlips: tally.prefixFlips + (causes.includes("message-prefix-changed") ? 1 : 0),
+    workingSetChanges: tally.workingSetChanges + (workingSetChanged === true ? 1 : 0),
+  };
+}
