@@ -558,8 +558,10 @@ export function classifyCacheMiss(input: {
   if (changed(input.previous.diagnostics, input.current.diagnostics, "toolsHash")) causes.push("tool-schema-changed");
   if (changed(input.previous.diagnostics, input.current.diagnostics, "stablePrefixHash")) causes.push("stable-prefix-changed");
   // `messagePrefixHash` may represent the entire growing transcript. Only
-  // compare the explicit reusable-prefix hash for cache continuity.
-  if (changed(input.previous.diagnostics, input.current.diagnostics, "reusablePrefixHash")) causes.push("stable-prefix-changed");
+  // compare the explicit reusable-prefix hash for cache continuity. A changed
+  // reusable prefix with a stable front is normal append-only tail growth,
+  // not a stable-prefix break.
+  if (changed(input.previous.diagnostics, input.current.diagnostics, "reusablePrefixHash")) causes.push("message-prefix-changed");
   if (
     input.current.diagnostics.workingSetChanged === true ||
     changed(input.previous.diagnostics, input.current.diagnostics, "workingSetHash")

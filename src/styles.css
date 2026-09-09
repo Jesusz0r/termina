@@ -473,7 +473,24 @@ body {
 
 #left-pane.minimized,
 #right-pane.minimized {
-  display: none;
+  flex: 0 0 34px;
+  width: 34px;
+  min-width: 34px;
+  max-width: 34px;
+  overflow: hidden;
+}
+
+#main-split.layout-terminal-top #left-pane.minimized,
+#main-split.layout-terminal-bottom #left-pane.minimized,
+#main-split.layout-terminal-top #right-pane.minimized,
+#main-split.layout-terminal-bottom #right-pane.minimized {
+  width: auto;
+  max-width: none;
+  min-width: 0;
+  height: 34px;
+  min-height: 34px;
+  max-height: 34px;
+  flex: 0 0 34px;
 }
 
 #main-split:has(#left-pane.minimized) #divider,
@@ -487,6 +504,56 @@ body {
   width: auto;
   min-width: 0;
   min-height: 0;
+}
+
+#left-pane.minimized #terminal-container,
+#left-pane.minimized #activity-tabbar,
+#left-pane.minimized #timeline-strip,
+#left-pane.minimized #plan-panel,
+#left-pane.minimized #worldline-panel,
+#left-pane.minimized #modified-panel,
+#left-pane.minimized #terminal-tabs-list,
+#left-pane.minimized #btn-new-terminal {
+  display: none;
+}
+
+#left-pane.minimized #terminal-tabs {
+  flex: 0 0 34px;
+  height: 34px;
+  min-height: 34px;
+  max-height: 34px;
+  justify-content: center;
+  padding: 0 3px;
+}
+
+#left-pane.minimized .pane-toggle {
+  margin-left: 0;
+}
+
+#right-pane.minimized #editor-tabs,
+#right-pane.minimized #editor-container,
+#right-pane.minimized #review-container,
+#right-pane.minimized .editor-tab,
+#right-pane.minimized .project-editor .editor-tabs,
+#right-pane.minimized .project-editor .editor-container,
+#right-pane.minimized .editor-empty {
+  display: none !important;
+}
+
+#right-pane.minimized .project-editor {
+  flex: 0 0 34px;
+  min-height: 34px;
+  max-height: 34px;
+}
+
+#right-pane.minimized .pane-chrome {
+  flex: 0 0 34px;
+  justify-content: center;
+  padding: 0 3px;
+}
+
+#right-pane.minimized .pane-toggle {
+  margin-left: 0;
 }
 
 /* --------------------------------------------------------------- terminal */

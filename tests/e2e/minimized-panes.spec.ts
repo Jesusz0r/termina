@@ -1,6 +1,6 @@
 import { test, expect } from "./fixtures.ts";
 
-test("minimized editor leaves no right rail; terminal owns full width", async ({ page }) => {
+test("minimized editor keeps a right rail; toggle restores it", async ({ page }) => {
   await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
   // Ensure the editor ends minimized regardless of boot state.
   const wasMinimized = await page.locator("#right-pane.minimized").count();
@@ -11,17 +11,28 @@ test("minimized editor leaves no right rail; terminal owns full width", async ({
   const probe = await page.evaluate(() => {
     const w = window.innerWidth;
     const h = window.innerHeight;
-    const el = document.elementFromPoint(w - 4, Math.floor(h / 2));
-    const chain: string[] = [];
-    let cur: Element | null = el;
-    while (cur && chain.length < 6) {
-      chain.push(cur.id ? `#${cur.id}` : cur.className ? `.${String(cur.className).split(" ")[0]}` : cur.tagName);
-      cur = cur.parentElement;
-    }
-    const left = document.querySelector("#left-pane")!.getBoundingClientRect();
+    const right = document.querySelector("#right-pane")!.getBoundingClientRect();
     const cs = getComputedStyle(document.querySelector("#right-pane")!);
-    return { w, edgeEl: chain, leftRight: Math.round(left.right), rightDisplay: cs.display };
+    const btn = document.querySelector("#btn-min-editor") as HTMLElement | null;
+    const btnBox = btn?.getBoundingClientRect();
+    const btnVisible = !!btn && !!btnBox && btnBox.width > 0 && btnBox.height > 0;
+    return {
+      w,
+      rightWidth: Math.round(right.width),
+      rightDisplay: cs.display,
+      rightLeft: Math.round(right.left),
+      btnVisible,
+      btnLabel: btn?.getAttribute("aria-label") ?? null,
+    };
   });
-  expect(probe.rightDisplay).toBe("none");
-  expect(probe.leftRight).toBeGreaterThanOrEqual(probe.w - 1);
+  // Slim restore rail on the right edge, not display:none.
+  expect(probe.rightDisplay).not.toBe("none");
+  expect(probe.rightWidth).toBeGreaterThanOrEqual(30);
+  expect(probe.rightWidth).toBeLessThanOrEqual(40);
+  expect(probe.rightLeft).toBeGreaterThanOrEqual(probe.w - 45);
+  expect(probe.btnVisible).toBe(true);
+  expect(probe.btnLabel).toMatch(/restore/i);
+  // Toggle restores the editor.
+  await page.locator("#btn-min-editor").click();
+  await expect(page.locator("#right-pane.minimized")).toHaveCount(0, { timeout: 10_000 });
 });

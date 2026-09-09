@@ -1935,15 +1935,13 @@ function requestMinimize(pane: WorkPane): void {
   if (isFullscreenLayout()) {
     exitFullscreen();
     if (minimizedWork === pane) {
-      if (pane === "editor" && !editorPaneOccupied()) return;
       setMinimizedWork(null);
     }
     return;
   }
-  // Restore when this pane is already the thin bar.
+  // Restore when this pane is already the thin bar. Manual toggle always
+  // restores, even an empty editor; auto-collapse still hides it on idle.
   if (minimizedWork === pane) {
-    // Keep the editor closed until a file or review occupies it.
-    if (pane === "editor" && !editorPaneOccupied()) return;
     setMinimizedWork(null);
     return;
   }

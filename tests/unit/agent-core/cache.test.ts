@@ -328,7 +328,7 @@ describe("Agent Core Cache", () => {
         noiseFloorTokens: 1_024,
       });
       expect(miss.attributed).toBe(true);
-      expect(miss.primary).toBe("stable-prefix-changed");
+      expect(miss.primary).toBe("message-prefix-changed");
       expect(miss.missedTokens).toBe(46_191);
       expect(miss.missingFields).not.toContain("previous.cacheWriteTokens");
       expect(miss.missingFields).not.toContain("current.cacheWriteTokens");

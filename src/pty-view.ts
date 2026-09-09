@@ -466,12 +466,15 @@ export class PtyView {
     if (!container || container.clientWidth === 0 || container.clientHeight === 0) return;
     const dims = this.fitAddon.proposeDimensions();
     if (!dims || !Number.isFinite(dims.cols) || !Number.isFinite(dims.rows)) return;
+    // proposeDimensions() unconditionally reserves HIDDEN_SCROLLBAR_RESERVE_PX
+    // for a scrollbar we hide via CSS. Reclaim it so the grid fills the pane.
+    const cols = this.correctedCols(container as HTMLElement, dims.cols);
     const refreshFont = this.refreshFont;
     this.refreshFont = false;
-    if (!refreshFont && dims.cols === this.term.cols && dims.rows === this.term.rows) return;
+    if (!refreshFont && cols === this.term.cols && dims.rows === this.term.rows) return;
     const scroll = this.readScrollAnchor();
     try {
-      this.fitAddon.fit();
+      this.term.resize(cols, dims.rows);
     } catch {
       this.refreshFont = refreshFont;
       return;
@@ -486,6 +489,26 @@ export class PtyView {
       }
     }
     this.restoreScrollAnchor(scroll);
+  }
+
+  /** Fit against the full parent width instead of the addon's proposal.
+   *  @xterm/addon-fit unconditionally reserves 14px for a scrollbar whenever
+   *  scrollback is enabled; both scrollbars are hidden here (see styles.css),
+   *  so using the proposal verbatim leaves a permanent gutter on the right.
+   *  Measures the cell width from the rendered screen (public DOM, no xterm
+   *  internals) and fits against the full parent width. Falls back to the
+   *  proposal before first render when no screen measurement exists yet. */
+  private correctedCols(parent: HTMLElement, proposed: number): number {
+    const screen = this.term.element?.querySelector(".xterm-screen") as HTMLElement | null;
+    const current = this.term.cols;
+    const cellWidth = screen && current > 0 ? screen.clientWidth / current : NaN;
+    if (!Number.isFinite(cellWidth) || cellWidth <= 0) return proposed;
+    const style = window.getComputedStyle(this.term.element!);
+    const paddingX = (parseInt(style.getPropertyValue("padding-left")) || 0) +
+      (parseInt(style.getPropertyValue("padding-right")) || 0);
+    const available = parent.clientWidth - paddingX;
+    if (!Number.isFinite(available) || available <= 0) return proposed;
+    return Math.max(2, Math.floor(available / cellWidth));
   }
 
   /** Pin to the live row when the user is at the bottom. Keep the same

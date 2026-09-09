@@ -26,6 +26,7 @@ import {
   opendirSync,
   readdirSync,
   readSync,
+  realpathSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -1444,9 +1445,23 @@ function createSessionBundleWithAdmission(
   parsed: SessionBundlePaths,
   hooks?: Pick<SessionTestHooks, "afterSessionProjectCreated" | "afterEmptySessionReservation">,
 ): SessionResult {
-  const admissionRoot = dirname(parsed.projectDir);
+  const rawAdmissionRoot = dirname(parsed.projectDir);
   const projectName = basename(parsed.projectDir);
   if (!safeSessionChildName(projectName)) return { ok: false, error: "session project directory has an invalid name" };
+  // Canonicalize a symlinked admission parent (macOS /tmp → /private/tmp)
+  // so the retention lock and directory anchors share one identity.
+  // Final segments stay no-follow validated below; only parents resolve.
+  let admissionRoot: string;
+  try {
+    admissionRoot = realpathSync(resolve(rawAdmissionRoot));
+  } catch (err) {
+    return { ok: false, error: errMsg(err) };
+  }
+  const projectDir = join(admissionRoot, projectName);
+  const bundleDir = join(projectDir, basename(parsed.bundleDir));
+  const currentDir = join(bundleDir, basename(parsed.currentDir));
+  const sessionFile = join(currentDir, basename(parsed.sessionFile));
+  const effective: SessionBundlePaths = { ...parsed, projectDir, bundleDir, currentDir, sessionFile };
   let lock: SessionRetentionLock;
   try {
     lock = acquireSessionRetentionLock(admissionRoot);
@@ -1461,21 +1476,21 @@ function createSessionBundleWithAdmission(
     root = openedRoot.anchor;
     const rootStable = validateDirectoryAnchor(root);
     if (!rootStable.ok) return rootStable;
-    const openedProject = openOrCreateSessionChildDirectory(root, parsed.projectDir, "session project directory");
+    const openedProject = openOrCreateSessionChildDirectory(root, effective.projectDir, "session project directory");
     if (!openedProject.ok) return openedProject;
     project = openedProject.anchor;
     if (openedProject.created) {
       try {
-        hooks?.afterSessionProjectCreated?.(parsed.projectDir);
+        hooks?.afterSessionProjectCreated?.(effective.projectDir);
       } catch (err) {
         return { ok: false, error: errMsg(err) };
       }
     }
-    const current = inspectEntry(parsed.currentDir);
+    const current = inspectEntry(effective.currentDir);
     if (current?.kind === "symlink") return { ok: false, error: "current directory is a symlink" };
     if (current && current.kind !== "dir") return { ok: false, error: "current is not a directory" };
     if (current) {
-      const active = inspectEntry(parsed.sessionFile);
+      const active = inspectEntry(effective.sessionFile);
       if (active?.kind === "symlink") return { ok: false, error: "active session segment is a symlink" };
       if (active?.kind === "file") {
         const rootAfter = validateDirectoryAnchor(root);
@@ -1485,15 +1500,15 @@ function createSessionBundleWithAdmission(
         return { ok: true };
       }
     }
-    const admitted = admitNewEmptySessionBundle(parsed.projectDir, parsed.sessionId);
+    const admitted = admitNewEmptySessionBundle(effective.projectDir, effective.sessionId);
     if (!admitted.ok) return admitted;
-    const created = createCurrentDirBound(project, parsed.bundleDir, parsed.currentDir, parsed.sessionFile, hooks);
+    const created = createCurrentDirBound(project, effective.bundleDir, effective.currentDir, effective.sessionFile, hooks);
     if (!created.ok) return created;
     const rootAfter = validateDirectoryAnchor(root);
     if (!rootAfter.ok) return rootAfter;
     const projectAfter = validateDirectoryAnchor(project);
     if (!projectAfter.ok) return projectAfter;
-    const rechecked = emptySessionBundleAdmission(parsed.projectDir);
+    const rechecked = emptySessionBundleAdmission(effective.projectDir);
     if (!rechecked.ok) return rechecked;
     if (rechecked.count > MAX_RETAINED_EMPTY_SESSION_BUNDLES || rechecked.bytes > MAX_EMPTY_SESSION_ADMISSION_BYTES || rechecked.workBytes > MAX_EMPTY_SESSION_ADMISSION_WORK_BYTES) {
       return { ok: false, error: "retained empty session admission changed during publication; explicitly reclaim retained sessions before retrying" };
