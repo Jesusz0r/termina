@@ -356,7 +356,10 @@ let activeSubagent: { task: SubagentTaskFile; turns: number; partial: boolean; i
 /** Last settled run outcome, for the subagent result frame. Set at the single settle point. */
 let lastRunOutcome: { status: string; failure: string | null } | null = null;
 
-let effortWanted: EffortLevel = "medium";
+let effortWanted: EffortLevel = ((value) => {
+  const wanted = value.trim().toLowerCase();
+  return (EFFORT_LEVELS as readonly string[]).includes(wanted) ? (wanted as EffortLevel) : "medium";
+})(process.env.TERMINA_CORE_EFFORT ?? "");
 let currentWorkingSetHash: string | null = null;
 let currentWorkingSetChanged: boolean | null = null;
 let previousWorkingSetHash: string | null = null;

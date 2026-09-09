@@ -2994,7 +2994,10 @@ class PiEditorApp {
       this.rememberModel(nextModel);
     }
     const nextThinking = this.usablePiThinking(thinkingLevel);
-    if (nextThinking) inst.thinkingLevel = nextThinking;
+    if (nextThinking) {
+      inst.thinkingLevel = nextThinking;
+      this.rememberEffort(inst, nextThinking);
+    }
   }
 
   /** Silently remember the last-used model per provider so fresh sessions
@@ -3012,7 +3015,19 @@ class PiEditorApp {
     );
   }
 
-  /** Most recently used model for a fresh session without a source tab. */
+  /** Silently remember the last-used effort so fresh sessions reopen on it
+   *  instead of the core default. Worldline candidates run explicit specs;
+   *  their levels never become the user default. */
+  private rememberEffort(inst: PiTerminalInstance, level: string): void {
+    if (this.worldlineTailers.has(inst.id)) return;
+    if ((this.preferences.defaultEffort ?? null) === level) return;
+    this.commitPreferencePatch({ defaultEffort: level }, false).then(
+      () => undefined,
+      (err) => {
+        console.warn(`[main] effort save failed: ${(err as Error).message}`);
+      },
+    );
+  }
   private rememberedAgentSettings(): { model: string | null; thinkingLevel: null } | null {
     const [first] = this.preferences.recentModels ?? [];
     if (!first) return null;
@@ -3123,6 +3138,11 @@ class PiEditorApp {
       const resuming = Boolean(sessionFile && sessionBundleHasContent(sessionFile));
       if (resuming) env.TERMINA_CORE_RESUME = "1";
       else delete env.TERMINA_CORE_RESUME;
+      // Fresh sessions reopen on the last-used effort; resumed bundles keep
+      // their own saved level, and agent-core clamps per model regardless.
+      const defaultEffort = this.usablePiThinking(this.preferences.defaultEffort ?? null);
+      if (defaultEffort) env.TERMINA_CORE_EFFORT = defaultEffort;
+      else delete env.TERMINA_CORE_EFFORT;
       const coreModel = this.copiedCoreModel(opts?.fromTerminalId);
       const resumeModel = this.usablePiModel(opts?.model);
       if (coreModel) {

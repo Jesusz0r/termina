@@ -122,7 +122,8 @@ A core tab is a full-screen TUI: `/login`, `/models`, `/clear`, `/compact`,
 Tab completes, Enter inserts the path, Enter again submits. Esc closes the
 picker and keeps what you typed. Ctrl+R searches prompt history. Drag to
 select transcript text; Cmd/Ctrl+C copies. Reasoning starts at medium;
-`/effort` shows the levels available for the current model. Ctrl+J inserts
+`/effort` shows the levels available for the current model, and your last
+choice sticks: new tabs reopen on it (clamped to what each model supports). Ctrl+J inserts
 a newline; Enter submits. Paste keeps newlines. `/help` lists keys.
 Paste a screenshot (Cmd/Ctrl+V) to attach it to the next prompt — up to
 four images, about 4 MB each. The status line shows how many are waiting.

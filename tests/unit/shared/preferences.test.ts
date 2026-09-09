@@ -85,3 +85,43 @@ describe("recordRecentModel", () => {
     expect(recordRecentModel(prev, "a/b", "x")).toEqual([{ provider: "openai", model: "gpt-5.3" }]);
   });
 });
+
+describe("defaultEffort preference", () => {
+  it("defaults to null", () => {
+    expect(normalizeAppPreferences({}).defaultEffort).toBe(null);
+  });
+
+  it("keeps a well-formed level and drops garbage", () => {
+    expect(normalizeAppPreferences({ defaultEffort: "xhigh" }).defaultEffort).toBe("xhigh");
+    expect(normalizeAppPreferences({ defaultEffort: " HIGH " }).defaultEffort).toBe("high");
+    expect(normalizeAppPreferences({ defaultEffort: "turbo" }).defaultEffort).toBe("turbo");
+    expect(normalizeAppPreferences({ defaultEffort: 3 }).defaultEffort).toBe(null);
+    expect(normalizeAppPreferences({ defaultEffort: "high!" }).defaultEffort).toBe(null);
+  });
+
+  it("stays main-owned, not user-patchable", () => {
+    const patch = normalizeUserPreferencePatch({ defaultEffort: "high", theme: "light" });
+    expect("defaultEffort" in patch).toBe(false);
+    expect(patch.theme).toBe("light");
+  });
+});
+
+describe("defaultEffort preference", () => {
+  it("defaults to null", () => {
+    expect(normalizeAppPreferences({}).defaultEffort).toBe(null);
+  });
+
+  it("keeps a well-formed level and drops garbage", () => {
+    expect(normalizeAppPreferences({ defaultEffort: "xhigh" }).defaultEffort).toBe("xhigh");
+    expect(normalizeAppPreferences({ defaultEffort: " HIGH " }).defaultEffort).toBe("high");
+    expect(normalizeAppPreferences({ defaultEffort: "turbo" }).defaultEffort).toBe("turbo");
+    expect(normalizeAppPreferences({ defaultEffort: 3 }).defaultEffort).toBe(null);
+    expect(normalizeAppPreferences({ defaultEffort: "high!" }).defaultEffort).toBe(null);
+  });
+
+  it("stays main-owned, not user-patchable", () => {
+    const patch = normalizeUserPreferencePatch({ defaultEffort: "high", theme: "light" });
+    expect("defaultEffort" in patch).toBe(false);
+    expect(patch.theme).toBe("light");
+  });
+});

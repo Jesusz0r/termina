@@ -128,6 +128,14 @@ function sanitizeRecentModels(value: unknown): RecentModel[] {
   return result;
 }
 
+/** Last-used effort level, opaque here: agent-core owns the vocabulary and
+ *  validates/clamps per model. Main only checks the shape. */
+function sanitizeDefaultEffort(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const next = value.trim().toLowerCase();
+  return /^[a-z]{1,16}$/.test(next) ? next : null;
+}
+
 /** Move a provider's last-used model to the front, dropping malformed
  *  entries. Pure so the recording rule stays unit-testable. */
 export function recordRecentModel(previous: readonly RecentModel[], provider: string, model: string): RecentModel[] {
@@ -155,6 +163,7 @@ export function normalizeAppPreferences(raw: unknown): AppPreferences {
     showThinking: typeof input.showThinking === "boolean" ? input.showThinking : defaults.showThinking,
     autoOpenAgentFiles: typeof input.autoOpenAgentFiles === "boolean" ? input.autoOpenAgentFiles : defaults.autoOpenAgentFiles,
     recentModels: sanitizeRecentModels(input.recentModels),
+    defaultEffort: sanitizeDefaultEffort(input.defaultEffort),
   };
 }
 

@@ -295,6 +295,9 @@ export interface AppPreferences {
   autoOpenAgentFiles: boolean;
   /** Last-used models, most recent first. Main owns this field. */
   recentModels: RecentModel[];
+  /** Last-used reasoning effort for fresh core sessions. Main owns this
+   *  field; agent-core owns the level vocabulary and clamps per model. */
+  defaultEffort: string | null;
 }
 
 /** One remembered model: provider id plus the provider-local model id. */
@@ -320,6 +323,7 @@ export function defaultAppPreferences(): AppPreferences {
     showThinking: true,
     autoOpenAgentFiles: true,
     recentModels: [],
+    defaultEffort: null,
   };
 }
 
