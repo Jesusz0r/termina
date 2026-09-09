@@ -89,6 +89,10 @@ export interface CacheRequestDiagnosticsInput {
   tools?: unknown;
   /** Exact post-protocol `body.tools` array; never canonicalize or reorder it. */
   serializedTools?: unknown;
+  /** Exact pre-serialized `body.tools` JSON. When supplied, it is hashed
+   * directly so repeated diagnoses of the same tools array (retries,
+   * cache-field fallbacks) do not re-serialize it. */
+  serializedToolsText?: string | null;
   stablePrefix?: unknown;
   reusablePrefix?: unknown;
   messagePrefix?: unknown;
@@ -316,9 +320,16 @@ export function hashCacheDiagnostic(value: unknown): string {
   return shortHash(JSON.stringify(canonical) ?? "undefined");
 }
 
-function exactSerializedTools(value: unknown): { hash: string; bytes: number } | null {
-  if (!Array.isArray(value)) return null;
+function exactSerializedTools(value: unknown, preSerialized?: string | null): { hash: string; bytes: number } | null {
   try {
+    if (typeof preSerialized === "string") {
+      const encoded = Buffer.from(preSerialized, "utf8");
+      return {
+        hash: createHash("sha256").update(encoded).digest("hex"),
+        bytes: encoded.length,
+      };
+    }
+    if (!Array.isArray(value)) return null;
     const serialized = JSON.stringify(value);
     if (typeof serialized !== "string") return null;
     return {
@@ -353,7 +364,7 @@ function normalizeMarkerPositions(value: readonly number[] | null | undefined): 
 /** Build bounded, nullable diagnostics for one exact provider request. */
 export function cacheRequestDiagnostics(input: CacheRequestDiagnosticsInput): CacheRequestDiagnostics {
   const hashOptional = (value: unknown): string | null => (value === undefined ? null : hashCacheDiagnostic(value));
-  const serializedTools = exactSerializedTools(input.serializedTools);
+  const serializedTools = exactSerializedTools(input.serializedTools, input.serializedToolsText);
   const markerCount = finiteNonnegative(input.markerCount);
   return {
     cacheKeyHash: input.identity?.key ? hashCacheDiagnostic(input.identity.key) : null,

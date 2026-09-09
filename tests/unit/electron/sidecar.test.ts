@@ -42,6 +42,15 @@ describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
       expect(Buffer.byteLength(JSON.stringify(envelope), "utf8")).toBeLessThan(8 * 1024 * 1024);
       expect(Buffer.byteLength(JSON.stringify(envelope.edits), "utf8")).toBeLessThanOrEqual(SIDECAR_TOOL_EDIT_PREVIEW_BYTES);
     });
+
+    it("omits truncation metadata when edits fit", () => {
+      const bounded = boundedSidecarEdits([{ oldText: "aaa", newText: "bbb" }]);
+      expect(bounded).toEqual({ edits: [{ oldText: "aaa", newText: "bbb" }] });
+      expect(bounded).not.toHaveProperty("editsBytes");
+      expect(bounded).not.toHaveProperty("editsSha256");
+      expect(boundedSidecarEdits([])).toEqual({});
+      expect(boundedSidecarEdits("nope")).toBeUndefined();
+    });
   });
 
   describe("SidecarEventQueue Backpressure & Coalescing", () => {

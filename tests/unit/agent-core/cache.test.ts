@@ -249,6 +249,26 @@ describe("Agent Core Cache", () => {
       expect(absent.serializedToolsBytes).toBeNull();
     });
 
+    it("hashes pre-serialized tools without re-serializing", () => {
+      const toolsA = [{ name: "read_file", description: "lee 🔧", input_schema: { type: "object", properties: {} } }];
+      const text = JSON.stringify(toolsA);
+      const fromArray = cache.cacheRequestDiagnostics({
+        identity,
+        policy: diagnostics().policy,
+        tools: toolsA,
+        serializedTools: toolsA,
+      });
+      const fromText = cache.cacheRequestDiagnostics({
+        identity,
+        policy: diagnostics().policy,
+        tools: toolsA,
+        serializedToolsText: text,
+      });
+      expect(fromText.serializedToolsHash).toBe(fromArray.serializedToolsHash);
+      expect(fromText.serializedToolsBytes).toBe(fromArray.serializedToolsBytes);
+      expect(fromText.serializedToolsBytes).toBe(Buffer.byteLength(text, "utf8"));
+    });
+
     it("classifies cache misses accurately across all causes", () => {
       const hit = cache.classifyCacheMiss({
         previous: prior,

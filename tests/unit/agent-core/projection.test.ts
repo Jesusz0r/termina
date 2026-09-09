@@ -256,4 +256,14 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
     expect(overlay.hash).toBe(createHash("sha256").update(Buffer.from(overlay.text, "utf8")).digest("hex"));
     expect(overlay.text).not.toContain("�");
   });
+
+  it("hashes whitespace-only host variants identically", () => {
+    const a = overlayFor([], "fresh host state");
+    const b = overlayFor([], "  fresh host state  \n");
+    const c = overlayFor([], "\n\tfresh host state\n");
+    expect(a).toBeTruthy();
+    expect(b?.hash).toBe(a?.hash);
+    expect(c?.hash).toBe(a?.hash);
+    expect(b?.bytes).toBe(a?.bytes);
+  });
 });

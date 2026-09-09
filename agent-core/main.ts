@@ -2485,9 +2485,6 @@ function utf8Prefix(value: string, maxBytes: number): string {
 
 export function boundedSidecarEdits(value: unknown): Record<string, unknown> | undefined {
   if (!Array.isArray(value)) return undefined;
-  const serialized = JSON.stringify(value) ?? "[]";
-  const editsBytes = Buffer.byteLength(serialized, "utf8");
-  const editsSha256 = createHash("sha256").update(serialized, "utf8").digest("hex");
   const edits: Array<Record<string, string>> = [];
   let retainedBytes = 2;
   let editsTruncated = false;
@@ -2506,11 +2503,11 @@ export function boundedSidecarEdits(value: unknown): Record<string, unknown> | u
     const preview: Record<string, string> = {};
     if (oldText !== undefined) {
       preview.oldText = utf8Prefix(oldText, SIDECAR_TOOL_EDIT_FIELD_BYTES);
-      if (Buffer.byteLength(preview.oldText, "utf8") !== Buffer.byteLength(oldText, "utf8")) editsTruncated = true;
+      if (preview.oldText !== oldText) editsTruncated = true;
     }
     if (newText !== undefined) {
       preview.newText = utf8Prefix(newText, SIDECAR_TOOL_EDIT_FIELD_BYTES);
-      if (Buffer.byteLength(preview.newText, "utf8") !== Buffer.byteLength(newText, "utf8")) editsTruncated = true;
+      if (preview.newText !== newText) editsTruncated = true;
     }
     const candidateBytes = Buffer.byteLength(JSON.stringify(preview), "utf8") + (edits.length === 0 ? 0 : 1);
     if (retainedBytes + candidateBytes > SIDECAR_TOOL_EDIT_PREVIEW_BYTES) {
@@ -2521,10 +2518,17 @@ export function boundedSidecarEdits(value: unknown): Record<string, unknown> | u
     retainedBytes += candidateBytes;
   }
   if (edits.length < value.length) editsTruncated = true;
+  if (!editsTruncated) return edits.length > 0 ? { edits } : {};
+  // Only serialize the full edit list when callers actually need the
+  // truncation boundary (bytes/count/sha). The common fitting case skips it.
+  const serialized = JSON.stringify(value) ?? "[]";
+  const encoded = Buffer.from(serialized, "utf8");
   return {
     ...(edits.length > 0 ? { edits } : {}),
-    ...(editsTruncated ? { editsTruncated: true } : {}),
-    ...(editsTruncated ? { editsBytes, editsCount: value.length, editsSha256 } : {}),
+    editsTruncated: true,
+    editsBytes: encoded.length,
+    editsCount: value.length,
+    editsSha256: createHash("sha256").update(encoded).digest("hex"),
   };
 }
 
@@ -3488,6 +3492,36 @@ function cachePolicyFromBody(
   };
 }
 
+/** Exact tools serialization memoized by array identity. One turn diagnoses
+ * the same `body.tools` array up to three times (initial attempt, rejected
+ * cache-field trace, fallback retry); serialize it once. Entries are
+ * identity-keyed so they drop with the array — no size cap needed. */
+const serializedToolsMemo = new WeakMap<object, { text: string; hash: string; bytes: number } | null>();
+
+function memoizedSerializedTools(tools: unknown): { text: string; hash: string; bytes: number } | null {
+  try {
+    const serialized = JSON.stringify(tools);
+    if (typeof serialized !== "string") return null;
+    const encoded = Buffer.from(serialized, "utf8");
+    return {
+      text: serialized,
+      hash: createHash("sha256").update(encoded).digest("hex"),
+      bytes: encoded.length,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function memoizedSerializedToolsFor(tools: unknown): { text: string; hash: string; bytes: number } | null {
+  if (typeof tools !== "object" || tools === null) return memoizedSerializedTools(tools);
+  const hit = serializedToolsMemo.get(tools);
+  if (hit !== undefined) return hit;
+  const result = memoizedSerializedTools(tools);
+  serializedToolsMemo.set(tools, result);
+  return result;
+}
+
 function cacheDiagnosticsForRequest(
   body: Record<string, unknown>,
   identity: { provider: ProviderId; protocol: string; model: string },
@@ -3500,17 +3534,9 @@ function cacheDiagnosticsForRequest(
 ): TraceCacheDiagnostics {
   const settings = { ...body };
   const tools = settings.tools ?? [];
-  let serializedToolsHash: string | null = null;
-  let serializedToolsBytes: number | null = null;
-  try {
-    const serializedTools = JSON.stringify(tools);
-    if (serializedTools !== undefined) {
-      serializedToolsHash = createHash("sha256").update(serializedTools, "utf8").digest("hex").slice(0, 16);
-      serializedToolsBytes = Buffer.byteLength(serializedTools, "utf8");
-    }
-  } catch {
-    /* A cyclic/unsupported schema remains explicitly unknown in the trace. */
-  }
+  const memoizedTools = memoizedSerializedToolsFor(tools);
+  const serializedToolsHash = memoizedTools ? memoizedTools.hash.slice(0, 16) : null;
+  const serializedToolsBytes = memoizedTools ? memoizedTools.bytes : null;
   delete settings.tools;
   let stableSystem = settings.instructions ?? settings.system ?? settings.systemInstruction ?? null;
   delete settings.instructions;
@@ -3549,6 +3575,7 @@ function cacheDiagnosticsForRequest(
     policy: policyDetails.policy,
     modelSettings,
     tools,
+    serializedToolsText: memoizedTools?.text ?? null,
     stablePrefix: { system: stableSystem, tools, settings: modelSettings },
     reusablePrefix: persistedMessages,
     messagePrefix: messages,
@@ -6405,12 +6432,15 @@ async function callModel(
   let res = await providerPost(route.provider, body, currentAbort?.signal, route.model, true, true, cacheIdentity, onRetry);
   if (!res.ok || !res.body) {
     const detail = (await readBoundedHttpBody(res, PROVIDER_ERROR_BODY_CAP_BYTES)).text.slice(0, 300);
-    const optionalFieldsRequested = body.prompt_cache_options !== undefined || JSON.stringify(body).includes("prompt_cache_breakpoint");
+    // Check the cheap preconditions first: the full-body serialization below
+    // only runs when this is actually a 400 about cache fields.
+    const fallbackCandidate = res.status === 400 && /prompt_cache_(?:breakpoint|options)/i.test(detail);
+    const optionalFieldsRequested = fallbackCandidate &&
+      (body.prompt_cache_options !== undefined || JSON.stringify(body).includes("prompt_cache_breakpoint"));
     if (
       !optionalCacheFallbackUsed &&
-      res.status === 400 &&
+      fallbackCandidate &&
       optionalFieldsRequested &&
-      /prompt_cache_(?:breakpoint|options)/i.test(detail) &&
       usesResponsesApi(route.provider, route.model)
     ) {
       optionalCacheFallbackUsed = true;
