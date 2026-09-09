@@ -221,7 +221,50 @@ describe("subagents Phase 1 registry", () => {
     expect(reg.settleRun(id, "final").ok).toBe(true);
     const after = reg.message(id, "too late");
     expect(after.ok).toBe(false);
-    if (!after.ok) expect(after.error).toMatch(/already settled/);
+    if (!after.ok) {
+      expect(after.error).toMatch(/already settled/);
+      expect(after.error).toContain("final");
+    }
+  });
+
+  it("grounds nudges to failed runs with the outcome", async () => {
+    const reg = registry();
+    const spawned = await reg.spawn({ task: "t", parent });
+    expect(spawned.ok).toBe(true);
+    if (!spawned.ok) return;
+    expect(reg.settleRun(spawned.run.id, "", "failed").ok).toBe(true);
+    const nudge = reg.message(spawned.run.id, "if still running, continue");
+    expect(nudge.ok).toBe(false);
+    if (!nudge.ok) {
+      expect(nudge.error).toMatch(/already failed/);
+      expect(nudge.error).toMatch(/empty result/);
+    }
+  });
+
+  it("refuses an identical brief that already failed empty", async () => {
+    const reg = registry();
+    const first = await reg.spawn({ task: "run the suite", parent });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(reg.settleRun(first.run.id, "", "failed").ok).toBe(true);
+    const retry = await reg.spawn({ task: "run the suite", parent });
+    expect(retry.ok).toBe(false);
+    if (!retry.ok) {
+      expect(retry.error).toMatch(/already failed as bg-1/);
+      expect(retry.error).toMatch(/rewrite the task/);
+    }
+    // A failed run that delivered a result, a settled run, and a killed run
+    // do not block: the parent may be iterating on real evidence.
+    const withResult = await reg.spawn({ task: "other", parent });
+    expect(withResult.ok).toBe(true);
+    if (!withResult.ok) return;
+    expect(reg.settleRun(withResult.run.id, "flaky output", "failed").ok).toBe(true);
+    expect((await reg.spawn({ task: "other", parent })).ok).toBe(true);
+    const settled = await reg.spawn({ task: "third", parent });
+    expect(settled.ok).toBe(true);
+    if (!settled.ok) return;
+    expect(reg.settleRun(settled.run.id, "done").ok).toBe(true);
+    expect((await reg.spawn({ task: "third", parent })).ok).toBe(true);
   });
 
   it("settles exactly once and scans the result", async () => {

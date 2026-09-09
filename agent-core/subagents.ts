@@ -650,6 +650,14 @@ export class SubagentRegistry {
     if (task.length > MAX_SUBAGENT_TASK_CHARS) {
       return { ok: false, error: `spawn_subagent task exceeds ${MAX_SUBAGENT_TASK_CHARS} chars` };
     }
+    // An identical brief that already failed empty-handed will fail the same
+    // way: the child never delivered anything, so there is nothing to iterate
+    // on. Fail closed here instead of burning another identical boot.
+    for (const prior of this.runs.values()) {
+      if (prior.state === "failed" && !prior.result?.trim() && prior.task === task) {
+        return { ok: false, error: `identical brief already failed as ${prior.id} with an empty result — rewrite the task instead of respawning it unchanged` };
+      }
+    }
     let maxTurns = 50;
     if (req.budget !== undefined) {
       if (typeof req.budget !== "object" || req.budget === null || Array.isArray(req.budget)) {
@@ -744,7 +752,14 @@ export class SubagentRegistry {
   message(runId: string, text: string): { ok: true } | { ok: false; error: string } {
     const run = this.runs.get(runId);
     if (!run) return { ok: false, error: `unknown subagent run: ${runId}` };
-    if (run.state !== "active") return { ok: false, error: `subagent run ${runId} is already ${run.state}` };
+    if (run.state !== "active") {
+      // Ground the parent immediately: a nudge sent while the run was dying
+      // races settlement, and the bare "already failed" leaves the parent
+      // re-asking about a dead run instead of moving on.
+      const outcome = `subagent run ${runId} is already ${run.state}`;
+      const excerpt = (run.result ?? "").trim().slice(0, 300);
+      return { ok: false, error: excerpt ? `${outcome} with result: ${excerpt}` : `${outcome} with an empty result` };
+    }
     const clean = text?.trim() ?? "";
     if (!clean) return { ok: false, error: "message_subagent text must not be empty" };
     if (clean.length > MAX_SUBAGENT_MESSAGE_CHARS) {

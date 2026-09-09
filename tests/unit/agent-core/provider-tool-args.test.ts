@@ -293,5 +293,16 @@ describe("Agent Core Provider Tool Arguments Contract", () => {
         core.providerToolAdmissionError([{ type: "tool_use", id: "call-1", name: "bash", input: {} }] as any),
       ).toBeNull();
     });
+
+    it("flags output-limit stop reasons as truncated", () => {
+      expect(compat.isTruncatedStopReason("length")).toBe(true);
+      expect(compat.isTruncatedStopReason("max_tokens")).toBe(true);
+      expect(compat.isTruncatedStopReason("MAX_TOKENS")).toBe(true);
+      expect(compat.isTruncatedStopReason("stop")).toBe(false);
+      expect(compat.isTruncatedStopReason("tool_calls")).toBe(false);
+      expect(compat.isTruncatedStopReason("end_turn")).toBe(false);
+      expect(compat.isTruncatedStopReason(null)).toBe(false);
+      expect(compat.isTruncatedStopReason(undefined)).toBe(false);
+    });
   });
 });

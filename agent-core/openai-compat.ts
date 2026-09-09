@@ -226,8 +226,16 @@ function markPrefixThenTail(
 }
 
 /** Strip prompt_cache_breakpoint and prompt_cache_options when a model rejects explicit caching. */
-export function stripResponsesBreakpoints(body: Record<string, unknown>): Record<string, unknown> {
-  const next = { ...body };
+/**
+ * Provider stop reasons that mean the turn was cut by the output limit:
+ * OpenAI "length", Anthropic "max_tokens", Google "MAX_TOKENS". Tool calls
+ * from such a turn may carry truncated arguments that still parse.
+ */
+export function isTruncatedStopReason(reason: string | null | undefined): boolean {
+  return reason === "length" || reason === "max_tokens" || reason === "MAX_TOKENS";
+}
+
+export function stripResponsesBreakpoints(body: Record<string, unknown>): Record<string, unknown> {  const next = { ...body };
   delete next.prompt_cache_options;
   if (Array.isArray(next.input)) {
     next.input = next.input.map((item) => {

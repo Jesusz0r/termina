@@ -100,6 +100,7 @@ import {
   googleGenerateBody,
   googleLiveDelta,
   googleResultFromEvents,
+  isTruncatedStopReason,
   readSseJson,
   responsesBody,
   responsesLiveDelta,
@@ -4660,7 +4661,7 @@ export async function withFileMutation<T>(key: string | null, fn: () => Promise<
   }
 }
 
-async function executeTool(use: ToolUse): Promise<ToolOutcome> {
+async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolOutcome> {
   if (use.name === "read_file") {
     const got = readProjectFile(canonicalCwd, use.input, allowPaths);
     return done(use, got);
@@ -4707,6 +4708,12 @@ async function executeTool(use: ToolUse): Promise<ToolOutcome> {
     return done(use, got);
   }
   if (use.name === "spawn_subagent") {
+    // A length-truncated turn may carry cut-off brief arguments that parse
+    // but are silently incomplete. Never spawn from one: the child would boot
+    // on a broken brief and burn its run failing.
+    if (parentTruncated) {
+      return done(use, "error: parent turn hit the output limit, so the brief may be truncated — re-issue spawn_subagent with the complete brief", true);
+    }
     // Forward budget/paths raw: the registry validates them so malformed
     // input fails closed instead of silently dropping lease protection.
     const got = await subagentRegistry.spawn({
@@ -7807,7 +7814,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           process.stdout.write(`\n${formatToolAnnounce(use)}\n`);
           return null;
         });
-        const wrapped = chunk.map((use) => executeTool(use));
+        const wrapped = chunk.map((use) => executeTool(use, isTruncatedStopReason(result.stopReason)));
         const settled = await Promise.allSettled(wrapped);
         for (let ci = 0; ci < chunk.length; ci++) {
           const item = settled[ci]!;
