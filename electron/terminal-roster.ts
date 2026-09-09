@@ -7,16 +7,20 @@ import { isCoreSessionId } from "../agent-core/session.ts";
 
 export const MAX_TERMINAL_ROSTER = 16;
 export const MAX_ROSTER_BYTES = 64 * 1024;
+/** Handoff tasks per terminal: the board survives restarts, not archives. */
+export const MAX_ROSTER_PLAN_TASKS = 50;
+const MAX_PLAN_TEXT = 500;
+const MAX_PLAN_PATHS = 100;
+const MAX_PLAN_PATH = 256;
+const MAX_VERIFY_TEXT = 256;
 const MAX_ID = 64;
 const MAX_PATH = 1024;
-const MAX_SESSION_ID = 128;
 const TERM_ID = /^term-[1-9][0-9]{0,5}$/;
-const SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
 
 export type TerminalRosterEntry = {
   id: string;
   type: "agent" | "shell";
-  engine?: "pi" | "core";
+  engine?: "core";
   shell?: string;
   sessionId?: string | null;
   sessionFile?: string | null;
@@ -40,6 +44,37 @@ export function isRosterModel(value: string): boolean {
   if (value.length < 3 || value.length > 200 || /[\x00-\x1f\x7f\s]/.test(value)) return false;
   const cut = value.indexOf("/");
   return cut > 0 && cut < value.length - 1;
+}
+
+function parseRosterPlan(value: unknown): TerminalRosterEntry["plan"] {
+  if (!Array.isArray(value)) return undefined;
+  const out: NonNullable<TerminalRosterEntry["plan"]> = [];
+  for (const item of value) {
+    if (out.length >= MAX_ROSTER_PLAN_TASKS) break;
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const rec = item as Record<string, unknown>;
+    if (typeof rec.text !== "string" || !rec.text || rec.text.length > MAX_PLAN_TEXT || /[\x00-\x1f]/.test(rec.text)) continue;
+    if (rec.state !== "pending" && rec.state !== "active" && rec.state !== "done") continue;
+    const paths: string[] = [];
+    if (Array.isArray(rec.paths)) {
+      for (const p of rec.paths) {
+        if (paths.length >= MAX_PLAN_PATHS) break;
+        if (typeof p === "string" && p && p.length <= MAX_PLAN_PATH && !/[\x00-\x1f]/.test(p)) paths.push(p);
+      }
+    }
+    out.push({ text: rec.text, paths, state: rec.state });
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function parseRosterVerify(value: unknown): TerminalRosterEntry["verify"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const rec = value as Record<string, unknown>;
+  if (rec.state !== "untested" && rec.state !== "pass" && rec.state !== "fail" && rec.state !== "timeout" && rec.state !== "cancelled") return undefined;
+  if (rec.state === "untested") return undefined;
+  const text = (v: unknown): string | null =>
+    typeof v === "string" && v.length <= MAX_VERIFY_TEXT && !/[\x00-\x1f]/.test(v) ? v : null;
+  return { state: rec.state, command: text(rec.command), summary: text(rec.summary) };
 }
 
 export function parseTerminalRoster(raw: unknown): TerminalRosterEntry[] {
@@ -83,6 +118,24 @@ export function parseTerminalRoster(raw: unknown): TerminalRosterEntry[] {
     if (out.length >= MAX_TERMINAL_ROSTER) break;
   }
   return out;
+}
+
+/**
+ * Fit entries into the roster byte budget, degrading handoff state before
+ * identity: other entries' plans go first, then all verdicts. The first
+ * entry keeps its plan longest. Core resume fields always fit, so tabs are
+ * never lost to a full board.
+ */
+export function fitTerminalRoster(entries: TerminalRosterEntry[]): TerminalRosterEntry[] {
+  const size = (list: TerminalRosterEntry[]): number => Buffer.byteLength(JSON.stringify({ terminals: list }), "utf8");
+  if (size(entries) <= MAX_ROSTER_BYTES) return entries;
+  const stripped = entries.map((entry, i) =>
+    i === 0 ? entry : { ...entry, plan: undefined },
+  );
+  if (size(stripped) <= MAX_ROSTER_BYTES) return stripped;
+  const bare = stripped.map(({ plan: _plan, verify: _verify, ...rest }) => rest);
+  if (size(bare) <= MAX_ROSTER_BYTES) return bare;
+  return bare.slice(0, MAX_TERMINAL_ROSTER);
 }
 
 /**

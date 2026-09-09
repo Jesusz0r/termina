@@ -14,7 +14,7 @@ import type { FileHandle } from "node:fs/promises";
 import { BoundedTextAccumulator, type BoundedText, type BoundedTextMarkerDetails, type CompletionState } from "./tool-output.ts";
 
 const ACK_ID = /^[A-Za-z0-9_-]{1,128}$/;
-const CONTEXT_FILES = ["verify", "edits", "mailbox"] as const;
+const CONTEXT_FILES = ["verify", "edits", "mailbox", "project", "diagnostics"] as const;
 const PROTECTED_PATHS_BYTES = 64 * 1024;
 const PLAN_TEXT_CAP = 4000;
 export const HOST_CONTEXT_BYTES = 64 * 1024;

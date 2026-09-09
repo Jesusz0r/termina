@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { parsePlanTasks } from "../../../electron/plan-board.ts";
+import {
+  MIN_SCHEDULE_INTERVAL_MS,
+  nextScheduleRun,
+  parsePlanTasks,
+  parseScheduleMarker,
+} from "../../../electron/plan-board.ts";
 
 describe("Plan Board Task Parser Contract", () => {
   it("accepts a headed list with bullet, numbered, unchecked, and checked variants", async () => {
@@ -35,5 +40,41 @@ describe("Plan Board Task Parser Contract", () => {
     expect(tasks.length).toBe(2);
     expect(tasks[0].state).toBe("pending");
     expect(tasks[1].state).toBe("done");
+  });
+});
+
+describe("Plan Board Schedule Markers", () => {
+  it("parses every/at markers and rejects the rest", () => {
+    expect(parseScheduleMarker("lint @every 30m")).toEqual({ kind: "every", intervalMs: 30 * 60_000 });
+    expect(parseScheduleMarker("lint @every 2h")).toEqual({ kind: "every", intervalMs: 2 * 3_600_000 });
+    expect(parseScheduleMarker("standup @at 09:30")).toEqual({ kind: "at", hour: 9, minute: 30 });
+    expect(parseScheduleMarker("plain task")).toBeNull();
+    expect(parseScheduleMarker("lint @every 30x")).toBeNull();
+    expect(parseScheduleMarker("standup @at 25:00")).toBeNull();
+  });
+
+  it("rejects intervals below the minimum", () => {
+    expect(parseScheduleMarker("lint @every 30s")).toBeNull();
+    expect(parseScheduleMarker("lint @every 4m")).toBeNull();
+    expect(parseScheduleMarker(`lint @every ${MIN_SCHEDULE_INTERVAL_MS / 60_000}m`)).not.toBeNull();
+  });
+
+  it("fires every-intervals immediately at first, then by interval", () => {
+    const now = Date.UTC(2026, 0, 1, 12, 0, 0);
+    const spec = parseScheduleMarker("lint @every 1h")!;
+    expect(nextScheduleRun(spec, now, true)).toBe(now);
+    expect(nextScheduleRun(spec, now, false)).toBe(now + 3_600_000);
+  });
+
+  it("schedules at-markers for the next occurrence", () => {
+    const noon = new Date(2026, 0, 1, 12, 0, 0).getTime();
+    const morning = parseScheduleMarker("standup @at 09:30")!;
+    const evening = parseScheduleMarker("sync @at 18:00")!;
+    const nextMorning = new Date(nextScheduleRun(morning, noon, false));
+    expect(nextMorning.getHours()).toBe(9);
+    expect(nextMorning.getDate()).toBe(2);
+    const nextEvening = new Date(nextScheduleRun(evening, noon, false));
+    expect(nextEvening.getHours()).toBe(18);
+    expect(nextEvening.getDate()).toBe(1);
   });
 });

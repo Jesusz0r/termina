@@ -890,6 +890,24 @@ function activatePaneWhenReady(instanceId: string): void {
   if (pane && !pane.exited) activatePane(instanceId);
 }
 
+/** Mirror unseen verify failures onto the project tab so background
+ *  projects nudge too. The active project shows its own terminal dots. */
+function updateProjectAttention(projectId: string | null): void {
+  if (!projectId) return;
+  const view = projectViews.get(projectId);
+  const dot = view?.tabEl.querySelector(".tab-status") as HTMLElement | null;
+  if (!view || !dot) return;
+  let fail = false;
+  for (const pane of panes.values()) {
+    if (pane.projectId !== projectId || !pane.verifyAttention) continue;
+    if (pane.verify.state === "fail" || pane.verify.state === "timeout") {
+      fail = true;
+      break;
+    }
+  }
+  dot.classList.toggle("verify-fail", fail && projectId !== activeProjectId);
+}
+
 function activatePane(instanceId: string): void {
   const pane = panes.get(instanceId);
   if (!pane) return;
@@ -1162,11 +1180,15 @@ function updatePaneTab(pane: Pane): void {
     : `${pane.cwd ?? "?"}${
         pane.type === "shell" && pane.shellName
           ? ` · ${pane.shellName} shell`
-          : pane.engine === "core"
-            ? " · core agent"
-            : " · pi agent"
+          : " · core agent"
       }`;
   pane.statusEl.classList.toggle("busy", pane.busy);
+  // Unseen verify failures hold the tab dot until first view; any newer
+  // verify state clears them.
+  const failDot = pane.verifyAttention && pane.verify.state === "fail";
+  const timeoutDot = pane.verifyAttention && pane.verify.state === "timeout";
+  pane.statusEl.classList.toggle("verify-fail", failDot);
+  pane.statusEl.classList.toggle("verify-timeout", timeoutDot);
   applyTypeBadge(pane);
   // Worldline candidates carry the A/B badge on their tab.
   const wlineEl = pane.tabEl.querySelector(".tab-worldline") as HTMLElement;

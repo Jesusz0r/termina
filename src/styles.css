@@ -666,6 +666,16 @@ body {
   animation: blink 1.2s ease-in-out infinite;
 }
 
+.terminal-tab .tab-status.verify-fail {
+  background: var(--red);
+  animation: none;
+}
+
+.terminal-tab .tab-status.verify-timeout {
+  background: var(--yellow);
+  animation: none;
+}
+
 .terminal-tab .tab-close {
   font-size: 13px;
   line-height: 1;
@@ -1812,6 +1822,17 @@ body {
 .project-tab .tab-close:hover {
   color: var(--text);
   background: var(--bg-hover);
+}
+
+.project-tab .tab-status {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.project-tab .tab-status.verify-fail {
+  background: var(--red);
 }
 
 /* The new-project stub reads as half a tab tucked behind the open tabs.

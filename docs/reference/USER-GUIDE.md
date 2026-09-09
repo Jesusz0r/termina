@@ -119,7 +119,11 @@ tab strip cycles its tabs.
 ### Talking to the agent
 
 A core tab is a full-screen TUI: `/login`, `/models`, `/clear`, `/compact`,
-`/resume`, `/effort`. Type `@` to pick a project file; keep typing to filter.
+`/resume`, `/effort`. Every turn starts with a bounded project snapshot (top
+of the tree first), so the agent is oriented without spending tool calls on
+discovery — file tools always see live state.
+
+Type `@` to pick a project file; keep typing to filter.
 Tab completes, Enter inserts the path, Enter again submits. Esc closes the
 picker and keeps what you typed. Ctrl+R searches prompt history. Drag to
 select transcript text; Cmd/Ctrl+C copies. Reasoning starts at medium;
@@ -214,6 +218,15 @@ States you will see:
 | `⏰ …` | Timed out. |
 | `⏸ …` | Cancelled. |
 
+A failure on a background tab dots that tab red (amber for timeout) until you
+look at it, so an idle terminal's verdict never sits unseen. Failures in a
+background project dot that project tab instead.
+
+TypeScript projects get background typechecks: after your run settles,
+`tsc --noEmit` refreshes silently into the agent's next-turn context when the
+tree moved since the last clean run, at most once a minute per workspace.
+Other stacks stay manual for now.
+
 Candidate terminals (see Worldlines) detect their own test command from their
 own copy of the project.
 
@@ -252,9 +265,13 @@ shows the task list with live progress: `○` pending, `◐` active, `✓` done.
 
 ### Dispatching tasks
 
-- **Click any pending task** to send it to a parallel worker — a separate pi
+- **Click any pending task** to send it to a parallel worker — a separate
   agent that works on the same project simultaneously. A toast confirms the
   dispatch.
+- **Schedule a task** with a trailing `@every 30m` / `@every 2h` / `@at 09:30`
+  marker: while its terminal stays open and idle, Termina dispatches it to a
+  worker on cadence through the same briefing, settle-note, and auto-verify
+  loop. Intervals below 5 minutes are ignored.
 - **⇉ Dispatch** sends the plan's tasks out.
 
 Dispatched tasks show their worker and claimed files on the board. Clicking a

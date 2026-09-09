@@ -50,11 +50,14 @@ import { createAppUpdater, updateMenuCopy, type AppUpdateController } from "./ap
 import { installCliCommand, uninstallCliCommand, isCliCommandInstalled, parseTargetCwdFromArgv } from "./cli-install.js";
 import {
   MAX_DISPATCH_WORKERS,
+  SCHEDULE_TICK_MS,
   findTaskByText,
   finalizePlanTasks,
   formatDispatchBriefing,
   markPlanProgress,
+  nextScheduleRun,
   parsePlanTasks,
+  parseScheduleMarker,
   pickDispatchTasks,
   reattachDispatchAssignments,
   taskIsComplete,
@@ -81,8 +84,9 @@ import {
 } from "./terminal-drop.js";
 import {
   composeTerminalRoster,
-  isRosterSessionId,
+  fitTerminalRoster,
   MAX_ROSTER_BYTES,
+  MAX_ROSTER_PLAN_TASKS,
   MAX_TERMINAL_ROSTER,
   parseTerminalRoster,
   type TerminalRosterEntry,
@@ -128,6 +132,18 @@ function isChallengeProfile(value: unknown): value is ChallengeProfile {
 const MAX_CLIPBOARD_BYTES = 4 * 1024 * 1024;
 const MAX_EXPLORER_ENTRIES = 2000;
 const MAX_VERIFY_OUTPUT = 200_000;
+/** Bound for one diagnostics run's captured output. */
+const MAX_DIAGNOSTICS_OUTPUT = 32 * 1024;
+/** Bound for one diagnostics context file. */
+const MAX_DIAGNOSTICS_CONTEXT_BYTES = 6 * 1024;
+/** Background typecheck budget per run; slower suites stay manual. */
+const DIAGNOSTICS_TIMEOUT_MS = 120_000;
+/** Cap for cached workspace diagnostics state (project open/close churn). */
+const MAX_DIAGNOSTICS_WORKSPACES = 64;
+/** Bound for one project snapshot context file (tree listing for a turn). */
+const MAX_PROJECT_SNAPSHOT_BYTES = 12 * 1024;
+/** Debounce for snapshot refresh after watcher bursts. */
+const PROJECT_SNAPSHOT_DEBOUNCE_MS = 5000;
 /** Timeline snapshots bigger than this are dropped (dot stays, no content). */
 const MAX_SNAPSHOT_SIZE = 100_000;
 /** file:changed pushes the content only up to this byte budget. The
@@ -643,6 +659,15 @@ class PiEditorApp {
   private installingUpdate = false;
   /** In-flight background verify runs by owner terminal id. */
   private verifyRuns = new Set<string>();
+  /** Workspaces with an in-flight background diagnostics run. */
+  private diagnosticsRuns = new Set<string>();
+  /** Last diagnostics run per workspace: proven-clean generation and start
+   *  time. Failures keep the old generation so the next settle retries. */
+  private lastDiagnostics = new Map<string, { generation: number; atMs: number }>();
+  /** Minimum gap between diagnostics runs of one workspace. */
+  private static readonly MIN_DIAGNOSTICS_INTERVAL_MS = 60_000;
+  /** Debounced snapshot refresh timers by workspace id. */
+  private projectSnapshotTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Background test processes by owner terminal id. */
   private verifyJobs = new Map<string, VerifyJob>();
   /** Busy agent terminal ids: concurrent runs in one workspace overlap. */
@@ -653,6 +678,20 @@ class PiEditorApp {
   private dispatchRuns = new Map<string, { ownerId: string; taskText: string }>();
   /** Dispatch mailbox notes per terminal, flushed to mailbox-<id>.md. */
   private dispatchMailbox = new Map<string, string[]>();
+  /** Scheduled task key (`ownerId\ntaskText`) → next run epoch ms. */
+  private scheduledNextRuns = new Map<string, number>();
+  /** Background schedule tick. Cleared on dispose. */
+  private scheduleTimer: ReturnType<typeof setInterval> | null = null;
+  /** Owner terminal id → task text awaiting an automatic verify after a
+   *  dispatch worker settled with its task done. Consumed once by the
+   *  verify finish path; never retried. */
+  private autoVerifyTasks = new Map<string, string>();
+  /** Owner terminal id → consecutive failed verifies (manual or auto).
+   *  Seeded by any failure, consumed by the loop below. Pass, cancel, or
+   *  terminal close clears it. */
+  private autoVerifyFailures = new Map<string, number>();
+  /** Consecutive failed verifies before the automatic loop stops. */
+  private static readonly MAX_AUTO_VERIFY_ATTEMPTS = 3;
   /** True after the native owner has bound the events directory. */
   private eventsDirReady = false;
 
@@ -2721,9 +2760,23 @@ class PiEditorApp {
     // The session's own last model (tracked from sidecar agent_settings /
     // agent_start). Resume restores it; without it a restart falls back to
     // the global last-used model or the provider default.
-    const lastModel = this.usablePiModel(inst.model);
-    if (inst.type === "agent" && inst.engine === "core" && lastModel) {
+    const lastModel = this.usableAgentModel(inst.model);
+    if (inst.type === "agent" && lastModel) {
       entry.model = lastModel;
+    }
+    if (inst.type === "agent") {
+      // Handoff: board tasks (assignments never survive — workers are gone)
+      // and the last settled verdict. A running verify restores as untested.
+      if (inst.plan.length > 0) {
+        entry.plan = inst.plan.slice(0, MAX_ROSTER_PLAN_TASKS).map((t) => ({
+          text: t.text.slice(0, 500),
+          paths: t.paths.slice(0, 100),
+          state: t.state,
+        }));
+      }
+      if (inst.verify.state !== "untested" && inst.verify.state !== "running") {
+        entry.verify = { state: inst.verify.state, command: inst.verify.command, summary: inst.verify.summary };
+      }
     }
     return entry;
   }
@@ -3140,6 +3193,8 @@ class PiEditorApp {
       }
       this.terminals.delete(inst.id);
       this.busyAgents.delete(inst.id);
+      this.autoVerifyTasks.delete(inst.id);
+      this.autoVerifyFailures.delete(inst.id);
       exitOwner?.workspaces.get(inst.workspaceId)?.terminalIds.delete(inst.id);
       exitOwner?.terminalIds.delete(inst.id);
       if (persistOwner) this.saveTerminalRoster(persistOwner);
@@ -3179,6 +3234,9 @@ class PiEditorApp {
       owner.mineCommit = mineRefresh;
       void mineRefresh.catch((err) => console.warn(`[main] could not refresh mine context: ${(err as Error).message}`));
     }
+    // Orient the first turn without discovery tool calls. Refreshes follow
+    // watcher bursts through scheduleProjectSnapshot.
+    if (type === "agent") void this.writeProjectSnapshot(inst);
     this.sendInstances(rendererTarget);
     return inst;
   }
@@ -3390,6 +3448,9 @@ class PiEditorApp {
       clearTimeout(verifyTimer);
       this.verifyRuns.delete(ownerId);
       this.verifyJobs.delete(ownerId);
+      const autoTask = this.autoVerifyTasks.get(ownerId) ?? null;
+      this.autoVerifyTasks.delete(ownerId);
+      const wasLooping = this.autoVerifyFailures.has(ownerId);
       if (verifyProfilePath) {
         const profilePath = verifyProfilePath;
         const profileParent = verifyProfileParent;
@@ -3412,8 +3473,37 @@ class PiEditorApp {
         }
       }
       owner.verify = { state: how, command: tc.label, summary };
+      this.savePlanRoster(owner);
       // Do not write a result for a cancelled run. The previous context stays.
       if (how !== "cancelled") this.writeVerifyContext(ownerId, tc.label, how, code, output, failed);
+      if (autoTask && how !== "cancelled") {
+        const verdict = how === "pass" ? "✅ auto-verify passed" : how === "timeout" ? "⏰ auto-verify timed out" : "❌ auto-verify failed";
+        this.appendMailboxNote(ownerId, `## Auto-verify\n\nTask: ${autoTask}\nResult: ${verdict} — \`${summary}\``);
+      }
+      if (how === "pass" || how === "cancelled") {
+        this.autoVerifyFailures.delete(ownerId);
+        if (how === "pass" && wasLooping && !autoTask) {
+          this.appendMailboxNote(ownerId, `## Auto-verify\n\nResult: ✅ verify passed — \`${summary}\``);
+        }
+      } else if (how === "timeout") {
+        // A timed-out suite usually hangs again; retrying would burn up to
+        // three 10-minute runs. Report it and stop the loop.
+        this.autoVerifyFailures.delete(ownerId);
+        if (!autoTask) {
+          this.appendMailboxNote(ownerId, `## Verify timed out\n\n\`${summary}\` — automatic re-verify is disabled for timeouts; run Verify manually when the suite is responsive again.`);
+        }
+      } else {
+        const attempts = (this.autoVerifyFailures.get(ownerId) ?? 0) + 1;
+        if (attempts >= PiEditorApp.MAX_AUTO_VERIFY_ATTEMPTS) {
+          this.autoVerifyFailures.delete(ownerId);
+          this.appendMailboxNote(ownerId, `## Auto-verify stopped\n\n${attempts} consecutive failed verifies — needs attention before another automatic run.`);
+        } else {
+          this.autoVerifyFailures.set(ownerId, attempts);
+          if (!autoTask) {
+            this.appendMailboxNote(ownerId, `## Verify failed\n\n\`${summary}\` — will automatically re-verify when your next run settles (attempt ${attempts} of ${PiEditorApp.MAX_AUTO_VERIFY_ATTEMPTS}).`);
+          }
+        }
+      }
       this.send("verify:state", { terminalId: ownerId, verify: owner.verify }, rendererTarget);
     };
     function finishAfterCleanup(): void {
@@ -3720,6 +3810,64 @@ class PiEditorApp {
       jobs.push(job);
     }
     return jobs;
+  }
+
+  /**
+   * Fire due scheduled plan tasks (`@every` / `@at` markers). One tick per
+   * minute across projects: prune dead entries, skip busy owners and full
+   * dispatch boards, and dispatch through the normal worker path so briefing,
+   * settle notes, and auto-verify apply unchanged. Never throws.
+   */
+  private async tickSchedules(now: number = Date.now()): Promise<void> {
+    if (this.disposed) return;
+    try {
+      const live = new Set<string>();
+      for (const project of this.projects.values()) {
+        for (const id of project.terminalIds) {
+          const inst = this.terminals.get(id);
+          if (!inst || inst.type !== "agent" || inst.closed) continue;
+          for (const task of inst.plan) {
+            if (task.state !== "pending") continue;
+            const spec = parseScheduleMarker(task.text);
+            if (!spec) continue;
+            const key = `${inst.id}\n${task.text}`;
+            live.add(key);
+            const next = this.scheduledNextRuns.get(key);
+            if (next === undefined) {
+              this.scheduledNextRuns.set(key, nextScheduleRun(spec, now, true));
+              continue;
+            }
+            if (next > now) continue;
+            // Reschedule first: a slow dispatch must not pile up ticks.
+            this.scheduledNextRuns.set(key, nextScheduleRun(spec, now, false));
+            if (inst.busy) continue;
+            const result = await this.dispatchRun(inst.id, task.text);
+            if (!result.ok) {
+              console.warn(`[main] scheduled dispatch skipped: ${result.error}`);
+            }
+          }
+        }
+      }
+      for (const key of [...this.scheduledNextRuns.keys()]) {
+        if (!live.has(key)) this.scheduledNextRuns.delete(key);
+      }
+    } catch (err) {
+      console.warn(`[main] schedule tick failed: ${(err as Error).message}`);
+    }
+  }
+
+  private startScheduleTick(): void {
+    if (this.scheduleTimer) return;
+    this.scheduleTimer = setInterval(() => {
+      void this.tickSchedules();
+    }, SCHEDULE_TICK_MS);
+  }
+
+  private stopScheduleTick(): void {
+    if (this.scheduleTimer) {
+      clearInterval(this.scheduleTimer);
+      this.scheduleTimer = null;
+    }
   }
 
   private async dispatchRun(
@@ -4354,6 +4502,8 @@ class PiEditorApp {
     inst.pty.cancelOutput();
     this.newCommandBuffers.delete(id);
     this.busyAgents.delete(id);
+    this.autoVerifyTasks.delete(id);
+    this.autoVerifyFailures.delete(id);
     if (inst.captureTimer) {
       clearTimeout(inst.captureTimer);
       inst.captureTimer = null;
@@ -4697,11 +4847,20 @@ class PiEditorApp {
           const task = ownerInst ? findTaskByText(ownerInst.plan, dispatchEnd.taskText) : undefined;
           if (ownerInst) {
             if (task && taskIsComplete(task.paths, inst.touched, inst.toolOutcomes)) task.state = "done";
+            this.savePlanRoster(ownerInst);
             this.sendPlan(ownerInst, rendererTarget);
             this.collectWorker(inst, ownerInst, rendererTarget);
+            this.maybeAutoVerify(ownerInst, task?.state === "done" ? task.text : null);
           }
           // The run entry goes; the tab label stays until the terminal exits.
           this.dispatchRuns.delete(inst.id);
+        } else if (inst.type === "agent") {
+          // The owner's own run settled with a failing verify on record:
+          // re-verify the fix automatically, bounded by the attempt cap.
+          this.maybeAutoReverify(inst);
+          // Refresh static diagnostics in the background when the tree moved.
+          // Generation-cached and silent; the result lands in context.
+          void this.runDiagnostics(inst);
         }
         // The settled marker is published by the checkpoint handler only after
         // its immutable source state has been captured.
@@ -6642,6 +6801,9 @@ class PiEditorApp {
         if (oldest !== undefined) this.lastWatchChange.delete(oldest);
       }
       if (isDupWatch) return;
+      // Keep per-turn project snapshots near live state without a walk per
+      // event: one debounced refresh per burst.
+      this.scheduleProjectSnapshot(ws.id);
       // A change with no busy agent terminal belongs to the user — unless a
       // verify run is running in this workspace: test outputs (snapshots,
       // coverage, fixtures) are automated writes, not user edits. The agent
@@ -7655,10 +7817,7 @@ class PiEditorApp {
     const initialCwd = initial && existsSync(initial) ? initial : null;
     this.tailer.onEvent = (id, event) => this.enqueueSidecarEvent(id, event);
     this.tailer.start();
-    // Write the bridge before the first terminal starts: pi loads it with
-    // the CLI extension option on every agent launch, with or without a
-    // project folder.
-    await this.ensureAppBridge();
+    this.startScheduleTick();
     // Open the window early so the user immediately sees the splash and UI skeleton.
     await this.createWindow();
     this.appUpdater.start();
@@ -7854,6 +8013,7 @@ class PiEditorApp {
     // exit notifications may be delivered after the app has begun teardown.
     this.ptyEgress.dispose();
     this.appUpdater?.dispose();
+    this.stopScheduleTick();
     await this.persistOpenProjects();
     await this.preferenceCommits;
     await this.preferencesStore.flush();
