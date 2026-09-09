@@ -674,6 +674,8 @@ export class SubagentRegistry {
     }
     // Resume target must be a settled sibling run: continuing an active run
     // would fork its session, and an unknown id can never resolve to one.
+    // Resuming an empty failed run with an identical brief would repeat it
+    // exactly (empty session, same task), so that stays blocked below.
     let resumeRunId: string | null = null;
     if (req.resume !== undefined && req.resume !== null) {
       if (typeof req.resume !== "string") return { ok: false, error: "spawn_subagent resume must be a run id" };
@@ -682,12 +684,17 @@ export class SubagentRegistry {
       const prior = this.runs.get(resumeRaw);
       if (!prior) return { ok: false, error: `unknown subagent run: ${resumeRaw}` };
       if (prior.state === "active") return { ok: false, error: `subagent run ${resumeRaw} is still active` };
+      if (prior.state === "failed" && !prior.result?.trim() && prior.task === task) {
+        return { ok: false, error: `identical brief already failed as ${prior.id} with an empty result — rewrite the task instead of respawning it unchanged` };
+      }
       resumeRunId = resumeRaw;
     }
     // An identical brief that already failed empty-handed will fail the same
     // way: the child never delivered anything, so there is nothing to iterate
     // on. Fail closed here instead of burning another identical boot. An
-    // explicit resume is exempt: it is the sanctioned retry-with-context.
+    // explicit resume of a run with session content is exempt: it is the
+    // sanctioned retry-with-context (resuming an empty failed run with an
+    // identical brief stays blocked above).
     if (resumeRunId === null) {
       for (const prior of this.runs.values()) {
         if (prior.state === "failed" && !prior.result?.trim() && prior.task === task) {

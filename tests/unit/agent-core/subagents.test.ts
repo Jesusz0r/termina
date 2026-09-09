@@ -286,13 +286,17 @@ describe("subagents Phase 1 registry", () => {
     expect(resumed.ok).toBe(true);
     if (!resumed.ok) return;
     expect(resumed.run.resumeRunId).toBe(first.run.id);
-    // Resume is the sanctioned retry: the identical-brief guard exempts it.
+    // Resume is the sanctioned retry — except resuming an empty failed run
+    // with an identical brief, which would repeat it exactly.
     const sameTask = await reg.spawn({ task: "explore", parent });
     expect(sameTask.ok).toBe(true);
     if (!sameTask.ok) return;
     expect(reg.settleRun(sameTask.run.id, "", "failed").ok).toBe(true);
     const resumeSame = await reg.spawn({ task: "explore", resume: sameTask.run.id, parent });
-    expect(resumeSame.ok).toBe(true);
+    expect(resumeSame.ok).toBe(false);
+    if (!resumeSame.ok) expect(resumeSame.error).toMatch(/already failed/);
+    const resumeRewritten = await reg.spawn({ task: "explore with logs", resume: sameTask.run.id, parent });
+    expect(resumeRewritten.ok).toBe(true);
   });
 
   it("settles exactly once and scans the result", async () => {

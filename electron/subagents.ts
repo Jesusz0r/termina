@@ -15,7 +15,7 @@ import { spawn as spawnProcess, type ChildProcess } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join } from "node:path";
-import { coreSessionFile, parseSessionBundlePath } from "../agent-core/session.js";
+import { coreSessionFile, parseSessionBundlePath, sessionBundleExists } from "../agent-core/session.js";
 import {
   MAX_SUBAGENT_RESULT_CHARS,
   MAX_SUBAGENT_TOUCHED,
@@ -348,6 +348,22 @@ export class SubagentHost {
         }
       }
     }
+    // One continuation at a time: two live children appending to the same
+    // replayed bundle would interleave its session file.
+    if (task.resumeRunId) {
+      const rival = [...this.runs.values()].find(
+        (other) => other.parentTerminalId === sourceTerminalId && other.task.resumeRunId === task.resumeRunId,
+      );
+      if (rival) {
+        await this.finishFailed(
+          sourceTerminalId,
+          runId,
+          task,
+          `${task.resumeRunId} is already being continued by ${rival.runId}`,
+        );
+        return;
+      }
+    }
     // Dispatch interplay (unified claims): a live dispatch worker on an
     // overlapping path fails the spawn before any child exists. Both sides
     // anchor at the dispatch root so subdir terminals key identically.
@@ -421,7 +437,10 @@ export class SubagentHost {
     let resumeFile: string | null = null;
     if (run.task.resumeRunId) {
       const retained = this.pastSessions.get(this.runKey(run.parentTerminalId, run.task.resumeRunId));
-      if (!retained) {
+      // The bundle may have vanished since (retention sweep, disk cleanup):
+      // check the filesystem, not just host memory, before spawning.
+      const usable = retained && sessionBundleExists(retained) ? retained : null;
+      if (!usable) {
         await this.finishFailed(
           run.parentTerminalId,
           run.runId,
@@ -430,7 +449,7 @@ export class SubagentHost {
         );
         return;
       }
-      resumeFile = retained;
+      resumeFile = usable;
     }
     const sessionId = `core-${randomUUID()}`;
     let sessionFile: string;
@@ -450,7 +469,8 @@ export class SubagentHost {
         );
         return;
       }
-    } else {      try {
+    } else {
+      try {
         const root = await this.sinks.sessionRootFor(run.task.cwd);
         sessionFile = coreSessionFile(root, sessionId);
         mkdirSync(dirname(sessionFile), { recursive: true });
@@ -465,8 +485,6 @@ export class SubagentHost {
     env.TERMINA_EVENTS_DIR = dir;
     env.TERMINA_CORE_SESSION_ID = resumeSessionId ?? sessionId;
     env.TERMINA_CORE_SESSION_FILE = sessionFile;
-    if (resumeFile) env.TERMINA_CORE_RESUME = "1";
-    else delete env.TERMINA_CORE_RESUME;
     env.TERMINA_CORE_SUBAGENT_DEPTH = String(run.task.depth);
     env.ELECTRON_RUN_AS_NODE = "1";
     delete env.TERMINA_CORE_MODEL;
@@ -744,9 +762,12 @@ export class SubagentHost {
       lines.push("", "Summarize this result and state your next step explicitly. The result above is complete; do not poll the run.");
     } else if (error) {
       lines.push(`${outcome === "killed" ? "Reason" : "Error"}: ${error.slice(0, 1000)}`);
-      // An identical brief will fail identically: rewrite the task or dismiss
-      // the run instead of respawning it unchanged.
-      lines.push("", "Do not respawn this exact brief. Rewrite the task or dismiss the run.");
+      // A failed identical brief will fail identically: rewrite the task or
+      // dismiss the run instead of respawning it unchanged. Killed runs
+      // (timeouts) are exempt: retrying with an adjusted budget is legitimate.
+      if (outcome === "failed") {
+        lines.push("", "Do not respawn this exact brief. Rewrite the task or dismiss the run.");
+      }
     }
     // Parent merge task: siblings that touched the same files. The parent
     // merges; siblings never negotiate with each other.

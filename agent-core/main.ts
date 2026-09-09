@@ -7880,7 +7880,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           result: outcomes[index]?.result ?? null,
         }))),
       );
-      const stalled = stallTracker.repeats >= STALL_TURNS;
+      const stalled = !interrupted && stallTracker.repeats >= STALL_TURNS;
       await writeMainTrace({
         status: stalled ? "stalled" : "ok",
         seqBefore,

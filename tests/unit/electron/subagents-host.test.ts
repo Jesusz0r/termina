@@ -508,6 +508,40 @@ describe("SubagentHost", () => {
     expect(s.notes.at(-1)!.note).toMatch(/cannot resume bg-1/);
   });
 
+  it("rejects a second live continuation of the same run", async () => {
+    const s = setup();
+    s.writeTask();
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    s.procs[0]!.out(`SUBAGENT_RESULT {"ok":true,"result":"done"}\n`);
+    s.procs[0]!.exit(0);
+    await until(() => existsSync(s.resultFile));
+    const second = "subagent-term-7-bg-2.task.json";
+    writeFileSync(join(s.dir, second), JSON.stringify({ ...validTask({ runId: "bg-2" }), resumeRunId: "bg-1" }));
+    await s.host.handleSpawn("term-7", "bg-2", second);
+    expect(s.procs.length).toBe(2);
+    const third = "subagent-term-7-bg-3.task.json";
+    writeFileSync(join(s.dir, third), JSON.stringify({ ...validTask({ runId: "bg-3" }), resumeRunId: "bg-1" }));
+    await s.host.handleSpawn("term-7", "bg-3", third);
+    // Two live children must never append to one replayed bundle.
+    expect(s.procs.length).toBe(2);
+    await until(() => existsSync(join(s.dir, "subagent-term-7-bg-3.result.json")));
+    const body = JSON.parse(readFileSync(join(s.dir, "subagent-term-7-bg-3.result.json"), "utf8"));
+    expect(body.outcome).toBe("failed");
+    expect(s.notes.at(-1)!.note).toMatch(/already being continued by bg-2/);
+  });
+
+  it("exempts killed runs from the no-respawn instruction", async () => {
+    const s = setup();
+    s.writeTask();
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    expect(s.host.kill("term-7", "bg-1", "parent cleared")).toBe(true);
+    s.procs[0]!.exit(null, "SIGTERM");
+    await until(() => existsSync(s.resultFile));
+    expect(s.readResult().outcome).toBe("killed");
+    // Timeouts may legitimately retry with an adjusted budget.
+    expect(s.notes.at(-1)!.note).not.toContain("Do not respawn");
+  });
+
   it("replays the prior bundle on resume", async () => {
     const s = setup();
     s.writeTask();
@@ -525,7 +559,9 @@ describe("SubagentHost", () => {
     await until(() => s.procs.length === 2, 5000);
     const secondEnv = s.launches[1]!.env;
     expect(secondEnv.TERMINA_CORE_SESSION_FILE).toBe(firstEnv.TERMINA_CORE_SESSION_FILE);
-    expect(secondEnv.TERMINA_CORE_RESUME).toBe("1");
+    // No RESUME flag: the task file's resume pointer is the single trigger,
+    // so boot cannot replay the bundle a second time.
+    expect(secondEnv.TERMINA_CORE_RESUME).toBeUndefined();
     expect(secondEnv.TERMINA_CORE_SESSION_ID).toBe(firstEnv.TERMINA_CORE_SESSION_ID);
     s.procs[1]!.out(`SUBAGENT_RESULT {"ok":true,"result":"continued"}\n`);
     s.procs[1]!.exit(0);
