@@ -66,22 +66,16 @@ describe("Session Fork Teardown and Retention Probes", () => {
         realHome: worldsRoot,
         userData: worldsRoot,
         primaryEventsDir: worldsRoot,
-        bridgePath: join(worldsRoot, "bridge.ts"),
-        piBin: process.execPath,
         agentCorePath: process.execPath,
         electronExecPath: process.execPath,
         candidateEnv: () => ({}),
         showThinking: () => false,
         getStore: async () => null,
         appReadPaths: () => [],
-        forkSession: async () => {
-          throw new Error("unexpected Pi fork");
-        },
         forkCoreSession: async () => {
           throw new Error("unexpected core fork");
         },
         discardCoreSession: async () => ({ ok: true }),
-        discardPiSession: async () => ({ ok: true, removed: true }),
         createCandidate: async () => ({ terminalId: "term-test", pid: 0 }),
         createCandidateWorkspace: () => join(worldsRoot, "candidate-workspace"),
         onUpdate: () => undefined,
@@ -162,8 +156,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
         primaryRoot: dir,
         baseCommit: "base-commit",
         baseStateId: "base",
-        inheritTrust: false,
-        model: null,
+          model: null,
         thinkingLevel: null,
         engine: "core",
         expectedCandidates: 2,

@@ -1,7 +1,7 @@
 /**
  * Sidecar protocol: JSONL events the engine writes and the app tails.
  *
- * Two writers emit this protocol: the Pi bridge and agent-core. This
+ * Two writers emit this protocol: agent-core primary and candidate hosts. This
  * module is the only parser and the only tailer of sidecar JSONL.
  */
 import { watch, type FSWatcher } from "node:fs";

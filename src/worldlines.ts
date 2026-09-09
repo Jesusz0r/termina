@@ -371,8 +371,9 @@ export class WorldlinesView {
     const promoteBtn = actionButton("cand-promote", "Promote", "Merge this candidate into the primary project", () => void this.promote(comparisonId, label));
     const verifyBtn = actionButton("cand-verify", "Verify", "Run the detected tests inside the candidate sandbox", () => void this.verify(comparisonId, label));
     const compareBtn = actionButton("cand-compare", "Compare", "Diff the candidate head against the shared base", () => void this.openBaseCompare(comparisonId, label));
-    const openBtn = actionButton("cand-open", "Open", "Reopen the candidate Pi terminal", () => void this.reopen(comparisonId, label));
-    actions.append(promoteBtn, verifyBtn, compareBtn, openBtn);
+    const openBtn = actionButton("cand-open", "Open", "Reopen the candidate agent terminal", () => void this.reopen(comparisonId, label));
+    const exportBtn = actionButton("cand-export", "Export", "Write a patch bundle with the evidence summary for a PR", () => void this.export(comparisonId, label));
+    actions.append(promoteBtn, verifyBtn, compareBtn, openBtn, exportBtn);
 
     el.append(head, meta, detailsBody, actions);
 

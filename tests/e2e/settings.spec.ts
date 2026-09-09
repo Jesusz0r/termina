@@ -106,7 +106,7 @@ test.describe("Settings & Preferences E2E", () => {
     await expect(toggle).toBeChecked();
 
     await toggle.uncheck();
-    expect(await page.evaluate(() => (window as any).pi.getPreferences().then((p: any) => p.autoOpenAgentFiles))).toBe(false);
+    await expect.poll(() => page.evaluate(() => (window as any).termina.getPreferences().then((p: any) => p.autoOpenAgentFiles)), { timeout: 5_000 }).toBe(false);
 
     await modal.locator(".settings-close").click();
     await expect(modal).toBeHidden();
@@ -117,7 +117,7 @@ test.describe("Settings & Preferences E2E", () => {
 
     // Restore the default for later suites.
     await page.locator(".settings-modal .settings-check-row", { hasText: "Open files the agent edits" }).locator("input").check();
-    expect(await page.evaluate(() => (window as any).pi.getPreferences().then((p: any) => p.autoOpenAgentFiles))).toBe(true);
+    await expect.poll(() => page.evaluate(() => (window as any).termina.getPreferences().then((p: any) => p.autoOpenAgentFiles)), { timeout: 5_000 }).toBe(true);
     await page.locator(".settings-modal .settings-close").click();
   });
 });

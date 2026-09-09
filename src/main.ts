@@ -1,9 +1,9 @@
 /**
  * Renderer entry — terminal-first architecture.
  *
- * Left: multiple terminal panes, each running real pi TUI in a pty.
+ * Left: multiple terminal panes, each running the real agent TUI in a pty.
  * Right: per-project Monaco editor + file explorer, live-synced via the watcher.
- * The bridge extension's sidecar events drive auto-open and the modified list.
+ * The agent's sidecar events drive auto-open and the modified list.
  */
 import editorWorker from "monaco-editor/editor/editor.worker?worker";
 import tsWorker from "monaco-editor/language/typescript/ts.worker?worker";
@@ -291,6 +291,7 @@ function setActiveProject(projectId: string | null): void {
     const active = item.id === activeProjectId;
     item.tabEl.classList.toggle("active", active);
     item.editorEl.style.display = active ? "" : "none";
+    updateProjectAttention(item.id);
   }
   placeEditorToggle(activeProjectId);
   syncPaneVisibility();
@@ -588,7 +589,7 @@ interface Pane {
   cwd: string | null;
   busy: boolean;
   type: "agent" | "shell";
-  engine?: "pi" | "core";
+  engine?: "core";
   shellName: string | undefined;
   error: boolean;
   /** True after pty:exit. The pane remains until the user closes the tab. */
@@ -597,6 +598,9 @@ interface Pane {
   accepted: Set<string>;
   reverted: Set<string>;
   verify: VerifyInfo;
+  /** True while a failed/timed-out verify awaits its first view. Cleared on
+   *  activate and on every non-fail verify state. Transient UI state. */
+  verifyAttention: boolean;
   timeline: TimelineEvent[];
   timelineLoaded: boolean;
   /** Monotonic token for the current timeline/prefix load. */
@@ -816,6 +820,7 @@ function createPaneShell(instanceId: string): Pane {
     accepted: new Set(),
     reverted: new Set(),
     verify: { state: "untested", command: null, summary: null },
+    verifyAttention: false,
     timeline: [],
     timelineLoaded: false,
     timelineRequestToken: 0,
@@ -853,7 +858,7 @@ function createPaneShell(instanceId: string): Pane {
   return pane;
 }
 
-/** A terminal tab that shows a message instead of a live pty (pi missing). */
+/** A terminal tab that shows a message instead of a live pty (agent failed to start). */
 let errorSeq = 0;
 function createErrorPane(message: string): void {
   const id = `term-error-${++errorSeq}`;
@@ -890,6 +895,12 @@ function activatePane(instanceId: string): void {
   if (!pane) return;
   removeSplash();
   activeId = instanceId;
+  // Viewing clears the unseen-failure nudge.
+  if (pane.verifyAttention) {
+    pane.verifyAttention = false;
+    updatePaneTab(pane);
+  }
+  updateProjectAttention(pane.projectId);
   if (pane.projectId) lastActivePane.set(pane.projectId, instanceId);
   // Scope to this project: background projects keep their own active tab so
   // returning to them shows a pane instead of a blank frame (flicker).
@@ -1559,7 +1570,7 @@ async function openTerminalMenu(): Promise<void> {
     items[selectedIndex]?.row.scrollIntoView({ block: "nearest" });
   };
 
-  const makeTerminal = (opts?: { type?: "agent" | "shell"; shell?: string; engine?: "pi" | "core" }) => {
+  const makeTerminal = (opts?: { type?: "agent" | "shell"; shell?: string; engine?: "core" }) => {
     const source = activeId ? panes.get(activeId) : undefined;
     const fromTerminalId = source && !source.error && !source.exited ? source.instanceId : undefined;
     const inherit = Boolean(fromTerminalId) && opts?.type !== "shell";
@@ -1596,7 +1607,6 @@ async function openTerminalMenu(): Promise<void> {
   };
 
   addItem("Agent (core)", "Termina's in-house coding agent", () => makeTerminal({ type: "agent", engine: "core" }));
-  addItem("Agent (pi)", "the pi coding agent terminal", () => makeTerminal({ type: "agent", engine: "pi" }));
   for (const shell of shells) {
     addItem(shell.name, `interactive ${shell.name} shell`, () => makeTerminal({ type: "shell", shell: shell.path }));
   }
@@ -2507,7 +2517,7 @@ function setupTabDrag(tabEl: HTMLElement): void {
   });
 }
 
-// ------------------------------------------------------------ pi events ----
+// -------------------------------------------------------- agent events ----
 
 function renderAcceptedPtyRecords(
   pane: Pane,

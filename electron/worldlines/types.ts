@@ -5,7 +5,6 @@
  */
 import type { BoundPromotionExpectedLeaf, PromotionFsIdentity } from "../worldline-git.js";
 import type { WorldlineState } from "../../shared/types.js";
-import type { PiSessionCopyIdentity } from "../session-fork.js";
 
 export interface CandidateState {
   label: "A" | "B";
@@ -294,8 +293,6 @@ export type CanonicalPath = (absPath: string) => Promise<string>;
 
 export type PromotionRecoveryContext = {
   primaryRoot: string;
-  piSessionRoot: string;
-  coreSessionRoot: string;
 };
 export type PromotionRecoveryTestHook = (stage: "after-journal-validation", journalDir: string) => void | Promise<void>;
 
@@ -307,7 +304,7 @@ export interface PromoteSeed {
   primaryWorkspaceId: string;
   comparisonId: string;
   label: "A" | "B";
-  engine: "pi" | "core";
+  engine: "core";
 }
 
 /** One recorded run (WORLDLINES §6.5). */
@@ -342,5 +339,5 @@ export interface RunRecord {
   startedAt: number;
   settledAt: number | null;
   trustHashes: Record<string, string> | null;
-  engine?: "pi" | "core";
+  engine?: "core";
 }

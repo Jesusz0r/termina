@@ -10,7 +10,7 @@ export interface TerminaE2EFixtures {
   page: Page;
   projectRoot: string;
   runRoot: string;
-  terminalEngine: "pi" | "core";
+  terminalEngine: "core";
   closeElectron: () => Promise<void>;
 }
 
@@ -43,7 +43,7 @@ async function stopElectron(app: ElectronApplication): Promise<void> {
 }
 
 export const test = base.extend<TerminaE2EFixtures>({
-  terminalEngine: ["pi", { option: true }],
+  terminalEngine: ["core", { option: true }],
   runRoot: async ({}, use) => {
     const runRoot = mkdtempSync(join(tmpdir(), "termina-playwright-"));
     await use(runRoot);

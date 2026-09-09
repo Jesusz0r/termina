@@ -51,12 +51,11 @@ export default async function run(log: (message: string) => void): Promise<void>
 
     const worlds = join(root, "worlds");
     const primaryRoot = join(root, "primary");
-    const piRoot = join(root, "pi-sessions");
-    mkdirSync(piRoot, { recursive: true });
+    mkdirSync(primaryRoot, { recursive: true, mode: 0o700 });
     // Establish the worlds/primary root provenance records through the
     // canonical recovery binder before seeding a journal. Existing leaves
     // without persisted identities are intentionally not adopted.
-    await recoverPromotionJournals(worlds, { primaryRoot, piSessionRoot: realpathSync(piRoot), coreSessionRoot: realpathSync(installedRoot) });
+    await recoverPromotionJournals(worlds, { primaryRoot });
     const primaryPath = realpathSync(primaryRoot);
     const bundleDir = dirname(dirname(installed));
     const journal = join(worlds, "promotion-journal", "interrupted-core");
@@ -74,7 +73,7 @@ export default async function run(log: (message: string) => void): Promise<void>
       }),
       { mode: 0o600 },
     );
-    await recoverPromotionJournals(worlds, { primaryRoot: primaryPath, piSessionRoot: realpathSync(piRoot), coreSessionRoot: realpathSync(join(root, "installed")) });
+    await recoverPromotionJournals(worlds, { primaryRoot: primaryPath });
     if (!existsSync(dirname(dirname(installed))) || !existsSync(journal)) {
       throw new Error("recovery deleted a journal-described core session artifact");
     }
@@ -96,7 +95,7 @@ export default async function run(log: (message: string) => void): Promise<void>
       installedSessionManifest: artifactManifest(outsideBundle),
       paths: [],
     }));
-    await recoverPromotionJournals(worlds, { primaryRoot: primaryPath, piSessionRoot: realpathSync(piRoot), coreSessionRoot: realpathSync(installedRoot) });
+    await recoverPromotionJournals(worlds, { primaryRoot: primaryPath });
     if (!existsSync(outsideBundle) || !existsSync(outsideJournal)) throw new Error("recovery removed a core bundle outside its trusted root");
     log("PASS core promotion recovery retains a valid-shaped bundle under the wrong root");
   } finally {

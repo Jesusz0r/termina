@@ -1,8 +1,8 @@
 /**
  * Consume launch-only session bindings before tools or extensions spawn children.
- * The process-local copy survives Pi extension reloads, but cannot be inherited
+ * The process-local copy survives agent host reloads, but cannot be inherited
  * by a subprocess. Keep this function self-contained: the app embeds it in the
- * standalone Pi bridge, which cannot import files from the app bundle.
+ * standalone hosts, which cannot import files from the app bundle.
  */
 export function consumeAgentSessionEnvironment(): Readonly<Record<string, string | undefined>> {
   const key = Symbol.for("termina.agentSessionEnvironment");

@@ -2,7 +2,7 @@ import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fuzzyScore, searchProjectFiles } from "../../../electron/quick-open.ts";
+import { fuzzyScore, listProjectSnapshot, searchProjectFiles } from "../../../electron/quick-open.ts";
 
 describe("quick-open fuzzyScore", () => {
   it("rejects non-subsequences", () => {
@@ -64,5 +64,44 @@ describe("quick-open searchProjectFiles", () => {
 
   it("returns [] for nul queries", async () => {
     expect((await searchProjectFiles(root, "a\0b")).entries).toEqual([]);
+  });
+});
+
+describe("quick-open listProjectSnapshot", () => {
+  let root: string;
+  beforeAll(async () => {
+    root = await mkdtemp(join(tmpdir(), "termina-snapshot-"));
+    await writeFile(join(root, "main.ts"), "x");
+    await mkdir(join(root, "src"), { recursive: true });
+    await writeFile(join(root, "src", "editor.ts"), "x");
+    await mkdir(join(root, "node_modules", "dep"), { recursive: true });
+    await writeFile(join(root, "node_modules", "dep", "index.js"), "x");
+    await writeFile(join(root, ".hidden"), "x");
+    await symlink(join(root, "src"), join(root, "loop"), "dir").catch(() => undefined);
+  });
+  afterAll(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("lists top levels first with directories suffixed", async () => {
+    const { entries, truncated } = await listProjectSnapshot(root);
+    expect(truncated).toBe(false);
+    expect(entries).toContain("main.ts");
+    expect(entries).toContain("src/");
+    expect(entries).toContain(join("src", "editor.ts"));
+    expect(entries.indexOf("src/") < entries.indexOf(join("src", "editor.ts"))).toBe(true);
+    expect(entries.some((e) => e.includes("node_modules"))).toBe(false);
+    expect(entries).not.toContain(".hidden");
+  });
+
+  it("caps entries and reports truncation", async () => {
+    const { entries, truncated } = await listProjectSnapshot(root, { maxEntries: 2 });
+    expect(entries.length).toBe(2);
+    expect(truncated).toBe(true);
+  });
+
+  it("terminates on symlink cycles", async () => {
+    const { truncated } = await listProjectSnapshot(root);
+    expect(truncated).toBe(false);
   });
 });

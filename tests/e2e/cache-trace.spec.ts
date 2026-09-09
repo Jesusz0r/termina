@@ -124,7 +124,6 @@ function assertCleanTrace(report: any, sourceErrors: unknown[]): void {
     manifestWriteFailures: 0,
     readerOmittedRecords: 0,
     manifestErrors: 0,
-    mixedSchemas: false,
   });
   expect(report.tasks).toMatchObject({ total: TURNS, settled: TURNS, successful: TURNS, unsettled: 0 });
 }

@@ -117,7 +117,7 @@ export function formatDispatchBriefing(
   const lines: string[] = [
     "## Dispatch briefing",
     "",
-    "You are one of several Pi workers on the same project. Do not edit files claimed by a sibling.",
+    "You are one of several agent workers on the same project. Do not edit files claimed by a sibling.",
     "",
     "### Your assignment",
     assigned.text,

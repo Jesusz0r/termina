@@ -105,7 +105,7 @@ export const TERMINAL_THEMES: Record<ThemeId, ITheme> = {
   },
 };
 
-export function terminalTheme(theme: ThemeId, engine?: "pi" | "core"): ITheme {
+export function terminalTheme(theme: ThemeId, engine?: "core"): ITheme {
   const base = TERMINAL_THEMES[theme];
   if (engine !== "core") return base;
   return { ...base, extendedAnsi: [...CORE_EXTENDED[theme]] };

@@ -1,9 +1,9 @@
 /**
  * Electron main process — terminal-first architecture.
  *
- * Left side: real pi interactive TUI instances running in ptys (node-pty).
+ * Left side: real agent-core interactive TUI instances running in ptys (node-pty).
  * Right side: Monaco IDE + explorer, live-synced by the file watcher.
- * An app-owned bridge extension streams agent events (tool calls, busy
+ * The agent-core host streams agent events (tool calls, busy
  * state) to sidecar files we tail — that powers auto-open of files
  * mid-run and the modified-files panel.
  */
@@ -33,11 +33,10 @@ import {
   type PtyLifecycleIdentity,
   type PtyRendererSendTarget,
 } from "./pty-egress.js";
-import { BRIDGE_EXTENSION } from "./bridge-extension.js";
 import { AgentStartEvent, SidecarEvent, SidecarEventDelivery, SidecarEventQueue, SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
-import { SnapshotStore, MIN_WORLDS_FREE_BYTES, bindOwnedDirectory, bindOwnedEntry, boundPromotionCopyTree, boundPromotionEnsureDirectory, boundPromotionListEntries, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionReadFile, boundPromotionWriteFile, captureRootInRepo, createOwnedDirectory, disposeWorldlineGitCore, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, gitTrackedFiles, platformHasRecursiveWatcher, platformHasSandboxExec, removeBoundOwnedDirectory, removeBoundOwnedEntry, trustResourceHashes, type BoundOwnedDirectory, type BoundPromotionExpectedLeaf, type PromotionFsIdentity, type SourceState, writeBoundOwnedFile } from "./worldline-git.js";
-import { WorldlineManager, dirBytes, quoteShellArg, recoverPromotionJournals, type RunRecord } from "./worldlines/index.js";
+import { SnapshotStore, MIN_WORLDS_FREE_BYTES, bindOwnedDirectory, bindOwnedEntry, boundPromotionEnsureDirectory, boundPromotionListEntries, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionReadFile, boundPromotionWriteFile, captureRootInRepo, createOwnedDirectory, disposeWorldlineGitCore, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, gitTrackedFiles, platformHasRecursiveWatcher, platformHasSandboxExec, removeBoundOwnedDirectory, removeBoundOwnedEntry, trustResourceHashes, type BoundOwnedDirectory, type BoundPromotionExpectedLeaf, type PromotionFsIdentity, type SourceState, writeBoundOwnedFile } from "./worldline-git.js";
+import { WorldlineManager, quoteShellArg, recoverPromotionJournals, type RunRecord } from "./worldlines/index.js";
 import {
   candidateSandboxLaunch,
   evidenceProfileContent,
@@ -63,8 +62,8 @@ import {
 import { AppPreferencesStore } from "./preferences.js";
 import { SubagentHost } from "./subagents.js";
 import { anchorClaimPath, isSubagentManagedFile } from "../agent-core/subagents.js";
-import { listSessionJsonl, mergeSessionFiles, searchSessionFiles, sessionFileEntry, type SessionFileEntry } from "./session-search.js";
-import { searchProjectFiles } from "./quick-open.js";
+import { listSessionJsonl, mergeSessionFiles, searchSessionFiles } from "./session-search.js";
+import { listProjectSnapshot, searchProjectFiles } from "./quick-open.js";
 import { appendPendingImages, MAX_PENDING_IMAGES, pendingImageState } from "../agent-core/host.js";
 import {
   coreSessionFile as bundleSessionFile,
@@ -119,8 +118,8 @@ import {
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MAX_OPEN_FILE_SIZE = 2 * 1024 * 1024;
 const MAX_PROMPT_BYTES = 20 * 1024 * 1024;
-const MAX_PI_RESOURCE_BYTES = 200 * 1024 * 1024;
-/** Bound for ~/.pi/agent/auth.json when checking whether a provider exists. */
+const MAX_AGENT_RESOURCE_BYTES = 200 * 1024 * 1024;
+/** Bound for ~/.termina/agent/auth.json when checking whether a provider exists. */
 const MAX_AUTH_JSON_BYTES = 128 * 1024;
 
 function isChallengeProfile(value: unknown): value is ChallengeProfile {
@@ -195,8 +194,8 @@ interface PendingPreflight {
 }
 
 /**
- * Host agent session variables. The app's pi TUI must start clean — a pinned
- * session file or model makes the TUI crash or hang at startup.
+ * Host agent session variables. The app's agent TUI must start clean — a pinned
+ * session file or model makes the TUI attach to the wrong session or hang.
  */
 const AGENT_ENV_BLOCKLIST = new Set([
   "PI_SESSION_FILE",
@@ -212,27 +211,24 @@ const AGENT_ENV_BLOCKLIST = new Set([
   "TERMINA_CORE_RESUME",
 ]);
 
-/** The environment for a pi process: the host env minus session pins. */
+/** The environment for an agent process: the host env minus session pins. */
 function cleanEnv(): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (!AGENT_ENV_BLOCKLIST.has(key)) env[key] = value;
   }
-  // The packaged bundle ships its own node for pi. Put it first on PATH so
-  // the cli.js shebang and pi's own child processes resolve it.
+  // The packaged bundle ships its own node for the agent. Put it first on
+  // PATH so the agent binary and its child processes resolve it.
   const bundledNode = join(process.resourcesPath, "node", "bin");
   if (existsSync(bundledNode)) {
     env.PATH = `${bundledNode}${env.PATH ? `:${env.PATH}` : ""}`;
   }
-  // Termina launches a pinned pi package. The TUI update check would tell
-  // the user to upgrade, but that command cannot change the pin.
-  env.PI_SKIP_VERSION_CHECK = "1";
   return env;
 }
 
 /**
  * Bundled agent-core entry. ELECTRON_RUN_AS_NODE cannot read inside the
- * asar; spawn the unpacked copy (same rule as pi's cli.js).
+ * asar; spawn the unpacked copy.
  */
 function coreEngineBinary(): string {
   return join(__dirname, "agent-core.mjs").replace("app.asar", "app.asar.unpacked");
@@ -248,9 +244,9 @@ function candidateEnv(provider: string | null): Record<string, string | undefine
   return filterCandidateEnvironment(process.env, provider, existsSync(bundledNode) ? [bundledNode] : []);
 }
 
-/** Values pi accepts for --thinking. Reject anything else at spawn. */
-const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-const MAX_PI_MODEL_CHARS = 256;
+/** Thinking levels the agent accepts. Reject anything else at spawn. */
+const AGENT_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const MAX_AGENT_MODEL_CHARS = 256;
 
 /** One background process that runs a test command. */
 interface VerifyJob {
@@ -349,7 +345,7 @@ class PiTerminalInstance {
   projectId: string | null = null;
   type: "agent" | "shell";
   /** The engine for an agent terminal. Shells leave this unset. */
-  engine?: "pi" | "core";
+  engine?: "core";
   /** Persist this tab in the project roster (user terminals, not dispatch or candidates). */
   persist = true;
   /** Harness session id for resume. */
@@ -464,8 +460,8 @@ interface ProjectState {
   unrestoredTerminals: TerminalRosterEntry[];
 }
 
-/** Env vars pi treats as a provider credential (see pi providers.md). */
-const PI_PROVIDER_ENV = [
+/** Env vars the agent treats as a provider credential (see agent-core providers). */
+const AGENT_PROVIDER_ENV = [
   "ANTHROPIC_API_KEY",
   "ANT_LING_API_KEY",
   "AZURE_OPENAI_API_KEY",
@@ -500,23 +496,24 @@ const PI_PROVIDER_ENV = [
   "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
 ] as const;
 
-/** True when process env already supplies a pi provider key. */
-function envHasPiProvider(env: NodeJS.Dict<string | undefined>): boolean {
-  for (const key of PI_PROVIDER_ENV) {
+/** True when process env already supplies an agent provider key. */
+function envHasAgentProvider(env: NodeJS.Dict<string | undefined>): boolean {
+  for (const key of AGENT_PROVIDER_ENV) {
     if (env[key]) return true;
   }
   return false;
 }
 
-/** True when auth.json holds at least one provider credential. */
-function authJsonHasPiProvider(raw: unknown): boolean {
+/** True when core auth.json holds at least one provider credential
+ *  (api_key with a key, or oauth with a refresh token). */
+function authJsonHasCoreCredential(raw: unknown): boolean {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
   for (const value of Object.values(raw as Record<string, unknown>)) {
     if (!value || typeof value !== "object" || Array.isArray(value)) continue;
     const entry = value as Record<string, unknown>;
     const type = typeof entry.type === "string" ? entry.type : "";
-    if (type === "oauth") return true;
-    if (typeof entry.key === "string" && entry.key.length > 0) return true;
+    if (type === "oauth" && typeof entry.refresh === "string" && entry.refresh.length > 0) return true;
+    if (type === "api_key" && typeof entry.key === "string" && entry.key.length > 0) return true;
   }
   return false;
 }
@@ -664,7 +661,7 @@ class PiEditorApp {
    *  One map per workspace. */
   private userEditsByWorkspace = new Map<string, Map<string, UserEdit>>();
 
-  /** The session-fork client. SessionManager work runs in the worker. */
+  /** The session-fork client. Bundle forks run in the worker. */
   private sessionFork = new SessionForkClient();
 
   /** The app-owned worlds root. */
@@ -1589,7 +1586,7 @@ class PiEditorApp {
       if (thinkingChanged) {
         const seq = candidate.showThinking ? SHOW_THINKING_CSI : HIDE_THINKING_CSI;
         for (const inst of this.terminals.values()) {
-          if (inst.engine === "core") inst.pty.write(seq);
+          if (inst.type === "agent") inst.pty.write(seq);
         }
       }
       return { ...candidate, shortcuts: { ...candidate.shortcuts } };
@@ -1721,7 +1718,7 @@ class PiEditorApp {
 
   /** The trust-sensitive resource hashes, computed off the main thread. */
   private async computeTrustHashes(project: ProjectState): Promise<Record<string, string>> {
-    const agentDir = join(homedir(), ".pi", "agent");
+    const agentDir = join(homedir(), ".termina", "agent");
     return trustResourceHashes(agentDir, project.cwd ? resolve(project.cwd) : null);
   }
 
@@ -1739,8 +1736,6 @@ class PiEditorApp {
       realHome: homedir(),
       userData: this.userDataDir,
       primaryEventsDir: this.eventsDir,
-      bridgePath: this.bridgePath(),
-      piBin: this.resolvePiBin(),
       agentCorePath: coreEngineBinary(),
       electronExecPath: process.execPath,
       candidateEnv: (provider) => candidateEnv(provider),
@@ -1749,9 +1744,10 @@ class PiEditorApp {
         const store = await project.storePromise;
         return store;
       },
-      // The sandboxed pi loads the pinned package and the node binary.
+      // The sandboxed core loads the app-owned agent-core copy, the
+      // electron binary, and the node binary.
       appReadPaths: () => {
-        const out: string[] = [dirname(dirname(dirname(dirname(this.resolvePiBin()))))];
+        const out: string[] = [];
         out.push(process.execPath);
         out.push(dirname(dirname(process.execPath)));
         const corePath = coreEngineBinary();
@@ -1803,18 +1799,6 @@ class PiEditorApp {
         const resourceLimitReason = sandboxResourceLimitPreflight();
         if (resourceLimitReason) reasons.push(resourceLimitReason);
         if (!platformHasRecursiveWatcher()) reasons.push("the platform has no reliable recursive watcher");
-        // A custom TERMINA_PI_BIN must match the pinned pi version
-        // (WORLDLINES §5): a mismatched session format disables Worldlines.
-        if (process.env.TERMINA_PI_BIN) {
-          const override = realpathSync(process.env.TERMINA_PI_BIN);
-          const pinned = realpathSync(this.pinnedPiBin());
-          if (override !== pinned) {
-            const [overrideV, pinnedV] = await Promise.all([this.piVersionOf(override), this.piVersionOf(pinned)]);
-            if (overrideV !== pinnedV) {
-              reasons.push(`TERMINA_PI_BIN is a different pi version (${overrideV ?? "unknown"} vs ${pinnedV ?? "unknown"})`);
-            }
-          }
-        }
         const free = await freeDiskBytes(this.worldsRoot);
         if (free !== null && free < MIN_WORLDS_FREE_BYTES) {
           reasons.push(`free disk space is below the 512 MB minimum (${Math.floor(free / (1024 * 1024))} MB)`);
@@ -1865,34 +1849,24 @@ class PiEditorApp {
       onPromotionApply: (relPaths) => {
         this.promotionPaths = relPaths ? new Set(relPaths) : null;
       },
-      primarySessionDir: (cwd, engine) => engine === "core" ? this.coreProjectSessionDir(cwd) : Promise.resolve(this.primarySessionDir(cwd)),
+      primarySessionDir: (cwd) => this.coreProjectSessionDir(cwd),
       installPromoted: async (seed) => {
         const rendererTarget = this.captureRendererSendTarget();
         const inst = await this.createTerminal(
           seed.primaryRoot,
-          seed.engine === "core"
-            ? await (async () => {
-                const parsed = parseSessionBundlePath(seed.installedSession);
-                if (!parsed || resolve(parsed.projectDir) !== resolve(await this.coreProjectSessionDir(seed.primaryRoot))) {
-                  throw new Error("the promoted core session path is invalid");
-                }
-                return {
-                  type: "agent" as const,
-                  engine: "core" as const,
-                  workspaceId: seed.primaryWorkspaceId,
-                  resume: { sessionId: parsed.sessionId, sessionFile: parsed.sessionFile },
-                };
-              })()
-            : {
-                type: "agent",
-                engine: "pi" as const,
-                workspaceId: seed.primaryWorkspaceId,
-                launch: {
-                  cmd: this.resolvePiBin(),
-                  args: ["-e", this.bridgePath(), "--session", seed.installedSession],
-                  env: { ...cleanEnv(), TERMINA_EVENTS_DIR: this.eventsDir },
-                },
-              },
+          await (async () => {
+            if (seed.engine !== "core") throw new Error("pi promotions are removed; core is the only engine");
+            const parsed = parseSessionBundlePath(seed.installedSession);
+            if (!parsed || resolve(parsed.projectDir) !== resolve(await this.coreProjectSessionDir(seed.primaryRoot))) {
+              throw new Error("the promoted core session path is invalid");
+            }
+            return {
+              type: "agent" as const,
+              engine: "core" as const,
+              workspaceId: seed.primaryWorkspaceId,
+              resume: { sessionId: parsed.sessionId, sessionFile: parsed.sessionFile },
+            };
+          })(),
         );
         for (const path of seed.paths) {
           const abs = await this.canonicalPath(join(seed.primaryRoot, path.rel));
@@ -1970,13 +1944,13 @@ class PiEditorApp {
     }
   }
 
-  /** Core tabs attach a clipboard image as a pending host file. Pi and
-   *  shell tabs only paste text: a PNG cannot travel through the pty. */
+  /** Core tabs attach a clipboard image as a pending host file. Shell
+   *  tabs only paste text: a PNG cannot travel through the pty. */
   private async pasteTerminal(id: unknown): Promise<TerminalPasteResult> {
     const text = (): TerminalPasteResult => ({ ok: true, kind: "text", text: capUtf8(clipboard.readText(), MAX_CLIPBOARD_BYTES) });
     if (typeof id !== "string") return text();
     const captured = this.terminals.get(id);
-    if (!captured || captured.engine !== "core") return text();
+    if (!captured || captured.type !== "agent") return text();
     const image = clipboard.readImage();
     if (image.isEmpty()) return text();
     let png: Buffer;
@@ -2005,7 +1979,7 @@ class PiEditorApp {
     if (!captured) return { ok: false, error: "terminal closed" };
     const normalized = normalizeDroppedPaths(raw);
     if (!normalized.ok) return normalized;
-    if (captured.engine === "core") {
+    if (captured.type === "agent") {
       const eventsDir = this.eventsDirOf(captured);
       const state = await pendingImageState(eventsDir, captured.id);
       if (!state.ok) return { ok: false, error: state.error };
@@ -2042,14 +2016,14 @@ class PiEditorApp {
   private async createCandidate(opts: {
     root: string;
     workspaceId: string;
-    engine?: "pi" | "core";
+    engine?: "core";
     launch: { cmd: string; args: string[]; env: Record<string, string | undefined> };
     beforeSpawn?: (terminalId: string) => void;
     signal?: AbortSignal;
   }): Promise<{ terminalId: string; pid: number }> {
     const eventsDir = opts.launch.env.TERMINA_EVENTS_DIR;
     // Allocate the id and arm the candidate-owned tailer before constructing
-    // the PTY.  Pi/core can emit session_ready from their startup handler
+    // the PTY.  Core can emit session_ready from its startup handler
     // synchronously with process creation; installing the cursor after the
     // spawn would make watch() treat that record as old history and drop the
     // readiness transition.
@@ -2233,13 +2207,6 @@ class PiEditorApp {
   }
 
   // ------------------------------------------------- promotion (WORLDLINES §6.10) ----
-
-  /** The promoted session installs into the primary session directory. */
-  private primarySessionDir(cwd: string): string {
-    // pi canonicalizes the cwd for its session dir (realpath); the install
-    // must land in the same directory the session picker reads.
-    return join(homedir(), ".pi", "agent", "sessions", this.sanitizeSessionDir(realpathSync(cwd)));
-  }
 
   /** The project that owns a comparison, or null. */
   private projectOfComparison(comparisonId: string): ProjectState | null {
@@ -2426,7 +2393,7 @@ class PiEditorApp {
     return out;
   }
 
-  /** Create a bounded evidence home from the real Pi resources. */
+  /** Create a bounded evidence home from the real agent resources. */
   private async createEvidenceHome(): Promise<string> {
     const eventsBinding = this.eventsDirBinding;
     if (!eventsBinding) throw new Error("events directory is not bound");
@@ -2444,21 +2411,21 @@ class PiEditorApp {
       const agent = await boundPromotionPrepareDirectory({
         root: dir,
         rootIdentity: binding.identity,
-        components: [".pi", "agent"],
+        components: [".termina", "agent"],
         createMissing: true,
       });
       if (!agent.identity) throw new Error("evidence agent directory was not created");
-      const agentSrc = join(homedir(), ".pi", "agent");
-      for (const name of ["auth.json", "settings.json", "models.json", "models-store.json"]) {
+      const agentSrc = join(homedir(), ".termina", "agent");
+      for (const name of ["auth.json", "mcp.json"]) {
         try {
           const source = join(agentSrc, name);
           const info = await stat(source);
-          if (!info.isFile() || info.size > MAX_PI_RESOURCE_BYTES) continue;
+          if (!info.isFile() || info.size > MAX_AGENT_RESOURCE_BYTES) continue;
           const content = await readFile(source);
           await boundPromotionWriteFile({
             root: dir,
             rootIdentity: binding.identity,
-            components: [".pi", "agent", name],
+            components: [".termina", "agent", name],
             parentIdentity: agent.identity,
             expectedDestination: { state: { type: "missing" } },
             content,
@@ -2466,30 +2433,6 @@ class PiEditorApp {
           });
         } catch {
           /* The resource is optional. */
-        }
-      }
-      for (const name of ["skills", "prompts", "themes", "extensions"]) {
-        const src = join(agentSrc, name);
-        try {
-          if ((await stat(src)).isDirectory() && (await dirBytes(src)) <= MAX_PI_RESOURCE_BYTES) {
-            const destination = await boundPromotionPrepareDirectory({
-              root: dir,
-              rootIdentity: binding.identity,
-              components: [".pi", "agent", name],
-              createMissing: true,
-            });
-            if (!destination.identity) throw new Error("evidence resource destination was not created");
-            const sourceBinding = await bindOwnedDirectory(src);
-            await boundPromotionCopyTree({
-              sourceRoot: src,
-              sourceRootIdentity: sourceBinding.identity,
-              destinationRoot: join(dir, ".pi", "agent", name),
-              destinationRootIdentity: destination.identity,
-              maxBytes: MAX_PI_RESOURCE_BYTES,
-            });
-          }
-        } catch {
-          /* An optional or oversized resource is omitted. */
         }
       }
       for (const name of ["A", "B"]) {
@@ -2727,12 +2670,6 @@ class PiEditorApp {
     return null;
   }
 
-  private piMissingMessage(): string {
-    return (
-      "pi is not installed.\n\nInstall it with:\n  npm install -g @earendil-works/pi-coding-agent\n\nor set TERMINA_PI_BIN to the pi binary path."
-    );
-  }
-
   private allocateTerminalId(): string {
     return `term-${++terminalSeq}`;
   }
@@ -2798,7 +2735,7 @@ class PiEditorApp {
       if (!inst?.persist || inst.closed) continue;
       live.push(this.rosterEntryFor(inst));
     }
-    const entries = composeTerminalRoster(live, project.unrestoredTerminals);
+    const entries = fitTerminalRoster(composeTerminalRoster(live, project.unrestoredTerminals));
     const dir = join(this.userDataDir, "terminal-rosters");
     const path = this.terminalRosterPath(project);
     const previous = this.terminalRosterCommits.get(path) ?? Promise.resolve();
@@ -2824,15 +2761,6 @@ class PiEditorApp {
   private async drainTerminalRosterCommits(): Promise<void> {
     while (this.terminalRosterCommits.size > 0) {
       await Promise.all(this.terminalRosterCommits.values());
-    }
-  }
-
-  private sessionFileExists(path: string | null | undefined): boolean {
-    if (!path) return false;
-    try {
-      return statSync(path).isFile();
-    } catch {
-      return false;
     }
   }
 
@@ -2907,15 +2835,30 @@ class PiEditorApp {
         const inst = await this.createTerminal(project.cwd, {
           id: rec.id,
           type: rec.type,
-          engine: rec.engine,
+          engine: "core",
           shell: rec.shell,
           projectId: project.id,
           workspaceId: this.primaryWorkspace(project)?.id,
           persist: true,
           skipRosterSave: true,
-          resume: { sessionId: rec.sessionId ?? null, sessionFile: rec.sessionFile ?? null },
+          resume: { sessionId: rec.sessionId ?? null, sessionFile: null },
           model: rec.model ?? null,
         });
+        // Handoff: restore the board and the last verdict. Worker assignments
+        // never survive — dispatched tasks return to pending without claims.
+        if (rec.type === "agent") {
+          if (rec.plan && rec.plan.length > 0) {
+            inst.plan = rec.plan.map((t) => ({
+              text: t.text,
+              paths: t.paths,
+              state: t.state === "done" ? "done" : "pending",
+            }));
+            this.sendPlan(inst);
+          }
+          if (rec.verify) {
+            inst.verify = { state: rec.verify.state, command: rec.verify.command, summary: rec.verify.summary };
+          }
+        }
         spawned.push({ rec, id: inst.id });
       } catch (err) {
         unrestored.push(rec);
@@ -2932,31 +2875,20 @@ class PiEditorApp {
     this.saveTerminalRoster(project);
   }
 
-  /** Live model and thinking of a pi agent tab, for copying onto a new tab. */
-  private copiedAgentSettings(fromTerminalId: string | undefined): { model: string | null; thinkingLevel: string | null } | null {
-    if (!fromTerminalId) return null;
-    const source = this.terminals.get(fromTerminalId);
-    if (!source || source.type !== "agent" || source.engine === "core") return null;
-    return {
-      model: source.model ?? source.currentRun?.model ?? null,
-      thinkingLevel: source.thinkingLevel ?? source.currentRun?.thinkingLevel ?? null,
-    };
-  }
-
   /** Provider-qualified model of a core tab, for TERMINA_CORE_* env. */
   private copiedCoreModel(fromTerminalId: string | undefined): string | null {
     if (!fromTerminalId) return null;
     const source = this.terminals.get(fromTerminalId);
-    if (!source || source.type !== "agent" || source.engine !== "core") return null;
+    if (!source || source.type !== "agent") return null;
     const model = source.model ?? source.currentRun?.model ?? null;
     return typeof model === "string" && model.includes("/") ? model : null;
   }
 
   /** Provider-qualified model id that is safe to pass as --model. */
-  private usablePiModel(model: string | null | undefined): string | null {
+  private usableAgentModel(model: string | null | undefined): string | null {
     if (typeof model !== "string") return null;
     const next = model.trim();
-    if (next.length < 3 || next.length > MAX_PI_MODEL_CHARS) return null;
+    if (next.length < 3 || next.length > MAX_AGENT_MODEL_CHARS) return null;
     if (!next.includes("/")) return null;
     if (/[\x00-\x1f]/.test(next)) return null;
     return next;
@@ -3018,7 +2950,7 @@ class PiEditorApp {
     opts?: {
       type?: "agent" | "shell";
       shell?: string;
-      engine?: "pi" | "core";
+      engine?: "core";
       workspaceId?: string;
       projectId?: string;
       id?: string;
@@ -3041,7 +2973,6 @@ class PiEditorApp {
     // cannot publish its list into a replacement renderer.
     const rendererTarget = this.captureRendererSendTarget();
     const type = opts?.type ?? "agent";
-    const agentEngine: "pi" | "core" | undefined = type === "agent" ? (opts?.engine === "pi" ? "pi" : "core") : undefined;
     const persist = opts?.persist ?? (!opts?.launch && !opts?.id);
     const requestedProject = opts?.projectId ? this.projects.get(opts.projectId) ?? null : null;
     const workspaceId =
@@ -3057,12 +2988,9 @@ class PiEditorApp {
     } else {
       id = this.allocateTerminalId();
     }
-    if (agentEngine === "pi" && !(await this.checkPiAvailable())) {
-      throw new Error(this.piMissingMessage());
+    if (opts?.engine !== undefined && opts.engine !== "core") {
+      throw new Error("pi agent terminals are removed; core is the only engine");
     }
-    const copied = agentEngine === "pi" && !opts?.launch && !opts?.resume
-      ? this.copiedAgentSettings(opts?.fromTerminalId)
-      : null;
     let cmd: string;
     let args: string[];
     let shellName: string | undefined;
@@ -3071,7 +2999,7 @@ class PiEditorApp {
     let sessionId = persist ? opts?.resume?.sessionId ?? null : null;
     let sessionFile = persist ? opts?.resume?.sessionFile ?? null : null;
     if (opts?.launch) {
-      // A worldline candidate: the sandbox wraps the pinned pi binary.
+      // A worldline candidate: the sandbox wraps the core binary.
       cmd = opts.launch.cmd;
       args = opts.launch.args;
       env = { ...opts.launch.env, TERMINA_TERMINAL_ID: id };
@@ -3083,11 +3011,10 @@ class PiEditorApp {
       shellName = chosen.name;
       shellPath = chosen.path;
       env = { ...process.env };
-    } else if (agentEngine === "core") {
-      // In-house engine. Same sidecar contract as the Pi bridge, so
-      // timeline and modified list work unchanged. ELECTRON_RUN_AS_NODE
-      // cannot read inside the asar; spawn the unpacked copy (same rule
-      // as pi's cli.js).
+    } else if (type === "agent") {
+      // In-house engine. Timeline and modified list consume its sidecar
+      // contract. ELECTRON_RUN_AS_NODE cannot read inside the asar; spawn
+      // the unpacked copy.
       cmd = process.execPath;
       args = [
         coreEngineBinary(),
@@ -3118,7 +3045,7 @@ class PiEditorApp {
       if (resuming) env.TERMINA_CORE_RESUME = "1";
       else delete env.TERMINA_CORE_RESUME;
       const coreModel = this.copiedCoreModel(opts?.fromTerminalId);
-      const resumeModel = this.usablePiModel(opts?.model);
+      const resumeModel = this.usableAgentModel(opts?.model);
       if (coreModel) {
         const cut = coreModel.indexOf("/");
         env.TERMINA_CORE_PROVIDER = coreModel.slice(0, cut);
@@ -3163,8 +3090,7 @@ class PiEditorApp {
     inst.shellPath = shellPath;
     inst.sessionId = sessionId;
     inst.sessionFile = sessionFile;
-    if (type === "agent") inst.engine = agentEngine === "core" ? "core" : "pi";
-    if (copied) this.applyAgentSettings(inst, copied.model, copied.thinkingLevel);
+    if (type === "agent") inst.engine = "core";
     this.terminals.set(inst.id, inst);
     if (owner) {
       owner.workspaces.get(workspaceId)?.terminalIds.add(id);
@@ -3616,6 +3542,7 @@ class PiEditorApp {
     );
     if (tasks.length === 0) return;
     inst.plan = tasks;
+    this.savePlanRoster(inst);
     // Do not reset touched or tool outcomes. The plan can arrive after
     // the first tool events, and their progress must count.
     reattachDispatchAssignments(
@@ -3655,9 +3582,10 @@ class PiEditorApp {
   private searchSessionsSeq = 0;
 
   /**
-   * Search past session files for the active project (Pi and core).
-   * Streams lines asynchronously so the main process stays responsive.
-   * Bounded to the 50 newest sessions and 50 total hits.
+   * Search past session files for the active project (core bundles plus
+   * read-only Pi history left in ~/.pi). Streams lines asynchronously so
+   * the main process stays responsive. Bounded to the 50 newest sessions
+   * and 50 total hits. History search never spawns an agent.
    */
   private async searchSessions(query: string): Promise<SessionHit[]> {
     const project = this.project();
@@ -3668,7 +3596,7 @@ class PiEditorApp {
     const piDir = join(homedir(), ".pi", "agent", "sessions", key);
     const coreDir = join(this.coreSessionRoot(), key);
     const seq = ++this.searchSessionsSeq;
-    const [coreSessions, extra] = await Promise.all([listLogicalSessions(coreDir), this.extraSessionFiles(project)]);
+    const coreSessions = await listLogicalSessions(coreDir);
     const files = mergeSessionFiles([
       await listSessionJsonl(piDir),
       coreSessions.map((entry) => ({
@@ -3677,7 +3605,6 @@ class PiEditorApp {
         mtimeMs: entry.mtimeMs,
         segments: entry.segments,
       })),
-      extra,
     ]);
     const hits = await searchSessionFiles({
       query,
@@ -3706,30 +3633,6 @@ class PiEditorApp {
       shouldStop: () => this.disposed || seq !== this.fileSearchSeq,
     });
     return truncated ? { entries, truncated: true } : { entries };
-  }
-
-  /** Extra Pi sessions from live tabs and unrestored roster entries. */
-  private async extraSessionFiles(project: ProjectState): Promise<SessionFileEntry[]> {
-    const paths: string[] = [];
-    for (const id of project.terminalIds) {
-      const inst = this.terminals.get(id);
-      if (inst?.persist && inst.engine !== "core" && inst.sessionFile) paths.push(inst.sessionFile);
-    }
-    for (const rec of project.unrestoredTerminals) {
-      if (rec.engine !== "core" && rec.sessionFile) paths.push(rec.sessionFile);
-    }
-    const out: SessionFileEntry[] = [];
-    for (const path of paths) {
-      let real = path;
-      try {
-        real = realpathSync(path);
-      } catch {
-        /* keep the unresolved path */
-      }
-      const entry = await sessionFileEntry(real);
-      if (entry) out.push(entry);
-    }
-    return out;
   }
 
   private async isProjectFile(relPath: string, projectCwd: string): Promise<boolean> {
@@ -3873,7 +3776,7 @@ class PiEditorApp {
       try {
         const worker = await this.createTerminal(undefined, {
           type: "agent",
-          engine: owner.engine === "core" ? "core" : "pi",
+          engine: "core",
           workspaceId: owner.workspaceId,
           id: job.id,
           fromTerminalId: ownerId,
@@ -4764,6 +4667,7 @@ class PiEditorApp {
           const task = ownerInst ? findTaskByText(ownerInst.plan, dispatchStart.taskText) : undefined;
           if (ownerInst && task) {
             task.state = "active";
+            this.savePlanRoster(ownerInst);
             this.sendPlan(ownerInst, rendererTarget);
           }
         }
@@ -5247,7 +5151,7 @@ class PiEditorApp {
         unownedEdits: 0,
         startedAt: Date.now(),
         settledAt: null,
-        engine: inst.engine === "core" ? "core" : "pi",
+        engine: "core",
       };
       // The source must not have changed between preflight and start.
       if (ws && ws.generation !== pending.generation) {
@@ -6346,14 +6250,11 @@ class PiEditorApp {
         this.activeProjectId = id;
         project.activationGeneration = activationGeneration;
       }
-      await this.ensureAppBridge();
       // Finish or roll back any pending promotion journal BEFORE the
       // primary watcher starts: the restored bytes must not attribute to
       // a user edit.
       await recoverPromotionJournals(this.worldsRoot, {
         primaryRoot: project.canonicalRoot,
-        piSessionRoot: this.primarySessionDir(project.canonicalRoot),
-        coreSessionRoot: await this.coreProjectSessionDir(project.canonicalRoot),
       });
       this.createWorkspace(project, cwd, true);
       await this.loadMineFiles(project);
@@ -6434,7 +6335,7 @@ class PiEditorApp {
       && this.projectActivationGeneration === activationGeneration
       && this.projectSelectionAction === selectionAction;
     if (!current()) return false;
-    const needsLogin = await this.piNeedsLogin();
+    const needsLogin = await this.agentNeedsLogin();
     // Auth I/O is asynchronous. Re-check every active-project fence before
     // publishing; an earlier request must never resurrect a closed/hidden tab.
     if (!current()) return false;
@@ -6443,12 +6344,12 @@ class PiEditorApp {
   }
 
   /**
-   * True when pi has no provider in auth.json or in the process environment.
+   * True when the agent has no provider in core auth.json or in the process environment.
    * The check is boolean only. It never sends credentials to the renderer.
    */
-  private async piNeedsLogin(): Promise<boolean> {
-    if (envHasPiProvider(process.env)) return false;
-    const authPath = join(homedir(), ".pi", "agent", "auth.json");
+  private async agentNeedsLogin(): Promise<boolean> {
+    if (envHasAgentProvider(process.env)) return false;
+    const authPath = join(homedir(), ".termina", "agent", "auth.json");
     try {
       const info = await stat(authPath);
       if (!info.isFile() || info.size === 0) {
@@ -6462,7 +6363,7 @@ class PiEditorApp {
       if (this.loginHint && this.loginHint.mtimeMs === info.mtimeMs && this.loginHint.size === info.size) {
         return this.loginHint.needsLogin;
       }
-      const needsLogin = !authJsonHasPiProvider(JSON.parse(await readFile(authPath, "utf8")));
+      const needsLogin = !authJsonHasCoreCredential(JSON.parse(await readFile(authPath, "utf8")));
       this.loginHint = { mtimeMs: info.mtimeMs, size: info.size, needsLogin };
       return needsLogin;
     } catch {
@@ -6701,35 +6602,6 @@ class PiEditorApp {
         inst.pty.killGroup("SIGKILL");
         inst.pty.kill("SIGKILL");
       }
-    }
-  }
-
-  // ---------------------------------------------------------- app bridge ----
-
-  /** The app-owned bridge file, passed to pi with the CLI extension option. */
-  private bridgePath(): string {
-    return join(this.userDataDir, "termina-bridge.ts");
-  }
-
-  /** Write the bridge to the app user-data directory when it changed. */
-  private async ensureAppBridge(): Promise<void> {
-    try {
-      const p = this.bridgePath();
-      try {
-        if (await readFile(p, "utf8") === BRIDGE_EXTENSION) return; // already current
-      } catch {
-        /* missing — write it */
-      }
-      await mkdir(dirname(p), { recursive: true });
-      const temp = `${p}.${process.pid}.${randomUUID()}.tmp`;
-      try {
-        await writeFile(temp, BRIDGE_EXTENSION, { flag: "wx", mode: 0o600 });
-        await fsRename(temp, p);
-      } finally {
-        await rm(temp, { force: true }).catch(() => undefined);
-      }
-    } catch (err) {
-      console.warn(`[main] could not write the app bridge: ${(err as Error).message}`);
     }
   }
 
@@ -7214,7 +7086,7 @@ class PiEditorApp {
     // ---- Project tabs ----
     ipcMain.handle("project:list", async () => {
       if (this.initialRestorePromise) await this.initialRestorePromise;
-      const needsLogin = await this.piNeedsLogin();
+      const needsLogin = await this.agentNeedsLogin();
       return [...this.projects.values()].map((p) => ({
         id: p.id,
         cwd: p.cwd,
@@ -7281,7 +7153,7 @@ class PiEditorApp {
     ipcMain.handle("terminals:create", async (_e, opts?: unknown) => {
       let type: "agent" | "shell" | undefined;
       let shell: string | undefined;
-      let engine: "pi" | "core" | undefined;
+      let engine: "core" | undefined;
       let fromTerminalId: string | undefined;
       let projectId: string | undefined;
       if (opts !== undefined) {
@@ -7290,7 +7162,7 @@ class PiEditorApp {
         if (rec.type !== undefined && rec.type !== "agent" && rec.type !== "shell") {
           return { ok: false, error: "invalid terminal type" };
         }
-        if (rec.engine !== undefined && rec.engine !== "pi" && rec.engine !== "core") {
+        if (rec.engine !== undefined && rec.engine !== "core") {
           return { ok: false, error: "invalid agent engine" };
         }
         if (rec.shell !== undefined && typeof rec.shell !== "string") return { ok: false, error: "invalid shell" };
@@ -7991,10 +7863,10 @@ class PiEditorApp {
     await this.drainRecordingTasks();
     await this.sessionRetention.drain();
     await Promise.all([...this.projects.values()].map((project) => project.worldlines?.drainSessionForks() ?? Promise.resolve()));
-    // Worldline disposal clears completed runs and therefore may enqueue the
-    // identity-bound Pi branch discards. Keep the session worker alive until
+    // Worldline disposal clears completed runs and therefore may enqueue
+    // retained session-bundle discards. Keep the session worker alive until
     // those exact cleanup requests have drained; disposing it first would
-    // silently retain every finalized Pi branch at app shutdown.
+    // silently retain every finalized branch at app shutdown.
     await Promise.all([...this.projects.values()].map((project) => project.worldlines?.dispose().catch(() => undefined) ?? Promise.resolve()));
     await this.sessionFork.dispose();
     for (const [path, binding] of [...this.evidenceHomeDirs]) {

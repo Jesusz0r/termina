@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { isRosterModel, parseTerminalRoster } from "../../../electron/terminal-roster.ts";
+import { readFileSync } from "node:fs";
+import { fitTerminalRoster, isRosterModel, parseTerminalRoster } from "../../../electron/terminal-roster.ts";
 
 describe("terminal roster model pin", () => {
   it("accepts a provider-qualified model on agent entries", () => {

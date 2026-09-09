@@ -2,7 +2,7 @@
   "name": "termina",
   "productName": "Termina",
   "version": "0.1.38",
-  "description": "Hybrid terminal/editor: prompt a pi coding agent in a terminal, watch it edit files live in a Monaco (VS Code) editor, click modified files to inspect them.",
+  "description": "Hybrid terminal/editor: prompt an agentic coding agent in a terminal, watch it edit files live in a Monaco (VS Code) editor, click modified files to inspect them.",
   "repository": {
     "type": "git",
     "url": "https://github.com/Jesusz0r/termina.git"
@@ -52,7 +52,7 @@
     "test:release-macos": "pnpm run test:sandbox-security-live && pnpm run test:e2e-release-smoke",
     "test:release": "pnpm run test && pnpm run test:release-core && pnpm run test:agent-core-main && pnpm run test:release-workflow",
     "test": "pnpm run typecheck && pnpm run test:unit",
-    "test:spikes": "pnpm run spike -- capture && pnpm run spike -- merge && pnpm run spike -- session-fork && pnpm run spike -- platform && pnpm run spike -- tree-delta && pnpm run spike -- gitignore && pnpm run spike -- terminal-roster && pnpm run spike -- core-session-promotion && pnpm run spike -- promotion-transaction && pnpm run spike -- watcher-idle && pnpm run test:promotion-native-boundary",
+    "test:spikes": "pnpm run spike -- capture && pnpm run spike -- merge && pnpm run spike -- platform && pnpm run spike -- tree-delta && pnpm run spike -- gitignore && pnpm run spike -- terminal-roster && pnpm run spike -- core-session-promotion && pnpm run spike -- promotion-transaction && pnpm run spike -- watcher-idle && pnpm run test:promotion-native-boundary",
     "test:e2e": "playwright test",
     "test:e2e:cache-live": "playwright test tests/e2e/cache-trace.spec.ts --grep \"live Core cache probe\"",
     "test:e2e:watch": "playwright test --ui",
@@ -62,7 +62,6 @@
     "dist:mac": "pnpm run build && node --experimental-strip-types scripts/prepare-resources.ts && electron-builder --mac"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.84.4",
     "@lydell/node-pty": "^1.2.0-beta.14",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",

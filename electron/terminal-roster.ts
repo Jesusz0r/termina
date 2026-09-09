@@ -22,15 +22,16 @@ export type TerminalRosterEntry = {
   sessionFile?: string | null;
   /** Provider-qualified model the session last used (core resume pin). */
   model?: string;
+  /** Handoff plan: task text, paths, and state. Worker assignments never
+   *  persist — the restoring side resets active tasks to pending. */
+  plan?: Array<{ text: string; paths: string[]; state: "pending" | "active" | "done" }>;
+  /** Last verify verdict for the badge. */
+  verify?: { state: "untested" | "pass" | "fail" | "timeout" | "cancelled"; command: string | null; summary: string | null };
 };
 
 function isAbsPath(value: string): boolean {
   if (!value || value.length > MAX_PATH || /[\x00-\x1f]/.test(value)) return false;
   return value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value);
-}
-
-export function isRosterSessionId(value: string): boolean {
-  return value.length <= MAX_SESSION_ID && SESSION_ID.test(value);
 }
 
 /** provider/model without whitespace or control characters. The model part
@@ -56,25 +57,26 @@ export function parseTerminalRoster(raw: unknown): TerminalRosterEntry[] {
     if (rec.type !== "agent" && rec.type !== "shell") continue;
     if (typeof rec.id !== "string" || rec.id.length > MAX_ID || !TERM_ID.test(rec.id) || seen.has(rec.id)) continue;
     const entry: TerminalRosterEntry = { id: rec.id, type: rec.type };
-    if (rec.type === "agent") {
-      if (rec.engine === "core" || rec.engine === "pi") entry.engine = rec.engine;
-      else entry.engine = "core";
-    }
+    // Legacy pi entries start a fresh core session; the pi session file is
+    // ignored. Pi spawn is removed.
+    if (rec.type === "agent") entry.engine = "core";
     if (rec.type === "shell" && typeof rec.shell === "string" && isAbsPath(rec.shell)) entry.shell = rec.shell;
-    if (
-      typeof rec.sessionId === "string" &&
-      (entry.engine === "core" ? isCoreSessionId(rec.sessionId) : isRosterSessionId(rec.sessionId))
-    ) {
+    if (typeof rec.sessionId === "string" && isCoreSessionId(rec.sessionId)) {
       entry.sessionId = rec.sessionId;
-    }
-    if (entry.engine !== "core" && typeof rec.sessionFile === "string" && isAbsPath(rec.sessionFile)) {
-      entry.sessionFile = rec.sessionFile;
     }
     // The session's own last model, so resume restores it instead of the
     // global last-used one. Entries written before this field exist stay
     // valid without it. Same shape rule as the spawn-time model flag.
     if (entry.type === "agent" && typeof rec.model === "string" && isRosterModel(rec.model)) {
       entry.model = rec.model;
+    }
+    // Handoff state: the board and the last verdict survive restarts.
+    // Entries written before these fields exist stay valid without them.
+    if (entry.type === "agent") {
+      const plan = parseRosterPlan(rec.plan);
+      if (plan) entry.plan = plan;
+      const verify = parseRosterVerify(rec.verify);
+      if (verify) entry.verify = verify;
     }
     seen.add(entry.id);
     out.push(entry);

@@ -1,39 +1,29 @@
 /**
  * Session worker entry (worker_threads).
  *
- * Performs all SessionManager work off the Electron main thread
- * (WORLDLINES §6.7). Forking a candidate session runs here: copy the
- * source session to an app-private workspace, open the copy, verify the
- * entry chain, extract the path, and fork it into the candidate session
- * directory.
+ * Performs all core session-bundle work off the Electron main thread.
+ * Forking a candidate session runs here: materialize the bundle slice into
+ * the candidate session directory. Session parsing and durable writes never
+ * run on Electron's main thread.
  *
  * Keep session-fork as a type-only import: a runtime import would load the
  * client (and nested Worker) inside this thread.
  */
 import { parentPort } from "node:worker_threads";
-import { existsSync, lstatSync, realpathSync } from "node:fs";
-import type { BigIntStats } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { lstatSync, realpathSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
 import {
-  copyPiSessionFile,
   inspectEmptySessionBundle,
   writeForkedSession,
-  type PiSessionCopyIdentity,
-  type PiSessionCopyResult,
 } from "../agent-core/session.js";
 import {
-  boundPromotionCreateDirectory,
-  boundPromotionOpenDirectory,
   boundPromotionRemoveTree,
   disposeWorldlineGitCore,
 } from "./worldline-git.js";
 import type {
   CoreSessionForkRequest,
   CoreSessionDiscardRequest,
-  PiSessionCopyRequest,
   SessionForkReply,
-  SessionForkRequest,
   SessionWorkerRequest,
 } from "./session-fork.js";
 

@@ -173,11 +173,8 @@ describe("Sidecar Concurrency & Race Condition Invariants", () => {
   it("passes sidecar runtime flow tests", async () => {
     const root = await mkdtemp(join(tmpdir(), "termina-sidecar-runtime-flow-"));
     const sidecarBundle = join(root, "sidecar.mjs");
-    const bridgeBundle = join(root, "bridge-bundle.mjs");
     await build({ entryPoints: ["electron/sidecar.ts"], bundle: true, platform: "node", format: "esm", outfile: sidecarBundle, logLevel: "silent" });
-    await build({ entryPoints: ["electron/bridge-extension.ts"], bundle: true, platform: "node", format: "esm", outfile: bridgeBundle, logLevel: "silent" });
     const { SidecarTailer } = await import(`${pathToFileURL(sidecarBundle).href}?${Date.now()}`);
-    const { BRIDGE_EXTENSION } = await import(`${pathToFileURL(bridgeBundle).href}?${Date.now()}`);
 
     const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
     const waitFor = async (predicate: () => boolean, timeoutMs = 5000) => {
@@ -227,45 +224,14 @@ describe("Sidecar Concurrency & Race Condition Invariants", () => {
       const writerTailer = new SidecarTailer(writerDir, fakeWatch);
       writerTailer.onEvent = (_id: string, event: any) => { writerEvents.push(event); return true; };
       writerTailer.start();
-      writerTailer.watch("term-writer");
-      const extensionSource = BRIDGE_EXTENSION.replace('import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";', "");
-      const extensionFile = join(root, "bridge.ts");
-      await writeFile(extensionFile, extensionSource);
-      process.env.TERMINA_EVENTS_DIR = writerDir;
-      process.env.TERMINA_TERMINAL_ID = "term-writer";
-      const handlers = new Map<string, Function>();
-      const pi = { on(name: string, handler: Function) { handlers.set(name, handler); }, appendEntry() {} };
-      const extension = await import(`${pathToFileURL(extensionFile).href}?${Date.now()}`);
-      extension.default(pi);
-
-      const protectedFile = join(writerDir, "protected.ts");
-      await writeFile(join(writerDir, "mine-term-writer.json"), JSON.stringify([protectedFile]));
-      let confirmResolve: ((approved: boolean) => void) | undefined;
-      let confirmCalls = 0;
-      const toolContext = {
-        cwd: writerDir,
-        ui: {
-          confirm: () => {
-            confirmCalls++;
-            return new Promise<boolean>((resolve) => { confirmResolve = resolve; });
-          },
-        },
-      };
-      let approvalSettled = false;
-      const approval = handlers.get("tool_call")!({ toolName: "write", input: { path: protectedFile } }, toolContext)
-        .then((result: unknown) => { approvalSettled = true; return result; });
-      await sleep(25);
-      expect(approvalSettled).toBe(false);
-      confirmResolve!(true);
-      expect(await approval).toBeUndefined();
-      expect(confirmCalls).toBe(1);
-      expect(await handlers.get("tool_call")!({ toolName: "edit", input: { path: protectedFile } }, toolContext)).toBeUndefined();
-      expect(confirmCalls).toBe(1);
-
-      await mkdir(writerFile);
-      handlers.get("session_start")!({}, { model: { id: "model", provider: "test" }, thinkingLevel: "low" });
-      await rm(writerFile, { recursive: true, force: true });
       await writeFile(writerFile, "", { mode: 0o600 });
+      writerTailer.watch("term-writer");
+      // The core host appends startup records directly; the tailer must
+      // deliver session_ready + agent_settings with unique generations.
+      await appendFile(writerFile, [
+        { bridgeId: "writer", seq: 1, t: "session_ready", generation: "generation-writer-a" },
+        { bridgeId: "writer", seq: 2, t: "agent_settings", model: "test/model", generation: "generation-writer-b" },
+      ].map((event) => `${JSON.stringify(event)}\n`).join(""));
       await waitFor(() => writerEvents.length === 2);
       expect(writerEvents.map((event) => event.seq)).toEqual([1, 2]);
       expect(writerEvents.map((event) => event.t)).toEqual(["session_ready", "agent_settings"]);

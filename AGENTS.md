@@ -1,6 +1,6 @@
 # AGENTS.md — Termina
 
-Hybrid coding tool: left = real pi TUI in a pty, right = Monaco + file explorer. Desktop app: Electron + Vite + TypeScript + node-pty + Rust `core/` (`termina-core`).
+Hybrid coding tool: left = real agent TUI in a pty, right = Monaco + file explorer. Desktop app: Electron + Vite + TypeScript + node-pty + Rust `core/` (`termina-core`).
 
 ## Decision priority (when rules conflict)
 
@@ -24,7 +24,7 @@ One responsibility → one owner. Reuse, extend, or replace — never add a para
 - `electron/session-fork.ts` → `electron/session-worker.ts` — only session fork path.
 - `shared/preferences.ts` — only prefs validator; `electron/preferences.ts` — only file store.
 - `electron/plan-board.ts` — Plan Board parse/progress/dispatch. `electron/worldlines.ts` — comparisons/promotion/evidence/runs. `electron/evidence.ts` only measures.
-- `electron/sidecar.ts` owns sidecar parse/tail. Only writers: `electron/bridge-extension.ts` + `agent-core/host.ts` + `logEvent` in `agent-core/main.ts`.
+- `electron/sidecar.ts` owns sidecar parse/tail. Only writers: `agent-core/host.ts` + `logEvent` in `agent-core/main.ts`.
 - `electron/session-search.ts` owns Session Search walk. `electron/sandbox.ts` owns sandbox profiles.
 - `agent-core/subagents.ts` — background-subagent registry and host contract (spawn validation, claims, handoff/result formats, scanning). The tool surface stays in `agent-core/main.ts`; the headless entry is `--subagent-task`.
 - `electron/subagents.ts` — headless child lifecycle (spawn, settle/kill/retry, result files, mailbox notes). Piped stdio, never node-pty; only spawner of `--subagent-task` children.
@@ -36,7 +36,7 @@ When a touched file exceeds 800 lines, assess extraction. Extract cohesive respo
 
 ## Rules
 
-**No backwards compat.** Don't add shims, deprecated aliases, or feature-flagged old paths. Migrate internal callers, delete the old interface. Temporary compat only at the narrowest boundary when an external file on disk forces it (prefs on disk, snapshot format, sidecar from a running `pi`); delegate to the canonical impl and remove when the constraint lifts. When a feature is removed, remove its IPC/types/helpers/tests/docs too.
+**No backwards compat.** Don't add shims, deprecated aliases, or feature-flagged old paths. Migrate internal callers, delete the old interface. Temporary compat only at the narrowest boundary when an external file on disk forces it (prefs on disk, snapshot format, promotion journals from a previous build); delegate to the canonical impl and remove when the constraint lifts. When a feature is removed, remove its IPC/types/helpers/tests/docs too.
 
 **No overengineering / YAGNI.** Prefer in order: use existing → compose → small change → small helper → new abstraction → new subsystem. Don't add config/options/abstractions for hypothetical needs. `TERMINA_EVENTS_DIR`, `TERMINA_CORE_BIN`, `TERMINA_SKIP_CORE_BUILD`, `CSC_NAME` stay configurable. The smallest correct, boring code wins.
 
@@ -77,7 +77,7 @@ Follow the existing owner for the behavior: `agent-core/auth.ts` (auth/provider 
 
 ## Glossary
 
-Run = one agent session (`agent_start` → `agent_settled`). Sidecar = JSONL per terminal in `TERMINA_EVENTS_DIR`. Baseline = file at run start. Snapshot = file at a moment. Dot = timeline point. Worker = one dispatched plan task. Fork point = timeline event + Pi session entry + immutable source state. Worldline = isolated candidate tree + session. Candidate/Reference(A)/Alternative(B)/Challenge/Evidence contract/Write lease/Workspace — see `docs/reference/AGENT-CORE.md`.
+Run = one agent session (`agent_start` → `agent_settled`). Sidecar = JSONL per terminal in `TERMINA_EVENTS_DIR`. Baseline = file at run start. Snapshot = file at a moment. Dot = timeline point. Worker = one dispatched plan task. Fork point = timeline event + agent session sequence + immutable source state. Worldline = isolated candidate tree + session. Candidate/Reference(A)/Alternative(B)/Challenge/Evidence contract/Write lease/Workspace — see `docs/reference/AGENT-CORE.md`.
 
 ## Event flow
 

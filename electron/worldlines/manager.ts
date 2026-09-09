@@ -6,7 +6,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import type { BigIntStats } from "node:fs";
-import { lstat as lstatPath, readFile, realpath, stat } from "node:fs/promises";
+import { lstat as lstatPath, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { buildSandboxProfile, candidateSandboxLaunch, type SandboxPaths } from "../sandbox.js";
 import {
@@ -141,11 +141,10 @@ import {
   MAX_CANDIDATE_BYTES,
   MAX_IGNORED_BYTES,
   MAX_IGNORED_FILES,
-  MAX_PI_RESOURCE_BYTES,
+  MAX_AGENT_RESOURCE_BYTES,
   MAX_PROMPT_BYTES,
   MAX_RETAINED_RUNS,
   MAX_RUNS_PER_TERMINAL,
-  MAX_SESSION_BYTES,
   MAX_STALE_SWEEP_BYTES,
   MAX_TEMPLATE_BYTES,
   MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES,
@@ -153,8 +152,9 @@ import {
   READY_TIMEOUT_MS,
   RUNTIME_ALLOWLIST,
 } from "./limits.js";
-function runEngine(run: { engine?: "pi" | "core" }): "pi" | "core" {
-  return run.engine === "core" ? "core" : "pi";
+/** Core is the only engine. A missing engine fails closed as non-core. */
+function isCoreRun(run: { engine?: "core" }): boolean {
+  return run.engine === "core";
 }
 
 const CHALLENGE_CONSTRAINTS: Record<ChallengeProfile, string> = {
@@ -175,26 +175,21 @@ export interface WorldlineDeps {
   realHome: string;
   userData: string;
   primaryEventsDir: string;
-  bridgePath: string;
-  piBin: string;
   agentCorePath: string;
   electronExecPath: string;
   /** Candidate-only allowlisted environment, scoped to one model provider. */
   candidateEnv(provider: string | null): Record<string, string | undefined>;
   showThinking(): boolean;
   getStore(): Promise<SnapshotStore | null>;
-  /** Read-only load paths for the sandboxed pi (app package + node). */
+  /** Read-only load paths for the sandboxed core (agent-core copy + electron + node). */
   appReadPaths(): string[];
-  forkSession(opts: SessionForkOpts, callOptions?: SessionForkCallOptions): Promise<SessionForkResult>;
   forkCoreSession(opts: CoreSessionForkOpts, callOptions?: SessionForkCallOptions): Promise<CoreSessionForkResult>;
   /** Discard a proven durable core session bundle through the retention owner. */
   discardCoreSession(runId: string): Promise<{ ok: boolean; error?: string }>;
-  /** Discard a finalized Pi branch only through its copied-file identity. */
-  discardPiSession(sessionFile: string, identity: PiSessionCopyIdentity): Promise<PiSessionDiscardResult>;
   createCandidate(opts: {
     root: string;
     workspaceId: string;
-    engine?: "pi" | "core";
+    engine?: "core";
     launch: { cmd: string; args: string[]; env: Record<string, string | undefined> };
     /** Install candidate routing before the PTY is allowed to spawn. */
     beforeSpawn?: (terminalId: string) => void;
@@ -209,7 +204,7 @@ export interface WorldlineDeps {
   onRemoved(comparisonId: string): void;
   /** The fork preflight (WORLDLINES §4): repo, platform, disk. */
   preflight(): Promise<{ ok: boolean; reasons: string[] }>;
-  /** The trust-sensitive resource hashes of the project + pi agent dir. */
+  /** The trust-sensitive resource hashes of the project + agent dir. */
   trustHashes(): Promise<Record<string, string>>;
   /** Capture a candidate head off the main thread. */
   captureHead(root: string, gitDir: string, parent: string | null): Promise<{ commit: string; tree: string }>;
@@ -248,7 +243,7 @@ export interface WorldlineDeps {
   } | null>;
   onEvidenceUpdate(summary: EvidenceSummary): void;
   onPromotionApply(relPaths: string[] | null): void;
-  primarySessionDir(cwd: string, engine: "pi" | "core"): Promise<string>;
+  primarySessionDir(cwd: string): Promise<string>;
   installPromoted(seed: PromoteSeed): Promise<{ terminalId: string }>;
 }
 
@@ -357,7 +352,7 @@ export class WorldlineManager {
     return task;
   }
 
-  /** Drain both Pi and core session forks before removing owned directories. */
+  /** Drain tracked session forks before removing owned directories. */
   async drainSessionForks(comparisonId?: string): Promise<void> {
     while (true) {
       const pending = [...this.sessionForks].filter((fork) => comparisonId === undefined || fork.comparisonId === comparisonId);
@@ -379,15 +374,6 @@ export class WorldlineManager {
 
   private ensureComparisonLive(cmp: ComparisonState): void {
     if (!this.comparisonIsLive(cmp)) throw new Error("comparison is no longer live");
-  }
-
-  private forkSession(cmp: ComparisonState, opts: SessionForkOpts): Promise<SessionForkResult> {
-    return this.trackSessionFork(cmp.id, async (signal) => {
-      const result = await this.deps.forkSession(opts, { signal });
-      if (!result.ok) return result;
-      this.ensureComparisonLive(cmp);
-      return result;
-    });
   }
 
   private forkCoreSession(cmp: ComparisonState, opts: CoreSessionForkOpts): Promise<CoreSessionForkResult> {
@@ -466,7 +452,6 @@ export class WorldlineManager {
       settledEntryId: r.settledEntryId,
       sessionFile: r.sessionFile,
       sessionBranchFile: r.sessionBranchFile,
-      sessionBranchIdentity: r.sessionBranchIdentity,
       uncertainSessionFile: r.uncertainSessionFile,
       replayable: r.replayable,
       reason: r.reason,
@@ -643,7 +628,7 @@ export class WorldlineManager {
       if (cleanup) void cleanup.catch(() => undefined);
     }
     if (run.sessionBranchFile) {
-      if (runEngine(run) === "core") {
+      if (isCoreRun(run)) {
         // Successful core finalization leaves a proven durable bundle after
         // its claim is removed. Route its reclamation through the same owner;
         // uncertainSessionFile is intentionally never treated as a valid
@@ -651,15 +636,9 @@ export class WorldlineManager {
         const discard = this.deps.discardCoreSession(run.id).catch(() => undefined);
         this.retainedSessionDiscards.add(discard);
         void discard.finally(() => this.retainedSessionDiscards.delete(discard));
-      } else {
-        // A finalized Pi branch is app-private, but its pathname is not an
-        // authority. Keep the copy when its published identity is missing or
-        // changed; the worker/native owner is the only cleanup path.
-        if (!run.sessionBranchIdentity) return;
-        const discard = this.deps.discardPiSession(run.sessionBranchFile, run.sessionBranchIdentity).catch(() => ({ ok: false }));
-        this.retainedSessionDiscards.add(discard);
-        void discard.finally(() => this.retainedSessionDiscards.delete(discard));
       }
+      // Non-core branches are removed with no session discard: no pi
+      // sessions are recorded anymore, so there is nothing to reclaim.
     }
   }
 
@@ -788,9 +767,7 @@ export class WorldlineManager {
     if (!run?.promptPayloadFile) {
       return { ok: false, error: "the run has no captured task or pre-task anchor" };
     }
-    if (cmp.engine !== "core" && !run.promptParentEntryId) {
-      return { ok: false, error: "the run has no captured task or pre-task anchor" };
-    }
+    if (cmp.engine !== "core") return { ok: false, error: "pi comparisons are removed; core is the only engine" };
     // This comparison is replaced by the challenge pair, so its live
     // candidates free their budget slots.
     if (this.liveWorldlineCount() - cmp.candidates.size + 2 > 3) {
@@ -830,7 +807,6 @@ export class WorldlineManager {
       primaryRoot: this.deps.primaryRoot,
       baseCommit: null,
       baseStateId: cmp.baseStateId,
-      inheritTrust: cmp.inheritTrust,
       model: cmp.model,
       thinkingLevel: cmp.thinkingLevel,
       engine: cmp.engine,
@@ -1281,13 +1257,13 @@ export class WorldlineManager {
     if (!run) return { ok: false, error: "run not found" };
     // Eligibility (WORLDLINES §6.5): replayable run with complete states.
     if (!run.replayable) return { ok: false, error: run.reason ?? "the run is not replayable" };
-    if (!run.startStateId || !run.settledStateId) return { ok: false, error: "the run has no complete source checkpoints" };
-    if (!run.sessionBranchFile) return { ok: false, error: "the run has no session branch copy" };
-    if (runEngine(run) !== "core" && !run.sessionBranchIdentity) {
+    if (!isCoreRun(run)) {
       run.replayable = false;
-      run.reason = "the finalized Pi session branch has no identity-bound provenance";
+      run.reason = "pi runs are not forkable; core is the only engine";
       return { ok: false, error: run.reason };
     }
+    if (!run.startStateId || !run.settledStateId) return { ok: false, error: "the run has no complete source checkpoints" };
+    if (!run.sessionBranchFile) return { ok: false, error: "the run has no session branch copy" };
     if (this.liveWorldlineCount() + 2 > 3) return { ok: false, error: "the live worldline budget is exhausted" };
     // The fork preflight (WORLDLINES §4): repository, platform, disk.
     const pre = await this.deps.preflight();
@@ -1305,16 +1281,7 @@ export class WorldlineManager {
         return { ok: false, error: `trust-sensitive resources changed since the run: ${changed.slice(0, 3).join(", ")}` };
       }
     }
-    // Budgets (WORLDLINES §9): session and prompt payload caps.
-    if (run.sessionBranchFile && runEngine(run) !== "core") {
-      try {
-        if ((await stat(run.sessionBranchFile)).size > MAX_SESSION_BYTES) {
-          return { ok: false, error: "the session branch exceeds the 64 MB budget" };
-        }
-      } catch {
-        /* unreadable — the eligibility checks above already cover it */
-      }
-    }
+    // Budgets (WORLDLINES §9): prompt payload caps.
     if (run.promptPayloadFile) {
       if (run.promptPayloadFile.includes("/") || run.promptPayloadFile.includes("\\")) {
         return { ok: false, error: "the prompt payload path is invalid" };
@@ -1355,8 +1322,7 @@ export class WorldlineManager {
       }
       await this.forkSessions(cmp, run);
       await this.createSupportDirs(cmp);
-      if (cmp.engine === "core") await this.copyCoreResources(cmp);
-      else await this.copyPiResources(cmp);
+      await this.copyCoreResources(cmp);
       await this.writeStartupControls(cmp, run, opts.challengeProfile);
       await this.launchCandidates(cmp, run);
       cmp.phase = "running";
@@ -1659,7 +1625,7 @@ export class WorldlineManager {
       if (existsSync(authSrc)) {
         try {
           const info = await stat(authSrc);
-          if (info.isFile() && info.size <= MAX_PI_RESOURCE_BYTES) {
+          if (info.isFile() && info.size <= MAX_AGENT_RESOURCE_BYTES) {
             await copyBoundPrivateFile(authSrc, authDstDir, "auth.json");
           }
         } catch {
@@ -1685,51 +1651,10 @@ export class WorldlineManager {
             sourceRootIdentity: sourceBinding,
             destinationRoot: destination.path,
             destinationRootIdentity: promotionIdentityOf(destination),
-            maxBytes: MAX_PI_RESOURCE_BYTES,
+            maxBytes: MAX_AGENT_RESOURCE_BYTES,
           });
         } catch {
           /* Keep the candidate without user skills. */
-        }
-      }
-    }
-  }
-
-  /** Copy the resolved Pi resources into each candidate home. */
-  private async copyPiResources(cmp: ComparisonState): Promise<void> {
-    const agentSrc = join(this.deps.realHome, ".pi", "agent");
-    for (const cand of cmp.candidates.values()) {
-      if (!cand.homeBinding) throw new Error(`candidate ${cand.label} home is not natively bound`);
-      const agentDst = await ensureBoundChildDirectory(
-        await ensureBoundChildDirectory(cand.homeBinding, ".pi", true),
-        "agent",
-        true,
-      );
-      for (const name of ["auth.json", "settings.json", "models.json", "models-store.json"]) {
-        const src = join(agentSrc, name);
-        if (!existsSync(src)) continue;
-        try {
-          const info = await stat(src);
-          if (!info.isFile() || info.size > MAX_PI_RESOURCE_BYTES) continue;
-          await copyBoundPrivateFile(src, agentDst, name);
-        } catch {
-          /* Keep the candidate without this file. */
-        }
-      }
-      for (const name of ["skills", "prompts", "themes", "extensions"]) {
-        const src = join(agentSrc, name);
-        if (!existsSync(src)) continue;
-        try {
-          const sourceBinding = await boundPromotionOpenDirectory({ path: src });
-          const destination = await ensureBoundChildDirectory(agentDst, name, true);
-          await boundPromotionCopyTree({
-            sourceRoot: src,
-            sourceRootIdentity: sourceBinding,
-            destinationRoot: destination.path,
-            destinationRootIdentity: promotionIdentityOf(destination),
-            maxBytes: MAX_PI_RESOURCE_BYTES,
-          });
-        } catch {
-          /* Keep the candidate without this resource. */
         }
       }
     }
@@ -1753,7 +1678,7 @@ export class WorldlineManager {
         content: [{ type: "text", text: promptText }, ...payload.images],
       });
     } else {
-      // Text-only prompt: prefilled and editable in the Pi editor.
+      // Text-only prompt: prefilled and editable in the core editor.
       await this.writeControl(b, { opId: randomUUID(), action: "prefill", text: promptText });
     }
   }
@@ -1775,7 +1700,7 @@ export class WorldlineManager {
     });
   }
 
-  /** Launch both candidate Pi terminals inside their sandboxes. */
+  /** Launch both candidate agent terminals inside their sandboxes. */
   private async launchCandidates(cmp: ComparisonState, run: RunRecord): Promise<void> {
     for (const cand of cmp.candidates.values()) {
       // Candidate B replays with the captured model and thinking level.
@@ -1832,13 +1757,13 @@ export class WorldlineManager {
   private async candidateLaunch(
     cmp: ComparisonState,
     cand: CandidateState,
-    extraPiArgs: string[],
+    _extraArgs: string[],
   ): Promise<{ cmd: string; args: string[]; env: Record<string, string | undefined> }> {
     await refreshComparisonBindings(cmp);
     // A moment comparison has a single candidate: no sibling to deny (the
     // worlds-root deny covers its tree anyway).
     const sibling = cmp.candidates.get(cand.label === "A" ? "B" : "A");
-    const core = cmp.engine === "core";
+    if (cmp.engine !== "core") throw new Error("pi candidates are removed; core is the only engine");
     const modelCut = cmp.model?.indexOf("/") ?? -1;
     const provider = modelCut > 0 ? cmp.model!.slice(0, modelCut) : null;
     const baseEnv = this.deps.candidateEnv(provider);
@@ -1855,9 +1780,8 @@ export class WorldlineManager {
       storeDir: join(this.deps.userData, "worldlines"),
       primaryEventsDir: this.deps.primaryEventsDir,
       userData: this.deps.userData,
-      bridgePath: this.deps.bridgePath,
       appReadPaths: this.deps.appReadPaths(),
-      agentHomeDir: join(cand.homeDir, core ? ".termina" : ".pi", "agent"),
+      agentHomeDir: join(cand.homeDir, ".termina", "agent"),
       denyNetwork: false,
     };
     const profiles = cmp.profilesBinding;
@@ -1873,45 +1797,30 @@ export class WorldlineManager {
       content: Buffer.from(buildSandboxProfile(paths)),
       mode: 0o600,
     });
-    if (core) {
-      const session = cand.sessionFile ? parseSessionBundlePath(cand.sessionFile) : null;
-      if (!session) throw new Error("the candidate session path is invalid");
-      const model = cmp.model && cmp.model.includes("/") ? cmp.model : null;
-      const cut = model ? model.indexOf("/") : -1;
-      const env: Record<string, string | undefined> = {
-        ...baseEnv,
-        HOME: cand.homeDir,
-        TMPDIR: cand.tmpDir,
-        TERMINA_EVENTS_DIR: cand.eventsDir,
-        ELECTRON_RUN_AS_NODE: "1",
-        TERMINA_CORE_SESSION_FILE: cand.sessionFile ?? undefined,
-        TERMINA_CORE_SESSION_ID: session.sessionId,
-        TERMINA_CORE_APPROVE: "all",
-        ...(sessionBundleHasContent(cand.sessionFile!) ? { TERMINA_CORE_RESUME: "1" } : {}),
-        ...(model && cut > 0
-          ? { TERMINA_CORE_PROVIDER: model.slice(0, cut), TERMINA_CORE_MODEL: model.slice(cut + 1) }
-          : {}),
-        ...(cmp.inheritTrust ? { TERMINA_INHERIT_TRUST: "1" } : {}),
-      };
-      const launch = candidateSandboxLaunch(cand.profilePath, [
-        this.deps.electronExecPath,
-        this.deps.agentCorePath,
-        ...thinkingStartupArgs(this.deps.showThinking()),
-      ]);
-      return { ...launch, env };
-    }
-    const piArgs = ["--session", cand.sessionFile!, "-e", this.deps.bridgePath, ...extraPiArgs];
-    const launch = candidateSandboxLaunch(cand.profilePath, [this.deps.piBin, ...piArgs]);
-    return {
-      ...launch,
-      env: {
-        ...baseEnv,
-        HOME: cand.homeDir,
-        TMPDIR: cand.tmpDir,
-        TERMINA_EVENTS_DIR: cand.eventsDir,
-        ...(cmp.inheritTrust ? { TERMINA_INHERIT_TRUST: "1" } : {}),
-      },
+    const session = cand.sessionFile ? parseSessionBundlePath(cand.sessionFile) : null;
+    if (!session) throw new Error("the candidate session path is invalid");
+    const model = cmp.model && cmp.model.includes("/") ? cmp.model : null;
+    const cut = model ? model.indexOf("/") : -1;
+    const env: Record<string, string | undefined> = {
+      ...baseEnv,
+      HOME: cand.homeDir,
+      TMPDIR: cand.tmpDir,
+      TERMINA_EVENTS_DIR: cand.eventsDir,
+      ELECTRON_RUN_AS_NODE: "1",
+      TERMINA_CORE_SESSION_FILE: cand.sessionFile ?? undefined,
+      TERMINA_CORE_SESSION_ID: session.sessionId,
+      TERMINA_CORE_APPROVE: "all",
+      ...(sessionBundleHasContent(cand.sessionFile!) ? { TERMINA_CORE_RESUME: "1" } : {}),
+      ...(model && cut > 0
+        ? { TERMINA_CORE_PROVIDER: model.slice(0, cut), TERMINA_CORE_MODEL: model.slice(cut + 1) }
+        : {}),
     };
+    const launch = candidateSandboxLaunch(cand.profilePath, [
+      this.deps.electronExecPath,
+      this.deps.agentCorePath,
+      ...thinkingStartupArgs(this.deps.showThinking()),
+    ]);
+    return { ...launch, env };
   }
 
   private async updateManifest(cmp: ComparisonState, cand: CandidateState, attempt?: CandidateLaunchAttempt): Promise<void> {
@@ -2292,7 +2201,8 @@ export class WorldlineManager {
     const candGen = candWs?.generation ?? 0;
     const comparison = this.comparisons.get(comparisonId);
     if (!comparison) return { ok: false, error: "comparison not found" };
-    const promoteEngine = comparison.engine === "core" ? "core" : "pi";
+    if (comparison.engine !== "core") return { ok: false, error: "pi promotions are removed; core is the only engine" };
+    const promoteEngine = "core" as const;
 
     // The admission reservation is the cross-process boundary. It must be
     // acquired before creating promotion-journal (or any operation below it),
@@ -2328,7 +2238,7 @@ export class WorldlineManager {
         ino: journalIdentity.identity.ino,
         capability: journalIdentity.identity.capability,
       };
-      installDir = await this.deps.primarySessionDir(this.deps.primaryRoot, promoteEngine);
+      installDir = await this.deps.primarySessionDir(this.deps.primaryRoot);
       installBinding = await ensureBoundDirectory(installDir, "primary session directory", worldsIdentity);
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -2574,7 +2484,7 @@ export class WorldlineManager {
 
       const sessionBinding = await ensureBoundChildDirectory(journalBinding!.directory, "session", true);
       const sessionDir = sessionBinding.path;
-      if (promoteEngine === "core") {
+      {
         if (!target.sessionFile) throw new Error("the candidate has no session");
         const staged = coreSessionFile(sessionDir, "staged");
         const fork = await this.forkCoreSession(comparison, {
@@ -2692,7 +2602,7 @@ export class WorldlineManager {
       await writePromotionJournal(journalBinding!, journal);
 
       let installed: string;
-      if (promoteEngine === "core") {
+      {
         const sessionId = `core-${randomUUID()}`;
         const stagedBundle = join(sessionDir, sessionId);
         installed = coreSessionFile(installBinding.path, sessionId);
@@ -2728,40 +2638,6 @@ export class WorldlineManager {
         if (moved.outcome !== "applied" || !moved.durable) throw new Error(moved.error ?? "could not install the promoted core session bundle");
         const bundleDir = parseSessionBundlePath(installed)?.bundleDir ?? dirname(installed);
         journal.installedSessionManifest = await createPromotionArtifactManifest(bundleDir);
-        await writePromotionJournal(journalBinding!, journal);
-      } else {
-        const sessionName = `${new Date().toISOString().replace(/[:.]/g, "-")}_${randomUUID()}.jsonl`;
-        installed = join(installBinding.path, sessionName);
-        journal.installedSession = installed;
-        journal.installedSessionTemp = null;
-        journal.installedSessionManifest = { status: "planned", path: installed };
-        journal.installedSessionTempManifest = null;
-        await writePromotionJournal(journalBinding!, journal);
-        const staged = String(journal.stagedSession);
-        const stagedRelative = relative(sessionBinding.path, staged);
-        if (!stagedRelative || stagedRelative.startsWith("..") || isAbsolute(stagedRelative)) throw new Error("staged Pi session escaped the promotion session root");
-        const sourceParentPath = dirname(staged);
-        const sourceParentPlan = await probePromotionDirectory(sessionBinding, sourceParentPath, "staged Pi session parent");
-        if (!sourceParentPlan.identity) throw new Error(`staged Pi session parent is missing: ${sourceParentPath}`);
-        const sourceParentInfo = sourceParentPlan.identity;
-        const installedResult = await boundPromotionTransition({
-          primaryRoot: installBinding.path,
-          primaryRootIdentity: promotionIdentityOf(installBinding),
-          destinationComponents: [sessionName],
-          parentIdentity: promotionIdentityOf(installBinding),
-          transition: {
-            kind: "install",
-            sourceRoot: sessionBinding.path,
-            sourceRootIdentity: promotionIdentityOf(sessionBinding),
-            sourceComponents: promotionSourceComponents(stagedRelative),
-            sourceParentIdentity: sourceParentInfo,
-            expectedSource: await boundPromotionExpectedLeaf(staged, { type: "file", hash: sha256Hex(await readFile(staged)) }, "staged Pi session"),
-            expectedDestination: { state: { type: "missing" } },
-          },
-        });
-        if (installedResult.outcome !== "applied" || !installedResult.durable) throw new Error(installedResult.error ?? "could not install the promoted Pi session");
-        journal.installedSessionTempManifest = null;
-        journal.installedSessionManifest = await createPromotionArtifactManifest(installed);
         await writePromotionJournal(journalBinding!, journal);
       }
       journal.phase = "done";
@@ -2810,7 +2686,7 @@ export class WorldlineManager {
         await rollbackPromotion(journalDir, journal, this.deps.primaryRoot, this.deps.canonicalPath, journalBinding ?? undefined, primaryRootBinding);
         // Session artifacts are intentionally retained on a failed promotion.
         // A journal manifest is recovery evidence, not proof that a currently
-        // matching Pi/core session still belongs to this operation. In
+        // matching agent session still belongs to this operation. In
         // particular, never delete a replacement at a predictable session
         // name merely because the in-memory journal once described it.
       } catch (rollbackError) {
@@ -2845,6 +2721,7 @@ export class WorldlineManager {
     const sessionFile = nested?.sessionFile ?? covering?.sessionFile;
     if (!rootRun) return { ok: false, error: "the source run is unavailable" };
     if (!sessionFile) return { ok: false, error: "the run session is unavailable" };
+    if (!isCoreRun(rootRun)) return { ok: false, error: "pi moments are not forkable; core is the only engine" };
     const opts = {
       terminalId,
       stateId: moment.stateId,
@@ -2900,10 +2777,9 @@ export class WorldlineManager {
       primaryRoot: this.deps.primaryRoot,
       baseCommit: null,
       baseStateId: opts.baseStateId ?? null,
-      inheritTrust: opts.inheritTrust ?? false,
       model: opts.model,
       thinkingLevel: opts.thinkingLevel,
-      engine: runEngine(rootRun),
+      engine: "core",
       expectedCandidates: 1,
       uncertainSessionArtifacts: [],
       manifestWriteFailed: false,
@@ -2950,7 +2826,7 @@ export class WorldlineManager {
       await this.cloneCandidates(cmp);
       // The session branches at the dot's entry: later entries stay out.
       await this.createSupportDirs(cmp);
-      if (cmp.engine === "core") {
+      {
         const through = parseStorageSeq(opts.entryId);
         if (through === null) throw new Error("this moment has no session address");
         const dest = coreSessionFile(cand.sessionDir, "session");
@@ -3005,7 +2881,7 @@ export class WorldlineManager {
   }
 
   /** Launch one candidate inside its sandbox (A or a moment candidate). */
-  private async launchCandidate(cmp: ComparisonState, cand: CandidateState, extraPiArgs: string[], headStateId: string | null): Promise<void> {
+  private async launchCandidate(cmp: ComparisonState, cand: CandidateState, extraArgs: string[], headStateId: string | null): Promise<void> {
     const attempt: CandidateLaunchAttempt = {
       comparisonId: cmp.id,
       label: cand.label,
@@ -3031,7 +2907,7 @@ export class WorldlineManager {
 
     const operation = (async (): Promise<void> => {
       this.ensureCandidateLaunchLive(cmp, cand, attempt);
-      const { cmd, args, env } = await this.candidateLaunch(cmp, cand, extraPiArgs);
+      const { cmd, args, env } = await this.candidateLaunch(cmp, cand, extraArgs);
       this.ensureCandidateLaunchLive(cmp, cand, attempt);
       cand.headStateId = headStateId ?? cand.headStateId ?? cmp.baseStateId;
       const workspaceId = this.deps.createCandidateWorkspace(cand.dir, cand.headStateId, cmp.id);
@@ -3039,7 +2915,7 @@ export class WorldlineManager {
       const created = await this.deps.createCandidate({
         root: cand.dir,
         workspaceId,
-        engine: cmp.engine,
+        engine: "core",
         launch: { cmd, args, env },
         signal: attempt.controller.signal,
         beforeSpawn: (terminalId) => {
@@ -3474,7 +3350,7 @@ export class WorldlineManager {
       const created = await this.deps.createCandidate({
         root: cand.dir,
         workspaceId,
-        engine: cmp.engine,
+        engine: "core",
         launch: { cmd, args, env },
         beforeSpawn: (terminalId) => {
           routedTerminalId = terminalId;
@@ -3786,7 +3662,6 @@ export class WorldlineManager {
       primaryRoot: this.deps.primaryRoot,
       baseCommit: null,
       baseStateId: null,
-      inheritTrust: false,
       model: null,
       thinkingLevel: null,
       engine: "core",

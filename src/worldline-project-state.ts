@@ -164,7 +164,7 @@ export interface WorldlineInstancePane extends WorldlineCandidateTestPane {
   workspaceId: string;
   busy: boolean;
   type: "agent" | "shell";
-  engine?: "pi" | "core";
+  engine?: "core";
   shellName: string | undefined;
   dispatchWorker: boolean;
   dispatchTask: string | undefined;

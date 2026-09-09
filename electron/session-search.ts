@@ -1,7 +1,7 @@
 /**
  * Session Search parse and walk.
  *
- * Main supplies the jsonl paths for this project (Pi dir, core dir,
+ * Main supplies the jsonl paths for this project (history dir, core dir,
  * live and roster files). This module is the only JSONL parser for
  * search hits.
  */
@@ -43,7 +43,7 @@ function pushToolPaths(block: Record<string, unknown>, paths: string[]): void {
 }
 
 /**
- * Parse one Pi or core session JSONL line. Returns null for non-message
+ * Parse one agent session JSONL line. Returns null for non-message
  * records (usage, revisions, thinking-only).
  */
 export function parseSessionMessageLine(line: string): SessionMessageParse | null {

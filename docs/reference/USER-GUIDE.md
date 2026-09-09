@@ -2,8 +2,8 @@
 
 > **Status:** current product reference.
 
-Termina is a hybrid coding cockpit. The left side runs **pi**, the real
-interactive coding agent, in a terminal. The right side is a Monaco (VS Code)
+Termina is a hybrid coding cockpit. The left side runs Termina's in-house
+coding agent, in a terminal. The right side is a Monaco (VS Code)
 editor that watches the agent work live. You review what changed, verify it,
 fork runs into isolated candidates, and promote the winner.
 
@@ -13,7 +13,7 @@ writes your Git repository.
 
 ```
 ┌──────────────────────────────┬───────────────────────────────┐
-│ pi TUI (real terminal, pty)  │  Monaco IDE + file explorer   │
+│ agent TUI (real terminal, pty) │  Monaco IDE + file explorer   │
 ├──────────────────────────────┴───────────────────────────────┤
 │ terminal tabs · status bar                                   │
 └──────────────────────────────────────────────────────────────┘
@@ -46,8 +46,8 @@ writes your Git repository.
 
 Download the signed `.dmg` (macOS Apple Silicon) or `.AppImage` (Linux x64)
 from the [releases page](https://github.com/Jesusz0r/termina/releases). The
-bundle ships everything: the app, the Rust snapshot core, the pinned pi
-package, and its own node runtime. Nothing else to install.
+bundle ships everything: the app, the Rust snapshot core, the in-house
+agent, and its own node runtime. Nothing else to install.
 
 Packaged builds check GitHub Releases for updates and install them when you
 quit the app.
@@ -60,11 +60,13 @@ A fresh install starts empty:
 2. In the terminal, run `/login` to configure your model provider.
 3. Run `/models` to pick the default model.
 
-The empty editor tells you about `/login` and `/models` when pi has no
-provider configured yet.
+The empty editor tells you about `/login` and `/models` when the agent has
+no provider configured yet.
 
-Opening a folder creates one project tab and starts one pi agent terminal in
-it. Your open project tabs restore on the next launch.
+Opening a folder creates one project tab and starts one agent terminal in
+it. Your open project tabs restore on the next launch — including each
+terminal's plan board and last verify verdict. Dispatched worker assignments
+never survive a restart; their tasks return to pending.
 
 ### Project tabs
 
@@ -104,12 +106,11 @@ while no file or review is open.
 
 Click `＋` next to the terminal tabs to open the terminal chooser:
 
-- **Agent (core)** — Termina's in-house coding agent (the default for a new folder).
-- **Agent (pi)** — a pi TUI session in your project.
+- **Agent (core)** — Termina's in-house coding agent (the default for new tabs and new folders).
 - **Shells** — any shell detected on your system (`zsh`, `bash`, …).
 
 Shell tabs show the shell name as a badge. `Cmd/Ctrl+T` opens the chooser.
-Opening a folder starts one **Agent (core)** tab. Existing Pi tabs restore as Pi.
+Opening a folder starts one **Agent (core)** tab. Legacy Pi entries on disk reopen as fresh Agent (core) tabs.
 
 Cycle without the mouse: `Ctrl+Tab` / `Ctrl+Shift+Tab` move between terminal
 tabs, `Cmd/Ctrl+Shift+[` / `]` move between project tabs, and scrolling over a
@@ -126,10 +127,8 @@ select transcript text; Cmd/Ctrl+C copies. Reasoning starts at medium;
 a newline; Enter submits. Paste keeps newlines. `/help` lists keys.
 Paste a screenshot (Cmd/Ctrl+V) to attach it to the next prompt — up to
 four images, about 4 MB each. The status line shows how many are waiting.
-Pi tabs still run the pi TUI with its own commands. Text paste is
-unchanged there; a PNG cannot go through the terminal.
 
-Multi-line input in a Pi tab:
+Multi-line input:
 
 - `Shift+Enter`, `Ctrl+Enter`, or `Cmd+Enter` (macOS) inserts a newline.
 - `Option+Enter` (macOS) queues a follow-up message while the agent runs.
@@ -261,7 +260,14 @@ shows the task list with live progress: `○` pending, `◐` active, `✓` done.
 Dispatched tasks show their worker and claimed files on the board. Clicking a
 dispatched task jumps to that worker's terminal (tabs are named `dispatch`).
 Workers receive a mailbox briefing with their task, and settle notes flow back
-to siblings so they stay aware of each other's results.
+to siblings so they stay aware of each other's results. When a worker settles
+with its task done, the owner is idle, and no sibling worker is still running,
+Termina automatically runs Verify once (when the project has a detectable test
+command) and reports the verdict to your next turn — cancellable like any
+verify run. A failing verify — manual or automatic — re-runs automatically
+when your next run settles, up to 3 consecutive failed attempts; then it stops
+and asks for attention instead of burning more test runs. Timed-out suites never
+auto-retry: a hang would just burn three 10-minute runs.
 
 ---
 
@@ -269,7 +275,7 @@ to siblings so they stay aware of each other's results.
 
 Worldlines answer one question: *what if the agent had done it differently?*
 A completed run can be forked into isolated candidates — full copies of the
-project with their own pi sessions — that run side by side with the original.
+project with their own agent sessions — that run side by side with the original.
 
 Requirements: the project must be inside a Git repository, and your platform
 must support the candidate sandbox (macOS and Linux x64 do). Otherwise the
@@ -285,7 +291,7 @@ the timeline. It forks the run into two candidates:
   original prompt loaded. Text prompts arrive editable, so you can change the
   instructions and get a different implementation of the same task.
 
-Both candidates open as real pi terminals (badged `A` and `B`). They are fully
+Both candidates open as real agent terminals (badged `A` and `B`). They are fully
 isolated: their own source trees, sessions, homes, and process groups, with
 network access denied except the model provider.
 
@@ -434,8 +440,8 @@ leaves the previous one searchable.
   outside your repository. Promotion writes files, never Git history.
 - **Renderer isolation.** The editor UI never talks to the agent directly; it
   renders state the main process pushes.
-- **Clean environments.** Host `PI_*` session variables are stripped before
-  pi starts, so a host session can never attach to a terminal.
+- **Clean environments.** Host session variables are stripped before
+  the agent starts, so a host session can never attach to a terminal.
 - **Candidate sandboxes.** Worldline candidates, Verify, and evidence runs
   execute under OS-level profiles that deny writes outside their own tree and
   deny network except the model provider. Evidence runs are fully offline.
@@ -448,7 +454,7 @@ leaves the previous one searchable.
 ## 14. Troubleshooting
 
 **The editor says to run `/login` and `/models`.**
-pi has no provider configured yet. Run `/login` in the terminal, then pick a
+The agent has no provider configured yet. Run `/login` in the terminal, then pick a
 model with `/models`.
 
 **Worldlines is unavailable.**

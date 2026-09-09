@@ -1,14 +1,14 @@
 # Termina
 
-**Termina** is a hybrid coding cockpit: the left side runs **pi** — the real
-interactive TUI — inside a terminal; the right side is a Monaco IDE that
-watches the agent work live. Review what changed, verify it, fork runs into
-isolated candidates, and converge on green code together.
+**Termina** is a hybrid coding cockpit: the left side runs Termina's in-house
+agent — the real interactive TUI — inside a terminal; the right side is a
+Monaco IDE that watches the agent work live. Review what changed, verify it,
+fork runs into isolated candidates, and converge on green code together.
 
 ```
 ┌──────────────────────────────┬───────────────────────────────┐
-│ pi TUI (real terminal, pty)  │  Monaco IDE + file explorer   │
-│  /settings /login /models    │   files auto-open mid-run     │
+│ agent TUI (real terminal, pty)│  Monaco IDE + file explorer   │
+│  /login /models /effort      │   files auto-open mid-run     │
 │  plan mode, completions…     │   live-synced via fs.watch    │
 ├──────────────────────────────┴───────────────────────────────┤
 │ terminal tabs · status bar                                   │
@@ -19,7 +19,7 @@ Everything runs locally. The terminal stays the source of truth; the app
 records byte-exact source states in an app-owned snapshot store and never
 writes your Git repository.
 
-![Termina — the pi TUI on the left, the live Monaco editor with the
+![Termina — the agent TUI on the left, the live Monaco editor with the
 modified list and session timeline on the right](docs/assets/screenshot.png)
 
 ![Worldlines — a forked run with candidates A and B, and the plan
@@ -67,7 +67,7 @@ command, including toggle-terminal.
 Packaged releases support **macOS (Apple Silicon) and Linux x64 only**.
 Download the `.dmg` (or
 `.AppImage`) from the [releases page](https://github.com/Jesusz0r/termina/releases).
-The bundle ships the app, the Rust core, the pinned pi package, and its own
+The bundle ships the app, the Rust core, the in-house agent, and its own
 node runtime — nothing else to install. Release builds are signed and
 notarized, so Gatekeeper opens them without warnings.
 
@@ -99,17 +99,16 @@ pnpm run typecheck                 # tsc --noEmit
 pnpm run test:agent-core           # agent-core kernel harness tests (no Electron)
 pnpm run build                     # production build (Electron main + renderer)
 pnpm run spike -- capture          # one plain-node store spike suite
-pnpm run test:spikes               # capture · merge · session-fork · platform · tree-delta
+pnpm run test:spikes               # capture · merge · platform · tree-delta
 node scripts/perf-baseline.mjs    # capture latency baselines
 node scripts/perf-compare.mjs     # compare a run against a baseline
 pnpm run test:e2e                  # the full Electron e2e matrix (fresh instances)
 pnpm test                          # typecheck + agent-core + build + spikes
 ```
 
-A new folder opens an **Agent (core)** tab. **Agent (pi)** remains in the
-terminal chooser. Rostered Pi tabs still restore as Pi.
+A new folder opens an **Agent (core)** tab. New tabs default to core. Legacy rostered Pi entries reopen as fresh Agent (core) tabs.
 
-Termina uses the pi configuration in `~/.pi/agent`. Host `PI_*` session
+Termina uses the agent configuration in `~/.termina/agent`. Host session
 variables are removed before launch so a host session file cannot attach
 to a terminal. Run `/login` and set the default provider and model in the
 Termina terminal before running model-driven e2e suites.
@@ -118,8 +117,8 @@ Termina terminal before running model-driven e2e suites.
 
 - `electron/` — the main process: terminals, workspaces, watchers, IPC,
   preferences, the worldline manager, the evidence engine, candidate
-  sandboxes, and the auto-updater. The bridge extension (app-owned, loaded
-  by pi through the CLI option) is the only writer of sidecar JSONL;
+  sandboxes, and the auto-updater. The in-house agent host writes sidecar
+  JSONL (`agent-core/host.ts`, `logEvent` in `agent-core/main.ts`);
   `sidecar.ts` is the only parser. Session forks run off the main thread
   in a worker (`session-fork.ts` → `session-worker.ts`).
 - `core/` — `termina-core`, the Rust snapshot core: captures,

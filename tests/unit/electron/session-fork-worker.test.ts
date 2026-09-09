@@ -15,7 +15,6 @@ import {
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 describe("Electron Session Fork Worker & Multi-Process Isolation", () => {
   let work: string;
@@ -157,6 +156,19 @@ describe("Electron Session Fork Worker & Multi-Process Isolation", () => {
       expect(appended.ok).toBe(true);
     }
     opened.writer.close();
+
+    const preAborted = new AbortController();
+    preAborted.abort();
+    let preAbortedRejected = false;
+    try {
+      await client.forkCore(
+        { sourceSessionFile: source, destinationSessionFile: destinationSession("pre-aborted-project", "pre-aborted") },
+        { signal: preAborted.signal },
+      );
+    } catch (error: any) {
+      preAbortedRejected = error instanceof Error && error.name === "AbortError";
+    }
+    expect(preAbortedRejected).toBe(true);
 
     const destination = destinationSession("destination-project", "destination");
     let timerTicks = 0;
