@@ -126,6 +126,7 @@ const bridge: PiBridge = {
   challengeCandidate: (comparisonId, label, profile) => ipcRenderer.invoke("worldline:challenge-candidate", comparisonId, label, profile),
   runEvidence: (comparisonId) => ipcRenderer.invoke("worldline:evidence", comparisonId),
   promoteWorldline: (comparisonId, label, force) => ipcRenderer.invoke("worldline:promote", comparisonId, label, force),
+  exportWorldline: (comparisonId, label) => ipcRenderer.invoke("worldline:export", comparisonId, label),
   onWorldlineUpdate: (cb) => bindPushEvent("worldline:update", cb),
   onWorldlineRemoved: (cb) => bindPushEvent("worldline:removed", cb),
   onWorldlineRunsChanged: (cb) => bindPushEvent("worldline:runs-changed", cb),

@@ -1358,6 +1358,17 @@ Use the existing `area:action` convention.
 - `worldline:cancel`
 - `worldline:promote`
 - `worldline:discard`
+- `worldline:export`
+
+### Export
+
+A live candidate exports to a bundle under `worlds/exports/<comparison>-<label>`:
+`candidate.patch` (unified diff, base commit → candidate head, stubbed past
+256 KiB or binary), `pr-body.md` (summary with evidence verdicts), and
+`metadata.json`. Only the newest 20 bundles are retained; extra changed files
+past 200 stay listed in the summary but leave the patch. The bundle never
+touches the user's Git history — apply it with `git apply` or paste the body
+into a PR.
 
 ### Pushes
 

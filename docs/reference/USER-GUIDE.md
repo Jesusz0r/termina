@@ -316,6 +316,7 @@ Each comparison gets a card pair in the Worldlines panel:
 | **A ⇄ B** | Compares the two candidates file by file. |
 | **▾** | Details: changed-file statistics, provenance, dependency changes. |
 | **Promote** | Three-way merges the candidate back into your project. |
+| **Export** | Writes a patch bundle (`candidate.patch`, `pr-body.md`, `metadata.json`) with the evidence summary — ready for `git apply` or a PR. |
 | **Discard** | Removes both candidates and every app-owned resource. |
 
 Promotion merges source changes only — never commits, branches, or staging

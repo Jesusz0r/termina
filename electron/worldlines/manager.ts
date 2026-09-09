@@ -31,15 +31,12 @@ import {
   type BoundPromotionExpectedLeaf,
   type PromotionFsIdentity,
 } from "../worldline-git.js";
+import { buildExportMarkdown, buildUnifiedPatch, MAX_EXPORT_BUNDLES, MAX_EXPORT_FILES, type ExportPatchFile } from "./export.js";
 import { EvidenceEngine, dependencyDiff, mineChangeReason, rankProfiles, type EvidenceDeps } from "../evidence.js";
 import type {
   CoreSessionForkOpts,
   CoreSessionForkResult,
-  PiSessionCopyIdentity,
-  PiSessionDiscardResult,
   SessionForkCallOptions,
-  SessionForkOpts,
-  SessionForkResult,
 } from "../session-fork.js";
 import type {
   ChallengeProfile,
@@ -1136,6 +1133,117 @@ export class WorldlineManager {
     if (res === null) return { ok: false, error: "file not in the base" };
     if (res.byteLength > MAX_WORLDLINE_FILE_BYTES) return { ok: false, error: "the base file is too large" };
     return { ok: true, content: res.toString() };
+  }
+
+  /**
+   * Export one candidate as a patch bundle: unified diff plus an evidence
+   * summary for a PR body. No git mutation, no network — the bundle lands
+   * in the app-owned exports directory for review, `git apply`, or paste.
+   */
+  async exportCandidate(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; path?: string; error?: string }> {
+    const cmp = this.comparisons.get(comparisonId);
+    const cand = cmp?.candidates.get(label);
+    if (!cmp || !cand) return { ok: false, error: "candidate not found" };
+    if (cand.state === "discarded" || cand.state === "error") {
+      return { ok: false, error: "only a live candidate can be exported" };
+    }
+    // The directory name derives from renderer input: allow only the
+    // manager-generated id shape even though lookup already gates it.
+    if (!/^cmp-[0-9]+$/.test(comparisonId)) return { ok: false, error: "invalid comparison" };
+    let changed: WorldlineChangedFile[];
+    try {
+      changed = (await this.changedFiles(cmp, cand)).files;
+    } catch (err) {
+      return { ok: false, error: `could not list candidate changes: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    if (changed.length === 0) return { ok: false, error: "the candidate has no changes to export" };
+    // Bound per-file round-trips and patch size: extra files stay listed in
+    // the summary but leave the patch.
+    const capped = changed.slice(0, MAX_EXPORT_FILES);
+    const patchFiles: ExportPatchFile[] = [];
+    for (const file of capped) {
+      if (!this.isSafeRelativePath(file.relPath)) continue;
+      // Patch format cannot represent newline names; they stay listed only.
+      if (file.relPath.includes("\n")) continue;
+      let before: string | null = null;
+      let after: string | null = null;
+      if (file.status !== "created") {
+        const base = await this.baseFileOf(comparisonId, file.relPath);
+        if (base.ok) before = base.content ?? null;
+      }
+      if (file.status !== "deleted") {
+        const head = await this.fileOf(comparisonId, label, file.relPath);
+        if (head.ok) after = head.content ?? null;
+      }
+      // Unreadable on both sides: listed in the summary, absent from the patch.
+      if (before === null && after === null) continue;
+      patchFiles.push({ relPath: file.relPath, before, after });
+    }
+    if (patchFiles.length === 0) return { ok: false, error: "no exportable file contents" };
+    const evidence = this.evidenceByComparison.get(comparisonId);
+    const records = evidence?.byCandidate[label] ?? [];
+    const bundle = buildExportMarkdown({
+      comparisonId,
+      label,
+      role: cand.role,
+      model: cmp.model,
+      baseCommit: cmp.baseCommit,
+      exportedAt: new Date().toISOString(),
+      files: changed.map((file) => ({ relPath: file.relPath, status: file.status })),
+      evidence: records.map((record) => ({ kind: record.kind, status: record.status, reason: record.reason })),
+      profiles: (evidence?.profiles ?? []).map((profile) => ({ profile: profile.profile, winner: profile.winner })),
+      truncatedFiles: changed.length > capped.length ? changed.length - capped.length : 0,
+      evidenceStale: evidence?.stale === true,
+    });
+    const patch = buildUnifiedPatch(patchFiles);
+    const dir = join(this.deps.worldsRoot, "exports", `${comparisonId}-${label}`);
+    try {
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      await writeFile(join(dir, "candidate.patch"), patch, { mode: 0o600 });
+      await writeFile(join(dir, "pr-body.md"), bundle, { mode: 0o600 });
+      await writeFile(join(dir, "metadata.json"), JSON.stringify({
+        comparisonId,
+        label,
+        role: cand.role,
+        model: cmp.model,
+        baseCommit: cmp.baseCommit,
+        exportedAt: new Date().toISOString(),
+        files: changed.length,
+        truncatedFiles: changed.length > capped.length ? changed.length - capped.length : 0,
+      }, null, 2), { mode: 0o600 });
+      await this.pruneExportBundles(join(this.deps.worldsRoot, "exports"), dir);
+    } catch (err) {
+      return { ok: false, error: `could not write the export bundle: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    return { ok: true, path: dir };
+  }
+
+  /** Keep only the newest export bundles. Best-effort; never fails export. */
+  private async pruneExportBundles(exportsRoot: string, keepDir: string): Promise<void> {
+    try {
+      const names = await readdir(exportsRoot);
+      if (names.length <= MAX_EXPORT_BUNDLES) return;
+      const stamped: Array<{ dir: string; mtimeMs: number }> = [];
+      for (const name of names) {
+        const full = join(exportsRoot, name);
+        if (full === keepDir) continue;
+        try {
+          const info = await stat(full);
+          if (!info.isDirectory()) continue;
+          stamped.push({ dir: full, mtimeMs: info.mtimeMs });
+        } catch {
+          continue;
+        }
+      }
+      stamped.sort((a, b) => a.mtimeMs - b.mtimeMs);
+      while (stamped.length >= MAX_EXPORT_BUNDLES) {
+        const oldest = stamped.shift();
+        if (!oldest) break;
+        await rm(oldest.dir, { recursive: true, force: true });
+      }
+    } catch {
+      /* Retention is best-effort. */
+    }
   }
 
   private isSafeRelativePath(relPath: string): boolean {

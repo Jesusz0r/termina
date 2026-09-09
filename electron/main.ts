@@ -7323,6 +7323,12 @@ class PiEditorApp {
       if (!manager) return Promise.resolve({ ok: false, error: "candidate not found" });
       return manager.promote(comparisonId, label, force === true);
     });
+    ipcMain.handle("worldline:export", (_e, comparisonId: string, label: "A" | "B") => {
+      if (label !== "A" && label !== "B") return { ok: false, error: "invalid candidate" };
+      const manager = this.projectOfComparison(comparisonId)?.worldlines;
+      if (!manager) return Promise.resolve({ ok: false, error: "candidate not found" });
+      return manager.exportCandidate(comparisonId, label);
+    });
     ipcMain.handle("worldline:challenge", async (_e, runId: string, profile: unknown) => {
       if (!isChallengeProfile(profile)) return { ok: false, error: "invalid challenge profile" };
       const manager = this.projectForRun(runId)?.worldlines;
