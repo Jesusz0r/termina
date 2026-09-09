@@ -800,6 +800,12 @@ body {
   height: 0;
 }
 
+/* xterm draws its own overlay scrollbar; hide it. The viewport keeps
+ * overflow-y: scroll, so wheel / touch / keyboard scrolling still works. */
+.term-pane .xterm-scrollable-element > .scrollbar {
+  display: none;
+}
+
 .term-pane.active {
   display: block;
 }
