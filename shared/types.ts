@@ -215,6 +215,8 @@ export interface InstanceSummary {
   modified: ModifiedFile[];
   /** Main-owned timeline recorder state, replayed during renderer hydration. */
   recorderState: RecorderState;
+  /** Latest capture failure, replayed with the recorder state. */
+  recorderDetail?: string | null;
   /** Verify state for agent terminals; null for plain shells. */
   verify?: VerifyInfo | null;
 }
@@ -544,7 +546,7 @@ export interface PiBridge {
   /** Push: last-tool counts for the Timeline header. */
   onTimelinePrefix(cb: (p: TimelinePrefix) => void): () => void;
   /** Push: the recorder state of a terminal's timeline. */
-  onRecorderState(cb: (p: { terminalId: string; state: RecorderState }) => void): () => void;
+  onRecorderState(cb: (p: { terminalId: string; state: RecorderState; detail?: string | null }) => void): () => void;
   onVerifyState(cb: (p: { terminalId: string; verify: VerifyInfo }) => void): () => void;
   onFolderOpened(cb: (e: FolderOpenedPayload) => void): () => void;
   onInstances(cb: (list: InstanceSummary[]) => void): () => void;

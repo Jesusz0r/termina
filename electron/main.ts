@@ -406,6 +406,12 @@ class PiTerminalInstance {
   momentDots: TimelineEvent[] = [];
   /** The recorder state of this terminal's timeline. */
   recorderState: RecorderState = "paused";
+  /** The last capture failure, shown in the timeline tooltip while degraded. */
+  recorderDetail: string | null = null;
+  /** Last wall-clock reseed attempt after a capture failure (bounds retries). */
+  lastReseedMs = 0;
+  /** The recorder detail last pushed (dedupes degraded resends). */
+  lastSentRecorderDetail: string | null = null;
   /** The prompt payload reported by before_agent_start. */
   pendingPrompt: { file: string; text: string; images: number } | null = null;
   /** The open run record of this terminal, or null. */
@@ -4533,6 +4539,7 @@ class PiEditorApp {
       dispatchTask: this.dispatchWorkers.get(t.id),
       modified: [...t.modified.values()],
       recorderState: t.recorderState,
+      recorderDetail: t.recorderDetail,
       verify: t.type === "agent" ? t.verify : null,
     }));
   }
@@ -5556,9 +5563,25 @@ class PiEditorApp {
       this.attachMomentState(inst, state.commit, batch, expected);
       this.setRecorderState(inst, "ready", expected);
     } catch (err) {
-      console.warn(`[main] moment capture failed: ${(err as Error).message}`);
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[main] moment capture failed: ${message}`);
+      // A dangling base (rebuilt store) fails every incremental capture
+      // forever. Re-seed primary workspaces with one full capture, at most
+      // once a minute; candidates keep their creation-seeded chain.
+      if (ws.primary && Date.now() - inst.lastReseedMs > 60_000) {
+        inst.lastReseedMs = Date.now();
+        try {
+          const reseeded = await store.capture(await gitHead(ws.root), null);
+          this.setWorkspaceState(ws, reseeded.commit);
+          this.attachMomentState(inst, reseeded.commit, batch, expected);
+          this.setRecorderState(inst, "ready", expected);
+          return;
+        } catch (reseedErr) {
+          console.warn(`[main] moment reseed failed: ${reseedErr instanceof Error ? reseedErr.message : String(reseedErr)}`);
+        }
+      }
       // Failed batches remain internal and are never published as dots.
-      this.setRecorderState(inst, "degraded", expected);
+      this.setRecorderState(inst, "degraded", expected, message.slice(0, 160));
     }
   }
 
@@ -5611,10 +5634,15 @@ class PiEditorApp {
   }
 
   /** Push the recorder state label (WORLDLINES §6). */
-  private setRecorderState(inst: PiTerminalInstance, state: RecorderState, expected?: PtyRendererSendTarget | null): void {
-    if (inst.recorderState === state) return;
+  private setRecorderState(inst: PiTerminalInstance, state: RecorderState, expected?: PtyRendererSendTarget | null, detail?: string | null): void {
+    if (state === "degraded" && detail !== undefined) inst.recorderDetail = detail;
+    if (state !== "degraded") inst.recorderDetail = null;
+    // Degraded resends: each failed batch carries the latest error for the
+    // tooltip. Other states send once per transition.
+    if (inst.recorderState === state && (state !== "degraded" || inst.recorderDetail === inst.lastSentRecorderDetail)) return;
     inst.recorderState = state;
-    this.send("timeline:recorder-state", { terminalId: inst.id, state }, expected);
+    inst.lastSentRecorderDetail = inst.recorderDetail;
+    this.send("timeline:recorder-state", { terminalId: inst.id, state, detail: inst.recorderDetail }, expected);
   }
 
   private ignoredSegmentIn(rel: string): boolean {

@@ -603,6 +603,7 @@ interface Pane {
   timelineRequestToken: number;
   timelinePrefix: Pick<TimelinePrefix, "ok" | "error" | "open"> | null;
   recorderState: string;
+  recorderDetail: string | null;
   plan: PlanTask[];
   planLoaded: boolean;
   planLoadAttempts: number;
@@ -821,6 +822,7 @@ function createPaneShell(instanceId: string): Pane {
     timelineRequestToken: 0,
     timelinePrefix: null,
     recorderState: "paused",
+    recorderDetail: null,
     plan: [],
     planLoaded: false,
     planLoadAttempts: 0,
@@ -1014,7 +1016,7 @@ function renderTimeline(): void {
     timelineView.setEvents([]);
     return;
   }
-  timelineView.setRecorder(pane.recorderState as Parameters<typeof timelineView.setRecorder>[0]);
+  timelineView.setRecorder(pane.recorderState as Parameters<typeof timelineView.setRecorder>[0], pane.recorderDetail);
   timelineView.setPrefix(pane.timelinePrefix);
   if (!pane.timelineLoaded) {
     const id = pane.instanceId;
@@ -2732,11 +2734,12 @@ window.pi.onTimelinePrefix((p) => {
   if (activeId === p.terminalId) timelineView.setPrefix(p);
 });
 
-window.pi.onRecorderState(({ terminalId, state }) => {
+window.pi.onRecorderState(({ terminalId, state, detail }) => {
   const pane = panes.get(terminalId);
   if (!pane) return;
   pane.recorderState = state;
-  if (activeId === terminalId) timelineView.setRecorder(state);
+  pane.recorderDetail = detail ?? null;
+  if (activeId === terminalId) timelineView.setRecorder(state, detail ?? null);
 });
 
 window.pi.onPlanUpdate(({ instanceId, tasks }) => {
@@ -3028,6 +3031,7 @@ async function boot(attempt = 0): Promise<void> {
         // modified/recorder/verify state cannot reset to renderer defaults.
         pane.modified = inst.modified ?? [];
         pane.recorderState = inst.recorderState ?? "paused";
+        pane.recorderDetail = inst.recorderDetail ?? null;
         pane.verify = inst.verify ?? { state: "untested", command: null, summary: null };
         updatePaneTab(pane);
       }
