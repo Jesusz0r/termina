@@ -65,9 +65,6 @@ use crate::promote_fs::{
 };
 use crate::promotion_files::promotion_cleanup_same_namespace_identity;
 
-use std::thread;
-use std::time::Duration;
-
 use git2::{ErrorCode, RepositoryInitOptions};
 
 
@@ -1338,14 +1335,7 @@ pub(crate) fn pause_at_hook(req: &Value, name: &str) -> Result<(), String> {
         .get("releasePath")
         .and_then(Value::as_str)
         .ok_or_else(|| format!("missing {name} releasePath"))?;
-    fs::write(ready, b"ready").map_err(|e| format!("write {name} ready marker failed: {e}"))?;
-    for _ in 0..6_000 {
-        if Path::new(release).exists() {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
-    Err(format!("timed out waiting for {name} release marker"))
+    crate::test_hooks::pause(ready, release, name)
 }
 
 // ------------------------------------------------------------ capture -----

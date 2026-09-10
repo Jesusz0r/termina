@@ -9,8 +9,6 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path};
 use std::sync::{Mutex, OnceLock};
-use std::thread;
-use std::time::Duration;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
@@ -1069,18 +1067,7 @@ pub(crate) fn promotion_test_pause(req: &Value, stage: &str) -> Result<(), Strin
         .ok_or("promotion test hook releasePath is missing")?;
     promotion_absolute_path(ready, "test hook readyPath")?;
     promotion_absolute_path(release, "test hook releasePath")?;
-    fs::write(ready, b"ready")
-        .map_err(|error| format!("write promotion test hook failed: {error}"))?;
-    loop {
-        match fs::symlink_metadata(release) {
-            Ok(_) => break,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                thread::sleep(Duration::from_millis(1))
-            }
-            Err(error) => return Err(format!("read promotion test hook failed: {error}")),
-        }
-    }
-    Ok(())
+    crate::test_hooks::pause(ready, release, "promotion")
 }
 
 pub(crate) fn promotion_rename_noreplace(

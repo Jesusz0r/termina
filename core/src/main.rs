@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 mod store;
 mod store_tx;
 mod promote_fs;
+mod test_hooks;
 mod capture;
 use capture::{
     FlatEntry, GitTreeBudget, TreeLookupKind, exact_ref_target,
