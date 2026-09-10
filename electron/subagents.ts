@@ -173,10 +173,21 @@ function defaultLauncher(cmd: string, args: string[], opts: { cwd: string; env: 
   };
 }
 
+function truncateUtf8Tail(text: string, cap: number): string {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= cap) return text;
+  let start = buf.length - cap;
+  // Move forward over continuation bytes to the lead byte of a character.
+  while (start < buf.length && (buf[start]! & 0xc0) === 0x80) start += 1;
+  return buf.toString("utf8", start);
+}
+
 function appendCapped(current: string, chunk: Buffer, cap: number): { text: string; truncated: boolean } {
   const next = current + chunk.toString("utf8");
   if (Buffer.byteLength(next, "utf8") <= cap) return { text: next, truncated: false };
-  return { text: truncateUtf8(next, cap), truncated: true };
+  // Keep the tail: the host takes the LAST framed line, and stderr evidence
+  // is read via tailLines. Head-truncation dropped both.
+  return { text: truncateUtf8Tail(next, cap), truncated: true };
 }
 
 export class SubagentHost {
@@ -311,8 +322,18 @@ export class SubagentHost {
 
   private async spawnInner(sourceTerminalId: string, runId: unknown, taskFile: unknown): Promise<void> {
     if (typeof runId !== "string" || !/^bg-\d{1,10}$/.test(runId)) return;
-    if (typeof taskFile !== "string" || !taskFile || taskFile.includes("/") || taskFile.includes("\\") || taskFile.includes("..")) return;
-    if (!taskFile.endsWith(".task.json")) return;
+    if (typeof taskFile !== "string" || !taskFile || taskFile.includes("/") || taskFile.includes("\\") || taskFile.includes("..")) {
+      // Valid run id but malformed handoff name: the parent holds an active
+      // run that reconcile can only free via a result file, so fail loudly
+      // instead of returning silently. An invalid run id cannot be addressed
+      // to any parent run and stays silent above.
+      if (typeof runId === "string") await this.finishFailed(sourceTerminalId, runId, null, "invalid subagent handoff identity");
+      return;
+    }
+    if (!taskFile.endsWith(".task.json")) {
+      if (typeof runId === "string") await this.finishFailed(sourceTerminalId, runId, null, "invalid subagent handoff identity");
+      return;
+    }
     const key = this.runKey(sourceTerminalId, runId);
     if (this.runs.has(key)) return;
     const dir = this.sinks.eventsDirFor(sourceTerminalId);
@@ -331,9 +352,22 @@ export class SubagentHost {
     // Cross-terminal sibling overlap: registries are per-process, so two
     // parents on one tree can claim the same paths. Same canonical cwd plus
     // overlapping relpaths rejects, exactly like the single-parent rule.
-    const cwdKey = await this.sinks.canonicalPath(task.cwd).catch(() => task.cwd);
+    // Fail closed: an unresolvable cwd cannot prove non-overlap.
+    let cwdKey: string;
+    try {
+      cwdKey = await this.sinks.canonicalPath(task.cwd);
+    } catch {
+      await this.finishFailed(sourceTerminalId, runId, task, "cannot verify path overlap (cwd)");
+      return;
+    }
     for (const other of this.runs.values()) {
-      const otherCwd = await this.sinks.canonicalPath(other.task.cwd).catch(() => other.task.cwd);
+      let otherCwd: string;
+      try {
+        otherCwd = await this.sinks.canonicalPath(other.task.cwd);
+      } catch {
+        await this.finishFailed(sourceTerminalId, runId, task, "cannot verify path overlap (sibling cwd)");
+        return;
+      }
       if (otherCwd !== cwdKey) continue;
       for (const p of task.paths) {
         const hit = other.task.paths.find((q) => subagentPathsOverlap(p, q));
@@ -367,11 +401,24 @@ export class SubagentHost {
     // Dispatch interplay (unified claims): a live dispatch worker on an
     // overlapping path fails the spawn before any child exists. Both sides
     // anchor at the dispatch root so subdir terminals key identically.
-    const dispatch = await this.sinks.dispatchKeysFor(sourceTerminalId).catch(() => ({ keys: new Set<string>(), root: "" }));
+    // Fail closed: unverifiable dispatch claims or paths reject the spawn.
+    let dispatch: { keys: Set<string>; root: string };
+    try {
+      dispatch = await this.sinks.dispatchKeysFor(sourceTerminalId);
+    } catch {
+      await this.finishFailed(sourceTerminalId, runId, task, "cannot verify dispatch claims");
+      return;
+    }
     if (dispatch.keys.size > 0 && task.paths.length > 0) {
       for (const p of task.paths) {
         const anchored = anchorClaimPath(task.cwd, p, dispatch.root || task.cwd);
-        const key = await this.sinks.canonicalPath(join(anchored.root, anchored.rel)).catch(() => "");
+        let key: string;
+        try {
+          key = await this.sinks.canonicalPath(join(anchored.root, anchored.rel));
+        } catch {
+          await this.finishFailed(sourceTerminalId, runId, task, `cannot verify dispatch overlap (${p})`);
+          return;
+        }
         if (key && dispatch.keys.has(key)) {
           await this.finishFailed(sourceTerminalId, runId, task, `path overlaps a dispatch worker (${p})`);
           return;
@@ -650,12 +697,32 @@ export class SubagentHost {
     run.settled = true;
     // Retain the bundle for resume: a later sibling run can replay it as a
     // follow-up. Bounded and same-parent keyed; a host restart drops it all.
+    // Eviction also removes the bundle directory from disk, so retained
+    // sessions cannot leak storage. A bundle still referenced by another
+    // retained key (resume reuses one file) is never deleted.
     if (run.sessionFile) {
       this.pastSessions.set(this.runKey(run.parentTerminalId, run.runId), run.sessionFile);
+      const evicted: string[] = [];
       while (this.pastSessions.size > MAX_SUBAGENT_PAST_SESSIONS) {
         const oldest = this.pastSessions.keys().next().value as string | undefined;
         if (oldest === undefined) break;
+        const removed = this.pastSessions.get(oldest);
         this.pastSessions.delete(oldest);
+        if (removed) evicted.push(removed);
+      }
+      const live = new Set(this.pastSessions.values());
+      for (const run of this.runs.values()) {
+        if (run.sessionFile) live.add(run.sessionFile);
+      }
+      for (const path of evicted) {
+        if (live.has(path)) continue;
+        const bundleDir = parseSessionBundlePath(path)?.bundleDir;
+        if (!bundleDir) continue;
+        try {
+          rmSync(bundleDir, { recursive: true, force: true });
+        } catch {
+          /* Orphaned bundles are host evidence; a later eviction retries. */
+        }
       }
     }
     if (run.retryTimer) {
