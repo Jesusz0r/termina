@@ -5745,6 +5745,7 @@ export function formatUsageIndicators(
   contextTokens: number,
   maxContext: number,
   usd: number | null = null,
+  flips: CacheFlipTally | null = null,
 ): string {
   const uncachedInput = safeTokenCount(usage.input);
   const cacheRead = safeTokenCount(usage.cacheRead);
@@ -5758,11 +5759,18 @@ export function formatUsageIndicators(
   const limit = Math.max(1, safeTokenCount(maxContext));
   const contextPct = Math.round((context / limit) * 100);
   const cost = usd !== null && Number.isFinite(usd) && usd >= 0 ? ` · last $${usd.toFixed(4)}` : "";
+  // Stable-prefix breaks per evaluated attempt. Working-set churn is expected
+  // (host context moves most turns) and stays in the tally only, so the
+  // indicator flags prefix breaks without training users to ignore it.
+  const flipCount = flips && Number.isInteger(flips.evaluations) && flips.evaluations > 0
+    && Number.isInteger(flips.prefixFlips) && flips.prefixFlips >= 0
+    ? ` · flips ${flips.prefixFlips}/${flips.evaluations}`
+    : "";
   const inputDisplay = inputKnown ? compactTokenCount(input) : "?";
   const outputDisplay = typeof usage.output === "number" && Number.isFinite(usage.output) && usage.output >= 0
     ? compactTokenCount(usage.output)
     : "?";
-  return `tokens ${inputDisplay} in/${outputDisplay} out · cache ${cache} · context ~${compactTokenCount(context)}/${compactTokenCount(limit)} ${contextPct}%${cost}`;
+  return `tokens ${inputDisplay} in/${outputDisplay} out · cache ${cache} · context ~${compactTokenCount(context)}/${compactTokenCount(limit)} ${contextPct}%${cost}${flipCount}`;
 }
 
 let sessionUsage: Usage = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0 };
@@ -8316,7 +8324,7 @@ function statusContextTokens(): number {
 
 function syncIndicators(): void {
   surface?.setStatus({
-    usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd),
+    usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd, cacheFlipStats()),
   });
 }
 
@@ -8752,7 +8760,7 @@ function syncStatus(): void {
   surface?.setStatus({
     model: `${route.provider}/${route.model}`,
     effort: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)),
-    usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd),
+    usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd, cacheFlipStats()),
   });
   logSettings();
 }
@@ -9050,7 +9058,7 @@ async function main(): Promise<void> {
       model: `${route.provider}/${route.model}`,
       effort: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)),
       permissions: permissionMode,
-      usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd),
+      usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd, cacheFlipStats()),
     });
     surface.setBusy(true);
     if (!surface.start()) surface = null;

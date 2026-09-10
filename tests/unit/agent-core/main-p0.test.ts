@@ -54,6 +54,15 @@ describe("Agent Core Main P0 Invariants", () => {
       assert.match(text, /tokens \? in\/\? out/);
       assert.match(text, /cache --/);
     });
+
+    check("usage indicators append prefix-flip counts only with evaluations", () => {
+      const base = { input: 10, cacheRead: 5, cacheWrite: 0, output: 1 };
+      const plain = core.formatUsageIndicators(base, 0, 100);
+      assert.doesNotMatch(plain, /flips/);
+      assert.doesNotMatch(core.formatUsageIndicators(base, 0, 100, null, { evaluations: 0, prefixFlips: 0, workingSetChanges: 3 }), /flips/);
+      const flipped = core.formatUsageIndicators(base, 0, 100, null, { evaluations: 14, prefixFlips: 2, workingSetChanges: 9 });
+      assert.match(flipped, /flips 2\/14/);
+    });
     
     check("provider-reported cost gates on finite nonnegative dollars", () => {
       assert.equal(core.providerReportedUsd({ reportedUsd: 0.0037756 }), 0.0037756);
