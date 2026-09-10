@@ -178,6 +178,19 @@ Rules:
   ambiguous coalesced boundaries produce unknown evidence. Working-set changes compare requests,
   not a flag latched for the entire run. Traces retain hashes and item counts,
   never a second copy of prompt content.
+- Codex probe evidence (2026-09-10, synthetic inputs only): moving-tail and
+  append-only histories both reported zero cache reads at about 6.5k tokens.
+  A 22.7k-token control also reported zero reads for a byte-identical replay
+  and both layouts. The route rejected `prompt_cache_breakpoint` as unsupported.
+  A separate two-request diagnostic probe used a 2,915-input-token synthetic
+  baseline (zero reported cache reads/writes), then replayed the same request
+  with only `comparison_response_id` added. Codex returned HTTP 400:
+  `Unsupported parameter: prompt_cache_options`; no comparison was available.
+  This does **not** establish that overlays cause misses or that caching is
+  disabled globally. Keep overlays transient and the Codex cache policy
+  unchanged; public Responses API features are not proof of backend support.
+  Sources: [prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)
+  and [diagnostics](https://developers.openai.com/api/docs/guides/prompt-caching/diagnostics).
 - Traces are JSON files, not sidecar events. They record usage, estimated
   cost when the local price catalog has a match, measured waste tokens and
   cause, revision count and kinds, and overflow attempts.
