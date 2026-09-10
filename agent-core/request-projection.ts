@@ -115,18 +115,6 @@ function clampUtf8PrefixBytes(source: Buffer, maxBytes: number): Buffer {
   return source.subarray(0, end);
 }
 
-function takeUtf8Prefix(text: string, maxBytes: number): string {
-  if (maxBytes <= 0) return "";
-  const source = Buffer.from(text, "utf8");
-  if (source.length <= maxBytes) return text;
-  return clampUtf8PrefixBytes(source, maxBytes).toString("utf8");
-}
-
-function fullOverlayText(hostContext: string): string {
-  const host = hostContextSafe(hostContext);
-  return host ? `<working-set>\n${host}\n</working-set>` : "";
-}
-
 const OVERLAY_OPENING_TEXT = "<working-set>\n";
 const OVERLAY_CLOSING_TEXT = "\n</working-set>";
 const OVERLAY_OMITTED_TEXT = "<!-- host context omitted -->";
@@ -145,13 +133,6 @@ function truncateHostOverlayBytes(hostBytes: Buffer, maxBytes: number): Buffer |
   const prefix = clampUtf8PrefixBytes(hostBytes, remaining);
   if (prefix.length === 0) return fixed;
   return Buffer.concat([opening, prefix, closing]);
-}
-
-function truncateHostOverlay(hostContext: string, maxBytes: number): string | null {
-  const host = hostContextSafe(hostContext);
-  if (!host) return null;
-  const bytes = truncateHostOverlayBytes(Buffer.from(host, "utf8"), maxBytes);
-  return bytes ? bytes.toString("utf8") : null;
 }
 
 /**
