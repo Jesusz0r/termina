@@ -1,133 +1,249 @@
 /**
- * Live probe: does the Codex backend route accept `prompt_cache_key`?
+ * Bounded live follow-up to the Pi/OpenCode source audit. No production policy changes.
  *
- * Context: today's Codex sessions show bimodal prompt-cache reuse (median
- * read/prevTotal 0 on growing turns, occasional full hits). Live OpenAI docs
- * say per-machine KV routing overflows are mitigated by `prompt_cache_key`,
- * but our route is the undocumented `chatgpt.com/backend-api` and no docs
- * say it accepts the field — so probe, don't assume.
+ * node --experimental-strip-types --no-warnings scripts/codex-cache-probe.ts --live --group all --out /owned/tmp/results.json
  *
- * The probe sends its own minimal `store:false` requests (no session state
- * touched, own `tc1_probe_*` key namespace) and reports accept/reject plus,
- * on acceptance, whether a repeated prefix actually reads from cache.
+ * identity: Codex SSE, no identifiers / key only / key + aligned Pi session headers.
+ * transport: Codex SSE full replay / reused WebSocket full replay / WS incremental continuation.
+ * mode: PUBLIC OpenAI implicit / Termina's explicit mode and marker placement.
  *
- *   node --experimental-strip-types --no-warnings scripts/codex-cache-probe.ts
+ * Three requests per arm, <=24 total, no inference retries or silent transport fallback.
+ * Requests have 20s deadlines; the whole probe has a 4-minute deadline. Synthetic
+ * prompts only, store:false, tiny requested answers. Missing credentials skip a group.
+ * Use of account quota/billing is intentional only with --live. Acceptance is NOT
+ * evidence of a cache hit; a few misses do not establish backend policy.
  *
- * Costs a few cents at most (phase 2 replays ~1.2k tokens twice).
+ * https://developers.openai.com/api/docs/guides/prompt-caching
+ * https://developers.openai.com/api/docs/guides/websocket-mode
  */
-import { resolveAuth } from "../agent-core/auth.ts";
+import { createHash, randomUUID } from "node:crypto";
+import { closeSync, existsSync, openSync, realpathSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
+import { authPath, resolveAuth } from "../agent-core/auth.ts";
 import { protocolEndpoint } from "../agent-core/auth/providers/endpoints.ts";
-import { responsesBody, responsesResultFromEvents } from "../agent-core/openai-compat.ts";
+import { responsesBody, stripResponsesBreakpoints, usageFromOpenAI } from "../agent-core/openai-compat.ts";
+import { httpTransport, websocketTransport, ProbeFailure, type Json, type ProbeTransport } from "./codex-cache-probe-transport.ts";
 
-const MODEL = "gpt-6-astra";
-const KEY = `tc1_probe_${Date.now().toString(36)}`;
+export const MODEL = "gpt-6-astra";
+export const TURNS = 3;
+export const MAX_REQUESTS = 24;
+export type Group = "identity" | "transport" | "mode";
+type Provider = "openai-codex" | "openai";
+export type Arm = {
+  name: string;
+  identity: "none" | "key" | "aligned";
+  wire: "http" | "websocket";
+  incremental?: boolean;
+  explicit?: boolean;
+};
+export const ARMS: Record<Group, readonly Arm[]> = {
+  identity: [
+    { name: "no-identifiers", identity: "none", wire: "http" },
+    { name: "key-only", identity: "key", wire: "http" },
+    { name: "aligned-identifiers", identity: "aligned", wire: "http" },
+  ],
+  transport: [
+    { name: "sse-full", identity: "aligned", wire: "http" },
+    { name: "ws-full", identity: "aligned", wire: "websocket" },
+    { name: "ws-incremental", identity: "aligned", wire: "websocket", incremental: true },
+  ],
+  mode: [
+    { name: "implicit", identity: "key", wire: "http" },
+    { name: "explicit", identity: "key", wire: "http", explicit: true },
+  ],
+};
+const SYSTEM = "This is a synthetic transport benchmark. Answer only with the verification code in the first user message. No explanation, punctuation, or tools.";
+const QUESTION = "Return the verification code from the first user message, exactly and nothing else.";
+export const hash = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-function sseEvents(text: string): Array<Record<string, unknown>> {
-  const events: Array<Record<string, unknown>> = [];
-  for (const chunk of text.split("\n\n")) {
-    for (const line of chunk.split("\n")) {
-      const payload = line.startsWith("data:") ? line.slice(5).trim() : null;
-      if (!payload || payload === "[DONE]") continue;
-      try {
-        const parsed: unknown = JSON.parse(payload);
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          events.push(parsed as Record<string, unknown>);
+export function prepareArm(group: Group, arm: Arm, runId: string) {
+  const provider: Provider = group === "mode" ? "openai" : "openai-codex";
+  const key = `probe_${hash([runId, group, arm.name]).slice(0, 48)}`;
+  const code = hash([key, "verification"]).slice(0, 12).toUpperCase();
+  // Different early nonces prevent one arm warming another; shape/length and corpus
+  // are matched. Within identity/mode arms the three wire requests are identical.
+  const prefix = `Verification code: ${code}. Namespace: ${key}.\n` + Array.from({ length: 140 }, (_, i) =>
+    `Record ${i}: amber station has a ready worker, stable tools, deterministic inputs, and no pending changes.`,
+  ).join("\n");
+  const body = responsesBody(MODEL, SYSTEM, [
+    { role: "user", content: prefix }, { role: "user", content: QUESTION },
+  ], [], {
+    provider, reasoningEffort: "low", textVerbosity: "low",
+    ...(arm.identity === "none" ? {} : { cacheKey: key }),
+    ...(provider === "openai" ? { maxTokens: 64 } : {}),
+    ...(arm.explicit ? { promptCacheMode: "explicit", explicitCacheBreakpoint: true } : {}),
+  });
+  const headers: Record<string, string> = arm.identity === "aligned"
+    ? { "session-id": key, "x-client-request-id": key } : {};
+  return { provider, body, headers, code, prefixHash: hash(prefix) };
+}
+
+function logicalHash(body: Json): string {
+  const clean = stripResponsesBreakpoints(body);
+  delete clean.prompt_cache_key;
+  return hash(clean);
+}
+
+export type Sample = {
+  group: Group; arm: string; turn: number; ok: boolean; error?: string; status?: number | null;
+  bodyHash: string; logicalHash: string; prefixHash: string; inputBytes: number; usedPreviousResponse: boolean;
+  elapsedMs?: number; firstTextMs?: number | null; connectMs?: number; requestBytes?: number;
+  totalInput?: number | null; responseModel?: string | null; serviceTier?: string | null;
+  usage?: ReturnType<typeof usageFromOpenAI>; outputMatches?: boolean;
+};
+type Access = { baseUrl: string; headers: Record<string, string> };
+type TransportFactory = (wire: Arm["wire"], url: string, headers: Record<string, string>, signal: AbortSignal) => ProbeTransport;
+const realTransport: TransportFactory = (wire, url, headers, signal) =>
+  wire === "http" ? httpTransport(url, headers, signal) : websocketTransport(url, headers, signal);
+
+export async function runGroup(
+  group: Group, access: Access, runId: string, signal: AbortSignal,
+  onSample: (sample: Sample) => void = () => {}, makeTransport: TransportFactory = realTransport,
+): Promise<Sample[]> {
+  const states = ARMS[group].map((arm) => {
+    const prepared = prepareArm(group, arm, runId);
+    const protocol = prepared.provider === "openai" ? "openai-responses" : "openai-codex-responses";
+    const url = protocolEndpoint(access.baseUrl, MODEL, protocol, true);
+    const expected = prepared.provider === "openai" ? "https://api.openai.com/v1/responses" : "https://chatgpt.com/backend-api/codex/responses";
+    if (url !== expected) throw new ProbeFailure("refusing-noncanonical-provider-route");
+    return {
+      arm, ...prepared, transport: makeTransport(arm.wire, url, { ...access.headers, ...prepared.headers }, signal),
+      fullInput: prepared.body.input as Json[], previousId: null as string | null, failed: false,
+    };
+  });
+  const samples: Sample[] = [];
+  let blocked = false;
+  try {
+    // Rotate order on each round, rather than running every baseline before every treatment.
+    for (let turn = 0; turn < TURNS && !blocked && !signal.aborted; turn++) {
+      const ordered = [...states.slice(turn % states.length), ...states.slice(0, turn % states.length)];
+      for (const state of ordered) {
+        if (state.failed || signal.aborted) continue;
+        const fullBody = { ...state.body, input: state.fullInput };
+        const body: Json = state.arm.incremental && turn > 0
+          ? { ...fullBody, previous_response_id: state.previousId, input: state.fullInput.slice(-1) }
+          : fullBody;
+        const sample: Sample = {
+          group, arm: state.arm.name, turn: turn + 1, ok: false,
+          bodyHash: hash(body), logicalHash: logicalHash(fullBody), prefixHash: state.prefixHash,
+          inputBytes: Buffer.byteLength(JSON.stringify(body.input)), usedPreviousResponse: Boolean(body.previous_response_id),
+        };
+        try {
+          if (state.arm.incremental && turn > 0 && !state.previousId) throw new ProbeFailure("missing-continuation-id");
+          const result = await state.transport.send(body);
+          const raw = result.response.usage as Json | undefined;
+          sample.ok = true;
+          sample.elapsedMs = result.elapsedMs;
+          sample.firstTextMs = result.firstTextMs;
+          sample.connectMs = result.connectMs;
+          sample.requestBytes = result.requestBytes;
+          sample.totalInput = typeof raw?.input_tokens === "number" ? raw.input_tokens : null;
+          sample.usage = usageFromOpenAI(raw);
+          sample.responseModel = typeof result.response.model === "string" ? result.response.model : null;
+          sample.serviceTier = typeof result.response.service_tier === "string" ? result.response.service_tier : null;
+          sample.outputMatches = new RegExp(`\\b${state.code}\\b`, "i").test(result.text);
+          if (!sample.outputMatches) throw new ProbeFailure("verification-code-mismatch");
+          if (group === "transport") {
+            if (!Array.isArray(result.response.output)) throw new ProbeFailure("missing-response-output");
+            state.previousId = typeof result.response.id === "string" ? result.response.id : null;
+            // Preserve actual output items (including encrypted reasoning) byte-for-byte.
+            // The incremental request contains neither the code nor old messages.
+            state.fullInput = [...state.fullInput, ...result.response.output, {
+              role: "user", content: [{ type: "input_text", text: QUESTION }],
+            }];
+          }
+        } catch (error) {
+          sample.ok = false;
+          sample.error = error instanceof ProbeFailure ? error.message : "transport-failure";
+          sample.status = error instanceof ProbeFailure ? error.status : null;
+          state.failed = true;
+          state.transport.close();
+          blocked = sample.status !== null && [401, 402, 403, 429].includes(sample.status!);
         }
-      } catch {
-        /* Non-JSON SSE payloads carry no usage. */
+        samples.push(sample);
+        onSample(sample);
+        if (blocked) break;
       }
     }
+  } finally {
+    for (const state of states) state.transport.close();
   }
-  return events;
+  return samples;
 }
 
-async function send(messages: Array<{ role: "user" | "assistant"; content: string }>, headers: Record<string, string>, url: string, turnState?: string): Promise<{
-  ok: boolean;
-  status: number;
-  usage: Record<string, unknown> | null;
-  error: string | null;
-  turnState: string | null;
-}> {
-  const body = responsesBody(MODEL, "You are a coding agent.", messages, [], {
-    provider: "openai-codex",
-    cacheKey: KEY,
-    includeEncryptedReasoning: false,
+function median(values: number[]): number | null {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  return (sorted[Math.floor((sorted.length - 1) / 2)]! + sorted[Math.floor(sorted.length / 2)]!) / 2;
+}
+
+export function summarize(samples: Sample[]) {
+  return [...new Set(samples.map((sample) => `${sample.group}/${sample.arm}`))].map((name) => {
+    const rows = samples.filter((sample) => `${sample.group}/${sample.arm}` === name);
+    const warm = rows.filter((sample) => sample.ok && sample.turn > 1);
+    const known = warm.filter((sample) => typeof sample.usage?.cacheRead === "number" && typeof sample.totalInput === "number" && sample.totalInput > 0);
+    return {
+      arm: name, completed: rows.filter((sample) => sample.ok).length, attempted: rows.length,
+      warmSamples: warm.length, measuredWarmSamples: known.length,
+      warmReadFractions: known.map((sample) => sample.usage!.cacheRead! / sample.totalInput!),
+      medianWarmMs: median(warm.flatMap((sample) => typeof sample.elapsedMs === "number" ? [sample.elapsedMs] : [])),
+      medianWarmInputBytes: median(warm.map((sample) => sample.inputBytes)),
+      errors: rows.flatMap((sample) => sample.error ? [sample.error] : []),
+    };
   });
-  if (body.prompt_cache_key !== KEY) {
-    return { ok: false, status: 0, usage: null, error: "local body builder did not emit prompt_cache_key", turnState: null };
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  const groupArg = args.indexOf("--group");
+  const selected = groupArg < 0 ? "all" : args[groupArg + 1];
+  if (selected !== "all" && selected !== "identity" && selected !== "transport" && selected !== "mode") throw new Error("Invalid --group");
+  const groups: Group[] = selected === "all" ? ["identity", "transport", "mode"] : [selected];
+  if (!args.includes("--live")) {
+    console.log(JSON.stringify({ model: MODEL, groups, maxRequests: MAX_REQUESTS, live: false, note: "Pass --live to use provider quota; --out writes a new JSON result file." }));
+    return;
   }
-  const outgoing: Record<string, string> = { ...headers, accept: "text/event-stream", "content-type": "application/json" };
-  if (turnState) outgoing["x-codex-turn-state"] = turnState;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: outgoing,
-    body: JSON.stringify(body),
-  });
-  const state = res.headers.get("x-codex-turn-state")?.trim() || null;
-  const text = await res.text();
-  if (!res.ok) {
-    return { ok: false, status: res.status, usage: null, error: text.slice(0, 500), turnState: state };
+  const file = existsSync(authPath()) ? realpathSync(authPath()) : resolve(authPath());
+  const forbidden = join(homedir(), ".pi", "agent");
+  if (file === forbidden || file.startsWith(forbidden + sep)) throw new Error("Refusing host Pi auth tree");
+  const outArg = args.indexOf("--out");
+  if (outArg >= 0 && !args[outArg + 1]) throw new Error("Missing --out path");
+  // Exclusive creation before any inference prevents overwriting another task's files.
+  const fd = outArg >= 0 ? openSync(resolve(args[outArg + 1]!), "wx", 0o600) : null;
+  const runId = randomUUID();
+  const samples: Sample[] = [];
+  const skipped: Array<{ group: Group; reason: string }> = [];
+  const signal = AbortSignal.timeout(240_000);
+  const auths = new Map<Provider, Awaited<ReturnType<typeof resolveAuth>>>();
+  try {
+    for (const group of groups) {
+      const provider: Provider = group === "mode" ? "openai" : "openai-codex";
+      if (signal.aborted) { skipped.push({ group, reason: "probe-deadline" }); continue; }
+      let auth = auths.get(provider);
+      if (!auth) {
+        auth = await resolveAuth(provider, AbortSignal.any([signal, AbortSignal.timeout(10_000)]));
+        auths.set(provider, auth);
+      }
+      if (!auth.ok) { skipped.push({ group, reason: `${provider}-credentials-unavailable` }); continue; }
+      const denied = samples.some((sample) => sample.status != null && [401, 402, 403, 429].includes(sample.status));
+      if (denied && provider === "openai-codex") { skipped.push({ group, reason: "provider-blocked-earlier" }); continue; }
+      await runGroup(group, auth, runId, signal, (sample) => {
+        samples.push(sample);
+        console.log(JSON.stringify(sample));
+      });
+    }
+    const result = { schemaVersion: 1, runId, at: new Date().toISOString(), model: MODEL, maxRequests: MAX_REQUESTS,
+      productionPolicyChanged: false, samples, skipped, summary: summarize(samples),
+      limitation: "Small exploratory sample; no cache-policy conclusion from acceptance or misses alone. Cross-arm prefixes are isolated, not identical. No application session content sent." };
+    if (fd !== null) writeFileSync(fd, JSON.stringify(result, null, 2) + "\n");
+    console.log(JSON.stringify({ summary: result.summary, skipped }));
+  } finally {
+    if (fd !== null) closeSync(fd);
   }
-  const result = responsesResultFromEvents(sseEvents(text), () => {}, Date.now());
-  const usage = result.usage ? { ...(result.usage as Record<string, unknown>) } : null;
-  return { ok: true, status: res.status, usage, error: null, turnState: state };
 }
 
-function usageLine(label: string, usage: Record<string, unknown> | null): string {
-  if (!usage) return `${label}: no usage parsed`;
-  const raw = usage as {
-    input?: unknown; cacheRead?: unknown; cacheWrite?: unknown; output?: unknown; reasoning?: unknown;
-  };
-  return `${label}: input=${String(raw.input)} cacheRead=${String(raw.cacheRead)} cacheWrite=${String(raw.cacheWrite)} output=${String(raw.output)}`;
-}
-
-const auth = await resolveAuth("openai-codex");
-if (!auth.ok) {
-  console.error(`auth: ${auth.error}`);
-  process.exit(2);
-}
-const url = protocolEndpoint(auth.baseUrl, MODEL, "openai-codex-responses", true);
-console.log(`route: ${url} key: ${KEY}`);
-
-// Phase 1: acceptance with a tiny body (below cacheable minimum by design).
-const tiny = await send([{ role: "user", content: "Reply with exactly the word ok." }], auth.headers as Record<string, string>, url);
-if (!tiny.ok) {
-  console.log(`REJECTED status=${tiny.status} error=${tiny.error}`);
-  console.log("verdict: prompt_cache_key not accepted on the Codex route (mirrors recordRejectedCacheFields semantics)");
-  process.exit(1);
-}
-console.log(`ACCEPTED status=${tiny.status} ${usageLine("tiny", tiny.usage)}`);
-
-// Phase 2: same ~1.2k-token prefix twice; a routing-effective key shows
-// cached_tokens on the second response.
-const filler = Array.from({ length: 170 }, (_, i) => `probe sentence ${i}: the cache key routes repeated prefixes to one machine.`).join(" ");
-const shared: Array<{ role: "user" | "assistant"; content: string }> = [{ role: "user", content: filler }];
-const first = await send([...shared, { role: "user", content: "First question: reply yes." }], auth.headers as Record<string, string>, url);
-console.log(usageLine("first ", first.usage));
-if (!first.ok) {
-  console.log("verdict: accepted but the long-prefix request failed; inconclusive");
-  process.exit(1);
-}
-const second = await send([...shared, { role: "user", content: "Second question: reply yes." }], auth.headers as Record<string, string>, url, first.turnState ?? undefined);
-console.log(usageLine("second", second.usage));
-const read = typeof second.usage?.cacheRead === "number" ? second.usage.cacheRead : null;
-if (read !== null && read > 0) {
-  console.log(`verdict: key accepted AND effective (second-response cacheRead=${read}) — wire prompt_cache_key on openai-codex`);
-} else {
-  console.log("verdict: key accepted but no cache read observed — key is tolerated, routing benefit unproven");
-}
-
-// Phase 3: same prefix chained through the backend turn-state header,
-// mirroring real sessions (x-codex-turn-state from turn 2 onward).
-if (second.turnState) {
-  const third = await send([...shared, { role: "user", content: "Third question: reply yes." }], auth.headers as Record<string, string>, url, second.turnState);
-  console.log(usageLine("third ", third.usage));
-  const read3 = typeof third.usage?.cacheRead === "number" ? third.usage.cacheRead : null;
-  if (read3 !== null && read3 > 0) {
-    console.log(`verdict: turn-state chaining reads cache (${read3}) — affinity rides the state header, key optional`);
-  } else {
-    console.log("verdict: even turn-state chaining misses — backend routing is opaque; no client key/header fixes it");
-  }
-} else {
-  console.log("note: backend returned no x-codex-turn-state; phase 3 skipped");
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  main().catch(() => { console.error("Probe failed; no credentials or raw provider error bodies logged."); process.exitCode = 1; });
 }
