@@ -47,10 +47,14 @@ export const test = base.extend<TerminaE2EFixtures>({
   runRoot: async ({}, use) => {
     const runRoot = mkdtempSync(join(tmpdir(), "termina-playwright-"));
     await use(runRoot);
-    try {
-      rmSync(runRoot, { recursive: true, force: true });
-    } catch {
-      // Best-effort cleanup
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        rmSync(runRoot, { recursive: true, force: true });
+        break;
+      } catch {
+        if (attempt === 3) break;
+        await new Promise((r) => setTimeout(r, 100 * attempt));
+      }
     }
   },
 
@@ -67,8 +71,9 @@ export const test = base.extend<TerminaE2EFixtures>({
       execFileSync("git", ["config", "user.name", "termina"], { cwd: root });
       execFileSync("git", ["add", "-A"], { cwd: root });
       execFileSync("git", ["commit", "-qm", "initial"], { cwd: root });
-    } catch {
-      /* fallback if git is unavailable */
+      execFileSync("git", ["rev-parse", "--verify", "HEAD"], { cwd: root, stdio: "ignore" });
+    } catch (err) {
+      throw new Error(`e2e fixture requires git: ${(err as Error).message}`);
     }
 
     await use(root);
