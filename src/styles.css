@@ -371,9 +371,23 @@ body {
   -webkit-app-region: no-drag;
 }
 
+/* Paint-only hover: no padding/border/height change, so a hovered row never
+ * reflows under the cursor or shifts the rows below it. Deliberately weaker
+ * than .selected so the two states stay distinguishable. */
+.explorer-row:hover {
+  background: color-mix(in srgb, var(--bg-hover) 55%, transparent);
+}
+
 .explorer-row.selected {
   background: var(--bg-hover);
   box-shadow: inset 2px 0 var(--accent);
+}
+
+/* Keyboard focus ring: outline is paint-only, so it never reflows the row or
+ * shifts the rows below it. :focus-visible keeps it off mouse clicks. */
+.explorer-row:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
 }
 
 .explorer-row.dragging {
@@ -416,6 +430,8 @@ body {
   background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
+/* File icons stay inside the same 8x10 box as the default. Only the tint
+ * changes per kind, so every row keeps one icon footprint. */
 .file-icon::before {
   content: "";
   width: 8px;
@@ -424,15 +440,81 @@ body {
   border-radius: 1px;
 }
 
+.file-icon[data-kind="code"]::before {
+  border-color: color-mix(in srgb, var(--purple) 75%, var(--text-dim));
+  background: color-mix(in srgb, var(--purple) 18%, transparent);
+}
+
+.file-icon[data-kind="config"]::before {
+  border-color: color-mix(in srgb, var(--yellow) 75%, var(--text-dim));
+  background: color-mix(in srgb, var(--yellow) 16%, transparent);
+}
+
+.file-icon[data-kind="doc"]::before {
+  border-color: color-mix(in srgb, var(--green) 75%, var(--text-dim));
+  background: color-mix(in srgb, var(--green) 16%, transparent);
+}
+
+.file-icon[data-kind="image"]::before {
+  border-color: color-mix(in srgb, var(--orange) 75%, var(--text-dim));
+  background: color-mix(in srgb, var(--orange) 16%, transparent);
+}
+
+.file-icon[data-kind="archive"]::before {
+  border-color: color-mix(in srgb, var(--red) 65%, var(--text-dim));
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+}
+
 .explorer-name {
   overflow: hidden;
   text-overflow: ellipsis;
   flex: 1;
+  /* Two-tone spans must not introduce a break between base and extension. */
+  white-space: nowrap;
+}
+
+/* The extension recedes so the basename reads first. */
+.explorer-name-ext {
+  color: var(--text-dim);
+}
+
+/* Width is reserved whether or not the row changed, so marking a file never
+ * reflows the tree. Only opacity toggles. */
+.explorer-change {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--yellow);
+  opacity: 0;
+}
+
+.explorer-row.changed .explorer-change {
+  opacity: 1;
+}
+
+/* Placeholder for loading/truncation: deliberately NOT the interactive
+ * .explorer-empty button styling (that class is the "Open folder" action). */
+.explorer-note {
+  display: block;
+  padding: 6px 12px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-style: italic;
 }
 
 .explorer-children {
   display: block;
   margin-left: 12px;
+  /* Depth guide as a background gradient: paint-only, so adding it never
+   * changes the indented block's width. x=0 of this block lines up with the
+   * parent row's chevron centre (row padding-left 6px + arrow width 12px / 2),
+   * so the line runs directly under the expander it belongs to. */
+  background-image: linear-gradient(var(--border), var(--border));
+  background-size: 1px 100%;
+  background-position: 0 0;
+  background-repeat: no-repeat;
 }
 
 #explorer-divider {

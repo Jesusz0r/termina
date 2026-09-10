@@ -42,6 +42,7 @@ import { QuickOpen } from "./quick-open";
 import { ActivityTabs } from "./activity-tabs";
 import { WorldlinesView } from "./worldlines";
 import { Explorer } from "./components/explorer";
+import { projectChangedPaths } from "./explorer-file";
 import { toast } from "./components/modals";
 import { showContextMenu, type ContextMenuItem } from "./components/context-menu";
 import { SettingsView } from "./settings";
@@ -298,6 +299,7 @@ function setActiveProject(projectId: string | null): void {
   }
   placeEditorToggle(activeProjectId);
   syncPaneVisibility();
+  syncExplorerChanged();
   syncEditorMinimizedForProject();
   drainPendingToolTargets(activeProjectId);
   fitPanes();
@@ -1157,6 +1159,8 @@ async function closePane(instanceId: string): Promise<void> {
   for (const [projectId, activeInstanceId] of lastActivePane) {
     if (activeInstanceId === instanceId) lastActivePane.delete(projectId);
   }
+  // This pane's changed files leave with it; recompute so no dot outlives it.
+  syncExplorerChanged();
   pane.view.dispose();
   pane.container.remove();
   pane.tabEl.remove();
@@ -2880,7 +2884,24 @@ window.termina.onModifiedList((p) => {
   if (!pane) return;
   pane.modified = p.files;
   if (activeId === pane.instanceId) renderModified(pane);
+  if (pane.projectId === activeProjectId) syncExplorerChanged();
 });
+
+/**
+ * The explorer marks agent-changed files. Main owns the modified list, so the
+ * dot is derived from the same pushes that drive the Modified panel and can
+ * never disagree with it. Only panes in the project's primary workspace count:
+ * a worldline candidate has its own tree, so its relative paths would mark
+ * files the project tree never changed.
+ */
+function syncExplorerChanged(): void {
+  const view = activeProjectId ? projectViews.get(activeProjectId) : undefined;
+  if (!view) {
+    explorer.setModifiedFiles([]);
+    return;
+  }
+  explorer.setModifiedFiles(projectChangedPaths(panes.values(), activeProjectId, view.workspaceId));
+}
 
 window.termina.onFolderOpened((e) => {
   if (
@@ -2903,6 +2924,9 @@ window.termina.onFolderOpened((e) => {
   baseEditorInstance?.setProjectOpen(true);
   setActiveProject(view.id);
   explorer.setProject(projectId, e.cwd);
+  // setProject clears change marks (they are project-relative), and it runs
+  // after setActiveProject, so the marks must be re-pushed here.
+  syncExplorerChanged();
   reviewView?.resetForProject();
   refreshMine(projectId);
   activateProjectPane();
@@ -2956,10 +2980,12 @@ window.termina.onInstances((list: InstanceSummary[]) => {
   const liveIds = new Set(list.map((inst) => inst.id));
 
   // Reconcile and prune deceased background panes (candidates, dispatch workers, exited panes)
+  let prunedPane = false;
   for (const [id, pane] of [...panes.entries()]) {
     if (!liveIds.has(id)) {
       if (pane.dispatchWorker || pane.worldlineLabel !== null || pane.exited || closingPanes.has(id)) {
         panes.delete(id);
+        prunedPane = true;
         for (const [projId, activeInstId] of lastActivePane) {
           if (activeInstId === id) lastActivePane.delete(projId);
         }
@@ -2972,6 +2998,8 @@ window.termina.onInstances((list: InstanceSummary[]) => {
       }
     }
   }
+  // A pruned pane takes its changed-file contributions with it.
+  if (prunedPane) syncExplorerChanged();
 
   handleWorldlineInstances(list, {
     paneById: (instanceId) => panes.get(instanceId),
@@ -3081,6 +3109,9 @@ async function boot(attempt = 0): Promise<void> {
     // Panes are created visible; hide other projects' panes now that
     // every projectId is assigned (setActiveProject ran while empty).
     syncPaneVisibility();
+    // setActiveProject ran before the instance list arrived, so the panes had
+    // no modified state yet. Recompute now that each pane carries its list.
+    syncExplorerChanged();
     activateProjectPane();
     updateEditorLock();
     // Hydrate every pane only after all terminal shells and their project

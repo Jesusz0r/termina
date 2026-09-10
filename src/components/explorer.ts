@@ -6,8 +6,68 @@
  * the explorer:paste backend, so no new IPC exists for drag-drop.
  */
 import { pathBasename, type CommandId, type ExplorerEntry } from "../../shared/types";
+import {
+  computeChangedSets,
+  deleteConfirmMessage,
+  fileIconKind,
+  findTypeAheadIndex,
+  normalizeRelPath,
+  parentRowRel,
+  rowLevel,
+  splitExtension,
+  targetDirRel,
+} from "../explorer-file";
 import { showContextMenu, closeContextMenu, type ContextMenuItem } from "./context-menu";
 import { copyText, showConfirm, showInput, toast } from "./modals";
+
+/** Matches the CSS transition on the focus ring; type-ahead resets after it. */
+const TYPE_AHEAD_RESET_MS = 700;
+
+/** Icon element for a file row; the kind drives the CSS shape/color. */
+function makeFileIcon(name: string): HTMLElement {
+  const icon = document.createElement("span");
+  icon.className = "explorer-icon file-icon";
+  icon.dataset.kind = fileIconKind(name);
+  return icon;
+}
+
+/** Right-edge dot for a row the agent changed. Always occupies its width (the
+ *  `.changed` class toggles opacity only), so marking never reflows the row. */
+function makeChangeMark(): HTMLElement {
+  const mark = document.createElement("span");
+  mark.className = "explorer-change";
+  mark.setAttribute("aria-hidden", "true");
+  return mark;
+}
+
+/** Non-interactive placeholder (loading, truncation). Not a button. */
+function makeNote(text: string): HTMLElement {
+  const note = document.createElement("div");
+  note.className = "explorer-note";
+  note.textContent = text;
+  return note;
+}
+
+/** Name element; for files the extension is dimmed so the basename reads
+ *  first. Directories stay single-tone (a dot is just part of the name). */
+function makeNameEl(name: string, twoTone = true): HTMLElement {
+  const el = document.createElement("span");
+  el.className = "explorer-name";
+  el.title = name;
+  const { base, ext } = twoTone ? splitExtension(name) : { base: name, ext: "" };
+  if (!ext) {
+    el.textContent = name;
+    return el;
+  }
+  const baseEl = document.createElement("span");
+  baseEl.className = "explorer-name-base";
+  baseEl.textContent = base;
+  const extEl = document.createElement("span");
+  extEl.className = "explorer-name-ext";
+  extEl.textContent = ext;
+  el.append(baseEl, extEl);
+  return el;
+}
 
 interface DirState {
   expanded: boolean;
@@ -21,6 +81,22 @@ interface DirView {
   state: DirState;
   node: HTMLElement;
   children: HTMLElement;
+  /** The row element and its chevron, so a keyboard toggle updates both. */
+  row: HTMLElement;
+  arrow: HTMLElement;
+}
+
+/**
+ * ARIA treeitem attributes for a row. `aria-level` follows the tree depth and
+ * `aria-expanded` exists only for directories (a file must not claim it).
+ */
+function applyRowA11y(row: HTMLElement, entry: ExplorerEntry, expanded?: boolean): void {
+  row.setAttribute("role", "treeitem");
+  row.setAttribute("aria-level", String(rowLevel(entry.relPath)));
+  if (entry.type === "dir") row.setAttribute("aria-expanded", expanded ? "true" : "false");
+  row.setAttribute("aria-selected", row.classList.contains("selected") ? "true" : "false");
+  // Roving tabindex: exactly one row is tabbable, the rest are reachable by arrow.
+  if (row.tabIndex !== 0) row.tabIndex = -1;
 }
 
 export class Explorer {
@@ -41,6 +117,23 @@ export class Explorer {
   private expandTimer: ReturnType<typeof setTimeout> | null = null;
 
   private onOpenFile: (absPath: string, preview?: boolean) => void = () => {};
+  /** Project-relative files the agent changed (row dot marker). */
+  private changedRel = new Set<string>();
+  /** Project-relative directories containing a changed file, so a collapsed
+   *  branch still shows that something inside it changed. */
+  private changedDirRel = new Set<string>();
+  /** The row currently holding the roving tabindex (tabIndex 0). */
+  private focusedRow: HTMLElement | null = null;
+  /** Roving tabindex target: the project-relative path of the focused row. */
+  private focusedPath: string | null = null;
+  /** Type-ahead buffer and its reset timer (keyboard name search). */
+  private typeBuffer = "";
+  private typeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The entry behind each row, so keyboard actions act on the same object the
+   *  mouse does. Keyed by element so a rebuilt row never inherits a stale one. */
+  private readonly rowEntry = new WeakMap<HTMLElement, ExplorerEntry>();
+  /** The row currently painted as selected, so `select` clears exactly one. */
+  private selectedRow: HTMLElement | null = null;
 
   constructor(container: HTMLElement) {
     this.treeEl = container.querySelector("#explorer-tree") as HTMLElement;
@@ -50,7 +143,239 @@ export class Explorer {
       if (!this.projectCwd) return;
       showContextMenu(this.rootMenuItems(), e.clientX, e.clientY);
     });
+    this.treeEl.addEventListener("keydown", (e) => this.onKeyDown(e));
+    // Focus can leave the tree (Tab away); keep the roving row in sync so
+    // returning to the tree resumes where the user was.
+    this.treeEl.addEventListener("focusout", () => this.storeFocusedRow());
     void this.renderRoot();
+  }
+
+  // ------------------------------------------------- keyboard + focus --
+
+  /** Rows in DOM order, which is preorder traversal and therefore visual order. */
+  private visibleRows(): HTMLElement[] {
+    return [...this.treeEl.querySelectorAll<HTMLElement>(".explorer-row")];
+  }
+
+  private rowByRel(rel: string): HTMLElement | null {
+    for (const row of this.visibleRows()) {
+      if (row.dataset.relPath === rel) return row;
+    }
+    return null;
+  }
+
+  private currentRow(rows: HTMLElement[]): HTMLElement | null {
+    if (rows.length === 0) return null;
+    const byPath = this.focusedPath ? rows.find((r) => r.dataset.relPath === this.focusedPath) : undefined;
+    return byPath ?? rows[0]!;
+  }
+
+  /** Remember the focused row and move the roving tabindex onto it. */
+  /**
+   * Move the roving tabindex onto `row`. O(1): only the previously focused row
+   * and the new one change, so a keystroke on a 2000-entry tree does two DOM
+   * writes instead of re-scanning every row.
+   */
+  private markFocus(row: HTMLElement): void {
+    const previous = this.focusedRow;
+    if (previous && previous !== row) previous.tabIndex = -1;
+    row.tabIndex = 0;
+    this.focusedRow = row;
+    this.focusedPath = row.dataset.relPath ?? null;
+  }
+
+  private storeFocusedRow(): void {
+    const active = document.activeElement as HTMLElement | null;
+    if (active && this.treeEl.contains(active) && active.dataset.relPath !== undefined) {
+      this.markFocus(active);
+    }
+  }
+
+  /** Focus a row: selection follows focus, so rename/delete target it. */
+  private focusRow(row: HTMLElement, focus = true): void {
+    this.markFocus(row);
+    if (focus) row.focus();
+    const entry = this.rowEntry.get(row);
+    if (entry) this.select(entry, row);
+  }
+
+  /**
+   * Re-apply roving focus after the tree was rebuilt (refresh, expand,
+   * collapse). Keeps DOM focus only when the tree already had it, so a
+   * background watcher refresh never steals focus from the editor.
+   */
+  private restoreFocus(fallbackRel: string | null = null): void {
+    // A rebuild can drop the selected entry (deleted on disk, filtered out).
+    // Leaving it selected would aim rename/delete at a path that is gone.
+    if (this.selectedRow && !this.selectedRow.isConnected) {
+      this.selected = null;
+      this.selectedRow = null;
+    }
+    const rows = this.visibleRows();
+    if (rows.length === 0) return;
+    const hadFocus = this.treeEl.contains(document.activeElement);
+    const target =
+      (this.focusedPath ? rows.find((r) => r.dataset.relPath === this.focusedPath) : undefined)
+      ?? (fallbackRel !== null ? rows.find((r) => r.dataset.relPath === fallbackRel) : undefined)
+      ?? rows[0]!;
+    this.markFocus(target);
+    if (hadFocus) target.focus();
+  }
+
+  /** Drop the type-ahead buffer. Navigation keys end a name search, so a stale
+   *  buffer cannot combine with the next keystroke. */
+  private resetTypeAhead(): void {
+    this.typeBuffer = "";
+    if (this.typeTimer) {
+      clearTimeout(this.typeTimer);
+      this.typeTimer = null;
+    }
+  }
+
+  private onKeyDown(e: KeyboardEvent): void {
+    if (e.defaultPrevented) return;
+    // Modifier combos belong to the shortcut dispatcher and the browser.
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // The capture-phase shortcut dispatcher in main handles F2 when it is
+    // bound; this fallback keeps rename working when it is unbound.
+    if (e.key === "F2") {
+      const row = this.currentRow(this.visibleRows());
+      const entry = row ? this.rowEntry.get(row) : undefined;
+      if (entry) {
+        e.preventDefault();
+        void this.renameAt(entry);
+      }
+      return;
+    }
+    const rows = this.visibleRows();
+    const row = this.currentRow(rows);
+    if (!row) return;
+    const index = rows.indexOf(row);
+    const entry = this.rowEntry.get(row);
+
+    const move = (delta: number): void => {
+      const next = rows[index + delta];
+      if (next) this.focusRow(next);
+    };
+
+    switch (e.key) {
+      case "ArrowDown":
+        e.preventDefault();
+        this.resetTypeAhead();
+        move(1);
+        return;
+      case "ArrowUp":
+        e.preventDefault();
+        this.resetTypeAhead();
+        move(-1);
+        return;
+      case "Home":
+        e.preventDefault();
+        this.resetTypeAhead();
+        this.focusRow(rows[0]!);
+        return;
+      case "End":
+        e.preventDefault();
+        this.resetTypeAhead();
+        this.focusRow(rows[rows.length - 1]!);
+        return;
+      case "ArrowRight": {
+        if (!entry) return;
+        e.preventDefault();
+        this.resetTypeAhead();
+        if (entry.type === "dir") {
+          const view = this.dirViews.get(entry.path);
+          if (view && !view.state.expanded) void this.setDirExpanded(entry.path, true);
+          // Already open: step into the first child, if it is mounted.
+          else {
+            const next = rows[index + 1];
+            if (next && Number(next.getAttribute("aria-level")) > Number(row.getAttribute("aria-level"))) {
+              this.focusRow(next);
+            }
+          }
+        }
+        return;
+      }
+      case "ArrowLeft": {
+        if (!entry) return;
+        e.preventDefault();
+        this.resetTypeAhead();
+        const view = entry.type === "dir" ? this.dirViews.get(entry.path) : undefined;
+        if (view?.state.expanded) {
+          void this.setDirExpanded(entry.path, false);
+          return;
+        }
+        const parentRel = parentRowRel(entry.relPath);
+        if (parentRel !== null) {
+          const parentRow = this.rowByRel(parentRel);
+          if (parentRow) this.focusRow(parentRow);
+        }
+        return;
+      }
+      case "Enter": {
+        if (!entry) return;
+        e.preventDefault();
+        this.resetTypeAhead();
+        if (entry.type === "dir") {
+          const view = this.dirViews.get(entry.path);
+          void this.setDirExpanded(entry.path, !(view?.state.expanded ?? false));
+        } else {
+          // Same as double-click: open pinned, not as a preview.
+          this.onOpenFile(entry.path, false);
+        }
+        return;
+      }
+      case "Delete": {
+        // The root row has no relPath; there is nothing to delete.
+        if (!entry || !entry.relPath) return;
+        e.preventDefault();
+        void this.deleteAt(entry);
+        return;
+      }
+      case "Backspace": {
+        // While a type-ahead search is active, Backspace edits the search
+        // instead of arming a delete: a typo must never open a destructive
+        // confirm in the middle of typing a file name.
+        if (this.typeBuffer) {
+          e.preventDefault();
+          this.typeBuffer = this.typeBuffer.slice(0, -1);
+          if (this.typeBuffer) this.applyTypeAhead(rows, index);
+          return;
+        }
+        if (!entry || !entry.relPath) return;
+        e.preventDefault();
+        void this.deleteAt(entry);
+        return;
+      }
+      default:
+        break;
+    }
+
+    // Type-ahead: a printable single character jumps to the next matching name.
+    if (e.key.length === 1 && e.key !== " ") {
+      if (this.typeAhead(rows, index, e.key)) e.preventDefault();
+    }
+  }
+
+  /** Focus the row matching the current buffer; false when nothing matches. */
+  private applyTypeAhead(rows: HTMLElement[], index: number): boolean {
+    const names = rows.map((r) => r.dataset.name ?? "");
+    const found = findTypeAheadIndex(names, index, this.typeBuffer);
+    const row = found === -1 ? undefined : rows[found];
+    if (!row) return false;
+    this.focusRow(row);
+    return true;
+  }
+
+  /** Extend the type-ahead buffer and focus the next name that matches it. */
+  private typeAhead(rows: HTMLElement[], index: number, char: string): boolean {
+    this.typeBuffer += char;
+    if (this.typeTimer) clearTimeout(this.typeTimer);
+    this.typeTimer = setTimeout(() => {
+      this.typeTimer = null;
+      this.typeBuffer = "";
+    }, TYPE_AHEAD_RESET_MS);
+    return this.applyTypeAhead(rows, index);
   }
 
   bind(handlers: { onOpenFile: (absPath: string, preview?: boolean) => void }): void {
@@ -61,10 +386,10 @@ export class Explorer {
   handleCommand(command: CommandId): void {
     switch (command) {
       case "new-file":
-        void this.createAt("", "file");
+        void this.createAt(this.createTargetRel(), "file");
         break;
       case "new-folder":
-        void this.createAt("", "dir");
+        void this.createAt(this.createTargetRel(), "dir");
         break;
       case "rename":
         this.withSelected((entry) => void this.renameAt(entry));
@@ -76,6 +401,15 @@ export class Explorer {
         void this.refresh();
         break;
     }
+  }
+
+  /**
+   * Folder a File-menu create should land in: the selected folder, the parent of
+   * the selected file, or the project root when nothing is selected. The context
+   * menu offers the same targets, so both paths agree.
+   */
+  private createTargetRel(): string {
+    return this.selected ? targetDirRel(this.selected) : "";
   }
 
   /** Called when the project folder changes. Null clears the tree. */
@@ -90,9 +424,17 @@ export class Explorer {
     this.dirViews.clear();
     this.pendingChanges.clear();
     this.selected = null;
+    this.selectedRow = null;
     // Clipboard entries are project-relative: they never survive a switch.
     this.clipboardEntry = null;
     this.dragSrc = null;
+    // Change marks are project-relative too; main re-pushes them per project.
+    this.changedRel = new Set<string>();
+    this.changedDirRel = new Set<string>();
+    // Keyboard state is project-relative as well.
+    this.focusedRow = null;
+    this.focusedPath = null;
+    this.resetTypeAhead();
     this.clearExpandTimer();
     closeContextMenu();
     void this.renderRoot();
@@ -119,6 +461,7 @@ export class Explorer {
     if (!changedPaths) this.pendingChanges.clear();
     if (!changedPaths || changedPaths.length === 0) {
       await this.renderRoot(true);
+      await this.reloadMountedBranches();
       return;
     }
     await this.renderRoot(false);
@@ -143,6 +486,28 @@ export class Explorer {
     }
   }
 
+  /**
+   * Force-reload every mounted, expanded folder, leaving collapsed ones marked
+   * stale so they reload on expand.
+   *
+   * A full refresh has to walk the whole visible tree, not just the root. A new
+   * EMPTY folder produces no file event (the watcher records directories only to
+   * detect their later deletion), so nothing else would ever reveal it: neither
+   * the watcher nor a root-only reload sees it.
+   */
+  private async reloadMountedBranches(): Promise<void> {
+    for (const path of [...this.dirViews.keys()]) {
+      const view = this.dirViews.get(path);
+      // The map mutates while reloading (nodes are added and forgotten).
+      if (!view) continue;
+      // The root is rendered by renderRoot.
+      if (view.entry.relPath === "") continue;
+      if (view.state.expanded) await this.renderChildren(view.children, view.entry, view.state, true);
+      else view.state.loaded = false;
+    }
+    this.restoreFocus();
+  }
+
   // ------------------------------------------------------------- rendering --
 
   private async renderRoot(forceReload = false): Promise<void> {
@@ -150,6 +515,9 @@ export class Explorer {
     if (!cwd) {
       this.dirViews.clear();
       this.treeEl.replaceChildren();
+      // No tree to describe while there is no project; the action stands alone.
+      this.treeEl.removeAttribute("role");
+      this.treeEl.removeAttribute("aria-label");
       const empty = document.createElement("button");
       empty.type = "button";
       empty.className = "explorer-empty";
@@ -158,6 +526,9 @@ export class Explorer {
       this.treeEl.appendChild(empty);
       return;
     }
+    // A real tree: screen readers get the structure and the label.
+    this.treeEl.setAttribute("role", "tree");
+    this.treeEl.setAttribute("aria-label", "Project files");
     const name = pathBasename(cwd);
     const existing = this.dirViews.get(cwd);
     const node = existing?.node ?? this.makeDirRow({ name, path: cwd, relPath: "", type: "dir" }, true);
@@ -166,6 +537,7 @@ export class Explorer {
     if (view?.state.expanded && (forceReload || !view.state.loaded)) {
       await this.renderChildren(view.children, view.entry, view.state, forceReload);
     }
+    this.restoreFocus();
   }
 
   private dirState(absPath: string): DirState {
@@ -214,6 +586,36 @@ export class Explorer {
     this.pruneCollapsedDescendants(absPath);
   }
 
+  /**
+   * Replace the agent-changed set. Main owns the modified list and pushes it;
+   * the explorer only marks rows, so the dot can never disagree with the
+   * Modified panel. Paths are project-relative (as `ModifiedFile.relPath`).
+   */
+  setModifiedFiles(relPaths: readonly string[]): void {
+    const { files, dirs } = computeChangedSets(relPaths);
+    this.changedRel = files;
+    this.changedDirRel = dirs;
+    this.applyChangeMarks();
+  }
+
+  /** True when this entry (or, for a directory, something inside it) changed. */
+  private isChanged(entry: ExplorerEntry): boolean {
+    const rel = normalizeRelPath(entry.relPath);
+    return entry.type === "dir" ? this.changedDirRel.has(rel) : this.changedRel.has(rel);
+  }
+
+  /** Re-mark every mounted row; toggles a class so the dot's width is fixed. */
+  private applyChangeMarks(): void {
+    for (const el of this.treeEl.querySelectorAll<HTMLElement>(".explorer-row")) {
+      const rel = el.dataset.relPath;
+      if (rel === undefined) continue;
+      const changed = el.dataset.type === "dir"
+        ? this.changedDirRel.has(normalizeRelPath(rel))
+        : this.changedRel.has(normalizeRelPath(rel));
+      el.classList.toggle("changed", changed);
+    }
+  }
+
   private makeDirRow(entry: ExplorerEntry, forceOpen = false): HTMLElement {
     const state = this.dirState(entry.path);
     if (forceOpen) {
@@ -227,41 +629,66 @@ export class Explorer {
     const row = document.createElement("div");
     row.className = "explorer-row dir";
     row.dataset.path = entry.path;
+    row.dataset.relPath = normalizeRelPath(entry.relPath);
+    row.dataset.type = entry.type;
+    row.dataset.name = entry.name || entry.path;
+    if (this.isChanged(entry)) row.classList.add("changed");
+    applyRowA11y(row, entry, state.expanded);
 
     const arrow = document.createElement("span");
     arrow.className = "explorer-arrow";
+    arrow.setAttribute("aria-hidden", "true");
     arrow.textContent = state.expanded ? "▾" : "▸";
 
     const icon = document.createElement("span");
     icon.className = "explorer-icon dir-icon";
+    icon.setAttribute("aria-hidden", "true");
 
-    const name = document.createElement("span");
-    name.className = "explorer-name";
-    name.textContent = entry.name || entry.path;
+    const name = makeNameEl(entry.name || entry.path, false);
 
-    row.append(arrow, icon, name);
+    row.append(arrow, icon, name, makeChangeMark());
     row.addEventListener("click", () => {
       this.select(entry, row);
-      state.expanded = !state.expanded;
-      if (!state.expanded) {
-        state.loadSeq += 1;
-        state.loaded = false;
-        this.forgetMountedDescendants(children);
-      }
-      arrow.textContent = state.expanded ? "▾" : "▸";
-      void this.renderChildren(children, entry, state);
+      this.markFocus(row);
+      void this.setDirExpanded(entry.path, !state.expanded);
     });
     this.bindRowMenu(row, entry);
     this.setupDragSource(row, entry);
 
     const children = document.createElement("div");
     children.className = "explorer-children";
+    children.setAttribute("role", "group");
     node.append(row, children);
     node.dataset.path = entry.path;
     node.dataset.type = entry.type;
-    this.dirViews.set(entry.path, { entry, state, node, children });
-    this.setupDirDrop(row, children, entry, state, arrow);
+    this.rowEntry.set(row, entry);
+    this.dirViews.set(entry.path, { entry, state, node, children, row, arrow });
+    // A refresh can rebuild this row; selection is owned here, not by the DOM.
+    if (this.selected?.path === entry.path) this.select(entry, row);
+    this.setupDirDrop(row, children, entry, state);
     return node;
+  }
+
+  /**
+   * Expand or collapse a directory by its absolute path. One owner for the
+   * toggle so the mouse, the keyboard and drop-to-expand cannot drift: it keeps
+   * `state`, the chevron and `aria-expanded` in step, and drops the expansion
+   * state of unmounted descendants when collapsing.
+   */
+  private async setDirExpanded(absPath: string, expanded: boolean): Promise<void> {
+    const view = this.dirViews.get(absPath);
+    if (!view || view.state.expanded === expanded) return;
+    view.state.expanded = expanded;
+    if (!expanded) {
+      view.state.loadSeq += 1;
+      view.state.loaded = false;
+      this.forgetMountedDescendants(view.children);
+    }
+    view.arrow.textContent = expanded ? "▾" : "▸";
+    applyRowA11y(view.row, view.entry, expanded);
+    await this.renderChildren(view.children, view.entry, view.state);
+    // Collapsing may unmount the focused row; fall back to the folder itself.
+    this.restoreFocus(normalizeRelPath(view.entry.relPath));
   }
 
   private async renderChildren(children: HTMLElement, entry: ExplorerEntry, state: DirState, force = false): Promise<void> {
@@ -274,10 +701,7 @@ export class Explorer {
     const hadContent = state.loaded;
     if (!hadContent) {
       children.replaceChildren();
-      const loading = document.createElement("div");
-      loading.className = "explorer-empty";
-      loading.textContent = "loading…";
-      children.appendChild(loading);
+      children.appendChild(makeNote("loading…"));
     }
     const projectId = this.projectId;
     const cwd = this.projectCwd;
@@ -311,10 +735,7 @@ export class Explorer {
     }
     const next: HTMLElement[] = [];
     if (res.truncated) {
-      const note = document.createElement("div");
-      note.className = "explorer-empty";
-      note.textContent = "folder truncated (too many entries)";
-      next.push(note);
+      next.push(makeNote("folder truncated (too many entries)"));
     }
     for (const child of res.entries) {
       const existing = current.get(child.path);
@@ -330,25 +751,33 @@ export class Explorer {
       next.push(node);
     }
     children.replaceChildren(...next);
+    // Rows were rebuilt; keep the roving tabindex valid (and focus if we own it).
+    this.restoreFocus();
   }
 
   private makeFileRow(entry: ExplorerEntry): HTMLElement {
     const row = document.createElement("div");
     row.className = "explorer-row file";
     row.dataset.path = entry.path;
+    row.dataset.relPath = normalizeRelPath(entry.relPath);
     row.dataset.type = entry.type;
-    const icon = document.createElement("span");
-    icon.className = "explorer-icon file-icon";
-    const name = document.createElement("span");
-    name.className = "explorer-name";
-    name.textContent = entry.name;
-    row.append(icon, name);
+    row.dataset.name = entry.name;
+    if (this.isChanged(entry)) row.classList.add("changed");
+    applyRowA11y(row, entry);
+    const icon = makeFileIcon(entry.name);
+    icon.setAttribute("aria-hidden", "true");
+    const name = makeNameEl(entry.name);
+    row.append(icon, name, makeChangeMark());
+    this.rowEntry.set(row, entry);
+    if (this.selected?.path === entry.path) this.select(entry, row);
     row.addEventListener("click", () => {
       this.select(entry, row);
+      this.markFocus(row);
       this.onOpenFile(entry.path, true);
     });
     row.addEventListener("dblclick", () => {
       this.select(entry, row);
+      this.markFocus(row);
       this.onOpenFile(entry.path, false);
     });
     this.bindRowMenu(row, entry);
@@ -397,7 +826,6 @@ export class Explorer {
     children: HTMLElement,
     entry: ExplorerEntry,
     state: DirState,
-    arrow: HTMLElement,
   ): void {
     const target = entry.relPath;
     const over = (e: DragEvent) => {
@@ -414,9 +842,9 @@ export class Explorer {
         this.expandTimer = setTimeout(() => {
           this.expandTimer = null;
           if (!this.dragSrc || state.expanded) return;
-          state.expanded = true;
-          arrow.textContent = "▾";
-          void this.renderChildren(children, entry, state);
+          // Same toggle owner as click/keyboard: keeps the chevron and
+          // aria-expanded in step with the state.
+          void this.setDirExpanded(entry.path, true);
         }, 600);
       }
     };
@@ -440,7 +868,7 @@ export class Explorer {
       // tree (detaching these nodes), so expansion must live in dir state,
       // which survives refresh and renders the moved entry visible.
       if (src) {
-        state.expanded = true;
+        void this.setDirExpanded(entry.path, true);
         void this.moveDragged(src, target);
       }
     };
@@ -524,10 +952,14 @@ export class Explorer {
   /** Highlight the selected row; keeps it as the rename/delete target. */
   private select(entry: ExplorerEntry, row: HTMLElement): void {
     this.selected = entry;
-    for (const r of this.treeEl.querySelectorAll(".explorer-row.selected")) {
-      r.classList.remove("selected");
+    const previous = this.selectedRow;
+    if (previous && previous !== row) {
+      previous.classList.remove("selected");
+      previous.setAttribute("aria-selected", "false");
     }
     row.classList.add("selected");
+    row.setAttribute("aria-selected", "true");
+    this.selectedRow = row;
   }
 
   private withSelected(run: (entry: ExplorerEntry) => void): void {
@@ -548,14 +980,14 @@ export class Explorer {
   }
 
   private entryMenuItems(entry: ExplorerEntry): ContextMenuItem[] {
-    const pasteTarget = pasteTargetRel(entry);
+    const pasteTarget = targetDirRel(entry);
     const items: ContextMenuItem[] = [];
     if (entry.type === "file") {
       items.push({ label: "Open", action: () => this.onOpenFile(entry.path, false) });
     } else {
       items.push(
-        { label: "New File", action: () => void this.createAt(entry.relPath, "file") },
-        { label: "New Folder", action: () => void this.createAt(entry.relPath, "dir") },
+        { label: "New File", action: () => void this.createAt(targetDirRel(entry), "file") },
+        { label: "New Folder", action: () => void this.createAt(targetDirRel(entry), "dir") },
         { separator: true },
       );
     }
@@ -618,7 +1050,25 @@ export class Explorer {
     if (name.cancelled || !name.value?.trim()) return;
     const rel = parentRel ? `${parentRel}/${name.value.trim()}` : name.value.trim();
     this.toastIfFailed(await window.termina.createEntry(projectId, rel, kind));
+    // Expand the target folder BEFORE refreshing, so an entry created in a
+    // collapsed folder is revealed by the reload instead of staying hidden.
+    await this.revealDirRel(parentRel);
     await this.refresh();
+  }
+
+  /**
+   * Expand the folder at a project-relative path when it is already mounted.
+   * A new EMPTY folder fires no watcher file event, so opening its target is
+   * what makes the result visible.
+   */
+  private async revealDirRel(rel: string): Promise<void> {
+    if (!rel) return;
+    for (const [absPath, view] of this.dirViews) {
+      if (normalizeRelPath(view.entry.relPath) === rel) {
+        await this.setDirExpanded(absPath, true);
+        return;
+      }
+    }
   }
 
   private async renameAt(entry: ExplorerEntry): Promise<void> {
@@ -634,18 +1084,12 @@ export class Explorer {
   private async deleteAt(entry: ExplorerEntry): Promise<void> {
     const projectId = this.projectId;
     if (!projectId) return;
-    const ok = await showConfirm("Delete", `Delete "${entry.relPath || entry.name}"?`);
+    const ok = await showConfirm("Delete", deleteConfirmMessage(entry));
     if (!ok.confirmed) return;
     this.toastIfFailed(await window.termina.deleteEntry(projectId, entry.relPath));
     // The watcher fires file:deleted, which closes any open editor tab.
     await this.refresh();
   }
-}
-
-/** Folder that receives Paste for this row. Files paste into their parent. */
-function pasteTargetRel(entry: ExplorerEntry): string {
-  if (entry.type === "dir") return entry.relPath;
-  return parentRel(entry.relPath);
 }
 
 /** Parent folder of a project-relative path; "" is the project root. */
