@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { patchBundleName } from "../../scripts/patch-bundle-name.ts";
+import { OwnedProcessTree } from "./owned-processes.ts";
 
 export interface TerminaE2EFixtures {
   electronApp: ElectronApplication;
@@ -14,32 +15,100 @@ export interface TerminaE2EFixtures {
   closeElectron: () => Promise<void>;
 }
 
-async function stopElectron(app: ElectronApplication): Promise<void> {
-  const child = app.process();
-  if (child.exitCode !== null || child.signalCode !== null) return;
+// Capture process handles while the Playwright connection is alive. Early
+// close and fixture teardown share one completion, including orphan cleanup.
+const electronLifetimes = new WeakMap<ElectronApplication, {
+  child: ReturnType<ElectronApplication["process"]>;
+  tree: OwnedProcessTree;
+  shutdown: Promise<void> | null;
+  /** Bounded tail of the app's output, so a failed startup is diagnosable.
+   *  stdout and stderr are both kept: `[main]` startup logs go to stdout, while
+   *  Chromium/GPU failures land on stderr, and either can be empty. */
+  outputTail: string[];
+}>();
+const preservedRunRoots = new Set<string>();
 
-  await new Promise<void>((resolveDone) => {
-    const forceKill = setTimeout(() => {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        /* The exit listener still owns completion. */
+/**
+ * Total budget for the app to surface its first window. Startup is normally
+ * about a second, but a loaded machine has been observed to delay the renderer
+ * far past that, so the budget is generous and the failure carries diagnostics.
+ */
+const WINDOW_DEADLINE_MS = 60_000;
+const WINDOW_POLL_MS = 5_000;
+const OUTPUT_TAIL_LINES = 40;
+
+function stopElectron(app: ElectronApplication): Promise<void> {
+  const lifetime = electronLifetimes.get(app);
+  if (!lifetime) return Promise.reject(new Error("missing test Electron ownership"));
+  if (lifetime.shutdown) return lifetime.shutdown;
+  const { child, tree } = lifetime;
+  lifetime.shutdown = (async () => {
+    let captureError: unknown = null;
+    const forceKill = () => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      try { tree.capture(); } catch (error) { captureError = error; }
+      child.kill("SIGKILL");
+    };
+    await new Promise<void>((resolveDone) => {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        resolveDone();
+        return;
       }
-    }, 3_000);
-
-    child.once("exit", () => {
-      clearTimeout(forceKill);
-      resolveDone();
+      const timer = setTimeout(forceKill, 3_000);
+      child.once("exit", () => {
+        clearTimeout(timer);
+        resolveDone();
+      });
+      app.close().catch(forceKill);
     });
+    await tree.stop();
+    if (captureError) throw captureError;
+  })();
+  return lifetime.shutdown;
+}
 
-    app.close().catch(() => {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        /* The exit listener still owns completion. */
-      }
-    });
-  });
+/** Append to a bounded output tail, dropping the oldest lines first. */
+function rememberOutput(tail: string[], chunk: string): void {
+  for (const line of chunk.split("\n")) {
+    if (line.trim()) tail.push(line);
+  }
+  if (tail.length > OUTPUT_TAIL_LINES) tail.splice(0, tail.length - OUTPUT_TAIL_LINES);
+}
+
+/**
+ * Acquire the app's first window.
+ *
+ * `windows()` catches a window that appeared before this ran, while
+ * `firstWindow()` waits for one that has not. Both are polled until the shared
+ * deadline, because a single `firstWindow()` call can race an already-created
+ * window and a single `windows()` read can miss one still loading.
+ *
+ * On failure the app's output tail is included: without it the only symptom is
+ * a bare deadline message and the cause (a failed GPU context, a crash, a stuck
+ * startup) is invisible.
+ */
+async function acquireFirstWindow(app: ElectronApplication): Promise<Page> {
+  const deadline = Date.now() + WINDOW_DEADLINE_MS;
+  let lastError: unknown = null;
+  for (;;) {
+    const existing = app.windows()[0];
+    if (existing) return existing;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    try {
+      return await app.firstWindow({ timeout: Math.min(WINDOW_POLL_MS, remaining) });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  const late = app.windows()[0];
+  if (late) return late;
+  const tail = (electronLifetimes.get(app)?.outputTail ?? []).slice(-20);
+  throw new Error(
+    `Electron window was not created within ${WINDOW_DEADLINE_MS}ms`
+    + (lastError ? `\nlast wait error: ${String(lastError)}` : "")
+    + (tail.length ? `\n--- app output (last ${tail.length} lines) ---\n${tail.join("\n")}` : "\napp produced no output"),
+  );
 }
 
 export const test = base.extend<TerminaE2EFixtures>({
@@ -47,6 +116,10 @@ export const test = base.extend<TerminaE2EFixtures>({
   runRoot: async ({}, use) => {
     const runRoot = mkdtempSync(join(tmpdir(), "termina-playwright-"));
     await use(runRoot);
+    if (preservedRunRoots.has(runRoot)) {
+      console.warn(`[e2e] retaining ${runRoot}: process cleanup was not confirmed`);
+      return;
+    }
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         rmSync(runRoot, { recursive: true, force: true });
@@ -109,9 +182,13 @@ export const test = base.extend<TerminaE2EFixtures>({
       TERMINA_USER_DATA_DIR: userData,
       TERMINA_E2E_RUN_ROOT: runRoot,
       NODE_ENV: "test",
+      // Keep the window off screen and out of the Dock: the suite drives the
+      // real app, and a shown window would hold the user's focus for the run.
+      TERMINA_E2E_HIDDEN: "1",
     };
     delete env.ELECTRON_RUN_AS_NODE;
 
+    preservedRunRoots.add(runRoot);
     const app = await electron.launch({
       args: [
         resolve("."),
@@ -120,15 +197,27 @@ export const test = base.extend<TerminaE2EFixtures>({
       env,
     });
 
-    app.process().stderr?.on("data", (chunk) => {
+    const child = app.process();
+    const lifetime = { child, tree: new OwnedProcessTree(child.pid!), shutdown: null, outputTail: [] as string[] };
+    electronLifetimes.set(app, lifetime);
+    // Buffer both streams for diagnostics; stdout carries `[main]` startup logs
+    // while stderr carries Chromium/GPU failures, and either can be empty when
+    // the window never appears.
+    child.stderr?.on("data", (chunk) => {
       const msg = chunk.toString();
+      rememberOutput(lifetime.outputTail, msg);
       if (!msg.includes("GPU") && !msg.includes("libpng") && !msg.includes("fontconfig")) {
         console.error("[electron:err]", msg.trim());
       }
     });
+    child.stdout?.on("data", (chunk) => rememberOutput(lifetime.outputTail, chunk.toString()));
 
-    await use(app);
-    await stopElectron(app);
+    try {
+      await use(app);
+    } finally {
+      await stopElectron(app);
+      preservedRunRoots.delete(runRoot);
+    }
   },
 
   closeElectron: async ({ electronApp }, use) => {
@@ -136,17 +225,7 @@ export const test = base.extend<TerminaE2EFixtures>({
   },
 
   page: async ({ electronApp }, use) => {
-    let page = electronApp.windows()[0];
-    if (!page) {
-      try {
-        page = await electronApp.firstWindow({ timeout: 30_000 });
-      } catch {
-        page = electronApp.windows()[0];
-      }
-    }
-    if (!page) {
-      throw new Error("Electron window was not created within deadline");
-    }
+    const page = await acquireFirstWindow(electronApp);
     await page.waitForLoadState("domcontentloaded");
     await use(page);
   },

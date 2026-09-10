@@ -264,6 +264,16 @@ function candidateEnv(provider: string | null): Record<string, string | undefine
 const AGENT_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const MAX_AGENT_MODEL_CHARS = 256;
 
+/**
+ * True for the e2e suite, which drives this same app in a real window. A shown
+ * window takes the user's focus for the whole run, so the suite asks for a
+ * window that is never displayed (tests/e2e/fixtures.ts sets TERMINA_E2E_HIDDEN).
+ * `backgroundThrottling` stays off because Chromium throttles timers in hidden
+ * windows, which would change the timing the tests assert against. Absent the
+ * variable, launch behavior is exactly as before.
+ */
+const E2E_HIDDEN_WINDOW = process.env.TERMINA_E2E_HIDDEN === "1";
+
 /** One background process that runs a test command. */
 interface VerifyJob {
   child: ReturnType<typeof spawn>;
@@ -1204,11 +1214,13 @@ class PiEditorApp {
       backgroundColor,
       titleBarStyle: "hiddenInset",
       trafficLightPosition: { x: 12, y: 12 },
+      ...(E2E_HIDDEN_WINDOW ? { show: false } : {}),
       webPreferences: {
         preload: join(__dirname, "preload.cjs"),
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: false,
+        ...(E2E_HIDDEN_WINDOW ? { backgroundThrottling: false } : {}),
       },
     });
     const windowGeneration = ++rendererWindowGenerationSeq;
@@ -7945,6 +7957,8 @@ class PiEditorApp {
   // ---------------------------------------------------------------- boot ----
 
   async start(): Promise<void> {
+    // An e2e run must not take over the Dock either; the window stays hidden.
+    if (E2E_HIDDEN_WINDOW) app.dock?.hide();
     // Core session admission is descriptor-bound and intentionally refuses to
     // create its own root. Establish the app-owned root before any restored
     // core terminal or session fork can inspect it.
@@ -7971,10 +7985,12 @@ class PiEditorApp {
     this.tailer.onEvent = (id, event) => this.enqueueSidecarEvent(id, event);
     this.tailer.start();
     this.startScheduleTick();
-    // Open the window early so the user immediately sees the splash and UI skeleton.
-    await this.createWindow();
-    this.appUpdater.start();
-    this.initialRestorePromise = this.restoreInitialProjects(initialCwd, cliTarget);
+    // Publish the restoration barrier before yielding to the renderer's
+    // project:list / terminals:list requests during window loading. The
+    // window still opens immediately; only hydration waits for restoration.
+    const windowReady = this.createWindow().then(() => { this.appUpdater?.start(); });
+    this.initialRestorePromise = windowReady.then(() => this.restoreInitialProjects(initialCwd, cliTarget));
+    await windowReady;
   }
 
   /** Asynchronously restore open projects and their terminals on boot. */
@@ -8238,6 +8254,8 @@ class PiEditorApp {
   }
 
   focusWindow(): void {
+    // An e2e run must never pull focus off whatever the user is doing.
+    if (E2E_HIDDEN_WINDOW) return;
     if (this.win && !this.win.isDestroyed()) {
       if (this.win.isMinimized()) this.win.restore();
       this.win.focus();

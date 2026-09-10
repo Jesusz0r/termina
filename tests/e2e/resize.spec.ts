@@ -95,7 +95,7 @@ test.describe("pane resize dividers", () => {
     await page.evaluate(async () => {
       const w = window as any;
       const root = document.querySelector<HTMLElement>("#explorer-tree [data-path]")!.dataset.path!;
-      const list = await w.pi.projectList();
+      const list = await w.termina.projectList();
       const proj = list.find((p: any) => p.active) ?? list[0];
       await w.__editorMgr.openFile(`${root}/greeting.ts`, {
         preview: false,

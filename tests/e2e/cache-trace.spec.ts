@@ -59,7 +59,12 @@ async function focusTerminal(page: Page): Promise<void> {
     }
     return false;
   });
-  await terminal.click();
+  // The outer panel is not an input target; focus the actual xterm textarea
+  // in the foreground page before sending any keyboard events.
+  await page.bringToFront();
+  const input = terminal.locator(".xterm-helper-textarea");
+  await input.focus();
+  await expect(input).toBeFocused();
 }
 
 async function selectModelThroughTerminalUi(page: Page, target: string): Promise<string> {
@@ -82,8 +87,16 @@ async function submitTurns(page: Page, runRoot: string): Promise<void> {
   for (let turn = 1; turn <= TURNS; turn++) {
     const cacheWarmup = turn === 1 ? `Stable cache fixture; ignore this repeated text:\n${CACHE_WARMING_PREFIX}\n\n` : "";
     await page.keyboard.insertText(`${cacheWarmup}Turn ${turn}: reply with exactly OK. Do not use tools or modify any files.`);
+    // Wait for the pty/TUI echo, not just Chromium accepting insertText.
+    await expect.poll(() => terminalText(page), {
+      message: `turn ${turn} prompt must reach the terminal before submission`,
+    }).toContain(`Turn ${turn}:`);
     await page.keyboard.press("Enter");
-    await waitForSettledTurns(runRoot, turn);
+    try {
+      await waitForSettledTurns(runRoot, turn);
+    } catch (error) {
+      throw new Error(`turn ${turn} did not settle: ${String(error)}\n${await terminalText(page)}`);
+    }
     const source = readTraceDirectory(traceDir(runRoot));
     const report = summarizeTraces(source.records, `cache-e2e-turn-${turn}`);
     if (report.tasks.failed > 0) {
@@ -164,7 +177,7 @@ test.describe("deterministic Core cache traces", () => {
   test.beforeAll(async () => {
     for (const key of ENV_KEYS) previousEnv.set(key, process.env[key]);
     server = createServer((request, response) => {
-      if (request.method === "GET" && request.url?.startsWith("/models")) {
+      if (request.method === "GET" && request.url?.startsWith("/v1/models")) {
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({ data: [{ id: "gpt-5.6-sol" }] }));
         return;
