@@ -98,16 +98,28 @@ type TransportFactory = (wire: Arm["wire"], url: string, headers: Record<string,
 const realTransport: TransportFactory = (wire, url, headers, signal) =>
   wire === "http" ? httpTransport(url, headers, signal) : websocketTransport(url, headers, signal);
 
+/** Shared live-probe boundaries; never read the host Pi credential tree. */
+export function assertProbeAuthPath(): void {
+  const file = existsSync(authPath()) ? realpathSync(authPath()) : resolve(authPath());
+  const forbidden = join(homedir(), ".pi", "agent");
+  if (file === forbidden || file.startsWith(forbidden + sep)) throw new Error("Refusing host Pi auth tree");
+}
+
+export function probeEndpoint(baseUrl: string, provider: Provider): string {
+  const protocol = provider === "openai" ? "openai-responses" : "openai-codex-responses";
+  const url = protocolEndpoint(baseUrl, MODEL, protocol, true);
+  const expected = provider === "openai" ? "https://api.openai.com/v1/responses" : "https://chatgpt.com/backend-api/codex/responses";
+  if (url !== expected) throw new ProbeFailure("refusing-noncanonical-provider-route");
+  return url;
+}
+
 export async function runGroup(
   group: Group, access: Access, runId: string, signal: AbortSignal,
   onSample: (sample: Sample) => void = () => {}, makeTransport: TransportFactory = realTransport,
 ): Promise<Sample[]> {
   const states = ARMS[group].map((arm) => {
     const prepared = prepareArm(group, arm, runId);
-    const protocol = prepared.provider === "openai" ? "openai-responses" : "openai-codex-responses";
-    const url = protocolEndpoint(access.baseUrl, MODEL, protocol, true);
-    const expected = prepared.provider === "openai" ? "https://api.openai.com/v1/responses" : "https://chatgpt.com/backend-api/codex/responses";
-    if (url !== expected) throw new ProbeFailure("refusing-noncanonical-provider-route");
+    const url = probeEndpoint(access.baseUrl, prepared.provider);
     return {
       arm, ...prepared, transport: makeTransport(arm.wire, url, { ...access.headers, ...prepared.headers }, signal),
       fullInput: prepared.body.input as Json[], previousId: null as string | null, failed: false,
@@ -205,9 +217,7 @@ async function main() {
     console.log(JSON.stringify({ model: MODEL, groups, maxRequests: MAX_REQUESTS, live: false, note: "Pass --live to use provider quota; --out writes a new JSON result file." }));
     return;
   }
-  const file = existsSync(authPath()) ? realpathSync(authPath()) : resolve(authPath());
-  const forbidden = join(homedir(), ".pi", "agent");
-  if (file === forbidden || file.startsWith(forbidden + sep)) throw new Error("Refusing host Pi auth tree");
+  assertProbeAuthPath();
   const outArg = args.indexOf("--out");
   if (outArg >= 0 && !args[outArg + 1]) throw new Error("Missing --out path");
   // Exclusive creation before any inference prevents overwriting another task's files.
