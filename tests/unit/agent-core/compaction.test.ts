@@ -7,6 +7,7 @@ import {
   evictionBoundary,
   isUserPrompt,
   messagesForSummary,
+  planSummary,
   serializeForSummary,
   shouldCompactForCacheCost,
   summaryPrompt,
@@ -70,6 +71,33 @@ describe("compaction planning", () => {
     ]);
     expect(text).toContain("[User]: next");
     expect(text).toContain("[Assistant tool call]: bash(");
+  });
+
+  it("defers tiny evictions until enough new history can be reclaimed", () => {
+    const tail = [prompt("recent one", 200), msg("assistant", "one", 200), prompt("recent two", 200)];
+    const options = { lastHandoffBody: "prior", guardTokens: 0, minimumReclaimTokens: 1_000 };
+    const handoff = { role: "user", content: "<context-handoff>\nprior\n</context-handoff>", tokens: 2_000 } as CompactionMessage;
+    const tiny = [handoff, prompt("old but tiny", 40), msg("assistant", "reply", 40), ...tail];
+    expect(planSummary(tiny, options)).toBeNull();
+    // Explicit /compact and emergency fitting may reclaim a smaller span.
+    expect(planSummary(tiny, { ...options, minimumReclaimTokens: 0 })?.boundary).toBe(3);
+    const ready = [handoff, prompt("old and large", 800), msg("assistant", "reply", 300), ...tail];
+    const snapshot = JSON.stringify(ready);
+    const plan = planSummary(ready, options);
+    expect(plan?.boundary).toBe(3);
+    expect(plan?.evicted).toEqual(ready.slice(1, 3));
+    expect(JSON.stringify(ready)).toBe(snapshot);
+    expect(ready.slice(plan!.boundary)).toEqual(tail);
+  });
+
+  it("never calls a summarizer to fold only its own handoff again", () => {
+    const handoff = { role: "user", content: "<context-handoff>\nprior\n</context-handoff>", tokens: 5_000 } as CompactionMessage;
+    const tail = [prompt("recent one", 5_000), prompt("recent two", 5_000)];
+    for (let turn = 0; turn < 10; turn++) {
+      expect(planSummary([handoff, ...tail], {
+        lastHandoffBody: "prior", guardTokens: 0, minimumReclaimTokens: 0,
+      })).toBeNull();
+    }
   });
 
   it("builds the handoff prompt with the prior folded in", () => {

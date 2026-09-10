@@ -154,8 +154,9 @@ import {
   type StallTracker,
 } from "./stall.ts";
 import {
-  evictionBoundary,
-  messagesForSummary,
+  HIGH_WATER,
+  LOW_WATER,
+  planSummary,
   serializeForSummary,
   shouldCompactForCacheCost,
   summaryPrompt,
@@ -303,8 +304,6 @@ const OUTPUT_CAP = 16_384;
 const THINKING_OUTPUT_CAP = 64_000;
 /** Bound server-tool continuation requests so a provider cannot loop forever. */
 const MAX_PAUSE_TURN_CONTINUATIONS = 5;
-const HIGH_WATER = 0.8;
-const LOW_WATER = 0.6;
 /** Trailing tool-output span never reclaimed (fraction of usable, clamped). */
 const PROTECT_MIN = 4_000;
 const PROTECT_MAX = 40_000;
@@ -5461,6 +5460,11 @@ let pendingReclaimEvidence: Record<string, unknown> | null = null;
 function recordRevision(kind: RevisionKind): void {
   revisions++;
   revisionKinds.push(kind);
+  postRevision = true;
+  // Every durable revision changes the billed request, including pruning.
+  // Reusing that stale pressure can immediately trigger a second revision.
+  lastBilledTokens = null;
+  lastCacheReadShare = null;
 }
 
 function toolSchemaTokens(): number {
@@ -5647,7 +5651,6 @@ async function reclaim(): Promise<number> {
   }
   pendingReclaimEvidence = reclaimEvidenceForRevision(revision, before, true);
   installReplayedHistory(before);
-  postRevision = true;
   recordRevision("prune");
   syncIndicators();
   return revision.targets.length;
@@ -5668,10 +5671,7 @@ function truncate(): boolean {
   if (cut <= 0) return false;
   persist({ type: "revision", kind: "truncate", dropped: cut });
   history.splice(0, cut);
-  postRevision = true;
   recordRevision("truncate");
-  lastBilledTokens = null;
-  lastCacheReadShare = null;
   syncIndicators();
   return true;
 }
@@ -5707,10 +5707,15 @@ export function isContextOverflowMessage(message: string): boolean {
 /** Collapse old turns into one handoff message. Runs on the cheap lane.
  *  Returns false when there is nothing safely evictable or the call fails;
  *  callers fall back to truncate. */
-async function summarize(): Promise<boolean> {
-  const boundary = evictionBoundary(history, Math.min(protectTokens(), usableTokens() / 4));
-  if (boundary <= 0) return false;
-  const evicted = messagesForSummary(history.slice(0, boundary), lastHandoff);
+async function summarize(required = false): Promise<boolean> {
+  const usable = usableTokens();
+  const plan = planSummary(history, {
+    lastHandoffBody: lastHandoff,
+    guardTokens: Math.min(protectTokens(), usable / 4),
+    minimumReclaimTokens: required || effectiveTotalTokens() >= usable ? 0 : Math.ceil(usable * (HIGH_WATER - LOW_WATER)),
+  });
+  if (!plan) return false;
+  const { boundary, evicted } = plan;
   const prompt = summaryPrompt(lastHandoff, serializeForSummary(evicted));
   const started = Date.now();
   currentAbort ??= new AbortController();
@@ -5726,9 +5731,12 @@ async function summarize(): Promise<boolean> {
       syncIndicators();
     }
     const text = folded.text;
-    if (!text) {
+    const handoff = `<context-handoff>\n${text}\n</context-handoff>`;
+    const handoffTokens = estimateReclaimTokens(handoff);
+    const evictedTokens = history.slice(0, boundary).reduce((sum, message) => sum + message.tokens, 0);
+    if (!text || handoffTokens >= evictedTokens) {
       await writeSummaryTrace({
-        status: "empty",
+        status: text ? "no-reduction" : "empty",
         usage: u,
         started,
         seq: null,
@@ -5741,19 +5749,13 @@ async function summarize(): Promise<boolean> {
       return false;
     }
     const handoffBody = text;
-    const handoff = `<context-handoff>\n${handoffBody}\n</context-handoff>`;
     const sseq = storageSeq + 1;
     persist({ type: "revision", kind: "summarize", evicted: boundary, summarySseq: sseq, message: { role: "user", content: handoff } });
     lastHandoff = handoffBody;
     history.splice(0, boundary);
-    const m: Message = { role: "user", content: handoff, tokens: estimateReclaimTokens(handoff), sseq };
+    const m: Message = { role: "user", content: handoff, tokens: handoffTokens, sseq };
     history.unshift(m);
-    postRevision = true;
     recordRevision("summarize");
-    // History no longer matches the last billed request; drop billed truth so
-    // the next turn re-bills instead of compacting against a stale-high total.
-    lastBilledTokens = null;
-    lastCacheReadShare = null;
     syncIndicators();
     await writeSummaryTrace({
       status: "ok",
@@ -7750,22 +7752,10 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           );
         if (shouldCompactForCost) cacheCostCompactionAttempted = true;
         const compactedForCost = shouldCompactForCost ? await summarize() : false;
-        if (compactedForCost) {
-          lastBilledTokens = null;
-          lastCacheReadShare = null;
-        }
-        // Reclaim first. Summarize at the high-water line. Truncate last.
-        // Gate on billed truth when available: the local estimate undercounts.
-        // A successful summarize/truncate invalidates the last billed total
-        // (it describes pre-revision history), so clear it instead of letting
-        // the post-revision check below re-fire on a stale-high value.
+        // Reclaim first. Summarize at high water, truncate only when fitting
+        // is required. recordRevision invalidates pressure from the old view.
         if (!compactedForCost && effectiveTotalTokens() >= usableTokens() * HIGH_WATER) {
-          if (await summarize()) {
-            lastBilledTokens = null;
-            lastCacheReadShare = null;
-          } else if (effectiveTotalTokens() >= usableTokens()) {
-            truncate();
-          }
+          if (!await summarize() && effectiveTotalTokens() >= usableTokens()) truncate();
         }
       }
       resumePaused = false;
@@ -7785,7 +7775,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           await writeMainTrace({ status: "overflow", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: streamFailure?.cache ?? null, started: callStarted, attempt: failedAttempt });
           retriedOverflow = true;
           await reclaim();
-          await summarize();
+          await summarize(true);
           truncate();
           try {
             result = await callModel(history, activeRequestOverlay, {
@@ -8954,7 +8944,7 @@ function dispatchLine(line: string): void {
     void (async () => {
       try {
         const n = await reclaim();
-        const summed = await summarize();
+        const summed = await summarize(true);
         syncIndicators();
         out(`(compacted${n ? `; reclaimed ${n}` : ""}${summed ? "; summarized" : ""})\n`);
       } catch (err) {

@@ -18,9 +18,7 @@ import type {
   SessionReclaimRecovery,
 } from "./session.ts";
 
-const HIGH_WATER = 0.8;
-const LOW_WATER = 0.6;
-const PROTECT_TURNS = 2;
+import { HIGH_WATER, LOW_WATER, PROTECT_TURNS, isUserPrompt } from "./compaction.ts";
 const PRUNE_MIN_CHARS = 2_048;
 const MAX_RECEIPT_TARGETS = 256;
 
@@ -147,13 +145,6 @@ export function estimateReclaimTokens(value: unknown): number {
 
 function isThinkingBlock(block: Block): boolean {
   return block.type === "thinking" || block.type === "redacted_thinking";
-}
-
-function isUserPrompt(message: IndexedMessage): boolean {
-  if (message.role !== "user") return false;
-  if (typeof message.content === "string") return true;
-  return Array.isArray(message.content) && message.content.some((block) =>
-    isRecord(block) && (block.type === "text" || block.type === "image"));
 }
 
 function normalizeMessages(messages: unknown): IndexedMessage[] | null {

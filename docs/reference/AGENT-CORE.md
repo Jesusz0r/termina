@@ -110,6 +110,14 @@ Rules:
   60%). A context hovering between the marks revises nothing. Without the
   low-water rule a session near the threshold revises every turn and pays
   full price every turn.
+- All durable revisions invalidate the last request's billed-pressure sample,
+  including pruning. Do not trigger a second revision against the old view.
+  Automatic summaries batch newly evictable history across the high/low-water
+  gap (20% of usable input); the previous handoff does not count as new history.
+  Explicit `/compact`, hard-window fitting and provider-overflow recovery may
+  fold a smaller span without changing protected-turn boundaries. Never
+  summarize only the previous handoff, or install a summary that does not
+  reduce the local token estimate. Originals remain in the session log.
 - Budgets are fractions of the model's window, clamped to sane absolutes —
   fixed token constants break across 8k and 1M-window models.
 - Revisions happen at turn boundaries (between user→assistant pairs), never

@@ -24,6 +24,9 @@ export interface CompactionMessage {
   tokens: number;
 }
 
+/** Shared hysteresis for pruning, summarization and truncation. */
+export const HIGH_WATER = 0.8;
+export const LOW_WATER = 0.6;
 /** Newest user turns whose messages are never touched. */
 export const PROTECT_TURNS = 2;
 
@@ -148,6 +151,21 @@ export function messagesForSummary(
     ? null
     : `<context-handoff>\n${lastHandoffBody}\n</context-handoff>`;
   return messages.filter((message) => message.content !== prior);
+}
+
+/** Batch automatic summaries across the hysteresis band instead of rewriting
+ * the prefix for tiny evictions. A prior handoff alone is never new evidence.
+ * Required fitting and explicit /compact use a zero minimum, but keep the
+ * same protected-turn boundary. */
+export function planSummary(
+  messages: readonly CompactionMessage[],
+  options: { lastHandoffBody: string | null; guardTokens: number; minimumReclaimTokens: number },
+): { boundary: number; evicted: CompactionMessage[] } | null {
+  const boundary = evictionBoundary(messages, options.guardTokens);
+  if (boundary <= 0) return null;
+  const evicted = messagesForSummary(messages.slice(0, boundary), options.lastHandoffBody);
+  if (!evicted.length || evicted.reduce((sum, message) => sum + message.tokens, 0) < options.minimumReclaimTokens) return null;
+  return { boundary, evicted };
 }
 
 export function serializeForSummary(messages: readonly CompactionMessage[]): string {
