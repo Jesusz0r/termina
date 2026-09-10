@@ -15,6 +15,7 @@
     "build": "node --experimental-strip-types scripts/build.ts && vite build",
     "start": "electron .",
     "typecheck": "tsc --noEmit",
+    "lint:no-git-cli": "sh scripts/no-git-cli.sh",
     "test:unit": "vitest run",
     "test:unit:watch": "vitest",
     "test:test-infra": "vitest run tests/unit/build/test-infra.test.ts",
