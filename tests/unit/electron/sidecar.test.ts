@@ -21,6 +21,59 @@ describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
   });
 
   describe("Sidecar Producer Envelope Bounding", () => {
+    it("skips poll tails for idle terminals and attributes watch vs poll wakes", async () => {
+      const id = "term-wake-counts";
+      const active = join(eventsDir, `${id}.jsonl`);
+      let listener: ((...args: any[]) => void) | null = null;
+      const capturingWatch = (...args: any[]) => {
+        listener = args[1] as (...inner: any[]) => void;
+        return { close() {} };
+      };
+      const tailer = new SidecarTailer(eventsDir, capturingWatch as any);
+      const received: any[] = [];
+      tailer.onEvent = (_terminalId, event) => { received.push(event); return true; };
+      tailer.start();
+      tailer.watch(id);
+      try {
+        // Idle: no file, no events — the recovery poll must not tail.
+        await new Promise((resolve) => setTimeout(resolve, 450));
+        expect(tailer.tailWakeCounts()).toEqual({ poll: 0, watch: 0 });
+        // Watcher event → debounced watch-path tail.
+        await appendFile(active, `${JSON.stringify({ bridgeId: id, seq: 1, t: "session_ready" })}\n`);
+        listener?.("rename", `${id}.jsonl`);
+        const firstDeadline = Date.now() + 3000;
+        while (received.length < 1 && Date.now() < firstDeadline) await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(received.map((event) => event.seq)).toEqual([1]);
+        expect(tailer.tailWakeCounts().watch).toBe(1);
+        // Wait until the first tail fully commits before appending again, so
+        // the second event can only arrive via a fresh wake.
+        const cursorPath = join(eventsDir, `.cursor-${id}.json`);
+        const commitDeadline = Date.now() + 3000;
+        let committed = false;
+        while (!committed && Date.now() < commitDeadline) {
+          try {
+            committed = JSON.parse(await readFile(cursorPath, "utf8")).sequence === 1;
+          } catch {
+            /* Cursor not published yet. */
+          }
+          if (!committed) await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        expect(committed).toBe(true);
+        // Let the first pass fully drain and one clean poll tick go by, so
+        // the second event can only arrive via a fresh wake.
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        // Silent append (a dropped watcher callback) → the size probe
+        // re-dirties the id on the next poll tick.
+        await appendFile(active, `${JSON.stringify({ bridgeId: id, seq: 2, t: "agent_settled" })}\n`);
+        const secondDeadline = Date.now() + 3000;
+        while (received.length < 2 && Date.now() < secondDeadline) await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(received.map((event) => event.seq)).toEqual([1, 2]);
+        expect(tailer.tailWakeCounts().poll).toBeGreaterThanOrEqual(1);
+      } finally {
+        tailer.stop();
+      }
+    });
+
     it("bounds oversized producer edits and retains truncation boundary", () => {
       const oldText = "old-".repeat(2 * 1024 * 1024);
       const newText = "new-".repeat(2 * 1024 * 1024);

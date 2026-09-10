@@ -733,6 +733,12 @@ export class SidecarTailer {
   private timer: ReturnType<typeof setInterval> | null = null;
   private watcher: FSWatcher | null = null;
   private pendingTails = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Terminals with possibly-unread bytes since the last tail pass. Set by
+   * the watcher path; the recovery poll only tails dirty ids (or every live
+   * id while the watcher is down). */
+  private dirty = new Set<string>();
+  /** Watcher-driven vs poll-driven tail dispatches, for wakeup attribution. */
+  private wakeCounts = { poll: 0, watch: 0 };
   /** A rejected delivery pauses reads so the durable file remains the queue. */
   private paused = new Set<string>();
   /** Accepted records whose handler acknowledgement has not settled. */
@@ -760,20 +766,49 @@ export class SidecarTailer {
     this.maxRecordBytes = Math.min(configuredMaxRecordBytes, MAX_SIDECAR_RECORD_BYTES);
   }
 
+  /** Watcher-driven vs poll-driven tail dispatches since start. */
+  tailWakeCounts(): { poll: number; watch: number } {
+    return { ...this.wakeCounts };
+  }
+
+  /** Transient drain states always need the full pass; their bytes live in
+   * segment inodes the active-size probe cannot see. */
+  private drainActive(id: string): boolean {
+    return this.retainedSegments.has(id) || this.segmentDrainPaths.has(id);
+  }
+
+  /** Cheap missed-event probe for the active file. Segment transitions
+   * rename inside the watched dir and arrive via schedule(); appends move
+   * the size away from the read cursor, truncation the other way. */
+  private activeMoved(id: string): boolean {
+    try {
+      return statSync(join(this.dir, `${id}.jsonl`)).size !== this.offsets.get(id);
+    } catch {
+      // A missing active file matters only when the cursor claims bytes.
+      return (this.offsets.get(id) ?? 0) > 0;
+    }
+  }
+
   start(): void {
     if (this.timer) return;
     this.stopping = false;
     this.armWatch();
     this.timer = setInterval(() => {
       // Recovery poll: catch events the watcher missed. Also re-arm the
-      // watcher when the directory did not exist yet.
+      // watcher when the directory did not exist yet. Live ids stay clean
+      // while the watcher runs, so idle terminals cost no tail pass here.
       if (!this.watcher) this.armWatch();
       for (const id of this.offsets.keys()) {
         const generation = this.terminalGenerations.get(id);
         if (generation === undefined) continue;
         if (this.quarantined.has(id)) continue;
+        if (!this.isLive(id, generation)) continue;
         if (this.paused.has(id)) void this.checkBacklog(id, undefined, generation);
-        else void this.tail(id, generation);
+        else if (!this.watcher || this.dirty.has(id) || this.drainActive(id) || this.activeMoved(id)) {
+          this.dirty.delete(id);
+          this.wakeCounts.poll++;
+          void this.tail(id, generation);
+        }
       }
     }, 300);
   }
@@ -800,13 +835,18 @@ export class SidecarTailer {
     if (!this.timer || this.stopping) return;
     const generation = this.terminalGenerations.get(id);
     if (generation === undefined) return;
+    this.dirty.add(id);
     const existing = this.pendingTails.get(id);
     if (existing) clearTimeout(existing);
     this.pendingTails.set(
       id,
       setTimeout(() => {
         this.pendingTails.delete(id);
-        if (this.isLive(id, generation)) void this.tail(id, generation);
+        if (this.isLive(id, generation)) {
+          this.wakeCounts.watch++;
+          this.dirty.delete(id);
+          void this.tail(id, generation);
+        }
       }, 10),
     );
   }
@@ -989,6 +1029,7 @@ export class SidecarTailer {
     if (resumeTimer) clearTimeout(resumeTimer);
     this.resumeTimers.delete(id);
     this.paused.delete(id);
+    this.dirty.delete(id);
     void this.clearBackpressureMarker(id, generation, true);
     // Quarantine is durable admission state. Keep its marker across lifecycle
     // teardown so a restart cannot resume after an
