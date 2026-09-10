@@ -1783,12 +1783,21 @@ class PiEditorApp {
     return resolved;
   }
 
-  private async initWorldlines(project: ProjectState): Promise<void> {
-    if (project.worldlines) return;
-    project.worldlines = new WorldlineManager({
-      worldsRoot: this.worldsRoot,
-      // The canonical primary root: the sandbox compares canonical paths.
-      primaryRoot: await this.canonicalPath(this.primaryWorkspace(project)?.root ?? project.cwd ?? homedir()),
+  /** In-flight worldline inits by project id. The sync guard below used to be
+   * atomic; the canonical-path await in construction is not, so concurrent
+   * agent_start events for one project must share a single construction. */
+  private worldlineInits = new Map<string, Promise<void>>();
+
+  private initWorldlines(project: ProjectState): Promise<void> {
+    if (project.worldlines) return Promise.resolve();
+    const pending = this.worldlineInits.get(project.id);
+    if (pending) return pending;
+    const task = (async () => {
+      if (project.worldlines) return;
+      project.worldlines = new WorldlineManager({
+        worldsRoot: this.worldsRoot,
+        // The canonical primary root: the sandbox compares canonical paths.
+        primaryRoot: await this.canonicalPath(this.primaryWorkspace(project)?.root ?? project.cwd ?? homedir()),
       primaryRootIdentity: project.primaryRootIdentity,
       realHome: homedir(),
       userData: this.userDataDir,
@@ -1946,6 +1955,13 @@ class PiEditorApp {
         return { terminalId: inst.id };
       },
     });
+    })();
+    this.worldlineInits.set(project.id, task);
+    const forget = () => {
+      if (this.worldlineInits.get(project.id) === task) this.worldlineInits.delete(project.id);
+    };
+    task.then(forget, forget);
+    return task;
   }
 
   /** The events dir a terminal's bridge reads (candidates have their own). */
@@ -6050,7 +6066,9 @@ class PiEditorApp {
       this.newCommandBuffers.set(id, (lines.pop() ?? "").slice(-200));
       for (const line of lines) {
         if (this.isNewCommand(line)) {
-          void this.clearForNewSession(id);
+          void this.clearForNewSession(id).catch((err) => {
+            console.warn(`[main] session clear failed: ${(err as Error)?.message ?? err}`);
+          });
           break;
         }
       }
