@@ -771,10 +771,37 @@ export class SidecarTailer {
     return { ...this.wakeCounts };
   }
 
-  /** Transient drain states always need the full pass; their bytes live in
-   * segment inodes the active-size probe cannot see. */
-  private drainActive(id: string): boolean {
-    return this.retainedSegments.has(id) || this.segmentDrainPaths.has(id);
+  /** Owner id for unpublished sealed generations: `.<id>.jsonl.<gen>.sealed`.
+   * Retained/draining/final anchors are revisit-gated below, and proof
+   * (`.sealed.owner`) and cursor files never match this suffix. A sealed
+   * name lingers across the multi-pass drain/retire chain, so its presence
+   * keeps re-dirtying until the chain unlinks it. */
+  private segmentOwnerId(name: string): string | null {
+    if (!name.endsWith(SIDECAR_SEALED_FILE_SUFFIX)) return null;
+    return name.match(/^\.([^.]+)\.jsonl\.(.+)$/)?.[1] ?? null;
+  }
+
+  /** Internal segment work that only advances inside a pass. Drain links are
+   * transient by design; a set link means the retirement chain is mid-flight
+   * (or hit a transient failure it must retry). Empty-poll countdowns gate
+   * sealed retirement the same way. Stable retained anchors are excluded on
+   * purpose: their names are sweep-stable and their content is contractually
+   * immutable, so bound anchors stay quiet until the active file moves. */
+  private needsSegmentRevisit(id: string): boolean {
+    if (this.segmentDrainPaths.has(id)) return true;
+    const prefix = `${id}\u0000`;
+    for (const key of this.segmentEmptyPolls.keys()) {
+      if (!key.startsWith(prefix)) continue;
+      // Countdowns for vanished segments clean themselves instead of
+      // pinning the old tick cadence on a name that can never progress.
+      try {
+        statSync(join(this.dir, key.slice(prefix.length)));
+        return true;
+      } catch {
+        this.segmentEmptyPolls.delete(key);
+      }
+    }
+    return false;
   }
 
   /** Cheap missed-event probe for the active file. Segment transitions
@@ -798,19 +825,41 @@ export class SidecarTailer {
       // watcher when the directory did not exist yet. Live ids stay clean
       // while the watcher runs, so idle terminals cost no tail pass here.
       if (!this.watcher) this.armWatch();
-      for (const id of this.offsets.keys()) {
-        const generation = this.terminalGenerations.get(id);
-        if (generation === undefined) continue;
-        if (this.quarantined.has(id)) continue;
-        if (!this.isLive(id, generation)) continue;
-        if (this.paused.has(id)) void this.checkBacklog(id, undefined, generation);
-        else if (!this.watcher || this.dirty.has(id) || this.drainActive(id) || this.activeMoved(id)) {
-          this.dirty.delete(id);
-          this.wakeCounts.poll++;
-          void this.tail(id, generation);
-        }
-      }
+      void this.pollTick();
     }, 300);
+  }
+
+  private async pollTick(): Promise<void> {
+    // One directory sweep per tick catches segment renames a live-but-lossy
+    // watcher may drop. The active-size probe below cannot see sealed
+    // sources, and a rotation with a quiet new active file would otherwise
+    // stall retirement until unrelated bytes arrive.
+    if (this.watcher) {
+      try {
+        for (const name of await readDirectory(this.dir)) {
+          const owner = this.segmentOwnerId(String(name));
+          if (owner !== null && this.offsets.has(owner)) this.dirty.add(owner);
+        }
+      } catch {
+        // Unlistable directory: tail live ids below instead of stalling.
+        for (const id of this.offsets.keys()) this.dirty.add(id);
+      }
+    }
+    for (const id of this.offsets.keys()) {
+      const generation = this.terminalGenerations.get(id);
+      if (generation === undefined) continue;
+      if (this.quarantined.has(id)) continue;
+      if (!this.isLive(id, generation)) continue;
+      if (this.paused.has(id)) void this.checkBacklog(id, undefined, generation);
+      else if (
+        !this.watcher || this.dirty.has(id) || this.inFlight.has(id) ||
+        this.sequenceGapDeferred.has(id) || this.needsSegmentRevisit(id) || this.activeMoved(id)
+      ) {
+        this.dirty.delete(id);
+        this.wakeCounts.poll++;
+        void this.tail(id, generation);
+      }
+    }
   }
 
   /** Watch the events directory; a new line triggers an immediate tail. */
