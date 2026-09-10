@@ -206,7 +206,7 @@ describe("Agent Core Cache", () => {
         modelSettings: { effort: "high" },
         tools: [{ name: "read_file" }],
         stablePrefix: "stable-prefix",
-        reusablePrefix: "reusable-prefix",
+        reusablePrefix: [{ role: "user", content: "reusable-prefix" }],
         messagePrefix: "message-prefix",
         workingSet: "working-set",
         ...overrides,
@@ -218,6 +218,75 @@ describe("Agent Core Cache", () => {
       diagnostics: diagnostics(),
       postRevision: false,
     };
+
+    it("compares the same historical span on growth, retries, rewrites and truncation", () => {
+      const history = [{ role: "user", content: "first" }, { role: "assistant", content: "answer" }];
+      const before = diagnostics({ reusablePrefix: history });
+      const growing = diagnostics({ reusablePrefix: [...history, { role: "user", content: "next" }], previous: before });
+      expect(growing.reusablePrefixHash).not.toBe(before.reusablePrefixHash);
+      expect(growing.reusablePrefixItems).toBe(3);
+      expect(growing.comparedPrefixItems).toBe(2);
+      expect(growing.comparedPrefixHash).toBe(before.reusablePrefixHash);
+      const classify = (current) => cache.classifyCacheMiss({
+        previous: { ...prior, diagnostics: before }, current: { ...prior, atMs: 1, diagnostics: current },
+      });
+      expect(classify(growing).primary).toBe("backend-or-unknown");
+      expect(classify(diagnostics({ reusablePrefix: history, previous: before })).primary).toBe("backend-or-unknown");
+      for (const changed of [
+        [{ role: "user", content: "rewritten" }, history[1]],
+        [...history].reverse(),
+        history.slice(0, 1),
+      ]) {
+        expect(classify(diagnostics({ reusablePrefix: changed, previous: before })).primary).toBe("message-prefix-changed");
+      }
+      // Without a same-span comparison, different whole-history hashes prove nothing.
+      const unknown = classify(diagnostics({ reusablePrefix: [...history, { role: "user", content: "next" }] }));
+      expect(unknown.primary).toBe("backend-or-unknown");
+      expect(unknown.missingFields).toContain("comparedPrefixHash");
+    });
+
+    it("does not truncate prefix evidence at diagnostic array/string limits", () => {
+      const history = Array.from({ length: 600 }, (_, i) => ({ role: "user", content: `${i}: ${"x".repeat(100)}` }));
+      const before = diagnostics({ reusablePrefix: history });
+      const rewritten = history.map((item, i) => i === 550 ? { ...item, content: "changed" } : item);
+      const after = diagnostics({ reusablePrefix: rewritten, previous: before });
+      expect(after.comparedPrefixHash).not.toBe(before.reusablePrefixHash);
+      expect(after.comparedPrefixItems).toBe(600);
+    });
+
+    it("ignores cache markers, but not identically named tool arguments", () => {
+      const history = [{ role: "user", content: [{ type: "text", text: "first", cache_control: { type: "ephemeral" } }] }];
+      const snapshot = JSON.stringify(history);
+      const before = diagnostics({ reusablePrefix: history });
+      const after = diagnostics({ reusablePrefix: [{ role: "user", content: [{ type: "text", text: "first" }] }], previous: before });
+      expect(after.comparedPrefixHash).toBe(before.reusablePrefixHash);
+      expect(JSON.stringify(history)).toBe(snapshot);
+      const tool = (value) => [{ role: "assistant", content: [{ type: "tool_use", input: { cache_control: value } }] }];
+      const toolBefore = diagnostics({ reusablePrefix: tool("a") });
+      expect(diagnostics({ reusablePrefix: tool("b"), previous: toolBefore }).comparedPrefixHash).not.toBe(toolBefore.reusablePrefixHash);
+    });
+
+    it("keeps missing, invalid and over-budget history evidence unknown", () => {
+      const circular = {}; circular.self = circular;
+      for (const reusablePrefix of [undefined, "not an array", [circular],
+        Array(4_097).fill({ role: "user", content: "x" }), [{ role: "user", content: "x".repeat(8 * 1024 * 1024) }],
+      ]) {
+        const result = diagnostics({ reusablePrefix, previous: prior.diagnostics });
+        expect(result.reusablePrefixHash).toBeNull();
+        expect(result.reusablePrefixItems).toBeNull();
+        expect(result.comparedPrefixHash).toBeNull();
+      }
+    });
+
+    it("reports a working-set change once per successful-request comparison", () => {
+      const before = diagnostics();
+      const changed = diagnostics({ workingSet: "new", previous: before });
+      const same = diagnostics({ workingSet: "new", previous: changed });
+      expect(before.workingSetChanged).toBeNull();
+      expect(changed.workingSetChanged).toBe(true);
+      expect(same.workingSetChanged).toBe(false);
+      expect(diagnostics({ workingSet: "new", previous: before }).workingSetChanged).toBe(true); // retry
+    });
 
     it("evaluates serialized tool hashing", () => {
       const toolsA = [{ name: "read_file", description: "lee 🔧", input_schema: { type: "object", properties: {} } }];
@@ -353,7 +422,7 @@ describe("Agent Core Cache", () => {
           ...xaiPrior,
           atMs: 7_000,
           usage: { inputTokens: 46_191, cacheReadTokens: 0, cacheWriteTokens: null, cacheWriteSupported: false },
-          diagnostics: diagnostics({ reusablePrefix: "grown-prefix" }),
+          diagnostics: diagnostics({ reusablePrefix: [{ role: "user", content: "rewritten-prefix" }], previous: xaiPrior.diagnostics }),
         },
         noiseFloorTokens: 1_024,
       });
@@ -369,7 +438,7 @@ describe("Agent Core Cache", () => {
           ...xaiPrior,
           atMs: 7_000,
           usage: { inputTokens: 46_191, cacheReadTokens: 0, cacheWriteTokens: null, cacheWriteSupported: null },
-          diagnostics: diagnostics({ reusablePrefix: "grown-prefix" }),
+          diagnostics: diagnostics({ reusablePrefix: [{ role: "user", content: "rewritten-prefix" }], previous: xaiPrior.diagnostics }),
         },
         noiseFloorTokens: 1_024,
       });

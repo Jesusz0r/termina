@@ -123,6 +123,9 @@ export interface TraceCache {
   readonly serializedToolsBytes: number | null;
   readonly stablePrefixHash: string | null;
   readonly reusablePrefixHash: string | null;
+  readonly reusablePrefixItems: number | null;
+  readonly comparedPrefixHash: string | null;
+  readonly comparedPrefixItems: number | null;
   readonly messagePrefixHash: string | null;
   readonly workingSetHash: string | null;
   readonly workingSetChanged: boolean | null;
@@ -311,6 +314,9 @@ export interface TraceCacheInput {
   readonly serializedToolsBytes?: unknown;
   readonly stablePrefixHash?: unknown;
   readonly reusablePrefixHash?: unknown;
+  readonly reusablePrefixItems?: unknown;
+  readonly comparedPrefixHash?: unknown;
+  readonly comparedPrefixItems?: unknown;
   readonly messagePrefixHash?: unknown;
   readonly workingSetHash?: unknown;
   readonly workingSetChanged?: unknown;
@@ -835,6 +841,9 @@ function cache(value: TraceCacheInput | null | undefined): TraceCache {
     serializedToolsBytes: nullableInteger(value?.serializedToolsBytes),
     stablePrefixHash: text(value?.stablePrefixHash, "stable prefix hash"),
     reusablePrefixHash: text(value?.reusablePrefixHash, "reusable prefix hash"),
+    reusablePrefixItems: nullableInteger(value?.reusablePrefixItems),
+    comparedPrefixHash: optionalText(value?.comparedPrefixHash, "compared prefix hash"),
+    comparedPrefixItems: nullableInteger(value?.comparedPrefixItems),
     messagePrefixHash: text(value?.messagePrefixHash, "message prefix hash"),
     workingSetHash: text(value?.workingSetHash, "working set hash"),
     workingSetChanged: nullableBoolean(value?.workingSetChanged),
@@ -1040,7 +1049,7 @@ function validTraceTurn(value: unknown): value is number | null {
   return value === null || (typeof value === "number" && Number.isSafeInteger(value) && value > 0);
 }
 
-function validTraceLinkIndex(value: unknown): value is TraceLinkIndex {
+export function validTraceLinkIndex(value: unknown): value is TraceLinkIndex {
   if (!isRecord(value) || value.schemaVersion !== TRACE_SCHEMA_VERSION || value.kind !== "trace-link-index" ||
     typeof value.complete !== "boolean" || !validExistingId(value.updatedAt) ||
     !Array.isArray(value.attempts) || !Array.isArray(value.settlements) ||

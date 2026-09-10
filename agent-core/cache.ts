@@ -71,8 +71,12 @@ export interface CacheRequestDiagnostics {
   /** UTF-8 byte length of the exact provider-visible JSON tools array. */
   serializedToolsBytes: number | null;
   stablePrefixHash: string | null;
-  /** Hash of the exact reusable prefix, excluding append-only history/tail. */
+  /** Content fingerprint of all durable provider input items, without cache markers. */
   reusablePrefixHash: string | null;
+  reusablePrefixItems: number | null;
+  /** Current content at the previous successful request's item boundary. */
+  comparedPrefixHash: string | null;
+  comparedPrefixItems: number | null;
   /** Optional whole-history diagnostic; never use this to infer cache misses.
    * Omit it on the per-attempt hot path (hashing the growing transcript every
    * attempt dominates diagnostics cost); the hash then reports null. */
@@ -96,12 +100,13 @@ export interface CacheRequestDiagnosticsInput {
    * cache-field fallbacks) do not re-serialize it. */
   serializedToolsText?: string | null;
   stablePrefix?: unknown;
+  /** Durable post-protocol input items (no volatile overlay). */
   reusablePrefix?: unknown;
+  previous?: CacheRequestDiagnostics | null;
   messagePrefix?: unknown;
   workingSet?: unknown;
   markerCount?: number | null;
   markerPositions?: readonly number[] | null;
-  workingSetChanged?: boolean | null;
 }
 
 function finiteNonnegative(value: unknown): number | null {
@@ -363,11 +368,73 @@ function normalizeMarkerPositions(value: readonly number[] | null | undefined): 
   return positions.length ? positions : [];
 }
 
+type PrefixEvidence = Pick<CacheRequestDiagnostics,
+  "reusablePrefixHash" | "reusablePrefixItems" | "comparedPrefixHash" | "comparedPrefixItems">;
+
+/** Cache markers move independently of message content. Strip only protocol
+ * block metadata, never nested tool arguments or user-supplied text. */
+function withoutBlockMarkers(item: unknown): unknown {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+  const next = { ...item } as Record<string, unknown>;
+  for (const field of ["content", "output"] as const) {
+    const blocks = next[field];
+    if (!Array.isArray(blocks)) continue;
+    next[field] = blocks.map((block: unknown) => {
+      if (!block || typeof block !== "object" || Array.isArray(block)) return block;
+      const { cache_control: _, prompt_cache_breakpoint: __, ...content } = block as Record<string, unknown>;
+      return content;
+    });
+  }
+  return next;
+}
+
+/** One bounded pass; copy the running hash at the OLD boundary, not at the
+ * new tail. Unlike generic diagnostics, never truncate content and call it
+ * exact evidence. Retain only digests/counts, not a second transcript. */
+function prefixEvidence(items: unknown, previous: CacheRequestDiagnostics | null | undefined): PrefixEvidence {
+  const unknown: PrefixEvidence = {
+    reusablePrefixHash: null, reusablePrefixItems: null, comparedPrefixHash: null, comparedPrefixItems: null,
+  };
+  if (!Array.isArray(items) || items.length > 4_096) return unknown;
+  const boundary = previous?.reusablePrefixItems;
+  const comparable = typeof boundary === "number" && Number.isSafeInteger(boundary) && boundary >= 0 &&
+    boundary <= items.length && typeof previous?.reusablePrefixHash === "string";
+  const hash = createHash("sha256");
+  let comparedPrefixHash = comparable && boundary === 0 ? hash.copy().digest("hex") : null;
+  let bytes = 0;
+  try {
+    for (let i = 0; i < items.length; i++) {
+      const text = JSON.stringify(withoutBlockMarkers(items[i]));
+      if (text === undefined) return unknown;
+      bytes += Buffer.byteLength(text, "utf8");
+      if (bytes > 8 * 1024 * 1024) return unknown;
+      hash.update(`${text.length}:`).update(text);
+      if (comparable && i + 1 === boundary) comparedPrefixHash = hash.copy().digest("hex");
+    }
+    return {
+      reusablePrefixHash: hash.digest("hex"), reusablePrefixItems: items.length,
+      comparedPrefixHash, comparedPrefixItems: comparable ? boundary : null,
+    };
+  } catch {
+    return unknown;
+  }
+}
+
+function prefixChanged(previous: CacheRequestDiagnostics, current: CacheRequestDiagnostics): boolean | null {
+  if (previous.reusablePrefixHash == null || current.reusablePrefixHash == null ||
+      previous.reusablePrefixItems == null || current.reusablePrefixItems == null) return null;
+  if (current.reusablePrefixItems < previous.reusablePrefixItems) return true;
+  if (current.comparedPrefixItems !== previous.reusablePrefixItems || current.comparedPrefixHash == null) return null;
+  return current.comparedPrefixHash !== previous.reusablePrefixHash;
+}
+
 /** Build bounded, nullable diagnostics for one exact provider request. */
 export function cacheRequestDiagnostics(input: CacheRequestDiagnosticsInput): CacheRequestDiagnostics {
   const hashOptional = (value: unknown): string | null => (value === undefined ? null : hashCacheDiagnostic(value));
   const serializedTools = exactSerializedTools(input.serializedTools, input.serializedToolsText);
   const markerCount = finiteNonnegative(input.markerCount);
+  const workingSetHash = hashOptional(input.workingSet);
+  const previousWorkingSetHash = input.previous?.workingSetHash;
   return {
     cacheKeyHash: input.identity?.key ? hashCacheDiagnostic(input.identity.key) : null,
     modelSettingsHash: hashOptional(input.modelSettings),
@@ -375,10 +442,11 @@ export function cacheRequestDiagnostics(input: CacheRequestDiagnosticsInput): Ca
     serializedToolsHash: serializedTools?.hash ?? null,
     serializedToolsBytes: serializedTools?.bytes ?? null,
     stablePrefixHash: hashOptional(input.stablePrefix),
-    reusablePrefixHash: hashOptional(input.reusablePrefix),
+    ...prefixEvidence(input.reusablePrefix, input.previous),
     messagePrefixHash: hashOptional(input.messagePrefix),
-    workingSetHash: hashOptional(input.workingSet),
-    workingSetChanged: typeof input.workingSetChanged === "boolean" ? input.workingSetChanged : null,
+    workingSetHash,
+    workingSetChanged: typeof previousWorkingSetHash === "string" && workingSetHash !== null
+      ? previousWorkingSetHash !== workingSetHash : null,
     markerCount,
     markerPositions: normalizeMarkerPositions(input.markerPositions),
     policy: normalizePolicy(input.policy),
@@ -464,6 +532,7 @@ function metadataMissing(previous: CacheRequestDiagnostics, current: CacheReques
   for (const field of fields) {
     if (previous[field] === null || current[field] === null) missing.push(field);
   }
+  if (prefixChanged(previous, current) === null) missing.push("comparedPrefixHash");
   return missing;
 }
 
@@ -570,15 +639,8 @@ export function classifyCacheMiss(input: {
   }
   if (changed(input.previous.diagnostics, input.current.diagnostics, "toolsHash")) causes.push("tool-schema-changed");
   if (changed(input.previous.diagnostics, input.current.diagnostics, "stablePrefixHash")) causes.push("stable-prefix-changed");
-  // `messagePrefixHash` may represent the entire growing transcript. Only
-  // compare the explicit reusable-prefix hash for cache continuity. A changed
-  // reusable prefix with a stable front is normal append-only tail growth,
-  // not a stable-prefix break.
-  if (changed(input.previous.diagnostics, input.current.diagnostics, "reusablePrefixHash")) causes.push("message-prefix-changed");
-  if (
-    input.current.diagnostics.workingSetChanged === true ||
-    changed(input.previous.diagnostics, input.current.diagnostics, "workingSetHash")
-  ) {
+  if (prefixChanged(input.previous.diagnostics, input.current.diagnostics) === true) causes.push("message-prefix-changed");
+  if (changed(input.previous.diagnostics, input.current.diagnostics, "workingSetHash")) {
     causes.push("working-set-changed");
   }
   if (input.current.postRevision) causes.push("post-revision");

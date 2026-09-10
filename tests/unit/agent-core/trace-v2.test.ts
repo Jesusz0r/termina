@@ -53,6 +53,7 @@ describe("Agent Core Trace V2 Invariants", () => {
       missGapMs = null,
       toolOutcomes = [],
       reclaimEvidence = null,
+      prefixEvidence = {},
     }) {
       return {
         schemaVersion: 2,
@@ -95,6 +96,7 @@ describe("Agent Core Trace V2 Invariants", () => {
           messagePrefixHash: `messages-${attemptId}`,
           workingSetHash: `working-${attemptId}`,
           workingSetChanged: false,
+          ...prefixEvidence,
           requested: {
             mode: requestedMode,
             ttlMs: requestedTtlMs,
@@ -176,6 +178,12 @@ describe("Agent Core Trace V2 Invariants", () => {
         retryPromptIdentical: true,
         toolNames: ["read_file", "edit"],
         sessionLengthBucket: "short",
+        prefixEvidence: {
+          reusablePrefixHash: "current-durable-prefix",
+          reusablePrefixItems: 5,
+          comparedPrefixHash: "previous-boundary-prefix",
+          comparedPrefixItems: 3,
+        },
         missPrimary: "working-set",
         missContributors: ["stable-prefix", "working-set"],
         missGapMs: 10 * 60 * 1000,
@@ -304,6 +312,7 @@ describe("Agent Core Trace V2 Invariants", () => {
         readerOmittedRecords: 0,
         manifestErrors: 0,
         schemaRecords: { current: records.length },
+        linkIndex: { present: false, complete: null, errors: 0, prunedAttemptsReferenced: 0 },
       });
     }, failures);
     
@@ -467,6 +476,26 @@ describe("Agent Core Trace V2 Invariants", () => {
       assert.equal(report.attempts.byId["summary-1"].cache.namespace.endsWith("/summary"), true);
     }, failures);
     
+    check("same-span prefix evidence round-trips and absent fields stay null", () => {
+      for (const [attemptId, expected] of [
+        ["attempt-1", { reusablePrefixHash: null, reusablePrefixItems: null, comparedPrefixHash: null, comparedPrefixItems: null }],
+        ["attempt-3", { reusablePrefixHash: "current-durable-prefix", reusablePrefixItems: 5, comparedPrefixHash: "previous-boundary-prefix", comparedPrefixItems: 3 }],
+      ]) {
+        for (const normalized of [report.attempts.byId[attemptId], report.attempts.perTurn.find((row) => row.attemptId === attemptId)]) {
+          for (const [field, value] of Object.entries(expected)) assert.equal(normalized.cache[field], value, `${attemptId}.${field}`);
+        }
+      }
+    }, failures);
+
+    check("prefix counts preserve zero but reject non-integers and unsafe values", () => {
+      for (const value of [0, -1, 1.5, "3", Number.MAX_SAFE_INTEGER + 1]) {
+        const fixture = { ...records[0], cache: { reusablePrefixItems: value, comparedPrefixItems: value } };
+        const normalized = summarizeTraces([fixture], "prefix-counts").attempts.byId["attempt-1"].cache;
+        assert.equal(normalized.reusablePrefixItems, value === 0 ? 0 : null);
+        assert.equal(normalized.comparedPrefixItems, value === 0 ? 0 : null);
+      }
+    }, failures);
+
     check("report exposes stable dimension groups", () => {
       assert.equal(report.groups.byRole.main.attempts, 4);
       assert.equal(report.groups.byRole.summary.attempts, 1);

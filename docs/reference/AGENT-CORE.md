@@ -162,9 +162,21 @@ Rules:
 - Attribute each measured miss as `post-revision`, `idle-expired`, or
   `unexplained`. Model changes reset the previous-prompt baseline instead of
   creating a separate cause. Attribution runs per terminal stream.
+- Prefix-flip evidence compares current durable provider input at the previous
+  successful request's item boundary. Whole-history growth is not a flip.
+  Cache markers are excluded from content fingerprints; diagnostic limits or
+  ambiguous coalesced boundaries produce unknown evidence. Working-set changes compare requests,
+  not a flag latched for the entire run. Traces retain hashes and item counts,
+  never a second copy of prompt content.
 - Traces are JSON files, not sidecar events. They record usage, estimated
   cost when the local price catalog has a match, measured waste tokens and
   cause, revision count and kinds, and overflow attempts.
+- `pnpm run report:agent-core <trace-directory>` validates retained links
+  against the bounded `trace-index.json` identity ledger. A known evicted
+  attempt can validate a retry, parent, or settlement link without inventing
+  its usage, cost, or outcome. Reports count those references and stay
+  incomplete. Unknown identities, cross-task/run links, and malformed
+  retained parents are still rejected; retention alone is not proof.
 
 Verify: every measured miss has one recorded cause or is below the noise floor.
 

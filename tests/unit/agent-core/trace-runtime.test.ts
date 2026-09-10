@@ -115,6 +115,9 @@ describe("Agent Core Trace Runtime Invariants", () => {
           serializedToolsBytes: 321,
           stablePrefixHash: "stable-hash",
           reusablePrefixHash: "reusable-hash",
+          reusablePrefixItems: 5,
+          comparedPrefixHash: "previous-boundary-hash",
+          comparedPrefixItems: 3,
           messagePrefixHash: "message-hash",
           workingSetHash: null,
           workingSetChanged: false,
@@ -258,6 +261,13 @@ describe("Agent Core Trace Runtime Invariants", () => {
     assert.deepEqual(unknown.cost.unknownReasons, ["provider-omitted-cache-read"]);
     assert.equal(unknown.cache.serializedToolsHash, "serialized-tools-hash");
     assert.equal(unknown.cache.serializedToolsBytes, 321);
+    assert.equal(unknown.cache.reusablePrefixItems, 5);
+    assert.equal(unknown.cache.comparedPrefixHash, "previous-boundary-hash");
+    assert.equal(unknown.cache.comparedPrefixItems, 3);
+    const absentPrefix = createAttemptRecord({ ...makeAttempt(1), cache: {} });
+    assert.equal(absentPrefix.cache.reusablePrefixItems, null);
+    assert.equal(absentPrefix.cache.comparedPrefixHash, null);
+    assert.equal(absentPrefix.cache.comparedPrefixItems, null);
     assert.equal(unknown.toolOutcomes[0].bounded.inputBytes, 200);
     assert.equal(unknown.reclaimEvidence.targets[0].originalSha256.length, 64);
     assert.equal(unknown.startedAtMs, 1_001);

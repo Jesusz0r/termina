@@ -381,10 +381,6 @@ let effortWanted: EffortLevel = ((value) => {
   const wanted = value.trim().toLowerCase();
   return (EFFORT_LEVELS as readonly string[]).includes(wanted) ? (wanted as EffortLevel) : "medium";
 })(process.env.TERMINA_CORE_EFFORT ?? "");
-let currentWorkingSetHash: string | null = null;
-let currentWorkingSetChanged: boolean | null = null;
-let previousWorkingSetHash: string | null = null;
-let hasPreviousWorkingSet = false;
 type HostContextTrace = Pick<
   BoundedText,
   "state" | "direction" | "limitBytes" | "inputBytes" | "retainedBytes" | "omittedBytes" | "outputBytes" | "truncated"
@@ -3362,6 +3358,9 @@ function traceCacheInput(
     toolsHash: cache.toolsHash,
     stablePrefixHash: cache.stablePrefixHash,
     reusablePrefixHash: cache.reusablePrefixHash,
+    reusablePrefixItems: cache.reusablePrefixItems,
+    comparedPrefixHash: cache.comparedPrefixHash,
+    comparedPrefixItems: cache.comparedPrefixItems,
     messagePrefixHash: cache.messagePrefixHash,
     workingSetHash: cache.workingSetHash,
     workingSetChanged: cache.workingSetChanged,
@@ -3680,15 +3679,14 @@ function cacheDiagnosticsForRequest(
     serializedToolsText: memoizedTools?.text ?? null,
     stablePrefix: { system: stableSystem, tools, settings: modelSettings },
     reusablePrefix: persistedMessages,
-    // messagePrefix intentionally omitted: hashing the whole transcript every
-    // attempt is the hot-path cost, and continuity never reads it (only
-    // reusablePrefixHash). The diagnostic reports null.
+    previous: cacheIdentity?.role === "main" ? previousCacheAttempt?.diagnostics : null,
+    // Prefix evidence takes one bounded pass and checkpoints the previous
+    // request's boundary. Do not compute a second whole-history diagnostic.
     // An absent overlay is complete evidence (no working set was sent), so
     // report it as an explicit null that hashes to a stable sentinel. Only
     // an undefined value stays unknown, as for routes where the prefix
     // cannot be reconstructed after serialization.
     workingSet: overlay ? overlay.text : null,
-    workingSetChanged: currentWorkingSetChanged,
     markerCount: policyDetails.markers.count,
     markerPositions: policyDetails.markers.positions,
   });
@@ -7045,10 +7043,6 @@ export function cacheFlipStats(): CacheFlipTally {
 
 function resetCacheContinuity(): void {
   resetUsageContinuity();
-  currentWorkingSetHash = null;
-  currentWorkingSetChanged = null;
-  previousWorkingSetHash = null;
-  hasPreviousWorkingSet = false;
   currentHostContext = null;
   activeRequestOverlay = null;
   codexTurnState = "";
@@ -7696,10 +7690,6 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     showPrompt();
     return;
   }
-  currentWorkingSetHash = activeRequestOverlay?.hash ?? null;
-  currentWorkingSetChanged = hasPreviousWorkingSet ? currentWorkingSetHash !== previousWorkingSetHash : null;
-  previousWorkingSetHash = currentWorkingSetHash;
-  hasPreviousWorkingSet = true;
   // Rate lookup is optional and bounded. Capture the fully replaced catalog
   // map before opening the logical task so every attempt in this run shares
   // one immutable provenance snapshot.
