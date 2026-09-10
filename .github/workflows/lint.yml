@@ -14,3 +14,35 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Forbid git CLI in app code
         run: sh scripts/no-git-cli.sh
+
+  checks:
+    runs-on: ubuntu-latest
+    env:
+      # Matches release.yml's test job: the unit suite carries oversized
+      # harness files, so give V8 a fixed ceiling instead of the runner default.
+      NODE_OPTIONS: --max-old-space-size=4096
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.23.2
+      # The unit suite needs the Rust core: tests/unit/electron/core-client-read-budget.test.ts
+      # defaults TERMINA_CORE_BIN to core/target/release/termina-core and spawns it
+      # (coreClient -> resolveCoreBin), so an unbuilt core fails that test with ENOENT.
+      # Same toolchain as release.yml.
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # v1.2.0
+        with:
+          toolchain: 1.97.1
+      # packageManager pins pnpm; corepack activates that exact version.
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      # Fail fast on types before paying for the Rust build.
+      - name: Typecheck
+        run: pnpm run typecheck
+      # Canonical build entry (scripts/build-core.ts): compiles the core and
+      # stages dist-electron. The Vite renderer build is skipped: the unit
+      # suites import TypeScript directly and never read dist-renderer.
+      - name: Build bundles and the Rust core
+        run: node --experimental-strip-types scripts/build.ts
+      - name: Unit tests
+        run: pnpm run test:unit
