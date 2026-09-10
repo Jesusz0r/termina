@@ -8,7 +8,6 @@
  */
 import {
   createReadStream,
-  lstatSync,
 } from "node:fs";
 import { lstat, opendir, readFile, open } from "node:fs/promises";
 import type { BigIntStats, Stats } from "node:fs";
@@ -413,7 +412,7 @@ async function writeRetainedClaim(root: string, runId: string, retentionLock: Se
   const name = retainedClaimName(runId);
   const finalPath = join(root, name);
   try {
-    lstatSync(finalPath);
+    await lstat(finalPath);
     throw new Error("the retained session destination has an unresolved claim");
   } catch (error) {
     if (errorCode(error) !== "ENOENT") throw error;
@@ -443,7 +442,7 @@ async function removeRetainedClaim(
   const path = join(root, retainedClaimName(runId));
   let info;
   try {
-    info = lstatSync(path);
+    info = await lstat(path);
   } catch (error) {
     if (errorCode(error) === "ENOENT") return;
     throw error;
@@ -1451,7 +1450,7 @@ export class SessionRetentionOwner {
                 const canonical = await measureRetainedBundle(destinationPath);
                 const staging = canonical.ok ? canonical : await measureRetainedStaging(destinationPath);
                 if (!staging.ok) return { ok: false, error: staging.error };
-                await removeRetainedEntry(root, runId, lstatSync(destinationPath), lock, this.testHooks?.beforeBundleRemoval);
+                await removeRetainedEntry(root, runId, await lstat(destinationPath), lock, this.testHooks?.beforeBundleRemoval);
               }
               await removeRetainedClaim(root, runId, lock, this.testHooks?.beforeClaimRemoval);
               return { ok: true };
@@ -1461,7 +1460,7 @@ export class SessionRetentionOwner {
             if (destination.isSymbolicLink() || !destination.isDirectory()) return { ok: false, error: "retained session bundle is not a proven directory" };
             const measured = await measureRetainedBundle(join(root, runId));
             if (!measured.ok) return { ok: false, error: measured.error };
-            await removeRetainedEntry(root, runId, lstatSync(join(root, runId)), lock, this.testHooks?.beforeBundleRemoval);
+            await removeRetainedEntry(root, runId, await lstat(join(root, runId)), lock, this.testHooks?.beforeBundleRemoval);
             return { ok: true };
           }
           const claimName = retainedClaimName(runId);
@@ -1477,7 +1476,7 @@ export class SessionRetentionOwner {
                 return { ok: false, error: "retained session claim contains a non-discardable or changed destination" };
               }
               if (destination.isSymbolicLink() || !destination.isDirectory()) return { ok: false, error: "retained session claim contains a non-discardable destination" };
-              const destinationInfo = lstatSync(destinationPath);
+              const destinationInfo = await lstat(destinationPath);
               await removeRetainedEntry(root, runId, destinationInfo, lock, this.testHooks?.beforeBundleRemoval);
               removedNames.add(runId);
             }
@@ -1491,7 +1490,7 @@ export class SessionRetentionOwner {
                 return { ok: false, error: "retained session bundle is not a proven directory" };
               }
               if (destination.isSymbolicLink() || !destination.isDirectory()) return { ok: false, error: "retained session bundle is not a proven directory" };
-              const destinationInfo = lstatSync(destinationPath);
+              const destinationInfo = await lstat(destinationPath);
               await removeRetainedEntry(root, runId, destinationInfo, lock, this.testHooks?.beforeBundleRemoval);
               removedNames.add(runId);
             } else if (directEntry) {
@@ -1599,14 +1598,14 @@ export class SessionRetentionOwner {
     }
     const destinationBundle = join(root, runId);
     try {
-      lstatSync(destinationBundle);
+      await lstat(destinationBundle);
       throw new Error("the retained session destination already exists");
     } catch (error) {
       if (errorCode(error) !== "ENOENT") throw error;
     }
     const claim = join(root, retainedClaimName(runId));
     try {
-      lstatSync(claim);
+      await lstat(claim);
       throw new Error("the retained session destination has an unresolved claim");
     } catch (error) {
       if (errorCode(error) !== "ENOENT") throw error;

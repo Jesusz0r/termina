@@ -12,7 +12,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain as electronIpcMain, Menu
 // Name the app for the macOS menu bar and user-data paths. Unpackaged runs default to "Electron".
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { access, cp, lstat, mkdir, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
@@ -1771,12 +1771,24 @@ class PiEditorApp {
    * Create the worldline manager of one project. Depends on app paths
    * that exist only after the app creates the window.
    */
-  private initWorldlines(project: ProjectState): void {
+  private realpathCache = new Map<string, string>();
+  /** Sync realpath with a tiny cache. appReadPaths runs per candidate
+   * launch; the binary paths it resolves change only when PATH does. */
+  private cachedRealpath(input: string): string {
+    const hit = this.realpathCache.get(input);
+    if (hit !== undefined) return hit;
+    const resolved = realpathSync(input);
+    if (this.realpathCache.size >= 16) this.realpathCache.clear();
+    this.realpathCache.set(input, resolved);
+    return resolved;
+  }
+
+  private async initWorldlines(project: ProjectState): Promise<void> {
     if (project.worldlines) return;
     project.worldlines = new WorldlineManager({
       worldsRoot: this.worldsRoot,
       // The canonical primary root: the sandbox compares canonical paths.
-      primaryRoot: realpathSync(this.primaryWorkspace(project)?.root ?? project.cwd ?? homedir()),
+      primaryRoot: await this.canonicalPath(this.primaryWorkspace(project)?.root ?? project.cwd ?? homedir()),
       primaryRootIdentity: project.primaryRootIdentity,
       realHome: homedir(),
       userData: this.userDataDir,
@@ -1800,7 +1812,7 @@ class PiEditorApp {
         const node = this.findOnPath("node") ?? process.execPath;
         out.push(node, dirname(node));
         try {
-          out.push(realpathSync(node));
+          out.push(this.cachedRealpath(node));
         } catch {
           /* The configured node path can disappear between checks. */
         }
@@ -2552,8 +2564,24 @@ class PiEditorApp {
     if (previous && previous !== stateId) void this.releaseStateIfUnused(previous);
   }
 
+  private findOnPathCache = new Map<string, string | null>();
   private findOnPath(name: string): string | null {
-    for (const dir of (process.env.PATH ?? "").split(":")) {
+    const pathEnv = process.env.PATH ?? "";
+    const key = `${pathEnv}\0${name}`;
+    const hit = this.findOnPathCache.get(key);
+    if (hit) return hit;
+    const found = this.findOnPathUncached(name, pathEnv);
+    // Cache hits only: a miss may resolve later (new install under the same
+    // PATH) and must fall through to process.execPath fresh each time.
+    if (found !== null) {
+      if (this.findOnPathCache.size >= 16) this.findOnPathCache.clear();
+      this.findOnPathCache.set(key, found);
+    }
+    return found;
+  }
+
+  private findOnPathUncached(name: string, pathEnv: string): string | null {
+    for (const dir of pathEnv.split(":")) {
       if (!dir) continue;
       try {
         const candidate = join(dir, name);
@@ -2595,13 +2623,19 @@ class PiEditorApp {
     return join(this.userDataDir, "terminal-rosters", `${this.sanitizeSessionDir(project.canonicalRoot)}.json`);
   }
 
-  private loadTerminalRoster(project: ProjectState): { exists: boolean; entries: TerminalRosterEntry[] } {
+  private async loadTerminalRoster(project: ProjectState): Promise<{ exists: boolean; entries: TerminalRosterEntry[] }> {
     const path = this.terminalRosterPath(project);
-    if (!existsSync(path)) return { exists: false, entries: [] };
+    let info;
     try {
-      const info = statSync(path);
+      info = await stat(path);
+    } catch (error) {
+      // Only a clean absence means first launch. Anything else (unreadable,
+      // oversized handled below) must not spawn an unrequested terminal.
+      return { exists: (error as NodeJS.ErrnoException)?.code !== "ENOENT", entries: [] };
+    }
+    try {
       if (!info.isFile() || info.size > MAX_ROSTER_BYTES) return { exists: true, entries: [] };
-      const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
+      const raw = JSON.parse(await readFile(path, "utf8")) as unknown;
       return { exists: true, entries: parseTerminalRoster(raw) };
     } catch {
       // A present but unreadable roster must not be mistaken for first launch:
@@ -2710,7 +2744,7 @@ class PiEditorApp {
   }
 
   private async restoreProjectTerminals(project: ProjectState): Promise<void> {
-    const loaded = this.loadTerminalRoster(project);
+    const loaded = await this.loadTerminalRoster(project);
     if (loaded.entries.length === 0) {
       // Only a genuinely new project gets a default terminal. An existing
       // empty roster is the durable result of closing the project's last tab.
@@ -4810,7 +4844,7 @@ class PiEditorApp {
             images: Array.isArray(payload.images) ? payload.images.length : 0,
           };
           if (inst.pendingPrompt.text && this.isNewCommand(inst.pendingPrompt.text)) {
-            this.clearForNewSession(terminalId, rendererTarget);
+            await this.clearForNewSession(terminalId, rendererTarget);
           }
         } catch {
           inst.pendingPrompt = null;
@@ -5009,7 +5043,7 @@ class PiEditorApp {
             if (baseline !== undefined) this.setBaseline(inst, path, baseline);
           }
         }
-        const status = toolName === "write" ? this.classifyWrite(path) : "modified";
+        const status = toolName === "write" ? await this.classifyWrite(path) : "modified";
         await this.recordModified(inst, path, status);
         if ((toolName === "write" || toolName === "create_file") && !inst.baselines.has(path)) {
           this.trackRecordingTask(this.fillBaseline(inst, path, status));
@@ -5033,7 +5067,7 @@ class PiEditorApp {
           entryId: event.entryId ?? null,
           model: inst.currentRun?.model ?? null,
         };
-        const snapshot = this.toolSnapshot(inst, path, toolName, eventEdits, ev);
+        const snapshot = await this.toolSnapshot(inst, path, toolName, eventEdits, ev);
         if (snapshot?.content !== undefined) ev.content = snapshot.content;
         if (snapshot?.status) ev.status = snapshot.status;
         this.pushTimeline(inst, ev, rendererTarget);
@@ -5375,7 +5409,7 @@ class PiEditorApp {
     const pending = token ? this.pendingPreflights.get(token) : undefined;
     const ws = this.workspaceOfTerminal(inst);
     const owner = this.projectOfTerminal(inst.id);
-    if (owner) this.initWorldlines(owner);
+    if (owner) await this.initWorldlines(owner);
     const manager = owner?.worldlines ?? null;
     if (pending && pending.terminalId === inst.id) {
       this.pendingPreflights.delete(token);
@@ -5911,14 +5945,14 @@ class PiEditorApp {
     }
   }
 
-  private toolSnapshot(
+  private async toolSnapshot(
     inst: AgentTerminalInstance,
     path: string,
     toolName: string,
     edits: unknown,
     ev: Omit<TimelineEvent, "seq" | "ts">,
-  ): { content?: string; status?: "created" | "modified" } {
-    const status = toolName === "write" ? this.classifyWrite(path) : "modified";
+  ): Promise<{ content?: string; status?: "created" | "modified" }> {
+    const status = toolName === "write" ? await this.classifyWrite(path) : "modified";
     // Claim the imminent watcher change. Set the marker in every branch so
     // the write-without-cache path also claims the change event.
     inst.lastToolAt.set(path, Date.now());
@@ -6016,7 +6050,7 @@ class PiEditorApp {
       this.newCommandBuffers.set(id, (lines.pop() ?? "").slice(-200));
       for (const line of lines) {
         if (this.isNewCommand(line)) {
-          this.clearForNewSession(id);
+          void this.clearForNewSession(id);
           break;
         }
       }
@@ -6028,7 +6062,7 @@ class PiEditorApp {
   /**
    * Reset session-scoped state for a slash-command reset (/clear, alias /new). The
    * timeline, plan, and worldline comparisons reflect the abandoned run;\n   * the workspace source and modified files reflect real disk changes and\n   * persist.\n   */
-  private clearForNewSession(terminalId: string, expected?: PtyRendererSendTarget | null): void {
+  private async clearForNewSession(terminalId: string, expected?: PtyRendererSendTarget | null): Promise<void> {
     const inst = this.terminals.get(terminalId);
     if (!inst) return;
     // A fresh session orphans the owner's background runs: terminate them.
@@ -6040,9 +6074,9 @@ class PiEditorApp {
     // (A clear landing between the host's task read and child launch stays
     // a visible, attributable stray — accepted, not silent.)
     try {
-      for (const name of readdirSync(this.eventsDirOf(inst))) {
+      for (const name of await readdir(this.eventsDirOf(inst))) {
         if (name.startsWith(`subagent-${terminalId}-`) && name.endsWith(".task.json")) {
-          void this.removeEventLeaf(inst, name).catch(() => undefined);
+          await this.removeEventLeaf(inst, name).catch(() => undefined);
         }
       }
     } catch {
@@ -6208,8 +6242,13 @@ class PiEditorApp {
     return content !== undefined && Buffer.byteLength(content, "utf8") <= MAX_SNAPSHOT_SIZE;
   }
 
-  private classifyWrite(path: string): "created" | "modified" {
-    return existsSync(path) ? "modified" : "created";
+  private async classifyWrite(path: string): Promise<"created" | "modified"> {
+    try {
+      await stat(path);
+      return "modified";
+    } catch {
+      return "created";
+    }
   }
 
   /**
@@ -6512,7 +6551,7 @@ class PiEditorApp {
       });
       this.createWorkspace(project, cwd, true);
       await this.loadMineFiles(project);
-      this.initWorldlines(project);
+      await this.initWorldlines(project);
       // Spawn the terminal before folder:opened so the renderer can show
       // that pane when it switches the project view.
       await this.restoreProjectTerminals(project);
@@ -7602,7 +7641,7 @@ class PiEditorApp {
       if (!inst) return { ok: false, error: "terminal not found" };
       const owner = this.projectOfTerminal(terminalId);
       if (!owner) return { ok: false, error: "no project open" };
-      this.initWorldlines(owner);
+      await this.initWorldlines(owner);
       const ev = inst.timeline.find((e) => e.seq === seq) ?? null;
       return owner.worldlines!.forkPoint(terminalId, ev);
     });
@@ -7843,7 +7882,9 @@ class PiEditorApp {
           dirAbs = await this.projectAbs(workspace, targetDirRel);
         }
         // The paste target must be a directory.
-        if (!existsSync(dirAbs) || !statSync(dirAbs).isDirectory()) {
+        try {
+          if (!(await stat(dirAbs)).isDirectory()) return { ok: false, error: "paste target is not a folder" };
+        } catch {
           return { ok: false, error: "paste target is not a folder" };
         }
         // A folder cannot be pasted into itself or one of its descendants.
@@ -7930,7 +7971,7 @@ class PiEditorApp {
           const stored: { root: string; canonical: string }[] = [];
           for (const root of this.preferences.openProjects) {
             try {
-              if (!statSync(root).isDirectory()) continue;
+              if (!(await stat(root)).isDirectory()) continue;
               stored.push({ root, canonical: await this.canonicalPath(root) });
             } catch {
               continue;
@@ -7971,7 +8012,7 @@ class PiEditorApp {
         // stored focus is applied afterwards so order and focus stay stable.
         for (const root of this.preferences.openProjects) {
           try {
-            if (!statSync(root).isDirectory()) continue;
+            if (!(await stat(root)).isDirectory()) continue;
           } catch {
             continue;
           }
