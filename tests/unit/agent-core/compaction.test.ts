@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
+  CACHE_MISS_COMPACT_TOKENS,
+  COMPACT_COST_REFERENCE_WINDOW,
+  compactCostTokenThreshold,
   PROTECT_TURNS,
   evictionBoundary,
   isUserPrompt,
@@ -80,5 +83,27 @@ describe("compaction planning", () => {
     expect(shouldCompactForCacheCost(120_000, 0.8, 120_000, false)).toBe(false);
     expect(shouldCompactForCacheCost(120_000, 0.1, 120_000, true)).toBe(false);
     expect(shouldCompactForCacheCost(null, 0.1, 120_000, false)).toBe(false);
+  });
+
+  it("derives the cost threshold from the context window with a floor", () => {
+    expect(COMPACT_COST_REFERENCE_WINDOW).toBe(2 * CACHE_MISS_COMPACT_TOKENS);
+    expect(compactCostTokenThreshold()).toBe(CACHE_MISS_COMPACT_TOKENS);
+    expect(compactCostTokenThreshold(null)).toBe(CACHE_MISS_COMPACT_TOKENS);
+    expect(compactCostTokenThreshold(NaN)).toBe(CACHE_MISS_COMPACT_TOKENS);
+    // Small windows never compact more eagerly than the tuned default.
+    expect(compactCostTokenThreshold(32_000)).toBe(CACHE_MISS_COMPACT_TOKENS);
+    expect(compactCostTokenThreshold(200_000)).toBe(CACHE_MISS_COMPACT_TOKENS);
+    // Large windows scale the trigger instead of firing at a fixed 100k.
+    expect(compactCostTokenThreshold(1_000_000)).toBe(500_000);
+  });
+
+  it("keeps default behavior without a window and scales with one", () => {
+    // Omitted window preserves the historical trigger.
+    expect(shouldCompactForCacheCost(120_000, 0.1, 120_000, false)).toBe(true);
+    // 1M window needs 500k billed/context before cost compaction fires.
+    expect(shouldCompactForCacheCost(120_000, 0.1, 120_000, false, 1_000_000)).toBe(false);
+    expect(shouldCompactForCacheCost(600_000, 0.1, 600_000, false, 1_000_000)).toBe(true);
+    // 32k window stays floored at the default trigger.
+    expect(shouldCompactForCacheCost(120_000, 0.1, 120_000, false, 32_000)).toBe(true);
   });
 });

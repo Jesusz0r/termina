@@ -73,7 +73,9 @@ export interface CacheRequestDiagnostics {
   stablePrefixHash: string | null;
   /** Hash of the exact reusable prefix, excluding append-only history/tail. */
   reusablePrefixHash: string | null;
-  /** Optional whole-history diagnostic; never use this to infer cache misses. */
+  /** Optional whole-history diagnostic; never use this to infer cache misses.
+   * Omit it on the per-attempt hot path (hashing the growing transcript every
+   * attempt dominates diagnostics cost); the hash then reports null. */
   messagePrefixHash: string | null;
   workingSetHash: string | null;
   workingSetChanged: boolean | null;

@@ -30,6 +30,18 @@ export const PROTECT_TURNS = 2;
 /** Compact an expensive miss before the request reaches the context limit. */
 export const CACHE_MISS_COMPACT_TOKENS = 100_000;
 export const CACHE_MISS_COMPACT_SHARE = 0.5;
+/** Default window the floor constants were tuned against (2 × the floor). */
+export const COMPACT_COST_REFERENCE_WINDOW = 2 * CACHE_MISS_COMPACT_TOKENS;
+
+/** Cost-compaction token threshold for a context window. Half the window keeps
+ * the historical trigger ratio, floored so small windows never compact more
+ * eagerly than the tuned default. */
+export function compactCostTokenThreshold(contextWindow?: number | null): number {
+  const window = typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0
+    ? contextWindow
+    : COMPACT_COST_REFERENCE_WINDOW;
+  return Math.max(CACHE_MISS_COMPACT_TOKENS, Math.floor(window / 2));
+}
 
 export function isUserPrompt(m: { role: string; content: unknown }): boolean {
   if (m.role !== "user") return false;
@@ -46,13 +58,15 @@ export function shouldCompactForCacheCost(
   cacheReadShare: number | null,
   contextTokens: number,
   followedRevision: boolean,
+  contextWindow?: number | null,
 ): boolean {
+  const threshold = compactCostTokenThreshold(contextWindow);
   return (
     !followedRevision &&
     billedTokens !== null &&
     cacheReadShare !== null &&
-    billedTokens >= CACHE_MISS_COMPACT_TOKENS &&
-    contextTokens >= CACHE_MISS_COMPACT_TOKENS &&
+    billedTokens >= threshold &&
+    contextTokens >= threshold &&
     cacheReadShare < CACHE_MISS_COMPACT_SHARE
   );
 }

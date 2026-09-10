@@ -3680,7 +3680,9 @@ function cacheDiagnosticsForRequest(
     serializedToolsText: memoizedTools?.text ?? null,
     stablePrefix: { system: stableSystem, tools, settings: modelSettings },
     reusablePrefix: persistedMessages,
-    messagePrefix: messages,
+    // messagePrefix intentionally omitted: hashing the whole transcript every
+    // attempt is the hot-path cost, and continuity never reads it (only
+    // reusablePrefixHash). The diagnostic reports null.
     // An absent overlay is complete evidence (no working set was sent), so
     // report it as an explicit null that hashes to a stable sentinel. Only
     // an undefined value stays unknown, as for routes where the prefix
@@ -7754,6 +7756,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
             lastCacheReadShare,
             effectiveTotalTokens(),
             lastRequestFollowedRevision,
+            contextWindow(),
           );
         if (shouldCompactForCost) cacheCostCompactionAttempted = true;
         const compactedForCost = shouldCompactForCost ? await summarize() : false;

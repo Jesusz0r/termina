@@ -90,14 +90,14 @@ function overlayByteCap(value: unknown): number {
   return Number.isFinite(value) ? Math.max(0, Math.floor(Number(value))) : DEFAULT_OVERLAY_BYTES;
 }
 
-function takeUtf8Prefix(text: string, maxBytes: number): string {
-  if (maxBytes <= 0) return "";
-  const source = Buffer.from(text, "utf8");
-  if (source.length <= maxBytes) return text;
+/** Clamp already-encoded bytes to a UTF-8 boundary. Single-encode core: callers
+ * holding the encoded form slice without re-encoding the string. */
+function clampUtf8PrefixBytes(source: Buffer, maxBytes: number): Buffer {
+  if (source.length <= maxBytes) return source;
   let end = maxBytes;
-  // Back up over a partial multi-byte sequence.  Buffer#toString replaces an
-  // incomplete sequence with U+FFFD, which would make the overlay bytes differ
-  // from the source prefix and could leak a misleading replacement character.
+  // Back up over a partial multi-byte sequence. Truncating mid-sequence would
+  // decode to U+FFFD, which would make the overlay bytes differ from the
+  // source prefix and could leak a misleading replacement character.
   let continuationBytes = 0;
   while (end > 0 && (source[end - 1]! & 0xc0) === 0x80) {
     continuationBytes++;
@@ -112,7 +112,14 @@ function takeUtf8Prefix(text: string, maxBytes: number): string {
     const lead = source[end - 1]!;
     if (lead >= 0xc0) end--;
   }
-  return source.subarray(0, end).toString("utf8");
+  return source.subarray(0, end);
+}
+
+function takeUtf8Prefix(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  const source = Buffer.from(text, "utf8");
+  if (source.length <= maxBytes) return text;
+  return clampUtf8PrefixBytes(source, maxBytes).toString("utf8");
 }
 
 function fullOverlayText(hostContext: string): string {
@@ -120,19 +127,31 @@ function fullOverlayText(hostContext: string): string {
   return host ? `<working-set>\n${host}\n</working-set>` : "";
 }
 
+const OVERLAY_OPENING_TEXT = "<working-set>\n";
+const OVERLAY_CLOSING_TEXT = "\n</working-set>";
+const OVERLAY_OMITTED_TEXT = "<!-- host context omitted -->";
+
+/** Truncate pre-encoded host bytes to the overlay budget. Owns the framing math
+ * so callers encode the host string once instead of re-encoding per check. */
+function truncateHostOverlayBytes(hostBytes: Buffer, maxBytes: number): Buffer | null {
+  const opening = Buffer.from(OVERLAY_OPENING_TEXT, "utf8");
+  const omitted = Buffer.from(OVERLAY_OMITTED_TEXT, "utf8");
+  const tail = Buffer.from(OVERLAY_CLOSING_TEXT, "utf8");
+  const closing = Buffer.concat([Buffer.from("\n", "utf8"), omitted, tail]);
+  const fixed = Buffer.concat([opening, omitted, tail]);
+  if (fixed.length > maxBytes) return null;
+  const remaining = maxBytes - opening.length - closing.length;
+  if (remaining <= 0) return fixed;
+  const prefix = clampUtf8PrefixBytes(hostBytes, remaining);
+  if (prefix.length === 0) return fixed;
+  return Buffer.concat([opening, prefix, closing]);
+}
+
 function truncateHostOverlay(hostContext: string, maxBytes: number): string | null {
   const host = hostContextSafe(hostContext);
   if (!host) return null;
-  const opening = "<working-set>\n";
-  const marker = "<!-- host context omitted -->";
-  const closing = `\n${marker}\n</working-set>`;
-  const fixed = `${opening}${marker}\n</working-set>`;
-  if (Buffer.byteLength(fixed, "utf8") > maxBytes) return null;
-  const remaining = maxBytes - Buffer.byteLength(opening + closing, "utf8");
-  if (remaining <= 0) return fixed;
-  const prefix = takeUtf8Prefix(host, remaining);
-  const text = prefix ? `${opening}${prefix}${closing}` : fixed;
-  return Buffer.byteLength(text, "utf8") <= maxBytes ? text : fixed;
+  const bytes = truncateHostOverlayBytes(Buffer.from(host, "utf8"), maxBytes);
+  return bytes ? bytes.toString("utf8") : null;
 }
 
 /**
@@ -142,13 +161,22 @@ function truncateHostOverlay(hostContext: string, maxBytes: number): string | nu
 export function buildRequestOverlay(opts: BuildRequestOverlayOptions): RequestOverlay | null {
   void opts.messages;
   const maxBytes = overlayByteCap(opts.maxBytes);
-  const host = opts.hostContext ?? "";
-  const full = fullOverlayText(host);
-  if (!full) return null;
-  const encoded = Buffer.from(full, "utf8");
-  if (encoded.length <= maxBytes) return overlayFromEncoded(full, encoded);
-  const text = truncateHostOverlay(host, maxBytes);
-  return text ? overlayFromText(text) : null;
+  const safe = hostContextSafe(opts.hostContext ?? "");
+  if (!safe) return null;
+  // Encode once: the full fast path reuses these bytes, and the truncate path
+  // slices them instead of re-encoding the host string per length check.
+  const safeBytes = Buffer.from(safe, "utf8");
+  const fullBytes = Buffer.concat([
+    Buffer.from(OVERLAY_OPENING_TEXT, "utf8"),
+    safeBytes,
+    Buffer.from(OVERLAY_CLOSING_TEXT, "utf8"),
+  ]);
+  if (fullBytes.length <= maxBytes) {
+    return overlayFromEncoded(fullBytes.toString("utf8"), fullBytes);
+  }
+  const truncated = truncateHostOverlayBytes(safeBytes, maxBytes);
+  if (!truncated) return null;
+  return overlayFromEncoded(truncated.toString("utf8"), truncated);
 }
 
 function toolId(block: ProjectionBlock): string | null {
