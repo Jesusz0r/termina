@@ -65,7 +65,7 @@ import {
 import { AppPreferencesStore } from "./preferences.js";
 import { SubagentHost } from "./subagents.js";
 import { anchorClaimPath, isSubagentManagedFile } from "../agent-core/subagents.js";
-import { listSessionJsonl, mergeSessionFiles, searchSessionFiles } from "./session-search.js";
+import { listSessionJsonl, mergeSessionFiles } from "./session-search.js";
 import { listProjectSnapshot, searchProjectFiles } from "./quick-open.js";
 import { appendPendingImages, MAX_PENDING_IMAGES, pendingImageState } from "../agent-core/host.js";
 import {
@@ -3818,11 +3818,13 @@ class PiEditorApp {
   }
 
   private searchSessionsSeq = 0;
+  /** Aborts the in-flight worker search when a newer query arrives. */
+  private searchAbort: AbortController | null = null;
 
   /**
    * Search past session files for the active project (core bundles plus
-   * read-only Pi history left in ~/.pi). Streams lines asynchronously so
-   * the main process stays responsive. Bounded to the 50 newest sessions
+   * read-only Pi history left in ~/.pi). The walk runs in the session worker
+   * so the main process stays responsive. Bounded to the 50 newest sessions
    * and 50 total hits. History search never spawns an agent.
    */
   private async searchSessions(query: string): Promise<SessionHit[]> {
@@ -3844,15 +3846,28 @@ class PiEditorApp {
         segments: entry.segments,
       })),
     ]);
-    const hits = await searchSessionFiles({
-      query,
-      files,
-      projectCwd,
-      canonicalize: (absPath) => this.canonicalPath(absPath),
-      isProjectFile: (relPath, root) => this.isProjectFile(relPath, root),
-      shouldStop: () => seq !== this.searchSessionsSeq || this.disposed,
-    });
-    return seq === this.searchSessionsSeq ? hits : [];
+    const stale = (): boolean => seq !== this.searchSessionsSeq || this.disposed;
+    this.searchAbort?.abort();
+    const controller = new AbortController();
+    this.searchAbort = controller;
+    try {
+      const result = await this.sessionFork.searchSessions({ query, files, projectCwd }, { signal: controller.signal });
+      if (stale()) return [];
+      if (!result.ok) {
+        console.warn(`[main] session search failed: ${result.error}`);
+        return [];
+      }
+      return result.hits;
+    } catch (err) {
+      // AbortError on newer queries or teardown; worker failures otherwise.
+      // Search is best-effort: never reject into the IPC handler.
+      if (!stale() && (!(err instanceof Error) || err.name !== "AbortError")) {
+        console.warn(`[main] session search failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return [];
+    } finally {
+      if (this.searchAbort === controller) this.searchAbort = null;
+    }
   }
 
   /**
@@ -3871,22 +3886,6 @@ class PiEditorApp {
       shouldStop: () => this.disposed || seq !== this.fileSearchSeq,
     });
     return truncated ? { entries, truncated: true } : { entries };
-  }
-
-  private async isProjectFile(relPath: string, projectCwd: string): Promise<boolean> {
-    if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return false;
-    const abs = join(projectCwd, relPath);
-    // searchSessions canonicalizes projectCwd once. Canonicalize only the
-    // candidate so symlink escapes are rejected without a synchronous stat or
-    // a second realpath of the trusted project root.
-    const canonicalAbs = await this.canonicalPath(abs);
-    const checkedRel = relative(projectCwd, canonicalAbs);
-    if (!checkedRel || checkedRel.startsWith("..") || isAbsolute(checkedRel)) return false;
-    try {
-      return (await stat(canonicalAbs)).isFile();
-    } catch {
-      return false;
-    }
   }
 
   // ------------------------------------------------------------- dispatch --

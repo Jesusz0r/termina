@@ -10,12 +10,17 @@
  * client (and nested Worker) inside this thread.
  */
 import { parentPort } from "node:worker_threads";
-import { lstatSync, realpathSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { lstatSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import {
   inspectEmptySessionBundle,
   writeForkedSession,
 } from "../agent-core/session.js";
+import {
+  isProjectFileInRoot,
+  searchSessionFiles,
+  type SessionFileEntry,
+} from "./session-search.js";
 import {
   boundPromotionRemoveTree,
   disposeWorldlineGitCore,
@@ -24,6 +29,7 @@ import type {
   CoreSessionForkRequest,
   CoreSessionDiscardRequest,
   SessionForkReply,
+  SessionSearchRequest,
   SessionWorkerRequest,
 } from "./session-fork.js";
 
@@ -32,6 +38,81 @@ function post(msg: SessionForkReply): void {
 }
 
 const activeCoreForks = new Map<string, AbortController>();
+/** Live session searches by request id (read-only; run outside the fork queue). */
+const activeSearches = new Map<string, AbortController>();
+
+/**
+ * Sync mirror of the main-process canonical path (total: resolves existing
+ * prefixes, never throws). The admission policy itself stays single-owner in
+ * session-search.ts (`isProjectFileInRoot`).
+ */
+function workerCanonicalize(absPath: string): string {
+  let tail = "";
+  let cur = absPath;
+  for (;;) {
+    try {
+      const real = realpathSync(cur);
+      return tail ? join(real, tail) : real;
+    } catch {
+      const parent = dirname(cur);
+      if (parent === cur) return absPath;
+      tail = tail ? join(basename(cur), tail) : basename(cur);
+      cur = parent;
+    }
+  }
+}
+
+function workerIsProjectFile(relPath: string, projectCwd: string): Promise<boolean> {
+  return isProjectFileInRoot(relPath, projectCwd, workerCanonicalize, (abs) => {
+    try {
+      return statSync(abs).isFile();
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** Search past session files. Read-only, so searches run concurrently. */
+async function searchSessions(msg: SessionSearchRequest): Promise<void> {
+  const controller = new AbortController();
+  activeSearches.set(msg.requestId, controller);
+  try {
+    const files: SessionFileEntry[] = Array.isArray(msg.files)
+      ? msg.files.filter((f): f is SessionFileEntry =>
+        !!f && typeof f.path === "string" && typeof f.name === "string" && typeof f.mtimeMs === "number")
+      : [];
+    const hits = await searchSessionFiles({
+      query: typeof msg.query === "string" ? msg.query : "",
+      files,
+      projectCwd: typeof msg.projectCwd === "string" ? msg.projectCwd : "",
+      canonicalize: (absPath) => workerCanonicalize(absPath),
+      isProjectFile: (relPath, root) => workerIsProjectFile(relPath, root),
+      shouldStop: () => controller.signal.aborted,
+    });
+    if (controller.signal.aborted) {
+      post({
+        op: "search-sessions-result",
+        requestId: msg.requestId,
+        ok: false,
+        error: { code: "cancelled", message: "session search cancelled" },
+      });
+      return;
+    }
+    post({ op: "search-sessions-result", requestId: msg.requestId, ok: true, hits });
+  } catch (err) {
+    post({
+      op: "search-sessions-result",
+      requestId: msg.requestId,
+      ok: false,
+      error: {
+        code: controller.signal.aborted ? "cancelled" : "failed",
+        message: err instanceof Error ? err.message : String(err),
+      },
+    });
+  } finally {
+    activeSearches.delete(msg.requestId);
+  }
+}
 
 /**
  * Reclaim an empty core-session bundle only after the canonical session owner
@@ -169,6 +250,7 @@ parentPort?.on("message", (msg: SessionWorkerRequest) => {
   }
   if (msg.op === "cancel") {
     activeCoreForks.get(msg.requestId)?.abort();
+    activeSearches.get(msg.requestId)?.abort();
     return;
   }
   if (msg.op === "discard-core-empty") {
@@ -177,5 +259,10 @@ parentPort?.on("message", (msg: SessionWorkerRequest) => {
   }
   if (msg.op === "fork-core") {
     enqueueWorkerOp(() => forkCoreSession(msg));
+    return;
+  }
+  if (msg.op === "search-sessions") {
+    // Read-only: runs concurrently with forks instead of queueing behind them.
+    void searchSessions(msg);
   }
 });

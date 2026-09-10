@@ -7,7 +7,7 @@
  */
 import { createReadStream } from "node:fs";
 import { readdir, realpath, stat } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 // .ts extensions so the harness can load this file with strip-types.
 import { cleanPlanPathToken, looksLikePath } from "./plan-board.ts";
@@ -120,23 +120,63 @@ function formatSessionHitSnippet(role: string, text: string, matchIdx: number, m
   return prefix + snippet;
 }
 
+/** Bounded concurrency for hit-path existence checks (main or worker). */
+const HIT_PATH_CONCURRENCY = 5;
+
+export type CanonicalizeFn = (absPath: string) => string | Promise<string>;
+export type ExistsFileFn = (absPath: string) => boolean | Promise<boolean>;
+
+/**
+ * Project-file admission: reject escapes, canonicalize the candidate, reject
+ * symlink escapes, require a file. Single owner for the main-process and the
+ * session-worker checks.
+ */
+export async function isProjectFileInRoot(
+  relPath: string,
+  projectCwd: string,
+  canonicalize: CanonicalizeFn,
+  isFile: ExistsFileFn,
+): Promise<boolean> {
+  if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return false;
+  const abs = join(projectCwd, relPath);
+  // Callers canonicalize projectCwd once. Canonicalize only the candidate so
+  // symlink escapes are rejected without a second realpath of the trusted root.
+  const canonicalAbs = await canonicalize(abs);
+  const checkedRel = relative(projectCwd, canonicalAbs);
+  if (!checkedRel || checkedRel.startsWith("..") || isAbsolute(checkedRel)) return false;
+  try {
+    return await isFile(canonicalAbs);
+  } catch {
+    return false;
+  }
+}
+
+/** Bounded parallel map preserving input order in the output. */
+async function mapBounded<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const lanes = Math.min(Math.max(1, limit), items.length);
+  await Promise.all(Array.from({ length: lanes }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      out[index] = await fn(items[index]!, index);
+    }
+  }));
+  return out;
+}
+
 async function resolveSessionHitPath(
   parsed: SessionMessageParse,
   projectCwd: string,
   canonicalize: CanonicalizePath,
   isProjectFile: (relPath: string, projectCwd: string) => boolean | Promise<boolean>,
 ): Promise<string | null> {
-  for (const p of parsed.paths.slice(0, 5)) {
-    const clean = await cleanPlanPathToken(p, projectCwd, canonicalize);
-    if (await isProjectFile(clean, projectCwd)) return clean;
-  }
+  // Candidates in priority order: tool arguments, backticks, ordinary tokens.
+  const candidates: string[] = [];
+  for (const p of parsed.paths.slice(0, 5)) candidates.push(p);
   const backticks = parsed.text.match(/`([^`]+)`/g);
   if (backticks) {
-    for (const raw of backticks.slice(0, 5)) {
-      const token = raw.slice(1, -1).trim();
-      const clean = await cleanPlanPathToken(token, projectCwd, canonicalize);
-      if (await isProjectFile(clean, projectCwd)) return clean;
-    }
+    for (const raw of backticks.slice(0, 5)) candidates.push(raw.slice(1, -1).trim());
   }
   // Resolve the first ordinary path-like token too. Bound the scan because a
   // session message can contain a large pasted document.
@@ -145,8 +185,21 @@ async function resolveSessionHitPath(
     if (scanned++ >= 64) break;
     const token = raw.replace(/^[\s'"([{<]+/, "").replace(/[\s'"\])}>.,;:!?]+$/, "");
     if (!token || (!token.includes("/") && !/\.[A-Za-z0-9_-]{1,12}$/.test(token))) continue;
+    candidates.push(token);
+  }
+  const seen = new Set<string>();
+  const unique = candidates.filter((token) => {
+    if (!token || seen.has(token)) return false;
+    seen.add(token);
+    return true;
+  });
+  const resolved = await mapBounded(unique, HIT_PATH_CONCURRENCY, async (token) => {
     const clean = await cleanPlanPathToken(token, projectCwd, canonicalize);
     if (await isProjectFile(clean, projectCwd)) return clean;
+    return null;
+  });
+  for (const hit of resolved) {
+    if (hit) return hit;
   }
   return null;
 }

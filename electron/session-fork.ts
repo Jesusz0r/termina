@@ -11,6 +11,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SessionRetentionLock } from "../shared/session-retention-lock.js";
+import type { SessionHit } from "../shared/types.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 /** Bound retained operations so a slow worker cannot retain an unbounded chain of closures. */
@@ -30,6 +31,24 @@ export interface CoreSessionDiscardOpts {
   sessionFile: string;
 }
 
+/** One session-search file entry (mirrors SessionFileEntry in session-search.ts). */
+export interface SessionSearchFile {
+  path: string;
+  name: string;
+  mtimeMs: number;
+  segments?: string[];
+}
+
+export interface SessionSearchOpts {
+  query: string;
+  files: SessionSearchFile[];
+  projectCwd: string;
+}
+
+export type SessionSearchResult =
+  | { ok: true; hits: SessionHit[] }
+  | { ok: false; error: string };
+
 export type CoreSessionForkResult =
   | { ok: true; sessionFile: string; kept: number }
   | { ok: false; sessionFile: string; commit: "uncertain"; error: string };
@@ -48,6 +67,11 @@ export interface CoreSessionDiscardRequest extends CoreSessionDiscardOpts {
   requestId: string;
 }
 
+export interface SessionSearchRequest extends SessionSearchOpts {
+  op: "search-sessions";
+  requestId: string;
+}
+
 export interface SessionForkCancelRequest {
   op: "cancel";
   requestId: string;
@@ -57,7 +81,7 @@ export interface SessionWorkerShutdownRequest {
   op: "shutdown";
 }
 
-export type SessionWorkerRequest = CoreSessionForkRequest | CoreSessionDiscardRequest | SessionForkCancelRequest | SessionWorkerShutdownRequest;
+export type SessionWorkerRequest = CoreSessionForkRequest | CoreSessionDiscardRequest | SessionSearchRequest | SessionForkCancelRequest | SessionWorkerShutdownRequest;
 
 export type SessionForkFailure = {
   requestId: string;
@@ -69,14 +93,16 @@ export type SessionForkReply =
   | { op: "fork-core-result"; requestId: string; ok: true; sessionFile: string; kept: number }
   | (SessionForkFailure & { op: "fork-core-result" })
   | { op: "discard-core-empty-result"; requestId: string; ok: true; removed: boolean }
-  | (SessionForkFailure & { op: "discard-core-empty-result" });
+  | (SessionForkFailure & { op: "discard-core-empty-result" })
+  | { op: "search-sessions-result"; requestId: string; ok: true; hits: SessionHit[] }
+  | (SessionForkFailure & { op: "search-sessions-result" });
 
 export type SessionForkCallOptions = {
   signal?: AbortSignal;
 };
 
 type PendingRequest = {
-  kind: "fork-core" | "discard-core-empty";
+  kind: "fork-core" | "discard-core-empty" | "search-sessions";
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   removeAbortListener?: () => void;
@@ -110,6 +136,18 @@ export class SessionForkClient {
   /** Reclaim an empty core-session bundle through native bound cleanup. */
   discardEmptyCoreSession(sessionFile: string): Promise<CoreSessionDiscardResult> {
     return this.enqueue(() => this.dispatchDiscardCore({ sessionFile }));
+  }
+
+  /**
+   * Search past session files off the main thread. Bypasses the client queue
+   * so keystroke searches stay responsive behind long forks; the worker runs
+   * searches concurrently (read-only) with its own abort map. Stale results
+   * are dropped by the caller's seq fence.
+   */
+  searchSessions(opts: SessionSearchOpts, callOptions?: SessionForkCallOptions): Promise<SessionSearchResult> {
+    if (this.disposed) return Promise.reject(new Error("session worker disposed"));
+    if (callOptions?.signal?.aborted) return Promise.reject(abortError());
+    return this.dispatchSearch(opts, callOptions?.signal);
   }
 
   dispose(): Promise<void> {
@@ -191,6 +229,38 @@ export class SessionForkClient {
     });
   }
 
+  private dispatchSearch(payload: SessionSearchOpts, signal?: AbortSignal): Promise<SessionSearchResult> {
+    return new Promise((resolve, reject) => {
+      const requestId = `search-sessions-${++this.seq}`;
+      const worker = this.ensure();
+      const cancel = (): void => {
+        if (!this.pending.has(requestId) || this.worker !== worker) return;
+        const msg: SessionForkCancelRequest = { op: "cancel", requestId };
+        try {
+          worker.postMessage(msg);
+        } catch {
+          // A worker failure/exit rejects the same pending request.
+        }
+      };
+      const pending: PendingRequest = {
+        kind: "search-sessions",
+        resolve: (value) => resolve(value as SessionSearchResult),
+        reject,
+        ...(signal ? { removeAbortListener: () => signal.removeEventListener("abort", cancel) } : {}),
+      };
+      this.pending.set(requestId, pending);
+      if (signal) signal.addEventListener("abort", cancel, { once: true });
+      try {
+        const msg: SessionSearchRequest = { ...payload, op: "search-sessions", requestId };
+        worker.postMessage(msg);
+        if (signal?.aborted) cancel();
+      } catch (err) {
+        this.takePending(requestId);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
   private ensure(): Worker {
     if (this.disposed) throw new Error("session worker disposed");
     if (this.worker) return this.worker;
@@ -202,7 +272,8 @@ export class SessionForkClient {
       if (!pending) return;
       const matches =
         (pending.kind === "fork-core" && msg.op === "fork-core-result") ||
-        (pending.kind === "discard-core-empty" && msg.op === "discard-core-empty-result");
+        (pending.kind === "discard-core-empty" && msg.op === "discard-core-empty-result") ||
+        (pending.kind === "search-sessions" && msg.op === "search-sessions-result");
       if (!matches) return;
       this.takePending(msg.requestId);
       if (msg.ok) pending.resolve(msg);
@@ -259,6 +330,8 @@ export class SessionForkClient {
         } satisfies CoreSessionForkResult);
       } else if (pending.kind === "discard-core-empty") {
         pending.resolve({ ok: false, error: `${error.message}; cleanup was not proven and was retained` });
+      } else if (pending.kind === "search-sessions") {
+        pending.reject(new Error(`${error.message}; session search was not completed`));
       } else {
         pending.reject(error);
       }
