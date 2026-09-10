@@ -74,15 +74,17 @@ function validTask(overrides: Record<string, unknown> = {}): Record<string, unkn
   };
 }
 
-function setup(opts: { wallMs?: number; maxAttempts?: number; backoffMs?: number[]; dispatch?: { keys: Set<string>; root: string } } = {}) {
+function setup(opts: { wallMs?: number; maxAttempts?: number; backoffMs?: number[]; launchFailures?: number; dispatch?: { keys: Set<string>; root: string } } = {}) {
   const dir = tmp();
-  const { dispatch, ...hostOpts } = opts;
+  const { dispatch, launchFailures = 0, ...hostOpts } = opts;
   const notes: Array<{ terminalId: string; note: string }> = [];
   const watched: string[] = [];
   const unwatched: string[] = [];
   const procs: FakeProc[] = [];
   const launches: Array<{ cmd: string; args: string[]; env: Record<string, string | undefined> }> = [];
+  let launchAttempts = 0;
   const launch: SubagentLauncher = (cmd, args, launchOpts) => {
+    if (++launchAttempts <= launchFailures) throw new Error("launch temporarily unavailable");
     const fake = makeFake();
     procs.push(fake);
     launches.push({ cmd, args, env: launchOpts.cwd ? { ...launchOpts.env, PWD: launchOpts.cwd } : launchOpts.env });
@@ -114,7 +116,7 @@ function setup(opts: { wallMs?: number; maxAttempts?: number; backoffMs?: number
   };
   const resultFile = join(dir, "subagent-term-7-bg-1.result.json");
   const readResult = () => JSON.parse(readFileSync(resultFile, "utf8"));
-  return { dir, host, notes, watched, unwatched, procs, launches, writeTask, resultFile, readResult };
+  return { dir, host, notes, watched, unwatched, procs, launches, writeTask, resultFile, readResult, get launchAttempts() { return launchAttempts; } };
 }
 
 describe("SubagentHost", () => {
@@ -184,35 +186,57 @@ describe("SubagentHost", () => {
     expect(s.procs.length).toBe(1);
   });
 
-  it("takes the last framed line and reports child failures without retry", async () => {
+  it.each([0, 1])("takes the last framed failure without retry (exit %s)", async (code) => {
     const s = setup();
     s.writeTask();
     await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
     s.procs[0]!.out(`SUBAGENT_RESULT {"ok":true,"result":"decoy"}\nSUBAGENT_RESULT {"ok":false,"error":"model blew up"}\n`);
-    s.procs[0]!.exit(0);
+    s.host.noteChildEvent("sub-term-7-bg-1", "agent_start");
+    s.procs[0]!.exit(code);
     await until(() => existsSync(s.resultFile));
     expect(s.readResult().outcome).toBe("failed");
     expect(s.procs.length).toBe(1);
   });
 
-  it("retries crashes with backoff then reports failure", async () => {
+  it.each([false, true])("does not replay a signal crash when boot observed=%s", async (booted) => {
     const s = setup();
     s.writeTask();
     await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    if (booted) s.host.noteChildEvent("sub-term-7-bg-1", "agent_start");
+    s.procs[0]!.err("boom\n");
+    s.procs[0]!.exit(null, "SIGSEGV");
+    await until(() => existsSync(s.resultFile));
+    expect(s.readResult().outcome).toBe("failed");
+    expect(s.notes[0]!.note).toContain("not restarted");
     expect(s.procs.length).toBe(1);
-    // Each crashed attempt must boot (agent_start) then exit before the next launches.
-    for (let i = 0; i < 3; i++) {
-      s.host.noteChildEvent("sub-term-7-bg-1", "agent_start");
-      s.procs[i]!.err("boom\n");
-      s.procs[i]!.exit(1);
-      if (i < 2) await until(() => s.procs.length === i + 2, 5000);
+    expect(s.watched).toEqual(["sub-term-7-bg-1"]);
+  });
+
+  it.each([2, 3])("retries only pre-child launch failures, bounded to three attempts (%s failures)", async (launchFailures) => {
+    const s = setup({ launchFailures });
+    s.writeTask();
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    expect(s.launchAttempts).toBe(3);
+    if (launchFailures === 2) {
+      expect(s.procs).toHaveLength(1);
+      s.procs[0]!.out('SUBAGENT_RESULT {"ok":true,"result":"done"}\n');
+      s.procs[0]!.exit(0);
     }
     await until(() => existsSync(s.resultFile));
-    const body = s.readResult();
-    expect(body.outcome).toBe("failed");
-    expect(s.procs.length).toBe(3);
-    // Retries reuse the same stream: watched once, released once.
-    expect(s.watched).toEqual(["sub-term-7-bg-1"]);
+    expect(s.readResult().outcome).toBe(launchFailures === 2 ? "settled" : "failed");
+  });
+
+  it("escalates wall timeout when SIGTERM is ignored, without releasing or replaying a live child", async () => {
+    const s = setup({ wallMs: 20 });
+    s.writeTask();
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    await until(() => s.procs[0]!.kills.includes("group:SIGKILL"), 7000);
+    expect(s.host.activeCount()).toBe(1);
+    expect(existsSync(s.resultFile)).toBe(false);
+    s.procs[0]!.exit(null, "SIGKILL");
+    await until(() => existsSync(s.resultFile));
+    expect(s.readResult().outcome).toBe("killed");
+    expect(s.procs).toHaveLength(1);
   });
 
   it("kills terminate without retry", async () => {
@@ -231,7 +255,7 @@ describe("SubagentHost", () => {
   });
 
   it("times out hanging children", async () => {
-    const s = setup({ wallMs: 40, maxAttempts: 1 });
+    const s = setup({ wallMs: 40 });
     s.writeTask();
     await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
     // Wall timer fires; the fake dies only when told, like a real SIGTERM.
@@ -428,7 +452,8 @@ describe("SubagentHost", () => {
     expect(s.unwatched).toEqual(["sub-term-7-bg-1"]);
   });
 
-  it("kills one owner's runs and keeps the other's", async () => {    const s = setup();
+  it("kills one owner's runs and keeps the other's", async () => {
+    const s = setup();
     for (const [term, run] of [["term-7", "bg-1"], ["term-7", "bg-2"], ["term-9", "bg-1"]] as const) {
       const name = `subagent-${term}-${run}.task.json`;
       writeFileSync(join(s.dir, name), JSON.stringify(validTask({ runId: run, parentTerminalId: term })), { mode: 0o600 });
@@ -440,7 +465,7 @@ describe("SubagentHost", () => {
     expect(s.host.activeCount()).toBe(3);
     expect(s.procs.filter((p) => p.kills.includes("group:SIGTERM")).length).toBe(2);
     // Exit both cleared children; only the survivor keeps running.
-    for (const proc of s.procs) proc.exit(null, "SIGTERM");
+    for (const proc of s.procs.filter((child) => child.kills.includes("group:SIGTERM"))) proc.exit(null, "SIGTERM");
     await until(() => existsSync(join(s.dir, "subagent-term-7-bg-1.result.json")));
     await until(() => existsSync(join(s.dir, "subagent-term-7-bg-2.result.json")));
     await until(() => s.host.activeCount() === 1);
@@ -459,18 +484,15 @@ describe("SubagentHost", () => {
     expect(s.procs.length).toBe(1);
   });
 
-  it("retries a child that crashes after booting", async () => {
+  it("does not replay a nonzero exit after booting", async () => {
     const s = setup();
     s.writeTask();
     await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
     s.host.noteChildEvent("sub-term-7-bg-1", "agent_start");
     s.procs[0]!.exit(1);
-    await until(() => s.procs.length === 2, 5000);
-    // Second attempt never boots: settles failed without a third launch.
-    s.procs[1]!.exit(1);
     await until(() => existsSync(s.resultFile));
     expect(s.readResult().outcome).toBe("failed");
-    expect(s.procs.length).toBe(2);
+    expect(s.procs.length).toBe(1);
   });
 
   it("quotes the full task in the mailbox failure note", async () => {

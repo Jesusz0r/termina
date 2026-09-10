@@ -113,6 +113,7 @@ export const SUBAGENT_TOOL_DEFS: Array<Record<string, unknown>> = [
       "Spawn one background subagent for an independent subtask of the current task. The brief must be complete (goal, file paths, decisions, done-criteria): children start context-fresh. Returns a run id immediately; the final result arrives as a tool result when the run settles. Siblings never share a subtask; pass paths to reserve them. Pass resume with a settled sibling run id to continue it: the child replays that run's session and treats the brief as a follow-up.",
     input_schema: {
       type: "object",
+      additionalProperties: false,
       properties: {
         task: { type: "string" },
         model: { type: "string" },
@@ -120,6 +121,7 @@ export const SUBAGENT_TOOL_DEFS: Array<Record<string, unknown>> = [
         resume: { type: "string" },
         budget: {
           type: "object",
+          additionalProperties: false,
           properties: { maxTurns: { type: "number" } },
         },
         paths: { type: "array", items: { type: "string" } },
@@ -133,6 +135,7 @@ export const SUBAGENT_TOOL_DEFS: Array<Record<string, unknown>> = [
       "Push text into a running subagent (answers, redirects, cancellation reason). Unknown or finished run ids are errors, not silent drops.",
     input_schema: {
       type: "object",
+      additionalProperties: false,
       properties: {
         run_id: { type: "string" },
         text: { type: "string" },

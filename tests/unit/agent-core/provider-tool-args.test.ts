@@ -294,6 +294,34 @@ describe("Agent Core Provider Tool Arguments Contract", () => {
       ).toBeNull();
     });
 
+    it("rejects duplicate call IDs before execution or persistence", () => {
+      expect(core.providerToolAdmissionError([
+        { type: "tool_use", id: "same", name: "bash", input: { command: "first" } },
+        { type: "tool_use", id: "same", name: "bash", input: { command: "second" } },
+      ])).toMatch(/duplicate tool call identity/);
+    });
+
+    it("keeps recovery model-visible without ending an unresolved server-tool turn", () => {
+      const results = [
+        { type: "tool_result", tool_use_id: "local-1", content: "original output" },
+        { type: "tool_result", tool_use_id: "local-2", content: "second output", is_error: true },
+      ];
+      const server = { type: "server_tool_use", id: "search-1", name: "web_search", input: {} };
+      const mixed = core.toolResultsWithRecovery(results, [server], "change approach");
+      expect(mixed.map((block) => block.type)).toEqual(["tool_result", "tool_result"]);
+      expect(mixed[0]?.content).toEqual([
+        { type: "text", text: "original output" },
+        { type: "text", text: "[Harness recovery guidance]\nchange approach" },
+      ]);
+      expect(results[0]?.content).toBe("original output");
+      expect(mixed[1]).toEqual(results[1]);
+      const finished = core.toolResultsWithRecovery(results, [server,
+        { type: "web_search_tool_result", tool_use_id: "search-1", content: [] },
+      ], "change approach");
+      expect(finished.at(-1)).toEqual({ type: "text", text: "change approach" });
+      expect(core.toolResultsWithRecovery(results, [], "change approach")).toEqual(finished);
+    });
+
     it("flags output-limit stop reasons as truncated", () => {
       expect(compat.isTruncatedStopReason("length")).toBe(true);
       expect(compat.isTruncatedStopReason("max_tokens")).toBe(true);

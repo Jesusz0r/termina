@@ -72,9 +72,11 @@ estimate reclaimed space. Provider usage is authoritative after a request.
 The fallback context window is 1,000,000 tokens for Anthropic and Google,
 500,000 for xAI, and 1,050,000 for other providers. Anthropic Haiku uses
 200,000. A live model catalog can provide another value. There is no
-1,000,000-token run cap and no turn cap — the run fuses on
-`totalTokens() >= usableTokens() * HIGH_WATER`,
-not on a fixed iteration count.
+1,000,000-token run cap. Context reclamation is driven by the window's
+high-water mark, not a fixed token total. Separately, a logical run stops
+requesting continuation at 200 model turns or before a batch would exceed
+1,000 client tool calls. These safety fuses survive compaction; a natural
+final answer at the turn limit is still accepted.
 
 ## P2 — Separate reclamation from summarization
 
@@ -210,6 +212,45 @@ calls run concurrently behind a small bound; dependent calls stay sequential.
 No speculative prefetch — reads are on demand. The loop language contributes
 milliseconds to a seconds-scale path; Rust buys packaging, startup, and
 footprint, not these numbers.
+
+### Tool-call safety and progress
+
+- `agent-core/tool-dispatch.ts` validates built-in arguments against their
+  published schemas before sidecar formatting, approval, or execution. Missing
+  write/edit bodies are errors, never implicit empty writes. Domain-specific
+  validation stays with each tool's owner; MCP schemas stay server-owned.
+- Only consecutive `read_file`, `grep`, `glob`, and `fetch` calls run concurrently
+  (at most four). Writes, bash, subagents, and unknown/MCP tools are ordering
+  barriers. Identical reads share an execution only inside an uninterrupted
+  read segment of one response. Adjacent duplicate actions are explicitly
+  refused, not silently run twice. No result cache crosses a mutation or turn.
+- `agent-core/stall.ts` tracks exact repeats, normalized failures, and cycles up
+  to eight turns using a bounded 24-turn hash window. Three repetitions produce
+  model-visible recovery guidance; three more repetitions of that same loop
+  stop the run. Changed observations allow recovery; re-reading unchanged text
+  and oscillating edits do not count as progress. The run fuses above bound
+  longer or changing loops that these heuristics cannot recognize.
+- Every admitted client call gets one paired result, including calls refused
+  for duplication, cancellation, or run limits. Duplicate call IDs fail
+  admission. Recovery is appended after results, or nested inside a result when
+  a server tool is unresolved, preserving the provider's continuation rules.
+- A spawned subagent is never automatically restarted after failure, crash, or
+  timeout: it may already have changed files. Only synchronous pre-child launch
+  failures retry (three attempts total). Explicit resume retains the prior
+  session. Cancellation and wall timeout both escalate from SIGTERM to SIGKILL
+  after five seconds; claims remain held until the child has closed.
+
+Regression coverage: `stall-tracker.test.ts`, `tool-dispatch.test.ts`,
+`main-tool-loop.test.ts`, `provider-tool-args.test.ts`, and
+`tests/unit/electron/subagents-host.test.ts`. Main-loop tests use real local
+execution with mocked provider streams and isolated projects/HOME/session roots.
+These are execution guarantees, not a claim that a model will never propose
+redundant work or that arbitrary remote operations are exactly-once.
+
+Provider references reviewed for result pairing and execution order:
+[Claude tool-call lifecycle](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls),
+[parallel tool use](https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use),
+and [OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling).
 
 ## Targets
 

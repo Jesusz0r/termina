@@ -140,19 +140,13 @@ import {
   type CacheRequestDiagnostics,
 } from "./cache.ts";
 import {
-  emptyFailureLoopTracker,
-  emptyStallTracker,
+  emptyToolLoopTracker,
   GREP_NO_MATCHES_PREFIX,
   isGrepNoMatches,
-  STALL_FAILURE_TURNS,
-  STALL_TURNS,
-  stallFailureKeysForTurn,
-  stallTurnFingerprint,
-  trackFailureLoopTurn,
-  trackStallTurn,
-  type FailureLoopTracker,
-  type StallTracker,
+  toolRunLimitReason,
+  trackToolLoopTurn,
 } from "./stall.ts";
+import { toolExecutionWaves, toolInputError } from "./tool-dispatch.ts";
 import {
   HIGH_WATER,
   LOW_WATER,
@@ -333,7 +327,6 @@ const LINE_NUM_WIDTH = 6;
 const EDIT_MISS_SHOW = 3;
 const EDIT_MISS_LINE_CHARS = 240;
 const READ_SCAN_MS = 2_000;
-const TOOL_CONCURRENCY = 4;
 const NOISE_FLOOR_TOKENS = 1_024;
 const USER_AGENTS_CAP = 8_192;
 const PROJECT_AGENTS_CAP = 24_576;
@@ -4150,13 +4143,16 @@ export function shellQuote(raw: string): string {
 }
 
 export function reproFor(use: ToolUse): string | undefined {
-  if (use.name === "bash") return `bash ${shellQuote(use.input.command ?? "")}`;
-  if (use.name === "read_file") return `read_file(${JSON.stringify(use.input.path ?? "")})`;
-  if (use.name === "edit") return `edit(${JSON.stringify(use.input.path ?? "")})`;
-  if (use.name === "grep") return `grep ${shellQuote(use.input.pattern ?? "")}`;
-  if (use.name === "glob") return `glob ${shellQuote(use.input.pattern ?? "")}`;
-  if (use.name === "web_search") return `web_search ${shellQuote(use.input.query ?? "")}`;
-  if (use.name === "fetch") return `fetch ${shellQuote(String(use.input.url ?? ""))}`;
+  // Error results also need reproduction metadata; malformed runtime values
+  // must not throw while we are trying to report their validation failure.
+  const text = (key: string): string => typeof use.input[key] === "string" ? use.input[key] as string : "";
+  if (use.name === "bash") return `bash ${shellQuote(text("command"))}`;
+  if (use.name === "read_file") return `read_file(${JSON.stringify(text("path"))})`;
+  if (use.name === "edit") return `edit(${JSON.stringify(text("path"))})`;
+  if (use.name === "grep") return `grep ${shellQuote(text("pattern"))}`;
+  if (use.name === "glob") return `glob ${shellQuote(text("pattern"))}`;
+  if (use.name === "web_search") return `web_search ${shellQuote(text("query"))}`;
+  if (use.name === "fetch") return `fetch ${shellQuote(text("url"))}`;
   return undefined;
 }
 
@@ -4795,6 +4791,8 @@ export async function withFileMutation<T>(key: string | null, fn: () => Promise<
 }
 
 async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolOutcome> {
+  if (interrupted) return done(use, "(interrupted by user; tool not executed)", true);
+  if (!clientTools.some((tool) => tool.name === use.name)) return done(use, `error: unknown tool ${use.name}`, true);
   if (use.name === "read_file") {
     const got = readProjectFile(canonicalCwd, use.input, allowPaths);
     return done(use, got);
@@ -4802,6 +4800,7 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
   if (use.name === "write_file") {
     return withFileMutation(fileMutationKey(canonicalCwd, use.input.path), async () => {
       if (!(await confirmProtectedMutation(use.input.path))) return done(use, "error: protected file edit denied", true);
+      if (interrupted) return done(use, "(interrupted by user; tool not executed)", true);
       const got = writeProjectFile(canonicalCwd, use.input.path, use.input.content ?? "");
       return done(use, got.content, got.isError);
     });
@@ -4809,6 +4808,7 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
   if (use.name === "edit") {
     return withFileMutation(fileMutationKey(canonicalCwd, use.input.path), async () => {
       if (!(await confirmProtectedMutation(use.input.path))) return done(use, "error: protected file edit denied", true);
+      if (interrupted) return done(use, "(interrupted by user; tool not executed)", true);
       const got = editProjectFile(
         canonicalCwd,
         use.input.path,
@@ -4837,6 +4837,7 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
   if (use.name === "bash") {
     const command = use.input.command ?? "";
     if (!(await confirmBash(command))) return done(use, "error: bash denied", true);
+    if (interrupted) return done(use, "(interrupted by user; tool not executed)", true);
     const got = await runBash(command, { cwd: canonicalCwd, shouldStop: () => interrupted });
     return done(use, got);
   }
@@ -4865,6 +4866,10 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
       },
     });
     if (!got.ok) return done(use, `error: ${got.error}`, true);
+    if (interrupted) {
+      subagentRegistry.settleRun(got.run.id, "interrupted before host handoff", "failed");
+      return done(use, "(interrupted by user; subagent not started)", true);
+    }
     // Hand the validated run to the host: task file first (it lands before
     // the queued sidecar record), then announce. A failed handoff fails the
     // run exactly once so the slot and claims release. The child-facing
@@ -4927,6 +4932,7 @@ const TOOLS: Array<Record<string, unknown>> = [
       "Read a text file relative to the working directory. Each line is prefixed with its 1-based line number and a pipe; do not include those prefixes in edit old_text. Caps near 40 KB of file bytes. Optional start_line and end_line (inclusive). Pass offset (bytes) only to continue a truncated read; do not combine with start_line. A directory path lists that directory.",
     input_schema: {
       type: "object",
+      additionalProperties: false,
       properties: {
         path: { type: "string" },
         offset: { type: "number" },
@@ -4941,6 +4947,7 @@ const TOOLS: Array<Record<string, unknown>> = [
     description: "Create or overwrite a file relative to the working directory. Parent directories are created. Paths stay inside the project.",
     input_schema: {
       type: "object",
+      additionalProperties: false,
       properties: { path: { type: "string" }, content: { type: "string" } },
       required: ["path", "content"],
     },
@@ -4951,6 +4958,7 @@ const TOOLS: Array<Record<string, unknown>> = [
       "Replace old_text with new_text in a file. Read the file first and copy old_text exactly as it appears AFTER the line-number prefix (read shows N|content; never include the N| prefix, preserve tabs/spaces). Default: one unique occurrence (fails if missing or repeated). Set replace_all to replace every occurrence. Prefer this over write_file for existing files. Re-read before retrying a miss; the file may have changed. Miss errors include occurrence count and nearby lines.",
     input_schema: {
       type: "object",
+      additionalProperties: false,
       properties: {
         path: { type: "string" },
         old_text: { type: "string" },
@@ -4966,6 +4974,7 @@ const TOOLS: Array<Record<string, unknown>> = [
       "Search file contents with a regular expression. Uses ripgrep when available. Prefer this over bash rg or grep. Groups hits by file, shows sparse files first, and caps per file. Skip ignored directories. Narrow with path or glob when a file has more hits. An empty result is exactly (no matches); broaden the pattern or try a different path/glob, or list files with glob.",
     input_schema: {
       type: "object",
+      additionalProperties: false,
       properties: {
         pattern: { type: "string" },
         path: { type: "string" },
@@ -4979,6 +4988,7 @@ const TOOLS: Array<Record<string, unknown>> = [
     description: "Find files relative to the working directory. Pattern supports * ** and ? only. An empty result is exactly (no matches); widen the pattern or check the path.",
     input_schema: {
       type: "object",
+      additionalProperties: false,
       properties: { pattern: { type: "string" } },
       required: ["pattern"],
     },
@@ -4987,12 +4997,12 @@ const TOOLS: Array<Record<string, unknown>> = [
     name: "bash",
     description:
       "Run one bash command in the working directory. 60 s timeout. Combined output caps near 20 KB and always ends with [exit N]. Use grep or glob for file search; do not call rg.",
-    input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+    input_schema: { type: "object", additionalProperties: false, properties: { command: { type: "string" } }, required: ["command"] },
   },
   {
     name: "fetch",
     description: "Fetch an https URL. Output caps near 20 KB. No file or data URLs.",
-    input_schema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
+    input_schema: { type: "object", additionalProperties: false, properties: { url: { type: "string" } }, required: ["url"] },
   },
 ];
 
@@ -5804,6 +5814,7 @@ type Block =
  * reject first; this backstop prevents malformed executable calls from being
  * made durable if a decoder regresses. */
 export function providerToolAdmissionError(blocks: readonly Record<string, unknown>[]): string | null {
+  const ids = new Set<string>();
   for (const block of blocks) {
     if (block.type !== "tool_use") continue;
     if (
@@ -5812,11 +5823,33 @@ export function providerToolAdmissionError(blocks: readonly Record<string, unkno
     ) {
       return "provider protocol error: tool call identity is missing";
     }
+    if (ids.has(block.id)) return "provider protocol error: duplicate tool call identity";
+    ids.add(block.id);
     if (!block.input || typeof block.input !== "object" || Array.isArray(block.input)) {
       return "provider protocol error: tool call arguments must be an object";
     }
   }
   return null;
+}
+
+/** Keep client results paired even when a server tool is still outstanding.
+ * Claude forbids sibling user text in that case; attach harness guidance as a
+ * nested text block without mutating the original tool outcome. */
+export function toolResultsWithRecovery(
+  results: readonly ContentBlock[],
+  response: readonly Record<string, unknown>[],
+  recovery: string,
+): ContentBlock[] {
+  const answered = new Set(response.filter((block) => block.type === "web_search_tool_result").map((block) => block.tool_use_id));
+  const pendingServer = response.some((block) => block.type === "server_tool_use" && !answered.has(block.id));
+  if (!pendingServer) return [...results, { type: "text", text: recovery }];
+  return results.map((block, index) => index === 0 ? {
+    ...block,
+    content: [
+      ...(Array.isArray(block.content) ? block.content : [{ type: "text", text: String(block.content ?? "") }]),
+      { type: "text", text: `[Harness recovery guidance]\n${recovery}` },
+    ],
+  } : block);
 }
 
 type Usage = ProviderUsage;
@@ -7025,9 +7058,6 @@ async function callModel(
 
 let previousCacheAttempt: CacheAttemptSnapshot | null = null;
 
-let stallTracker: StallTracker = emptyStallTracker();
-let failureLoopTracker: FailureLoopTracker = emptyFailureLoopTracker();
-
 let cacheFlipTally: CacheFlipTally = emptyCacheFlipTally();
 
 function resetUsageContinuity(): void {
@@ -7728,8 +7758,9 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   let pauseTurnContinuations = 0;
   let lastPlanText = "";
   let cacheCostCompactionAttempted = false;
-  stallTracker = emptyStallTracker();
-  failureLoopTracker = emptyFailureLoopTracker();
+  let toolLoopTracker = emptyToolLoopTracker();
+  let modelTurns = 0;
+  let requestedToolCalls = 0;
   codexTurnState = "";
   try {
     while (true) {
@@ -7824,7 +7855,15 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         }
       }
       const admissionError = providerToolAdmissionError(result.blocks);
-      if (admissionError) throw new Error(admissionError);
+      if (admissionError) {
+        await writeMainTrace({
+          status: "error", seqBefore, toolNames: [], usage: result.usage, waste: null,
+          sysHash: hashSystem(systemPrompt()), cache: result.cache, started: callStarted,
+          attempt: result.traceAttempt, providerError: admissionError,
+        });
+        throw new Error(admissionError);
+      }
+      modelTurns += 1;
       if (activeSubagent) activeSubagent.turns += 1;
       const sys = systemPrompt();
       if (!result.usage) resetUsageContinuity();
@@ -7878,6 +7917,25 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         );
         break;
       }
+      requestedToolCalls += uses.length;
+      const runLimit = !interrupted && (uses.length > 0 || result.stopReason === "pause_turn")
+        ? toolRunLimitReason(modelTurns, requestedToolCalls) : null;
+      if (runLimit) {
+        // No tools from an over-budget response execute, but every admitted
+        // call still receives a result so resume/replay cannot orphan it.
+        const skipped = uses.map((use) => done(use, `error: ${runLimit}; tool not executed`, true));
+        if (skipped.length) pushMessage("user", skipped.map((outcome) => ({ ...outcome.result, type: "tool_result", is_error: true })));
+        await writeMainTrace({
+          status: "tool-limit", seqBefore, toolNames: [...serverNames, ...uses.map((use) => use.name)],
+          usage: result.usage, waste, sysHash: hashSystem(sys), cache: traceCache,
+          started: callStarted, attempt: result.traceAttempt,
+          toolOutcomes: skipped.map((outcome, index) => toolOutcomeTraceInput(uses[index]!, outcome)),
+        });
+        taskFailure = runLimit;
+        taskOutcomeStatus = "failure";
+        out(`\n(${runLimit}; stopped before executing more tools. Continue in a new prompt if needed.)\n`);
+        break;
+      }
       if (uses.length === 0) {
         const pauseTurn = result.stopReason === "pause_turn" && !interrupted;
         const pauseLimitReached = pauseTurn && pauseTurnContinuations >= MAX_PAUSE_TURN_CONTINUATIONS;
@@ -7906,18 +7964,38 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         break;
       }
       const outcomes: ToolOutcome[] = [];
+      const pendingOutcomes = new Map<number, Promise<ToolOutcome>>();
+      const inputErrors = uses.map((use) => toolInputError(use, TOOLS));
       try {
-      for (let i = 0; i < uses.length; i += TOOL_CONCURRENCY) {
+      for (const wave of toolExecutionWaves(uses)) {
         if (interrupted) break;
-        const chunk = uses.slice(i, i + TOOL_CONCURRENCY);
-        const handles = chunk.map((use) => {
-          logToolStart(use);
+        const chunk = wave.map((entry) => uses[entry.index]!);
+        const handles = chunk.map((use, index) => {
+          const invalid = inputErrors[wave[index]!.index];
+          // Invalid arguments must not reach sidecar edit formatting or the
+          // filesystem before they have become an ordinary error result.
+          if (invalid) logEvent({ t: "tool", toolName: use.name, toolCallId: use.id });
+          else logToolStart(use);
           nonTtyTranscriptSection = null;
-          if (surface) return surface.startTool(use.name, toolTranscriptDetail(use));
-          process.stdout.write(`\n${formatToolAnnounce(use)}\n`);
+          const displayed = invalid ? { ...use, input: {} } : use;
+          if (surface) return surface.startTool(use.name, invalid ? "invalid arguments" : toolTranscriptDetail(use));
+          process.stdout.write(`\n${formatToolAnnounce(displayed)}\n`);
           return null;
         });
-        const wrapped = chunk.map((use) => executeTool(use, isTruncatedStopReason(result.stopReason)));
+        const wrapped = wave.map((entry) => {
+          const use = uses[entry.index]!;
+          const promise = (async (): Promise<ToolOutcome> => {
+            if (inputErrors[entry.index]) return done(use, inputErrors[entry.index]!, true);
+            if (entry.duplicateOf !== undefined) {
+              if (!entry.reuseResult) return done(use, "error: duplicate action in the same batch was not executed again. Inspect the first result before deciding whether another action is needed.", true);
+              const original = await pendingOutcomes.get(entry.duplicateOf)!;
+              return { ...original, result: { ...original.result, tool_use_id: use.id } };
+            }
+            return executeTool(use, isTruncatedStopReason(result.stopReason));
+          })();
+          pendingOutcomes.set(entry.index, promise);
+          return promise;
+        });
         const settled = await Promise.allSettled(wrapped);
         for (let ci = 0; ci < chunk.length; ci++) {
           const item = settled[ci]!;
@@ -7968,7 +8046,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         outcomes.push(outcome);
         logEvent({ t: "tool_end", toolCallId: uses[i]!.id, isError: true, ...toolOutcomeTraceFields(outcome) });
       }
-      const resultBlocks = outcomes.map((o, i): ContentBlock => {
+      let resultBlocks = outcomes.map((o, i): ContentBlock => {
         const b = o.result as ContentBlock;
         b.chars = undefined;
         b.tool = uses[i]!.name;
@@ -7976,22 +8054,24 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         if (o.isError) b.is_error = true;
         return b;
       });
-      pushMessage("user", resultBlocks);
-      const turnCalls = uses.map((use, index) => ({
-        name: use.name,
-        input: use.input,
-        result: outcomes[index]?.result ?? null,
-        isError: outcomes[index]?.isError === true,
-      }));
-      stallTracker = trackStallTurn(stallTracker, stallTurnFingerprint(turnCalls));
-      failureLoopTracker = trackFailureLoopTurn(failureLoopTracker, stallFailureKeysForTurn(turnCalls));
-      const exactStalled = stallTracker.repeats >= STALL_TURNS;
-      const failureStalled = !exactStalled && !interrupted && failureLoopTracker.repeats >= STALL_FAILURE_TURNS;
-      if (failureStalled) {
-        out(`\n(same call failing ${STALL_FAILURE_TURNS} times with the same outcome — see the tool description for recovery steps, then change approach)\n`);
-        failureLoopTracker = emptyFailureLoopTracker();
+      let stalled = false;
+      if (!interrupted) {
+        const turnCalls = uses.map((use, index) => ({
+          name: use.name,
+          input: use.input,
+          result: outcomes[index]?.result ?? null,
+          isError: outcomes[index]?.isError === true,
+        }));
+        const decision = trackToolLoopTurn(toolLoopTracker, turnCalls);
+        toolLoopTracker = decision.tracker;
+        stalled = decision.stalled;
+        if (decision.recovery) {
+          // Persist recovery in model-visible history, not just the terminal.
+          resultBlocks = toolResultsWithRecovery(resultBlocks, result.blocks, decision.recovery);
+          out(`\n(${decision.recovery})\n`);
+        }
       }
-      const stalled = !interrupted && exactStalled;
+      pushMessage("user", resultBlocks);
       await writeMainTrace({
         status: stalled ? "stalled" : "ok",
         seqBefore,
@@ -8005,7 +8085,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         toolOutcomes: outcomes.map((outcome, index) => toolOutcomeTraceInput(uses[index]!, outcome)),
       });
       if (stalled) {
-        taskFailure = `stalled: same tool call ${STALL_TURNS} times with unchanged results (${uses.map((u) => u.name).join(", ")})`;
+        taskFailure = `stalled: tool loop continued after recovery guidance (${uses.map((u) => u.name).join(", ")})`;
         taskOutcomeStatus = "failure";
         out(`\n(${taskFailure})\n`);
         break;

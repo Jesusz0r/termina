@@ -11,11 +11,22 @@
  */
 import { hashCacheDiagnostic } from "./cache.ts";
 
-/** Consecutive identical tool turns (same calls, same results) before the run settles stalled. */
+/** Consecutive identical tool turns before recovery guidance (then a stop if ignored). */
 export const STALL_TURNS = 3;
 
-/** Consecutive same-target error/empty repeats before the soft nudge fires. */
+/** Consecutive same-target error/empty repeats before recovery guidance (then a stop if ignored). */
 export const STALL_FAILURE_TURNS = 3;
+
+/** Final run fuses: compaction must not make a malfunctioning run unbounded. */
+export const MAX_RUN_MODEL_TURNS = 200;
+export const MAX_RUN_TOOL_CALLS = 1_000;
+
+/** Called only for responses requesting continuation, not a natural final answer. */
+export function toolRunLimitReason(modelTurns: number, requestedToolCalls: number): string | null {
+  if (modelTurns >= MAX_RUN_MODEL_TURNS) return `run limit reached after ${MAX_RUN_MODEL_TURNS} model turns`;
+  if (requestedToolCalls > MAX_RUN_TOOL_CALLS) return `run would exceed ${MAX_RUN_TOOL_CALLS} tool calls`;
+  return null;
+}
 
 /** Stable empty-search sentinel emitted by grep/glob; single source for producers and checks. */
 export const GREP_NO_MATCHES_PREFIX = "(no matches)";
@@ -36,17 +47,29 @@ export function emptyStallTracker(): StallTracker {
   return { fingerprint: null, repeats: 0 };
 }
 
+type ToolTurnCall = { name: string; input: unknown; result: unknown; isError?: boolean };
+
+function stallResultPayload(result: unknown): unknown {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return result;
+  const block = result as Record<string, unknown>;
+  if (block.type !== "tool_result") return result;
+  // Only remove the envelope's correlation id, never ids in actual tool output.
+  const { tool_use_id: _callId, ...payload } = block;
+  return payload;
+}
+
 /**
- * Fingerprint one model turn's tool calls plus their results. Tool-call ids
- * differ every turn, so only names, canonical inputs, and result payloads
- * participate. Null when the turn made no tool calls: a text-only turn is
- * different behavior, not a repetition.
+ * Fingerprint calls and semantic results, excluding envelope call IDs. Null
+ * for a text-only turn: different behavior, not a repetition.
  */
-export function stallTurnFingerprint(
-  calls: ReadonlyArray<{ name: string; input: unknown; result: unknown }>,
-): string | null {
+export function stallTurnFingerprint(calls: readonly ToolTurnCall[]): string | null {
   if (calls.length === 0) return null;
-  return hashCacheDiagnostic(calls.map((call) => ({ name: call.name, input: call.input, result: call.result })));
+  return hashCacheDiagnostic(calls.map((call) => ({
+    name: call.name,
+    input: call.input,
+    result: stallResultPayload(call.result),
+    isError: call.isError === true,
+  })));
 }
 
 /** Fold one turn fingerprint into the tracker. Any change (or text-only turn) resets the count. */
@@ -68,14 +91,14 @@ export function emptyFailureLoopTracker(): FailureLoopTracker {
   return { key: null, repeats: 0 };
 }
 
-function stallFailureTarget(input: unknown): string {
-  if (!input || typeof input !== "object" || Array.isArray(input)) return "";
-  const v = input as Record<string, unknown>;
-  const pick = (k: string): string => (typeof v[k] === "string" ? (v[k] as string).trim() : "");
-  // Stable target only: old_text/new_text are intentionally ignored so edit
-  // retries with different snippets on the same file still collide.
-  const parts = [pick("path"), pick("pattern"), pick("query"), pick("command"), pick("url")].filter(Boolean);
-  return parts.join("|").slice(0, 320);
+function stallFailureTarget(name: string, input: unknown): string {
+  if (input && typeof input === "object" && !Array.isArray(input) && (name === "edit" || name === "write_file")) {
+    // Changing a guessed snippet or body is not a new target after a failure.
+    return hashCacheDiagnostic({ path: (input as Record<string, unknown>).path });
+  }
+  // Keep search scopes, read ranges, and MCP-specific arguments. Dropping
+  // those conflates independent work with retries of the same failed call.
+  return hashCacheDiagnostic(input);
 }
 
 function stallResultText(result: unknown): string {
@@ -105,7 +128,7 @@ function stallOutcomeKind(text: string, isError: boolean): "error" | "empty" | n
  * kind. Null for productive turns so only stuck error/empty loops accumulate.
  */
 export function stallFailureKey(call: { name: string; input: unknown; result: unknown; isError?: boolean }): string | null {
-  const target = stallFailureTarget(call.input);
+  const target = stallFailureTarget(call.name, call.input);
   const kind = stallOutcomeKind(stallResultText(call.result), call.isError === true);
   if (!kind) return null;
   const prefix = stallResultText(call.result).trim().split("\n")[0]?.slice(0, 80).toLowerCase().replace(/\d+/g, "#") ?? "";
@@ -138,4 +161,90 @@ export function trackFailureLoopTurn(prev: FailureLoopTracker, keys: readonly st
     return { key: first, repeats: prev.repeats + keys.length };
   }
   return { key: first, repeats: keys.length };
+}
+
+const MAX_CYCLE_TURNS = 8;
+const RECENT_TURN_LIMIT = MAX_CYCLE_TURNS * STALL_TURNS;
+
+export interface ToolLoopTracker {
+  exact: StallTracker;
+  failure: FailureLoopTracker;
+  recoveryOffered: boolean;
+  /** Bounded hashes only; never retain tool payloads across turns. */
+  recentTurns: string[];
+  warnedCycle: { key: string; turns: readonly string[] } | null;
+}
+
+export function emptyToolLoopTracker(): ToolLoopTracker {
+  return {
+    exact: emptyStallTracker(), failure: emptyFailureLoopTracker(), recoveryOffered: false,
+    recentTurns: [], warnedCycle: null,
+  };
+}
+
+function normalizedTurnFingerprint(calls: readonly ToolTurnCall[]): string {
+  return hashCacheDiagnostic(calls.map((call) => stallFailureKey(call) ?? stallTurnFingerprint([call])!).sort());
+}
+
+/** Find three repetitions of a short cycle, including reordered failure batches. */
+function repeatedCycle(turns: readonly string[]): ToolLoopTracker["warnedCycle"] {
+  for (let size = 1; size <= MAX_CYCLE_TURNS && size * STALL_TURNS <= turns.length; size++) {
+    const start = turns.length - size * STALL_TURNS;
+    if (!turns.slice(start).every((value, index) => value === turns[start + index % size])) continue;
+    const cycle = turns.slice(-size);
+    // A→B and B→A are the same cycle. Bound is eight, independent of run length.
+    const rotations = cycle.map((_, i) => [...cycle.slice(i), ...cycle.slice(0, i)].join(":"));
+    return { key: hashCacheDiagnostic(rotations.sort()[0]), turns: cycle };
+  }
+  return null;
+}
+
+function recoveryGuidance(calls: readonly ToolTurnCall[]): string {
+  const editFailed = calls.some((call) => call.name === "edit" && call.isError);
+  const steps = editFailed
+    ? "Use read_file on the failed path before another edit. Copy a small, unique old_text from the current file, " +
+      "without the N| line-number prefixes; preserve its whitespace. Do not guess another snippet or overwrite " +
+      "the whole file to bypass an edit miss."
+    : "Inspect the failed tool's inputs and current state, then change approach using the tool's recovery steps. " +
+      "For empty searches, broaden the pattern or scope, or list files before searching again.";
+  return "Tool loop detected: repeated calls are not making progress. Recover autonomously; do not repeat the failing approach. " +
+    steps + " Continue the original task after recovery. If recovery is not possible, explain the concrete blocker instead of retrying.";
+}
+
+/**
+ * Offer model-visible recovery, then stop if the same loop resumes. Remember
+ * short cycles across reads: repeatedly re-reading unchanged text is not
+ * recovery from a failed edit. New observations clear cycle escalation; merely
+ * oscillating between already-observed successful edits does not.
+ */
+export function trackToolLoopTurn(
+  prev: ToolLoopTracker,
+  calls: readonly ToolTurnCall[],
+): { tracker: ToolLoopTracker; recovery: string | null; stalled: boolean } {
+  if (calls.length === 0) return { tracker: emptyToolLoopTracker(), recovery: null, stalled: false };
+  const exact = trackStallTurn(prev.exact, stallTurnFingerprint(calls));
+  const failure = trackFailureLoopTurn(prev.failure, stallFailureKeysForTurn(calls));
+  const sameLoop = (exact.fingerprint !== null && exact.fingerprint === prev.exact.fingerprint) ||
+    (failure.key !== null && failure.key === prev.failure.key);
+  const turn = normalizedTurnFingerprint(calls);
+  const recentTurns = [...prev.recentTurns, turn].slice(-RECENT_TURN_LIMIT);
+  const cycle = repeatedCycle(recentTurns);
+  const warnedCycle = prev.warnedCycle?.turns.includes(turn) ? prev.warnedCycle : null;
+  const tracker: ToolLoopTracker = {
+    exact, failure, recoveryOffered: sameLoop && prev.recoveryOffered, recentTurns, warnedCycle,
+  };
+  if (exact.repeats < STALL_TURNS && failure.repeats < STALL_FAILURE_TURNS && !cycle) {
+    return { tracker, recovery: null, stalled: false };
+  }
+  if (tracker.recoveryOffered || (cycle !== null && cycle.key === warnedCycle?.key)) {
+    return { tracker, recovery: null, stalled: true };
+  }
+  return {
+    tracker: {
+      exact: { ...exact, repeats: 0 }, failure: { ...failure, repeats: 0 },
+      recoveryOffered: true, recentTurns: [], warnedCycle: cycle,
+    },
+    recovery: recoveryGuidance(calls),
+    stalled: false,
+  };
 }

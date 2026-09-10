@@ -34,9 +34,9 @@ import {
 
 /** At most 4 child processes at once (Anthropic rule, host-wide). */
 export const MAX_SUBAGENT_HOST_CHILDREN = 4;
-/** Total attempts per run before reporting failure. */
+/** Pre-child launch attempts per run before reporting failure. */
 export const SUBAGENT_MAX_ATTEMPTS = 3;
-/** Backoff between crash retries (attempts 2 and 3). */
+/** Backoff between failed launches (attempts 2 and 3); never replay started work. */
 export const SUBAGENT_RETRY_BACKOFF_MS = [1000, 2000];
 /** Wall clock per attempt before the child is killed as timed out. */
 export const SUBAGENT_WALL_TIMEOUT_MS = 10 * 60_000;
@@ -136,6 +136,9 @@ function defaultLauncher(cmd: string, args: string[], opts: { cwd: string; env: 
     stdio: ["ignore", "pipe", "pipe"],
     detached: process.platform !== "win32",
   });
+  // Spawn errors also emit close. Handle error now so a missing executable or
+  // cwd cannot crash Electron; settlement waits for stdio to finish draining.
+  child.once("error", () => {});
   const wrap = (stream: NodeJS.ReadableStream | null): SubagentChildEvents => ({
     onData: (callback: (chunk: Buffer) => void) => {
       stream?.on("data", callback);
@@ -146,7 +149,7 @@ function defaultLauncher(cmd: string, args: string[], opts: { cwd: string; env: 
     stdout: wrap(child.stdout),
     stderr: wrap(child.stderr),
     onExit: (callback) => {
-      child.on("exit", (code, signal) => callback(code, signal));
+      child.once("close", (code, signal) => callback(code, signal));
     },
     killChild: (signal) => {
       try {
@@ -282,12 +285,20 @@ export class SubagentHost {
       clearTimeout(run.wallTimer);
       run.wallTimer = null;
     }
-    run.child.killGroup("SIGTERM");
+    this.terminateChild(run);
+    return true;
+  }
+
+  /** Both explicit cancellation and wall timeout use the same bounded stop. */
+  private terminateChild(run: HostRun): void {
+    const child = run.child;
+    if (!child) return;
+    child.killGroup("SIGTERM");
+    if (run.retryTimer) clearTimeout(run.retryTimer);
     run.retryTimer = setTimeout(() => {
       run.retryTimer = null;
-      if (!run.settled) run.child?.killGroup("SIGKILL");
+      if (!run.settled && run.child === child) child.killGroup("SIGKILL");
     }, 5000);
-    return true;
   }
 
   /** Terminate every run owned by a terminal (e.g. `/clear`). Returns the count. */
@@ -548,7 +559,7 @@ export class SubagentHost {
         env,
       });
     } catch (err) {
-      await this.resolveCrash(run, `spawn failed: ${err instanceof Error ? err.message : String(err)}`, true);
+      await this.retryLaunch(run, `spawn failed: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
     // The task file was consumed at spawn; attempts rebuild from the run.
@@ -580,7 +591,7 @@ export class SubagentHost {
       run.wallTimer = null;
       if (run.settled || !run.child) return;
       run.stop = { kind: "timeout" };
-      run.child.killGroup("SIGTERM");
+      this.terminateChild(run);
     }, this.wallMs);
     child.onExit((code, signal) => {
       void this.onChildExit(run, code, signal);
@@ -589,61 +600,41 @@ export class SubagentHost {
 
   private async onChildExit(run: HostRun, code: number | null, signal: NodeJS.Signals | null): Promise<void> {
     if (run.settled) return;
-    if (run.wallTimer) {
-      clearTimeout(run.wallTimer);
-      run.wallTimer = null;
-    }
+    if (run.wallTimer) clearTimeout(run.wallTimer);
+    if (run.retryTimer) clearTimeout(run.retryTimer);
+    run.wallTimer = null;
+    run.retryTimer = null;
     run.child = null;
-    if (code === 0 && run.stop?.kind !== "kill") {
-      // A clean exit with a frame settles even if the wall timer fired first:
-      // the run finished in time, the timer was merely late.
-      const frame = lastResultFrame(run.stdout);
-      if (frame && frame.ok) {
-        const scanned = scanSubagentOutput(truncateUtf8(frame.result ?? "", MAX_SUBAGENT_RESULT_CHARS));
-        await this.finishSettled(run, scanned.text, scanned.flags);
-        return;
-      }
-      if (run.stop?.kind === "timeout") {
-        await this.resolveCrash(run, "wall timeout exceeded", true);
-        return;
-      }
-      await this.finishFailed(
-        run.parentTerminalId,
-        run.runId,
-        run.task,
-        frame && !frame.ok ? `child reported failure: ${frame.error ?? "unknown"}` : "child exited without a result frame",
-      );
-      return;
-    }
     if (run.stop?.kind === "kill") {
-      if (run.retryTimer) {
-        clearTimeout(run.retryTimer);
-        run.retryTimer = null;
-      }
       await this.finishKilled(run, run.stop.reason);
       return;
     }
-    if (run.stop?.kind === "timeout" || signal !== null) {
-      await this.resolveCrash(run, run.stop?.kind === "timeout" ? "wall timeout exceeded" : `crashed (${signal ?? "signal"})`, true);
+    const frame = lastResultFrame(run.stdout);
+    if (frame && !frame.ok) {
+      // The engine deliberately exits 1 for a failed run. This is a result,
+      // not a transient launch failure that is safe to replay from scratch.
+      await this.finishFailed(run.parentTerminalId, run.runId, run.task, `child reported failure: ${frame.error ?? "unknown"}`);
       return;
     }
-    const booted = this.streams.get(run.childTid)?.booted ?? false;
-    await this.resolveCrash(run, `exit ${code ?? "?"}${run.stderr ? `: ${tailLines(run.stderr, 3)}` : ""}`, booted);
+    if (code === 0 && frame?.ok) {
+      const scanned = scanSubagentOutput(truncateUtf8(frame.result ?? "", MAX_SUBAGENT_RESULT_CHARS));
+      await this.finishSettled(run, scanned.text, scanned.flags);
+      return;
+    }
+    // Once spawned, the child may have performed side effects even if the
+    // sidecar tailer has not observed agent_start yet. Never replay implicitly.
+    const recovery = "not restarted: work may already have executed; inspect the project and explicitly resume if needed";
+    if (run.stop?.kind === "timeout") {
+      await this.finishKilled(run, `wall timeout exceeded; ${recovery}`);
+      return;
+    }
+    const reason = signal ? `crashed (${signal})` : code === 0 ? "child exited without a result frame" : `exit ${code ?? "?"}`;
+    await this.finishFailed(run.parentTerminalId, run.runId, run.task, `${reason}${run.stderr ? `: ${tailLines(run.stderr, 3)}` : ""}; ${recovery}`);
   }
 
-  /**
-   * Crashes (and timeouts) retry with backoff; clean exits never retry. A
-   * child that exits fast without ever booting (no agent_start) fails
-   * deterministically — same task file, same env — so it settles failed
-   * immediately instead of burning attempts on identical boots. Timeouts,
-   * signal crashes, and launch failures still retry: those may be transient.
-   */
-  private async resolveCrash(run: HostRun, reason: string, started: boolean): Promise<void> {
+  /** Retry only a synchronous launch failure: no child exists to have done work. */
+  private async retryLaunch(run: HostRun, reason: string): Promise<void> {
     if (run.settled) return;
-    if (!started) {
-      await this.finishFailed(run.parentTerminalId, run.runId, run.task, reason);
-      return;
-    }
     if (run.attempts < this.maxAttempts) {
       const wait = this.backoffMs[Math.min(run.attempts - 1, this.backoffMs.length - 1)] ?? 1000;
       await this.sleep(wait);
@@ -655,9 +646,7 @@ export class SubagentHost {
       await this.startAttempt(run);
       return;
     }
-    const timeout = /timeout/i.test(reason);
-    if (timeout) await this.finishKilled(run, reason);
-    else await this.finishFailed(run.parentTerminalId, run.runId, run.task, reason);
+    await this.finishFailed(run.parentTerminalId, run.runId, run.task, reason);
   }
 
   private async finishSettled(run: HostRun, result: string, flags: string[]): Promise<void> {
