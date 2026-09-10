@@ -17,10 +17,11 @@ function runNode(args: string[], options = {}) {
 }
 
 describe("Test Infrastructure & Gate Invariants", () => {
-  it("verifies package-wired session gate executes canonical Vitest targets", () => {
+  it("verifies package-wired focused suites target area directories", () => {
     const scripts = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")).scripts;
-    expect(scripts["test:agent-core-session"]).toContain("session-segmented.test.ts");
-    expect(scripts["test:agent-core-session"]).toContain("session-receipt.test.ts");
+    expect(scripts["test:agent-core-focused"]).toContain("tests/unit/agent-core/");
+    expect(scripts["test:electron-focused"]).toContain("tests/unit/electron/");
+    expect(scripts["test:build-focused"]).toContain("tests/unit/build/");
   });
 
   it("propagates a failed check as nonzero in canonical callback reporter", () => {
@@ -40,14 +41,14 @@ describe("Test Infrastructure & Gate Invariants", () => {
 
   it("wires default and release graphs through canonical Vitest suites", () => {
     const scripts = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")).scripts;
-    expect(scripts["test:agent-core-trace"]).toContain("tests/unit/agent-core/trace-*.test.ts");
+    expect(scripts["test:agent-core-main"]).toContain("tests/unit/agent-core/main-*.test.ts");
     expect(scripts["test"]).toContain("pnpm run test:unit");
     expect(scripts["test:release"]).toContain("pnpm run test");
   });
 
-  it("wires ipc-navigation through its isolated E2E spec runner", () => {
+  it("runs isolated E2E specs through the shared playwright runner", () => {
     const scripts = JSON.parse(readFileSync(join(repo, "package.json"), "utf8")).scripts;
-    expect(scripts["test:ipc-navigation"]).toBe("playwright test tests/e2e/ipc-navigation.spec.ts");
+    expect(scripts["test:e2e"]).toBe("playwright test");
   });
 
   it("derives decimal byte bound from native read-budget failures", () => {

@@ -40,6 +40,8 @@ pnpm exec tsc --noEmit        # typecheck
 pnpm run build                # production build
 pnpm run test:spikes          # plain-node spike suites (capture, merge, platform)
 pnpm run test:e2e              # the full Electron e2e matrix
+pnpm run test:electron-focused  # area suites (also test:agent-core-focused, test:build-focused)
+pnpm exec vitest run <path>     # any single file or directory; one-off specs need no alias
 node scripts/e2e.mjs --skip-build worldline-capture-test.mjs   # one suite
 ```
 
