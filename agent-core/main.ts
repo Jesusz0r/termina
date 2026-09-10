@@ -130,7 +130,6 @@ import {
   classifyCacheMiss,
   createCapabilityCache,
   emptyCacheFlipTally,
-  hashCacheDiagnostic,
   queryCapability,
   recordCapability,
   tallyCacheFlip,
@@ -140,6 +139,20 @@ import {
   type CachePolicyDiagnostics,
   type CacheRequestDiagnostics,
 } from "./cache.ts";
+import {
+  emptyFailureLoopTracker,
+  emptyStallTracker,
+  GREP_NO_MATCHES_PREFIX,
+  isGrepNoMatches,
+  STALL_FAILURE_TURNS,
+  STALL_TURNS,
+  stallFailureKeysForTurn,
+  stallTurnFingerprint,
+  trackFailureLoopTurn,
+  trackStallTurn,
+  type FailureLoopTracker,
+  type StallTracker,
+} from "./stall.ts";
 import {
   evictionBoundary,
   messagesForSummary,
@@ -323,8 +336,6 @@ const EDIT_MISS_LINE_CHARS = 240;
 const READ_SCAN_MS = 2_000;
 const TOOL_CONCURRENCY = 4;
 const NOISE_FLOOR_TOKENS = 1_024;
-/** Consecutive identical tool turns (same calls, same results) before the run settles stalled. */
-export const STALL_TURNS = 3;
 const USER_AGENTS_CAP = 8_192;
 const PROJECT_AGENTS_CAP = 24_576;
 const SKILL_XML_CAP = 8_192;
@@ -1355,13 +1366,20 @@ function grepRipgrep(
         // output cap; this is a complete search with an intentionally clipped
         // page, not a provider/tool failure.
         state = "complete";
-      } else if (code === 2 && !outputTruncated) {
+        body = text
+          ? `${formatGrepHits(text)}\n(more matching files not listed)`
+          : "(output clipped before results arrived)";
+      } else if (code === 2) {
+        // ripgrep exit codes are a stable documented contract: 0 = match,
+        // 1 = no match, 2 = error. Keep partial hits like the timeout and
+        // interrupt branches do so the model keeps whatever matched.
         state = "failed";
         isError = true;
         const err = stderrResult.text.trim().slice(0, 300);
-        body = err ? `error: ${err}` : "error: invalid regular expression";
+        const note = err ? `error: ${err}` : "error: invalid regular expression";
+        body = text ? `${formatGrepHits(text)}\n${note}` : note;
       } else if (!text) {
-        body = outputTruncated ? "(more matching files not listed)" : "(no matches)";
+        body = GREP_NO_MATCHES_PREFIX;
       } else {
         const formatted = formatGrepHits(text);
         body = outputTruncated || hitCap
@@ -1380,7 +1398,6 @@ function grepRipgrep(
       });
       resolve(Object.freeze({
         ...result,
-        continuation: state === "complete" && !outputTruncated && !stderrTruncated && !hitCap ? null : continuation,
         repro,
         stdout: stdoutResult,
         stderr: stderrResult,
@@ -1518,7 +1535,7 @@ export async function grepFiles(
   if (hits.length === 0) {
     const stateDesc = state === "timeout" ? "timed out" : state;
     const body = state === "complete"
-      ? lineTruncated ? "(no matches in retained line prefixes; some lines were truncated)" : "(no matches)"
+      ? lineTruncated ? "(no matches in retained line prefixes; some lines were truncated)" : GREP_NO_MATCHES_PREFIX
       : `(grep ${stateDesc} after ${scanned} files)`;
     const needsContinuation = stateError || lineTruncated;
     const result = logicalToolText(body, {
@@ -1586,7 +1603,7 @@ export async function globFiles(
     ? visible.join("\n")
     : incomplete
       ? `(glob ${collected.state} after ${collected.files.length} files)`
-      : "(no matches)";
+      : GREP_NO_MATCHES_PREFIX;
   const needsContinuation = hasMore || incomplete;
   const result = logicalToolText(body, {
     maxBytes: GREP_BYTE_CAP,
@@ -1917,13 +1934,13 @@ function scanTimedOut(started: number): boolean {
   return Date.now() - started >= READ_SCAN_MS;
 }
 
-function countNewlinesInRange(fd: number, end: number, started: number): number | { error: string } {
+function countNewlinesInRange(fd: number, end: number, started: number): number | { error: string; timedOut: boolean } {
   if (end <= 0) return 0;
   const chunk = Buffer.alloc(Math.min(64 * 1024, end));
   let pos = 0;
   let nls = 0;
   while (pos < end) {
-    if (scanTimedOut(started)) return { error: "error: read timed out" };
+    if (scanTimedOut(started)) return { error: "error: read timed out", timedOut: true };
     const want = Math.min(chunk.length, end - pos);
     const n = readSync(fd, chunk, 0, want, pos);
     if (n <= 0) break;
@@ -1941,7 +1958,7 @@ function lineRangeOffsets(
   startLine: number,
   endLine: number | undefined,
   started: number,
-): { start: number; end: number } | { error: string } {
+): { start: number; end: number } | { error: string; timedOut: boolean } {
   const startTarget = Math.max(1, startLine);
   const endTarget = endLine === undefined ? undefined : Math.max(1, endLine + 1);
   let start = startTarget <= 1 ? 0 : -1;
@@ -1951,7 +1968,7 @@ function lineRangeOffsets(
   let pos = 0;
   let current = 1;
   while (pos < size) {
-    if (scanTimedOut(started)) return { error: "error: read timed out" };
+    if (scanTimedOut(started)) return { error: "error: read timed out", timedOut: true };
     const n = readSync(fd, chunk, 0, Math.min(chunk.length, size - pos), pos);
     if (n <= 0) break;
     for (let i = 0; i < n; i++) {
@@ -2095,13 +2112,13 @@ export function readTextView(
     let until = st.size;
     if (lineMode) {
       const offsets = lineRangeOffsets(fd, st.size, startLine, endLine, started);
-      if ("error" in offsets) return fail(offsets.error, offsets.error.includes("timed out") ? "timeout" : "failed");
+      if ("error" in offsets) return fail(offsets.error, offsets.timedOut ? "timeout" : "failed");
       from = offsets.start;
       viewStartLine = startLine;
       until = offsets.end;
     } else {
       const nls = countNewlinesInRange(fd, from, started);
-      if (typeof nls === "object") return fail(nls.error, nls.error.includes("timed out") ? "timeout" : "failed");
+      if (typeof nls === "object") return fail(nls.error, nls.timedOut ? "timeout" : "failed");
       viewStartLine = nls + 1;
     }
     if (from >= st.size || from >= until) return logicalToolText("", {
@@ -2389,6 +2406,58 @@ export function editMissDiagnostic(body: string, oldText: string): string {
   return lines.join("\n");
 }
 
+/** Upstream-style fuzzy fallback (opencode replacers, minimal subset). Exact stays
+ * authoritative; these only rescue whitespace/indent/trim drift and refuse
+ * disproportionate spans so a wrong block can never apply. */
+function findFuzzyEditSpan(body: string, oldText: string): { at: number; len: number } | { ambiguous: true } | null {
+  const norm = (s: string): string[] => s.replace(/\r\n/g, "\n").split("\n");
+  const bodyLines = norm(body);
+  const findLines = norm(oldText);
+  while (findLines.length > 0 && findLines[findLines.length - 1]!.trim() === "" && oldText.endsWith("\n")) findLines.pop();
+  if (findLines.length === 0 || findLines.every((l) => l.trim() === "")) return null;
+  const matches: Array<{ at: number; len: number }> = [];
+  // 1. Line-trimmed block match (indent drift, line-number prefix copy errors).
+  for (let i = 0; i <= bodyLines.length - findLines.length; i++) {
+    let ok = true;
+    for (let j = 0; j < findLines.length; j++) {
+      if (bodyLines[i + j]!.trim() !== findLines[j]!.trim()) {
+        ok = false;
+        break;
+      }
+    }
+    if (!ok) continue;
+    let at = 0;
+    for (let k = 0; k < i; k++) at += bodyLines[k]!.length + 1;
+    let len = 0;
+    for (let k = 0; k < findLines.length; k++) {
+      len += bodyLines[i + k]!.length;
+      if (k < findLines.length - 1) len += 1;
+    }
+    matches.push({ at, len });
+    if (matches.length > 1) return { ambiguous: true };
+  }
+  if (matches.length === 1) {
+    const m = matches[0]!;
+    if (m.len > Math.max(64, oldText.length * 4)) return null;
+    return m;
+  }
+  if (matches.length > 1) return { ambiguous: true };
+  // 2. Whitespace-normalized single-span fallback for short snippets.
+  if (oldText.length <= 640) {
+    const normWs = (s: string): string => s.replace(/\s+/g, " ").trim();
+    const target = normWs(oldText);
+    if (target.length >= 8) {
+      const bodyNorm = normWs(body);
+      const hit = bodyNorm.indexOf(target);
+      if (hit >= 0 && bodyNorm.indexOf(target, hit + 1) < 0) {
+        // Map back approximately: refuse unless the span is proportionate.
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
 /** First unique occurrence of oldText, or every occurrence when replaceAll is set.
  *  Does not write when the match is missing. Unique mode also fails when repeated. */
 export function editProjectFile(
@@ -2424,19 +2493,40 @@ export function editProjectFile(
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
+  if (body.charCodeAt(0) === 0xfeff) body = body.slice(1);
+  const ending = body.includes("\r\n") ? "\r\n" : "\n";
+  const old = oldText.replace(/\r\n/g, "\n").replace(/\n/g, ending).replace(/^\uFEFF/, "");
+  const replacement = newText.replace(/\r\n/g, "\n").replace(/\n/g, ending);
   if (!replaceAll) {
     let count = 0;
     let idx = 0;
     while (idx < body.length) {
-      const at = body.indexOf(oldText, idx);
+      const at = body.indexOf(old, idx);
       if (at < 0) break;
       count++;
-      if (count > 1) return { content: editMissDiagnostic(body, oldText), isError: true };
-      idx = at + oldText.length;
+      if (count > 1) return { content: editMissDiagnostic(body, old), isError: true };
+      idx = at + old.length;
     }
-    if (count === 0) return { content: editMissDiagnostic(body, oldText), isError: true };
-    const at = body.indexOf(oldText);
-    const next = body.slice(0, at) + newText + body.slice(at + oldText.length);
+    if (count > 1) return { content: editMissDiagnostic(body, old), isError: true };
+    if (count === 0) {
+      const fuzzy = findFuzzyEditSpan(body, old);
+      if (fuzzy && !("ambiguous" in fuzzy)) {
+        const next = body.slice(0, fuzzy.at) + replacement + body.slice(fuzzy.at + fuzzy.len);
+        try {
+          atomicWrite(confined.abs, next, st.mode & 0o777);
+        } catch (err) {
+          return { content: `error: ${(err as Error).message}`, isError: true };
+        }
+        return {
+          content: `ok: edited ${posixRel(freezeCwd(cwd), confined.abs)} (whitespace/indent-tolerant match)`,
+          isError: false,
+          edits: [{ oldText, newText }],
+        };
+      }
+      return { content: editMissDiagnostic(body, old), isError: true };
+    }
+    const at = body.indexOf(old);
+    const next = body.slice(0, at) + replacement + body.slice(at + old.length);
     try {
       atomicWrite(confined.abs, next, st.mode & 0o777);
     } catch (err) {
@@ -2452,13 +2542,13 @@ export function editProjectFile(
   let from = 0;
   let n = 0;
   while (from <= next.length) {
-    const at = next.indexOf(oldText, from);
+    const at = next.indexOf(old, from);
     if (at < 0) break;
-    next = next.slice(0, at) + newText + next.slice(at + oldText.length);
-    from = at + newText.length;
+    next = next.slice(0, at) + replacement + next.slice(at + old.length);
+    from = at + replacement.length;
     n++;
   }
-  if (n === 0) return { content: editMissDiagnostic(body, oldText), isError: true };
+  if (n === 0) return { content: editMissDiagnostic(body, old), isError: true };
   try {
     atomicWrite(confined.abs, next, st.mode & 0o777);
   } catch (err) {
@@ -4126,7 +4216,9 @@ export function formatToolFollowup(use: ToolUse, outcome: { result: Record<strin
     return `◇ ${use.name} · failed${shown ? `\n${shown}` : ""}\n`;
   }
   if (use.name === "grep" || use.name === "glob") {
-    if (content === "(no matches)") return `◇ ${use.name} · done · no matches\n`;
+    if (isGrepNoMatches(content)) return `◇ ${use.name} · done · no matches\n`;
+    // Ripgrep-style summary header ("N hits in M files") carries the exact
+    // count; prefer it over counting display lines. Pinned by harness-kernel.
     if (use.name === "grep") {
       const hm = /^(\d+\+?) hits? in /.exec(content);
       if (hm) return `◇ grep · done · ${hm[1]} hits\n`;
@@ -4857,7 +4949,7 @@ const TOOLS: Array<Record<string, unknown>> = [
   {
     name: "edit",
     description:
-      "Replace old_text with new_text in a file. Default: one unique occurrence (fails if missing or repeated). Set replace_all to replace every occurrence. Prefer this over write_file for existing files. Miss errors include occurrence count and nearby lines.",
+      "Replace old_text with new_text in a file. Read the file first and copy old_text exactly as it appears AFTER the line-number prefix (read shows N|content; never include the N| prefix, preserve tabs/spaces). Default: one unique occurrence (fails if missing or repeated). Set replace_all to replace every occurrence. Prefer this over write_file for existing files. Re-read before retrying a miss; the file may have changed. Miss errors include occurrence count and nearby lines.",
     input_schema: {
       type: "object",
       properties: {
@@ -4872,7 +4964,7 @@ const TOOLS: Array<Record<string, unknown>> = [
   {
     name: "grep",
     description:
-      "Search file contents with a regular expression. Uses ripgrep when available. Prefer this over bash rg or grep. Groups hits by file, shows sparse files first, and caps per file. Skip ignored directories. Narrow with path or glob when a file has more hits.",
+      "Search file contents with a regular expression. Uses ripgrep when available. Prefer this over bash rg or grep. Groups hits by file, shows sparse files first, and caps per file. Skip ignored directories. Narrow with path or glob when a file has more hits. An empty result is exactly (no matches); broaden the pattern or try a different path/glob, or list files with glob.",
     input_schema: {
       type: "object",
       properties: {
@@ -4885,7 +4977,7 @@ const TOOLS: Array<Record<string, unknown>> = [
   },
   {
     name: "glob",
-    description: "Find files relative to the working directory. Pattern supports * ** and ? only.",
+    description: "Find files relative to the working directory. Pattern supports * ** and ? only. An empty result is exactly (no matches); widen the pattern or check the path.",
     input_schema: {
       type: "object",
       properties: { pattern: { type: "string" } },
@@ -6931,39 +7023,8 @@ async function callModel(
 
 let previousCacheAttempt: CacheAttemptSnapshot | null = null;
 
-/** Consecutive identical tool-turn evidence for stall detection. */
-export interface StallTracker {
-  fingerprint: string | null;
-  repeats: number;
-}
-
-export function emptyStallTracker(): StallTracker {
-  return { fingerprint: null, repeats: 0 };
-}
-
 let stallTracker: StallTracker = emptyStallTracker();
-
-/**
- * Fingerprint one model turn's tool calls plus their results. Tool-call ids
- * differ every turn, so only names, canonical inputs, and result payloads
- * participate. Null when the turn made no tool calls: a text-only turn is
- * different behavior, not a repetition.
- */
-export function stallTurnFingerprint(
-  calls: ReadonlyArray<{ name: string; input: unknown; result: unknown }>,
-): string | null {
-  if (calls.length === 0) return null;
-  return hashCacheDiagnostic(calls.map((call) => ({ name: call.name, input: call.input, result: call.result })));
-}
-
-/** Fold one turn fingerprint into the tracker. Any change (or text-only turn) resets the count. */
-export function trackStallTurn(prev: StallTracker, fingerprint: string | null): StallTracker {
-  if (fingerprint === null) return emptyStallTracker();
-  if (prev.fingerprint !== null && prev.fingerprint === fingerprint) {
-    return { fingerprint, repeats: prev.repeats + 1 };
-  }
-  return { fingerprint, repeats: 1 };
-}
+let failureLoopTracker: FailureLoopTracker = emptyFailureLoopTracker();
 
 let cacheFlipTally: CacheFlipTally = emptyCacheFlipTally();
 
@@ -7674,6 +7735,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   let lastPlanText = "";
   let cacheCostCompactionAttempted = false;
   stallTracker = emptyStallTracker();
+  failureLoopTracker = emptyFailureLoopTracker();
   codexTurnState = "";
   try {
     while (true) {
@@ -7932,15 +7994,21 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         return b;
       });
       pushMessage("user", resultBlocks);
-      stallTracker = trackStallTurn(
-        stallTracker,
-        stallTurnFingerprint(uses.map((use, index) => ({
-          name: use.name,
-          input: use.input,
-          result: outcomes[index]?.result ?? null,
-        }))),
-      );
-      const stalled = !interrupted && stallTracker.repeats >= STALL_TURNS;
+      const turnCalls = uses.map((use, index) => ({
+        name: use.name,
+        input: use.input,
+        result: outcomes[index]?.result ?? null,
+        isError: outcomes[index]?.isError === true,
+      }));
+      stallTracker = trackStallTurn(stallTracker, stallTurnFingerprint(turnCalls));
+      failureLoopTracker = trackFailureLoopTurn(failureLoopTracker, stallFailureKeysForTurn(turnCalls));
+      const exactStalled = stallTracker.repeats >= STALL_TURNS;
+      const failureStalled = !exactStalled && !interrupted && failureLoopTracker.repeats >= STALL_FAILURE_TURNS;
+      if (failureStalled) {
+        out(`\n(same call failing ${STALL_FAILURE_TURNS} times with the same outcome — see the tool description for recovery steps, then change approach)\n`);
+        failureLoopTracker = emptyFailureLoopTracker();
+      }
+      const stalled = !interrupted && exactStalled;
       await writeMainTrace({
         status: stalled ? "stalled" : "ok",
         seqBefore,
@@ -8395,10 +8463,6 @@ function drainQueuedLine(): void {
 
 function engineBusy(): boolean {
   return running || authBusy || resumeBusy || mcpBusy;
-}
-
-export function isEngineBusy(): boolean {
-  return engineBusy();
 }
 
 function submit(line: string): void {
