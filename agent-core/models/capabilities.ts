@@ -229,14 +229,73 @@ export function catalogSupportsTools(entry: ModelInfo | undefined): boolean | nu
   return entry.supportedParameters.includes("tools");
 }
 
+/**
+ * Documented context windows for the OpenAI families, largest generation first.
+ *
+ * The openai catalog does not report these — `/v1/models` carries no context
+ * field — so this table *is* the window for that route, and the same model name
+ * served by a relay gets the same value.
+ *
+ * Sources (all fetched 2026-09-10; verified against the models.dev catalog):
+ * - gpt-6-astra        1,050,000  https://developers.openai.com/api/docs/models/gpt-6-astra
+ * - gpt-5.6 (sol/terra/luna), gpt-5.5*, gpt-5.4* main tiers
+ *                      1,050,000  https://developers.openai.com/api/docs/models/gpt-5.6-sol
+ * - gpt-5.0 - 5.3, and the 5.4 mini/nano tiers
+ *                        400,000  https://developers.openai.com/api/docs/models/gpt-5
+ * - o-series            200,000  https://developers.openai.com/api/docs/models/o3
+ * - gpt-4o              128,000  https://developers.openai.com/api/docs/models/gpt-4o
+ *
+ * The generation boundary is real, not cosmetic: 5.0-5.3 are 400k while 5.4 and
+ * later are 1.05M, and the mini/nano tiers stayed at 400k when their main tier
+ * moved. `/models` returns no metadata to distinguish them, so these tiers are
+ * named explicitly rather than approximated.
+ */
+function openaiContextWindow(leaf: string): number | null {
+  // Dated chat aliases and the codex "spark" tier are capped at 128k even
+  // though their generation is larger.
+  if (leaf.endsWith("-chat-latest") || leaf === "gpt-5.3-codex-spark") return 128_000;
+  // Only the documented gpt-6 id: one data point is not a generation trend, and
+  // a future gpt-6 tier must not inherit the flagship's window by accident.
+  if (leaf.startsWith("gpt-6-astra")) return 1_050_000;
+  // 5.4 through 5.9 are all documented at 1.05M, so the range generalizes.
+  if (/^gpt-5\.[4-9]/.test(leaf) && !/-(?:mini|nano)$/.test(leaf)) return 1_050_000;
+  if (/^gpt-5/.test(leaf)) return 400_000;
+  if (/^o[0-9]/.test(leaf)) return 200_000;
+  if (/^gpt-4o/.test(leaf)) return 128_000;
+  // An undocumented id (a future generation) falls through to the floor rather
+  // than inheriting a window it was never documented to have.
+  return null;
+}
+
+/**
+ * Conservative floor for a route whose window cannot be established.
+ *
+ * A relay catalog accepts any model id (`acceptsId: () => true`), so an
+ * unrecognized id may be any size. The coding families these relays serve span
+ * that whole range on their own — measured across the models.dev catalog, qwen
+ * runs 4k-10M, deepseek 4k-1.3M, kimi 32k-1M, glm 12k-1.3M — so the family name
+ * cannot pick a window either. The catalog is the only reliable source:
+ * `contextWindow()` prefers a catalog-reported value and falls back here only
+ * for ids the catalog did not describe.
+ *
+ * This is the same documented floor used for older OpenAI models:
+ * https://developers.openai.com/api/docs/models/gpt-4o
+ *
+ * The direction matters. Over-estimating costs a failed request plus a forced
+ * truncate; under-estimating only compacts a little sooner. So an unknown route
+ * takes the conservative value rather than the largest one seen anywhere.
+ */
+const UNKNOWN_CONTEXT_FLOOR = 128_000;
+
 export function defaultContextWindow(provider: ProviderId, model: string): number {
   const id = model.toLowerCase();
+  const leaf = modelLeaf(model);
   if (id.includes("haiku")) return 200_000;
-  if (provider === "xai" || modelLeaf(model).startsWith("grok")) return 500_000;
-  if (provider === "anthropic" || provider === "google") return 1_000_000;
-  // Conservative documented floor for OpenAI models without catalog context
-  // (gpt-4o/gpt-4o-mini are 128k; larger-context models report real metadata).
-  // https://developers.openai.com/api/docs/models/gpt-4o
-  if (provider === "openai") return 128_000;
-  return 1_050_000;
+  if (provider === "xai" || leaf.startsWith("grok")) return 500_000;
+  // Gemini's documented input window is 2^20, not a round 1M.
+  if (provider === "google") return 1_048_576;
+  if (provider === "anthropic") return 1_000_000;
+  // A named OpenAI family carries a documented window; anything else — every
+  // relay id the catalog did not describe — takes the conservative floor.
+  return openaiContextWindow(leaf) ?? UNKNOWN_CONTEXT_FLOOR;
 }

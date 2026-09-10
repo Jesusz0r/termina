@@ -302,12 +302,47 @@ const MAX_PAUSE_TURN_CONTINUATIONS = 5;
 const PROTECT_MIN = 4_000;
 const PROTECT_MAX = 40_000;
 
-function contextWindow(): number {
-  const env = Number(process.env.TERMINA_CORE_CONTEXT ?? "");
+/**
+ * Resolve a context window from the sources in precedence order.
+ *
+ * Exported so the precedence is testable without a route or a network. Pure:
+ * every source is passed in, so a test can exercise each layer in isolation.
+ *
+ * Order matters. The route's own catalog is most specific (a provider that
+ * reports a window knows its own models); the shared catalog is next and is
+ * what covers routes that report nothing (openai, both relays); the static
+ * fallback answers last, when neither catalog is loaded.
+ */
+export function resolveContextWindow(sources: {
+  env: string | undefined;
+  providerContext: number | undefined;
+  catalogContext: number | undefined;
+  provider: ProviderId;
+  model: string;
+}): number {
+  const env = Number(sources.env ?? "");
   if (Number.isFinite(env) && env >= 8_000) return env;
+  if (typeof sources.providerContext === "number" && Number.isFinite(sources.providerContext) && sources.providerContext >= 8_000) {
+    return sources.providerContext;
+  }
+  if (typeof sources.catalogContext === "number" && Number.isFinite(sources.catalogContext) && sources.catalogContext >= 8_000) {
+    return sources.catalogContext;
+  }
+  return defaultContextWindow(sources.provider, sources.model);
+}
+
+function contextWindow(): number {
+  // The route's own catalog: a provider that reports a window knows its models.
   const hit = catalogs.get(route.provider)?.find((m) => m.id === route.model);
-  if (typeof hit?.context === "number" && Number.isFinite(hit.context) && hit.context >= 8_000) return hit.context;
-  return defaultContextWindow(route.provider, route.model);
+  return resolveContextWindow({
+    env: process.env.TERMINA_CORE_CONTEXT,
+    providerContext: typeof hit?.context === "number" ? hit.context : undefined,
+    // The shared models.dev catalog, which covers every route whose endpoint
+    // reports no window at all (openai, both relays).
+    catalogContext: contextCatalogMap.get(contextCatalogKey(contextCatalogProviderId(route.provider), route.model)),
+    provider: route.provider,
+    model: route.model,
+  });
 }
 
 function usableTokens(): number {
@@ -7085,7 +7120,7 @@ function resetCacheContinuity(): void {
 // arithmetic so missing counters/rates remain unknown and cache-write prices
 // never fall back to input pricing.
 type CatalogCost = Record<string, unknown>;
-type CatalogModelEntry = { cost?: CatalogCost };
+type CatalogModelEntry = { cost?: CatalogCost; limit?: { context?: unknown } };
 type CatalogProvider = { models?: Record<string, CatalogModelEntry>; version?: unknown; updatedAt?: unknown };
 type CatalogResponse = Record<string, CatalogProvider> & { version?: unknown; updatedAt?: unknown };
 
@@ -7110,13 +7145,63 @@ const RATE_UNITS = {
 } as const;
 let rateSnapshotMap: ReadonlyMap<string, RateSnapshot> = new Map();
 let ratesLoadPromise: Promise<void> | null = null;
+/**
+ * Context windows from the same models.dev payload, keyed `provider\0model`.
+ *
+ * Neither the OpenAI `/models` response nor either relay carries a window, so
+ * without this the provider-specific fallback in `defaultContextWindow` is the
+ * only answer for those routes. The catalog also covers models that fallback
+ * cannot express (an Anthropic opus at 200k, a grok at 1M, glm at 200k).
+ * Replaced atomically with the rate map; empty when the load has not succeeded,
+ * in which case the fallback answers.
+ */
+let contextCatalogMap: ReadonlyMap<string, number> = new Map();
+
+function contextCatalogKey(provider: string, model: string): string {
+  return `${provider}\0${model}`;
+}
 
 function catalogKey(provider: string, model: string, role: "main" | "summary"): string {
   return `${provider}\0${model}\0${role}`;
 }
 
-function catalogProviderId(provider: ProviderId): string {
+/**
+ * models.dev provider whose **pricing** applies to a route.
+ *
+ * Copilot and Codex are billed at OpenAI's rates, so their costs come from the
+ * `openai` catalog. This mapping is about billing only — see
+ * `contextCatalogProviderId` for the separate window lookup.
+ */
+export function catalogProviderId(provider: ProviderId): string {
   return provider === "openai-codex" || provider === "github-copilot" ? "openai" : provider;
+}
+
+/**
+ * models.dev provider whose **context windows** apply to a route.
+ *
+ * Deliberately not `catalogProviderId`: Copilot is *billed* like OpenAI but
+ * *serves* its own model list, including models OpenAI does not have (claude,
+ * grok, gemini, kimi) and ids whose window differs (`gpt-5-mini` is 264k on
+ * Copilot, 400k on OpenAI). Reusing the pricing mapping would leave those 18
+ * models with no entry and give `gpt-5-mini` the wrong window.
+ *
+ * Both OpenCode relays serve one shared model list, which models.dev publishes
+ * as `opencode`; neither relay endpoint reports a window itself.
+ */
+export function contextCatalogProviderId(provider: ProviderId): string {
+  if (provider === "opencode-go" || provider === "opencode-zen") return "opencode";
+  return provider;
+}
+
+/** The context entry for a route's provider, or null when it has no models.
+ *  Narrows `models` to a present record so callers need no second check. */
+function contextCatalogEntry(
+  db: CatalogResponse,
+  provider: ProviderId,
+): { models: Record<string, CatalogModelEntry> } | null {
+  const entry = db[contextCatalogProviderId(provider)];
+  if (!entry || typeof entry !== "object" || !entry.models || typeof entry.models !== "object") return null;
+  return { models: entry.models };
 }
 
 function catalogMetadata(value: unknown): string | null {
@@ -7190,21 +7275,39 @@ async function loadRates(): Promise<boolean> {
     const lookedUpAt = new Date().toISOString();
     const version = catalogMetadata(db.version) ?? catalogMetadata(db.updatedAt);
     const next = new Map<string, RateSnapshot>();
+    // Context is captured here rather than in a second fetch: this payload
+    // already carries `limit.context` for every model of every provider, and
+    // this loop already walks exactly the (provider, model) pairs we route to.
+    const nextContext = new Map<string, number>();
     for (const providerId of AUTH_PROVIDER_ORDER) {
+      // Context is gathered first and independently of pricing: it comes from a
+      // different provider entry (Copilot is billed as OpenAI but serves its own
+      // model list), and a catalog missing pricing must not hide its windows.
+      const contextCatalog = contextCatalogEntry(db, providerId);
+      if (contextCatalog) {
+        for (const [model, entry] of Object.entries(contextCatalog.models)) {
+          const context = Number(entry?.limit?.context);
+          if (Number.isFinite(context) && context >= 8_000) {
+            nextContext.set(contextCatalogKey(providerId, model), Math.floor(context));
+          }
+        }
+      }
       const catalog = db[catalogProviderId(providerId)];
       if (!catalog || typeof catalog !== "object" || !catalog.models || typeof catalog.models !== "object") continue;
       for (const [model, entry] of Object.entries(catalog.models)) {
-        if (!entry || typeof entry !== "object" || !entry.cost || typeof entry.cost !== "object") continue;
+        if (!entry || typeof entry !== "object") continue;
+        if (!entry.cost || typeof entry.cost !== "object") continue;
         for (const role of ["main", "summary"] as const) {
           const snapshot = snapshotForCatalogEntry(providerId, model, role, entry.cost, version, lookedUpAt);
           if (snapshot) next.set(catalogKey(providerId, model, role), freezeRateSnapshot(snapshot));
         }
       }
     }
-    // Replace the map only after the response has been fully normalized. A
+    // Replace the maps only after the response has been fully normalized. A
     // logical task keeps the previous map reference and cannot observe a
     // half-loaded or changing catalog.
     rateSnapshotMap = next;
+    contextCatalogMap = nextContext;
     return true;
   } catch {
     /* Offline/catalog failure leaves the scoped snapshot unknown. */

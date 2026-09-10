@@ -3634,6 +3634,80 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("defaultContextWindow openai is 128k", defaultContextWindow("openai", "gpt-4o") === 128_000);
     check("defaultContextWindow xai is 500k", defaultContextWindow("xai", "grok-4.6") === 500_000);
     check("defaultContextWindow zen grok is 500k", defaultContextWindow("opencode-zen", "grok-4.6") === 500_000);
+    // OpenAI families carry their documented windows. The openai catalog does
+    // not report context, so this fallback IS the window for that route.
+    // https://developers.openai.com/api/docs/models/gpt-5 (400,000)
+    // https://developers.openai.com/api/docs/models/gpt-6-astra (1,050,000)
+    // https://developers.openai.com/api/docs/models/o3 (200,000)
+    check("defaultContextWindow gpt-5 family is 400k", defaultContextWindow("openai", "gpt-5") === 400_000);
+    check("defaultContextWindow gpt-6-astra is 1.05M", defaultContextWindow("openai", "gpt-6-astra") === 1_050_000);
+    check("defaultContextWindow o-series is 200k", defaultContextWindow("openai", "o3") === 200_000);
+    // The generation boundary is real: 5.0-5.3 are 400k, 5.4+ are 1.05M, and
+    // the mini/nano tiers stayed at 400k when their main tier moved. Validated
+    // against the online catalog: 28/28 gpt-5/6/o models resolve as documented.
+    check("defaultContextWindow gpt-5.4 is 1.05M", defaultContextWindow("openai", "gpt-5.4") === 1_050_000);
+    check("defaultContextWindow gpt-5.6-sol is 1.05M", defaultContextWindow("openai", "gpt-5.6-sol") === 1_050_000);
+    check("defaultContextWindow gpt-5.4-mini stays 400k", defaultContextWindow("openai", "gpt-5.4-mini") === 400_000);
+    check("defaultContextWindow gpt-5.3 stays 400k", defaultContextWindow("openai", "gpt-5.3-codex") === 400_000);
+    check("defaultContextWindow chat alias is 128k", defaultContextWindow("openai", "gpt-5.2-chat-latest") === 128_000);
+    check("defaultContextWindow codex spark is 128k", defaultContextWindow("openai", "gpt-5.3-codex-spark") === 128_000);
+    // The repo's own default main model must not be under-sized.
+    check("defaultContextWindow default main model is 1.05M", defaultContextWindow("openai-codex", "gpt-5.6-sol") === 1_050_000);
+    check("defaultContextWindow gemini is 2^20", defaultContextWindow("google", "gemini-3.7-flash") === 1_048_576);
+
+    // Context-window precedence (resolveContextWindow). The shared models.dev
+    // catalog covers the routes whose endpoints report no window at all.
+    const rw = (o: Parameters<typeof core.resolveContextWindow>[0]) => core.resolveContextWindow(o);
+    // Every catalog value below DIFFERS from what the static fallback would
+    // return for the same route (gpt-5.6-sol -> 1,050,000). A value equal to the
+    // fallback would make these checks pass even with the catalog layer removed.
+    const base = { env: undefined, providerContext: undefined, catalogContext: undefined, provider: "openai" as const, model: "gpt-5.6-sol" };
+    const FALLBACK = defaultContextWindow("openai", "gpt-5.6-sol");
+    // The shared catalog answers for a route that reports nothing.
+    check("context: catalog resolves an unreported route", rw({ ...base, catalogContext: 907_000 }) === 907_000);
+    check("context: catalog value differs from the fallback", 907_000 !== FALLBACK);
+    // A route's own catalog is more specific than the shared one.
+    check("context: route catalog outranks shared catalog", rw({ ...base, providerContext: 272_000, catalogContext: 907_000 }) === 272_000);
+    // An explicit override outranks both.
+    check("context: env outranks both catalogs", rw({ ...base, env: "500000", providerContext: 272_000, catalogContext: 907_000 }) === 500_000);
+    // With no catalog loaded, the static fallback still answers (offline path).
+    check("context: fallback answers without a catalog", rw({ ...base, catalogContext: undefined }) === FALLBACK);
+    check("context: fallback answers for a relay", rw({ ...base, provider: "opencode-go", model: "glm-5.1" }) === 128_000);
+    // Degenerate catalog values must not win.
+    check("context: tiny catalog value is ignored", rw({ ...base, catalogContext: 100 }) === FALLBACK);
+    check("context: non-finite catalog value is ignored", rw({ ...base, catalogContext: Number.NaN }) === FALLBACK);
+    check("context: tiny env value is ignored", rw({ ...base, env: "10" }) === FALLBACK);
+
+    // The pricing and context provider mappings must NOT be the same function.
+    // Copilot is billed as OpenAI but serves its own model list (claude, grok,
+    // gemini, kimi) and a different gpt-5-mini window (264k vs 400k). Reusing
+    // the pricing mapping for context left 18 Copilot models with no entry.
+    check("catalog: copilot bills as openai", core.catalogProviderId("github-copilot") === "openai");
+    check("catalog: copilot resolves context as itself", core.contextCatalogProviderId("github-copilot") === "github-copilot");
+    check("catalog: codex resolves context as itself", core.contextCatalogProviderId("openai-codex") === "openai-codex");
+    check("catalog: relays share the opencode context list", core.contextCatalogProviderId("opencode-go") === "opencode" && core.contextCatalogProviderId("opencode-zen") === "opencode");
+    check("catalog: relays keep their own pricing entry", core.catalogProviderId("opencode-go") === "opencode-go");
+    check("catalog: plain providers map to themselves", core.contextCatalogProviderId("anthropic") === "anthropic" && core.catalogProviderId("anthropic") === "anthropic");
+    // A named family must beat the floor; this is the bug that shipped.
+    check("defaultContextWindow gpt-5 is not floored", defaultContextWindow("openai", "gpt-5") > defaultContextWindow("openai", "gpt-4o"));
+    // An undocumented id must NOT inherit its flagship's window.
+    check("defaultContextWindow undisclosed gpt-6 id takes the floor", defaultContextWindow("openai", "gpt-6-mini") === 128_000);
+    // Relay ids that name a real model get that model's window.
+    check("defaultContextWindow relay gpt-5 keeps its window", defaultContextWindow("openrouter", "openai/gpt-5") === 400_000);
+
+    // A relay catalog accepts any id, so an id it did not describe must take the
+    // conservative floor instead of the largest window seen anywhere.
+    check("defaultContextWindow relay unknown id takes the floor", defaultContextWindow("opencode-go", "muse-spark-1.3") === 128_000);
+    check("defaultContextWindow openrouter unknown id takes the floor", defaultContextWindow("openrouter", "some-vendor/undescribed") === 128_000);
+    check("defaultContextWindow self-described id takes the floor", defaultContextWindow("opencode-zen", "undescribed-model") === 128_000);
+    // The invariant the bug violated: an unestablished window must never be
+    // claimed larger than a window some provider documents explicitly.
+    check(
+      "defaultContextWindow floor never exceeds an explicit window",
+      defaultContextWindow("opencode-go", "undescribed") <= defaultContextWindow("anthropic", "claude-haiku-4-5"),
+    );
+    // Explicit routes are untouched by the floor.
+    check("defaultContextWindow openai is not raised by the floor", defaultContextWindow("openai", "gpt-4o") < defaultContextWindow("anthropic", "claude-sonnet-5"));
     check("includeEncryptedReasoning skips xai", includeEncryptedReasoning("xai", "grok-4.6") === false);
     check("includeEncryptedReasoning skips zen grok", includeEncryptedReasoning("opencode-zen", "grok-4.6") === false);
     check("includeEncryptedReasoning keeps openai", includeEncryptedReasoning("openai", "gpt-5.6-sol") === true);

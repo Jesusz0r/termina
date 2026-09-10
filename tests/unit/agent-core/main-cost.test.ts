@@ -45,7 +45,7 @@ describe("Agent Core Canonical Cost Contract", () => {
             version: "cost-fixture-v1",
             openai: { models: { "gpt-5.6-sol": { cost: {
               input: 1, output: 2, cache_read: 0.1, cache_write: 1.25, reasoning: 2
-            } } } }
+            }, limit: { context: 400000 } } } }
           }), { status: 200, headers: { "content-type": "application/json" } });
         }
         await new Promise((resolve) => setTimeout(resolve, 50));
