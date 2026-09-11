@@ -192,3 +192,38 @@ export function findTypeAheadIndex(names: readonly string[], from: number, buffe
   if (direct !== -1) return direct;
   return query.length > 1 ? search(query.slice(0, 1)) : -1;
 }
+
+/**
+ * Rows that survive an active filter: every match, every ancestor directory of a
+ * match, and the project root.
+ *
+ * Ancestors are the point. A match inside a collapsed folder only reads as "in
+ * context" if the path down to it stays on screen, so the set carries the whole
+ * chain rather than the bare matches. The root ("") is included for the same
+ * reason the change marker includes it: with the root collapsed, a filtered tree
+ * would otherwise show nothing at all.
+ *
+ * An empty result yields an empty set, NOT null: "the query matched nothing" and
+ * "no filter is active" are different states, and only the caller knows which
+ * one it is. A null return here would paint a no-match query as an unfiltered
+ * tree.
+ */
+export function filterVisibleSet(matches: readonly string[]): Set<string> {
+  const visible = new Set<string>();
+  for (const raw of matches) {
+    const rel = normalizeRelPath(raw);
+    // Blank, root-sentinel and whitespace-only entries are not real paths; a
+    // bare " " would otherwise enter the set and keep the root visible, showing
+    // an unfiltered-looking tree for a query that matched nothing.
+    if (!rel || rel === "." || !rel.trim()) continue;
+    visible.add(rel);
+    for (const dir of ancestorDirs(rel)) visible.add(dir);
+  }
+  if (visible.size > 0) visible.add("");
+  return visible;
+}
+
+/** True when a row stays visible under an active filter set. */
+export function filterKeeps(visible: Set<string>, relPath: string): boolean {
+  return visible.has(normalizeRelPath(relPath));
+}

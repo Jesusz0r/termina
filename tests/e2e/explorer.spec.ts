@@ -1,5 +1,5 @@
 import { test, expect } from "./fixtures.ts";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 test.describe("Explorer File Tree & Actions", () => {
@@ -360,5 +360,82 @@ test.describe("Explorer create targets & delete confirmation", () => {
     await expect(page.locator(".modal-body")).toContainText("everything inside it");
     await page.keyboard.press("Escape");
     await expect(page.locator(".modal")).toHaveCount(0);
+  });
+});
+
+test.describe("Explorer filter", () => {
+  test("reveals a match inside a collapsed folder, keeping its ancestors", async ({ page }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+    const tree = page.locator("#explorer-tree");
+    const input = page.locator("#explorer-filter-input");
+    await expect(input).toBeVisible();
+
+    // index.ts lives in src/, which starts collapsed and so is not mounted.
+    expect(await tree.getByText("index.ts").isVisible().catch(() => false)).toBe(false);
+
+    await input.fill("index");
+    await expect(tree.getByText("index.ts")).toBeVisible({ timeout: 10_000 });
+    const shown = await page.locator(".explorer-row").evaluateAll((els) =>
+      els.filter((el) => !(el as HTMLElement).hidden).map((el) => (el as HTMLElement).dataset.relPath),
+    );
+    // The match, the folder it lives in, and the root all stay on screen.
+    expect(shown).toContain("src/index.ts");
+    expect(shown).toContain("src");
+    expect(shown).toContain("");
+    // A non-matching sibling is hidden.
+    expect(shown).not.toContain("greeting.ts");
+  });
+
+  test("an unmatched query shows nothing and flags the box, clearing restores the tree", async ({ page }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+    const input = page.locator("#explorer-filter-input");
+    const shown = () => page.locator(".explorer-row").evaluateAll((els) =>
+      els.filter((el) => !(el as HTMLElement).hidden).length,
+    );
+
+    await input.fill("zzzqqq");
+    await expect.poll(shown, { timeout: 10_000 }).toBe(0);
+    await expect(input).toHaveClass(/no-matches/);
+
+    // Escape clears and the tree returns.
+    await input.press("Escape");
+    await expect(input).toHaveValue("");
+    await expect(page.locator("#explorer-tree").getByText("greeting.ts")).toBeVisible();
+  });
+
+  test("the keyboard never lands on a filtered-out row", async ({ page }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+    const tree = page.locator("#explorer-tree");
+    const input = page.locator("#explorer-filter-input");
+
+    await input.fill("index");
+    await expect(tree.getByText("index.ts")).toBeVisible({ timeout: 10_000 });
+    await input.press("ArrowDown");
+
+    // Focus and the roving tabindex both stay on a row the user can see.
+    const focusedHidden = await page.evaluate(() => document.activeElement?.hasAttribute("hidden") ?? null);
+    expect(focusedHidden).toBe(false);
+    const hiddenStops = await tree
+      .locator(".explorer-row[hidden]")
+      .evaluateAll((els) => els.filter((el) => (el as HTMLElement).tabIndex === 0).length);
+    expect(hiddenStops).toBe(0);
+    const visibleStops = await tree
+      .locator(".explorer-row:not([hidden])")
+      .evaluateAll((els) => els.filter((el) => (el as HTMLElement).tabIndex === 0).length);
+    expect(visibleStops).toBe(1);
+  });
+
+  test("switching projects clears the filter", async ({ page, runRoot }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+    const input = page.locator("#explorer-filter-input");
+    await input.fill("greeting");
+    await expect(input).toHaveValue("greeting");
+
+    const other = join(runRoot, "filter-other");
+    mkdirSync(other, { recursive: true });
+    await page.evaluate((dir) => window.termina.projectOpenPath(dir), other);
+    await expect(page.locator(".project-tab")).toHaveCount(2, { timeout: 10_000 });
+    // A query from the previous project must not carry over.
+    await expect(input).toHaveValue("");
   });
 });

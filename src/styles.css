@@ -3164,3 +3164,44 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
+/* ---- explorer filter ---- */
+
+/* Under the header, above the tree: the conventional place for a filter, and
+ * the tree keeps the remaining flexible height. */
+.explorer-filter {
+  flex: 0 0 auto;
+  padding: 6px 8px 4px;
+}
+
+.explorer-filter-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 8px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  -webkit-app-region: no-drag;
+}
+
+.explorer-filter-input::placeholder {
+  color: var(--text-dim);
+}
+
+.explorer-filter-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* No match: the query is live but nothing in the project matched. */
+.explorer-filter-input.no-matches {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+/* Hidden rows must not take part in layout or keyboard navigation. */
+.explorer-row[hidden] {
+  display: none;
+}

@@ -5,6 +5,8 @@ import {
   deleteConfirmMessage,
   extensionOf,
   fileIconKind,
+  filterKeeps,
+  filterVisibleSet,
   findTypeAheadIndex,
   normalizeRelPath,
   parentRowRel,
@@ -265,6 +267,54 @@ describe("explorer file visuals", () => {
     it("falls back to the name when there is no relative path", () => {
       expect(deleteConfirmMessage({ relPath: "", name: "project", type: "dir" }))
         .toBe('Delete folder "project" and everything inside it?');
+    });
+  });
+
+  describe("filterVisibleSet", () => {
+    it("keeps a match, its ancestors, and the root", () => {
+      const set = filterVisibleSet(["src/components/a.ts"]);
+      expect([...set].sort()).toEqual(["", "src", "src/components", "src/components/a.ts"]);
+    });
+
+    it("keeps the root for a top-level match", () => {
+      const set = filterVisibleSet(["greeting.ts"]);
+      expect([...set].sort()).toEqual(["", "greeting.ts"]);
+    });
+
+    it("returns an EMPTY set for no matches, distinct from no filter", () => {
+      // null means "no filter active"; an empty set means "the query matched
+      // nothing". Conflating them would paint a no-match query as an
+      // unfiltered tree.
+      const set = filterVisibleSet([]);
+      expect(set).not.toBeNull();
+      expect(set.size).toBe(0);
+    });
+
+    it("ignores blank entries so they cannot fake a match", () => {
+      expect(filterVisibleSet(["", ".", " "]).size).toBe(0);
+    });
+
+    it("normalizes separators so Windows paths match row data", () => {
+      const set = filterVisibleSet(["src\\deep\\a.ts"]);
+      expect(set.has("src/deep")).toBe(true);
+      expect(set.has("src/deep/a.ts")).toBe(true);
+    });
+
+    it("unions shared ancestors across matches", () => {
+      const set = filterVisibleSet(["src/a.ts", "src/deep/b.ts"]);
+      expect([...set].sort()).toEqual(["", "src", "src/a.ts", "src/deep", "src/deep/b.ts"]);
+    });
+  });
+
+  describe("filterKeeps", () => {
+    it("keeps matches and ancestors, drops everything else", () => {
+      const set = filterVisibleSet(["src/a.ts"]);
+      expect(filterKeeps(set, "src/a.ts")).toBe(true);
+      expect(filterKeeps(set, "src")).toBe(true);
+      expect(filterKeeps(set, "")).toBe(true);
+      expect(filterKeeps(set, "greeting.ts")).toBe(false);
+      expect(filterKeeps(set, "src/other.ts")).toBe(false);
+      expect(filterKeeps(set, "srcx")).toBe(false);
     });
   });
 

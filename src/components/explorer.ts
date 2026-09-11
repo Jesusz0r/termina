@@ -7,9 +7,12 @@
  */
 import { pathBasename, type CommandId, type ExplorerEntry } from "../../shared/types";
 import {
+  ancestorDirs,
   computeChangedSets,
   deleteConfirmMessage,
   fileIconKind,
+  filterKeeps,
+  filterVisibleSet,
   findTypeAheadIndex,
   normalizeRelPath,
   parentRowRel,
@@ -22,6 +25,9 @@ import { copyText, showConfirm, showInput, toast } from "./modals";
 
 /** Matches the CSS transition on the focus ring; type-ahead resets after it. */
 const TYPE_AHEAD_RESET_MS = 700;
+
+/** Matches the Quick Open debounce; long enough to skip intermediate keystrokes. */
+const FILTER_DEBOUNCE_MS = 150;
 
 /** Icon element for a file row; the kind drives the CSS shape/color. */
 function makeFileIcon(name: string): HTMLElement {
@@ -126,6 +132,14 @@ export class Explorer {
   private focusedRow: HTMLElement | null = null;
   /** Roving tabindex target: the project-relative path of the focused row. */
   private focusedPath: string | null = null;
+  /** Filter box, when the host markup provides one. */
+  private filterInput: HTMLInputElement | null = null;
+  /** Rows an active filter keeps; null means no filter is active. */
+  private filterVisible: Set<string> | null = null;
+  /** Debounce for the project-wide search behind the filter. */
+  private filterTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Fences a superseded search: a slow reply never paints over a newer query. */
+  private filterSeq = 0;
   /** Type-ahead buffer and its reset timer (keyboard name search). */
   private typeBuffer = "";
   private typeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -137,6 +151,26 @@ export class Explorer {
 
   constructor(container: HTMLElement) {
     this.treeEl = container.querySelector("#explorer-tree") as HTMLElement;
+    this.filterInput = container.querySelector<HTMLInputElement>("#explorer-filter-input");
+    this.filterInput?.addEventListener("input", () => this.setFilter(this.filterInput?.value ?? ""));
+    this.filterInput?.addEventListener("keydown", (e) => {
+      // Escape clears the filter and hands focus back to the tree, so the
+      // arrow keys keep working without a mouse trip.
+      if (e.key === "Escape" && this.filterInput?.value) {
+        e.preventDefault();
+        this.filterInput.value = "";
+        this.setFilter("");
+        this.restoreFocus();
+        return;
+      }
+      // Down/Up leave the box for the tree, matching the filter-then-navigate flow.
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        const row = this.currentRow(this.visibleRows());
+        if (!row) return;
+        e.preventDefault();
+        this.focusRow(row);
+      }
+    });
     this.treeEl.addEventListener("contextmenu", (e) => {
       if ((e.target as HTMLElement).closest(".explorer-row")) return;
       e.preventDefault();
@@ -152,9 +186,16 @@ export class Explorer {
 
   // ------------------------------------------------- keyboard + focus --
 
-  /** Rows in DOM order, which is preorder traversal and therefore visual order. */
+  /**
+   * Rows the keyboard can reach, in DOM order (which is preorder traversal and
+   * therefore visual order).
+   *
+   * Hidden rows are excluded: an active filter hides rows without unmounting
+   * them, so without this the arrow keys and type-ahead would walk into rows the
+   * user cannot see.
+   */
   private visibleRows(): HTMLElement[] {
-    return [...this.treeEl.querySelectorAll<HTMLElement>(".explorer-row")];
+    return [...this.treeEl.querySelectorAll<HTMLElement>(".explorer-row:not([hidden])")];
   }
 
   private rowByRel(rel: string): HTMLElement | null {
@@ -431,6 +472,14 @@ export class Explorer {
     // Change marks are project-relative too; main re-pushes them per project.
     this.changedRel = new Set<string>();
     this.changedDirRel = new Set<string>();
+    // The filter is project-relative too; clear it rather than carry matches over.
+    this.filterVisible = null;
+    this.filterSeq++;
+    if (this.filterTimer) {
+      clearTimeout(this.filterTimer);
+      this.filterTimer = null;
+    }
+    if (this.filterInput) this.filterInput.value = "";
     // Keyboard state is project-relative as well.
     this.focusedRow = null;
     this.focusedPath = null;
@@ -508,6 +557,98 @@ export class Explorer {
     this.restoreFocus();
   }
 
+  // -------------------------------------------------------------- filter --
+
+  /**
+   * Apply a filter query to the tree.
+   *
+   * The match set comes from the existing project-wide file search rather than
+   * from the mounted rows: a filter that only saw mounted rows could never find
+   * a file inside a collapsed folder, which is most of them. That search is
+   * already bounded and cancellable (`searchProjectFiles`).
+   */
+  private setFilter(query: string): void {
+    const trimmed = query.trim();
+    if (this.filterTimer) {
+      clearTimeout(this.filterTimer);
+      this.filterTimer = null;
+    }
+    const seq = ++this.filterSeq;
+    if (!trimmed) {
+      this.filterVisible = null;
+      this.applyFilter();
+      return;
+    }
+    this.filterTimer = setTimeout(() => {
+      this.filterTimer = null;
+      void this.runFilter(trimmed, seq);
+    }, FILTER_DEBOUNCE_MS);
+  }
+
+  private async runFilter(query: string, seq: number): Promise<void> {
+    let matches: string[] = [];
+    try {
+      const res = await window.termina.searchFiles(query);
+      matches = res.entries.map((entry) => entry.relPath);
+    } catch {
+      /* A failed search leaves the tree unfiltered rather than empty. */
+      return;
+    }
+    // A newer query, a cleared box, or a project switch owns the tree now.
+    if (seq !== this.filterSeq || !this.projectCwd) return;
+    // Always a set: an empty one means "this query matched nothing", which is an
+    // active filter showing no rows, not an unfiltered tree.
+    this.filterVisible = filterVisibleSet(matches);
+    await this.expandToMatches(matches);
+    if (seq !== this.filterSeq) return;
+    this.applyFilter();
+    // Row visibility changed, so re-seat focus on a row that is still shown.
+    this.restoreFocus();
+  }
+
+  /**
+   * Expand the ancestor chain of each match so its row mounts.
+   *
+   * Ancestors are expanded through the single toggle owner, so the chevron,
+   * `aria-expanded` and the children block stay in step. Expansion is left in
+   * place when the filter clears: those folders were genuinely opened, and
+   * silently collapsing them would undo the user's own expansion.
+   */
+  private async expandToMatches(matches: readonly string[]): Promise<void> {
+    for (const match of matches) {
+      for (const dirRel of ancestorDirs(match)) {
+        const mounted = this.mountedDirView(dirRel);
+        if (mounted && !mounted.view.state.expanded) await this.setDirExpanded(mounted.absPath, true);
+      }
+    }
+  }
+
+  /** The mounted view for a project-relative directory, if it has one. */
+  private mountedDirView(dirRel: string): { absPath: string; view: DirView } | null {
+    for (const [absPath, view] of this.dirViews) {
+      if (normalizeRelPath(view.entry.relPath) === dirRel) return { absPath, view };
+    }
+    return null;
+  }
+
+  /**
+   * Hide every row the filter excludes. Rows are hidden rather than unmounted:
+   * unmounting would drop `dirViews`/`DirState`, and expansion, selection and
+   * change marks all key off state that must survive the filter.
+   */
+  private applyFilter(): void {
+    const visible = this.filterVisible;
+    for (const row of this.treeEl.querySelectorAll<HTMLElement>(".explorer-row")) {
+      const rel = row.dataset.relPath;
+      // Rows without a relPath (the empty/loading placeholder) are left alone.
+      if (rel === undefined) continue;
+      row.hidden = visible !== null && !filterKeeps(visible, rel);
+    }
+    this.treeEl.classList.toggle("filtered", visible !== null);
+    // Flag a live query that matched nothing, so an empty tree is explained.
+    if (this.filterInput) this.filterInput.classList.toggle("no-matches", visible !== null && visible.size === 0);
+  }
+
   // ------------------------------------------------------------- rendering --
 
   private async renderRoot(forceReload = false): Promise<void> {
@@ -537,6 +678,7 @@ export class Explorer {
     if (view?.state.expanded && (forceReload || !view.state.loaded)) {
       await this.renderChildren(view.children, view.entry, view.state, forceReload);
     }
+    this.applyFilter();
     this.restoreFocus();
   }
 
@@ -751,7 +893,9 @@ export class Explorer {
       next.push(node);
     }
     children.replaceChildren(...next);
-    // Rows were rebuilt; keep the roving tabindex valid (and focus if we own it).
+    // Rows were rebuilt: apply the filter first so focus lands on a row that
+    // survived it, not on one this refresh hid.
+    this.applyFilter();
     this.restoreFocus();
   }
 
@@ -1063,12 +1207,8 @@ export class Explorer {
    */
   private async revealDirRel(rel: string): Promise<void> {
     if (!rel) return;
-    for (const [absPath, view] of this.dirViews) {
-      if (normalizeRelPath(view.entry.relPath) === rel) {
-        await this.setDirExpanded(absPath, true);
-        return;
-      }
-    }
+    const mounted = this.mountedDirView(rel);
+    if (mounted) await this.setDirExpanded(mounted.absPath, true);
   }
 
   private async renameAt(entry: ExplorerEntry): Promise<void> {
