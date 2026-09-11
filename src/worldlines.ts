@@ -1,14 +1,17 @@
 /**
- * Worldlines panel (WORLDLINES §6.9): one card per candidate pair with
- * lifecycle, model, Verify, reopen, discard, and on-demand details
- * (source statistics, provenance, runtime age, dependency changes).
- * Comparison opens in Change Review.
+ * Worldlines panel (WORLDLINES §6.9): one card per candidate pair.
+ * Open / Compare / Promote stay on the card; Challenge / Evidence /
+ * Export / Discard sit behind a ⋯ disclosure (same toggle as details ▾).
+ * A ⇄ B stays on the pair header. Comparison opens in Change Review.
  *
  * DOM updates are incremental: an update push touches only its card.
  */
 import { CHALLENGE_PROFILES, type ChallengeProfile, type WorldlineSummary, type WorldlineDetails, type WorldlineChangedFile, type EvidenceSummary } from "../shared/types";
 import { showConfirm, showFileListModal, toast } from "./components/modals";
 import { KIND_LABEL, chipText, evidenceLineDetail, formatBytes, profileCaption, recordOf, worldlineHeaderSummary } from "./worldline-evidence";
+
+/** Orientation for the first A/B pair: A kept the run, B is the retry. */
+export const WORLDLINE_FIRST_PAIR_LINE = "A is the result · B is a retry";
 
 interface ViewHandlers {
   /** Open a base-to-candidate diff in Change Review. */
@@ -36,6 +39,14 @@ function actionButton(className: string, label: string, title: string, onClick: 
     onClick();
   });
   return btn;
+}
+
+/** ⋯ toggle for overflow actions — same hidden-body pattern as details ▾. */
+function moreButton(title: string, body: HTMLElement): HTMLButtonElement {
+  body.hidden = true;
+  return actionButton("cand-details", "⋯", title, () => {
+    body.hidden = !body.hidden;
+  });
 }
 
 interface CandidateCard {
@@ -283,6 +294,10 @@ export class WorldlinesView {
     runEl.textContent = "…";
     const spacer = document.createElement("div");
     spacer.className = "spacer";
+    const abBtn = actionButton("cmp-ab", "A ⇄ B", "Compare the A and B heads file by file", () => void this.openABCompare(comparisonId));
+    const moreBody = document.createElement("div");
+    moreBody.className = "comparison-head";
+    const moreBtn = moreButton("Challenge, Evidence, and Discard", moreBody);
     const challengeLabels: Record<ChallengeProfile, string> = {
       "fewer-dependencies": "Deps",
       "preserve-api": "API",
@@ -296,9 +311,12 @@ export class WorldlinesView {
       return btn;
     });
     const evidenceBtn = actionButton("cmp-evidence", "Evidence", "Run the evidence contract for both candidates and rank the profiles", () => void this.evidence(comparisonId));
-    const abBtn = actionButton("cmp-ab", "A ⇄ B", "Compare the A and B heads file by file", () => void this.openABCompare(comparisonId));
     const discardBtn = actionButton("cmp-discard", "Discard", "Discard this comparison and remove every app-owned resource", () => void this.confirmDiscard(comparisonId));
-    head.append(idEl, runEl, spacer, ...challengeButtons, evidenceBtn, abBtn, discardBtn);
+    moreBody.append(...challengeButtons, evidenceBtn, discardBtn);
+    const rolesEl = document.createElement("div");
+    rolesEl.className = "cmp-caption";
+    rolesEl.textContent = WORLDLINE_FIRST_PAIR_LINE;
+    head.append(idEl, runEl, spacer, abBtn, moreBtn, rolesEl);
 
     const verdictsEl = document.createElement("div");
     verdictsEl.className = "cmp-verdicts";
@@ -312,7 +330,7 @@ export class WorldlinesView {
       pair.cards.set(label, card);
       row.appendChild(card.el);
     }
-    block.append(head, verdictsEl, row);
+    block.append(head, moreBody, verdictsEl, row);
     this.listEl.appendChild(block);
     this.pairs.set(comparisonId, pair);
     this.refreshCount();
@@ -341,6 +359,9 @@ export class WorldlinesView {
     stateEl.className = "cand-state";
     const spacer = document.createElement("div");
     spacer.className = "spacer";
+    const moreBody = document.createElement("div");
+    moreBody.className = "cand-actions";
+    const moreBtn = moreButton("Verify and Export", moreBody);
     const detailsBtn = actionButton("cand-details", "▾", "Show source statistics, provenance, and dependency changes", () => this.toggleDetails(comparisonId, label, false));
     head.append(badge, role, stateEl, spacer, detailsBtn);
 
@@ -368,14 +389,15 @@ export class WorldlinesView {
 
     const actions = document.createElement("div");
     actions.className = "cand-actions";
+    const openBtn = actionButton("cand-open", "Open", "Reopen the candidate agent terminal", () => void this.reopen(comparisonId, label));
+    const compareBtn = actionButton("cand-compare", "Compare", "Diff the candidate head against the shared base", () => void this.openBaseCompare(comparisonId, label));
     const promoteBtn = actionButton("cand-promote", "Promote", "Merge this candidate into the primary project", () => void this.promote(comparisonId, label));
     const verifyBtn = actionButton("cand-verify", "Verify", "Run the detected tests inside the candidate sandbox", () => void this.verify(comparisonId, label));
-    const compareBtn = actionButton("cand-compare", "Compare", "Diff the candidate head against the shared base", () => void this.openBaseCompare(comparisonId, label));
-    const openBtn = actionButton("cand-open", "Open", "Reopen the candidate agent terminal", () => void this.reopen(comparisonId, label));
     const exportBtn = actionButton("cand-export", "Export", "Write a patch bundle with the evidence summary for a PR", () => void this.export(comparisonId, label));
-    actions.append(promoteBtn, verifyBtn, compareBtn, openBtn, exportBtn);
+    actions.append(openBtn, compareBtn, promoteBtn, moreBtn);
+    moreBody.append(verifyBtn, exportBtn);
 
-    el.append(head, meta, detailsBody, actions);
+    el.append(head, meta, detailsBody, actions, moreBody);
 
     const card: CandidateCard = {
       summary: { id: `${comparisonId}-${label.toLowerCase()}`, comparisonId, label, role: label === "A" ? "reference" : "alternative", state: "creating", error: null, root: "", sessionFile: null, model: null, thinkingLevel: null, createdAt: 0, terminalId: null, version: 0, comparisonBaseStateId: "", promotionBaseStateId: "", headStateId: "", sourceRunId: "" },
