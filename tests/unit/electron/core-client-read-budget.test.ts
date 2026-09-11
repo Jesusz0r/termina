@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -10,6 +10,19 @@ import { parseNativeByteBound } from "../../test-support.ts";
 process.env.TERMINA_CORE_TEST = "1";
 process.env.TERMINA_CORE_BIN ??= resolve("core/target/release/termina-core");
 
+/** store-create lifecycle fields, round-tripped verbatim into later requests. */
+interface StoreCreateLifecycle {
+  storeGeneration: unknown;
+  storeIdentity: unknown;
+  storeGitIdentity: unknown;
+  storeGitObjectsIdentity: unknown;
+  storeGitObjectsInfoIdentity: unknown;
+  storeGitObjectsPackIdentity: unknown;
+  storeGitRefsIdentity: unknown;
+  storeGitRefsHeadsIdentity: unknown;
+  storeGitRefsTagsIdentity: unknown;
+}
+
 describe("Core Client Read Budget & Native Bound Invariants", () => {
   it("enforces native read budget limits and fails closed on overflow", async () => {
     const root = mkdtempSync(join(tmpdir(), "termina-core-read-budget-"));
@@ -18,15 +31,15 @@ const store = join(root, "store");
 const rawAtNativeLimit = 47 * 1024 * 1024;
 const rawOverNativeLimit = 48 * 1024 * 1024;
 
-function git(...args) {
+function git(...args: string[]) {
   return execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
 }
 
-function gitAt(directory, ...args) {
+function gitAt(directory: string, ...args: string[]) {
   return execFileSync("git", ["-C", directory, ...args], { encoding: "utf8" }).trim();
 }
 
-async function waitForMarker(path) {
+async function waitForMarker(path: string) {
   for (let attempt = 0; attempt < 1_000; attempt += 1) {
     if (existsSync(path)) return;
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
@@ -46,7 +59,7 @@ try {
   git("commit", "--quiet", "-m", "read budget fixture");
   const commit = git("rev-parse", "HEAD");
 
-  const created = await coreClient.request({ op: "store-create", storeDir: store, sourceRoot: repo, sourceGitDir: join(repo, ".git"), objectFormat: "sha1" });
+  const created = await coreClient.request({ op: "store-create", storeDir: store, sourceRoot: repo, sourceGitDir: join(repo, ".git"), objectFormat: "sha1" }) as StoreCreateLifecycle;
   const storeLifecycle = {
     storeGeneration: created.storeGeneration,
     storeIdentity: created.storeIdentity,
@@ -58,7 +71,7 @@ try {
     storeGitRefsHeadsIdentity: created.storeGitRefsHeadsIdentity,
     storeGitRefsTagsIdentity: created.storeGitRefsTagsIdentity,
   };
-  const storeRequest = (extra) => ({
+  const storeRequest = (extra: Record<string, unknown>) => ({
     storeDir: store,
     sourceRoot: repo,
     sourceGitDir: join(repo, ".git"),
@@ -71,7 +84,7 @@ try {
     head: commit,
     parentCommit: null,
     budget: { maxFileBytes: 64 * 1024 * 1024, maxNewBlobBytes: 200 * 1024 * 1024 },
-  }));
+  })) as { commit: string };
   const state = captured.commit;
 
   // macOS exposes /var as a fixed system alias for /private/var. Exercise
@@ -93,7 +106,7 @@ try {
         head: commit,
         parentCommit: null,
         budget: { maxFileBytes: 64 * 1024 * 1024, maxNewBlobBytes: 200 * 1024 * 1024 },
-      }));
+      })) as { commit: string };
       assert.ok(canonicalCapture.commit, "canonical /private/var capture returned no state");
       if (repo !== aliasRepo || store !== aliasStore) {
         const aliasCapture = await coreClient.request(storeRequest({
@@ -104,7 +117,7 @@ try {
           head: commit,
           parentCommit: null,
           budget: { maxFileBytes: 64 * 1024 * 1024, maxNewBlobBytes: 200 * 1024 * 1024 },
-        }));
+        })) as { commit: string };
         assert.ok(aliasCapture.commit, "aliased /var capture returned no state");
       }
       console.log("PASS exact /var and /private/var capture spellings bind the same root safely");
@@ -113,23 +126,23 @@ try {
     }
   }
 
-  const readBlob = async (relPath) => coreClient.request(storeRequest({ op: "read-blob", stateId: state, relPath }));
-  const repoFile = async (path) => coreClient.request({ op: "repo-file", root: repo, commit, path });
+  const readBlob = async (relPath: string) => await coreClient.request(storeRequest({ op: "read-blob", stateId: state, relPath })) as { content: string };
+  const repoFile = async (path: string) => await coreClient.request({ op: "repo-file", root: repo, commit, path }) as { content: string };
   const blobAtLimit = await readBlob("blob-at-native-limit.bin");
   assert.equal(Buffer.from(blobAtLimit.content, "base64").byteLength, rawAtNativeLimit);
   const fileAtLimit = await repoFile("blob-at-native-limit.bin");
   assert.equal(Buffer.from(fileAtLimit.content, "base64").byteLength, rawAtNativeLimit);
   console.log("PASS native-limit read-blob and repo-file payloads round-trip through CoreClient");
 
-  async function rejectAtNativeReadBound(operation, label) {
-    let failure;
+  async function rejectAtNativeReadBound(operation: () => Promise<unknown>, label: string) {
+    let failure: unknown;
     try {
       await operation();
     } catch (error) {
       failure = error;
     }
     assert.ok(failure, `${label} did not reject an over-bound payload`);
-    return parseNativeByteBound(failure?.message ?? failure);
+    return parseNativeByteBound(failure instanceof Error ? failure.message : failure);
   }
 
   const blobBound = await rejectAtNativeReadBound(
@@ -188,7 +201,7 @@ try {
     sourceRoot: ancestorRepo,
     sourceGitDir: ancestorGitDir,
     objectFormat: "sha1",
-  });
+  }) as StoreCreateLifecycle;
   const ancestorLifecycle = {
     storeGeneration: ancestorCreated.storeGeneration,
     storeIdentity: ancestorCreated.storeIdentity,
@@ -200,7 +213,7 @@ try {
     storeGitRefsHeadsIdentity: ancestorCreated.storeGitRefsHeadsIdentity,
     storeGitRefsTagsIdentity: ancestorCreated.storeGitRefsTagsIdentity,
   };
-  const ancestorRequest = (extra) => ({
+  const ancestorRequest = (extra: Record<string, unknown>) => ({
     storeDir: ancestorStore,
     sourceRoot: ancestorRepo,
     sourceGitDir: ancestorGitDir,
@@ -214,7 +227,7 @@ try {
     head: ancestorCommit,
     parentCommit: null,
     budget: { maxFileBytes: 64 * 1024 * 1024, maxNewBlobBytes: 200 * 1024 * 1024 },
-  }));
+  })) as { commit: string };
   const ancestorReady = join(root, "ancestor-swap-ready");
   const ancestorRelease = join(root, "ancestor-swap-release");
   const ancestorBackup = join(root, "ancestor-original-backup");
@@ -236,7 +249,7 @@ try {
     op: "read-blob",
     stateId: ancestorBase.commit,
     relPath: "payload.txt",
-  }));
+  })) as { content: string };
   assert.equal(Buffer.from(retainedAncestor.content, "base64").toString(), "ancestor-A\n");
     } finally {
       coreClient.dispose();

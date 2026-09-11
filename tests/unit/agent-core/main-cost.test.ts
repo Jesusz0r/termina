@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 /**
  * Focused integration contract for canonical per-run rate snapshots.
  *
@@ -22,7 +22,7 @@ import { join } from "node:path";
 
 describe("Agent Core Canonical Cost Contract", () => {
   it("passes canonical cost calculation contract", async () => {
-    function readJsonLines(path) {
+    function readJsonLines(path: string) {
       if (!existsSync(path)) return [];
       return readFileSync(path, "utf8")
         .split("\n")
@@ -89,7 +89,7 @@ describe("Agent Core Canonical Cost Contract", () => {
     child.stderr.on("data", (chunk) => { stderr += chunk; });
     const ackTimer = setInterval(() => {
       try {
-        const request = readJsonLines(join(events, `${terminalId}.jsonl`)).findLast((record) => record.t === "preflight_request");
+        const request = [...readJsonLines(join(events, `${terminalId}.jsonl`))].reverse().find((record) => record.t === "preflight_request");
         if (request?.requestId) {
           writeFileSync(
             join(events, `ack-${terminalId}-${request.requestId}.json`),
@@ -103,7 +103,7 @@ describe("Agent Core Canonical Cost Contract", () => {
     }, 10);
     
     try {
-      const result = await new Promise((resolve) => {
+      const result = await new Promise<{ code: number | null; signal: string | null }>((resolve) => {
         const timer = setTimeout(() => {
           child.kill("SIGKILL");
           resolve({ code: -1, signal: "SIGKILL" });

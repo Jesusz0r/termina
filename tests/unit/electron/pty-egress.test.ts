@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -17,10 +17,106 @@ import {
   sendPtyRendererMessage,
   splitPtyData,
 } from "../../../electron/pty-egress.ts";
+import type {
+  PtyEgressQueueStats,
+  PtyEgressSchedulerOptions,
+  PtyEgressTransport,
+  PtyRendererSendTarget,
+} from "../../../electron/pty-egress.ts";
 import {
   PtySequenceLedger,
   PTY_RENDERER_SEQUENCE_GAP_WINDOW,
 } from "../../../src/pty-sequence-ledger.ts";
+
+interface PtyDataSend {
+  id: string;
+  terminalGeneration: number;
+  windowGeneration: number;
+  rendererGeneration: number;
+  sequence: number;
+  data: string;
+}
+
+interface PtyDataSendWithTime extends PtyDataSend {
+  at: number;
+}
+
+interface PtyExitSend {
+  id: string;
+  terminalGeneration: number;
+  windowGeneration: number;
+  rendererGeneration: number;
+  sequence: number;
+  code: number;
+}
+
+interface PtyDataEvent extends PtyDataSend {
+  kind: "data";
+  code?: undefined;
+}
+
+interface PtyExitEvent extends PtyExitSend {
+  kind: "exit";
+  data?: undefined;
+}
+
+type PtyEgressEvent = PtyDataEvent | PtyExitEvent;
+
+interface OrderedDataSend extends PtyDataSend {
+  kind?: undefined;
+  code?: undefined;
+}
+
+interface OrderedExitSend extends PtyExitSend {
+  kind: "exit";
+  data?: undefined;
+}
+
+type OrderedSend = OrderedDataSend | OrderedExitSend;
+
+interface AckPayload {
+  id: string;
+  terminalGeneration: number;
+  windowGeneration: number;
+  rendererGeneration: number;
+  sequence: number;
+}
+
+type PtyEgressGlobalStats = Extract<
+  ReturnType<PtyEgressScheduler["stats"]>,
+  { rendererReady: boolean }
+>;
+
+function terminalStats(scheduler: PtyEgressScheduler, id: string): PtyEgressQueueStats {
+  const stats = scheduler.stats(id);
+  assert("hydrated" in stats);
+  return stats;
+}
+
+function globalStats(scheduler: PtyEgressScheduler): PtyEgressGlobalStats {
+  const stats = scheduler.stats();
+  assert("rendererReady" in stats);
+  return stats;
+}
+
+interface MockWebContentsCall {
+  channel: string;
+  payload: unknown;
+}
+
+interface MockWebContents {
+  destroyed: boolean;
+  crashed: boolean;
+  calls: MockWebContentsCall[];
+  isDestroyed(): boolean;
+  isCrashed(): boolean;
+  send(channel: string, payload: unknown): void;
+}
+
+interface MockWindow {
+  destroyed: boolean;
+  isDestroyed(): boolean;
+}
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const waitFor = async (predicate: () => boolean, message: string) => {
@@ -48,7 +144,13 @@ function source() {
   };
 }
 
-function ready(scheduler, id, terminalGeneration, windowGeneration = 1, rendererGeneration = 1) {
+function ready(
+  scheduler: PtyEgressScheduler,
+  id: string,
+  terminalGeneration: number,
+  windowGeneration = 1,
+  rendererGeneration = 1,
+): void {
   assert.equal(scheduler.setRendererReady(windowGeneration, rendererGeneration, true), true);
   assert.equal(
     scheduler.hydrateTerminal(id, terminalGeneration, windowGeneration, rendererGeneration),
@@ -56,11 +158,14 @@ function ready(scheduler, id, terminalGeneration, windowGeneration = 1, renderer
   );
 }
 
-function testScheduler(transport, options = {}) {
-  return new PtyEgressScheduler(transport, { flushIntervalMs: 0, ...options });
+function testScheduler(
+  transport: Partial<PtyEgressTransport> & Pick<PtyEgressTransport, "send">,
+  options: PtyEgressSchedulerOptions = {},
+): PtyEgressScheduler {
+  return new PtyEgressScheduler(transport as PtyEgressTransport, { flushIntervalMs: 0, ...options });
 }
 
-function acknowledgeAll(scheduler, payloads) {
+function acknowledgeAll(scheduler: PtyEgressScheduler, payloads: readonly AckPayload[]): void {
   for (const payload of payloads) {
     scheduler.acknowledge(
       payload.id,
@@ -75,7 +180,7 @@ function acknowledgeAll(scheduler, payloads) {
 
 describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   it("coalesces output and admits at most one message per terminal per frame", async () => {
-    const sends = [];
+    const sends: PtyDataSendWithTime[] = [];
     const scheduler = new PtyEgressScheduler({
       send: (...args) => {
         const [id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data] = args;
@@ -111,7 +216,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   });
 
   it("preserves coalesced replay and exit ordering with frame pacing enabled", async () => {
-    const events = [];
+    const events: PtyEgressEvent[] = [];
     const scheduler = new PtyEgressScheduler({
       send: (id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data) => {
         events.push({ kind: "data", id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data });
@@ -148,7 +253,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   });
 
   it("keeps same-generation replay payloads immutable when output resumes", async () => {
-    const sends = [];
+    const sends: PtyDataSend[] = [];
     const scheduler = new PtyEgressScheduler({
       send: (id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data) => {
         sends.push({ id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data });
@@ -179,18 +284,24 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   // Generic renderer pushes use the exact BrowserWindow/WebContents/document
   // identity and turn both preflight races and synchronous send throws into a
   // harmless false result.
-  function sendTarget(window, webContents, windowGeneration, rendererGeneration, nonce) {
+  function sendTarget(
+    window: PtyRendererSendTarget["window"],
+    webContents: PtyRendererSendTarget["webContents"],
+    windowGeneration: number,
+    rendererGeneration: number,
+    nonce: string,
+  ): PtyRendererSendTarget {
     return { window, webContents, windowGeneration, rendererGeneration, nonce };
   }
-  const oldWebContents = {
+  const oldWebContents: MockWebContents = {
     destroyed: false,
     crashed: false,
     calls: [],
     isDestroyed() { return this.destroyed; },
     isCrashed() { return this.crashed; },
-    send(channel, payload) { this.calls.push({ channel, payload }); },
+    send(channel: string, payload: unknown) { this.calls.push({ channel, payload }); },
   };
-  const oldBrowserWindow = {
+  const oldBrowserWindow: MockWindow = {
     destroyed: false,
     isDestroyed() { return this.destroyed; },
   };
@@ -198,8 +309,8 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   assert.equal(isPtyRendererSendTargetCurrent(oldTarget, oldTarget), true);
   assert.equal(sendPtyRendererMessage(oldTarget, oldTarget, true, "state", { value: 1 }), true);
   assert.deepEqual(oldWebContents.calls, [{ channel: "state", payload: { value: 1 } }]);
-  const replacementWebContents = { ...oldWebContents, calls: [] };
-  const replacementWindow = { destroyed: false, isDestroyed() { return this.destroyed; } };
+  const replacementWebContents: MockWebContents = { ...oldWebContents, calls: [] };
+  const replacementWindow: MockWindow = { destroyed: false, isDestroyed() { return this.destroyed; } };
   const replacementTarget = sendTarget(replacementWindow, replacementWebContents, 2, 2, "new-document");
   assert.equal(isPtyRendererSendTargetCurrent(replacementTarget, oldTarget), false);
   assert.equal(sendPtyRendererMessage(replacementTarget, oldTarget, true, "stale", { value: 2 }), false);
@@ -295,7 +406,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
 
   // No PTY bytes may be sent merely because the document loaded. The exact
   // terminal generation handshake is the hydration boundary.
-  const hydrationSends = [];
+  const hydrationSends: PtyDataSend[] = [];
   const hydration = testScheduler({
     send: (...args) => {
       const [id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data] = args;
@@ -308,7 +419,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   assert.equal(hydration.setRendererReady(1, 1, true), true);
   assert.equal(hydration.enqueue("hydrated", 1, "before-hydration"), true);
   await sleep(10);
-  assert.deepEqual(hydrationSends, [], "document load alone cannot deliver into an unbuilt pane");
+  assert.deepEqual<PtyDataSend[]>(hydrationSends, [], "document load alone cannot deliver into an unbuilt pane");
   assert.equal(hydrationSource.paused, true);
   assert.equal(hydration.hydrateTerminal("hydrated", 1, 1, 1), true);
   await waitFor(() => hydrationSends.length === 1, "hydrated PTY output was not delivered");
@@ -321,7 +432,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
 
   // Unacknowledged bytes survive a renderer failure. Replay starts in order,
   // and a re-entrant readiness change cannot let one batch overrun the fence.
-  const replaySends = [];
+  const replaySends: PtyDataSend[] = [];
   const replay = testScheduler({
     send: (...args) => {
       const [id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data] = args;
@@ -356,7 +467,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   assert.equal(staleReady.setRendererReady(11, 1, false), true);
   assert.equal(staleReady.setRendererReady(11, 2, true), true);
   assert.equal(staleReady.hydrateTerminal("stale-ready", 12, 11, 1), false);
-  assert.equal(staleReady.stats("stale-ready").hydrated, false);
+  assert.equal(terminalStats(staleReady, "stale-ready").hydrated, false);
   assert.equal(staleReady.hydrateTerminal("stale-ready", 12, 11, 2), true);
   staleReady.cancel("stale-ready", 12);
 
@@ -554,8 +665,8 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   // A synchronous data transport throw may synchronously fence the renderer.
   // The resulting replay must own the record exactly once; the catch path
   // cannot append a second reference to the same sequence.
-  const throwingDataSends = [];
-  let throwingData;
+  const throwingDataSends: PtyDataSend[] = [];
+  let throwingData!: PtyEgressScheduler;
   let throwingDataAttempts = 0;
   throwingData = testScheduler({
     send: (...args) => {
@@ -606,8 +717,8 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   // The same ownership rule applies to the ordered exit marker. A crash
   // during its first send must replay one marker, retain the terminal, and
   // resolve finish only after the replacement acknowledges that sequence.
-  const throwingExitSends = [];
-  let throwingExit;
+  const throwingExitSends: PtyEgressEvent[] = [];
+  let throwingExit!: PtyEgressScheduler;
   let throwingExitAttempts = 0;
   throwingExit = testScheduler({
     send: (...args) => {
@@ -635,6 +746,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   void throwingExitDone.then(() => { throwingExitSettled = true; });
   await waitFor(() => throwingExitSends.some((item) => item.kind === "data"), "exit data send did not run");
   const throwingExitData = throwingExitSends.find((item) => item.kind === "data");
+  assert(throwingExitData !== undefined);
   assert.equal(throwingExit.acknowledge("throw-exit", 15, 104, 1, throwingExitData.sequence), true);
   await waitFor(() => throwingExitSends.some((item) => item.kind === "exit"), "thrown exit send did not run");
   assert.deepEqual(
@@ -668,10 +780,10 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   assert.equal(await throwingExitDone, true);
   assert.equal(throwingExit.stats("throw-exit").retainedChunks, 0);
   assert.equal(throwingExit.stats("throw-exit").retainedBytes, 0);
-  assert.equal(throwingExit.stats("throw-exit").terminalGeneration, 0);
+  assert.equal(terminalStats(throwingExit, "throw-exit").terminalGeneration, 0);
 
-  let reentrant;
-  const reentrantSends = [];
+  let reentrant!: PtyEgressScheduler;
+  const reentrantSends: PtyDataSend[] = [];
   reentrant = testScheduler({
     send: (...args) => {
       const [id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data] = args;
@@ -699,7 +811,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   // IPC admission itself is bounded by queued + in-flight bytes. A sink that
   // accepts every send but never acknowledges cannot accumulate 100 MiB in
   // Chromium behind the scheduler.
-  const slowSends = [];
+  const slowSends: PtyDataSend[] = [];
   const slow = testScheduler(
     {
       send: (...args) => {
@@ -752,7 +864,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   oversizedScheduler.cancel("oversized", 5);
 
   // Terminal id reuse cannot admit output from an old PTY generation.
-  const reuseSends = [];
+  const reuseSends: PtyDataSend[] = [];
   const reuse = testScheduler({
     send: (...args) => {
       const [id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data] = args;
@@ -777,7 +889,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
 
   // Delayed lifecycle events from an older BrowserWindow cannot disable the
   // current window. A newer document also fences all old acknowledgements.
-  const windowSends = [];
+  const windowSends: PtyDataSend[] = [];
   const windows = testScheduler({
     send: (...args) => {
       const [id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data] = args;
@@ -790,7 +902,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   windows.enqueue("window", 8, "window-byte");
   await waitFor(() => windowSends.length === 1, "window output missing");
   assert.equal(windows.setRendererReady(49, 99, false), false);
-  assert.equal(windows.stats().rendererReady, true);
+  assert.equal(globalStats(windows).rendererReady, true);
   assert.equal(windows.stats().windowGeneration, 50);
   assert.equal(windows.acknowledge("window", 8, 49, 99, 1), false);
   assert.equal(windows.acknowledge("window", 8, 50, 1, 1), true);
@@ -799,8 +911,8 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
 
   // Natural exit is an acknowledgement barrier: pty:exit may not overtake
   // bytes accepted before the native onExit event.
-  const exitOrder = [];
-  const orderedSends = [];
+  const exitOrder: string[] = [];
+  const orderedSends: OrderedSend[] = [];
   const ordered = testScheduler({
     send: (...args) => {
       const [id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data] = args;
@@ -834,7 +946,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   assert.equal(await ended, true);
   assert.deepEqual(exitOrder, ["one", "two", "exit:0"]);
 
-  const inactiveSends = [];
+  const inactiveSends: PtyExitSend[] = [];
   const inactive = testScheduler({
     send: () => true,
     sendExit: (...args) => {
@@ -860,7 +972,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   // Natural exit is itself a sequenced ledger record. If the renderer crashes
   // after receiving the marker but before acknowledging it, the marker is
   // replayed and the terminal remains retained until the replacement acks it.
-  const exitSends = [];
+  const exitSends: PtyEgressEvent[] = [];
   const exit = testScheduler({
     send: (...args) => {
       const [id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data] = args;
@@ -896,12 +1008,12 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
   assert.equal(exitSends[2].rendererGeneration, 2);
   assert.equal(exit.acknowledge("crash-exit", 13, 71, 2, 2), true);
   assert.equal(await exitDone, true);
-  assert.equal(exit.stats("crash-exit").terminalGeneration, 0);
+  assert.equal(terminalStats(exit, "crash-exit").terminalGeneration, 0);
 
   // A deterministic 100 MiB burst proves exact ordering, source high-water,
   // fair yielding, and no unbounded downstream sink acceptance.
-  const burstSends = [];
-  let burst;
+  const burstSends: PtyDataSend[] = [];
+  let burst!: PtyEgressScheduler;
   const burstSource = source();
   const expected = createHash("sha256");
   const actual = createHash("sha256");
@@ -949,7 +1061,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
 
   // Round-robin dispatch prevents a noisy terminal from monopolizing a
   // bounded batch. The first three sends include every live terminal.
-  const fairSends = [];
+  const fairSends: PtyDataSend[] = [];
   const fair = testScheduler(
     {
       send: (...args) => {
@@ -978,7 +1090,7 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
 
   // Close and shutdown clear retained data; delayed old acknowledgements and
   // later sends cannot leak bytes from a removed terminal.
-  const closeSends = [];
+  const closeSends: PtyDataSend[] = [];
   const closing = testScheduler({
     send: (...args) => {
       const [id, terminalGeneration, windowGeneration, rendererGeneration, sequence, data] = args;

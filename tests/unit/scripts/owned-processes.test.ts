@@ -21,8 +21,9 @@ describe("E2E descendant ownership", () => {
     ignoreTerm = false;
     listing = "100 1\n101 100\n102 101\n900 1\n";
     vi.mocked(execFileSync).mockImplementation((_file, args) => {
-      if (args[0] === "-axo") return listing;
-      const pid = Number(args[1]);
+      const argv = args ?? [];
+      if (argv[0] === "-axo") return listing;
+      const pid = Number(argv[1]);
       return listing.split("\n").find((line) => Number(line.split(" ")[0]) === pid)?.split(" ")[1] ?? "";
     });
     vi.mocked(readSystemProcessIdentity).mockImplementation((pid) => identities.get(pid) ?? null);
@@ -99,7 +100,7 @@ describe("E2E descendant ownership", () => {
     listing += "103 100\n";
     const readParent = vi.mocked(execFileSync).getMockImplementation()!;
     vi.mocked(execFileSync).mockImplementation((file, args) => {
-      if (args[0] === "-p" && args[1] === "103") return "900";
+      if (args?.[0] === "-p" && args?.[1] === "103") return "900";
       return readParent(file, args);
     });
     const tree = new OwnedProcessTree(100);

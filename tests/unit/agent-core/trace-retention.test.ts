@@ -16,7 +16,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 
 const attempt = (attemptId: string, extra = {}) => ({
   schemaVersion: 2, recordType: "attempt", runId: "run", taskId: "task", attemptId,
-  role: "main", provider: "fixture", protocol: "fixture", model: "fixture", status: "ok",
+  role: "main" as const, provider: "fixture", protocol: "fixture", model: "fixture", status: "ok",
   usage: { input: 10, output: 1, cacheRead: 20 }, ...extra,
 });
 const settlement = {

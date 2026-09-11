@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 /** Focused Anthropic stream bound contract. */
 process.env.TERMINA_CORE_TEST = "1";
 
@@ -45,7 +45,7 @@ describe("Agent Core Anthropic Stream-Bound Contract", () => {
     let error = "";
     child.stdout.on("data", (chunk) => { output += chunk; });
     child.stderr.on("data", (chunk) => { error += chunk; });
-    const result = await new Promise((resolve) => {
+    const result = await new Promise<{ code: number | null; signal: string | null }>((resolve) => {
       const timer = setTimeout(() => {
         child.kill("SIGKILL");
         resolve({ code: -1, signal: "SIGKILL" });

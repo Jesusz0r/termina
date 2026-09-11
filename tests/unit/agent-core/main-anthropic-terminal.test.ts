@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 /** Anthropic streams must terminate cleanly and contain complete tool JSON. */
 process.env.TERMINA_CORE_TEST = "1";
 
@@ -13,7 +13,7 @@ describe("Agent Core Anthropic Terminal Contract", () => {
     const textDelta = { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } };
     const stop = { type: "message_stop" };
     
-    async function runScenario(name, body, expected) {
+    async function runScenario(name: string, body: string, expected: RegExp) {
       const childScript = `
         globalThis.fetch = async (input) => {
           if (String(input) === "https://models.dev/api.json") return new Response(JSON.stringify({}), { status: 200 });
@@ -35,7 +35,7 @@ describe("Agent Core Anthropic Terminal Contract", () => {
       let error = "";
       child.stdout.on("data", (chunk) => { output += chunk; });
       child.stderr.on("data", (chunk) => { error += chunk; });
-      const result = await new Promise((resolve) => {
+      const result = await new Promise<{ code: number | null; signal: string | null }>((resolve) => {
         const timer = setTimeout(() => {
           child.kill("SIGKILL");
           resolve({ code: -1, signal: "SIGKILL" });
@@ -50,7 +50,7 @@ describe("Agent Core Anthropic Terminal Contract", () => {
       assert.ok(Buffer.byteLength(output, "utf8") < 100_000, `${name} must not emit partial success text`);
     }
     
-    const event = (value) => `data: ${JSON.stringify(value)}\n`;
+    const event = (value: unknown) => `data: ${JSON.stringify(value)}\n`;
     await runScenario(
       "malformed-json",
       `${event(start)}${event("not-json")}${event(stop)}`.replace('data: "not-json"', "data: {broken"),

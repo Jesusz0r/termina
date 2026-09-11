@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 /**
  * Focused RED/GREEN tests for the agent-core main integration seam.
  *
@@ -7,19 +7,21 @@ import { describe, it, expect } from "vitest";
 process.env.TERMINA_CORE_TEST = "1";
 
 import assert from "node:assert/strict";
+import type { TraceWriteFailure } from "../../../agent-core/trace.ts";
 
 describe("Agent Core Main P0 Invariants", () => {
   it("passes P0 focused main integration tests", async () => {
     const core = await import("../../../agent-core/main.ts");
     
     const failures = [];
-    function check(name, fn) {
+    function check(name: string, fn: () => void) {
       try {
         fn();
         console.log(`PASS  ${name}`);
       } catch (error) {
-        failures.push(`${name} — ${String(error?.message ?? error)}`);
-        console.log(`FAIL  ${name} — ${String(error?.message ?? error)}`);
+        const detail = error instanceof Error ? error.message : String(error);
+        failures.push(`${name} — ${detail}`);
+        console.log(`FAIL  ${name} — ${detail}`);
       }
     }
     
@@ -76,7 +78,7 @@ describe("Agent Core Main P0 Invariants", () => {
 
     check("trace integration keeps failed writes retryable", () => {
       assert.equal(typeof core.traceWriteDisposition, "function");
-      assert.deepEqual(core.traceWriteDisposition({ ok: false, persisted: false, retryable: true }), {
+      assert.deepEqual(core.traceWriteDisposition({ ok: false, persisted: false, retryable: true } as TraceWriteFailure), {
         persisted: false,
         retry: true,
         terminal: false,
@@ -85,13 +87,13 @@ describe("Agent Core Main P0 Invariants", () => {
     
     check("main request projection keeps host context volatile", () => {
       assert.equal(typeof core.projectMainRequest, "function");
-      const messages = [{ role: "user", content: "inspect", sseq: 1, tokens: 1 }];
+      const messages = [{ role: "user" as const, content: "inspect", sseq: 1, tokens: 1 }];
       const first = core.projectMainRequest(messages, "<working-set>one</working-set>");
       const second = core.projectMainRequest(messages, "<working-set>two</working-set>");
       assert.equal(first.persistedMessages.length, 1);
       assert.equal(first.messages.length, 2);
       assert.equal(first.messages[0].content, "inspect");
-      assert.notEqual(first.overlay.hash, second.overlay.hash);
+      assert.notEqual(first.overlay?.hash, second.overlay?.hash);
       assert.equal(JSON.stringify(messages).includes("working-set"), false);
     });
     

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MODELS_DISPLAY_CAP, MODEL_LIST_CAP, filterCatalogModels, formatCatalogLines, parseModelsPayload } from "../../../agent-core/models.ts";
+import { MODELS_DISPLAY_CAP, MODEL_LIST_CAP, filterCatalogModels, formatCatalogLines, parseModelsPayload, type CatalogModel } from "../../../agent-core/models.ts";
 import { catalogOutputLimit, catalogReasoningLevels, catalogSupportsTools } from "../../../agent-core/models/capabilities.ts";
 
 describe("catalog provider policy composition", () => {
@@ -68,14 +68,14 @@ describe("catalog provider policy composition", () => {
     expect(filterCatalogModels([...rows], "  ")).toHaveLength(3);
     expect(filterCatalogModels([...rows], "zzz")).toHaveLength(0);
     const many = Array.from({ length: MODELS_DISPLAY_CAP + 5 }, (_, i) => ({ provider: "p", id: `m-${i}` }));
-    const text = formatCatalogLines(many, "p", "m-0");
+    const text = formatCatalogLines(many as CatalogModel[], "p", "m-0");
     expect(text.split("\n")).toHaveLength(MODELS_DISPLAY_CAP + 1);
     expect(text).toMatch(/\(\+5 more/);
     expect(formatCatalogLines([...rows], "xai", "grok-4.6")).not.toMatch(/more/);
   });
 
   it("fuzzy-matches model abbreviations and unordered words across catalog fields", () => {
-    const rows = [
+    const rows: CatalogModel[] = [
       { provider: "anthropic", id: "claude-sonnet-4-5" },
       { provider: "openai", id: "gpt-4o", name: "Flagship Omni" },
       { provider: "xai", id: "sonnet45" },

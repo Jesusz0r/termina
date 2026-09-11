@@ -281,7 +281,7 @@ describe("SubagentHost", () => {
         appendMailboxNote: (_t, note) => { notes.push(note); },
         watchStream: () => {},
         releaseStream: () => {},
-        dispatchKeysFor: async () => new Set<string>(),
+        dispatchKeysFor: async () => ({ keys: new Set<string>(), root: dir }),
         canonicalPath: async (p) => p,
       },
       {

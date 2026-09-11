@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -38,6 +38,11 @@ describe("Agent Core Token Calibration Invariants", () => {
     };
     
     const report = calibrateSamples(fixture.samples);
+    const mustFind = (id: string) => {
+      const sample = report.samples.find((candidate) => candidate.id === id);
+      if (!sample) throw new Error(`missing calibration sample ${id}`);
+      return sample;
+    };
     
     assert.equal(report.schemaVersion, 1);
     assert.equal(report.totalSamples, 9);
@@ -46,15 +51,15 @@ describe("Agent Core Token Calibration Invariants", () => {
     assert.deepEqual(report.unknownReasons, { "provider-usage-incomplete": 1 });
     assert.deepEqual(report.sampleIds, fixture.samples.map((sample) => sample.id).sort());
     
-    assert.equal(report.samples.find((sample) => sample.id === "code-a").estimatedTokens, 1);
-    assert.equal(report.samples.find((sample) => sample.id === "code-a").providerInputTokens, 2);
-    assert.equal(report.samples.find((sample) => sample.id === "code-a").signedErrorTokens, -1);
-    assert.equal(report.samples.find((sample) => sample.id === "code-a").absoluteErrorTokens, 1);
-    assert.equal(report.samples.find((sample) => sample.id === "prose-a").signedErrorTokens, 1);
-    assert.equal(report.samples.find((sample) => sample.id === "non-english-a").estimatedTokens, 3);
-    assert.equal(report.samples.find((sample) => sample.id === "tool-payload-a").providerInputTokens, 6);
+    assert.equal(mustFind("code-a").estimatedTokens, 1);
+    assert.equal(mustFind("code-a").providerInputTokens, 2);
+    assert.equal(mustFind("code-a").signedErrorTokens, -1);
+    assert.equal(mustFind("code-a").absoluteErrorTokens, 1);
+    assert.equal(mustFind("prose-a").signedErrorTokens, 1);
+    assert.equal(mustFind("non-english-a").estimatedTokens, 3);
+    assert.equal(mustFind("tool-payload-a").providerInputTokens, 6);
     
-    const unknown = report.samples.find((sample) => sample.id === "unknown-cache-read");
+    const unknown = mustFind("unknown-cache-read");
     assert.equal(unknown.providerInputTokens, null);
     assert.equal(unknown.signedErrorTokens, null);
     assert.equal(unknown.absoluteErrorTokens, null);

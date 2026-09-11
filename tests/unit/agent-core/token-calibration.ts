@@ -25,20 +25,20 @@ export const CONTENT_CLASSES = Object.freeze([
   "tool-payload",
 ]);
 
-const CLASS_RANK = new Map(CONTENT_CLASSES.map((name, index) => [name, index]));
+const CLASS_RANK: Map<string, number> = new Map(CONTENT_CLASSES.map((name, index) => [name, index]));
 const MAX_SAMPLE_ID_LENGTH = 128;
 const SAMPLE_ID_PATTERN = /^[^\u0000-\u001f\u007f]+$/;
 const TRACE_FILE_PATTERN = /^turn-(\d+)\.json$/;
 
-function isRecord(value) {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function isKnownTokenCount(value) {
-  return Number.isSafeInteger(value) && value >= 0;
+function isKnownTokenCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-function compareStable(left, right) {
+function compareStable(left: unknown, right: unknown): number {
   const a = Buffer.from(String(left), "utf8");
   const b = Buffer.from(String(right), "utf8");
   const length = Math.min(a.length, b.length);
@@ -48,35 +48,38 @@ function compareStable(left, right) {
   return a.length - b.length;
 }
 
-function roundDecimal(value, places = 3) {
+function roundDecimal(value: number, places = 3): number | null {
   if (!Number.isFinite(value)) return null;
   const scale = 10 ** places;
   return Math.round((value + Number.EPSILON) * scale) / scale;
 }
 
-function sortedCounts(values) {
-  const counts = new Map();
-  for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+function sortedCounts(values: Array<string | null>): Record<string, number> {
+  const counts = new Map<string, number>();
+  for (const value of values) {
+    if (value === null) continue;
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
   return Object.fromEntries([...counts].sort(([a], [b]) => compareStable(a, b)));
 }
 
-function sampleValuePresent(sample) {
+function sampleValuePresent(sample: Record<string, unknown>): boolean {
   return Object.hasOwn(sample, "value") || Object.hasOwn(sample, "content");
 }
 
-function sampleValue(sample) {
+function sampleValue(sample: Record<string, unknown>): unknown {
   // `content` is accepted for trace-shaped fixtures. `value` wins when both
   // are present so a fixture can carry non-calibration metadata safely.
   return Object.hasOwn(sample, "value") ? sample.value : sample.content;
 }
 
-function boundedLabel(value) {
+function boundedLabel(value: unknown): string {
   return typeof value === "string" && value.length > 0 && value.length <= MAX_SAMPLE_ID_LENGTH && SAMPLE_ID_PATTERN.test(value)
     ? value
     : "unknown";
 }
 
-function providerInputFor(sample) {
+function providerInputFor(sample: Record<string, unknown>): { value: number | null; reason: string | null } {
   if (Object.hasOwn(sample, "providerInputTokens")) {
     if (isKnownTokenCount(sample.providerInputTokens)) {
       return { value: sample.providerInputTokens, reason: null };
@@ -89,22 +92,24 @@ function providerInputFor(sample) {
     : Object.hasOwn(sample, "usage") ? sample.usage : undefined;
   if (!isRecord(usage)) return { value: null, reason: "provider-usage-incomplete" };
 
-  const fields = [usage.input, usage.cacheRead, usage.cacheWrite];
-  if (!fields.every(isKnownTokenCount)) {
+  const input = usage.input;
+  const cacheRead = usage.cacheRead;
+  const cacheWrite = usage.cacheWrite;
+  if (!isKnownTokenCount(input) || !isKnownTokenCount(cacheRead) || !isKnownTokenCount(cacheWrite)) {
     return { value: null, reason: "provider-usage-incomplete" };
   }
-  const total = usage.input + usage.cacheRead + usage.cacheWrite;
+  const total = input + cacheRead + cacheWrite;
   return Number.isSafeInteger(total)
     ? { value: total, reason: null }
     : { value: null, reason: "provider-usage-invalid" };
 }
 
-function normalizeSample(raw, index) {
+function normalizeSample(raw: unknown, index: number) {
   if (!isRecord(raw)) throw new TypeError(`sample ${index + 1} is not an object`);
   if (typeof raw.id !== "string" || raw.id.length === 0 || raw.id.length > MAX_SAMPLE_ID_LENGTH || !SAMPLE_ID_PATTERN.test(raw.id)) {
     throw new TypeError(`sample ${index + 1} has an invalid id`);
   }
-  if (!CLASS_RANK.has(raw.class)) {
+  if (typeof raw.class !== "string" || !CLASS_RANK.has(raw.class)) {
     throw new TypeError(`sample ${raw.id} has an unsupported content class`);
   }
   if (!sampleValuePresent(raw)) {
@@ -113,28 +118,43 @@ function normalizeSample(raw, index) {
 
   const provider = providerInputFor(raw);
   const estimatedTokens = estimateReclaimTokens(sampleValue(raw));
-  const known = provider.value !== null;
+  const providerValue = provider.value;
+  const known = providerValue !== null;
+  const signedErrorTokens = providerValue === null ? null : estimatedTokens - providerValue;
+  const absoluteErrorTokens = providerValue === null ? null : Math.abs(estimatedTokens - providerValue);
+  // Provider token counts are validated non-negative, so `> 0` only excludes zero.
+  const hasRatio = providerValue !== null && providerValue > 0;
+  const signedErrorRatio = !hasRatio || providerValue === null ? null : roundDecimal((estimatedTokens - providerValue) / providerValue);
+  const absoluteErrorRatio = !hasRatio || providerValue === null ? null : roundDecimal(Math.abs(estimatedTokens - providerValue) / providerValue);
   return {
     id: raw.id,
     class: raw.class,
     provider: boundedLabel(raw.provider),
     model: boundedLabel(raw.model),
     estimatedTokens,
-    providerInputTokens: provider.value,
-    signedErrorTokens: known ? estimatedTokens - provider.value : null,
-    absoluteErrorTokens: known ? Math.abs(estimatedTokens - provider.value) : null,
-    signedErrorRatio: known && provider.value > 0
-      ? roundDecimal((estimatedTokens - provider.value) / provider.value)
-      : null,
-    absoluteErrorRatio: known && provider.value > 0
-      ? roundDecimal(Math.abs(estimatedTokens - provider.value) / provider.value)
-      : null,
+    providerInputTokens: providerValue,
+    signedErrorTokens,
+    absoluteErrorTokens,
+    signedErrorRatio,
+    absoluteErrorRatio,
     unknownReason: known ? null : provider.reason,
   };
 }
 
-function safetyFactor(records) {
-  const known = records.filter((record) => record.providerInputTokens !== null);
+type NormalizedSample = ReturnType<typeof normalizeSample>;
+type KnownSample = NormalizedSample & {
+  providerInputTokens: number;
+  signedErrorTokens: number;
+  absoluteErrorTokens: number;
+};
+
+/** All provider-derived error fields share one known/unknown bit by construction. */
+function isKnownSample(record: NormalizedSample): record is KnownSample {
+  return record.providerInputTokens !== null;
+}
+
+function safetyFactor(records: NormalizedSample[]): { value: number | null; status: string } {
+  const known = records.filter(isKnownSample);
   if (known.length === 0) return { value: null, status: "no-known-samples" };
 
   let required = 1;
@@ -148,8 +168,8 @@ function safetyFactor(records) {
   return { value: Math.ceil((required - Number.EPSILON) * 1000) / 1000, status: "bounded" };
 }
 
-function summarizeRecords(records) {
-  const known = records.filter((record) => record.providerInputTokens !== null);
+function summarizeRecords(records: NormalizedSample[]) {
+  const known = records.filter(isKnownSample);
   const estimatedTokens = known.reduce((sum, record) => sum + record.estimatedTokens, 0);
   const providerInputTokens = known.reduce((sum, record) => sum + record.providerInputTokens, 0);
   const signedErrorTokens = known.reduce((sum, record) => sum + record.signedErrorTokens, 0);
@@ -176,19 +196,22 @@ function summarizeRecords(records) {
   };
 }
 
-function sortSamples(samples) {
+function sortSamples(samples: NormalizedSample[]): NormalizedSample[] {
   return samples.slice().sort((left, right) => {
-    const classOrder = CLASS_RANK.get(left.class) - CLASS_RANK.get(right.class);
+    // Classes are validated at normalize time; the fallback is unreachable.
+    const classOrder = (CLASS_RANK.get(left.class) ?? -1) - (CLASS_RANK.get(right.class) ?? -1);
     return classOrder || compareStable(left.id, right.id);
   });
 }
 
-function modelKey(sample) {
+function modelKey(sample: NormalizedSample): string {
   return `${sample.provider}/${sample.model}`;
 }
 
-function summarizeModelGroups(samples) {
-  const groups = new Map();
+type RecordsSummary = ReturnType<typeof summarizeRecords>;
+
+function summarizeModelGroups(samples: NormalizedSample[]) {
+  const groups = new Map<string, { provider: string; model: string; samples: NormalizedSample[] }>();
   for (const sample of samples) {
     const key = modelKey(sample);
     const group = groups.get(key) ?? { provider: sample.provider, model: sample.model, samples: [] };
@@ -198,7 +221,7 @@ function summarizeModelGroups(samples) {
   return Object.fromEntries([...groups]
     .sort(([left], [right]) => compareStable(left, right))
     .map(([key, group]) => {
-      const byClass = {};
+      const byClass: Record<string, RecordsSummary> = {};
       for (const contentClass of CONTENT_CLASSES) {
         byClass[contentClass] = summarizeRecords(group.samples.filter((sample) => sample.class === contentClass));
       }
@@ -218,7 +241,10 @@ function summarizeModelGroups(samples) {
  * three fields are known nonnegative integers. A nullable field therefore
  * excludes that sample from every provider-input/error denominator.
  */
-export function calibrateSamples(rawSamples) {
+/** Report shape produced by calibrateSamples; the auditor renderer consumes it. */
+type CalibrationReport = ReturnType<typeof calibrateSamples>;
+
+export function calibrateSamples(rawSamples: unknown[]) {
   if (!Array.isArray(rawSamples)) throw new TypeError("calibration samples must be an array");
   const normalized = rawSamples.map(normalizeSample);
   const ids = new Set();
@@ -228,7 +254,7 @@ export function calibrateSamples(rawSamples) {
   }
 
   const samples = sortSamples(normalized);
-  const byClass = {};
+  const byClass: Record<string, RecordsSummary> = {};
   for (const contentClass of CONTENT_CLASSES) {
     byClass[contentClass] = summarizeRecords(samples.filter((sample) => sample.class === contentClass));
   }
@@ -265,7 +291,7 @@ export function calibrateSamples(rawSamples) {
   };
 }
 
-function parseJsonFile(file) {
+function parseJsonFile(file: string): unknown {
   let text;
   try {
     text = readFileSync(file, "utf8");
@@ -279,7 +305,7 @@ function parseJsonFile(file) {
   }
 }
 
-function extractSamples(value, source, { requireCalibrationRecord = false } = {}) {
+function extractSamples(value: unknown, source: string, { requireCalibrationRecord = false }: { requireCalibrationRecord?: boolean } = {}): unknown[] {
   if (requireCalibrationRecord && (!isRecord(value) || value.recordType !== CALIBRATION_RECORD_TYPE)) {
     throw new Error(`${source} must be a calibration-sample record; trace-v2 provider records are not calibration evidence`);
   }
@@ -303,13 +329,13 @@ function extractSamples(value, source, { requireCalibrationRecord = false } = {}
   throw new Error(`${source} must contain samples`);
 }
 
-function traceFileNumber(name) {
+function traceFileNumber(name: string): number | null {
   const match = TRACE_FILE_PATTERN.exec(name);
   return match ? Number(match[1]) : null;
 }
 
 /** Read one fixture file or a directory of deterministic turn-N trace files. */
-export async function readCalibrationInput(inputPath) {
+export async function readCalibrationInput(inputPath: string): Promise<unknown[]> {
   const target = resolve(inputPath);
   if (!existsSync(target)) throw new Error(`input does not exist: ${target}`);
   const stat = lstatSync(target);
@@ -318,24 +344,24 @@ export async function readCalibrationInput(inputPath) {
 
   const files = readdirSync(target)
     .map((name) => ({ name, turn: traceFileNumber(name) }))
-    .filter((entry) => entry.turn !== null)
+    .filter((entry): entry is { name: string; turn: number } => entry.turn !== null)
     .sort((left, right) => left.turn - right.turn || compareStable(left.name, right.name));
   if (files.length === 0) throw new Error(`no turn-N JSON traces found in ${target}`);
   return files.flatMap(({ name }) => extractSamples(parseJsonFile(join(target, name)), join(target, name), { requireCalibrationRecord: true }));
 }
 
-function formatNumber(value) {
+function formatNumber(value: number | null): string {
   return value === null ? "--" : String(value);
 }
 
-function formatFactor(value, status) {
+function formatFactor(value: number | null, status: string): string {
   if (status === "unbounded") return "unbounded";
   if (status === "no-known-samples") return "-- (no known samples)";
   return `${value}x`;
 }
 
 /** Render a stable, human-readable audit without printing fixture content. */
-export function renderCalibrationReport(report) {
+export function renderCalibrationReport(report: CalibrationReport): string {
   const lines = [
     "Token calibration (pure reclaim-payload estimator; no tokenizer accuracy claim)",
     "runtime watermark/message-overhead estimate is not calibrated by this report",
@@ -357,11 +383,11 @@ export function renderCalibrationReport(report) {
   return `${lines.join("\n")}\n`;
 }
 
-function usage() {
+function usage(): string {
   return "usage: node --experimental-strip-types scripts/agent-core-token-calibration.mjs [--json] fixture.json|calibration-sample-trace-dir ...";
 }
 
-export async function run(argv = process.argv.slice(2)) {
+export async function run(argv: string[] = process.argv.slice(2)): Promise<{ help: string } | string> {
   const json = argv.includes("--json");
   const paths = argv.filter((arg) => arg !== "--json");
   if (argv.includes("--help") || argv.includes("-h")) return { help: usage() };
@@ -369,7 +395,7 @@ export async function run(argv = process.argv.slice(2)) {
   if (unknown.length > 0) throw new Error(`unknown option: ${unknown[0]}\n${usage()}`);
   if (paths.length === 0) throw new Error(usage());
 
-  const rawSamples = [];
+  const rawSamples: unknown[] = [];
   for (const inputPath of paths) rawSamples.push(...await readCalibrationInput(inputPath));
   const report = calibrateSamples(rawSamples);
   return json ? JSON.stringify(report, null, 2) + "\n" : renderCalibrationReport(report);
@@ -380,10 +406,10 @@ const invokedFile = process.argv[1] ? resolve(process.argv[1]) : null;
 if (invokedFile === thisFile) {
   try {
     const output = await run();
-    if (isRecord(output) && typeof output.help === "string") {
-      console.log(output.help);
-    } else {
+    if (typeof output === "string") {
       process.stdout.write(output);
+    } else {
+      console.log(output.help);
     }
   } catch (error) {
     process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`);

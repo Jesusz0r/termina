@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 /**
  * Focused contracts for the final main.ts review fixes.
  *
@@ -7,6 +7,7 @@ import { describe, it, expect } from "vitest";
 process.env.TERMINA_CORE_TEST = "1";
 
 import assert from "node:assert/strict";
+import type { TraceWriteFailure } from "../../../agent-core/trace.ts";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,11 +17,11 @@ describe("Agent Core Main Final Review Contracts", () => {
     const main = await import("../../../agent-core/main.ts");
     
     assert.deepEqual(
-      main.traceWriteDisposition({ ok: false, persisted: false, retryable: true }),
+      main.traceWriteDisposition({ ok: false, persisted: false, retryable: true } as TraceWriteFailure),
       { persisted: false, retry: true, terminal: false },
     );
     assert.deepEqual(
-      main.traceWriteDisposition({ ok: false, persisted: true, retryable: true }),
+      main.traceWriteDisposition({ ok: false, persisted: true, retryable: true } as TraceWriteFailure),
       { persisted: true, retry: false, terminal: true },
     );
     assert.equal(main.isTerminalTraceAttemptStatus("error"), true);
@@ -58,8 +59,8 @@ describe("Agent Core Main Final Review Contracts", () => {
         assert.equal(result.state, "complete");
         assert.equal(result.truncated, true);
         assert.ok(!result.content.includes("\uFFFD"));
-        const continuation = result.continuation ?? "";
-        const offset = Number(continuation.match(/read_file offset (\d+)/)?.[1]);
+        const continuation = result.continuation;
+        const offset = Number(typeof continuation === "string" ? continuation.match(/read_file offset (\d+)/)?.[1] : undefined);
         assert.equal(offset, 40 * 1024 - 1, "continuation must end on a complete UTF-8 boundary");
         assert.ok(offset < Buffer.byteLength(unicode));
       }
@@ -71,7 +72,11 @@ describe("Agent Core Main Final Review Contracts", () => {
       assert.equal(lineResult.state, "complete");
       assert.equal(lineResult.truncated, true);
       assert.ok(!lineResult.content.includes("\uFFFD"));
-      assert.equal(Number(lineResult.continuation?.match(/read_file offset (\d+)/)?.[1]), 40 * 1024 - 1);
+      const lineContinuation = lineResult.continuation;
+      assert.equal(
+        Number(typeof lineContinuation === "string" ? lineContinuation.match(/read_file offset (\d+)/)?.[1] : undefined),
+        40 * 1024 - 1,
+      );
     
       writeFileSync(join(root, "scan-a.txt"), "a");
       writeFileSync(join(root, "scan-b.txt"), "b");
@@ -99,8 +104,8 @@ describe("Agent Core Main Final Review Contracts", () => {
       assert.equal(grepResult.state, "complete");
       assert.equal(grepResult.isError, false);
       assert.equal(grepResult.truncated, true);
-      assert.match(grepResult.content, /grep hit cap/);
-      assert.match(grepResult.continuation ?? "", /Grep again/);
+      assert.match(typeof grepResult.content === "string" ? grepResult.content : "", /grep hit cap/);
+      assert.match(typeof grepResult.continuation === "string" ? grepResult.continuation : "", /Grep again/);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

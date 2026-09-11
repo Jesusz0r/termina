@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
 import {
@@ -29,6 +29,36 @@ describe("Agent Core Cache Experiment Invariants", () => {
       },
     ];
     
+    type AttemptFixtureOptions = {
+      runId: string;
+      taskId: string;
+      attemptId: string;
+      variant: string;
+      corpusId?: string;
+      replicateId?: string | null;
+      role?: string;
+      provider?: string;
+      protocol?: string;
+      route?: string;
+      model?: string;
+      atMs?: number;
+      startedAt?: string;
+      usage?: {
+        input: number | null;
+        cacheRead: number | null;
+        cacheWrite: number | null;
+        output: number | null;
+        reasoning: number | null;
+      };
+      cost?: unknown;
+      effectiveMode?: string;
+      effectiveTtlMs?: number | null;
+      retentionKnown?: boolean | null;
+      markerPositions?: number[];
+      retryCount?: number;
+      fallbackReason?: string | null;
+    };
+
     const attempt = ({
       runId,
       taskId,
@@ -42,6 +72,7 @@ describe("Agent Core Cache Experiment Invariants", () => {
       route = "https://api.openai.com/v1/responses",
       model = "gpt-5.6-sol",
       atMs,
+      startedAt,
       usage,
       cost = undefined,
       effectiveMode = "explicit",
@@ -50,7 +81,7 @@ describe("Agent Core Cache Experiment Invariants", () => {
       markerPositions = [0],
       retryCount = 0,
       fallbackReason = null,
-    }) => ({
+    }: AttemptFixtureOptions) => ({
       schemaVersion: 2,
       recordType: "attempt",
       runId,
@@ -69,9 +100,9 @@ describe("Agent Core Cache Experiment Invariants", () => {
       retryCount,
       fallbackReason,
       atMs,
-      startedAt: typeof atMs === "number"
+      startedAt: startedAt ?? (typeof atMs === "number"
         ? new Date(Date.parse("2026-08-30T00:00:00.000Z") + atMs).toISOString()
-        : undefined,
+        : undefined),
       ttftMs: role === "summary" ? null : 100,
       turnMs: role === "summary" ? 150 : 500,
       usage,

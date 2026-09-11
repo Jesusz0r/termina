@@ -39,6 +39,8 @@ jobs:
       # Fail fast on types before paying for the Rust build.
       - name: Typecheck
         run: pnpm run typecheck
+      - name: Typecheck tests
+        run: pnpm run typecheck:tests
       # Canonical build entry (scripts/build-core.ts): compiles the core and
       # stages dist-electron. The Vite renderer build is skipped: the unit
       # suites import TypeScript directly and never read dist-renderer.

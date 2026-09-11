@@ -7,8 +7,10 @@ import { pathToFileURL } from "node:url";
 import {
   computeTraceCost,
   normalizeRateSnapshot as normalizeCanonicalRateSnapshot,
+  type RateField,
 } from "../../../agent-core/rates.ts";
 import { readTraceDirectory } from "./trace-report.ts";
+import type { TraceJsonObject } from "./trace-links.ts";
 
 const SCHEMA_VERSION = 1;
 const TRACE_SCHEMA_VERSION = 2;
@@ -24,23 +26,305 @@ const TOKEN_RATE_PER_TOKEN_UNITS = new Set(["usd_per_token", "usd-per-token", "p
 const TOKEN_RATE_PER_MILLION_UNITS = new Set(["usd-per-million-tokens", "usd_per_million_tokens", "per-million-tokens", "perMillionTokens"]);
 const STORAGE_PER_TOKEN_HOUR_UNITS = new Set(["usd_per_token_hour", "usd-per-token-hour", "per-token-hour", "perTokenHour"]);
 
-function isObject(value) {
+type ExperimentUsage = { input: number | null; cacheRead: number | null; cacheWrite: number | null; output: number | null; reasoning: number | null };
+type UsageField = "input" | "cacheRead" | "cacheWrite" | "output" | "reasoning";
+type UsageMetric = { total: number; knownSamples: number; unknownSamples: number };
+type UsageAggregate = {
+  input: UsageMetric;
+  cacheRead: UsageMetric;
+  cacheWrite: UsageMetric;
+  output: UsageMetric;
+  reasoning: UsageMetric;
+  completeSamples: number;
+  partialSamples: number;
+  unknownSamples: number;
+  cachedInputShare: number | null;
+  cacheShareDenominator: { input: number; cacheRead: number; cacheWrite: number; totalInput: number; knownSamples: number };
+};
+type ExperimentPolicy = {
+  mode: string | null;
+  ttlMs: number | null;
+  markerCount: number | null;
+  markerPositions: number[] | null;
+  rejected: boolean | null;
+  fallbackReason: string | null;
+  eligibleBlockCount: number | null;
+  blocksAddedSincePrior: number | null;
+  retentionKnown: boolean | null;
+};
+type ExperimentCache = {
+  namespace: string | null;
+  effective: ExperimentPolicy;
+  requested: ExperimentPolicy;
+  markerPositions: number[] | null;
+  retryPromptIdentical: boolean | null;
+  fallbackReason: string | null;
+  cacheKeyHash: string | null;
+  modelSettingsHash: string | null;
+  toolsHash: string | null;
+  stablePrefixHash: string | null;
+  messagePrefixHash: string | null;
+  workingSetHash: string | null;
+  workingSetChanged: boolean | null;
+  retentionKnown: boolean | null;
+  eligibleBlockCount: number | null;
+  blocksAddedSincePrior: number | null;
+};
+type ExperimentCost = { usd: number | null; source: string | null; version: string | null; retrievedAt: string | null };
+type NormalizedAttempt = {
+  raw: TraceJsonObject;
+  runId: string;
+  taskId: string;
+  attemptId: string;
+  role: string;
+  provider: string;
+  protocol: string;
+  route: string;
+  model: string;
+  taskClass: string | null;
+  corpusId: string | null;
+  corpusSource: string | null;
+  variant: string | null;
+  replicateId: string | null;
+  status: string;
+  atMs: number | null;
+  observedAtMs: number | null;
+  traceTurn: number | null;
+  usage: ExperimentUsage;
+  cost: ExperimentCost;
+  cache: ExperimentCache;
+  ttftMs: number | null;
+  turnMs: number | null;
+};
+type NormalizedSettlement = {
+  runId: string;
+  taskId: string;
+  corpusId: string | null;
+  corpusSource: string | null;
+  replicateId: string | null;
+  status: string | null;
+  correctness: string | null;
+  finalAttemptId: string | null;
+  attemptIds: string[];
+  summaryAttemptIds: string[];
+};
+type InvalidRecord = {
+  schemaVersion: unknown;
+  recordType: string | null;
+  runId: string | null;
+  taskId: string | null;
+  attemptId: string | null;
+  reason: string;
+};
+type RateSnapshot = {
+  source: string | null;
+  version: string | null;
+  retrievedAt: string | null;
+  provider: string | null;
+  protocol: string | null;
+  route: string | null;
+  model: string | null;
+  role: string | null;
+  inputPerToken: number | null;
+  outputPerToken: number | null;
+  cacheReadPerToken: number | null;
+  cacheWritePerToken: number | null;
+  reasoningPerToken: number | null;
+  storagePerTokenHour: number | null;
+  cacheWriteTtlClass: "unknown" | "provider-default" | "5m" | "30m" | "1h" | "custom" | null;
+  reasoningBilling: "separate" | "included-in-output" | null;
+};
+type StorageCost =
+  | { usd: number; known: true; reason: null }
+  | { usd: null; known: false; reason: string };
+type AttemptCost = {
+  usd: number | null;
+  source: string | null;
+  version: string | null;
+  retrievedAt: string | null;
+  rateSnapshot: RateSnapshot | null;
+  storage: StorageCost | { usd: null; known: null; reason: string };
+  rateFingerprint: string | null;
+  known: boolean;
+  reason: string | null;
+};
+type CostAggregate = {
+  totalUsd: number;
+  knownSamples: number;
+  unknownSamples: number;
+  knownRateSamples: number;
+  unknownRateSamples: number;
+  unknownSourceSamples: number;
+  storage: { totalUsd: number; knownSamples: number; unknownSamples: number };
+  bySource: Record<string, number>;
+};
+type LatencyAggregate = {
+  ttftMs: { p50: number | null; p95: number | null; knownSamples: number; unknownSamples: number };
+  turnMs: { p50: number | null; p95: number | null; knownSamples: number; unknownSamples: number };
+};
+type DimensionGroup = {
+  attempts: number;
+  tasks: number;
+  usage: UsageAggregate;
+  cost: CostAggregate;
+  latency: LatencyAggregate;
+  cachedInputShare: number | null;
+};
+type TtlBucket = { label: string; minMs: number; maxMs: number | null };
+type TtlBucketState = {
+  samples: number;
+  completeSamples: number;
+  observedHits: number;
+  observedMisses: number;
+  unknownSamples: number;
+  effectiveTtlExceededSamples: number;
+} & Record<string, number>;
+type TtlComparison = {
+  retentionClaims: number;
+  unknownRetentionSamples: number;
+  effectiveTtlExceededSamples: number;
+  timestampedPairs: number;
+  retentionEvidencePairs: number;
+  buckets: Record<string, TtlBucketState>;
+};
+type TaskGroup = {
+  runId: string;
+  taskId: string;
+  corpusId: string | null;
+  corpusSource: string | null;
+  replicateId: string | null;
+  attempts: NormalizedAttempt[];
+  settlement: NormalizedSettlement | null;
+};
+type TaskAccounting = {
+  inputKnown: boolean;
+  inputTotal: number | null;
+  costKnown: boolean;
+  costTotal: number | null;
+  rateFingerprints: string[];
+};
+type IntegrityResult = { status: string; complete: boolean; reasons: string[]; denominator: string };
+type PairedGroup = { baseline: TaskGroup; candidate: TaskGroup };
+type SettledGroup = TaskGroup & { settlement: NormalizedSettlement };
+type SettledPairedGroup = { baseline: SettledGroup; candidate: SettledGroup };
+type BreakpointPair = {
+  runId: string;
+  taskId: string;
+  role: string;
+  provider: string;
+  protocol: string;
+  route: string;
+  model: string;
+  cacheNamespace: string | null;
+  cacheKeyHash: string | null;
+  beforeAttemptId: string;
+  afterAttemptId: string;
+  markerCountBefore: number | null;
+  markerCountAfter: number | null;
+  markerCountDelta: number | null;
+  markerPositionsAdded: number[] | null;
+  markerPositionsRemoved: number[] | null;
+  eligibleBlockDelta: number | null;
+  blocksAddedSincePrior: number | null;
+};
+type BreakpointDeltas = {
+  comparisons: number;
+  markerCountDelta: { knownSamples: number; unknownSamples: number; added: number; removed: number; unchanged: number; median: number | null };
+  eligibleBlockDelta: { knownSamples: number; unknownSamples: number; median: number | null };
+  pairs: BreakpointPair[];
+  openAiLookbackLimit: null;
+};
+type MergedTtlComparison = {
+  retentionClaims: number;
+  unknownRetentionSamples: number;
+  unknownRetentionPairSamples: number;
+  effectiveTtlExceededSamples: number;
+  timestampedPairs: number;
+  retentionEvidencePairs: number;
+  buckets: Record<string, TtlBucketState>;
+};
+type TaskGroupAccumulator = {
+  runId: string;
+  taskId: string;
+  corpusIds: Set<string>;
+  corpusSources: Set<string>;
+  replicateIds: Set<string>;
+  attempts: NormalizedAttempt[];
+  settlement: NormalizedSettlement | null;
+};
+type KnownInputAccounting = TaskAccounting & { inputTotal: number };
+type KnownCostAccounting = TaskAccounting & { costTotal: number };
+type KnownInputPair = { baseline: KnownInputAccounting; candidate: KnownInputAccounting };
+type KnownCostPair = { baseline: KnownCostAccounting; candidate: KnownCostAccounting };
+type PairedTaskEntry = PairedGroup & { key: string };
+type TaskPairing = { pairs: PairedTaskEntry[]; ambiguous: number; unpaired: number; unknownCorpusTasks: number; unknownVariantTasks: number };
+type VariantCounts = { total: number; settled: number; successful: number; failed: number; correct: number; incorrect: number };
+type VariantStats = VariantCounts & { successRate: number | null; failureRate: number | null; correctnessRate: number | null };
+type EfficiencyGate = {
+  status: string;
+  reason: string | null;
+  denominator: number;
+  knownPairs: number;
+  knownCoverage: number | null;
+  minimumCostReduction: number | null;
+  minimumKnownCostCoverage: number | null;
+  baselineMedianCostUsd: number | null;
+  candidateMedianCostUsd: number | null;
+  medianCostReduction: number | null;
+};
+type BreakEvenStorage = { perTokenHour: number | null; ttlMs: number | null; included: boolean };
+type BreakEvenCostAtReads = Record<number, { uncachedUsd: number; cachedUsd: number; savingsUsd: number }>;
+type BreakEvenFields = {
+  prefixTokens: number | null;
+  rateSnapshot: RateSnapshot;
+  readsToStrictSavings: number | null;
+  readsToRecoverWrite: number | null;
+  savingsPerRead: number | null;
+  costAtReads: BreakEvenCostAtReads;
+  storage: BreakEvenStorage;
+  unknowns: string[];
+};
+type RoleGroup = {
+  attempts: number;
+  usage: UsageAggregate;
+  cost: CostAggregate;
+  latency: LatencyAggregate;
+  cachedInputShare: number | null;
+};
+type ExperimentOptions = {
+  rateSnapshots?: unknown;
+  readerDiagnostics?: unknown;
+  ttlBuckets?: unknown;
+  efficiencyGate?: unknown;
+  prefixTokens?: unknown;
+  storageTtlMs?: unknown;
+};
+
+function isObject(value: unknown): value is TraceJsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function finiteNonnegative(value) {
+function asObject(value: unknown): TraceJsonObject | null {
+  return isObject(value) ? value : null;
+}
+
+function finiteNonnegative(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
-function finitePositive(value) {
+function finitePositive(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }
 
-function nonempty(value) {
+function nullableSafeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) ? value : null;
+}
+
+function nonempty(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-function normalizeTimestamp(value) {
+function normalizeTimestamp(value: unknown): string | null {
   if (typeof value === "string" && value.trim()) {
     const parsed = Date.parse(value);
     return Number.isFinite(parsed) && parsed >= 0 ? new Date(parsed).toISOString() : null;
@@ -51,7 +335,7 @@ function normalizeTimestamp(value) {
   return null;
 }
 
-function stableCompare(left, right) {
+function stableCompare(left: unknown, right: unknown): number {
   const a = Buffer.from(String(left), "utf8");
   const b = Buffer.from(String(right), "utf8");
   const length = Math.min(a.length, b.length);
@@ -61,11 +345,11 @@ function stableCompare(left, right) {
   return a.length - b.length;
 }
 
-function sortedObject(entries) {
+function sortedObject<V>(entries: Array<[string, V]>): Record<string, V> {
   return Object.fromEntries(entries.sort(([left], [right]) => stableCompare(left, right)));
 }
 
-function recordTimeMs(record) {
+function recordTimeMs(record: TraceJsonObject): number | null {
   for (const field of ["atMs", "startedAtMs", "timestampMs", "timeMs", "turnStartedAtMs"]) {
     const value = finiteNonnegative(record?.[field]);
     if (value !== null) return value;
@@ -77,7 +361,7 @@ function recordTimeMs(record) {
   return null;
 }
 
-function absoluteRecordTimeMs(record) {
+function absoluteRecordTimeMs(record: TraceJsonObject): number | null {
   for (const field of ["startedAt", "timestamp", "createdAt", "at", "occurredAt"]) {
     const normalized = normalizeTimestamp(record?.[field]);
     if (normalized !== null) return Date.parse(normalized);
@@ -91,11 +375,21 @@ function absoluteRecordTimeMs(record) {
   return null;
 }
 
-function traceOrder(record) {
-  const turn = Number.isSafeInteger(record?.traceTurn) && record.traceTurn >= 0 ? record.traceTurn : null;
-  const storage = Array.isArray(record?.storageSeqRange) && Number.isSafeInteger(record.storageSeqRange[0])
-    ? record.storageSeqRange[0]
-    : null;
+type TraceOrder = {
+  timeMs: number | null;
+  traceTurn: number | null;
+  storageSeq: number | null;
+  runId: string;
+  taskId: string;
+  role: string;
+  attemptId: string;
+};
+
+function traceOrder(record: TraceJsonObject): TraceOrder {
+  const turnValue = nullableSafeInteger(record?.traceTurn);
+  const turn = turnValue !== null && turnValue >= 0 ? turnValue : null;
+  const storageSeqValues = Array.isArray(record?.storageSeqRange) ? record.storageSeqRange : null;
+  const storage = storageSeqValues ? nullableSafeInteger(storageSeqValues[0]) : null;
   return {
     timeMs: recordTimeMs(record),
     traceTurn: turn,
@@ -107,7 +401,7 @@ function traceOrder(record) {
   };
 }
 
-function compareTraceRecords(left, right) {
+function compareTraceRecords(left: TraceJsonObject, right: TraceJsonObject): number {
   const a = traceOrder(left);
   const b = traceOrder(right);
   for (const [leftValue, rightValue] of [
@@ -131,13 +425,14 @@ function compareTraceRecords(left, right) {
   return 0;
 }
 
-function compositeKey(runId, taskId) {
+function compositeKey(runId: unknown, taskId: unknown): string {
   return `${runId ?? "unknown"}\u0000${taskId ?? "unknown"}`;
 }
 
-function usageFromRecord(record) {
-  const usage = isObject(record?.usage) ? record.usage : null;
-  const pick = (name, ...aliases) => {
+function usageFromRecord(record: TraceJsonObject): ExperimentUsage {
+  const rawUsage = record?.usage;
+  const usage = isObject(rawUsage) ? rawUsage : null;
+  const pick = (name: string, ...aliases: string[]) => {
     if (!usage) return null;
     for (const field of [name, ...aliases]) {
       if (Object.hasOwn(usage, field)) return finiteNonnegative(usage[field]);
@@ -153,19 +448,20 @@ function usageFromRecord(record) {
   };
 }
 
-function completeInputUsage(usage) {
+function completeInputUsage(usage: ExperimentUsage): number | null {
   return usage.input !== null && usage.cacheRead !== null && usage.cacheWrite !== null
     ? usage.input + usage.cacheRead + usage.cacheWrite
     : null;
 }
 
-function normalizePositions(value) {
+function normalizePositions(value: unknown): number[] | null {
   if (!Array.isArray(value)) return null;
-  const positions = value.filter((item) => Number.isSafeInteger(item) && item >= 0);
+  const positions = value.filter((item): item is number =>
+    typeof item === "number" && Number.isSafeInteger(item) && item >= 0);
   return [...new Set(positions)].sort((left, right) => left - right);
 }
 
-function normalizePolicy(value) {
+function normalizePolicy(value: unknown): ExperimentPolicy {
   const policy = isObject(value) ? value : {};
   return {
     mode: nonempty(policy.mode),
@@ -180,8 +476,9 @@ function normalizePolicy(value) {
   };
 }
 
-function normalizeCache(record) {
-  const cache = isObject(record?.cache) ? record.cache : {};
+function normalizeCache(record: TraceJsonObject): ExperimentCache {
+  const rawCache = record?.cache;
+  const cache = isObject(rawCache) ? rawCache : {};
   const effective = normalizePolicy(cache.effective ?? record?.effectiveCache);
   const requested = normalizePolicy(cache.requested ?? record?.requestedCache);
   const topPositions = normalizePositions(cache.markerPositions ?? record?.markerPositions);
@@ -209,41 +506,36 @@ function normalizeCache(record) {
   };
 }
 
-function variantFromRecord(record) {
+function variantFromRecord(record: TraceJsonObject): string | null {
   return nonempty(record?.variant)
     ?? nonempty(record?.runVariant)
     ?? nonempty(record?.experimentVariant)
-    ?? nonempty(record?.metadata?.variant)
-    ?? nonempty(record?.experiment?.variant);
+    ?? nonempty(asObject(record?.metadata)?.variant)
+    ?? nonempty(asObject(record?.experiment)?.variant);
 }
 
-function replicateFromRecord(record) {
+function replicateFromRecord(record: TraceJsonObject): string | null {
   return nonempty(record?.replicateId)
     ?? nonempty(record?.replicate)
-    ?? nonempty(record?.metadata?.replicateId)
-    ?? nonempty(record?.experiment?.replicateId);
+    ?? nonempty(asObject(record?.metadata)?.replicateId)
+    ?? nonempty(asObject(record?.experiment)?.replicateId);
 }
 
-function corpusFromRecord(record) {
-  return {
-    id: nonempty(record?.corpusId)
-      ?? nonempty(record?.corpus)
-      ?? nonempty(record?.metadata?.corpusId)
-      ?? nonempty(record?.taskClass),
-    source: nonempty(record?.corpusId)
-      ? "corpusId"
-      : nonempty(record?.corpus)
-        ? "corpus"
-        : nonempty(record?.metadata?.corpusId)
-          ? "metadata.corpusId"
-          : nonempty(record?.taskClass)
-            ? "taskClass"
-            : null,
-  };
+function corpusFromRecord(record: TraceJsonObject): { id: string | null; source: string | null } {
+  const corpusId = nonempty(record?.corpusId);
+  if (corpusId) return { id: corpusId, source: "corpusId" };
+  const corpus = nonempty(record?.corpus);
+  if (corpus) return { id: corpus, source: "corpus" };
+  const metadataCorpusId = nonempty(asObject(record?.metadata)?.corpusId);
+  if (metadataCorpusId) return { id: metadataCorpusId, source: "metadata.corpusId" };
+  const taskClass = nonempty(record?.taskClass);
+  if (taskClass) return { id: taskClass, source: "taskClass" };
+  return { id: null, source: null };
 }
 
-function normalizeCost(record) {
-  const cost = isObject(record?.cost) ? record.cost : null;
+function normalizeCost(record: TraceJsonObject): ExperimentCost {
+  const rawCost = record?.cost;
+  const cost = isObject(rawCost) ? rawCost : null;
   const usd = finiteNonnegative(cost?.usd ?? (cost && Object.hasOwn(cost, "usd") ? null : record?.usd));
   return {
     usd,
@@ -253,7 +545,7 @@ function normalizeCost(record) {
   };
 }
 
-function normalizeAttempt(record) {
+function normalizeAttempt(record: unknown): NormalizedAttempt | null {
   if (!isObject(record) || record.schemaVersion !== TRACE_SCHEMA_VERSION || record.recordType !== "attempt") return null;
   const runId = nonempty(record.runId);
   const taskId = nonempty(record.taskId);
@@ -278,7 +570,7 @@ function normalizeAttempt(record) {
     status: nonempty(record.status) ?? "unknown",
     atMs: recordTimeMs(record),
     observedAtMs: absoluteRecordTimeMs(record),
-    traceTurn: Number.isSafeInteger(record.traceTurn) ? record.traceTurn : null,
+    traceTurn: nullableSafeInteger(record.traceTurn),
     usage: usageFromRecord(record),
     cost: normalizeCost(record),
     cache: normalizeCache(record),
@@ -287,7 +579,7 @@ function normalizeAttempt(record) {
   };
 }
 
-function normalizeSettlement(record) {
+function normalizeSettlement(record: unknown): NormalizedSettlement | null {
   if (!isObject(record) || record.schemaVersion !== TRACE_SCHEMA_VERSION || record.recordType !== "task-settled") return null;
   const runId = nonempty(record.runId);
   const taskId = nonempty(record.taskId);
@@ -303,17 +595,17 @@ function normalizeSettlement(record) {
     status: nonempty(outcome.status),
     correctness: nonempty(outcome.correctness),
     finalAttemptId: nonempty(record.finalAttemptId),
-    attemptIds: Array.isArray(record.attemptIds) ? record.attemptIds.filter((id) => typeof id === "string") : [],
-    summaryAttemptIds: Array.isArray(record.summaryAttemptIds) ? record.summaryAttemptIds.filter((id) => typeof id === "string") : [],
+    attemptIds: Array.isArray(record.attemptIds) ? record.attemptIds.filter((id: unknown) => typeof id === "string") : [],
+    summaryAttemptIds: Array.isArray(record.summaryAttemptIds) ? record.summaryAttemptIds.filter((id: unknown) => typeof id === "string") : [],
   };
 }
 
-function normalizeRecords(records) {
-  const attempts = [];
-  const settlements = [];
-  const invalidRecords = [];
-  const attemptKeys = new Set();
-  const settlementKeys = new Set();
+function normalizeRecords(records: unknown): { attempts: NormalizedAttempt[]; settlements: NormalizedSettlement[]; invalidRecords: InvalidRecord[] } {
+  const attempts: NormalizedAttempt[] = [];
+  const settlements: NormalizedSettlement[] = [];
+  const invalidRecords: InvalidRecord[] = [];
+  const attemptKeys = new Set<string>();
+  const settlementKeys = new Set<string>();
   for (const record of Array.isArray(records) ? records : []) {
     const identity = {
       schemaVersion: isObject(record) ? record.schemaVersion ?? null : null,
@@ -344,7 +636,7 @@ function normalizeRecords(records) {
     }
     invalidRecords.push({ ...identity, reason: "unsupported-record-type" });
   }
-  const uniqueAttempts = [];
+  const uniqueAttempts: NormalizedAttempt[] = [];
   for (const attempt of attempts) {
     const key = `${attempt.runId}\u0000${attempt.attemptId}`;
     if (attemptKeys.has(key)) {
@@ -356,7 +648,7 @@ function normalizeRecords(records) {
   }
   attempts.length = 0;
   attempts.push(...uniqueAttempts);
-  const uniqueSettlements = [];
+  const uniqueSettlements: NormalizedSettlement[] = [];
   for (const settlement of settlements) {
     const key = compositeKey(settlement.runId, settlement.taskId);
     if (settlementKeys.has(key)) {
@@ -369,12 +661,12 @@ function normalizeRecords(records) {
   settlements.length = 0;
   settlements.push(...uniqueSettlements);
   const attemptsByKey = new Map(attempts.map((attempt) => [`${attempt.runId}\u0000${attempt.attemptId}`, attempt]));
-  const validSettlements = [];
+  const validSettlements: NormalizedSettlement[] = [];
   for (const settlement of settlements) {
     const ids = settlement.attemptIds;
     const summaryIds = settlement.summaryAttemptIds;
     const idSet = new Set(ids);
-    let reason = null;
+    let reason: string | null = null;
     if (idSet.size !== ids.length) reason = "settlement-attempt-ids-not-unique";
     if (!reason && ids.some((id) => {
       const attempt = attemptsByKey.get(`${settlement.runId}\u0000${id}`);
@@ -405,12 +697,12 @@ function normalizeRecords(records) {
   return { attempts, settlements, invalidRecords };
 }
 
-function compareNormalizedAttempts(left, right) {
+function compareNormalizedAttempts(left: NormalizedAttempt, right: NormalizedAttempt): number {
   return compareTraceRecords(left.raw, right.raw);
 }
 
-function groupAttempts(attempts, selector) {
-  const groups = new Map();
+function groupAttempts(attempts: NormalizedAttempt[], selector: (attempt: NormalizedAttempt) => string | null): Array<[string, NormalizedAttempt[]]> {
+  const groups = new Map<string, NormalizedAttempt[]>();
   for (const attempt of attempts) {
     const name = selector(attempt) ?? "unknown";
     const group = groups.get(name) ?? [];
@@ -420,27 +712,37 @@ function groupAttempts(attempts, selector) {
   return [...groups.entries()].sort(([left], [right]) => stableCompare(left, right));
 }
 
-function percentile(values, fraction) {
+function percentile(values: number[], fraction: number): number | null {
   if (values.length === 0) return null;
   const sorted = values.slice().sort((left, right) => left - right);
   return sorted[Math.max(0, Math.ceil(sorted.length * fraction) - 1)];
 }
 
-function usageAggregate(attempts) {
-  const fields = ["input", "cacheRead", "cacheWrite", "output", "reasoning"];
-  const result = {};
-  for (const field of fields) {
-    const values = attempts.map((attempt) => attempt.usage[field]).filter((value) => value !== null);
-    result[field] = {
+function usageAggregate(attempts: NormalizedAttempt[]): UsageAggregate {
+  const metric = (field: UsageField): UsageMetric => {
+    const values = attempts.map((attempt) => attempt.usage[field]).filter((value): value is number => value !== null);
+    return {
       total: values.reduce((sum, value) => sum + value, 0),
       knownSamples: values.length,
       unknownSamples: attempts.length - values.length,
     };
-  }
+  };
+  const result: UsageAggregate = {
+    input: metric("input"),
+    cacheRead: metric("cacheRead"),
+    cacheWrite: metric("cacheWrite"),
+    output: metric("output"),
+    reasoning: metric("reasoning"),
+    completeSamples: 0,
+    partialSamples: 0,
+    unknownSamples: 0,
+    cachedInputShare: null,
+    cacheShareDenominator: { input: 0, cacheRead: 0, cacheWrite: 0, totalInput: 0, knownSamples: 0 },
+  };
   const complete = attempts.filter((attempt) => completeInputUsage(attempt.usage) !== null);
-  const input = complete.reduce((sum, attempt) => sum + attempt.usage.input, 0);
-  const cacheRead = complete.reduce((sum, attempt) => sum + attempt.usage.cacheRead, 0);
-  const cacheWrite = complete.reduce((sum, attempt) => sum + attempt.usage.cacheWrite, 0);
+  const input = complete.reduce((sum, attempt) => sum + (attempt.usage.input ?? 0), 0);
+  const cacheRead = complete.reduce((sum, attempt) => sum + (attempt.usage.cacheRead ?? 0), 0);
+  const cacheWrite = complete.reduce((sum, attempt) => sum + (attempt.usage.cacheWrite ?? 0), 0);
   const denominator = input + cacheRead + cacheWrite;
   result.completeSamples = complete.length;
   result.partialSamples = attempts.filter((attempt) => {
@@ -459,30 +761,30 @@ function usageAggregate(attempts) {
   return result;
 }
 
-function normalizeRateNumber(value, unit, kind = "token") {
+function normalizeRateNumber(value: unknown, unit: unknown, kind = "token"): number | null {
   const number = finiteNonnegative(value);
   if (number === null) return null;
   if (kind === "storage") {
-    return unit === null || unit === undefined || STORAGE_PER_TOKEN_HOUR_UNITS.has(unit) ? number : null;
+    return unit === null || unit === undefined || (typeof unit === "string" && STORAGE_PER_TOKEN_HOUR_UNITS.has(unit)) ? number : null;
   }
-  if (unit === null || unit === undefined || TOKEN_RATE_PER_TOKEN_UNITS.has(unit)) return number;
-  return TOKEN_RATE_PER_MILLION_UNITS.has(unit) ? number / RATE_PER_MILLION : null;
+  if (unit === null || unit === undefined || (typeof unit === "string" && TOKEN_RATE_PER_TOKEN_UNITS.has(unit))) return number;
+  return typeof unit === "string" && TOKEN_RATE_PER_MILLION_UNITS.has(unit) ? number / RATE_PER_MILLION : null;
 }
 
-function normalizeRateSnapshot(snapshot) {
+function normalizeRateSnapshot(snapshot: unknown): RateSnapshot | null {
   if (!isObject(snapshot)) return null;
   const nested = isObject(snapshot.rates) ? snapshot.rates : snapshot;
   const units = isObject(snapshot.units) ? snapshot.units : null;
   const unit = nested.unit ?? snapshot.unit;
-  const unitFor = (name) => units?.[name] ?? units?.[name.replace(/PerToken(?:Hour)?$/, "")] ?? unit;
-  const field = (name, ...aliases) => {
+  const unitFor = (name: string) => units?.[name] ?? units?.[name.replace(/PerToken(?:Hour)?$/, "")] ?? unit;
+  const field = (name: string, ...aliases: string[]) => {
     for (const key of [name, ...aliases]) {
       if (Object.hasOwn(nested, key)) return normalizeRateNumber(nested[key], unitFor(name));
       if (Object.hasOwn(snapshot, key)) return normalizeRateNumber(snapshot[key], unitFor(name));
     }
     return null;
   };
-  const storageField = (name, ...aliases) => {
+  const storageField = (name: string, ...aliases: string[]) => {
     for (const key of [name, ...aliases]) {
       if (Object.hasOwn(nested, key)) return normalizeRateNumber(nested[key], unitFor(name), "storage");
       if (Object.hasOwn(snapshot, key)) return normalizeRateNumber(snapshot[key], unitFor(name), "storage");
@@ -492,6 +794,7 @@ function normalizeRateSnapshot(snapshot) {
   const retrievedAt = normalizeTimestamp(snapshot.retrievedAt)
     ?? normalizeTimestamp(snapshot.lookedUpAt)
     ?? normalizeTimestamp(snapshot.timestamp);
+  const ttlClass = snapshot.cacheWriteTtlClass;
   return {
     source: nonempty(snapshot.source),
     version: nonempty(snapshot.version),
@@ -507,8 +810,8 @@ function normalizeRateSnapshot(snapshot) {
     cacheWritePerToken: field("cacheWritePerToken", "cacheWrite", "cache_write", "cache_write_rate"),
     reasoningPerToken: field("reasoningPerToken", "reasoning", "reasoning_rate"),
     storagePerTokenHour: storageField("storagePerTokenHour", "storage", "storage_rate", "storage_per_token_hour"),
-    cacheWriteTtlClass: ["unknown", "provider-default", "5m", "30m", "1h", "custom"].includes(snapshot.cacheWriteTtlClass)
-      ? snapshot.cacheWriteTtlClass
+    cacheWriteTtlClass: ttlClass === "unknown" || ttlClass === "provider-default" || ttlClass === "5m" || ttlClass === "30m" || ttlClass === "1h" || ttlClass === "custom"
+      ? ttlClass
       : null,
     reasoningBilling: snapshot.reasoningBilling === "separate" || snapshot.reasoningBilling === "included-in-output"
       ? snapshot.reasoningBilling
@@ -516,9 +819,9 @@ function normalizeRateSnapshot(snapshot) {
   };
 }
 
-function rateSnapshotSpecificity(snapshot, attempt) {
+function rateSnapshotSpecificity(snapshot: RateSnapshot, attempt: NormalizedAttempt): number {
   let score = 0;
-  for (const field of ["provider", "protocol", "route", "model", "role"]) {
+  for (const field of ["provider", "protocol", "route", "model", "role"] as const) {
     if (snapshot[field] === null) continue;
     if (snapshot[field] !== attempt[field]) return -1;
     score++;
@@ -526,20 +829,20 @@ function rateSnapshotSpecificity(snapshot, attempt) {
   return score;
 }
 
-function rateAvailableAtAttempt(snapshot, attempt) {
+function rateAvailableAtAttempt(snapshot: RateSnapshot, attempt: NormalizedAttempt): boolean {
   if (snapshot.retrievedAt === null) return false;
   if (attempt.observedAtMs === null) return false;
   const retrievedAtMs = Date.parse(snapshot.retrievedAt);
   return Number.isFinite(retrievedAtMs) && retrievedAtMs <= attempt.observedAtMs;
 }
 
-function traceCostAvailableAtAttempt(attempt) {
+function traceCostAvailableAtAttempt(attempt: NormalizedAttempt): boolean {
   if (attempt.cost.retrievedAt === null || attempt.observedAtMs === null) return false;
   const retrievedAtMs = Date.parse(attempt.cost.retrievedAt);
   return Number.isFinite(retrievedAtMs) && retrievedAtMs <= attempt.observedAtMs;
 }
 
-function cacheWriteTtlClass(attempt) {
+function cacheWriteTtlClass(attempt: NormalizedAttempt): string {
   const ttlMs = attempt.cache.effective.ttlMs ?? attempt.cache.requested.ttlMs;
   if (ttlMs === null) return "unknown";
   if (ttlMs === 5 * 60 * 1000) return "5m";
@@ -548,7 +851,7 @@ function cacheWriteTtlClass(attempt) {
   return "custom";
 }
 
-function cacheWriteTtlCompatible(snapshot, attempt) {
+function cacheWriteTtlCompatible(snapshot: RateSnapshot, attempt: NormalizedAttempt): boolean {
   if (attempt.usage.cacheWrite === null || attempt.usage.cacheWrite === 0) return true;
   const rateClass = snapshot.cacheWriteTtlClass;
   const attemptClass = cacheWriteTtlClass(attempt);
@@ -556,7 +859,7 @@ function cacheWriteTtlCompatible(snapshot, attempt) {
   return rateClass === attemptClass;
 }
 
-function canonicalSnapshotForAttempt(snapshot, attempt) {
+function canonicalSnapshotForAttempt(snapshot: RateSnapshot | null, attempt: NormalizedAttempt) {
   if (!snapshot) return null;
   return normalizeCanonicalRateSnapshot({
     scope: {
@@ -590,7 +893,7 @@ function canonicalSnapshotForAttempt(snapshot, attempt) {
   });
 }
 
-function rateFingerprint(snapshot) {
+function rateFingerprint(snapshot: RateSnapshot | null): string | null {
   if (!snapshot) return null;
   return JSON.stringify({
     source: snapshot.source,
@@ -612,7 +915,7 @@ function rateFingerprint(snapshot) {
   });
 }
 
-function traceCostFingerprint(attempt) {
+function traceCostFingerprint(attempt: NormalizedAttempt): string | null {
   if (!attempt.cost.source || !attempt.cost.retrievedAt) return null;
   return `trace:${JSON.stringify({
     source: attempt.cost.source,
@@ -626,7 +929,7 @@ function traceCostFingerprint(attempt) {
   })}`;
 }
 
-function chooseRateSnapshot(attempt, snapshots) {
+function chooseRateSnapshot(attempt: NormalizedAttempt, snapshots: RateSnapshot[]): RateSnapshot | null {
   const candidates = snapshots
     .map((snapshot) => ({ snapshot, specificity: rateSnapshotSpecificity(snapshot, attempt) }))
     .filter((item) => item.specificity >= 0 && rateAvailableAtAttempt(item.snapshot, attempt))
@@ -641,7 +944,7 @@ function chooseRateSnapshot(attempt, snapshots) {
   return candidates[0]?.snapshot ?? null;
 }
 
-function storageCostForAttempt(attempt, snapshot) {
+function storageCostForAttempt(attempt: NormalizedAttempt, snapshot: RateSnapshot | null): StorageCost {
   if (snapshot === null) return { usd: null, known: false, reason: "missing-rate-snapshot" };
   if (attempt.usage.cacheWrite === null) return { usd: null, known: false, reason: "missing-cache-write" };
   if (attempt.usage.cacheWrite === 0) {
@@ -658,13 +961,13 @@ function storageCostForAttempt(attempt, snapshot) {
   };
 }
 
-function costForAttempt(attempt, snapshots) {
+function costForAttempt(attempt: NormalizedAttempt, snapshots: RateSnapshot[]): AttemptCost {
   const usage = attempt.usage;
   const rateSnapshot = chooseRateSnapshot(attempt, snapshots);
   const storage = storageCostForAttempt(attempt, rateSnapshot);
-  if (rateSnapshot && storage.known && cacheWriteTtlCompatible(rateSnapshot, attempt)) {
+  if (rateSnapshot && storage.known && storage.usd !== null && cacheWriteTtlCompatible(rateSnapshot, attempt)) {
     const canonical = canonicalSnapshotForAttempt(rateSnapshot, attempt);
-    const requiredFields = rateSnapshot.reasoningBilling === "included-in-output"
+    const requiredFields: RateField[] = rateSnapshot.reasoningBilling === "included-in-output"
       ? ["input", "cacheRead", "cacheWrite", "output"]
       : ["input", "cacheRead", "cacheWrite", "output", "reasoning"];
     const computed = computeTraceCost({
@@ -743,11 +1046,11 @@ function costForAttempt(attempt, snapshots) {
   };
 }
 
-function costAggregate(attempts, snapshots) {
+function costAggregate(attempts: NormalizedAttempt[], snapshots: RateSnapshot[]): CostAggregate {
   const values = attempts.map((attempt) => costForAttempt(attempt, snapshots));
-  const known = values.filter((value) => value.known);
+  const known = values.filter((value): value is AttemptCost & { usd: number } => value.known);
   const fromRates = known.filter((value) => value.reason !== "trace-cost");
-  const storageKnown = values.filter((value) => value.storage?.known === true);
+  const storageKnown = values.filter((value): value is AttemptCost & { storage: { usd: number; known: true; reason: null } } => value.storage?.known === true);
   const storageValues = storageKnown.map((value) => value.storage.usd);
   return {
     totalUsd: known.reduce((sum, value) => sum + value.usd, 0),
@@ -761,13 +1064,13 @@ function costAggregate(attempts, snapshots) {
       knownSamples: storageKnown.length,
       unknownSamples: values.length - storageKnown.length,
     },
-    bySource: sortedObject([...new Set(known.map((value) => value.source).filter(Boolean))].map((source) => [source, known.filter((value) => value.source === source).length])),
+    bySource: sortedObject([...new Set(known.map((value) => value.source).filter((source): source is string => Boolean(source)))].map((source): [string, number] => [source, known.filter((value) => value.source === source).length])),
   };
 }
 
-function latencyAggregate(attempts) {
-  const ttft = attempts.map((attempt) => attempt.ttftMs).filter((value) => value !== null);
-  const turn = attempts.map((attempt) => attempt.turnMs).filter((value) => value !== null);
+function latencyAggregate(attempts: NormalizedAttempt[]): LatencyAggregate {
+  const ttft = attempts.map((attempt) => attempt.ttftMs).filter((value): value is number => value !== null);
+  const turn = attempts.map((attempt) => attempt.turnMs).filter((value): value is number => value !== null);
   return {
     ttftMs: {
       p50: percentile(ttft, 0.5),
@@ -784,7 +1087,7 @@ function latencyAggregate(attempts) {
   };
 }
 
-function dimensionGroup(attempts, snapshots) {
+function dimensionGroup(attempts: NormalizedAttempt[], snapshots: RateSnapshot[]): DimensionGroup {
   const usage = usageAggregate(attempts);
   return {
     attempts: attempts.length,
@@ -796,11 +1099,11 @@ function dimensionGroup(attempts, snapshots) {
   };
 }
 
-function dimensionGroups(attempts, selector, snapshots) {
-  return sortedObject(groupAttempts(attempts, selector).map(([name, group]) => [name, dimensionGroup(group, snapshots)]));
+function dimensionGroups(attempts: NormalizedAttempt[], selector: (attempt: NormalizedAttempt) => string | null, snapshots: RateSnapshot[]): Record<string, DimensionGroup> {
+  return sortedObject(groupAttempts(attempts, selector).map(([name, group]): [string, DimensionGroup] => [name, dimensionGroup(group, snapshots)]));
 }
 
-function continuityKey(attempt) {
+function continuityKey(attempt: NormalizedAttempt): string {
   return [
     attempt.runId,
     attempt.taskId,
@@ -815,12 +1118,12 @@ function continuityKey(attempt) {
   ].join("\u0000");
 }
 
-function continuityGroups(attempts) {
+function continuityGroups(attempts: NormalizedAttempt[]): Array<[string, NormalizedAttempt[]]> {
   return groupAttempts(attempts, continuityKey);
 }
 
-function breakpointDeltas(attempts) {
-  const pairs = [];
+function breakpointDeltas(attempts: NormalizedAttempt[]): BreakpointDeltas {
+  const pairs: BreakpointPair[] = [];
   for (const [, group] of continuityGroups(attempts)) {
     const ordered = group.slice().sort(compareNormalizedAttempts);
     for (let index = 1; index < ordered.length; index++) {
@@ -868,8 +1171,8 @@ function breakpointDeltas(attempts) {
     }
     return 0;
   });
-  const markerDeltas = pairs.map((pair) => pair.markerCountDelta).filter((value) => value !== null);
-  const eligibleDeltas = pairs.map((pair) => pair.eligibleBlockDelta).filter((value) => value !== null);
+  const markerDeltas = pairs.map((pair) => pair.markerCountDelta).filter((value): value is number => value !== null);
+  const eligibleDeltas = pairs.map((pair) => pair.eligibleBlockDelta).filter((value): value is number => value !== null);
   return {
     comparisons: pairs.length,
     markerCountDelta: {
@@ -892,37 +1195,43 @@ function breakpointDeltas(attempts) {
   };
 }
 
-function sampleTime(sample) {
-  if (sample && Object.hasOwn(sample, "atMs")) return finiteNonnegative(sample.atMs);
-  if (sample && Object.hasOwn(sample, "timeMs")) return finiteNonnegative(sample.timeMs);
-  return recordTimeMs(sample?.raw ?? sample);
+function sampleTime(sample: TraceJsonObject): number | null {
+  if (Object.hasOwn(sample, "atMs")) return finiteNonnegative(sample.atMs);
+  if (Object.hasOwn(sample, "timeMs")) return finiteNonnegative(sample.timeMs);
+  const raw = sample.raw;
+  if (isObject(raw)) return recordTimeMs(raw);
+  return recordTimeMs(raw === null || raw === undefined ? sample : {});
 }
 
-function sampleCacheRead(sample) {
+function sampleCacheRead(sample: TraceJsonObject): number | null {
   if (Object.hasOwn(sample, "cacheRead")) return finiteNonnegative(sample.cacheRead);
-  if (sample?.usage && Object.hasOwn(sample.usage, "cacheRead")) return finiteNonnegative(sample.usage.cacheRead);
-  return finiteNonnegative(sample?.usage?.cache_read_input_tokens);
+  const usage = asObject(sample.usage);
+  if (sample.usage && usage && Object.hasOwn(usage, "cacheRead")) return finiteNonnegative(usage.cacheRead);
+  return finiteNonnegative(usage?.cache_read_input_tokens);
 }
 
-function sampleTtl(sample) {
+function sampleTtl(sample: TraceJsonObject): number | null {
   if (Object.hasOwn(sample, "effectiveTtlMs")) return finiteNonnegative(sample.effectiveTtlMs);
-  if (sample?.cache?.effective) return finiteNonnegative(sample.cache.effective.ttlMs);
-  return finiteNonnegative(sample?.cache?.effectiveTtlMs);
+  const cache = asObject(sample.cache);
+  if (cache && isObject(cache.effective)) return finiteNonnegative(cache.effective.ttlMs);
+  return finiteNonnegative(cache?.effectiveTtlMs);
 }
 
-function sampleRetentionKnown(sample) {
-  if (typeof sample?.retentionKnown === "boolean") return sample.retentionKnown;
-  if (typeof sample?.cache?.retentionKnown === "boolean") return sample.cache.retentionKnown;
-  if (typeof sample?.cache?.effective?.retentionKnown === "boolean") return sample.cache.effective.retentionKnown;
+function sampleRetentionKnown(sample: TraceJsonObject): boolean | null {
+  if (typeof sample.retentionKnown === "boolean") return sample.retentionKnown;
+  const cache = asObject(sample.cache);
+  if (cache && typeof cache.retentionKnown === "boolean") return cache.retentionKnown;
+  const effective = cache ? asObject(cache.effective) : null;
+  if (effective && typeof effective.retentionKnown === "boolean") return effective.retentionKnown;
   // An effective TTL is a requested/observed policy field, not proof of
   // backend retention. Keep the retention denominator unknown unless runtime
   // or a controlled probe records explicit evidence.
   return null;
 }
 
-function normalizeTtlBuckets(input) {
+function normalizeTtlBuckets(input: unknown): TtlBucket[] {
   const source = Array.isArray(input) && input.length ? input : DEFAULT_TTL_BUCKETS;
-  const buckets = [];
+  const buckets: TtlBucket[] = [];
   for (const item of source) {
     if (typeof item === "number") {
       const maxMs = finitePositive(item);
@@ -941,8 +1250,8 @@ function normalizeTtlBuckets(input) {
   return buckets.length ? buckets : DEFAULT_TTL_BUCKETS;
 }
 
-function emptyTtlBuckets(buckets) {
-  const result = {};
+function emptyTtlBuckets(buckets: TtlBucket[]): Record<string, TtlBucketState> {
+  const result: Record<string, TtlBucketState> = {};
   for (const bucket of buckets) {
     result[bucket.label] = { samples: 0, completeSamples: 0, observedHits: 0, observedMisses: 0, unknownSamples: 0, effectiveTtlExceededSamples: 0 };
   }
@@ -951,8 +1260,8 @@ function emptyTtlBuckets(buckets) {
   return result;
 }
 
-export function compareTtlBuckets(samples, options = {}) {
-  const bucketOptions = Array.isArray(options) ? options : options.buckets;
+export function compareTtlBuckets(samples: unknown, options: unknown = {}): TtlComparison {
+  const bucketOptions = Array.isArray(options) ? options : asObject(options)?.buckets;
   const buckets = normalizeTtlBuckets(bucketOptions);
   const outputBuckets = emptyTtlBuckets(buckets);
   const ordered = (Array.isArray(samples) ? samples : []).slice().sort((left, right) => {
@@ -977,7 +1286,7 @@ export function compareTtlBuckets(samples, options = {}) {
     const retentionKnown = sampleRetentionKnown(current);
     if (gapMs !== null) timestampedPairs++;
     if (gapMs !== null && ttlMs !== null && retentionKnown === true) retentionEvidencePairs++;
-    let bucketName;
+    let bucketName: string;
     if (retentionKnown !== true || ttlMs === null) {
       bucketName = UNKNOWN_RETENTION_BUCKET;
       unknownRetentionSamples++;
@@ -1012,8 +1321,8 @@ export function compareTtlBuckets(samples, options = {}) {
   };
 }
 
-function mergeTtlComparisons(comparisons, unknownRetentionAttemptSamples) {
-  const buckets = {};
+function mergeTtlComparisons(comparisons: TtlComparison[], unknownRetentionAttemptSamples: number): MergedTtlComparison {
+  const buckets: Record<string, TtlBucketState> = {};
   let unknownPairSamples = 0;
   let exceeded = 0;
   let timestampedPairs = 0;
@@ -1039,79 +1348,94 @@ function mergeTtlComparisons(comparisons, unknownRetentionAttemptSamples) {
   };
 }
 
-function taskModel(attempts, settlements) {
-  const groups = new Map();
+function taskModel(attempts: NormalizedAttempt[], settlements: NormalizedSettlement[]): TaskGroup[] {
+  const groups = new Map<string, TaskGroupAccumulator>();
   for (const attempt of attempts) {
     const key = compositeKey(attempt.runId, attempt.taskId);
-    const group = groups.get(key) ?? {
-      runId: attempt.runId,
-      taskId: attempt.taskId,
-      corpusIds: new Set(),
-      corpusSources: new Set(),
-      replicateIds: new Set(),
-      attempts: [],
-      settlement: null,
-    };
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        runId: attempt.runId,
+        taskId: attempt.taskId,
+        corpusIds: new Set<string>(),
+        corpusSources: new Set<string>(),
+        replicateIds: new Set<string>(),
+        attempts: [],
+        settlement: null,
+      };
+      groups.set(key, group);
+    }
     if (attempt.corpusId) group.corpusIds.add(attempt.corpusId);
     if (attempt.corpusSource) group.corpusSources.add(attempt.corpusSource);
     if (attempt.replicateId) group.replicateIds.add(attempt.replicateId);
     group.attempts.push(attempt);
-    groups.set(key, group);
   }
   for (const settlement of settlements) {
     const key = compositeKey(settlement.runId, settlement.taskId);
-    const group = groups.get(key) ?? {
-      runId: settlement.runId,
-      taskId: settlement.taskId,
-      corpusIds: new Set(),
-      corpusSources: new Set(),
-      replicateIds: new Set(),
-      attempts: [],
-      settlement: null,
-    };
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        runId: settlement.runId,
+        taskId: settlement.taskId,
+        corpusIds: new Set<string>(),
+        corpusSources: new Set<string>(),
+        replicateIds: new Set<string>(),
+        attempts: [],
+        settlement: null,
+      };
+      groups.set(key, group);
+    }
     if (settlement.corpusId) group.corpusIds.add(settlement.corpusId);
     if (settlement.corpusSource) group.corpusSources.add(settlement.corpusSource);
     if (settlement.replicateId) group.replicateIds.add(settlement.replicateId);
     group.settlement = settlement;
-    groups.set(key, group);
   }
+  const result: TaskGroup[] = [];
   for (const group of groups.values()) {
-    group.corpusId = group.corpusIds.size === 1 ? [...group.corpusIds][0] : null;
-    group.corpusSource = group.corpusSources.size === 1 ? [...group.corpusSources][0] : null;
-    group.replicateId = group.replicateIds.size === 1 ? [...group.replicateIds][0] : null;
-    delete group.corpusIds;
-    delete group.corpusSources;
-    delete group.replicateIds;
+    result.push({
+      runId: group.runId,
+      taskId: group.taskId,
+      attempts: group.attempts,
+      settlement: group.settlement,
+      corpusId: group.corpusIds.size === 1 ? [...group.corpusIds][0] : null,
+      corpusSource: group.corpusSources.size === 1 ? [...group.corpusSources][0] : null,
+      replicateId: group.replicateIds.size === 1 ? [...group.replicateIds][0] : null,
+    });
   }
-  return [...groups.values()].sort((left, right) => stableCompare(compositeKey(left.runId, left.taskId), compositeKey(right.runId, right.taskId)));
+  return result.sort((left, right) => stableCompare(compositeKey(left.runId, left.taskId), compositeKey(right.runId, right.taskId)));
 }
 
-function taskVariant(group) {
-  const variants = [...new Set(group.attempts.map((attempt) => attempt.variant).filter(Boolean))];
+function taskVariant(group: TaskGroup): string | null {
+  const variants = [...new Set(group.attempts.map((attempt) => attempt.variant).filter((variant): variant is string => Boolean(variant)))];
   return variants.length === 1 ? variants[0] : null;
 }
 
-function taskAccounting(group, snapshots) {
+function taskAccounting(group: TaskGroup, snapshots: RateSnapshot[]): TaskAccounting {
   const inputValues = group.attempts.map((attempt) => completeInputUsage(attempt.usage));
   const costs = group.attempts.map((attempt) => costForAttempt(attempt, snapshots));
-  const rateFingerprints = [...new Set(costs.map((value) => value.rateFingerprint).filter(Boolean))].sort(stableCompare);
+  const rateFingerprints = [...new Set(costs.map((value) => value.rateFingerprint).filter((fingerprint): fingerprint is string => Boolean(fingerprint)))].sort(stableCompare);
+  const knownInputs = inputValues.filter((value): value is number => value !== null);
+  const knownCosts = costs.filter((value): value is AttemptCost & { usd: number } => value.known);
+  const inputKnown = knownInputs.length === inputValues.length;
+  const costKnown = knownCosts.length === costs.length;
   return {
-    inputKnown: inputValues.every((value) => value !== null),
-    inputTotal: inputValues.every((value) => value !== null) ? inputValues.reduce((sum, value) => sum + value, 0) : null,
-    costKnown: costs.every((value) => value.known),
-    costTotal: costs.every((value) => value.known) ? costs.reduce((sum, value) => sum + value.usd, 0) : null,
+    inputKnown,
+    inputTotal: inputKnown ? knownInputs.reduce((sum, value) => sum + value, 0) : null,
+    costKnown,
+    costTotal: costKnown ? knownCosts.reduce((sum, value) => sum + value.usd, 0) : null,
     rateFingerprints,
   };
 }
 
-function boundedRate(count, denominator) {
+function boundedRate(count: number, denominator: number): number | null {
   return denominator > 0 ? Math.min(1, Math.max(0, count / denominator)) : null;
 }
 
-function sumKnownReaderField(diagnostics, field) {
-  const values = diagnostics.map((item) => finiteNonnegative(item?.[field]));
-  return values.length && values.every((value) => value !== null)
-    ? values.reduce((sum, value) => sum + value, 0)
+function sumKnownReaderField(diagnostics: unknown[], field: string): number | null {
+  const values = diagnostics.map((item) => finiteNonnegative(asObject(item)?.[field]));
+  const known = values.filter((value): value is number => value !== null);
+  return values.length > 0 && known.length === values.length
+    ? known.reduce((sum, value) => sum + value, 0)
     : null;
 }
 
@@ -1126,13 +1450,13 @@ const TRACE_INTEGRITY_FIELDS = [
   "manifestErrors",
 ];
 
-function traceIntegrity(invalidRecords, readerDiagnostics) {
-  const reasons = [];
+function traceIntegrity(invalidRecords: InvalidRecord[], readerDiagnostics: unknown[]): IntegrityResult {
+  const reasons: string[] = [];
   if (invalidRecords.length > 0) reasons.push("invalid-records");
   if (readerDiagnostics.length === 0) reasons.push("reader-diagnostics-not-provided");
   for (const diagnostic of readerDiagnostics) {
     for (const field of TRACE_INTEGRITY_FIELDS) {
-      const value = finiteNonnegative(diagnostic?.[field]);
+      const value = finiteNonnegative(asObject(diagnostic)?.[field]);
       if (value === null) reasons.push(`${field}-unknown`);
       else if (value > 0) reasons.push(`${field}>0`);
     }
@@ -1146,16 +1470,17 @@ function traceIntegrity(invalidRecords, readerDiagnostics) {
   };
 }
 
-function sameRateProvenance(left, right) {
+function sameRateProvenance(left: TaskAccounting | undefined, right: TaskAccounting | undefined): boolean {
   const leftRates = [...(left?.rateFingerprints ?? [])].sort(stableCompare);
   const rightRates = [...(right?.rateFingerprints ?? [])].sort(stableCompare);
   return leftRates.length > 0 && leftRates.length === rightRates.length
     && leftRates.every((value, index) => value === rightRates[index]);
 }
 
-function efficiencyGate(pairedCorrectAccounting, eligibleCorrectPairs, options) {
-  const configured = isObject(options) && (Object.hasOwn(options, "minimumCostReduction") || Object.hasOwn(options, "minimumKnownCostCoverage"));
-  if (!configured) {
+function efficiencyGate(pairedCorrectAccounting: KnownCostPair[], eligibleCorrectPairs: SettledPairedGroup[], options: unknown): EfficiencyGate {
+  const opts = asObject(options);
+  const configured = opts !== null && (Object.hasOwn(opts, "minimumCostReduction") || Object.hasOwn(opts, "minimumKnownCostCoverage"));
+  if (!configured || !opts) {
     return {
       status: "not-evaluated",
       reason: "efficiency-thresholds-not-configured",
@@ -1169,8 +1494,8 @@ function efficiencyGate(pairedCorrectAccounting, eligibleCorrectPairs, options) 
       medianCostReduction: null,
     };
   }
-  const minimumCostReduction = finiteNonnegative(options.minimumCostReduction) ?? 0;
-  const minimumKnownCostCoverage = Math.min(1, finiteNonnegative(options.minimumKnownCostCoverage) ?? 1);
+  const minimumCostReduction = finiteNonnegative(opts.minimumCostReduction) ?? 0;
+  const minimumKnownCostCoverage = Math.min(1, finiteNonnegative(opts.minimumKnownCostCoverage) ?? 1);
   const knownCoverage = eligibleCorrectPairs.length > 0 ? pairedCorrectAccounting.length / eligibleCorrectPairs.length : null;
   if (knownCoverage === null || knownCoverage < minimumKnownCostCoverage) {
     return {
@@ -1190,7 +1515,7 @@ function efficiencyGate(pairedCorrectAccounting, eligibleCorrectPairs, options) 
   const candidateCosts = pairedCorrectAccounting.map((pair) => pair.candidate.costTotal);
   const baselineMedianCostUsd = percentile(baselineCosts, 0.5);
   const candidateMedianCostUsd = percentile(candidateCosts, 0.5);
-  const medianCostReduction = baselineMedianCostUsd > 0
+  const medianCostReduction = baselineMedianCostUsd !== null && baselineMedianCostUsd > 0 && candidateMedianCostUsd !== null
     ? 1 - candidateMedianCostUsd / baselineMedianCostUsd
     : null;
   const status = medianCostReduction !== null && medianCostReduction >= minimumCostReduction ? "pass" : "fail";
@@ -1208,8 +1533,8 @@ function efficiencyGate(pairedCorrectAccounting, eligibleCorrectPairs, options) 
   };
 }
 
-function pairedTaskGroups(taskGroups) {
-  const byVariant = new Map();
+function pairedTaskGroups(taskGroups: TaskGroup[]): TaskPairing {
+  const byVariant = new Map<string, Map<string, TaskGroup[]>>();
   let unknownCorpusTasks = 0;
   let unknownVariantTasks = 0;
   for (const group of taskGroups) {
@@ -1232,7 +1557,7 @@ function pairedTaskGroups(taskGroups) {
   const baseline = byVariant.get("baseline") ?? new Map();
   const candidate = byVariant.get("candidate") ?? new Map();
   const keys = [...new Set([...baseline.keys(), ...candidate.keys()])].sort(stableCompare);
-  const pairs = [];
+  const pairs: PairedTaskEntry[] = [];
   let ambiguous = 0;
   let unpaired = 0;
   for (const key of keys) {
@@ -1245,25 +1570,25 @@ function pairedTaskGroups(taskGroups) {
   return { pairs, ambiguous, unpaired, unknownCorpusTasks, unknownVariantTasks };
 }
 
-function qualitySummary(taskGroups, snapshots, integrity, efficiencyOptions) {
+function qualitySummary(taskGroups: TaskGroup[], snapshots: RateSnapshot[], integrity: IntegrityResult | null, efficiencyOptions: unknown) {
   const accountingEligible = integrity?.complete !== false;
   const successful = taskGroups.filter((group) => group.settlement?.status === "success");
-  const settled = taskGroups.filter((group) => group.settlement !== null);
+  const settled = taskGroups.filter((group): group is SettledGroup => group.settlement !== null);
   const accounting = new Map(taskGroups.map((group) => [compositeKey(group.runId, group.taskId), taskAccounting(group, snapshots)]));
   const knownInput = accountingEligible
-    ? successful.map((group) => accounting.get(compositeKey(group.runId, group.taskId))).filter((value) => value?.inputKnown)
+    ? successful.map((group) => accounting.get(compositeKey(group.runId, group.taskId))).filter((value): value is KnownInputAccounting => value?.inputKnown === true && value.inputTotal !== null)
     : [];
   const knownCost = accountingEligible
-    ? successful.map((group) => accounting.get(compositeKey(group.runId, group.taskId))).filter((value) => value?.costKnown)
+    ? successful.map((group) => accounting.get(compositeKey(group.runId, group.taskId))).filter((value): value is KnownCostAccounting => value?.costKnown === true && value.costTotal !== null)
     : [];
   const correctness = {
     correct: settled.filter((group) => group.settlement.correctness === "correct").length,
     incorrect: settled.filter((group) => group.settlement.correctness === "incorrect").length,
-    unknown: taskGroups.length - settled.filter((group) => ["correct", "incorrect"].includes(group.settlement.correctness)).length,
+    unknown: taskGroups.length - settled.filter((group) => group.settlement.correctness === "correct" || group.settlement.correctness === "incorrect").length,
     denominator: "all-tasks",
   };
   const allCorrectness = { ...correctness };
-  const variantGroups = new Map();
+  const variantGroups = new Map<string, VariantCounts>();
   for (const group of taskGroups) {
     const variant = taskVariant(group) ?? "unknown";
     const entry = variantGroups.get(variant) ?? { total: 0, settled: 0, successful: 0, failed: 0, correct: 0, incorrect: 0 };
@@ -1277,14 +1602,14 @@ function qualitySummary(taskGroups, snapshots, integrity, efficiencyOptions) {
     }
     variantGroups.set(variant, entry);
   }
-  const variantStats = sortedObject([...variantGroups.entries()].map(([name, value]) => [name, {
+  const variantStats = sortedObject([...variantGroups.entries()].map(([name, value]): [string, VariantStats] => [name, {
     ...value,
     successRate: boundedRate(value.successful, value.settled),
     failureRate: boundedRate(value.failed, value.settled),
     correctnessRate: boundedRate(value.correct, value.successful),
   }]));
   const pairing = pairedTaskGroups(taskGroups);
-  const pairedOutcomes = pairing.pairs.filter((pair) => [pair.baseline.settlement?.status, pair.candidate.settlement?.status]
+  const pairedOutcomes = pairing.pairs.filter((pair): pair is PairedTaskEntry & SettledPairedGroup => [pair.baseline.settlement?.status, pair.candidate.settlement?.status]
     .every((status) => status === "success" || status === "failure"));
   const pairedSuccessful = pairedOutcomes.filter((pair) => pair.baseline.settlement.status === "success" && pair.candidate.settlement.status === "success");
   const pairedCorrectness = pairedSuccessful.filter((pair) => [pair.baseline.settlement.correctness, pair.candidate.settlement.correctness]
@@ -1301,21 +1626,31 @@ function qualitySummary(taskGroups, snapshots, integrity, efficiencyOptions) {
     candidate: accounting.get(compositeKey(pair.candidate.runId, pair.candidate.taskId)),
   }));
   const eligiblePairedAccounting = accountingEligible ? pairedAccounting : [];
-  const pairedKnownInput = eligiblePairedAccounting.filter((pair) => pair.baseline?.inputKnown && pair.candidate?.inputKnown);
-  const pairedKnownCost = eligiblePairedAccounting.filter((pair) =>
-    pair.baseline?.costKnown && pair.candidate?.costKnown && sameRateProvenance(pair.baseline, pair.candidate));
+  const pairedKnownInput = eligiblePairedAccounting.filter((pair): pair is KnownInputPair =>
+    pair.baseline?.inputKnown === true && pair.baseline.inputTotal !== null
+    && pair.candidate?.inputKnown === true && pair.candidate.inputTotal !== null);
+  const pairedKnownCost = eligiblePairedAccounting.filter((pair): pair is KnownCostPair =>
+    pair.baseline?.costKnown === true && pair.baseline.costTotal !== null
+    && pair.candidate?.costKnown === true && pair.candidate.costTotal !== null
+    && sameRateProvenance(pair.baseline, pair.candidate));
   const pairedRateMismatches = eligiblePairedAccounting.filter((pair) =>
     pair.baseline?.costKnown && pair.candidate?.costKnown && !sameRateProvenance(pair.baseline, pair.candidate)).length;
   const pairingAvailable = pairing.pairs.length > 0 && pairedOutcomes.length > 0;
+  const candidateSuccessRate = boundedRate(candidatePairedSuccesses, pairedOutcomes.length);
+  const baselineSuccessRate = boundedRate(baselinePairedSuccesses, pairedOutcomes.length);
+  const candidateFailureRate = boundedRate(candidatePairedFailures, pairedOutcomes.length);
+  const baselineFailureRate = boundedRate(baselinePairedFailures, pairedOutcomes.length);
   const successGate = !pairingAvailable
     ? { status: "insufficient-data", reason: "paired-baseline-candidate-outcomes-required", denominator: pairedOutcomes.length }
-    : boundedRate(candidatePairedSuccesses, pairedOutcomes.length) >= boundedRate(baselinePairedSuccesses, pairedOutcomes.length)
-      && boundedRate(candidatePairedFailures, pairedOutcomes.length) <= boundedRate(baselinePairedFailures, pairedOutcomes.length)
+    : candidateSuccessRate !== null && baselineSuccessRate !== null && candidateFailureRate !== null && baselineFailureRate !== null
+      && candidateSuccessRate >= baselineSuccessRate && candidateFailureRate <= baselineFailureRate
       ? { status: "pass", reason: null, denominator: pairedOutcomes.length }
       : { status: "fail", reason: "candidate-success-or-failure-rate-regressed", denominator: pairedOutcomes.length };
+  const candidateCorrectRate = boundedRate(candidateCorrect, pairedCorrectness.length);
+  const baselineCorrectRate = boundedRate(baselineCorrect, pairedCorrectness.length);
   const correctnessGate = pairedCorrectness.length === 0
     ? { status: "insufficient-data", reason: "paired-successful-correctness-outcomes-required", denominator: 0 }
-    : boundedRate(candidateCorrect, pairedCorrectness.length) >= boundedRate(baselineCorrect, pairedCorrectness.length)
+    : candidateCorrectRate !== null && baselineCorrectRate !== null && candidateCorrectRate >= baselineCorrectRate
       ? { status: "pass", reason: null, denominator: pairedCorrectness.length }
       : { status: "fail", reason: "candidate-correctness-rate-regressed", denominator: pairedCorrectness.length };
   const traceGate = integrity?.complete === false
@@ -1394,10 +1729,10 @@ function qualitySummary(taskGroups, snapshots, integrity, efficiencyOptions) {
   };
 }
 
-function breakEvenFields(snapshot, options) {
-  const prefixTokens = finitePositive(typeof options === "number" ? options : options?.prefixTokens);
-  const storageTtlMs = finiteNonnegative(typeof options === "object" ? options?.storageTtlMs : null);
-  const unknowns = [];
+function breakEvenFields(snapshot: RateSnapshot, options: unknown): BreakEvenFields {
+  const prefixTokens = typeof options === "number" ? finitePositive(options) : finitePositive(asObject(options)?.prefixTokens);
+  const storageTtlMs = typeof options === "object" ? finiteNonnegative(asObject(options)?.storageTtlMs) : null;
+  const unknowns: string[] = [];
   if (snapshot.source === null) unknowns.push("source");
   if (snapshot.retrievedAt === null) unknowns.push("retrievedAt");
   if (snapshot.inputPerToken === null) unknowns.push("inputPerToken");
@@ -1412,9 +1747,12 @@ function breakEvenFields(snapshot, options) {
     ttlMs: storageTtlMs,
     included: snapshot.storagePerTokenHour !== null && storageTtlMs !== null,
   };
-  const required = [snapshot.inputPerToken, snapshot.cacheReadPerToken, snapshot.cacheWritePerToken, snapshot.storagePerTokenHour];
-  if (snapshot.storagePerTokenHour > 0 && storageTtlMs === null) unknowns.push("storageTtlMs");
-  if (required.some((value) => value === null) || snapshot.retrievedAt === null || (snapshot.storagePerTokenHour > 0 && storageTtlMs === null)) {
+  const uncached = snapshot.inputPerToken;
+  const read = snapshot.cacheReadPerToken;
+  const writeRate = snapshot.cacheWritePerToken;
+  const storageRate = snapshot.storagePerTokenHour;
+  if (storageRate !== null && storageRate > 0 && storageTtlMs === null) unknowns.push("storageTtlMs");
+  if (uncached === null || read === null || writeRate === null || storageRate === null || snapshot.retrievedAt === null || (storageRate > 0 && storageTtlMs === null)) {
     return {
       prefixTokens,
       rateSnapshot: snapshot,
@@ -1426,16 +1764,14 @@ function breakEvenFields(snapshot, options) {
       unknowns: [...new Set(unknowns)],
     };
   }
-  const uncached = snapshot.inputPerToken;
-  const read = snapshot.cacheReadPerToken;
-  const write = snapshot.cacheWritePerToken + storagePerToken;
+  const write = writeRate + storagePerToken;
   const perReadSavings = uncached - read;
   const threshold = (write - uncached) / perReadSavings;
   const recoveryThreshold = write / perReadSavings;
   const strictReads = perReadSavings > 0 ? Math.max(0, Math.floor(threshold + Number.EPSILON) + 1) : null;
   const recoverReads = perReadSavings > 0 ? Math.max(0, Math.floor(recoveryThreshold + Number.EPSILON) + 1) : null;
   const readCounts = [0, 1, 2, 3, 5, 10];
-  const costAtReads = {};
+  const costAtReads: BreakEvenCostAtReads = {};
   for (const reads of readCounts) {
     const uncachedCost = (reads + 1) * uncached + storagePerToken * 0;
     const cachedCost = write + reads * read;
@@ -1458,13 +1794,13 @@ function breakEvenFields(snapshot, options) {
   };
 }
 
-export function breakEvenFromRateSnapshot(snapshot, options = {}) {
+export function breakEvenFromRateSnapshot(snapshot: unknown, options: unknown = {}): BreakEvenFields {
   const normalized = normalizeRateSnapshot(snapshot);
   if (!normalized) throw new Error("rate snapshot must be an object");
   return breakEvenFields(normalized, options);
 }
 
-function analyzeBreakEven(snapshots, options) {
+function analyzeBreakEven(snapshots: RateSnapshot[], options: ExperimentOptions): BreakEvenFields[] {
   return snapshots
     .map((snapshot) => breakEvenFields(snapshot, { prefixTokens: options.prefixTokens, storageTtlMs: options.storageTtlMs }))
     .sort((left, right) => {
@@ -1478,11 +1814,11 @@ function analyzeBreakEven(snapshots, options) {
     });
 }
 
-export function analyzeCacheExperiment(records, options = {}) {
-  const normalizedOptions = isObject(options) ? options : {};
+export function analyzeCacheExperiment(records: unknown, options: unknown = {}) {
+  const normalizedOptions: ExperimentOptions = isObject(options) ? options : {};
   const normalizedRates = (Array.isArray(normalizedOptions.rateSnapshots) ? normalizedOptions.rateSnapshots : [])
     .map(normalizeRateSnapshot)
-    .filter(Boolean)
+    .filter((snapshot): snapshot is RateSnapshot => Boolean(snapshot))
     .sort((left, right) => {
       for (const [a, b] of [[left.retrievedAt ?? "", right.retrievedAt ?? ""], [left.source, right.source], [left.version ?? "", right.version ?? ""]]) {
         const result = stableCompare(a, b);
@@ -1495,10 +1831,11 @@ export function analyzeCacheExperiment(records, options = {}) {
     : isObject(records) && Array.isArray(records.records)
       ? records.records
       : [];
-  const inheritedReaderDiagnostics = Array.isArray(normalizedOptions.readerDiagnostics)
+  const recordsDiagnostics = asObject(records)?.traceDiagnostics;
+  const inheritedReaderDiagnostics: unknown[] = Array.isArray(normalizedOptions.readerDiagnostics)
     ? normalizedOptions.readerDiagnostics
-    : isObject(records?.traceDiagnostics)
-      ? [records.traceDiagnostics]
+    : isObject(recordsDiagnostics)
+      ? [recordsDiagnostics]
       : [];
   const { attempts, settlements, invalidRecords } = normalizeRecords(sourceRecords);
   const integrity = traceIntegrity(invalidRecords, inheritedReaderDiagnostics);
@@ -1509,27 +1846,30 @@ export function analyzeCacheExperiment(records, options = {}) {
     .filter(([, group]) => group.length > 1)
     .flatMap(([, group]) => group)
     .filter((attempt) => sampleTtl(attempt) === null).length;
-  const ttl = mergeTtlComparisons(ttlComparisons, unknownRetentionAttemptSamples);
-  ttl.availability = {
-    available: ttl.timestampedPairs > 0,
-    timestampAvailable: ttl.timestampedPairs > 0,
-    retentionEvidenceAvailable: ttl.retentionEvidencePairs > 0,
-    status: ttl.timestampedPairs === 0
-      ? "unavailable"
-      : ttl.retentionEvidencePairs === 0
-        ? "retention-unknown"
-        : ttl.retentionEvidencePairs < ttl.timestampedPairs
-          ? "partial"
-          : "available",
-    reason: ttl.timestampedPairs === 0
-      ? "attempt-timestamps-required"
-      : ttl.retentionEvidencePairs === 0
-        ? "explicit-retention-evidence-required"
-        : ttl.retentionEvidencePairs < ttl.timestampedPairs
-          ? "some-attempts-lack-retention-evidence"
-          : null,
+  const mergedTtl = mergeTtlComparisons(ttlComparisons, unknownRetentionAttemptSamples);
+  const ttl = {
+    ...mergedTtl,
+    availability: {
+      available: mergedTtl.timestampedPairs > 0,
+      timestampAvailable: mergedTtl.timestampedPairs > 0,
+      retentionEvidenceAvailable: mergedTtl.retentionEvidencePairs > 0,
+      status: mergedTtl.timestampedPairs === 0
+        ? "unavailable"
+        : mergedTtl.retentionEvidencePairs === 0
+          ? "retention-unknown"
+          : mergedTtl.retentionEvidencePairs < mergedTtl.timestampedPairs
+            ? "partial"
+            : "available",
+      reason: mergedTtl.timestampedPairs === 0
+        ? "attempt-timestamps-required"
+        : mergedTtl.retentionEvidencePairs === 0
+          ? "explicit-retention-evidence-required"
+          : mergedTtl.retentionEvidencePairs < mergedTtl.timestampedPairs
+            ? "some-attempts-lack-retention-evidence"
+            : null,
+    },
   };
-  const roles = sortedObject(groupAttempts(attempts, (attempt) => attempt.role).map(([name, group]) => {
+  const roles = sortedObject(groupAttempts(attempts, (attempt) => attempt.role).map(([name, group]): [string, RoleGroup] => {
     const usageRole = usageAggregate(group);
     return [name, {
       attempts: group.length,
@@ -1544,14 +1884,14 @@ export function analyzeCacheExperiment(records, options = {}) {
     schemaVersion: SCHEMA_VERSION,
     attempts: {
       total: attempts.length,
-      byStatus: sortedObject([...new Set(attempts.map((attempt) => attempt.status))].map((status) => [status, attempts.filter((attempt) => attempt.status === status).length])),
+      byStatus: sortedObject([...new Set(attempts.map((attempt) => attempt.status))].map((status): [string, number] => [status, attempts.filter((attempt) => attempt.status === status).length])),
     },
     tasks: {
       total: taskGroups.length,
       settled: taskGroups.filter((group) => group.settlement !== null).length,
       successful: taskGroups.filter((group) => group.settlement?.status === "success").length,
       failed: taskGroups.filter((group) => group.settlement?.status === "failure").length,
-      unknownOutcome: taskGroups.filter((group) => !group.settlement || !["success", "failure"].includes(group.settlement.status)).length,
+      unknownOutcome: taskGroups.filter((group) => !group.settlement || group.settlement.status === null || !["success", "failure"].includes(group.settlement.status)).length,
     },
     usage: {
       completeKnown: {
@@ -1626,7 +1966,7 @@ export function analyzeCacheExperiment(records, options = {}) {
   };
 }
 
-function defaultDirectories(env) {
+function defaultDirectories(env: NodeJS.ProcessEnv): string[] {
   const events = env.TERMINA_EVENTS_DIR;
   const terminal = env.TERMINA_TERMINAL_ID;
   if (!events) return [];
@@ -1634,7 +1974,7 @@ function defaultDirectories(env) {
   return [];
 }
 
-function readJsonFile(path) {
+function readJsonFile(path: string): unknown[] {
   const value = JSON.parse(readFileSync(resolve(path), "utf8"));
   if (Array.isArray(value)) return value;
   if (isObject(value) && Array.isArray(value.records)) return value.records;
@@ -1646,7 +1986,7 @@ function usageText() {
   return "usage: node scripts/agent-core-cache-experiment.mjs [--json] [--rates rate-snapshots.json] [trace-directory ...]";
 }
 
-export function run(argv = process.argv.slice(2), env = process.env) {
+export function run(argv: string[] = process.argv.slice(2), env: NodeJS.ProcessEnv = process.env): number {
   if (argv.includes("--help") || argv.includes("-h")) {
     console.log(usageText());
     return 0;
@@ -1670,9 +2010,9 @@ export function run(argv = process.argv.slice(2), env = process.env) {
     console.error(`no trace directory found\n${usageText()}`);
     return 1;
   }
-  const records = [];
-  const sourceErrors = [];
-  const readerDiagnostics = [];
+  const records: unknown[] = [];
+  const sourceErrors: Array<Record<string, unknown>> = [];
+  const readerDiagnostics: Array<Record<string, unknown>> = [];
   for (const input of inputs) {
     try {
       const resolved = resolve(input);
@@ -1692,7 +2032,7 @@ export function run(argv = process.argv.slice(2), env = process.env) {
     console.error(`no trace-v2 records found\n${usageText()}`);
     return 1;
   }
-  let rateSnapshots = [];
+  let rateSnapshots: unknown[] = [];
   if (ratePath) {
     try {
       const value = readJsonFile(ratePath);

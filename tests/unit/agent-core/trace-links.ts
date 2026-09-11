@@ -1,37 +1,65 @@
 /** Private retention-aware identity validation for the trace report. */
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { TRACE_SCHEMA_VERSION, validTraceLinkIndex } from "../../../agent-core/trace.ts";
+import {
+  TRACE_SCHEMA_VERSION,
+  validTraceLinkIndex,
+  type TraceAttemptIndexEntry,
+  type TraceLinkIndex,
+} from "../../../agent-core/trace.ts";
 
-function nonemptyString(value) {
+/** Unvalidated trace JSON shared with the report builder. */
+export type TraceJsonValue = string | number | boolean | null | undefined | TraceJsonObject | TraceJsonValue[];
+export type TraceJsonObject = { [key: string]: TraceJsonValue };
+
+/** A trace file the reader or validator rejected. */
+export interface TraceFileError {
+  file: string;
+  error: string;
+}
+
+/** Identity health of the retained turn files. */
+export type TraceLinkSummary = {
+  present: boolean;
+  complete: boolean | null;
+  errors: number;
+  prunedAttemptsReferenced: number;
+};
+
+function nonemptyString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-function knownCount(value) {
-  return Number.isSafeInteger(value) && value >= 0;
+function knownCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-function recordFileName(record) {
+function recordFileName(record: TraceJsonObject): string {
   return Number.isInteger(record.traceTurn) ? `turn-${record.traceTurn}.json` : "<memory>";
 }
 
-export function v2CompositeKey(runId, id) {
+export function v2CompositeKey(runId: unknown, id: unknown): string {
   return `${runId}\u0000${id}`;
 }
 
-function hasUniqueStrings(values) {
+function hasUniqueStrings(values: unknown): boolean {
   return Array.isArray(values) && values.every(nonemptyString) && new Set(values).size === values.length;
 }
 
-function readTombstones(directory, records, retainedTurns, readerOmittedTurns) {
-  const tombstones = new Map();
-  const errors = [];
-  let index = null;
+function readTombstones(
+  directory: string,
+  records: TraceJsonObject[],
+  retainedTurns: Set<number>,
+  readerOmittedTurns: Set<number>,
+): { tombstones: Map<string, TraceAttemptIndexEntry>; index: TraceLinkIndex | null; errors: TraceFileError[] } {
+  const tombstones = new Map<string, TraceAttemptIndexEntry>();
+  const errors: TraceFileError[] = [];
+  let index: TraceLinkIndex | null = null;
   const file = join(directory, "trace-index.json");
   if (existsSync(file)) {
     try {
       if (statSync(file).size > 1024 * 1024) throw new Error("trace link index exceeds 1 MiB");
-      const value = JSON.parse(readFileSync(file, "utf8"));
+      const value: unknown = JSON.parse(readFileSync(file, "utf8"));
       if (!validTraceLinkIndex(value)) throw new Error("invalid trace link index");
       index = value;
       const observedKeys = new Set(records.filter((r) => r.recordType === "attempt")
@@ -42,7 +70,7 @@ function readTombstones(directory, records, retainedTurns, readerOmittedTurns) {
         // resurrect a present-but-invalid record or excuse a missing file
         // which the index still claims is retained.
         if (observedKeys.has(key) || entry.unknown || entry.traceTurn === null || retainedTurns.has(entry.traceTurn)) continue;
-        if (entry.retained && !readerOmittedTurns.has(entry.traceTurn)) continue;
+        if (entry.retained && (entry.traceTurn === null || !readerOmittedTurns.has(entry.traceTurn))) continue;
         tombstones.set(key, entry);
       }
     } catch (error) {
@@ -52,21 +80,26 @@ function readTombstones(directory, records, retainedTurns, readerOmittedTurns) {
   return { tombstones, index, errors };
 }
 
-export function validateV2Relationships(directory, records, retainedTurns, readerOmittedTurns) {
+export function validateV2Relationships(
+  directory: string,
+  records: TraceJsonObject[],
+  retainedTurns: Set<number>,
+  readerOmittedTurns: Set<number>,
+): { records: TraceJsonObject[]; errors: TraceFileError[]; malformedRecords: number; linkIndex: TraceLinkSummary } {
   const { tombstones, index, errors } = readTombstones(directory, records, retainedTurns, readerOmittedTurns);
   const indexErrors = errors.length;
-  const prunedReferences = new Set();
-  const invalid = new Set();
+  const prunedReferences = new Set<string>();
+  const invalid = new Set<TraceJsonObject>();
   const v2Attempts = records.filter((record) => record.schemaVersion === TRACE_SCHEMA_VERSION && record.recordType === "attempt");
   const v2Settlements = records.filter((record) => record.schemaVersion === TRACE_SCHEMA_VERSION && record.recordType === "task-settled");
   let changed = true;
   while (changed) {
     changed = false;
-    const attemptsById = new Map(tombstones);
-    const settlementsByTask = new Map();
-    const duplicateAttemptKeys = new Set();
-    const roundInvalid = new Map();
-    const markInvalid = (record, message) => {
+    const attemptsById = new Map<string, TraceAttemptIndexEntry | TraceJsonObject>(tombstones);
+    const settlementsByTask = new Map<string, TraceJsonObject>();
+    const duplicateAttemptKeys = new Set<string>();
+    const roundInvalid = new Map<TraceJsonObject, string[]>();
+    const markInvalid = (record: TraceJsonObject, message: string) => {
       const messages = roundInvalid.get(record) ?? [];
       messages.push(message);
       roundInvalid.set(record, messages);

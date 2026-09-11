@@ -21,6 +21,45 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
+/** Owner record prepareNode binds to the staging lock directory. */
+interface NodePrepareLockOwner {
+  pid: number;
+  token: string;
+  startedAt: number;
+  processIdentity: string;
+  dev: number;
+  ino: number;
+}
+
+/** Logger shape prepareNode expects. */
+interface NodePrepareLogger {
+  log(message: unknown): void;
+  warn(message: unknown): void;
+}
+
+type NodeFetchImpl = (url: string) => Promise<Response>;
+
+/** Arguments prepareNode passes to the downloadArchive hook. */
+interface DownloadArchiveArgs {
+  destination: string;
+  fetchImpl: NodeFetchImpl;
+  logger: NodePrepareLogger;
+}
+
+/** Arguments prepareNode passes to the extractArchive hook. */
+interface ExtractArchiveArgs {
+  destinationDir: string;
+  release: { directoryName: string };
+}
+
+/** Settled outcome of one concurrent prepareNode child. */
+interface ConcurrentChildResult {
+  code: number | null;
+  signal: string | null;
+  stdout: string;
+  stderr: string;
+}
+
 
 describe("Node Runtime Staging & Preparation Invariants", () => {
   it("verifies fail-closed staging invariants", async () => {
@@ -53,33 +92,33 @@ assert.deepEqual(
 );
 const fixtureBytes = Buffer.from("verified-node-archive");
 const fixtureDigest = "8ccea8c25445345293d645a4d78127527f6367e7a8b21b6a397759ed51066e96";
-const roots = [];
+const roots: string[] = [];
 function tempRoot() {
   const root = mkdtempSync(join(tmpdir(), "termina-node-runtime-test-"));
   roots.push(root);
   return root;
 }
 
-function quietLogger() {
+function quietLogger(): NodePrepareLogger {
   return { log() {}, warn() {} };
 }
-function lockOwnerRecordName(owner) {
+function lockOwnerRecordName(owner: NodePrepareLockOwner) {
   return `.record-${owner.token}-${owner.dev}-${owner.ino}`;
 }
-function writeLockOwner(lockPath, owner) {
+function writeLockOwner(lockPath: string, owner: NodePrepareLockOwner) {
   const name = lockOwnerRecordName(owner);
   writeFileSync(join(lockPath, name), JSON.stringify(owner), { mode: 0o600 });
   return name;
 }
-function readLockOwner(lockPath) {
+function readLockOwner(lockPath: string): { name: string; raw: string; owner: NodePrepareLockOwner } {
   const names = readdirSync(lockPath).filter((name) => /^\.record-[a-f0-9]{32}-\d+-\d+$/.test(name));
   assert.equal(names.length, 1, "a published lock must have one inode-bound owner record");
   const raw = readFileSync(join(lockPath, names[0]), "utf8");
-  return { name: names[0], raw, owner: JSON.parse(raw) };
+  return { name: names[0], raw, owner: JSON.parse(raw) as NodePrepareLockOwner };
 }
-function deferred() {
-  let resolve;
-  const promise = new Promise((done) => { resolve = done; });
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: () => void = () => {};
+  const promise = new Promise<void>((done) => { resolve = done; });
   return { promise, resolve };
 }
 const fixtureRoot = tempRoot();
@@ -95,7 +134,7 @@ execFileSync("/usr/bin/tar", ["-czf", fixtureArchive, "-C", fixtureSource, fixtu
 const fixtureArchiveBytes = readFileSync(fixtureArchive);
 const fixtureArchiveDigest = createHash("sha256").update(fixtureArchiveBytes).digest("hex");
 
-function downloadFixture({ destination, logger }) {
+function downloadFixture({ destination, logger }: { destination: string; logger: NodePrepareLogger }) {
   return downloadVerifiedArchive({
     url: "https://fixture.invalid/node.tar.gz",
     destination,
@@ -128,7 +167,7 @@ function concurrentChildCode() {
   `;
 }
 
-function startConcurrentChild(env) {
+function startConcurrentChild(env: Record<string, string>) {
   const child = spawn(process.execPath, ["-e", concurrentChildCode()], {
     cwd: resolve("."),
     env: { ...process.env, ...env },
@@ -141,14 +180,14 @@ function startConcurrentChild(env) {
   const closed = once(child, "close");
   return {
     child,
-    async result() {
+    async result(): Promise<ConcurrentChildResult> {
       const [code, signal] = await closed;
       return { code, signal, stdout, stderr };
     },
   };
 }
 
-async function waitForFile(path, message) {
+async function waitForFile(path: string, message: string) {
   const deadline = Date.now() + 5_000;
   while (!existsSync(path)) {
     if (Date.now() >= deadline) throw new Error(message);
@@ -221,7 +260,7 @@ try {
         targetPlatform: "darwin",
         targetArch: "arm64",
         fetchImpl: async () => new Response(Buffer.concat([fixtureBytes, Buffer.from("!")])),
-        downloadArchive({ destination, fetchImpl, logger }) {
+        downloadArchive({ destination, fetchImpl, logger }: DownloadArchiveArgs) {
           return downloadVerifiedArchive({
             url: "https://fixture.invalid/node.tar.gz",
             destination,
@@ -233,7 +272,7 @@ try {
         extractArchive() {
           extractCalled = true;
         },
-        runNode(binary) {
+        runNode(binary: string) {
           return binary === oldNode ? "v22.22.0\n" : `${PINNED_NODE_VERSION}\n`;
         },
         logger: quietLogger(),
@@ -298,12 +337,12 @@ try {
       resourcesDir,
       targetPlatform: "linux",
       targetArch: "x64",
-      async downloadArchive({ destination }) {
+      async downloadArchive({ destination }: { destination: string }) {
         entered.resolve();
         await release.promise;
         writeFileSync(destination, fixtureBytes);
       },
-      extractArchive({ destinationDir, release: nodeRelease }) {
+      extractArchive({ destinationDir, release: nodeRelease }: ExtractArchiveArgs) {
         const stagedBin = join(destinationDir, nodeRelease.directoryName, "bin", "node");
         mkdirSync(join(destinationDir, nodeRelease.directoryName, "bin"), { recursive: true });
         writeFileSync(stagedBin, "verified-holder");
@@ -358,7 +397,7 @@ try {
       assert.equal(existsSync(secondEntered), false, "the second process entered before the first released its lock");
       writeFileSync(releaseFirst, "release");
       const [firstResult, secondResult] = await Promise.all([first.result(), second.result()]);
-      for (const [name, result] of [["first", firstResult], ["second", secondResult]]) {
+      for (const { name, result } of [{ name: "first", result: firstResult }, { name: "second", result: secondResult }]) {
         assert.equal(result.code, 0, `${name} preparer failed (${result.signal}): ${result.stderr}`);
         assert.equal(result.stdout, "ok", `${name} preparer did not complete`);
       }
@@ -378,14 +417,14 @@ try {
     mkdirSync(dirname(oldNode), { recursive: true });
     writeFileSync(oldNode, "prior-runtime");
     const lockPath = join(resourcesDir, ".node-prepare.lock");
-    let replacementOwner;
+    let replacementOwner: NodePrepareLockOwner | undefined;
 
     await assert.rejects(
       prepareNode({
         resourcesDir,
         targetPlatform: "linux",
         targetArch: "x64",
-        async downloadArchive({ destination }) {
+        async downloadArchive({ destination }: { destination: string }) {
           const published = readLockOwner(lockPath);
           replacementOwner = published.owner;
           rmSync(lockPath, { recursive: true, force: true });
@@ -399,6 +438,7 @@ try {
       /node runtime lock lost/i,
     );
     assert.equal(readFileSync(oldNode, "utf8"), "prior-runtime", "a lost lock must abort before target mutation");
+    if (!replacementOwner) throw new Error("lock-replacement hook never published an owner");
     assert.equal(readLockOwner(lockPath).raw, JSON.stringify(replacementOwner));
     assert.equal(existsSync(join(lockPath, `.owner-${replacementOwner.token}`)), true);
     console.log("PASS lock replacement aborts mutation and is never deleted by the former owner");
@@ -411,7 +451,7 @@ try {
     mkdirSync(dirname(oldNode), { recursive: true });
     writeFileSync(oldNode, "prior-runtime");
     const lockPath = join(resourcesDir, ".node-prepare.lock");
-    let copiedOwner;
+    let copiedOwner: NodePrepareLockOwner | undefined;
 
     await assert.rejects(
       prepareNode({
@@ -421,7 +461,7 @@ try {
         downloadArchive: downloadFixture,
         logger: {
           warn() {},
-          log(message) {
+          log(message: unknown) {
             if (!String(message).includes("staged")) return;
             const published = readLockOwner(lockPath);
             copiedOwner = published.owner;
@@ -506,6 +546,8 @@ try {
 
   const reusedPidProcess = spawn(process.execPath, ["-e", "setInterval(() => {}, 1_000)"], { stdio: "ignore" });
   await once(reusedPidProcess, "spawn");
+  const reusedPid = reusedPidProcess.pid;
+  if (reusedPid === undefined) throw new Error("reused-PID fixture failed to spawn");
   try {
     {
       const root = tempRoot();
@@ -520,7 +562,7 @@ try {
       mkdirSync(lockPath, { mode: 0o700 });
       const lockStat = lstatSync(lockPath);
       const owner = {
-        pid: reusedPidProcess.pid, token, startedAt: 1, processIdentity: "stale-reused-pid-instance",
+        pid: reusedPid, token, startedAt: 1, processIdentity: "stale-reused-pid-instance",
         dev: lockStat.dev, ino: lockStat.ino,
       };
       mkdirSync(join(lockPath, `.owner-${token}`), { mode: 0o700 });
@@ -562,7 +604,7 @@ try {
       assert.equal(deadOwner.status, 0);
       assert.equal(deadClaimant.status, 0);
       assert.notEqual(deadOwner.stdout, deadClaimant.stdout);
-      const claimantPid = reusedClaimantPid ? reusedPidProcess.pid : Number(deadClaimant.stdout);
+      const claimantPid = reusedClaimantPid ? reusedPid : Number(deadClaimant.stdout);
 
       const ownerToken = "11111111111111111111111111111111";
       const claimToken = "22222222222222222222222222222222";
@@ -668,15 +710,15 @@ try {
         resourcesDir,
         targetPlatform: "linux",
         targetArch: "x64",
-        async downloadArchive({ destination }) {
+        async downloadArchive({ destination }: { destination: string }) {
           writeFileSync(destination, fixtureBytes);
         },
-        extractArchive({ destinationDir, release }) {
+        extractArchive({ destinationDir, release }: ExtractArchiveArgs) {
           const stagedBin = join(destinationDir, release.directoryName, "bin", "node");
           mkdirSync(join(destinationDir, release.directoryName, "bin"), { recursive: true });
           writeFileSync(stagedBin, "invalid-runtime");
         },
-        runNode(binary) {
+        runNode(binary: string) {
           return binary === oldNode ? "v22.22.0\n" : "v0.0.0\n";
         },
         logger: quietLogger(),
@@ -703,7 +745,7 @@ try {
         resourcesDir,
         targetPlatform: "linux",
         targetArch: "x64",
-        async downloadArchive({ destination }) { writeFileSync(destination, fixtureBytes); },
+        async downloadArchive({ destination }: { destination: string }) { writeFileSync(destination, fixtureBytes); },
         extractArchive() { throw new Error("fixture extraction failed"); },
         logger: quietLogger(),
       }),
@@ -726,7 +768,7 @@ try {
         targetPlatform: "linux",
         targetArch: "x64",
         downloadArchive: downloadFixture,
-        runNode(binary, args, options) {
+        runNode(binary: string, args: string[], options: { encoding: "utf8" }) {
           const version = execFileSync(binary, args, options);
           rmSync(dirname(dirname(binary)), { recursive: true, force: true });
           return version;
@@ -798,8 +840,8 @@ try {
         resourcesDir,
         targetPlatform: "linux",
         targetArch: "x64",
-        async downloadArchive({ destination }) { writeFileSync(destination, fixtureBytes); },
-        extractArchive({ destinationDir, release }) {
+        async downloadArchive({ destination }: { destination: string }) { writeFileSync(destination, fixtureBytes); },
+        extractArchive({ destinationDir, release }: ExtractArchiveArgs) {
           const extractedDir = join(destinationDir, release.directoryName);
           mkdirSync(extractedDir);
           symlinkSync(externalBin, join(extractedDir, "bin"), "dir");

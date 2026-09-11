@@ -73,7 +73,7 @@ describe("terminal roster handoff", () => {
       id,
       type: "agent" as const,
       engine: "core" as const,
-      plan: Array.from({ length: 50 }, (_, i) => ({ text: "x".repeat(500), paths: ["y".repeat(256)], state: "pending" as const })),
+      plan: Array.from({ length: 50 }, (_, _i) => ({ text: "x".repeat(500), paths: ["y".repeat(256)], state: "pending" as const })),
       verify: { state: "fail" as const, command: "c", summary: "s" },
     });
     const full = [big("term-1"), big("term-2")];

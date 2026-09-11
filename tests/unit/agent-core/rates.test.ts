@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 /**
  * Focused tests for the deterministic agent-core rate/cost seam.
  * No network, provider credentials, or main.ts boot required.
@@ -162,7 +162,7 @@ describe("Agent Core Rates Accounting Invariants", () => {
     assert.equal(mainCost.source, "fixture-catalog");
     assert.equal(mainCost.version, "fixture-v1");
     assert.equal(mainCost.lookedUpAt, "2026-08-30T12:00:00.000Z");
-    assert.equal(mainCost.scope.provider, "fixture-provider");
+    assert.equal(mainCost.scope?.provider, "fixture-provider");
     assert.equal(mainCost.cacheWriteTtlClass, "5m");
     assert.equal(mainCost.reasoningBilling, "separate");
     
@@ -189,7 +189,7 @@ describe("Agent Core Rates Accounting Invariants", () => {
     });
     assert.equal(missingCacheWriteRate.usd, null);
     assert.deepEqual(missingCacheWriteRate.unknownFields, ["cacheWrite"]);
-    assert.ok(Math.abs(missingCacheWriteRate.components.input - 0.0001) < Number.EPSILON);
+    assert.ok(Math.abs((missingCacheWriteRate.components.input ?? NaN) - 0.0001) < Number.EPSILON);
     assert.equal(missingCacheWriteRate.components.cacheWrite, null);
     
     const missingReasoningCounter = computeTraceCost({
@@ -238,7 +238,7 @@ describe("Agent Core Rates Accounting Invariants", () => {
     assert.deepEqual(zeroCost.unknownFields, []);
     
     const canonicalA = serializeRateSnapshot(valid.value);
-    const canonicalB = serializeRateSnapshot(normalizeRateSnapshot({
+    const snapshotB = normalizeRateSnapshot({
       scope: { ...mainScope, role: "main" },
       source: "fixture-catalog",
       version: "fixture-v1",
@@ -254,7 +254,9 @@ describe("Agent Core Rates Accounting Invariants", () => {
         reasoning: 0.000004,
         storage: 0.0000000005,
       },
-    }));
+    });
+    assert.ok(snapshotB);
+    const canonicalB = serializeRateSnapshot(snapshotB);
     assert.equal(canonicalA, canonicalB);
     assert.equal(canonicalA, '{"scope":{"provider":"fixture-provider","protocol":"fixture-protocol","model":"fixture-model","route":"fixture-route","role":"main"},"source":"fixture-catalog","version":"fixture-v1","lookedUpAt":"2026-08-30T12:00:00.000Z","units":{"input":"usd_per_token","cacheRead":"usd_per_token","cacheWrite":"usd_per_token","output":"usd_per_token","reasoning":"usd_per_token","storage":"usd_per_gib_second"},"cacheWriteTtlClass":"5m","reasoningBilling":"separate","rates":{"input":0.000001,"cacheRead":1e-7,"cacheWrite":0.000003,"output":0.000002,"reasoning":0.000004,"storage":5e-10}}');
     

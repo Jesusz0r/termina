@@ -1,15 +1,15 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import * as session from "../../../agent-core/session.ts";
 
-function hashBlock(value: any) {
+function hashBlock(value: unknown) {
   return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
 }
 
-function line(record: any) {
+function line(record: unknown) {
   return `${JSON.stringify(record)}\n`;
 }
 
@@ -58,7 +58,7 @@ describe("Agent Core Session Durable Reclaim Receipts & Block Recovery", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  function writeSession(records: any[]) {
+  function writeSession(records: unknown[]) {
     mkdirSync(dirname(sourceFile), { recursive: true, mode: 0o700 });
     writeFileSync(sourceFile, records.map(line).join(""), { mode: 0o600 });
   }
@@ -73,7 +73,9 @@ describe("Agent Core Session Durable Reclaim Receipts & Block Recovery", () => {
     };
     const res = session.validateSessionReclaimReceipt(invalidFallback);
     expect(res.ok).toBe(false);
-    expect(res.error).toMatch(/invalid recovery receipt target/);
+    if (!res.ok) {
+      expect(res.error).toMatch(/invalid recovery receipt target/);
+    }
   });
 
   it("recovers stubbed blocks from original source records", async () => {
@@ -94,8 +96,11 @@ describe("Agent Core Session Durable Reclaim Receipts & Block Recovery", () => {
 
     const replayed = await session.replaySessionBundle(sourceFile);
     expect(replayed.ok).toBe(true);
-    expect(replayed.messages[0].content[0].stubbed).toBe(true);
-    expect(replayed.state.recoveries.size).toBe(1);
+    if (replayed.ok) {
+      const firstBlock = replayed.messages[0].content[0];
+      expect(typeof firstBlock !== "string" && firstBlock.stubbed).toBe(true);
+      expect(replayed.state.recoveries.size).toBe(1);
+    }
 
     const recovery = await session.recoverSessionBlock(sourceFile, {
       revisionId: receipt.revisionId,
@@ -103,8 +108,10 @@ describe("Agent Core Session Durable Reclaim Receipts & Block Recovery", () => {
       blockIndex: 0,
     });
     expect(recovery.ok).toBe(true);
-    expect(recovery.block).toEqual(originalBlock);
-    expect(recovery.recoveredFrom).toBe("source-record");
+    if (recovery.ok) {
+      expect(recovery.block).toEqual(originalBlock);
+      expect(recovery.recoveredFrom).toBe("source-record");
+    }
 
     const missing = await session.recoverSessionBlock(sourceFile, {
       revisionId: "missing-revision",
@@ -112,7 +119,9 @@ describe("Agent Core Session Durable Reclaim Receipts & Block Recovery", () => {
       blockIndex: 0,
     });
     expect(missing.ok).toBe(false);
-    expect(missing.error).toMatch(/missing recovery receipt/);
+    if (!missing.ok) {
+      expect(missing.error).toMatch(/missing recovery receipt/);
+    }
 
     const stale = await session.recoverSessionBlock(sourceFile, {
       revisionId: receipt.revisionId,
@@ -120,7 +129,9 @@ describe("Agent Core Session Durable Reclaim Receipts & Block Recovery", () => {
       blockIndex: 1,
     });
     expect(stale.ok).toBe(false);
-    expect(stale.error).toMatch(/stale recovery target/);
+    if (!stale.ok) {
+      expect(stale.error).toMatch(/stale recovery target/);
+    }
   });
 
   it("detects hash mismatches upon tampering", async () => {
@@ -132,7 +143,9 @@ describe("Agent Core Session Durable Reclaim Receipts & Block Recovery", () => {
       blockIndex: 0,
     });
     expect(hashMismatch.ok).toBe(false);
-    expect(hashMismatch.error).toMatch(/hash mismatch/);
+    if (!hashMismatch.ok) {
+      expect(hashMismatch.error).toMatch(/hash mismatch/);
+    }
   });
 
   it("carries origin and recovery mapping across session forks", async () => {
@@ -159,15 +172,20 @@ describe("Agent Core Session Durable Reclaim Receipts & Block Recovery", () => {
     expect(forked.ok).toBe(true);
     const forkReplay = await session.replaySessionBundle(forkFile);
     expect(forkReplay.ok).toBe(true);
-    expect(forkReplay.messages[0].content[0].stubbed).toBe(true);
-    expect(forkReplay.state.recoveries.size).toBe(1);
+    if (forkReplay.ok) {
+      const forkFirstBlock = forkReplay.messages[0].content[0];
+      expect(typeof forkFirstBlock !== "string" && forkFirstBlock.stubbed).toBe(true);
+      expect(forkReplay.state.recoveries.size).toBe(1);
+    }
     const forkRecovery = await session.recoverSessionBlock(forkFile, {
       revisionId: "rev-gap",
       sseq: 10,
       blockIndex: 0,
     });
     expect(forkRecovery.ok).toBe(true);
-    expect(forkRecovery.block).toEqual(originalBlock);
+    if (forkRecovery.ok) {
+      expect(forkRecovery.block).toEqual(originalBlock);
+    }
   });
 
   it("survives dense fork for drop receipts and recovers thinking blocks", async () => {
@@ -206,15 +224,19 @@ describe("Agent Core Session Durable Reclaim Receipts & Block Recovery", () => {
       );
       const dropReplay = await session.replaySessionBundle(dropSource);
       expect(dropReplay.ok).toBe(true);
-      expect(dropReplay.messages[0].content).toEqual([visibleBlock]);
-      expect(dropReplay.state.recoveries.size).toBe(1);
+      if (dropReplay.ok) {
+        expect(dropReplay.messages[0].content).toEqual([visibleBlock]);
+        expect(dropReplay.state.recoveries.size).toBe(1);
+      }
 
       const dropResult = await session.writeForkedSession(dropSource, dropFork, 11);
       expect(dropResult.ok).toBe(true);
       const dropForkReplay = await session.replaySessionBundle(dropFork);
       expect(dropForkReplay.ok).toBe(true);
-      expect(dropForkReplay.messages[0].content).toEqual([visibleBlock]);
-      expect(dropForkReplay.state.recoveries.size).toBe(1);
+      if (dropForkReplay.ok) {
+        expect(dropForkReplay.messages[0].content).toEqual([visibleBlock]);
+        expect(dropForkReplay.state.recoveries.size).toBe(1);
+      }
 
       const dropRecovery = await session.recoverSessionBlock(dropFork, {
         revisionId: "rev-drop",
@@ -222,7 +244,9 @@ describe("Agent Core Session Durable Reclaim Receipts & Block Recovery", () => {
         blockIndex: 0,
       });
       expect(dropRecovery.ok).toBe(true);
-      expect(dropRecovery.block).toEqual(thinkingBlock);
+      if (dropRecovery.ok) {
+        expect(dropRecovery.block).toEqual(thinkingBlock);
+      }
     } finally {
       rmSync(dropRoot, { recursive: true, force: true });
     }
@@ -237,7 +261,9 @@ describe("Agent Core Session Durable Reclaim Receipts & Block Recovery", () => {
       writeFileSync(partFile, "", { mode: 0o600 });
       const missingPartReplay = await session.replaySessionBundle(partFile);
       expect(missingPartReplay.ok).toBe(false);
-      expect(missingPartReplay.error).toMatch(/non-contiguous/);
+      if (!missingPartReplay.ok) {
+        expect(missingPartReplay.error).toMatch(/non-contiguous/);
+      }
     } finally {
       rmSync(partRoot, { recursive: true, force: true });
     }

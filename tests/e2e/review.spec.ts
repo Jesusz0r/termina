@@ -1,4 +1,5 @@
-import { test, expect, type Page } from "./fixtures.ts";
+import { test, expect } from "./fixtures.ts";
+import type { Page } from "@playwright/test";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -26,7 +27,7 @@ async function seedModified(
   relPath: string,
   status: "created" | "modified" | "deleted" = "modified",
 ): Promise<string> {
-  const absPath = await page.evaluate(({ relPath, status }) => {
+  const absPath = await page.evaluate(({ relPath, status }: { relPath: string; status: "created" | "modified" | "deleted" }) => {
     const w = window as unknown as Record<string, unknown>;
     const panes = w.__panes as Map<string, { error: boolean; exited: boolean; modified: unknown[] }>;
     const pane = [...panes.values()].find((p) => !p.error && !p.exited) ?? [...panes.values()][0]!;

@@ -169,7 +169,8 @@ describe("Agent Core Reclaim Contract", () => {
       message: { role: "assistant", content: [sourceBlock] },
     } as any)).toEqual({ ok: true });
     expect(session.applySessionRecord(state, { storageSeq: 42, ...revision } as any)).toEqual({ ok: true });
-    expect(state.messages[0]?.content[0]?.stubbed).toBe(true);
+    const firstBlock = state.messages[0]?.content[0];
+    expect(typeof firstBlock !== "string" && firstBlock?.stubbed).toBe(true);
 
     expect(recoveryPlan(receipt as any)).toEqual({
       source: "session-record",

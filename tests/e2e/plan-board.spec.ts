@@ -8,7 +8,6 @@ test.describe("Plan Board UI & Task Lifecycle E2E", () => {
     await expect(planPanel).toBeAttached();
 
     // Verify initial structure
-    const planCount = page.locator("#plan-count");
     const planList = page.locator("#plan-list");
     await expect(planList).toBeAttached();
 

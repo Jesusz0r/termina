@@ -2,6 +2,33 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
+/** Frame shape for the renderer-capability executable model. */
+interface ProbeFrame {
+  processId: number;
+  routingId: number;
+  top?: ProbeFrame;
+}
+
+interface ProbeSenderEvent {
+  sender: unknown;
+  senderFrame?: ProbeFrame;
+}
+
+interface ProbeCapability {
+  windowGeneration: number;
+  rendererGeneration: number;
+  loadGeneration: number;
+  nonce: string;
+  processId: number;
+  frameRoutingId: number;
+}
+
+interface ProbeProjectEvent {
+  type: string;
+  projectId: string;
+  epoch: number;
+}
+
 describe("IPC Capability & Project Flow Security Invariants", () => {
   it("enforces renderer capability, project activation, and terminal restoration fences", async () => {
 /**
@@ -17,8 +44,8 @@ const renderer = readFileSync(new URL("../../../src/main.ts", import.meta.url), 
 const rendererState = readFileSync(new URL("../../../src/worldline-project-state.ts", import.meta.url), "utf8");
 const types = readFileSync(new URL("../../../shared/types.ts", import.meta.url), "utf8");
 
-const checks = [];
-function check(name, value) {
+const checks: string[] = [];
+function check(name: string, value: unknown) {
   assert.equal(Boolean(value), true, name);
   checks.push(name);
 }
@@ -53,9 +80,9 @@ check("preload cannot mint a capability", preload.includes('sendSync("renderer:c
 // Keep a small executable model beside the source assertions. It exercises
 // the exact malicious/stale classes the production predicate must reject.
 const webContents = {};
-const mainFrame = { processId: 41, routingId: 7 };
+const mainFrame: ProbeFrame = { processId: 41, routingId: 7 };
 mainFrame.top = mainFrame;
-const current = {
+const current: ProbeCapability = {
   windowGeneration: 3,
   rendererGeneration: 8,
   loadGeneration: 12,
@@ -63,7 +90,7 @@ const current = {
   processId: 41,
   frameRoutingId: 7,
 };
-const accepted = (event, capability, state = current, crashed = false) => !crashed
+const accepted = (event: ProbeSenderEvent, capability: ProbeCapability, state: ProbeCapability = current, crashed = false) => !crashed
   && event.sender === webContents
   && event.senderFrame?.processId === mainFrame.processId
   && event.senderFrame?.routingId === mainFrame.routingId
@@ -89,7 +116,7 @@ check("replaced frame is rejected", !accepted(validEvent, { ...validCapability, 
 
 const trustedFile = "file:///app/dist-renderer/index.html";
 const trustedHttp = "http://127.0.0.1:5173";
-const appUrl = (value, expected) => {
+const appUrl = (value: string, expected: string) => {
   try {
     const actual = new URL(value);
     const target = new URL(expected);
@@ -110,9 +137,9 @@ check("foreign file/http origins are rejected by the URL model", !appUrl("file:/
 const activationCloseProbe = async () => {
   let action = 0;
   let epoch = 0;
-  let active = "nested";
-  const events = [];
-  const activate = async (projectId) => {
+  let active: string | null = "nested";
+  const events: ProbeProjectEvent[] = [];
+  const activate = async (projectId: string) => {
     const myAction = ++action;
     const myEpoch = ++epoch;
     active = projectId;
@@ -121,7 +148,7 @@ const activationCloseProbe = async () => {
       events.push({ type: "folder:opened", projectId, epoch: myEpoch });
     }
   };
-  const close = async (projectId) => {
+  const close = async (projectId: string) => {
     const myAction = ++action;
     const myEpoch = ++epoch;
     await Promise.resolve();
@@ -159,7 +186,7 @@ check("stale open-by-path cannot reclaim a newer activation", (await staleOpenPr
   && main.includes("activateProject(existing.id, rendererTarget, selectionAction)"));
 
 const closeCoalesceProbe = async () => {
-  let pending = null;
+  let pending: Promise<{ ok: boolean }> | null = null;
   let confirmations = 0;
   let teardowns = 0;
   const close = () => {
@@ -198,7 +225,7 @@ const replacementOpenProbe = async () => {
   let action = 0;
   let epoch = 0;
   let active = "A";
-  const events = [];
+  const events: ProbeProjectEvent[] = [];
   const openB = async () => {
     const openingAction = ++action;
     await Promise.resolve();

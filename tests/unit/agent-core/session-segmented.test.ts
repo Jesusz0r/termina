@@ -23,9 +23,45 @@ import {
 } from "node:fs";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runExportedChecks } from "../../test-support.ts";
+import { runExportedChecks, type CheckFn } from "../../test-support.ts";
+import type { SessionResult, SessionWriter as SessionWriterType } from "../../../agent-core/session.ts";
+
+interface BundlePaths {
+  sessionFile: string;
+  currentDir: string;
+  bundleDir: string;
+}
+
+interface DeviceIdentity {
+  dev: number;
+  ino: number;
+}
+
+interface RollProbeInfo {
+  paths: BundlePaths;
+  partPath: string;
+}
+
+interface SessionBlockFixture {
+  type: string;
+  chars?: unknown;
+  content?: unknown;
+  tool?: unknown;
+  repro?: unknown;
+}
+
+interface SpawnCoreOptions {
+  autoAck?: boolean;
+  ackPayload?: Record<string, unknown>;
+}
+
+interface SpawnCoreResult {
+  out: string;
+  err: string;
+  code: number | null;
+}
 
 const session = await import("../../../agent-core/session.ts");
 const host = await import("../../../agent-core/host.ts");
@@ -61,12 +97,12 @@ const png1x1 = Buffer.from(
   "base64",
 );
 
-function bundlePaths(root, id) {
+function bundlePaths(root: string, id: string): BundlePaths {
   const sessionFile = coreSessionFile(root, id);
   return { sessionFile, currentDir: dirname(sessionFile), bundleDir: join(root, id) };
 }
 
-function openWriter(sessionFile, lastStorageSeq = 0) {
+function openWriter(sessionFile: string, lastStorageSeq = 0): SessionWriterType {
   // Session admission locks are transient under parallel workers; retry
   // like session-retention-admission.test.ts before failing.
   const deadline = Date.now() + 2000;
@@ -80,16 +116,16 @@ function openWriter(sessionFile, lastStorageSeq = 0) {
   }
 }
 
-function appendMsg(writer, sseq, role, content) {
+function appendMsg(writer: SessionWriterType, sseq: number, role: string, content: string): SessionResult<{ storageSeq: number }> {
   return writer.appendRecord({ storageSeq: sseq, type: "message", message: { role, content } });
 }
 
-function fillRecord(sseq, bytes) {
+function fillRecord(sseq: number, bytes: number) {
   const pad = "x".repeat(Math.max(1, bytes));
   return { storageSeq: sseq, type: "message", message: { role: "user", content: pad } };
 }
 
-function rollCleanupProbe(root, id, mutate) {
+function rollCleanupProbe(root: string, id: string, mutate: (info: RollProbeInfo) => void) {
   const paths = bundlePaths(root, id);
   mkdirSync(paths.currentDir, { recursive: true, mode: 0o700 });
   let writer;
@@ -114,7 +150,7 @@ function rollCleanupProbe(root, id, mutate) {
   return { paths, failed };
 }
 
-function childDirWithIdentity(parent, identity) {
+function childDirWithIdentity(parent: string, identity: DeviceIdentity | null): string | null {
   if (!identity || !existsSync(parent)) return null;
   for (const name of readdirSync(parent)) {
     const path = join(parent, name);
@@ -128,7 +164,7 @@ function childDirWithIdentity(parent, identity) {
   return null;
 }
 
-function canonicalStubReceipt(revisionId, sseq, block) {
+function canonicalStubReceipt(revisionId: string, sseq: number, block: SessionBlockFixture) {
   const bytes = sessionBlockBytes(block);
   const sha256 = sessionBlockHash(block);
   if (bytes === null || sha256 === null) throw new Error("could not hash test block");
@@ -151,9 +187,9 @@ function canonicalStubReceipt(revisionId, sseq, block) {
   return checked.receipt;
 }
 
-function spawnCore(env, args = [], stdinLines = [], opts = {}) {
+function spawnCore(env: Record<string, string>, args: string[] = [], stdinLines: string[] = [], opts: SpawnCoreOptions = {}): Promise<SpawnCoreResult> {
   const src = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "agent-core", "main.ts");
-  return new Promise((resolve) => {
+  return new Promise<SpawnCoreResult>((resolve) => {
     const child = spawn(process.execPath, ["--experimental-strip-types", "--no-warnings", src, ...args], {
       env: { ...process.env, TERMINA_CORE_TEST: "1", ...env },
       stdio: ["pipe", "pipe", "pipe"],
@@ -172,7 +208,7 @@ function spawnCore(env, args = [], stdinLines = [], opts = {}) {
           try {
             const sidecar = readFileSync(join(env.TERMINA_EVENTS_DIR, `${env.TERMINA_TERMINAL_ID}.jsonl`), "utf8");
             const records = sidecar.trim().split("\n").map((line) => JSON.parse(line));
-            const request = records.findLast((record) => record.t === "preflight_request");
+            const request = records.filter((record) => record.t === "preflight_request").at(-1);
             if (request?.requestId) {
               writeFileSync(
                 host.ackPath(env.TERMINA_EVENTS_DIR, env.TERMINA_TERMINAL_ID, request.requestId),
@@ -198,7 +234,7 @@ function spawnCore(env, args = [], stdinLines = [], opts = {}) {
   });
 }
 
-export async function run({ check, leftovers }) {
+export async function run({ check, leftovers }: { check: CheckFn; leftovers: string[] }): Promise<void> {
   const root = mkdtempSync(join(realpathSync(tmpdir()), "agent-core-session-"));
   leftovers.push(root);
 
@@ -226,7 +262,7 @@ export async function run({ check, leftovers }) {
   const rolledAppend = rollWriter.appendRecord(rollRec);
   rollWriter.close();
   const afterRoll = listCurrentSegments(roll.currentDir);
-  rolled = afterRoll.ok && afterRoll.parts.length === 1 && afterRoll.active && afterRoll.active.size === encodedRoll;
+  rolled = afterRoll.ok && afterRoll.parts.length === 1 && afterRoll.active?.size === encodedRoll;
   check("rollover happens before the segment budget", rolledAppend.ok && rolled);
 
   const rollCleanupLeafMarker = "roll-cleanup-leaf-competitor";
@@ -271,7 +307,7 @@ export async function run({ check, leftovers }) {
       readFileSync(join(rollCleanupAncestor.paths.currentDir, "part-000001.jsonl"), "utf8") === rollCleanupAncestorMarker,
   );
 
-  function recordWithEncodedSize(sseq, targetBytes) {
+  function recordWithEncodedSize(sseq: number, targetBytes: number) {
     const rec = { storageSeq: sseq, type: "message", message: { role: "user", content: "" } };
     const overhead = Buffer.byteLength(`${JSON.stringify(rec)}\n`);
     rec.message.content = "x".repeat(Math.max(1, targetBytes - overhead));
@@ -491,7 +527,7 @@ export async function run({ check, leftovers }) {
     exactGot.ok &&
       boundListing.ok &&
       boundListing.parts.length === 0 &&
-      boundListing.active.size === MAX_SESSION_SEGMENT_BYTES,
+      boundListing.active?.size === MAX_SESSION_SEGMENT_BYTES,
   );
   const oversized = fillRecord(boundSeq + 1, MAX_SESSION_RECORD_BYTES);
   const overGot = boundWriter.appendRecord(oversized);
@@ -645,7 +681,7 @@ export async function run({ check, leftovers }) {
     "crash after rename recovers an empty active segment",
     crash1Replay.ok && crash1Replay.messages[0]?.content === "before-roll" && crash1Open.ok && crash1Open.writer.activeSize === 0,
   );
-  crash1Open.writer?.close();
+  if (crash1Open.ok) crash1Open.writer.close();
 
   const crash2 = bundlePaths(root, "crash-2");
   mkdirSync(crash2.currentDir, { recursive: true, mode: 0o700 });
@@ -733,10 +769,12 @@ export async function run({ check, leftovers }) {
       JSON.stringify({ storageSeq: 2, type: "revision", kind: "prune", ...pruneReceipt }),
     ].join("\n"),
   );
-  check("prune revision stubs a tool result", pruneReplay.ok && String(pruneReplay.messages[0]?.content[0]?.content ?? "").includes("storageSeq 1"));
+  const pruneFirst = pruneReplay.ok ? pruneReplay.messages[0]?.content : undefined;
+  check("prune revision stubs a tool result", Array.isArray(pruneFirst) && String(pruneFirst[0]?.content ?? "").includes("storageSeq 1"));
   const badPruneBlock = { type: "tool_result", content: "BODY" };
   const badPruneReceipt = canonicalStubReceipt("rev-bad", 1, badPruneBlock);
-  badPruneReceipt.targets[0].action = "unknown";
+  // The fixture intentionally corrupts the action to verify rejection.
+  (badPruneReceipt.targets[0] as { action: string }).action = "unknown";
   const badPruneReplay = replaySessionRecords(
     [
       JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: [badPruneBlock] } }),
@@ -769,7 +807,7 @@ export async function run({ check, leftovers }) {
   failW.close();
   chmodSync(fail.sessionFile, 0o444);
   const failW2 = SessionWriter.open(fail.sessionFile, 1);
-  let failAppend = { ok: false, error: "writer did not open" };
+  let failAppend: SessionResult<{ storageSeq: number }> = { ok: false, error: "writer did not open" };
   if (failW2.ok) {
     failAppend = failW2.writer.appendRecord({ storageSeq: 2, type: "message", message: { role: "user", content: "nope" } });
     failW2.writer.close();
@@ -898,7 +936,8 @@ export async function run({ check, leftovers }) {
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line))
-    .findLast((event) => event.t === "session_ready");
+    .filter((event) => event.t === "session_ready")
+    .at(-1);
   check("invalid startup bundle reports session_ready failure", invalidReady?.ok === false && typeof invalidReady?.error === "string");
   const explicitResume = await spawnCore(
     {
@@ -925,7 +964,8 @@ export async function run({ check, leftovers }) {
   forkW.appendRecord({ storageSeq: 10, type: "message", message: { role: "assistant", content: "s2" } });
   forkW.appendRecord({ storageSeq: 11, type: "message", message: { role: "user", content: "s3" } });
   forkW.close();
-  if (listCurrentSegments(forkSrc.currentDir).ok && listCurrentSegments(forkSrc.currentDir).parts.length === 0) {
+  const forkSrcListing = listCurrentSegments(forkSrc.currentDir);
+  if (forkSrcListing.ok && forkSrcListing.parts.length === 0) {
     writeFileSync(join(forkSrc.currentDir, "part-000001.jsonl"), readFileSync(forkSrc.sessionFile));
     writeFileSync(
       forkSrc.sessionFile,
@@ -933,6 +973,7 @@ export async function run({ check, leftovers }) {
     );
   }
   const srcReplay = await replaySessionBundle(forkSrc.sessionFile);
+  if (!srcReplay.ok) throw new Error(srcReplay.error);
   const forkZero = bundlePaths(root, "fork-zero");
   const zeroGot = await writeForkedSession(forkSrc.sessionFile, forkZero.sessionFile, 0);
   check("fork at sequence 0 writes an empty current", zeroGot.ok && zeroGot.kept === 0 && existsSync(forkZero.sessionFile) && readFileSync(forkZero.sessionFile, "utf8") === "");
@@ -1004,7 +1045,7 @@ export async function run({ check, leftovers }) {
       sumForkReplay.messages[0]?.sseq === 1 &&
       sumForkReplay.messages[1]?.sseq === 2,
   );
-  check("dense renumbering writes 1..N after summary", sumForkReplay.maxSeq >= 2 && sumForkReplay.messages[0]?.sseq === 1);
+  check("dense renumbering writes 1..N after summary", sumForkReplay.ok && sumForkReplay.maxSeq >= 2 && sumForkReplay.messages[0]?.sseq === 1);
 
   const ckptDst = bundlePaths(root, "ckpt-dst");
   const ckptFork = await writeForkedSession(sumSrc.sessionFile, ckptDst.sessionFile, 4);
@@ -1035,7 +1076,7 @@ export async function run({ check, leftovers }) {
   );
 
   const tempReplacementDest = bundlePaths(root, "temp-replacement-dest");
-  let tempReplacementIdentity = null;
+  let tempReplacementIdentity: DeviceIdentity | null = null;
   const tempReplacement = await writeForkedSession(sumSrc.sessionFile, tempReplacementDest.sessionFile, 4, {
     testHooks: {
       afterTempCreated(path) {
@@ -1058,7 +1099,7 @@ export async function run({ check, leftovers }) {
   );
 
   const tempFinallyDest = bundlePaths(root, "temp-finally-replacement-dest");
-  let tempFinallyReplacementIdentity = null;
+  let tempFinallyReplacementIdentity: DeviceIdentity | null = null;
   const tempFinallyReplacement = await writeForkedSession(sumSrc.sessionFile, tempFinallyDest.sessionFile, 4, {
     testHooks: {
       beforeDestinationCurrentInstall() {
@@ -1087,7 +1128,7 @@ export async function run({ check, leftovers }) {
   const tempFinallyAbaProject = join(root, "temp-finally-aba-project");
   mkdirSync(tempFinallyAbaProject, { recursive: true, mode: 0o700 });
   const tempFinallyAbaDest = bundlePaths(tempFinallyAbaProject, "destination");
-  let tempFinallyAbaIdentity = null;
+  let tempFinallyAbaIdentity: DeviceIdentity | null = null;
   const tempFinallyAba = await writeForkedSession(sumSrc.sessionFile, tempFinallyAbaDest.sessionFile, 4, {
     testHooks: {
       beforeDestinationCurrentInstall() {
@@ -1122,7 +1163,7 @@ export async function run({ check, leftovers }) {
   const tempFinallyAncestorProject = join(tempFinallyAncestorBase, "project");
   mkdirSync(tempFinallyAncestorProject, { recursive: true, mode: 0o700 });
   const tempFinallyAncestorDest = bundlePaths(tempFinallyAncestorProject, "destination");
-  let tempFinallyAncestorReplacementPath = null;
+  let tempFinallyAncestorReplacementPath: string | null = null;
   const tempFinallyAncestor = await writeForkedSession(sumSrc.sessionFile, tempFinallyAncestorDest.sessionFile, 4, {
     testHooks: {
       beforeDestinationCurrentInstall() {
@@ -1148,7 +1189,7 @@ export async function run({ check, leftovers }) {
   );
 
   const destinationClaimRaceDest = bundlePaths(root, "destination-claim-race-dest");
-  let competitorClaimIdentity = null;
+  let competitorClaimIdentity: DeviceIdentity | null = null;
   const destinationClaimRace = await writeForkedSession(sumSrc.sessionFile, destinationClaimRaceDest.sessionFile, 4, {
     testHooks: {
       beforeDestinationClaim(path) {
@@ -1161,13 +1202,16 @@ export async function run({ check, leftovers }) {
   const survivingClaim = existsSync(destinationClaimRaceDest.bundleDir)
     ? lstatSync(destinationClaimRaceDest.bundleDir)
     : null;
+  // Snapshot: the hook assignment is invisible to control flow, so the
+  // captured let still looks null here.
+  const competitorClaim = competitorClaimIdentity as DeviceIdentity | null;
   check(
     "atomic destination claim never replaces an intervening empty competitor directory",
     destinationClaimRace.ok === false &&
-      competitorClaimIdentity !== null &&
+      competitorClaim !== null &&
       survivingClaim?.isDirectory() === true &&
-      survivingClaim.dev === competitorClaimIdentity.dev &&
-      survivingClaim.ino === competitorClaimIdentity.ino &&
+      survivingClaim.dev === competitorClaim.dev &&
+      survivingClaim.ino === competitorClaim.ino &&
       readdirSync(destinationClaimRaceDest.bundleDir).length === 0,
   );
 
@@ -1207,7 +1251,7 @@ export async function run({ check, leftovers }) {
 
   const cleanupSwapDest = bundlePaths(root, "cleanup-identity-swap-dest");
   const cleanupSwapMarker = join(cleanupSwapDest.bundleDir, "competitor.txt");
-  let cleanupSwapIdentity = null;
+  let cleanupSwapIdentity: DeviceIdentity | null = null;
   const cleanupSwap = await writeForkedSession(sumSrc.sessionFile, cleanupSwapDest.sessionFile, 4, {
     testHooks: {
       beforeDestinationCurrentInstall() {
@@ -1225,20 +1269,23 @@ export async function run({ check, leftovers }) {
   const survivingCleanupSwap = existsSync(cleanupSwapDest.bundleDir)
     ? lstatSync(cleanupSwapDest.bundleDir)
     : null;
+  // Snapshot: the hook assignment is invisible to control flow, so the
+  // captured let still looks null here.
+  const cleanupSwapId = cleanupSwapIdentity as DeviceIdentity | null;
   check(
     "empty-claim cleanup rechecks identity after proof and preserves a replacement root",
     cleanupSwap.ok === false &&
       cleanupSwap.commit === "uncertain" &&
-      cleanupSwapIdentity !== null &&
+      cleanupSwapId !== null &&
       survivingCleanupSwap?.isDirectory() === true &&
-      survivingCleanupSwap.dev === cleanupSwapIdentity.dev &&
-      survivingCleanupSwap.ino === cleanupSwapIdentity.ino &&
+      survivingCleanupSwap.dev === cleanupSwapId.dev &&
+      survivingCleanupSwap.ino === cleanupSwapId.ino &&
       existsSync(cleanupSwapMarker) &&
       readFileSync(cleanupSwapMarker, "utf8") === "competitor-after-proof",
   );
 
   const cleanupFinalSwapDest = bundlePaths(root, "cleanup-final-swap-dest");
-  let cleanupFinalSwapIdentity = null;
+  let cleanupFinalSwapIdentity: DeviceIdentity | null = null;
   const cleanupFinalSwap = await writeForkedSession(sumSrc.sessionFile, cleanupFinalSwapDest.sessionFile, 4, {
     testHooks: {
       beforeDestinationCurrentInstall() {
@@ -1255,19 +1302,22 @@ export async function run({ check, leftovers }) {
   const survivingCleanupFinalSwap = existsSync(cleanupFinalSwapDest.bundleDir)
     ? lstatSync(cleanupFinalSwapDest.bundleDir)
     : null;
+  // Snapshot: the hook assignment is invisible to control flow, so the
+  // captured let still looks null here.
+  const cleanupFinalSwapId = cleanupFinalSwapIdentity as DeviceIdentity | null;
   check(
     "cleanup fails closed when a leaf is replaced after the final identity proof",
     cleanupFinalSwap.ok === false &&
       cleanupFinalSwap.commit === "uncertain" &&
-      cleanupFinalSwapIdentity !== null &&
+      cleanupFinalSwapId !== null &&
       survivingCleanupFinalSwap?.isDirectory() === true &&
-      survivingCleanupFinalSwap.dev === cleanupFinalSwapIdentity.dev &&
-      survivingCleanupFinalSwap.ino === cleanupFinalSwapIdentity.ino,
+      survivingCleanupFinalSwap.dev === cleanupFinalSwapId.dev &&
+      survivingCleanupFinalSwap.ino === cleanupFinalSwapId.ino,
   );
 
   const cleanupAbaDest = bundlePaths(root, "cleanup-aba-dest");
-  let cleanupAbaReplacement = null;
-  let cleanupAbaIdentity = null;
+  let cleanupAbaReplacement: string | null = null;
+  let cleanupAbaIdentity: DeviceIdentity | null = null;
   const cleanupAba = await writeForkedSession(sumSrc.sessionFile, cleanupAbaDest.sessionFile, 4, {
     testHooks: {
       beforeDestinationCurrentInstall() {
@@ -1284,7 +1334,7 @@ export async function run({ check, leftovers }) {
       beforeDestinationCleanupMutation(path) {
         const original = `${path}.aba-original-late`;
         renameSync(path, original);
-        renameSync(cleanupAbaReplacement, path);
+        renameSync(cleanupAbaReplacement!, path);
         const info = lstatSync(path);
         cleanupAbaIdentity = { dev: info.dev, ino: info.ino };
       },
@@ -1293,21 +1343,24 @@ export async function run({ check, leftovers }) {
   const survivingCleanupAba = existsSync(cleanupAbaDest.bundleDir)
     ? lstatSync(cleanupAbaDest.bundleDir)
     : null;
+  // Snapshot: the hook assignment is invisible to control flow, so the
+  // captured let still looks null here.
+  const cleanupAbaId = cleanupAbaIdentity as DeviceIdentity | null;
   check(
     "cleanup fails closed across an ABA leaf generation after the final identity proof",
     cleanupAba.ok === false &&
       cleanupAba.commit === "uncertain" &&
-      cleanupAbaIdentity !== null &&
+      cleanupAbaId !== null &&
       survivingCleanupAba?.isDirectory() === true &&
-      survivingCleanupAba.dev === cleanupAbaIdentity.dev &&
-      survivingCleanupAba.ino === cleanupAbaIdentity.ino,
+      survivingCleanupAba.dev === cleanupAbaId.dev &&
+      survivingCleanupAba.ino === cleanupAbaId.ino,
   );
 
   const cleanupAncestorBase = join(root, "cleanup-ancestor-base");
   const cleanupAncestorProject = join(cleanupAncestorBase, "project");
   mkdirSync(cleanupAncestorProject, { recursive: true, mode: 0o700 });
   const cleanupAncestorDest = bundlePaths(cleanupAncestorProject, "session");
-  let cleanupAncestorIdentity = null;
+  let cleanupAncestorIdentity: DeviceIdentity | null = null;
   const cleanupAncestor = await writeForkedSession(sumSrc.sessionFile, cleanupAncestorDest.sessionFile, 4, {
     testHooks: {
       beforeDestinationCurrentInstall() {
@@ -1326,19 +1379,22 @@ export async function run({ check, leftovers }) {
   const survivingCleanupAncestor = existsSync(cleanupAncestorDest.bundleDir)
     ? lstatSync(cleanupAncestorDest.bundleDir)
     : null;
+  // Snapshot: the hook assignment is invisible to control flow, so the
+  // captured let still looks null here.
+  const cleanupAncestorId = cleanupAncestorIdentity as DeviceIdentity | null;
   check(
     "cleanup fails closed when its destination ancestor is swapped after proof",
     cleanupAncestor.ok === false &&
       cleanupAncestor.commit === "uncertain" &&
-      cleanupAncestorIdentity !== null &&
+      cleanupAncestorId !== null &&
       survivingCleanupAncestor?.isDirectory() === true &&
-      survivingCleanupAncestor.dev === cleanupAncestorIdentity.dev &&
-      survivingCleanupAncestor.ino === cleanupAncestorIdentity.ino,
+      survivingCleanupAncestor.dev === cleanupAncestorId.dev &&
+      survivingCleanupAncestor.ino === cleanupAncestorId.ino,
   );
 
   const rollbackReplacementDest = bundlePaths(root, "rollback-replacement-dest");
   const rollbackReplacementMarker = join(rollbackReplacementDest.bundleDir, "competitor.txt");
-  let rollbackReplacementIdentity = null;
+  let rollbackReplacementIdentity: DeviceIdentity | null = null;
   const rollbackReplacement = await writeForkedSession(sumSrc.sessionFile, rollbackReplacementDest.sessionFile, 4, {
     testHooks: {
       beforeDestinationParentSync(path) {
@@ -1354,14 +1410,17 @@ export async function run({ check, leftovers }) {
   const survivingReplacement = existsSync(rollbackReplacementDest.bundleDir)
     ? lstatSync(rollbackReplacementDest.bundleDir)
     : null;
+  // Snapshot: the hook assignment is invisible to control flow, so the
+  // captured let still looks null here.
+  const rollbackReplacementId = rollbackReplacementIdentity as DeviceIdentity | null;
   check(
     "rollback never deletes a replacement destination and reports an uncertain commit",
     rollbackReplacement.ok === false &&
       rollbackReplacement.commit === "uncertain" &&
-      rollbackReplacementIdentity !== null &&
+      rollbackReplacementId !== null &&
       survivingReplacement?.isDirectory() === true &&
-      survivingReplacement.dev === rollbackReplacementIdentity.dev &&
-      survivingReplacement.ino === rollbackReplacementIdentity.ino &&
+      survivingReplacement.dev === rollbackReplacementId.dev &&
+      survivingReplacement.ino === rollbackReplacementId.ino &&
       readFileSync(rollbackReplacementMarker, "utf8") === "competitor-owned-bytes",
   );
 
@@ -1545,7 +1604,7 @@ export async function run({ check, leftovers }) {
   const cleared = clearSessionBundle(clearB.sessionFile, Date.UTC(2026, 7, 26, 15, 4, 5));
   check("clear archives a non-empty current", cleared.ok && typeof cleared.archived === "string" && existsSync(cleared.archived));
   check("clear creates a new current", existsSync(clearB.sessionFile) && readFileSync(clearB.sessionFile, "utf8") === "");
-  check("archived current keeps the image", existsSync(join(cleared.archived, "session-img-1.png")));
+  check("archived current keeps the image", cleared.ok && typeof cleared.archived === "string" && existsSync(join(cleared.archived, "session-img-1.png")));
   const clearedAgain = clearSessionBundle(clearB.sessionFile);
   check("clear of an empty current does not create an archive", clearedAgain.ok && clearedAgain.archived === null);
   const removeCleared = await removeEmptySessionBundle(clearB.sessionFile);
@@ -1566,7 +1625,7 @@ export async function run({ check, leftovers }) {
   const emptyCleanupRace = bundlePaths(root, "empty-cleanup-race");
   const emptyRaceWriter = openWriter(emptyCleanupRace.sessionFile);
   emptyRaceWriter.close();
-  let emptyCleanupReplacementIdentity = null;
+  let emptyCleanupReplacementIdentity: DeviceIdentity | null = null;
   const emptyCleanupResult = await removeEmptySessionBundle(emptyCleanupRace.sessionFile, {
     testHooks: {
       beforeEmptySessionCleanupMutation(path) {
@@ -1580,12 +1639,15 @@ export async function run({ check, leftovers }) {
       },
     },
   });
+  // Snapshot: the hook assignment is invisible to control flow, so the
+  // captured let still looks null here.
+  const emptyCleanupReplacementId = emptyCleanupReplacementIdentity as DeviceIdentity | null;
   check(
     "empty-session cleanup retains a replacement inserted after final shape proof",
     emptyCleanupResult.ok &&
       emptyCleanupResult.removed === false &&
-      emptyCleanupReplacementIdentity !== null &&
-      lstatSync(emptyCleanupRace.bundleDir).ino === emptyCleanupReplacementIdentity.ino &&
+      emptyCleanupReplacementId !== null &&
+      lstatSync(emptyCleanupRace.bundleDir).ino === emptyCleanupReplacementId.ino &&
       existsSync(join(emptyCleanupRace.bundleDir, "competitor.txt")) &&
       readFileSync(join(emptyCleanupRace.bundleDir, "competitor.txt"), "utf8") === "competitor-empty-cleanup",
   );
@@ -1646,7 +1708,7 @@ export async function run({ check, leftovers }) {
   mkdirSync(fresh.currentDir, { recursive: true, mode: 0o700 });
   writeFileSync(fresh.sessionFile, `${JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "old" } })}\n`);
   const archived = prepareFreshSession(fresh.sessionFile, Date.UTC(2026, 7, 26, 15, 4, 5));
-  check("fresh prompt archives non-empty current", archived.ok && existsSync(archived.archived));
+  check("fresh prompt archives non-empty current", archived.ok && typeof archived.archived === "string" && existsSync(archived.archived));
 
   const q = bundlePaths(root, "q-1");
   mkdirSync(q.currentDir, { recursive: true, mode: 0o700 });
@@ -1658,7 +1720,7 @@ export async function run({ check, leftovers }) {
   mkdirSync(q.currentDir, { recursive: true, mode: 0o700 });
   writeFileSync(q.sessionFile, "second\n");
   const q2 = quarantineSessionBundle(q.sessionFile, Date.UTC(2026, 7, 26, 15, 4, 5));
-  check("quarantine collision uses a numeric suffix", q2.ok && q2.aside !== quarantined.aside && existsSync(q2.aside));
+  check("quarantine collision uses a numeric suffix", q2.ok && quarantined.ok && q2.aside !== quarantined.aside && existsSync(q2.aside));
 
   const collide = bundlePaths(root, "col-1");
   mkdirSync(collide.currentDir, { recursive: true, mode: 0o700 });

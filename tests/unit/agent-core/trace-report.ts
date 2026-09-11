@@ -2,7 +2,13 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { validateV2Relationships, v2CompositeKey } from "./trace-links.ts";
+import {
+  validateV2Relationships,
+  v2CompositeKey,
+  type TraceFileError,
+  type TraceJsonObject,
+  type TraceJsonValue,
+} from "./trace-links.ts";
 
 const MAX_TRACE_FILES = 10_000;
 const MAX_TRACE_BYTES = 1024 * 1024;
@@ -11,31 +17,224 @@ const TRACE_RECORD_TYPES = new Set(["attempt", "task-settled"]);
 const MAX_REPORT_LIST_ITEMS = 256;
 const MAX_REPORT_STRING_CHARS = 512;
 
-function finiteNonnegative(value) {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
-}
+/** Records with the non-enumerable diagnostics expando readTraceDirectory attaches. */
+type TraceRecordList = TraceJsonObject[] & { traceDiagnostics?: TraceJsonObject };
 
-function knownNonnegative(value) {
+type V2UsageMetric = { total: number; knownSamples: number; unknownSamples: number };
+type V2UsageField = "input" | "cacheRead" | "cacheWrite" | "output" | "reasoning";
+type V2UsageAggregate = {
+  input: V2UsageMetric;
+  cacheRead: V2UsageMetric;
+  cacheWrite: V2UsageMetric;
+  output: V2UsageMetric;
+  reasoning: V2UsageMetric;
+  completeSamples: number;
+  partialSamples: number;
+  unknownSamples: number;
+  cachedInputShare: number | null;
+  cacheShareDenominator: { input: number; cacheRead: number; cacheWrite: number; totalInput: number; knownSamples: number };
+};
+type V2CostAggregate = { totalUsd: number; knownSamples: number; unknownSamples: number; byPriceSource: Record<string, number> };
+type V2CostDetails = { components: Record<string, V2UsageMetric>; unknownReasons: Record<string, number> };
+type V2CostComponents = Record<string, number | null>;
+type V2Policy = { mode: string | null; ttlMs: number | null };
+type V2Miss = {
+  attributed: boolean | null;
+  primary: string | null;
+  contributing: string[];
+  missedTokens: number | null;
+  gapMs: number | null;
+  missingFields: string[];
+  noiseFloorTokens: number | null;
+};
+type V2ToolOutcome = {
+  name: string | null;
+  status: string;
+  complete: boolean | null;
+  truncated: boolean | null;
+  isError: boolean | null;
+  state: string | null;
+  direction: string | null;
+  limitBytes: number | null;
+  inputBytes: number | null;
+  retainedBytes: number | null;
+  omittedBytes: number | null;
+  outputBytes: number | null;
+  bytes: number | null;
+  tokens: number | null;
+  exitCode: number | null;
+  cancellationScope: string | null;
+};
+type V2ReclaimReceipt = {
+  kind: string | null;
+  sourceSseq: number | null;
+  blockIndex: number | null;
+  originalBytes: number | null;
+  reclaimedBytes: number | null;
+  reclaimedTokens: number | null;
+  originalHash: string | null;
+  stubHash: string | null;
+  recovery: string | null;
+  status: string | null;
+};
+type V2ReclaimEvidence = {
+  attempted: boolean | null;
+  applied: boolean | null;
+  recovered: boolean | null;
+  reclaimedBytes: number | null;
+  reclaimedTokens: number | null;
+  targetCount: number | null;
+  receiptCount: number | null;
+  omittedReceipts: number;
+  revisionId: string | null;
+  source: string | null;
+  error: string | null;
+  receipts: V2ReclaimReceipt[];
+  targets: V2ReclaimReceipt[];
+};
+type V2Usage = { input: number | null; cacheRead: number | null; cacheWrite: number | null; output: number | null; reasoning: number | null };
+type V2AttemptCost = {
+  usd: number | null;
+  source: string | null;
+  version: string | null;
+  lookedUpAt: string | null;
+  knownFields: string[];
+  unknownFields: string[];
+  unknownReasons: string[];
+  components: V2CostComponents;
+};
+type V2Cache = {
+  namespace: string | null;
+  requested: V2Policy;
+  effective: V2Policy;
+  markerCount: number | null;
+  markerPositions: number[];
+  rejected: boolean | null;
+  fallbackReason: string | null;
+  cacheKeyHash: string | null;
+  modelSettingsHash: string | null;
+  toolsHash: string | null;
+  stablePrefixHash: string | null;
+  reusablePrefixHash: string | null;
+  reusablePrefixItems: number | null;
+  comparedPrefixHash: string | null;
+  comparedPrefixItems: number | null;
+  messagePrefixHash: string | null;
+  workingSetHash: string | null;
+  workingSetChanged: boolean | null;
+  retryPromptIdentical: boolean | null;
+  codexTurnStateUsed: boolean;
+  missAttribution: V2Miss;
+};
+type V2Revisions = { count: number | null; kinds: string[] };
+type V2NormalizedAttempt = {
+  id: string;
+  runId: string | null;
+  taskId: string | null;
+  attemptId: string;
+  parentAttemptId: string | null;
+  retryOfAttemptId: string | null;
+  role: string;
+  provider: string;
+  protocol: string;
+  route: string | null;
+  model: string;
+  taskClass: string | null;
+  requestedEffort: string | null;
+  effectiveEffort: string | null;
+  status: string;
+  retryCount: number | null;
+  fallbackReason: string | null;
+  ttftMs: number | null;
+  turnMs: number | null;
+  usage: V2Usage;
+  cost: V2AttemptCost;
+  cache: V2Cache;
+  revisions: V2Revisions;
+  toolNames: string[];
+  toolOutcomes: V2ToolOutcome[];
+  reclaimEvidence: V2ReclaimEvidence | null;
+  sessionLengthBucket: string | null;
+  wasteTokens: number | null;
+  wasteCause: string | null;
+  traceTurn: number | null;
+};
+type V2TaskGroup = {
+  runId: string | null;
+  taskId: string | null;
+  total: number;
+  main: number;
+  summary: number;
+  unknownRole: number;
+  retries: number;
+  fallbacks: number;
+  attemptIds: string[];
+  finalAttemptId: string | null;
+  settled: boolean;
+  outcomeStatus: string | null;
+  outcomeClass: string;
+  correctness: string | null;
+  taskClass: string | null;
+  sessionLengthBucket: string | null;
+};
+type V2CacheGroup = {
+  turns: number;
+  totalInput: number;
+  cacheRead: number;
+  cachedInputShare: number | null;
+  completeSamples: number;
+  partialSamples: number;
+  unknownSamples: number;
+};
+type V2DimensionGroup = {
+  attempts: number;
+  tasks: number;
+  usage: V2UsageAggregate;
+  cost: V2CostAggregate & V2CostDetails;
+  cachedInputShare: number | null;
+};
+type V2PerTurn = {
+  turn: number;
+  taskId: string | null;
+  attemptId: string;
+  role: string;
+  status: string;
+  provider: string;
+  protocol: string;
+  route: string | null;
+  model: string;
+  sessionLengthBucket: string | null;
+  totalInput: number | null;
+  cacheRead: number | null;
+  cachedInputShare: number | null;
+  cache: V2Cache;
+};
+
+function knownNonnegative(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
-function nullableNonnegative(value) {
+function nullableNonnegative(value: unknown): number | null {
   return knownNonnegative(value) ? value : null;
 }
 
-function nonemptyString(value) {
+function nullableSafeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) ? value : null;
+}
+
+function nonemptyString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-function boundedString(value, limit = MAX_REPORT_STRING_CHARS) {
+function boundedString(value: unknown, limit = MAX_REPORT_STRING_CHARS): string | null {
   const text = nonemptyString(value);
   return text === null ? null : text.slice(0, limit);
 }
 
-function boundedStringArray(value, limit = MAX_REPORT_LIST_ITEMS) {
+function boundedStringArray(value: unknown, limit = MAX_REPORT_LIST_ITEMS): string[] {
   if (!Array.isArray(value)) return [];
-  const result = [];
-  const seen = new Set();
+  const result: string[] = [];
+  const seen = new Set<string>();
   for (const item of value) {
     const text = boundedString(item);
     if (text === null || seen.has(text)) continue;
@@ -46,11 +245,11 @@ function boundedStringArray(value, limit = MAX_REPORT_LIST_ITEMS) {
   return result;
 }
 
-function nullableBoolean(value) {
+function nullableBoolean(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
 }
 
-function metricFromValues(values) {
+function metricFromValues(values: (number | null)[]): V2UsageMetric {
   let total = 0;
   let knownSamples = 0;
   for (const value of values) {
@@ -61,7 +260,7 @@ function metricFromValues(values) {
   return { total, knownSamples, unknownSamples: values.length - knownSamples };
 }
 
-function compareStable(left, right) {
+function compareStable(left: unknown, right: unknown): number {
   const a = Buffer.from(String(left), "utf8");
   const b = Buffer.from(String(right), "utf8");
   const length = Math.min(a.length, b.length);
@@ -71,18 +270,18 @@ function compareStable(left, right) {
   return a.length - b.length;
 }
 
-function knownCount(value) {
-  return Number.isSafeInteger(value) && value >= 0;
+function knownCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-function validTraceRecord(record) {
+function validTraceRecord(record: TraceJsonValue): asserts record is TraceJsonObject {
   if (!record || typeof record !== "object" || Array.isArray(record)) {
     throw new Error("root is not an object");
   }
   if (record.schemaVersion !== TRACE_SCHEMA_VERSION) {
     throw new Error(`unsupported trace schema version: ${String(record.schemaVersion)}`);
   }
-  if (!TRACE_RECORD_TYPES.has(record.recordType)) {
+  if (typeof record.recordType !== "string" || !TRACE_RECORD_TYPES.has(record.recordType)) {
     throw new Error(`unsupported trace record type: ${String(record.recordType)}`);
   }
   if (!nonemptyString(record.runId)) throw new Error("v2 record is missing runId");
@@ -92,85 +291,44 @@ function validTraceRecord(record) {
   }
 }
 
-function percentile(values, fraction) {
+function percentile(values: number[], fraction: number): number | null {
   if (values.length === 0) return null;
   const sorted = values.slice().sort((a, b) => a - b);
   return sorted[Math.max(0, Math.ceil(sorted.length * fraction) - 1)];
 }
 
-function counts(values) {
-  const out = Object.create(null);
+function counts(values: string[]): Record<string, number> {
+  const out: Record<string, number> = Object.create(null);
   for (const value of values) out[value] = (out[value] ?? 0) + 1;
   return Object.fromEntries(Object.entries(out).sort(([a], [b]) => compareStable(a, b)));
 }
 
-function cacheShare(record) {
-  if (!record.usage || typeof record.usage !== "object") return null;
-  const total = finiteNonnegative(record.usage.input) + finiteNonnegative(record.usage.cacheRead) + finiteNonnegative(record.usage.cacheWrite);
-  return total > 0 ? finiteNonnegative(record.usage.cacheRead) / total : null;
-}
-
-function cacheGroups(records, field) {
-  const groups = new Map();
-  for (const record of records) {
-    const name = field(record);
-    if (!name) continue;
-    const input = finiteNonnegative(record.usage?.input) + finiteNonnegative(record.usage?.cacheRead) + finiteNonnegative(record.usage?.cacheWrite);
-    const cacheRead = finiteNonnegative(record.usage?.cacheRead);
-    const group = groups.get(name) ?? { turns: 0, totalInput: 0, cacheRead: 0, cachedInputShare: null };
-    group.turns++;
-    group.totalInput += input;
-    group.cacheRead += cacheRead;
-    group.cachedInputShare = group.totalInput > 0 ? group.cacheRead / group.totalInput : null;
-    groups.set(name, group);
-  }
-  return Object.fromEntries([...groups].sort(([a], [b]) => compareStable(a, b)));
-}
-
-const CACHE_HASH_FIELDS = ["cacheKeyHash", "modelSettingsHash", "toolsHash", "stablePrefixHash", "messagePrefixHash", "workingSetHash"];
-
-function withCacheChanges(records) {
-  let previous = null;
-  return records.map((record) => {
-    const current = record.cache && typeof record.cache === "object" ? record.cache : null;
-    const changes = {};
-    for (const field of CACHE_HASH_FIELDS) {
-      changes[field] =
-        current && previous && Object.hasOwn(current, field) && Object.hasOwn(previous, field)
-          ? current[field] !== previous[field]
-          : null;
-    }
-    if (current) previous = current;
-    return { ...record, cacheChanges: changes };
-  });
-}
-
-function traceNumber(name) {
+function traceNumber(name: string): number | null {
   const match = /^turn-(\d+)\.json$/.exec(name);
   if (!match) return null;
   const turn = Number(match[1]);
   return Number.isSafeInteger(turn) && turn > 0 ? turn : null;
 }
 
-function likelyPartialText(value) {
+function likelyPartialText(value: string): boolean {
   const text = value.trimEnd();
   if (text.length === 0) return true;
   const last = text[text.length - 1];
   return last !== "}" && last !== "]";
 }
 
-export function readTraceDirectory(path) {
+export function readTraceDirectory(path: string) {
   const directory = resolve(path);
   if (!existsSync(directory) || !statSync(directory).isDirectory()) {
     throw new Error(`trace directory does not exist: ${directory}`);
   }
   const candidateNames = readdirSync(directory)
     .map((name) => ({ name, turn: traceNumber(name) }))
-    .filter((item) => item.turn !== null)
+    .filter((item): item is { name: string; turn: number } => item.turn !== null)
     .sort((a, b) => a.turn - b.turn || compareStable(a.name, b.name))
   const names = candidateNames.slice(-MAX_TRACE_FILES);
-  const records = [];
-  const recordErrors = [];
+  const records: TraceJsonObject[] = [];
+  const recordErrors: TraceFileError[] = [];
   let scannedPartialRecords = 0;
   for (const { name, turn } of names) {
     const file = join(directory, name);
@@ -201,8 +359,8 @@ export function readTraceDirectory(path) {
   records.splice(0, records.length, ...relationshipValidation.records);
   recordErrors.push(...relationshipValidation.errors);
 
-  let manifest = null;
-  const manifestErrors = [];
+  let manifest: TraceJsonObject | null = null;
+  const manifestErrors: TraceFileError[] = [];
   const manifestFile = join(directory, "trace-manifest.json");
   if (existsSync(manifestFile)) {
     try {
@@ -218,13 +376,15 @@ export function readTraceDirectory(path) {
     }
   }
 
-  const manifestCount = (field) => {
-    if (!manifest || manifest[field] === undefined) return null;
-    if (!knownCount(manifest[field])) {
+  const manifestCount = (field: string): number | null => {
+    if (!manifest) return null;
+    const value = manifest[field];
+    if (value === undefined) return null;
+    if (!knownCount(value)) {
       manifestErrors.push({ file: "trace-manifest.json", error: `${field} must be a nonnegative integer` });
       return null;
     }
-    return manifest[field];
+    return value;
   };
   const schemaRecords = {
     current: records.filter((record) => record.schemaVersion === TRACE_SCHEMA_VERSION).length,
@@ -264,36 +424,27 @@ export function readTraceDirectory(path) {
   };
 }
 
-function isV2Record(record) {
-  return record && typeof record === "object" && record.schemaVersion === TRACE_SCHEMA_VERSION && TRACE_RECORD_TYPES.has(record.recordType);
+function isV2Record(record: TraceJsonObject): boolean {
+  return record.schemaVersion === TRACE_SCHEMA_VERSION
+    && typeof record.recordType === "string"
+    && TRACE_RECORD_TYPES.has(record.recordType);
 }
 
-function v2RecordId(record, index) {
+function v2RecordId(record: TraceJsonObject, index: number): string {
   return nonemptyString(record.attemptId) ?? `trace-${Number.isInteger(record.traceTurn) ? record.traceTurn : index + 1}`;
 }
 
-function v2TaskId(record) {
+function v2TaskId(record: TraceJsonObject): string | null {
   return nonemptyString(record.taskId);
 }
 
-function v2TaskKey(taskId) {
-  return taskId ?? "unknown";
-}
-
-function v2UsageValue(record, field) {
+function v2UsageValue(record: TraceJsonObject, field: string): number | null {
   const usage = record.usage;
   return usage && typeof usage === "object" && !Array.isArray(usage) ? nullableNonnegative(usage[field]) : null;
 }
 
-function aggregateV2Usage(attempts) {
-  const fields = ["input", "cacheRead", "cacheWrite", "output", "reasoning"];
-  const result = {};
-  const cacheFields = ["input", "cacheRead", "cacheWrite"];
-  let completeSamples = 0;
-  let partialSamples = 0;
-  let unknownSamples = 0;
-  const completeTotals = { input: 0, cacheRead: 0, cacheWrite: 0 };
-  for (const field of fields) {
+function aggregateV2Usage(attempts: TraceJsonObject[]): V2UsageAggregate {
+  const metric = (field: V2UsageField): V2UsageMetric => {
     let total = 0;
     let knownSamples = 0;
     for (const record of attempts) {
@@ -302,14 +453,19 @@ function aggregateV2Usage(attempts) {
       total += value;
       knownSamples++;
     }
-    result[field] = { total, knownSamples, unknownSamples: attempts.length - knownSamples };
-  }
+    return { total, knownSamples, unknownSamples: attempts.length - knownSamples };
+  };
+  const cacheFields = ["input", "cacheRead", "cacheWrite"] as const;
+  let completeSamples = 0;
+  let partialSamples = 0;
+  let unknownSamples = 0;
+  const completeTotals = { input: 0, cacheRead: 0, cacheWrite: 0 };
   for (const record of attempts) {
     const values = cacheFields.map((field) => v2UsageValue(record, field));
     const known = values.filter((value) => value !== null).length;
     if (known === cacheFields.length) {
       completeSamples++;
-      for (const [index, field] of cacheFields.entries()) completeTotals[field] += values[index];
+      for (const [index, field] of cacheFields.entries()) completeTotals[field] += values[index] ?? 0;
     } else if (known > 0) {
       partialSamples++;
     } else {
@@ -317,21 +473,27 @@ function aggregateV2Usage(attempts) {
     }
   }
   const totalInput = completeTotals.input + completeTotals.cacheRead + completeTotals.cacheWrite;
-  result.completeSamples = completeSamples;
-  result.partialSamples = partialSamples;
-  result.unknownSamples = unknownSamples;
-  result.cachedInputShare = totalInput > 0 ? completeTotals.cacheRead / totalInput : null;
-  result.cacheShareDenominator = {
-    input: completeTotals.input,
-    cacheRead: completeTotals.cacheRead,
-    cacheWrite: completeTotals.cacheWrite,
-    totalInput,
-    knownSamples: completeSamples,
+  return {
+    input: metric("input"),
+    cacheRead: metric("cacheRead"),
+    cacheWrite: metric("cacheWrite"),
+    output: metric("output"),
+    reasoning: metric("reasoning"),
+    completeSamples,
+    partialSamples,
+    unknownSamples,
+    cachedInputShare: totalInput > 0 ? completeTotals.cacheRead / totalInput : null,
+    cacheShareDenominator: {
+      input: completeTotals.input,
+      cacheRead: completeTotals.cacheRead,
+      cacheWrite: completeTotals.cacheWrite,
+      totalInput,
+      knownSamples: completeSamples,
+    },
   };
-  return result;
 }
 
-function summarizeCachePhase(attempts) {
+function summarizeCachePhase(attempts: TraceJsonObject[]) {
   const usage = aggregateV2Usage(attempts);
   return {
     turns: attempts.length,
@@ -346,9 +508,9 @@ function summarizeCachePhase(attempts) {
   };
 }
 
-function summarizeIdleGaps(attempts) {
+function summarizeIdleGaps(attempts: V2NormalizedAttempt[]) {
   const gaps = attempts.slice(1).map((attempt) => attempt.cache.missAttribution.gapMs);
-  const known = gaps.filter((gap) => gap !== null);
+  const known = gaps.filter((gap): gap is number => gap !== null);
   const within5Minutes = known.filter((gap) => gap <= 5 * 60 * 1000).length;
   const between5MinutesAnd1Hour = known.filter((gap) => gap > 5 * 60 * 1000 && gap <= 60 * 60 * 1000).length;
   return {
@@ -366,18 +528,19 @@ function summarizeIdleGaps(attempts) {
   };
 }
 
-function v2CostValue(record) {
-  const value = record.cost && typeof record.cost === "object" ? record.cost.usd : record.usd;
-  return nullableNonnegative(value);
+function v2CostValue(record: TraceJsonObject): number | null {
+  const cost = record.cost;
+  const usd = cost && typeof cost === "object" ? (!Array.isArray(cost) ? cost.usd : undefined) : record.usd;
+  return nullableNonnegative(usd);
 }
 
 const V2_COST_COMPONENT_FIELDS = ["input", "cacheRead", "cacheWrite", "output", "reasoning", "storage"];
 
-function v2CostObject(record) {
+function v2CostObject(record: TraceJsonObject): TraceJsonObject | null {
   return record.cost && typeof record.cost === "object" && !Array.isArray(record.cost) ? record.cost : null;
 }
 
-function v2CostComponents(record) {
+function v2CostComponents(record: TraceJsonObject): V2CostComponents {
   const cost = v2CostObject(record);
   const components = cost?.components && typeof cost.components === "object" && !Array.isArray(cost.components)
     ? cost.components
@@ -385,7 +548,7 @@ function v2CostComponents(record) {
   return Object.fromEntries(V2_COST_COMPONENT_FIELDS.map((field) => [field, nullableNonnegative(components?.[field])]));
 }
 
-function v2CostUnknownReasons(record) {
+function v2CostUnknownReasons(record: TraceJsonObject): string[] {
   const cost = v2CostObject(record);
   const explicit = boundedStringArray(cost?.unknownReasons ?? record.unknownReasons);
   const singular = boundedString(cost?.unknownReason ?? record.unknownReason);
@@ -398,16 +561,19 @@ function v2CostUnknownReasons(record) {
   return ["cost-not-reported"];
 }
 
-function aggregateV2Cost(attempts) {
+function aggregateV2Cost(attempts: TraceJsonObject[]): V2CostAggregate {
   let totalUsd = 0;
   let knownSamples = 0;
-  const byPriceSource = Object.create(null);
+  const byPriceSource: Record<string, number> = Object.create(null);
   for (const record of attempts) {
     const value = v2CostValue(record);
     if (value === null) continue;
     totalUsd += value;
     knownSamples++;
-    const source = nonemptyString(record.cost && typeof record.cost === "object" ? record.cost.source : record.priceSource);
+    const cost = record.cost;
+    const source = nonemptyString(
+      cost && typeof cost === "object" ? (!Array.isArray(cost) ? cost.source : undefined) : record.priceSource,
+    );
     if (source) byPriceSource[source] = (byPriceSource[source] ?? 0) + 1;
   }
   return {
@@ -418,8 +584,8 @@ function aggregateV2Cost(attempts) {
   };
 }
 
-function aggregateV2CostDetails(attempts) {
-  const components = {};
+function aggregateV2CostDetails(attempts: TraceJsonObject[]): V2CostDetails {
+  const components: Record<string, V2UsageMetric> = {};
   for (const field of V2_COST_COMPONENT_FIELDS) {
     components[field] = metricFromValues(attempts.map((attempt) => v2CostComponents(attempt)[field]));
   }
@@ -429,7 +595,7 @@ function aggregateV2CostDetails(attempts) {
   };
 }
 
-function normalizeV2Policy(value) {
+function normalizeV2Policy(value: TraceJsonValue): V2Policy {
   const policy = value && typeof value === "object" && !Array.isArray(value) ? value : null;
   return {
     mode: nonemptyString(policy?.mode),
@@ -437,33 +603,40 @@ function normalizeV2Policy(value) {
   };
 }
 
-function normalizeV2SessionLengthBucket(record) {
+function normalizeV2SessionLengthBucket(record: TraceJsonObject): string | null {
+  const session = record.session && typeof record.session === "object" && !Array.isArray(record.session)
+    ? record.session
+    : null;
+  const sessionLength = record.sessionLength && typeof record.sessionLength === "object" && !Array.isArray(record.sessionLength)
+    ? record.sessionLength
+    : null;
   return boundedString(
     record.sessionLengthBucket
-      ?? record.session?.lengthBucket
-      ?? record.sessionLength?.bucket,
+      ?? session?.lengthBucket
+      ?? sessionLength?.bucket,
   );
 }
 
-function normalizeV2Miss(record, cache) {
+function normalizeV2Miss(record: TraceJsonObject, cache: TraceJsonObject | null | undefined): V2Miss {
   const miss = cache?.missAttribution
     ?? cache?.miss
     ?? record.missAttribution
     ?? record.miss
     ?? null;
-  const contributors = miss?.contributing ?? miss?.contributors ?? record.missContributors;
+  const missObj = miss && typeof miss === "object" && !Array.isArray(miss) ? miss : null;
+  const contributors = missObj?.contributing ?? missObj?.contributors ?? record.missContributors;
   return {
-    attributed: nullableBoolean(miss?.attributed),
-    primary: boundedString(miss?.primary ?? miss?.primaryCause ?? record.missPrimary),
+    attributed: nullableBoolean(missObj?.attributed),
+    primary: boundedString(missObj?.primary ?? missObj?.primaryCause ?? record.missPrimary),
     contributing: boundedStringArray(contributors),
-    missedTokens: nullableNonnegative(miss?.missedTokens),
-    gapMs: nullableNonnegative(miss?.gapMs),
-    missingFields: boundedStringArray(miss?.missingFields),
-    noiseFloorTokens: nullableNonnegative(miss?.noiseFloorTokens),
+    missedTokens: nullableNonnegative(missObj?.missedTokens),
+    gapMs: nullableNonnegative(missObj?.gapMs),
+    missingFields: boundedStringArray(missObj?.missingFields),
+    noiseFloorTokens: nullableNonnegative(missObj?.noiseFloorTokens),
   };
 }
 
-function normalizeV2ToolOutcome(value) {
+function normalizeV2ToolOutcome(value: TraceJsonValue): V2ToolOutcome | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const bounded = value.bounded && typeof value.bounded === "object" && !Array.isArray(value.bounded)
     ? value.bounded
@@ -491,15 +664,15 @@ function normalizeV2ToolOutcome(value) {
     outputBytes: nullableNonnegative(value.outputBytes ?? bounded?.outputBytes),
     bytes: nullableNonnegative(value.bytes ?? value.outputBytes ?? bounded?.outputBytes ?? bounded?.retainedBytes),
     tokens: nullableNonnegative(value.tokens ?? value.outputTokens ?? bounded?.tokens),
-    exitCode: Number.isSafeInteger(value.exitCode) ? value.exitCode : null,
+    exitCode: nullableSafeInteger(value.exitCode),
     cancellationScope: boundedString(value.cancellationScope),
   };
 }
 
-function normalizeV2ToolOutcomes(record) {
+function normalizeV2ToolOutcomes(record: TraceJsonObject): V2ToolOutcome[] {
   const raw = record.toolOutcomes ?? record.toolResults;
   if (!Array.isArray(raw)) return [];
-  const outcomes = [];
+  const outcomes: V2ToolOutcome[] = [];
   for (const value of raw.slice(0, MAX_REPORT_LIST_ITEMS)) {
     const outcome = normalizeV2ToolOutcome(value);
     if (outcome) outcomes.push(outcome);
@@ -507,14 +680,14 @@ function normalizeV2ToolOutcomes(record) {
   return outcomes;
 }
 
-function normalizeV2ReclaimReceipt(value) {
+function normalizeV2ReclaimReceipt(value: TraceJsonValue): V2ReclaimReceipt | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const sseq = nullableSafeInteger(value.sourceSseq ?? value.sseq);
+  const block = nullableSafeInteger(value.blockIndex);
   return {
     kind: boundedString(value.kind ?? value.action),
-    sourceSseq: Number.isSafeInteger(value.sourceSseq ?? value.sseq) && (value.sourceSseq ?? value.sseq) >= 0
-      ? (value.sourceSseq ?? value.sseq)
-      : null,
-    blockIndex: Number.isSafeInteger(value.blockIndex) && value.blockIndex >= 0 ? value.blockIndex : null,
+    sourceSseq: sseq !== null && sseq >= 0 ? sseq : null,
+    blockIndex: block !== null && block >= 0 ? block : null,
     originalBytes: nullableNonnegative(value.originalBytes),
     reclaimedBytes: nullableNonnegative(value.reclaimedBytes),
     reclaimedTokens: nullableNonnegative(value.reclaimedTokens),
@@ -525,18 +698,20 @@ function normalizeV2ReclaimReceipt(value) {
   };
 }
 
-function normalizeV2ReclaimEvidence(record) {
+function normalizeV2ReclaimEvidence(record: TraceJsonObject): V2ReclaimEvidence | null {
   const raw = record.reclaimEvidence ?? record.reclaim ?? null;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const rawReceipts = Array.isArray(raw.receipts) ? raw.receipts : Array.isArray(raw.targets) ? raw.targets : [];
-  const receipts = rawReceipts.slice(0, MAX_REPORT_LIST_ITEMS).map(normalizeV2ReclaimReceipt).filter(Boolean);
+  const receipts = rawReceipts.slice(0, MAX_REPORT_LIST_ITEMS).map(normalizeV2ReclaimReceipt)
+    .filter((receipt): receipt is V2ReclaimReceipt => receipt !== null);
+  const targetCount = nullableSafeInteger(raw.targetCount);
   return {
     attempted: nullableBoolean(raw.attempted ?? raw.planned),
     applied: nullableBoolean(raw.applied),
     recovered: nullableBoolean(raw.recovered),
     reclaimedBytes: nullableNonnegative(raw.reclaimedBytes ?? raw.bytes),
     reclaimedTokens: nullableNonnegative(raw.reclaimedTokens ?? raw.tokens),
-    targetCount: Number.isSafeInteger(raw.targetCount) && raw.targetCount >= 0 ? raw.targetCount : null,
+    targetCount: targetCount !== null && targetCount >= 0 ? targetCount : null,
     receiptCount: Number.isSafeInteger(rawReceipts.length) ? rawReceipts.length : null,
     omittedReceipts: Math.max(0, rawReceipts.length - MAX_REPORT_LIST_ITEMS),
     revisionId: boundedString(raw.revisionId),
@@ -547,12 +722,15 @@ function normalizeV2ReclaimEvidence(record) {
   };
 }
 
-function normalizeV2Attempt(record, index) {
+function normalizeV2Attempt(record: TraceJsonObject, index: number): V2NormalizedAttempt {
   const cache = record.cache && typeof record.cache === "object" && !Array.isArray(record.cache) ? record.cache : null;
-  const usage = {};
-  for (const field of ["input", "cacheRead", "cacheWrite", "output", "reasoning"]) usage[field] = v2UsageValue(record, field);
+  const usage: V2Usage = { input: null, cacheRead: null, cacheWrite: null, output: null, reasoning: null };
+  const usageFields: V2UsageField[] = ["input", "cacheRead", "cacheWrite", "output", "reasoning"];
+  for (const field of usageFields) usage[field] = v2UsageValue(record, field);
   const cost = record.cost && typeof record.cost === "object" && !Array.isArray(record.cost) ? record.cost : null;
-  const revisions = record.revisions && typeof record.revisions === "object" ? record.revisions : null;
+  const revisions = record.revisions && typeof record.revisions === "object" && !Array.isArray(record.revisions)
+    ? record.revisions
+    : null;
   const attemptId = v2RecordId(record, index);
   const unknownReasons = boundedStringArray(cost?.unknownReasons ?? record.unknownReasons);
   const unknownReason = boundedString(cost?.unknownReason ?? record.unknownReason);
@@ -561,10 +739,15 @@ function normalizeV2Attempt(record, index) {
   const effective = normalizeV2Policy(cache?.effective ?? record.effectiveCache);
   const requested = normalizeV2Policy(cache?.requested ?? record.requestedCache);
   const toolNames = boundedStringArray(record.toolNames);
-  const markerPositions = Array.isArray(cache?.effective?.markerPositions)
-    ? cache.effective.markerPositions.filter((position) => Number.isInteger(position) && position >= 0)
+  const effectiveCache = cache?.effective && typeof cache.effective === "object" && !Array.isArray(cache.effective)
+    ? cache.effective
+    : null;
+  const markerPositions = Array.isArray(effectiveCache?.markerPositions)
+    ? effectiveCache.markerPositions.filter((position): position is number =>
+        typeof position === "number" && Number.isInteger(position) && position >= 0)
     : Array.isArray(cache?.markerPositions)
-      ? cache.markerPositions.filter((position) => Number.isInteger(position) && position >= 0)
+      ? cache.markerPositions.filter((position): position is number =>
+          typeof position === "number" && Number.isInteger(position) && position >= 0)
       : [];
   return {
     id: attemptId,
@@ -601,20 +784,20 @@ function normalizeV2Attempt(record, index) {
       namespace: nonemptyString(cache?.namespace),
       requested,
       effective,
-      markerCount: nullableNonnegative(cache?.effective?.markerCount ?? cache?.markerCount),
+      markerCount: nullableNonnegative(effectiveCache?.markerCount ?? cache?.markerCount),
       markerPositions,
-      rejected: typeof cache?.effective?.rejected === "boolean"
-        ? cache.effective.rejected
+      rejected: typeof effectiveCache?.rejected === "boolean"
+        ? effectiveCache.rejected
         : typeof cache?.rejected === "boolean" ? cache.rejected : null,
-      fallbackReason: nonemptyString(cache?.effective?.fallbackReason) ?? fallbackReason,
+      fallbackReason: nonemptyString(effectiveCache?.fallbackReason) ?? fallbackReason,
       cacheKeyHash: nonemptyString(cache?.cacheKeyHash),
       modelSettingsHash: nonemptyString(cache?.modelSettingsHash),
       toolsHash: nonemptyString(cache?.toolsHash),
       stablePrefixHash: nonemptyString(cache?.stablePrefixHash),
       reusablePrefixHash: nonemptyString(cache?.reusablePrefixHash),
-      reusablePrefixItems: Number.isSafeInteger(cache?.reusablePrefixItems) ? nullableNonnegative(cache.reusablePrefixItems) : null,
+      reusablePrefixItems: Number.isSafeInteger(cache?.reusablePrefixItems) ? nullableNonnegative(cache?.reusablePrefixItems) : null,
       comparedPrefixHash: nonemptyString(cache?.comparedPrefixHash),
-      comparedPrefixItems: Number.isSafeInteger(cache?.comparedPrefixItems) ? nullableNonnegative(cache.comparedPrefixItems) : null,
+      comparedPrefixItems: Number.isSafeInteger(cache?.comparedPrefixItems) ? nullableNonnegative(cache?.comparedPrefixItems) : null,
       messagePrefixHash: nonemptyString(cache?.messagePrefixHash),
       workingSetHash: nonemptyString(cache?.workingSetHash),
       workingSetChanged: typeof cache?.workingSetChanged === "boolean" ? cache.workingSetChanged : null,
@@ -632,12 +815,15 @@ function normalizeV2Attempt(record, index) {
     sessionLengthBucket: normalizeV2SessionLengthBucket(record),
     wasteTokens: nullableNonnegative(record.wasteTokens),
     wasteCause: nonemptyString(record.wasteCause),
-    traceTurn: Number.isInteger(record.traceTurn) ? record.traceTurn : null,
+    traceTurn: nullableSafeInteger(record.traceTurn),
   };
 }
 
-function v2CacheGroups(attempts, field) {
-  const groups = new Map();
+function v2CacheGroups(
+  attempts: V2NormalizedAttempt[],
+  field: "provider" | "protocol" | "workingSetChanged",
+): Record<string, V2CacheGroup> {
+  const groups = new Map<string, V2NormalizedAttempt[]>();
   for (const attempt of attempts) {
     const rawName = field === "workingSetChanged" ? attempt.cache.workingSetChanged : attempt[field];
     const name = typeof rawName === "boolean" ? String(rawName) : nonemptyString(rawName) ?? "unknown";
@@ -661,14 +847,17 @@ function v2CacheGroups(attempts, field) {
     }));
 }
 
-function v2EffectivePolicyKey(attempt) {
+function v2EffectivePolicyKey(attempt: V2NormalizedAttempt): string {
   const mode = attempt.cache.effective.mode ?? "unknown";
   const ttl = attempt.cache.effective.ttlMs === null ? "unknown" : String(attempt.cache.effective.ttlMs);
   return `${mode}/${ttl}`;
 }
 
-function aggregateV2Dimension(attempts, selector) {
-  const groups = new Map();
+function aggregateV2Dimension(
+  attempts: V2NormalizedAttempt[],
+  selector: (attempt: V2NormalizedAttempt) => string | null | undefined,
+): Record<string, V2DimensionGroup> {
+  const groups = new Map<string, V2NormalizedAttempt[]>();
   for (const attempt of attempts) {
     const name = selector(attempt) ?? "unknown";
     const group = groups.get(name) ?? [];
@@ -692,8 +881,11 @@ function aggregateV2Dimension(attempts, selector) {
     }));
 }
 
-function aggregateV2MultiDimension(attempts, selector) {
-  const groups = new Map();
+function aggregateV2MultiDimension(
+  attempts: V2NormalizedAttempt[],
+  selector: (attempt: V2NormalizedAttempt) => unknown,
+): Record<string, V2DimensionGroup> {
+  const groups = new Map<string, V2NormalizedAttempt[]>();
   for (const attempt of attempts) {
     const values = boundedStringArray(selector(attempt));
     for (const value of values) {
@@ -719,7 +911,7 @@ function aggregateV2MultiDimension(attempts, selector) {
     }));
 }
 
-function aggregateV2ToolOutcomes(attempts) {
+function aggregateV2ToolOutcomes(attempts: V2NormalizedAttempt[]) {
   const outcomes = attempts.flatMap((attempt) => attempt.toolOutcomes);
   const incomplete = outcomes.filter((outcome) =>
     outcome.complete === false || outcome.truncated === true ||
@@ -739,10 +931,10 @@ function aggregateV2ToolOutcomes(attempts) {
   };
 }
 
-function aggregateV2Reclaim(attempts) {
-  const evidence = attempts.map((attempt) => attempt.reclaimEvidence).filter(Boolean);
+function aggregateV2Reclaim(attempts: V2NormalizedAttempt[]) {
+  const evidence = attempts.map((attempt) => attempt.reclaimEvidence).filter((item): item is V2ReclaimEvidence => item !== null);
   const receipts = evidence.flatMap((item) => item.receipts);
-  const boolCounts = (field) => ({
+  const boolCounts = (field: "attempted" | "applied" | "recovered") => ({
     true: evidence.filter((item) => item[field] === true).length,
     false: evidence.filter((item) => item[field] === false).length,
     unknown: evidence.filter((item) => item[field] === null).length,
@@ -764,7 +956,7 @@ function aggregateV2Reclaim(attempts) {
   };
 }
 
-function v2TaskOutcomeClass(status, settled) {
+function v2TaskOutcomeClass(status: string | null, settled: boolean): string {
   if (!settled) return "unsettled";
   const normalized = typeof status === "string" ? status.toLowerCase() : "";
   if (normalized === "success" || normalized === "succeeded" || normalized === "ok") return "success";
@@ -775,7 +967,13 @@ function v2TaskOutcomeClass(status, settled) {
   return "unknown";
 }
 
-function aggregateV2BillingAttempts(attempts, taskGroups, groupPredicate, attemptPredicate = () => true, countMatchingGroups = false) {
+function aggregateV2BillingAttempts(
+  attempts: V2NormalizedAttempt[],
+  taskGroups: Map<string, V2TaskGroup>,
+  groupPredicate: (group: V2TaskGroup | undefined, attempt: V2NormalizedAttempt | null) => boolean,
+  attemptPredicate: (attempt: V2NormalizedAttempt) => boolean = () => true,
+  countMatchingGroups = false,
+) {
   const selected = attempts.filter((attempt) => {
     const group = taskGroups.get(v2CompositeKey(attempt.runId, attempt.taskId));
     return groupPredicate(group, attempt) && attemptPredicate(attempt);
@@ -794,7 +992,7 @@ function aggregateV2BillingAttempts(attempts, taskGroups, groupPredicate, attemp
   };
 }
 
-function v2Diagnostics(records) {
+function v2Diagnostics(records: TraceRecordList): TraceJsonObject {
   const diagnostics = records?.traceDiagnostics;
   return diagnostics && typeof diagnostics === "object"
     ? { ...diagnostics }
@@ -824,18 +1022,24 @@ const V2_INTEGRITY_FIELDS = [
   "manifestErrors",
 ];
 
-function v2TraceIntegrity(records, diagnostics) {
+function v2TraceIntegrity(records: TraceRecordList, diagnostics: TraceJsonObject) {
   if (!records?.traceDiagnostics || typeof records.traceDiagnostics !== "object") {
     return { status: "not-provided", complete: false, reasons: ["reader-diagnostics-not-provided"] };
   }
-  const reasons = [];
+  const reasons: string[] = [];
   for (const field of V2_INTEGRITY_FIELDS) {
     const value = diagnostics[field];
-    if (!Number.isSafeInteger(value) || value < 0) reasons.push(`${field}-unknown`);
-    else if (value > 0) reasons.push(`${field}>0`);
+    const numeric = typeof value === "number" ? value : NaN;
+    if (!Number.isSafeInteger(numeric) || numeric < 0) reasons.push(`${field}-unknown`);
+    else if (numeric > 0) reasons.push(`${field}>0`);
   }
-  if (diagnostics.linkIndex?.errors > 0) reasons.push("link-index-errors>0");
-  if (diagnostics.linkIndex?.prunedAttemptsReferenced > 0) reasons.push("linked-attempts-pruned");
+  const linkIndex = diagnostics.linkIndex && typeof diagnostics.linkIndex === "object" && !Array.isArray(diagnostics.linkIndex)
+    ? diagnostics.linkIndex
+    : null;
+  const linkErrors = linkIndex?.errors;
+  const linkPruned = linkIndex?.prunedAttemptsReferenced;
+  if (typeof linkErrors === "number" && linkErrors > 0) reasons.push("link-index-errors>0");
+  if (typeof linkPruned === "number" && linkPruned > 0) reasons.push("linked-attempts-pruned");
   const uniqueReasons = [...new Set(reasons)].sort(compareStable);
   return {
     status: uniqueReasons.length === 0 ? "complete" : "incomplete",
@@ -844,20 +1048,20 @@ function v2TraceIntegrity(records, diagnostics) {
   };
 }
 
-function summarizeV2Traces(records, label) {
+function summarizeV2Traces(records: TraceRecordList, label: string) {
   const v2Records = records.filter(isV2Record);
   const rawAttempts = v2Records.filter((record) => record.recordType === "attempt");
   const settlements = v2Records.filter((record) => record.recordType === "task-settled");
   const attempts = rawAttempts.map(normalizeV2Attempt);
   const mainAttempts = attempts.filter((attempt) => attempt.role === "main");
   const summaryAttempts = attempts.filter((attempt) => attempt.role === "summary");
-  const settlementByTask = new Map();
+  const settlementByTask = new Map<string, TraceJsonObject>();
   for (const settlement of settlements) {
     settlementByTask.set(v2CompositeKey(settlement.runId, v2TaskId(settlement)), settlement);
   }
 
-  const taskGroups = new Map();
-  const ensureTask = (runId, taskId) => {
+  const taskGroups = new Map<string, V2TaskGroup>();
+  const ensureTask = (runId: string | null, taskId: string | null): V2TaskGroup => {
     const key = v2CompositeKey(runId, taskId);
     const group = taskGroups.get(key) ?? {
       runId,
@@ -895,8 +1099,10 @@ function summarizeV2Traces(records, label) {
     group.attemptIds.push(attempt.attemptId);
   }
   for (const [key, settlement] of settlementByTask) {
-    const group = ensureTask(settlement.runId, v2TaskId(settlement));
-    const outcome = settlement.outcome && typeof settlement.outcome === "object" ? settlement.outcome : null;
+    const group = ensureTask(nonemptyString(settlement.runId), v2TaskId(settlement));
+    const outcome = settlement.outcome && typeof settlement.outcome === "object" && !Array.isArray(settlement.outcome)
+      ? settlement.outcome
+      : null;
     group.settled = true;
     group.finalAttemptId = nonemptyString(settlement.finalAttemptId);
     group.outcomeStatus = nonemptyString(outcome?.status);
@@ -911,9 +1117,9 @@ function summarizeV2Traces(records, label) {
     taskGroups.set(key, group);
   }
   const runIds = new Set([...taskGroups.values()].map((group) => group.runId ?? "unknown"));
-  const taskIds = new Map();
+  const taskIds = new Map<string, number>();
   for (const group of taskGroups.values()) taskIds.set(group.taskId ?? "unknown", (taskIds.get(group.taskId ?? "unknown") ?? 0) + 1);
-  const taskEntries = [...taskGroups.values()].map((group) => {
+  const taskEntries = [...taskGroups.values()].map((group): [string, V2TaskGroup] => {
     const taskId = group.taskId ?? "unknown";
     const key = runIds.size > 1 || (taskIds.get(taskId) ?? 0) > 1
       ? `${group.runId ?? "unknown"}/${taskId}`
@@ -921,9 +1127,9 @@ function summarizeV2Traces(records, label) {
     return [key, group];
   }).sort(([a], [b]) => compareStable(a, b));
   const byTask = Object.fromEntries(taskEntries);
-  const attemptIds = new Map();
+  const attemptIds = new Map<string, number>();
   for (const attempt of attempts) attemptIds.set(attempt.id, (attemptIds.get(attempt.id) ?? 0) + 1);
-  const byId = Object.fromEntries(attempts.map((attempt) => {
+  const byId = Object.fromEntries(attempts.map((attempt): [string, V2NormalizedAttempt] => {
     const key = runIds.size > 1 || (attemptIds.get(attempt.id) ?? 0) > 1
       ? `${attempt.runId ?? "unknown"}/${attempt.id}`
       : attempt.id;
@@ -941,7 +1147,7 @@ function summarizeV2Traces(records, label) {
   const costSummaryDetails = aggregateV2CostDetails(summaryAttempts);
   const costAllDetails = aggregateV2CostDetails(attempts);
   const tools = mainAttempts.flatMap((attempt) => attempt.toolNames);
-  const wasteByCause = Object.create(null);
+  const wasteByCause: Record<string, number> = Object.create(null);
   let wasteUnknownSamples = 0;
   for (const attempt of mainAttempts) {
     if (attempt.wasteTokens === null) {
@@ -954,8 +1160,8 @@ function summarizeV2Traces(records, label) {
   }
   const revisions = mainAttempts.reduce((sum, attempt) => sum + (attempt.revisions.count ?? 0), 0);
   const revisionKinds = counts(mainAttempts.flatMap((attempt) => attempt.revisions.kinds));
-  const ttft = mainAttempts.map((attempt) => attempt.ttftMs).filter((value) => value !== null);
-  const turn = mainAttempts.map((attempt) => attempt.turnMs).filter((value) => value !== null);
+  const ttft = mainAttempts.map((attempt) => attempt.ttftMs).filter((value): value is number => value !== null);
+  const turn = mainAttempts.map((attempt) => attempt.turnMs).filter((value): value is number => value !== null);
   const totalInput = usageMain.input.total + usageMain.cacheRead.total + usageMain.cacheWrite.total;
   const usage = {
     main: usageMain,
@@ -1057,29 +1263,38 @@ function summarizeV2Traces(records, label) {
   const byMissContributor = aggregateV2MultiDimension(attempts, (attempt) => attempt.cache.missAttribution.contributing);
   const toolOutcomes = aggregateV2ToolOutcomes(mainAttempts);
   const reclaim = aggregateV2Reclaim(mainAttempts);
-  const perTurn = attempts.map((attempt, index) => ({
-    turn: attempt.traceTurn ?? index + 1,
-    taskId: attempt.taskId,
-    attemptId: attempt.attemptId,
-    role: attempt.role,
-    status: attempt.status,
-    provider: attempt.provider,
-    protocol: attempt.protocol,
-    route: attempt.route,
-    model: attempt.model,
-    sessionLengthBucket: attempt.sessionLengthBucket,
-    totalInput: attempt.usage.input === null || attempt.usage.cacheRead === null || attempt.usage.cacheWrite === null
-      ? null
-      : attempt.usage.input + attempt.usage.cacheRead + attempt.usage.cacheWrite,
-    cacheRead: attempt.usage.cacheRead,
-    cachedInputShare: attempt.usage.input !== null && attempt.usage.cacheRead !== null && attempt.usage.cacheWrite !== null
-      ? (() => {
-        const total = attempt.usage.input + attempt.usage.cacheRead + attempt.usage.cacheWrite;
-        return total > 0 ? attempt.usage.cacheRead / total : null;
-      })()
-      : null,
-    cache: attempt.cache,
-  }));
+  const perTurn: V2PerTurn[] = attempts.map((attempt, index) => {
+    const input = attempt.usage.input;
+    const cacheRead = attempt.usage.cacheRead;
+    const cacheWrite = attempt.usage.cacheWrite;
+    return {
+      turn: attempt.traceTurn ?? index + 1,
+      taskId: attempt.taskId,
+      attemptId: attempt.attemptId,
+      role: attempt.role,
+      status: attempt.status,
+      provider: attempt.provider,
+      protocol: attempt.protocol,
+      route: attempt.route,
+      model: attempt.model,
+      sessionLengthBucket: attempt.sessionLengthBucket,
+      totalInput: input === null || cacheRead === null || cacheWrite === null
+        ? null
+        : input + cacheRead + cacheWrite,
+      cacheRead,
+      cachedInputShare: input !== null && cacheRead !== null && cacheWrite !== null
+        ? (() => {
+          const total = input + cacheRead + cacheWrite;
+          return total > 0 ? cacheRead / total : null;
+        })()
+        : null,
+      cache: attempt.cache,
+    };
+  });
+  const summaryDiagnostics: TraceJsonObject = {
+    ...v2Diagnostics(records),
+    schemaRecords: { current: v2Records.length },
+  };
   return {
     schemaVersion: TRACE_SCHEMA_VERSION,
     label,
@@ -1157,32 +1372,29 @@ function summarizeV2Traces(records, label) {
     bySessionLengthBucket: groups.bySessionLengthBucket,
     byMissPrimary,
     byMissContributor,
-    diagnostics: {
-      ...v2Diagnostics(records),
-      schemaRecords: { current: v2Records.length },
-    },
+    diagnostics: summaryDiagnostics,
   };
 }
 
-export function summarizeTraces(records, label = "traces") {
+export function summarizeTraces(records: TraceRecordList, label = "traces") {
   if (!records.every(isV2Record)) throw new Error("trace records must use the current schema");
   return summarizeV2Traces(records, label);
 }
 
-function formatMs(value) {
+function formatMs(value: number | null): string {
   return value === null ? "--" : `${(value / 1000).toFixed(2)}s`;
 }
 
-function formatInt(value) {
+function formatInt(value: number): string {
   return Math.round(value).toLocaleString("en-US");
 }
 
-function formatCounts(value) {
+function formatCounts(value: Record<string, number>): string {
   const entries = Object.entries(value);
   return entries.length ? entries.map(([name, count]) => `${name}=${count}`).join(", ") : "none";
 }
 
-function formatCacheTurns(turns) {
+function formatCacheTurns(turns: V2PerTurn[]): string {
   const shown = turns.slice(-100);
   const prefix = turns.length > shown.length ? `${turns.length - shown.length} earlier turns omitted; ` : "";
   const values = shown.map((turn) => {
@@ -1192,21 +1404,60 @@ function formatCacheTurns(turns) {
   return `${prefix}${values || "none"}`;
 }
 
-function formatCacheGroups(groups) {
+function formatCacheGroups(groups: Record<string, V2CacheGroup>): string {
   return Object.entries(groups).map(([name, group]) => {
     const share = group.cachedInputShare === null ? "--" : `${(group.cachedInputShare * 100).toFixed(1)}%`;
     return `${name}=${share}`;
   }).join(", ") || "none";
 }
 
-function formatV2Metric(metric) {
+function formatV2Metric(metric: V2UsageMetric): string {
   return `${formatInt(metric.total)} (${metric.knownSamples} known, ${metric.unknownSamples} unknown)`;
 }
 
-function formatV2TraceSummary(summary, sourceErrors = []) {
+type V2TraceSummary = ReturnType<typeof summarizeV2Traces>;
+
+/** Pre-schema-v2 summaries; no in-repo producer remains, but the formatter still accepts them. */
+type LegacyTraceSummary = {
+  schemaVersion: number;
+  label: string;
+  mainTurns: number;
+  summaryCalls: number;
+  statuses: Record<string, number>;
+  latency: { p50TtftMs: number | null; p95TtftMs: number | null; p50TurnMs: number | null; p95TurnMs: number | null };
+  usage: {
+    cachedInputShare: number | null;
+    totalInput: number;
+    cacheRead: number;
+    cacheWrite: number;
+    output: number;
+    missingTurns: number;
+  };
+  cost: { usd: number; measuredTurns: number };
+  waste: { tokens: number; byCause: Record<string, number> };
+  tools: { calls: number };
+  revisions: number;
+  systemHashes: number;
+  cache: {
+    perTurn: V2PerTurn[];
+    byProvider: Record<string, V2CacheGroup>;
+    byProtocol: Record<string, V2CacheGroup>;
+    byWorkingSetChange: Record<string, V2CacheGroup>;
+    byCacheKeyChange: Record<string, V2CacheGroup>;
+    byModelSettingsChange: Record<string, V2CacheGroup>;
+    byToolsChange: Record<string, V2CacheGroup>;
+    byStablePrefixChange: Record<string, V2CacheGroup>;
+  };
+};
+
+function formatV2TraceSummary(summary: V2TraceSummary, sourceErrors: TraceFileError[] = []): string {
   const main = summary.usage.main;
   const cache = main.cachedInputShare === null ? "--" : `${(main.cachedInputShare * 100).toFixed(1)}%`;
   const diagnostics = summary.diagnostics;
+  const linkIndex = diagnostics.linkIndex && typeof diagnostics.linkIndex === "object" && !Array.isArray(diagnostics.linkIndex)
+    ? diagnostics.linkIndex
+    : null;
+  const prunedAttempts = linkIndex?.prunedAttemptsReferenced;
   const lines = [
     summary.label,
     `  tasks: ${summary.tasks.total} total, ${summary.tasks.settled} settled (${summary.tasks.successful} success, ${summary.tasks.failed} failure); attempts: ${summary.attempts.total} (${summary.attempts.retries} retries, ${summary.attempts.fallbacks} fallbacks)`,
@@ -1217,34 +1468,38 @@ function formatV2TraceSummary(summary, sourceErrors = []) {
     `  diagnostics: integrity=${summary.integrity.status}, retained=${diagnostics.retainedRecords ?? "--"}, omitted=${diagnostics.omittedRecords ?? "--"}, partial=${diagnostics.partialRecords ?? "--"}, malformed=${diagnostics.malformedRecords ?? "--"}, retention-failures=${diagnostics.retentionFailures ?? "--"}, write-failures=${diagnostics.writeFailures ?? "--"}, manifest-write-failures=${diagnostics.manifestWriteFailures ?? "--"}`,
     `  efficiency: ${summary.tools.calls} tool calls, ${summary.revisions} revisions`,
   ];
-  if (diagnostics.linkIndex?.prunedAttemptsReferenced > 0) {
-    lines.push(`  linked attempts: ${diagnostics.linkIndex.prunedAttemptsReferenced} not loaded (indexed identity only; metrics remain incomplete)`);
+  if (typeof prunedAttempts === "number" && prunedAttempts > 0) {
+    lines.push(`  linked attempts: ${prunedAttempts} not loaded (indexed identity only; metrics remain incomplete)`);
   }
   if (sourceErrors.length > 0) lines.push(`  warning: ${sourceErrors.length} trace files could not be read`);
   return lines.join("\n");
 }
 
-export function formatTraceSummary(summary, sourceErrors = []) {
-  if (summary.schemaVersion === TRACE_SCHEMA_VERSION) return formatV2TraceSummary(summary, sourceErrors);
-  const cache = summary.usage.cachedInputShare === null ? "--" : `${(summary.usage.cachedInputShare * 100).toFixed(1)}%`;
+export function formatTraceSummary(
+  summary: V2TraceSummary | LegacyTraceSummary,
+  sourceErrors: TraceFileError[] = [],
+): string {
+  if (summary.schemaVersion === TRACE_SCHEMA_VERSION) return formatV2TraceSummary(summary as V2TraceSummary, sourceErrors);
+  const legacy = summary as LegacyTraceSummary;
+  const cache = legacy.usage.cachedInputShare === null ? "--" : `${(legacy.usage.cachedInputShare * 100).toFixed(1)}%`;
   const lines = [
-    summary.label,
-    `  turns: ${summary.mainTurns} main, ${summary.summaryCalls} summary (${formatCounts(summary.statuses)})`,
-    `  latency: TTFT p50 ${formatMs(summary.latency.p50TtftMs)}, p95 ${formatMs(summary.latency.p95TtftMs)}; turn p50 ${formatMs(summary.latency.p50TurnMs)}, p95 ${formatMs(summary.latency.p95TurnMs)}`,
-    `  tokens: ${formatInt(summary.usage.totalInput)} in (${formatInt(summary.usage.cacheRead)} read, ${formatInt(summary.usage.cacheWrite)} write), ${formatInt(summary.usage.output)} out; cache ${cache}`,
-    `  cost: $${summary.cost.usd.toFixed(6)} (${summary.cost.measuredTurns}/${summary.mainTurns} turns measured)`,
-    `  waste: ${formatInt(summary.waste.tokens)} (${formatCounts(summary.waste.byCause)})`,
-    `  efficiency: ${summary.tools.calls} tool calls, ${summary.revisions} revisions; systems=${summary.systemHashes}`,
-    `  cache by turn: ${formatCacheTurns(summary.cache.perTurn)}`,
-    `  cache correlation: provider [${formatCacheGroups(summary.cache.byProvider)}]; protocol [${formatCacheGroups(summary.cache.byProtocol)}]; working-set-changed [${formatCacheGroups(summary.cache.byWorkingSetChange)}]`,
-    `  cache changes: key [${formatCacheGroups(summary.cache.byCacheKeyChange)}]; settings [${formatCacheGroups(summary.cache.byModelSettingsChange)}]; tools [${formatCacheGroups(summary.cache.byToolsChange)}]; stable-prefix [${formatCacheGroups(summary.cache.byStablePrefixChange)}]`,
+    legacy.label,
+    `  turns: ${legacy.mainTurns} main, ${legacy.summaryCalls} summary (${formatCounts(legacy.statuses)})`,
+    `  latency: TTFT p50 ${formatMs(legacy.latency.p50TtftMs)}, p95 ${formatMs(legacy.latency.p95TtftMs)}; turn p50 ${formatMs(legacy.latency.p50TurnMs)}, p95 ${formatMs(legacy.latency.p95TurnMs)}`,
+    `  tokens: ${formatInt(legacy.usage.totalInput)} in (${formatInt(legacy.usage.cacheRead)} read, ${formatInt(legacy.usage.cacheWrite)} write), ${formatInt(legacy.usage.output)} out; cache ${cache}`,
+    `  cost: $${legacy.cost.usd.toFixed(6)} (${legacy.cost.measuredTurns}/${legacy.mainTurns} turns measured)`,
+    `  waste: ${formatInt(legacy.waste.tokens)} (${formatCounts(legacy.waste.byCause)})`,
+    `  efficiency: ${legacy.tools.calls} tool calls, ${legacy.revisions} revisions; systems=${legacy.systemHashes}`,
+    `  cache by turn: ${formatCacheTurns(legacy.cache.perTurn)}`,
+    `  cache correlation: provider [${formatCacheGroups(legacy.cache.byProvider)}]; protocol [${formatCacheGroups(legacy.cache.byProtocol)}]; working-set-changed [${formatCacheGroups(legacy.cache.byWorkingSetChange)}]`,
+    `  cache changes: key [${formatCacheGroups(legacy.cache.byCacheKeyChange)}]; settings [${formatCacheGroups(legacy.cache.byModelSettingsChange)}]; tools [${formatCacheGroups(legacy.cache.byToolsChange)}]; stable-prefix [${formatCacheGroups(legacy.cache.byStablePrefixChange)}]`,
   ];
-  if (summary.usage.missingTurns > 0) lines.push(`  warning: usage missing for ${summary.usage.missingTurns} main turns`);
+  if (legacy.usage.missingTurns > 0) lines.push(`  warning: usage missing for ${legacy.usage.missingTurns} main turns`);
   if (sourceErrors.length > 0) lines.push(`  warning: ${sourceErrors.length} trace files could not be read`);
   return lines.join("\n");
 }
 
-function defaultDirectories(env) {
+function defaultDirectories(env: NodeJS.ProcessEnv): string[] {
   const events = env.TERMINA_EVENTS_DIR;
   const terminal = env.TERMINA_TERMINAL_ID;
   if (!events) return [];
@@ -1259,7 +1514,7 @@ function usage() {
   return "usage: pnpm run report:agent-core -- [--json] [trace-directory ...]";
 }
 
-export function run(argv = process.argv.slice(2), env = process.env) {
+export function run(argv: string[] = process.argv.slice(2), env: NodeJS.ProcessEnv = process.env): number {
   const json = argv.includes("--json");
   if (argv.includes("--help") || argv.includes("-h")) {
     console.log(usage());
@@ -1276,7 +1531,7 @@ export function run(argv = process.argv.slice(2), env = process.env) {
     console.error(`no trace directory found\n${usage()}`);
     return 1;
   }
-  const reports = [];
+  const reports: Array<{ directory: string; summary: V2TraceSummary; errors: TraceFileError[] }> = [];
   for (const directory of directories) {
     try {
       const source = readTraceDirectory(directory);

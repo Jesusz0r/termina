@@ -10,7 +10,6 @@ const {
   normalizeMcpCallResult,
   normalizeMcpTools,
   selectMcpTools,
-  startMcp,
 } = mcp;
 
 function tool({ server, original, description = original, input_schema = { type: "object", properties: {} } }: any) {

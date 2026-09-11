@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   mkdirSync,
@@ -16,7 +16,16 @@ import {
   createTaskSettledRecord,
   createTraceRuntime,
 } from "../../../agent-core/trace.ts";
+import type { TraceAttemptInput } from "../../../agent-core/trace.ts";
 import { readTraceDirectory, summarizeTraces } from "./trace-report.ts";
+
+/** Entry shape for trace-link-index JSON parsed back from disk in assertions. */
+interface TraceLinkIndexEntry {
+  attemptId?: string;
+  taskId?: string;
+  retained?: boolean;
+  unknown?: boolean;
+}
 
 describe("Agent Core Trace Runtime Invariants", () => {
   it("passes agent-core trace runtime tests", async () => {
@@ -34,7 +43,7 @@ describe("Agent Core Trace Runtime Invariants", () => {
     assert.equal((await asyncContractWrite).ok, true);
     await asyncContractRuntime.close();
     
-    function makeAttempt(index, overrides = {}) {
+    function makeAttempt(index: number, overrides: Partial<TraceAttemptInput> = {}) {
       return createAttemptRecord({
         runId: "run-runtime",
         taskId: "task-runtime",
@@ -191,11 +200,11 @@ describe("Agent Core Trace Runtime Invariants", () => {
       });
     }
     
-    function traceIndexAttempt(runId, taskId, attemptId, retained = false, traceTurn = null) {
+    function traceIndexAttempt(runId: string, taskId: string, attemptId: string, retained = false, traceTurn: number | null = null) {
       return { runId, taskId, attemptId, role: "main", retained, traceTurn, unknown: false };
     }
-    
-    function traceIndexSettlement(runId, taskId, attemptId, retained = false, traceTurn = null) {
+
+    function traceIndexSettlement(runId: string, taskId: string, attemptId: string, retained = false, traceTurn: number | null = null) {
       return {
         runId,
         taskId,
@@ -208,7 +217,10 @@ describe("Agent Core Trace Runtime Invariants", () => {
       };
     }
     
-    function writeTraceIndex(directory, attempts, settlements, complete = true, updatedAt = "2026-08-30T00:00:00.000Z") {
+    type TraceIndexAttemptRecord = ReturnType<typeof traceIndexAttempt>;
+    type TraceIndexSettlementRecord = ReturnType<typeof traceIndexSettlement>;
+
+    function writeTraceIndex(directory: string, attempts: TraceIndexAttemptRecord[], settlements: TraceIndexSettlementRecord[], complete = true, updatedAt = "2026-08-30T00:00:00.000Z") {
       mkdirSync(directory, { recursive: true });
       writeFileSync(join(directory, "trace-index.json"), JSON.stringify({
         schemaVersion: TRACE_SCHEMA_VERSION,
@@ -220,7 +232,7 @@ describe("Agent Core Trace Runtime Invariants", () => {
       }));
     }
     
-    function longTraceId(prefix, index) {
+    function longTraceId(prefix: string, index: number) {
       return `${prefix}-${index}-${"x".repeat(480)}`;
     }
     
@@ -257,7 +269,7 @@ describe("Agent Core Trace Runtime Invariants", () => {
     assert.equal(unknown.cache.missAttribution.primary, null);
     assert.deepEqual(unknown.cache.missAttribution.missingFields, ["cacheReadTokens"]);
     assert.equal(unknown.cost.components.cacheRead, null);
-    assert.equal(unknown.cost.units.input, "usd_per_million_tokens");
+    assert.equal(unknown.cost.units?.input, "usd_per_million_tokens");
     assert.deepEqual(unknown.cost.unknownReasons, ["provider-omitted-cache-read"]);
     assert.equal(unknown.cache.serializedToolsHash, "serialized-tools-hash");
     assert.equal(unknown.cache.serializedToolsBytes, 321);
@@ -268,8 +280,8 @@ describe("Agent Core Trace Runtime Invariants", () => {
     assert.equal(absentPrefix.cache.reusablePrefixItems, null);
     assert.equal(absentPrefix.cache.comparedPrefixHash, null);
     assert.equal(absentPrefix.cache.comparedPrefixItems, null);
-    assert.equal(unknown.toolOutcomes[0].bounded.inputBytes, 200);
-    assert.equal(unknown.reclaimEvidence.targets[0].originalSha256.length, 64);
+    assert.equal(unknown.toolOutcomes[0]?.bounded?.inputBytes, 200);
+    assert.equal(unknown.reclaimEvidence?.targets[0]?.originalSha256?.length, 64);
     assert.equal(unknown.startedAtMs, 1_001);
     assert.equal(unknown.endedAtMs, 1_501);
     assert.equal(unknown.turnMs, 500);
@@ -531,7 +543,7 @@ describe("Agent Core Trace Runtime Invariants", () => {
     await linkRetentionRuntime.close();
     const linkIndexAfterRetention = JSON.parse(readFileSync(join(linkRetention, "trace-index.json"), "utf8"));
     assert.equal(linkIndexAfterRetention.kind, "trace-link-index");
-    assert.equal(linkIndexAfterRetention.attempts.find((entry) => entry.attemptId === "retained-first").retained, false);
+    assert.equal(linkIndexAfterRetention.attempts.find((entry: TraceLinkIndexEntry) => entry.attemptId === "retained-first").retained, false);
     
     const linkRetentionReopened = createTraceRuntime({
       directory: linkRetention,
@@ -590,8 +602,8 @@ describe("Agent Core Trace Runtime Invariants", () => {
     assert.equal(tombstoneRuntime.manifest.linkIndex.attempts, 2_048);
     assert.equal(tombstoneRuntime.manifest.linkIndex.settlements, 2_047);
     const compactedTombstoneIndex = JSON.parse(readFileSync(join(exhaustedTombstones, "trace-index.json"), "utf8"));
-    assert.equal(compactedTombstoneIndex.attempts.some((entry) => entry.attemptId === "attempt-tombstone-0"), false);
-    assert.equal(compactedTombstoneIndex.attempts.some((entry) => entry.attemptId === "attempt-after-tombstones"), true);
+    assert.equal(compactedTombstoneIndex.attempts.some((entry: TraceLinkIndexEntry) => entry.attemptId === "attempt-tombstone-0"), false);
+    assert.equal(compactedTombstoneIndex.attempts.some((entry: TraceLinkIndexEntry) => entry.attemptId === "attempt-after-tombstones"), true);
     assert.equal((await tombstoneRuntime.writeAttempt(makeAttempt(1, {
       runId: "run-tombstone-1",
       taskId: "task-tombstone-1",
@@ -642,9 +654,9 @@ describe("Agent Core Trace Runtime Invariants", () => {
       retryOfAttemptId: "attempt-protected-link-0",
     }))).ok, true);
     const protectedLinkIndex = JSON.parse(readFileSync(join(protectedLinkCapacity, "trace-index.json"), "utf8"));
-    assert.equal(protectedLinkIndex.attempts.some((entry) => entry.attemptId === "attempt-protected-link-0" && entry.unknown === false), true);
-    assert.equal(protectedLinkIndex.settlements.some((entry) => entry.taskId === "task-protected-link-0"), true);
-    assert.equal(protectedLinkIndex.attempts.some((entry) => entry.attemptId === "attempt-protected-link-1"), false);
+    assert.equal(protectedLinkIndex.attempts.some((entry: TraceLinkIndexEntry) => entry.attemptId === "attempt-protected-link-0" && entry.unknown === false), true);
+    assert.equal(protectedLinkIndex.settlements.some((entry: TraceLinkIndexEntry) => entry.taskId === "task-protected-link-0"), true);
+    assert.equal(protectedLinkIndex.attempts.some((entry: TraceLinkIndexEntry) => entry.attemptId === "attempt-protected-link-1"), false);
     await protectedLinkRuntime.close();
     
     const protectedHistoryCapacity = join(root, "protected-history-capacity.traces");
@@ -685,11 +697,11 @@ describe("Agent Core Trace Runtime Invariants", () => {
       retryOfAttemptId: null,
     }))).ok, true);
     const protectedHistoryIndex = JSON.parse(readFileSync(join(protectedHistoryCapacity, "trace-index.json"), "utf8"));
-    assert.equal(protectedHistoryIndex.attempts.some((entry) => entry.attemptId === "attempt-history-retained" && entry.retained), true);
-    assert.equal(protectedHistoryIndex.settlements.some((entry) => entry.taskId === "task-history-retained" && entry.retained), true);
-    assert.equal(protectedHistoryIndex.attempts.some((entry) => entry.attemptId === "attempt-history-unsettled"), true);
-    assert.equal(protectedHistoryIndex.attempts.some((entry) => entry.attemptId === "attempt-history-unsettled-2"), true);
-    assert.equal(protectedHistoryIndex.attempts.some((entry) => entry.attemptId === "attempt-history-unknown" && entry.unknown), true);
+    assert.equal(protectedHistoryIndex.attempts.some((entry: TraceLinkIndexEntry) => entry.attemptId === "attempt-history-retained" && entry.retained), true);
+    assert.equal(protectedHistoryIndex.settlements.some((entry: TraceLinkIndexEntry) => entry.taskId === "task-history-retained" && entry.retained), true);
+    assert.equal(protectedHistoryIndex.attempts.some((entry: TraceLinkIndexEntry) => entry.attemptId === "attempt-history-unsettled"), true);
+    assert.equal(protectedHistoryIndex.attempts.some((entry: TraceLinkIndexEntry) => entry.attemptId === "attempt-history-unsettled-2"), true);
+    assert.equal(protectedHistoryIndex.attempts.some((entry: TraceLinkIndexEntry) => entry.attemptId === "attempt-history-unknown" && entry.unknown), true);
     await protectedHistoryRuntime.close();
     
     const byteExhausted = join(root, "byte-exhausted.traces");
@@ -739,11 +751,11 @@ describe("Agent Core Trace Runtime Invariants", () => {
     const variableTimestampBoundary = join(root, "variable-timestamp-boundary.traces");
     const shortIndexTimestamp = "s";
     const longIndexTimestamp = "l".repeat(512);
-    const timestampBoundaryAttempts = [];
-    const timestampBoundarySettlements = [];
+    const timestampBoundaryAttempts: TraceIndexAttemptRecord[] = [];
+    const timestampBoundarySettlements: TraceIndexSettlementRecord[] = [];
     let timestampBoundaryRecord = null;
     for (let index = 0; timestampBoundaryRecord === null; index++) {
-      const boundaryRecordFor = (length) => {
+      const boundaryRecordFor = (length: number) => {
         const suffix = "n".repeat(length);
         return {
           runId: `run-timestamp-boundary-${suffix}`,
@@ -751,7 +763,7 @@ describe("Agent Core Trace Runtime Invariants", () => {
           attemptId: `attempt-timestamp-boundary-${suffix}`,
         };
       };
-      const boundaryBytes = (record, updatedAt) => Buffer.byteLength(JSON.stringify({
+      const boundaryBytes = (record: { runId: string; taskId: string; attemptId: string }, updatedAt: string) => Buffer.byteLength(JSON.stringify({
         schemaVersion: TRACE_SCHEMA_VERSION,
         kind: "trace-link-index",
         complete: true,

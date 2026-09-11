@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 /** Failed-provider trace must not claim an inverted or phantom storage range. */
 process.env.TERMINA_CORE_TEST = "1";
 
@@ -18,7 +18,7 @@ import { join } from "node:path";
 
 describe("Agent Core Failed Provider Trace Contract", () => {
   it("passes failed-provider trace contract", async () => {
-    function readJsonLines(path) {
+    function readJsonLines(path: string) {
       if (!existsSync(path)) return [];
       return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
     }
@@ -66,7 +66,7 @@ describe("Agent Core Failed Provider Trace Contract", () => {
     child.stderr.on("data", (chunk) => { stderr += chunk; });
     const ackTimer = setInterval(() => {
       try {
-        const request = readJsonLines(join(events, `${terminalId}.jsonl`)).findLast((record) => record.t === "preflight_request");
+        const request = [...readJsonLines(join(events, `${terminalId}.jsonl`))].reverse().find((record) => record.t === "preflight_request");
         if (request?.requestId) {
           writeFileSync(
             join(events, `ack-${terminalId}-${request.requestId}.json`),
@@ -80,7 +80,7 @@ describe("Agent Core Failed Provider Trace Contract", () => {
     }, 10);
     
     try {
-      const result = await new Promise((resolve) => {
+      const result = await new Promise<{ code: number | null; signal: string | null }>((resolve) => {
         const timer = setTimeout(() => {
           child.kill("SIGKILL");
           resolve({ code: -1, signal: "SIGKILL" });
@@ -99,7 +99,7 @@ describe("Agent Core Failed Provider Trace Contract", () => {
       const attempts = traces.filter((record) => record.recordType === "attempt" && record.role === "main");
       assert.ok(attempts.length >= 2, "provider retries and terminal failure must be persisted");
       assert.ok(attempts.some((record) => record.status === "retrying"));
-      const terminal = attempts.findLast((record) => record.status === "error");
+      const terminal = [...attempts].reverse().find((record) => record.status === "error");
       assert.ok(terminal, "terminal provider failure must be persisted");
       assert.equal(terminal.storageSeqRange, null);
       assert.ok(attempts.every((record) => record.storageSeqRange === null || record.storageSeqRange[1] >= record.storageSeqRange[0]));

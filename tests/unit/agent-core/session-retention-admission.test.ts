@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 /**
  * Focused cross-process admission probes for agent-core retained staging.
  *
@@ -9,15 +9,14 @@ import { describe, it, expect } from "vitest";
  */
 import { build } from "esbuild";
 import { spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import type { SessionForkClient as SessionForkClientType } from "../../../electron/session-fork.ts";
+import type { SessionRetentionOwner as SessionRetentionOwnerType } from "../../../electron/session-retention.ts";
 import {
-  closeSync,
   existsSync,
-  fstatSync,
-  ftruncateSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
-  openSync,
   realpathSync,
   readdirSync,
   readFileSync,
@@ -38,9 +37,9 @@ describe("Agent Core Session Retention Admission Invariants", () => {
     const retentionBundle = join(work, "retention.mjs");
     const forkBundle = join(work, "session-fork.mjs");
     const workerBundle = join(work, "session-worker.mjs");
-    const children = new Set();
-    let client = null;
-    let disposeRetentionCoreClient = null;
+    const children = new Set<ChildProcess>();
+    let client: SessionForkClientType | null = null;
+    let disposeRetentionCoreClient: (() => void) | null = null;
     
     process.on("exit", () => {
       for (const child of children) {
@@ -54,12 +53,12 @@ describe("Agent Core Session Retention Admission Invariants", () => {
       }
     });
     
-    function check(condition, message) {
+    function check(condition: unknown, message: string) {
       if (!condition) throw new Error(`FAIL ${message}`);
       console.log(`PASS ${message}`);
     }
     
-    function seedSource(root, session) {
+    function seedSource(root: string, session: typeof import("../../../agent-core/session.ts")) {
       const sourceFile = session.coreSessionFile(root, "source");
       const opened = session.SessionWriter.open(sourceFile, 0);
       if (!opened.ok) throw new Error(opened.error);
@@ -73,16 +72,17 @@ describe("Agent Core Session Retention Admission Invariants", () => {
       return sourceFile;
     }
     
-    function stageNames(root) {
+    function stageNames(root: string) {
       if (!existsSync(root)) return [];
       return readdirSync(root).filter((name) => /^t-[0-9a-f]{32}$/.test(name));
     }
     
-    function stageBytes(root) {
+    function stageBytes(root: string) {
       let bytes = 0;
       const pending = stageNames(root).map((name) => join(root, name));
       while (pending.length > 0) {
         const path = pending.pop();
+        if (path === undefined) break;
         const info = lstatSync(path);
         if (info.isDirectory()) {
           for (const name of readdirSync(path)) pending.push(join(path, name));
@@ -158,7 +158,7 @@ describe("Agent Core Session Retention Admission Invariants", () => {
       `;
     }
     
-    function startChild(source, destination, options = {}) {
+    function startChild(source: string, destination: string, options: Record<string, string> = {}) {
       const child = spawn(process.execPath, ["--experimental-strip-types", "--no-warnings", "--input-type=module", "-e", childCode()], {
         cwd: process.cwd(),
         env: {
@@ -192,7 +192,7 @@ describe("Agent Core Session Retention Admission Invariants", () => {
       };
     }
     
-    function startFirstChild(destination, options = {}) {
+    function startFirstChild(destination: string, options: Record<string, string> = {}) {
       const child = spawn(process.execPath, ["--experimental-strip-types", "--no-warnings", "--input-type=module", "-e", firstSessionChildCode()], {
         cwd: process.cwd(),
         env: {
@@ -225,7 +225,7 @@ describe("Agent Core Session Retention Admission Invariants", () => {
       };
     }
     
-    function waitForFile(path) {
+    function waitForFile(path: string) {
       const deadline = Date.now() + 5_000;
       while (!existsSync(path)) {
         if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`);
@@ -233,7 +233,7 @@ describe("Agent Core Session Retention Admission Invariants", () => {
       }
     }
     
-    async function waitForFileAsync(path, failurePath = null) {
+    async function waitForFileAsync(path: string, failurePath: string | null = null) {
       const deadline = Date.now() + 5_000;
       while (!existsSync(path)) {
         if (failurePath && existsSync(failurePath)) throw new Error(`wait failed: ${readFileSync(failurePath, "utf8")}`);
@@ -283,7 +283,7 @@ describe("Agent Core Session Retention Admission Invariants", () => {
         }),
       ]);
     
-      const session = await import(pathToFileURL(sessionBundle).href);
+      const session: typeof import("../../../agent-core/session.ts") = await import(pathToFileURL(sessionBundle).href);
       const {
         disposeSessionRetentionCoreClient,
         MAX_RETAINED_SESSION_BUNDLES,
@@ -444,23 +444,25 @@ describe("Agent Core Session Retention Admission Invariants", () => {
       // explicit lease through the canonical callback prevents same-PID worker
       // reentrancy from being mistaken for a competing owner.
       const integrationRoot = join(work, "integration");
-      const owner = new SessionRetentionOwner(integrationRoot);
-      const first = await owner.transact("owner-first", (destination, lease) => client.forkCore({
+      const owner: SessionRetentionOwnerType = new SessionRetentionOwner(integrationRoot);
+      const forkClient = client;
+      if (!forkClient) throw new Error("missing session fork client");
+      const first = await owner.transact("owner-first", (destination, lease) => forkClient.forkCore({
         sourceSessionFile: source,
         destinationSessionFile: destination,
         throughSeq: 1,
         retentionLease: lease,
       }));
       check(first.result.ok, "first durable owner transaction succeeds with its explicit lease");
-      const second = await owner.transact("owner-second", (destination, lease) => client.forkCore({
+      const second = await owner.transact("owner-second", (destination, lease) => forkClient.forkCore({
         sourceSessionFile: source,
         destinationSessionFile: destination,
         throughSeq: 1,
         retentionLease: lease,
       }));
       check(second.result.ok, "second durable owner transaction admits after an empty staging sibling");
-      const restartedOwner = new SessionRetentionOwner(integrationRoot);
-      const third = await restartedOwner.transact("owner-third", (destination, lease) => client.forkCore({
+      const restartedOwner: SessionRetentionOwnerType = new SessionRetentionOwner(integrationRoot);
+      const third = await restartedOwner.transact("owner-third", (destination, lease) => forkClient.forkCore({
         sourceSessionFile: source,
         destinationSessionFile: destination,
         throughSeq: 1,
@@ -474,7 +476,7 @@ describe("Agent Core Session Retention Admission Invariants", () => {
       // bounded admission slot without poisoning the next transaction, and be
       // explicitly discardable through the same native bound-removal primitive.
       const claimRoot = join(work, "claims");
-      const claimOwner = new SessionRetentionOwner(claimRoot);
+      const claimOwner: SessionRetentionOwnerType = new SessionRetentionOwner(claimRoot);
       const claimFirst = await claimOwner.transact("claim-empty", (destination, lease) => session.writeForkedSession(
         source,
         destination,
@@ -491,7 +493,7 @@ describe("Agent Core Session Retention Admission Invariants", () => {
       check(claimFirst.result.ok === false && claimFirst.result.commit === "uncertain", "pre-commit claim remains durable after an empty destination boundary");
       const listedClaim = (await claimOwner.list()).find((claim) => claim.runId === "claim-empty");
       check(listedClaim?.kind === "staging" && listedClaim?.bytes !== null, "empty pre-commit claim is classified as retained staging");
-      const restartedClaimOwner = new SessionRetentionOwner(claimRoot);
+      const restartedClaimOwner: SessionRetentionOwnerType = new SessionRetentionOwner(claimRoot);
       const rehydratedClaim = (await restartedClaimOwner.list()).find((claim) => claim.runId === "claim-empty");
       check(rehydratedClaim?.kind === "staging", "restart rehydrates the empty staging claim for recovery");
       const claimFollowup = await restartedClaimOwner.transact("claim-followup", (destination, lease) => session.writeForkedSession(
@@ -525,7 +527,7 @@ describe("Agent Core Session Retention Admission Invariants", () => {
       const claimAbaReady = join(work, "claim-aba-ready");
       const claimAbaRelease = join(work, "claim-aba-release");
       const claimAbaFailure = join(work, "claim-aba-failure");
-      const claimAbaOwner = new SessionRetentionOwner(claimRoot, {
+      const claimAbaOwner: SessionRetentionOwnerType = new SessionRetentionOwner(claimRoot, {
         testHooks: {
           beforeClaimRemoval: {
             stage: "promotion-cleanup-root-open",
@@ -560,7 +562,7 @@ describe("Agent Core Session Retention Admission Invariants", () => {
       const claimAncestorReady = join(work, "claim-ancestor-ready");
       const claimAncestorRelease = join(work, "claim-ancestor-release");
       const claimAncestorFailure = join(work, "claim-ancestor-failure");
-      const claimAncestorOwner = new SessionRetentionOwner(claimAncestorRoot, {
+      const claimAncestorOwner: SessionRetentionOwnerType = new SessionRetentionOwner(claimAncestorRoot, {
         testHooks: {
           beforeClaimRemoval: {
             stage: "promotion-cleanup-root-open",

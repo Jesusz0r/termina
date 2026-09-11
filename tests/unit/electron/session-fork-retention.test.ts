@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 /**
  * Focused runtime regressions for comparison teardown and uncertain-session
  * retention.  This deliberately imports the real WorldlineManager bundle so
@@ -7,6 +7,15 @@ import { describe, it, expect } from "vitest";
  */
 import { build } from "esbuild";
 import { spawn, spawnSync } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import type {
+  CoreSessionForkOpts,
+  CoreSessionForkResult,
+  SessionForkCallOptions,
+  SessionForkClient,
+} from "../../../electron/session-fork.ts";
+import type { UncertainComparisonAdmissionLease } from "../../../electron/worldlines/types.ts";
+import type { SessionRetentionLock } from "../../../shared/session-retention-lock.ts";
 import {
   closeSync,
   existsSync,
@@ -27,6 +36,77 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+type TestCandidateFixture = {
+  label: string;
+  role: string;
+  dir: string;
+  supportDir: string;
+  homeDir: string;
+  sessionDir: string;
+  eventsDir: string;
+  tmpDir: string;
+  cacheDir: string;
+  profilePath: string;
+  sessionFile: string | null;
+  comparisonBaseStateId: string;
+  promotionBaseStateId: string;
+  headStateId: string;
+  headCommit: Promise<void>;
+  terminalId: string | null;
+  pid: number | null;
+  lstart: string | null;
+  state: string;
+  version: number;
+  error: string | null;
+};
+
+type TestComparisonFixture = {
+  id: string;
+  dir: string;
+  rootIdentity: { dev: string; ino: string };
+  rootBinding: { path: string; dev: string; ino: string };
+  templateDir: string;
+  sourceRunId: string;
+  sourceGitDir: string;
+  primaryRoot: string;
+  baseCommit: string;
+  baseStateId: string;
+  model: string | null;
+  thinkingLevel: string | null;
+  engine: "core";
+  expectedCandidates: number;
+  uncertainSessionArtifacts: Array<{ path: string; error: string }>;
+  manifestWriteFailed: boolean;
+  teardownPromise: Promise<void> | null;
+  removeUncertainRequested: boolean;
+  createdAt: number;
+  candidates: Map<string, TestCandidateFixture>;
+  phase: string;
+  error: string | null;
+  readyTimer: ReturnType<typeof setTimeout> | null;
+};
+
+type TestRetainedLayoutOptions = {
+  active?: string | null;
+  archive?: string | null;
+  imageBytes?: number | null;
+  unknownBytes?: number | null;
+};
+
+type TestRetainedStagingOptions = {
+  active?: string | null;
+  unknownBytes?: number | null;
+};
+
+type UncertainAdmissionResult =
+  | { ok: true; lease: UncertainComparisonAdmissionLease }
+  | { ok: false; error: string };
+
+type TestComparisonAllocator = {
+  acquireUncertainComparisonAdmission(): Promise<UncertainAdmissionResult>;
+  allocateComparisonDirectory(): Promise<{ id: string; dir: string }>;
+};
+
 describe("Session Fork Teardown and Retention Probes", () => {
   it("passes session fork teardown and retention regressions natively", async () => {
     const work = mkdtempSync(join(tmpdir(), "termina-session-retention-"));
@@ -37,10 +117,10 @@ describe("Session Fork Teardown and Retention Probes", () => {
     const sessionForkBundle = join(work, "session-fork.mjs");
     const sessionWorkerBundle = join(work, "session-worker.mjs");
     const RETAINED_ROOT_MARKER = ".termina-retained-session-root";
-    const activeChildren = new Set();
-    let sessionForkClient;
-    let disposeRetentionCoreClient = null;
-    let disposeWorldlineCoreClient = null;
+    const activeChildren = new Set<ChildProcess>();
+    let sessionForkClient: SessionForkClient | null = null;
+    let disposeRetentionCoreClient: (() => void) | null = null;
+    let disposeWorldlineCoreClient: (() => void) | null = null;
     
     process.on("exit", () => {
       for (const child of activeChildren) {
@@ -54,12 +134,12 @@ describe("Session Fork Teardown and Retention Probes", () => {
       }
     });
     
-    function check(condition, message) {
+    function check(condition: unknown, message: string): void {
       if (!condition) throw new Error(`FAIL ${message}`);
       console.log(`PASS ${message}`);
     }
     
-    function deps(worldsRoot, overrides = {}) {
+    function deps(worldsRoot: string, overrides: Record<string, unknown> = {}) {
       return {
         worldsRoot,
         primaryRoot: worldsRoot,
@@ -92,8 +172,8 @@ describe("Session Fork Teardown and Retention Probes", () => {
         acquireWriteLease: async () => ({ ok: true }),
         releaseWriteLease: () => undefined,
         flushDirtyModels: async () => ({ ok: true }),
-        canonicalPath: async (path) => path,
-        mineFiles: () => new Set(),
+        canonicalPath: async (path: string) => path,
+        mineFiles: () => new Set<string>(),
         drainMineUpdates: async () => undefined,
         runSandboxedEvidence: async () => ({ code: 0, stdout: "", timedOut: false }),
         sourceFilesOf: async () => [],
@@ -109,12 +189,12 @@ describe("Session Fork Teardown and Retention Probes", () => {
       };
     }
     
-    function mark(dir) {
+    function mark(dir: string): void {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       writeFileSync(join(dir, ".termina-world"), "test-marker", { mode: 0o600 });
     }
     
-    function candidate(label, dir) {
+    function candidate(label: string, dir: string): TestCandidateFixture {
       return {
         label,
         role: label === "A" ? "reference" : "alternative",
@@ -140,7 +220,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       };
     }
     
-    function comparison(id, dir) {
+    function comparison(id: string, dir: string): TestComparisonFixture {
       const rootPath = realpathSync(dir);
       const rootInfo = lstatSync(rootPath, { bigint: true });
       const rootIdentity = { dev: String(rootInfo.dev), ino: String(rootInfo.ino) };
@@ -174,7 +254,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       };
     }
     
-    function seedUncertainComparison(root, id, bytes = null) {
+    function seedUncertainComparison(root: string, id: string, bytes: number | null = null): string {
       const dir = join(root, id);
       mark(dir);
       writeFileSync(
@@ -202,7 +282,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       return dir;
     }
     
-    function publishRetainedBundle(destinationSessionFile, bytes = 0) {
+    function publishRetainedBundle(destinationSessionFile: string, bytes: number = 0): void {
       mkdirSync(dirname(destinationSessionFile), { recursive: true, mode: 0o700 });
       const fd = openSync(destinationSessionFile, "w", 0o600);
       try {
@@ -212,12 +292,12 @@ describe("Session Fork Teardown and Retention Probes", () => {
       }
     }
     
-    function seedRetainedBundle(root, id, bytes = 0) {
+    function seedRetainedBundle(root: string, id: string, bytes: number = 0): void {
       mkdirSync(root, { recursive: true, mode: 0o700 });
       publishRetainedBundle(join(root, id, "current", "session.jsonl"), bytes);
     }
     
-    function seedRetainedLayout(root, id, { active = "{}\n", archive = null, imageBytes = null, unknownBytes = null } = {}) {
+    function seedRetainedLayout(root: string, id: string, { active = "{}\n", archive = null, imageBytes = null, unknownBytes = null }: TestRetainedLayoutOptions = {}): void {
       mkdirSync(root, { recursive: true, mode: 0o700 });
       const bundle = join(root, id);
       const current = join(bundle, "current");
@@ -232,7 +312,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       if (unknownBytes !== null) publishRetainedBundle(join(current, "unknown.partial"), unknownBytes);
     }
     
-    function seedRetainedStaging(root, id, { active = null, unknownBytes = null } = {}) {
+    function seedRetainedStaging(root: string, id: string, { active = null, unknownBytes = null }: TestRetainedStagingOptions = {}): void {
       mkdirSync(root, { recursive: true, mode: 0o700 });
       const current = join(root, id, "current");
       mkdirSync(current, { recursive: true, mode: 0o700 });
@@ -240,17 +320,17 @@ describe("Session Fork Teardown and Retention Probes", () => {
       if (unknownBytes !== null) publishRetainedBundle(join(current, "unknown.partial"), unknownBytes);
     }
     
-    function publishValidRetainedBundle(destinationSessionFile) {
+    function publishValidRetainedBundle(destinationSessionFile: string): void {
       mkdirSync(dirname(destinationSessionFile), { recursive: true, mode: 0o700 });
       writeFileSync(destinationSessionFile, "{}\n", { mode: 0o600 });
     }
     
-    function publishValidRetainedBundleWithImage(destinationSessionFile, imageBytes) {
+    function publishValidRetainedBundleWithImage(destinationSessionFile: string, imageBytes: number): void {
       publishValidRetainedBundle(destinationSessionFile);
       publishRetainedBundle(join(dirname(destinationSessionFile), "run-img-1.png"), imageBytes);
     }
     
-    async function waitForFile(path, message) {
+    async function waitForFile(path: string, message: string): Promise<void> {
       const deadline = Date.now() + 5_000;
       while (!existsSync(path)) {
         if (Date.now() >= deadline) throw new Error(message);
@@ -301,7 +381,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       `;
     }
     
-    function startRetentionChild(options) {
+    function startRetentionChild(options: Record<string, string>) {
       const child = spawn(process.execPath, ["--no-warnings", "-e", retentionChildCode()], {
         cwd: process.cwd(),
         env: { ...process.env, TERMINA_RETENTION_BUNDLE: pathToFileURL(retentionBundle).href, ...options },
@@ -323,7 +403,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       };
     }
     
-    function seedDirectoryLock(root, lockName, { pid, token, startedAt = 1 }) {
+    function seedDirectoryLock(root: string, lockName: string, { pid, token, startedAt = 1 }: { pid: number; token: string; startedAt?: number }): void {
       const lock = join(root, lockName);
       mkdirSync(lock, { mode: 0o700 });
       const directory = lstatSync(lock);
@@ -398,7 +478,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       disposeRetentionCoreClient = disposeSessionRetentionCoreClient;
       const { writeForkedSession } = await import(pathToFileURL(sessionBundle).href);
       const { SessionForkClient } = await import(pathToFileURL(sessionForkBundle).href);
-      const bootstrapWorldlineRoot = async (root) => {
+      const bootstrapWorldlineRoot = async (root: string): Promise<void> => {
         const manager = new WorldlineManager(deps(root));
         await manager.ready;
         await manager.dispose();
@@ -412,7 +492,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       const startupBootstrap = new WorldlineManager(deps(startupRoot));
       await startupBootstrap.ready;
       await startupBootstrap.dispose();
-      const startupCases = [
+      const startupCases: Array<[string, string | null]> = [
         ["missing", null],
         ["empty", ""],
         ["partial", "{"],
@@ -535,7 +615,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       check(firstUncertaintyAdmission.ok === true, "uncertain count admission reserves before materialization");
       check(existsSync(join(uncertaintyCountRoot, UNCERTAIN_COMPARISON_USAGE_LEDGER)), "uncertain admission persists its root usage ledger");
       let secondUncertaintySettled = false;
-      const secondUncertaintyAdmission = uncertaintyCountManager.acquireUncertainComparisonAdmission().then((value) => {
+      const secondUncertaintyAdmission = uncertaintyCountManager.acquireUncertainComparisonAdmission().then((value: UncertainAdmissionResult) => {
         secondUncertaintySettled = true;
         return value;
       });
@@ -627,7 +707,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       const firstByteAdmission = await uncertaintyByteManager.acquireUncertainComparisonAdmission();
       check(firstByteAdmission.ok === true, "uncertain byte admission reserves the durable session envelope");
       let secondByteSettled = false;
-      const secondByteAdmission = uncertaintyByteManager.acquireUncertainComparisonAdmission().then((value) => {
+      const secondByteAdmission = uncertaintyByteManager.acquireUncertainComparisonAdmission().then((value: UncertainAdmissionResult) => {
         secondByteSettled = true;
         return value;
       });
@@ -664,11 +744,11 @@ describe("Session Fork Teardown and Retention Probes", () => {
       // Teardown must synchronously close admission, abort the in-flight request,
       // wait for its explicit result, and retain a late uncertain artifact.
       const teardownRoot = join(work, "teardown-worlds");
-      let resolveFork;
-      let forkSignal;
+      let resolveFork: ((value: CoreSessionForkResult) => void) | undefined;
+      let forkSignal: AbortSignal | undefined;
       const teardownManager = new WorldlineManager(
         deps(teardownRoot, {
-          forkCoreSession: (_opts, callOptions) => {
+          forkCoreSession: (_opts: CoreSessionForkOpts, callOptions?: SessionForkCallOptions) => {
             forkSignal = callOptions?.signal;
             return new Promise((resolve) => {
               resolveFork = resolve;
@@ -695,7 +775,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
       check(forkSignal?.aborted === true, "comparison teardown cooperatively cancels the in-flight fork");
       check(existsSync(teardownDir), "comparison teardown waits before deleting the owned directory");
-      resolveFork({ ok: false, sessionFile: join(teardownDir, "A-support", "sessions", "session"), commit: "uncertain", error: "worker ended after commit" });
+      resolveFork!({ ok: false, sessionFile: join(teardownDir, "A-support", "sessions", "session"), commit: "uncertain", error: "worker ended after commit" });
       const forkResult = await forkPromise;
       if (!forkResult.ok) await teardownManager.recordUncertainSession(teardownCmp, forkResult.sessionFile, forkResult.error);
       await teardownPromise;
@@ -707,7 +787,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       // A successful late result must not publish a candidate after teardown has
       // closed the comparison or start a second pair leg.
       const lateRoot = join(work, "late-worlds");
-      let resolveLate;
+      let resolveLate: ((value: CoreSessionForkResult) => void) | undefined;
       let lateCalls = 0;
       const lateManager = new WorldlineManager(
         deps(lateRoot, {
@@ -737,11 +817,11 @@ describe("Session Fork Teardown and Retention Probes", () => {
       await new Promise((resolve) => setImmediate(resolve));
       const lateTeardown = lateManager.discard(lateCmp.id);
       await new Promise((resolve) => setTimeout(resolve, 20));
-      resolveLate({ ok: true, sessionFile: join(lateDir, "A-support", "sessions", "session"), kept: 1 });
+      resolveLate!({ ok: true, sessionFile: join(lateDir, "A-support", "sessions", "session"), kept: 1 });
       await pairPromise;
       await lateTeardown;
       check(lateCalls === 1, "teardown prevents a late successful first leg from starting its sibling");
-      check(lateCmp.candidates.get("A").sessionFile === null && lateCmp.candidates.get("B").sessionFile === null, "late success cannot publish candidate session paths");
+      check(lateCmp.candidates.get("A")!.sessionFile === null && lateCmp.candidates.get("B")!.sessionFile === null, "late success cannot publish candidate session paths");
       check(!existsSync(lateDir), "discard removes the late-success comparison only after its fork settles");
     
       await lateManager.dispose();
@@ -754,13 +834,13 @@ describe("Session Fork Teardown and Retention Probes", () => {
       for (let index = 0; index < MAX_RETAINED_SESSION_BUNDLES - 1; index++) {
         seedRetainedBundle(countRoot, `existing-${String(index).padStart(3, "0")}`);
       }
-      let releaseCount;
-      let countEnteredResolve;
+      let releaseCount: ((value?: unknown) => void) | undefined;
+      let countEnteredResolve: ((value?: unknown) => void) | undefined;
       const countEntered = new Promise((resolve) => {
         countEnteredResolve = resolve;
       });
-      const firstCount = countOwner.transact("run-count-first", async (destination) => {
-        countEnteredResolve();
+      const firstCount = countOwner.transact("run-count-first", async (destination: string) => {
+        countEnteredResolve!();
         await new Promise((resolve) => {
           releaseCount = resolve;
         });
@@ -768,11 +848,11 @@ describe("Session Fork Teardown and Retention Probes", () => {
         return "first";
       });
       await countEntered;
-      const secondCount = countOwner.transact("run-count-second", async (destination) => {
+      const secondCount = countOwner.transact("run-count-second", async (destination: string) => {
         publishValidRetainedBundle(destination);
         return "second";
       });
-      releaseCount();
+      releaseCount!();
       const countOutcomes = await Promise.allSettled([firstCount, secondCount]);
       check(countOutcomes[0].status === "fulfilled", "count-cap first admission publishes under the bound");
       check(countOutcomes[1].status === "rejected" && /128/.test(String(countOutcomes[1].reason)), "count-cap concurrent admission is serialized and rejects the second bundle");
@@ -784,7 +864,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       // consumed by successful finalizations.
       const discardRoot = join(work, "retained-discard-restart");
       const discardOwner = new SessionRetentionOwner(discardRoot);
-      const discardTransaction = await discardOwner.transact("run-discard-restart", async (destination) => {
+      const discardTransaction = await discardOwner.transact("run-discard-restart", async (destination: string) => {
         publishValidRetainedBundle(destination);
         return "published";
       });
@@ -800,7 +880,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       const bundleLeafReady = join(work, "retained-bundle-leaf-ready");
       const bundleLeafRelease = join(work, "retained-bundle-leaf-release");
       const bundleLeafOwner = new SessionRetentionOwner(bundleLeafAbaRoot);
-      await bundleLeafOwner.transact("run-bundle-leaf-aba", async (destination) => {
+      await bundleLeafOwner.transact("run-bundle-leaf-aba", async (destination: string) => {
         publishValidRetainedBundle(destination);
         return "published";
       });
@@ -834,7 +914,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       const bundleAncestorReady = join(work, "retained-bundle-ancestor-ready");
       const bundleAncestorRelease = join(work, "retained-bundle-ancestor-release");
       const bundleAncestorOwner = new SessionRetentionOwner(bundleAncestorRoot);
-      await bundleAncestorOwner.transact("run-bundle-ancestor-aba", async (destination) => {
+      await bundleAncestorOwner.transact("run-bundle-ancestor-aba", async (destination: string) => {
         publishValidRetainedBundle(destination);
         return "published";
       });
@@ -869,7 +949,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       const repeatedDiscardOwner = new SessionRetentionOwner(repeatedDiscardRoot);
       for (let index = 0; index < MAX_RETAINED_SESSION_BUNDLES + 2; index++) {
         const runId = `run-reclaim-${String(index).padStart(3, "0")}`;
-        await repeatedDiscardOwner.transact(runId, async (destination) => {
+        await repeatedDiscardOwner.transact(runId, async (destination: string) => {
           publishValidRetainedBundle(destination);
           return "published";
         });
@@ -893,7 +973,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       });
       let imagePublished = false;
       const exactImageOutcome = await Promise.allSettled([
-        exactImageOwner.transact("run-exact-image", async (destination) => {
+        exactImageOwner.transact("run-exact-image", async (destination: string) => {
           imagePublished = true;
           publishValidRetainedBundleWithImage(destination, 128 * 1024 * 1024);
           return "unexpected";
@@ -951,13 +1031,13 @@ describe("Session Fork Teardown and Retention Probes", () => {
         archive: "{}\n",
         imageBytes: MAX_RETAINED_SESSION_BYTES - MAX_RETAINED_SESSION_BUNDLE_BYTES - byteCurrent - byteArchive,
       });
-      let releaseBytes;
-      let byteEnteredResolve;
+      let releaseBytes: ((value?: unknown) => void) | undefined;
+      let byteEnteredResolve: ((value?: unknown) => void) | undefined;
       const byteEntered = new Promise((resolve) => {
         byteEnteredResolve = resolve;
       });
-      const firstBytes = byteOwner.transact("run-byte-first", async (destination) => {
-        byteEnteredResolve();
+      const firstBytes = byteOwner.transact("run-byte-first", async (destination: string) => {
+        byteEnteredResolve!();
         await new Promise((resolve) => {
           releaseBytes = resolve;
         });
@@ -965,11 +1045,11 @@ describe("Session Fork Teardown and Retention Probes", () => {
         return "first";
       });
       await byteEntered;
-      const secondBytes = byteOwner.transact("run-byte-second", async (destination) => {
+      const secondBytes = byteOwner.transact("run-byte-second", async (destination: string) => {
         publishValidRetainedBundle(destination);
         return "second";
       });
-      releaseBytes();
+      releaseBytes!();
       const byteOutcomes = await Promise.allSettled([firstBytes, secondBytes]);
       check(byteOutcomes[0].status === "fulfilled", "byte-cap first admission publishes under the bound");
       check(byteOutcomes[1].status === "rejected" && /4 GB/.test(String(byteOutcomes[1].reason)), "byte-cap concurrent admission is serialized and rejects the second bundle");
@@ -983,7 +1063,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       seedRetainedLayout(malformedRoot, "malformed-active", { active: "{" });
       let malformedPublished = false;
       const malformedOutcome = await Promise.allSettled([
-        malformedOwner.transact("run-malformed", async (destination) => {
+        malformedOwner.transact("run-malformed", async (destination: string) => {
           malformedPublished = true;
           publishValidRetainedBundle(destination);
           return "unexpected";
@@ -997,7 +1077,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       await missingActiveOwner.list();
       seedRetainedLayout(missingActiveRoot, "missing-active", { active: null });
       const missingActiveOutcome = await Promise.allSettled([
-        missingActiveOwner.transact("run-missing-active", async (destination) => {
+        missingActiveOwner.transact("run-missing-active", async (destination: string) => {
           publishValidRetainedBundle(destination);
           return "unexpected";
         }),
@@ -1009,7 +1089,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       await unknownOwner.list();
       seedRetainedLayout(unknownRoot, "unknown-entry", { unknownBytes: MAX_RETAINED_SESSION_BYTES });
       const unknownOutcome = await Promise.allSettled([
-        unknownOwner.transact("run-unknown-entry", async (destination) => {
+        unknownOwner.transact("run-unknown-entry", async (destination: string) => {
           publishValidRetainedBundle(destination);
           return "unexpected";
         }),
@@ -1025,11 +1105,11 @@ describe("Session Fork Teardown and Retention Probes", () => {
         archive: "{}\n",
         imageBytes: MAX_RETAINED_SESSION_BYTES - MAX_RETAINED_SESSION_BUNDLE_BYTES - fullTreeCurrent - fullTreeArchive,
       });
-      const fullTreeFirst = fullTreeOwner.transact("run-full-tree-first", async (destination) => {
+      const fullTreeFirst = fullTreeOwner.transact("run-full-tree-first", async (destination: string) => {
         publishValidRetainedBundle(destination);
         return "first";
       });
-      const fullTreeSecond = fullTreeOwner.transact("run-full-tree-second", async (destination) => {
+      const fullTreeSecond = fullTreeOwner.transact("run-full-tree-second", async (destination: string) => {
         publishValidRetainedBundle(destination);
         return "second";
       });
@@ -1044,12 +1124,12 @@ describe("Session Fork Teardown and Retention Probes", () => {
       const stagingRoot = join(work, "retained-staging");
       const stagingOwner = new SessionRetentionOwner(stagingRoot);
       const stagingId = `t-${"a".repeat(32)}`;
-      const stagingFirst = stagingOwner.transact("run-staging-first", async (destination) => {
+      const stagingFirst = stagingOwner.transact("run-staging-first", async (destination: string) => {
         publishValidRetainedBundle(destination);
         seedRetainedStaging(stagingRoot, stagingId);
         return "first";
       });
-      const stagingSecond = stagingOwner.transact("run-staging-second", async (destination) => {
+      const stagingSecond = stagingOwner.transact("run-staging-second", async (destination: string) => {
         publishValidRetainedBundle(destination);
         return "second";
       });
@@ -1062,7 +1142,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       await stagingUnknownOwner.list();
       seedRetainedStaging(stagingUnknownRoot, `t-${"b".repeat(32)}`, { unknownBytes: 1 });
       const stagingUnknownOutcome = await Promise.allSettled([
-        stagingUnknownOwner.transact("run-staging-unknown", async (destination) => {
+        stagingUnknownOwner.transact("run-staging-unknown", async (destination: string) => {
           publishValidRetainedBundle(destination);
           return "unexpected";
         }),
@@ -1079,8 +1159,8 @@ describe("Session Fork Teardown and Retention Probes", () => {
       writeFileSync(realSource, `${JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "hello" } })}\n`, { mode: 0o600 });
       const realRoot = join(work, "retained-real");
       const realOwner = new SessionRetentionOwner(realRoot);
-      const realFirst = realOwner.transact("run-real-first", (destination, retentionLease) => writeForkedSession(realSource, destination, 1, { retentionLease }));
-      const realSecond = realOwner.transact("run-real-second", (destination, retentionLease) => writeForkedSession(realSource, destination, 1, { retentionLease }));
+      const realFirst = realOwner.transact("run-real-first", (destination: string, retentionLease: SessionRetentionLock) => writeForkedSession(realSource, destination, 1, { retentionLease }));
+      const realSecond = realOwner.transact("run-real-second", (destination: string, retentionLease: SessionRetentionLock) => writeForkedSession(realSource, destination, 1, { retentionLease }));
       const realOutcomes = await Promise.allSettled([realFirst, realSecond]);
       check(
         realOutcomes[0].status === "fulfilled" && realOutcomes[0].value.result.ok === true
@@ -1096,13 +1176,13 @@ describe("Session Fork Teardown and Retention Probes", () => {
       const workerRoot = join(work, "retained-worker");
       const workerOwner = new SessionRetentionOwner(workerRoot);
       sessionForkClient = new SessionForkClient();
-      const workerFirst = workerOwner.transact("run-worker-first", (destination, retentionLease) => sessionForkClient.forkCore({
+      const workerFirst = workerOwner.transact("run-worker-first", (destination: string, retentionLease: SessionRetentionLock) => sessionForkClient!.forkCore({
         sourceSessionFile: realSource,
         destinationSessionFile: destination,
         throughSeq: 1,
         retentionLease,
       }));
-      const workerSecond = workerOwner.transact("run-worker-second", (destination, retentionLease) => sessionForkClient.forkCore({
+      const workerSecond = workerOwner.transact("run-worker-second", (destination: string, retentionLease: SessionRetentionLock) => sessionForkClient!.forkCore({
         sourceSessionFile: realSource,
         destinationSessionFile: destination,
         throughSeq: 1,
@@ -1114,7 +1194,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
           && workerOutcomes[1].status === "fulfilled" && workerOutcomes[1].value.result.ok === true,
         "real worker retained core finalization succeeds twice with the shared generation lease",
       );
-      await sessionForkClient.dispose();
+      await sessionForkClient!.dispose();
       sessionForkClient = null;
       check(!existsSync(join(workerRoot, RETAINED_SESSION_ADMISSION_LOCK)), "worker retained finalization releases the shared admission lock");
     
@@ -1127,7 +1207,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       sessionForkClient = new SessionForkClient();
       for (let index = 0; index < 130; index++) {
         const runId = `run-worker-cycle-${String(index).padStart(3, "0")}`;
-        const finalized = await workerCycleOwner.transact(runId, (destination, retentionLease) => sessionForkClient.forkCore({
+        const finalized = await workerCycleOwner.transact(runId, (destination: string, retentionLease: SessionRetentionLock) => sessionForkClient!.forkCore({
           sourceSessionFile: realSource,
           destinationSessionFile: destination,
           throughSeq: 1,
@@ -1141,7 +1221,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
         const discarded = await workerCycleOwner.discard(runId);
         if (!discarded.ok) throw new Error(`FAIL real worker discard cycle ${index + 1}: ${discarded.error ?? "unknown error"}`);
       }
-      await sessionForkClient.dispose();
+      await sessionForkClient!.dispose();
       sessionForkClient = null;
       check(
         readdirSync(workerCycleRoot).filter((name) => name !== ".termina-retained-session-root" && name !== RETAINED_SESSION_ADMISSION_LOCK && !name.startsWith(".termina-promotion-cleanup-")).filter((name) => /^t-[0-9a-f]{32}$/.test(name)).length === 0,
@@ -1170,7 +1250,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
     
       const comparisonManagerB = new WorldlineManager(deps(comparisonAllocationRoot));
       await comparisonManagerB.ready;
-      const allocateConcurrently = async (manager) => {
+      const allocateConcurrently = async (manager: TestComparisonAllocator) => {
         const admission = await manager.acquireUncertainComparisonAdmission();
         if (!admission.ok) throw new Error(admission.error);
         try {
@@ -1244,13 +1324,13 @@ describe("Session Fork Teardown and Retention Probes", () => {
       const processRoot = join(work, "retained-process-lock");
       const processOwnerA = new SessionRetentionOwner(processRoot);
       const processOwnerB = new SessionRetentionOwner(processRoot);
-      let releaseProcess;
-      let processEnteredResolve;
+      let releaseProcess: ((value?: unknown) => void) | undefined;
+      let processEnteredResolve: ((value?: unknown) => void) | undefined;
       const processEntered = new Promise((resolve) => {
         processEnteredResolve = resolve;
       });
-      const processFirst = processOwnerA.transact("run-process-first", async (destination) => {
-        processEnteredResolve();
+      const processFirst = processOwnerA.transact("run-process-first", async (destination: string) => {
+        processEnteredResolve!();
         await new Promise((resolve) => {
           releaseProcess = resolve;
         });
@@ -1261,7 +1341,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
       const processSecond = processOwnerB.transact("run-process-second", async () => "second");
       const processSecondOutcome = await Promise.allSettled([processSecond]);
       check(processSecondOutcome[0].status === "rejected" && /busy/.test(String(processSecondOutcome[0].reason)), "independent retained-session owner cannot bypass the admission lock");
-      releaseProcess();
+      releaseProcess!();
       await processFirst;
     
       console.log("PASS session-fork teardown/retention regressions");

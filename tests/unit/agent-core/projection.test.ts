@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -198,6 +198,7 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
       writeFileSync(join(dirname(source), "resume-img-1.png"), Buffer.from("image-bytes"), { mode: 0o600 });
       const opened = session.SessionWriter.open(source, 0);
       expect(opened.ok).toBe(true);
+      if (!opened.ok) throw new Error("expected session open to succeed");
       const records = [
         { storageSeq: 1, type: "message", message: { role: "user", content: [{ type: "text", text: "resume" }, { type: "image", source: { type: "file", name: "resume-img-1.png", media_type: "image/png" } }] } },
         { storageSeq: 2, type: "message", message: { role: "assistant", content: [toolUse("fork-call", "read_file", "current.ts")] } },
@@ -207,11 +208,13 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
       opened.writer.close();
       const resumed = await session.replaySessionBundle(source);
       expect(resumed.ok).toBe(true);
+      if (!resumed.ok) throw new Error("expected session replay to succeed");
       expect(resumed.messages.length).toBe(3);
       const forked = await session.writeForkedSession(source, dest, 3);
       expect(forked.ok).toBe(true);
       const forkReplay = await session.replaySessionBundle(dest);
       expect(forkReplay.ok).toBe(true);
+      if (!forkReplay.ok) throw new Error("expected fork replay to succeed");
       expect(forkReplay.messages.map((m: any) => m.content)).toEqual(resumed.messages.map((m: any) => m.content));
       expect(existsSync(join(dirname(dest), "resume-img-1.png"))).toBe(true);
       const overlay = overlayFor(forkReplay.messages, "fresh host state");

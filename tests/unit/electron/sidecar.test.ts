@@ -4,7 +4,14 @@ import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SidecarEventQueue, SidecarTailer, sidecarEventFromRecord } from "../../../electron/sidecar.ts";
+import type { SidecarEvent } from "../../../electron/sidecar.ts";
+import type * as fs from "node:fs";
+import type { FSWatcher } from "node:fs";
 import { boundedSidecarEdits, SIDECAR_TOOL_EDIT_PREVIEW_BYTES } from "../../../agent-core/main.ts";
+
+/** fs.watch-shaped fake that never fires; the probes drive tails via appends and polls. */
+const inertWatch: typeof fs.watch = (..._args: unknown[]) =>
+  Object.assign(new EventEmitter(), { close() {} }) as FSWatcher;
 
 describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
   let root: string;
@@ -40,7 +47,10 @@ describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
         expect(tailer.tailWakeCounts()).toEqual({ poll: 0, watch: 0 });
         // Watcher event → debounced watch-path tail.
         await appendFile(active, `${JSON.stringify({ bridgeId: id, seq: 1, t: "session_ready" })}\n`);
-        listener?.("rename", `${id}.jsonl`);
+        // Snapshot: the closure assignment above is invisible to outer-flow narrowing.
+        const capturedListener = listener as ((...args: any[]) => void) | null;
+        if (!capturedListener) throw new Error("watch listener was not captured");
+        capturedListener("rename", `${id}.jsonl`);
         const firstDeadline = Date.now() + 3000;
         while (received.length < 1 && Date.now() < firstDeadline) await new Promise((resolve) => setTimeout(resolve, 20));
         expect(received.map((event) => event.seq)).toEqual([1]);
@@ -77,8 +87,8 @@ describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
     it("bounds oversized producer edits and retains truncation boundary", () => {
       const oldText = "old-".repeat(2 * 1024 * 1024);
       const newText = "new-".repeat(2 * 1024 * 1024);
-      const bounded = boundedSidecarEdits([{ oldText, newText }]);
-      const envelope = {
+      const bounded = boundedSidecarEdits([{ oldText, newText }]) ?? {};
+      const envelope: Record<string, unknown> = {
         bridgeId: "producer",
         seq: 1,
         t: "tool",
@@ -123,8 +133,8 @@ describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
         },
         { maxItems: 3, maxBytes: 16 * 1024 },
       );
-      const boundary = (seq: number) => ({ bridgeId: "bridge", seq, t: "agent_start", sessionId: String(seq) });
-      const plan = (seq: number, text: string) => ({ bridgeId: "bridge", seq, t: "plan", text });
+      const boundary = (seq: number): SidecarEvent => ({ bridgeId: "bridge", seq, t: "agent_start", sessionId: String(seq) });
+      const plan = (seq: number, text: string): SidecarEvent => ({ bridgeId: "bridge", seq, t: "plan", text });
 
       expect(queue.enqueue(boundary(1))).toBe(true);
       expect(queue.enqueue(plan(2, "old"))).toBe(true);
@@ -144,7 +154,7 @@ describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
     });
 
     it("enforces byte limits on incoming events", async () => {
-      const plan = (seq: number, text: string) => ({ bridgeId: "bridge", seq, t: "plan", text });
+      const plan = (seq: number, text: string): SidecarEvent => ({ bridgeId: "bridge", seq, t: "plan", text });
       const byteQueue = new SidecarEventQueue(async () => {}, { maxItems: 4, maxBytes: 64 });
       expect(byteQueue.enqueue(plan(6, "x".repeat(512)))).toBe(false);
     });
@@ -160,9 +170,9 @@ describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
       await writeFile(active, `${JSON.stringify({ bridgeId: "old-active", seq: 1, t: "agent_start" })}\n`);
       await writeFile(cursor, JSON.stringify({ offset: 0, segmentOffset: 0, sealedSegment: `.${id}.jsonl.segment` }));
 
-      const tailer = new SidecarTailer(eventsDir, () => Object.assign(new EventEmitter(), { close() {} }));
+      const tailer = new SidecarTailer(eventsDir, inertWatch);
       const received: any[] = [];
-      tailer.onEvent = (_terminalId, event) => received.push(event);
+      tailer.onEvent = (_terminalId, event) => { received.push(event); };
       tailer.start();
       tailer.watch(id);
       try {
@@ -181,7 +191,7 @@ describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
     });
 
     it("rejects a child session takeover while allowing reloads and concurrent terminals", async () => {
-      const tailer = new SidecarTailer(eventsDir, () => Object.assign(new EventEmitter(), { close() {} }));
+      const tailer = new SidecarTailer(eventsDir, inertWatch);
       const received: any[] = [];
       tailer.onEvent = (id, event) => { received.push({ id, ...event }); };
       tailer.start();
@@ -221,9 +231,9 @@ describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
       const termFile = join(eventsDir, "term-tailer.jsonl");
       await writeFile(termFile, "");
 
-      const tailer = new SidecarTailer(eventsDir, () => Object.assign(new EventEmitter(), { close() {} }));
+      const tailer = new SidecarTailer(eventsDir, inertWatch);
       const received: any[] = [];
-      tailer.onEvent = (_id, event) => received.push(event);
+      tailer.onEvent = (_id, event) => { received.push(event); };
       tailer.start();
       tailer.watch("term-tailer");
 

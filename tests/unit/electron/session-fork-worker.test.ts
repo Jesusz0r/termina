@@ -2,18 +2,12 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { build } from "esbuild";
 import {
   existsSync,
-  linkSync,
   mkdirSync,
   mkdtempSync,
-  readdirSync,
-  readFileSync,
-  renameSync,
   rmSync,
-  symlinkSync,
-  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 describe("Electron Session Fork Worker & Multi-Process Isolation", () => {
@@ -22,7 +16,6 @@ describe("Electron Session Fork Worker & Multi-Process Isolation", () => {
   let SessionWriter: any;
   let coreSessionFile: any;
   let replaySessionBundle: any;
-  let nativeCoreAvailable: boolean;
 
   function destinationSession(projectName: string, sessionId: string) {
     const project = join(work, projectName);
@@ -38,12 +31,6 @@ describe("Electron Session Fork Worker & Multi-Process Isolation", () => {
     SessionWriter = sessionMod.SessionWriter;
     coreSessionFile = sessionMod.coreSessionFile;
     replaySessionBundle = sessionMod.replaySessionBundle;
-
-    nativeCoreAvailable = [
-      process.env.TERMINA_CORE_BIN,
-      join(process.cwd(), "core", "target", "release", "termina-core"),
-      join(process.cwd(), "core", "target", "debug", "termina-core"),
-    ].some((candidate) => candidate && existsSync(candidate));
 
     const bundleBanner = {
       js: 'import { createRequire as __sessionForkRequire } from "node:module"; const require = __sessionForkRequire(import.meta.url);',

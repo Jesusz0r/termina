@@ -21,7 +21,7 @@ function shellArg(text: string) {
   return `'${String(text).replace(/'/g, `'\\''`)}'`;
 }
 
-function assertBoundedText(result: any, label: string) {
+function assertBoundedText(result: any, _label: string) {
   expect(typeof result?.content).toBe("string");
   expect(result.outputBytes).toBe(Buffer.byteLength(result.content, "utf8"));
   expect(result.outputBytes).toBeLessThanOrEqual(result.limitBytes);

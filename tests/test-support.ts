@@ -7,9 +7,12 @@
  */
 import { rmSync } from "node:fs";
 
-export function createCheckReporter({ write = console.log } = {}) {
-  const results = [];
-  const check = (name, ok, detail = "") => {
+export type CheckFn = (name: string, ok: unknown, detail?: unknown) => boolean;
+export type CheckWriter = (message: string) => void;
+
+export function createCheckReporter({ write = console.log }: { write?: CheckWriter } = {}): { check: CheckFn; results: boolean[] } {
+  const results: boolean[] = [];
+  const check: CheckFn = (name, ok, detail = "") => {
     const passed = Boolean(ok);
     results.push(passed);
     write(`${passed ? "PASS" : "FAIL"}  ${name}${detail ? " — " + String(detail).slice(0, 240) : ""}`);
@@ -18,7 +21,7 @@ export function createCheckReporter({ write = console.log } = {}) {
   return { check, results };
 }
 
-export function cleanupTestRoots(paths) {
+export function cleanupTestRoots(paths: Iterable<unknown>) {
   for (const path of new Set(paths)) {
     if (typeof path !== "string") continue;
     try {
@@ -29,7 +32,7 @@ export function cleanupTestRoots(paths) {
   }
 }
 
-export function summarizeCheckResults(results) {
+export function summarizeCheckResults(results: boolean[]) {
   const failed = results.filter((passed) => !passed).length;
   return {
     total: results.length,
@@ -39,22 +42,25 @@ export function summarizeCheckResults(results) {
   };
 }
 
-export function parseNativeByteBound(message) {
+export function parseNativeByteBound(message: unknown) {
   const match = String(message).match(/exceeds its (?<bytes>[0-9]+)-byte bound/);
-  const bytes = match ? Number(match.groups.bytes) : NaN;
+  const bytes = Number(match?.groups?.bytes);
   if (!Number.isSafeInteger(bytes) || bytes <= 0) {
     throw new Error("native read-budget error does not expose a decimal byte bound");
   }
   return bytes;
 }
 
-export async function runExportedChecks(run, { label = "test", write = console.log } = {}) {
+export async function runExportedChecks(
+  run: (api: { check: CheckFn; leftovers: string[] }) => unknown | Promise<unknown>,
+  { label = "test", write = console.log }: { label?: string; write?: CheckWriter } = {},
+) {
   const reporter = createCheckReporter({ write });
-  const leftovers = [];
+  const leftovers: string[] = [];
   try {
     await run({ check: reporter.check, leftovers });
   } catch (error) {
-    reporter.check(`${label} execution failed`, false, error?.stack ?? error);
+    reporter.check(`${label} execution failed`, false, error instanceof Error ? error.stack : error);
   } finally {
     cleanupTestRoots(leftovers);
   }

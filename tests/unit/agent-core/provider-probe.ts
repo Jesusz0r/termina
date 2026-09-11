@@ -22,6 +22,188 @@ import { resolve } from "node:path";
 import * as auth from "../../../agent-core/auth.ts";
 import * as compat from "../../../agent-core/openai-compat.ts";
 import * as trace from "../../../agent-core/trace.ts";
+import type {
+  CacheIdentity,
+  ProviderId,
+  ProviderProtocol,
+} from "../../../agent-core/auth.ts";
+import type {
+  CompletionsOpts,
+  KernelMessage,
+  ProviderUsage,
+  ToolDef,
+} from "../../../agent-core/openai-compat.ts";
+
+type ProbeRoute =
+  | { readonly protocols: readonly string[]; readonly hosts: readonly string[] }
+  | { readonly disabled: boolean };
+
+interface NormalizedFixture {
+  id: string;
+  system: string;
+  firstUser: string;
+  assistant: string;
+  secondUser: string;
+  tool: typeof FIXTURE.tool;
+  targetBytes: number | null;
+}
+
+interface NormalizedProbeConfig {
+  endpoint: string;
+  endpointUrl: URL;
+  provider: string;
+  model: string;
+  protocol: string;
+  sessionId: string;
+  sessionSeed: string;
+  cacheIdentity: CacheIdentity;
+  sourceUrl: string;
+  retrievedAt: string;
+  fixture: NormalizedFixture;
+  repeat: number;
+  gapsMs: number[];
+  waitForGaps: boolean;
+  timeoutMs: number;
+  apiKey: string;
+  live: boolean;
+  allowLive: boolean;
+  allowHosts: string[];
+}
+
+interface ProbePolicy {
+  namespace: string;
+  cacheFields: string[];
+  markerCount: number;
+  markerPositions: number[];
+  ttl: unknown;
+  ttlMs: number | null;
+  mode: string;
+  requested: boolean;
+  providerAcceptance: string;
+}
+
+interface PublicPolicy {
+  namespace: string | null;
+  cacheFields: string[];
+  markerCount: number;
+  markerPositions: number[] | null;
+  ttl: unknown;
+  ttlMs: number | null;
+  mode: string;
+  requested: boolean;
+  providerAcceptance: string;
+}
+
+interface ProbeRequest {
+  method: string;
+  endpoint: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+  bodyText: string;
+  stablePrefixText: string;
+  requestedPolicy: ProbePolicy;
+  effectivePolicy: ProbePolicy;
+}
+
+interface AnthropicProbeMessage {
+  role: "user" | "assistant";
+  content: Array<Record<string, unknown>> | string;
+}
+
+interface CacheWriteBreakdown {
+  ephemeral5m: number | null;
+  ephemeral1h: number | null;
+}
+
+interface ProbeUsage extends ProviderUsage {
+  cacheWriteBreakdown?: CacheWriteBreakdown | undefined;
+}
+
+interface ProbeResponseData {
+  rawBody: string;
+  responseHash: string | null;
+  responseHashScope: string;
+  payload: unknown;
+  oversized: boolean;
+}
+
+export interface ProbeFetchInit {
+  method: string;
+  headers: Record<string, string>;
+  body: string;
+  redirect: "manual";
+  signal: AbortSignal;
+}
+
+export type ProbeFetch = (input: string, init: ProbeFetchInit) => Promise<unknown>;
+
+interface ProbeDependencies {
+  now?: () => unknown;
+  env?: Record<string, string | undefined>;
+  fetchImpl?: ProbeFetch;
+}
+
+interface ProbeAttempt {
+  attempt: number;
+  repeatIndex: number;
+  gapBeforeMs: number;
+  attemptId: string;
+  retryOfAttemptId: string | null;
+  retryIndex: number;
+  startedAt: string;
+  finishedAt: string;
+  httpStatus: number | null;
+  ok: boolean;
+  requestBodyHash: string;
+  stablePrefixHash: string;
+  stablePrefixText: string;
+  stablePrefixByteLength: number;
+  stablePrefixByteIdentical: boolean;
+  requestedPolicy: PublicPolicy;
+  effectivePolicy: PublicPolicy;
+  policyAcceptance: string;
+  cacheObservation: string;
+  missCause: string;
+  usage: ProbeUsage;
+  responseHash: string | null;
+  responseHashScope: string;
+  responseOversized: boolean;
+  redactedHeaders: Record<string, string>;
+  errorKind?: string | undefined;
+  error?: string | null | undefined;
+}
+
+interface TracePolicyView {
+  mode: string | null;
+  ttlMs: number | null;
+  namespace: string | null;
+  markerCount: number | null;
+  markerPositions: number[] | null;
+  rejected: boolean | null;
+  fallbackReason: string | null;
+}
+
+interface PublicPlan {
+  method: string;
+  endpoint: string;
+  headers: Record<string, string>;
+  requestBodyHash: string;
+  stablePrefixHash: string;
+  stablePrefixByteLength: number;
+  fixtureSizeBytes: number;
+  requestedPolicy: PublicPolicy;
+  schedule: { repeat: number; gapsMs: number[]; waitForGaps: boolean };
+}
+
+interface ProbePlan {
+  schemaVersion: number;
+  fixtureId: string;
+  provider: string;
+  model: string;
+  protocol: string;
+  source: { url: string; retrievedAt: string };
+  requestPlan: PublicPlan;
+}
 
 export const PROBE_SCHEMA_VERSION = 1;
 export const FIXTURE_ID = "agent-core-provider-probe-v1";
@@ -42,14 +224,14 @@ const OPTIONAL_HEADERS = new Set(["x-grok-conv-id", "x-session-id"]);
 const SENSITIVE_HEADERS = /^(authorization|proxy-authorization|x-api-key|api-key|cookie|set-cookie|x-session-id|x-opencode-session|x-grok-conv-id)$/i;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
 
-const SOURCE_URLS = Object.freeze({
+const SOURCE_URLS: Record<string, string> = Object.freeze({
   anthropic: "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
   openai: "https://developers.openai.com/api/docs/guides/prompt-caching",
   xai: "https://docs.x.ai/developers/advanced-api-usage/prompt-caching",
   openrouter: "https://openrouter.ai/docs/guides/best-practices/prompt-caching",
 });
 
-const ROUTES = Object.freeze({
+const ROUTES: Record<string, ProbeRoute> = Object.freeze({
   anthropic: Object.freeze({
     protocols: ["anthropic-messages"],
     hosts: ["api.anthropic.com"],
@@ -91,7 +273,7 @@ const FIXTURE = Object.freeze({
   }),
 });
 
-function normalizeFixture(value) {
+function normalizeFixture(value: unknown): NormalizedFixture {
   if (value === undefined) {
     return {
       id: FIXTURE_ID,
@@ -110,11 +292,11 @@ function normalizeFixture(value) {
   if (!id || id.length > 128 || hasControl(id)) {
     throw new ProbeConfigurationError("INVALID_FIXTURE", "fixture.id must be a short printable string");
   }
-  const targetBytes = value.targetBytes;
-  if (!Number.isSafeInteger(targetBytes) || targetBytes < 1 || targetBytes > MAX_RESPONSE_BYTES) {
+  const targetBytes: unknown = value.targetBytes;
+  if (typeof targetBytes !== "number" || !Number.isSafeInteger(targetBytes) || targetBytes < 1 || targetBytes > MAX_RESPONSE_BYTES) {
     throw new ProbeConfigurationError("INVALID_FIXTURE", `fixture.targetBytes must be an integer from 1 to ${MAX_RESPONSE_BYTES}`);
   }
-  const base = {
+  const base: NormalizedFixture = {
     id,
     system: FIXTURE.system,
     firstUser: FIXTURE.firstUser,
@@ -133,54 +315,55 @@ function normalizeFixture(value) {
 }
 
 export class ProbeConfigurationError extends Error {
-  constructor(code, message) {
+  code: string;
+  constructor(code: string, message: string) {
     super(message);
     this.name = "ProbeConfigurationError";
     this.code = code;
   }
 }
 
-function isRecord(value) {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function nonempty(value) {
+function nonempty(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function hasControl(value) {
+function hasControl(value: unknown): boolean {
   return typeof value === "string" && /\p{Cc}/u.test(value);
 }
 
-function stableStringify(value) {
+function stableStringify(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
-  const entries = Object.entries(value)
+  if (Array.isArray(value)) return `[${value.map((item: unknown) => stableStringify(item)).join(",")}]`;
+  const entries: string[] = Object.entries(value)
     .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
     .map(([key, child]) => `${JSON.stringify(key)}:${stableStringify(child)}`);
   return `{${entries.join(",")}}`;
 }
 
-function sha256(value) {
+function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-function sha256Bytes(value) {
+function sha256Bytes(value: Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function isoTimestamp(value, field) {
-  const date = value instanceof Date ? value : new Date(value);
+function isoTimestamp(value: unknown, field: string): string {
+  const date = value instanceof Date ? value : new Date(value as string | number);
   if (!Number.isFinite(date.getTime())) {
     throw new ProbeConfigurationError("INVALID_TIMESTAMP", `${field} must be an ISO timestamp`);
   }
   return date.toISOString();
 }
 
-function safeSourceUrl(value) {
-  let url;
+function safeSourceUrl(value: unknown): string {
+  let url: URL;
   try {
-    url = new URL(value);
+    url = new URL(value as string);
   } catch {
     throw new ProbeConfigurationError("INVALID_SOURCE", "sourceUrl must be an https URL");
   }
@@ -190,10 +373,10 @@ function safeSourceUrl(value) {
   return url.toString();
 }
 
-function safeEndpoint(value) {
-  let url;
+function safeEndpoint(value: unknown): URL {
+  let url: URL;
   try {
-    url = new URL(value);
+    url = new URL(value as string);
   } catch {
     throw new ProbeConfigurationError("INVALID_ENDPOINT", "endpoint must be an http(s) URL");
   }
@@ -203,10 +386,10 @@ function safeEndpoint(value) {
   return url;
 }
 
-function validateRoute(provider, protocol, endpoint, allowHosts) {
+function validateRoute(provider: string, protocol: string, endpoint: URL, allowHosts: unknown): void {
   const route = ROUTES[provider];
   if (!route) throw new ProbeConfigurationError("UNSUPPORTED_PROVIDER", `unsupported probe provider: ${provider}`);
-  if (route.disabled) {
+  if ("disabled" in route) {
     throw new ProbeConfigurationError("PROBE_DISABLED", `${provider} compatibility cache probing is disabled until the route is documented`);
   }
   if (!route.protocols.includes(protocol)) {
@@ -214,7 +397,7 @@ function validateRoute(provider, protocol, endpoint, allowHosts) {
   }
   const host = endpoint.hostname.toLowerCase();
   if (LOOPBACK_HOSTS.has(host)) {
-    const explicit = Array.isArray(allowHosts) && allowHosts.some((item) => String(item).toLowerCase() === host);
+    const explicit = Array.isArray(allowHosts) && allowHosts.some((item: unknown) => String(item).toLowerCase() === host);
     if (!explicit) {
       throw new ProbeConfigurationError("ROUTE_NOT_ALLOWED", "loopback endpoints require an explicit allowHosts entry");
     }
@@ -225,7 +408,7 @@ function validateRoute(provider, protocol, endpoint, allowHosts) {
   }
 }
 
-function normalizeConfig(config) {
+function normalizeConfig(config: unknown): NormalizedProbeConfig {
   if (!isRecord(config)) throw new ProbeConfigurationError("INVALID_CONFIG", "probe config must be an object");
   for (const field of ["endpoint", "provider", "model", "protocol"]) {
     if (!nonempty(config[field])) {
@@ -233,9 +416,10 @@ function normalizeConfig(config) {
     }
   }
   const endpoint = safeEndpoint(config.endpoint);
-  const provider = config.provider.trim().toLowerCase();
-  const model = config.model.trim();
-  const protocol = config.protocol.trim().toLowerCase();
+  // The loop above guarantees these fields are non-empty strings.
+  const provider = (config.provider as string).trim().toLowerCase();
+  const model = (config.model as string).trim();
+  const protocol = (config.protocol as string).trim().toLowerCase();
   validateRoute(provider, protocol, endpoint, config.allowHosts);
   if (!Object.hasOwn(config, "retrievedAt") || !nonempty(config.retrievedAt)) {
     throw new ProbeConfigurationError("MISSING_FIELD", "probe config requires retrievedAt for the documentation snapshot");
@@ -250,23 +434,23 @@ function normalizeConfig(config) {
   const cacheIdentity = auth.cacheIdentityFor({
     sessionSeed,
     role: "main",
-    provider,
-    protocol,
+    provider: provider as ProviderId,
+    protocol: protocol as ProviderProtocol,
     route: endpoint.toString(),
   });
   if (!cacheIdentity) {
     throw new ProbeConfigurationError("INVALID_IDENTITY", "canonical cache identity could not be derived for this route");
   }
-  const repeat = config.repeat === undefined ? 1 : config.repeat;
-  if (!Number.isSafeInteger(repeat) || repeat < 1 || repeat > MAX_REPEAT) {
+  const repeat: unknown = config.repeat === undefined ? 1 : config.repeat;
+  if (typeof repeat !== "number" || !Number.isSafeInteger(repeat) || repeat < 1 || repeat > MAX_REPEAT) {
     throw new ProbeConfigurationError("INVALID_REPEAT", `repeat must be an integer from 1 to ${MAX_REPEAT}`);
   }
-  const gapsMs = config.gapsMs === undefined ? [] : config.gapsMs;
-  if (!Array.isArray(gapsMs) || gapsMs.length > repeat - 1 || gapsMs.some((gap) => !Number.isFinite(gap) || gap < 0 || gap > MAX_GAP_MS)) {
+  const gapsMs: unknown = config.gapsMs === undefined ? [] : config.gapsMs;
+  if (!Array.isArray(gapsMs) || gapsMs.length > repeat - 1 || gapsMs.some((gap: unknown) => typeof gap !== "number" || !Number.isFinite(gap) || gap < 0 || gap > MAX_GAP_MS)) {
     throw new ProbeConfigurationError("INVALID_GAPS", `gapsMs must contain at most ${repeat - 1} gaps from 0 to ${MAX_GAP_MS}ms`);
   }
-  const timeoutMs = config.timeoutMs === undefined ? DEFAULT_TIMEOUT_MS : config.timeoutMs;
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
+  const timeoutMs: unknown = config.timeoutMs === undefined ? DEFAULT_TIMEOUT_MS : config.timeoutMs;
+  if (typeof timeoutMs !== "number" || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
     throw new ProbeConfigurationError("INVALID_TIMEOUT", `timeoutMs must be an integer from 1 to ${MAX_TIMEOUT_MS}`);
   }
   return {
@@ -282,7 +466,7 @@ function normalizeConfig(config) {
     retrievedAt,
     fixture: normalizeFixture(config.fixture),
     repeat,
-    gapsMs: gapsMs.map((gap) => Math.trunc(gap)),
+    gapsMs: gapsMs.map((gap: number) => Math.trunc(gap)),
     waitForGaps: config.waitForGaps === true,
     timeoutMs,
     apiKey: typeof config.apiKey === "string" ? config.apiKey : "",
@@ -292,14 +476,17 @@ function normalizeConfig(config) {
   };
 }
 
-function deriveProbeKey(config) {
+function deriveProbeKey(config: NormalizedProbeConfig): string {
   return config.cacheIdentity.key;
 }
 
-function cloneWithoutOptionalFields(value) {
-  if (Array.isArray(value)) return value.map(cloneWithoutOptionalFields);
+function cloneWithoutOptionalFields(value: Record<string, unknown>): Record<string, unknown>;
+function cloneWithoutOptionalFields(value: unknown[]): unknown[];
+function cloneWithoutOptionalFields(value: unknown): unknown;
+function cloneWithoutOptionalFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item: unknown) => cloneWithoutOptionalFields(item));
   if (!isRecord(value)) return value;
-  const result = {};
+  const result: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(value)) {
     if (OPTIONAL_BODY_FIELDS.has(key)) continue;
     result[key] = cloneWithoutOptionalFields(child);
@@ -307,21 +494,25 @@ function cloneWithoutOptionalFields(value) {
   return result;
 }
 
-function redactHeaders(headers) {
-  const result = {};
-  for (const [name, value] of Object.entries(headers ?? {})) {
+function redactHeaders(headers: unknown): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!isRecord(headers)) return result;
+  for (const [name, value] of Object.entries(headers)) {
     result[name] = SENSITIVE_HEADERS.test(name) ? "[REDACTED]" : String(value);
   }
   return result;
 }
 
-function strippedHeaders(headers) {
+function strippedHeaders(headers: Record<string, string>): Record<string, string>;
+function strippedHeaders(headers: unknown): Record<string, unknown>;
+function strippedHeaders(headers: unknown): Record<string, unknown> {
+  if (!isRecord(headers)) return {};
   return Object.fromEntries(
-    Object.entries(headers ?? {}).filter(([name]) => !OPTIONAL_HEADERS.has(name.toLowerCase())),
+    Object.entries(headers).filter(([name]) => !OPTIONAL_HEADERS.has(name.toLowerCase())),
   );
 }
 
-function modelIsGpt56OrLater(model) {
+function modelIsGpt56OrLater(model: string): boolean {
   const leaf = model.trim().toLowerCase().split("/").at(-1) ?? "";
   const match = /^gpt-(\d+)(?:\.(\d+))?(?:[.-]|$)/.exec(leaf);
   if (!match) return false;
@@ -330,12 +521,12 @@ function modelIsGpt56OrLater(model) {
   return major > 5 || (major === 5 && minor >= 6);
 }
 
-function modelSupportsOpenRouterBreakpoint(model) {
+function modelSupportsOpenRouterBreakpoint(model: string): boolean {
   const normalized = model.trim().toLowerCase();
   return modelIsGpt56OrLater(normalized) || normalized.includes("claude") || normalized.includes("gemini");
 }
 
-function anthropicMessages(fixture) {
+function anthropicMessages(fixture: NormalizedFixture): AnthropicProbeMessage[] {
   return [
     { role: "user", content: [{ type: "text", text: fixture.firstUser }] },
     { role: "assistant", content: fixture.assistant },
@@ -343,7 +534,7 @@ function anthropicMessages(fixture) {
   ];
 }
 
-function kernelMessages(fixture) {
+function kernelMessages(fixture: NormalizedFixture): KernelMessage[] {
   return [
     { role: "user", content: [{ type: "text", text: fixture.firstUser }] },
     { role: "assistant", content: fixture.assistant },
@@ -351,7 +542,7 @@ function kernelMessages(fixture) {
   ];
 }
 
-function probeToolDef(fixture) {
+function probeToolDef(fixture: NormalizedFixture): ToolDef {
   return {
     name: fixture.tool.name,
     description: fixture.tool.description,
@@ -359,9 +550,9 @@ function probeToolDef(fixture) {
   };
 }
 
-function buildRequest(config, includeOptional = true) {
+function buildRequest(config: NormalizedProbeConfig, includeOptional = true): ProbeRequest {
   const key = deriveProbeKey(config);
-  const headers = {
+  const headers: Record<string, string> = {
     accept: "application/json",
     "content-type": "application/json",
     "user-agent": "termina-agent-core-provider-probe/1",
@@ -372,27 +563,28 @@ function buildRequest(config, includeOptional = true) {
   }
   Object.assign(headers, auth.cacheSessionHeaders(config.cacheIdentity));
 
-  let body;
+  let body: Record<string, unknown>;
   if (config.provider === "anthropic") {
     headers["anthropic-version"] = "2023-06-01";
+    const system: Array<Record<string, unknown>> = [{ type: "text", text: config.fixture.system }];
     body = {
       model: config.model,
       max_tokens: 16,
       stream: false,
-      system: [{ type: "text", text: config.fixture.system }],
+      system,
       messages: anthropicMessages(config.fixture),
     };
     if (includeOptional) {
-      body.system[0].cache_control = { type: "ephemeral", ttl: "1h" };
+      system[0].cache_control = { type: "ephemeral", ttl: "1h" };
     }
   } else if (config.protocol === "openai-responses") {
-    const options = {
+    const options: CompletionsOpts = {
       provider: config.provider,
       maxTokens: 16,
       ...(includeOptional && config.provider === "openai" && modelIsGpt56OrLater(config.model)
         ? {
           cacheKey: key,
-          promptCacheMode: "explicit",
+          promptCacheMode: "explicit" as const,
           explicitCacheBreakpoint: true,
         }
         : {}),
@@ -401,7 +593,7 @@ function buildRequest(config, includeOptional = true) {
           cacheKey: key,
           sessionId: key,
           ...(modelSupportsOpenRouterBreakpoint(config.model) ? { explicitCacheBreakpoint: true } : {}),
-          ...(modelIsGpt56OrLater(config.model) ? { promptCacheMode: "explicit" } : {}),
+          ...(modelIsGpt56OrLater(config.model) ? { promptCacheMode: "explicit" as const } : {}),
         }
         : {}),
       ...(includeOptional && config.provider === "xai" ? { cacheKey: key } : {}),
@@ -415,7 +607,7 @@ function buildRequest(config, includeOptional = true) {
     );
     body.stream = false;
   } else {
-    const options = {
+    const options: CompletionsOpts = {
       provider: config.provider,
       maxTokens: 16,
       ...(includeOptional && config.provider === "openrouter" ? { sessionId: key } : {}),
@@ -447,9 +639,9 @@ function buildRequest(config, includeOptional = true) {
   };
 }
 
-function cacheFieldsFor(body, headers) {
-  const fields = new Set();
-  const visit = (value) => {
+function cacheFieldsFor(body: Record<string, unknown>, headers: Record<string, string>): string[] {
+  const fields = new Set<string>();
+  const visit = (value: unknown): void => {
     if (Array.isArray(value)) {
       for (const item of value) visit(item);
       return;
@@ -467,9 +659,9 @@ function cacheFieldsFor(body, headers) {
   return [...fields].sort();
 }
 
-function markerCount(body) {
+function markerCount(body: Record<string, unknown>): number {
   let count = 0;
-  const visit = (value) => {
+  const visit = (value: unknown): void => {
     if (Array.isArray(value)) {
       for (const item of value) visit(item);
       return;
@@ -482,10 +674,10 @@ function markerCount(body) {
   return count;
 }
 
-function markerPositions(body) {
-  const positions = [];
+function markerPositions(body: Record<string, unknown>): number[] {
+  const positions: number[] = [];
   let position = 0;
-  const visit = (value) => {
+  const visit = (value: unknown): void => {
     if (Array.isArray(value)) {
       for (const item of value) visit(item);
       return;
@@ -499,18 +691,25 @@ function markerPositions(body) {
   return positions;
 }
 
-function ttlMilliseconds(ttl) {
+function ttlMilliseconds(ttl: unknown): number | null {
   if (ttl === "5m") return 5 * 60 * 1000;
   if (ttl === "30m") return 30 * 60 * 1000;
   if (ttl === "1h") return 60 * 60 * 1000;
   return null;
 }
 
-function policyFor(config, body, headers, requested) {
+function policyFor(config: NormalizedProbeConfig, body: Record<string, unknown>, headers: Record<string, string>, requested: boolean): ProbePolicy {
   const fields = cacheFieldsFor(body, headers);
-  let ttl = null;
-  if (Object.hasOwn(body, "prompt_cache_options") && body.prompt_cache_options?.ttl) ttl = body.prompt_cache_options.ttl;
-  if (fields.includes("cache_control")) ttl = body.system?.[0]?.cache_control?.ttl ?? null;
+  let ttl: unknown = null;
+  if (Object.hasOwn(body, "prompt_cache_options")) {
+    const promptCacheOptions = body.prompt_cache_options as { ttl?: unknown } | null | undefined;
+    if (promptCacheOptions?.ttl) ttl = promptCacheOptions.ttl;
+  }
+  if (fields.includes("cache_control")) {
+    const system = body.system as Array<{ cache_control?: unknown }> | null | undefined;
+    const cacheControl = system?.[0]?.cache_control as { ttl?: unknown } | null | undefined;
+    ttl = cacheControl?.ttl ?? null;
+  }
   return {
     namespace: `${config.provider}/${config.protocol}/${config.model}`,
     cacheFields: fields,
@@ -524,7 +723,7 @@ function policyFor(config, body, headers, requested) {
   };
 }
 
-function stripOptionalRequest(request, config) {
+function stripOptionalRequest(request: ProbeRequest, config: NormalizedProbeConfig): ProbeRequest {
   const body = cloneWithoutOptionalFields(request.body);
   const headers = strippedHeaders(request.headers);
   const bodyText = stableStringify(body);
@@ -539,11 +738,11 @@ function stripOptionalRequest(request, config) {
   };
 }
 
-function usageNumber(value) {
+function usageNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
-function firstNumber(...values) {
+function firstNumber(...values: unknown[]): number | null {
   for (const value of values) {
     const parsed = usageNumber(value);
     if (parsed !== null) return parsed;
@@ -551,13 +750,15 @@ function firstNumber(...values) {
   return null;
 }
 
-function usageFromPayload(provider, protocol, payload) {
-  const usage = isRecord(payload?.usage)
-    ? payload.usage
-    : isRecord(payload?.usageMetadata)
-      ? payload.usageMetadata
+function usageFromPayload(provider: string, protocol: string, payload: unknown): ProbeUsage {
+  const container: Record<string, unknown> | null =
+    typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>) : null;
+  const usage = container && isRecord(container.usage)
+    ? container.usage
+    : container && isRecord(container.usageMetadata)
+      ? container.usageMetadata
       : null;
-  const empty = { input: null, cacheRead: null, cacheWrite: null, output: null, reasoning: null };
+  const empty: ProbeUsage = { input: null, cacheRead: null, cacheWrite: null, output: null, reasoning: null };
   if (!usage) return empty;
   if (provider === "anthropic") {
     const creation = isRecord(usage.cache_creation) ? usage.cache_creation : null;
@@ -576,10 +777,11 @@ function usageFromPayload(provider, protocol, payload) {
   // The canonical compatibility parser owns the OpenAI/xAI/OpenRouter
   // response mapping. Keep its nullable semantics, then make an impossible
   // cached > total relationship entirely unknown for this evidence record.
+  const payloadOutput: unknown = container?.output;
   const parsed = protocol === "openai-responses"
     ? compat.responsesResultFromEvents([{
       type: "response.completed",
-      response: { ...payload, output: Array.isArray(payload?.output) ? payload.output : [], usage },
+      response: { ...(container ?? {}), output: Array.isArray(payloadOutput) ? payloadOutput : [], usage },
     }], () => {}, 0).usage
     : compat.completionResultFromEvents([{ usage }], () => {}, 0).usage;
   if (!parsed) return empty;
@@ -594,7 +796,7 @@ function usageFromPayload(provider, protocol, payload) {
   return parsed;
 }
 
-function optionalFieldRejection(status, rawBody) {
+function optionalFieldRejection(status: unknown, rawBody: unknown): boolean {
   if (status !== 400 && status !== 422) return false;
   const text = String(rawBody ?? "").toLowerCase();
   return [
@@ -605,17 +807,20 @@ function optionalFieldRejection(status, rawBody) {
   ].some((field) => text.includes(field));
 }
 
-function abortError() {
+function abortError(): DOMException {
   return new DOMException("aborted", "AbortError");
 }
 
-function readChunk(reader, signal) {
+function readChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal | null | undefined,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
   if (!signal) return reader.read();
   if (signal.aborted) return Promise.reject(abortError());
-  return new Promise((resolve, reject) => {
+  return new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
     let settled = false;
-    const cleanup = () => signal.removeEventListener("abort", onAbort);
-    const onAbort = () => {
+    const cleanup = (): void => { signal.removeEventListener("abort", onAbort); };
+    const onAbort = (): void => {
       if (settled) return;
       settled = true;
       cleanup();
@@ -627,7 +832,7 @@ function readChunk(reader, signal) {
       settled = true;
       cleanup();
       resolve(value);
-    }, (error) => {
+    }, (error: unknown) => {
       if (settled) return;
       settled = true;
       cleanup();
@@ -636,10 +841,14 @@ function readChunk(reader, signal) {
   });
 }
 
-async function readResponse(response, signal) {
-  const reader = response?.body && typeof response.body.getReader === "function" ? response.body.getReader() : null;
+async function readResponse(response: unknown, signal: AbortSignal | null | undefined): Promise<ProbeResponseData> {
+  const fetchResponse = response as {
+    body?: { getReader?: () => ReadableStreamDefaultReader<Uint8Array> } | null;
+    text: () => Promise<string>;
+  };
+  const reader = fetchResponse?.body && typeof fetchResponse.body.getReader === "function" ? fetchResponse.body.getReader() : null;
   if (reader) {
-    const chunks = [];
+    const chunks: Uint8Array[] = [];
     let total = 0;
     let oversized = false;
     try {
@@ -665,7 +874,7 @@ async function readResponse(response, signal) {
     const rawBody = new TextDecoder().decode(bytes);
     const responseHash = sha256Bytes(bytes);
     if (oversized) return { rawBody, responseHash, responseHashScope: "bounded-prefix", payload: null, oversized: true };
-    let payload = null;
+    let payload: unknown = null;
     try {
       payload = rawBody ? JSON.parse(rawBody) : null;
     } catch {
@@ -674,14 +883,14 @@ async function readResponse(response, signal) {
     return { rawBody, responseHash, responseHashScope: "full", payload, oversized: false };
   }
   if (signal?.aborted) throw new DOMException("aborted", "AbortError");
-  const raw = await response.text();
+  const raw = await fetchResponse.text();
   const bytes = Buffer.from(raw, "utf8");
   const oversized = bytes.byteLength > MAX_RESPONSE_BYTES;
   const bounded = oversized ? bytes.subarray(0, MAX_RESPONSE_BYTES) : bytes;
   const rawBody = bounded.toString("utf8");
   const responseHash = sha256Bytes(bounded);
   if (oversized) return { rawBody, responseHash, responseHashScope: "bounded-prefix", payload: null, oversized: true };
-  let payload = null;
+  let payload: unknown = null;
   try {
     payload = rawBody ? JSON.parse(rawBody) : null;
   } catch {
@@ -690,23 +899,26 @@ async function readResponse(response, signal) {
   return { rawBody, responseHash, responseHashScope: "full", payload, oversized: false };
 }
 
-function nowIso(dependencies) {
+function nowIso(dependencies: ProbeDependencies): string {
   const value = typeof dependencies?.now === "function" ? dependencies.now() : new Date();
   return isoTimestamp(value, "clock");
 }
 
-function waitForGap(milliseconds) {
+function waitForGap(milliseconds: number): Promise<void> {
   if (milliseconds <= 0) return Promise.resolve();
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function responseErrorKind(response, normalized) {
-  const status = Number.isInteger(response?.status) ? response.status : null;
+function responseErrorKind(response: unknown, normalized: NormalizedProbeConfig): string | null {
+  const fetchResponse = response as { status?: unknown; redirected?: unknown; url?: unknown } | null | undefined;
+  const fetchStatus: unknown = fetchResponse?.status;
+  const status = Number.isInteger(fetchStatus) ? (fetchStatus as number) : null;
   if (status !== null && status >= 300 && status < 400) return "redirect-rejected";
-  if (response?.redirected === true) return "redirect-rejected";
-  if (typeof response?.url === "string" && response.url && response.url !== normalized.endpoint) {
+  if (fetchResponse?.redirected === true) return "redirect-rejected";
+  const responseUrl: unknown = fetchResponse?.url;
+  if (typeof responseUrl === "string" && responseUrl && responseUrl !== normalized.endpoint) {
     try {
-      validateRoute(normalized.provider, normalized.protocol, new URL(response.url), normalized.allowHosts);
+      validateRoute(normalized.provider, normalized.protocol, new URL(responseUrl), normalized.allowHosts);
     } catch {
       return "redirect-route-rejected";
     }
@@ -715,7 +927,7 @@ function responseErrorKind(response, normalized) {
   return null;
 }
 
-function tracePolicy(policy, rejected, fallbackReason) {
+function tracePolicy(policy: PublicPolicy | null | undefined, rejected: boolean, fallbackReason: string | null): TracePolicyView {
   return {
     mode: policy?.mode ?? null,
     ttlMs: policy?.ttlMs ?? null,
@@ -727,7 +939,7 @@ function tracePolicy(policy, rejected, fallbackReason) {
   };
 }
 
-function traceAdapter(normalized, runId, taskId, attempts) {
+function traceAdapter(normalized: NormalizedProbeConfig, runId: string, taskId: string, attempts: ProbeAttempt[]) {
   const traceAttempts = attempts.map((attempt) => trace.createAttemptRecord({
     runId,
     taskId,
@@ -795,7 +1007,7 @@ function traceAdapter(normalized, runId, taskId, attempts) {
   };
 }
 
-function publicPolicy(policy) {
+function publicPolicy(policy: ProbePolicy | null | undefined): PublicPolicy {
   return {
     namespace: policy?.namespace ?? null,
     cacheFields: [...(policy?.cacheFields ?? [])],
@@ -809,7 +1021,7 @@ function publicPolicy(policy) {
   };
 }
 
-function publicPlan(config, request) {
+function publicPlan(config: NormalizedProbeConfig, request: ProbeRequest): PublicPlan {
   return {
     method: request.method,
     endpoint: config.endpoint,
@@ -827,7 +1039,7 @@ function publicPlan(config, request) {
   };
 }
 
-function buildProbePlanFromNormalized(normalized) {
+function buildProbePlanFromNormalized(normalized: NormalizedProbeConfig): ProbePlan {
   const request = buildRequest(normalized, true);
   return {
     schemaVersion: PROBE_SCHEMA_VERSION,
@@ -841,7 +1053,7 @@ function buildProbePlanFromNormalized(normalized) {
 }
 
 /** Validate and build a redacted dry-run plan without invoking fetch. */
-export function buildProbePlan(config) {
+export function buildProbePlan(config: unknown): ProbePlan {
   return buildProbePlanFromNormalized(normalizeConfig(config));
 }
 
@@ -850,7 +1062,7 @@ export function buildProbePlan(config) {
  * response bodies. A 400/422 mentioning an optional cache field gets one—and
  * only one—retry with all optional cache fields removed.
  */
-export async function runProviderCacheProbe(config, dependencies = {}) {
+export async function runProviderCacheProbe(config: unknown, dependencies: ProbeDependencies = {}) {
   const normalized = normalizeConfig(config);
   const probeStartedAt = nowIso(dependencies);
   const original = buildProbePlanFromNormalized(normalized);
@@ -891,10 +1103,10 @@ export async function runProviderCacheProbe(config, dependencies = {}) {
   if (typeof fetchImpl !== "function") throw new ProbeConfigurationError("FETCH_REQUIRED", "live mode requires fetch");
 
   const originalRequest = previewRequest;
-  const attempts = [];
+  const attempts: ProbeAttempt[] = [];
   let retryCount = 0;
-  let retryReason = null;
-  let stablePrefixReference = null;
+  let retryReason: string | null = null;
+  let stablePrefixReference: string | null = null;
   for (let repeatIndex = 0; repeatIndex < normalized.repeat; repeatIndex += 1) {
     const gapBeforeMs = repeatIndex > 0 ? normalized.gapsMs[repeatIndex - 1] ?? 0 : 0;
     if (normalized.waitForGaps && gapBeforeMs > 0) await waitForGap(gapBeforeMs);
@@ -903,10 +1115,10 @@ export async function runProviderCacheProbe(config, dependencies = {}) {
       const startedAt = nowIso(dependencies);
       const attemptId = `probe-attempt-${repeatIndex + 1}-${retryIndex + 1}-${sha256(`${runId}\0${repeatIndex}\0${retryIndex}`).slice(0, 16)}`;
       const retryOfAttemptId = retryIndex > 0 ? attempts.at(-1)?.attemptId ?? null : null;
-      let response;
-      let responseData = { rawBody: "", responseHash: null, responseHashScope: "full", payload: null, oversized: false };
-      let errorKind = null;
-      let errorMessage = null;
+      let response: unknown;
+      let responseData: ProbeResponseData = { rawBody: "", responseHash: null, responseHashScope: "full", payload: null, oversized: false };
+      let errorKind: string | null = null;
+      let errorMessage: string | null = null;
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), normalized.timeoutMs);
       try {
@@ -926,13 +1138,15 @@ export async function runProviderCacheProbe(config, dependencies = {}) {
         clearTimeout(timer);
       }
       const finishedAt = nowIso(dependencies);
-      const status = response && Number.isInteger(response.status) ? response.status : null;
+      const fetchStatus: unknown = (response as { status?: unknown } | null | undefined)?.status;
+      const status = Number.isInteger(fetchStatus) ? (fetchStatus as number) : null;
       const rejectedOptional = !errorKind && optionalFieldRejection(status, responseData.rawBody);
       const usage = errorKind ? { input: null, cacheRead: null, cacheWrite: null, output: null, reasoning: null } : usageFromPayload(normalized.provider, normalized.protocol, responseData.payload);
       const stablePrefixByteIdentical = stablePrefixReference === null || stablePrefixReference === request.stablePrefixText;
       if (stablePrefixReference === null) stablePrefixReference = request.stablePrefixText;
       const cacheObservation = usage.cacheRead !== null || usage.cacheWrite !== null ? "reported" : "unknown";
-      const attempt = {
+      const fetchOk: unknown = (response as { ok?: unknown } | null | undefined)?.ok;
+      const attempt: ProbeAttempt = {
         attempt: attempts.length + 1,
         repeatIndex,
         gapBeforeMs,
@@ -942,7 +1156,7 @@ export async function runProviderCacheProbe(config, dependencies = {}) {
         startedAt,
         finishedAt,
         httpStatus: status,
-        ok: !errorKind && Boolean(response?.ok ?? (status !== null && status >= 200 && status < 300)),
+        ok: !errorKind && Boolean(fetchOk ?? (status !== null && status >= 200 && status < 300)),
         requestBodyHash: sha256(request.bodyText),
         stablePrefixHash: sha256(request.stablePrefixText),
         stablePrefixText: request.stablePrefixText,
@@ -988,8 +1202,8 @@ export async function runProviderCacheProbe(config, dependencies = {}) {
   };
 }
 
-function parseArgs(argv) {
-  const values = {};
+function parseArgs(argv: string[]): Record<string, string | boolean | string[]> {
+  const values: Record<string, string | boolean | string[]> = {};
   const repeated = new Set(["allow-host"]);
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -1004,7 +1218,8 @@ function parseArgs(argv) {
     if (!value || value.startsWith("--")) throw new ProbeConfigurationError("INVALID_ARGUMENT", `missing value for --${name}`);
     index += 1;
     if (repeated.has(name)) {
-      values[name] = [...(values[name] ?? []), value];
+      const prior = values[name];
+      values[name] = [...(Array.isArray(prior) ? prior : []), value];
     } else {
       values[name] = value;
     }
@@ -1012,7 +1227,7 @@ function parseArgs(argv) {
   return values;
 }
 
-function usageText() {
+function usageText(): string {
   return [
     "Controlled agent-core provider cache probe (dry-run by default)",
     "",
@@ -1025,7 +1240,7 @@ function usageText() {
   ].join("\n");
 }
 
-async function main() {
+async function main(): Promise<void> {
   try {
     const args = parseArgs(process.argv.slice(2));
     if (args.help) {
@@ -1033,7 +1248,15 @@ async function main() {
       return;
     }
     const provider = args.provider;
-    const keyEnv = args["api-key-env"] ?? ({ anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY", xai: "XAI_API_KEY", openrouter: "OPENROUTER_API_KEY" }[provider] ?? "");
+    const providerKey = typeof provider === "string" ? provider : "";
+    const defaultKeyEnv: Record<string, string> = {
+      anthropic: "ANTHROPIC_API_KEY",
+      openai: "OPENAI_API_KEY",
+      xai: "XAI_API_KEY",
+      openrouter: "OPENROUTER_API_KEY",
+    };
+    const keyEnv = args["api-key-env"] ?? defaultKeyEnv[providerKey] ?? "";
+    const apiKey = typeof keyEnv === "string" && keyEnv ? process.env[keyEnv] ?? "" : "";
     const report = await runProviderCacheProbe({
       endpoint: args.endpoint,
       provider,
@@ -1042,7 +1265,7 @@ async function main() {
       sessionId: args["session-id"],
       sourceUrl: args["source-url"],
       retrievedAt: args["retrieved-at"],
-      apiKey: keyEnv ? process.env[keyEnv] ?? "" : "",
+      apiKey,
       allowHosts: args["allow-host"],
       live: args.live === true,
       allowLive: args["allow-live"] === true,

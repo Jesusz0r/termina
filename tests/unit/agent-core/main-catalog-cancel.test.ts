@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 /** End-to-end cancellation contract for provider auth and user catalog work. */
 process.env.TERMINA_CORE_TEST = "1";
 
@@ -19,12 +19,29 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+/** Request counters and hang modes for one mock-provider scenario. */
+interface ScenarioState {
+  modelModes: string[];
+  tokenMode: string;
+  modelRequests: number;
+  tokenRequests: number;
+  providerRequests: number;
+  catalogHangs: number;
+  tokenHangs: number;
+}
+
+interface ScenarioOptions {
+  auth?: Record<string, unknown>;
+  modelModes?: string[];
+  tokenMode?: string;
+}
+
 describe("Agent Core Catalog Cancellation Contract", () => {
   it("passes catalog cancellation contract", async () => {
     const root = mkdtempSync(join(tmpdir(), "termina-main-catalog-cancel-"));
     const mainPath = new URL("../../../agent-core/main.ts", import.meta.url).pathname;
     const mainUrl = new URL("../../../agent-core/main.ts", import.meta.url).href;
-    const scenarios = new Map();
+    const scenarios = new Map<string, ScenarioState>();
     
     const server = createServer((req, res) => {
       const match = new URL(req.url || "/", "http://127.0.0.1").pathname.match(/^\/([^/]+)\/(models|token|v1\/messages)$/);
@@ -93,7 +110,7 @@ describe("Agent Core Catalog Cancellation Contract", () => {
     });
     await new Promise((resolve, reject) => {
       server.once("error", reject);
-      server.listen(0, "127.0.0.1", resolve);
+      server.listen(0, "127.0.0.1", () => resolve(undefined));
     });
     const address = server.address();
     assert.ok(address && typeof address === "object");
@@ -112,18 +129,18 @@ describe("Agent Core Catalog Cancellation Contract", () => {
       expires: Date.now() - 1,
     });
     
-    function readJsonLines(path) {
+    function readJsonLines(path: string) {
       if (!existsSync(path)) return [];
       return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
     }
     
-    function clean(text) {
+    function clean(text: string) {
       return text
         .replace(/\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "")
         .replace(/\r/g, "");
     }
     
-    async function waitFor(predicate, timeoutMs, detail) {
+    async function waitFor(predicate: () => boolean, timeoutMs: number, detail: string | (() => string)) {
       const deadline = Date.now() + timeoutMs;
       while (!predicate()) {
         if (Date.now() >= deadline) {
@@ -134,7 +151,7 @@ describe("Agent Core Catalog Cancellation Contract", () => {
       }
     }
     
-    function replaceAuth(path, data) {
+    function replaceAuth(path: string, data: unknown) {
       const next = `${path}.next`;
       writeFileSync(next, `${JSON.stringify(data)}\n`, { mode: 0o600 });
       renameSync(next, path);
@@ -142,7 +159,7 @@ describe("Agent Core Catalog Cancellation Contract", () => {
       utimesSync(path, future, future);
     }
     
-    async function startScenario(name, options = {}) {
+    async function startScenario(name: string, options: ScenarioOptions = {}) {
       const dir = join(root, name);
       const eventsDir = join(dir, "events");
       const terminalId = `term-${name}`;
@@ -200,8 +217,8 @@ describe("Agent Core Catalog Cancellation Contract", () => {
       );
       let output = "";
       let exited = false;
-      let resolveExit;
-      const exitPromise = new Promise((resolve) => { resolveExit = resolve; });
+      let resolveExit: () => void = () => {};
+      const exitPromise = new Promise<void>((resolve) => { resolveExit = resolve; });
       pty.onData((chunk) => { output += chunk; });
       pty.onExit(() => {
         exited = true;
@@ -229,16 +246,16 @@ describe("Agent Core Catalog Cancellation Contract", () => {
         sessionFile,
         state,
         get output() { return output; },
-        tail(mark) { return clean(output.slice(mark)); },
+        tail(mark: number) { return clean(output.slice(mark)); },
         mark() { return output.length; },
-        write(text) { pty.write(text); },
-        replaceAuth(data) { replaceAuth(authPath, data); },
+        write(text: string) { pty.write(text); },
+        replaceAuth(data: unknown) { replaceAuth(authPath, data); },
         async stop() {
           clearInterval(ackTimer);
           if (!exited) {
             try { pty.kill(); } catch { /* already exited */ }
           }
-          const waitForExit = (timeoutMs) => new Promise((resolve) => {
+          const waitForExit = (timeoutMs: number) => new Promise<boolean>((resolve) => {
             if (exited) {
               resolve(true);
               return;
@@ -260,7 +277,9 @@ describe("Agent Core Catalog Cancellation Contract", () => {
       };
     }
     
-    async function expectCancelled(app, expected) {
+    type ScenarioApp = Awaited<ReturnType<typeof startScenario>>;
+
+    async function expectCancelled(app: ScenarioApp, expected: string) {
       const mark = app.mark();
       const started = performance.now();
       app.write("\x03");

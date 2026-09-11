@@ -28,11 +28,11 @@ const {
 
 const base = {
   sessionSeed: cacheSessionSeed("terminal-1"),
-  role: "main" as const,
+  role: "main",
   provider: "openrouter",
   protocol: "openai-responses",
   route: "openrouter.ai",
-};
+} as const;
 
 describe("Agent Core Cache", () => {
   describe("Cache Session Seed & Derivation", () => {
@@ -64,7 +64,7 @@ describe("Agent Core Cache", () => {
       });
       expect(longKey!.length).toBeLessThanOrEqual(CACHE_KEY_MAX_LENGTH);
 
-      expect(mainKey).not.toBe(deriveCacheIdentityKey({ ...base, role: "summary" as any }));
+      expect(mainKey).not.toBe(deriveCacheIdentityKey({ ...base, role: "summary" }));
       expect(mainKey).not.toBe(deriveCacheIdentityKey({ ...base, provider: "xai" }));
       expect(mainKey).not.toBe(deriveCacheIdentityKey({ ...base, protocol: "openai-completions" }));
       expect(mainKey).not.toBe(deriveCacheIdentityKey({ ...base, route: "api.openrouter.ai" }));
@@ -91,7 +91,7 @@ describe("Agent Core Cache", () => {
       expect(usesOpenAIExplicitCache("gpt-5.6", "openrouter", "api.openrouter.ai")).toBe(false);
       expect(usesOpenAIExplicitCache("gpt-5.6", "opencode-zen", "zen")).toBe(false);
       expect(usesOpenAIExplicitCache("gpt-5.6", "xai", "api.x.ai")).toBe(false);
-      expect(usesOpenAIExplicitCache("gpt-5.6", "openai")).toBe(false);
+      expect(usesOpenAIExplicitCache("gpt-5.6", "openai", undefined!)).toBe(false);
 
       expect(usesPromptCacheOptions("openai", "gpt-5.6", "api.openai.com")).toBe(true);
       expect(usesPromptCacheOptions("openrouter", "gpt-5.6", "api.openrouter.ai")).toBe(false);
@@ -124,7 +124,7 @@ describe("Agent Core Cache", () => {
       route: "https://api.openai.com/v1",
       model: "gpt-5.6",
       feature: CACHE_CAPABILITY_FEATURE.promptCacheKey,
-    };
+    } as const;
 
     it("returns correct capabilities for providers", () => {
       const cap = documentedCacheCapability(directOpenAiScope);
@@ -145,18 +145,18 @@ describe("Agent Core Cache", () => {
     it("manages LRU capability cache correctly", () => {
       const capabilityCache = createCapabilityCache(2);
       expect(typeof capabilityCacheKey(directOpenAiScope)).toBe("string");
-      expect(capabilityCacheKey(directOpenAiScope).length).toBeLessThanOrEqual(80);
+      expect(capabilityCacheKey(directOpenAiScope)?.length).toBeLessThanOrEqual(80);
 
       const cacheMiss = queryCapability(capabilityCache, directOpenAiScope, 1_000);
-      expect(cacheMiss.supported).toBeNull();
-      expect(cacheMiss.status).toBe("unknown");
+      expect(cacheMiss?.supported).toBeNull();
+      expect(cacheMiss?.status).toBe("unknown");
 
       const observed = recordCapability(capabilityCache, {
         scope: directOpenAiScope,
         supported: true,
         source: "probe",
-        observedAtMs: "100" as any,
-        expiresAtMs: "2000" as any,
+        observedAtMs: "100" as unknown as number,
+        expiresAtMs: "2000" as unknown as number,
       });
       expect(observed?.supported).toBe(true);
       expect(queryCapability(capabilityCache, directOpenAiScope, 1_999).supported).toBe(true);
@@ -189,7 +189,7 @@ describe("Agent Core Cache", () => {
 
   describe("Request Diagnostics and Miss Classification", () => {
     const identity = cacheIdentityFor(base)!;
-    const diagnostics = (overrides = {}) =>
+    const diagnostics = (overrides: Partial<cache.CacheRequestDiagnosticsInput> = {}) =>
       cache.cacheRequestDiagnostics({
         identity,
         policy: {
@@ -227,7 +227,7 @@ describe("Agent Core Cache", () => {
       expect(growing.reusablePrefixItems).toBe(3);
       expect(growing.comparedPrefixItems).toBe(2);
       expect(growing.comparedPrefixHash).toBe(before.reusablePrefixHash);
-      const classify = (current) => cache.classifyCacheMiss({
+      const classify = (current: cache.CacheRequestDiagnostics) => cache.classifyCacheMiss({
         previous: { ...prior, diagnostics: before }, current: { ...prior, atMs: 1, diagnostics: current },
       });
       expect(classify(growing).primary).toBe("backend-or-unknown");
@@ -261,13 +261,13 @@ describe("Agent Core Cache", () => {
       const after = diagnostics({ reusablePrefix: [{ role: "user", content: [{ type: "text", text: "first" }] }], previous: before });
       expect(after.comparedPrefixHash).toBe(before.reusablePrefixHash);
       expect(JSON.stringify(history)).toBe(snapshot);
-      const tool = (value) => [{ role: "assistant", content: [{ type: "tool_use", input: { cache_control: value } }] }];
+      const tool = (value: string) => [{ role: "assistant", content: [{ type: "tool_use", input: { cache_control: value } }] }];
       const toolBefore = diagnostics({ reusablePrefix: tool("a") });
       expect(diagnostics({ reusablePrefix: tool("b"), previous: toolBefore }).comparedPrefixHash).not.toBe(toolBefore.reusablePrefixHash);
     });
 
     it("keeps missing, invalid and over-budget history evidence unknown", () => {
-      const circular = {}; circular.self = circular;
+      const circular: { self?: unknown } = {}; circular.self = circular;
       for (const reusablePrefix of [undefined, "not an array", [circular],
         Array(4_097).fill({ role: "user", content: "x" }), [{ role: "user", content: "x".repeat(8 * 1024 * 1024) }],
       ]) {
@@ -291,10 +291,6 @@ describe("Agent Core Cache", () => {
     it("evaluates serialized tool hashing", () => {
       const toolsA = [{ name: "read_file", description: "lee 🔧", input_schema: { type: "object", properties: {} } }];
       const toolsKeyOrder = [{ input_schema: { properties: {}, type: "object" }, description: "lee 🔧", name: "read_file" }];
-      const toolsArrayOrder = [
-        { name: "write_file", input_schema: { type: "object" } },
-        { name: "read_file", input_schema: { type: "object" } },
-      ];
 
       const exactA = cache.cacheRequestDiagnostics({
         identity,

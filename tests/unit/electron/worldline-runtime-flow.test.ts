@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
@@ -6,6 +6,86 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { build, stop } from "esbuild";
+
+/** Candidate fixture shape shared by the flow probes. */
+interface FlowCandidate {
+  label: string;
+  role: string;
+  dir: string;
+  supportDir: string;
+  homeDir: string;
+  sessionDir: string;
+  eventsDir: string;
+  tmpDir: string;
+  cacheDir: string;
+  profilePath: string;
+  sessionFile: string;
+  comparisonBaseStateId: null;
+  promotionBaseStateId: null;
+  headStateId: null;
+  headCommit: Promise<void>;
+  terminalId: string | null;
+  pid: number | null | undefined;
+  lstart: null;
+  state: string;
+  version: number;
+  error: null;
+  startupAttemptId?: string;
+}
+
+/** Comparison fixture shape shared by the flow probes. */
+interface FlowComparison {
+  id: string;
+  dir: string;
+  templateDir: string;
+  sourceRunId: string;
+  sourceGitDir: string;
+  primaryRoot: string;
+  baseCommit: null;
+  baseStateId: null;
+  model: null;
+  thinkingLevel: null;
+  engine: string;
+  expectedCandidates: number;
+  uncertainSessionArtifacts: unknown[];
+  manifestWriteFailed: boolean;
+  teardownPromise: null;
+  uncertainAdmissionLease: null;
+  removeUncertainRequested: boolean;
+  createdAt: number;
+  candidates: Map<string, FlowCandidate>;
+  phase: string;
+  error: null;
+  readyTimer: null;
+}
+
+/** Spawn options the probes observe on createCandidate. */
+interface CandidateSpawnOpts {
+  beforeSpawn?: (terminalId: string) => void;
+}
+
+/** Evidence attempt surface the probes observe (abort ownership). */
+interface EvidenceAttemptView {
+  controller: AbortController;
+}
+
+/** Test-double view of the bundled WorldlineManager surface the probes use. */
+interface FlowWorldlineManager {
+  ready: Promise<unknown>;
+  candidateLaunch: unknown;
+  updateManifest: unknown;
+  removeOwnedDir: unknown;
+  runEvidence: unknown;
+  comparisons: Map<string, FlowComparison>;
+  candidateLaunchAttempts: Map<string, unknown>;
+  launchCandidate: (...args: unknown[]) => Promise<unknown>;
+  cancel: (...args: unknown[]) => Promise<{ ok: unknown }>;
+  discard: (...args: unknown[]) => Promise<{ ok: unknown }>;
+  measureEvidence: (...args: unknown[]) => Promise<{ ok: unknown }>;
+  onSessionReady: (...args: unknown[]) => void;
+  evidenceAttempts: { size: number };
+  dispose: () => Promise<unknown>;
+}
 
 describe("Worldline Runtime Flow Suite", () => {
   it("passes worldline runtime teardown & candidate flow natively", async () => {
@@ -21,9 +101,9 @@ describe("Worldline Runtime Flow Suite", () => {
     const { WorldlineManager, disposeWorldlineCoreClient, ensurePromotionRoots } = await import(`${pathToFileURL(worldlineBundle).href}?${Date.now()}`);
     const { terminateSandboxProcessGroup } = await import(`${pathToFileURL(sandboxBundle).href}?${Date.now()}`);
     
-    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
     const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
-    const alive = (pid) => {
+    const alive = (pid: number) => {
       try {
         process.kill(-pid, 0);
         return true;
@@ -32,7 +112,7 @@ describe("Worldline Runtime Flow Suite", () => {
       }
     };
     
-    const makeCandidate = (rootPath, label = "A") => ({
+    const makeCandidate = (rootPath: string, label = "A"): FlowCandidate => ({
       label,
       role: "moment",
       dir: join(rootPath, `${label}-candidate`),
@@ -56,7 +136,7 @@ describe("Worldline Runtime Flow Suite", () => {
       error: null,
     });
     
-    const makeComparison = (rootPath, id, candidate) => ({
+    const makeComparison = (rootPath: string, id: string, candidate: FlowCandidate): FlowComparison => ({
       id,
       dir: join(rootPath, id),
       templateDir: join(rootPath, `${id}-template`),
@@ -92,8 +172,8 @@ describe("Worldline Runtime Flow Suite", () => {
     const primaryRoot = join(root, "primary");
     await ensurePromotionRoots(worldsRoot, primaryRoot);
     
-    const terminated = [];
-    const updates = [];
+    const terminated: string[] = [];
+    const updates: Array<{ summary: unknown; afterRemoved: boolean }> = [];
     let removed = false;
     const deps = {
       worldsRoot,
@@ -109,10 +189,10 @@ describe("Worldline Runtime Flow Suite", () => {
       appReadPaths: () => [],
       forkCoreSession: async () => ({ ok: false, error: "unused" }),
       discardCoreSession: async () => ({ ok: false, error: "unused" }),
-      createCandidate: async () => ({ terminalId: "unused", pid: 0 }),
-      terminateCandidate: (terminalId) => terminated.push(terminalId),
+      createCandidate: async (_opts: CandidateSpawnOpts) => ({ terminalId: "unused", pid: 0 }),
+      terminateCandidate: (terminalId: string) => terminated.push(terminalId),
       createCandidateWorkspace: () => root,
-      onUpdate: (summary) => updates.push({ summary, afterRemoved: removed }),
+      onUpdate: (summary: unknown) => updates.push({ summary, afterRemoved: removed }),
       onCandidateState: () => {},
       onRemoved: () => { removed = true; },
       preflight: async () => ({ ok: false, reasons: ["unused"] }),
@@ -126,7 +206,7 @@ describe("Worldline Runtime Flow Suite", () => {
       acquireWriteLease: async () => ({ ok: false, error: "unused" }),
       releaseWriteLease: () => {},
       flushDirtyModels: async () => ({ ok: false }),
-      canonicalPath: async (path) => path,
+      canonicalPath: async (path: string) => path,
       mineFiles: () => new Set(),
       drainMineUpdates: async () => {},
       runSandboxedEvidence: async () => ({ code: 0, stdout: "", timedOut: false }),
@@ -141,18 +221,21 @@ describe("Worldline Runtime Flow Suite", () => {
       installPromoted: async () => ({ terminalId: "unused" }),
     };
     
-    let manager;
-    let spawnedResolve;
-    const spawned = new Promise((resolve) => { spawnedResolve = resolve; });
-    deps.createCandidate = async (opts) => {
+    // Assigned in try before any probe runs; finally guards with ?. for construction failure.
+    let manager!: FlowWorldlineManager;
+    let spawnedResolve: (value: { terminalId: string; pid: number }) => void = () => {};
+    const spawned = new Promise<{ terminalId: string; pid: number }>((resolve) => { spawnedResolve = resolve; });
+    deps.createCandidate = async (opts: CandidateSpawnOpts) => {
       const terminalId = "candidate-fresh-1";
       opts.beforeSpawn?.(terminalId);
       const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 30000)"], { detached: true, stdio: "ignore" });
-      spawnedResolve({ terminalId, pid: child.pid });
+      const childPid = child.pid;
+      if (childPid === undefined) throw new Error("candidate child failed to spawn");
+      spawnedResolve({ terminalId, pid: childPid });
       // Fresh startup readiness is immediate, before the launch continuation's
       // delayed process identity lookup.
-      manager.onSessionReady(terminalId, true, null, { bridgeId: "fresh-bridge", generation: "fresh-generation", seq: 1 });
-      return { terminalId, pid: child.pid };
+      manager?.onSessionReady(terminalId, true, null, { bridgeId: "fresh-bridge", generation: "fresh-generation", seq: 1 });
+      return { terminalId, pid: childPid };
     };
     
     try {
@@ -177,12 +260,14 @@ describe("Worldline Runtime Flow Suite", () => {
       assert.equal(updates.some((update) => update.afterRemoved), false, "no stale candidate update follows worldline:removed");
       assert.equal(terminated.includes(created.terminalId), true, "late startup cleanup closes the exact terminal");
       const replacement = spawn(process.execPath, ["-e", "setInterval(() => {}, 30000)"], { detached: true, stdio: "ignore" });
-      candidate.pid = replacement.pid;
+      const replacementPid = replacement.pid;
+      if (replacementPid === undefined) throw new Error("replacement child failed to spawn");
+      candidate.pid = replacementPid;
       candidate.startupAttemptId = "replacement-attempt";
       await sleep(2200);
       assert.equal(alive(created.pid), false, "late process-start identity cleanup removes the detached group");
-      assert.equal(alive(replacement.pid), true, "late cleanup cannot kill a replacement pid");
-      try { process.kill(-replacement.pid, "SIGKILL"); } catch {}
+      assert.equal(alive(replacementPid), true, "late cleanup cannot kill a replacement pid");
+      try { process.kill(-replacementPid, "SIGKILL"); } catch {}
       assert.ok(oldAttempt, "the cancelled attempt remained identifiable through teardown");
     
       // The attempt fence is source-visible and replacement-safe: cleanup uses the
@@ -198,8 +283,8 @@ describe("Worldline Runtime Flow Suite", () => {
       const evidenceComparison = makeComparison(root, "evidence-discard", evidenceCandidate);
       evidenceComparison.phase = "running";
       manager.comparisons.set(evidenceComparison.id, evidenceComparison);
-      let evidenceAttempt;
-      manager.runEvidence = (_comparisonId, attempt) => new Promise((resolve) => {
+      let evidenceAttempt: EvidenceAttemptView | undefined;
+      manager.runEvidence = (_comparisonId: string, attempt: EvidenceAttemptView) => new Promise((resolve) => {
         evidenceAttempt = attempt;
         attempt.controller.signal.addEventListener("abort", () => resolve({ ok: false, error: "evidence was cancelled" }), { once: true });
       });
@@ -217,13 +302,14 @@ describe("Worldline Runtime Flow Suite", () => {
       const cancelEvidenceComparison = makeComparison(root, "evidence-cancel", cancelEvidenceCandidate);
       cancelEvidenceComparison.phase = "running";
       manager.comparisons.set(cancelEvidenceComparison.id, cancelEvidenceComparison);
-      let cancelEvidenceAttempt;
-      manager.runEvidence = (_comparisonId, attempt) => new Promise((resolve) => {
+      let cancelEvidenceAttempt: EvidenceAttemptView | undefined;
+      manager.runEvidence = (_comparisonId: string, attempt: EvidenceAttemptView) => new Promise((resolve) => {
         cancelEvidenceAttempt = attempt;
         attempt.controller.signal.addEventListener("abort", () => resolve({ ok: false, error: "evidence was cancelled" }), { once: true });
       });
       const cancelEvidencePromise = manager.measureEvidence(cancelEvidenceComparison.id);
       await nextTurn();
+      assert.ok(cancelEvidenceAttempt, "cancel evidence worker is registered before it starts");
       const cancelledEvidence = await manager.cancel(cancelEvidenceComparison.id);
       const cancelledEvidenceResult = await cancelEvidencePromise;
       assert.equal(cancelledEvidence.ok, true, "direct cancel drains its evidence worker");

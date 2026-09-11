@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 /**
  * Focused integration contract for provider retry attempt tracing.
  *
@@ -22,7 +22,7 @@ import { join } from "node:path";
 
 describe("Agent Core Main Stage 3B Retry Trace Contract", () => {
   it("passes Stage 3B retry trace contract", async () => {
-    function readJsonLines(path) {
+    function readJsonLines(path: string) {
       if (!existsSync(path)) return [];
       return readFileSync(path, "utf8")
         .split("\n")
@@ -96,7 +96,7 @@ describe("Agent Core Main Stage 3B Retry Trace Contract", () => {
     child.stderr.on("data", (chunk) => { stderr += chunk; });
     const ackTimer = setInterval(() => {
       try {
-        const request = readJsonLines(join(events, `${terminalId}.jsonl`)).findLast((record) => record.t === "preflight_request");
+        const request = [...readJsonLines(join(events, `${terminalId}.jsonl`))].reverse().find((record) => record.t === "preflight_request");
         if (request?.requestId) {
           writeFileSync(
             join(events, `ack-${terminalId}-${request.requestId}.json`),
@@ -109,7 +109,7 @@ describe("Agent Core Main Stage 3B Retry Trace Contract", () => {
       }
     }, 10);
     
-    const result = await new Promise((resolve) => {
+    const result = await new Promise<{ code: number | null; signal: string | null }>((resolve) => {
       const timer = setTimeout(() => {
         child.kill("SIGKILL");
         resolve({ code: -1, signal: "SIGKILL" });

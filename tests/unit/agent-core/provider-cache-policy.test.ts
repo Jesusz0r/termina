@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 /**
  * Provider/cache contract tests for the token-efficiency roadmap.
  *
@@ -24,6 +24,27 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { CacheIdentityInputs, ProviderId, ProviderProtocol } from "../../../agent-core/auth.ts";
+
+interface LocalProviderOptions {
+  provider: string;
+  model: string;
+  baseEnv: { key: string; token: string; suffix?: string };
+  providerBaseUrl?: string;
+  scenario: string;
+  terminalId: string;
+}
+
+interface ResponsesInputItem {
+  type?: string;
+  content?: Array<{ prompt_cache_breakpoint?: { mode?: string }; cache_control?: unknown }>;
+  output?: unknown;
+}
+
+/** The responses serializers return untyped bodies; tests probe input items by shape. */
+function responsesInputItems(body: Record<string, unknown>): ResponsesInputItem[] {
+  return body.input as ResponsesInputItem[];
+}
 
 describe("Agent Core Provider Cache Policy Invariants", () => {
   it("passes provider cache tests", async () => {
@@ -40,9 +61,9 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       throw new Error(`agent-core/main.ts could not load: ${detail}`);
     }
     
-    const failures = [];
+    const failures: Array<{ name: string; error: unknown }> = [];
     
-    async function test(name, fn) {
+    async function test(name: string, fn: () => void | Promise<void>): Promise<void> {
       try {
         await fn();
         console.log(`PASS  ${name}`);
@@ -52,20 +73,21 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       }
     }
     
-    function usageField(usage, field) {
+    function usageField(usage: unknown, field: string): unknown {
       assert.ok(usage, "provider returned no usage object");
-      return usage[field];
+      return (usage as Record<string, unknown>)[field];
     }
     
-    function reasoningField(usage) {
+    function reasoningField(usage: unknown): unknown {
       assert.ok(usage, "provider returned no usage object");
-      return Object.prototype.hasOwnProperty.call(usage, "reasoning") ? usage.reasoning : usage.reasoningTokens;
+      const record = usage as Record<string, unknown>;
+      return Object.prototype.hasOwnProperty.call(record, "reasoning") ? record.reasoning : record.reasoningTokens;
     }
     
-    function allCacheMarkers(value) {
+    function allCacheMarkers(value: unknown): Array<Record<string, unknown>> {
       if (!value || typeof value !== "object") return [];
       if (Array.isArray(value)) return value.flatMap(allCacheMarkers);
-      const record = value;
+      const record = value as Record<string, unknown>;
       const own = Object.prototype.hasOwnProperty.call(record, "cache_control") ||
         Object.prototype.hasOwnProperty.call(record, "prompt_cache_breakpoint")
         ? [record]
@@ -73,7 +95,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       return own.concat(Object.values(record).flatMap(allCacheMarkers));
     }
     
-    function readJsonLines(path) {
+    function readJsonLines(path: string) {
       if (!existsSync(path)) return [];
       return readFileSync(path, "utf8")
         .split("\n")
@@ -81,8 +103,8 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
         .map((line) => JSON.parse(line));
     }
     
-    function streamFromChunks(chunks, onCancel = () => {}) {
-      return new ReadableStream({
+    function streamFromChunks(chunks: Uint8Array[], onCancel: () => void = () => {}): ReadableStream<Uint8Array> {
+      return new ReadableStream<Uint8Array>({
         start(controller) {
           for (const chunk of chunks) controller.enqueue(chunk);
           controller.close();
@@ -91,18 +113,18 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       });
     }
     
-    function encoded(value) {
+    function encoded(value: string): Uint8Array {
       return new TextEncoder().encode(value);
     }
     
     /** Run a direct agent-core request against a deterministic in-process fetch. */
-    async function runLocalProvider({ provider, model, baseEnv, providerBaseUrl, scenario, terminalId }) {
+    async function runLocalProvider({ provider, model, baseEnv, providerBaseUrl, scenario, terminalId }: LocalProviderOptions) {
       const root = mkdtempSync(join(tmpdir(), "agent-core-provider-"));
       const events = join(root, "events");
       mkdirSync(events, { recursive: true, mode: 0o700 });
       const requestLog = join(root, "provider-requests.jsonl");
       const baseUrl = providerBaseUrl ?? `http://provider.local${baseEnv.suffix ?? ""}`;
-      const env = {
+      const env: Record<string, string | undefined> = {
         ...process.env,
         TERMINA_CORE_TEST: "1",
         TERMINA_CORE_PROVIDER: provider,
@@ -204,7 +226,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       const ackTimer = setInterval(() => {
         try {
           const sidecar = readJsonLines(join(events, `${terminalId}.jsonl`));
-          const request = sidecar.findLast((record) => record.t === "preflight_request");
+          const request = sidecar.filter((record) => record.t === "preflight_request").at(-1);
           if (request?.requestId) {
             writeFileSync(
               join(events, `ack-${terminalId}-${request.requestId}.json`),
@@ -217,7 +239,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
         }
       }, 10);
     
-      const result = await new Promise((resolve) => {
+      const result = await new Promise<{ code: number | null; signal: string | null }>((resolve) => {
         const timer = setTimeout(() => {
           child.kill("SIGKILL");
           resolve({ code: -1, signal: "SIGKILL" });
@@ -242,7 +264,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
     
     await test("cache identity is private, stable, bounded, and changes with the session", () => {
       const raw = "session-with-sensitive-project-name";
-      const identityInput = {
+      const identityInput: CacheIdentityInputs = {
         sessionSeed: auth.cacheSessionSeed(raw),
         role: "main",
         provider: "openrouter",
@@ -268,7 +290,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
     await test("cache header namespaces differ across provider routes", () => {
       const session = "same-session";
       const seed = auth.cacheSessionSeed(session);
-      const identityFor = (provider, route, protocol = "openai-responses") => auth.cacheIdentityFor({
+      const identityFor = (provider: ProviderId, route: string, protocol: ProviderProtocol = "openai-responses") => auth.cacheIdentityFor({
         sessionSeed: seed,
         role: "main",
         provider,
@@ -404,13 +426,13 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
     await test("writeless relay routes treat a null cache write as exact", () => {
       const core = requireCore();
       assert.equal(typeof core.cacheWriteSupportedFor, "function");
-      for (const provider of ["xai", "opencode-go", "opencode-zen"]) {
+      for (const provider of ["xai", "opencode-go", "opencode-zen"] as const) {
         assert.equal(core.cacheWriteSupportedFor(provider, null), false);
       }
-      for (const provider of ["openai-codex", "openai", "anthropic", "google", "openrouter"]) {
+      for (const provider of ["openai-codex", "openai", "anthropic", "google", "openrouter"] as const) {
         assert.equal(core.cacheWriteSupportedFor(provider, null), null);
       }
-      for (const provider of ["xai", "opencode-go", "opencode-zen", "openai-codex"]) {
+      for (const provider of ["xai", "opencode-go", "opencode-zen", "openai-codex"] as const) {
         assert.equal(core.cacheWriteSupportedFor(provider, 0), true);
         assert.equal(core.cacheWriteSupportedFor(provider, 12), true);
       }
@@ -499,7 +521,8 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       const chat = await compat.readSseJson(
         streamFromChunks([encoded('data: {"choices":[{"finish_reason":"tool_calls"}]}\n')]),
       );
-      assert.equal(chat[0]?.choices?.[0]?.finish_reason, "tool_calls");
+      const chatChoices = chat[0]?.choices as Array<{ finish_reason?: string }> | undefined;
+      assert.equal(chatChoices?.[0]?.finish_reason, "tool_calls");
       const done = await compat.readSseJson(
         streamFromChunks([encoded('data: {"type":"response.output_text.delta","delta":"ok"}\ndata: [DONE]\n')]),
       );
@@ -697,8 +720,9 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       assert.equal(body.prompt_cache_key, undefined);
       assert.equal(body.session_id, undefined);
       assert.equal(body.prompt_cache_options, undefined);
-      assert.equal(body.input[0]?.content?.[0]?.prompt_cache_breakpoint, undefined);
-      assert.equal(body.input[0]?.content?.[0]?.cache_control, undefined);
+      const geminiInput = responsesInputItems(body);
+      assert.equal(geminiInput[0]?.content?.[0]?.prompt_cache_breakpoint, undefined);
+      assert.equal(geminiInput[0]?.content?.[0]?.cache_control, undefined);
     });
     
     await test("optional cache controls follow documented route inputs", () => {
@@ -709,7 +733,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
         explicitCacheBreakpoint: true,
         explicitCacheSkipTail: false,
         cacheControl: true,
-      };
+      } as const;
       const openai = compat.responsesBody(
         "gpt-5.6-sol",
         "sys",
@@ -718,9 +742,9 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
         { ...opts, provider: "openai" },
       );
       assert.equal(openai.prompt_cache_key, opts.cacheKey);
-      assert.equal(openai.prompt_cache_options?.mode, "explicit");
+      assert.equal((openai.prompt_cache_options as { mode?: string } | undefined)?.mode, "explicit");
       assert.deepEqual(
-        openai.input.map((item: any) => item.content?.[0]?.prompt_cache_breakpoint?.mode ?? null),
+        responsesInputItems(openai).map((item) => item.content?.[0]?.prompt_cache_breakpoint?.mode ?? null),
         [null, "explicit", "explicit", "explicit", "explicit"],
       );
       assert.equal(openai.session_id, undefined);
@@ -733,7 +757,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
         { ...opts, provider: "openai", explicitCacheSkipTail: true },
       );
       assert.deepEqual(
-        stableHistory.input.map((item: any) => item.content?.[0]?.prompt_cache_breakpoint?.mode ?? null),
+        responsesInputItems(stableHistory).map((item) => item.content?.[0]?.prompt_cache_breakpoint?.mode ?? null),
         ["explicit", "explicit", "explicit", "explicit", null],
       );
 
@@ -746,8 +770,9 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       );
       assert.equal(xai.prompt_cache_key, opts.cacheKey);
       assert.equal(xai.prompt_cache_options, undefined);
-      assert.equal(xai.input[0]?.content?.[0]?.prompt_cache_breakpoint, undefined);
-      assert.equal(xai.input[0]?.content?.[0]?.cache_control, undefined);
+      const xaiInput = responsesInputItems(xai);
+      assert.equal(xaiInput[0]?.content?.[0]?.prompt_cache_breakpoint, undefined);
+      assert.equal(xaiInput[0]?.content?.[0]?.cache_control, undefined);
       assert.equal(xai.session_id, undefined);
     });
 
@@ -768,7 +793,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
           cacheControl: true,
         },
       );
-      const output = body.input.find((item: any) => item.type === "function_call_output");
+      const output = responsesInputItems(body).find((item) => item.type === "function_call_output");
       assert.deepEqual(output?.output, [{
         type: "input_text",
         text: "file contents",
@@ -779,7 +804,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       assert.equal(body.prompt_cache_options, undefined);
       assert.equal(JSON.stringify(body).includes("cache_control"), false);
       const stripped = compat.stripResponsesBreakpoints(body);
-      const strippedOutput = stripped.input.find((item: any) => item.type === "function_call_output");
+      const strippedOutput = responsesInputItems(stripped).find((item) => item.type === "function_call_output");
       assert.deepEqual(strippedOutput?.output, [{ type: "input_text", text: "file contents" }]);
     });
 
@@ -854,7 +879,7 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
     });
     
     await test("Anthropic direct history markers stay within the documented 20-block lookback", () => {
-      const history = [{ role: "user", content: [{ type: "text", text: "old reusable text" }] }];
+      const history: Array<{ role: string; content: unknown }> = [{ role: "user", content: [{ type: "text", text: "old reusable text" }] }];
       for (let i = 0; i < 20; i++) {
         history.push({ role: "assistant", content: [{ type: "thinking", thinking: `thought-${i}` }] });
       }
@@ -872,12 +897,13 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
       const prefix = requireCore().buildCachedPrefix("system", premarkedTools);
       const markers = allCacheMarkers(prefix);
       assert.ok(markers.length <= 4);
-      assert.ok(markers.every((entry) => entry.cache_control?.ttl === undefined));
+      assert.ok(markers.every((entry) => (entry.cache_control as { ttl?: unknown } | undefined)?.ttl === undefined));
     });
     
     await test("route capability defaults do not claim OpenCode Zen GPT explicit caching", () => {
-      assert.equal(auth.usesOpenAIExplicitCache("gpt-5.6-sol", "opencode-zen"), false);
-      assert.equal(auth.usesPromptCacheOptions("opencode-zen", "gpt-5.6-sol"), false);
+      // The route is intentionally undefined: these pin the default-route behavior.
+      assert.equal(auth.usesOpenAIExplicitCache("gpt-5.6-sol", "opencode-zen", undefined!), false);
+      assert.equal(auth.usesPromptCacheOptions("opencode-zen", "gpt-5.6-sol", undefined!), false);
     });
     
     await test("direct OpenAI route may use documented explicit cache controls", async () => {

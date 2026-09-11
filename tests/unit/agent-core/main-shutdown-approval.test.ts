@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 /** Shutdown must resolve an in-flight approval before tearing down the TUI. */
 process.env.TERMINA_CORE_TEST = "1";
 
@@ -9,7 +9,7 @@ describe("Agent Core Shutdown Approval Contract", () => {
   it("passes shutdown-with-pending-approval contract", async () => {
     const cwd = process.cwd();
     const mainPath = new URL("../../../agent-core/main.ts", import.meta.url).pathname;
-    const event = (value) => `data: ${JSON.stringify(value)}\n\n`;
+    const event = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
     const functionCall = {
       type: "function_call",
       id: "item-1",
@@ -54,7 +54,7 @@ describe("Agent Core Shutdown Approval Contract", () => {
     
     let output = "";
     pty.onData((chunk) => { output += chunk; });
-    const waitFor = async (predicate, timeoutMs) => {
+    const waitFor = async (predicate: () => boolean, timeoutMs: number) => {
       const deadline = Date.now() + timeoutMs;
       while (!predicate()) {
         if (Date.now() >= deadline) throw new Error(`timed out; output=${output}`);
@@ -69,7 +69,7 @@ describe("Agent Core Shutdown Approval Contract", () => {
       // choice prompt is still live. A stuck approval promise would keep this
       // pty open or dereference the torn-down surface.
       pty.write("\x04");
-      const exit = await new Promise((resolve, reject) => {
+      const exit = await new Promise<{ exitCode: number; signal?: number }>((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error(`shutdown timed out; output=${output}`)), 8_000);
         pty.onExit((result) => {
           clearTimeout(timer);

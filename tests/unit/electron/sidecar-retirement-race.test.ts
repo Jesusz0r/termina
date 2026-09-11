@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
+import type { SidecarTailer as SidecarTailerType } from "../../../electron/sidecar.ts";
 
 describe("Sidecar Retirement Race & Restart Invariants", () => {
   it("passes sidecar retirement race and restart probes", async () => {
@@ -73,16 +74,15 @@ describe("Sidecar Retirement Race & Restart Invariants", () => {
     }
     `;
     
-    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-    const waitFor = async (predicate, message, timeoutMs = 5000) => {
+    const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+    const waitFor = async (predicate: () => boolean, message: string, timeoutMs = 5000): Promise<void> => {
       const deadline = Date.now() + timeoutMs;
       while (!predicate() && Date.now() < deadline) await wait(5);
       assert.equal(predicate(), true, message);
     };
-    const record = (bridgeId, seq, t = "checkpoint_result", generation) => `${JSON.stringify({ bridgeId, seq, t, ...(generation ? { generation } : {}), ok: true })}\n`;
-    const largeRecord = (bridgeId, seq, payloadBytes, t = "checkpoint_result", generation) => `${JSON.stringify({ bridgeId, seq, t, ...(generation ? { generation } : {}), ok: true, payload: "x".repeat(payloadBytes) })}\n`;
+    const record = (bridgeId: string, seq: number, t = "checkpoint_result", generation?: string): string => `${JSON.stringify({ bridgeId, seq, t, ...(generation ? { generation } : {}), ok: true })}\n`;
     const fakeWatch = () => ({ close() {} });
-    const publishOwnerProof = async (sealedPath, bridgeId, writerGeneration = randomUUID(), lastSeq = 1) => {
+    const publishOwnerProof = async (sealedPath: string, bridgeId: string, writerGeneration = randomUUID(), lastSeq = 1): Promise<void> => {
       const stats = statSync(sealedPath);
       const sealedName = sealedPath.split("/").at(-1);
       const identity = `${String(stats.dev)}:${String(stats.ino)}`;
@@ -111,8 +111,10 @@ describe("Sidecar Retirement Race & Restart Invariants", () => {
     await mkdir(eventsDir);
     const { SidecarTailer } = await import(`${pathToFileURL(bundle).href}?${Date.now()}`);
     
-    const makeTailer = () => {
-      const tailer = new SidecarTailer(eventsDir, fakeWatch, { maxBacklogBytes: 64 * 1024 * 1024 });
+    const makeTailer = (): SidecarTailerType => {
+      // The tailer under test is the esbuild bundle (with the fs-shim
+      // plugin), so it arrives untyped and is cast back to the app class.
+      const tailer = new SidecarTailer(eventsDir, fakeWatch, { maxBacklogBytes: 64 * 1024 * 1024 }) as SidecarTailerType;
       tailer.start();
       return tailer;
     };
@@ -126,7 +128,7 @@ describe("Sidecar Retirement Race & Restart Invariants", () => {
       const finalGuardSealed = join(eventsDir, `.${finalGuardId}.jsonl.manual.sealed`);
       await writeFile(finalGuardActive, "");
       const firstFinalGuardTailer = makeTailer();
-      const firstFinalGuardReceived = [];
+      const firstFinalGuardReceived: number[] = [];
       firstFinalGuardTailer.onEvent = (_id, event) => {
         firstFinalGuardReceived.push(event.seq);
         return true;
@@ -169,7 +171,7 @@ describe("Sidecar Retirement Race & Restart Invariants", () => {
       }
     
       await wait(50);
-      const afterFinalGuardRestart = [];
+      const afterFinalGuardRestart: number[] = [];
       const secondFinalGuardTailer = makeTailer();
       secondFinalGuardTailer.onEvent = (_id, event) => {
         afterFinalGuardRestart.push(event.seq);
@@ -193,7 +195,7 @@ describe("Sidecar Retirement Race & Restart Invariants", () => {
       const verifyWindowSealed = join(eventsDir, `.${verifyWindowId}.jsonl.manual.sealed`);
       await writeFile(verifyWindowActive, "");
       const verifyWindowTailer = makeTailer();
-      const verifyWindowReceived = [];
+      const verifyWindowReceived: number[] = [];
       verifyWindowTailer.onEvent = (_id, event) => {
         verifyWindowReceived.push(event.seq);
         return true;
@@ -222,7 +224,7 @@ describe("Sidecar Retirement Race & Restart Invariants", () => {
       }
       await wait(50);
       const verifyWindowRestart = makeTailer();
-      const verifyWindowAfterRestart = [];
+      const verifyWindowAfterRestart: number[] = [];
       verifyWindowRestart.onEvent = (_id, event) => {
         verifyWindowAfterRestart.push(event.seq);
         return true;
@@ -244,7 +246,7 @@ describe("Sidecar Retirement Race & Restart Invariants", () => {
       const verifyGrowthSealed = join(eventsDir, `.${verifyGrowthId}.jsonl.manual.sealed`);
       await writeFile(verifyGrowthActive, "");
       const verifyGrowthTailer = makeTailer();
-      const verifyGrowthReceived = [];
+      const verifyGrowthReceived: number[] = [];
       verifyGrowthTailer.onEvent = (_id, event) => {
         verifyGrowthReceived.push(event.seq);
         return true;
@@ -274,7 +276,7 @@ describe("Sidecar Retirement Race & Restart Invariants", () => {
       const repeatedActive = join(eventsDir, `${repeatedId}.jsonl`);
       await writeFile(repeatedActive, "");
       const repeatedTailer = makeTailer();
-      const repeatedReceived = [];
+      const repeatedReceived: number[] = [];
       repeatedTailer.onEvent = (_id, event) => {
         repeatedReceived.push(event.seq);
         return true;
@@ -325,9 +327,9 @@ describe("Sidecar Retirement Race & Restart Invariants", () => {
       const boundedSealed = join(eventsDir, `.${boundedId}.jsonl.first.sealed`);
       const boundedSecondSealed = join(eventsDir, `.${boundedId}.jsonl.second.sealed`);
       await writeFile(boundedActive, "");
-      const boundedTailer = new SidecarTailer(eventsDir, fakeWatch, { maxBacklogBytes: 1024 });
+      const boundedTailer = new SidecarTailer(eventsDir, fakeWatch, { maxBacklogBytes: 1024 }) as SidecarTailerType;
       boundedTailer.start();
-      const boundedReceived = [];
+      const boundedReceived: number[] = [];
       boundedTailer.onEvent = (_id, event) => {
         boundedReceived.push(event.seq);
         return true;
@@ -341,6 +343,7 @@ describe("Sidecar Retirement Race & Restart Invariants", () => {
         await waitFor(() => readdirSync(eventsDir).some((name) => name.startsWith(basename(boundedSealed) + ".retained-")), "unproven generation did not produce its single quarantine anchor");
         const boundedRetainedAnchor = readdirSync(eventsDir).find((name) => name.startsWith(basename(boundedSealed) + ".retained-"));
         assert.equal(typeof boundedRetainedAnchor, "string");
+        if (boundedRetainedAnchor === undefined) throw new Error("bounded retained anchor was not created");
         // An escaped descriptor may continue growing the retained inode. The
         // tailer must surface bounded overflow/quarantine without allocating a
         // second identity anchor or deleting the first one.
@@ -374,14 +377,14 @@ describe("Sidecar Retirement Race & Restart Invariants", () => {
       // Crash probes cover each publication boundary. The first tailer commits
       // seq1/2, then the filesystem is left at one deterministic intermediate
       // state before restart. Every case must deliver only seq3 afterward.
-      const runCrashPublicationCase = async (caseName, stage) => {
+      const runCrashPublicationCase = async (caseName: string, stage: string): Promise<void> => {
         const id = `term-crash-${caseName}`;
         const active = join(eventsDir, `${id}.jsonl`);
         const sealed = join(eventsDir, `.${id}.jsonl.crash.sealed`);
         const crashGeneration = randomUUID();
         await writeFile(active, "");
         const first = makeTailer();
-        const firstReceived = [];
+        const firstReceived: number[] = [];
         first.onEvent = (_id, event) => {
           firstReceived.push(event.seq);
           return true;
@@ -413,7 +416,7 @@ describe("Sidecar Retirement Race & Restart Invariants", () => {
         }
     
         const second = makeTailer();
-        const afterRestart = [];
+        const afterRestart: number[] = [];
         second.onEvent = (_id, event) => {
           afterRestart.push(event.seq);
           return true;

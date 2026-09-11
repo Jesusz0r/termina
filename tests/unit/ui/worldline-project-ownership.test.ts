@@ -5,17 +5,39 @@ import {
   beginWorldlineHydration,
   clearWorldlineProjectUi,
   handleWorldlineBusy,
-  handleWorldlineInstances,
   refreshWorldlineCandidateTest,
-  refreshWorldlinePaneLabel,
   updateWorldlinePaneTab,
   worldlineEventBelongsToProject,
+  type WorldlineLabel,
 } from "../../../src/worldline-project-state.ts";
+import type { WorldlineSummary } from "../../../shared/types.ts";
+
+function worldlineSummary(comparisonId: string, terminalId: string, label: WorldlineLabel): WorldlineSummary {
+  return {
+    id: `${comparisonId}-${label}`,
+    comparisonId,
+    label,
+    role: "reference",
+    comparisonBaseStateId: null,
+    promotionBaseStateId: null,
+    headStateId: null,
+    sourceRunId: "run-test",
+    terminalId,
+    version: 1,
+    state: "ready",
+    error: null,
+    root: "/tmp/test-world",
+    sessionFile: null,
+    model: null,
+    thinkingLevel: null,
+    createdAt: 0,
+  };
+}
 
 describe("Worldline Multi-Project Ownership & UI Reconciliation", () => {
   let panes: any[];
   let visible: Map<string, any>;
-  let labelsByTerminal: Map<string, string>;
+  let labelsByTerminal: Map<string, WorldlineLabel>;
   let paneBadges: Map<string, string | null>;
   let tabBadges: Map<string, any>;
   let tombstones: Set<string> | null;
@@ -275,7 +297,7 @@ describe("Worldline Multi-Project Ownership & UI Reconciliation", () => {
     const hydrated = applyWorldlineHydration(
       "project-b",
       "project-b",
-      [{ comparisonId: "comparison-b-current", terminalId: "terminal-b2", label: "B" }],
+      [worldlineSummary("comparison-b-current", "terminal-b2", "B")],
       tombstones,
       panes,
       effects,
@@ -291,7 +313,7 @@ describe("Worldline Multi-Project Ownership & UI Reconciliation", () => {
       applyWorldlineHydration(
         "project-b",
         "project-a",
-        [{ comparisonId: "comparison-a-late", terminalId: "terminal-a", label: "A" }],
+        [worldlineSummary("comparison-a-late", "terminal-a", "A")],
         new Set(),
         panes,
         effects,

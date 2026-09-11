@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 /**
  * Focused integration contracts for Stage 3A main wiring.
  *
@@ -89,7 +89,7 @@ describe("Agent Core Main Stage 3 Contracts", () => {
     
       globalThis.fetch = async (_url, init = {}) => {
         const signal = init.signal;
-        return await new Promise((resolve, reject) => {
+        return await new Promise((_resolve, reject) => {
           const abort = () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
           if (signal?.aborted) {
             abort();
@@ -113,8 +113,8 @@ describe("Agent Core Main Stage 3 Contracts", () => {
       const processResult = await main.runBash("printf out; printf err >&2; exit 7", { cwd: root });
       assert.equal(processResult.exitCode, 7);
       assert.equal(processResult.isError, true);
-      assert.equal(processResult.stdout.text, "out");
-      assert.equal(processResult.stderr.text, "err");
+      assert.equal(processResult.stdout?.text, "out");
+      assert.equal(processResult.stderr?.text, "err");
       assert.match(processResult.content, /\[exit 7\]/);
     
       const noisy = await main.runBash(
@@ -122,10 +122,10 @@ describe("Agent Core Main Stage 3 Contracts", () => {
         { cwd: root },
       );
       assert.equal(noisy.isError, false);
-      assert.equal(noisy.stdout.truncated, true);
-      assert.equal(noisy.stderr.truncated, true);
-      assert.ok(!noisy.stdout.text.includes("\uFFFD"));
-      assert.ok(!noisy.stderr.text.includes("\uFFFD"));
+      assert.equal(noisy.stdout?.truncated, true);
+      assert.equal(noisy.stderr?.truncated, true);
+      assert.ok(!noisy.stdout?.text.includes("\uFFFD"));
+      assert.ok(!noisy.stderr?.text.includes("\uFFFD"));
     
       const timedBash = await main.runBash("sleep 8", { cwd: root, timeoutMs: 20 });
       assert.equal(timedBash.state, "timeout");
@@ -135,8 +135,8 @@ describe("Agent Core Main Stage 3 Contracts", () => {
       const stoppedBashResult = await stoppedBash;
       assert.equal(stoppedBashResult.state, "interrupted");
     
-      assert.equal(main.planPruneStubs, undefined);
-      assert.equal(main.tokenEstimate, undefined);
+      assert.equal("planPruneStubs" in main, false);
+      assert.equal("tokenEstimate" in main, false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

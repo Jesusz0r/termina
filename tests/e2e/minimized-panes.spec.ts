@@ -10,7 +10,6 @@ test("minimized editor keeps a right rail; toggle restores it", async ({ page })
   await expect(page.locator("#right-pane.minimized")).toHaveCount(1, { timeout: 10_000 });
   const probe = await page.evaluate(() => {
     const w = window.innerWidth;
-    const h = window.innerHeight;
     const right = document.querySelector("#right-pane")!.getBoundingClientRect();
     const cs = getComputedStyle(document.querySelector("#right-pane")!);
     const btn = document.querySelector("#btn-min-editor") as HTMLElement | null;

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 /**
  * Focused retention-ledger performance regressions.
  *
@@ -13,7 +13,6 @@ import {
   closeSync,
   existsSync,
   linkSync,
-  lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -35,7 +34,7 @@ describe("Session Retention Performance Probes", () => {
     const retentionBundle = join(work, "session-retention.mjs");
     const worldlineBundle = join(work, "worldlines.mjs");
     
-    function writeBundle(path, records = 8) {
+    function writeBundle(path: string, records = 8) {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
       const fd = openSync(path, "w", 0o600);
       try {
@@ -73,7 +72,7 @@ describe("Session Retention Performance Probes", () => {
       assert.ok(estimatedBytes > 0);
       assert.ok(heartbeatTicks > 0, "large source accounting yields to the event loop");
     
-      await owner.transact("ledger-first", async (destination) => {
+      await owner.transact("ledger-first", async (destination: string) => {
         writeBundle(destination, 2);
         writeFileSync(join(dirname(destination), "ledger-first-img-1.png"), "image", { mode: 0o600 });
         return "ok";
@@ -90,16 +89,16 @@ describe("Session Retention Performance Probes", () => {
       // verification. The unchanged tree proof is intentionally retained so this
       // catches accounting-field validation rather than only mutation detection.
       const forgedLedger = JSON.parse(JSON.stringify(initialLedger));
-      const forgedEntry = forgedLedger.entries.find((entry) => entry.name === "ledger-first");
+      const forgedEntry = forgedLedger.entries.find((entry: { name: string }) => entry.name === "ledger-first");
       forgedEntry.usage = { bytes: 0, entries: 0, images: 0, unknowns: 0 };
       forgedLedger.accounting = { bytes: 0, entries: 0, images: 0, unknowns: 0, bundleCount: 1, stagingCount: 0 };
       writeFileSync(join(root, RETAINED_SESSION_USAGE_LEDGER), JSON.stringify(forgedLedger), { mode: 0o600 });
-      await owner.transact("forged-usage-rebuild", async (destination) => {
+      await owner.transact("forged-usage-rebuild", async (destination: string) => {
         writeBundle(destination, 1);
         return "rebuilt";
       });
       const rebuiltAfterForgery = JSON.parse(readFileSync(join(root, RETAINED_SESSION_USAGE_LEDGER), "utf8"));
-      const rebuiltEntry = rebuiltAfterForgery.entries.find((entry) => entry.name === "ledger-first");
+      const rebuiltEntry = rebuiltAfterForgery.entries.find((entry: { name: string }) => entry.name === "ledger-first");
       assert.ok(rebuiltEntry.usage.bytes > 0 && rebuiltEntry.usage.entries > 0, "forged retained usage fields rebuild from measured bytes and entries");
       assert.equal(rebuiltEntry.usage.images, 1, "forged retained image count rebuilds from the measured tree");
     
@@ -109,7 +108,7 @@ describe("Session Retention Performance Probes", () => {
       writeBundle(nestedSession, 3);
       let nestedPublished = false;
       await assert.doesNotReject(
-        owner.transact("nested-mutation", async (destination) => {
+        owner.transact("nested-mutation", async (destination: string) => {
           nestedPublished = true;
           writeBundle(destination, 1);
           return "rebuilt";
@@ -133,12 +132,12 @@ describe("Session Retention Performance Probes", () => {
       const concurrentB = new SessionRetentionOwner(concurrentRoot);
       let concurrentEntered = 0;
       const concurrentResults = await Promise.allSettled([
-        concurrentA.transact("concurrent-a", async (destination) => {
+        concurrentA.transact("concurrent-a", async (destination: string) => {
           concurrentEntered++;
           writeBundle(destination, 1);
           return "a";
         }),
-        concurrentB.transact("concurrent-b", async (destination) => {
+        concurrentB.transact("concurrent-b", async (destination: string) => {
           concurrentEntered++;
           writeBundle(destination, 1);
           return "b";
@@ -149,7 +148,7 @@ describe("Session Retention Performance Probes", () => {
       assert.equal(concurrentEntered, 1);
       assert.ok(existsSync(join(concurrentRoot, "concurrent-a")) || existsSync(join(concurrentRoot, "concurrent-b")));
       const followupRun = existsSync(join(concurrentRoot, "concurrent-a")) ? "concurrent-b" : "concurrent-a";
-      await concurrentB.transact(followupRun, async (destination) => {
+      await concurrentB.transact(followupRun, async (destination: string) => {
         writeBundle(destination, 1);
         return "followup";
       });
@@ -168,7 +167,7 @@ describe("Session Retention Performance Probes", () => {
       }
       let capPublished = false;
       await assert.rejects(
-        capOwner.transact("cap-run", async (destination) => {
+        capOwner.transact("cap-run", async (destination: string) => {
           capPublished = true;
           writeBundle(destination, 1);
           return "unexpected";
@@ -201,7 +200,7 @@ describe("Session Retention Performance Probes", () => {
       const strictOwner = new SessionRetentionOwner(unprovenRoot);
       await assert.rejects(strictOwner.list(), /previously trusted expectedIdentity/, "runtime rejects an unproven retained root");
     
-      function freshRetentionList(rootPath) {
+      function freshRetentionList(rootPath: string) {
         return spawnSync(process.execPath, ["--no-warnings", "--input-type=module", "-e", `
           const { SessionRetentionOwner, disposeSessionRetentionCoreClient } = await import(process.env.TERMINA_RETENTION_BUNDLE);
           try {
@@ -296,7 +295,7 @@ describe("Session Retention Performance Probes", () => {
       // retained root permanently. The pre-state create seam is deliberately
       // deterministic rejection: it leaves only an empty, marker-less leaf, not
       // a valid root whose identity could be guessed on the next startup.
-      async function runKilledRootBind(stage, root, expectRestartable = true) {
+      async function runKilledRootBind(stage: string, root: string, expectRestartable = true) {
         const ready = join(work, `retained-root-crash-${stage}.ready`);
         const release = join(work, `retained-root-crash-${stage}.release`);
         const child = spawn(process.execPath, ["--no-warnings", "--input-type=module", "-e", `
@@ -327,7 +326,7 @@ describe("Session Retention Performance Probes", () => {
         child.stderr.on("data", (chunk) => { stderr += chunk; });
         await waitForFile(ready, `root crash probe did not reach ${stage}`);
         child.kill("SIGKILL");
-        const exitCode = await new Promise((resolvePromise) => child.once("close", (code, signal) => resolvePromise({ code, signal })));
+        const exitCode = await new Promise<{ code: number | null; signal: string | null }>((resolvePromise) => child.once("close", (code, signal) => resolvePromise({ code, signal })));
         assert.equal(exitCode.signal, "SIGKILL", `${stage} probe was killed at the native seam (${stderr})`);
         rmSync(release, { force: true });
         const restart = spawnSync(process.execPath, ["--no-warnings", "--input-type=module", "-e", `
@@ -403,7 +402,7 @@ describe("Session Retention Performance Probes", () => {
       // replaced at any phase. The test hook pauses with the exact descriptors
       // held, then swaps both the leaf and its ancestor before the next native
       // step. Every phase must fail closed and leave the replacement untrusted.
-      async function waitForFile(path, message) {
+      async function waitForFile(path: string, message: string) {
         const deadline = Date.now() + 5_000;
         while (!existsSync(path)) {
           if (Date.now() >= deadline) throw new Error(message);
@@ -453,7 +452,7 @@ describe("Session Retention Performance Probes", () => {
       // pathname while the original fd is held must reject without cleaning the
       // unbound replacement; swapping the ancestor must reject the public path
       // while preserving the parked original transaction.
-      async function runBoundStateReplacementSwap(mode) {
+      async function runBoundStateReplacementSwap(mode: string) {
         const base = join(work, `retained-bound-state-${mode}`);
         const root = join(base, "retained");
         mkdirSync(base, { recursive: true, mode: 0o700 });
@@ -513,7 +512,7 @@ describe("Session Retention Performance Probes", () => {
       const rootAba = join(rootAbaBase, "retained");
       mkdirSync(rootAbaBase, { recursive: true, mode: 0o700 });
       const rootAbaOwner = new SessionRetentionOwner(rootAba);
-      await rootAbaOwner.transact("root-aba-first", async (destination) => {
+      await rootAbaOwner.transact("root-aba-first", async (destination: string) => {
         writeBundle(destination, 1);
         return "first";
       });
@@ -522,7 +521,7 @@ describe("Session Retention Performance Probes", () => {
       mkdirSync(rootAba, { recursive: true, mode: 0o700 });
       let rootAbaPublished = false;
       await assert.rejects(
-        rootAbaOwner.transact("root-aba-second", async (destination) => {
+        rootAbaOwner.transact("root-aba-second", async (destination: string) => {
           rootAbaPublished = true;
           writeBundle(destination, 1);
           return "unexpected";

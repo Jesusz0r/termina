@@ -3,7 +3,7 @@
 import readline from "node:readline";
 import { spawn } from "node:child_process";
 
-const stderrFlood = (marker, done) => {
+const stderrFlood = (marker: string, done: () => void) => {
   const bytes = Buffer.concat([Buffer.alloc(512 * 1024, "x"), Buffer.from(`\n${marker}\n`)]);
   process.stderr.write(bytes, done);
 };

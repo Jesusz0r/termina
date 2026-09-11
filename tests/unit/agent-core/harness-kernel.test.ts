@@ -27,6 +27,18 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createCheckReporter } from "../../test-support.ts";
+import type {
+  BuildRequestOverlayOptions,
+  ProjectionBlock,
+  ProjectionMessage,
+  RequestMessage,
+} from "../../../agent-core/request-projection.ts";
+import type { PendingImageMediaType } from "../../../agent-core/host.ts";
+import type { KernelMessage } from "../../../agent-core/openai-compat.ts";
+import type { TerminalRosterEntry } from "../../../electron/terminal-roster.ts";
+import type { ThemeId } from "../../../shared/types.ts";
+import { validateGrepPattern } from "../../../shared/grep-pattern.ts";
+import type { AgentTui, TranscriptHandle } from "../../../agent-core/tui.ts";
 
 describe("Agent Core Kernel & TUI Harness Suite", () => {
   it("passes all kernel harness assertions natively", async () => {
@@ -42,7 +54,6 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const session = await import("../../../agent-core/session.ts");
     const trace = await import("../../../agent-core/trace.ts");
     const toolOutput = await import("../../../agent-core/tool-output.ts");
-    const tuiCore = await import("../../../agent-core/tui.ts");
     
     const {
       confinePath,
@@ -67,7 +78,6 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       formatNumberedText,
       listProjectDir,
       editMissDiagnostic,
-      validateGrepPattern,
       buildCachedPrefix,
       anthropicCacheMark,
       renderHistoryTranscript,
@@ -84,7 +94,6 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       FROZEN_IDENTITY,
       buildFrozenSystem,
       isDirectRunFrom,
-      hashSystem,
       WEB_SEARCH_TOOL,
       requestTools,
       stampHistoryCache,
@@ -114,7 +123,6 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const {
       buildRequestOverlay,
       projectPersistedMessages,
-      appendRequestOverlay,
       userPromptContent,
     } = projection;
     const { estimateReclaimTokens, makePruneRevision, planPruneStubs } = reclaim;
@@ -146,18 +154,20 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     
     const { check, results } = createCheckReporter();
     
-    function projectPersistedForTest(messages, imageRoots = []) {
+    function projectPersistedForTest(messages: ProjectionMessage[], imageRoots: string[] = []): RequestMessage[] {
       const result = projectPersistedMessages({ messages, imageRoots });
       if (!result.ok) throw new Error(result.error);
       return result.messages;
     }
-    
-    function projectBlockForTest(block) {
+
+    function projectBlockForTest(block: ProjectionBlock): unknown {
       const projected = projectPersistedForTest([{ role: "user", content: [block], sseq: 1, tokens: 1 }]);
-      return projected[0]?.content?.[0];
+      const content: unknown = projected[0]?.content;
+      if (typeof content === "string" || Array.isArray(content)) return content[0];
+      return undefined;
     }
-    
-    function workingSetForTest(opts) {
+
+    function workingSetForTest(opts: BuildRequestOverlayOptions): string {
       return buildRequestOverlay(opts)?.text ?? "";
     }
     
@@ -422,9 +432,12 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       input: { path: "a.ts", old_text: "old", new_text: "new" },
     });
     check("sidecar edit maps to edit with path", editStart.toolName === "edit" && editStart.path === "a.ts");
+    const editStartEdits: unknown = editStart.edits;
+    const firstEdit = Array.isArray(editStartEdits) ? editStartEdits[0] : undefined;
     check(
       "sidecar edit carries oldText/newText",
-      editStart.edits?.[0]?.oldText === "old" && editStart.edits?.[0]?.newText === "new",
+      typeof firstEdit === "object" && firstEdit !== null && "oldText" in firstEdit && firstEdit.oldText === "old"
+        && "newText" in firstEdit && firstEdit.newText === "new",
     );
     writeFileSync(join(root, "many.ts"), "foo foo foo\n");
     const replaced = editProjectFile(root, "many.ts", "foo", "bar", true);
@@ -475,9 +488,12 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       "trustedPath skips extra dirs under cwd",
       !extraUnderCwd || !trustedPath("/bin", "/usr/local").includes("/usr/local/bin"),
     );
-    check("parseBangCommand reads the shell command", parseBangCommand("!ls -la")?.command === "ls -la");
-    check("parseBangCommand rejects a bare bang", parseBangCommand("!")?.error === "empty command");
-    check("parseBangCommand rejects whitespace", parseBangCommand("!   ")?.error === "empty command");
+    const bangLs = parseBangCommand("!ls -la");
+    check("parseBangCommand reads the shell command", !!bangLs && "command" in bangLs && bangLs.command === "ls -la");
+    const bangBare = parseBangCommand("!");
+    check("parseBangCommand rejects a bare bang", !!bangBare && "error" in bangBare && bangBare.error === "empty command");
+    const bangBlank = parseBangCommand("!   ");
+    check("parseBangCommand rejects whitespace", !!bangBlank && "error" in bangBlank && bangBlank.error === "empty command");
     check("parseBangCommand ignores prompts", parseBangCommand("hello") === null);
     const bangContext = bangCommandContext("printf hello", "hello\n[exit 0]");
     check(
@@ -499,7 +515,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         largeBash.truncated === true &&
         largeBash.stdout?.direction === "tail" &&
         largeBash.stdout?.truncated === true &&
-        largeBash.continuation?.includes("Re-run the command") === true &&
+        typeof largeBash.continuation === "string" && largeBash.continuation.includes("Re-run the command") === true &&
         largeBash.content.includes("[exit 0]") &&
         largeBash.outputBytes <= largeBash.limitBytes,
     );
@@ -572,6 +588,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       "claimPendingImages returns bytes and leaves the live list empty",
       claimed.ok && claimed.claim.images.length === 2 && claimed.claim.images[0]?.bytes.length === png1x1.length,
     );
+    if (!claimed.ok) throw new Error(`claimPendingImages failed: ${claimed.error}`);
     const stateAfterClaim = await host.pendingImageState(imgDir, hostId);
     check("pendingImageState sees the durable claim", stateAfterClaim.ok && stateAfterClaim.count === 2);
     const sessImg = join(imgDir, "core-imgtest.jsonl");
@@ -580,7 +597,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("persistLoadedImages writes a sidecar file", stored.ok && stored.images[0]?.name === "core-imgtest-img-1.png" && existsSync(join(imgDir, "core-imgtest-img-1.png")));
     const persistedNames = (stored.ok ? stored.images : [])
       .map((ref, i) => (ref.name !== claimed.claim.images[i]?.name && existsSync(join(imgDir, ref.name)) ? claimed.claim.images[i].name : null))
-      .filter(Boolean);
+      .filter((name): name is string => Boolean(name));
     const ackOk = await host.acknowledgePendingImages(imgDir, hostId, claimed.claim.claimId, persistedNames);
     check("acknowledgePendingImages removes persisted sources", ackOk.ok === true && !existsSync(join(imgDir, claimed.claim.images[0].name)));
     const emptyAck = await host.acknowledgePendingImages(imgDir, hostId, claimed.claim.claimId, []);
@@ -635,7 +652,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     check(
       "appendPendingImages rejects an unsupported media type",
-      (await host.appendPendingImages(imgDir, hostId, [{ bytes: png1x1, mediaType: "image/bmp", id: "cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee" }])).ok === false,
+      (await host.appendPendingImages(imgDir, hostId, [{ bytes: png1x1, mediaType: "image/bmp" as unknown as PendingImageMediaType, id: "cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee" }])).ok === false,
     );
     check(
       "appendPendingImages rejects empty bytes",
@@ -668,7 +685,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       { bytes: png1x1, mediaType: "image/png", id: "99999999-bbbb-cccc-dddd-eeeeeeeeeeee" },
     ]);
     const capState = await host.pendingImageState(capDir, hostId);
-    check("appendPendingImages rejects over capacity", fifth.ok === false && fifth.error === "too many pending images" && capState.count === 4);
+    check("appendPendingImages rejects over capacity", fifth.ok === false && fifth.error === "too many pending images" && capState.ok && capState.count === 4);
     
     const failDir = mkdtempSync(join(tmpdir(), "agent-core-img-fail-"));
     leftovers.push(failDir);
@@ -769,13 +786,13 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       stuck.ok === false && existsSync(join(stuckDir, stuckTx)),
     );
     
-    let holdRelease;
+    let holdRelease: () => void = () => {};
     const holdGate = new Promise((resolve) => {
-      holdRelease = resolve;
+      holdRelease = () => resolve(undefined);
     });
-    let holdStarted;
+    let holdStarted: () => void = () => {};
     const holdReady = new Promise((resolve) => {
-      holdStarted = resolve;
+      holdStarted = () => resolve(undefined);
     });
     const busyDir = mkdtempSync(join(tmpdir(), "agent-core-img-busy-"));
     leftovers.push(busyDir);
@@ -820,13 +837,13 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     
     const raceDir = mkdtempSync(join(tmpdir(), "agent-core-img-race-"));
     leftovers.push(raceDir);
-    let releaseCommit;
+    let releaseCommit: () => void = () => {};
     const commitGate = new Promise((resolve) => {
-      releaseCommit = resolve;
+      releaseCommit = () => resolve(undefined);
     });
-    let atCommit;
+    let atCommit: () => void = () => {};
     const commitReady = new Promise((resolve) => {
-      atCommit = resolve;
+      atCommit = () => resolve(undefined);
     });
     const prodP = host.appendPendingImages(
       raceDir,
@@ -876,7 +893,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       "current-process claim is reused",
       firstReuse.ok && secondReuse.ok && firstReuse.claim.claimId === secondReuse.claim.claimId && secondReuse.claim.images.length === 1,
     );
-    const partialAck = await host.acknowledgePendingImages(reuseDir, hostId, firstReuse.claim.claimId, [firstReuse.claim.images[0].name]);
+    const partialAck = await host.acknowledgePendingImages(reuseDir, hostId, firstReuse.ok ? firstReuse.claim.claimId : "", [firstReuse.ok ? firstReuse.claim.images[0].name : ""]);
     const afterPartial = await host.claimPendingImages(reuseDir, hostId);
     check("full acknowledgement removes the claim", partialAck.ok && afterPartial.ok && afterPartial.claim.images.length === 0);
     
@@ -901,6 +918,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     leftovers.push(persistFailDir);
     await host.appendPendingImages(persistFailDir, hostId, [{ bytes: png1x1, mediaType: "image/png", id: idA }]);
     const persistClaim = await host.claimPendingImages(persistFailDir, hostId);
+    if (!persistClaim.ok) throw new Error(`claimPendingImages failed: ${persistClaim.error}`);
     const zeroPersisted = await host.acknowledgePendingImages(persistFailDir, hostId, persistClaim.claim.claimId, []);
     const recoveredClaim = await host.claimPendingImages(persistFailDir, hostId);
     check(
@@ -957,13 +975,6 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     writeFileSync(join(liveClaimDir, liveImg), png1x1);
     writeFileSync(join(liveClaimDir, liveClaimName), JSON.stringify({ images: [{ name: liveImg, mediaType: "image/png" }] }));
     writeFileSync(join(liveClaimDir, `images-${hostId}.json`), JSON.stringify({ images: [{ name: liveImg, mediaType: "image/png" }] }));
-    let skippedForeign = true;
-    try {
-      process.kill(1, 0);
-    } catch (err) {
-      skippedForeign = err && err.code === "EPERM";
-    }
-    if (liveClaimName.includes(`-${process.pid}-`)) skippedForeign = false;
     const skipClaim = await host.claimPendingImages(liveClaimDir, hostId);
     check(
       "a live foreign claim is skipped while a live manifest can still be claimed",
@@ -977,7 +988,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     try {
       process.kill(1, 0);
     } catch (err) {
-      if (err && err.code === "EPERM") {
+      if (err instanceof Error && "code" in err && err.code === "EPERM") {
         const epermDir = mkdtempSync(join(tmpdir(), "agent-core-img-eperm-"));
         leftovers.push(epermDir);
         writeFileSync(
@@ -1040,7 +1051,11 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       { name: "b", description: "b", input_schema: { type: "object" } },
     ]);
     const reqTools = requestTools(clientPrefix.tools);
-    check("requestTools keeps cache on last client tool", reqTools[1]?.cache_control?.type === "ephemeral");
+    const lastClientToolMark: unknown = reqTools[1]?.cache_control;
+    check(
+      "requestTools keeps cache on last client tool",
+      typeof lastClientToolMark === "object" && lastClientToolMark !== null && "type" in lastClientToolMark && lastClientToolMark.type === "ephemeral",
+    );
     check(
       "requestTools skips web_search for completions providers",
       requestTools(clientPrefix.tools, "xai").every((t) => t.name !== "web_search") &&
@@ -1059,7 +1074,14 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       requestTools(clientPrefix.tools, "anthropic", "claude-sonnet-5")[2]?.type === "web_search_20260209",
     );
     check("sidecar web_search has no path", sidecarStartFor({ name: "web_search", id: "1", input: { path: "src" } }).path === undefined);
-    check("sidecar fetch has no path", sidecarStartFor({ name: "fetch", id: "1", input: { url: "https://example.com" } }).path === undefined);
+    // Deliberate non-edit probe: fetch inputs carry `url`, outside sidecarStartFor's edit-shaped input.
+    const fetchProbeInput = { url: "https://example.com" } as unknown as {
+      path?: string;
+      old_text?: string;
+      new_text?: string;
+      replace_all?: unknown;
+    };
+    check("sidecar fetch has no path", sidecarStartFor({ name: "fetch", id: "1", input: fetchProbeInput }).path === undefined);
     check("fetchUrlError rejects file", Boolean(fetchUrlError("file:///etc/passwd")?.includes("not allowed")));
     check("fetchUrlError rejects data", Boolean(fetchUrlError("data:text/plain,hi")?.includes("not allowed")));
     check("fetchUrlError allows https", fetchUrlError("https://example.com/x") === null);
@@ -1077,8 +1099,10 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       res.writeHead(200, { "content-type": "text/plain" });
       res.end("fetched-body");
     });
-    await new Promise((resolve) => fetchSrv.listen(0, "127.0.0.1", resolve));
-    const fetchPort = fetchSrv.address().port;
+    await new Promise<void>((resolve) => fetchSrv.listen(0, "127.0.0.1", resolve));
+    const fetchAddress = fetchSrv.address();
+    if (!fetchAddress || typeof fetchAddress === "string") throw new Error("fetch server did not bind");
+    const fetchPort = fetchAddress.port;
     const fetched = await fetchUrl(`http://127.0.0.1:${fetchPort}/ok`);
     check("fetch loopback in tests", fetched.isError === false && fetched.content === "fetched-body");
     const bounced = await fetchUrl(`http://127.0.0.1:${fetchPort}/go`);
@@ -1089,14 +1113,14 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       bigFetch.isError === false &&
         bigFetch.state === "complete" &&
         bigFetch.truncated === true &&
-        bigFetch.continuation?.includes("Re-run fetch") === true &&
+        typeof bigFetch.continuation === "string" && bigFetch.continuation.includes("Re-run fetch") === true &&
         bigFetch.outputBytes <= bigFetch.limitBytes &&
         bigFetch.inputBytes > bigFetch.retainedBytes,
     );
     const stopped = await fetchUrl(`http://127.0.0.1:${fetchPort}/ok`, { shouldStop: () => true });
     check("fetch interrupt is an error", stopped.isError === true);
     fetchSrv.close();
-    const slots = [];
+    const slots: Array<{ type: string; text: string } | undefined> = [];
     placeStreamBlock(slots, 1, { type: "text", text: "kept" });
     check("stream compact skips holes", compactStreamBlocks(slots).length === 1 && compactStreamBlocks(slots)[0].text === "kept");
     check(
@@ -1104,9 +1128,10 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       JSON.stringify(projectBlockForTest({ type: "text", text: "hi", stubbed: true, chars: 2 })).includes("hi") &&
         !JSON.stringify(projectBlockForTest({ type: "text", text: "hi", stubbed: true })).includes("stubbed"),
     );
+    const signedThinking = projectBlockForTest({ type: "thinking", thinking: "abc", signature: "sig" });
     check(
       "request projection keeps signed thinking",
-      projectBlockForTest({ type: "thinking", thinking: "abc", signature: "sig" }).thinking === "abc",
+      typeof signedThinking === "object" && signedThinking !== null && "thinking" in signedThinking && signedThinking.thinking === "abc",
     );
     const persistedContext = projectPersistedMessages({
       messages: [{ role: "user", content: [{ type: "context", text: "<working-set>x</working-set>" }], sseq: 1, tokens: 1 }],
@@ -1117,7 +1142,8 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     check("plain user prompt stays a string", userPromptContent("visible", []) === "visible");
     const unsignedThinking = projectPersistedForTest([{ role: "assistant", content: [{ type: "thinking", thinking: "abc" }], tokens: 1, sseq: 1 }]);
-    check("request projection drops unsigned thinking", unsignedThinking[0]?.content?.length === 0);
+    const unsignedContent: unknown = unsignedThinking[0]?.content;
+    check("request projection drops unsigned thinking", (typeof unsignedContent === "string" || Array.isArray(unsignedContent)) && unsignedContent.length === 0);
     const searchReq = projectPersistedForTest([
       {
         role: "assistant",
@@ -1266,6 +1292,10 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         { systemTokens: 0, usable: 10_000, protectTokens: 10, fillTokens: 9_000 },
       ).length === 0,
     );
+    const thinkBlock = { type: "thinking", thinking: "secret" };
+    const thinkBytes = sessionBlockBytes(thinkBlock);
+    const thinkHash = sessionBlockHash(thinkBlock);
+    if (thinkBytes === null || thinkHash === null) throw new Error("session block measurement failed");
     const thinkRevision = makePruneRevision("think-rev", [{
       sseq: 1,
       blockIndex: 0,
@@ -1273,8 +1303,8 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       original: {
         type: "thinking",
         chars: "secret".length,
-        bytes: sessionBlockBytes({ type: "thinking", thinking: "secret" }),
-        sha256: sessionBlockHash({ type: "thinking", thinking: "secret" }),
+        bytes: thinkBytes,
+        sha256: thinkHash,
       },
       reclaimedTokens: estimateReclaimTokens("secret"),
       fallback: { source: "session-record", tool: "thinking", repro: null },
@@ -1294,12 +1324,14 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       JSON.stringify({ storageSeq: 2, ...thinkRevision }),
     ].join("\n");
     const droppedThink = replaySessionRecords(thinkReplay);
+    const droppedContent: unknown = droppedThink.ok ? droppedThink.messages[0]?.content : undefined;
+    const droppedBlock = Array.isArray(droppedContent) ? droppedContent[0] : undefined;
     check(
       "prune replay drops thinking and matches live",
-      droppedThink.ok &&
-        droppedThink.messages[0]?.content?.length === 1 &&
-        droppedThink.messages[0]?.content[0]?.type === "text" &&
-        droppedThink.messages[0]?.content[0]?.text === "ok",
+      droppedThink.ok && Array.isArray(droppedContent) && droppedContent.length === 1
+        && typeof droppedBlock === "object" && droppedBlock !== null
+        && "type" in droppedBlock && droppedBlock.type === "text"
+        && "text" in droppedBlock && droppedBlock.text === "ok",
     );
     
     const tools = [
@@ -1309,11 +1341,14 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const prefix1 = buildCachedPrefix("sys", tools);
     const prefix2 = buildCachedPrefix("sys", tools);
     check("buildCachedPrefix deep-equal", JSON.stringify(prefix1) === JSON.stringify(prefix2));
-    check("buildCachedPrefix omits automatic top-level cache", prefix1.cache_control === undefined);
+    const prefix1Top: Record<string, unknown> = prefix1;
+    const defaultMark: Record<string, unknown> = buildCachedPrefix("sys", tools).system[0]?.cache_control ?? {};
+    const toolCopies: Array<Record<string, unknown>> = tools;
+    check("buildCachedPrefix omits automatic top-level cache", prefix1Top.cache_control === undefined);
     check("buildCachedPrefix system marker", prefix1.system[0]?.cache_control?.type === "ephemeral");
     check("buildCachedPrefix last tool copy", prefix1.tools[1]?.cache_control?.type === "ephemeral");
-    check("buildCachedPrefix uses Anthropic's default ttl", buildCachedPrefix("sys", tools).system[0]?.cache_control?.ttl === undefined);
-    check("buildCachedPrefix does not mutate tools", tools[1].cache_control === undefined);
+    check("buildCachedPrefix uses Anthropic's default ttl", defaultMark.ttl === undefined);
+    check("buildCachedPrefix does not mutate tools", toolCopies[1].cache_control === undefined);
     
     check("sidecar write maps to write", sidecarStartFor({ name: "write_file", id: "9", input: { path: "a.ts" } }).toolName === "write");
     check("sidecar read_file has no path", sidecarStartFor({ name: "read_file", id: "9", input: { path: "a.ts" } }).path === undefined);
@@ -1374,6 +1409,9 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     
     const bodyBlock = { type: "tool_result", tool_use_id: "t", content: "BODY", tool: "bash", repro: "bash x" };
+    const bodyBytes = sessionBlockBytes(bodyBlock);
+    const bodyHash = sessionBlockHash(bodyBlock);
+    if (bodyBytes === null || bodyHash === null) throw new Error("session block measurement failed");
     const bodyRevision = makePruneRevision("body-rev", [{
       sseq: 2,
       blockIndex: 0,
@@ -1381,8 +1419,8 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       original: {
         type: "tool_result",
         chars: "BODY".length,
-        bytes: sessionBlockBytes(bodyBlock),
-        sha256: sessionBlockHash(bodyBlock),
+        bytes: bodyBytes,
+        sha256: bodyHash,
       },
       reclaimedTokens: estimateReclaimTokens("BODY"),
       tool: "bash",
@@ -1403,9 +1441,11 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       JSON.stringify({ storageSeq: 3, ...bodyRevision }),
     ].join("\n");
     const pruned = replaySessionRecords(pruneLines);
+    const prunedContent: unknown = pruned.ok ? pruned.messages.find((message) => message.sseq === 2)?.content : undefined;
+    const prunedBlock = Array.isArray(prunedContent) ? prunedContent[0] : undefined;
     check(
       "prune replay uses formatStub",
-      pruned.ok && String(pruned.messages.find((message) => message.sseq === 2)?.content?.[0]?.content ?? "").includes("storageSeq 2"),
+      pruned.ok && String(typeof prunedBlock === "object" && prunedBlock !== null && "content" in prunedBlock ? prunedBlock.content : "").includes("storageSeq 2"),
     );
     
     const truncLines = [
@@ -1438,7 +1478,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       now: () => "2026-08-30T00:00:00.000Z",
     });
     const traceStartup = await traceRetentionRuntime.ready;
-    const makeTraceAttempt = (attemptId, sequence) => createAttemptRecord({
+    const makeTraceAttempt = (attemptId: string, sequence: number) => createAttemptRecord({
       runId: "run-harness-retention",
       taskId: "task-harness-retention",
       attemptId,
@@ -1861,7 +1901,6 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       cacheSessionHeaders,
       cacheSessionSeed,
       cacheIdentityFor,
-      deriveCacheIdentityKey,
       CACHE_KEY_MAX_LENGTH,
       googleNativeHeaders,
     } = auth;
@@ -1915,7 +1954,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     
     modifyProvider("anthropic", () => ({ type: "api_key", key: "stored-key", extra: "keep-me" }));
     modifyProvider("other", () => ({ type: "api_key", key: "other-key" }));
-    modifyProvider("anthropic", (current) => ({ ...current, key: "stored-key-2" }));
+    modifyProvider("anthropic", (current) => ({ ...(typeof current === "object" && current !== null ? current : {}), key: "stored-key-2" }));
     const storedFile = JSON.parse(readFileSync(authFile, "utf8"));
     check("modifyProvider preserves unrelated root keys", storedFile.other?.key === "other-key");
     check("modifyProvider preserves extra entry fields", storedFile.anthropic?.extra === "keep-me");
@@ -1944,9 +1983,12 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     if (prevTok === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
     else process.env.ANTHROPIC_AUTH_TOKEN = prevTok;
     
-    check("parseAuthCommand bare /login asks to pick", "error" in parseAuthCommand("/login") && String(parseAuthCommand("/login").error).includes("pick a provider"));
-    check("parseAuthCommand bare /logout asks to pick", "error" in parseAuthCommand("/logout") && String(parseAuthCommand("/logout").error).includes("pick a provider"));
-    check("parseAuthCommand code mode", parseAuthCommand("/login code").mode === "code");
+    const bareLogin = parseAuthCommand("/login");
+    check("parseAuthCommand bare /login asks to pick", "error" in bareLogin && String(bareLogin.error).includes("pick a provider"));
+    const bareLogout = parseAuthCommand("/logout");
+    check("parseAuthCommand bare /logout asks to pick", "error" in bareLogout && String(bareLogout.error).includes("pick a provider"));
+    const codeLogin = parseAuthCommand("/login code");
+    check("parseAuthCommand code mode", "mode" in codeLogin && codeLogin.mode === "code");
     check("parseAuthCommand rejects unknown provider", "error" in parseAuthCommand("/login nope"));
     check("banner does not contain raw token", !authBanner({ ok: true, providerId: "anthropic", token: "sk-ant-oat-SUPERSECRET99", kind: "oauth", source: "oauth", baseUrl: "https://api.anthropic.com", headers: {} }).includes("SUPERSECRET"));
     const cancelledLogin = new AbortController();
@@ -2010,8 +2052,12 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         res.end(JSON.stringify({ access_token: "sk-ant-oat-login99xy", refresh_token: "refresh-1", expires_in: 3600 }));
       });
     });
-    const tokenPort = await new Promise((resolve) => {
-      tokenSrv.listen(0, "127.0.0.1", () => resolve(tokenSrv.address().port));
+    const tokenPort = await new Promise<number>((resolve, reject) => {
+      tokenSrv.listen(0, "127.0.0.1", () => {
+        const address = tokenSrv.address();
+        if (!address || typeof address === "string") reject(new Error("token server did not bind"));
+        else resolve(address.port);
+      });
     });
     const prevTokenUrl = process.env.TERMINA_TEST_TOKEN_URL;
     const prevRedir = process.env.TERMINA_TEST_REDIRECT_PORT;
@@ -2044,7 +2090,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       "login resolve uses bearer oat",
       afterLogin.ok && afterLogin.kind === "oauth" && afterLogin.headers.authorization?.startsWith("Bearer ") && afterLogin.headers["x-api-key"] === undefined,
     );
-    modifyProvider("anthropic", (current) => ({ ...current, expires: Date.now() - 1 }));
+    modifyProvider("anthropic", (current) => ({ ...(typeof current === "object" && current !== null ? current : {}), expires: Date.now() - 1 }));
     resetAuthCache();
     const afterRefresh = await resolveAuth("anthropic");
     check(
@@ -2208,52 +2254,67 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
           "anthropic-version": "2023-06-01",
         })["anthropic-version"] === undefined,
     );
-    check("anthropicCacheMark uses Anthropic's default ttl", anthropicCacheMark().ttl === undefined);
+    const defaultCacheMark: Record<string, unknown> = anthropicCacheMark();
+    check("anthropicCacheMark uses Anthropic's default ttl", defaultCacheMark.ttl === undefined);
     check("defaultLoginMode opencode-go is key", defaultLoginMode("opencode-go") === "key");
     check("defaultLoginMode opencode-zen is key", defaultLoginMode("opencode-zen") === "key");
-    check("parseAuthCommand /login xai is device", parseAuthCommand("/login xai").mode === "device" && parseAuthCommand("/login xai").provider === "xai");
-    check("parseAuthCommand /login key openai", parseAuthCommand("/login key openai").mode === "key" && parseAuthCommand("/login key openai").provider === "openai");
-    check("parseAuthCommand /login openai-codex", parseAuthCommand("/login openai-codex").provider === "openai-codex" && parseAuthCommand("/login openai-codex").mode === "browser");
+    const loginXai = parseAuthCommand("/login xai");
+    check("parseAuthCommand /login xai is device", "mode" in loginXai && loginXai.mode === "device" && loginXai.provider === "xai");
+    const loginKeyOpenai = parseAuthCommand("/login key openai");
+    check("parseAuthCommand /login key openai", "mode" in loginKeyOpenai && loginKeyOpenai.mode === "key" && loginKeyOpenai.provider === "openai");
+    const loginOpenaiCodex = parseAuthCommand("/login openai-codex");
+    check("parseAuthCommand /login openai-codex", "mode" in loginOpenaiCodex && loginOpenaiCodex.provider === "openai-codex" && loginOpenaiCodex.mode === "browser");
+    const loginOpenaiOauth = parseAuthCommand("/login openai oauth");
     check(
       "parseAuthCommand /login openai oauth is Codex",
-      parseAuthCommand("/login openai oauth").provider === "openai-codex" && parseAuthCommand("/login openai oauth").mode === "browser",
+      "mode" in loginOpenaiOauth && loginOpenaiOauth.provider === "openai-codex" && loginOpenaiOauth.mode === "browser",
     );
+    const loginOpenaiKey = parseAuthCommand("/login openai key");
     check(
       "parseAuthCommand /login openai key is API key",
-      parseAuthCommand("/login openai key").provider === "openai" && parseAuthCommand("/login openai key").mode === "key",
+      "mode" in loginOpenaiKey && loginOpenaiKey.provider === "openai" && loginOpenaiKey.mode === "key",
     );
+    const loginAnthropicKey = parseAuthCommand("/login anthropic key");
     check(
       "parseAuthCommand /login anthropic key",
-      parseAuthCommand("/login anthropic key").provider === "anthropic" && parseAuthCommand("/login anthropic key").mode === "key",
+      "mode" in loginAnthropicKey && loginAnthropicKey.provider === "anthropic" && loginAnthropicKey.mode === "key",
     );
+    const loginXaiOauth = parseAuthCommand("/login xai oauth");
     check(
       "parseAuthCommand /login xai oauth is device",
-      parseAuthCommand("/login xai oauth").mode === "device" && parseAuthCommand("/login xai oauth").provider === "xai",
+      "mode" in loginXaiOauth && loginXaiOauth.mode === "device" && loginXaiOauth.provider === "xai",
     );
+    const loginOpenaiCase = parseAuthCommand("/login OpenAI OAuth");
+    const loginKeyCase = parseAuthCommand("/login KEY Anthropic");
     check(
       "parseAuthCommand is case-insensitive",
-      parseAuthCommand("/login OpenAI OAuth").provider === "openai-codex" && parseAuthCommand("/login KEY Anthropic").mode === "key",
+      "provider" in loginOpenaiCase && loginOpenaiCase.provider === "openai-codex" && "mode" in loginKeyCase && loginKeyCase.mode === "key",
     );
     check("parseAuthCommand google oauth is rejected", "error" in parseAuthCommand("/login google oauth"));
+    const logoutOpenaiOauth = parseAuthCommand("/logout openai oauth");
     check(
       "parseAuthCommand /logout openai oauth is Codex",
-      parseAuthCommand("/logout openai oauth").cmd === "logout" && parseAuthCommand("/logout openai oauth").provider === "openai-codex",
+      "cmd" in logoutOpenaiOauth && logoutOpenaiOauth.cmd === "logout" && logoutOpenaiOauth.provider === "openai-codex",
     );
+    const logoutOpenaiKey = parseAuthCommand("/logout openai key");
     check(
       "parseAuthCommand /logout openai key is API key store",
-      parseAuthCommand("/logout openai key").provider === "openai",
+      "provider" in logoutOpenaiKey && logoutOpenaiKey.provider === "openai",
     );
+    const loginCopilot = parseAuthCommand("/login github-copilot");
     check(
       "parseAuthCommand /login github-copilot is device",
-      parseAuthCommand("/login github-copilot").mode === "device" && parseAuthCommand("/login github-copilot").provider === "github-copilot",
+      "mode" in loginCopilot && loginCopilot.mode === "device" && loginCopilot.provider === "github-copilot",
     );
+    const loginOpencodeGo = parseAuthCommand("/login opencode-go");
     check(
       "parseAuthCommand /login opencode-go is key",
-      parseAuthCommand("/login opencode-go").mode === "key" && parseAuthCommand("/login opencode-go").provider === "opencode-go",
+      "mode" in loginOpencodeGo && loginOpencodeGo.mode === "key" && loginOpencodeGo.provider === "opencode-go",
     );
+    const loginOpencodeZen = parseAuthCommand("/login opencode-zen");
     check(
       "parseAuthCommand /login opencode-zen is key",
-      parseAuthCommand("/login opencode-zen").mode === "key" && parseAuthCommand("/login opencode-zen").provider === "opencode-zen",
+      "mode" in loginOpencodeZen && loginOpencodeZen.mode === "key" && loginOpencodeZen.provider === "opencode-zen",
     );
     check("parseAuthCommand opencode-go oauth is rejected", "error" in parseAuthCommand("/login opencode-go oauth"));
     check(
@@ -2375,12 +2436,17 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         ],
       },
     ]);
+    const mappedSecondBlock: unknown = Array.isArray(mappedImg[1].content) ? mappedImg[1].content[1] : undefined;
+    const mappedImageUrl: unknown = typeof mappedSecondBlock === "object" && mappedSecondBlock !== null && "image_url" in mappedSecondBlock
+      ? mappedSecondBlock.image_url
+      : undefined;
+    const mappedUrl: unknown = typeof mappedImageUrl === "object" && mappedImageUrl !== null && "url" in mappedImageUrl ? mappedImageUrl.url : undefined;
     check(
       "completions maps image blocks to image_url",
       Array.isArray(mappedImg[1].content) &&
         mappedImg[1].content[0]?.type === "text" &&
         mappedImg[1].content[1]?.type === "image_url" &&
-        String(mappedImg[1].content[1]?.image_url?.url).startsWith("data:image/png;base64,"),
+        String(mappedUrl).startsWith("data:image/png;base64,"),
     );
     const responsesImg = compat.toResponsesInput([
       {
@@ -2391,11 +2457,15 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         ],
       },
     ]);
+    const responsesContent: unknown = responsesImg[0].content;
+    const responsesSecond = Array.isArray(responsesContent) ? responsesContent[1] : undefined;
+    const responsesSecondType: unknown = typeof responsesSecond === "object" && responsesSecond !== null && "type" in responsesSecond ? responsesSecond.type : undefined;
+    const responsesImageUrl: unknown = typeof responsesSecond === "object" && responsesSecond !== null && "image_url" in responsesSecond ? responsesSecond.image_url : undefined;
     check(
       "responses maps image blocks to input_image",
       responsesImg[0].role === "user" &&
-        responsesImg[0].content[1]?.type === "input_image" &&
-        String(responsesImg[0].content[1]?.image_url).startsWith("data:image/png;base64,"),
+        responsesSecondType === "input_image" &&
+        String(responsesImageUrl).startsWith("data:image/png;base64,"),
     );
     const responsesIn = compat.toResponsesInput([
       { role: "assistant", content: [{ type: "tool_use", id: "call-1", name: "bash", input: { command: "ls" } }] },
@@ -2453,8 +2523,12 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         );
       });
     });
-    const devicePort = await new Promise((resolve) => {
-      deviceSrv.listen(0, "127.0.0.1", () => resolve(deviceSrv.address().port));
+    const devicePort = await new Promise<number>((resolve, reject) => {
+      deviceSrv.listen(0, "127.0.0.1", () => {
+        const address = deviceSrv.address();
+        if (!address || typeof address === "string") reject(new Error("device server did not bind"));
+        else resolve(address.port);
+      });
     });
     const prevDevice = process.env.TERMINA_TEST_DEVICE_URL;
     const prevTok2 = process.env.TERMINA_TEST_TOKEN_URL;
@@ -2603,8 +2677,12 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         has_more: false,
       }));
     });
-    const modelPort = await new Promise((resolve) => {
-      modelSrv.listen(0, "127.0.0.1", () => resolve(modelSrv.address().port));
+    const modelPort = await new Promise<number>((resolve, reject) => {
+      modelSrv.listen(0, "127.0.0.1", () => {
+        const address = modelSrv.address();
+        if (!address || typeof address === "string") reject(new Error("model server did not bind"));
+        else resolve(address.port);
+      });
     });
     const prevModelsUrl = process.env.TERMINA_TEST_MODELS_URL;
     const prevAnth = process.env.ANTHROPIC_API_KEY;
@@ -2662,7 +2740,12 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     });
     let filteredText = "";
     const sseEvents = await compat.readSseJson(sse, undefined, (event) => {
-      filteredText = event.choices?.[0]?.delta?.content ?? "";
+      const evt: unknown = event;
+      const evtChoices: unknown = typeof evt === "object" && evt !== null && "choices" in evt ? evt.choices : undefined;
+      const evtFirst = Array.isArray(evtChoices) ? evtChoices[0] : undefined;
+      const evtDelta: unknown = typeof evtFirst === "object" && evtFirst !== null && "delta" in evtFirst ? evtFirst.delta : undefined;
+      const evtContent: unknown = typeof evtDelta === "object" && evtDelta !== null && "content" in evtDelta ? evtDelta.content : undefined;
+      filteredText = typeof evtContent === "string" ? evtContent : "";
       return false;
     });
     check("readSseJson streams and can discard events", filteredText === "Hi" && sseEvents.length === 0);
@@ -2728,10 +2811,13 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       reasoningEffort: "minimal",
       googleThinking: true,
     });
+    const googleExtra: unknown = bodyGoogle.extra_body;
+    const googleConfig: unknown = typeof googleExtra === "object" && googleExtra !== null && "google" in googleExtra ? googleExtra.google : undefined;
+    const googleThinking: unknown = typeof googleConfig === "object" && googleConfig !== null && "thinking_config" in googleConfig ? googleConfig.thinking_config : undefined;
     check(
       "Google completions request visible thought summaries",
-      bodyGoogle.extra_body?.google?.thinking_config?.thinking_level === "minimal" &&
-        bodyGoogle.extra_body?.google?.thinking_config?.include_thoughts === true,
+      typeof googleThinking === "object" && googleThinking !== null && "thinking_level" in googleThinking && googleThinking.thinking_level === "minimal"
+        && "include_thoughts" in googleThinking && googleThinking.include_thoughts === true,
     );
     const bodyGlm = compat.completionsBody("glm-5.2", "sys", [], [], "max_tokens", {
       reasoningEffort: "high",
@@ -2770,6 +2856,16 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       "summarize Codex responses omit max_output_tokens",
       bodySummaryCodex.max_output_tokens === undefined && bodySummaryCodex.stream === true,
     );
+    function inputBreakpoint(input: unknown, index: number): unknown {
+      if (!Array.isArray(input)) return undefined;
+      const item = input[index < 0 ? input.length + index : index];
+      const content: unknown = typeof item === "object" && item !== null && "content" in item ? item.content : undefined;
+      const block = Array.isArray(content) ? content[0] : undefined;
+      return typeof block === "object" && block !== null && "prompt_cache_breakpoint" in block ? block.prompt_cache_breakpoint : undefined;
+    }
+    function breakpointMode(breakpoint: unknown): unknown {
+      return typeof breakpoint === "object" && breakpoint !== null && "mode" in breakpoint ? breakpoint.mode : undefined;
+    }
     const bodyOrClaude = compat.responsesBody(
       "anthropic/claude-sonnet-5",
       "sys",
@@ -2785,8 +2881,8 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       bodyOrClaude.prompt_cache_key === "sess-1" &&
         bodyOrClaude.session_id === "sess-1" &&
         bodyOrClaude.cache_control === undefined &&
-        bodyOrClaude.input[0]?.content?.[0]?.prompt_cache_breakpoint?.mode === "explicit" &&
-        bodyOrClaude.input.at(-1)?.content?.[0]?.prompt_cache_breakpoint === undefined,
+        breakpointMode(inputBreakpoint(bodyOrClaude.input, 0)) === "explicit" &&
+        inputBreakpoint(bodyOrClaude.input, -1) === undefined,
     );
     const bodyGpt56 = compat.responsesBody(
       "gpt-5.6-sol",
@@ -2798,11 +2894,11 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       [],
       { cacheKey: "sess-2", explicitCacheBreakpoint: true, includeEncryptedReasoning: false },
     );
-    const gpt56First = bodyGpt56.input[0]?.content?.[0];
-    const gpt56Last = bodyGpt56.input.at(-1)?.content?.[0];
+    const gpt56FirstBreakpoint = inputBreakpoint(bodyGpt56.input, 0);
+    const gpt56LastBreakpoint = inputBreakpoint(bodyGpt56.input, -1);
     check(
       "gpt-5.6 breakpoint sits before the overlay",
-      gpt56First?.prompt_cache_breakpoint?.mode === "explicit" && gpt56Last?.prompt_cache_breakpoint === undefined,
+      breakpointMode(gpt56FirstBreakpoint) === "explicit" && gpt56LastBreakpoint === undefined,
     );
     check("gpt-5.6 breakpoint-only omits prompt_cache_options", bodyGpt56.prompt_cache_options === undefined);
     const bodyGpt56Explicit = compat.responsesBody(
@@ -2820,11 +2916,14 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         includeEncryptedReasoning: false,
       },
     );
+    const explicitCacheOptions: unknown = bodyGpt56Explicit.prompt_cache_options;
+    const explicitCacheMode: unknown = typeof explicitCacheOptions === "object" && explicitCacheOptions !== null && "mode" in explicitCacheOptions ? explicitCacheOptions.mode : undefined;
+    const explicitCacheTtl: unknown = typeof explicitCacheOptions === "object" && explicitCacheOptions !== null && "ttl" in explicitCacheOptions ? explicitCacheOptions.ttl : undefined;
     check(
       "gpt-5.6 explicit mode disables implicit overlay writes",
-      bodyGpt56Explicit.prompt_cache_options?.mode === "explicit" &&
-        bodyGpt56Explicit.prompt_cache_options?.ttl === "30m" &&
-        bodyGpt56Explicit.input.at(-1)?.content?.[0]?.prompt_cache_breakpoint === undefined,
+      explicitCacheMode === "explicit" &&
+        explicitCacheTtl === "30m" &&
+        inputBreakpoint(bodyGpt56Explicit.input, -1) === undefined,
     );
     const bodyGpt56NoOverlay = compat.responsesBody("gpt-5.6-sol", "sys", [{ role: "user", content: "stable history" }], [], {
       explicitCacheBreakpoint: true,
@@ -2834,7 +2933,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     });
     check(
       "gpt-5.6 without overlay still pins the last user text",
-      bodyGpt56NoOverlay.input[0]?.content?.[0]?.prompt_cache_breakpoint?.mode === "explicit",
+      breakpointMode(inputBreakpoint(bodyGpt56NoOverlay.input, 0)) === "explicit",
     );
     const bodyGpt56Assistant = compat.responsesBody(
       "gpt-5.6-sol",
@@ -2848,8 +2947,8 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     check(
       "gpt-5.6 breakpoint does not mark assistant output_text",
-      bodyGpt56Assistant.input[0]?.content?.[0]?.prompt_cache_breakpoint === undefined &&
-        bodyGpt56Assistant.input.at(-1)?.content?.[0]?.prompt_cache_breakpoint === undefined,
+      inputBreakpoint(bodyGpt56Assistant.input, 0) === undefined &&
+        inputBreakpoint(bodyGpt56Assistant.input, -1) === undefined,
     );
     const bodyGpt56Solo = compat.responsesBody("gpt-5.6-sol", "sys", [{ role: "user", content: "only overlay" }], [], {
       explicitCacheBreakpoint: true,
@@ -2857,34 +2956,43 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     });
     check(
       "gpt-5.6 breakpoint does not mark a lone overlay",
-      bodyGpt56Solo.input[0]?.content?.[0]?.prompt_cache_breakpoint === undefined,
+      inputBreakpoint(bodyGpt56Solo.input, 0) === undefined,
     );
     const stripped = compat.stripResponsesBreakpoints(bodyGpt56Explicit);
     check(
       "stripResponsesBreakpoints removes options and input markers",
       stripped.prompt_cache_options === undefined &&
-        stripped.input[0]?.content?.[0]?.prompt_cache_breakpoint === undefined,
+        inputBreakpoint(stripped.input, 0) === undefined,
     );
     const bodyResponses = compat.responsesBody("gpt-5.6-sol", "sys", [], [], { maxTokens: 32_768, reasoningEffort: "max" });
     check("other responses set max_output_tokens", bodyResponses.max_output_tokens === 32_768);
+    const bodyReasoning: unknown = bodyResponses.reasoning;
+    const bodyReasoningEffort: unknown = typeof bodyReasoning === "object" && bodyReasoning !== null && "effort" in bodyReasoning ? bodyReasoning.effort : undefined;
+    const bodyReasoningSummary: unknown = typeof bodyReasoning === "object" && bodyReasoning !== null && "summary" in bodyReasoning ? bodyReasoning.summary : undefined;
     check(
       "responses body requests a live reasoning summary",
-      bodyResponses.reasoning?.effort === "max" && bodyResponses.reasoning?.summary === "auto",
+      bodyReasoningEffort === "max" && bodyReasoningSummary === "auto",
     );
     check(
       "responses body asks for encrypted reasoning",
       Array.isArray(bodyCodex.include) && bodyCodex.include.includes("reasoning.encrypted_content"),
     );
-    check("responses body sets reasoning effort", bodyCodex.reasoning?.effort === "none");
+    const codexReasoning: unknown = bodyCodex.reasoning;
+    const codexReasoningEffort: unknown = typeof codexReasoning === "object" && codexReasoning !== null && "effort" in codexReasoning ? codexReasoning.effort : undefined;
+    check("responses body sets reasoning effort", codexReasoningEffort === "none");
     const bodyGpt56Agent = compat.responsesBody("gpt-5.6-sol", "sys", [], [], {
       reasoningEffort: "medium",
       reasoningContext: "all_turns",
       textVerbosity: "low",
       includeEncryptedReasoning: false,
     });
+    const agentReasoning: unknown = bodyGpt56Agent.reasoning;
+    const agentReasoningContext: unknown = typeof agentReasoning === "object" && agentReasoning !== null && "context" in agentReasoning ? agentReasoning.context : undefined;
+    const agentText: unknown = bodyGpt56Agent.text;
+    const agentVerbosity: unknown = typeof agentText === "object" && agentText !== null && "verbosity" in agentText ? agentText.verbosity : undefined;
     check(
       "GPT-5.6 responses keep reasoning across turns and low verbosity",
-      bodyGpt56Agent.reasoning?.context === "all_turns" && bodyGpt56Agent.text?.verbosity === "low",
+      agentReasoningContext === "all_turns" && agentVerbosity === "low",
     );
     check("gpt56ReasoningContext sol", gpt56ReasoningContext("gpt-5.6-sol") === "all_turns");
     check("gpt56ReasoningContext grok is omitted", gpt56ReasoningContext("grok-4.6") === undefined);
@@ -2900,12 +3008,15 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         ],
       },
     ]);
+    const reasonedSummary: unknown = reasoned[0]?.summary;
+    const reasonedSummaryFirst = Array.isArray(reasonedSummary) ? reasonedSummary[0] : undefined;
+    const reasonedSummaryText: unknown = typeof reasonedSummaryFirst === "object" && reasonedSummaryFirst !== null && "text" in reasonedSummaryFirst ? reasonedSummaryFirst.text : undefined;
     check(
       "toResponsesInput round-trips reasoning before the tool call",
       reasoned[0]?.type === "reasoning" &&
         reasoned[0]?.id === "rs_1" &&
         reasoned[0]?.encrypted_content === "enc" &&
-        reasoned[0]?.summary?.[0]?.text === "plan" &&
+        reasonedSummaryText === "plan" &&
         reasoned[1]?.type === "function_call",
     );
     check("responses tools are non-strict", compat.toResponsesTools([{ name: "bash", description: "b", input_schema: { type: "object" } }])[0]?.strict === false);
@@ -2959,17 +3070,25 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         content: [{ type: "tool_result", tool_use_id: "call_A", content: "file.txt" }],
       },
     ]);
+    const partialOutput2: unknown = partialAnswer[2]?.output;
+    const partialFirst2 = Array.isArray(partialOutput2) ? partialOutput2[0] : undefined;
+    const partialType2: unknown = typeof partialFirst2 === "object" && partialFirst2 !== null && "type" in partialFirst2 ? partialFirst2.type : undefined;
+    const partialText2: unknown = typeof partialFirst2 === "object" && partialFirst2 !== null && "text" in partialFirst2 ? partialFirst2.text : undefined;
+    const partialOutput3: unknown = partialAnswer[3]?.output;
+    const partialFirst3 = Array.isArray(partialOutput3) ? partialOutput3[0] : undefined;
+    const partialType3: unknown = typeof partialFirst3 === "object" && partialFirst3 !== null && "type" in partialFirst3 ? partialFirst3.type : undefined;
+    const partialText3: unknown = typeof partialFirst3 === "object" && partialFirst3 !== null && "text" in partialFirst3 ? partialFirst3.text : undefined;
     check(
       "toResponsesInput flushes unanswered parallel tool calls even without user text",
       partialAnswer.length === 4 &&
         partialAnswer[0]?.call_id === "call_A" &&
         partialAnswer[1]?.call_id === "call_B" &&
         partialAnswer[2]?.call_id === "call_A" &&
-        partialAnswer[2]?.output?.[0]?.type === "input_text" &&
-        partialAnswer[2]?.output?.[0]?.text === "file.txt" &&
+        partialType2 === "input_text" &&
+        partialText2 === "file.txt" &&
         partialAnswer[3]?.call_id === "call_B" &&
-        partialAnswer[3]?.output?.[0]?.type === "input_text" &&
-        partialAnswer[3]?.output?.[0]?.text === "(interrupted)",
+        partialType3 === "input_text" &&
+        partialText3 === "(interrupted)",
     );
     const deltaThenDone = compat.responsesResultFromEvents(
       [
@@ -3001,12 +3120,19 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       () => {},
       Date.now(),
     );
+    const doneOnlyInput: unknown = doneOnly.blocks[0]?.input;
     check(
       "responses result reads a function call from output_item.done",
-      doneOnly.blocks[0]?.type === "tool_use" && doneOnly.blocks[0]?.id === "call_9" && doneOnly.blocks[0]?.input?.command === "pwd",
+      doneOnly.blocks[0]?.type === "tool_use" && doneOnly.blocks[0]?.id === "call_9"
+        && typeof doneOnlyInput === "object" && doneOnlyInput !== null && "command" in doneOnlyInput && doneOnlyInput.command === "pwd",
     );
     const xaiBody = compat.responsesBody("grok-4.6", "sys", [], [], { includeEncryptedReasoning: false, reasoningEffort: "low" });
-    check("xai responses omit encrypted include", xaiBody.include === undefined && xaiBody.reasoning?.effort === "low");
+    const xaiReasoning: unknown = xaiBody.reasoning;
+    check(
+      "xai responses omit encrypted include",
+      xaiBody.include === undefined
+        && typeof xaiReasoning === "object" && xaiReasoning !== null && "effort" in xaiReasoning && xaiReasoning.effort === "low",
+    );
     const reasonedOut = compat.responsesResultFromEvents(
       [
         {
@@ -3140,7 +3266,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       "MCP loads only the user-owned config",
       mcp.loadMcpConfigs(mcpUser).map((s) => s.name).join(",") === "gh,keep",
     );
-    check("project MCP config is not an executable source", mcp.projectMcpPath === undefined);
+    check("project MCP config is not an executable source", !("projectMcpPath" in mcp));
     const mcpJail = mkdtempSync(join(tmpdir(), "agent-core-mcp-jail-"));
     leftovers.push(mcpJail);
     try {
@@ -3240,10 +3366,10 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     crashMcp.shutdown();
     
     const httpStub = createServer((req, res) => {
-      const chunks = [];
+      const chunks: Uint8Array[] = [];
       req.on("data", (c) => chunks.push(c));
       req.on("end", () => {
-        let msg = {};
+        let msg: { method?: unknown; id?: unknown; params?: unknown } = {};
         try {
           msg = JSON.parse(Buffer.concat(chunks).toString("utf8"));
         } catch {
@@ -3255,13 +3381,16 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         const path = String(req.url ?? "");
         if (path.includes("hang") && msg.method === "tools/call") return;
         const sse = path.includes("sse");
+        const msgParams: unknown = msg.params;
+        const msgArgs: unknown = typeof msgParams === "object" && msgParams !== null && "arguments" in msgParams ? msgParams.arguments : undefined;
+        const msgText: unknown = typeof msgArgs === "object" && msgArgs !== null && "text" in msgArgs ? msgArgs.text : undefined;
         const body =
           msg.method === "initialize"
             ? { jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "http-echo" } } }
             : msg.method === "tools/list"
               ? { jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "echo", description: "echo text", inputSchema: { type: "object", properties: { text: { type: "string" } } } }] } }
               : msg.method === "tools/call"
-                ? { jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: String(msg.params?.arguments?.text ?? "") }] } }
+                ? { jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: String(msgText ?? "") }] } }
                 : { jsonrpc: "2.0", id: msg.id, result: {} };
         if (sse) {
           res.setHeader("content-type", "text/event-stream");
@@ -3272,8 +3401,10 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         res.end(JSON.stringify(body));
       });
     });
-    await new Promise((resolve) => httpStub.listen(0, "127.0.0.1", resolve));
-    const httpPort = httpStub.address().port;
+    await new Promise<void>((resolve) => httpStub.listen(0, "127.0.0.1", resolve));
+    const httpAddress = httpStub.address();
+    if (!httpAddress || typeof httpAddress === "string") throw new Error("http stub did not bind");
+    const httpPort = httpAddress.port;
     const httpMcp = await mcp.startMcp(
       [{ name: "httpecho", url: `http://127.0.0.1:${httpPort}/mcp`, args: [], env: {} }],
       { projectRoot: mcpDir, confineCwd: (cwd) => mcp.jailMcpCwd(mcpDir, cwd) },
@@ -3309,13 +3440,15 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       blockedHttp.tools.length === 0 && blockedHttp.notes.some((n) => n.includes("https")),
     );
     blockedHttp.shutdown();
-    const redirStub = createServer((req, res) => {
+    const redirStub = createServer((_req, res) => {
       res.statusCode = 302;
       res.setHeader("location", "http://127.0.0.1/steal");
       res.end("moved");
     });
-    await new Promise((resolve) => redirStub.listen(0, "127.0.0.1", resolve));
-    const redirPort = redirStub.address().port;
+    await new Promise<void>((resolve) => redirStub.listen(0, "127.0.0.1", resolve));
+    const redirAddress = redirStub.address();
+    if (!redirAddress || typeof redirAddress === "string") throw new Error("redirect stub did not bind");
+    const redirPort = redirAddress.port;
     const redirMcp = await mcp.startMcp(
       [{ name: "redir", url: `http://127.0.0.1:${redirPort}/mcp`, args: [], env: {} }],
       { projectRoot: mcpDir, confineCwd: (cwd) => mcp.jailMcpCwd(mcpDir, cwd) },
@@ -3326,12 +3459,14 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     redirMcp.shutdown();
     redirStub.close();
-    const hugeStub = createServer((req, res) => {
+    const hugeStub = createServer((_req, res) => {
       res.setHeader("content-type", "application/json");
       res.end(`${"x".repeat(300 * 1024)}`);
     });
-    await new Promise((resolve) => hugeStub.listen(0, "127.0.0.1", resolve));
-    const hugePort = hugeStub.address().port;
+    await new Promise<void>((resolve) => hugeStub.listen(0, "127.0.0.1", resolve));
+    const hugeAddress = hugeStub.address();
+    if (!hugeAddress || typeof hugeAddress === "string") throw new Error("huge stub did not bind");
+    const hugePort = hugeAddress.port;
     const hugeMcp = await mcp.startMcp(
       [{ name: "huge", url: `http://127.0.0.1:${hugePort}/mcp`, args: [], env: {} }],
       { projectRoot: mcpDir, confineCwd: (cwd) => mcp.jailMcpCwd(mcpDir, cwd) },
@@ -3376,15 +3511,16 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     check("isCoreSessionId rejects parent segment", isCoreSessionId("..") === false);
     check("isCoreSessionId accepts uuid form", isCoreSessionId("core-11111111-1111-1111-1111-111111111111") === true);
-    const liveRoster = [{ id: "term-3", type: "agent", engine: "core" }];
+    const liveRoster: TerminalRosterEntry[] = [{ id: "term-3", type: "agent", engine: "core" }];
+    // Legacy "pi" engines probe that compose stays engine-agnostic.
     const unrestoredRoster = [
       { id: "term-1", type: "agent", engine: "pi" },
       { id: "term-3", type: "agent", engine: "pi" },
-    ];
+    ] as unknown as TerminalRosterEntry[];
     const composed = rosterMod.composeTerminalRoster(liveRoster, unrestoredRoster);
     check("composeTerminalRoster prefers live id", composed[0]?.id === "term-3" && composed[0]?.engine === "core");
     check("composeTerminalRoster keeps unrestored sibling", composed[1]?.id === "term-1" && composed.length === 2);
-    const manyLive = Array.from({ length: 20 }, (_, i) => ({ id: `term-${i + 1}`, type: "agent", engine: "pi" }));
+    const manyLive = Array.from({ length: 20 }, (_, i) => ({ id: `term-${i + 1}`, type: "agent", engine: "pi" })) as unknown as TerminalRosterEntry[];
     check("composeTerminalRoster caps at 16", rosterMod.composeTerminalRoster(manyLive, []).length === rosterMod.MAX_TERMINAL_ROSTER);
     
     const rotFixed = new Date(2026, 7, 26, 15, 4, 5).getTime();
@@ -3582,10 +3718,14 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     check("slash /effort x matches xhigh", matchingSlashCommands("/effort x")[0]?.submit === "/effort xhigh");
     check("parseEffortCommand missing is null", parseEffortCommand("/model") === null);
-    check("parseEffortCommand bare shows", parseEffortCommand("/effort")?.show === true);
-    check("parseEffortCommand max", parseEffortCommand("/effort max")?.effort === "max");
-    check("parseEffortCommand xhigh", parseEffortCommand("/effort xhigh")?.effort === "xhigh");
-    check("parseEffortCommand rejects junk", typeof parseEffortCommand("/effort ultra")?.error === "string");
+    const effortBare = parseEffortCommand("/effort");
+    check("parseEffortCommand bare shows", !!effortBare && "show" in effortBare && effortBare.show === true);
+    const effortMax = parseEffortCommand("/effort max");
+    check("parseEffortCommand max", !!effortMax && "effort" in effortMax && effortMax.effort === "max");
+    const effortXhigh = parseEffortCommand("/effort xhigh");
+    check("parseEffortCommand xhigh", !!effortXhigh && "effort" in effortXhigh && effortXhigh.effort === "xhigh");
+    const effortJunk = parseEffortCommand("/effort ultra");
+    check("parseEffortCommand rejects junk", !!effortJunk && "error" in effortJunk && typeof effortJunk.error === "string");
     check(
       "gpt 5.6 exposes its direct API levels",
       supportedEffortLevels("openai", "gpt-5.6-sol", auth.providerProtocol("openai", "gpt-5.6-sol")).join(" ") === "off low medium high xhigh max",
@@ -3813,7 +3953,11 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const bodyGpt6 = compat.responsesBody("gpt-6-astra", "sys", [], [], {
       reasoningEffort: reasoningEffortFor("openai", "gpt-6-astra", "max", auth.providerProtocol("openai", "gpt-6-astra")),
     });
-    check("GPT-6 responses set reasoning effort", bodyGpt6.reasoning?.effort === "max");
+    const gpt6Reasoning: unknown = bodyGpt6.reasoning;
+    check(
+      "GPT-6 responses set reasoning effort",
+      typeof gpt6Reasoning === "object" && gpt6Reasoning !== null && "effort" in gpt6Reasoning && gpt6Reasoning.effort === "max",
+    );
     check(
       "reasoningEffortFor zen Claude is omitted",
       reasoningEffortFor("opencode-zen", "claude-sonnet-5", "high", auth.providerProtocol("opencode-zen", "claude-sonnet-5")) === undefined,
@@ -3836,10 +3980,14 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       reasoningEffort: "high",
       googleThinking: true,
     });
+    const zenGeneration: unknown = bodyZenGemini.generationConfig;
+    const zenThinking: unknown = typeof zenGeneration === "object" && zenGeneration !== null && "thinkingConfig" in zenGeneration ? zenGeneration.thinkingConfig : undefined;
+    const zenLevel: unknown = typeof zenThinking === "object" && zenThinking !== null && "thinkingLevel" in zenThinking ? zenThinking.thinkingLevel : undefined;
+    const zenInclude: unknown = typeof zenThinking === "object" && zenThinking !== null && "includeThoughts" in zenThinking ? zenThinking.includeThoughts : undefined;
     check(
       "Zen Gemini generateContent sets thinkingLevel",
-      bodyZenGemini.generationConfig?.thinkingConfig?.thinkingLevel === "high" &&
-        bodyZenGemini.generationConfig?.thinkingConfig?.includeThoughts === true &&
+      zenLevel === "high" &&
+        zenInclude === true &&
         bodyZenGemini.model === undefined,
     );
     const bodyZenGeminiMerged = compat.googleGenerateBody(
@@ -3850,11 +3998,15 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       ],
       [],
     );
+    const mergedContents: unknown = bodyZenGeminiMerged.contents;
+    const mergedFirst = Array.isArray(mergedContents) ? mergedContents[0] : undefined;
+    const mergedFirstRole: unknown = typeof mergedFirst === "object" && mergedFirst !== null && "role" in mergedFirst ? mergedFirst.role : undefined;
+    const mergedFirstParts: unknown = typeof mergedFirst === "object" && mergedFirst !== null && "parts" in mergedFirst ? mergedFirst.parts : undefined;
     check(
       "Zen Gemini merges consecutive user turns",
-      bodyZenGeminiMerged.contents?.length === 1 &&
-        bodyZenGeminiMerged.contents[0]?.role === "user" &&
-        bodyZenGeminiMerged.contents[0]?.parts?.length === 2,
+      Array.isArray(mergedContents) && mergedContents.length === 1 &&
+        mergedFirstRole === "user" &&
+        Array.isArray(mergedFirstParts) && mergedFirstParts.length === 2,
     );
     const bodyZenGeminiUnsigned = compat.googleGenerateBody(
       "sys",
@@ -3929,7 +4081,11 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const bodyZenSpark = compat.responsesBody("muse-spark-1.3-contributor-free", "sys", [], [], {
       reasoningEffort: reasoningEffortFor("opencode-zen", "muse-spark-1.3-contributor-free", "high", auth.providerProtocol("opencode-zen", "muse-spark-1.3-contributor-free")),
     });
-    check("Zen Muse Spark responses set reasoning effort", bodyZenSpark.reasoning?.effort === "high");
+    const zenSparkReasoning: unknown = bodyZenSpark.reasoning;
+    check(
+      "Zen Muse Spark responses set reasoning effort",
+      typeof zenSparkReasoning === "object" && zenSparkReasoning !== null && "effort" in zenSparkReasoning && zenSparkReasoning.effort === "high",
+    );
     check(
       "Zen relay completions expose the core effort subset",
       supportedEffortLevels("opencode-zen", "deepseek-v4-pro", auth.providerProtocol("opencode-zen", "deepseek-v4-pro")).join(" ") === "off low medium high max" &&
@@ -3985,26 +4141,49 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       },
     ];
     const stamped = stampHistoryCache(cacheMsgs);
-    check("stampHistoryCache does not mutate input", cacheMsgs[2].content[1].cache_control === undefined);
+    const cacheMsgContent: unknown = cacheMsgs[2].content;
+    const cacheSecond: unknown = typeof cacheMsgContent === "string" || Array.isArray(cacheMsgContent) ? cacheMsgContent[1] : undefined;
+    const cacheMark: unknown = typeof cacheSecond === "object" && cacheSecond !== null && "cache_control" in cacheSecond ? cacheSecond.cache_control : undefined;
+    check("stampHistoryCache does not mutate input", cacheMark === undefined);
+    const stampedContent: unknown = stamped[2].content;
+    const stampedSecond: unknown = typeof stampedContent === "string" || Array.isArray(stampedContent) ? stampedContent[1] : undefined;
+    const stampedMark: unknown = typeof stampedSecond === "object" && stampedSecond !== null && "cache_control" in stampedSecond ? stampedSecond.cache_control : undefined;
+    const stampedMarkType: unknown = typeof stampedMark === "object" && stampedMark !== null && "type" in stampedMark ? stampedMark.type : undefined;
+    const stampedFirst: unknown = typeof stampedContent === "string" || Array.isArray(stampedContent) ? stampedContent[0] : undefined;
+    const stampedFirstMark: unknown = typeof stampedFirst === "object" && stampedFirst !== null && "cache_control" in stampedFirst ? stampedFirst.cache_control : undefined;
     check(
       "stampHistoryCache marks last tool_result only",
-      stamped[2].content[1].cache_control?.type === "ephemeral" && stamped[2].content[0].cache_control === undefined,
+      stampedMarkType === "ephemeral" && stampedFirstMark === undefined,
     );
     check("stampHistoryCache leaves earlier messages", stamped[0] === cacheMsgs[0]);
-    const converted = compat.toCompletionsMessages("sys", stamped);
+    const stampedKernel: KernelMessage[] = stamped.map((message) => ({
+      role: message.role === "assistant" ? "assistant" : "user",
+      content: typeof message.content === "string"
+        ? message.content
+        : Array.isArray(message.content)
+          ? message.content.filter((block): block is Record<string, unknown> => typeof block === "object" && block !== null && !Array.isArray(block))
+          : [],
+    }));
+    const converted = compat.toCompletionsMessages("sys", stampedKernel);
     check(
       "openai conversion drops cache_control",
       converted.every((m) => !("cache_control" in m) && (typeof m.content === "string" || m.content == null || !JSON.stringify(m).includes("cache_control"))),
     );
     const stampedUser = stampHistoryCache([{ role: "user", content: "hi" }]);
+    const stampedUserContent: unknown = stampedUser[0]?.content;
+    const stampedUserFirst: unknown = typeof stampedUserContent === "string" || Array.isArray(stampedUserContent) ? stampedUserContent[0] : undefined;
+    const stampedUserFirstType: unknown = typeof stampedUserFirst === "object" && stampedUserFirst !== null && "type" in stampedUserFirst ? stampedUserFirst.type : undefined;
+    const stampedUserFirstText: unknown = typeof stampedUserFirst === "object" && stampedUserFirst !== null && "text" in stampedUserFirst ? stampedUserFirst.text : undefined;
+    const stampedUserFirstMark: unknown = typeof stampedUserFirst === "object" && stampedUserFirst !== null && "cache_control" in stampedUserFirst ? stampedUserFirst.cache_control : undefined;
+    const stampedUserFirstMarkType: unknown = typeof stampedUserFirstMark === "object" && stampedUserFirstMark !== null && "type" in stampedUserFirstMark ? stampedUserFirstMark.type : undefined;
     check(
       "stampHistoryCache pins the last user text",
-      stampedUser[0]?.content?.[0]?.type === "text" &&
-        stampedUser[0]?.content?.[0]?.text === "hi" &&
-        stampedUser[0]?.content?.[0]?.cache_control?.type === "ephemeral",
+      stampedUserFirstType === "text" &&
+        stampedUserFirstText === "hi" &&
+        stampedUserFirstMarkType === "ephemeral",
     );
     check("request overlay omits empty", workingSetForTest({ messages: [] }) === "");
-    const overlayMsgs = [
+    const overlayMsgs: ProjectionMessage[] = [
       { role: "assistant", content: [{ type: "tool_use", name: "edit", input: { path: "a.ts" } }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: "1", content: "ok" }] },
     ];
@@ -4020,12 +4199,16 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       ...stampHistoryCache(overlayMsgs),
       { role: "user", content: overlay },
     ];
+    const overlayPrevContent: unknown = stampedThenOverlay.at(-2)?.content;
+    const overlayPrevFirst: unknown = typeof overlayPrevContent === "string" || Array.isArray(overlayPrevContent) ? overlayPrevContent[0] : undefined;
+    const overlayPrevMark: unknown = typeof overlayPrevFirst === "object" && overlayPrevFirst !== null && "cache_control" in overlayPrevFirst ? overlayPrevFirst.cache_control : undefined;
+    const overlayPrevMarkType: unknown = typeof overlayPrevMark === "object" && overlayPrevMark !== null && "type" in overlayPrevMark ? overlayPrevMark.type : undefined;
     check(
       "overlay sits after stamped tool_result",
       stampedThenOverlay.at(-1)?.content === overlay &&
-        stampedThenOverlay.at(-2)?.content?.[0]?.cache_control?.type === "ephemeral",
+        overlayPrevMarkType === "ephemeral",
     );
-    const hdr = (v) => ({ get: (name) => (name.toLowerCase() === "retry-after" ? v : null) });
+    const hdr = (v: string | null) => ({ get: (name: string) => (name.toLowerCase() === "retry-after" ? v : null) });
     check("retryAfter 400 is null", retryAfter(400, hdr(null), 0) === null);
     check("retryAfter 429 first wait 1s", retryAfter(429, hdr(null), 0) === 1_000);
     check("retryAfter 429 second wait 2s", retryAfter(429, hdr(null), 1) === 2_000);
@@ -4140,32 +4323,34 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       commandsMod.COMMAND_DEFINITIONS.some((c) => c.command === "toggle-thinking" && c.label === "Toggle Thinking" && c.defaultShortcut === "CmdOrCtrl+Shift+H"),
     );
     const themesMod = await import("../../../src/terminal-themes.ts");
-    function luminance(hex) {
-      const n = Number.parseInt(hex.slice(1), 16);
+    function luminance(hex: string | undefined): number {
+      const n = Number.parseInt((hex ?? "").slice(1), 16);
       const rgb = [n >> 16, (n >> 8) & 255, n & 255].map((c) => {
         const s = c / 255;
         return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
       });
       return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
     }
-    function contrastRatio(a, b) {
+    function contrastRatio(a: string | undefined, b: string | undefined): number {
       const l1 = luminance(a);
       const l2 = luminance(b);
       const hi = Math.max(l1, l2);
       const lo = Math.min(l1, l2);
       return (hi + 0.05) / (lo + 0.05);
     }
-    for (const theme of Object.keys(themesMod.TERMINAL_THEMES)) {
+    for (const theme of Object.keys(themesMod.TERMINAL_THEMES) as ThemeId[]) {
       const coreTheme = themesMod.terminalTheme(theme, "core");
-      const plainTheme = themesMod.terminalTheme(theme, "pi");
+      // Deliberate legacy-engine probe: "pi" predates the "core"-only engine union.
+      const plainTheme = themesMod.terminalTheme(theme, "pi" as unknown as "core");
       check(
         `core ${theme} has three extendedAnsi entries`,
         Array.isArray(coreTheme.extendedAnsi) && coreTheme.extendedAnsi.length === 3,
       );
       check(`pi ${theme} has no extendedAnsi override`, plainTheme.extendedAnsi === undefined);
+      const coreAnsi = coreTheme.extendedAnsi;
       check(
         `core ${theme} tool backgrounds keep 4.5 contrast`,
-        coreTheme.extendedAnsi.every((bg) => contrastRatio(coreTheme.foreground, bg) >= 4.5),
+        Array.isArray(coreAnsi) && coreAnsi.every((bg) => contrastRatio(coreTheme.foreground, bg) >= 4.5),
       );
       check(
         `core ${theme} thinking dim keeps 4.5 contrast`,
@@ -4242,7 +4427,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         semFrame.includes("failed"),
     );
     semanticTui.finishTool(h1, "success");
-    semanticTui.finishTool(/** @type {any} */ ({}), "success");
+    semanticTui.finishTool({} as unknown as TranscriptHandle, "success");
     check("forged or duplicate tool handles stay bounded", semanticTui.frame().includes("invalid tool handle"));
     const boundTui = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
@@ -4261,7 +4446,8 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       onExit: () => {},
     });
     truncTui.appendAssistant("a".repeat(410_000));
-    const truncText = String(truncTui.entries?.[0]?.text ?? truncTui.frame());
+    const truncAny = truncTui as unknown as { entries?: Array<{ text?: unknown }> };
+    const truncText = String(truncAny.entries?.[0]?.text ?? truncTui.frame());
     check(
       "active assistant over budget keeps one truncation marker",
       (truncText.match(/\[truncated\]/g) || []).length === 1 && truncText.length <= 400_000 + 32,
@@ -4396,8 +4582,8 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         resumeHandoff.frame().includes("(image)") &&
         !resumeHandoff.frame().includes("<context-handoff>"),
     );
-    function paintCapture(setup) {
-      const writes = [];
+    function paintCapture(setup: (tui: AgentTui) => void): string {
+      const writes: string[] = [];
       const tui = new tuiMod.AgentTui({
         stdout: { write: (s) => { writes.push(s); return true; }, columns: 80, rows: 24, isTTY: true },
         stdin: { isTTY: true, setRawMode: () => {}, resume: () => {} },
@@ -4593,7 +4779,8 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     });
     mixTrunc.appendPlain("s".repeat(390_000));
     mixTrunc.appendAssistant(`keep-me-${"a".repeat(20_000)}`);
-    const mixText = String(mixTrunc.entries?.[0]?.text ?? mixTrunc.frame());
+    const mixAny = mixTrunc as unknown as { entries?: Array<{ text?: unknown }> };
+    const mixText = String(mixAny.entries?.[0]?.text ?? mixTrunc.frame());
     check(
       "eviction runs before active-stream truncation",
       mixText.includes("keep-me-") && !mixText.includes("[truncated]"),
@@ -4619,8 +4806,8 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const visSrc = Array.from({ length: 80 }, (_, i) => `L${String(i).padStart(2, "0")}`).join("\n") + "\n";
     const vis = tuiMod.visibleLines(visSrc, 10, 3, 0);
     check("visibleLines is the tail", vis.join("|").includes("L79") && !vis.join("|").includes("L00"));
-    const submitted = [];
-    const exits = [];
+    const submitted: string[] = [];
+    const exits: boolean[] = [];
     const tui = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
       stdin: { isTTY: false },
@@ -4628,12 +4815,13 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       onInterrupt: () => {},
       onExit: () => exits.push(true),
     });
-    tui.setStatus({
+    const tuiStatus = {
       model: "anthropic/claude",
       auth: "oauth",
       effort: "max",
       usage: usageIndicators,
-    });
+    };
+    tui.setStatus(tuiStatus);
     tui.appendPlain("hello from transcript\n");
     const frame = tui.frame();
     const frameLines = frame.split("\n");
@@ -4674,12 +4862,13 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       onInterrupt: () => {},
       onExit: () => {},
     });
-    combinedStatusTui.setStatus({
+    const combinedStatus = {
       model: "openrouter/模型-very-long-model-name",
       auth: "oauth",
       effort: "maximum",
       permissions: "ask",
-    });
+    };
+    combinedStatusTui.setStatus(combinedStatus);
     combinedStatusTui.setPendingImageCount(2);
     combinedStatusTui.setQueued("queue a late UTF-8 ✅ mutation");
     const combinedStatusHeader = combinedStatusTui.frame().split("\n").at(-2) ?? "";
@@ -4711,7 +4900,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     refreshTui.feed("\x1b[200~abc\x1b[201~");
     check("bracketed paste end does not invoke host refresh", hostRefresh === 1 && refreshTui.frame().includes("keep this"));
-    const effortPicks = [];
+    const effortPicks: string[] = [];
     const effortTui = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
       stdin: { isTTY: false },
@@ -4729,7 +4918,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     effortTui.feed("\x1b[B\r");
     check("tui effort picker submits max", effortPicks[0] === "/effort max");
-    const permissionPicks = [];
+    const permissionPicks: string[] = [];
     const permissionTui = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
       stdin: { isTTY: false },
@@ -4755,7 +4944,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("tui approval defaults to deny", permissionPicks[1] === "/approve deny");
     check("tui approval keeps an in-flight draft", permissionTui.frame().includes("> keep this draft"));
     permissionTui.setBusy(false);
-    const shortcutLines = [];
+    const shortcutLines: string[] = [];
     let shortcutInterrupts = 0;
     const shortcutTui = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
@@ -4841,7 +5030,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("Ctrl+R searches prompt history", histTuiSearch.frame().includes("beta two"));
     tui.feed("/");
     check("tui slash menu lists help and exit", tui.frame().includes("/help") && tui.frame().includes("/exit"));
-    const tagSubmitted = [];
+    const tagSubmitted: string[] = [];
     const tagTui = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
       stdin: { isTTY: false },
@@ -4871,7 +5060,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     });
     tagTab.feed("@ok\t");
     check("tui @ tab completes a unique file", tagTab.frame().includes("@ok.txt"));
-    const tagExact = [];
+    const tagExact: string[] = [];
     const tagExactTui = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
       stdin: { isTTY: false },
@@ -4884,7 +5073,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("tui @ enter on an exact path submits", tagExact[0] === "@ok.txt");
     tui.feed("\r");
     check("tui enter on / submits help", submitted[0] === "/help");
-    const loginPicks = [];
+    const loginPicks: string[] = [];
     const loginTui = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
       stdin: { isTTY: false },
@@ -4929,7 +5118,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     tui.feed("/login\r");
     check("raw input submits /login as a line", submitted.at(-1) === "/login");
     tui.setRawInput(false);
-    const histLines = [];
+    const histLines: string[] = [];
     const histTui = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
       stdin: { isTTY: false },
@@ -4943,7 +5132,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("tui history up past a login command", histLines.at(-1) === "hello");
     tui.appendPlain("\x1b[31mred-text\x1b[0m");
     check("tui strips ansi from transcript", tui.frame().includes("red-text") && !tui.frame().includes("\x1b[31m"));
-    const pasteLines = [];
+    const pasteLines: string[] = [];
     const pasteTui = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
       stdin: { isTTY: false },
@@ -4953,7 +5142,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     });
     pasteTui.feed("\x1b[200~hello\nworld\x1b[201~\r");
     check("paste keeps newlines", pasteLines[0] === "hello\nworld");
-    const nlLines = [];
+    const nlLines: string[] = [];
     const nlTui = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
       stdin: { isTTY: false },
@@ -4967,7 +5156,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("Alt+Enter inserts a newline", nlLines[1] === "ab\ncd");
     nlTui.feed("ab\x1b[13;3ucd\r");
     check("CSI-u Alt+Enter inserts a newline", nlLines[2] === "ab\ncd");
-    const killLines = [];
+    const killLines: string[] = [];
     const killTui = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
       stdin: { isTTY: false },
@@ -4977,7 +5166,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     });
     killTui.feed("one two\x17\r");
     check("ctrl-w kills the last word", killLines[0] === "one");
-    const editLines = [];
+    const editLines: string[] = [];
     const editTui = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
       stdin: { isTTY: false },
@@ -5000,7 +5189,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     editTui.setDraft("\ncd");
     editTui.feed("\x1b[AX\r");
     check("up arrow from a later line reaches an empty first line", editLines[4] === "X\ncd");
-    const draftLines = [];
+    const draftLines: string[] = [];
     const draftTui = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
       stdin: { isTTY: false },
@@ -5028,15 +5217,16 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       onInterrupt: () => {},
       onExit: () => {},
     });
+    const scrollProbe = scrollTestTui as unknown as { scroll: number };
     scrollTestTui.appendAssistant("line\n".repeat(100));
     scrollTestTui.feed("\x1b[<64;1;1M");
-    check("mouse wheel up scrolls by 1 line", scrollTestTui.scroll === 1);
+    check("mouse wheel up scrolls by 1 line", scrollProbe.scroll === 1);
     scrollTestTui.feed("\x1b[<64;1;1M");
-    check("second mouse wheel up scrolls by 1 line", scrollTestTui.scroll === 2);
+    check("second mouse wheel up scrolls by 1 line", scrollProbe.scroll === 2);
     scrollTestTui.feed("\x1b[<65;1;1M");
-    check("mouse wheel down scrolls by 1 line", scrollTestTui.scroll === 1);
+    check("mouse wheel down scrolls by 1 line", scrollProbe.scroll === 1);
     scrollTestTui.feed("\x1b[5~");
-    check("page up scrolls by full page", scrollTestTui.scroll > 10);
+    check("page up scrolls by full page", scrollProbe.scroll > 10);
     
     
     const failed = results.filter((r) => !r).length;

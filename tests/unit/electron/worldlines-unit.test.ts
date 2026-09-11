@@ -1,12 +1,8 @@
 import { describe, it, expect, afterAll } from "vitest";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { resolve, join } from "node:path";
+import { join } from "node:path";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { WorldlineManager, disposeWorldlineCoreClient } from "../../../electron/worldlines/index.ts";
-
-const execFileAsync = promisify(execFile);
 
 describe("Worldline Manager, Core Client & Retention Performance Unit Suite", () => {
 

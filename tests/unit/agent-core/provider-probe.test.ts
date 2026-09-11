@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 /**
  * Tests for the controlled provider cache probe.
  *
@@ -16,10 +16,32 @@ import {
   buildProbePlan,
   runProviderCacheProbe,
 } from "./provider-probe.ts";
+import type { ProbeFetch, ProbeFetchInit } from "./provider-probe.ts";
+
+/** One request captured by the in-memory mock provider. */
+interface MockProviderRequest {
+  method: string;
+  headers: Record<string, string>;
+  raw: string;
+  body: Record<string, unknown>;
+  redirect: "manual";
+  signal: AbortSignal;
+}
+
+interface MockProviderResponse {
+  status?: number;
+  payload?: unknown;
+}
+
+interface MockProviderOptions {
+  status?: number;
+  payload?: unknown;
+  onRequest?: (request: MockProviderRequest, attempt: number, init: ProbeFetchInit) => MockProviderResponse | Promise<MockProviderResponse>;
+}
 
 describe("Agent Core Provider Probe Invariants", () => {
   it("passes provider probe tests", async () => {
-    const SOURCE_URLS = {
+    const SOURCE_URLS: Record<string, string> = {
       anthropic: "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
       openai: "https://developers.openai.com/api/docs/guides/prompt-caching",
       xai: "https://docs.x.ai/developers/advanced-api-usage/prompt-caching",
@@ -27,9 +49,9 @@ describe("Agent Core Provider Probe Invariants", () => {
     };
     
     const RETRIEVED_AT = "2026-08-30T12:00:00.000Z";
-    const failures = [];
-    
-    async function test(name, fn) {
+    const failures: Array<{ name: string; error: unknown }> = [];
+
+    async function test(name: string, fn: () => Promise<void> | void) {
       try {
         await fn();
         console.log(`PASS  ${name}`);
@@ -39,8 +61,8 @@ describe("Agent Core Provider Probe Invariants", () => {
       }
     }
     
-    function config(overrides = {}) {
-      const provider = overrides.provider ?? "openai";
+    function config(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+      const provider = typeof overrides.provider === "string" ? overrides.provider : "openai";
       return {
         endpoint: "https://api.openai.com/v1/responses",
         provider,
@@ -54,15 +76,15 @@ describe("Agent Core Provider Probe Invariants", () => {
       };
     }
     
-    async function startMockProvider({ status = 200, payload, onRequest } = {}) {
-      const requests = [];
-      const fetchImpl = async (input, init = {}) => {
+    async function startMockProvider({ status = 200, payload, onRequest }: MockProviderOptions = {}) {
+      const requests: MockProviderRequest[] = [];
+      const fetchImpl: ProbeFetch = async (_input, init) => {
         const raw = typeof init.body === "string" ? init.body : "";
-        let body = null;
+        let body: Record<string, unknown> = {};
         try {
-          body = raw ? JSON.parse(raw) : null;
+          body = raw ? JSON.parse(raw) : {};
         } catch {
-          body = null;
+          body = {};
         }
         const item = {
           method: init.method,
@@ -106,7 +128,7 @@ describe("Agent Core Provider Probe Invariants", () => {
       assert.doesNotMatch(serialized, /sensitive-project-session/);
       assert.doesNotMatch(serialized, /provider-test-token/);
       assert.doesNotMatch(serialized, /You are an agent-core provider probe/);
-      assert.equal(result.requestPlan.body, undefined, "dry-run must not expose the prompt body");
+      assert.equal("body" in result.requestPlan, false, "dry-run must not expose the prompt body");
     });
     
     await test("endpoint, provider, model, and protocol are mandatory", async () => {
@@ -198,7 +220,8 @@ describe("Agent Core Provider Probe Invariants", () => {
         assert.equal(mock.requests[0].body.store, false);
         assert.equal(mock.requests[0].body.tool_choice, "auto");
         assert.equal(mock.requests[0].body.parallel_tool_calls, true);
-        assert.equal(mock.requests[0].body.tools[0].strict, false);
+        const firstRequestTools = mock.requests[0].body.tools as Array<{ strict: unknown }>;
+        assert.equal(firstRequestTools[0].strict, false);
         assert.equal(result.attempts[1].effectivePolicy.cacheFields.length, 0);
         assert.equal(result.attempts[1].stablePrefixByteIdentical, true);
         assert.equal(result.attempts[1].usage.input, 6);
@@ -207,9 +230,9 @@ describe("Agent Core Provider Probe Invariants", () => {
         assert.equal(result.attempts[1].usage.output, 3);
         assert.equal(result.attempts[1].usage.reasoning, 1);
         assert.equal(result.attempts[1].policyAcceptance, "unknown");
-        assert.equal(result.attempts[1].responseHash.length, 64);
-        assert.equal(result.attempts[1].responseBody, undefined);
-        assert.equal(result.attempts[0].requestBody, undefined);
+        assert.equal(result.attempts[1].responseHash?.length, 64);
+        assert.equal("responseBody" in result.attempts[1], false);
+        assert.equal("requestBody" in result.attempts[0], false);
         assert.equal(result.trace.format, "agent-core-trace-v2");
         assert.equal(result.trace.attempts.length, 2);
         assert.equal(result.trace.attempts[0].recordType, "attempt");
@@ -278,7 +301,7 @@ describe("Agent Core Provider Probe Invariants", () => {
         assert.equal(calls, 2);
         assert.equal(result.attempts.length, 2);
         assert.equal(result.retry.count, 1);
-        assert.equal(result.attempts.at(-1).httpStatus, 400);
+        assert.equal(result.attempts.at(-1)?.httpStatus, 400);
       } finally {
         /* The in-memory mock has no socket to close. */
       }
@@ -436,7 +459,7 @@ describe("Agent Core Provider Probe Invariants", () => {
           [result.attempts[0].requestBodyHash, result.attempts[0].requestBodyHash, result.attempts[0].requestBodyHash],
         );
         assert.ok(result.attempts.every((attempt) => attempt.missCause === "unknown"));
-        assert.equal(result.cacheHit, undefined);
+        assert.equal("cacheHit" in result, false);
       } finally {
         /* The in-memory mock has no socket to close. */
       }
@@ -448,7 +471,7 @@ describe("Agent Core Provider Probe Invariants", () => {
       }));
       assert.equal(result.fixtureId, "threshold-2048-bytes");
       assert.ok(result.requestPlan.fixtureSizeBytes >= 2048);
-      assert.equal(result.requestPlan.body, undefined);
+      assert.equal("body" in result.requestPlan, false);
       assert.doesNotMatch(JSON.stringify(result), /threshold fixture padding/);
     });
     
@@ -487,8 +510,8 @@ describe("Agent Core Provider Probe Invariants", () => {
           allowLive: true,
         }), { fetchImpl: mock.fetchImpl });
         assert.equal(result.attempts[0].responseOversized, true);
-        assert.equal(result.attempts[0].responseHash.length, 64);
-        assert.equal(result.attempts[0].responseBody, undefined);
+        assert.equal(result.attempts[0].responseHash?.length, 64);
+        assert.equal("responseBody" in result.attempts[0], false);
       } finally {
         /* The in-memory mock has no socket to close. */
       }

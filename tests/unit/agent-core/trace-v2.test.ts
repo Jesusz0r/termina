@@ -1,9 +1,98 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readTraceDirectory, summarizeTraces } from "./trace-report.ts";
+
+type PriceProvenance = {
+  source: string;
+  retrievedAt: string;
+  version: string;
+};
+
+type AttemptUsage = {
+  input: number | null;
+  cacheRead: number | null;
+  cacheWrite: number | null;
+  output: number | null;
+  reasoning: number | null;
+};
+
+type PrefixEvidence = {
+  reusablePrefixHash?: string | null;
+  reusablePrefixItems?: number | null;
+  comparedPrefixHash?: string | null;
+  comparedPrefixItems?: number | null;
+};
+
+type ToolOutcomeFixture = {
+  name: string;
+  status: string;
+  complete: boolean;
+  bytes: number;
+};
+
+type ReclaimEvidenceFixture = {
+  planned: boolean;
+  applied: boolean;
+  recovered: boolean;
+  reclaimedBytes: number;
+  reclaimedTokens: number;
+  receipts: Array<{ kind: string; sourceSseq: number; contentHash: string; recovery: string }>;
+};
+
+type AttemptFixtureOptions = {
+  taskId: string;
+  attemptId: string;
+  role?: string;
+  provider?: string;
+  protocol?: string;
+  model?: string;
+  status: string;
+  retryIndex?: number;
+  retryOfAttemptId?: string | null;
+  fallbackReason?: string | null;
+  usage: AttemptUsage;
+  usd: number | null;
+  price?: PriceProvenance | null;
+  effectiveMode: string;
+  effectiveTtlMs: number | null;
+  requestedMode?: string;
+  requestedTtlMs?: number | null;
+  rejection?: string | null;
+  markerCount?: number | null;
+  markerPositions?: number[];
+  retryPromptIdentical?: boolean | null;
+  parentAttemptId?: string | null;
+  toolNames?: string[];
+  sessionLengthBucket?: string | null;
+  missPrimary?: string | null;
+  missContributors?: string[];
+  missGapMs?: number | null;
+  toolOutcomes?: ToolOutcomeFixture[];
+  reclaimEvidence?: ReclaimEvidenceFixture | null;
+  prefixEvidence?: PrefixEvidence;
+};
+
+type TaskSettledFixture = {
+  schemaVersion: number;
+  recordType: string;
+  runId: string;
+  taskId: string;
+  attemptCount: number;
+  finalAttemptId: string | null;
+  attemptIds: string[];
+  summaryAttemptIds: string[];
+  outcome: { status: string; correctness: string | null; criteriaHash?: string };
+};
+
+type PrefixExpectation = {
+  reusablePrefixHash: string | null;
+  reusablePrefixItems: number | null;
+  comparedPrefixHash: string | null;
+  comparedPrefixItems: number | null;
+};
 
 // This fixture is the frozen v2 boundary for the trace reader/consumer.  An
 // attempt is one provider call; task-settled is the logical outcome.  Keeping
@@ -17,7 +106,7 @@ describe("Agent Core Trace V2 Invariants", () => {
     const traces = join(root, "term-v2.traces");
     mkdirSync(traces);
     
-    const knownPrice = {
+    const knownPrice: PriceProvenance = {
       source: "models.dev",
       retrievedAt: "2026-08-30T00:00:00.000Z",
       version: "fixture-v1",
@@ -54,7 +143,7 @@ describe("Agent Core Trace V2 Invariants", () => {
       toolOutcomes = [],
       reclaimEvidence = null,
       prefixEvidence = {},
-    }) {
+    }: AttemptFixtureOptions) {
       return {
         schemaVersion: 2,
         recordType: "attempt",
@@ -284,7 +373,7 @@ describe("Agent Core Trace V2 Invariants", () => {
       lastTraceTurn: 7,
     }));
     
-    function check(label, callback, failures) {
+    function check(label: string, callback: () => void, failures: string[]): void {
       try {
         callback();
       } catch (error) {
@@ -292,7 +381,7 @@ describe("Agent Core Trace V2 Invariants", () => {
       }
     }
     
-    const failures = [];
+    const failures: string[] = [];
     const source = readTraceDirectory(traces);
     check("reader accepts only frozen v2 records", () => {
       assert.equal(source.matchedFiles, 9);
@@ -403,7 +492,7 @@ describe("Agent Core Trace V2 Invariants", () => {
     }, failures);
     
     check("non-success outcomes never become successful tasks", () => {
-      const outcomeRecords = [];
+      const outcomeRecords: Array<ReturnType<typeof attempt> | TaskSettledFixture> = [];
       const outcomes = [
         ["interrupted-task", "interrupted"],
         ["cancelled-task", "cancelled"],
@@ -473,16 +562,20 @@ describe("Agent Core Trace V2 Invariants", () => {
       assert.equal(report.attempts.byId["attempt-2"].cache.retryPromptIdentical, true);
       assert.deepEqual(report.attempts.byId["attempt-3"].cache.effective, { mode: "explicit", ttlMs: 1_800_000 });
       assert.deepEqual(report.attempts.byId["summary-1"].cache.effective, { mode: "implicit", ttlMs: null });
-      assert.equal(report.attempts.byId["summary-1"].cache.namespace.endsWith("/summary"), true);
+      assert.equal(report.attempts.byId["summary-1"].cache.namespace?.endsWith("/summary"), true);
     }, failures);
     
     check("same-span prefix evidence round-trips and absent fields stay null", () => {
-      for (const [attemptId, expected] of [
+      const prefixCases: Array<[string, PrefixExpectation]> = [
         ["attempt-1", { reusablePrefixHash: null, reusablePrefixItems: null, comparedPrefixHash: null, comparedPrefixItems: null }],
         ["attempt-3", { reusablePrefixHash: "current-durable-prefix", reusablePrefixItems: 5, comparedPrefixHash: "previous-boundary-prefix", comparedPrefixItems: 3 }],
-      ]) {
-        for (const normalized of [report.attempts.byId[attemptId], report.attempts.perTurn.find((row) => row.attemptId === attemptId)]) {
-          for (const [field, value] of Object.entries(expected)) assert.equal(normalized.cache[field], value, `${attemptId}.${field}`);
+      ];
+      for (const [attemptId, expected] of prefixCases) {
+        for (const normalized of [report.attempts.byId[attemptId], report.attempts.perTurn.find((row: { attemptId: string }) => row.attemptId === attemptId)]) {
+          assert.ok(normalized);
+          // The cache surface is probed by dynamic field name here.
+          const cache = normalized.cache as unknown as Record<string, unknown>;
+          for (const [field, value] of Object.entries(expected)) assert.equal(cache[field], value, `${attemptId}.${field}`);
         }
       }
     }, failures);
@@ -567,7 +660,8 @@ describe("Agent Core Trace V2 Invariants", () => {
       summaryAttemptIds: ["missing"],
       outcome: { status: "success", correctness: "correct" },
     }));
-    const missingRun = attempt({
+    // The invalid fixture drops runId; rest-siblings are exempt from noUnusedLocals.
+    const { runId: _droppedRunId, ...missingRun } = attempt({
       taskId: "task-invalid",
       attemptId: "missing-run",
       status: "ok",
@@ -577,7 +671,6 @@ describe("Agent Core Trace V2 Invariants", () => {
       effectiveMode: "none",
       effectiveTtlMs: null,
     });
-    delete missingRun.runId;
     writeFileSync(join(invalid, "turn-4.json"), JSON.stringify(missingRun));
     const selfLink = attempt({
       taskId: "task-invalid",

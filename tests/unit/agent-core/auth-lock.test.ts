@@ -282,7 +282,7 @@ describe("Agent Core Auth Lock & Crash Recovery", () => {
   });
 
   it("fails closed on malformed and oversized locks", () => {
-    for (const [name, lock] of [["malformed", "not json"], ["oversized", "x".repeat(8_193)]] as const) {
+    for (const [, lock] of [["malformed", "not json"], ["oversized", "x".repeat(8_193)]] as const) {
       resetAuth();
       writeDirectoryLock(lock);
       const result = contender();
