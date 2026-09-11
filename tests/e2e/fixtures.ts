@@ -193,6 +193,10 @@ export const test = base.extend<TerminaE2EFixtures>({
       args: [
         resolve("."),
         `--user-data-dir=${userData}`,
+        // Deterministic software rendering: without this the GPU mode varies
+        // with the host. Production keeps the GPU; the suite never needs
+        // WebGL (guarded by gpu-mode.spec.ts).
+        "--disable-gpu",
       ],
       env,
     });
@@ -200,14 +204,25 @@ export const test = base.extend<TerminaE2EFixtures>({
     const child = app.process();
     const lifetime = { child, tree: new OwnedProcessTree(child.pid!), shutdown: null, outputTail: [] as string[] };
     electronLifetimes.set(app, lifetime);
+    // Suppressed-noise counters, split by class: the filter below keeps the
+    // console readable, but a silent filter also hides frequency regressions,
+    // so every suppressed line is counted and reported once per test below.
+    let suppressedGpu = 0;
+    let suppressedLib = 0;
     // Buffer both streams for diagnostics; stdout carries `[main]` startup logs
     // while stderr carries Chromium/GPU failures, and either can be empty when
     // the window never appears.
     child.stderr?.on("data", (chunk) => {
       const msg = chunk.toString();
       rememberOutput(lifetime.outputTail, msg);
-      if (!msg.includes("GPU") && !msg.includes("libpng") && !msg.includes("fontconfig")) {
+      // The GLES context failure spells it lowercase ("gpu/ipc/..."), so the
+      // match must be case-insensitive to actually cover it.
+      if (!/gpu|libpng|fontconfig/i.test(msg)) {
         console.error("[electron:err]", msg.trim());
+      } else if (/gpu/i.test(msg)) {
+        suppressedGpu++;
+      } else {
+        suppressedLib++;
       }
     });
     child.stdout?.on("data", (chunk) => rememberOutput(lifetime.outputTail, chunk.toString()));
@@ -216,6 +231,10 @@ export const test = base.extend<TerminaE2EFixtures>({
       await use(app);
     } finally {
       await stopElectron(app);
+      const parts: string[] = [];
+      if (suppressedGpu > 0) parts.push(`${suppressedGpu} gpu`);
+      if (suppressedLib > 0) parts.push(`${suppressedLib} libpng/fontconfig`);
+      if (parts.length > 0) console.error(`[electron:err] suppressed ${parts.join(" + ")} stderr line(s)`);
       preservedRunRoots.delete(runRoot);
     }
   },
