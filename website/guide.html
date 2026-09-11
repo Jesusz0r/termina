@@ -274,6 +274,14 @@
         worker's terminal (tabs are named <code>dispatch</code>). Workers receive a mailbox briefing with their task,
         and settle notes flow back to siblings so they stay aware of each other's results.
       </p>
+
+      <h3>Scheduled dispatch</h3>
+      <p>
+        End any task with <code>@every 30m</code> or <code>@at 09:30</code> to dispatch it on cadence — seconds,
+        minutes, hours, and days all work, and the first <code>@every</code> run fires immediately. Settled
+        workers auto-verify once and report back; failing suites re-verify automatically up to 3 attempts, while
+        timeouts are reported and left alone.
+      </p>
     </section>
 
     <!-- ============ 9. WORLDLINES ============ -->
@@ -321,6 +329,7 @@
           <tr><td><b>A ⇄ B</b></td><td>Compares the two candidates file by file.</td></tr>
           <tr><td><b>▾</b></td><td>Details: changed-file statistics, provenance, dependency changes.</td></tr>
           <tr><td><b>Promote</b></td><td>Three-way merges the candidate back into your project.</td></tr>
+          <tr><td><b>Export</b></td><td>Writes a patch + PR bundle (<code>candidate.patch</code>, <code>pr-body.md</code>, <code>metadata.json</code>) without touching Git history.</td></tr>
           <tr><td><b>Discard</b></td><td>Removes both candidates and every app-owned resource.</td></tr>
         </tbody>
       </table>
@@ -363,6 +372,12 @@
       <p>
         Full file tree with VS Code-style interactions: right-click context menu, New File / New Folder,
         Cut / Copy / Paste, Copy Path and Copy Relative Path, Rename (<code>F2</code>), Delete, and Refresh.
+      </p>
+      <p>
+        The <b>Filter files</b> box narrows the tree in place as you type; very wide matches show a
+        <code>50+ matches (refine to narrow)</code> note instead of flooding the tree. The tree answers the
+        keyboard: arrows move and expand, <code>Enter</code> opens, <code>Home</code>/<code>End</code> jump, and
+        typing jumps to the first match.
       </p>
 
       <h3>Editor</h3>
@@ -426,6 +441,9 @@
           <tr><td><code>Cmd/Ctrl+E</code></td><td>Toggle editor</td></tr>
           <tr><td><code>Cmd/Ctrl+Shift+F</code></td><td>Terminal fullscreen</td></tr>
           <tr><td><code>Cmd/Ctrl+Shift+P</code></td><td>Search sessions</td></tr>
+          <tr><td><code>Cmd/Ctrl+P</code></td><td>Quick Open a project file by name</td></tr>
+          <tr><td><code>Cmd/Ctrl+K</code></td><td>Command palette — run any command by name</td></tr>
+          <tr><td><code>Cmd/Ctrl+F</code></td><td>Find in the active terminal's scrollback</td></tr>
           <tr><td><code>Cmd/Ctrl+,</code></td><td>Open settings</td></tr>
           <tr><td><code>Shift+Enter</code> / <code>Ctrl+Enter</code></td><td>Newline in the terminal input</td></tr>
           <tr><td><code>Option+Enter</code> (macOS)</td><td>Queue a follow-up while the agent runs</td></tr>
@@ -438,6 +456,12 @@
         <code>Cmd/Ctrl+Shift+P</code> opens a full-text search over past agent sessions of the project. Results list the
         matching moments; clicking one opens the file it mentions. Backtick paths and ordinary mentions such as
         <code>src/main.ts</code> resolve to project files. Type at least two characters.
+      </p>
+
+      <h3>Quick Open and Command Palette</h3>
+      <p>
+        <code>Cmd/Ctrl+P</code> finds any project file by name from a persistent index, so repeated searches stay
+        instant. <code>Cmd/Ctrl+K</code> runs any Termina command by name.
       </p>
     </section>
 
@@ -486,7 +510,7 @@
 
     <div class="guide-end">
       <a href="index.html#install" class="btn btn-primary">↓ Download Termina — free</a>
-      <a href="https://github.com/Jesusz0r/termina/blob/master/docs/USER-GUIDE.md" target="_blank" class="btn btn-ghost">this guide on GitHub ↗</a>
+      <a href="https://github.com/Jesusz0r/termina/blob/master/docs/reference/USER-GUIDE.md" target="_blank" class="btn btn-ghost">this guide on GitHub ↗</a>
     </div>
   </main>
 

@@ -72,6 +72,8 @@
         <span><i>●</i>&nbsp; Scheduled dispatch + auto-verify</span>
         <span><i>●</i>&nbsp; Patch + PR export</span>
         <span><i>●</i>&nbsp; Effort memory + fuzzy /models</span>
+        <span><i>●</i>&nbsp; Quick Open + command palette</span>
+        <span><i>●</i>&nbsp; In-place explorer filter</span>
       </div>
     </div>
   </section>
@@ -136,7 +138,7 @@
       <div class="reveal">
         <span class="eyebrow">Now in Termina</span>
         <h2 class="section-title">More control at every decision point.</h2>
-        <p class="section-sub">The in-house agent is now the only engine — no pi dependency. Plans dispatch on schedule with auto-verify, candidates export to patch + PR bundles, and your effort level sticks across sessions.</p>
+        <p class="section-sub">The in-house agent is now the only engine — no pi dependency. Plans dispatch on schedule with auto-verify, candidates export to patch + PR bundles, and your effort level sticks across sessions. Latest: the explorer filters in place and answers the keyboard, session search runs off the main thread, and the agent loop self-corrects tool mistakes instead of stalling on them.</p>
       </div>
 
       <div class="latest-grid reveal">
@@ -367,7 +369,7 @@
       </div>
 
       <div class="verdict reveal">
-        <b>$ termina compare --verdict</b><br>
+        <b>evidence verdict</b><br>
         Candidate B wins: −44% p99 latency, −43% memory, zero new deps, minimal churn.<br>
         → promoted to trunk via journaled three-way merge. crash-safe.
       </div>
@@ -466,7 +468,7 @@
           </div>
           <div class="bench-speed" style="color:var(--amber)">0.6× — git wins</div>
         </div>
-        <div class="bench-note">medians of phased samples on an apple m4, release build · lower is better · the core owns merges for isolation and zero repo pollution, not raw speed · reproduce: node scripts/perf-compare.mjs</div>
+        <div class="bench-note">medians of phased samples on an apple m4, release build · lower is better · the core owns merges for isolation and zero repo pollution, not raw speed · reproduce: node --experimental-strip-types scripts/perf-compare.ts</div>
       </div>
     </div>
   </section>
@@ -507,8 +509,8 @@
         <div class="install-pane" data-pane="source">
           <p>For contributors building Electron and the Rust core:</p>
           <div class="cmd">
-            <code>git clone https://github.com/Jesusz0r/termina.git &amp;&amp; cd termina &amp;&amp; npm install &amp;&amp; npm run dev</code>
-            <button class="copy-btn copy-cmd" data-cmd="git clone https://github.com/Jesusz0r/termina.git && cd termina && npm install && npm run dev">copy</button>
+            <code>git clone https://github.com/Jesusz0r/termina.git &amp;&amp; cd termina &amp;&amp; pnpm install &amp;&amp; pnpm run dev</code>
+            <button class="copy-btn copy-cmd" data-cmd="git clone https://github.com/Jesusz0r/termina.git && cd termina && pnpm install && pnpm run dev">copy</button>
           </div>
           <p style="margin-top:16px; margin-bottom:0;">The Rust core builds with cargo on first run; set <code>TERMINA_SKIP_CORE_BUILD=1</code> to use a downloaded binary instead.</p>
         </div>

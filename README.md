@@ -100,8 +100,8 @@ pnpm run test:agent-core           # agent-core kernel harness tests (no Electro
 pnpm run build                     # production build (Electron main + renderer)
 pnpm run spike -- capture          # one plain-node store spike suite
 pnpm run test:spikes               # capture · merge · platform · tree-delta
-node scripts/perf-baseline.mjs    # capture latency baselines
-node scripts/perf-compare.mjs     # compare a run against a baseline
+node --experimental-strip-types scripts/perf-baseline.ts    # capture latency baselines
+node --experimental-strip-types scripts/perf-compare.ts     # Rust core vs Git CLI on equal work
 pnpm run test:e2e                  # the full Electron e2e matrix (fresh instances)
 pnpm test                          # typecheck + agent-core + build + spikes
 ```
