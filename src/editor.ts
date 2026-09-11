@@ -12,73 +12,83 @@ import { languageForPath } from "./editor-language";
 import { changedLinesInAfter } from "../shared/line-diff";
 import { copyText, toast } from "./components/modals";
 import { showContextMenu, closeContextMenu } from "./components/context-menu";
+import { THEME_TOKENS } from "./theme-tokens.gen";
+
+/** Monaco token rules take bare hex; the generated tokens carry the `#`. */
+function bare(hex: string): string {
+  return hex.slice(1);
+}
 
 // Both custom themes are defined at import time: the editor constructor
 // references "termina-dark" before applyMonacoTheme ever runs, and an
-// undefined theme silently falls back to stock vs-dark.
+// undefined theme silently falls back to stock vs-dark. Colors read the
+// generated styles.css tokens; the few remaining literals are hues with no
+// token counterpart (each used exactly once).
+const darkTokens = THEME_TOKENS.dark;
 monaco.editor.defineTheme("termina-dark", {
   base: "vs-dark",
   inherit: true,
   rules: [
     { token: "comment", foreground: "5f6a51", fontStyle: "italic" },
-    { token: "string", foreground: "86e29b" },
-    { token: "keyword", foreground: "ffb454" },
-    { token: "number", foreground: "d9a05b" },
-    { token: "regexp", foreground: "7cc4ff" },
-    { token: "type", foreground: "b8f04a" },
-    { token: "class", foreground: "b8f04a" },
-    { token: "function", foreground: "7cc4ff" },
-    { token: "identifier", foreground: "edf2e2" },
-    { token: "delimiter", foreground: "9aa78c" },
-    { token: "tag", foreground: "ff7a6b" },
-    { token: "attribute.name", foreground: "ffb454" },
-    { token: "attribute.value", foreground: "86e29b" },
+    { token: "string", foreground: bare(darkTokens.green) },
+    { token: "keyword", foreground: bare(darkTokens.yellow) },
+    { token: "number", foreground: bare(darkTokens.orange) },
+    { token: "regexp", foreground: bare(darkTokens.purple) },
+    { token: "type", foreground: bare(darkTokens.accent) },
+    { token: "class", foreground: bare(darkTokens.accent) },
+    { token: "function", foreground: bare(darkTokens.purple) },
+    { token: "identifier", foreground: bare(darkTokens.text) },
+    { token: "delimiter", foreground: bare(darkTokens.textDim) },
+    { token: "tag", foreground: bare(darkTokens.red) },
+    { token: "attribute.name", foreground: bare(darkTokens.yellow) },
+    { token: "attribute.value", foreground: bare(darkTokens.green) },
   ],
   colors: {
-    "editor.background": "#0b0d09",
-    "editor.foreground": "#edf2e2",
-    "editor.lineHighlightBackground": "#11140d",
-    "editor.selectionBackground": "#333c26",
-    "editorCursor.foreground": "#b8f04a",
+    "editor.background": darkTokens.bg,
+    "editor.foreground": darkTokens.text,
+    "editor.lineHighlightBackground": darkTokens.bgPanel,
+    "editor.selectionBackground": darkTokens.selection,
+    "editorCursor.foreground": darkTokens.accent,
     "editorLineNumber.foreground": "#3f4930",
-    "editorLineNumber.activeForeground": "#9aa78c",
-    "editorWidget.background": "#11140d",
-    "editorSuggestWidget.background": "#11140d",
-    "editorHoverWidget.background": "#11140d",
-    "minimap.background": "#0b0d09",
+    "editorLineNumber.activeForeground": darkTokens.textDim,
+    "editorWidget.background": darkTokens.bgPanel,
+    "editorSuggestWidget.background": darkTokens.bgPanel,
+    "editorHoverWidget.background": darkTokens.bgPanel,
+    "minimap.background": darkTokens.bg,
   },
 });
 
+const atomTokens = THEME_TOKENS.atom;
 monaco.editor.defineTheme("termina-atom", {
   base: "vs-dark",
   inherit: true,
   rules: [
-    { token: "comment", foreground: "5c6370", fontStyle: "italic" },
-    { token: "string", foreground: "98c379" },
-    { token: "keyword", foreground: "c678dd" },
-    { token: "number", foreground: "d19a66" },
+    { token: "comment", foreground: bare(atomTokens.textDim), fontStyle: "italic" },
+    { token: "string", foreground: bare(atomTokens.green) },
+    { token: "keyword", foreground: bare(atomTokens.purple) },
+    { token: "number", foreground: bare(atomTokens.orange) },
     { token: "regexp", foreground: "56b6c2" },
-    { token: "type", foreground: "e5c07b" },
-    { token: "class", foreground: "e5c07b" },
-    { token: "function", foreground: "61afef" },
-    { token: "identifier", foreground: "abb2bf" },
-    { token: "delimiter", foreground: "abb2bf" },
-    { token: "tag", foreground: "e06c75" },
-    { token: "attribute.name", foreground: "d19a66" },
-    { token: "attribute.value", foreground: "98c379" },
+    { token: "type", foreground: bare(atomTokens.yellow) },
+    { token: "class", foreground: bare(atomTokens.yellow) },
+    { token: "function", foreground: bare(atomTokens.accent) },
+    { token: "identifier", foreground: bare(atomTokens.text) },
+    { token: "delimiter", foreground: bare(atomTokens.text) },
+    { token: "tag", foreground: bare(atomTokens.red) },
+    { token: "attribute.name", foreground: bare(atomTokens.orange) },
+    { token: "attribute.value", foreground: bare(atomTokens.green) },
   ],
   colors: {
-    "editor.background": "#282c34",
-    "editor.foreground": "#abb2bf",
+    "editor.background": atomTokens.bg,
+    "editor.foreground": atomTokens.text,
     "editor.lineHighlightBackground": "#2c313c",
-    "editor.selectionBackground": "#3e4451",
+    "editor.selectionBackground": atomTokens.selection,
     "editorCursor.foreground": "#528bff",
     "editorLineNumber.foreground": "#495162",
-    "editorLineNumber.activeForeground": "#abb2bf",
-    "editorWidget.background": "#21252b",
-    "editorSuggestWidget.background": "#21252b",
-    "editorHoverWidget.background": "#21252b",
-    "minimap.background": "#282c34",
+    "editorLineNumber.activeForeground": atomTokens.text,
+    "editorWidget.background": atomTokens.bgPanel,
+    "editorSuggestWidget.background": atomTokens.bgPanel,
+    "editorHoverWidget.background": atomTokens.bgPanel,
+    "minimap.background": atomTokens.bg,
   },
 });
 

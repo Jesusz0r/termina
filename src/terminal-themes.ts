@@ -1,5 +1,6 @@
 import type { ITheme } from "@xterm/xterm";
 import type { ThemeId } from "../shared/types";
+import { THEME_TOKENS, type ThemeTokens } from "./theme-tokens.gen";
 
 const CORE_EXTENDED: Record<ThemeId, string[]> = {
   dark: ["#16324a", "#163a28", "#4a1818"],
@@ -8,101 +9,130 @@ const CORE_EXTENDED: Record<ThemeId, string[]> = {
   atom: ["#1c3148", "#1e3a2a", "#4a2024"],
 };
 
+/** Slots below read the generated styles.css tokens where the value is that
+ *  token; the remaining literals are ANSI-only hues with no token counterpart
+ *  (each written once per theme and shared with its bright twin). */
+function darkTerminal(t: ThemeTokens): ITheme {
+  const magenta = "#c586c0";
+  const cyan = "#56d4dd";
+  return {
+    background: t.bg,
+    foreground: t.text,
+    cursor: t.accent,
+    cursorAccent: t.bg,
+    selectionBackground: t.selection,
+    black: t.bgPanel,
+    red: t.red,
+    green: t.green,
+    yellow: t.yellow,
+    blue: t.purple,
+    magenta,
+    cyan,
+    white: t.text,
+    brightBlack: t.textDim,
+    brightRed: t.red,
+    brightGreen: t.green,
+    brightYellow: t.yellow,
+    brightBlue: t.accent,
+    brightMagenta: magenta,
+    brightCyan: cyan,
+    brightWhite: t.text,
+  };
+}
+
+function lightTerminal(t: ThemeTokens): ITheme {
+  const black = "#24292f";
+  const cyan = "#09757c";
+  const brightCyan = "#0a7b83";
+  const brightWhite = "#ffffff";
+  return {
+    background: t.bgPanel,
+    foreground: t.text,
+    cursor: t.accent,
+    cursorAccent: t.bg,
+    selectionBackground: t.selection,
+    black,
+    red: t.red,
+    green: t.green,
+    yellow: t.yellow,
+    blue: t.accent,
+    magenta: t.purple,
+    cyan,
+    white: t.bg,
+    brightBlack: t.textDim,
+    brightRed: t.red,
+    brightGreen: t.green,
+    brightYellow: t.yellow,
+    brightBlue: t.accent,
+    brightMagenta: t.purple,
+    brightCyan,
+    brightWhite,
+  };
+}
+
+function highContrastTerminal(t: ThemeTokens): ITheme {
+  const cyan = "#56d4dd";
+  return {
+    background: t.bg,
+    foreground: t.text,
+    cursor: t.text,
+    cursorAccent: t.bg,
+    selectionBackground: t.selection,
+    black: t.bg,
+    red: t.red,
+    green: t.green,
+    yellow: t.yellow,
+    blue: t.accent,
+    magenta: t.purple,
+    cyan,
+    white: t.text,
+    brightBlack: t.textDim,
+    brightRed: t.red,
+    brightGreen: t.green,
+    brightYellow: t.yellow,
+    brightBlue: t.accent,
+    brightMagenta: t.purple,
+    brightCyan: cyan,
+    brightWhite: t.text,
+  };
+}
+
+function atomTerminal(t: ThemeTokens): ITheme {
+  const cyan = "#56b6c2";
+  const brightBlack = "#8b92a0";
+  const brightWhite = "#ffffff";
+  return {
+    background: t.bgPanel,
+    foreground: t.text,
+    cursor: t.accent,
+    cursorAccent: t.bgPanel,
+    selectionBackground: t.selection,
+    black: t.bg,
+    red: t.red,
+    green: t.green,
+    yellow: t.yellow,
+    blue: t.accent,
+    magenta: t.purple,
+    cyan,
+    white: t.text,
+    brightBlack,
+    brightRed: t.red,
+    brightGreen: t.green,
+    brightYellow: t.yellow,
+    brightBlue: t.accent,
+    brightMagenta: t.purple,
+    brightCyan: cyan,
+    brightWhite,
+  };
+}
+
 /** xterm palettes keyed by the app theme id. Agent-core uses blue as the
  *  accent and bright black as dim text. */
 export const TERMINAL_THEMES: Record<ThemeId, ITheme> = {
-  dark: {
-    background: "#0b0d09",
-    foreground: "#edf2e2",
-    cursor: "#b8f04a",
-    cursorAccent: "#0b0d09",
-    selectionBackground: "#333c26",
-    black: "#11140d",
-    red: "#ff7a6b",
-    green: "#86e29b",
-    yellow: "#ffb454",
-    blue: "#7cc4ff",
-    magenta: "#c586c0",
-    cyan: "#56d4dd",
-    white: "#edf2e2",
-    brightBlack: "#9aa78c",
-    brightRed: "#ff7a6b",
-    brightGreen: "#86e29b",
-    brightYellow: "#ffb454",
-    brightBlue: "#b8f04a",
-    brightMagenta: "#c586c0",
-    brightCyan: "#56d4dd",
-    brightWhite: "#edf2e2",
-  },
-  light: {
-    background: "#eef1f4",
-    foreground: "#1f2328",
-    cursor: "#0969da",
-    cursorAccent: "#f6f8fa",
-    selectionBackground: "#b6d7ff",
-    black: "#24292f",
-    red: "#cf222e",
-    green: "#1a7f37",
-    yellow: "#9a6700",
-    blue: "#0969da",
-    magenta: "#8250df",
-    cyan: "#09757c",
-    white: "#f6f8fa",
-    brightBlack: "#57606a",
-    brightRed: "#cf222e",
-    brightGreen: "#1a7f37",
-    brightYellow: "#9a6700",
-    brightBlue: "#0969da",
-    brightMagenta: "#8250df",
-    brightCyan: "#0a7b83",
-    brightWhite: "#ffffff",
-  },
-  "high-contrast": {
-    background: "#000000",
-    foreground: "#ffffff",
-    cursor: "#ffffff",
-    cursorAccent: "#000000",
-    selectionBackground: "#264f78",
-    black: "#000000",
-    red: "#ff6b6b",
-    green: "#7ee787",
-    yellow: "#f2cc60",
-    blue: "#79c0ff",
-    magenta: "#d2a8ff",
-    cyan: "#56d4dd",
-    white: "#ffffff",
-    brightBlack: "#c7c7c7",
-    brightRed: "#ff6b6b",
-    brightGreen: "#7ee787",
-    brightYellow: "#f2cc60",
-    brightBlue: "#79c0ff",
-    brightMagenta: "#d2a8ff",
-    brightCyan: "#56d4dd",
-    brightWhite: "#ffffff",
-  },
-  atom: {
-    background: "#21252b",
-    foreground: "#abb2bf",
-    cursor: "#61afef",
-    cursorAccent: "#21252b",
-    selectionBackground: "#3e4451",
-    black: "#282c34",
-    red: "#e06c75",
-    green: "#98c379",
-    yellow: "#e5c07b",
-    blue: "#61afef",
-    magenta: "#c678dd",
-    cyan: "#56b6c2",
-    white: "#abb2bf",
-    brightBlack: "#8b92a0",
-    brightRed: "#e06c75",
-    brightGreen: "#98c379",
-    brightYellow: "#e5c07b",
-    brightBlue: "#61afef",
-    brightMagenta: "#c678dd",
-    brightCyan: "#56b6c2",
-    brightWhite: "#ffffff",
-  },
+  dark: darkTerminal(THEME_TOKENS.dark),
+  light: lightTerminal(THEME_TOKENS.light),
+  "high-contrast": highContrastTerminal(THEME_TOKENS["high-contrast"]),
+  atom: atomTerminal(THEME_TOKENS.atom),
 };
 
 export function terminalTheme(theme: ThemeId, engine?: "core"): ITheme {

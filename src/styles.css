@@ -24,6 +24,9 @@
   --red: #ff7a6b;
   --orange: #d9a05b;
   --purple: #7cc4ff;
+  /* Shared with the terminal and editor selections via the generated
+   * theme-tokens module; no stylesheet rule reads it. */
+  --selection: #333c26;
   /* One monospace family across the app chrome. Preferences swap this when
    * the font family changes; the editor/terminal canvases set their own. */
   --font-chrome: "Departure Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -47,6 +50,7 @@ html[data-theme="light"] {
   --red: #cf222e;
   --orange: #bc4c00;
   --purple: #8250df;
+  --selection: #b6d7ff;
 }
 
 html[data-theme="high-contrast"] {
@@ -64,6 +68,7 @@ html[data-theme="high-contrast"] {
   --red: #ff6b6b;
   --orange: #ffa657;
   --purple: #d2a8ff;
+  --selection: #264f78;
 }
 
 html[data-theme="atom"] {
@@ -80,6 +85,7 @@ html[data-theme="atom"] {
   --red: #e06c75;
   --orange: #d19a66;
   --purple: #c678dd;
+  --selection: #3e4451;
 }
 
 * {

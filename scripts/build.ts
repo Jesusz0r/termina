@@ -3,6 +3,11 @@
 // Renderer is built separately by Vite (vite build).
 import { build } from "esbuild";
 import { buildCore } from "./build-core.ts";
+import { generateThemeTokens } from "./theme-tokens.ts";
+
+// styles.css is the one place theme values are written; the terminal and
+// Monaco palettes import them from the generated module (fresh every build).
+generateThemeTokens();
 
 const shared = {
   bundle: true,
