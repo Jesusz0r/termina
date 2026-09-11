@@ -5,6 +5,7 @@ import {
   defaultAppPreferences,
   type AppPreferences,
   type CodeFontFamily,
+  type RecentFile,
   type RecentModel,
   type ShortcutCommand,
   type ShortcutMap,
@@ -147,6 +148,44 @@ export function recordRecentModel(previous: readonly RecentModel[], provider: st
   return sanitizeRecentModels([{ provider: cleanProvider, model: cleanModel }, ...previous]);
 }
 
+const MAX_RECENT_FILES = 20;
+const MAX_RECENT_PATH_LENGTH = 1024;
+
+/** Last-opened files, most recent first. Main owns writes; validation still
+ *  guards the file against a hand-edited entry. */
+function sanitizeRecentFiles(value: unknown): RecentFile[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const result: RecentFile[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    if (typeof record.projectId !== "string" || typeof record.relPath !== "string") continue;
+    const projectId = record.projectId.trim();
+    const relPath = record.relPath.trim();
+    if (projectId.length === 0 || projectId.length > MAX_PROVIDER_ID_LENGTH) continue;
+    if (relPath.length === 0 || relPath.length > MAX_RECENT_PATH_LENGTH) continue;
+    if (relPath.startsWith("/") || relPath.split("/").includes("..")) continue;
+    const key = `${projectId}\0${relPath}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push({ projectId, relPath });
+    if (result.length >= MAX_RECENT_FILES) break;
+  }
+  return result;
+}
+
+/** Move a file to the front of the recents, dropping malformed entries.
+ *  Pure so the recording rule stays unit-testable. */
+export function recordRecentFile(previous: readonly RecentFile[], projectId: string, relPath: string): RecentFile[] {
+  const cleanProject = projectId.trim();
+  const cleanRel = relPath.trim();
+  if (cleanProject.length === 0 || cleanRel.length === 0) {
+    return sanitizeRecentFiles(previous);
+  }
+  return sanitizeRecentFiles([{ projectId: cleanProject, relPath: cleanRel }, ...previous]);
+}
+
 export function normalizeAppPreferences(raw: unknown): AppPreferences {
   const defaults = defaultAppPreferences();
   const input = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
@@ -163,6 +202,7 @@ export function normalizeAppPreferences(raw: unknown): AppPreferences {
     showThinking: typeof input.showThinking === "boolean" ? input.showThinking : defaults.showThinking,
     autoOpenAgentFiles: typeof input.autoOpenAgentFiles === "boolean" ? input.autoOpenAgentFiles : defaults.autoOpenAgentFiles,
     recentModels: sanitizeRecentModels(input.recentModels),
+    recentFiles: sanitizeRecentFiles(input.recentFiles),
     defaultEffort: sanitizeDefaultEffort(input.defaultEffort),
   };
 }

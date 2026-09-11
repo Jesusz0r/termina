@@ -1561,6 +1561,9 @@ async function openFileSmart(
   revealEditor();
   try {
     await ensureProjectEditor(view).openFile(abs, { preview, owner, line, column });
+    // A successful open is the recency signal, whatever path led here.
+    const rel = abs.startsWith(`${view.cwd}/`) ? abs.slice(view.cwd.length + 1) : null;
+    if (rel) void window.termina.recordRecentFile(owner.projectId, rel);
   } catch (err) {
     toast(`could not open ${pathBasename(abs)}: ${(err as Error).message}`, "error");
   }
@@ -2367,7 +2370,11 @@ commands.register("session-search", () => sessionSearch.open());
 quickOpen.bind({
   // An explicit modal pick is a direct gesture: take editor focus so the
   // keyboard flow (Cmd+P, Enter, type) works without an extra click.
-  onOpenFile: (relPath) => void openFileSmart(relPath, true).then(() => activeEditor().focusEditor()),
+  onOpenFile: (relPath) =>
+    void openFileSmart(relPath, true).then(() => {
+      activeEditor().focusEditor();
+      void explorer.reveal(relPath);
+    }),
   onOpenContentHit: (relPath, line, column) => openContentHit(relPath, line, column),
   onContentResults: (pattern, hits, truncated) => explorer.showContentResults(pattern, hits, truncated),
   onExecuteCommand: (command) => commands.execute(command),

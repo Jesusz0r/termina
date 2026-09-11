@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentModel } from "../../../shared/preferences.ts";
+import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel } from "../../../shared/preferences.ts";
 
 describe("autoOpenAgentFiles preference", () => {
   it("defaults to true", () => {
@@ -83,6 +83,49 @@ describe("recordRecentModel", () => {
     ] as { provider: string; model: string }[];
     expect(recordRecentModel(prev, "", "x")).toEqual([{ provider: "openai", model: "gpt-5.3" }]);
     expect(recordRecentModel(prev, "a/b", "x")).toEqual([{ provider: "openai", model: "gpt-5.3" }]);
+  });
+});
+
+describe("recordRecentFile", () => {
+  it("moves the file to the front, most recent first", () => {
+    const prev = [{ projectId: "p", relPath: "a.ts" }];
+    expect(recordRecentFile(prev, "p", "b.ts")).toEqual([
+      { projectId: "p", relPath: "b.ts" },
+      { projectId: "p", relPath: "a.ts" },
+    ]);
+    expect(recordRecentFile(recordRecentFile(prev, "p", "b.ts"), "p", "a.ts")[0]).toEqual({
+      projectId: "p",
+      relPath: "a.ts",
+    });
+  });
+
+  it("dedupes by project and path, not by path alone", () => {
+    const prev = [{ projectId: "p1", relPath: "a.ts" }];
+    expect(recordRecentFile(prev, "p2", "a.ts")).toEqual([
+      { projectId: "p2", relPath: "a.ts" },
+      { projectId: "p1", relPath: "a.ts" },
+    ]);
+  });
+
+  it("drops malformed and escaping entries", () => {
+    expect(recordRecentFile([], "p", "../outside.ts")).toEqual([]);
+    expect(recordRecentFile([], "p", "/abs.ts")).toEqual([]);
+    expect(recordRecentFile([], "", "a.ts")).toEqual([]);
+    expect(recordRecentFile([], "p", "")).toEqual([]);
+  });
+
+  it("bounds the list", () => {
+    let files: Array<{ projectId: string; relPath: string }> = [];
+    for (let i = 0; i < 30; i++) files = recordRecentFile(files, "p", `f${i}.ts`);
+    expect(files).toHaveLength(20);
+    expect(files[0]).toEqual({ projectId: "p", relPath: "f29.ts" });
+  });
+
+  it("defaults empty and stays main-owned", () => {
+    expect(normalizeAppPreferences({}).recentFiles).toEqual([]);
+    const patch = normalizeUserPreferencePatch({ recentFiles: [{ projectId: "p", relPath: "a.ts" }], theme: "light" });
+    expect("recentFiles" in patch).toBe(false);
+    expect(patch.theme).toBe("light");
   });
 });
 

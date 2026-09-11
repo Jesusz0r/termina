@@ -2390,6 +2390,13 @@ body {
   font-size: 11px;
 }
 
+.search-text mark,
+.search-path mark {
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+  color: inherit;
+  border-radius: 2px;
+}
+
 #statusbar {
   display: flex;
   align-items: center;

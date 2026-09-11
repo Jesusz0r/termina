@@ -92,7 +92,7 @@ import {
   parseTerminalRoster,
   type TerminalRosterEntry,
 } from "./terminal-roster.js";
-import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
+import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
 import { HIDE_THINKING_CSI, SHOW_THINKING_CSI, thinkingStartupArgs } from "../shared/terminal-control.js";
 import { validateGrepPattern } from "../shared/grep-pattern.js";
 import {
@@ -2902,6 +2902,21 @@ class PiEditorApp {
     );
   }
 
+  /** Silently remember a file the renderer opened, so an empty Quick Open
+   *  leads with it. The renderer requests, main validates and persists. */
+  private rememberFile(projectId: unknown, relPath: unknown): void {
+    if (typeof projectId !== "string" || typeof relPath !== "string") return;
+    if (!this.projects.has(projectId)) return;
+    const next = recordRecentFile(this.preferences.recentFiles ?? [], projectId, relPath);
+    if (JSON.stringify(next) === JSON.stringify(this.preferences.recentFiles ?? [])) return;
+    this.commitPreferencePatch({ recentFiles: next }, false).then(
+      () => undefined,
+      (err) => {
+        console.warn(`[main] recent file save failed: ${(err as Error).message}`);
+      },
+    );
+  }
+
   /** Silently remember the last-used effort so fresh sessions reopen on it
    *  instead of the core default. Worldline candidates run explicit specs;
    *  their levels never become the user default. */
@@ -3905,7 +3920,7 @@ class PiEditorApp {
   private async searchProjectFiles(
     query: string,
     source: unknown,
-  ): Promise<{ entries: Array<{ relPath: string }>; truncated?: boolean }> {
+  ): Promise<{ entries: Array<{ relPath: string; matches?: number[] }>; truncated?: boolean }> {
     const project = this.project();
     const cwd = project?.cwd ?? null;
     if (!project || !cwd) return { entries: [] };
@@ -3916,7 +3931,12 @@ class PiEditorApp {
     // project pays for the walk, and a superseded query still returns nothing
     // rather than a partial result.
     const candidates = await this.pathIndex.candidates(root, stop);
-    const { entries, truncated } = await searchProjectFiles(root, query, { shouldStop: stop, candidates });
+    // Empty queries lead with this project's recent files (rankProjectPaths
+    // drops recents that left the tree); scored queries ignore them.
+    const recent = (this.preferences.recentFiles ?? [])
+      .filter((file) => file.projectId === project.id)
+      .map((file) => file.relPath);
+    const { entries, truncated } = await searchProjectFiles(root, query, { shouldStop: stop, candidates, recent });
     return truncated ? { entries, truncated: true } : { entries };
   }
 
@@ -7804,6 +7824,7 @@ class PiEditorApp {
     // ---- Session Search ----
     ipcMain.handle("session:search", (_e, query: unknown) => this.searchSessions(typeof query === "string" ? query : ""));
     ipcMain.handle("file:search", (_e, query: unknown, source: unknown) => this.searchProjectFiles(typeof query === "string" ? query : "", source));
+    ipcMain.handle("file:record-recent", (_e, projectId: unknown, relPath: unknown) => this.rememberFile(projectId, relPath));
     ipcMain.handle("content:search", (_e, pattern: unknown, source: unknown) => this.searchProjectContent(pattern, source));
 
     // ---- Plan Board ----

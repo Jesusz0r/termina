@@ -7,6 +7,49 @@ import type { ContentHit } from "../shared/types";
 
 export type QuickOpenMode = "files" | "actions" | "content";
 
+/**
+ * Render text with the matched characters wrapped in <mark>, one element per
+ * consecutive run. Indices address the full match string; `offset` is where
+ * `text` starts inside it (the basename within the relPath).
+ */
+function paintMatches(el: HTMLElement, text: string, indices: readonly number[] | undefined, offset: number): void {
+  if (!indices || indices.length === 0) {
+    el.textContent = text;
+    return;
+  }
+  const hits = new Set<number>();
+  for (const i of indices) {
+    const local = i - offset;
+    if (local >= 0 && local < text.length) hits.add(local);
+  }
+  if (hits.size === 0) {
+    el.textContent = text;
+    return;
+  }
+  let plain = "";
+  let run = "";
+  const flush = (): void => {
+    if (plain) {
+      el.appendChild(document.createTextNode(plain));
+      plain = "";
+    }
+    if (run) {
+      const mark = document.createElement("mark");
+      mark.textContent = run;
+      el.appendChild(mark);
+      run = "";
+    }
+  };
+  for (let i = 0; i < text.length; i++) {
+    if (hits.has(i)) run += text[i];
+    else {
+      if (run) flush();
+      plain += text[i];
+    }
+  }
+  flush();
+}
+
 export class QuickOpen {
   private root: HTMLElement | null = null;
   private input: HTMLInputElement | null = null;
@@ -16,7 +59,7 @@ export class QuickOpen {
   private searchSeq = 0;
   private mode: QuickOpenMode = "files";
   private selected = 0;
-  private rows: Array<{ key: string; label: string; detail: string; line?: number; column?: number }> = [];
+  private rows: Array<{ key: string; label: string; detail: string; line?: number; column?: number; matches?: number[] }> = [];
 
   private onOpenFile: (relPath: string) => void = () => {};
   private onOpenContentHit: (relPath: string, line: number, column: number) => void = () => {};
@@ -161,7 +204,12 @@ export class QuickOpen {
     }
     if (seq !== this.searchSeq || (this.input?.value ?? "") !== query) return;
     this.selected = 0;
-    this.rows = res.entries.map((e) => ({ key: e.relPath, label: e.relPath.split("/").pop() ?? e.relPath, detail: e.relPath }));
+    this.rows = res.entries.map((e) => ({
+      key: e.relPath,
+      label: e.relPath.split("/").pop() ?? e.relPath,
+      detail: e.relPath,
+      matches: e.matches,
+    }));
     this.renderRows(res.truncated ? `${res.entries.length}+ files (refine to narrow)` : null);
   }
 
@@ -243,10 +291,11 @@ export class QuickOpen {
       el.className = "search-hit clickable" + (i === this.selected ? " selected" : "");
       const text = document.createElement("span");
       text.className = "search-text";
-      text.textContent = row.label;
+      // Match indices address the relPath; the label is its basename suffix.
+      paintMatches(text, row.label, row.matches, row.detail.length - row.label.length);
       const detail = document.createElement("span");
       detail.className = "search-path";
-      detail.textContent = row.detail;
+      paintMatches(detail, row.detail, this.mode === "files" ? row.matches : undefined, 0);
       el.append(text, detail);
       el.addEventListener("click", () => {
         this.selected = i;

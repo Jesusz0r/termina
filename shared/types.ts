@@ -295,6 +295,8 @@ export interface AppPreferences {
   autoOpenAgentFiles: boolean;
   /** Last-used models, most recent first. Main owns this field. */
   recentModels: RecentModel[];
+  /** Last-opened files, most recent first. Main owns this field. */
+  recentFiles: RecentFile[];
   /** Last-used reasoning effort for fresh core sessions. Main owns this
    *  field; agent-core owns the level vocabulary and clamps per model. */
   defaultEffort: string | null;
@@ -306,7 +308,13 @@ export interface RecentModel {
   model: string;
 }
 
-export type UserPreferencePatch = Partial<Omit<AppPreferences, "openProjects" | "activeProject" | "recentModels">>;
+/** One remembered file: owning project plus its project-relative path. */
+export interface RecentFile {
+  projectId: string;
+  relPath: string;
+}
+
+export type UserPreferencePatch = Partial<Omit<AppPreferences, "openProjects" | "activeProject" | "recentModels" | "recentFiles">>;
 export type PreferenceUpdate = { patch: UserPreferencePatch; activateShortcuts: boolean };
 
 export function defaultAppPreferences(): AppPreferences {
@@ -323,6 +331,7 @@ export function defaultAppPreferences(): AppPreferences {
     showThinking: true,
     autoOpenAgentFiles: true,
     recentModels: [],
+    recentFiles: [],
     defaultEffort: null,
   };
 }
@@ -598,7 +607,9 @@ export interface TerminaBridge {
   /** Full-text search over the project's past sessions. */
   searchSessions(query: string): Promise<SessionHit[]>;
   /** Fuzzy file search over the active project tree (quick open, explorer filter). */
-  searchFiles(query: string, source?: FileSearchSource): Promise<{ entries: Array<{ relPath: string }>; truncated?: boolean }>;
+  searchFiles(query: string, source?: FileSearchSource): Promise<{ entries: Array<{ relPath: string; matches?: number[] }>; truncated?: boolean }>;
+  /** Tell main a file was opened, so it leads the next empty Quick Open. */
+  recordRecentFile(projectId: string, relPath: string): Promise<void>;
   /** Content search over the active project tree (modal jump-to, explorer results). */
   searchContent(pattern: string, source?: ContentSearchSource): Promise<{ hits: ContentHit[]; truncated?: boolean; error?: string }>;
 

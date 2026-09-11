@@ -13,6 +13,8 @@ import { IGNORED_SEGMENTS } from "../shared/gitignore.ts";
 
 export interface QuickOpenEntry {
   relPath: string;
+  /** Matched character indices into relPath, for result highlighting. */
+  matches?: number[];
 }
 
 const MAX_QUICK_OPEN_DIRS = 8000;
@@ -21,38 +23,51 @@ const MAX_QUICK_OPEN_RESULTS = 50;
 const MAX_QUICK_OPEN_QUERY = 256;
 
 /**
- * Subsequence fuzzy score. Null when the query is not a subsequence of the
- * candidate. Higher is better: basename matches outrank directory matches,
- * consecutive and segment-start runs outrank scatters.
+ * Subsequence fuzzy match. Null when the query is not a subsequence of the
+ * candidate. Higher score is better: basename matches outrank directory
+ * matches, consecutive and segment-start runs outrank scatters.
+ *
+ * The walk addresses the ORIGINAL candidate (comparing lowercased per
+ * character), so the returned indices always index the caller's string — a
+ * lowercased copy could shift positions on case-expanding characters.
  */
-export function fuzzyScore(query: string, candidate: string): number | null {
+export function fuzzyMatch(query: string, candidate: string): { score: number; indices: number[] } | null {
   const q = query.toLowerCase();
-  const c = candidate.toLowerCase();
   if (!q) return null;
   let qi = 0;
   let score = 0;
   let run = 0;
   let lastIdx = -2;
-  const baseStart = c.lastIndexOf("/") + 1;
-  for (let ci = 0; ci < c.length && qi < q.length; ci++) {
-    if (c[ci] !== q[qi]) {
+  const indices: number[] = [];
+  const baseStart = candidate.lastIndexOf("/") + 1;
+  for (let ci = 0; ci < candidate.length && qi < q.length; ci++) {
+    if (candidate[ci]!.toLowerCase() !== q[qi]) {
       run = 0;
       continue;
     }
     const consecutive = ci === lastIdx + 1;
     run = consecutive ? run + 1 : 1;
     score += 10 + run * 5;
-    if (ci === 0 || c[ci - 1] === "/" || c[ci - 1] === "." || c[ci - 1] === "-" || c[ci - 1] === "_") score += 8;
+    if (ci === 0 || candidate[ci - 1] === "/" || candidate[ci - 1] === "." || candidate[ci - 1] === "-" || candidate[ci - 1] === "_") score += 8;
     if (ci >= baseStart) score += 6;
+    indices.push(ci);
     lastIdx = ci;
     qi++;
   }
   if (qi < q.length) return null;
   // Shorter candidates win ties; exact basename match wins outright.
   score -= candidate.length * 0.1;
-  const base = c.slice(baseStart);
+  const base = candidate.slice(baseStart).toLowerCase();
   if (base === q) score += 100;
-  return score;
+  return { score, indices };
+}
+
+/**
+ * Subsequence fuzzy score. Null when the query is not a subsequence of the
+ * candidate. One walk: the score is fuzzyMatch's, without the indices.
+ */
+export function fuzzyScore(query: string, candidate: string): number | null {
+  return fuzzyMatch(query, candidate)?.score ?? null;
 }
 
 function visibleDirent(name: string): boolean {
@@ -142,32 +157,53 @@ export async function listProjectPaths(
 /**
  * Rank candidate paths against a query. Pure: no filesystem access, so the path
  * index can feed it a cached list and tests can feed it a fixture.
+ *
+ * `recent` (most-recent-first relPaths, already scoped to this project by the
+ * caller) orders the empty query: files still in the tree lead, then the
+ * standard fill. Entries carry their matched indices for highlighting.
  */
 export function rankProjectPaths(
   candidates: Iterable<string>,
   rawQuery: string,
   truncated: boolean,
+  recent: readonly string[] = [],
 ): { entries: QuickOpenEntry[]; truncated: boolean } {
   const query = rawQuery.trim().toLowerCase().slice(0, MAX_QUICK_OPEN_QUERY);
   if (query.includes("\0")) return { entries: [], truncated: false };
   if (!query) {
-    // No query: the first N in walk order (shallow first), then alphabetized.
-    const plain: string[] = [];
-    for (const relPath of candidates) {
-      if (plain.length >= MAX_QUICK_OPEN_RESULTS) break;
-      plain.push(relPath);
+    // No query: recents first (most recent first), then the first N in walk
+    // order (shallow first), alphabetized — the pre-recents behavior.
+    const all = [...candidates];
+    const membership = new Set(all);
+    const seen = new Set<string>();
+    const ordered: string[] = [];
+    for (const relPath of recent) {
+      if (ordered.length >= MAX_QUICK_OPEN_RESULTS) break;
+      if (!membership.has(relPath) || seen.has(relPath)) continue;
+      seen.add(relPath);
+      ordered.push(relPath);
     }
-    plain.sort();
-    return { entries: plain.map((relPath) => ({ relPath })), truncated };
+    const fill: string[] = [];
+    for (const relPath of all) {
+      if (ordered.length + fill.length >= MAX_QUICK_OPEN_RESULTS) break;
+      if (seen.has(relPath)) continue;
+      seen.add(relPath);
+      fill.push(relPath);
+    }
+    fill.sort();
+    return { entries: [...ordered, ...fill].map((relPath) => ({ relPath })), truncated };
   }
-  const scored: Array<{ relPath: string; score: number }> = [];
+  const scored: Array<{ relPath: string; score: number; indices: number[] }> = [];
   for (const relPath of candidates) {
-    const score = fuzzyScore(query, relPath);
-    if (score === null) continue;
-    scored.push({ relPath, score });
+    const match = fuzzyMatch(query, relPath);
+    if (match === null) continue;
+    scored.push({ relPath, score: match.score, indices: match.indices });
   }
   scored.sort((a, b) => b.score - a.score || (a.relPath < b.relPath ? -1 : 1));
-  return { entries: scored.slice(0, MAX_QUICK_OPEN_RESULTS).map(({ relPath }) => ({ relPath })), truncated };
+  return {
+    entries: scored.slice(0, MAX_QUICK_OPEN_RESULTS).map(({ relPath, indices }) => ({ relPath, matches: indices })),
+    truncated,
+  };
 }
 
 /**
@@ -205,12 +241,12 @@ export class SearchGenerations<Lane extends string> {
 export async function searchProjectFiles(
   root: string,
   rawQuery: string,
-  opts?: { shouldStop?: () => boolean; candidates?: { paths: readonly string[]; truncated: boolean } },
+  opts?: { shouldStop?: () => boolean; candidates?: { paths: readonly string[]; truncated: boolean }; recent?: readonly string[] },
 ): Promise<{ entries: QuickOpenEntry[]; truncated: boolean }> {
   const listed = opts?.candidates ?? await listProjectPaths(root, opts);
   // A cancelled walk must not be ranked as though it were complete.
   if (opts?.shouldStop?.()) return { entries: [], truncated: false };
-  return rankProjectPaths(listed.paths, rawQuery, listed.truncated);
+  return rankProjectPaths(listed.paths, rawQuery, listed.truncated, opts?.recent);
 }
 
 /**

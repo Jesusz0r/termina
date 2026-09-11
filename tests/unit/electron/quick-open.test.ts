@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProjectPathIndex, SearchGenerations, fuzzyScore, listProjectSnapshot, searchProjectFiles } from "../../../electron/quick-open.ts";
+import { ProjectPathIndex, SearchGenerations, fuzzyMatch, fuzzyScore, listProjectSnapshot, rankProjectPaths, searchProjectFiles } from "../../../electron/quick-open.ts";
 
 describe("quick-open fuzzyScore", () => {
   it("rejects non-subsequences", () => {
@@ -23,6 +23,51 @@ describe("quick-open fuzzyScore", () => {
 
   it("is case-insensitive", () => {
     expect(fuzzyScore("MAIN", "src/main.ts")).not.toBeNull();
+  });
+});
+
+describe("quick-open fuzzyMatch", () => {
+  it("returns the matched indices into the original candidate", () => {
+    expect(fuzzyMatch("main", "src/main.ts")).toEqual({ score: expect.any(Number), indices: [4, 5, 6, 7] });
+    expect(fuzzyMatch("smt", "src/main.ts")?.indices).toEqual([0, 4, 9]);
+  });
+
+  it("addresses the original casing, not the lowered copy", () => {
+    const match = fuzzyMatch("main", "SRC/MAIN.TS")!;
+    expect(match.indices).toEqual([4, 5, 6, 7]);
+    expect("SRC/MAIN.TS"[match.indices[0]!]).toBe("M");
+  });
+
+  it("agrees with fuzzyScore on score and nullability", () => {
+    for (const [query, candidate] of [["main", "src/main.ts"], ["xyz", "src/main.ts"], ["", "src/main.ts"]] as const) {
+      expect(fuzzyMatch(query, candidate)?.score ?? null).toBe(fuzzyScore(query, candidate));
+    }
+  });
+});
+
+describe("quick-open rankProjectPaths recents", () => {
+  const candidates = ["aaa.ts", "mmm.ts", "zzz.ts"];
+
+  it("leads an empty query with recents still in the tree", () => {
+    const { entries } = rankProjectPaths(candidates, "", false, ["zzz.ts", "gone.ts", "mmm.ts"]);
+    expect(entries.map((e) => e.relPath)).toEqual(["zzz.ts", "mmm.ts", "aaa.ts"]);
+  });
+
+  it("keeps the plain ordering without recents", () => {
+    const { entries } = rankProjectPaths(candidates, "", false);
+    expect(entries.map((e) => e.relPath)).toEqual(["aaa.ts", "mmm.ts", "zzz.ts"]);
+  });
+
+  it("ignores recents for a non-empty query", () => {
+    const { entries } = rankProjectPaths(candidates, "mm", false, ["zzz.ts"]);
+    expect(entries.map((e) => e.relPath)).toEqual(["mmm.ts"]);
+  });
+
+  it("carries matched indices on scored entries only", () => {
+    const { entries } = rankProjectPaths(candidates, "mm", false);
+    expect(entries[0]).toEqual({ relPath: "mmm.ts", matches: [0, 1] });
+    const empty = rankProjectPaths(candidates, "", false, ["zzz.ts"]);
+    expect(empty.entries[0]).toEqual({ relPath: "zzz.ts" });
   });
 });
 
@@ -160,7 +205,7 @@ describe("Quick Open path index", () => {
 
       index.noteAdded("src/new.ts");
       expect((await searchProjectFiles(root, "new", { candidates: await index.candidates(root) })).entries)
-        .toEqual([{ relPath: "src/new.ts" }]);
+        .toEqual([{ relPath: "src/new.ts", matches: [4, 5, 6] }]);
 
       index.noteRemoved("src/new.ts");
       expect((await searchProjectFiles(root, "new", { candidates: await index.candidates(root) })).entries).toEqual([]);

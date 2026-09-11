@@ -110,6 +110,7 @@ const bridge: TerminaBridge = {
   getPlan: (terminalId) => ipcRenderer.invoke("plan:get", terminalId),
   searchSessions: (query) => ipcRenderer.invoke("session:search", query),
   searchFiles: (query, source) => ipcRenderer.invoke("file:search", query, source),
+  recordRecentFile: (projectId, relPath) => ipcRenderer.invoke("file:record-recent", projectId, relPath),
   searchContent: (pattern, source) => ipcRenderer.invoke("content:search", pattern, source),
   getRuns: (terminalId) => ipcRenderer.invoke("worldline:runs", terminalId),
   reportFlush: (requestId, result) => ipcRenderer.invoke("editor:flush-report", requestId, result),

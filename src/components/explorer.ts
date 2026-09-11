@@ -285,6 +285,24 @@ export class Explorer {
     if (hadFocus) target.focus();
   }
 
+  /**
+   * Expand the tree to a project-relative file and move the selection onto
+   * its row, so the tree agrees with the editor about where the user is.
+   * Moves the roving tabindex but never DOM focus, so opening a file from
+   * Quick Open does not steal focus back from the editor.
+   */
+  async reveal(relPath: string): Promise<void> {
+    const rel = normalizeRelPath(relPath);
+    if (!rel || !this.projectCwd) return;
+    await this.expandToMatches([rel]);
+    const row = this.rowByRel(rel);
+    if (!row) return;
+    this.markFocus(row);
+    const entry = this.rowEntry.get(row);
+    if (entry) this.select(entry, row);
+    row.scrollIntoView({ block: "nearest" });
+  }
+
   /** Drop the type-ahead buffer. Navigation keys end a name search, so a stale
    *  buffer cannot combine with the next keystroke. */
   private resetTypeAhead(): void {
