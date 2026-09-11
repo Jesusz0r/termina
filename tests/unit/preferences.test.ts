@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { FileHandle, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AppPreferencesStore } from "../../electron/preferences.ts";
@@ -7,9 +7,27 @@ import { normalizeAppPreferences } from "../../shared/preferences";
 import { syncParentDir } from "../../shared/fsync.ts";
 import { defaultAppPreferences } from "../../shared/types.ts";
 
+const tempFileSync = vi.hoisted(() => vi.fn());
+
 vi.mock("../../shared/fsync.ts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../shared/fsync.ts")>();
   return { ...actual, syncParentDir: vi.fn(actual.syncParentDir) };
+});
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    open: async (...args: Parameters<typeof actual.open>) => {
+      const handle = await actual.open(...args);
+      const originalSync = handle.sync.bind(handle);
+      handle.sync = async () => {
+        tempFileSync();
+        return originalSync();
+      };
+      return handle;
+    },
+  };
 });
 
 describe("recentModels sanitizer", () => {
@@ -38,6 +56,7 @@ describe("AppPreferencesStore", () => {
 
   afterEach(async () => {
     vi.mocked(syncParentDir).mockClear();
+    tempFileSync.mockClear();
     if (root) await rm(root, { recursive: true, force: true });
     root = "";
   });
@@ -50,11 +69,9 @@ describe("AppPreferencesStore", () => {
 
   it("fsyncs the temp file and parent directory on save", async () => {
     const store = await openStore();
-    const fileSync = vi.spyOn(FileHandle.prototype, "sync");
     await store.save(defaultAppPreferences());
-    expect(fileSync).toHaveBeenCalled();
+    expect(tempFileSync).toHaveBeenCalled();
     expect(vi.mocked(syncParentDir)).toHaveBeenCalledWith(filePath);
-    fileSync.mockRestore();
     expect(JSON.parse(await readFile(filePath, "utf8")).theme).toBe("dark");
   });
 
