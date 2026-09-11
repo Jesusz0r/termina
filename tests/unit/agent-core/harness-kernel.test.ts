@@ -2031,6 +2031,72 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     else process.env.TERMINA_TEST_LOGIN_TIMEOUT_MS = prevTimeout;
     if (prevDenyPort === undefined) delete process.env.TERMINA_TEST_REDIRECT_PORT;
     else process.env.TERMINA_TEST_REDIRECT_PORT = prevDenyPort;
+
+    const prevStatePort = process.env.TERMINA_TEST_REDIRECT_PORT;
+    process.env.TERMINA_TEST_REDIRECT_PORT = "27325";
+    let mismatchOut = "";
+    const mismatchAbort = new AbortController();
+    const mismatchTimer = setTimeout(() => mismatchAbort.abort(), 4_000);
+    const mismatchP = runLogin("anthropic", "browser", {
+      write: (t) => {
+        mismatchOut += t;
+      },
+      openUrl: () => {},
+      signal: mismatchAbort.signal,
+    });
+    let mismatchResult;
+    try {
+      const started = Date.now();
+      while (!mismatchOut.includes("authorize:") && Date.now() - started < 2000) await new Promise((r) => setTimeout(r, 20));
+      const mismatchDeadline = Date.now() + 2000;
+      while (Date.now() < mismatchDeadline) {
+        try {
+          await fetch("http://127.0.0.1:27325/callback?code=foreign-code&state=wrong-state");
+          break;
+        } catch {
+          await new Promise((r) => setTimeout(r, 20));
+        }
+      }
+      mismatchResult = await mismatchP;
+    } catch (err) {
+      mismatchResult = { ok: false, error: String(err) };
+    } finally {
+      clearTimeout(mismatchTimer);
+    }
+    check("oauth wrong state is rejected", mismatchResult.ok === false && mismatchResult.error === "login failed: state mismatch");
+    process.env.TERMINA_TEST_REDIRECT_PORT = "27326";
+    let missingOut = "";
+    const missingAbort = new AbortController();
+    const missingTimer = setTimeout(() => missingAbort.abort(), 4_000);
+    const missingP = runLogin("anthropic", "browser", {
+      write: (t) => {
+        missingOut += t;
+      },
+      openUrl: () => {},
+      signal: missingAbort.signal,
+    });
+    let missingResult;
+    try {
+      const started = Date.now();
+      while (!missingOut.includes("authorize:") && Date.now() - started < 2000) await new Promise((r) => setTimeout(r, 20));
+      const missingDeadline = Date.now() + 2000;
+      while (Date.now() < missingDeadline) {
+        try {
+          await fetch("http://127.0.0.1:27326/callback?code=foreign-code");
+          break;
+        } catch {
+          await new Promise((r) => setTimeout(r, 20));
+        }
+      }
+      missingResult = await missingP;
+    } catch (err) {
+      missingResult = { ok: false, error: String(err) };
+    } finally {
+      clearTimeout(missingTimer);
+    }
+    check("oauth missing state is rejected", missingResult.ok === false && missingResult.error === "login failed: state mismatch");
+    if (prevStatePort === undefined) delete process.env.TERMINA_TEST_REDIRECT_PORT;
+    else process.env.TERMINA_TEST_REDIRECT_PORT = prevStatePort;
     
     const tokenSrv = createServer((req, res) => {
       let body = "";
