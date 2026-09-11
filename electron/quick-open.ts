@@ -10,6 +10,7 @@
 import { readdir, realpath as fsRealpath, stat } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { IGNORED_SEGMENTS } from "../shared/gitignore.ts";
+import type { FileSearchSource } from "../shared/types.ts";
 
 export interface QuickOpenEntry {
   relPath: string;
@@ -171,6 +172,31 @@ export function rankProjectPaths(
 }
 
 /**
+ * Per-caller cancellation generations for file:search. Each caller owns a
+ * lane: same-lane searches supersede each other, cross-lane searches never
+ * abort. Unknown sources share the quick-open lane, so a compromised or
+ * outdated renderer cannot grow the lane set.
+ */
+export class FileSearchGenerations {
+  private seq: Record<FileSearchSource, number> = { "quick-open": 0, filter: 0 };
+
+  /** Allocate the next generation for the caller's lane. */
+  next(source: unknown): { source: FileSearchSource; seq: number } {
+    const lane = FileSearchGenerations.lane(source);
+    return { source: lane, seq: ++this.seq[lane] };
+  }
+
+  /** True while no newer same-lane search has started. */
+  current(source: FileSearchSource, seq: number): boolean {
+    return this.seq[source] === seq;
+  }
+
+  private static lane(source: unknown): FileSearchSource {
+    return source === "filter" ? "filter" : "quick-open";
+  }
+}
+
+/**
  * Search the project for a query. Walks when the caller has no candidate list;
  * a cached list (the path index) is scored directly.
  */
@@ -188,10 +214,9 @@ export async function searchProjectFiles(
 /**
  * Cached project file inventory for repeated searches.
  *
- * Quick Open runs a full walk per keystroke; this keeps the file list between
- * queries and patches it from watcher events, so only the first search pays for
- * the walk. The candidate list is ranked by `rankProjectPaths`, so scoring and
- * visibility rules stay owned by the walk above.
+ * This keeps the file list between queries and patches it from watcher events,
+ * so only the first search pays for the walk. The candidate list is ranked by
+ * `rankProjectPaths`, so scoring and visibility rules stay owned by the walk above.
  *
  * Order is preserved from the walk: the empty-query result is the first N paths
  * encountered (shallow first), which a set would not reproduce.
@@ -203,29 +228,32 @@ export class ProjectPathIndex {
   private truncated = false;
   private built = false;
   private building: Promise<void> | null = null;
+  private generation = 0;
 
   /** Candidate list for a query, building the index on first use. */
   async candidates(root: string, shouldStop?: () => boolean): Promise<{ paths: readonly string[]; truncated: boolean }> {
     if (this.root !== root) this.reset(root);
     if (!this.built) {
-      const build = this.building ?? (this.building = this.build(root, shouldStop));
+      const build = this.building ?? (this.building = this.build(root, shouldStop, this.generation));
       await build;
     }
     return { paths: this.paths, truncated: this.truncated };
   }
 
-  private async build(root: string, shouldStop?: () => boolean): Promise<void> {
+  private async build(root: string, shouldStop: (() => boolean) | undefined, generation: number): Promise<void> {
     try {
       const listed = await listProjectPaths(root, { shouldStop });
-      // Cancelled or superseded: leave the index unbuilt so the next search
-      // retries rather than caching a partial tree.
-      if (this.root !== root || shouldStop?.()) return;
+      // Cancelled, invalidated, or superseded: leave the index unbuilt so the
+      // next search retries rather than caching a partial or stale tree.
+      if (this.root !== root || generation !== this.generation || shouldStop?.()) return;
       this.paths = listed.paths;
       this.membership = new Set(listed.paths);
       this.truncated = listed.truncated;
       this.built = true;
     } finally {
-      this.building = null;
+      // Only clear our own in-flight marker: an invalidation may have started
+      // a newer build while this one was still running.
+      if (generation === this.generation) this.building = null;
     }
   }
 
@@ -260,12 +288,14 @@ export class ProjectPathIndex {
 
   /** Discard the index; the next search rebuilds it. */
   invalidate(): void {
+    this.generation++;
     this.built = false;
     this.building = null;
   }
 
   /** Point the index at a different root, dropping the previous tree. */
   reset(root: string | null = null): void {
+    this.generation++;
     this.root = root;
     this.paths = [];
     this.membership = new Set();

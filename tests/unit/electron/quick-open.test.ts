@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProjectPathIndex, fuzzyScore, listProjectSnapshot, searchProjectFiles } from "../../../electron/quick-open.ts";
+import { FileSearchGenerations, ProjectPathIndex, fuzzyScore, listProjectSnapshot, searchProjectFiles } from "../../../electron/quick-open.ts";
 
 describe("quick-open fuzzyScore", () => {
   it("rejects non-subsequences", () => {
@@ -219,5 +219,64 @@ describe("Quick Open path index", () => {
     } finally {
       cleanup();
     }
+  });
+
+  it("discards a build that was invalidated while in flight", async () => {
+    const { root, cleanup } = fixture();
+    try {
+      const index = new ProjectPathIndex();
+      const view = index as unknown as { building: unknown; built: boolean };
+      // No await between starting the build and invalidating, so the walk is
+      // deterministically still in flight: the stale result must be dropped.
+      const stale = index.candidates(root);
+      index.invalidate();
+      await stale;
+      expect(view.built).toBe(false);
+      // And the next call rebuilds from disk instead of serving stale data.
+      expect((await index.candidates(root)).paths).toContain("top.ts");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("does not let a stale build populate past an aborted replacement", async () => {
+    const { root, cleanup } = fixture();
+    try {
+      const index = new ProjectPathIndex();
+      const view = index as unknown as { built: boolean };
+      const stale = index.candidates(root);
+      index.invalidate();
+      // A replacement starts and aborts; whichever build lands first, the
+      // pre-invalidation walk must not populate the index.
+      await index.candidates(root, () => true);
+      await stale;
+      expect(view.built).toBe(false);
+      expect((await index.candidates(root)).paths).toContain("top.ts");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("FileSearchGenerations", () => {
+  it("supersedes same-lane searches without touching the other lane", () => {
+    const gen = new FileSearchGenerations();
+    const filterFirst = gen.next("filter");
+    const quickFirst = gen.next("quick-open");
+    expect(gen.current(filterFirst.source, filterFirst.seq)).toBe(true);
+    const filterSecond = gen.next("filter");
+    // The older filter search is stale, but the quick-open search that ran
+    // between them is untouched: callers never abort each other.
+    expect(gen.current(filterFirst.source, filterFirst.seq)).toBe(false);
+    expect(gen.current(filterSecond.source, filterSecond.seq)).toBe(true);
+    expect(gen.current(quickFirst.source, quickFirst.seq)).toBe(true);
+  });
+
+  it("routes unknown sources to the quick-open lane", () => {
+    const gen = new FileSearchGenerations();
+    for (const source of [undefined, null, "", "quick-open", "explorer", 42]) {
+      expect(gen.next(source).source).toBe("quick-open");
+    }
+    expect(gen.next("filter").source).toBe("filter");
   });
 });

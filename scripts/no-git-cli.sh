@@ -8,7 +8,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 matches=$(git grep -n -E \
-  -e "(spawnSync|spawn|execFileSync|execFile|execSync|exec|execaSync|execa)\(\s*['\"]git['\"]" \
+  -e "(spawnSync|spawn|execFileSync|execFile|execSync|exec|execaSync|execa|execaCommand)\(\s*['\"]git( |['\"])" \
   -e "from\s+['\"](simple-git|isomorphic-git|dugite|nodegit)" \
   -e "require\(\s*['\"](simple-git|isomorphic-git|dugite|nodegit)" \
   -- agent-core electron src shared 2>&1) || code=$?

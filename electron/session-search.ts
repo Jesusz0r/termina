@@ -19,6 +19,8 @@ const MAX_SESSION_SEARCH_HITS = 50;
 const MAX_SESSION_SEARCH_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_SESSION_SEARCH_LINES = 10_000;
 const MAX_PROJECT_FILE_MEMO_ENTRIES = 4096;
+/** Renderer queries are truncated to this before the walk (main and worker). */
+export const MAX_SESSION_SEARCH_QUERY = 256;
 
 export type SessionMessageParse = { role: string; text: string; paths: string[] };
 
@@ -270,8 +272,10 @@ export async function searchSessionFiles(opts: {
   isProjectFile: (relPath: string, projectCwd: string) => boolean | Promise<boolean>;
   shouldStop?: () => boolean;
 }): Promise<SessionHit[]> {
-  const needle = opts.query.trim().toLowerCase();
+  // The worker is its own trust boundary: never trust caller-supplied sizes.
+  const needle = opts.query.trim().toLowerCase().slice(0, MAX_SESSION_SEARCH_QUERY);
   if (needle.length < 2) return [];
+  const files = opts.files.slice(0, MAX_SESSION_SEARCH_FILES);
   const hits: SessionHit[] = [];
   // A single message can expose the same candidate through tool arguments,
   // backticks, and ordinary tokens.  Keep the bounded search from repeating
@@ -286,7 +290,7 @@ export async function searchSessionFiles(opts: {
     return result;
   };
 
-  for (const file of opts.files) {
+  for (const file of files) {
     if (opts.shouldStop?.()) return [];
     let snapshot = sessionSegmentSnapshot(file);
     if (!snapshot) continue;

@@ -1324,6 +1324,9 @@ pub(crate) fn fail_before_state_ref(req: &Value) -> Result<(), String> {
 /// Deterministic cross-process test seam. The core announces that it reached
 /// a publication boundary, then waits for the spike process to release it.
 pub(crate) fn pause_at_hook(req: &Value, name: &str) -> Result<(), String> {
+    if std::env::var_os("TERMINA_CORE_TEST").is_none() {
+        return Ok(());
+    }
     let Some(hook) = req.pointer(&format!("/hooks/{name}")) else {
         return Ok(());
     };
@@ -1335,6 +1338,8 @@ pub(crate) fn pause_at_hook(req: &Value, name: &str) -> Result<(), String> {
         .get("releasePath")
         .and_then(Value::as_str)
         .ok_or_else(|| format!("missing {name} releasePath"))?;
+    crate::promote_fs::promotion_absolute_path(ready, "test hook readyPath")?;
+    crate::promote_fs::promotion_absolute_path(release, "test hook releasePath")?;
     crate::test_hooks::pause(ready, release, name)
 }
 
@@ -2911,4 +2916,112 @@ pub(crate) fn tree_lookup(
         current = git_tree_object_bounded(repo, found.0, &mut budget)?;
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::fs;
+
+    /// Serializes the env-mutating tests below: Rust tests share one process,
+    /// so concurrent set/remove of TERMINA_CORE_TEST would flake them.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Restores the process env on drop so a panic mid-test cannot leak
+    /// TERMINA_CORE_TEST into other tests.
+    struct EnvGuard {
+        prior: Option<OsString>,
+    }
+
+    impl EnvGuard {
+        fn set() -> Self {
+            let prior = std::env::var_os("TERMINA_CORE_TEST");
+            // SAFETY: ENV_LOCK serializes these tests against each other, and
+            // no other test in this binary touches this variable.
+            unsafe { std::env::set_var("TERMINA_CORE_TEST", "1") };
+            Self { prior }
+        }
+
+        fn cleared() -> Self {
+            let prior = std::env::var_os("TERMINA_CORE_TEST");
+            // SAFETY: see set().
+            unsafe { std::env::remove_var("TERMINA_CORE_TEST") };
+            Self { prior }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: see set().
+            unsafe {
+                if let Some(value) = self.prior.take() {
+                    std::env::set_var("TERMINA_CORE_TEST", value);
+                } else {
+                    std::env::remove_var("TERMINA_CORE_TEST");
+                }
+            }
+        }
+    }
+
+    struct Fixture(std::path::PathBuf);
+
+    impl Fixture {
+        fn named(name: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("termina-capture-hook-{}-{name}", std::process::id()));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn hook_payload_is_ignored_without_the_test_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::cleared();
+        let marker = std::env::temp_dir().join(format!(
+            "termina-capture-hook-{}-must-not-exist.ready",
+            std::process::id()
+        ));
+        let req = json!({ "hooks": { "probe": {
+            "readyPath": marker.to_str().unwrap(),
+            "releasePath": marker.to_str().unwrap(),
+        } } });
+        assert!(pause_at_hook(&req, "probe").is_ok());
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn relative_hook_paths_are_rejected_before_any_write() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set();
+        let req = json!({ "hooks": { "probe": {
+            "readyPath": "relative-ready",
+            "releasePath": "relative-release",
+        } } });
+        assert!(pause_at_hook(&req, "probe").is_err());
+        assert!(!std::path::Path::new("relative-ready").exists());
+    }
+
+    #[test]
+    fn absolute_hook_paths_pause_and_release() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set();
+        let root = Fixture::named("absolute");
+        let ready = root.0.join("ready");
+        let release = root.0.join("release");
+        fs::write(&release, b"release").unwrap();
+        let req = json!({ "hooks": { "probe": {
+            "readyPath": ready.to_str().unwrap(),
+            "releasePath": release.to_str().unwrap(),
+        } } });
+        assert!(pause_at_hook(&req, "probe").is_ok());
+        assert_eq!(fs::read(ready).unwrap(), b"ready");
+    }
 }

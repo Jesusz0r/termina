@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SessionRetentionLock } from "../shared/session-retention-lock.js";
 import type { SessionHit } from "../shared/types.js";
+import type { ExportPatchFile } from "./worldlines/export.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 /** Bound retained operations so a slow worker cannot retain an unbounded chain of closures. */
@@ -49,6 +50,14 @@ export type SessionSearchResult =
   | { ok: true; hits: SessionHit[] }
   | { ok: false; error: string };
 
+export interface ExportPatchOpts {
+  files: ExportPatchFile[];
+}
+
+export type ExportPatchResult =
+  | { ok: true; patch: string }
+  | { ok: false; error: string };
+
 export type CoreSessionForkResult =
   | { ok: true; sessionFile: string; kept: number }
   | { ok: false; sessionFile: string; commit: "uncertain"; error: string };
@@ -72,6 +81,11 @@ export interface SessionSearchRequest extends SessionSearchOpts {
   requestId: string;
 }
 
+export interface ExportPatchRequest extends ExportPatchOpts {
+  op: "export-patch";
+  requestId: string;
+}
+
 export interface SessionForkCancelRequest {
   op: "cancel";
   requestId: string;
@@ -81,7 +95,7 @@ export interface SessionWorkerShutdownRequest {
   op: "shutdown";
 }
 
-export type SessionWorkerRequest = CoreSessionForkRequest | CoreSessionDiscardRequest | SessionSearchRequest | SessionForkCancelRequest | SessionWorkerShutdownRequest;
+export type SessionWorkerRequest = CoreSessionForkRequest | CoreSessionDiscardRequest | SessionSearchRequest | ExportPatchRequest | SessionForkCancelRequest | SessionWorkerShutdownRequest;
 
 export type SessionForkFailure = {
   requestId: string;
@@ -95,14 +109,16 @@ export type SessionForkReply =
   | { op: "discard-core-empty-result"; requestId: string; ok: true; removed: boolean }
   | (SessionForkFailure & { op: "discard-core-empty-result" })
   | { op: "search-sessions-result"; requestId: string; ok: true; hits: SessionHit[] }
-  | (SessionForkFailure & { op: "search-sessions-result" });
+  | (SessionForkFailure & { op: "search-sessions-result" })
+  | { op: "export-patch-result"; requestId: string; ok: true; patch: string }
+  | (SessionForkFailure & { op: "export-patch-result" });
 
 export type SessionForkCallOptions = {
   signal?: AbortSignal;
 };
 
 type PendingRequest = {
-  kind: "fork-core" | "discard-core-empty" | "search-sessions";
+  kind: "fork-core" | "discard-core-empty" | "search-sessions" | "export-patch";
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   removeAbortListener?: () => void;
@@ -148,6 +164,16 @@ export class SessionForkClient {
     if (this.disposed) return Promise.reject(new Error("session worker disposed"));
     if (callOptions?.signal?.aborted) return Promise.reject(abortError());
     return this.dispatchSearch(opts, callOptions?.signal);
+  }
+
+  /**
+   * Build an export patch off the main thread. Pure CPU over
+   * caller-supplied contents; runs concurrently like search (no shared
+   * worker state). Exports are explicit user actions, so no abort lane.
+   */
+  exportPatch(opts: ExportPatchOpts): Promise<ExportPatchResult> {
+    if (this.disposed) return Promise.reject(new Error("session worker disposed"));
+    return this.dispatchExportPatch(opts);
   }
 
   dispose(): Promise<void> {
@@ -261,6 +287,25 @@ export class SessionForkClient {
     });
   }
 
+  private dispatchExportPatch(payload: ExportPatchOpts): Promise<ExportPatchResult> {
+    return new Promise((resolve, reject) => {
+      const requestId = `export-patch-${++this.seq}`;
+      const worker = this.ensure();
+      this.pending.set(requestId, {
+        kind: "export-patch",
+        resolve: (value) => resolve(value as ExportPatchResult),
+        reject,
+      });
+      try {
+        const msg: ExportPatchRequest = { ...payload, op: "export-patch", requestId };
+        worker.postMessage(msg);
+      } catch (err) {
+        this.takePending(requestId);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
   private ensure(): Worker {
     if (this.disposed) throw new Error("session worker disposed");
     if (this.worker) return this.worker;
@@ -273,7 +318,8 @@ export class SessionForkClient {
       const matches =
         (pending.kind === "fork-core" && msg.op === "fork-core-result") ||
         (pending.kind === "discard-core-empty" && msg.op === "discard-core-empty-result") ||
-        (pending.kind === "search-sessions" && msg.op === "search-sessions-result");
+        (pending.kind === "search-sessions" && msg.op === "search-sessions-result") ||
+        (pending.kind === "export-patch" && msg.op === "export-patch-result");
       if (!matches) return;
       this.takePending(msg.requestId);
       if (msg.ok) pending.resolve(msg);
@@ -332,6 +378,8 @@ export class SessionForkClient {
         pending.resolve({ ok: false, error: `${error.message}; cleanup was not proven and was retained` });
       } else if (pending.kind === "search-sessions") {
         pending.reject(new Error(`${error.message}; session search was not completed`));
+      } else if (pending.kind === "export-patch") {
+        pending.reject(new Error(`${error.message}; export patch was not completed`));
       } else {
         pending.reject(error);
       }

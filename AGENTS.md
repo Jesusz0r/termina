@@ -48,7 +48,7 @@ When a touched file exceeds 800 lines, assess extraction. Extract cohesive respo
 
 ## Process isolation
 
-Renderer never talks directly to the agent or performs privileged fs/pty/snapshot work. Preload exposes only the typed `window.pi` bridge; validate privileged requests in main. Write leases prevent two writers on one tree — don't bypass. Use the existing candidate sandboxes / offline evidence profile for isolation; a separate process or tree alone is not a sandbox. Preserve `PI_SESSION_*` env sanitization when launching `pi`.
+Renderer never talks directly to the agent or performs privileged fs/pty/snapshot work. Preload exposes only the typed `window.termina` bridge; validate privileged requests in main. Write leases prevent two writers on one tree — don't bypass. Use the existing candidate sandboxes / offline evidence profile for isolation; a separate process or tree alone is not a sandbox. Preserve `PI_SESSION_*` env sanitization when launching the agent.
 
 ## Performance
 

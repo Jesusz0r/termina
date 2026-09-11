@@ -590,4 +590,39 @@ describe("SubagentHost", () => {
     await until(() => existsSync(join(s.dir, "subagent-term-7-bg-2.result.json")));
     expect(s.notes.at(-1)!.note).toContain("Continued from bg-1");
   });
+
+  it("admits only one of two concurrent continuations of the same run", async () => {
+    const s = setup();
+    s.writeTask();
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    s.procs[0]!.out(`SUBAGENT_RESULT {"ok":true,"result":"done"}\n`);
+    s.procs[0]!.exit(0);
+    await until(() => existsSync(s.resultFile));
+    writeFileSync(join(s.dir, "subagent-term-7-bg-2.task.json"), JSON.stringify({ ...validTask({ runId: "bg-2" }), resumeRunId: "bg-1" }));
+    writeFileSync(join(s.dir, "subagent-term-7-bg-3.task.json"), JSON.stringify({ ...validTask({ runId: "bg-3" }), resumeRunId: "bg-1" }));
+    // No await between the spawns: both are in flight across the same
+    // admission awaits, so exactly one may insert.
+    await Promise.all([
+      s.host.handleSpawn("term-7", "bg-2", "subagent-term-7-bg-2.task.json"),
+      s.host.handleSpawn("term-7", "bg-3", "subagent-term-7-bg-3.task.json"),
+    ]);
+    expect(s.procs.length).toBe(2);
+    const outcomes = ["bg-2", "bg-3"].map((id) => {
+      const file = join(s.dir, `subagent-term-7-${id}.result.json`);
+      return existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as { outcome: string }).outcome : "running";
+    });
+    expect(outcomes.filter((o) => o === "failed")).toHaveLength(1);
+    expect(outcomes.filter((o) => o === "running")).toHaveLength(1);
+    expect(s.notes.some((n) => /already being continued by bg-[23]/.test(n.note))).toBe(true);
+  });
+
+  it("spawns once for a duplicated concurrent delivery", async () => {
+    const s = setup();
+    s.writeTask();
+    await Promise.all([
+      s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json"),
+      s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json"),
+    ]);
+    expect(s.procs.length).toBe(1);
+  });
 });

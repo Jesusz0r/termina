@@ -3201,6 +3201,11 @@ body {
   color: var(--red);
 }
 
+/* Truncated: more files matched than the search returns; the count is in title. */
+.explorer-filter-input.truncated {
+  border-color: var(--accent);
+}
+
 /* Hidden rows must not take part in layout or keyboard navigation. */
 .explorer-row[hidden] {
   display: none;

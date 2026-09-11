@@ -22,12 +22,18 @@ import {
   type SessionFileEntry,
 } from "./session-search.js";
 import {
+  MAX_EXPORT_FILES,
+  buildUnifiedPatch,
+  type ExportPatchFile,
+} from "./worldlines/export.js";
+import {
   boundPromotionRemoveTree,
   disposeWorldlineGitCore,
 } from "./worldline-git.js";
 import type {
   CoreSessionForkRequest,
   CoreSessionDiscardRequest,
+  ExportPatchRequest,
   SessionForkReply,
   SessionSearchRequest,
   SessionWorkerRequest,
@@ -111,6 +117,31 @@ async function searchSessions(msg: SessionSearchRequest): Promise<void> {
     });
   } finally {
     activeSearches.delete(msg.requestId);
+  }
+}
+
+/** Build an export patch. Pure CPU over caller contents; runs concurrently. */
+async function exportPatch(msg: ExportPatchRequest): Promise<void> {
+  try {
+    const files: ExportPatchFile[] = (Array.isArray(msg.files) ? msg.files : [])
+      .filter((f): f is ExportPatchFile =>
+        !!f && typeof f.relPath === "string" &&
+        (typeof f.before === "string" || f.before === null) &&
+        (typeof f.after === "string" || f.after === null))
+      .slice(0, MAX_EXPORT_FILES);
+    // buildUnifiedPatch stubs oversized/binary files itself; the slice above
+    // bounds the file count the builder ever sees.
+    post({ op: "export-patch-result", requestId: msg.requestId, ok: true, patch: buildUnifiedPatch(files) });
+  } catch (err) {
+    post({
+      op: "export-patch-result",
+      requestId: msg.requestId,
+      ok: false,
+      error: {
+        code: "failed",
+        message: err instanceof Error ? err.message : String(err),
+      },
+    });
   }
 }
 
@@ -264,5 +295,9 @@ parentPort?.on("message", (msg: SessionWorkerRequest) => {
   if (msg.op === "search-sessions") {
     // Read-only: runs concurrently with forks instead of queueing behind them.
     void searchSessions(msg);
+  }
+  if (msg.op === "export-patch") {
+    // Pure CPU: runs concurrently; no shared worker state to serialize.
+    void exportPatch(msg);
   }
 });

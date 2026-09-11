@@ -518,6 +518,9 @@ export type TerminalPasteResult =
   | { ok: true; kind: "image"; count: number; queued: boolean }
   | { ok: false; error: string };
 
+/** Callers of file:search; each owns a cancellation generation in main. */
+export type FileSearchSource = "quick-open" | "filter";
+
 export interface TerminaBridge {
   // push events (main → renderer)
   onPtyData(cb: (e: PtyDataPayload) => void): () => void;
@@ -583,8 +586,8 @@ export interface TerminaBridge {
   getPlan(terminalId: string): Promise<PlanTask[]>;
   /** Full-text search over the project's past sessions. */
   searchSessions(query: string): Promise<SessionHit[]>;
-  /** Fuzzy file search over the active project tree (quick open). */
-  searchFiles(query: string): Promise<{ entries: Array<{ relPath: string }>; truncated?: boolean }>;
+  /** Fuzzy file search over the active project tree (quick open, explorer filter). */
+  searchFiles(query: string, source?: FileSearchSource): Promise<{ entries: Array<{ relPath: string }>; truncated?: boolean }>;
 
   // Worldlines: run records
   /** The recorded runs of a terminal (or every terminal). */

@@ -2433,29 +2433,35 @@ export function editMissDiagnostic(body: string, oldText: string): string {
  * authoritative; these only rescue whitespace/indent/trim drift and refuse
  * disproportionate spans so a wrong block can never apply. */
 function findFuzzyEditSpan(body: string, oldText: string): { at: number; len: number } | { ambiguous: true } | null {
-  const norm = (s: string): string[] => s.replace(/\r\n/g, "\n").split("\n");
-  const bodyLines = norm(body);
-  const findLines = norm(oldText);
+  // Compare on CRLF-normalized lines but index the original body: raw line
+  // starts keep every \r accounted for so the span never shifts the cut.
+  const rawLines = body.split("\n");
+  const bodyLines = rawLines.map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
+  const bodyTrimmed = bodyLines.map((line) => line.trim());
+  const starts: number[] = new Array<number>(rawLines.length);
+  let lineStart = 0;
+  for (let k = 0; k < rawLines.length; k++) {
+    starts[k] = lineStart;
+    lineStart += rawLines[k]!.length + 1;
+  }
+  const findLines = oldText.replace(/\r\n/g, "\n").split("\n");
   while (findLines.length > 0 && findLines[findLines.length - 1]!.trim() === "" && oldText.endsWith("\n")) findLines.pop();
   if (findLines.length === 0 || findLines.every((l) => l.trim() === "")) return null;
+  const findTrimmed = findLines.map((line) => line.trim());
   const matches: Array<{ at: number; len: number }> = [];
   // 1. Line-trimmed block match (indent drift, line-number prefix copy errors).
   for (let i = 0; i <= bodyLines.length - findLines.length; i++) {
     let ok = true;
     for (let j = 0; j < findLines.length; j++) {
-      if (bodyLines[i + j]!.trim() !== findLines[j]!.trim()) {
+      if (bodyTrimmed[i + j]! !== findTrimmed[j]!) {
         ok = false;
         break;
       }
     }
     if (!ok) continue;
-    let at = 0;
-    for (let k = 0; k < i; k++) at += bodyLines[k]!.length + 1;
-    let len = 0;
-    for (let k = 0; k < findLines.length; k++) {
-      len += bodyLines[i + k]!.length;
-      if (k < findLines.length - 1) len += 1;
-    }
+    const at = starts[i]!;
+    const last = i + findLines.length - 1;
+    const len = starts[last]! + rawLines[last]!.length - at;
     matches.push({ at, len });
     if (matches.length > 1) return { ambiguous: true };
   }
@@ -2463,20 +2469,6 @@ function findFuzzyEditSpan(body: string, oldText: string): { at: number; len: nu
     const m = matches[0]!;
     if (m.len > Math.max(64, oldText.length * 4)) return null;
     return m;
-  }
-  if (matches.length > 1) return { ambiguous: true };
-  // 2. Whitespace-normalized single-span fallback for short snippets.
-  if (oldText.length <= 640) {
-    const normWs = (s: string): string => s.replace(/\s+/g, " ").trim();
-    const target = normWs(oldText);
-    if (target.length >= 8) {
-      const bodyNorm = normWs(body);
-      const hit = bodyNorm.indexOf(target);
-      if (hit >= 0 && bodyNorm.indexOf(target, hit + 1) < 0) {
-        // Map back approximately: refuse unless the span is proportionate.
-        return null;
-      }
-    }
   }
   return null;
 }
@@ -2530,7 +2522,6 @@ export function editProjectFile(
       if (count > 1) return { content: editMissDiagnostic(body, old), isError: true };
       idx = at + old.length;
     }
-    if (count > 1) return { content: editMissDiagnostic(body, old), isError: true };
     if (count === 0) {
       const fuzzy = findFuzzyEditSpan(body, old);
       if (fuzzy && !("ambiguous" in fuzzy)) {

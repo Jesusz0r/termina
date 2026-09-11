@@ -140,6 +140,8 @@ export class Explorer {
   private filterTimer: ReturnType<typeof setTimeout> | null = null;
   /** Fences a superseded search: a slow reply never paints over a newer query. */
   private filterSeq = 0;
+  /** Truncation note for the active filter ("50+ matches …"); null when complete. */
+  private filterTruncatedNote: string | null = null;
   /** Type-ahead buffer and its reset timer (keyboard name search). */
   private typeBuffer = "";
   private typeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -474,6 +476,7 @@ export class Explorer {
     this.changedDirRel = new Set<string>();
     // The filter is project-relative too; clear it rather than carry matches over.
     this.filterVisible = null;
+    this.filterTruncatedNote = null;
     this.filterSeq++;
     if (this.filterTimer) {
       clearTimeout(this.filterTimer);
@@ -576,6 +579,7 @@ export class Explorer {
     const seq = ++this.filterSeq;
     if (!trimmed) {
       this.filterVisible = null;
+      this.filterTruncatedNote = null;
       this.applyFilter();
       return;
     }
@@ -587,9 +591,11 @@ export class Explorer {
 
   private async runFilter(query: string, seq: number): Promise<void> {
     let matches: string[] = [];
+    let truncatedNote: string | null = null;
     try {
-      const res = await window.termina.searchFiles(query);
+      const res = await window.termina.searchFiles(query, "filter");
       matches = res.entries.map((entry) => entry.relPath);
+      if (res.truncated) truncatedNote = `${matches.length}+ matches (refine to narrow)`;
     } catch {
       /* A failed search leaves the tree unfiltered rather than empty. */
       return;
@@ -599,6 +605,7 @@ export class Explorer {
     // Always a set: an empty one means "this query matched nothing", which is an
     // active filter showing no rows, not an unfiltered tree.
     this.filterVisible = filterVisibleSet(matches);
+    this.filterTruncatedNote = truncatedNote;
     await this.expandToMatches(matches);
     if (seq !== this.filterSeq) return;
     this.applyFilter();
@@ -646,7 +653,13 @@ export class Explorer {
     }
     this.treeEl.classList.toggle("filtered", visible !== null);
     // Flag a live query that matched nothing, so an empty tree is explained.
-    if (this.filterInput) this.filterInput.classList.toggle("no-matches", visible !== null && visible.size === 0);
+    // A truncated query keeps its count in the input's title instead.
+    if (this.filterInput) {
+      this.filterInput.classList.toggle("no-matches", visible !== null && visible.size === 0);
+      const note = visible !== null ? this.filterTruncatedNote : null;
+      this.filterInput.classList.toggle("truncated", note !== null);
+      this.filterInput.title = note ?? "";
+    }
   }
 
   // ------------------------------------------------------------- rendering --

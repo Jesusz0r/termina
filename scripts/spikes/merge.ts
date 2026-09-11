@@ -14,6 +14,10 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { SnapshotStore, boundPromotionOpenDirectory, gitHead, gitObjectFormat, gitTopLevel, gitCommonDir, type SourceState } from "../../electron/worldline-git.js";
 
+// This spike drives core pause hooks; they stay gated on TERMINA_CORE_TEST so
+// production requests can never pause an op or write hook markers.
+process.env.TERMINA_CORE_TEST ??= "1";
+
 export default async function run(log: (msg: string) => void) {
   const results: Array<{ name: string; ok: boolean; detail: string }> = [];
   const check = (name: string, ok: boolean, detail = "") => {

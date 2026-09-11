@@ -14,6 +14,10 @@ import { join } from "node:path";
 import { SnapshotStore, type SnapshotStoreLifecycle } from "../../electron/worldline-git.js";
 import { coreClient } from "../../electron/worldline-git/core-process.js";
 
+// This spike drives core pause hooks; they stay gated on TERMINA_CORE_TEST so
+// production requests can never pause an op or write hook markers.
+process.env.TERMINA_CORE_TEST ??= "1";
+
 type Lifecycle = SnapshotStoreLifecycle;
 
 export default async function run(log: (msg: string) => void) {

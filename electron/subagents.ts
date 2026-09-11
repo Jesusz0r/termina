@@ -13,6 +13,7 @@
 
 import { spawn as spawnProcess, type ChildProcess } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { coreSessionFile, parseSessionBundlePath, sessionBundleExists } from "../agent-core/session.js";
@@ -393,22 +394,6 @@ export class SubagentHost {
         }
       }
     }
-    // One continuation at a time: two live children appending to the same
-    // replayed bundle would interleave its session file.
-    if (task.resumeRunId) {
-      const rival = [...this.runs.values()].find(
-        (other) => other.parentTerminalId === sourceTerminalId && other.task.resumeRunId === task.resumeRunId,
-      );
-      if (rival) {
-        await this.finishFailed(
-          sourceTerminalId,
-          runId,
-          task,
-          `${task.resumeRunId} is already being continued by ${rival.runId}`,
-        );
-        return;
-      }
-    }
     // Dispatch interplay (unified claims): a live dispatch worker on an
     // overlapping path fails the spawn before any child exists. Both sides
     // anchor at the dispatch root so subdir terminals key identically.
@@ -474,6 +459,25 @@ export class SubagentHost {
       sessionFile: null,
       touched: new Set<string>(),
     };
+    // Both admission checks sit immediately before insert with no await
+    // between: concurrent spawns cannot slip past the same guard. A duplicate
+    // delivery of this run is redundant (the first owns it); a second live
+    // continuation would interleave the replayed bundle.
+    if (this.runs.has(key)) return;
+    if (task.resumeRunId) {
+      const rival = [...this.runs.values()].find(
+        (other) => other.parentTerminalId === sourceTerminalId && other.task.resumeRunId === task.resumeRunId,
+      );
+      if (rival) {
+        await this.finishFailed(
+          sourceTerminalId,
+          runId,
+          task,
+          `${task.resumeRunId} is already being continued by ${rival.runId}`,
+        );
+        return;
+      }
+    }
     this.runs.set(key, run);
     await this.startAttempt(run);
   }
@@ -708,7 +712,9 @@ export class SubagentHost {
         const bundleDir = parseSessionBundlePath(path)?.bundleDir;
         if (!bundleDir) continue;
         try {
-          rmSync(bundleDir, { recursive: true, force: true });
+          // Async: bundle trees are unbounded, and a recursive delete must
+          // not stall the main loop from the settle path.
+          await rm(bundleDir, { recursive: true, force: true });
         } catch {
           /* Orphaned bundles are host evidence; a later eviction retries. */
         }

@@ -133,4 +133,34 @@ describe("Electron Session Fork Worker & Multi-Process Isolation", () => {
     const replayed = await replaySessionBundle(destination);
     expect(replayed.ok && replayed.messages.length === recordCount).toBe(true);
   });
+
+  it("builds export patches off the main thread", async () => {
+    const lines = (n: number, tag: string): string =>
+      Array.from({ length: n }, (_, i) => `${tag} line ${i}`).join("\n") + "\n";
+    const files = Array.from({ length: 30 }, (_, i) => {
+      const before = lines(1200, `f${i}`);
+      return { relPath: `file-${i}.ts`, before, after: before.replace(`f${i} line 600`, `f${i} line 600 CHANGED`) };
+    });
+    let timerTicks = 0;
+    const heartbeat = setInterval(() => {
+      timerTicks += 1;
+    }, 1);
+    const result = await client.exportPatch({ files });
+    clearInterval(heartbeat);
+
+    expect(result.ok).toBe(true);
+    expect(result.patch.match(/diff --git/g)?.length).toBe(30);
+    expect(result.patch).toContain("CHANGED");
+    expect(timerTicks).toBeGreaterThanOrEqual(2);
+  });
+
+  it("bounds export-patch input by count and shape", async () => {
+    const files: any[] = Array.from({ length: 205 }, (_, i) => ({ relPath: `f-${i}.ts`, before: null, after: "x\n" }));
+    files.push({ relPath: 42, before: null, after: "x\n" }, null, "nope");
+    const result = await client.exportPatch({ files });
+    expect(result.ok).toBe(true);
+    expect(result.patch.match(/diff --git/g)?.length).toBe(200);
+
+    expect((await client.exportPatch({ files: "nope" as any })).ok).toBe(true);
+  });
 });

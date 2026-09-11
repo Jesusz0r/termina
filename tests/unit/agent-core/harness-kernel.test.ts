@@ -394,6 +394,28 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     writeFileSync(join(root, "dollar.ts"), "cost $1 and done\n");
     const dollar = editProjectFile(root, "dollar.ts", "cost $1", "cost $2");
     check("edit treats $ in new_text as literal", dollar.isError === false && readFileSync(join(root, "dollar.ts"), "utf8") === "cost $2 and done\n");
+    writeFileSync(join(root, "lf-fuzzy.ts"), "alpha\n    beta\nGamma\n");
+    const lfFuzzy = editProjectFile(root, "lf-fuzzy.ts", "alpha\n  beta\nGamma", "REPLACED");
+    check(
+      "edit fuzzy tolerates indent drift on LF files",
+      lfFuzzy.isError === false &&
+        lfFuzzy.content.includes("whitespace/indent-tolerant") &&
+        readFileSync(join(root, "lf-fuzzy.ts"), "utf8") === "REPLACED\n",
+    );
+    writeFileSync(join(root, "crlf-fuzzy.txt"), "line one\r\n    indented body\r\nline three\r\n");
+    const crlfFuzzy = editProjectFile(root, "crlf-fuzzy.txt", "line one\n  indented body\nline three", "REPLACED");
+    check(
+      "edit fuzzy on CRLF replaces the exact span without shifting",
+      crlfFuzzy.isError === false &&
+        crlfFuzzy.content.includes("whitespace/indent-tolerant") &&
+        readFileSync(join(root, "crlf-fuzzy.txt"), "utf8") === "REPLACED\n",
+    );
+    writeFileSync(join(root, "mixed-fuzzy.txt"), "a\r\nb\nc\r\n");
+    const mixedFuzzy = editProjectFile(root, "mixed-fuzzy.txt", "a\nb\nc", "REPLACED");
+    check(
+      "edit fuzzy on mixed line endings replaces the exact span",
+      mixedFuzzy.isError === false && readFileSync(join(root, "mixed-fuzzy.txt"), "utf8") === "REPLACED\n",
+    );
     const editStart = sidecarStartFor({
       name: "edit",
       id: "e1",

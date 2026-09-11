@@ -117,6 +117,25 @@ describe("export markdown", () => {
     expect(md).toContain("5 more files listed only");
     expect(md).toContain("Stale: the candidate ran again");
   });
+
+  it("escapes markdown-breaking paths and reasons", () => {
+    const md = buildExportMarkdown({
+      comparisonId: "cmp-1",
+      label: "A",
+      role: "reference",
+      model: "m",
+      baseCommit: "abc",
+      exportedAt: "now",
+      files: [{ relPath: "we`ird\nname.ts", status: "modified" }],
+      evidence: [{ kind: "verify", status: "fail", reason: "a|b\nnext" }],
+      profiles: [],
+    });
+    // No raw backtick/newline inside the code span, no raw pipe/newline in
+    // the table row: each record stays on exactly one line.
+    expect(md).toContain("`we'ird name.ts` (modified)");
+    expect(md).toContain("| verify | fail | a\\|b next |");
+    expect(md).not.toContain("we`ird");
+  });
 });
 
 describe("export wiring", () => {

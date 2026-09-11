@@ -31,7 +31,7 @@ import {
   type BoundPromotionExpectedLeaf,
   type PromotionFsIdentity,
 } from "../worldline-git.js";
-import { buildExportMarkdown, buildUnifiedPatch, MAX_EXPORT_BUNDLES, MAX_EXPORT_FILES, type ExportPatchFile } from "./export.js";
+import { buildExportMarkdown, MAX_EXPORT_BUNDLES, MAX_EXPORT_FILES, type ExportPatchFile } from "./export.js";
 import { EvidenceEngine, dependencyDiff, mineChangeReason, rankProfiles, type EvidenceDeps } from "../evidence.js";
 import type {
   CoreSessionForkOpts,
@@ -181,6 +181,8 @@ export interface WorldlineDeps {
   /** Read-only load paths for the sandboxed core (agent-core copy + electron + node). */
   appReadPaths(): string[];
   forkCoreSession(opts: CoreSessionForkOpts, callOptions?: SessionForkCallOptions): Promise<CoreSessionForkResult>;
+  /** Build an export patch off the main thread (pure CPU over gathered contents). */
+  buildExportPatch(files: ExportPatchFile[]): Promise<string>;
   /** Discard a proven durable core session bundle through the retention owner. */
   discardCoreSession(runId: string): Promise<{ ok: boolean; error?: string }>;
   createCandidate(opts: {
@@ -1167,13 +1169,29 @@ export class WorldlineManager {
       truncatedFiles: changed.length > capped.length ? changed.length - capped.length : 0,
       evidenceStale: evidence?.stale === true,
     });
-    const patch = buildUnifiedPatch(patchFiles);
-    const dir = join(this.deps.worldsRoot, "exports", `${comparisonId}-${label}`);
+    let patch: string;
+    try {
+      patch = await this.deps.buildExportPatch(patchFiles);
+    } catch (err) {
+      return { ok: false, error: `could not build the export patch: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    // The gather + patch window is long: refuse to write a bundle for a
+    // candidate that was discarded while it ran.
+    const fresh = this.comparisons.get(comparisonId)?.candidates.get(label);
+    if (!fresh || fresh.state === "discarded" || fresh.state === "error") {
+      return { ok: false, error: "the candidate was discarded during export" };
+    }
+    const exportsRoot = join(this.deps.worldsRoot, "exports");
+    const dir = join(exportsRoot, `${comparisonId}-${label}`);
     try {
       await mkdir(dir, { recursive: true, mode: 0o700 });
-      await writeFile(join(dir, "candidate.patch"), patch, { mode: 0o600 });
-      await writeFile(join(dir, "pr-body.md"), bundle, { mode: 0o600 });
-      await writeFile(join(dir, "metadata.json"), JSON.stringify({
+      // Confine the bundle inside the app-owned exports root even if a
+      // same-user actor planted a symlink along the path.
+      const [canonicalRoot, canonicalDir] = await Promise.all([realpath(exportsRoot), realpath(dir)]);
+      if (!isInside(canonicalRoot, canonicalDir)) return { ok: false, error: "export bundle escaped its directory" };
+      await writeFile(join(canonicalDir, "candidate.patch"), patch, { mode: 0o600 });
+      await writeFile(join(canonicalDir, "pr-body.md"), bundle, { mode: 0o600 });
+      await writeFile(join(canonicalDir, "metadata.json"), JSON.stringify({
         comparisonId,
         label,
         role: cand.role,
@@ -1183,7 +1201,7 @@ export class WorldlineManager {
         files: changed.length,
         truncatedFiles: changed.length > capped.length ? changed.length - capped.length : 0,
       }, null, 2), { mode: 0o600 });
-      await this.pruneExportBundles(join(this.deps.worldsRoot, "exports"), dir);
+      await this.pruneExportBundles(canonicalRoot, canonicalDir);
     } catch (err) {
       return { ok: false, error: `could not write the export bundle: ${err instanceof Error ? err.message : String(err)}` };
     }
@@ -1197,10 +1215,13 @@ export class WorldlineManager {
       if (names.length <= MAX_EXPORT_BUNDLES) return;
       const stamped: Array<{ dir: string; mtimeMs: number }> = [];
       for (const name of names) {
+        // Only manager-generated bundle names are ever removed.
+        if (!/^cmp-[0-9]+-[AB]$/.test(name)) continue;
         const full = join(exportsRoot, name);
         if (full === keepDir) continue;
         try {
-          const info = await stat(full);
+          // lstat, not stat: a symlink never qualifies as a directory here.
+          const info = await lstatPath(full);
           if (!info.isDirectory()) continue;
           stamped.push({ dir: full, mtimeMs: info.mtimeMs });
         } catch {

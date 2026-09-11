@@ -180,6 +180,16 @@ export interface ExportBundleInput {
   evidenceStale?: boolean;
 }
 
+/** Code spans cannot contain backticks or newlines; keep the path readable. */
+function markdownPath(relPath: string): string {
+  return relPath.replace(/`/g, "'").replace(/[\n\r]+/g, " ");
+}
+
+/** Table cells cannot contain pipes or newlines. */
+function markdownCell(text: string): string {
+  return text.replace(/\|/g, "\\|").replace(/[\n\r]+/g, " ");
+}
+
 /** PR-body markdown: what changed, what the evidence says. */
 export function buildExportMarkdown(input: ExportBundleInput): string {
   const lines = [
@@ -194,7 +204,7 @@ export function buildExportMarkdown(input: ExportBundleInput): string {
     ``,
   ];
   for (const file of input.files) {
-    lines.push(`- \`${file.relPath}\` (${file.status})`);
+    lines.push(`- \`${markdownPath(file.relPath)}\` (${file.status})`);
   }
   if ((input.truncatedFiles ?? 0) > 0) {
     lines.push(`- …and ${input.truncatedFiles} more files listed only (patch file cap).`);
@@ -209,7 +219,7 @@ export function buildExportMarkdown(input: ExportBundleInput): string {
     lines.push(`| Kind | Status | Reason |`);
     lines.push(`| --- | --- | --- |`);
     for (const record of input.evidence) {
-      lines.push(`| ${record.kind} | ${record.status} | ${record.reason ?? "—"} |`);
+      lines.push(`| ${record.kind} | ${record.status} | ${record.reason === null ? "—" : markdownCell(record.reason)} |`);
     }
   }
   if (input.profiles.length > 0) {

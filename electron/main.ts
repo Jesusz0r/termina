@@ -65,8 +65,8 @@ import {
 import { AppPreferencesStore } from "./preferences.js";
 import { SubagentHost } from "./subagents.js";
 import { anchorClaimPath, isSubagentManagedFile } from "../agent-core/subagents.js";
-import { listSessionJsonl, mergeSessionFiles } from "./session-search.js";
-import { ProjectPathIndex, listProjectSnapshot, searchProjectFiles } from "./quick-open.js";
+import { MAX_SESSION_SEARCH_QUERY, listSessionJsonl, mergeSessionFiles } from "./session-search.js";
+import { FileSearchGenerations, ProjectPathIndex, listProjectSnapshot, searchProjectFiles } from "./quick-open.js";
 import { appendPendingImages, MAX_PENDING_IMAGES, pendingImageState } from "../agent-core/host.js";
 import {
   coreSessionFile as bundleSessionFile,
@@ -748,9 +748,9 @@ class PiEditorApp {
   /** Renderer flush requests awaiting their report. */
   private flushWaiters = new Map<string, { workspaceId: string; resolve: (r: { ok: boolean; failed: string[] }) => void; timer: ReturnType<typeof setTimeout> }>();
   private flushSeq = 0;
-  /** Latest file:search generation; older walks abort so fast typing
-   *  never stacks full-tree walks. */
-  private fileSearchSeq = 0;
+  /** Per-caller file:search generations; older same-caller walks abort so fast
+   *  typing never stacks full-tree walks. */
+  private fileSearchSeq = new FileSearchGenerations();
   /** Cached project file list for Quick Open; patched by watcher events. */
   private readonly pathIndex = new ProjectPathIndex();
   private userEditsWriteTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1842,6 +1842,11 @@ class PiEditorApp {
         return [...new Set(out)];
       },
       forkCoreSession: (opts, callOptions) => this.sessionFork.forkCore(opts, callOptions),
+      buildExportPatch: (files) =>
+        this.sessionFork.exportPatch({ files }).then((result) => {
+          if (!result.ok) throw new Error(result.error);
+          return result.patch;
+        }),
       discardCoreSession: (runId) => this.sessionRetention.discard(runId),
       createCandidate: (opts) => this.createCandidate(opts),
       terminateCandidate: (terminalId) => this.terminateCandidate(terminalId),
@@ -3841,10 +3846,12 @@ class PiEditorApp {
    * so the main process stays responsive. Bounded to the 50 newest sessions
    * and 50 total hits. History search never spawns an agent.
    */
-  private async searchSessions(query: string): Promise<SessionHit[]> {
+  private async searchSessions(rawQuery: string): Promise<SessionHit[]> {
     const project = this.project();
     const cwd = project?.cwd ?? null;
-    if (!project || !cwd || query.trim().length < 2) return [];
+    // Bound the IPC/worker payload up front; the worker re-bounds defensively.
+    const query = rawQuery.trim().slice(0, MAX_SESSION_SEARCH_QUERY);
+    if (!project || !cwd || query.length < 2) return [];
     const projectCwd = await this.canonicalPath(cwd);
     const key = this.sanitizeSessionDir(projectCwd);
     const piDir = join(homedir(), ".pi", "agent", "sessions", key);
@@ -3885,18 +3892,20 @@ class PiEditorApp {
   }
 
   /**
-   * Quick Open file search over the active project tree. Per-query walk
-   * keeps IPC payloads small; caps in quick-open.ts bound main-thread work.
+   * File search over the active project tree (Quick Open, explorer filter).
+   * Scores the cached index; caps in quick-open.ts bound main-thread work and
+   * the IPC payload. Each caller has its own cancellation lane.
    */
   private async searchProjectFiles(
     query: string,
+    source: unknown,
   ): Promise<{ entries: Array<{ relPath: string }>; truncated?: boolean }> {
     const project = this.project();
     const cwd = project?.cwd ?? null;
     if (!project || !cwd) return { entries: [] };
     const root = await this.canonicalPath(cwd);
-    const seq = ++this.fileSearchSeq;
-    const stop = () => this.disposed || seq !== this.fileSearchSeq;
+    const { source: lane, seq } = this.fileSearchSeq.next(source);
+    const stop = () => this.disposed || !this.fileSearchSeq.current(lane, seq);
     // Score the cached inventory when there is one: only the first search of a
     // project pays for the walk, and a superseded query still returns nothing
     // rather than a partial result.
@@ -7764,7 +7773,7 @@ class PiEditorApp {
 
     // ---- Session Search ----
     ipcMain.handle("session:search", (_e, query: unknown) => this.searchSessions(typeof query === "string" ? query : ""));
-    ipcMain.handle("file:search", (_e, query: unknown) => this.searchProjectFiles(typeof query === "string" ? query : ""));
+    ipcMain.handle("file:search", (_e, query: unknown, source: unknown) => this.searchProjectFiles(typeof query === "string" ? query : "", source));
 
     // ---- Plan Board ----
     ipcMain.handle("plan:get", (_e, terminalId: string) => this.terminals.get(terminalId)?.plan ?? []);
