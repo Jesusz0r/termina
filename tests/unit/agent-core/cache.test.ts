@@ -114,6 +114,11 @@ describe("Agent Core Cache", () => {
       expect(cacheSessionHeaders(xaiChatIdentity)["x-grok-conv-id"]).toBe(xaiChatIdentity.key);
       expect(Object.keys(cacheSessionHeaders({ ...identity, provider: "xai", protocol: "openai-completions", route: "api.x.ai" })).length).toBe(0);
       expect(Object.keys(cacheSessionHeaders({ ...identity, provider: "openai" })).length).toBe(0);
+
+      const codexIdentity = cacheIdentityFor({ ...base, provider: "openai-codex", protocol: "openai-codex-responses", route: "chatgpt.com/backend-api" })!;
+      expect(cacheSessionHeaders(codexIdentity)["session-id"]).toBe(codexIdentity.key);
+      expect(cacheSessionHeaders(codexIdentity)["x-client-request-id"]).toBe(codexIdentity.key);
+      expect(Object.keys(cacheSessionHeaders({ ...codexIdentity, provider: "openai" })).length).toBe(0);
     });
   });
 

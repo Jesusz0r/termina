@@ -74,8 +74,8 @@ The fallback context window is 1,000,000 tokens for Anthropic and Google,
 200,000. A live model catalog can provide another value. There is no
 1,000,000-token run cap. Context reclamation is driven by the window's
 high-water mark, not a fixed token total. Separately, a logical run stops
-requesting continuation at 200 model turns or before a batch would exceed
-1,000 client tool calls. These safety fuses survive compaction; a natural
+requesting continuation at 500 model turns or before a batch would exceed
+2,500 client tool calls. These safety fuses survive compaction; a natural
 final answer at the turn limit is still accepted.
 
 ## P2 — Separate reclamation from summarization
@@ -186,9 +186,12 @@ Rules:
   baseline (zero reported cache reads/writes), then replayed the same request
   with only `comparison_response_id` added. Codex returned HTTP 400:
   `Unsupported parameter: prompt_cache_options`; no comparison was available.
-  This does **not** establish that overlays cause misses or that caching is
-  disabled globally. Keep overlays transient and the Codex cache policy
-  unchanged; public Responses API features are not proof of backend support.
+  Those synthetic probes did not isolate overlay position. Live-session
+  evidence (2026-09-11, per-item wire hashes) later established that a
+  *trailing* working-set overlay breaks prefix extension: history grows
+  before it, so every tool turn diverges at the first history item and
+  cache reads pin at system+tools size. The overlay is therefore
+  prepended, keeping persisted history append-only on the wire.
   Sources: [prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)
   and [diagnostics](https://developers.openai.com/api/docs/guides/prompt-caching/diagnostics).
 - Traces are JSON files, not sidecar events. They record usage, estimated

@@ -7,7 +7,7 @@ import * as session from "../../../agent-core/session.ts";
 
 let projectRequest: any;
 let projectPersistedMessages: any;
-let appendRequestOverlay: any;
+let prependRequestOverlay: any;
 let buildRequestOverlay: any;
 let userPromptContent: any;
 
@@ -62,7 +62,7 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
     const mod = await import("../../../agent-core/request-projection.ts");
     projectRequest = mod.projectRequest;
     projectPersistedMessages = mod.projectPersistedMessages;
-    appendRequestOverlay = mod.appendRequestOverlay;
+    prependRequestOverlay = mod.prependRequestOverlay;
     buildRequestOverlay = mod.buildRequestOverlay;
     userPromptContent = mod.userPromptContent;
   });
@@ -109,7 +109,7 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
     expect(first.overlay).toEqual(second.overlay);
   });
 
-  it("stamps persisted projection before appending overlay", () => {
+  it("stamps persisted projection before prepending overlay", () => {
     const overlay = overlayFor(baseHistory);
     expect(overlay).toBeTruthy();
     const persisted = projectPersistedMessages({ messages: baseHistory });
@@ -120,10 +120,10 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
         ? entry.content
         : entry.content.map((block: any) => ({ ...block, cache_control: { type: "ephemeral" } })),
     }));
-    const assembled = appendRequestOverlay(stamped, overlay);
+    const assembled = prependRequestOverlay(stamped, overlay);
     expect(assembled.length).toBe(stamped.length + 1);
-    expect(assembled.at(-1)?.content).toBe(overlay.text);
-    expect(JSON.stringify(assembled.at(-1))).not.toContain("cache_control");
+    expect(assembled.at(0)?.content).toBe(overlay.text);
+    expect(JSON.stringify(assembled.at(0))).not.toContain("cache_control");
   });
 
   it("enforces exact metadata on caller-supplied overlays", () => {
@@ -160,7 +160,7 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
     expect(overlayFor([], " \n\t ")).toBeNull();
   });
 
-  it("places overlay after complete tool-call/tool-result sequence", () => {
+  it("places overlay before persisted history so tool sequences stay append-only", () => {
     const overlay = overlayFor(baseHistory);
     expect(overlay).toBeTruthy();
     const request = requestMessages(projection({ messages: baseHistory, overlay }));
@@ -170,7 +170,8 @@ describe("Agent Core Request Projection & Volatile Overlays", () => {
     const overlayAt = indexText(serialized, overlay.text);
     expect(callAt).toBeGreaterThanOrEqual(0);
     expect(resultAt).toBeGreaterThan(callAt);
-    expect(overlayAt).toBeGreaterThan(resultAt);
+    expect(overlayAt).toBeGreaterThanOrEqual(0);
+    expect(overlayAt).toBeLessThan(callAt);
   });
 
   it("rejects persisted context blocks", () => {

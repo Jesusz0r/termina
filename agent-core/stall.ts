@@ -1,9 +1,13 @@
 /**
  * Loop-guard trackers (extracted from agent-core/main.ts).
  *
- * Single owner for stall detection: exact identical-turn fingerprints plus
- * normalized same-target error/empty failure keys. Pure functions, no process
- * state; the run loop in main.ts owns the live tracker instances.
+ * Single owner for stall detection: opencode-parity exact repeats (same tool
+ * + same input, three turns) plus normalized same-target error/empty failure
+ * keys. Pure functions, no process state; the run loop in main.ts owns the
+ * live tracker instances. Recovery is autonomous (model-visible guidance once,
+ * then stop): the core loop has no human permission gate, so there is no
+ * permission.ask equivalent here. Pi parity: truncated responses fail their
+ * tool calls via isTruncatedStopReason in main.ts, not here.
  *
  * Also owns the empty-search sentinel so producers (grep/glob bodies),
  * display, and the failure tracker share one source without a main↔stall
@@ -18,8 +22,8 @@ export const STALL_TURNS = 3;
 export const STALL_FAILURE_TURNS = 3;
 
 /** Final run fuses: compaction must not make a malfunctioning run unbounded. */
-export const MAX_RUN_MODEL_TURNS = 200;
-export const MAX_RUN_TOOL_CALLS = 1_000;
+export const MAX_RUN_MODEL_TURNS = 500;
+export const MAX_RUN_TOOL_CALLS = 2_500;
 
 /** Called only for responses requesting continuation, not a natural final answer. */
 export function toolRunLimitReason(modelTurns: number, requestedToolCalls: number): string | null {
@@ -49,6 +53,20 @@ export function emptyStallTracker(): StallTracker {
 
 type ToolTurnCall = { name: string; input: unknown; result: unknown; isError?: boolean };
 
+/**
+ * Fingerprint tool calls by identity (opencode doom-loop parity: same tool +
+ * same input JSON, completed calls only). Results are deliberately excluded:
+ * repeating the same action is not progress even when output text varies.
+ * Null for a text-only turn: different behavior, not a repetition.
+ */
+export function stallTurnFingerprint(calls: readonly ToolTurnCall[]): string | null {
+  if (calls.length === 0) return null;
+  return hashCacheDiagnostic(calls.map((call) => ({
+    name: call.name,
+    input: call.input,
+  })));
+}
+
 function stallResultPayload(result: unknown): unknown {
   if (!result || typeof result !== "object" || Array.isArray(result)) return result;
   const block = result as Record<string, unknown>;
@@ -59,17 +77,17 @@ function stallResultPayload(result: unknown): unknown {
 }
 
 /**
- * Fingerprint calls and semantic results, excluding envelope call IDs. Null
- * for a text-only turn: different behavior, not a repetition.
+ * Observed single-call fingerprint for cycle detection: identity plus semantic
+ * result. New observations break cycles; merely re-reading unchanged text or
+ * re-emitting the same output does not.
  */
-export function stallTurnFingerprint(calls: readonly ToolTurnCall[]): string | null {
-  if (calls.length === 0) return null;
-  return hashCacheDiagnostic(calls.map((call) => ({
+function stallObservedFingerprint(call: ToolTurnCall): string {
+  return hashCacheDiagnostic({
     name: call.name,
     input: call.input,
     result: stallResultPayload(call.result),
     isError: call.isError === true,
-  })));
+  });
 }
 
 /** Fold one turn fingerprint into the tracker. Any change (or text-only turn) resets the count. */
@@ -183,7 +201,7 @@ export function emptyToolLoopTracker(): ToolLoopTracker {
 }
 
 function normalizedTurnFingerprint(calls: readonly ToolTurnCall[]): string {
-  return hashCacheDiagnostic(calls.map((call) => stallFailureKey(call) ?? stallTurnFingerprint([call])!).sort());
+  return hashCacheDiagnostic(calls.map((call) => stallFailureKey(call) ?? stallObservedFingerprint(call)).sort());
 }
 
 /** Find three repetitions of a short cycle, including reordered failure batches. */

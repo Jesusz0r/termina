@@ -17,7 +17,7 @@ function jsonLines(path: string): Row[] {
  * belongs to this fixture, including HOME, authentication, events and traces. */
 async function scenario(toolProgram: string, check: (result: {
   root: string; output: string; messages: Row[]; requests: Row[]; traces: Row[]; events: Row[];
-}) => void): Promise<void> {
+}) => void, timeoutMs = 40_000): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "termina-tool-loop-"));
   const project = join(root, "project");
   const home = join(root, "home");
@@ -77,7 +77,7 @@ async function scenario(toolProgram: string, check: (result: {
     }
   }, 10);
   let timedOut = false;
-  const timeout = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, 40_000);
+  const timeout = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, timeoutMs);
   try {
     const code = await closed;
     expect(timedOut, output).toBe(false);
@@ -200,8 +200,8 @@ describe("real tool loop regressions", () => {
       expect(result.traces.some((row) => row.status === "tool-limit")).toBe(true);
       expect(toolResults(result.messages).at(-1)?.is_error).toBe(true);
       expectPaired(result.messages);
-    });
-  });
+    }, 150_000);
+  }, 180_000);
 
   it("rejects an entire over-budget tool batch before any side effects", async () => {
     await scenario(`return Array.from({ length: ${MAX_RUN_TOOL_CALLS + 1} }, (_, i) => ({ name: "write_file", input: { path: "must-not-exist-" + i, content: "unsafe" } }));`, (result) => {

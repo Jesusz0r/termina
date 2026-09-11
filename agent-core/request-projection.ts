@@ -245,7 +245,7 @@ function normalizeOverlay(
 
 /**
  * Project only durable session content.  Main can stamp this returned array
- * for a provider-specific reusable prefix before calling appendRequestOverlay
+ * for a provider-specific reusable prefix before calling prependRequestOverlay
  * with the already-snapshotted overlay.
  */
 export function projectPersistedMessages(
@@ -256,20 +256,23 @@ export function projectPersistedMessages(
   return { ok: true, messages: projectMessages(opts.messages, opts.imageRoots ?? []) };
 }
 
-/** Append a previously built overlay after provider-specific prefix stamping. */
-export function appendRequestOverlay(
+/** Prepend a previously built overlay before provider-specific prefix stamping.
+ * The overlay goes FIRST so persisted history stays append-only on the wire:
+ * a trailing overlay would shift position every time history grows, breaking
+ * the relay's reusable prefix at the first history item on every tool turn. */
+export function prependRequestOverlay(
   persistedMessages: readonly RequestMessage[],
   overlay: RequestOverlay | null | undefined,
 ): RequestMessage[] {
   const messages = persistedMessages.slice();
   if (!overlay || typeof overlay.text !== "string" || overlay.text.length === 0) return messages;
-  messages.push({ role: "user", content: overlay.text });
+  messages.unshift({ role: "user", content: overlay.text });
   return messages;
 }
 
 /**
- * Project persisted messages into a request and append one immutable overlay
- * message after the complete history.  The input messages and overlay are
+ * Project persisted messages into a request and prepend one immutable overlay
+ * message before the complete history.  The input messages and overlay are
  * never mutated, so retries can reuse this exact request projection.
  */
 export function projectRequest(opts: ProjectRequestOptions): ProjectRequestResult {
@@ -299,14 +302,14 @@ export function projectRequest(opts: ProjectRequestOptions): ProjectRequestResul
       overlayIndex: null,
     };
   }
-  const messages = appendRequestOverlay(persistedMessages, overlay);
+  const messages = prependRequestOverlay(persistedMessages, overlay);
   return {
     ok: true,
     messages,
     persistedMessages,
     overlay,
-    overlayMessage: messages[messages.length - 1] ?? null,
-    overlayIndex: messages.length - 1,
+    overlayMessage: messages[0] ?? null,
+    overlayIndex: 0,
   };
 }
 

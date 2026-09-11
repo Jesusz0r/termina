@@ -120,7 +120,7 @@ import {
   type RateSnapshotInput,
 } from "./rates.ts";
 import {
-  appendRequestOverlay,
+  prependRequestOverlay,
   buildRequestOverlay,
   projectRequest,
   type RequestMessage,
@@ -3624,12 +3624,12 @@ function cacheDiagnosticsForRequest(
   const modelSettings = { ...identity, request: settings };
   const policyDetails = cachePolicyFromBody(body, identity, priorPolicy, fallbackReason);
   // `toGoogleContents` coalesces adjacent user turns into one contents item,
-  // so its last array element is not a reliable overlay boundary. Leave that
+  // so its first array element is not a reliable overlay boundary. Leave that
   // reusable-prefix hash unknown rather than claiming a prefix we cannot
   // reconstruct byte-for-byte after serialization.
   const persistedMessages = identity.protocol === "google-generate" && overlay
     ? undefined
-    : Array.isArray(messages) && overlay ? messages.slice(0, -1) : messages;
+    : Array.isArray(messages) && overlay ? messages.slice(1) : messages;
   // A session seed is useful for deriving provider headers, but it is not a
   // provider-facing cache key on every route (for example direct Anthropic or
   // Gemini). Only report the identity hash when this request actually emits
@@ -6460,7 +6460,7 @@ async function callModel(
     proto === "anthropic-messages" && anthropicCacheSupported && prefixMarkerCount < 4
       ? stampHistoryCache(persistedMessages)
       : persistedMessages;
-  const providerMessages = appendRequestOverlay(stampedMessages as RequestMessage[], overlay);
+  const providerMessages = prependRequestOverlay(stampedMessages as RequestMessage[], overlay);
   const kernelMessages = providerMessages.map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content as string | Array<Record<string, unknown>>,

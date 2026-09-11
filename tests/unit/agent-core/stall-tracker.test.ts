@@ -45,12 +45,12 @@ describe("stall detector", () => {
     expect(tracker.repeats).toBe(STALL_TURNS);
   });
 
-  it("resets when results change", () => {
+  it("counts the same tool+input as a repeat even when results change", () => {
     let tracker = trackStallTurn(emptyStallTracker(), stallTurnFingerprint([bashCall("git status -sb", "M migrate.ts")]));
     tracker = trackStallTurn(tracker, stallTurnFingerprint([bashCall("git status -sb", "M migrate.ts")]));
     expect(tracker.repeats).toBe(2);
     tracker = trackStallTurn(tracker, stallTurnFingerprint([bashCall("git status -sb", "clean")]));
-    expect(tracker.repeats).toBe(1);
+    expect(tracker.repeats).toBe(3);
   });
 
   it("resets on different tools or a text-only turn", () => {
@@ -61,7 +61,7 @@ describe("stall detector", () => {
     expect(tracker).toEqual({ fingerprint: null, repeats: 0 });
   });
 
-  it("ignores fresh result-envelope IDs without ignoring actual output IDs or errors", () => {
+  it("ignores result payloads and errors: exact-repeat is tool+input only", () => {
     const call = (id: string, content: unknown = "same") => ({
       ...bashCall("pwd", "same"),
       result: { type: "tool_result", tool_use_id: id, content },
@@ -69,8 +69,8 @@ describe("stall detector", () => {
     const first = call("call-1");
     const second = call("call-2");
     expect(stallTurnFingerprint([first])).toBe(stallTurnFingerprint([second]));
-    expect(stallTurnFingerprint([first])).not.toBe(stallTurnFingerprint([{ ...second, isError: true }]));
-    expect(stallTurnFingerprint([call("call-1", { tool_use_id: "data-1" })])).not.toBe(
+    expect(stallTurnFingerprint([first])).toBe(stallTurnFingerprint([{ ...second, isError: true }]));
+    expect(stallTurnFingerprint([call("call-1", { tool_use_id: "data-1" })])).toBe(
       stallTurnFingerprint([call("call-2", { tool_use_id: "data-2" })]),
     );
     expect(first.result.tool_use_id).toBe("call-1");

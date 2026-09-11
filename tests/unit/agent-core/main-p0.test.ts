@@ -92,7 +92,8 @@ describe("Agent Core Main P0 Invariants", () => {
       const second = core.projectMainRequest(messages, "<working-set>two</working-set>");
       assert.equal(first.persistedMessages.length, 1);
       assert.equal(first.messages.length, 2);
-      assert.equal(first.messages[0].content, "inspect");
+      assert.equal(first.messages[0].content, "<working-set>one</working-set>");
+      assert.equal(first.messages[1].content, "inspect");
       assert.notEqual(first.overlay?.hash, second.overlay?.hash);
       assert.equal(JSON.stringify(messages).includes("working-set"), false);
     });
