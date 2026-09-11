@@ -8,9 +8,10 @@
  */
 import * as monaco from "monaco-editor";
 import { cssFontFamily, pathBasename, type ProjectWorkspaceRef, type ThemeId } from "../shared/types";
+import { decideUnsavedClose, unsavedCloseMessage } from "../shared/unsaved-close";
 import { languageForPath } from "./editor-language";
 import { changedLinesInAfter } from "../shared/line-diff";
-import { copyText, toast } from "./components/modals";
+import { copyText, showUnsavedConfirm, toast } from "./components/modals";
 import { showContextMenu, closeContextMenu } from "./components/context-menu";
 import { THEME_TOKENS } from "./theme-tokens.gen";
 
@@ -535,7 +536,7 @@ export class EditorManager {
     close.textContent = "×";
     close.addEventListener("click", (e) => {
       e.stopPropagation();
-      this.closeTab(key);
+      void this.requestCloseTab(key);
     });
     dom.append(dirty, name, mine, wline, close);
     if (this.mineKeys.has(key)) dom.classList.add("mine");
@@ -554,7 +555,7 @@ export class EditorManager {
     dom.addEventListener("mousedown", (e) => {
       if (e.button === 1) {
         e.preventDefault();
-        this.closeTab(key);
+        void this.requestCloseTab(key);
       }
     });
     // Drag to reorder. The drop indicator is a class on the target tab;
@@ -631,6 +632,11 @@ export class EditorManager {
     this.editor.focus();
   }
 
+  /** User-initiated close: prompt when this tab has unsaved edits. */
+  requestCloseTab(key: string): Promise<boolean> {
+    return this.requestCloseKeys([key]);
+  }
+
   closeTab(key: string): void {
     const tab = this.tabs.get(key);
     if (!tab) return;
@@ -678,8 +684,14 @@ export class EditorManager {
    *  With `writerId` (the write-lease holder) the saves bypass the lease
    *  block — the flush IS the holder's operation. */
   async flushAll(writerId?: string): Promise<{ ok: boolean; failed: string[] }> {
+    return this.flushKeys([...this.userDirty], writerId);
+  }
+
+  /** Save the given dirty keys through the same file:save / flush-save path. */
+  async flushKeys(keys: string[], writerId?: string): Promise<{ ok: boolean; failed: string[] }> {
     const failed: string[] = [];
-    for (const key of [...this.userDirty]) {
+    for (const key of keys) {
+      if (!this.userDirty.has(key)) continue;
       const tab = this.tabs.get(key);
       if (!tab) continue;
       if (!tab.owner) {
@@ -705,6 +717,11 @@ export class EditorManager {
     return this.userDirty.size > 0;
   }
 
+  /** How many models have unsaved user edits. */
+  dirtyCount(): number {
+    return this.userDirty.size;
+  }
+
   /** Close a tab if it is open (the file was deleted on disk). */
   closeIfOpen(path: string): void {
     const resolved = this.resolveKey(path);
@@ -717,24 +734,61 @@ export class EditorManager {
   private dropTarget: { key: string; after: boolean } | null = null;
 
   closeOthers(key: string): void {
-    this.closeKeys(this.order.filter((k) => k !== key));
-    if (this.tabs.has(key)) this.activate(key);
+    void this.requestCloseKeys(this.order.filter((k) => k !== key)).then((ok) => {
+      if (ok && this.tabs.has(key)) this.activate(key);
+    });
   }
 
   closeToLeft(key: string): void {
     const at = this.order.indexOf(key);
     if (at === -1) return;
-    this.closeKeys(this.order.slice(0, at));
+    void this.requestCloseKeys(this.order.slice(0, at));
   }
 
   closeToRight(key: string): void {
     const at = this.order.indexOf(key);
     if (at === -1) return;
-    this.closeKeys(this.order.slice(at + 1));
+    void this.requestCloseKeys(this.order.slice(at + 1));
   }
 
   closeAllTabs(): void {
-    this.closeKeys([...this.order]);
+    void this.requestCloseKeys([...this.order]);
+  }
+
+  private closeConfirm: Promise<boolean> | null = null;
+
+  /** Prompt once for dirty keys, then close. Internal callers still use closeTab. */
+  private requestCloseKeys(keys: string[]): Promise<boolean> {
+    if (this.closeConfirm) return this.closeConfirm.then(() => false);
+    const promise = this.requestCloseKeysOnce(keys);
+    this.closeConfirm = promise;
+    void promise.finally(() => {
+      if (this.closeConfirm === promise) this.closeConfirm = null;
+    });
+    return promise;
+  }
+
+  private async requestCloseKeysOnce(keys: string[]): Promise<boolean> {
+    const unique = [...new Set(keys)].filter((k) => this.tabs.has(k));
+    if (unique.length === 0) return true;
+    const dirtyKeys = unique.filter((k) => this.userDirty.has(k));
+    const choice = dirtyKeys.length > 0
+      ? await showUnsavedConfirm(
+        "Unsaved changes",
+        unsavedCloseMessage(dirtyKeys.length, dirtyKeys.length === 1 ? pathBasename(dirtyKeys[0]) : undefined),
+      )
+      : null;
+    const decision = decideUnsavedClose(dirtyKeys.length > 0, choice);
+    if (decision === "abort") return false;
+    if (decision === "save") {
+      const result = await this.flushKeys(dirtyKeys);
+      if (!result.ok) {
+        toast(`could not save: ${result.failed.map((p) => pathBasename(p)).join(", ")}`, "error");
+        return false;
+      }
+    }
+    this.closeKeys(unique);
+    return true;
   }
 
   private closeKeys(keys: string[]): void {
@@ -784,7 +838,7 @@ export class EditorManager {
     const relPath = isTimeline ? null : this.relativePath(key);
     showContextMenu(
       [
-        { label: "Close", action: () => this.closeTab(key) },
+        { label: "Close", action: () => void this.requestCloseTab(key) },
         { label: "Close Others", action: () => this.closeOthers(key) },
         { label: "Close to the Left", disabled: idx === 0, action: () => this.closeToLeft(key) },
         { label: "Close to the Right", disabled: idx === this.order.length - 1, action: () => this.closeToRight(key) },
