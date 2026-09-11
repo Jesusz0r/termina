@@ -66,7 +66,7 @@ import { AppPreferencesStore } from "./preferences.js";
 import { SubagentHost } from "./subagents.js";
 import { anchorClaimPath, isSubagentManagedFile } from "../agent-core/subagents.js";
 import { listSessionJsonl, mergeSessionFiles } from "./session-search.js";
-import { listProjectSnapshot, searchProjectFiles } from "./quick-open.js";
+import { ProjectPathIndex, listProjectSnapshot, searchProjectFiles } from "./quick-open.js";
 import { appendPendingImages, MAX_PENDING_IMAGES, pendingImageState } from "../agent-core/host.js";
 import {
   coreSessionFile as bundleSessionFile,
@@ -751,6 +751,8 @@ class PiEditorApp {
   /** Latest file:search generation; older walks abort so fast typing
    *  never stacks full-tree walks. */
   private fileSearchSeq = 0;
+  /** Cached project file list for Quick Open; patched by watcher events. */
+  private readonly pathIndex = new ProjectPathIndex();
   private userEditsWriteTimer: ReturnType<typeof setTimeout> | null = null;
   /** Paths the promotion is applying right now (suppress user-edit records). */
   private promotionPaths: Set<string> | null = null;
@@ -3894,9 +3896,12 @@ class PiEditorApp {
     if (!project || !cwd) return { entries: [] };
     const root = await this.canonicalPath(cwd);
     const seq = ++this.fileSearchSeq;
-    const { entries, truncated } = await searchProjectFiles(root, query, {
-      shouldStop: () => this.disposed || seq !== this.fileSearchSeq,
-    });
+    const stop = () => this.disposed || seq !== this.fileSearchSeq;
+    // Score the cached inventory when there is one: only the first search of a
+    // project pays for the walk, and a superseded query still returns nothing
+    // rather than a partial result.
+    const candidates = await this.pathIndex.candidates(root, stop);
+    const { entries, truncated } = await searchProjectFiles(root, query, { shouldStop: stop, candidates });
     return truncated ? { entries, truncated: true } : { entries };
   }
 
@@ -6945,6 +6950,11 @@ class PiEditorApp {
       const path = await this.canonicalPath(change.path);
       const relPath = relative(await canonicalRootPromise, path);
       if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return;
+      // Keep the Quick Open inventory current. Only creates and modifications
+      // arrive here; deletions come through onFileDeleted below. A watcher
+      // overflow replays every observed path through these same callbacks, so
+      // the index re-syncs rather than drifting.
+      this.pathIndex.noteAdded(relPath);
       ws.generation++;
       this.markCandidateEvidenceStale(ws.comparisonId);
       const now = Date.now();
@@ -7076,6 +7086,7 @@ class PiEditorApp {
       const p = await this.canonicalPath(path);
       const relPath = relative(await this.canonicalPath(ws.root), p);
       if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return;
+      this.pathIndex.noteRemoved(relPath);
       ws.generation++;
       this.markCandidateEvidenceStale(ws.comparisonId);
       this.send("file:deleted", { projectId: owner.id, workspaceId: ws.id, path: p }, rendererTarget);

@@ -59,32 +59,27 @@ function visibleDirent(name: string): boolean {
   return !IGNORED_SEGMENTS.has(name) && !name.startsWith(".");
 }
 
-export async function searchProjectFiles(
+/**
+ * Relative paths of every visible project file, in breadth-first walk order.
+ *
+ * The single owner of "what files exist in the project": the search and the
+ * path index both read this rather than each walking on their own. Bounds are
+ * the caller-visible caps; `truncated` means the tree exceeded them and the
+ * list is a prefix, not the whole project.
+ */
+export async function listProjectPaths(
   root: string,
-  rawQuery: string,
   opts?: { shouldStop?: () => boolean },
-): Promise<{ entries: QuickOpenEntry[]; truncated: boolean }> {
-  const query = rawQuery.trim().toLowerCase().slice(0, MAX_QUICK_OPEN_QUERY);
-  if (query.includes("\0")) return { entries: [], truncated: false };
-  const scored: Array<{ relPath: string; score: number }> = [];
-  const plain: string[] = [];
+): Promise<{ paths: string[]; truncated: boolean }> {
+  const paths: string[] = [];
   let dirs = 0;
   let files = 0;
   let truncated = false;
   const seen = new Set<string>([root]);
   const queue: string[] = [root];
   let head = 0;
-  const push = (relPath: string): void => {
-    if (query) {
-      const score = fuzzyScore(query, relPath);
-      if (score === null) return;
-      scored.push({ relPath, score });
-    } else if (plain.length < MAX_QUICK_OPEN_RESULTS) {
-      plain.push(relPath);
-    }
-  };
   while (head < queue.length) {
-    if (opts?.shouldStop?.()) return { entries: [], truncated: false };
+    if (opts?.shouldStop?.()) return { paths: [], truncated: false };
     const dir = queue[head++]!;
     if (++dirs > MAX_QUICK_OPEN_DIRS) {
       truncated = true;
@@ -122,7 +117,7 @@ export async function searchProjectFiles(
             truncated = true;
             break;
           }
-          push(relative(root, full));
+          paths.push(relative(root, full));
           continue;
         }
         seen.add(real);
@@ -134,19 +129,150 @@ export async function searchProjectFiles(
           truncated = true;
           break;
         }
-        push(relative(root, full));
+        paths.push(relative(root, full));
         continue;
       }
       queue.push(full);
     }
     if (truncated) break;
   }
-  if (query) {
-    scored.sort((a, b) => b.score - a.score || (a.relPath < b.relPath ? -1 : 1));
-    return { entries: scored.slice(0, MAX_QUICK_OPEN_RESULTS).map(({ relPath }) => ({ relPath })), truncated };
+  return { paths, truncated };
+}
+
+/**
+ * Rank candidate paths against a query. Pure: no filesystem access, so the path
+ * index can feed it a cached list and tests can feed it a fixture.
+ */
+export function rankProjectPaths(
+  candidates: Iterable<string>,
+  rawQuery: string,
+  truncated: boolean,
+): { entries: QuickOpenEntry[]; truncated: boolean } {
+  const query = rawQuery.trim().toLowerCase().slice(0, MAX_QUICK_OPEN_QUERY);
+  if (query.includes("\0")) return { entries: [], truncated: false };
+  if (!query) {
+    // No query: the first N in walk order (shallow first), then alphabetized.
+    const plain: string[] = [];
+    for (const relPath of candidates) {
+      if (plain.length >= MAX_QUICK_OPEN_RESULTS) break;
+      plain.push(relPath);
+    }
+    plain.sort();
+    return { entries: plain.map((relPath) => ({ relPath })), truncated };
   }
-  plain.sort();
-  return { entries: plain.slice(0, MAX_QUICK_OPEN_RESULTS).map((relPath) => ({ relPath })), truncated };
+  const scored: Array<{ relPath: string; score: number }> = [];
+  for (const relPath of candidates) {
+    const score = fuzzyScore(query, relPath);
+    if (score === null) continue;
+    scored.push({ relPath, score });
+  }
+  scored.sort((a, b) => b.score - a.score || (a.relPath < b.relPath ? -1 : 1));
+  return { entries: scored.slice(0, MAX_QUICK_OPEN_RESULTS).map(({ relPath }) => ({ relPath })), truncated };
+}
+
+/**
+ * Search the project for a query. Walks when the caller has no candidate list;
+ * a cached list (the path index) is scored directly.
+ */
+export async function searchProjectFiles(
+  root: string,
+  rawQuery: string,
+  opts?: { shouldStop?: () => boolean; candidates?: { paths: readonly string[]; truncated: boolean } },
+): Promise<{ entries: QuickOpenEntry[]; truncated: boolean }> {
+  const listed = opts?.candidates ?? await listProjectPaths(root, opts);
+  // A cancelled walk must not be ranked as though it were complete.
+  if (opts?.shouldStop?.()) return { entries: [], truncated: false };
+  return rankProjectPaths(listed.paths, rawQuery, listed.truncated);
+}
+
+/**
+ * Cached project file inventory for repeated searches.
+ *
+ * Quick Open runs a full walk per keystroke; this keeps the file list between
+ * queries and patches it from watcher events, so only the first search pays for
+ * the walk. The candidate list is ranked by `rankProjectPaths`, so scoring and
+ * visibility rules stay owned by the walk above.
+ *
+ * Order is preserved from the walk: the empty-query result is the first N paths
+ * encountered (shallow first), which a set would not reproduce.
+ */
+export class ProjectPathIndex {
+  private root: string | null = null;
+  private paths: string[] = [];
+  private membership = new Set<string>();
+  private truncated = false;
+  private built = false;
+  private building: Promise<void> | null = null;
+
+  /** Candidate list for a query, building the index on first use. */
+  async candidates(root: string, shouldStop?: () => boolean): Promise<{ paths: readonly string[]; truncated: boolean }> {
+    if (this.root !== root) this.reset(root);
+    if (!this.built) {
+      const build = this.building ?? (this.building = this.build(root, shouldStop));
+      await build;
+    }
+    return { paths: this.paths, truncated: this.truncated };
+  }
+
+  private async build(root: string, shouldStop?: () => boolean): Promise<void> {
+    try {
+      const listed = await listProjectPaths(root, { shouldStop });
+      // Cancelled or superseded: leave the index unbuilt so the next search
+      // retries rather than caching a partial tree.
+      if (this.root !== root || shouldStop?.()) return;
+      this.paths = listed.paths;
+      this.membership = new Set(listed.paths);
+      this.truncated = listed.truncated;
+      this.built = true;
+    } finally {
+      this.building = null;
+    }
+  }
+
+  /** A watcher-reported create. Ignored until the index exists (nothing to patch). */
+  noteAdded(relPath: string): void {
+    if (!this.built || !relPath || this.membership.has(relPath)) return;
+    this.paths.push(relPath);
+    this.membership.add(relPath);
+  }
+
+  /**
+   * A watcher-reported removal.
+   *
+   * Removes the path *and anything under it*. A deleted directory fires one
+   * event for the directory itself, not one per descendant, so a prefix match is
+   * what keeps the index from continuing to offer files that are gone. For a
+   * file path the prefix can only ever match the path itself.
+   */
+  noteRemoved(relPath: string): void {
+    if (!this.built || !relPath) return;
+    const prefix = `${relPath}/`;
+    const keep: string[] = [];
+    for (const path of this.paths) {
+      if (path === relPath || path.startsWith(prefix)) {
+        this.membership.delete(path);
+        continue;
+      }
+      keep.push(path);
+    }
+    if (keep.length !== this.paths.length) this.paths = keep;
+  }
+
+  /** Discard the index; the next search rebuilds it. */
+  invalidate(): void {
+    this.built = false;
+    this.building = null;
+  }
+
+  /** Point the index at a different root, dropping the previous tree. */
+  reset(root: string | null = null): void {
+    this.root = root;
+    this.paths = [];
+    this.membership = new Set();
+    this.truncated = false;
+    this.built = false;
+    this.building = null;
+  }
 }
 
 /** Snapshot entries for one agent turn: most projects fit, huge ones truncate. */
