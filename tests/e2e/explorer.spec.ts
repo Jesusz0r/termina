@@ -1,5 +1,6 @@
 import { test, expect } from "./fixtures.ts";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 test.describe("Explorer File Tree & Actions", () => {
@@ -437,5 +438,48 @@ test.describe("Explorer filter", () => {
     await expect(page.locator(".project-tab")).toHaveCount(2, { timeout: 10_000 });
     // A query from the previous project must not carry over.
     await expect(input).toHaveValue("");
+  });
+});
+
+test.describe("Explorer symlink safety (list-dir)", () => {
+  test("lists links that stay inside, hides escaping and dangling ones", async ({ page, projectRoot }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+
+    // A target outside the project, plus three links: one inside, one out, one dead.
+    const outside = mkdtempSync(join(tmpdir(), "termina-outside-"));
+    writeFileSync(join(outside, "secret.ts"), "export const secret = true;\n");
+    symlinkSync(join(projectRoot, "src", "index.ts"), join(projectRoot, "link-inside.ts"));
+    symlinkSync(join(outside, "secret.ts"), join(projectRoot, "link-outside.ts"));
+    symlinkSync(join(projectRoot, "missing.ts"), join(projectRoot, "link-dangling.ts"));
+
+    // Drive list-dir directly: this is the code path that decides visibility, and
+    // it avoids depending on watcher timing for the assertion.
+    const res = await page.evaluate(async (root) => {
+      const projects = await window.termina.projectList();
+      const active = projects.find((p) => p.active) ?? projects[0];
+      return window.termina.listDir(active.id, root);
+    }, projectRoot);
+
+    const names = res.entries.map((e) => e.name).sort();
+    console.log("listed:", JSON.stringify(names));
+
+    // The link that resolves inside the project is a normal entry.
+    expect(names).toContain("link-inside.ts");
+    // A link escaping the workspace must not be listed...
+    expect(names).not.toContain("link-outside.ts");
+    // ...and neither must one that resolves to nothing.
+    expect(names).not.toContain("link-dangling.ts");
+    // Regular entries are unaffected.
+    expect(names).toContain("greeting.ts");
+    expect(names).toContain("src");
+
+    // Reported paths stay inside the project for every entry. Compare against
+    // the canonical root: the app reports canonical paths, and the fixture root
+    // is /var/... on macOS while canonical is /private/var/...
+    const canonicalRoot = realpathSync(projectRoot);
+    for (const entry of res.entries) {
+      expect(entry.path.startsWith(canonicalRoot)).toBe(true);
+      expect(entry.relPath.startsWith("..")).toBe(false);
+    }
   });
 });

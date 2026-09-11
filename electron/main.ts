@@ -7212,17 +7212,22 @@ class PiEditorApp {
           break;
         }
         const full = join(dir, ent.name);
+        let child = full;
         let isDir = ent.isDirectory();
         if (ent.isSymbolicLink()) {
           try {
-            await fsRealpath(full);
+            // A symlink is the only entry that can resolve anywhere but here:
+            // `dir` is the output of canonicalPath, so a plain child is already
+            // canonical and needs no realpath walk. Resolving the link once
+            // yields both the path to report and, via stat, whether it is a
+            // directory — the same value canonicalPath would have returned.
+            child = await fsRealpath(full);
             const st = await stat(full);
             isDir = st.isDirectory();
           } catch {
             continue;
           }
         }
-        const child = await this.canonicalPath(full);
         const relPath = relative(rootCanon, child);
         if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) continue;
         entries.push({
