@@ -521,6 +521,17 @@ export type TerminalPasteResult =
 /** Callers of file:search; each owns a cancellation generation in main. */
 export type FileSearchSource = "quick-open" | "filter";
 
+/** Callers of content:search; each owns a cancellation generation in main. */
+export type ContentSearchSource = "modal" | "explorer";
+
+/** One content-search hit: 1-based line/column with a bounded preview. */
+export interface ContentHit {
+  relPath: string;
+  line: number;
+  column: number;
+  text: string;
+}
+
 export interface TerminaBridge {
   // push events (main → renderer)
   onPtyData(cb: (e: PtyDataPayload) => void): () => void;
@@ -588,6 +599,8 @@ export interface TerminaBridge {
   searchSessions(query: string): Promise<SessionHit[]>;
   /** Fuzzy file search over the active project tree (quick open, explorer filter). */
   searchFiles(query: string, source?: FileSearchSource): Promise<{ entries: Array<{ relPath: string }>; truncated?: boolean }>;
+  /** Content search over the active project tree (modal jump-to, explorer results). */
+  searchContent(pattern: string, source?: ContentSearchSource): Promise<{ hits: ContentHit[]; truncated?: boolean; error?: string }>;
 
   // Worldlines: run records
   /** The recorded runs of a terminal (or every terminal). */

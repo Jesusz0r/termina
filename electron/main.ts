@@ -66,7 +66,8 @@ import { AppPreferencesStore } from "./preferences.js";
 import { SubagentHost } from "./subagents.js";
 import { anchorClaimPath, isSubagentManagedFile } from "../agent-core/subagents.js";
 import { MAX_SESSION_SEARCH_QUERY, listSessionJsonl, mergeSessionFiles } from "./session-search.js";
-import { FileSearchGenerations, ProjectPathIndex, listProjectSnapshot, searchProjectFiles } from "./quick-open.js";
+import { ProjectPathIndex, SearchGenerations, listProjectSnapshot, searchProjectFiles } from "./quick-open.js";
+import { searchProjectContent } from "./content-search.js";
 import { appendPendingImages, MAX_PENDING_IMAGES, pendingImageState } from "../agent-core/host.js";
 import {
   coreSessionFile as bundleSessionFile,
@@ -93,6 +94,7 @@ import {
 } from "./terminal-roster.js";
 import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
 import { HIDE_THINKING_CSI, SHOW_THINKING_CSI, thinkingStartupArgs } from "../shared/terminal-control.js";
+import { validateGrepPattern } from "../shared/grep-pattern.js";
 import {
   DEFAULT_SHORTCUTS,
   defaultAppPreferences,
@@ -100,6 +102,7 @@ import {
   CHALLENGE_PROFILES,
   type ChallengeProfile,
   type CommandId,
+  type ContentHit,
   type ExplorerEntry,
   type InstanceSummary,
   type ModifiedFile,
@@ -750,7 +753,9 @@ class PiEditorApp {
   private flushSeq = 0;
   /** Per-caller file:search generations; older same-caller walks abort so fast
    *  typing never stacks full-tree walks. */
-  private fileSearchSeq = new FileSearchGenerations();
+  private fileSearchSeq = new SearchGenerations(["quick-open", "filter"] as const, "quick-open");
+  /** Per-caller content:search generations; older same-caller searches abort. */
+  private contentSearchSeq = new SearchGenerations(["modal", "explorer"] as const, "modal");
   /** Cached project file list for Quick Open; patched by watcher events. */
   private readonly pathIndex = new ProjectPathIndex();
   private userEditsWriteTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1516,6 +1521,7 @@ class PiEditorApp {
           { label: "Previous Project", accelerator: shortcut("previous-project"), click: send("previous-project") },
           { label: "Search Sessions…", accelerator: shortcut("session-search"), click: send("session-search") },
           { label: "Quick Open…", accelerator: shortcut("quick-open"), click: send("quick-open") },
+          { label: "Search File Contents…", accelerator: shortcut("content-search"), click: send("content-search") },
           { label: "Command Palette…", accelerator: shortcut("command-palette"), click: send("command-palette") },
           { type: "separator" },
           { label: "Toggle DevTools", accelerator: "Alt+Cmd+I", role: "toggleDevTools" },
@@ -3912,6 +3918,30 @@ class PiEditorApp {
     const candidates = await this.pathIndex.candidates(root, stop);
     const { entries, truncated } = await searchProjectFiles(root, query, { shouldStop: stop, candidates });
     return truncated ? { entries, truncated: true } : { entries };
+  }
+
+  /**
+   * Grep the active project tree. The pattern is validated before touching
+   * the filesystem; the root always comes from main-side project state, so
+   * the renderer cannot aim the search outside the project. Each caller has
+   * its own cancellation lane.
+   */
+  private async searchProjectContent(
+    pattern: unknown,
+    source: unknown,
+  ): Promise<{ hits: ContentHit[]; truncated?: boolean; error?: string }> {
+    if (typeof pattern !== "string") return { hits: [], error: "pattern must be a string" };
+    const unsafe = validateGrepPattern(pattern);
+    if (unsafe) return { hits: [], error: unsafe };
+    const project = this.project();
+    const cwd = project?.cwd ?? null;
+    if (!project || !cwd) return { hits: [] };
+    const root = await this.canonicalPath(cwd);
+    const { source: lane, seq } = this.contentSearchSeq.next(source);
+    const stop = () => this.disposed || !this.contentSearchSeq.current(lane, seq);
+    const candidates = await this.pathIndex.candidates(root, stop);
+    const { hits, truncated } = await searchProjectContent(root, pattern, { shouldStop: stop, candidates });
+    return truncated ? { hits, truncated: true } : { hits };
   }
 
   // ------------------------------------------------------------- dispatch --
@@ -7774,6 +7804,7 @@ class PiEditorApp {
     // ---- Session Search ----
     ipcMain.handle("session:search", (_e, query: unknown) => this.searchSessions(typeof query === "string" ? query : ""));
     ipcMain.handle("file:search", (_e, query: unknown, source: unknown) => this.searchProjectFiles(typeof query === "string" ? query : "", source));
+    ipcMain.handle("content:search", (_e, pattern: unknown, source: unknown) => this.searchProjectContent(pattern, source));
 
     // ---- Plan Board ----
     ipcMain.handle("plan:get", (_e, terminalId: string) => this.terminals.get(terminalId)?.plan ?? []);

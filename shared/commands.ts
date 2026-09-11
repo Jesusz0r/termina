@@ -59,6 +59,7 @@ export const COMMAND_DEFINITIONS = [
   { command: "project-9", label: "Project 9", category: "View", description: "Activate the ninth project tab", defaultShortcut: "Ctrl+9", scope: "renderer" },
   { command: "session-search", label: "Search sessions", category: "View", description: "Search previous agent sessions", defaultShortcut: "CmdOrCtrl+Shift+P", scope: "renderer" },
   { command: "quick-open", label: "Quick open", category: "View", description: "Open a project file by name", defaultShortcut: "CmdOrCtrl+P", scope: "renderer" },
+  { command: "content-search", label: "Search file contents", category: "View", description: "Grep the project and jump to a match", defaultShortcut: "CmdOrCtrl+Alt+F", scope: "renderer" },
   { command: "command-palette", label: "Command palette", category: "View", description: "Run a command by name", defaultShortcut: "CmdOrCtrl+K", scope: "renderer" },
   { command: "open-settings", label: "Open settings", category: "Settings", description: "Open this preferences window", defaultShortcut: "CmdOrCtrl+,", scope: "renderer" },
 ] as const;

@@ -294,6 +294,7 @@ body {
 }
 
 #explorer.minimized #explorer-tree,
+#explorer.minimized .explorer-content,
 #explorer.minimized .header-logo,
 #explorer.minimized .explorer-header > span:not(.header-logo) {
   display: none;
@@ -3199,6 +3200,95 @@ body {
 .explorer-filter-input.no-matches {
   border-color: var(--red);
   color: var(--red);
+}
+
+/* Persistent content-search listing, fed by the Search Contents modal. */
+.explorer-content {
+  flex: 0 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 45%;
+  border-bottom: 1px solid var(--border);
+}
+
+.explorer-content[hidden] {
+  display: none;
+}
+
+.explorer-content-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.explorer-content-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.explorer-content-btn {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.explorer-content-btn:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+#explorer-content-results {
+  overflow-y: auto;
+  padding-bottom: 4px;
+  font-size: 12px;
+}
+
+.explorer-content-file {
+  padding: 4px 8px 2px;
+  color: var(--text);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.explorer-content-hit {
+  display: flex;
+  gap: 8px;
+  padding: 1px 8px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.explorer-content-hit:hover {
+  background: var(--bg-hover);
+}
+
+.explorer-content-line {
+  flex: 0 0 auto;
+  min-width: 2ch;
+  text-align: right;
+  color: var(--accent);
+}
+
+.explorer-content-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dim);
 }
 
 /* Truncated: more files matched than the search returns; the count is in title. */

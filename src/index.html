@@ -81,6 +81,14 @@
                    placeholder="Filter files" aria-label="Filter files in the explorer"
                    autocomplete="off" spellcheck="false" />
           </div>
+          <div class="explorer-content" id="explorer-content" hidden>
+            <div class="explorer-content-header">
+              <span id="explorer-content-title" class="explorer-content-title">Content results</span>
+              <button type="button" id="explorer-content-rerun" class="explorer-content-btn" title="Re-run search" aria-label="Re-run content search">↻</button>
+              <button type="button" id="explorer-content-clear" class="explorer-content-btn" title="Clear results" aria-label="Clear content results">×</button>
+            </div>
+            <div id="explorer-content-results"></div>
+          </div>
           <div id="explorer-tree"></div>
         </div>
         <div id="explorer-divider" title="Drag to resize"></div>

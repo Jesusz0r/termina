@@ -1,10 +1,11 @@
 /**
- * Quick Open (files) and Command Palette (actions) modal.
- * Triggered by View → Quick Open / Command Palette (Cmd+P / Cmd+K).
+ * Quick Open (files), Content Search (grep), and Command Palette (actions) modal.
+ * Triggered by View → Quick Open / Search File Contents / Command Palette.
  */
 import { COMMAND_DEFINITIONS, type CommandId } from "../shared/commands";
+import type { ContentHit } from "../shared/types";
 
-export type QuickOpenMode = "files" | "actions";
+export type QuickOpenMode = "files" | "actions" | "content";
 
 export class QuickOpen {
   private root: HTMLElement | null = null;
@@ -15,18 +16,25 @@ export class QuickOpen {
   private searchSeq = 0;
   private mode: QuickOpenMode = "files";
   private selected = 0;
-  private rows: Array<{ key: string; label: string; detail: string }> = [];
+  private rows: Array<{ key: string; label: string; detail: string; line?: number; column?: number }> = [];
 
   private onOpenFile: (relPath: string) => void = () => {};
+  private onOpenContentHit: (relPath: string, line: number, column: number) => void = () => {};
+  /** Mirror of the last content search, so the Explorer can list it persistently. */
+  private onContentResults: (pattern: string, hits: ContentHit[], truncated: boolean) => void = () => {};
   private onExecuteCommand: (command: CommandId) => void = () => {};
   private getShortcut: (command: CommandId) => string = () => "";
 
   bind(handlers: {
     onOpenFile: (relPath: string) => void;
+    onOpenContentHit: (relPath: string, line: number, column: number) => void;
+    onContentResults: (pattern: string, hits: ContentHit[], truncated: boolean) => void;
     onExecuteCommand: (command: CommandId) => void;
     getShortcut: (command: CommandId) => string;
   }): void {
     this.onOpenFile = handlers.onOpenFile;
+    this.onOpenContentHit = handlers.onOpenContentHit;
+    this.onContentResults = handlers.onContentResults;
     this.onExecuteCommand = handlers.onExecuteCommand;
     this.getShortcut = handlers.getShortcut;
   }
@@ -38,13 +46,14 @@ export class QuickOpen {
     this.build();
     if (this.input) {
       this.input.value = "";
-      this.input.placeholder = mode === "files" ? "Open a project file…" : "Run a command…";
+      this.input.placeholder = mode === "files" ? "Open a project file…" : mode === "content" ? "Search file contents…" : "Run a command…";
     }
     const title = this.root?.querySelector(".modal-title");
-    if (title) title.textContent = mode === "files" ? "Quick Open" : "Command Palette";
+    if (title) title.textContent = mode === "files" ? "Quick Open" : mode === "content" ? "Search Contents" : "Command Palette";
     if (this.root) this.root.style.display = "flex";
     this.input?.focus();
     if (this.mode === "files") void this.runFileSearch("");
+    else if (this.mode === "content") this.showEmpty("Type to search file contents.");
     else this.renderActions("");
   }
 
@@ -102,7 +111,12 @@ export class QuickOpen {
         return;
       }
       if (this.searchTimer) clearTimeout(this.searchTimer);
-      this.searchTimer = setTimeout(() => void this.runFileSearch(input.value), 150);
+      // Content search scans file bodies: debounce longer than name search.
+      const delay = this.mode === "content" ? 250 : 150;
+      this.searchTimer = setTimeout(() => {
+        if (this.mode === "content") void this.runContentSearch(input.value);
+        else void this.runFileSearch(input.value);
+      }, delay);
     });
   }
 
@@ -123,6 +137,7 @@ export class QuickOpen {
     const row = this.rows[this.selected];
     if (!row) return;
     if (this.mode === "files") this.onOpenFile(row.key);
+    else if (this.mode === "content") this.onOpenContentHit(row.key, row.line ?? 1, row.column ?? 1);
     else this.onExecuteCommand(row.key as CommandId);
   }
 
@@ -148,6 +163,49 @@ export class QuickOpen {
     this.selected = 0;
     this.rows = res.entries.map((e) => ({ key: e.relPath, label: e.relPath.split("/").pop() ?? e.relPath, detail: e.relPath }));
     this.renderRows(res.truncated ? `${res.entries.length}+ files (refine to narrow)` : null);
+  }
+
+  private async runContentSearch(pattern: string): Promise<void> {
+    const seq = ++this.searchSeq;
+    if (!pattern.trim()) {
+      this.rows = [];
+      this.selected = 0;
+      this.showEmpty("Type to search file contents.");
+      return;
+    }
+    const list = this.resultsEl;
+    if (list) {
+      list.replaceChildren();
+      const loading = document.createElement("div");
+      loading.className = "search-empty";
+      loading.textContent = "searching…";
+      list.appendChild(loading);
+    }
+    let res;
+    try {
+      res = await window.termina.searchContent(pattern, "modal");
+    } catch (err) {
+      if (seq !== this.searchSeq) return;
+      this.showEmpty((err as Error).message);
+      return;
+    }
+    if (seq !== this.searchSeq || (this.input?.value ?? "") !== pattern) return;
+    if (res.error) {
+      this.rows = [];
+      this.selected = 0;
+      this.showEmpty(res.error);
+      return;
+    }
+    this.selected = 0;
+    this.rows = res.hits.map((h) => ({
+      key: h.relPath,
+      line: h.line,
+      column: h.column,
+      label: h.text || "(empty line)",
+      detail: `${h.relPath}:${h.line}`,
+    }));
+    this.renderRows(res.truncated ? `${res.hits.length}+ matches (refine to narrow)` : null);
+    this.onContentResults(pattern, res.hits, res.truncated ?? false);
   }
 
   private renderActions(query: string): void {

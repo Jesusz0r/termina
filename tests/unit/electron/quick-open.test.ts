@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FileSearchGenerations, ProjectPathIndex, fuzzyScore, listProjectSnapshot, searchProjectFiles } from "../../../electron/quick-open.ts";
+import { ProjectPathIndex, SearchGenerations, fuzzyScore, listProjectSnapshot, searchProjectFiles } from "../../../electron/quick-open.ts";
 
 describe("quick-open fuzzyScore", () => {
   it("rejects non-subsequences", () => {
@@ -258,9 +258,9 @@ describe("Quick Open path index", () => {
   });
 });
 
-describe("FileSearchGenerations", () => {
+describe("SearchGenerations", () => {
   it("supersedes same-lane searches without touching the other lane", () => {
-    const gen = new FileSearchGenerations();
+    const gen = new SearchGenerations(["quick-open", "filter"] as const, "quick-open");
     const filterFirst = gen.next("filter");
     const quickFirst = gen.next("quick-open");
     expect(gen.current(filterFirst.source, filterFirst.seq)).toBe(true);
@@ -273,7 +273,7 @@ describe("FileSearchGenerations", () => {
   });
 
   it("routes unknown sources to the quick-open lane", () => {
-    const gen = new FileSearchGenerations();
+    const gen = new SearchGenerations(["quick-open", "filter"] as const, "quick-open");
     for (const source of [undefined, null, "", "quick-open", "explorer", 42]) {
       expect(gen.next(source).source).toBe("quick-open");
     }

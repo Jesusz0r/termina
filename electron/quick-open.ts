@@ -10,7 +10,6 @@
 import { readdir, realpath as fsRealpath, stat } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { IGNORED_SEGMENTS } from "../shared/gitignore.ts";
-import type { FileSearchSource } from "../shared/types.ts";
 
 export interface QuickOpenEntry {
   relPath: string;
@@ -172,27 +171,30 @@ export function rankProjectPaths(
 }
 
 /**
- * Per-caller cancellation generations for file:search. Each caller owns a
+ * Per-caller cancellation generations for project search. Each caller owns a
  * lane: same-lane searches supersede each other, cross-lane searches never
- * abort. Unknown sources share the quick-open lane, so a compromised or
+ * abort. Unknown sources share the default lane, so a compromised or
  * outdated renderer cannot grow the lane set.
  */
-export class FileSearchGenerations {
-  private seq: Record<FileSearchSource, number> = { "quick-open": 0, filter: 0 };
+export class SearchGenerations<Lane extends string> {
+  private seq = new Map<Lane, number>();
+
+  constructor(
+    private readonly lanes: readonly Lane[],
+    private readonly defaultLane: Lane,
+  ) {}
 
   /** Allocate the next generation for the caller's lane. */
-  next(source: unknown): { source: FileSearchSource; seq: number } {
-    const lane = FileSearchGenerations.lane(source);
-    return { source: lane, seq: ++this.seq[lane] };
+  next(source: unknown): { source: Lane; seq: number } {
+    const lane = (this.lanes as readonly unknown[]).includes(source) ? (source as Lane) : this.defaultLane;
+    const seq = (this.seq.get(lane) ?? 0) + 1;
+    this.seq.set(lane, seq);
+    return { source: lane, seq };
   }
 
   /** True while no newer same-lane search has started. */
-  current(source: FileSearchSource, seq: number): boolean {
-    return this.seq[source] === seq;
-  }
-
-  private static lane(source: unknown): FileSearchSource {
-    return source === "filter" ? "filter" : "quick-open";
+  current(source: Lane, seq: number): boolean {
+    return (this.seq.get(source) ?? 0) === seq;
   }
 }
 

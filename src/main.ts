@@ -434,7 +434,16 @@ function refreshMine(projectId: string | null = activeProjectId): void {
 (window as unknown as Record<string, unknown>).__refreshMine = refreshMine;
 void refreshMine();
 const explorerEl = document.getElementById("explorer")!;
-explorer.bind({ onOpenFile: (path, preview) => void openFileSmart(path, preview ?? true) });
+explorer.bind({
+  onOpenFile: (path, preview) => void openFileSmart(path, preview ?? true),
+  onContentHit: (relPath, line, column) => openContentHit(relPath, line, column),
+});
+
+/** Jump to a content-search hit: open at the match, then take editor focus
+ *  (a direct gesture, like a Quick Open pick). */
+function openContentHit(relPath: string, line: number, column: number): void {
+  void openFileSmart(relPath, true, undefined, line, column).then(() => activeEditor().focusEditor());
+}
 
 const leftPane = document.getElementById("left-pane")!;
 const termTabsList = document.getElementById("terminal-tabs-list")!;
@@ -2359,10 +2368,13 @@ quickOpen.bind({
   // An explicit modal pick is a direct gesture: take editor focus so the
   // keyboard flow (Cmd+P, Enter, type) works without an extra click.
   onOpenFile: (relPath) => void openFileSmart(relPath, true).then(() => activeEditor().focusEditor()),
+  onOpenContentHit: (relPath, line, column) => openContentHit(relPath, line, column),
+  onContentResults: (pattern, hits, truncated) => explorer.showContentResults(pattern, hits, truncated),
   onExecuteCommand: (command) => commands.execute(command),
   getShortcut: (command) => preferences.shortcuts[command] ?? "",
 });
 commands.register("quick-open", () => quickOpen.open("files"));
+commands.register("content-search", () => quickOpen.open("content"));
 commands.register("command-palette", () => quickOpen.open("actions"));
 
 // Settings
