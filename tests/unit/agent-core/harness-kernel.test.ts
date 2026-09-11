@@ -3706,6 +3706,12 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("ordinary active appends do not discard logical-session hits", appendChecks > 0 && appendHits.length === 1);
     check("slash menu puts help first", SLASH_COMMANDS[0]?.name === "/help");
     check("slash menu puts exit last", SLASH_COMMANDS.at(-1)?.name === "/exit");
+    check(
+      "slash help hints group session model danger",
+      SLASH_COMMANDS.some((c) => c.name === "/help" && c.hint.startsWith("session ·")) &&
+        SLASH_COMMANDS.some((c) => c.name === "/model" && c.hint.startsWith("model ·")) &&
+        SLASH_COMMANDS.some((c) => c.name === "/permissions" && c.hint.startsWith("danger ·")),
+    );
     check("slash /clear is marked new", SLASH_COMMANDS.some((c) => c.name === "/clear (new)" && c.submit === "/clear"));
     check("slash /new aliases /clear", matchingSlashCommands("/new").some((c) => c.submit === "/clear"));
     check("slash /n offers /clear", matchingSlashCommands("/n").some((c) => c.submit === "/clear"));
@@ -4229,6 +4235,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       matchingSlashCommands("/m").map((c) => c.name).join(" ") === "/model /models",
     );
     check("slash /models is exact", matchingSlashCommands("/models").map((c) => c.name).join(" ") === "/models");
+    check("slash /model is exact", matchingSlashCommands("/model").map((c) => c.name).join(" ") === "/model");
     check(
       "slash /permissions lists policies",
       matchingSlashCommands("/permissions").map((c) => c.name).join(" ") ===
@@ -4289,8 +4296,22 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       ]).map((c) => c.name).join(" ") === "openai-codex/gpt-5.4 anthropic/claude-sonnet-4-5",
     );
     check(
+      "slash /model lists the same picker rows as /models",
+      matchingSlashCommands("/model", SLASH_COMMANDS, [
+        { name: "openai-codex/gpt-5.4", hint: "openai-codex", submit: "/model openai-codex/gpt-5.4" },
+        { name: "anthropic/claude-sonnet-4-5", hint: "anthropic", submit: "/model anthropic/claude-sonnet-4-5" },
+      ]).map((c) => c.name).join(" ") === "openai-codex/gpt-5.4 anthropic/claude-sonnet-4-5",
+    );
+    check(
       "slash /models a is Anthropic only",
       matchingSlashCommands("/models a", SLASH_COMMANDS, [
+        { name: "openai-codex/gpt-5.4", hint: "openai-codex", submit: "/model openai-codex/gpt-5.4" },
+        { name: "anthropic/claude-sonnet-4-5", hint: "anthropic", submit: "/model anthropic/claude-sonnet-4-5" },
+      ]).map((c) => c.name).join(" ") === "anthropic/claude-sonnet-4-5",
+    );
+    check(
+      "slash /model a is Anthropic only",
+      matchingSlashCommands("/model a", SLASH_COMMANDS, [
         { name: "openai-codex/gpt-5.4", hint: "openai-codex", submit: "/model openai-codex/gpt-5.4" },
         { name: "anthropic/claude-sonnet-4-5", hint: "anthropic", submit: "/model anthropic/claude-sonnet-4-5" },
       ]).map((c) => c.name).join(" ") === "anthropic/claude-sonnet-4-5",
@@ -4609,13 +4630,21 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       runningPaint.includes("\x1b[?1049h") && !runningPaint.includes("\x1b[?1000h") && !runningPaint.includes("\x1b[?1006h"),
     );
     const donePaint = paintCapture((tui) => {
-      tui.finishTool(tui.startTool("bash", "ls"), "success", "ok");
+      tui.finishTool(tui.startTool("bash", "ls"), "success", "UNIQUE_DONE_TOOL_PAYLOAD");
     });
     check("successful tool uses index 17", donePaint.includes("\x1b[48;5;17m") && donePaint.includes("done"));
+    check(
+      "successful tool folds payload to one summary line",
+      donePaint.includes("◆ bash  ls  done") && !donePaint.includes("UNIQUE_DONE_TOOL_PAYLOAD"),
+    );
     const failedPaint = paintCapture((tui) => {
-      tui.finishTool(tui.startTool("bash", "ls"), "error", "nope");
+      tui.finishTool(tui.startTool("bash", "ls"), "error", "UNIQUE_FAILED_TOOL_PAYLOAD");
     });
     check("failed tool uses index 18", failedPaint.includes("\x1b[48;5;18m") && failedPaint.includes("failed"));
+    check(
+      "failed tool folds payload to one summary line",
+      failedPaint.includes("◆ bash  ls  failed") && !failedPaint.includes("UNIQUE_FAILED_TOOL_PAYLOAD"),
+    );
     const cancelledPaint = paintCapture((tui) => {
       tui.startTool("bash", "ls");
       tui.cancelPendingTools();
@@ -4960,6 +4989,9 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     ]);
     shortcutTui.setEffortLevels(["low", "max"]);
     shortcutTui.setStatus({ model: "anthropic/b", effort: "low" });
+    shortcutTui.feed("/model");
+    check("slash /model opens the models picker rows", shortcutTui.frame().includes("anthropic/a") && shortcutTui.frame().includes("anthropic/c"));
+    shortcutTui.feed("\x15");
     shortcutTui.feed("\x0c");
     check("Ctrl+L opens the model picker", shortcutTui.frame().includes("anthropic/a"));
     shortcutTui.feed("\x10");

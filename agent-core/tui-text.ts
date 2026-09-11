@@ -6,20 +6,27 @@ import { loginPickerItems } from "./auth.ts";
 
 export type SlashCommand = { name: string; hint: string; submit?: string };
 
-/** `/help` first and `/exit` last so Enter on a bare slash is safe. */
+/** `/help` first and `/exit` last so Enter on a bare slash is safe.
+ *  Hints are grouped session / model / danger so a flat `/help` dump stays scannable. */
 export const SLASH_COMMANDS: SlashCommand[] = [
-  { name: "/help", hint: "list commands" },
-  { name: "/login", hint: "pick a provider" },
-  { name: "/logout", hint: "drop a stored credential" },
-  { name: "/model", hint: "show or switch the model" },
-  { name: "/models", hint: "list live models" },
-  { name: "/resume", hint: "replay the stored session" },
-  { name: "/clear (new)", hint: "start a new empty session", submit: "/clear" },
-  { name: "/compact", hint: "reclaim and summarize context" },
-  { name: "/effort", hint: "show or set reasoning effort" },
-  { name: "/permissions", hint: "set bash approval policy" },
-  { name: "/exit", hint: "quit the engine" },
+  { name: "/help", hint: "session · list commands" },
+  { name: "/resume", hint: "session · replay the stored session" },
+  { name: "/clear (new)", hint: "session · start a new empty session", submit: "/clear" },
+  { name: "/compact", hint: "session · reclaim and summarize context" },
+  { name: "/login", hint: "session · pick a provider" },
+  { name: "/logout", hint: "session · drop a stored credential" },
+  { name: "/model", hint: "model · pick or switch" },
+  { name: "/models", hint: "model · list live models" },
+  { name: "/effort", hint: "model · show or set reasoning effort" },
+  { name: "/permissions", hint: "danger · set bash approval policy" },
+  { name: "/exit", hint: "danger · quit the engine" },
 ];
+
+/** One-line tool header: `◆ name  detail  done|failed`. */
+export function formatToolSummary(name: string, detail: string | undefined, status: string): string {
+  const label = name || "tool";
+  return detail ? `◆ ${label}  ${detail}  ${status}` : `◆ ${label}  ${status}`;
+}
 
 export const PERMISSION_COMMANDS: SlashCommand[] = [
   { name: "Always ask", hint: "ask before every bash command", submit: "/permissions ask" },
@@ -103,12 +110,12 @@ export function matchingSlashCommands(
     if (space < 0) return rows;
     return rows.filter((c) => pickerRowMatches(line, c));
   }
-  if (head === "/models") {
-    if (space < 0 && line !== "/models") {
+  if (head === "/models" || head === "/model") {
+    if (space < 0 && line !== "/models" && line !== "/model") {
       return commands.filter((c) => c.name.startsWith(line));
     }
     if (modelRows.length === 0) {
-      return space < 0 ? commands.filter((c) => c.name === "/models") : [];
+      return space < 0 ? commands.filter((c) => c.name === head) : [];
     }
     if (space < 0) return modelRows;
     const rest = line.slice(space + 1).trim().toLowerCase();
@@ -310,16 +317,17 @@ export const EMPTY_STATE_TEXT =
   "   @ file  ·  / command  ·  /help lists keys  ·  /login  /models";
 
 export const TUI_SHORTCUTS: SlashCommand[] = [
-  { name: "Ctrl+L", hint: "model picker" },
-  { name: "Ctrl+P", hint: "next model" },
-  { name: "Shift+Tab", hint: "cycle effort" },
-  { name: "Ctrl+J", hint: "newline" },
-  { name: "Ctrl+R", hint: "search prompt history" },
-  { name: "End", hint: "jump to live output when scrolled up" },
-  { name: "PgUp/PgDn", hint: "scroll transcript" },
-  { name: "Cmd/Ctrl+C", hint: "copy selection" },
-  { name: "Ctrl+C", hint: "interrupt run or clear draft" },
-  { name: "Esc", hint: "close picker" },
+  { name: "Ctrl+L", hint: "model · picker" },
+  { name: "Ctrl+P", hint: "model · next" },
+  { name: "Shift+Tab", hint: "model · cycle effort" },
+  { name: "Enter", hint: "session · send, or expand a folded tool" },
+  { name: "Ctrl+J", hint: "session · newline" },
+  { name: "Ctrl+R", hint: "session · search prompt history" },
+  { name: "End", hint: "session · jump to live output when scrolled up" },
+  { name: "PgUp/PgDn", hint: "session · scroll transcript" },
+  { name: "Cmd/Ctrl+C", hint: "session · copy selection" },
+  { name: "Ctrl+C", hint: "danger · interrupt run or clear draft" },
+  { name: "Esc", hint: "session · close picker" },
 ];
 
 export const graphemeSegmenter = new Intl.Segmenter("en", { granularity: "grapheme" });
