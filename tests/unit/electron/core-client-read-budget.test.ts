@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { coreClient } from "../../../electron/worldline-git/core-process.ts";
 import { parseNativeByteBound } from "../../test-support.ts";
 
+process.env.TERMINA_CORE_TEST = "1";
 process.env.TERMINA_CORE_BIN ??= resolve("core/target/release/termina-core");
 
 describe("Core Client Read Budget & Native Bound Invariants", () => {
