@@ -23,7 +23,10 @@ One responsibility → one owner. Reuse, extend, or replace — never add a para
 - `electron/worldline-git.ts` — only public TS client for `core/`; private process/protocol helpers live in `electron/worldline-git/`.
 - `electron/session-fork.ts` → `electron/session-worker.ts` — only session fork path.
 - `shared/preferences.ts` — only prefs validator; `electron/preferences.ts` — only file store.
-- `electron/plan-board.ts` — Plan Board parse/progress/dispatch. `electron/worldlines.ts` — comparisons/promotion/evidence/runs. `electron/evidence.ts` only measures.
+- `electron/plan-board.ts` — Plan Board parse/progress/dispatch. `electron/worldlines/` — comparisons/promotion/evidence/runs. `electron/evidence.ts` only measures.
+- `shared/guards.ts` — only unknown-value inspectors (`isRecord`, `errorCode`, `isErrno`); `shared/fsync.ts` — only crash-durability fsyncs (`syncDirectory`, `syncParentDir`). Node-only except guards.
+- `shared/grep-pattern.ts` — only grep-pattern validator (agent-core + main). `electron/content-search.ts` owns project content search; `electron/quick-open.ts` owns file-name search.
+- `src/theme-tokens.gen.ts` is generated from `src/styles.css` by `scripts/theme-tokens.ts` (runs in `scripts/build.ts`); never hand-edit the generated file.
 - `electron/sidecar.ts` owns sidecar parse/tail. Only writers: `agent-core/host.ts` + `logEvent` in `agent-core/main.ts`.
 - `electron/session-search.ts` owns Session Search walk. `electron/sandbox.ts` owns sandbox profiles.
 - `agent-core/subagents.ts` — background-subagent registry and host contract (spawn validation, claims, handoff/result formats, scanning). The tool surface stays in `agent-core/main.ts`; the headless entry is `--subagent-task`.
