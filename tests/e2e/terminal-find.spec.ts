@@ -22,14 +22,17 @@ test.describe("Terminal Find", () => {
     await expect(bar).toBeVisible();
     await page.locator(".terminal-find input").fill(marker);
 
-    await page.waitForFunction(
-      (text) => {
-        const pane = [...(window as any).__panes.values()][0];
-        return pane?.view.getTerminal().getSelection().includes(text) ?? false;
-      },
-      marker,
+    // Poll from the Playwright side: waitForFunction defaults to RAF polling,
+    // which stalls in the suite's never-shown windows under parallel load
+    // even though the selection itself is set synchronously by the fill.
+    await expect.poll(
+      () =>
+        page.evaluate((text) => {
+          const pane = [...(window as any).__panes.values()][0];
+          return pane?.view.getTerminal().getSelection().includes(text) ?? false;
+        }, marker),
       { timeout: 5_000 },
-    );
+    ).toBe(true);
 
     await page.keyboard.press("Escape");
     await expect(bar).toBeHidden();
