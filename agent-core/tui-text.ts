@@ -10,13 +10,13 @@ export type SlashCommand = { name: string; hint: string; submit?: string };
  *  Hints are grouped session / model / danger so a flat `/help` dump stays scannable. */
 export const SLASH_COMMANDS: SlashCommand[] = [
   { name: "/help", hint: "session · list commands" },
-  { name: "/resume", hint: "session · replay the stored session" },
-  { name: "/clear (new)", hint: "session · start a new empty session", submit: "/clear" },
-  { name: "/compact", hint: "session · reclaim and summarize context" },
   { name: "/login", hint: "session · pick a provider" },
   { name: "/logout", hint: "session · drop a stored credential" },
   { name: "/model", hint: "model · pick or switch" },
   { name: "/models", hint: "model · list live models" },
+  { name: "/resume", hint: "session · replay the stored session" },
+  { name: "/clear (new)", hint: "session · start a new empty session", submit: "/clear" },
+  { name: "/compact", hint: "session · reclaim and summarize context" },
   { name: "/effort", hint: "model · show or set reasoning effort" },
   { name: "/permissions", hint: "danger · set bash approval policy" },
   { name: "/exit", hint: "danger · quit the engine" },

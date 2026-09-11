@@ -4517,13 +4517,17 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       resumeFrame.includes("hello there") &&
         resumeFrame.includes("hi back") &&
         resumeFrame.includes("a.ts") &&
-        resumeFrame.includes("ok file") &&
+        resumeFrame.includes("◆") &&
+        resumeFrame.includes("done") &&
+        !resumeFrame.includes("ok file") &&
         resumeFrame.includes("done reading") &&
         resumeFrame.includes("resume-think") &&
         !resumeFrame.includes("hidden-working-set") &&
         !resumeFrame.includes("hidden-encrypted") &&
         !resumeFrame.includes("resumed 4 messages"),
     );
+    resumeTui.feed("\r");
+    check("resume folded tool expands on Enter", resumeTui.frame().includes("ok file"));
     resumeTui.setThinkingVisible(false);
     check(
       "resume keeps thinking hideable",
@@ -4559,15 +4563,20 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       resumePair,
     );
     const pairFrame = resumePair.frame();
+    const pairEntries = (resumePair as unknown as { entries: Array<{ text?: string; toolDetail?: string }> }).entries;
     check(
       "resume pairs tools out of order and keeps orphan results",
       pairFrame.includes("first.ts") &&
         pairFrame.includes("second.ts") &&
         pairFrame.includes("empty-id.ts") &&
-        pairFrame.includes("first-body") &&
-        pairFrame.includes("second-body") &&
-        pairFrame.includes("empty-body") &&
-        pairFrame.includes("orphan-body") &&
+        pairEntries.some((entry) => entry.text === "first-body") &&
+        pairEntries.some((entry) => entry.text === "second-body") &&
+        pairEntries.some((entry) => entry.text === "empty-body") &&
+        pairEntries.some((entry) => entry.text === "orphan-body") &&
+        !pairFrame.includes("first-body") &&
+        !pairFrame.includes("second-body") &&
+        !pairFrame.includes("empty-body") &&
+        !pairFrame.includes("orphan-body") &&
         !pairFrame.includes("running"),
     );
     const resumeCancel = new tuiMod.AgentTui({
