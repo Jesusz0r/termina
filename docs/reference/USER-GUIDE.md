@@ -161,7 +161,8 @@ While the agent works:
 - The file watcher pushes every disk change into open editor models. You see
   edits land as the agent writes them.
 - Files the agent touches auto-open in editor tabs mid-run, so you can follow
-  along without hunting for paths.
+  along without hunting for paths. Turn this off in Settings → General →
+  **Open files the agent edits**.
 - The Modified files panel (bottom of the terminal pane) lists every file the
   current run changed, with a badge per file: `A` created, `M` modified,
   `D` deleted.
@@ -393,7 +394,14 @@ current Mine set before merging.
 
 ## 11. Settings
 
-Open with `Cmd/Ctrl+,`.
+Open with `Cmd/Ctrl+,`. Settings has three sections: **General**,
+**Appearance**, and **Shortcuts**.
+
+**General**
+
+| Setting | Options |
+|---|---|
+| Open files the agent edits | On / off. When on, a file opens in the editor as the agent starts editing it. On by default. |
 
 **Appearance**
 
@@ -434,6 +442,9 @@ elsewhere — `Ctrl+Tab` is literal `Ctrl` on every platform):
 | `Cmd/Ctrl+Shift+E` | Toggle terminal |
 | `Cmd/Ctrl+E` | Toggle editor |
 | `Cmd/Ctrl+Shift+F` | Terminal fullscreen |
+| `Cmd/Ctrl+P` | Quick Open (open a project file by name) |
+| `Cmd/Ctrl+K` | Command palette |
+| `Cmd/Ctrl+Alt+F` | Search file contents |
 | `Cmd/Ctrl+Shift+P` | Search sessions |
 | `Cmd/Ctrl+,` | Open settings |
 | `Shift+Enter` / `Ctrl+Enter` | Newline in the terminal input |
