@@ -34,6 +34,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { TextDecoder } from "node:util";
 import { readSystemProcessIdentity } from "../shared/process-identity.js";
+import { errorCode, isRecord } from "../shared/guards.ts";
 
 import { SUPPORTED_PROVIDERS, type ProviderId, type ProviderProtocol, type LoginMode } from "./auth/providers/types.ts";
 export type { ProviderId, ProviderProtocol, LoginMode } from "./auth/providers/types.ts";
@@ -695,10 +696,6 @@ type AuthFile = Record<string, unknown>;
 let cached: { path: string; mtimeMs: number; data: AuthFile } | null = null;
 const refreshFlights = new Map<string, Promise<{ ok: true } | { ok: false; error: string }>>();
 
-function isObject(v: unknown): v is Record<string, unknown> {
-  return Boolean(v) && typeof v === "object" && !Array.isArray(v);
-}
-
 function extraApiUrl(entry: Record<string, unknown>): string | null {
   const raw = typeof entry.apiUrl === "string" ? entry.apiUrl.trim() : "";
   return raw ? validateCopilotApiUrl(raw) : null;
@@ -784,12 +781,8 @@ type AuthLockTransition = {
   guardPresent: boolean;
 };
 
-function lockErrorCode(error: unknown): string | null {
-  return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : null;
-}
-
 function authLockOwner(value: unknown): AuthLockOwner | null {
-  if (!isObject(value)) return null;
+  if (!isRecord(value)) return null;
   const pid = value.pid;
   const token = value.token;
   const startedAt = value.startedAt;
@@ -855,7 +848,7 @@ function authLockGuardState(path: string): AuthLockGuardState {
     ) return "invalid";
     return "present";
   } catch (error) {
-    return lockErrorCode(error) === "ENOENT" || lockErrorCode(error) === "ENOTDIR" ? "missing" : "invalid";
+    return errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR" ? "missing" : "invalid";
   }
 }
 
@@ -930,7 +923,7 @@ function probeAuthLockWitnessPath(path: string): boolean | null {
       closeSync(fd);
     }
   } catch (error) {
-    const code = lockErrorCode(error);
+    const code = errorCode(error);
     if (code === "ENOENT" || code === "ENOTDIR" || code === "ENXIO") return false;
     return null;
   }
@@ -1099,7 +1092,7 @@ function authLockOwnerAlive(
   try {
     process.kill(owner.pid, 0);
   } catch (error) {
-    return lockErrorCode(error) !== "ESRCH";
+    return errorCode(error) !== "ESRCH";
   }
   const actualIdentity = observedAuthProcessIdentity(owner.pid);
   // An unreadable birth identity is uncertainty, not proof of death.
@@ -1141,7 +1134,7 @@ function removeEmptyAuthLock(lock: string, directory: AuthLockDirectory): boolea
     rmdirSync(lock);
     return true;
   } catch (error) {
-    return lockErrorCode(error) === "ENOENT";
+    return errorCode(error) === "ENOENT";
   }
 }
 
@@ -1221,7 +1214,7 @@ function cleanupAuthLockTransition(lock: string, expected: AuthLockTransition, w
     unlinkSync(afterGuard.recordPath);
     return removeEmptyAuthLock(lock, expected.directory);
   } catch (error) {
-    return lockErrorCode(error) === "ENOENT" && removeEmptyAuthLock(lock, expected.directory);
+    return errorCode(error) === "ENOENT" && removeEmptyAuthLock(lock, expected.directory);
   } finally {
     if (heldWitnessFd !== null) {
       try { closeSync(heldWitnessFd); } catch { /* best effort after a failed cleanup */ }
@@ -1282,7 +1275,7 @@ function recoverAuthLock(lock: string, stale: AuthLockHandle): boolean {
   try {
     renameSync(stale.ownerPath, recoveredOwner);
   } catch (error) {
-    return lockErrorCode(error) === "ENOENT";
+    return errorCode(error) === "ENOENT";
   }
   const moved = readAuthLockOwner(recoveredOwner);
   const currentDirectory = authLockDirectory(lock);
@@ -1345,7 +1338,7 @@ function tryAcquireAuthLock(lock: string, binding: AuthPathBinding): AuthLockHan
       mkdirSync(candidate, { mode: 0o700 });
       break;
     } catch (error) {
-      if (lockErrorCode(error) === "EEXIST") continue;
+      if (errorCode(error) === "EEXIST") continue;
       throw error;
     }
   }
@@ -1375,7 +1368,7 @@ function tryAcquireAuthLock(lock: string, binding: AuthPathBinding): AuthLockHan
     try {
       renameSync(candidate, lock);
     } catch (error) {
-      const code = lockErrorCode(error);
+      const code = errorCode(error);
       if (code === "EEXIST" || code === "ENOTEMPTY" || code === "EISDIR" || code === "ENOTDIR") return null;
       throw error;
     }
@@ -1424,7 +1417,7 @@ function withLock<T>(fn: (binding: AuthPathBinding) => T): T {
         }
       }
     } catch (error) {
-      if (lockErrorCode(error) !== null || error instanceof Error) {
+      if (errorCode(error) !== null || error instanceof Error) {
         if (!(error instanceof Error) || error.message !== "auth file busy") throw error;
       } else {
         throw error;
@@ -1452,7 +1445,7 @@ export function readAuth(): { ok: true; data: AuthFile } | { ok: false; reason: 
     const st = statSync(path);
     if (cached && cached.path === path && cached.mtimeMs === st.mtimeMs) return { ok: true, data: cached.data };
     const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
-    if (!isObject(parsed)) {
+    if (!isRecord(parsed)) {
       cached = null;
       return { ok: false, reason: "corrupt" };
     }
@@ -1826,7 +1819,7 @@ function fromStored(
   id: ProviderId,
   entry: unknown,
 ): ResolvedAuth | { needsOauthRefresh: true; refresh: string; extra: Record<string, unknown> } | null {
-  if (!isObject(entry) || typeof entry.type !== "string") return null;
+  if (!isRecord(entry) || typeof entry.type !== "string") return null;
   if (entry.type === "api_key") {
     const key = typeof entry.key === "string" ? entry.key.trim() : "";
     if (!key) return null;
@@ -2067,7 +2060,7 @@ function persistOauth(
 ): { ok: true } | { ok: false; error: string } {
   try {
     modifyProvider(providerId, (current) => {
-      const cur = isObject(current) ? current : {};
+      const cur = isRecord(current) ? current : {};
       const accountId =
         providerId === "openai-codex"
           ? extractAccountId(parsed.access) ?? (typeof extra.accountId === "string" ? extra.accountId : undefined)
@@ -2091,7 +2084,7 @@ function persistOauth(
 function persistApiKey(providerId: ProviderId, key: string): { ok: true } | { ok: false; error: string } {
   try {
     modifyProvider(providerId, (current) => {
-      const cur = isObject(current) ? current : {};
+      const cur = isRecord(current) ? current : {};
       return { ...cur, type: "api_key", key };
     });
   } catch (err) {
@@ -2107,7 +2100,7 @@ async function runRefreshOauth(providerId: ProviderId): Promise<RefreshResult> {
     const got = readAuth();
     if (!got.ok) return { ok: false, error: "auth expired — run /login" };
     const entry = got.data[providerId];
-    if (!isObject(entry) || entry.type !== "oauth" || typeof entry.refresh !== "string") {
+    if (!isRecord(entry) || entry.type !== "oauth" || typeof entry.refresh !== "string") {
       return { ok: false, error: "auth expired — run /login" };
     }
     let parsed: ReturnType<typeof parseOauthToken>;
@@ -2324,7 +2317,7 @@ async function exchangeCodex(
     const parsed = parseTokenResponse(res.payload);
     if (!parsed.ok) return { ok: false, error: `login failed: ${parsed.error}` };
     if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
-    const rec = isObject(res.payload) ? res.payload : {};
+    const rec = isRecord(res.payload) ? res.payload : {};
     const idToken = typeof rec.id_token === "string" ? rec.id_token : "";
     const accountId = extractAccountId(parsed.access) || extractAccountId(idToken) || undefined;
     return persistOauth("openai-codex", parsed, accountId ? { accountId } : {});
@@ -2344,7 +2337,7 @@ async function exchangeOpenRouter(
       { code, code_verifier: verifier, code_challenge_method: "S256" },
       signal,
     );
-    const rec = isObject(res.payload) ? res.payload : {};
+    const rec = isRecord(res.payload) ? res.payload : {};
     const key = typeof rec.key === "string" ? rec.key : "";
     if (!res.ok || !key) return { ok: false, error: "login failed: OpenRouter key exchange failed" };
     if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
@@ -2608,7 +2601,7 @@ export async function requestXaiDeviceCode(signal?: AbortSignal): Promise<{
     { client_id: XAI_CLIENT_ID, scope: XAI_SCOPE, referrer: "termina" },
     signal,
   );
-  if (!res.ok || !isObject(res.payload)) {
+  if (!res.ok || !isRecord(res.payload)) {
     throw new Error(`xAI device authorization failed (HTTP ${res.status})`);
   }
   const deviceCode = typeof res.payload.device_code === "string" ? res.payload.device_code : "";
@@ -2658,7 +2651,7 @@ export async function pollXaiDeviceToken(
       if (!parsed.ok) return { ok: false, error: `login failed: ${parsed.error}` };
       return parsed;
     }
-    const err = isObject(res.payload) && typeof res.payload.error === "string" ? res.payload.error : "";
+    const err = isRecord(res.payload) && typeof res.payload.error === "string" ? res.payload.error : "";
     if (err === "authorization_pending") continue;
     if (err === "slow_down") {
       intervalMs += XAI_SLOW_DOWN_MS;
@@ -2734,7 +2727,7 @@ export async function requestGithubDeviceCode(signal?: AbortSignal): Promise<{
     signal,
     { accept: "application/json", "user-agent": COPILOT_HEADERS["user-agent"] },
   );
-  if (!res.ok || !isObject(res.payload)) {
+  if (!res.ok || !isRecord(res.payload)) {
     throw new Error(`GitHub device authorization failed (HTTP ${res.status})`);
   }
   const deviceCode = typeof res.payload.device_code === "string" ? res.payload.device_code : "";
@@ -2769,10 +2762,10 @@ export async function pollGithubDeviceToken(
       signal,
       { accept: "application/json", "user-agent": COPILOT_HEADERS["user-agent"] },
     );
-    if (isObject(res.payload) && typeof res.payload.access_token === "string" && res.payload.access_token) {
+    if (isRecord(res.payload) && typeof res.payload.access_token === "string" && res.payload.access_token) {
       return { ok: true, githubToken: res.payload.access_token };
     }
-    const err = isObject(res.payload) && typeof res.payload.error === "string" ? res.payload.error : "";
+    const err = isRecord(res.payload) && typeof res.payload.error === "string" ? res.payload.error : "";
     if (err === "access_denied") return { ok: false, error: "GitHub device authorization was denied" };
     if (err === "expired_token") return { ok: false, error: "GitHub device code expired" };
     if (err === "slow_down") waitMs += 5_000;
@@ -2804,11 +2797,11 @@ export async function exchangeGithubCopilotToken(
       signal,
     );
     const payload = res.payload;
-    if (!res.ok || !isObject(payload) || typeof payload.token !== "string" || !payload.token) {
+    if (!res.ok || !isRecord(payload) || typeof payload.token !== "string" || !payload.token) {
       return { ok: false, error: `Copilot session token failed (HTTP ${res.status})` };
     }
     if (signal?.aborted) return { ok: false, error: AUTH_REQUEST_CANCELLED };
-    const endpoints = isObject(payload.endpoints) ? payload.endpoints : {};
+    const endpoints = isRecord(payload.endpoints) ? payload.endpoints : {};
     const reported = typeof endpoints.api === "string" ? endpoints.api : "";
     const apiUrl = validateCopilotApiUrl(reported) || providerDefinition("github-copilot").baseUrl;
     let expires = Date.now() + 25 * 60 * 1000;

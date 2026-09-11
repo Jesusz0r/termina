@@ -8,6 +8,7 @@ import { isAbsolute, normalize } from "node:path";
 import { randomUUID } from "node:crypto";
 import { MAX_IMAGE_BYTES, MAX_PENDING_IMAGES, type PendingImageMediaType } from "../agent-core/host.ts";
 import { quoteShellArg } from "../shared/terminal-control.ts";
+import { isErrno } from "../shared/guards.ts";
 import type { FileHandle } from "node:fs/promises";
 
 const MAX_DROP_PATHS = 16;
@@ -22,10 +23,6 @@ const GIF89 = Buffer.from("GIF89a");
 
 export type DropImage = { bytes: Buffer; mediaType: PendingImageMediaType; id: string };
 export type DropFailure = { ok: false; error: string };
-
-function isErrno(err: unknown, code: string): boolean {
-  return Boolean(err && typeof err === "object" && "code" in err && (err as { code: unknown }).code === code);
-}
 
 export function normalizeDroppedPaths(raw: unknown): { ok: true; paths: string[] } | DropFailure {
   if (!Array.isArray(raw) || raw.length === 0) return { ok: false, error: "no files" };

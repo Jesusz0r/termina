@@ -17,6 +17,7 @@ import { delimiter, isAbsolute, join, relative, sep } from "node:path";
 import { realpathSync, statSync } from "node:fs";
 import { IGNORED_SEGMENTS, matchGitignore, parseGitignore, type GitignoreRules } from "../shared/gitignore.ts";
 import type { ContentHit } from "../shared/types.ts";
+import { isRecord } from "../shared/guards.ts";
 import { listProjectPaths } from "./quick-open.js";
 
 export type { ContentHit };
@@ -51,10 +52,6 @@ const MAX_SCAN_BYTES = 32 * 1024 * 1024;
 const CONTENT_SEARCH_BUDGET_MS = 5000;
 /** Ripgrep stdout cap: --json is verbose, the hit cap usually fires first. */
 const RG_STDOUT_CAP = 1024 * 1024;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function previewLine(text: string): string {
   const line = text.replace(/[\r\n]+$/, "");

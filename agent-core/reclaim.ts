@@ -19,6 +19,7 @@ import type {
 } from "./session.ts";
 
 import { HIGH_WATER, LOW_WATER, PROTECT_TURNS, isUserPrompt } from "./compaction.ts";
+import { isRecord } from "../shared/guards.ts";
 const PRUNE_MIN_CHARS = 2_048;
 const MAX_RECEIPT_TARGETS = 256;
 
@@ -70,10 +71,6 @@ export type RecoveryPlan = {
 
 type Block = Record<string, unknown> & { type?: unknown };
 type IndexedMessage = ReclaimMessage & { inputIndex: number; messageTokens: number };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
 
 function isSafeInteger(value: unknown, min = 0): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= min;

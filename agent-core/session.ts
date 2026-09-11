@@ -41,6 +41,7 @@ import {
   validateSessionRetentionLease,
   type SessionRetentionLock,
 } from "../shared/session-retention-lock.ts";
+import { errorCode, isRecord } from "../shared/guards.ts";
 
 export const MAX_SESSION_SEGMENT_BYTES = 8 * 1024 * 1024;
 export const MAX_SESSION_RECORD_BYTES = 1 * 1024 * 1024;
@@ -237,10 +238,6 @@ const SESSION_HASH = /^[0-9a-f]{64}$/;
 const RECEIPT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_RECEIPT_TARGETS = 256;
 const MAX_RECEIPT_METADATA_CHARS = 4096;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
 
 function integerAtLeast(value: unknown, min: number): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= min;
@@ -498,10 +495,6 @@ function isSafeImageName(name: string): boolean {
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-function errorCode(err: unknown): string | null {
-  return err && typeof err === "object" && "code" in err && typeof err.code === "string" ? err.code : null;
 }
 
 const UNBOUND_CLEANUP_ERROR = "session cleanup is not descriptor-bound";

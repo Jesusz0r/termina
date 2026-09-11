@@ -7,6 +7,8 @@
  * cache-write/reasoning billing policy.
  */
 
+import { isRecord } from "../shared/guards.ts";
+
 export const RATE_FIELDS = [
   "input",
   "cacheRead",
@@ -189,10 +191,6 @@ const UNKNOWN_FIELD_ORDER: readonly TraceUnknownField[] = [
   "reasoningBilling",
   "aggregate",
 ];
-
-function isRecord(value: unknown): value is RecordLike {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function hasOwn(value: object, key: PropertyKey): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);

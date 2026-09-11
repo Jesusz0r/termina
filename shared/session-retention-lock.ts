@@ -24,6 +24,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { syncDirectory } from "./fsync.ts";
+import { errorCode } from "./guards.ts";
 
 export const RETAINED_SESSION_ADMISSION_LOCK = ".termina-retained-session-admission.lock";
 
@@ -68,10 +70,6 @@ type LockTransition = {
 
 type SessionRetentionLockState = Omit<SessionRetentionLock, "rootIdentity">;
 
-function errorCode(error: unknown): string | null {
-  return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : null;
-}
-
 function processAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -103,15 +101,6 @@ function parseLockOwner(value: unknown): LockOwner | null {
     record.ino < 0
   ) return null;
   return { pid: record.pid, token: record.token, startedAt: record.startedAt, dev: record.dev, ino: record.ino };
-}
-
-function syncDirectory(path: string): void {
-  const fd = openSync(path, fsConstants.O_RDONLY);
-  try {
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
 }
 
 function lockOwnerEntry(owner: Pick<LockOwner, "token" | "dev" | "ino">): string {

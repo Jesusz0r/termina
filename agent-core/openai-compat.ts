@@ -7,6 +7,8 @@
  * (OpenCode Zen Gemini).
  */
 
+import { isRecord } from "../shared/guards.ts";
+
 export type ToolDef = {
   name: string;
   description: string;
@@ -546,10 +548,6 @@ const GOOGLE_MODEL_RE = /^models\/[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const GOOGLE_TTL_RE = /^(?:0|[1-9]\d*)(?:\.\d{1,9})?s$/;
 const GOOGLE_DISPLAY_NAME_MAX_CHARS = 128;
 const GOOGLE_RESOURCE_MAX_CHARS = 512;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
 
 function jsonByteLength(value: unknown): number | null {
   let json: string;

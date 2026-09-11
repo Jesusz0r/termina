@@ -40,6 +40,7 @@ import { gpt56ReasoningContext, gpt5TextVerbosity } from "./models/families/open
 import { modelLeaf } from "./models/families/identity.ts";
 import { claudeThinkingApi } from "./models/families/anthropic.ts";
 import { consumeAgentSessionEnvironment } from "../shared/agent-environment.ts";
+import { syncParentDir } from "../shared/fsync.ts";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -93,6 +94,7 @@ import {
   type ProviderId,
   type ProviderProtocol,
 } from "./auth.ts";
+import { providerDefinition } from "./auth/providers/index.ts";
 import {
   completionsBody,
   completionLiveDelta,
@@ -2631,17 +2633,13 @@ function syncFile(path: string): void {
   const fd = openSync(path, "r");
   try { fsyncSync(fd); } finally { closeSync(fd); }
 }
-function syncDirectory(path: string): void {
-  const fd = openSync(dirname(path), "r");
-  try { fsyncSync(fd); } finally { closeSync(fd); }
-}
 function writeDurableMarker(path: string, content: string): void {
   const temp = `${path}.${randomUUID()}.tmp`;
   try {
     writeFileSync(temp, content, { flag: "wx", mode: 0o600 });
     syncFile(temp);
     renameSync(temp, path);
-    syncDirectory(path);
+    syncParentDir(path);
   } catch (error) {
     try { rmSync(temp, { force: true }); } catch { /* best effort */ }
     throw error;
@@ -2755,7 +2753,7 @@ function sealBeforeAppend(lineBytes: number, lastSeq: number): boolean {
         try {
           const activeFd = openSync(activeSidecarPath, "a", 0o600);
           try { fsyncSync(activeFd); } finally { closeSync(activeFd); }
-          syncDirectory(activeSidecarPath);
+          syncParentDir(activeSidecarPath);
           return true;
         } catch {
           return false;
@@ -2817,7 +2815,7 @@ function sealBeforeAppend(lineBytes: number, lastSeq: number): boolean {
       syncFile(sealedPath);
       const activeFd = openSync(activeSidecarPath, "a", 0o600);
       try { fsyncSync(activeFd); } finally { closeSync(activeFd); }
-      syncDirectory(sealedPath);
+      syncParentDir(sealedPath);
       // Publish the close proof last. If a crash interrupts any prior
       // rename/file/parent durability step, restart sees an unproven sealed
       // inode and keeps an anchor instead of trusting an orphan marker.
@@ -2840,7 +2838,7 @@ function sealBeforeAppend(lineBytes: number, lastSeq: number): boolean {
       if (proofPath) {
         try {
           rmSync(proofPath, { force: true });
-          syncDirectory(proofPath);
+          syncParentDir(proofPath);
         } catch { /* best effort */ }
       }
       if ((error as NodeJS.ErrnoException)?.code === "ENOENT") continue;
@@ -2878,21 +2876,16 @@ type MainCacheIdentity = NonNullable<ReturnType<typeof cacheIdentityFor>>;
 /** Route origin used for documented capability gates. Custom relay origins
  * remain unknown because a model name alone cannot establish their fields. */
 function cacheRouteForProvider(provider: ProviderId): string {
-  const envName: Partial<Record<ProviderId, string>> = {
-    anthropic: "ANTHROPIC_BASE_URL",
-    openai: "OPENAI_BASE_URL",
-    xai: "XAI_BASE_URL",
-    openrouter: "OPENROUTER_BASE_URL",
-  };
-  const env = envName[provider];
-  if (env) {
-    const configured = process.env[env]?.trim();
+  const definition = providerDefinition(provider);
+  if (definition.baseEnv) {
+    const configured = process.env[definition.baseEnv]?.trim();
     if (configured) return configured;
   }
-  if (provider === "anthropic") return "https://api.anthropic.com";
-  if (provider === "openai") return "https://api.openai.com/v1";
-  if (provider === "xai") return "https://api.x.ai/v1";
-  if (provider === "google") return "https://generativelanguage.googleapis.com/v1beta/openai";
+  // Only these origins have documented capability gates; relays keep their
+  // opaque provider name so they can never match a documented route.
+  if (provider === "anthropic" || provider === "openai" || provider === "xai" || provider === "google") {
+    return definition.baseUrl;
+  }
   return `${provider}`;
 }
 

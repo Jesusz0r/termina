@@ -16,6 +16,8 @@ import {
   stat,
   unlink,
 } from "node:fs/promises";
+import { errorCode, isRecord } from "../shared/guards.ts";
+import { syncDirectoryAsync } from "../shared/fsync.ts";
 import { basename, dirname, join } from "node:path";
 
 export const TRACE_SCHEMA_VERSION = 2 as const;
@@ -962,10 +964,6 @@ function traceTurnFromName(name: string): number | null {
   return Number.isSafeInteger(turn) && turn > 0 ? turn : null;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
 function likelyPartial(textValue: string): boolean {
   const value = textValue.trim();
   if (value.length === 0) return true;
@@ -1184,16 +1182,6 @@ function retryableFailureKind(kind: TraceWriteFailureKind): boolean {
     kind === "index-write-failure" || kind === "queue-full";
 }
 
-async function syncDirectory(directory: string): Promise<void> {
-  let handle: Awaited<ReturnType<typeof openFile>> | null = null;
-  try {
-    handle = await openFile(directory, "r");
-    await handle.sync();
-  } finally {
-    await handle?.close().catch(() => undefined);
-  }
-}
-
 type AtomicWriteResult = { ok: true } | { ok: false; error: string; renamed: boolean };
 
 async function atomicWrite(path: string, textValue: string): Promise<AtomicWriteResult> {
@@ -1208,7 +1196,7 @@ async function atomicWrite(path: string, textValue: string): Promise<AtomicWrite
     handle = null;
     await rename(temporary, path);
     renamed = true;
-    await syncDirectory(dirname(path));
+    await syncDirectoryAsync(dirname(path));
     return { ok: true };
   } catch (error) {
     if (handle !== null) {
@@ -1286,10 +1274,6 @@ function compositeKey(runId: string, idValue: string): string {
 
 function taskKey(runId: string, taskId: string): string {
   return compositeKey(runId, taskId);
-}
-
-function errorCode(error: unknown): string | null {
-  return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : null;
 }
 
 function processAlive(pid: number): boolean {
@@ -1714,13 +1698,13 @@ export class TraceRuntime {
       try {
         await handle.writeFile(JSON.stringify({ pid: process.pid, token: this.lockToken, startedAt: timestamp(this.now) }), { encoding: "utf8" });
         await handle.sync();
-        await syncDirectory(this.directory);
+        await syncDirectoryAsync(this.directory);
         this.lockHandle = handle;
         return { ok: true };
       } catch (error) {
         await handle.close().catch(() => undefined);
         await unlink(this.lockPath).catch(() => undefined);
-        await syncDirectory(this.directory).catch(() => undefined);
+        await syncDirectoryAsync(this.directory).catch(() => undefined);
         return { ok: false, error: stableError(error) };
       }
     } catch (error) {
@@ -1737,7 +1721,7 @@ export class TraceRuntime {
       }
       try {
         await unlink(this.lockPath);
-        await syncDirectory(this.directory);
+        await syncDirectoryAsync(this.directory);
       } catch {
         return { ok: false, error: "trace directory is already locked" };
       }
@@ -1746,13 +1730,13 @@ export class TraceRuntime {
         try {
           await handle.writeFile(JSON.stringify({ pid: process.pid, token: this.lockToken, startedAt: timestamp(this.now) }), { encoding: "utf8" });
           await handle.sync();
-          await syncDirectory(this.directory);
+          await syncDirectoryAsync(this.directory);
           this.lockHandle = handle;
           return { ok: true };
         } catch (retryError) {
           await handle.close().catch(() => undefined);
           await unlink(this.lockPath).catch(() => undefined);
-          await syncDirectory(this.directory).catch(() => undefined);
+          await syncDirectoryAsync(this.directory).catch(() => undefined);
           return { ok: false, error: stableError(retryError) };
         }
       } catch (retryError) {
@@ -1774,7 +1758,7 @@ export class TraceRuntime {
     }
     if (ownsPath) await unlink(this.lockPath).catch(() => undefined);
     await handle.close().catch(() => undefined);
-    await syncDirectory(this.directory).catch(() => undefined);
+    await syncDirectoryAsync(this.directory).catch(() => undefined);
   }
 
   private countUnknownLinks(): number {
@@ -2729,7 +2713,7 @@ export class TraceRuntime {
     }
     if (removed) {
       try {
-        await syncDirectory(this.directory);
+        await syncDirectoryAsync(this.directory);
       } catch (caught) {
         this.manifestValue = freezeDeep({
           ...this.manifestValue,

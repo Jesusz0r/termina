@@ -9,7 +9,7 @@
 import {
   createReadStream,
 } from "node:fs";
-import { lstat, opendir, readFile, open } from "node:fs/promises";
+import { lstat, opendir, readFile } from "node:fs/promises";
 import type { BigIntStats, Stats } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
@@ -20,6 +20,8 @@ import {
   validateSessionRetentionLease,
   type SessionRetentionLock,
 } from "../shared/session-retention-lock.js";
+import { errorCode } from "../shared/guards.js";
+import { syncDirectoryAsync } from "../shared/fsync.js";
 export { RETAINED_SESSION_ADMISSION_LOCK } from "../shared/session-retention-lock.js";
 import {
   boundPromotionOpenDirectory,
@@ -105,10 +107,6 @@ export type RetainedSessionTransaction<T> = {
   destinationSessionFile: string;
   result: T;
 };
-
-function errorCode(error: unknown): string | null {
-  return error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : null;
-}
 
 function usageZero(): RetainedUsage {
   return { bytes: 0, entries: 0, images: 0, unknowns: 0 };
@@ -245,14 +243,6 @@ async function inspectPath(path: string): Promise<BigIntStats | null> {
   }
 }
 
-async function syncDirectory(path: string): Promise<void> {
-  const handle = await open(path, "r");
-  try {
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
 type RetainedRootBinding = {
   path: string;
   identity: PromotionFsIdentity;
@@ -405,7 +395,7 @@ async function removeRetainedEntry(
     expectedIdentity: { dev: String(expectedIdentity.dev), ino: String(expectedIdentity.ino) },
     ...(testHook ? { testHook } : {}),
   });
-  await syncDirectory(root);
+  await syncDirectoryAsync(root);
 }
 
 async function writeRetainedClaim(root: string, runId: string, retentionLock: SessionRetentionLock, rootBinding: RetainedRootBinding): Promise<string> {

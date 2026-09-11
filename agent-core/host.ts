@@ -10,6 +10,7 @@ import { link, lstat, mkdir, open, readdir, rename, unlink } from "node:fs/promi
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { HAS_PLAN_TASK } from "../shared/plan-task.ts";
+import { isErrno } from "../shared/guards.ts";
 import type { FileHandle } from "node:fs/promises";
 import { BoundedTextAccumulator, type BoundedText, type BoundedTextMarkerDetails, type CompletionState } from "./tool-output.ts";
 
@@ -452,10 +453,6 @@ function extForMedia(mediaType: string): string {
   if (mediaType === "image/webp") return "webp";
   if (mediaType === "image/gif") return "gif";
   return "png";
-}
-
-function isErrno(err: unknown, code: string): boolean {
-  return Boolean(err && typeof err === "object" && "code" in err && (err as { code: unknown }).code === code);
 }
 
 function queueFail(error: string): never {
