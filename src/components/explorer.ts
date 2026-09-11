@@ -8,13 +8,19 @@
 import { pathBasename, type CommandId, type ContentHit, type ExplorerEntry } from "../../shared/types";
 import {
   ancestorDirs,
+  canDropEntry,
   computeChangedSets,
   deleteConfirmMessage,
   fileIconKind,
   filterKeeps,
   filterVisibleSet,
   findTypeAheadIndex,
+  isMarkedChanged,
+  isPathDescendant,
+  isTypeAheadKey,
   normalizeRelPath,
+  parentPath,
+  parentRel,
   parentRowRel,
   rowLevel,
   splitExtension,
@@ -409,7 +415,7 @@ export class Explorer {
     }
 
     // Type-ahead: a printable single character jumps to the next matching name.
-    if (e.key.length === 1 && e.key !== " ") {
+    if (isTypeAheadKey(e.key)) {
       if (this.typeAhead(rows, index, e.key)) e.preventDefault();
     }
   }
@@ -804,10 +810,8 @@ export class Explorer {
 
   /** A collapsed branch no longer needs expansion state for hidden descendants. */
   private pruneCollapsedDescendants(absPath: string): void {
-    const slashPrefix = `${absPath}/`;
-    const backslashPrefix = `${absPath}\\`;
     for (const path of this.dirs.keys()) {
-      if (path.startsWith(slashPrefix) || path.startsWith(backslashPrefix)) {
+      if (isPathDescendant(path, absPath)) {
         this.dirs.delete(path);
         this.dirViews.delete(path);
       }
@@ -853,8 +857,7 @@ export class Explorer {
 
   /** True when this entry (or, for a directory, something inside it) changed. */
   private isChanged(entry: ExplorerEntry): boolean {
-    const rel = normalizeRelPath(entry.relPath);
-    return entry.type === "dir" ? this.changedDirRel.has(rel) : this.changedRel.has(rel);
+    return isMarkedChanged(entry.type, entry.relPath, this.changedRel, this.changedDirRel);
   }
 
   /** Re-mark every mounted row; toggles a class so the dot's width is fixed. */
@@ -862,10 +865,7 @@ export class Explorer {
     for (const el of this.treeEl.querySelectorAll<HTMLElement>(".explorer-row")) {
       const rel = el.dataset.relPath;
       if (rel === undefined) continue;
-      const changed = el.dataset.type === "dir"
-        ? this.changedDirRel.has(normalizeRelPath(rel))
-        : this.changedRel.has(normalizeRelPath(rel));
-      el.classList.toggle("changed", changed);
+      el.classList.toggle("changed", isMarkedChanged(el.dataset.type, rel, this.changedRel, this.changedDirRel));
     }
   }
 
@@ -1170,11 +1170,7 @@ export class Explorer {
 
   /** False for no-ops the backend would turn into " copy" duplicates. */
   private canDrop(targetDirRel: string): boolean {
-    const src = this.dragSrc;
-    if (!src || !src.relPath) return false;
-    if (targetDirRel === parentRel(src.relPath)) return false;
-    if (src.type === "dir" && (targetDirRel === src.relPath || targetDirRel.startsWith(`${src.relPath}/`))) return false;
-    return true;
+    return canDropEntry(this.dragSrc, targetDirRel);
   }
 
   private clearExpandTimer(): void {
@@ -1341,20 +1337,4 @@ export class Explorer {
     // The watcher fires file:deleted, which closes any open editor tab.
     await this.refresh();
   }
-}
-
-/** Parent folder of a project-relative path; "" is the project root. */
-function parentRel(relPath: string): string {
-  const at = relPath.lastIndexOf("/");
-  return at === -1 ? "" : relPath.slice(0, at);
-}
-
-/** Parent directory for watcher paths, preserving the platform separator. */
-function parentPath(path: string): string {
-  const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  if (slash <= 0) return path.slice(0, Math.max(1, slash));
-  // Keep the separator after a Windows drive letter: `C:\\file` belongs to
-  // `C:\\`, whereas slicing at the separator would produce `C:`.
-  if (slash === 2 && path[1] === ":") return path.slice(0, 3);
-  return path.slice(0, slash);
 }

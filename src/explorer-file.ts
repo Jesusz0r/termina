@@ -93,6 +93,21 @@ export function computeChangedSets(relPaths: readonly string[]): {
   return { files, dirs };
 }
 
+/**
+ * True when this entry (or, for a directory, something inside it) changed: a
+ * file reads the file set, a directory the ancestor set. One owner for the
+ * lookup so row creation and the re-mark pass cannot disagree.
+ */
+export function isMarkedChanged(
+  entryType: string | undefined,
+  relPath: string,
+  changedFiles: ReadonlySet<string>,
+  changedDirs: ReadonlySet<string>,
+): boolean {
+  const rel = normalizeRelPath(relPath);
+  return entryType === "dir" ? changedDirs.has(rel) : changedFiles.has(rel);
+}
+
 /** The pane fields the explorer's change marks are derived from. */
 export interface ChangedPaneSource {
   projectId: string | null;
@@ -156,6 +171,47 @@ export function targetDirRel(entry: { relPath: string; type: "file" | "dir" }): 
   return at === -1 ? "" : rel.slice(0, at);
 }
 
+/** Parent folder of a project-relative path; "" is the project root. */
+export function parentRel(relPath: string): string {
+  const at = relPath.lastIndexOf("/");
+  return at === -1 ? "" : relPath.slice(0, at);
+}
+
+/** Parent directory for watcher paths, preserving the platform separator. */
+export function parentPath(path: string): string {
+  const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  if (slash <= 0) return path.slice(0, Math.max(1, slash));
+  // Keep the separator after a Windows drive letter: `C:\\file` belongs to
+  // `C:\\`, whereas slicing at the separator would produce `C:`.
+  if (slash === 2 && path[1] === ":") return path.slice(0, 3);
+  return path.slice(0, slash);
+}
+
+/**
+ * True when `path` is strictly inside `ancestor` under either separator: the
+ * match requires the separator, so a sibling with a shared prefix (`/a/bb`
+ * under `/a/b`) is not a descendant, and the ancestor itself is not one.
+ * Drives the collapse prune of hidden descendants' expansion state.
+ */
+export function isPathDescendant(path: string, ancestor: string): boolean {
+  return path.startsWith(`${ancestor}/`) || path.startsWith(`${ancestor}\\`);
+}
+
+/**
+ * True when the dragged entry may drop into `target`. False for no-ops the
+ * backend would turn into " copy" duplicates (same folder) and for a folder
+ * dropped into itself or one of its descendants.
+ */
+export function canDropEntry(
+  src: { relPath: string; type: "file" | "dir" } | null,
+  target: string,
+): boolean {
+  if (!src || !src.relPath) return false;
+  if (target === parentRel(src.relPath)) return false;
+  if (src.type === "dir" && (target === src.relPath || target.startsWith(`${src.relPath}/`))) return false;
+  return true;
+}
+
 /**
  * Confirmation text for deleting one explorer entry. A directory delete is
  * recursive (`rm -rf` in main), so the message must say so: the count cannot be
@@ -191,6 +247,15 @@ export function findTypeAheadIndex(names: readonly string[], from: number, buffe
   const direct = search(query);
   if (direct !== -1) return direct;
   return query.length > 1 ? search(query.slice(0, 1)) : -1;
+}
+
+/**
+ * True when a key extends the type-ahead name search: one printable character.
+ * Space is excluded so it keeps its default behavior instead of entering the
+ * name buffer.
+ */
+export function isTypeAheadKey(key: string): boolean {
+  return key.length === 1 && key !== " ";
 }
 
 /**

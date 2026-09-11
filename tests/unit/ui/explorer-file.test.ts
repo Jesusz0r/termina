@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ancestorDirs,
+  canDropEntry,
   computeChangedSets,
   deleteConfirmMessage,
   extensionOf,
@@ -8,7 +9,12 @@ import {
   filterKeeps,
   filterVisibleSet,
   findTypeAheadIndex,
+  isMarkedChanged,
+  isPathDescendant,
+  isTypeAheadKey,
   normalizeRelPath,
+  parentPath,
+  parentRel,
   parentRowRel,
   projectChangedPaths,
   rowLevel,
@@ -342,6 +348,119 @@ describe("explorer file visuals", () => {
       expect(findTypeAheadIndex(names, 0, "zzz")).toBe(-1);
       expect(findTypeAheadIndex([], 0, "a")).toBe(-1);
       expect(findTypeAheadIndex(names, 0, "")).toBe(-1);
+    });
+  });
+
+  describe("parentRel", () => {
+    it("returns the containing folder", () => {
+      expect(parentRel("src/components/explorer.ts")).toBe("src/components");
+      expect(parentRel("src/main.ts")).toBe("src");
+    });
+
+    it("returns the root for top-level entries", () => {
+      expect(parentRel("main.ts")).toBe("");
+      expect(parentRel("")).toBe("");
+    });
+  });
+
+  describe("parentPath", () => {
+    it("climbs posix paths", () => {
+      expect(parentPath("/proj/src/main.ts")).toBe("/proj/src");
+      expect(parentPath("/proj/src")).toBe("/proj");
+      expect(parentPath("/proj")).toBe("/");
+    });
+
+    it("climbs windows paths without changing the separator", () => {
+      expect(parentPath("C:\\proj\\src\\main.ts")).toBe("C:\\proj\\src");
+      expect(parentPath("C:\\proj\\src")).toBe("C:\\proj");
+    });
+
+    it("keeps the separator after a drive letter", () => {
+      expect(parentPath("C:\\file")).toBe("C:\\");
+    });
+  });
+
+  describe("isPathDescendant", () => {
+    it("matches children at any depth under either separator", () => {
+      expect(isPathDescendant("/a/b/c", "/a/b")).toBe(true);
+      expect(isPathDescendant("/a/b/c/d", "/a/b")).toBe(true);
+      expect(isPathDescendant("C:\\a\\b\\c", "C:\\a\\b")).toBe(true);
+    });
+
+    it("rejects the ancestor itself", () => {
+      expect(isPathDescendant("/a/b", "/a/b")).toBe(false);
+      expect(isPathDescendant("C:\\a\\b", "C:\\a\\b")).toBe(false);
+    });
+
+    it("rejects siblings with a shared prefix", () => {
+      expect(isPathDescendant("/a/bb", "/a/b")).toBe(false);
+      expect(isPathDescendant("C:\\a\\bb", "C:\\a\\b")).toBe(false);
+    });
+  });
+
+  describe("canDropEntry", () => {
+    it("rejects a missing or root source", () => {
+      expect(canDropEntry(null, "src")).toBe(false);
+      expect(canDropEntry({ relPath: "", type: "dir" }, "src")).toBe(false);
+    });
+
+    it("rejects a same-folder no-op", () => {
+      expect(canDropEntry({ relPath: "src/main.ts", type: "file" }, "src")).toBe(false);
+      expect(canDropEntry({ relPath: "main.ts", type: "file" }, "")).toBe(false);
+    });
+
+    it("accepts a real move", () => {
+      expect(canDropEntry({ relPath: "src/main.ts", type: "file" }, "lib")).toBe(true);
+      expect(canDropEntry({ relPath: "src/main.ts", type: "file" }, "")).toBe(true);
+      expect(canDropEntry({ relPath: "src", type: "dir" }, "lib")).toBe(true);
+    });
+
+    it("rejects a folder dropped into itself or a descendant", () => {
+      expect(canDropEntry({ relPath: "src", type: "dir" }, "src")).toBe(false);
+      expect(canDropEntry({ relPath: "src", type: "dir" }, "src/components")).toBe(false);
+    });
+
+    it("accepts a folder dropped beside a shared-prefix sibling", () => {
+      expect(canDropEntry({ relPath: "src", type: "dir" }, "src-old")).toBe(true);
+    });
+  });
+
+  describe("isMarkedChanged", () => {
+    const files = new Set(["src/main.ts"]);
+    const dirs = new Set(["src", ""]);
+
+    it("reads the file set for files", () => {
+      expect(isMarkedChanged("file", "src/main.ts", files, dirs)).toBe(true);
+      expect(isMarkedChanged("file", "src/other.ts", files, dirs)).toBe(false);
+    });
+
+    it("reads the ancestor set for directories", () => {
+      expect(isMarkedChanged("dir", "src", files, dirs)).toBe(true);
+      expect(isMarkedChanged("dir", "lib", files, dirs)).toBe(false);
+    });
+
+    it("normalizes separators before the lookup", () => {
+      expect(isMarkedChanged("file", "src\\main.ts", files, dirs)).toBe(true);
+    });
+
+    it("treats a missing type as a file", () => {
+      expect(isMarkedChanged(undefined, "src/main.ts", files, dirs)).toBe(true);
+    });
+  });
+
+  describe("isTypeAheadKey", () => {
+    it("accepts single printable characters", () => {
+      expect(isTypeAheadKey("a")).toBe(true);
+      expect(isTypeAheadKey("Z")).toBe(true);
+      expect(isTypeAheadKey("1")).toBe(true);
+      expect(isTypeAheadKey(".")).toBe(true);
+    });
+
+    it("rejects space, empty, and multi-character keys", () => {
+      expect(isTypeAheadKey(" ")).toBe(false);
+      expect(isTypeAheadKey("")).toBe(false);
+      expect(isTypeAheadKey("Enter")).toBe(false);
+      expect(isTypeAheadKey("F2")).toBe(false);
     });
   });
 });
