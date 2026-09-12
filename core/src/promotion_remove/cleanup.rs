@@ -24,10 +24,8 @@ use crate::util::{
     stat_file,
 };
 use crate::store::FileIdentity;
-use crate::promotion_files::{
-    promotion_cleanup_same_namespace_identity,
-};
-use crate::capture::read_link_at;
+use crate::promotion_files::promotion_cleanup_same_namespace_identity;
+use crate::util::read_link_at;
 use crate::promote_fs::{
     PromotionDirectoryStream,
     promotion_add_work,

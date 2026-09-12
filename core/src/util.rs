@@ -14,8 +14,8 @@ use sha2::{Digest, Sha256};
 use serde_json::Value;
 
 use crate::store::FileIdentity;
-use crate::{StoreObjectTransaction, write_blob};
-use crate::capture::{AnchoredPath, CaptureRoot, read_link_at};
+use crate::{PROMOTION_PATH_MAX_BYTES, StoreObjectTransaction, write_blob};
+use crate::capture::{AnchoredPath, CaptureRoot};
 
 pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
@@ -254,6 +254,31 @@ pub(crate) fn open_at_mode(
 
 pub(crate) fn missing_path(error: &io::Error) -> bool {
     matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ENOTDIR))
+}
+
+/// Bounded `readlinkat(2)` for a descriptor-relative symlink.
+pub(crate) fn read_link_at(parent: RawFd, name: &CStr) -> io::Result<Vec<u8>> {
+    let mut bytes = vec![0u8; PROMOTION_PATH_MAX_BYTES + 1];
+    let len = unsafe {
+        libc::readlinkat(
+            parent,
+            name.as_ptr(),
+            bytes.as_mut_ptr().cast::<libc::c_char>(),
+            bytes.len(),
+        )
+    };
+    if len == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let len = len as usize;
+    if len > PROMOTION_PATH_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "promotion symlink target exceeds its bounded path budget",
+        ));
+    }
+    bytes.truncate(len);
+    Ok(bytes)
 }
 
 /// Open an absolute directory one component at a time without following a

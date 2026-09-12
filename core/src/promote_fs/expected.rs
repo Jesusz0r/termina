@@ -10,11 +10,11 @@ use crate::{
     BUDGET_MAX_FILE_BYTES,
     PROMOTION_COMPONENT_MAX_BYTES,
     PROMOTION_PATH_MAX_BYTES,
-    read_link_at,
 };
 use crate::util::{
     missing_path,
     open_at,
+    read_link_at,
     stat_at,
     stat_file,
 };

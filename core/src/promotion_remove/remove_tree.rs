@@ -6,9 +6,7 @@ use std::sync::atomic::Ordering;
 
 use serde_json::{Value, json};
 
-use crate::{
-    PROMOTION_CLEANUP_SEQUENCE,
-};
+use crate::PROMOTION_CLEANUP_SEQUENCE;
 use crate::util::{
     open_at,
     s,
@@ -20,7 +18,7 @@ use crate::promotion_files::{
     promotion_cleanup_same_namespace_identity,
     promotion_rename_unsupported,
 };
-use crate::capture::read_link_at;
+use crate::util::read_link_at;
 use crate::promote_fs::{
     open_promotion_absolute_directory,
     open_promotion_bound_root,

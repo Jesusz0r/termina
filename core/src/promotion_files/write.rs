@@ -17,7 +17,7 @@ use crate::util::{
     stat_at,
     stat_file,
 };
-use crate::capture::read_link_at;
+use crate::util::read_link_at;
 use crate::copy::{
     promotion_expected_directory,
     promotion_leaf_result,
