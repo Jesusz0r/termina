@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { stepTimelineIndex } from "../../../src/timeline.ts";
+import { MAX_TIMELINE_EVENTS, stepTimelineIndex } from "../../../src/timeline.ts";
 
 const html = readFileSync(new URL("../../../src/index.html", import.meta.url), "utf8");
 const css = readFileSync(new URL("../../../src/styles.css", import.meta.url), "utf8");
+const timelineSrc = readFileSync(new URL("../../../src/timeline.ts", import.meta.url), "utf8");
 
 describe("timeline keyboard", () => {
   it("clamps arrow movement at both ends of the strip", () => {
@@ -23,5 +24,19 @@ describe("timeline keyboard", () => {
     expect(html).toMatch(/id="timeline-dots"[^>]*role="toolbar"[^>]*aria-label="[^"]+"/);
     // Keyboard focus needs a ring: the dot is 8px and the hover zoom is mouse-only.
     expect(css).toMatch(/\.timeline-dot:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--accent\)/);
+  });
+
+  it("caps the strip and restores a tab stop after eviction", () => {
+    expect(MAX_TIMELINE_EVENTS).toBe(400);
+    expect(timelineSrc).toContain("if (this.tabStopSeq === null || !this.dots.has(this.tabStopSeq))");
+    expect(timelineSrc).toContain("const hadDotFocus = this.timelineHasDotFocus()");
+    expect(timelineSrc).toContain("this.restoreTimelineFocus(hadDotFocus)");
+  });
+
+  it("stops replay on Escape unless a nested surface owns the key", () => {
+    expect(timelineSrc).toContain("document.addEventListener(\"keydown\", this.onDocumentKeydown)");
+    expect(timelineSrc).toContain('target.closest("#terminal-container")');
+    expect(timelineSrc).toContain('target.closest("#modal-root")');
+    expect(timelineSrc).toContain('target.closest("#review-container")');
   });
 });

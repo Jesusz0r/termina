@@ -96,10 +96,56 @@ test.describe("keyboard panes", () => {
     await page.keyboard.press("End");
     await expect(dots.nth(2)).toBeFocused();
 
-    // Escape stops a replay: before this the only stop was the ▶ button.
+    // Escape stops a replay even after focus leaves the strip (snapshots
+    // open in the editor). The terminal still owns the key.
     await page.locator("#btn-timeline-play").click();
     await expect(page.locator("#btn-timeline-play")).toHaveClass(/playing/);
+    await page.locator("#terminal-container").click();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#btn-timeline-play")).toHaveClass(/playing/);
+    await page.locator("#btn-min-editor").focus();
     await page.keyboard.press("Escape");
     await expect(page.locator("#btn-timeline-play")).not.toHaveClass(/playing/);
+  });
+
+  test("empty, single, and capped timeline strips stay one tab stop", async ({ page }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+    const dots = page.locator("#timeline-dots .timeline-dot");
+
+    await seedDots(page, 0);
+    await expect(dots).toHaveCount(0);
+
+    await seedDots(page, 1);
+    await expect(dots).toHaveCount(1);
+    await expect(dots).toHaveAttribute("tabindex", "0");
+    await dots.focus();
+    await page.keyboard.press("ArrowLeft");
+    await expect(dots).toBeFocused();
+
+    await seedDots(page, 400);
+    await expect(dots).toHaveCount(400);
+    await expect(page.locator("#timeline-dots .timeline-dot[tabindex='0']")).toHaveCount(1);
+    await dots.last().focus();
+    await page.keyboard.press("Home");
+    await expect(dots.first()).toBeFocused();
+    await page.keyboard.press("End");
+    await expect(dots.last()).toBeFocused();
+    await page.keyboard.press("Home");
+    await expect(dots.first()).toBeFocused();
+
+    // Cap eviction of the oldest (focused) moment must leave one tab stop.
+    await page.evaluate(() => {
+      const view = (window as unknown as Record<string, unknown>).__timelineView as { push(event: unknown): void };
+      view.push({
+        seq: 401,
+        t: "tool",
+        ts: Date.now(),
+        toolName: "read_file",
+        relPath: "file-401.ts",
+      });
+    });
+    await expect(dots).toHaveCount(400);
+    await expect(page.locator("#timeline-dots .timeline-dot[tabindex='0']")).toHaveCount(1);
+    await expect(page.locator("#timeline-dots .timeline-dot[tabindex='0']")).toBeFocused();
   });
 });

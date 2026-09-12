@@ -179,9 +179,13 @@ export class ActivityTabs {
     const from = this.tabOf(event.target);
     if (!from) return;
     const tabs = visibleActivityTabs(this.state);
+    // A just-hidden tab can still hold focus until apply() moves it. Start
+    // from a reachable tab so arrows cannot get stuck on a stop that left.
+    const origin = tabs.includes(from) ? from : tabs.includes(this.state.active) ? this.state.active : tabs[0];
+    if (!origin) return;
     let next: ActivityTab | null = null;
     if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
-      next = stepActivityTab(tabs, from, event.key === "ArrowRight" ? 1 : -1);
+      next = stepActivityTab(tabs, origin, event.key === "ArrowRight" ? 1 : -1);
     } else if (event.key === "Home") {
       next = tabs[0] ?? null;
     } else if (event.key === "End") {
@@ -261,6 +265,12 @@ export class ActivityTabs {
       }
       const empty = this.empties.get(tab);
       if (empty) empty.hidden = !activityEmptyVisible(this.state, tab);
+    }
+    // Hiding the focused tab (Modified off, Worldlines gone) must not leave
+    // the key on a `hidden` button — arrows would then walk a dead stop.
+    const focused = this.tabOf(document.activeElement);
+    if (focused && !this.state.visible[focused]) {
+      this.buttons.get(this.state.active)?.focus();
     }
   }
 }

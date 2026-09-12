@@ -71,6 +71,7 @@ export class ReviewView {
     if (event.key !== "Escape" || event.defaultPrevented || !this.isVisible) return;
     const target = event.target;
     if (target instanceof Element && (target.closest("#terminal-container") || target.closest("#modal-root"))) return;
+    event.preventDefault();
     this.hide();
   };
 
