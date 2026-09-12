@@ -32,6 +32,7 @@ import {
 import { type ExportPatchFile } from "./export.js";
 import { changedFiles, isSafeRelativePath } from "./candidate-files.js";
 import { exportCandidateRun } from "./export-candidate.js";
+import { RunRegistry } from "./run-registry.js";
 import { EvidenceEngine, dependencyDiff, mineChangeReason, rankProfiles, type EvidenceDeps } from "../evidence.js";
 import type {
   CoreSessionForkOpts,
@@ -142,8 +143,6 @@ import {
   MAX_IGNORED_FILES,
   MAX_AGENT_RESOURCE_BYTES,
   MAX_PROMPT_BYTES,
-  MAX_RETAINED_RUNS,
-  MAX_RUNS_PER_TERMINAL,
   MAX_STALE_SWEEP_BYTES,
   MAX_TEMPLATE_BYTES,
   MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES,
@@ -275,7 +274,6 @@ export class WorldlineManager {
   private promotionAdmissionOwner: PromotionJournalAdmissionOwner | null = null;
   private releaseUncertainAdmissionParticipant: (() => void) | null = null;
   private releasePromotionAdmissionParticipant: (() => void) | null = null;
-  private retainedSessionDiscards = new Set<Promise<unknown>>();
   private closingComparisons = new Set<string>();
   private terminalToComparison = new Map<string, { comparisonId: string; label: "A" | "B"; startupAttemptId?: string }>();
   /** Reopen readiness is a one-shot handshake keyed by the new terminal id. */
@@ -291,11 +289,18 @@ export class WorldlineManager {
   private evidenceQueueDepth = 0;
   /** Every queued/running evidence operation is owned by its comparison. */
   private evidenceAttempts = new Map<string, EvidenceAttempt>();
-  private runsByTerminal = new Map<string, RunRecord[]>();
-  private runsById = new Map<string, RunRecord>();
+  private runs: RunRegistry;
   private readyError: Error | null = null;
 
   constructor(private deps: WorldlineDeps) {
+    this.runs = new RunRegistry({
+      releaseState: (stateId) => this.deps.releaseState(stateId),
+      removePromptPayload: this.deps.removePromptPayload
+        ? (eventsDir, fileName) => this.deps.removePromptPayload!(eventsDir, fileName)
+        : undefined,
+      discardCoreSession: (runId) => this.deps.discardCoreSession(runId),
+      isCoreRun,
+    });
     this.ready = (async () => {
       // Establish app roots from descriptor-bound parent proofs. A
       // pathname-only mkdir/open could turn an ancestor replacement into the
@@ -421,78 +426,27 @@ export class WorldlineManager {
 
   /** Add the run to the project catalog. */
   recordRun(run: RunRecord): void {
-    this.runsById.set(run.id, run);
-    let list = this.runsByTerminal.get(run.terminalId);
-    if (!list) {
-      list = [];
-      this.runsByTerminal.set(run.terminalId, list);
-    }
-    list.push(run);
-    this.evictOverflow(run.terminalId);
+    this.runs.record(run, this.pinnedRunIds());
   }
 
   runOf(runId: string): RunRecord | null {
-    return this.runsById.get(runId) ?? null;
-  }
-
-  private runsOf(terminalId?: string): RunRecord[] {
-    if (terminalId) return [...(this.runsByTerminal.get(terminalId) ?? [])];
-    const out: RunRecord[] = [];
-    for (const list of this.runsByTerminal.values()) out.push(...list);
-    return out;
+    return this.runs.of(runId);
   }
 
   runSummaries(terminalId?: string): RunSummary[] {
-    return this.runsOf(terminalId).map((r) => ({
-      id: r.id,
-      terminalId: r.terminalId,
-      workspaceId: r.workspaceId,
-      startStateId: r.startStateId,
-      settledStateId: r.settledStateId,
-      promptText: r.promptText,
-      promptEntryId: r.promptEntryId,
-      promptParentEntryId: r.promptParentEntryId,
-      settledEntryId: r.settledEntryId,
-      sessionFile: r.sessionFile,
-      sessionBranchFile: r.sessionBranchFile,
-      uncertainSessionFile: r.uncertainSessionFile,
-      replayable: r.replayable,
-      reason: r.reason,
-      interrupted: r.interrupted,
-      steering: r.steering,
-      overlap: r.overlap,
-      unownedEdits: r.unownedEdits,
-      model: r.model,
-      thinkingLevel: r.thinkingLevel,
-      startedAt: r.startedAt,
-      settledAt: r.settledAt,
-    }));
+    return this.runs.summaries(terminalId);
   }
 
   runCovering(terminalId: string, ts: number): RunRecord | null {
-    const runs = this.runsByTerminal.get(terminalId) ?? [];
-    for (let i = runs.length - 1; i >= 0; i--) {
-      const run = runs[i];
-      if (ts < run.startedAt) continue;
-      if (run.settledAt !== null && ts > run.settledAt) continue;
-      return run;
-    }
-    return null;
+    return this.runs.covering(terminalId, ts);
   }
 
   holdsRunState(stateId: string): boolean {
-    for (const run of this.runsById.values()) {
-      if (run.startStateId === stateId || run.settledStateId === stateId) return true;
-    }
-    return false;
+    return this.runs.holdsState(stateId);
   }
 
   promptPayloadsOf(terminalId: string): Set<string> {
-    const keep = new Set<string>();
-    for (const run of this.runsByTerminal.get(terminalId) ?? []) {
-      if (run.promptPayloadFile) keep.add(run.promptPayloadFile);
-    }
-    return keep;
+    return this.runs.promptPayloadsOf(terminalId);
   }
 
   /** Run ids that a live comparison still needs (promote, evidence, nested fork). */
@@ -576,87 +530,13 @@ export class WorldlineManager {
     throw new Error("comparison id allocation exhausted");
   }
 
-  private canDiscard(run: RunRecord, pinned: Set<string>): boolean {
-    return run.settledAt !== null && !pinned.has(run.id);
-  }
-
-  private oldestDiscardable(pinned: Set<string>): RunRecord | null {
-    let oldest: RunRecord | null = null;
-    for (const records of this.runsByTerminal.values()) {
-      for (const run of records) {
-        if (!this.canDiscard(run, pinned)) continue;
-        if (!oldest || run.startedAt < oldest.startedAt) oldest = run;
-      }
-    }
-    return oldest;
-  }
-
-  /**
-   * Drop the oldest disposable records. Never drop an open run or the
-   * source of a live comparison.
-   */
-  private evictOverflow(terminalId: string): void {
-    const pinned = this.pinnedRunIds();
-    const list = this.runsByTerminal.get(terminalId);
-    if (list) {
-      while (list.length > MAX_RUNS_PER_TERMINAL) {
-        const idx = list.findIndex((run) => this.canDiscard(run, pinned));
-        if (idx < 0) break;
-        this.discardRun(list.splice(idx, 1)[0]);
-      }
-    }
-    while (this.runsById.size > MAX_RETAINED_RUNS) {
-      const victim = this.oldestDiscardable(pinned);
-      if (!victim) break;
-      const records = this.runsByTerminal.get(victim.terminalId);
-      if (!records) break;
-      const idx = records.indexOf(victim);
-      if (idx >= 0) records.splice(idx, 1);
-      if (records.length === 0) this.runsByTerminal.delete(victim.terminalId);
-      this.discardRun(victim);
-    }
-  }
-
-  private discardRun(run: RunRecord | undefined): void {
-    if (!run) return;
-    this.runsById.delete(run.id);
-    if (run.startStateId) void this.deps.releaseState(run.startStateId);
-    if (run.settledStateId && run.settledStateId !== run.startStateId) void this.deps.releaseState(run.settledStateId);
-    if (run.promptPayloadFile && run.promptEventsDir) {
-      // The manager does not own the primary events-root capability. Delegate
-      // to Main's bound leaf owner; when it is unavailable, retaining the
-      // payload is safer than deleting a pathname replacement.
-      const cleanup = this.deps.removePromptPayload?.(run.promptEventsDir, run.promptPayloadFile);
-      if (cleanup) void cleanup.catch(() => undefined);
-    }
-    if (run.sessionBranchFile) {
-      if (isCoreRun(run)) {
-        // Successful core finalization leaves a proven durable bundle after
-        // its claim is removed. Route its reclamation through the same owner;
-        // uncertainSessionFile is intentionally never treated as a valid
-        // branch and is not passed here.
-        const discard = this.deps.discardCoreSession(run.id).catch(() => undefined);
-        this.retainedSessionDiscards.add(discard);
-        void discard.finally(() => this.retainedSessionDiscards.delete(discard));
-      }
-      // Non-core branches are removed with no session discard: only core
-      // sessions are recorded, so there is nothing else to reclaim.
-    }
-  }
-
   /** Drain native durable core-bundle reclamation before app shutdown. */
   private async drainRetainedSessionDiscards(): Promise<void> {
-    while (this.retainedSessionDiscards.size > 0) {
-      await Promise.all([...this.retainedSessionDiscards].map((task) => task.catch(() => undefined)));
-    }
+    await this.runs.drainDiscards();
   }
 
   private clearRuns(): void {
-    for (const list of this.runsByTerminal.values()) {
-      for (const run of list) this.discardRun(run);
-    }
-    this.runsByTerminal.clear();
-    this.runsById.clear();
+    this.runs.clear();
   }
 
   private summaryOf(cmp: ComparisonState, cand: CandidateState): WorldlineSummary {
