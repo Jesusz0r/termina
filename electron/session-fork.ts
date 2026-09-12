@@ -32,22 +32,15 @@ export interface CoreSessionDiscardOpts {
   sessionFile: string;
 }
 
-/** One session-search file entry (mirrors SessionFileEntry in session-search.ts). */
-export interface SessionSearchFile {
-  path: string;
-  name: string;
-  mtimeMs: number;
-  segments?: string[];
-}
-
 export interface SessionSearchOpts {
   query: string;
-  files: SessionSearchFile[];
+  /** Project-scoped core session directory; the worker lists it off the main thread. */
+  coreDir: string;
   projectCwd: string;
 }
 
 export type SessionSearchResult =
-  | { ok: true; hits: SessionHit[] }
+  | { ok: true; hits: SessionHit[]; error?: string }
   | { ok: false; error: string };
 
 export interface ExportPatchOpts {
@@ -108,7 +101,7 @@ export type SessionForkReply =
   | (SessionForkFailure & { op: "fork-core-result" })
   | { op: "discard-core-empty-result"; requestId: string; ok: true; removed: boolean }
   | (SessionForkFailure & { op: "discard-core-empty-result" })
-  | { op: "search-sessions-result"; requestId: string; ok: true; hits: SessionHit[] }
+  | { op: "search-sessions-result"; requestId: string; ok: true; hits: SessionHit[]; error?: string }
   | (SessionForkFailure & { op: "search-sessions-result" })
   | { op: "export-patch-result"; requestId: string; ok: true; patch: string }
   | (SessionForkFailure & { op: "export-patch-result" });

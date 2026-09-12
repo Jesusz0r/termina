@@ -66,7 +66,7 @@ import { AppPreferencesStore } from "./preferences.js";
 import { filterAgentEnvironment } from "./agent-env.js";
 import { SubagentHost } from "./subagents.js";
 import { anchorClaimPath, isSubagentManagedFile } from "../agent-core/subagents.js";
-import { MAX_SESSION_SEARCH_QUERY, collectSessionSearchFiles } from "./session-search.js";
+import { MAX_SESSION_SEARCH_QUERY } from "./session-search.js";
 import { DiagnosticsRunner } from "./diagnostics.js";
 import { ScheduleRunner, type ScheduleTickTask } from "./schedule.js";
 import { ProjectPathIndex, SearchGenerations, listProjectSnapshot, searchProjectFiles } from "./quick-open.js";
@@ -3385,40 +3385,41 @@ class TerminaApp {
 
   /**
    * Search past session files for the active project (core bundles). The
-   * walk runs in the session worker so the main process stays responsive.
-   * Bounded to the 50 newest sessions and 50 total hits. History search
-   * never spawns an agent.
+   * listing and the walk run in the session worker so the main process stays
+   * responsive. Bounded to the 50 newest sessions and 50 total hits. History
+   * search never spawns an agent. Worker and listing failures surface as
+   * `error` (like content search) instead of a silent empty.
    */
-  private async searchSessions(rawQuery: string): Promise<SessionHit[]> {
+  private async searchSessions(rawQuery: string): Promise<{ hits: SessionHit[]; error?: string }> {
     const project = this.project();
     const cwd = project?.cwd ?? null;
     // Bound the IPC/worker payload up front; the worker re-bounds defensively.
     const query = rawQuery.trim().slice(0, MAX_SESSION_SEARCH_QUERY);
-    if (!project || !cwd || query.length < 2) return [];
+    if (!project || !cwd || query.length < 2) return { hits: [] };
     const projectCwd = await this.canonicalPath(cwd);
     const key = this.sanitizeSessionDir(projectCwd);
     const coreDir = join(this.coreSessionRoot(), key);
     const seq = ++this.searchSessionsSeq;
-    const files = await collectSessionSearchFiles(coreDir);
     const stale = (): boolean => seq !== this.searchSessionsSeq || this.disposed;
     this.searchAbort?.abort();
     const controller = new AbortController();
     this.searchAbort = controller;
     try {
-      const result = await this.sessionFork.searchSessions({ query, files, projectCwd }, { signal: controller.signal });
-      if (stale()) return [];
+      const result = await this.sessionFork.searchSessions({ query, coreDir, projectCwd }, { signal: controller.signal });
+      if (stale()) return { hits: [] };
       if (!result.ok) {
         console.warn(`[main] session search failed: ${result.error}`);
-        return [];
+        return { hits: [], error: result.error };
       }
-      return result.hits;
+      if (result.error) return { hits: result.hits, error: result.error };
+      return { hits: result.hits };
     } catch (err) {
       // AbortError on newer queries or teardown; worker failures otherwise.
       // Search is best-effort: never reject into the IPC handler.
-      if (!stale() && (!(err instanceof Error) || err.name !== "AbortError")) {
-        console.warn(`[main] session search failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-      return [];
+      if (stale() || (err instanceof Error && err.name === "AbortError")) return { hits: [] };
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[main] session search failed: ${message}`);
+      return { hits: [], error: message };
     } finally {
       if (this.searchAbort === controller) this.searchAbort = null;
     }

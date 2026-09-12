@@ -5,12 +5,13 @@
  * roster files). This module is the only JSONL parser for search hits.
  */
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 // .ts extensions so the harness can load this file with strip-types.
 import { cleanPlanPathToken, looksLikePath } from "./plan-board.ts";
-import { listCurrentSegments, listLogicalSessions } from "../agent-core/session.ts";
+import { isCoreSessionId, listCurrentSegments, listLogicalSessions } from "../agent-core/session.ts";
+import { errorCode, isErrno } from "../shared/guards.ts";
 import type { CanonicalizePath, SessionHit } from "../shared/types.ts";
 
 const MAX_SESSION_SEARCH_FILES = 50;
@@ -234,13 +235,26 @@ export function mergeSessionFiles(groups: SessionFileEntry[][]): SessionFileEntr
 
 /**
  * Gather the session files participating in Session Search: core bundles,
- * newest first, capped. Single owner for which files a search covers; main
- * supplies the project-scoped directory and keeps worker dispatch plus
- * query cancellation.
+ * newest first, capped. Single owner for which files a search covers; the
+ * session worker calls this off the main thread, and main keeps query
+ * cancellation. A missing directory is empty history; anything else that
+ * prevents a complete listing (permission errors, unreadable or malformed
+ * bundles) returns `error` so the modal can say the listing is uncertain
+ * instead of showing a silent empty.
  */
-export async function collectSessionSearchFiles(coreDir: string): Promise<SessionFileEntry[]> {
+export type SessionSearchListing = { files: SessionFileEntry[]; error?: string };
+
+export async function collectSessionSearchFiles(coreDir: string): Promise<SessionSearchListing> {
+  let topNames: string[];
+  try {
+    topNames = await readdir(coreDir);
+  } catch (err) {
+    if (isErrno(err, "ENOENT")) return { files: [] };
+    const detail = errorCode(err) ?? (err instanceof Error ? err.message : String(err));
+    return { files: [], error: `session listing uncertain: ${detail}` };
+  }
   const coreSessions = await listLogicalSessions(coreDir);
-  return mergeSessionFiles([
+  const files = mergeSessionFiles([
     coreSessions.map((entry) => ({
       path: entry.path,
       name: entry.name,
@@ -248,6 +262,24 @@ export async function collectSessionSearchFiles(coreDir: string): Promise<Sessio
       segments: entry.segments,
     })),
   ]);
+  const seen = new Set(coreSessions.map((entry) => entry.sessionId));
+  let skipped = 0;
+  for (const name of topNames) {
+    if (!isCoreSessionId(name) || seen.has(name)) continue;
+    try {
+      if (!(await stat(join(coreDir, name))).isDirectory()) continue;
+    } catch (err) {
+      // A concurrent delete is a race, not uncertainty; anything else (EACCES,
+      // ENOTDIR on a swapped path) means a bundle could not be proven absent.
+      if (isErrno(err, "ENOENT")) continue;
+    }
+    skipped++;
+  }
+  if (skipped > 0) {
+    const detail = skipped === 1 ? "1 session could not be listed" : `${skipped} sessions could not be listed`;
+    return { files, error: `session listing uncertain: ${detail}` };
+  }
+  return { files };
 }
 
 export async function searchSessionFiles(opts: {
