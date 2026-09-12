@@ -5148,13 +5148,13 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
 
 /** Rebuild the context view from storage. Revision records address messages
  *  by stable sseq, so replay is order-independent and exact. */
-function abortResume(message: string): void {
+function abortResume(message: string, file: string | null = sessionFile): void {
   out(`${message}\n`);
   history.length = 0;
   syncIndicators();
   closeSessionWriter();
-  if (sessionFile) {
-    const quarantined = quarantineSessionBundle(sessionFile);
+  if (file) {
+    const quarantined = quarantineSessionBundle(file);
     if (quarantined.ok) {
       streamPrepared = false;
       storageSeq = 0;
@@ -5165,6 +5165,22 @@ function abortResume(message: string): void {
   streamPrepared = true;
   storageSeq = 0;
   rotateCacheSession();
+}
+
+/**
+ * Writer failure keeps the bundle for retry: a transient permission or disk
+ * error must not quarantine a valid session. Clears the partially installed
+ * view so /resume can retry, without moving current/ or rotating the cache
+ * seed. Only replay/parse failure quarantines.
+ */
+function abortResumeKeepBundle(message: string): void {
+  out(`${message}\n`);
+  history.length = 0;
+  syncIndicators();
+  closeSessionWriter();
+  storageSeq = 0;
+  streamPrepared = false;
+  resetCacheContinuity();
 }
 
 async function resumeSession(): Promise<SessionResult> {
@@ -5178,19 +5194,24 @@ async function resumeSession(): Promise<SessionResult> {
   }
 }
 
-async function resumeSessionBody(): Promise<SessionResult> {
-  if (!sessionFile || !sessionBundleExists(sessionFile)) {
+async function resumeSessionBody(overrides?: {
+  sessionFile?: string | null;
+  openWriter?: () => void;
+}): Promise<SessionResult> {
+  const file = overrides?.sessionFile !== undefined ? overrides.sessionFile : sessionFile;
+  const open = overrides?.openWriter ?? openSessionWriter;
+  if (!file || !sessionBundleExists(file)) {
     out("(no stored session)\n");
     return { ok: false, error: "stored session is missing" };
   }
-  if (!sessionBundleHasContent(sessionFile)) {
+  if (!sessionBundleHasContent(file)) {
     out("(stored session is empty)\n");
     streamPrepared = false;
     return { ok: true };
   }
-  const replayed = await replaySessionBundle(sessionFile);
+  const replayed = await replaySessionBundle(file);
   if (!replayed.ok) {
-    abortResume(`(resume failed: ${replayed.error})`);
+    abortResume(`(resume failed: ${replayed.error})`, file);
     return { ok: false, error: replayed.error };
   }
   if (replayed.messages.length === 0 && replayed.maxSeq === 0) {
@@ -5217,10 +5238,10 @@ async function resumeSessionBody(): Promise<SessionResult> {
     effortWanted = clampEffortLevel(route.provider, route.model, savedEffort as EffortLevel, providerProtocol(route.provider, route.model));
   }
   try {
-    openSessionWriter();
+    open();
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
-    abortResume(`(resume failed: ${error})`);
+    abortResumeKeepBundle(`(resume failed: ${error})`);
     return { ok: false, error };
   }
   streamPrepared = true;
@@ -5228,6 +5249,21 @@ async function resumeSessionBody(): Promise<SessionResult> {
   syncStatus();
   renderHistoryTranscript(history, surface);
   return { ok: true };
+}
+
+export type ResumeTestOverrides = {
+  sessionFile?: string | null;
+  openWriter?: () => void;
+};
+
+/** Test seam: drive the resume path against a temp bundle with an injected writer. */
+export async function testOnlyResumeSessionBody(overrides?: ResumeTestOverrides): Promise<SessionResult> {
+  return resumeSessionBody(overrides);
+}
+
+/** Test seam: inspect the resume view so tests can confirm /resume can retry. */
+export function testOnlyResumeState(): { historyLength: number; storageSeq: number; streamPrepared: boolean } {
+  return { historyLength: history.length, storageSeq, streamPrepared };
 }
 
 // ---- terminal surface ----
