@@ -267,6 +267,9 @@ body {
 .pane-toggle {
   margin-left: auto;
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 28px;
   height: 28px;
   border: 1px solid transparent;
@@ -274,10 +277,34 @@ body {
   background: transparent;
   color: var(--text-dim);
   font: inherit;
-  font-size: 14px;
-  line-height: 1;
+  /* Hide the leftover – / □ that main.ts writes (PANE_MIN_ICON). */
+  font-size: 0;
+  line-height: 0;
   cursor: pointer;
   -webkit-app-region: no-drag;
+}
+
+.pane-toggle::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(135deg);
+}
+
+#btn-min-editor::before {
+  transform: rotate(-45deg);
+}
+
+#explorer.minimized .pane-toggle::before,
+#left-pane.minimized .pane-toggle::before {
+  transform: rotate(-45deg);
+}
+
+#right-pane.minimized .pane-toggle::before {
+  transform: rotate(135deg);
 }
 
 .pane-toggle:hover {
@@ -1042,6 +1069,57 @@ body {
 .activity-tab .activity-count {
   font-size: 10px;
   opacity: 0.75;
+}
+
+/* Tab bar already names the panel. Keep counts and actions. */
+#timeline-strip:not([data-repeat-title]) .activity-panel-title,
+#plan-panel:not([data-repeat-title]) .activity-panel-title,
+#worldline-panel:not([data-repeat-title]) .activity-panel-title,
+#modified-panel:not([data-repeat-title]) .activity-panel-title {
+  display: none;
+}
+
+#timeline-strip,
+#plan-panel,
+#worldline-panel,
+#modified-panel {
+  container-type: inline-size;
+  container-name: activity-chrome;
+}
+
+.action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.action-label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+#btn-timeline-play::after {
+  content: "Replay";
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+#btn-timeline-play.playing::after {
+  content: "Stop";
+}
+
+@container activity-chrome (max-width: 280px) {
+  .action-label {
+    display: none;
+  }
+
+  #btn-timeline-play::after {
+    content: none;
+  }
 }
 
 /* Why-empty copy for a selected unused tab. Sibling of the list so
@@ -3254,6 +3332,14 @@ body {
   min-height: 0;
   max-height: 45%;
   border-bottom: 1px solid var(--border);
+  container-type: inline-size;
+  container-name: explorer-content;
+}
+
+@container explorer-content (max-width: 180px) {
+  .action-label {
+    display: none;
+  }
 }
 
 .explorer-content[hidden] {
