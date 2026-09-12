@@ -173,6 +173,10 @@ interface WorkspaceState {
   terminalIds: Set<string>;
   /** The last captured state commit (the lineage parent). */
   lastStateCommit: string | null;
+  /** Serializes incremental moment captures so siblings never snapshot the same parent. */
+  momentCapturePromise: Promise<void> | null;
+  /** Last wall-clock reseed after a capture failure (bounds retries). */
+  lastReseedMs: number;
   /** New retained blob bytes since the index (WORLDLINES §9). */
   retainedBlobBytes: number;
   /** Resolves when the initial index capture finished. */
@@ -1635,6 +1639,16 @@ class TerminaApp {
     return owner?.workspaces.get(inst.workspaceId) ?? null;
   }
 
+  /** Live terminals that share a source tree (dispatch workers plus the owner). */
+  private terminalsOnWorkspace(ws: WorkspaceState): AgentTerminalInstance[] {
+    const out: AgentTerminalInstance[] = [];
+    for (const id of ws.terminalIds) {
+      const inst = this.terminals.get(id);
+      if (inst && !inst.closed) out.push(inst);
+    }
+    return out;
+  }
+
   /** The user-edit map of a workspace (WORLDLINES §6.2: one per workspace). */
   private userEditsOf(ws: WorkspaceState): Map<string, UserEdit> {
     let m = this.userEditsByWorkspace.get(ws.id);
@@ -1657,6 +1671,8 @@ class TerminaApp {
       watcher: null,
       terminalIds: new Set(),
       lastStateCommit: null,
+      momentCapturePromise: null,
+      lastReseedMs: 0,
       retainedBlobBytes: 0,
       indexReady: null,
       recordError: null,
@@ -5201,21 +5217,23 @@ class TerminaApp {
   /**
    * One incremental capture for the dots since the last one. The watcher
    * hints are the delta; the watcher cache reconciles missed events.
+   * Queue is per workspace: later terminals wait and the next job drains
+   * every sibling's hints so two incrementals never share a parent.
    */
   private runMomentCapture(
     inst: AgentTerminalInstance,
     ws: WorkspaceState,
     expected?: PtyRendererSendTarget | null,
   ): Promise<void> {
-    const previous = inst.momentCapturePromise ?? Promise.resolve();
+    const previous = ws.momentCapturePromise ?? Promise.resolve();
     let current: Promise<void>;
     current = previous
       .catch(() => undefined)
       .then(() => this.captureMomentNow(inst, ws, expected))
       .finally(() => {
-        if (inst.momentCapturePromise === current) inst.momentCapturePromise = null;
+        if (ws.momentCapturePromise === current) ws.momentCapturePromise = null;
       });
-    inst.momentCapturePromise = current;
+    ws.momentCapturePromise = current;
     return current;
   }
 
@@ -5224,74 +5242,121 @@ class TerminaApp {
     ws: WorkspaceState,
     expected?: PtyRendererSendTarget | null,
   ): Promise<void> {
-    if (inst.momentDots.length === 0 && inst.pendingHints.size === 0) return;
-    const batch = inst.momentDots;
-    inst.momentDots = [];
-    const momentOwner = this.projectOfTerminal(inst.id);
+    const members = this.terminalsOnWorkspace(ws);
+    if (!inst.closed && !members.some((member) => member.id === inst.id)) members.push(inst);
+    const hasWork = members.some((member) => member.momentDots.length > 0 || member.pendingHints.size > 0);
+    if (!hasWork) return;
+    const momentOwner = this.projectOfTerminal(inst.id) ?? this.projectOfWorkspace(ws.id);
     const store = await momentOwner?.storePromise;
     if (!store || !ws.lastStateCommit) {
-      this.setRecorderState(inst, "paused", expected);
-      inst.momentDots.unshift(...batch);
+      for (const member of members) {
+        if (member.momentDots.length > 0 || member.pendingHints.size > 0) {
+          this.setRecorderState(member, "paused", expected);
+        }
+      }
       return;
     }
     // The retained-blob budget (WORLDLINES §9): pause recording beyond it.
     if ((ws.retainedBlobBytes ?? 0) > 256 * 1024 * 1024) {
-      this.setRecorderState(inst, "budget", expected);
-      inst.pendingHints.clear();
+      for (const member of members) {
+        if (member.momentDots.length === 0 && member.pendingHints.size === 0) continue;
+        member.pendingHints.clear();
+        member.momentDots = [];
+        this.setRecorderState(member, "budget", expected);
+      }
       return;
     }
-    const hints = [...inst.pendingHints];
-    inst.pendingHints.clear();
-    // Reconcile: the watcher's precomputed blob oids catch changes the
-    // hints missed. Shipping hashes instead of contents keeps the request
-    // small and skips a re-hash of the whole cache per capture. Bound the
-    // walk so a huge cache cannot stall the capture.
-    const oids = ws.watcher?.lastOids;
-    const reconcile: Array<{ relPath: string; oid: string }> = [];
-    const hinted = new Set(hints);
-    // ProjectWatcher stores canonical absolute paths. Resolve the workspace
-    // root once for this bounded walk instead of realpath'ing it for every
-    // cached file.
-    const canonicalRoot = await this.canonicalPath(ws.root);
-    let walked = 0;
-    for (const [path, pair] of oids ?? []) {
-      if (walked >= 2000) break;
-      walked++;
-      const rel = relative(canonicalRoot, path);
-      if (!rel || rel.startsWith("..") || isAbsolute(rel)) continue;
-      if (hinted.has(rel)) continue;
-      if (this.ignoredSegmentIn(rel)) continue;
-      reconcile.push({ relPath: rel, oid: store.objectFormat === "sha256" ? pair.sha256 : pair.sha1 });
+    // Promote (and other writers) hold this lease while the tree is torn.
+    // Bail rather than snapshot a tree another writer owns. Dots and hints
+    // stay on their terminals for the next queued job.
+    const leaseRequester = `moment:${ws.id}`;
+    if (ws.writerId !== null && ws.writerId !== leaseRequester) {
+      return;
     }
+    const lease = await this.acquireWriteLease(ws.id, leaseRequester, 0);
+    if (!lease.ok) {
+      return;
+    }
+    const jobs: Array<{ inst: AgentTerminalInstance; batch: TimelineEvent[] }> = [];
+    const hints = new Set<string>();
     try {
-      // A candidate workspace captures its OWN tree (the source override).
-      const source = ws.primary ? undefined : { root: ws.root, gitDir: (await gitCommonDir(ws.root)) ?? ws.root };
-      const state = await store.captureIncremental(ws.lastStateCommit, hints, reconcile, {}, {}, source);
-      this.setWorkspaceState(ws, state.commit);
-      ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
-      if (!ws.primary) await momentOwner?.worldlines?.updateHeadState(inst.id, state.commit);
-      this.attachMomentState(inst, state.commit, batch, expected);
-      this.setRecorderState(inst, "ready", expected);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.warn(`[main] moment capture failed: ${message}`);
-      // A dangling base (rebuilt store) fails every incremental capture
-      // forever. Re-seed primary workspaces with one full capture, at most
-      // once a minute; candidates keep their creation-seeded chain.
-      if (ws.primary && Date.now() - inst.lastReseedMs > 60_000) {
-        inst.lastReseedMs = Date.now();
-        try {
-          const reseeded = await store.capture(await gitHead(ws.root), null);
-          this.setWorkspaceState(ws, reseeded.commit);
-          this.attachMomentState(inst, reseeded.commit, batch, expected);
-          this.setRecorderState(inst, "ready", expected);
-          return;
-        } catch (reseedErr) {
-          console.warn(`[main] moment reseed failed: ${reseedErr instanceof Error ? reseedErr.message : String(reseedErr)}`);
+      for (const member of this.terminalsOnWorkspace(ws)) {
+        if (member.momentDots.length === 0 && member.pendingHints.size === 0) continue;
+        jobs.push({ inst: member, batch: member.momentDots });
+        member.momentDots = [];
+        for (const hint of member.pendingHints) hints.add(hint);
+        member.pendingHints.clear();
+      }
+      if (!inst.closed && !jobs.some((job) => job.inst.id === inst.id)
+        && (inst.momentDots.length > 0 || inst.pendingHints.size > 0)) {
+        jobs.push({ inst, batch: inst.momentDots });
+        inst.momentDots = [];
+        for (const hint of inst.pendingHints) hints.add(hint);
+        inst.pendingHints.clear();
+      }
+      if (jobs.length === 0) return;
+      // Reconcile: the watcher's precomputed blob oids catch changes the
+      // hints missed. Shipping hashes instead of contents keeps the request
+      // small and skips a re-hash of the whole cache per capture. Bound the
+      // walk so a huge cache cannot stall the capture.
+      const oids = ws.watcher?.lastOids;
+      const reconcile: Array<{ relPath: string; oid: string }> = [];
+      // ProjectWatcher stores canonical absolute paths. Resolve the workspace
+      // root once for this bounded walk instead of realpath'ing it for every
+      // cached file.
+      const canonicalRoot = await this.canonicalPath(ws.root);
+      let walked = 0;
+      for (const [path, pair] of oids ?? []) {
+        if (walked >= 2000) break;
+        walked++;
+        const rel = relative(canonicalRoot, path);
+        if (!rel || rel.startsWith("..") || isAbsolute(rel)) continue;
+        if (hints.has(rel)) continue;
+        if (this.ignoredSegmentIn(rel)) continue;
+        reconcile.push({ relPath: rel, oid: store.objectFormat === "sha256" ? pair.sha256 : pair.sha1 });
+      }
+      try {
+        // A candidate workspace captures its OWN tree (the source override).
+        const source = ws.primary ? undefined : { root: ws.root, gitDir: (await gitCommonDir(ws.root)) ?? ws.root };
+        const state = await store.captureIncremental(ws.lastStateCommit, [...hints], reconcile, {}, {}, source);
+        this.setWorkspaceState(ws, state.commit);
+        ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
+        if (!ws.primary) {
+          for (const job of jobs) {
+            await momentOwner?.worldlines?.updateHeadState(job.inst.id, state.commit);
+          }
+        }
+        for (const job of jobs) {
+          this.attachMomentState(job.inst, state.commit, job.batch, expected);
+          this.setRecorderState(job.inst, "ready", expected);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(`[main] moment capture failed: ${message}`);
+        // A dangling base (rebuilt store) fails every incremental capture
+        // forever. Re-seed primary workspaces with one full capture, at most
+        // once a minute; candidates keep their creation-seeded chain.
+        if (ws.primary && Date.now() - ws.lastReseedMs > 60_000) {
+          ws.lastReseedMs = Date.now();
+          try {
+            const reseeded = await store.capture(await gitHead(ws.root), null);
+            this.setWorkspaceState(ws, reseeded.commit);
+            for (const job of jobs) {
+              this.attachMomentState(job.inst, reseeded.commit, job.batch, expected);
+              this.setRecorderState(job.inst, "ready", expected);
+            }
+            return;
+          } catch (reseedErr) {
+            console.warn(`[main] moment reseed failed: ${reseedErr instanceof Error ? reseedErr.message : String(reseedErr)}`);
+          }
+        }
+        // Failed batches remain internal and are never published as dots.
+        for (const job of jobs) {
+          this.setRecorderState(job.inst, "degraded", expected, message.slice(0, 160));
         }
       }
-      // Failed batches remain internal and are never published as dots.
-      this.setRecorderState(inst, "degraded", expected, message.slice(0, 160));
+    } finally {
+      this.releaseWriteLease(ws.id, leaseRequester);
     }
   }
 
