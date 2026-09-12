@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 
 const renderer = readFileSync(new URL("../../../src/main.ts", import.meta.url), "utf8");
+const editor = readFileSync(new URL("../../../src/editor.ts", import.meta.url), "utf8");
 
 describe("explorer divider grab", () => {
   it("claims near-miss presses before draggable file rows see them", () => {
@@ -30,12 +31,50 @@ describe("explorer divider grab", () => {
     expect(renderer).toContain("syncEditorMinimizedForProject()");
     const syncStart = renderer.indexOf("function syncEditorMinimizedForProject()");
     const sync = renderer.slice(syncStart, syncStart + 600);
+    expect(sync).toContain("editorPaneOccupied()");
     expect(sync).toContain('if (minimizedWork === "editor") setMinimizedWork(null)');
     expect(sync).toContain('if (minimizedWork === null) setMinimizedWork("editor")');
     const setActiveStart = renderer.indexOf("function setActiveProject(");
     const setActive = renderer.slice(setActiveStart, renderer.indexOf("drainPendingToolTargets(activeProjectId)", setActiveStart));
     expect(setActive).toContain("syncEditorMinimizedForProject()");
     expect(setActive).not.toContain("collapseEditorIfIdle()");
+  });
+
+  it("skips auto-minimize when needsLogin and the editor is empty", () => {
+    const occStart = renderer.indexOf("function editorPaneOccupied()");
+    const occ = renderer.slice(occStart, renderer.indexOf("function syncEditorMinimizedForProject()"));
+    expect(occ).toContain("hasOpenTabs()");
+    expect(occ).toContain("needsLogin");
+    expect(occ).toContain("syncEmptyState");
+    // Tabs still occupy the pane; login only counts when no file is open.
+    expect(occ.indexOf("hasOpenTabs()")).toBeLessThan(occ.indexOf("needsLogin"));
+    expect(occ).toContain("return view?.needsLogin === true");
+
+    const syncStart = renderer.indexOf("function syncEditorMinimizedForProject()");
+    const sync = renderer.slice(syncStart, renderer.indexOf("function collapseEditorIfIdle()"));
+    expect(sync).toContain("editorPaneOccupied()");
+    // Occupied (tabs or login hint) restores; empty + signed-in still collapses.
+    expect(sync.indexOf("editorPaneOccupied()")).toBeLessThan(sync.indexOf('setMinimizedWork(null)'));
+    expect(sync.indexOf('setMinimizedWork(null)')).toBeLessThan(sync.indexOf('setMinimizedWork("editor")'));
+
+    const collapseStart = renderer.indexOf("function collapseEditorIfIdle()");
+    const collapse = renderer.slice(collapseStart, renderer.indexOf("function revealEditor()"));
+    expect(collapse).toContain("editorPaneOccupied()");
+    expect(collapse).toContain('setMinimizedWork("editor")');
+
+    // No second login surface: chrome copy still lives in syncEmptyState.
+    expect(editor).toContain("const showLogin = this.projectOpen && this.needsLogin && noTabs");
+    expect(editor).toContain("this.emptyLogin.hidden = !showLogin");
+  });
+
+  it("clears needsLogin when auth:login-hint says credentials exist", () => {
+    expect(renderer).toContain('window.termina.onLoginHint');
+    expect(renderer).toContain("view.needsLogin = e.needsLogin === true");
+    expect(renderer).toContain("syncEditorMinimizedForProject()");
+    const main = readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8");
+    expect(main).toContain("startLoginHintWatch");
+    expect(main).toContain('this.send("auth:login-hint", { needsLogin })');
+    expect(main).toContain('name !== "auth.json"');
   });
 
   it("preserves the split ratio across minimize/restore", () => {

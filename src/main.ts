@@ -1964,13 +1964,20 @@ function setMinimizedWork(pane: WorkPane | null): void {
 
 function editorPaneOccupied(): boolean {
   if (reviewView?.isVisible === true) return true;
-  if (activeProjectId) return projectViews.get(activeProjectId)?.editorMgr?.hasOpenTabs() === true;
+  if (activeProjectId) {
+    const view = projectViews.get(activeProjectId);
+    if (view?.editorMgr?.hasOpenTabs() === true) return true;
+    // Same gate as EditorManager.syncEmptyState: keep the empty pane so
+    // `.empty-login` is not auto-collapsed after Open folder.
+    return view?.needsLogin === true;
+  }
   return baseEditorInstance?.hasOpenTabs() === true;
 }
 
 /** Project switches share one minimize bar but occupancy is per-project: an
  *  empty project auto-collapses the editor, and returning to a project with
- *  open tabs restores it. An explicit terminal minimize is never clobbered. */
+ *  open tabs (or a first-run login hint) restores it. An explicit terminal
+ *  minimize is never clobbered. */
 function syncEditorMinimizedForProject(): void {
   if (editorPaneOccupied()) {
     if (minimizedWork === "editor") setMinimizedWork(null);
@@ -3007,6 +3014,14 @@ window.termina.onFolderOpened((e) => {
   timelineView.resetForProject();
   renderTimeline();
   hydrateWorldlines(projectId);
+});
+
+window.termina.onLoginHint((e) => {
+  for (const view of projectViews.values()) {
+    view.needsLogin = e.needsLogin === true;
+    view.editorMgr?.setProjectOpen(true, e.needsLogin);
+  }
+  syncEditorMinimizedForProject();
 });
 
 // ---------------------------------------------------------- worldlines ----

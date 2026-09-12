@@ -507,7 +507,11 @@ export interface FolderOpenedPayload {
   workspaceId: string;
   /** Monotonic main-side project activation epoch. */
   activationGeneration: number;
-  /** True when pi has no provider in auth.json or in the process environment. */
+  /** True when the agent has no provider in auth.json or in the process environment. */
+  needsLogin: boolean;
+}
+
+export interface LoginHintPayload {
   needsLogin: boolean;
 }
 
@@ -563,6 +567,7 @@ export interface TerminaBridge {
   onRecorderState(cb: (p: { terminalId: string; state: RecorderState; detail?: string | null }) => void): () => void;
   onVerifyState(cb: (p: { terminalId: string; verify: VerifyInfo }) => void): () => void;
   onFolderOpened(cb: (e: FolderOpenedPayload) => void): () => void;
+  onLoginHint(cb: (e: LoginHintPayload) => void): () => void;
   onInstances(cb: (list: InstanceSummary[]) => void): () => void;
   /** Main asks the renderer to save every dirty model (run-start preflight). */
   onFlushRequest(cb: (p: { requestId: string; writerId: string; projectId: string; workspaceId: string }) => void): () => void;

@@ -39,6 +39,7 @@ describe("initial project restoration", () => {
       coreSessionRoot: () => "/fixture/core",
       preferencesStore: { load: async () => ({ shortcuts: {} }) },
       registerIpc: () => {},
+      startLoginHintWatch: () => {},
       prepareEventsDir: async () => {},
       cleanupStaleDispatchFiles: async () => {},
       parseTargetCwdFromArgv: () => null,
