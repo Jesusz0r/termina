@@ -232,6 +232,10 @@ body {
    * revealed itself on an agent auto-open the divider stopped tracking
    * the pointer. Overflow pressure belongs on #main-split (min-width: 0). */
   flex: 0 0 auto;
+  /* A tall file list must not size this column. If this minimum follows
+   * content, #main grows with the tree and the status bar sits above a
+   * blank strip. */
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: var(--bg-panel);
@@ -357,6 +361,8 @@ body {
 
 #explorer-tree {
   flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   padding: 4px 0;
   font-family: var(--font-chrome);
@@ -368,6 +374,8 @@ body {
 
 #explorer-tree::-webkit-scrollbar {
   display: none;
+  width: 0;
+  height: 0;
 }
 
 .explorer-empty {

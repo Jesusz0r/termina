@@ -34,10 +34,30 @@ test.describe("Explorer File Tree & Actions", () => {
     }))).toEqual({ overflow: "auto", scrollbar: "none" });
 
     await tree.evaluate((element) => {
-      element.style.height = "72px";
-      element.style.flex = "0 0 72px";
+      const row = element.querySelector(".explorer-row");
+      if (!row) throw new Error("missing explorer row");
+      for (let i = 0; i < 80; i++) element.appendChild(row.cloneNode(true));
     });
-    expect(await tree.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+
+    expect(await page.evaluate(() => {
+      const tree = document.getElementById("explorer-tree")!;
+      const explorer = document.getElementById("explorer")!;
+      const main = document.getElementById("main")!;
+      const status = document.getElementById("statusbar")!;
+      const app = document.getElementById("app")!;
+      const near = (a: number, b: number) => Math.abs(a - b) <= 1;
+      return {
+        treeScrolls: tree.scrollHeight > tree.clientHeight + 1,
+        explorerMatchesMain: near(explorer.getBoundingClientRect().height, main.getBoundingClientRect().height),
+        statusAtBottom: near(status.getBoundingClientRect().bottom, app.getBoundingClientRect().bottom),
+        appFitsWindow: near(app.getBoundingClientRect().height, window.innerHeight),
+      };
+    })).toEqual({
+      treeScrolls: true,
+      explorerMatchesMain: true,
+      statusAtBottom: true,
+      appFitsWindow: true,
+    });
 
     await tree.hover();
     await page.mouse.wheel(0, 250);

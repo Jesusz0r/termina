@@ -117,6 +117,14 @@ describe("explorer minimize chrome", () => {
     const block = css.slice(start, css.indexOf("}", start) + 1);
     expect(block).toMatch(/overflow-y:\s*auto/);
     expect(block).toMatch(/scrollbar-width:\s*none/);
+    // Content height must not become the sidebar's minimum or a tall tree
+    // grows #main and leaves a blank strip under the status bar.
+    expect(block).toMatch(/min-height:\s*0/);
+
+    const explorerStart = css.indexOf("#explorer {");
+    expect(explorerStart).toBeGreaterThan(-1);
+    const explorer = css.slice(explorerStart, css.indexOf("}", explorerStart) + 1);
+    expect(explorer).toMatch(/min-height:\s*0/);
 
     const webkitStart = css.indexOf("#explorer-tree::-webkit-scrollbar");
     expect(webkitStart).toBeGreaterThan(-1);
