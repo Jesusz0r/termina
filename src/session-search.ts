@@ -56,17 +56,13 @@ export class SessionSearch {
     this.input = input;
     this.resultsEl = results;
 
-    const close = (): void => {
-      if (this.searchTimer) clearTimeout(this.searchTimer);
-      backdrop.style.display = "none";
-    };
     backdrop.addEventListener("click", (e) => {
-      if (e.target === backdrop) close();
+      if (e.target === backdrop) this.hide();
     });
     input.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         e.stopPropagation();
-        close();
+        this.hide();
       } else if (e.key === "ArrowDown") {
         e.preventDefault();
         this.move(1);
@@ -75,7 +71,7 @@ export class SessionSearch {
         this.move(-1);
       } else if (e.key === "Enter") {
         e.preventDefault();
-        if (this.activate()) close();
+        if (this.activate()) this.hide();
       }
     });
     input.addEventListener("input", () => {
@@ -114,6 +110,13 @@ export class SessionSearch {
     }
     if (seq !== this.searchSeq || (this.input?.value ?? "") !== query) return;
     this.render(res.hits, query, res.error);
+  }
+
+  /** Hide the modal, cancelling any debounced search. Shared by the
+   *  backdrop/Escape/Enter handlers and row clicks. */
+  private hide(): void {
+    if (this.searchTimer) clearTimeout(this.searchTimer);
+    if (this.root) this.root.style.display = "none";
   }
 
   private move(delta: 1 | -1): void {
@@ -177,7 +180,7 @@ export class SessionSearch {
         row.addEventListener("click", () => {
           this.selected = i;
           this.highlight();
-          if (this.activate()) this.root!.style.display = "none";
+          if (this.activate()) this.hide();
         });
       } else {
         const hint = document.createElement("span");
