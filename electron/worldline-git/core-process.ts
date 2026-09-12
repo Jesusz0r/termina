@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
+import { isRecord } from "../../shared/guards.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -270,7 +271,7 @@ export class CoreClient {
 
   /** The trust-sensitive resource hashes, off the main thread (section 6.7). */
   trustHashes(agentDir: string, projectRoot: string | null): Promise<Record<string, string>> {
-    return this.request({ op: "trust-hashes", agentDir, projectRoot }) as Promise<Record<string, string>>;
+    return this.request({ op: "trust-hashes", agentDir, projectRoot }).then(decodeTrustHashes);
   }
 
   /** The tracked file paths of a source repository. */
@@ -318,6 +319,18 @@ export class CoreClient {
     this.process = null;
     process?.child.kill();
   }
+}
+
+/** Decode a trust-hashes core response. Incomplete or malformed walks fail closed. */
+export function decodeTrustHashes(response: unknown): Record<string, string> {
+  if (!isRecord(response)) throw new Error("trust hashes returned an invalid response");
+  if (response.complete !== true) throw new Error("trust hashes returned an incomplete walk");
+  const hashes = response.hashes;
+  if (!isRecord(hashes)) throw new Error("trust hashes returned an invalid response");
+  for (const value of Object.values(hashes)) {
+    if (typeof value !== "string") throw new Error("trust hashes returned an invalid response");
+  }
+  return hashes as Record<string, string>;
 }
 
 /** The shared core process for the whole app. */

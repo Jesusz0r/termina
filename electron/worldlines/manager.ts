@@ -1375,13 +1375,21 @@ export class WorldlineManager {
       return { ok: false, error: "the source repository identity changed since the run" };
     }
     // Trust-sensitive resources must still match the run's capture (§6.5).
-    if (run.trustHashes) {
-      const now = await this.deps.trustHashes();
-      const changed = [...new Set([...Object.keys(run.trustHashes), ...Object.keys(now)])]
-        .filter((k) => now[k] !== run.trustHashes![k]);
-      if (changed.length > 0) {
-        return { ok: false, error: `trust-sensitive resources changed since the run: ${changed.slice(0, 3).join(", ")}` };
-      }
+    // Either side incomplete refuses the fork: a missing baseline or a
+    // failed re-hash must never read as "unchanged".
+    if (!run.trustHashes) {
+      return { ok: false, error: "the run has no complete trust-sensitive baseline" };
+    }
+    let now: Record<string, string>;
+    try {
+      now = await this.deps.trustHashes();
+    } catch (error) {
+      return { ok: false, error: `trust-sensitive resources could not be verified: ${error instanceof Error ? error.message : String(error)}` };
+    }
+    const changed = [...new Set([...Object.keys(run.trustHashes), ...Object.keys(now)])]
+      .filter((k) => now[k] !== run.trustHashes![k]);
+    if (changed.length > 0) {
+      return { ok: false, error: `trust-sensitive resources changed since the run: ${changed.slice(0, 3).join(", ")}` };
     }
     // Budgets (WORLDLINES §9): prompt payload caps.
     if (run.promptPayloadFile) {

@@ -44,7 +44,9 @@ pub(crate) fn op_trust_hashes(req: &Value) -> Result<Value, String> {
         project_root.as_deref(),
         &TrustBudget::production(),
     )?;
-    Ok(json!({ "state": Value::Object(state), "complete": true }))
+    // The map key is `hashes`, not `state`: the client resolves `msg.state`
+    // when present, which would strip `complete` from the envelope.
+    Ok(json!({ "hashes": Value::Object(state), "complete": true }))
 }
 
 fn collect_trust_hashes(
@@ -328,9 +330,9 @@ mod tests {
     }
 
     fn state_keys(value: &Value) -> Vec<&str> {
-        value["state"]
+        value["hashes"]
             .as_object()
-            .expect("trust hashes return a state object")
+            .expect("trust hashes return a hashes map")
             .keys()
             .map(String::as_str)
             .collect()
@@ -362,7 +364,7 @@ mod tests {
                 "agent/skills/z.txt",
             ]
         );
-        assert_eq!(first["state"]["agent/skills/a.txt"], sha256_hex(b"a"));
+        assert_eq!(first["hashes"]["agent/skills/a.txt"], sha256_hex(b"a"));
     }
 
     #[test]
@@ -422,6 +424,27 @@ mod tests {
     }
 
     #[test]
+    fn repeated_over_budget_walks_fail_identically() {
+        let fixture = Fixture::new();
+        let skills = fixture.agent.join("skills");
+        fs::create_dir(&skills).unwrap();
+        for name in ["z.txt", "a.txt", "m.txt", "k.txt", "q.txt"] {
+            fs::write(skills.join(name), b"skill-bytes").unwrap();
+        }
+        let budget = TrustBudget {
+            max_files: 3,
+            max_bytes: TRUST_MAX_BYTES,
+            max_file_bytes: TRUST_MAX_FILE_BYTES,
+        };
+        let first =
+            collect_trust_hashes(&fixture.agent, Some(&fixture.project), &budget).unwrap_err();
+        let second =
+            collect_trust_hashes(&fixture.agent, Some(&fixture.project), &budget).unwrap_err();
+        assert_eq!(first, second);
+        assert!(first.contains("file budget"), "got {first}");
+    }
+
+    #[test]
     fn symlink_settings_json_hashes_link_not_target() {
         let fixture = Fixture::new();
         let foreign = fixture.root.join("foreign-settings.json");
@@ -433,11 +456,11 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first["complete"], true);
         assert_eq!(
-            first["state"]["agent/settings.json"],
+            first["hashes"]["agent/settings.json"],
             symlink_digest(&foreign)
         );
         assert_ne!(
-            first["state"]["agent/settings.json"],
+            first["hashes"]["agent/settings.json"],
             sha256_hex(b"foreign-secret-bytes")
         );
 
@@ -447,11 +470,11 @@ mod tests {
         unix_fs::symlink(&other, fixture.agent.join("settings.json")).unwrap();
         let retargeted = op_trust_hashes(&fixture.req()).unwrap();
         assert_ne!(
-            retargeted["state"]["agent/settings.json"],
-            first["state"]["agent/settings.json"]
+            retargeted["hashes"]["agent/settings.json"],
+            first["hashes"]["agent/settings.json"]
         );
         assert_eq!(
-            retargeted["state"]["agent/settings.json"],
+            retargeted["hashes"]["agent/settings.json"],
             symlink_digest(&other)
         );
     }
@@ -468,12 +491,12 @@ mod tests {
         assert_eq!(result["complete"], true);
         assert_eq!(state_keys(&result), ["agent/skills"]);
         assert_eq!(
-            result["state"]["agent/skills"],
+            result["hashes"]["agent/skills"],
             symlink_digest(&foreign_skills)
         );
-        assert!(result["state"].get("agent/skills/secret.txt").is_none());
+        assert!(result["hashes"].get("agent/skills/secret.txt").is_none());
         assert_ne!(
-            result["state"]["agent/skills"],
+            result["hashes"]["agent/skills"],
             sha256_hex(b"foreign-secret-bytes")
         );
     }
@@ -495,15 +518,15 @@ mod tests {
             ["agent/skills/linked.md", "agent/skills/local.md"]
         );
         assert_eq!(
-            result["state"]["agent/skills/linked.md"],
+            result["hashes"]["agent/skills/linked.md"],
             symlink_digest(&foreign)
         );
         assert_eq!(
-            result["state"]["agent/skills/local.md"],
+            result["hashes"]["agent/skills/local.md"],
             sha256_hex(b"local")
         );
         assert_ne!(
-            result["state"]["agent/skills/linked.md"],
+            result["hashes"]["agent/skills/linked.md"],
             sha256_hex(b"foreign-secret-bytes")
         );
     }
@@ -515,7 +538,7 @@ mod tests {
         fs::write(&foreign, b"foreign-secret-bytes").unwrap();
         unix_fs::symlink(&foreign, fixture.agent.join("settings.json")).unwrap();
         let linked = op_trust_hashes(&fixture.req()).unwrap();
-        let link_hash = linked["state"]["agent/settings.json"].as_str().unwrap().to_string();
+        let link_hash = linked["hashes"]["agent/settings.json"].as_str().unwrap().to_string();
         assert!(link_hash.starts_with(SYMLINK_DIGEST_PREFIX));
 
         fs::remove_file(fixture.agent.join("settings.json")).unwrap();
@@ -523,7 +546,7 @@ mod tests {
         impersonation.extend_from_slice(foreign.as_os_str().as_bytes());
         fs::write(fixture.agent.join("settings.json"), &impersonation).unwrap();
         let regular = op_trust_hashes(&fixture.req()).unwrap();
-        let file_hash = regular["state"]["agent/settings.json"].as_str().unwrap();
+        let file_hash = regular["hashes"]["agent/settings.json"].as_str().unwrap();
         assert_ne!(file_hash, link_hash);
         assert!(!file_hash.starts_with(SYMLINK_DIGEST_PREFIX));
         assert_eq!(file_hash, hex_sha256(&impersonation));
@@ -537,7 +560,7 @@ mod tests {
         let result = op_trust_hashes(&fixture.req()).unwrap();
         assert_eq!(result["complete"], true);
         assert_eq!(
-            result["state"]["agent/settings.json"],
+            result["hashes"]["agent/settings.json"],
             symlink_digest(&missing)
         );
     }
@@ -572,6 +595,6 @@ mod tests {
         let fixture = Fixture::new();
         let result = op_trust_hashes(&fixture.req()).unwrap();
         assert_eq!(result["complete"], true);
-        assert_eq!(result["state"], json!({}));
+        assert_eq!(result["hashes"], json!({}));
     }
 }
