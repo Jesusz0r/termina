@@ -2704,7 +2704,10 @@ async function confirmUnsavedEditors(projectId: string | null): Promise<{ ok: bo
   );
   if (decision === "abort") return { ok: false, cancelled: true };
   if (decision === "save") {
-    const results = await Promise.all(dirty.map((editor) => editor.flushAll()));
+    // Flush every editor, not just the prompt-time dirties: an editor
+    // dirtied while the prompt was open must still be saved. Clean editors
+    // are a no-op flush.
+    const results = await Promise.all(editors.map((editor) => editor.flushAll()));
     const failed = results.flatMap((result) => result.failed);
     if (failed.length > 0) {
       toast(`could not save: ${failed.map((p) => pathBasename(p)).join(", ")}`, "error");

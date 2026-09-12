@@ -781,7 +781,9 @@ export class EditorManager {
     const decision = decideUnsavedClose(dirtyKeys.length > 0, choice);
     if (decision === "abort") return false;
     if (decision === "save") {
-      const result = await this.flushKeys(dirtyKeys);
+      // Flush the closing set, not the prompt-time dirties: a key dirtied
+      // while the prompt was open must still be saved. Clean keys are skipped.
+      const result = await this.flushKeys(unique);
       if (!result.ok) {
         toast(`could not save: ${result.failed.map((p) => pathBasename(p)).join(", ")}`, "error");
         return false;

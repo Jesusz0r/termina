@@ -47,7 +47,7 @@ describe("multi-project editor event routing", () => {
     expect(editor).toContain("requestCloseTab(key)");
     expect(editor).toContain("void this.requestCloseTab(key)");
     expect(editor).toContain("decideUnsavedClose");
-    expect(editor).toContain("flushKeys(dirtyKeys)");
+    expect(editor).toContain("flushKeys(unique)");
     expect(editor).toContain("window.termina.saveFile");
     const closeClick = editor.indexOf('close.addEventListener("click"');
     const middleClick = editor.indexOf("e.button === 1");
