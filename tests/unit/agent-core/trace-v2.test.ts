@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readTraceDirectory, summarizeTraces } from "./trace-report.ts";
+import { formatTraceSummary, readTraceDirectory, summarizeTraces } from "./trace-report.ts";
 
 type PriceProvenance = {
   source: string;
@@ -607,14 +607,137 @@ describe("Agent Core Trace V2 Invariants", () => {
       assert.equal(report.tools.outcomes.byStatus.ok, 1);
       assert.equal(report.tools.outcomes.byStatus.truncated, 1);
       assert.equal(report.tools.outcomes.incomplete, 1);
+      assert.equal(report.tools.calls, 2);
+      assert.equal(report.tools.toolTurns, 1);
+      assert.equal(report.tools.singleToolTurns, 0);
+      assert.equal(report.tools.parallelToolTurns, 1);
+      assert.equal(report.tools.singleToolShare, 0);
+      assert.equal(report.tools.callsPerTurn, 2);
+      assert.deepEqual(report.tools.byCount, { 2: 1 });
+      assert.equal(report.tools.grepThenRead, 0);
+      assert.equal(report.tools.readThenEdit, 0);
+      assert.equal(report.tools.sameTurnReadEdit, 1);
       assert.equal(report.reclaim.samples, 1);
       assert.equal(report.reclaim.reclaimedBytes.total, 120);
       assert.equal(report.reclaim.reclaimedTokens.total, 30);
       assert.equal(report.reclaim.receipts, 1);
     }, failures);
+    check("text summary prints tool-turn batching after efficiency", () => {
+      const text = formatTraceSummary(report);
+      assert.match(text, /efficiency: 2 tool calls, 0 revisions\n {2}tool turns: 1 \(0\.0% single, mean 2 calls\/turn\); adjacent grep→read 0, read→edit 0; same-turn read\+edit 1/);
+    }, failures);
     
     check("serialization is byte-stable for the same ordered fixture", () => {
       assert.equal(JSON.stringify(report), JSON.stringify(summarizeTraces(source.records, "trace-v2")));
+    }, failures);
+
+    check("tool-turn histograms and adjacency skip empty and summary attempts", () => {
+      const usage = { input: 1, cacheRead: 0, cacheWrite: 0, output: 1, reasoning: 0 };
+      const batchRecords = [
+        attempt({
+          taskId: "task-batch",
+          attemptId: "batch-grep",
+          status: "ok",
+          usage,
+          usd: 0,
+          price: knownPrice,
+          effectiveMode: "none",
+          effectiveTtlMs: null,
+          toolNames: ["grep"],
+        }),
+        attempt({
+          taskId: "task-batch",
+          attemptId: "batch-summary",
+          role: "summary",
+          status: "ok",
+          usage,
+          usd: 0,
+          price: knownPrice,
+          effectiveMode: "none",
+          effectiveTtlMs: null,
+          toolNames: ["read_file"],
+        }),
+        attempt({
+          taskId: "task-other",
+          attemptId: "other-single",
+          status: "ok",
+          usage,
+          usd: 0,
+          price: knownPrice,
+          effectiveMode: "none",
+          effectiveTtlMs: null,
+          toolNames: ["read_file"],
+        }),
+        attempt({
+          taskId: "task-batch",
+          attemptId: "batch-text",
+          status: "ok",
+          usage,
+          usd: 0,
+          price: knownPrice,
+          effectiveMode: "none",
+          effectiveTtlMs: null,
+          toolNames: [],
+        }),
+        attempt({
+          taskId: "task-batch",
+          attemptId: "batch-read",
+          status: "ok",
+          usage,
+          usd: 0,
+          price: knownPrice,
+          effectiveMode: "none",
+          effectiveTtlMs: null,
+          toolNames: ["read_file"],
+        }),
+        attempt({
+          taskId: "task-batch",
+          attemptId: "batch-edit",
+          status: "ok",
+          usage,
+          usd: 0,
+          price: knownPrice,
+          effectiveMode: "none",
+          effectiveTtlMs: null,
+          toolNames: ["edit"],
+        }),
+      ];
+      const batchReport = summarizeTraces(batchRecords, "tool-turns");
+      assert.equal(batchReport.tools.calls, 4);
+      assert.equal(batchReport.tools.toolTurns, 4);
+      assert.equal(batchReport.tools.singleToolTurns, 4);
+      assert.equal(batchReport.tools.parallelToolTurns, 0);
+      assert.equal(batchReport.tools.singleToolShare, 1);
+      assert.equal(batchReport.tools.callsPerTurn, 1);
+      assert.deepEqual(batchReport.tools.byCount, { 1: 4 });
+      assert.equal(batchReport.tools.grepThenRead, 1);
+      assert.equal(batchReport.tools.readThenEdit, 1);
+      assert.equal(batchReport.tools.sameTurnReadEdit, 0);
+      assert.match(
+        formatTraceSummary(batchReport),
+        /tool turns: 4 \(100\.0% single, mean 1 calls\/turn\); adjacent grep→read 1, read→edit 1; same-turn read\+edit 0/,
+      );
+      const emptyReport = summarizeTraces([
+        attempt({
+          taskId: "task-empty",
+          attemptId: "empty-main",
+          status: "ok",
+          usage,
+          usd: 0,
+          price: knownPrice,
+          effectiveMode: "none",
+          effectiveTtlMs: null,
+        }),
+      ], "empty-tools");
+      assert.equal(emptyReport.tools.calls, 0);
+      assert.equal(emptyReport.tools.toolTurns, 0);
+      assert.equal(emptyReport.tools.singleToolShare, null);
+      assert.equal(emptyReport.tools.callsPerTurn, null);
+      assert.deepEqual(emptyReport.tools.byCount, {});
+      assert.match(
+        formatTraceSummary(emptyReport),
+        /tool turns: 0 \(-- single, mean -- calls\/turn\); adjacent grep→read 0, read→edit 0; same-turn read\+edit 0/,
+      );
     }, failures);
     
     check("malformed, retained, and write-failure counters stay separate", () => {

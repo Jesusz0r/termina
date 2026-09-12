@@ -931,6 +931,37 @@ function aggregateV2ToolOutcomes(attempts: V2NormalizedAttempt[]) {
   };
 }
 
+function aggregateV2ToolTurnStats(mainAttempts: V2NormalizedAttempt[], calls: number) {
+  const toolTurns = mainAttempts.filter((attempt) => attempt.toolNames.length > 0);
+  const toolTurnCount = toolTurns.length;
+  const singleToolTurns = toolTurns.filter((attempt) => attempt.toolNames.length === 1).length;
+  const previousByTask = new Map<string, string[]>();
+  let grepThenRead = 0;
+  let readThenEdit = 0;
+  for (const attempt of mainAttempts) {
+    if (attempt.toolNames.length === 0) continue;
+    const key = v2CompositeKey(attempt.runId, attempt.taskId);
+    const previous = previousByTask.get(key);
+    if (previous) {
+      if (previous.includes("grep") && attempt.toolNames.includes("read_file")) grepThenRead++;
+      if (previous.includes("read_file") && attempt.toolNames.includes("edit")) readThenEdit++;
+    }
+    previousByTask.set(key, attempt.toolNames);
+  }
+  return {
+    toolTurns: toolTurnCount,
+    singleToolTurns,
+    parallelToolTurns: toolTurns.filter((attempt) => attempt.toolNames.length >= 2).length,
+    singleToolShare: toolTurnCount === 0 ? null : singleToolTurns / toolTurnCount,
+    callsPerTurn: toolTurnCount === 0 ? null : calls / toolTurnCount,
+    byCount: counts(toolTurns.map((attempt) => String(attempt.toolNames.length))),
+    grepThenRead,
+    readThenEdit,
+    sameTurnReadEdit: toolTurns.filter((attempt) =>
+      attempt.toolNames.includes("read_file") && attempt.toolNames.includes("edit")).length,
+  };
+}
+
 function aggregateV2Reclaim(attempts: V2NormalizedAttempt[]) {
   const evidence = attempts.map((attempt) => attempt.reclaimEvidence).filter((item): item is V2ReclaimEvidence => item !== null);
   const receipts = evidence.flatMap((item) => item.receipts);
@@ -1358,7 +1389,12 @@ function summarizeV2Traces(records: TraceRecordList, label: string) {
     },
     revisions,
     revisionKinds,
-    tools: { calls: tools.length, byName: counts(tools), outcomes: toolOutcomes },
+    tools: {
+      calls: tools.length,
+      byName: counts(tools),
+      outcomes: toolOutcomes,
+      ...aggregateV2ToolTurnStats(mainAttempts, tools.length),
+    },
     reclaim,
     integrity,
     billing,
@@ -1383,6 +1419,14 @@ export function summarizeTraces(records: TraceRecordList, label = "traces") {
 
 function formatMs(value: number | null): string {
   return value === null ? "--" : `${(value / 1000).toFixed(2)}s`;
+}
+
+function formatShare(value: number | null): string {
+  return value === null ? "--" : `${(value * 100).toFixed(1)}%`;
+}
+
+function formatCallsPerTurn(value: number | null): string {
+  return value === null ? "--" : String(Number(value.toFixed(2)));
 }
 
 function formatInt(value: number): string {
@@ -1467,6 +1511,7 @@ function formatV2TraceSummary(summary: V2TraceSummary, sourceErrors: TraceFileEr
     `  cost: $${summary.cost.main.totalUsd.toFixed(6)} (${summary.cost.main.knownSamples}/${summary.attempts.main} main attempts measured)`,
     `  diagnostics: integrity=${summary.integrity.status}, retained=${diagnostics.retainedRecords ?? "--"}, omitted=${diagnostics.omittedRecords ?? "--"}, partial=${diagnostics.partialRecords ?? "--"}, malformed=${diagnostics.malformedRecords ?? "--"}, retention-failures=${diagnostics.retentionFailures ?? "--"}, write-failures=${diagnostics.writeFailures ?? "--"}, manifest-write-failures=${diagnostics.manifestWriteFailures ?? "--"}`,
     `  efficiency: ${summary.tools.calls} tool calls, ${summary.revisions} revisions`,
+    `  tool turns: ${summary.tools.toolTurns} (${formatShare(summary.tools.singleToolShare)} single, mean ${formatCallsPerTurn(summary.tools.callsPerTurn)} calls/turn); adjacent grep→read ${summary.tools.grepThenRead}, read→edit ${summary.tools.readThenEdit}; same-turn read+edit ${summary.tools.sameTurnReadEdit}`,
   ];
   if (typeof prunedAttempts === "number" && prunedAttempts > 0) {
     lines.push(`  linked attempts: ${prunedAttempts} not loaded (indexed identity only; metrics remain incomplete)`);

@@ -206,7 +206,8 @@ Rules:
   attempt can validate a retry, parent, or settlement link without inventing
   its usage, cost, or outcome. Reports count those references and stay
   incomplete. Unknown identities, cross-task/run links, and malformed
-  retained parents are still rejected; retention alone is not proof.
+  retained parents are still rejected; retention alone is not proof. It also
+  prints tool-turn batching stats derived from main-attempt `toolNames`.
 
 Verify: every measured miss has one recorded cause or is below the noise floor.
 
