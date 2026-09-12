@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 const review = readFileSync(new URL("../../../src/review.ts", import.meta.url), "utf8");
 const worldlines = readFileSync(new URL("../../../src/worldlines.ts", import.meta.url), "utf8");
+const main = readFileSync(new URL("../../../src/main.ts", import.meta.url), "utf8");
 
 /** Body of a class method, including nested blocks. */
 function methodBody(source: string, signature: string): string {
@@ -106,6 +107,88 @@ describe("worldline success toasts", () => {
     );
     expect(methodBody(worldlines, "private async verify(")).toContain(
       'toast(res.error ?? "verify failed to start", "warning")',
+    );
+  });
+});
+
+describe("dispatch success toasts", () => {
+  it("does not flash dispatched info toasts after the plan row shows the worker", () => {
+    const rowDispatch = methodBody(main, 'li.addEventListener("click", (e) => {');
+    const bulkDispatch = methodBody(main, 'btnDispatch.addEventListener("click", () => {');
+    const plan = methodBody(main, "function renderPlan(pane: Pane, announce = true): void {");
+    // The durable surface: the row renders the worker and claimed files.
+    expect(plan).toContain("plan-meta");
+    expect(plan).toContain("task.workerId");
+    expect(rowDispatch).toContain("dispatchRun(pane.instanceId, task.text)");
+    expect(bulkDispatch).toContain("dispatchRun(id)");
+    expect(hasInfoToast(rowDispatch)).toBe(false);
+    expect(hasInfoToast(bulkDispatch)).toBe(false);
+    expect(main).not.toContain("dispatched 1 task to a parallel agent");
+    expect(main).not.toContain("task(s) to parallel agents");
+  });
+
+  it("still toasts dispatch failures", () => {
+    const rowDispatch = methodBody(main, 'li.addEventListener("click", (e) => {');
+    const bulkDispatch = methodBody(main, 'btnDispatch.addEventListener("click", () => {');
+    expect(rowDispatch).toContain('toast(res.error ?? "dispatch failed", "warning")');
+    expect(bulkDispatch).toContain('toast(res.error ?? "dispatch failed", "warning")');
+  });
+});
+
+describe("accept-all success toast", () => {
+  it("does not flash an accepted info toast after the row marks update", () => {
+    const acceptAll = methodBody(main, 'btnAcceptAll.addEventListener("click", (e) => {');
+    expect(acceptAll).toContain("pane.accepted.set(f.path, reviewedAt)");
+    expect(acceptAll).toContain("renderModified(pane)");
+    expect(hasInfoToast(acceptAll)).toBe(false);
+    expect(main).not.toContain("file(s) accepted");
+  });
+});
+
+describe("verify badge toast", () => {
+  it("does not flash the summary the badge already shows; a click only cancels a run", () => {
+    const badgeClick = methodBody(main, 'verifyBadge.addEventListener("click", () => {');
+    const badge = methodBody(main, "function renderVerify(pane: Pane): void {");
+    expect(badge).toContain("verifyBadge.textContent");
+    expect(badgeClick).toContain("cancelVerify");
+    expect(hasInfoToast(badgeClick)).toBe(false);
+    expect(main).not.toContain('toast(pane.verify.summary ?? "", "info")');
+  });
+
+  it("still toasts verify start and cancel failures", () => {
+    expect(main).toContain('toast(res.error ?? "verify failed to start", "warning")');
+    expect(methodBody(main, 'verifyBadge.addEventListener("click", () => {')).toContain(
+      'toast(res.error ?? "verify could not be cancelled", "warning")',
+    );
+  });
+});
+
+describe("fork success toasts", () => {
+  it("does not flash starting info toasts after the candidate cards arrive", () => {
+    const forkRun = methodBody(main, 'btnForkRun.addEventListener("click", () => {');
+    const challengeRun = methodBody(main, 'button.addEventListener("click", () => {');
+    const forkPoint = methodBody(main, "onFork: (ev) => {");
+    // The durable surface: worldline pushes render cards and badge the tab.
+    expect(main).toContain("worldlinesView.upsert(summary)");
+    expect(forkRun).toContain("forkRun(run.id)");
+    expect(challengeRun).toContain("challengeRun(run.id, profile)");
+    expect(forkPoint).toContain("forkPoint(pane.instanceId, ev.seq)");
+    expect(hasInfoToast(forkRun)).toBe(false);
+    expect(hasInfoToast(challengeRun)).toBe(false);
+    expect(hasInfoToast(forkPoint)).toBe(false);
+    expect(main).not.toContain("are starting");
+    expect(main).not.toContain("is starting");
+  });
+
+  it("still toasts fork failures", () => {
+    expect(methodBody(main, 'btnForkRun.addEventListener("click", () => {')).toContain(
+      "toast(`Fork Run failed: ${res.error ?? \"unknown error\"}`, \"warning\")",
+    );
+    expect(methodBody(main, 'button.addEventListener("click", () => {')).toContain(
+      "toast(`Challenge failed: ${res.error ?? \"unknown error\"}`, \"warning\")",
+    );
+    expect(methodBody(main, "onFork: (ev) => {")).toContain(
+      "toast(`fork at this moment failed: ${res.error ?? \"unknown error\"}`, \"warning\")",
     );
   });
 });
