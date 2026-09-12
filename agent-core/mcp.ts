@@ -899,8 +899,52 @@ class McpHttp implements McpConn {
   }
 }
 
-function mcpEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
+const MCP_ENV_ALLOWLIST = [
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TERM",
+  "COLORTERM",
+  "NO_COLOR",
+  "FORCE_COLOR",
+  "TZ",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "SYSTEMROOT",
+  "SYSTEMDRIVE",
+  "WINDIR",
+  "COMSPEC",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+] as const;
+
+const MCP_DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+
+/**
+ * Mint the stdio MCP environment: a small allowlist (PATH, HOME, locale,
+ * terminal, temp, Windows system) plus the user-owned mcp.json `env` for
+ * that server. Provider keys and session pins never cross implicitly; a
+ * server that needs a secret must declare it per-server in mcp.json.
+ */
+export function mcpEnv(extra: Record<string, string>, host: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of MCP_ENV_ALLOWLIST) {
+    const value = host[key];
+    if (value !== undefined && !value.includes("\0")) env[key] = value;
+  }
+  if (!env.PATH) env.PATH = MCP_DEFAULT_PATH;
+  for (const [key, value] of Object.entries(extra)) {
+    if (!key || key.startsWith("PI_")) continue;
+    if (typeof value !== "string" || value.includes("\0")) continue;
+    env[key] = value;
+  }
   for (const key of Object.keys(env)) {
     if (key.startsWith("PI_")) delete env[key];
   }
@@ -1146,57 +1190,104 @@ export async function startMcp(
   const procs: McpConn[] = [];
   const discovered: McpClientTool[] = [];
   const notes: string[] = [];
-  const byOriginal = new Map<string, McpConn>();
+  const liveByServer = new Map<string, McpConn>();
+  const serverConfigs = new Map<string, McpServerConfig>();
+  const reconnecting = new Map<string, Promise<McpConn | null>>();
+  let isShutdown = false;
 
-  const started = await Promise.all(
-    configs.slice(0, MAX_MCP_SERVERS).map(async (cfg) => {
-      if (cfg.url) {
-        const bad = mcpHttpUrlError(cfg.url);
-        if (bad) {
-          return { cfg, proc: null as McpConn | null, tools: [] as McpClientTool[], note: `mcp ${cfg.name}: ${bad}` };
-        }
-        const proc = new McpHttp(cfg.name, cfg.url, cfg.headers ?? {});
-        try {
-          const tools = await handshake(proc);
-          return { cfg, proc, tools, note: "" };
-        } catch (err) {
-          proc.kill();
-          const why = err instanceof Error ? err.message : String(err);
-          return { cfg, proc: null as McpConn | null, tools: [] as McpClientTool[], note: `mcp ${cfg.name}: ${why}` };
-        }
+  const connectOne = async (cfg: McpServerConfig): Promise<{
+    cfg: McpServerConfig;
+    proc: McpConn | null;
+    tools: McpClientTool[];
+    note: string;
+  }> => {
+    if (cfg.url) {
+      const bad = mcpHttpUrlError(cfg.url);
+      if (bad) {
+        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${bad}` };
       }
-      const cwd = opts.confineCwd(cfg.cwd);
-      if (!cwd) return { cfg, proc: null as McpConn | null, tools: [] as McpClientTool[], note: `mcp ${cfg.name}: cwd is outside the project` };
-      const proc = new McpProcess(cfg.name);
+      const proc = new McpHttp(cfg.name, cfg.url, cfg.headers ?? {});
       try {
-        proc.start(cfg, cwd, mcpEnv(cfg.env));
         const tools = await handshake(proc);
         return { cfg, proc, tools, note: "" };
       } catch (err) {
         proc.kill();
-        const extra = proc.stderrTail();
         const why = err instanceof Error ? err.message : String(err);
-        return { cfg, proc: null, tools: [] as McpClientTool[], note: `mcp ${cfg.name}: ${why}${extra ? ` (${extra.slice(0, 200)})` : ""}` };
+        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${why}` };
       }
-    }),
-  );
+    }
+    const cwd = opts.confineCwd(cfg.cwd);
+    if (!cwd) return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: cwd is outside the project` };
+    const proc = new McpProcess(cfg.name);
+    try {
+      proc.start(cfg, cwd, mcpEnv(cfg.env));
+      const tools = await handshake(proc);
+      return { cfg, proc, tools, note: "" };
+    } catch (err) {
+      proc.kill();
+      const extra = proc.stderrTail();
+      const why = err instanceof Error ? err.message : String(err);
+      return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${why}${extra ? ` (${extra.slice(0, 200)})` : ""}` };
+    }
+  };
+
+  const started = await Promise.all(configs.slice(0, MAX_MCP_SERVERS).map(connectOne));
   for (const row of started) {
     if (row.note) notes.push(row.note);
     if (!row.proc) continue;
     procs.push(row.proc);
-    for (const tool of row.tools) {
-      byOriginal.set(`${row.cfg.name}\0${tool.original}`, row.proc);
-      discovered.push(tool);
-    }
+    liveByServer.set(row.cfg.name, row.proc);
+    serverConfigs.set(row.cfg.name, row.cfg);
+    for (const tool of row.tools) discovered.push(tool);
   }
+
+  const ensureLive = async (server: string): Promise<McpConn | null> => {
+    const current = liveByServer.get(server);
+    if (current && !current.dead) return current;
+    if (isShutdown) return null;
+    const ongoing = reconnecting.get(server);
+    if (ongoing) return ongoing;
+    const cfg = serverConfigs.get(server);
+    if (!cfg) return current ?? null;
+    const attempt = (async (): Promise<McpConn | null> => {
+      try {
+        const fresh = await connectOne(cfg);
+        if (isShutdown) {
+          fresh.proc?.kill();
+          return null;
+        }
+        if (!fresh.proc) return null;
+        const old = liveByServer.get(server);
+        liveByServer.set(server, fresh.proc);
+        if (old) {
+          const index = procs.indexOf(old);
+          if (index >= 0) procs[index] = fresh.proc;
+          else procs.push(fresh.proc);
+          try {
+            old.kill();
+          } catch {
+            /* already dead */
+          }
+        } else {
+          procs.push(fresh.proc);
+        }
+        return fresh.proc;
+      } catch {
+        return null;
+      } finally {
+        reconnecting.delete(server);
+      }
+    })();
+    reconnecting.set(server, attempt);
+    return attempt;
+  };
 
   const normalized = normalizeMcpDiscovery(discovered);
   notes.push(...normalized.conflicts);
   const tools = selectMcpTools(normalized.tools);
-  const byPrefixed = new Map<string, { proc: McpConn; original: string }>();
+  const byPrefixed = new Map<string, { server: string; original: string }>();
   for (const tool of tools) {
-    const proc = byOriginal.get(`${tool.server}\0${tool.original}`);
-    if (proc) byPrefixed.set(tool.name, { proc, original: tool.original });
+    if (liveByServer.has(tool.server)) byPrefixed.set(tool.name, { server: tool.server, original: tool.original });
   }
 
   return {
@@ -1205,19 +1296,28 @@ export async function startMcp(
     async call(name, args, callOpts) {
       const hit = byPrefixed.get(name);
       if (!hit) return mcpErrorResult(`error: unknown tool ${name}`);
-      const continuation = createMcpContinuation(hit.proc.name, name);
-      if (hit.proc.dead) return mcpErrorResult(`error: mcp ${hit.proc.name} is not running`, "failed", "none", continuation);
+      const continuation = createMcpContinuation(hit.server, name);
+      let proc = liveByServer.get(hit.server);
+      if (!proc) return mcpErrorResult(`error: mcp ${hit.server} is not running`, "failed", "none", continuation);
+      if (proc.dead) {
+        const revived = await ensureLive(hit.server);
+        if (!revived || revived.dead) {
+          return mcpErrorResult(`error: mcp ${hit.server} is not running`, "failed", "none", continuation);
+        }
+        proc = revived;
+      }
+      const active = proc;
       const timeoutMs = callOpts?.timeoutMs ?? MCP_CALL_MS;
       const stop = callOpts?.shouldStop;
       let poll: ReturnType<typeof setInterval> | null = null;
       try {
         const result = await new Promise<unknown>((resolve, reject) => {
-          const req = hit.proc.request("tools/call", { name: hit.original, arguments: args ?? {} }, timeoutMs);
+          const req = active.request("tools/call", { name: hit.original, arguments: args ?? {} }, timeoutMs);
           req.then(resolve, reject);
           poll = setInterval(() => {
-            if (stop?.()) hit.proc.kill(new Error("interrupted"));
+            if (stop?.()) active.kill(new Error("interrupted"));
           }, 50);
-          if (stop?.()) hit.proc.kill(new Error("interrupted"));
+          if (stop?.()) active.kill(new Error("interrupted"));
         });
         return normalizeMcpCallResult(result, continuation);
       } catch (err) {
@@ -1228,12 +1328,17 @@ export async function startMcp(
         const cancellationScope: McpCancellationScope = state === "interrupted" || state === "timeout"
           ? "connection"
           : "none";
-        return mcpErrorResult(`error: mcp ${hit.proc.name}: ${why}`, state, cancellationScope, continuation);
+        const result = mcpErrorResult(`error: mcp ${active.name}: ${why}`, state, cancellationScope, continuation);
+        if (active.dead && (state === "timeout" || state === "interrupted")) {
+          void ensureLive(hit.server).catch(() => {});
+        }
+        return result;
       } finally {
         if (poll) clearInterval(poll);
       }
     },
     shutdown() {
+      isShutdown = true;
       for (const proc of procs) proc.kill();
     },
   };
