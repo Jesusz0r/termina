@@ -6,9 +6,7 @@ use std::os::fd::AsRawFd;
 use base64::Engine as _;
 use serde_json::{Value, json};
 
-use crate::{
-    PROMOTION_JOURNAL_MAX_BYTES,
-};
+use crate::PROMOTION_JOURNAL_MAX_BYTES;
 use crate::util::{
     open_at,
     stat_at,

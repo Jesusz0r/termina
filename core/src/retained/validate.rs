@@ -11,9 +11,7 @@ use crate::util::{
     stat_file_owned,
 };
 use crate::FileIdentity;
-use crate::promote_fs::{
-    PromotionDirectoryStream,
-};
+use crate::promote_fs::PromotionDirectoryStream;
 
 use super::{RETAINED_ROOT_MARKER_MAX_BYTES, RETAINED_ROOT_MAX_ENTRIES, RETAINED_ROOT_MAX_SCAN_BYTES, RETAINED_ROOT_MAX_SCAN_DEPTH, RETAINED_ROOT_MAX_SCAN_ENTRIES, RETAINED_ROOT_MAX_SCAN_WORK_BYTES};
 use super::private_files::promotion_read_private_bounded_file;

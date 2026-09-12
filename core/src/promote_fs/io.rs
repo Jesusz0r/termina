@@ -10,9 +10,7 @@ use crate::{
     PROMOTION_COMPONENT_MAX_BYTES,
     PROMOTION_PATH_MAX_BYTES,
 };
-use crate::util::{
-    stat_file,
-};
+use crate::util::stat_file;
 use crate::FileIdentity;
 
 use super::capability::PromotionIdentity;
