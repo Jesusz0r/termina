@@ -1074,11 +1074,17 @@ pub(crate) fn collect_tree_map_cached(
     repo: &Repository,
     tree_oid: Oid,
 ) -> Result<std::sync::Arc<TreeMap>, String> {
-    if let Some(hit) = tree_map_cache().lock().unwrap().get(&tree_oid) {
+    if let Some(hit) = tree_map_cache()
+        .lock()
+        .expect("tree-map cache mutex is never poisoned: core handles requests one at a time")
+        .get(&tree_oid)
+    {
         return Ok(hit.clone());
     }
     let map = std::sync::Arc::new(collect_tree_map(repo, tree_oid)?);
-    let mut cache = tree_map_cache().lock().unwrap();
+    let mut cache = tree_map_cache()
+        .lock()
+        .expect("tree-map cache mutex is never poisoned: core handles requests one at a time");
     if cache.len() >= TREE_MAP_CACHE_SIZE {
         // Evict one arbitrary entry. Any policy beats a full walk here.
         if let Some(oldest) = cache.keys().next().cloned() {
@@ -1091,7 +1097,9 @@ pub(crate) fn collect_tree_map_cached(
 
 /// Remember the flat map of a freshly written tree.
 fn cache_tree_map(tree_oid: Oid, map: std::sync::Arc<TreeMap>) {
-    let mut cache = tree_map_cache().lock().unwrap();
+    let mut cache = tree_map_cache()
+        .lock()
+        .expect("tree-map cache mutex is never poisoned: core handles requests one at a time");
     if cache.len() >= TREE_MAP_CACHE_SIZE {
         if let Some(oldest) = cache.keys().next().cloned() {
             cache.remove(&oldest);
@@ -2970,28 +2978,30 @@ mod tests {
         fn named(name: &str) -> Self {
             let path =
                 std::env::temp_dir().join(format!("termina-capture-hook-{}-{name}", std::process::id()));
-            fs::create_dir_all(&path).unwrap();
+            fs::create_dir_all(&path).expect("hook test fixture directory");
             Self(path)
         }
     }
 
     impl Drop for Fixture {
         fn drop(&mut self) {
-            fs::remove_dir_all(&self.0).unwrap();
+            fs::remove_dir_all(&self.0).expect("hook test fixture cleanup");
         }
     }
 
     #[test]
     fn hook_payload_is_ignored_without_the_test_env() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .expect("hook test env lock is never poisoned");
         let _env = EnvGuard::cleared();
         let marker = std::env::temp_dir().join(format!(
             "termina-capture-hook-{}-must-not-exist.ready",
             std::process::id()
         ));
         let req = json!({ "hooks": { "probe": {
-            "readyPath": marker.to_str().unwrap(),
-            "releasePath": marker.to_str().unwrap(),
+            "readyPath": marker.to_str().expect("temp hook marker path is UTF-8"),
+            "releasePath": marker.to_str().expect("temp hook marker path is UTF-8"),
         } } });
         assert!(pause_at_hook(&req, "probe").is_ok());
         assert!(!marker.exists());
@@ -2999,7 +3009,9 @@ mod tests {
 
     #[test]
     fn relative_hook_paths_are_rejected_before_any_write() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .expect("hook test env lock is never poisoned");
         let _env = EnvGuard::set();
         let req = json!({ "hooks": { "probe": {
             "readyPath": "relative-ready",
@@ -3011,17 +3023,19 @@ mod tests {
 
     #[test]
     fn absolute_hook_paths_pause_and_release() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK
+            .lock()
+            .expect("hook test env lock is never poisoned");
         let _env = EnvGuard::set();
         let root = Fixture::named("absolute");
         let ready = root.0.join("ready");
         let release = root.0.join("release");
-        fs::write(&release, b"release").unwrap();
+        fs::write(&release, b"release").expect("hook test release marker write");
         let req = json!({ "hooks": { "probe": {
-            "readyPath": ready.to_str().unwrap(),
-            "releasePath": release.to_str().unwrap(),
+            "readyPath": ready.to_str().expect("temp hook path is UTF-8"),
+            "releasePath": release.to_str().expect("temp hook path is UTF-8"),
         } } });
         assert!(pause_at_hook(&req, "probe").is_ok());
-        assert_eq!(fs::read(ready).unwrap(), b"ready");
+        assert_eq!(fs::read(ready).expect("hook test ready marker read"), b"ready");
     }
 }

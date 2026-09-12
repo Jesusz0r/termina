@@ -112,7 +112,8 @@ mod promotion_root_capability_tests {
         drop(registry);
 
         let active_identity = PromotionIdentity { dev: 1, ino: 1 };
-        let active = issue_promotion_root_capability("/active", active_identity).unwrap();
+        let active = issue_promotion_root_capability("/active", active_identity)
+            .expect("test capability fits a cleared registry");
         for index in 1..MAX_PROMOTION_ROOT_CAPABILITIES {
             issue_promotion_root_capability(
                 &format!("/root-{index}"),
@@ -121,11 +122,12 @@ mod promotion_root_capability_tests {
                     ino: index as u64 + 1,
                 },
             )
-            .unwrap();
+            .expect("test capability fits a bounded registry");
         }
 
         assert_eq!(
-            issue_promotion_root_capability("/active", active_identity).unwrap(),
+            issue_promotion_root_capability("/active", active_identity)
+                .expect("reused test capability resolves"),
             active
         );
         assert!(issue_promotion_root_capability(
