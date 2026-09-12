@@ -335,4 +335,51 @@ describe("Agent Core Session Settings Records", () => {
       { storageSeq: 1, type: "settings", effort: "low", message: { role: "user", content: "x" } },
     ])).ok).toBe(false);
   });
+
+  it("round-trips the last settings model and rejects a malformed pin", () => {
+    const good = session.replaySessionRecords(text([
+      { storageSeq: 1, type: "settings", effort: "low", model: "anthropic/claude-opus-4-6" },
+      { storageSeq: 2, type: "settings", effort: "high", model: "openai/gpt-5.4" },
+    ]));
+    expect(good.ok).toBe(true);
+    if (good.ok) {
+      expect(good.effort).toBe("high");
+      expect(good.model).toBe("openai/gpt-5.4");
+    }
+    const effortOnly = session.replaySessionRecords(text([
+      { storageSeq: 1, type: "settings", effort: "low" },
+    ]));
+    expect(effortOnly.ok).toBe(true);
+    if (effortOnly.ok) expect(effortOnly.model).toBeNull();
+    expect(session.replaySessionRecords(text([
+      { storageSeq: 1, type: "settings", effort: "low", model: "bare" },
+    ])).ok).toBe(false);
+    expect(session.replaySessionRecords(text([
+      { storageSeq: 1, type: "settings", effort: "low", model: "trailing/" },
+    ])).ok).toBe(false);
+  });
+
+  it("keeps the last model when a later settings record omits it", () => {
+    const replayed = session.replaySessionRecords(text([
+      { storageSeq: 1, type: "settings", effort: "low", model: "anthropic/claude-opus-4-6" },
+      { storageSeq: 2, type: "settings", effort: "high" },
+    ]));
+    expect(replayed.ok).toBe(true);
+    if (replayed.ok) {
+      expect(replayed.effort).toBe("high");
+      expect(replayed.model).toBe("anthropic/claude-opus-4-6");
+    }
+  });
+
+  it("resume applies the replayed model and does not persist the startup route first", () => {
+    const main = readFileSync(new URL("../../../agent-core/main.ts", import.meta.url), "utf8");
+    const start = main.indexOf("async function resumeSessionBody");
+    const end = main.indexOf("export type ResumeTestOverrides");
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const resume = main.slice(start, end);
+    expect(resume.includes("const savedModel = replayed.state.model;")).toBe(true);
+    expect(resume.includes("persistRouteSettings")).toBe(false);
+    expect(main.includes("...(isSessionModel(model) ? { model } : {})")).toBe(true);
+  });
 });

@@ -111,4 +111,18 @@ describe("roster handoff wiring", () => {
     expect(main.includes("this.savePlanRoster(owner);"))
       .toBe(true);
   });
+
+  it("pins the roster model on the instance and keeps it across restore saves", () => {
+    const main = readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8");
+    expect(main.includes("const resumeModel = this.usableAgentModel(opts?.model);"))
+      .toBe(true);
+    expect(main.includes("const provisional = this.usableAgentModel(`${provider}/${modelName}`);"))
+      .toBe(true);
+    expect(main.includes("if (provisional) inst.model = provisional;"))
+      .toBe(true);
+    expect(main.includes("if (modelChanged && inst.persist) this.savePlanRoster(inst);"))
+      .toBe(true);
+    expect(main.includes("if (!this.projectIsSwitching(project.id)) this.saveTerminalRoster(project);"))
+      .toBe(true);
+  });
 });
