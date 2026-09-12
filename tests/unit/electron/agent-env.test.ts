@@ -12,11 +12,13 @@ describe("filterAgentEnvironment", () => {
       NODE_OPTIONS: "--require /tmp/inject.js",
       NODE_PATH: "/tmp/evil-modules",
       LD_PRELOAD: "/tmp/evil.so",
+      LD_LIBRARY_PATH: "/tmp/evil-lib",
     });
     expect(env.PATH).toBe("/usr/bin:/bin");
     expect(env.NODE_OPTIONS).toBeUndefined();
     expect(env.NODE_PATH).toBeUndefined();
     expect(env.LD_PRELOAD).toBeUndefined();
+    expect(env.LD_LIBRARY_PATH).toBeUndefined();
   });
 
   it("strips DYLD_* and ELECTRON_* by prefix", () => {
