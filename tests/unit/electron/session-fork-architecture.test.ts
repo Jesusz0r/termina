@@ -7,11 +7,15 @@ describe("SessionFork Architecture Contracts", () => {
   const main = readFileSync(join(root, "electron", "main.ts"), "utf8");
   // The worldlines owner is a directory; read every module so the contracts
   // below cover the whole owner instead of one file.
-  const worldlines = readdirSync(join(root, "electron", "worldlines"))
+  const worldlines = [...readdirSync(join(root, "electron", "worldlines"))
     .filter((name) => name.endsWith(".ts"))
     .sort()
-    .map((name) => readFileSync(join(root, "electron", "worldlines", name), "utf8"))
-    .join("\n");
+    .map((name) => readFileSync(join(root, "electron", "worldlines", name), "utf8")),
+    ...readdirSync(join(root, "electron", "worldlines", "promotion-recovery"))
+    .filter((name) => name.endsWith(".ts"))
+    .sort()
+    .map((name) => readFileSync(join(root, "electron", "worldlines", "promotion-recovery", name), "utf8")),
+  ].join("\n");
   // The Rust core is split into modules; read them all for the same reason.
   const core = readdirSync(join(root, "core", "src"))
     .filter((name) => name.endsWith(".rs"))
