@@ -1157,6 +1157,9 @@ timelineView.bind({
       return progress;
     });
   },
+  onContent: (has, count) => {
+    activityTabs.syncContent("timeline", has, count);
+  },
 });
 
 async function closePane(instanceId: string): Promise<void> {
@@ -1230,8 +1233,13 @@ function renderChrome(): void {
     planPanel.classList.add("collapsed");
     modifiedList.replaceChildren();
     modifiedRenderedPaneId = null;
+    modifiedPanel.classList.add("collapsed");
+    btnDispatch.hidden = true;
     btnCopySubject.hidden = true;
     btnOpenShell.hidden = true;
+    activityTabs.syncContent("plan", false, 0);
+    activityTabs.syncContent("modified", false, 0);
+    timelineView.setEvents([]);
     return;
   }
   renderStatus(pane);

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  activityEmptyVisible,
   initialActivityTabState,
   reduceActivityTab,
   resolveActivityTab,
@@ -56,5 +57,29 @@ describe("activity tabs", () => {
     expect(s1.active).toBe("timeline");
     // Hidden tabs cannot be selected.
     expect(reduceActivityTab(s1, { type: "select", tab: "modified" })).toBe(s1);
+  });
+
+  it("empty copy shows only on the selected tab with no content", () => {
+    const s0 = initialActivityTabState("timeline");
+    expect(activityEmptyVisible(s0, "timeline")).toBe(true);
+    expect(activityEmptyVisible(s0, "plan")).toBe(false);
+    expect(activityEmptyVisible(s0, "worldlines")).toBe(false);
+    expect(activityEmptyVisible(s0, "modified")).toBe(false);
+
+    const s1 = reduceActivityTab(s0, { type: "select", tab: "plan" });
+    expect(activityEmptyVisible(s1, "timeline")).toBe(false);
+    expect(activityEmptyVisible(s1, "plan")).toBe(true);
+
+    const s2 = reduceActivityTab(s1, { type: "sync", tab: "plan", has: true });
+    expect(activityEmptyVisible(s2, "plan")).toBe(false);
+
+    // Terminal switch: this tab's content is gone, so the copy returns.
+    const s3 = reduceActivityTab(s2, { type: "sync", tab: "plan", has: false });
+    expect(activityEmptyVisible(s3, "plan")).toBe(true);
+
+    // Another tab filling does not hide this tab's copy.
+    const s4 = reduceActivityTab(s3, { type: "sync", tab: "modified", has: true });
+    expect(activityEmptyVisible(s4, "plan")).toBe(true);
+    expect(activityEmptyVisible(s4, "modified")).toBe(false);
   });
 });
