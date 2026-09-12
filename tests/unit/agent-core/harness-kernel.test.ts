@@ -1666,6 +1666,12 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         FROZEN_IDENTITY.includes("Follow an explicit host instruction not to touch a file") &&
         !FROZEN_IDENTITY.includes("not a stop"),
     );
+    check(
+      "frozen identity batches independent tools",
+      /batch|simultaneous/i.test(FROZEN_IDENTITY) &&
+        /independent/i.test(FROZEN_IDENTITY) &&
+        !FROZEN_IDENTITY.includes("read before edit"),
+    );
     check("missing user-global omitted", !childFrozen.system.includes("<user-instructions>"));
     
     const escapedCwd = mkdtempSync(join(tmpdir(), "agent-core-esc-"));
