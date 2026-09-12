@@ -202,12 +202,23 @@ check(
 const repoRoot = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const mainSource = readFileSync(join(repoRoot, "electron", "main.ts"), "utf8");
 const sandboxSource = readFileSync(join(repoRoot, "electron", "sandbox.ts"), "utf8");
-const worldlinesSource = readdirSync(join(repoRoot, "electron", "worldlines"))
+const worldlinesSource = [...readdirSync(join(repoRoot, "electron", "worldlines"))
   .filter((name) => name.endsWith(".ts"))
   .sort()
-  .map((name) => readFileSync(join(repoRoot, "electron", "worldlines", name), "utf8"))
+  .map((name) => readFileSync(join(repoRoot, "electron", "worldlines", name), "utf8")),
+  // The promotion-recovery owner is a directory; cover the whole owner.
+  ...readdirSync(join(repoRoot, "electron", "worldlines", "promotion-recovery"))
+  .filter((name) => name.endsWith(".ts"))
+  .sort()
+  .map((name) => readFileSync(join(repoRoot, "electron", "worldlines", "promotion-recovery", name), "utf8")),
+].join("\n");
+// The core client is a directory; cover the entry plus every private module.
+const preflightSource = [join(repoRoot, "electron", "worldline-git.ts"), ...readdirSync(join(repoRoot, "electron", "worldline-git"))
+  .filter((name) => name.endsWith(".ts"))
+  .sort()
+  .map((name) => join(repoRoot, "electron", "worldline-git", name))]
+  .map((path) => readFileSync(path, "utf8"))
   .join("\n");
-const preflightSource = readFileSync(join(repoRoot, "electron", "worldline-git.ts"), "utf8");
 check("evidence and Verify launch the absolute constant", !mainSource.includes('spawn("sandbox-exec"') && !mainSource.includes('? "sandbox-exec" :'));
 check(
   "Evidence and Verify both derive from the trusted profile helper",
