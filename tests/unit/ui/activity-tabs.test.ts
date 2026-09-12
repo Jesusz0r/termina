@@ -8,6 +8,8 @@ import {
   initialActivityTabState,
   reduceActivityTab,
   resolveActivityTab,
+  stepActivityTab,
+  visibleActivityTabs,
 } from "../../../src/activity-tabs.ts";
 
 const html = readFileSync(new URL("../../../src/index.html", import.meta.url), "utf8");
@@ -57,6 +59,32 @@ describe("activity tabs", () => {
     expect(reduceActivityTab(s1, { type: "content", tab: "plan", has: true })).toBe(s1);
   });
 
+  it("an explicit tab pick holds the panel against content auto-switch", () => {
+    // #63: the user returns to Timeline, and a run that adds Modified files
+    // must not steal the panel. Picking the active tab still arms the hold.
+    const s0 = reduceActivityTab(initialActivityTabState("timeline"), { type: "select", tab: "timeline" });
+    expect(s0.held).toBe("timeline");
+    const s1 = reduceActivityTab(s0, { type: "content", tab: "modified", has: true });
+    expect(s1.active).toBe("timeline");
+    // The arrival is not swallowed: the badge and the panel content still update.
+    expect(s1.content.modified).toBe(true);
+    // The hold moves with the user's next pick instead of expiring on its own.
+    const s2 = reduceActivityTab(s1, { type: "select", tab: "plan" });
+    const s3 = reduceActivityTab(s2, { type: "content", tab: "worldlines", has: true });
+    expect(s3.active).toBe("plan");
+    expect(reduceActivityTab(s3, { type: "select", tab: "plan" })).toBe(s3);
+  });
+
+  it("hiding the held tab releases the hold", () => {
+    const s0 = reduceActivityTab(initialActivityTabState("timeline"), { type: "select", tab: "modified" });
+    expect(s0.held).toBe("modified");
+    // A project with no Modified surface cannot keep the auto-switch muted.
+    const s1 = reduceActivityTab(s0, { type: "visibility", tab: "modified", visible: false });
+    expect(s1.active).toBe("timeline");
+    expect(s1.held).toBeNull();
+    expect(reduceActivityTab(s1, { type: "content", tab: "worldlines", has: true }).active).toBe("worldlines");
+  });
+
   it("timeline content never auto-switches", () => {
     const s0 = initialActivityTabState("plan");
     const s1 = reduceActivityTab(s0, { type: "content", tab: "timeline", has: true });
@@ -83,6 +111,20 @@ describe("activity tabs", () => {
     expect(s1.active).toBe("timeline");
     // Hidden tabs cannot be selected.
     expect(reduceActivityTab(s1, { type: "select", tab: "modified" })).toBe(s1);
+  });
+
+  it("arrow navigation walks only the visible tabs and wraps", () => {
+    const hidden = reduceActivityTab(initialActivityTabState("timeline"), { type: "visibility", tab: "plan", visible: false });
+    expect(visibleActivityTabs(hidden)).toEqual(["timeline", "worldlines", "modified"]);
+    // The hidden tab is skipped in both directions.
+    expect(stepActivityTab(visibleActivityTabs(hidden), "timeline", 1)).toBe("worldlines");
+    expect(stepActivityTab(visibleActivityTabs(hidden), "worldlines", -1)).toBe("timeline");
+    // Wrapping keeps every visible tab reachable by arrows alone.
+    expect(stepActivityTab(ACTIVITY_TABS, "modified", 1)).toBe("timeline");
+    expect(stepActivityTab(ACTIVITY_TABS, "timeline", -1)).toBe("modified");
+    // Unreachable cases stay put instead of throwing.
+    expect(stepActivityTab(["timeline"], "timeline", 1)).toBe("timeline");
+    expect(stepActivityTab(ACTIVITY_TABS, "nope" as never, 1)).toBe("nope");
   });
 
   it("empty copy shows only on the selected tab with no content", () => {

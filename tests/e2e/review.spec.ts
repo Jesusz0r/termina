@@ -72,6 +72,20 @@ test.describe("Diff Review Mode & Revert Lifecycle", () => {
     // No run baseline exists here, so the original side is empty.
     expect(sides.original).toBe("");
 
+    // Escape dismisses the diff, but never out of the terminal: there the key
+    // belongs to the pty (shell or agent TUI).
+    await page.locator("#terminal-container").click();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#review-container")).toBeVisible();
+
+    await page.locator("#review-back").focus();
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#review-container")).toBeHidden();
+
+    // Reopening works after a keyboard dismissal.
+    await row.click();
+    await expect(page.locator("#review-container")).toBeVisible();
+
     // Back hides the review again.
     await page.locator("#review-back").click();
     await expect(page.locator("#review-container")).toBeHidden();

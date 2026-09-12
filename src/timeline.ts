@@ -3,11 +3,22 @@
  * showing every agent action with a dot. Clicking a dot opens the file as it
  * looked at that exact moment (read-only snapshot tab); ▶ replays the run.
  * A forkable dot (captured source state) forks a candidate at that moment
- * with Cmd/Ctrl+Click.
+ * with Cmd/Ctrl+Click. Keyboard: Tab enters the strip once (roving tabindex),
+ * arrows/Home/End move the selection, Enter/Space open the moment,
+ * Cmd/Ctrl+Enter forks it, Escape stops a replay.
  */
 import type { TimelineEvent, RecorderState, TimelinePrefix, TimelineProgress } from "../shared/types";
 
 const MAX_TIMELINE_EVENTS = 400;
+
+/** Arrow target inside the strip: clamped at the ends (a timeline reads in
+ *  order, so wrapping past the newest moment would be a lie). `null` when the
+ *  move would leave the strip. */
+export function stepTimelineIndex(count: number, index: number, delta: -1 | 1): number | null {
+  if (index < 0 || index >= count) return null;
+  const next = index + delta;
+  return next < 0 || next >= count ? null : next;
+}
 
 export class TimelineView {
   private dotsEl: HTMLElement;
@@ -27,6 +38,8 @@ export class TimelineView {
   private hoverSeq: number | null = null;
   private hoverTimer: ReturnType<typeof setTimeout> | null = null;
   private activeSeq: number | null = null;
+  /** The one dot with tabindex 0 (roving): the selection, else the newest. */
+  private tabStopSeq: number | null = null;
   private replayTimer: ReturnType<typeof setInterval> | null = null;
   private replayIdx = 0;
 
@@ -45,6 +58,7 @@ export class TimelineView {
       e.stopPropagation();
       this.toggleReplay();
     });
+    container.addEventListener("keydown", (e) => this.onKeydown(e));
     container.addEventListener(
       "wheel",
       (e) => {
@@ -128,6 +142,7 @@ export class TimelineView {
       this.progressCache.delete(seq);
       this.progressInFlight.delete(seq);
     }
+    if (this.tabStopSeq !== null && gone.has(this.tabStopSeq)) this.setTabStop(this.activeSeq ?? this.newestSeq());
     this.countEl.textContent = this.events.length ? `(${this.events.length})` : "";
     this.btnPlay.hidden = this.events.length === 0;
     this.reportContent();
@@ -154,6 +169,7 @@ export class TimelineView {
       if (existing) {
         existing.className = this.dotClass(event);
         existing.title = this.tooltip(event);
+        existing.setAttribute("aria-label", existing.title);
         this.progressCache.delete(event.seq);
         this.progressInFlight.delete(event.seq);
       }
@@ -172,6 +188,9 @@ export class TimelineView {
     const dot = this.makeDot(event);
     this.dots.set(event.seq, dot);
     this.dotsEl.appendChild(dot);
+    if (event.seq === this.activeSeq) this.markActive(dot, true);
+    // With no selection the newest dot is the strip's single tab stop.
+    else if (this.activeSeq === null) this.setTabStop(event.seq);
     this.countEl.textContent = `(${this.events.length})`;
     this.btnPlay.hidden = this.events.length === 0;
     this.reportContent();
@@ -187,14 +206,22 @@ export class TimelineView {
     let activeEl: HTMLElement | null = null;
     for (const [s, el] of this.dots) {
       const on = s === seq;
-      el.classList.toggle("active", on);
+      this.markActive(el, on);
       if (on) activeEl = el;
     }
+    this.setTabStop(seq);
     // Center the active dot: replay steps beyond the visible strip width.
     if (activeEl) {
       const left = activeEl.offsetLeft - this.dotsEl.clientWidth / 2;
       this.dotsEl.scrollLeft = Math.max(0, left);
     }
+  }
+
+  /** Selection chrome on one dot: the CSS class plus its ARIA state. */
+  private markActive(el: HTMLElement, on: boolean): void {
+    el.classList.toggle("active", on);
+    if (on) el.setAttribute("aria-current", "true");
+    else el.removeAttribute("aria-current");
   }
 
   private dotClass(ev: TimelineEvent): string {
@@ -205,7 +232,13 @@ export class TimelineView {
     const dot = document.createElement("span");
     dot.className = this.dotClass(ev);
     dot.dataset.seq = String(ev.seq);
-    dot.title = this.tooltip(ev);
+    const label = this.tooltip(ev);
+    dot.title = label;
+    // A dot is a button in a toolbar: arrows move between moments, Tab
+    // enters the strip once (roving tabindex), Enter/Space open the moment.
+    dot.setAttribute("role", "button");
+    dot.setAttribute("aria-label", label);
+    dot.tabIndex = -1;
     dot.addEventListener("click", (e) => {
       const latest = this.eventBySeq(ev.seq) ?? ev;
       if ((e.metaKey || e.ctrlKey) && latest.stateId) {
@@ -217,8 +250,86 @@ export class TimelineView {
     });
     dot.addEventListener("pointerenter", () => this.scheduleProgress(ev.seq));
     dot.addEventListener("pointerleave", () => this.clearHover());
-    if (ev.seq === this.activeSeq) dot.classList.add("active");
+    // Keyboard parity with hover: focusing a forkable dot fetches its diff.
+    dot.addEventListener("focus", () => this.scheduleProgress(ev.seq));
+    dot.addEventListener("blur", () => this.clearHover());
     return dot;
+  }
+
+  /** Keep exactly one dot tabbable, so Tab enters the strip instead of
+   *  walking every moment. A seq that is no longer rendered falls back to the
+   *  newest dot, so the strip is never left without a stop. O(1). */
+  private setTabStop(seq: number | null): void {
+    const target = seq !== null && this.dots.has(seq) ? seq : this.newestSeq();
+    if (this.tabStopSeq === target) return;
+    if (this.tabStopSeq !== null) {
+      const previous = this.dots.get(this.tabStopSeq);
+      if (previous) previous.tabIndex = -1;
+    }
+    this.tabStopSeq = target;
+    if (target !== null) {
+      const next = this.dots.get(target);
+      if (next) next.tabIndex = 0;
+    }
+  }
+
+  /** The dot the strip falls back to when nothing is selected: the newest. */
+  private newestSeq(): number | null {
+    return this.events.length > 0 ? this.events[this.events.length - 1].seq : null;
+  }
+
+  /** Move focus and the selection to a moment, without opening it. */
+  private focusSeq(seq: number): void {
+    this.highlight(seq);
+    this.dots.get(seq)?.focus({ preventScroll: true });
+  }
+
+  private activate(ev: TimelineEvent, fork: boolean): void {
+    if (fork && ev.stateId) this.forkAt(ev);
+    else this.jumpTo(ev);
+  }
+
+  /** Strip keyboard: arrows/Home/End move the selection, Enter/Space open
+   *  the moment, Cmd/Ctrl+Enter forks it, Escape stops a replay. */
+  private onKeydown(e: KeyboardEvent): void {
+    if (e.key === "Escape") {
+      if (!this.replayTimer) return;
+      e.preventDefault();
+      this.stopReplay();
+      return;
+    }
+    const target = e.target instanceof HTMLElement ? e.target.closest<HTMLElement>(".timeline-dot") : null;
+    const seq = target ? Number(target.dataset.seq) : NaN;
+    const idx = this.events.findIndex((ev) => ev.seq === seq);
+    if (idx === -1) return;
+    let to: number | null;
+    switch (e.key) {
+      case "ArrowLeft":
+        to = stepTimelineIndex(this.events.length, idx, -1);
+        break;
+      case "ArrowRight":
+        to = stepTimelineIndex(this.events.length, idx, 1);
+        break;
+      case "Home":
+        to = 0;
+        break;
+      case "End":
+        to = this.events.length - 1;
+        break;
+      case "Enter":
+      case " ": {
+        const ev = this.eventBySeq(seq);
+        if (!ev) return;
+        e.preventDefault();
+        this.activate(ev, e.metaKey || e.ctrlKey);
+        return;
+      }
+      default:
+        return;
+    }
+    e.preventDefault();
+    const next = to === null ? undefined : this.events[to];
+    if (next) this.focusSeq(next.seq);
   }
 
   private render(): void {
@@ -227,12 +338,14 @@ export class TimelineView {
     this.btnPlay.hidden = n === 0;
     this.dotsEl.replaceChildren();
     this.dots.clear();
+    this.tabStopSeq = null;
     for (const ev of this.events) {
       const dot = this.makeDot(ev);
       this.dots.set(ev.seq, dot);
-      if (ev.seq === this.activeSeq) dot.classList.add("active");
+      if (ev.seq === this.activeSeq) this.markActive(dot, true);
       this.dotsEl.appendChild(dot);
     }
+    this.setTabStop(this.activeSeq ?? this.newestSeq());
     // Keep the newest dot in view — but only when the user is already near
     // the end, so new events do not pull the view away from an old moment.
     const nearEnd = this.dotsEl.scrollLeft + this.dotsEl.clientWidth >= this.dotsEl.scrollWidth - 24;
@@ -242,7 +355,7 @@ export class TimelineView {
 
   private tooltip(ev: TimelineEvent, progress?: TimelineProgress): string {
     const time = new Date(ev.ts).toLocaleTimeString();
-    const fork = ev.stateId ? " — Cmd/Ctrl+Click to fork at this moment" : ev.evicted ? " (source evicted)" : "";
+    const fork = ev.stateId ? " — Cmd/Ctrl+Click or Cmd/Ctrl+Enter to fork at this moment" : ev.evicted ? " (source evicted)" : "";
     let base: string;
     switch (ev.t) {
       case "agent_start":

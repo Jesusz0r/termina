@@ -98,6 +98,13 @@ button:
 Terminal and editor cannot both be minimized. The editor stays minimized
 while no file or review is open.
 
+The strip at the bottom of the terminal pane is keyboard-navigable: `Tab`
+enters the activity tabs (Timeline, Plan, Worldlines, Modified) as a single
+stop, and `←`/`→` (`Home`/`End` for the ends) move between them. The panel
+follows the focus, so one keystroke both selects the tab and shows it. A tab
+you pick by hand stays put while a run works — new content only updates its
+`(n)` badge instead of stealing the panel.
+
 ---
 
 ## 3. Working with the agent
@@ -192,6 +199,9 @@ To review a change:
    **Clear** to forget review state. Clear only hides the list — files stay
    changed on disk, and their review marks are dropped.
 
+`Esc` and the `←` button both leave the diff and return to the editor. `Esc`
+stays with the terminal while keyboard focus is in it.
+
 ### Handing off to Git
 
 Termina never writes your Git repository — no staging, no commits, no refs.
@@ -249,6 +259,10 @@ with a running count. This is the record of what happened, in order.
 - **Cmd/Ctrl+Click a forkable dot** to fork a candidate from that exact source
   state — any moment of any run becomes a branch point. See
   [Fork Any Moment](#fork-any-moment).
+- **Keyboard**: `Tab` enters the strip once (not once per dot), `←`/`→` move
+  the selection a moment at a time, `Home`/`End` go to the oldest and newest
+  moment, `Enter` opens the selected moment, and `Cmd/Ctrl+Enter` forks a
+  candidate from it. `Esc` stops a running replay.
 
 The recorder label next to the count tells you the recording health:
 
@@ -453,7 +467,8 @@ elsewhere — `Ctrl+Tab` is literal `Ctrl` on every platform):
 | `Cmd/Ctrl+,` | Open settings |
 | `Shift+Enter` / `Ctrl+Enter` | Newline in the terminal input |
 | `Option+Enter` (macOS) | Queue a follow-up while the agent runs |
-| `Cmd/Ctrl+Click` a timeline dot | Fork a candidate at that moment |
+| `Cmd/Ctrl+Click` / `Cmd/Ctrl+Enter` on a timeline dot | Fork a candidate at that moment |
+| `Esc` | Dismiss Change Review (never while focus is in the terminal) |
 
 ### Session Search
 

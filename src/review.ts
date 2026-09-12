@@ -61,6 +61,22 @@ export class ReviewView {
     });
     document.getElementById("review-revert")!.addEventListener("click", () => void this.revert());
     document.getElementById("review-accept")!.addEventListener("click", () => this.accept());
+    document.addEventListener("keydown", this.onKeydown);
+  }
+
+  /** Escape dismisses the review — unless a nested surface already handled it
+   *  (Monaco's find widget calls preventDefault, an open modal owns the key)
+   *  or focus sits in the terminal, where Escape belongs to the agent TUI. */
+  private onKeydown = (event: KeyboardEvent): void => {
+    if (event.key !== "Escape" || event.defaultPrevented || !this.isVisible) return;
+    const target = event.target;
+    if (target instanceof Element && (target.closest("#terminal-container") || target.closest("#modal-root"))) return;
+    this.hide();
+  };
+
+  /** Sole writer of the pane's display style. */
+  private setVisible(visible: boolean): void {
+    this.container.style.display = visible ? "flex" : "none";
   }
 
   bind(handlers: { onOpenFile: (path: string, owner: ProjectWorkspaceRef) => void; onAccepted: (path: string) => void; onReverted: (path: string) => void; onHidden?: () => void; onShown?: () => void }): void {
@@ -144,7 +160,7 @@ export class ReviewView {
     acceptBtn.disabled = false;
 
     this.coverEditors(true);
-    this.container.style.display = "flex";
+    this.setVisible(true);
     this.onShown();
     if (deleted) {
       hint.textContent = "file deleted by the agent — reverting restores it";
@@ -175,7 +191,7 @@ export class ReviewView {
     revertBtn.style.display = "none";
     acceptBtn.style.display = "none";
     this.coverEditors(true);
-    this.container.style.display = "flex";
+    this.setVisible(true);
     this.onShown();
     const hint = document.getElementById("review-hint")!;
     hint.textContent = `shared base → candidate ${label}`;
@@ -200,7 +216,7 @@ export class ReviewView {
     revertBtn.style.display = "none";
     acceptBtn.style.display = "none";
     this.coverEditors(true);
-    this.container.style.display = "flex";
+    this.setVisible(true);
     this.onShown();
     const hint = document.getElementById("review-hint")!;
     hint.textContent = "candidate A (reference) → candidate B (alternative)";
@@ -321,7 +337,7 @@ export class ReviewView {
   hide(): void {
     this.loadSeq++;
     this.refreshVersion++;
-    this.container.style.display = "none";
+    this.setVisible(false);
     this.coverEditors(false);
     this.diffEditor.setModel(null);
     this.originalModel?.dispose();
@@ -346,6 +362,7 @@ export class ReviewView {
   }
 
   dispose(): void {
+    document.removeEventListener("keydown", this.onKeydown);
     this.originalModel?.dispose();
     this.modifiedModel?.dispose();
     this.diffEditor.dispose();
