@@ -62,6 +62,7 @@ import {
   taskIsComplete,
 } from "./plan-board.js";
 import { AppPreferencesStore } from "./preferences.js";
+import { filterAgentEnvironment } from "./agent-env.js";
 import { SubagentHost } from "./subagents.js";
 import { anchorClaimPath, isSubagentManagedFile } from "../agent-core/subagents.js";
 import { MAX_SESSION_SEARCH_QUERY, collectSessionSearchFiles } from "./session-search.js";
@@ -206,30 +207,9 @@ interface PendingPreflight {
   trustHashes: Record<string, string> | null;
 }
 
-/**
- * Host agent session variables. The app's agent TUI must start clean — a pinned
- * session file or model makes the TUI attach to the wrong session or hang.
- */
-const AGENT_ENV_BLOCKLIST = new Set([
-  "PI_SESSION_FILE",
-  "PI_SESSION_ID",
-  "PI_MODEL",
-  "PI_PROVIDER",
-  "PI_REASONING_LEVEL",
-  "PI_CODING_AGENT",
-  "PI_CODING_AGENT_DIR",
-  "PI_CODING_AGENT_SESSION_DIR",
-  "TERMINA_CORE_SESSION_FILE",
-  "TERMINA_CORE_SESSION_ID",
-  "TERMINA_CORE_RESUME",
-]);
-
-/** The environment for an agent process: the host env minus session pins. */
+/** The environment for an agent process: the host env minus injection and session pins. */
 function cleanEnv(): Record<string, string | undefined> {
-  const env: Record<string, string | undefined> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (!AGENT_ENV_BLOCKLIST.has(key)) env[key] = value;
-  }
+  const env = filterAgentEnvironment(process.env);
   // The packaged bundle ships its own node for the agent. Put it first on
   // PATH so the agent binary and its child processes resolve it.
   const bundledNode = join(process.resourcesPath, "node", "bin");
