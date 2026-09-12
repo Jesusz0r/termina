@@ -1671,7 +1671,7 @@ class TerminaApp {
       message: "Termina could not read your settings file, so changes cannot be saved.",
       detail: "Reset settings to defaults and replace the damaged file?",
       buttons: ["Reset to defaults", "Cancel"],
-      defaultId: 0,
+      defaultId: 1,
       cancelId: 1,
     });
     return res.response === 0;
