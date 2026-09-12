@@ -226,6 +226,7 @@ import {
   clearSubagentApprovalFiles,
   formatSubagentBrief,
   formatSubagentResultFrame,
+  isWorldlineCandidateEnv,
   parseSubagentApprovalName,
   parseSubagentTaskFile,
   readSubagentApprovalRequest,
@@ -1921,6 +1922,10 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
     return done(use, got);
   }
   if (use.name === "spawn_subagent") {
+    // Worldline candidates run sandboxed with auto-approve; a host-spawned
+    // child would escape that sandbox, so the tool fails closed here and the
+    // host refuses their sidecar spawns too.
+    if (IS_WORLDLINE_CANDIDATE) return done(use, "error: spawn_subagent is disabled in worldline candidates", true);
     // A length-truncated turn may carry cut-off brief arguments that parse
     // but are silently incomplete. Never spawn from one: the child would boot
     // on a broken brief and burn its run failing.
@@ -2089,10 +2094,16 @@ const TOOLS: Array<Record<string, unknown>> = [
 /**
  * Background subagents (SUBAGENTS-PLAN.md Phase 1: tool surface + registry).
  * Depth comes from the environment so headless children (Phase 2) inherit it;
- * children never receive `spawn_subagent` (max depth 1).
+ * children never receive `spawn_subagent` (max depth 1). Worldline candidates
+ * never receive it either: the host refuses their spawns, so offering the
+ * tool would only burn a run that fails closed.
  */
 const SUBAGENT_DEPTH = subagentDepthFromEnv(process.env);
-for (const def of visibleSubagentTools(SUBAGENT_DEPTH)) TOOLS.push(def);
+const IS_WORLDLINE_CANDIDATE = isWorldlineCandidateEnv(process.env);
+for (const def of visibleSubagentTools(SUBAGENT_DEPTH)) {
+  if (IS_WORLDLINE_CANDIDATE && def.name === "spawn_subagent") continue;
+  TOOLS.push(def);
+}
 const subagentRegistry = new SubagentRegistry();
 
 let clientTools: Array<Record<string, unknown>> = TOOLS.slice();

@@ -74,9 +74,19 @@ function validTask(overrides: Record<string, unknown> = {}): Record<string, unkn
   };
 }
 
-function setup(opts: { wallMs?: number; maxAttempts?: number; maxChildren?: number; backoffMs?: number[]; launchFailures?: number; dispatch?: { keys: Set<string>; root: string } } = {}) {
+function setup(opts: {
+  wallMs?: number;
+  maxAttempts?: number;
+  maxChildren?: number;
+  backoffMs?: number[];
+  launchFailures?: number;
+  dispatch?: { keys: Set<string>; root: string };
+  isWorldlineTerminal?: (terminalId: string) => boolean;
+  workspaceRootFor?: (terminalId: string) => { root: string; cwd: string } | null;
+  autoApproveAllowedFor?: (terminalId: string) => boolean;
+} = {}) {
   const dir = tmp();
-  const { dispatch, launchFailures = 0, ...hostOpts } = opts;
+  const { dispatch, launchFailures = 0, isWorldlineTerminal, workspaceRootFor, autoApproveAllowedFor, ...hostOpts } = opts;
   const notes: Array<{ terminalId: string; note: string }> = [];
   const watched: string[] = [];
   const unwatched: string[] = [];
@@ -107,6 +117,9 @@ function setup(opts: { wallMs?: number; maxAttempts?: number; maxChildren?: numb
           return p;
         }
       },
+      isWorldlineTerminal: isWorldlineTerminal ?? (() => false),
+      workspaceRootFor: workspaceRootFor ?? (() => ({ root: "/", cwd: "/" })),
+      autoApproveAllowedFor: autoApproveAllowedFor ?? (() => false),
     },
     { launch, backoffMs: [5, 5], ...hostOpts },
   );
@@ -315,6 +328,9 @@ describe("SubagentHost", () => {
         releaseStream: () => {},
         dispatchKeysFor: async () => ({ keys: new Set<string>(), root: dir }),
         canonicalPath: async (p) => p,
+        isWorldlineTerminal: () => false,
+        workspaceRootFor: () => ({ root: "/", cwd: "/" }),
+        autoApproveAllowedFor: () => false,
       },
       {
         wallMs: 20000,

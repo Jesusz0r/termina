@@ -15,7 +15,7 @@ import { spawn as spawnProcess, type ChildProcess } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { coreSessionFile, parseSessionBundlePath, sessionBundleExists } from "../agent-core/session.js";
 import {
   MAX_SUBAGENT_ERROR_CHARS,
@@ -30,6 +30,7 @@ import {
   subagentChildTid,
   subagentPathsOverlap,
   subagentResultFileName,
+  subagentTaskFileName,
   truncateUtf8,
   type SubagentOutcome,
   type SubagentTaskFile,
@@ -74,6 +75,12 @@ export interface SubagentHostSinks {
   dispatchKeysFor(ownerId: string): Promise<{ keys: Set<string>; root: string }>;
   /** Canonical absolute path (total: resolves existing prefixes, never throws). */
   canonicalPath(p: string): Promise<string>;
+  /** True when the parent runs inside a sandboxed worldline candidate. */
+  isWorldlineTerminal(terminalId: string): boolean;
+  /** Parent workspace root plus the terminal cwd; null when unknown. */
+  workspaceRootFor(terminalId: string): { root: string; cwd: string } | null;
+  /** True only when the parent workspace policy allows auto-approve children. */
+  autoApproveAllowedFor(terminalId: string): boolean;
 }
 
 export interface SubagentChildEvents {
@@ -351,6 +358,22 @@ export class SubagentHost {
       if (typeof runId === "string") await this.finishFailed(sourceTerminalId, runId, null, "invalid subagent handoff identity");
       return;
     }
+    // Worldline candidates run sandboxed with auto-approve. A host-spawned
+    // child would escape that sandbox with host HOME, API keys, and primary
+    // write access, so their spawns fail closed without reading the task
+    // file (it lives in the writable candidate events dir and is forgeable).
+    // The failure result frees the parent slot via reconcile.
+    if (this.sinks.isWorldlineTerminal(sourceTerminalId)) {
+      await this.finishFailed(sourceTerminalId, runId, null, "subagents are disabled in worldline candidates");
+      return;
+    }
+    // The handoff name must be exactly this terminal/run's file. A forged
+    // sidecar record pointing at another run's task file is ignored.
+    const expectedTaskFile = subagentTaskFileName(sourceTerminalId, runId);
+    if (!expectedTaskFile || basename(taskFile) !== expectedTaskFile) {
+      await this.finishFailed(sourceTerminalId, runId, null, "invalid subagent handoff identity");
+      return;
+    }
     const key = this.runKey(sourceTerminalId, runId);
     if (this.runs.has(key)) return;
     const dir = this.sinks.eventsDirFor(sourceTerminalId);
@@ -366,17 +389,39 @@ export class SubagentHost {
       await this.finishFailed(sourceTerminalId, runId, task, "subagent task parent mismatch");
       return;
     }
-    // Cross-terminal sibling overlap: registries are per-process, so two
-    // parents on one tree can claim the same paths. Same canonical cwd plus
-    // overlapping relpaths rejects, exactly like the single-parent rule.
-    // Fail closed: an unresolvable cwd cannot prove non-overlap.
+    if (task.runId !== runId) {
+      await this.finishFailed(sourceTerminalId, runId, task, "subagent task run mismatch");
+      return;
+    }
+    // The task cwd must stay inside the parent workspace. A forged task file
+    // claiming another tree (the primary project from a candidate, a sibling
+    // project from a primary) is ignored. Fail closed when the workspace is
+    // unknown or unresolvable.
+    const workspace = this.sinks.workspaceRootFor(sourceTerminalId);
+    if (!workspace) {
+      await this.finishFailed(sourceTerminalId, runId, task, "cannot verify parent workspace");
+      return;
+    }
     let cwdKey: string;
     try {
-      cwdKey = await this.sinks.canonicalPath(task.cwd);
+      const [canonicalRoot, canonicalCwd] = await Promise.all([
+        this.sinks.canonicalPath(workspace.root),
+        this.sinks.canonicalPath(task.cwd),
+      ]);
+      const rel = relative(canonicalRoot, canonicalCwd);
+      if (rel !== "" && (rel.startsWith("..") || isAbsolute(rel))) {
+        await this.finishFailed(sourceTerminalId, runId, task, "subagent cwd outside parent workspace");
+        return;
+      }
+      cwdKey = canonicalCwd;
     } catch {
       await this.finishFailed(sourceTerminalId, runId, task, "cannot verify path overlap (cwd)");
       return;
     }
+    // Cross-terminal sibling overlap: registries are per-process, so two
+    // parents on one tree can claim the same paths. Same canonical cwd plus
+    // overlapping relpaths rejects, exactly like the single-parent rule.
+    // Fail closed: an unresolvable cwd cannot prove non-overlap.
     for (const other of this.runs.values()) {
       let otherCwd: string;
       try {
@@ -561,9 +606,14 @@ export class SubagentHost {
     delete env.TERMINA_CORE_PROVIDER;
     delete env.TERMINA_CORE_SUMMARY_MODEL;
     // Inherit the parent's permission mode and nothing more: `always` alone
-    // auto-approves. Every other mode fails closed headless (ask denies).
-    if (run.task.permissionMode === "always") env.TERMINA_CORE_APPROVE = "all";
-    else delete env.TERMINA_CORE_APPROVE;
+    // auto-approves, and only when the parent workspace policy allows it. A
+    // forged task file claiming `always` from an `ask` parent stays denied.
+    // Every other mode fails closed headless (ask denies).
+    if (run.task.permissionMode === "always" && this.sinks.autoApproveAllowedFor(run.parentTerminalId)) {
+      env.TERMINA_CORE_APPROVE = "all";
+    } else {
+      delete env.TERMINA_CORE_APPROVE;
+    }
     let child: SubagentChild;
     try {
       child = this.launch(process.execPath, [this.sinks.coreBinary(), "--subagent-task", join(dir, run.taskFile)], {
