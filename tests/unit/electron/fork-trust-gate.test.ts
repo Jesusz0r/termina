@@ -96,11 +96,12 @@ async function makeManager(trustHashes: () => Promise<Record<string, string>>) {
   const manager = new WorldlineManager(deps as any);
   // The trust gate sits past root binding but never touches it: keep the
   // suite hermetic (no core binary) by marking construction settled. The
-  // original ready still rejects in the background without a binary, so
-  // observe it to avoid an unhandled rejection.
-  ((manager as unknown as { ready: Promise<void> }).ready as Promise<void>).catch(() => undefined);
+  // original ready still settles in the background, so teardown awaits it:
+  // otherwise rm can race the constructor's root-binding fs work.
+  const ready = (manager as unknown as { ready: Promise<void> }).ready;
+  ready.catch(() => undefined);
   (manager as unknown as { ready: Promise<void> }).ready = Promise.resolve();
-  return { manager, root };
+  return { manager, root, ready };
 }
 
 describe("fork trust gate (issue #47)", () => {
@@ -109,7 +110,7 @@ describe("fork trust gate (issue #47)", () => {
   });
 
   it("refuses when a new trust-sensitive path appears after the run", async () => {
-    const { manager, root } = await makeManager(async () => ({
+    const { manager, root, ready } = await makeManager(async () => ({
       ...BASELINE,
       "agent/skills/added-after-run.md": "ccc",
     }));
@@ -120,13 +121,14 @@ describe("fork trust gate (issue #47)", () => {
       expect(result.error).toContain("trust-sensitive resources changed since the run");
       expect(result.error).toContain("agent/skills/added-after-run.md");
     } finally {
+      await ready.catch(() => {});
       await manager.dispose().catch(() => {});
       await rm(root, { recursive: true, force: true });
     }
   });
 
   it("refuses when a trust-sensitive path disappears after the run", async () => {
-    const { manager, root } = await makeManager(async () => ({
+    const { manager, root, ready } = await makeManager(async () => ({
       "agent/settings.json": "aaa",
     }));
     try {
@@ -136,26 +138,28 @@ describe("fork trust gate (issue #47)", () => {
       expect(result.error).toContain("trust-sensitive resources changed since the run");
       expect(result.error).toContain("agent/skills/review.md");
     } finally {
+      await ready.catch(() => {});
       await manager.dispose().catch(() => {});
       await rm(root, { recursive: true, force: true });
     }
   });
 
   it("refuses when the run has no trust baseline", async () => {
-    const { manager, root } = await makeManager(async () => ({ ...BASELINE }));
+    const { manager, root, ready } = await makeManager(async () => ({ ...BASELINE }));
     try {
       manager.recordRun(makeRun({ trustHashes: null }));
       const result = await manager.forkRun("run-trust");
       expect(result.ok).toBe(false);
       expect(result.error).toBe("the run has no complete trust-sensitive baseline");
     } finally {
+      await ready.catch(() => {});
       await manager.dispose().catch(() => {});
       await rm(root, { recursive: true, force: true });
     }
   });
 
   it("refuses cleanly when the fork-time re-hash fails", async () => {
-    const { manager, root } = await makeManager(async () => {
+    const { manager, root, ready } = await makeManager(async () => {
       throw new Error("trust hash walk exceeded its file budget: agent/skills/z.txt");
     });
     try {
@@ -165,13 +169,14 @@ describe("fork trust gate (issue #47)", () => {
       expect(result.error).toContain("trust-sensitive resources could not be verified");
       expect(result.error).toContain("file budget");
     } finally {
+      await ready.catch(() => {});
       await manager.dispose().catch(() => {});
       await rm(root, { recursive: true, force: true });
     }
   });
 
   it("passes the trust gate when hashes match", async () => {
-    const { manager, root } = await makeManager(async () => ({ ...BASELINE }));
+    const { manager, root, ready } = await makeManager(async () => ({ ...BASELINE }));
     try {
       // An invalid payload path fails the check after the trust gate,
       // proving the gate passed without building a comparison.
@@ -180,6 +185,7 @@ describe("fork trust gate (issue #47)", () => {
       expect(result.ok).toBe(false);
       expect(result.error).toBe("the prompt payload path is invalid");
     } finally {
+      await ready.catch(() => {});
       await manager.dispose().catch(() => {});
       await rm(root, { recursive: true, force: true });
     }
