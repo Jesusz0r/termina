@@ -1,7 +1,7 @@
 import { test, expect } from "./fixtures.ts";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { e2eTempDir } from "./tmpdir.ts";
 
 test.describe("Explorer File Tree & Actions", () => {
   test("renders root directory and files with folder expansion", async ({ page }) => {
@@ -446,7 +446,7 @@ test.describe("Explorer symlink safety (list-dir)", () => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
 
     // A target outside the project, plus three links: one inside, one out, one dead.
-    const outside = mkdtempSync(join(tmpdir(), "termina-outside-"));
+    const outside = mkdtempSync(join(e2eTempDir(), "termina-outside-"));
     writeFileSync(join(outside, "secret.ts"), "export const secret = true;\n");
     symlinkSync(join(projectRoot, "src", "index.ts"), join(projectRoot, "link-inside.ts"));
     symlinkSync(join(outside, "secret.ts"), join(projectRoot, "link-outside.ts"));

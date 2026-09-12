@@ -895,6 +895,63 @@ export async function boundPromotionWriteFile(options: {
   return decodePromotionLeaf(result.leaf, "bound promotion written leaf");
 }
 
+const NON_PRIVATE_PROMOTION_READ = "promotion read file is not a bounded private regular file";
+
+/**
+ * Authenticate the leaf that a bound write will replace. A missing path
+ * becomes an explicit missing expectation. A leftover group-readable
+ * file (from an older pathname write) is removed through the bound
+ * parent so the create path can mint a private 0600 leaf.
+ */
+async function expectedDestinationForBoundWrite(options: {
+  root: string;
+  rootIdentity: PromotionFsIdentity;
+  components: string[];
+  parentIdentity: PromotionFsIdentity;
+  maxBytes?: number;
+  mode?: number;
+}): Promise<BoundPromotionExpectedLeaf | BoundPromotionExpectedMissing> {
+  try {
+    const current = await boundPromotionReadFile({
+      root: options.root,
+      rootIdentity: options.rootIdentity,
+      components: options.components,
+      parentIdentity: options.parentIdentity,
+      ...(options.maxBytes === undefined ? {} : { maxBytes: options.maxBytes }),
+    });
+    let mode = options.mode ?? 0o600;
+    try {
+      mode = lstatSync(join(options.root, ...options.components)).mode & 0o777;
+    } catch {
+      /* Native read authenticated the existing leaf; keep the safe default. */
+    }
+    return {
+      identity: current.identity,
+      state: {
+        type: "file",
+        mode,
+        size: String(current.content.byteLength),
+        sha256: createHash("sha256").update(current.content).digest("hex"),
+      },
+    };
+  } catch (error) {
+    const path = join(options.root, ...options.components);
+    try {
+      lstatSync(path);
+    } catch (probeError) {
+      if (probeError && typeof probeError === "object" && "code" in probeError && probeError.code === "ENOENT") {
+        return { state: { type: "missing" } };
+      }
+      throw error;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    if (message !== NON_PRIVATE_PROMOTION_READ) throw error;
+    const binding = await bindOwnedEntry(path, options.parentIdentity);
+    await removeBoundOwnedEntry({ binding });
+    return { state: { type: "missing" } };
+  }
+}
+
 /**
  * Replace one small private file below an already-bound directory.  The
  * existing leaf is authenticated by the native read before the write; a
@@ -912,43 +969,7 @@ export async function writeBoundOwnedFile(options: {
   maxBytes?: number;
   testHook?: { stage: string; readyPath: string; releasePath: string };
 }): Promise<BoundPromotionExpectedLeaf> {
-  let expected: BoundPromotionExpectedLeaf | BoundPromotionExpectedMissing = { state: { type: "missing" } };
-  try {
-    const current = await boundPromotionReadFile({
-      root: options.root,
-      rootIdentity: options.rootIdentity,
-      components: options.components,
-      parentIdentity: options.parentIdentity,
-      ...(options.maxBytes === undefined ? {} : { maxBytes: options.maxBytes }),
-    });
-    let mode = options.mode ?? 0o600;
-    try {
-      mode = lstatSync(join(options.root, ...options.components)).mode & 0o777;
-    } catch {
-      /* Native read authenticated the existing leaf; keep the safe default. */
-    }
-    expected = {
-      identity: current.identity,
-      state: {
-        type: "file",
-        mode,
-        size: String(current.content.byteLength),
-        sha256: createHash("sha256").update(current.content).digest("hex"),
-      },
-    };
-  } catch (error) {
-    try {
-      lstatSync(join(options.root, ...options.components));
-      throw error;
-    } catch (probeError) {
-      if (probeError === error) throw error;
-      if (probeError && typeof probeError === "object" && "code" in probeError && probeError.code === "ENOENT") {
-        expected = { state: { type: "missing" } };
-      } else {
-        throw error;
-      }
-    }
-  }
+  const expected = await expectedDestinationForBoundWrite(options);
   return boundPromotionWriteFile({
     root: options.root,
     rootIdentity: options.rootIdentity,
@@ -981,45 +1002,14 @@ export async function boundPromotionWriteJsonFile(options: {
   if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 0 || content.byteLength > options.maxBytes) {
     throw new Error("bound promotion JSON exceeds its byte budget");
   }
-  let expected: BoundPromotionExpectedLeaf | BoundPromotionExpectedMissing = { state: { type: "missing" } };
-  try {
-    const existing = await boundPromotionReadFile({
-      root: options.root,
-      rootIdentity: options.rootIdentity,
-      components: options.components,
-      parentIdentity: options.parentIdentity,
-      maxBytes: options.maxBytes,
-    });
-    let mode = options.mode ?? 0o600;
-    try {
-      const info = lstatSync(join(options.root, ...options.components));
-      mode = info.mode & 0o777;
-    } catch {
-      // Native read already authenticated the existing leaf; retain the
-      // default mode if a concurrent pathname observation is unavailable.
-    }
-    expected = {
-      identity: existing.identity,
-      state: {
-        type: "file",
-        mode,
-        size: String(existing.content.byteLength),
-        sha256: createHash("sha256").update(existing.content).digest("hex"),
-      },
-    };
-  } catch (error) {
-    try {
-      const info = lstatSync(join(options.root, ...options.components));
-      if (info.isFile() && !info.isSymbolicLink()) throw error;
-    } catch (probeError) {
-      if (probeError === error) throw error;
-      if (probeError && typeof probeError === "object" && "code" in probeError && probeError.code === "ENOENT") {
-        expected = { state: { type: "missing" } };
-      } else {
-        throw error;
-      }
-    }
-  }
+  const expected = await expectedDestinationForBoundWrite({
+    root: options.root,
+    rootIdentity: options.rootIdentity,
+    components: options.components,
+    parentIdentity: options.parentIdentity,
+    maxBytes: options.maxBytes,
+    mode: options.mode,
+  });
   return boundPromotionWriteFile({
     root: options.root,
     rootIdentity: options.rootIdentity,

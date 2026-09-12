@@ -13,4 +13,5 @@ release/
 *.key
 test-results/
 playwright-report/
+.e2e-tmp/
 .intent/

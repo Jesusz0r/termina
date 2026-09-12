@@ -13,6 +13,7 @@ export const IGNORED_SEGMENTS = new Set([
   ".next",
   ".nuxt",
   ".cache",
+  ".e2e-tmp",
   ".parcel-cache",
   ".turbo",
   ".yarn",

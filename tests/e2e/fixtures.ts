@@ -1,10 +1,10 @@
 import { test as base, expect, _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
 import { mkdtempSync, rmSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { patchBundleName } from "../../scripts/patch-bundle-name.ts";
 import { OwnedProcessTree } from "./owned-processes.ts";
+import { e2eTempDir } from "./tmpdir.ts";
 
 export interface TerminaE2EFixtures {
   electronApp: ElectronApplication;
@@ -114,7 +114,7 @@ async function acquireFirstWindow(app: ElectronApplication): Promise<Page> {
 export const test = base.extend<TerminaE2EFixtures>({
   terminalEngine: ["core", { option: true }],
   runRoot: async ({}, use) => {
-    const runRoot = mkdtempSync(join(tmpdir(), "termina-playwright-"));
+    const runRoot = mkdtempSync(join(e2eTempDir(), "termina-playwright-"));
     await use(runRoot);
     if (preservedRunRoots.has(runRoot)) {
       console.warn(`[e2e] retaining ${runRoot}: process cleanup was not confirmed`);

@@ -1784,9 +1784,18 @@ class TerminaApp {
       // Capture the opened folder. A Git subdirectory is a valid project.
       // v2: older stores captured the Git top-level for the same folder key.
       const store = await SnapshotStore.create(project.storeDir!, storeRoot, gitDir, fmt);
-      const state = await store.capture(await gitHead(ws.root), null);
-      ws.lastStateCommit = state.commit;
-      this.pushRecorderForWorkspace(ws, "ready", rendererTarget);
+      try {
+        const state = await store.capture(await gitHead(ws.root), null);
+        ws.lastStateCommit = state.commit;
+        this.pushRecorderForWorkspace(ws, "ready", rendererTarget);
+      } catch (err) {
+        // Keep the store so a later capture can retry. Rejecting here
+        // leaves every storePromise waiter failed and surfaces as an
+        // unhandled core rejection while the editor stays locked.
+        ws.recordError = err instanceof Error ? err.message : String(err);
+        this.pushRecorderForWorkspace(ws, "paused", rendererTarget);
+        console.warn(`[main] initial workspace capture failed: ${ws.recordError}`);
+      }
       return store;
     })();
     ws.indexReady = promise.then(() => undefined, (err) => {
