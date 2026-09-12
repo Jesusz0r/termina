@@ -33,6 +33,11 @@ describe("fetch and MCP outbound URL policy", () => {
     expectBlocked("https://10.0.0.1");
     expectBlocked("https://192.168.1.50");
     expectBlocked("https://172.16.0.1");
+    expectBlocked("https://0.0.0.0/");
+    expectBlocked("https://[::]/");
+    expectBlocked("https://100.64.1.1/");
+    expectBlocked("https://[::ffff:0.0.0.0]/");
+    expectBlocked("https://[::ffff:100.64.1.1]/");
   });
 
   it("rejects https multicast, ULA, and IPv4-mapped private hosts", () => {
