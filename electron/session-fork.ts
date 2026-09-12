@@ -51,6 +51,34 @@ export type ExportPatchResult =
   | { ok: true; patch: string }
   | { ok: false; error: string };
 
+export interface LineDiffOpts {
+  before: string;
+  after: string;
+}
+
+export type LineDiffResult =
+  | { ok: true; lines: number[] }
+  | { ok: false; error: string };
+
+export interface ReadPromptOpts {
+  /** Validated absolute prompt payload path (the caller owns the allowlist). */
+  path: string;
+  maxBytes: number;
+  textCap: number;
+  contextCap: number;
+}
+
+/**
+ * Prompt payload read off the main thread. `found: false` is the expected
+ * fail-closed (missing/oversize/malformed) — the caller maps it to null/empty
+ * without a sync retry. `ok: false` is an unexpected worker rejection and the
+ * caller falls back to the identical sync read.
+ */
+export type ReadPromptResult =
+  | { ok: true; found: true; text: string; images: unknown[]; context: string }
+  | { ok: true; found: false }
+  | { ok: false; error: string };
+
 export type CoreSessionForkResult =
   | { ok: true; sessionFile: string; kept: number }
   | { ok: false; sessionFile: string; commit: "uncertain"; error: string };
@@ -79,6 +107,16 @@ export interface ExportPatchRequest extends ExportPatchOpts {
   requestId: string;
 }
 
+export interface LineDiffRequest extends LineDiffOpts {
+  op: "line-diff";
+  requestId: string;
+}
+
+export interface ReadPromptRequest extends ReadPromptOpts {
+  op: "read-prompt";
+  requestId: string;
+}
+
 export interface SessionForkCancelRequest {
   op: "cancel";
   requestId: string;
@@ -88,7 +126,7 @@ export interface SessionWorkerShutdownRequest {
   op: "shutdown";
 }
 
-export type SessionWorkerRequest = CoreSessionForkRequest | CoreSessionDiscardRequest | SessionSearchRequest | ExportPatchRequest | SessionForkCancelRequest | SessionWorkerShutdownRequest;
+export type SessionWorkerRequest = CoreSessionForkRequest | CoreSessionDiscardRequest | SessionSearchRequest | ExportPatchRequest | LineDiffRequest | ReadPromptRequest | SessionForkCancelRequest | SessionWorkerShutdownRequest;
 
 export type SessionForkFailure = {
   requestId: string;
@@ -104,14 +142,19 @@ export type SessionForkReply =
   | { op: "search-sessions-result"; requestId: string; ok: true; hits: SessionHit[]; error?: string }
   | (SessionForkFailure & { op: "search-sessions-result" })
   | { op: "export-patch-result"; requestId: string; ok: true; patch: string }
-  | (SessionForkFailure & { op: "export-patch-result" });
+  | (SessionForkFailure & { op: "export-patch-result" })
+  | { op: "line-diff-result"; requestId: string; ok: true; lines: number[] }
+  | (SessionForkFailure & { op: "line-diff-result" })
+  | { op: "read-prompt-result"; requestId: string; ok: true; found: true; text: string; images: unknown[]; context: string }
+  | { op: "read-prompt-result"; requestId: string; ok: true; found: false }
+  | (SessionForkFailure & { op: "read-prompt-result" });
 
 export type SessionForkCallOptions = {
   signal?: AbortSignal;
 };
 
 type PendingRequest = {
-  kind: "fork-core" | "discard-core-empty" | "search-sessions" | "export-patch";
+  kind: "fork-core" | "discard-core-empty" | "search-sessions" | "export-patch" | "line-diff" | "read-prompt";
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   removeAbortListener?: () => void;
@@ -167,6 +210,28 @@ export class SessionForkClient {
   exportPatch(opts: ExportPatchOpts): Promise<ExportPatchResult> {
     if (this.disposed) return Promise.reject(new Error("session worker disposed"));
     return this.dispatchExportPatch(opts);
+  }
+
+  /**
+   * Line-diff one watcher transition off the main thread (issue #60). Pure CPU
+   * over caller-supplied contents; runs concurrently like export-patch. The
+   * watcher emit awaits it, so the main loop stays free while PTY/sidecar/IPC
+   * interleave. No abort lane: diffs are milliseconds and already bounded by
+   * the watcher's in-flight cap.
+   */
+  lineDiff(opts: LineDiffOpts): Promise<LineDiffResult> {
+    if (this.disposed) return Promise.reject(new Error("session worker disposed"));
+    return this.dispatchLineDiff(opts);
+  }
+
+  /**
+   * Read one prompt payload file off the main thread (issue #60). The worker
+   * stats, reads, and parses the file; the main thread never holds the 20 MB
+   * string. Runs concurrently like export-patch; no abort lane.
+   */
+  readPrompt(opts: ReadPromptOpts): Promise<ReadPromptResult> {
+    if (this.disposed) return Promise.reject(new Error("session worker disposed"));
+    return this.dispatchReadPrompt(opts);
   }
 
   dispose(): Promise<void> {
@@ -299,6 +364,44 @@ export class SessionForkClient {
     });
   }
 
+  private dispatchLineDiff(payload: LineDiffOpts): Promise<LineDiffResult> {
+    return new Promise((resolve, reject) => {
+      const requestId = `line-diff-${++this.seq}`;
+      const worker = this.ensure();
+      this.pending.set(requestId, {
+        kind: "line-diff",
+        resolve: (value) => resolve(value as LineDiffResult),
+        reject,
+      });
+      try {
+        const msg: LineDiffRequest = { ...payload, op: "line-diff", requestId };
+        worker.postMessage(msg);
+      } catch (err) {
+        this.takePending(requestId);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  private dispatchReadPrompt(payload: ReadPromptOpts): Promise<ReadPromptResult> {
+    return new Promise((resolve, reject) => {
+      const requestId = `read-prompt-${++this.seq}`;
+      const worker = this.ensure();
+      this.pending.set(requestId, {
+        kind: "read-prompt",
+        resolve: (value) => resolve(value as ReadPromptResult),
+        reject,
+      });
+      try {
+        const msg: ReadPromptRequest = { ...payload, op: "read-prompt", requestId };
+        worker.postMessage(msg);
+      } catch (err) {
+        this.takePending(requestId);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
   private ensure(): Worker {
     if (this.disposed) throw new Error("session worker disposed");
     if (this.worker) return this.worker;
@@ -312,7 +415,9 @@ export class SessionForkClient {
         (pending.kind === "fork-core" && msg.op === "fork-core-result") ||
         (pending.kind === "discard-core-empty" && msg.op === "discard-core-empty-result") ||
         (pending.kind === "search-sessions" && msg.op === "search-sessions-result") ||
-        (pending.kind === "export-patch" && msg.op === "export-patch-result");
+        (pending.kind === "export-patch" && msg.op === "export-patch-result") ||
+        (pending.kind === "line-diff" && msg.op === "line-diff-result") ||
+        (pending.kind === "read-prompt" && msg.op === "read-prompt-result");
       if (!matches) return;
       this.takePending(msg.requestId);
       if (msg.ok) pending.resolve(msg);
@@ -373,6 +478,10 @@ export class SessionForkClient {
         pending.reject(new Error(`${error.message}; session search was not completed`));
       } else if (pending.kind === "export-patch") {
         pending.reject(new Error(`${error.message}; export patch was not completed`));
+      } else if (pending.kind === "line-diff") {
+        pending.reject(new Error(`${error.message}; line diff was not completed`));
+      } else if (pending.kind === "read-prompt") {
+        pending.reject(new Error(`${error.message}; prompt read was not completed`));
       } else {
         pending.reject(error);
       }

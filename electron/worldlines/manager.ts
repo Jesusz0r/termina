@@ -36,6 +36,8 @@ import { EvidenceEngine, dependencyDiff, mineChangeReason, rankProfiles, type Ev
 import type {
   CoreSessionForkOpts,
   CoreSessionForkResult,
+  ReadPromptOpts,
+  ReadPromptResult,
   SessionForkCallOptions,
 } from "../session-fork.js";
 import type {
@@ -58,6 +60,7 @@ import {
 } from "../../agent-core/session.js";
 import { MAX_MCP_JSON_BYTES } from "../../agent-core/mcp.js";
 import { thinkingStartupArgs } from "../../shared/terminal-control.js";
+import { readPromptPayloadFile } from "../prompt-payload.js";
 import {
   UncertainComparisonAdmissionOwner,
   boundedWorldlineEntries,
@@ -183,6 +186,8 @@ export interface WorldlineDeps {
   forkCoreSession(opts: CoreSessionForkOpts, callOptions?: SessionForkCallOptions): Promise<CoreSessionForkResult>;
   /** Build an export patch off the main thread (pure CPU over gathered contents). */
   buildExportPatch(files: ExportPatchFile[]): Promise<string>;
+  /** Read one prompt payload file off the main thread (issue #60). Absent in older test seams; the reader falls back to sync. */
+  readPromptPayload?(opts: ReadPromptOpts): Promise<ReadPromptResult>;
   /** Discard a proven durable core session bundle through the retention owner. */
   discardCoreSession(runId: string): Promise<{ ok: boolean; error?: string }>;
   createCandidate(opts: {
@@ -1654,23 +1659,20 @@ export class WorldlineManager {
     }
   }
 
-  /** Read the prompt payload file (text, images, injected context). */
+  /** Read the prompt payload file (text, images, injected context). Off the main thread via the shared reader (issue #60). */
   private async readPromptPayload(run: { promptPayloadFile: string | null; promptEventsDir?: string | null }): Promise<{ text: string; images: unknown[]; context: string }> {
     const path = await this.safePromptPayloadPath(run);
     if (!path) return { text: "", images: [], context: "" };
-    try {
-      const info = await stat(path);
-      if (info.size > MAX_PROMPT_BYTES) return { text: "", images: [], context: "" };
-      const raw = await readFile(path, "utf8");
-      const payload = JSON.parse(raw) as { prompt?: unknown; images?: unknown; context?: unknown };
-      return {
-        text: String(payload.prompt ?? "").slice(0, 64000),
-        images: Array.isArray(payload.images) ? payload.images : [],
-        context: String(payload.context ?? "").slice(0, 16000),
-      };
-    } catch {
-      return { text: "", images: [], context: "" };
-    }
+    const offload = this.deps.readPromptPayload;
+    const payload = await readPromptPayloadFile(path, {
+      maxBytes: MAX_PROMPT_BYTES,
+      textCap: 64000,
+      contextCap: 16000,
+      offload: offload
+        ? (p, maxBytes, textCap, contextCap) => offload({ path: p, maxBytes, textCap, contextCap })
+        : async () => ({ ok: false as const, error: "prompt offload unavailable" }),
+    });
+    return payload ?? { text: "", images: [], context: "" };
   }
 
   /** Support directories: home, sessions, events, tmp, cache. */

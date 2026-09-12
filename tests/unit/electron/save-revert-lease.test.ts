@@ -76,7 +76,7 @@ type DeleteBaseline = (inst: FakeInst, path: string) => void;
 type SetBaseline = (inst: FakeInst, path: string, value: string | null, stateId?: string | null) => void;
 type SetBounded = <K, V>(map: Map<K, V>, key: K, value: V, limit: number) => void;
 type RecordModified = (inst: FakeInst, absPath: string, status: "created" | "modified") => Promise<void>;
-type PrepareRunBaselines = (inst: FakeInst, source: Map<string, string> | undefined) => void;
+type PrepareRunBaselines = (inst: FakeInst) => void;
 
 interface FakeWorkspace {
   id: string;
@@ -498,7 +498,7 @@ describe("baseline anchors", () => {
     expect(inst.baselineStates.has(file)).toBe(false);
   });
 
-  it("preserves retained anchors and leaves fresh snapshots unanchored", () => {
+  it("preserves retained anchors and drops untouched files for first-touch capture", () => {
     const ws = makeWorkspace(dir);
     const inst = makeInst(ws);
     const kept = join(dir, "kept.txt");
@@ -507,11 +507,13 @@ describe("baseline anchors", () => {
     inst.baselines.set(kept, "old");
     inst.baselineStates.set(kept, "run-1");
     inst.baselines.set(fresh, "stale");
-    realPrepareRunBaselines.call(makePrepareApp(), inst, new Map([[fresh, "snap"]]));
+    // Issue #60: no wholesale cache copy — untouched files have no baseline until first touch.
+    realPrepareRunBaselines.call(makePrepareApp(), inst);
     expect(inst.baselines.get(kept)).toBe("old");
     expect(inst.baselineStates.get(kept)).toBe("run-1");
-    expect(inst.baselines.get(fresh)).toBe("snap");
+    expect(inst.baselines.has(fresh)).toBe(false);
     expect(inst.baselineStates.has(fresh)).toBe(false);
+    expect(inst.baselineBytes).toBe(Buffer.byteLength("old", "utf8"));
   });
 });
 
