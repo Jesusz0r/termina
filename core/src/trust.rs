@@ -1,6 +1,7 @@
 //! Agent-trust hashes: bounded walks over agent config files.
 use std::fs;
 use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
@@ -69,13 +70,17 @@ fn collect_trust_hashes(
             Err(error) => return Err(format!("stat trust path {key} failed: {error}")),
         };
         if metadata.file_type().is_symlink() {
-            return Err(format!("trust path {key} is a symlink"));
-        }
-        if metadata.file_type().is_dir() {
+            record_hash(
+                &mut out,
+                hash_symlink(&full, &key, &mut files, &mut bytes, budget)?,
+            );
+        } else if metadata.file_type().is_dir() {
             walk_hashes(&full, &key, &mut out, &mut files, &mut bytes, budget)?;
         } else if metadata.file_type().is_file() {
-            let (key, hash) = hash_file(&full, &key, &mut files, &mut bytes, budget)?;
-            out.insert(key, Value::String(hash));
+            record_hash(
+                &mut out,
+                hash_file(&full, &key, &mut files, &mut bytes, budget)?,
+            );
         } else {
             return Err(format!("trust path {key} has an unsupported file type"));
         }
@@ -109,7 +114,8 @@ fn walk_hashes(
         Err(error) => return Err(format!("stat trust path {prefix} failed: {error}")),
     };
     if metadata.file_type().is_symlink() {
-        return Err(format!("trust path {prefix} is a symlink"));
+        record_hash(out, hash_symlink(abs_root, prefix, files, bytes, budget)?);
+        return Ok(());
     }
     if !metadata.file_type().is_dir() {
         return Err(format!("trust path {prefix} is not a directory"));
@@ -140,18 +146,62 @@ fn walk_hashes(
             Err(error) => return Err(format!("stat trust path {key} failed: {error}")),
         };
         if metadata.file_type().is_symlink() {
-            return Err(format!("trust path {key} is a symlink"));
-        }
-        if metadata.file_type().is_dir() {
+            record_hash(out, hash_symlink(&full, &key, files, bytes, budget)?);
+        } else if metadata.file_type().is_dir() {
             walk_hashes(&full, &key, out, files, bytes, budget)?;
         } else if metadata.file_type().is_file() {
-            let (key, hash) = hash_file(&full, &key, files, bytes, budget)?;
-            out.insert(key, Value::String(hash));
+            record_hash(out, hash_file(&full, &key, files, bytes, budget)?);
         } else {
             return Err(format!("trust path {key} has an unsupported file type"));
         }
     }
     Ok(())
+}
+
+fn record_hash(out: &mut serde_json::Map<String, Value>, hashed: (String, String)) {
+    out.insert(hashed.0, Value::String(hashed.1));
+}
+
+fn charge_budget(
+    key: &str,
+    len: u64,
+    files: &mut usize,
+    bytes: &mut u64,
+    budget: &TrustBudget,
+) -> Result<(), String> {
+    if *files >= budget.max_files {
+        return Err(format!("trust hash walk exceeded its file budget: {key}"));
+    }
+    if len > budget.max_file_bytes {
+        return Err(format!("trust file {key} exceeds the per-file byte budget"));
+    }
+    if bytes
+        .checked_add(len)
+        .map(|total| total > budget.max_bytes)
+        .unwrap_or(true)
+    {
+        return Err(format!("trust hash walk exceeded its byte budget: {key}"));
+    }
+    Ok(())
+}
+
+fn hash_symlink(
+    path: &Path,
+    key: &str,
+    files: &mut usize,
+    bytes: &mut u64,
+    budget: &TrustBudget,
+) -> Result<(String, String), String> {
+    let target = fs::read_link(path)
+        .map_err(|error| format!("readlink trust path {key} failed: {error}"))?;
+    let mut content = b"symlink\0".to_vec();
+    content.extend_from_slice(target.as_os_str().as_bytes());
+    let len = u64::try_from(content.len())
+        .map_err(|_| format!("trust symlink {key} length does not fit u64"))?;
+    charge_budget(key, len, files, bytes, budget)?;
+    *files += 1;
+    *bytes += len;
+    Ok((key.to_string(), hex_sha256(&content)))
 }
 
 fn hash_file(
@@ -165,63 +215,50 @@ fn hash_file(
         return Err(format!("trust hash walk exceeded its file budget: {key}"));
     }
 
-    let mut file = fs::OpenOptions::new()
+    let mut file = match fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)
-        .map_err(|error| {
-            if error.raw_os_error() == Some(libc::ELOOP) {
-                format!("trust path {key} is a symlink")
-            } else {
-                format!("open trust file {key} failed: {error}")
-            }
-        })?;
+    {
+        Ok(file) => file,
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            return hash_symlink(path, key, files, bytes, budget);
+        }
+        Err(error) => return Err(format!("open trust file {key} failed: {error}")),
+    };
     let metadata = file
         .metadata()
         .map_err(|error| format!("stat trust file {key} failed: {error}"))?;
     if !metadata.file_type().is_file() {
         return Err(format!("trust path {key} is not a regular file"));
     }
-    let len = metadata.len();
-    if len > budget.max_file_bytes {
-        return Err(format!("trust file {key} exceeds the per-file byte budget"));
-    }
-    if bytes
-        .checked_add(len)
-        .map(|total| total > budget.max_bytes)
-        .unwrap_or(true)
-    {
-        return Err(format!("trust hash walk exceeded its byte budget: {key}"));
-    }
+    charge_budget(key, metadata.len(), files, bytes, budget)?;
 
     let mut content = Vec::new();
     file.read_to_end(&mut content)
         .map_err(|error| format!("read trust file {key} failed: {error}"))?;
     let read_len = u64::try_from(content.len())
         .map_err(|_| format!("trust file {key} length does not fit u64"))?;
-    if read_len > budget.max_file_bytes {
-        return Err(format!(
-            "trust file {key} grew past the per-file byte budget"
-        ));
-    }
-    if bytes
-        .checked_add(read_len)
-        .map(|total| total > budget.max_bytes)
-        .unwrap_or(true)
-    {
-        return Err(format!("trust hash walk exceeded its byte budget: {key}"));
+    if read_len != metadata.len() {
+        charge_budget(key, read_len, files, bytes, budget)?;
     }
 
     *files += 1;
     *bytes += read_len;
-    let digest = Sha256::digest(&content);
-    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-    Ok((key.to_string(), hex))
+    Ok((key.to_string(), hex_sha256(&content)))
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs as unix_fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -274,10 +311,13 @@ mod tests {
     }
 
     fn sha256_hex(bytes: &[u8]) -> String {
-        Sha256::digest(bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
+        hex_sha256(bytes)
+    }
+
+    fn symlink_digest(target: &Path) -> String {
+        let mut content = b"symlink\0".to_vec();
+        content.extend_from_slice(target.as_os_str().as_bytes());
+        hex_sha256(&content)
     }
 
     fn state_keys(value: &Value) -> Vec<&str> {
@@ -305,13 +345,16 @@ mod tests {
         let second = op_trust_hashes(&fixture.req()).unwrap();
         assert_eq!(first, second);
         assert_eq!(first["complete"], true);
-        assert_eq!(state_keys(&first), [
-            "agent/skills/a.txt",
-            "agent/skills/m.txt",
-            "agent/skills/nested/a.txt",
-            "agent/skills/nested/z.txt",
-            "agent/skills/z.txt",
-        ]);
+        assert_eq!(
+            state_keys(&first),
+            [
+                "agent/skills/a.txt",
+                "agent/skills/m.txt",
+                "agent/skills/nested/a.txt",
+                "agent/skills/nested/z.txt",
+                "agent/skills/z.txt",
+            ]
+        );
         assert_eq!(first["state"]["agent/skills/a.txt"], sha256_hex(b"a"));
     }
 
@@ -326,11 +369,15 @@ mod tests {
         fs::write(skills.join("a.txt"), b"a").unwrap();
         fs::write(skills.join("m.txt"), b"m").unwrap();
 
-        let error = collect_trust_hashes(&fixture.agent, Some(&fixture.project), &TrustBudget {
-            max_files: 2,
-            max_bytes: TRUST_MAX_BYTES,
-            max_file_bytes: TRUST_MAX_FILE_BYTES,
-        })
+        let error = collect_trust_hashes(
+            &fixture.agent,
+            Some(&fixture.project),
+            &TrustBudget {
+                max_files: 2,
+                max_bytes: TRUST_MAX_BYTES,
+                max_file_bytes: TRUST_MAX_FILE_BYTES,
+            },
+        )
         .unwrap_err();
         assert!(
             error.contains("file budget"),
@@ -347,11 +394,15 @@ mod tests {
         let fixture = Fixture::new();
         fs::write(fixture.agent.join("settings.json"), b"0123456789abcdef").unwrap();
 
-        let error = collect_trust_hashes(&fixture.agent, Some(&fixture.project), &TrustBudget {
-            max_files: TRUST_MAX_FILES,
-            max_bytes: 8,
-            max_file_bytes: TRUST_MAX_FILE_BYTES,
-        })
+        let error = collect_trust_hashes(
+            &fixture.agent,
+            Some(&fixture.project),
+            &TrustBudget {
+                max_files: TRUST_MAX_FILES,
+                max_bytes: 8,
+                max_file_bytes: TRUST_MAX_FILE_BYTES,
+            },
+        )
         .unwrap_err();
         assert!(
             error.contains("byte budget"),
@@ -364,20 +415,114 @@ mod tests {
     }
 
     #[test]
-    fn symlink_settings_json_fails_instead_of_following() {
+    fn symlink_settings_json_hashes_link_not_target() {
         let fixture = Fixture::new();
         let foreign = fixture.root.join("foreign-settings.json");
         fs::write(&foreign, b"foreign-secret-bytes").unwrap();
         unix_fs::symlink(&foreign, fixture.agent.join("settings.json")).unwrap();
 
-        let error = op_trust_hashes(&fixture.req()).unwrap_err();
-        assert!(
-            error.contains("symlink"),
-            "expected a symlink error, got {error}"
+        let first = op_trust_hashes(&fixture.req()).unwrap();
+        let second = op_trust_hashes(&fixture.req()).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first["complete"], true);
+        assert_eq!(
+            first["state"]["agent/settings.json"],
+            symlink_digest(&foreign)
         );
+        assert_ne!(
+            first["state"]["agent/settings.json"],
+            sha256_hex(b"foreign-secret-bytes")
+        );
+
+        let other = fixture.root.join("other-settings.json");
+        fs::write(&other, b"foreign-secret-bytes").unwrap();
+        fs::remove_file(fixture.agent.join("settings.json")).unwrap();
+        unix_fs::symlink(&other, fixture.agent.join("settings.json")).unwrap();
+        let retargeted = op_trust_hashes(&fixture.req()).unwrap();
+        assert_ne!(
+            retargeted["state"]["agent/settings.json"],
+            first["state"]["agent/settings.json"]
+        );
+        assert_eq!(
+            retargeted["state"]["agent/settings.json"],
+            symlink_digest(&other)
+        );
+    }
+
+    #[test]
+    fn directory_symlink_is_link_identity_not_walked() {
+        let fixture = Fixture::new();
+        let foreign_skills = fixture.root.join("foreign-skills");
+        fs::create_dir(&foreign_skills).unwrap();
+        fs::write(foreign_skills.join("secret.txt"), b"foreign-secret-bytes").unwrap();
+        unix_fs::symlink(&foreign_skills, fixture.agent.join("skills")).unwrap();
+
+        let result = op_trust_hashes(&fixture.req()).unwrap();
+        assert_eq!(result["complete"], true);
+        assert_eq!(state_keys(&result), ["agent/skills"]);
+        assert_eq!(
+            result["state"]["agent/skills"],
+            symlink_digest(&foreign_skills)
+        );
+        assert!(result["state"].get("agent/skills/secret.txt").is_none());
+        assert_ne!(
+            result["state"]["agent/skills"],
+            sha256_hex(b"foreign-secret-bytes")
+        );
+    }
+
+    #[test]
+    fn nested_file_symlink_hashes_link_not_target() {
+        let fixture = Fixture::new();
+        let skills = fixture.agent.join("skills");
+        fs::create_dir(&skills).unwrap();
+        let foreign = fixture.root.join("foreign-skill.md");
+        fs::write(&foreign, b"foreign-secret-bytes").unwrap();
+        unix_fs::symlink(&foreign, skills.join("linked.md")).unwrap();
+        fs::write(skills.join("local.md"), b"local").unwrap();
+
+        let result = op_trust_hashes(&fixture.req()).unwrap();
+        assert_eq!(result["complete"], true);
+        assert_eq!(
+            state_keys(&result),
+            ["agent/skills/linked.md", "agent/skills/local.md"]
+        );
+        assert_eq!(
+            result["state"]["agent/skills/linked.md"],
+            symlink_digest(&foreign)
+        );
+        assert_eq!(
+            result["state"]["agent/skills/local.md"],
+            sha256_hex(b"local")
+        );
+        assert_ne!(
+            result["state"]["agent/skills/linked.md"],
+            sha256_hex(b"foreign-secret-bytes")
+        );
+    }
+
+    #[test]
+    fn readlink_failure_fails_the_walk() {
+        let fixture = Fixture::new();
+        let missing = fixture.root.join("missing-target");
+        unix_fs::symlink(&missing, fixture.agent.join("settings.json")).unwrap();
+        fs::write(&missing, b"temp").unwrap();
+        // Replace the symlink path with a directory after creating a dangling
+        // name collision: unlink the symlink and put a directory there, then
+        // point hash_symlink at a path that is not a symlink.
+        fs::remove_file(fixture.agent.join("settings.json")).unwrap();
+        fs::create_dir(fixture.agent.join("settings.json")).unwrap();
+        let error = hash_symlink(
+            &fixture.agent.join("settings.json"),
+            "agent/settings.json",
+            &mut 0,
+            &mut 0,
+            &TrustBudget::production(),
+        )
+        .unwrap_err();
         assert!(
-            !error.contains(&sha256_hex(b"foreign-secret-bytes")),
-            "symlink walk must not hash the foreign target, got {error}"
+            error.contains("readlink"),
+            "expected a readlink failure, got {error}"
         );
     }
 
