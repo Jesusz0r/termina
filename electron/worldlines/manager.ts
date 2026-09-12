@@ -6,7 +6,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import type { BigIntStats } from "node:fs";
-import { lstat as lstatPath, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { lstat as lstatPath, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { buildSandboxProfile, candidateSandboxLaunch, type SandboxPaths } from "../sandbox.js";
 import {
@@ -21,8 +21,6 @@ import {
   boundPromotionWriteFile,
   captureRootInRepo,
   gitCommitFile,
-  gitCommitTree,
-  gitCommittedChanges,
   gitCommonDir,
   gitHead,
   gitIgnoredFiles,
@@ -31,7 +29,10 @@ import {
   type BoundPromotionExpectedLeaf,
   type PromotionFsIdentity,
 } from "../worldline-git.js";
-import { buildExportMarkdown, MAX_EXPORT_BUNDLES, MAX_EXPORT_FILES, type ExportPatchFile } from "./export.js";
+import { type ExportPatchFile } from "./export.js";
+import { changedFiles, isSafeRelativePath } from "./candidate-files.js";
+import { exportCandidateRun } from "./export-candidate.js";
+import { RunRegistry } from "./run-registry.js";
 import { EvidenceEngine, dependencyDiff, mineChangeReason, rankProfiles, type EvidenceDeps } from "../evidence.js";
 import type {
   CoreSessionForkOpts,
@@ -47,7 +48,6 @@ import type {
   EvidenceSummary,
   RunSummary,
   TimelineEvent,
-  WorldlineChangedFile,
   WorldlineDetails,
   WorldlineState,
   WorldlineSummary,
@@ -143,8 +143,6 @@ import {
   MAX_IGNORED_FILES,
   MAX_AGENT_RESOURCE_BYTES,
   MAX_PROMPT_BYTES,
-  MAX_RETAINED_RUNS,
-  MAX_RUNS_PER_TERMINAL,
   MAX_STALE_SWEEP_BYTES,
   MAX_TEMPLATE_BYTES,
   MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES,
@@ -276,7 +274,6 @@ export class WorldlineManager {
   private promotionAdmissionOwner: PromotionJournalAdmissionOwner | null = null;
   private releaseUncertainAdmissionParticipant: (() => void) | null = null;
   private releasePromotionAdmissionParticipant: (() => void) | null = null;
-  private retainedSessionDiscards = new Set<Promise<unknown>>();
   private closingComparisons = new Set<string>();
   private terminalToComparison = new Map<string, { comparisonId: string; label: "A" | "B"; startupAttemptId?: string }>();
   /** Reopen readiness is a one-shot handshake keyed by the new terminal id. */
@@ -292,11 +289,18 @@ export class WorldlineManager {
   private evidenceQueueDepth = 0;
   /** Every queued/running evidence operation is owned by its comparison. */
   private evidenceAttempts = new Map<string, EvidenceAttempt>();
-  private runsByTerminal = new Map<string, RunRecord[]>();
-  private runsById = new Map<string, RunRecord>();
+  private runs: RunRegistry;
   private readyError: Error | null = null;
 
   constructor(private deps: WorldlineDeps) {
+    this.runs = new RunRegistry({
+      releaseState: (stateId) => this.deps.releaseState(stateId),
+      removePromptPayload: this.deps.removePromptPayload
+        ? (eventsDir, fileName) => this.deps.removePromptPayload!(eventsDir, fileName)
+        : undefined,
+      discardCoreSession: (runId) => this.deps.discardCoreSession(runId),
+      isCoreRun,
+    });
     this.ready = (async () => {
       // Establish app roots from descriptor-bound parent proofs. A
       // pathname-only mkdir/open could turn an ancestor replacement into the
@@ -422,78 +426,27 @@ export class WorldlineManager {
 
   /** Add the run to the project catalog. */
   recordRun(run: RunRecord): void {
-    this.runsById.set(run.id, run);
-    let list = this.runsByTerminal.get(run.terminalId);
-    if (!list) {
-      list = [];
-      this.runsByTerminal.set(run.terminalId, list);
-    }
-    list.push(run);
-    this.evictOverflow(run.terminalId);
+    this.runs.record(run, this.pinnedRunIds());
   }
 
   runOf(runId: string): RunRecord | null {
-    return this.runsById.get(runId) ?? null;
-  }
-
-  private runsOf(terminalId?: string): RunRecord[] {
-    if (terminalId) return [...(this.runsByTerminal.get(terminalId) ?? [])];
-    const out: RunRecord[] = [];
-    for (const list of this.runsByTerminal.values()) out.push(...list);
-    return out;
+    return this.runs.of(runId);
   }
 
   runSummaries(terminalId?: string): RunSummary[] {
-    return this.runsOf(terminalId).map((r) => ({
-      id: r.id,
-      terminalId: r.terminalId,
-      workspaceId: r.workspaceId,
-      startStateId: r.startStateId,
-      settledStateId: r.settledStateId,
-      promptText: r.promptText,
-      promptEntryId: r.promptEntryId,
-      promptParentEntryId: r.promptParentEntryId,
-      settledEntryId: r.settledEntryId,
-      sessionFile: r.sessionFile,
-      sessionBranchFile: r.sessionBranchFile,
-      uncertainSessionFile: r.uncertainSessionFile,
-      replayable: r.replayable,
-      reason: r.reason,
-      interrupted: r.interrupted,
-      steering: r.steering,
-      overlap: r.overlap,
-      unownedEdits: r.unownedEdits,
-      model: r.model,
-      thinkingLevel: r.thinkingLevel,
-      startedAt: r.startedAt,
-      settledAt: r.settledAt,
-    }));
+    return this.runs.summaries(terminalId);
   }
 
   runCovering(terminalId: string, ts: number): RunRecord | null {
-    const runs = this.runsByTerminal.get(terminalId) ?? [];
-    for (let i = runs.length - 1; i >= 0; i--) {
-      const run = runs[i];
-      if (ts < run.startedAt) continue;
-      if (run.settledAt !== null && ts > run.settledAt) continue;
-      return run;
-    }
-    return null;
+    return this.runs.covering(terminalId, ts);
   }
 
   holdsRunState(stateId: string): boolean {
-    for (const run of this.runsById.values()) {
-      if (run.startStateId === stateId || run.settledStateId === stateId) return true;
-    }
-    return false;
+    return this.runs.holdsState(stateId);
   }
 
   promptPayloadsOf(terminalId: string): Set<string> {
-    const keep = new Set<string>();
-    for (const run of this.runsByTerminal.get(terminalId) ?? []) {
-      if (run.promptPayloadFile) keep.add(run.promptPayloadFile);
-    }
-    return keep;
+    return this.runs.promptPayloadsOf(terminalId);
   }
 
   /** Run ids that a live comparison still needs (promote, evidence, nested fork). */
@@ -577,87 +530,13 @@ export class WorldlineManager {
     throw new Error("comparison id allocation exhausted");
   }
 
-  private canDiscard(run: RunRecord, pinned: Set<string>): boolean {
-    return run.settledAt !== null && !pinned.has(run.id);
-  }
-
-  private oldestDiscardable(pinned: Set<string>): RunRecord | null {
-    let oldest: RunRecord | null = null;
-    for (const records of this.runsByTerminal.values()) {
-      for (const run of records) {
-        if (!this.canDiscard(run, pinned)) continue;
-        if (!oldest || run.startedAt < oldest.startedAt) oldest = run;
-      }
-    }
-    return oldest;
-  }
-
-  /**
-   * Drop the oldest disposable records. Never drop an open run or the
-   * source of a live comparison.
-   */
-  private evictOverflow(terminalId: string): void {
-    const pinned = this.pinnedRunIds();
-    const list = this.runsByTerminal.get(terminalId);
-    if (list) {
-      while (list.length > MAX_RUNS_PER_TERMINAL) {
-        const idx = list.findIndex((run) => this.canDiscard(run, pinned));
-        if (idx < 0) break;
-        this.discardRun(list.splice(idx, 1)[0]);
-      }
-    }
-    while (this.runsById.size > MAX_RETAINED_RUNS) {
-      const victim = this.oldestDiscardable(pinned);
-      if (!victim) break;
-      const records = this.runsByTerminal.get(victim.terminalId);
-      if (!records) break;
-      const idx = records.indexOf(victim);
-      if (idx >= 0) records.splice(idx, 1);
-      if (records.length === 0) this.runsByTerminal.delete(victim.terminalId);
-      this.discardRun(victim);
-    }
-  }
-
-  private discardRun(run: RunRecord | undefined): void {
-    if (!run) return;
-    this.runsById.delete(run.id);
-    if (run.startStateId) void this.deps.releaseState(run.startStateId);
-    if (run.settledStateId && run.settledStateId !== run.startStateId) void this.deps.releaseState(run.settledStateId);
-    if (run.promptPayloadFile && run.promptEventsDir) {
-      // The manager does not own the primary events-root capability. Delegate
-      // to Main's bound leaf owner; when it is unavailable, retaining the
-      // payload is safer than deleting a pathname replacement.
-      const cleanup = this.deps.removePromptPayload?.(run.promptEventsDir, run.promptPayloadFile);
-      if (cleanup) void cleanup.catch(() => undefined);
-    }
-    if (run.sessionBranchFile) {
-      if (isCoreRun(run)) {
-        // Successful core finalization leaves a proven durable bundle after
-        // its claim is removed. Route its reclamation through the same owner;
-        // uncertainSessionFile is intentionally never treated as a valid
-        // branch and is not passed here.
-        const discard = this.deps.discardCoreSession(run.id).catch(() => undefined);
-        this.retainedSessionDiscards.add(discard);
-        void discard.finally(() => this.retainedSessionDiscards.delete(discard));
-      }
-      // Non-core branches are removed with no session discard: only core
-      // sessions are recorded, so there is nothing else to reclaim.
-    }
-  }
-
   /** Drain native durable core-bundle reclamation before app shutdown. */
   private async drainRetainedSessionDiscards(): Promise<void> {
-    while (this.retainedSessionDiscards.size > 0) {
-      await Promise.all([...this.retainedSessionDiscards].map((task) => task.catch(() => undefined)));
-    }
+    await this.runs.drainDiscards();
   }
 
   private clearRuns(): void {
-    for (const list of this.runsByTerminal.values()) {
-      for (const run of list) this.discardRun(run);
-    }
-    this.runsByTerminal.clear();
-    this.runsById.clear();
+    this.runs.clear();
   }
 
   private summaryOf(cmp: ComparisonState, cand: CandidateState): WorldlineSummary {
@@ -1024,7 +903,7 @@ export class WorldlineManager {
     if (!cmp.baseCommit) return { ok: false, error: "the comparison base is missing" };
     let primaryCommit: string | null = null;
     try {
-      const changedFiles = await this.changedFiles(cmp, cand);
+      const changed = await changedFiles(cmp, cand);
       // Provenance: the unowned edits of the source run (§6.9).
       const unownedEdits = this.runOf(cmp.sourceRunId)?.unownedEdits ?? 0;
       // Ignored/generated runtime fingerprints: metadata only, bounded.
@@ -1062,9 +941,9 @@ export class WorldlineManager {
           model: cmp.model,
           thinkingLevel: cmp.thinkingLevel,
           createdAt: cmp.createdAt,
-          sourceFiles: changedFiles.sourceFiles,
-          sourceBytes: changedFiles.sourceBytes,
-          changedFiles: changedFiles.files,
+          sourceFiles: changed.sourceFiles,
+          sourceBytes: changed.sourceBytes,
+          changedFiles: changed.files,
           dependencies: await this.dependencyChanges(cmp, cand),
           unownedEdits,
           ignoredFiles: ignored.count,
@@ -1085,7 +964,7 @@ export class WorldlineManager {
     const cmp = this.comparisons.get(comparisonId);
     const cand = cmp?.candidates.get(label);
     if (!cmp || !cand) return { ok: false, error: "candidate not found" };
-    if (!this.isSafeRelativePath(relPath)) return { ok: false, error: "invalid candidate path" };
+    if (!isSafeRelativePath(relPath)) return { ok: false, error: "invalid candidate path" };
     const root = resolve(cand.dir);
     const target = resolve(root, relPath);
     if (!isInside(root, target)) return { ok: false, error: "path escapes the candidate tree" };
@@ -1105,7 +984,7 @@ export class WorldlineManager {
   async baseFileOf(comparisonId: string, relPath: string): Promise<{ ok: boolean; content?: string; error?: string }> {
     const cmp = this.comparisons.get(comparisonId);
     if (!cmp || !cmp.baseCommit) return { ok: false, error: "the comparison base is missing" };
-    if (!this.isSafeRelativePath(relPath)) return { ok: false, error: "invalid base path" };
+    if (!isSafeRelativePath(relPath)) return { ok: false, error: "invalid base path" };
     const anyCand = cmp.candidates.get("A") ?? cmp.candidates.get("B");
     if (!anyCand) return { ok: false, error: "candidate not found" };
     const res = await gitCommitFile(anyCand.dir, cmp.baseCommit!, relPath);
@@ -1120,164 +999,20 @@ export class WorldlineManager {
    * in the app-owned exports directory for review, `git apply`, or paste.
    */
   async exportCandidate(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; path?: string; error?: string }> {
-    const cmp = this.comparisons.get(comparisonId);
-    const cand = cmp?.candidates.get(label);
-    if (!cmp || !cand) return { ok: false, error: "candidate not found" };
-    if (cand.state === "discarded" || cand.state === "error") {
-      return { ok: false, error: "only a live candidate can be exported" };
-    }
-    // The directory name derives from renderer input: allow only the
-    // manager-generated id shape even though lookup already gates it.
-    if (!/^cmp-[0-9]+$/.test(comparisonId)) return { ok: false, error: "invalid comparison" };
-    let changed: WorldlineChangedFile[];
-    try {
-      changed = (await this.changedFiles(cmp, cand)).files;
-    } catch (err) {
-      return { ok: false, error: `could not list candidate changes: ${err instanceof Error ? err.message : String(err)}` };
-    }
-    if (changed.length === 0) return { ok: false, error: "the candidate has no changes to export" };
-    // Bound per-file round-trips and patch size: extra files stay listed in
-    // the summary but leave the patch.
-    const capped = changed.slice(0, MAX_EXPORT_FILES);
-    const patchFiles: ExportPatchFile[] = [];
-    for (const file of capped) {
-      if (!this.isSafeRelativePath(file.relPath)) continue;
-      // Patch format cannot represent newline names; they stay listed only.
-      if (file.relPath.includes("\n")) continue;
-      let before: string | null = null;
-      let after: string | null = null;
-      if (file.status !== "created") {
-        const base = await this.baseFileOf(comparisonId, file.relPath);
-        if (base.ok) before = base.content ?? null;
-      }
-      if (file.status !== "deleted") {
-        const head = await this.fileOf(comparisonId, label, file.relPath);
-        if (head.ok) after = head.content ?? null;
-      }
-      // Unreadable on both sides: listed in the summary, absent from the patch.
-      if (before === null && after === null) continue;
-      patchFiles.push({ relPath: file.relPath, before, after });
-    }
-    if (patchFiles.length === 0) return { ok: false, error: "no exportable file contents" };
-    const evidence = this.evidenceByComparison.get(comparisonId);
-    const records = evidence?.byCandidate[label] ?? [];
-    const bundle = buildExportMarkdown({
+    return exportCandidateRun(
+      {
+        comparisons: this.comparisons,
+        evidenceByComparison: this.evidenceByComparison,
+        buildExportPatch: (files) => this.deps.buildExportPatch(files),
+        worldsRoot: this.deps.worldsRoot,
+        baseFileOf: (cid, relPath) => this.baseFileOf(cid, relPath),
+        fileOf: (cid, candidateLabel, relPath) => this.fileOf(cid, candidateLabel, relPath),
+      },
       comparisonId,
       label,
-      role: cand.role,
-      model: cmp.model,
-      baseCommit: cmp.baseCommit,
-      exportedAt: new Date().toISOString(),
-      files: changed.map((file) => ({ relPath: file.relPath, status: file.status })),
-      evidence: records.map((record) => ({ kind: record.kind, status: record.status, reason: record.reason })),
-      profiles: (evidence?.profiles ?? []).map((profile) => ({ profile: profile.profile, winner: profile.winner })),
-      truncatedFiles: changed.length > capped.length ? changed.length - capped.length : 0,
-      evidenceStale: evidence?.stale === true,
-    });
-    let patch: string;
-    try {
-      patch = await this.deps.buildExportPatch(patchFiles);
-    } catch (err) {
-      return { ok: false, error: `could not build the export patch: ${err instanceof Error ? err.message : String(err)}` };
-    }
-    // The gather + patch window is long: refuse to write a bundle for a
-    // candidate that was discarded while it ran.
-    const fresh = this.comparisons.get(comparisonId)?.candidates.get(label);
-    if (!fresh || fresh.state === "discarded" || fresh.state === "error") {
-      return { ok: false, error: "the candidate was discarded during export" };
-    }
-    const exportsRoot = join(this.deps.worldsRoot, "exports");
-    const dir = join(exportsRoot, `${comparisonId}-${label}`);
-    try {
-      await mkdir(dir, { recursive: true, mode: 0o700 });
-      // Confine the bundle inside the app-owned exports root even if a
-      // same-user actor planted a symlink along the path.
-      const [canonicalRoot, canonicalDir] = await Promise.all([realpath(exportsRoot), realpath(dir)]);
-      if (!isInside(canonicalRoot, canonicalDir)) return { ok: false, error: "export bundle escaped its directory" };
-      await writeFile(join(canonicalDir, "candidate.patch"), patch, { mode: 0o600 });
-      await writeFile(join(canonicalDir, "pr-body.md"), bundle, { mode: 0o600 });
-      await writeFile(join(canonicalDir, "metadata.json"), JSON.stringify({
-        comparisonId,
-        label,
-        role: cand.role,
-        model: cmp.model,
-        baseCommit: cmp.baseCommit,
-        exportedAt: new Date().toISOString(),
-        files: changed.length,
-        truncatedFiles: changed.length > capped.length ? changed.length - capped.length : 0,
-      }, null, 2), { mode: 0o600 });
-      await this.pruneExportBundles(canonicalRoot, canonicalDir);
-    } catch (err) {
-      return { ok: false, error: `could not write the export bundle: ${err instanceof Error ? err.message : String(err)}` };
-    }
-    return { ok: true, path: dir };
+    );
   }
 
-  /** Keep only the newest export bundles. Best-effort; never fails export. */
-  private async pruneExportBundles(exportsRoot: string, keepDir: string): Promise<void> {
-    try {
-      const names = await readdir(exportsRoot);
-      if (names.length <= MAX_EXPORT_BUNDLES) return;
-      const stamped: Array<{ dir: string; mtimeMs: number }> = [];
-      for (const name of names) {
-        // Only manager-generated bundle names are ever removed.
-        if (!/^cmp-[0-9]+-[AB]$/.test(name)) continue;
-        const full = join(exportsRoot, name);
-        if (full === keepDir) continue;
-        try {
-          // lstat, not stat: a symlink never qualifies as a directory here.
-          const info = await lstatPath(full);
-          if (!info.isDirectory()) continue;
-          stamped.push({ dir: full, mtimeMs: info.mtimeMs });
-        } catch {
-          continue;
-        }
-      }
-      stamped.sort((a, b) => a.mtimeMs - b.mtimeMs);
-      while (stamped.length >= MAX_EXPORT_BUNDLES) {
-        const oldest = stamped.shift();
-        if (!oldest) break;
-        await rm(oldest.dir, { recursive: true, force: true });
-      }
-    } catch {
-      /* Retention is best-effort. */
-    }
-  }
-
-  private isSafeRelativePath(relPath: string): boolean {
-    return relPath.length > 0 && relPath !== "." && relPath.indexOf("\0") === -1 && !isAbsolute(relPath) && !relPath.startsWith("/") && !relPath.split(/[\\/]/).includes("..");
-  }
-
-  /** Files differing from the base plus head-tree source statistics. */
-  private async changedFiles(cmp: ComparisonState, cand: CandidateState): Promise<{ files: WorldlineChangedFile[]; sourceFiles: number; sourceBytes: number }> {
-    // Working tree vs HEAD: staged, unstaged, and untracked changes.
-    const status = await gitWorkingChanges(cand.dir);
-    // Committed changes since the shared base (A's settled apply and any
-    // agent commits; B usually has none).
-    const committed = await gitCommittedChanges(cand.dir, cmp.baseCommit!, "HEAD");
-    const tree = await gitCommitTree(cand.dir, "HEAD");
-    const byPath = new Map<string, WorldlineChangedFile>();
-    const set = (relPath: string, status: "created" | "modified" | "deleted"): void => {
-      const prev = byPath.get(relPath);
-      // A later state wins: deleted beats modified, created beats deleted.
-      if (!prev || (status === "deleted" && prev.status !== "deleted") || (status === "created" && prev.status !== "deleted")) {
-        byPath.set(relPath, { relPath, status });
-      }
-    };
-    for (const change of status) {
-      set(change.relPath, change.status);
-    }
-    for (const change of committed) {
-      set(change.relPath, change.status);
-    }
-    let sourceFiles = tree.length;
-    let sourceBytes = 0;
-    for (const entry of tree) {
-      sourceBytes += entry.size;
-    }
-    const files = [...byPath.values()].sort((a, b) => a.relPath.localeCompare(b.relPath));
-    return { files, sourceFiles, sourceBytes };
-  }
 
   /** Declared dependency differences between base and head. */
   private async dependencyChanges(cmp: ComparisonState, cand: CandidateState): Promise<DependencyChange[]> {

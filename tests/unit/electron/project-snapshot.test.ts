@@ -12,7 +12,7 @@ import { readFileSync } from "node:fs";
 describe("Project Snapshot Invariants", () => {
   it("wires snapshot write, debounced refresh, and lowest-priority read", async () => {
     const main = readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8");
-    const host = readFileSync(new URL("../../../agent-core/host.ts", import.meta.url), "utf8");
+    const host = readFileSync(new URL("../../../agent-core/host/context.ts", import.meta.url), "utf8");
     const checks: string[] = [];
     function check(name: string, value: unknown) {
       assert.equal(Boolean(value), true, name);

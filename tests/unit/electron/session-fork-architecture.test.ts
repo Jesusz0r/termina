@@ -7,11 +7,15 @@ describe("SessionFork Architecture Contracts", () => {
   const main = readFileSync(join(root, "electron", "main.ts"), "utf8");
   // The worldlines owner is a directory; read every module so the contracts
   // below cover the whole owner instead of one file.
-  const worldlines = readdirSync(join(root, "electron", "worldlines"))
+  const worldlines = [...readdirSync(join(root, "electron", "worldlines"))
     .filter((name) => name.endsWith(".ts"))
     .sort()
-    .map((name) => readFileSync(join(root, "electron", "worldlines", name), "utf8"))
-    .join("\n");
+    .map((name) => readFileSync(join(root, "electron", "worldlines", name), "utf8")),
+    ...readdirSync(join(root, "electron", "worldlines", "promotion-recovery"))
+    .filter((name) => name.endsWith(".ts"))
+    .sort()
+    .map((name) => readFileSync(join(root, "electron", "worldlines", "promotion-recovery", name), "utf8")),
+  ].join("\n");
   // The Rust core is split into modules (including subdirectories); read them
   // all for the same reason.
   function collectRustSources(dir: string): string[] {
@@ -30,8 +34,22 @@ describe("SessionFork Architecture Contracts", () => {
     .map((file) => readFileSync(file, "utf8"))
     .join("\n");
   const worker = readFileSync(join(root, "electron", "session-worker.ts"), "utf8");
-  const retention = readFileSync(join(root, "electron", "session-retention.ts"), "utf8");
-  const session = readFileSync(join(root, "agent-core", "session.ts"), "utf8");
+  // The retention owner is a directory; read every module so the contracts
+  // below cover the whole owner instead of one file.
+  const retention = [join(root, "electron", "session-retention.ts"), ...readdirSync(join(root, "electron", "session-retention"))
+    .filter((name) => name.endsWith(".ts"))
+    .sort()
+    .map((name) => join(root, "electron", "session-retention", name))]
+    .map((path) => readFileSync(path, "utf8"))
+    .join("\n");
+  // The session owner is a directory; read every module so the contracts
+  // below cover the whole owner instead of one file.
+  const session = [join(root, "agent-core", "session.ts"), ...readdirSync(join(root, "agent-core", "session"))
+    .filter((name) => name.endsWith(".ts"))
+    .sort()
+    .map((name) => join(root, "agent-core", "session", name))]
+    .map((path) => readFileSync(path, "utf8"))
+    .join("\n");
 
   function methodBody(source: string, signature: string, nextSignature?: string) {
     const start = source.indexOf(signature);

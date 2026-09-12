@@ -10,11 +10,21 @@ import { existsSync, lstatSync, readlinkSync, symlinkSync, unlinkSync, mkdirSync
 import { join, resolve, dirname } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { quoteShellArg } from "../shared/terminal-control.ts";
 
 const execFileAsync = promisify(execFile);
 
 const CLI_TARGET_DIR = "/usr/local/bin";
 const CLI_TARGET_PATH = join(CLI_TARGET_DIR, "termina");
+
+/**
+ * Escape text for interpolation into an AppleScript double-quoted string
+ * (the `do shell script "..."` argument). Backslashes first so the quote
+ * escapes are not themselves escaped.
+ */
+export function quoteAppleScriptString(text: string): string {
+  return text.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
 
 export function getCliSourcePath(): string {
   if (app?.isPackaged && typeof process.resourcesPath === "string") {
@@ -91,8 +101,11 @@ export async function installCliCommand(): Promise<{ ok: boolean; path?: string;
   // Elevate via native OS dialog
   if (process.platform === "darwin") {
     try {
-      const command = `mkdir -p '${CLI_TARGET_DIR}' && ln -sf '${source}' '${CLI_TARGET_PATH}'`;
-      await execFileAsync("osascript", ["-e", `do shell script "${command}" with administrator privileges`]);
+      // The launcher path derives from the install location, so it is data,
+      // not code: single-quote every word for sh, then escape the whole
+      // command for the AppleScript string. This runs as root.
+      const command = `mkdir -p ${quoteShellArg(CLI_TARGET_DIR)} && ln -sf ${quoteShellArg(source)} ${quoteShellArg(CLI_TARGET_PATH)}`;
+      await execFileAsync("osascript", ["-e", `do shell script "${quoteAppleScriptString(command)}" with administrator privileges`]);
       return { ok: true, path: CLI_TARGET_PATH };
     } catch (err) {
       const msg = (err as Error).message;
@@ -125,8 +138,8 @@ export async function uninstallCliCommand(): Promise<{ ok: boolean; error?: stri
 
   if (process.platform === "darwin") {
     try {
-      const command = `rm -f '${CLI_TARGET_PATH}'`;
-      await execFileAsync("osascript", ["-e", `do shell script "${command}" with administrator privileges`]);
+      const command = `rm -f ${quoteShellArg(CLI_TARGET_PATH)}`;
+      await execFileAsync("osascript", ["-e", `do shell script "${quoteAppleScriptString(command)}" with administrator privileges`]);
       return { ok: true };
     } catch (err) {
       const msg = (err as Error).message;
