@@ -1,13 +1,21 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer } from "node:http";
 import { fetchUrl, fetchUrlError } from "../../../agent-core/main.ts";
-import { mcpHttpUrlError, parseMcpConfig } from "../../../agent-core/mcp.ts";
+import { mcpHttpUrlError, parseMcpConfig, startMcp } from "../../../agent-core/mcp.ts";
+import { resolvedHostError } from "../../../agent-core/main/url.ts";
+
+const { lookupMock } = vi.hoisted(() => ({ lookupMock: vi.fn() }));
+vi.mock("node:dns/promises", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("node:dns/promises")>();
+  return { ...orig, lookup: lookupMock };
+});
 
 const originalTestFlag = process.env.TERMINA_CORE_TEST;
 
 afterEach(() => {
   if (originalTestFlag === undefined) delete process.env.TERMINA_CORE_TEST;
   else process.env.TERMINA_CORE_TEST = originalTestFlag;
+  lookupMock.mockReset();
 });
 
 function expectBlocked(url: string): void {
@@ -95,13 +103,13 @@ describe("fetch and MCP outbound URL policy", () => {
     globalThis.fetch = async (input) => {
       hops += 1;
       const url = String(input);
-      if (url.includes("example.com")) {
+      if (url.includes("8.8.8.8")) {
         return new Response(null, { status: 302, headers: { location: "https://127.0.0.1/secret" } });
       }
       throw new Error(`fetch followed a blocked redirect: ${url}`);
     };
     try {
-      const result = await fetchUrl("https://example.com/go");
+      const result = await fetchUrl("https://8.8.8.8/go");
       expect(hops).toBe(1);
       expect(result.isError).toBe(true);
       expect(result.content).toMatch(/not allowed/);
@@ -142,5 +150,65 @@ describe("fetch and MCP outbound URL policy", () => {
     expect(
       parseMcpConfig({ mcpServers: { web: { type: "http", url: "https://example.com/mcp" } } }).map((s) => s.name),
     ).toEqual(["web"]);
+  });
+
+  it("does not resolve hosts while parsing MCP config", () => {
+    process.env.TERMINA_CORE_TEST = "1";
+    const parsed = parseMcpConfig({ mcpServers: { web: { type: "http", url: "https://example.com/mcp" } } });
+    expect(parsed.map((s) => s.name)).toEqual(["web"]);
+    expect(lookupMock).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when a public name resolves to a private address", async () => {
+    process.env.TERMINA_CORE_TEST = "1";
+    lookupMock.mockResolvedValue([{ address: "127.0.0.1", family: 4 }]);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      throw new Error("fetch should not run for a name that resolves private");
+    };
+    try {
+      expect(await resolvedHostError("private.test")).toMatch(/not allowed/);
+      const result = await fetchUrl("https://private.test/secret");
+      expect(result.isError).toBe(true);
+      expect(result.content).toMatch(/not allowed/);
+      expect(lookupMock).toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("still fetches a public https name whose addresses are public", async () => {
+    process.env.TERMINA_CORE_TEST = "1";
+    lookupMock.mockResolvedValue([{ address: "93.184.216.34", family: 4 }]);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response("public-ok", { status: 200, headers: { "content-type": "text/plain" } });
+    try {
+      expect(await resolvedHostError("example.com")).toBeNull();
+      const result = await fetchUrl("https://example.com/x");
+      expect(result.isError).toBe(false);
+      expect(result.content).toBe("public-ok");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("rejects MCP HTTP connect when the name resolves private", async () => {
+    process.env.TERMINA_CORE_TEST = "1";
+    lookupMock.mockResolvedValue([{ address: "10.0.0.9", family: 4 }]);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      throw new Error("MCP should not connect to a name that resolves private");
+    };
+    try {
+      const session = await startMcp(
+        [{ name: "web", url: "https://private.test/mcp", args: [], env: {} }],
+        { projectRoot: ".", confineCwd: () => "." },
+      );
+      expect(session.tools).toEqual([]);
+      expect(session.notes.some((note) => note.includes("not allowed"))).toBe(true);
+      session.shutdown();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

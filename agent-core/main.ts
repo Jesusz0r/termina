@@ -185,7 +185,7 @@ import {
   shellQuote,
 } from "./main/files.ts";
 import { isDirectRunFrom, trustedPath } from "./main/env.ts";
-import { outboundUrlError } from "./main/url.ts";
+import { outboundUrlError, resolvedHostError } from "./main/url.ts";
 import { grepFiles } from "./main/grep.ts";
 import {
   editProjectFile,
@@ -1509,6 +1509,14 @@ export async function fetchUrl(
   for (let hop = 0; hop <= FETCH_REDIRECT_CAP; hop++) {
     const bad = fetchUrlError(current);
     if (bad) return fail(bad);
+    let hopHost: string;
+    try {
+      hopHost = new URL(current).hostname;
+    } catch {
+      return fail("error: invalid URL");
+    }
+    const resolved = await resolvedHostError(hopHost);
+    if (resolved) return fail(resolved);
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), timeoutMs);
     const poll = setInterval(() => {

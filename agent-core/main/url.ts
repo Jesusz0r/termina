@@ -1,8 +1,10 @@
 /**
  * Outbound URL policy for fetch and MCP HTTP.
  * https-only, test-only http loopback, and blocked special-use hosts.
- * Stateless.
+ * Parse-time checks stay literal and offline. Resolve-at-connect is a
+ * separate hop check so MCP config parse never touches the network.
  */
+import { lookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
 
 const HOST_NOT_ALLOWED = "error: URL host not allowed";
@@ -66,4 +68,28 @@ export function outboundUrlError(url: string): string | null {
   }
   if (parsed.protocol === "http:") return "error: only https URLs are allowed";
   return `error: URL scheme not allowed: ${parsed.protocol}`;
+}
+
+/**
+ * Resolve a hostname just before connect. Literal IPs and test-only
+ * loopback skip the network. A name that answers with any restricted
+ * address fails closed. Lookup failure is not treated as private: the
+ * hop still has to survive fetch/connect.
+ */
+export async function resolvedHostError(hostname: string): Promise<string | null> {
+  if (process.env.TERMINA_CORE_TEST === "1" && isTestLoopbackHost(hostname)) return null;
+  const host = normalizeHost(hostname);
+  if (!host) return HOST_NOT_ALLOWED;
+  if (restrictedNetworkHost(host)) return HOST_NOT_ALLOWED;
+  if (isIP(host)) return null;
+  try {
+    const answers = await lookup(host, { all: true });
+    if (answers.length === 0) return null;
+    for (const answer of answers) {
+      if (restrictedNetworkHost(answer.address)) return HOST_NOT_ALLOWED;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }

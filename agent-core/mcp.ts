@@ -8,7 +8,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import { outboundUrlError } from "./main/url.ts";
+import { outboundUrlError, resolvedHostError } from "./main/url.ts";
 import { BoundedTextAccumulator, type BoundedToolResult, type CompletionState } from "./tool-output.ts";
 
 export const MAX_MCP_SERVERS = 8;
@@ -1195,6 +1195,16 @@ export async function startMcp(
       const bad = mcpHttpUrlError(cfg.url);
       if (bad) {
         return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${bad}` };
+      }
+      let hopHost: string;
+      try {
+        hopHost = new URL(cfg.url).hostname;
+      } catch {
+        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: error: invalid URL` };
+      }
+      const resolved = await resolvedHostError(hopHost);
+      if (resolved) {
+        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${resolved}` };
       }
       const proc = new McpHttp(cfg.name, cfg.url, cfg.headers ?? {});
       try {
