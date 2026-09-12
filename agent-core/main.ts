@@ -4446,6 +4446,7 @@ function logSettings(): void {
     t: "agent_settings",
     model: `${route.provider}/${route.model}`,
     thinkingLevel: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)),
+    usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd, cacheFlipStats()),
   });
 }
 
@@ -5491,6 +5492,7 @@ function syncIndicators(): void {
   surface?.setStatus({
     usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd, cacheFlipStats()),
   });
+  logSettings();
 }
 
 function showPrompt(): void {

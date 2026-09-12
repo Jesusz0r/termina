@@ -2563,6 +2563,36 @@ body {
   background: rgba(0, 0, 0, 0.12);
 }
 
+.statusbar-agent {
+  background: transparent;
+  border: none;
+  color: var(--on-accent);
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  max-width: 22vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statusbar-agent:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.statusbar-agent:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+#statusbar #status-usage {
+  max-width: 30vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 #verify-badge {
   cursor: pointer;
   border-radius: 3px;

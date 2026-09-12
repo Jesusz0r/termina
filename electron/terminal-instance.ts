@@ -38,6 +38,8 @@ export class AgentTerminalInstance {
   model: string | null = null;
   /** The live thinking level of this agent. */
   thinkingLevel: string | null = null;
+  /** The live usage/cache line of this agent, formatted by agent-core. */
+  usage: string | null = null;
   shellName?: string;
   /** Absolute shell binary, for roster resume. */
   shellPath?: string;

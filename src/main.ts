@@ -454,6 +454,9 @@ const btnVerify = document.getElementById("btn-verify") as HTMLButtonElement;
 const verifyBadge = document.getElementById("verify-badge")!;
 const statusCwd = document.getElementById("status-cwd")!;
 const statusState = document.getElementById("status-state")!;
+const statusModel = document.getElementById("status-model") as HTMLButtonElement;
+const statusEffort = document.getElementById("status-effort") as HTMLButtonElement;
+const statusUsage = document.getElementById("status-usage")!;
 const btnAppUpdate = document.getElementById("btn-app-update") as HTMLButtonElement;
 const modifiedList = document.getElementById("modified-list")!;
 const modifiedPanel = document.getElementById("modified-panel")!;
@@ -606,6 +609,9 @@ interface Pane {
   type: "agent" | "shell";
   engine?: "core";
   shellName: string | undefined;
+  model: string | null;
+  thinkingLevel: string | null;
+  usage: string | null;
   error: boolean;
   /** True after pty:exit. The pane remains until the user closes the tab. */
   exited: boolean;
@@ -833,6 +839,9 @@ function createPaneShell(instanceId: string): Pane {
     type: "agent",
     engine: "core",
     shellName: undefined,
+    model: null,
+    thinkingLevel: null,
+    usage: null,
     error: false,
     exited: false,
     modified: [],
@@ -1230,6 +1239,9 @@ function renderChrome(): void {
   if (!pane) {
     statusState.textContent = "no terminal";
     statusCwd.textContent = "";
+    statusModel.hidden = true;
+    statusEffort.hidden = true;
+    statusUsage.hidden = true;
     btnVerify.disabled = true;
     verifyBadge.textContent = "";
     verifyBadge.hidden = true;
@@ -1256,8 +1268,39 @@ function renderStatus(pane: Pane): void {
   statusState.textContent = pane.busy ? "● agent working" : "idle";
   statusState.classList.toggle("busy", pane.busy);
   statusCwd.textContent = pane.cwd ?? "";
+  renderAgentStatus(pane);
   renderVerify(pane);
   renderHandoff(pane);
+}
+
+/** Status bar trailing: model · effort · usage for the active agent. */
+function renderAgentStatus(pane: Pane): void {
+  const isAgent = pane.type === "agent" && !pane.error;
+  statusModel.hidden = !isAgent;
+  statusEffort.hidden = !isAgent;
+  statusUsage.hidden = !isAgent || !pane.usage;
+  if (!isAgent) return;
+  const model = pane.model ?? "no model";
+  statusModel.textContent = model;
+  statusModel.title = pane.model ? `${model} — focus terminal to run /models` : "No model — focus terminal to run /models";
+  statusModel.disabled = pane.exited;
+  const effort = pane.thinkingLevel ?? "—";
+  statusEffort.textContent = effort;
+  statusEffort.title = pane.thinkingLevel ? `${effort} — focus terminal to run /effort` : "Effort unknown — focus terminal to run /effort";
+  statusEffort.disabled = pane.exited;
+  if (pane.usage) {
+    statusUsage.textContent = pane.usage;
+    statusUsage.title = pane.usage;
+  } else {
+    statusUsage.textContent = "";
+    statusUsage.title = "";
+  }
+}
+
+function focusActiveTerminal(): void {
+  const pane = activeId ? panes.get(activeId) : undefined;
+  if (!pane || pane.exited) return;
+  pane.view.focus();
 }
 
 /** Plan Board: the current run's tasks with live progress. */
@@ -1759,6 +1802,8 @@ window.addEventListener("click", () => closeTerminalMenu());
 window.addEventListener("blur", () => closeTerminalMenu());
 btnCopySubject.addEventListener("click", () => void copyCommitSubject());
 btnOpenShell.addEventListener("click", () => void focusProjectShell());
+statusModel.addEventListener("click", () => focusActiveTerminal());
+statusEffort.addEventListener("click", () => focusActiveTerminal());
 btnVerify.addEventListener("click", () => {
   const id = activeId;
   if (!id) return;
@@ -2800,6 +2845,15 @@ window.termina.onBusy(({ instanceId, busy }) => {
   );
 });
 
+window.termina.onAgentStatus(({ terminalId, model, thinkingLevel, usage }) => {
+  const pane = panes.get(terminalId);
+  if (!pane) return;
+  pane.model = model;
+  pane.thinkingLevel = thinkingLevel;
+  pane.usage = usage;
+  if (activeId === terminalId) renderStatus(pane);
+});
+
 window.termina.onVerifyState(({ terminalId, verify }) => {
   const pane = panes.get(terminalId);
   if (!pane) return;
@@ -3119,6 +3173,8 @@ window.termina.onInstances((list: InstanceSummary[]) => {
     const current = activeId ? panes.get(activeId) : undefined;
     if (!current || current.projectId !== activeProjectId) activateProjectPane();
   }
+  const activePane = activeId ? panes.get(activeId) : undefined;
+  if (activePane) renderStatus(activePane);
   updateEditorLock();
   // The pane shells, xterm instances, tabs, and project bindings now exist;
   // only this explicit per-terminal handshake opens main's egress gate.
