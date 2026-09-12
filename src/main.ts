@@ -37,6 +37,7 @@ import "./styles.css";
 import "@xterm/xterm/css/xterm.css";
 import { PtyView } from "./pty-view";
 import { MAX_TIMELINE_EVENTS, TimelineView } from "./timeline";
+import { createTerminalMenu } from "./main/terminal-menu";
 import { SessionSearch } from "./session-search";
 import { QuickOpen } from "./quick-open";
 import { ActivityTabs } from "./activity-tabs";
@@ -1657,154 +1658,16 @@ async function openFileSmart(
 
 // ---------------------------------------------------------------- panels ----
 
-// Terminal-type chooser: ＋ opens a menu (agent vs shells).
-let terminalMenu: HTMLElement | null = null;
-let terminalMenuCleanups: Array<() => void> = [];
-let shellsCache: { name: string; path: string }[] | null = null;
-let shellsPromise: Promise<{ name: string; path: string }[]> | null = null;
-
-async function getAvailableShells(): Promise<{ name: string; path: string }[]> {
-  if (shellsCache) return shellsCache;
-  if (!shellsPromise) {
-    shellsPromise = window.termina.getShells().catch(() => []);
-  }
-  shellsCache = await shellsPromise;
-  return shellsCache;
-}
-
-async function openTerminalMenu(): Promise<void> {
-  if (terminalMenu) {
-    closeTerminalMenu();
-    return;
-  }
-  const shells = await getAvailableShells();
-  if (terminalMenu) {
-    closeTerminalMenu();
-    return;
-  }
-  const menu = document.createElement("div");
-  menu.className = "terminal-menu";
-  menu.tabIndex = -1;
-  menu.addEventListener("click", (e) => e.stopPropagation());
-
-  const items: Array<{ row: HTMLElement; run: () => void }> = [];
-  let selectedIndex = 0;
-
-  const updateSelection = (index: number): void => {
-    if (items.length === 0) return;
-    selectedIndex = (index + items.length) % items.length;
-    for (let i = 0; i < items.length; i++) {
-      items[i].row.classList.toggle("selected", i === selectedIndex);
-    }
-    items[selectedIndex]?.row.scrollIntoView({ block: "nearest" });
-  };
-
-  const makeTerminal = (opts?: { type?: "agent" | "shell"; shell?: string; engine?: "core" }) => {
-    const source = activeId ? panes.get(activeId) : undefined;
-    const fromTerminalId = source && !source.error && !source.exited ? source.instanceId : undefined;
-    const inherit = Boolean(fromTerminalId) && opts?.type !== "shell";
-    const projectId = activeProjectId ?? undefined;
-    const withProject = projectId ? { ...opts, projectId } : opts;
-    void window.termina.createTerminal(inherit ? { ...withProject, fromTerminalId } : withProject).then((res) => {
-      if (!res.ok) {
-        createErrorPane(res.error ?? "could not create terminal");
-        return;
-      }
-      if (res.id && panes.has(res.id)) activatePane(res.id);
-    });
-  };
-
-  const addItem = (label: string, desc: string, run: () => void) => {
-    const row = document.createElement("div");
-    row.className = "terminal-menu-item";
-    const name = document.createElement("span");
-    name.className = "terminal-menu-name";
-    name.textContent = label;
-    const d = document.createElement("span");
-    d.className = "terminal-menu-desc";
-    d.textContent = desc;
-    row.append(name, d);
-    const itemIndex = items.length;
-    row.addEventListener("mouseenter", () => updateSelection(itemIndex));
-    row.addEventListener("click", (e) => {
-      e.stopPropagation();
-      closeTerminalMenu();
-      run();
-    });
-    menu.appendChild(row);
-    items.push({ row, run });
-  };
-
-  addItem("Agent (core)", "Termina's in-house coding agent", () => makeTerminal({ type: "agent", engine: "core" }));
-  for (const shell of shells) {
-    addItem(shell.name, `interactive ${shell.name} shell`, () => makeTerminal({ type: "shell", shell: shell.path }));
-  }
-
-  updateSelection(0);
-
-  const onKeydown = (e: KeyboardEvent): void => {
-    if (e.key === "ArrowDown" || (e.key === "Tab" && !e.shiftKey)) {
-      e.preventDefault();
-      e.stopPropagation();
-      updateSelection(selectedIndex + 1);
-    } else if (e.key === "ArrowUp" || (e.key === "Tab" && e.shiftKey)) {
-      e.preventDefault();
-      e.stopPropagation();
-      updateSelection(selectedIndex - 1);
-    } else if (e.key === "Home") {
-      e.preventDefault();
-      e.stopPropagation();
-      updateSelection(0);
-    } else if (e.key === "End") {
-      e.preventDefault();
-      e.stopPropagation();
-      updateSelection(items.length - 1);
-    } else if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      e.stopPropagation();
-      const chosen = items[selectedIndex];
-      closeTerminalMenu();
-      chosen?.run();
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      e.stopPropagation();
-      closeTerminalMenu();
-    }
-  };
-
-  window.addEventListener("keydown", onKeydown, true);
-  terminalMenuCleanups.push(() => {
-    window.removeEventListener("keydown", onKeydown, true);
-  });
-
-  document.body.appendChild(menu);
-  const rect = btnNewTerminal.getBoundingClientRect();
-  const pad = 8;
-  const left = Math.max(pad, Math.min(rect.left, window.innerWidth - 240 - pad));
-  const top = Math.max(pad, Math.min(rect.bottom + 6, window.innerHeight - 100));
-  menu.style.left = `${left}px`;
-  menu.style.top = `${top}px`;
-  terminalMenu = menu;
-  menu.focus();
-}
-
-function closeTerminalMenu(): void {
-  for (const cleanup of terminalMenuCleanups) cleanup();
-  terminalMenuCleanups = [];
-  const menu = terminalMenu;
-  terminalMenu?.remove();
-  terminalMenu = null;
-  // Focus returns to the terminal only when a menu was open. Every window
-  // click routes here; stealing focus on each one breaks editor typing.
-  if (menu && activeId && panes.has(activeId)) {
-    panes.get(activeId)?.view.focus();
-  }
-}
-
-btnNewTerminal.addEventListener("click", (e) => {
-  e.stopPropagation();
-  if (terminalMenu) closeTerminalMenu();
-  else void openTerminalMenu();
+const terminalMenu = createTerminalMenu({
+  anchor: btnNewTerminal,
+  getActivePane: () => (activeId ? panes.get(activeId) : undefined),
+  hasPane: (instanceId) => panes.has(instanceId),
+  getActiveProjectId: () => activeProjectId,
+  activatePane,
+  createErrorPane,
+  refocusActivePane: () => {
+    if (activeId && panes.has(activeId)) panes.get(activeId)?.view.focus();
+  },
 });
 window.termina.onProjectClosed(({ projectId, activationGeneration }) => {
   if (Number.isSafeInteger(activationGeneration) && activationGeneration > latestProjectActivationGeneration) {
@@ -1829,8 +1692,6 @@ projectTabsEl.addEventListener("dblclick", (e) => {
   void window.termina.projectOpen();
 });
 
-window.addEventListener("click", () => closeTerminalMenu());
-window.addEventListener("blur", () => closeTerminalMenu());
 btnCopySubject.addEventListener("click", () => void copyCommitSubject());
 btnOpenShell.addEventListener("click", () => void focusProjectShell());
 statusModel.addEventListener("click", () => focusActiveTerminal());
@@ -2203,8 +2064,7 @@ commands.register("select-all", () => runMenuEdit("select-all"));
 
 // Terminal commands
 commands.register("new-terminal", () => {
-  if (terminalMenu) closeTerminalMenu();
-  else void openTerminalMenu();
+  terminalMenu.toggle();
 });
 commands.register("next-terminal", () => cycleTerminals(1));
 commands.register("previous-terminal", () => cycleTerminals(-1));
