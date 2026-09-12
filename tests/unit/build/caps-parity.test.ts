@@ -25,10 +25,14 @@ describe("Cross-module budget parity", () => {
     expect(rendererOwner, "src/timeline.ts must define MAX_TIMELINE_EVENTS exactly once").toHaveLength(1);
     expect(new Set([electron[0], rendererOwner[0]])).toEqual(new Set(["400"]));
     // Renderer consumers import the shared owner instead of defining their own.
-    const mainSource = await read("src/main.ts");
-    expect(constValues(mainSource, "MAX_TIMELINE_EVENTS"), "src/main.ts must not define its own timeline cap").toEqual([]);
-    expect(mainSource, "src/main.ts must import MAX_TIMELINE_EVENTS from ./timeline").toMatch(
-      /import\s*\{[^}]*MAX_TIMELINE_EVENTS[^}]*\}\s*from\s*["']\.\/timeline["']/,
+    // The trim sites live in the timeline pane split; src/main.ts holds none.
+    for (const file of ["src/main.ts", "src/main/timeline-pane.ts"]) {
+      const source = await read(file);
+      expect(constValues(source, "MAX_TIMELINE_EVENTS"), `${file} must not define its own timeline cap`).toEqual([]);
+    }
+    const paneSource = await read("src/main/timeline-pane.ts");
+    expect(paneSource, "src/main/timeline-pane.ts must import MAX_TIMELINE_EVENTS from ../timeline").toMatch(
+      /import\s*\{[^}]*MAX_TIMELINE_EVENTS[^}]*\}\s*from\s*["']\.\.\/timeline["']/,
     );
   });
 
@@ -37,7 +41,7 @@ describe("Cross-module budget parity", () => {
     expect(constValues(main, "MAX_TIMELINE_CONTENT_BYTES")).toEqual(["4 * 1024 * 1024"]);
     // The renderer intentionally holds no content budget: main strips content
     // before send (trimTimelineContent) and evicts by seq (timeline:evict).
-    for (const file of ["src/main.ts", "src/timeline.ts"]) {
+    for (const file of ["src/main.ts", "src/timeline.ts", "src/main/timeline-pane.ts"]) {
       expect(constValues(await read(file), "MAX_TIMELINE_CONTENT_BYTES"), `${file} must not define its own content budget`).toEqual([]);
     }
   });
