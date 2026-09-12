@@ -930,6 +930,10 @@ export function isSubagentManagedFile(name: string): boolean {
 /** How long a child waits for a parent approval before denying. */
 export const SUBAGENT_APPROVAL_TIMEOUT_MS = 120_000;
 
+/** Parent poll cadence while a run is active, so a mid-stream child request
+ *  surfaces in seconds instead of waiting for the parent turn to end. */
+export const SUBAGENT_APPROVAL_POLL_MS = 1000;
+
 /** Operator/test override; clamps to 1s..1h, else the default. */
 export function subagentApprovalTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
   const raw = Number(env.TERMINA_SUBAGENT_APPROVAL_TIMEOUT_MS ?? "");

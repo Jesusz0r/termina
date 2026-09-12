@@ -804,9 +804,7 @@ export class AgentTui {
       return;
     }
     const { cols, rows } = this.size();
-    const inputLines = this.choicePrompt
-      ? wrapText(this.choicePrompt, inputWrapWidth(cols)).length
-      : wrapInput(INPUT_PREFIX, this.chars, this.cursor, inputWrapWidth(cols)).wrapped.length;
+    const inputLines = this.composerInput(cols).wrapped.length;
     const layout = layoutHeights(rows, Math.max(1, inputLines), this.matches().length);
     const anchor = this.topVisibleEntryId(cols, layout.transcript, this.scroll);
     this.thinkingVisible = visible;
@@ -1387,11 +1385,23 @@ export class AgentTui {
     return this.fileRows();
   }
 
+  /** Composer box content during a picker: the question shows while idle,
+   *  typed-ahead input replaces it while typing so the box stays one row
+   *  and short terminals keep the choice rows visible. */
+  private composerInput(cols: number): { wrapped: string[]; pos: { row: number; col: number } } {
+    const width = inputWrapWidth(cols);
+    if (!this.choicePrompt || this.chars.length > 0) {
+      return wrapInput(INPUT_PREFIX, this.chars, this.cursor, width);
+    }
+    return {
+      wrapped: wrapText(this.choicePrompt, width),
+      pos: { row: 0, col: Math.min(width - 1, cellWidth(this.choicePrompt)) },
+    };
+  }
+
   private visibleFoldableTools(): TranscriptEntry[] {
     const { cols, rows } = this.size();
-    const inputLines = this.choicePrompt
-      ? wrapText(this.choicePrompt, inputWrapWidth(cols)).length
-      : wrapInput(INPUT_PREFIX, this.chars, this.cursor, inputWrapWidth(cols)).wrapped.length;
+    const inputLines = this.composerInput(cols).wrapped.length;
     const layout = layoutHeights(rows, Math.max(1, inputLines), this.matches().length);
     const ids = this.visibleSlice(cols, layout.transcript, this.scroll).ids;
     const tools: TranscriptEntry[] = [];
@@ -1443,33 +1453,67 @@ export class AgentTui {
     }
     let line = typed.trim();
     let echo = line;
+    let isChoicePick = false;
     if (matches.length > 0) {
-      const exact = matches.find((m) => m.name === line || m.submit === line);
-      const picked = exact ?? matches[this.slashIndex];
-      if (picked?.submit) {
-        line = picked.submit;
-        echo = picked.name;
-      } else if (picked) {
-        line = picked.name;
-        echo = picked.name;
+      if (wasChoice) {
+        // Empty submit picks the highlighted row; an exact name/submit picks
+        // that row. Anything else is a typed-ahead prompt that queues in the
+        // engine while the picker stays open.
+        if (!line) {
+          const picked = matches[this.slashIndex] ?? matches[0];
+          if (picked?.submit) {
+            line = picked.submit;
+            echo = picked.name;
+          } else if (picked) {
+            line = picked.name;
+            echo = picked.name;
+          }
+          isChoicePick = true;
+        } else {
+          const exact = matches.find((m) => m.name === line || m.submit === line);
+          if (exact) {
+            if (exact.submit) {
+              line = exact.submit;
+              echo = exact.name;
+            } else {
+              line = exact.name;
+              echo = exact.name;
+            }
+            isChoicePick = true;
+          }
+        }
+      } else {
+        const exact = matches.find((m) => m.name === line || m.submit === line);
+        const picked = exact ?? matches[this.slashIndex];
+        if (picked?.submit) {
+          line = picked.submit;
+          echo = picked.name;
+        } else if (picked) {
+          line = picked.name;
+          echo = picked.name;
+        }
       }
     }
     // Bare /model is the models picker, not the engine "show current route" probe.
-    if (line === "/model") line = "/models";
-    if (
-      !this.rawInput &&
-      (line === "/login" ||
-        line === "/logout" ||
-        line === "/permissions" ||
-        (line === "/models" && this.modelRows.length > 0))
-    ) {
-      this.chars = splitGraphemes(line);
-      this.cursor = this.chars.length;
-      this.slashIndex = 0;
-      this.histIndex = -1;
-      this.draft = "";
-      this.schedule();
-      return;
+    // Queued input during a picker submits straight through; the engine
+    // answers (engine busy) for slash while the picker stays pending.
+    if (!(wasChoice && !isChoicePick)) {
+      if (line === "/model") line = "/models";
+      if (
+        !this.rawInput &&
+        (line === "/login" ||
+          line === "/logout" ||
+          line === "/permissions" ||
+          (line === "/models" && this.modelRows.length > 0))
+      ) {
+        this.chars = splitGraphemes(line);
+        this.cursor = this.chars.length;
+        this.slashIndex = 0;
+        this.histIndex = -1;
+        this.draft = "";
+        this.schedule();
+        return;
+      }
     }
     if (!line && !wasChoice && !this.rawInput && this.toggleVisibleToolFold()) {
       return;
@@ -1479,8 +1523,8 @@ export class AgentTui {
     this.slashIndex = 0;
     this.histIndex = -1;
     this.draft = "";
-    if (wasChoice) this.clearChoices();
-    if (!wasChoice && line && (this.history.length === 0 || this.history[this.history.length - 1] !== line)) {
+    if (wasChoice && isChoicePick) this.clearChoices();
+    if ((!wasChoice || !isChoicePick) && line && (this.history.length === 0 || this.history[this.history.length - 1] !== line)) {
       this.history.push(line);
       if (this.history.length > MAX_HISTORY) this.history.shift();
     }
@@ -1912,7 +1956,7 @@ export class AgentTui {
   private scrollLines(lines: number): void {
     const { cols, rows } = this.size();
     const matches = this.matches();
-    const inputLines = Math.max(1, wrapInput(INPUT_PREFIX, this.chars, this.cursor, inputWrapWidth(cols)).wrapped.length || 1);
+    const inputLines = Math.max(1, this.composerInput(cols).wrapped.length || 1);
     const layout = layoutHeights(rows, inputLines, matches.length);
     const extra = Math.max(1, Math.abs(lines));
     const wrapped = this.visibleTranscript(cols, layout.transcript + this.scroll + extra + 2, 0);
@@ -1925,7 +1969,7 @@ export class AgentTui {
   private scrollPages(pages: number): void {
     const { cols, rows } = this.size();
     const matches = this.matches();
-    const inputLines = Math.max(1, wrapInput(INPUT_PREFIX, this.chars, this.cursor, inputWrapWidth(cols)).wrapped.length || 1);
+    const inputLines = Math.max(1, this.composerInput(cols).wrapped.length || 1);
     const layout = layoutHeights(rows, inputLines, matches.length);
     const page = Math.max(1, layout.transcript - 1);
     this.scrollLines(pages * page);
@@ -1959,10 +2003,7 @@ export class AgentTui {
     const { cols, rows } = size;
     const matches = this.matches();
     if (this.slashIndex >= matches.length) this.slashIndex = Math.max(0, matches.length - 1);
-    const input = this.choicePrompt
-      ? { wrapped: wrapText(this.choicePrompt, inputWrapWidth(cols)), pos: { row: 0, col: Math.min(inputWrapWidth(cols) - 1, cellWidth(this.choicePrompt)) } }
-      : wrapInput(INPUT_PREFIX, this.chars, this.cursor, inputWrapWidth(cols));
-    const { wrapped: inputWrapped, pos } = input;
+    const { wrapped: inputWrapped, pos } = this.composerInput(cols);
     const layout = layoutHeights(rows, Math.max(1, inputWrapped.length), matches.length);
     const slashStart = Math.max(
       0,
