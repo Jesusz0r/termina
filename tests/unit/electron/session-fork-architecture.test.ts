@@ -39,6 +39,8 @@ describe("SessionFork Architecture Contracts", () => {
   it("wires WorldlineDeps through shared SessionForkClient and session retention", () => {
     expect(/forkCoreSession\(opts: CoreSessionForkOpts, callOptions\?: SessionForkCallOptions\): Promise<CoreSessionForkResult>/.test(worldlines)).toBe(true);
     expect(/forkCoreSession:\s*\(opts,\s*callOptions\)\s*=>\s*this\.sessionFork\.forkCore\(opts,\s*callOptions\)/.test(main)).toBe(true);
+    expect(/readPromptPayload\(opts: ReadPromptOpts\): Promise<ReadPromptResult>/.test(worldlines)).toBe(true);
+    expect(/readPromptPayload:\s*\(opts\)\s*=>\s*this\.sessionFork\.readPrompt\(opts\)/.test(main)).toBe(true);
     expect(/discardCoreSession:\s*\(runId\)\s*=>\s*this\.sessionRetention\.discard\(runId\)/.test(main)).toBe(true);
     expect(/discardCoreSession\(runId: string\): Promise<\{ ok: boolean; error\?: string \}>/.test(worldlines)).toBe(true);
     expect(!/discardPiSession/.test(worldlines)).toBe(true);

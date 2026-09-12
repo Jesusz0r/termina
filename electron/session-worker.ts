@@ -11,7 +11,10 @@
  */
 import { parentPort } from "node:worker_threads";
 import { lstatSync, realpathSync, statSync } from "node:fs";
+import { stat, readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { changedLinesInAfter } from "../shared/line-diff.js";
+import { parsePromptPayload } from "./prompt-payload.js";
 import {
   inspectEmptySessionBundle,
   writeForkedSession,
@@ -34,6 +37,8 @@ import type {
   CoreSessionForkRequest,
   CoreSessionDiscardRequest,
   ExportPatchRequest,
+  LineDiffRequest,
+  ReadPromptRequest,
   SessionForkReply,
   SessionSearchRequest,
   SessionWorkerRequest,
@@ -159,6 +164,97 @@ async function exportPatch(msg: ExportPatchRequest): Promise<void> {
   } catch (err) {
     post({
       op: "export-patch-result",
+      requestId: msg.requestId,
+      ok: false,
+      error: {
+        code: "failed",
+        message: err instanceof Error ? err.message : String(err),
+      },
+    });
+  }
+}
+
+/** Diff one watcher transition. Pure CPU; runs concurrently (issue #60). */
+async function lineDiff(msg: LineDiffRequest): Promise<void> {
+  try {
+    if (typeof msg.before !== "string" || typeof msg.after !== "string") {
+      throw new Error("invalid line-diff input");
+    }
+    post({ op: "line-diff-result", requestId: msg.requestId, ok: true, lines: changedLinesInAfter(msg.before, msg.after) });
+  } catch (err) {
+    post({
+      op: "line-diff-result",
+      requestId: msg.requestId,
+      ok: false,
+      error: {
+        code: "failed",
+        message: err instanceof Error ? err.message : String(err),
+      },
+    });
+  }
+}
+
+/**
+ * Read one prompt payload file. Stats, reads, and parses off the main thread;
+ * the main thread never holds the 20 MB string (issue #60). Expected failures
+ * (missing/oversize/malformed) report `found: false` so the caller fails closed
+ * without a sync retry; only invalid input reports a failure for fallback.
+ */
+async function readPrompt(msg: ReadPromptRequest): Promise<void> {
+  const notFound = (): void => {
+    post({ op: "read-prompt-result", requestId: msg.requestId, ok: true, found: false });
+  };
+  try {
+    const path = typeof msg.path === "string" ? msg.path : "";
+    const maxBytes = msg.maxBytes;
+    const textCap = msg.textCap;
+    const contextCap = msg.contextCap;
+    if (!path || path.length > 4096 || !isAbsolute(path)) {
+      notFound();
+      return;
+    }
+    if (
+      !Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > 64 * 1024 * 1024 ||
+      !Number.isSafeInteger(textCap) || textCap < 0 || textCap > 256 * 1024 ||
+      !Number.isSafeInteger(contextCap) || contextCap < 0 || contextCap > 64 * 1024
+    ) {
+      throw new Error("invalid prompt-read bounds");
+    }
+    let info;
+    try {
+      info = await stat(path);
+    } catch {
+      notFound();
+      return;
+    }
+    if (!info.isFile() || info.size > maxBytes) {
+      notFound();
+      return;
+    }
+    let raw: string;
+    try {
+      raw = await readFile(path, "utf8");
+    } catch {
+      notFound();
+      return;
+    }
+    try {
+      const payload = parsePromptPayload(raw, textCap, contextCap);
+      post({
+        op: "read-prompt-result",
+        requestId: msg.requestId,
+        ok: true,
+        found: true,
+        text: payload.text,
+        images: payload.images,
+        context: payload.context,
+      });
+    } catch {
+      notFound();
+    }
+  } catch (err) {
+    post({
+      op: "read-prompt-result",
       requestId: msg.requestId,
       ok: false,
       error: {
@@ -323,5 +419,13 @@ parentPort?.on("message", (msg: SessionWorkerRequest) => {
   if (msg.op === "export-patch") {
     // Pure CPU: runs concurrently; no shared worker state to serialize.
     void exportPatch(msg);
+  }
+  if (msg.op === "line-diff") {
+    // Pure CPU: runs concurrently; the watcher emit awaits it off the loop.
+    void lineDiff(msg);
+  }
+  if (msg.op === "read-prompt") {
+    // File read + parse off the loop; runs concurrently.
+    void readPrompt(msg);
   }
 });
