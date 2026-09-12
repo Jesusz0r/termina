@@ -110,6 +110,19 @@ describe("explorer minimize chrome", () => {
     expect(hideBlock).toContain(".explorer-content");
     expect(hideBlock).toMatch(/display:\s*none/);
   });
+
+  it("hides the tree scrollbar without disabling overflow", () => {
+    const start = css.indexOf("#explorer-tree {");
+    expect(start).toBeGreaterThan(-1);
+    const block = css.slice(start, css.indexOf("}", start) + 1);
+    expect(block).toMatch(/overflow-y:\s*auto/);
+    expect(block).toMatch(/scrollbar-width:\s*none/);
+
+    const webkitStart = css.indexOf("#explorer-tree::-webkit-scrollbar");
+    expect(webkitStart).toBeGreaterThan(-1);
+    const webkit = css.slice(webkitStart, css.indexOf("}", webkitStart) + 1);
+    expect(webkit).toMatch(/display:\s*none/);
+  });
 });
 
 describe("work pane minimize", () => {

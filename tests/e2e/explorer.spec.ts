@@ -23,6 +23,27 @@ test.describe("Explorer File Tree & Actions", () => {
     await expect(explorerTree.getByText("index.ts")).toBeVisible();
   });
 
+  test("hides the vertical scrollbar but retains wheel scrolling", async ({ page }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+    const tree = page.locator("#explorer-tree");
+    await expect(tree).toBeVisible();
+
+    expect(await tree.evaluate((element) => ({
+      overflow: getComputedStyle(element).overflowY,
+      scrollbar: getComputedStyle(element).scrollbarWidth,
+    }))).toEqual({ overflow: "auto", scrollbar: "none" });
+
+    await tree.evaluate((element) => {
+      element.style.height = "72px";
+      element.style.flex = "0 0 72px";
+    });
+    expect(await tree.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+
+    await tree.hover();
+    await page.mouse.wheel(0, 250);
+    await expect.poll(() => tree.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  });
+
   test("creates a new file through explorer context menu", async ({ page }) => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
 

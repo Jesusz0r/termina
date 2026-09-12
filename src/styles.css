@@ -362,6 +362,12 @@ body {
   font-family: var(--font-chrome);
   font-size: 12px;
   -webkit-app-region: no-drag;
+  /* Keep wheel / trackpad / keyboard scrolling; hide the gutter. */
+  scrollbar-width: none;
+}
+
+#explorer-tree::-webkit-scrollbar {
+  display: none;
 }
 
 .explorer-empty {
@@ -3440,6 +3446,11 @@ body {
   overflow-y: auto;
   padding-bottom: 4px;
   font-size: 12px;
+  scrollbar-width: none;
+}
+
+#explorer-content-results::-webkit-scrollbar {
+  display: none;
 }
 
 .explorer-content-file {
