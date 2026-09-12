@@ -9,6 +9,10 @@
  */
 
 import { Buffer } from "node:buffer";
+import type { McpContinuation } from "./mcp.ts";
+
+/** Default bound for one tool text result (grep pages, generic output). */
+export const GREP_BYTE_CAP = 64 * 1024;
 
 export const COMPLETION_STATES = Object.freeze([
   "complete",
@@ -515,4 +519,79 @@ export async function readBoundedResponseBody(
   const state = failed ? "failed" : options.state ?? "complete";
   const result = accumulator.finish(state);
   return responseResult(result, contentLength, inputBytesKnown, capReached || expectedBytesMissing);
+}
+
+export type ToolTextResult = BoundedToolResult & {
+  continuation?: string | McpContinuation | null;
+  repro?: string | null;
+  stdout?: BoundedText;
+  stderr?: BoundedText;
+  exitCode?: number | null;
+  signal?: string | null;
+};
+
+export function genericToolText(content: string, isError: boolean): ToolTextResult {
+  return boundedToolResult(content, {
+    maxBytes: GREP_BYTE_CAP,
+    direction: "head",
+    marker: isError ? "" : "[output truncated — re-run the tool for the rest]",
+    state: isError ? "failed" : "complete",
+    isError,
+  });
+}
+
+/** Render an actionable continuation even when the operation itself was
+ * complete but its page/result was intentionally shortened (for example the
+ * 200-entry glob page). */
+export function logicalToolText(
+  content: string,
+  opts: {
+    maxBytes: number;
+    state: CompletionState;
+    isError: boolean;
+    marker?: string | null;
+    repro?: string | null;
+    forceMarker?: boolean;
+    continuation?: string | McpContinuation | null;
+  },
+): ToolTextResult {
+  const marker = opts.marker === undefined
+    ? "[output truncated — re-run the tool for the rest]"
+    : opts.marker ?? "";
+  if (!opts.forceMarker || !marker) {
+    return Object.freeze({
+      ...boundedToolResult(content, {
+        maxBytes: opts.maxBytes,
+        direction: "head",
+        marker,
+        state: opts.state,
+        isError: opts.isError,
+      }),
+      continuation: opts.continuation ?? (marker || null),
+      repro: opts.repro ?? null,
+    });
+  }
+  const markerBytes = Buffer.byteLength(marker, "utf8");
+  const bodyLimit = Math.max(0, opts.maxBytes - markerBytes - 1);
+  const body = boundedToolResult(content, {
+    maxBytes: bodyLimit,
+    direction: "head",
+    marker: "",
+    state: opts.state,
+    isError: opts.isError,
+  });
+  const combined = body.content ? `${body.content}\n${marker}` : marker;
+  const final = boundedToolResult(combined, {
+    maxBytes: opts.maxBytes,
+    direction: "head",
+    marker: "",
+    state: opts.state,
+    isError: opts.isError,
+  });
+  return Object.freeze({
+    ...final,
+    truncated: true,
+    continuation: opts.continuation ?? marker,
+    repro: opts.repro ?? null,
+  });
 }
