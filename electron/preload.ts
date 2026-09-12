@@ -106,6 +106,7 @@ const bridge: TerminaBridge = {
   updatePreferences: (update: PreferenceUpdate): Promise<AppPreferences> =>
     ipcRenderer.invoke("settings:update", update),
   setKeyboardShortcuts: (shortcuts: ShortcutMap) => ipcRenderer.invoke("settings:shortcuts", shortcuts),
+  setTerminalFocus: (focused: boolean) => ipcRenderer.invoke("menu:terminal-focus", focused),
   getTimeline: (terminalId) => ipcRenderer.invoke("timeline:get", terminalId),
   getTimelinePrefix: (terminalId) => ipcRenderer.invoke("timeline:prefix", terminalId),
   getTimelineProgress: (terminalId, seq) => ipcRenderer.invoke("timeline:progress", terminalId, seq),

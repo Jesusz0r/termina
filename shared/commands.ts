@@ -15,6 +15,9 @@ export interface CommandDefinition {
   scope: CommandScope;
 }
 
+/** Why Quick Open yields its chord: a focused core terminal owns Ctrl+P. Shared by the settings copy and the palette row so the split reads the same in both. */
+export const QUICK_OPEN_TERMINAL_NOTE = "in a core terminal, Ctrl+P cycles models";
+
 export const COMMAND_DEFINITIONS = [
   { command: "open-folder", label: "Open folder", category: "File", description: "Choose a project folder", defaultShortcut: "CmdOrCtrl+O", scope: "main" },
   { command: "new-file", label: "New file", category: "File", description: "Create a file in the explorer", defaultShortcut: "CmdOrCtrl+Alt+N", scope: "renderer" },
@@ -58,7 +61,7 @@ export const COMMAND_DEFINITIONS = [
   { command: "project-8", label: "Project 8", category: "View", description: "Activate the eighth project tab", defaultShortcut: "Ctrl+8", scope: "renderer" },
   { command: "project-9", label: "Project 9", category: "View", description: "Activate the ninth project tab", defaultShortcut: "Ctrl+9", scope: "renderer" },
   { command: "session-search", label: "Search sessions", category: "View", description: "Search previous agent sessions", defaultShortcut: "CmdOrCtrl+Shift+P", scope: "renderer" },
-  { command: "quick-open", label: "Quick open", category: "View", description: "Open a project file by name", defaultShortcut: "CmdOrCtrl+P", scope: "renderer" },
+  { command: "quick-open", label: "Quick open", category: "View", description: `Open a project file by name (${QUICK_OPEN_TERMINAL_NOTE})`, defaultShortcut: "CmdOrCtrl+P", scope: "renderer" },
   { command: "content-search", label: "Search file contents", category: "View", description: "Grep the project and jump to a match", defaultShortcut: "CmdOrCtrl+Alt+F", scope: "renderer" },
   { command: "command-palette", label: "Command palette", category: "View", description: "Run a command by name", defaultShortcut: "CmdOrCtrl+K", scope: "renderer" },
   { command: "open-settings", label: "Open settings", category: "Settings", description: "Open this preferences window", defaultShortcut: "CmdOrCtrl+,", scope: "renderer" },
@@ -73,3 +76,15 @@ export type ShortcutMap = Record<CommandId, string>;
 export const DEFAULT_SHORTCUTS: ShortcutMap = Object.fromEntries(
   COMMAND_DEFINITIONS.map((def) => [def.command, def.defaultShortcut]),
 ) as ShortcutMap;
+
+/**
+ * True when a resolved shortcut is owned by a focused core TUI: Ctrl+P
+ * (next model) and Ctrl+R (history search). Callers resolve CmdOrCtrl to
+ * the platform modifier first. The menu blanks these accelerators and the
+ * renderer lets them fall through to the pty while a core terminal has
+ * focus, so neither layer steals documented TUI chords on Windows/Linux.
+ */
+export function isTuiOwnedShortcut(resolvedShortcut: string): boolean {
+  const chord = resolvedShortcut.toLowerCase();
+  return chord === "ctrl+p" || chord === "ctrl+r";
+}

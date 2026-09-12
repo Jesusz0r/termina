@@ -602,6 +602,8 @@ export interface TerminaBridge {
   getPreferences(): Promise<AppPreferences>;
   updatePreferences(update: PreferenceUpdate): Promise<AppPreferences>;
   setKeyboardShortcuts(shortcuts: ShortcutMap): Promise<ShortcutMap>;
+  /** Tell main whether a core TUI owns keyboard focus, so the menu blanks the Ctrl+P / Ctrl+R accelerators it would otherwise steal. */
+  setTerminalFocus(focused: boolean): Promise<void>;
 
   // Session Timeline
   getTimeline(terminalId: string): Promise<TimelineEvent[]>;

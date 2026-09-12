@@ -2,7 +2,7 @@
  * Quick Open (files), Content Search (grep), and Command Palette (actions) modal.
  * Triggered by View → Quick Open / Search File Contents / Command Palette.
  */
-import { COMMAND_DEFINITIONS, type CommandId } from "../shared/commands";
+import { COMMAND_DEFINITIONS, QUICK_OPEN_TERMINAL_NOTE, type CommandId } from "../shared/commands";
 import type { ContentHit } from "../shared/types";
 
 export type QuickOpenMode = "files" | "actions" | "content";
@@ -48,6 +48,16 @@ function paintMatches(el: HTMLElement, text: string, indices: readonly number[] 
     }
   }
   flush();
+}
+
+/**
+ * Palette row detail: `category · shortcut`, with the terminal split
+ * appended for Quick Open (its chord cycles models in a core terminal).
+ * Pure so the split copy stays unit-testable without a modal.
+ */
+export function paletteRowDetail(command: CommandId, category: string, shortcut: string): string {
+  const base = shortcut ? `${category} · ${shortcut}` : category;
+  return command === "quick-open" ? `${base} · ${QUICK_OPEN_TERMINAL_NOTE}` : base;
 }
 
 export class QuickOpen {
@@ -266,7 +276,7 @@ export class QuickOpen {
         (!q || d.label.toLowerCase().includes(q) || d.command.includes(q) || d.description.toLowerCase().includes(q)),
     ).map((d) => {
       const shortcut = this.getShortcut(d.command as CommandId);
-      return { key: d.command, label: d.label, detail: shortcut ? `${d.category} · ${shortcut}` : d.category };
+      return { key: d.command, label: d.label, detail: paletteRowDetail(d.command as CommandId, d.category, shortcut) };
     });
     this.selected = 0;
     this.renderRows(null);
