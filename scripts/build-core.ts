@@ -40,6 +40,17 @@ function isCoreUpToDate(destination: string): boolean {
 }
 
 /**
+ * The cargo target directory buildCore stages from. Honors cargo's env-level
+ * redirect (a sandbox or a deliberate shared target dir) so the staged binary
+ * is the one cargo just built — never a stale core/target copy. A
+ * config-file build.target-dir is not honored; point CARGO_TARGET_DIR at it
+ * instead when staging from such a setup.
+ */
+export function coreTargetDir() {
+  return process.env.CARGO_TARGET_DIR ?? process.env.CARGO_BUILD_TARGET_DIR ?? join(process.cwd(), "core", "target");
+}
+
+/**
  * Publish a complete executable under a new inode.
  *
  * macOS can retain the code-signing state of an executable vnode when a
@@ -84,7 +95,7 @@ export function buildCore(force = false) {
   }
   const cargo = process.env.CARGO ?? "cargo";
   execFileSync(cargo, ["build", "--release", "--manifest-path", "core/Cargo.toml"], { stdio: "inherit" });
-  stageCoreBinary("core/target/release/termina-core", destination);
+  stageCoreBinary(join(coreTargetDir(), "release", "termina-core"), destination);
   console.log("✓ termina-core built");
 }
 
