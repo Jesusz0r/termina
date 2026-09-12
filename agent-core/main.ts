@@ -2068,7 +2068,7 @@ const TOOLS: Array<Record<string, unknown>> = [
   {
     name: "edit",
     description:
-      "Replace old_text with new_text in a file. Copy old_text exactly as it appears AFTER the line-number prefix (read shows N|content; never include the N| prefix, preserve tabs/spaces). Unique current text may come from grep, the working-set overlay, or a prior read. Default: one unique occurrence (fails if missing or repeated). Set replace_all to replace every occurrence. Prefer this over write_file for existing files. Miss errors include occurrence count and nearby lines; use those to retry. Do not re-read unless the nearby lines are not enough.",
+      "Replace old_text with new_text in a file. Copy old_text exactly as it appears AFTER the line-number prefix (read shows N|content; never include the N| prefix, preserve tabs/spaces). Unique current text may come from a complete grep line, the working-set overlay, or a prior read. Default: one unique occurrence (fails if missing or repeated). Set replace_all to replace every occurrence. Prefer this over write_file for existing files. Miss errors include occurrence count and nearby lines; use those to retry. Do not re-read unless the nearby lines are not enough.",
     input_schema: {
       type: "object",
       additionalProperties: false,
@@ -2084,7 +2084,7 @@ const TOOLS: Array<Record<string, unknown>> = [
   {
     name: "grep",
     description:
-      "Search file contents with a regular expression. Uses ripgrep when available. Prefer this over bash rg or grep. Groups hits by file, shows sparse files first, and caps per file. Skip ignored directories. Narrow with path or glob when a file has more hits. An empty result is exactly (no matches); broaden the pattern or try a different path/glob, or list files with glob. A unique hit with enough line text can be edited without a follow-up read.",
+      "Search file contents with a regular expression. Uses ripgrep when available. Prefer this over bash rg or grep. Groups hits by file, shows sparse files first, and caps per file. Skip ignored directories. Narrow with path or glob when a file has more hits. An empty result is exactly (no matches); broaden the pattern or try a different path/glob, or list files with glob. Edit from a grep hit only when the shown line is complete and unique; otherwise read.",
     input_schema: {
       type: "object",
       additionalProperties: false,
