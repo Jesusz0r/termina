@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   MAX_SUBAGENT_RUNS,
+  MAX_SUBAGENT_RUNS_USER,
   SUBAGENT_TOOL_DEFS,
   SubagentRegistry,
   anchorClaimPath,
@@ -199,6 +200,40 @@ describe("subagents Phase 1 registry", () => {
     if (!extra.ok) expect(extra.error).toMatch(/at most 4/);
   });
 
+  it("rejects a non-boolean user_requested flag", async () => {
+    const reg = registry();
+    for (const bad of ["true", 1, {}, []]) {
+      const got = await reg.spawn({ task: "t", parent, userRequested: bad });
+      expect(got.ok).toBe(false);
+      if (!got.ok) expect(got.error).toMatch(/user_requested must be a boolean/);
+    }
+  });
+
+  it("lets user-requested runs bypass the auto cap up to the manual bound", async () => {
+    const reg = registry();
+    for (let i = 0; i < MAX_SUBAGENT_RUNS; i++) {
+      expect((await reg.spawn({ task: `auto${i}`, parent })).ok).toBe(true);
+    }
+    // Auto spawns stay capped even while manual slots remain.
+    expect((await reg.spawn({ task: "auto-extra", parent })).ok).toBe(false);
+    for (let i = 0; i < MAX_SUBAGENT_RUNS_USER - MAX_SUBAGENT_RUNS; i++) {
+      const got = await reg.spawn({ task: `manual${i}`, parent, userRequested: true });
+      expect(got.ok).toBe(true);
+      if (got.ok) expect(got.run.userRequested).toBe(true);
+    }
+    const over = await reg.spawn({ task: "manual-over", parent, userRequested: true });
+    expect(over.ok).toBe(false);
+    if (!over.ok) expect(over.error).toMatch(/user-requested/);
+  });
+
+  it("keeps path-claim exclusivity for user-requested runs", async () => {
+    const reg = registry();
+    expect((await reg.spawn({ task: "one", paths: ["src/a.ts"], parent, userRequested: true })).ok).toBe(true);
+    const overlap = await reg.spawn({ task: "two", paths: ["src/a.ts"], parent, userRequested: true });
+    expect(overlap.ok).toBe(false);
+    if (!overlap.ok) expect(overlap.error).toMatch(/overlap/);
+  });
+
   it("refuses depth beyond 1", async () => {
     const reg = registry();
     const child: SubagentParent = { ...parent, depth: 1 };
@@ -238,6 +273,21 @@ describe("subagents Phase 1 registry", () => {
     if (!nudge.ok) {
       expect(nudge.error).toMatch(/already failed/);
       expect(nudge.error).toMatch(/empty result/);
+    }
+  });
+
+  it("carries the failure diagnostic through settle and message", async () => {
+    const reg = registry();
+    const spawned = await reg.spawn({ task: "t", parent });
+    expect(spawned.ok).toBe(true);
+    if (!spawned.ok) return;
+    expect(reg.settleRun(spawned.run.id, "", "failed", "exit 1: boom").ok).toBe(true);
+    expect(reg.get(spawned.run.id)?.error).toBe("exit 1: boom");
+    const nudge = reg.message(spawned.run.id, "continue");
+    expect(nudge.ok).toBe(false);
+    if (!nudge.ok) {
+      expect(nudge.error).toMatch(/already failed/);
+      expect(nudge.error).toMatch(/exit 1: boom/);
     }
   });
 
@@ -536,6 +586,14 @@ describe("subagents Phase 2 handoff contract", () => {
     expect(parseSubagentResultFile("bg-1", { version: 1, runId: "bg-2", outcome: "settled", result: "x", flags: [] }).ok).toBe(false);
     expect(parseSubagentResultFile("bg-1", { version: 1, runId: "bg-1", outcome: "exploded", result: "x", flags: [] }).ok).toBe(false);
     expect(parseSubagentResultFile("bg-1", { version: 1, runId: "bg-1", outcome: "settled", result: "x", flags: "nope" }).ok).toBe(false);
+    expect(parseSubagentResultFile("bg-1", { version: 1, runId: "bg-1", outcome: "failed", result: "", error: 42, flags: [] }).ok).toBe(false);
+    // Older writers omit the error: settled files without it still parse.
+    const legacy = parseSubagentResultFile("bg-1", { version: 1, runId: "bg-1", outcome: "settled", result: "x", flags: [] });
+    expect(legacy.ok).toBe(true);
+    if (legacy.ok) expect(legacy.file.error).toBeNull();
+    const withError = parseSubagentResultFile("bg-1", { version: 1, runId: "bg-1", outcome: "failed", result: "", error: "exit 1", flags: [] });
+    expect(withError.ok).toBe(true);
+    if (withError.ok) expect(withError.file.error).toBe("exit 1");
   });
 
   it("reconciles landed results and frees their claims", async () => {
@@ -554,6 +612,17 @@ describe("subagents Phase 2 handoff contract", () => {
     // Freed claims are reusable; disjoint claims still held.
     expect((await reg.spawn({ task: "reuse", paths: ["src/a.ts"], parent })).ok).toBe(true);
     expect((await reg.spawn({ task: "clash", paths: ["src/b.ts"], parent })).ok).toBe(false);
+  });
+
+  it("reconciles the failure diagnostic onto the run", async () => {
+    const reg = registry();
+    const dir = events();
+    const spawned = await reg.spawn({ task: "t", parent });
+    expect(spawned.ok).toBe(true);
+    if (!spawned.ok) return;
+    writeResult(dir, "term-7", spawned.run.id, { version: 1, runId: spawned.run.id, outcome: "failed", result: "", error: "exit 1: boom", flags: [], settledAt: 1 });
+    expect(reconcileSubagentRuns(dir, "term-7", reg).map((r) => r.id)).toEqual([spawned.run.id]);
+    expect(reg.get(spawned.run.id)?.error).toBe("exit 1: boom");
   });
 
   it("ignores missing and malformed results without settling", async () => {
@@ -596,7 +665,38 @@ describe("subagents Phase 2 handoff contract", () => {
       t: "subagent_spawn",
       runId: "bg-3",
       taskFile: "subagent-term-7-bg-3.task.json",
+      userRequested: false,
     });
+    expect(
+      subagentSpawnSidecarRecord("bg-4", "subagent-term-7-bg-4.task.json", true),
+    ).toMatchObject({ userRequested: true });
+  });
+
+  it("defaults a missing userRequested flag and rejects a bad one", () => {
+    const base = {
+      version: 1,
+      runId: "bg-2",
+      task: "t",
+      brief: "t",
+      provider: "anthropic",
+      model: "claude-sonnet-4-5",
+      protocol: "anthropic-messages",
+      effort: "off",
+      maxTurns: 10,
+      paths: [],
+      permissionMode: "ask",
+      parentTerminalId: "term-7",
+      cwd: "/proj",
+      depth: 1,
+      createdAt: 1,
+    };
+    const missing = parseSubagentTaskFile({ ...base });
+    expect(missing.ok).toBe(true);
+    if (missing.ok) expect(missing.file.userRequested).toBe(false);
+    const flagged = parseSubagentTaskFile({ ...base, userRequested: true });
+    expect(flagged.ok).toBe(true);
+    if (flagged.ok) expect(flagged.file.userRequested).toBe(true);
+    expect(parseSubagentTaskFile({ ...base, userRequested: "true" }).ok).toBe(false);
   });
 
   it("frames results on one line and rejects garbage", () => {

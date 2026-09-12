@@ -33,6 +33,7 @@ export class TimelineView {
   private onJump: (ev: TimelineEvent, opts?: { replay?: boolean }) => void = () => {};
   private onFork: (ev: TimelineEvent) => void = () => {};
   private onProgress: (seq: number) => Promise<TimelineProgress> = async (seq) => ({ ok: false, seq });
+  private onContent: (has: boolean, count: number) => void = () => {};
 
   constructor(container: HTMLElement) {
     this.dotsEl = container.querySelector("#timeline-dots")!;
@@ -62,10 +63,17 @@ export class TimelineView {
     onJump: (ev: TimelineEvent, opts?: { replay?: boolean }) => void;
     onFork: (ev: TimelineEvent) => void;
     onProgress: (seq: number) => Promise<TimelineProgress>;
+    /** Badge + empty-copy sync. Timeline never auto-switches the tab. */
+    onContent?: (has: boolean, count: number) => void;
   }): void {
     this.onJump = handlers.onJump;
     this.onFork = handlers.onFork;
     this.onProgress = handlers.onProgress;
+    this.onContent = handlers.onContent ?? (() => {});
+  }
+
+  private reportContent(): void {
+    this.onContent(this.events.length > 0, this.events.length);
   }
 
   /** Clear timeline state when the project changes. */
@@ -122,6 +130,7 @@ export class TimelineView {
     }
     this.countEl.textContent = this.events.length ? `(${this.events.length})` : "";
     this.btnPlay.hidden = this.events.length === 0;
+    this.reportContent();
   }
 
   setEvents(events: TimelineEvent[]): void {
@@ -165,6 +174,7 @@ export class TimelineView {
     this.dotsEl.appendChild(dot);
     this.countEl.textContent = `(${this.events.length})`;
     this.btnPlay.hidden = this.events.length === 0;
+    this.reportContent();
     // Keep the newest dot in view — but only when the user is already near
     // the end, so new events do not pull the view away from an old moment.
     const nearEnd = this.dotsEl.scrollLeft + this.dotsEl.clientWidth >= this.dotsEl.scrollWidth - 24;
@@ -227,6 +237,7 @@ export class TimelineView {
     // the end, so new events do not pull the view away from an old moment.
     const nearEnd = this.dotsEl.scrollLeft + this.dotsEl.clientWidth >= this.dotsEl.scrollWidth - 24;
     if (n > 0 && nearEnd) this.dotsEl.scrollLeft = this.dotsEl.scrollWidth;
+    this.reportContent();
   }
 
   private tooltip(ev: TimelineEvent, progress?: TimelineProgress): string {

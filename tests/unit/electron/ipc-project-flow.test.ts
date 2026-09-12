@@ -39,6 +39,7 @@ describe("IPC Capability & Project Flow Security Invariants", () => {
  */
 
 const main = readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8");
+const rosterStore = readFileSync(new URL("../../../electron/roster-store.ts", import.meta.url), "utf8");
 const preload = readFileSync(new URL("../../../electron/preload.ts", import.meta.url), "utf8");
 const renderer = readFileSync(new URL("../../../src/main.ts", import.meta.url), "utf8");
 const rendererState = readFileSync(new URL("../../../src/worldline-project-state.ts", import.meta.url), "utf8");
@@ -265,7 +266,7 @@ check("shared project contracts expose activation generations", types.includes("
 // An existing empty roster means the user closed the project's last terminal;
 // only a missing roster gets a first-launch default. Every restore is bound to
 // its project before createTerminal crosses asynchronous setup.
-check("empty terminal rosters survive restart", main.includes("{ exists: boolean; entries: TerminalRosterEntry[] }")
+check("empty terminal rosters survive restart", rosterStore.includes("{ exists: boolean; entries: TerminalRosterEntry[] }")
   && main.includes("if (!loaded.exists)")
   && main.includes("empty roster is the durable result"));
 check("restored terminals bind to their source project", main.includes("projectId: project.id")
