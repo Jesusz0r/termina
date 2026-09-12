@@ -5,111 +5,36 @@
  * Entries drag onto folders to move (cut + paste); the move itself reuses
  * the explorer:paste backend, so no new IPC exists for drag-drop.
  */
-import { pathBasename, type CommandId, type ContentHit, type ExplorerEntry } from "../../shared/types";
+import { type CommandId, type ContentHit, type ExplorerEntry } from "../../shared/types";
 import {
   ancestorDirs,
   canDropEntry,
   computeChangedSets,
   deleteConfirmMessage,
-  fileIconKind,
-  filterKeeps,
-  filterVisibleSet,
-  findTypeAheadIndex,
   isMarkedChanged,
-  isPathDescendant,
-  isTypeAheadKey,
   normalizeRelPath,
-  parentPath,
   parentRel,
-  parentRowRel,
-  rowLevel,
-  splitExtension,
   targetDirRel,
 } from "../explorer-file";
 import { showContextMenu, closeContextMenu, type ContextMenuItem } from "./context-menu";
 import { copyText, showConfirm, showInput, toast } from "./modals";
+import { ExplorerContent } from "./explorer-content";
+import { ExplorerFilter } from "./explorer-filter";
+import { ExplorerKeyboard } from "./explorer-keyboard";
+import { ExplorerRefresh } from "./explorer-refresh";
+import {
+  applyRowA11y,
+  makeChangeMark,
+  makeFileIcon,
+  makeNameEl,
+  makeNote,
+  type DirState,
+  type DirView,
+} from "./explorer-rows";
 
-/** Matches the CSS transition on the focus ring; type-ahead resets after it. */
-const TYPE_AHEAD_RESET_MS = 700;
 
-/** Matches the Quick Open debounce; long enough to skip intermediate keystrokes. */
-const FILTER_DEBOUNCE_MS = 150;
 
-/** Icon element for a file row; the kind drives the CSS shape/color. */
-function makeFileIcon(name: string): HTMLElement {
-  const icon = document.createElement("span");
-  icon.className = "explorer-icon file-icon";
-  icon.dataset.kind = fileIconKind(name);
-  return icon;
-}
 
-/** Right-edge dot for a row the agent changed. Always occupies its width (the
- *  `.changed` class toggles opacity only), so marking never reflows the row. */
-function makeChangeMark(): HTMLElement {
-  const mark = document.createElement("span");
-  mark.className = "explorer-change";
-  mark.setAttribute("aria-hidden", "true");
-  return mark;
-}
-
-/** Non-interactive placeholder (loading, truncation). Not a button. */
-function makeNote(text: string): HTMLElement {
-  const note = document.createElement("div");
-  note.className = "explorer-note";
-  note.textContent = text;
-  return note;
-}
-
-/** Name element; for files the extension is dimmed so the basename reads
- *  first. Directories stay single-tone (a dot is just part of the name). */
-function makeNameEl(name: string, twoTone = true): HTMLElement {
-  const el = document.createElement("span");
-  el.className = "explorer-name";
-  el.title = name;
-  const { base, ext } = twoTone ? splitExtension(name) : { base: name, ext: "" };
-  if (!ext) {
-    el.textContent = name;
-    return el;
-  }
-  const baseEl = document.createElement("span");
-  baseEl.className = "explorer-name-base";
-  baseEl.textContent = base;
-  const extEl = document.createElement("span");
-  extEl.className = "explorer-name-ext";
-  extEl.textContent = ext;
-  el.append(baseEl, extEl);
-  return el;
-}
-
-interface DirState {
-  expanded: boolean;
-  loaded: boolean;
-  /** Bumped per list. A slow listing never fills a newer expand. */
-  loadSeq: number;
-}
-
-interface DirView {
-  entry: ExplorerEntry;
-  state: DirState;
-  node: HTMLElement;
-  children: HTMLElement;
-  /** The row element and its chevron, so a keyboard toggle updates both. */
-  row: HTMLElement;
-  arrow: HTMLElement;
-}
-
-/**
- * ARIA treeitem attributes for a row. `aria-level` follows the tree depth and
- * `aria-expanded` exists only for directories (a file must not claim it).
- */
-function applyRowA11y(row: HTMLElement, entry: ExplorerEntry, expanded?: boolean): void {
-  row.setAttribute("role", "treeitem");
-  row.setAttribute("aria-level", String(rowLevel(entry.relPath)));
-  if (entry.type === "dir") row.setAttribute("aria-expanded", expanded ? "true" : "false");
-  row.setAttribute("aria-selected", row.classList.contains("selected") ? "true" : "false");
-  // Roving tabindex: exactly one row is tabbable, the rest are reachable by arrow.
-  if (row.tabIndex !== 0) row.tabIndex = -1;
-}
 
 export class Explorer {
   private treeEl: HTMLElement;
@@ -118,8 +43,6 @@ export class Explorer {
   private dirViews = new Map<string, DirView>();
   private projectId: string | null = null;
   private projectCwd: string | null = null;
-  private refreshTimer: ReturnType<typeof setTimeout> | null = null;
-  private pendingChanges = new Set<string>();
   private selected: ExplorerEntry | null = null;
   /** Project-relative entry waiting for Paste. */
   private clipboardEntry: { relPath: string; cut: boolean } | null = null;
@@ -135,57 +58,37 @@ export class Explorer {
   /** Project-relative directories containing a changed file, so a collapsed
    *  branch still shows that something inside it changed. */
   private changedDirRel = new Set<string>();
-  /** The row currently holding the roving tabindex (tabIndex 0). */
-  private focusedRow: HTMLElement | null = null;
-  /** Roving tabindex target: the project-relative path of the focused row. */
-  private focusedPath: string | null = null;
-  /** Filter box, when the host markup provides one. */
   private filterInput: HTMLInputElement | null = null;
-  /** Rows an active filter keeps; null means no filter is active. */
-  private filterVisible: Set<string> | null = null;
-  /** Debounce for the project-wide search behind the filter. */
-  private filterTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Persistent content-search listing, fed by the Search Contents modal. */
-  private contentSection: HTMLElement | null = null;
-  private contentTitle: HTMLElement | null = null;
-  private contentResults: HTMLElement | null = null;
-  /** Pattern behind the listing; "" means the section is empty/hidden. */
-  private contentPattern = "";
-  /** Bumped per re-run. A slow old search never renders over a newer one. */
-  private contentSeq = 0;
-  /** Fences a superseded search: a slow reply never paints over a newer query. */
-  private filterSeq = 0;
-  /** Truncation note for the active filter ("50+ matches …"); null when complete. */
-  private filterTruncatedNote: string | null = null;
-  /** Type-ahead buffer and its reset timer (keyboard name search). */
-  private typeBuffer = "";
-  private typeTimer: ReturnType<typeof setTimeout> | null = null;
   /** The entry behind each row, so keyboard actions act on the same object the
    *  mouse does. Keyed by element so a rebuilt row never inherits a stale one. */
   private readonly rowEntry = new WeakMap<HTMLElement, ExplorerEntry>();
   /** The row currently painted as selected, so `select` clears exactly one. */
   private selectedRow: HTMLElement | null = null;
+  private keyboard!: ExplorerKeyboard;
+  private filter!: ExplorerFilter;
+  private tree!: ExplorerRefresh;
+  private content!: ExplorerContent;
 
   constructor(container: HTMLElement) {
     this.treeEl = container.querySelector("#explorer-tree") as HTMLElement;
     this.filterInput = container.querySelector<HTMLInputElement>("#explorer-filter-input");
-    this.filterInput?.addEventListener("input", () => this.setFilter(this.filterInput?.value ?? ""));
+    this.filterInput?.addEventListener("input", () => this.filter.setFilter(this.filterInput?.value ?? ""));
     this.filterInput?.addEventListener("keydown", (e) => {
       // Escape clears the filter and hands focus back to the tree, so the
       // arrow keys keep working without a mouse trip.
       if (e.key === "Escape" && this.filterInput?.value) {
         e.preventDefault();
         this.filterInput.value = "";
-        this.setFilter("");
-        this.restoreFocus();
+        this.filter.setFilter("");
+        this.keyboard.restoreFocus();
         return;
       }
       // Down/Up leave the box for the tree, matching the filter-then-navigate flow.
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        const row = this.currentRow(this.visibleRows());
+        const row = this.keyboard.currentRow(this.keyboard.visibleRows());
         if (!row) return;
         e.preventDefault();
-        this.focusRow(row);
+        this.keyboard.focusRow(row);
       }
     });
     this.treeEl.addEventListener("contextmenu", (e) => {
@@ -194,269 +97,78 @@ export class Explorer {
       if (!this.projectCwd) return;
       showContextMenu(this.rootMenuItems(), e.clientX, e.clientY);
     });
-    this.treeEl.addEventListener("keydown", (e) => this.onKeyDown(e));
+    this.keyboard = new ExplorerKeyboard({
+      treeEl: this.treeEl,
+      rowEntry: this.rowEntry,
+      dirViews: this.dirViews,
+      select: (entry, row) => this.select(entry, row),
+      invalidateDisconnectedSelection: () => {
+        if (this.selectedRow && !this.selectedRow.isConnected) {
+          this.selected = null;
+          this.selectedRow = null;
+        }
+      },
+      setDirExpanded: (absPath, expanded) => this.setDirExpanded(absPath, expanded),
+      deleteAt: (entry) => this.deleteAt(entry),
+      renameAt: (entry) => this.renameAt(entry),
+      openFile: (absPath, preview) => this.onOpenFile(absPath, preview),
+    });
+    this.filter = new ExplorerFilter({
+      treeEl: this.treeEl,
+      filterInput: this.filterInput,
+      projectCwd: () => this.projectCwd,
+      expandToMatches: (matches) => this.expandToMatches(matches),
+      restoreFocus: () => this.keyboard.restoreFocus(),
+    });
+    this.tree = new ExplorerRefresh({
+      treeEl: this.treeEl,
+      projectCwd: () => this.projectCwd,
+      dirs: this.dirs,
+      dirViews: this.dirViews,
+      renderChildren: (children, entry, state, force) => this.renderChildren(children, entry, state, force),
+      makeDirRow: (entry, forceOpen) => this.makeDirRow(entry, forceOpen),
+      applyFilter: () => this.filter.applyFilter(),
+      restoreFocus: () => this.keyboard.restoreFocus(),
+    });
+    this.treeEl.addEventListener("keydown", (e) => this.keyboard.onKeyDown(e));
     // Focus can leave the tree (Tab away); keep the roving row in sync so
     // returning to the tree resumes where the user was.
-    this.treeEl.addEventListener("focusout", () => this.storeFocusedRow());
-    this.contentSection = container.querySelector("#explorer-content");
-    this.contentTitle = container.querySelector("#explorer-content-title");
-    this.contentResults = container.querySelector("#explorer-content-results");
-    container.querySelector("#explorer-content-rerun")?.addEventListener("click", () => void this.rerunContentSearch());
-    container.querySelector("#explorer-content-clear")?.addEventListener("click", () => this.clearContentResults());
-    void this.renderRoot();
+    this.treeEl.addEventListener("focusout", () => this.keyboard.storeFocusedRow());
+    this.content = new ExplorerContent(container, {
+      onContentHit: (relPath, line, column) => this.onContentHit(relPath, line, column),
+    });
+    void this.tree.renderRoot();
   }
 
   // ------------------------------------------------- keyboard + focus --
 
-  /**
-   * Rows the keyboard can reach, in DOM order (which is preorder traversal and
-   * therefore visual order).
-   *
-   * Hidden rows are excluded: an active filter hides rows without unmounting
-   * them, so without this the arrow keys and type-ahead would walk into rows the
-   * user cannot see.
-   */
-  private visibleRows(): HTMLElement[] {
-    return [...this.treeEl.querySelectorAll<HTMLElement>(".explorer-row:not([hidden])")];
-  }
-
-  private rowByRel(rel: string): HTMLElement | null {
-    for (const row of this.visibleRows()) {
-      if (row.dataset.relPath === rel) return row;
-    }
-    return null;
-  }
-
-  private currentRow(rows: HTMLElement[]): HTMLElement | null {
-    if (rows.length === 0) return null;
-    const byPath = this.focusedPath ? rows.find((r) => r.dataset.relPath === this.focusedPath) : undefined;
-    return byPath ?? rows[0]!;
-  }
-
-  /** Remember the focused row and move the roving tabindex onto it. */
-  /**
-   * Move the roving tabindex onto `row`. O(1): only the previously focused row
-   * and the new one change, so a keystroke on a 2000-entry tree does two DOM
-   * writes instead of re-scanning every row.
-   */
-  private markFocus(row: HTMLElement): void {
-    const previous = this.focusedRow;
-    if (previous && previous !== row) previous.tabIndex = -1;
-    row.tabIndex = 0;
-    this.focusedRow = row;
-    this.focusedPath = row.dataset.relPath ?? null;
-  }
-
-  private storeFocusedRow(): void {
-    const active = document.activeElement as HTMLElement | null;
-    if (active && this.treeEl.contains(active) && active.dataset.relPath !== undefined) {
-      this.markFocus(active);
-    }
-  }
-
-  /** Focus a row: selection follows focus, so rename/delete target it. */
-  private focusRow(row: HTMLElement, focus = true): void {
-    this.markFocus(row);
-    if (focus) row.focus();
-    const entry = this.rowEntry.get(row);
-    if (entry) this.select(entry, row);
-  }
-
-  /**
-   * Re-apply roving focus after the tree was rebuilt (refresh, expand,
-   * collapse). Keeps DOM focus only when the tree already had it, so a
-   * background watcher refresh never steals focus from the editor.
-   */
-  private restoreFocus(fallbackRel: string | null = null): void {
-    // A rebuild can drop the selected entry (deleted on disk, filtered out).
-    // Leaving it selected would aim rename/delete at a path that is gone.
-    if (this.selectedRow && !this.selectedRow.isConnected) {
-      this.selected = null;
-      this.selectedRow = null;
-    }
-    const rows = this.visibleRows();
-    if (rows.length === 0) return;
-    const hadFocus = this.treeEl.contains(document.activeElement);
-    const target =
-      (this.focusedPath ? rows.find((r) => r.dataset.relPath === this.focusedPath) : undefined)
-      ?? (fallbackRel !== null ? rows.find((r) => r.dataset.relPath === fallbackRel) : undefined)
-      ?? rows[0]!;
-    this.markFocus(target);
-    if (hadFocus) target.focus();
-  }
-
-  /**
-   * Expand the tree to a project-relative file and move the selection onto
-   * its row, so the tree agrees with the editor about where the user is.
-   * Moves the roving tabindex but never DOM focus, so opening a file from
-   * Quick Open does not steal focus back from the editor.
-   */
   async reveal(relPath: string): Promise<void> {
     const rel = normalizeRelPath(relPath);
     if (!rel || !this.projectCwd) return;
     await this.expandToMatches([rel]);
-    const row = this.rowByRel(rel);
+    const row = this.keyboard.rowByRel(rel);
     if (!row) return;
-    this.markFocus(row);
+    this.keyboard.markFocus(row);
     const entry = this.rowEntry.get(row);
     if (entry) this.select(entry, row);
     row.scrollIntoView({ block: "nearest" });
   }
 
-  /** Drop the type-ahead buffer. Navigation keys end a name search, so a stale
-   *  buffer cannot combine with the next keystroke. */
-  private resetTypeAhead(): void {
-    this.typeBuffer = "";
-    if (this.typeTimer) {
-      clearTimeout(this.typeTimer);
-      this.typeTimer = null;
-    }
+  /** A file/dir changed on disk (watcher events) — refresh lazily. */
+  handleDiskChange(path?: string): void {
+    this.tree.handleDiskChange(path);
   }
 
-  private onKeyDown(e: KeyboardEvent): void {
-    if (e.defaultPrevented) return;
-    // Modifier combos belong to the shortcut dispatcher and the browser.
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
-    // The capture-phase shortcut dispatcher in main handles F2 when it is
-    // bound; this fallback keeps rename working when it is unbound.
-    if (e.key === "F2") {
-      const row = this.currentRow(this.visibleRows());
-      const entry = row ? this.rowEntry.get(row) : undefined;
-      if (entry) {
-        e.preventDefault();
-        void this.renameAt(entry);
-      }
-      return;
-    }
-    const rows = this.visibleRows();
-    const row = this.currentRow(rows);
-    if (!row) return;
-    const index = rows.indexOf(row);
-    const entry = this.rowEntry.get(row);
-
-    const move = (delta: number): void => {
-      const next = rows[index + delta];
-      if (next) this.focusRow(next);
-    };
-
-    switch (e.key) {
-      case "ArrowDown":
-        e.preventDefault();
-        this.resetTypeAhead();
-        move(1);
-        return;
-      case "ArrowUp":
-        e.preventDefault();
-        this.resetTypeAhead();
-        move(-1);
-        return;
-      case "Home":
-        e.preventDefault();
-        this.resetTypeAhead();
-        this.focusRow(rows[0]!);
-        return;
-      case "End":
-        e.preventDefault();
-        this.resetTypeAhead();
-        this.focusRow(rows[rows.length - 1]!);
-        return;
-      case "ArrowRight": {
-        if (!entry) return;
-        e.preventDefault();
-        this.resetTypeAhead();
-        if (entry.type === "dir") {
-          const view = this.dirViews.get(entry.path);
-          if (view && !view.state.expanded) void this.setDirExpanded(entry.path, true);
-          // Already open: step into the first child, if it is mounted.
-          else {
-            const next = rows[index + 1];
-            if (next && Number(next.getAttribute("aria-level")) > Number(row.getAttribute("aria-level"))) {
-              this.focusRow(next);
-            }
-          }
-        }
-        return;
-      }
-      case "ArrowLeft": {
-        if (!entry) return;
-        e.preventDefault();
-        this.resetTypeAhead();
-        const view = entry.type === "dir" ? this.dirViews.get(entry.path) : undefined;
-        if (view?.state.expanded) {
-          void this.setDirExpanded(entry.path, false);
-          return;
-        }
-        const parentRel = parentRowRel(entry.relPath);
-        if (parentRel !== null) {
-          const parentRow = this.rowByRel(parentRel);
-          if (parentRow) this.focusRow(parentRow);
-        }
-        return;
-      }
-      case "Enter": {
-        if (!entry) return;
-        e.preventDefault();
-        this.resetTypeAhead();
-        if (entry.type === "dir") {
-          const view = this.dirViews.get(entry.path);
-          void this.setDirExpanded(entry.path, !(view?.state.expanded ?? false));
-        } else {
-          // Same as double-click: open pinned, not as a preview.
-          this.onOpenFile(entry.path, false);
-        }
-        return;
-      }
-      case "Delete": {
-        // The root row has no relPath; there is nothing to delete.
-        if (!entry || !entry.relPath) return;
-        e.preventDefault();
-        void this.deleteAt(entry);
-        return;
-      }
-      case "Backspace": {
-        // While a type-ahead search is active, Backspace edits the search
-        // instead of arming a delete: a typo must never open a destructive
-        // confirm in the middle of typing a file name.
-        if (this.typeBuffer) {
-          e.preventDefault();
-          this.typeBuffer = this.typeBuffer.slice(0, -1);
-          if (this.typeBuffer) this.applyTypeAhead(rows, index);
-          return;
-        }
-        if (!entry || !entry.relPath) return;
-        e.preventDefault();
-        void this.deleteAt(entry);
-        return;
-      }
-      default:
-        break;
-    }
-
-    // Type-ahead: a printable single character jumps to the next matching name.
-    if (isTypeAheadKey(e.key)) {
-      if (this.typeAhead(rows, index, e.key)) e.preventDefault();
-    }
+  async refresh(changedPaths?: string[]): Promise<void> {
+    await this.tree.refresh(changedPaths);
   }
 
-  /** Focus the row matching the current buffer; false when nothing matches. */
-  private applyTypeAhead(rows: HTMLElement[], index: number): boolean {
-    const names = rows.map((r) => r.dataset.name ?? "");
-    const found = findTypeAheadIndex(names, index, this.typeBuffer);
-    const row = found === -1 ? undefined : rows[found];
-    if (!row) return false;
-    this.focusRow(row);
-    return true;
+  showContentResults(pattern: string, hits: ContentHit[], truncated: boolean): void {
+    this.content.showContentResults(pattern, hits, truncated);
   }
 
-  /** Extend the type-ahead buffer and focus the next name that matches it. */
-  private typeAhead(rows: HTMLElement[], index: number, char: string): boolean {
-    this.typeBuffer += char;
-    if (this.typeTimer) clearTimeout(this.typeTimer);
-    this.typeTimer = setTimeout(() => {
-      this.typeTimer = null;
-      this.typeBuffer = "";
-    }, TYPE_AHEAD_RESET_MS);
-    return this.applyTypeAhead(rows, index);
+  clearContentResults(): void {
+    this.content.clearContentResults();
   }
 
   bind(handlers: { onOpenFile: (absPath: string, preview?: boolean) => void; onContentHit: (relPath: string, line: number, column: number) => void }): void {
@@ -496,15 +208,11 @@ export class Explorer {
 
   /** Called when the project folder changes. Null clears the tree. */
   setProject(projectId: string | null, cwd: string | null): void {
-    if (this.refreshTimer) {
-      clearTimeout(this.refreshTimer);
-      this.refreshTimer = null;
-    }
+    this.tree.reset();
     this.projectId = projectId;
     this.projectCwd = cwd;
     this.dirs.clear();
     this.dirViews.clear();
-    this.pendingChanges.clear();
     this.selected = null;
     this.selectedRow = null;
     // Clipboard entries are project-relative: they never survive a switch.
@@ -514,235 +222,17 @@ export class Explorer {
     this.changedRel = new Set<string>();
     this.changedDirRel = new Set<string>();
     // The filter is project-relative too; clear it rather than carry matches over.
-    this.filterVisible = null;
-    this.filterTruncatedNote = null;
-    this.filterSeq++;
-    if (this.filterTimer) {
-      clearTimeout(this.filterTimer);
-      this.filterTimer = null;
-    }
+    this.filter.reset();
     if (this.filterInput) this.filterInput.value = "";
     // Keyboard state is project-relative as well.
-    this.focusedRow = null;
-    this.focusedPath = null;
-    this.resetTypeAhead();
+    this.keyboard.reset();
     this.clearExpandTimer();
     // Content results are project-relative as well.
     this.clearContentResults();
     closeContextMenu();
-    void this.renderRoot();
+    void this.tree.renderRoot();
   }
 
-  /**
-   * List content-search hits grouped by file. Fed by the Search Contents
-   * modal; the listing persists so many hits stay browsable after the modal
-   * closes.
-   */
-  showContentResults(pattern: string, hits: ContentHit[], truncated: boolean): void {
-    this.contentPattern = pattern;
-    const section = this.contentSection;
-    const title = this.contentTitle;
-    const results = this.contentResults;
-    if (!section || !title || !results) return;
-    section.hidden = false;
-    const label = hits.length === 1 ? "1 match" : `${hits.length} matches`;
-    title.textContent = `${label} for "${pattern}"${truncated ? " (truncated)" : ""}`;
-    title.title = pattern;
-    results.replaceChildren();
-    if (hits.length === 0) {
-      results.appendChild(makeNote(`No matches for "${pattern}".`));
-      return;
-    }
-    let currentFile: string | null = null;
-    for (const hit of hits) {
-      if (hit.relPath !== currentFile) {
-        currentFile = hit.relPath;
-        const file = document.createElement("div");
-        file.className = "explorer-content-file";
-        file.textContent = hit.relPath;
-        file.title = hit.relPath;
-        results.appendChild(file);
-      }
-      const row = document.createElement("div");
-      row.className = "explorer-content-hit";
-      row.title = `${hit.relPath}:${hit.line}`;
-      const lineNo = document.createElement("span");
-      lineNo.className = "explorer-content-line";
-      lineNo.textContent = String(hit.line);
-      const text = document.createElement("span");
-      text.className = "explorer-content-text";
-      text.textContent = hit.text || "(empty line)";
-      row.append(lineNo, text);
-      row.addEventListener("click", () => this.onContentHit(hit.relPath, hit.line, hit.column));
-      results.appendChild(row);
-    }
-    if (truncated) results.appendChild(makeNote("More matches exist — refine to narrow."));
-  }
-
-  /** Hide the content listing and forget its pattern. */
-  clearContentResults(): void {
-    this.contentPattern = "";
-    this.contentSeq++;
-    if (this.contentSection) this.contentSection.hidden = true;
-    this.contentResults?.replaceChildren();
-  }
-
-  /** Re-run the listing's pattern (it goes stale as files change). */
-  private async rerunContentSearch(): Promise<void> {
-    const pattern = this.contentPattern;
-    const results = this.contentResults;
-    if (!pattern || !results) return;
-    const seq = ++this.contentSeq;
-    results.replaceChildren();
-    const loading = makeNote("searching…");
-    results.appendChild(loading);
-    let res;
-    try {
-      res = await window.termina.searchContent(pattern, "explorer");
-    } catch (err) {
-      if (seq !== this.contentSeq) return;
-      results.replaceChildren();
-      results.appendChild(makeNote((err as Error).message));
-      return;
-    }
-    if (seq !== this.contentSeq) return;
-    if (res.error) {
-      results.replaceChildren();
-      results.appendChild(makeNote(res.error));
-      return;
-    }
-    this.showContentResults(pattern, res.hits, res.truncated ?? false);
-  }
-
-  /** A file/dir changed on disk (watcher events) — refresh lazily. */
-  handleDiskChange(path?: string): void {
-    if (path) this.pendingChanges.add(path);
-    if (this.refreshTimer) clearTimeout(this.refreshTimer);
-    this.refreshTimer = setTimeout(() => {
-      this.refreshTimer = null;
-      const changes = [...this.pendingChanges];
-      this.pendingChanges.clear();
-      void this.refresh(changes);
-    }, 250);
-  }
-
-  async refresh(changedPaths?: string[]): Promise<void> {
-    if (!this.projectCwd) return;
-    if (this.refreshTimer) {
-      clearTimeout(this.refreshTimer);
-      this.refreshTimer = null;
-    }
-    if (!changedPaths) this.pendingChanges.clear();
-    if (!changedPaths || changedPaths.length === 0) {
-      await this.renderRoot(true);
-      await this.reloadMountedBranches();
-      return;
-    }
-    await this.renderRoot(false);
-    const directories = new Set<string>();
-    for (const path of changedPaths) {
-      if (!path || !this.projectCwd) continue;
-      let directory: string = path === this.projectCwd ? path : parentPath(path);
-      // If an ancestor is collapsed, its descendants are not mounted. Mark
-      // the nearest mounted ancestor stale so the branch reloads on expand.
-      while (!this.dirViews.has(directory) && directory !== this.projectCwd) {
-        const parent = parentPath(directory);
-        if (parent === directory) break;
-        directory = parent;
-      }
-      directories.add(directory);
-    }
-    for (const path of directories) {
-      const view = this.dirViews.get(path);
-      if (!view) continue;
-      if (view.state.expanded) await this.renderChildren(view.children, view.entry, view.state, true);
-      else view.state.loaded = false;
-    }
-  }
-
-  /**
-   * Force-reload every mounted, expanded folder, leaving collapsed ones marked
-   * stale so they reload on expand.
-   *
-   * A full refresh has to walk the whole visible tree, not just the root. A new
-   * EMPTY folder produces no file event (the watcher records directories only to
-   * detect their later deletion), so nothing else would ever reveal it: neither
-   * the watcher nor a root-only reload sees it.
-   */
-  private async reloadMountedBranches(): Promise<void> {
-    for (const path of [...this.dirViews.keys()]) {
-      const view = this.dirViews.get(path);
-      // The map mutates while reloading (nodes are added and forgotten).
-      if (!view) continue;
-      // The root is rendered by renderRoot.
-      if (view.entry.relPath === "") continue;
-      if (view.state.expanded) await this.renderChildren(view.children, view.entry, view.state, true);
-      else view.state.loaded = false;
-    }
-    this.restoreFocus();
-  }
-
-  // -------------------------------------------------------------- filter --
-
-  /**
-   * Apply a filter query to the tree.
-   *
-   * The match set comes from the existing project-wide file search rather than
-   * from the mounted rows: a filter that only saw mounted rows could never find
-   * a file inside a collapsed folder, which is most of them. That search is
-   * already bounded and cancellable (`searchProjectFiles`).
-   */
-  private setFilter(query: string): void {
-    const trimmed = query.trim();
-    if (this.filterTimer) {
-      clearTimeout(this.filterTimer);
-      this.filterTimer = null;
-    }
-    const seq = ++this.filterSeq;
-    if (!trimmed) {
-      this.filterVisible = null;
-      this.filterTruncatedNote = null;
-      this.applyFilter();
-      return;
-    }
-    this.filterTimer = setTimeout(() => {
-      this.filterTimer = null;
-      void this.runFilter(trimmed, seq);
-    }, FILTER_DEBOUNCE_MS);
-  }
-
-  private async runFilter(query: string, seq: number): Promise<void> {
-    let matches: string[] = [];
-    let truncatedNote: string | null = null;
-    try {
-      const res = await window.termina.searchFiles(query, "filter");
-      matches = res.entries.map((entry) => entry.relPath);
-      if (res.truncated) truncatedNote = `${matches.length}+ matches (refine to narrow)`;
-    } catch {
-      /* A failed search leaves the tree unfiltered rather than empty. */
-      return;
-    }
-    // A newer query, a cleared box, or a project switch owns the tree now.
-    if (seq !== this.filterSeq || !this.projectCwd) return;
-    // Always a set: an empty one means "this query matched nothing", which is an
-    // active filter showing no rows, not an unfiltered tree.
-    this.filterVisible = filterVisibleSet(matches);
-    this.filterTruncatedNote = truncatedNote;
-    await this.expandToMatches(matches);
-    if (seq !== this.filterSeq) return;
-    this.applyFilter();
-    // Row visibility changed, so re-seat focus on a row that is still shown.
-    this.restoreFocus();
-  }
-
-  /**
-   * Expand the ancestor chain of each match so its row mounts.
-   *
-   * Ancestors are expanded through the single toggle owner, so the chevron,
-   * `aria-expanded` and the children block stay in step. Expansion is left in
-   * place when the filter clears: those folders were genuinely opened, and
-   * silently collapsing them would undo the user's own expansion.
-   */
   private async expandToMatches(matches: readonly string[]): Promise<void> {
     for (const match of matches) {
       for (const dirRel of ancestorDirs(match)) {
@@ -758,107 +248,6 @@ export class Explorer {
       if (normalizeRelPath(view.entry.relPath) === dirRel) return { absPath, view };
     }
     return null;
-  }
-
-  /**
-   * Hide every row the filter excludes. Rows are hidden rather than unmounted:
-   * unmounting would drop `dirViews`/`DirState`, and expansion, selection and
-   * change marks all key off state that must survive the filter.
-   */
-  private applyFilter(): void {
-    const visible = this.filterVisible;
-    for (const row of this.treeEl.querySelectorAll<HTMLElement>(".explorer-row")) {
-      const rel = row.dataset.relPath;
-      // Rows without a relPath (the empty/loading placeholder) are left alone.
-      if (rel === undefined) continue;
-      row.hidden = visible !== null && !filterKeeps(visible, rel);
-    }
-    this.treeEl.classList.toggle("filtered", visible !== null);
-    // Flag a live query that matched nothing, so an empty tree is explained.
-    // A truncated query keeps its count in the input's title instead.
-    if (this.filterInput) {
-      this.filterInput.classList.toggle("no-matches", visible !== null && visible.size === 0);
-      const note = visible !== null ? this.filterTruncatedNote : null;
-      this.filterInput.classList.toggle("truncated", note !== null);
-      this.filterInput.title = note ?? "";
-    }
-  }
-
-  // ------------------------------------------------------------- rendering --
-
-  private async renderRoot(forceReload = false): Promise<void> {
-    const cwd = this.projectCwd;
-    if (!cwd) {
-      this.dirViews.clear();
-      this.treeEl.replaceChildren();
-      // No tree to describe while there is no project; the action stands alone.
-      this.treeEl.removeAttribute("role");
-      this.treeEl.removeAttribute("aria-label");
-      const empty = document.createElement("button");
-      empty.type = "button";
-      empty.className = "explorer-empty";
-      empty.textContent = "Open folder";
-      empty.addEventListener("click", () => void window.termina.projectOpen());
-      this.treeEl.appendChild(empty);
-      return;
-    }
-    // A real tree: screen readers get the structure and the label.
-    this.treeEl.setAttribute("role", "tree");
-    this.treeEl.setAttribute("aria-label", "Project files");
-    const name = pathBasename(cwd);
-    const existing = this.dirViews.get(cwd);
-    const node = existing?.node ?? this.makeDirRow({ name, path: cwd, relPath: "", type: "dir" }, true);
-    if (!node.parentElement) this.treeEl.replaceChildren(node);
-    const view = this.dirViews.get(cwd);
-    if (view?.state.expanded && (forceReload || !view.state.loaded)) {
-      await this.renderChildren(view.children, view.entry, view.state, forceReload);
-    }
-    this.applyFilter();
-    this.restoreFocus();
-  }
-
-  private dirState(absPath: string): DirState {
-    let state = this.dirs.get(absPath);
-    if (!state) {
-      state = { expanded: false, loaded: false, loadSeq: 0 };
-      this.dirs.set(absPath, state);
-    }
-    return state;
-  }
-
-  /** A collapsed branch no longer needs expansion state for hidden descendants. */
-  private pruneCollapsedDescendants(absPath: string): void {
-    for (const path of this.dirs.keys()) {
-      if (isPathDescendant(path, absPath)) {
-        this.dirs.delete(path);
-        this.dirViews.delete(path);
-      }
-    }
-  }
-
-  /**
-   * Drop expansion state for the mounted descendants of a collapsed branch.
-   * The nodes carry their own paths, so this stays exact where prefix
-   * matching cannot: the root key may be non-canonical (/var vs
-   * /private/var) and a prefix prune then silently misses every descendant,
-   * leaving stale expanded+loaded states behind detached nodes that never
-   * reload on re-expand.
-   */
-  private forgetMountedDescendants(children: HTMLElement): void {
-    for (const el of children.querySelectorAll<HTMLElement>("[data-path]")) {
-      const path = el.dataset.path;
-      if (path) {
-        this.dirs.delete(path);
-        this.dirViews.delete(path);
-      }
-    }
-  }
-
-  /** Drop state for a directory that disappeared from its parent's listing. */
-  private forgetDirectory(absPath: string): void {
-    this.dirs.delete(absPath);
-    this.dirViews.delete(absPath);
-    this.pruneCollapsedDescendants(absPath);
   }
 
   /**
@@ -888,7 +277,7 @@ export class Explorer {
   }
 
   private makeDirRow(entry: ExplorerEntry, forceOpen = false): HTMLElement {
-    const state = this.dirState(entry.path);
+    const state = this.tree.dirState(entry.path);
     if (forceOpen) {
       state.expanded = true;
     }
@@ -920,7 +309,7 @@ export class Explorer {
     row.append(arrow, icon, name, makeChangeMark());
     row.addEventListener("click", () => {
       this.select(entry, row);
-      this.markFocus(row);
+      this.keyboard.markFocus(row);
       void this.setDirExpanded(entry.path, !state.expanded);
     });
     this.bindRowMenu(row, entry);
@@ -953,13 +342,13 @@ export class Explorer {
     if (!expanded) {
       view.state.loadSeq += 1;
       view.state.loaded = false;
-      this.forgetMountedDescendants(view.children);
+      this.tree.forgetMountedDescendants(view.children);
     }
     view.arrow.textContent = expanded ? "▾" : "▸";
     applyRowA11y(view.row, view.entry, expanded);
     await this.renderChildren(view.children, view.entry, view.state);
     // Collapsing may unmount the focused row; fall back to the folder itself.
-    this.restoreFocus(normalizeRelPath(view.entry.relPath));
+    this.keyboard.restoreFocus(normalizeRelPath(view.entry.relPath));
   }
 
   private async renderChildren(children: HTMLElement, entry: ExplorerEntry, state: DirState, force = false): Promise<void> {
@@ -1002,7 +391,7 @@ export class Explorer {
     }
     const nextDirPaths = new Set(res.entries.filter((child) => child.type === "dir").map((child) => child.path));
     for (const [path, node] of current) {
-      if (node.dataset.type === "dir" && !nextDirPaths.has(path)) this.forgetDirectory(path);
+      if (node.dataset.type === "dir" && !nextDirPaths.has(path)) this.tree.forgetDirectory(path);
     }
     const next: HTMLElement[] = [];
     if (res.truncated) {
@@ -1024,8 +413,8 @@ export class Explorer {
     children.replaceChildren(...next);
     // Rows were rebuilt: apply the filter first so focus lands on a row that
     // survived it, not on one this refresh hid.
-    this.applyFilter();
-    this.restoreFocus();
+    this.filter.applyFilter();
+    this.keyboard.restoreFocus();
   }
 
   private makeFileRow(entry: ExplorerEntry): HTMLElement {
@@ -1045,12 +434,12 @@ export class Explorer {
     if (this.selected?.path === entry.path) this.select(entry, row);
     row.addEventListener("click", () => {
       this.select(entry, row);
-      this.markFocus(row);
+      this.keyboard.markFocus(row);
       this.onOpenFile(entry.path, true);
     });
     row.addEventListener("dblclick", () => {
       this.select(entry, row);
-      this.markFocus(row);
+      this.keyboard.markFocus(row);
       this.onOpenFile(entry.path, false);
     });
     this.bindRowMenu(row, entry);
