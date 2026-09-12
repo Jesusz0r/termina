@@ -7,13 +7,13 @@ principles, not implementations: each principle names the invariant, the rule
 that follows from it, and how to verify it. Where a number appears it is an
 example starting point, never the spec.
 
-Status: implemented in `agent-core/main.ts` and `agent-core/tui.ts` (frozen zones + append-only
+Status: implemented in `agent-core/main.ts` (+ `agent-core/main/`) and `agent-core/tui.ts` (frozen zones + append-only
 storage + `/resume` replay, reclamation hysteresis + summarization with
 handoff chaining + emergency overflow + truncate last resort, executable
 stubs + structured inventories, waste attribution with models.dev pricing,
 two-role routing map, bounded concurrency, cwd jail, grep/glob, unique first-occurrence
 edit (replace_all), interruptible bash, web_search, fetch, skill
-index, prefix `cache_control` on tools and system (1-hour TTL on the Anthropic login), last history-block cache pin, GPT-5.6 explicit prompt cache, session `prompt_cache_key` by model family,
+index, prefix `cache_control` on tools and system (`{ type: "ephemeral" }` with no `ttl`; Anthropic default is 5 minutes), last history-block cache pin, GPT-5.6 explicit prompt cache, session `prompt_cache_key` by model family,
 429 retry, model-aware `/effort`, live provider reasoning, request-only working-set overlay,
 traces, provider auth, live model list, full-screen TUI, Termina sidecar host contract, core worldline session slice,
 selectable bash approval policies, `/permissions`, /clear /compact, -p print, token/cache/context status, stdio MCP). Zone 1 is identity, environment,
@@ -56,6 +56,9 @@ Rules:
   stored. The request suffix after that breakpoint (file inventories and host
   context) may be rebuilt every call. It is not stored in the session log.
   Do not send top-level automatic `cache_control`: that pins the suffix.
+  Anthropic markers are `{ type: "ephemeral" }` with no `ttl`, so the
+  cache uses the 5-minute default
+  ([prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)).
 - Revision events (compaction, prune) are the ONLY writes to the visible
   context, and they must be reconstructable: the storage log stays
   append-only (a revision is a new entry), or snapshots back the
@@ -69,9 +72,10 @@ user turn must be identical bytes.
 Context water marks use `ceil(stringLength / 3)` as a conservative estimate.
 This is not a tokenizer. The prune planner uses `ceil(chars / 4)` only to
 estimate reclaimed space. Provider usage is authoritative after a request.
-The fallback context window is 1,000,000 tokens for Anthropic and Google,
-500,000 for xAI, and 1,050,000 for other providers. Anthropic Haiku uses
-200,000. A live model catalog can provide another value. There is no
+The fallback context window is 1,000,000 tokens for Anthropic, 1,048,576
+for Google, 500,000 for xAI, and 128,000 for unknown providers
+(`UNKNOWN_CONTEXT_FLOOR`). Anthropic Haiku uses 200,000. A live model
+catalog can provide another value. There is no
 1,000,000-token run cap. Context reclamation is driven by the window's
 high-water mark, not a fixed token total. Separately, a logical run stops
 requesting continuation at 500 model turns or before a batch would exceed

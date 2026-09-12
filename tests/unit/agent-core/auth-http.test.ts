@@ -122,6 +122,10 @@ describe("Agent Core Auth HTTP Bounding & Cancellation", () => {
         }, 120);
         return;
       }
+      if (path === "/openrouter-key") {
+        res.end(JSON.stringify({ key: "sk-or-test-key" }));
+        return;
+      }
       res.statusCode = 404;
       res.end("{}");
     });
@@ -427,5 +431,120 @@ describe("Agent Core Auth HTTP Bounding & Cancellation", () => {
     expect(auth.ok && auth.token).toBe("shared-access");
     expect(existsSync(process.env.TERMINA_AUTH_PATH!)).toBe(true);
     expect(JSON.parse(readFileSync(process.env.TERMINA_AUTH_PATH!, "utf8")).anthropic.access).toBe("shared-access");
+  });
+
+  async function waitForNeedle(holder: { text: string }, needle: string, timeoutMs = 2_000) {
+    const started = Date.now();
+    while (!holder.text.includes(needle) && Date.now() - started < timeoutMs) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(holder.text.includes(needle)).toBe(true);
+  }
+
+  async function fetchLoopback(url: string, timeoutMs = 2_000): Promise<Response> {
+    const started = Date.now();
+    let last: unknown;
+    while (Date.now() - started < timeoutMs) {
+      try {
+        return await fetch(url);
+      } catch (error) {
+        last = error;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    }
+    throw new Error(`loopback not reachable: ${url}: ${String(last)}`);
+  }
+
+  async function startBrowserLogin(providerId: "anthropic" | "openrouter", port: string, signal?: AbortSignal) {
+    process.env.TERMINA_TEST_REDIRECT_PORT = port;
+    const out = { text: "" };
+    const login = runLogin(providerId, "browser", {
+      write: (text) => { out.text += text; },
+      openUrl: () => {},
+      signal,
+    });
+    await waitForNeedle(out, "authorize:");
+    const authUrl = new URL((out.text.match(/authorize: (\S+)/) || [])[1] ?? "");
+    return { login, out, authUrl };
+  }
+
+  it("rejects an OAuth callback with the wrong state", async () => {
+    useAuthFile("oauth-wrong-state");
+    const controller = new AbortController();
+    try {
+      const { login } = await startBrowserLogin("anthropic", "27651", controller.signal);
+      const response = await fetchLoopback("http://127.0.0.1:27651/callback?code=foreign-code&state=wrong-state");
+      expect(response.ok).toBe(true);
+      expect(await login).toEqual({ ok: false, error: "login failed: state mismatch" });
+      expect(storedProvider("anthropic")).toBeUndefined();
+    } finally {
+      controller.abort();
+      process.env.TERMINA_TEST_REDIRECT_PORT = "27641";
+    }
+  });
+
+  it("rejects an OAuth callback with a missing state", async () => {
+    useAuthFile("oauth-missing-state");
+    const controller = new AbortController();
+    try {
+      const { login } = await startBrowserLogin("anthropic", "27652", controller.signal);
+      const response = await fetchLoopback("http://127.0.0.1:27652/callback?code=foreign-code");
+      expect(response.ok).toBe(true);
+      expect(await login).toEqual({ ok: false, error: "login failed: state mismatch" });
+      expect(storedProvider("anthropic")).toBeUndefined();
+    } finally {
+      controller.abort();
+      process.env.TERMINA_TEST_REDIRECT_PORT = "27641";
+    }
+  });
+
+  it("accepts an OAuth callback with the matching state", async () => {
+    useAuthFile("oauth-matching-state");
+    process.env.TERMINA_TEST_TOKEN_URL = `${origin}/normal`;
+    const controller = new AbortController();
+    try {
+      const { login, authUrl } = await startBrowserLogin("anthropic", "27653", controller.signal);
+      const state = authUrl.searchParams.get("state");
+      expect(state).toMatch(/^[0-9a-f]{32}$/i);
+      const response = await fetchLoopback(`http://127.0.0.1:27653/callback?code=test-code&state=${state}`);
+      expect(response.ok).toBe(true);
+      expect(await login).toEqual(expect.objectContaining({ ok: true }));
+      expect(storedProvider("anthropic")?.access).toBe("normal-access");
+    } finally {
+      controller.abort();
+      process.env.TERMINA_TEST_REDIRECT_PORT = "27641";
+    }
+  });
+
+  it("rejects a foreign OpenRouter code on the loopback port and accepts the matching callback path", async () => {
+    useAuthFile("openrouter-callback-state");
+    process.env.TERMINA_TEST_TOKEN_URL = `${origin}/openrouter-key`;
+    const controller = new AbortController();
+    try {
+      const { login, authUrl } = await startBrowserLogin("openrouter", "27654", controller.signal);
+      expect(authUrl.origin).toBe("https://openrouter.ai");
+      const callback = new URL(authUrl.searchParams.get("callback_url") ?? "");
+      expect(callback.pathname).toMatch(/^\/callback\/[0-9a-f]{32}$/i);
+      expect(callback.searchParams.get("state")).toBeNull();
+
+      const missing = await fetchLoopback(`http://127.0.0.1:27654/callback?code=foreign-code`);
+      expect(missing.status).toBe(404);
+      const wrong = await fetchLoopback(`http://127.0.0.1:27654/callback/${"0".repeat(32)}?code=foreign-code`);
+      expect(wrong.status).toBe(404);
+      const stillPending = await Promise.race([
+        login.then((result) => result),
+        new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 150)),
+      ]);
+      expect(stillPending).toBe("pending");
+      expect(storedProvider("openrouter")).toBeUndefined();
+
+      const accepted = await fetchLoopback(`${callback.origin}${callback.pathname}?code=openrouter-code`);
+      expect(accepted.ok).toBe(true);
+      expect(await login).toEqual(expect.objectContaining({ ok: true }));
+      expect(storedProvider("openrouter")?.key).toBe("sk-or-test-key");
+    } finally {
+      controller.abort();
+      process.env.TERMINA_TEST_REDIRECT_PORT = "27641";
+    }
   });
 });

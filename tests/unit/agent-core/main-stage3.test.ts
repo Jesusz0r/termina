@@ -15,13 +15,16 @@ import { join } from "node:path";
 describe("Agent Core Main Stage 3 Contracts", () => {
   it("passes Stage 3 integration contracts", async () => {
     const main = await import("../../../agent-core/main.ts");
+    const files = await import("../../../agent-core/main/files.ts");
+    const grep = await import("../../../agent-core/main/grep.ts");
+    const fileOps = await import("../../../agent-core/main/file-ops.ts");
     
     const root = mkdtempSync(join(tmpdir(), "agent-core-main-stage3-"));
     try {
       for (let i = 1; i <= 201; i += 1) writeFileSync(join(root, `match-${String(i).padStart(3, "0")}.txt`), `${i}\n`);
       writeFileSync(join(root, "unicode.txt"), "prefix-é-😀-suffix");
     
-      const underCap = await main.globFiles(root, "match-*.txt");
+      const underCap = await files.globFiles(root, "match-*.txt");
       assert.equal(underCap.state, "complete");
       assert.equal(underCap.content.split("\n").filter((line) => /^match-/.test(line)).length, 200);
       assert.match(underCap.content, /more matching files/);
@@ -30,42 +33,42 @@ describe("Agent Core Main Stage 3 Contracts", () => {
       for (const count of [199, 200]) {
         const prefix = `exact-${count}`;
         for (let i = 1; i <= count; i += 1) writeFileSync(join(root, `${prefix}-${String(i).padStart(3, "0")}.txt`), `${i}\n`);
-        const exact = await main.globFiles(root, `${prefix}-*.txt`);
+        const exact = await files.globFiles(root, `${prefix}-*.txt`);
         assert.equal(exact.state, "complete");
         assert.equal(exact.content.split("\n").filter((line) => line.startsWith(`${prefix}-`)).length, count);
         assert.equal(exact.truncated, false);
         assert.doesNotMatch(exact.content, /more matching files/);
       }
     
-      const read = main.readTextView(join(root, "unicode.txt"), { offset: 0 });
+      const read = fileOps.readTextView(join(root, "unicode.txt"), { offset: 0 });
       assert.equal(read.isError, false);
       assert.equal(read.state, "complete");
       assert.match(read.content, /prefix-é-😀-suffix/);
       assert.ok(!read.content.includes("\uFFFD"));
     
-      const stopped = await main.collectFiles(root, root, 2_000, { shouldStop: () => true });
+      const stopped = await files.collectFiles(root, root, 2_000, { shouldStop: () => true });
       assert.equal(stopped.state, "interrupted");
-      const visitCapped = await main.collectFiles(root, root, 1);
+      const visitCapped = await files.collectFiles(root, root, 1);
       assert.equal(visitCapped.state, "visit-cap");
-      const timedOut = await main.collectFiles(root, root, 2_000, { budgetMs: 0 });
+      const timedOut = await files.collectFiles(root, root, 2_000, { budgetMs: 0 });
       assert.equal(timedOut.state, "timeout");
-      const failedWalk = await main.collectFiles(root, root, 2_000, {
+      const failedWalk = await files.collectFiles(root, root, 2_000, {
         shouldStop: () => { throw new Error("stop callback failed"); },
       });
       assert.equal(failedWalk.state, "failed");
     
       for (let i = 1; i <= 9; i += 1) writeFileSync(join(root, `tag-${i}.txt`), `tag-${i}`);
-      const tagged = main.expandFileTags(root, Array.from({ length: 9 }, (_, i) => `@tag-${i + 1}.txt`).join(" "));
+      const tagged = fileOps.expandFileTags(root, Array.from({ length: 9 }, (_, i) => `@tag-${i + 1}.txt`).join(" "));
       assert.match(tagged, /attachments omitted/);
     
       writeFileSync(join(root, "long-unicode.txt"), "😀é漢".repeat(30_000));
-      const longRead = main.readTextView(join(root, "long-unicode.txt"), { offset: 0 });
+      const longRead = fileOps.readTextView(join(root, "long-unicode.txt"), { offset: 0 });
       assert.equal(longRead.isError, false);
       assert.ok(longRead.truncated);
       assert.ok(!longRead.content.includes("\uFFFD"));
     
       writeFileSync(join(root, "long-line.txt"), `${"é😀".repeat(10_000)}\n`);
-      const jsGrep = await main.grepFiles(root, { pattern: "😀", path: "long-line.txt" }, { jsOnly: true });
+      const jsGrep = await grep.grepFiles(root, { pattern: "😀", path: "long-line.txt" }, { jsOnly: true });
       assert.equal(jsGrep.truncated, true);
       assert.match(jsGrep.content, /truncated|Grep again/);
       assert.ok(!jsGrep.content.includes("\uFFFD"));

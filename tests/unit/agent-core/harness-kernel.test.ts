@@ -43,6 +43,8 @@ import type { AgentTui, TranscriptHandle } from "../../../agent-core/tui.ts";
 describe("Agent Core Kernel & TUI Harness Suite", () => {
   it("passes all kernel harness assertions natively", async () => {
     const core = await import("../../../agent-core/main.ts");
+    const files = await import("../../../agent-core/main/files.ts");
+    const env = await import("../../../agent-core/main/env.ts");
     const { defaultContextWindow, supportedEffortLevels, clampEffortLevel, thinkingEnabledFor, thinkingRequestFor, adaptiveEffortFor, effectiveEffortFor, reasoningEffortFor, includeEncryptedReasoning } = await import("../../../agent-core/models/capabilities.ts");
     const { gpt56ReasoningContext, gpt5TextVerbosity } = await import("../../../agent-core/models/families/openai.ts");
     const host = await import("../../../agent-core/host.ts");
@@ -58,17 +60,29 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const {
       confinePath,
       matchGlob,
-      grepFiles,
-      formatGrepHits,
-      completeGrepStdout,
       globFiles,
-      scanSkills,
-      formatSkillIndex,
-      formatProjectInstructions,
-      formatUserInstructions,
-      formatEnvironment,
-      parsePrintPrompt,
+      listTaggedFiles,
+      collectRelativeFiles,
+      parseFileTags,
+    } = files;
+    const { formatEnvironment, trustedPath } = env;
+    const grep = await import("../../../agent-core/main/grep.ts");
+    const { grepFiles, formatGrepHits, completeGrepStdout } = grep;
+    const { scanSkills, formatSkillIndex, formatProjectInstructions, formatUserInstructions } = await import("../../../agent-core/main/skills.ts");
+    const { tracesDirFor, isValidTerminalId } = await import("../../../agent-core/main/sidecar.ts");
+    const {
       reproFor,
+      sidecarStartFor,
+      formatToolAnnounce,
+      formatToolFollowup,
+      isDangerousBash,
+      shouldAskPermission,
+      displayToolOutput,
+    } = await import("../../../agent-core/main/tools.ts");
+    const { FROZEN_IDENTITY, buildFrozenSystem } = await import("../../../agent-core/main/front-matter.ts");
+    const { renderHistoryTranscript } = await import("../../../agent-core/main/history-view.ts");
+    const { isDirectRunFrom } = await import("../../../agent-core/main/env.ts");
+    const {
       readProjectFile,
       writeProjectFile,
       editProjectFile,
@@ -78,39 +92,26 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       formatNumberedText,
       listProjectDir,
       editMissDiagnostic,
+      readFileResult,
+      expandFileTags,
+    } = await import("../../../agent-core/main/file-ops.ts");
+    const {
+      parsePrintPrompt,
       buildCachedPrefix,
       anthropicCacheMark,
-      renderHistoryTranscript,
-      sidecarStartFor,
-      formatToolAnnounce,
-      formatToolFollowup,
-      isDangerousBash,
-      shouldAskPermission,
       runBash,
       isDirectRun,
-      tracesDirFor,
-      isValidTerminalId,
-      readFileResult,
-      FROZEN_IDENTITY,
-      buildFrozenSystem,
-      isDirectRunFrom,
       WEB_SEARCH_TOOL,
       requestTools,
       stampHistoryCache,
       placeStreamBlock,
       compactStreamBlocks,
-      displayToolOutput,
-      listTaggedFiles,
-      collectRelativeFiles,
-      parseFileTags,
-      expandFileTags,
       retryAfter,
       parseEffortCommand,
       outputTokenBudget,
       formatUsageIndicators,
       fetchUrl,
       fetchUrlError,
-      trustedPath,
       parseBangCommand,
       bangCommandContext,
     } = core;
@@ -455,6 +456,11 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check(
       "tool announce structures edit path",
       formatToolAnnounce({ id: "1", name: "edit", input: { path: "a.ts" } }) === "◆ Tool · edit\n  a.ts",
+    );
+    check(
+      "tool announce marks user-requested spawns",
+      formatToolAnnounce({ id: "1", name: "spawn_subagent", input: { task: "do things", user_requested: true } }).includes("user-requested") &&
+        !formatToolAnnounce({ id: "1", name: "spawn_subagent", input: { task: "do things" } }).includes("user-requested"),
     );
     check(
       "tool followup structures grep hits",
@@ -2031,6 +2037,72 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     else process.env.TERMINA_TEST_LOGIN_TIMEOUT_MS = prevTimeout;
     if (prevDenyPort === undefined) delete process.env.TERMINA_TEST_REDIRECT_PORT;
     else process.env.TERMINA_TEST_REDIRECT_PORT = prevDenyPort;
+
+    const prevStatePort = process.env.TERMINA_TEST_REDIRECT_PORT;
+    process.env.TERMINA_TEST_REDIRECT_PORT = "27325";
+    let mismatchOut = "";
+    const mismatchAbort = new AbortController();
+    const mismatchTimer = setTimeout(() => mismatchAbort.abort(), 4_000);
+    const mismatchP = runLogin("anthropic", "browser", {
+      write: (t) => {
+        mismatchOut += t;
+      },
+      openUrl: () => {},
+      signal: mismatchAbort.signal,
+    });
+    let mismatchResult;
+    try {
+      const started = Date.now();
+      while (!mismatchOut.includes("authorize:") && Date.now() - started < 2000) await new Promise((r) => setTimeout(r, 20));
+      const mismatchDeadline = Date.now() + 2000;
+      while (Date.now() < mismatchDeadline) {
+        try {
+          await fetch("http://127.0.0.1:27325/callback?code=foreign-code&state=wrong-state");
+          break;
+        } catch {
+          await new Promise((r) => setTimeout(r, 20));
+        }
+      }
+      mismatchResult = await mismatchP;
+    } catch (err) {
+      mismatchResult = { ok: false, error: String(err) };
+    } finally {
+      clearTimeout(mismatchTimer);
+    }
+    check("oauth wrong state is rejected", mismatchResult.ok === false && mismatchResult.error === "login failed: state mismatch");
+    process.env.TERMINA_TEST_REDIRECT_PORT = "27326";
+    let missingOut = "";
+    const missingAbort = new AbortController();
+    const missingTimer = setTimeout(() => missingAbort.abort(), 4_000);
+    const missingP = runLogin("anthropic", "browser", {
+      write: (t) => {
+        missingOut += t;
+      },
+      openUrl: () => {},
+      signal: missingAbort.signal,
+    });
+    let missingResult;
+    try {
+      const started = Date.now();
+      while (!missingOut.includes("authorize:") && Date.now() - started < 2000) await new Promise((r) => setTimeout(r, 20));
+      const missingDeadline = Date.now() + 2000;
+      while (Date.now() < missingDeadline) {
+        try {
+          await fetch("http://127.0.0.1:27326/callback?code=foreign-code");
+          break;
+        } catch {
+          await new Promise((r) => setTimeout(r, 20));
+        }
+      }
+      missingResult = await missingP;
+    } catch (err) {
+      missingResult = { ok: false, error: String(err) };
+    } finally {
+      clearTimeout(missingTimer);
+    }
+    check("oauth missing state is rejected", missingResult.ok === false && missingResult.error === "login failed: state mismatch");
+    if (prevStatePort === undefined) delete process.env.TERMINA_TEST_REDIRECT_PORT;
+    else process.env.TERMINA_TEST_REDIRECT_PORT = prevStatePort;
     
     const tokenSrv = createServer((req, res) => {
       let body = "";

@@ -617,16 +617,25 @@ export function redirectPort(id: ProviderId = "anthropic"): number {
   return ANTHROPIC_REDIRECT_PORT;
 }
 
-function redirectPath(id: ProviderId): string {
-  return id === "openai-codex" ? OPENAI_CODEX_REDIRECT_PATH : "/callback";
+function redirectPath(id: ProviderId, callbackToken?: string): string {
+  const base = id === "openai-codex" ? OPENAI_CODEX_REDIRECT_PATH : "/callback";
+  if (id !== "openrouter") return base;
+  // Live OpenRouter docs do not document an authorize-URL `state` parameter
+  // (https://openrouter.ai/docs/guides/overview/auth/oauth). Bind the
+  // loopback listener to a one-time path token so a foreign `code` on the
+  // well-known /callback path cannot win.
+  if (!callbackToken || !/^[0-9a-f]{32}$/i.test(callbackToken)) {
+    throw new Error("OpenRouter OAuth callback requires a one-time path token");
+  }
+  return `${base}/${callbackToken}`;
 }
 
 function redirectHost(id: ProviderId): string {
   return id === "openai-codex" ? "localhost" : "127.0.0.1";
 }
 
-function redirectUri(id: ProviderId, port: number): string {
-  return `http://${redirectHost(id)}:${port}${redirectPath(id)}`;
+function redirectUri(id: ProviderId, port: number, callbackToken?: string): string {
+  return `http://${redirectHost(id)}:${port}${redirectPath(id, callbackToken)}`;
 }
 
 export function openaiCodexClientVersion(): string {
@@ -2392,10 +2401,18 @@ function loginCallbackTimeoutMs(): number | null {
   return 3 * 60 * 1000;
 }
 
+function callbackStateMatches(path: string, expectedState: string, returnedState: string | null): boolean {
+  if (!expectedState) return false;
+  if (returnedState === expectedState) return true;
+  // OpenRouter redirects with `code` only. A one-time path token is the CSRF
+  // secret when the provider does not echo `state`.
+  return returnedState === null && path.endsWith(`/${expectedState}`);
+}
+
 function waitForCallback(
   port: number,
   path: string,
-  expectedState: string | null,
+  expectedState: string,
   signal?: AbortSignal,
 ): Promise<{ code: string } | { error: string }> {
   return new Promise((resolve) => {
@@ -2424,7 +2441,7 @@ function waitForCallback(
         finish({ error: cancelled ? "login cancelled" : `login failed: ${err}` });
         return;
       }
-      if (expectedState && state !== expectedState) {
+      if (!callbackStateMatches(path, expectedState, state)) {
         res.end("<p>Login failed (state mismatch). You can close this tab.</p>");
         finish({ error: "login failed: state mismatch" });
         return;
@@ -2555,8 +2572,7 @@ async function collectCode(
   io.signal?.addEventListener("abort", onUserAbort, { once: true });
   if (io.signal?.aborted) ac.abort();
   try {
-    const expectedState = providerId === "openrouter" ? null : state;
-    const waited = await waitForCallback(port, redirectPath(providerId), expectedState, ac.signal);
+    const waited = await waitForCallback(port, redirectPath(providerId, state), state, ac.signal);
     if ("error" in waited) {
       if (timedOut && !io.signal?.aborted) {
         return { ok: false, error: "login cancelled — browser closed or timed out" };
@@ -2896,7 +2912,7 @@ export async function runLogin(
   const port = redirectPort(providerId);
   const { verifier, challenge, state } = pkce();
   if (providerId === "openrouter") {
-    const url = buildOpenRouterAuthorizeUrl(challenge, redirectUri(providerId, port));
+    const url = buildOpenRouterAuthorizeUrl(challenge, redirectUri(providerId, port, state));
     const code = await collectCode(providerId, chosen === "code" ? "code" : "browser", url, state, io);
     if (!code.ok) return code;
     const exchanged = await exchangeOpenRouter(code.code, verifier, io.signal);
