@@ -99,6 +99,7 @@ import { isErrno } from "../shared/guards.js";
 import {
   DEFAULT_SHORTCUTS,
   defaultAppPreferences,
+  isTuiOwnedShortcut,
   type AppPreferences,
   CHALLENGE_PROFILES,
   type ChallengeProfile,
@@ -663,6 +664,8 @@ class TerminaApp {
     usableModel: (model) => this.usableAgentModel(model),
   });
   private shortcutMap: ShortcutMap = { ...DEFAULT_SHORTCUTS };
+  /** Renderer-reported scope: a live core TUI owns keyboard focus, so the menu blanks the Ctrl+P / Ctrl+R accelerators it would otherwise steal. */
+  private coreTerminalFocused = false;
   private worldsRoot = process.env.TERMINA_WORLDS_DIR ?? join(this.userDataDir, "worlds");
   /** Input buffer for /clear (/new alias) slash-command detection (terminals:write is per keystroke). */
   private newCommandBuffers = new Map<string, string>();
@@ -1351,9 +1354,20 @@ class TerminaApp {
     this.buildMenu();
   }
 
+  /**
+   * Blank the menu accelerators a focused core TUI owns (Ctrl+P next model,
+   * Ctrl+R history search) so those chords reach the pty. Menu clicks still
+   * run the command; anything else keeps its chord.
+   */
+  private tuiScopedAccelerator(value: string | undefined): string | undefined {
+    if (!value || !this.coreTerminalFocused) return value;
+    const resolved = value.replace("CmdOrCtrl", process.platform === "darwin" ? "Cmd" : "Ctrl");
+    return isTuiOwnedShortcut(resolved) ? undefined : value;
+  }
+
   private buildMenu(): void {
     const send = (command: CommandId) => () => this.send("menu:command", { command });
-    const shortcut = (command: ShortcutCommand): string | undefined => this.shortcutMap[command] || undefined;
+    const shortcut = (command: ShortcutCommand): string | undefined => this.tuiScopedAccelerator(this.shortcutMap[command] || undefined);
     const update = updateMenuCopy(
       this.appUpdater?.getState() ?? { status: "disabled", currentVersion: app.getVersion() },
     );
@@ -1470,7 +1484,7 @@ class TerminaApp {
           { label: "Command Palette…", accelerator: shortcut("command-palette"), click: send("command-palette") },
           { type: "separator" },
           { label: "Toggle DevTools", accelerator: "Alt+Cmd+I", role: "toggleDevTools" },
-          { label: "Reload", accelerator: "CmdOrCtrl+R", role: "reload" },
+          { label: "Reload", accelerator: this.tuiScopedAccelerator("CmdOrCtrl+R"), role: "reload" },
           { type: "separator" },
           { label: "Zoom In", role: "zoomIn" },
           { label: "Zoom Out", role: "zoomOut" },
@@ -1576,6 +1590,14 @@ class TerminaApp {
     this.shortcutMap = sanitizeShortcutMap(raw, {} as ShortcutMap);
     this.buildMenu();
     return { ...this.shortcutMap };
+  }
+
+  /** Renderer focus scope for menu accelerators. Rebuilds only on change: focus flips constantly, and a rebuild per flip would churn the native menu. */
+  private setCoreTerminalFocused(raw: unknown): void {
+    if (typeof raw !== "boolean") throw new Error("invalid terminal focus flag");
+    if (this.coreTerminalFocused === raw) return;
+    this.coreTerminalFocused = raw;
+    this.buildMenu();
   }
 
   private async commitPreferencePatch(patch: Partial<AppPreferences>, activateShortcuts: boolean, confirmReset = false): Promise<AppPreferences> {
@@ -7304,6 +7326,7 @@ class TerminaApp {
       this.updatePreferences(update, activateShortcuts === true),
     );
     ipcMain.handle("settings:shortcuts", (_e, shortcuts: unknown) => this.setKeyboardShortcuts(shortcuts));
+    ipcMain.handle("menu:terminal-focus", (_e, focused: unknown) => this.setCoreTerminalFocused(focused));
     ipcMain.handle("update:get", () => this.appUpdater?.getState() ?? { status: "disabled" as const, currentVersion: app.getVersion() });
     ipcMain.handle("update:check", async () => {
       return (await this.appUpdater?.check()) ?? { status: "disabled" as const, currentVersion: app.getVersion() };

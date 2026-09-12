@@ -316,9 +316,11 @@ export const EMPTY_STATE_TEXT =
   "⌖  Type a task and press Enter — the agent runs in this terminal.\n" +
   "   @ file  ·  / command  ·  /help lists keys  ·  /login  /models";
 
+/** /help key rows. Ctrl+L is the one advertised model chord: Ctrl+P still
+ *  cycles models in the terminal, but the menu owns that chord while the
+ *  editor is focused, so /help points at the picker instead. */
 export const TUI_SHORTCUTS: SlashCommand[] = [
   { name: "Ctrl+L", hint: "model · picker" },
-  { name: "Ctrl+P", hint: "model · next" },
   { name: "Shift+Tab", hint: "model · cycle effort" },
   { name: "Enter", hint: "session · send, or expand a folded tool" },
   { name: "Ctrl+J", hint: "session · newline" },

@@ -61,7 +61,7 @@ import {
   updateWorldlinePaneTab,
   worldlineEventBelongsToProject,
 } from "./worldline-project-state";
-import { CHALLENGE_PROFILES, cssFontFamily, defaultAppPreferences, pathBasename } from "../shared/types";
+import { CHALLENGE_PROFILES, cssFontFamily, defaultAppPreferences, isTuiOwnedShortcut, pathBasename } from "../shared/types";
 import { normalizeAppPreferences } from "../shared/preferences";
 import type { AppPreferences, AppUpdateState, ChallengeProfile, CommandId, ModifiedFile, InstanceSummary, ProjectWorkspaceRef, VerifyInfo, TimelineEvent, TimelinePrefix, PlanTask, RunSummary } from "../shared/types";
 
@@ -2405,6 +2405,28 @@ function normalizeShortcut(value: string): string {
   return value.replace("CmdOrCtrl", isMacPlatform() ? "Cmd" : "Ctrl");
 }
 
+/** True when a live core TUI owns keyboard focus: its textarea is the focused element of the active core pane. Shells and exited panes keep menu behavior. */
+function isCoreTerminalFocused(): boolean {
+  const pane = activeId ? panes.get(activeId) : undefined;
+  if (!pane || pane.error || pane.exited || pane.engine !== "core") return false;
+  const textarea = pane.view.getTerminal().textarea;
+  return !!textarea && document.activeElement === textarea;
+}
+
+/** Push menu-accelerator scope to main when terminal focus changes. The menu blanks the TUI-owned chords while a core terminal is focused so they reach the pty; reports only on change. */
+let lastReportedTerminalFocus = false;
+function syncTerminalFocusScope(): void {
+  const focused = isCoreTerminalFocused();
+  if (focused === lastReportedTerminalFocus) return;
+  lastReportedTerminalFocus = focused;
+  void window.termina.setTerminalFocus(focused).catch(() => undefined);
+}
+document.addEventListener("focusin", syncTerminalFocusScope);
+document.addEventListener("focusout", syncTerminalFocusScope);
+// The e2e suites poll the last scope reported to main: menu scoping crosses
+// async IPC, so suites settle it before pressing TUI chords.
+(window as unknown as Record<string, unknown>).__terminalFocusScope = () => lastReportedTerminalFocus;
+
 window.addEventListener(
   "keydown",
   (e) => {
@@ -2412,6 +2434,11 @@ window.addEventListener(
     const computed = shortcutForEvent(e);
     if (!computed) return;
     const target = normalizeShortcut(computed);
+    // A focused core TUI owns Ctrl+P (next model) and Ctrl+R (history
+    // search): let those chords fall through to the pty instead of running
+    // their bound command. The menu blanks the same chords (see
+    // syncTerminalFocusScope), so neither layer steals them on Windows/Linux.
+    if (isTuiOwnedShortcut(target) && isCoreTerminalFocused()) return;
     const entries = Object.entries(preferences.shortcuts) as [CommandId, string][];
     const command = entries.find(([, bound]) => bound && normalizeShortcut(bound) === target)?.[0];
     if (!command || !commands.has(command)) return;
@@ -2711,6 +2738,8 @@ function renderAcceptedPtyRecords(
       continue;
     }
     pane.exited = true;
+    // The TUI is gone: un-scope the menu so Ctrl+P / Ctrl+R run their bound commands again while this pane stays focused.
+    syncTerminalFocusScope();
     pane.view.write("\r\n\x1b[90m[agent exited]\x1b[0m\r\n", () => {
       window.termina.acknowledgePtyData({
         id,
