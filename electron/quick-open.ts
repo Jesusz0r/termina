@@ -346,8 +346,13 @@ export class ProjectPathIndex {
     }
   }
 
-  /** A watcher-reported create. Ignored until the index exists (nothing to patch). */
-  noteAdded(relPath: string): void {
+  /**
+   * A watcher-reported create for one workspace root. Events from any other
+   * root are ignored so a background project never patches the foreground
+   * index. Ignored until the index exists (nothing to patch).
+   */
+  noteAdded(root: string, relPath: string): void {
+    if (this.root !== root) return;
     if (!relPath) return;
     if (isGitignoreRelPath(relPath)) {
       this.invalidate();
@@ -359,14 +364,17 @@ export class ProjectPathIndex {
   }
 
   /**
-   * A watcher-reported removal.
+   * A watcher-reported removal for one workspace root. Events from any other
+   * root are ignored so a background project never patches the foreground
+   * index.
    *
    * Removes the path *and anything under it*. A deleted directory fires one
    * event for the directory itself, not one per descendant, so a prefix match is
    * what keeps the index from continuing to offer files that are gone. For a
    * file path the prefix can only ever match the path itself.
    */
-  noteRemoved(relPath: string): void {
+  noteRemoved(root: string, relPath: string): void {
+    if (this.root !== root) return;
     if (!relPath) return;
     if (isGitignoreRelPath(relPath)) {
       this.invalidate();

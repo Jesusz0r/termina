@@ -6453,13 +6453,15 @@ class PiEditorApp {
       const owner = this.projectOfWorkspace(ws.id);
       if (this.disposed || !owner || this.projectIsSwitching(owner.id)) return;
       const path = await this.canonicalPath(change.path);
-      const relPath = relative(await canonicalRootPromise, path);
+      const canonicalRoot = await canonicalRootPromise;
+      const relPath = relative(canonicalRoot, path);
       if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return;
       // Keep the Quick Open inventory current. Only creates and modifications
       // arrive here; deletions come through onFileDeleted below. A watcher
       // overflow replays every observed path through these same callbacks, so
-      // the index re-syncs rather than drifting.
-      this.pathIndex.noteAdded(relPath);
+      // the index re-syncs rather than drifting. The root scopes the patch to
+      // the indexed project; background workspaces never touch it.
+      this.pathIndex.noteAdded(canonicalRoot, relPath);
       ws.generation++;
       this.markCandidateEvidenceStale(ws.comparisonId);
       const now = Date.now();
@@ -6589,9 +6591,10 @@ class PiEditorApp {
       const owner = this.projectOfWorkspace(ws.id);
       if (this.disposed || !owner || this.projectIsSwitching(owner.id)) return;
       const p = await this.canonicalPath(path);
-      const relPath = relative(await this.canonicalPath(ws.root), p);
+      const canonicalRoot = await this.canonicalPath(ws.root);
+      const relPath = relative(canonicalRoot, p);
       if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return;
-      this.pathIndex.noteRemoved(relPath);
+      this.pathIndex.noteRemoved(canonicalRoot, relPath);
       ws.generation++;
       this.markCandidateEvidenceStale(ws.comparisonId);
       this.send("file:deleted", { projectId: owner.id, workspaceId: ws.id, path: p }, rendererTarget);
