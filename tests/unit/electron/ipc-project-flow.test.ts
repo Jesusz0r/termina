@@ -280,7 +280,21 @@ check("terminal close persists before process exit", main.includes("saveTerminal
 check("closing terminals cannot be rehydrated", main.includes("filter((t) => !t.closed)")
   && renderer.includes("list.filter((instance) => !closingPanes.has(instance.id))"));
 
-assert.equal(checks.length, 26);
+check("project close and quit share the unsaved-buffer gate", main.includes("async confirmClose(projectId?: string)")
+  && main.includes("await this.confirmUnsavedEditorBuffers(projectId)")
+  && main.includes("return this.confirmDiscardActiveCandidates(projectId)")
+  && main.includes("if (!(await this.confirmClose(projectId)))")
+  && main.includes(".confirmClose()")
+  && main.includes('this.send("editor:unsaved-confirm"')
+  && renderer.includes("confirmUnsavedEditors(projectId)")
+  && renderer.includes("editor.hasDirtyModels()")
+  && renderer.includes("editor.flushAll()")
+  && preload.includes("onUnsavedConfirm")
+  && types.includes("onUnsavedConfirm")
+  && main.includes("const flush = await this.flushDirtyModels(`dispatch:${ownerId}`")
+  && main.includes("const flush = await this.flushDirtyModels(leaseRequester, ws.id"));
+
+assert.equal(checks.length, 27);
 
   });
 });

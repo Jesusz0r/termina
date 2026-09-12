@@ -295,6 +295,15 @@ function isFlushResult(value: unknown): value is { ok: boolean; failed: string[]
   return typeof rec.ok === "boolean" && Array.isArray(rec.failed) && rec.failed.every((item) => typeof item === "string");
 }
 
+function isUnsavedConfirmResult(value: unknown): value is { ok: boolean; cancelled?: boolean; error?: string } {
+  if (typeof value !== "object" || value === null) return false;
+  const rec = value as { ok?: unknown; cancelled?: unknown; error?: unknown };
+  if (typeof rec.ok !== "boolean") return false;
+  if (rec.cancelled !== undefined && typeof rec.cancelled !== "boolean") return false;
+  if (rec.error !== undefined && typeof rec.error !== "string") return false;
+  return true;
+}
+
 let shellsPromise: Promise<{ name: string; path: string }[]> | null = null;
 
 function detectShells(): Promise<{ name: string; path: string }[]> {
@@ -652,6 +661,9 @@ class PiEditorApp {
   /** Renderer flush requests awaiting their report. */
   private flushWaiters = new Map<string, { workspaceId: string; resolve: (r: { ok: boolean; failed: string[] }) => void; timer: ReturnType<typeof setTimeout> }>();
   private flushSeq = 0;
+  /** Renderer unsaved-buffer confirms awaiting their report. */
+  private unsavedWaiters = new Map<string, { resolve: (r: { ok: boolean; cancelled?: boolean; error?: string }) => void; timer: ReturnType<typeof setTimeout> }>();
+  private unsavedSeq = 0;
   /** Per-caller file:search generations; older same-caller walks abort so fast
    *  typing never stacks full-tree walks. */
   private fileSearchSeq = new SearchGenerations(["quick-open", "filter"] as const, "quick-open");
@@ -5909,6 +5921,39 @@ class PiEditorApp {
   // ------------------------------------------------------------- project -----
 
   /**
+   * Ask the renderer to Save / Discard / Cancel dirty editor buffers.
+   * Save reuses flushAll → file:save. Cancel aborts the close or quit.
+   */
+  async confirmUnsavedEditorBuffers(projectId?: string): Promise<{ ok: boolean; cancelled?: boolean; error?: string }> {
+    const rendererTarget = this.captureRendererSendTarget();
+    return new Promise((resolve) => {
+      const requestId = `unsaved-${++this.unsavedSeq}`;
+      const timer = setTimeout(() => {
+        this.unsavedWaiters.delete(requestId);
+        resolve({ ok: false, cancelled: true });
+      }, 5 * 60 * 1000);
+      this.unsavedWaiters.set(requestId, { resolve, timer });
+      const sent = this.send("editor:unsaved-confirm", { requestId, projectId: projectId ?? null }, rendererTarget);
+      if (sent) return;
+      clearTimeout(timer);
+      this.unsavedWaiters.delete(requestId);
+      const win = this.win;
+      if (win && !win.isDestroyed()) resolve({ ok: false, error: "editor is unavailable" });
+      else resolve({ ok: true });
+    });
+  }
+
+  /**
+   * Shared close/quit gate: unsaved editor buffers, then live worldline
+   * candidates. Cancel at either step aborts.
+   */
+  async confirmClose(projectId?: string): Promise<boolean> {
+    const unsaved = await this.confirmUnsavedEditorBuffers(projectId);
+    if (!unsaved.ok) return false;
+    return this.confirmDiscardActiveCandidates(projectId);
+  }
+
+  /**
    * Confirmation for live candidates with activity (§6.11): a folder
    * switch or app quit discards them; ask first.
    */
@@ -6198,7 +6243,7 @@ class PiEditorApp {
         rendererTarget,
       );
     };
-    if (!(await this.confirmDiscardActiveCandidates(projectId))) {
+    if (!(await this.confirmClose(projectId))) {
       await restoreActive();
       return { ok: false, cancelled: true };
     }
@@ -7173,6 +7218,15 @@ class PiEditorApp {
       this.flushWaiters.delete(requestId);
       waiter.resolve(result);
     });
+    ipcMain.handle("editor:unsaved-report", (_e, requestId: unknown, result: unknown) => {
+      if (typeof requestId !== "string") return;
+      if (!isUnsavedConfirmResult(result)) return;
+      const waiter = this.unsavedWaiters.get(requestId);
+      if (!waiter) return;
+      clearTimeout(waiter.timer);
+      this.unsavedWaiters.delete(requestId);
+      waiter.resolve(result);
+    });
     /** The flush saves go through the lease holder (the preflight). */
     ipcMain.handle("file:flush-save", async (_e, absPath: string, content: string, writerId: string, owner: unknown) => {
       if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > MAX_OPEN_FILE_SIZE) return { ok: false, error: "file content is too large" };
@@ -7626,7 +7680,7 @@ class PiEditorApp {
     if (current.status !== "ready") return updater.install();
     if (this.installingUpdate) return { ok: false, error: "The update is already installing." };
     this.installingUpdate = true;
-    if (!(await this.confirmDiscardActiveCandidates())) {
+    if (!(await this.confirmClose())) {
       this.installingUpdate = false;
       return { ok: false, error: "Update cancelled." };
     }
@@ -7713,6 +7767,11 @@ class PiEditorApp {
       waiter.resolve({ ok: false, failed: ["app disposed"] });
     }
     this.flushWaiters.clear();
+    for (const waiter of this.unsavedWaiters.values()) {
+      clearTimeout(waiter.timer);
+      waiter.resolve({ ok: false, cancelled: true });
+    }
+    this.unsavedWaiters.clear();
     this.projects.clear();
     this.terminals.clear();
     for (const tailer of this.worldlineTailers.values()) tailer.stop();
@@ -7894,7 +7953,7 @@ app.on("before-quit", (event) => {
   }
   cleanupStarted = true;
   void appState
-    .confirmDiscardActiveCandidates()
+    .confirmClose()
     .catch(() => false)
     .then((ok) => {
       cleanupStarted = false;

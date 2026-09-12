@@ -3,6 +3,8 @@
  * and generic toasts for notifications.
  */
 
+import type { UnsavedCloseChoice } from "../../shared/unsaved-close";
+
 interface ModalResult {
   cancelled?: boolean;
   value?: string;
@@ -16,6 +18,17 @@ export function showConfirm(title: string, message: string): Promise<ModalResult
     makeModal(title, message, [
       { label: "Cancel", primary: false, onClick: () => resolve({ cancelled: true }) },
       { label: "OK", primary: true, onClick: () => resolve({ confirmed: true }) },
+    ]);
+  });
+}
+
+/** Save / Discard / Cancel for dirty editor buffers. Esc still hits Cancel. */
+export function showUnsavedConfirm(title: string, message: string): Promise<UnsavedCloseChoice> {
+  return new Promise((resolve) => {
+    makeModal(title, message, [
+      { label: "Cancel", primary: false, onClick: () => resolve("cancel") },
+      { label: "Discard", primary: false, onClick: () => resolve("discard") },
+      { label: "Save", primary: true, onClick: () => resolve("save") },
     ]);
   });
 }
