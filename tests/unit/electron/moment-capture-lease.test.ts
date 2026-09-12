@@ -178,11 +178,14 @@ describe("promote refreshes workspace state after apply", () => {
     const success = afterDone.slice(0, afterDone.indexOf("return { ok: true, terminalId: opened.terminalId }"));
     expect(success.indexOf("await refreshMergedPrimary()")).toBeGreaterThan(-1);
     expect(success.indexOf("await refreshMergedPrimary()")).toBeLessThan(success.indexOf("releaseLeases()"));
+    expect(success).toContain("workspace snapshot was not refreshed");
+    expect(promotion).not.toContain("post-promote capture failed");
 
     const doneCatch = afterDone.slice(afterDone.indexOf('if (String(journal.phase) === "done")'));
     const doneRelease = doneCatch.indexOf("releaseLeases()");
     expect(doneCatch.indexOf("await refreshMergedPrimary()")).toBeGreaterThan(-1);
     expect(doneCatch.indexOf("await refreshMergedPrimary()")).toBeLessThan(doneRelease);
+    expect(doneCatch).toContain("releaseLeases()");
     expect(success.indexOf("store.captureIncremental")).toBe(-1);
   });
 });
