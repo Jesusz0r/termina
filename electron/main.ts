@@ -93,6 +93,7 @@ import { PathLookup } from "./path-lookup.js";
 import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
 import { HIDE_THINKING_CSI, SHOW_THINKING_CSI, thinkingStartupArgs } from "../shared/terminal-control.js";
 import { validateGrepPattern } from "../shared/grep-pattern.js";
+import { isErrno } from "../shared/guards.js";
 import {
   DEFAULT_SHORTCUTS,
   defaultAppPreferences,
@@ -3956,7 +3957,7 @@ class TerminaApp {
       }
     }
     for (const [p, b] of worker.baselines) {
-      if (!owner.baselines.has(p)) this.setBaseline(owner, p, b);
+      if (!owner.baselines.has(p)) this.setBaseline(owner, p, b, worker.baselineStates.get(p) ?? null);
     }
     if (changed) this.send("modified:list", { instanceId: owner.id, files: [...owner.modified.values()] }, expected);
   }
@@ -5936,11 +5937,17 @@ class TerminaApp {
     // A terminal's modified list is cumulative until the user clears it. Keep
     // those files anchored to their first pre-change content across turns.
     const retained = new Map<string, string | null>();
+    const retainedStates = new Map<string, string>();
     for (const path of inst.modified.keys()) {
-      if (inst.baselines.has(path)) retained.set(path, inst.baselines.get(path)!);
+      if (inst.baselines.has(path)) {
+        retained.set(path, inst.baselines.get(path)!);
+        const anchor = inst.baselineStates.get(path);
+        if (anchor !== undefined) retainedStates.set(path, anchor);
+      }
     }
 
     inst.baselines.clear();
+    inst.baselineStates.clear();
     inst.baselineBytes = 0;
     if (source) {
       for (const [path, content] of source) {
@@ -5949,14 +5956,21 @@ class TerminaApp {
     }
     // Insert retained entries last so the bounded cache evicts speculative
     // untouched-file snapshots before baselines backing visible review items.
-    for (const [path, content] of retained) this.setBaseline(inst, path, content);
+    for (const [path, content] of retained) this.setBaseline(inst, path, content, retainedStates.get(path) ?? null);
   }
 
-  private setBaseline(inst: AgentTerminalInstance, path: string, value: string | null): void {
+  /**
+   * Remember pre-run content for Change Review. The optional stateId anchors
+   * the baseline to a run-start state so revert can restore byte-exact blob
+   * bytes; a replaced baseline without one keeps no stale anchor.
+   */
+  private setBaseline(inst: AgentTerminalInstance, path: string, value: string | null, stateId?: string | null): void {
     const previous = inst.baselines.get(path);
     if (previous !== undefined && previous !== null) inst.baselineBytes -= Buffer.byteLength(previous, "utf8");
     inst.baselines.set(path, value);
     if (value !== null) inst.baselineBytes += Buffer.byteLength(value, "utf8");
+    if (value === null || stateId === undefined || stateId === null) inst.baselineStates.delete(path);
+    else inst.baselineStates.set(path, stateId);
     while (inst.baselines.size > TerminaApp.MAX_BASELINE_FILES || inst.baselineBytes > TerminaApp.MAX_BASELINE_BYTES) {
       const oldest = inst.baselines.keys().next().value;
       if (oldest === undefined) break;
@@ -5968,6 +5982,7 @@ class TerminaApp {
     const previous = inst.baselines.get(path);
     if (previous !== undefined && previous !== null) inst.baselineBytes -= Buffer.byteLength(previous, "utf8");
     inst.baselines.delete(path);
+    inst.baselineStates.delete(path);
   }
 
   private setRunSnapshot(inst: AgentTerminalInstance, path: string, content: string): void {
@@ -6009,7 +6024,7 @@ class TerminaApp {
     if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return;
     const content = await store.readBlob(stateId, relPath);
     if (content !== null && content.byteLength <= MAX_OPEN_FILE_SIZE && !inst.baselines.has(path)) {
-      this.setBaseline(inst, path, content.toString("utf8"));
+      this.setBaseline(inst, path, content.toString("utf8"), stateId);
     }
   }
 
@@ -6024,6 +6039,14 @@ class TerminaApp {
 
   private async recordModified(inst: AgentTerminalInstance, absPath: string, status: "created" | "modified"): Promise<void> {
     const p = await this.canonicalPath(absPath);
+    // The first review entry for a file captures pre-run content. Anchor an
+    // unanchored baseline to this run start so revert restores byte-exact
+    // start-state bytes instead of a UTF-8 string.
+    const current = inst.baselines.get(p);
+    if (current !== undefined && current !== null && !inst.baselineStates.has(p)) {
+      const anchor = inst.currentRun?.startStateId;
+      if (anchor) inst.baselineStates.set(p, anchor);
+    }
     const existing = inst.modified.get(p);
     if (existing) {
       // Status is relative to the cumulative review baseline, not merely the
@@ -7415,7 +7438,8 @@ class TerminaApp {
       if (!managed || managed.workspace.id !== target.workspace.id) return { ok: false, error: "path is outside the project workspace" };
       if (managed.workspace.writerId !== writerId) return { ok: false, error: "the flush does not hold the write lease" };
       try {
-        const info = await stat(managed.path);
+        // lstat: refuse a leaf swapped for a symlink after admission.
+        const info = await lstat(managed.path);
         if (!info.isFile()) return { ok: false, error: "path is not a regular file" };
         await writeFile(managed.path, content, "utf8");
         return { ok: true };
@@ -7509,54 +7533,13 @@ class TerminaApp {
       if (b === null) return { status: "created", baseline: null };
       return { status: status === "deleted" ? "deleted" : "modified", baseline: b };
     });
-    ipcMain.handle("review:revert", async (_e, terminalId: string, path: string) => {
-      const inst = this.terminals.get(terminalId);
-      if (!inst) return { ok: false, error: "terminal not found" };
-      const blocked = this.assertWorkspaceWritable(inst.workspaceId);
-      if (blocked) return { ok: false, error: blocked };
-      const managed = await this.managedPath(path, inst.workspaceId);
-      if (!managed || managed.workspace.id !== inst.workspaceId) return { ok: false, error: "path is outside the terminal workspace" };
-      const p = managed.path;
-      const b = inst.baselines.get(p);
-      if (b === undefined) return { ok: false, error: "no baseline captured for this file" };
-      try {
-        if (b === null) {
-          // The agent created the file. Delete it.
-          await rm(p, { force: true });
-        } else {
-          // The file's parent may have been deleted with it.
-          await mkdir(dirname(p), { recursive: true });
-          await writeFile(p, b, "utf8");
-        }
-        this.deleteBaseline(inst, p);
-        return { ok: true };
-      } catch (err) {
-        return { ok: false, error: (err as Error).message };
-      }
-    });
+    ipcMain.handle("review:revert", (_e, terminalId: string, path: string) => this.revertReviewFile(terminalId, path));
 
     ipcMain.handle("file:open", (_e, absPath: unknown, owner: unknown) => {
       if (typeof absPath !== "string") return { ok: false, path: "", error: "invalid path" };
       return this.openFileInEditor(absPath, owner);
     });
-    ipcMain.handle("file:save", async (_e, absPath: unknown, content: unknown, owner: unknown) => {
-      if (typeof absPath !== "string") return { ok: false, error: "invalid path" };
-      if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > MAX_OPEN_FILE_SIZE) return { ok: false, error: "file content is too large" };
-      const target = this.projectWorkspace(owner);
-      if (!target) return { ok: false, error: "invalid project workspace" };
-      const managed = await this.managedPath(absPath, target.workspace.id);
-      if (!managed || managed.workspace.id !== target.workspace.id) return { ok: false, error: "path is outside the project workspace" };
-      const blocked = this.assertWorkspaceWritable(managed.workspace.id);
-      if (blocked) return { ok: false, error: blocked };
-      try {
-        const info = await stat(managed.path);
-        if (!info.isFile()) return { ok: false, error: "path is not a regular file" };
-        await writeFile(managed.path, content, "utf8");
-        return { ok: true };
-      } catch (err) {
-        return { ok: false, error: (err as Error).message };
-      }
-    });
+    ipcMain.handle("file:save", (_e, absPath: unknown, content: unknown, owner: unknown) => this.saveEditorFile(absPath, content, owner));
 
     ipcMain.handle("explorer:list-dir", (_e, projectId: unknown, absPath: unknown) => {
       if (typeof projectId !== "string" || typeof absPath !== "string") return { entries: [], error: "invalid path" };
@@ -7649,6 +7632,97 @@ class TerminaApp {
       return { ok: true, path: managed.path, content, changedLines: managed.workspace.changeLines.get(managed.path) };
     } catch (err) {
       return { ok: false, path: managed.path, error: (err as Error).message };
+    }
+  }
+
+  /**
+   * Save one editor buffer. Holds a short write lease so a promotion apply
+   * cannot land between the guard and the write, and re-checks the leaf
+   * with lstat immediately before writing.
+   */
+  private async saveEditorFile(absPath: unknown, content: unknown, owner: unknown): Promise<{ ok: boolean; error?: string }> {
+    if (typeof absPath !== "string") return { ok: false, error: "invalid path" };
+    if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > MAX_OPEN_FILE_SIZE) return { ok: false, error: "file content is too large" };
+    const target = this.projectWorkspace(owner);
+    if (!target) return { ok: false, error: "invalid project workspace" };
+    const requester = `save:${randomUUID()}`;
+    const lease = await this.acquireWriteLease(target.workspace.id, requester, 0);
+    if (!lease.ok) return { ok: false, error: lease.error ?? "the workspace is busy" };
+    try {
+      const managed = await this.managedPath(absPath, target.workspace.id);
+      if (!managed || managed.workspace.id !== target.workspace.id) return { ok: false, error: "path is outside the project workspace" };
+      const st = await lstat(managed.path).catch((err: unknown) => {
+        if (isErrno(err, "ENOENT")) return null;
+        throw err;
+      });
+      if (st === null || !st.isFile()) return { ok: false, error: "path is not a regular file" };
+      await writeFile(managed.path, content, "utf8");
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    } finally {
+      this.releaseWriteLease(target.workspace.id, requester);
+    }
+  }
+
+  /**
+   * Restore one Change Review file to its pre-run baseline. Holds a short
+   * write lease; restores byte-exact start-state blob bytes with a stored
+   * string fallback; refuses non-regular files.
+   */
+  private async revertReviewFile(terminalId: string, path: string): Promise<{ ok: boolean; error?: string }> {
+    const inst = this.terminals.get(terminalId);
+    if (!inst) return { ok: false, error: "terminal not found" };
+    const requester = `revert:${randomUUID()}`;
+    const lease = await this.acquireWriteLease(inst.workspaceId, requester, 0);
+    if (!lease.ok) return { ok: false, error: lease.error ?? "the workspace is busy" };
+    try {
+      const managed = await this.managedPath(path, inst.workspaceId);
+      if (!managed || managed.workspace.id !== inst.workspaceId) return { ok: false, error: "path is outside the terminal workspace" };
+      const p = managed.path;
+      const b = inst.baselines.get(p);
+      if (b === undefined) return { ok: false, error: "no baseline captured for this file" };
+      if (b === null) {
+        // The agent created the file. Remove it, but only a regular file.
+        const created = await lstat(p).catch((err: unknown) => {
+          if (isErrno(err, "ENOENT")) return null;
+          throw err;
+        });
+        if (created !== null && !created.isFile()) return { ok: false, error: "path is not a regular file" };
+        if (created !== null) await rm(p, { force: true });
+        this.deleteBaseline(inst, p);
+        return { ok: true };
+      }
+      // Restore start-state bytes, which stay exact for binary files. The
+      // stored string is the fallback when no anchor or blob is available.
+      let data: Buffer | string = b;
+      const anchor = inst.baselineStates.get(p);
+      if (anchor !== undefined) {
+        try {
+          const store = await this.projectOfTerminal(terminalId)?.storePromise;
+          const rel = relative(await this.canonicalPath(managed.workspace.root), p);
+          if (store && rel !== "" && !rel.startsWith("..") && !isAbsolute(rel)) {
+            const blob = await store.readBlob(anchor, rel);
+            if (blob !== null) data = blob;
+          }
+        } catch {
+          // Fall through to the stored string.
+        }
+      }
+      // The file's parent may have been deleted with it.
+      await mkdir(dirname(p), { recursive: true });
+      const st = await lstat(p).catch((err: unknown) => {
+        if (isErrno(err, "ENOENT")) return null;
+        throw err;
+      });
+      if (st !== null && !st.isFile()) return { ok: false, error: "path is not a regular file" };
+      await writeFile(p, data);
+      this.deleteBaseline(inst, p);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    } finally {
+      this.releaseWriteLease(inst.workspaceId, requester);
     }
   }
 

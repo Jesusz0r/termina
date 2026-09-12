@@ -49,6 +49,8 @@ export class AgentTerminalInstance {
   modified = new Map<string, ModifiedFile>();
   /** Pre-run content per path (Change Review): string = baseline, null = created. */
   baselines = new Map<string, string | null>();
+  /** Run-start state anchoring each baseline; revert reads bytes from it. */
+  baselineStates = new Map<string, string>();
   baselineBytes = 0;
   /** In-flight lazy baseline captures per path (Change Review waits for them). */
   baselineFills = new Map<string, Promise<void>>();
