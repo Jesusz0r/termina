@@ -239,4 +239,63 @@ describe("Project Watcher Bounded-Emitter & Backpressure", () => {
       rmSync(root, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it("reports oversized and binary files without caching content", async () => {
+    const root = mkdtempSync(join(tmpdir(), "termina-watcher-uncached-"));
+    const fakeWatch = (..._args: any[]) => Object.assign(new EventEmitter(), { close() {} }) as any;
+    const watcher = new ProjectWatcher(root, undefined, fakeWatch as any, {
+      maxPendingItems: 8,
+      maxPendingBytes: 4096,
+      maxInFlight: 2,
+    });
+    const internals = watcher as any;
+    const uncached: Array<{ path: string; status: string }> = [];
+    const changed: string[] = [];
+    watcher.onFileUncached = async (path: string, status: "created" | "modified") => {
+      uncached.push({ path, status });
+    };
+    watcher.onChange = async (change) => {
+      changed.push(change.relPath);
+    };
+    const waitFor = async (pred: () => boolean, ms: number): Promise<boolean> => {
+      const deadline = Date.now() + ms;
+      while (!pred() && Date.now() < deadline) await sleep(25);
+      return pred();
+    };
+    try {
+      watcher.start();
+      // Seed on an empty root, then create: the first report reads "created".
+      await sleep(150);
+      writeFileSync(join(root, "blob.bin"), Buffer.from([0x89, 0x00, 0xff, 0x41]));
+      internals.schedule("blob.bin", internals.generation);
+      expect(await waitFor(() => uncached.some((u) => u.path === join(root, "blob.bin")), 5000)).toBe(true);
+      expect(uncached.find((u) => u.path === join(root, "blob.bin"))?.status).toBe("created");
+      expect(changed).not.toContain("blob.bin");
+      expect(watcher.lastContents.has(join(root, "blob.bin"))).toBe(false);
+      // A second write reads "modified": the skip path tracks seen state.
+      writeFileSync(join(root, "blob.bin"), Buffer.from([0x89, 0x00, 0xff, 0x42]));
+      internals.schedule("blob.bin", internals.generation);
+      expect(await waitFor(() => uncached.filter((u) => u.path === join(root, "blob.bin")).length >= 2, 5000)).toBe(true);
+      expect(uncached.filter((u) => u.path === join(root, "blob.bin")).at(-1)?.status).toBe("modified");
+      // Oversized text is reported the same way, without caching 2 MiB+.
+      writeFileSync(join(root, "huge.txt"), "x".repeat(2 * 1024 * 1024 + 1));
+      internals.schedule("huge.txt", internals.generation);
+      expect(await waitFor(() => uncached.some((u) => u.path === join(root, "huge.txt")), 5000)).toBe(true);
+      expect(changed).not.toContain("huge.txt");
+      expect(watcher.lastContents.has(join(root, "huge.txt"))).toBe(false);
+      // A text file that turns binary evicts its stale cache entry.
+      writeFileSync(join(root, "flip.txt"), "plain text");
+      internals.schedule("flip.txt", internals.generation);
+      expect(await waitFor(() => changed.includes("flip.txt"), 5000)).toBe(true);
+      expect(watcher.lastContents.has(join(root, "flip.txt"))).toBe(true);
+      writeFileSync(join(root, "flip.txt"), Buffer.from([0x00, 0x01, 0x02]));
+      internals.schedule("flip.txt", internals.generation);
+      expect(await waitFor(() => uncached.some((u) => u.path === join(root, "flip.txt")), 5000)).toBe(true);
+      expect(watcher.lastContents.has(join(root, "flip.txt"))).toBe(false);
+      expect(watcher.lastOids.has(join(root, "flip.txt"))).toBe(false);
+    } finally {
+      watcher.stop();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

@@ -149,6 +149,9 @@ export class ProjectWatcher {
   onFileTouched: (path: string, status: "created" | "modified") => void | Promise<void> = () => {};
   /** Fired when a previously-seen file disappears (tabs and list entries clean up). */
   onFileDeleted: (path: string) => void | Promise<void> = () => {};
+  /** Fired when a file changed but its content was not cached (oversized or
+   *  binary). Carries the path and status only — no content, no prev. */
+  onFileUncached: (path: string, status: "created" | "modified") => void | Promise<void> = () => {};
 
   /**
    * @param root watched directory
@@ -716,7 +719,8 @@ export class ProjectWatcher {
     return false;
   }
 
-  private isIgnored(relPath: string): boolean {
+  /** True when the watcher drops this root-relative path (segments/gitignore). */
+  isIgnored(relPath: string): boolean {
     const segments = relPath.split(sep);
     if (segments.some((s) => IGNORED_SEGMENTS.has(s))) return true;
     return this.gitignoreRules.size > 0 && matchGitignore(this.gitignoreRules, segments.join("/"));
@@ -785,14 +789,7 @@ export class ProjectWatcher {
     if (st.size > MAX_FILE_SIZE) {
       // A file can grow past the cap. Mark it seen so a later small read
       // reports "modified", and drop the stale cached content.
-      this.seen.add(relPath);
-      const key = this.canonicalize ? await this.canonicalize(abs) : abs;
-      const evicted = this.lastContents.get(key);
-      if (evicted !== undefined) {
-        this.cacheBytes -= Buffer.byteLength(evicted, "utf8");
-        this.lastContents.delete(key);
-        this.lastOids.delete(key);
-      }
+      await this.reportUncached(abs, relPath, generation);
       return;
     }
 
@@ -801,7 +798,10 @@ export class ProjectWatcher {
       const buf = await readFile(abs);
       // NUL bytes do not appear in text. Check the buffer, not the decoded
       // string: valid text can contain the replacement character.
-      if (buf.includes(0)) return;
+      if (buf.includes(0)) {
+        await this.reportUncached(abs, relPath, generation);
+        return;
+      }
       content = buf.toString("utf8");
     } catch (error) {
       throw error;
@@ -830,6 +830,24 @@ export class ProjectWatcher {
       this.seen.add(relPath);
       this.putCached(key, content);
     }
+  }
+
+  /** Report an oversized or binary file without caching its content. Marks
+   *  the path seen (so the next report reads "modified"), evicts any stale
+   *  cached text, and fires `onFileUncached` so the tree still records the
+   *  write. Overflow reconciliation replays through here too: skipped paths
+   *  have no cached content to compare, so they report unconditionally. */
+  private async reportUncached(abs: string, relPath: string, generation: number): Promise<void> {
+    const status = this.seen.has(relPath) ? "modified" : "created";
+    this.seen.add(relPath);
+    const key = this.canonicalize ? await this.canonicalize(abs) : abs;
+    const evicted = this.lastContents.get(key);
+    if (evicted !== undefined) {
+      this.cacheBytes -= Buffer.byteLength(evicted, "utf8");
+      this.lastContents.delete(key);
+      this.lastOids.delete(key);
+    }
+    if (generation === this.generation) await this.onFileUncached(abs, status);
   }
 
   /** Add one file version to the content cache and evict when over budget. */
