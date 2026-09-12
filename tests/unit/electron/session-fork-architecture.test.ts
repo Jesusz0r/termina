@@ -19,7 +19,14 @@ describe("SessionFork Architecture Contracts", () => {
     .map((name) => readFileSync(join(root, "core", "src", name), "utf8"))
     .join("\n");
   const worker = readFileSync(join(root, "electron", "session-worker.ts"), "utf8");
-  const retention = readFileSync(join(root, "electron", "session-retention.ts"), "utf8");
+  // The retention owner is a directory; read every module so the contracts
+  // below cover the whole owner instead of one file.
+  const retention = [join(root, "electron", "session-retention.ts"), ...readdirSync(join(root, "electron", "session-retention"))
+    .filter((name) => name.endsWith(".ts"))
+    .sort()
+    .map((name) => join(root, "electron", "session-retention", name))]
+    .map((path) => readFileSync(path, "utf8"))
+    .join("\n");
   // The session owner is a directory; read every module so the contracts
   // below cover the whole owner instead of one file.
   const session = [join(root, "agent-core", "session.ts"), ...readdirSync(join(root, "agent-core", "session"))
