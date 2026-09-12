@@ -1142,7 +1142,8 @@ class PiEditorApp {
         preload: join(__dirname, "preload.cjs"),
         contextIsolation: true,
         nodeIntegration: false,
-        sandbox: false,
+        // Sandboxed: the preload may only use contextBridge/ipcRenderer/webUtils.
+        sandbox: true,
         ...(E2E_HIDDEN_WINDOW ? { backgroundThrottling: false } : {}),
       },
     });
@@ -1217,6 +1218,16 @@ class PiEditorApp {
       if (!this.rendererAwaitingNewFrame) this.beginPtyDocumentReload(win, windowGeneration);
     });
     win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    // The renderer needs no web permissions except the DOM clipboard that
+    // Monaco copy/cut/paste and the copy buttons use. Deny everything else
+    // so a future XSS cannot reach media, geolocation, notifications, or
+    // devices. The already-privileged bridge owns terminal clipboard flows.
+    win.webContents.session.setPermissionRequestHandler((_webContents, permission, callback) =>
+      callback(permission === "clipboard-read" || permission === "clipboard-sanitized-write"),
+    );
+    win.webContents.session.setPermissionCheckHandler((_webContents, permission) =>
+      permission === "clipboard-read" || permission === "clipboard-sanitized-write",
+    );
     win.webContents.on("did-start-navigation", (details, _url, _isInPlace, _isMainFrame, frameProcessId, frameRoutingId) => {
       if (this.disposed || this.win !== win || this.rendererWindowGeneration !== windowGeneration || win.isDestroyed()) return;
       if (!details.isMainFrame || details.isSameDocument) return;
