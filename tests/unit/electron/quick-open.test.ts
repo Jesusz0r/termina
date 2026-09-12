@@ -203,11 +203,11 @@ describe("Quick Open path index", () => {
       const index = new ProjectPathIndex();
       await index.candidates(root);
 
-      index.noteAdded("src/new.ts");
+      index.noteAdded(root, "src/new.ts");
       expect((await searchProjectFiles(root, "new", { candidates: await index.candidates(root) })).entries)
         .toEqual([{ relPath: "src/new.ts", matches: [4, 5, 6] }]);
 
-      index.noteRemoved("src/new.ts");
+      index.noteRemoved(root, "src/new.ts");
       expect((await searchProjectFiles(root, "new", { candidates: await index.candidates(root) })).entries).toEqual([]);
     } finally {
       cleanup();
@@ -221,7 +221,7 @@ describe("Quick Open path index", () => {
       await index.candidates(root);
       // One event for the directory, none for its files: the index must not keep
       // offering paths that are gone.
-      index.noteRemoved("src");
+      index.noteRemoved(root, "src");
       const { paths } = await index.candidates(root);
       expect(paths).not.toContain("src/a.ts");
       expect(paths).not.toContain("src/deep/b.ts");
@@ -301,6 +301,44 @@ describe("Quick Open path index", () => {
       cleanup();
     }
   });
+
+  it("ignores watcher events from a background project", async () => {
+    const rootA = mkdtempSync(join(tmpdir(), "qo-fg-"));
+    const rootB = mkdtempSync(join(tmpdir(), "qo-bg-"));
+    try {
+      for (const root of [rootA, rootB]) {
+        mkdirSync(join(root, "src"), { recursive: true });
+        writeFileSync(join(root, "src", "app.ts"), "x");
+      }
+      const index = new ProjectPathIndex();
+      await index.candidates(rootA);
+
+      // Background creates must not appear as ghosts; background deletes of
+      // a same-named path must not hide the foreground file.
+      index.noteAdded(rootB, "src/ghost.ts");
+      index.noteRemoved(rootB, "src/app.ts");
+      const { paths } = await index.candidates(rootA);
+      expect(paths).not.toContain("src/ghost.ts");
+      expect(paths).toContain("src/app.ts");
+      const ghost = await searchProjectFiles(rootA, "ghost", { candidates: await index.candidates(rootA) });
+      expect(ghost.entries).toEqual([]);
+      const app = await searchProjectFiles(rootA, "app", { candidates: await index.candidates(rootA) });
+      expect(app.entries.map((e) => e.relPath)).toContain("src/app.ts");
+
+      // A background .gitignore touch must not wipe the foreground cache: a
+      // file added quietly on disk stays invisible until a foreground
+      // .gitignore event rebuilds the index.
+      writeFileSync(join(rootA, "added-quietly.ts"), "x");
+      index.noteAdded(rootB, ".gitignore");
+      index.noteRemoved(rootB, ".gitignore");
+      expect((await index.candidates(rootA)).paths).not.toContain("added-quietly.ts");
+      index.noteAdded(rootA, ".gitignore");
+      expect((await index.candidates(rootA)).paths).toContain("added-quietly.ts");
+    } finally {
+      rmSync(rootA, { recursive: true, force: true });
+      rmSync(rootB, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("quick-open gitignore", () => {
@@ -363,7 +401,7 @@ describe("quick-open gitignore", () => {
 
       writeFileSync(join(root, ".gitignore"), "ignored/\n*.log\n!keep.log\nnotes.md\n");
       // Watcher create/modify of .gitignore arrives as noteAdded.
-      index.noteAdded(".gitignore");
+      index.noteAdded(root, ".gitignore");
 
       const after = await searchProjectFiles(root, "notes", { candidates: await index.candidates(root) });
       expect(after.entries.map((e) => e.relPath)).not.toContain("notes.md");
@@ -381,7 +419,7 @@ describe("quick-open gitignore", () => {
       expect((await index.candidates(root)).paths).not.toContain("app.log");
 
       rmSync(join(root, ".gitignore"));
-      index.noteRemoved(".gitignore");
+      index.noteRemoved(root, ".gitignore");
 
       const { paths } = await index.candidates(root);
       expect(paths).toContain("app.log");
