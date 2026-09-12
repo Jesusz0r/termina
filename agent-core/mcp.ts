@@ -8,6 +8,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { outboundUrlError, resolvedHostError } from "./main/url.ts";
 import { BoundedTextAccumulator, type BoundedToolResult, type CompletionState } from "./tool-output.ts";
 
 export const MAX_MCP_SERVERS = 8;
@@ -149,18 +150,7 @@ function parseHeaderMap(raw: unknown): Record<string, string> {
 
 export function mcpHttpUrlError(url: string): string | null {
   if (!url || url.length > 2048) return "error: invalid URL";
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return "error: invalid URL";
-  }
-  if (parsed.protocol === "https:") return null;
-  const loopback =
-    parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "::1";
-  if (parsed.protocol === "http:" && loopback && process.env.TERMINA_CORE_TEST === "1") return null;
-  if (parsed.protocol === "http:") return "error: only https URLs are allowed";
-  return `error: URL scheme not allowed: ${parsed.protocol}`;
+  return outboundUrlError(url);
 }
 
 function parseOneServer(name: string, rec: unknown): McpServerConfig | "disabled" | null {
@@ -1205,6 +1195,16 @@ export async function startMcp(
       const bad = mcpHttpUrlError(cfg.url);
       if (bad) {
         return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${bad}` };
+      }
+      let hopHost: string;
+      try {
+        hopHost = new URL(cfg.url).hostname;
+      } catch {
+        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: error: invalid URL` };
+      }
+      const resolved = await resolvedHostError(hopHost);
+      if (resolved) {
+        return { cfg, proc: null, tools: [], note: `mcp ${cfg.name}: ${resolved}` };
       }
       const proc = new McpHttp(cfg.name, cfg.url, cfg.headers ?? {});
       try {
