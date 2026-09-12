@@ -221,6 +221,7 @@ import {
 } from "./main/tools.ts";
 import { createFrontMatter } from "./main/front-matter.ts";
 import { renderHistoryTranscript, type ContentBlock } from "./main/history-view.ts";
+import { shouldAutoOpenLogin } from "./main/login-hint.ts";
 import {
   SubagentRegistry,
   appendSubagentInboxMessage,
@@ -6226,6 +6227,7 @@ async function main(): Promise<void> {
   const resumeResult = sessionEnvironment.TERMINA_CORE_RESUME === "1" ? await resumeSession() : { ok: true as const };
   let structured = "";
   let structuredImages: Array<{ name: string; mediaType: string }> = [];
+  let startupPrefilled = false;
   if (eventsDir && terminalId) {
     const control = consumeStartupControl(eventsDir, terminalId, bridgeId);
     const opId = control?.opId ?? "";
@@ -6234,6 +6236,7 @@ async function main(): Promise<void> {
     else sidecar.logEvent({ t: "session_ready", opId, ok: true });
     logSettings();
     if (control?.action === "prefill" && control.text) {
+      startupPrefilled = true;
       surface?.setDraft(control.text);
       if (!surface) out(`${control.text}\n`);
     } else if (control?.action === "structured") {
@@ -6243,6 +6246,23 @@ async function main(): Promise<void> {
     }
   }
   showPrompt();
+  const subagentTaskPath = parseSubagentTaskFlag(process.argv);
+  const printed = parsePrintPrompt(process.argv);
+  // First run with no provider: the `/login` picker is the TUI, not a
+  // typed command. Prefill it so it is visible without expanding chrome.
+  if (
+    shouldAutoOpenLogin({
+      hasSurface: surface !== null,
+      historyLength: history.length,
+      startupPrefilled,
+      hasStructuredPrompt: structured !== "" || structuredImages.length > 0,
+      isSubagent: subagentTaskPath !== null,
+      isPrintMode: printed !== null,
+      hasAuthenticatedProvider: firstAuthenticatedProvider() !== null,
+    })
+  ) {
+    surface?.setDraft("/login");
+  }
   if (structured || structuredImages.length > 0) {
     if (structured) out(`> ${structured}\n`);
     void runPrompt(structured, structuredImages)
@@ -6252,12 +6272,10 @@ async function main(): Promise<void> {
       });
     return;
   }
-  const subagentTaskPath = parseSubagentTaskFlag(process.argv);
   if (subagentTaskPath !== null) {
     await runSubagentTask(subagentTaskPath);
     return;
   }
-  const printed = parsePrintPrompt(process.argv);
   if (printed !== null) {
     if (!printed) {
       process.stderr.write("agent-core: -p needs a prompt\n");
