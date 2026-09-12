@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { AgentTui } from "../../../agent-core/tui.ts";
+import { formatToolSummary, matchingSlashCommands, SLASH_COMMANDS } from "../../../agent-core/tui-text.ts";
 
 function makeTui(): AgentTui {
   return new AgentTui({
@@ -72,5 +73,109 @@ describe("agent-core TUI streaming bounds", () => {
     expect(frame).toContain("const value = 1;");
     expect(frame).toContain("after");
     expect(frame).not.toContain("```ts");
+  });
+});
+
+const MODEL_PICKER_ROWS = [
+  { name: "openai-codex/gpt-5.4", hint: "openai-codex", submit: "/model openai-codex/gpt-5.4" },
+  { name: "anthropic/claude-sonnet-4-5", hint: "anthropic", submit: "/model anthropic/claude-sonnet-4-5" },
+];
+
+describe("agent-core TUI settled tool fold", () => {
+  it("formats the one-line tool summary", () => {
+    expect(formatToolSummary("bash", "ls", "done")).toBe("◆ bash  ls  done");
+    expect(formatToolSummary("bash", "ls", "failed")).toBe("◆ bash  ls  failed");
+    expect(formatToolSummary("read", undefined, "done")).toBe("◆ read  done");
+  });
+
+  it("paints a settled tool as one line until Enter expands the payload", () => {
+    const tui = makeTui();
+    const payload = "UNIQUE_SETTLED_TOOL_PAYLOAD";
+    tui.finishTool(tui.startTool("bash", "ls -la"), "success", payload);
+    const folded = tui.frame();
+    const toolLines = folded.split("\n").filter((line) => line.includes("◆"));
+    expect(toolLines).toHaveLength(1);
+    expect(toolLines[0]).toContain("◆ bash  ls -la  done");
+    expect(folded).not.toContain(payload);
+
+    tui.feed("\r");
+    const expanded = tui.frame();
+    expect(expanded).toContain(payload);
+    expect(expanded).toContain("◆ bash  ls -la  done");
+
+    tui.feed("\r");
+    expect(tui.frame()).not.toContain(payload);
+  });
+
+  it("does not expand a folded tool when Enter submits a prompt", () => {
+    const submitted: string[] = [];
+    const tui = new AgentTui({
+      stdout: { write: () => true, columns: 120, rows: 40, isTTY: false },
+      stdin: { isTTY: false },
+      onSubmit: (line) => submitted.push(line),
+      onInterrupt: () => {},
+      onExit: () => {},
+    });
+    tui.finishTool(tui.startTool("bash", "ls"), "success", "UNIQUE_SETTLED_TOOL_PAYLOAD");
+    tui.feed("keep going\r");
+    expect(submitted).toEqual(["keep going"]);
+    expect(tui.frame()).not.toContain("UNIQUE_SETTLED_TOOL_PAYLOAD");
+  });
+});
+
+describe("agent-core TUI /model picker alias", () => {
+  it("matches /model to the same picker rows as /models", () => {
+    const fromModels = matchingSlashCommands("/models", SLASH_COMMANDS, MODEL_PICKER_ROWS).map((row) => row.name);
+    const fromModel = matchingSlashCommands("/model", SLASH_COMMANDS, MODEL_PICKER_ROWS).map((row) => row.name);
+    expect(fromModel).toEqual(fromModels);
+    expect(fromModel).toEqual(["openai-codex/gpt-5.4", "anthropic/claude-sonnet-4-5"]);
+    expect(matchingSlashCommands("/model a", SLASH_COMMANDS, MODEL_PICKER_ROWS).map((row) => row.name)).toEqual([
+      "anthropic/claude-sonnet-4-5",
+    ]);
+  });
+
+  it("shows models picker rows when /model is typed", () => {
+    const submitted: string[] = [];
+    const tui = new AgentTui({
+      stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+      stdin: { isTTY: false },
+      onSubmit: (line) => submitted.push(line),
+      onInterrupt: () => {},
+      onExit: () => {},
+    });
+    tui.setModelRows(MODEL_PICKER_ROWS);
+    tui.feed("/model");
+    const frame = tui.frame();
+    expect(frame).toContain("openai-codex/gpt-5.4");
+    expect(frame).toContain("anthropic/claude-sonnet-4-5");
+    expect(frame).toContain("> /model");
+    tui.feed("\r");
+    expect(submitted).toEqual(["/model openai-codex/gpt-5.4"]);
+  });
+
+  it("submits /models when bare /model has no picker rows yet", () => {
+    const submitted: string[] = [];
+    const tui = new AgentTui({
+      stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+      stdin: { isTTY: false },
+      onSubmit: (line) => submitted.push(line),
+      onInterrupt: () => {},
+      onExit: () => {},
+    });
+    tui.feed("/model\r");
+    expect(submitted).toEqual(["/models"]);
+  });
+
+  it("keeps /model <id> as a switch", () => {
+    const submitted: string[] = [];
+    const tui = new AgentTui({
+      stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
+      stdin: { isTTY: false },
+      onSubmit: (line) => submitted.push(line),
+      onInterrupt: () => {},
+      onExit: () => {},
+    });
+    tui.feed("/model anthropic/claude-sonnet-4-5\r");
+    expect(submitted).toEqual(["/model anthropic/claude-sonnet-4-5"]);
   });
 });
