@@ -395,7 +395,7 @@ current Mine set before merging.
 ## 11. Settings
 
 Open with `Cmd/Ctrl+,`. Settings has three sections: **General**,
-**Appearance**, and **Shortcuts**.
+**Appearance**, and **Keyboard**.
 
 **General**
 
