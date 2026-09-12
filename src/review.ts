@@ -310,13 +310,11 @@ export class ReviewView {
     // The watcher updates the editor; refresh the diff to show the restored state.
     await this.refreshCurrent();
     this.onReverted(this.path);
-    toast("reverted", "info");
   }
 
   accept(): void {
     if (!this.path) return;
     this.onAccepted(this.path);
-    toast("accepted", "info");
     this.hide();
   }
 

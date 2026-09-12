@@ -478,7 +478,6 @@ export class WorldlinesView {
       if (!r.confirmed) return;
       const res = await window.termina.challengeCandidate(comparisonId, "A", profile);
       if (!res.ok) toast(`challenge failed: ${res.error ?? "unknown error"}`, "warning");
-      else toast(`challenger launched — ${res.comparisonId ?? ""}`, "info");
     });
   }
 
@@ -509,10 +508,7 @@ export class WorldlinesView {
       return;
     }
     if (!res.ok) toast(`promotion failed: ${res.error ?? "unknown error"}`, "warning");
-    else {
-      toast(`candidate ${label} promoted — opening the result in a new terminal`, "info");
-      if (res.terminalId) this.handlers.onOpenTerminal(res.terminalId);
-    }
+    else if (res.terminalId) this.handlers.onOpenTerminal(res.terminalId);
   }
 
   private async verify(comparisonId: string, label: "A" | "B"): Promise<void> {
@@ -535,7 +531,25 @@ export class WorldlinesView {
   private async export(comparisonId: string, label: "A" | "B"): Promise<void> {
     const res = await window.termina.exportWorldline(comparisonId, label);
     if (!res.ok) toast(res.error ?? "export failed", "warning");
-    else toast(`candidate ${label} exported — ${res.path ?? "bundle written"}`, "info");
+    else this.recordExportPath(comparisonId, label, res.path);
+  }
+
+  /** The bundle path used to live only in a vanishing toast. Keep it on the card. */
+  private recordExportPath(comparisonId: string, label: "A" | "B", path: string | undefined): void {
+    const card = this.pairs.get(comparisonId)?.cards.get(label);
+    if (!card) return;
+    const dest = path?.trim() || "bundle written";
+    const exportBtn = card.el.querySelector<HTMLButtonElement>(".cand-export");
+    if (exportBtn) exportBtn.title = dest;
+    let note = card.el.querySelector<HTMLElement>(".cand-export-path");
+    if (!note) {
+      note = document.createElement("p");
+      note.className = "cand-export-path muted";
+      card.el.appendChild(note);
+    }
+    note.textContent = dest;
+    const moreBody = exportBtn?.parentElement;
+    if (moreBody) moreBody.hidden = false;
   }
 
   private async reopen(comparisonId: string, label: "A" | "B"): Promise<void> {
@@ -547,10 +561,7 @@ export class WorldlinesView {
     }
     const res = await window.termina.openWorldlineTerminal(comparisonId, label);
     if (!res.ok) toast(res.error ?? "could not reopen the candidate", "warning");
-    else {
-      toast(`candidate ${label} reopened`, "info");
-      if (res.terminalId) this.handlers.onOpenTerminal(res.terminalId);
-    }
+    else if (res.terminalId) this.handlers.onOpenTerminal(res.terminalId);
   }
 
   private confirmDiscard(comparisonId: string): void {
