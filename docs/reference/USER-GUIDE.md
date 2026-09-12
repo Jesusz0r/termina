@@ -160,9 +160,10 @@ While the agent works:
 
 - The file watcher pushes every disk change into open editor models. You see
   edits land as the agent writes them.
-- Files the agent touches auto-open in editor tabs mid-run, so you can follow
-  along without hunting for paths. Turn this off in Settings → General →
-  **Open files the agent edits**.
+- Files the agent touches auto-open in a replaceable preview tab mid-run, so
+  you can follow along without hunting for paths — a long run never pins a
+  tab per file. Edit, double-click, or Keep Open to pin one. Turn this off
+  in Settings → General → **Open files the agent edits**.
 - The Modified files panel (bottom of the terminal pane) lists every file the
   current run changed, with a badge per file: `A` created, `M` modified,
   `D` deleted.
@@ -182,11 +183,14 @@ To review a change:
 1. Click a file in the Modified files panel. Change Review opens a side-by-side
    diff: baseline on the left, current content on the right.
 2. Choose an action:
-   - **Accept** — mark the change as kept (`✓` mark in the list).
+   - **Accept** — mark the change as reviewed (`✓` mark in the list, with the
+     review time). The mark drops if the file changes again — it reviewed the
+     bytes the file no longer has.
    - **Revert** — restore the pre-run version (`↩` mark in the list).
    - **Open file** — leave the diff and edit the file as a normal tab.
 3. Use **Accept all** in the panel header to accept every change at once, or
-   **Clear** to reset the list display.
+   **Clear** to forget review state. Clear only hides the list — files stay
+   changed on disk, and their review marks are dropped.
 
 ### Handing off to Git
 
@@ -401,7 +405,7 @@ Open with `Cmd/Ctrl+,`. Settings has three sections: **General**,
 
 | Setting | Options |
 |---|---|
-| Open files the agent edits | On / off. When on, a file opens in the editor as the agent starts editing it. On by default. |
+| Open files the agent edits | On / off. When on, a file opens as a replaceable preview tab as the agent starts editing it. On by default. |
 
 **Appearance**
 
