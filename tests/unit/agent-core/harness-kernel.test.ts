@@ -4113,7 +4113,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
               content: {
                 parts: [
                   { text: "plan", thought: true, thoughtSignature: "sig1" },
-                  { functionCall: { name: "read_file", args: { path: "a.ts" } } },
+                  { functionCall: { name: "read_file", args: { path: "a.ts" }, id: "provider-call-1" } },
                 ],
               },
             },
@@ -4125,7 +4125,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
               content: {
                 parts: [
                   { text: "plan", thought: true, thoughtSignature: "sig1" },
-                  { functionCall: { name: "read_file", args: { path: "a.ts" } } },
+                  { functionCall: { name: "read_file", args: { path: "a.ts" }, id: "provider-call-1" } },
                 ],
               },
             },

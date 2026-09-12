@@ -22,9 +22,9 @@ function responses(id: any, name: any, args: any) {
   ], () => {}, 0);
 }
 
-function google(name: any, args: any) {
+function google(name: any, args: any, id: any = "call-1") {
   return compat.googleResultFromEvents([
-    { candidates: [{ content: { parts: [{ functionCall: { name, args } }] }, finishReason: "STOP" }] },
+    { candidates: [{ content: { parts: [{ functionCall: { name, args, id } }] }, finishReason: "STOP" }] },
   ], () => {}, 0);
 }
 
@@ -71,8 +71,8 @@ function sseStream(lines: any[]) {
 function atomicGoogle(secondArgs: any) {
   return compat.googleResultFromEvents([
     { candidates: [{ content: { parts: [
-      { functionCall: { name: "read_file", args: {} } },
-      { functionCall: { name: "bash", args: secondArgs } },
+      { functionCall: { name: "read_file", args: {}, id: "call-valid" } },
+      { functionCall: { name: "bash", args: secondArgs, id: "call-invalid" } },
     ] }, finishReason: "STOP" }] },
   ], () => {}, 0);
 }
@@ -126,9 +126,127 @@ describe("Agent Core Provider Tool Arguments Contract", () => {
       assertRejected(google(" \t ", {}), /tool call identity/i);
       assertRejected(google("bash", undefined), /tool call arguments.*JSON object/i);
 
+      // Blank ids fall back to a generated id instead of failing the turn:
+      // functionCall.id is guaranteed only on Gemini 3.
+      for (const id of ["", "   "]) {
+        const fallback = google("bash", {}, id);
+        expect(fallback.error).toBeUndefined();
+        expect(fallback.blocks.find((block: any) => block.type === "tool_use")?.id).toBe("call_1");
+      }
+
       const validGoogle = google("bash", {});
       expect(validGoogle.error).toBeUndefined();
       expect(validGoogle.blocks.find((block: any) => block.type === "tool_use")?.input).toEqual({});
+    });
+  });
+
+  describe("Google functionCall identity and thought signatures", () => {
+    function googleParts(parts: any[]) {
+      return compat.googleResultFromEvents([
+        { candidates: [{ content: { parts }, finishReason: "STOP" }] },
+      ], () => {}, 0);
+    }
+
+    it("persists provider functionCall ids through decode", () => {
+      const result = googleParts([
+        { functionCall: { name: "read_file", args: { path: "a.ts" }, id: "provider-call-1" } },
+        { functionCall: { name: "read_file", args: { path: "b.ts" }, id: "provider-call-2" } },
+      ]);
+      expect(result.error).toBeUndefined();
+      const calls = result.blocks.filter((block: any) => block.type === "tool_use");
+      expect(calls.map((call: any) => [call.id, call.name, call.input])).toEqual([
+        ["provider-call-1", "read_file", { path: "a.ts" }],
+        ["provider-call-2", "read_file", { path: "b.ts" }],
+      ]);
+    });
+
+    it("falls back to a generated id for Google calls without a provider id", () => {
+      for (const parts of [
+        [{ functionCall: { name: "read_file", args: {} } }],
+        [{ functionCall: { name: "read_file", args: {}, id: 7 } }],
+        [{ functionCall: { name: "read_file", args: {}, id: "  " } }],
+      ]) {
+        const result = googleParts(parts);
+        expect(result.error).toBeUndefined();
+        const calls = result.blocks.filter((block: any) => block.type === "tool_use");
+        expect(calls.map((call: any) => [call.id, call.name])).toEqual([["call_1", "read_file"]]);
+      }
+      // Nameless calls stay rejected: a generated id cannot make them executable.
+      assertRejected(googleParts([{ functionCall: { name: "", args: {}, id: "provider-call-1" } }]), /tool call identity/i);
+    });
+
+    it("dedupes id-less snapshot repeats by name+args", () => {
+      const repeats = compat.googleResultFromEvents(
+        [
+          { candidates: [{ content: { parts: [{ functionCall: { name: "read_file", args: { path: "a.ts" } } }] } }] },
+          { candidates: [{ content: { parts: [{ functionCall: { name: "read_file", args: { path: "a.ts" } } }] }, finishReason: "STOP" }] },
+        ],
+        () => {},
+        0,
+      );
+      expect(repeats.error).toBeUndefined();
+      const calls = repeats.blocks.filter((block: any) => block.type === "tool_use");
+      expect(calls.map((call: any) => [call.id, call.input])).toEqual([["call_1", { path: "a.ts" }]]);
+    });
+
+    it("keeps same-name parallel calls distinct while deduping snapshot repeats by id", () => {
+      const parallel = googleParts([
+        { functionCall: { name: "read_file", args: { path: "same.ts" }, id: "provider-call-1" } },
+        { functionCall: { name: "read_file", args: { path: "same.ts" }, id: "provider-call-2" } },
+      ]);
+      expect(parallel.error).toBeUndefined();
+      expect(
+        parallel.blocks.filter((block: any) => block.type === "tool_use").map((call: any) => call.id),
+      ).toEqual(["provider-call-1", "provider-call-2"]);
+
+      const repeats = compat.googleResultFromEvents(
+        [
+          { candidates: [{ content: { parts: [{ functionCall: { name: "read_file", args: { path: "a.ts" }, id: "provider-call-1" } }] } }] },
+          { candidates: [{ content: { parts: [{ functionCall: { name: "read_file", args: { path: "a.ts" }, id: "provider-call-1" } }] }, finishReason: "STOP" }] },
+        ],
+        () => {},
+        0,
+      );
+      expect(repeats.error).toBeUndefined();
+      expect(repeats.blocks.filter((block: any) => block.type === "tool_use")).toHaveLength(1);
+    });
+
+    it("round-trips provider ids and the first-call thoughtSignature on replay", () => {
+      const decoded = googleParts([
+        { functionCall: { name: "read_file", args: { path: "a.ts" }, id: "provider-call-1" }, thoughtSignature: "sig-1" },
+        { functionCall: { name: "read_file", args: { path: "b.ts" }, id: "provider-call-2" } },
+      ]);
+      expect(decoded.error).toBeUndefined();
+      expect(
+        decoded.blocks.filter((block: any) => block.type === "tool_use").map((call: any) => [call.id, call.thought_signature]),
+      ).toEqual([
+        ["provider-call-1", "sig-1"],
+        ["provider-call-2", undefined],
+      ]);
+
+      const body = compat.googleGenerateBody("", [
+        { role: "assistant", content: decoded.blocks },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "provider-call-1", content: "contents-a" },
+            { type: "tool_result", tool_use_id: "provider-call-2", content: "contents-b" },
+          ],
+        },
+      ], []);
+      const contents = body.contents as any[];
+      expect(contents.map((item: any) => item.role)).toEqual(["model", "user"]);
+      expect(contents[0].parts).toEqual([
+        {
+          functionCall: { name: "read_file", args: { path: "a.ts" }, id: "provider-call-1" },
+          thoughtSignature: "sig-1",
+        },
+        { functionCall: { name: "read_file", args: { path: "b.ts" }, id: "provider-call-2" } },
+      ]);
+      expect(contents[1].parts).toEqual([
+        { functionResponse: { name: "read_file", response: { output: "contents-a" }, id: "provider-call-1" } },
+        { functionResponse: { name: "read_file", response: { output: "contents-b" }, id: "provider-call-2" } },
+      ]);
     });
   });
 
