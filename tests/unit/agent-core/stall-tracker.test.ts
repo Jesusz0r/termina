@@ -160,6 +160,23 @@ describe("tool-loop recovery policy", () => {
     for (let i = 0; i < 2; i++) tracker = trackToolLoopTurn(tracker, [call]).tracker;
     const step = trackToolLoopTurn(tracker, [call]);
     expect(step.recovery).toContain("broaden the pattern or scope");
+    expect(step.recovery).not.toContain("write_file");
+    expect(step.stalled).toBe(false);
+  });
+
+  it("tells identical successful reads to write instead of inspect again", () => {
+    let tracker = emptyToolLoopTracker();
+    const call = { name: "read_file", input: { path: "mig.ts" }, result: "1|export" };
+    for (let i = 0; i < 2; i++) tracker = trackToolLoopTurn(tracker, [call]).tracker;
+    const step = trackToolLoopTurn(tracker, [call]);
+    expect(step.recovery).toContain("You already have this read_file result");
+    expect(step.recovery).toContain("Do not call read_file again");
+    expect(step.recovery).toContain("write_file");
+    expect(step.recovery).toContain("write_file a complete first version now");
+    expect(step.recovery).toContain("do not keep re-reading a template");
+    expect(step.recovery).not.toContain("inspect the failed");
+    expect(step.recovery).not.toContain("empty searches");
+    expect(step.recovery).not.toContain("Use read_file on the failed path");
     expect(step.stalled).toBe(false);
   });
 

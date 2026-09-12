@@ -217,16 +217,36 @@ function repeatedCycle(turns: readonly string[]): ToolLoopTracker["warnedCycle"]
   return null;
 }
 
+/** Same observational set as tool-dispatch READ_TOOLS; listed here to keep stall.ts acyclic. */
+const OBSERVATIONAL_TOOLS = new Set(["read_file", "grep", "glob", "fetch"]);
+
 function recoveryGuidance(calls: readonly ToolTurnCall[]): string {
-  const editFailed = calls.some((call) => call.name === "edit" && call.isError);
-  const steps = editFailed
-    ? "Use read_file on the failed path before another edit. Copy a small, unique old_text from the current file, " +
+  const prefix =
+    "Tool loop detected: repeated calls are not making progress. Recover autonomously; do not repeat the failing approach. ";
+  const suffix =
+    " Continue the original task after recovery. If recovery is not possible, explain the concrete blocker instead of retrying.";
+  if (calls.some((call) => call.name === "edit" && call.isError)) {
+    return prefix +
+      "Use read_file on the failed path before another edit. Copy a small, unique old_text from the current file, " +
       "without the N| line-number prefixes; preserve its whitespace. Do not guess another snippet or overwrite " +
-      "the whole file to bypass an edit miss."
-    : "Inspect the failed tool's inputs and current state, then change approach using the tool's recovery steps. " +
-      "For empty searches, broaden the pattern or scope, or list files before searching again.";
-  return "Tool loop detected: repeated calls are not making progress. Recover autonomously; do not repeat the failing approach. " +
-    steps + " Continue the original task after recovery. If recovery is not possible, explain the concrete blocker instead of retrying.";
+      "the whole file to bypass an edit miss." + suffix;
+  }
+  if (calls.some((call) =>
+    (call.name === "grep" || call.name === "glob") && isGrepNoMatches(stallResultText(call.result))
+  )) {
+    return prefix +
+      "For empty searches, broaden the pattern or scope, or list files before searching again." + suffix;
+  }
+  if (calls.length > 0 && calls.every((call) => OBSERVATIONAL_TOOLS.has(call.name) && call.isError !== true)) {
+    const tools = [...new Set(calls.map((call) => call.name))].join("/");
+    return prefix +
+      `You already have this ${tools} result. Do not call ${tools} again with the same arguments. ` +
+      "If you intended to create or change a file, call write_file or edit now. " +
+      "For a large new file, write_file a complete first version now, then edit to add more if needed; " +
+      "do not keep re-reading a template." + suffix;
+  }
+  return prefix +
+    "Inspect the last tool's inputs, then change approach using the tool's recovery steps." + suffix;
 }
 
 /**

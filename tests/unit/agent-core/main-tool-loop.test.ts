@@ -132,6 +132,9 @@ describe("real tool loop regressions", () => {
     await scenario('return [{ name: "read_file", input: { path: "file.txt" } }];', (result) => {
       expect(result.requests).toHaveLength(6);
       expect(JSON.stringify(result.requests[3])).toContain("Tool loop detected");
+      expect(JSON.stringify(result.requests[3])).toContain("You already have this read_file result");
+      expect(JSON.stringify(result.requests[3])).toContain("do not keep re-reading a template");
+      expect(JSON.stringify(result.requests[3])).not.toContain("inspect the failed");
       expect(result.traces.some((row) => row.status === "stalled")).toBe(true);
       expect(result.events.find((row) => row.t === "agent_settled")?.error).toContain("stalled");
       expectPaired(result.messages);

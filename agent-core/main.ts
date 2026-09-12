@@ -2076,7 +2076,8 @@ const TOOLS: Array<Record<string, unknown>> = [
   },
   {
     name: "write_file",
-    description: "Create or overwrite a file relative to the working directory. Parent directories are created. Paths stay inside the project.",
+    description:
+      "Create or overwrite a file relative to the working directory. Parent directories are created. Paths stay inside the project. After you have a template or the contents, call this with the file body. For a large new file, write a complete first version, then edit to append; do not re-read a template instead of writing.",
     input_schema: {
       type: "object",
       additionalProperties: false,

@@ -1664,6 +1664,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       "frozen identity forbids conversational edit permission",
       FROZEN_IDENTITY.includes("instead of asking permission conversationally") &&
         FROZEN_IDENTITY.includes("Follow an explicit host instruction not to touch a file") &&
+        FROZEN_IDENTITY.includes("New files use write_file") &&
         !FROZEN_IDENTITY.includes("not a stop"),
     );
     check(

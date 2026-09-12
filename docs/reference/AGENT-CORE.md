@@ -247,7 +247,9 @@ footprint, not these numbers.
   refused, not silently run twice. No result cache crosses a mutation or turn.
 - `agent-core/stall.ts` tracks exact repeats, normalized failures, and cycles up
   to eight turns using a bounded 24-turn hash window. Three repetitions produce
-  model-visible recovery guidance; three more repetitions of that same loop
+  model-visible recovery guidance (failed edits: re-read and copy a snippet;
+  empty searches: broaden scope; identical successful reads: write_file/edit
+  instead of reading again); three more repetitions of that same loop
   stop the run. Changed observations allow recovery; re-reading unchanged text
   and oscillating edits do not count as progress. The run fuses above bound
   longer or changing loops that these heuristics cannot recognize.
