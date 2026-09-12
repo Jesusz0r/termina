@@ -79,15 +79,12 @@ export class AgentTerminalInstance {
   pendingHints = new Set<string>();
   /** Debounced moment-capture timer. */
   captureTimer: ReturnType<typeof setTimeout> | null = null;
-  momentCapturePromise: Promise<void> | null = null;
   /** Dots waiting for their captured source state. */
   momentDots: TimelineEvent[] = [];
   /** The recorder state of this terminal's timeline. */
   recorderState: RecorderState = "paused";
   /** The last capture failure, shown in the timeline tooltip while degraded. */
   recorderDetail: string | null = null;
-  /** Last wall-clock reseed attempt after a capture failure (bounds retries). */
-  lastReseedMs = 0;
   /** The recorder detail last pushed (dedupes degraded resends). */
   lastSentRecorderDetail: string | null = null;
   /** The prompt payload reported by before_agent_start. */
