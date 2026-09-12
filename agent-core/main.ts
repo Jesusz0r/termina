@@ -185,6 +185,7 @@ import {
   shellQuote,
 } from "./main/files.ts";
 import { isDirectRunFrom, trustedPath } from "./main/env.ts";
+import { outboundUrlError } from "./main/url.ts";
 import { grepFiles } from "./main/grep.ts";
 import {
   editProjectFile,
@@ -1479,17 +1480,7 @@ export function runBash(
 }
 
 export function fetchUrlError(url: string): string | null {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return "error: invalid URL";
-  }
-  if (parsed.protocol === "https:") return null;
-  const loopback = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
-  if (parsed.protocol === "http:" && loopback && process.env.TERMINA_CORE_TEST === "1") return null;
-  if (parsed.protocol === "http:") return "error: only https URLs are allowed";
-  return `error: URL scheme not allowed: ${parsed.protocol}`;
+  return outboundUrlError(url);
 }
 
 export async function fetchUrl(
