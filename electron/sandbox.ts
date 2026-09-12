@@ -267,6 +267,30 @@ export function filterCandidateEnvironment(
   return env;
 }
 
+/**
+ * Pure Verify/diagnostics-env policy for project-controlled commands
+ * (Primary Verify test scripts, the project's own tsc). Same allowlist idea
+ * as the candidate Verify env: PATH plus locale/terminal variables, and
+ * never provider tokens, SSH_*, or proxy variables. A repo's test script
+ * runs as a product feature; inheriting ambient credentials is not required.
+ *
+ * HOME and the temp-dir variables pass through: cargo, go, and npm resolve
+ * homes and caches from them, and they are paths rather than credentials.
+ * Project commands already run with the user's filesystem access, so these
+ * add no capability a script could not hardcode.
+ */
+export function filterVerifyEnvironment(
+  hostEnv: NodeJS.Dict<string | undefined>,
+  pathPrefixes: readonly string[],
+): Record<string, string | undefined> {
+  const env = filterCandidateEnvironment(hostEnv, null, pathPrefixes);
+  for (const key of ["HOME", "TMPDIR", "TEMP", "TMP"] as const) {
+    const value = hostEnv[key];
+    if (value !== undefined && !/[\0\r\n]/.test(value)) env[key] = value;
+  }
+  return env;
+}
+
 export interface SandboxPaths {
   /** The candidate source tree (writable). */
   candidateRoot: string;

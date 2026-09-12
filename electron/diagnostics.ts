@@ -47,7 +47,8 @@ export interface DiagnosticsHost {
   isDisposed(): boolean;
   isTerminalCurrent(inst: DiagnosticsTerminal): boolean;
   eventsTarget(terminalId: string): { dir: string; binding: PromotionFsIdentity } | null;
-  cleanEnv(): Record<string, string | undefined>;
+  /** Minted Verify env (PATH + locale/TERM + home/tmp); never ambient credentials. */
+  verifyEnv(): Record<string, string | undefined>;
 }
 
 /**
@@ -159,7 +160,7 @@ export class DiagnosticsRunner {
       child = spawn(tc.command, tc.args, {
         cwd,
         detached: process.platform !== "win32",
-        env: { ...this.host.cleanEnv() },
+        env: { ...this.host.verifyEnv() },
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
       });
