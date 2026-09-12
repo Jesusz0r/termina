@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 
 const renderer = readFileSync(new URL("../../../src/main.ts", import.meta.url), "utf8");
+const activityPane = readFileSync(new URL("../../../src/main/activity-pane.ts", import.meta.url), "utf8");
 const guide = readFileSync(new URL("../../../docs/reference/USER-GUIDE.md", import.meta.url), "utf8");
 
 /** Body of a function or callback starting at a signature, braces balanced. */
@@ -26,8 +27,9 @@ describe("review accept marks", () => {
   it("records Accept as a reviewed-at timestamp, not a permanent mark", () => {
     expect(renderer).toContain("accepted: Map<string, number>;");
     expect(renderer).toContain("pane.accepted.set(path, Date.now())");
-    expect(renderer).toContain("pane.accepted.set(f.path, reviewedAt)");
+    expect(activityPane).toContain("pane.accepted.set(f.path, reviewedAt)");
     expect(renderer).not.toContain("pane.accepted.add(");
+    expect(activityPane).not.toContain("pane.accepted.add(");
   });
 
   it("drops the ✓ when the file changes again on disk", () => {
@@ -35,15 +37,15 @@ describe("review accept marks", () => {
     const deleted = blockBody(renderer, "window.termina.onFileDeleted((p) => {");
     expect(changed).toContain("dropStaleAcceptMarks(p.path)");
     expect(deleted).toContain("dropStaleAcceptMarks(p.path)");
-    const drop = blockBody(renderer, "function dropStaleAcceptMarks(");
+    const drop = blockBody(activityPane, "function dropStaleAcceptMarks(");
     expect(drop).toContain("pane.accepted.delete(path)");
     expect(drop).toContain("renderModified(pane)");
   });
 
   it("prunes review marks to the live list when main replaces it", () => {
-    const list = blockBody(renderer, "window.termina.onModifiedList((p) => {");
+    const list = blockBody(activityPane, "window.termina.onModifiedList((p) => {");
     expect(list).toContain("pruneReviewMarks(pane)");
-    const prune = blockBody(renderer, "function pruneReviewMarks(");
+    const prune = blockBody(activityPane, "function pruneReviewMarks(");
     expect(prune).toContain("pane.accepted.delete(path)");
     expect(prune).toContain("pane.reverted.delete(path)");
   });
