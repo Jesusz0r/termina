@@ -10,8 +10,8 @@ import { CHALLENGE_PROFILES, type ChallengeProfile, type WorldlineSummary, type 
 import { showConfirm, showFileListModal, toast } from "./components/modals";
 import { KIND_LABEL, chipText, evidenceLineDetail, formatBytes, profileCaption, recordOf, worldlineHeaderSummary } from "./worldline-evidence";
 
-/** Orientation for the first A/B pair: A kept the run, B is the retry. */
-export const WORLDLINE_FIRST_PAIR_LINE = "A is the result · B is a retry";
+/** Orientation caption on every A/B pair header: A kept the run, B is the retry. */
+export const WORLDLINE_PAIR_ROLES_LINE = "A is the result · B is a retry";
 
 interface ViewHandlers {
   /** Open a base-to-candidate diff in Change Review. */
@@ -315,7 +315,7 @@ export class WorldlinesView {
     moreBody.append(...challengeButtons, evidenceBtn, discardBtn);
     const rolesEl = document.createElement("div");
     rolesEl.className = "cmp-caption";
-    rolesEl.textContent = WORLDLINE_FIRST_PAIR_LINE;
+    rolesEl.textContent = WORLDLINE_PAIR_ROLES_LINE;
     head.append(idEl, runEl, spacer, abBtn, moreBtn, rolesEl);
 
     const verdictsEl = document.createElement("div");
