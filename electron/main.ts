@@ -2656,6 +2656,7 @@ class TerminaApp {
   ): void {
     let changed = false;
     const nextModel = this.usableAgentModel(model);
+    const modelChanged = Boolean(nextModel && nextModel !== inst.model);
     if (nextModel) {
       if (nextModel !== inst.model) {
         inst.model = nextModel;
@@ -2677,6 +2678,9 @@ class TerminaApp {
       changed = true;
     }
     if (changed) this.sendAgentStatus(inst, expected);
+    // /model and the first status line must not wait for the next run to
+    // pin the roster. Same-model sidecar repeats do not rewrite the file.
+    if (modelChanged && inst.persist) this.savePlanRoster(inst);
   }
 
   private sendAgentStatus(inst: AgentTerminalInstance, expected?: PtyRendererSendTarget | null): void {
@@ -8103,6 +8107,9 @@ class TerminaApp {
     this.loginHintWatcher = null;
     if (this.initialRestorePromise) {
       await this.initialRestorePromise.catch(() => undefined);
+    }
+    for (const project of this.projects.values()) {
+      if (!this.projectIsSwitching(project.id)) this.saveTerminalRoster(project);
     }
     await this.rosterStore.drain();
     // Shutdown is an intentional cancellation boundary: no queued bytes or

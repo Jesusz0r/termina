@@ -268,6 +268,7 @@ import {
   applySessionRecord,
   clearSessionBundle,
   createReplayState,
+  isSessionModel,
   prepareFreshSession,
   quarantineSessionBundle,
   replaySessionBundle,
@@ -1333,6 +1334,23 @@ function ensureFreshSession(): void {
   }
   storageSeq = 0;
   streamPrepared = true;
+}
+
+function persistRouteSettings(): number {
+  const model = `${route.provider}/${route.model}`;
+  return persist({
+    type: "settings",
+    effort: effortWanted,
+    ...(isSessionModel(model) ? { model } : {}),
+  });
+}
+
+function persistRouteSettingsOrWarn(label: string): void {
+  try {
+    persistRouteSettings();
+  } catch (err) {
+    out(`(${label}; setting not persisted: ${(err as Error).message})\n`);
+  }
 }
 
 /**
@@ -4727,6 +4745,11 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   let userMsg: Message;
   try {
     userMsg = pushUserPrompt(taggedPrompt, images);
+    try {
+      persistRouteSettings();
+    } catch {
+      /* The run still starts; /model and /effort retry the pin. */
+    }
   } catch (err) {
     cancelPreflight();
     const message = err instanceof SessionStoreError ? err.message : err instanceof Error ? err.message : String(err);
@@ -5279,6 +5302,21 @@ async function resumeSessionBody(overrides?: {
     }
   }
   storageSeq = Math.max(storageSeq, replayed.maxSeq);
+  const savedModel = replayed.state.model;
+  if (typeof savedModel === "string") {
+    const next = parseModelRef(savedModel);
+    if (
+      savedModel.startsWith(`${next.provider}/`)
+      && (hasStoredCredential(next.provider) || hasEnvCredential(next.provider))
+    ) {
+      if (next.provider !== route.provider) {
+        route = { provider: next.provider, model: next.model };
+        retargetSummary(next.provider);
+      } else {
+        route.model = next.model;
+      }
+    }
+  }
   const savedEffort = replayed.state.effort;
   if (typeof savedEffort === "string" && (EFFORT_LEVELS as readonly string[]).includes(savedEffort)) {
     effortWanted = clampEffortLevel(route.provider, route.model, savedEffort as EffortLevel, providerProtocol(route.provider, route.model));
@@ -5840,6 +5878,7 @@ function startCatalogCommand(line: string): void {
         resetCacheContinuity();
         out(`model ${route.provider}/${route.model}\n`);
         syncStatus();
+        persistRouteSettingsOrWarn(`model ${route.provider}/${route.model}`);
         return;
       }
       const next = parseModelSwitch(rest, route.provider);
@@ -5872,6 +5911,7 @@ function startCatalogCommand(line: string): void {
         out(`(warning: ${route.provider}/${route.model} does not advertise tool support)\n`);
       }
       syncStatus();
+      persistRouteSettingsOrWarn(`model ${route.provider}/${route.model}`);
     } finally {
       if (catalogAbort === abort) {
         catalogAbort = null;
@@ -6140,7 +6180,7 @@ function dispatchLine(line: string): void {
     effortWanted = clampEffortLevel(route.provider, route.model, requested, providerProtocol(route.provider, route.model));
     if (effortWanted !== prev) {
       try {
-        persist({ type: "settings", effort: effortWanted });
+        persistRouteSettings();
       } catch (err) {
         out(`(effort ${effortWanted}; setting not persisted: ${(err as Error).message})\n`);
         syncStatus();

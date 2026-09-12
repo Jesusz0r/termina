@@ -195,6 +195,8 @@ export type ReplayState = {
   receiptRevisionIds: Set<string>;
   /** Last-writer-wins kernel setting from `settings` records (e.g. effort). */
   effort: string | null;
+  /** Last-writer-wins provider-qualified model from `settings` records. */
+  model: string | null;
   lastSeq: number;
   maxSeq: number;
 };
@@ -1748,6 +1750,7 @@ export function createReplayState(): ReplayState {
     recoveries: new Map(),
     receiptRevisionIds: new Set(),
     effort: null,
+    model: null,
     lastSeq: 0,
     maxSeq: 0,
   };
@@ -1873,6 +1876,13 @@ function applyReceiptPrune(
   return { ok: true };
 }
 
+/** provider/model without whitespace or control characters. */
+export function isSessionModel(value: string): boolean {
+  if (value.length < 3 || value.length > 200 || /[\x00-\x1f\x7f\s]/.test(value)) return false;
+  const cut = value.indexOf("/");
+  return cut > 0 && cut < value.length - 1;
+}
+
 export function applySessionRecord(state: ReplayState, rec: unknown): SessionResult {
   if (!rec || typeof rec !== "object" || Array.isArray(rec)) return { ok: false, error: "malformed session record" };
   const e = rec as {
@@ -1886,6 +1896,7 @@ export function applySessionRecord(state: ReplayState, rec: unknown): SessionRes
     evicted?: unknown;
     summarySseq?: unknown;
     effort?: unknown;
+    model?: unknown;
   };
   if (typeof e.storageSeq !== "number" || !Number.isInteger(e.storageSeq) || e.storageSeq < 1) {
     return { ok: false, error: "invalid storageSeq" };
@@ -1906,6 +1917,12 @@ export function applySessionRecord(state: ReplayState, rec: unknown): SessionRes
       return { ok: false, error: "invalid settings effort" };
     }
     state.effort = e.effort;
+    if ("model" in e) {
+      if (typeof e.model !== "string" || !isSessionModel(e.model)) {
+        return { ok: false, error: "invalid settings model" };
+      }
+      state.model = e.model;
+    }
     commitSequence(state, e.storageSeq);
     return { ok: true };
   }
@@ -2114,7 +2131,7 @@ function applyFramed(state: ReplayState, framed: FramedRecord): SessionResult | 
   return applySessionRecord(state, framed.rec);
 }
 
-export function replaySessionRecords(text: string): SessionResult<{ messages: ReplayMessage[]; maxSeq: number; effort: string | null }> {
+export function replaySessionRecords(text: string): SessionResult<{ messages: ReplayMessage[]; maxSeq: number; effort: string | null; model: string | null }> {
   const state = createReplayState();
   const buf = Buffer.from(text, "utf8");
   let pending: Buffer = buf;
@@ -2132,7 +2149,7 @@ export function replaySessionRecords(text: string): SessionResult<{ messages: Re
     const applied = applyFramed(state, parsed);
     if (applied !== "skip" && !applied.ok) return applied;
   }
-  return { ok: true, messages: state.messages, maxSeq: state.maxSeq, effort: state.effort };
+  return { ok: true, messages: state.messages, maxSeq: state.maxSeq, effort: state.effort, model: state.model };
 }
 
 export async function replaySessionBundle(
