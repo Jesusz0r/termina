@@ -63,6 +63,7 @@ async function makeManager(trustHashes: () => Promise<Record<string, string>>) {
     appReadPaths: () => [],
     forkCoreSession: async () => ({ ok: false, error: "unused" }),
     discardCoreSession: async () => ({ ok: false, error: "unused" }),
+    readPromptPayload: async () => ({ ok: false, error: "unused" }),
     createCandidate: async () => ({ terminalId: "unused", pid: 0 }),
     createCandidateWorkspace: () => root,
     onUpdate: () => {},

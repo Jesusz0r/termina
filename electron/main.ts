@@ -48,6 +48,7 @@ import {
 } from "./sandbox.js";
 import { parseFailingTests, verifyFailSummary } from "./evidence.js";
 import { changedLinesInAfter } from "../shared/line-diff.js";
+import { readPromptPayloadFile } from "./prompt-payload.js";
 import { createAppUpdater, updateMenuCopy, type AppUpdateController } from "./app-update.js";
 import { installCliCommand, uninstallCliCommand, isCliCommandInstalled, parseTargetCwdFromArgv } from "./cli-install.js";
 import {
@@ -1853,6 +1854,7 @@ class TerminaApp {
           if (!result.ok) throw new Error(result.error);
           return result.patch;
         }),
+      readPromptPayload: (opts) => this.sessionFork.readPrompt(opts),
       discardCoreSession: (runId) => this.sessionRetention.discard(runId),
       createCandidate: (opts) => this.createCandidate(opts),
       terminateCandidate: (terminalId) => this.terminateCandidate(terminalId),
@@ -4526,14 +4528,20 @@ class TerminaApp {
           const dir = this.eventsDirOf(inst);
           const payloadPath = await this.safeEventsFile(dir, file);
           if (!payloadPath) throw new Error("prompt payload path is outside the events directory");
-          const info = await stat(payloadPath);
-          if (info.size > MAX_PROMPT_BYTES) throw new Error("prompt payload exceeds the 20 MB budget");
-          const raw = await readFile(payloadPath, "utf8");
-          const payload = JSON.parse(raw) as { prompt?: unknown; images?: unknown };
+          // The worker stats, reads, and parses the file: the main thread never
+          // holds the 20 MB string (issue #60). Identical slicing; fail-closed.
+          const payload = await readPromptPayloadFile(payloadPath, {
+            maxBytes: MAX_PROMPT_BYTES,
+            textCap: 64000,
+            contextCap: 0,
+            offload: (path, maxBytes, textCap, contextCap) =>
+              this.sessionFork.readPrompt({ path, maxBytes, textCap, contextCap }),
+          });
+          if (!payload) throw new Error("prompt payload is unavailable");
           inst.pendingPrompt = {
             file,
-            text: String(payload.prompt ?? "").slice(0, 64000),
-            images: Array.isArray(payload.images) ? payload.images.length : 0,
+            text: payload.text,
+            images: payload.images.length,
           };
           if (inst.pendingPrompt.text && this.isNewCommand(inst.pendingPrompt.text)) {
             await this.clearForNewSession(terminalId, rendererTarget);
@@ -4604,11 +4612,11 @@ class TerminaApp {
         inst.toolOutcomes = new Map();
         this.sendPlan(inst, rendererTarget);
         this.sendTimelinePrefix(inst, rendererTarget);
-        // Refresh untouched-file baselines from the run start, but retain the
-        // original baseline of every file already in Change Review. The
-        // modified list spans turns, so replacing those baselines here would
-        // make earlier files appear unchanged after the next prompt.
-        this.prepareRunBaselines(inst, startWs?.watcher?.lastContents);
+        // Retain the original baseline of every file already in Change Review.
+        // The modified list spans turns, so replacing those baselines here would
+        // make earlier files appear unchanged after the next prompt. Untouched
+        // files are baselined on first touch (issue #60), not snapshotted here.
+        this.prepareRunBaselines(inst);
         inst.runSnapshots.clear();
         inst.runSnapshotBytes = 0;
         inst.lastToolAt.clear();
@@ -6073,9 +6081,15 @@ class TerminaApp {
     }
   }
 
-  private prepareRunBaselines(inst: AgentTerminalInstance, source: Map<string, string> | undefined): void {
+  private prepareRunBaselines(inst: AgentTerminalInstance): void {
     // A terminal's modified list is cumulative until the user clears it. Keep
     // those files anchored to their first pre-change content across turns.
+    // Untouched files are NOT snapshotted here (issue #60): copying the whole
+    // watcher cache (up to 5000 files / 64 MB) blocked the main loop at every
+    // run start. Baselines are captured on first touch instead — the watcher
+    // change carries the pre-change content (authoritative), the edit tool
+    // reconstructs from its args, and fillBaselineFromState reads the immutable
+    // start-state blob. Each equals the run-start content on first touch.
     const retained = new Map<string, string | null>();
     const retainedStates = new Map<string, string>();
     for (const path of inst.modified.keys()) {
@@ -6089,13 +6103,6 @@ class TerminaApp {
     inst.baselines.clear();
     inst.baselineStates.clear();
     inst.baselineBytes = 0;
-    if (source) {
-      for (const [path, content] of source) {
-        if (!inst.modified.has(path)) this.setBaseline(inst, path, content);
-      }
-    }
-    // Insert retained entries last so the bounded cache evicts speculative
-    // untouched-file snapshots before baselines backing visible review items.
     for (const [path, content] of retained) this.setBaseline(inst, path, content, retainedStates.get(path) ?? null);
   }
 
@@ -6175,6 +6182,21 @@ class TerminaApp {
       if (oldest === undefined) break;
       map.delete(oldest);
     }
+  }
+
+  /**
+   * Diff one watcher transition off the main loop (issue #60). Identical output
+   * via the shared line-diff; the session worker computes it while the main loop
+   * stays free. Falls back to the sync diff when the worker is unavailable.
+   */
+  private async computeChangedLines(before: string, after: string): Promise<number[]> {
+    try {
+      const res = await this.sessionFork.lineDiff({ before, after });
+      if (res.ok) return res.lines;
+    } catch {
+      /* Worker disposed/crashed; fall through to the identical sync diff. */
+    }
+    return changedLinesInAfter(before, after);
   }
 
   private async recordModified(inst: AgentTerminalInstance, absPath: string, status: "created" | "modified"): Promise<void> {
@@ -6901,10 +6923,12 @@ class TerminaApp {
       // sync budget. The renderer fetches larger files on demand.
       const liveContent = Buffer.byteLength(change.content, "utf8") <= MAX_LIVE_SYNC_BYTES ? change.content : undefined;
       // The pre-change cache gives the exact transition. Cache the lines so
-      // a later open paints the same highlight without tab history.
+      // a later open paints the same highlight without tab history. The diff
+      // runs in the session worker (issue #60): identical output, main stays
+      // free for PTY/sidecar/IPC while the worker computes.
       let changedLines: number[] | undefined;
       if (change.prev !== undefined) {
-        changedLines = changedLinesInAfter(change.prev, change.content);
+        changedLines = await this.computeChangedLines(change.prev, change.content);
         this.setBounded(ws.changeLines, path, changedLines, TerminaApp.MAX_MODIFIED_FILES);
       } else {
         ws.changeLines.delete(path);
