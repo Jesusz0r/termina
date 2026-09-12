@@ -81,11 +81,14 @@ function makeHarness(opts: {
   lastStateCommit?: string | null;
   lastReseedMs?: number;
   incrementalError?: string;
+  incrementalCommit?: string;
   reseedError?: string;
+  watcher?: { isPaused: boolean; pendingItems: number; inFlight: number } | null;
   members?: ReturnType<typeof makeInst>[];
 }) {
   const captures: Array<{ kind: "incremental" | "full"; parent: string | null; hints: string[] }> = [];
   const attached: Array<{ id: string; stateId: string; paths: string[] }> = [];
+  const scheduled: string[] = [];
   const members = opts.members ?? [makeInst("term-1", ["a.ts"], "/proj/a.ts")];
   const inst = members[0]!;
   const ws = {
@@ -97,8 +100,20 @@ function makeHarness(opts: {
     lastStateCommit: opts.lastStateCommit === undefined ? "state-before" : opts.lastStateCommit,
     lastReseedMs: opts.lastReseedMs ?? 0,
     momentCapturePromise: null as Promise<void> | null,
+    momentUnsettledRetries: 0,
     retainedBlobBytes: 0,
-    watcher: null,
+    watcher: opts.watcher === undefined
+      ? null
+      : opts.watcher === null
+        ? null
+        : {
+          isPaused: () => opts.watcher!.isPaused,
+          queueStats: () => ({
+            pendingItems: opts.watcher!.pendingItems,
+            pendingBytes: 0,
+            inFlight: opts.watcher!.inFlight,
+          }),
+        },
     generation: 1,
     terminalIds: new Set(members.map((member) => member.id)),
   };
@@ -107,7 +122,7 @@ function makeHarness(opts: {
     captureIncremental: async (parent: string, hints: string[]) => {
       if (opts.incrementalError) throw new Error(opts.incrementalError);
       captures.push({ kind: "incremental", parent, hints: [...hints].sort() });
-      return { commit: "state-after", newBlobBytes: 4 };
+      return { commit: opts.incrementalCommit ?? "state-after", newBlobBytes: 4 };
     },
     capture: async (_head: string | null, parent: string | null) => {
       if (opts.reseedError) throw new Error(opts.reseedError);
@@ -150,8 +165,11 @@ function makeHarness(opts: {
     addPendingHint: (member: { pendingHints: Set<string> }, relPath: string) => {
       member.pendingHints.add(relPath);
     },
+    scheduleMomentCapture: (member: { id: string }) => {
+      scheduled.push(member.id);
+    },
   };
-  return { ws, inst, members, captures, attached, acquired, released, recorder, app };
+  return { ws, inst, members, captures, attached, scheduled, acquired, released, recorder, app };
 }
 
 describe("moment capture write lease", () => {
@@ -262,6 +280,87 @@ describe("moment capture write lease", () => {
     expect(recovered.captures).toEqual([{ kind: "full", parent: null, hints: [] }]);
     expect(recovered.ws.lastReseedMs).toBeGreaterThan(0);
     expect(recovered.attached).toEqual([{ id: "term-1", stateId: "state-reseed", paths: ["/proj/a.ts"] }]);
+  });
+});
+
+describe("moment capture watcher race", () => {
+  it("restores the batch and reschedules when hints name paths the incremental missed", async () => {
+    const captureMomentNow = loadCaptureMomentNow();
+    const live = { ...makeInst("term-1", ["a.ts"], "/proj/a.ts"), currentRun: {} };
+    const { ws, inst, captures, attached, scheduled, recorder, app } = makeHarness({
+      writerId: null,
+      incrementalCommit: "state-before",
+      watcher: { isPaused: false, pendingItems: 0, inFlight: 0 },
+      members: [live],
+    });
+    await captureMomentNow.call(app, inst, ws);
+    expect(captures).toEqual([{ kind: "incremental", parent: "state-before", hints: ["a.ts"] }]);
+    expect(attached).toEqual([]);
+    expect(ws.lastStateCommit).toBe("state-before");
+    expect(ws.momentUnsettledRetries).toBe(1);
+    expect(live.momentDots).toHaveLength(1);
+    expect([...live.pendingHints]).toEqual(["a.ts"]);
+    expect(scheduled).toEqual(["term-1"]);
+    expect(recorder).toEqual([]);
+  });
+
+  it("attaches the parent after bounded unsettled retries", async () => {
+    const captureMomentNow = loadCaptureMomentNow();
+    const { ws, inst, attached, scheduled, app } = makeHarness({
+      writerId: null,
+      incrementalCommit: "state-before",
+    });
+    ws.momentUnsettledRetries = 2;
+    await captureMomentNow.call(app, inst, ws);
+    expect(attached).toEqual([{ id: "term-1", stateId: "state-before", paths: ["/proj/a.ts"] }]);
+    expect(ws.momentUnsettledRetries).toBe(0);
+    expect(scheduled).toEqual([]);
+  });
+
+  it("does not retry a parent return when no hints were given", async () => {
+    const captureMomentNow = loadCaptureMomentNow();
+    const noHints = makeInst("term-1", [], "/proj/a.ts");
+    const { ws, captures, attached, scheduled, app } = makeHarness({
+      writerId: null,
+      incrementalCommit: "state-before",
+      members: [noHints],
+    });
+    await captureMomentNow.call(app, noHints, ws);
+    expect(captures).toEqual([{ kind: "incremental", parent: "state-before", hints: [] }]);
+    expect(attached).toEqual([{ id: "term-1", stateId: "state-before", paths: ["/proj/a.ts"] }]);
+    expect(ws.momentUnsettledRetries).toBe(0);
+    expect(scheduled).toEqual([]);
+  });
+
+  it("retries while the watcher still has queued work even when the tree moved", async () => {
+    const captureMomentNow = loadCaptureMomentNow();
+    const { ws, inst, attached, scheduled, app } = makeHarness({
+      writerId: null,
+      watcher: { isPaused: false, pendingItems: 1, inFlight: 0 },
+    });
+    await captureMomentNow.call(app, inst, ws);
+    expect(attached).toEqual([]);
+    expect(ws.lastStateCommit).toBe("state-before");
+    expect(ws.momentUnsettledRetries).toBe(1);
+    expect(inst.momentDots).toHaveLength(1);
+    expect([...inst.pendingHints]).toEqual(["a.ts"]);
+    expect(scheduled).toEqual(["term-1"]);
+  });
+
+  it("reschedules the triggering terminal when no job has a live run", async () => {
+    const captureMomentNow = loadCaptureMomentNow();
+    const first = makeInst("term-1", ["a.ts"], "/proj/a.ts");
+    const second = makeInst("term-2", ["b.ts"], "/proj/b.ts");
+    const { ws, attached, scheduled, app } = makeHarness({
+      writerId: null,
+      incrementalCommit: "state-before",
+      members: [first, second],
+    });
+    await captureMomentNow.call(app, second, ws);
+    expect(attached).toEqual([]);
+    expect(scheduled).toEqual(["term-2"]);
+    expect([...first.pendingHints]).toEqual(["a.ts"]);
+    expect([...second.pendingHints]).toEqual(["b.ts"]);
   });
 });
 

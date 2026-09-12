@@ -176,6 +176,8 @@ interface WorkspaceState {
   lastStateCommit: string | null;
   /** Serializes incremental moment captures so siblings never snapshot the same parent. */
   momentCapturePromise: Promise<void> | null;
+  /** Consecutive moment captures that raced the watcher (bounds the retry). */
+  momentUnsettledRetries: number;
   /** Last wall-clock reseed after a capture failure (bounds retries). */
   lastReseedMs: number;
   /** New retained blob bytes since the index (WORLDLINES §9). */
@@ -1678,6 +1680,7 @@ class TerminaApp {
       terminalIds: new Set(),
       lastStateCommit: null,
       momentCapturePromise: null,
+      momentUnsettledRetries: 0,
       lastReseedMs: 0,
       retainedBlobBytes: 0,
       indexReady: null,
@@ -4630,6 +4633,11 @@ class TerminaApp {
           this.trackRecordingTask(this.fillBaseline(inst, path, status));
         }
         const rel = await this.rel(path, toolWs!.root);
+        // Fork Any Moment: hint the tool path at tool start so the next
+        // capture carries the write even when the watcher change lands
+        // after the capture timer. Watcher-filtered paths stay out: the
+        // core trusts hints, and a full capture would exclude them.
+        if (rel && !toolWs.watcher?.isIgnored(rel)) this.addPendingHint(inst, rel);
         inst.touched.add(rel);
         const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId.trim() : "";
         if (toolCallId && rel) inst.pendingFileTools.set(toolCallId, rel);
@@ -5363,6 +5371,36 @@ class TerminaApp {
         const state = parent
           ? await store.captureIncremental(parent, [...hints], reconcile, {}, {}, source)
           : await store.capture(await gitHead(ws.root), null);
+        // The capture timer can fire before the watcher's debounced change
+        // lands: hints name the paths but the bytes are not on disk yet, so
+        // the incremental returns the parent. Stamping that parent would
+        // freeze the write out of the dots. Likewise when the watcher still
+        // has queued work, more writes are about to land. Restore and retry
+        // instead — bounded, so a genuinely unchanged tree still settles.
+        // (A delete-only capture mints a new commit with pathCount 0, so the
+        // parent comparison — not pathCount — is the empty signal.)
+        const watcher = ws.watcher;
+        const watcherStats = watcher && !watcher.isPaused() ? watcher.queueStats() : null;
+        const watcherSettled = !watcher
+          || (watcherStats !== null && watcherStats.pendingItems === 0 && watcherStats.inFlight === 0);
+        if (parent !== null && ((hints.size > 0 && state.commit === parent) || !watcherSettled)) {
+          ws.momentUnsettledRetries = (ws.momentUnsettledRetries ?? 0) + 1;
+          if (ws.momentUnsettledRetries <= 2) {
+            for (const job of jobs) {
+              job.inst.momentDots = [...job.batch, ...job.inst.momentDots];
+              for (const hint of job.hints) this.addPendingHint(job.inst, hint);
+            }
+            let rescheduled = false;
+            for (const job of jobs) {
+              if (!job.inst.currentRun) continue;
+              this.scheduleMomentCapture(job.inst, expected);
+              rescheduled = true;
+            }
+            if (!rescheduled) this.scheduleMomentCapture(inst, expected);
+            return;
+          }
+        }
+        ws.momentUnsettledRetries = 0;
         this.setWorkspaceState(ws, state.commit);
         if (!parent) ws.lastReseedMs = Date.now();
         ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
@@ -6780,6 +6818,29 @@ class TerminaApp {
         if (inst.busy) await this.recordModified(inst, canonical, status);
       }
     };
+    watcher.onFileUncached = async (path, status) => {
+      const rendererTarget = this.captureRendererSendTarget();
+      const owner = this.projectOfWorkspace(ws.id);
+      if (this.disposed || !owner || this.projectIsSwitching(owner.id)) return;
+      const canonical = await this.canonicalPath(path);
+      const canonicalRoot = await canonicalRootPromise;
+      const relPath = relative(canonicalRoot, canonical);
+      if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return;
+      // Oversized and binary files never reach onChange (no cached content),
+      // but they still move the tree: hint the path so the next incremental
+      // captures the bytes from disk.
+      this.pathIndex.noteAdded(canonicalRoot, relPath);
+      ws.generation++;
+      this.markCandidateEvidenceStale(ws.comparisonId);
+      this.scheduleProjectSnapshot(ws.id);
+      for (const inst of workspaceTerminals()) {
+        if (!inst.busy) continue;
+        await this.recordModified(inst, canonical, status);
+        if (!inst.currentRun) continue;
+        this.addPendingHint(inst, relPath);
+        this.scheduleMomentCapture(inst, rendererTarget);
+      }
+    };
     watcher.onFileDeleted = async (path) => {
       const rendererTarget = this.captureRendererSendTarget();
       const owner = this.projectOfWorkspace(ws.id);
@@ -6792,7 +6853,16 @@ class TerminaApp {
       ws.generation++;
       this.markCandidateEvidenceStale(ws.comparisonId);
       this.send("file:deleted", { projectId: owner.id, workspaceId: ws.id, path: p }, rendererTarget);
-      for (const inst of workspaceTerminals()) await this.recordDeleted(inst, p, rendererTarget);
+      for (const inst of workspaceTerminals()) {
+        await this.recordDeleted(inst, p, rendererTarget);
+        // A delete moves the tree like any write: hint the path so the next
+        // incremental drops it even though the watcher cache no longer
+        // carries it.
+        if (inst.busy && inst.currentRun) {
+          this.addPendingHint(inst, relPath);
+          this.scheduleMomentCapture(inst, rendererTarget);
+        }
+      }
       // A user-side deletion makes the recorded edit moot: drop the entry so
       // the context never points at a file that no longer exists. An empty
       // map must remove the file itself — the writer skips empty maps.
