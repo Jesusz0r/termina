@@ -3408,8 +3408,11 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const tHang = Date.now();
     const interruptedCall = await hangMcp.call("mcp_hang_hang", {}, { shouldStop: () => true });
     check("mcp interrupt returns quickly", Date.now() - tHang < 2000 && interruptedCall.isError === true && interruptedCall.content.includes("interrupted"));
-    const afterInterrupt = await hangMcp.call("mcp_hang_hang", {});
-    check("mcp interrupt kills the server", afterInterrupt.isError === true);
+    const afterInterrupt = await hangMcp.call("mcp_hang_hang", {}, { timeoutMs: 200 });
+    check(
+      "mcp interrupt reconnects instead of leaving a dead server",
+      afterInterrupt.isError === true && afterInterrupt.content.includes("timed out") && !afterInterrupt.content.includes("is not running"),
+    );
     hangMcp.shutdown();
     const timeoutMcp = await mcp.startMcp(
       [{ name: "hang", command: process.execPath, args: [hangServer], env: {} }],
@@ -3417,8 +3420,11 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     const timed = await timeoutMcp.call("mcp_hang_hang", {}, { timeoutMs: 200, shouldStop: () => false });
     check("mcp call timeout kills the server", timed.isError === true && timed.content.includes("timed out"));
-    const afterKill = await timeoutMcp.call("mcp_hang_hang", {});
-    check("mcp call after timeout sees a dead server", afterKill.isError === true);
+    const afterKill = await timeoutMcp.call("mcp_hang_hang", {}, { timeoutMs: 200 });
+    check(
+      "mcp call after timeout reconnects instead of seeing a dead server",
+      afterKill.isError === true && afterKill.content.includes("timed out") && !afterKill.content.includes("is not running"),
+    );
     timeoutMcp.shutdown();
     const deadMcp = await mcp.startMcp(
       [{ name: "gone", command: join(mcpDir, "missing-bin"), args: [], env: {} }],
