@@ -36,7 +36,7 @@ import htmlWorker from "monaco-editor/language/html/html.worker?worker";
 import "./styles.css";
 import "@xterm/xterm/css/xterm.css";
 import { PtyView } from "./pty-view";
-import { TimelineView } from "./timeline";
+import { MAX_TIMELINE_EVENTS, TimelineView } from "./timeline";
 import { SessionSearch } from "./session-search";
 import { QuickOpen } from "./quick-open";
 import { ActivityTabs } from "./activity-tabs";
@@ -1902,7 +1902,6 @@ const MODIFIED_HEIGHT_KEY = "termina.modifiedHeight";
 const WORKPANE_KEY = "termina.workpane";
 const PANE_MIN_ICON = "–";
 const PANE_MAX_ICON = "□";
-const MAX_TIMELINE_EVENTS = 400;
 
 const splitEl = document.getElementById("main-split")!;
 const modifiedPanelEl = document.getElementById("modified-panel")!;
