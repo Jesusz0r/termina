@@ -1091,6 +1091,11 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("fetchUrlError rejects file", Boolean(fetchUrlError("file:///etc/passwd")?.includes("not allowed")));
     check("fetchUrlError rejects data", Boolean(fetchUrlError("data:text/plain,hi")?.includes("not allowed")));
     check("fetchUrlError allows https", fetchUrlError("https://example.com/x") === null);
+    check("fetchUrlError rejects https loopback", Boolean(fetchUrlError("https://127.0.0.1")?.includes("not allowed")));
+    check("fetchUrlError rejects https link-local", Boolean(fetchUrlError("https://169.254.169.254")?.includes("not allowed")));
+    check("fetchUrlError rejects https RFC1918", Boolean(fetchUrlError("https://10.0.0.1")?.includes("not allowed")));
+    const blockedHttpsFetch = await fetchUrl("https://127.0.0.1");
+    check("fetch https loopback fails closed", blockedHttpsFetch.isError === true && blockedHttpsFetch.content.includes("not allowed"));
     const fetchSrv = createServer((req, res) => {
       if (req.url === "/big") {
         res.writeHead(200, { "content-type": "text/plain" });
@@ -3296,7 +3301,14 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("mcpHttpUrlError rejects http", mcp.mcpHttpUrlError("http://example.com/mcp")?.includes("https"));
     check("mcpHttpUrlError rejects file", mcp.mcpHttpUrlError("file:///tmp/x")?.includes("scheme"));
     check("mcpHttpUrlError allows https", mcp.mcpHttpUrlError("https://example.com/mcp") === null);
+    check("mcpHttpUrlError rejects https loopback", Boolean(mcp.mcpHttpUrlError("https://127.0.0.1/mcp")?.includes("not allowed")));
+    check("mcpHttpUrlError rejects https link-local", Boolean(mcp.mcpHttpUrlError("https://169.254.169.254/mcp")?.includes("not allowed")));
+    check("mcpHttpUrlError rejects https RFC1918", Boolean(mcp.mcpHttpUrlError("https://10.0.0.1/mcp")?.includes("not allowed")));
     check("parseMcpConfig drops a non-https MCP URL", mcp.parseMcpConfig({ mcpServers: { web: { type: "http", url: "http://example.com" } } }).length === 0);
+    check(
+      "parseMcpConfig drops https MCP on a private host",
+      mcp.parseMcpConfig({ mcpServers: { web: { type: "http", url: "https://127.0.0.1/mcp" } } }).length === 0,
+    );
     const httpHdrs = mcp.parseMcpConfig({
       mcpServers: {
         web: {

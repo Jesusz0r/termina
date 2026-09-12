@@ -2353,6 +2353,12 @@ export class WorldlineManager {
       this.deps.releaseWriteLease(primary.id, requester);
       if (candWs) this.deps.releaseWriteLease(candWs.id, requester);
     };
+    let mergedParent = primary.lastStateCommit;
+    const refreshMergedPrimary = async (): Promise<void> => {
+      const mergedState = await store.capture(await gitHead(this.deps.primaryRoot), mergedParent);
+      await this.deps.onCandidateState(this.deps.primaryRoot, mergedState.commit);
+      mergedParent = mergedState.commit;
+    };
     const fail = async (message: string): Promise<{ ok: false; error: string }> => {
       releaseLeases();
       if (journalBinding) {
@@ -2394,6 +2400,7 @@ export class WorldlineManager {
         store.capture(await gitHead(target.root), baseState, {}, {}, { root: target.root, gitDir: candGitDir ?? target.root }),
         store.capture(await gitHead(this.deps.primaryRoot), primary.lastStateCommit ?? null),
       ]);
+      mergedParent = pState.commit;
       await this.deps.onCandidateState(this.deps.primaryRoot, pState.commit);
       const primaryNow = await this.deps.workspaceAt(this.deps.primaryRoot);
       if (!primaryNow || primaryNow.generation !== leaseP.generation) return fail("the primary changed during promotion preflight");
@@ -2714,6 +2721,26 @@ export class WorldlineManager {
         engine: promoteEngine,
       });
       await this.finishPromotion(comparisonId, true, null);
+      try {
+        await refreshMergedPrimary();
+      } catch (refreshError) {
+        const refreshMessage = refreshError instanceof Error ? refreshError.message : String(refreshError);
+        releaseLeases();
+        if (journalBinding) {
+          await boundPromotionRemoveTree({
+            root: journalBinding.root.path,
+            rootIdentity: promotionIdentityOf(journalBinding.root),
+            components: [journalBinding.name],
+            parentIdentity: promotionIdentityOf(journalBinding.root),
+            expectedIdentity: { dev: journalBinding.directory.dev, ino: journalBinding.directory.ino },
+          }).catch((error) => console.warn(`[worldline] promotion evidence cleanup retained: ${error instanceof Error ? error.message : String(error)}`));
+        }
+        return {
+          ok: false,
+          error: `the source was promoted, but the workspace snapshot was not refreshed: ${refreshMessage}`,
+          terminalId: opened.terminalId,
+        };
+      }
       releaseLeases();
       if (journalBinding) {
         await boundPromotionRemoveTree({
@@ -2729,6 +2756,12 @@ export class WorldlineManager {
       const message = err instanceof Error ? err.message : String(err);
       if (String(journal.phase) === "done") {
         // The primary already has the merged bytes and the session file.
+        let snapshotError: string | null = null;
+        try {
+          await refreshMergedPrimary();
+        } catch (refreshError) {
+          snapshotError = refreshError instanceof Error ? refreshError.message : String(refreshError);
+        }
         releaseLeases();
         await this.finishPromotion(comparisonId, true, null);
         if (journalBinding) {
@@ -2740,7 +2773,10 @@ export class WorldlineManager {
             expectedIdentity: { dev: journalBinding.directory.dev, ino: journalBinding.directory.ino },
           }).catch((error) => console.warn(`[worldline] promotion evidence cleanup retained: ${error instanceof Error ? error.message : String(error)}`));
         }
-        return { ok: false, error: `the source was promoted, but the new session did not open: ${message}` };
+        const suffix = snapshotError
+          ? ` the workspace snapshot was not refreshed: ${snapshotError}`
+          : ` the new session did not open: ${message}`;
+        return { ok: false, error: `the source was promoted, but${suffix}` };
       }
       try {
         await rollbackPromotion(journalDir, journal, this.deps.primaryRoot, this.deps.canonicalPath, journalBinding ?? undefined, primaryRootBinding);

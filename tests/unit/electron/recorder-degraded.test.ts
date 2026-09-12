@@ -18,7 +18,7 @@ describe("Recorder Degraded Invariants", () => {
   });
 
   it("reseeds a dangling base with a bounded full capture on primary workspaces", () => {
-    assert.match(main, /ws\.primary && Date\.now\(\) - inst\.lastReseedMs > 60_000/);
+    assert.match(main, /ws\.primary && Date\.now\(\) - ws\.lastReseedMs > 60_000/);
     assert.match(main, /store\.capture\(await gitHead\(ws\.root\), null\)/);
   });
 
