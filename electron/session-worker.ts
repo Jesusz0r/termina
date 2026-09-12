@@ -11,15 +11,15 @@
  */
 import { parentPort } from "node:worker_threads";
 import { lstatSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import {
   inspectEmptySessionBundle,
   writeForkedSession,
 } from "../agent-core/session.js";
 import {
+  collectSessionSearchFiles,
   isProjectFileInRoot,
   searchSessionFiles,
-  type SessionFileEntry,
 } from "./session-search.js";
 import {
   MAX_EXPORT_FILES,
@@ -83,10 +83,28 @@ async function searchSessions(msg: SessionSearchRequest): Promise<void> {
   const controller = new AbortController();
   activeSearches.set(msg.requestId, controller);
   try {
-    const files: SessionFileEntry[] = Array.isArray(msg.files)
-      ? msg.files.filter((f): f is SessionFileEntry =>
-        !!f && typeof f.path === "string" && typeof f.name === "string" && typeof f.mtimeMs === "number")
-      : [];
+    const coreDir = typeof msg.coreDir === "string" ? msg.coreDir : "";
+    // The worker is its own trust boundary: the session directory must be a
+    // bounded absolute path before the listing touches the filesystem.
+    if (!coreDir || coreDir.length > 4096 || !isAbsolute(coreDir)) {
+      post({
+        op: "search-sessions-result",
+        requestId: msg.requestId,
+        ok: false,
+        error: { code: "failed", message: "invalid session directory" },
+      });
+      return;
+    }
+    const { files, error: listingError } = await collectSessionSearchFiles(coreDir);
+    if (controller.signal.aborted) {
+      post({
+        op: "search-sessions-result",
+        requestId: msg.requestId,
+        ok: false,
+        error: { code: "cancelled", message: "session search cancelled" },
+      });
+      return;
+    }
     const hits = await searchSessionFiles({
       query: typeof msg.query === "string" ? msg.query : "",
       files,
@@ -104,7 +122,13 @@ async function searchSessions(msg: SessionSearchRequest): Promise<void> {
       });
       return;
     }
-    post({ op: "search-sessions-result", requestId: msg.requestId, ok: true, hits });
+    post({
+      op: "search-sessions-result",
+      requestId: msg.requestId,
+      ok: true,
+      hits,
+      ...(listingError ? { error: listingError } : {}),
+    });
   } catch (err) {
     post({
       op: "search-sessions-result",

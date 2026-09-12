@@ -612,7 +612,7 @@ export interface TerminaBridge {
   /** The current run's plan tasks (Plan Board). */
   getPlan(terminalId: string): Promise<PlanTask[]>;
   /** Full-text search over the project's past sessions. */
-  searchSessions(query: string): Promise<SessionHit[]>;
+  searchSessions(query: string): Promise<{ hits: SessionHit[]; error?: string }>;
   /** Fuzzy file search over the active project tree (quick open, explorer filter). */
   searchFiles(query: string, source?: FileSearchSource): Promise<{ entries: Array<{ relPath: string; matches?: number[] }>; truncated?: boolean }>;
   /** Tell main a file was opened, so it leads the next empty Quick Open. */

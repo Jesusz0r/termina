@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -44,7 +44,8 @@ describe("collectSessionSearchFiles", () => {
       writeFileSync(join(current, "session.jsonl"), "{}\n");
       writeFileSync(join(coreDir, "notes.txt"), "not a session\n");
       writeFileSync(join(coreDir, "loose.jsonl"), "{}\n");
-      const files = await collectSessionSearchFiles(coreDir);
+      const { files, error } = await collectSessionSearchFiles(coreDir);
+      expect(error).toBeUndefined();
       expect(files.map((e) => e.name)).toEqual([
         "core-11111111-1111-1111-1111-111111111111/current/session.jsonl",
       ]);
@@ -56,9 +57,78 @@ describe("collectSessionSearchFiles", () => {
   it("yields [] for missing directories", async () => {
     const root = mkdtempSync(join(tmpdir(), "ssc-"));
     try {
-      const files = await collectSessionSearchFiles(join(root, "no-core"));
-      expect(files).toEqual([]);
+      const missing = await collectSessionSearchFiles(join(root, "no-core"));
+      expect(missing.files).toEqual([]);
+      expect(missing.error).toBeUndefined();
     } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports uncertain when the core directory cannot be listed", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ssc-"));
+    try {
+      const coreDir = join(root, "core-file");
+      writeFileSync(coreDir, "not a directory\n");
+      const { files, error } = await collectSessionSearchFiles(coreDir);
+      expect(files).toEqual([]);
+      expect(error).toMatch(/session listing uncertain/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports uncertain when a session bundle cannot be listed, keeping the readable ones", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ssc-"));
+    try {
+      const coreDir = join(root, "core");
+      const good = join(coreDir, "good-bundle-1", "current");
+      mkdirSync(good, { recursive: true });
+      writeFileSync(join(good, "session.jsonl"), "{}\n");
+      const bad = join(coreDir, "bad-bundle-1", "current");
+      mkdirSync(bad, { recursive: true });
+      writeFileSync(join(bad, "session.jsonl"), "{}\n");
+      writeFileSync(join(bad, "weird.jsonl"), "{}\n");
+      const { files, error } = await collectSessionSearchFiles(coreDir);
+      expect(files.map((e) => e.name)).toEqual(["good-bundle-1/current/session.jsonl"]);
+      expect(error).toMatch(/session listing uncertain: 1 session could not be listed/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores loose files named like session ids", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ssc-"));
+    try {
+      const coreDir = join(root, "core");
+      mkdirSync(coreDir, { recursive: true });
+      writeFileSync(join(coreDir, "fake-session-1"), "not a directory\n");
+      const { files, error } = await collectSessionSearchFiles(coreDir);
+      expect(files).toEqual([]);
+      expect(error).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports uncertain when a bundle directory is unreadable", async () => {
+    if (process.platform === "win32" || process.getuid?.() === 0) return;
+    const root = mkdtempSync(join(tmpdir(), "ssc-"));
+    const locked = join(root, "core", "locked-bundle-1");
+    try {
+      const coreDir = join(root, "core");
+      mkdirSync(join(locked, "current"), { recursive: true });
+      writeFileSync(join(locked, "current", "session.jsonl"), "{}\n");
+      chmodSync(locked, 0o000);
+      const { files, error } = await collectSessionSearchFiles(coreDir);
+      expect(files).toEqual([]);
+      expect(error).toMatch(/session listing uncertain/);
+    } finally {
+      try {
+        chmodSync(locked, 0o700);
+      } catch {
+        /* best-effort restore before the recursive remove */
+      }
       rmSync(root, { recursive: true, force: true });
     }
   });
