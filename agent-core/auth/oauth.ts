@@ -12,7 +12,10 @@ import { type ProviderId } from "./providers/types.ts";
 import { ANTHROPIC_CLIENT_ID, GITHUB_ACCESS_TOKEN_URL, GITHUB_COPILOT_CLIENT_ID, GITHUB_COPILOT_TOKEN_URL, GITHUB_DEVICE_GRANT, GITHUB_DEVICE_URL, OPENAI_CODEX_CLIENT_ID, XAI_CLIENT_ID, XAI_DEFAULT_EXPIRES_MS, XAI_DEFAULT_INTERVAL_MS, XAI_DEVICE_GRANT, XAI_MIN_INTERVAL_MS, XAI_POLL_MARGIN_MS, XAI_SCOPE, XAI_SLOW_DOWN_MS, deviceUrl, isSupportedProvider, redirectUri, testLoopbackOverride, tokenUrl, validateCopilotApiUrl } from "./endpoints.ts";
 import { AUTH_REQUEST_CANCELLED, authFetch, authHttpError, isAuthHttpFailure, postForm, postJson } from "./http.ts";
 import { modifyProvider, readAuth, refreshFlights } from "./store.ts";
+
 const EXPIRE_MARGIN_MS = 300_000;
+
+
 export function parseOauthToken(
   payload: unknown,
   now = Date.now(),
@@ -38,12 +41,16 @@ export function parseOauthToken(
     expires: now + expiresIn * 1000 - EXPIRE_MARGIN_MS,
   };
 }
+
+
 export function parseTokenResponse(
   payload: unknown,
   now = Date.now(),
 ): { ok: true; access: string; refresh: string; expires: number } | { ok: false; error: string } {
   return parseOauthToken(payload, now, { requireRefresh: true });
 }
+
+
 function sleepAsync(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -63,6 +70,8 @@ function sleepAsync(ms: number, signal?: AbortSignal): Promise<void> {
     signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
+
+
 export function persistOauth(
   providerId: ProviderId,
   parsed: { access: string; refresh: string; expires: number },
@@ -90,6 +99,8 @@ export function persistOauth(
   }
   return { ok: true };
 }
+
+
 export function persistApiKey(providerId: ProviderId, key: string): { ok: true } | { ok: false; error: string } {
   try {
     modifyProvider(providerId, (current) => {
@@ -101,7 +112,11 @@ export function persistApiKey(providerId: ProviderId, key: string): { ok: true }
   }
   return { ok: true };
 }
+
+
 type RefreshResult = { ok: true } | { ok: false; error: string };
+
+
 async function runRefreshOauth(providerId: ProviderId): Promise<RefreshResult> {
   try {
     const got = readAuth();
@@ -160,6 +175,8 @@ async function runRefreshOauth(providerId: ProviderId): Promise<RefreshResult> {
     return { ok: false, error: authHttpError(error) ?? "auth expired — run /login" };
   }
 }
+
+
 function waitForRefresh(flight: Promise<RefreshResult>, signal?: AbortSignal): Promise<RefreshResult> {
   if (!signal) return flight;
   if (signal.aborted) return Promise.resolve({ ok: false, error: AUTH_REQUEST_CANCELLED });
@@ -177,6 +194,8 @@ function waitForRefresh(flight: Promise<RefreshResult>, signal?: AbortSignal): P
     void flight.then(finish, () => finish({ ok: false, error: "auth expired — run /login" }));
   });
 }
+
+
 /** A caller signal cancels only that wait. The provider-keyed refresh remains
  * internally time-bounded so another caller can safely share the same flight. */
 export async function refreshOauth(providerId: string, signal?: AbortSignal): Promise<RefreshResult> {
@@ -193,6 +212,8 @@ export async function refreshOauth(providerId: string, signal?: AbortSignal): Pr
   }
   return waitForRefresh(flight, signal);
 }
+
+
 export async function exchangeAnthropic(
   code: string,
   verifier: string,
@@ -219,6 +240,8 @@ export async function exchangeAnthropic(
     return { ok: false, error: authHttpError(error) ?? "login failed: Anthropic token exchange failed" };
   }
 }
+
+
 export async function exchangeCodex(
   code: string,
   verifier: string,
@@ -248,6 +271,8 @@ export async function exchangeCodex(
     return { ok: false, error: authHttpError(error) ?? "login failed: OpenAI token exchange failed" };
   }
 }
+
+
 export async function exchangeOpenRouter(
   code: string,
   verifier: string,
@@ -268,6 +293,8 @@ export async function exchangeOpenRouter(
     return { ok: false, error: authHttpError(error) ?? "login failed: OpenRouter key exchange failed" };
   }
 }
+
+
 function validateVerificationUri(raw: string): string {
   let url: URL;
   try {
@@ -280,15 +307,21 @@ function validateVerificationUri(raw: string): string {
   }
   return url.href;
 }
+
+
 function intervalMs(value: unknown, fallback: number, min: number): number {
   const seconds = Number(value);
   if (!Number.isFinite(seconds) || seconds < 0) return Math.max(fallback, min);
   return Math.max(seconds * 1000, min);
 }
+
+
 function positiveMs(value: unknown, fallback: number): number {
   const seconds = Number(value);
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : fallback;
 }
+
+
 export async function requestXaiDeviceCode(signal?: AbortSignal): Promise<{
   deviceCode: string;
   userCode: string;
@@ -327,6 +360,8 @@ export async function requestXaiDeviceCode(signal?: AbortSignal): Promise<{
     expiresMs: positiveMs(res.payload.expires_in, XAI_DEFAULT_EXPIRES_MS),
   };
 }
+
+
 export async function pollXaiDeviceToken(
   device: { deviceCode: string; intervalMs: number; expiresMs: number },
   signal?: AbortSignal,
@@ -362,15 +397,23 @@ export async function pollXaiDeviceToken(
   }
   return { ok: false, error: "xAI device authorization timed out" };
 }
+
+
 function githubDeviceUrl(): string {
   return testLoopbackOverride("TERMINA_TEST_DEVICE_URL") || GITHUB_DEVICE_URL;
 }
+
+
 function githubAccessUrl(): string {
   return testLoopbackOverride("TERMINA_TEST_TOKEN_URL") || GITHUB_ACCESS_TOKEN_URL;
 }
+
+
 function copilotSessionUrl(): string {
   return testLoopbackOverride("TERMINA_TEST_COPILOT_TOKEN_URL") || GITHUB_COPILOT_TOKEN_URL;
 }
+
+
 function validateGithubVerificationUri(raw: string): string {
   let url: URL;
   try {
@@ -386,6 +429,8 @@ function validateGithubVerificationUri(raw: string): string {
   }
   return url.href;
 }
+
+
 export async function requestGithubDeviceCode(signal?: AbortSignal): Promise<{
   deviceCode: string;
   userCode: string;
@@ -416,6 +461,8 @@ export async function requestGithubDeviceCode(signal?: AbortSignal): Promise<{
     expiresMs: positiveMs(res.payload.expires_in, 15 * 60 * 1000),
   };
 }
+
+
 export async function pollGithubDeviceToken(
   device: { deviceCode: string; intervalMs: number; expiresMs: number },
   signal?: AbortSignal,
@@ -450,6 +497,8 @@ export async function pollGithubDeviceToken(
   }
   return { ok: false, error: "GitHub device authorization timed out" };
 }
+
+
 export async function exchangeGithubCopilotToken(
   githubToken: string,
   signal?: AbortSignal,

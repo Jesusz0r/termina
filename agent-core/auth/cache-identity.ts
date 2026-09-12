@@ -7,7 +7,11 @@
 import { type ProviderId, type ProviderProtocol } from "./providers/types.ts";
 import { createHash, randomBytes } from "node:crypto";
 import { isSupportedProvider } from "./endpoints.ts";
+
+
 export type CacheRole = "main" | "summary";
+
+
 /**
  * Inputs shared by every cache-key and provider-session serializer.
  *
@@ -23,16 +27,25 @@ export interface CacheIdentityInputs {
   /** A stable route/domain, never a turn prompt or working-set hash. */
   route: string;
 }
+
+
 /** OpenRouter documents a 256-character session id; all emitted keys stay below it. */
 export const CACHE_KEY_MAX_LENGTH = 64;
+
 const CACHE_KEY_PREFIX = "tc1_";
+
 const CACHE_IDENTITY_DOMAIN = "termina-cache-identity-v1";
+
 const CACHE_CONTROL_RE = /\p{Cc}/u;
+
+
 function normalizedCacheText(value: unknown): string | null {
   if (typeof value !== "string" || CACHE_CONTROL_RE.test(value)) return null;
   const normalized = value.trim().normalize("NFC");
   return normalized || null;
 }
+
+
 /**
  * Create the stable seed for one logical session/run boundary.
  *
@@ -48,12 +61,16 @@ export function cacheSessionSeed(session: string | null | undefined): string {
   if (!normalized) return `ephemeral:${randomBytes(32).toString("hex")}`;
   return `durable:${normalized}`;
 }
+
+
 function cacheIdentityField(label: string, value: string): string | null {
   const normalized = normalizedCacheText(value);
   if (!normalized) return null;
   // Length-prefix each field so concatenation cannot create ambiguous inputs.
   return `${label.length}:${label}${normalized.length}:${normalized}`;
 }
+
+
 /**
  * Normalize a route to its non-secret domain. URL paths are intentionally not
  * part of the value because protocol is already a separate identity field.
@@ -69,6 +86,8 @@ export function cacheRouteDomain(route: string): string {
   }
   return normalized.toLowerCase();
 }
+
+
 /**
  * Derive the sole provider-facing cache identity. The output is printable
  * ASCII, bounded, and contains no raw session, terminal, or filesystem id.
@@ -86,6 +105,8 @@ export function deriveCacheIdentityKey(input: CacheIdentityInputs): string | nul
   const digest = createHash("sha256").update(material, "utf8").digest("hex");
   return `${CACHE_KEY_PREFIX}${digest}`.slice(0, CACHE_KEY_MAX_LENGTH);
 }
+
+
 export interface CacheIdentity {
   sessionSeed: string;
   key: string;
@@ -94,6 +115,8 @@ export interface CacheIdentity {
   protocol: ProviderProtocol;
   route: string;
 }
+
+
 /** Build the identity object consumed by both headers and request bodies. */
 export function cacheIdentityFor(input: CacheIdentityInputs): CacheIdentity | null {
   const route = cacheRouteDomain(input.route);
@@ -110,6 +133,8 @@ export function cacheIdentityFor(input: CacheIdentityInputs): CacheIdentity | nu
   });
   return identity;
 }
+
+
 /**
  * Host-specific session pin. Verify every canonical identity input before
  * emitting a header so a key cannot be copied across route domains.

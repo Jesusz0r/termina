@@ -15,6 +15,8 @@ import type { ForkSessionResult, ReplayContent, ReplayMessage, ReplayRecovery, R
 import { recoverSessionBlocks, replaySessionBundle } from "./replay.ts";
 import { closeTempBundle, copyReferencedImages, createSecureTempBundle, referencedImageNames, releaseTempRetentionLock, removeEmptyAppOwnedClaim, retainedTempUsage, validateCommittedDestination, validateForkDestination, validateTempBundle } from "./temp-bundles.ts";
 import type { TempBundle } from "./temp-bundles.ts";
+
+
 export async function writeForkedSession(
   sourcePath: string,
   destPath: string,
@@ -63,6 +65,8 @@ export async function writeForkedSession(
     options,
   );
 }
+
+
 async function materializeEmptyFork(dest: SessionBundlePaths, options?: SessionOperationOptions): Promise<ForkSessionResult> {
   const created = createSecureTempBundle(dest, options);
   if (!created.ok) return created;
@@ -87,6 +91,8 @@ async function materializeEmptyFork(dest: SessionBundlePaths, options?: SessionO
     releaseTempRetentionLock(temp);
   }
 }
+
+
 async function materializeVisibleFork(
   source: SessionBundlePaths,
   dest: SessionBundlePaths,
@@ -269,6 +275,8 @@ async function materializeVisibleFork(
     releaseTempRetentionLock(temp);
   }
 }
+
+
 async function installTempBundle(
   temp: TempBundle,
   destBundle: string,
