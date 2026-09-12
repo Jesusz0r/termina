@@ -7,7 +7,7 @@ principles, not implementations: each principle names the invariant, the rule
 that follows from it, and how to verify it. Where a number appears it is an
 example starting point, never the spec.
 
-Status: implemented in `agent-core/main.ts` and `agent-core/tui.ts` (frozen zones + append-only
+Status: implemented in `agent-core/main.ts` (+ `agent-core/main/`) and `agent-core/tui.ts` (frozen zones + append-only
 storage + `/resume` replay, reclamation hysteresis + summarization with
 handoff chaining + emergency overflow + truncate last resort, executable
 stubs + structured inventories, waste attribution with models.dev pricing,

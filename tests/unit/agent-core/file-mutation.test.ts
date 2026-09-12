@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileMutationKey, withFileMutation } from "../../../agent-core/main.ts";
+import { fileMutationKey, withFileMutation } from "../../../agent-core/main/file-ops.ts";
 
 describe("file mutation serialization", () => {
   it("keys by confined absolute path", () => {

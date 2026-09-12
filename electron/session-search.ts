@@ -11,7 +11,7 @@ import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 // .ts extensions so the harness can load this file with strip-types.
 import { cleanPlanPathToken, looksLikePath } from "./plan-board.ts";
-import { listCurrentSegments } from "../agent-core/session.ts";
+import { listCurrentSegments, listLogicalSessions } from "../agent-core/session.ts";
 import type { CanonicalizePath, SessionHit } from "../shared/types.ts";
 
 const MAX_SESSION_SEARCH_FILES = 50;
@@ -262,6 +262,25 @@ export function mergeSessionFiles(groups: SessionFileEntry[][]): SessionFileEntr
     return b.entry.name < a.entry.name ? -1 : b.entry.name > a.entry.name ? 1 : 0;
   });
   return all.slice(0, MAX_SESSION_SEARCH_FILES).map(({ entry }) => entry);
+}
+
+/**
+ * Gather the session files participating in Session Search: read-only Pi
+ * history plus core bundles, newest first, capped. Single owner for which
+ * files a search covers; main supplies the project-scoped directories and
+ * keeps worker dispatch plus query cancellation.
+ */
+export async function collectSessionSearchFiles(piDir: string, coreDir: string): Promise<SessionFileEntry[]> {
+  const coreSessions = await listLogicalSessions(coreDir);
+  return mergeSessionFiles([
+    await listSessionJsonl(piDir),
+    coreSessions.map((entry) => ({
+      path: entry.path,
+      name: entry.name,
+      mtimeMs: entry.mtimeMs,
+      segments: entry.segments,
+    })),
+  ]);
 }
 
 export async function searchSessionFiles(opts: {

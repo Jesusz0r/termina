@@ -30,6 +30,9 @@ import {
 
 /** Anthropic rule adopted by the plan: at most 4 parallel runs. */
 export const MAX_SUBAGENT_RUNS = 4;
+/** Manual fan-out bound: user explicitly asked for many agents. Still bounded
+ * so one prompt cannot fork-bomb the host; concurrency stays safe. */
+export const MAX_SUBAGENT_RUNS_USER = 20;
 /** Children never receive the spawn tool: max spawn depth 1. */
 export const MAX_SUBAGENT_DEPTH = 1;
 /** Bound the parent-written subtask brief kept on the run record. */
@@ -42,6 +45,8 @@ export const MAX_SUBAGENT_TOUCHED = 200;
 export const MAX_SUBAGENT_MESSAGE_CHARS = 8_000;
 /** Bound one child result held for parent fan-in. */
 export const MAX_SUBAGENT_RESULT_CHARS = 32_000;
+/** Bound one child failure diagnostic held for parent fan-in. */
+export const MAX_SUBAGENT_ERROR_CHARS = 4_000;
 /** Per-run turn budget must fit in 1..MAX_SUBAGENT_TURNS. */
 export const MAX_SUBAGENT_TURNS = 200;
 /** Cap claimed paths per spawn so one run cannot reserve the tree. */
@@ -76,6 +81,9 @@ export interface SubagentSpawnRequest {
    * non-active run; anything else fails closed.
    */
   resume?: unknown;
+  /** Raw user_requested flag: true only when the user explicitly asked for
+   * parallel agents this turn. Bypasses the 4-run auto cap. */
+  userRequested?: unknown;
   parent: SubagentParent;
 }
 
@@ -93,11 +101,15 @@ export interface SubagentRun {
   maxTurns: number;
   /** Settled sibling run this run continues, if any. */
   resumeRunId: string | null;
+  /** True when the user explicitly requested this fan-out (manual bypass). */
+  userRequested: boolean;
   state: SubagentRunState;
   /** Parent-to-child texts in arrival order (answers, redirects). */
   inbox: string[];
   /** Scanned final result once settled; never intermediate tool streams. */
   result: string | null;
+  /** Failure/kill diagnostic once resolved; null for settled runs. */
+  error: string | null;
   /** Additive scan markers on the result (see scanSubagentOutput). */
   flags: string[];
   createdAt: number;
@@ -110,7 +122,7 @@ export const SUBAGENT_TOOL_DEFS: Array<Record<string, unknown>> = [
   {
     name: "spawn_subagent",
     description:
-      "Spawn one background subagent for an independent subtask of the current task. The brief must be complete (goal, file paths, decisions, done-criteria): children start context-fresh. Returns a run id immediately; the final result arrives as a tool result when the run settles. Siblings never share a subtask; pass paths to reserve them. Pass resume with a settled sibling run id to continue it: the child replays that run's session and treats the brief as a follow-up.",
+      "Spawn one background subagent for an independent subtask of the current task. The brief must be complete (goal, file paths, decisions, done-criteria): children start context-fresh. Returns a run id immediately; the final result arrives as a tool result when the run settles. Siblings never share a subtask; pass paths to reserve them. Pass resume with a settled sibling run id to continue it: the child replays that run's session and treats the brief as a follow-up. Pass user_requested true only when the user explicitly asked for many/parallel agents in this turn: it bypasses the 4-run auto cap.",
     input_schema: {
       type: "object",
       additionalProperties: false,
@@ -119,6 +131,7 @@ export const SUBAGENT_TOOL_DEFS: Array<Record<string, unknown>> = [
         model: { type: "string" },
         effort: { type: "string" },
         resume: { type: "string" },
+        user_requested: { type: "boolean" },
         budget: {
           type: "object",
           additionalProperties: false,
@@ -214,6 +227,8 @@ export interface SubagentTaskFile {
   parentTerminalId: string;
   cwd: string;
   depth: number;
+  /** True when the user explicitly requested this fan-out. Older files omit it (false). */
+  userRequested: boolean;
   createdAt: number;
 }
 
@@ -292,6 +307,9 @@ export function parseSubagentTaskFile(raw: unknown): { ok: true; file: SubagentT
   if (!Number.isInteger(v.depth) || (v.depth as number) < 1 || (v.depth as number) > MAX_SUBAGENT_DEPTH) {
     return { ok: false, error: "subagent task file has a bad depth" };
   }
+  if (v.userRequested !== undefined && typeof v.userRequested !== "boolean") {
+    return { ok: false, error: "subagent task file has a bad userRequested" };
+  }
   return {
     ok: true,
     file: {
@@ -310,6 +328,7 @@ export function parseSubagentTaskFile(raw: unknown): { ok: true; file: SubagentT
       parentTerminalId: v.parentTerminalId,
       cwd: v.cwd,
       depth: v.depth as number,
+      userRequested: v.userRequested === true,
       createdAt: typeof v.createdAt === "number" ? v.createdAt : Date.now(),
     },
   };
@@ -346,6 +365,7 @@ export function writeSubagentTaskFile(
     parentTerminalId: opts.parentTerminalId,
     cwd: opts.cwd,
     depth: run.depth,
+    userRequested: run.userRequested,
     createdAt: run.createdAt,
   });
   try {
@@ -363,6 +383,8 @@ export interface SubagentResultFile {
   runId: string;
   outcome: SubagentOutcome;
   result: string;
+  /** Failure/kill diagnostic; null for settled runs. Older writers omit it. */
+  error: string | null;
   flags: string[];
   /** Absolute touched paths (bounded) for sibling merge detection. */
   touched: string[];
@@ -386,6 +408,15 @@ export function parseSubagentResultFile(
   if (!Array.isArray(v.flags) || v.flags.some((f) => typeof f !== "string")) {
     return { ok: false, error: "subagent result has bad flags" };
   }
+  // Error is the failure diagnostic: absent/null (older writers, settled
+  // runs) means none; malformed means the whole file is untrusted.
+  let error: string | null = null;
+  if (v.error !== undefined && v.error !== null) {
+    if (typeof v.error !== "string" || Buffer.byteLength(v.error, "utf8") > MAX_SUBAGENT_ERROR_CHARS) {
+      return { ok: false, error: "subagent result has a bad error" };
+    }
+    error = v.error;
+  }
   // Touched is advisory merge evidence: absent (older writers) means none,
   // malformed means the whole file is untrusted.
   let touched: string[] = [];
@@ -402,6 +433,7 @@ export function parseSubagentResultFile(
       runId,
       outcome: v.outcome,
       result: v.result,
+      error,
       flags: v.flags as string[],
       touched,
       settledAt: typeof v.settledAt === "number" ? v.settledAt : Date.now(),
@@ -463,7 +495,7 @@ export function reconcileSubagentRuns(
   for (const run of registry.activeRuns()) {
     const read = readSubagentResultFile(eventsDir, parentTerminalId, run.id);
     if (read.status !== "ok") continue;
-    const done = registry.settleRun(run.id, read.file.result, read.file.outcome);
+    const done = registry.settleRun(run.id, read.file.result, read.file.outcome, read.file.error);
     if (!done.ok) continue;
     const name = subagentResultFileName(parentTerminalId, run.id);
     if (name) {
@@ -478,9 +510,14 @@ export function reconcileSubagentRuns(
   return settled;
 }
 
-/** Sidecar body announcing a validated spawn; the host launches from the task file. */
-export function subagentSpawnSidecarRecord(runId: string, taskFile: string): Record<string, unknown> {
-  return { t: SUBAGENT_SPAWN_RECORD, runId, taskFile };
+/** Sidecar body announcing a validated spawn; the host launches from the task file.
+ * The userRequested flag is informational (manual bypass audit trail). */
+export function subagentSpawnSidecarRecord(
+  runId: string,
+  taskFile: string,
+  userRequested = false,
+): Record<string, unknown> {
+  return { t: SUBAGENT_SPAWN_RECORD, runId, taskFile, userRequested };
 }
 
 // ---- Phase 2 slice 2a: child result framing (engine stdout → host) ----
@@ -651,6 +688,7 @@ export class SubagentRegistry {
     runId: string,
     result: string,
     outcome: Extract<SubagentRunState, "settled" | "failed" | "killed"> = "settled",
+    error: string | null = null,
   ): { ok: true; run: SubagentRun } | { ok: false; error: string } {
     const run = this.runs.get(runId);
     if (!run) return { ok: false, error: `unknown subagent run: ${runId}` };
@@ -662,6 +700,7 @@ export class SubagentRegistry {
     run.state = outcome;
     run.result = scanned.text;
     run.flags = scanned.flags;
+    run.error = outcome === "settled" || !error?.trim() ? null : truncateUtf8(error, MAX_SUBAGENT_ERROR_CHARS);
     return { ok: true, run };
   }
 
@@ -672,6 +711,9 @@ export class SubagentRegistry {
     }
     const task = req.task?.trim() ?? "";
     if (!task) return { ok: false, error: "spawn_subagent task must not be empty" };
+    if (req.userRequested !== undefined && typeof req.userRequested !== "boolean") {
+      return { ok: false, error: "spawn_subagent user_requested must be a boolean" };
+    }
     if (task.length > MAX_SUBAGENT_TASK_CHARS) {
       return { ok: false, error: `spawn_subagent task exceeds ${MAX_SUBAGENT_TASK_CHARS} chars` };
     }
@@ -766,8 +808,10 @@ export class SubagentRegistry {
       effort = supportedEffortLevels(provider, model, protocol)[0] ?? "off";
     }
     const active = this.activeRuns();
-    if (active.length >= MAX_SUBAGENT_RUNS) {
-      return { ok: false, error: `at most ${MAX_SUBAGENT_RUNS} subagent runs at once` };
+    const userRequested = req.userRequested === true;
+    const cap = userRequested ? MAX_SUBAGENT_RUNS_USER : MAX_SUBAGENT_RUNS;
+    if (active.length >= cap) {
+      return { ok: false, error: userRequested ? `at most ${cap} user-requested subagent runs at once` : `at most ${cap} subagent runs at once` };
     }
     for (const other of active) {
       for (const p of paths) {
@@ -779,6 +823,7 @@ export class SubagentRegistry {
       id: `bg-${this.nextId++}`,
       task,
       resumeRunId,
+      userRequested,
       provider,
       model,
       protocol,
@@ -790,6 +835,7 @@ export class SubagentRegistry {
       state: "active",
       inbox: [],
       result: null,
+      error: null,
       flags: [],
       createdAt: Date.now(),
     };
@@ -806,7 +852,9 @@ export class SubagentRegistry {
       // re-asking about a dead run instead of moving on.
       const outcome = `subagent run ${runId} is already ${run.state}`;
       const excerpt = (run.result ?? "").trim().slice(0, 300);
-      return { ok: false, error: excerpt ? `${outcome} with result: ${excerpt}` : `${outcome} with an empty result` };
+      if (excerpt) return { ok: false, error: `${outcome} with result: ${excerpt}` };
+      const errExcerpt = (run.error ?? "").trim().slice(0, 300);
+      return { ok: false, error: errExcerpt ? `${outcome} with error: ${errExcerpt}` : `${outcome} with an empty result` };
     }
     const clean = text?.trim() ?? "";
     if (!clean) return { ok: false, error: "message_subagent text must not be empty" };
