@@ -8,8 +8,9 @@
  * the TerminalRosterHost seam.
  */
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename as fsRename, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { syncParentDir } from "../shared/fsync.js";
 import type { PlanTask, VerifyInfo } from "../shared/types.js";
 import {
   MAX_ROSTER_BYTES,
@@ -108,11 +109,23 @@ export class TerminalRosterStore {
     const commit = previous.then(async () => {
       await mkdir(dir, { recursive: true, mode: 0o700 });
       const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+      let handle: Awaited<ReturnType<typeof open>> | undefined;
       try {
-        await writeFile(tmp, `${JSON.stringify({ terminals: entries })}\n`, { flag: "wx", mode: 0o600 });
+        handle = await open(tmp, "wx", 0o600);
+        await handle.writeFile(`${JSON.stringify({ terminals: entries })}\n`, "utf8");
+        await handle.sync();
+        await handle.close();
+        handle = undefined;
         await fsRename(tmp, path);
-      } finally {
+        syncParentDir(path);
+      } catch (error) {
+        try {
+          await handle?.close();
+        } catch {
+          /* best-effort fd cleanup */
+        }
         await rm(tmp, { force: true }).catch(() => undefined);
+        throw error;
       }
     });
     const settled = commit.catch((err) => {
