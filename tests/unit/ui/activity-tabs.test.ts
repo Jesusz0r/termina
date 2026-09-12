@@ -1,10 +1,36 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
+  ACTIVITY_TAB_LABELS,
+  ACTIVITY_TABS,
   activityEmptyVisible,
+  activityPanelTitleVisible,
   initialActivityTabState,
   reduceActivityTab,
   resolveActivityTab,
 } from "../../../src/activity-tabs.ts";
+
+const html = readFileSync(new URL("../../../src/index.html", import.meta.url), "utf8");
+const css = readFileSync(new URL("../../../src/styles.css", import.meta.url), "utf8");
+const tabsSrc = readFileSync(new URL("../../../src/activity-tabs.ts", import.meta.url), "utf8");
+
+function buttonMarkup(id: string): string {
+  const match = html.match(new RegExp(`<button\\b[^>]*\\bid="${id}"[^>]*>[\\s\\S]*?</button>`));
+  if (!match) throw new Error(`missing button #${id}`);
+  return match[0];
+}
+
+function accessibleName(markup: string): string {
+  const aria = /aria-label="([^"]*)"/.exec(markup)?.[1];
+  if (aria) return aria;
+  const text = markup.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  if (/[A-Za-z]{3,}/.test(text)) return text;
+  return /title="([^"]*)"/.exec(markup)?.[1] ?? text;
+}
+
+function hasWordBeyondGlyph(name: string): boolean {
+  return /[A-Za-z]{3,}/.test(name);
+}
 
 describe("activity tabs", () => {
   it("falls back to timeline for unknown stored values", () => {
@@ -81,5 +107,65 @@ describe("activity tabs", () => {
     const s4 = reduceActivityTab(s3, { type: "sync", tab: "modified", has: true });
     expect(activityEmptyVisible(s4, "plan")).toBe(true);
     expect(activityEmptyVisible(s4, "modified")).toBe(false);
+  });
+
+  it("repeats the tab name in panel chrome only when the tab bar is gone", () => {
+    expect(activityPanelTitleVisible(true)).toBe(false);
+    expect(activityPanelTitleVisible(false)).toBe(true);
+    expect(tabsSrc).toContain('panel.toggleAttribute("data-repeat-title"');
+    expect(tabsSrc).toContain('panel.setAttribute("aria-labelledby"');
+    expect(css).toMatch(/#timeline-strip:not\(\[data-repeat-title\]\) \.activity-panel-title/);
+    expect(css).toMatch(/#plan-panel:not\(\[data-repeat-title\]\) \.activity-panel-title/);
+    expect(css).toMatch(/#worldline-panel:not\(\[data-repeat-title\]\) \.activity-panel-title/);
+    expect(css).toMatch(/#modified-panel:not\(\[data-repeat-title\]\) \.activity-panel-title/);
+    expect(css).toMatch(/\.activity-panel-title\s*\{[\s\S]*?display:\s*none/);
+  });
+
+  it("keeps the tablist as the single visible title for each panel", () => {
+    const tabbar = html.match(/id="activity-tabbar"[\s\S]*?<\/div>/)?.[0];
+    expect(tabbar).toBeTruthy();
+    for (const tab of ACTIVITY_TABS) {
+      const label = ACTIVITY_TAB_LABELS[tab];
+      expect(tabbar).toContain(`data-tab="${tab}"`);
+      expect(tabbar).toContain(label);
+      const titles = [...html.matchAll(/class="activity-panel-title">([^<]*)<\/span>/g)].map((m) => m[1]);
+      expect(titles.some((title) => title === label || title.startsWith(label))).toBe(true);
+    }
+    // Title lives in the marked span (hidden while the tab bar is up), not as a second heading.
+    expect(html).not.toMatch(/class="timeline-label">Timeline/);
+    expect(html).not.toMatch(/<span>Plan<\/span>/);
+    expect(html).not.toMatch(/<span>Worldlines<\/span>/);
+    expect(html).not.toMatch(/<span>Modified files<\/span>/);
+  });
+
+  it("names glyph actions with visible text or an accessible word", () => {
+    const actions = [
+      { id: "btn-dispatch", visible: "Dispatch" },
+      { id: "btn-timeline-play", visible: "Replay" },
+      { id: "explorer-content-rerun", visible: "Re-run" },
+      { id: "btn-fork-run", visible: "Fork Run" },
+      { id: "btn-min-explorer", visible: "Minimize" },
+      { id: "btn-min-terminal", visible: "Minimize" },
+      { id: "btn-min-editor", visible: "Minimize" },
+      { id: "btn-app-update", visible: "Update" },
+    ];
+    for (const action of actions) {
+      const markup = buttonMarkup(action.id);
+      const name = accessibleName(markup);
+      expect(hasWordBeyondGlyph(name), `${action.id} accessible name: ${name}`).toBe(true);
+      expect(name).toContain(action.visible);
+    }
+    expect(html).toMatch(/id="btn-dispatch"[^>]*>[\s\S]*<span class="action-label">Dispatch<\/span>/);
+    expect(html).toMatch(/id="explorer-content-rerun"[^>]*>[\s\S]*<span class="action-label">Re-run<\/span>/);
+    expect(css).toMatch(/#btn-timeline-play::after\s*\{[^}]*content:\s*"Replay"/);
+    expect(css).toMatch(/@container activity-chrome \(max-width:/);
+    expect(css).toMatch(/@container explorer-content \(max-width:/);
+  });
+
+  it("draws pane collapse as a chevron instead of a minus", () => {
+    expect(css).toContain(".pane-toggle::before");
+    expect(css).toMatch(/\.pane-toggle::before\s*\{[^}]*transform:\s*rotate\(135deg\)/);
+    expect(css).toContain("PANE_MIN_ICON");
+    expect(css).toMatch(/\.pane-toggle\s*\{[^}]*font-size:\s*0/);
   });
 });

@@ -14,7 +14,19 @@ export type ActivityTab = "timeline" | "plan" | "worldlines" | "modified";
 
 export const ACTIVITY_TABS: readonly ActivityTab[] = ["timeline", "plan", "worldlines", "modified"];
 
+export const ACTIVITY_TAB_LABELS: Record<ActivityTab, string> = {
+  timeline: "Timeline",
+  plan: "Plan",
+  worldlines: "Worldlines",
+  modified: "Modified",
+};
+
 export const ACTIVITY_TAB_KEY = "termina.activityTab";
+
+/** Panel chrome repeats the tab name only when the tab bar is gone. */
+export function activityPanelTitleVisible(tabBarVisible: boolean): boolean {
+  return !tabBarVisible;
+}
 
 export interface ActivityTabState {
   active: ActivityTab;
@@ -130,10 +142,17 @@ export class ActivityTabs {
     this.update(tab, count, { type: "sync", tab, has });
   }
 
+  private writeCount(tab: ActivityTab, count: number): void {
+    const label = count > 0 ? `(${count})` : "";
+    const countEl = this.deps.counts[tab];
+    if (countEl) countEl.textContent = label;
+    const badge = this.buttons.get(tab)?.querySelector<HTMLElement>(".activity-count");
+    if (badge) badge.textContent = label;
+  }
+
   private update(tab: ActivityTab, count: number, event: ActivityTabEvent): void {
     const next = reduceActivityTab(this.state, event);
-    const countEl = this.deps.counts[tab];
-    if (countEl) countEl.textContent = count > 0 ? `(${count})` : "";
+    this.writeCount(tab, count);
     if (next === this.state) return;
     const switched = next.active !== this.state.active;
     this.state = next;
@@ -157,13 +176,25 @@ export class ActivityTabs {
   }
 
   private apply(): void {
+    const tabBarVisible = !this.deps.bar.hidden;
+    const repeatTitle = activityPanelTitleVisible(tabBarVisible);
     for (const tab of ACTIVITY_TABS) {
-      this.deps.panels[tab]?.classList.toggle("tab-active", this.state.active === tab);
+      const panel = this.deps.panels[tab];
+      panel?.classList.toggle("tab-active", this.state.active === tab);
       const button = this.buttons.get(tab);
       button?.classList.toggle("active", this.state.active === tab);
       if (button) {
         button.hidden = !this.state.visible[tab];
         button.setAttribute("aria-selected", this.state.active === tab ? "true" : "false");
+        if (!button.id) button.id = `activity-tab-${tab}`;
+      }
+      if (panel) {
+        panel.toggleAttribute("data-repeat-title", repeatTitle);
+        panel.setAttribute("role", "tabpanel");
+        if (button) {
+          if (panel.id) button.setAttribute("aria-controls", panel.id);
+          panel.setAttribute("aria-labelledby", button.id);
+        }
       }
       const empty = this.empties.get(tab);
       if (empty) empty.hidden = !activityEmptyVisible(this.state, tab);
