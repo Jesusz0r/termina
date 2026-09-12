@@ -16,7 +16,6 @@ use serde_json::Value;
 use crate::store::FileIdentity;
 use crate::{StoreObjectTransaction, write_blob};
 use crate::capture::{AnchoredPath, CaptureRoot, read_link_at};
-use crate::promotion_remove::hook_matches;
 
 pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
@@ -76,6 +75,15 @@ pub(crate) fn after_cache_hooks(req: &Value) -> Vec<(String, String, bool)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// True when a capture path falls under a hook path: an exact match or a
+/// suffix at a segment boundary.
+pub(crate) fn hook_matches(rel_path: &str, hook_path: &str) -> bool {
+    rel_path == hook_path
+        || (rel_path.len() > hook_path.len()
+            && rel_path.ends_with(hook_path)
+            && rel_path.as_bytes()[rel_path.len() - hook_path.len() - 1] == b'/')
 }
 
 pub(crate) fn oid_ext(repo: &Repository, value: &str) -> Result<Oid, String> {
