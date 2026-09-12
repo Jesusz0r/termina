@@ -78,7 +78,7 @@ export async function worldlineCapturePrimary(
   primary: { root: string; lastStateCommit: string | null } | null,
 ): Promise<string | null> {
   const store = await storePromise;
-  if (!primary || !store || !primary.lastStateCommit) return null;
+  if (!primary || !store) return null;
   try {
     const state = await store.capture(await gitHead(primary.root), primary.lastStateCommit);
     return state.commit;

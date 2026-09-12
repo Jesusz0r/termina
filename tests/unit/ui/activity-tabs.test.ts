@@ -158,6 +158,7 @@ describe("activity tabs", () => {
     expect(html).toMatch(/id="btn-dispatch"[^>]*>[\s\S]*<span class="action-label">Dispatch<\/span>/);
     expect(html).toMatch(/id="explorer-content-rerun"[^>]*>[\s\S]*<span class="action-label">Re-run<\/span>/);
     expect(css).toMatch(/#btn-timeline-play::after\s*\{[^}]*content:\s*"Replay"/);
+    expect(css).toMatch(/#btn-timeline-play\s*\{[^}]*font-size:\s*0/);
     expect(css).toMatch(/@container activity-chrome \(max-width:/);
     expect(css).toMatch(/@container explorer-content \(max-width:/);
   });

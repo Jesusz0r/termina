@@ -199,7 +199,7 @@ export interface WorldlineDeps {
   terminateCandidate?(terminalId: string): void;
   createCandidateWorkspace(root: string, baseStateId: string | null, comparisonId: string): string;
   onUpdate(summary: WorldlineSummary): void;
-  onCandidateState(root: string, stateId: string): void | Promise<void>;
+  onCandidateState(root: string, stateId: string | null): void | Promise<void>;
   onRemoved(comparisonId: string): void;
   /** The fork preflight (WORLDLINES §4): repo, platform, disk. */
   preflight(): Promise<{ ok: boolean; reasons: string[] }>;
@@ -1377,7 +1377,8 @@ export class WorldlineManager {
     // Trust-sensitive resources must still match the run's capture (§6.5).
     if (run.trustHashes) {
       const now = await this.deps.trustHashes();
-      const changed = Object.keys(run.trustHashes).filter((k) => now[k] !== run.trustHashes![k]);
+      const changed = [...new Set([...Object.keys(run.trustHashes), ...Object.keys(now)])]
+        .filter((k) => now[k] !== run.trustHashes![k]);
       if (changed.length > 0) {
         return { ok: false, error: `trust-sensitive resources changed since the run: ${changed.slice(0, 3).join(", ")}` };
       }
@@ -2355,9 +2356,16 @@ export class WorldlineManager {
     };
     let mergedParent = primary.lastStateCommit;
     const refreshMergedPrimary = async (): Promise<void> => {
-      const mergedState = await store.capture(await gitHead(this.deps.primaryRoot), mergedParent);
-      await this.deps.onCandidateState(this.deps.primaryRoot, mergedState.commit);
-      mergedParent = mergedState.commit;
+      try {
+        const mergedState = await store.capture(await gitHead(this.deps.primaryRoot), mergedParent);
+        await this.deps.onCandidateState(this.deps.primaryRoot, mergedState.commit);
+        mergedParent = mergedState.commit;
+      } catch (error) {
+        // Disk already has the merged bytes. A stale pre-apply parent would
+        // let later incrementals poison the workspace lineage.
+        await this.deps.onCandidateState(this.deps.primaryRoot, null);
+        throw error;
+      }
     };
     const fail = async (message: string): Promise<{ ok: false; error: string }> => {
       releaseLeases();

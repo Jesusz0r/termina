@@ -1193,7 +1193,9 @@ body {
   background: none;
   border: none;
   color: var(--text-dim);
-  font-size: 10px;
+  /* Hide the leftover ▶ / ■ that timeline.ts writes. */
+  font-size: 0;
+  line-height: 0;
   padding: 1px 5px;
   border-radius: 3px;
   cursor: pointer;

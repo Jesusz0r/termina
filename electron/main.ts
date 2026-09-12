@@ -1641,12 +1641,15 @@ class TerminaApp {
     return owner?.workspaces.get(inst.workspaceId) ?? null;
   }
 
-  /** Live terminals that share a source tree (dispatch workers plus the owner). */
+  /** Terminals that share a source tree (dispatch workers plus the owner).
+   *  A closed terminal stays listed while it still has undrained moment work. */
   private terminalsOnWorkspace(ws: WorkspaceState): AgentTerminalInstance[] {
     const out: AgentTerminalInstance[] = [];
     for (const id of ws.terminalIds) {
       const inst = this.terminals.get(id);
-      if (inst && !inst.closed) out.push(inst);
+      if (!inst) continue;
+      if (inst.closed && inst.momentDots.length === 0 && inst.pendingHints.size === 0) continue;
+      out.push(inst);
     }
     return out;
   }
@@ -2106,6 +2109,23 @@ class TerminaApp {
     ws.leaseDepth = Math.max(0, (ws.leaseDepth ?? 1) - 1);
     if (ws.leaseDepth === 0) {
       ws.writerId = null;
+      // Moment capture bails while another writer holds the tree. Kick once
+      // the tree is free so drained-not-yet-captured dots are not stranded.
+      // The moment writer itself must not kick: a failed incremental restores
+      // its batch and a self-kick would tight-loop on a wedged store.
+      if (!requesterId.startsWith("moment:")) this.kickWorkspaceMomentCapture(ws);
+    }
+  }
+
+  /** Schedule one capture if any terminal on this tree still has dots or hints. */
+  private kickWorkspaceMomentCapture(ws: WorkspaceState): void {
+    if (this.disposed) return;
+    if (this.projectIsSwitching(this.projectOfWorkspace(ws.id)?.id)) return;
+    for (const member of this.terminalsOnWorkspace(ws)) {
+      if (!member.currentRun) continue;
+      if (member.momentDots.length === 0 && member.pendingHints.size === 0) continue;
+      this.scheduleMomentCapture(member);
+      return;
     }
   }
 
@@ -2433,7 +2453,7 @@ class TerminaApp {
     }
   }
 
-  private setWorkspaceState(ws: WorkspaceState, stateId: string): void {
+  private setWorkspaceState(ws: WorkspaceState, stateId: string | null): void {
     const previous = ws.lastStateCommit;
     ws.lastStateCommit = stateId;
     if (previous && previous !== stateId) void this.releaseStateIfUnused(previous);
@@ -4187,6 +4207,19 @@ class TerminaApp {
       clearTimeout(inst.captureTimer);
       inst.captureTimer = null;
     }
+    // Closing cancels the debounce timer, and PTY exit would cancel a
+    // rescheduled one. Enqueue on the workspace now so leftover hints still
+    // enter the lineage before the process map drops this terminal.
+    const captureWs = this.workspaceOfTerminal(inst);
+    if (
+      captureWs
+      && inst.currentRun
+      && (inst.momentDots.length > 0 || inst.pendingHints.size > 0)
+      && !this.disposed
+      && !this.projectIsSwitching(this.projectOfTerminal(inst.id)?.id)
+    ) {
+      this.trackRecordingTask(this.runMomentCapture(inst, captureWs));
+    }
     if (this.verifyRuns.has(id)) this.cancelVerify(id);
     inst.pty.killGroup("SIGTERM");
     inst.pty.kill("SIGTERM");
@@ -5118,7 +5151,7 @@ class TerminaApp {
   ): Promise<void> {
     if (!requestId) return;
     const ws = this.workspaceOfTerminal(inst);
-    if (!ws || !ws.lastStateCommit) {
+    if (!ws || (!ws.lastStateCommit && !ws.primary)) {
       this.writeAck(inst.id, requestId, { ok: false, error: "recording is not available" });
       return;
     }
@@ -5245,12 +5278,15 @@ class TerminaApp {
     expected?: PtyRendererSendTarget | null,
   ): Promise<void> {
     const members = this.terminalsOnWorkspace(ws);
-    if (!inst.closed && !members.some((member) => member.id === inst.id)) members.push(inst);
+    if (!members.some((member) => member.id === inst.id)
+      && (!inst.closed || inst.momentDots.length > 0 || inst.pendingHints.size > 0)) {
+      members.push(inst);
+    }
     const hasWork = members.some((member) => member.momentDots.length > 0 || member.pendingHints.size > 0);
     if (!hasWork) return;
     const momentOwner = this.projectOfTerminal(inst.id) ?? this.projectOfWorkspace(ws.id);
     const store = await momentOwner?.storePromise;
-    if (!store || !ws.lastStateCommit) {
+    if (!store || (!ws.lastStateCommit && !ws.primary)) {
       for (const member of members) {
         if (member.momentDots.length > 0 || member.pendingHints.size > 0) {
           this.setRecorderState(member, "paused", expected);
@@ -5279,22 +5315,24 @@ class TerminaApp {
     if (!lease.ok) {
       return;
     }
-    const jobs: Array<{ inst: AgentTerminalInstance; batch: TimelineEvent[] }> = [];
+    const jobs: Array<{ inst: AgentTerminalInstance; batch: TimelineEvent[]; hints: string[] }> = [];
     const hints = new Set<string>();
     try {
       for (const member of this.terminalsOnWorkspace(ws)) {
         if (member.momentDots.length === 0 && member.pendingHints.size === 0) continue;
-        jobs.push({ inst: member, batch: member.momentDots });
+        const hintList = [...member.pendingHints];
+        jobs.push({ inst: member, batch: member.momentDots, hints: hintList });
         member.momentDots = [];
-        for (const hint of member.pendingHints) hints.add(hint);
         member.pendingHints.clear();
+        for (const hint of hintList) hints.add(hint);
       }
-      if (!inst.closed && !jobs.some((job) => job.inst.id === inst.id)
+      if (!jobs.some((job) => job.inst.id === inst.id)
         && (inst.momentDots.length > 0 || inst.pendingHints.size > 0)) {
-        jobs.push({ inst, batch: inst.momentDots });
+        const hintList = [...inst.pendingHints];
+        jobs.push({ inst, batch: inst.momentDots, hints: hintList });
         inst.momentDots = [];
-        for (const hint of inst.pendingHints) hints.add(hint);
         inst.pendingHints.clear();
+        for (const hint of hintList) hints.add(hint);
       }
       if (jobs.length === 0) return;
       // Reconcile: the watcher's precomputed blob oids catch changes the
@@ -5320,8 +5358,12 @@ class TerminaApp {
       try {
         // A candidate workspace captures its OWN tree (the source override).
         const source = ws.primary ? undefined : { root: ws.root, gitDir: (await gitCommonDir(ws.root)) ?? ws.root };
-        const state = await store.captureIncremental(ws.lastStateCommit, [...hints], reconcile, {}, {}, source);
+        const parent = ws.lastStateCommit;
+        const state = parent
+          ? await store.captureIncremental(parent, [...hints], reconcile, {}, {}, source)
+          : await store.capture(await gitHead(ws.root), null);
         this.setWorkspaceState(ws, state.commit);
+        if (!parent) ws.lastReseedMs = Date.now();
         ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
         if (!ws.primary) {
           for (const job of jobs) {
@@ -5339,10 +5381,10 @@ class TerminaApp {
         // forever. Re-seed primary workspaces with one full capture, at most
         // once a minute; candidates keep their creation-seeded chain.
         if (ws.primary && Date.now() - ws.lastReseedMs > 60_000) {
-          ws.lastReseedMs = Date.now();
           try {
             const reseeded = await store.capture(await gitHead(ws.root), null);
             this.setWorkspaceState(ws, reseeded.commit);
+            ws.lastReseedMs = Date.now();
             for (const job of jobs) {
               this.attachMomentState(job.inst, reseeded.commit, job.batch, expected);
               this.setRecorderState(job.inst, "ready", expected);
@@ -5352,8 +5394,10 @@ class TerminaApp {
             console.warn(`[main] moment reseed failed: ${reseedErr instanceof Error ? reseedErr.message : String(reseedErr)}`);
           }
         }
-        // Failed batches remain internal and are never published as dots.
+        // Keep the batch so a later lease-release or tool event can retry.
         for (const job of jobs) {
+          job.inst.momentDots = [...job.batch, ...job.inst.momentDots];
+          for (const hint of job.hints) this.addPendingHint(job.inst, hint);
           this.setRecorderState(job.inst, "degraded", expected, message.slice(0, 160));
         }
       }
