@@ -43,6 +43,7 @@ import {
   candidateSandboxLaunch,
   evidenceProfileContent,
   filterCandidateEnvironment,
+  filterVerifyEnvironment,
   terminateSandboxProcessGroup,
 } from "./sandbox.js";
 import { parseFailingTests, verifyFailSummary } from "./evidence.js";
@@ -235,6 +236,18 @@ function coreEngineBinary(): string {
 function candidateEnv(provider: string | null): Record<string, string | undefined> {
   const bundledNode = join(process.resourcesPath, "node", "bin");
   return filterCandidateEnvironment(process.env, provider, existsSync(bundledNode) ? [bundledNode] : []);
+}
+
+/**
+ * Project-controlled commands (Primary Verify test scripts, background
+ * diagnostics) get a minted environment, never the ambient terminal
+ * environment: a repo's test script must not inherit provider tokens,
+ * SSH/proxy variables, or the app's own sidecar config. Same allowlist
+ * idea as the candidate Verify env.
+ */
+function verifyEnv(): Record<string, string | undefined> {
+  const bundledNode = join(process.resourcesPath, "node", "bin");
+  return filterVerifyEnvironment(process.env, existsSync(bundledNode) ? [bundledNode] : []);
 }
 
 /** Thinking levels the agent accepts. Reject anything else at spawn. */
@@ -593,7 +606,7 @@ class TerminaApp {
       if (!binding) return null;
       return { dir: this.eventsDirOf(inst), binding };
     },
-    cleanEnv: () => cleanEnv(),
+    verifyEnv: () => verifyEnv(),
   });
   /** Debounced snapshot refresh timers by workspace id. */
   private projectSnapshotTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -3000,7 +3013,7 @@ class TerminaApp {
       const args = launch?.args ?? ["-c", cmdline];
       const env = candidate
         ? { ...candidateEnv(null), HOME: candidate.homeDir, TMPDIR: candidate.tmpDir, TERMINA_EVENTS_DIR: candidate.eventsDir }
-        : { ...cleanEnv() };
+        : { ...verifyEnv() };
       child = spawn(command, args, {
         cwd,
         detached: process.platform !== "win32",
