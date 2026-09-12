@@ -167,7 +167,7 @@ export class SettingsView {
     content.appendChild(this.checkRow(
       "autoOpenAgentFiles",
       "Open files the agent edits",
-      "Automatically open a file in the editor when an agent starts editing it.",
+      "Automatically open a file in the editor when an agent starts editing it. Opens as a preview tab — edit, double-click, or Keep Open to pin it.",
     ));
   }
 

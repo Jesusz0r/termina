@@ -320,7 +320,7 @@ function drainPendingToolTargets(projectId: string | null): void {
   for (const target of queued) {
     if (view.workspaceId !== target.workspaceId) continue;
     const owner: ProjectWorkspaceRef = { projectId, workspaceId: target.workspaceId };
-    void ensureProjectEditor(view).openFile(target.path, { preview: false, owner }).catch((err) => {
+    void ensureProjectEditor(view).openFile(target.path, { preview: true, owner }).catch((err) => {
       toast(`could not open ${pathBasename(target.path)}: ${(err as Error).message}`, "error");
     });
   }
@@ -374,7 +374,7 @@ function ensureReviewView(): Promise<ReviewViewInstance> {
       onAccepted: (path) => {
         const pane = activeId ? panes.get(activeId) : undefined;
         if (!pane) return;
-        pane.accepted.add(path);
+        pane.accepted.set(path, Date.now());
         pane.reverted.delete(path);
         renderModified(pane);
         renderHandoff(pane);
@@ -610,7 +610,9 @@ interface Pane {
   /** True after pty:exit. The pane remains until the user closes the tab. */
   exited: boolean;
   modified: ModifiedFile[];
-  accepted: Set<string>;
+  /** Reviewed-at timestamp per path. A later disk change drops the entry, so
+   *  the ✓ never survives a rewrite of the file it marked. */
+  accepted: Map<string, number>;
   reverted: Set<string>;
   verify: VerifyInfo;
   /** True while a failed/timed-out verify awaits its first view. Cleared on
@@ -646,7 +648,8 @@ const panes = new Map<string, Pane>();
 /** Last active terminal per project. Returning to a project restores it. */
 const lastActivePane = new Map<string, string>();
 /** Agent auto-opens that arrived while their project was in the background.
- *  Drained (pinned, not preview) when the project becomes active again. */
+ *  Drained as replaceable preview tabs when the project becomes active
+ *  again, so a long run never pins a tab per file it touched. */
 const pendingToolTargets = new Map<string, Array<{ path: string; workspaceId: string }>>();
 const MAX_PENDING_TOOL_TARGETS = 20;
 (window as unknown as Record<string, unknown>).__panes = panes;
@@ -836,7 +839,7 @@ function createPaneShell(instanceId: string): Pane {
     error: false,
     exited: false,
     modified: [],
-    accepted: new Set(),
+    accepted: new Map(),
     reverted: new Set(),
     verify: { state: "untested", command: null, summary: null },
     verifyAttention: false,
@@ -1398,6 +1401,32 @@ function renderVerify(pane: Pane): void {
     v.state === "running" ? "Click to cancel verification" : v.state === "fail" && v.summary ? v.summary : v.command ?? "";
 }
 
+/** Drop review marks for paths main no longer lists. Clear (and any list
+ *  replacement) forgets review state; without pruning, a re-added path would
+ *  resurrect a stale ✓ from an earlier review. */
+function pruneReviewMarks(pane: Pane): void {
+  const live = new Set(pane.modified.map((f) => f.path));
+  for (const path of pane.accepted.keys()) {
+    if (!live.has(path)) pane.accepted.delete(path);
+  }
+  for (const path of pane.reverted) {
+    if (!live.has(path)) pane.reverted.delete(path);
+  }
+}
+
+/** A disk change invalidates every accept mark on that file: the ✓ reviewed
+ *  the bytes it no longer has. Paths are absolute, so no two panes can mean
+ *  different files by the same key. */
+function dropStaleAcceptMarks(path: string): void {
+  for (const pane of panes.values()) {
+    if (!pane.accepted.delete(path)) continue;
+    if (pane.instanceId === activeId) {
+      renderModified(pane);
+      renderHandoff(pane);
+    }
+  }
+}
+
 function renderModified(pane: Pane, announce = true): void {
   modifiedCount.textContent = pane.modified.length ? `(${pane.modified.length})` : "";
   if (modifiedRenderedPaneId !== pane.instanceId) {
@@ -1441,10 +1470,12 @@ function renderModified(pane: Pane, announce = true): void {
         void ensureReviewView().then((view) => view.show(pane.instanceId, li.dataset.path ?? f.path, li.dataset.relPath ?? f.relPath, owner));
       });
     }
-    if (pane.accepted.has(f.path)) {
+    const reviewedAt = pane.accepted.get(f.path);
+    if (reviewedAt !== undefined) {
       const mark = document.createElement("span");
       mark.className = "review-mark accepted";
       mark.textContent = "✓";
+      mark.title = `Reviewed ${new Date(reviewedAt).toLocaleString()}`;
       li.appendChild(mark);
     } else if (pane.reverted.has(f.path)) {
       const mark = document.createElement("span");
@@ -1791,8 +1822,9 @@ btnAcceptAll.addEventListener("click", (e) => {
   const pane = activeId ? panes.get(activeId) : undefined;
   if (!pane || pane.modified.length === 0) return;
   // Accept every file: the list becomes the approved changes for a commit.
+  const reviewedAt = Date.now();
   for (const f of pane.modified) {
-    pane.accepted.add(f.path);
+    pane.accepted.set(f.path, reviewedAt);
     pane.reverted.delete(f.path);
   }
   renderModified(pane);
@@ -2893,7 +2925,7 @@ window.termina.onToolTarget((p) => {
     pendingToolTargets.set(p.projectId, queued);
     return;
   }
-  void ensureProjectEditor(view).openFile(p.path, { preview: false, owner }).catch((err) => {
+  void ensureProjectEditor(view).openFile(p.path, { preview: true, owner }).catch((err) => {
     toast(`could not open ${pathBasename(p.path)}: ${(err as Error).message}`, "error");
   });
 });
@@ -2936,6 +2968,7 @@ window.termina.onFileChanged((p) => {
     if (oldestKey === undefined) break;
     lastChangePush.delete(oldestKey);
   }
+  dropStaleAcceptMarks(p.path);
   if (p.content !== undefined) {
     if (view.editorMgr) view.editorMgr.updateContent(p.path, p.content, p.changedLines);
   } else {
@@ -2955,6 +2988,7 @@ window.termina.onFileDeleted((p) => {
   const owner: ProjectWorkspaceRef = { projectId: p.projectId, workspaceId: p.workspaceId };
   lastChangePush.delete(changeKey(owner, p.path));
   view.editorMgr?.closeIfOpen(p.path);
+  dropStaleAcceptMarks(p.path);
   if (activeProjectId !== p.projectId) return;
   explorer.handleDiskChange(p.path);
 });
@@ -2963,6 +2997,7 @@ window.termina.onModifiedList((p) => {
   const pane = panes.get(p.instanceId);
   if (!pane) return;
   pane.modified = p.files;
+  pruneReviewMarks(pane);
   if (activeId === pane.instanceId) renderModified(pane);
   if (pane.projectId === activeProjectId) syncExplorerChanged();
 });

@@ -24,9 +24,17 @@ describe("multi-project editor event routing", () => {
     const handlerEnd = renderer.indexOf("const lastChangePush", handlerStart);
     const handler = renderer.slice(handlerStart, handlerEnd);
     expect(handler).toContain("pendingToolTargets");
-    // Queued targets open pinned (not preview) when the project returns.
+    // Queued targets open as replaceable preview tabs when the project
+    // returns: a long run must not pin a permanent tab per file it touched.
     expect(renderer).toContain("drainPendingToolTargets(activeProjectId)");
     expect(renderer).toContain("pendingToolTargets.delete(projectId)");
+    const drainStart = renderer.indexOf("function drainPendingToolTargets(");
+    expect(drainStart).toBeGreaterThanOrEqual(0);
+    const drain = renderer.slice(drainStart, renderer.indexOf("/** Show only the active project's terminals.", drainStart));
+    expect(drain).toContain("preview: true");
+    expect(drain).not.toContain("preview: false");
+    expect(handler).toContain("preview: true");
+    expect(handler).not.toContain("preview: false");
   });
 
   it("reveals the editor only after the open is routed to its project", () => {
