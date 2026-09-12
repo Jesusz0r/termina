@@ -6763,7 +6763,6 @@ class TerminaApp {
       // the index re-syncs rather than drifting. The root scopes the patch to
       // the indexed project; background workspaces never touch it.
       this.pathIndex.noteAdded(canonicalRoot, relPath);
-      ws.generation++;
       this.markCandidateEvidenceStale(ws.comparisonId);
       const now = Date.now();
       // Merge duplicate file system events for the same physical write
@@ -6782,6 +6781,10 @@ class TerminaApp {
         if (oldest !== undefined) this.lastWatchChange.delete(oldest);
       }
       if (isDupWatch) return;
+      // The generation moves only on a real tree change. A duplicate event
+      // (same bytes within the merge window) must not trip the preflight or
+      // promotion generation fences.
+      ws.generation++;
       // Keep per-turn project snapshots near live state without a walk per
       // event: one debounced refresh per burst.
       this.scheduleProjectSnapshot(ws.id);
@@ -6881,7 +6884,9 @@ class TerminaApp {
       const canonical = await this.canonicalPath(path);
       const relPath = relative(await this.canonicalPath(ws.root), canonical);
       if (!relPath || relPath.startsWith("..") || isAbsolute(relPath)) return;
-      ws.generation++;
+      // No generation bump here: every emit runs onChange first, which owns
+      // the single bump per real change. A second bump would trip the
+      // preflight/promotion fences on a touch-only event.
       this.markCandidateEvidenceStale(ws.comparisonId);
       for (const inst of workspaceTerminals()) {
         if (inst.busy) await this.recordModified(inst, canonical, status);
