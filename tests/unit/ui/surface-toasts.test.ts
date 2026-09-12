@@ -82,6 +82,7 @@ describe("worldline success toasts", () => {
     expect(challenge).not.toContain("challenger launched");
     expect(runPromote).not.toContain("promoted —");
     expect(exportFn).not.toContain("exported —");
+    expect(exportFn).toContain("this.recordExportPath(comparisonId, label, res.path)");
     expect(reopen).not.toContain("reopened`, \"info\"");
     expect(runPromote).toContain("this.handlers.onOpenTerminal(res.terminalId)");
     expect(reopen).toContain("this.handlers.onOpenTerminal(res.terminalId)");
