@@ -157,6 +157,9 @@ export const test = base.extend<TerminaE2EFixtures>({
     const worldsDir = join(runRoot, "worlds");
     const userData = join(runRoot, "user-data");
     const homeDir = join(runRoot, "home");
+    // SidecarTailer.armWatch fails closed while this directory is missing.
+    // Create it before launch so boot session_ready is visible to the tailer.
+    mkdirSync(eventsDir, { recursive: true });
     mkdirSync(userData, { recursive: true });
     mkdirSync(homeDir, { recursive: true });
 

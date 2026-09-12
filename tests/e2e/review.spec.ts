@@ -2,6 +2,7 @@ import { test, expect } from "./fixtures.ts";
 import type { Page } from "@playwright/test";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { parseSidecarRecord } from "../../electron/sidecar.ts";
 
 /**
  * Change Review (diff view + revert).
@@ -43,6 +44,59 @@ async function seedModified(
   // Unlike clicking Accept all, it re-renders without mutating pane state.
   await page.locator(".terminal-tab").first().click();
   return absPath;
+}
+
+/** Last producer-bound sidecar envelope on disk. */
+function liveSidecarStream(file: string): { bridgeId: string; seq: number; producerPid: number } | null {
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+  let latest: { bridgeId: string; seq: number; producerPid: number } | null = null;
+  for (const line of text.split("\n")) {
+    const rec = parseSidecarRecord(line);
+    if (!rec) continue;
+    const bridgeId = rec.bridgeId;
+    const seq = rec.seq;
+    const producerPid = rec.producerPid;
+    if (typeof bridgeId !== "string" || bridgeId.length === 0) continue;
+    if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 1) continue;
+    if (typeof producerPid !== "number" || !Number.isSafeInteger(producerPid) || producerPid < 1) continue;
+    latest = { bridgeId, seq, producerPid };
+  }
+  return latest;
+}
+
+/**
+ * Wait until the live agent has bound a sidecar stream and that envelope
+ * is stable across two polls. A foreign `seq: 1` tool is dropped once
+ * session_ready occupies the stream; boot also writes agent_settings in
+ * the same turn, so a single snapshot can still collide on seq.
+ */
+async function waitForLiveSidecarStream(file: string): Promise<{ bridgeId: string; seq: number; producerPid: number }> {
+  let previous: { bridgeId: string; seq: number; producerPid: number } | null = null;
+  await expect.poll(() => {
+    const stream = liveSidecarStream(file);
+    if (!stream) {
+      previous = null;
+      return null;
+    }
+    if (
+      previous
+      && previous.bridgeId === stream.bridgeId
+      && previous.seq === stream.seq
+      && previous.producerPid === stream.producerPid
+    ) {
+      return stream;
+    }
+    previous = stream;
+    return null;
+  }, { timeout: 15_000 }).toBeTruthy();
+  const stream = liveSidecarStream(file);
+  if (!stream) throw new Error(`sidecar stream disappeared: ${file}`);
+  return stream;
 }
 
 test.describe("Diff Review Mode & Revert Lifecycle", () => {
@@ -131,13 +185,18 @@ test.describe("Diff Review Mode & Revert Lifecycle", () => {
     // The exact sidecar record the engine emits at edit start: main captures
     // the pre-edit baseline by reversing the landed edit. No provider needed —
     // the tailer delivers this the same way it delivers a real run's events.
+    // Attach to the live producer: a foreign seq:1 / missing-pid tool is
+    // dropped after boot session_ready binds the stream (~5% of runs).
     const eventsDir = join(runRoot, "events");
     mkdirSync(eventsDir, { recursive: true });
+    const sidecarFile = join(eventsDir, `${target.instanceId}.jsonl`);
+    const stream = await waitForLiveSidecarStream(sidecarFile);
     appendFileSync(
-      join(eventsDir, `${target.instanceId}.jsonl`),
+      sidecarFile,
       JSON.stringify({
-        bridgeId: "e2e-change-review",
-        seq: 1,
+        bridgeId: stream.bridgeId,
+        seq: stream.seq + 1,
+        producerPid: stream.producerPid,
         t: "tool",
         toolName: "edit",
         path: target.absPath,
