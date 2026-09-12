@@ -29,6 +29,8 @@ export class TimelineView {
   private events: TimelineEvent[] = [];
   /** seq → dot element, for O(1) updates (defensive; main rarely re-sends). */
   private dots = new Map<number, HTMLElement>();
+  /** seq → event, for O(1) burst-path checks and lookups. Kept with events. */
+  private eventsBySeq = new Map<number, TimelineEvent>();
   /** seq → on-demand progress. Dropped on reset, setEvents, and eviction. */
   private progressCache = new Map<number, TimelineProgress>();
   /** seqs with an in-flight progress fetch. Prevents duplicate core calls. */
@@ -143,6 +145,7 @@ export class TimelineView {
     for (const seq of seqs) {
       this.dots.get(seq)?.remove();
       this.dots.delete(seq);
+      this.eventsBySeq.delete(seq);
       this.progressCache.delete(seq);
       this.progressInFlight.delete(seq);
     }
@@ -161,6 +164,8 @@ export class TimelineView {
     this.progressCache.clear();
     this.progressInFlight.clear();
     this.events = events.slice(-MAX_TIMELINE_EVENTS);
+    this.eventsBySeq.clear();
+    for (const ev of this.events) this.eventsBySeq.set(ev.seq, ev);
     this.activeSeq = null;
     this.render();
   }
@@ -168,9 +173,10 @@ export class TimelineView {
   /** Append a new point (or refresh an existing one by seq — updates from
    *  main re-use the same seq). O(1) — no full re-render per event. */
   push(event: TimelineEvent): void {
-    const idx = this.events.findIndex((e) => e.seq === event.seq);
-    if (idx !== -1) {
-      this.events[idx] = event;
+    if (this.eventsBySeq.has(event.seq)) {
+      const idx = this.events.findIndex((e) => e.seq === event.seq);
+      if (idx !== -1) this.events[idx] = event;
+      this.eventsBySeq.set(event.seq, event);
       const existing = this.dots.get(event.seq);
       if (existing) {
         existing.className = this.dotClass(event);
@@ -181,12 +187,14 @@ export class TimelineView {
       return;
     }
     this.events.push(event);
+    this.eventsBySeq.set(event.seq, event);
     const hadDotFocus = this.timelineHasDotFocus();
     while (this.events.length > MAX_TIMELINE_EVENTS) {
       const removed = this.events.shift();
       if (removed) {
         this.dots.get(removed.seq)?.remove();
         this.dots.delete(removed.seq);
+        this.eventsBySeq.delete(removed.seq);
         this.progressCache.delete(removed.seq);
         this.progressInFlight.delete(removed.seq);
       }
@@ -214,15 +222,16 @@ export class TimelineView {
     if (nearEnd) this.dotsEl.scrollLeft = this.dotsEl.scrollWidth;
   }
 
-  /** Highlight a dot (used while replaying). */
+  /** Highlight a dot (used while replaying). O(1): at most one dot is active. */
   private highlight(seq: number): void {
+    const prevSeq = this.activeSeq;
     this.activeSeq = seq;
-    let activeEl: HTMLElement | null = null;
-    for (const [s, el] of this.dots) {
-      const on = s === seq;
-      this.markActive(el, on);
-      if (on) activeEl = el;
+    if (prevSeq !== null && prevSeq !== seq) {
+      const prevEl = this.dots.get(prevSeq);
+      if (prevEl) this.markActive(prevEl, false);
     }
+    const activeEl = this.dots.get(seq) ?? null;
+    if (activeEl) this.markActive(activeEl, true);
     this.setTabStop(seq);
     // Center the active dot: replay steps beyond the visible strip width.
     if (activeEl) {
@@ -416,7 +425,7 @@ export class TimelineView {
   }
 
   private eventBySeq(seq: number): TimelineEvent | undefined {
-    return this.events.find((e) => e.seq === seq);
+    return this.eventsBySeq.get(seq);
   }
 
   private clearHover(): void {

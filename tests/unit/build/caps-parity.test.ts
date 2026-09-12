@@ -3,10 +3,12 @@ import { readFile } from "node:fs/promises";
 import { cacheRequestDiagnostics } from "../../../agent-core/cache.ts";
 
 /**
- * Cross-module budget parity (#12). The timeline/event caps are declared in
- * several modules that cannot share an import in tests (electron/main pulls
- * the Electron runtime), so this pins their literals in source. The marker
- * bound is behavioral: agent-core/cache is side-effect free.
+ * Cross-module budget parity (#12). The main and renderer processes bundle
+ * separately, so each owns its timeline cap literal (electron/main.ts and
+ * src/timeline.ts) with parity pinned here. Inside the renderer the cap has
+ * one shared owner: src/timeline.ts. Consumers (src/main.ts, its split
+ * modules) import it instead of defining their own. The marker bound is
+ * behavioral: agent-core/cache is side-effect free.
  */
 const read = (path: string) => readFile(path, "utf8");
 
@@ -17,13 +19,21 @@ function constValues(source: string, name: string): string[] {
 
 describe("Cross-module budget parity", () => {
   it("keeps MAX_TIMELINE_EVENTS identical in main and renderer", async () => {
-    const files = ["electron/main.ts", "src/main.ts", "src/timeline.ts"];
-    const seen = new Map<string, string[]>();
-    for (const file of files) seen.set(file, constValues(await read(file), "MAX_TIMELINE_EVENTS"));
-    for (const [file, values] of seen) {
-      expect(values, `${file} must define MAX_TIMELINE_EVENTS exactly once`).toHaveLength(1);
+    const electron = constValues(await read("electron/main.ts"), "MAX_TIMELINE_EVENTS");
+    const rendererOwner = constValues(await read("src/timeline.ts"), "MAX_TIMELINE_EVENTS");
+    expect(electron, "electron/main.ts must define MAX_TIMELINE_EVENTS exactly once").toHaveLength(1);
+    expect(rendererOwner, "src/timeline.ts must define MAX_TIMELINE_EVENTS exactly once").toHaveLength(1);
+    expect(new Set([electron[0], rendererOwner[0]])).toEqual(new Set(["400"]));
+    // Renderer consumers import the shared owner instead of defining their own.
+    // The trim sites live in the timeline pane split; src/main.ts holds none.
+    for (const file of ["src/main.ts", "src/main/timeline-pane.ts"]) {
+      const source = await read(file);
+      expect(constValues(source, "MAX_TIMELINE_EVENTS"), `${file} must not define its own timeline cap`).toEqual([]);
     }
-    expect(new Set([...seen.values()].map(([value]) => value))).toEqual(new Set(["400"]));
+    const paneSource = await read("src/main/timeline-pane.ts");
+    expect(paneSource, "src/main/timeline-pane.ts must import MAX_TIMELINE_EVENTS from ../timeline").toMatch(
+      /import\s*\{[^}]*MAX_TIMELINE_EVENTS[^}]*\}\s*from\s*["']\.\.\/timeline["']/,
+    );
   });
 
   it("keeps the timeline content budget owned by main", async () => {
@@ -31,7 +41,7 @@ describe("Cross-module budget parity", () => {
     expect(constValues(main, "MAX_TIMELINE_CONTENT_BYTES")).toEqual(["4 * 1024 * 1024"]);
     // The renderer intentionally holds no content budget: main strips content
     // before send (trimTimelineContent) and evicts by seq (timeline:evict).
-    for (const file of ["src/main.ts", "src/timeline.ts"]) {
+    for (const file of ["src/main.ts", "src/timeline.ts", "src/main/timeline-pane.ts"]) {
       expect(constValues(await read(file), "MAX_TIMELINE_CONTENT_BYTES"), `${file} must not define its own content budget`).toEqual([]);
     }
   });

@@ -36,7 +36,9 @@ import htmlWorker from "monaco-editor/language/html/html.worker?worker";
 import "./styles.css";
 import "@xterm/xterm/css/xterm.css";
 import { PtyView } from "./pty-view";
-import { TimelineView } from "./timeline";
+import { createTerminalMenu } from "./main/terminal-menu";
+import { createTimelinePane } from "./main/timeline-pane";
+import { createActivityPane } from "./main/activity-pane";
 import { SessionSearch } from "./session-search";
 import { QuickOpen } from "./quick-open";
 import { ActivityTabs } from "./activity-tabs";
@@ -100,7 +102,6 @@ let activeProjectId: string | null = null;
 let activeProjectGeneration = 0;
 /** Highest activation epoch observed from main; stale folder pushes are inert. */
 let latestProjectActivationGeneration = 0;
-let timelineJumpEpoch = 0;
 const emptyTemplate = document.getElementById("editor-empty-template") as HTMLTemplateElement;
 const rightPaneEl = document.getElementById("right-pane")!;
 // The base editor fills the pane before any project tab exists (the
@@ -304,7 +305,7 @@ function setActiveProject(projectId: string | null): void {
   syncEditorMinimizedForProject();
   drainPendingToolTargets(activeProjectId);
   fitPanes();
-  timelineJumpEpoch++;
+  timelinePane.invalidateJumps();
   updateEditorLock();
 }
 
@@ -376,7 +377,7 @@ function ensureReviewView(): Promise<ReviewViewInstance> {
         if (!pane) return;
         pane.accepted.set(path, Date.now());
         pane.reverted.delete(path);
-        renderModified(pane);
+        activityPane.renderModified(pane);
         renderHandoff(pane);
       },
       onReverted: (path) => {
@@ -384,7 +385,7 @@ function ensureReviewView(): Promise<ReviewViewInstance> {
         if (!pane) return;
         pane.reverted.add(path);
         pane.accepted.delete(path);
-        renderModified(pane);
+        activityPane.renderModified(pane);
       },
       onHidden: () => collapseEditorIfIdle(),
       onShown: () => revealEditor(),
@@ -461,7 +462,6 @@ const btnAppUpdate = document.getElementById("btn-app-update") as HTMLButtonElem
 const modifiedList = document.getElementById("modified-list")!;
 const modifiedPanel = document.getElementById("modified-panel")!;
 const modifiedCount = document.getElementById("modified-count")!;
-let modifiedRenderedPaneId: string | null = null;
 const btnClearModified = document.getElementById("btn-clear-modified") as HTMLButtonElement;
 const btnAcceptAll = document.getElementById("btn-accept-all") as HTMLButtonElement;
 const btnCopySubject = document.getElementById("btn-copy-subject") as HTMLButtonElement;
@@ -470,8 +470,62 @@ const planPanel = document.getElementById("plan-panel")!;
 const planList = document.getElementById("plan-list")!;
 const planCount = document.getElementById("plan-count")!;
 const btnDispatch = document.getElementById("btn-dispatch") as HTMLButtonElement;
-const timelineView = new TimelineView(document.getElementById("timeline-strip")!);
-(window as unknown as Record<string, unknown>).__timelineView = timelineView;
+const timelinePane = createTimelinePane({
+  container: document.getElementById("timeline-strip")!,
+  getActivePane: () => (activeId ? panes.get(activeId) : undefined),
+  getActivePaneId: () => activeId,
+  getPaneById: (id) => panes.get(id),
+  getActiveProject: () => ({ id: activeProjectId, generation: activeProjectGeneration }),
+  getEditor: () => activeEditor(),
+  onContent: (has, count) => activityTabs.syncContent("timeline", has, count),
+  onAgentSettled: (pane) => {
+    pane.runs = null;
+    loadRuns(pane);
+  },
+  onTimelineCleared: (pane) => {
+    pane.plan = [];
+    pane.planVersion++;
+    if (activeId === pane.instanceId) activityPane.renderPlan(pane);
+  },
+});
+(window as unknown as Record<string, unknown>).__timelineView = timelinePane.view;
+const activityPane = createActivityPane({
+  elements: {
+    planPanel,
+    planList,
+    planCount,
+    btnDispatch,
+    modifiedList,
+    modifiedPanel,
+    modifiedCount,
+    btnClearModified,
+    btnAcceptAll,
+  },
+  getActivePane: () => (activeId ? panes.get(activeId) : undefined),
+  getActivePaneId: () => activeId,
+  getPaneById: (id) => panes.get(id),
+  getAllPanes: () => panes.values(),
+  onPlanContent: (has, count, announce) => {
+    if (announce) activityTabs.setHasContent("plan", has, count);
+    else activityTabs.syncContent("plan", has, count);
+  },
+  onModifiedContent: (has, count, announce) => {
+    if (announce) activityTabs.setHasContent("modified", has, count);
+    else activityTabs.syncContent("modified", has, count);
+  },
+  onReviewChanged: (pane) => renderHandoff(pane),
+  onModifiedListChanged: (pane) => {
+    if (pane.projectId === activeProjectId) syncExplorerChanged();
+  },
+  onShowWorker: (workerId) => activatePane(workerId),
+  openReview: (pane, path, relPath) => {
+    const projectId = pane.projectId;
+    const workspaceId = pane.workspaceId;
+    if (!projectId || !workspaceId) return;
+    const owner = { projectId, workspaceId };
+    void ensureReviewView().then((view) => view.show(pane.instanceId, path, relPath, owner));
+  },
+});
 const worldlinesView = new WorldlinesView(document.getElementById("worldline-panel")!);
 const activityTabs = new ActivityTabs({
   bar: document.getElementById("activity-tabbar")!,
@@ -971,7 +1025,7 @@ function activatePane(instanceId: string): void {
     if (activeId === instanceId) pane.view.fit();
   });
   renderChrome();
-  renderTimeline();
+  timelinePane.renderTimeline();
   loadRuns(pane);
   refreshCandidateTestCommand(pane);
 }
@@ -1068,116 +1122,6 @@ function refreshCandidateTestCommand(pane: Pane): void {
   });
 }
 
-/** Session Timeline: show the active pane's points, fetch once per pane. */
-function renderTimeline(): void {
-  const pane = activeId ? panes.get(activeId) : undefined;
-  if (!pane) {
-    timelineView.setEvents([]);
-    return;
-  }
-  timelineView.setRecorder(pane.recorderState as Parameters<typeof timelineView.setRecorder>[0], pane.recorderDetail);
-  timelineView.setPrefix(pane.timelinePrefix);
-  if (!pane.timelineLoaded) {
-    const id = pane.instanceId;
-    const requestedProjectId = activeProjectId;
-    const requestedGeneration = activeProjectGeneration;
-    const requestToken = ++pane.timelineRequestToken;
-    pane.timelineLoaded = true;
-    void window.termina.getTimeline(id).then((events) => {
-      const p = panes.get(id);
-      if (!p) return;
-      if (p !== pane || p.timelineRequestToken !== requestToken) return;
-      if (activeProjectId !== requestedProjectId || activeProjectGeneration !== requestedGeneration) {
-        p.timelineLoaded = false;
-        return;
-      }
-      const maxSeq = events.length ? Math.max(...events.map((e) => e.seq)) : 0;
-      p.timeline = events.concat(p.timeline.filter((e) => e.seq > maxSeq)).slice(-MAX_TIMELINE_EVENTS);
-      if (activeId === id) timelineView.setEvents(p.timeline);
-    }).catch((err) => {
-      const p = panes.get(id);
-      if (!p || p !== pane || p.timelineRequestToken !== requestToken) return;
-      if (activeProjectId !== requestedProjectId || activeProjectGeneration !== requestedGeneration) {
-        p.timelineLoaded = false;
-        return;
-      }
-      p.timelineLoaded = false;
-      toast(`could not load timeline: ${(err as Error).message}`, "error");
-    });
-    void window.termina.getTimelinePrefix(id).then((prefix) => {
-      const p = panes.get(id);
-      if (!p || p !== pane || p.timelineRequestToken !== requestToken) return;
-      if (activeProjectId !== requestedProjectId || activeProjectGeneration !== requestedGeneration) return;
-      p.timelinePrefix = prefix;
-      if (activeId === id) timelineView.setPrefix(prefix);
-    }).catch((err) => {
-      const p = panes.get(id);
-      if (!p || p !== pane || p.timelineRequestToken !== requestToken) return;
-      if (activeProjectId !== requestedProjectId || activeProjectGeneration !== requestedGeneration) return;
-      toast(`could not load timeline counts: ${(err as Error).message}`, "error");
-    });
-    return;
-  }
-  timelineView.setEvents(pane.timeline);
-}
-
-timelineView.bind({
-  onJump: async (ev, opts) => {
-    const pane = activeId ? panes.get(activeId) : undefined;
-    if (!pane) return;
-    const epoch = ++timelineJumpEpoch;
-    const terminalId = pane.instanceId;
-    const projectId = activeProjectId;
-    const editor = activeEditor();
-    const isCurrent = (): boolean =>
-      epoch === timelineJumpEpoch && activeId === terminalId && activeProjectId === projectId && activeEditor() === editor;
-    // Snapshots are fetched on demand — the strip/IPC never carries content.
-    let res = await window.termina.getTimelineContent(pane.instanceId, ev.seq);
-    if (!isCurrent()) return;
-    // A write snapshot may still be filling in (the delayed fill takes
-    // 400 milliseconds) — retry
-    // briefly before giving up.
-    for (let i = 0; i < 5 && !res.ok; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      if (!isCurrent()) return;
-      res = await window.termina.getTimelineContent(pane.instanceId, ev.seq);
-      if (!isCurrent()) return;
-    }
-    if (!res.ok) {
-      const what = ev.t === "change" ? "change" : ev.toolName ?? "event";
-      toast(`${what} ${res.relPath ?? ev.relPath ?? ""} — no snapshot for this moment`, "info");
-      return;
-    }
-    const label = `${new Date(res.ts ?? ev.ts).toLocaleTimeString()} · ${res.toolName ?? ev.toolName ?? "on disk"}`;
-    editor.openSnapshot(pane.instanceId, String(ev.seq), res.relPath ?? res.path ?? "", res.content ?? "", label, opts?.replay ?? false);
-  },
-  onFork: (ev) => {
-    const pane = activeId ? panes.get(activeId) : undefined;
-    if (!pane) return;
-    if (!ev.stateId) {
-      toast("this moment is not forkable yet", "warning");
-      return;
-    }
-    void window.termina.forkPoint(pane.instanceId, ev.seq).then((res) => {
-      // Success needs no toast: the new candidate cards are the confirmation.
-      if (!res.ok) toast(`fork at this moment failed: ${res.error ?? "unknown error"}`, "warning");
-    });
-  },
-  onProgress: (seq) => {
-    const pane = activeId ? panes.get(activeId) : undefined;
-    if (!pane) return Promise.resolve({ ok: false, seq });
-    const requestedProjectId = activeProjectId;
-    const requestedGeneration = activeProjectGeneration;
-    return window.termina.getTimelineProgress(pane.instanceId, seq).then((progress) => {
-      if (activeProjectId !== requestedProjectId || activeProjectGeneration !== requestedGeneration || activeId !== pane.instanceId) return { ok: false, seq };
-      return progress;
-    });
-  },
-  onContent: (has, count) => {
-    activityTabs.syncContent("timeline", has, count);
-  },
-});
-
 async function closePane(instanceId: string): Promise<void> {
   const pane = panes.get(instanceId);
   if (!pane) return;
@@ -1248,22 +1192,15 @@ function renderChrome(): void {
     btnVerify.disabled = true;
     verifyBadge.textContent = "";
     verifyBadge.hidden = true;
-    planList.replaceChildren();
-    planPanel.classList.add("collapsed");
-    modifiedList.replaceChildren();
-    modifiedRenderedPaneId = null;
-    modifiedPanel.classList.add("collapsed");
-    btnDispatch.hidden = true;
+    activityPane.clear();
     btnCopySubject.hidden = true;
     btnOpenShell.hidden = true;
-    activityTabs.syncContent("plan", false, 0);
-    activityTabs.syncContent("modified", false, 0);
-    timelineView.setEvents([]);
+    timelinePane.renderTimeline();
     return;
   }
   renderStatus(pane);
-  renderPlan(pane, false);
-  renderModified(pane, false);
+  activityPane.renderPlan(pane, false);
+  activityPane.renderModified(pane, false);
 }
 
 /** Status bar and Verify only. Busy ticks must not rebuild the plan or modified lists. */
@@ -1304,79 +1241,6 @@ function focusActiveTerminal(): void {
   const pane = activeId ? panes.get(activeId) : undefined;
   if (!pane || pane.exited) return;
   pane.view.focus();
-}
-
-/** Plan Board: the current run's tasks with live progress. */
-function renderPlan(pane: Pane, announce = true): void {
-  if (!pane.planLoaded) {
-    pane.planLoaded = true;
-    const versionAtStart = pane.planVersion;
-    void window.termina.getPlan(pane.instanceId).then((tasks) => {
-      const p = panes.get(pane.instanceId);
-      if (!p) return;
-      if (p.planVersion !== versionAtStart) return; // a push won the race
-      p.plan = tasks;
-      p.planLoadAttempts = 0;
-      if (activeId === pane.instanceId) renderPlan(p, announce);
-    }).catch((err) => {
-      const p = panes.get(pane.instanceId);
-      if (!p || p.planVersion !== versionAtStart) return;
-      p.planLoaded = false;
-      p.planLoadAttempts++;
-      if (p.planLoadAttempts < 3) {
-        const delay = 250 * (2 ** (p.planLoadAttempts - 1));
-        setTimeout(() => {
-          const current = panes.get(p.instanceId);
-          if (current === p && current.planVersion === versionAtStart && activeId === current.instanceId) renderPlan(current, announce);
-        }, delay);
-        return;
-      }
-      toast(`could not load plan: ${(err as Error).message}`, "error");
-    });
-  }
-  planCount.textContent = pane.plan.length ? `(${pane.plan.length})` : "";
-  planList.replaceChildren();
-  for (const task of pane.plan) {
-    const li = document.createElement("li");
-    li.className = `plan-task state-${task.state}`;
-    const mark = document.createElement("span");
-    mark.className = "plan-mark";
-    mark.textContent = task.state === "done" ? "✓" : task.state === "active" ? "◐" : "○";
-    const text = document.createElement("span");
-    text.className = "plan-text";
-    text.textContent = task.text;
-    li.append(mark, text);
-    if (task.workerId || (task.claimed && task.claimed.length > 0)) {
-      const meta = document.createElement("span");
-      meta.className = "plan-meta";
-      const claim = (task.claimed ?? task.paths).join(", ");
-      const status = task.state === "done" ? "settled" : task.workerId ?? "dispatch";
-      meta.textContent = claim ? `${status} · ${claim}` : status;
-      li.appendChild(meta);
-    }
-    if (task.state !== "done") {
-      li.classList.add("dispatchable");
-      li.title = task.workerId ? "show dispatch worker" : "dispatch this task";
-      li.addEventListener("click", (e) => {
-        e.stopPropagation();
-        if (task.workerId) {
-          activatePane(task.workerId);
-          return;
-        }
-        // Success needs no toast: main re-sends the plan and the row shows the worker.
-        void window.termina.dispatchRun(pane.instanceId, task.text).then((res) => {
-          if (!res.ok) toast(res.error ?? "dispatch failed", "warning");
-        });
-      });
-    }
-    planList.appendChild(li);
-  }
-  planPanel.classList.toggle("collapsed", pane.plan.length === 0);
-  if (announce) activityTabs.setHasContent("plan", pane.plan.length > 0, pane.plan.length);
-  else activityTabs.syncContent("plan", pane.plan.length > 0, pane.plan.length);
-  // Dispatch is possible when the plan has tasks. The button label shows
-  // whether a dispatch is running (main re-sends the plan on settle).
-  btnDispatch.hidden = pane.plan.length === 0;
 }
 
 /** Verify & Iterate: badge + button for the active terminal. */
@@ -1442,99 +1306,6 @@ function renderVerify(pane: Pane): void {
   }
   verifyBadge.title =
     v.state === "running" ? "Click to cancel verification" : v.state === "fail" && v.summary ? v.summary : v.command ?? "";
-}
-
-/** Drop review marks for paths main no longer lists. Clear (and any list
- *  replacement) forgets review state; without pruning, a re-added path would
- *  resurrect a stale ✓ from an earlier review. */
-function pruneReviewMarks(pane: Pane): void {
-  const live = new Set(pane.modified.map((f) => f.path));
-  for (const path of pane.accepted.keys()) {
-    if (!live.has(path)) pane.accepted.delete(path);
-  }
-  for (const path of pane.reverted) {
-    if (!live.has(path)) pane.reverted.delete(path);
-  }
-}
-
-/** A disk change invalidates every accept mark on that file: the ✓ reviewed
- *  the bytes it no longer has. Paths are absolute, so no two panes can mean
- *  different files by the same key. */
-function dropStaleAcceptMarks(path: string): void {
-  for (const pane of panes.values()) {
-    if (!pane.accepted.delete(path)) continue;
-    if (pane.instanceId === activeId) {
-      renderModified(pane);
-      renderHandoff(pane);
-    }
-  }
-}
-
-function renderModified(pane: Pane, announce = true): void {
-  modifiedCount.textContent = pane.modified.length ? `(${pane.modified.length})` : "";
-  if (modifiedRenderedPaneId !== pane.instanceId) {
-    modifiedList.replaceChildren();
-    modifiedRenderedPaneId = pane.instanceId;
-  }
-  const existing = new Map<string, HTMLLIElement>();
-  for (const row of modifiedList.querySelectorAll<HTMLLIElement>("li[data-path]")) {
-    const path = row.dataset.path;
-    if (path) existing.set(path, row);
-  }
-  const seen = new Set<string>();
-  for (const f of pane.modified) {
-    const current = existing.get(f.path);
-    const isNew = !current;
-    const li = current ?? document.createElement("li");
-    li.dataset.path = f.path;
-    li.dataset.relPath = f.relPath;
-    let badge = li.querySelector<HTMLElement>(".status-badge");
-    let path = li.querySelector<HTMLElement>(".path");
-    if (!badge || !path) {
-      li.replaceChildren();
-      badge = document.createElement("span");
-      path = document.createElement("span");
-      badge.className = "status-badge";
-      path.className = "path";
-      li.append(badge, path);
-    }
-    badge.className = `status-badge ${f.status}`;
-    badge.textContent = f.status === "created" ? "A" : f.status === "deleted" ? "D" : "M";
-    path.textContent = f.relPath;
-    path.title = f.path;
-    for (const mark of li.querySelectorAll(".review-mark")) mark.remove();
-    if (isNew) {
-      li.addEventListener("click", () => {
-        // The modified list is the review surface: clicking opens the diff.
-        const projectId = pane.projectId;
-        const workspaceId = pane.workspaceId;
-        if (!projectId || !workspaceId) return;
-        const owner = { projectId, workspaceId };
-        void ensureReviewView().then((view) => view.show(pane.instanceId, li.dataset.path ?? f.path, li.dataset.relPath ?? f.relPath, owner));
-      });
-    }
-    const reviewedAt = pane.accepted.get(f.path);
-    if (reviewedAt !== undefined) {
-      const mark = document.createElement("span");
-      mark.className = "review-mark accepted";
-      mark.textContent = "✓";
-      mark.title = `Reviewed ${new Date(reviewedAt).toLocaleString()}`;
-      li.appendChild(mark);
-    } else if (pane.reverted.has(f.path)) {
-      const mark = document.createElement("span");
-      mark.className = "review-mark reverted";
-      mark.textContent = "↩";
-      li.appendChild(mark);
-    }
-    modifiedList.appendChild(li);
-    seen.add(f.path);
-  }
-  for (const [path, row] of existing) {
-    if (!seen.has(path)) row.remove();
-  }
-  modifiedPanel.classList.toggle("collapsed", pane.modified.length === 0);
-  if (announce) activityTabs.setHasContent("modified", pane.modified.length > 0, pane.modified.length);
-  else activityTabs.syncContent("modified", pane.modified.length > 0, pane.modified.length);
 }
 
 /** Show the Git handoff after a green Verify or an Accept. Termina never writes Git. */
@@ -1657,154 +1428,16 @@ async function openFileSmart(
 
 // ---------------------------------------------------------------- panels ----
 
-// Terminal-type chooser: ＋ opens a menu (agent vs shells).
-let terminalMenu: HTMLElement | null = null;
-let terminalMenuCleanups: Array<() => void> = [];
-let shellsCache: { name: string; path: string }[] | null = null;
-let shellsPromise: Promise<{ name: string; path: string }[]> | null = null;
-
-async function getAvailableShells(): Promise<{ name: string; path: string }[]> {
-  if (shellsCache) return shellsCache;
-  if (!shellsPromise) {
-    shellsPromise = window.termina.getShells().catch(() => []);
-  }
-  shellsCache = await shellsPromise;
-  return shellsCache;
-}
-
-async function openTerminalMenu(): Promise<void> {
-  if (terminalMenu) {
-    closeTerminalMenu();
-    return;
-  }
-  const shells = await getAvailableShells();
-  if (terminalMenu) {
-    closeTerminalMenu();
-    return;
-  }
-  const menu = document.createElement("div");
-  menu.className = "terminal-menu";
-  menu.tabIndex = -1;
-  menu.addEventListener("click", (e) => e.stopPropagation());
-
-  const items: Array<{ row: HTMLElement; run: () => void }> = [];
-  let selectedIndex = 0;
-
-  const updateSelection = (index: number): void => {
-    if (items.length === 0) return;
-    selectedIndex = (index + items.length) % items.length;
-    for (let i = 0; i < items.length; i++) {
-      items[i].row.classList.toggle("selected", i === selectedIndex);
-    }
-    items[selectedIndex]?.row.scrollIntoView({ block: "nearest" });
-  };
-
-  const makeTerminal = (opts?: { type?: "agent" | "shell"; shell?: string; engine?: "core" }) => {
-    const source = activeId ? panes.get(activeId) : undefined;
-    const fromTerminalId = source && !source.error && !source.exited ? source.instanceId : undefined;
-    const inherit = Boolean(fromTerminalId) && opts?.type !== "shell";
-    const projectId = activeProjectId ?? undefined;
-    const withProject = projectId ? { ...opts, projectId } : opts;
-    void window.termina.createTerminal(inherit ? { ...withProject, fromTerminalId } : withProject).then((res) => {
-      if (!res.ok) {
-        createErrorPane(res.error ?? "could not create terminal");
-        return;
-      }
-      if (res.id && panes.has(res.id)) activatePane(res.id);
-    });
-  };
-
-  const addItem = (label: string, desc: string, run: () => void) => {
-    const row = document.createElement("div");
-    row.className = "terminal-menu-item";
-    const name = document.createElement("span");
-    name.className = "terminal-menu-name";
-    name.textContent = label;
-    const d = document.createElement("span");
-    d.className = "terminal-menu-desc";
-    d.textContent = desc;
-    row.append(name, d);
-    const itemIndex = items.length;
-    row.addEventListener("mouseenter", () => updateSelection(itemIndex));
-    row.addEventListener("click", (e) => {
-      e.stopPropagation();
-      closeTerminalMenu();
-      run();
-    });
-    menu.appendChild(row);
-    items.push({ row, run });
-  };
-
-  addItem("Agent (core)", "Termina's in-house coding agent", () => makeTerminal({ type: "agent", engine: "core" }));
-  for (const shell of shells) {
-    addItem(shell.name, `interactive ${shell.name} shell`, () => makeTerminal({ type: "shell", shell: shell.path }));
-  }
-
-  updateSelection(0);
-
-  const onKeydown = (e: KeyboardEvent): void => {
-    if (e.key === "ArrowDown" || (e.key === "Tab" && !e.shiftKey)) {
-      e.preventDefault();
-      e.stopPropagation();
-      updateSelection(selectedIndex + 1);
-    } else if (e.key === "ArrowUp" || (e.key === "Tab" && e.shiftKey)) {
-      e.preventDefault();
-      e.stopPropagation();
-      updateSelection(selectedIndex - 1);
-    } else if (e.key === "Home") {
-      e.preventDefault();
-      e.stopPropagation();
-      updateSelection(0);
-    } else if (e.key === "End") {
-      e.preventDefault();
-      e.stopPropagation();
-      updateSelection(items.length - 1);
-    } else if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      e.stopPropagation();
-      const chosen = items[selectedIndex];
-      closeTerminalMenu();
-      chosen?.run();
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      e.stopPropagation();
-      closeTerminalMenu();
-    }
-  };
-
-  window.addEventListener("keydown", onKeydown, true);
-  terminalMenuCleanups.push(() => {
-    window.removeEventListener("keydown", onKeydown, true);
-  });
-
-  document.body.appendChild(menu);
-  const rect = btnNewTerminal.getBoundingClientRect();
-  const pad = 8;
-  const left = Math.max(pad, Math.min(rect.left, window.innerWidth - 240 - pad));
-  const top = Math.max(pad, Math.min(rect.bottom + 6, window.innerHeight - 100));
-  menu.style.left = `${left}px`;
-  menu.style.top = `${top}px`;
-  terminalMenu = menu;
-  menu.focus();
-}
-
-function closeTerminalMenu(): void {
-  for (const cleanup of terminalMenuCleanups) cleanup();
-  terminalMenuCleanups = [];
-  const menu = terminalMenu;
-  terminalMenu?.remove();
-  terminalMenu = null;
-  // Focus returns to the terminal only when a menu was open. Every window
-  // click routes here; stealing focus on each one breaks editor typing.
-  if (menu && activeId && panes.has(activeId)) {
-    panes.get(activeId)?.view.focus();
-  }
-}
-
-btnNewTerminal.addEventListener("click", (e) => {
-  e.stopPropagation();
-  if (terminalMenu) closeTerminalMenu();
-  else void openTerminalMenu();
+const terminalMenu = createTerminalMenu({
+  anchor: btnNewTerminal,
+  getActivePane: () => (activeId ? panes.get(activeId) : undefined),
+  hasPane: (instanceId) => panes.has(instanceId),
+  getActiveProjectId: () => activeProjectId,
+  activatePane,
+  createErrorPane,
+  refocusActivePane: () => {
+    if (activeId && panes.has(activeId)) panes.get(activeId)?.view.focus();
+  },
 });
 window.termina.onProjectClosed(({ projectId, activationGeneration }) => {
   if (Number.isSafeInteger(activationGeneration) && activationGeneration > latestProjectActivationGeneration) {
@@ -1829,8 +1462,6 @@ projectTabsEl.addEventListener("dblclick", (e) => {
   void window.termina.projectOpen();
 });
 
-window.addEventListener("click", () => closeTerminalMenu());
-window.addEventListener("blur", () => closeTerminalMenu());
 btnCopySubject.addEventListener("click", () => void copyCommitSubject());
 btnOpenShell.addEventListener("click", () => void focusProjectShell());
 statusModel.addEventListener("click", () => focusActiveTerminal());
@@ -1850,44 +1481,6 @@ verifyBadge.addEventListener("click", () => {
     if (!res.ok) toast(res.error ?? "verify could not be cancelled", "warning");
   });
 });
-btnClearModified.addEventListener("click", (e) => {
-  e.stopPropagation();
-  const pane = activeId ? panes.get(activeId) : undefined;
-  if (!pane) return;
-  // Main owns the list: clear it there or the next push resurrects it.
-  void window.termina.clearModified(pane.instanceId).then((res) => {
-    if (!res.ok) toast(res.error ?? "could not clear the list", "warning");
-  });
-});
-btnAcceptAll.addEventListener("click", (e) => {
-  e.stopPropagation();
-  const pane = activeId ? panes.get(activeId) : undefined;
-  if (!pane || pane.modified.length === 0) return;
-  // Accept every file: the list becomes the approved changes for a commit.
-  const reviewedAt = Date.now();
-  for (const f of pane.modified) {
-    pane.accepted.set(f.path, reviewedAt);
-    pane.reverted.delete(f.path);
-  }
-  renderModified(pane);
-  renderHandoff(pane);
-  // No toast: the ✓ marks on the rows are the confirmation.
-});
-modifiedPanel.querySelector(".panel-header")?.addEventListener("click", () => {
-  modifiedPanel.classList.toggle("collapsed");
-});
-planPanel.querySelector(".panel-header")?.addEventListener("click", (e) => {
-  if ((e.target as HTMLElement).closest("#btn-dispatch")) return;
-  planPanel.classList.toggle("collapsed");
-});
-btnDispatch.addEventListener("click", () => {
-  const id = activeId;
-  if (!id) return;
-  // Success needs no toast: main re-sends the plan and each row shows its worker.
-  void window.termina.dispatchRun(id).then((res) => {
-    if (!res.ok) toast(res.error ?? "dispatch failed", "warning");
-  });
-});
 
 // ---------------------------------------------------------------- layout ---
 
@@ -1902,7 +1495,6 @@ const MODIFIED_HEIGHT_KEY = "termina.modifiedHeight";
 const WORKPANE_KEY = "termina.workpane";
 const PANE_MIN_ICON = "–";
 const PANE_MAX_ICON = "□";
-const MAX_TIMELINE_EVENTS = 400;
 
 const splitEl = document.getElementById("main-split")!;
 const modifiedPanelEl = document.getElementById("modified-panel")!;
@@ -2204,8 +1796,7 @@ commands.register("select-all", () => runMenuEdit("select-all"));
 
 // Terminal commands
 commands.register("new-terminal", () => {
-  if (terminalMenu) closeTerminalMenu();
-  else void openTerminalMenu();
+  terminalMenu.toggle();
 });
 commands.register("next-terminal", () => cycleTerminals(1));
 commands.register("previous-terminal", () => cycleTerminals(-1));
@@ -2933,68 +2524,6 @@ window.termina.onVerifyState(({ terminalId, verify }) => {
   if (activeId === terminalId) renderStatus(pane);
 });
 
-window.termina.onTimelineEvent(({ terminalId, event }) => {
-  const pane = panes.get(terminalId);
-  if (!pane) return;
-  // Updates from main re-use the seq — replace in place, never duplicate.
-  const idx = pane.timeline.findIndex((e) => e.seq === event.seq);
-  if (idx === -1) pane.timeline.push(event);
-  else pane.timeline[idx] = event;
-  if (pane.timeline.length > MAX_TIMELINE_EVENTS) pane.timeline.splice(0, pane.timeline.length - MAX_TIMELINE_EVENTS);
-  if (activeId === terminalId) timelineView.push(event);
-  // A settled run may have become forkable: refresh the Fork Run button.
-  if (event.t === "agent_settled") {
-    pane.runs = null;
-    loadRuns(pane);
-  }
-});
-
-window.termina.onTimelineEvict(({ terminalId, seqs }) => {
-  const pane = panes.get(terminalId);
-  if (!pane) return;
-  pane.timeline = pane.timeline.filter((e) => !seqs.includes(e.seq));
-  if (activeId === terminalId) timelineView.evict(seqs);
-});
-
-window.termina.onTimelineClear(({ terminalId }) => {
-  const pane = panes.get(terminalId);
-  if (!pane) return;
-  pane.timeline = [];
-  pane.timelinePrefix = null;
-  pane.plan = [];
-  pane.planVersion++;
-  if (activeId === terminalId) {
-    timelineView.setEvents([]);
-    timelineView.setPrefix(null);
-    renderPlan(pane);
-  }
-});
-
-window.termina.onTimelinePrefix((p) => {
-  const pane = panes.get(p.terminalId);
-  if (!pane) return;
-  pane.timelinePrefix = p;
-  if (activeId === p.terminalId) timelineView.setPrefix(p);
-});
-
-window.termina.onRecorderState(({ terminalId, state, detail }) => {
-  const pane = panes.get(terminalId);
-  if (!pane) return;
-  pane.recorderState = state;
-  pane.recorderDetail = detail ?? null;
-  if (activeId === terminalId) timelineView.setRecorder(state, detail ?? null);
-});
-
-window.termina.onPlanUpdate(({ instanceId, tasks }) => {
-  const pane = panes.get(instanceId);
-  if (!pane) return;
-  pane.planVersion++;
-  pane.plan = tasks;
-  pane.planLoaded = true;
-  pane.planLoadAttempts = 0;
-  if (activeId === instanceId) renderPlan(pane);
-});
-
 window.termina.onToolTarget((p) => {
   const view = projectViews.get(p.projectId);
   if (!view || view.workspaceId !== p.workspaceId) return;
@@ -3053,7 +2582,7 @@ window.termina.onFileChanged((p) => {
     if (oldestKey === undefined) break;
     lastChangePush.delete(oldestKey);
   }
-  dropStaleAcceptMarks(p.path);
+  activityPane.dropStaleAcceptMarks(p.path);
   if (p.content !== undefined) {
     if (view.editorMgr) view.editorMgr.updateContent(p.path, p.content, p.changedLines);
   } else {
@@ -3073,18 +2602,9 @@ window.termina.onFileDeleted((p) => {
   const owner: ProjectWorkspaceRef = { projectId: p.projectId, workspaceId: p.workspaceId };
   lastChangePush.delete(changeKey(owner, p.path));
   view.editorMgr?.closeIfOpen(p.path);
-  dropStaleAcceptMarks(p.path);
+  activityPane.dropStaleAcceptMarks(p.path);
   if (activeProjectId !== p.projectId) return;
   explorer.handleDiskChange(p.path);
-});
-
-window.termina.onModifiedList((p) => {
-  const pane = panes.get(p.instanceId);
-  if (!pane) return;
-  pane.modified = p.files;
-  pruneReviewMarks(pane);
-  if (activeId === pane.instanceId) renderModified(pane);
-  if (pane.projectId === activeProjectId) syncExplorerChanged();
 });
 
 /**
@@ -3131,8 +2651,8 @@ window.termina.onFolderOpened((e) => {
   refreshMine(projectId);
   activateProjectPane();
   void refreshTestCommand(projectId);
-  timelineView.resetForProject();
-  renderTimeline();
+  timelinePane.resetForProject();
+  timelinePane.renderTimeline();
   hydrateWorldlines(projectId);
 });
 
