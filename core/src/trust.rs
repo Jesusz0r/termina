@@ -16,6 +16,9 @@ const TRUST_MAX_FILES: usize = 10_000;
 const TRUST_MAX_BYTES: u64 = 64 * 1024 * 1024;
 /// Trust files larger than this fail the walk.
 const TRUST_MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
+/// Stored symlink identities are tagged so they cannot collide with a
+/// regular file whose bytes happen to be `symlink\0` plus a path.
+const SYMLINK_DIGEST_PREFIX: &str = "symlink:";
 
 struct TrustBudget {
     max_files: usize,
@@ -201,7 +204,10 @@ fn hash_symlink(
     charge_budget(key, len, files, bytes, budget)?;
     *files += 1;
     *bytes += len;
-    Ok((key.to_string(), hex_sha256(&content)))
+    Ok((
+        key.to_string(),
+        format!("{SYMLINK_DIGEST_PREFIX}{}", hex_sha256(&content)),
+    ))
 }
 
 fn hash_file(
@@ -232,16 +238,17 @@ fn hash_file(
     if !metadata.file_type().is_file() {
         return Err(format!("trust path {key} is not a regular file"));
     }
-    charge_budget(key, metadata.len(), files, bytes, budget)?;
-
+    let read_cap = budget
+        .max_file_bytes
+        .checked_add(1)
+        .ok_or_else(|| format!("trust file {key} byte budget overflow"))?;
     let mut content = Vec::new();
-    file.read_to_end(&mut content)
+    std::io::Read::take(&mut file, read_cap)
+        .read_to_end(&mut content)
         .map_err(|error| format!("read trust file {key} failed: {error}"))?;
     let read_len = u64::try_from(content.len())
         .map_err(|_| format!("trust file {key} length does not fit u64"))?;
-    if read_len != metadata.len() {
-        charge_budget(key, read_len, files, bytes, budget)?;
-    }
+    charge_budget(key, read_len, files, bytes, budget)?;
 
     *files += 1;
     *bytes += read_len;
@@ -317,7 +324,7 @@ mod tests {
     fn symlink_digest(target: &Path) -> String {
         let mut content = b"symlink\0".to_vec();
         content.extend_from_slice(target.as_os_str().as_bytes());
-        hex_sha256(&content)
+        format!("{SYMLINK_DIGEST_PREFIX}{}", hex_sha256(&content))
     }
 
     fn state_keys(value: &Value) -> Vec<&str> {
@@ -498,6 +505,40 @@ mod tests {
         assert_ne!(
             result["state"]["agent/skills/linked.md"],
             sha256_hex(b"foreign-secret-bytes")
+        );
+    }
+
+    #[test]
+    fn file_bytes_cannot_impersonate_a_symlink_identity() {
+        let fixture = Fixture::new();
+        let foreign = fixture.root.join("foreign-settings.json");
+        fs::write(&foreign, b"foreign-secret-bytes").unwrap();
+        unix_fs::symlink(&foreign, fixture.agent.join("settings.json")).unwrap();
+        let linked = op_trust_hashes(&fixture.req()).unwrap();
+        let link_hash = linked["state"]["agent/settings.json"].as_str().unwrap().to_string();
+        assert!(link_hash.starts_with(SYMLINK_DIGEST_PREFIX));
+
+        fs::remove_file(fixture.agent.join("settings.json")).unwrap();
+        let mut impersonation = b"symlink\0".to_vec();
+        impersonation.extend_from_slice(foreign.as_os_str().as_bytes());
+        fs::write(fixture.agent.join("settings.json"), &impersonation).unwrap();
+        let regular = op_trust_hashes(&fixture.req()).unwrap();
+        let file_hash = regular["state"]["agent/settings.json"].as_str().unwrap();
+        assert_ne!(file_hash, link_hash);
+        assert!(!file_hash.starts_with(SYMLINK_DIGEST_PREFIX));
+        assert_eq!(file_hash, hex_sha256(&impersonation));
+    }
+
+    #[test]
+    fn dangling_symlink_is_still_a_complete_link_identity() {
+        let fixture = Fixture::new();
+        let missing = fixture.root.join("missing-settings.json");
+        unix_fs::symlink(&missing, fixture.agent.join("settings.json")).unwrap();
+        let result = op_trust_hashes(&fixture.req()).unwrap();
+        assert_eq!(result["complete"], true);
+        assert_eq!(
+            result["state"]["agent/settings.json"],
+            symlink_digest(&missing)
         );
     }
 
