@@ -39,6 +39,11 @@ const captureFactory = ts.transpileModule(`return ({ ${captureSource} }).capture
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText;
 
+const runSource = extractMethod(main, "private runMomentCapture(").replace(/^private /, "");
+const runFactory = ts.transpileModule(`return ({ ${runSource} }).runMomentCapture;`, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText;
+
 function loadCaptureMomentNow(): (
   inst: Record<string, unknown>,
   ws: Record<string, unknown>,
@@ -52,12 +57,34 @@ function loadCaptureMomentNow(): (
   );
 }
 
+function loadRunMomentCapture(): (
+  inst: Record<string, unknown>,
+  ws: Record<string, unknown>,
+  expected?: unknown,
+) => Promise<void> {
+  return new Function(runFactory)();
+}
+
+function makeInst(id: string, hints: string[], path: string) {
+  return {
+    id,
+    closed: false,
+    momentDots: [{ t: "tool", seq: 1, path }],
+    pendingHints: new Set(hints),
+    timeline: [],
+  };
+}
+
 function makeHarness(opts: {
   writerId: string | null;
   acquireOk?: boolean;
   lastStateCommit?: string;
+  members?: ReturnType<typeof makeInst>[];
 }) {
-  const captures: Array<{ kind: "incremental" | "full"; parent: string | null }> = [];
+  const captures: Array<{ kind: "incremental" | "full"; parent: string | null; hints: string[] }> = [];
+  const attached: Array<{ id: string; stateId: string; paths: string[] }> = [];
+  const members = opts.members ?? [makeInst("term-1", ["a.ts"], "/proj/a.ts")];
+  const inst = members[0]!;
   const ws = {
     id: "ws-primary",
     root: "/proj",
@@ -65,34 +92,32 @@ function makeHarness(opts: {
     writerId: opts.writerId,
     leaseDepth: opts.writerId ? 1 : 0,
     lastStateCommit: opts.lastStateCommit ?? "state-before",
+    lastReseedMs: 0,
+    momentCapturePromise: null as Promise<void> | null,
     retainedBlobBytes: 0,
     watcher: null,
     generation: 1,
-  };
-  const inst = {
-    id: "term-1",
-    momentDots: [{ t: "tool", seq: 1, path: "/proj/a.ts" }],
-    pendingHints: new Set(["a.ts"]),
-    lastReseedMs: 0,
-    timeline: [],
+    terminalIds: new Set(members.map((member) => member.id)),
   };
   const store = {
     objectFormat: "sha1",
-    captureIncremental: async (parent: string) => {
-      captures.push({ kind: "incremental", parent });
+    captureIncremental: async (parent: string, hints: string[]) => {
+      captures.push({ kind: "incremental", parent, hints: [...hints].sort() });
       return { commit: "state-after", newBlobBytes: 4 };
     },
     capture: async (_head: string | null, parent: string | null) => {
-      captures.push({ kind: "full", parent });
+      captures.push({ kind: "full", parent, hints: [] });
       return { commit: "state-reseed", newBlobBytes: 0 };
     },
   };
   const released: string[] = [];
   const acquired: string[] = [];
-  const recorder: string[] = [];
+  const recorder: Array<{ id: string; state: string }> = [];
   const app = {
     projectOfTerminal: () => ({ storePromise: Promise.resolve(store) }),
-    setRecorderState: (_inst: unknown, state: string) => { recorder.push(state); },
+    projectOfWorkspace: () => ({ storePromise: Promise.resolve(store) }),
+    terminalsOnWorkspace: () => members,
+    setRecorderState: (member: { id: string }, state: string) => { recorder.push({ id: member.id, state }); },
     acquireWriteLease: async (_wsId: string, requester: string) => {
       acquired.push(requester);
       if (opts.acquireOk === false) return { ok: false, generation: ws.generation, error: `another writer holds the lease: ${ws.writerId}` };
@@ -114,9 +139,11 @@ function makeHarness(opts: {
     setWorkspaceState: (workspace: { lastStateCommit: string }, stateId: string) => {
       workspace.lastStateCommit = stateId;
     },
-    attachMomentState: () => {},
+    attachMomentState: (member: { id: string }, stateId: string, batch: Array<{ path?: string }>) => {
+      attached.push({ id: member.id, stateId, paths: batch.map((event) => event.path ?? "") });
+    },
   };
-  return { ws, inst, captures, acquired, released, recorder, app };
+  return { ws, inst, members, captures, attached, acquired, released, recorder, app };
 }
 
 describe("moment capture write lease", () => {
@@ -145,6 +172,7 @@ describe("moment capture write lease", () => {
     expect(captures).toEqual([]);
     expect(ws.lastStateCommit).toBe("state-before");
     expect(inst.momentDots).toHaveLength(1);
+    expect([...inst.pendingHints]).toEqual(["a.ts"]);
     expect(released).toEqual([]);
   });
 
@@ -154,12 +182,78 @@ describe("moment capture write lease", () => {
       writerId: null,
     });
     await captureMomentNow.call(app, inst, ws);
-    expect(acquired).toEqual(["moment:term-1"]);
-    expect(captures).toEqual([{ kind: "incremental", parent: "state-before" }]);
+    expect(acquired).toEqual(["moment:ws-primary"]);
+    expect(captures).toEqual([{ kind: "incremental", parent: "state-before", hints: ["a.ts"] }]);
     expect(ws.lastStateCommit).toBe("state-after");
     expect(ws.writerId).toBeNull();
-    expect(released).toEqual(["moment:term-1"]);
-    expect(recorder.at(-1)).toBe("ready");
+    expect(released).toEqual(["moment:ws-primary"]);
+    expect(recorder.at(-1)).toEqual({ id: "term-1", state: "ready" });
+  });
+});
+
+describe("workspace moment capture queue", () => {
+  it("queues on the workspace, not the triggering terminal", () => {
+    const run = methodBody(main, "private runMomentCapture(", "private async captureMomentNow(");
+    expect(run).toContain("ws.momentCapturePromise");
+    expect(run).not.toContain("inst.momentCapturePromise");
+  });
+
+  it("merges sibling hint sets into one incremental from the current parent", async () => {
+    const captureMomentNow = loadCaptureMomentNow();
+    const { ws, inst, members, captures, attached, app } = makeHarness({
+      writerId: null,
+      members: [
+        makeInst("term-1", ["worker-a.ts"], "/proj/worker-a.ts"),
+        makeInst("term-2", ["worker-b.ts"], "/proj/worker-b.ts"),
+      ],
+    });
+    await captureMomentNow.call(app, inst, ws);
+    expect(captures).toEqual([{
+      kind: "incremental",
+      parent: "state-before",
+      hints: ["worker-a.ts", "worker-b.ts"],
+    }]);
+    expect(ws.lastStateCommit).toBe("state-after");
+    expect(attached).toEqual([
+      { id: "term-1", stateId: "state-after", paths: ["/proj/worker-a.ts"] },
+      { id: "term-2", stateId: "state-after", paths: ["/proj/worker-b.ts"] },
+    ]);
+    expect(members[0]!.pendingHints.size).toBe(0);
+    expect(members[1]!.pendingHints.size).toBe(0);
+  });
+
+  it("does not start two incrementals from the same parent when siblings queue", async () => {
+    const runMomentCapture = loadRunMomentCapture();
+    const parents: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let entered = 0;
+    let notifyEntered!: () => void;
+    const firstEntered = new Promise<void>((resolve) => { notifyEntered = resolve; });
+    const ws = {
+      id: "ws-primary",
+      lastStateCommit: "state-before",
+      momentCapturePromise: null as Promise<void> | null,
+    };
+    const app = {
+      async captureMomentNow(_inst: { id: string }, workspace: { lastStateCommit: string }) {
+        parents.push(workspace.lastStateCommit);
+        entered += 1;
+        if (entered === 1) notifyEntered();
+        if (entered === 1) await firstGate;
+        workspace.lastStateCommit = `after-${entered}`;
+      },
+    };
+    const first = runMomentCapture.call(app, { id: "term-1" }, ws);
+    await firstEntered;
+    const second = runMomentCapture.call(app, { id: "term-2" }, ws);
+    expect(parents).toEqual(["state-before"]);
+    expect(ws.momentCapturePromise).not.toBeNull();
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(parents).toEqual(["state-before", "after-1"]);
+    expect(ws.lastStateCommit).toBe("after-2");
+    expect(ws.momentCapturePromise).toBeNull();
   });
 });
 
