@@ -277,6 +277,75 @@ describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
       }
     });
 
+    it("drops a foreign or producer-less tool after session_ready binds the stream", async () => {
+      const id = "term-review-stream";
+      const file = join(eventsDir, `${id}.jsonl`);
+      let listener: ((...args: any[]) => void) | null = null;
+      const capturingWatch = (...args: any[]) => {
+        listener = args[1] as (...inner: any[]) => void;
+        return { close() {} };
+      };
+      const tailer = new SidecarTailer(eventsDir, capturingWatch as any);
+      const received: SidecarEvent[] = [];
+      tailer.onEvent = (_terminalId, event) => { received.push(event); };
+      tailer.start();
+      tailer.watch(id);
+      tailer.setExpectedProducer(id, 4242);
+      const line = (record: Record<string, unknown>) => `${JSON.stringify(record)}\n`;
+      const wake = () => {
+        const captured = listener as ((...inner: any[]) => void) | null;
+        if (!captured) throw new Error("watch listener was not captured");
+        captured("change", `${id}.jsonl`);
+      };
+      try {
+        await appendFile(file,
+          line({ bridgeId: "agent-bridge", seq: 1, producerPid: 4242, t: "session_ready", ok: true }) +
+          line({ bridgeId: "agent-bridge", seq: 2, producerPid: 4242, t: "agent_settings" }));
+        wake();
+        await expect.poll(() => received.map((event) => event.t)).toEqual(["session_ready", "agent_settings"]);
+
+        await appendFile(file, line({
+          bridgeId: "e2e-change-review",
+          seq: 1,
+          t: "tool",
+          toolName: "edit",
+          path: "/tmp/greeting.ts",
+          edits: [{ oldText: '"hello"', newText: '"hi there"' }],
+          toolCallId: "e2e-change-review-1",
+        }));
+        await appendFile(file, line({
+          bridgeId: "agent-bridge",
+          seq: 3,
+          t: "tool",
+          toolName: "edit",
+          path: "/tmp/greeting.ts",
+          edits: [{ oldText: '"hello"', newText: '"hi there"' }],
+          toolCallId: "e2e-change-review-2",
+        }));
+        wake();
+        // Debounce is 10ms; one tail pass must consume both records as skips.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(received.map((event) => event.t)).toEqual(["session_ready", "agent_settings"]);
+
+        await appendFile(file, line({
+          bridgeId: "agent-bridge",
+          seq: 3,
+          producerPid: 4242,
+          t: "tool",
+          toolName: "edit",
+          path: "/tmp/greeting.ts",
+          edits: [{ oldText: '"hello"', newText: '"hi there"' }],
+          toolCallId: "e2e-change-review-3",
+        }));
+        wake();
+        await expect.poll(() => received.at(-1)?.t).toBe("tool");
+        expect(received.filter((event) => event.t === "tool")).toHaveLength(1);
+        expect(received.at(-1)).toMatchObject({ bridgeId: "agent-bridge", seq: 3, toolCallId: "e2e-change-review-3" });
+      } finally {
+        tailer.stop();
+      }
+    });
+
     it("parses the subagent spawn announcement", () => {
       const event = sidecarEventFromRecord({
         bridgeId: "core-1",
