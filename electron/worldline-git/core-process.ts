@@ -324,7 +324,15 @@ export class CoreClient {
 /** Decode a trust-hashes core response. Incomplete or malformed walks fail closed. */
 export function decodeTrustHashes(response: unknown): Record<string, string> {
   if (!isRecord(response)) throw new Error("trust hashes returned an invalid response");
-  if (response.complete !== true) throw new Error("trust hashes returned an incomplete walk");
+  if (response.complete !== true) {
+    // Legacy core binaries answer {state, complete}; the resolver unwraps
+    // `state`, so a bare string map here means the binary predates the trust
+    // protocol — say so instead of blaming the walk.
+    if (response.hashes === undefined && Object.values(response).every((value) => typeof value === "string")) {
+      throw new Error("trust hashes returned a legacy core response (rebuild termina-core)");
+    }
+    throw new Error("trust hashes returned an incomplete walk");
+  }
   const hashes = response.hashes;
   if (!isRecord(hashes)) throw new Error("trust hashes returned an invalid response");
   for (const value of Object.values(hashes)) {

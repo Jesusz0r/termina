@@ -217,4 +217,13 @@ describe("decodeTrustHashes", () => {
     expect(() => decodeTrustHashes({ hashes: { "agent/skills/a.md": 42 }, complete: true }))
       .toThrow("trust hashes returned an invalid response");
   });
+
+  it("names a stale binary instead of blaming the walk", () => {
+    // Pre-protocol cores answer {state, complete}; the resolver unwraps
+    // `state`, so decode sees the bare map. Fail closed, but actionable.
+    expect(() => decodeTrustHashes({ ...BASELINE }))
+      .toThrow("trust hashes returned a legacy core response (rebuild termina-core)");
+    expect(() => decodeTrustHashes({})).toThrow("trust hashes returned a legacy core response (rebuild termina-core)");
+    expect(() => decodeTrustHashes({ complete: true })).toThrow("trust hashes returned an invalid response");
+  });
 });

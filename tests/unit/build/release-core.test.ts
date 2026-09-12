@@ -16,11 +16,11 @@ import {
 import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { stageCoreBinary } from "../../../scripts/build-core.ts";
+import { coreTargetDir, stageCoreBinary } from "../../../scripts/build-core.ts";
 
 const CORE_REQUEST_TIMEOUT_MS = 5_000;
 const CORE_RESPONSE_MAX_BYTES = 64 * 1024;
-const source = resolve("core/target/release/termina-core");
+const source = resolve(coreTargetDir(), "release", "termina-core");
 
 function architectureFromBytes(bytes: Buffer): string {
   const magicLE = bytes.length >= 4 ? bytes.readUInt32LE(0) : 0;
@@ -159,6 +159,27 @@ describe("Release Core Binary Staging & Architecture Invariants", () => {
       await boundedCoreRequest(destination);
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("coreTargetDir", () => {
+  it("honors cargo's env-level target redirect so staging copies the binary cargo just built", () => {
+    const savedTarget = process.env.CARGO_TARGET_DIR;
+    const savedBuildTarget = process.env.CARGO_BUILD_TARGET_DIR;
+    try {
+      delete process.env.CARGO_TARGET_DIR;
+      delete process.env.CARGO_BUILD_TARGET_DIR;
+      expect(coreTargetDir()).toBe(join(process.cwd(), "core", "target"));
+      process.env.CARGO_BUILD_TARGET_DIR = join(tmpdir(), "termina-build-target");
+      expect(coreTargetDir()).toBe(join(tmpdir(), "termina-build-target"));
+      process.env.CARGO_TARGET_DIR = join(tmpdir(), "termina-target");
+      expect(coreTargetDir()).toBe(join(tmpdir(), "termina-target"));
+    } finally {
+      if (savedTarget === undefined) delete process.env.CARGO_TARGET_DIR;
+      else process.env.CARGO_TARGET_DIR = savedTarget;
+      if (savedBuildTarget === undefined) delete process.env.CARGO_BUILD_TARGET_DIR;
+      else process.env.CARGO_BUILD_TARGET_DIR = savedBuildTarget;
     }
   });
 });

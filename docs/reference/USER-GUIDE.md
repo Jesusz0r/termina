@@ -446,7 +446,7 @@ elsewhere — `Ctrl+Tab` is literal `Ctrl` on every platform):
 | `Cmd/Ctrl+Shift+E` | Toggle terminal |
 | `Cmd/Ctrl+E` | Toggle editor |
 | `Cmd/Ctrl+Shift+F` | Terminal fullscreen |
-| `Cmd/Ctrl+P` | Quick Open (open a project file by name) |
+| `Cmd/Ctrl+P` | Quick Open (open a project file by name; in a focused core terminal, Ctrl+P cycles models instead) |
 | `Cmd/Ctrl+K` | Command palette |
 | `Cmd/Ctrl+Alt+F` | Search file contents |
 | `Cmd/Ctrl+Shift+P` | Search sessions |
