@@ -7,7 +7,7 @@ import { SidecarEventQueue, SidecarTailer, sidecarEventFromRecord } from "../../
 import type { SidecarEvent } from "../../../electron/sidecar.ts";
 import type * as fs from "node:fs";
 import type { FSWatcher } from "node:fs";
-import { boundedSidecarEdits, SIDECAR_TOOL_EDIT_PREVIEW_BYTES } from "../../../agent-core/main.ts";
+import { boundedSidecarEdits, SIDECAR_TOOL_EDIT_PREVIEW_BYTES } from "../../../agent-core/main/sidecar.ts";
 
 /** fs.watch-shaped fake that never fires; the probes drive tails via appends and polls. */
 const inertWatch: typeof fs.watch = (..._args: unknown[]) =>
@@ -289,6 +289,17 @@ describe("Electron Sidecar Envelope, Tailer & Queue Flow Control", () => {
       if (event?.t !== "subagent_spawn") return;
       expect(event.runId).toBe("bg-1");
       expect(event.taskFile).toBe("subagent-bg-1.task.json");
+      expect(event.userRequested).toBeUndefined();
+      const manual = sidecarEventFromRecord({
+        bridgeId: "core-1",
+        seq: 11,
+        t: "subagent_spawn",
+        runId: "bg-2",
+        taskFile: "subagent-bg-2.task.json",
+        userRequested: true,
+      });
+      if (manual?.t !== "subagent_spawn") return;
+      expect(manual.userRequested).toBe(true);
       expect(sidecarEventFromRecord({ bridgeId: "core-1", seq: 10, t: "nope" })).toBeNull();
     });
   });

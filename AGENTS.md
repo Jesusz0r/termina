@@ -27,8 +27,10 @@ One responsibility → one owner. Reuse, extend, or replace — never add a para
 - `shared/guards.ts` — only unknown-value inspectors (`isRecord`, `errorCode`, `isErrno`); `shared/fsync.ts` — only crash-durability fsyncs (`syncDirectory`, `syncParentDir`). Node-only except guards.
 - `shared/grep-pattern.ts` — only grep-pattern validator (agent-core + main). `electron/content-search.ts` owns project content search; `electron/quick-open.ts` owns file-name search.
 - `src/theme-tokens.gen.ts` is generated from `src/styles.css` by `scripts/theme-tokens.ts` (runs in `scripts/build.ts`); never hand-edit the generated file.
-- `electron/sidecar.ts` owns sidecar parse/tail. Only writers: `agent-core/host.ts` + `logEvent` in `agent-core/main.ts`.
-- `electron/session-search.ts` owns Session Search walk. `electron/sandbox.ts` owns sandbox profiles.
+- `electron/sidecar.ts` owns sidecar parse/tail. Only writers: `agent-core/host.ts` + `logEvent` in `agent-core/main/sidecar.ts`.
+- `agent-core/main/` owns agent file/grep/env/tool-format/skill/front-matter/history/sidecar pure helpers; the tool surface stays in `agent-core/main.ts`.
+- `electron/session-search.ts` owns Session Search walk (file coverage via `collectSessionSearchFiles`). `electron/sandbox.ts` owns sandbox profiles.
+- `electron/diagnostics.ts`, `electron/schedule.ts`, `electron/roster-store.ts`, `electron/terminal-instance.ts`, `electron/path-lookup.ts`, `electron/verify-detect.ts`, `electron/evidence-home.ts` own their slice behind host seams; `electron/worldlines/bootstrap.ts` owns fork preflight/capture/read paths.
 - `agent-core/subagents.ts` — background-subagent registry and host contract (spawn validation, claims, handoff/result formats, scanning). The tool surface stays in `agent-core/main.ts`; the headless entry is `--subagent-task`.
 - `electron/subagents.ts` — headless child lifecycle (spawn, settle/kill/retry, result files, mailbox notes). Piped stdio, never node-pty; only spawner of `--subagent-task` children.
 - `electron/main.ts` owns terminal/workspace lifecycle and IPC. Main owns authoritative app state; `src/` owns rendering and transient UI state, and requests privileged operations through preload. Keep orchestration out of the core client, `pty-terminal.ts`, and `session-fork.ts`.

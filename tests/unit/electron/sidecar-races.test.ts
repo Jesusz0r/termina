@@ -197,7 +197,7 @@ describe("Sidecar Concurrency & Race Condition Invariants", () => {
       const mapping = worldlinesSource.indexOf("this.terminalToComparison.set(terminalId", launchStart);
       const processLookup = worldlinesSource.indexOf("cand.lstart = await readProcessStart(pid)", launchStart);
       expect(launchStart >= 0 && mapping > launchStart && mapping < processLookup).toBe(true);
-      const coreSource = await readFile("agent-core/main.ts", "utf8");
+      const coreSource = await readFile("agent-core/main/sidecar.ts", "utf8");
       const coreAppend = coreSource.indexOf("appendDurable(activeSidecarPath, pending.line)");
       const coreCommit = coreSource.indexOf("seq = pending.seq", coreAppend);
       expect(coreAppend >= 0 && coreCommit > coreAppend).toBe(true);

@@ -303,6 +303,97 @@ describe("Quick Open path index", () => {
   });
 });
 
+describe("quick-open gitignore", () => {
+  /** Root + nested ignore files, a negation, and both kept and ignored paths. */
+  function fixture(): { root: string; cleanup: () => void } {
+    const root = mkdtempSync(join(tmpdir(), "qo-gitignore-"));
+    writeFileSync(join(root, ".gitignore"), "ignored/\n*.log\n!keep.log\n");
+    writeFileSync(join(root, "main.ts"), "x");
+    writeFileSync(join(root, "keep.log"), "x");
+    writeFileSync(join(root, "app.log"), "x");
+    writeFileSync(join(root, "notes.md"), "x");
+    mkdirSync(join(root, "ignored"), { recursive: true });
+    writeFileSync(join(root, "ignored", "secret.ts"), "x");
+    mkdirSync(join(root, "sub"), { recursive: true });
+    writeFileSync(join(root, "sub", ".gitignore"), "debug.log\n");
+    writeFileSync(join(root, "sub", "visible.ts"), "x");
+    writeFileSync(join(root, "sub", "debug.log"), "x");
+    writeFileSync(join(root, "sub", "nested.log"), "x");
+    return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  }
+
+  const visible = ["main.ts", "keep.log", "notes.md", "sub/visible.ts"];
+  const hidden = ["app.log", "ignored/secret.ts", "sub/debug.log", "sub/nested.log"];
+
+  it("omits ignored paths from search and the path index", async () => {
+    const { root, cleanup } = fixture();
+    try {
+      const { entries } = await searchProjectFiles(root, "");
+      const rels = entries.map((e) => e.relPath);
+      for (const path of visible) expect(rels).toContain(path);
+      for (const path of hidden) expect(rels).not.toContain(path);
+
+      const index = new ProjectPathIndex();
+      const { paths } = await index.candidates(root);
+      for (const path of visible) expect(paths).toContain(path);
+      for (const path of hidden) expect(paths).not.toContain(path);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("keeps the same visibility in the project snapshot", async () => {
+    const { root, cleanup } = fixture();
+    try {
+      const { entries } = await listProjectSnapshot(root);
+      for (const path of visible) expect(entries).toContain(path);
+      expect(entries).toContain("sub/");
+      expect(entries).not.toContain("ignored/");
+      for (const path of hidden) expect(entries).not.toContain(path);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("drops newly ignored files after a .gitignore change invalidates the index", async () => {
+    const { root, cleanup } = fixture();
+    try {
+      const index = new ProjectPathIndex();
+      expect((await index.candidates(root)).paths).toContain("notes.md");
+
+      writeFileSync(join(root, ".gitignore"), "ignored/\n*.log\n!keep.log\nnotes.md\n");
+      // Watcher create/modify of .gitignore arrives as noteAdded.
+      index.noteAdded(".gitignore");
+
+      const after = await searchProjectFiles(root, "notes", { candidates: await index.candidates(root) });
+      expect(after.entries.map((e) => e.relPath)).not.toContain("notes.md");
+      expect((await index.candidates(root)).paths).toContain("main.ts");
+      expect((await index.candidates(root)).paths).not.toContain("notes.md");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("rebuilds after a deleted .gitignore so previously ignored files return", async () => {
+    const { root, cleanup } = fixture();
+    try {
+      const index = new ProjectPathIndex();
+      expect((await index.candidates(root)).paths).not.toContain("app.log");
+
+      rmSync(join(root, ".gitignore"));
+      index.noteRemoved(".gitignore");
+
+      const { paths } = await index.candidates(root);
+      expect(paths).toContain("app.log");
+      expect(paths).toContain("sub/nested.log");
+      // Nested ignore file still hides debug.log.
+      expect(paths).not.toContain("sub/debug.log");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
 describe("SearchGenerations", () => {
   it("supersedes same-lane searches without touching the other lane", () => {
     const gen = new SearchGenerations(["quick-open", "filter"] as const, "quick-open");

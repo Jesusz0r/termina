@@ -12,7 +12,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain as electronIpcMain, Menu
 // Name the app for the macOS menu bar and user-data paths. Unpackaged runs default to "Electron".
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
-import { accessSync, constants, existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { access, cp, lstat, mkdir, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
@@ -20,7 +20,6 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } 
 import { fileURLToPath } from "node:url";
 import { SessionForkClient } from "./session-fork.js";
 import { SessionRetentionOwner } from "./session-retention.js";
-import { PtyTerminal } from "./pty-terminal.js";
 import {
   isPtyDocumentCurrent,
   isPtyFrameEventCurrent,
@@ -35,13 +34,15 @@ import {
 } from "./pty-egress.js";
 import { AgentStartEvent, SidecarEvent, SidecarEventDelivery, SidecarEventQueue, SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
-import { SnapshotStore, MIN_WORLDS_FREE_BYTES, bindOwnedDirectory, bindOwnedEntry, boundPromotionEnsureDirectory, boundPromotionListEntries, boundPromotionOpenDirectory, boundPromotionPrepareDirectory, boundPromotionReadFile, boundPromotionWriteFile, captureRootInRepo, createOwnedDirectory, disposeWorldlineGitCore, freeDiskBytes, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, gitTrackedFiles, platformHasRecursiveWatcher, platformHasSandboxExec, removeBoundOwnedDirectory, removeBoundOwnedEntry, trustResourceHashes, type BoundOwnedDirectory, type BoundPromotionExpectedLeaf, type PromotionFsIdentity, type SourceState, writeBoundOwnedFile } from "./worldline-git.js";
+import { SnapshotStore, bindOwnedDirectory, bindOwnedEntry, boundPromotionEnsureDirectory, boundPromotionListEntries, boundPromotionOpenDirectory, boundPromotionReadFile, captureRootInRepo, createOwnedDirectory, disposeWorldlineGitCore, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, gitTrackedFiles, removeBoundOwnedDirectory, removeBoundOwnedEntry, trustResourceHashes, type BoundPromotionExpectedLeaf, type PromotionFsIdentity, type SourceState, writeBoundOwnedFile } from "./worldline-git.js";
+import { EvidenceHomeStore } from "./evidence-home.js";
+import { benchmarkConfigFrom, detectTestCommand, detectTestFromState } from "./verify-detect.js";
 import { WorldlineManager, quoteShellArg, recoverPromotionJournals, type RunRecord } from "./worldlines/index.js";
+import { worldlineAppReadPaths, worldlineCaptureHead, worldlineCapturePrimary, worldlinePreflight } from "./worldlines/bootstrap.js";
 import {
   candidateSandboxLaunch,
   evidenceProfileContent,
   filterCandidateEnvironment,
-  sandboxResourceLimitPreflight,
   terminateSandboxProcessGroup,
 } from "./sandbox.js";
 import { parseFailingTests, verifyFailSummary } from "./evidence.js";
@@ -50,12 +51,10 @@ import { createAppUpdater, updateMenuCopy, type AppUpdateController } from "./ap
 import { installCliCommand, uninstallCliCommand, isCliCommandInstalled, parseTargetCwdFromArgv } from "./cli-install.js";
 import {
   MAX_DISPATCH_WORKERS,
-  SCHEDULE_TICK_MS,
   findTaskByText,
   finalizePlanTasks,
   formatDispatchBriefing,
   markPlanProgress,
-  nextScheduleRun,
   parsePlanTasks,
   parseScheduleMarker,
   pickDispatchTasks,
@@ -65,14 +64,15 @@ import {
 import { AppPreferencesStore } from "./preferences.js";
 import { SubagentHost } from "./subagents.js";
 import { anchorClaimPath, isSubagentManagedFile } from "../agent-core/subagents.js";
-import { MAX_SESSION_SEARCH_QUERY, listSessionJsonl, mergeSessionFiles } from "./session-search.js";
+import { MAX_SESSION_SEARCH_QUERY, collectSessionSearchFiles } from "./session-search.js";
+import { DiagnosticsRunner } from "./diagnostics.js";
+import { ScheduleRunner, type ScheduleTickTask } from "./schedule.js";
 import { ProjectPathIndex, SearchGenerations, listProjectSnapshot, searchProjectFiles } from "./quick-open.js";
 import { searchProjectContent } from "./content-search.js";
 import { appendPendingImages, MAX_PENDING_IMAGES, pendingImageState } from "../agent-core/host.js";
 import {
   coreSessionFile as bundleSessionFile,
   isCoreSessionId,
-  listLogicalSessions,
   parseSessionBundlePath,
   sessionBundleHasContent,
 } from "../agent-core/session.js";
@@ -84,14 +84,12 @@ import {
   validatePathDropTargets,
 } from "./terminal-drop.js";
 import {
-  composeTerminalRoster,
-  fitTerminalRoster,
-  MAX_ROSTER_BYTES,
-  MAX_ROSTER_PLAN_TASKS,
   MAX_TERMINAL_ROSTER,
-  parseTerminalRoster,
   type TerminalRosterEntry,
 } from "./terminal-roster.js";
+import { TerminalRosterStore, loadRosterFile, rosterFilePath, type RosterTerminal } from "./roster-store.js";
+import { AgentTerminalInstance } from "./terminal-instance.js";
+import { PathLookup } from "./path-lookup.js";
 import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
 import { HIDE_THINKING_CSI, SHOW_THINKING_CSI, thinkingStartupArgs } from "../shared/terminal-control.js";
 import { validateGrepPattern } from "../shared/grep-pattern.js";
@@ -105,7 +103,6 @@ import {
   type ContentHit,
   type ExplorerEntry,
   type InstanceSummary,
-  type ModifiedFile,
   type PlanTask,
   type RecorderState,
   type SessionHit,
@@ -118,14 +115,12 @@ import {
   type TimelineProgress,
   type ProjectWorkspaceRef,
   type RendererIpcCapability,
-  type VerifyInfo,
   type VerifyState,
 } from "../shared/types.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const MAX_OPEN_FILE_SIZE = 2 * 1024 * 1024;
 const MAX_PROMPT_BYTES = 20 * 1024 * 1024;
-const MAX_AGENT_RESOURCE_BYTES = 200 * 1024 * 1024;
 /** Bound for ~/.termina/agent/auth.json when checking whether a provider exists. */
 const MAX_AUTH_JSON_BYTES = 128 * 1024;
 
@@ -135,14 +130,6 @@ function isChallengeProfile(value: unknown): value is ChallengeProfile {
 const MAX_CLIPBOARD_BYTES = 4 * 1024 * 1024;
 const MAX_EXPLORER_ENTRIES = 2000;
 const MAX_VERIFY_OUTPUT = 200_000;
-/** Bound for one diagnostics run's captured output. */
-const MAX_DIAGNOSTICS_OUTPUT = 32 * 1024;
-/** Bound for one diagnostics context file. */
-const MAX_DIAGNOSTICS_CONTEXT_BYTES = 6 * 1024;
-/** Background typecheck budget per run; slower suites stay manual. */
-const DIAGNOSTICS_TIMEOUT_MS = 120_000;
-/** Cap for cached workspace diagnostics state (project open/close churn). */
-const MAX_DIAGNOSTICS_WORKSPACES = 64;
 /** Bound for one project snapshot context file (tree listing for a turn). */
 const MAX_PROJECT_SNAPSHOT_BYTES = 12 * 1024;
 /** Debounce for snapshot refresh after watcher bursts. */
@@ -308,6 +295,15 @@ function isFlushResult(value: unknown): value is { ok: boolean; failed: string[]
   return typeof rec.ok === "boolean" && Array.isArray(rec.failed) && rec.failed.every((item) => typeof item === "string");
 }
 
+function isUnsavedConfirmResult(value: unknown): value is { ok: boolean; cancelled?: boolean; error?: string } {
+  if (typeof value !== "object" || value === null) return false;
+  const rec = value as { ok?: unknown; cancelled?: unknown; error?: unknown };
+  if (typeof rec.ok !== "boolean") return false;
+  if (rec.cancelled !== undefined && typeof rec.cancelled !== "boolean") return false;
+  if (rec.error !== undefined && typeof rec.error !== "string") return false;
+  return true;
+}
+
 let shellsPromise: Promise<{ name: string; path: string }[]> | null = null;
 
 function detectShells(): Promise<{ name: string; path: string }[]> {
@@ -360,107 +356,6 @@ function awaitCandidateAbortable<T>(promise: Promise<T>, signal?: AbortSignal): 
       },
     );
   });
-}
-
-class AgentTerminalInstance {
-  readonly id: string;
-  /** Monotonic generation fencing this PTY from a later id reuse. */
-  readonly generation = ++terminalGenerationSeq;
-  pty: PtyTerminal;
-  cwd: string;
-  /** The workspace this terminal works in (empty when no folder is open). */
-  workspaceId: string;
-  /** The project that owns this terminal, or null. */
-  projectId: string | null = null;
-  type: "agent" | "shell";
-  /** The engine for an agent terminal. Shells leave this unset. */
-  engine?: "core";
-  /** Persist this tab in the project roster (user terminals, not dispatch or candidates). */
-  persist = true;
-  /** Harness session id for resume. */
-  sessionId: string | null = null;
-  /** Absolute session file used to resume this harness. */
-  sessionFile: string | null = null;
-  /** The live model of this agent, provider-qualified when known. */
-  model: string | null = null;
-  /** The live thinking level of this agent. */
-  thinkingLevel: string | null = null;
-  shellName?: string;
-  /** Absolute shell binary, for roster resume. */
-  shellPath?: string;
-  /** User/project teardown invalidated this terminal's pending delivery. */
-  closed = false;
-  /** Fences forced timeout cleanup from a late native PTY exit callback. */
-  exitHandled = false;
-  busy = false;
-  modified = new Map<string, ModifiedFile>();
-  /** Pre-run content per path (Change Review): string = baseline, null = created. */
-  baselines = new Map<string, string | null>();
-  baselineBytes = 0;
-  /** In-flight lazy baseline captures per path (Change Review waits for them). */
-  baselineFills = new Map<string, Promise<void>>();
-  /** Verify & Iterate: last test run attached to this terminal. */
-  verify: VerifyInfo = { state: "untested", command: null, summary: null };
-  /** Plan Board: the tasks of the current run. */
-  plan: PlanTask[] = [];
-  /** Paths this run touched, relative to the project (for task progress). */
-  touched = new Set<string>();
-  /** In-flight file tools: tool call id to the relative path. */
-  pendingFileTools = new Map<string, string>();
-  /** Last file-tool outcome per relative path. */
-  toolOutcomes = new Map<string, "ok" | "error">();
-  /** Last prefix payload sent, so identical tool_end events skip IPC. */
-  lastTimelinePrefixKey = "";
-  /** When the user sent an interrupt (\x03) into this terminal. */
-  interruptedAt?: number;
-  /** Session Timeline: ordered points with file snapshots. */
-  timeline: TimelineEvent[] = [];
-  /** Per-path content as of the last snapshot in this run (for edit math). */
-  runSnapshots = new Map<string, string>();
-  runSnapshotBytes = 0;
-  /** Recent file-tool paths. Watcher changes on these paths join the tool
-   *  dot instead of adding a second change dot. */
-  lastToolAt = new Map<string, number>();
-  timelineSeq = 0;
-  /** Watcher hint paths since the last moment capture (Phase 6). */
-  pendingHints = new Set<string>();
-  /** Debounced moment-capture timer. */
-  captureTimer: ReturnType<typeof setTimeout> | null = null;
-  momentCapturePromise: Promise<void> | null = null;
-  /** Dots waiting for their captured source state. */
-  momentDots: TimelineEvent[] = [];
-  /** The recorder state of this terminal's timeline. */
-  recorderState: RecorderState = "paused";
-  /** The last capture failure, shown in the timeline tooltip while degraded. */
-  recorderDetail: string | null = null;
-  /** Last wall-clock reseed attempt after a capture failure (bounds retries). */
-  lastReseedMs = 0;
-  /** The recorder detail last pushed (dedupes degraded resends). */
-  lastSentRecorderDetail: string | null = null;
-  /** The prompt payload reported by before_agent_start. */
-  pendingPrompt: { file: string; text: string; images: number } | null = null;
-  /** The open run record of this terminal, or null. */
-  currentRun: RunRecord | null = null;
-
-  constructor(
-    id: string,
-    cwd: string,
-    workspaceId: string,
-    type: "agent" | "shell",
-    shellName: string | undefined,
-    cmd: string,
-    args: string[],
-    env: Record<string, string | undefined>,
-    cols: number,
-    rows: number,
-  ) {
-    this.id = id;
-    this.cwd = cwd;
-    this.workspaceId = workspaceId;
-    this.type = type;
-    this.shellName = shellName;
-    this.pty = new PtyTerminal({ id, cwd, cmd, args, env, cols, rows });
-  }
 }
 
 /**
@@ -556,7 +451,6 @@ function authJsonHasCoreCredential(raw: unknown): boolean {
 let quitConfirmed = false;
 let cleanupComplete = false;
 let cleanupStarted = false;
-let terminalGenerationSeq = 0;
 let rendererWindowGenerationSeq = 0;
 let rendererGenerationSeq = 0;
 let rendererLoadGenerationSeq = 0;
@@ -678,13 +572,25 @@ class PiEditorApp {
   private installingUpdate = false;
   /** In-flight background verify runs by owner terminal id. */
   private verifyRuns = new Set<string>();
-  /** Workspaces with an in-flight background diagnostics run. */
-  private diagnosticsRuns = new Set<string>();
-  /** Last diagnostics run per workspace: proven-clean generation and start
-   *  time. Failures keep the old generation so the next settle retries. */
-  private lastDiagnostics = new Map<string, { generation: number; atMs: number }>();
-  /** Minimum gap between diagnostics runs of one workspace. */
-  private static readonly MIN_DIAGNOSTICS_INTERVAL_MS = 60_000;
+  /** Background static diagnostics; main supplies live reads into app state. */
+  private diagnostics = new DiagnosticsRunner({
+    workspaceById: (workspaceId) => this.workspaceById(workspaceId),
+    isProjectSwitching: (workspaceId) => {
+      const owner = this.projectOfWorkspace(workspaceId);
+      return !owner || this.projectIsSwitching(owner.id);
+    },
+    isDisposed: () => this.disposed,
+    isTerminalCurrent: (inst) => this.terminals.get(inst.id) === inst && !inst.closed,
+    eventsTarget: (terminalId) => {
+      // finish() already gated on isTerminalCurrent, so this is the run's terminal.
+      const inst = this.terminals.get(terminalId);
+      if (!inst) return null;
+      const binding = this.eventsBindingOf(inst);
+      if (!binding) return null;
+      return { dir: this.eventsDirOf(inst), binding };
+    },
+    cleanEnv: () => cleanEnv(),
+  });
   /** Debounced snapshot refresh timers by workspace id. */
   private projectSnapshotTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Background test processes by owner terminal id. */
@@ -697,10 +603,12 @@ class PiEditorApp {
   private dispatchRuns = new Map<string, { ownerId: string; taskText: string }>();
   /** Dispatch mailbox notes per terminal, flushed to mailbox-<id>.md. */
   private dispatchMailbox = new Map<string, string[]>();
-  /** Scheduled task key (`ownerId\ntaskText`) → next run epoch ms. */
-  private scheduledNextRuns = new Map<string, number>();
-  /** Background schedule tick. Cleared on dispose. */
-  private scheduleTimer: ReturnType<typeof setInterval> | null = null;
+  /** Background schedule tick; main supplies live reads into app state. */
+  private schedules = new ScheduleRunner({
+    isDisposed: () => this.disposed,
+    agentTasks: () => this.agentScheduleTasks(),
+    dispatchRun: (ownerId, taskText) => this.dispatchRun(ownerId, taskText),
+  });
   /** Owner terminal id → task text awaiting an automatic verify after a
    *  dispatch worker settled with its task done. Consumed once by the
    *  verify finish path; never retried. */
@@ -732,8 +640,10 @@ class PiEditorApp {
   private preferencesStore = new AppPreferencesStore(join(this.userDataDir, "preferences.json"));
   private preferences: AppPreferences = defaultAppPreferences();
   private preferenceCommits: Promise<void> = Promise.resolve();
-  /** Per-roster async commit tails preserve close/open ordering off the main loop. */
-  private terminalRosterCommits = new Map<string, Promise<void>>();
+  /** Terminal roster persistence; main supplies live terminals when saving. */
+  private rosterStore = new TerminalRosterStore({
+    usableModel: (model) => this.usableAgentModel(model),
+  });
   private shortcutMap: ShortcutMap = { ...DEFAULT_SHORTCUTS };
   private worldsRoot = process.env.TERMINA_WORLDS_DIR ?? join(this.userDataDir, "worlds");
   /** Input buffer for /clear (/new alias) slash-command detection (terminals:write is per keystroke). */
@@ -751,6 +661,9 @@ class PiEditorApp {
   /** Renderer flush requests awaiting their report. */
   private flushWaiters = new Map<string, { workspaceId: string; resolve: (r: { ok: boolean; failed: string[] }) => void; timer: ReturnType<typeof setTimeout> }>();
   private flushSeq = 0;
+  /** Renderer unsaved-buffer confirms awaiting their report. */
+  private unsavedWaiters = new Map<string, { resolve: (r: { ok: boolean; cancelled?: boolean; error?: string }) => void; timer: ReturnType<typeof setTimeout> }>();
+  private unsavedSeq = 0;
   /** Per-caller file:search generations; older same-caller walks abort so fast
    *  typing never stacks full-tree walks. */
   private fileSearchSeq = new SearchGenerations(["quick-open", "filter"] as const, "quick-open");
@@ -762,7 +675,10 @@ class PiEditorApp {
   /** Paths the promotion is applying right now (suppress user-edit records). */
   private promotionPaths: Set<string> | null = null;
   /** Evidence homes retain the same provenance across the measurement. */
-  private evidenceHomeDirs = new Map<string, BoundOwnedDirectory>();
+  private evidenceHomes = new EvidenceHomeStore({
+    eventsDir: () => this.eventsDir,
+    eventsBinding: () => this.eventsDirBinding,
+  });
   private static readonly USER_EDITS_MAX = 50;
   private static readonly MAX_MODIFIED_FILES = 2000;
   private static readonly MAX_BASELINE_FILES = 2000;
@@ -1796,17 +1712,8 @@ class PiEditorApp {
    * Create the worldline manager of one project. Depends on app paths
    * that exist only after the app creates the window.
    */
-  private realpathCache = new Map<string, string>();
-  /** Sync realpath with a tiny cache. appReadPaths runs per candidate
-   * launch; the binary paths it resolves change only when PATH does. */
-  private cachedRealpath(input: string): string {
-    const hit = this.realpathCache.get(input);
-    if (hit !== undefined) return hit;
-    const resolved = realpathSync(input);
-    if (this.realpathCache.size >= 16) this.realpathCache.clear();
-    this.realpathCache.set(input, resolved);
-    return resolved;
-  }
+  /** Cached host path resolution (realpath + PATH lookup). */
+  private paths = new PathLookup();
 
   /** In-flight worldline inits by project id. The sync guard below used to be
    * atomic; the canonical-path await in construction is not, so concurrent
@@ -1837,21 +1744,7 @@ class PiEditorApp {
       },
       // The sandboxed core loads the app-owned agent-core copy, the
       // electron binary, and the node binary.
-      appReadPaths: () => {
-        const out: string[] = [];
-        out.push(process.execPath);
-        out.push(dirname(dirname(process.execPath)));
-        const corePath = coreEngineBinary();
-        out.push(corePath, dirname(corePath));
-        const node = this.findOnPath("node") ?? process.execPath;
-        out.push(node, dirname(node));
-        try {
-          out.push(this.cachedRealpath(node));
-        } catch {
-          /* The configured node path can disappear between checks. */
-        }
-        return [...new Set(out)];
-      },
+      appReadPaths: () => worldlineAppReadPaths(coreEngineBinary(), this.paths),
       forkCoreSession: (opts, callOptions) => this.sessionFork.forkCore(opts, callOptions),
       buildExportPatch: (files) =>
         this.sessionFork.exportPatch({ files }).then((result) => {
@@ -1873,46 +1766,15 @@ class PiEditorApp {
         this.send("worldline:removed", { projectId: project.id, comparisonId });
       },
       // The fork preflight (WORLDLINES §4): repository, platform, disk.
-      preflight: async () => {
-        const reasons: string[] = [];
-        const store = await project.storePromise;
-        const primaryRoot = this.primaryWorkspace(project)?.root ?? project.cwd ?? "";
-        if (store) {
-          const repo = await store.preflightRepo({ worldsRoot: this.worldsRoot });
-          reasons.push(...repo.reasons);
-        } else {
-          // No store: the folder is not a recordable repository.
-          const top = primaryRoot ? await gitTopLevel(primaryRoot).catch(() => null) : null;
-          if (!top) reasons.push("the opened folder is not inside a Git repository");
-        }
-        if (!platformHasSandboxExec()) reasons.push("the platform has no sandbox-exec");
-        const resourceLimitReason = sandboxResourceLimitPreflight();
-        if (resourceLimitReason) reasons.push(resourceLimitReason);
-        if (!platformHasRecursiveWatcher()) reasons.push("the platform has no reliable recursive watcher");
-        const free = await freeDiskBytes(this.worldsRoot);
-        if (free !== null && free < MIN_WORLDS_FREE_BYTES) {
-          reasons.push(`free disk space is below the 512 MB minimum (${Math.floor(free / (1024 * 1024))} MB)`);
-        }
-        return { ok: reasons.length === 0, reasons };
-      },
+      preflight: () =>
+        worldlinePreflight({
+          storePromise: project.storePromise,
+          worldsRoot: this.worldsRoot,
+          primaryRoot: this.primaryWorkspace(project)?.root ?? project.cwd ?? "",
+        }),
       trustHashes: async () => this.computeTrustHashes(project),
-      captureHead: async (root, gitDir, parent) => {
-        const store = await project.storePromise;
-        if (!store) throw new Error("recording is not available");
-        const state = await store.capture(await gitHead(root), parent, {}, {}, { root, gitDir });
-        return { commit: state.commit, tree: state.tree };
-      },
-      capturePrimary: async () => {
-        const ws = this.primaryWorkspace(project);
-        const store = await project.storePromise;
-        if (!ws || !store || !ws.lastStateCommit) return null;
-        try {
-          const state = await store.capture(await gitHead(ws.root), ws.lastStateCommit);
-          return state.commit;
-        } catch {
-          return null;
-        }
-      },
+      captureHead: (root, gitDir, parent) => worldlineCaptureHead(project.storePromise, root, gitDir, parent),
+      capturePrimary: () => worldlineCapturePrimary(project.storePromise, this.primaryWorkspace(project)),
       releaseState: async (stateId) => {
         await this.releaseStateIfUnused(stateId);
       },
@@ -1931,10 +1793,10 @@ class PiEditorApp {
       removePromptPayload: (eventsDir, fileName) => this.removePromptPayload(eventsDir, fileName),
       runSandboxedEvidence: (cand, command, timeoutMs, signal) => this.runSandboxedEvidence(cand, command, timeoutMs, signal),
       sourceFilesOf: (root) => this.sourceFilesOf(root),
-      createEvidenceHome: () => this.createEvidenceHome(),
-      removeEvidenceHome: (path) => this.removeEvidenceHome(path),
-      detectTestFromState: (store, stateId) => this.detectTestFromState(store, stateId),
-      benchmarkConfigFrom: (store, stateId) => this.benchmarkConfigFrom(store, stateId),
+      createEvidenceHome: () => this.evidenceHomes.create(),
+      removeEvidenceHome: (path) => this.evidenceHomes.remove(path),
+      detectTestFromState: (store, stateId) => detectTestFromState(store, stateId),
+      benchmarkConfigFrom: (store, stateId) => benchmarkConfigFrom(store, stateId),
       onEvidenceUpdate: (summary) => this.send("worldline:evidence-update", { projectId: project.id, summary }),
       onPromotionApply: (relPaths) => {
         this.promotionPaths = relPaths ? new Set(relPaths) : null;
@@ -2490,83 +2352,6 @@ class PiEditorApp {
     return out;
   }
 
-  /** Create a bounded evidence home from the real agent resources. */
-  private async createEvidenceHome(): Promise<string> {
-    const eventsBinding = this.eventsDirBinding;
-    if (!eventsBinding) throw new Error("events directory is not bound");
-    let dir: string | null = null;
-    let binding: BoundOwnedDirectory | null = null;
-    let complete = false;
-    try {
-      binding = await createOwnedDirectory(this.eventsDir, eventsBinding, "evidence-home-");
-      dir = binding.path;
-      this.evidenceHomeDirs.set(dir, binding);
-      // The evidence home is allocated once by the native descriptor-bound
-      // owner. Every destination directory and file is then created below
-      // that retained capability; no awaited pathname `mkdir`/`copyFile` can
-      // be redirected to a replacement ancestor.
-      const agent = await boundPromotionPrepareDirectory({
-        root: dir,
-        rootIdentity: binding.identity,
-        components: [".termina", "agent"],
-        createMissing: true,
-      });
-      if (!agent.identity) throw new Error("evidence agent directory was not created");
-      const agentSrc = join(homedir(), ".termina", "agent");
-      for (const name of ["auth.json", "mcp.json"]) {
-        try {
-          const source = join(agentSrc, name);
-          const info = await stat(source);
-          if (!info.isFile() || info.size > MAX_AGENT_RESOURCE_BYTES) continue;
-          const content = await readFile(source);
-          await boundPromotionWriteFile({
-            root: dir,
-            rootIdentity: binding.identity,
-            components: [".termina", "agent", name],
-            parentIdentity: agent.identity,
-            expectedDestination: { state: { type: "missing" } },
-            content,
-            mode: 0o600,
-          });
-        } catch {
-          /* The resource is optional. */
-        }
-      }
-      for (const name of ["A", "B"]) {
-        const tmp = await boundPromotionPrepareDirectory({
-          root: dir,
-          rootIdentity: binding.identity,
-          components: ["tmp", name],
-          createMissing: true,
-        });
-        if (!tmp.identity) throw new Error(`evidence tmp/${name} directory was not created`);
-      }
-      complete = true;
-      return dir;
-    } finally {
-      if (!complete && dir) {
-        this.evidenceHomeDirs.delete(dir);
-        if (binding) await removeBoundOwnedDirectory({ binding }).catch(() => undefined);
-      }
-    }
-  }
-
-  /** Remove an evidence home only through the binding captured at creation. */
-  private async removeEvidenceHome(path: string): Promise<boolean> {
-    const binding = this.evidenceHomeDirs.get(path);
-    if (!binding) return false;
-    try {
-      await removeBoundOwnedDirectory({ binding });
-      this.evidenceHomeDirs.delete(path);
-      return true;
-    } catch (error) {
-      // Keep the binding so a later lifecycle/dispose cleanup can retry.  A
-      // replacement parent or leaf is deliberately retained on uncertainty.
-      console.warn(`[main] evidence home cleanup retained ${path}: ${String(error)}`);
-      return false;
-    }
-  }
-
   private markCandidateEvidenceStale(comparisonId: string | undefined): void {
     if (!comparisonId) return;
     this.projectOfComparison(comparisonId)?.worldlines?.markEvidenceStale(comparisonId);
@@ -2610,38 +2395,6 @@ class PiEditorApp {
     if (previous && previous !== stateId) void this.releaseStateIfUnused(previous);
   }
 
-  private findOnPathCache = new Map<string, string | null>();
-  private findOnPath(name: string): string | null {
-    const pathEnv = process.env.PATH ?? "";
-    const key = `${pathEnv}\0${name}`;
-    const hit = this.findOnPathCache.get(key);
-    if (hit) return hit;
-    const found = this.findOnPathUncached(name, pathEnv);
-    // Cache hits only: a miss may resolve later (new install under the same
-    // PATH) and must fall through to process.execPath fresh each time.
-    if (found !== null) {
-      if (this.findOnPathCache.size >= 16) this.findOnPathCache.clear();
-      this.findOnPathCache.set(key, found);
-    }
-    return found;
-  }
-
-  private findOnPathUncached(name: string, pathEnv: string): string | null {
-    for (const dir of pathEnv.split(":")) {
-      if (!dir) continue;
-      try {
-        const candidate = join(dir, name);
-        if (existsSync(candidate)) {
-          accessSync(candidate, constants.X_OK);
-          return candidate;
-        }
-      } catch {
-        /* keep scanning */
-      }
-    }
-    return null;
-  }
-
   private allocateTerminalId(): string {
     return `term-${++terminalSeq}`;
   }
@@ -2665,95 +2418,18 @@ class PiEditorApp {
     return bundleSessionFile(await this.coreProjectSessionDir(cwd), sessionId);
   }
 
-  private terminalRosterPath(project: ProjectState): string {
-    return join(this.userDataDir, "terminal-rosters", `${this.sanitizeSessionDir(project.canonicalRoot)}.json`);
-  }
-
-  private async loadTerminalRoster(project: ProjectState): Promise<{ exists: boolean; entries: TerminalRosterEntry[] }> {
-    const path = this.terminalRosterPath(project);
-    let info;
-    try {
-      info = await stat(path);
-    } catch (error) {
-      // Only a clean absence means first launch. Anything else (unreadable,
-      // oversized handled below) must not spawn an unrequested terminal.
-      return { exists: (error as NodeJS.ErrnoException)?.code !== "ENOENT", entries: [] };
-    }
-    try {
-      if (!info.isFile() || info.size > MAX_ROSTER_BYTES) return { exists: true, entries: [] };
-      const raw = JSON.parse(await readFile(path, "utf8")) as unknown;
-      return { exists: true, entries: parseTerminalRoster(raw) };
-    } catch {
-      // A present but unreadable roster must not be mistaken for first launch:
-      // doing so would create and persist a terminal the user did not request.
-      return { exists: true, entries: [] };
-    }
-  }
-
-  private rosterEntryFor(inst: AgentTerminalInstance): TerminalRosterEntry {
-    const entry: TerminalRosterEntry = { id: inst.id, type: inst.type };
-    if (inst.type === "agent") entry.engine = "core";
-    if (inst.type === "shell" && inst.shellPath) entry.shell = inst.shellPath;
-    if (inst.sessionId) entry.sessionId = inst.sessionId;
-    if (inst.sessionFile) entry.sessionFile = inst.sessionFile;
-    // The session's own last model (tracked from sidecar agent_settings /
-    // agent_start). Resume restores it; without it a restart falls back to
-    // the global last-used model or the provider default.
-    const lastModel = this.usableAgentModel(inst.model);
-    if (inst.type === "agent" && lastModel) {
-      entry.model = lastModel;
-    }
-    if (inst.type === "agent") {
-      // Handoff: board tasks (assignments never survive — workers are gone)
-      // and the last settled verdict. A running verify restores as untested.
-      if (inst.plan.length > 0) {
-        entry.plan = inst.plan.slice(0, MAX_ROSTER_PLAN_TASKS).map((t) => ({
-          text: t.text.slice(0, 500),
-          paths: t.paths.slice(0, 100),
-          state: t.state,
-        }));
-      }
-      if (inst.verify.state !== "untested" && inst.verify.state !== "running") {
-        entry.verify = { state: inst.verify.state, command: inst.verify.command, summary: inst.verify.summary };
-      }
-    }
-    return entry;
-  }
-
   private saveTerminalRoster(project: ProjectState): void {
-    const live: TerminalRosterEntry[] = [];
+    const live: RosterTerminal[] = [];
     for (const id of project.terminalIds) {
       const inst = this.terminals.get(id);
       if (!inst?.persist || inst.closed) continue;
-      live.push(this.rosterEntryFor(inst));
+      live.push(inst);
     }
-    const entries = fitTerminalRoster(composeTerminalRoster(live, project.unrestoredTerminals));
-    const dir = join(this.userDataDir, "terminal-rosters");
-    const path = this.terminalRosterPath(project);
-    const previous = this.terminalRosterCommits.get(path) ?? Promise.resolve();
-    const commit = previous.then(async () => {
-      await mkdir(dir, { recursive: true, mode: 0o700 });
-      const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
-      try {
-        await writeFile(tmp, `${JSON.stringify({ terminals: entries })}\n`, { flag: "wx", mode: 0o600 });
-        await fsRename(tmp, path);
-      } finally {
-        await rm(tmp, { force: true }).catch(() => undefined);
-      }
-    });
-    const settled = commit.catch((err) => {
-      console.warn(`[main] could not save terminal roster: ${(err as Error).message}`);
-    });
-    this.terminalRosterCommits.set(path, settled);
-    void settled.then(() => {
-      if (this.terminalRosterCommits.get(path) === settled) this.terminalRosterCommits.delete(path);
-    });
-  }
-
-  private async drainTerminalRosterCommits(): Promise<void> {
-    while (this.terminalRosterCommits.size > 0) {
-      await Promise.all(this.terminalRosterCommits.values());
-    }
+    this.rosterStore.save(
+      rosterFilePath(this.userDataDir, this.sanitizeSessionDir(project.canonicalRoot)),
+      live,
+      project.unrestoredTerminals,
+    );
   }
 
   /** True when `target` resolves inside `parent`. Neither path needs to exist. */
@@ -2790,7 +2466,7 @@ class PiEditorApp {
   }
 
   private async restoreProjectTerminals(project: ProjectState): Promise<void> {
-    const loaded = await this.loadTerminalRoster(project);
+    const loaded = await loadRosterFile(rosterFilePath(this.userDataDir, this.sanitizeSessionDir(project.canonicalRoot)));
     if (loaded.entries.length === 0) {
       // Only a genuinely new project gets a default terminal. An existing
       // empty roster is the durable result of closing the project's last tab.
@@ -3182,226 +2858,6 @@ class PiEditorApp {
   // ------------------------------------------------------------- verify ----
 
   /**
-   * Detect a fast static diagnostics command: TypeScript via the project's
-   * own compiler. Other stacks stay manual until a cheap probe exists.
-   */
-  private async detectDiagnosticsCommand(cwd: string): Promise<{ command: string; args: string[]; label: string } | null> {
-    try {
-      const root = await fsRealpath(cwd);
-      await stat(join(root, "tsconfig.json"));
-      const tsc = join(root, "node_modules", ".bin", "tsc");
-      const info = await stat(tsc);
-      if (!info.isFile()) return null;
-      return { command: tsc, args: ["--noEmit", "-p", join(root, "tsconfig.json")], label: "tsc --noEmit" };
-    } catch {
-      return null;
-    }
-  }
-
-  /**
-   * Run static diagnostics in the background after an agent settles.
-   * TypeScript-only v1, primary workspaces only. Skipped when the workspace
-   * generation has not moved since the last clean run, and at most once a
-   * minute per workspace. Silent: the capped result lands in the diagnostics
-   * context file for the next turn. Never throws.
-   */
-  private async runDiagnostics(inst: AgentTerminalInstance): Promise<void> {
-    const ws = this.workspaceById(inst.workspaceId);
-    if (!ws || !ws.primary || this.disposed) return;
-    const owner = this.projectOfWorkspace(ws.id);
-    if (!owner || this.projectIsSwitching(owner.id)) return;
-    if (this.diagnosticsRuns.has(ws.id)) return;
-    const startGeneration = ws.generation;
-    const last = this.lastDiagnostics.get(ws.id);
-    if (last && last.generation >= startGeneration) return;
-    if (last && Date.now() - last.atMs < PiEditorApp.MIN_DIAGNOSTICS_INTERVAL_MS) return;
-    const cwd = ws.root;
-    let tc: { command: string; args: string[]; label: string } | null;
-    try {
-      tc = await this.detectDiagnosticsCommand(cwd);
-    } catch {
-      return;
-    }
-    if (!tc) return;
-    if (this.terminals.get(inst.id) !== inst || inst.closed || this.disposed) return;
-    this.diagnosticsRuns.add(ws.id);
-    // Refresh recency: re-setting a Map key keeps its original position.
-    this.lastDiagnostics.delete(ws.id);
-    this.lastDiagnostics.set(ws.id, { generation: last?.generation ?? -1, atMs: Date.now() });
-    if (this.lastDiagnostics.size > MAX_DIAGNOSTICS_WORKSPACES) {
-      const oldest = this.lastDiagnostics.keys().next().value;
-      if (oldest !== undefined && oldest !== ws.id) this.lastDiagnostics.delete(oldest);
-    }
-    let child: ReturnType<typeof spawn> | null = null;
-    let output = "";
-    let finished = false;
-    const finish = (code: number | null, timedOut: boolean): void => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-      this.diagnosticsRuns.delete(ws.id);
-      if (this.terminals.get(inst.id) !== inst || inst.closed || this.disposed) return;
-      const pass = !timedOut && code === 0;
-      // A passing run proves the start generation clean. Failures and
-      // timeouts keep the old watermark (plus the fresh timestamp above) so
-      // the next settle retries after the interval.
-      if (pass) {
-        const current = this.lastDiagnostics.get(ws.id);
-        this.lastDiagnostics.set(ws.id, { generation: startGeneration, atMs: current?.atMs ?? Date.now() });
-      }
-      const body = output.trim().slice(-MAX_DIAGNOSTICS_CONTEXT_BYTES);
-      const md =
-        `## Diagnostics — \`${tc.label}\` — ${new Date().toISOString()}\n\n` +
-        `**Status:** ${pass ? "✅ clean" : timedOut ? "⏰ timed out" : "❌ errors"}\n\n` +
-        (body && !pass ? `<details>\n<summary>Output</summary>\n\n\`\`\`text\n${body}\n\`\`\`\n</details>\n` : "");
-      const eventsDir = this.eventsDirOf(inst);
-      const binding = this.eventsBindingOf(inst);
-      if (!binding) return;
-      void writeBoundOwnedFile({
-        root: eventsDir,
-        rootIdentity: binding,
-        components: [`diagnostics-${inst.id}.md`],
-        parentIdentity: binding,
-        content: Buffer.from(md, "utf8"),
-        mode: 0o600,
-        maxBytes: MAX_DIAGNOSTICS_CONTEXT_BYTES + 1024,
-      }).catch((err) => {
-        console.warn(`[main] could not write diagnostics context: ${String(err)}`);
-      });
-    };
-    const timer = setTimeout(() => {
-      if (child) {
-        try {
-          terminateSandboxProcessGroup(child, "SIGKILL", 1500);
-        } catch {
-          /* The close handler owns the result. */
-        }
-      }
-      finish(null, true);
-    }, DIAGNOSTICS_TIMEOUT_MS);
-    try {
-      child = spawn(tc.command, tc.args, {
-        cwd,
-        detached: process.platform !== "win32",
-        env: { ...cleanEnv() },
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true,
-      });
-    } catch {
-      clearTimeout(timer);
-      this.diagnosticsRuns.delete(ws.id);
-      return;
-    }
-    child.stdout?.on("data", (data: Buffer | string) => {
-      if (output.length < MAX_DIAGNOSTICS_OUTPUT) output += data.toString().slice(0, MAX_DIAGNOSTICS_OUTPUT - output.length);
-    });
-    child.stderr?.on("data", (data: Buffer | string) => {
-      if (output.length < MAX_DIAGNOSTICS_OUTPUT) output += data.toString().slice(0, MAX_DIAGNOSTICS_OUTPUT - output.length);
-    });
-    child.once("error", () => finish(null, false));
-    child.once("close", (code) => finish(code, false));
-  }
-
-  /**
-   * Detect the project's test command: package.json scripts (prefer `test`,
-   * then the first `test:*` script), pytest, cargo test, go test.
-   */
-  private async detectTestCommand(cwd: string): Promise<{ command: string; args: string[]; label: string } | null> {
-    const pkgText = await this.safeWorkspaceRead(cwd, "package.json");
-    if (pkgText !== null) {
-      const fromPkg = this.detectTestFromPkg(pkgText);
-      if (fromPkg) return fromPkg;
-    }
-    return this.detectTestFromFiles(cwd);
-  }
-
-  private async safeWorkspaceRead(root: string, relPath: string): Promise<string | null> {
-    try {
-      const [canonicalRoot, canonicalPath] = await Promise.all([fsRealpath(root), fsRealpath(join(root, relPath))]);
-      const rel = relative(canonicalRoot, canonicalPath);
-      if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null;
-      return await readFile(canonicalPath, "utf8");
-    } catch {
-      return null;
-    }
-  }
-
-  /** The npm test script of a package text, resolved to its immutable base
-   *  command body (WORLDLINES §6.8): a candidate's changed test config
-   *  never changes what the evidence runs. */
-  private detectTestFromPkg(pkgText: string): { command: string; args: string[]; label: string } | null {
-    try {
-      const pkg = JSON.parse(pkgText) as { scripts?: Record<string, string> };
-      const scripts = pkg.scripts ?? {};
-      const names = Object.keys(scripts);
-      const pick = names.includes("test") ? "test" : names.find((n) => n.startsWith("test:"));
-      if (pick) {
-        const body = (scripts[pick] ?? "").trim();
-        if (!body) return null;
-        // A simple invocation runs directly; a shell body runs under sh.
-        const tokens = body.split(/\s+/);
-        if (tokens.some((t) => /[|&;<>()]/.test(t) || /[=$]/.test(t))) return { command: "sh", args: ["-c", body], label: `npm run ${pick}` };
-        return { command: tokens[0] ?? "true", args: tokens.slice(1), label: `npm run ${pick}` };
-      }
-    } catch {
-      /* no package.json */
-    }
-    return null;
-  }
-
-  /** The pytest/cargo/go detection of a workspace. */
-  private async detectTestFromFiles(cwd: string): Promise<{ command: string; args: string[]; label: string } | null> {
-    try {
-      await stat(join(cwd, "pytest.ini"));
-      return { command: "pytest", args: [], label: "pytest" };
-    } catch {
-      const pyproject = await this.safeWorkspaceRead(cwd, "pyproject.toml");
-      if (pyproject?.includes("[tool.pytest")) return { command: "pytest", args: [], label: "pytest" };
-    }
-    try {
-      await stat(join(cwd, "Cargo.toml"));
-      return { command: "cargo", args: ["test"], label: "cargo test" };
-    } catch {
-      /* Cargo is not configured. */
-    }
-    try {
-      await stat(join(cwd, "go.mod"));
-      return { command: "go", args: ["test", "./..."], label: "go test ./..." };
-    } catch {
-      return null;
-    }
-  }
-
-  /** The test command of a captured state (the shared base). */
-  private async detectTestFromState(store: SnapshotStore, stateId: string): Promise<{ command: string; args: string[]; label: string } | null> {
-    const pkg = await store.readBlob(stateId, "package.json");
-    if (pkg) {
-      const fromPkg = this.detectTestFromPkg(pkg.toString("utf8"));
-      if (fromPkg) return fromPkg;
-    }
-    return null;
-  }
-
-  /** The benchmark harness config of a captured state, or null. */
-  private async benchmarkConfigFrom(store: SnapshotStore, stateId: string): Promise<{ command: string[]; unit: string; direction: "lower" | "higher"; samples: number; thresholdPct: number } | null> {
-    const pkg = await store.readBlob(stateId, "package.json");
-    if (!pkg) return null;
-    try {
-      const cfg = (JSON.parse(pkg.toString("utf8")) as { "termina"?: { benchmark?: { command?: string; unit?: string; direction?: string; samples?: number; thresholdPct?: number } } })["termina"]?.benchmark;
-      if (!cfg?.command) return null;
-      return {
-        command: cfg.command.split(/\s+/),
-        unit: cfg.unit ?? "ms",
-        direction: cfg.direction === "higher" ? "higher" : "lower",
-        samples: Math.min(10, Math.max(3, cfg.samples ?? 5)),
-        thresholdPct: Math.max(1, cfg.thresholdPct ?? 5) / 100,
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  /**
    * Start one automatic verify after a dispatch worker settled with its task
    * done. Only when the owner is idle and no sibling worker is still running:
    * a running agent must not have tests execute under its edits. One shot per
@@ -3460,7 +2916,7 @@ class PiEditorApp {
     const cwd = candidate?.root ?? this.terminalCwd();
     let tc: { command: string; args: string[]; label: string } | null;
     try {
-      tc = await this.detectTestCommand(cwd);
+      tc = await detectTestCommand(cwd);
     } catch (err) {
       this.verifyRuns.delete(ownerId);
       return { ok: false, error: `could not detect the test command: ${(err as Error).message}` };
@@ -3883,16 +3339,7 @@ class PiEditorApp {
     const piDir = join(homedir(), ".pi", "agent", "sessions", key);
     const coreDir = join(this.coreSessionRoot(), key);
     const seq = ++this.searchSessionsSeq;
-    const coreSessions = await listLogicalSessions(coreDir);
-    const files = mergeSessionFiles([
-      await listSessionJsonl(piDir),
-      coreSessions.map((entry) => ({
-        path: entry.path,
-        name: entry.name,
-        mtimeMs: entry.mtimeMs,
-        segments: entry.segments,
-      })),
-    ]);
+    const files = await collectSessionSearchFiles(piDir, coreDir);
     const stale = (): boolean => seq !== this.searchSessionsSeq || this.disposed;
     this.searchAbort?.abort();
     const controller = new AbortController();
@@ -4041,60 +3488,21 @@ class PiEditorApp {
   }
 
   /**
-   * Fire due scheduled plan tasks (`@every` / `@at` markers). One tick per
-   * minute across projects: prune dead entries, skip busy owners and full
-   * dispatch boards, and dispatch through the normal worker path so briefing,
-   * settle notes, and auto-verify apply unchanged. Never throws.
+   * Live traversal of pending scheduled plan tasks across agent owners, for
+   * the schedule tick. Lazy: mid-tick interleaving matches the inline loop.
    */
-  private async tickSchedules(now: number = Date.now()): Promise<void> {
-    if (this.disposed) return;
-    try {
-      const live = new Set<string>();
-      for (const project of this.projects.values()) {
-        for (const id of project.terminalIds) {
-          const inst = this.terminals.get(id);
-          if (!inst || inst.type !== "agent" || inst.closed) continue;
-          for (const task of inst.plan) {
-            if (task.state !== "pending") continue;
-            const spec = parseScheduleMarker(task.text);
-            if (!spec) continue;
-            const key = `${inst.id}\n${task.text}`;
-            live.add(key);
-            const next = this.scheduledNextRuns.get(key);
-            if (next === undefined) {
-              this.scheduledNextRuns.set(key, nextScheduleRun(spec, now, true));
-              continue;
-            }
-            if (next > now) continue;
-            // Reschedule first: a slow dispatch must not pile up ticks.
-            this.scheduledNextRuns.set(key, nextScheduleRun(spec, now, false));
-            if (inst.busy) continue;
-            const result = await this.dispatchRun(inst.id, task.text);
-            if (!result.ok) {
-              console.warn(`[main] scheduled dispatch skipped: ${result.error}`);
-            }
-          }
+  private *agentScheduleTasks(): Generator<ScheduleTickTask> {
+    for (const project of this.projects.values()) {
+      for (const id of project.terminalIds) {
+        const inst = this.terminals.get(id);
+        if (!inst || inst.type !== "agent" || inst.closed) continue;
+        for (const task of inst.plan) {
+          if (task.state !== "pending") continue;
+          const spec = parseScheduleMarker(task.text);
+          if (!spec) continue;
+          yield { ownerId: inst.id, text: task.text, spec, isBusy: () => inst.busy };
         }
       }
-      for (const key of [...this.scheduledNextRuns.keys()]) {
-        if (!live.has(key)) this.scheduledNextRuns.delete(key);
-      }
-    } catch (err) {
-      console.warn(`[main] schedule tick failed: ${(err as Error).message}`);
-    }
-  }
-
-  private startScheduleTick(): void {
-    if (this.scheduleTimer) return;
-    this.scheduleTimer = setInterval(() => {
-      void this.tickSchedules();
-    }, SCHEDULE_TICK_MS);
-  }
-
-  private stopScheduleTick(): void {
-    if (this.scheduleTimer) {
-      clearInterval(this.scheduleTimer);
-      this.scheduleTimer = null;
     }
   }
 
@@ -5089,7 +4497,7 @@ class PiEditorApp {
           this.maybeAutoReverify(inst);
           // Refresh static diagnostics in the background when the tree moved.
           // Generation-cached and silent; the result lands in context.
-          void this.runDiagnostics(inst);
+          void this.diagnostics.run(inst);
         }
         // The settled marker is published by the checkpoint handler only after
         // its immutable source state has been captured.
@@ -6518,6 +5926,39 @@ class PiEditorApp {
   // ------------------------------------------------------------- project -----
 
   /**
+   * Ask the renderer to Save / Discard / Cancel dirty editor buffers.
+   * Save reuses flushAll → file:save. Cancel aborts the close or quit.
+   */
+  async confirmUnsavedEditorBuffers(projectId?: string): Promise<{ ok: boolean; cancelled?: boolean; error?: string }> {
+    const rendererTarget = this.captureRendererSendTarget();
+    return new Promise((resolve) => {
+      const requestId = `unsaved-${++this.unsavedSeq}`;
+      const timer = setTimeout(() => {
+        this.unsavedWaiters.delete(requestId);
+        resolve({ ok: false, cancelled: true });
+      }, 5 * 60 * 1000);
+      this.unsavedWaiters.set(requestId, { resolve, timer });
+      const sent = this.send("editor:unsaved-confirm", { requestId, projectId: projectId ?? null }, rendererTarget);
+      if (sent) return;
+      clearTimeout(timer);
+      this.unsavedWaiters.delete(requestId);
+      const win = this.win;
+      if (win && !win.isDestroyed()) resolve({ ok: false, error: "editor is unavailable" });
+      else resolve({ ok: true });
+    });
+  }
+
+  /**
+   * Shared close/quit gate: unsaved editor buffers, then live worldline
+   * candidates. Cancel at either step aborts.
+   */
+  async confirmClose(projectId?: string): Promise<boolean> {
+    const unsaved = await this.confirmUnsavedEditorBuffers(projectId);
+    if (!unsaved.ok) return false;
+    return this.confirmDiscardActiveCandidates(projectId);
+  }
+
+  /**
    * Confirmation for live candidates with activity (§6.11): a folder
    * switch or app quit discards them; ask first.
    */
@@ -6807,7 +6248,7 @@ class PiEditorApp {
         rendererTarget,
       );
     };
-    if (!(await this.confirmDiscardActiveCandidates(projectId))) {
+    if (!(await this.confirmClose(projectId))) {
       await restoreActive();
       return { ok: false, cancelled: true };
     }
@@ -7782,6 +7223,15 @@ class PiEditorApp {
       this.flushWaiters.delete(requestId);
       waiter.resolve(result);
     });
+    ipcMain.handle("editor:unsaved-report", (_e, requestId: unknown, result: unknown) => {
+      if (typeof requestId !== "string") return;
+      if (!isUnsavedConfirmResult(result)) return;
+      const waiter = this.unsavedWaiters.get(requestId);
+      if (!waiter) return;
+      clearTimeout(waiter.timer);
+      this.unsavedWaiters.delete(requestId);
+      waiter.resolve(result);
+    });
     /** The flush saves go through the lease holder (the preflight). */
     ipcMain.handle("file:flush-save", async (_e, absPath: string, content: string, writerId: string, owner: unknown) => {
       if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > MAX_OPEN_FILE_SIZE) return { ok: false, error: "file content is too large" };
@@ -7806,9 +7256,9 @@ class PiEditorApp {
       if (terminalId !== undefined) {
         if (typeof terminalId !== "string") return null;
         const inst = this.terminals.get(terminalId);
-        return inst ? this.detectTestCommand(inst.cwd) : null;
+        return inst ? detectTestCommand(inst.cwd) : null;
       }
-      return this.detectTestCommand(this.terminalCwd());
+      return detectTestCommand(this.terminalCwd());
     });
     ipcMain.handle("verify:run", (_e, terminalId: string) => this.runVerify(terminalId));
     ipcMain.handle("verify:cancel", (_e, terminalId: string) => this.cancelVerify(terminalId));
@@ -8066,7 +7516,7 @@ class PiEditorApp {
     const initialCwd = initial && existsSync(initial) ? initial : null;
     this.tailer.onEvent = (id, event) => this.enqueueSidecarEvent(id, event);
     this.tailer.start();
-    this.startScheduleTick();
+    this.schedules.start();
     // Publish the restoration barrier before yielding to the renderer's
     // project:list / terminals:list requests during window loading. The
     // window still opens immediately; only hydration waits for restoration.
@@ -8235,7 +7685,7 @@ class PiEditorApp {
     if (current.status !== "ready") return updater.install();
     if (this.installingUpdate) return { ok: false, error: "The update is already installing." };
     this.installingUpdate = true;
-    if (!(await this.confirmDiscardActiveCandidates())) {
+    if (!(await this.confirmClose())) {
       this.installingUpdate = false;
       return { ok: false, error: "Update cancelled." };
     }
@@ -8259,12 +7709,12 @@ class PiEditorApp {
     if (this.initialRestorePromise) {
       await this.initialRestorePromise.catch(() => undefined);
     }
-    await this.drainTerminalRosterCommits();
+    await this.rosterStore.drain();
     // Shutdown is an intentional cancellation boundary: no queued bytes or
     // exit notifications may be delivered after the app has begun teardown.
     this.ptyEgress.dispose();
     this.appUpdater?.dispose();
-    this.stopScheduleTick();
+    this.schedules.stop();
     await this.persistOpenProjects();
     await this.preferenceCommits;
     await this.preferencesStore.flush();
@@ -8286,13 +7736,7 @@ class PiEditorApp {
     // silently retain every finalized branch at app shutdown.
     await Promise.all([...this.projects.values()].map((project) => project.worldlines?.dispose().catch(() => undefined) ?? Promise.resolve()));
     await this.sessionFork.dispose();
-    for (const [path, binding] of [...this.evidenceHomeDirs]) {
-      if (await this.removeEvidenceHome(path)) continue;
-      // The failed identity proof intentionally retains the replacement.
-      // Drop only the in-memory retry handle during final app teardown.
-      this.evidenceHomeDirs.delete(path);
-      void binding;
-    }
+    await this.evidenceHomes.dispose();
     for (const project of this.projects.values()) {
       project.worldlines = null;
       for (const ws of project.workspaces.values()) ws.watcher?.stop();
@@ -8328,6 +7772,11 @@ class PiEditorApp {
       waiter.resolve({ ok: false, failed: ["app disposed"] });
     }
     this.flushWaiters.clear();
+    for (const waiter of this.unsavedWaiters.values()) {
+      clearTimeout(waiter.timer);
+      waiter.resolve({ ok: false, cancelled: true });
+    }
+    this.unsavedWaiters.clear();
     this.projects.clear();
     this.terminals.clear();
     for (const tailer of this.worldlineTailers.values()) tailer.stop();
@@ -8509,7 +7958,7 @@ app.on("before-quit", (event) => {
   }
   cleanupStarted = true;
   void appState
-    .confirmDiscardActiveCandidates()
+    .confirmClose()
     .catch(() => false)
     .then((ok) => {
       cleanupStarted = false;

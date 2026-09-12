@@ -6,7 +6,8 @@
  * State transitions are a pure reducer (node-testable); the class below is
  * thin DOM glue over it. Content arrivals auto-switch on the empty →
  * non-empty edge for plan/worldlines/modified only — timeline dots stream
- * continuously and must never yank the tab.
+ * continuously and must never yank the tab. A selected unused tab shows
+ * the `[data-empty]` sentence in that panel; content hides it.
  */
 
 export type ActivityTab = "timeline" | "plan" | "worldlines" | "modified";
@@ -37,6 +38,11 @@ export function initialActivityTabState(active: ActivityTab): ActivityTabState {
 /** Stored value → tab, falling back to timeline for anything unexpected. */
 export function resolveActivityTab(stored: unknown): ActivityTab {
   return stored === "plan" || stored === "worldlines" || stored === "modified" ? stored : "timeline";
+}
+
+/** Why-empty copy shows only on the selected tab when that tab has no content. */
+export function activityEmptyVisible(state: ActivityTabState, tab: ActivityTab): boolean {
+  return state.active === tab && !state.content[tab];
 }
 
 export function reduceActivityTab(state: ActivityTabState, event: ActivityTabEvent): ActivityTabState {
@@ -79,6 +85,7 @@ export class ActivityTabs {
   private state: ActivityTabState;
   private readonly deps: ActivityTabsDeps;
   private readonly buttons = new Map<ActivityTab, HTMLButtonElement>();
+  private readonly empties = new Map<ActivityTab, HTMLElement>();
 
   constructor(deps: ActivityTabsDeps) {
     this.deps = deps;
@@ -91,9 +98,12 @@ export class ActivityTabs {
     this.state = initialActivityTabState(resolveActivityTab(stored));
     for (const tab of ACTIVITY_TABS) {
       const button = deps.bar.querySelector<HTMLButtonElement>(`[data-tab="${tab}"]`);
-      if (!button) continue;
-      this.buttons.set(tab, button);
-      button.addEventListener("click", () => this.select(tab));
+      if (button) {
+        this.buttons.set(tab, button);
+        button.addEventListener("click", () => this.select(tab));
+      }
+      const empty = deps.panels[tab]?.querySelector<HTMLElement>("[data-empty]");
+      if (empty) this.empties.set(tab, empty);
     }
     this.apply();
   }
@@ -155,6 +165,8 @@ export class ActivityTabs {
         button.hidden = !this.state.visible[tab];
         button.setAttribute("aria-selected", this.state.active === tab ? "true" : "false");
       }
+      const empty = this.empties.get(tab);
+      if (empty) empty.hidden = !activityEmptyVisible(this.state, tab);
     }
   }
 }

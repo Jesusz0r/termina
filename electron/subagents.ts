@@ -18,7 +18,9 @@ import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { coreSessionFile, parseSessionBundlePath, sessionBundleExists } from "../agent-core/session.js";
 import {
+  MAX_SUBAGENT_ERROR_CHARS,
   MAX_SUBAGENT_RESULT_CHARS,
+  MAX_SUBAGENT_RUNS_USER,
   MAX_SUBAGENT_TOUCHED,
   SUBAGENT_RESULT_PREFIX,
   anchorClaimPath,
@@ -35,6 +37,9 @@ import {
 
 /** At most 4 child processes at once (Anthropic rule, host-wide). */
 export const MAX_SUBAGENT_HOST_CHILDREN = 4;
+/** Manual fan-out bound: user explicitly asked for many agents. Mirrors the
+ * registry user cap so manual runs fail closed instead of fork-bombing. */
+export const MAX_SUBAGENT_HOST_CHILDREN_USER = MAX_SUBAGENT_RUNS_USER;
 /** Pre-child launch attempts per run before reporting failure. */
 export const SUBAGENT_MAX_ATTEMPTS = 3;
 /** Backoff between failed launches (attempts 2 and 3); never replay started work. */
@@ -421,8 +426,11 @@ export class SubagentHost {
         }
       }
     }
-    if (this.runs.size >= this.maxChildren) {
-      await this.finishFailed(sourceTerminalId, runId, task, `subagent host at capacity (${this.maxChildren} runs)`);
+    const cap = task.userRequested
+      ? Math.max(this.maxChildren, MAX_SUBAGENT_HOST_CHILDREN_USER)
+      : this.maxChildren;
+    if (this.runs.size >= cap) {
+      await this.finishFailed(sourceTerminalId, runId, task, `subagent host at capacity (${cap} runs)`);
       return;
     }
     let cwdStat: { isDirectory(): boolean } | null = null;
@@ -780,6 +788,7 @@ export class SubagentHost {
       runId,
       outcome,
       result,
+      error: error ? truncateUtf8(error, MAX_SUBAGENT_ERROR_CHARS) : null,
       flags,
       touched: touched.slice(0, MAX_SUBAGENT_TOUCHED),
       settledAt: this.now(),
