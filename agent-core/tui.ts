@@ -13,6 +13,7 @@ import {
   fileMentionAt,
   forEachGrapheme,
   formatPickerRow,
+  formatToolSummary,
   graphemeCells,
   cursorRowCol,
   matchingSlashCommands,
@@ -387,6 +388,7 @@ type TranscriptEntry = {
   toolName?: string;
   toolDetail?: string;
   toolState?: ToolUiState;
+  expanded?: boolean;
   sanitizer: SanitizerState;
   revision: number;
   mdPrefixLen: number;
@@ -861,6 +863,7 @@ export class AgentTui {
     this.transcriptChars -= entryChars(entry);
     entry.toolState = state === "success" ? "success" : state === "cancelled" ? "cancelled" : "error";
     entry.settled = true;
+    entry.expanded = false;
     entry.text = closeSanitize(output ?? "", freshSanitizer());
     entry.revision += 1;
     this.resetMarkdown(entry);
@@ -992,13 +995,12 @@ export class AgentTui {
 
   private entrySpans(entry: TranscriptEntry): StyledSpan[] {
     if (entry.kind === "tool") {
-      const title = `◆ ${entry.toolName || "tool"}${entry.toolDetail ? `  ${entry.toolDetail}` : ""}`;
       const status = toolStatusLabel(entry.toolState);
-      const spans: StyledSpan[] = [
-        { text: title, style: 4 },
-        { text: `\n  ${status}`, style: 7 },
-      ];
-      if (entry.text) spans.push({ text: `\n${entry.text}`, style: 0 });
+      const title = formatToolSummary(entry.toolName || "", entry.toolDetail, status);
+      const spans: StyledSpan[] = [{ text: title, style: 4 }];
+      if (entry.text && (!entry.settled || entry.expanded)) {
+        spans.push({ text: `\n${entry.text}`, style: 0 });
+      }
       return spans;
     }
     if (entry.kind !== "assistant" && entry.kind !== "thinking") {
@@ -1385,6 +1387,36 @@ export class AgentTui {
     return this.fileRows();
   }
 
+  private visibleFoldableTools(): TranscriptEntry[] {
+    const { cols, rows } = this.size();
+    const inputLines = this.choicePrompt
+      ? wrapText(this.choicePrompt, inputWrapWidth(cols)).length
+      : wrapInput(INPUT_PREFIX, this.chars, this.cursor, inputWrapWidth(cols)).wrapped.length;
+    const layout = layoutHeights(rows, Math.max(1, inputLines), this.matches().length);
+    const ids = this.visibleSlice(cols, layout.transcript, this.scroll).ids;
+    const tools: TranscriptEntry[] = [];
+    const seen = new Set<number>();
+    for (const id of ids) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const entry = this.entries.find((item) => item.id === id);
+      if (entry?.kind === "tool" && entry.settled && entry.text) tools.push(entry);
+    }
+    return tools;
+  }
+
+  /** Enter on an empty composer toggles the tool row in view (no new chrome). */
+  private toggleVisibleToolFold(): boolean {
+    const tools = this.visibleFoldableTools();
+    if (tools.length === 0) return false;
+    const entry = this.scroll > 0 ? tools[0]! : tools[tools.length - 1]!;
+    entry.expanded = !entry.expanded;
+    entry.revision += 1;
+    entry.cache = null;
+    this.schedule();
+    return true;
+  }
+
   private submitLine(): void {
     if (this.search) this.exitSearch(false);
     this.pickerSuppressed = false;
@@ -1422,6 +1454,8 @@ export class AgentTui {
         echo = picked.name;
       }
     }
+    // Bare /model is the models picker, not the engine "show current route" probe.
+    if (line === "/model") line = "/models";
     if (
       !this.rawInput &&
       (line === "/login" ||
@@ -1435,6 +1469,9 @@ export class AgentTui {
       this.histIndex = -1;
       this.draft = "";
       this.schedule();
+      return;
+    }
+    if (!line && !wasChoice && !this.rawInput && this.toggleVisibleToolFold()) {
       return;
     }
     this.chars = [];

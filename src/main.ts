@@ -43,7 +43,8 @@ import { ActivityTabs } from "./activity-tabs";
 import { WorldlinesView } from "./worldlines";
 import { Explorer } from "./components/explorer";
 import { projectChangedPaths } from "./explorer-file";
-import { toast } from "./components/modals";
+import { showUnsavedConfirm, toast } from "./components/modals";
+import { decideUnsavedClose, unsavedCloseMessage } from "../shared/unsaved-close";
 import { showContextMenu, type ContextMenuItem } from "./components/context-menu";
 import { SettingsView } from "./settings";
 import { emptyShortcuts, isMacPlatform, shortcutForEvent } from "./settings-shortcuts";
@@ -702,15 +703,17 @@ function paintPreferences(prefs: AppPreferences): void {
   for (const pane of panes.values()) applyTerminalPreferences(pane.view, prefs);
 }
 
-function applyPreferences(next: AppPreferences, persist: boolean, activateShortcuts: boolean): void {
+function applyPreferences(next: AppPreferences, persist: boolean, activateShortcuts: boolean, confirmReset = false): void {
   const generation = ++preferenceGeneration;
   const preview = normalizeAppPreferences(next);
   preferences = preview;
   paintPreferences(preferences);
   if (persist) {
     const patch = userPatch(committedPreferences, preview);
-    if (Object.keys(patch).length > 0) {
-      void window.termina.updatePreferences({ patch, activateShortcuts }).then((saved) => {
+    // A reset always persists, even with an empty patch: that is the write
+    // that clears an unreadable prefs file back to defaults.
+    if (Object.keys(patch).length > 0 || confirmReset) {
+      void window.termina.updatePreferences({ patch, activateShortcuts, ...(confirmReset ? { confirmReset: true } : {}) }).then((saved) => {
         const normalized = normalizeAppPreferences(saved);
         committedPreferences = normalized;
         if (generation !== preferenceGeneration) return;
@@ -749,6 +752,7 @@ function applyTerminalPreferences(view: PtyView, prefs: AppPreferences): void {
 
 const settingsView = new SettingsView({
   onChange: (next) => applyPreferences(next, true, false),
+  onReset: (next) => applyPreferences(next, true, false, true),
   onOpen: () => void window.termina.setKeyboardShortcuts(emptyShortcuts()),
   onClose: (next) => applyPreferences(next, true, true),
 });
@@ -1157,6 +1161,9 @@ timelineView.bind({
       return progress;
     });
   },
+  onContent: (has, count) => {
+    activityTabs.syncContent("timeline", has, count);
+  },
 });
 
 async function closePane(instanceId: string): Promise<void> {
@@ -1230,8 +1237,13 @@ function renderChrome(): void {
     planPanel.classList.add("collapsed");
     modifiedList.replaceChildren();
     modifiedRenderedPaneId = null;
+    modifiedPanel.classList.add("collapsed");
+    btnDispatch.hidden = true;
     btnCopySubject.hidden = true;
     btnOpenShell.hidden = true;
+    activityTabs.syncContent("plan", false, 0);
+    activityTabs.syncContent("modified", false, 0);
+    timelineView.setEvents([]);
     return;
   }
   renderStatus(pane);
@@ -2676,6 +2688,48 @@ window.termina.onFlushRequest(({ requestId, writerId, projectId, workspaceId }) 
     return;
   }
   void view.editorMgr.flushAll(writerId).then((result) => void window.termina.reportFlush(requestId, result));
+});
+
+/** Editors that can hold dirty buffers for one project, or every project on quit. */
+function editorsForUnsavedConfirm(projectId: string | null): EditorManagerInstance[] {
+  if (projectId) {
+    const view = projectViews.get(projectId);
+    return view?.editorMgr ? [view.editorMgr] : [];
+  }
+  const editors: EditorManagerInstance[] = [];
+  for (const view of projectViews.values()) {
+    if (view.editorMgr) editors.push(view.editorMgr);
+  }
+  if (baseEditorInstance) editors.push(baseEditorInstance);
+  return editors;
+}
+
+/** Save / Discard / Cancel for dirty buffers. Save reuses flushAll → file:save. */
+async function confirmUnsavedEditors(projectId: string | null): Promise<{ ok: boolean; cancelled?: boolean; error?: string }> {
+  const editors = editorsForUnsavedConfirm(projectId);
+  const dirty = editors.filter((editor) => editor.hasDirtyModels());
+  const count = dirty.reduce((n, editor) => n + editor.dirtyCount(), 0);
+  const decision = decideUnsavedClose(
+    count > 0,
+    count > 0 ? await showUnsavedConfirm("Unsaved changes", unsavedCloseMessage(count)) : null,
+  );
+  if (decision === "abort") return { ok: false, cancelled: true };
+  if (decision === "save") {
+    // Flush every editor, not just the prompt-time dirties: an editor
+    // dirtied while the prompt was open must still be saved. Clean editors
+    // are a no-op flush.
+    const results = await Promise.all(editors.map((editor) => editor.flushAll()));
+    const failed = results.flatMap((result) => result.failed);
+    if (failed.length > 0) {
+      toast(`could not save: ${failed.map((p) => pathBasename(p)).join(", ")}`, "error");
+      return { ok: false, error: "could not save editor changes" };
+    }
+  }
+  return { ok: true };
+}
+
+window.termina.onUnsavedConfirm(({ requestId, projectId }) => {
+  void confirmUnsavedEditors(projectId).then((result) => void window.termina.reportUnsavedConfirm(requestId, result));
 });
 
 function applyAppUpdateState(state: AppUpdateState): void {

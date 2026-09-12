@@ -41,4 +41,24 @@ describe("multi-project editor event routing", () => {
     expect(editor).toContain("acquireSharedFileModel(path, owner)");
     expect(editor).toContain("project=");
   });
+
+  it("prompts on user tab close and reuses the existing save flush", () => {
+    expect(editor).toContain("hasDirtyModels()");
+    expect(editor).toContain("requestCloseTab(key)");
+    expect(editor).toContain("void this.requestCloseTab(key)");
+    expect(editor).toContain("decideUnsavedClose");
+    expect(editor).toContain("flushKeys(unique)");
+    expect(editor).toContain("window.termina.saveFile");
+    const closeClick = editor.indexOf('close.addEventListener("click"');
+    const middleClick = editor.indexOf("e.button === 1");
+    expect(closeClick).toBeGreaterThanOrEqual(0);
+    expect(middleClick).toBeGreaterThan(closeClick);
+    expect(editor.indexOf("void this.requestCloseTab(key)", closeClick)).toBeGreaterThan(closeClick);
+    expect(editor.indexOf("void this.requestCloseTab(key)", middleClick)).toBeGreaterThan(middleClick);
+    expect(editor).toContain('{ label: "Close", action: () => void this.requestCloseTab(key) }');
+    expect(renderer).toContain("confirmUnsavedEditors(projectId)");
+    expect(renderer).toContain("editor.hasDirtyModels()");
+    expect(renderer).toContain("editor.flushAll()");
+    expect(renderer).toContain("onUnsavedConfirm");
+  });
 });

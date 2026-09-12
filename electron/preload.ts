@@ -68,6 +68,7 @@ const bridge: TerminaBridge = {
   onRecorderState: (cb) => bindPushEvent("timeline:recorder-state", cb),
   onFolderOpened: (cb) => bindPushEvent("folder:opened", cb),
   onFlushRequest: (cb) => bindPushEvent("editor:flush-request", cb),
+  onUnsavedConfirm: (cb) => bindPushEvent("editor:unsaved-confirm", cb),
   onUpdateState: (cb) => bindPushEvent("update:state", cb),
   onInstances: (cb) => bindPushEvent("instances:list", cb),
 
@@ -114,6 +115,7 @@ const bridge: TerminaBridge = {
   searchContent: (pattern, source) => ipcRenderer.invoke("content:search", pattern, source),
   getRuns: (terminalId) => ipcRenderer.invoke("worldline:runs", terminalId),
   reportFlush: (requestId, result) => ipcRenderer.invoke("editor:flush-report", requestId, result),
+  reportUnsavedConfirm: (requestId, result) => ipcRenderer.invoke("editor:unsaved-report", requestId, result),
   flushSave: (path, content, writerId, owner: ProjectWorkspaceRef) => ipcRenderer.invoke("file:flush-save", path, content, writerId, owner),
   getWorldlines: (projectId) => ipcRenderer.invoke("worldline:list", projectId),
   getWorldlineDetails: (comparisonId, label) => ipcRenderer.invoke("worldline:details", comparisonId, label),

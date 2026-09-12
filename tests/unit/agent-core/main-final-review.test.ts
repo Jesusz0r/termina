@@ -15,6 +15,9 @@ import { join } from "node:path";
 describe("Agent Core Main Final Review Contracts", () => {
   it("passes final-review contracts", async () => {
     const main = await import("../../../agent-core/main.ts");
+    const files = await import("../../../agent-core/main/files.ts");
+    const grep = await import("../../../agent-core/main/grep.ts");
+    const fileOps = await import("../../../agent-core/main/file-ops.ts");
     
     assert.deepEqual(
       main.traceWriteDisposition({ ok: false, persisted: false, retryable: true } as TraceWriteFailure),
@@ -51,9 +54,9 @@ describe("Agent Core Main Final Review Contracts", () => {
       writeFileSync(unicodePath, unicode);
     
       for (const result of [
-        main.readTextView(unicodePath, { offset: 0 }),
-        main.readTextView(unicodePath, { offset: 0, startLine: 1 }),
-        main.readFileResult(unicodePath, 0),
+        fileOps.readTextView(unicodePath, { offset: 0 }),
+        fileOps.readTextView(unicodePath, { offset: 0, startLine: 1 }),
+        fileOps.readFileResult(unicodePath, 0),
       ]) {
         assert.equal(result.isError, false);
         assert.equal(result.state, "complete");
@@ -67,7 +70,7 @@ describe("Agent Core Main Final Review Contracts", () => {
     
       const linePath = join(root, "lines.txt");
       writeFileSync(linePath, `${"😀é漢".repeat(20_000)}\nnext line\n`);
-      const lineResult = main.readTextView(linePath, { offset: 0, startLine: 1, endLine: 1 });
+      const lineResult = fileOps.readTextView(linePath, { offset: 0, startLine: 1, endLine: 1 });
       assert.equal(lineResult.isError, false);
       assert.equal(lineResult.state, "complete");
       assert.equal(lineResult.truncated, true);
@@ -80,27 +83,27 @@ describe("Agent Core Main Final Review Contracts", () => {
     
       writeFileSync(join(root, "scan-a.txt"), "a");
       writeFileSync(join(root, "scan-b.txt"), "b");
-      const cappedScan = main.collectRelativeFiles(root, 1);
+      const cappedScan = files.collectRelativeFiles(root, 1);
       assert.equal(cappedScan.state, "visit-cap");
       assert.equal(cappedScan.hitCap, true);
       assert.ok(Array.isArray(cappedScan.files));
       assert.deepEqual(cappedScan.files, Array.from(cappedScan));
-      const timeoutScan = main.collectRelativeFiles(root, 100, { budgetMs: 0 });
+      const timeoutScan = files.collectRelativeFiles(root, 100, { budgetMs: 0 });
       assert.equal(timeoutScan.state, "timeout");
       assert.equal(timeoutScan.timedOut, true);
-      const interruptedScan = main.collectRelativeFiles(root, 100, { shouldStop: () => true });
+      const interruptedScan = files.collectRelativeFiles(root, 100, { shouldStop: () => true });
       assert.equal(interruptedScan.state, "interrupted");
-      const failedScan = main.collectRelativeFiles(root, 100, { shouldStop: () => { throw new Error("stop probe"); } });
+      const failedScan = files.collectRelativeFiles(root, 100, { shouldStop: () => { throw new Error("stop probe"); } });
       assert.equal(failedScan.state, "failed");
-      const unreadableScan = main.collectRelativeFiles(join(root, "missing"), 100);
+      const unreadableScan = files.collectRelativeFiles(join(root, "missing"), 100);
       assert.equal(unreadableScan.state, "unreadable");
-      const partialMatches = main.listTaggedFiles(root, "", 50, { visitCap: 1 });
+      const partialMatches = files.listTaggedFiles(root, "", 50, { visitCap: 1 });
       assert.equal(partialMatches.state, "visit-cap");
       assert.equal(partialMatches.hitCap, true);
     
       const grepPath = join(root, "many-matches.txt");
       writeFileSync(grepPath, `${Array.from({ length: 60 }, (_, i) => `needle ${i}`).join("\n")}\n`);
-      const grepResult = await main.grepFiles(root, { pattern: "needle", path: "many-matches.txt" }, { jsOnly: true });
+      const grepResult = await grep.grepFiles(root, { pattern: "needle", path: "many-matches.txt" }, { jsOnly: true });
       assert.equal(grepResult.state, "complete");
       assert.equal(grepResult.isError, false);
       assert.equal(grepResult.truncated, true);

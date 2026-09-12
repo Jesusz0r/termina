@@ -1,9 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   MAX_SESSION_SEARCH_QUERY,
+  collectSessionSearchFiles,
   mergeSessionFiles,
   searchSessionFiles,
   type SessionFileEntry,
@@ -30,6 +31,34 @@ describe("mergeSessionFiles", () => {
     const b = entry("2024-01-01T10-00-00.jsonl", 2);
     const merged = mergeSessionFiles([[a], [a, b]]);
     expect(merged.map((e) => e.path)).toEqual(["/s/shared.jsonl", b.path]);
+  });
+});
+
+describe("collectSessionSearchFiles", () => {
+  it("merges pi history with core bundles, ignoring non-jsonl files", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ssc-"));
+    try {
+      const piDir = join(root, "pi");
+      const coreDir = join(root, "core");
+      mkdirSync(piDir, { recursive: true });
+      mkdirSync(coreDir, { recursive: true });
+      writeFileSync(join(piDir, "2024-06-01T10-00-00.jsonl"), "{}\n");
+      writeFileSync(join(piDir, "notes.txt"), "not a session\n");
+      const files = await collectSessionSearchFiles(piDir, coreDir);
+      expect(files.map((e) => e.name)).toEqual(["2024-06-01T10-00-00.jsonl"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("yields [] for missing directories", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ssc-"));
+    try {
+      const files = await collectSessionSearchFiles(join(root, "no-pi"), join(root, "no-core"));
+      expect(files).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

@@ -2,14 +2,14 @@
  * Quick Open workspace file search (HARNESS-BACKLOG #2).
  *
  * Single owner for walking the active project tree and fuzzy-matching
- * relative paths. Same visibility rule as the explorer: hidden segments
- * and dotfiles are skipped. Symlinked directories are followed only when
- * they resolve inside the project root; visited directories are tracked
- * by realpath so cycles terminate.
+ * relative paths. Visibility: hidden segments, dotfiles, and .gitignore
+ * matches (root and nested) are skipped. Symlinked directories are
+ * followed only when they resolve inside the project root; visited
+ * directories are tracked by realpath so cycles terminate.
  */
-import { readdir, realpath as fsRealpath, stat } from "node:fs/promises";
+import { readdir, readFile, realpath as fsRealpath, stat } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
-import { IGNORED_SEGMENTS } from "../shared/gitignore.ts";
+import { IGNORED_SEGMENTS, matchGitignore, parseGitignore, type GitignoreRules } from "../shared/gitignore.ts";
 
 export interface QuickOpenEntry {
   relPath: string;
@@ -74,6 +74,45 @@ function visibleDirent(name: string): boolean {
   return !IGNORED_SEGMENTS.has(name) && !name.startsWith(".");
 }
 
+function isGitignoreRelPath(relPath: string): boolean {
+  const norm = relPath.split(sep).join("/");
+  return norm === ".gitignore" || norm.endsWith("/.gitignore");
+}
+
+/**
+ * Load ancestor .gitignore files for one directory. Same nested-load as
+ * content-search `ensureGitignoreChain`: each directory is read once,
+ * parse/match stay in shared/gitignore.ts.
+ */
+async function ensureGitignoreChain(
+  rules: GitignoreRules,
+  loaded: Set<string>,
+  root: string,
+  posixDir: string,
+): Promise<void> {
+  let dir = posixDir;
+  for (;;) {
+    if (!loaded.has(dir)) {
+      loaded.add(dir);
+      const abs = dir === "" ? join(root, ".gitignore") : join(root, ...dir.split("/"), ".gitignore");
+      try {
+        rules.set(dir, parseGitignore(await readFile(abs, "utf8")));
+      } catch {
+        /* no gitignore here */
+      }
+    }
+    if (dir === "") return;
+    const slash = dir.lastIndexOf("/");
+    dir = slash === -1 ? "" : dir.slice(0, slash);
+  }
+}
+
+/** True when matchGitignore excludes this path. A directory uses the `/x`
+ *  probe so directory-only rules (`ignored/`) prune the folder itself. */
+function gitignored(rules: GitignoreRules, posixRel: string, isDir: boolean): boolean {
+  return matchGitignore(rules, posixRel) || (isDir && matchGitignore(rules, `${posixRel}/x`));
+}
+
 /**
  * Relative paths of every visible project file, in breadth-first walk order.
  *
@@ -81,6 +120,9 @@ function visibleDirent(name: string): boolean {
  * path index both read this rather than each walking on their own. Bounds are
  * the caller-visible caps; `truncated` means the tree exceeded them and the
  * list is a prefix, not the whole project.
+ *
+ * An ignored directory is never enqueued: like Git, nothing inside it can
+ * come back through a deeper negation.
  */
 export async function listProjectPaths(
   root: string,
@@ -92,6 +134,8 @@ export async function listProjectPaths(
   let truncated = false;
   const seen = new Set<string>([root]);
   const queue: string[] = [root];
+  const rules: GitignoreRules = new Map();
+  const loaded = new Set<string>();
   let head = 0;
   while (head < queue.length) {
     if (opts?.shouldStop?.()) return { paths: [], truncated: false };
@@ -106,9 +150,12 @@ export async function listProjectPaths(
     } catch {
       continue;
     }
+    const dirPosix = relative(root, dir).split(sep).join("/");
+    await ensureGitignoreChain(rules, loaded, root, dirPosix);
     for (const ent of dirents) {
       if (!visibleDirent(ent.name)) continue;
       const full = join(dir, ent.name);
+      const posixRel = dirPosix ? `${dirPosix}/${ent.name}` : ent.name;
       const isDir = ent.isDirectory();
       if (ent.isSymbolicLink()) {
         let real: string;
@@ -126,6 +173,7 @@ export async function listProjectPaths(
         } catch {
           continue;
         }
+        if (gitignored(rules, posixRel, realIsDir)) continue;
         if (!realIsDir) {
           // A symlinked file inside the project is a searchable result.
           if (++files > MAX_QUICK_OPEN_FILES) {
@@ -139,6 +187,7 @@ export async function listProjectPaths(
         queue.push(real);
         continue;
       }
+      if (gitignored(rules, posixRel, isDir)) continue;
       if (!isDir) {
         if (++files > MAX_QUICK_OPEN_FILES) {
           truncated = true;
@@ -255,6 +304,8 @@ export async function searchProjectFiles(
  * This keeps the file list between queries and patches it from watcher events,
  * so only the first search pays for the walk. The candidate list is ranked by
  * `rankProjectPaths`, so scoring and visibility rules stay owned by the walk above.
+ * A created, changed, or deleted `.gitignore` invalidates the cache so the next
+ * search rebuilds under the new rules.
  *
  * Order is preserved from the walk: the empty-query result is the first N paths
  * encountered (shallow first), which a set would not reproduce.
@@ -297,7 +348,12 @@ export class ProjectPathIndex {
 
   /** A watcher-reported create. Ignored until the index exists (nothing to patch). */
   noteAdded(relPath: string): void {
-    if (!this.built || !relPath || this.membership.has(relPath)) return;
+    if (!relPath) return;
+    if (isGitignoreRelPath(relPath)) {
+      this.invalidate();
+      return;
+    }
+    if (!this.built || this.membership.has(relPath)) return;
     this.paths.push(relPath);
     this.membership.add(relPath);
   }
@@ -311,7 +367,12 @@ export class ProjectPathIndex {
    * file path the prefix can only ever match the path itself.
    */
   noteRemoved(relPath: string): void {
-    if (!this.built || !relPath) return;
+    if (!relPath) return;
+    if (isGitignoreRelPath(relPath)) {
+      this.invalidate();
+      return;
+    }
+    if (!this.built) return;
     const prefix = `${relPath}/`;
     const keep: string[] = [];
     for (const path of this.paths) {
@@ -351,9 +412,10 @@ const MAX_PROJECT_SNAPSHOT_DIRS = 2000;
 /**
  * Breadth-first project inventory for the per-turn project snapshot:
  * directories with a trailing slash, files as relative paths, top levels
- * first. Same visibility rule as search: hidden segments, dotfiles, and
- * escaping/cyclic symlinks are skipped. Stops early at the entry cap so a
- * huge tree costs one shallow walk, not a full one.
+ * first. Same visibility rule as search: hidden segments, dotfiles,
+ * .gitignore matches, and escaping/cyclic symlinks are skipped. Stops
+ * early at the entry cap so a huge tree costs one shallow walk, not a
+ * full one.
  */
 export async function listProjectSnapshot(
   root: string,
@@ -365,6 +427,8 @@ export async function listProjectSnapshot(
   let dirs = 0;
   const seen = new Set<string>([root]);
   const queue: string[] = [root];
+  const rules: GitignoreRules = new Map();
+  const loaded = new Set<string>();
   let head = 0;
   while (head < queue.length) {
     if (opts?.shouldStop?.()) return { entries: [], truncated: false };
@@ -379,6 +443,8 @@ export async function listProjectSnapshot(
     } catch {
       continue;
     }
+    const dirPosix = relative(root, dir).split(sep).join("/");
+    await ensureGitignoreChain(rules, loaded, root, dirPosix);
     dirents.sort((a, b) => (a.name < b.name ? -1 : 1));
     for (const ent of dirents) {
       if (entries.length >= maxEntries) {
@@ -387,6 +453,7 @@ export async function listProjectSnapshot(
       }
       if (!visibleDirent(ent.name)) continue;
       const full = join(dir, ent.name);
+      const posixRel = dirPosix ? `${dirPosix}/${ent.name}` : ent.name;
       if (ent.isSymbolicLink()) {
         let real: string;
         try {
@@ -403,6 +470,7 @@ export async function listProjectSnapshot(
         } catch {
           continue;
         }
+        if (gitignored(rules, posixRel, realIsDir)) continue;
         if (!realIsDir) {
           entries.push(relative(root, full));
           continue;
@@ -411,6 +479,7 @@ export async function listProjectSnapshot(
         queue.push(real);
         continue;
       }
+      if (gitignored(rules, posixRel, ent.isDirectory())) continue;
       if (ent.isDirectory()) {
         entries.push(`${relative(root, full)}/`);
         queue.push(full);

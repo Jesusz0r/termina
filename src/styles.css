@@ -1044,6 +1044,23 @@ body {
   opacity: 0.75;
 }
 
+/* Why-empty copy for a selected unused tab. Sibling of the list so
+ * `.collapsed` (which hides the empty list) does not hide the sentence. */
+.activity-empty {
+  margin: 0;
+  padding: 2px 10px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+#timeline-strip > .activity-empty {
+  padding: 0 4px 2px;
+}
+
+#timeline-dots:empty {
+  display: none;
+}
+
 #timeline-strip:not(.tab-active),
 #plan-panel:not(.tab-active),
 #worldline-panel:not(.tab-active),
