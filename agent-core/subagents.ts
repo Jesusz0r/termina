@@ -167,6 +167,14 @@ export function subagentDepthFromEnv(env: NodeJS.ProcessEnv = process.env): numb
   return n;
 }
 
+/** Marker set by the worldline candidate launch; candidates never spawn subagents. */
+export const WORLDLINE_CANDIDATE_ENV = "TERMINA_WORLDLINE_CANDIDATE";
+
+/** True when this core runs inside a sandboxed worldline candidate. */
+export function isWorldlineCandidateEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[WORLDLINE_CANDIDATE_ENV] === "1";
+}
+
 /** Children never receive `spawn_subagent` (max depth 1); main.ts spreads this into TOOLS. */
 export function visibleSubagentTools(depth: number): Array<Record<string, unknown>> {
   if (depth >= MAX_SUBAGENT_DEPTH) return SUBAGENT_TOOL_DEFS.filter((d) => d.name !== "spawn_subagent");

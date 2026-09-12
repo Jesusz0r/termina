@@ -1881,6 +1881,7 @@ export class WorldlineManager {
       TERMINA_CORE_SESSION_FILE: cand.sessionFile ?? undefined,
       TERMINA_CORE_SESSION_ID: session.sessionId,
       TERMINA_CORE_APPROVE: "all",
+      TERMINA_WORLDLINE_CANDIDATE: "1",
       ...(sessionBundleHasContent(cand.sessionFile!) ? { TERMINA_CORE_RESUME: "1" } : {}),
       ...(model && cut > 0
         ? { TERMINA_CORE_PROVIDER: model.slice(0, cut), TERMINA_CORE_MODEL: model.slice(cut + 1) }

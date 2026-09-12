@@ -14,6 +14,8 @@ describe("Subagent Wiring Invariants", () => {
   const main = readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8");
   const host = readFileSync(new URL("../../../electron/subagents.ts", import.meta.url), "utf8");
   const kernel = readFileSync(new URL("../../../agent-core/subagents.ts", import.meta.url), "utf8");
+  const agentMain = readFileSync(new URL("../../../agent-core/main.ts", import.meta.url), "utf8");
+  const manager = readFileSync(new URL("../../../electron/worldlines/manager.ts", import.meta.url), "utf8");
 
   it("spawns delegate to the single host owner", () => {
     assert.match(main, /this\.subagents\.handleSpawn\(terminalId, runId, taskFile\)/);
@@ -50,5 +52,27 @@ describe("Subagent Wiring Invariants", () => {
   it("depth stays 1 with no child-to-child channels", () => {
     assert.match(kernel, /MAX_SUBAGENT_DEPTH = 1/);
     assert.match(kernel, /visibleSubagentTools/);
+  });
+
+  it("worldline candidates cannot spawn host children (issue #39)", () => {
+    // The candidate launch marks its core; the core hides the tool and fails
+    // the call; the host refuses the sidecar spawn without reading the file.
+    assert.match(manager, /TERMINA_WORLDLINE_CANDIDATE: "1"/);
+    assert.match(kernel, /isWorldlineCandidateEnv/);
+    assert.match(agentMain, /spawn_subagent is disabled in worldline candidates/);
+    assert.match(agentMain, /IS_WORLDLINE_CANDIDATE && def\.name === "spawn_subagent"/);
+    assert.match(host, /isWorldlineTerminal\(sourceTerminalId\)/);
+    assert.match(host, /subagents are disabled in worldline candidates/);
+    assert.match(main, /isWorldlineTerminal: \(terminalId\)/);
+  });
+
+  it("host re-validates handoff identity, cwd, and permission mode (issue #39)", () => {
+    assert.match(host, /subagentTaskFileName\(sourceTerminalId, runId\)/);
+    assert.match(host, /task\.runId !== runId/);
+    assert.match(host, /workspaceRootFor\(sourceTerminalId\)/);
+    assert.match(host, /outside parent workspace/);
+    assert.match(host, /autoApproveAllowedFor\(run\.parentTerminalId\)/);
+    assert.match(main, /workspaceRootFor: \(terminalId\)/);
+    assert.match(main, /autoApproveAllowedFor: \(terminalId\)/);
   });
 });

@@ -566,6 +566,21 @@ class PiEditorApp {
       return { keys: await this.dispatchPathKeysInFlight(ownerId, root), root };
     },
     canonicalPath: (p) => this.canonicalPath(p),
+    isWorldlineTerminal: (terminalId) =>
+      this.worldlineTailers.has(terminalId) || this.isWorldlineTerminal(terminalId),
+    workspaceRootFor: (terminalId) => {
+      const inst = this.terminals.get(terminalId);
+      if (!inst) return null;
+      const ws = this.workspaceOfTerminal(inst);
+      return { root: ws?.root ?? inst.cwd, cwd: inst.cwd };
+    },
+    // Primary terminals start in `ask` (no TERMINA_CORE_APPROVE bypass at
+    // launch); only an explicit host-level opt-in lets a child auto-approve.
+    // Worldline candidates never qualify: the host refuses their spawns.
+    autoApproveAllowedFor: (terminalId) =>
+      !this.worldlineTailers.has(terminalId)
+      && !this.isWorldlineTerminal(terminalId)
+      && cleanEnv().TERMINA_CORE_APPROVE === "all",
   });
   private paintWatchdog: ReturnType<typeof setInterval> | null = null;
   private appUpdater: AppUpdateController | null = null;
@@ -4593,7 +4608,10 @@ class PiEditorApp {
       case "subagent_spawn": {
         // The parent validated the spawn; the host owns everything after.
         // Unknown terminals were already rejected at admission, so this is
-        // always a live owner. Never blocks the sidecar queue.
+        // always a live owner. Candidates share this queue: the host refuses
+        // worldline spawns without launching (the task file in the writable
+        // candidate events dir is forgeable and ignored). Never blocks the
+        // sidecar queue.
         const runId = typeof event.runId === "string" ? event.runId : "";
         const taskFile = typeof event.taskFile === "string" ? event.taskFile : "";
         if (runId && taskFile) void this.subagents.handleSpawn(terminalId, runId, taskFile);
