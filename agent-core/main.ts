@@ -233,6 +233,7 @@ import {
   readSubagentApprovalRequest,
   readSubagentInbox,
   reconcileSubagentRuns,
+  SUBAGENT_APPROVAL_POLL_MS,
   subagentApprovalTimeoutMs,
   subagentChildTid,
   subagentDepthFromEnv,
@@ -1640,6 +1641,11 @@ let approvalResolve: ((line: string) => void) | null = null;
 let approvalQueue = Promise.resolve();
 const protectedTaskApprovals = new Set<string>();
 
+/** True when a submitted line answers the approval picker (deny/once/always/protected). */
+export function isApprovalAnswer(line: string): boolean {
+  return line === "/approve" || line.startsWith("/approve ");
+}
+
 /** Resolve an in-flight permission prompt before tearing down its surface. */
 export function cancelPendingApproval(line = "/approve deny"): boolean {
   const resolve = approvalResolve;
@@ -1727,13 +1733,36 @@ function clearSubagentApprovals(): void {
   clearSubagentApprovalFiles(eventsDir, terminalId);
 }
 
+let subagentApprovalTimer: ReturnType<typeof setInterval> | null = null;
+
+/** Mid-stream poller: a long parent stream must not hold child approvals hostage. */
+function startSubagentApprovalTimer(): void {
+  if (subagentApprovalTimer) return;
+  subagentApprovalTimer = setInterval(() => {
+    if (!running) return;
+    try {
+      pollSubagentApprovals();
+    } catch {
+      /* Best-effort: the per-turn poll retries. */
+    }
+  }, SUBAGENT_APPROVAL_POLL_MS);
+  const timer = subagentApprovalTimer as unknown as { unref?: () => void };
+  if (typeof timer.unref === "function") timer.unref();
+}
+
+function stopSubagentApprovalTimer(): void {
+  if (!subagentApprovalTimer) return;
+  clearInterval(subagentApprovalTimer);
+  subagentApprovalTimer = null;
+}
+
 /**
- * Parent side of child approvals (Phase 3). Once per turn, surface fresh
- * requests from live runs in the parent's own choice picker — Deny and
- * Approve once only, never Always, so a child can never escalate either
- * side to auto-approve. Stale requests, runs that already settled, and
- * headless parents (no picker surface) resolve to a fast deny ack instead
- * of making the child hang the full timeout.
+ * Parent side of child approvals (Phase 3). Surface fresh requests from
+ * live runs in the parent's own choice picker — Deny and Approve once
+ * only, never Always, so a child can never escalate either side to
+ * auto-approve. Stale requests, runs that already settled, and headless
+ * parents (no picker surface) resolve to a fast deny ack instead of
+ * making the child hang the full timeout.
  */
 function pollSubagentApprovals(): void {
   if (!eventsDir || !terminalId || subagentRegistry.activeRuns().length === 0) return;
@@ -4760,6 +4789,10 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   let modelTurns = 0;
   let requestedToolCalls = 0;
   codexTurnState = "";
+  // Mid-stream poller: a long model stream must not hold child approvals
+  // hostage until the turn ends. The per-turn poll below stays as the
+  // deterministic backstop.
+  startSubagentApprovalTimer();
   try {
     while (true) {
       if (interrupted) break;
@@ -5149,6 +5182,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   // second prompt must not replace `activeTraceTask` while this task's
   // task-settled record is still being written.
   activeRequestOverlay = null;
+  stopSubagentApprovalTimer();
   running = false;
   syncIndicators();
   showPrompt();
@@ -5301,6 +5335,7 @@ let shutdownRequested = false;
 let processShutdownHandlersInstalled = false;
 
 function stopInteractiveResources(): void {
+  stopSubagentApprovalTimer();
   mcpSession?.shutdown();
   mcpSession = null;
   surface?.stop();
@@ -5519,6 +5554,7 @@ async function runBangCommand(command: string): Promise<void> {
   running = true;
   interrupted = false;
   showPrompt();
+  startSubagentApprovalTimer();
   try {
     if (!(await confirmBash(command))) {
       out("(bash denied)\n");
@@ -5532,6 +5568,7 @@ async function runBangCommand(command: string): Promise<void> {
     ensureFreshSession();
     pushMessage("user", bangCommandContext(command, got.content));
   } finally {
+    stopSubagentApprovalTimer();
     running = false;
     interrupted = false;
     showPrompt();
@@ -5562,17 +5599,22 @@ function engineBusy(): boolean {
   return running || authBusy || resumeBusy || mcpBusy;
 }
 
+/** Single-slot typed-ahead queue shared by mid-run submits and picker-time typing. */
+function queueTypedLine(line: string): void {
+  sidecar.logEvent({ t: "steer_input", behavior: "steer" });
+  // Keep one typed-ahead prompt. More than one has no consumer yet.
+  queuedLine = line;
+  surface?.setQueued(line);
+  out("(queued — runs after the current task)\n");
+}
+
 function submit(line: string): void {
   if (resumeBusy || mcpBusy) {
     out("(engine busy)\n");
     return;
   }
   if (running) {
-    sidecar.logEvent({ t: "steer_input", behavior: "steer" });
-    // Keep one typed-ahead prompt. More than one has no consumer yet.
-    queuedLine = line;
-    surface?.setQueued(line);
-    out("(queued — runs after the current task)\n");
+    queueTypedLine(line);
     return;
   }
   // A rejected prompt promise must never kill the engine: the pty would
@@ -5928,10 +5970,22 @@ function dispatchLine(line: string): void {
     return;
   }
   if (approvalResolve) {
-    const resolve = approvalResolve;
-    approvalResolve = null;
-    resolve(line);
-    return;
+    if (isApprovalAnswer(line)) {
+      const resolve = approvalResolve;
+      approvalResolve = null;
+      resolve(line);
+      return;
+    }
+    // Typed input during a picker queues as typed-ahead instead of denying.
+    // The picker stays open until it gets an explicit /approve answer.
+    if (!line.startsWith("/") && !line.startsWith("!")) {
+      queueTypedLine(line);
+      showPrompt();
+      return;
+    }
+    // Slash and bang lines fall through to the normal dispatch below, which
+    // answers with (engine busy) while the run holds the engine. The picker
+    // stays pending either way.
   }
   if (line === "/help") {
     printSlashHelp();
