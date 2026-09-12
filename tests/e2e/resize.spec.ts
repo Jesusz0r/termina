@@ -144,6 +144,43 @@ test.describe("pane resize dividers", () => {
     await expect.poll(leftWidth).toBeCloseTo(custom, 0);
   });
 
+  test("activity panel placeholders share one geometry", async ({ page }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+    const panels: Array<[string, string]> = [
+      ["timeline", "timeline-strip"],
+      ["plan", "plan-panel"],
+      ["worldlines", "worldline-panel"],
+      ["modified", "modified-panel"],
+    ];
+    // One chrome contract: title row and empty copy share the same inset.
+    // Measure the glyphs so a later box tweak cannot silently drift.
+    const read = (panel: HTMLElement) => {
+      const empty = panel.querySelector<HTMLElement>("[data-empty]")!;
+      const header = panel.querySelector<HTMLElement>(".timeline-header, .panel-header")!;
+      const range = document.createRange();
+      range.selectNodeContents(empty);
+      const text = range.getBoundingClientRect();
+      return {
+        left: text.left - panel.getBoundingClientRect().left,
+        gap: text.top - header.getBoundingClientRect().bottom,
+      };
+    };
+
+    const seen: Array<{ tab: string; left: number; gap: number }> = [];
+    for (const [tab, id] of panels) {
+      await page.locator(`#activity-tab-${tab}`).click();
+      await expect(page.locator(`#${id} [data-empty]`)).toBeVisible();
+      seen.push({ tab, ...(await page.locator(`#${id}`).evaluate(read)) });
+    }
+
+    // Switching tabs must not move the copy.
+    const [first, ...rest] = seen;
+    for (const other of rest) {
+      expect(other.left, `${other.tab} inset`).toBeCloseTo(first.left, 0);
+      expect(other.gap, `${other.tab} header gap`).toBeCloseTo(first.gap, 0);
+    }
+  });
+
   test("project tab clicks above the divider do not start an explorer resize", async ({ page, runRoot }) => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
     const other = join(runRoot, "resize-other");

@@ -33,7 +33,7 @@ import {
   type PtyRendererSendTarget,
 } from "./pty-egress.js";
 import { AgentStartEvent, SidecarEvent, SidecarEventDelivery, SidecarEventQueue, SidecarTailer } from "./sidecar.js";
-import { IGNORED_SEGMENTS, ProjectWatcher } from "./watcher.js";
+import { IGNORED_SEGMENTS, ProjectWatcher, watchContentIdentity } from "./watcher.js";
 import { SnapshotStore, bindOwnedDirectory, bindOwnedEntry, boundPromotionEnsureDirectory, boundPromotionListEntries, boundPromotionOpenDirectory, boundPromotionReadFile, captureRootInRepo, createOwnedDirectory, disposeWorldlineGitCore, gitCommonDir, gitHead, gitObjectFormat, gitTopLevel, gitTrackedFiles, removeBoundOwnedDirectory, removeBoundOwnedEntry, trustResourceHashes, type BoundPromotionExpectedLeaf, type PromotionFsIdentity, type SourceState, writeBoundOwnedFile } from "./worldline-git.js";
 import { EvidenceHomeStore } from "./evidence-home.js";
 import { benchmarkConfigFrom, detectTestCommand, detectTestFromState } from "./verify-detect.js";
@@ -93,6 +93,7 @@ import {
 import { TerminalRosterStore, loadRosterFile, rosterFilePath, type RosterTerminal } from "./roster-store.js";
 import { AgentTerminalInstance } from "./terminal-instance.js";
 import { PathLookup } from "./path-lookup.js";
+import { attachMacTitlebarReclaim, macWindowChrome } from "./window-chrome.js";
 import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
 import { HIDE_THINKING_CSI, SHOW_THINKING_CSI, thinkingStartupArgs } from "../shared/terminal-control.js";
 import { validateGrepPattern } from "../shared/grep-pattern.js";
@@ -714,7 +715,7 @@ class TerminaApp {
    * The last watcher change per path. A single physical write can produce
    * several fs events; the duplicates must not count as fresh user edits.
    */
-  private lastWatchChange = new Map<string, { content: string; at: number }>();
+  private lastWatchChange = new Map<string, { identity: string; at: number }>();
   private static readonly LAST_WATCH_MAX = 500;
   private disposed = false;
   /** The project ids with an open or close in progress. Events of these
@@ -1158,8 +1159,7 @@ class TerminaApp {
       minHeight: 600,
       title: "Termina",
       backgroundColor,
-      titleBarStyle: "hiddenInset",
-      trafficLightPosition: { x: 12, y: 12 },
+      ...macWindowChrome(process.platform),
       ...(E2E_HIDDEN_WINDOW ? { show: false } : {}),
       webPreferences: {
         preload: join(__dirname, "preload.cjs"),
@@ -1191,6 +1191,7 @@ class TerminaApp {
     this.rendererPendingLoad = this.currentPtyLifecycle();
     this.ptyEgress.setRendererReady(windowGeneration, rendererGeneration, false);
     win.removeMenu();
+    attachMacTitlebarReclaim(win, process.platform);
 
     // Attach lifecycle listeners before loading.  PTY output can arrive while
     // the first document or a reload is still being parsed; it stays in the
@@ -6832,14 +6833,14 @@ class TerminaApp {
       // Merge duplicate file system events for the same physical write
       // (same content, recent). A duplicate that lands after the run
       // settled must not appear as a fresh user edit.
-      const cappedContent = change.content.length > 4000 ? change.content.slice(0, 4000) : change.content;
+      const watchIdentity = watchContentIdentity(change.content);
       // macOS can deliver a duplicate fs event seconds late (under load). The
       // window must outlive that delay, or the duplicate re-records an edit
-      // the run already consumed.
+      // the run already consumed. Identity is the full payload so a
+      // suffix-only edit is not treated as the same write.
       const lastWatch = this.lastWatchChange.get(path);
-      const isDupWatch = lastWatch !== undefined && lastWatch.content === cappedContent && now - lastWatch.at < 5000;
-      // Cap the stored content. The merge window is 5 seconds.
-      this.lastWatchChange.set(path, { content: cappedContent, at: now });
+      const isDupWatch = lastWatch !== undefined && lastWatch.identity === watchIdentity && now - lastWatch.at < 5000;
+      this.lastWatchChange.set(path, { identity: watchIdentity, at: now });
       if (this.lastWatchChange.size > TerminaApp.LAST_WATCH_MAX) {
         const oldest = this.lastWatchChange.keys().next().value;
         if (oldest !== undefined) this.lastWatchChange.delete(oldest);

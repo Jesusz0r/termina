@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 
 const renderer = readFileSync(new URL("../../../src/main.ts", import.meta.url), "utf8");
 const editor = readFileSync(new URL("../../../src/editor.ts", import.meta.url), "utf8");
+const css = readFileSync(new URL("../../../src/styles.css", import.meta.url), "utf8");
 
 describe("explorer divider grab", () => {
   it("claims near-miss presses before draggable file rows see them", () => {
@@ -90,5 +91,50 @@ describe("explorer divider grab", () => {
     const stash = renderer.slice(stashStart, stashStart + 500);
     expect(stash).toContain("leftPane.style.flex");
     expect(stash).toContain("leftPane.style.flexBasis");
+  });
+});
+
+describe("explorer minimize chrome", () => {
+  it("hides the filter with the same minimized CSS as the tree", () => {
+    // applyExplorerMinimized only toggles the class; body chrome must hide
+    // via that one CSS list, including the filter that sits under the header.
+    const applyStart = renderer.indexOf("function applyExplorerMinimized()");
+    const apply = renderer.slice(applyStart, renderer.indexOf("function setExplorerMinimized("));
+    expect(apply).toContain('explorerEl.classList.toggle("minimized", explorerMinimized)');
+    expect(apply).not.toContain("explorer-filter");
+
+    const hideStart = css.indexOf("#explorer.minimized #explorer-tree");
+    expect(hideStart).toBeGreaterThan(-1);
+    const hideBlock = css.slice(hideStart, css.indexOf("}", hideStart) + 1);
+    expect(hideBlock).toContain(".explorer-filter");
+    expect(hideBlock).toContain(".explorer-content");
+    expect(hideBlock).toMatch(/display:\s*none/);
+  });
+});
+
+describe("work pane minimize", () => {
+  it("lets the terminal collapse while the editor owns the split", () => {
+    const start = renderer.indexOf("function requestMinimize(");
+    const block = renderer.slice(start, renderer.indexOf("function syncPaneToggle("));
+    // Occupancy used to no-op terminal minimize when the editor was empty,
+    // so an expanded/maximized editor could not collapse the terminal.
+    expect(block).not.toContain("editorPaneOccupied()");
+    expect(block).not.toContain('pane === "terminal" && !editorPaneOccupied()');
+    expect(block).toContain("setMinimizedWork(pane)");
+    // Clicking the already-collapsed pane restores it; clicking the other
+    // swaps so both are never bars.
+    expect(block).toContain("if (minimizedWork === pane)");
+    expect(block).toContain("setMinimizedWork(null)");
+    // Terminal fullscreen is a maximize: leave it, then still minimize.
+    expect(block).toContain("isFullscreenLayout()");
+    expect(block).toContain("exitFullscreen()");
+    expect(block.indexOf('pane === "editor"')).toBeLessThan(block.lastIndexOf("setMinimizedWork(pane)"));
+  });
+
+  it("does not auto-collapse an idle editor over an explicit terminal minimize", () => {
+    const collapseStart = renderer.indexOf("function collapseEditorIfIdle()");
+    const collapse = renderer.slice(collapseStart, renderer.indexOf("function revealEditor()"));
+    expect(collapse).toContain('minimizedWork === "terminal"');
+    expect(collapse.indexOf('minimizedWork === "terminal"')).toBeLessThan(collapse.indexOf('setMinimizedWork("editor")'));
   });
 });

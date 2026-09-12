@@ -21,6 +21,11 @@ describe("quick-open fuzzyScore", () => {
     expect(fuzzyScore("main.ts", "src/main.ts")!).toBeGreaterThan(fuzzyScore("main.ts", "src/main.tsx")!);
   });
 
+  it("rewards an exact basename stem over a longer prefix", () => {
+    expect(fuzzyScore("hit", "hit.ts")!).toBeGreaterThan(fuzzyScore("hit", "history.ts")!);
+    expect(fuzzyScore("hit", "src/hit.ts")!).toBeGreaterThan(fuzzyScore("hit", "src/hit-list.ts")!);
+  });
+
   it("is case-insensitive", () => {
     expect(fuzzyScore("MAIN", "src/main.ts")).not.toBeNull();
   });
@@ -68,6 +73,43 @@ describe("quick-open rankProjectPaths recents", () => {
     expect(entries[0]).toEqual({ relPath: "mmm.ts", matches: [0, 1] });
     const empty = rankProjectPaths(candidates, "", false, ["zzz.ts"]);
     expect(empty.entries[0]).toEqual({ relPath: "zzz.ts" });
+  });
+});
+
+describe("quick-open rankProjectPaths tight hits", () => {
+  it("drops mid-word matches when a filename is a direct hit", () => {
+    const { entries } = rankProjectPaths(
+      ["white.ts", "architecture.md", "this.ts", "src/hit.ts", "history.ts", "hit-list.ts"],
+      "hit",
+      false,
+    );
+    expect(entries.map((e) => e.relPath)).toEqual(["src/hit.ts", "hit-list.ts"]);
+  });
+
+  it("keeps fuzzy matches when nothing is a direct hit", () => {
+    const { entries } = rankProjectPaths(["white.ts", "architecture.md"], "hit", false);
+    expect(entries.map((e) => e.relPath)).toEqual(["white.ts", "architecture.md"]);
+  });
+
+  it("treats a dotted or slashed query as precise", () => {
+    expect(rankProjectPaths(["white.ts", "hit.ts"], "hit.ts", false).entries.map((e) => e.relPath)).toEqual(["hit.ts"]);
+    expect(rankProjectPaths(["white.ts"], "hit.ts", false).entries).toEqual([]);
+    expect(rankProjectPaths(["src/white.ts", "src/hit.ts"], "src/hit", false).entries.map((e) => e.relPath)).toEqual(["src/hit.ts"]);
+  });
+
+  it("drops a scattered match when a path fragment is tight", () => {
+    const { entries } = rankProjectPaths(["src/main.ts", "my-app-note-index.ts"], "main", false);
+    expect(entries.map((e) => e.relPath)).toEqual(["src/main.ts"]);
+  });
+
+  it("keeps a separator-aligned acronym when no tight filename exists", () => {
+    const { entries } = rankProjectPaths(["src/main.ts", "readme.md"], "smt", false);
+    expect(entries.map((e) => e.relPath)).toContain("src/main.ts");
+  });
+
+  it("drops an acronym when the same query is a real filename", () => {
+    const { entries } = rankProjectPaths(["src/main.ts", "smt.ts"], "smt", false);
+    expect(entries.map((e) => e.relPath)).toEqual(["smt.ts"]);
   });
 });
 

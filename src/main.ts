@@ -2062,6 +2062,9 @@ function syncEditorMinimizedForProject(): void {
 
 function collapseEditorIfIdle(): void {
   if (editorPaneOccupied()) return;
+  // An explicit terminal minimize owns the split. Closing the last tab
+  // must not steal it by auto-collapsing the empty editor.
+  if (minimizedWork === "terminal") return;
   if (minimizedWork !== "editor") setMinimizedWork("editor");
 }
 
@@ -2078,10 +2081,13 @@ function revealTerminal(): void {
 function requestMinimize(pane: WorkPane): void {
   if (isFullscreenLayout()) {
     exitFullscreen();
-    if (minimizedWork === pane) {
-      setMinimizedWork(null);
+    // Terminal fullscreen is a maximize. Toggle-editor only leaves that
+    // layout so the editor can come back; toggle-terminal falls through
+    // so the terminal can still collapse while the editor stays up.
+    if (pane === "editor") {
+      if (minimizedWork === "editor") setMinimizedWork(null);
+      return;
     }
-    return;
   }
   // Restore when this pane is already the thin bar. Manual toggle always
   // restores, even an empty editor; auto-collapse still hides it on idle.
@@ -2089,11 +2095,10 @@ function requestMinimize(pane: WorkPane): void {
     setMinimizedWork(null);
     return;
   }
-  // An idle editor is already a bar. Compacting the terminal would expand
-  // the empty editor, which the occupancy rule forbids.
-  if (pane === "terminal" && !editorPaneOccupied()) return;
-  // Terminal and editor cannot both be bars. Minimizing the expanded pane
-  // swaps which one is compacted.
+  // One work pane always stays expanded. Minimizing the last visible
+  // pane swaps: the other is restored (maximized) automatically.
+  // Occupancy must not block this — an expanded editor, empty or not,
+  // can still collapse the terminal.
   setMinimizedWork(pane);
 }
 

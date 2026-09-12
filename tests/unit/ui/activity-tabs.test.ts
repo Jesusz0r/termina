@@ -167,6 +167,15 @@ describe("activity tabs", () => {
     expect(css).toMatch(/\.activity-panel-title\s*\{[\s\S]*?display:\s*none/);
   });
 
+  it("uses one spacing contract for activity panel chrome", () => {
+    expect(css).toMatch(/\.timeline-header\s*,\s*\.panel-header\s*\{[^}]*padding:\s*6px 10px/);
+    expect(css).toMatch(
+      /\.activity-empty\s*,\s*#timeline-dots\s*,\s*#plan-list\s*,\s*#worldline-list\s*,\s*#modified-list\s*\{[^}]*padding:\s*6px 10px 10px/,
+    );
+    expect(css).not.toContain("#timeline-strip > .activity-empty");
+    expect(css).not.toMatch(/#timeline-strip \{[^}]*padding:/);
+  });
+
   it("keeps the tablist as the single visible title for each panel", () => {
     const tabbar = html.match(/id="activity-tabbar"[\s\S]*?<\/div>/)?.[0];
     expect(tabbar).toBeTruthy();

@@ -22,10 +22,31 @@ const MAX_QUICK_OPEN_FILES = 30000;
 const MAX_QUICK_OPEN_RESULTS = 50;
 const MAX_QUICK_OPEN_QUERY = 256;
 
+/** Path / name break: start of the string or after `/` `.` `-` `_`. */
+function isSegStart(candidate: string, index: number): boolean {
+  if (index <= 0) return true;
+  const prev = candidate[index - 1];
+  return prev === "/" || prev === "." || prev === "-" || prev === "_";
+}
+
+/**
+ * True when the walk landed on a contiguous path/name fragment: every query
+ * character is adjacent, and the run starts on a segment boundary. Mid-word
+ * substrings (`hit` in `white`) and scattered subsequences are not tight.
+ */
+function isTightMatch(candidate: string, indices: readonly number[]): boolean {
+  if (indices.length === 0) return false;
+  const first = indices[0]!;
+  const last = indices[indices.length - 1]!;
+  return last - first + 1 === indices.length && isSegStart(candidate, first);
+}
+
 /**
  * Subsequence fuzzy match. Null when the query is not a subsequence of the
  * candidate. Higher score is better: basename matches outrank directory
- * matches, consecutive and segment-start runs outrank scatters.
+ * matches, consecutive and segment-start runs outrank scatters. An exact
+ * basename, or a basename stem equal to the query (`hit` → `hit.ts`), wins
+ * outright.
  *
  * The walk addresses the ORIGINAL candidate (comparing lowercased per
  * character), so the returned indices always index the caller's string — a
@@ -48,17 +69,21 @@ export function fuzzyMatch(query: string, candidate: string): { score: number; i
     const consecutive = ci === lastIdx + 1;
     run = consecutive ? run + 1 : 1;
     score += 10 + run * 5;
-    if (ci === 0 || candidate[ci - 1] === "/" || candidate[ci - 1] === "." || candidate[ci - 1] === "-" || candidate[ci - 1] === "_") score += 8;
+    if (isSegStart(candidate, ci)) score += 8;
     if (ci >= baseStart) score += 6;
     indices.push(ci);
     lastIdx = ci;
     qi++;
   }
   if (qi < q.length) return null;
-  // Shorter candidates win ties; exact basename match wins outright.
+  // Shorter candidates win ties; exact basename / stem wins outright.
   score -= candidate.length * 0.1;
   const base = candidate.slice(baseStart).toLowerCase();
   if (base === q) score += 100;
+  else {
+    const dot = base.lastIndexOf(".");
+    if (dot > 0 && base.slice(0, dot) === q) score += 80;
+  }
   return { score, indices };
 }
 
@@ -210,6 +235,11 @@ export async function listProjectPaths(
  * `recent` (most-recent-first relPaths, already scoped to this project by the
  * caller) orders the empty query: files still in the tree lead, then the
  * standard fill. Entries carry their matched indices for highlighting.
+ *
+ * A tight / precise query keeps only boundary-aligned contiguous matches
+ * (filename, stem, or path fragment). Weak mid-word and scattered
+ * subsequences stay only when the query is exploratory and nothing tighter
+ * exists.
  */
 export function rankProjectPaths(
   candidates: Iterable<string>,
@@ -242,15 +272,24 @@ export function rankProjectPaths(
     fill.sort();
     return { entries: [...ordered, ...fill].map((relPath) => ({ relPath })), truncated };
   }
-  const scored: Array<{ relPath: string; score: number; indices: number[] }> = [];
+  const scored: Array<{ relPath: string; score: number; indices: number[]; tight: boolean }> = [];
+  let hasTight = false;
   for (const relPath of candidates) {
     const match = fuzzyMatch(query, relPath);
     if (match === null) continue;
-    scored.push({ relPath, score: match.score, indices: match.indices });
+    const tight = isTightMatch(relPath, match.indices);
+    if (tight) hasTight = true;
+    scored.push({ relPath, score: match.score, indices: match.indices, tight });
   }
-  scored.sort((a, b) => b.score - a.score || (a.relPath < b.relPath ? -1 : 1));
+  // A direct hit (tight fragment, or a query that already looks like a
+  // filename/path) drops weak subsequence / mid-word matches so the explorer
+  // filter and Quick Open are not flooded. Fuzzy stays only when nothing
+  // tighter exists and the query is not already precise.
+  const precise = query.includes("/") || query.includes(".");
+  const ranked = precise || hasTight ? scored.filter((row) => row.tight) : scored;
+  ranked.sort((a, b) => b.score - a.score || (a.relPath < b.relPath ? -1 : 1));
   return {
-    entries: scored.slice(0, MAX_QUICK_OPEN_RESULTS).map(({ relPath, indices }) => ({ relPath, matches: indices })),
+    entries: ranked.slice(0, MAX_QUICK_OPEN_RESULTS).map(({ relPath, indices }) => ({ relPath, matches: indices })),
     truncated,
   };
 }
