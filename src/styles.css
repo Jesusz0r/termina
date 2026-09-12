@@ -1839,6 +1839,20 @@ body {
   cursor: not-allowed;
 }
 
+/* ⋯ is a disclosure, not a fourth primary — same chrome as details ▾. */
+.cand-actions .cand-details {
+  flex: 0 0 auto;
+  border-color: transparent;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+
+.cand-actions .cand-details:hover:not(:disabled),
+.cand-actions .cand-details:focus-visible {
+  border-color: transparent;
+  color: var(--text);
+}
+
 /* The A/B badge on terminal and editor tabs */
 .terminal-tab .tab-worldline,
 .editor-tab .tab-worldline {
