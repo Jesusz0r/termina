@@ -1549,7 +1549,7 @@ class PiEditorApp {
     return { ...this.shortcutMap };
   }
 
-  private async commitPreferencePatch(patch: Partial<AppPreferences>, activateShortcuts: boolean): Promise<AppPreferences> {
+  private async commitPreferencePatch(patch: Partial<AppPreferences>, activateShortcuts: boolean, confirmReset = false): Promise<AppPreferences> {
     const operation = this.preferenceCommits.then(async () => {
       const candidate = normalizeAppPreferences({ ...this.preferences, ...patch });
       if (!Object.prototype.hasOwnProperty.call(patch, "openProjects")) {
@@ -1558,7 +1558,7 @@ class PiEditorApp {
       if (!Object.prototype.hasOwnProperty.call(patch, "activeProject")) {
         candidate.activeProject = this.preferences.activeProject;
       }
-      await this.preferencesStore.save(candidate);
+      await this.preferencesStore.save(candidate, confirmReset ? { confirmReset: true } : undefined);
       const thinkingChanged = this.preferences.showThinking !== candidate.showThinking;
       this.preferences = candidate;
       nativeTheme.themeSource = candidate.theme === "light" ? "light" : "dark";
@@ -1583,7 +1583,12 @@ class PiEditorApp {
     const activate = raw && typeof raw === "object" && raw !== null && "activateShortcuts" in raw
       ? (raw as { activateShortcuts?: boolean }).activateShortcuts === true
       : activateShortcuts;
-    return this.commitPreferencePatch(patch, activate);
+    // "Reset all" is the explicit user confirmation that overwrites an
+    // unreadable prefs file; every other save refuses until then.
+    const reset = raw && typeof raw === "object" && raw !== null && "confirmReset" in raw
+      ? (raw as { confirmReset?: boolean }).confirmReset === true
+      : false;
+    return this.commitPreferencePatch(patch, activate, reset);
   }
 
   // ------------------------------------------------------------- terminals --

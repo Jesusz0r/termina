@@ -315,7 +315,7 @@ export interface RecentFile {
 }
 
 export type UserPreferencePatch = Partial<Omit<AppPreferences, "openProjects" | "activeProject" | "recentModels" | "recentFiles">>;
-export type PreferenceUpdate = { patch: UserPreferencePatch; activateShortcuts: boolean };
+export type PreferenceUpdate = { patch: UserPreferencePatch; activateShortcuts: boolean; confirmReset?: boolean };
 
 export function defaultAppPreferences(): AppPreferences {
   return {

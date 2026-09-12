@@ -703,15 +703,17 @@ function paintPreferences(prefs: AppPreferences): void {
   for (const pane of panes.values()) applyTerminalPreferences(pane.view, prefs);
 }
 
-function applyPreferences(next: AppPreferences, persist: boolean, activateShortcuts: boolean): void {
+function applyPreferences(next: AppPreferences, persist: boolean, activateShortcuts: boolean, confirmReset = false): void {
   const generation = ++preferenceGeneration;
   const preview = normalizeAppPreferences(next);
   preferences = preview;
   paintPreferences(preferences);
   if (persist) {
     const patch = userPatch(committedPreferences, preview);
-    if (Object.keys(patch).length > 0) {
-      void window.termina.updatePreferences({ patch, activateShortcuts }).then((saved) => {
+    // A reset always persists, even with an empty patch: that is the write
+    // that clears an unreadable prefs file back to defaults.
+    if (Object.keys(patch).length > 0 || confirmReset) {
+      void window.termina.updatePreferences({ patch, activateShortcuts, ...(confirmReset ? { confirmReset: true } : {}) }).then((saved) => {
         const normalized = normalizeAppPreferences(saved);
         committedPreferences = normalized;
         if (generation !== preferenceGeneration) return;
@@ -750,6 +752,7 @@ function applyTerminalPreferences(view: PtyView, prefs: AppPreferences): void {
 
 const settingsView = new SettingsView({
   onChange: (next) => applyPreferences(next, true, false),
+  onReset: (next) => applyPreferences(next, true, false, true),
   onOpen: () => void window.termina.setKeyboardShortcuts(emptyShortcuts()),
   onClose: (next) => applyPreferences(next, true, true),
 });
