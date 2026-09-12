@@ -7,7 +7,17 @@ import { replaySessionBundle } from "../../../agent-core/session.ts";
 
 type Row = Record<string, any>;
 function rows(path: string): Row[] {
-  return existsSync(path) ? readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
+  if (!existsSync(path)) return [];
+  const out: Row[] = [];
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    if (!line) continue;
+    try {
+      out.push(JSON.parse(line) as Row);
+    } catch {
+      // The child may still be appending this line.
+    }
+  }
+  return out;
 }
 
 // Real multi-prompt kernel and durable receipts; only provider responses are
