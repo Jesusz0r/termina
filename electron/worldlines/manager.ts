@@ -186,8 +186,8 @@ export interface WorldlineDeps {
   forkCoreSession(opts: CoreSessionForkOpts, callOptions?: SessionForkCallOptions): Promise<CoreSessionForkResult>;
   /** Build an export patch off the main thread (pure CPU over gathered contents). */
   buildExportPatch(files: ExportPatchFile[]): Promise<string>;
-  /** Read one prompt payload file off the main thread (issue #60). Absent in older test seams; the reader falls back to sync. */
-  readPromptPayload?(opts: ReadPromptOpts): Promise<ReadPromptResult>;
+  /** Read one prompt payload file off the main thread (issue #60). */
+  readPromptPayload(opts: ReadPromptOpts): Promise<ReadPromptResult>;
   /** Discard a proven durable core session bundle through the retention owner. */
   discardCoreSession(runId: string): Promise<{ ok: boolean; error?: string }>;
   createCandidate(opts: {
@@ -1668,9 +1668,7 @@ export class WorldlineManager {
       maxBytes: MAX_PROMPT_BYTES,
       textCap: 64000,
       contextCap: 16000,
-      offload: offload
-        ? (p, maxBytes, textCap, contextCap) => offload({ path: p, maxBytes, textCap, contextCap })
-        : async () => ({ ok: false as const, error: "prompt offload unavailable" }),
+      offload: (p, maxBytes, textCap, contextCap) => offload({ path: p, maxBytes, textCap, contextCap }),
     });
     return payload ?? { text: "", images: [], context: "" };
   }

@@ -156,6 +156,7 @@ describe("Session Fork Teardown and Retention Probes", () => {
           throw new Error("unexpected core fork");
         },
         discardCoreSession: async () => ({ ok: true }),
+        readPromptPayload: async () => ({ ok: false, error: "unused" }),
         createCandidate: async () => ({ terminalId: "term-test", pid: 0 }),
         createCandidateWorkspace: () => join(worldsRoot, "candidate-workspace"),
         onUpdate: () => undefined,

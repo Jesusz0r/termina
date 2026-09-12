@@ -189,6 +189,7 @@ describe("Worldline Runtime Flow Suite", () => {
       appReadPaths: () => [],
       forkCoreSession: async () => ({ ok: false, error: "unused" }),
       discardCoreSession: async () => ({ ok: false, error: "unused" }),
+      readPromptPayload: async () => ({ ok: false, error: "unused" }),
       createCandidate: async (_opts: CandidateSpawnOpts) => ({ terminalId: "unused", pid: 0 }),
       terminateCandidate: (terminalId: string) => terminated.push(terminalId),
       createCandidateWorkspace: () => root,

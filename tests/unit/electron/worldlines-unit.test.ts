@@ -27,6 +27,7 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
       appReadPaths: () => [],
       forkCoreSession: async () => ({ ok: false, error: "unused" }),
       discardCoreSession: async () => ({ ok: false, error: "unused" }),
+      readPromptPayload: async () => ({ ok: false, error: "unused" }),
       createCandidate: async () => ({ terminalId: "unused", pid: 0 }),
       createCandidateWorkspace: () => root,
       onUpdate: () => {},
@@ -99,6 +100,7 @@ describe("Worldline Manager, Core Client & Retention Performance Unit Suite", ()
       appReadPaths: () => [],
       forkCoreSession: async () => ({ ok: false, error: "unused" }),
       discardCoreSession: async () => ({ ok: false, error: "unused" }),
+      readPromptPayload: async () => ({ ok: false, error: "unused" }),
       createCandidate: async (opts: any) => {
         const terminalId = `candidate-${++sequence}`;
         const useRouting = mode !== "mapping-failure";
