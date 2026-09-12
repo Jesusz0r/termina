@@ -1031,8 +1031,8 @@ btnForkRun.addEventListener("click", () => {
     return;
   }
   void window.termina.forkRun(run.id).then((res) => {
+    // Success needs no toast: the new candidate cards are the confirmation.
     if (!res.ok) toast(`Fork Run failed: ${res.error ?? "unknown error"}`, "warning");
-    else toast(`forked ${run.id} — candidates ${res.comparisonId ?? ""} are starting`, "info");
   });
 });
 
@@ -1047,8 +1047,8 @@ for (const button of challengeRunButtons) {
       return;
     }
     void window.termina.challengeRun(run.id, profile).then((res) => {
+      // Success needs no toast: the challenger cards are the confirmation.
       if (!res.ok) toast(`Challenge failed: ${res.error ?? "unknown error"}`, "warning");
-      else toast(`${profile} challenger ${res.comparisonId ?? ""} is starting`, "info");
     });
   });
 }
@@ -1159,8 +1159,8 @@ timelineView.bind({
       return;
     }
     void window.termina.forkPoint(pane.instanceId, ev.seq).then((res) => {
+      // Success needs no toast: the new candidate cards are the confirmation.
       if (!res.ok) toast(`fork at this moment failed: ${res.error ?? "unknown error"}`, "warning");
-      else toast(`forked this moment — candidate ${res.comparisonId ?? ""} is starting`, "info");
     });
   },
   onProgress: (seq) => {
@@ -1363,9 +1363,9 @@ function renderPlan(pane: Pane, announce = true): void {
           activatePane(task.workerId);
           return;
         }
+        // Success needs no toast: main re-sends the plan and the row shows the worker.
         void window.termina.dispatchRun(pane.instanceId, task.text).then((res) => {
           if (!res.ok) toast(res.error ?? "dispatch failed", "warning");
-          else toast("dispatched 1 task to a parallel agent", "info");
         });
       });
     }
@@ -1844,14 +1844,11 @@ btnVerify.addEventListener("click", () => {
 });
 verifyBadge.addEventListener("click", () => {
   const pane = activeId ? panes.get(activeId) : undefined;
-  if (!pane) return;
-  if (pane.verify.state === "running") {
-    void window.termina.cancelVerify(pane.instanceId).then((res) => {
-      if (!res.ok) toast(res.error ?? "verify could not be cancelled", "warning");
-    });
-    return;
-  }
-  toast(pane.verify.summary ?? "", "info");
+  // The badge already shows the verdict summary; a click only cancels a run.
+  if (!pane || pane.verify.state !== "running") return;
+  void window.termina.cancelVerify(pane.instanceId).then((res) => {
+    if (!res.ok) toast(res.error ?? "verify could not be cancelled", "warning");
+  });
 });
 btnClearModified.addEventListener("click", (e) => {
   e.stopPropagation();
@@ -1874,7 +1871,7 @@ btnAcceptAll.addEventListener("click", (e) => {
   }
   renderModified(pane);
   renderHandoff(pane);
-  toast(`${pane.modified.length} file(s) accepted — Termina does not write Git`, "info");
+  // No toast: the ✓ marks on the rows are the confirmation.
 });
 modifiedPanel.querySelector(".panel-header")?.addEventListener("click", () => {
   modifiedPanel.classList.toggle("collapsed");
@@ -1886,9 +1883,9 @@ planPanel.querySelector(".panel-header")?.addEventListener("click", (e) => {
 btnDispatch.addEventListener("click", () => {
   const id = activeId;
   if (!id) return;
+  // Success needs no toast: main re-sends the plan and each row shows its worker.
   void window.termina.dispatchRun(id).then((res) => {
     if (!res.ok) toast(res.error ?? "dispatch failed", "warning");
-    else toast(`dispatched ${res.dispatched ?? 0} task(s) to parallel agents`, "info");
   });
 });
 
