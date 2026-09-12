@@ -13,6 +13,8 @@ import { formatShortcut, shortcutForEvent } from "./settings-shortcuts";
 
 interface SettingsCallbacks {
   onChange: (preferences: AppPreferences) => void;
+  /** "Reset all": persists defaults even over an unreadable prefs file. */
+  onReset: (preferences: AppPreferences) => void;
   onOpen: () => void;
   onClose: (preferences: AppPreferences) => void;
 }
@@ -153,7 +155,7 @@ export class SettingsView {
       this.preferences = defaultAppPreferences();
       this.recording = null;
       this.captureError = null;
-      this.notify();
+      this.callbacks.onReset(normalizeAppPreferences(this.preferences));
       this.render(modal);
     });
     footer.append(hint, reset);

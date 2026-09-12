@@ -40,31 +40,17 @@ import { gpt56ReasoningContext, gpt5TextVerbosity } from "./models/families/open
 import { modelLeaf } from "./models/families/identity.ts";
 import { claudeThinkingApi } from "./models/families/anthropic.ts";
 import { consumeAgentSessionEnvironment } from "../shared/agent-environment.ts";
-import { syncParentDir } from "../shared/fsync.ts";
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  closeSync,
   existsSync,
-  fstatSync,
-  fsyncSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
   readdirSync,
   readFileSync,
-  readSync,
-  realpathSync,
-  renameSync,
   rmSync,
-  statSync,
-  writeFileSync,
-  writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { createInterface } from "node:readline";
-import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, join, relative } from "node:path";
 import {
   AUTH_PROVIDER_ORDER,
   authBanner,
@@ -143,8 +129,6 @@ import {
 } from "./cache.ts";
 import {
   emptyToolLoopTracker,
-  GREP_NO_MATCHES_PREFIX,
-  isGrepNoMatches,
   toolRunLimitReason,
   trackToolLoopTurn,
 } from "./stall.ts";
@@ -169,8 +153,6 @@ import {
   type CatalogModel,
   type ModelInfo,
 } from "./models.ts";
-import { IGNORED_SEGMENTS, matchGitignore, parseGitignore, type GitignoreRules } from "../shared/gitignore.ts";
-import { validateGrepPattern } from "../shared/grep-pattern.ts";
 import {
   acknowledgePendingImages,
   claimPendingImages,
@@ -190,10 +172,54 @@ import {
 import {
   BoundedTextAccumulator,
   boundedToolResult,
+  logicalToolText,
   type BoundedText,
-  type BoundedToolResult,
   type CompletionState,
+  type ToolTextResult,
 } from "./tool-output.ts";
+import {
+  confinePath,
+  freezeCwd,
+  globFiles,
+  listTaggedFiles,
+  shellQuote,
+} from "./main/files.ts";
+import { isDirectRunFrom, trustedPath } from "./main/env.ts";
+import { grepFiles } from "./main/grep.ts";
+import {
+  editProjectFile,
+  expandFileTags,
+  fileMutationKey,
+  isReplaceAll,
+  readProjectFile,
+  withFileMutation,
+  writeProjectFile,
+} from "./main/file-ops.ts";
+import {
+  createSidecarWriter,
+  isValidTerminalId,
+  tracesDirFor,
+} from "./main/sidecar.ts";
+import {
+  TOOL_DISPLAY_BYTES,
+  capDisplay,
+  done,
+  formatToolAnnounce,
+  formatToolFollowup,
+  reproFor,
+  shouldAskPermission,
+  sidecarStartFor,
+  toolOutcomeTraceFields,
+  toolOutcomeTraceInput,
+  toolResult,
+  toolTranscriptDetail,
+  toolTranscriptOutput,
+  type PermissionMode,
+  type ToolOutcome,
+  type ToolUse,
+} from "./main/tools.ts";
+import { createFrontMatter } from "./main/front-matter.ts";
+import { renderHistoryTranscript, type ContentBlock } from "./main/history-view.ts";
 import {
   SubagentRegistry,
   appendSubagentInboxMessage,
@@ -223,7 +249,6 @@ import {
   planPruneStubs as planReclaimStubs,
   type PrunePick as ReclaimPick,
 } from "./reclaim.ts";
-import { formatSkillIndex as formatCompactSkillIndex, type SkillIndexSkill } from "./skill-index.ts";
 import {
   createTraceRuntime,
   DEFAULT_TRACE_RETENTION_CAP,
@@ -256,13 +281,11 @@ import {
   mcpToolDefs,
   startMcp,
   userMcpPath,
-  type McpCancellationScope,
-  type McpContinuation,
   type McpSession,
 } from "./mcp.ts";
 
-import { AgentTui, type TranscriptHandle } from "./tui.ts";
-import { SLASH_COMMANDS, TUI_SHORTCUTS, rankFileTags } from "./tui-text.ts";
+import { AgentTui } from "./tui.ts";
+import { SLASH_COMMANDS, TUI_SHORTCUTS } from "./tui-text.ts";
 import { parseHideThinking } from "../shared/terminal-control.ts";
 
 /** Example starting values from docs/AGENT-CORE.md; never spec constants. */
@@ -356,38 +379,12 @@ function usableTokens(): number {
 function protectTokens(): number {
   return Math.min(PROTECT_MAX, Math.max(PROTECT_MIN, Math.floor(usableTokens() * 0.25)));
 }
-/** Tool results below this size are never worth a stub. */
-const READ_CAP_BYTES = 40 * 1024;
 const BASH_CAP_BYTES = 20 * 1024;
 const BASH_TIMEOUT_MS = 60_000;
-const DIR_LIST_CAP = 200;
-const LINE_NUM_WIDTH = 6;
-const EDIT_MISS_SHOW = 3;
-const EDIT_MISS_LINE_CHARS = 240;
-const READ_SCAN_MS = 2_000;
 const NOISE_FLOOR_TOKENS = 1_024;
-const USER_AGENTS_CAP = 8_192;
-const PROJECT_AGENTS_CAP = 24_576;
-const SKILL_XML_CAP = 8_192;
-const GREP_HIT_CAP = 50;
-const GREP_SHOW_PER_FILE = 8;
-const GREP_SHOW_HITS = 20;
-const GREP_SHOW_FILES = 8;
-const GREP_SHOW_LINE_CHARS = 240;
-const GREP_COLLECT_FILES = 40;
-const GREP_BYTE_CAP = 64 * 1024;
-const GREP_VISIT_CAP = 2_000;
-const GREP_LINE_CHARS = 8_192;
-const GREP_BUDGET_MS = 2_000;
-const GREP_ROW = /^(.+):(\d+):(.*)$/;
 const FETCH_TIMEOUT_MS = 15_000;
 const FETCH_CAP_BYTES = 20 * 1024;
 const FETCH_REDIRECT_CAP = 5;
-const GLOB_HIT_CAP = 200;
-const LISTING_CAP = 20;
-const PROBE_TIMEOUT_MS = 500;
-const EDIT_MAX_BYTES = 8 * 1024 * 1024;
-const TOOL_DISPLAY_BYTES = 2 * 1024;
 
 export function parsePrintPrompt(argv: string[]): string | null {
   const i = argv.findIndex((a) => a === "-p" || a === "--print");
@@ -432,2177 +429,6 @@ export function parseEffortCommand(
   return { error: "use /effort off, minimal, low, medium, high, xhigh, or max" };
 }
 
-export function freezeCwd(cwd: string): string {
-  try {
-    if (existsSync(cwd)) return realpathSync(cwd);
-  } catch {
-    /* fall through to resolve */
-  }
-  return resolve(cwd);
-}
-
-function underRoot(abs: string, root: string): boolean {
-  return abs === root || abs.startsWith(root + sep);
-}
-
-export function isValidTerminalId(id: string): boolean {
-  return /^[A-Za-z0-9_-]{1,128}$/.test(id);
-}
-
-function sortUtf8(names: string[]): string[] {
-  return names.slice().sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
-}
-
-function posixRel(root: string, abs: string): string {
-  return relative(root, abs).split(sep).join("/");
-}
-
-function gitignoreSkips(rules: GitignoreRules, rel: string, isDir: boolean): boolean {
-  if (!rel || rel === ".") return false;
-  if (matchGitignore(rules, rel)) return true;
-  return isDir && matchGitignore(rules, `${rel}/x`);
-}
-
-function yieldEventLoop(): Promise<void> {
-  return new Promise((resolve) => setImmediate(resolve));
-}
-
-export type ConfineResult = { ok: true; abs: string } | { ok: false; error: string };
-
-export function confinePath(
-  cwd: string,
-  input: string | undefined,
-  opts?: { mustExist?: boolean; allow?: ReadonlySet<string> },
-): ConfineResult {
-  const root = freezeCwd(cwd);
-  const candidate = resolve(root, input ?? ".");
-  const label = input ?? ".";
-  let existed = false;
-  try {
-    lstatSync(candidate);
-    existed = true;
-  } catch {
-    existed = false;
-  }
-  if (existed) {
-    try {
-      const abs = realpathSync(candidate);
-      if (underRoot(abs, root) || (opts?.allow !== undefined && opts.allow.has(abs))) return { ok: true, abs };
-      return { ok: false, error: `error: path outside project: ${label}` };
-    } catch {
-      return { ok: false, error: `error: cannot resolve ${label}` };
-    }
-  }
-  if (opts?.mustExist) return { ok: false, error: `error: not found: ${label}` };
-  let cur = dirname(candidate);
-  for (;;) {
-    try {
-      lstatSync(cur);
-    } catch {
-      const parent = dirname(cur);
-      if (parent === cur) return { ok: false, error: `error: path outside project: ${label}` };
-      cur = parent;
-      continue;
-    }
-    let ancestorReal: string;
-    try {
-      ancestorReal = realpathSync(cur);
-    } catch {
-      return { ok: false, error: `error: cannot resolve ${label}` };
-    }
-    if (!underRoot(ancestorReal, root)) return { ok: false, error: `error: path outside project: ${label}` };
-    const suffix = relative(cur, candidate);
-    const abs = suffix ? join(ancestorReal, suffix) : ancestorReal;
-    if (underRoot(abs, root)) return { ok: true, abs };
-    return { ok: false, error: `error: path outside project: ${label}` };
-  }
-}
-
-function matchStar(pat: string, seg: string): boolean {
-  const n = pat.length;
-  const m = seg.length;
-  const dp: Uint8Array[] = Array.from({ length: n + 1 }, () => new Uint8Array(m + 1));
-  dp[0]![0] = 1;
-  for (let i = 1; i <= n; i++) {
-    if (pat[i - 1] === "*") dp[i]![0] = dp[i - 1]![0]!;
-  }
-  for (let i = 1; i <= n; i++) {
-    const pc = pat[i - 1]!;
-    for (let j = 1; j <= m; j++) {
-      if (pc === "*") dp[i]![j] = dp[i]![j - 1]! | dp[i - 1]![j]!;
-      else if (pc === "?" || pc === seg[j - 1]) dp[i]![j] = dp[i - 1]![j - 1]!;
-    }
-  }
-  return dp[n]![m] === 1;
-}
-
-export function matchGlob(pattern: string, relPath: string): boolean {
-  if (pattern.length < 1 || pattern.length > 256) return false;
-  if (/[\[\]{}]/.test(pattern)) return false;
-  const pSegs = pattern.split("/");
-  const tSegs = relPath.split(sep).join("/").split("/");
-  const n = pSegs.length;
-  const m = tSegs.length;
-  const dp: Uint8Array[] = Array.from({ length: n + 1 }, () => new Uint8Array(m + 1));
-  dp[0]![0] = 1;
-  for (let i = 1; i <= n; i++) {
-    if (pSegs[i - 1] === "**") dp[i]![0] = dp[i - 1]![0]!;
-  }
-  for (let i = 1; i <= n; i++) {
-    const ps = pSegs[i - 1]!;
-    for (let j = 1; j <= m; j++) {
-      if (ps === "**") dp[i]![j] = dp[i - 1]![j]! | dp[i]![j - 1]!;
-      else if (matchStar(ps, tSegs[j - 1]!)) dp[i]![j] = dp[i - 1]![j - 1]!;
-    }
-  }
-  return dp[n]![m] === 1;
-}
-
-function fileHasNul(abs: string): boolean {
-  let fd: number | undefined;
-  try {
-    fd = openSync(abs, "r");
-    const buf = Buffer.alloc(4096);
-    const n = readSync(fd, buf, 0, 4096, 0);
-    return buf.subarray(0, n).includes(0);
-  } catch {
-    return true;
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
-
-function isReadableFile(abs: string): boolean {
-  let fd: number | undefined;
-  try {
-    fd = openSync(abs, "r");
-    return true;
-  } catch {
-    return false;
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
-
-// ---- walk helpers (shared between collectFiles + collectRelativeFiles) ----
-function readDirState(dirReal: string, root: string, gitignore: GitignoreRules): { names: string[]; byName: Map<string, import("node:fs").Dirent> } | null {
-  let ents;
-  try {
-    ents = readdirSync(dirReal, { withFileTypes: true });
-  } catch {
-    return null;
-  }
-  const names = sortUtf8(ents.map((e) => e.name));
-  const byName = new Map(ents.map((e) => [e.name, e] as const));
-  if (byName.has(".gitignore")) {
-    try {
-      gitignore.set(posixRel(root, dirReal), parseGitignore(readFileSync(join(dirReal, ".gitignore"), "utf8")));
-    } catch {
-      /* unreadable gitignore */
-    }
-  }
-  return { names, byName };
-}
-
-function classifyWalkPath(abs: string, root: string): { kind: "dir" | "file"; real: string } | null {
-  let lst;
-  try {
-    lst = lstatSync(abs);
-  } catch {
-    return null;
-  }
-  if (lst.isSymbolicLink()) {
-    let real: string;
-    try {
-      real = realpathSync(abs);
-    } catch {
-      return null;
-    }
-    if (!underRoot(real, root)) return null;
-    let st;
-    try {
-      st = statSync(real);
-    } catch {
-      return null;
-    }
-    if (st.isDirectory()) return { kind: "dir", real };
-    if (st.isFile()) return { kind: "file", real };
-    return null;
-  }
-  if (lst.isDirectory()) {
-    let real = abs;
-    try {
-      real = realpathSync(abs);
-    } catch {
-      return { kind: "dir", real: abs };
-    }
-    return { kind: "dir", real };
-  }
-  if (lst.isFile()) {
-    let real = abs;
-    try {
-      real = realpathSync(abs);
-    } catch {
-      return null;
-    }
-    if (!underRoot(real, root)) return null;
-    return { kind: "file", real };
-  }
-  return null;
-}
-
-export async function collectFiles(
-  start: string,
-  root: string,
-  visitCap: number,
-  opts?: { skipNul?: boolean; shouldStop?: () => boolean; budgetMs?: number },
-): Promise<{
-  files: string[];
-  state: CompletionState;
-  hitCap: boolean;
-  timedOut: boolean;
-}> {
-  const skipNul = opts?.skipNul !== false;
-  const rawBudgetMs = opts?.budgetMs ?? GREP_BUDGET_MS;
-  const budgetMs = Number.isFinite(rawBudgetMs) && rawBudgetMs >= 0 ? rawBudgetMs : 0;
-  const normalizedVisitCap = Number.isSafeInteger(visitCap) && visitCap >= 0 ? visitCap : 0;
-  const files: string[] = [];
-  const visited = new Set<string>();
-  const seenFiles = new Set<string>();
-  const gitignore: GitignoreRules = new Map();
-  let stopCallbackFailed = false;
-  const shouldStop = (): boolean => {
-    try {
-      return opts?.shouldStop?.() === true;
-    } catch {
-      stopCallbackFailed = true;
-      return true;
-    }
-  };
-  if (shouldStop()) return { files, state: stopCallbackFailed ? "failed" : "interrupted", hitCap: false, timedOut: false };
-  if (budgetMs <= 0) return { files, state: "timeout", hitCap: false, timedOut: true };
-  const classified = classifyWalkPath(start, root);
-  if (!classified) return { files, state: "unreadable", hitCap: false, timedOut: false };
-  if (classified.kind === "file") {
-    const rel = posixRel(root, classified.real);
-    if (rel && gitignoreSkips(gitignore, rel, false)) return { files, state: "complete", hitCap: false, timedOut: false };
-    if (!isReadableFile(classified.real)) return { files, state: "unreadable", hitCap: false, timedOut: false };
-    if (skipNul && fileHasNul(classified.real)) return { files, state: "complete", hitCap: false, timedOut: false };
-    return { files: [classified.real], state: "complete", hitCap: false, timedOut: false };
-  }
-  const stack = [classified.real];
-  let visits = 0;
-  const started = Date.now();
-  let unreadable = false;
-  while (stack.length > 0) {
-    if (shouldStop()) {
-      files.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
-      return { files, state: stopCallbackFailed ? "failed" : "interrupted", hitCap: false, timedOut: false };
-    }
-    if (budgetMs <= 0 || Date.now() - started >= budgetMs) {
-      files.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
-      return { files, state: "timeout", hitCap: false, timedOut: true };
-    }
-    const dir = stack.pop()!;
-    let dirReal = dir;
-    try {
-      dirReal = realpathSync(dir);
-    } catch {
-      unreadable = true;
-      continue;
-    }
-    if (visited.has(dirReal)) continue;
-    visited.add(dirReal);
-    const state = readDirState(dirReal, root, gitignore);
-    if (!state) {
-      unreadable = true;
-      continue;
-    }
-    const { names, byName } = state;
-    for (const name of names) {
-      if (shouldStop()) {
-        files.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
-        return { files, state: stopCallbackFailed ? "failed" : "interrupted", hitCap: false, timedOut: false };
-      }
-      if (name === "." || name === "..") continue;
-      if (IGNORED_SEGMENTS.has(name)) continue;
-      if (!byName.has(name)) continue;
-      const abs = join(dirReal, name);
-      visits++;
-      if (visits > normalizedVisitCap) {
-        files.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
-        return { files, state: "visit-cap", hitCap: true, timedOut: false };
-      }
-      if (visits % 25 === 0) {
-        await yieldEventLoop();
-        if (shouldStop()) {
-          files.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
-          return { files, state: stopCallbackFailed ? "failed" : "interrupted", hitCap: false, timedOut: false };
-        }
-      }
-      const candidate = classifyWalkPath(abs, root);
-      if (!candidate) {
-        unreadable = true;
-        continue;
-      }
-      const rel = posixRel(root, candidate.real);
-      if (gitignoreSkips(gitignore, rel, candidate.kind === "dir")) continue;
-      const next = { kind: candidate.kind, real: candidate.real, rel };
-      if (next.kind === "dir") stack.push(next.real);
-      else {
-        if (seenFiles.has(next.real)) continue;
-        seenFiles.add(next.real);
-        if (!isReadableFile(next.real)) {
-          unreadable = true;
-          continue;
-        }
-        if (skipNul && fileHasNul(next.real)) continue;
-        files.push(next.real);
-      }
-    }
-  }
-  files.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
-  return { files, state: unreadable ? "unreadable" : "complete", hitCap: false, timedOut: false };
-}
-
-const FILE_TAG_VISIT_CAP = GREP_VISIT_CAP;
-const FILE_TAG_PICK_CAP = 50;
-const FILE_TAG_ATTACH_CAP = 8;
-const FILE_TAG_SCAN_MS = GREP_BUDGET_MS;
-
-const FILE_TAG_TTL_MS = 2_000;
-export type RelativeFilesScanOptions = {
-  shouldStop?: () => boolean;
-  budgetMs?: number;
-};
-
-/**
- * Array-shaped result so existing ranking/selection code remains a normal
- * string-array consumer while every scan carries its completion state. The
- * `files` copy is the explicit canonical payload for metadata-aware callers.
- */
-export type RelativeFilesResult = string[] & {
-  readonly files: string[];
-  readonly state: CompletionState;
-  readonly hitCap: boolean;
-  readonly timedOut: boolean;
-  readonly visits: number;
-  readonly visitedDirectories: number;
-};
-
-function relativeFilesResult(
-  files: string[],
-  metadata: Omit<RelativeFilesResult, "files" | keyof string[]>,
-): RelativeFilesResult {
-  const result = files.slice() as RelativeFilesResult;
-  Object.defineProperties(result, {
-    files: { value: result.slice(), enumerable: true },
-    state: { value: metadata.state, enumerable: true },
-    hitCap: { value: metadata.hitCap, enumerable: true },
-    timedOut: { value: metadata.timedOut, enumerable: true },
-    visits: { value: metadata.visits, enumerable: true },
-    visitedDirectories: { value: metadata.visitedDirectories, enumerable: true },
-  });
-  return result;
-}
-
-let fileTagIndex: { root: string; scan: RelativeFilesResult; at: number } | null = null;
-
-/** Relative project files and folders for `@` tagging. Sync, ignored walks, no NUL scan. */
-export function collectRelativeFiles(
-  cwd: string,
-  visitCap = FILE_TAG_VISIT_CAP,
-  opts?: RelativeFilesScanOptions,
-): RelativeFilesResult {
-  const root = freezeCwd(cwd);
-  const files: string[] = [];
-  const visited = new Set<string>();
-  const seenFiles = new Set<string>();
-  const gitignore: GitignoreRules = new Map();
-  const normalizedVisitCap = Number.isSafeInteger(visitCap) && visitCap >= 0 ? visitCap : 0;
-  const rawBudgetMs = opts?.budgetMs ?? FILE_TAG_SCAN_MS;
-  const budgetMs = Number.isFinite(rawBudgetMs) && rawBudgetMs >= 0 ? rawBudgetMs : 0;
-  let stopCallbackFailed = false;
-  const shouldStop = (): boolean => {
-    try {
-      return opts?.shouldStop?.() === true;
-    } catch {
-      stopCallbackFailed = true;
-      return true;
-    }
-  };
-  const started = Date.now();
-  let visits = 0;
-  let unreadable = false;
-  const finish = (
-    state: CompletionState,
-    hitCap = false,
-    timedOut = false,
-  ): RelativeFilesResult => {
-    files.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
-    return relativeFilesResult(files, {
-      state,
-      hitCap,
-      timedOut,
-      visits,
-      visitedDirectories: visited.size,
-    } as Omit<RelativeFilesResult, "files" | keyof string[]>);
-  };
-  if (shouldStop()) return finish(stopCallbackFailed ? "failed" : "interrupted");
-  if (budgetMs <= 0) return finish("timeout", false, true);
-  const classified = classifyWalkPath(root, root);
-  if (!classified || classified.kind !== "dir") return finish("unreadable");
-  const stack = [classified.real];
-  while (stack.length > 0) {
-    if (shouldStop()) return finish(stopCallbackFailed ? "failed" : "interrupted");
-    if (Date.now() - started >= budgetMs) return finish("timeout", false, true);
-    const dir = stack.pop()!;
-    let dirReal = dir;
-    try {
-      dirReal = realpathSync(dir);
-    } catch {
-      unreadable = true;
-      continue;
-    }
-    if (visited.has(dirReal)) continue;
-    visited.add(dirReal);
-    const state = readDirState(dirReal, root, gitignore);
-    if (!state) {
-      unreadable = true;
-      continue;
-    }
-    const { names } = state;
-    for (const name of names) {
-      if (shouldStop()) return finish(stopCallbackFailed ? "failed" : "interrupted");
-      if (Date.now() - started >= budgetMs) return finish("timeout", false, true);
-      if (name === "." || name === "..") continue;
-      if (IGNORED_SEGMENTS.has(name)) continue;
-      visits++;
-      if (visits > normalizedVisitCap) {
-        return finish("visit-cap", true);
-      }
-      const candidate = classifyWalkPath(join(dirReal, name), root);
-      if (!candidate) {
-        unreadable = true;
-        continue;
-      }
-      const rel = posixRel(root, candidate.real);
-      if (gitignoreSkips(gitignore, rel, candidate.kind === "dir")) continue;
-      if (candidate.kind === "dir") {
-        stack.push(candidate.real);
-        if (!seenFiles.has(candidate.real)) {
-          seenFiles.add(candidate.real);
-          if (rel) files.push(rel.endsWith("/") ? rel : `${rel}/`);
-        }
-      } else if (!seenFiles.has(candidate.real)) {
-        seenFiles.add(candidate.real);
-        if (rel) files.push(rel);
-      }
-    }
-  }
-  return finish(unreadable ? "unreadable" : "complete");
-}
-
-export function listTaggedFiles(
-  cwd: string,
-  query: string,
-  cap = FILE_TAG_PICK_CAP,
-  opts?: RelativeFilesScanOptions & { visitCap?: number },
-): RelativeFilesResult {
-  const root = freezeCwd(cwd);
-  const now = Date.now();
-  const requestedScan = opts !== undefined;
-  const stale = requestedScan || !fileTagIndex || fileTagIndex.root !== root ||
-    (query === "" && now - fileTagIndex.at >= FILE_TAG_TTL_MS);
-  let scan: RelativeFilesResult;
-  if (stale) {
-    scan = collectRelativeFiles(root, opts?.visitCap ?? FILE_TAG_VISIT_CAP, opts);
-    // Never retain an incomplete scan as if it were a complete autocomplete
-    // index. A subsequent query will rescan and report its own state.
-    if (scan.state === "complete") fileTagIndex = { root, scan, at: now };
-    else fileTagIndex = null;
-  } else {
-    scan = fileTagIndex!.scan;
-  }
-  const matches = rankFileTags(scan.files, query, cap);
-  return relativeFilesResult(matches, {
-    state: scan.state,
-    hitCap: scan.hitCap,
-    timedOut: scan.timedOut,
-    visits: scan.visits,
-    visitedDirectories: scan.visitedDirectories,
-  } as Omit<RelativeFilesResult, "files" | keyof string[]>);
-}
-
-export function parseFileTags(text: string): string[] {
-  const found: string[] = [];
-  const seen = new Set<string>();
-  const re = /(^|\s)@([^\s@]+)/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) {
-    const path = m[2]!;
-    if (path === "." || path === ".." || path.includes("://")) continue;
-    if (seen.has(path)) continue;
-    seen.add(path);
-    found.push(path);
-  }
-  return found;
-}
-
-export function expandFileTags(cwd: string, prompt: string): string {
-  const tags = parseFileTags(prompt);
-  if (tags.length === 0) return prompt;
-  const chunks: string[] = [];
-  let omitted = 0;
-  for (let index = 0; index < tags.length; index += 1) {
-    const path = tags[index]!;
-    if (chunks.length >= FILE_TAG_ATTACH_CAP) {
-      omitted = tags.length - index;
-      break;
-    }
-    const confined = confinePath(cwd, path);
-    if (!confined.ok) continue;
-    let st;
-    try {
-      st = statSync(confined.abs);
-    } catch {
-      continue;
-    }
-    if (st.isDirectory()) {
-      const listing = listProjectDir(cwd, confined.abs);
-      if (listing.isError) continue;
-      chunks.push(`<file path="${xmlSafe(path)}">\n${xmlSafe(listing.content)}\n</file>`);
-      continue;
-    }
-    const got = readTextView(confined.abs, { offset: 0 });
-    if (got.isError) continue;
-    chunks.push(`<file path="${xmlSafe(path)}">\n${xmlSafe(got.content)}\n</file>`);
-  }
-  if (chunks.length === 0) return prompt;
-  const omission = omitted > 0
-    ? `\n<!-- ${omitted} file attachments omitted after the ${FILE_TAG_ATTACH_CAP}-file cap; read_file the omitted paths explicitly -->`
-    : "";
-  return `${prompt}\n\n<tagged-files>\n${chunks.join("\n")}${omission}\n</tagged-files>`;
-}
-
-const GREP_LINE_BYTE_CAP = GREP_LINE_CHARS * 4;
-
-function decodeGrepLine(value: Uint8Array): { text: string; truncated: boolean } {
-  const bounded = new BoundedTextAccumulator({
-    maxBytes: GREP_LINE_BYTE_CAP,
-    direction: "head",
-    // The surrounding grep result carries the actionable continuation.  A
-    // marker on every clipped line would consume the page budget and obscure
-    // the line number.
-    marker: "",
-  });
-  bounded.push(value);
-  const result = bounded.finish();
-  return { text: result.text, truncated: result.truncated };
-}
-
-type LineScanResult = { state: CompletionState; truncated: boolean };
-
-function forEachGrepLine(
-  abs: string,
-  fn: (lineNo: number, line: string) => boolean,
-  shouldStop?: () => boolean,
-  budgetMs = GREP_BUDGET_MS,
-): LineScanResult {
-  let fd: number | undefined;
-  const started = Date.now();
-  let truncated = false;
-  const result = (state: CompletionState): LineScanResult => ({ state, truncated });
-  try {
-    fd = openSync(abs, "r");
-    const chunk = Buffer.alloc(64 * 1024);
-    let leftover = Buffer.alloc(0);
-    let skipUntilNl = false;
-    let lineNo = 1;
-    let pos = 0;
-    for (;;) {
-      if (shouldStop?.()) return result("interrupted");
-      if (budgetMs <= 0 || Date.now() - started >= budgetMs) return result("timeout");
-      const n = readSync(fd, chunk, 0, chunk.length, pos);
-      if (n <= 0) break;
-      pos += n;
-      let data = leftover.length > 0 ? Buffer.concat([leftover, chunk.subarray(0, n)]) : chunk.subarray(0, n);
-      leftover = Buffer.alloc(0);
-      let start = 0;
-      if (skipUntilNl) {
-        const nl = data.indexOf(10);
-        if (nl < 0) continue;
-        skipUntilNl = false;
-        start = nl + 1;
-      }
-      for (let i = start; i < data.length; i++) {
-        if (data[i] !== 10) continue;
-        let end = i;
-        if (end > start && data[end - 1] === 13) end--;
-        const raw = data.subarray(start, end);
-        if (raw.length > GREP_LINE_BYTE_CAP) truncated = true;
-        const line = decodeGrepLine(raw.subarray(0, GREP_LINE_BYTE_CAP));
-        truncated ||= line.truncated;
-        if (!fn(lineNo, line.text)) return result("complete");
-        lineNo++;
-        start = i + 1;
-      }
-      leftover = start < data.length ? Buffer.from(data.subarray(start)) : Buffer.alloc(0);
-      if (leftover.length > GREP_LINE_BYTE_CAP) {
-        truncated = true;
-        const line = decodeGrepLine(leftover.subarray(0, GREP_LINE_BYTE_CAP));
-        truncated ||= line.truncated;
-        if (!fn(lineNo, line.text)) return result("complete");
-        lineNo++;
-        leftover = Buffer.alloc(0);
-        skipUntilNl = true;
-      }
-    }
-    if (!skipUntilNl && leftover.length > 0) {
-      if (leftover.length > GREP_LINE_BYTE_CAP) truncated = true;
-      const line = decodeGrepLine(leftover.subarray(0, GREP_LINE_BYTE_CAP));
-      truncated ||= line.truncated;
-      fn(lineNo, line.text);
-    }
-    return result("complete");
-  } catch {
-    return result("unreadable");
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
-
-function parseGrepRow(row: string): { file: string; line: number; text: string } | null {
-  const m = GREP_ROW.exec(row.endsWith("\r") ? row.slice(0, -1) : row);
-  if (!m) return null;
-  const line = Number(m[2]);
-  if (!Number.isInteger(line) || line < 1) return null;
-  return { file: m[1]!, line, text: m[3]! };
-}
-
-function cmpUtf8(a: string, b: string): number {
-  return Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
-}
-
-function clipGrepText(text: string): string {
-  if (text.length <= GREP_SHOW_LINE_CHARS) return text;
-  return `${text.slice(0, GREP_SHOW_LINE_CHARS)}...`;
-}
-
-function countLabel(count: number, capped: boolean): string {
-  return capped ? `${GREP_HIT_CAP}+` : String(count);
-}
-
-/** Drop a trailing incomplete line when ripgrep stdout hit the byte cap. */
-export function completeGrepStdout(text: string, truncated: boolean): string {
-  if (!truncated) return text.replace(/\n+$/, "");
-  const cut = text.endsWith("\n") ? text : text.slice(0, Math.max(0, text.lastIndexOf("\n")));
-  return cut.replace(/\n+$/, "");
-}
-
-/** Ripgrep's per-file --max-count cannot distinguish exactly-cap hits from a
- * file with additional matches, so reaching the cap is always an incomplete
- * result and must carry a continuation. */
-function grepHitCapReached(raw: string): boolean {
-  const counts = new Map<string, number>();
-  for (const row of raw.split("\n")) {
-    const hit = parseGrepRow(row);
-    if (!hit) continue;
-    const count = (counts.get(hit.file) ?? 0) + 1;
-    counts.set(hit.file, count);
-    if (count >= GREP_HIT_CAP) return true;
-  }
-  return false;
-}
-
-/** Group hits by file, put sparse files first, and cap the page the model sees. */
-export function formatGrepHits(raw: string): string {
-  if (!raw) return raw;
-
-  const byFile = new Map<string, Array<{ line: number; text: string }>>();
-  for (const row of raw.split("\n")) {
-    if (!row) continue;
-    const hit = parseGrepRow(row);
-    if (!hit) continue;
-    const list = byFile.get(hit.file);
-    if (list) list.push({ line: hit.line, text: hit.text });
-    else byFile.set(hit.file, [{ line: hit.line, text: hit.text }]);
-  }
-  if (byFile.size === 0) return raw;
-
-  const files = [...byFile.entries()].sort((a, b) => {
-    if (a[1].length !== b[1].length) return a[1].length - b[1].length;
-    return cmpUtf8(a[0], b[0]);
-  });
-
-  let total = 0;
-  let totalCapped = false;
-  for (const [, hits] of files) {
-    total += hits.length;
-    if (hits.length >= GREP_HIT_CAP) totalCapped = true;
-  }
-
-  const body: string[] = [];
-  let shownHits = 0;
-  let shownFiles = 0;
-  const partials: Array<{ file: string; left: number }> = [];
-  const omitted: Array<{ file: string; count: number; capped: boolean }> = [];
-
-  for (const [file, hits] of files) {
-    const capped = hits.length >= GREP_HIT_CAP;
-    const label = countLabel(hits.length, capped);
-    if (shownFiles >= GREP_SHOW_FILES || shownHits >= GREP_SHOW_HITS) {
-      omitted.push({ file, count: hits.length, capped });
-      continue;
-    }
-    const take = Math.min(GREP_SHOW_PER_FILE, hits.length, GREP_SHOW_HITS - shownHits);
-    if (take <= 0) {
-      omitted.push({ file, count: hits.length, capped });
-      continue;
-    }
-    const left = hits.length - take;
-    if (left > 0) {
-      body.push(`${file} (${label} hits, showing ${take})`);
-      partials.push({ file, left });
-    } else {
-      body.push(`${file} (${label} ${hits.length === 1 && !capped ? "hit" : "hits"})`);
-    }
-    for (let i = 0; i < take; i++) {
-      const h = hits[i]!;
-      body.push(`  ${h.line}:${clipGrepText(h.text)}`);
-    }
-    shownHits += take;
-    shownFiles += 1;
-  }
-
-  const hitWord = total === 1 && !totalCapped ? "hit" : "hits";
-  const fileWord = files.length === 1 ? "file" : "files";
-  const out = [
-    `${total}${totalCapped ? "+" : ""} ${hitWord} in ${files.length} ${fileWord}, showing ${shownHits}`,
-    ...body,
-  ];
-  const footer = grepContinueFooter(partials, omitted);
-  if (footer) out.push(footer);
-  return out.join("\n");
-}
-
-function grepContinueFooter(
-  partials: Array<{ file: string; left: number }>,
-  omitted: Array<{ file: string; count: number; capped: boolean }>,
-): string | undefined {
-  if (partials.length === 0 && omitted.length === 0) return undefined;
-
-  let bestFile = "";
-  let bestScore = -1;
-  for (const p of partials) {
-    if (p.left > bestScore) {
-      bestScore = p.left;
-      bestFile = p.file;
-    }
-  }
-  for (const o of omitted) {
-    if (o.count > bestScore) {
-      bestScore = o.count;
-      bestFile = o.file;
-    }
-  }
-
-  const parts: string[] = [];
-  if (partials.length > 0) {
-    let dense = partials[0]!;
-    for (const p of partials) {
-      if (p.left > dense.left) dense = p;
-    }
-    parts.push(`${dense.left} more in ${dense.file}`);
-  }
-  if (omitted.length > 0) {
-    let largest = omitted[0]!;
-    for (const item of omitted) {
-      if (item.count > largest.count) largest = item;
-    }
-    if (bestFile === largest.file) {
-      parts.push(
-        `${omitted.length} more files (largest: ${largest.file} ${countLabel(largest.count, largest.capped)} hits)`,
-      );
-    } else {
-      parts.push(`${omitted.length} more files`);
-    }
-  }
-  parts.push(`Grep again with path=${JSON.stringify(bestFile)} or a tighter glob.`);
-  return parts.join(". ");
-}
-
-function grepRipgrep(
-  rg: string,
-  root: string,
-  searchAbs: string,
-  pattern: string,
-  glob: string | undefined,
-  opts: { shouldStop?: () => boolean; budgetMs?: number },
-): Promise<ToolTextResult> {
-  const budgetMs = opts.budgetMs ?? GREP_BUDGET_MS;
-  const repro = `grep ${shellQuote(pattern)}${glob ? ` --glob ${shellQuote(glob)}` : ""}`;
-  const continuation = `Grep again with path=${JSON.stringify(searchAbs === root ? "." : posixRel(root, searchAbs))}${glob ? ` or a tighter glob than ${JSON.stringify(glob)}` : " or a tighter glob"}.`;
-  let stopCallbackFailed = false;
-  const shouldStop = (): boolean => {
-    try {
-      return opts.shouldStop?.() === true;
-    } catch {
-      stopCallbackFailed = true;
-      return true;
-    }
-  };
-  if (budgetMs <= 0) {
-    return Promise.resolve(boundedToolResult("(grep timed out after 0 files)", {
-      maxBytes: GREP_BYTE_CAP,
-      marker: continuation,
-      state: "timeout",
-      isError: true,
-    }));
-  }
-  const relSearch = searchAbs === root ? "." : posixRel(root, searchAbs);
-  const args = [
-    "--color=never",
-    "-n",
-    "--no-heading",
-    "--with-filename",
-    "--hidden",
-    "--no-require-git",
-    `--max-count=${GREP_HIT_CAP}`,
-  ];
-  for (const name of IGNORED_SEGMENTS) args.push("-g", `!**/${name}`, "-g", `!**/${name}/**`);
-  if (glob) args.push("-g", glob);
-  args.push("--", pattern, relSearch);
-  return new Promise((resolve) => {
-    let child: ReturnType<typeof spawn>;
-    try {
-      child = spawn(rg, args, { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
-    } catch (err) {
-      resolve(boundedToolResult(`error: ${(err as Error).message}`, {
-        maxBytes: GREP_BYTE_CAP,
-        marker: "",
-        state: "failed",
-        isError: true,
-      }));
-      return;
-    }
-    const stdout = new BoundedTextAccumulator({ maxBytes: GREP_BYTE_CAP, direction: "head", marker: "" });
-    const stderr = new BoundedTextAccumulator({ maxBytes: 8 * 1024, direction: "head", marker: "" });
-    let stdoutSeen = 0;
-    let outputTruncated = false;
-    let killedForOutput = false;
-    const kill = (): void => {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        /* already gone */
-      }
-    };
-    child.stdout?.on("data", (chunk: Buffer) => {
-      stdout.push(chunk);
-      stdoutSeen += chunk.byteLength;
-      if (stdoutSeen > GREP_BYTE_CAP) {
-        outputTruncated = true;
-        killedForOutput = true;
-        kill();
-      }
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderr.push(chunk);
-    });
-    let settled = false;
-    let timedOut = false;
-    let interruptedByUser = false;
-    let spawnFailed = false;
-    const finish = (code: number | null): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      clearInterval(poll);
-      const stdoutResult = stdout.finish();
-      const stderrResult = stderr.finish();
-      const stderrTruncated = stderrResult.truncated;
-      const text = completeGrepStdout(stdoutResult.text, outputTruncated || stdoutResult.truncated);
-      const hitCap = grepHitCapReached(text);
-      let state: CompletionState = "complete";
-      let isError = false;
-      let body = "";
-      if (timedOut) {
-        state = "timeout";
-        isError = true;
-        body = text ? `${formatGrepHits(text)}\n(grep timed out)` : "(grep timed out)";
-      } else if (stopCallbackFailed) {
-        state = "failed";
-        isError = true;
-        body = text ? `${formatGrepHits(text)}\n(grep stop callback failed)` : "error: grep stop callback failed";
-      } else if (interruptedByUser) {
-        state = "interrupted";
-        isError = true;
-        body = text ? `${formatGrepHits(text)}\n(grep interrupted)` : "(grep interrupted)";
-      } else if (spawnFailed) {
-        state = "failed";
-        isError = true;
-        body = `error: ${stderrResult.text || "could not start ripgrep"}`;
-      } else if (killedForOutput) {
-        // The process was stopped only because its display stream reached the
-        // output cap; this is a complete search with an intentionally clipped
-        // page, not a provider/tool failure.
-        state = "complete";
-        body = text
-          ? `${formatGrepHits(text)}\n(more matching files not listed)`
-          : "(output clipped before results arrived)";
-      } else if (code === 2) {
-        // ripgrep exit codes are a stable documented contract: 0 = match,
-        // 1 = no match, 2 = error. Keep partial hits like the timeout and
-        // interrupt branches do so the model keeps whatever matched.
-        state = "failed";
-        isError = true;
-        const err = stderrResult.text.trim().slice(0, 300);
-        const note = err ? `error: ${err}` : "error: invalid regular expression";
-        body = text ? `${formatGrepHits(text)}\n${note}` : note;
-      } else if (!text) {
-        body = GREP_NO_MATCHES_PREFIX;
-      } else {
-        const formatted = formatGrepHits(text);
-        body = outputTruncated || hitCap
-          ? `${formatted}\n(more matching files not listed)`
-          : formatted;
-      }
-      const marker = state === "complete" && !outputTruncated && !stderrTruncated && !hitCap ? "" : continuation;
-      const result = logicalToolText(body, {
-        maxBytes: GREP_BYTE_CAP,
-        state,
-        isError,
-        forceMarker: Boolean(marker),
-        marker,
-        continuation: marker || null,
-        repro,
-      });
-      resolve(Object.freeze({
-        ...result,
-        repro,
-        stdout: stdoutResult,
-        stderr: stderrResult,
-      }));
-    };
-    const timer = setTimeout(() => {
-      timedOut = true;
-      kill();
-    }, budgetMs);
-    const poll = setInterval(() => {
-      if (shouldStop()) {
-        interruptedByUser = true;
-        kill();
-      }
-    }, 50);
-    if (shouldStop()) {
-      interruptedByUser = true;
-      kill();
-    }
-    child.on("error", () => {
-      spawnFailed = true;
-      if (!settled) finish(null);
-    });
-    child.on("close", (code) => finish(code));
-  });
-}
-
-export async function grepFiles(
-  cwd: string,
-  input: { pattern?: string; path?: string; glob?: string },
-  opts?: { shouldStop?: () => boolean; budgetMs?: number; jsOnly?: boolean },
-): Promise<ToolTextResult> {
-  const pattern = input.pattern ?? "";
-  const repro = `grep ${shellQuote(pattern)}${input.glob ? ` --glob ${shellQuote(input.glob)}` : ""}`;
-  const continuation = `Grep again with path=${JSON.stringify(input.path ?? ".")}${input.glob ? ` or a tighter glob than ${JSON.stringify(input.glob)}` : " or a tighter glob"}.`;
-  let stopCallbackFailed = false;
-  const shouldStop = (): boolean => {
-    try {
-      return opts?.shouldStop?.() === true;
-    } catch {
-      stopCallbackFailed = true;
-      return true;
-    }
-  };
-  const fail = (content: string): ToolTextResult => Object.freeze({
-    ...boundedToolResult(content, { maxBytes: GREP_BYTE_CAP, marker: "", state: "failed", isError: true }),
-    continuation: null,
-    repro,
-  });
-  const unsafe = validateGrepPattern(pattern);
-  const root = freezeCwd(cwd);
-  const confined = confinePath(cwd, input.path ?? ".", { mustExist: true });
-  if (!confined.ok) return fail(confined.error);
-  if (input.glob) {
-    if (input.glob.length < 1 || input.glob.length > 256) return fail("error: glob pattern length must be 1–256");
-    if (/[\[\]{}]/.test(input.glob)) return fail("error: glob only supports * ** ?");
-  }
-  if (!opts?.jsOnly) {
-    const rg = resolveTrustedBin("rg", root);
-    if (rg) {
-      if (pattern.length < 1 || pattern.length > 256) return fail(unsafe ?? "error: pattern length must be 1–256");
-      return grepRipgrep(rg, root, confined.abs, pattern, input.glob, { ...opts, shouldStop });
-    }
-  }
-  if (unsafe) return fail(unsafe);
-  let regex: RegExp;
-  try {
-    regex = new RegExp(pattern);
-  } catch {
-    return fail("error: invalid regular expression");
-  }
-  const budgetMs = opts?.budgetMs ?? GREP_BUDGET_MS;
-  const started = Date.now();
-  const collected = await collectFiles(confined.abs, root, GREP_VISIT_CAP, {
-    shouldStop,
-    budgetMs,
-  });
-  const hits: string[] = [];
-  let filesWithHits = 0;
-  let scanned = 0;
-  let state: CompletionState = collected.state;
-  let fileCap = false;
-  let hitCap = false;
-  let lineTruncated = false;
-  for (const abs of collected.files) {
-    if (shouldStop()) {
-      state = stopCallbackFailed ? "failed" : "interrupted";
-      break;
-    }
-    if (Date.now() - started >= budgetMs) {
-      state = "timeout";
-      break;
-    }
-    scanned++;
-    if (scanned % 25 === 0) await yieldEventLoop();
-    const rel = relative(root, abs).split(sep).join("/");
-    if (input.glob && !matchGlob(input.glob, rel)) continue;
-    if (filesWithHits >= GREP_COLLECT_FILES) {
-      fileCap = true;
-      break;
-    }
-    let fileHits = 0;
-    const lineState = forEachGrepLine(
-      abs,
-      (lineNo, line) => {
-        if (Date.now() - started >= budgetMs) {
-          return false;
-        }
-        if (!regex.test(line)) return true;
-        fileHits++;
-        if (fileHits <= GREP_HIT_CAP) hits.push(`${rel}:${lineNo}:${line}`);
-        return fileHits < GREP_HIT_CAP;
-      },
-      shouldStop,
-      Math.max(1, budgetMs - (Date.now() - started)),
-    );
-    if (fileHits > 0) filesWithHits++;
-    if (fileHits >= GREP_HIT_CAP) hitCap = true;
-    lineTruncated ||= lineState.truncated;
-    if (lineState.state === "interrupted" || shouldStop()) {
-      state = stopCallbackFailed ? "failed" : "interrupted";
-      break;
-    }
-    if (lineState.state === "timeout") {
-      state = "timeout";
-      break;
-    }
-    if (Date.now() - started >= budgetMs && lineState.state === "complete") {
-      state = "timeout";
-      break;
-    }
-    if (lineState.state === "unreadable" && state === "complete") state = "unreadable";
-  }
-  const stateError = state !== "complete";
-  if (hits.length === 0) {
-    const stateDesc = state === "timeout" ? "timed out" : state;
-    const body = state === "complete"
-      ? lineTruncated ? "(no matches in retained line prefixes; some lines were truncated)" : GREP_NO_MATCHES_PREFIX
-      : `(grep ${stateDesc} after ${scanned} files)`;
-    const needsContinuation = stateError || lineTruncated;
-    const result = logicalToolText(body, {
-      maxBytes: GREP_BYTE_CAP,
-      state,
-      isError: stateError,
-      forceMarker: needsContinuation,
-      marker: needsContinuation ? continuation : "",
-      continuation: needsContinuation ? continuation : null,
-      repro,
-    });
-    return result;
-  }
-  const formatted = formatGrepHits(hits.join("\n"));
-  const extra: string[] = [];
-  if (fileCap) extra.push("(more matching files not listed. Grep again with path or glob.)");
-  if (hitCap) extra.push("(grep hit cap; more matching lines may be omitted)");
-  if (state !== "complete") extra.push(`(grep ${state === "timeout" ? "timed out" : state} after ${scanned} files)`);
-  if (lineTruncated) extra.push("(some matching lines were truncated)");
-  const body = extra.length > 0 ? `${formatted}\n${extra.join("\n")}` : formatted;
-  const needsContinuation = stateError || fileCap || hitCap || lineTruncated;
-  const result = logicalToolText(body, {
-    maxBytes: GREP_BYTE_CAP,
-    state,
-    isError: stateError,
-    forceMarker: needsContinuation,
-    marker: needsContinuation ? continuation : "",
-    continuation: needsContinuation ? continuation : null,
-    repro,
-  });
-  return result;
-}
-
-export async function globFiles(
-  cwd: string,
-  pattern: string,
-  opts?: { shouldStop?: () => boolean; budgetMs?: number },
-): Promise<ToolTextResult> {
-  const repro = `glob ${shellQuote(pattern)}`;
-  const continuation = `Glob again with a narrower pattern than ${JSON.stringify(pattern)} or a narrower path.`;
-  const fail = (content: string): ToolTextResult => Object.freeze({
-    ...boundedToolResult(content, { maxBytes: GREP_BYTE_CAP, marker: "", state: "failed", isError: true }),
-    continuation: null,
-    repro,
-  });
-  if (pattern.length < 1 || pattern.length > 256) return fail("error: pattern length must be 1–256");
-  if (/[\[\]{}]/.test(pattern)) return fail("error: glob only supports * ** ?");
-  const root = freezeCwd(cwd);
-  const collected = await collectFiles(root, root, GREP_VISIT_CAP, {
-    shouldStop: opts?.shouldStop,
-    budgetMs: opts?.budgetMs,
-  });
-  const out: string[] = [];
-  for (const abs of collected.files) {
-    const rel = relative(root, abs).split(sep).join("/");
-    if (!matchGlob(pattern, rel)) continue;
-    out.push(rel);
-    // One lookahead distinguishes an exact page from an omitted continuation.
-    if (out.length > GLOB_HIT_CAP) break;
-  }
-  const hasMore = out.length > GLOB_HIT_CAP;
-  const visible = out.slice(0, GLOB_HIT_CAP);
-  const incomplete = collected.state !== "complete";
-  const body = visible.length > 0
-    ? visible.join("\n")
-    : incomplete
-      ? `(glob ${collected.state} after ${collected.files.length} files)`
-      : GREP_NO_MATCHES_PREFIX;
-  const needsContinuation = hasMore || incomplete;
-  const result = logicalToolText(body, {
-    maxBytes: GREP_BYTE_CAP,
-    state: collected.state,
-    isError: incomplete,
-    forceMarker: needsContinuation,
-    marker: needsContinuation ? `${hasMore ? "(more matching files not listed)\n" : ""}${continuation}` : "",
-    continuation: needsContinuation ? continuation : null,
-    repro,
-  });
-  return Object.freeze({ ...result, truncated: result.truncated || needsContinuation });
-}
-
-export type Skill = SkillIndexSkill;
-
-function parseFrontmatter(text: string): Record<string, string> {
-  if (!text.startsWith("---")) return {};
-  const rest = text.startsWith("---\n") || text.startsWith("---\r\n") ? text.slice(text.indexOf("\n") + 1) : text.slice(3);
-  const end = rest.search(/\n---(?:\n|$)/);
-  if (end < 0) return {};
-  const block = rest.slice(0, end);
-  const out: Record<string, string> = {};
-  for (const line of block.split("\n")) {
-    const m = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
-    if (!m) continue;
-    let v = m[2]!.trim();
-    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
-    out[m[1]!] = v;
-  }
-  return out;
-}
-
-function escapeXml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
-
-function xmlSafe(s: string): string {
-  return escapeXml(s.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, ""));
-}
-
-function walkSkillFiles(scanRoot: string): { files: string[]; capped: boolean } {
-  if (!existsSync(scanRoot)) return { files: [], capped: false };
-  let rootReal: string;
-  try {
-    rootReal = realpathSync(scanRoot);
-  } catch {
-    return { files: [], capped: false };
-  }
-  const found: string[] = [];
-  const visited = new Set<string>();
-  const stack = [rootReal];
-  let visits = 0;
-  while (stack.length > 0) {
-    const dir = stack.pop()!;
-    let dirReal = dir;
-    try {
-      dirReal = realpathSync(dir);
-    } catch {
-      continue;
-    }
-    if (visited.has(dirReal)) continue;
-    visited.add(dirReal);
-    let ents;
-    try {
-      ents = readdirSync(dirReal, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    const names = sortUtf8(ents.map((e) => e.name));
-    for (const name of names) {
-      if (name === "." || name === "..") continue;
-      if (name === "node_modules") continue;
-      visits++;
-      if (visits > GREP_VISIT_CAP) return { files: found, capped: true };
-      const abs = join(dirReal, name);
-      const next = classifyWalkPath(abs, rootReal);
-      if (!next) continue;
-      if (next.kind === "dir") stack.push(next.real);
-      else if (basename(next.real) === "SKILL.md") found.push(next.real);
-    }
-  }
-  found.sort((a, b) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8")));
-  return { files: found, capped: false };
-}
-
-export function scanSkills(dirs: string[]): { skills: Skill[]; capped: boolean } {
-  const byName = new Map<string, Skill>();
-  let capped = false;
-  for (const dir of dirs) {
-    const walked = walkSkillFiles(dir);
-    if (walked.capped) capped = true;
-    for (const abs of walked.files) {
-      if (fileHasNul(abs)) continue;
-      let text: string;
-      try {
-        const fd = openSync(abs, "r");
-        try {
-          const buf = Buffer.alloc(8192);
-          const n = readSync(fd, buf, 0, 8192, 0);
-          text = buf.subarray(0, n).toString("utf8");
-        } finally {
-          closeSync(fd);
-        }
-      } catch {
-        continue;
-      }
-      const fm = parseFrontmatter(text);
-      if (fm["disable-model-invocation"] === "true") continue;
-      const name = (fm.name || basename(dirname(abs))).trim();
-      if (!name) continue;
-      byName.set(name, { name, description: fm.description ?? "", abs });
-    }
-  }
-  const skills = [...byName.values()].sort((a, b) => {
-    const n = Buffer.compare(Buffer.from(a.name, "utf8"), Buffer.from(b.name, "utf8"));
-    if (n !== 0) return n;
-    return Buffer.compare(Buffer.from(a.abs, "utf8"), Buffer.from(b.abs, "utf8"));
-  });
-  return { skills, capped };
-}
-
-export function formatSkillIndex(skills: Skill[], opts?: { capped?: boolean }): string {
-  return formatCompactSkillIndex(skills, { capBytes: SKILL_XML_CAP, capped: opts?.capped });
-}
-
-function capParagraph(md: string, max: number): { text: string; omitted: number } {
-  if (md.length <= max) return { text: md, omitted: 0 };
-  const slice = md.slice(0, max);
-  const blank = slice.lastIndexOf("\n\n");
-  const text = blank > 0 ? slice.slice(0, blank) : slice;
-  return { text, omitted: md.length - text.length };
-}
-
-export function formatProjectInstructions(md: string): string {
-  const { text, omitted } = capParagraph(md, PROJECT_AGENTS_CAP);
-  let body = text;
-  if (omitted > 0) body += `\n<!-- AGENTS.md truncated; ${omitted} chars remain; read AGENTS.md with read_file -->`;
-  return `<project-instructions>\n${body}\n</project-instructions>`;
-}
-
-export function formatUserInstructions(md: string, absPath: string): string {
-  const { text, omitted } = capParagraph(md, USER_AGENTS_CAP);
-  let body = text;
-  if (omitted > 0) {
-    // Keep the absolute path outside the HTML comment. A path that contains
-    // "--" would otherwise close the comment early.
-    body += `\n<!-- AGENTS.md truncated; ${omitted} chars remain -->\nread_file ${JSON.stringify(absPath)}`;
-  }
-  return `<user-instructions>\n${body}\n</user-instructions>`;
-}
-
-function extraBinDirs(): string[] {
-  const home = homedir();
-  return [
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    join(home, ".local", "bin"),
-    join(home, ".cargo", "bin"),
-  ];
-}
-
-/** Add user binary directories that a GUI launch leaves off PATH. Search the process PATH first. */
-export function trustedPath(pathEnv = process.env.PATH ?? "", cwdRoot?: string): string {
-  const seen = new Set<string>();
-  const parts: string[] = [];
-  const extra = extraBinDirs();
-  const extraSet = new Set(extra);
-  const root = cwdRoot ? freezeCwd(cwdRoot) : "";
-  for (const dir of [...pathEnv.split(delimiter), ...extra]) {
-    if (!dir || seen.has(dir)) continue;
-    if (root && extraSet.has(dir)) {
-      try {
-        if (underRoot(realpathSync(dir), root)) continue;
-      } catch {
-        /* A missing extra directory stays on PATH. bash skips it. */
-      }
-    }
-    seen.add(dir);
-    parts.push(dir);
-  }
-  return parts.join(delimiter);
-}
-
-function resolveTrustedBin(bin: string, cwdRoot: string): string | null {
-  for (const dir of trustedPath(process.env.PATH, cwdRoot).split(delimiter)) {
-    if (!dir || !isAbsolute(dir)) continue;
-    let realDir: string;
-    try {
-      realDir = realpathSync(dir);
-    } catch {
-      continue;
-    }
-    if (underRoot(realDir, cwdRoot)) continue;
-    const cand = join(realDir, bin);
-    try {
-      if (statSync(cand).isFile()) return cand;
-    } catch {
-      continue;
-    }
-  }
-  return null;
-}
-
-function probeAbs(absBin: string, remainingMs: number): string | null {
-  if (remainingMs <= 0) return null;
-  try {
-    const out = execFileSync(absBin, ["--version"], {
-      timeout: remainingMs,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const line = String(out).split("\n")[0]?.trim() ?? "";
-    return line ? line.slice(0, 80) : null;
-  } catch (err) {
-    const extra = err as { stdout?: string; stderr?: string };
-    const line = `${extra.stdout ?? ""}${extra.stderr ?? ""}`.split("\n")[0]?.trim() ?? "";
-    return line ? line.slice(0, 80) : null;
-  }
-}
-
-export function formatEnvironment(cwd: string, opts?: { probes?: boolean }): string {
-  const root = freezeCwd(cwd);
-  const lines = [`cwd: ${JSON.stringify(root)}`, `platform: ${JSON.stringify(process.platform)}`];
-  try {
-    const giPath = join(root, ".gitignore");
-    const listingRules: GitignoreRules = new Map();
-    try {
-      if (existsSync(giPath)) listingRules.set("", parseGitignore(readFileSync(giPath, "utf8")));
-    } catch {
-      /* listing still works without gitignore */
-    }
-    const names = sortUtf8(
-      readdirSync(root).filter((n) => {
-        if (n === "." || n === ".." || IGNORED_SEGMENTS.has(n)) return false;
-        return !gitignoreSkips(listingRules, n, false) && !gitignoreSkips(listingRules, n, true);
-      }),
-    ).slice(0, LISTING_CAP);
-    if (names.length > 0) lines.push(`listing: ${names.map((n) => JSON.stringify(n)).join(", ")}`);
-  } catch {
-    /* unreadable cwd */
-  }
-  if (opts?.probes !== false) {
-    const tools: string[] = [`node ${process.version}`];
-    const deadline = Date.now() + PROBE_TIMEOUT_MS;
-    for (const bin of ["python3", "rustc", "go"]) {
-      const abs = resolveTrustedBin(bin, root);
-      if (!abs) continue;
-      const ver = probeAbs(abs, deadline - Date.now());
-      if (ver) tools.push(`${bin} ${ver}`);
-    }
-    lines.push(`toolchain: ${tools.join("; ")}`);
-  }
-  return `<environment>\n${lines.join("\n")}\n</environment>`;
-}
-
-
-export function parseOffset(value: unknown): number | { error: string } {
-  if (value === undefined || value === null || value === "") return 0;
-  const n = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(n) || n > Number.MAX_SAFE_INTEGER) return { error: "error: offset must be a number" };
-  const i = Math.floor(n);
-  if (i < 0) return { error: "error: offset must be >= 0" };
-  return i;
-}
-
-export function parseLineBound(value: unknown, field: string): number | { error: string } | undefined {
-  if (value === undefined || value === null || value === "") return undefined;
-  const n = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(n) || n > Number.MAX_SAFE_INTEGER) return { error: `error: ${field} must be a number` };
-  const i = Math.floor(n);
-  if (i < 1) return { error: `error: ${field} must be >= 1` };
-  return i;
-}
-
-function linePrefix(n: number): string {
-  const s = String(n);
-  return `${s.length >= LINE_NUM_WIDTH ? s : s.padStart(LINE_NUM_WIDTH, " ")}|`;
-}
-
-export function formatNumberedText(text: string, startLine: number): string {
-  if (text === "") return "";
-  const endsWithNl = text.endsWith("\n");
-  const parts = text.split("\n");
-  if (endsWithNl) parts.pop();
-  return parts.map((line, i) => `${linePrefix(startLine + i)}${line.replace(/\r$/, "")}`).join("\n");
-}
-
-function newlineCount(buf: Buffer): number {
-  let n = 0;
-  for (let i = 0; i < buf.length; i++) if (buf[i] === 10) n++;
-  return n;
-}
-
-function lastNewlineIndex(buf: Buffer): number {
-  for (let i = buf.length - 1; i >= 0; i--) if (buf[i] === 10) return i;
-  return -1;
-}
-
-/** Number of source bytes ending at a complete UTF-8 code-point boundary. */
-function completeUtf8Boundary(value: Uint8Array): number {
-  let cursor = 0;
-  while (cursor < value.byteLength) {
-    const first = value[cursor]!;
-    let length = 0;
-    if (first <= 0x7f) length = 1;
-    else if (first >= 0xc2 && first <= 0xdf) length = 2;
-    else if (first >= 0xe0 && first <= 0xef) length = 3;
-    else if (first >= 0xf0 && first <= 0xf4) length = 4;
-    else break;
-    if (cursor + length > value.byteLength) break;
-    const second = value[cursor + 1];
-    if (length >= 2) {
-      if (second === undefined || (second & 0xc0) !== 0x80) break;
-      if (first === 0xe0 && second < 0xa0) break;
-      if (first === 0xed && second >= 0xa0) break;
-      if (first === 0xf0 && second < 0x90) break;
-      if (first === 0xf4 && second >= 0x90) break;
-      for (let i = 2; i < length; i += 1) {
-        if ((value[cursor + i]! & 0xc0) !== 0x80) return cursor;
-      }
-    }
-    cursor += length;
-  }
-  return cursor;
-}
-
-function scanTimedOut(started: number): boolean {
-  return Date.now() - started >= READ_SCAN_MS;
-}
-
-function countNewlinesInRange(fd: number, end: number, started: number): number | { error: string; timedOut: boolean } {
-  if (end <= 0) return 0;
-  const chunk = Buffer.alloc(Math.min(64 * 1024, end));
-  let pos = 0;
-  let nls = 0;
-  while (pos < end) {
-    if (scanTimedOut(started)) return { error: "error: read timed out", timedOut: true };
-    const want = Math.min(chunk.length, end - pos);
-    const n = readSync(fd, chunk, 0, want, pos);
-    if (n <= 0) break;
-    for (let i = 0; i < n; i++) if (chunk[i] === 10) nls++;
-    pos += n;
-  }
-  return nls;
-}
-
-/** Find both line boundaries in one pass, or `size` when a requested line is
- * beyond EOF. A range read must not rescan the file prefix for its end line. */
-function lineRangeOffsets(
-  fd: number,
-  size: number,
-  startLine: number,
-  endLine: number | undefined,
-  started: number,
-): { start: number; end: number } | { error: string; timedOut: boolean } {
-  const startTarget = Math.max(1, startLine);
-  const endTarget = endLine === undefined ? undefined : Math.max(1, endLine + 1);
-  let start = startTarget <= 1 ? 0 : -1;
-  let end = endTarget === undefined ? size : -1;
-  if (start === 0 && endTarget === undefined) return { start, end };
-  const chunk = Buffer.alloc(64 * 1024);
-  let pos = 0;
-  let current = 1;
-  while (pos < size) {
-    if (scanTimedOut(started)) return { error: "error: read timed out", timedOut: true };
-    const n = readSync(fd, chunk, 0, Math.min(chunk.length, size - pos), pos);
-    if (n <= 0) break;
-    for (let i = 0; i < n; i++) {
-      if (chunk[i] === 10) {
-        current++;
-        const offset = pos + i + 1;
-        if (start < 0 && current === startTarget) start = offset;
-        if (end < 0 && endTarget !== undefined && current === endTarget) {
-          end = offset;
-          if (start >= 0) return { start, end };
-        }
-      }
-    }
-    pos += n;
-  }
-  return { start: start < 0 ? size : start, end: end < 0 ? size : end };
-}
-
-function gitignoreRulesFor(root: string, dirAbs: string): GitignoreRules {
-  const rules: GitignoreRules = new Map();
-  const dirs: string[] = [];
-  let cur = dirAbs;
-  for (;;) {
-    dirs.push(cur);
-    if (cur === root) break;
-    const parent = dirname(cur);
-    if (parent === cur) break;
-    if (parent !== root && !underRoot(parent, root)) break;
-    cur = parent;
-  }
-  for (const dir of dirs.reverse()) {
-    try {
-      const gi = join(dir, ".gitignore");
-      if (!existsSync(gi)) continue;
-      const rel = dir === root ? "" : posixRel(root, dir);
-      rules.set(rel, parseGitignore(readFileSync(gi, "utf8")));
-    } catch {
-      /* unreadable gitignore */
-    }
-  }
-  return rules;
-}
-
-export function listProjectDir(cwd: string, abs: string): ToolTextResult {
-  const root = freezeCwd(cwd);
-  let dirReal = abs;
-  try {
-    dirReal = realpathSync(abs);
-  } catch (err) {
-    return logicalToolText(`error: ${(err as Error).message}`, {
-      maxBytes: READ_CAP_BYTES,
-      state: "failed",
-      isError: true,
-    });
-  }
-  if (!underRoot(dirReal, root)) return logicalToolText("error: path outside project", {
-    maxBytes: READ_CAP_BYTES,
-    state: "failed",
-    isError: true,
-  });
-  let ents;
-  try {
-    ents = readdirSync(dirReal, { withFileTypes: true });
-  } catch (err) {
-    return logicalToolText(`error: ${(err as Error).message}`, {
-      maxBytes: READ_CAP_BYTES,
-      state: "unreadable",
-      isError: true,
-    });
-  }
-  const names = sortUtf8(ents.map((e) => e.name));
-  const gi = gitignoreRulesFor(root, dirReal);
-  const rows: string[] = [];
-  let omitted = 0;
-  for (const name of names) {
-    if (name === "." || name === "..") continue;
-    if (IGNORED_SEGMENTS.has(name)) continue;
-    const classified = classifyWalkPath(join(dirReal, name), root);
-    if (!classified) continue;
-    const rel = posixRel(root, classified.real);
-    if (gitignoreSkips(gi, rel, classified.kind === "dir")) continue;
-    if (rows.length >= DIR_LIST_CAP) {
-      omitted++;
-      continue;
-    }
-    const cleaned = name.replace(/[\x00-\x1f\x7f]/g, " ");
-    rows.push(classified.kind === "dir" ? `${cleaned}/` : cleaned);
-  }
-  const relDir = (posixRel(root, dirReal) || ".").replace(/[\x00-\x1f\x7f]/g, " ");
-  let body = rows.length > 0 ? rows.join("\n") : "(empty directory)";
-  if (omitted > 0) body += `\n<!-- ${omitted} entries omitted -->`;
-  const continuation = omitted > 0 ? `List ${JSON.stringify(relDir)} with a narrower path or filter.` : null;
-  return logicalToolText(`[directory ${relDir}]\n${body}`, {
-    maxBytes: READ_CAP_BYTES,
-    state: "complete",
-    isError: false,
-    forceMarker: omitted > 0,
-    marker: continuation,
-    continuation,
-  });
-}
-
-function truncationMarker(nextOffset: number, nextLine?: number): string {
-  if (nextLine !== undefined) {
-    return `[truncated at ${READ_CAP_BYTES} bytes — read_file offset ${nextOffset} — start_line ${nextLine}]`;
-  }
-  return `[truncated at ${READ_CAP_BYTES} bytes — read_file offset ${nextOffset}]`;
-}
-
-export function readTextView(
-  abs: string,
-  opts: { offset: number; startLine?: number; endLine?: number },
-): ToolTextResult {
-  const repro = `read_file(${JSON.stringify(abs)})`;
-  const fail = (content: string, state: CompletionState = "failed"): ToolTextResult => logicalToolText(content, {
-    maxBytes: READ_CAP_BYTES,
-    state,
-    isError: true,
-    repro,
-  });
-  let fd: number | undefined;
-  try {
-    fd = openSync(abs, "r");
-    const st = fstatSync(fd);
-    const head = Buffer.alloc(Math.min(4096, st.size));
-    if (head.length > 0) readSync(fd, head, 0, head.length, 0);
-    if (head.includes(0)) return fail("error: binary file");
-    if (st.size === 0) return logicalToolText("", {
-      maxBytes: READ_CAP_BYTES,
-      state: "complete",
-      isError: false,
-      repro,
-    });
-
-    const started = Date.now();
-    const lineMode = opts.startLine !== undefined || opts.endLine !== undefined;
-    const startLine = opts.startLine ?? 1;
-    const endLine = opts.endLine;
-    let from = opts.offset;
-    let viewStartLine = 1;
-    let until = st.size;
-    if (lineMode) {
-      const offsets = lineRangeOffsets(fd, st.size, startLine, endLine, started);
-      if ("error" in offsets) return fail(offsets.error, offsets.timedOut ? "timeout" : "failed");
-      from = offsets.start;
-      viewStartLine = startLine;
-      until = offsets.end;
-    } else {
-      const nls = countNewlinesInRange(fd, from, started);
-      if (typeof nls === "object") return fail(nls.error, nls.timedOut ? "timeout" : "failed");
-      viewStartLine = nls + 1;
-    }
-    if (from >= st.size || from >= until) return logicalToolText("", {
-      maxBytes: READ_CAP_BYTES,
-      state: "complete",
-      isError: false,
-      repro,
-    });
-    const want = Math.min(READ_CAP_BYTES, Math.max(0, until - from));
-    const slice = Buffer.alloc(want);
-    if (want > 0) readSync(fd, slice, 0, want, from);
-    const more = from + want < until;
-    let view = slice;
-    let nextOffset = from + want;
-    let atLineBoundary = false;
-    if (more) {
-      const nl = lastNewlineIndex(slice);
-      if (nl >= 0) {
-        view = slice.subarray(0, nl + 1);
-        nextOffset = from + nl + 1;
-        atLineBoundary = true;
-      }
-    }
-    const safe = new BoundedTextAccumulator({ maxBytes: READ_CAP_BYTES, direction: "head", marker: "" });
-    safe.push(view);
-    const safeText = safe.finish();
-    // The provider-visible continuation is a byte offset into the source,
-    // not the end of the raw read buffer.  A cap can split a 2–4 byte code
-    // point; advancing by `want` would silently skip its remaining bytes.
-    const completeBytes = completeUtf8Boundary(view);
-    const sourceBoundary = Math.min(safeText.retainedBytes, completeBytes);
-    nextOffset = from + sourceBoundary;
-    const numbered = formatNumberedText(safeText.text, viewStartLine);
-    if (nextOffset < until) {
-      const nextLine = atLineBoundary && sourceBoundary === view.length
-        ? viewStartLine + newlineCount(view)
-        : undefined;
-      const marker = truncationMarker(nextOffset, nextLine);
-      return logicalToolText(numbered, {
-        maxBytes: READ_CAP_BYTES,
-        state: "complete",
-        isError: false,
-        forceMarker: true,
-        marker,
-        continuation: marker,
-        repro,
-      });
-    }
-    if (safeText.truncated) {
-      const marker = truncationMarker(nextOffset);
-      return logicalToolText(numbered, {
-        maxBytes: READ_CAP_BYTES,
-        state: "unreadable",
-        isError: true,
-        forceMarker: true,
-        marker,
-        continuation: marker,
-        repro,
-      });
-    }
-    return logicalToolText(numbered, {
-      maxBytes: READ_CAP_BYTES,
-      state: "complete",
-      isError: false,
-      repro,
-    });
-  } catch (err) {
-    return fail(`error: ${(err as Error).message}`);
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
-
-export function nestedAgentsPointer(cwd: string, fileAbs: string): string | null {
-  const root = freezeCwd(cwd);
-  let abs = fileAbs;
-  try {
-    if (existsSync(fileAbs)) abs = realpathSync(fileAbs);
-  } catch {
-    abs = resolve(fileAbs);
-  }
-  if (basename(abs) === "AGENTS.md") return null;
-  if (!underRoot(abs, root)) return null;
-  let dir = dirname(abs);
-  while (dir.startsWith(root + sep)) {
-    const candidate = join(dir, "AGENTS.md");
-    if (existsSync(candidate)) {
-      try {
-        const real = realpathSync(candidate);
-        if (!underRoot(real, root)) return null;
-      } catch {
-        return null;
-      }
-      const rel = relative(root, candidate).split(sep).join("/");
-      return `[package instructions: ${rel} — read_file that path]`;
-    }
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return null;
-}
-
-export function readFileResult(abs: string, offset: number): ToolTextResult {
-  const repro = `read_file(${JSON.stringify(abs)})`;
-  const fail = (content: string): ToolTextResult => logicalToolText(content, {
-    maxBytes: READ_CAP_BYTES,
-    state: "failed",
-    isError: true,
-    repro,
-  });
-  let fd: number | undefined;
-  try {
-    fd = openSync(abs, "r");
-    const st = fstatSync(fd);
-    const head = Buffer.alloc(Math.min(4096, st.size));
-    if (head.length > 0) readSync(fd, head, 0, head.length, 0);
-    if (head.includes(0)) return fail("error: binary file");
-    if (offset >= st.size) return logicalToolText("", {
-      maxBytes: READ_CAP_BYTES,
-      state: "complete",
-      isError: false,
-      repro,
-    });
-    const want = Math.min(READ_CAP_BYTES, Math.max(0, st.size - offset));
-    const slice = Buffer.alloc(want);
-    if (want > 0) readSync(fd, slice, 0, want, offset);
-    const safe = new BoundedTextAccumulator({ maxBytes: READ_CAP_BYTES, direction: "head", marker: "" });
-    safe.push(slice);
-    const text = safe.finish();
-    const completeBytes = completeUtf8Boundary(slice);
-    const nextOffset = offset + Math.min(text.retainedBytes, completeBytes);
-    const marker = nextOffset < st.size
-      ? `[truncated at ${READ_CAP_BYTES} bytes — read_file offset ${nextOffset}]`
-      : text.truncated
-        ? `[invalid UTF-8 omitted — continue with read_file offset ${nextOffset}]`
-        : null;
-    const result = logicalToolText(text.text, {
-      maxBytes: READ_CAP_BYTES,
-      state: nextOffset >= st.size && text.truncated ? "unreadable" : "complete",
-      isError: nextOffset >= st.size && text.truncated,
-      forceMarker: marker !== null,
-      marker,
-      continuation: marker,
-      repro,
-    });
-    return result;
-  } catch (err) {
-    return fail(`error: ${(err as Error).message}`);
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
-
-export function readProjectFile(
-  cwd: string,
-  input: { path?: string; offset?: unknown; start_line?: unknown; end_line?: unknown },
-  allow?: ReadonlySet<string>,
-): ToolTextResult {
-  const fail = (content: string): ToolTextResult => logicalToolText(content, {
-    maxBytes: READ_CAP_BYTES,
-    state: "failed",
-    isError: true,
-  });
-  const off = parseOffset(input.offset);
-  if (typeof off !== "number") return fail(off.error);
-  const startLine = parseLineBound(input.start_line, "start_line");
-  if (typeof startLine === "object") return fail(startLine.error);
-  const endLine = parseLineBound(input.end_line, "end_line");
-  if (typeof endLine === "object") return fail(endLine.error);
-  if (startLine !== undefined && endLine !== undefined && endLine < startLine) {
-    return fail("error: end_line must be >= start_line");
-  }
-  if (off > 0 && (startLine !== undefined || endLine !== undefined)) {
-    return fail("error: use start_line or offset, not both");
-  }
-  const confined = confinePath(cwd, input.path ?? "", { allow });
-  if (!confined.ok) return fail(confined.error);
-  let st;
-  try {
-    st = statSync(confined.abs);
-  } catch (err) {
-    return fail(`error: ${(err as Error).message}`);
-  }
-  if (st.isDirectory()) {
-    if (off > 0 || startLine !== undefined || endLine !== undefined) {
-      return fail("error: path is a directory");
-    }
-    return listProjectDir(cwd, confined.abs);
-  }
-  const got = readTextView(confined.abs, { offset: off, startLine, endLine });
-  if (got.isError) return got;
-  const pointer = nestedAgentsPointer(cwd, confined.abs);
-  if (pointer) {
-    const pointerContent = `${pointer}\n${got.content}`;
-    const pointerContinuation = typeof got.continuation === "string"
-      ? got.continuation
-      : `Continue with read_file(${JSON.stringify(confined.abs)}).`;
-    const withPointer = logicalToolText(pointerContent, {
-      maxBytes: READ_CAP_BYTES,
-      state: got.state,
-      isError: got.isError,
-      forceMarker: Buffer.byteLength(pointerContent, "utf8") > READ_CAP_BYTES,
-      marker: pointerContinuation,
-      continuation: typeof got.continuation === "string" ? got.continuation : null,
-      repro: got.repro ?? null,
-    });
-    return Object.freeze({
-      ...withPointer,
-      truncated: withPointer.truncated || got.truncated,
-      continuation: withPointer.continuation ?? got.continuation ?? null,
-      repro: withPointer.repro ?? got.repro ?? null,
-    });
-  }
-  return got;
-}
-
-function atomicWrite(path: string, content: string, mode?: number): void {
-  const tmp = join(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
-  try {
-    writeFileSync(tmp, content, { flag: "wx", ...(mode === undefined ? {} : { mode }) });
-    renameSync(tmp, path);
-  } catch (err) {
-    try {
-      rmSync(tmp, { force: true });
-    } catch {
-      /* preserve the original error */
-    }
-    throw err;
-  }
-}
-
-export function writeProjectFile(cwd: string, path: string | undefined, content: string): { content: string; isError: boolean } {
-  const confined = confinePath(cwd, path ?? "");
-  if (!confined.ok) return { content: confined.error, isError: true };
-  try {
-    mkdirSync(dirname(confined.abs), { recursive: true });
-    let mode: number | undefined;
-    try {
-      mode = statSync(confined.abs).mode & 0o777;
-    } catch {
-      /* use the process umask for a new file */
-    }
-    atomicWrite(confined.abs, content, mode);
-    return { content: `ok: wrote ${posixRel(freezeCwd(cwd), confined.abs)}`, isError: false };
-  } catch (err) {
-    return { content: `error: ${(err as Error).message}`, isError: true };
-  }
-}
-
-export type EditResult = {
-  content: string;
-  isError: boolean;
-  edits?: Array<{ oldText: string; newText: string }>;
-};
-
-function isReplaceAll(value: unknown): boolean {
-  return value === true || value === "true";
-}
-
-export function editMissDiagnostic(body: string, oldText: string): string {
-  const hits: number[] = [];
-  let count = 0;
-  let idx = 0;
-  const step = Math.max(oldText.length, 1);
-  while (idx < body.length) {
-    const at = body.indexOf(oldText, idx);
-    if (at < 0) break;
-    count++;
-    if (hits.length < EDIT_MISS_SHOW) hits.push(at);
-    idx = at + step;
-  }
-  const kind = count === 0 ? "old_text not found" : "old_text is not unique";
-  const noun = count === 1 ? "occurrence" : "occurrences";
-  const lines = [`error: ${kind} (${count} ${noun})`];
-  for (const at of hits) {
-    const lineNo = body.slice(0, at).split("\n").length;
-    const lineStart = at === 0 ? 0 : body.lastIndexOf("\n", at - 1) + 1;
-    const nl = body.indexOf("\n", at);
-    const line = body.slice(lineStart, nl < 0 ? body.length : nl).replace(/\r$/, "");
-    const clipped = line.length > EDIT_MISS_LINE_CHARS ? `${line.slice(0, EDIT_MISS_LINE_CHARS)}...` : line;
-    lines.push(`  ${lineNo}:${clipped}`);
-  }
-  if (count > hits.length) lines.push(`  (${count - hits.length} more)`);
-  return lines.join("\n");
-}
-
-/** Upstream-style fuzzy fallback (opencode replacers, minimal subset). Exact stays
- * authoritative; these only rescue whitespace/indent/trim drift and refuse
- * disproportionate spans so a wrong block can never apply. */
-function findFuzzyEditSpan(body: string, oldText: string): { at: number; len: number } | { ambiguous: true } | null {
-  // Compare on CRLF-normalized lines but index the original body: raw line
-  // starts keep every \r accounted for so the span never shifts the cut.
-  const rawLines = body.split("\n");
-  const bodyLines = rawLines.map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
-  const bodyTrimmed = bodyLines.map((line) => line.trim());
-  const starts: number[] = new Array<number>(rawLines.length);
-  let lineStart = 0;
-  for (let k = 0; k < rawLines.length; k++) {
-    starts[k] = lineStart;
-    lineStart += rawLines[k]!.length + 1;
-  }
-  const findLines = oldText.replace(/\r\n/g, "\n").split("\n");
-  while (findLines.length > 0 && findLines[findLines.length - 1]!.trim() === "" && oldText.endsWith("\n")) findLines.pop();
-  if (findLines.length === 0 || findLines.every((l) => l.trim() === "")) return null;
-  const findTrimmed = findLines.map((line) => line.trim());
-  const matches: Array<{ at: number; len: number }> = [];
-  // 1. Line-trimmed block match (indent drift, line-number prefix copy errors).
-  for (let i = 0; i <= bodyLines.length - findLines.length; i++) {
-    let ok = true;
-    for (let j = 0; j < findLines.length; j++) {
-      if (bodyTrimmed[i + j]! !== findTrimmed[j]!) {
-        ok = false;
-        break;
-      }
-    }
-    if (!ok) continue;
-    const at = starts[i]!;
-    const last = i + findLines.length - 1;
-    const len = starts[last]! + rawLines[last]!.length - at;
-    matches.push({ at, len });
-    if (matches.length > 1) return { ambiguous: true };
-  }
-  if (matches.length === 1) {
-    const m = matches[0]!;
-    if (m.len > Math.max(64, oldText.length * 4)) return null;
-    return m;
-  }
-  return null;
-}
-
-/** First unique occurrence of oldText, or every occurrence when replaceAll is set.
- *  Does not write when the match is missing. Unique mode also fails when repeated. */
-export function editProjectFile(
-  cwd: string,
-  path: string | undefined,
-  oldText: string,
-  newText: string,
-  replaceAll = false,
-): EditResult {
-  if (oldText === "") return { content: "error: old_text must not be empty", isError: true };
-  const confined = confinePath(cwd, path ?? "", { mustExist: true });
-  if (!confined.ok) return { content: confined.error, isError: true };
-  let st;
-  try {
-    st = statSync(confined.abs);
-  } catch (err) {
-    return { content: `error: ${(err as Error).message}`, isError: true };
-  }
-  if (st.isDirectory()) return { content: "error: EISDIR", isError: true };
-  if (st.size > EDIT_MAX_BYTES) return { content: `error: file exceeds ${EDIT_MAX_BYTES} bytes`, isError: true };
-  let fd: number | undefined;
-  let body: string;
-  try {
-    fd = openSync(confined.abs, "r");
-    const buf = Buffer.alloc(st.size);
-    if (st.size > 0) readSync(fd, buf, 0, st.size, 0);
-    if (buf.subarray(0, Math.min(4096, buf.length)).includes(0)) {
-      return { content: "error: binary file", isError: true };
-    }
-    body = buf.toString("utf8");
-  } catch (err) {
-    return { content: `error: ${(err as Error).message}`, isError: true };
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-  if (body.charCodeAt(0) === 0xfeff) body = body.slice(1);
-  const ending = body.includes("\r\n") ? "\r\n" : "\n";
-  const old = oldText.replace(/\r\n/g, "\n").replace(/\n/g, ending).replace(/^\uFEFF/, "");
-  const replacement = newText.replace(/\r\n/g, "\n").replace(/\n/g, ending);
-  if (!replaceAll) {
-    let count = 0;
-    let idx = 0;
-    while (idx < body.length) {
-      const at = body.indexOf(old, idx);
-      if (at < 0) break;
-      count++;
-      if (count > 1) return { content: editMissDiagnostic(body, old), isError: true };
-      idx = at + old.length;
-    }
-    if (count === 0) {
-      const fuzzy = findFuzzyEditSpan(body, old);
-      if (fuzzy && !("ambiguous" in fuzzy)) {
-        const next = body.slice(0, fuzzy.at) + replacement + body.slice(fuzzy.at + fuzzy.len);
-        try {
-          atomicWrite(confined.abs, next, st.mode & 0o777);
-        } catch (err) {
-          return { content: `error: ${(err as Error).message}`, isError: true };
-        }
-        return {
-          content: `ok: edited ${posixRel(freezeCwd(cwd), confined.abs)} (whitespace/indent-tolerant match)`,
-          isError: false,
-          edits: [{ oldText, newText }],
-        };
-      }
-      return { content: editMissDiagnostic(body, old), isError: true };
-    }
-    const at = body.indexOf(old);
-    const next = body.slice(0, at) + replacement + body.slice(at + old.length);
-    try {
-      atomicWrite(confined.abs, next, st.mode & 0o777);
-    } catch (err) {
-      return { content: `error: ${(err as Error).message}`, isError: true };
-    }
-    return {
-      content: `ok: edited ${posixRel(freezeCwd(cwd), confined.abs)}`,
-      isError: false,
-      edits: [{ oldText, newText }],
-    };
-  }
-  let next = body;
-  let from = 0;
-  let n = 0;
-  while (from <= next.length) {
-    const at = next.indexOf(old, from);
-    if (at < 0) break;
-    next = next.slice(0, at) + replacement + next.slice(at + old.length);
-    from = at + replacement.length;
-    n++;
-  }
-  if (n === 0) return { content: editMissDiagnostic(body, old), isError: true };
-  try {
-    atomicWrite(confined.abs, next, st.mode & 0o777);
-  } catch (err) {
-    return { content: `error: ${(err as Error).message}`, isError: true };
-  }
-  return {
-    content: `ok: edited ${posixRel(freezeCwd(cwd), confined.abs)} (${n} replacements)`,
-    isError: false,
-  };
-}
-
-// ---- sidecar (the bridge contract) ----
-
-/** Keep producer edit previews below the tailer's durable record limit. The
- * tool boundary and a digest/count remain even when the preview is clipped;
- * the file on disk remains the authority for the state mutation. */
-export const SIDECAR_TOOL_EDIT_PREVIEW_BYTES = 512 * 1024;
-const SIDECAR_TOOL_EDIT_FIELD_BYTES = 128 * 1024;
-
-function utf8Prefix(value: string, maxBytes: number): string {
-  const source = Buffer.from(value, "utf8");
-  if (source.length <= maxBytes) return value;
-  let end = Math.max(0, maxBytes);
-  while (end > 0 && (source[end]! & 0xc0) === 0x80) end--;
-  return source.subarray(0, end).toString("utf8");
-}
-
-export function boundedSidecarEdits(value: unknown): Record<string, unknown> | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const edits: Array<Record<string, string>> = [];
-  let retainedBytes = 2;
-  let editsTruncated = false;
-  for (const item of value) {
-    if (!item || typeof item !== "object") {
-      editsTruncated = true;
-      continue;
-    }
-    const rec = item as Record<string, unknown>;
-    const oldText = typeof rec.oldText === "string" ? rec.oldText : typeof rec.old_text === "string" ? rec.old_text : undefined;
-    const newText = typeof rec.newText === "string" ? rec.newText : typeof rec.new_text === "string" ? rec.new_text : undefined;
-    if (oldText === undefined && newText === undefined) {
-      editsTruncated = true;
-      continue;
-    }
-    const preview: Record<string, string> = {};
-    if (oldText !== undefined) {
-      preview.oldText = utf8Prefix(oldText, SIDECAR_TOOL_EDIT_FIELD_BYTES);
-      if (preview.oldText !== oldText) editsTruncated = true;
-    }
-    if (newText !== undefined) {
-      preview.newText = utf8Prefix(newText, SIDECAR_TOOL_EDIT_FIELD_BYTES);
-      if (preview.newText !== newText) editsTruncated = true;
-    }
-    const candidateBytes = Buffer.byteLength(JSON.stringify(preview), "utf8") + (edits.length === 0 ? 0 : 1);
-    if (retainedBytes + candidateBytes > SIDECAR_TOOL_EDIT_PREVIEW_BYTES) {
-      editsTruncated = true;
-      break;
-    }
-    edits.push(preview);
-    retainedBytes += candidateBytes;
-  }
-  if (edits.length < value.length) editsTruncated = true;
-  if (!editsTruncated) return edits.length > 0 ? { edits } : {};
-  // Only serialize the full edit list when callers actually need the
-  // truncation boundary (bytes/count/sha). The common fitting case skips it.
-  const serialized = JSON.stringify(value) ?? "[]";
-  const encoded = Buffer.from(serialized, "utf8");
-  return {
-    ...(edits.length > 0 ? { edits } : {}),
-    editsTruncated: true,
-    editsBytes: encoded.length,
-    editsCount: value.length,
-    editsSha256: createHash("sha256").update(encoded).digest("hex"),
-  };
-}
-
-export function tracesDirFor(events: string, id: string): string | null {
-  if (!events || !isValidTerminalId(id)) return null;
-  return join(events, `${id}.traces`);
-}
-
 const sessionEnvironment = consumeAgentSessionEnvironment();
 const eventsDir = sessionEnvironment.TERMINA_EVENTS_DIR ?? "";
 const rawTerminalId = sessionEnvironment.TERMINA_TERMINAL_ID ?? "";
@@ -2612,243 +438,9 @@ const sessionId = sessionEnvironment.TERMINA_CORE_SESSION_ID?.trim() || terminal
 let cacheSeed = cacheSessionSeed(sessionId);
 const bridgeId = `core-${randomUUID()}`;
 const traceRunId = `run-${randomUUID()}`;
-let seq = 0;
-// Every record carries the immutable generation of the producer-owned
-// inode. A marker without this binding cannot authorize retirement.
-let writerGeneration = randomUUID();
-const sidecarBackpressureCell = new Int32Array(new SharedArrayBuffer(4));
-const SIDECAR_MAX_BYTES = 8 * 1024 * 1024;
-const SIDECAR_SEALED_SUFFIX = ".sealed";
-const SIDECAR_SEALED_PROOF_SUFFIX = ".owner";
-const SIDECAR_QUARANTINE_PREFIX = ".quarantine-";
-const SIDECAR_MAX_BACKPRESSURE_POLLS = 80;
-const SIDECAR_APPEND_RETRY_MS = 25;
-const SIDECAR_MAX_APPEND_RETRIES = 80;
-const SIDECAR_MAX_PENDING_EVENTS = 256;
-/** Idempotency look-behind for sidecar appends. Dup detection only matters
- * at EOF (see appendDurable); the window beyond one payload length exists
- * solely for interleaved foreign bytes. */
-const SIDECAR_DUP_WINDOW_BYTES = 64 * 1024;
-function syncFile(path: string): void {
-  const fd = openSync(path, "r");
-  try { fsyncSync(fd); } finally { closeSync(fd); }
-}
-function writeDurableMarker(path: string, content: string): void {
-  const temp = `${path}.${randomUUID()}.tmp`;
-  try {
-    writeFileSync(temp, content, { flag: "wx", mode: 0o600 });
-    syncFile(temp);
-    renameSync(temp, path);
-    syncParentDir(path);
-  } catch (error) {
-    try { rmSync(temp, { force: true }); } catch { /* best effort */ }
-    throw error;
-  }
-}
-function waitForSidecarBackpressure(): boolean {
-  if (!eventsDir || !terminalId) return true;
-  const marker = join(eventsDir, `.backpressure-${terminalId}`);
-  let polls = 0;
-  while (existsSync(marker)) {
-    if (hasQuarantineSidecar()) return false;
-    if (++polls > SIDECAR_MAX_BACKPRESSURE_POLLS) {
-      // Checkpoint/preflight handlers can outlive this poll budget. Treat
-      // the marker as advisory so a slow consumer cannot quarantine the
-      // producer and permanently stall the terminal.
-      return true;
-    }
-    try {
-      Atomics.wait(sidecarBackpressureCell, 0, 0, 25);
-    } catch {
-      // A runtime that cannot block synchronously must fail closed rather
-      // than append past the bounded durable spool.
-      return false;
-    }
-  }
-  return true;
-}
-const activeSidecarPath = eventsDir && terminalId ? join(eventsDir, terminalId + ".jsonl") : "";
-function hasQuarantineSidecar(): boolean {
-  return !!eventsDir && !!terminalId && existsSync(join(eventsDir, SIDECAR_QUARANTINE_PREFIX + terminalId));
-}
-function hasRetainedSidecar(): boolean {
-  if (!eventsDir || !terminalId) return false;
-  try {
-    const prefix = "." + terminalId + ".jsonl.";
-    return readdirSync(eventsDir).some((name) =>
-      name.startsWith(prefix)
-      && (name.includes(".retained-")
-        || name.includes(".draining-")
-        || name.includes(".final-"))
-    );
-  } catch {
-    return false;
-  }
-}
-function quarantineAdmission(reason: string): void {
-  try {
-    if (!hasQuarantineSidecar()) {
-      writeDurableMarker(
-        join(eventsDir, SIDECAR_QUARANTINE_PREFIX + terminalId),
-        JSON.stringify({ version: 1, state: "quarantined", terminalId, reason }) + "\n",
-      );
-    }
-  } catch {
-    /* The caller still fails closed if the diagnostic cannot be published. */
-  }
-}
-/** Append one exact record idempotently. If a write/fsync throws after the
- * kernel accepted the bytes, the next attempt recognizes that same line and
- * only commits its reserved sequence once durability succeeds. */
-function appendDurable(path: string, line: string): void {
-  const payload = Buffer.from(line, "utf8");
-  const fd = openSync(path, "a+", 0o600);
-  try {
-    const size = fstatSync(fd).size;
-    // The writer is a single FIFO, so a retried line is always at (or
-    // partially at) EOF: one payload length covers the full-duplicate check
-    // and the longest recoverable prefix. The extra window only absorbs
-    // interleaved foreign bytes; a full-file scan would re-read megabytes
-    // per tool event for no additional safety.
-    const tailSize = Math.min(size, payload.length + SIDECAR_DUP_WINDOW_BYTES);
-    const tail = Buffer.alloc(tailSize);
-    if (tailSize > 0) readSync(fd, tail, 0, tailSize, size - tailSize);
-    if (tail.indexOf(payload) < 0) {
-      // Recover a prefix accepted by a failed write without emitting the
-      // pending identity a second time. O_APPEND keeps each syscall at EOF.
-      let prefix = 0;
-      const maxPrefix = Math.min(payload.length - 1, tail.length);
-      for (let length = maxPrefix; length > 0; length--) {
-        let equal = true;
-        const start = tail.length - length;
-        for (let i = 0; i < length; i++) {
-          if (tail[start + i] !== payload[i]) { equal = false; break; }
-        }
-        if (equal) { prefix = length; break; }
-      }
-      let written = prefix;
-      while (written < payload.length) {
-        const count = writeSync(fd, payload, written, payload.length - written, undefined);
-        if (!Number.isInteger(count) || count <= 0) throw new Error("sidecar append made no progress");
-        written += count;
-      }
-    }
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-}
-/** Publish a sealed generation from the producer side. Publication records
- * the active inode identity and durable close state; the tailer will not trust
- * a marker that is merely present or bound to another generation. */
-function sealBeforeAppend(lineBytes: number, lastSeq: number): boolean {
-  if (!activeSidecarPath) return false;
-  if (hasQuarantineSidecar()) return false;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    let activeStats: ReturnType<typeof statSync>;
-    try {
-      activeStats = statSync(activeSidecarPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
-        try {
-          const activeFd = openSync(activeSidecarPath, "a", 0o600);
-          try { fsyncSync(activeFd); } finally { closeSync(activeFd); }
-          syncParentDir(activeSidecarPath);
-          return true;
-        } catch {
-          return false;
-        }
-      }
-      return false;
-    }
-    if (activeStats.size === 0 || activeStats.size + lineBytes <= SIDECAR_MAX_BYTES) return true;
-    // A retained/unproven inode may continue draining while this active
-    // generation has room. Once rotation is required, admission stops at
-    // the bounded quarantine boundary instead of creating an overtaking
-    // generation that could lose sequence order.
-    if (hasRetainedSidecar()) {
-      quarantineAdmission("unproven sidecar generation blocked a safe rotation");
-      return false;
-    }
-    // Let an already-published canonical generation retire before creating
-    // another one. This wait is only on the rotation boundary; ordinary
-    // active appends continue while an older retained inode drains.
-    let sealedPolls = 0;
-    let sealedPending = false;
-    try {
-      const prefix = "." + terminalId + ".jsonl.";
-      sealedPending = readdirSync(eventsDir).some((name) => name.startsWith(prefix) && name.endsWith(SIDECAR_SEALED_SUFFIX));
-    } catch {}
-    while (sealedPending) {
-      if (++sealedPolls > SIDECAR_MAX_BACKPRESSURE_POLLS) {
-        quarantineAdmission("sealed sidecar generation did not retire within the bounded admission budget");
-        return false;
-      }
-      if (!waitForSidecarBackpressure()) return false;
-      try { Atomics.wait(sidecarBackpressureCell, 0, 0, 25); } catch { return false; }
-      if (hasQuarantineSidecar()) return false;
-      if (hasRetainedSidecar()) {
-        quarantineAdmission("unproven sidecar generation blocked a safe rotation");
-        return false;
-      }
-      try {
-        const prefix = "." + terminalId + ".jsonl.";
-        sealedPending = readdirSync(eventsDir).some((name) => name.startsWith(prefix) && name.endsWith(SIDECAR_SEALED_SUFFIX));
-      } catch {
-        sealedPending = false;
-      }
-    }
-    let proofPath: string | undefined;
-    try {
-      const sealedPath = activeSidecarPath + "." + Date.now().toString(36) + "-" + process.pid + "-" + randomUUID() + SIDECAR_SEALED_SUFFIX;
-      proofPath = sealedPath + SIDECAR_SEALED_PROOF_SUFFIX;
-      const sealedName = basename(sealedPath);
-      const identity = String(activeStats.dev) + ":" + String(activeStats.ino);
-      // The synchronous append path has no descriptor that survives this
-      // call. Flush and revalidate the active inode immediately before the
-      // publication boundary; a concurrent replacement must not be described
-      // by this writer's close proof.
-      syncFile(activeSidecarPath);
-      const beforeRename = statSync(activeSidecarPath);
-      if (String(beforeRename.dev) + ":" + String(beforeRename.ino) !== identity || beforeRename.size !== activeStats.size) continue;
-      renameSync(activeSidecarPath, sealedPath);
-      syncFile(sealedPath);
-      const activeFd = openSync(activeSidecarPath, "a", 0o600);
-      try { fsyncSync(activeFd); } finally { closeSync(activeFd); }
-      syncParentDir(sealedPath);
-      // Publish the close proof last. If a crash interrupts any prior
-      // rename/file/parent durability step, restart sees an unproven sealed
-      // inode and keeps an anchor instead of trusting an orphan marker.
-      writeDurableMarker(proofPath, JSON.stringify({
-        version: 2,
-        state: "closed",
-        writerId: bridgeId,
-        bridgeId,
-        generation: writerGeneration,
-        sealedName,
-        identity,
-        lastSeq,
-      }) + "\n");
-      writerGeneration = randomUUID();
-      return true;
-    } catch (error) {
-      // A failed publish may have written a proof after the sealed pathname
-      // was published but before the complete operation returned. Removing
-      // it makes restart use the conservative retained-anchor path.
-      if (proofPath) {
-        try {
-          rmSync(proofPath, { force: true });
-          syncParentDir(proofPath);
-        } catch { /* best effort */ }
-      }
-      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") continue;
-      return false;
-    }
-  }
-  return false;
-}
+const sidecar = createSidecarWriter({ eventsDir, terminalId, bridgeId });
 const canonicalCwd = freezeCwd(process.cwd());
-let allowPaths = new Set<string>();
+const frontMatter = createFrontMatter({ canonicalCwd });
 const tracesDir = tracesDirFor(eventsDir, terminalId) ?? "";
 let streamPrepared = false;
 
@@ -3017,82 +609,6 @@ function rotateCacheSession(): void {
   resetCacheContinuity();
 }
 
-type PendingSidecarWrite = {
-  body: Record<string, unknown>;
-  seq: number;
-  generation: string | null;
-  line: string | null;
-  attempts: number;
-};
-
-let sidecarWriteStopped = false;
-const pendingSidecarWrites: PendingSidecarWrite[] = [];
-let sidecarRetryTimer: ReturnType<typeof setTimeout> | null = null;
-
-function scheduleSidecarRetry(): void {
-  if (sidecarWriteStopped || sidecarRetryTimer !== null) return;
-  sidecarRetryTimer = setTimeout(() => {
-    sidecarRetryTimer = null;
-    // The queue head may have committed while this timer was pending; retry
-    // whichever exact identity is now blocking the FIFO.
-    flushPendingSidecar();
-  }, SIDECAR_APPEND_RETRY_MS);
-}
-
-function failPendingSidecar(pending: PendingSidecarWrite, error: unknown): void {
-  pending.attempts++;
-  if (pending.attempts >= SIDECAR_MAX_APPEND_RETRIES) {
-    sidecarWriteStopped = true;
-    quarantineAdmission("sidecar append did not become durable within the bounded retry budget");
-    console.warn(`[sidecar] event append stopped after bounded retries: ${error instanceof Error ? error.message : String(error)}`);
-    return;
-  }
-  scheduleSidecarRetry();
-}
-
-function flushPendingSidecar(): boolean {
-  if (pendingSidecarWrites.length === 0 || sidecarWriteStopped) return false;
-  while (pendingSidecarWrites.length > 0) {
-    const pending = pendingSidecarWrites[0]!;
-    try {
-      mkdirSync(eventsDir, { recursive: true });
-      if (!waitForSidecarBackpressure()) throw new Error("sidecar admission is paused");
-      if (pending.line === null) {
-        const draft = JSON.stringify({ ...pending.body, bridgeId, producerPid: process.pid, seq: pending.seq, generation: writerGeneration }) + "\n";
-        if (!sealBeforeAppend(Buffer.byteLength(draft, "utf8"), seq)) throw new Error("sidecar generation is not publishable");
-        // Rotation changes the active inode generation. Freeze the post-rotation
-        // line so every retry addresses this exact event identity.
-        pending.generation = writerGeneration;
-        pending.line = JSON.stringify({ ...pending.body, bridgeId, producerPid: process.pid, seq: pending.seq, generation: pending.generation }) + "\n";
-      }
-      appendDurable(activeSidecarPath, pending.line);
-      // The sequence is committed only after append + fsync succeed.
-      seq = pending.seq;
-      pendingSidecarWrites.shift();
-      pending.attempts = 0;
-    } catch (error) {
-      failPendingSidecar(pending, error);
-      return false;
-    }
-  }
-  return true;
-}
-
-function logEvent(body: Record<string, unknown>): void {
-  if (!eventsDir || !terminalId || sidecarWriteStopped) return;
-  // Reserve in call order even while an earlier append is retrying. Later
-  // records stay queued behind the exact failed identity instead of being
-  // silently dropped by a transient filesystem error.
-  if (pendingSidecarWrites.length >= SIDECAR_MAX_PENDING_EVENTS) {
-    sidecarWriteStopped = true;
-    quarantineAdmission("sidecar pending event queue exceeded its bounded admission");
-    console.warn("[sidecar] event append stopped after pending queue overflow");
-    return;
-  }
-  pendingSidecarWrites.push({ body, seq: seq + pendingSidecarWrites.length + 1, generation: null, line: null, attempts: 0 });
-  void flushPendingSidecar();
-}
-
 export interface TraceCacheDiagnostics extends CacheRequestDiagnostics {
   /** Hash and exact byte count of the volatile overlay, if one was sent. */
   overlayHash: string | null;
@@ -3247,7 +763,7 @@ function beginTraceAttempt(
 
 function traceFailure(outcome: TraceWriteOutcome): void {
   if (outcome.ok) return;
-  logEvent({
+  sidecar.logEvent({
     t: "trace_write_failure",
     kind: outcome.kind,
     persisted: outcome.persisted,
@@ -3267,7 +783,7 @@ async function closeTraceRuntime(): Promise<boolean> {
   try {
     const outcome = await runtime.close();
     if (!outcome.ok) {
-      logEvent({
+      sidecar.logEvent({
         t: "trace_manifest_failure",
         kind: outcome.kind,
         path: outcome.path,
@@ -3276,7 +792,7 @@ async function closeTraceRuntime(): Promise<boolean> {
     }
     return outcome.ok;
   } catch (error) {
-    logEvent({
+    sidecar.logEvent({
       t: "trace_manifest_failure",
       kind: "manifest-write-failure",
       path: tracesDir ? join(tracesDir, "trace-manifest.json") : null,
@@ -3410,7 +926,7 @@ async function writeTraceAttempt(
     if (disposition.retry && attempt.traceWriteRetries < 1) {
       attempt.traceWriteRetries += 1;
       const failure = outcome.ok ? null : outcome;
-      logEvent({
+      sidecar.logEvent({
         t: "trace_write_retry",
         kind: outcome.kind,
         retryable: failure?.retryable ?? false,
@@ -3428,7 +944,7 @@ async function writeTraceAttempt(
       }
     } else if (!disposition.terminal) {
       const failure = outcome.ok ? null : outcome;
-      logEvent({
+      sidecar.logEvent({
         t: "trace_write_unpersisted",
         kind: failure?.kind ?? outcome.kind,
         retryable: failure?.retryable ?? false,
@@ -3440,7 +956,7 @@ async function writeTraceAttempt(
     attempt.traceWriteComplete = true;
   } catch (error) {
     attempt.traceWriteComplete = true;
-    logEvent({ t: "trace_write_failure", kind: "write-failure", persisted: false, error: error instanceof Error ? error.message : String(error) });
+    sidecar.logEvent({ t: "trace_write_failure", kind: "write-failure", persisted: false, error: error instanceof Error ? error.message : String(error) });
   } finally {
     if (inFlightTraceAttempt === attempt) inFlightTraceAttempt = null;
   }
@@ -3467,7 +983,7 @@ async function settleTraceTask(status: string): Promise<void> {
       outcome: { status, correctness: null, criteriaHash: task.criteriaHash },
     }));
   } catch (error) {
-    logEvent({ t: "trace_write_failure", kind: "write-failure", persisted: false, error: error instanceof Error ? error.message : String(error) });
+    sidecar.logEvent({ t: "trace_write_failure", kind: "write-failure", persisted: false, error: error instanceof Error ? error.message : String(error) });
   } finally {
     activeTraceTask = null;
     inFlightTraceAttempt = null;
@@ -3833,373 +1349,6 @@ function persist(entry: Record<string, unknown>): number {
   return sseq;
 }
 
-function readOptional(path: string): string | null {
-  try {
-    if (!existsSync(path)) return null;
-    return readFileSync(path, "utf8");
-  } catch {
-    return null;
-  }
-}
-
-// ---- frozen deterministic front matter ----
-
-let frozenSystem: string | null = null;
-
-/** Zone 1 identity. Do not ask in chat to edit ordinary project files.
- *  Host notes that name a file not to touch (Mine, sibling claims) still bind. */
-export const FROZEN_IDENTITY = [
-  "You are the Termina agent-core. Be terse. Use tools to do real work in the user's project.",
-  "For clear, reversible local work, do it in the current turn instead of asking permission conversationally. Follow an explicit host instruction not to touch a file. Prefer edit on existing files, grep/glob over bash search, and read before edit.",
-].join("\n");
-
-/** Built once per process, fixed order: identity, environment, user
- *  instructions, skill index, project instructions. */
-export function buildFrozenSystem(opts: {
-  cwd: string;
-  userAgentsPath: string | null;
-  userSkillDir: string | null;
-  probes?: boolean;
-}): { system: string; allow: Set<string> } {
-  const root = freezeCwd(opts.cwd);
-  const skillDirs: string[] = [];
-  if (opts.userSkillDir) skillDirs.push(opts.userSkillDir);
-  const projectSkillRoot = join(root, ".agents", "skills");
-  try {
-    if (existsSync(projectSkillRoot) && underRoot(realpathSync(projectSkillRoot), root)) {
-      skillDirs.push(projectSkillRoot);
-    }
-  } catch {
-    /* omit escaped project skill root */
-  }
-  const scanned = scanSkills(skillDirs);
-  const allow = new Set(scanned.skills.map((s) => s.abs));
-  if (opts.userAgentsPath) {
-    try {
-      if (existsSync(opts.userAgentsPath)) allow.add(realpathSync(opts.userAgentsPath));
-    } catch {
-      /* missing or unreadable */
-    }
-  }
-  const parts = [
-    FROZEN_IDENTITY,
-    formatEnvironment(root, { probes: opts.probes !== false }),
-  ];
-  if (opts.userAgentsPath) {
-    const userMd = readOptional(opts.userAgentsPath);
-    if (userMd !== null) {
-      let abs = opts.userAgentsPath;
-      try {
-        abs = realpathSync(opts.userAgentsPath);
-      } catch {
-        /* keep unresolved path */
-      }
-      parts.push(formatUserInstructions(userMd, abs));
-    }
-  }
-  const skillXml = formatCompactSkillIndex(scanned.skills, {
-    roots: skillDirs,
-    capBytes: SKILL_XML_CAP,
-    capped: scanned.capped,
-  });
-  if (skillXml) parts.push(skillXml);
-  const projPath = join(root, "AGENTS.md");
-  try {
-    if (existsSync(projPath) && underRoot(realpathSync(projPath), root)) {
-      const proj = readOptional(projPath);
-      if (proj !== null) parts.push(formatProjectInstructions(proj));
-    }
-  } catch {
-    /* omit escaped project instructions */
-  }
-  return { system: parts.join("\n\n"), allow };
-}
-
-function freezeFrontMatter(): string {
-  if (frozenSystem !== null) return frozenSystem;
-  const built = buildFrozenSystem({
-    cwd: canonicalCwd,
-    userAgentsPath: join(homedir(), ".agents", "AGENTS.md"),
-    userSkillDir: join(homedir(), ".agents", "skills"),
-    probes: true,
-  });
-  allowPaths = built.allow;
-  frozenSystem = built.system;
-  return frozenSystem;
-}
-
-function systemPrompt(): string {
-  return freezeFrontMatter();
-}
-
-// ---- tools ----
-
-interface ToolUse {
-  id: string;
-  name: string;
-  input: {
-    path?: string;
-    command?: string;
-    content?: string;
-    offset?: unknown;
-    start_line?: unknown;
-    end_line?: unknown;
-    pattern?: string;
-    glob?: string;
-    query?: string;
-    old_text?: string;
-    new_text?: string;
-    [key: string]: unknown;
-  };
-}
-
-/**
- * Result shape shared by filesystem/process/network tools.
- *
- * `content` is the bounded rendering that is safe to put in the next model
- * request.  The original stream accounting remains on `bounded`; process
- * tools additionally keep independent stdout/stderr results and exit status.
- * A continuation is deliberately metadata (the actionable hint is also in
- * the bounded text marker) so it cannot leak as an unrecognised provider
- * content block.
- */
-export type ToolTextResult = BoundedToolResult & {
-  continuation?: string | McpContinuation | null;
-  repro?: string | null;
-  stdout?: BoundedText;
-  stderr?: BoundedText;
-  exitCode?: number | null;
-  signal?: string | null;
-};
-
-type BoundedOutcomeMetadata = Pick<
-  BoundedText,
-  "state" | "direction" | "limitBytes" | "inputBytes" | "retainedBytes" | "omittedBytes" | "outputBytes" | "truncated"
->;
-
-interface ToolOutcome {
-  result: Record<string, unknown>;
-  isError: boolean;
-  /** Preserve bounded MCP accounting through the generic tool boundary. */
-  bounded?: BoundedOutcomeMetadata;
-  cancellationScope?: McpCancellationScope;
-  continuation?: string | McpContinuation | null;
-  repro?: string | null;
-  stdout?: BoundedText;
-  stderr?: BoundedText;
-  exitCode?: number | null;
-  signal?: string | null;
-}
-
-function toolResult(use: ToolUse, content: string): Record<string, unknown> {
-  return { type: "tool_result", tool_use_id: use.id, content };
-}
-
-function boundedMetadata(value: BoundedText): BoundedOutcomeMetadata {
-  return {
-    state: value.state,
-    direction: value.direction,
-    limitBytes: value.limitBytes,
-    inputBytes: value.inputBytes,
-    retainedBytes: value.retainedBytes,
-    omittedBytes: value.omittedBytes,
-    outputBytes: value.outputBytes,
-    truncated: value.truncated,
-  };
-}
-
-function genericToolText(content: string, isError: boolean): ToolTextResult {
-  return boundedToolResult(content, {
-    maxBytes: GREP_BYTE_CAP,
-    direction: "head",
-    marker: isError ? "" : "[output truncated — re-run the tool for the rest]",
-    state: isError ? "failed" : "complete",
-    isError,
-  });
-}
-
-/** Render an actionable continuation even when the operation itself was
- * complete but its page/result was intentionally shortened (for example the
- * 200-entry glob page). */
-function logicalToolText(
-  content: string,
-  opts: {
-    maxBytes: number;
-    state: CompletionState;
-    isError: boolean;
-    marker?: string | null;
-    repro?: string | null;
-    forceMarker?: boolean;
-    continuation?: string | McpContinuation | null;
-  },
-): ToolTextResult {
-  const marker = opts.marker === undefined
-    ? "[output truncated — re-run the tool for the rest]"
-    : opts.marker ?? "";
-  if (!opts.forceMarker || !marker) {
-    return Object.freeze({
-      ...boundedToolResult(content, {
-        maxBytes: opts.maxBytes,
-        direction: "head",
-        marker,
-        state: opts.state,
-        isError: opts.isError,
-      }),
-      continuation: opts.continuation ?? (marker || null),
-      repro: opts.repro ?? null,
-    });
-  }
-  const markerBytes = Buffer.byteLength(marker, "utf8");
-  const bodyLimit = Math.max(0, opts.maxBytes - markerBytes - 1);
-  const body = boundedToolResult(content, {
-    maxBytes: bodyLimit,
-    direction: "head",
-    marker: "",
-    state: opts.state,
-    isError: opts.isError,
-  });
-  const combined = body.content ? `${body.content}\n${marker}` : marker;
-  const final = boundedToolResult(combined, {
-    maxBytes: opts.maxBytes,
-    direction: "head",
-    marker: "",
-    state: opts.state,
-    isError: opts.isError,
-  });
-  return Object.freeze({
-    ...final,
-    truncated: true,
-    continuation: opts.continuation ?? marker,
-    repro: opts.repro ?? null,
-  });
-}
-
-function done(use: ToolUse, value: string | ToolTextResult, isError?: boolean): ToolOutcome {
-  const output = typeof value === "string"
-    ? Object.freeze({ ...genericToolText(value, isError === true), repro: reproFor(use) ?? null })
-    : value;
-  return {
-    result: toolResult(use, output.content),
-    isError: output.isError,
-    bounded: boundedMetadata(output),
-    continuation: output.continuation ?? null,
-    repro: output.repro ?? null,
-    ...(output.stdout ? { stdout: output.stdout } : {}),
-    ...(output.stderr ? { stderr: output.stderr } : {}),
-    ...(output.exitCode === undefined ? {} : { exitCode: output.exitCode }),
-    ...(output.signal === undefined ? {} : { signal: output.signal }),
-  };
-}
-
-function toolOutcomeTraceFields(outcome: ToolOutcome): Record<string, unknown> {
-  const fields: Record<string, unknown> = {};
-  if (outcome.bounded) fields.bounded = { ...outcome.bounded };
-  if (outcome.cancellationScope) fields.cancellationScope = outcome.cancellationScope;
-  if (outcome.continuation) fields.continuation = outcome.continuation;
-  if (outcome.repro) fields.repro = outcome.repro;
-  if (outcome.stdout) fields.stdout = { ...boundedMetadata(outcome.stdout) };
-  if (outcome.stderr) fields.stderr = { ...boundedMetadata(outcome.stderr) };
-  if (outcome.exitCode !== undefined) fields.exitCode = outcome.exitCode;
-  if (outcome.signal !== undefined) fields.signal = outcome.signal;
-  return fields;
-}
-
-function toolOutcomeTraceInput(use: ToolUse, outcome: ToolOutcome): Record<string, unknown> {
-  return {
-    toolName: use.name,
-    toolCallId: use.id,
-    isError: outcome.isError,
-    ...toolOutcomeTraceFields(outcome),
-  };
-}
-
-export function shellQuote(raw: string): string {
-  const cleaned = raw.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 80);
-  return `'${cleaned.replace(/'/g, `'\\''`)}'`;
-}
-
-export function reproFor(use: ToolUse): string | undefined {
-  // Error results also need reproduction metadata; malformed runtime values
-  // must not throw while we are trying to report their validation failure.
-  const text = (key: string): string => typeof use.input[key] === "string" ? use.input[key] as string : "";
-  if (use.name === "bash") return `bash ${shellQuote(text("command"))}`;
-  if (use.name === "read_file") return `read_file(${JSON.stringify(text("path"))})`;
-  if (use.name === "edit") return `edit(${JSON.stringify(text("path"))})`;
-  if (use.name === "grep") return `grep ${shellQuote(text("pattern"))}`;
-  if (use.name === "glob") return `glob ${shellQuote(text("pattern"))}`;
-  if (use.name === "web_search") return `web_search ${shellQuote(text("query"))}`;
-  if (use.name === "fetch") return `fetch ${shellQuote(text("url"))}`;
-  return undefined;
-}
-
-export function sidecarStartFor(use: {
-  name: string;
-  id: string;
-  input: { path?: string; old_text?: string; new_text?: string; replace_all?: unknown };
-}): Record<string, unknown> {
-  if (use.name === "write_file") {
-    return { t: "tool", toolName: "write", path: use.input.path, toolCallId: use.id };
-  }
-  if (use.name === "edit") {
-    const start: Record<string, unknown> = {
-      t: "tool",
-      toolName: "edit",
-      path: use.input.path,
-      toolCallId: use.id,
-    };
-    if (!isReplaceAll(use.input.replace_all)) {
-      Object.assign(start, boundedSidecarEdits([{ oldText: use.input.old_text ?? "", newText: use.input.new_text ?? "" }]));
-    }
-    return start;
-  }
-  return { t: "tool", toolName: use.name, toolCallId: use.id };
-}
-
-export function formatToolAnnounce(use: ToolUse): string {
-  let detail = "";
-  if (use.name === "edit" || use.name === "write_file" || use.name === "read_file") detail = use.input.path ?? "";
-  else if (use.name === "bash") detail = `$ ${use.input.command ?? ""}`;
-  else if (use.name === "grep") detail = use.input.pattern ?? "";
-  else if (use.name === "glob") detail = use.input.pattern ?? "";
-  else if (use.name === "fetch") detail = String(use.input.url ?? "");
-  else if (use.name === "spawn_subagent") detail = String(use.input.task ?? "").slice(0, 80);
-  else if (use.name === "message_subagent") detail = String(use.input.run_id ?? "");
-  return `◆ Tool · ${use.name}${detail ? `\n  ${detail}` : ""}`;
-}
-
-function capDisplay(text: string, maxBytes: number): string {
-  const buf = Buffer.from(text, "utf8");
-  if (buf.length <= maxBytes) return text;
-  let start = buf.length - maxBytes;
-  while (start < buf.length && (buf[start]! & 0xc0) === 0x80) start += 1;
-  return buf.subarray(start).toString("utf8");
-}
-
-export function formatToolFollowup(use: ToolUse, outcome: { result: Record<string, unknown>; isError: boolean }): string {
-  const content = typeof outcome.result.content === "string" ? outcome.result.content : "";
-  const status = outcome.isError ? "failed" : "done";
-  if (use.name === "bash") {
-    const shown = displayToolOutput(content);
-    return `◇ ${use.name} · ${status}${shown ? `\n${shown}` : ""}\n`;
-  }
-  if (outcome.isError) {
-    const shown = displayToolOutput(content);
-    return `◇ ${use.name} · failed${shown ? `\n${shown}` : ""}\n`;
-  }
-  if (use.name === "grep" || use.name === "glob") {
-    if (isGrepNoMatches(content)) return `◇ ${use.name} · done · no matches\n`;
-    // Ripgrep-style summary header ("N hits in M files") carries the exact
-    // count; prefer it over counting display lines. Pinned by harness-kernel.
-    if (use.name === "grep") {
-      const hm = /^(\d+\+?) hits? in /.exec(content);
-      if (hm) return `◇ grep · done · ${hm[1]} hits\n`;
-    }
-    const n = content === "" ? 0 : content.split("\n").length;
-    return `◇ ${use.name} · done · ${n} ${use.name === "grep" ? "hits" : "files"}\n`;
-  }
-  return `◇ ${use.name} · done\n`;
-}
-
 export function runBash(
   command: string,
   opts: { cwd: string; timeoutMs?: number; shouldStop?: () => boolean },
@@ -4486,25 +1635,6 @@ export async function fetchUrl(
   return fail("error: too many redirects");
 }
 
-export type PermissionMode = "always" | "dangerous" | "ask";
-
-export function isDangerousBash(command: string): boolean {
-  const text = command.replace(/\\\n/g, " ");
-  return (
-    /\b(?:sudo|doas|su|rm|rmdir|unlink|shred|truncate|mkfs|fdisk|parted|shutdown|reboot|halt|poweroff|chmod|chown|kill|pkill|killall)\b/i.test(text) ||
-    /\bdd\b[^\n]*\bof=/i.test(text) ||
-    /\bfind\b[^\n]*(?:\s-delete\b|\s-exec\b)/i.test(text) ||
-    /\bgit\b[^\n;&|]*\b(?:clean\b|restore\b|push\b|reset\s+--hard\b|checkout\s+--\b)/i.test(text) ||
-    /\b(?:npm|pnpm|yarn)\s+publish\b/i.test(text) ||
-    /\b(?:curl|wget)\b[^\n]*\|\s*(?:env\s+)?(?:ba|z|k|c)?sh\b/i.test(text) ||
-    /\b(?:python\d*|node|ruby|perl|(?:ba|z|k|c)?sh)\b[^\n]*(?:\s-c\b|\s-e\b)/i.test(text)
-  );
-}
-
-export function shouldAskPermission(mode: PermissionMode, command: string): boolean {
-  return mode === "ask" || (mode === "dangerous" && isDangerousBash(command));
-}
-
 let permissionMode: PermissionMode = process.env.TERMINA_CORE_APPROVE === "all" ? "always" : "ask";
 let approvalResolve: ((line: string) => void) | null = null;
 let approvalQueue = Promise.resolve();
@@ -4739,38 +1869,11 @@ async function confirmProtectedMutation(inputPath: string | undefined): Promise<
   return queueApproval(() => confirmProtectedMutationNow(inputPath));
 }
 
-/** Per-file promise chains so concurrent batch tools never interleave mutations. */
-const fileMutationChains = new Map<string, Promise<void>>();
-
-export function fileMutationKey(cwd: string, inputPath: string | undefined): string | null {
-  const confined = confinePath(cwd, inputPath);
-  return confined.ok ? confined.abs : null;
-}
-
-/** Run fn after the previous mutation on key settles. Null keys run unserialized. */
-export async function withFileMutation<T>(key: string | null, fn: () => Promise<T>): Promise<T> {
-  if (key === null) return fn();
-  const prev = fileMutationChains.get(key) ?? Promise.resolve();
-  let release!: () => void;
-  const mine = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const chained = prev.then(() => mine);
-  fileMutationChains.set(key, chained);
-  await prev;
-  try {
-    return await fn();
-  } finally {
-    release();
-    if (fileMutationChains.get(key) === chained) fileMutationChains.delete(key);
-  }
-}
-
 async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolOutcome> {
   if (interrupted) return done(use, "(interrupted by user; tool not executed)", true);
   if (!clientTools.some((tool) => tool.name === use.name)) return done(use, `error: unknown tool ${use.name}`, true);
   if (use.name === "read_file") {
-    const got = readProjectFile(canonicalCwd, use.input, allowPaths);
+    const got = readProjectFile(canonicalCwd, use.input, frontMatter.allowPaths);
     return done(use, got);
   }
   if (use.name === "write_file") {
@@ -4824,8 +1927,8 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
     if (parentTruncated) {
       return done(use, "error: parent turn hit the output limit, so the brief may be truncated — re-issue spawn_subagent with the complete brief", true);
     }
-    // Forward budget/paths raw: the registry validates them so malformed
-    // input fails closed instead of silently dropping lease protection.
+    // Forward budget/paths/user_requested raw: the registry validates them so
+    // malformed input fails closed instead of silently dropping protection.
     const got = await subagentRegistry.spawn({
       task: String(use.input.task ?? ""),
       ...(use.input.model === undefined ? {} : { model: String(use.input.model) }),
@@ -4833,6 +1936,7 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
       ...(use.input.budget === undefined ? {} : { budget: use.input.budget }),
       ...(use.input.paths === undefined ? {} : { paths: use.input.paths }),
       ...(use.input.resume === undefined ? {} : { resume: use.input.resume }),
+      ...(use.input.user_requested === undefined ? {} : { userRequested: use.input.user_requested }),
       parent: {
         provider: route.provider,
         model: route.model,
@@ -4861,7 +1965,7 @@ async function executeTool(use: ToolUse, parentTruncated = false): Promise<ToolO
       subagentRegistry.settleRun(got.run.id, `host handoff failed: ${handoff.error}`, "failed");
       return done(use, `error: ${handoff.error}`, true);
     }
-    logEvent(subagentSpawnSidecarRecord(got.run.id, handoff.file));
+    sidecar.logEvent(subagentSpawnSidecarRecord(got.run.id, handoff.file, got.run.userRequested));
     return done(use, JSON.stringify({ runId: got.run.id }));
   }
   if (use.name === "message_subagent") {
@@ -5168,168 +2272,7 @@ export function requestTools(
 }
 
 function logToolStart(use: ToolUse): void {
-  logEvent(sidecarStartFor(use));
-}
-
-function toolTranscriptDetail(use: ToolUse): string {
-  if (use.name === "edit" || use.name === "write_file" || use.name === "read_file") return use.input.path ?? "";
-  if (use.name === "bash") return use.input.command ?? "";
-  if (use.name === "grep" || use.name === "glob") return use.input.pattern ?? "";
-  if (use.name === "fetch") return String(use.input.url ?? "");
-  return "";
-}
-
-const TOOL_TRUNCATION_HINT = "…[truncated — re-run or read_file for the rest]";
-
-export function displayToolOutput(content: string): string {
-  if (Buffer.byteLength(content, "utf8") <= TOOL_DISPLAY_BYTES) return content;
-  return `${capDisplay(content, TOOL_DISPLAY_BYTES)}\n${TOOL_TRUNCATION_HINT}`;
-}
-
-function toolTranscriptOutput(outcome: ToolOutcome): string {
-  const content = typeof outcome.result.content === "string" ? outcome.result.content : "";
-  return displayToolOutput(content);
-}
-
-function blockInput(block: ContentBlock): ToolUse["input"] {
-  const raw = block.input;
-  if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw as ToolUse["input"];
-  return {};
-}
-
-function blockBodyText(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (!Array.isArray(value)) return "";
-  const parts: string[] = [];
-  for (const part of value) {
-    if (typeof part === "string") parts.push(part);
-    else if (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string") {
-      parts.push((part as { text: string }).text);
-    }
-  }
-  return parts.join("\n");
-}
-
-function replayToolOutput(text: string): string {
-  return displayToolOutput(text);
-}
-
-function replayToolState(block: ContentBlock, text: string): "success" | "error" {
-  if (block.is_error === true || block.isError === true) return "error";
-  if (text.startsWith("error:")) return "error";
-  return "success";
-}
-
-function paintPlain(tui: AgentTui | null, text: string): void {
-  if (!text) return;
-  if (tui) tui.appendPlain(text);
-  else process.stdout.write(text);
-}
-
-function paintUserEcho(tui: AgentTui | null, text: string): void {
-  const body = text.trimEnd();
-  if (!body) return;
-  paintPlain(tui, `\n> ${body}\n`);
-}
-
-/** Paint stored messages into the live transcript. Skip encrypted reasoning. */
-export function renderHistoryTranscript(
-  messages: Array<{ role: "user" | "assistant"; content: string | ContentBlock[] }>,
-  tui: AgentTui | null,
-): void {
-  const pending: Array<{ id: string; handle: TranscriptHandle | null }> = [];
-
-  const writeFollowup = (state: "success" | "error" | "cancelled", output?: string): void => {
-    const label = state === "error" ? "failed" : state === "cancelled" ? "cancelled" : "done";
-    process.stdout.write(`◇ ${label}${output ? `\n${output}` : ""}\n`);
-  };
-
-  const finishHandle = (handle: TranscriptHandle | null, state: "success" | "error" | "cancelled", output?: string): void => {
-    if (handle && tui) tui.finishTool(handle, state, output);
-    else if (!tui) writeFollowup(state, output);
-  };
-
-  const finish = (id: string, state: "success" | "error" | "cancelled", output?: string): void => {
-    let idx = pending.findIndex((item) => item.id === id);
-    if (idx < 0 && !id) idx = 0;
-    if (idx < 0 || idx >= pending.length) {
-      if (tui) {
-        const handle = tui.startTool("tool", "");
-        tui.finishTool(handle, state, output);
-      } else writeFollowup(state, output);
-      return;
-    }
-    const rec = pending.splice(idx, 1)[0]!;
-    finishHandle(rec.handle, state, output);
-  };
-
-  const start = (id: string, name: string, detail: string, announce: string): void => {
-    if (tui) pending.push({ id, handle: tui.startTool(name, detail) });
-    else {
-      process.stdout.write(`\n${announce}\n`);
-      pending.push({ id, handle: null });
-    }
-  };
-
-  for (const message of messages) {
-    const content = message.content;
-    if (typeof content === "string") {
-      if (content.startsWith("<context-handoff>")) {
-        const handoff = content.replace(/<\/?context-handoff>/g, "").trim();
-        if (handoff) paintPlain(tui, `${handoff}\n`);
-        continue;
-      }
-      if (message.role === "user") paintUserEcho(tui, content);
-      else if (tui) tui.appendAssistant(content);
-      else process.stdout.write(content);
-      continue;
-    }
-    for (const block of content) {
-      if (!block || typeof block !== "object") continue;
-      if (block.type === "redacted_thinking") continue;
-      if (block.type === "thinking") {
-        const text = String(block.thinking ?? "");
-        if (!text) continue;
-        if (tui) tui.appendThinking(text);
-        else process.stdout.write(`\n◆ Thinking\n${text}`);
-        continue;
-      }
-      if (block.type === "text") {
-        const text = String(block.text ?? "");
-        if (!text) continue;
-        if (message.role === "user") paintUserEcho(tui, text);
-        else if (tui) tui.appendAssistant(text);
-        else process.stdout.write(text);
-        continue;
-      }
-      if (block.type === "image") {
-        paintPlain(tui, "(image)\n");
-        continue;
-      }
-      if (block.type === "tool_use" || block.type === "server_tool_use") {
-        const name = String(block.name ?? (block.type === "server_tool_use" ? "web_search" : "tool"));
-        const use: ToolUse = { id: String(block.id ?? ""), name, input: blockInput(block) };
-        start(use.id, name, toolTranscriptDetail(use), formatToolAnnounce(use));
-        continue;
-      }
-      if (block.type === "tool_result" || block.type === "web_search_tool_result") {
-        const id = String(block.tool_use_id ?? block.toolUseId ?? "");
-        const text = replayToolOutput(blockBodyText(block.content));
-        const err =
-          block.type === "web_search_tool_result" &&
-          Boolean(block.content) &&
-          typeof block.content === "object" &&
-          !Array.isArray(block.content) &&
-          (block.content as { type?: string }).type === "web_search_tool_result_error";
-        finish(id, err ? "error" : replayToolState(block, text), text);
-        continue;
-      }
-    }
-  }
-  while (pending.length > 0) {
-    const rec = pending.pop()!;
-    finishHandle(rec.handle, "cancelled");
-  }
+  sidecar.logEvent(sidecarStartFor(use));
 }
 
 function renderServerTools(
@@ -5341,7 +2284,7 @@ function renderServerTools(
     if (b.type === "server_tool_use") {
       const name = b.name ?? "web_search";
       names.push(name);
-      logEvent(sidecarStartFor({ name, id: b.id ?? "", input: {} }));
+      sidecar.logEvent(sidecarStartFor({ name, id: b.id ?? "", input: {} }));
       nonTtyTranscriptSection = null;
       if (surface) {
         const handle = surface.startTool(name, "");
@@ -5355,7 +2298,7 @@ function renderServerTools(
         typeof b.content === "object" &&
         !Array.isArray(b.content) &&
         (b.content as { type?: string }).type === "web_search_tool_result_error";
-      if (b.tool_use_id) logEvent({ t: "tool_end", toolCallId: b.tool_use_id, isError: err });
+      if (b.tool_use_id) sidecar.logEvent({ t: "tool_end", toolCallId: b.tool_use_id, isError: err });
       if (surface) {
         const idx = unmatched.findIndex((item) => item.providerId && item.providerId === (b.tool_use_id ?? ""));
         const rec = idx >= 0 ? unmatched.splice(idx, 1)[0] : unmatched.shift();
@@ -5370,15 +2313,6 @@ function renderServerTools(
 }
 
 // ---- history: in-memory view over the append-only storage ----
-
-type ContentBlock = Record<string, unknown> & {
-  type: string;
-  /** View metadata. Stripped before any request leaves the process. */
-  chars?: number;
-  tool?: string;
-  repro?: string;
-  stubbed?: boolean;
-};
 
 interface Message {
   role: "user" | "assistant";
@@ -5592,7 +2526,7 @@ async function reclaim(): Promise<number> {
     {
       // The overlay is not durable and is never a prune target, but it still
       // occupies the provider window for this logical prompt.
-      systemTokens: estimateReclaimTokens(systemPrompt()) + activeOverlayTokens(),
+      systemTokens: estimateReclaimTokens(frontMatter.systemPrompt()) + activeOverlayTokens(),
       toolSchemaTokens: toolSchemaTokens(),
       usable: usableTokens(),
       protectTokens: protectTokens(),
@@ -5668,7 +2602,7 @@ function truncate(): boolean {
 let lastHandoff: string | null = null;
 
 function totalTokens(): number {
-  return estimateReclaimTokens(systemPrompt()) + toolSchemaTokens() + activeOverlayTokens() + history.reduce((s, m) => s + m.tokens, 0);
+  return estimateReclaimTokens(frontMatter.systemPrompt()) + toolSchemaTokens() + activeOverlayTokens() + history.reduce((s, m) => s + m.tokens, 0);
 }
 
 /**
@@ -5690,8 +2624,9 @@ export function isContextOverflowMessage(message: string): boolean {
   return /prompt is too long|maximum context|maximum prompt|context_length|request_too_large|request too large|too many tokens|tokens?\s+(exceed|exceeds|exceeded)|exceed.*tokens?|tokens?.*exceed|request contains .*tokens|input.*too long|prompt.*too (long|large|big)|context.*too (long|large|big)|context.*exceed|exceed.*context|token limit|context limit/i.test(message);
 }
 
-/** Collapse old turns into one handoff message. Runs on the cheap lane.
- *  Returns false when there is nothing safely evictable or the call fails;
+/** Collapse old turns into one handoff message. Runs on the cheap lane,
+ *  falling back to the current main model when the cheap lane fails.
+ *  Returns false when there is nothing safely evictable or every call fails;
  *  callers fall back to truncate. */
 async function summarize(required = false): Promise<boolean> {
   const usable = usableTokens();
@@ -5708,7 +2643,16 @@ async function summarize(required = false): Promise<boolean> {
   let foldedResult: Awaited<ReturnType<typeof completeText>> | null = null;
   try {
     const summarySystem = "You compress coding-agent session history. Only output the structured handoff.";
-    const folded = await completeText(summaryRoute.provider, summaryRoute.model, summarySystem, prompt, currentAbort.signal);
+    let folded: Awaited<ReturnType<typeof completeText>>;
+    try {
+      folded = await completeText(summaryRoute.provider, summaryRoute.model, summarySystem, prompt, currentAbort.signal);
+    } catch (err) {
+      // Cheap-lane credentials can lapse while the main route still works
+      // (e.g. a 401 on the summary model). Retry once on the current model
+      // before giving up; skip the retry when both routes already match.
+      if (summaryRoute.provider === route.provider && summaryRoute.model === route.model) throw err;
+      folded = await completeText(route.provider, route.model, summarySystem, prompt, currentAbort.signal);
+    }
     foldedResult = folded;
     const u = folded.usage;
     if (u) {
@@ -6443,7 +3387,7 @@ async function callModel(
     fallbackReason: retry?.fallbackReason,
     retryCount: retry?.retryCount ?? (retry?.retryOfAttemptId ? 1 : 0),
   });
-  const sys = systemPrompt();
+  const sys = frontMatter.systemPrompt();
   const proto = providerProtocol(route.provider, route.model);
   const anthropicCacheSupported = cacheCapabilitySupported(route.provider, route.model, CACHE_CAPABILITY_FEATURE.anthropicCacheControl);
   const prefix = anthropicCacheSupported
@@ -7488,7 +4432,7 @@ function reportUsage(
 let interrupted = false;
 
 function logSettings(): void {
-  logEvent({
+  sidecar.logEvent({
     t: "agent_settings",
     model: `${route.provider}/${route.model}`,
     thinkingLevel: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)),
@@ -7633,11 +4577,11 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   const hasImages = pendingResult.hasImages || extraImages.length > 0;
   let preflight: { requestId: string; token: string | null } | null = null;
   const cancelPreflight = (): void => {
-    if (preflight) logEvent({ t: "preflight_cancel", requestId: preflight.requestId });
+    if (preflight) sidecar.logEvent({ t: "preflight_cancel", requestId: preflight.requestId });
     preflight = null;
   };
   if (eventsDir && terminalId) {
-    if (sidecarWriteStopped) {
+    if (sidecar.isWriteStopped()) {
       out("(the run did not start: sidecar admission is paused)\n");
       surface?.setDraft(prompt);
       running = false;
@@ -7647,7 +4591,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     }
     const requestId = randomUUID();
     const timeoutMs = 15_000;
-    logEvent({ t: "preflight_request", requestId, hasImages, deadlineAt: Date.now() + timeoutMs });
+    sidecar.logEvent({ t: "preflight_request", requestId, hasImages, deadlineAt: Date.now() + timeoutMs });
     const ack = await waitForAck(eventsDir, terminalId, requestId, timeoutMs, bridgeId, {
       shouldStop: () => interrupted,
     });
@@ -7657,7 +4601,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       // in-flight capture and cannot strand the late preflight lease.
       // A concrete ack already finished the request; do not append cancel
       // while the tailer may still be holding backpressure for capture.
-      if (!ack) logEvent({ t: "preflight_cancel", requestId });
+      if (!ack) sidecar.logEvent({ t: "preflight_cancel", requestId });
       const err = String(ack && typeof ack.error === "string" ? ack.error : "preflight timed out");
       out(`(the run did not start: ${err})\n`);
       surface?.setDraft(prompt);
@@ -7737,7 +4681,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   if (eventsDir && terminalId) {
     const file = promptFileName(terminalId, bridgeId, randomUUID().slice(0, 8));
     const written = writePromptPayload(eventsDir, terminalId, file, { prompt: taggedPrompt, context, images });
-    if (written) logEvent({ t: "prompt", file: written, hasPreflight: preflight !== null });
+    if (written) sidecar.logEvent({ t: "prompt", file: written, hasPreflight: preflight !== null });
   }
   let userMsg: Message;
   try {
@@ -7775,7 +4719,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     const ackImages = await acknowledgePendingImages(eventsDir, terminalId, claim.claimId, persistedPendingNames);
     if (!ackImages.ok) out(`(host: ${ackImages.error})\n`);
   }
-  logEvent({
+  sidecar.logEvent({
     t: "agent_start",
     runId: traceTask.runId,
     taskId: traceTask.taskId,
@@ -7847,7 +4791,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         // Emergency mid-turn revision: the provider
         // rejected the window; reclaim hard and retry exactly once.
         if (!retriedOverflow && isContextOverflowMessage(providerMessage)) {
-          await writeMainTrace({ status: "overflow", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: streamFailure?.cache ?? null, started: callStarted, attempt: failedAttempt });
+          await writeMainTrace({ status: "overflow", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(frontMatter.systemPrompt()), cache: streamFailure?.cache ?? null, started: callStarted, attempt: failedAttempt });
           retriedOverflow = true;
           await reclaim();
           await summarize(true);
@@ -7861,7 +4805,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           } catch (retryErr) {
             const retryStreamFailure = retryErr instanceof ProviderStreamLimitError ? retryErr : null;
             const retryMessage = retryErr instanceof Error ? retryErr.message : String(retryErr);
-            await writeMainTrace({ status: retryStreamFailure?.traceStatus ?? "overflow-retry-error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: retryStreamFailure?.cache ?? null, started: callStarted, attempt: inFlightTraceAttempt, providerError: retryMessage });
+            await writeMainTrace({ status: retryStreamFailure?.traceStatus ?? "overflow-retry-error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(frontMatter.systemPrompt()), cache: retryStreamFailure?.cache ?? null, started: callStarted, attempt: inFlightTraceAttempt, providerError: retryMessage });
             throw retryErr;
           }
         } else if (!retriedProviderTermination && !interrupted && isRetriableProviderTermination(providerMessage)) {
@@ -7869,7 +4813,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           // first token. Retry once with identical bytes, then let the
           // failure settle with diagnostics on the trace and the terminal.
           retriedProviderTermination = true;
-          await writeMainTrace({ status: "error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: streamFailure?.cache ?? null, started: callStarted, attempt: failedAttempt, providerError: providerMessage });
+          await writeMainTrace({ status: "error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(frontMatter.systemPrompt()), cache: streamFailure?.cache ?? null, started: callStarted, attempt: failedAttempt, providerError: providerMessage });
           if (interrupted) throw err;
           out(`(provider terminated the stream after ${(failedTurnMs / 1000).toFixed(0)}s with no first token; retrying once)\n`);
           try {
@@ -7887,14 +4831,14 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
             terminatedDiagnostics = isRetriableProviderTermination(retryMessage)
               ? `stream ended twice before first token (${(retryTurnMs / 1000).toFixed(0)}s observed; see trace providerError)`
               : `stream ended before first token (${(failedTurnMs / 1000).toFixed(0)}s observed; retry failed: ${sanitizeProviderError(retryMessage)?.slice(0, 200) ?? "(unreadable)"}; see trace providerError)`;
-            await writeMainTrace({ status: retryStreamFailure?.traceStatus ?? "error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: retryStreamFailure?.cache ?? null, started: callStarted, attempt: inFlightTraceAttempt, providerError: retryMessage });
+            await writeMainTrace({ status: retryStreamFailure?.traceStatus ?? "error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(frontMatter.systemPrompt()), cache: retryStreamFailure?.cache ?? null, started: callStarted, attempt: inFlightTraceAttempt, providerError: retryMessage });
             throw retryErr;
           }
         } else {
           if (isRetriableProviderTermination(providerMessage)) {
             terminatedDiagnostics = `stream ended before first token (${(failedTurnMs / 1000).toFixed(0)}s observed; see trace providerError)`;
           }
-          await writeMainTrace({ status: streamFailure?.traceStatus ?? "error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(systemPrompt()), cache: streamFailure?.cache ?? null, started: callStarted, attempt: failedAttempt, providerError: providerMessage });
+          await writeMainTrace({ status: streamFailure?.traceStatus ?? "error", seqBefore, toolNames: [], usage: null, waste: null, sysHash: hashSystem(frontMatter.systemPrompt()), cache: streamFailure?.cache ?? null, started: callStarted, attempt: failedAttempt, providerError: providerMessage });
           throw err;
         }
       }
@@ -7902,14 +4846,14 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       if (admissionError) {
         await writeMainTrace({
           status: "error", seqBefore, toolNames: [], usage: result.usage, waste: null,
-          sysHash: hashSystem(systemPrompt()), cache: result.cache, started: callStarted,
+          sysHash: hashSystem(frontMatter.systemPrompt()), cache: result.cache, started: callStarted,
           attempt: result.traceAttempt, providerError: admissionError,
         });
         throw new Error(admissionError);
       }
       modelTurns += 1;
       if (activeSubagent) activeSubagent.turns += 1;
-      const sys = systemPrompt();
+      const sys = frontMatter.systemPrompt();
       if (!result.usage) resetUsageContinuity();
       const waste = result.usage
         ? reportUsage(result.usage, result.ttftMs, callStarted, result.cache)
@@ -7935,7 +4879,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       const plan = planTextIfChanged(visibleAssistantText(result.blocks), lastPlanText);
       if (plan) {
         lastPlanText = plan;
-        logEvent({ t: "plan", text: plan });
+        sidecar.logEvent({ t: "plan", text: plan });
       }
       const serverNames = renderServerTools(result.blocks);
       if (result.blocks.some((block) => {
@@ -8018,7 +4962,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
           const invalid = inputErrors[wave[index]!.index];
           // Invalid arguments must not reach sidecar edit formatting or the
           // filesystem before they have become an ordinary error result.
-          if (invalid) logEvent({ t: "tool", toolName: use.name, toolCallId: use.id });
+          if (invalid) sidecar.logEvent({ t: "tool", toolName: use.name, toolCallId: use.id });
           else logToolStart(use);
           nonTtyTranscriptSection = null;
           const displayed = invalid ? { ...use, input: {} } : use;
@@ -8061,7 +5005,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
               if (follow) process.stdout.write(follow);
             }
             outcomes.push(outcome);
-            logEvent({
+            sidecar.logEvent({
               t: "tool_end",
               toolCallId: chunk[ci]!.id,
               isError: outcome.isError,
@@ -8074,7 +5018,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
             const outcome = done(chunk[ci]!, message, true);
             toolErrorObserved = true;
             outcomes.push(outcome);
-            logEvent({ t: "tool_end", toolCallId: chunk[ci]!.id, isError: true, ...toolOutcomeTraceFields(outcome) });
+            sidecar.logEvent({ t: "tool_end", toolCallId: chunk[ci]!.id, isError: true, ...toolOutcomeTraceFields(outcome) });
           }
         }
       }
@@ -8088,7 +5032,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         const outcome = done(uses[i]!, "(interrupted by user)", true);
         toolErrorObserved = true;
         outcomes.push(outcome);
-        logEvent({ t: "tool_end", toolCallId: uses[i]!.id, isError: true, ...toolOutcomeTraceFields(outcome) });
+        sidecar.logEvent({ t: "tool_end", toolCallId: uses[i]!.id, isError: true, ...toolOutcomeTraceFields(outcome) });
       }
       let resultBlocks = outcomes.map((o, i): ContentBlock => {
         const b = o.result as ContentBlock;
@@ -8165,7 +5109,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     taskOutcomeStatus = "failure";
     taskFailure ??= "tool error";
   }
-  logEvent({
+  sidecar.logEvent({
     t: "agent_settled",
     runId: traceTask.runId,
     taskId: traceTask.taskId,
@@ -8174,7 +5118,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   lastRunOutcome = { status: taskOutcomeStatus, failure: storageFailure ?? taskFailure };
   if (!storageFailure && eventsDir && terminalId) {
     const requestId = randomUUID();
-    logEvent({
+    sidecar.logEvent({
       t: "checkpoint_request",
       requestId,
       kind: "settled",
@@ -8183,7 +5127,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
     const ack = await waitForAck(eventsDir, terminalId, requestId, 5_000, bridgeId, {
       shouldStop: () => interrupted,
     });
-    logEvent({
+    sidecar.logEvent({
       t: "checkpoint_result",
       requestId,
       ok: ack?.ok === true,
@@ -8386,7 +5330,7 @@ export function shutdownAgentCore(options: ShutdownOptions = {}): Promise<Shutdo
     const runSettled = await waitForRunToSettle(deadline);
     let timedOut = !runSettled;
     if (!runSettled) {
-      logEvent({ t: "shutdown_timeout", reason, phase: "run", timeoutMs });
+      sidecar.logEvent({ t: "shutdown_timeout", reason, phase: "run", timeoutMs });
     }
     // The writer is synchronous and must only close after the run has had a
     // bounded opportunity to finish its final session append.
@@ -8401,19 +5345,19 @@ export function shutdownAgentCore(options: ShutdownOptions = {}): Promise<Shutdo
         timedOut = true;
         ok = false;
         error = "trace runtime close timed out";
-        logEvent({ t: "shutdown_timeout", reason, phase: "trace", timeoutMs });
+        sidecar.logEvent({ t: "shutdown_timeout", reason, phase: "trace", timeoutMs });
       } else if (closed.error) {
         ok = false;
         error = closed.error instanceof Error ? closed.error.message : String(closed.error);
-        logEvent({ t: "shutdown_failure", reason, phase: "trace", error });
+        sidecar.logEvent({ t: "shutdown_failure", reason, phase: "trace", error });
       } else if (closed.value !== true) {
         ok = false;
         error = "trace runtime close failed";
-        logEvent({ t: "shutdown_failure", reason, phase: "trace", error });
+        sidecar.logEvent({ t: "shutdown_failure", reason, phase: "trace", error });
       }
     }
     if (timedOut && error === null) error = "shutdown timed out";
-    if (timedOut || !ok) logEvent({ t: "shutdown_result", reason, ok: false, timedOut, error });
+    if (timedOut || !ok) sidecar.logEvent({ t: "shutdown_result", reason, ok: false, timedOut, error });
     return { ok: ok && !timedOut, timedOut, error };
   })();
   return shutdownPromise;
@@ -8578,7 +5522,7 @@ function submit(line: string): void {
     return;
   }
   if (running) {
-    logEvent({ t: "steer_input", behavior: "steer" });
+    sidecar.logEvent({ t: "steer_input", behavior: "steer" });
     // Keep one typed-ahead prompt. More than one has no consumer yet.
     queuedLine = line;
     surface?.setQueued(line);
@@ -8593,20 +5537,6 @@ function submit(line: string): void {
       showPrompt();
     })
     .then(() => drainQueuedLine());
-}
-
-export function isDirectRunFrom(selfUrl: string, argv1: string | undefined): boolean {
-  if (!argv1) return false;
-  try {
-    const self = selfUrl.startsWith("file:") ? fileURLToPath(selfUrl) : selfUrl;
-    return realpathSync(self) === realpathSync(argv1);
-  } catch {
-    return false;
-  }
-}
-
-export function isDirectRun(): boolean {
-  return isDirectRunFrom(import.meta.url, process.argv[1]);
 }
 
 let loginCodeResolve: ((code: string) => void) | null = null;
@@ -9157,7 +6087,7 @@ async function main(): Promise<void> {
       const startup = await traceRuntime.ready;
       if (!startup.ok && startup.error) out(`(trace startup warning: ${startup.error})\n`);
       const manifest = traceRuntime.manifest;
-      logEvent({
+      sidecar.logEvent({
         t: "trace_startup",
         runId: traceRunId,
         namespace: startup.namespace,
@@ -9178,14 +6108,14 @@ async function main(): Promise<void> {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       out(`(trace startup warning: ${message})\n`);
-      logEvent({ t: "trace_startup", runId: traceRunId, ok: false, error: message });
+      sidecar.logEvent({ t: "trace_startup", runId: traceRunId, ok: false, error: message });
     }
   }
   // The TUI is constructed before the first MCP bind so it can render the
   // startup banner, but no prompt may be accepted until the tool schema is
   // fixed for this session.
   mcpBusy = true;
-  freezeFrontMatter();
+  frontMatter.systemPrompt();
   await bootCatalog();
   const auth = await resolveAuth(route.provider);
   const banner = `termina agent-core v1 · model ${route.provider}/${route.model} · ${authBanner(auth)} · Ctrl+C interrupts · /exit quits\n`;
@@ -9253,9 +6183,9 @@ async function main(): Promise<void> {
   if (eventsDir && terminalId) {
     const control = consumeStartupControl(eventsDir, terminalId, bridgeId);
     const opId = control?.opId ?? "";
-    if (!resumeResult.ok) logEvent({ t: "session_ready", opId, ok: false, error: resumeResult.error });
-    else if (!control) logEvent({ t: "session_ready", opId, ok: true, reload: true });
-    else logEvent({ t: "session_ready", opId, ok: true });
+    if (!resumeResult.ok) sidecar.logEvent({ t: "session_ready", opId, ok: false, error: resumeResult.error });
+    else if (!control) sidecar.logEvent({ t: "session_ready", opId, ok: true, reload: true });
+    else sidecar.logEvent({ t: "session_ready", opId, ok: true });
     logSettings();
     if (control?.action === "prefill" && control.text) {
       surface?.setDraft(control.text);
@@ -9302,6 +6232,10 @@ async function main(): Promise<void> {
       }
     });
   }
+}
+
+export function isDirectRun(): boolean {
+  return isDirectRunFrom(import.meta.url, process.argv[1]);
 }
 
 if (isDirectRun()) {

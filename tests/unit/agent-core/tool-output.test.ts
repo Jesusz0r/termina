@@ -6,6 +6,8 @@ import { join } from "node:path";
 
 import * as output from "../../../agent-core/tool-output.ts";
 import * as core from "../../../agent-core/main.ts";
+import * as files from "../../../agent-core/main/files.ts";
+import * as fileOps from "../../../agent-core/main/file-ops.ts";
 import * as host from "../../../agent-core/host.ts";
 import * as mcp from "../../../agent-core/mcp.ts";
 
@@ -370,7 +372,7 @@ describe("Agent Core Bounded Output Foundation", () => {
       const readPath = join(integrationRoot, "read-é.txt");
       const payload = `${"r".repeat(40 * 1024)}éé`;
       writeFileSync(readPath, Buffer.from(payload, "utf8"));
-      const result = core.readFileResult(readPath, 0);
+      const result = fileOps.readFileResult(readPath, 0);
 
       assertBoundedText(result, "read_file");
       expect(result.isError).toBe(false);
@@ -388,7 +390,7 @@ describe("Agent Core Bounded Output Foundation", () => {
       for (let i = 0; i < 201; i++) {
         writeFileSync(join(globRoot, `f${String(i).padStart(4, "0")}.txt`), `${i}\n`);
       }
-      const result = await core.globFiles(integrationRoot, `${prefix}/*.txt`, { budgetMs: 2_000 });
+      const result = await files.globFiles(integrationRoot, `${prefix}/*.txt`, { budgetMs: 2_000 });
       assertBoundedText(result, "glob 201");
       expect(result.state).toBe("complete");
       expect(result.isError).toBe(false);

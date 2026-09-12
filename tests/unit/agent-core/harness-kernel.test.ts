@@ -43,6 +43,8 @@ import type { AgentTui, TranscriptHandle } from "../../../agent-core/tui.ts";
 describe("Agent Core Kernel & TUI Harness Suite", () => {
   it("passes all kernel harness assertions natively", async () => {
     const core = await import("../../../agent-core/main.ts");
+    const files = await import("../../../agent-core/main/files.ts");
+    const env = await import("../../../agent-core/main/env.ts");
     const { defaultContextWindow, supportedEffortLevels, clampEffortLevel, thinkingEnabledFor, thinkingRequestFor, adaptiveEffortFor, effectiveEffortFor, reasoningEffortFor, includeEncryptedReasoning } = await import("../../../agent-core/models/capabilities.ts");
     const { gpt56ReasoningContext, gpt5TextVerbosity } = await import("../../../agent-core/models/families/openai.ts");
     const host = await import("../../../agent-core/host.ts");
@@ -58,17 +60,29 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const {
       confinePath,
       matchGlob,
-      grepFiles,
-      formatGrepHits,
-      completeGrepStdout,
       globFiles,
-      scanSkills,
-      formatSkillIndex,
-      formatProjectInstructions,
-      formatUserInstructions,
-      formatEnvironment,
-      parsePrintPrompt,
+      listTaggedFiles,
+      collectRelativeFiles,
+      parseFileTags,
+    } = files;
+    const { formatEnvironment, trustedPath } = env;
+    const grep = await import("../../../agent-core/main/grep.ts");
+    const { grepFiles, formatGrepHits, completeGrepStdout } = grep;
+    const { scanSkills, formatSkillIndex, formatProjectInstructions, formatUserInstructions } = await import("../../../agent-core/main/skills.ts");
+    const { tracesDirFor, isValidTerminalId } = await import("../../../agent-core/main/sidecar.ts");
+    const {
       reproFor,
+      sidecarStartFor,
+      formatToolAnnounce,
+      formatToolFollowup,
+      isDangerousBash,
+      shouldAskPermission,
+      displayToolOutput,
+    } = await import("../../../agent-core/main/tools.ts");
+    const { FROZEN_IDENTITY, buildFrozenSystem } = await import("../../../agent-core/main/front-matter.ts");
+    const { renderHistoryTranscript } = await import("../../../agent-core/main/history-view.ts");
+    const { isDirectRunFrom } = await import("../../../agent-core/main/env.ts");
+    const {
       readProjectFile,
       writeProjectFile,
       editProjectFile,
@@ -78,39 +92,26 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       formatNumberedText,
       listProjectDir,
       editMissDiagnostic,
+      readFileResult,
+      expandFileTags,
+    } = await import("../../../agent-core/main/file-ops.ts");
+    const {
+      parsePrintPrompt,
       buildCachedPrefix,
       anthropicCacheMark,
-      renderHistoryTranscript,
-      sidecarStartFor,
-      formatToolAnnounce,
-      formatToolFollowup,
-      isDangerousBash,
-      shouldAskPermission,
       runBash,
       isDirectRun,
-      tracesDirFor,
-      isValidTerminalId,
-      readFileResult,
-      FROZEN_IDENTITY,
-      buildFrozenSystem,
-      isDirectRunFrom,
       WEB_SEARCH_TOOL,
       requestTools,
       stampHistoryCache,
       placeStreamBlock,
       compactStreamBlocks,
-      displayToolOutput,
-      listTaggedFiles,
-      collectRelativeFiles,
-      parseFileTags,
-      expandFileTags,
       retryAfter,
       parseEffortCommand,
       outputTokenBudget,
       formatUsageIndicators,
       fetchUrl,
       fetchUrlError,
-      trustedPath,
       parseBangCommand,
       bangCommandContext,
     } = core;
@@ -455,6 +456,11 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check(
       "tool announce structures edit path",
       formatToolAnnounce({ id: "1", name: "edit", input: { path: "a.ts" } }) === "◆ Tool · edit\n  a.ts",
+    );
+    check(
+      "tool announce marks user-requested spawns",
+      formatToolAnnounce({ id: "1", name: "spawn_subagent", input: { task: "do things", user_requested: true } }).includes("user-requested") &&
+        !formatToolAnnounce({ id: "1", name: "spawn_subagent", input: { task: "do things" } }).includes("user-requested"),
     );
     check(
       "tool followup structures grep hits",

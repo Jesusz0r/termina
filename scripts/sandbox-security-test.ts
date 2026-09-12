@@ -231,7 +231,7 @@ check(
 );
 check(
   "preflight validates the resource helper and constructed arguments",
-  mainSource.includes("sandboxResourceLimitPreflight()")
+  worldlinesSource.includes("sandboxResourceLimitPreflight()")
     && sandboxSource.includes("candidate resource-limit helper is unavailable")
     && sandboxSource.includes("candidate resource-limit launch arguments are invalid"),
 );

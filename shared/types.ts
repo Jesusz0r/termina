@@ -315,7 +315,7 @@ export interface RecentFile {
 }
 
 export type UserPreferencePatch = Partial<Omit<AppPreferences, "openProjects" | "activeProject" | "recentModels" | "recentFiles">>;
-export type PreferenceUpdate = { patch: UserPreferencePatch; activateShortcuts: boolean };
+export type PreferenceUpdate = { patch: UserPreferencePatch; activateShortcuts: boolean; confirmReset?: boolean };
 
 export function defaultAppPreferences(): AppPreferences {
   return {
@@ -566,6 +566,8 @@ export interface TerminaBridge {
   onInstances(cb: (list: InstanceSummary[]) => void): () => void;
   /** Main asks the renderer to save every dirty model (run-start preflight). */
   onFlushRequest(cb: (p: { requestId: string; writerId: string; projectId: string; workspaceId: string }) => void): () => void;
+  /** Main asks the renderer to confirm dirty buffers before project close or quit. */
+  onUnsavedConfirm(cb: (p: { requestId: string; projectId: string | null }) => void): () => void;
   onUpdateState(cb: (state: AppUpdateState) => void): () => void;
 
   // terminals (agent = core TUI, shell = a real shell like zsh)
@@ -626,6 +628,8 @@ export interface TerminaBridge {
   getWorldlineBaseFile(comparisonId: string, relPath: string): Promise<{ ok: boolean; content?: string; error?: string }>;
   /** The renderer's answer to a flush request. */
   reportFlush(requestId: string, result: { ok: boolean; failed: string[] }): Promise<void>;
+  /** The renderer's answer to an unsaved-buffer confirm (save / discard / cancel). */
+  reportUnsavedConfirm(requestId: string, result: { ok: boolean; cancelled?: boolean; error?: string }): Promise<void>;
   /** Save a dirty model on behalf of the write-lease holder (the flush). */
   flushSave(path: string, content: string, writerId: string, owner: ProjectWorkspaceRef): Promise<{ ok: boolean; error?: string }>;
 

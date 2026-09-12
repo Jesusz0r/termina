@@ -43,7 +43,7 @@ describe("initial project restoration", () => {
       cleanupStaleDispatchFiles: async () => {},
       parseTargetCwdFromArgv: () => null,
       tailer: { onEvent: null, start: () => {} },
-      startScheduleTick: () => {},
+      schedules: { start: () => {} },
       createWindow: () => {
         windowShown.resolve();
         return windowLoaded.promise;

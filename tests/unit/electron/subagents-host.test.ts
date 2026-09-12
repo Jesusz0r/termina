@@ -74,7 +74,7 @@ function validTask(overrides: Record<string, unknown> = {}): Record<string, unkn
   };
 }
 
-function setup(opts: { wallMs?: number; maxAttempts?: number; backoffMs?: number[]; launchFailures?: number; dispatch?: { keys: Set<string>; root: string } } = {}) {
+function setup(opts: { wallMs?: number; maxAttempts?: number; maxChildren?: number; backoffMs?: number[]; launchFailures?: number; dispatch?: { keys: Set<string>; root: string } } = {}) {
   const dir = tmp();
   const { dispatch, launchFailures = 0, ...hostOpts } = opts;
   const notes: Array<{ terminalId: string; note: string }> = [];
@@ -158,6 +158,38 @@ describe("SubagentHost", () => {
     expect(s.procs.length).toBe(4);
     const fifthBody = JSON.parse(readFileSync(join(s.dir, "subagent-term-7-bg-5.result.json"), "utf8"));
     expect(fifthBody.outcome).toBe("failed");
+  });
+
+  it("lets user-requested task files bypass the child cap up to the manual bound", async () => {
+    const s = setup();
+    for (let i = 1; i <= 4; i++) {
+      const name = `subagent-term-7-bg-${i}.task.json`;
+      writeFileSync(join(s.dir, name), JSON.stringify(validTask({ runId: `bg-${i}` })), { mode: 0o600 });
+      await s.host.handleSpawn("term-7", `bg-${i}`, name);
+    }
+    expect(s.host.activeCount()).toBe(4);
+    const manual = `subagent-term-7-bg-5.task.json`;
+    writeFileSync(join(s.dir, manual), JSON.stringify(validTask({ runId: "bg-5", userRequested: true })), { mode: 0o600 });
+    await s.host.handleSpawn("term-7", "bg-5", manual);
+    expect(s.procs.length).toBe(5);
+    expect(s.host.activeCount()).toBe(5);
+  });
+
+  it("still caps user-requested children at the manual bound", async () => {
+    const s = setup({ maxChildren: 20 });
+    for (let i = 1; i <= 20; i++) {
+      const name = `subagent-term-7-bg-${i}.task.json`;
+      writeFileSync(join(s.dir, name), JSON.stringify(validTask({ runId: `bg-${i}`, userRequested: true })), { mode: 0o600 });
+      await s.host.handleSpawn("term-7", `bg-${i}`, name);
+    }
+    expect(s.host.activeCount()).toBe(20);
+    const over = `subagent-term-7-bg-21.task.json`;
+    writeFileSync(join(s.dir, over), JSON.stringify(validTask({ runId: "bg-21", userRequested: true })), { mode: 0o600 });
+    await s.host.handleSpawn("term-7", "bg-21", over);
+    expect(s.procs.length).toBe(20);
+    const body = JSON.parse(readFileSync(join(s.dir, "subagent-term-7-bg-21.result.json"), "utf8"));
+    expect(body.outcome).toBe("failed");
+    expect(s.notes.at(-1)!.note).toMatch(/host at capacity \(20 runs\)/);
   });
 
   it("settles successful runs with scanned results and a mailbox note", async () => {
@@ -480,7 +512,10 @@ describe("SubagentHost", () => {
     // Exit before agent_start: same task+env would fail identically, so no retry.
     s.procs[0]!.exit(1);
     await until(() => existsSync(s.resultFile));
-    expect(s.readResult().outcome).toBe("failed");
+    const body = s.readResult();
+    expect(body.outcome).toBe("failed");
+    expect(body.error).toMatch(/exit 1/);
+    expect(parseSubagentResultFile("bg-1", body).ok).toBe(true);
     expect(s.procs.length).toBe(1);
   });
 

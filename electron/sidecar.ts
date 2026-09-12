@@ -88,7 +88,7 @@ export type SidecarEvent =
       entryId?: string | null;
     })
   | (SidecarMeta & { t: "tool_end"; toolCallId?: string; isError?: boolean })
-  | (SidecarMeta & { t: "subagent_spawn"; runId?: string; taskFile?: string });
+  | (SidecarMeta & { t: "subagent_spawn"; runId?: string; taskFile?: string; userRequested?: boolean });
 
 export type AgentStartEvent = Extract<SidecarEvent, { t: "agent_start" }>;
 
@@ -469,7 +469,7 @@ function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>): Side
     case "tool_end":
       return { ...meta, t: "tool_end", toolCallId: optionalString(rec.toolCallId), isError: optionalBoolean(rec.isError) };
     case "subagent_spawn":
-      return { ...meta, t: "subagent_spawn", runId: optionalString(rec.runId), taskFile: optionalString(rec.taskFile) };
+      return { ...meta, t: "subagent_spawn", runId: optionalString(rec.runId), taskFile: optionalString(rec.taskFile), userRequested: optionalBoolean(rec.userRequested) };
   }
 }
 
