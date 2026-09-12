@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProjectWatcher } from "../../../electron/watcher.ts";
+import { ProjectWatcher, watchContentIdentity } from "../../../electron/watcher.ts";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -41,6 +41,16 @@ describe("Watcher generation", () => {
     // One bump per real change: a second increment in this block would trip
     // the preflight/promotion fences on a single write.
     assert.equal(changeBlock.split("ws.generation++;").length - 1, 1);
+  });
+
+  it("identifies duplicate watches by the full payload, not a 4000-byte prefix", () => {
+    assert.match(changeBlock, /watchContentIdentity\(change\.content\)/);
+    assert.doesNotMatch(changeBlock, /slice\(\s*0\s*,\s*4000\s*\)/);
+    const prefix = "a".repeat(4000);
+    const first = `${prefix}\nfirst\n`;
+    const second = `${prefix}\nsecond\n`;
+    assert.notEqual(watchContentIdentity(first), watchContentIdentity(second));
+    assert.equal(watchContentIdentity(first), watchContentIdentity(first));
   });
 
   it("does not bump generation again on the touch callback", () => {

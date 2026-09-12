@@ -34,6 +34,16 @@ export function blobOid(content: string, algorithm: "sha1" | "sha256"): string {
   return createHash(algorithm).update(header).update(content, "utf8").digest("hex");
 }
 
+/**
+ * Identity of one watcher payload for duplicate-event merge.
+ * A 4000-byte prefix is not enough: two writes that share a head and
+ * differ only after that cut look identical, skip `file:changed`, and
+ * fail to bump the generation fence.
+ */
+export function watchContentIdentity(content: string): string {
+  return blobOid(content, "sha256");
+}
+
 interface FileChange {
   /** Absolute path. */
   path: string;
