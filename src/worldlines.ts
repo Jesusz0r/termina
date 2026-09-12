@@ -545,7 +545,7 @@ export class WorldlinesView {
     if (!note) {
       note = document.createElement("p");
       note.className = "cand-export-path muted";
-      (exportBtn?.parentElement ?? card.el).appendChild(note);
+      card.el.appendChild(note);
     }
     note.textContent = dest;
     const moreBody = exportBtn?.parentElement;
