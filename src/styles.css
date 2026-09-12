@@ -1312,6 +1312,13 @@ body {
   outline-offset: 1px;
 }
 
+/* Keyboard selection: the same ring as .active, in the accent color, and only
+ * for keyboard focus (mouse clicks keep the hover zoom instead). */
+.timeline-dot:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .timeline-dot.t-agent_start {
   background: var(--green);
 }
