@@ -31,6 +31,82 @@ describe("compaction planning", () => {
     expect(isUserPrompt({ role: "user", content: [{ type: "image", source: "x" }] })).toBe(true);
   });
 
+  it("never treats a tool-result message as a prompt, even with sibling text", () => {
+    // toolResultsWithRecovery appends harness guidance as a sibling text block
+    // on the user tool_result message. It must stay a tool-turn message:
+    // cutting there would evict the tool_use while keeping its orphan result,
+    // which request projection rejects on every later turn.
+    const mixed = {
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: "t1", content: "done" },
+        { type: "text", text: "(recovery guidance)" },
+      ],
+    };
+    expect(isUserPrompt(mixed)).toBe(false);
+    expect(isUserPrompt({
+      role: "user",
+      content: [
+        { type: "web_search_tool_result", tool_use_id: "s1", content: "hits" },
+        { type: "text", text: "(recovery guidance)" },
+      ],
+    })).toBe(false);
+    // Genuine mixed user content (no result blocks) is still a prompt.
+    expect(isUserPrompt({
+      role: "user",
+      content: [{ type: "image", source: "x" }, { type: "text", text: "look" }],
+    })).toBe(true);
+  });
+
+  it("never splits a tool pair across the eviction boundary", () => {
+    const toolUse: CompactionMessage = {
+      role: "assistant",
+      content: [{ type: "tool_use", name: "edit", input: {} }],
+      tokens: 100,
+    };
+    const mixedResult: CompactionMessage = {
+      role: "user",
+      content: [
+        { type: "tool_result", content: "ok" },
+        { type: "text", text: "(recovery guidance)" },
+      ],
+      tokens: 100,
+    };
+    const history = [
+      prompt("oldest", 100),
+      prompt("old", 100),
+      toolUse,
+      mixedResult,
+      msg("assistant", "ack", 100),
+      prompt("new", 100),
+    ];
+    const boundary = evictionBoundary(history, 0);
+    // The boundary must not land on the mixed result: that would evict the
+    // tool_use while keeping its orphan result (projection failure).
+    expect(boundary).not.toBe(3);
+    const tail = history.slice(boundary);
+    const keepsUse = tail.includes(toolUse);
+    const keepsResult = tail.includes(mixedResult);
+    expect(keepsUse).toBe(keepsResult);
+  });
+
+  it("never cuts truncation on a tool-result message", () => {
+    const history = [
+      prompt("one", 500),
+      { role: "assistant", content: [{ type: "tool_use", name: "edit", input: {} }], tokens: 100 } as CompactionMessage,
+      {
+        role: "user",
+        content: [{ type: "tool_result", content: "ok" }, { type: "text", text: "(recovery)" }],
+        tokens: 500,
+      } as CompactionMessage,
+      msg("assistant", "ack", 100),
+      prompt("two", 500),
+    ];
+    // total 1700 >= usable 1500; low-water 900 is first reachable past "one"
+    // only when the mixed result is not a cut point.
+    expect(truncateCut(history, 1700, 1500, 900)).toBe(4);
+  });
+
   it("protects recent turns and lands on a prompt boundary", () => {
     const history = [
       prompt("old", 100),
