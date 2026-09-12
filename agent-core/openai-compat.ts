@@ -1169,7 +1169,7 @@ export function googleResultFromEvents(
   const thoughts: Array<{ thinking: string; signature: string }> = [];
   const thoughtKeys = new Set<string>();
   const calls: Array<{ id: string; name: string; input: Record<string, unknown>; thought_signature?: string }> = [];
-  const callIds = new Set<string>();
+  const callKeys = new Set<string>();
   let toolError: string | undefined;
   let usage: CallResultLike["usage"] = null;
   let rawUsage: Record<string, unknown> | undefined;
@@ -1209,7 +1209,13 @@ export function googleResultFromEvents(
       }
       const fn = call as { name?: unknown; args?: unknown; id?: unknown };
       const name = typeof fn.name === "string" ? fn.name : "";
-      const id = typeof fn.id === "string" ? fn.id : "";
+      // functionCall.id is guaranteed only on Gemini 3; older leaves on this
+      // route may omit it. A missing id falls back to a generated one, kept
+      // consistent through replay, instead of failing the turn — fail-closed
+      // here would break tool use on id-less models whose calls still
+      // resolve through name matching.
+      const providerId = typeof fn.id === "string" && fn.id.trim() ? fn.id : "";
+      const id = providerId || `call_${calls.length + 1}`;
       const identityError = toolCallIdentityError(id, name);
       if (identityError) {
         toolError ??= identityError;
@@ -1222,9 +1228,11 @@ export function googleResultFromEvents(
       }
       // Streaming snapshot repeats resend the full parts list per event; the
       // provider id (not name+args) identifies a repeat. Distinct parallel
-      // calls share a name but carry different ids.
-      if (callIds.has(id)) continue;
-      callIds.add(id);
+      // calls share a name but carry different ids. Id-less calls fall back
+      // to the name+args signature so their repeats still collapse.
+      const key = providerId ? `id:${providerId}` : `sig:${name}:${JSON.stringify(args.input)}`;
+      if (callKeys.has(key)) continue;
+      callKeys.add(key);
       const thoughtSignature = typeof part.thoughtSignature === "string" ? part.thoughtSignature : "";
       calls.push({ id, name, input: args.input, ...(thoughtSignature ? { thought_signature: thoughtSignature } : {}) });
     }

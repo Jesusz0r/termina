@@ -124,9 +124,15 @@ describe("Agent Core Provider Tool Arguments Contract", () => {
       }
       assertRejected(google("", {}), /tool call identity/i);
       assertRejected(google(" \t ", {}), /tool call identity/i);
-      assertRejected(google("bash", {}, ""), /tool call identity/i);
-      assertRejected(google("bash", {}, "   "), /tool call identity/i);
       assertRejected(google("bash", undefined), /tool call arguments.*JSON object/i);
+
+      // Blank ids fall back to a generated id instead of failing the turn:
+      // functionCall.id is guaranteed only on Gemini 3.
+      for (const id of ["", "   "]) {
+        const fallback = google("bash", {}, id);
+        expect(fallback.error).toBeUndefined();
+        expect(fallback.blocks.find((block: any) => block.type === "tool_use")?.id).toBe("call_1");
+      }
 
       const validGoogle = google("bash", {});
       expect(validGoogle.error).toBeUndefined();
@@ -154,12 +160,33 @@ describe("Agent Core Provider Tool Arguments Contract", () => {
       ]);
     });
 
-    it("rejects Google function calls without a provider id instead of inventing one", () => {
-      assertRejected(googleParts([{ functionCall: { name: "read_file", args: {} } }]), /tool call identity/i);
-      assertRejected(
-        googleParts([{ functionCall: { name: "read_file", args: {}, id: 7 } }]),
-        /tool call identity/i,
+    it("falls back to a generated id for Google calls without a provider id", () => {
+      for (const parts of [
+        [{ functionCall: { name: "read_file", args: {} } }],
+        [{ functionCall: { name: "read_file", args: {}, id: 7 } }],
+        [{ functionCall: { name: "read_file", args: {}, id: "  " } }],
+      ]) {
+        const result = googleParts(parts);
+        expect(result.error).toBeUndefined();
+        const calls = result.blocks.filter((block: any) => block.type === "tool_use");
+        expect(calls.map((call: any) => [call.id, call.name])).toEqual([["call_1", "read_file"]]);
+      }
+      // Nameless calls stay rejected: a generated id cannot make them executable.
+      assertRejected(googleParts([{ functionCall: { name: "", args: {}, id: "provider-call-1" } }]), /tool call identity/i);
+    });
+
+    it("dedupes id-less snapshot repeats by name+args", () => {
+      const repeats = compat.googleResultFromEvents(
+        [
+          { candidates: [{ content: { parts: [{ functionCall: { name: "read_file", args: { path: "a.ts" } } }] } }] },
+          { candidates: [{ content: { parts: [{ functionCall: { name: "read_file", args: { path: "a.ts" } } }] }, finishReason: "STOP" }] },
+        ],
+        () => {},
+        0,
       );
+      expect(repeats.error).toBeUndefined();
+      const calls = repeats.blocks.filter((block: any) => block.type === "tool_use");
+      expect(calls.map((call: any) => [call.id, call.input])).toEqual([["call_1", { path: "a.ts" }]]);
     });
 
     it("keeps same-name parallel calls distinct while deduping snapshot repeats by id", () => {
