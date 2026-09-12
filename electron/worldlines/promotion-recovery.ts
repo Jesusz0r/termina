@@ -13,6 +13,7 @@ import {
   boundPromotionCreateDirectory,
   boundPromotionCreateSymlink,
   boundPromotionEnsureDirectory,
+  boundPromotionInstallDirectory,
   boundPromotionListDirectories,
   boundPromotionOpenDirectory,
   boundPromotionPrepareDirectory,
@@ -22,6 +23,7 @@ import {
   disposeWorldlineGitCore,
   readBoundPromotionJournal,
 } from "../worldline-git.js";
+import { parseSessionBundlePath } from "../../agent-core/session.js";
 import {
   MARKER,
   MAX_AGENT_RESOURCE_BYTES,
@@ -1063,6 +1065,156 @@ export function promotionSourceComponents(rel: string): string[] {
   return parts;
 }
 
+async function verifyInstalledBundleAgainstManifest(bundleDir: string, manifest: PromotionArtifactManifest): Promise<boolean> {
+  if (manifest.status !== "created") return true;
+  if (resolve(manifest.path) !== resolve(bundleDir)) return false;
+  let recomputed: PromotionArtifactManifest;
+  try {
+    recomputed = await createPromotionArtifactManifest(bundleDir);
+  } catch {
+    return false;
+  }
+  if (recomputed.status !== "created") return false;
+  if (recomputed.entries.length !== manifest.entries.length) return false;
+  const currentByRel = new Map(recomputed.entries.map((entry) => [entry.rel, entry]));
+  for (const expected of manifest.entries) {
+    const actual = currentByRel.get(expected.rel);
+    if (!actual) return false;
+    if (actual.dev !== expected.dev || actual.ino !== expected.ino) return false;
+    if (!promotionStatesEqual(actual.state, expected.state)) return false;
+  }
+  return true;
+}
+
+/**
+ * Crash-complete an `applied` journal without a session worker.
+ *
+ * The merged tree is already durable when phase is `applied`. When every
+ * journaled path still equals its after-state and the installed bundle is
+ * already present (or the staged bundle can be moved into place), leave the
+ * merged tree and report completion. Any other shape is impossible without a
+ * fork, so the caller falls back to rollback.
+ */
+async function tryCompleteAppliedPromotion(
+  journalDir: string,
+  journal: Record<string, unknown>,
+  primaryRoot: string,
+  canonicalPath: CanonicalPath,
+  journalBinding: PromotionJournalBinding,
+): Promise<boolean> {
+  try {
+    if (String(journal.phase) !== "applied") return false;
+    validatePromotionJournalHeader(journal, primaryRoot);
+    const paths = validatePromotionJournalPaths(journal);
+    const uncertain = journal.uncertainSessionArtifacts;
+    if (Array.isArray(uncertain) && uncertain.length > 0) return false;
+    const stagedSession = journal.stagedSession;
+    const installedSession = journal.installedSession;
+    if (typeof stagedSession !== "string" || typeof installedSession !== "string") return false;
+    const sessionRootPath = join(journalDir, "session");
+    if (!isInside(resolve(sessionRootPath), resolve(stagedSession))) return false;
+    const parsed = parseSessionBundlePath(installedSession);
+    if (!parsed) return false;
+    const manifest = parsePromotionArtifactManifest(journal.installedSessionManifest, "installedSession");
+    if (!manifest) return false;
+    if (resolve(manifest.path) !== resolve(parsed.bundleDir)) return false;
+    const canonicalRoot = await canonicalPath(primaryRoot);
+    for (const entry of paths) {
+      const abs = await promotionDestination(primaryRoot, canonicalRoot, entry.rel, canonicalPath);
+      const current = (await readPromotionEntry(abs)).state;
+      if (!promotionStatesEqual(current, entry.afterState!)) return false;
+    }
+    try {
+      const installedInfo = await lstatPath(parsed.bundleDir);
+      if (installedInfo.isDirectory() && !installedInfo.isSymbolicLink()) {
+        const installedState = (await readPromotionEntry(installedSession)).state;
+        if (installedState.type === "file") {
+          if (manifest.status === "created" && !(await verifyInstalledBundleAgainstManifest(parsed.bundleDir, manifest))) return false;
+          return true;
+        }
+        return false;
+      }
+    } catch (error) {
+      if (errnoCode(error) !== "ENOENT") return false;
+    }
+    if (manifest.status !== "planned") return false;
+    const stagedBundleDir = join(sessionRootPath, parsed.sessionId);
+    const sessionRootPlan = await probePromotionDirectory(journalBinding.directory, sessionRootPath, "promotion recovery session root");
+    if (!sessionRootPlan.identity) return false;
+    const stagedPlan = await probePromotionDirectory(journalBinding.directory, stagedBundleDir, "promotion recovery staged bundle");
+    if (!stagedPlan.identity) return false;
+    let stagedInfo;
+    try {
+      stagedInfo = await lstatPath(stagedBundleDir, { bigint: true });
+    } catch (error) {
+      if (errnoCode(error) === "ENOENT") return false;
+      return false;
+    }
+    if (!stagedInfo.isDirectory() || stagedInfo.isSymbolicLink()) return false;
+    if (String(stagedInfo.dev) !== stagedPlan.identity.dev || String(stagedInfo.ino) !== stagedPlan.identity.ino) return false;
+    const stagedState = (await readPromotionEntry(join(stagedBundleDir, "current", "session.jsonl"))).state;
+    if (stagedState.type !== "file") return false;
+    let destInfo;
+    try {
+      destInfo = await lstatPath(parsed.projectDir, { bigint: true });
+    } catch (error) {
+      if (errnoCode(error) === "ENOENT") return false;
+      return false;
+    }
+    if (!destInfo.isDirectory() || destInfo.isSymbolicLink()) return false;
+    let destIdentity: PromotionFsIdentity;
+    try {
+      destIdentity = await boundPromotionOpenDirectory({
+        path: parsed.projectDir,
+        expectedIdentity: { dev: String(destInfo.dev), ino: String(destInfo.ino) },
+      });
+    } catch {
+      return false;
+    }
+    const sourceRootBinding: BoundPromotionDirectory = {
+      path: sessionRootPath,
+      dev: sessionRootPlan.identity.dev,
+      ino: sessionRootPlan.identity.ino,
+      capability: sessionRootPlan.identity.capability,
+    };
+    const destRootBinding: BoundPromotionDirectory = {
+      path: parsed.projectDir,
+      dev: destIdentity.dev,
+      ino: destIdentity.ino,
+      capability: destIdentity.capability,
+    };
+    try {
+      const moved = await boundPromotionInstallDirectory({
+        sourceRoot: sourceRootBinding.path,
+        sourceRootIdentity: promotionIdentityOf(sourceRootBinding),
+        sourceComponents: [parsed.sessionId],
+        sourceParentIdentity: promotionIdentityOf(sourceRootBinding),
+        expectedSource: {
+          identity: { dev: stagedPlan.identity.dev, ino: stagedPlan.identity.ino },
+          mode: Number(stagedInfo.mode & 0o777n),
+        },
+        destinationRoot: destRootBinding.path,
+        destinationRootIdentity: promotionIdentityOf(destRootBinding),
+        destinationComponents: [parsed.sessionId],
+        destinationParentIdentity: promotionIdentityOf(destRootBinding),
+      });
+      if (moved.outcome !== "applied" || !moved.durable) return false;
+    } catch {
+      return false;
+    }
+    try {
+      const installedInfo = await lstatPath(parsed.bundleDir);
+      if (!installedInfo.isDirectory() || installedInfo.isSymbolicLink()) return false;
+      if ((await readPromotionEntry(installedSession)).state.type !== "file") return false;
+    } catch {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function rollbackPromotionPaths(
   journalDir: string,
   journal: Record<string, unknown>,
@@ -1290,6 +1442,11 @@ export async function rollbackPromotion(
     // freshly created journal.
     return false;
   }
+  // Live failure after `applied` still rolls back: the synchronous session
+  // install already failed, so files and session stay atomic by restoring the
+  // before-images. Crash recovery (`recoverPromotionJournals`) instead tries
+  // `tryCompleteAppliedPromotion` first and only rolls back when completion
+  // is impossible.
   return rollbackPromotionPaths(journalDir, journal, primaryRoot, canonicalPath, journalBinding, primaryRootBinding);
 }
 
@@ -1410,6 +1567,13 @@ async function recoverPromotionJournalsUnderTransaction(worldsRoot: string, cont
         name: entry.name,
         journalFile: null,
       };
+      if (phase === "applied") {
+        const completed = await tryCompleteAppliedPromotion(dir.path, journal, primaryRoot, filesystemCanonicalPath, recoveryBinding);
+        if (completed) {
+          console.warn(`[worldline] promotion journal completed with artifacts retained: ${dir.path}`);
+          continue;
+        }
+      }
       const rolledBack = await rollbackPromotionPaths(
         dir.path,
         journal,
