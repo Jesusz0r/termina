@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { lstat, mkdir, rm, writeFile, realpath as fsRealpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { isErrno } from "../../../shared/guards.ts";
+import { syncParentDir } from "../../../shared/fsync.ts";
 import ts from "typescript";
 
 /**
@@ -117,8 +118,8 @@ const saveEditorFile = loadMethod(
 const revertReviewFile = loadMethod(
   "revertReviewFile",
   "private async revertReviewFile(",
-  ["lstat", "mkdir", "rm", "writeFile", "randomUUID", "isErrno", "relative", "isAbsolute", "dirname"],
-  [lstat, mkdir, rm, writeFile, randomUUID, isErrno, relative, isAbsolute, dirname],
+  ["lstat", "mkdir", "rm", "writeFile", "randomUUID", "isErrno", "relative", "isAbsolute", "dirname", "syncParentDir"],
+  [lstat, mkdir, rm, writeFile, randomUUID, isErrno, relative, isAbsolute, dirname, syncParentDir],
 ) as RevertReviewFile;
 
 const realAcquire = loadMethod("acquireWriteLease", "private async acquireWriteLease(", [], []) as AcquireWriteLease;
@@ -203,6 +204,11 @@ function makeSaveApp(ws: FakeWorkspace, opts: { swapLeaf?: boolean } = {}) {
     ...makeLeaseBroker(ws),
     projectWorkspace: (owner: unknown) => (owner === "owner" ? { project: { id: "proj-1" }, workspace: ws } : null),
     managedPath: makeManagedPath(ws, opts),
+    // Lease-behavior tests only need a faithful write; the crash-durability
+    // sequence of the real helper has its own suite (durable-replace.test.ts).
+    durableReplaceFile: async (path: string, data: string | Buffer) => {
+      await writeFile(path, data);
+    },
   };
 }
 
@@ -214,6 +220,9 @@ function makeRevertApp(ws: FakeWorkspace, inst: FakeInst, store: FakeStore | nul
     projectOfTerminal: (id: string) => (id === inst.id ? { storePromise: Promise.resolve(store) } : null),
     canonicalPath: (p: string) => fsRealpath(p),
     deleteBaseline: (target: FakeInst, path: string) => realDeleteBaseline.call(null, target, path),
+    durableReplaceFile: async (path: string, data: string | Buffer) => {
+      await writeFile(path, data);
+    },
   };
 }
 
@@ -562,5 +571,37 @@ describe("save/revert wiring", () => {
     expect(extractMethod(main, "private prepareRunBaselines(")).toContain("retainedStates");
     expect(extractMethod(main, "private async fillBaselineFromState(")).toContain("this.setBaseline(inst, path, content.toString(\"utf8\"), stateId);");
     expect(extractMethod(main, "private collectWorker(")).toContain("worker.baselineStates.get(p)");
+  });
+
+  it("routes editor saves through the durable replace helper", () => {
+    const method = extractMethod(main, "private async saveEditorFile(");
+    expect(method).toContain("this.durableReplaceFile(");
+    expect(method).not.toContain("writeFile(");
+  });
+
+  it("routes review reverts through the durable replace helper", () => {
+    const method = extractMethod(main, "private async revertReviewFile(");
+    expect(method).toContain("this.durableReplaceFile(");
+    expect(method).toContain("syncParentDir(p)");
+    expect(method).not.toContain("writeFile(");
+  });
+
+  it("routes flush saves and acks through the durable replace helper", () => {
+    const flush = methodBody(main, 'ipcMain.handle("file:flush-save"', 'ipcMain.handle("verify:detect"');
+    expect(flush).toContain("this.durableReplaceFile(");
+    expect(flush).not.toContain("writeFile(");
+    const ack = methodBody(main, "private writeAck(", "private flushDirtyModels(");
+    expect(ack).toContain("this.durableReplaceFile(");
+    expect(ack).not.toContain("writeFile(");
+    expect(ack).not.toContain("fsRename(");
+  });
+
+  it("asks before replacing a damaged prefs file on the interactive path", () => {
+    const method = extractMethod(main, "private async updatePreferences(");
+    expect(method).toContain("this.confirmPrefsReset()");
+    expect(method).toContain("this.isPrefsResetRefusal(");
+    const confirm = extractMethod(main, "private async confirmPrefsReset(");
+    expect(confirm).toContain("showMessageBox");
+    expect(confirm).toContain("Reset to defaults");
   });
 });

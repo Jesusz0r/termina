@@ -13,7 +13,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain as electronIpcMain, Menu
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, statSync, watch, type FSWatcher } from "node:fs";
-import { access, cp, lstat, mkdir, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
+import { access, cp, lstat, mkdir, open, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -95,6 +95,7 @@ import { PathLookup } from "./path-lookup.js";
 import { normalizeAppPreferences, normalizeUserPreferencePatch, recordRecentFile, recordRecentModel, sanitizeShortcutMap } from "../shared/preferences.js";
 import { HIDE_THINKING_CSI, SHOW_THINKING_CSI, thinkingStartupArgs } from "../shared/terminal-control.js";
 import { validateGrepPattern } from "../shared/grep-pattern.js";
+import { syncParentDir } from "../shared/fsync.js";
 import { isErrno } from "../shared/guards.js";
 import {
   DEFAULT_SHORTCUTS,
@@ -1639,7 +1640,41 @@ class TerminaApp {
     const reset = raw && typeof raw === "object" && raw !== null && "confirmReset" in raw
       ? (raw as { confirmReset?: boolean }).confirmReset === true
       : false;
-    return this.commitPreferencePatch(patch, activate, reset);
+    try {
+      return await this.commitPreferencePatch(patch, activate, reset);
+    } catch (err) {
+      // The interactive settings path asks once before replacing a damaged
+      // file, so settings never go permanently unwritable. Background
+      // commits bypass this method and keep failing closed until then.
+      if (!reset && this.isPrefsResetRefusal(err) && (await this.confirmPrefsReset())) {
+        return this.commitPreferencePatch(patch, activate, true);
+      }
+      throw err;
+    }
+  }
+
+  /** True when the prefs store refused a save pending reset confirmation. */
+  private isPrefsResetRefusal(err: unknown): boolean {
+    return err instanceof Error && err.message.includes("until reset is confirmed");
+  }
+
+  /**
+   * Destructive confirm for replacing a damaged prefs file. Headless (no
+   * window) refuses: the damaged file must never be silently replaced.
+   */
+  private async confirmPrefsReset(): Promise<boolean> {
+    const win = this.win && !this.win.isDestroyed() ? this.win : undefined;
+    if (!win) return false;
+    const res = await dialog.showMessageBox(win, {
+      type: "warning",
+      title: "Settings file is damaged",
+      message: "Termina could not read your settings file, so changes cannot be saved.",
+      detail: "Reset settings to defaults and replace the damaged file?",
+      buttons: ["Reset to defaults", "Cancel"],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    return res.response === 0;
   }
 
   // ------------------------------------------------------------- terminals --
@@ -4788,13 +4823,7 @@ class TerminaApp {
           throw new Error("events directory identity changed");
         }
         const target = join(dir, name);
-        const temp = `${target}.${randomUUID()}.tmp`;
-        try {
-          await writeFile(temp, JSON.stringify(payload), { flag: "wx", mode: 0o600 });
-          await fsRename(temp, target);
-        } finally {
-          await rm(temp, { force: true }).catch(() => undefined);
-        }
+        await this.durableReplaceFile(target, JSON.stringify(payload), 0o600);
       } catch (error) {
         console.error(`[main] could not write ack terminal=${terminalId} request=${requestId}: ${String(error)}`);
       }
@@ -7581,7 +7610,7 @@ class TerminaApp {
         // lstat: refuse a leaf swapped for a symlink after admission.
         const info = await lstat(managed.path);
         if (!info.isFile()) return { ok: false, error: "path is not a regular file" };
-        await writeFile(managed.path, content, "utf8");
+        await this.durableReplaceFile(managed.path, content, info.mode & 0o777);
         return { ok: true };
       } catch (err) {
         return { ok: false, error: (err as Error).message };
@@ -7776,6 +7805,36 @@ class TerminaApp {
   }
 
   /**
+   * Crash-durable file replacement for main-owned writes (editor save,
+   * flush-save, review revert, ack files): exclusive temp in the same
+   * directory, fsync file, rename, fsync parent dir — the same sequence as
+   * the prefs store and sidecar durable writes. Call inside the write-lease
+   * hold where one applies. Pass the replaced file's permission bits to
+   * preserve them across the new inode; the default fits new files.
+   */
+  private async durableReplaceFile(path: string, data: string | Buffer, mode?: number): Promise<void> {
+    const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      handle = await open(temp, "wx", mode ?? 0o666);
+      await handle.writeFile(data);
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+      await fsRename(temp, path);
+      syncParentDir(path);
+    } catch (error) {
+      try {
+        await handle?.close();
+      } catch {
+        /* best-effort fd cleanup */
+      }
+      await rm(temp, { force: true }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  /**
    * Save one editor buffer. Holds a short write lease so a promotion apply
    * cannot land between the guard and the write, and re-checks the leaf
    * with lstat immediately before writing.
@@ -7796,7 +7855,7 @@ class TerminaApp {
         throw err;
       });
       if (st === null || !st.isFile()) return { ok: false, error: "path is not a regular file" };
-      await writeFile(managed.path, content, "utf8");
+      await this.durableReplaceFile(managed.path, content, st.mode & 0o777);
       return { ok: true };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
@@ -7829,7 +7888,10 @@ class TerminaApp {
           throw err;
         });
         if (created !== null && !created.isFile()) return { ok: false, error: "path is not a regular file" };
-        if (created !== null) await rm(p, { force: true });
+        if (created !== null) {
+          await rm(p, { force: true });
+          syncParentDir(p);
+        }
         this.deleteBaseline(inst, p);
         return { ok: true };
       }
@@ -7856,7 +7918,7 @@ class TerminaApp {
         throw err;
       });
       if (st !== null && !st.isFile()) return { ok: false, error: "path is not a regular file" };
-      await writeFile(p, data);
+      await this.durableReplaceFile(p, data, st === null ? undefined : st.mode & 0o777);
       this.deleteBaseline(inst, p);
       return { ok: true };
     } catch (err) {
