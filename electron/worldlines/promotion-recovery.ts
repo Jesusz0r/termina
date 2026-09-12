@@ -920,6 +920,7 @@ function validatePromotionRollbackTemps(journal: Record<string, unknown>): Promo
 function validatePromotionJournalHeader(journal: Record<string, unknown>, primaryRoot: string): void {
   if (!isAbsolute(primaryRoot) || journal.primaryRoot !== primaryRoot) throw new Error("invalid promotion primary root");
   if (journal.phase !== "prepared" && journal.phase !== "applying" && journal.phase !== "applied") throw new Error("invalid active promotion phase");
+  // Older journals may still record engine "pi"; accept that at this boundary only.
   if (journal.engine !== undefined && journal.engine !== "pi" && journal.engine !== "core") throw new Error("invalid promotion engine");
   for (const field of ["stagedSession", "installedSession", "installedSessionTemp"] as const) {
     if (journal[field] !== undefined && journal[field] !== null && typeof journal[field] !== "string") {

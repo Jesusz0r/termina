@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 
 /**
  * Source-level probes for the background-subagent integration seams.
- * The spawn/dispatch/clear/close wiring lives in PiEditorApp, which has
+ * The spawn/dispatch/clear/close wiring lives in TerminaApp, which has
  * no unit harness (it needs a live Electron app), so these probes pin
  * the seams textually the way ipc-project-flow does for IPC fences:
  * if a seam is deleted or rerouted, the probe fails and the author must

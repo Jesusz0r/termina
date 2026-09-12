@@ -1,9 +1,9 @@
 /**
- * Bounded live follow-up to the Pi/OpenCode source audit. No production policy changes.
+ * Bounded live follow-up to the Codex cache-probe audit. No production policy changes.
  *
  * node --experimental-strip-types --no-warnings scripts/codex-cache-probe.ts --live --group all --out /owned/tmp/results.json
  *
- * identity: Codex SSE, no identifiers / key only / key + aligned Pi session headers.
+ * identity: Codex SSE, no identifiers / key only / key + aligned session headers.
  * transport: Codex SSE full replay / reused WebSocket full replay / WS incremental continuation.
  * mode: PUBLIC OpenAI implicit / Termina's explicit mode and marker placement.
  *
@@ -98,11 +98,11 @@ type TransportFactory = (wire: Arm["wire"], url: string, headers: Record<string,
 const realTransport: TransportFactory = (wire, url, headers, signal) =>
   wire === "http" ? httpTransport(url, headers, signal) : websocketTransport(url, headers, signal);
 
-/** Shared live-probe boundaries; never read the host Pi credential tree. */
+/** Shared live-probe boundaries; never read a foreign host credential tree. */
 export function assertProbeAuthPath(): void {
   const file = existsSync(authPath()) ? realpathSync(authPath()) : resolve(authPath());
   const forbidden = join(homedir(), ".pi", "agent");
-  if (file === forbidden || file.startsWith(forbidden + sep)) throw new Error("Refusing host Pi auth tree");
+  if (file === forbidden || file.startsWith(forbidden + sep)) throw new Error("Refusing a foreign host auth tree");
 }
 
 export function probeEndpoint(baseUrl: string, provider: Provider): string {

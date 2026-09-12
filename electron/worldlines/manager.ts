@@ -635,8 +635,8 @@ export class WorldlineManager {
         this.retainedSessionDiscards.add(discard);
         void discard.finally(() => this.retainedSessionDiscards.delete(discard));
       }
-      // Non-core branches are removed with no session discard: no pi
-      // sessions are recorded anymore, so there is nothing to reclaim.
+      // Non-core branches are removed with no session discard: only core
+      // sessions are recorded, so there is nothing else to reclaim.
     }
   }
 
@@ -765,7 +765,7 @@ export class WorldlineManager {
     if (!run?.promptPayloadFile) {
       return { ok: false, error: "the run has no captured task or pre-task anchor" };
     }
-    if (cmp.engine !== "core") return { ok: false, error: "pi comparisons are removed; core is the only engine" };
+    if (cmp.engine !== "core") return { ok: false, error: "core is the only engine" };
     // This comparison is replaced by the challenge pair, so its live
     // candidates free their budget slots.
     if (this.liveWorldlineCount() - cmp.candidates.size + 2 > 3) {
@@ -1360,7 +1360,7 @@ export class WorldlineManager {
     if (!run.replayable) return { ok: false, error: run.reason ?? "the run is not replayable" };
     if (!isCoreRun(run)) {
       run.replayable = false;
-      run.reason = "pi runs are not forkable; core is the only engine";
+      run.reason = "core is the only engine";
       return { ok: false, error: run.reason };
     }
     if (!run.startStateId || !run.settledStateId) return { ok: false, error: "the run has no complete source checkpoints" };
@@ -1596,7 +1596,7 @@ export class WorldlineManager {
 
   /** Fork both session bundles through the session worker. */
   private async forkSessions(cmp: ComparisonState, run: RunRecord): Promise<void> {
-    if (cmp.engine !== "core") throw new Error("pi candidates are removed; core is the only engine");
+    if (cmp.engine !== "core") throw new Error("core is the only engine");
     await this.forkCoreSessions(cmp, run);
   }
 
@@ -1834,7 +1834,7 @@ export class WorldlineManager {
     // A moment comparison has a single candidate: no sibling to deny (the
     // worlds-root deny covers its tree anyway).
     const sibling = cmp.candidates.get(cand.label === "A" ? "B" : "A");
-    if (cmp.engine !== "core") throw new Error("pi candidates are removed; core is the only engine");
+    if (cmp.engine !== "core") throw new Error("core is the only engine");
     const modelCut = cmp.model?.indexOf("/") ?? -1;
     const provider = modelCut > 0 ? cmp.model!.slice(0, modelCut) : null;
     const baseEnv = this.deps.candidateEnv(provider);
@@ -2273,7 +2273,7 @@ export class WorldlineManager {
     const candGen = candWs?.generation ?? 0;
     const comparison = this.comparisons.get(comparisonId);
     if (!comparison) return { ok: false, error: "comparison not found" };
-    if (comparison.engine !== "core") return { ok: false, error: "pi promotions are removed; core is the only engine" };
+    if (comparison.engine !== "core") return { ok: false, error: "core is the only engine" };
     const promoteEngine = "core" as const;
 
     // The admission reservation is the cross-process boundary. It must be
@@ -2781,7 +2781,7 @@ export class WorldlineManager {
     const sessionFile = nested?.sessionFile ?? covering?.sessionFile;
     if (!rootRun) return { ok: false, error: "the source run is unavailable" };
     if (!sessionFile) return { ok: false, error: "the run session is unavailable" };
-    if (!isCoreRun(rootRun)) return { ok: false, error: "pi moments are not forkable; core is the only engine" };
+    if (!isCoreRun(rootRun)) return { ok: false, error: "core is the only engine" };
     const opts = {
       terminalId,
       stateId: moment.stateId,

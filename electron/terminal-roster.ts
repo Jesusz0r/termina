@@ -92,8 +92,7 @@ export function parseTerminalRoster(raw: unknown): TerminalRosterEntry[] {
     if (rec.type !== "agent" && rec.type !== "shell") continue;
     if (typeof rec.id !== "string" || rec.id.length > MAX_ID || !TERM_ID.test(rec.id) || seen.has(rec.id)) continue;
     const entry: TerminalRosterEntry = { id: rec.id, type: rec.type };
-    // Legacy pi entries start a fresh core session; the pi session file is
-    // ignored. Pi spawn is removed.
+    // Agent tabs are always core. A stale engine field on disk is ignored.
     if (rec.type === "agent") entry.engine = "core";
     if (rec.type === "shell" && typeof rec.shell === "string" && isAbsPath(rec.shell)) entry.shell = rec.shell;
     if (typeof rec.sessionId === "string" && isCoreSessionId(rec.sessionId)) {

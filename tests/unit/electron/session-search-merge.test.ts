@@ -35,17 +35,19 @@ describe("mergeSessionFiles", () => {
 });
 
 describe("collectSessionSearchFiles", () => {
-  it("merges pi history with core bundles, ignoring non-jsonl files", async () => {
+  it("lists core session bundles and ignores loose files", async () => {
     const root = mkdtempSync(join(tmpdir(), "ssc-"));
     try {
-      const piDir = join(root, "pi");
       const coreDir = join(root, "core");
-      mkdirSync(piDir, { recursive: true });
-      mkdirSync(coreDir, { recursive: true });
-      writeFileSync(join(piDir, "2024-06-01T10-00-00.jsonl"), "{}\n");
-      writeFileSync(join(piDir, "notes.txt"), "not a session\n");
-      const files = await collectSessionSearchFiles(piDir, coreDir);
-      expect(files.map((e) => e.name)).toEqual(["2024-06-01T10-00-00.jsonl"]);
+      const current = join(coreDir, "core-11111111-1111-1111-1111-111111111111", "current");
+      mkdirSync(current, { recursive: true });
+      writeFileSync(join(current, "session.jsonl"), "{}\n");
+      writeFileSync(join(coreDir, "notes.txt"), "not a session\n");
+      writeFileSync(join(coreDir, "loose.jsonl"), "{}\n");
+      const files = await collectSessionSearchFiles(coreDir);
+      expect(files.map((e) => e.name)).toEqual([
+        "core-11111111-1111-1111-1111-111111111111/current/session.jsonl",
+      ]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -54,7 +56,7 @@ describe("collectSessionSearchFiles", () => {
   it("yields [] for missing directories", async () => {
     const root = mkdtempSync(join(tmpdir(), "ssc-"));
     try {
-      const files = await collectSessionSearchFiles(join(root, "no-pi"), join(root, "no-core"));
+      const files = await collectSessionSearchFiles(join(root, "no-core"));
       expect(files).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });

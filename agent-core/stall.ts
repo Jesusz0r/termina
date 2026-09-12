@@ -6,8 +6,8 @@
  * keys. Pure functions, no process state; the run loop in main.ts owns the
  * live tracker instances. Recovery is autonomous (model-visible guidance once,
  * then stop): the core loop has no human permission gate, so there is no
- * permission.ask equivalent here. Pi parity: truncated responses fail their
- * tool calls via isTruncatedStopReason in main.ts, not here.
+ * permission.ask equivalent here. Truncated responses fail their tool
+ * calls via isTruncatedStopReason in main.ts, not here.
  *
  * Also owns the empty-search sentinel so producers (grep/glob bodies),
  * display, and the failure tracker share one source without a main↔stall

@@ -1,12 +1,11 @@
 /**
  * Session Search parse and walk.
  *
- * Main supplies the jsonl paths for this project (history dir, core dir,
- * live and roster files). This module is the only JSONL parser for
- * search hits.
+ * Main supplies the jsonl paths for this project (core dir, live and
+ * roster files). This module is the only JSONL parser for search hits.
  */
 import { createReadStream } from "node:fs";
-import { readdir, realpath, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { createInterface } from "node:readline";
 // .ts extensions so the harness can load this file with strip-types.
@@ -73,9 +72,6 @@ export function parseSessionMessageLine(line: string): SessionMessageParse | nul
         if (type === "thinking" || type === "redacted_thinking" || type === "reasoning") continue;
         if (type === "text" && typeof block.text === "string") {
           texts.push(block.text);
-        } else if (type === "toolCall" && typeof block.name === "string") {
-          texts.push(`[${block.name}]`);
-          pushToolPaths(block, paths);
         } else if (type === "tool_use" && typeof block.name === "string") {
           texts.push(`[${block.name}]`);
           pushToolPaths(block, paths);
@@ -206,34 +202,6 @@ async function resolveSessionHitPath(
   return null;
 }
 
-/** List jsonl files in one directory. Missing directories yield []. */
-export async function listSessionJsonl(dir: string): Promise<SessionFileEntry[]> {
-  let names: string[];
-  try {
-    names = (await readdir(dir)).filter((f) => f.endsWith(".jsonl"));
-  } catch {
-    return [];
-  }
-  const out: SessionFileEntry[] = [];
-  for (const name of names) {
-    const path = join(dir, name);
-    try {
-      const info = await stat(path);
-      if (!info.isFile()) continue;
-      let real = path;
-      try {
-        real = await realpath(path);
-      } catch {
-        /* keep the unresolved path */
-      }
-      out.push({ path: real, name, mtimeMs: info.mtimeMs });
-    } catch {
-      /* skip unreadable entries */
-    }
-  }
-  return out;
-}
-
 export async function sessionFileEntry(path: string): Promise<SessionFileEntry | null> {
   if (!path.endsWith(".jsonl")) return null;
   try {
@@ -265,15 +233,14 @@ export function mergeSessionFiles(groups: SessionFileEntry[][]): SessionFileEntr
 }
 
 /**
- * Gather the session files participating in Session Search: read-only Pi
- * history plus core bundles, newest first, capped. Single owner for which
- * files a search covers; main supplies the project-scoped directories and
- * keeps worker dispatch plus query cancellation.
+ * Gather the session files participating in Session Search: core bundles,
+ * newest first, capped. Single owner for which files a search covers; main
+ * supplies the project-scoped directory and keeps worker dispatch plus
+ * query cancellation.
  */
-export async function collectSessionSearchFiles(piDir: string, coreDir: string): Promise<SessionFileEntry[]> {
+export async function collectSessionSearchFiles(coreDir: string): Promise<SessionFileEntry[]> {
   const coreSessions = await listLogicalSessions(coreDir);
   return mergeSessionFiles([
-    await listSessionJsonl(piDir),
     coreSessions.map((entry) => ({
       path: entry.path,
       name: entry.name,

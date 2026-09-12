@@ -147,8 +147,8 @@ describe("bounded Codex diagnostic comparison", () => {
     expect(output()).not.toContain(baseUrl);
   });
 
-  it.each([false, true])("refuses the Pi credential tree before resolving auth (symlink=%s)", async (symlink) => {
-    // A synthetic HOME only; never inspect the host ~/.pi tree.
+  it.each([false, true])("refuses a foreign credential tree before resolving auth (symlink=%s)", async (symlink) => {
+    // A synthetic HOME only; never inspect the host credential tree.
     const target = join(home, ".pi", "agent", "auth.json");
     mkdirSync(join(home, ".pi", "agent"), { recursive: true });
     writeFileSync(target, "{}");

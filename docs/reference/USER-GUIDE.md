@@ -110,7 +110,7 @@ Click `＋` next to the terminal tabs to open the terminal chooser:
 - **Shells** — any shell detected on your system (`zsh`, `bash`, …).
 
 Shell tabs show the shell name as a badge. `Cmd/Ctrl+T` opens the chooser.
-Opening a folder starts one **Agent (core)** tab. Legacy Pi entries on disk reopen as fresh Agent (core) tabs.
+Opening a folder starts one **Agent (core)** tab.
 
 Cycle without the mouse: `Ctrl+Tab` / `Ctrl+Shift+Tab` move between terminal
 tabs, `Cmd/Ctrl+Shift+[` / `]` move between project tabs, and scrolling over a
@@ -454,11 +454,10 @@ elsewhere — `Ctrl+Tab` is literal `Ctrl` on every platform):
 ### Session Search
 
 `Cmd/Ctrl+Shift+P` opens a full-text search over past agent sessions of the
-project — including read-only history left under `~/.pi` from before the
-engine migration. Results list the matching moments; clicking one opens the
-file it mentions. Type at least two characters. Closing a core tab keeps
-that session on disk. `/clear` in a core tab starts a fresh session and
-leaves the previous one searchable.
+project. Results list the matching moments; clicking one opens the file it
+mentions. Type at least two characters. Closing a core tab keeps that
+session on disk. `/clear` in a core tab starts a fresh session and leaves
+the previous one searchable.
 
 ---
 

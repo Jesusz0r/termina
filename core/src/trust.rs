@@ -51,7 +51,7 @@ pub(crate) fn op_trust_hashes(req: &Value) -> Result<Value, String> {
         }
     }
     if let Some(root) = project_root {
-        for rel in [".pi", ".agents/skills"] {
+        for rel in [".agents/skills"] {
             walk_hashes(
                 &root.join(rel),
                 &format!("project/{rel}"),

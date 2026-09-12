@@ -216,7 +216,7 @@ check(
     || (mainSource.includes("createBoundEvidenceProfile(cand)")
       && mainSource.includes("createBoundEvidenceProfile(candidate)")),
 );
-check("Pi and core candidates launch the absolute constant", !worldlinesSource.includes('cmd: "sandbox-exec"'));
+check("candidates launch the absolute constant", !worldlinesSource.includes('cmd: "sandbox-exec"'));
 check("preflight checks the same absolute constant", preflightSource.includes("readFileSync(SANDBOX_EXEC)"));
 check(
   "evidence and Verify use the canonical resource-limit wrapper",

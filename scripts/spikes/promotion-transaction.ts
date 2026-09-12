@@ -106,7 +106,7 @@ export default async function run(log: (message: string) => void): Promise<void>
     const parent = statSync(canonicalPrimary);
     writeFileSync(join(leftoversDir, "journal.json"), JSON.stringify({
       phase: "applying",
-      engine: "pi",
+      engine: "core",
       primaryRoot: recoveryContext.primaryRoot,
       paths: [],
       installedSession,
@@ -123,7 +123,7 @@ export default async function run(log: (message: string) => void): Promise<void>
     const victim = join(primary, "victim.txt");
     mkdirSync(victimDir, { recursive: true });
     writeFileSync(victim, "user bytes\n");
-    writeFileSync(join(victimDir, "journal.json"), JSON.stringify({ phase: "applying", engine: "pi", primaryRoot: recoveryContext.primaryRoot, paths: [], installedSession: victim }));
+    writeFileSync(join(victimDir, "journal.json"), JSON.stringify({ phase: "applying", engine: "core", primaryRoot: recoveryContext.primaryRoot, paths: [], installedSession: victim }));
     await worldlines.recoverPromotionJournals(worlds, recoveryContext);
     if (!existsSync(victim) || !existsSync(victimDir)) throw new Error("recovery deleted a journal-selected primary file");
     log("PASS recovery retains journal-selected session paths outside the trusted root");
@@ -203,7 +203,7 @@ export default async function run(log: (message: string) => void): Promise<void>
     writeFileSync(outsideSession, "outside\n");
     const outsideJournal = join(worlds, "promotion-journal", "outside-session");
     mkdirSync(outsideJournal, { recursive: true });
-    writeFileSync(join(outsideJournal, "journal.json"), JSON.stringify({ phase: "applying", engine: "pi", primaryRoot: recoveryContext.primaryRoot, paths: [], installedSession: outsideSession, installedSessionManifest: fileManifest(outsideSession) }));
+    writeFileSync(join(outsideJournal, "journal.json"), JSON.stringify({ phase: "applying", engine: "core", primaryRoot: recoveryContext.primaryRoot, paths: [], installedSession: outsideSession, installedSessionManifest: fileManifest(outsideSession) }));
 
     const symlinkTarget = join(outsideSessionRoot, "symlink-target.jsonl");
     const symlinkSession = join(outsideSessionRoot, "2026-08-30T12-00-00-000Z_00000000-0000-4000-8000-000000000011.jsonl");
@@ -211,7 +211,7 @@ export default async function run(log: (message: string) => void): Promise<void>
     symlinkSync(symlinkTarget, symlinkSession);
     const symlinkJournal = join(worlds, "promotion-journal", "symlink-session");
     mkdirSync(symlinkJournal, { recursive: true });
-    writeFileSync(join(symlinkJournal, "journal.json"), JSON.stringify({ phase: "applying", engine: "pi", primaryRoot: recoveryContext.primaryRoot, paths: [], installedSession: symlinkSession, installedSessionManifest: fileManifest(symlinkSession) }));
+    writeFileSync(join(symlinkJournal, "journal.json"), JSON.stringify({ phase: "applying", engine: "core", primaryRoot: recoveryContext.primaryRoot, paths: [], installedSession: symlinkSession, installedSessionManifest: fileManifest(symlinkSession) }));
 
     const replacedSession = join(outsideSessionRoot, "2026-08-30T12-00-00-000Z_00000000-0000-4000-8000-000000000012.jsonl");
     writeFileSync(replacedSession, "original\n");
@@ -220,11 +220,11 @@ export default async function run(log: (message: string) => void): Promise<void>
     writeFileSync(replacedSession, "replacement\n");
     const replacedJournal = join(worlds, "promotion-journal", "replaced-session");
     mkdirSync(replacedJournal, { recursive: true });
-    writeFileSync(join(replacedJournal, "journal.json"), JSON.stringify({ phase: "applying", engine: "pi", primaryRoot: recoveryContext.primaryRoot, paths: [], installedSession: replacedSession, installedSessionManifest: replacedManifest }));
+    writeFileSync(join(replacedJournal, "journal.json"), JSON.stringify({ phase: "applying", engine: "core", primaryRoot: recoveryContext.primaryRoot, paths: [], installedSession: replacedSession, installedSessionManifest: replacedManifest }));
 
     const relativeJournal = join(worlds, "promotion-journal", "relative-session");
     mkdirSync(relativeJournal, { recursive: true });
-    writeFileSync(join(relativeJournal, "journal.json"), JSON.stringify({ phase: "applying", engine: "pi", primaryRoot: recoveryContext.primaryRoot, paths: [], installedSession: "relative.jsonl", installedSessionManifest: { status: "planned", path: "relative.jsonl" } }));
+    writeFileSync(join(relativeJournal, "journal.json"), JSON.stringify({ phase: "applying", engine: "core", primaryRoot: recoveryContext.primaryRoot, paths: [], installedSession: "relative.jsonl", installedSessionManifest: { status: "planned", path: "relative.jsonl" } }));
     await worldlines.recoverPromotionJournals(worlds, recoveryContext);
     if (!existsSync(outsideSession) || !existsSync(symlinkSession) || readFileSync(replacedSession, "utf8") !== "replacement\n") {
       throw new Error("recovery removed an unauthorized or replaced session artifact");
@@ -299,7 +299,7 @@ export default async function run(log: (message: string) => void): Promise<void>
     const validRollbackInfo = statSync(validRollback);
     writeFileSync(join(validDir, "journal.json"), JSON.stringify({
       phase: "applying",
-      engine: "pi",
+      engine: "core",
       primaryRoot: recoveryContext.primaryRoot,
       paths: [],
       installedSession: validInstalled,

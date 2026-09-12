@@ -122,7 +122,7 @@ export function websocketTransport(url: string, headers: Record<string, string>,
       if (!socket) {
         const Constructor = socketConstructor();
         const outgoing = { ...headers, "openai-beta": "responses_websockets=2026-02-06" };
-        // Beta value observed in pinned Pi Codex source, not inferred from public API docs.
+        // Beta value observed on the Codex websocket handshake, not inferred from public API docs.
         delete (outgoing as Json)["content-type"];
         socket = new Constructor(url.replace(/^https:/, "wss:"), {
           headers: outgoing, followRedirects: false, perMessageDeflate: false,

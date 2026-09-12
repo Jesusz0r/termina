@@ -532,9 +532,9 @@ export function cacheSessionHeaders(identity: CacheIdentity | null): Record<stri
   // x-grok-conv-id is documented for xAI Chat Completions, not Responses.
   if (identity.provider === "xai" && identity.protocol === "openai-completions") return { "x-grok-conv-id": identity.key };
   // Live codex-cache-probe evidence (gpt-6-astra): the Codex relay accepts
-  // these Pi-aligned session headers and routes repeated prefixes to warm
-  // machines (aligned arms hit 6/8 warm reads vs 1/4 without). The headers
-  // carry only the derived identity key and cannot alter the cached prefix.
+  // these session headers and routes repeated prefixes to warm machines
+  // (aligned arms hit 6/8 warm reads vs 1/4 without). The headers carry
+  // only the derived identity key and cannot alter the cached prefix.
   if (identity.provider === "openai-codex") return { "session-id": identity.key, "x-client-request-id": identity.key };
   return {};
 }

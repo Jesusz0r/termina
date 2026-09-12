@@ -45,7 +45,7 @@ describe("Dispatch Auto-Verify Invariants", () => {
     // pass/cancel/close clear the entry.
     check("failures seed bounded retry attempts",
       main.includes("const attempts = (this.autoVerifyFailures.get(ownerId) ?? 0) + 1;")
-      && main.includes("if (attempts >= PiEditorApp.MAX_AUTO_VERIFY_ATTEMPTS) {"));
+      && main.includes("if (attempts >= TerminaApp.MAX_AUTO_VERIFY_ATTEMPTS) {"));
     check("cap stops the loop with a needs-attention note",
       main.includes("consecutive failed verifies — needs attention before another automatic run."));
     check("timeouts report once and never schedule a retry",

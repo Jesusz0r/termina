@@ -2,10 +2,9 @@
 /**
  * Prepare the packaged resources: the node runtime and the core binary.
  *
- * The bundle ships its own node because pi's cli.js starts with a node
- * shebang and pi spawns node itself. The node version must satisfy pi's
- * engines (>= 22.19). The core binary comes from the release build or the
- * local cargo build.
+ * The bundle ships its own node so the agent and its children resolve a
+ * known runtime (Node >= 22.19). The core binary comes from the release
+ * build or the local cargo build.
  */
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";

@@ -11,7 +11,7 @@ function managerFor(worldsRoot: string): WorldlineManager {
   };
   internal.runsById.set("run", { startStateId: "state" });
   internal.comparisons.set("comparison", {
-    engine: "pi",
+    engine: "core",
     sourceRunId: "run",
     candidates: new Map([
       ["A", { state: "ready", sessionFile: join(worldsRoot, "session.jsonl"), terminalId: null, dir: join(worldsRoot, "A"), eventsDir: join(worldsRoot, "events") }],

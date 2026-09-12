@@ -3570,8 +3570,9 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
           terminals: [{ id: "term-2", type: "agent", engine: "core", sessionId: "core-abc", sessionFile: "/tmp/core-abc.jsonl" }],
         })[0]?.sessionId === "core-abc",
     );
-    check("parseTerminalRoster drops dispatch-like ids", rosterMod.parseTerminalRoster([{ id: "job-1", type: "agent", engine: "pi" }]).length === 0);
+    check("parseTerminalRoster drops dispatch-like ids", rosterMod.parseTerminalRoster([{ id: "job-1", type: "agent", engine: "core" }]).length === 0);
     check("parseTerminalRoster defaults agent engine to core", rosterMod.parseTerminalRoster([{ id: "term-1", type: "agent" }])[0]?.engine === "core");
+    check("parseTerminalRoster ignores a stale engine field", rosterMod.parseTerminalRoster([{ id: "term-1", type: "agent", engine: "pi" }])[0]?.engine === "core");
     check(
       "parseTerminalRoster drops obsolete core sessionFile values",
       rosterMod.parseTerminalRoster([{ id: "term-1", type: "agent", engine: "core", sessionFile: "/tmp/core-flat.jsonl" }])[0]?.sessionFile == null,
@@ -3580,7 +3581,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       "parseTerminalRoster drops duplicate ids",
       rosterMod.parseTerminalRoster([
         { id: "term-1", type: "agent", engine: "core" },
-        { id: "term-1", type: "agent", engine: "pi" },
+        { id: "term-1", type: "agent", engine: "core" },
       ]).length === 1,
     );
     check(
@@ -3590,31 +3591,20 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("isCoreSessionId rejects parent segment", isCoreSessionId("..") === false);
     check("isCoreSessionId accepts uuid form", isCoreSessionId("core-11111111-1111-1111-1111-111111111111") === true);
     const liveRoster: TerminalRosterEntry[] = [{ id: "term-3", type: "agent", engine: "core" }];
-    // Legacy "pi" engines probe that compose stays engine-agnostic.
     const unrestoredRoster = [
-      { id: "term-1", type: "agent", engine: "pi" },
-      { id: "term-3", type: "agent", engine: "pi" },
+      { id: "term-1", type: "agent", engine: "core" },
+      { id: "term-3", type: "agent", engine: "core" },
     ] as unknown as TerminalRosterEntry[];
     const composed = rosterMod.composeTerminalRoster(liveRoster, unrestoredRoster);
     check("composeTerminalRoster prefers live id", composed[0]?.id === "term-3" && composed[0]?.engine === "core");
     check("composeTerminalRoster keeps unrestored sibling", composed[1]?.id === "term-1" && composed.length === 2);
-    const manyLive = Array.from({ length: 20 }, (_, i) => ({ id: `term-${i + 1}`, type: "agent", engine: "pi" })) as unknown as TerminalRosterEntry[];
+    const manyLive = Array.from({ length: 20 }, (_, i) => ({ id: `term-${i + 1}`, type: "agent", engine: "core" })) as unknown as TerminalRosterEntry[];
     check("composeTerminalRoster caps at 16", rosterMod.composeTerminalRoster(manyLive, []).length === rosterMod.MAX_TERMINAL_ROSTER);
     
     const rotFixed = new Date(2026, 7, 26, 15, 4, 5).getTime();
     check("sessionRotateStamp is filesystem-safe", sessionRotateStamp(rotFixed) === "2026-08-26T15-04-05");
     
     const searchMod = await import("../../../electron/session-search.ts");
-    const piLine = JSON.stringify({
-      type: "message",
-      message: {
-        role: "assistant",
-        content: [
-          { type: "text", text: "created compute in `utils.ts`" },
-          { type: "toolCall", name: "write", arguments: { path: "utils.ts" } },
-        ],
-      },
-    });
     const coreLine = JSON.stringify({
       storageSeq: 2,
       type: "message",
@@ -3628,9 +3618,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       },
     });
     const usageLine = JSON.stringify({ storageSeq: 3, type: "usage", input: 1 });
-    const piParsed = searchMod.parseSessionMessageLine(piLine);
     const coreParsed = searchMod.parseSessionMessageLine(coreLine);
-    check("parse Pi toolCall extracts the path", piParsed?.role === "assistant" && piParsed.text.includes("compute") && piParsed.paths.includes("utils.ts"));
     check(
       "parse core tool_use extracts the path and skips thinking",
       coreParsed?.role === "assistant" &&
@@ -4439,13 +4427,12 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     }
     for (const theme of Object.keys(themesMod.TERMINAL_THEMES) as ThemeId[]) {
       const coreTheme = themesMod.terminalTheme(theme, "core");
-      // Deliberate legacy-engine probe: "pi" predates the "core"-only engine union.
-      const plainTheme = themesMod.terminalTheme(theme, "pi" as unknown as "core");
+      const plainTheme = themesMod.terminalTheme(theme);
       check(
         `core ${theme} has three extendedAnsi entries`,
         Array.isArray(coreTheme.extendedAnsi) && coreTheme.extendedAnsi.length === 3,
       );
-      check(`pi ${theme} has no extendedAnsi override`, plainTheme.extendedAnsi === undefined);
+      check(`${theme} without engine has no extendedAnsi override`, plainTheme.extendedAnsi === undefined);
       const coreAnsi = coreTheme.extendedAnsi;
       check(
         `core ${theme} tool backgrounds keep 4.5 contrast`,

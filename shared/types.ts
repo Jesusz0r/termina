@@ -642,7 +642,7 @@ export interface TerminaBridge {
   cancelWorldline(comparisonId: string): Promise<{ ok: boolean; error?: string }>;
   /** Discard a live comparison. */
   discardWorldline(comparisonId: string): Promise<{ ok: boolean; error?: string }>;
-  /** Reopen a candidate's Pi terminal. */
+  /** Reopen a candidate's agent terminal. */
   openWorldlineTerminal(comparisonId: string, label: "A" | "B"): Promise<{ ok: boolean; error?: string; terminalId?: string }>;
   /** Fork one candidate from a timeline moment (WORLDLINES §6). */
   forkPoint(terminalId: string, seq: number): Promise<{ ok: boolean; comparisonId?: string; error?: string }>;

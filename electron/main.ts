@@ -455,7 +455,7 @@ let rendererWindowGenerationSeq = 0;
 let rendererGenerationSeq = 0;
 let rendererLoadGenerationSeq = 0;
 
-class PiEditorApp {
+class TerminaApp {
   private win: BrowserWindow | null = null;
   private terminals = new Map<string, AgentTerminalInstance>();
   /** In-flight initial project/terminal restoration on app boot. */
@@ -1822,7 +1822,7 @@ class PiEditorApp {
         const inst = await this.createTerminal(
           seed.primaryRoot,
           await (async () => {
-            if (seed.engine !== "core") throw new Error("pi promotions are removed; core is the only engine");
+            if (seed.engine !== "core") throw new Error("core is the only engine");
             const parsed = parseSessionBundlePath(seed.installedSession);
             if (!parsed || resolve(parsed.projectDir) !== resolve(await this.coreProjectSessionDir(seed.primaryRoot))) {
               throw new Error("the promoted core session path is invalid");
@@ -2676,7 +2676,7 @@ class PiEditorApp {
       id = this.allocateTerminalId();
     }
     if (opts?.engine !== undefined && opts.engine !== "core") {
-      throw new Error("pi agent terminals are removed; core is the only engine");
+      throw new Error("core is the only engine");
     }
     let cmd: string;
     let args: string[];
@@ -2761,7 +2761,7 @@ class PiEditorApp {
       // (dialog outside the pty) for every bash run. Sandboxed worldline
       // candidates alone auto-approve via electron/worldlines/.
     } else {
-      throw new Error("pi agent terminals are removed; core is the only engine");
+      throw new Error("unsupported terminal type");
     }
     if (persist && owner && this.persistLive(owner).length >= MAX_TERMINAL_ROSTER) {
       throw new Error("this project already has the maximum number of saved terminals");
@@ -3065,13 +3065,13 @@ class PiEditorApp {
         }
       } else {
         const attempts = (this.autoVerifyFailures.get(ownerId) ?? 0) + 1;
-        if (attempts >= PiEditorApp.MAX_AUTO_VERIFY_ATTEMPTS) {
+        if (attempts >= TerminaApp.MAX_AUTO_VERIFY_ATTEMPTS) {
           this.autoVerifyFailures.delete(ownerId);
           this.appendMailboxNote(ownerId, `## Auto-verify stopped\n\n${attempts} consecutive failed verifies — needs attention before another automatic run.`);
         } else {
           this.autoVerifyFailures.set(ownerId, attempts);
           if (!autoTask) {
-            this.appendMailboxNote(ownerId, `## Verify failed\n\n\`${summary}\` — will automatically re-verify when your next run settles (attempt ${attempts} of ${PiEditorApp.MAX_AUTO_VERIFY_ATTEMPTS}).`);
+            this.appendMailboxNote(ownerId, `## Verify failed\n\n\`${summary}\` — will automatically re-verify when your next run settles (attempt ${attempts} of ${TerminaApp.MAX_AUTO_VERIFY_ATTEMPTS}).`);
           }
         }
       }
@@ -3338,10 +3338,10 @@ class PiEditorApp {
   private searchAbort: AbortController | null = null;
 
   /**
-   * Search past session files for the active project (core bundles plus
-   * read-only Pi history left in ~/.pi). The walk runs in the session worker
-   * so the main process stays responsive. Bounded to the 50 newest sessions
-   * and 50 total hits. History search never spawns an agent.
+   * Search past session files for the active project (core bundles). The
+   * walk runs in the session worker so the main process stays responsive.
+   * Bounded to the 50 newest sessions and 50 total hits. History search
+   * never spawns an agent.
    */
   private async searchSessions(rawQuery: string): Promise<SessionHit[]> {
     const project = this.project();
@@ -3351,10 +3351,9 @@ class PiEditorApp {
     if (!project || !cwd || query.length < 2) return [];
     const projectCwd = await this.canonicalPath(cwd);
     const key = this.sanitizeSessionDir(projectCwd);
-    const piDir = join(homedir(), ".pi", "agent", "sessions", key);
     const coreDir = join(this.coreSessionRoot(), key);
     const seq = ++this.searchSessionsSeq;
-    const files = await collectSessionSearchFiles(piDir, coreDir);
+    const files = await collectSessionSearchFiles(coreDir);
     const stale = (): boolean => seq !== this.searchSessionsSeq || this.disposed;
     this.searchAbort?.abort();
     const controller = new AbortController();
@@ -3619,8 +3618,8 @@ class PiEditorApp {
 
   private async writeDispatchBriefing(workerId: string, assigned: PlanTask, jobs: Array<{ task: PlanTask; id: string }>): Promise<void> {
     let briefing = formatDispatchBriefing(workerId, assigned, jobs);
-    if (briefing.length > PiEditorApp.MAX_MAILBOX_BYTES) {
-      briefing = briefing.slice(0, PiEditorApp.MAX_MAILBOX_BYTES) + "\n…";
+    if (briefing.length > TerminaApp.MAX_MAILBOX_BYTES) {
+      briefing = briefing.slice(0, TerminaApp.MAX_MAILBOX_BYTES) + "\n…";
     }
     this.dispatchMailbox.set(workerId, [briefing]);
     await this.flushMailbox(workerId);
@@ -3831,7 +3830,7 @@ class PiEditorApp {
     if (this.isWorldlineTerminal(terminalId)) return;
     const notes = this.dispatchMailbox.get(terminalId) ?? [];
     notes.push(note);
-    while (notes.length > PiEditorApp.MAX_MAILBOX_NOTES) notes.shift();
+    while (notes.length > TerminaApp.MAX_MAILBOX_NOTES) notes.shift();
     this.dispatchMailbox.set(terminalId, notes);
     void this.flushMailbox(terminalId);
   }
@@ -3846,11 +3845,11 @@ class PiEditorApp {
         return;
       }
       let body = notes.join("\n\n---\n\n");
-      while (body.length > PiEditorApp.MAX_MAILBOX_BYTES && notes.length > 1) {
+      while (body.length > TerminaApp.MAX_MAILBOX_BYTES && notes.length > 1) {
         notes.shift();
         body = notes.join("\n\n---\n\n");
       }
-      if (body.length > PiEditorApp.MAX_MAILBOX_BYTES) body = body.slice(0, PiEditorApp.MAX_MAILBOX_BYTES) + "\n…";
+      if (body.length > TerminaApp.MAX_MAILBOX_BYTES) body = body.slice(0, TerminaApp.MAX_MAILBOX_BYTES) + "\n…";
       this.ensureEventsDir();
       const binding = this.eventsDirBinding;
       if (!binding) throw new Error("events directory is not bound");
@@ -3861,7 +3860,7 @@ class PiEditorApp {
         parentIdentity: binding,
         content: Buffer.from(body, "utf8"),
         mode: 0o600,
-        maxBytes: PiEditorApp.MAX_MAILBOX_BYTES + 64,
+        maxBytes: TerminaApp.MAX_MAILBOX_BYTES + 64,
       });
     } catch (err) {
       console.warn(`[main] could not write mailbox context: ${(err as Error).message}`);
@@ -3903,7 +3902,7 @@ class PiEditorApp {
     let changed = false;
     for (const [p, f] of worker.modified) {
       if (!owner.modified.has(p)) {
-        this.setBounded(owner.modified, p, f, PiEditorApp.MAX_MODIFIED_FILES);
+        this.setBounded(owner.modified, p, f, TerminaApp.MAX_MODIFIED_FILES);
         changed = true;
       }
     }
@@ -3931,7 +3930,7 @@ class PiEditorApp {
       const wasMine = project.mineFiles.has(p);
       if (wasMine === mine) return;
       if (mine) {
-        if (project.mineFiles.size >= PiEditorApp.MAX_MINE_FILES) throw new Error("too many Mine files");
+        if (project.mineFiles.size >= TerminaApp.MAX_MINE_FILES) throw new Error("too many Mine files");
         project.mineFiles.add(p);
       } else {
         project.mineFiles.delete(p);
@@ -3995,7 +3994,7 @@ class PiEditorApp {
       const list = JSON.parse(raw) as string[];
       if (Array.isArray(list)) {
         for (const p of list) {
-          if (project.mineFiles.size >= PiEditorApp.MAX_MINE_FILES) break;
+          if (project.mineFiles.size >= TerminaApp.MAX_MINE_FILES) break;
           if (typeof p !== "string") continue;
           const workspace = this.primaryWorkspace(project);
           const managed = workspace ? await this.managedPath(p, workspace.id, true) : null;
@@ -4042,7 +4041,7 @@ class PiEditorApp {
       existing.at = capped.at;
     } else {
       edits.set(capped.path, capped);
-      if (edits.size > PiEditorApp.USER_EDITS_MAX) {
+      if (edits.size > TerminaApp.USER_EDITS_MAX) {
         // Evict the oldest known edit (map order is insertion order).
         const oldest = edits.keys().next().value;
         if (oldest !== undefined) edits.delete(oldest);
@@ -5165,7 +5164,7 @@ class PiEditorApp {
 
   private addPendingHint(inst: AgentTerminalInstance, relPath: string): void {
     if (inst.pendingHints.has(relPath)) return;
-    if (inst.pendingHints.size >= PiEditorApp.MAX_PENDING_HINTS) {
+    if (inst.pendingHints.size >= TerminaApp.MAX_PENDING_HINTS) {
       const oldest = inst.pendingHints.values().next().value;
       if (oldest !== undefined) inst.pendingHints.delete(oldest);
     }
@@ -5314,8 +5313,8 @@ class PiEditorApp {
    */
   private evictForkPoints(inst: AgentTerminalInstance, expected?: PtyRendererSendTarget | null): void {
     const forkable = inst.timeline.filter((e) => e.stateId);
-    if (forkable.length <= PiEditorApp.MAX_FORK_POINTS) return;
-    let excess = forkable.length - PiEditorApp.MAX_FORK_POINTS;
+    if (forkable.length <= TerminaApp.MAX_FORK_POINTS) return;
+    let excess = forkable.length - TerminaApp.MAX_FORK_POINTS;
     const evicted: number[] = [];
     for (const e of inst.timeline) {
       if (excess <= 0) break;
@@ -5378,7 +5377,7 @@ class PiEditorApp {
     // Materialize the session branch into app-private storage.
     if (run.sessionFile) {
       try {
-        if (run.engine !== "core") throw new Error("pi runs are removed; core is the only engine");
+        if (run.engine !== "core") throw new Error("core is the only engine");
         const through = Number(entryId);
         if (!Number.isInteger(through) || through < 1) throw new Error("the settled session address is missing");
         // Core uncertainty is recovery evidence: it lives outside the
@@ -5699,7 +5698,7 @@ class PiEditorApp {
         created,
         modified,
         deleted,
-        paths: changes.slice(0, PiEditorApp.MAX_PROGRESS_PATHS).map((c) => c.relPath),
+        paths: changes.slice(0, TerminaApp.MAX_PROGRESS_PATHS).map((c) => c.relPath),
       };
     } catch {
       return fail();
@@ -5836,7 +5835,7 @@ class PiEditorApp {
     if (previous !== undefined && previous !== null) inst.baselineBytes -= Buffer.byteLength(previous, "utf8");
     inst.baselines.set(path, value);
     if (value !== null) inst.baselineBytes += Buffer.byteLength(value, "utf8");
-    while (inst.baselines.size > PiEditorApp.MAX_BASELINE_FILES || inst.baselineBytes > PiEditorApp.MAX_BASELINE_BYTES) {
+    while (inst.baselines.size > TerminaApp.MAX_BASELINE_FILES || inst.baselineBytes > TerminaApp.MAX_BASELINE_BYTES) {
       const oldest = inst.baselines.keys().next().value;
       if (oldest === undefined) break;
       this.deleteBaseline(inst, oldest);
@@ -5854,7 +5853,7 @@ class PiEditorApp {
     if (previous !== undefined) inst.runSnapshotBytes -= Buffer.byteLength(previous, "utf8");
     inst.runSnapshots.set(path, content);
     inst.runSnapshotBytes += Buffer.byteLength(content, "utf8");
-    while (inst.runSnapshots.size > PiEditorApp.MAX_RUN_SNAPSHOTS || inst.runSnapshotBytes > PiEditorApp.MAX_RUN_SNAPSHOT_BYTES) {
+    while (inst.runSnapshots.size > TerminaApp.MAX_RUN_SNAPSHOTS || inst.runSnapshotBytes > TerminaApp.MAX_RUN_SNAPSHOT_BYTES) {
       const oldest = inst.runSnapshots.keys().next().value;
       if (oldest === undefined) break;
       const value = inst.runSnapshots.get(oldest);
@@ -5912,7 +5911,7 @@ class PiEditorApp {
     } else {
       const workspace = this.workspaceOfTerminal(inst);
       if (!workspace) return;
-      this.setBounded(inst.modified, p, { path: p, relPath: await this.rel(p, workspace.root), status }, PiEditorApp.MAX_MODIFIED_FILES);
+      this.setBounded(inst.modified, p, { path: p, relPath: await this.rel(p, workspace.root), status }, TerminaApp.MAX_MODIFIED_FILES);
     }
   }
 
@@ -5932,7 +5931,7 @@ class PiEditorApp {
       } else {
         const workspace = this.workspaceOfTerminal(inst);
         if (!workspace) return;
-        this.setBounded(inst.modified, p, { path: p, relPath: await this.rel(p, workspace.root), status: "deleted" }, PiEditorApp.MAX_MODIFIED_FILES);
+        this.setBounded(inst.modified, p, { path: p, relPath: await this.rel(p, workspace.root), status: "deleted" }, TerminaApp.MAX_MODIFIED_FILES);
       }
     } else {
       // Nothing to restore (created this run, or no baseline): drop the entry.
@@ -6494,7 +6493,7 @@ class PiEditorApp {
       const isDupWatch = lastWatch !== undefined && lastWatch.content === cappedContent && now - lastWatch.at < 5000;
       // Cap the stored content. The merge window is 5 seconds.
       this.lastWatchChange.set(path, { content: cappedContent, at: now });
-      if (this.lastWatchChange.size > PiEditorApp.LAST_WATCH_MAX) {
+      if (this.lastWatchChange.size > TerminaApp.LAST_WATCH_MAX) {
         const oldest = this.lastWatchChange.keys().next().value;
         if (oldest !== undefined) this.lastWatchChange.delete(oldest);
       }
@@ -6586,7 +6585,7 @@ class PiEditorApp {
       let changedLines: number[] | undefined;
       if (change.prev !== undefined) {
         changedLines = changedLinesInAfter(change.prev, change.content);
-        this.setBounded(ws.changeLines, path, changedLines, PiEditorApp.MAX_MODIFIED_FILES);
+        this.setBounded(ws.changeLines, path, changedLines, TerminaApp.MAX_MODIFIED_FILES);
       } else {
         ws.changeLines.delete(path);
       }
@@ -7894,7 +7893,7 @@ class PiEditorApp {
   }
 }
 
-const appState = new PiEditorApp();
+const appState = new TerminaApp();
 
 app.disableHardwareAcceleration();
 

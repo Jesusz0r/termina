@@ -53,7 +53,7 @@ When a touched file exceeds 800 lines, assess extraction. Extract cohesive respo
 
 ## Process isolation
 
-Renderer never talks directly to the agent or performs privileged fs/pty/snapshot work. Preload exposes only the typed `window.termina` bridge; validate privileged requests in main. Write leases prevent two writers on one tree — don't bypass. Use the existing candidate sandboxes / offline evidence profile for isolation; a separate process or tree alone is not a sandbox. Preserve `PI_SESSION_*` env sanitization when launching the agent.
+Renderer never talks directly to the agent or performs privileged fs/pty/snapshot work. Preload exposes only the typed `window.termina` bridge; validate privileged requests in main. Write leases prevent two writers on one tree — don't bypass. Use the existing candidate sandboxes / offline evidence profile for isolation; a separate process or tree alone is not a sandbox. Strip `PI_SESSION_*` (and other `PI_*`) from agent and MCP child env so a leftover host install cannot pin the wrong session.
 
 ## Performance
 
@@ -94,5 +94,5 @@ Agent runs a tool → the engine's sidecar writer records it → main tails the 
 - Preserve unrelated working-tree changes. Keep edits scoped to the task; when changing a contract, migrate its callers and remove obsolete artifacts together.
 - Use `package.json` as the source for commands. Development: `pnpm run dev`. Typecheck: `pnpm run typecheck`. Unit tests: `pnpm run test:unit` (or a relevant focused script). Build: `pnpm run build`. Rust: `cargo test --manifest-path core/Cargo.toml`.
 - For code changes, run typecheck and relevant tests. Run the build for bundling/packaging changes and Rust tests for `core/` changes. For Electron/UI integration changes, build first, then run the relevant Playwright suite with `pnpm run test:e2e`. Documentation-only changes need path/command checks, not an application test run. Report checks run and any failures or checks not run.
-- E2E isolation is defined in `tests/e2e/fixtures.ts`: fresh roots for projects, events, worlds, Electron user data, and a HOME with its own `.pi/agent` tree. Never use or modify the host `~/.pi/agent` tree. Use Playwright's Electron launcher; keep process termination and cleanup scoped to resources the test owns, and wait for children to exit before deleting their files.
+- E2E isolation is defined in `tests/e2e/fixtures.ts`: fresh roots for projects, events, worlds, Electron user data, and a HOME. Never use or modify the host `~/.termina/agent` tree. Use Playwright's Electron launcher; keep process termination and cleanup scoped to resources the test owns, and wait for children to exit before deleting their files.
 - Gotchas: `@lydell/node-pty` external; cargo needed for `core/`; packaged app ships its own `node` (`cleanEnv` prepends `resourcesPath/node/bin`); macOS paths canonical (`/tmp` → `/private/tmp`); events dir is `app.getPath("temp")/termina-events`; bridge is app-owned in user-data dir.

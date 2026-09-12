@@ -1,10 +1,7 @@
 # Worldlines — Executable Timeline plan
 
-> **Status:** implemented and maintained. Engine migration complete:
-> terminals, forks, candidates, promotion, sandboxing, and trust are core-only
-> (the in-house agent). Historical phase records below still name the previous
-> engine (“Pi”, “bridge”, “SessionManager”); the normative sections (§1–§9
-> invariants, eligibility, and architecture) are core-accurate.
+> **Status:** implemented and maintained. Terminals, forks, candidates,
+> promotion, sandboxing, and trust are core-only (the in-house agent).
 >
 > **Product promise:** Fork a recorded agent moment into isolated, runnable
 > projects with matching agent conversations. Compare the futures with measured

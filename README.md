@@ -106,7 +106,7 @@ pnpm run test:e2e                  # the full Electron e2e matrix (fresh instanc
 pnpm test                          # typecheck + agent-core + build + spikes
 ```
 
-A new folder opens an **Agent (core)** tab. New tabs default to core. Legacy rostered Pi entries reopen as fresh Agent (core) tabs.
+A new folder opens an **Agent (core)** tab. New tabs default to core.
 
 Termina uses the agent configuration in `~/.termina/agent`. Host session
 variables are removed before launch so a host session file cannot attach
