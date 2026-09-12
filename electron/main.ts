@@ -5240,58 +5240,74 @@ class TerminaApp {
       inst.pendingHints.clear();
       return;
     }
-    const hints = [...inst.pendingHints];
-    inst.pendingHints.clear();
-    // Reconcile: the watcher's precomputed blob oids catch changes the
-    // hints missed. Shipping hashes instead of contents keeps the request
-    // small and skips a re-hash of the whole cache per capture. Bound the
-    // walk so a huge cache cannot stall the capture.
-    const oids = ws.watcher?.lastOids;
-    const reconcile: Array<{ relPath: string; oid: string }> = [];
-    const hinted = new Set(hints);
-    // ProjectWatcher stores canonical absolute paths. Resolve the workspace
-    // root once for this bounded walk instead of realpath'ing it for every
-    // cached file.
-    const canonicalRoot = await this.canonicalPath(ws.root);
-    let walked = 0;
-    for (const [path, pair] of oids ?? []) {
-      if (walked >= 2000) break;
-      walked++;
-      const rel = relative(canonicalRoot, path);
-      if (!rel || rel.startsWith("..") || isAbsolute(rel)) continue;
-      if (hinted.has(rel)) continue;
-      if (this.ignoredSegmentIn(rel)) continue;
-      reconcile.push({ relPath: rel, oid: store.objectFormat === "sha256" ? pair.sha256 : pair.sha1 });
+    // Promote (and other writers) hold this lease while the tree is torn.
+    // Bail rather than snapshot a tree another writer owns.
+    const leaseRequester = `moment:${inst.id}`;
+    if (ws.writerId !== null && ws.writerId !== leaseRequester) {
+      inst.momentDots.unshift(...batch);
+      return;
+    }
+    const lease = await this.acquireWriteLease(ws.id, leaseRequester, 0);
+    if (!lease.ok) {
+      inst.momentDots.unshift(...batch);
+      return;
     }
     try {
-      // A candidate workspace captures its OWN tree (the source override).
-      const source = ws.primary ? undefined : { root: ws.root, gitDir: (await gitCommonDir(ws.root)) ?? ws.root };
-      const state = await store.captureIncremental(ws.lastStateCommit, hints, reconcile, {}, {}, source);
-      this.setWorkspaceState(ws, state.commit);
-      ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
-      if (!ws.primary) await momentOwner?.worldlines?.updateHeadState(inst.id, state.commit);
-      this.attachMomentState(inst, state.commit, batch, expected);
-      this.setRecorderState(inst, "ready", expected);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.warn(`[main] moment capture failed: ${message}`);
-      // A dangling base (rebuilt store) fails every incremental capture
-      // forever. Re-seed primary workspaces with one full capture, at most
-      // once a minute; candidates keep their creation-seeded chain.
-      if (ws.primary && Date.now() - inst.lastReseedMs > 60_000) {
-        inst.lastReseedMs = Date.now();
-        try {
-          const reseeded = await store.capture(await gitHead(ws.root), null);
-          this.setWorkspaceState(ws, reseeded.commit);
-          this.attachMomentState(inst, reseeded.commit, batch, expected);
-          this.setRecorderState(inst, "ready", expected);
-          return;
-        } catch (reseedErr) {
-          console.warn(`[main] moment reseed failed: ${reseedErr instanceof Error ? reseedErr.message : String(reseedErr)}`);
-        }
+      const hints = [...inst.pendingHints];
+      inst.pendingHints.clear();
+      // Reconcile: the watcher's precomputed blob oids catch changes the
+      // hints missed. Shipping hashes instead of contents keeps the request
+      // small and skips a re-hash of the whole cache per capture. Bound the
+      // walk so a huge cache cannot stall the capture.
+      const oids = ws.watcher?.lastOids;
+      const reconcile: Array<{ relPath: string; oid: string }> = [];
+      const hinted = new Set(hints);
+      // ProjectWatcher stores canonical absolute paths. Resolve the workspace
+      // root once for this bounded walk instead of realpath'ing it for every
+      // cached file.
+      const canonicalRoot = await this.canonicalPath(ws.root);
+      let walked = 0;
+      for (const [path, pair] of oids ?? []) {
+        if (walked >= 2000) break;
+        walked++;
+        const rel = relative(canonicalRoot, path);
+        if (!rel || rel.startsWith("..") || isAbsolute(rel)) continue;
+        if (hinted.has(rel)) continue;
+        if (this.ignoredSegmentIn(rel)) continue;
+        reconcile.push({ relPath: rel, oid: store.objectFormat === "sha256" ? pair.sha256 : pair.sha1 });
       }
-      // Failed batches remain internal and are never published as dots.
-      this.setRecorderState(inst, "degraded", expected, message.slice(0, 160));
+      try {
+        // A candidate workspace captures its OWN tree (the source override).
+        const source = ws.primary ? undefined : { root: ws.root, gitDir: (await gitCommonDir(ws.root)) ?? ws.root };
+        const state = await store.captureIncremental(ws.lastStateCommit, hints, reconcile, {}, {}, source);
+        this.setWorkspaceState(ws, state.commit);
+        ws.retainedBlobBytes = (ws.retainedBlobBytes ?? 0) + state.newBlobBytes;
+        if (!ws.primary) await momentOwner?.worldlines?.updateHeadState(inst.id, state.commit);
+        this.attachMomentState(inst, state.commit, batch, expected);
+        this.setRecorderState(inst, "ready", expected);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(`[main] moment capture failed: ${message}`);
+        // A dangling base (rebuilt store) fails every incremental capture
+        // forever. Re-seed primary workspaces with one full capture, at most
+        // once a minute; candidates keep their creation-seeded chain.
+        if (ws.primary && Date.now() - inst.lastReseedMs > 60_000) {
+          inst.lastReseedMs = Date.now();
+          try {
+            const reseeded = await store.capture(await gitHead(ws.root), null);
+            this.setWorkspaceState(ws, reseeded.commit);
+            this.attachMomentState(inst, reseeded.commit, batch, expected);
+            this.setRecorderState(inst, "ready", expected);
+            return;
+          } catch (reseedErr) {
+            console.warn(`[main] moment reseed failed: ${reseedErr instanceof Error ? reseedErr.message : String(reseedErr)}`);
+          }
+        }
+        // Failed batches remain internal and are never published as dots.
+        this.setRecorderState(inst, "degraded", expected, message.slice(0, 160));
+      }
+    } finally {
+      this.releaseWriteLease(ws.id, leaseRequester);
     }
   }
 
