@@ -12,7 +12,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain as electronIpcMain, Menu
 // Name the app for the macOS menu bar and user-data paths. Unpackaged runs default to "Electron".
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, watch, type FSWatcher } from "node:fs";
 import { access, cp, lstat, mkdir, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
@@ -535,6 +535,8 @@ class TerminaApp {
   private workspaceOwners = new Map<string, string>();
   /** Last auth.json check. A matching mtime and size skip the parse. */
   private loginHint: { mtimeMs: number; size: number; needsLogin: boolean } | null = null;
+  private loginHintWatcher: FSWatcher | null = null;
+  private loginHintTimer: ReturnType<typeof setTimeout> | null = null;
   private eventsDir = process.env.TERMINA_EVENTS_DIR ?? join(app.getPath("temp"), "termina-sidecars");
   /** The app-private session branch workspace. */
   private sessionWorkspaceDir = join(this.eventsDir, "session-workspace");
@@ -6232,6 +6234,38 @@ class TerminaApp {
     }
   }
 
+  /** After `/login` writes auth.json, drop the chrome hint without re-opening the folder. */
+  private startLoginHintWatch(): void {
+    const agentDir = join(homedir(), ".termina", "agent");
+    try {
+      mkdirSync(agentDir, { recursive: true, mode: 0o700 });
+    } catch {
+      return;
+    }
+    try {
+      this.loginHintWatcher?.close();
+      this.loginHintWatcher = watch(agentDir, { persistent: false }, (_event, filename) => {
+        const name = filename ?? "";
+        if (name && name !== "auth.json") return;
+        this.loginHint = null;
+        if (this.loginHintTimer) clearTimeout(this.loginHintTimer);
+        this.loginHintTimer = setTimeout(() => {
+          this.loginHintTimer = null;
+          void this.publishLoginHint();
+        }, 50);
+      });
+    } catch {
+      this.loginHintWatcher = null;
+    }
+  }
+
+  private async publishLoginHint(): Promise<void> {
+    if (this.disposed) return;
+    const needsLogin = await this.agentNeedsLogin();
+    if (this.disposed) return;
+    this.send("auth:login-hint", { needsLogin });
+  }
+
   /** Coalesce one project's close confirmation and teardown transaction. */
   private closeProject(projectId: string): Promise<{ ok: boolean; error?: string; cancelled?: boolean }> {
     const pending = this.projectClosePromises.get(projectId);
@@ -7535,6 +7569,7 @@ class TerminaApp {
       },
     });
     this.registerIpc();
+    this.startLoginHintWatch();
     void detectShells();
     // The launch scratch cleanup is native-bound and asynchronous.  A
     // changed events root/ancestor is retained until provenance is repaired.
@@ -7737,6 +7772,12 @@ class TerminaApp {
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.loginHintTimer) {
+      clearTimeout(this.loginHintTimer);
+      this.loginHintTimer = null;
+    }
+    this.loginHintWatcher?.close();
+    this.loginHintWatcher = null;
     if (this.initialRestorePromise) {
       await this.initialRestorePromise.catch(() => undefined);
     }

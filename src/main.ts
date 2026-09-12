@@ -3016,6 +3016,14 @@ window.termina.onFolderOpened((e) => {
   hydrateWorldlines(projectId);
 });
 
+window.termina.onLoginHint((e) => {
+  for (const view of projectViews.values()) {
+    view.needsLogin = e.needsLogin === true;
+    view.editorMgr?.setProjectOpen(true, e.needsLogin);
+  }
+  syncEditorMinimizedForProject();
+});
+
 // ---------------------------------------------------------- worldlines ----
 
 window.termina.onWorldlineRunsChanged(({ terminalId }) => {

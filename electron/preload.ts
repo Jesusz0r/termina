@@ -67,6 +67,7 @@ const bridge: TerminaBridge = {
   onTimelinePrefix: (cb) => bindPushEvent("timeline:prefix", cb),
   onRecorderState: (cb) => bindPushEvent("timeline:recorder-state", cb),
   onFolderOpened: (cb) => bindPushEvent("folder:opened", cb),
+  onLoginHint: (cb) => bindPushEvent("auth:login-hint", cb),
   onFlushRequest: (cb) => bindPushEvent("editor:flush-request", cb),
   onUnsavedConfirm: (cb) => bindPushEvent("editor:unsaved-confirm", cb),
   onUpdateState: (cb) => bindPushEvent("update:state", cb),

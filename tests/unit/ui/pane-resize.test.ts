@@ -67,6 +67,16 @@ describe("explorer divider grab", () => {
     expect(editor).toContain("this.emptyLogin.hidden = !showLogin");
   });
 
+  it("clears needsLogin when auth:login-hint says credentials exist", () => {
+    expect(renderer).toContain('window.termina.onLoginHint');
+    expect(renderer).toContain("view.needsLogin = e.needsLogin === true");
+    expect(renderer).toContain("syncEditorMinimizedForProject()");
+    const main = readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8");
+    expect(main).toContain("startLoginHintWatch");
+    expect(main).toContain('this.send("auth:login-hint", { needsLogin })');
+    expect(main).toContain('name !== "auth.json"');
+  });
+
   it("preserves the split ratio across minimize/restore", () => {
     // The minimize takeover must clear the inline sizes (inline flex beats
     // the full-width rule), so the ratio is stashed on minimize and
