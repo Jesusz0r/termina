@@ -26,7 +26,7 @@ use capture::{
     git_blob_bytes_bounded, git_blob_size_bounded, git_tree_entry_path, git_tree_object_bounded,
     materialize_state_bound, nested_from_flat, op_apply_state, op_capture, op_capture_incremental,
     op_template, open_store, pause_at_hook,
-    publish_transaction_ref, read_link_at, resolve_tree, state_entries, sync_exact_transaction_ref,
+    publish_transaction_ref, resolve_tree, state_entries, sync_exact_transaction_ref,
     tree_lookup, validate_transaction_ref, write_nested_tree_for_ref,
 };
 mod copy;

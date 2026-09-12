@@ -12,11 +12,22 @@ describe("SessionFork Architecture Contracts", () => {
     .sort()
     .map((name) => readFileSync(join(root, "electron", "worldlines", name), "utf8"))
     .join("\n");
-  // The Rust core is split into modules; read them all for the same reason.
-  const core = readdirSync(join(root, "core", "src"))
-    .filter((name) => name.endsWith(".rs"))
-    .sort()
-    .map((name) => readFileSync(join(root, "core", "src", name), "utf8"))
+  // The Rust core is split into modules (including subdirectories); read them
+  // all for the same reason.
+  function collectRustSources(dir: string): string[] {
+    const out: string[] = [];
+    const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
+      a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+    );
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) out.push(...collectRustSources(full));
+      else if (entry.name.endsWith(".rs")) out.push(full);
+    }
+    return out;
+  }
+  const core = collectRustSources(join(root, "core", "src"))
+    .map((file) => readFileSync(file, "utf8"))
     .join("\n");
   const worker = readFileSync(join(root, "electron", "session-worker.ts"), "utf8");
   const retention = readFileSync(join(root, "electron", "session-retention.ts"), "utf8");
