@@ -468,7 +468,7 @@ elsewhere — `Ctrl+Tab` is literal `Ctrl` on every platform):
 | `Shift+Enter` / `Ctrl+Enter` | Newline in the terminal input |
 | `Option+Enter` (macOS) | Queue a follow-up while the agent runs |
 | `Cmd/Ctrl+Click` / `Cmd/Ctrl+Enter` on a timeline dot | Fork a candidate at that moment |
-| `Esc` | Dismiss Change Review (never while focus is in the terminal) |
+| `Esc` | Dismiss Change Review, or stop a timeline replay (never while focus is in the terminal) |
 
 ### Session Search
 

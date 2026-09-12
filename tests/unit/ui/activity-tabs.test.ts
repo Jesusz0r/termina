@@ -119,6 +119,10 @@ describe("activity tabs", () => {
     // The hidden tab is skipped in both directions.
     expect(stepActivityTab(visibleActivityTabs(hidden), "timeline", 1)).toBe("worldlines");
     expect(stepActivityTab(visibleActivityTabs(hidden), "worldlines", -1)).toBe("timeline");
+    const noWorldlines = reduceActivityTab(initialActivityTabState("timeline"), { type: "visibility", tab: "worldlines", visible: false });
+    expect(visibleActivityTabs(noWorldlines)).toEqual(["timeline", "plan", "modified"]);
+    expect(stepActivityTab(visibleActivityTabs(noWorldlines), "plan", 1)).toBe("modified");
+    expect(stepActivityTab(visibleActivityTabs(noWorldlines), "modified", -1)).toBe("plan");
     // Wrapping keeps every visible tab reachable by arrows alone.
     expect(stepActivityTab(ACTIVITY_TABS, "modified", 1)).toBe("timeline");
     expect(stepActivityTab(ACTIVITY_TABS, "timeline", -1)).toBe("modified");

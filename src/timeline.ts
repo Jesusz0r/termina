@@ -9,7 +9,7 @@
  */
 import type { TimelineEvent, RecorderState, TimelinePrefix, TimelineProgress } from "../shared/types";
 
-const MAX_TIMELINE_EVENTS = 400;
+export const MAX_TIMELINE_EVENTS = 400;
 
 /** Arrow target inside the strip: clamped at the ends (a timeline reads in
  *  order, so wrapping past the newest moment would be a lie). `null` when the
@@ -59,6 +59,9 @@ export class TimelineView {
       this.toggleReplay();
     });
     container.addEventListener("keydown", (e) => this.onKeydown(e));
+    // Replay keeps opening snapshots after focus leaves the strip; Esc must
+    // still stop it, except in the terminal (agent TUI) or a nested modal.
+    document.addEventListener("keydown", this.onDocumentKeydown);
     container.addEventListener(
       "wheel",
       (e) => {
@@ -135,6 +138,7 @@ export class TimelineView {
   evict(seqs: number[]): void {
     if (seqs.length > 0) this.progressEpoch++;
     const gone = new Set(seqs);
+    const hadDotFocus = this.timelineHasDotFocus();
     this.events = this.events.filter((e) => !gone.has(e.seq));
     for (const seq of seqs) {
       this.dots.get(seq)?.remove();
@@ -142,7 +146,9 @@ export class TimelineView {
       this.progressCache.delete(seq);
       this.progressInFlight.delete(seq);
     }
+    if (this.activeSeq !== null && gone.has(this.activeSeq)) this.activeSeq = null;
     if (this.tabStopSeq !== null && gone.has(this.tabStopSeq)) this.setTabStop(this.activeSeq ?? this.newestSeq());
+    this.restoreTimelineFocus(hadDotFocus);
     this.countEl.textContent = this.events.length ? `(${this.events.length})` : "";
     this.btnPlay.hidden = this.events.length === 0;
     this.reportContent();
@@ -168,14 +174,14 @@ export class TimelineView {
       const existing = this.dots.get(event.seq);
       if (existing) {
         existing.className = this.dotClass(event);
-        existing.title = this.tooltip(event);
-        existing.setAttribute("aria-label", existing.title);
+        this.setDotLabel(existing, event);
         this.progressCache.delete(event.seq);
         this.progressInFlight.delete(event.seq);
       }
       return;
     }
     this.events.push(event);
+    const hadDotFocus = this.timelineHasDotFocus();
     while (this.events.length > MAX_TIMELINE_EVENTS) {
       const removed = this.events.shift();
       if (removed) {
@@ -188,9 +194,17 @@ export class TimelineView {
     const dot = this.makeDot(event);
     this.dots.set(event.seq, dot);
     this.dotsEl.appendChild(dot);
+    if (this.activeSeq !== null && !this.dots.has(this.activeSeq)) this.activeSeq = null;
     if (event.seq === this.activeSeq) this.markActive(dot, true);
     // With no selection the newest dot is the strip's single tab stop.
-    else if (this.activeSeq === null) this.setTabStop(event.seq);
+    // A cap eviction of the current stop (Home on the oldest, then 400 more)
+    // must not leave the strip without a tabbable dot.
+    if (this.tabStopSeq === null || !this.dots.has(this.tabStopSeq)) {
+      this.setTabStop(this.activeSeq ?? this.newestSeq());
+    } else if (this.activeSeq === null) {
+      this.setTabStop(event.seq);
+    }
+    this.restoreTimelineFocus(hadDotFocus);
     this.countEl.textContent = `(${this.events.length})`;
     this.btnPlay.hidden = this.events.length === 0;
     this.reportContent();
@@ -232,12 +246,10 @@ export class TimelineView {
     const dot = document.createElement("span");
     dot.className = this.dotClass(ev);
     dot.dataset.seq = String(ev.seq);
-    const label = this.tooltip(ev);
-    dot.title = label;
     // A dot is a button in a toolbar: arrows move between moments, Tab
     // enters the strip once (roving tabindex), Enter/Space open the moment.
+    this.setDotLabel(dot, ev);
     dot.setAttribute("role", "button");
-    dot.setAttribute("aria-label", label);
     dot.tabIndex = -1;
     dot.addEventListener("click", (e) => {
       const latest = this.eventBySeq(ev.seq) ?? ev;
@@ -278,6 +290,28 @@ export class TimelineView {
     return this.events.length > 0 ? this.events[this.events.length - 1].seq : null;
   }
 
+  /** Title and aria-label stay in lockstep (hover tooltip + keyboard name). */
+  private setDotLabel(dot: HTMLElement, ev: TimelineEvent, progress?: TimelineProgress): void {
+    const label = this.tooltip(ev, progress);
+    dot.title = label;
+    dot.setAttribute("aria-label", label);
+  }
+
+  /** True when a still-mounted timeline dot owns keyboard focus. */
+  private timelineHasDotFocus(): boolean {
+    const el = document.activeElement;
+    return el instanceof HTMLElement && el.classList.contains("timeline-dot") && this.dotsEl.contains(el);
+  }
+
+  /** If a removed dot had focus, land on the tab stop. Removing the focused
+   *  node first leaves `document.activeElement` on `body`, so callers snapshot
+   *  `timelineHasDotFocus()` before the detach. */
+  private restoreTimelineFocus(hadDotFocus: boolean): void {
+    if (!hadDotFocus) return;
+    if (this.timelineHasDotFocus()) return;
+    if (this.tabStopSeq !== null) this.dots.get(this.tabStopSeq)?.focus({ preventScroll: true });
+  }
+
   /** Move focus and the selection to a moment, without opening it. */
   private focusSeq(seq: number): void {
     this.highlight(seq);
@@ -289,15 +323,22 @@ export class TimelineView {
     else this.jumpTo(ev);
   }
 
+  /** Esc stops a replay from anywhere except the terminal, a nested modal,
+   *  or Change Review (those surfaces already own the key). */
+  private onDocumentKeydown = (e: KeyboardEvent): void => {
+    if (e.key !== "Escape" || e.defaultPrevented || !this.replayTimer) return;
+    const target = e.target;
+    if (
+      target instanceof Element
+      && (target.closest("#terminal-container") || target.closest("#modal-root") || target.closest("#review-container"))
+    ) return;
+    e.preventDefault();
+    this.stopReplay();
+  };
+
   /** Strip keyboard: arrows/Home/End move the selection, Enter/Space open
-   *  the moment, Cmd/Ctrl+Enter forks it, Escape stops a replay. */
+   *  the moment, Cmd/Ctrl+Enter forks it. Escape is handled on document. */
   private onKeydown(e: KeyboardEvent): void {
-    if (e.key === "Escape") {
-      if (!this.replayTimer) return;
-      e.preventDefault();
-      this.stopReplay();
-      return;
-    }
     const target = e.target instanceof HTMLElement ? e.target.closest<HTMLElement>(".timeline-dot") : null;
     const seq = target ? Number(target.dataset.seq) : NaN;
     const idx = this.events.findIndex((ev) => ev.seq === seq);
@@ -395,7 +436,7 @@ export class TimelineView {
     const cached = this.progressCache.get(seq);
     if (cached) {
       const dot = this.dots.get(seq);
-      if (dot) dot.title = this.tooltip(ev, cached);
+      if (dot) this.setDotLabel(dot, ev, cached);
       return;
     }
     if (this.progressInFlight.has(seq)) return;
@@ -413,7 +454,7 @@ export class TimelineView {
           if (this.hoverSeq !== seq) return;
           const latest = this.eventBySeq(seq);
           const dot = this.dots.get(seq);
-          if (latest && dot) dot.title = this.tooltip(latest, progress);
+          if (latest && dot) this.setDotLabel(dot, latest, progress);
         },
         () => {
           if (this.progressEpoch !== epoch) return;
