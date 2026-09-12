@@ -468,8 +468,16 @@ function toGoogleContents(messages: KernelMessage[]): Array<Record<string, unkno
           const name = String(b.name ?? "");
           if (id && name) names.set(id, name);
           if (!name) continue;
+          // Gemini 3 maps each result to its call by id and validates the
+          // first functionCall thoughtSignature of the current turn (400s).
+          const signature = typeof b.thought_signature === "string" ? b.thought_signature : "";
           parts.push({
-            functionCall: { name, args: b.input && typeof b.input === "object" && !Array.isArray(b.input) ? b.input : {} },
+            functionCall: {
+              name,
+              args: b.input && typeof b.input === "object" && !Array.isArray(b.input) ? b.input : {},
+              ...(id ? { id } : {}),
+            },
+            ...(signature ? { thoughtSignature: signature } : {}),
           });
         }
       }
@@ -486,6 +494,7 @@ function toGoogleContents(messages: KernelMessage[]): Array<Record<string, unkno
           functionResponse: {
             name,
             response: { output: blockText(b) },
+            id,
           },
         });
       } else if (b.type === "text") {
@@ -1159,8 +1168,8 @@ export function googleResultFromEvents(
   let text = "";
   const thoughts: Array<{ thinking: string; signature: string }> = [];
   const thoughtKeys = new Set<string>();
-  const calls: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
-  const callKeys = new Set<string>();
+  const calls: Array<{ id: string; name: string; input: Record<string, unknown>; thought_signature?: string }> = [];
+  const callIds = new Set<string>();
   let toolError: string | undefined;
   let usage: CallResultLike["usage"] = null;
   let rawUsage: Record<string, unknown> | undefined;
@@ -1198,9 +1207,10 @@ export function googleResultFromEvents(
         toolError ??= TOOL_CALL_SHAPE_ERROR;
         continue;
       }
-      const fn = call as { name?: unknown; args?: unknown };
+      const fn = call as { name?: unknown; args?: unknown; id?: unknown };
       const name = typeof fn.name === "string" ? fn.name : "";
-      const identityError = toolCallIdentityError(`call_${calls.length + 1}`, name);
+      const id = typeof fn.id === "string" ? fn.id : "";
+      const identityError = toolCallIdentityError(id, name);
       if (identityError) {
         toolError ??= identityError;
         continue;
@@ -1210,10 +1220,13 @@ export function googleResultFromEvents(
         toolError ??= args.error;
         continue;
       }
-      const key = `${name}:${JSON.stringify(args.input)}`;
-      if (callKeys.has(key)) continue;
-      callKeys.add(key);
-      calls.push({ id: `call_${calls.length + 1}`, name, input: args.input });
+      // Streaming snapshot repeats resend the full parts list per event; the
+      // provider id (not name+args) identifies a repeat. Distinct parallel
+      // calls share a name but carry different ids.
+      if (callIds.has(id)) continue;
+      callIds.add(id);
+      const thoughtSignature = typeof part.thoughtSignature === "string" ? part.thoughtSignature : "";
+      calls.push({ id, name, input: args.input, ...(thoughtSignature ? { thought_signature: thoughtSignature } : {}) });
     }
   }
   const blocks: Array<Record<string, unknown>> = [];
