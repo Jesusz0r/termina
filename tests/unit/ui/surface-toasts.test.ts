@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 const review = readFileSync(new URL("../../../src/review.ts", import.meta.url), "utf8");
 const worldlines = readFileSync(new URL("../../../src/worldlines.ts", import.meta.url), "utf8");
 const main = readFileSync(new URL("../../../src/main.ts", import.meta.url), "utf8");
+const activityPane = readFileSync(new URL("../../../src/main/activity-pane.ts", import.meta.url), "utf8");
+const timelinePane = readFileSync(new URL("../../../src/main/timeline-pane.ts", import.meta.url), "utf8");
 
 /** Body of a class method, including nested blocks. */
 function methodBody(source: string, signature: string): string {
@@ -113,9 +115,9 @@ describe("worldline success toasts", () => {
 
 describe("dispatch success toasts", () => {
   it("does not flash dispatched info toasts after the plan row shows the worker", () => {
-    const rowDispatch = methodBody(main, 'li.addEventListener("click", (e) => {');
-    const bulkDispatch = methodBody(main, 'btnDispatch.addEventListener("click", () => {');
-    const plan = methodBody(main, "function renderPlan(pane: Pane, announce = true): void {");
+    const rowDispatch = methodBody(activityPane, 'li.addEventListener("click", (e) => {');
+    const bulkDispatch = methodBody(activityPane, "const onDispatch = ");
+    const plan = methodBody(activityPane, "function renderPlan(pane: TPane, announce = true): void {");
     // The durable surface: the row renders the worker and claimed files.
     expect(plan).toContain("plan-meta");
     expect(plan).toContain("task.workerId");
@@ -125,11 +127,13 @@ describe("dispatch success toasts", () => {
     expect(hasInfoToast(bulkDispatch)).toBe(false);
     expect(main).not.toContain("dispatched 1 task to a parallel agent");
     expect(main).not.toContain("task(s) to parallel agents");
+    expect(activityPane).not.toContain("dispatched 1 task to a parallel agent");
+    expect(activityPane).not.toContain("task(s) to parallel agents");
   });
 
   it("still toasts dispatch failures", () => {
-    const rowDispatch = methodBody(main, 'li.addEventListener("click", (e) => {');
-    const bulkDispatch = methodBody(main, 'btnDispatch.addEventListener("click", () => {');
+    const rowDispatch = methodBody(activityPane, 'li.addEventListener("click", (e) => {');
+    const bulkDispatch = methodBody(activityPane, "const onDispatch = ");
     expect(rowDispatch).toContain('toast(res.error ?? "dispatch failed", "warning")');
     expect(bulkDispatch).toContain('toast(res.error ?? "dispatch failed", "warning")');
   });
@@ -137,11 +141,12 @@ describe("dispatch success toasts", () => {
 
 describe("accept-all success toast", () => {
   it("does not flash an accepted info toast after the row marks update", () => {
-    const acceptAll = methodBody(main, 'btnAcceptAll.addEventListener("click", (e) => {');
+    const acceptAll = methodBody(activityPane, "const onAcceptAll = ");
     expect(acceptAll).toContain("pane.accepted.set(f.path, reviewedAt)");
     expect(acceptAll).toContain("renderModified(pane)");
     expect(hasInfoToast(acceptAll)).toBe(false);
     expect(main).not.toContain("file(s) accepted");
+    expect(activityPane).not.toContain("file(s) accepted");
   });
 });
 
@@ -167,7 +172,7 @@ describe("fork success toasts", () => {
   it("does not flash starting info toasts after the candidate cards arrive", () => {
     const forkRun = methodBody(main, 'btnForkRun.addEventListener("click", () => {');
     const challengeRun = methodBody(main, 'button.addEventListener("click", () => {');
-    const forkPoint = methodBody(main, "onFork: (ev) => {");
+    const forkPoint = methodBody(timelinePane, "onFork: (ev) => {");
     // The durable surface: worldline pushes render cards and badge the tab.
     expect(main).toContain("worldlinesView.upsert(summary)");
     expect(forkRun).toContain("forkRun(run.id)");
@@ -178,6 +183,8 @@ describe("fork success toasts", () => {
     expect(hasInfoToast(forkPoint)).toBe(false);
     expect(main).not.toContain("are starting");
     expect(main).not.toContain("is starting");
+    expect(timelinePane).not.toContain("are starting");
+    expect(timelinePane).not.toContain("is starting");
   });
 
   it("still toasts fork failures", () => {
@@ -187,7 +194,7 @@ describe("fork success toasts", () => {
     expect(methodBody(main, 'button.addEventListener("click", () => {')).toContain(
       "toast(`Challenge failed: ${res.error ?? \"unknown error\"}`, \"warning\")",
     );
-    expect(methodBody(main, "onFork: (ev) => {")).toContain(
+    expect(methodBody(timelinePane, "onFork: (ev) => {")).toContain(
       "toast(`fork at this moment failed: ${res.error ?? \"unknown error\"}`, \"warning\")",
     );
   });
