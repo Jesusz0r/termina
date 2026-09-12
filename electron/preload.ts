@@ -59,6 +59,7 @@ const bridge: TerminaBridge = {
   onFileDeleted: (cb) => bindPushEvent("file:deleted", cb),
   onModifiedList: (cb) => bindPushEvent("modified:list", cb),
   onBusy: (cb) => bindPushEvent("busy", cb),
+  onAgentStatus: (cb) => bindPushEvent("agent:status", cb),
   onPlanUpdate: (cb) => bindPushEvent("plan:update", cb),
   onVerifyState: (cb) => bindPushEvent("verify:state", cb),
   onTimelineEvent: (cb) => bindPushEvent("timeline:event", cb),

@@ -171,6 +171,9 @@ export interface WorldlineInstancePane extends WorldlineCandidateTestPane {
   modified: import("../shared/types").ModifiedFile[];
   recorderState: string;
   verify: VerifyInfo;
+  model: string | null;
+  thinkingLevel: string | null;
+  usage: string | null;
 }
 
 export interface WorldlineInstancesBindings<TPane extends WorldlineInstancePane> {
@@ -206,6 +209,9 @@ export function handleWorldlineInstances<TPane extends WorldlineInstancePane>(
     pane.modified = summary.modified ?? [];
     pane.recorderState = summary.recorderState ?? "paused";
     pane.verify = summary.verify ?? { state: "untested", command: null, summary: null };
+    pane.model = summary.model ?? null;
+    pane.thinkingLevel = summary.thinkingLevel ?? null;
+    pane.usage = summary.usage ?? null;
     bindings.updatePaneTab(pane);
     handled++;
   }

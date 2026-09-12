@@ -253,6 +253,7 @@ function verifyEnv(): Record<string, string | undefined> {
 /** Thinking levels the agent accepts. Reject anything else at spawn. */
 const AGENT_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const MAX_AGENT_MODEL_CHARS = 256;
+const MAX_AGENT_USAGE_CHARS = 512;
 
 /**
  * True for the e2e suite, which drives this same app in a real window. A shown
@@ -2616,17 +2617,54 @@ class TerminaApp {
     return AGENT_THINKING_LEVELS.has(next) ? next : null;
   }
 
-  private applyAgentSettings(inst: AgentTerminalInstance, model: string | null | undefined, thinkingLevel: string | null | undefined): void {
+  private usableAgentUsage(usage: string | null | undefined): string | null {
+    if (typeof usage !== "string") return null;
+    const next = usage.trim();
+    if (next.length < 1 || next.length > MAX_AGENT_USAGE_CHARS) return null;
+    if (/[\x00-\x1f]/.test(next)) return null;
+    return next;
+  }
+
+  private applyAgentSettings(
+    inst: AgentTerminalInstance,
+    model: string | null | undefined,
+    thinkingLevel: string | null | undefined,
+    usage?: string | null | undefined,
+    expected?: PtyRendererSendTarget | null,
+  ): void {
+    let changed = false;
     const nextModel = this.usableAgentModel(model);
     if (nextModel) {
-      inst.model = nextModel;
+      if (nextModel !== inst.model) {
+        inst.model = nextModel;
+        changed = true;
+      }
       this.rememberModel(nextModel);
     }
     const nextThinking = this.usableAgentThinking(thinkingLevel);
     if (nextThinking) {
-      inst.thinkingLevel = nextThinking;
+      if (nextThinking !== inst.thinkingLevel) {
+        inst.thinkingLevel = nextThinking;
+        changed = true;
+      }
       this.rememberEffort(inst, nextThinking);
     }
+    const nextUsage = usage === undefined ? null : this.usableAgentUsage(usage);
+    if (nextUsage && nextUsage !== inst.usage) {
+      inst.usage = nextUsage;
+      changed = true;
+    }
+    if (changed) this.sendAgentStatus(inst, expected);
+  }
+
+  private sendAgentStatus(inst: AgentTerminalInstance, expected?: PtyRendererSendTarget | null): void {
+    if (inst.type !== "agent") return;
+    this.send("agent:status", {
+      terminalId: inst.id,
+      model: inst.model,
+      thinkingLevel: inst.thinkingLevel,
+      usage: inst.usage,
+    }, expected);
   }
 
   /** Silently remember the last-used model per provider so fresh sessions
@@ -2819,6 +2857,18 @@ class TerminaApp {
     inst.sessionId = sessionId;
     inst.sessionFile = sessionFile;
     if (type === "agent") inst.engine = "core";
+    if (type === "agent" && !opts?.launch) {
+      const provider = env.TERMINA_CORE_PROVIDER?.trim() ?? "";
+      const modelName = env.TERMINA_CORE_MODEL?.trim() ?? "";
+      if (provider && modelName) {
+        const provisional = this.usableAgentModel(`${provider}/${modelName}`);
+        if (provisional) inst.model = provisional;
+      }
+      if (env.TERMINA_CORE_RESUME !== "1") {
+        const thinking = this.usableAgentThinking(env.TERMINA_CORE_EFFORT ?? null);
+        if (thinking) inst.thinkingLevel = thinking;
+      }
+    }
     this.terminals.set(inst.id, inst);
     if (owner) {
       owner.workspaces.get(workspaceId)?.terminalIds.add(id);
@@ -4298,6 +4348,9 @@ class TerminaApp {
       recorderState: t.recorderState,
       recorderDetail: t.recorderDetail,
       verify: t.type === "agent" ? t.verify : null,
+      model: t.type === "agent" ? t.model : null,
+      thinkingLevel: t.type === "agent" ? t.thinkingLevel : null,
+      usage: t.type === "agent" ? t.usage : null,
     }));
   }
 
@@ -4466,10 +4519,10 @@ class TerminaApp {
         break;
       }
       case "agent_settings":
-        this.applyAgentSettings(inst, event.model, event.thinkingLevel);
+        this.applyAgentSettings(inst, event.model, event.thinkingLevel, event.usage, rendererTarget);
         break;
       case "agent_start":
-        this.applyAgentSettings(inst, event.model, event.thinkingLevel);
+        this.applyAgentSettings(inst, event.model, event.thinkingLevel, undefined, rendererTarget);
         inst.busy = true;
         // Track busy agents: a second agent starting in the same workspace
         // overlaps this run (marked in coupleRunStart, WORLDLINES §5).

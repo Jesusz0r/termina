@@ -72,7 +72,7 @@ export type SidecarEvent =
       thinkingLevel?: string | null;
     })
   | (SidecarMeta & { t: "agent_settled"; error?: string | null })
-  | (SidecarMeta & { t: "agent_settings"; model?: string | null; thinkingLevel?: string | null })
+  | (SidecarMeta & { t: "agent_settings"; model?: string | null; thinkingLevel?: string | null; usage?: string | null })
   | (SidecarMeta & { t: "plan"; text?: string })
   | (SidecarMeta & {
       t: "tool";
@@ -449,6 +449,7 @@ function sidecarEventBody(meta: SidecarMeta, rec: Record<string, unknown>): Side
         t: "agent_settings",
         model: optionalStringOrNull(rec.model),
         thinkingLevel: optionalStringOrNull(rec.thinkingLevel),
+        usage: optionalStringOrNull(rec.usage),
       };
     case "plan":
       return { ...meta, t: "plan", text: optionalString(rec.text) };

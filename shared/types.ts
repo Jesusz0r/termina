@@ -219,6 +219,19 @@ export interface InstanceSummary {
   recorderDetail?: string | null;
   /** Verify state for agent terminals; null for plain shells. */
   verify?: VerifyInfo | null;
+  /** Live agent model, provider-qualified when known; null for shells/unknown. */
+  model?: string | null;
+  /** Live thinking level; null for shells/unknown. */
+  thinkingLevel?: string | null;
+  /** Live usage/cache line, formatted by agent-core; null when unknown. */
+  usage?: string | null;
+}
+
+export interface AgentStatusPayload {
+  terminalId: string;
+  model: string | null;
+  thinkingLevel: string | null;
+  usage: string | null;
 }
 
 export interface ExplorerEntry {
@@ -555,6 +568,7 @@ export interface TerminaBridge {
   onFileDeleted(cb: (p: FileDeletedPayload) => void): () => void;
   onModifiedList(cb: (p: ModifiedListPayload) => void): () => void;
   onBusy(cb: (p: BusyPayload) => void): () => void;
+  onAgentStatus(cb: (p: AgentStatusPayload) => void): () => void;
   onPlanUpdate(cb: (p: PlanPayload) => void): () => void;
   onTimelineEvent(cb: (p: { terminalId: string; event: TimelineEvent }) => void): () => void;
   /** Push: dots whose source states were evicted (budget). */
