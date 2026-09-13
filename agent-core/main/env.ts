@@ -85,7 +85,11 @@ function probeAbs(absBin: string, remainingMs: number): string | null {
 
 export function formatEnvironment(cwd: string, opts?: { probes?: boolean }): string {
   const root = freezeCwd(cwd);
-  const lines = [`cwd: ${JSON.stringify(root)}`, `platform: ${JSON.stringify(process.platform)}`];
+  const lines = [
+    `cwd: ${JSON.stringify(root)}`,
+    `platform: ${JSON.stringify(process.platform)}`,
+    `date: ${JSON.stringify(new Date().toISOString().slice(0, 10))}`,
+  ];
   try {
     const giPath = join(root, ".gitignore");
     const listingRules: GitignoreRules = new Map();
