@@ -57,6 +57,20 @@ describe("Agent Core Main P0 Invariants", () => {
       assert.match(text, /cache --/);
     });
 
+    check("usage indicators treat unsupported cache write as zero", () => {
+      // xAI/Grok shape: input and cache read known, write never reported.
+      const shaped = { input: 3, cacheRead: 128, cacheWrite: null, output: 624 };
+      for (const provider of ["xai", "openai", "google", "opencode-go", "opencode-zen"] as const) {
+        const text = core.formatUsageIndicators(shaped, 0, 128_000, null, null, provider);
+        assert.match(text, /tokens 131 in\/624 out/);
+        assert.match(text, /cache 98%/);
+      }
+      // Without a provider the same null write stays an honest unknown.
+      const unknown = core.formatUsageIndicators(shaped, 0, 128_000);
+      assert.match(unknown, /tokens \? in\/624 out/);
+      assert.match(unknown, /cache --/);
+    });
+
     check("usage indicators append prefix-flip counts only with evaluations", () => {
       const base = { input: 10, cacheRead: 5, cacheWrite: 0, output: 1 };
       const plain = core.formatUsageIndicators(base, 0, 100);

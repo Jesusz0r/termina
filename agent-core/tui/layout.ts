@@ -161,7 +161,8 @@ export function layoutHeights(
   inputLines: number,
   slashCount: number,
 ): { header: number; transcript: number; input: number; slash: number } {
-  const header = rows >= 6 ? 2 : 1;
+  // The header is a single title row; usage lives in the sidecar feed.
+  const header = 1;
   const sep = 1;
   const minTranscript = 1;
   let slash = Math.max(0, slashCount);

@@ -42,7 +42,6 @@ export class AgentTui {
   private rawInput = false;
   private model = "";
   private effort = "off";
-  private usage = "";
   private pendingImageCount = 0;
   private permissions = "";
   private queued = "";
@@ -102,12 +101,10 @@ export class AgentTui {
   setStatus(status: {
     model?: string;
     effort?: string;
-    usage?: string;
     permissions?: string;
   }): void {
     if (status.model !== undefined) this.model = status.model;
     if (status.effort !== undefined) this.effort = status.effort;
-    if (status.usage !== undefined) this.usage = status.usage;
     if (status.permissions !== undefined) this.permissions = status.permissions;
     this.schedule();
   }
@@ -1454,17 +1451,15 @@ export class AgentTui {
     const imageN = this.pendingImageCount;
     const images = imageN > 0 ? `${imageN} img` : "";
     const permLabel = this.permissions ? `perm ${this.permissions}` : "";
-    const modelLabel = this.model ? `${spin ? `${spin} ` : ""}${this.model}` : spin ? `${spin} no model` : "no model";
     let queuedLabel = this.queued ? `queued ${truncateMiddle(this.queued, 18)}` : "";
-    // Model and effort are one visual group. Reserve the effort suffix before
-    // truncating a long model so narrow terminals never hide the active level.
+    // The footer carries controls only (permissions, images, queue). The busy
+    // spinner lives on the brand so narrow terminals keep the activity signal
+    // without a model label to anchor it.
+    const brand = spin ? `${spin} ▸ termina` : "▸ termina";
     let extraParts = [permLabel, images, queuedLabel].filter(Boolean);
     const separator = "  ·  ";
-    const modelSuffix = ` · ${this.effort}`;
     const fixedTitleCells = (parts: string[]): number =>
-      cellWidth("▸ termina") +
-      cellWidth(separator) +
-      cellWidth(modelSuffix) +
+      cellWidth(brand) +
       parts.reduce((sum, part) => sum + cellWidth(separator) + cellWidth(part), 0) +
       3; // outer spaces plus the minimum left/right gap
     let fixedCells = fixedTitleCells(extraParts);
@@ -1475,8 +1470,7 @@ export class AgentTui {
       extraParts = [permLabel, images, queuedLabel].filter(Boolean);
       fixedCells = fixedTitleCells(extraParts);
     }
-    const visibleModel = truncateMiddle(modelLabel, Math.max(1, cols - fixedCells));
-    const leftParts = [`▸ termina`, `${visibleModel}${modelSuffix}`, ...extraParts];
+    const leftParts = [brand, ...extraParts];
     const leftTitle = leftParts.join(separator);
     const gap = Math.max(1, cols - cellWidth(leftTitle) - 2);
     const title = ` ${leftTitle}${" ".repeat(gap)} `;
@@ -1500,7 +1494,7 @@ export class AgentTui {
     }
     // The composer is a bordered box: top border, content rows, bottom
     // border. It reads as one textbox separated from the transcript above
-    // and the slash menu, title, and usage below.
+    // and the slash menu and title below.
     const inputTop = layout.transcript;
     const inputShown = displayWrapped.slice(0, layout.input);
     lines.push(boxBorderRow(cols, "┌", "─", "┐"));
@@ -1515,10 +1509,6 @@ export class AgentTui {
     while (lines.length < rows - layout.header - 2) lines.push(clip("", cols));
     lines.push(clip("─".repeat(Math.max(0, cols)), cols));
     lines.push(clip(title, cols));
-    if (layout.header === 2) {
-      const usageLine = this.usage ? `  ${this.usage}` : "  idle — waiting for a task";
-      lines.push(clip(usageLine, cols));
-    }
     if (lines.length > rows) lines.length = rows;
 
     const contentTop = inputTop + 1;
@@ -1535,7 +1525,7 @@ export class AgentTui {
     for (let i = 0; i < rows; i++) {
       const raw = lines[i] ?? clip("", cols);
       if (i === titleRow) painted.push(`\x1b[30;104m${raw}\x1b[0m`);
-      else if (i === rows - 1 || i === titleRow - 1 || (layout.header === 2 && i === titleRow + 1)) {
+      else if (i === rows - 1 || i === titleRow - 1) {
         painted.push(`\x1b[90m${raw}\x1b[0m`);
       } else if (i === inputTop || i === contentTop + layout.input) {
         // Composer box borders.

@@ -426,10 +426,10 @@ describe("Agent Core Provider Cache Policy Invariants", () => {
     await test("writeless relay routes treat a null cache write as exact", () => {
       const core = requireCore();
       assert.equal(typeof core.cacheWriteSupportedFor, "function");
-      for (const provider of ["xai", "opencode-go", "opencode-zen"] as const) {
+      for (const provider of ["xai", "openai", "google", "opencode-go", "opencode-zen"] as const) {
         assert.equal(core.cacheWriteSupportedFor(provider, null), false);
       }
-      for (const provider of ["openai-codex", "openai", "anthropic", "google", "openrouter"] as const) {
+      for (const provider of ["openai-codex", "anthropic", "openrouter"] as const) {
         assert.equal(core.cacheWriteSupportedFor(provider, null), null);
       }
       for (const provider of ["xai", "opencode-go", "opencode-zen", "openai-codex"] as const) {

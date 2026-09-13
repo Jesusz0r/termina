@@ -2852,14 +2852,19 @@ export function formatUsageIndicators(
   maxContext: number,
   usd: number | null = null,
   flips: CacheFlipTally | null = null,
+  provider: ProviderId | null = null,
 ): string {
   const uncachedInput = safeTokenCount(usage.input);
   const cacheRead = safeTokenCount(usage.cacheRead);
   const cacheWrite = safeTokenCount(usage.cacheWrite);
   const input = uncachedInput + cacheRead + cacheWrite;
-  const inputKnown = [usage.input, usage.cacheRead, usage.cacheWrite].every(
-    (value) => typeof value === "number" && Number.isFinite(value) && value >= 0,
-  );
+  const known = (value: number | null): boolean =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0;
+  // Providers without a cache-write concept report no write count; a null
+  // write from them is a zero, not an unknown. Anywhere else it stays unknown.
+  const writeKnown = known(usage.cacheWrite) ||
+    (provider !== null && cacheWriteSupportedFor(provider, usage.cacheWrite) === false);
+  const inputKnown = known(usage.input) && known(usage.cacheRead) && writeKnown;
   const cache = inputKnown && input > 0 ? `${Math.round((cacheRead / input) * 100)}%` : "--";
   const context = safeTokenCount(contextTokens);
   const limit = Math.max(1, safeTokenCount(maxContext));
@@ -4398,12 +4403,18 @@ function traceCostForUsage(
  * and the OpenCode relays report cached reads only (255 Go+Zen turns on
  * 2026-09-07 carried reads up to 451k tokens without a single write
  * count, and the usage parser probes `cache_write_tokens` in two places
- * without ever finding it there), so null means no write component. A
- * reported count means support trivially; other providers stay strict.
+ * without ever finding it there), so null means no write component. The
+ * same holds for OpenAI (writes are free and unreported before GPT-5.6;
+ * 5.6+ reports `cache_write_tokens`, which takes the non-null branch) and
+ * Google (implicit caching has no write-token concept). A reported count
+ * means support trivially; other providers stay strict.
  */
 export function cacheWriteSupportedFor(provider: ProviderId, cacheWrite: number | null): boolean | null {
   if (cacheWrite !== null) return true;
-  return provider === "xai" || provider === "opencode-go" || provider === "opencode-zen" ? false : null;
+  return provider === "xai" || provider === "openai" || provider === "google" ||
+      provider === "opencode-go" || provider === "opencode-zen"
+    ? false
+    : null;
 }
 
 function reportUsage(
@@ -4495,7 +4506,7 @@ function logSettings(): void {
     t: "agent_settings",
     model: `${route.provider}/${route.model}`,
     thinkingLevel: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)),
-    usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd, cacheFlipStats()),
+    usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd, cacheFlipStats(), route.provider),
   });
 }
 
@@ -5564,9 +5575,8 @@ function statusContextTokens(): number {
 }
 
 function syncIndicators(): void {
-  surface?.setStatus({
-    usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd, cacheFlipStats()),
-  });
+  // Usage reaches the host app through the sidecar feed; the TUI footer
+  // carries controls only.
   logSettings();
 }
 
@@ -5993,7 +6003,6 @@ function syncStatus(): void {
   surface?.setStatus({
     model: `${route.provider}/${route.model}`,
     effort: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)),
-    usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd, cacheFlipStats()),
   });
   logSettings();
 }
@@ -6303,7 +6312,6 @@ async function main(): Promise<void> {
       model: `${route.provider}/${route.model}`,
       effort: effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)),
       permissions: permissionMode,
-      usage: formatUsageIndicators(sessionUsage, statusContextTokens(), contextWindow(), lastUsd, cacheFlipStats()),
     });
     surface.setBusy(true);
     if (!surface.start()) surface = null;

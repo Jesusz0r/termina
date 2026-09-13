@@ -4938,7 +4938,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     check("incomplete escape does not leak into the next entry", sanTui.frame().includes("SAFE2") && !sanTui.frame().includes("[SAFE2"));
     check(
       "layoutHeights keeps a transcript",
-      tuiMod.layoutHeights(24, 1, 7).transcript >= 2 && tuiMod.layoutHeights(24, 1, 7).header === 2,
+      tuiMod.layoutHeights(24, 1, 7).transcript >= 2 && tuiMod.layoutHeights(24, 1, 7).header === 1,
     );
     check("layoutHeights fits a tiny screen", tuiMod.layoutHeights(5, 1, 7).transcript >= 1 && tuiMod.layoutHeights(5, 1, 7).slash < 7);
     const visSrc = Array.from({ length: 80 }, (_, i) => `L${String(i).padStart(2, "0")}`).join("\n") + "\n";
@@ -4957,18 +4957,17 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       model: "anthropic/claude",
       auth: "oauth",
       effort: "max",
-      usage: usageIndicators,
     };
     tui.setStatus(tuiStatus);
     tui.appendPlain("hello from transcript\n");
     const frame = tui.frame();
     const frameLines = frame.split("\n");
     check("tui status names the kernel", frame.includes("▸ termina"));
-    check("tui status shows the model", frame.includes("anthropic/claude"));
-    check("tui status shows effort", frame.includes("anthropic/claude · max"));
+    check("tui status hides the model", !frame.includes("anthropic/claude"));
+    check("tui status hides effort", !frame.includes(" · max"));
     check(
       "tui status stays at the bottom",
-      frameLines.at(-2)?.includes("anthropic/claude") && frameLines.at(-1)?.includes("cache 67%"),
+      frameLines.at(-1)?.includes("▸ termina") && !frame.includes("cache 67%"),
     );
     const narrowTui = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 40, rows: 24, isTTY: false },
@@ -4978,11 +4977,15 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       onExit: () => {},
     });
     narrowTui.setStatus({ model: "openrouter/a-very-long-model-name", effort: "max" });
-    check("tui keeps effort visible with a long model", narrowTui.frame().includes(" · max"));
-    check("tui status shows token usage", frame.includes("tokens 1.5K in/250 out"));
-    check("tui status shows cache", frame.includes("cache 67%"));
-    check("tui status shows context", frame.includes("context ~20K/200K 10%"));
-    check("tui status keeps cost visible at 80 columns", frame.includes("$0.0123"));
+    const narrowFrame = narrowTui.frame();
+    check(
+      "tui footer hides model and effort at narrow widths",
+      narrowFrame.includes("▸ termina") && !narrowFrame.includes("a-very-long-model-name"),
+    );
+    check("tui status hides token usage", !frame.includes("tokens 1.5K in/250 out"));
+    check("tui status hides cache", !frame.includes("cache 67%"));
+    check("tui status hides context", !frame.includes("context ~20K/200K 10%"));
+    check("tui status hides cost at 80 columns", !frame.includes("$0.0123"));
     const imgTui = new tuiMod.AgentTui({
       stdout: { write: () => true, columns: 80, rows: 24, isTTY: false },
       stdin: { isTTY: false },
@@ -5009,10 +5012,12 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     combinedStatusTui.setStatus(combinedStatus);
     combinedStatusTui.setPendingImageCount(2);
     combinedStatusTui.setQueued("queue a late UTF-8 ✅ mutation");
-    const combinedStatusHeader = combinedStatusTui.frame().split("\n").at(-2) ?? "";
+    const combinedStatusHeader = combinedStatusTui.frame().split("\n").at(-1) ?? "";
     check(
-      "tui combined status preserves every control label",
-      combinedStatusHeader.includes("maximum") &&
+      "tui combined status keeps controls and hides the model",
+      combinedStatusHeader.includes("▸ termina") &&
+        !combinedStatusHeader.includes("maximum") &&
+        !combinedStatusHeader.includes("模型") &&
         combinedStatusHeader.includes("perm ask") &&
         combinedStatusHeader.includes("2 img") &&
         combinedStatusHeader.includes("queued") &&
