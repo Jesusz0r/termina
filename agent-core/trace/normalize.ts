@@ -5,8 +5,8 @@
  * inputs. Split from agent-core/trace.ts (issue #38).
  */
 import { isRecord } from "../../shared/guards.ts";
-import { MAX_ARRAY_ITEMS, MAX_ID_CHARS, MAX_RECLAIM_TARGETS, MAX_STRING_CHARS, MAX_TOOL_OUTCOMES } from "./schema.ts";
-import type { TraceBoundedToolOutput, TraceCache, TraceCacheInput, TraceCacheMissAttribution, TraceCachePolicy, TraceCachePolicyInput, TraceContinuation, TraceCost, TraceCostComponents, TraceCostInput, TraceCostScope, TraceCostUnits, TraceReclaimEvidence, TraceReclaimTarget, TraceRevisions, TraceRevisionsInput, TraceToolOutcome, TraceUsage, TraceUsageInput } from "./schema.ts";
+import { MAX_ARRAY_ITEMS, MAX_HOST_CONTEXT_FILES, MAX_ID_CHARS, MAX_RECLAIM_TARGETS, MAX_STRING_CHARS, MAX_TOOL_OUTCOMES } from "./schema.ts";
+import type { TraceBoundedToolOutput, TraceCache, TraceCacheInput, TraceCacheMissAttribution, TraceCachePolicy, TraceCachePolicyInput, TraceContinuation, TraceCost, TraceCostComponents, TraceCostInput, TraceCostScope, TraceCostUnits, TraceHostContext, TraceHostContextFile, TraceReclaimEvidence, TraceReclaimTarget, TraceRevisions, TraceRevisionsInput, TraceToolOutcome, TraceUsage, TraceUsageInput } from "./schema.ts";
 
 
 export function freezeDeep<T>(value: T): T {
@@ -184,6 +184,32 @@ function boundedToolOutput(value: unknown): TraceBoundedToolOutput | null {
 }
 
 
+function hostContextFile(value: unknown): TraceHostContextFile | null {
+  if (!isRecord(value)) return null;
+  return freezeDeep({
+    kind: optionalText(value.kind, "host context file kind"),
+    present: nullableBoolean(value.present),
+    size: nullableInteger(value.size),
+    mtimeMs: nullableNumber(value.mtimeMs),
+    consumedBytes: nullableInteger(value.consumedBytes),
+    contentHash: optionalText(value.contentHash, "host context file hash"),
+  });
+}
+
+
+function hostContext(value: unknown): TraceHostContext | null {
+  if (!isRecord(value)) return null;
+  const bounded = boundedToolOutput(value);
+  if (!bounded) return null;
+  const files = Array.isArray(value.files)
+    ? value.files.slice(0, MAX_HOST_CONTEXT_FILES)
+      .map((item) => hostContextFile(item))
+      .filter((item): item is TraceHostContextFile => item !== null)
+    : [];
+  return freezeDeep({ ...bounded, files });
+}
+
+
 function continuation(value: unknown): TraceContinuation | null {
   if (!isRecord(value)) return null;
   return freezeDeep({
@@ -348,6 +374,7 @@ export function cache(value: TraceCacheInput | null | undefined): TraceCache {
     messagePrefixHash: text(value?.messagePrefixHash, "message prefix hash"),
     workingSetHash: text(value?.workingSetHash, "working set hash"),
     workingSetChanged: nullableBoolean(value?.workingSetChanged),
+    hostContext: hostContext(value?.hostContext),
     retryPromptIdentical: nullableBoolean(value?.retryPromptIdentical),
     codexTurnStateUsed: typeof value?.codexTurnStateUsed === "boolean" ? value.codexTurnStateUsed : null,
     missAttribution: missAttribution(value?.missAttribution),

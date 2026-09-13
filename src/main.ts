@@ -455,8 +455,6 @@ const btnVerify = document.getElementById("btn-verify") as HTMLButtonElement;
 const verifyBadge = document.getElementById("verify-badge")!;
 const statusCwd = document.getElementById("status-cwd")!;
 const statusState = document.getElementById("status-state")!;
-const statusModel = document.getElementById("status-model") as HTMLButtonElement;
-const statusEffort = document.getElementById("status-effort") as HTMLButtonElement;
 const statusUsage = document.getElementById("status-usage")!;
 const btnAppUpdate = document.getElementById("btn-app-update") as HTMLButtonElement;
 const modifiedList = document.getElementById("modified-list")!;
@@ -1186,8 +1184,6 @@ function renderChrome(): void {
   if (!pane) {
     statusState.textContent = "no terminal";
     statusCwd.textContent = "";
-    statusModel.hidden = true;
-    statusEffort.hidden = true;
     statusUsage.hidden = true;
     btnVerify.disabled = true;
     verifyBadge.textContent = "";
@@ -1213,21 +1209,11 @@ function renderStatus(pane: Pane): void {
   renderHandoff(pane);
 }
 
-/** Status bar trailing: model · effort · usage for the active agent. */
+/** Status bar trailing: usage for the active agent. Model and effort live in the terminal footer. */
 function renderAgentStatus(pane: Pane): void {
   const isAgent = pane.type === "agent" && !pane.error;
-  statusModel.hidden = !isAgent;
-  statusEffort.hidden = !isAgent;
   statusUsage.hidden = !isAgent || !pane.usage;
   if (!isAgent) return;
-  const model = pane.model ?? "no model";
-  statusModel.textContent = model;
-  statusModel.title = pane.model ? `${model} — focus terminal to run /models` : "No model — focus terminal to run /models";
-  statusModel.disabled = pane.exited;
-  const effort = pane.thinkingLevel ?? "—";
-  statusEffort.textContent = effort;
-  statusEffort.title = pane.thinkingLevel ? `${effort} — focus terminal to run /effort` : "Effort unknown — focus terminal to run /effort";
-  statusEffort.disabled = pane.exited;
   if (pane.usage) {
     statusUsage.textContent = pane.usage;
     statusUsage.title = pane.usage;
@@ -1235,12 +1221,6 @@ function renderAgentStatus(pane: Pane): void {
     statusUsage.textContent = "";
     statusUsage.title = "";
   }
-}
-
-function focusActiveTerminal(): void {
-  const pane = activeId ? panes.get(activeId) : undefined;
-  if (!pane || pane.exited) return;
-  pane.view.focus();
 }
 
 /** Verify & Iterate: badge + button for the active terminal. */
@@ -1464,8 +1444,6 @@ projectTabsEl.addEventListener("dblclick", (e) => {
 
 btnCopySubject.addEventListener("click", () => void copyCommitSubject());
 btnOpenShell.addEventListener("click", () => void focusProjectShell());
-statusModel.addEventListener("click", () => focusActiveTerminal());
-statusEffort.addEventListener("click", () => focusActiveTerminal());
 btnVerify.addEventListener("click", () => {
   const id = activeId;
   if (!id) return;

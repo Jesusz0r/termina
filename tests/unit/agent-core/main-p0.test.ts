@@ -71,6 +71,16 @@ describe("Agent Core Main P0 Invariants", () => {
       assert.match(unknown, /cache --/);
     });
 
+    check("settings pins prepare only an empty, writerless stream", () => {
+      const may = core.mayPrepareSessionForSettings;
+      assert.equal(typeof may, "function");
+      assert.equal(may(null, false, false), false);
+      assert.equal(may("", false, false), false);
+      assert.equal(may("/ev/term-1/current/session.jsonl", true, false), false);
+      assert.equal(may("/ev/term-1/current/session.jsonl", false, true), false);
+      assert.equal(may("/ev/term-1/current/session.jsonl", false, false), true);
+    });
+
     check("usage indicators append prefix-flip counts only with evaluations", () => {
       const base = { input: 10, cacheRead: 5, cacheWrite: 0, output: 1 };
       const plain = core.formatUsageIndicators(base, 0, 100);
@@ -102,11 +112,11 @@ describe("Agent Core Main P0 Invariants", () => {
     check("main request projection keeps host context volatile", () => {
       assert.equal(typeof core.projectMainRequest, "function");
       const messages = [{ role: "user" as const, content: "inspect", sseq: 1, tokens: 1 }];
-      const first = core.projectMainRequest(messages, "<working-set>one</working-set>");
-      const second = core.projectMainRequest(messages, "<working-set>two</working-set>");
+      const first = core.projectMainRequest(messages, "one");
+      const second = core.projectMainRequest(messages, "two");
       assert.equal(first.persistedMessages.length, 1);
       assert.equal(first.messages.length, 2);
-      assert.equal(first.messages[0].content, "<working-set>one</working-set>");
+      assert.equal(first.messages[0].content, "<working-set>\none\n</working-set>");
       assert.equal(first.messages[1].content, "inspect");
       assert.notEqual(first.overlay?.hash, second.overlay?.hash);
       assert.equal(JSON.stringify(messages).includes("working-set"), false);

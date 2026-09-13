@@ -36,6 +36,8 @@ export const MAX_TOOL_OUTCOMES = 256;
 
 export const MAX_RECLAIM_TARGETS = 256;
 
+export const MAX_HOST_CONTEXT_FILES = 16;
+
 
 export type TraceRole = "main" | "summary";
 
@@ -139,6 +141,7 @@ export interface TraceCache {
   readonly messagePrefixHash: string | null;
   readonly workingSetHash: string | null;
   readonly workingSetChanged: boolean | null;
+  readonly hostContext: TraceHostContext | null;
   readonly retryPromptIdentical: boolean | null;
   readonly codexTurnStateUsed: boolean | null;
   readonly missAttribution: TraceCacheMissAttribution;
@@ -154,6 +157,46 @@ export interface TraceBoundedToolOutput {
   readonly omittedBytes: number | null;
   readonly outputBytes: number | null;
   readonly truncated: boolean | null;
+}
+
+
+/** Per-file digest attributing a working-set change to one context file. */
+export interface TraceHostContextFile {
+  readonly kind: string | null;
+  readonly present: boolean | null;
+  readonly size: number | null;
+  readonly mtimeMs: number | null;
+  readonly consumedBytes: number | null;
+  readonly contentHash: string | null;
+}
+
+
+/** Bounded host-reader metadata plus per-file digests; never host content. */
+export interface TraceHostContext extends TraceBoundedToolOutput {
+  readonly files: readonly TraceHostContextFile[];
+}
+
+
+export interface TraceHostContextFileInput {
+  readonly kind?: unknown;
+  readonly present?: unknown;
+  readonly size?: unknown;
+  readonly mtimeMs?: unknown;
+  readonly consumedBytes?: unknown;
+  readonly contentHash?: unknown;
+}
+
+
+export interface TraceHostContextInput {
+  readonly state?: unknown;
+  readonly direction?: unknown;
+  readonly limitBytes?: unknown;
+  readonly inputBytes?: unknown;
+  readonly retainedBytes?: unknown;
+  readonly omittedBytes?: unknown;
+  readonly outputBytes?: unknown;
+  readonly truncated?: unknown;
+  readonly files?: readonly TraceHostContextFileInput[] | null;
 }
 
 
@@ -346,6 +389,7 @@ export interface TraceCacheInput {
   readonly messagePrefixHash?: unknown;
   readonly workingSetHash?: unknown;
   readonly workingSetChanged?: unknown;
+  readonly hostContext?: TraceHostContextInput | null;
   readonly retryPromptIdentical?: unknown;
   readonly codexTurnStateUsed?: unknown;
   readonly missAttribution?: {

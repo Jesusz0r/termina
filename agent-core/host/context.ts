@@ -8,6 +8,7 @@
 import { isErrno } from "../../shared/guards.ts";
 import { HAS_PLAN_TASK } from "../../shared/plan-task.ts";
 import { BoundedTextAccumulator, type BoundedText, type BoundedTextMarkerDetails, type CompletionState } from "../tool-output.ts";
+import { createHash, type Hash } from "node:crypto";
 import { closeSync, constants as fsConstants, fstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
@@ -28,6 +29,30 @@ const HOST_CONTEXT_READ_CHUNK_BYTES = 16 * 1024;
 export type ReadContextFilesOptions = {
   shouldStop?: () => boolean;
 };
+
+
+/** Per-file attribution for one bounded host-context read.
+ *
+ * `size`/`mtimeMs` describe the file on disk at stat time; `consumedBytes`
+ * and `contentHash` describe exactly the prefix of the file that reached the
+ * overlay text (they differ from `size` when the read truncated early). A
+ * `null` contentHash means no byte of that file was consumed. Comparing two
+ * reads' digests pinpoints which of the five context files moved when the
+ * working-set hash changes.
+ */
+export type ContextFileDigest = Readonly<{
+  kind: string;
+  present: boolean;
+  size: number | null;
+  mtimeMs: number | null;
+  consumedBytes: number;
+  contentHash: string | null;
+}>;
+
+
+export type ContextFilesResult = BoundedText & Readonly<{
+  files: readonly ContextFileDigest[];
+}>;
 
 
 export function ackPath(eventsDir: string, terminalId: string, requestId: string): string {
@@ -103,22 +128,66 @@ function withKnownContextInput(result: BoundedText, inputBytes: number): Bounded
 
 
 /** Read all available host context while keeping the rendered result bounded. */
+type ContextFileNote = {
+  kind: (typeof CONTEXT_FILES)[number];
+  present: boolean;
+  size: number;
+  mtimeMs: number;
+  consumedBytes: number;
+  hash: Hash;
+};
+
+
+/** Attach per-file digests to a finished bounded read. `size`/`mtimeMs`
+ * describe the file on disk at stat time; `consumedBytes`/`contentHash`
+ * describe exactly the prefix that reached the overlay text (they differ from
+ * `size` when the read truncated early). A null contentHash means no byte of
+ * that file was consumed. Comparing two reads' digests pinpoints which of the
+ * five context files moved when the working-set hash changes. */
+function withContextFileDigests(result: BoundedText, notes: readonly ContextFileNote[]): ContextFilesResult {
+  const byKind = new Map(notes.map((note) => [note.kind, note]));
+  return Object.freeze({
+    ...result,
+    files: Object.freeze(CONTEXT_FILES.map((kind): ContextFileDigest => {
+      const note = byKind.get(kind);
+      if (!note?.present) return { kind, present: false, size: null, mtimeMs: null, consumedBytes: 0, contentHash: null };
+      return {
+        kind,
+        present: true,
+        size: note.size,
+        mtimeMs: note.mtimeMs,
+        consumedBytes: note.consumedBytes,
+        contentHash: note.consumedBytes > 0 ? note.hash.digest("hex").slice(0, 16) : null,
+      };
+    })),
+  });
+}
+
+
 export function readContextFilesResult(
   eventsDir: string,
   terminalId: string,
   options?: ReadContextFilesOptions,
-): BoundedText {
+): ContextFilesResult {
   const accumulator = new BoundedTextAccumulator({
     maxBytes: HOST_CONTEXT_BYTES,
     direction: "head",
     marker: hostContextMarker,
   });
-  if (!eventsDir || !terminalId) return accumulator.finish();
+  const notes: ContextFileNote[] = CONTEXT_FILES.map((kind) => ({
+    kind,
+    present: false,
+    size: 0,
+    mtimeMs: 0,
+    consumedBytes: 0,
+    hash: createHash("sha256"),
+  }));
+  if (!eventsDir || !terminalId) return withContextFileDigests(accumulator.finish(), notes);
 
   const separator = "\n\n---\n\n";
   const separatorBytes = Buffer.byteLength(separator, "utf8");
   let state: CompletionState = "complete";
-  const files: Array<{ fd: number; size: number }> = [];
+  const files: Array<{ fd: number; size: number; note: ContextFileNote }> = [];
 
   const closeFiles = (): void => {
     for (const file of files.splice(0)) {
@@ -130,10 +199,11 @@ export function readContextFilesResult(
     }
   };
 
-  if (OPEN_NOFOLLOW_READ === null) return accumulator.finish("unreadable");
+  if (OPEN_NOFOLLOW_READ === null) return withContextFileDigests(accumulator.finish("unreadable"), notes);
 
   // Stat every readable context entry first. This gives the bounded reader an
   // exact remaining-byte count without scanning a multi-gigabyte file.
+  const noteByKind = new Map(notes.map((note) => [note.kind, note]));
   for (const kind of CONTEXT_FILES) {
     const initialProbe = probeContextStop(options);
     if (initialProbe !== "continue") {
@@ -149,7 +219,11 @@ export function readContextFilesResult(
         state = mergeContextState(state, "unreadable");
         continue;
       }
-      files.push({ fd, size: info.size });
+      const note = noteByKind.get(kind)!;
+      note.present = true;
+      note.size = info.size;
+      note.mtimeMs = info.mtimeMs;
+      files.push({ fd, size: info.size, note });
       fd = undefined;
     } catch (error) {
       if (!isErrno(error, "ENOENT")) state = mergeContextState(state, "unreadable");
@@ -167,7 +241,7 @@ export function readContextFilesResult(
 
   if (state === "interrupted" || state === "failed") {
     closeFiles();
-    return accumulator.finish(state);
+    return withContextFileDigests(accumulator.finish(state), notes);
   }
 
   let knownInputBytes = 0;
@@ -215,6 +289,8 @@ export function readContextFilesResult(
         accumulator.push(buf.subarray(0, read));
         fileHadBytes = true;
         hasContent = true;
+        file.note.consumedBytes += read;
+        file.note.hash.update(buf.subarray(0, read));
         readOffset += read;
         streamedBytes += read;
       }
@@ -236,7 +312,7 @@ export function readContextFilesResult(
   // The accumulator only sees the bounded prefix. For a complete read, stats
   // provide the exact source-byte total without retaining or scanning the
   // omitted suffix.
-  return state === "complete" ? withKnownContextInput(result, knownInputBytes) : result;
+  return withContextFileDigests(state === "complete" ? withKnownContextInput(result, knownInputBytes) : result, notes);
 }
 
 

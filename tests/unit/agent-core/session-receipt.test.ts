@@ -382,4 +382,12 @@ describe("Agent Core Session Settings Records", () => {
     expect(resume.includes("persistRouteSettings")).toBe(false);
     expect(main.includes("...(isSessionModel(model) ? { model } : {})")).toBe(true);
   });
+
+  it("settings pins prepare an empty stream before writing", () => {
+    const main = readFileSync(new URL("../../../agent-core/main.ts", import.meta.url), "utf8");
+    // Both warn paths (/model shared helper, /effort twin) ensure first.
+    const ordered = main.match(/ensureRouteSettingsWritable\(\);\n\s+persistRouteSettings\(\);/g) ?? [];
+    expect(ordered).toHaveLength(2);
+    expect(main.includes("mayPrepareSessionForSettings(sessionFile, sessionWriter !== null, hasContent)")).toBe(true);
+  });
 });

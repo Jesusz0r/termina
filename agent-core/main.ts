@@ -165,6 +165,7 @@ import {
   readContextFilesResult,
   readProtectedPaths,
   structuredStartup,
+  type ContextFilesResult,
   visibleAssistantText,
   waitForAck,
   writePromptPayload,
@@ -416,7 +417,7 @@ let effortWanted: EffortLevel = ((value) => {
 type HostContextTrace = Pick<
   BoundedText,
   "state" | "direction" | "limitBytes" | "inputBytes" | "retainedBytes" | "omittedBytes" | "outputBytes" | "truncated"
->;
+> & Pick<ContextFilesResult, "files">;
 let currentHostContext: HostContextTrace | null = null;
 let activeRequestOverlay: RequestOverlay | null = null;
 
@@ -853,6 +854,7 @@ function traceCacheInput(
     messagePrefixHash: cache.messagePrefixHash,
     workingSetHash: cache.workingSetHash,
     workingSetChanged: cache.workingSetChanged,
+    hostContext: cache.hostContext,
     retryPromptIdentical: cache.retryPromptIdentical,
     codexTurnStateUsed: cache.codexTurnStateUsed,
     serializedToolsHash: cache.serializedToolsHash,
@@ -1347,10 +1349,49 @@ function persistRouteSettings(): number {
 
 function persistRouteSettingsOrWarn(label: string): void {
   try {
+    ensureRouteSettingsWritable();
     persistRouteSettings();
   } catch (err) {
-    out(`(${label}; setting not persisted: ${(err as Error).message})\n`);
+    out(`(${label}; setting not persisted: ${notPersistedReason(err)})\n`);
   }
+}
+
+/**
+ * Pre-stream /model and /effort run before any submit opened the session
+ * writer. Preparing is safe only when no stored bundle could be disturbed,
+ * so a later /resume still finds it untouched.
+ */
+function ensureRouteSettingsWritable(): void {
+  const hasContent = sessionFile ? sessionBundleHasContent(sessionFile) : false;
+  if (mayPrepareSessionForSettings(sessionFile, sessionWriter !== null, hasContent)) {
+    ensureFreshSession();
+  }
+}
+
+/**
+ * Whether a settings pin may prepare the session itself: a bundle path
+ * exists, no writer is open yet, and nothing is stored. Exported for unit
+ * tests; ensureRouteSettingsWritable keeps the only callers.
+ */
+export function mayPrepareSessionForSettings(
+  file: string | null,
+  writerOpen: boolean,
+  hasContent: boolean,
+): boolean {
+  return !!file && !writerOpen && !hasContent;
+}
+
+/**
+ * Human cause for a settings write failure. A closed writer over a stored
+ * bundle means resume-or-submit comes first (a submit re-pins the route on
+ * its own; resume restores the stored route, so the switch must be
+ * repeated after it); anything else is the raw error.
+ */
+function notPersistedReason(err: unknown): string {
+  if (!sessionWriter && sessionFile && sessionBundleHasContent(sessionFile)) {
+    return "a stored session is waiting — send a message to pin it, or repeat after /resume";
+  }
+  return err instanceof Error ? err.message : String(err);
 }
 
 /**
@@ -2061,15 +2102,15 @@ const TOOLS: Array<Record<string, unknown>> = [
   {
     name: "read_file",
     description:
-      "Read a text file relative to the working directory. Each line is prefixed with its 1-based line number and a pipe; do not include those prefixes in edit old_text. Caps near 40 KB of file bytes. Optional start_line and end_line (inclusive). Pass offset (bytes) only to continue a truncated read; do not combine with start_line. A directory path lists that directory.",
+      "Read a text file relative to the working directory. Each line is prefixed with its 1-based line number and a pipe (N|content); those prefixes are display-only — never copy them into edit old_text. Caps near 40 KB of file bytes. Optional start_line and end_line (inclusive). Pass offset (bytes) only to continue a truncated read; do not combine with start_line. A directory path lists that directory.",
     input_schema: {
       type: "object",
       additionalProperties: false,
       properties: {
-        path: { type: "string" },
-        offset: { type: "number" },
-        start_line: { type: "number" },
-        end_line: { type: "number" },
+        path: { type: "string", description: "File or directory path relative to the working directory." },
+        offset: { type: "number", description: "Byte offset to continue a truncated read. Do not combine with start_line." },
+        start_line: { type: "number", description: "1-based inclusive start line." },
+        end_line: { type: "number", description: "1-based inclusive end line." },
       },
       required: ["path"],
     },
@@ -2088,15 +2129,19 @@ const TOOLS: Array<Record<string, unknown>> = [
   {
     name: "edit",
     description:
-      "Replace old_text with new_text in a file. Copy old_text exactly as it appears AFTER the line-number prefix (read shows N|content; never include the N| prefix, preserve tabs/spaces). Unique current text may come from a complete grep line, the working-set overlay, or a prior read. Default: one unique occurrence (fails if missing or repeated). Set replace_all to replace every occurrence. Prefer this over write_file for existing files. Miss errors include occurrence count and nearby lines; use those to retry. Do not re-read unless the nearby lines are not enough.",
+      "Replace old_text with new_text in an existing file. Prefer this over write_file when the file already exists. Default: one unique occurrence (fails if missing or repeated). Set replace_all to replace every occurrence. Miss errors include occurrence count and nearby lines; copy a corrected unique old_text from those lines and retry. Do not re-read unless the nearby lines are not enough.",
     input_schema: {
       type: "object",
       additionalProperties: false,
       properties: {
-        path: { type: "string" },
-        old_text: { type: "string" },
-        new_text: { type: "string" },
-        replace_all: { type: "boolean" },
+        path: { type: "string", description: "Existing file path relative to the working directory." },
+        old_text: {
+          type: "string",
+          description:
+            "Exact current text to replace, copied from observed file content (complete grep line, working-set overlay, or a prior read). Strip read_file N| prefixes and grep path:line: prefixes; preserve tabs/spaces. Include enough surrounding context for a unique match unless replace_all is true. Empty string is rejected.",
+        },
+        new_text: { type: "string", description: "Replacement text. Preserve the file's indentation and whitespace style." },
+        replace_all: { type: "boolean", description: "When true, replace every occurrence of old_text instead of requiring a unique match." },
       },
       required: ["path", "old_text", "new_text"],
     },
@@ -2104,7 +2149,7 @@ const TOOLS: Array<Record<string, unknown>> = [
   {
     name: "grep",
     description:
-      "Search file contents with a regular expression. Uses ripgrep when available. Prefer this over bash rg or grep. Groups hits by file, shows sparse files first, and caps per file. Skip ignored directories. Narrow with path or glob when a file has more hits. An empty result is exactly (no matches); broaden the pattern or try a different path/glob, or list files with glob. Edit from a grep hit only when the shown line is complete and unique; otherwise read.",
+      "Search file contents with a regular expression. Uses ripgrep when available. Prefer this over bash rg or grep. Groups hits by file, shows sparse files first, and caps per file. Skip ignored directories. Narrow with path or glob when a file has more hits. An empty result is exactly (no matches); broaden the pattern or try a different path/glob, or list files with glob. Edit from a grep hit only when the shown line is complete and unique; copy the line text after path:line:, never that prefix. Otherwise read.",
     input_schema: {
       type: "object",
       additionalProperties: false,
@@ -2152,6 +2197,12 @@ for (const def of visibleSubagentTools(SUBAGENT_DEPTH)) {
   if (IS_WORLDLINE_CANDIDATE && def.name === "spawn_subagent") continue;
   TOOLS.push(def);
 }
+
+/** Built-in client tools before MCP merge. Tests inspect input contracts here. */
+export function builtinClientTools(): ReadonlyArray<Record<string, unknown>> {
+  return TOOLS;
+}
+
 const subagentRegistry = new SubagentRegistry();
 
 let clientTools: Array<Record<string, unknown>> = TOOLS.slice();
@@ -4747,6 +4798,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
         omittedBytes: contextResult.omittedBytes,
         outputBytes: contextResult.outputBytes,
         truncated: contextResult.truncated,
+        files: contextResult.files,
       }
     : null;
   if (eventsDir && terminalId) {
@@ -6190,9 +6242,10 @@ function dispatchLine(line: string): void {
     effortWanted = clampEffortLevel(route.provider, route.model, requested, providerProtocol(route.provider, route.model));
     if (effortWanted !== prev) {
       try {
+        ensureRouteSettingsWritable();
         persistRouteSettings();
       } catch (err) {
-        out(`(effort ${effortWanted}; setting not persisted: ${(err as Error).message})\n`);
+        out(`(effort ${effortWanted}; setting not persisted: ${notPersistedReason(err)})\n`);
         syncStatus();
         showPrompt();
         return;

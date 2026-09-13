@@ -77,7 +77,8 @@ Follow the existing owner for the behavior: `agent-core/auth.ts` (auth/provider 
 ## Session routine
 
 - One task active at a time (WIP=1); finish + verify before starting the next.
-- Done = evidence, in order: typecheck → unit → build/e2e. No skipping layers.
+- Done = checkable + proven by facts: define done before work; as-is vs should-be; fix before next step. No invented gates. Cap retries at 3, then honest report.
+- Tiered evidence: docs-only = path/command checks; TS-only = typecheck + focused unit; behavior/UI/main/snapshot/core = + build and relevant e2e.
 - Leave build green, remove debug code.
 
 ## Glossary
