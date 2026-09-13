@@ -657,7 +657,18 @@ export class ProjectWatcher {
       let scanAborted = false;
       const walk = async (dir: string): Promise<void> => {
         if (generation !== this.generation || scanAborted) return;
-        const entries = await this.readDirectory(dir, { withFileTypes: true });
+        let entries;
+        try {
+          entries = await this.readDirectory(dir, { withFileTypes: true });
+        } catch (error) {
+          // The project root must read cleanly: a failure there aborts the
+          // pass into the retry path. An unreadable subdirectory (EACCES, or
+          // ENOENT from a concurrent rename) is skipped instead — seedExisting
+          // treats it the same way, and neither the native watcher nor capture
+          // can observe inside it either.
+          if (dir === this.root) throw error;
+          return;
+        }
         for (const ent of entries) {
           if (generation !== this.generation || scanAborted) return;
           if (IGNORED_SEGMENTS.has(ent.name)) continue;

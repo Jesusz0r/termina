@@ -49,11 +49,19 @@ export function compactCostTokenThreshold(contextWindow?: number | null): number
 export function isUserPrompt(m: { role: string; content: unknown }): boolean {
   if (m.role !== "user") return false;
   if (typeof m.content === "string") return true;
-  return Array.isArray(m.content) && m.content.some((b) => {
-    if (!b || typeof b !== "object") return false;
+  if (!Array.isArray(m.content)) return false;
+  // A tool-turn message stays a tool-turn message even when the harness
+  // appends sibling text (e.g. stall-recovery guidance): cutting there would
+  // evict the preceding tool_use while keeping its orphan result, which
+  // request projection rejects on every later turn.
+  let sawPromptBlock = false;
+  for (const b of m.content) {
+    if (!b || typeof b !== "object") continue;
     const type = (b as { type?: unknown }).type;
-    return type === "text" || type === "image";
-  });
+    if (type === "tool_result" || type === "web_search_tool_result") return false;
+    if (type === "text" || type === "image") sawPromptBlock = true;
+  }
+  return sawPromptBlock;
 }
 
 export function shouldCompactForCacheCost(
