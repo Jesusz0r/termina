@@ -6,6 +6,7 @@
  * the explorer:paste backend, so no new IPC exists for drag-drop.
  */
 import { type CommandId, type ContentHit, type ExplorerEntry } from "../../shared/types";
+import { isRecord } from "../../shared/guards";
 import {
   ancestorDirs,
   canDropEntry,
@@ -31,6 +32,16 @@ import {
   type DirState,
   type DirView,
 } from "./explorer-rows";
+
+/** Shape guard for listDir entries. Main is same-app trusted, but a malformed
+ *  entry must not throw inside renderChildren: it runs under floated
+ *  `void refresh()` calls, where a throw is an unhandled rejection that
+ *  silently kills the refresh. Malformed entries are skipped. */
+function isExplorerEntry(value: unknown): value is ExplorerEntry {
+  if (!isRecord(value)) return false;
+  return typeof value.path === "string" && typeof value.relPath === "string" && typeof value.name === "string"
+    && (value.type === "file" || value.type === "dir");
+}
 
 
 
@@ -384,12 +395,19 @@ export class Explorer {
       toast(res.error, "error");
       return;
     }
+    const entries = Array.isArray(res.entries) ? res.entries.filter(isExplorerEntry) : null;
+    if (!entries) {
+      state.loaded = false;
+      if (!hadContent) children.replaceChildren();
+      toast(`could not list ${entry.name}: unexpected response`, "error");
+      return;
+    }
     const current = new Map<string, HTMLElement>();
     for (const node of children.querySelectorAll<HTMLElement>(":scope > [data-path]")) {
       const path = node.dataset.path;
       if (path) current.set(path, node);
     }
-    const nextDirPaths = new Set(res.entries.filter((child) => child.type === "dir").map((child) => child.path));
+    const nextDirPaths = new Set(entries.filter((child) => child.type === "dir").map((child) => child.path));
     for (const [path, node] of current) {
       if (node.dataset.type === "dir" && !nextDirPaths.has(path)) this.tree.forgetDirectory(path);
     }
@@ -397,7 +415,7 @@ export class Explorer {
     if (res.truncated) {
       next.push(makeNote("folder truncated (too many entries)"));
     }
-    for (const child of res.entries) {
+    for (const child of entries) {
       const existing = current.get(child.path);
       const node = existing && existing.dataset.type === child.type
         ? existing

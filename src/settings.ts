@@ -182,7 +182,11 @@ export class SettingsView {
       this.notify();
     });
     const text = document.createElement("span");
-    text.innerHTML = `<strong>${title}</strong><small>${description}</small>`;
+    const strong = document.createElement("strong");
+    strong.textContent = title;
+    const small = document.createElement("small");
+    small.textContent = description;
+    text.append(strong, small);
     row.append(box, text);
     return row;
   }
@@ -197,7 +201,13 @@ export class SettingsView {
       button.type = "button";
       button.className = `settings-theme-card${this.preferences.theme === theme.id ? " selected" : ""}`;
       button.dataset.theme = theme.id;
-      button.innerHTML = `<span class="theme-swatch"></span><strong>${theme.label}</strong><small>${theme.description}</small>`;
+      const swatch = document.createElement("span");
+      swatch.className = "theme-swatch";
+      const label = document.createElement("strong");
+      label.textContent = theme.label;
+      const description = document.createElement("small");
+      description.textContent = theme.description;
+      button.append(swatch, label, description);
       button.addEventListener("click", () => {
         this.preferences.theme = theme.id;
         this.notify();
@@ -225,7 +235,11 @@ export class SettingsView {
       this.notify();
     });
     const wrapText = document.createElement("span");
-    wrapText.innerHTML = "<strong>Word wrap</strong><small>Wrap long lines in the editor and review.</small>";
+    const wrapStrong = document.createElement("strong");
+    wrapStrong.textContent = "Word wrap";
+    const wrapSmall = document.createElement("small");
+    wrapSmall.textContent = "Wrap long lines in the editor and review.";
+    wrapText.append(wrapStrong, wrapSmall);
     wrapRow.append(wrap, wrapText);
     content.appendChild(wrapRow);
 
@@ -239,7 +253,11 @@ export class SettingsView {
       this.notify();
     });
     const miniText = document.createElement("span");
-    miniText.innerHTML = "<strong>Show minimap</strong><small>Keep the code map visible in the editor.</small>";
+    const miniStrong = document.createElement("strong");
+    miniStrong.textContent = "Show minimap";
+    const miniSmall = document.createElement("small");
+    miniSmall.textContent = "Keep the code map visible in the editor.";
+    miniText.append(miniStrong, miniSmall);
     miniRow.append(minimap, miniText);
     content.appendChild(miniRow);
   }

@@ -3305,11 +3305,19 @@ body {
   }
 }
 
-.toast {
+.toast-container {
   position: fixed;
   bottom: 64px;
   right: 16px;
   z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+  pointer-events: none;
+}
+
+.toast {
   background: var(--bg-raised);
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
@@ -3322,6 +3330,7 @@ body {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   animation: fadein 0.15s ease;
   user-select: text;
+  pointer-events: auto;
 }
 
 .toast-error {

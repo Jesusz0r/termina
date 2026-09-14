@@ -6,9 +6,16 @@
  * and document globals. Not a DOM implementation — add only what a test needs.
  */
 
-type Listener = (event: Record<string, unknown> & { preventDefault(): void; stopPropagation(): void }) => void;
+export interface FakeEvent {
+  [key: string]: unknown;
+  preventDefault(): void;
+  stopPropagation(): void;
+  readonly defaultPrevented: boolean;
+}
 
-function makeEvent(init: Record<string, unknown>): Parameters<Listener>[0] {
+type Listener = (event: FakeEvent) => void;
+
+function makeEvent(init: Record<string, unknown>): FakeEvent {
   let defaultPrevented = false;
   return {
     ...init,
@@ -19,7 +26,7 @@ function makeEvent(init: Record<string, unknown>): Parameters<Listener>[0] {
       defaultPrevented = true;
     },
     stopPropagation(): void {},
-  } as Parameters<Listener>[0];
+  };
 }
 
 export class FakeEl {
@@ -35,7 +42,7 @@ export class FakeEl {
   placeholder = "";
   type = "";
   hidden = false;
-  tabIndex = 0;
+  private _tabIndex = 0;
   disabled = false;
   offsetLeft = 0;
   scrollLeft = 0;
@@ -71,6 +78,15 @@ export class FakeEl {
   }
   set className(value: string) {
     this.classes = new Set(value.split(/\s+/).filter(Boolean));
+  }
+
+  /** Reflects to the content attribute, like the real IDL setter. */
+  get tabIndex(): number {
+    return this._tabIndex;
+  }
+  set tabIndex(value: number) {
+    this._tabIndex = value;
+    this.attributes.set("tabindex", String(value));
   }
 
   addEventListener(type: string, fn: Listener): void {
@@ -125,6 +141,9 @@ export class FakeEl {
   getAttribute(name: string): string | null {
     return this.attributes.get(name) ?? null;
   }
+  hasAttribute(name: string): boolean {
+    return this.attributes.has(name);
+  }
   removeAttribute(name: string): void {
     this.attributes.delete(name);
   }
@@ -165,12 +184,60 @@ export class FakeEl {
   }
 }
 
-/** Single-part selectors only: `#id`, `.class.chain`, or `tag`. */
+/**
+ * Selector subset: comma groups of an optional tag plus `#id`, `.class`,
+ * `[attr]` / `[attr="value"]` in any order, with `:not(...)` conditions.
+ * Anything else (`:scope`, combinators, pseudo-classes) never matches.
+ */
 function matchesSelector(el: FakeEl, selector: string): boolean {
-  const sel = selector.trim();
-  if (sel.startsWith("#")) return el.id === sel.slice(1);
-  if (sel.startsWith(".")) return sel.slice(1).split(".").every((c) => el.classList.contains(c));
-  return el.tagName.toLowerCase() === sel.toLowerCase();
+  return selector
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .some((part) => matchesSingle(el, part));
+}
+
+function matchesSingle(el: FakeEl, selector: string): boolean {
+  const nots: string[] = [];
+  let rest = selector
+    .replace(/:not\(([^)]*)\)/g, (_m, inner: string) => {
+      nots.push(inner.trim());
+      return "";
+    })
+    .trim();
+  for (const not of nots) {
+    if (matchAttrCondition(el, not)) return false;
+  }
+  const tag = /^[a-zA-Z][\w-]*/.exec(rest);
+  if (tag) {
+    if (el.tagName.toLowerCase() !== tag[0].toLowerCase()) return false;
+    rest = rest.slice(tag[0].length);
+  }
+  while (rest.length > 0) {
+    if (rest.startsWith("#")) {
+      const m = /^#([\w-]+)/.exec(rest);
+      if (!m || el.id !== m[1]) return false;
+      rest = rest.slice(m[0].length);
+    } else if (rest.startsWith(".")) {
+      const m = /^\.([\w-]+)/.exec(rest);
+      if (!m || !el.classList.contains(m[1])) return false;
+      rest = rest.slice(m[0].length);
+    } else if (rest.startsWith("[")) {
+      const m = /^\[([\w-]+)(?:="([^"]*)")?\]/.exec(rest);
+      if (!m || !matchAttrCondition(el, m[1] + (m[2] !== undefined ? `="${m[2]}"` : ""))) return false;
+      rest = rest.slice(m[0].length);
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+function matchAttrCondition(el: FakeEl, condition: string): boolean {
+  const m = /^([\w-]+)(?:="([^"]*)")?$/.exec(condition.trim());
+  if (!m) return false;
+  const actual = el.getAttribute(m[1]);
+  return m[2] === undefined ? actual !== null : actual === m[2];
 }
 
 export class FakeDocument {
@@ -202,6 +269,12 @@ export class FakeDocument {
   removeEventListener(type: string, fn: Listener): void {
     const list = this.listeners.get(type);
     if (list) this.listeners.set(type, list.filter((f) => f !== fn));
+  }
+  /** Dispatch to document-level listeners (capture listeners live here). */
+  dispatch(type: string, init: Record<string, unknown> = {}): { defaultPrevented: boolean } {
+    const event = makeEvent({ type, ...init });
+    for (const fn of this.listeners.get(type) ?? []) fn(event);
+    return event;
   }
 }
 

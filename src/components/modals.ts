@@ -118,13 +118,63 @@ function close(backdrop: HTMLElement): void {
   backdrop.remove();
 }
 
+// -------------------------------------------------------------- focus trap --
+
+/** Focusables for the modal Tab trap (buttons, fields, and tab stops). */
+const FOCUS_TRAP_SELECTOR =
+  'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/** The topmost open modal backdrop, if any (#modal-root stacks them in order). */
+function topmostBackdrop(): HTMLElement | null {
+  const backdrops = root.querySelectorAll(".modal-backdrop, .settings-backdrop");
+  return (backdrops[backdrops.length - 1] as HTMLElement | undefined) ?? null;
+}
+
+/** Trap Tab inside the topmost modal backdrop, so keyboard focus cannot leave
+ *  for the background tree or editor. Installed once: every modal backdrop
+ *  (makeModal, file-list, settings) lives in #modal-root. Only keystrokes
+ *  already inside the backdrop are trapped — background surfaces keep Tab. */
+function trapTab(event: KeyboardEvent): void {
+  if (event.key !== "Tab" || event.defaultPrevented) return;
+  const top = topmostBackdrop();
+  if (!top || !top.contains(event.target as Node | null)) return;
+  const focusables = [...top.querySelectorAll<HTMLElement>(FOCUS_TRAP_SELECTOR)];
+  if (focusables.length === 0) {
+    event.preventDefault();
+    return;
+  }
+  const active = document.activeElement as HTMLElement | null;
+  const at = active ? focusables.indexOf(active) : -1;
+  if (event.shiftKey && at <= 0) {
+    event.preventDefault();
+    focusables[focusables.length - 1].focus();
+  } else if (!event.shiftKey && (at === -1 || at === focusables.length - 1)) {
+    event.preventDefault();
+    focusables[0].focus();
+  }
+}
+
+document.addEventListener("keydown", trapTab, true);
+
 // ------------------------------------------------------------------- toasts --
+
+/** Stacked toast container (one fixed slot; rapid toasts pile vertically). */
+let toastContainer: HTMLElement | null = null;
+
+function ensureToastContainer(): HTMLElement {
+  if (!toastContainer) {
+    toastContainer = document.createElement("div");
+    toastContainer.className = "toast-container";
+    document.body.appendChild(toastContainer);
+  }
+  return toastContainer;
+}
 
 export function toast(message: string, type: "info" | "warning" | "error" = "info"): void {
   const el = document.createElement("div");
   el.className = `toast toast-${type}`;
   el.textContent = message;
-  document.body.appendChild(el);
+  ensureToastContainer().appendChild(el);
   setTimeout(() => el.remove(), 5000);
 }
 
