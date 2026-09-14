@@ -835,6 +835,9 @@ export function rankProfiles(
     if (el.A || el.B) {
       winner = "unavailable";
       reason = el.A && el.B ? "both candidates are ineligible" : el.A ? `candidate A is ineligible: ${el.A}` : `candidate B is ineligible: ${el.B}`;
+    } else if (apiFail.A && apiFail.B) {
+      winner = "tie";
+      reason = `both fail the API gate: A: ${apiFail.A}; B: ${apiFail.B}`;
     } else if (apiFail.B) {
       winner = "A";
       reason = `B fails the API gate: ${apiFail.B}`;
