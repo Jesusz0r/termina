@@ -355,4 +355,33 @@ describe("fetch and MCP outbound URL policy", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("releases the connection when body decoding fails", async () => {
+    process.env.TERMINA_CORE_TEST = "1";
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/plain", "content-encoding": "gzip" });
+      res.end(Buffer.from("not-gzip-bytes"));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("loopback server did not bind");
+      const result = await fetchUrl(`http://127.0.0.1:${address.port}/x`, { timeoutMs: 5000 });
+      expect(result.isError).toBe(true);
+      expect(result.content).toMatch(/^error: /);
+      // The failed body must not strand an open socket on the server: poll
+      // for close instead of asserting immediately (close is async).
+      const deadline = Date.now() + 2000;
+      for (;;) {
+        const open = await new Promise<number>((resolve) => server.getConnections((_, count) => resolve(count)));
+        if (open === 0 || Date.now() >= deadline) {
+          expect(open).toBe(0);
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    } finally {
+      server.close();
+    }
+  });
 });

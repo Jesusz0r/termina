@@ -1675,14 +1675,21 @@ export async function fetchUrl(
         if (res.status < 200 || res.status >= 300) {
           const detailAccumulator = new BoundedTextAccumulator({ maxBytes: 2 * 1024, direction: "head", marker: "" });
           let detailSeen = 0;
-          for await (const chunk of res.body) {
-            const bytes = chunk as Uint8Array;
-            detailAccumulator.push(bytes);
-            detailSeen += bytes.byteLength;
-            if (detailSeen > 2 * 1024) {
-              res.cancel();
-              break;
+          try {
+            for await (const chunk of res.body) {
+              const bytes = chunk as Uint8Array;
+              detailAccumulator.push(bytes);
+              detailSeen += bytes.byteLength;
+              if (detailSeen > 2 * 1024) {
+                res.cancel();
+                break;
+              }
             }
+          } catch (err) {
+            // A decoding or socket error mid-body must still release the
+            // connection; the outer catch maps the failure.
+            res.cancel();
+            throw err;
           }
           const detailResult = detailAccumulator.finish();
           const detail = detailResult.text.trim();
@@ -1703,15 +1710,22 @@ export async function fetchUrl(
         const body = new BoundedTextAccumulator({ maxBytes: FETCH_CAP_BYTES, direction: "head", marker: "" });
         let sourceTruncated = false;
         let bodySeen = 0;
-        for await (const chunk of res.body) {
-          const bytes = chunk as Uint8Array;
-          body.push(bytes);
-          bodySeen += bytes.byteLength;
-          if (bodySeen > FETCH_CAP_BYTES) {
-            sourceTruncated = true;
-            res.cancel();
-            break;
+        try {
+          for await (const chunk of res.body) {
+            const bytes = chunk as Uint8Array;
+            body.push(bytes);
+            bodySeen += bytes.byteLength;
+            if (bodySeen > FETCH_CAP_BYTES) {
+              sourceTruncated = true;
+              res.cancel();
+              break;
+            }
           }
+        } catch (err) {
+          // A decoding or socket error mid-body must still release the
+          // connection; the outer catch maps the failure.
+          res.cancel();
+          throw err;
         }
         const bodyResult = body.finish();
         const result = logicalToolText(bodyResult.text, {
