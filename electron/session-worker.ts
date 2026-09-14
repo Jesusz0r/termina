@@ -110,7 +110,7 @@ async function searchSessions(msg: SessionSearchRequest): Promise<void> {
       });
       return;
     }
-    const hits = await searchSessionFiles({
+    const { hits, error: walkError } = await searchSessionFiles({
       query: typeof msg.query === "string" ? msg.query : "",
       files,
       projectCwd: typeof msg.projectCwd === "string" ? msg.projectCwd : "",
@@ -127,12 +127,13 @@ async function searchSessions(msg: SessionSearchRequest): Promise<void> {
       });
       return;
     }
+    const error = [listingError, walkError].filter(Boolean).join("; ");
     post({
       op: "search-sessions-result",
       requestId: msg.requestId,
       ok: true,
       hits,
-      ...(listingError ? { error: listingError } : {}),
+      ...(error ? { error } : {}),
     });
   } catch (err) {
     post({

@@ -3733,21 +3733,21 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         coreLine,
       ].join("\n") + "\n",
     );
-    const searchHits = await searchMod.searchSessionFiles({
+    const searchHits = (await searchMod.searchSessionFiles({
       query: "compute",
       files: [{ path: coreJsonl, name: "core-bbbb.jsonl", mtimeMs: 1 }],
       projectCwd: searchDir,
       canonicalize: (p) => p,
       isProjectFile: (rel) => rel === "utils.ts" || rel === "greeting.ts",
-    });
+    })).hits;
     check("search finds a core user line", searchHits.some((h) => h.text.includes("add compute") && h.sessionFile === "core-bbbb.jsonl"));
-    const greetingHits = await searchMod.searchSessionFiles({
+    const greetingHits = (await searchMod.searchSessionFiles({
       query: "greeting",
       files: [{ path: coreJsonl, name: "core-bbbb.jsonl", mtimeMs: 1 }],
       projectCwd: searchDir,
       canonicalize: (p) => p,
       isProjectFile: (rel) => rel === "utils.ts" || rel === "greeting.ts",
-    });
+    })).hits;
     check("search resolves a core edit path", greetingHits.some((h) => h.filePath === "greeting.ts"));
     
     const logicalDir = join(searchDir, "core-logical", "current");
@@ -3762,13 +3762,13 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
       logicalActive,
       `${JSON.stringify({ storageSeq: 2, type: "message", message: { role: "user", content: "compute in the active segment" } })}\n`,
     );
-    const logicalHits = await searchMod.searchSessionFiles({
+    const logicalHits = (await searchMod.searchSessionFiles({
       query: "compute",
       files: [{ path: logicalActive, name: "core-logical/current/session.jsonl", mtimeMs: 2, segments: [logicalPart, logicalActive] }],
       projectCwd: searchDir,
       canonicalize: (p) => p,
       isProjectFile: () => false,
-    });
+    })).hits;
     check(
       "search treats bundle segments as one logical session",
       logicalHits.length === 1 &&
@@ -3776,14 +3776,14 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         logicalHits[0]?.line === 2 &&
         logicalHits[0]?.before.includes("first segment"),
     );
-    const cancelledLogicalHits = await searchMod.searchSessionFiles({
+    const cancelledLogicalHits = (await searchMod.searchSessionFiles({
       query: "compute",
       files: [{ path: logicalActive, name: "core-logical/current/session.jsonl", mtimeMs: 2, segments: [logicalPart, logicalActive] }],
       projectCwd: searchDir,
       canonicalize: (p) => p,
       isProjectFile: () => false,
       shouldStop: () => true,
-    });
+    })).hits;
     check("logical session search honors cancellation", cancelledLogicalHits.length === 0);
     
     const rolloverDir = join(searchDir, "core-rollover", "current");
@@ -3797,7 +3797,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     );
     let rolloverChecks = 0;
     let rolledDuringSearch = false;
-    const rolloverHits = await searchMod.searchSessionFiles({
+    const rolloverHits = (await searchMod.searchSessionFiles({
       query: "rollover needle",
       files: [{ path: rolloverActive, name: "core-rollover/current/session.jsonl", mtimeMs: 3, segments: [rolloverActive] }],
       projectCwd: searchDir,
@@ -3812,7 +3812,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         }
         return false;
       },
-    });
+    })).hits;
     check(
       "logical session search retries a live rollover without duplicate hits",
       rolledDuringSearch && rolloverHits.length === 1,
@@ -3824,7 +3824,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
     const appendActive = join(appendDir, "session.jsonl");
     writeFileSync(appendActive, `${JSON.stringify({ storageSeq: 1, type: "message", message: { role: "user", content: "stable append needle" } })}\n`);
     let appendChecks = 0;
-    const appendHits = await searchMod.searchSessionFiles({
+    const appendHits = (await searchMod.searchSessionFiles({
       query: "append needle",
       files: [{ path: appendActive, name: "core-append/current/session.jsonl", mtimeMs: 4, segments: [appendActive] }],
       projectCwd: searchDir,
@@ -3839,7 +3839,7 @@ describe("Agent Core Kernel & TUI Harness Suite", () => {
         );
         return false;
       },
-    });
+    })).hits;
     check("ordinary active appends do not discard logical-session hits", appendChecks > 0 && appendHits.length === 1);
     check("slash menu puts help first", SLASH_COMMANDS[0]?.name === "/help");
     check("slash menu puts exit last", SLASH_COMMANDS.at(-1)?.name === "/exit");

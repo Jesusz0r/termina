@@ -243,6 +243,11 @@ export function mergeSessionFiles(groups: SessionFileEntry[][]): SessionFileEntr
  * instead of showing a silent empty.
  */
 export type SessionSearchListing = { files: SessionFileEntry[]; error?: string };
+export type SessionSearchHits = { hits: SessionHit[]; error?: string };
+
+function sessionSearchUncertain(detail: string): string {
+  return `session listing uncertain: ${detail}`;
+}
 
 export async function collectSessionSearchFiles(coreDir: string): Promise<SessionSearchListing> {
   let topNames: string[];
@@ -251,7 +256,7 @@ export async function collectSessionSearchFiles(coreDir: string): Promise<Sessio
   } catch (err) {
     if (isErrno(err, "ENOENT")) return { files: [] };
     const detail = errorCode(err) ?? (err instanceof Error ? err.message : String(err));
-    return { files: [], error: `session listing uncertain: ${detail}` };
+    return { files: [], error: sessionSearchUncertain(detail) };
   }
   const coreSessions = await listLogicalSessions(coreDir);
   const files = mergeSessionFiles([
@@ -277,11 +282,21 @@ export async function collectSessionSearchFiles(coreDir: string): Promise<Sessio
   }
   if (skipped > 0) {
     const detail = skipped === 1 ? "1 session could not be listed" : `${skipped} sessions could not be listed`;
-    return { files, error: `session listing uncertain: ${detail}` };
+    return { files, error: sessionSearchUncertain(detail) };
   }
   return { files };
 }
 
+function walkErrorDetail(err: unknown): string {
+  return errorCode(err) ?? (err instanceof Error ? err.message : String(err));
+}
+
+/**
+ * Walk session files for hits. ENOENT on a vanished segment is a race (keep
+ * going). Permission, stream, or segment-listing failures keep hits already
+ * found and set `error` so the modal can say the walk is uncertain — same
+ * wording as an incomplete listing, not a silent partial.
+ */
 export async function searchSessionFiles(opts: {
   query: string;
   files: SessionFileEntry[];
@@ -289,12 +304,18 @@ export async function searchSessionFiles(opts: {
   canonicalize: CanonicalizePath;
   isProjectFile: (relPath: string, projectCwd: string) => boolean | Promise<boolean>;
   shouldStop?: () => boolean;
-}): Promise<SessionHit[]> {
+}): Promise<SessionSearchHits> {
   // The worker is its own trust boundary: never trust caller-supplied sizes.
   const needle = opts.query.trim().toLowerCase().slice(0, MAX_SESSION_SEARCH_QUERY);
-  if (needle.length < 2) return [];
+  if (needle.length < 2) return { hits: [] };
   const files = opts.files.slice(0, MAX_SESSION_SEARCH_FILES);
   const hits: SessionHit[] = [];
+  let error: string | undefined;
+  const markUncertain = (detail: string): void => {
+    error ??= sessionSearchUncertain(detail);
+  };
+  const cancelled = (): SessionSearchHits => ({ hits: [] });
+  const finish = (): SessionSearchHits => (opts.shouldStop?.() ? cancelled() : error ? { hits, error } : { hits });
   // A single message can expose the same candidate through tool arguments,
   // backticks, and ordinary tokens.  Keep the bounded search from repeating
   // the main-process existence/stat check for those candidates.
@@ -309,20 +330,26 @@ export async function searchSessionFiles(opts: {
   };
 
   for (const file of files) {
-    if (opts.shouldStop?.()) return [];
+    if (opts.shouldStop?.()) return cancelled();
     let snapshot = sessionSegmentSnapshot(file);
-    if (!snapshot) continue;
+    if (!snapshot.ok) {
+      markUncertain(snapshot.error);
+      continue;
+    }
     for (let attempt = 0; attempt < 2; attempt++) {
       const hitStart = hits.length;
+      const errorAtAttempt = error;
       let lineNum = 0;
       let prevText = "";
       let hitCap = false;
       for (const segment of snapshot.paths) {
-        if (opts.shouldStop?.()) return [];
+        if (opts.shouldStop?.()) return cancelled();
         try {
           const info = await stat(segment);
           if (!info.isFile() || info.size > MAX_SESSION_SEARCH_FILE_BYTES) continue;
-        } catch {
+        } catch (err) {
+          if (isErrno(err, "ENOENT")) continue;
+          markUncertain(walkErrorDetail(err));
           continue;
         }
         const stream = createReadStream(segment, { encoding: "utf8" });
@@ -332,7 +359,7 @@ export async function searchSessionFiles(opts: {
             if (opts.shouldStop?.()) {
               rl.close();
               stream.destroy();
-              return [];
+              return cancelled();
             }
             lineNum++;
             if (lineNum > MAX_SESSION_SEARCH_LINES) break;
@@ -359,8 +386,8 @@ export async function searchSessionFiles(opts: {
             }
             if (lineNum % 256 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
           }
-        } catch {
-          /* skip read errors */
+        } catch (err) {
+          if (!isErrno(err, "ENOENT")) markUncertain(walkErrorDetail(err));
         } finally {
           rl.close();
           stream.destroy();
@@ -368,26 +395,33 @@ export async function searchSessionFiles(opts: {
         if (hitCap || lineNum > MAX_SESSION_SEARCH_LINES) break;
       }
       const next = sessionSegmentSnapshot(file);
-      if (!file.segments || !next || next.key === snapshot.key) {
-        if (hitCap) return hits;
+      if (file.segments && !next.ok) {
+        markUncertain(next.error);
+        if (hitCap) return finish();
+        break;
+      }
+      if (!file.segments || !next.ok || next.key === snapshot.key) {
+        if (hitCap) return finish();
         break;
       }
       hits.splice(hitStart);
+      error = errorAtAttempt;
       if (attempt === 1) break;
       snapshot = next;
     }
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
 
-  return opts.shouldStop?.() ? [] : hits;
+  return finish();
 }
 
-function sessionSegmentSnapshot(file: SessionFileEntry): { paths: string[]; key: string } | null {
-  if (!file.segments) return { paths: [file.path], key: file.path };
+function sessionSegmentSnapshot(
+  file: SessionFileEntry,
+): { ok: true; paths: string[]; key: string } | { ok: false; error: string } {
+  if (!file.segments) return { ok: true, paths: [file.path], key: file.path };
   const listing = listCurrentSegments(dirname(file.path));
-  if (!listing.ok) return null;
+  if (!listing.ok) return { ok: false, error: listing.error };
   const paths = listing.parts.map((part) => part.path);
   if (listing.active) paths.push(listing.active.path);
-  const key = paths.join("\n");
-  return { paths, key };
+  return { ok: true, paths, key: paths.join("\n") };
 }
