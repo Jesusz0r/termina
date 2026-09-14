@@ -76,7 +76,9 @@ describe("makeModal dialog ARIA (refs #303)", () => {
     expect(list.classList.contains("worldline-list-modal")).toBe(true);
     expect(list.getAttribute("role")).toBe("dialog");
     labelledByTitle(list);
-    expect(list.querySelectorAll(".worldline-list li")).toHaveLength(2);
+    const files = list.querySelector(".worldline-list");
+    if (!files) throw new Error("expected a file list");
+    expect(files.querySelectorAll("li")).toHaveLength(2);
   });
 
   it("gives stacked modals unique title ids", () => {
@@ -126,7 +128,8 @@ describe("makeModal dialog ARIA (refs #303)", () => {
     modals.showFileListModal("Changed", [["src/a.ts", "modified"]], (relPath) => {
       picked = relPath;
     });
-    const row = fake.modalRoot.querySelector(".worldline-list li");
+    const files = fake.modalRoot.querySelector(".worldline-list");
+    const row = files?.querySelector("li");
     if (!row) throw new Error("expected a file-list row");
     row.click();
     expect(picked).toBe("src/a.ts");
