@@ -221,14 +221,29 @@ async function makeFixture(opts: {
 
 /** Every journal.json payload observed through the native write boundary. */
 function journalPathCounts(): number[] {
-  const counts: number[] = [];
+  return journalPayloads().map((journal) => journal.paths?.length ?? 0);
+}
+
+function journalPayloads(): Array<{ paths?: Array<{ rel?: string; beforeState?: { type?: string }; beforeImageIdentity?: unknown; beforeImageSize?: unknown }> }> {
+  const payloads: Array<{ paths?: Array<{ rel?: string; beforeState?: { type?: string }; beforeImageIdentity?: unknown; beforeImageSize?: unknown }> }> = [];
   for (const call of mockWriteFile.mock.calls) {
     const args = call[0] as { components?: string[]; content?: Buffer };
     if (!args.components?.includes("journal.json") || !args.content) continue;
-    const journal = JSON.parse(args.content.toString("utf8")) as { paths?: unknown[] };
-    counts.push(journal.paths?.length ?? 0);
+    payloads.push(JSON.parse(args.content.toString("utf8")) as { paths?: Array<{ rel?: string; beforeState?: { type?: string }; beforeImageIdentity?: unknown; beforeImageSize?: unknown }> });
   }
-  return counts;
+  return payloads;
+}
+
+/** Every checkpoint must carry complete crash-rollback inputs. */
+function expectCompletePayloads(): void {
+  for (const journal of journalPayloads()) {
+    for (const p of journal.paths ?? []) {
+      if (p.beforeState?.type === "file") {
+        expect(p.beforeImageIdentity, `missing before-image identity for ${p.rel}`).toBeDefined();
+        expect(p.beforeImageSize, `missing before-image size for ${p.rel}`).toBeDefined();
+      }
+    }
+  }
 }
 
 describe("promote iterates the touched set (issue #196)", () => {
@@ -288,6 +303,76 @@ describe("promote iterates the touched set (issue #196)", () => {
       const entries = await readdir(join(fx.worldsRoot, "promotion-journal", journals[0]!));
       expect(entries).not.toContain("before");
       // The pair stays usable.
+      const cmp = (fx.manager as unknown as { comparisons: Map<string, ComparisonState> }).comparisons.get(fx.comparisonId)!;
+      expect(cmp.candidates.get("A")!.state).toBe("ready");
+    } finally {
+      await fx.manager.dispose();
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  }, 60_000);
+});
+
+describe("bounded journal checkpoints (issue #178)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("persists a 250-path promotion in bounded checkpoint writes", async () => {
+    const changes = Array.from({ length: 250 }, (_, i) => ({ relPath: `f-${String(i).padStart(3, "0")}.txt`, status: "modified" as const }));
+    const fx = await makeFixture({
+      changes,
+      primaryPaths: ["touched.txt", "other.txt", ...changes.map((c) => c.relPath)],
+      mergedPaths: ["touched.txt", "other.txt", ...changes.map((c) => c.relPath)],
+      materialize: async (dir) => {
+        await writeFile(join(dir, "touched.txt"), "new\n");
+        for (const c of changes) await writeFile(join(dir, c.relPath), "merged\n");
+      },
+    });
+    try {
+      for (const c of changes) await writeFile(join(fx.primaryRoot, c.relPath), "old\n");
+      const result = await fx.manager.promote(fx.comparisonId, "A", true);
+      expect(result).toEqual({ ok: true, terminalId: "term-promoted" });
+      // Initial, two periodic checkpoints, the gather tail, then transitions.
+      const counts = journalPathCounts();
+      expect(counts.slice(0, 4)).toEqual([0, 100, 200, 250]);
+      expect(counts.slice(4).every((n) => n === 250)).toBe(true);
+      expect(counts.length).toBeLessThanOrEqual(15);
+      expectCompletePayloads();
+      expect(mockCopyFile).toHaveBeenCalledTimes(250);
+      expect(await readFile(join(fx.primaryRoot, "f-000.txt"), "utf8")).toBe("merged\n");
+    } finally {
+      await fx.manager.dispose();
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("interrupted gather checkpoints the complete prefix and leaves primary intact", async () => {
+    const changes = Array.from({ length: 150 }, (_, i) => ({ relPath: `g-${String(i).padStart(3, "0")}.txt`, status: "modified" as const }));
+    const missing = changes[changes.length - 1]!.relPath;
+    const fx = await makeFixture({
+      changes,
+      primaryPaths: ["touched.txt", "other.txt", ...changes.map((c) => c.relPath)],
+      mergedPaths: ["touched.txt", "other.txt", ...changes.map((c) => c.relPath)],
+      materialize: async (dir) => {
+        for (const c of changes) {
+          if (c.relPath === missing) continue;
+          await writeFile(join(dir, c.relPath), "merged\n");
+        }
+      },
+    });
+    try {
+      for (const c of changes) await writeFile(join(fx.primaryRoot, c.relPath), "old\n");
+      const result = await fx.manager.promote(fx.comparisonId, "A", true);
+      expect(result.ok).toBe(false);
+      expect(result.error ?? "").toMatch(/unsupported filesystem object/);
+      // The periodic checkpoint plus the on-error checkpoint of the complete prefix.
+      expect(journalPathCounts().slice(0, 3)).toEqual([0, 100, 149]);
+      expectCompletePayloads();
+      expect(mockCopyFile).toHaveBeenCalledTimes(149);
+      // Nothing was ever applied: every primary file keeps its bytes.
+      for (const c of changes) {
+        expect(await readFile(join(fx.primaryRoot, c.relPath), "utf8")).toBe("old\n");
+      }
       const cmp = (fx.manager as unknown as { comparisons: Map<string, ComparisonState> }).comparisons.get(fx.comparisonId)!;
       expect(cmp.candidates.get("A")!.state).toBe("ready");
     } finally {

@@ -147,6 +147,7 @@ import {
   MAX_TEMPLATE_BYTES,
   MAX_UNCERTAIN_COMPARISON_ROOT_ENTRIES,
   MAX_WORLDLINE_FILE_BYTES,
+  PROMOTION_JOURNAL_CHECKPOINT_PATHS,
   READY_TIMEOUT_MS,
   RUNTIME_ALLOWLIST,
 } from "./limits.js";
@@ -2237,6 +2238,18 @@ export class WorldlineManager {
       const beforeDir = beforeBinding.path;
       const canonicalPrimaryRoot = await this.deps.canonicalPath(this.deps.primaryRoot);
       const paths: PromotionJournalPath[] = [];
+      // Gathered records accumulate in memory; the journal persists at
+      // bounded checkpoints. Every checkpoint holds complete crash-rollback
+      // inputs: a record joins `paths` only after its before-image identity
+      // is captured, and the failed record never joins at all.
+      const checkpointJournal = async (): Promise<void> => {
+        journal.paths = paths;
+        await writePromotionJournal(journalBinding!, journal);
+      };
+      const maybeCheckpointJournal = async (): Promise<void> => {
+        if (paths.length % PROMOTION_JOURNAL_CHECKPOINT_PATHS === 0) await checkpointJournal();
+      };
+      try {
       for (const rel of writeRels) {
         const abs = await promotionDestination(this.deps.primaryRoot, canonicalPrimaryRoot, rel, this.deps.canonicalPath);
         const before = await readPromotionEntry(abs);
@@ -2253,9 +2266,6 @@ export class WorldlineManager {
           beforeState: before.state,
           afterState: after.state,
         };
-        paths.push(record);
-        journal.paths = paths;
-        await writePromotionJournal(journalBinding!, journal);
         if (before.state.type === "file") {
           reservePromotionOperationBytes(promotionBudget, before.size!, `before-image ${rel}`);
           const sourceParentPlan = parentPlans.get(resolve(dirname(abs)));
@@ -2273,9 +2283,9 @@ export class WorldlineManager {
           record.beforeImageIdentity = copied.identity;
           if (copied.state.type !== "file") throw new Error(`before-image copy changed type at ${rel}`);
           record.beforeImageSize = copied.state.size;
-          journal.paths = paths;
-          await writePromotionJournal(journalBinding!, journal);
         }
+        paths.push(record);
+        await maybeCheckpointJournal();
       }
       for (const rel of deleteRels) {
         const abs = await promotionDestination(this.deps.primaryRoot, canonicalPrimaryRoot, rel, this.deps.canonicalPath);
@@ -2290,9 +2300,6 @@ export class WorldlineManager {
           beforeState: before.state,
           afterState: { type: "missing" },
         };
-        paths.push(record);
-        journal.paths = paths;
-        await writePromotionJournal(journalBinding!, journal);
         if (before.state.type === "file") {
           reservePromotionOperationBytes(promotionBudget, before.size!, `before-image ${rel}`);
           // A deletion is retired into journal-owned evidence during apply;
@@ -2314,11 +2321,19 @@ export class WorldlineManager {
           record.beforeImageIdentity = copied.identity;
           if (copied.state.type !== "file") throw new Error(`before-image copy changed type at ${rel}`);
           record.beforeImageSize = copied.state.size;
-          journal.paths = paths;
-          await writePromotionJournal(journalBinding!, journal);
         }
+        paths.push(record);
+        await maybeCheckpointJournal();
       }
-      journal.paths = paths;
+      } catch (err) {
+        // Persist the complete prefix for crash-rollback evidence, then let
+        // the outer handler roll back and report the original failure.
+        await checkpointJournal().catch((checkpointError) => console.warn(`[worldline] promotion error checkpoint retained: ${checkpointError instanceof Error ? checkpointError.message : String(checkpointError)}`));
+        throw err;
+      }
+      // Gather-to-session phase transition: persist the tail past the last
+      // periodic checkpoint.
+      await checkpointJournal();
       const retainedBinding = paths.some((p) => p.kind === "delete" && p.beforeState!.type !== "missing")
         ? await ensureBoundChildDirectory(journalBinding!.directory, "retained", true)
         : null;
@@ -2377,11 +2392,10 @@ export class WorldlineManager {
           const parentIdentity = promotionIdentityOf(destinationParent);
           if (p.kind === "delete") {
             const retainedName = basename(p.retainedName ?? `.termina-promotion-retained-${sha256Hex(Buffer.from(`${opId}:${p.rel}`)).slice(0, 24)}.tmp`);
-            if (!p.retainedName) {
-              p.retainedName = retainedName;
-              journal.paths = paths;
-              await writePromotionJournal(journalBinding!, journal);
-            }
+            // Retained names accumulate in memory and ride on the applied-phase
+            // write below: crash recovery re-derives an unpersisted name
+            // deterministically from opId and rel.
+            p.retainedName = retainedName;
             const result = await boundPromotionTransition({
               primaryRoot: this.deps.primaryRoot,
               primaryRootIdentity: nativePrimaryRootIdentity,

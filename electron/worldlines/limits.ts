@@ -13,6 +13,8 @@ export const CANDIDATE_CLEANUP_TIMEOUT_MS = 2500;
 export const MAX_AGENT_RESOURCE_BYTES = 200 * 1024 * 1024;
 /** Single promotion files above this fail closed before any buffering. */
 export const MAX_PROMOTION_FILE_BYTES = 512 * 1024 * 1024;
+/** Live-promotion journal writes happen at most every this many gathered paths. */
+export const PROMOTION_JOURNAL_CHECKPOINT_PATHS = 100;
 export const MAX_WORLDLINE_FILE_BYTES = 2 * 1024 * 1024;
 export const MAX_RUNS_PER_TERMINAL = 20;
 export const MAX_RETAINED_RUNS = 200;

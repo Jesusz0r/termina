@@ -203,6 +203,65 @@ describe("Promotion after-applied crash recovery", () => {
     }
   });
 
+  it("rolls back applied paths from a checkpoint journal with before-image identities", async () => {
+    const { root, worldsRoot, primaryRoot } = await setupRoots();
+    try {
+      const files = ["ck-a.txt", "ck-b.txt", "ck-c.txt"];
+      const before = "before\n";
+      const after = "applied\n";
+      // Two paths applied before the crash, one still at its before-state.
+      await writeFile(join(primaryRoot, files[0]!), after, { mode: 0o644 });
+      await writeFile(join(primaryRoot, files[1]!), after, { mode: 0o644 });
+      await writeFile(join(primaryRoot, files[2]!), before, { mode: 0o644 });
+      const opId = "promote-checkpoint-rollback";
+      const journalDir = join(worldsRoot, "promotion-journal", opId);
+      await mkdir(join(journalDir, "before"), { recursive: true, mode: 0o700 });
+      const paths = [];
+      for (const rel of files) {
+        const imagePath = join(journalDir, "before", rel);
+        await writeFile(imagePath, before, { mode: 0o644 });
+        const info = await lstat(imagePath, { bigint: true });
+        paths.push({
+          rel,
+          kind: "write",
+          beforeHash: sha256(before),
+          afterHash: sha256(after),
+          beforeExists: true,
+          beforeState: { type: "file", mode: 0o644, hash: sha256(before) },
+          afterState: { type: "file", mode: 0o644, hash: sha256(after) },
+          beforeImageIdentity: { dev: String(info.dev), ino: String(info.ino) },
+          beforeImageSize: String(Buffer.byteLength(before)),
+        });
+      }
+      await writeFile(
+        join(journalDir, "journal.json"),
+        JSON.stringify({
+          opId,
+          primaryRoot,
+          phase: "prepared",
+          createdAt: Date.now(),
+          paths,
+          stagedSession: null,
+          installedSession: null,
+          installedSessionTemp: null,
+          installedSessionManifest: null,
+          installedSessionTempManifest: null,
+          uncertainSessionArtifacts: [],
+          rollbackTemps: [],
+          engine: "core",
+        }),
+        { mode: 0o600 },
+      );
+      await recoverPromotionJournals(worldsRoot, { primaryRoot });
+      for (const rel of files) {
+        expect(await readFile(join(primaryRoot, rel), "utf8")).toBe(before);
+      }
+      expect((await lstat(join(journalDir, "journal.json"))).isFile()).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   afterAll(() => {
     disposeWorldlineCoreClient();
   });
