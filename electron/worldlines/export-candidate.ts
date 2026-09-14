@@ -33,6 +33,11 @@ export interface ExportCandidateContext {
     label: "A" | "B",
     relPath: string,
   ): Promise<{ ok: boolean; content?: string; error?: string }>;
+  /** Pin the candidate worktree head (a store capture, like details). */
+  captureHead(
+    comparisonId: string,
+    label: "A" | "B",
+  ): Promise<{ ok: boolean; commit?: string; tree?: string; error?: string }>;
 }
 
 /**
@@ -54,6 +59,12 @@ export async function exportCandidateRun(
   // The directory name derives from renderer input: allow only the
   // manager-generated id shape even though lookup already gates it.
   if (!/^cmp-[0-9]+$/.test(comparisonId)) return { ok: false, error: "invalid comparison" };
+  // Pin the worktree head before any gather read: a running candidate can
+  // move mid-gather and mix moments into one bundle.
+  const startHead = await ctx.captureHead(comparisonId, label);
+  if (!startHead.ok || !startHead.commit) {
+    return { ok: false, error: `could not pin the candidate head: ${startHead.error ?? "unknown error"}` };
+  }
   let changed: WorldlineChangedFile[];
   try {
     changed = (await changedFiles(cmp, cand)).files;
@@ -114,10 +125,18 @@ export async function exportCandidateRun(
     }
   }
   // The gather + patch window is long: refuse to write a bundle for a
-  // candidate that was discarded while it ran.
+  // candidate that was discarded while it ran, or whose head moved (a
+  // running candidate mixes moments across the per-file reads).
   const fresh = ctx.comparisons.get(comparisonId)?.candidates.get(label);
   if (!fresh || fresh.state === "discarded" || fresh.state === "error") {
     return { ok: false, error: "the candidate was discarded during export" };
+  }
+  const endHead = await ctx.captureHead(comparisonId, label);
+  if (!endHead.ok || !endHead.commit) {
+    return { ok: false, error: `could not re-verify the candidate head: ${endHead.error ?? "unknown error"}` };
+  }
+  if (endHead.commit !== startHead.commit) {
+    return { ok: false, error: "the candidate changed during export; retry when it settles" };
   }
   const exportsRoot = join(ctx.worldsRoot, "exports");
   const dir = join(exportsRoot, `${comparisonId}-${label}`);
@@ -138,6 +157,7 @@ export async function exportCandidateRun(
       role: cand.role,
       model: cmp.model,
       baseCommit: cmp.baseCommit,
+      headStateId: startHead.commit,
       exportedAt: new Date().toISOString(),
       files: changed.length,
       truncatedFiles: changed.length > capped.length ? changed.length - capped.length : 0,

@@ -1008,6 +1008,17 @@ export class WorldlineManager {
         worldsRoot: this.deps.worldsRoot,
         baseFileOf: (cid, relPath) => this.baseFileOf(cid, relPath),
         fileOf: (cid, candidateLabel, relPath) => this.fileOf(cid, candidateLabel, relPath),
+        captureHead: async (cid, candidateLabel) => {
+          const c = this.comparisons.get(cid);
+          const cd = c?.candidates.get(candidateLabel);
+          if (!c || !cd) return { ok: false, error: "candidate not found" };
+          try {
+            const head = await this.deps.captureHead(cd.dir, join(cd.dir, ".git"), c.baseStateId);
+            return { ok: true, commit: head.commit, tree: head.tree };
+          } catch (err) {
+            return { ok: false, error: err instanceof Error ? err.message : String(err) };
+          }
+        },
       },
       comparisonId,
       label,
