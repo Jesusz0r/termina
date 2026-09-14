@@ -32,7 +32,14 @@ function seedBundle(id: string, messages: Array<{ role: string; content: string 
   const root = mkdtempSync(join(tmpdir(), "session-clear-seed-"));
   roots.push(root);
   const sessionFile = coreSessionFile(root, id);
-  const opened = SessionWriter.open(sessionFile, 0);
+  // Session admission locks are transient under parallel workers; retry
+  // like resume-quarantine.test.ts before failing.
+  const deadline = Date.now() + 5000;
+  let opened = SessionWriter.open(sessionFile, 0);
+  while (!opened.ok && /busy|admission lock is unreadable/i.test(opened.error || "") && Date.now() < deadline) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+    opened = SessionWriter.open(sessionFile, 0);
+  }
   if (!opened.ok) throw new Error(opened.error);
   writers.push(opened.writer);
   try {
