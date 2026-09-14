@@ -860,6 +860,10 @@ export function editProjectFile(
   const ending = body.includes("\r\n") ? "\r\n" : "\n";
   const old = oldText.replace(/\r\n/g, "\n").replace(/\n/g, ending).replace(/^\uFEFF/, "");
   const replacement = newText.replace(/\r\n/g, "\n").replace(/\n/g, ending);
+  // A BOM-only search passes the pre-read empty check, then normalizes to
+  // "". indexOf("", from) always matches without advancing, which hangs
+  // both search modes. Reject the normalized empty term before matching.
+  if (old === "") return { content: "error: old_text must not be empty", isError: true };
   if (!replaceAll) {
     let count = 0;
     let idx = 0;
