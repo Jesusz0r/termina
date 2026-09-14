@@ -40,6 +40,7 @@ async function makeFixture(opts: {
   primaryPaths: string[];
   mergedPaths: string[];
   materialize: (dir: string) => Promise<void>;
+  workspaceAt?: (wsRoot: string) => Promise<{ id: string; generation: number; lastStateCommit: string | null } | null>;
 }): Promise<PromoteFixture> {
   const root = await realpath(await mkdtemp(join(tmpdir(), "termina-promote-touched-")));
   const worldsRoot = join(root, "worlds");
@@ -111,11 +112,11 @@ async function makeFixture(opts: {
     releaseState: async () => {},
     terminalBusy: () => false,
     terminalVerifying: () => false,
-    workspaceAt: async (wsRoot: string) => {
+    workspaceAt: opts.workspaceAt ?? (async (wsRoot: string) => {
       if (wsRoot === primaryRoot) return { id: "ws-primary", generation: 7, lastStateCommit: "p0" };
       if (wsRoot === candRoot) return { id: "ws-cand", generation: 3, lastStateCommit: "c0" };
       return null;
-    },
+    }),
     acquireWriteLease: async (workspaceId: string) => ({ ok: true, generation: generations.get(workspaceId) ?? 0 }),
     releaseWriteLease: () => {},
     flushDirtyModels: async () => ({ ok: true }),
@@ -376,6 +377,56 @@ describe("bounded journal checkpoints (issue #178)", () => {
       const cmp = (fx.manager as unknown as { comparisons: Map<string, ComparisonState> }).comparisons.get(fx.comparisonId)!;
       expect(cmp.candidates.get("A")!.state).toBe("ready");
     } finally {
+      await fx.manager.dispose();
+      await rm(fx.root, { recursive: true, force: true });
+    }
+  }, 60_000);
+});
+
+describe("candidate apply fence (issue #199)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("fails closed when the candidate moves after capture, before any apply", async () => {
+    let candidateMoved = false;
+    const fx = await makeFixture({
+      changes: [{ relPath: "touched.txt", status: "modified" }],
+      primaryPaths: ["touched.txt", "other.txt"],
+      mergedPaths: ["touched.txt", "other.txt"],
+      materialize: async (dir) => {
+        await writeFile(join(dir, "touched.txt"), "new\n");
+      },
+      workspaceAt: async (wsRoot: string) => {
+        if (wsRoot === fx.primaryRoot) return { id: "ws-primary", generation: 7, lastStateCommit: "p0" };
+        if (wsRoot === fx.candRoot) return { id: "ws-cand", generation: candidateMoved ? 4 : 3, lastStateCommit: "c0" };
+        return null;
+      },
+    });
+    // Flip the candidate generation once gather completes (phase-anchored:
+    // the first journal write carrying the path), so entry and preflight
+    // still see the pinned generation.
+    const baseImpl = mockWriteFile.getMockImplementation()!;
+    mockWriteFile.mockImplementation(async (args) => {
+      const result = await baseImpl(args);
+      const components = (args as { components?: string[] }).components ?? [];
+      const content = (args as { content?: Buffer }).content;
+      if (components.includes("journal.json") && content) {
+        const journal = JSON.parse(content.toString("utf8")) as { paths?: unknown[] };
+        if ((journal.paths?.length ?? 0) >= 1) candidateMoved = true;
+      }
+      return result;
+    });
+    try {
+      const result = await fx.manager.promote(fx.comparisonId, "A", true);
+      expect(result.ok).toBe(false);
+      expect(result.error ?? "").toBe("the candidate changed during promotion apply");
+      // Nothing applied: the primary keeps its bytes and the pair stays usable.
+      expect(await readFile(join(fx.primaryRoot, "touched.txt"), "utf8")).toBe("old\n");
+      const cmp = (fx.manager as unknown as { comparisons: Map<string, ComparisonState> }).comparisons.get(fx.comparisonId)!;
+      expect(cmp.candidates.get("A")!.state).toBe("ready");
+    } finally {
+      mockWriteFile.mockImplementation(baseImpl);
       await fx.manager.dispose();
       await rm(fx.root, { recursive: true, force: true });
     }

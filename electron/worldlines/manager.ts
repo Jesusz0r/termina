@@ -2375,6 +2375,12 @@ export class WorldlineManager {
       if ((await this.deps.workspaceAt(this.deps.primaryRoot))?.generation !== leaseP.generation) {
         return fail("the primary changed during promotion apply");
       }
+      // Mirror fence for the candidate: the agent writes past its lease, so a
+      // running candidate that moved after capture must fail, not promote
+      // torn bytes. A vanished workspace fails the same way.
+      if (candWs && (await this.deps.workspaceAt(target.root))?.generation !== candGen) {
+        return fail("the candidate changed during promotion apply");
+      }
 
       const nativePrimaryRootIdentity = promotionIdentityOf(primaryRootBinding);
       const nativeMergedRootIdentity = promotionIdentityOf(mergedBinding);
