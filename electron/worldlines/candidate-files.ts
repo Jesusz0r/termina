@@ -2,8 +2,8 @@
  * Candidate file-listing helpers (worldlines owner).
  *
  * Pure against manager state: the manager passes comparison/candidate state
- * in and renders the results. Extracted from manager.ts (issue #38) with no
- * behavior change.
+ * in and renders the results. Listings are capped at MAX_CHANGED_FILES with
+ * a truncated flag and uncapped total so details counts stay honest.
  */
 import { isAbsolute } from "node:path";
 import {
@@ -11,7 +11,7 @@ import {
   gitCommitTree,
   gitWorkingChanges,
 } from "../worldline-git.js";
-import type { WorldlineChangedFile } from "../../shared/types.js";
+import { capChangedFileList, type WorldlineChangedFile } from "../../shared/types.js";
 import type { CandidateState, ComparisonState } from "./types.js";
 
 export function isSafeRelativePath(relPath: string): boolean {
@@ -19,7 +19,13 @@ export function isSafeRelativePath(relPath: string): boolean {
 }
 
 /** Files differing from the base plus head-tree source statistics. */
-export async function changedFiles(cmp: ComparisonState, cand: CandidateState): Promise<{ files: WorldlineChangedFile[]; sourceFiles: number; sourceBytes: number }> {
+export async function changedFiles(cmp: ComparisonState, cand: CandidateState): Promise<{
+  files: WorldlineChangedFile[];
+  sourceFiles: number;
+  sourceBytes: number;
+  truncated: boolean;
+  total: number;
+}> {
   // The export call site passes comparisons with no base guard of its own.
   if (!cmp.baseCommit) throw new Error("the comparison base is missing");
   // Working tree vs HEAD: staged, unstaged, and untracked changes.
@@ -44,5 +50,6 @@ export async function changedFiles(cmp: ComparisonState, cand: CandidateState): 
     sourceBytes += entry.size;
   }
   const files = [...byPath.values()].sort((a, b) => (a.relPath < b.relPath ? -1 : a.relPath > b.relPath ? 1 : 0));
-  return { files, sourceFiles, sourceBytes };
+  const listed = capChangedFileList(files);
+  return { files: listed.files, sourceFiles, sourceBytes, truncated: listed.truncated, total: listed.total };
 }

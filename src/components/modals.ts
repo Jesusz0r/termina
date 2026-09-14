@@ -3,6 +3,7 @@
  * and generic toasts for notifications.
  */
 
+import { capChangedFileList, MAX_CHANGED_FILES } from "../../shared/types";
 import type { UnsavedCloseChoice } from "../../shared/unsaved-close";
 
 interface ModalResult {
@@ -185,15 +186,12 @@ export function copyText(text: string, okMessage: string): void {
     .catch(() => toast("could not copy the path", "error"));
 }
 
-/** Rendered cap for file-list modals (worldline Compare). The title keeps the
- *  true total; the overflow note keeps the count honest without the DOM cost. */
-export const MAX_FILE_LIST_MODAL_ROWS = 1000;
-
-/** A small modal with a clickable file list. */
+/** A small modal with a clickable file list. `total` is the uncapped count. */
 export function showFileListModal(
   title: string,
   items: Array<[string, "created" | "modified" | "deleted"]>,
   onPick: (relPath: string) => void,
+  total = items.length,
 ): void {
   const root = document.getElementById("modal-root")!;
   const backdrop = document.createElement("div");
@@ -208,7 +206,9 @@ export function showFileListModal(
   body.className = "modal-body";
   const list = document.createElement("ul");
   list.className = "worldline-list";
-  for (const [relPath, status] of items.slice(0, MAX_FILE_LIST_MODAL_ROWS)) {
+  const listed = capChangedFileList(items);
+  const count = Math.max(total, listed.total);
+  for (const [relPath, status] of listed.files) {
     const li = document.createElement("li");
     const badge = document.createElement("span");
     // Upstream-typed but cosmetic-only: an unknown status falls back to modified.
@@ -225,10 +225,10 @@ export function showFileListModal(
     });
     list.appendChild(li);
   }
-  if (items.length > MAX_FILE_LIST_MODAL_ROWS) {
+  if (count > listed.files.length) {
     const more = document.createElement("li");
     more.className = "worldline-more";
-    more.textContent = `…and ${items.length - MAX_FILE_LIST_MODAL_ROWS} more (showing first ${MAX_FILE_LIST_MODAL_ROWS})`;
+    more.textContent = `…and ${count - listed.files.length} more (showing first ${MAX_CHANGED_FILES})`;
     list.appendChild(more);
   }
   body.appendChild(list);

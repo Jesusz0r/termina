@@ -948,6 +948,8 @@ export class WorldlineManager {
           sourceFiles: changed.sourceFiles,
           sourceBytes: changed.sourceBytes,
           changedFiles: changed.files,
+          truncated: changed.truncated,
+          changedFileCount: changed.total,
           dependencies: await this.dependencyChanges(cmp, cand),
           unownedEdits,
           ignoredFiles: ignored.count,

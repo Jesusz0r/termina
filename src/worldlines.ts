@@ -6,16 +6,19 @@
  *
  * DOM updates are incremental: an update push touches only its card.
  */
-import { CHALLENGE_PROFILES, type ChallengeProfile, type WorldlineSummary, type WorldlineDetails, type WorldlineChangedFile, type EvidenceSummary } from "../shared/types";
+import { CHALLENGE_PROFILES, capChangedFileList, type ChallengeProfile, type WorldlineSummary, type WorldlineDetails, type WorldlineChangedFile, type EvidenceSummary } from "../shared/types";
 import { showConfirm, showFileListModal, toast } from "./components/modals";
 import { KIND_LABEL, chipText, evidenceLineDetail, formatBytes, profileCaption, recordOf, worldlineHeaderSummary } from "./worldline-evidence";
 
 /** Orientation caption on every A/B pair header: A kept the run, B is the retry. */
 export const WORLDLINE_PAIR_ROLES_LINE = "A is the result · B is a retry";
 
-/** Rendered cap for the inline changed-files list. The title and stats keep the
- *  true total; the overflow note points at Compare for the fuller listing. */
-export const MAX_INLINE_CHANGED_ROWS = 500;
+export { MAX_CHANGED_FILES } from "../shared/types";
+
+/** Honest changed-file count: the uncapped total when main truncated the listing. */
+function changedFileTotal(d: WorldlineDetails): number {
+  return d.changedFileCount ?? d.changedFiles.length;
+}
 
 /** Known candidate states (WorldlineState): the state pill allowlists against these. */
 const KNOWN_CANDIDATE_STATES: ReadonlySet<string> = new Set([
@@ -675,7 +678,10 @@ export class WorldlinesView {
     const statsEl = card.detailsBody.querySelector(".cand-stats")!;
     const depsEl = card.detailsBody.querySelector(".cand-deps")!;
     const age = d.ageMs < 60_000 ? `${Math.max(1, Math.round(d.ageMs / 1000))} s` : `${Math.round(d.ageMs / 60_000)} min`;
-    statsEl.textContent = `${d.sourceFiles} files · ${formatBytes(d.sourceBytes)} · ${d.changedFiles.length} changed · ${age} old`;
+    const listed = capChangedFileList(d.changedFiles);
+    const total = changedFileTotal(d);
+    const truncated = d.truncated === true || listed.truncated;
+    statsEl.textContent = `${d.sourceFiles} files · ${formatBytes(d.sourceBytes)} · ${total} changed · ${age} old`;
     depsEl.textContent = "";
     for (const dep of d.dependencies) {
       const parts: string[] = [];
@@ -686,9 +692,9 @@ export class WorldlinesView {
       row.textContent = `${dep.file}: ${parts.join("  ")}`;
       depsEl.appendChild(row);
     }
-    card.detailsBody.querySelector(".cand-changed-title")!.textContent = `Changed vs base (${d.changedFiles.length})`;
+    card.detailsBody.querySelector(".cand-changed-title")!.textContent = `Changed vs base (${total})`;
     card.changedList.replaceChildren();
-    for (const f of d.changedFiles.slice(0, MAX_INLINE_CHANGED_ROWS)) {
+    for (const f of listed.files) {
       const li = document.createElement("li");
       li.className = "cand-changed-item";
       const badge = document.createElement("span");
@@ -708,11 +714,13 @@ export class WorldlinesView {
       });
       card.changedList.appendChild(li);
     }
-    if (d.changedFiles.length > MAX_INLINE_CHANGED_ROWS) {
+    if (truncated || total > listed.files.length) {
       const more = document.createElement("li");
       more.className = "cand-more";
-      more.textContent =
-        `…and ${d.changedFiles.length - MAX_INLINE_CHANGED_ROWS} more — open Compare to browse further`;
+      const remaining = Math.max(0, total - listed.files.length);
+      more.textContent = remaining > 0
+        ? `…and ${remaining} more — open Compare to browse further`
+        : "…listing truncated — open Compare to browse further";
       card.changedList.appendChild(more);
     }
   }
@@ -721,18 +729,20 @@ export class WorldlinesView {
   private async openBaseCompare(comparisonId: string, label: "A" | "B"): Promise<void> {
     const details = await this.detailsOf(comparisonId, label);
     if (!details) return;
-    if (details.changedFiles.length === 0) {
+    const total = changedFileTotal(details);
+    if (total === 0) {
       toast(`candidate ${label} has no changes versus the shared base`, "info");
       return;
     }
     showFileListModal(
-      `base → ${label} — ${details.changedFiles.length} file(s)`,
+      `base → ${label} — ${total} file(s)`,
       details.changedFiles.map((f) => [f.relPath, f.status] as [string, WorldlineChangedFile["status"]]),
       (relPath) => {
         const root = this.rootOf(comparisonId, label);
         if (!root) return;
         this.handlers.onCompareBase(comparisonId, label, relPath, `${root}/${relPath}`);
       },
+      total,
     );
   }
 
@@ -754,10 +764,13 @@ export class WorldlinesView {
     };
     for (const f of a.changedFiles) add(f, true, false);
     for (const f of b.changedFiles) add(f, false, true);
+    const truncated = a.truncated === true || b.truncated === true;
+    const total = truncated ? Math.max(changedFileTotal(a), changedFileTotal(b), byPath.size) : byPath.size;
     showFileListModal(
-      `A ⇄ B — ${byPath.size} file(s)`,
+      `A ⇄ B — ${total} file(s)`,
       [...byPath.entries()].sort((x, y) => x[0].localeCompare(y[0])).map(([relPath, f]) => [relPath, f.status] as [string, WorldlineChangedFile["status"]]),
       (relPath) => this.handlers.onCompareAB(comparisonId, relPath),
+      total,
     );
   }
 
