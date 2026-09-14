@@ -186,7 +186,7 @@ export function copyText(text: string, okMessage: string): void {
 }
 
 /** Rendered cap for file-list modals (worldline Compare). The title keeps the
- *  true total; the overflow note keeps the count honest without the DOM cost. */
+ *  true total; the overflow note says the listing is truncated. */
 export const MAX_FILE_LIST_MODAL_ROWS = 1000;
 
 /** A small modal with a clickable file list. */
@@ -194,6 +194,7 @@ export function showFileListModal(
   title: string,
   items: Array<[string, "created" | "modified" | "deleted"]>,
   onPick: (relPath: string) => void,
+  listing?: { truncated?: boolean; total?: number },
 ): void {
   const root = document.getElementById("modal-root")!;
   const backdrop = document.createElement("div");
@@ -225,10 +226,14 @@ export function showFileListModal(
     });
     list.appendChild(li);
   }
-  if (items.length > MAX_FILE_LIST_MODAL_ROWS) {
+  const shownCount = Math.min(items.length, MAX_FILE_LIST_MODAL_ROWS);
+  const total = listing?.total ?? items.length;
+  if (listing?.truncated === true || total > shownCount || items.length > MAX_FILE_LIST_MODAL_ROWS) {
     const more = document.createElement("li");
     more.className = "worldline-more";
-    more.textContent = `…and ${items.length - MAX_FILE_LIST_MODAL_ROWS} more (showing first ${MAX_FILE_LIST_MODAL_ROWS})`;
+    more.textContent = total > shownCount
+      ? `…first ${shownCount} of ${total} — listing truncated`
+      : `…listing truncated — showing first ${shownCount}`;
     list.appendChild(more);
   }
   body.appendChild(list);

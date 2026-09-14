@@ -118,8 +118,8 @@ describe("worldline changed-file caps (refs #213)", () => {
     expect(changedList.children.length).toBe(worldlines.MAX_INLINE_CHANGED_ROWS + 1);
     const note = changedList.children.at(-1)!;
     expect(note.className).toBe("cand-more");
-    expect(note.textContent).toContain("9500 more");
-    expect(note.textContent).toContain("Compare");
+    expect(note.textContent).toBe("…first 500 of 10000 — listing truncated");
+    expect(note.textContent).not.toContain("Compare");
     // Totals stay honest: the array itself is complete on the renderer side.
     const card = panel.querySelectorAll(".candidate-card")[0];
     expect(card.querySelector(".cand-changed-title")!.textContent).toBe("Changed vs base (10000)");
@@ -141,8 +141,8 @@ describe("worldline changed-file caps (refs #213)", () => {
     });
     const note = changedList.children.at(-1)!;
     expect(note.className).toBe("cand-more");
-    expect(note.textContent).toContain("9500 more");
-    expect(note.textContent).toContain("Compare");
+    expect(note.textContent).toBe("…first 500 of 10000 — listing truncated");
+    expect(note.textContent).not.toContain("Compare");
     const card = panel.querySelectorAll(".candidate-card")[0];
     expect(card.querySelector(".cand-changed-title")!.textContent).toBe("Changed vs base (10000)");
     expect(card.querySelector(".cand-stats")!.textContent).toContain("10000 changed");
@@ -172,7 +172,8 @@ describe("worldline changed-file caps (refs #213)", () => {
     expect(list.children.length).toBe(modals.MAX_FILE_LIST_MODAL_ROWS + 1);
     const note = list.children.at(-1)!;
     expect(note.className).toBe("worldline-more");
-    expect(note.textContent).toContain("9000 more");
+    expect(note.textContent).toBe("…first 1000 of 10000 — listing truncated");
+    expect(note.textContent).not.toMatch(/browse further|Compare/);
     expect(fake.modalRoot.querySelector(".modal-title")!.textContent).toBe("A ⇄ B — 10000 file(s)");
   });
 
@@ -195,6 +196,9 @@ describe("worldline changed-file caps (refs #213)", () => {
       expect(fake.modalRoot.querySelector(".modal-title")).not.toBeNull();
     });
     expect(fake.modalRoot.querySelector(".modal-title")!.textContent).toBe("base → A — 10000 file(s)");
+    const compareNote = fake.modalRoot.querySelector(".worldline-more")!;
+    expect(compareNote.textContent).toBe("…first 500 of 10000 — listing truncated");
+    expect(compareNote.textContent).not.toMatch(/browse further|Compare/);
   });
 
   it("titles A ⇄ B as a lower bound when either side is truncated", async () => {
@@ -209,5 +213,8 @@ describe("worldline changed-file caps (refs #213)", () => {
       expect(fake.modalRoot.querySelector(".modal-title")).not.toBeNull();
     });
     expect(fake.modalRoot.querySelector(".modal-title")!.textContent).toBe("A ⇄ B — at least 10000 file(s)");
+    const abNote = fake.modalRoot.querySelector(".worldline-more")!;
+    expect(abNote.textContent).toBe("…first 500 of 10000 — listing truncated");
+    expect(abNote.textContent).not.toMatch(/browse further|Compare/);
   });
 });

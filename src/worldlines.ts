@@ -14,7 +14,7 @@ import { KIND_LABEL, chipText, evidenceLineDetail, formatBytes, profileCaption, 
 export const WORLDLINE_PAIR_ROLES_LINE = "A is the result · B is a retry";
 
 /** Rendered cap for the inline changed-files list. The title and stats keep the
- *  true total; the overflow note points at Compare for the fuller listing. */
+ *  true total; the overflow note says the listing is truncated. */
 export const MAX_INLINE_CHANGED_ROWS = 500;
 
 /** Honest changed-file count: the uncapped total when main truncated the listing. */
@@ -719,10 +719,9 @@ export class WorldlinesView {
     if (d.truncated === true || total > renderedCount || d.changedFiles.length > MAX_INLINE_CHANGED_ROWS) {
       const more = document.createElement("li");
       more.className = "cand-more";
-      const remaining = Math.max(0, total - renderedCount);
-      more.textContent = remaining > 0
-        ? `…and ${remaining} more — open Compare to browse further`
-        : "…listing truncated — open Compare to browse further";
+      more.textContent = total > renderedCount
+        ? `…first ${renderedCount} of ${total} — listing truncated`
+        : `…listing truncated — showing first ${renderedCount}`;
       card.changedList.appendChild(more);
     }
   }
@@ -744,6 +743,7 @@ export class WorldlinesView {
         if (!root) return;
         this.handlers.onCompareBase(comparisonId, label, relPath, `${root}/${relPath}`);
       },
+      { truncated: details.truncated === true || total > details.changedFiles.length, total },
     );
   }
 
@@ -772,6 +772,7 @@ export class WorldlinesView {
       truncated ? `A ⇄ B — at least ${lowerBound} file(s)` : `A ⇄ B — ${listed} file(s)`,
       [...byPath.entries()].sort((x, y) => x[0].localeCompare(y[0])).map(([relPath, f]) => [relPath, f.status] as [string, WorldlineChangedFile["status"]]),
       (relPath) => this.handlers.onCompareAB(comparisonId, relPath),
+      { truncated, total: lowerBound },
     );
   }
 
