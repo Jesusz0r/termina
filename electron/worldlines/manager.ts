@@ -2170,7 +2170,9 @@ export class WorldlineManager {
       const pPaths = await store.treePaths(pState.commit);
       const parentPlans = new Map<string, PromotionDirectoryPlan>();
       const parentPaths = new Set<string>();
-      for (const rel of [...changed.map((entry) => entry.relPath), ...pPaths]) {
+      // Only touched parents: every effected write or delete below names a
+      // candidate-changed path, so the full primary tree needs no probing.
+      for (const rel of changed.map((entry) => entry.relPath)) {
         parentPaths.add(resolve(dirname(join(this.deps.primaryRoot, rel))));
       }
       for (const parentPath of parentPaths) {
@@ -2221,11 +2223,21 @@ export class WorldlineManager {
       });
       const promotionBudget = await createPromotionOperationBudget(mergedDir);
       const mergedPaths = await store.treePaths(merge.tree);
+      // The journal covers the touched set only: candidate changes that
+      // survive the merge, plus primary files the merge deletes. Untouched
+      // files already equal the merged bytes; reinstalling them rewrites
+      // every mtime and trips the path cap on large repos.
+      const changedWriteRels = new Set(changed.filter((entry) => entry.status !== "deleted").map((entry) => entry.relPath));
+      const writeRels = [...mergedPaths].filter((rel) => changedWriteRels.has(rel)).sort();
+      const deleteRels = [...pPaths].filter((rel) => !mergedPaths.has(rel)).sort();
+      // Fail fast before any before-image copy or journal growth: recovery
+      // never accepts more paths than this.
+      if (writeRels.length + deleteRels.length > 2000) throw new Error("the promotion touches too many paths");
       const beforeBinding = await ensureBoundChildDirectory(journalBinding!.directory, "before", true);
       const beforeDir = beforeBinding.path;
       const canonicalPrimaryRoot = await this.deps.canonicalPath(this.deps.primaryRoot);
       const paths: PromotionJournalPath[] = [];
-      for (const rel of [...mergedPaths].sort()) {
+      for (const rel of writeRels) {
         const abs = await promotionDestination(this.deps.primaryRoot, canonicalPrimaryRoot, rel, this.deps.canonicalPath);
         const before = await readPromotionEntry(abs);
         const after = await readPromotionEntry(join(mergedDir, rel));
@@ -2265,7 +2277,7 @@ export class WorldlineManager {
           await writePromotionJournal(journalBinding!, journal);
         }
       }
-      for (const rel of [...pPaths].filter((p) => !mergedPaths.has(p)).sort()) {
+      for (const rel of deleteRels) {
         const abs = await promotionDestination(this.deps.primaryRoot, canonicalPrimaryRoot, rel, this.deps.canonicalPath);
         const before = await readPromotionEntry(abs);
         if (!isRestorablePromotionState(before.state)) throw new Error(`unsupported filesystem object in promotion: ${rel}`);
@@ -2306,7 +2318,6 @@ export class WorldlineManager {
           await writePromotionJournal(journalBinding!, journal);
         }
       }
-      if (paths.length > 2000) throw new Error("the promotion touches too many paths");
       journal.paths = paths;
       const retainedBinding = paths.some((p) => p.kind === "delete" && p.beforeState!.type !== "missing")
         ? await ensureBoundChildDirectory(journalBinding!.directory, "retained", true)
