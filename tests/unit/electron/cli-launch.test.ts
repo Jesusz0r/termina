@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { resolve, join, dirname } from "node:path";
-import { statSync, existsSync, readFileSync, mkdtempSync, mkdirSync, copyFileSync, chmodSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { statSync, existsSync, readFileSync, realpathSync, mkdtempSync, mkdirSync, copyFileSync, chmodSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { parseTargetCwdFromArgv, getCliSourcePath, quoteAppleScriptString } from "../../../electron/cli-install.ts";
@@ -179,7 +179,9 @@ describe("Linux launcher target resolution (#129)", () => {
       env: linuxEnv({ PATH: `${dirname(launcher)}:${process.env.PATH ?? ""}`, TERMINA_BIN: markerBin }),
       timeout: LAUNCH_TIMEOUT_MS,
     });
-    expect(readFileSync(marker, "utf8")).toBe(`launched: ${root}\n`);
+    // The launcher resolves through the kernel cwd, which is canonical
+    // (/tmp -> /private/tmp on macOS); compare against the same form.
+    expect(readFileSync(marker, "utf8")).toBe(`launched: ${realpathSync(root)}\n`);
   });
 
   it("rejects self-resolution without looping", () => {
@@ -198,6 +200,27 @@ describe("Linux launcher target resolution (#129)", () => {
     symlinkSync(launcher, link);
     const failed = launchFails(link, ["."], {
       ...linuxEnv({ PATH: `${linkDir}:/usr/bin:/bin`, TERMINA_BIN: undefined }),
+    });
+    expect(failed.status).toBe(1);
+    expect(failed.stderr).toContain("TERMINA_BIN");
+  });
+
+  it("rejects a TERMINA_BIN that resolves to the launcher itself", () => {
+    const { launcher } = makeFixture();
+    const binDir = dirname(launcher);
+    // Without self-rejection this execs forever; the timeout turns a
+    // regression into a failure (status null) instead of a hung suite.
+    const failed = launchFails(launcher, [], linuxEnv({ PATH: `${binDir}:/usr/bin:/bin`, TERMINA_BIN: launcher }));
+    expect(failed.status).toBe(1);
+    expect(failed.stderr).toContain("TERMINA_BIN");
+  });
+
+  it("rejects a TERMINA_BIN symlink alias of the launcher", () => {
+    const { root, launcher } = makeFixture();
+    const alias = join(root, "app", "alias");
+    symlinkSync(launcher, alias);
+    const failed = launchFails(launcher, ["."], {
+      ...linuxEnv({ PATH: `${dirname(launcher)}:/usr/bin:/bin`, TERMINA_BIN: alias }),
     });
     expect(failed.status).toBe(1);
     expect(failed.stderr).toContain("TERMINA_BIN");
@@ -232,7 +255,7 @@ describe("Linux launcher target resolution (#129)", () => {
       env: linuxEnv({ PATH: `${otherDir}:/usr/bin:/bin`, TERMINA_BIN: undefined }),
       timeout: LAUNCH_TIMEOUT_MS,
     });
-    expect(readFileSync(otherMarker, "utf8")).toBe(`other: ${join(root, "sub", "dir")}\n`);
+    expect(readFileSync(otherMarker, "utf8")).toBe(`other: ${join(realpathSync(root), "sub", "dir")}\n`);
     // An explicit TERMINA_BIN wins over PATH discovery.
     execFileSync(launcher, [], {
       encoding: "utf8",

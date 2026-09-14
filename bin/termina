@@ -43,25 +43,32 @@ resolve_target_path() {
 }
 
 # Resolve the real application executable for non-macOS launches, once. An
-# explicit TERMINA_BIN wins. PATH discovery must never resolve back to this
-# launcher: the installed launcher is itself named `termina`, so a naive
-# `command -v termina` self-executes forever.
+# explicit TERMINA_BIN wins unless it resolves back to this launcher (which
+# would exec forever). PATH discovery must never resolve back to this
+# launcher either: the installed launcher is itself named `termina`, so a
+# naive `command -v termina` self-executes forever.
 resolve_linux_target() {
+  local self="$0"
+  case "$self" in
+    */*) ;;
+    *) self="$(command -v "$self" 2>/dev/null | head -n 1 || true)" ;;
+  esac
+  local self_canonical=""
+  if [ -n "$self" ]; then
+    self_canonical="$(canonical_path "$self")"
+  fi
   if [ -n "${TERMINA_BIN:-}" ] && [ -f "$TERMINA_BIN" ] && [ -x "$TERMINA_BIN" ]; then
-    echo "$TERMINA_BIN"
-    return 0
+    if [ -z "$self_canonical" ] || [ "$(canonical_path "$TERMINA_BIN")" != "$self_canonical" ]; then
+      echo "$TERMINA_BIN"
+      return 0
+    fi
   fi
   local found
   found="$(command -v termina 2>/dev/null | head -n 1 || true)"
   if [ -z "$found" ] || [ ! -f "$found" ] || [ ! -x "$found" ]; then
     return 1
   fi
-  local self="$0"
-  case "$self" in
-    */*) ;;
-    *) self="$(command -v "$self" 2>/dev/null | head -n 1 || true)" ;;
-  esac
-  if [ -n "$self" ] && [ "$(canonical_path "$found")" = "$(canonical_path "$self")" ]; then
+  if [ -n "$self_canonical" ] && [ "$(canonical_path "$found")" = "$self_canonical" ]; then
     return 1
   fi
   echo "$found"
