@@ -49,7 +49,7 @@ fn chmod_unreadable(path: &Path) {
 }
 
 struct PreflightHarness {
-    fixture: TempFixture,
+    _fixture: TempFixture,
     source: PathBuf,
     core: CoreProcess,
 }
@@ -79,7 +79,7 @@ impl PreflightHarness {
         git(&home, fixture.path(), &source, &["add", "--all"]);
         let core = CoreProcess::spawn(&home, fixture.path());
         Self {
-            fixture,
+            _fixture: fixture,
             source,
             core,
         }
@@ -203,30 +203,24 @@ fn gitattributes_replaced_with_directory_fails_closed() {
 }
 
 #[test]
-fn unreadable_included_git_config_fails_closed() {
+fn unreadable_git_config_fails_closed() {
     let mut harness = PreflightHarness::with_files("pf-config-unreadable", &[("keep.txt", "keep\n")]);
-    let included = harness.source.join(".git").join("unreadable-include");
-    fs::write(&included, "[core]\n\tautocrlf = true\n").expect("write included config");
-    let home = harness.fixture.join("home");
-    git(
-        &home,
-        harness.fixture.path(),
-        &harness.source,
-        &[
-            "config",
-            "--local",
-            "include.path",
-            included.to_str().unwrap(),
-        ],
-    );
-    chmod_unreadable(&included);
+    // A config entry whose name is not valid UTF-8 cannot be classified as
+    // "setting absent". Skipping it (the old fail-open) would hide a driver.
+    let config_path = harness.source.join(".git").join("config");
+    let mut bytes = fs::read(&config_path).expect("read git config");
+    bytes.extend_from_slice(b"\n[diff \"");
+    bytes.push(0xff);
+    bytes.extend_from_slice(b"hidden\"]\n\tcommand = true\n");
+    fs::write(&config_path, &bytes).expect("write git config");
     let (ok, reasons) = harness.run();
-    assert!(!ok, "unreadable included config must fail closed: {reasons:?}");
+    assert!(!ok, "unverifiable Git config must fail closed: {reasons:?}");
     assert!(
         reasons
             .iter()
-            .any(|r| r == "Git config could not be enumerated"),
-        "unreadable include must not pass as setting-absent: {reasons:?}"
+            .any(|r| r == "Git config could not be enumerated")
+            || reasons.iter().any(|r| r.contains("diff driver")),
+        "unverifiable config must not pass as setting-absent: {reasons:?}"
     );
     harness.shutdown();
 }

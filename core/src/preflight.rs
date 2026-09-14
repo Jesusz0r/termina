@@ -273,3 +273,68 @@ pub(crate) fn op_preflight(req: &Value) -> Result<Value, String> {
     }
     Ok(json!({ "result": { "ok": reasons.is_empty(), "reasons": reasons } }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    fn open_file_config(bytes: &[u8]) -> git2::Config {
+        let path = std::env::temp_dir().join(format!(
+            "termina-preflight-config-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, bytes).expect("write probe config");
+        git2::Config::open(&path).unwrap_or_else(|e| panic!("open probe config: {e}"))
+    }
+
+    #[test]
+    fn driver_probe_absent_vs_present() {
+        let absent = open_file_config(b"[core]\n\tbare = false\n");
+        assert!(matches!(
+            config_has_driver(&absent, "diff", "command"),
+            ConfigProbe::Absent
+        ));
+        let present = open_file_config(b"[diff \"tool\"]\n\tcommand = true\n");
+        assert!(matches!(
+            config_has_driver(&present, "diff", "command"),
+            ConfigProbe::Present
+        ));
+        let lfs = open_file_config(b"[diff \"lfs\"]\n\tcommand = true\n");
+        assert!(matches!(
+            config_has_driver(&lfs, "diff", "command"),
+            ConfigProbe::Absent
+        ));
+    }
+
+    #[test]
+    fn driver_probe_invalid_utf8_name_is_unreadable() {
+        let mut bytes = b"[diff \"".to_vec();
+        bytes.push(0xff);
+        bytes.extend_from_slice(b"hidden\"]\n\tcommand = true\n");
+        let config = open_file_config(&bytes);
+        assert!(
+            matches!(
+                config_has_driver(&config, "diff", "command"),
+                ConfigProbe::Unreadable
+            ),
+            "invalid UTF-8 config names must not classify as verified absence"
+        );
+    }
+
+    #[test]
+    fn filter_probe_invalid_utf8_name_is_unreadable() {
+        let mut bytes = b"[filter \"".to_vec();
+        bytes.push(0xff);
+        bytes.extend_from_slice(b"hidden\"]\n\tclean = true\n");
+        let config = open_file_config(&bytes);
+        assert!(matches!(
+            config_has_non_lfs_filter(&config),
+            ConfigProbe::Unreadable
+        ));
+    }
+}
