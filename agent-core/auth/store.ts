@@ -5,8 +5,9 @@
  * entry mutation. Split from agent-core/auth.ts (issue #38).
  */
 import { errorCode, isRecord } from "../../shared/guards.ts";
+import { syncParentDir } from "../../shared/fsync.ts";
 import { randomBytes } from "node:crypto";
-import { closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { authPath } from "./endpoints.ts";
 import { authDirectoryOpenFlags, authLockNoFollowFlags, authLockOwnerAlive, authPathBinding, authPathDirectoryIdentity, inspectAuthLock, recoverAuthLock, releaseAuthLock, resumeAuthLock, sameAuthPathIdentity, tryAcquireAuthLock, validateAuthPathBinding } from "./lock.ts";
@@ -21,11 +22,30 @@ let cached: { path: string; mtimeMs: number; data: AuthFile } | null = null;
 export const refreshFlights = new Map<string, Promise<{ ok: true } | { ok: false; error: string }>>();
 
 
+/**
+ * Stored auth needs POSIX file semantics throughout: FIFO witnesses
+ * (`/usr/bin/mkfifo`), exact 0600 modes, O_NOFOLLOW/O_DIRECTORY, and
+ * descriptor-anchored parents. Windows has none of these, so every
+ * credential write fails there — fail fast with one explicit error instead
+ * of a cascade of platform symptoms. Reads (including env-var credentials)
+ * keep working.
+ */
+export function assertStoredAuthSupported(): void {
+  if (process.platform === "win32") {
+    throw new Error(
+      "stored auth requires POSIX file semantics — credential storage is not supported on this platform; use environment-variable credentials instead",
+    );
+  }
+}
+
+
 function withLock<T>(fn: (binding: AuthPathBinding) => T): T {
+  assertStoredAuthSupported();
   const path = resolve(authPath());
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const binding = authPathBinding(path);
   const lock = `${path}.lock`;
+  let selfHealed = false;
   for (;;) {
     try {
       validateAuthPathBinding(binding);
@@ -50,6 +70,13 @@ function withLock<T>(fn: (binding: AuthPathBinding) => T): T {
       throw new Error("auth file busy");
     }
     if (inspected.owner.pid === process.pid || authLockOwnerAlive(lock, inspected.owner)) {
+      // A self-owned lock whose witness is dead is our own abandoned publish
+      // (publish succeeded, post-publish inspection failed): force-release it
+      // and retry once instead of staying busy forever.
+      if (!selfHealed && inspected.owner.pid === process.pid && !authLockOwnerAlive(lock, inspected.owner)) {
+        selfHealed = true;
+        if (recoverAuthLock(lock, inspected)) continue;
+      }
       throw new Error("auth file busy");
     }
     if (!recoverAuthLock(lock, inspected)) throw new Error("auth file busy");
@@ -65,14 +92,15 @@ export function readAuth(): { ok: true; data: AuthFile } | { ok: false; reason: 
   }
   try {
     const st = statSync(path);
-    if (cached && cached.path === path && cached.mtimeMs === st.mtimeMs) return { ok: true, data: cached.data };
+    // Deep-copy on the way out: callers must not mutate the cached object.
+    if (cached && cached.path === path && cached.mtimeMs === st.mtimeMs) return { ok: true, data: structuredClone(cached.data) };
     const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
     if (!isRecord(parsed)) {
       cached = null;
       return { ok: false, reason: "corrupt" };
     }
     cached = { path, mtimeMs: st.mtimeMs, data: parsed };
-    return { ok: true, data: parsed };
+    return { ok: true, data: structuredClone(parsed) };
   } catch {
     cached = null;
     return { ok: false, reason: "corrupt" };
@@ -212,6 +240,55 @@ function truncateAuthDescriptor(fd: number): void {
 type AuthWriteTestStage = "after-open" | "after-fsync" | "after-temp";
 
 
+/**
+ * Sweep temp files orphaned by a SIGKILL between temp creation and publish.
+ * These hold full credentials at 0600, so a dead owner's residue is zeroed
+ * before unlinking. Only exact-shape entries are touched, and only when the
+ * owner pid is dead. Never throws: a sweep must not fail a write.
+ */
+function sweepStaleAuthTempFiles(binding: AuthPathBinding): void {
+  let entries: string[];
+  try {
+    entries = readdirSync(binding.parent);
+  } catch {
+    return;
+  }
+  const prefix = `.${basename(binding.path)}.tmp-`;
+  for (const name of entries) {
+    if (!name.startsWith(prefix)) continue;
+    const pid = Number(name.slice(prefix.length).split("-")[0]);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) continue;
+    try {
+      process.kill(pid, 0);
+      continue;
+    } catch (error) {
+      if (errorCode(error) !== "ESRCH") continue;
+    }
+    try {
+      const full = join(binding.parent, name);
+      const st = lstatSync(full);
+      if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1 || (st.mode & 0o777) !== 0o600) continue;
+      try {
+        const fd = openSync(full, authLockNoFollowFlags(fsConstants.O_WRONLY));
+        try {
+          ftruncateSync(fd, 0);
+          fsyncSync(fd);
+        } finally {
+          closeSync(fd);
+        }
+      } catch {
+        /* Fall through to the unlink attempt. */
+      }
+      const again = lstatSync(full);
+      if (again.isFile() && !again.isSymbolicLink() && again.dev === st.dev && again.ino === st.ino) {
+        unlinkSync(full);
+      }
+    } catch {
+      /* Leave anything unproven in place. */
+    }
+  }
+}
+
 function maybeCrashAuthWrite(stage: AuthWriteTestStage): void {
   if (process.env.TERMINA_CORE_TEST !== "1" || process.env.TERMINA_AUTH_WRITE_CRASH !== stage) return;
   process.kill(process.pid, "SIGKILL");
@@ -231,6 +308,7 @@ function maybePauseAuthWrite(stage: AuthWriteTestStage): void {
 function writeAuth(data: AuthFile, binding: AuthPathBinding): void {
   const path = binding.path;
   validateAuthPathBinding(binding);
+  sweepStaleAuthTempFiles(binding);
   const tmp = join(binding.parent, `.${basename(path)}.tmp-${process.pid}-${randomBytes(16).toString("hex")}`);
   const anchoredTempName = basename(tmp);
   const anchoredDestinationName = basename(path);
@@ -280,6 +358,11 @@ function writeAuth(data: AuthFile, binding: AuthPathBinding): void {
       || afterPublish.ino !== tempIdentity.ino
     ) throw new Error("auth published file identity changed");
     published = true;
+    // Crash durability for the directory entry: without this, a crash inside
+    // the flush window can revert auth.json to its pre-write content. This
+    // runs after published is set so a sync failure surfaces without
+    // triggering the unpublished-write cleanup above.
+    syncParentDir(path);
   } finally {
     if (fd !== null && !published) truncateAuthDescriptor(fd);
     if (tempCreated && !published && tempIdentity !== null) {
@@ -307,17 +390,36 @@ function writeAuth(data: AuthFile, binding: AuthPathBinding): void {
 }
 
 
-export function modifyProvider(id: string, fn: (current: unknown) => unknown | null): void {
-  withLock((binding) => {
+export type AuthWriteOpts = {
+  /**
+   * Discard an unreadable auth file instead of refusing the write. The
+   * refusal stays the default: only logout and an explicitly confirmed
+   * login pass this.
+   */
+  discardCorrupt?: boolean;
+};
+
+
+export function modifyProvider(
+  id: string,
+  fn: (current: unknown) => unknown | null,
+  opts?: AuthWriteOpts,
+): { discardedCorrupt: boolean } {
+  return withLock((binding) => {
     const got = readAuth();
+    let discardedCorrupt = false;
     if (!got.ok && got.reason === "corrupt") {
-      throw new Error("auth.json is unreadable — refusing to write");
+      if (!opts?.discardCorrupt) {
+        throw new Error("auth.json is unreadable — refusing to write");
+      }
+      discardedCorrupt = true;
     }
     const data: AuthFile = got.ok ? { ...got.data } : {};
     const next = fn(data[id]);
     if (next === null) delete data[id];
     else data[id] = next;
     writeAuth(data, binding);
+    return { discardedCorrupt };
   });
 }
 

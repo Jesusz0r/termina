@@ -167,7 +167,9 @@ export async function authFetch(
 ): Promise<{ ok: boolean; status: number; payload: unknown; raw: string }> {
   const request = authRequestSignal(callerSignal);
   try {
-    const response = await fetch(url, { ...init, signal: request.signal });
+    // Never follow redirects: a 307/308 from a token endpoint would resend
+    // refresh codes and tokens to the redirect target.
+    const response = await fetch(url, { ...init, redirect: "error", signal: request.signal });
     const result = await readAuthResponse(response);
     const aborted = request.abortError();
     if (aborted) throw aborted;

@@ -4,12 +4,21 @@ export function isOAuthToken(token: string): boolean {
   return token.includes(OAT_MARK);
 }
 
-export function pickHeaders(token: string): Record<string, string> {
+export function pickHeaders(token: string, extra?: Record<string, unknown>): Record<string, string> {
   const headers: Record<string, string> = {
     "content-type": "application/json",
     "anthropic-version": "2023-06-01",
   };
-  if (isOAuthToken(token)) {
+  // The credential source decides the header, not the token substring:
+  // ANTHROPIC_AUTH_TOKEN is always a bearer token (live CLI docs), and a
+  // stored oauth entry is bearer too. The marker remains only for unsourced
+  // callers that pass a bare token.
+  // https://code.claude.com/docs/en/env-vars
+  const storedType = typeof extra?.type === "string" ? extra.type : "";
+  const envName = typeof extra?.envName === "string" ? extra.envName : "";
+  const oauth = storedType === "oauth" || envName === "ANTHROPIC_AUTH_TOKEN" ||
+    (!storedType && !envName && isOAuthToken(token));
+  if (oauth) {
     headers.authorization = `Bearer ${token}`;
     headers["anthropic-beta"] = "claude-code-20250219,oauth-2025-04-20";
     headers["user-agent"] = "termina-agent-core/1";

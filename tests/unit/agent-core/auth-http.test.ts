@@ -226,7 +226,7 @@ describe("Agent Core Auth HTTP Bounding & Cancellation", () => {
         return new Response(JSON.stringify({
           device_code: "canonical-xai-device",
           user_code: "XAI-1234",
-          verification_uri: "https://x.ai/device",
+          verification_uri: "https://auth.x.ai/device",
           interval: 0,
           expires_in: 60,
         }), { status: 200, headers: { "content-type": "application/json" } });

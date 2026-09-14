@@ -396,7 +396,7 @@ function requiredFieldsFor(input: TraceCostInput, reasoningBilling: ReasoningBil
   if (reasoningBilling === "included-in-output") {
     required = required.filter((field) => field !== "reasoning");
   }
-  if (!input.requiredFields && isRecord(input.usage) && hasOwn(input.usage, "storage")) required.push("storage");
+  if (!input.requiredFields && isRecord(input.usage) && hasOwn(input.usage, "storage") && input.usage.storage != null) required.push("storage");
   return canonicalFields(required);
 }
 

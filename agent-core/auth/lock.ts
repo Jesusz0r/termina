@@ -560,11 +560,8 @@ export function releaseAuthLock(lock: string, handle: AuthLockHandle): void {
       || !sameAuthLockOwner(current.owner, owner)
       || current.ownerPath !== handle.ownerPath
     ) return;
-    if (!current.guardPresent) {
-      unlinkSync(current.ownerPath);
-      removeEmptyAuthLock(lock, directory);
-      return;
-    }
+    // inspectAuthLock only returns guard-present handles, so no missing-guard
+    // arm is needed here.
     const releasedOwner = authLockTransitionPath(lock, "released", owner);
     renameSync(current.ownerPath, releasedOwner);
     const moved = readAuthLockOwner(releasedOwner);
@@ -650,7 +647,52 @@ function cleanupAuthLockCandidate(
 }
 
 
+/**
+ * Sweep acquisition candidates orphaned by a SIGKILL between candidate
+ * creation and publish. Only candidates whose owner pid is dead are
+ * touched, and only through the same shape-exact cleanup as the live path.
+ * Never throws: a sweep must not fail an acquisition.
+ */
+function sweepStaleAuthLockCandidates(lock: string): void {
+  let entries: string[];
+  try {
+    entries = readdirSync(dirname(lock));
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    if (!name.startsWith(AUTH_LOCK_CANDIDATE_PREFIX)) continue;
+    const pid = Number(name.slice(AUTH_LOCK_CANDIDATE_PREFIX.length).split("-")[0]);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) continue;
+    try {
+      process.kill(pid, 0);
+      continue;
+    } catch (error) {
+      if (errorCode(error) !== "ESRCH") continue;
+    }
+    try {
+      const candidate = join(dirname(lock), name);
+      const directory = authLockDirectory(candidate);
+      if (directory === null) continue;
+      const ownerEntry = readdirSync(candidate).map(parseAuthLockOwnerEntry).find(
+        (entry): entry is NonNullable<typeof entry> => entry !== null,
+      );
+      if (!ownerEntry) {
+        removeEmptyAuthLock(candidate, directory);
+        continue;
+      }
+      const owner = readAuthLockOwner(authLockOwnerPath(candidate, ownerEntry));
+      if (owner === null || owner.dev !== directory.dev || owner.ino !== directory.ino) continue;
+      cleanupAuthLockCandidate(candidate, directory, owner, null);
+    } catch {
+      /* Leave anything unproven in place. */
+    }
+  }
+}
+
+
 export function tryAcquireAuthLock(lock: string, binding: AuthPathBinding): AuthLockHandle | null {
+  sweepStaleAuthLockCandidates(lock);
   let candidate: string;
   let candidateToken: string;
   for (;;) {

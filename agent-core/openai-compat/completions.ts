@@ -5,6 +5,7 @@
  * Split from agent-core/openai-compat.ts (issue #38).
  */
 import type { CompletionMessage, CompletionsOpts, KernelMessage, ToolDef } from "./types.ts";
+import { gemini25Model } from "../models/families/google.ts";
 
 
 export function imageDataUrl(b: Record<string, unknown>): string | null {
@@ -161,14 +162,22 @@ export function completionsBody(
   };
   applyCacheOpts(body, opts, model);
   if (opts?.googleThinking && opts.reasoningEffort && opts.reasoningEffort !== "none") {
-    body.extra_body = {
-      google: {
-        thinking_config: {
-          thinking_level: opts.reasoningEffort,
-          include_thoughts: true,
+    if (gemini25Model(model)) {
+      // Gemini 2.5 has no thinking_level: the OpenAI-compatible endpoint maps
+      // reasoning_effort to its thinking_budget server-side, and the two
+      // overlap so they cannot be combined.
+      // https://ai.google.dev/gemini-api/docs/openai
+      body.reasoning_effort = opts.reasoningEffort;
+    } else {
+      body.extra_body = {
+        google: {
+          thinking_config: {
+            thinking_level: opts.reasoningEffort,
+            include_thoughts: true,
+          },
         },
-      },
-    };
+      };
+    }
   } else if (opts?.reasoningEffort) {
     body.reasoning_effort = opts.reasoningEffort;
   }
