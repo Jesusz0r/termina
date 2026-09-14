@@ -179,3 +179,58 @@ describe("agent-core TUI /model picker alias", () => {
     expect(submitted).toEqual(["/model anthropic/claude-sonnet-4-5"]);
   });
 });
+
+describe("agent-core TUI paste batching (#224)", () => {
+  function submitTui() {
+    const submitted: string[] = [];
+    const tui = new AgentTui({
+      stdout: { write: () => true, columns: 120, rows: 40, isTTY: false },
+      stdin: { isTTY: false },
+      onSubmit: (line) => submitted.push(line),
+      onInterrupt: () => {},
+      onExit: () => {},
+    });
+    return { tui, submitted };
+  }
+
+  it("inserts a 200 KB bracketed paste in bounded time with a capped draft", () => {
+    const { tui, submitted } = submitTui();
+    const paste = `x${"y".repeat(200 * 1024 - 2)}z`;
+    const started = Date.now();
+    tui.feed(`\x1b[200~${paste}\x1b[201~`);
+    expect(Date.now() - started).toBeLessThan(2000);
+    tui.feed("\r");
+    expect(submitted).toHaveLength(1);
+    expect(Buffer.byteLength(submitted[0]!, "utf8")).toBeLessThanOrEqual(256 * 1024);
+    expect(submitted[0]).toBe(paste);
+  });
+
+  it("trims past the draft cap with a visible note", () => {
+    const capped = submitTui();
+    capped.tui.feed(`\x1b[200~${"q".repeat(300 * 1024)}\x1b[201~`);
+    capped.tui.feed("\r");
+    expect(capped.submitted).toHaveLength(1);
+    expect(Buffer.byteLength(capped.submitted[0]!, "utf8")).toBeLessThanOrEqual(256 * 1024);
+    // The note lands in the transcript above the capped composer page.
+    const noted = submitTui();
+    noted.tui.feed(`\x1b[200~${"q".repeat(300 * 1024)}\x1b[201~`);
+    noted.tui.setDraft("");
+    expect(noted.tui.frame()).toContain("256 KiB cap");
+  });
+
+  it("keeps grapheme-correct cursors across combining-character pastes", () => {
+    const { tui, submitted } = submitTui();
+    tui.feed("\x1b[200~e\u0301\x1b[201~");
+    tui.feed("!");
+    tui.feed("\r");
+    // e + combining acute is one grapheme; ! lands after it, not inside it.
+    expect(submitted).toEqual(["e\u0301!"]);
+  });
+
+  it("normalizes pasted line endings like the per-character path", () => {
+    const { tui, submitted } = submitTui();
+    tui.feed("\x1b[200~a\r\nb\rc\x1b[201~");
+    tui.feed("\r");
+    expect(submitted).toEqual(["a\nb\nc"]);
+  });
+});

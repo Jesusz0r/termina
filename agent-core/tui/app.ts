@@ -9,6 +9,30 @@ import { INPUT_PREFIX, boxBorderRow, boxContentRow, clip, displayBudget, graphem
 import { HANDLE_ERROR, MAX_CSI, MAX_HISTORY, MAX_TRANSCRIPT, MAX_TRANSCRIPT_ENTRIES, SPIN, TRANSCRIPT_TRIM_TARGET, TRUNCATION_MARKER, closeSanitize, entryChars, freshMarkdownBoundary, freshSanitizer, parseMarkdown, sanitizeText, toolStatusLabel, transcriptHandleBrand } from "./transcript.ts";
 import type { StyledSpan, ToolTranscriptState, TranscriptEntry, TranscriptHandle, TuiIO, TuiInput } from "./transcript.ts";
 
+/** Composer draft bound: every keystroke re-scans the draft, so cap it. */
+const MAX_DRAFT_BYTES = 256 * 1024;
+
+/** Bracketed-paste staging bound: the run cap plus room to trim from. */
+const MAX_PASTE_BUFFER_BYTES = MAX_DRAFT_BYTES + 64 * 1024;
+
+/** Cap the note spam when input keeps arriving past the draft cap. */
+const DRAFT_CAP_NOTE_MS = 5000;
+
+/** Trim text to a byte budget on grapheme boundaries. */
+function trimGraphemesToBytes(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+  const out: string[] = [];
+  let used = 0;
+  for (const grapheme of splitGraphemes(text)) {
+    const size = Buffer.byteLength(grapheme, "utf8");
+    if (used + size > maxBytes) break;
+    out.push(grapheme);
+    used += size;
+  }
+  return out.join("");
+}
+
 
 export class AgentTui {
   private readonly out: TuiIO;
@@ -38,7 +62,10 @@ export class AgentTui {
   private esc = 0;
   private csi = "";
   private paste = false;
-  private pasteCR = false;
+  private pasteChunks: string[] = [];
+  private pasteBytes = 0;
+  private pasteTrimmed = false;
+  private capNotedAt = 0;
   private rawInput = false;
   private model = "";
   private effort = "off";
@@ -208,7 +235,12 @@ export class AgentTui {
   }
 
   setDraft(text: string): void {
-    this.chars = splitGraphemes(text);
+    let finalText = text;
+    if (Buffer.byteLength(text, "utf8") > MAX_DRAFT_BYTES) {
+      finalText = trimGraphemesToBytes(text, MAX_DRAFT_BYTES);
+      this.noteDraftCap();
+    }
+    this.chars = splitGraphemes(finalText);
     this.cursor = this.chars.length;
     this.slashIndex = 0;
     this.histIndex = -1;
@@ -1036,18 +1068,15 @@ export class AgentTui {
       return;
     }
     if (this.paste) {
-      if (ch === "\r") {
-        this.insert("\n");
-        this.pasteCR = true;
-        return;
+      // Buffer the paste and insert once at the terminator: per-character
+      // insertion re-segments the whole draft, which is O(n^2) for pastes.
+      const size = Buffer.byteLength(ch, "utf8");
+      if (this.pasteBytes + size <= MAX_PASTE_BUFFER_BYTES) {
+        this.pasteChunks.push(ch);
+        this.pasteBytes += size;
+      } else {
+        this.pasteTrimmed = true;
       }
-      if (ch === "\n") {
-        if (!this.pasteCR) this.insert("\n");
-        this.pasteCR = false;
-        return;
-      }
-      this.pasteCR = false;
-      if (ch === "\t" || ch >= " ") this.insert(ch);
       return;
     }
     if (ch === "\r") {
@@ -1181,9 +1210,77 @@ export class AgentTui {
     this.chars.splice(this.cursor, 0, ch);
     const prefix = this.chars.slice(0, this.cursor + 1).join("");
     const rest = this.chars.slice(this.cursor + 1).join("");
+    if (Buffer.byteLength(prefix, "utf8") + Buffer.byteLength(rest, "utf8") > MAX_DRAFT_BYTES) {
+      this.chars.splice(this.cursor, 1);
+      this.noteDraftCap();
+      this.schedule();
+      return;
+    }
     const prefixGs = splitGraphemes(prefix);
     this.chars = [...prefixGs, ...splitGraphemes(rest)];
     this.cursor = prefixGs.length;
+    this.slashIndex = 0;
+    this.histIndex = -1;
+    this.pickerSuppressed = false;
+    this.schedule();
+  }
+
+  /** Insert one bracketed paste: normalize once, then a single resegment. */
+  private flushPaste(): void {
+    const text = this.pasteChunks.join("");
+    const trimmedBuffer = this.pasteTrimmed;
+    this.pasteChunks = [];
+    this.pasteBytes = 0;
+    this.pasteTrimmed = false;
+    if (!text) {
+      if (trimmedBuffer) this.noteDraftCap();
+      return;
+    }
+    this.insertText(text, trimmedBuffer);
+  }
+
+  private noteDraftCap(): void {
+    const now = Date.now();
+    if (now - this.capNotedAt < DRAFT_CAP_NOTE_MS) return;
+    this.capNotedAt = now;
+    this.appendPlain("(draft hit the 256 KiB cap; further input is trimmed)\n");
+  }
+
+  /**
+   * Insert bulk text in O(draft + text): one normalization, one resegment,
+   * with the cursor floored to the grapheme boundary ending the insertion.
+   * Trims to the draft cap with a visible note instead of growing unbounded.
+   */
+  private insertText(text: string, bufferTrimmed: boolean): void {
+    const kept: string[] = [];
+    for (const ch of text.replace(/\r\n/g, "\n").replace(/\r/g, "\n")) {
+      if (ch === "\t" || ch === "\n" || ch >= " ") kept.push(ch);
+    }
+    const before = this.chars.slice(0, this.cursor).join("");
+    const after = this.chars.slice(this.cursor).join("");
+    const room = MAX_DRAFT_BYTES - Buffer.byteLength(before, "utf8") - Buffer.byteLength(after, "utf8");
+    let clean = kept.join("");
+    if (bufferTrimmed || Buffer.byteLength(clean, "utf8") > room) {
+      clean = trimGraphemesToBytes(clean, Math.max(0, room));
+      this.noteDraftCap();
+    }
+    if (!clean) {
+      this.schedule();
+      return;
+    }
+    const combined = before + clean + after;
+    const gs = splitGraphemes(combined);
+    const cutBytes = Buffer.byteLength(before, "utf8") + Buffer.byteLength(clean, "utf8");
+    let used = 0;
+    let cursor = 0;
+    for (const g of gs) {
+      const gb = Buffer.byteLength(g, "utf8");
+      if (used + gb > cutBytes) break;
+      used += gb;
+      cursor++;
+    }
+    this.chars = gs;
+    this.cursor = cursor;
     this.slashIndex = 0;
     this.histIndex = -1;
     this.pickerSuppressed = false;
@@ -1259,6 +1356,7 @@ export class AgentTui {
     if (this.paste) {
       if (params === "201") {
         this.paste = false;
+        this.flushPaste();
         this.schedule();
       } else if (params === "200") this.paste = true;
       return;
