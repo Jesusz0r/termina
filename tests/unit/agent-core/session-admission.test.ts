@@ -60,14 +60,24 @@ function openWriter(
   lastStorageSeq: number,
   testOnlyMaxBundleBytes?: number,
 ): SessionWriterType {
-  const opened = SessionWriter.open(
-    sessionFile,
-    lastStorageSeq,
-    testOnlyMaxBundleBytes === undefined ? undefined : { testOnlyMaxBundleBytes },
-  );
-  if (!opened.ok) throw new Error(opened.error);
-  writers.push(opened.writer);
-  return opened.writer;
+  // Session admission locks are transient under parallel workers; retry
+  // like resume-quarantine.test.ts before failing.
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const opened = SessionWriter.open(
+      sessionFile,
+      lastStorageSeq,
+      testOnlyMaxBundleBytes === undefined ? undefined : { testOnlyMaxBundleBytes },
+    );
+    if (opened.ok) {
+      writers.push(opened.writer);
+      return opened.writer;
+    }
+    if (!/busy|admission lock is unreadable/i.test(opened.error || "") || Date.now() >= deadline) {
+      throw new Error(opened.error);
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+  }
 }
 
 function bundleBytes(currentDir: string): number {

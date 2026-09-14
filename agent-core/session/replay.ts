@@ -383,14 +383,21 @@ async function readSegmentIntoState(
         if (pending.length > MAX_SESSION_RECORD_BYTES) {
           return { ok: false, error: "oversized session record" };
         }
-        try {
-          // Even a crash-truncated tail is decoded strictly. It may be
-          // discarded as incomplete, but malformed UTF-8 is never replaced.
-          UTF8_DECODER.decode(pending);
-        } catch {
-          return { ok: false, error: "invalid UTF-8 session record" };
+        if (!segment.allowTruncatedTail) {
+          // Immutable parts must be newline-terminated. Decode strictly so
+          // malformed bytes still report as invalid UTF-8, then reject the
+          // unterminated part as truncated.
+          try {
+            UTF8_DECODER.decode(pending);
+          } catch {
+            return { ok: false, error: "invalid UTF-8 session record" };
+          }
+          return { ok: false, error: "truncated session record" };
         }
-        if (!segment.allowTruncatedTail) return { ok: false, error: "truncated session record" };
+        // Active tail: unterminated bytes are uncommitted (a crash between
+        // writes). Discard them per the newline commit rule WITHOUT decoding:
+        // a crash between bytes of a multibyte character must not reject the
+        // valid acknowledged prefix (#163).
         bytes += pending.length;
         pending = Buffer.alloc(0);
         break;
