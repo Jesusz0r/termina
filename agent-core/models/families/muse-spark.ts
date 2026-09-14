@@ -16,8 +16,16 @@ export function museSparkReasoningFamily(model: string): boolean {
  * - none is rejected with HTTP 400, so off is hidden and clamps to minimal.
  * - minimal/low/medium/high/xhigh are valid wire values.
  * - max is Standard-tier 1.3 only and unavailable on Contributor-tier
- *   models, so it stays hidden: undocumented for a given id is not inferred.
+ *   models, so it is offered only when the model id carries no
+ *   `-contributor` marker (Contributor ids are marker-bearing, e.g.
+ *   `muse-spark-1.3-contributor-free`; Standard ids are bare, e.g.
+ *   `muse-spark-1.3`).
+ *
+ * Assumption: Contributor tier is inferred from a `-contributor` marker in
+ * the model id leaf. An unmarked Contributor-tier id would be offered max
+ * and would fail at the provider.
  */
-export function museSparkEffortLevelMap(): EffortLevelMap {
-  return { off: null, xhigh: "xhigh" };
+export function museSparkEffortLevelMap(model: string): EffortLevelMap {
+  if (modelLeaf(model).includes("-contributor")) return { off: null, xhigh: "xhigh" };
+  return { off: null, xhigh: "xhigh", max: "max" };
 }

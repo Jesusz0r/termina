@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   adaptiveEffortFor,
+  clampEffortLevel,
   effortControlFor,
   reasoningEffortFor,
   supportedEffortLevels,
@@ -52,6 +53,34 @@ describe("shared model capabilities across provider protocols", () => {
     expect(reasoningEffortFor("opencode-zen", "muse-spark-1.3-contributor", "off", "openai-responses")).toBe("minimal");
     expect(supportedEffortLevels("opencode-zen", "muse-spark-1.3-contributor", "openai-responses"))
       .toEqual(["minimal", "low", "medium", "high", "xhigh"]);
+  });
+
+  it("hides Muse Spark max on Contributor-marker ids and clamps max to xhigh", () => {
+    for (const model of [
+      "muse-spark-1.3-contributor",
+      "muse-spark-1.3-contributor-free",
+      "muse-spark-1.2-contributor",
+      "opencode-zen/muse-spark-1.3-contributor-free",
+    ]) {
+      expect(supportedEffortLevels("opencode-zen", model, "openai-responses"))
+        .toEqual(["minimal", "low", "medium", "high", "xhigh"]);
+      expect(clampEffortLevel("opencode-zen", model, "max", "openai-responses")).toBe("xhigh");
+      expect(reasoningEffortFor("opencode-zen", model, "max", "openai-responses")).toBe("xhigh");
+    }
+  });
+
+  it("offers Muse Spark max on bare Standard-tier ids with the max wire value", () => {
+    expect(supportedEffortLevels("opencode-zen", "muse-spark-1.3", "openai-responses"))
+      .toEqual(["minimal", "low", "medium", "high", "xhigh", "max"]);
+    expect(clampEffortLevel("opencode-zen", "muse-spark-1.3", "max", "openai-responses")).toBe("max");
+    expect(reasoningEffortFor("opencode-zen", "muse-spark-1.3", "max", "openai-responses")).toBe("max");
+  });
+
+  it("clamps Muse Spark off to minimal on Contributor and Standard ids", () => {
+    for (const model of ["muse-spark-1.3-contributor", "muse-spark-1.3"]) {
+      expect(clampEffortLevel("opencode-zen", model, "off", "openai-responses")).toBe("minimal");
+      expect(reasoningEffortFor("opencode-zen", model, "off", "openai-responses")).toBe("minimal");
+    }
   });
 
   it("controls Gemini 2.5 effort on the direct provider and marks unverified routes provider-default", () => {

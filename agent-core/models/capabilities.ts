@@ -121,7 +121,7 @@ const EFFORT_MAP_RULES: readonly EffortMapRule[] = [
   },
   {
     match: (_provider, model) => responsesReasoningFamily(model) && museSparkReasoningFamily(model),
-    map: () => museSparkEffortLevelMap(),
+    map: (_provider, model) => museSparkEffortLevelMap(model),
   },
   {
     match: (_provider, model) => responsesReasoningFamily(model),
