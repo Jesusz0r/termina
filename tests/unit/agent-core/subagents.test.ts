@@ -808,3 +808,78 @@ describe("subagents Phase 2 handoff contract", () => {
     expect(readSubagentInbox(dir, "term-7", "bg-1")?.messages.length).toBe(50);
   });
 });
+
+describe("subagent settled retention window (#215)", () => {
+  it("evicts settled runs beyond the window, least recently settled first", async () => {
+    const reg = registry();
+    const ids: string[] = [];
+    for (let i = 0; i < 25; i++) {
+      const spawned = await reg.spawn({ task: `task-${i}`, parent });
+      if (!spawned.ok) throw new Error(spawned.error);
+      ids.push(spawned.run.id);
+      expect(reg.settleRun(spawned.run.id, `result-${i}`).ok).toBe(true);
+    }
+    // 25 settled, window of 10: the first 15 are evicted, the last 10 kept.
+    const retained = ids.filter((id) => reg.get(id) !== undefined);
+    expect(retained).toHaveLength(10);
+    expect(retained).toEqual(ids.slice(15));
+    expect(reg.activeRuns()).toHaveLength(0);
+  });
+
+  it("never evicts active runs", async () => {
+    const reg = registry();
+    const active: string[] = [];
+    for (let i = 0; i < MAX_SUBAGENT_RUNS; i++) {
+      const spawned = await reg.spawn({ task: `active-${i}`, parent });
+      if (!spawned.ok) throw new Error(spawned.error);
+      active.push(spawned.run.id);
+    }
+    for (let i = 0; i < 15; i++) {
+      const spawned = await reg.spawn({ task: `churn-${i}`, userRequested: true, parent });
+      if (!spawned.ok) throw new Error(spawned.error);
+      expect(reg.settleRun(spawned.run.id, `result-${i}`).ok).toBe(true);
+    }
+    expect(reg.activeRuns().map((r) => r.id).sort()).toEqual(active.slice().sort());
+    for (const id of active) expect(reg.get(id)?.state).toBe("active");
+  });
+
+  it("resumes in-window runs and fails closed past the window", async () => {
+    const reg = registry();
+    const first = await reg.spawn({ task: "original brief", parent });
+    if (!first.ok) throw new Error(first.error);
+    expect(reg.settleRun(first.run.id, "original result").ok).toBe(true);
+    // Push the first run out of the window with settled churn.
+    for (let i = 0; i < 12; i++) {
+      const spawned = await reg.spawn({ task: `churn-${i}`, parent });
+      if (!spawned.ok) throw new Error(spawned.error);
+      expect(reg.settleRun(spawned.run.id, `result-${i}`).ok).toBe(true);
+    }
+    const evicted = await reg.spawn({ task: "follow-up", resume: first.run.id, parent });
+    expect(evicted.ok).toBe(false);
+    if (evicted.ok) throw new Error("expected unknown-run failure");
+    expect(evicted.error).toMatch(/unknown subagent run/);
+    // The most recent run is still resumable.
+    const recent = await reg.spawn({ task: "another", parent });
+    if (!recent.ok) throw new Error(recent.error);
+    expect(reg.settleRun(recent.run.id, "recent result").ok).toBe(true);
+    const resumed = await reg.spawn({ task: "follow-up", resume: recent.run.id, parent });
+    expect(resumed.ok).toBe(true);
+  });
+
+  it("forgets identical-failed briefs past the window", async () => {
+    const reg = registry();
+    const failed = await reg.spawn({ task: "doomed brief", parent });
+    if (!failed.ok) throw new Error(failed.error);
+    expect(reg.settleRun(failed.run.id, "", "failed", "boom").ok).toBe(true);
+    const blocked = await reg.spawn({ task: "doomed brief", parent });
+    expect(blocked.ok).toBe(false);
+    for (let i = 0; i < 12; i++) {
+      const spawned = await reg.spawn({ task: `churn-${i}`, parent });
+      if (!spawned.ok) throw new Error(spawned.error);
+      expect(reg.settleRun(spawned.run.id, `result-${i}`).ok).toBe(true);
+    }
+    // Evicted: the guard no longer sees the old failure.
+    const retry = await reg.spawn({ task: "doomed brief", parent });
+    expect(retry.ok).toBe(true);
+  });
+});

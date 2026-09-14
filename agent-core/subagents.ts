@@ -53,6 +53,15 @@ export const MAX_SUBAGENT_TURNS = 200;
 export const MAX_SUBAGENT_CLAIM_PATHS = 20;
 /** Bound queued parent-to-child messages per run (bounded memory; Phase 2 drains). */
 export const MAX_SUBAGENT_INBOX_MSGS = 50;
+/**
+ * Settled-run retention window (#215). Active runs are always retained; the
+ * registry keeps only the N most recently settled records for resume and
+ * result excerpts, and evicts older ones on settle. Beyond the window a run
+ * id is unknown again: resume/message fail closed and the
+ * identical-failed-brief scan no longer sees it. Registry memory stays
+ * bounded by active runs plus N settled records.
+ */
+export const MAX_SETTLED_SUBAGENT_RUNS = 10;
 
 export type SubagentPermissionMode = "always" | "dangerous" | "ask";
 
@@ -709,7 +718,23 @@ export class SubagentRegistry {
     run.result = scanned.text;
     run.flags = scanned.flags;
     run.error = outcome === "settled" || !error?.trim() ? null : truncateUtf8(error, MAX_SUBAGENT_ERROR_CHARS);
+    // Re-insert so map order is settle order for settled runs; the retention
+    // window below trims the least recently settled first. Active relative
+    // order is unchanged (the settling run leaves the active set).
+    this.runs.delete(runId);
+    this.runs.set(runId, run);
+    this.evictSettledRuns();
     return { ok: true, run };
+  }
+
+  /** Drop settled runs beyond the retention window, least recently settled first. */
+  private evictSettledRuns(): void {
+    const settled: string[] = [];
+    for (const [id, run] of this.runs) {
+      if (run.state !== "active") settled.push(id);
+    }
+    const overflow = settled.length - MAX_SETTLED_SUBAGENT_RUNS;
+    for (let i = 0; i < overflow; i++) this.runs.delete(settled[i]!);
   }
 
   async spawn(req: SubagentSpawnRequest): Promise<{ ok: true; run: SubagentRun } | { ok: false; error: string }> {
