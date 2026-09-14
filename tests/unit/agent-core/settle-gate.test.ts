@@ -1,14 +1,19 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildCriticPrompt,
   checksSectionState,
   checkKindsForCommand,
   claimedCheckKinds,
   gateEditCount,
   isCheckCommand,
+  needsCriticReview,
+  parseCriticVerdict,
   ranChecks,
   recordGateObservation,
   settleGateVerdict,
+  summarizeChangesForCritic,
+  summarizeCheckOutcomes,
   type GateToolObservation,
 } from "../../../agent-core/main/settle-gate.ts";
 import type { ToolOutcome, ToolUse } from "../../../agent-core/main/tools.ts";
@@ -246,5 +251,76 @@ describe("settleGateVerdict", () => {
       false,
     );
     expect(verdict.decision).toBe("pass");
+  });
+});
+
+describe("critic review helpers (#124)", () => {
+  it("gates review to non-trivial runs", () => {
+    expect(needsCriticReview({ editCount: 0, modelTurns: 9 })).toBe(false);
+    expect(needsCriticReview({ editCount: 1, modelTurns: 3 })).toBe(false);
+    expect(needsCriticReview({ editCount: 2, modelTurns: 2 })).toBe(true);
+    expect(needsCriticReview({ editCount: 1, modelTurns: 4 })).toBe(true);
+  });
+
+  it("summarizes tool-observed changes and checks", () => {
+    const observations: GateToolObservation[] = [
+      { name: "edit", path: "a.ts", executed: true, ok: true, oldText: "x", newText: "y" },
+      { name: "write_file", path: "b.ts", executed: true, ok: true, contentChars: 42 },
+      { name: "edit", path: "c.ts", executed: true, ok: false, oldText: "no", newText: "no" },
+      { name: "bash", command: "pnpm test", executed: true, ok: true, exitCode: 0 },
+      { name: "bash", command: "ls", executed: true, ok: true, exitCode: 0 },
+    ];
+    const changes = summarizeChangesForCritic(observations);
+    expect(changes).toContain("edit a.ts");
+    expect(changes).toContain("write b.ts (42 chars)");
+    expect(changes).not.toContain("c.ts");
+    expect(summarizeCheckOutcomes(observations)).toBe("pnpm test → exit 0");
+    expect(summarizeCheckOutcomes([])).toBe("(no checks observed)");
+  });
+
+  it("builds a bounded review prompt", () => {
+    const prompt = buildCriticPrompt({
+      request: "fix it",
+      changes: "edit a.ts",
+      report: "done",
+      checks: "pnpm test → exit 0",
+    });
+    expect(prompt).toContain("## Original request");
+    expect(prompt).toContain("## Observed file changes");
+    expect(prompt).toContain("## Final report");
+    expect(prompt).toContain("## Check outcomes");
+    const big = buildCriticPrompt({
+      request: "r".repeat(10_000),
+      changes: "c".repeat(10_000),
+      report: "p".repeat(10_000),
+      checks: "k".repeat(10_000),
+    });
+    expect(big.length).toBeLessThan(10_000);
+  });
+
+  it("parses pass/fail verdicts and fails open on garbage", () => {
+    expect(parseCriticVerdict('{"verdict":"pass","rationale":"tight scope"}')).toEqual({
+      verdict: "pass",
+      rationale: "tight scope",
+      parsed: true,
+    });
+    expect(parseCriticVerdict('Sure.\n{"verdict": "fail", "rationale": "gold-plated"}\n')).toMatchObject({
+      verdict: "fail",
+      parsed: true,
+    });
+    expect(parseCriticVerdict("finished").parsed).toBe(false);
+    expect(parseCriticVerdict("finished").verdict).toBe("pass");
+    expect(parseCriticVerdict('{"verdict":"maybe"}').parsed).toBe(false);
+  });
+
+  it("captures bounded edit snippets in observations", () => {
+    const captured = observe(
+      "edit",
+      { path: "a.ts", old_text: "o".repeat(1000), new_text: "n" },
+      outcome(),
+    );
+    expect(captured.oldText?.length).toBe(300);
+    expect(captured.newText).toBe("n");
+    expect(observe("write_file", { path: "b.ts", content: "hi" }, outcome()).contentChars).toBe(2);
   });
 });

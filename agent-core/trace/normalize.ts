@@ -6,7 +6,7 @@
  */
 import { isRecord } from "../../shared/guards.ts";
 import { MAX_ARRAY_ITEMS, MAX_HOST_CONTEXT_FILES, MAX_ID_CHARS, MAX_RECLAIM_TARGETS, MAX_STRING_CHARS, MAX_TOOL_OUTCOMES } from "./schema.ts";
-import type { TraceBoundedToolOutput, TraceCache, TraceCacheInput, TraceCacheMissAttribution, TraceCachePolicy, TraceCachePolicyInput, TraceContinuation, TraceCost, TraceCostComponents, TraceCostInput, TraceCostScope, TraceCostUnits, TraceHostContext, TraceHostContextFile, TraceReclaimEvidence, TraceReclaimTarget, TraceRevisions, TraceRevisionsInput, TraceToolOutcome, TraceUsage, TraceUsageInput } from "./schema.ts";
+import type { TraceBoundedToolOutput, TraceCache, TraceCacheInput, TraceCacheMissAttribution, TraceCachePolicy, TraceCachePolicyInput, TraceContinuation, TraceCost, TraceCostComponents, TraceCostInput, TraceCostScope, TraceCostUnits, TraceCriticVerdict, TraceHostContext, TraceHostContextFile, TraceReclaimEvidence, TraceReclaimTarget, TraceRevisions, TraceRevisionsInput, TraceTaskSettledInput, TraceToolOutcome, TraceUsage, TraceUsageInput } from "./schema.ts";
 
 
 export function freezeDeep<T>(value: T): T {
@@ -118,7 +118,7 @@ function costScope(value: unknown): TraceCostScope | null {
   const protocol = optionalText(value.protocol, "cost scope protocol");
   const model = optionalText(value.model, "cost scope model");
   const route = optionalText(value.route, "cost scope route");
-  const role = value.role === "main" || value.role === "summary" ? value.role : null;
+  const role = value.role === "main" || value.role === "summary" || value.role === "critic" ? value.role : null;
   if (provider === null || protocol === null || model === null || route === null || role === null) return null;
   return freezeDeep({ provider, protocol, model, route, role });
 }
@@ -387,5 +387,20 @@ export function revisions(value: TraceRevisionsInput | number | null | undefined
   return freezeDeep({
     count: nullableInteger(value?.count),
     kinds: stringArray(value?.kinds, "revision kinds"),
+  });
+}
+
+
+/** Pre-settle critic verdict (#124); null when the run skipped review. */
+export function criticVerdict(value: TraceTaskSettledInput["critic"]): TraceCriticVerdict | null {
+  if (value === null || value === undefined) return null;
+  if (!isRecord(value)) throw new Error("critic must be an object or null");
+  if (value.verdict !== "pass" && value.verdict !== "fail") throw new Error("critic verdict must be pass or fail");
+  const rounds = nullableInteger(value.rounds);
+  if (rounds === null) throw new Error("critic rounds must be a nonnegative safe integer");
+  return freezeDeep({
+    verdict: value.verdict,
+    rationale: optionalText(value.rationale, "critic rationale"),
+    rounds,
   });
 }

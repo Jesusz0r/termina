@@ -7,7 +7,7 @@
 import { errorCode, isRecord } from "../../shared/guards.ts";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { cache, cost, freezeDeep, id, nullableInteger, nullableNumber, optionalText, pair, reclaimEvidence, revisions, stringArray, text, toolOutcomes, usage } from "./normalize.ts";
+import { cache, cost, criticVerdict, freezeDeep, id, nullableInteger, nullableNumber, optionalText, pair, reclaimEvidence, revisions, stringArray, text, toolOutcomes, usage } from "./normalize.ts";
 import { MAX_ARRAY_ITEMS, MAX_ID_CHARS, MAX_TRACE_INDEX_ENTRIES, TRACE_FILE_PATTERN, TRACE_SCHEMA_VERSION } from "./schema.ts";
 import type { FrozenTraceAttempt, FrozenTraceManifest, FrozenTraceTaskSettled, TraceAttempt, TraceAttemptInput, TraceLinkIndex, TraceManifest, TraceManifestLinkIndex, TraceRole, TraceTaskSettled, TraceTaskSettledInput, TraceWriteFailureKind } from "./schema.ts";
 
@@ -27,8 +27,8 @@ export function sanitizeProviderError(value: unknown): string | null {
 
 /** Construct one immutable provider-call attempt without inventing task facts. */
 export function createAttemptRecord(input: TraceAttemptInput): FrozenTraceAttempt {
-  if (input.role !== "main" && input.role !== "summary") {
-    throw new Error("role must be main or summary");
+  if (input.role !== "main" && input.role !== "summary" && input.role !== "critic") {
+    throw new Error("role must be main, summary, or critic");
   }
   const record: TraceAttempt = {
     schemaVersion: TRACE_SCHEMA_VERSION,
@@ -94,6 +94,7 @@ export function createTaskSettledRecord(input: TraceTaskSettledInput): FrozenTra
       correctness: text(input.outcome?.correctness, "outcome correctness"),
       criteriaHash: text(input.outcome?.criteriaHash, "outcome criteria hash"),
     }),
+    critic: criticVerdict(input.critic),
   };
   return freezeDeep(record);
 }
@@ -217,7 +218,7 @@ export function validTraceLinkIndex(value: unknown): value is TraceLinkIndex {
   const attemptKeys = new Set<string>();
   for (const item of value.attempts) {
     if (!isRecord(item) || !validExistingId(item.runId) || !validExistingId(item.taskId) || !validExistingId(item.attemptId) ||
-      (item.role !== "main" && item.role !== "summary") || typeof item.retained !== "boolean" ||
+      (item.role !== "main" && item.role !== "summary" && item.role !== "critic") || typeof item.retained !== "boolean" ||
       !validTraceTurn(item.traceTurn) || typeof item.unknown !== "boolean") return false;
     const key = compositeKey(item.runId, item.attemptId);
     if (attemptKeys.has(key)) return false;
@@ -283,7 +284,7 @@ export async function inspectExisting(directory: string, maxScanFiles: number, m
         const retryOfAttemptId = value.retryOfAttemptId === null || value.retryOfAttemptId === undefined
           ? null
           : validExistingId(value.retryOfAttemptId) ? value.retryOfAttemptId : undefined;
-        if (!validExistingId(value.attemptId) || (value.role !== "main" && value.role !== "summary") ||
+        if (!validExistingId(value.attemptId) || (value.role !== "main" && value.role !== "summary" && value.role !== "critic") ||
           parentAttemptId === undefined || retryOfAttemptId === undefined) {
           malformedRecords++;
           continue;

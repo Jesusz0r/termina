@@ -222,8 +222,15 @@ import {
 } from "./main/tools.ts";
 import { createFrontMatter } from "./main/front-matter.ts";
 import {
+  buildCriticPrompt,
+  CRITIC_SYSTEM_PROMPT,
+  gateEditCount,
+  needsCriticReview,
+  parseCriticVerdict,
   recordGateObservation,
   settleGateVerdict,
+  summarizeChangesForCritic,
+  summarizeCheckOutcomes,
   type GateToolObservation,
 } from "./main/settle-gate.ts";
 import { renderHistoryTranscript, type ContentBlock } from "./main/history-view.ts";
@@ -266,6 +273,7 @@ import {
   type TraceAttemptInput,
   type TraceCacheInput,
   type TraceCostInput as TraceRecordCostInput,
+  type TraceCriticVerdict,
   type TraceRuntime,
   type TraceWriteOutcome,
 } from "./trace.ts";
@@ -690,7 +698,7 @@ type TraceTaskState = {
 type TraceAttemptState = {
   task: TraceTaskState;
   attemptId: string;
-  role: "main" | "summary";
+  role: "main" | "summary" | "critic";
   provider: ProviderId;
   protocol: string;
   model: string;
@@ -732,12 +740,14 @@ function beginTraceTask(): TraceTaskState {
 }
 
 function beginTraceAttempt(
-  role: "main" | "summary",
+  role: "main" | "summary" | "critic",
   opts: {
     parentAttemptId?: string | null;
     retryOfAttemptId?: string | null;
     fallbackReason?: string | null;
     retryCount?: number;
+    provider?: ProviderId;
+    model?: string;
   } = {},
 ): TraceAttemptState | null {
   const task = activeTraceTask;
@@ -746,15 +756,15 @@ function beginTraceAttempt(
     ? role === "summary" ? task.lastMainAttemptId : task.lastMainAttemptId
     : opts.parentAttemptId;
   const retryOfAttemptId = opts.retryOfAttemptId ?? null;
+  const provider = opts.provider ?? (role === "main" ? route.provider : summaryRoute.provider);
+  const model = opts.model ?? (role === "main" ? route.model : summaryRoute.model);
   const attempt: TraceAttemptState = {
     task,
     attemptId: `attempt-${randomUUID()}`,
     role,
-    provider: role === "summary" ? summaryRoute.provider : route.provider,
-    protocol: role === "summary"
-      ? providerProtocol(summaryRoute.provider, summaryRoute.model)
-      : providerProtocol(route.provider, route.model),
-    model: role === "summary" ? summaryRoute.model : route.model,
+    provider,
+    protocol: providerProtocol(provider, model),
+    model,
     parentAttemptId: parentAttemptId ?? null,
     retryOfAttemptId,
     retryCount: Number.isSafeInteger(opts.retryCount) && (opts.retryCount as number) >= 0 ? opts.retryCount as number : retryOfAttemptId ? 1 : 0,
@@ -815,7 +825,7 @@ async function closeTraceRuntime(): Promise<boolean> {
 
 function traceCachePolicyInput(
   cache: TraceCacheDiagnostics,
-  role: "main" | "summary",
+  role: "main" | "summary" | "critic",
   rejected: boolean,
   effective: boolean,
 ): TraceCacheInput["requested"] {
@@ -909,10 +919,10 @@ async function writeTraceAttempt(
     route: `${attempt.provider}/${attempt.protocol}`,
     model: attempt.model,
     taskClass: attempt.task.taskClass,
-    requestedEffort: attempt.role === "summary" ? "off" : effortWanted,
-    effectiveEffort: attempt.role === "summary"
-      ? effectiveEffortFor(summaryRoute.provider, summaryRoute.model, "off", providerProtocol(summaryRoute.provider, summaryRoute.model))
-      : effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model)),
+    requestedEffort: attempt.role === "main" ? effortWanted : "off",
+    effectiveEffort: attempt.role === "main"
+      ? effectiveEffortFor(route.provider, route.model, effortWanted, providerProtocol(route.provider, route.model))
+      : effectiveEffortFor(summaryRoute.provider, summaryRoute.model, "off", providerProtocol(summaryRoute.provider, summaryRoute.model)),
     status: fields.status,
     retryCount: attempt.retryCount,
     fallbackReason: attempt.fallbackReason,
@@ -974,7 +984,7 @@ async function writeTraceAttempt(
   }
 }
 
-async function settleTraceTask(status: string): Promise<void> {
+async function settleTraceTask(status: string, critic: TraceCriticVerdict | null = null): Promise<void> {
   const task = activeTraceTask;
   if (!task || task.settled) return;
   task.settled = true;
@@ -993,6 +1003,7 @@ async function settleTraceTask(status: string): Promise<void> {
       attemptIds: task.attemptIds,
       summaryAttemptIds: task.summaryAttemptIds,
       outcome: { status, correctness: null, criteriaHash: task.criteriaHash },
+      critic,
     }));
   } catch (error) {
     sidecar.logEvent({ t: "trace_write_failure", kind: "write-failure", persisted: false, error: error instanceof Error ? error.message : String(error) });
@@ -1238,6 +1249,44 @@ async function writeSummaryTrace(opts: {
     wasteCause: null,
     cache: opts.cache ?? null,
     cost: opts.cost ?? traceCostForUsage(
+      opts.usage,
+      opts.attempt?.provider ?? summaryRoute.provider,
+      opts.attempt?.model ?? summaryRoute.model,
+      "summary",
+      opts.cache ?? null,
+    ),
+  });
+}
+
+/**
+ * Critic-attempt records (#124). The attempt role is "critic"; the cost
+ * scope stays "summary" because the review rides the cheap lane (the same
+ * lane summarize bills), even on the main-route fallback.
+ */
+async function writeCriticTrace(opts: {
+  status: string;
+  usage: Usage | null;
+  started: number;
+  attempt?: TraceAttemptState | null;
+  cache?: TraceCacheDiagnostics | null;
+  ttftMs?: number | null;
+}): Promise<void> {
+  await writeTraceAttempt(opts.attempt ?? null, {
+    status: opts.status,
+    storageSeqRange: null,
+    toolNames: [],
+    usage: opts.usage,
+    usd: null,
+    ttftMs: opts.ttftMs ?? null,
+    turnMs: opts.attempt?.ended !== null && opts.attempt?.ended !== undefined
+      ? Math.max(0, opts.attempt.ended - opts.attempt.started)
+      : Date.now() - opts.started,
+    revisions: 0,
+    revisionKinds: [],
+    wasteTokens: null,
+    wasteCause: null,
+    cache: opts.cache ?? null,
+    cost: traceCostForUsage(
       opts.usage,
       opts.attempt?.provider ?? summaryRoute.provider,
       opts.attempt?.model ?? summaryRoute.model,
@@ -3055,7 +3104,14 @@ async function rotateProviderRetryAttempt(
     toolNames: [],
     usage: null,
     usd: null,
-    cost: traceCostForUsage(null, attempt.provider, attempt.model, attempt.role, cache),
+    cost: traceCostForUsage(
+      null,
+      attempt.provider,
+      attempt.model,
+      // Critic reviews ride the cheap lane; bill them on the summary scope.
+      attempt.role === "critic" ? "summary" : attempt.role,
+      cache,
+    ),
     ttftMs: null,
     turnMs: Math.max(0, ended - attempt.started),
     revisions,
@@ -3069,6 +3125,8 @@ async function rotateProviderRetryAttempt(
     retryOfAttemptId: attempt.attemptId,
     fallbackReason: reason,
     retryCount: event.retryCount,
+    provider: attempt.provider,
+    model: attempt.model,
   });
 }
 
@@ -3450,8 +3508,9 @@ async function completeText(
   system: string,
   prompt: string,
   signal: AbortSignal | undefined,
+  opts?: { traceRole?: "summary" | "critic" },
 ): Promise<{ text: string; usage: Usage | null; ttftMs: number | null; cache: TraceCacheDiagnostics | null; traceAttempt: TraceAttemptState | null }> {
-  let attempt = beginTraceAttempt("summary");
+  let attempt = beginTraceAttempt(opts?.traceRole ?? "summary", { provider: providerId, model });
   let summaryCache: TraceCacheDiagnostics | null = null;
   const onRetry: ProviderRetryHook = async (event, cache) => {
     summaryCache = cache ?? summaryCache;
@@ -4876,6 +4935,9 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
   const gateObservations: GateToolObservation[] = [];
   let gateNudged = false;
   let lastAssistantText = "";
+  let criticRounds = 0;
+  let criticExtraRoundUsed = false;
+  let criticVerdict: TraceCriticVerdict | null = null;
   let retriedOverflow = false;
   let retriedProviderTermination = false;
   let terminatedDiagnostics: string | null = null;
@@ -5109,6 +5171,87 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
             out(`\n(settle gate: ${verdict.detail})\n`);
             break;
           }
+          // Critic pass (#124): gate-green, non-trivial runs get one reviewer
+          // call over the request + tool-observed changes + report + checks.
+          // A fail verdict buys exactly one more work round; the second
+          // verdict is recorded but never triggers another round. Check
+          // observations accumulate, so an extra round cannot re-trip the
+          // gate on already-observed checks (stale checks are the critic's
+          // call to flag, not the gate's).
+          const editCount = gateEditCount(gateObservations);
+          if (
+            needsCriticReview({ editCount, modelTurns }) &&
+            (criticRounds === 0 || (criticRounds === 1 && criticExtraRoundUsed))
+          ) {
+            const criticStarted = Date.now();
+            currentAbort ??= new AbortController();
+            const criticPrompt = buildCriticPrompt({
+              request: taggedPrompt,
+              changes: summarizeChangesForCritic(gateObservations),
+              report: lastAssistantText,
+              checks: summarizeCheckOutcomes(gateObservations),
+            });
+            let folded: Awaited<ReturnType<typeof completeText>> | null = null;
+            try {
+              try {
+                folded = await completeText(
+                  summaryRoute.provider,
+                  summaryRoute.model,
+                  CRITIC_SYSTEM_PROMPT,
+                  criticPrompt,
+                  currentAbort.signal,
+                  { traceRole: "critic" },
+                );
+              } catch (err) {
+                // Cheap-lane credentials can lapse while the main route still
+                // works; retry once on the current model, mirroring summarize.
+                if (summaryRoute.provider === route.provider && summaryRoute.model === route.model) throw err;
+                folded = await completeText(
+                  route.provider,
+                  route.model,
+                  CRITIC_SYSTEM_PROMPT,
+                  criticPrompt,
+                  currentAbort.signal,
+                  { traceRole: "critic" },
+                );
+              }
+            } catch (err) {
+              // completeText owns provider-error persistence; the run still
+              // settles. A dead reviewer must not burn a work round.
+              criticRounds += 1;
+              const reason = sanitizeProviderError(err instanceof Error ? err.message : String(err)) ?? "unknown error";
+              criticVerdict = { verdict: "pass", rationale: `critic unavailable: ${reason.slice(0, 200)}`, rounds: criticRounds };
+              if (!interrupted) out(`\n(critic review failed: ${(err as Error).message})\n`);
+            }
+            if (folded) {
+              criticRounds += 1;
+              if (folded.usage) {
+                accumulateUsage(folded.usage);
+                lastUsd = null;
+                syncIndicators();
+              }
+              await writeCriticTrace({
+                status: "ok",
+                usage: folded.usage,
+                started: criticStarted,
+                attempt: folded.traceAttempt,
+                cache: folded.cache,
+                ttftMs: folded.ttftMs,
+              });
+              const parsed = parseCriticVerdict(folded.text);
+              criticVerdict = { verdict: parsed.verdict, rationale: parsed.rationale, rounds: criticRounds };
+              if (parsed.verdict === "fail" && !criticExtraRoundUsed) {
+                criticExtraRoundUsed = true;
+                pushMessage(
+                  "user",
+                  `Critic review found a problem with this change:\n${parsed.rationale ?? "(no rationale given)"}\n` +
+                    "Address the critique with minimal additional changes, then finish.",
+                );
+                out("\n(critic: change needs work — one more round)\n");
+                continue;
+              }
+            }
+          }
         }
         break;
       }
@@ -5308,7 +5451,7 @@ async function runPrompt(prompt: string, extraImages: Array<{ name: string; medi
       error: ack && typeof ack.error === "string" ? ack.error : null,
     });
   }
-  await settleTraceTask(taskOutcomeStatus);
+  await settleTraceTask(taskOutcomeStatus, criticVerdict);
   // Keep the engine busy until checkpointing and trace settlement finish. A
   // second prompt must not replace `activeTraceTask` while this task's
   // task-settled record is still being written.

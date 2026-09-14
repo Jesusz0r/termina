@@ -18,9 +18,14 @@ export interface GateToolObservation {
   readonly executed: boolean;
   readonly ok: boolean;
   readonly exitCode?: number | null;
+  /** Bounded edit snippets for the critic change summary (#124). */
+  readonly oldText?: string;
+  readonly newText?: string;
+  readonly contentChars?: number;
 }
 
 const MAX_OBSERVATION_TEXT = 4 * 1024;
+const MAX_CRITIC_SNIPPET = 300;
 
 function boundedText(value: unknown): string | undefined {
   if (typeof value !== "string" || value.length === 0) return undefined;
@@ -47,11 +52,23 @@ export function recordGateObservation(
   const path = use.name === "edit" || use.name === "write_file" || use.name === "read_file"
     ? boundedText(use.input.path)
     : undefined;
+  const oldText = use.name === "edit" && typeof use.input.old_text === "string"
+    ? use.input.old_text.slice(0, MAX_CRITIC_SNIPPET)
+    : undefined;
+  const newText = use.name === "edit" && typeof use.input.new_text === "string"
+    ? use.input.new_text.slice(0, MAX_CRITIC_SNIPPET)
+    : undefined;
+  const contentChars = use.name === "write_file" && typeof use.input.content === "string"
+    ? use.input.content.length
+    : undefined;
   observations.push({
     ...entry,
     ...(command !== undefined ? { command } : {}),
     ...(path !== undefined ? { path } : {}),
     ...(use.name === "bash" ? { exitCode: outcome.exitCode ?? null } : {}),
+    ...(oldText !== undefined ? { oldText } : {}),
+    ...(newText !== undefined ? { newText } : {}),
+    ...(contentChars !== undefined ? { contentChars } : {}),
   });
   if (observations.length > 512) observations.splice(0, observations.length - 512);
 }
@@ -261,4 +278,114 @@ export function settleGateVerdict(
     );
   }
   return { decision: "pass" };
+}
+
+// ---- critic pass (#124) ----
+
+/**
+ * Non-trivial runs get a critic review: at least one file edit plus either
+ * 2+ mutations or 4+ model turns. Read-only, single-edit, and short runs
+ * skip with no extra calls.
+ */
+export function needsCriticReview(input: { readonly editCount: number; readonly modelTurns: number }): boolean {
+  if (input.editCount < 1) return false;
+  return input.editCount >= 2 || input.modelTurns >= 4;
+}
+
+const MAX_CRITIC_FILES = 10;
+
+/**
+ * Tool-observed change summary for the critic. agent-core cannot shell out
+ * to git (core/ owns snapshots), so the critic sees the edits the engine
+ * executed, not a working-tree diff.
+ */
+export function summarizeChangesForCritic(observations: readonly GateToolObservation[]): string {
+  const lines: string[] = [];
+  let shown = 0;
+  for (const o of observations) {
+    if (!o.executed || !o.ok) continue;
+    if (o.name !== "edit" && o.name !== "write_file") continue;
+    if (shown >= MAX_CRITIC_FILES) {
+      lines.push("…(more files changed)");
+      break;
+    }
+    shown += 1;
+    if (o.name === "write_file") {
+      lines.push(`write ${o.path ?? "(unknown path)"} (${o.contentChars ?? 0} chars)`);
+    } else {
+      lines.push(`edit ${o.path ?? "(unknown path)"}:\n- ${o.oldText ?? ""}\n+ ${o.newText ?? ""}`);
+    }
+  }
+  return lines.join("\n").slice(0, 4 * 1024) || "(no file changes observed)";
+}
+
+/** One line per observed check command with its outcome. */
+export function summarizeCheckOutcomes(observations: readonly GateToolObservation[]): string {
+  const lines: string[] = [];
+  for (const o of observations) {
+    if (o.name !== "bash" || !o.executed || !o.command || !isCheckCommand(o.command)) continue;
+    lines.push(`${o.command} → ${o.exitCode === null || o.exitCode === undefined ? "not completed" : `exit ${o.exitCode}`}`);
+    if (lines.length >= MAX_CRITIC_FILES) {
+      lines.push("…(more checks ran)");
+      break;
+    }
+  }
+  return lines.join("\n").slice(0, 1024) || "(no checks observed)";
+}
+
+/** Tiny frozen critic instruction. The call carries no tools. */
+export const CRITIC_SYSTEM_PROMPT =
+  "You are a code-review critic. Judge only whether the change does what was asked, no more and no less. " +
+  'Reply with exactly one JSON object and nothing else: {"verdict":"pass"|"fail","rationale":"..."}. ' +
+  'Fail for scope-downs, symptom patches, gold-plating, or misread requirements. Pass small correct changes.';
+
+export function buildCriticPrompt(input: {
+  readonly request: string;
+  readonly changes: string;
+  readonly report: string;
+  readonly checks: string;
+}): string {
+  const section = (label: string, text: string, cap: number): string =>
+    `## ${label}\n${text.slice(0, cap) || "(empty)"}`;
+  return [
+    "Review this coding-agent run before it settles. Does the change do what was asked, no more and no less?",
+    "",
+    section("Original request", input.request, 1500),
+    "",
+    section("Observed file changes", input.changes, 4000),
+    "",
+    section("Final report", input.report, 2000),
+    "",
+    section("Check outcomes", input.checks, 1000),
+  ].join("\n");
+}
+
+export interface ParsedCriticVerdict {
+  readonly verdict: "pass" | "fail";
+  readonly rationale: string | null;
+  readonly parsed: boolean;
+}
+
+/**
+ * Parse the critic reply. Unparseable output fails open to pass with a
+ * recorded note: the critic is advisory quality review, not a safety gate,
+ * and a malformed verdict must not burn a work round.
+ */
+export function parseCriticVerdict(text: string): ParsedCriticVerdict {
+  const match = /\{[\s\S]{1,2000}?\}/.exec(text);
+  if (match) {
+    try {
+      const value = JSON.parse(match[0]) as { verdict?: unknown; rationale?: unknown };
+      const verdict = typeof value.verdict === "string" ? value.verdict.toLowerCase() : "";
+      if (verdict === "pass" || verdict === "fail") {
+        const rationale = typeof value.rationale === "string" && value.rationale.trim()
+          ? value.rationale.trim().replace(/\s+/g, " ").slice(0, 1000)
+          : null;
+        return { verdict, rationale, parsed: true };
+      }
+    } catch {
+      /* fall through to the unparseable default */
+    }
+  }
+  return { verdict: "pass", rationale: "critic output was not parseable as a verdict", parsed: false };
 }

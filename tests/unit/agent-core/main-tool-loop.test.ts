@@ -17,7 +17,7 @@ function jsonLines(path: string): Row[] {
  * belongs to this fixture, including HOME, authentication, events and traces. */
 async function scenario(toolProgram: string, check: (result: {
   root: string; output: string; messages: Row[]; requests: Row[]; traces: Row[]; events: Row[];
-}) => void, timeoutMs = 40_000, extraFiles: Record<string, string> = {}): Promise<void> {
+}) => void, timeoutMs = 40_000, extraFiles: Record<string, string> = {}, textProgram = 'return "finished";'): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "termina-tool-loop-"));
   const project = join(root, "project");
   const home = join(root, "home");
@@ -34,6 +34,7 @@ async function scenario(toolProgram: string, check: (result: {
     import { appendFileSync } from "node:fs";
     let turn = 0;
     const toolsFor = (turn) => { ${toolProgram} };
+    const textFor = (turn) => { ${textProgram} };
     globalThis.fetch = async (input, init) => {
       if (String(input) === "https://models.dev/api.json") return new Response("{}", { status: 200 });
       if (++turn > ${MAX_RUN_MODEL_TURNS + 2}) throw new Error("test provider request safety bound");
@@ -42,7 +43,7 @@ async function scenario(toolProgram: string, check: (result: {
       const items = tools.map((tool, i) => ({ type: "function_call", id: "item-" + turn + "-" + i,
         call_id: tool.id ?? "call-" + turn + "-" + i, name: tool.name, arguments: JSON.stringify(tool.input) }));
       const events = items.map((item) => ({ type: "response.output_item.done", item }));
-      if (!items.length) events.push({ type: "response.output_text.delta", delta: "finished" });
+      if (!items.length) events.push({ type: "response.output_text.delta", delta: textFor(turn) });
       events.push({ type: "response.completed", response: { status: "completed", output: items,
         usage: { input_tokens: 3000 + turn, output_tokens: 5, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 } } } });
       return new Response(events.map((event) => "data: " + JSON.stringify(event) + "\\n\\n").join(""),
@@ -176,6 +177,40 @@ describe("real tool loop regressions", () => {
       expect(readFileSync(join(result.root, "file.txt"), "utf8")).toBe("fixed\n");
       expectPaired(result.messages);
     }, 40_000, { Makefile: "check:\n\ttrue\n" });
+  });
+
+  it("records a critic verdict on non-trivial runs", async () => {
+    await scenario(`if (turn === 1) return [{ name: "edit", input: { path: "file.txt", old_text: "original", new_text: "v1" } }];
+      if (turn === 2) return [{ name: "edit", input: { path: "file.txt", old_text: "v1", new_text: "v2" } }];
+      if (turn === 3) return [{ name: "bash", input: { command: "make check" } }];
+      return [];`, (result) => {
+      expect(result.requests).toHaveLength(5);
+      expect(JSON.stringify(result.requests[4])).toContain("code-review critic");
+      expect(result.events.find((row) => row.t === "agent_settled")?.error).toBeNull();
+      expect(result.traces.some((row) => row.recordType === "attempt" && row.role === "critic")).toBe(true);
+      const settled = result.traces.find((row) => row.recordType === "task-settled");
+      expect(settled?.critic).toMatchObject({ verdict: "pass", rounds: 1 });
+      expect(readFileSync(join(result.root, "file.txt"), "utf8")).toBe("v2\n");
+      expectPaired(result.messages);
+    }, 40_000, { Makefile: "check:\n\ttrue\n" });
+  });
+
+  it("gives a failing critic verdict one more round, then settles", async () => {
+    await scenario(`if (turn === 1) return [{ name: "edit", input: { path: "file.txt", old_text: "original", new_text: "v1" } }];
+      if (turn === 2) return [{ name: "edit", input: { path: "file.txt", old_text: "v1", new_text: "v2" } }];
+      if (turn === 3) return [{ name: "bash", input: { command: "make check" } }];
+      return [];`, (result) => {
+      expect(result.requests).toHaveLength(7);
+      expect(JSON.stringify(result.messages)).toContain("scope-down test");
+      expect(result.events.find((row) => row.t === "agent_settled")?.error).toBeNull();
+      const settled = result.traces.find((row) => row.recordType === "task-settled");
+      expect(settled?.critic).toMatchObject({ verdict: "pass", rounds: 2 });
+      expect(readFileSync(join(result.root, "file.txt"), "utf8")).toBe("v2\n");
+      expectPaired(result.messages);
+    }, 40_000, { Makefile: "check:\n\ttrue\n" },
+    `if (turn === 5) return JSON.stringify({ verdict: "fail", rationale: "scope-down test" });
+     if (turn === 7) return JSON.stringify({ verdict: "pass", rationale: "addressed" });
+     return "finished";`);
   });
 
   it("rejects missing or wrongly typed mutation arguments without changing files", async () => {
