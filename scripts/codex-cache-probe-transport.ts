@@ -1,6 +1,6 @@
 // Private transport for the bounded cache probe; never used by agent-core.
-import { createRequire } from "node:module";
 import type { EventEmitter } from "node:events";
+import WebSocket from "ws";
 import { readSseJson, responsesResultFromEvents } from "../agent-core/openai-compat.ts";
 
 export type Json = Record<string, unknown>;
@@ -100,11 +100,7 @@ type Socket = EventEmitter & { readyState: number; send(data: string): void; ter
 type SocketConstructor = new (url: string, options: Json) => Socket;
 
 function socketConstructor(): SocketConstructor {
-  // Reuse the installed test dependency, without installing a production WS dependency.
-  const require = createRequire(import.meta.url);
-  const testRequire = createRequire(require.resolve("@playwright/test"));
-  const playwrightRequire = createRequire(testRequire.resolve("playwright"));
-  return playwrightRequire("playwright-core/lib/utilsBundle").ws as SocketConstructor;
+  return WebSocket as unknown as SocketConstructor;
 }
 
 export function websocketTransport(url: string, headers: Record<string, string>, signal: AbortSignal): ProbeTransport {

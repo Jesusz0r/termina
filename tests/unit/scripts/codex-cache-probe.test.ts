@@ -1,8 +1,9 @@
-import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { WebSocketServer } from "ws";
 import { ARMS, MAX_REQUESTS, TURNS, prepareArm, runGroup, summarize } from "../../../scripts/codex-cache-probe.ts";
 import { httpTransport, ProbeFailure, websocketTransport, type Json } from "../../../scripts/codex-cache-probe-transport.ts";
 import { stripResponsesBreakpoints } from "../../../agent-core/openai-compat.ts";
@@ -185,11 +186,14 @@ describe("probe transport", () => {
     await expect(httpTransport("https://example.invalid", {}, signal()).send({})).rejects.toThrow("without-completion");
   });
 
+  it("does not deep-import Playwright internals for the WebSocket constructor", () => {
+    const source = readFileSync(new URL("../../../scripts/codex-cache-probe-transport.ts", import.meta.url), "utf8");
+    expect(source).toContain('from "ws"');
+    expect(source).not.toContain("playwright-core/lib/utilsBundle");
+    expect(source).not.toContain("createRequire");
+  });
+
   it("reuses a real owned WebSocket and sends response.create without HTTP stream fields", async () => {
-    const require = createRequire(import.meta.url);
-    const testRequire = createRequire(require.resolve("@playwright/test"));
-    const pwRequire = createRequire(testRequire.resolve("playwright"));
-    const { wsServer: WebSocketServer } = pwRequire("playwright-core/lib/utilsBundle");
     const server = createServer();
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as { port: number }).port;
@@ -214,7 +218,7 @@ describe("probe transport", () => {
       expect(requests[1]!.previous_response_id).toBe("resp_fixture");
     } finally {
       client.close();
-      await new Promise<void>((resolve) => wsServer.close(resolve));
+      await new Promise<void>((resolve, reject) => wsServer.close((err) => err ? reject(err) : resolve()));
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
