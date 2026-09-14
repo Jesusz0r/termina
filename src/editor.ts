@@ -13,6 +13,7 @@ import { decideUnsavedClose, unsavedCloseMessage } from "../shared/unsaved-close
 import { languageForPath } from "./editor-language";
 import { changedLinesInAfter } from "../shared/line-diff";
 import { copyText, showUnsavedConfirm, toast } from "./components/modals";
+import { applyEmptyStateShortcutHints } from "./settings-shortcuts";
 import { showContextMenu, closeContextMenu } from "./components/context-menu";
 import { THEME_TOKENS } from "./theme-tokens.gen";
 
@@ -207,6 +208,7 @@ export class EditorManager {
     this.emptyWelcome = emptyEl.querySelector<HTMLElement>(".empty-welcome");
     this.emptyLogin = emptyEl.querySelector<HTMLElement>(".empty-login");
     this.emptyOpenBtn = emptyEl.querySelector<HTMLElement>(".empty-open-folder");
+    applyEmptyStateShortcutHints(emptyEl);
     this.projectOpen = projectOpen;
     this.needsLogin = projectOpen && needsLogin;
 

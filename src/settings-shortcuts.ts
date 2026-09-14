@@ -21,6 +21,13 @@ export function formatShortcut(value: string): string {
   return mac ? parts.join("") : parts.join("+");
 }
 
+/** Set empty-state modifier keys for this platform (⌘ on Mac, Ctrl elsewhere). */
+export function applyEmptyStateShortcutHints(root: ParentNode): void {
+  for (const el of root.querySelectorAll("[data-shortcut-mod]")) {
+    el.textContent = formatShortcut("CmdOrCtrl");
+  }
+}
+
 function keyForEvent(event: KeyboardEvent): string | null {
   const code = event.code;
   if (/^Key[A-Z]$/.test(code)) return code.slice(3);

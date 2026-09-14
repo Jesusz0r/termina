@@ -4,7 +4,7 @@
  * and plan/modified pushes. Main wires pane callbacks and explorer, review,
  * handoff, and tab-badge effects; all activity state lives here.
  */
-import { toast } from "../components/modals";
+import { showConfirm, toast } from "../components/modals";
 import { asKnownState, KNOWN_FILE_STATUSES, KNOWN_PLAN_STATES } from "../known-state";
 import type { ModifiedFile, PlanTask } from "../../shared/types";
 
@@ -242,10 +242,17 @@ export function createActivityPane<TPane extends ActivityPaneState>(
     e.stopPropagation();
     const pane = bindings.getActivePane();
     if (!pane) return;
-    // Main owns the list: clear it there or the next push resurrects it.
-    void window.termina.clearModified(pane.instanceId).then((res) => {
-      if (!res.ok) toast(res.error ?? "could not clear the list", "warning");
-    }).catch((err) => toast(`could not clear the list: ${(err as Error).message}`, "warning"));
+    // Ask first: Clear sits next to Accept all, and there is no undo.
+    void showConfirm(
+      "Clear review list?",
+      "Your files remain changed on disk, but Termina will stop tracking them in this run.",
+    ).then((r) => {
+      if (!r.confirmed) return;
+      // Main owns the list: clear it there or the next push resurrects it.
+      void window.termina.clearModified(pane.instanceId).then((res) => {
+        if (!res.ok) toast(res.error ?? "could not clear the list", "warning");
+      }).catch((err) => toast(`could not clear the list: ${(err as Error).message}`, "warning"));
+    });
   };
 
   const onAcceptAll = (e: MouseEvent): void => {
