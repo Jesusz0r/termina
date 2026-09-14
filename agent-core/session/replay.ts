@@ -603,6 +603,14 @@ type RecoveryScanResult = SessionResult<{ blocks: Map<string, Record<string, unk
  * Recover a set of blocks with one ordered session scan.  Fork materialization
  * can carry many receipts; indexing by source storage sequence prevents a
  * receipt-by-receipt full-session walk.
+ *
+ * Receipt block indexes are revision-relative (#162): each receipt addresses
+ * the view just before its own revision, so successive drops reuse shifted
+ * indexes. Resolution replays prior drops per message in revision order and
+ * reads each receipt from its own pre-revision view. Stubs never shift
+ * indexes and stubbed blocks are never re-addressed (replay rejects
+ * stub-of-stub), so only drops need mechanical replay; the exact original
+ * hash/byte/character check stays authoritative for every target.
  */
 export async function recoverSessionBlocks(
   sessionFile: string,
@@ -633,15 +641,24 @@ export async function recoverSessionBlocks(
     closeOpenSessionBundle(opened.bundle);
     return { ok: false, error: "session segments changed before recovery" };
   }
-  const bySseq = new Map<number, Array<{ key: string; target: ReplayRecovery }>>();
-  let maxSseq = 0;
+  const wantedSseqs = new Set<number>();
+  const pendingByRevision = new Map<number, Array<{ key: string; target: ReplayRecovery }>>();
+  const remainingBySseq = new Map<number, number>();
+  let maxNeeded = 0;
   for (const target of targets) {
     const key = recoveryKey(target);
-    const entries = bySseq.get(target.sseq) ?? [];
-    entries.push({ key, target });
-    bySseq.set(target.sseq, entries);
-    if (target.sseq > maxSseq) maxSseq = target.sseq;
+    wantedSseqs.add(target.sseq);
+    const pending = pendingByRevision.get(target.revisionSeq) ?? [];
+    pending.push({ key, target });
+    pendingByRevision.set(target.revisionSeq, pending);
+    remainingBySseq.set(target.sseq, (remainingBySseq.get(target.sseq) ?? 0) + 1);
+    if (target.sseq > maxNeeded) maxNeeded = target.sseq;
+    if (target.revisionSeq > maxNeeded) maxNeeded = target.revisionSeq;
   }
+  // Pre-revision working views, released as soon as a message's last target
+  // resolves so a many-receipt fork never retains the whole session.
+  const working = new Map<number, unknown[]>();
+  let malformedRevision = false;
   try {
     const readBudget = { remaining: limit.limit };
     for (const segment of opened.bundle.segments) {
@@ -650,21 +667,53 @@ export async function recoverSessionBlocks(
         segment,
         readBudget,
         null,
-        maxSseq,
+        maxNeeded,
         (record) => {
-          if (!isRecord(record) || record.type !== "message" || typeof record.storageSeq !== "number") return;
-          const entries = bySseq.get(record.storageSeq);
-          if (!entries) return;
+          if (!isRecord(record) || typeof record.storageSeq !== "number") return;
+          if (record.type === "revision" && (record as { kind?: unknown }).kind === "prune") {
+            const revision = parseRecoveryPruneRevision(record);
+            if (!revision) {
+              malformedRevision = true;
+              return;
+            }
+            // Resolve first: pending receipts address this pre-revision view.
+            const pending = pendingByRevision.get(revision.revisionSeq);
+            if (pending) {
+              for (const entry of pending) {
+                const view = working.get(entry.target.sseq);
+                const block = view?.[entry.target.blockIndex];
+                if (isRecord(block)) blocks.set(entry.key, cloneJson(block));
+                const remaining = (remainingBySseq.get(entry.target.sseq) ?? 1) - 1;
+                if (remaining <= 0) {
+                  remainingBySseq.delete(entry.target.sseq);
+                  working.delete(entry.target.sseq);
+                } else {
+                  remainingBySseq.set(entry.target.sseq, remaining);
+                }
+              }
+              pendingByRevision.delete(revision.revisionSeq);
+            }
+            // Then replay drops for receipts addressed to later revisions,
+            // descending per message exactly like canonical application.
+            const drops = revision.targets
+              .filter((target) => target.action === "drop")
+              .sort((a, b) => a.sseq - b.sseq || b.blockIndex - a.blockIndex);
+            for (const drop of drops) {
+              const view = working.get(drop.sseq);
+              if (view && drop.blockIndex < view.length) view.splice(drop.blockIndex, 1);
+            }
+            return;
+          }
+          if (record.type !== "message") return;
+          if (!wantedSseqs.has(record.storageSeq) || working.has(record.storageSeq)) return;
           const message = record.message;
           if (!isRecord(message) || !Array.isArray(message.content)) return;
-          for (const entry of entries) {
-            const block = message.content[entry.target.blockIndex];
-            if (isRecord(block)) blocks.set(entry.key, cloneJson(block));
-          }
+          working.set(record.storageSeq, message.content.map((block) => cloneJson(block)));
         },
         options?.signal,
       );
       if (!scanned.ok) return scanned;
+      if (malformedRevision) return { ok: false, error: "invalid prune targets" };
       if (scanned.stop) break;
     }
     const afterFingerprint = fingerprintOpenSessionBundle(opened.bundle, limit.limit);
@@ -689,6 +738,26 @@ export async function recoverSessionBlocks(
     }
   }
   return { ok: true, blocks };
+}
+
+function parseRecoveryPruneRevision(record: Record<string, unknown>): {
+  revisionSeq: number;
+  targets: Array<{ sseq: number; blockIndex: number; action: "drop" | "stub" }>;
+} | null {
+  if (typeof record.storageSeq !== "number" || !Number.isInteger(record.storageSeq) || record.storageSeq < 1) return null;
+  if (!Array.isArray(record.targets)) return null;
+  const targets: Array<{ sseq: number; blockIndex: number; action: "drop" | "stub" }> = [];
+  for (const raw of record.targets) {
+    if (!isRecord(raw)) return null;
+    const sseq = raw.sseq;
+    const blockIndex = raw.blockIndex;
+    const action = raw.action;
+    if (typeof sseq !== "number" || !Number.isInteger(sseq) || sseq < 1) return null;
+    if (typeof blockIndex !== "number" || !Number.isInteger(blockIndex) || blockIndex < 0) return null;
+    if (action !== "drop" && action !== "stub") return null;
+    targets.push({ sseq, blockIndex, action });
+  }
+  return { revisionSeq: record.storageSeq, targets };
 }
 
 
