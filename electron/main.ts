@@ -2175,6 +2175,20 @@ class TerminaApp {
     }
   }
 
+  /**
+   * Join an already-held write lease for the duration of one privileged
+   * write (flush-save): bumps the depth only when requesterId is the
+   * current holder, synchronously, so a holder that released between
+   * admission and replacement cannot authorize the write. Pair with
+   * releaseWriteLease. Never waits, and never acquires an idle workspace.
+   */
+  private joinWriteLease(wsId: string, requesterId: string): boolean {
+    const ws = this.workspaceById(wsId);
+    if (!ws || ws.writerId !== requesterId) return false;
+    ws.leaseDepth = (ws.leaseDepth ?? 0) + 1;
+    return true;
+  }
+
   /** Release a workspace write lease. Only the holder can release it. */
   private releaseWriteLease(wsId: string, requesterId: string): void {
     const ws = this.workspaceById(wsId);
@@ -3731,11 +3745,19 @@ class TerminaApp {
     const chosen = picked.tasks;
     const alreadyDispatching = this.ownerDispatchCount(ownerId) > 0;
     if (owner.busy && !alreadyDispatching) owner.pty.write("\x03"); // the workers replace the owner's run
-    // Structured startup skips the interactive preflight. Flush once so
-    // unsaved editor buffers land before the workers write.
+    // Structured startup skips the interactive preflight. Hold a real write
+    // lease across the flush so the editor saves go through as a genuine
+    // holder (file:flush-save admits only the current holder).
     if (ownerWs) {
-      const flush = await this.flushDirtyModels(`dispatch:${ownerId}`, ownerWs.id, 5000, rendererTarget);
-      if (!flush.ok) return { ok: false, error: "could not save editor changes" };
+      const dispatchWriter = `dispatch:${ownerId}`;
+      const dispatchLease = await this.acquireWriteLease(ownerWs.id, dispatchWriter, 5000);
+      if (!dispatchLease.ok) return { ok: false, error: dispatchLease.error ?? "the workspace is busy" };
+      try {
+        const flush = await this.flushDirtyModels(dispatchWriter, ownerWs.id, 5000, rendererTarget);
+        if (!flush.ok) return { ok: false, error: "could not save editor changes" };
+      } finally {
+        this.releaseWriteLease(ownerWs.id, dispatchWriter);
+      }
     }
     const jobs = chosen.map((task) => ({ task, id: this.allocateTerminalId() }));
     try {
@@ -7762,11 +7784,17 @@ class TerminaApp {
     /** The flush saves go through the lease holder (the preflight). */
     ipcMain.handle("file:flush-save", async (_e, absPath: string, content: string, writerId: string, owner: unknown) => {
       if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > MAX_OPEN_FILE_SIZE) return { ok: false, error: "file content is too large" };
+      // The TypeScript annotation is not runtime validation: null (or any
+      // non-string/empty value) must never match an idle workspace's holder.
+      if (typeof writerId !== "string" || writerId.length === 0) return { ok: false, error: "the flush does not hold the write lease" };
       const target = this.projectWorkspace(owner);
       if (!target) return { ok: false, error: "invalid project workspace" };
       const managed = await this.managedPath(absPath, target.workspace.id);
       if (!managed || managed.workspace.id !== target.workspace.id) return { ok: false, error: "path is outside the project workspace" };
-      if (managed.workspace.writerId !== writerId) return { ok: false, error: "the flush does not hold the write lease" };
+      // Join the holder's lease across the write: a stale holder that
+      // released after admission is rejected here, and a competing writer
+      // cannot interleave while the depth is held.
+      if (!this.joinWriteLease(managed.workspace.id, writerId)) return { ok: false, error: "the flush does not hold the write lease" };
       try {
         // lstat: refuse a leaf swapped for a symlink after admission.
         const info = await lstat(managed.path);
@@ -7775,6 +7803,8 @@ class TerminaApp {
         return { ok: true };
       } catch (err) {
         return { ok: false, error: (err as Error).message };
+      } finally {
+        this.releaseWriteLease(managed.workspace.id, writerId);
       }
     });
 
