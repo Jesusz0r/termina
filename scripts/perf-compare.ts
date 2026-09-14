@@ -6,6 +6,14 @@
  * plus samples as JSON. The website Speed section cites these numbers;
  * re-run this script to reproduce them.
  *
+ * Methodology: one timing boundary per sample. Each workload callback
+ * performs its fixture work first (dirtying files, cleaning destinations,
+ * reinstalling branch contents), then returns the milliseconds of exactly
+ * one measured operation. Equivalence is asserted, not assumed: the merge
+ * inputs are byte-identical trees on both sides and both merges must
+ * produce the same tree oid, or the run fails instead of publishing a
+ * non-equivalent comparison.
+ *
  * Rows:
  * - capture: change 10 files per round, then termina's hint-based
  *   incremental capture versus `git add <paths>` + `git write-tree`.
@@ -39,6 +47,7 @@ try {
     entry,
     `
   import { SnapshotStore, boundPromotionOpenDirectory } from "${join(import.meta.dirname, "..", "electron", "worldline-git.ts")}";
+  import { measure, phased } from "${join(import.meta.dirname, "perf-measure.ts")}";
   import { spawnSync, execFileSync } from "node:child_process";
   import { lstatSync, mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
   import { join } from "node:path";
@@ -74,11 +83,6 @@ try {
     if (res.status !== 0) throw new Error(\`git \${args.join(" ")} failed: \${res.stderr}\`);
     return res.stdout.trim();
   };
-  const timed = async (fn) => {
-    const t0 = performance.now();
-    await fn();
-    return performance.now() - t0;
-  };
   const stats = (arr) => {
     const sorted = [...arr].sort((a, b) => a - b);
     return {
@@ -92,22 +96,6 @@ try {
     const targetInfo = lstatSync(target, { bigint: true });
     const binding = await boundPromotionOpenDirectory({ path: target, expectedIdentity: { dev: String(targetInfo.dev), ino: String(targetInfo.ino) } });
     return store.materialize(state, target, { boundRootIdentity: binding });
-  };
-  /**
-   * Measure one tool per pure block and swap the block order on every
-   * repetition, so neither tool always pays the cache-warmth or process-
-   * spawn cost of the other.
-   */
-  const phased = async (blocks, runTerm, runGit) => {
-    const term = [];
-    const gitTimes = [];
-    for (let pass = 0; pass < blocks; pass++) {
-      const firstIsTerm = pass % 2 === 0;
-      for (const [first, second] of firstIsTerm ? [[runTerm, term], [runGit, gitTimes]] : [[runGit, gitTimes], [runTerm, term]]) {
-        for (let i = 0; i < SAMPLES_PER_BLOCK; i++) second.push(await timed(first));
-      }
-    }
-    return { term, gitTimes };
   };
 
   // ---- snapshot capture -----------------------------------------------------
@@ -138,14 +126,14 @@ try {
     git(["write-tree"]);
     const { term, gitTimes } = await phased(
       CAPTURE_BLOCKS,
+      SAMPLES_PER_BLOCK,
       async () => {
         const changed = nextDirtyTree();
-        const ms = await timed(async () => { parent = (await store.captureIncremental(parent, changed, [], {}, {})).commit; });
-        return ms;
+        return measure(async () => { parent = (await store.captureIncremental(parent, changed, [], {}, {})).commit; });
       },
       async () => {
         const changed = nextDirtyTree();
-        return timed(() => { git(["add", ...changed]); git(["write-tree"]); });
+        return measure(() => { git(["add", ...changed]); git(["write-tree"]); });
       },
     );
     termCapture.push(...term);
@@ -161,28 +149,65 @@ try {
     git(["write-tree"]);
     const { term, gitTimes } = await phased(
       CAPTURE_BLOCKS,
-      () => store.capture(baseOid, null),
-      async () => timed(() => { git(["add", "-A"]); git(["write-tree"]); }),
+      SAMPLES_PER_BLOCK,
+      () => measure(() => store.capture(baseOid, null)),
+      () => measure(() => { git(["add", "-A"]); git(["write-tree"]); }),
     );
     termFull.push(...term);
     gitFullScan.push(...gitTimes);
   }
 
   // ---- three-way merge --------------------------------------------------------
-  // Sibling states off the shared base: ours content for files 0..49,
-  // theirs content for files 50..99. Same workload as the git branches.
+  // Sibling states off the shared base with the SAME contents as the git
+  // branches: reset the capture-phase dirt, reinstall each branch's 50
+  // files before capturing, then restore the base worktree. Both
+  // implementations merge identical trees or the run is rejected.
+  execFileSync("git", ["reset", "-q", "--hard", baseOid], { cwd: fixture });
+  const reinstall = (ref, lo, hi) => {
+    for (let i = lo; i < hi; i++) {
+      const content = execFileSync("git", ["show", \`\${ref}:file-\${i}.ts\`], { cwd: fixture });
+      writeFileSync(join(fixture, \`file-\${i}.ts\`), content);
+    }
+  };
+  const changedNames = () => git(["diff", "--name-only", baseOid]).split("\\n").filter(Boolean).sort();
+  const expectChanged = (label, lo, hi) => {
+    const names = changedNames();
+    const expected = Array.from({ length: hi - lo }, (_, k) => \`file-\${lo + k}.ts\`);
+    if (names.length !== expected.length || names.some((name, k) => name !== expected[k])) {
+      throw new Error(\`\${label} worktree diverged from its branch: \${names.length} changed files\`);
+    }
+  };
+  reinstall("ours", 0, 50);
+  expectChanged("ours", 0, 50);
   const tOurs = await store.captureIncremental(coldState.commit, Array.from({ length: 50 }, (_, i) => \`file-\${i}.ts\`), []);
+  reinstall(baseOid, 0, 50);
+  reinstall("theirs", 50, 100);
+  expectChanged("theirs", 50, 100);
   const tTheirs = await store.captureIncremental(coldState.commit, Array.from({ length: 50 }, (_, i) => \`file-\${50 + i}.ts\`), []);
-  // Warm-up plus result validation for both tools.
+  reinstall(baseOid, 0, 100);
+  if (changedNames().length !== 0) throw new Error("base worktree not restored after merge setup");
+  // Warm-up plus output equivalence: both merges must produce the same tree.
+  const expectedTree = git(["merge-tree", "--write-tree", "ours", "theirs"]);
   {
     const m = await store.merge3(tOurs.commit, tTheirs.commit);
     if (!m.ok || m.conflicts.length !== 0) throw new Error(\`termina merge not clean: \${JSON.stringify(m.conflicts)}\`);
-    git(["merge-tree", "--write-tree", "ours", "theirs"]);
+    if (m.tree !== expectedTree) throw new Error("termina merge tree differs from git merge-tree");
   }
   const mergeRow = await phased(
     MERGE_BLOCKS + 1,
-    () => store.merge3(tOurs.commit, tTheirs.commit),
-    async () => timed(() => git(["merge-tree", "--write-tree", "ours", "theirs"])),
+    SAMPLES_PER_BLOCK,
+    async () => {
+      let merged = null;
+      const ms = await measure(async () => { merged = await store.merge3(tOurs.commit, tTheirs.commit); });
+      if (!merged.ok || merged.tree !== expectedTree) throw new Error("termina merge diverged from the git merge-tree result");
+      return ms;
+    },
+    async () => {
+      let tree = "";
+      const ms = await measure(() => { tree = git(["merge-tree", "--write-tree", "ours", "theirs"]); });
+      if (tree !== expectedTree) throw new Error("git merge-tree result changed mid-benchmark");
+      return ms;
+    },
   );
   // Drop the first block entirely: it absorbs the coldest caches.
   mergeRow.term.splice(0, SAMPLES_PER_BLOCK);
@@ -192,8 +217,8 @@ try {
   const matA = ${JSON.stringify(join(dir, "mat-a"))};
   const matB = ${JSON.stringify(join(dir, "mat-b"))};
   const extractArchive = () => {
-    // tar -C needs the target to exist; creating the empty dir is setup,
-    // not part of the measured extraction.
+    // Both sides create their target dir inside the measured op (symmetric,
+    // microsecond noise); destination cleanup stays outside the boundary.
     mkdirSync(matB, { recursive: true });
     const res = spawnSync("sh", ["-c", \`git archive HEAD | tar -x -C \${matB}\`], { cwd: fixture });
     if (res.status !== 0) throw new Error("archive extraction failed");
@@ -207,13 +232,14 @@ try {
   if (!existsSync(join(matB, \`file-\${FILE_COUNT - 1}.ts\`))) throw new Error("archive extraction incomplete");
   const matRow = await phased(
     MATERIALIZE_BLOCKS,
+    SAMPLES_PER_BLOCK,
     async () => {
       rmSync(matA, { recursive: true, force: true });
-      return timed(() => materializeState(coldState.commit, matA));
+      return measure(() => materializeState(coldState.commit, matA));
     },
     async () => {
       rmSync(matB, { recursive: true, force: true });
-      return timed(extractArchive);
+      return measure(extractArchive);
     },
   );
 
