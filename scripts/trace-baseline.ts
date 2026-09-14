@@ -20,6 +20,9 @@
  *
  *   node --experimental-strip-types --no-warnings scripts/trace-baseline.ts <trace-dir>
  */
+import { TRACE_SCHEMA_VERSION } from "../agent-core/trace/schema.ts";
+import { nullableNumber } from "../agent-core/trace/normalize.ts";
+import { isRecord } from "../shared/guards.ts";
 
 export interface BaselineOptions {
   readonly maxFiles: number;
@@ -36,16 +39,80 @@ export const DEFAULT_BASELINE_OPTIONS: BaselineOptions = {
 const TURN_FILE_PATTERN = /^turn-(\d+)\.json$/;
 const MANIFEST_FILE = "trace-manifest.json";
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function asString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
 function asNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+  return nullableNumber(value);
+}
+
+/** A present-but-invalid counter (negative or non-finite number) fails the record. */
+function hasInvalidCounter(values: readonly unknown[]): boolean {
+  return values.some((value) => typeof value === "number" && nullableNumber(value) === null);
+}
+
+/**
+ * Minimal fs surface for bounded reads, injectable so growth races are
+ * unit-testable without a concurrent writer.
+ */
+export interface BaselineFs {
+  readonly constants: { readonly O_RDONLY: number; readonly O_NOFOLLOW?: number };
+  openSync(path: string, flags: number): number;
+  fstatSync(fd: number): { isFile(): boolean; size: number };
+  readFileSync(fd: number): Buffer;
+  closeSync(fd: number): void;
+}
+
+export type BoundedRead = { readonly ok: true; readonly value: unknown } | { readonly ok: false; readonly reason: "malformed" | "oversized" };
+
+/**
+ * Read one JSON file through an unlinked-safe descriptor: no symlink
+ * following, regular files only, and the byte bound enforced on the bytes
+ * actually consumed — not just on an earlier stat — so concurrent growth
+ * or special files cannot slip an unbounded read past the check.
+ */
+export function readBoundedJsonFile(fsMod: BaselineFs, filePath: string, maxBytes: number): BoundedRead {
+  const noFollow = typeof fsMod.constants.O_NOFOLLOW === "number" ? fsMod.constants.O_NOFOLLOW : 0;
+  let fd: number | null = null;
+  try {
+    fd = fsMod.openSync(filePath, fsMod.constants.O_RDONLY | noFollow);
+  } catch {
+    return { ok: false, reason: "malformed" };
+  }
+  try {
+    let isFile = false;
+    let size = 0;
+    try {
+      const stat = fsMod.fstatSync(fd);
+      isFile = stat.isFile();
+      size = stat.size;
+    } catch {
+      return { ok: false, reason: "malformed" };
+    }
+    if (!isFile) return { ok: false, reason: "malformed" };
+    if (size > maxBytes) return { ok: false, reason: "oversized" };
+    let bytes: Buffer;
+    try {
+      bytes = fsMod.readFileSync(fd);
+    } catch {
+      return { ok: false, reason: "malformed" };
+    }
+    if (bytes.byteLength > maxBytes) return { ok: false, reason: "oversized" };
+    try {
+      return { ok: true, value: JSON.parse(bytes.toString("utf8")) };
+    } catch {
+      return { ok: false, reason: "malformed" };
+    }
+  } finally {
+    if (fd !== null) {
+      try {
+        fsMod.closeSync(fd);
+      } catch {
+        /* best effort; the read already settled */
+      }
+    }
+  }
 }
 
 function countKey(map: Map<string, number>, key: string): void {
@@ -183,7 +250,7 @@ function emptyReport(): BaselineReport {
 function isAttemptRecord(value: Record<string, unknown>): boolean {
   return (
     value["recordType"] === "attempt" &&
-    typeof value["schemaVersion"] === "number" &&
+    value["schemaVersion"] === TRACE_SCHEMA_VERSION &&
     asString(value["runId"]) !== null &&
     asString(value["taskId"]) !== null &&
     asString(value["attemptId"]) !== null
@@ -193,7 +260,7 @@ function isAttemptRecord(value: Record<string, unknown>): boolean {
 function isSettlementRecord(value: Record<string, unknown>): boolean {
   return (
     value["recordType"] === "task-settled" &&
-    typeof value["schemaVersion"] === "number" &&
+    value["schemaVersion"] === TRACE_SCHEMA_VERSION &&
     asString(value["runId"]) !== null &&
     asString(value["taskId"]) !== null
   );
@@ -233,24 +300,26 @@ async function readBaseline(dir: string, options: BaselineOptions): Promise<Base
   }
 
   const manifestPath = path.join(dir, MANIFEST_FILE);
-  try {
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as unknown;
-    if (isRecord(manifest)) {
-      const w = report.integrity as unknown as Record<string, number | null>;
-      for (const key of [
-        "retainedRecords",
-        "omittedRecords",
-        "writeFailures",
-        "malformedRecords",
-        "partialRecords",
-      ] as const) {
-        const n = asNumber(manifest[key]);
-        if (n !== null) w[`writer${key[0].toUpperCase()}${key.slice(1)}`] = n;
-      }
+  const manifestRead = readBoundedJsonFile(fs, manifestPath, options.maxFileBytes);
+  if (manifestRead.ok && isRecord(manifestRead.value)) {
+    const manifest = manifestRead.value;
+    const w = report.integrity as unknown as Record<string, number | null>;
+    for (const key of [
+      "retainedRecords",
+      "omittedRecords",
+      "writeFailures",
+      "malformedRecords",
+      "partialRecords",
+    ] as const) {
+      const n = asNumber(manifest[key]);
+      if (n !== null) w[`writer${key[0].toUpperCase()}${key.slice(1)}`] = n;
     }
-  } catch {
-    // No manifest is a valid state for a bare fixture directory.
+  } else if (!manifestRead.ok && manifestRead.reason === "oversized") {
+    // An over-bound manifest is untrustworthy input, not an absent one.
+    (report.integrity as unknown as Record<string, number>)["malformedFiles"] += 1;
   }
+  // An absent or malformed manifest is a valid state for a bare fixture
+  // directory; only an oversized one is counted.
 
   const byRole = new Map<string, number>();
   const byProvider = new Map<string, number>();
@@ -276,24 +345,12 @@ async function readBaseline(dir: string, options: BaselineOptions): Promise<Base
 
   for (const file of turnFiles) {
     const filePath = path.join(dir, file.name);
-    let statSize: number;
-    try {
-      statSize = fs.statSync(filePath).size;
-    } catch {
-      (report.integrity as unknown as Record<string, number>)["malformedFiles"] += 1;
+    const bounded = readBoundedJsonFile(fs, filePath, options.maxFileBytes);
+    if (!bounded.ok) {
+      (report.integrity as unknown as Record<string, number>)[bounded.reason === "oversized" ? "oversizedFiles" : "malformedFiles"] += 1;
       continue;
     }
-    if (statSize > options.maxFileBytes) {
-      (report.integrity as unknown as Record<string, number>)["oversizedFiles"] += 1;
-      continue;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    } catch {
-      (report.integrity as unknown as Record<string, number>)["malformedFiles"] += 1;
-      continue;
-    }
+    const parsed: unknown = bounded.value;
     (report.integrity as unknown as Record<string, number>)["filesScanned"] += 1;
     if (recordsSeen >= options.maxRecords) {
       (report.integrity as unknown as Record<string, number>)["recordCapOmitted"] += 1;
@@ -302,6 +359,26 @@ async function readBaseline(dir: string, options: BaselineOptions): Promise<Base
     if (!isRecord(parsed) || (!isAttemptRecord(parsed) && !isSettlementRecord(parsed))) {
       (report.integrity as unknown as Record<string, number>)["partialRecords"] += 1;
       continue;
+    }
+    if (parsed["recordType"] === "attempt") {
+      // Negative or non-finite counters fail the record: corrupt evidence
+      // must land in integrity, never in the totals. Missing or mistyped
+      // fields stay unknown and are preserved downstream, not zeroed.
+      const usageCheck = isRecord(parsed["usage"]) ? parsed["usage"] : {};
+      const costCheck = isRecord(parsed["cost"]) ? parsed["cost"] : {};
+      if (
+        hasInvalidCounter([
+          usageCheck["input"],
+          usageCheck["cacheRead"],
+          usageCheck["cacheWrite"],
+          usageCheck["output"],
+          usageCheck["reasoning"],
+          costCheck["usd"],
+        ])
+      ) {
+        (report.integrity as unknown as Record<string, number>)["partialRecords"] += 1;
+        continue;
+      }
     }
     recordsSeen += 1;
     const runId = asString(parsed["runId"]) ?? "";
