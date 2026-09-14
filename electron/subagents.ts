@@ -121,6 +121,8 @@ interface HostRun {
   task: SubagentTaskFile;
   taskFile: string;
   childTid: string;
+  /** Canonical absolute claim paths, one per task.paths entry, fixed at admission. */
+  claims: string[];
   attempts: number;
   stop: { kind: "kill"; reason: string } | { kind: "timeout" } | null;
   retryTimer: ReturnType<typeof setTimeout> | null;
@@ -418,32 +420,8 @@ export class SubagentHost {
       await this.finishFailed(sourceTerminalId, runId, task, "cannot verify path overlap (cwd)");
       return;
     }
-    // Cross-terminal sibling overlap: registries are per-process, so two
-    // parents on one tree can claim the same paths. Same canonical cwd plus
-    // overlapping relpaths rejects, exactly like the single-parent rule.
-    // Fail closed: an unresolvable cwd cannot prove non-overlap.
-    for (const other of this.runs.values()) {
-      let otherCwd: string;
-      try {
-        otherCwd = await this.sinks.canonicalPath(other.task.cwd);
-      } catch {
-        await this.finishFailed(sourceTerminalId, runId, task, "cannot verify path overlap (sibling cwd)");
-        return;
-      }
-      if (otherCwd !== cwdKey) continue;
-      for (const p of task.paths) {
-        const hit = other.task.paths.find((q) => subagentPathsOverlap(p, q));
-        if (hit) {
-          await this.finishFailed(
-            sourceTerminalId,
-            runId,
-            task,
-            `paths overlap running subagent ${other.runId} (${hit})`,
-          );
-          return;
-        }
-      }
-    }
+    // Cross-terminal sibling overlap is decided at admission below, after
+    // every awaited check: see the atomic insert for the one namespace.
     // Dispatch interplay (unified claims): a live dispatch worker on an
     // overlapping path fails the spawn before any child exists. Both sides
     // anchor at the dispatch root so subdir terminals key identically.
@@ -493,6 +471,25 @@ export class SubagentHost {
       await this.finishFailed(sourceTerminalId, runId, task, "bad subagent stream identity");
       return;
     }
+    // Canonical absolute claims in one namespace: every live run carries
+    // its claims this way, so cross-parent and nested-cwd aliases
+    // ("/project" + "pkg/shared.ts" vs "/project/pkg" + "shared.ts")
+    // compare identically. Computed here during async prep; the admission
+    // block below compares and inserts with no intervening await.
+    const claims: string[] = [];
+    for (const p of task.paths) {
+      const clean = p.replace(/\/{2,}/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+      if (!clean) {
+        await this.finishFailed(sourceTerminalId, runId, task, `invalid subagent claim path (${p})`);
+        return;
+      }
+      try {
+        claims.push(await this.sinks.canonicalPath(isAbsolute(clean) ? clean : join(cwdKey, clean)));
+      } catch {
+        await this.finishFailed(sourceTerminalId, runId, task, `cannot verify path overlap (${p})`);
+        return;
+      }
+    }
     const run: HostRun = {
       key,
       parentTerminalId: sourceTerminalId,
@@ -500,6 +497,7 @@ export class SubagentHost {
       task,
       taskFile: basename(taskFile),
       childTid,
+      claims,
       attempts: 0,
       stop: null,
       retryTimer: null,
@@ -512,10 +510,14 @@ export class SubagentHost {
       sessionFile: null,
       touched: new Set<string>(),
     };
-    // Both admission checks sit immediately before insert with no await
-    // between: concurrent spawns cannot slip past the same guard. A duplicate
+    // Admission sits immediately before insert with no await between:
+    // concurrent spawns cannot slip past the same guard. A duplicate
     // delivery of this run is redundant (the first owns it); a second live
-    // continuation would interleave the replayed bundle.
+    // continuation would interleave the replayed bundle. Sibling overlap
+    // joins the same atomic step: registries are per-process, so two
+    // parents on one tree must meet here or not at all. Reject branches
+    // await only their own failure write, after the decision, before
+    // returning; the check-to-insert path itself never yields.
     if (this.runs.has(key)) return;
     if (task.resumeRunId) {
       const rival = [...this.runs.values()].find(
@@ -527,6 +529,19 @@ export class SubagentHost {
           runId,
           task,
           `${task.resumeRunId} is already being continued by ${rival.runId}`,
+        );
+        return;
+      }
+    }
+    for (const other of this.runs.values()) {
+      const overlap = other.claims.find((q) => claims.some((abs) => subagentPathsOverlap(abs, q)));
+      if (overlap) {
+        const rel = other.task.paths[other.claims.indexOf(overlap)] ?? overlap;
+        await this.finishFailed(
+          sourceTerminalId,
+          runId,
+          task,
+          `paths overlap running subagent ${other.runId} (${rel})`,
         );
         return;
       }
@@ -616,6 +631,13 @@ export class SubagentHost {
     }
     let child: SubagentChild;
     try {
+      // A kill (or clear) may have landed during the awaited session setup
+      // above: finish() already settled, removed, and reported this run.
+      // Re-verify the same run is still registered, unsettled, and
+      // uncancelled with a live parent immediately before spawn — never
+      // launch a child for a dead run, and never write a second result.
+      if (run.settled || run.stop !== null || this.runs.get(run.key) !== run) return;
+      if (!this.sinks.eventsDirFor(run.parentTerminalId)) return;
       child = this.launch(process.execPath, [this.sinks.coreBinary(), "--subagent-task", join(dir, run.taskFile)], {
         cwd: run.task.cwd,
         env,

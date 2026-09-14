@@ -13,7 +13,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain as electronIpcMain, Menu
 app.setName("Termina");
 import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, statSync, watch, type FSWatcher } from "node:fs";
-import { access, cp, lstat, mkdir, open, readFile, readdir, realpath as fsRealpath, rename as fsRename, rm, stat, writeFile } from "node:fs/promises";
+import { access, cp, link, lstat, mkdir, open, readFile, readdir, readlink, realpath as fsRealpath, rename as fsRename, rm, rmdir, stat, symlink, unlink } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -135,6 +135,12 @@ function isChallengeProfile(value: unknown): value is ChallengeProfile {
   return typeof value === "string" && (CHALLENGE_PROFILES as readonly string[]).includes(value);
 }
 const MAX_CLIPBOARD_BYTES = 4 * 1024 * 1024;
+/** Exit teardown waits this long for the renderer to acknowledge the PTY
+ *  tail before cancelling it: crash/reload cycles finish well inside, while
+ *  a wedged renderer cannot stall teardown (and subagent cleanup) forever. */
+const PTY_EXIT_DRAIN_TIMEOUT_MS = 10_000;
+/** Absurd terminal dimensions are clamped before they reach the pty ioctl. */
+const MAX_TERMINAL_DIMENSION = 1024;
 const MAX_EXPLORER_ENTRIES = 2000;
 const MAX_VERIFY_OUTPUT = 200_000;
 /** Bound for one project snapshot context file (tree listing for a turn). */
@@ -157,6 +163,9 @@ const TOOL_CHANGE_DEDUP_MS = 1500;
 const CHANGE_BURST_MS = 2000;
 /** Bound one checkpoint's watcher-idle barrier without blocking main. */
 const CHECKPOINT_IDLE_WAIT_MS = 1000;
+/** Overall deadline for one checkpoint capture: a wedged core must stall
+ *  one terminal's sidecar queue for seconds, not forever. */
+const CHECKPOINT_CAPTURE_TIMEOUT_MS = 30_000;
 
 let terminalSeq = 0;
 let workspaceSeq = 0;
@@ -190,6 +199,8 @@ interface WorkspaceState {
   retainedBlobBytes: number;
   /** Resolves when the initial index capture finished. */
   indexReady: Promise<void> | null;
+  /** True once the initial index capture settled (success or failure). */
+  indexDone: boolean;
   /** Why recording is unavailable, when it is. */
   recordError: string | null;
   /** Last watcher transition per path as 1-based changed lines. The editor
@@ -210,6 +221,14 @@ interface PendingPreflight {
   timer: ReturnType<typeof setTimeout>;
   /** The trust-sensitive resource hashes at preflight time (§6.7). */
   trustHashes: Record<string, string> | null;
+}
+
+/** One FIFO waiter for a workspace write lease. */
+interface LeaseWaiter {
+  requesterId: string;
+  settled: boolean;
+  timer: ReturnType<typeof setTimeout>;
+  resolve: (result: { ok: boolean; generation: number; error?: string }) => void;
 }
 
 /** The environment for an agent process: the host env minus injection and session pins. */
@@ -684,7 +703,8 @@ class TerminaApp {
   private ackWrites = new Set<Promise<void>>();
   /** Renderer flush requests awaiting their report. */
   private flushWaiters = new Map<string, { workspaceId: string; resolve: (r: { ok: boolean; failed: string[] }) => void; timer: ReturnType<typeof setTimeout> }>();
-  private flushSeq = 0;
+  /** FIFO write-lease waiters per workspace id; empty queues are deleted. */
+  private leaseWaiters = new Map<string, LeaseWaiter[]>();
   /** Renderer unsaved-buffer confirms awaiting their report. */
   private unsavedWaiters = new Map<string, { resolve: (r: { ok: boolean; cancelled?: boolean; error?: string }) => void; timer: ReturnType<typeof setTimeout> }>();
   private unsavedSeq = 0;
@@ -1614,10 +1634,14 @@ class TerminaApp {
       }
       await this.preferencesStore.save(candidate, confirmReset ? { confirmReset: true } : undefined);
       const thinkingChanged = this.preferences.showThinking !== candidate.showThinking;
+      // The menu reads the active shortcut map and the thinking flag only:
+      // recent files, open projects, and theme-only patches skip the rebuild.
+      const shortcutsChanged = activateShortcuts
+        && JSON.stringify(this.shortcutMap) !== JSON.stringify(candidate.shortcuts);
       this.preferences = candidate;
       nativeTheme.themeSource = candidate.theme === "light" ? "light" : "dark";
       if (activateShortcuts) this.shortcutMap = { ...candidate.shortcuts };
-      this.buildMenu();
+      if (shortcutsChanged || thinkingChanged) this.buildMenu();
       if (thinkingChanged) {
         const seq = candidate.showThinking ? SHOW_THINKING_CSI : HIDE_THINKING_CSI;
         for (const inst of this.terminals.values()) {
@@ -1737,6 +1761,7 @@ class TerminaApp {
       lastReseedMs: 0,
       retainedBlobBytes: 0,
       indexReady: null,
+      indexDone: false,
       recordError: null,
       changeLines: new Map(),
     };
@@ -1799,9 +1824,15 @@ class TerminaApp {
       }
       return store;
     })();
-    ws.indexReady = promise.then(() => undefined, (err) => {
-      ws.recordError = err instanceof Error ? err.message : String(err);
-    });
+    ws.indexReady = promise.then(
+      () => {
+        ws.indexDone = true;
+      },
+      (err) => {
+        ws.recordError = err instanceof Error ? err.message : String(err);
+        ws.indexDone = true;
+      },
+    );
     project.storePromise = promise;
   }
 
@@ -1890,7 +1921,7 @@ class TerminaApp {
       captureHead: (root, gitDir, parent) => worldlineCaptureHead(project.storePromise, root, gitDir, parent),
       capturePrimary: () => worldlineCapturePrimary(project.storePromise, this.primaryWorkspace(project)),
       releaseState: async (stateId) => {
-        await this.releaseStateIfUnused(stateId);
+        await this.releaseStateIfUnused(stateId, undefined, undefined, project);
       },
       terminalBusy: (terminalId) => this.terminals.get(terminalId)?.busy === true,
       terminalVerifying: (terminalId) => this.verifyRuns.has(terminalId),
@@ -2165,8 +2196,22 @@ class TerminaApp {
         if (inst && inst.workspaceId === id) project.terminalIds.delete(tid);
       });
       this.userEditsByWorkspace.delete(id);
-      if (stateId) void this.releaseStateIfUnused(stateId);
+      if (stateId) void this.releaseStateIfUnused(stateId, undefined, undefined, project);
     }
+  }
+
+  /**
+   * Join an already-held write lease for the duration of one privileged
+   * write (flush-save): bumps the depth only when requesterId is the
+   * current holder, synchronously, so a holder that released between
+   * admission and replacement cannot authorize the write. Pair with
+   * releaseWriteLease. Never waits, and never acquires an idle workspace.
+   */
+  private joinWriteLease(wsId: string, requesterId: string): boolean {
+    const ws = this.workspaceById(wsId);
+    if (!ws || ws.writerId !== requesterId) return false;
+    ws.leaseDepth = (ws.leaseDepth ?? 0) + 1;
+    return true;
   }
 
   /** Release a workspace write lease. Only the holder can release it. */
@@ -2176,12 +2221,30 @@ class TerminaApp {
     ws.leaseDepth = Math.max(0, (ws.leaseDepth ?? 1) - 1);
     if (ws.leaseDepth === 0) {
       ws.writerId = null;
+      this.grantLeaseWaiter(ws);
       // Moment capture bails while another writer holds the tree. Kick once
       // the tree is free so drained-not-yet-captured dots are not stranded.
       // The moment writer itself must not kick: a failed incremental restores
       // its batch and a self-kick would tight-loop on a wedged store.
       if (!requesterId.startsWith("moment:")) this.kickWorkspaceMomentCapture(ws);
     }
+  }
+
+  /** Grant a freed lease to the head of its FIFO waiter queue, if any. */
+  private grantLeaseWaiter(ws: WorkspaceState): void {
+    const queue = this.leaseWaiters.get(ws.id);
+    if (!queue) return;
+    while (queue.length > 0) {
+      const head = queue.shift()!;
+      if (head.settled) continue;
+      head.settled = true;
+      clearTimeout(head.timer);
+      ws.writerId = head.requesterId;
+      ws.leaseDepth = 1;
+      head.resolve({ ok: true, generation: ws.generation });
+      break;
+    }
+    if (queue.length === 0) this.leaseWaiters.delete(ws.id);
   }
 
   /** Schedule one capture if any terminal on this tree still has dots or hints. */
@@ -2198,22 +2261,53 @@ class TerminaApp {
 
   /**
    * Acquire the workspace write lease, waiting up to `timeoutMs` when
-   * another writer holds it. Serializing keeps concurrent captures and
-   * run starts from corrupting each other.
+   * another writer holds it. Waiters queue FIFO per workspace, so no waiter
+   * can starve behind repeated polling winners; the holder itself
+   * re-acquires without queueing and can never self-deadlock. Serializing
+   * keeps concurrent captures and run starts from corrupting each other.
    */
   private async acquireWriteLease(wsId: string, requesterId: string, timeoutMs = 5000): Promise<{ ok: boolean; generation: number; error?: string }> {
-    const deadline = Date.now() + timeoutMs;
-    while (true) {
-      const ws = this.workspaceById(wsId);
-      if (!ws) return { ok: false, generation: 0, error: "workspace not found" };
-      if (ws.writerId === null || ws.writerId === requesterId) {
-        ws.writerId = requesterId;
-        ws.leaseDepth = (ws.leaseDepth ?? 0) + 1;
-        return { ok: true, generation: ws.generation };
-      }
-      if (Date.now() >= deadline) return { ok: false, generation: ws.generation, error: `another writer holds the lease: ${ws.writerId}` };
-      await new Promise((r) => setTimeout(r, 50));
+    const ws = this.workspaceById(wsId);
+    if (!ws) return { ok: false, generation: 0, error: "workspace not found" };
+    // Re-entrant fast path: the holder never queues behind itself.
+    if (ws.writerId === requesterId) {
+      ws.leaseDepth = (ws.leaseDepth ?? 0) + 1;
+      return { ok: true, generation: ws.generation };
     }
+    if (ws.writerId === null && (this.leaseWaiters.get(wsId)?.length ?? 0) === 0) {
+      ws.writerId = requesterId;
+      ws.leaseDepth = 1;
+      return { ok: true, generation: ws.generation };
+    }
+    // Held (or defensively queued): take a FIFO place. The timer resolves
+    // the wait, never the lease itself: a freed lease always grants to its
+    // head waiter through releaseWriteLease.
+    return new Promise<{ ok: boolean; generation: number; error?: string }>((resolve) => {
+      const queue = this.leaseWaiters.get(wsId) ?? [];
+      this.leaseWaiters.set(wsId, queue);
+      const waiter: LeaseWaiter = {
+        requesterId,
+        settled: false,
+        timer: setTimeout(() => {
+          if (waiter.settled) return;
+          waiter.settled = true;
+          const pending = this.leaseWaiters.get(wsId);
+          if (pending) {
+            const index = pending.indexOf(waiter);
+            if (index >= 0) pending.splice(index, 1);
+            if (pending.length === 0) this.leaseWaiters.delete(wsId);
+          }
+          const current = this.workspaceById(wsId);
+          if (!current) {
+            resolve({ ok: false, generation: 0, error: "workspace not found" });
+            return;
+          }
+          resolve({ ok: false, generation: current.generation, error: `another writer holds the lease: ${current.writerId}` });
+        }, timeoutMs),
+        resolve,
+      };
+      queue.push(waiter);
+    });
   }
 
   /** The workspace whose root contains the path, or null. */
@@ -2512,9 +2606,21 @@ class TerminaApp {
     return false;
   }
 
-  private async releaseStateIfUnused(stateId: string, ignoredTerminalId?: string, ignoredSeq?: number): Promise<void> {
+  private async releaseStateIfUnused(
+    stateId: string,
+    ignoredTerminalId: string | undefined,
+    ignoredSeq: number | undefined,
+    owner: ProjectState | null,
+  ): Promise<void> {
     if (this.stateIsReferenced(stateId, ignoredTerminalId, ignoredSeq)) return;
-    for (const project of this.projects.values()) {
+    // The unref targets the owning project's store only: states are captured
+    // per project, so fanning out to every store is wasteful and risks
+    // touching an unrelated project's identically-named state. The reference
+    // check above stays global (conservative); only the unref is scoped.
+    // A null owner (terminal without a project) keeps the fan-out fallback
+    // so the state is still released everywhere it could live.
+    const stores = owner ? [owner] : [...this.projects.values()];
+    for (const project of stores) {
       const store = await project.storePromise;
       if (store) await store.unref(stateId).catch(() => undefined);
     }
@@ -2523,7 +2629,9 @@ class TerminaApp {
   private setWorkspaceState(ws: WorkspaceState, stateId: string | null): void {
     const previous = ws.lastStateCommit;
     ws.lastStateCommit = stateId;
-    if (previous && previous !== stateId) void this.releaseStateIfUnused(previous);
+    if (previous && previous !== stateId) {
+      void this.releaseStateIfUnused(previous, undefined, undefined, this.projectOfWorkspace(ws.id));
+    }
   }
 
   private allocateTerminalId(): string {
@@ -2961,8 +3069,15 @@ class TerminaApp {
       console.log(`[main] terminal ${inst.id} (${inst.type}) exited code=${code}`);
       // Keep the terminal in the live map while queued output drains.  An
       // exit notification overtaking PTY bytes changes TUI semantics, and a
-      // renderer reload must be able to receive the retained tail.
-      await this.ptyEgress.finish(inst.id, terminalGeneration, code);
+      // renderer reload must be able to receive the retained tail. A wedged
+      // renderer (ready but never acking) gets a bounded wait, then its
+      // retained output is cancelled so teardown — timeline release,
+      // subagent cleanup, dispatch re-pending — cannot stall forever.
+      const drained = await this.ptyEgress.finish(inst.id, terminalGeneration, code, PTY_EXIT_DRAIN_TIMEOUT_MS);
+      if (!drained) {
+        console.warn(`[main] terminal ${inst.id} exit drain timed out; dropping retained output`);
+        this.ptyEgress.cancel(inst.id, terminalGeneration);
+      }
       if (inst.captureTimer) {
         clearTimeout(inst.captureTimer);
         inst.captureTimer = null;
@@ -2978,7 +3093,7 @@ class TerminaApp {
       this.closeRunOnExit(inst);
       void this.cleanupPromptPayloads(inst);
       for (const event of inst.timeline) {
-        if (event.stateId) void this.releaseStateIfUnused(event.stateId, inst.id, event.seq);
+        if (event.stateId) void this.releaseStateIfUnused(event.stateId, inst.id, event.seq, this.projectOfTerminal(inst.id));
       }
       // Resolve the owner before the map delete. projectOfTerminal reads
       // the terminal map, so a lookup after the delete finds no project.
@@ -3696,6 +3811,8 @@ class TerminaApp {
   ): Promise<{ ok: boolean; error?: string; dispatched?: number }> {
     const owner = this.terminals.get(ownerId);
     if (!owner || owner.type !== "agent") return { ok: false, error: "terminal not found" };
+    const dispatchOwnerId = this.projectOfTerminal(ownerId)?.id;
+    if (this.disposed || this.projectIsSwitching(dispatchOwnerId)) return { ok: false, error: "the project is changing" };
     const rendererTarget = this.captureRendererSendTarget();
     if (owner.plan.length === 0) return { ok: false, error: "the plan board is empty — ask the agent for a plan first" };
     const ownerWs = this.workspaceOfTerminal(owner);
@@ -3718,11 +3835,24 @@ class TerminaApp {
     const chosen = picked.tasks;
     const alreadyDispatching = this.ownerDispatchCount(ownerId) > 0;
     if (owner.busy && !alreadyDispatching) owner.pty.write("\x03"); // the workers replace the owner's run
-    // Structured startup skips the interactive preflight. Flush once so
-    // unsaved editor buffers land before the workers write.
+    // Structured startup skips the interactive preflight. Hold a real write
+    // lease across the flush so the editor saves go through as a genuine
+    // holder (file:flush-save admits only the current holder).
     if (ownerWs) {
-      const flush = await this.flushDirtyModels(`dispatch:${ownerId}`, ownerWs.id, 5000, rendererTarget);
-      if (!flush.ok) return { ok: false, error: "could not save editor changes" };
+      const dispatchWriter = `dispatch:${ownerId}`;
+      const dispatchLease = await this.acquireWriteLease(ownerWs.id, dispatchWriter, 5000);
+      if (!dispatchLease.ok) return { ok: false, error: dispatchLease.error ?? "the workspace is busy" };
+      try {
+        const flush = await this.flushDirtyModels(dispatchWriter, ownerWs.id, 5000, rendererTarget);
+        if (!flush.ok) return { ok: false, error: "could not save editor changes" };
+      } finally {
+        this.releaseWriteLease(ownerWs.id, dispatchWriter);
+      }
+    }
+    // The pick and flush above await: re-verify the project did not start
+    // closing before spawning workers into it.
+    if (this.disposed || this.projectIsSwitching(this.projectOfTerminal(ownerId)?.id)) {
+      return { ok: false, error: "the project is changing" };
     }
     const jobs = chosen.map((task) => ({ task, id: this.allocateTerminalId() }));
     try {
@@ -4532,8 +4662,11 @@ class TerminaApp {
       }
       case "prompt": {
         const file = String(event.file ?? "");
-        // The payload file must be a plain name inside the events dir.
+        // The payload file must be a plain name inside the events dir, and
+        // must carry this terminal's prompt- prefix: any other agent-chosen
+        // name is not a prompt payload and must never become persisted text.
         if (!file || file.includes("/") || file.includes("\\")) break;
+        if (!file.startsWith(`prompt-${terminalId}-`)) break;
         try {
           const dir = this.eventsDirOf(inst);
           const payloadPath = await this.safeEventsFile(dir, file);
@@ -4637,7 +4770,11 @@ class TerminaApp {
         const startWs2 = this.workspaceOfTerminal(inst);
         void agentOwner?.storePromise?.then((s) => {
           if (!this.disposed && !this.projectIsSwitching(agentOwner?.id) && this.terminals.has(inst.id)) {
-            this.setRecorderState(inst, !s ? "paused" : startWs2?.indexReady ? "indexing" : "ready", rendererTarget);
+            this.setRecorderState(
+              inst,
+              !s || startWs2?.recordError ? "paused" : startWs2 && !startWs2.indexDone ? "indexing" : "ready",
+              rendererTarget,
+            );
           }
         });
         // Couple the run to its start preflight when the token matches. Publish
@@ -4865,7 +5002,9 @@ class TerminaApp {
     const project = this.projectOfWorkspace(workspaceId);
     if (!project) return Promise.resolve({ ok: false, failed: ["workspace is no longer owned by a project"] });
     return new Promise((resolve) => {
-      const requestId = `flush-${++this.flushSeq}`;
+      // Random per-request id: sequential ids let a stale or foreign report
+      // resolve another request's waiter.
+      const requestId = `flush-${randomUUID()}`;
       const timer = setTimeout(() => {
         this.flushWaiters.delete(requestId);
         resolve({ ok: false, failed: ["renderer did not answer the flush request"] });
@@ -5296,8 +5435,32 @@ class TerminaApp {
       this.writeAck(inst.id, requestId, { ok: false, error: lease.error ?? "the workspace is busy" });
       return;
     }
+    // The preflight's race shape: the capture has an overall deadline so a
+    // wedged core stalls one terminal's sidecar queue for seconds, not
+    // forever. On timeout the in-flight capture keeps the lease until it
+    // returns (it must not hold the sidecar queue meanwhile), so the
+    // finally below must not release it early.
+    let releaseOnExit = true;
     try {
-      const state = await this.captureStable(store, ws);
+      const capturePromise = this.captureStable(store, ws);
+      const captured = await Promise.race([
+        capturePromise.then((state) => ({ ok: true as const, state })),
+        new Promise<{ ok: false }>((resolve) => {
+          setTimeout(() => resolve({ ok: false }), CHECKPOINT_CAPTURE_TIMEOUT_MS);
+        }),
+      ]);
+      if (!captured.ok) {
+        releaseOnExit = false;
+        this.writeAck(inst.id, requestId, { ok: false, error: "checkpoint capture timed out" });
+        this.trackRecordingTask(capturePromise.then(
+          () => undefined,
+          () => undefined,
+        ).then(() => {
+          this.releaseWriteLease(ws.id, leaseRequester);
+        }));
+        return;
+      }
+      const state = captured.state;
       this.setWorkspaceState(ws, state.commit);
       if (!ws.primary) await checkpointOwner?.worldlines?.updateHeadState(inst.id, state.commit);
       this.writeAck(inst.id, requestId, { ok: true, stateId: state.commit });
@@ -5320,7 +5483,7 @@ class TerminaApp {
     } catch (err) {
       this.writeAck(inst.id, requestId, { ok: false, error: err instanceof Error ? err.message : String(err) });
     } finally {
-      this.releaseWriteLease(ws.id, leaseRequester);
+      if (releaseOnExit) this.releaseWriteLease(ws.id, leaseRequester);
     }
   }
 
@@ -5603,7 +5766,7 @@ class TerminaApp {
       excess--;
       evicted.push(e.seq);
       const evictedState = e.stateId;
-      if (evictedState) void this.releaseStateIfUnused(evictedState, inst.id, e.seq);
+      if (evictedState) void this.releaseStateIfUnused(evictedState, inst.id, e.seq, this.projectOfTerminal(inst.id));
       e.stateId = null;
       e.evicted = true;
     }
@@ -5888,7 +6051,7 @@ class TerminaApp {
     }
     // Timeline: drop every dot and release its captured state.
     for (const ev of inst.timeline) {
-      if (ev.stateId) void this.releaseStateIfUnused(ev.stateId, terminalId, ev.seq);
+      if (ev.stateId) void this.releaseStateIfUnused(ev.stateId, terminalId, ev.seq, this.projectOfTerminal(terminalId));
     }
     inst.timeline = [];
     inst.momentDots = [];
@@ -5913,6 +6076,11 @@ class TerminaApp {
       inst.currentRun.reason = inst.currentRun.reason ?? "session reset by /clear";
       inst.currentRun = null;
     }
+    // The staged prompt belongs to the abandoned session: without this it
+    // becomes the next run's prompt. The old verify verdict is stale too.
+    inst.pendingPrompt = null;
+    inst.verify = { state: "untested", command: null, summary: null };
+    this.send("verify:state", { terminalId, verify: inst.verify }, expected);
     // Modified files and their original baselines intentionally survive /clear:
     // they describe real workspace changes still present on disk. The next
     // agent_start refreshes baselines only for files not already in the list.
@@ -6007,7 +6175,7 @@ class TerminaApp {
       const removedSeqs = new Set(seqs);
       inst.momentDots = inst.momentDots.filter((dot) => !removedSeqs.has(dot.seq));
       for (const old of removed) {
-        if (old.stateId) void this.releaseStateIfUnused(old.stateId, inst.id, old.seq);
+        if (old.stateId) void this.releaseStateIfUnused(old.stateId, inst.id, old.seq, this.projectOfTerminal(inst.id));
       }
       // Hidden failed captures still consume the internal cap. Explicitly
       // remove any displaced visible dots so renderer and main cannot diverge.
@@ -7109,6 +7277,108 @@ class TerminaApp {
     return null;
   }
 
+  /**
+   * Create an empty file only when nothing exists at the path (O_EXCL).
+   * Explorer New File must never truncate an existing destination.
+   */
+  private async createFileExclusive(abs: string): Promise<void> {
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      handle = await open(abs, "wx", 0o666);
+    } catch (err) {
+      if (isErrno(err, "EEXIST")) throw new Error("destination already exists");
+      throw err;
+    }
+    await handle.close().catch(() => undefined);
+  }
+
+  /**
+   * Rename without replacing: refuses when the destination exists, including
+   * destinations created concurrently after admission. Plain rename(2)
+   * replaces the destination on POSIX, and a pre-check alone is racy, so
+   * files move via link+unlink, symlinks via readlink+symlink+unlink, and
+   * directories reserve the name with mkdir (onto which rename only lands
+   * while it stayed an empty directory). Same-name and case-only
+   * self-renames cannot destroy anything and stay plain renames. Windows
+   * rename never replaces, so it needs no reservation dance.
+   */
+  private async renameNoReplace(src: string, dest: string): Promise<void> {
+    if (src === dest) return;
+    if (process.platform === "win32") {
+      try {
+        await fsRename(src, dest);
+      } catch (err) {
+        if (existsSync(dest)) throw new Error("destination already exists");
+        throw err;
+      }
+      return;
+    }
+    // A case-only rename on a case-insensitive volume addresses the file
+    // itself: replacing it cannot destroy anything.
+    try {
+      const [a, b, la, lb] = await Promise.all([stat(src), stat(dest), lstat(src), lstat(dest)]);
+      if (!la.isSymbolicLink() && !lb.isSymbolicLink() && a.dev === b.dev && a.ino === b.ino) {
+        await fsRename(src, dest);
+        return;
+      }
+    } catch {
+      /* The destination is absent (or the source vanished): continue below. */
+    }
+    const st = await lstat(src);
+    if (st.isDirectory()) {
+      try {
+        await mkdir(dest);
+      } catch (err) {
+        if (isErrno(err, "EEXIST")) throw new Error("destination already exists");
+        throw err;
+      }
+      // The name is now ours: rename lands only while it stayed an empty
+      // directory (ENOTEMPTY/ENOTDIR fail closed), or if it vanished.
+      try {
+        await fsRename(src, dest);
+      } catch (err) {
+        // Remove only our own empty reservation, never real content: rmdir
+        // refuses files, symlinks, and non-empty directories alike, so a
+        // destination swapped after the reservation survives the cleanup.
+        await rmdir(dest).catch(() => undefined);
+        throw err;
+      }
+      return;
+    }
+    if (st.isSymbolicLink()) {
+      const target = await readlink(src);
+      try {
+        await symlink(target, dest);
+      } catch (err) {
+        if (isErrno(err, "EEXIST")) throw new Error("destination already exists");
+        throw err;
+      }
+      try {
+        await unlink(src);
+      } catch (err) {
+        await unlink(dest).catch(() => undefined);
+        throw err;
+      }
+      return;
+    }
+    try {
+      await link(src, dest);
+    } catch (err) {
+      if (isErrno(err, "EEXIST")) throw new Error("destination already exists");
+      throw err;
+    }
+    try {
+      // The source may have been swapped after admission; only an unchanged
+      // non-directory, non-symlink source may move.
+      const again = await lstat(src);
+      if (again.isDirectory() || again.isSymbolicLink()) throw new Error("source changed during rename");
+      await unlink(src);
+    } catch (err) {
+      await unlink(dest).catch(() => undefined);
+      throw err;
+    }
+  }
+
   private async listDir(projectId: unknown, absPath: string): Promise<{ entries: ExplorerEntry[]; error?: string; truncated?: boolean }> {
     const target = this.explorerWorkspace(projectId);
     if ("error" in target) return { entries: [], error: target.error };
@@ -7444,6 +7714,18 @@ class TerminaApp {
         }
       }
       try {
+        // An explicit but unresolvable project id fails closed: silently
+        // landing the terminal in the active project misattributes its
+        // session, recordings, and worldlines.
+        if (projectId && !this.projects.has(projectId)) return { ok: false, error: "unknown project" };
+        // A New Terminal landing after closeProjectOnce snapshots its ids is
+        // never closed and runs degraded: refuse creation into a switching
+        // project. Restore/promotion/candidate creation bypass this IPC gate
+        // internally and legitimately run while switching.
+        const createTarget = (projectId ? this.projects.get(projectId) : undefined) ?? this.project();
+        if (this.disposed || (createTarget && this.projectIsSwitching(createTarget.id))) {
+          return { ok: false, error: "the project is changing" };
+        }
         const t = await this.createTerminal(undefined, { type, shell, engine, fromTerminalId, projectId });
         return { ok: true, id: t.id };
       } catch (err) {
@@ -7532,7 +7814,7 @@ class TerminaApp {
     ipcMain.handle("terminals:write", (_e, id: unknown, data: unknown) => {
       if (typeof id !== "string" || typeof data !== "string") return;
       const inst = this.terminals.get(id);
-      if (!inst) return;
+      if (!inst || inst.closed) return;
       // Detect /clear (/new alias) slash command before it reaches the pty. The bridge also
       // catches it via the prompt payload, but /clear may reset the session
       // without a prompt/before_agent_start cycle.
@@ -7551,7 +7833,13 @@ class TerminaApp {
     });
     ipcMain.handle("terminals:resize", (_e, id: unknown, cols: unknown, rows: unknown) => {
       if (typeof id !== "string" || !Number.isFinite(cols) || !Number.isFinite(rows)) return;
-      this.terminals.get(id)?.pty.resize(Math.max(2, Math.floor(Number(cols))), Math.max(2, Math.floor(Number(rows))));
+      const inst = this.terminals.get(id);
+      if (!inst || inst.closed) return;
+      // Floor at 2 (a 1-wide pty collapses layouts); clamp absurd sizes
+      // before they reach the ioctl.
+      const clampedCols = Math.min(MAX_TERMINAL_DIMENSION, Math.max(2, Math.floor(Number(cols))));
+      const clampedRows = Math.min(MAX_TERMINAL_DIMENSION, Math.max(2, Math.floor(Number(rows))));
+      inst.pty.resize(clampedCols, clampedRows);
     });
     ipcMain.handle("terminals:list", async () => {
       if (this.initialRestorePromise) await this.initialRestorePromise;
@@ -7573,6 +7861,7 @@ class TerminaApp {
       return this.projects.get(projectId)?.worldlines?.listWithEvidence() ?? [];
     });
     ipcMain.handle("worldline:promote", (_e, comparisonId: string, label: "A" | "B", force?: boolean) => {
+      if (label !== "A" && label !== "B") return { ok: false, error: "invalid candidate" };
       if (force !== undefined && force !== true && force !== false) return { ok: false, error: "invalid force" };
       const manager = this.projectOfComparison(comparisonId)?.worldlines;
       if (!manager) return Promise.resolve({ ok: false, error: "candidate not found" });
@@ -7605,12 +7894,20 @@ class TerminaApp {
       return owner.worldlines!.forkPoint(terminalId, ev);
     });
     const wlOf = (comparisonId: string) => this.projectOfComparison(comparisonId)?.worldlines ?? null;
-    ipcMain.handle("worldline:details", (_e, comparisonId: string, label: "A" | "B") => wlOf(comparisonId)?.details(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" });
+    const validLabel = (label: unknown): label is "A" | "B" => label === "A" || label === "B";
+    ipcMain.handle("worldline:details", (_e, comparisonId: string, label: "A" | "B") => {
+      if (!validLabel(label)) return { ok: false, error: "invalid candidate" };
+      return wlOf(comparisonId)?.details(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" };
+    });
     ipcMain.handle("worldline:challenge-candidate", (_e, comparisonId: string, label: "A" | "B", profile: unknown) => {
+      if (!validLabel(label)) return { ok: false, error: "invalid candidate" };
       if (!isChallengeProfile(profile)) return { ok: false, error: "invalid challenge profile" };
       return wlOf(comparisonId)?.challengeFromCandidate(comparisonId, label, profile) ?? { ok: false, error: "worldlines unavailable" };
     });
-    ipcMain.handle("worldline:file", (_e, comparisonId: string, label: "A" | "B", relPath: string) => wlOf(comparisonId)?.fileOf(comparisonId, label, relPath) ?? { ok: false, error: "worldlines unavailable" });
+    ipcMain.handle("worldline:file", (_e, comparisonId: string, label: "A" | "B", relPath: string) => {
+      if (!validLabel(label)) return { ok: false, error: "invalid candidate" };
+      return wlOf(comparisonId)?.fileOf(comparisonId, label, relPath) ?? { ok: false, error: "worldlines unavailable" };
+    });
     ipcMain.handle("worldline:base-file", (_e, comparisonId: string, relPath: string) => wlOf(comparisonId)?.baseFileOf(comparisonId, relPath) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:fork-run", async (_e, runId: string) => {
       const manager = this.projectForRun(runId)?.worldlines;
@@ -7619,9 +7916,10 @@ class TerminaApp {
     });
     ipcMain.handle("worldline:cancel", (_e, comparisonId: string) => wlOf(comparisonId)?.cancel(comparisonId) ?? { ok: false, error: "worldlines unavailable" });
     ipcMain.handle("worldline:discard", (_e, comparisonId: string) => wlOf(comparisonId)?.discard(comparisonId) ?? { ok: false, error: "worldlines unavailable" });
-    ipcMain.handle("worldline:open-terminal", (_e, comparisonId: string, label: "A" | "B") =>
-      wlOf(comparisonId)?.openTerminal(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" },
-    );
+    ipcMain.handle("worldline:open-terminal", (_e, comparisonId: string, label: "A" | "B") => {
+      if (!validLabel(label)) return { ok: false, error: "invalid candidate" };
+      return wlOf(comparisonId)?.openTerminal(comparisonId, label) ?? { ok: false, error: "worldlines unavailable" };
+    });
     // ---- Editor flush (run-start preflight) ----
     ipcMain.handle("editor:flush-report", (_e, requestId: unknown, result: unknown) => {
       if (typeof requestId !== "string") return;
@@ -7644,11 +7942,17 @@ class TerminaApp {
     /** The flush saves go through the lease holder (the preflight). */
     ipcMain.handle("file:flush-save", async (_e, absPath: string, content: string, writerId: string, owner: unknown) => {
       if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > MAX_OPEN_FILE_SIZE) return { ok: false, error: "file content is too large" };
+      // The TypeScript annotation is not runtime validation: null (or any
+      // non-string/empty value) must never match an idle workspace's holder.
+      if (typeof writerId !== "string" || writerId.length === 0) return { ok: false, error: "the flush does not hold the write lease" };
       const target = this.projectWorkspace(owner);
       if (!target) return { ok: false, error: "invalid project workspace" };
       const managed = await this.managedPath(absPath, target.workspace.id);
       if (!managed || managed.workspace.id !== target.workspace.id) return { ok: false, error: "path is outside the project workspace" };
-      if (managed.workspace.writerId !== writerId) return { ok: false, error: "the flush does not hold the write lease" };
+      // Join the holder's lease across the write: a stale holder that
+      // released after admission is rejected here, and a competing writer
+      // cannot interleave while the depth is held.
+      if (!this.joinWriteLease(managed.workspace.id, writerId)) return { ok: false, error: "the flush does not hold the write lease" };
       try {
         // lstat: refuse a leaf swapped for a symlink after admission.
         const info = await lstat(managed.path);
@@ -7657,6 +7961,8 @@ class TerminaApp {
         return { ok: true };
       } catch (err) {
         return { ok: false, error: (err as Error).message };
+      } finally {
+        this.releaseWriteLease(managed.workspace.id, writerId);
       }
     });
 
@@ -7764,11 +8070,18 @@ class TerminaApp {
         const abs = await this.projectAbs(workspace, relPath);
         if (!live()) return { ok: false, error: "project is not open" };
         if (kind === "dir") {
-          await mkdir(abs, { recursive: true });
+          await mkdir(dirname(abs), { recursive: true });
+          if (!live()) return { ok: false, error: "project is not open" };
+          try {
+            await mkdir(abs);
+          } catch (err) {
+            if (isErrno(err, "EEXIST")) return { ok: false, error: "destination already exists" };
+            throw err;
+          }
         } else {
           await mkdir(dirname(abs), { recursive: true });
           if (!live()) return { ok: false, error: "project is not open" };
-          await writeFile(abs, "", "utf8");
+          await this.createFileExclusive(abs);
         }
         return { ok: true };
       }).catch((err) => ({ ok: false, error: (err as Error).message }));
@@ -7781,7 +8094,7 @@ class TerminaApp {
       return this.mutateExplorer(projectId, async (workspace, live) => {
         const abs = await this.projectAbs(workspace, relPath);
         if (!live()) return { ok: false, error: "project is not open" };
-        await fsRename(abs, join(dirname(abs), newName));
+        await this.renameNoReplace(abs, join(dirname(abs), newName));
         return { ok: true };
       }).catch((err) => ({ ok: false, error: (err as Error).message }));
     });
@@ -7798,6 +8111,12 @@ class TerminaApp {
     // Explorer clipboard paste. Copies (or moves, for a cut entry) the source
     // under the target directory; a name collision gets " copy" / " copy N".
     // An empty targetDirRel means the project root itself.
+    //
+    // Residual race (documented): unusedCopyDest checks, then the move/copy
+    // acts, so a destination created concurrently in between still collides.
+    // Deterministic collisions already get copy-names; a racy one fails
+    // closed for moves (no-replace rename) and best-effort for copies
+    // (errorOnExist is checked, not atomic).
     ipcMain.handle("explorer:paste", async (_e, projectId: unknown, targetDirRel: unknown, srcRel: unknown, move: unknown) => {
       if (typeof targetDirRel !== "string" || typeof srcRel !== "string" || typeof move !== "boolean") {
         return { ok: false, error: "invalid arguments" };
@@ -7824,8 +8143,13 @@ class TerminaApp {
         const dest = this.unusedCopyDest(dirAbs, basename(src));
         if (!dest) return { ok: false, error: "destination already exists" };
         if (!live()) return { ok: false, error: "project is not open" };
-        if (move) await fsRename(src, dest);
-        else await cp(src, dest, { recursive: true });
+        try {
+          if (move) await this.renameNoReplace(src, dest);
+          else await cp(src, dest, { recursive: true, errorOnExist: true, force: false });
+        } catch (err) {
+          if (isErrno(err, "EEXIST")) return { ok: false, error: "destination already exists" };
+          throw err;
+        }
         return { ok: true, name: basename(dest) };
       }).catch((err) => ({ ok: false, error: (err as Error).message }));
     });
@@ -7841,6 +8165,12 @@ class TerminaApp {
       if (!st.isFile()) return { ok: false, path: managed.path, error: "not a file" };
       if (st.size > MAX_OPEN_FILE_SIZE) return { ok: false, path: managed.path, error: `file is too large to open (${st.size} bytes)` };
       const content = await readFile(managed.path, "utf8");
+      // The file may have grown between the stat and the read: enforce the
+      // budget on what was actually read, not on what was advertised.
+      const contentBytes = Buffer.byteLength(content, "utf8");
+      if (contentBytes > MAX_OPEN_FILE_SIZE) {
+        return { ok: false, path: managed.path, error: `file is too large to open (${contentBytes} bytes)` };
+      }
       return { ok: true, path: managed.path, content, changedLines: managed.workspace.changeLines.get(managed.path) };
     } catch (err) {
       return { ok: false, path: managed.path, error: (err as Error).message };
@@ -7866,6 +8196,10 @@ class TerminaApp {
       handle = undefined;
       await fsRename(temp, path);
       syncParentDir(path);
+      // A crash between temp creation and rename orphans a
+      // `<file>.<pid>.<uuid>.tmp` sibling: reap crash litter for this file
+      // on every successful write (best-effort, never fails the write).
+      await this.sweepReplaceTemps(path).catch(() => undefined);
     } catch (error) {
       try {
         await handle?.close();
@@ -7874,6 +8208,45 @@ class TerminaApp {
       }
       await rm(temp, { force: true }).catch(() => undefined);
       throw error;
+    }
+  }
+
+  /**
+   * Best-effort reaper for durableReplaceFile crash litter: sibling
+   * `<base>.<pid>.<uuid>.tmp` files whose pid tag is not alive. The shape
+   * match is strict (numeric pid plus a UUID) so user files can never
+   * qualify, and live pids — including our own — are never reaped, so a
+   * concurrent writer's in-flight temp is never touched.
+   */
+  private async sweepReplaceTemps(path: string): Promise<void> {
+    const dir = dirname(path);
+    const base = basename(path);
+    let entries: string[];
+    try {
+      entries = await readdir(dir);
+    } catch {
+      return;
+    }
+    for (const name of entries) {
+      if (!name.startsWith(`${base}.`) || !name.endsWith(".tmp")) continue;
+      const middle = name.slice(base.length + 1, -".tmp".length);
+      const dot = middle.indexOf(".");
+      if (dot <= 0) continue;
+      const pid = Number(middle.slice(0, dot));
+      const uuid = middle.slice(dot + 1);
+      if (!Number.isInteger(pid) || pid <= 0) continue;
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(uuid)) continue;
+      if (pid === process.pid) continue;
+      let alive = true;
+      try {
+        process.kill(pid, 0);
+      } catch (err) {
+        // ESRCH means a dead pid (safe to reap); any other failure —
+        // notably EPERM for a live process we cannot signal — keeps it.
+        alive = !isErrno(err, "ESRCH");
+      }
+      if (alive) continue;
+      await rm(join(dir, name), { force: true }).catch(() => undefined);
     }
   }
 
@@ -8252,6 +8625,13 @@ class TerminaApp {
     }
     await Promise.all([...this.projects.values()].map((project) => project.storePromise?.catch(() => null) ?? Promise.resolve(null)));
     disposeWorldlineGitCore();
+    // Headless subagents are separate processes: the PTY-exit cascade cannot
+    // be relied on during shutdown (native exit delivery is best-effort
+    // after forced termination), so terminate every live owner's runs
+    // directly before killing the PTYs.
+    for (const id of [...this.terminals.keys()]) {
+      this.subagents.killOwner(id, "app shutdown");
+    }
     for (const inst of this.terminals.values()) {
       inst.pty.killGroup("SIGTERM");
       inst.pty.kill();
@@ -8259,7 +8639,7 @@ class TerminaApp {
     await this.drainTerminals(null);
     for (const inst of this.terminals.values()) {
       for (const event of inst.timeline) {
-        if (event.stateId) void this.releaseStateIfUnused(event.stateId, inst.id, event.seq);
+        if (event.stateId) void this.releaseStateIfUnused(event.stateId, inst.id, event.seq, this.projectOfTerminal(inst.id));
       }
     }
     if (this.userEditsWriteTimer) {

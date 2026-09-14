@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import {
@@ -50,6 +51,52 @@ describe("content-search parseRipgrepJsonLine", () => {
     expect(parseRipgrepJsonLine(match({ path: { text: "../escape.txt" } }), root)).toBeNull();
     expect(parseRipgrepJsonLine(match({ line_number: 0 }), root)).toBeNull();
     expect(parseRipgrepJsonLine(match({ lines: { text: 42 } }), root)).toBeNull();
+  });
+
+  it("converts ripgrep byte offsets to editor columns (refs #173)", () => {
+    const match = (text: string, start: number): string =>
+      JSON.stringify({
+        type: "match",
+        data: {
+          path: { text: "./unicode.txt" },
+          lines: { text },
+          line_number: 1,
+          absolute_offset: 0,
+          submatches: [{ match: { text: "needle" }, start, end: start + 6 }],
+        },
+      });
+    // The filed record: é is 2 bytes but 1 UTF-16 unit, so byte 5 is column 4.
+    expect(parseRipgrepJsonLine(match("éé needle\n", 5), root)).toEqual({
+      relPath: "unicode.txt",
+      line: 1,
+      column: 4,
+      text: "éé needle",
+    });
+    // ASCII control: bytes and columns agree.
+    expect(parseRipgrepJsonLine(match("a needle\n", 2), root)?.column).toBe(3);
+    // Emoji are surrogate pairs: 4 bytes, 2 UTF-16 units.
+    expect(parseRipgrepJsonLine(match("😀 needle\n", 5), root)?.column).toBe(4);
+    // End-of-line offsets land past the last character.
+    expect(parseRipgrepJsonLine(match("needle\n", 6), root)?.column).toBe(7);
+    // Invalid boundaries are rejected, not mis-navigated.
+    expect(parseRipgrepJsonLine(match("éé needle\n", 1), root)).toBeNull();
+    expect(parseRipgrepJsonLine(match("éé needle\n", 99), root)).toBeNull();
+    expect(parseRipgrepJsonLine(match("éé needle\n", -1), root)).toBeNull();
+    expect(parseRipgrepJsonLine(match("éé needle\n", 2.5), root)).toBeNull();
+  });
+
+  it("agrees with the fallback scan on multibyte columns (refs #173)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "termina-content-unicode-"));
+    try {
+      writeFileSync(join(dir, "unicode.txt"), "éé needle\n");
+      const scanned = await searchProjectContent(dir, "needle", {
+        rg: null,
+        candidates: { paths: ["unicode.txt"], truncated: false },
+      });
+      expect(scanned.hits).toEqual([{ relPath: "unicode.txt", line: 1, column: 4, text: "éé needle" }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("relativizes absolute paths and truncates long previews", () => {
@@ -104,6 +151,48 @@ describe("content-search findRipgrep", () => {
   it("returns null when rg is absent", () => {
     process.env.PATH = join(tmpdir(), "termina-content-no-bin");
     expect(findRipgrep(join(tmpdir(), "termina-content-other"))).toBeNull();
+  });
+
+  it("rejects an external rg symlink whose target is inside the project (refs #174)", () => {
+    const project = mkdtempSync(join(tmpdir(), "termina-content-proj-"));
+    const external = mkdtempSync(join(tmpdir(), "termina-content-ext-"));
+    try {
+      writeFileSync(join(project, "fixture-rg"), "#!/bin/sh\nexit 0\n");
+      symlinkSync(join(project, "fixture-rg"), join(external, "rg"));
+      process.env.PATH = external;
+      // The selected executable is never run; discovery alone must refuse it.
+      expect(findRipgrep(project)).toBeNull();
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+      rmSync(external, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an aliased PATH directory inside the project (refs #174)", () => {
+    const project = mkdtempSync(join(tmpdir(), "termina-content-alias-"));
+    const external = mkdtempSync(join(tmpdir(), "termina-content-aliasbin-"));
+    try {
+      mkdirSync(join(project, "tools"), { recursive: true });
+      writeFileSync(join(project, "tools", "rg"), "#!/bin/sh\nexit 0\n");
+      symlinkSync(join(project, "tools"), join(external, "linked"));
+      process.env.PATH = join(external, "linked");
+      expect(findRipgrep(project)).toBeNull();
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+      rmSync(external, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts an external symlink to an external binary (refs #174)", () => {
+    const external = mkdtempSync(join(tmpdir(), "termina-content-extok-"));
+    try {
+      writeFileSync(join(external, "real-rg"), "#!/bin/sh\nexit 0\n");
+      symlinkSync(join(external, "real-rg"), join(external, "rg"));
+      process.env.PATH = external;
+      expect(findRipgrep(join(tmpdir(), "termina-content-other"))).toBe(join(realpathSync(external), "real-rg"));
+    } finally {
+      rmSync(external, { recursive: true, force: true });
+    }
   });
 });
 
@@ -193,6 +282,21 @@ describe("content-search scan engine", () => {
       candidates: { paths: [], truncated: true },
     });
     expect(partial).toEqual({ hits: [], truncated: true });
+  });
+
+  it.runIf(process.platform !== "win32")("never blocks on a FIFO .gitignore in the fallback (refs #170)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "termina-content-fifo-"));
+    try {
+      writeFileSync(join(dir, "a.txt"), "a needle in hay\n");
+      expect(spawnSync("mkfifo", [join(dir, ".gitignore")]).status).toBe(0);
+      const result = await Promise.race([
+        searchProjectContent(dir, "needle", { rg: null, candidates: { paths: ["a.txt"], truncated: false } }),
+        new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("fallback blocked on FIFO")), 5000)),
+      ]);
+      expect(result.hits).toContainEqual({ relPath: "a.txt", line: 1, column: 3, text: "a needle in hay" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

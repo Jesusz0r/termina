@@ -124,6 +124,7 @@ const revertReviewFile = loadMethod(
 
 const realAcquire = loadMethod("acquireWriteLease", "private async acquireWriteLease(", [], []) as AcquireWriteLease;
 const realRelease = loadMethod("releaseWriteLease", "private releaseWriteLease(", [], []) as ReleaseWriteLease;
+const realGrant = loadMethod("grantLeaseWaiter", "private grantLeaseWaiter(", [], []) as (ws: FakeWorkspace) => void;
 const realDeleteBaseline = loadMethod("deleteBaseline", "private deleteBaseline(", [], []) as DeleteBaseline;
 const realSetBaseline = loadMethod(
   "setBaseline",
@@ -189,9 +190,16 @@ function makeManagedPath(ws: FakeWorkspace, opts: { swapLeaf?: boolean } = {}) {
 }
 
 function makeLeaseBroker(ws: FakeWorkspace) {
-  const leaseApp = {
+  const leaseApp: {
+    workspaceById: (id: string) => FakeWorkspace | null;
+    kickWorkspaceMomentCapture: () => void;
+    leaseWaiters: Map<string, Array<{ requesterId: string; settled: boolean; timer: ReturnType<typeof setTimeout> }>>;
+    grantLeaseWaiter: (target: FakeWorkspace) => void;
+  } = {
     workspaceById: (id: string) => (id === ws.id ? ws : null),
     kickWorkspaceMomentCapture: () => undefined,
+    leaseWaiters: new Map(),
+    grantLeaseWaiter: (target: FakeWorkspace) => realGrant.call(leaseApp, target),
   };
   return {
     acquireWriteLease: (wsId: string, requester: string, timeoutMs?: number) => realAcquire.call(leaseApp, wsId, requester, timeoutMs),

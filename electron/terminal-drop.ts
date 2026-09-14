@@ -15,7 +15,13 @@ const MAX_DROP_PATHS = 16;
 const MAX_PATH_BYTES = 4096;
 const MAX_PATH_TOTAL_BYTES = 64 * 1024;
 const MAX_BATCH_BYTES = MAX_PENDING_IMAGES * MAX_IMAGE_BYTES;
-const OPEN_NOFOLLOW_READ = fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW;
+// A dropped FIFO opened O_RDONLY blocks until a writer appears, before the
+// descriptor-based file check below can run. O_NONBLOCK (POSIX only) makes
+// the open return immediately; the fstat then rejects the FIFO, and the
+// flag is a no-op for the regular files we keep reading.
+const OPEN_NOFOLLOW_READ = fsConstants.O_RDONLY
+  | fsConstants.O_NOFOLLOW
+  | (process.platform === "win32" ? 0 : fsConstants.O_NONBLOCK);
 const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const JPEG_SIG = Buffer.from([0xff, 0xd8, 0xff]);
 const GIF87 = Buffer.from("GIF87a");
