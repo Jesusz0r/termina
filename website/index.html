@@ -48,7 +48,7 @@
       </p>
       <div class="hero-ctas">
         <a href="#install" class="btn btn-primary">↓ Download for macOS &amp; Linux — free</a>
-        <button class="btn btn-ghost copy-cmd" data-cmd="curl -fsSL https://raw.githubusercontent.com/Jesusz0r/termina/master/scripts/install.sh | sh">$ curl install →</button>
+        <button class="btn btn-ghost copy-cmd" data-cmd="git clone https://github.com/Jesusz0r/termina.git && cd termina && sh scripts/install.sh">$ build from source →</button>
       </div>
       <div class="hero-meta">
         <span><b>Signed + notarized</b> .dmg</span>
@@ -484,7 +484,6 @@
       <div class="install-box reveal">
         <div class="install-tabs">
           <button class="install-tab active" data-tab="dmg">macOS / Linux app</button>
-          <button class="install-tab" data-tab="curl">one-line curl</button>
           <button class="install-tab" data-tab="source">from source</button>
         </div>
 
@@ -498,21 +497,13 @@
           <p style="margin-top:16px; margin-bottom:0;">First launch: open a folder, then run <code>/login</code> and <code>/models</code> in the terminal to pick your provider.</p>
         </div>
 
-        <div class="install-pane" data-pane="curl">
-          <p>Automated install script (requires Node ≥ 22.19):</p>
-          <div class="cmd">
-            <code>curl -fsSL https://raw.githubusercontent.com/Jesusz0r/termina/master/scripts/install.sh | sh</code>
-            <button class="copy-btn copy-cmd" data-cmd="curl -fsSL https://raw.githubusercontent.com/Jesusz0r/termina/master/scripts/install.sh | sh">copy</button>
-          </div>
-        </div>
-
         <div class="install-pane" data-pane="source">
-          <p>For contributors building Electron and the Rust core:</p>
+          <p>Requires Node ≥ 22.19, pnpm, and Rust/cargo — verified from your checkout:</p>
           <div class="cmd">
-            <code>git clone https://github.com/Jesusz0r/termina.git &amp;&amp; cd termina &amp;&amp; pnpm install &amp;&amp; pnpm run dev</code>
-            <button class="copy-btn copy-cmd" data-cmd="git clone https://github.com/Jesusz0r/termina.git && cd termina && pnpm install && pnpm run dev">copy</button>
+            <code>git clone https://github.com/Jesusz0r/termina.git &amp;&amp; cd termina &amp;&amp; sh scripts/install.sh</code>
+            <button class="copy-btn copy-cmd" data-cmd="git clone https://github.com/Jesusz0r/termina.git && cd termina && sh scripts/install.sh">copy</button>
           </div>
-          <p style="margin-top:16px; margin-bottom:0;">The Rust core builds with cargo on first run; set <code>TERMINA_SKIP_CORE_BUILD=1</code> to use a downloaded binary instead.</p>
+          <p style="margin-top:16px; margin-bottom:0;">Then start it with <code>pnpm run dev</code>. Packaged releases remain the no-toolchain install path.</p>
         </div>
       </div>
     </div>
