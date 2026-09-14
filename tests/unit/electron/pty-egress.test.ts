@@ -1281,13 +1281,13 @@ describe("Lossless PTY Egress & Sequence Ledger Invariants", () => {
       "setRendererReady",
       "stats",
     ]);
-    const prod = await readFile(new URL("../../../electron/main.ts", import.meta.url), "utf8");
+    const prod = await readFile(new URL("../../../electron/terminal-runtime.ts", import.meta.url), "utf8");
     // stats is the introspection seam tests and diagnostics read; every other
     // public method must be called from production (no drain()-style dead API).
     assert.equal("drain" in PtyEgressScheduler.prototype, false);
     for (const name of names) {
       if (name === "stats") continue;
-      assert.ok(prod.includes(`ptyEgress.${name}(`), `${name} has no production caller`);
+      assert.ok(prod.includes(`egress.${name}(`), `${name} has no production caller`);
     }
   });
 });

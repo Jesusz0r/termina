@@ -7,6 +7,7 @@ import { readdir, readdir as fsReaddir, rm } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { isErrno } from "../../../shared/guards.ts";
 import { normalizeAppPreferences } from "../../../shared/preferences.ts";
+import { emptyActivityInput } from "../../../electron/agent-activity.ts";
 import { HIDE_THINKING_CSI, SHOW_THINKING_CSI } from "../../../shared/terminal-control.ts";
 import { CHALLENGE_PROFILES, DEFAULT_SHORTCUTS, defaultAppPreferences } from "../../../shared/types.ts";
 import ts from "typescript";
@@ -190,7 +191,7 @@ describe("main hardening batch (refs #219)", () => {
       ["open", { id: "open", type: "shell", closed: false, pty: { write: (d: string) => calls.push(`write:${d}`), interrupt: () => calls.push("interrupt"), resize: (c: number, r: number) => calls.push(`resize:${c}x${r}`) } }],
       ["shut", { id: "shut", type: "shell", closed: true, pty: { write: (d: string) => calls.push(`write:${d}`), interrupt: () => calls.push("interrupt"), resize: (c: number, r: number) => calls.push(`resize:${c}x${r}`) } }],
     ]);
-    const app = { terminals, trackNewCommandInput: () => undefined };
+    const app = { terminals, runtime: { get: (id: string) => terminals.get(id) }, trackNewCommandInput: () => undefined };
     await write.call(app, {}, "open", "hello");
     await write.call(app, {}, "open", "\x03");
     await write.call(app, {}, "shut", "hello");
@@ -202,7 +203,7 @@ describe("main hardening batch (refs #219)", () => {
   });
 
   it("item 5: /clear drops the staged prompt and the stale verdict", async () => {
-    const clear = loadMethod("clearForNewSession", "private async clearForNewSession(", ["readdir"], [readdir]) as (
+    const clear = loadMethod("clearForNewSession", "private async clearForNewSession(", ["readdir", "emptyActivityInput"], [readdir, emptyActivityInput]) as (
       terminalId: string,
       expected?: unknown,
     ) => Promise<void>;
@@ -227,8 +228,12 @@ describe("main hardening batch (refs #219)", () => {
         pendingPrompt: { file: "prompt-term-1-x.json", text: "staged prompt", images: 0 },
         verify: { state: "fail", command: "npm run test", summary: "failing" },
       };
+      const terminals = new Map([["term-1", inst]]);
       const app = {
-        terminals: new Map([["term-1", inst]]),
+        terminals,
+        runtime: { get: (id: string) => terminals.get(id) },
+        activityInputs: new Map(),
+        lastActivityKey: new Map(),
         subagents: { killOwner: () => 0 },
         eventsDirOf: () => dir,
         removeEventLeaf: async () => undefined,
@@ -237,6 +242,7 @@ describe("main hardening batch (refs #219)", () => {
           sent.push({ channel, payload });
         },
         sendTimelinePrefix: () => undefined,
+        sendInstances: () => undefined,
         sendPlan: () => undefined,
         workspaceOfTerminal: () => null,
         clearUserEdits: () => undefined,
@@ -548,6 +554,7 @@ describe("main hardening batch (refs #219)", () => {
         preferencesStore: { save: async () => undefined },
         shortcutMap: { ...DEFAULT_SHORTCUTS },
         terminals: new Map(),
+        runtime: { values: () => new Map().values() },
         buildMenu: () => {
           menus.push(1);
         },

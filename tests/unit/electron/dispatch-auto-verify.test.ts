@@ -32,7 +32,7 @@ describe("Dispatch Auto-Verify Invariants", () => {
     // One shot: consumed at finish start (even when the terminal is gone),
     // startup failure clears the pending entry without a note.
     check("finish consumes the pending entry before the terminal check",
-      /const autoTask = this\.autoVerifyTasks\.get\(ownerId\) \?\? null;\n\s+this\.autoVerifyTasks\.delete\(ownerId\);\n[\s\S]{0,400}if \(this\.terminals\.get\(ownerId\) !== owner/.test(main));
+      /const autoTask = this\.autoVerifyTasks\.get\(ownerId\) \?\? null;\n\s+this\.autoVerifyTasks\.delete\(ownerId\);\n[\s\S]{0,400}if \(this\.runtime\.get\(ownerId\) !== owner/.test(main));
     check("verify startup failure clears the pending entry",
       main.includes("void this.runVerify(owner.id).then((result) => {")
       && main.includes("if (!result.ok) this.autoVerifyTasks.delete(owner.id);"));

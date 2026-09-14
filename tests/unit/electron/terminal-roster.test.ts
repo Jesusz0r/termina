@@ -118,7 +118,7 @@ describe("roster handoff wiring", () => {
       .toBe(true);
     expect(main.includes("const provisional = this.usableAgentModel(`${provider}/${modelName}`);"))
       .toBe(true);
-    expect(main.includes("if (provisional) inst.model = provisional;"))
+    expect(main.includes("if (provisional) created.model = provisional;"))
       .toBe(true);
     expect(main.includes("if (modelChanged && inst.persist) this.savePlanRoster(inst);"))
       .toBe(true);

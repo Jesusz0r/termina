@@ -103,6 +103,7 @@ function makeHarness(opts: { switching: Set<string>; activeId: string | null }) 
     disposed: false,
     projects,
     terminals,
+    runtime: { get: (id: string) => terminals.get(id) },
     project: () => (opts.activeId ? (projects.get(opts.activeId) ?? null) : null),
     projectOfTerminal: (id: string) => {
       const pid = terminalProjects.get(id);
@@ -179,13 +180,15 @@ describe("mid-teardown creation gates (refs #214)", () => {
 
   it("leaves createTerminal itself ungated for internal callers", () => {
     // Restore-during-open, promotion install, and candidate creation run
-    // while switching: only the IPC/dispatch layer gates. The single
-    // reference inside createTerminal is the exit handler's roster check.
+    // while switching: only the IPC/dispatch layer gates. The roster
+    // persist check lives on the runtime host exit hook.
     const start = main.indexOf("private async createTerminal(");
-    const end = main.indexOf("private maybeAutoVerify(", start);
+    const end = main.indexOf("private async handlePtyExitBeforeRelease(", start);
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
     const body = main.slice(start, end);
-    expect(body.match(/projectIsSwitching/g) ?? []).toHaveLength(1);
+    expect(body.match(/projectIsSwitching/g) ?? []).toHaveLength(0);
+    const exitHook = main.slice(end, main.indexOf("private handlePtyExitAfterRelease(", end));
+    expect(exitHook).toContain("projectIsSwitching(exitOwner.id)");
   });
 });

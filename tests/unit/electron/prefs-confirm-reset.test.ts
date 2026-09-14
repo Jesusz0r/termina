@@ -116,6 +116,7 @@ function makePrefsApp(
     shortcutMap: {},
     buildMenu: () => undefined,
     terminals: new Map(),
+    runtime: { values: () => new Map().values() },
     win: opts.win === undefined ? { isDestroyed: () => false } : opts.win,
   };
   const confirm = loadConfirm(dialog);

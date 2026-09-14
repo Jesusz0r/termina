@@ -134,8 +134,10 @@ describe("timeline content ready path (refs #253)", () => {
     const promise = new Promise<void>((r) => { resolve = r; });
     const fills = new WeakMap<object, { promise: Promise<void>; resolve: () => void }>();
     fills.set(ev, { promise, resolve });
+    const terminals = new Map([["term-1", { timeline: [ev] }]]);
     const app = {
-      terminals: new Map([["term-1", { timeline: [ev] }]]),
+      terminals,
+      runtime: { get: (id: string) => terminals.get(id) },
       timelineContentFills: fills,
     };
     const pending = handler.call(app, {}, "term-1", 3);
@@ -167,8 +169,10 @@ describe("timeline content ready path (refs #253)", () => {
       };
       const fills = new WeakMap<object, { promise: Promise<void>; resolve: () => void }>();
       fills.set(ev, { promise: new Promise<void>(() => {}), resolve: () => {} });
+      const terminals = new Map([["term-1", { timeline: [ev] }]]);
       const app = {
-        terminals: new Map([["term-1", { timeline: [ev] }]]),
+        terminals,
+        runtime: { get: (id: string) => terminals.get(id) },
         timelineContentFills: fills,
       };
       const pending = handler.call(app, {}, "term-1", 4);
@@ -320,8 +324,10 @@ describe("Change Review baseline and revert (refs #255)", () => {
       baselineFills: new Map<string, Promise<void>>([[path, pending]]),
       modified: new Map([[path, { status: "modified" }]]),
     };
+    const terminals = new Map([["term-1", inst]]);
     const app = {
-      terminals: new Map([["term-1", inst]]),
+      terminals,
+      runtime: { get: (id: string) => terminals.get(id) },
       managedPath: async () => ({ path, workspace: { id: "ws-1" } }),
     };
     const request = handler.call(app, {}, "term-1", path);

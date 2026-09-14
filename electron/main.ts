@@ -26,13 +26,12 @@ import {
   isPtyLifecycleCurrent,
   isPtyRendererSendTargetCurrent,
   isPtyReadyHandshakeCurrent,
-  PtyEgressScheduler,
   sendPtyRendererMessage,
   type PtyDocumentIdentity,
   type PtyLifecycleIdentity,
   type PtyRendererSendTarget,
 } from "./pty-egress.js";
-import { AgentStartEvent, SidecarEvent, SidecarEventDelivery, SidecarEventQueue, SidecarTailer } from "./sidecar.js";
+import { AgentStartEvent, SidecarEvent, SidecarEventDelivery, SidecarTailer } from "./sidecar.js";
 import { IGNORED_SEGMENTS, ProjectWatcher, watchContentIdentity } from "./watcher.js";
 import { SnapshotStore, bindOwnedDirectory, bindOwnedEntry, boundPromotionEnsureDirectory, boundPromotionListEntries, boundPromotionOpenDirectory, boundPromotionReadFile, captureRootInRepo, createOwnedDirectory, disposeWorldlineGitCore, gitCommonDir, gitHead, gitObjectFormat, gitTrackedFiles, removeBoundOwnedDirectory, removeBoundOwnedEntry, trustResourceHashes, type BoundPromotionExpectedLeaf, type PromotionFsIdentity, type SourceState, writeBoundOwnedFile } from "./worldline-git.js";
 import { EvidenceHomeStore } from "./evidence-home.js";
@@ -92,6 +91,7 @@ import {
 } from "./terminal-roster.js";
 import { TerminalRosterStore, loadRosterFile, rosterFilePath, type RosterTerminal } from "./roster-store.js";
 import { AgentTerminalInstance } from "./terminal-instance.js";
+import { TerminalRuntime } from "./terminal-runtime.js";
 import {
   activityFor,
   activityKey,
@@ -145,10 +145,6 @@ function isChallengeProfile(value: unknown): value is ChallengeProfile {
   return typeof value === "string" && (CHALLENGE_PROFILES as readonly string[]).includes(value);
 }
 const MAX_CLIPBOARD_BYTES = 4 * 1024 * 1024;
-/** Exit teardown waits this long for the renderer to acknowledge the PTY
- *  tail before cancelling it: crash/reload cycles finish well inside, while
- *  a wedged renderer cannot stall teardown (and subagent cleanup) forever. */
-const PTY_EXIT_DRAIN_TIMEOUT_MS = 10_000;
 /** Absurd terminal dimensions are clamped before they reach the pty ioctl. */
 const MAX_TERMINAL_DIMENSION = 1024;
 const MAX_EXPLORER_ENTRIES = 2000;
@@ -179,7 +175,6 @@ const CHECKPOINT_IDLE_WAIT_MS = 1000;
  *  one terminal's sidecar queue for seconds, not forever. */
 const CHECKPOINT_CAPTURE_TIMEOUT_MS = 30_000;
 
-let terminalSeq = 0;
 let workspaceSeq = 0;
 let projectSeq = 0;
 
@@ -493,7 +488,33 @@ let rendererLoadGenerationSeq = 0;
 
 class TerminaApp {
   private win: BrowserWindow | null = null;
-  private terminals = new Map<string, AgentTerminalInstance>();
+  private runtime = new TerminalRuntime({
+    sendChunk: (terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence, data) =>
+      this.sendPtyChunk(terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence, data),
+    sendExit: (terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence, code) =>
+      this.sendPtyExit(terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence, code),
+    isDisposed: () => this.disposed,
+    shouldAdmitSidecar: (terminalId) => {
+      if (this.disposed) return false;
+      // A candidate's PTY can publish session_ready during the synchronous
+      // spawn inside createTerminal, before adopt installs the instance.
+      // Accepting it here would make handleSidecarEvent drop the startup
+      // boundary as "terminal closed". Child subagent streams are tailed on
+      // the shared tailer but owned by the subagent host. Unknown ids stay
+      // on disk.
+      if (!this.runtime.has(terminalId) && !this.subagents.hasStream(terminalId)) return false;
+      // A project switch is a temporary admission stop. Returning without
+      // accepting keeps the durable record at the tailer's cursor.
+      if (this.projectIsSwitching(this.projectOfTerminal(terminalId)?.id)) return false;
+      return true;
+    },
+    onSidecarEvent: (terminalId, event) => this.handleSidecarEvent(terminalId, event),
+    onSidecarError: (error, failedEvent) => console.warn(`[main] sidecar ${failedEvent.t} failed: ${error.message}`),
+    onPtyExitBeforeRelease: (inst, rendererTarget, details) => this.handlePtyExitBeforeRelease(inst, rendererTarget, details),
+    onPtyExitAfterRelease: (inst, rendererTarget, details) => this.handlePtyExitAfterRelease(inst, rendererTarget, details),
+  });
+  /** Exit owner snapshot taken while the instance is still mapped. */
+  private readonly ptyExitOwners = new WeakMap<AgentTerminalInstance, { exitOwner: ProjectState | null; persistOwner: ProjectState | null }>();
   /** In-flight initial project/terminal restoration on app boot. */
   private initialRestorePromise: Promise<void> | null = null;
   /** True only while the current renderer can consume pushed IPC. */
@@ -519,14 +540,6 @@ class TerminaApp {
   private trustedRendererProtocol: "file:" | "http:" | "https:" | null = null;
   private trustedRendererOrigin: string | null = null;
   private trustedRendererFilePath: string | null = null;
-  /** The single lossless PTY→renderer delivery owner. */
-  private ptyEgress = new PtyEgressScheduler({
-    send: (terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence, data) =>
-      this.sendPtyChunk(terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence, data),
-    sendExit: (terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence, code) =>
-      this.sendPtyExit(terminalId, terminalGeneration, windowGeneration, rendererGeneration, sequence, code),
-  });
-
   /** The renderer-facing project (the tab in front), or null. */
   private project(): ProjectState | null {
     return this.activeProjectId ? this.projects.get(this.activeProjectId) ?? null : null;
@@ -534,7 +547,7 @@ class TerminaApp {
 
   /** The project that owns a terminal, or null. */
   private projectOfTerminal(terminalId: string): ProjectState | null {
-    const inst = this.terminals.get(terminalId);
+    const inst = this.runtime.get(terminalId);
     if (!inst?.projectId) return null;
     return this.projects.get(inst.projectId) ?? null;
   }
@@ -584,7 +597,7 @@ class TerminaApp {
   /** Headless background subagent runs (SUBAGENTS-PLAN.md Phase 2). */
   private subagents = new SubagentHost({
     eventsDirFor: (terminalId) => {
-      const inst = this.terminals.get(terminalId);
+      const inst = this.runtime.get(terminalId);
       return inst ? this.eventsDirOf(inst) : null;
     },
     baseEnv: () => cleanEnv(),
@@ -594,10 +607,10 @@ class TerminaApp {
     watchStream: (terminalId) => this.tailer.watch(terminalId),
     releaseStream: (terminalId) => {
       this.tailer.stopWatching(terminalId);
-      this.sidecarQueues.delete(terminalId);
+      this.runtime.deleteSidecarQueue(terminalId);
     },
     dispatchKeysFor: async (ownerId) => {
-      const owner = this.terminals.get(ownerId);
+      const owner = this.runtime.get(ownerId);
       if (!owner) return { keys: new Set<string>(), root: "" };
       const ws = this.workspaceOfTerminal(owner);
       const root = ws?.root ?? owner.cwd;
@@ -607,7 +620,7 @@ class TerminaApp {
     isWorldlineTerminal: (terminalId) =>
       this.worldlineTailers.has(terminalId) || this.isWorldlineTerminal(terminalId),
     workspaceRootFor: (terminalId) => {
-      const inst = this.terminals.get(terminalId);
+      const inst = this.runtime.get(terminalId);
       if (!inst) return null;
       const ws = this.workspaceOfTerminal(inst);
       return { root: ws?.root ?? inst.cwd, cwd: inst.cwd };
@@ -633,10 +646,10 @@ class TerminaApp {
       return !owner || this.projectIsSwitching(owner.id);
     },
     isDisposed: () => this.disposed,
-    isTerminalCurrent: (inst) => this.terminals.get(inst.id) === inst && !inst.closed,
+    isTerminalCurrent: (inst) => this.runtime.get(inst.id) === inst && !inst.closed,
     eventsTarget: (terminalId) => {
       // finish() already gated on isTerminalCurrent, so this is the run's terminal.
-      const inst = this.terminals.get(terminalId);
+      const inst = this.runtime.get(terminalId);
       if (!inst) return null;
       const binding = this.eventsBindingOf(inst);
       if (!binding) return null;
@@ -705,8 +718,6 @@ class TerminaApp {
   private newCommandBuffers = new Map<string, string>();
   /** Tailers for candidate events directories. */
   private worldlineTailers = new Map<string, SidecarTailer>();
-  /** Preserve event order while bounding sidecar fanout per terminal. */
-  private sidecarQueues = new Map<string, SidecarEventQueue>();
   /** Live fold for `electron/agent-activity.ts`. Never persisted. */
   private activityInputs = new Map<string, AgentActivityInput>();
   private lastActivityKey = new Map<string, string>();
@@ -1093,7 +1104,7 @@ class TerminaApp {
     this.rendererLoadPending = true;
     this.rendererAwaitingNewFrame = false;
     this.rendererCrashedFrame = null;
-    this.ptyEgress.setRendererReady(windowGeneration, this.rendererGeneration, false);
+    this.runtime.setRendererReady(windowGeneration, this.rendererGeneration, false);
     this.rendererPendingLoad = this.currentPtyLifecycle();
     return true;
   }
@@ -1132,7 +1143,7 @@ class TerminaApp {
     this.rendererLoadPending = true;
     this.rendererAwaitingNewFrame = true;
     this.rendererCrashedFrame = { processId, frameRoutingId };
-    this.ptyEgress.setRendererReady(windowGeneration, this.rendererGeneration, false);
+    this.runtime.setRendererReady(windowGeneration, this.rendererGeneration, false);
     this.rendererPendingLoad = this.currentPtyLifecycle();
     return true;
   }
@@ -1154,7 +1165,7 @@ class TerminaApp {
     this.rendererLoadPending = true;
     this.rendererAwaitingNewFrame = true;
     this.rendererCrashedFrame = null;
-    this.ptyEgress.setRendererReady(windowGeneration, this.rendererGeneration, false);
+    this.runtime.setRendererReady(windowGeneration, this.rendererGeneration, false);
     this.rendererPendingLoad = this.currentPtyLifecycle();
     return true;
   }
@@ -1226,7 +1237,7 @@ class TerminaApp {
     this.rendererAwaitingNewFrame = true;
     this.rendererCrashedFrame = null;
     this.rendererPendingLoad = this.currentPtyLifecycle();
-    this.ptyEgress.setRendererReady(windowGeneration, rendererGeneration, false);
+    this.runtime.setRendererReady(windowGeneration, rendererGeneration, false);
     win.removeMenu();
     attachMacTitlebarReclaim(win, process.platform);
 
@@ -1240,7 +1251,7 @@ class TerminaApp {
       this.rendererAwaitingNewFrame = false;
       this.rendererCrashedFrame = null;
       this.rendererPendingLoad = null;
-      this.ptyEgress.setRendererReady(windowGeneration, this.rendererGeneration, false);
+      this.runtime.setRendererReady(windowGeneration, this.rendererGeneration, false);
       this.win = null;
       this.stopPaintWatchdog();
     });
@@ -1661,7 +1672,7 @@ class TerminaApp {
       if (shortcutsChanged || thinkingChanged) this.buildMenu();
       if (thinkingChanged) {
         const seq = candidate.showThinking ? SHOW_THINKING_CSI : HIDE_THINKING_CSI;
-        for (const inst of this.terminals.values()) {
+        for (const inst of this.runtime.values()) {
           if (inst.type === "agent") inst.pty.write(seq);
         }
       }
@@ -1743,7 +1754,7 @@ class TerminaApp {
   private terminalsOnWorkspace(ws: WorkspaceState): AgentTerminalInstance[] {
     const out: AgentTerminalInstance[] = [];
     for (const id of ws.terminalIds) {
-      const inst = this.terminals.get(id);
+      const inst = this.runtime.get(id);
       if (!inst) continue;
       if (inst.closed && inst.momentDots.length === 0 && inst.pendingHints.size === 0) continue;
       out.push(inst);
@@ -1857,7 +1868,7 @@ class TerminaApp {
   /** Recorder state for every agent terminal of a workspace. */
   private pushRecorderForWorkspace(ws: WorkspaceState, state: RecorderState, expected?: PtyRendererSendTarget | null): void {
     for (const id of ws.terminalIds) {
-      const inst = this.terminals.get(id);
+      const inst = this.runtime.get(id);
       if (inst && inst.type === "agent") this.setRecorderState(inst, state, expected);
     }
   }
@@ -1941,7 +1952,7 @@ class TerminaApp {
       releaseState: async (stateId) => {
         await this.releaseStateIfUnused(stateId, undefined, undefined, project);
       },
-      terminalBusy: (terminalId) => this.terminals.get(terminalId)?.busy === true,
+      terminalBusy: (terminalId) => this.runtime.get(terminalId)?.busy === true,
       terminalVerifying: (terminalId) => this.verifyRuns.has(terminalId),
       workspaceAt: async (root) => {
         const ws = await this.workspaceContaining(root);
@@ -1992,7 +2003,7 @@ class TerminaApp {
         }
         this.send("modified:list", { instanceId: inst.id, files: [...inst.modified.values()] }, rendererTarget);
         const changedList = seed.paths.map((path) => `- \`${path.rel}\``).join("\n");
-        for (const other of this.terminals.values()) {
+        for (const other of this.runtime.values()) {
           if (other.id === inst.id || other.workspaceId !== seed.primaryWorkspaceId || other.type !== "agent") continue;
           try {
             await this.writeEventLeaf(
@@ -2071,7 +2082,7 @@ class TerminaApp {
   private async pasteTerminal(id: unknown): Promise<TerminalPasteResult> {
     const text = (): TerminalPasteResult => ({ ok: true, kind: "text", text: capUtf8(clipboard.readText(), MAX_CLIPBOARD_BYTES) });
     if (typeof id !== "string") return text();
-    const captured = this.terminals.get(id);
+    const captured = this.runtime.get(id);
     if (!captured || captured.type !== "agent") return text();
     const image = clipboard.readImage();
     if (image.isEmpty()) return text();
@@ -2083,12 +2094,12 @@ class TerminaApp {
     }
     if (png.length === 0) return { ok: false, error: "image is empty" };
     if (png.length > MAX_CLIPBOARD_BYTES) return { ok: false, error: "image is too large" };
-    if (this.terminals.get(id) !== captured) return { ok: false, error: "terminal closed" };
+    if (this.runtime.get(id) !== captured) return { ok: false, error: "terminal closed" };
     const attached = await appendPendingImages(
       this.eventsDirOf(captured),
       captured.id,
       [{ bytes: png, mediaType: "image/png", id: randomUUID() }],
-      { canCommit: () => this.terminals.get(id) === captured },
+      { canCommit: () => this.runtime.get(id) === captured },
     );
     if (!attached.ok) return { ok: false, error: attached.error };
     return { ok: true, kind: "image", count: attached.count, queued: captured.busy };
@@ -2097,7 +2108,7 @@ class TerminaApp {
   private async dropTerminalFiles(event: Electron.IpcMainInvokeEvent, id: unknown, raw: unknown): Promise<TerminalPasteResult> {
     if (!isAuthorizedDropSender(event, this.win)) return { ok: false, error: "unauthorized" };
     if (typeof id !== "string" || !/^term-\d+$/.test(id)) return { ok: false, error: "terminal closed" };
-    const captured = this.terminals.get(id);
+    const captured = this.runtime.get(id);
     if (!captured) return { ok: false, error: "terminal closed" };
     const normalized = normalizeDroppedPaths(raw);
     if (!normalized.ok) return normalized;
@@ -2108,9 +2119,9 @@ class TerminaApp {
       const remaining = Math.max(0, MAX_PENDING_IMAGES - state.count);
       const images = await readDroppedImages(normalized.paths, remaining);
       if (!images.ok) return images;
-      if (this.terminals.get(id) !== captured) return { ok: false, error: "terminal closed" };
+      if (this.runtime.get(id) !== captured) return { ok: false, error: "terminal closed" };
       const attached = await appendPendingImages(eventsDir, captured.id, images.images, {
-        canCommit: () => this.terminals.get(id) === captured,
+        canCommit: () => this.runtime.get(id) === captured,
       });
       if (!attached.ok) return { ok: false, error: attached.error };
       return { ok: true, kind: "image", count: attached.count, queued: captured.busy };
@@ -2119,7 +2130,7 @@ class TerminaApp {
     if (!exists.ok) return exists;
     const quoted = quotePosixPaths(normalized.paths, process.platform);
     if (!quoted.ok) return quoted;
-    if (this.terminals.get(id) !== captured) return { ok: false, error: "terminal closed" };
+    if (this.runtime.get(id) !== captured) return { ok: false, error: "terminal closed" };
     return { ok: true, kind: "text", text: quoted.text };
   }
 
@@ -2211,7 +2222,7 @@ class TerminaApp {
       project.workspaces.delete(id);
       this.workspaceOwners.delete(id);
       project.terminalIds.forEach((tid) => {
-        const inst = this.terminals.get(tid);
+        const inst = this.runtime.get(tid);
         if (inst && inst.workspaceId === id) project.terminalIds.delete(tid);
       });
       this.userEditsByWorkspace.delete(id);
@@ -2615,7 +2626,8 @@ class TerminaApp {
       if (project.worldlines?.holdsEvidenceState(stateId)) return true;
       if (project.worldlines?.holdsRunState(stateId)) return true;
     }
-    for (const [terminalId, inst] of this.terminals) {
+    for (const inst of this.runtime.values()) {
+      const terminalId = inst.id;
       if (terminalId === ignoredTerminalId) {
         if (inst.timeline.some((event) => event.stateId === stateId && event.seq !== ignoredSeq)) return true;
         continue;
@@ -2654,14 +2666,11 @@ class TerminaApp {
   }
 
   private allocateTerminalId(): string {
-    return `term-${++terminalSeq}`;
+    return this.runtime.allocateId();
   }
 
   private noteTerminalId(id: string): void {
-    const m = /^term-(\d+)$/.exec(id);
-    if (!m) return;
-    const n = Number(m[1]);
-    if (Number.isInteger(n) && n > terminalSeq) terminalSeq = n;
+    this.runtime.noteId(id);
   }
 
   private coreSessionRoot(): string {
@@ -2679,7 +2688,7 @@ class TerminaApp {
   private saveTerminalRoster(project: ProjectState): void {
     const live: RosterTerminal[] = [];
     for (const id of project.terminalIds) {
-      const inst = this.terminals.get(id);
+      const inst = this.runtime.get(id);
       if (!inst?.persist || inst.closed) continue;
       live.push(inst);
     }
@@ -2698,7 +2707,7 @@ class TerminaApp {
 
   private sessionFileInUse(path: string | null | undefined): boolean {
     if (!path) return false;
-    for (const inst of this.terminals.values()) {
+    for (const inst of this.runtime.values()) {
       if (inst.sessionFile === path) return true;
     }
     return false;
@@ -2717,7 +2726,7 @@ class TerminaApp {
   private persistLive(project: ProjectState): AgentTerminalInstance[] {
     const out: AgentTerminalInstance[] = [];
     for (const id of project.terminalIds) {
-      const inst = this.terminals.get(id);
+      const inst = this.runtime.get(id);
       if (inst?.persist && !inst.closed) out.push(inst);
     }
     return out;
@@ -2779,7 +2788,7 @@ class TerminaApp {
       }
     }
     for (const item of spawned) {
-      if (!this.terminals.get(item.id)?.persist) unrestored.push(item.rec);
+      if (!this.runtime.get(item.id)?.persist) unrestored.push(item.rec);
     }
     // A non-empty roster is authoritative. Do not replace failed restores
     // with a fresh core tab: retaining both would make the old tab appear as
@@ -2791,7 +2800,7 @@ class TerminaApp {
   /** Provider-qualified model of a core tab, for TERMINA_CORE_* env. */
   private copiedCoreModel(fromTerminalId: string | undefined): string | null {
     if (!fromTerminalId) return null;
-    const source = this.terminals.get(fromTerminalId);
+    const source = this.runtime.get(fromTerminalId);
     if (!source || source.type !== "agent") return null;
     const model = source.model ?? source.currentRun?.model ?? null;
     return typeof model === "string" && model.includes("/") ? model : null;
@@ -2950,7 +2959,7 @@ class TerminaApp {
       opts?.workspaceId ?? requestedProject?.workspaces.values().next().value?.id ?? this.primaryWorkspace(requestedProject ?? undefined)?.id ?? this.primaryWorkspace()?.id ?? "";
     const owner = this.projectOfWorkspace(workspaceId) ?? requestedProject ?? this.project();
     let id = opts?.id;
-    if (id && this.terminals.has(id)) {
+    if (id && this.runtime.has(id)) {
       // Two projects both restore term-1. Keep the session; never overwrite a live pty.
       if (!persist) throw new Error(`terminal ${id} already exists`);
       id = this.allocateTerminalId();
@@ -3050,121 +3059,45 @@ class TerminaApp {
     if (persist && owner && this.persistLive(owner).length >= MAX_TERMINAL_ROSTER) {
       throw new Error("this project already has the maximum number of saved terminals");
     }
-    const inst = new AgentTerminalInstance(id, cwd ?? this.terminalCwd(), workspaceId, type, shellName, cmd, args, env, 80, 24);
-    inst.projectId = owner?.id ?? null;
-    inst.persist = persist;
-    inst.shellPath = shellPath;
-    inst.sessionId = sessionId;
-    inst.sessionFile = sessionFile;
-    if (type === "agent") inst.engine = "core";
-    if (type === "agent" && !opts?.launch) {
-      const provider = env.TERMINA_CORE_PROVIDER?.trim() ?? "";
-      const modelName = env.TERMINA_CORE_MODEL?.trim() ?? "";
-      if (provider && modelName) {
-        const provisional = this.usableAgentModel(`${provider}/${modelName}`);
-        if (provisional) inst.model = provisional;
-      }
-      if (env.TERMINA_CORE_RESUME !== "1") {
-        const thinking = this.usableAgentThinking(env.TERMINA_CORE_EFFORT ?? null);
-        if (thinking) inst.thinkingLevel = thinking;
-      }
-    }
-    this.terminals.set(inst.id, inst);
+    const sidecarTailer = opts?.sidecarTailer ?? this.tailer;
+    const inst = this.runtime.spawn({
+      id,
+      cwd: cwd ?? this.terminalCwd(),
+      workspaceId,
+      type,
+      shellName,
+      cmd,
+      args,
+      env,
+      tailer: sidecarTailer,
+      skipSidecarWatch: opts?.skipSidecarWatch,
+      rendererTarget,
+      setup: (created) => {
+        created.projectId = owner?.id ?? null;
+        created.persist = persist;
+        created.shellPath = shellPath;
+        created.sessionId = sessionId;
+        created.sessionFile = sessionFile;
+        if (type === "agent") created.engine = "core";
+        if (type === "agent" && !opts?.launch) {
+          const provider = env.TERMINA_CORE_PROVIDER?.trim() ?? "";
+          const modelName = env.TERMINA_CORE_MODEL?.trim() ?? "";
+          if (provider && modelName) {
+            const provisional = this.usableAgentModel(`${provider}/${modelName}`);
+            if (provisional) created.model = provisional;
+          }
+          if (env.TERMINA_CORE_RESUME !== "1") {
+            const thinking = this.usableAgentThinking(env.TERMINA_CORE_EFFORT ?? null);
+            if (thinking) created.thinkingLevel = thinking;
+          }
+        }
+      },
+    });
     if (owner) {
       owner.workspaces.get(workspaceId)?.terminalIds.add(id);
       owner.terminalIds.add(id);
       if (persist && !opts?.skipRosterSave) this.saveTerminalRoster(owner);
     }
-
-    const terminalGeneration = inst.generation;
-    inst.pty.onData = (data) => this.sendPtyData(inst.id, terminalGeneration, data);
-    this.ptyEgress.register(inst.id, terminalGeneration, {
-      pause: () => inst.pty.pause(),
-      resume: () => inst.pty.resume(),
-    });
-    inst.pty.onExit = async (code: number, origin: "native" | "forced" = "native") => {
-      if (inst.exitHandled) return;
-      inst.exitHandled = true;
-      console.log(`[main] terminal ${inst.id} (${inst.type}) exited code=${code}${origin === "forced" ? " (forced cleanup)" : ""}`);
-      // Keep the terminal in the live map while queued output drains.  An
-      // exit notification overtaking PTY bytes changes TUI semantics, and a
-      // renderer reload must be able to receive the retained tail. A wedged
-      // renderer (ready but never acking) gets a bounded wait, then its
-      // retained output is cancelled so teardown — timeline release,
-      // subagent cleanup, dispatch re-pending — cannot stall forever.
-      const drained = await this.ptyEgress.finish(inst.id, terminalGeneration, code, PTY_EXIT_DRAIN_TIMEOUT_MS);
-      if (!drained) {
-        console.warn(`[main] terminal ${inst.id} exit drain timed out; dropping retained output`);
-        this.ptyEgress.cancel(inst.id, terminalGeneration);
-      }
-      if (inst.captureTimer) {
-        clearTimeout(inst.captureTimer);
-        inst.captureTimer = null;
-      }
-      for (const [token, pending] of [...this.pendingPreflights]) {
-        if (pending.terminalId !== inst.id) continue;
-        clearTimeout(pending.timer);
-        this.releaseWriteLease(pending.workspaceId, pending.leaseRequester);
-        this.pendingPreflights.delete(token);
-      }
-      // The exit marker was delivered and acknowledged by PtyEgressScheduler;
-      // it is not sent through the unsequenced generic channel.
-      this.closeRunOnExit(inst);
-      this.foldActivity(inst, { t: "pty_exit", seq: inst.timelineSeq, at: Date.now() }, rendererTarget);
-      void this.cleanupPromptPayloads(inst);
-      for (const event of inst.timeline) {
-        this.resolveTimelineContentFill(event);
-        if (event.stateId) void this.releaseStateIfUnused(event.stateId, inst.id, event.seq, this.projectOfTerminal(inst.id));
-      }
-      // Resolve the owner before the map delete. projectOfTerminal reads
-      // the terminal map, so a lookup after the delete finds no project.
-      const exitOwner = this.projectOfTerminal(inst.id);
-      const persistOwner = inst.persist && exitOwner && !this.disposed && !this.projectIsSwitching(exitOwner.id) ? exitOwner : null;
-      if (persistOwner) {
-        await this.discardCoreSession(inst).catch((error) => {
-          console.warn(`[main] could not discard exited core session ${inst.id}: ${(error as Error).message}`);
-        });
-      }
-      this.terminals.delete(inst.id);
-      this.busyAgents.delete(inst.id);
-      this.activityInputs.delete(inst.id);
-      this.lastActivityKey.delete(inst.id);
-      this.autoVerifyTasks.delete(inst.id);
-      this.autoVerifyFailures.delete(inst.id);
-      exitOwner?.workspaces.get(inst.workspaceId)?.terminalIds.delete(inst.id);
-      exitOwner?.terminalIds.delete(inst.id);
-      if (persistOwner) this.saveTerminalRoster(persistOwner);
-      exitOwner?.worldlines?.terminalExited(inst.id);
-      this.worldlineTailers.get(inst.id)?.stop();
-      this.worldlineTailers.delete(inst.id);
-      this.tailer.stopWatching(inst.id);
-      this.sidecarQueues.delete(inst.id);
-      this.ptyEgress.cancel(inst.id, terminalGeneration);
-      // A closed owner takes its background runs with it: no API burns for
-      // a dead terminal, and no orphan results land nowhere.
-      this.subagents.killOwner(inst.id, "terminal closed");
-      // A dispatch worker closed before settling: its task goes back to
-      // pending so the board stays honest.
-      const dispatchExit = this.dispatchRuns.get(inst.id);
-      if (dispatchExit) {
-        this.writeDispatchSettleNote(inst, "exited");
-        this.dispatchRuns.delete(inst.id);
-        this.dispatchWorkers.delete(inst.id);
-        const ownerInst = this.terminals.get(dispatchExit.ownerId);
-        const task = ownerInst ? findTaskByText(ownerInst.plan, dispatchExit.taskText) : undefined;
-        if (ownerInst && task) {
-          task.state = "pending";
-          task.workerId = undefined;
-          task.claimed = undefined;
-          this.sendPlan(ownerInst, rendererTarget);
-        }
-      }
-      this.sendInstances(rendererTarget);
-    };
-
-    const sidecarTailer = opts?.sidecarTailer ?? this.tailer;
-    if (!opts?.skipSidecarWatch) sidecarTailer.watch(inst.id);
-    if (type === "agent") sidecarTailer.setExpectedProducer(inst.id, inst.pty.pid);
     // watchReady for candidates runs before the instance exists; publish a
     // hold that landed in that window now that foldActivity can see the pane.
     if (type === "agent" && sidecarTailer.isHeld(inst.id)) {
@@ -3182,6 +3115,96 @@ class TerminaApp {
     return inst;
   }
 
+  /**
+   * Still mapped: drain already finished. Capture owner, expire preflights,
+   * fold exit, and discard the core session before the runtime releases the id.
+   */
+  private async handlePtyExitBeforeRelease(
+    inst: AgentTerminalInstance,
+    rendererTarget: PtyRendererSendTarget | null,
+    details: { code: number; origin: "native" | "forced"; drained: boolean },
+  ): Promise<void> {
+    console.log(`[main] terminal ${inst.id} (${inst.type}) exited code=${details.code}${details.origin === "forced" ? " (forced cleanup)" : ""}`);
+    if (!details.drained) {
+      console.warn(`[main] terminal ${inst.id} exit drain timed out; dropping retained output`);
+    }
+    if (inst.captureTimer) {
+      clearTimeout(inst.captureTimer);
+      inst.captureTimer = null;
+    }
+    for (const [token, pending] of [...this.pendingPreflights]) {
+      if (pending.terminalId !== inst.id) continue;
+      clearTimeout(pending.timer);
+      this.releaseWriteLease(pending.workspaceId, pending.leaseRequester);
+      this.pendingPreflights.delete(token);
+    }
+    // The exit marker was delivered and acknowledged by PtyEgressScheduler;
+    // it is not sent through the unsequenced generic channel.
+    this.closeRunOnExit(inst);
+    this.foldActivity(inst, { t: "pty_exit", seq: inst.timelineSeq, at: Date.now() }, rendererTarget);
+    void this.cleanupPromptPayloads(inst);
+    for (const event of inst.timeline) {
+      this.resolveTimelineContentFill(event);
+      if (event.stateId) void this.releaseStateIfUnused(event.stateId, inst.id, event.seq, this.projectOfTerminal(inst.id));
+    }
+    // Resolve the owner before the map delete. projectOfTerminal reads
+    // the terminal map, so a lookup after the delete finds no project.
+    // Snapshot persistOwner here: discard awaits, and a later recompute
+    // could skip the roster save the old path always paired with discard.
+    const exitOwner = this.projectOfTerminal(inst.id);
+    const persistOwner = inst.persist && exitOwner && !this.disposed && !this.projectIsSwitching(exitOwner.id) ? exitOwner : null;
+    this.ptyExitOwners.set(inst, { exitOwner, persistOwner });
+    if (persistOwner) {
+      await this.discardCoreSession(inst).catch((error) => {
+        console.warn(`[main] could not discard exited core session ${inst.id}: ${(error as Error).message}`);
+      });
+    }
+  }
+
+  /** Map/watch/queue/egress already released. */
+  private handlePtyExitAfterRelease(
+    inst: AgentTerminalInstance,
+    rendererTarget: PtyRendererSendTarget | null,
+    _details: { code: number; origin: "native" | "forced"; drained: boolean },
+  ): void {
+    const captured = this.ptyExitOwners.get(inst);
+    this.ptyExitOwners.delete(inst);
+    const exitOwner = captured?.exitOwner ?? (inst.projectId ? this.projects.get(inst.projectId) ?? null : null);
+    const persistOwner = captured ? captured.persistOwner : null;
+    this.busyAgents.delete(inst.id);
+    this.activityInputs.delete(inst.id);
+    this.lastActivityKey.delete(inst.id);
+    this.autoVerifyTasks.delete(inst.id);
+    this.autoVerifyFailures.delete(inst.id);
+    exitOwner?.workspaces.get(inst.workspaceId)?.terminalIds.delete(inst.id);
+    exitOwner?.terminalIds.delete(inst.id);
+    if (persistOwner) this.saveTerminalRoster(persistOwner);
+    exitOwner?.worldlines?.terminalExited(inst.id);
+    this.worldlineTailers.get(inst.id)?.stop();
+    this.worldlineTailers.delete(inst.id);
+    this.tailer.stopWatching(inst.id);
+    // A closed owner takes its background runs with it: no API burns for
+    // a dead terminal, and no orphan results land nowhere.
+    this.subagents.killOwner(inst.id, "terminal closed");
+    // A dispatch worker closed before settling: its task goes back to
+    // pending so the board stays honest.
+    const dispatchExit = this.dispatchRuns.get(inst.id);
+    if (dispatchExit) {
+      this.writeDispatchSettleNote(inst, "exited");
+      this.dispatchRuns.delete(inst.id);
+      this.dispatchWorkers.delete(inst.id);
+      const ownerInst = this.runtime.get(dispatchExit.ownerId);
+      const task = ownerInst ? findTaskByText(ownerInst.plan, dispatchExit.taskText) : undefined;
+      if (ownerInst && task) {
+        task.state = "pending";
+        task.workerId = undefined;
+        task.claimed = undefined;
+        this.sendPlan(ownerInst, rendererTarget);
+      }
+    }
+    this.sendInstances(rendererTarget);
+  }
+
   // ------------------------------------------------------------- verify ----
 
   /**
@@ -3197,7 +3220,7 @@ class TerminaApp {
     if (this.verifyRuns.has(owner.id) || this.autoVerifyTasks.has(owner.id)) return;
     for (const id of this.dispatchGroupIds(owner.id)) {
       if (id === owner.id) continue;
-      const sibling = this.terminals.get(id);
+      const sibling = this.runtime.get(id);
       if (sibling && !sibling.closed && sibling.busy) return;
     }
     this.autoVerifyTasks.set(owner.id, taskText);
@@ -3217,7 +3240,7 @@ class TerminaApp {
     if (this.verifyRuns.has(owner.id) || this.autoVerifyTasks.has(owner.id)) return;
     for (const id of this.dispatchGroupIds(owner.id)) {
       if (id === owner.id) continue;
-      const sibling = this.terminals.get(id);
+      const sibling = this.runtime.get(id);
       if (sibling && !sibling.closed && sibling.busy) return;
     }
     void this.runVerify(owner.id).then((result) => {
@@ -3226,7 +3249,7 @@ class TerminaApp {
   }
 
   private async runVerify(ownerId: string): Promise<{ ok: boolean; error?: string }> {
-    const owner = this.terminals.get(ownerId);
+    const owner = this.runtime.get(ownerId);
     if (!owner) return { ok: false, error: "terminal not found" };
     // The verify job can outlive several awaits (and the process itself can
     // run for minutes). Keep its pushes owned by the document that requested
@@ -3255,7 +3278,7 @@ class TerminaApp {
     if (
       this.disposed ||
       this.projectIsSwitching(verifyOwnerId) ||
-      this.terminals.get(ownerId) !== owner ||
+      this.runtime.get(ownerId) !== owner ||
       (candidate && (!verifyOwner?.worldlines?.candidateSandboxOf(ownerId) || !existsSync(candidate.root)))
     ) {
       this.verifyRuns.delete(ownerId);
@@ -3341,7 +3364,7 @@ class TerminaApp {
         verifyProfileParent = null;
         if (profileParent) void this.removeBoundEvidenceProfile(profilePath, profileParent);
       }
-      if (this.terminals.get(ownerId) !== owner || this.projectIsSwitching(this.projectOfTerminal(ownerId)?.id) || this.disposed) return;
+      if (this.runtime.get(ownerId) !== owner || this.projectIsSwitching(this.projectOfTerminal(ownerId)?.id) || this.disposed) return;
       let summary = how === "pass" ? "tests green" : how === "timeout" ? "tests timed out" : how === "cancelled" ? "cancelled" : "tests failing";
       let failed: { count: number; names: string[] } | null = null;
       if (how === "fail") {
@@ -3424,7 +3447,7 @@ class TerminaApp {
 
   private cancelVerifyForComparison(comparisonId: string): void {
     for (const ownerId of [...this.verifyRuns]) {
-      const owner = this.terminals.get(ownerId);
+      const owner = this.runtime.get(ownerId);
       const workspace = owner ? this.projectOfTerminal(ownerId)?.workspaces.get(owner.workspaceId) : undefined;
       if (workspace?.comparisonId !== comparisonId) continue;
       if (this.verifyJobs.has(ownerId)) this.cancelVerify(ownerId);
@@ -3433,7 +3456,7 @@ class TerminaApp {
   }
 
   private cancelVerify(ownerId: string): { ok: boolean; error?: string } {
-    if (!this.terminals.has(ownerId)) return { ok: false, error: "terminal not found" };
+    if (!this.runtime.has(ownerId)) return { ok: false, error: "terminal not found" };
     const job = this.verifyJobs.get(ownerId);
     if (!job || !this.verifyRuns.has(ownerId)) return { ok: false, error: "no verify run is in progress" };
     job.interrupted = true;
@@ -3466,7 +3489,7 @@ class TerminaApp {
     output: string,
     failed: { count: number; names: string[] } | null = null,
   ): void {
-    const owner = this.terminals.get(ownerId);
+    const owner = this.runtime.get(ownerId);
     const eventsDir = owner ? this.eventsDirOf(owner) : this.eventsDir;
     const root = owner ? this.eventsBindingOf(owner) : this.eventsDirBinding;
     if (!root) return;
@@ -3515,7 +3538,7 @@ class TerminaApp {
     } catch {
       return;
     }
-    if (this.terminals.get(inst.id) !== inst || inst.closed) return;
+    if (this.runtime.get(inst.id) !== inst || inst.closed) return;
     if (snapshot.entries.length === 0) {
       await this.removeEventLeaf(inst, `project-${inst.id}.md`);
       return;
@@ -3569,7 +3592,7 @@ class TerminaApp {
         const owner = ws ? this.projectOfWorkspace(workspaceId) : null;
         if (!ws || !owner || this.projectIsSwitching(owner.id)) return;
         for (const id of ws.terminalIds) {
-          const inst = this.terminals.get(id);
+          const inst = this.runtime.get(id);
           if (inst && inst.type === "agent" && !inst.closed) void this.writeProjectSnapshot(inst);
         }
       }, PROJECT_SNAPSHOT_DEBOUNCE_MS),
@@ -3753,11 +3776,11 @@ class TerminaApp {
   /** True when an active verify or dispatch overlaps the given workspace. */
   private overlapInWorkspace(workspaceId: string): boolean {
     for (const id of this.verifyRuns) {
-      const inst = this.terminals.get(id);
+      const inst = this.runtime.get(id);
       if (inst && inst.workspaceId === workspaceId) return true;
     }
     for (const entry of this.dispatchRuns.values()) {
-      const owner = this.terminals.get(entry.ownerId);
+      const owner = this.runtime.get(entry.ownerId);
       if (owner && owner.workspaceId === workspaceId) return true;
     }
     return false;
@@ -3774,7 +3797,7 @@ class TerminaApp {
   /** Canonical paths already claimed by this owner's live workers. */
   private async dispatchPathKeysInFlight(ownerId: string, root: string): Promise<Set<string>> {
     const used = new Set<string>();
-    const owner = this.terminals.get(ownerId);
+    const owner = this.runtime.get(ownerId);
     if (!owner) return used;
     for (const entry of this.dispatchRuns.values()) {
       if (entry.ownerId !== ownerId) continue;
@@ -3821,7 +3844,7 @@ class TerminaApp {
   private *agentScheduleTasks(): Generator<ScheduleTickTask> {
     for (const project of this.projects.values()) {
       for (const id of project.terminalIds) {
-        const inst = this.terminals.get(id);
+        const inst = this.runtime.get(id);
         if (!inst || inst.type !== "agent" || inst.closed) continue;
         for (const task of inst.plan) {
           if (task.state !== "pending") continue;
@@ -3837,7 +3860,7 @@ class TerminaApp {
     ownerId: string,
     taskText?: string,
   ): Promise<{ ok: boolean; error?: string; dispatched?: number }> {
-    const owner = this.terminals.get(ownerId);
+    const owner = this.runtime.get(ownerId);
     if (!owner || owner.type !== "agent") return { ok: false, error: "terminal not found" };
     const dispatchOwnerId = this.projectOfTerminal(ownerId)?.id;
     if (this.disposed || this.projectIsSwitching(dispatchOwnerId)) return { ok: false, error: "the project is changing" };
@@ -3846,7 +3869,7 @@ class TerminaApp {
     const ownerWs = this.workspaceOfTerminal(owner);
     for (const entry of this.dispatchRuns.values()) {
       if (entry.ownerId === ownerId) continue;
-      const running = this.terminals.get(entry.ownerId);
+      const running = this.runtime.get(entry.ownerId);
       if (running && ownerWs && running.workspaceId === ownerWs.id) {
         return { ok: false, error: "a dispatch is already running" };
       }
@@ -3988,7 +4011,7 @@ class TerminaApp {
     if (requested === resolve(this.eventsDir)) {
       binding = this.eventsDirBinding;
     } else {
-      for (const inst of this.terminals.values()) {
+      for (const inst of this.runtime.values()) {
         if (resolve(this.eventsDirOf(inst)) !== requested) continue;
         binding = this.eventsBindingOf(inst);
         break;
@@ -4280,7 +4303,7 @@ class TerminaApp {
 
   /** Publish machine-only Mine policy for each terminal's mutation tools. */
   private async writeMineContext(project: ProjectState): Promise<void> {
-    const agents = [...this.terminals.values()].filter((inst) => inst.type === "agent" && this.projectOfTerminal(inst.id) === project);
+    const agents = [...this.runtime.values()].filter((inst) => inst.type === "agent" && this.projectOfTerminal(inst.id) === project);
     const content = Buffer.from(JSON.stringify([...project.mineFiles].sort()));
     const writes = await Promise.allSettled(
       agents.map(async (inst) => {
@@ -4300,7 +4323,7 @@ class TerminaApp {
    *  marks stay in their file: revisiting the project restores them. */
   private async clearMineFiles(project: ProjectState): Promise<void> {
     project.mineFiles.clear();
-    const agents = [...this.terminals.values()].filter((inst) => inst.type === "agent" && this.projectOfTerminal(inst.id) === project);
+    const agents = [...this.runtime.values()].filter((inst) => inst.type === "agent" && this.projectOfTerminal(inst.id) === project);
     await Promise.all(
       agents.flatMap((inst) => [
         this.removeEventLeaf(inst, `mine-${inst.id}.md`),
@@ -4391,7 +4414,7 @@ class TerminaApp {
   private async writeUserEditsContext(): Promise<void> {
     if (this.userEditsByWorkspace.size === 0) return;
     const writes: Promise<void>[] = [];
-    for (const inst of this.terminals.values()) {
+    for (const inst of this.runtime.values()) {
       if (inst.type !== "agent") continue;
       const ws = this.workspaceOfTerminal(inst);
       if (!ws) continue;
@@ -4453,7 +4476,7 @@ class TerminaApp {
   /** Remove the edits context files of a workspace's agent terminals. */
   private removeUserEditsFiles(ws: WorkspaceState): void {
     for (const id of ws.terminalIds) {
-      const inst = this.terminals.get(id);
+      const inst = this.runtime.get(id);
       if (inst?.type !== "agent") continue;
       // Remove from the terminal's OWN events dir: a candidate's bridge
       // reads its candidate dir, not the primary's.
@@ -4465,18 +4488,17 @@ class TerminaApp {
    * startup handshake. Worldline has already removed its routing, so any
    * late sidecar records from this process are intentionally ignored. */
   private terminateCandidate(id: string): void {
-    this.terminals.get(id)?.pty.killGroup();
+    this.runtime.get(id)?.pty.killGroup();
     this.closeTerminal(id);
   }
 
   private closeTerminal(id: string): void {
-    const inst = this.terminals.get(id);
+    const inst = this.runtime.get(id);
     if (!inst || inst.closed) return;
     // A user close invalidates queued output.  The PTY exit callback may run
     // later, but its stale tail must not leak into a newly opened terminal
     // that happens to reuse the same renderer tab.
-    inst.closed = true;
-    this.ptyEgress.cancel(id, inst.generation);
+    this.runtime.markClosed(id);
     inst.pty.cancelOutput();
     this.newCommandBuffers.delete(id);
     this.busyAgents.delete(id);
@@ -4505,7 +4527,7 @@ class TerminaApp {
     type TerminalExitHandler = (code: number, origin?: "native" | "forced") => void | Promise<void>;
     const existingOnExit = inst.pty.onExit as TerminalExitHandler;
     const killWatchdog = setTimeout(() => {
-      if (!this.terminals.has(id) || inst.exitHandled) return;
+      if (!this.runtime.has(id) || inst.exitHandled) return;
       try {
         inst.pty.killGroup("SIGKILL");
       } catch (error) {
@@ -4535,7 +4557,7 @@ class TerminaApp {
   }
 
   private closeUserTerminal(id: string): void {
-    const inst = this.terminals.get(id);
+    const inst = this.runtime.get(id);
     if (!inst || inst.closed) return;
     const owner = this.projectOfTerminal(id);
     this.closeTerminal(id);
@@ -4569,11 +4591,11 @@ class TerminaApp {
   /** The terminals of the active project, in creation order. */
   private activeProjectTerminals(): AgentTerminalInstance[] {
     const project = this.project();
-    return [...this.terminals.values()].filter((inst) => !inst.closed && (!project || project.terminalIds.has(inst.id)));
+    return [...this.runtime.values()].filter((inst) => !inst.closed && (!project || project.terminalIds.has(inst.id)));
   }
 
   private instanceList(): InstanceSummary[] {
-    return [...this.terminals.values()].filter((t) => !t.closed).map((t) => ({
+    return [...this.runtime.values()].filter((t) => !t.closed).map((t) => ({
       id: t.id,
       generation: t.generation,
       cwd: t.cwd,
@@ -4617,54 +4639,15 @@ class TerminaApp {
   }
 
   private async drainSidecarQueues(ids?: Iterable<string>): Promise<void> {
-    const target = ids === undefined ? null : new Set(ids);
-    while (true) {
-      const pending = [...this.sidecarQueues]
-        .filter(([id]) => target === null || target.has(id))
-        .filter(([, queue]) => {
-          const stats = queue.stats();
-          return stats.items > 0 || stats.inFlight > 0;
-        })
-        .map(([, queue]) => queue.drain());
-      if (pending.length === 0) return;
-      await Promise.all(pending);
-    }
+    await this.runtime.drainSidecarQueues(ids);
   }
 
   private clearSidecarQueues(ids?: Iterable<string>): void {
-    if (ids === undefined) {
-      this.sidecarQueues.clear();
-      return;
-    }
-    for (const id of ids) this.sidecarQueues.delete(id);
+    this.runtime.clearSidecarQueues(ids);
   }
 
   private enqueueSidecarEvent(terminalId: string, event: SidecarEvent): SidecarEventDelivery {
-    if (this.disposed) return { accepted: false };
-    // A candidate's PTY can publish session_ready during the synchronous
-    // spawn inside createTerminal, before that method has installed its
-    // AgentTerminalInstance in the live map. Keep the durable sidecar record at
-    // the tailer's cursor until the instance exists; accepting it here would
-    // make handleSidecarEvent drop the startup boundary as "terminal closed".
-    // Child subagent streams are tailed on the shared tailer but owned by
-    // the subagent host, not by a terminal. Unknown ids stay on disk.
-    if (!this.terminals.has(terminalId) && !this.subagents.hasStream(terminalId)) return { accepted: false };
-    // A project switch is a temporary admission stop.  Returning without
-    // accepting would make the tailer advance past a boundary event, so the
-    // caller must retry the same durable record instead.
-    if (this.projectIsSwitching(this.projectOfTerminal(terminalId)?.id)) return { accepted: false };
-    let queue = this.sidecarQueues.get(terminalId);
-    if (!queue) {
-      queue = new SidecarEventQueue(
-        (queuedEvent) => this.handleSidecarEvent(terminalId, queuedEvent),
-        {
-          onError: (error, failedEvent) => console.warn(`[main] sidecar ${failedEvent.t} failed: ${error.message}`),
-        },
-      );
-      this.sidecarQueues.set(terminalId, queue);
-    }
-    // SidecarTailer treats false as backpressure and keeps this event on disk.
-    return queue.enqueueTracked(event);
+    return this.runtime.enqueueSidecar(terminalId, event);
   }
 
   private async handleSidecarEvent(terminalId: string, event: SidecarEvent): Promise<void> {
@@ -4676,7 +4659,7 @@ class TerminaApp {
       this.subagents.noteChildEvent(terminalId, event.t, event.t === "tool" ? event.path : undefined);
       return;
     }
-    const inst = this.terminals.get(terminalId);
+    const inst = this.runtime.get(terminalId);
     if (!inst) return;
     // A sidecar callback can yield across store/file work. Keep every push
     // from this event tied to the document that admitted it.
@@ -4809,7 +4792,7 @@ class TerminaApp {
         // The run records moments: the recorder state follows the store.
         const startWs2 = this.workspaceOfTerminal(inst);
         void agentOwner?.storePromise?.then((s) => {
-          if (!this.disposed && !this.projectIsSwitching(agentOwner?.id) && this.terminals.has(inst.id)) {
+          if (!this.disposed && !this.projectIsSwitching(agentOwner?.id) && this.runtime.has(inst.id)) {
             this.setRecorderState(
               inst,
               !s || startWs2?.recordError ? "paused" : startWs2 && !startWs2.indexDone ? "indexing" : "ready",
@@ -4833,7 +4816,7 @@ class TerminaApp {
         // A dispatch worker started: mark its task active on the owner board.
         const dispatchStart = this.dispatchRuns.get(inst.id);
         if (dispatchStart) {
-          const ownerInst = this.terminals.get(dispatchStart.ownerId);
+          const ownerInst = this.runtime.get(dispatchStart.ownerId);
           const task = ownerInst ? findTaskByText(ownerInst.plan, dispatchStart.taskText) : undefined;
           if (ownerInst && task) {
             task.state = "active";
@@ -4863,7 +4846,7 @@ class TerminaApp {
         const dispatchEnd = this.dispatchRuns.get(inst.id);
         if (dispatchEnd) {
           this.writeDispatchSettleNote(inst, "settled");
-          const ownerInst = this.terminals.get(dispatchEnd.ownerId);
+          const ownerInst = this.runtime.get(dispatchEnd.ownerId);
           const task = ownerInst ? findTaskByText(ownerInst.plan, dispatchEnd.taskText) : undefined;
           if (ownerInst) {
             if (task && taskIsComplete(task.paths, inst.touched, inst.toolOutcomes)) task.state = "done";
@@ -5015,7 +4998,7 @@ class TerminaApp {
     // bridge polls its candidate events dir, not the primary's. This write
     // is identity-checked but not queued through the snapshot core: a
     // capture in flight would otherwise delay the ack past the 15s wait.
-    const inst = this.terminals.get(terminalId);
+    const inst = this.runtime.get(terminalId);
     const root = inst ? this.eventsBindingOf(inst) : this.eventsDirBinding;
     const dir = inst ? this.eventsDirOf(inst) : this.eventsDir;
     if (!root) return;
@@ -5294,7 +5277,7 @@ class TerminaApp {
     clearTimeout(pending.timer);
     this.pendingPreflights.delete(token);
     this.releaseWriteLease(pending.workspaceId, pending.leaseRequester);
-    const inst = this.terminals.get(pending.terminalId);
+    const inst = this.runtime.get(pending.terminalId);
     // Cancel already folded `preflight_cancel`. Only the timer is a lease wait.
     if (inst && cause === "timeout") {
       this.foldActivity(inst, { t: "preflight_timeout", seq: inst.timelineSeq, at: Date.now() });
@@ -5415,7 +5398,7 @@ class TerminaApp {
     if (inst.type !== "agent") return;
     for (const otherId of this.busyAgents) {
       if (otherId === inst.id) continue;
-      const other = this.terminals.get(otherId);
+      const other = this.runtime.get(otherId);
       if (!other || other.workspaceId !== inst.workspaceId) continue;
       run.overlap = true;
       run.replayable = false;
@@ -6152,7 +6135,7 @@ class TerminaApp {
 
   private bindSidecarHold(tailer: SidecarTailer): void {
     tailer.onHold = (terminalId, held) => {
-      const inst = this.terminals.get(terminalId);
+      const inst = this.runtime.get(terminalId);
       if (!inst) return;
       this.foldActivity(inst, { t: "sidecar_hold", seq: inst.timelineSeq, at: Date.now(), held });
     };
@@ -6191,7 +6174,7 @@ class TerminaApp {
    * Reset session-scoped state for a slash-command reset (/clear, alias /new). The
    * timeline, plan, and worldline comparisons reflect the abandoned run;\n   * the workspace source and modified files reflect real disk changes and\n   * persist.\n   */
   private async clearForNewSession(terminalId: string, expected?: PtyRendererSendTarget | null): Promise<void> {
-    const inst = this.terminals.get(terminalId);
+    const inst = this.runtime.get(terminalId);
     if (!inst) return;
     // A fresh session orphans the owner's background runs: terminate them.
     // Their killed-result notes still land in the mailbox so the new
@@ -6275,7 +6258,7 @@ class TerminaApp {
   /** On-demand source diff of one forkable moment. Never from the sidecar handler. */
   private async timelineProgress(terminalId: string, seq: number): Promise<TimelineProgress> {
     const fail = (): TimelineProgress => ({ ok: false, seq });
-    const inst = this.terminals.get(terminalId);
+    const inst = this.runtime.get(terminalId);
     const ev = inst?.timeline.find((e) => e.seq === seq);
     if (!inst || !ev?.stateId || ev.evicted) return fail();
     const base = this.startStateForMoment(inst, ev);
@@ -6289,7 +6272,7 @@ class TerminaApp {
       !store ||
       this.disposed ||
       this.projectIsSwitching(project?.id) ||
-      this.terminals.get(terminalId) !== inst
+      this.runtime.get(terminalId) !== inst
     ) {
       return fail();
     }
@@ -6993,6 +6976,7 @@ class TerminaApp {
       await this.clearMineFiles(project);
       // Drain only this project's terminals. Other open projects keep running.
       for (const id of closingIds) {
+        this.runtime.stopSidecar(id);
         this.tailer.stopWatching(id);
         this.worldlineTailers.get(id)?.stop();
         this.worldlineTailers.delete(id);
@@ -7134,7 +7118,7 @@ class TerminaApp {
   private async drainTerminals(ids: Iterable<string> | null, timeoutMs = 2000): Promise<void> {
     const target = ids === null ? null : new Set(ids);
     const anyAlive = (): boolean => {
-      for (const inst of this.terminals.values()) {
+      for (const inst of this.runtime.values()) {
         if (target === null || target.has(inst.id)) return true;
       }
       return false;
@@ -7143,7 +7127,7 @@ class TerminaApp {
     while (anyAlive() && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
-    for (const inst of [...this.terminals.values()]) {
+    for (const inst of [...this.runtime.values()]) {
       if (target === null || target.has(inst.id)) {
         inst.pty.killGroup("SIGKILL");
         inst.pty.kill("SIGKILL");
@@ -7161,7 +7145,7 @@ class TerminaApp {
     // changed path.
     const canonicalRootPromise = this.canonicalPath(ws.root);
     const workspaceTerminals = (): AgentTerminalInstance[] =>
-      [...ws.terminalIds].map((id) => this.terminals.get(id)).filter((t): t is AgentTerminalInstance => t !== undefined);
+      [...ws.terminalIds].map((id) => this.runtime.get(id)).filter((t): t is AgentTerminalInstance => t !== undefined);
     watcher.onChange = async (change) => {
       const rendererTarget = this.captureRendererSendTarget();
       const owner = this.projectOfWorkspace(ws.id);
@@ -7207,7 +7191,7 @@ class TerminaApp {
       // receives user edits on its next turn (see the edits-<id>.md context
       // file).
       const busy = workspaceTerminals().filter((t) => t.busy);
-      const verifyInWorkspace = [...this.verifyRuns].some((id) => this.terminals.get(id)?.workspaceId === ws.id);
+      const verifyInWorkspace = [...this.verifyRuns].some((id) => this.runtime.get(id)?.workspaceId === ws.id);
       if (busy.length === 0 && !verifyInWorkspace && !this.promotionPaths?.has(relPath)) {
         this.recordUserEdit(ws, { path, relPath, status: change.status, prev: change.prev, content: change.content, at: now });
       }
@@ -7665,7 +7649,7 @@ class TerminaApp {
           && this.rendererGeneration === target.rendererGeneration
         ) {
           this.rendererReady = false;
-          this.ptyEgress.setRendererReady(target.windowGeneration, target.rendererGeneration, false);
+          this.runtime.setRendererReady(target.windowGeneration, target.rendererGeneration, false);
         }
       } catch {
         /* Teardown already fenced the document. */
@@ -7685,7 +7669,7 @@ class TerminaApp {
     try {
       if (!target.window.isDestroyed() && !target.webContents.isDestroyed()) {
         this.rendererReady = false;
-        this.ptyEgress.setRendererReady(target.windowGeneration, target.rendererGeneration, false);
+        this.runtime.setRendererReady(target.windowGeneration, target.rendererGeneration, false);
         this.reloadPtyDocument(target.window as BrowserWindow, target.windowGeneration);
       }
     } catch {
@@ -7779,7 +7763,7 @@ class TerminaApp {
     windowGeneration: number,
     rendererGeneration: number,
   ): boolean {
-    const inst = this.terminals.get(id);
+    const inst = this.runtime.get(id);
     const win = this.win;
     if (
       !inst
@@ -7806,15 +7790,6 @@ class TerminaApp {
       this.reloadPtyDocument(win, windowGeneration);
       return false;
     }
-  }
-
-  /** Enqueue PTY output in the single fair, lossless delivery path. */
-  private sendPtyData(id: string, terminalGeneration: number, data: string): boolean {
-    const inst = this.terminals.get(id);
-    if (this.disposed || !inst || inst.closed || inst.generation !== terminalGeneration) return false;
-    const accepted = this.ptyEgress.enqueue(id, terminalGeneration, data);
-    if (accepted) inst.notePtyOutput(data);
-    return accepted;
   }
 
   private registerIpc(): void {
@@ -7990,7 +7965,7 @@ class TerminaApp {
         this.rendererLoadPending = false;
         this.rendererPendingLoad = null;
         this.rendererReady = true;
-        this.ptyEgress.setRendererReady(this.rendererWindowGeneration, this.rendererGeneration, true);
+        this.runtime.setRendererReady(this.rendererWindowGeneration, this.rendererGeneration, true);
       }
       // Restore DECSET 2004 before the first replayed quantum so xterm's
       // paste wrapper matches the child's mode. Pump is scheduled after this
@@ -8001,7 +7976,7 @@ class TerminaApp {
         this.rendererWindowGeneration,
         this.rendererGeneration,
       );
-      this.ptyEgress.hydrateTerminal(
+      this.runtime.hydrateTerminal(
         id,
         generation,
         this.rendererWindowGeneration,
@@ -8027,7 +8002,7 @@ class TerminaApp {
         || !Number.isSafeInteger(p.sequence)
         || p.sequence < 1
       ) return;
-      this.ptyEgress.acknowledge(
+      this.runtime.acknowledge(
         p.id,
         p.generation,
         p.windowGeneration,
@@ -8038,13 +8013,13 @@ class TerminaApp {
     ipcMain.handle("terminals:close", (event, id: unknown, generation: unknown) => {
       if (event.sender !== this.win?.webContents) return;
       if (typeof id !== "string" || typeof generation !== "number" || !Number.isSafeInteger(generation) || generation < 1) return;
-      const inst = this.terminals.get(id);
+      const inst = this.runtime.get(id);
       if (!inst || inst.generation !== generation) return;
       this.closeUserTerminal(id);
     });
     ipcMain.handle("terminals:write", (_e, id: unknown, data: unknown) => {
       if (typeof id !== "string" || typeof data !== "string") return;
-      const inst = this.terminals.get(id);
+      const inst = this.runtime.get(id);
       if (!inst || inst.closed) return;
       // Detect /clear (/new alias) slash command before it reaches the pty. The bridge also
       // catches it via the prompt payload, but /clear may reset the session
@@ -8064,7 +8039,7 @@ class TerminaApp {
     });
     ipcMain.handle("terminals:resize", (_e, id: unknown, cols: unknown, rows: unknown) => {
       if (typeof id !== "string" || !Number.isFinite(cols) || !Number.isFinite(rows)) return;
-      const inst = this.terminals.get(id);
+      const inst = this.runtime.get(id);
       if (!inst || inst.closed) return;
       // Floor at 2 (a 1-wide pty collapses layouts); clamp absurd sizes
       // before they reach the ioctl.
@@ -8116,7 +8091,7 @@ class TerminaApp {
       return manager.measureEvidence(comparisonId);
     });
     ipcMain.handle("worldline:fork-point", async (_e, terminalId: string, seq: number) => {
-      const inst = this.terminals.get(terminalId);
+      const inst = this.runtime.get(terminalId);
       if (!inst) return { ok: false, error: "terminal not found" };
       const owner = this.projectOfTerminal(terminalId);
       if (!owner) return { ok: false, error: "no project open" };
@@ -8198,7 +8173,7 @@ class TerminaApp {
       // A candidate terminal detects from its own isolated tree.
       if (terminalId !== undefined) {
         if (typeof terminalId !== "string") return null;
-        const inst = this.terminals.get(terminalId);
+        const inst = this.runtime.get(terminalId);
         return inst ? detectTestCommand(inst.cwd) : null;
       }
       return detectTestCommand(this.terminalCwd());
@@ -8226,23 +8201,23 @@ class TerminaApp {
     ipcMain.handle("content:search", (_e, pattern: unknown, source: unknown) => this.searchProjectContent(pattern, source));
 
     // ---- Plan Board ----
-    ipcMain.handle("plan:get", (_e, terminalId: string) => this.terminals.get(terminalId)?.plan ?? []);
+    ipcMain.handle("plan:get", (_e, terminalId: string) => this.runtime.get(terminalId)?.plan ?? []);
 
     // ---- Session Timeline ----
     ipcMain.handle("timeline:get", (_e, terminalId: string) => {
-      const tl = this.terminals.get(terminalId)?.timeline ?? [];
+      const tl = this.runtime.get(terminalId)?.timeline ?? [];
       return tl
         .filter((event) => !!event.stateId && !!event.entryId && !event.evicted)
         .map(({ content: _content, ...pub }) => pub);
     });
     ipcMain.handle("timeline:prefix", (_e, terminalId: string) => {
-      const inst = this.terminals.get(terminalId);
+      const inst = this.runtime.get(terminalId);
       if (!inst) return { terminalId, ok: 0, error: 0, open: 0, activity: { state: "idle", reason: null } };
       return this.timelinePrefixOf(inst);
     });
     ipcMain.handle("timeline:progress", (_e, terminalId: string, seq: number) => this.timelineProgress(terminalId, seq));
     ipcMain.handle("timeline:content", async (_e, terminalId: string, seq: number) => {
-      const inst = this.terminals.get(terminalId);
+      const inst = this.runtime.get(terminalId);
       const ev = inst?.timeline.find((e) => e.seq === seq);
       if (!ev) return { ok: false, seq };
       if (ev.content === undefined) {
@@ -8260,7 +8235,7 @@ class TerminaApp {
 
     // ---- Modified list ----
     ipcMain.handle("modified:clear", (_e, terminalId: string) => {
-      const inst = this.terminals.get(terminalId);
+      const inst = this.runtime.get(terminalId);
       if (!inst) return { ok: false, error: "terminal not found" };
       // Main owns the list: clearing only the renderer copy would resurrect
       // every entry on the next push.
@@ -8271,7 +8246,7 @@ class TerminaApp {
 
     // ---- Change Review ----
     ipcMain.handle("review:baseline", async (_e, terminalId: string, path: string) => {
-      const inst = this.terminals.get(terminalId);
+      const inst = this.runtime.get(terminalId);
       const managed = inst ? await this.managedPath(path, inst.workspaceId) : null;
       if (!inst || !managed || managed.workspace.id !== inst.workspaceId) return { status: "modified", baseline: undefined };
       // A lazy capture can still be in flight when the user clicks the
@@ -8542,7 +8517,7 @@ class TerminaApp {
    * string fallback; refuses non-regular files.
    */
   private async revertReviewFile(terminalId: string, path: string): Promise<{ ok: boolean; error?: string }> {
-    const inst = this.terminals.get(terminalId);
+    const inst = this.runtime.get(terminalId);
     if (!inst) return { ok: false, error: "terminal not found" };
     const requester = `revert:${randomUUID()}`;
     const lease = await this.acquireWriteLease(inst.workspaceId, requester, 0);
@@ -8845,7 +8820,7 @@ class TerminaApp {
     await this.rosterStore.drain();
     // Shutdown is an intentional cancellation boundary: no queued bytes or
     // exit notifications may be delivered after the app has begun teardown.
-    this.ptyEgress.dispose();
+    this.runtime.disposeEgress();
     this.appUpdater?.dispose();
     this.schedules.stop();
     await this.persistOpenProjects();
@@ -8854,7 +8829,7 @@ class TerminaApp {
     await this.drainVerifyJobs(null);
     this.tailer.stop();
     await this.drainSidecarQueues();
-    this.sidecarQueues.clear();
+    this.runtime.clearSidecarQueues();
     await Promise.all(this.ackWrites);
     await Promise.all([...this.projects.values()].map((project) => project.mineCommit.catch(() => undefined)));
     await Promise.all([...this.projects.values()].map((project) => project.worldlines?.drainEvidence() ?? Promise.resolve()));
@@ -8874,7 +8849,7 @@ class TerminaApp {
       project.worldlines = null;
       for (const ws of project.workspaces.values()) ws.watcher?.stop();
     }
-    for (const inst of this.terminals.values()) {
+    for (const inst of this.runtime.values()) {
       if (inst.captureTimer) {
         clearTimeout(inst.captureTimer);
         inst.captureTimer = null;
@@ -8886,15 +8861,15 @@ class TerminaApp {
     // be relied on during shutdown (native exit delivery is best-effort
     // after forced termination), so terminate every live owner's runs
     // directly before killing the PTYs.
-    for (const id of [...this.terminals.keys()]) {
+    for (const id of [...this.runtime.keys()]) {
       this.subagents.killOwner(id, "app shutdown");
     }
-    for (const inst of this.terminals.values()) {
+    for (const inst of this.runtime.values()) {
       inst.pty.killGroup("SIGTERM");
       inst.pty.kill();
     }
     await this.drainTerminals(null);
-    for (const inst of this.terminals.values()) {
+    for (const inst of this.runtime.values()) {
       for (const event of inst.timeline) {
         if (event.stateId) void this.releaseStateIfUnused(event.stateId, inst.id, event.seq, this.projectOfTerminal(inst.id));
       }
@@ -8918,7 +8893,7 @@ class TerminaApp {
     }
     this.unsavedWaiters.clear();
     this.projects.clear();
-    this.terminals.clear();
+    this.runtime.clear();
     for (const tailer of this.worldlineTailers.values()) tailer.stop();
     this.worldlineTailers.clear();
     this.stopPaintWatchdog();

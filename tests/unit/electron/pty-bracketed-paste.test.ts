@@ -66,6 +66,7 @@ describe("BracketedPasteModeTracker (refs #278)", () => {
 
 describe("bracketed-paste attach handshake (refs #278)", () => {
   const main = readFileSync(new URL("../../../electron/main.ts", import.meta.url), "utf8");
+  const runtime = readFileSync(new URL("../../../electron/terminal-runtime.ts", import.meta.url), "utf8");
   const preload = readFileSync(new URL("../../../electron/preload.ts", import.meta.url), "utf8");
   const renderer = readFileSync(new URL("../../../src/main.ts", import.meta.url), "utf8");
   const ptyView = readFileSync(new URL("../../../src/pty-view.ts", import.meta.url), "utf8");
@@ -74,15 +75,15 @@ describe("bracketed-paste attach handshake (refs #278)", () => {
   it("feeds DECSET 2004 only from successfully queued PTY output", () => {
     expect(instance).toContain("notePtyOutput(data: string)");
     expect(instance).toContain("this.bracketedPaste.feed(data)");
-    const sendPtyData = main.slice(main.indexOf("private sendPtyData("), main.indexOf("private registerIpc("));
-    expect(sendPtyData).toContain("const accepted = this.ptyEgress.enqueue(id, terminalGeneration, data)");
-    expect(sendPtyData).toContain("if (accepted) inst.notePtyOutput(data)");
+    const accept = runtime.slice(runtime.indexOf("acceptOutput("), runtime.indexOf("markClosed("));
+    expect(accept).toContain("const accepted = this.egress.enqueue(id, terminalGeneration, data)");
+    expect(accept).toContain("if (accepted) inst.notePtyOutput(data)");
   });
 
   it("replays DECSET 2004 on pty:ready before hydrate starts the pump", () => {
     const ready = main.slice(main.indexOf('ipcMain.on("pty:ready"'), main.indexOf('ipcMain.on("pty:ack"'));
     const modesAt = ready.indexOf("this.sendPtyModes(");
-    const hydrateAt = ready.indexOf("this.ptyEgress.hydrateTerminal(");
+    const hydrateAt = ready.indexOf("this.runtime.hydrateTerminal(");
     expect(modesAt).toBeGreaterThan(0);
     expect(hydrateAt).toBeGreaterThan(modesAt);
     expect(main).toContain('win.webContents.send("pty:modes"');

@@ -44,6 +44,7 @@ describe("initial project restoration", () => {
       cleanupStaleDispatchFiles: async () => {},
       parseTargetCwdFromArgv: () => null,
       tailer: { onEvent: null, start: () => {} },
+      bindSidecarHold: () => {},
       schedules: { start: () => {} },
       createWindow: () => {
         windowShown.resolve();

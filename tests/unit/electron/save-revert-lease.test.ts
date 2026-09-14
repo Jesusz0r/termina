@@ -235,6 +235,7 @@ function makeRevertApp(ws: FakeWorkspace, inst: FakeInst, store: FakeStore | nul
   return {
     ...makeLeaseBroker(ws),
     terminals: new Map([[inst.id, inst]]),
+    runtime: { get: (id: string) => (id === inst.id ? inst : undefined) },
     managedPath: makeManagedPath(ws, opts),
     projectOfTerminal: (id: string) => (id === inst.id ? { storePromise: Promise.resolve(store) } : null),
     canonicalPath: (p: string) => fsRealpath(p),

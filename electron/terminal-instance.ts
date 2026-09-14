@@ -1,7 +1,7 @@
 /**
  * One terminal tab: the live PTY plus the agent session state main tracks
  * for it (timeline, baselines, verify, plan board, recorder). Plain state
- * holder; lifecycle and IPC stay in main.
+ * holder; lifecycle stays in `electron/terminal-runtime.ts` and IPC stays in main.
  */
 import { PtyTerminal } from "./pty-terminal.js";
 import { BracketedPasteModeTracker } from "./pty-bracketed-paste.js";
