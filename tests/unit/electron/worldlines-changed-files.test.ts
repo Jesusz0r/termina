@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { changedFiles } from "../../../electron/worldlines/candidate-files.ts";
+import { changedFiles, MAX_CHANGED_FILES } from "../../../electron/worldlines/candidate-files.ts";
 import { gitCommittedChanges, gitCommitTree, gitWorkingChanges } from "../../../electron/worldline-git.ts";
 import type { CandidateState, ComparisonState } from "../../../electron/worldlines/types.ts";
 
@@ -63,5 +63,27 @@ describe("changedFiles merge (issue #187)", () => {
     const cand = { dir: "/tmp/cand" } as CandidateState;
     await expect(changedFiles(cmp, cand)).rejects.toThrow(/comparison base is missing/);
     expect(mockWorking).not.toHaveBeenCalled();
+  });
+
+  it("caps 10k changed files and keeps the uncapped total (refs #213)", async () => {
+    const working = Array.from({ length: 10_000 }, (_, i) => ({ relPath: `w-${String(i).padStart(5, "0")}.ts`, status: "modified" as const }));
+    states(working, []);
+    const cmp = { baseCommit: "base" } as ComparisonState;
+    const cand = { dir: "/tmp/cand" } as CandidateState;
+    const result = await changedFiles(cmp, cand);
+    expect(result.files).toHaveLength(MAX_CHANGED_FILES);
+    expect(result.truncated).toBe(true);
+    expect(result.total).toBe(10_000);
+    expect(result.files[0]?.relPath).toBe("w-00000.ts");
+    expect(result.files.at(-1)?.relPath).toBe("w-00499.ts");
+  });
+
+  it("does not mark a listing at the cap as truncated", async () => {
+    const working = Array.from({ length: MAX_CHANGED_FILES }, (_, i) => ({ relPath: `f-${i}.ts`, status: "modified" as const }));
+    states(working, []);
+    const result = await changedFiles({ baseCommit: "base" } as ComparisonState, { dir: "/tmp/cand" } as CandidateState);
+    expect(result.files).toHaveLength(MAX_CHANGED_FILES);
+    expect(result.truncated).toBe(false);
+    expect(result.total).toBe(MAX_CHANGED_FILES);
   });
 });

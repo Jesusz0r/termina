@@ -508,8 +508,12 @@ export interface WorldlineDetails {
   /** Source statistics of the candidate head tree. */
   sourceFiles: number;
   sourceBytes: number;
-  /** Files differing from the comparison base. */
+  /** Files differing from the comparison base (capped; see truncated). */
   changedFiles: WorldlineChangedFile[];
+  /** True when changedFiles was truncated before IPC. */
+  truncated?: boolean;
+  /** Uncapped changed-file count; defaults to changedFiles.length. */
+  changedFileCount?: number;
   /** Declared dependency changes (base vs head). */
   dependencies: DependencyChange[];
   /** Age of the candidate pair in ms. */
