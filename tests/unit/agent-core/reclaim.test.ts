@@ -6,6 +6,7 @@ const {
   estimateReclaimTokens,
   makePruneRevision,
   planPruneStubs,
+  pruneCooldownHolds,
   recoveryPlan,
 } = reclaim;
 const { sessionBlockBytes, sessionBlockHash, validateSessionReclaimReceipt } = session;
@@ -218,5 +219,29 @@ describe("Agent Core Reclaim Contract", () => {
     expect(() => makePruneRevision("rev/bad", [pick])).toThrow();
     expect(() => makePruneRevision("rev-dup", [pick, pick])).toThrow();
     expect(() => makePruneRevision("rev-too-many", Array.from({ length: 257 }, (_, index) => ({ ...pick, sseq: index + 1 })))).toThrow();
+  });
+
+  it("paces back-to-back prunes by token growth, not turn count", () => {
+    // Prune reclaimed 20k at level 60k; small regrowth holds, large releases.
+    const cooldown = { baseTotal: 60_000, reclaimedTokens: 20_000 };
+    expect(pruneCooldownHolds(cooldown, 60_000, 5_000)).toBe(true);
+    expect(pruneCooldownHolds(cooldown, 70_000, 5_000)).toBe(true);
+    expect(pruneCooldownHolds(cooldown, 85_000, 5_000)).toBe(true);
+    expect(pruneCooldownHolds(cooldown, 85_001, 5_000)).toBe(false);
+    expect(pruneCooldownHolds(cooldown, 200_000, 5_000)).toBe(false);
+    // Zero regrowth still holds: the prune just happened.
+    expect(pruneCooldownHolds(cooldown, 60_000, 0)).toBe(true);
+  });
+
+  it("releases the cooldown fail-open on shrink or invalid input", () => {
+    const cooldown = { baseTotal: 60_000, reclaimedTokens: 20_000 };
+    // History shrank (summarize/truncate/clear): new baseline, not growth.
+    expect(pruneCooldownHolds(cooldown, 40_000, 5_000)).toBe(false);
+    expect(pruneCooldownHolds(null, 70_000, 5_000)).toBe(false);
+    expect(pruneCooldownHolds(undefined, 70_000, 5_000)).toBe(false);
+    expect(pruneCooldownHolds({ baseTotal: NaN, reclaimedTokens: 1 }, 70_000, 5_000)).toBe(false);
+    expect(pruneCooldownHolds({ baseTotal: 60_000, reclaimedTokens: -1 }, 70_000, 5_000)).toBe(false);
+    expect(pruneCooldownHolds(cooldown, NaN, 5_000)).toBe(false);
+    expect(pruneCooldownHolds(cooldown, 70_000, -1)).toBe(false);
   });
 });

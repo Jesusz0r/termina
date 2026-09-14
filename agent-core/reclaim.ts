@@ -292,6 +292,35 @@ export function planPruneStubs(messages: ReclaimMessage[], opts: ReclaimPlanOpti
   return picks;
 }
 
+/** Baseline for growth-based prune pacing, owned by the caller. */
+export type PruneCooldown = {
+  /** Local-estimate total right after the prune applied. */
+  baseTotal: number;
+  /** Local-estimate tokens that prune reclaimed. */
+  reclaimedTokens: number;
+};
+
+/**
+ * Hold the next automatic prune until genuinely new pressure arrives: the
+ * local-estimate growth since the last prune must exceed what that prune
+ * reclaimed plus a margin. Turn counts cannot pace this because one model
+ * turn can add a full window while ten turns add nothing. Fail-open: invalid
+ * input or a shrunken history (summarize/truncate/clear) releases.
+ */
+export function pruneCooldownHolds(
+  cooldown: PruneCooldown | null | undefined,
+  currentTotal: number,
+  margin: number,
+): boolean {
+  if (!cooldown) return false;
+  if (!Number.isSafeInteger(cooldown.baseTotal) || !Number.isSafeInteger(cooldown.reclaimedTokens)) return false;
+  if (!Number.isSafeInteger(currentTotal) || !Number.isSafeInteger(margin)) return false;
+  if (cooldown.reclaimedTokens < 0 || margin < 0) return false;
+  const growth = currentTotal - cooldown.baseTotal;
+  if (growth < 0) return false;
+  return growth <= cooldown.reclaimedTokens + margin;
+}
+
 /** Build one bounded durable-owner input; callers must split larger plans. */
 export function makePruneRevision(revisionId: string, picks: PrunePick[]): PruneRevision {
   if (!Array.isArray(picks) || picks.length === 0) throw new TypeError("prune revision requires targets");
