@@ -60,7 +60,12 @@ import {
 } from "../../agent-core/session.js";
 import { MAX_MCP_JSON_BYTES } from "../../agent-core/mcp.js";
 import { thinkingStartupArgs } from "../../shared/terminal-control.js";
-import { readPromptPayloadFile } from "../prompt-payload.js";
+import { isErrno } from "../../shared/guards.js";
+import {
+  describePromptPayloadFailure,
+  readPromptPayloadResult,
+  type PromptPayload,
+} from "../prompt-payload.js";
 import {
   UncertainComparisonAdmissionOwner,
   boundedWorldlineEntries,
@@ -167,6 +172,17 @@ const CHALLENGE_CONSTRAINTS: Record<ChallengeProfile, string> = {
 
 function challengedPrompt(text: string, profile: ChallengeProfile): string {
   return `${text}\n\nChallenge constraint (${profile}): ${CHALLENGE_CONSTRAINTS[profile]}`;
+}
+
+const EMPTY_PROMPT_PAYLOAD: PromptPayload = { text: "", images: [], context: "" };
+
+type PromptPayloadLookup =
+  | { kind: "absent" }
+  | { kind: "ok"; payload: PromptPayload }
+  | { kind: "unreadable"; error: string };
+
+function errorDetail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export interface WorldlineDeps {
@@ -652,6 +668,16 @@ export class WorldlineManager {
     if (!run?.promptPayloadFile) {
       return { ok: false, error: "the run has no captured task or pre-task anchor" };
     }
+    const payloadRead = await this.readPromptPayload(run);
+    if (payloadRead.kind !== "ok") {
+      return {
+        ok: false,
+        error: payloadRead.kind === "absent"
+          ? "the run has no captured task or pre-task anchor"
+          : payloadRead.error,
+      };
+    }
+    const payload = payloadRead.payload;
     if (cmp.engine !== "core") return { ok: false, error: "core is the only engine" };
     const uncertaintyAdmission = await this.acquireUncertainComparisonAdmission();
     if (!uncertaintyAdmission.ok) return { ok: false, error: uncertaintyAdmission.error };
@@ -742,7 +768,6 @@ export class WorldlineManager {
     nB.headStateId = ncmp.baseStateId;
     this.comparisons.set(id, ncmp);
     try {
-      const payload = await this.readPromptPayload(run);
       await this.createSupportDirs(ncmp);
       // The template is the SHARED BASE (R), not the reference head: the
       // challenger starts from the recorded base. Every directory and tree
@@ -1147,21 +1172,19 @@ export class WorldlineManager {
     if (changed.length > 0) {
       return { ok: false, error: `trust-sensitive resources changed since the run: ${changed.slice(0, 3).join(", ")}` };
     }
-    // Budgets (WORLDLINES §9): prompt payload caps.
-    if (run.promptPayloadFile) {
-      if (run.promptPayloadFile.includes("/") || run.promptPayloadFile.includes("\\")) {
-        return { ok: false, error: "the prompt payload path is invalid" };
-      }
-      const payloadPath = await this.safePromptPayloadPath(run);
-      if (!payloadPath) return { ok: false, error: "the prompt payload is unavailable" };
-      try {
-        if ((await stat(payloadPath)).size > MAX_PROMPT_BYTES) {
-          return { ok: false, error: "the prompt payload exceeds the 20 MB budget" };
-        }
-      } catch {
-        return { ok: false, error: "the prompt payload is unavailable" };
-      }
+    // Budgets (WORLDLINES §9): prompt payload caps. A present file that
+    // cannot be parsed is not an empty prefill — Challenge would auto-run it.
+    const payloadRead = await this.readPromptPayload(run);
+    if (opts.challengeProfile && payloadRead.kind !== "ok") {
+      return {
+        ok: false,
+        error: payloadRead.kind === "absent" ? "the run has no captured task to replay" : payloadRead.error,
+      };
     }
+    if (payloadRead.kind === "unreadable") {
+      return { ok: false, error: payloadRead.error };
+    }
+    const startupPayload = payloadRead.kind === "ok" ? payloadRead.payload : EMPTY_PROMPT_PAYLOAD;
 
     const uncertaintyAdmission = await this.acquireUncertainComparisonAdmission();
     if (!uncertaintyAdmission.ok) return { ok: false, error: uncertaintyAdmission.error };
@@ -1195,7 +1218,7 @@ export class WorldlineManager {
       await this.forkSessions(cmp, run);
       await this.createSupportDirs(cmp);
       await this.copyCoreResources(cmp);
-      await this.writeStartupControls(cmp, run, opts.challengeProfile);
+      await this.writeStartupControls(cmp, startupPayload, opts.challengeProfile);
       await this.launchCandidates(cmp, run);
       cmp.phase = "running";
       // Readiness arrives through the bridge session_ready events.
@@ -1416,17 +1439,25 @@ export class WorldlineManager {
   }
 
   /** Read the prompt payload file (text, images, injected context). Off the main thread via the shared reader (issue #60). */
-  private async readPromptPayload(run: { promptPayloadFile: string | null; promptEventsDir?: string | null }): Promise<{ text: string; images: unknown[]; context: string }> {
+  private async readPromptPayload(run: { promptPayloadFile: string | null; promptEventsDir?: string | null }): Promise<PromptPayloadLookup> {
+    const file = run.promptPayloadFile;
+    if (!file) return { kind: "absent" };
+    if (file.includes("/") || file.includes("\\")) {
+      return { kind: "unreadable", error: "the prompt payload path is invalid" };
+    }
     const path = await this.safePromptPayloadPath(run);
-    if (!path) return { text: "", images: [], context: "" };
+    if (!path) return { kind: "unreadable", error: "the prompt payload is unavailable" };
     const offload = this.deps.readPromptPayload;
-    const payload = await readPromptPayloadFile(path, {
+    const payload = await readPromptPayloadResult(path, {
       maxBytes: MAX_PROMPT_BYTES,
       textCap: 64000,
       contextCap: 16000,
       offload: (p, maxBytes, textCap, contextCap) => offload({ path: p, maxBytes, textCap, contextCap }),
     });
-    return payload ?? { text: "", images: [], context: "" };
+    if (!payload.ok) {
+      return { kind: "unreadable", error: describePromptPayloadFailure(payload.reason) };
+    }
+    return { kind: "ok", payload: payload.payload };
   }
 
   /** Support directories: home, sessions, events, tmp, cache. */
@@ -1458,47 +1489,66 @@ export class WorldlineManager {
         "agent",
         true,
       );
-      if (existsSync(authSrc)) {
-        try {
-          const info = await stat(authSrc);
-          if (info.isFile() && info.size <= MAX_AGENT_RESOURCE_BYTES) {
-            await copyBoundPrivateFile(authSrc, authDstDir, "auth.json");
-          }
-        } catch {
-          /* Keep the candidate without this file. */
-        }
-      }
-      if (existsSync(mcpSrc)) {
-        try {
-          const info = await stat(mcpSrc);
-          if (info.isFile() && info.size <= MAX_MCP_JSON_BYTES) {
-            await copyBoundPrivateFile(mcpSrc, authDstDir, "mcp.json");
-          }
-        } catch {
-          /* Keep the candidate without this file. */
-        }
-      }
-      if (existsSync(agentsSrc)) {
-        try {
-          const sourceBinding = await boundPromotionOpenDirectory({ path: agentsSrc });
-          const destination = await ensureBoundChildDirectory(cand.homeBinding, ".agents", true);
-          await boundPromotionCopyTree({
-            sourceRoot: agentsSrc,
-            sourceRootIdentity: sourceBinding,
-            destinationRoot: destination.path,
-            destinationRootIdentity: promotionIdentityOf(destination),
-            maxBytes: MAX_AGENT_RESOURCE_BYTES,
-          });
-        } catch {
-          /* Keep the candidate without user skills. */
-        }
-      }
+      await this.copyOptionalAgentFile(authSrc, authDstDir, "auth.json", MAX_AGENT_RESOURCE_BYTES, cand.label);
+      await this.copyOptionalAgentFile(mcpSrc, authDstDir, "mcp.json", MAX_MCP_JSON_BYTES, cand.label);
+      await this.copyOptionalAgentsTree(agentsSrc, cand, cand.homeBinding);
+    }
+  }
+
+  /**
+   * Copy one optional agent resource. ENOENT on the source is absence (skip);
+   * any other source-read or destination-write failure fails the fork.
+   */
+  private async copyOptionalAgentFile(
+    sourcePath: string,
+    destination: BoundPromotionDirectory,
+    name: string,
+    maxBytes: number,
+    label: "A" | "B",
+  ): Promise<void> {
+    let info;
+    try {
+      info = await stat(sourcePath);
+    } catch (error) {
+      if (isErrno(error, "ENOENT")) return;
+      throw new Error(`could not read ${name} for candidate ${label}: ${errorDetail(error)}`);
+    }
+    if (!info.isFile() || info.size > maxBytes) return;
+    try {
+      await copyBoundPrivateFile(sourcePath, destination, name);
+    } catch (error) {
+      throw new Error(`could not copy ${name} into candidate ${label}: ${errorDetail(error)}`);
+    }
+  }
+
+  private async copyOptionalAgentsTree(
+    agentsSrc: string,
+    cand: CandidateState,
+    home: BoundPromotionDirectory,
+  ): Promise<void> {
+    let sourceBinding;
+    try {
+      sourceBinding = await boundPromotionOpenDirectory({ path: agentsSrc });
+    } catch (error) {
+      if (isErrno(error, "ENOENT")) return;
+      throw new Error(`could not read user skills for candidate ${cand.label}: ${errorDetail(error)}`);
+    }
+    const destination = await ensureBoundChildDirectory(home, ".agents", true);
+    try {
+      await boundPromotionCopyTree({
+        sourceRoot: agentsSrc,
+        sourceRootIdentity: sourceBinding,
+        destinationRoot: destination.path,
+        destinationRootIdentity: promotionIdentityOf(destination),
+        maxBytes: MAX_AGENT_RESOURCE_BYTES,
+      });
+    } catch (error) {
+      throw new Error(`could not copy user skills into candidate ${cand.label}: ${errorDetail(error)}`);
     }
   }
 
   /** The startup control files: what the bridge does on session start. */
-  private async writeStartupControls(cmp: ComparisonState, run: RunRecord, challengeProfile?: ChallengeProfile): Promise<void> {
-    const payload = await this.readPromptPayload(run);
+  private async writeStartupControls(cmp: ComparisonState, payload: PromptPayload, challengeProfile?: ChallengeProfile): Promise<void> {
     const promptText = challengeProfile ? challengedPrompt(payload.text, challengeProfile) : payload.text;
     const a = cmp.candidates.get("A")!;
     const b = cmp.candidates.get("B")!;

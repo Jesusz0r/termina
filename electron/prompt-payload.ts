@@ -6,9 +6,10 @@
  * manager. The worker stats, reads, and parses the file so the main thread
  * never holds the 20 MB string; a sync fallback preserves identical output
  * when the worker is unavailable. Missing/oversize/malformed payloads fail
- * closed to null, matching the pre-#60 observable behavior.
+ * closed; callers that need the reason use `readPromptPayloadResult`.
  */
 import { stat, readFile } from "node:fs/promises";
+import { isErrno } from "../shared/guards.js";
 import type { ReadPromptResult } from "./session-fork.js";
 
 export interface PromptPayload {
@@ -19,6 +20,29 @@ export interface PromptPayload {
 
 export const PROMPT_TEXT_CAP = 64_000;
 export const PROMPT_CONTEXT_CAP = 16_000;
+
+export type PromptPayloadFailureReason = "missing" | "not-a-file" | "oversize" | "malformed" | "unreadable";
+
+export type PromptPayloadRead =
+  | { ok: true; payload: PromptPayload }
+  | { ok: false; reason: PromptPayloadFailureReason };
+
+/**
+ * User-facing copy for a fail-closed payload read. Worldline Challenge/fork
+ * gates use this instead of collapsing every failure to an empty task.
+ */
+export function describePromptPayloadFailure(reason: PromptPayloadFailureReason): string {
+  switch (reason) {
+    case "missing":
+      return "the prompt payload is unavailable";
+    case "oversize":
+      return "the prompt payload exceeds the 20 MB budget";
+    case "malformed":
+    case "not-a-file":
+    case "unreadable":
+      return "the prompt payload is unreadable";
+  }
+}
 
 /**
  * Pure parse + slice, identical to the pre-#60 `JSON.parse` + `String(...).slice`.
@@ -39,6 +63,44 @@ export function parsePromptPayload(
 }
 
 /**
+ * Read one validated absolute prompt payload path with an explicit failure
+ * reason. The offload runs first; only an unexpected worker rejection falls
+ * back to the identical sync read.
+ */
+export async function readPromptPayloadResult(
+  absPath: string,
+  opts: {
+    maxBytes: number;
+    textCap?: number;
+    contextCap?: number;
+    offload: (path: string, maxBytes: number, textCap: number, contextCap: number) => Promise<ReadPromptResult>;
+  },
+): Promise<PromptPayloadRead> {
+  const textCap = opts.textCap ?? PROMPT_TEXT_CAP;
+  const contextCap = opts.contextCap ?? PROMPT_CONTEXT_CAP;
+  try {
+    const res = await opts.offload(absPath, opts.maxBytes, textCap, contextCap);
+    if (res.ok && res.found) return { ok: true, payload: { text: res.text, images: res.images, context: res.context } };
+    if (res.ok) return { ok: false, reason: "unreadable" };
+  } catch {
+    /* Worker disposed/crashed; fall through to the identical sync read. */
+  }
+  try {
+    const info = await stat(absPath);
+    if (!info.isFile()) return { ok: false, reason: "not-a-file" };
+    if (info.size > opts.maxBytes) return { ok: false, reason: "oversize" };
+    const raw = await readFile(absPath, "utf8");
+    try {
+      return { ok: true, payload: parsePromptPayload(raw, textCap, contextCap) };
+    } catch {
+      return { ok: false, reason: "malformed" };
+    }
+  } catch (error) {
+    return { ok: false, reason: isErrno(error, "ENOENT") ? "missing" : "unreadable" };
+  }
+}
+
+/**
  * Read one validated absolute prompt payload path. Returns null when the payload
  * is missing, not a file, oversize, or malformed (fail-closed). The offload runs
  * first; only an unexpected worker rejection falls back to the identical sync read.
@@ -52,21 +114,6 @@ export async function readPromptPayloadFile(
     offload: (path: string, maxBytes: number, textCap: number, contextCap: number) => Promise<ReadPromptResult>;
   },
 ): Promise<PromptPayload | null> {
-  const textCap = opts.textCap ?? PROMPT_TEXT_CAP;
-  const contextCap = opts.contextCap ?? PROMPT_CONTEXT_CAP;
-  try {
-    const res = await opts.offload(absPath, opts.maxBytes, textCap, contextCap);
-    if (res.ok && res.found) return { text: res.text, images: res.images, context: res.context };
-    if (res.ok) return null;
-  } catch {
-    /* Worker disposed/crashed; fall through to the identical sync read. */
-  }
-  try {
-    const info = await stat(absPath);
-    if (!info.isFile() || info.size > opts.maxBytes) return null;
-    const raw = await readFile(absPath, "utf8");
-    return parsePromptPayload(raw, textCap, contextCap);
-  } catch {
-    return null;
-  }
+  const result = await readPromptPayloadResult(absPath, opts);
+  return result.ok ? result.payload : null;
 }

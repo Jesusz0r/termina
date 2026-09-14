@@ -7,6 +7,7 @@
 import { stat, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { isErrno } from "../shared/guards.js";
 import {
   boundPromotionPrepareDirectory,
   boundPromotionWriteFile,
@@ -53,11 +54,19 @@ export class EvidenceHomeStore {
       if (!agent.identity) throw new Error("evidence agent directory was not created");
       const agentSrc = join(homedir(), ".termina", "agent");
       for (const name of ["auth.json", "mcp.json"]) {
+        const source = join(agentSrc, name);
+        let content: Buffer;
         try {
-          const source = join(agentSrc, name);
           const info = await stat(source);
           if (!info.isFile() || info.size > MAX_AGENT_RESOURCE_BYTES) continue;
-          const content = await readFile(source);
+          content = await readFile(source);
+        } catch (error) {
+          // Source-absent is optional. Any other read failure is not "no credentials".
+          if (isErrno(error, "ENOENT")) continue;
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new Error(`could not read evidence ${name}: ${detail}`);
+        }
+        try {
           await boundPromotionWriteFile({
             root: dir,
             rootIdentity: binding.identity,
@@ -67,8 +76,9 @@ export class EvidenceHomeStore {
             content,
             mode: 0o600,
           });
-        } catch {
-          /* The resource is optional. */
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new Error(`could not write evidence ${name}: ${detail}`);
         }
       }
       for (const name of ["A", "B"]) {
