@@ -17,6 +17,11 @@ export const WORLDLINE_PAIR_ROLES_LINE = "A is the result · B is a retry";
  *  true total; the overflow note points at Compare for the fuller listing. */
 export const MAX_INLINE_CHANGED_ROWS = 500;
 
+/** Honest changed-file count: the uncapped total when main truncated the listing. */
+function changedFileTotal(d: WorldlineDetails): number {
+  return d.changedFileCount ?? d.changedFiles.length;
+}
+
 /** Known candidate states (WorldlineState): the state pill allowlists against these. */
 const KNOWN_CANDIDATE_STATES: ReadonlySet<string> = new Set([
   "creating", "ready", "running", "settled", "verifying", "promoting",
@@ -675,7 +680,10 @@ export class WorldlinesView {
     const statsEl = card.detailsBody.querySelector(".cand-stats")!;
     const depsEl = card.detailsBody.querySelector(".cand-deps")!;
     const age = d.ageMs < 60_000 ? `${Math.max(1, Math.round(d.ageMs / 1000))} s` : `${Math.round(d.ageMs / 60_000)} min`;
-    statsEl.textContent = `${d.sourceFiles} files · ${formatBytes(d.sourceBytes)} · ${d.changedFiles.length} changed · ${age} old`;
+    const total = changedFileTotal(d);
+    const rendered = d.changedFiles.slice(0, MAX_INLINE_CHANGED_ROWS);
+    const renderedCount = rendered.length;
+    statsEl.textContent = `${d.sourceFiles} files · ${formatBytes(d.sourceBytes)} · ${total} changed · ${age} old`;
     depsEl.textContent = "";
     for (const dep of d.dependencies) {
       const parts: string[] = [];
@@ -686,9 +694,9 @@ export class WorldlinesView {
       row.textContent = `${dep.file}: ${parts.join("  ")}`;
       depsEl.appendChild(row);
     }
-    card.detailsBody.querySelector(".cand-changed-title")!.textContent = `Changed vs base (${d.changedFiles.length})`;
+    card.detailsBody.querySelector(".cand-changed-title")!.textContent = `Changed vs base (${total})`;
     card.changedList.replaceChildren();
-    for (const f of d.changedFiles.slice(0, MAX_INLINE_CHANGED_ROWS)) {
+    for (const f of rendered) {
       const li = document.createElement("li");
       li.className = "cand-changed-item";
       const badge = document.createElement("span");
@@ -708,11 +716,13 @@ export class WorldlinesView {
       });
       card.changedList.appendChild(li);
     }
-    if (d.changedFiles.length > MAX_INLINE_CHANGED_ROWS) {
+    if (d.truncated === true || total > renderedCount || d.changedFiles.length > MAX_INLINE_CHANGED_ROWS) {
       const more = document.createElement("li");
       more.className = "cand-more";
-      more.textContent =
-        `…and ${d.changedFiles.length - MAX_INLINE_CHANGED_ROWS} more — open Compare to browse further`;
+      const remaining = Math.max(0, total - renderedCount);
+      more.textContent = remaining > 0
+        ? `…and ${remaining} more — open Compare to browse further`
+        : "…listing truncated — open Compare to browse further";
       card.changedList.appendChild(more);
     }
   }
@@ -721,12 +731,13 @@ export class WorldlinesView {
   private async openBaseCompare(comparisonId: string, label: "A" | "B"): Promise<void> {
     const details = await this.detailsOf(comparisonId, label);
     if (!details) return;
-    if (details.changedFiles.length === 0) {
+    const total = changedFileTotal(details);
+    if (total === 0) {
       toast(`candidate ${label} has no changes versus the shared base`, "info");
       return;
     }
     showFileListModal(
-      `base → ${label} — ${details.changedFiles.length} file(s)`,
+      `base → ${label} — ${total} file(s)`,
       details.changedFiles.map((f) => [f.relPath, f.status] as [string, WorldlineChangedFile["status"]]),
       (relPath) => {
         const root = this.rootOf(comparisonId, label);
@@ -754,8 +765,11 @@ export class WorldlinesView {
     };
     for (const f of a.changedFiles) add(f, true, false);
     for (const f of b.changedFiles) add(f, false, true);
+    const truncated = a.truncated === true || b.truncated === true;
+    const listed = byPath.size;
+    const lowerBound = Math.max(changedFileTotal(a), changedFileTotal(b), listed);
     showFileListModal(
-      `A ⇄ B — ${byPath.size} file(s)`,
+      truncated ? `A ⇄ B — at least ${lowerBound} file(s)` : `A ⇄ B — ${listed} file(s)`,
       [...byPath.entries()].sort((x, y) => x[0].localeCompare(y[0])).map(([relPath, f]) => [relPath, f.status] as [string, WorldlineChangedFile["status"]]),
       (relPath) => this.handlers.onCompareAB(comparisonId, relPath),
     );

@@ -32,7 +32,7 @@ function summary(label: "A" | "B"): WorldlineSummary {
   };
 }
 
-function details(label: "A" | "B", fileCount: number): WorldlineDetails {
+function details(label: "A" | "B", fileCount: number, opts?: { truncated?: boolean; changedFileCount?: number }): WorldlineDetails {
   const changedFiles: WorldlineChangedFile[] = [];
   for (let i = 0; i < fileCount; i++) changedFiles.push({ relPath: `file-${i}.ts`, status: "modified" });
   return {
@@ -51,6 +51,8 @@ function details(label: "A" | "B", fileCount: number): WorldlineDetails {
     sourceFiles: fileCount,
     sourceBytes: 1024,
     changedFiles,
+    truncated: opts?.truncated,
+    changedFileCount: opts?.changedFileCount,
     dependencies: [],
     ageMs: 1000,
     unownedEdits: 0,
@@ -124,6 +126,28 @@ describe("worldline changed-file caps (refs #213)", () => {
     expect(card.querySelector(".cand-stats")!.textContent).toContain("10000 changed");
   });
 
+  it("keeps the count honest for the post-cap IPC shape", async () => {
+    const panel = makePanel();
+    const view = new worldlines.WorldlinesView(panel as unknown as HTMLElement);
+    view.bind({});
+    view.upsert(summary("A"));
+    view.upsert(summary("B"));
+
+    pendingDetails = details("A", worldlines.MAX_INLINE_CHANGED_ROWS, { truncated: true, changedFileCount: 10_000 });
+    panel.querySelectorAll(".candidate-card")[0].querySelectorAll(".cand-details")[0].click();
+    const changedList = panel.querySelectorAll(".cand-changed")[0];
+    await vi.waitFor(() => {
+      expect(changedList.children.length).toBe(worldlines.MAX_INLINE_CHANGED_ROWS + 1);
+    });
+    const note = changedList.children.at(-1)!;
+    expect(note.className).toBe("cand-more");
+    expect(note.textContent).toContain("9500 more");
+    expect(note.textContent).toContain("Compare");
+    const card = panel.querySelectorAll(".candidate-card")[0];
+    expect(card.querySelector(".cand-changed-title")!.textContent).toBe("Changed vs base (10000)");
+    expect(card.querySelector(".cand-stats")!.textContent).toContain("10000 changed");
+  });
+
   it("renders small inline lists fully with no overflow note", async () => {
     const panel = makePanel();
     const view = new worldlines.WorldlinesView(panel as unknown as HTMLElement);
@@ -157,5 +181,33 @@ describe("worldline changed-file caps (refs #213)", () => {
     const list = fake.modalRoot.querySelector(".worldline-list")!;
     expect(list.children.length).toBe(2);
     expect(list.querySelectorAll(".worldline-more")).toHaveLength(0);
+  });
+
+  it("titles Compare from the uncapped total of a truncated details payload", async () => {
+    const panel = makePanel();
+    const view = new worldlines.WorldlinesView(panel as unknown as HTMLElement);
+    view.bind({});
+    view.upsert(summary("A"));
+    view.upsert(summary("B"));
+    pendingDetails = details("A", worldlines.MAX_INLINE_CHANGED_ROWS, { truncated: true, changedFileCount: 10_000 });
+    panel.querySelectorAll(".candidate-card")[0].querySelector(".cand-compare")!.click();
+    await vi.waitFor(() => {
+      expect(fake.modalRoot.querySelector(".modal-title")).not.toBeNull();
+    });
+    expect(fake.modalRoot.querySelector(".modal-title")!.textContent).toBe("base → A — 10000 file(s)");
+  });
+
+  it("titles A ⇄ B as a lower bound when either side is truncated", async () => {
+    const panel = makePanel();
+    const view = new worldlines.WorldlinesView(panel as unknown as HTMLElement);
+    view.bind({});
+    view.upsert(summary("A"));
+    view.upsert(summary("B"));
+    pendingDetails = details("A", worldlines.MAX_INLINE_CHANGED_ROWS, { truncated: true, changedFileCount: 10_000 });
+    panel.querySelector(".cmp-ab")!.click();
+    await vi.waitFor(() => {
+      expect(fake.modalRoot.querySelector(".modal-title")).not.toBeNull();
+    });
+    expect(fake.modalRoot.querySelector(".modal-title")!.textContent).toBe("A ⇄ B — at least 10000 file(s)");
   });
 });
