@@ -18,6 +18,7 @@ import { platform } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { buildCore, stageCoreBinary } from "./build-core.ts";
+import { errorCode } from "../shared/guards.ts";
 import { readSystemProcessIdentity } from "../shared/process-identity.js";
 
 const RESOURCES = join(process.cwd(), "resources");
@@ -40,9 +41,6 @@ const NODE_ARCHIVE_SHA256 = Object.freeze({
   "linux-x64": "b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a",
 });
 
-function errorCode(error) {
-  return error && typeof error === "object" && typeof error.code === "string" ? error.code : null;
-}
 function directoryIdentity(path) {
   try {
     const stat = lstatSync(path);

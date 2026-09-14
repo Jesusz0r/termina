@@ -19,6 +19,7 @@ import { testLoopbackOverride } from "./auth/endpoints.ts";
 import { providerDefinition } from "./auth/providers/index.ts";
 import { acceptedContextWindow, acceptedOutputLimit } from "./models/capabilities.ts";
 import { subsequenceSpread } from "./tui-text.ts";
+import { isRecord } from "../shared/guards.ts";
 
 export { firstAuthenticatedProvider } from "./auth.ts";
 
@@ -84,16 +85,11 @@ function stripModelsPrefix(id: string): string {
   return id.startsWith("models/") ? id.slice("models/".length) : id;
 }
 
-function asRecord(v: unknown): Record<string, unknown> | null {
-  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
-}
-
 function requireAnthropicModelsEnvelope(payload: unknown): Record<string, unknown> {
-  const rec = asRecord(payload);
-  if (!rec || !Array.isArray(rec.data) || typeof rec.has_more !== "boolean") {
+  if (!isRecord(payload) || !Array.isArray(payload.data) || typeof payload.has_more !== "boolean") {
     throw new Error("models: invalid response");
   }
-  return rec;
+  return payload;
 }
 
 function rowId(row: Record<string, unknown>, provider: ProviderId): ModelInfo | null {
@@ -128,13 +124,13 @@ function rowId(row: Record<string, unknown>, provider: ProviderId): ModelInfo | 
   // (https://github.com/openai/codex/blob/main/codex-rs/protocol/src/openai_models.rs).
   // Anthropic's docs page is a JS shell with no extractable schema, so no
   // Anthropic-specific keys are read here.
-  const topProvider = asRecord(row.top_provider);
+  const topProvider = isRecord(row.top_provider) ? row.top_provider : undefined;
   const outputRaw = Number(topProvider?.max_completion_tokens);
   const outputLimit = acceptedOutputLimit(outputRaw);
   const reasoningLevels = Array.isArray(row.supported_reasoning_levels)
     ? row.supported_reasoning_levels
         .map((preset) => {
-          const rec = asRecord(preset);
+          const rec = isRecord(preset) ? preset : undefined;
           const effort = rec && typeof rec.effort === "string" ? rec.effort.trim().toLowerCase() : "";
           return effort || null;
         })
@@ -155,7 +151,7 @@ function rowId(row: Record<string, unknown>, provider: ProviderId): ModelInfo | 
 }
 
 export function parseModelsPayload(payload: unknown, provider: ProviderId): ModelInfo[] {
-  const rec = asRecord(payload);
+  const rec = isRecord(payload) ? payload : undefined;
   const rawList = rec
     ? Array.isArray(rec.data)
       ? rec.data
@@ -168,10 +164,9 @@ export function parseModelsPayload(payload: unknown, provider: ProviderId): Mode
   const seen = new Set<string>();
   const out: ModelInfo[] = [];
   for (const item of rawList) {
-    const row = asRecord(item);
-    if (!row) continue;
-    if (providerDefinition(provider).catalog.acceptsRow?.(row) === false) continue;
-    const parsed = rowId(row, provider);
+    if (!isRecord(item)) continue;
+    if (providerDefinition(provider).catalog.acceptsRow?.(item) === false) continue;
+    const parsed = rowId(item, provider);
     if (!parsed || seen.has(parsed.id) || !isChatModel(parsed.id, provider)) continue;
     seen.add(parsed.id);
     out.push(parsed);
@@ -435,7 +430,9 @@ export async function loadProviderModels(
         return { ok: false, error: "models: invalid JSON" };
       }
       const anthropic = providerProtocol(providerId) === "anthropic-messages";
-      const rec = anthropic ? requireAnthropicModelsEnvelope(payload) : asRecord(payload);
+      const rec = anthropic
+        ? requireAnthropicModelsEnvelope(payload)
+        : isRecord(payload) ? payload : undefined;
       let models = parseModelsPayload(payload, providerId);
       const lastId = typeof rec?.last_id === "string" ? rec.last_id.trim() : "";
       if (anthropic && rec?.has_more === true && !lastId) {
