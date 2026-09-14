@@ -8407,6 +8407,13 @@ class TerminaApp {
     }
     await Promise.all([...this.projects.values()].map((project) => project.storePromise?.catch(() => null) ?? Promise.resolve(null)));
     disposeWorldlineGitCore();
+    // Headless subagents are separate processes: the PTY-exit cascade cannot
+    // be relied on during shutdown (native exit delivery is best-effort
+    // after forced termination), so terminate every live owner's runs
+    // directly before killing the PTYs.
+    for (const id of [...this.terminals.keys()]) {
+      this.subagents.killOwner(id, "app shutdown");
+    }
     for (const inst of this.terminals.values()) {
       inst.pty.killGroup("SIGTERM");
       inst.pty.kill();

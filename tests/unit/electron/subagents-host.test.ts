@@ -802,4 +802,20 @@ describe("SubagentHost", () => {
     expect(gated.host.kill("term-7", "bg-1", "terminal closed")).toBe(true);
     await until(() => existsSync(join(gatedDir, "subagent-term-7-bg-1.result.json")));
   });
+
+  it("signals live children on shutdown without PTY exit delivery (refs #211)", async () => {
+    const s = setup();
+    s.writeTask(validTask({ paths: [] }));
+    await s.host.handleSpawn("term-7", "bg-1", "subagent-term-7-bg-1.task.json");
+    expect(s.host.activeCount()).toBe(1);
+    // dispose() calls killOwner per live terminal id before killing PTYs:
+    // the headless child is signalled directly, not via any exit cascade.
+    expect(s.host.killOwner("term-7", "app shutdown")).toBe(1);
+    expect(s.procs[0]!.kills).toEqual(["group:SIGTERM"]);
+    s.procs[0]!.exit(null, "SIGTERM");
+    await until(() => existsSync(s.resultFile));
+    expect(s.readResult().outcome).toBe("killed");
+    expect(s.host.activeCount()).toBe(0);
+    expect(s.notes).toHaveLength(1);
+  });
 });

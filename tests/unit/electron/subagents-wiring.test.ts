@@ -37,6 +37,18 @@ describe("Subagent Wiring Invariants", () => {
     assert.match(main, /this\.subagents\.killOwner\(inst\.id, "terminal closed"\)/);
   });
 
+  it("shutdown terminates owner runs before killing PTYs (refs #211)", () => {
+    const disposeAt = main.indexOf("async dispose()");
+    const shutdownAt = main.indexOf("private stopPaintWatchdog", disposeAt);
+    assert.ok(disposeAt >= 0 && shutdownAt > disposeAt);
+    const dispose = main.slice(disposeAt, shutdownAt);
+    // Per live terminal id, and strictly before the PTY kill loop: the
+    // PTY-exit cascade is best-effort after forced termination, so shutdown
+    // cannot rely on it to reap headless children.
+    assert.match(dispose, /for \(const id of \[\.\.\.this\.terminals\.keys\(\)\]\) \{\s*this\.subagents\.killOwner\(id, "app shutdown"\);/);
+    assert.ok(dispose.indexOf('killOwner(id, "app shutdown")') < dispose.indexOf('inst.pty.killGroup("SIGTERM")'));
+  });
+
   it("startup sweep covers subagent-managed files", () => {
     assert.match(main, /isSubagentManagedFile\(name\)/);
   });
