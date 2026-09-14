@@ -313,6 +313,9 @@ function validateVerificationUri(raw: string): string {
   if (url.protocol !== "https:" && !testLoopbackOverride("TERMINA_TEST_DEVICE_URL")) {
     throw new Error("Untrusted verification URI in xAI OAuth response");
   }
+  if (!testLoopbackOverride("TERMINA_TEST_DEVICE_URL") && url.hostname !== "auth.x.ai" && !url.hostname.endsWith(".auth.x.ai")) {
+    throw new Error("Untrusted verification URI in xAI OAuth response");
+  }
   return url.href;
 }
 

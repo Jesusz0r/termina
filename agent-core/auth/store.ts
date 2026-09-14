@@ -7,7 +7,7 @@
 import { errorCode, isRecord } from "../../shared/guards.ts";
 import { syncParentDir } from "../../shared/fsync.ts";
 import { randomBytes } from "node:crypto";
-import { closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { authPath } from "./endpoints.ts";
 import { authDirectoryOpenFlags, authLockNoFollowFlags, authLockOwnerAlive, authPathBinding, authPathDirectoryIdentity, inspectAuthLock, recoverAuthLock, releaseAuthLock, resumeAuthLock, sameAuthPathIdentity, tryAcquireAuthLock, validateAuthPathBinding } from "./lock.ts";
@@ -45,6 +45,7 @@ function withLock<T>(fn: (binding: AuthPathBinding) => T): T {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const binding = authPathBinding(path);
   const lock = `${path}.lock`;
+  let selfHealed = false;
   for (;;) {
     try {
       validateAuthPathBinding(binding);
@@ -69,6 +70,13 @@ function withLock<T>(fn: (binding: AuthPathBinding) => T): T {
       throw new Error("auth file busy");
     }
     if (inspected.owner.pid === process.pid || authLockOwnerAlive(lock, inspected.owner)) {
+      // A self-owned lock whose witness is dead is our own abandoned publish
+      // (publish succeeded, post-publish inspection failed): force-release it
+      // and retry once instead of staying busy forever.
+      if (!selfHealed && inspected.owner.pid === process.pid && !authLockOwnerAlive(lock, inspected.owner)) {
+        selfHealed = true;
+        if (recoverAuthLock(lock, inspected)) continue;
+      }
       throw new Error("auth file busy");
     }
     if (!recoverAuthLock(lock, inspected)) throw new Error("auth file busy");
@@ -84,14 +92,15 @@ export function readAuth(): { ok: true; data: AuthFile } | { ok: false; reason: 
   }
   try {
     const st = statSync(path);
-    if (cached && cached.path === path && cached.mtimeMs === st.mtimeMs) return { ok: true, data: cached.data };
+    // Deep-copy on the way out: callers must not mutate the cached object.
+    if (cached && cached.path === path && cached.mtimeMs === st.mtimeMs) return { ok: true, data: structuredClone(cached.data) };
     const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
     if (!isRecord(parsed)) {
       cached = null;
       return { ok: false, reason: "corrupt" };
     }
     cached = { path, mtimeMs: st.mtimeMs, data: parsed };
-    return { ok: true, data: parsed };
+    return { ok: true, data: structuredClone(parsed) };
   } catch {
     cached = null;
     return { ok: false, reason: "corrupt" };
@@ -231,6 +240,55 @@ function truncateAuthDescriptor(fd: number): void {
 type AuthWriteTestStage = "after-open" | "after-fsync" | "after-temp";
 
 
+/**
+ * Sweep temp files orphaned by a SIGKILL between temp creation and publish.
+ * These hold full credentials at 0600, so a dead owner's residue is zeroed
+ * before unlinking. Only exact-shape entries are touched, and only when the
+ * owner pid is dead. Never throws: a sweep must not fail a write.
+ */
+function sweepStaleAuthTempFiles(binding: AuthPathBinding): void {
+  let entries: string[];
+  try {
+    entries = readdirSync(binding.parent);
+  } catch {
+    return;
+  }
+  const prefix = `.${basename(binding.path)}.tmp-`;
+  for (const name of entries) {
+    if (!name.startsWith(prefix)) continue;
+    const pid = Number(name.slice(prefix.length).split("-")[0]);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) continue;
+    try {
+      process.kill(pid, 0);
+      continue;
+    } catch (error) {
+      if (errorCode(error) !== "ESRCH") continue;
+    }
+    try {
+      const full = join(binding.parent, name);
+      const st = lstatSync(full);
+      if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1 || (st.mode & 0o777) !== 0o600) continue;
+      try {
+        const fd = openSync(full, authLockNoFollowFlags(fsConstants.O_WRONLY));
+        try {
+          ftruncateSync(fd, 0);
+          fsyncSync(fd);
+        } finally {
+          closeSync(fd);
+        }
+      } catch {
+        /* Fall through to the unlink attempt. */
+      }
+      const again = lstatSync(full);
+      if (again.isFile() && !again.isSymbolicLink() && again.dev === st.dev && again.ino === st.ino) {
+        unlinkSync(full);
+      }
+    } catch {
+      /* Leave anything unproven in place. */
+    }
+  }
+}
+
 function maybeCrashAuthWrite(stage: AuthWriteTestStage): void {
   if (process.env.TERMINA_CORE_TEST !== "1" || process.env.TERMINA_AUTH_WRITE_CRASH !== stage) return;
   process.kill(process.pid, "SIGKILL");
@@ -250,6 +308,7 @@ function maybePauseAuthWrite(stage: AuthWriteTestStage): void {
 function writeAuth(data: AuthFile, binding: AuthPathBinding): void {
   const path = binding.path;
   validateAuthPathBinding(binding);
+  sweepStaleAuthTempFiles(binding);
   const tmp = join(binding.parent, `.${basename(path)}.tmp-${process.pid}-${randomBytes(16).toString("hex")}`);
   const anchoredTempName = basename(tmp);
   const anchoredDestinationName = basename(path);

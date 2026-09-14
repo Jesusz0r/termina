@@ -268,8 +268,28 @@ export function validateCopilotApiUrl(raw: string): string | null {
 export function baseUrl(id: ProviderId): string {
   const envName = providerDefinition(id).baseEnv;
   if (envName) {
-    const raw = process.env[envName]?.trim();
-    if (raw) return raw.replace(/\/$/, "");
+    const validated = validateBaseUrlOverride(process.env[envName]);
+    if (validated) return validated;
   }
   return providerDefinition(id).baseUrl;
+}
+
+
+/**
+ * Validate a `*_BASE_URL` override the way the stored Copilot apiUrl is
+ * pinned: it must parse with an http(s) scheme and a hostname. Anything
+ * else falls back to the provider default so a typo cannot reroute (or
+ * break) credentialed requests. Plain http stays allowed — local relays
+ * and loopback fixtures are the operator's explicit choice.
+ */
+export function validateBaseUrlOverride(raw: string | undefined): string | null {
+  const trimmed = raw?.trim();
+  if (!trimmed) return null;
+  try {
+    const url = new URL(trimmed);
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || !url.hostname) return null;
+    return trimmed.replace(/\/$/, "");
+  } catch {
+    return null;
+  }
 }

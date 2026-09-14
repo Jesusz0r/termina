@@ -106,6 +106,17 @@ function resolveLoginPick(
       ? methods.find((m) => m.kind === kind)
       : methods.find((m) => m.mode === defaultLoginMode(m.id)) ?? methods[0];
   if (!picked) return { error: `${groupOrId} has no ${kindWord} login` };
+  // An explicit mode word that contradicts the resolved flow is a parse
+  // error, not a silent alias: "code" is the manual-paste browser variant,
+  // while device/browser name their own flows. ("oauth"/"key" name kinds,
+  // not modes, and always resolve to the row's own mode.)
+  if (
+    (kindWord === "device" && picked.mode !== "device") ||
+    (kindWord === "browser" && picked.mode !== "browser") ||
+    (kindWord === "code" && picked.mode !== "browser")
+  ) {
+    return { error: `${groupOrId} has no ${kindWord} login` };
+  }
   if (kindWord === "code") return { provider: picked.id, mode: "code" };
   if (kindWord === "device") return { provider: picked.id, mode: "device" };
   if (kindWord === "browser") return { provider: picked.id, mode: "browser" };
@@ -223,6 +234,9 @@ function waitForCallback(
       if (done) return;
       done = true;
       signal?.removeEventListener("abort", onAbort);
+      // A browser keep-alive connection would otherwise hold the handle
+      // open past close(); drop connections first, then close.
+      server.closeAllConnections?.();
       server.close();
       resolve(result);
     };
@@ -270,6 +284,8 @@ function waitForCallback(
     server.listen(port, "127.0.0.1", () => {
       if (done) server.close();
     });
+    // The login server must never hold the event loop open by itself.
+    server.unref?.();
   });
 }
 
