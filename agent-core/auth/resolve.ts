@@ -38,10 +38,12 @@ export const DEFAULT_MODELS = Object.fromEntries(
 ) as Record<ProviderId, { main: string; summary: string }>;
 
 
+export function parseModelRef(raw: string, override: ProviderId): { provider: ProviderId; model: string };
+export function parseModelRef(raw: string, override?: string): { provider: ProviderId; model: string } | null;
 export function parseModelRef(
   raw: string,
   override?: string,
-): { provider: ProviderId; model: string } {
+): { provider: ProviderId; model: string } | null {
   const trimmed = raw.trim();
   if (override && isSupportedProvider(override)) {
     const prefix = `${override}/`;
@@ -55,11 +57,12 @@ export function parseModelRef(
       return { provider: head, model: trimmed.slice(slash + 1) || DEFAULT_MODELS[head].main };
     }
   }
+  if (!trimmed) return null;
   if (trimmed.startsWith("claude") || trimmed.startsWith("haiku")) return { provider: "anthropic", model: trimmed };
   if (trimmed.startsWith("grok")) return { provider: "xai", model: trimmed };
   if (trimmed.startsWith("gemini") || trimmed.startsWith("gemma")) return { provider: "google", model: trimmed };
   if (/^(gpt-|o1|o3|o4|chatgpt)/.test(trimmed)) return { provider: "openai", model: trimmed };
-  return { provider: "anthropic", model: trimmed || DEFAULT_MODELS.anthropic.main };
+  return null;
 }
 
 

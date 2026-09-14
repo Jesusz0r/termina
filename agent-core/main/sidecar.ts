@@ -23,6 +23,7 @@ import {
 } from "node:fs";
 import { basename, join } from "node:path";
 import { syncParentDir } from "../../shared/fsync.ts";
+import { utf8TextPrefix } from "../tool-output.ts";
 
 export function isValidTerminalId(id: string): boolean {
   return /^[A-Za-z0-9_-]{1,128}$/.test(id);
@@ -70,13 +71,6 @@ const SIDECAR_TOOL_EDIT_FIELD_BYTES = 128 * 1024;
  * (identical to a full hash whenever the input fits the cap). */
 const SIDECAR_DIGEST_INPUT_CHARS = 64 * 1024;
 
-function utf8Prefix(value: string, maxBytes: number): string {
-  const source = Buffer.from(value, "utf8");
-  if (source.length <= maxBytes) return value;
-  let end = Math.max(0, maxBytes);
-  while (end > 0 && (source[end]! & 0xc0) === 0x80) end--;
-  return source.subarray(0, end).toString("utf8");
-}
 
 
 /** Longest proper prefix of `payload` matching a suffix of `tail`, in linear
@@ -121,11 +115,11 @@ export function boundedSidecarEdits(value: unknown): Record<string, unknown> | u
     }
     const preview: Record<string, string> = {};
     if (oldText !== undefined) {
-      preview.oldText = utf8Prefix(oldText, SIDECAR_TOOL_EDIT_FIELD_BYTES);
+      preview.oldText = utf8TextPrefix(oldText, SIDECAR_TOOL_EDIT_FIELD_BYTES);
       if (preview.oldText !== oldText) editsTruncated = true;
     }
     if (newText !== undefined) {
-      preview.newText = utf8Prefix(newText, SIDECAR_TOOL_EDIT_FIELD_BYTES);
+      preview.newText = utf8TextPrefix(newText, SIDECAR_TOOL_EDIT_FIELD_BYTES);
       if (preview.newText !== newText) editsTruncated = true;
     }
     const candidateBytes = Buffer.byteLength(JSON.stringify(preview), "utf8") + (edits.length === 0 ? 0 : 1);
@@ -404,7 +398,6 @@ export function createSidecarWriter(opts: { eventsDir: string; terminalId: strin
           version: 2,
           state: "closed",
           writerId: bridgeId,
-          bridgeId,
           generation: writerGeneration,
           sealedName,
           identity,

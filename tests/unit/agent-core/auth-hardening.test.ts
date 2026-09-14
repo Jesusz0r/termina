@@ -169,6 +169,9 @@ describe("auth hardening batch", () => {
     expect(resolveMod.parseModelRef("openai/")).toEqual({ provider: "openai", model: resolveMod.DEFAULT_MODELS.openai.main });
     expect(resolveMod.parseModelRef("anthropic/")).toEqual({ provider: "anthropic", model: resolveMod.DEFAULT_MODELS.anthropic.main });
     expect(resolveMod.parseModelRef("openai/gpt-5")).toEqual({ provider: "openai", model: "gpt-5" });
+    expect(resolveMod.parseModelRef("mystery-model")).toBeNull();
+    expect(resolveMod.parseModelRef("vendor/unknown-id")).toBeNull();
+    expect(resolveMod.parseModelRef("")).toBeNull();
   });
 
   it("item 8: mismatched login modes are rejected at parse time", () => {
@@ -239,10 +242,10 @@ describe("auth hardening batch", () => {
     const envBearer = anthropic.pickHeaders("gateway-token", { envName: "ANTHROPIC_AUTH_TOKEN" });
     expect(envBearer.authorization).toBe("Bearer gateway-token");
     expect(anthropic.pickHeaders("console-key", { envName: "ANTHROPIC_API_KEY" })["x-api-key"]).toBe("console-key");
-    // Unsourced bare-token callers keep the legacy marker fallback.
-    expect(anthropic.pickHeaders("sk-ant-oat-legacy").authorization).toBe("Bearer sk-ant-oat-legacy");
+    // Unsourced tokens fail closed to x-api-key; header keys off source, not a marker.
+    expect(anthropic.pickHeaders("sk-ant-oat-legacy")["x-api-key"]).toBe("sk-ant-oat-legacy");
+    expect(anthropic.pickHeaders("sk-ant-oat-legacy").authorization).toBeUndefined();
     expect(anthropic.pickHeaders("bare-key")["x-api-key"]).toBe("bare-key");
-    expect(anthropic.isOAuthToken("prefix-sk-ant-oat-zz")).toBe(true);
   });
 
   it("item 11: ANTHROPIC_AUTH_TOKEN resolves to bearer without any marker", async () => {

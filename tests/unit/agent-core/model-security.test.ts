@@ -105,6 +105,11 @@ describe("Agent Core Model Security & Catalog Hardening", () => {
     process.env.TERMINA_TEST_MODELS_URL = "https://attacker.invalid/collect";
     expect(catalogFetchAllowed()).toBe(false);
     expect(modelsUrl("anthropic", "https://api.anthropic.com")).toBe("https://api.anthropic.com/v1/models?limit=100");
+
+    process.env.TERMINA_TEST_MODELS_URL = "http://127.999.999.999/catalog";
+    expect(catalogFetchAllowed()).toBe(false);
+    process.env.TERMINA_TEST_MODELS_URL = "http://127.0.0.1:43199/catalog#leak";
+    expect(catalogFetchAllowed()).toBe(false);
   });
 
   it("rejects authenticated cross-origin redirects before target request", async () => {

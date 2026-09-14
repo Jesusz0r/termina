@@ -7,7 +7,7 @@ export type ToolExecutionEntry = { index: number; duplicateOf?: number; reuseRes
 const TOOL_CONCURRENCY = 4;
 // Only these built-ins are known to be observational. MCP annotations are not
 // a trust boundary, and bash can mutate anything regardless of its command name.
-const READ_TOOLS = new Set(["read_file", "grep", "glob", "fetch"]);
+export const READ_TOOLS = new Set(["read_file", "grep", "glob", "fetch"]);
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);

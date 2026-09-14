@@ -9,6 +9,7 @@
 import { createHash } from "node:crypto";
 
 import { expandFileImageSource } from "./host.ts";
+import { utf8BytePrefix } from "./tool-output.ts";
 
 const DEFAULT_OVERLAY_BYTES = 64 * 1024;
 const VIEW_KEYS = new Set(["chars", "tool", "repro", "stubbed"]);
@@ -94,25 +95,7 @@ function overlayByteCap(value: unknown): number {
  * holding the encoded form slice without re-encoding the string. */
 function clampUtf8PrefixBytes(source: Buffer, maxBytes: number): Buffer {
   if (source.length <= maxBytes) return source;
-  let end = maxBytes;
-  // Back up over a partial multi-byte sequence. Truncating mid-sequence would
-  // decode to U+FFFD, which would make the overlay bytes differ from the
-  // source prefix and could leak a misleading replacement character.
-  let continuationBytes = 0;
-  while (end > 0 && (source[end - 1]! & 0xc0) === 0x80) {
-    continuationBytes++;
-    end--;
-  }
-  if (continuationBytes > 0 && end > 0) {
-    const lead = source[end - 1]!;
-    const expected = lead < 0x80 ? 1 : lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4;
-    if (expected > continuationBytes + 1) end--;
-    else end = maxBytes;
-  } else if (end > 0) {
-    const lead = source[end - 1]!;
-    if (lead >= 0xc0) end--;
-  }
-  return source.subarray(0, end);
+  return utf8BytePrefix(source, maxBytes);
 }
 
 const OVERLAY_OPENING_TEXT = "<working-set>\n";

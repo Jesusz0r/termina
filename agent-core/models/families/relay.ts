@@ -26,15 +26,12 @@ export function glmReasoningFamily(model: string): boolean {
 const RELAY_COMPLETIONS_FAMILIES = [
   "big-pickle",
   "deepseek",
-  "glm",
   "kimi",
   "ling",
   "longcat",
   "mimo",
   "minimax",
-  "muse-spark",
   "nemotron",
-  "qwen",
 ] as const;
 
 export function relayCompletionsFamily(leaf: string): boolean {

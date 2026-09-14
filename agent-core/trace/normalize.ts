@@ -231,8 +231,8 @@ function continuation(value: unknown): TraceContinuation | null {
 function toolOutcome(value: unknown): TraceToolOutcome | null {
   if (!isRecord(value)) return null;
   return freezeDeep({
-    toolName: optionalText(value.toolName ?? value.name ?? value.tool, "tool outcome name"),
-    toolCallId: optionalText(value.toolCallId ?? value.callId, "tool outcome call id"),
+    toolName: optionalText(value.toolName, "tool outcome name"),
+    toolCallId: optionalText(value.toolCallId, "tool outcome call id"),
     isError: nullableBoolean(value.isError),
     bounded: boundedToolOutput(value.bounded),
     cancellationScope: optionalText(value.cancellationScope, "tool cancellation scope"),
@@ -262,41 +262,41 @@ function nestedRecord(value: unknown): Record<string, unknown> | null {
 function reclaimTarget(value: unknown): TraceReclaimTarget | null {
   if (!isRecord(value)) return null;
   const original = nestedRecord(value.original);
-  const fallback = nestedRecord(value.fallback) ?? nestedRecord(value.recovery);
+  const fallback = nestedRecord(value.fallback);
   return freezeDeep({
     sseq: nullableInteger(value.sseq),
     sourceSseq: nullableInteger(value.sourceSseq),
     blockIndex: nullableInteger(value.blockIndex),
-    action: optionalText(value.action ?? value.kind, "reclaim action"),
+    action: optionalText(value.action, "reclaim action"),
     originalType: optionalText(value.originalType ?? original?.type, "reclaim original type"),
     originalChars: nullableInteger(value.originalChars ?? original?.chars),
     originalBytes: nullableInteger(value.originalBytes ?? original?.bytes),
-    originalSha256: optionalText(value.originalSha256 ?? value.originalHash ?? original?.sha256 ?? original?.hash, "reclaim original hash"),
-    stubSha256: optionalText(value.stubSha256 ?? value.stubHash, "reclaim stub hash"),
+    originalSha256: optionalText(value.originalSha256, "reclaim original hash"),
+    stubSha256: optionalText(value.stubSha256, "reclaim stub hash"),
     reclaimedTokens: nullableInteger(value.reclaimedTokens),
     tool: optionalText(value.tool ?? fallback?.tool, "reclaim tool"),
     repro: optionalText(value.repro ?? fallback?.repro, "reclaim reproduction"),
     recovery: optionalText(value.recovery ?? fallback?.source, "reclaim recovery"),
-    result: optionalText(value.result ?? value.status, "reclaim result"),
+    result: optionalText(value.result, "reclaim result"),
   });
 }
 
 
 export function reclaimEvidence(value: unknown): TraceReclaimEvidence | null {
   if (!isRecord(value)) return null;
-  const rawTargets = Array.isArray(value.targets) ? value.targets : Array.isArray(value.receipts) ? value.receipts : [];
+  const rawTargets = Array.isArray(value.targets) ? value.targets : [];
   const targets = rawTargets.slice(0, MAX_RECLAIM_TARGETS)
     .map((item) => reclaimTarget(item))
     .filter((item): item is TraceReclaimTarget => item !== null);
   return freezeDeep({
-    attempted: nullableBoolean(value.attempted ?? value.planned),
+    attempted: nullableBoolean(value.attempted),
     planned: nullableBoolean(value.planned),
     applied: nullableBoolean(value.applied),
     recovered: nullableBoolean(value.recovered),
     revisionId: optionalText(value.revisionId, "reclaim revision id"),
     targetCount: nullableInteger(value.targetCount) ?? (rawTargets.length > 0 ? rawTargets.length : null),
-    reclaimedBytes: nullableInteger(value.reclaimedBytes ?? value.bytes),
-    reclaimedTokens: nullableInteger(value.reclaimedTokens ?? value.tokens),
+    reclaimedBytes: nullableInteger(value.reclaimedBytes),
+    reclaimedTokens: nullableInteger(value.reclaimedTokens),
     source: optionalText(value.source, "reclaim source"),
     recovery: optionalText(value.recovery, "reclaim recovery"),
     error: optionalText(value.error, "reclaim error"),
@@ -390,8 +390,7 @@ export function cache(value: TraceCacheInput | null | undefined): TraceCache {
 }
 
 
-export function revisions(value: TraceRevisionsInput | number | null | undefined): TraceRevisions {
-  if (typeof value === "number") return freezeDeep({ count: nullableInteger(value), kinds: [] });
+export function revisions(value: TraceRevisionsInput | null | undefined): TraceRevisions {
   return freezeDeep({
     count: nullableInteger(value?.count),
     kinds: stringArray(value?.kinds, "revision kinds"),

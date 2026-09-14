@@ -101,7 +101,7 @@ function isValidUtf8Sequence(sequence: readonly number[]): boolean {
 }
 
 /** Return the longest valid UTF-8 prefix that fits in maxBytes. */
-function utf8Prefix(value: Uint8Array, maxBytes: number): Buffer {
+export function utf8BytePrefix(value: Uint8Array, maxBytes: number): Buffer {
   if (maxBytes <= 0 || value.byteLength === 0) return Buffer.alloc(0);
   const end = Math.min(value.byteLength, maxBytes);
   let cursor = 0;
@@ -115,6 +115,23 @@ function utf8Prefix(value: Uint8Array, maxBytes: number): Buffer {
     safeEnd = cursor;
   }
   return Buffer.from(value.subarray(0, safeEnd));
+}
+
+/** Cut a string at a UTF-8 boundary so byte caps never split a character. */
+export function utf8TextPrefix(value: string, maxBytes: number): string {
+  const source = Buffer.from(value, "utf8");
+  if (source.length <= maxBytes) return value;
+  return utf8BytePrefix(source, maxBytes).toString("utf8");
+}
+
+/** Keep the trailing complete UTF-8 characters that fit in maxBytes. */
+export function utf8TextSuffix(value: string, maxBytes: number): string {
+  const source = Buffer.from(value, "utf8");
+  if (source.length <= maxBytes) return value;
+  const slice = source.subarray(Math.max(0, source.length - maxBytes));
+  let start = 0;
+  while (start < slice.length && (slice[start]! & 0xc0) === 0x80) start += 1;
+  return utf8BytePrefix(slice.subarray(start), slice.length - start).toString("utf8");
 }
 
 function flatten(sequences: readonly Uint8Array[]): Buffer {
@@ -139,7 +156,7 @@ function fitText(
   marker: string,
 ): FittedText {
   let markerBytes: Uint8Array = Buffer.from(marker, "utf8");
-  if (markerBytes.byteLength > maxBytes) markerBytes = utf8Prefix(markerBytes, maxBytes);
+  if (markerBytes.byteLength > maxBytes) markerBytes = utf8BytePrefix(markerBytes, maxBytes);
   const separatorBytes = source.length > 0 && markerBytes.byteLength > 0 ? 1 : 0;
   const bodyLimit = Math.max(0, maxBytes - markerBytes.byteLength - separatorBytes);
   const body = trimSequences(source, direction, bodyLimit);

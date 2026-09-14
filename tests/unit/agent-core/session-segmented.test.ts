@@ -420,7 +420,10 @@ export async function run({ check, leftovers }: { check: CheckFn; leftovers: str
       afterReplayRead(paths) {
         const path = paths[0]!;
         const before = readFileSync(path, "utf8");
-        const after = before.replace("stable", "mutate");
+        // Unique same-length token each attempt so a rewrite cannot become a
+        // no-op after the first mutation (which would let replay succeed).
+        const token = `mutat${postReplayContentMutations}`;
+        const after = before.replace(/"content":"[^"]+"/, `"content":"${token}"`);
         if (after.length !== before.length) throw new Error("same-size replay race fixture changed length");
         writeFileSync(path, after, { mode: 0o600 });
         postReplayContentMutations += 1;

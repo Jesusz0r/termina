@@ -4,7 +4,8 @@
  * Owns input mapping, explicit breakpoints, and the Responses body.
  * Split from agent-core/openai-compat.ts (issue #38).
  */
-import { applyCacheOpts, blockText, imageDataUrl, isGeminiModel, unmatchedToolCallError } from "./completions.ts";
+import { applyCacheOpts, blockText, imageDataUrl, unmatchedToolCallError } from "./completions.ts";
+import { modelLooksGemini } from "../models/families/google.ts";
 import type { CompletionsOpts, KernelMessage, ToolDef } from "./types.ts";
 
 
@@ -214,10 +215,12 @@ export function responsesBody(
     ...(tools.length > 0 ? { tool_choice: "auto" } : {}),
     parallel_tool_calls: true,
   };
-  if (opts?.maxTokens !== undefined) body.max_output_tokens = opts.maxTokens;
+  // Codex Responses rejects max_output_tokens on the ChatGPT backend.
+  // Callers always pass maxTokens; this serializer owns the omission.
+  if (opts?.maxTokens !== undefined && opts.provider !== "openai-codex") body.max_output_tokens = opts.maxTokens;
   if (opts?.includeEncryptedReasoning !== false) body.include = ["reasoning.encrypted_content"];
   applyCacheOpts(body, opts, model);
-  const geminiRoute = opts?.provider === "google" || isGeminiModel(model);
+  const geminiRoute = opts?.provider === "google" || modelLooksGemini(model);
   const explicitRoute = !geminiRoute && (opts?.provider === undefined || opts.provider === "openai" || opts.provider === "openrouter");
   if (opts?.promptCacheMode === "explicit" && explicitRoute) {
     body.prompt_cache_options = { mode: "explicit", ttl: "30m" };

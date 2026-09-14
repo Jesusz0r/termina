@@ -5,7 +5,7 @@
  */
 import type { McpCancellationScope, McpContinuation } from "../mcp.ts";
 import { isGrepNoMatches } from "../stall.ts";
-import { genericToolText, type BoundedText, type ToolTextResult } from "../tool-output.ts";
+import { genericToolText, utf8TextSuffix, type BoundedText, type ToolTextResult } from "../tool-output.ts";
 import { isReplaceAll } from "./file-ops.ts";
 import { shellQuote } from "./files.ts";
 import { boundedSidecarEdits } from "./sidecar.ts";
@@ -177,11 +177,7 @@ export function formatToolAnnounce(use: ToolUse): string {
 }
 
 export function capDisplay(text: string, maxBytes: number): string {
-  const buf = Buffer.from(text, "utf8");
-  if (buf.length <= maxBytes) return text;
-  let start = buf.length - maxBytes;
-  while (start < buf.length && (buf[start]! & 0xc0) === 0x80) start += 1;
-  return buf.subarray(start).toString("utf8");
+  return utf8TextSuffix(text, maxBytes);
 }
 
 export function formatToolFollowup(use: ToolUse, outcome: { result: Record<string, unknown>; isError: boolean }): string {

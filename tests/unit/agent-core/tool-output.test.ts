@@ -398,7 +398,7 @@ describe("Agent Core Bounded Output Foundation", () => {
       const readPath = join(integrationRoot, "read-é.txt");
       const payload = `${"r".repeat(40 * 1024)}éé`;
       writeFileSync(readPath, Buffer.from(payload, "utf8"));
-      const result = fileOps.readFileResult(readPath, 0);
+      const result = fileOps.readTextView(readPath, { offset: 0 });
 
       assertBoundedText(result, "read_file");
       expect(result.isError).toBe(false);

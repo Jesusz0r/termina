@@ -15,7 +15,9 @@ import {
   resolveAuth,
   type ProviderId,
 } from "./auth.ts";
+import { testLoopbackOverride } from "./auth/endpoints.ts";
 import { providerDefinition } from "./auth/providers/index.ts";
+import { acceptedContextWindow, acceptedOutputLimit } from "./models/capabilities.ts";
 import { subsequenceSpread } from "./tui-text.ts";
 
 export { firstAuthenticatedProvider } from "./auth.ts";
@@ -46,18 +48,7 @@ const SKIP_CHAT =
   /embedding|whisper|tts|dall-e|dalle|moderation|transcribe|sora|gpt-image|image|omni-moderation|realtime|^ada$|babbage|davinci|computer-use/;
 
 function testModelsUrl(): string | null {
-  if (process.env.TERMINA_CORE_TEST !== "1") return null;
-  const raw = process.env.TERMINA_TEST_MODELS_URL?.trim();
-  if (!raw) return null;
-  try {
-    const url = new URL(raw);
-    const host = url.hostname.replace(/^\[|\]$/g, "");
-    const loopback = host === "::1" || /^127(?:\.\d{1,3}){3}$/.test(host);
-    if (!loopback || (url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password) return null;
-    return url.toString();
-  } catch {
-    return null;
-  }
+  return testLoopbackOverride("TERMINA_TEST_MODELS_URL") ?? null;
 }
 
 export function modelsUrl(provider: ProviderId, baseUrl: string): string {
@@ -129,7 +120,7 @@ function rowId(row: Record<string, unknown>, provider: ProviderId): ModelInfo | 
   const policy = providerDefinition(provider).catalog;
   const contextRaw = Number(row.context_length ?? row.context_window ?? row.max_input_tokens ?? row.context
     ?? policy.contextFallback?.(row));
-  const context = Number.isFinite(contextRaw) && contextRaw >= 8_000 ? Math.floor(contextRaw) : undefined;
+  const context = acceptedContextWindow(contextRaw);
   const supportedEndpoints = policy.supportedEndpoints?.(row);
   // Doc-confirmed metadata only: OpenRouter `top_provider.max_completion_tokens`
   // and `supported_parameters` (https://openrouter.ai/docs/guides/overview/models.md);
@@ -139,7 +130,7 @@ function rowId(row: Record<string, unknown>, provider: ProviderId): ModelInfo | 
   // Anthropic-specific keys are read here.
   const topProvider = asRecord(row.top_provider);
   const outputRaw = Number(topProvider?.max_completion_tokens);
-  const outputLimit = Number.isFinite(outputRaw) && outputRaw >= 1_000 ? Math.floor(outputRaw) : undefined;
+  const outputLimit = acceptedOutputLimit(outputRaw);
   const reasoningLevels = Array.isArray(row.supported_reasoning_levels)
     ? row.supported_reasoning_levels
         .map((preset) => {

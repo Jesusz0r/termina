@@ -12,7 +12,7 @@
 // Split into ./auth/ modules (issue #38). This entry re-exports the public surface.
 export type { ProviderId, ProviderProtocol, LoginMode } from "./auth/providers/types.ts";
 export { protocolEndpoint } from "./auth/providers/endpoints.ts";
-export { isOAuthToken, pickHeaders } from "./auth/providers/anthropic.ts";
+export { pickHeaders } from "./auth/providers/anthropic.ts";
 export { extractAccountId } from "./auth/providers/openai-codex.ts";
 export { zenWireProtocol } from "./auth/providers/opencode-zen.ts";
 export { AUTH_PROVIDER_ORDER, authPath, defaultLoginMode, googleNativeHeaders, isSupportedProvider, maskSecret, needsRefresh, openaiCodexClientVersion, providerProtocol, providerProtocolHeaders, redirectPort, requestHeaders, usesResponsesApi, validateCopilotApiUrl } from "./auth/endpoints.ts";

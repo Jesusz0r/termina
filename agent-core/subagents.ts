@@ -13,6 +13,9 @@
 
 import { existsSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
+import { utf8TextPrefix } from "./tool-output.ts";
+
+export { utf8TextPrefix as truncateUtf8 } from "./tool-output.ts";
 import { readBoundedRegularFile } from "./main/files.ts";
 import {
   isSupportedProvider,
@@ -557,26 +560,6 @@ export function parseSubagentResultFrame(line: string): SubagentResultFrame | nu
   return { ok: v.ok, ...(typeof v.result === "string" ? { result: v.result } : {}), ...(typeof v.error === "string" ? { error: v.error } : {}) };
 }
 
-/** Cut text at a UTF-8 boundary so byte caps never split a character. */
-export function truncateUtf8(text: string, maxBytes: number): string {
-  const buf = Buffer.from(text, "utf8");
-  if (buf.length <= maxBytes) return text;
-  let end = maxBytes;
-  // Back over continuation bytes to the lead byte of the cut character.
-  while (end > 0 && (buf[end]! & 0xc0) === 0x80) end -= 1;
-  if (end > 0 && (buf[end]! & 0x80) !== 0) {
-    // Drop the cut character unless its full encoding fits the budget.
-    const lead = buf[end]!;
-    const width = lead < 0x80 ? 1 : lead < 0xe0 ? 2 : lead < 0xf0 ? 3 : 4;
-    if (end + width > maxBytes) {
-      // end already excludes it: [0, end) holds only complete characters.
-    } else {
-      end += width;
-    }
-  }
-  return buf.toString("utf8", 0, end);
-}
-
 function normalizeClaimPath(raw: unknown): { ok: true; path: string } | { ok: false; error: string } {
   if (typeof raw !== "string") return { ok: false, error: "spawn_subagent paths must be strings" };
   // Control characters would break the brief markdown and overlap matching.
@@ -701,7 +684,7 @@ export class SubagentRegistry {
     run.state = outcome;
     run.result = scanned.text;
     run.flags = scanned.flags;
-    run.error = outcome === "settled" || !error?.trim() ? null : truncateUtf8(error, MAX_SUBAGENT_ERROR_CHARS);
+    run.error = outcome === "settled" || !error?.trim() ? null : utf8TextPrefix(error, MAX_SUBAGENT_ERROR_CHARS);
     // Re-insert so map order is settle order for settled runs; the retention
     // window below trims the least recently settled first. Active relative
     // order is unchanged (the settling run leaves the active set).
@@ -777,8 +760,7 @@ export class SubagentRegistry {
       }
     }
     // Resolve the child route: a `provider/id` ref, else a bare id against
-    // the parent provider. An unknown provider prefix fails closed here so
-    // parseModelRef's anthropic fallback can never silently reroute a child.
+    // the parent provider. Unknown prefixes and unrecognized ids fail closed.
     let provider: ProviderId = parent.provider;
     let model = parent.model;
     const modelRaw = req.model?.trim() ?? "";
@@ -789,6 +771,7 @@ export class SubagentRegistry {
         return { ok: false, error: `unsupported provider: ${modelRaw.slice(0, slash)}` };
       }
       const parsed = slash > 0 ? parseModelRef(modelRaw) : parseModelRef(modelRaw, parent.provider);
+      if (!parsed) return { ok: false, error: `unknown model: ${modelRaw}` };
       if (!isSupportedProvider(parsed.provider)) return { ok: false, error: `unsupported provider: ${parsed.provider}` };
       provider = parsed.provider;
       model = parsed.model;
