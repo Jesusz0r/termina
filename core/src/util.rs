@@ -133,6 +133,78 @@ pub(crate) fn loose_path(repo: &Repository, oid: Oid) -> Option<PathBuf> {
 /// a stable sibling of the deletable store, so destroy/recreate cannot replace
 /// its inode while an older request still holds it.
 
+/// Decode a Git path that must be valid UTF-8. Non-UTF8 paths fail the
+/// operation instead of being dropped or forged as empty.
+pub(crate) fn require_utf8_git_path<E>(
+    path: Result<&str, E>,
+    what: &str,
+) -> Result<String, String> {
+    path.map(String::from)
+        .map_err(|_| format!("a {what} path is not valid UTF-8"))
+}
+
+/// Decode a filesystem path that must be valid UTF-8. A missing or
+/// non-UTF8 path fails the operation instead of being forged as empty.
+pub(crate) fn require_utf8_rel_path(path: Option<&Path>, what: &str) -> Result<String, String> {
+    path.and_then(Path::to_str)
+        .map(String::from)
+        .ok_or_else(|| format!("a {what} path is not valid UTF-8"))
+}
+
+/// Decode Git index/status bytes that must be valid UTF-8.
+pub(crate) fn require_utf8_path_bytes(path: Vec<u8>, what: &str) -> Result<String, String> {
+    String::from_utf8(path).map_err(|_| format!("a {what} path is not valid UTF-8"))
+}
+
+#[cfg(test)]
+mod utf8_path_tests {
+    use super::{require_utf8_git_path, require_utf8_path_bytes, require_utf8_rel_path};
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    #[test]
+    fn git_path_rejects_invalid_utf8() {
+        let err = String::from_utf8(vec![0xff]).unwrap_err().utf8_error();
+        assert_eq!(
+            require_utf8_git_path(Err(err), "status").unwrap_err(),
+            "a status path is not valid UTF-8"
+        );
+        assert_eq!(
+            require_utf8_git_path::<std::str::Utf8Error>(Ok("ok.txt"), "status").unwrap(),
+            "ok.txt"
+        );
+    }
+
+    #[test]
+    fn rel_path_rejects_missing_and_non_utf8() {
+        assert_eq!(
+            require_utf8_rel_path(None, "diff").unwrap_err(),
+            "a diff path is not valid UTF-8"
+        );
+        assert_eq!(
+            require_utf8_rel_path(Some(Path::new("ok.txt")), "diff").unwrap(),
+            "ok.txt"
+        );
+        let path = Path::new(OsStr::from_bytes(b"bad\xff.txt"));
+        assert_eq!(
+            require_utf8_rel_path(Some(path), "diff").unwrap_err(),
+            "a diff path is not valid UTF-8"
+        );
+    }
+
+    #[test]
+    fn path_bytes_reject_invalid_utf8() {
+        assert_eq!(
+            require_utf8_path_bytes(b"bad\xff.txt".to_vec(), "tracked").unwrap_err(),
+            "a tracked path is not valid UTF-8"
+        );
+        assert_eq!(
+            require_utf8_path_bytes(b"ok.txt".to_vec(), "tracked").unwrap(),
+            "ok.txt"
+        );
+    }
+}
 
 /// True when a path has no absolute or parent segments.
 pub(crate) fn is_safe_relative(path: &str) -> bool {
@@ -222,12 +294,9 @@ pub(crate) fn stat_file_owned(file: &fs::File) -> io::Result<(FileIdentity, u64)
     }
 }
 
-
-
 /// `fstatat(2)` metadata for a private publication pathname. Keep the link
 /// count and owner alongside the ordinary identity so a hardlink or pathname
 /// replacement cannot pass a dev/ino-only check during metadata publication.
-
 
 pub(crate) fn open_at(parent: RawFd, name: &CStr, flags: libc::c_int) -> io::Result<fs::File> {
     let fd = unsafe { libc::openat(parent, name.as_ptr(), flags) };
@@ -285,7 +354,10 @@ pub(crate) fn read_link_at(parent: RawFd, name: &CStr) -> io::Result<Vec<u8>> {
 /// symlink in the directory chain.  The returned descriptor is the capability
 /// used by the capture boundary; callers must retain it for the whole
 /// operation instead of resolving the pathname again.
-pub(crate) fn open_absolute_directory_nofollow(path: &Path, field: &str) -> Result<fs::File, String> {
+pub(crate) fn open_absolute_directory_nofollow(
+    path: &Path,
+    field: &str,
+) -> Result<fs::File, String> {
     let path = normalize_system_alias_path(path, field)?;
     open_absolute_directory_nofollow_raw(&path, field)
 }
@@ -344,7 +416,10 @@ pub(crate) fn normalize_system_alias_path(path: &Path, field: &str) -> Result<Pa
     }
 }
 
-pub(crate) fn open_absolute_directory_nofollow_raw(path: &Path, field: &str) -> Result<fs::File, String> {
+pub(crate) fn open_absolute_directory_nofollow_raw(
+    path: &Path,
+    field: &str,
+) -> Result<fs::File, String> {
     if !path.is_absolute() {
         return Err(format!("{field} must be an absolute path"));
     }
@@ -414,7 +489,6 @@ pub(crate) fn open_relative_directory(
     Ok(current)
 }
 
-
 // ------------------------------------------------ promotion native boundary --
 
 /// The native promotion boundary deliberately returns no parsed journal
@@ -422,15 +496,12 @@ pub(crate) fn open_relative_directory(
 /// verifies expected identities/states, and performs preservation-first
 /// namespace transitions.
 
-
 /// Run a Git operation with the process working directory set from an
 /// already-open directory descriptor.  libgit2 only accepts paths, but a
 /// descriptor-relative cwd keeps `Repository::init/open` and its subsequent
 /// index/object writes on the bound directory even if an ancestor is swapped
 /// while the request is in flight.  Core handles requests serially, so this
 /// short-lived cwd change cannot be observed by another core operation.
-
-
 
 /// Apply the spike-only rewrite after the read descriptor is open. Opening
 /// through the retained parent descriptor keeps the seam inside the same
