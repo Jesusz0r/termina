@@ -131,8 +131,10 @@ async function boundedCoreRequest(binary: string) {
 describe("Release Core Binary Staging & Architecture Invariants", () => {
   it("preserves identity, architecture, and bounded JSON-lines protocol", async () => {
     if (!existsSync(source)) {
-      console.warn("Release core binary not found at " + source + ", skipping");
-      return;
+      throw new Error(
+        `Release core binary not found at ${source}; build it first (pnpm run build). ` +
+          "This staging gate must fail when its required artifact is missing.",
+      );
     }
 
     const sourceIdentity = identity(source);
