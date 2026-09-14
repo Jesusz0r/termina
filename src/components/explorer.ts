@@ -6,6 +6,7 @@
  * the explorer:paste backend, so no new IPC exists for drag-drop.
  */
 import { type CommandId, type ContentHit, type ExplorerEntry } from "../../shared/types";
+import { isRecord } from "../../shared/guards";
 import {
   ancestorDirs,
   canDropEntry,
@@ -31,6 +32,16 @@ import {
   type DirState,
   type DirView,
 } from "./explorer-rows";
+
+/** Shape guard for listDir entries. Main is same-app trusted, but a malformed
+ *  entry must not throw inside renderChildren: it runs under floated
+ *  `void refresh()` calls, where a throw is an unhandled rejection that
+ *  silently kills the refresh. Malformed entries are skipped. */
+function isExplorerEntry(value: unknown): value is ExplorerEntry {
+  if (!isRecord(value)) return false;
+  return typeof value.path === "string" && typeof value.relPath === "string" && typeof value.name === "string"
+    && (value.type === "file" || value.type === "dir");
+}
 
 
 
@@ -384,12 +395,19 @@ export class Explorer {
       toast(res.error, "error");
       return;
     }
+    const entries = Array.isArray(res.entries) ? res.entries.filter(isExplorerEntry) : null;
+    if (!entries) {
+      state.loaded = false;
+      if (!hadContent) children.replaceChildren();
+      toast(`could not list ${entry.name}: unexpected response`, "error");
+      return;
+    }
     const current = new Map<string, HTMLElement>();
     for (const node of children.querySelectorAll<HTMLElement>(":scope > [data-path]")) {
       const path = node.dataset.path;
       if (path) current.set(path, node);
     }
-    const nextDirPaths = new Set(res.entries.filter((child) => child.type === "dir").map((child) => child.path));
+    const nextDirPaths = new Set(entries.filter((child) => child.type === "dir").map((child) => child.path));
     for (const [path, node] of current) {
       if (node.dataset.type === "dir" && !nextDirPaths.has(path)) this.tree.forgetDirectory(path);
     }
@@ -397,7 +415,7 @@ export class Explorer {
     if (res.truncated) {
       next.push(makeNote("folder truncated (too many entries)"));
     }
-    for (const child of res.entries) {
+    for (const child of entries) {
       const existing = current.get(child.path);
       const node = existing && existing.dataset.type === child.type
         ? existing
@@ -598,9 +616,14 @@ export class Explorer {
   private async moveDragged(src: ExplorerEntry, targetDirRel: string): Promise<boolean> {
     const projectId = this.projectId;
     if (!projectId) return false;
-    const res = await window.termina.pasteEntry(projectId, targetDirRel, src.relPath, true);
-    if (!res.ok) {
-      toast(res.error ?? "move failed", "error");
+    try {
+      const res = await window.termina.pasteEntry(projectId, targetDirRel, src.relPath, true);
+      if (!res.ok) {
+        toast(res.error ?? "move failed", "error");
+        return false;
+      }
+    } catch (err) {
+      toast(`move failed: ${(err as Error).message}`, "error");
       return false;
     }
     await this.refresh();
@@ -683,13 +706,20 @@ export class Explorer {
     const clip = this.clipboardEntry;
     const projectId = this.projectId;
     if (!clip || !projectId) return;
-    const res = await window.termina.pasteEntry(projectId, targetDirRel, clip.relPath, clip.cut);
-    if (!res.ok) {
-      toast(res.error ?? "paste failed", "error");
+    let pastedName: string | undefined;
+    try {
+      const res = await window.termina.pasteEntry(projectId, targetDirRel, clip.relPath, clip.cut);
+      if (!res.ok) {
+        toast(res.error ?? "paste failed", "error");
+        return;
+      }
+      pastedName = res.name;
+    } catch (err) {
+      toast(`paste failed: ${(err as Error).message}`, "error");
       return;
     }
     if (clip.cut) this.clipboardEntry = null; // a move pastes exactly once
-    toast(`Pasted as ${res.name ?? "entry"}`, "info");
+    toast(`Pasted as ${pastedName ?? "entry"}`, "info");
     await this.refresh();
   }
 
@@ -707,7 +737,12 @@ export class Explorer {
     const name = await showInput(kind === "file" ? "New file" : "New folder", "name", "");
     if (name.cancelled || !name.value?.trim()) return;
     const rel = parentRel ? `${parentRel}/${name.value.trim()}` : name.value.trim();
-    this.toastIfFailed(await window.termina.createEntry(projectId, rel, kind));
+    try {
+      this.toastIfFailed(await window.termina.createEntry(projectId, rel, kind));
+    } catch (err) {
+      toast(`could not create: ${(err as Error).message}`, "error");
+      return;
+    }
     // Expand the target folder BEFORE refreshing, so an entry created in a
     // collapsed folder is revealed by the reload instead of staying hidden.
     await this.revealDirRel(parentRel);
@@ -730,7 +765,12 @@ export class Explorer {
     if (!projectId) return;
     const res = await showInput("Rename", "new name", entry.name);
     if (res.cancelled || !res.value?.trim() || res.value.trim() === entry.name) return;
-    this.toastIfFailed(await window.termina.renameEntry(projectId, entry.relPath, res.value.trim()));
+    try {
+      this.toastIfFailed(await window.termina.renameEntry(projectId, entry.relPath, res.value.trim()));
+    } catch (err) {
+      toast(`could not rename: ${(err as Error).message}`, "error");
+      return;
+    }
     // Renames produce watcher delete+create events; refresh covers it.
     await this.refresh();
   }
@@ -740,7 +780,12 @@ export class Explorer {
     if (!projectId) return;
     const ok = await showConfirm("Delete", deleteConfirmMessage(entry));
     if (!ok.confirmed) return;
-    this.toastIfFailed(await window.termina.deleteEntry(projectId, entry.relPath));
+    try {
+      this.toastIfFailed(await window.termina.deleteEntry(projectId, entry.relPath));
+    } catch (err) {
+      toast(`could not delete: ${(err as Error).message}`, "error");
+      return;
+    }
     // The watcher fires file:deleted, which closes any open editor tab.
     await this.refresh();
   }

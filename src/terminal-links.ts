@@ -1,4 +1,4 @@
-import type { IBufferRange, ILink, ILinkProvider, Terminal } from "@xterm/xterm";
+import type { IBufferLine, IBufferRange, ILink, ILinkProvider, Terminal } from "@xterm/xterm";
 
 const KNOWN_EXTENSIONS = new Set([
   "ts", "tsx", "js", "jsx", "mjs", "cjs",
@@ -42,8 +42,16 @@ function safeDecodeUri(uri: string): string {
 /**
  * Parses a target candidate into clean path, line, and column.
  * Returns null if the target does not look like a source file or known config.
+ *
+ * Only `file://` URIs are local files: any other scheme (`http://`, `https://`,
+ * …) is rejected here so quoted and Markdown web targets never become file links.
+ * A leading `a/` or `b/` is a Git diff prefix only when the caller observed a
+ * real diff header (`diffHeader: true`); ordinary paths keep it literally.
  */
-export function parseTargetReference(target: string): { path: string; line?: number; column?: number } | null {
+export function parseTargetReference(
+  target: string,
+  opts: { diffHeader?: boolean } = {},
+): { path: string; line?: number; column?: number } | null {
   let cleaned = target;
   if (!/\(\d+(?:,\s*\d+)?\)$/.test(target)) {
     cleaned = cleaned.replace(/[.,;!?:)]+$/, "");
@@ -51,6 +59,8 @@ export function parseTargetReference(target: string): { path: string; line?: num
     cleaned = cleaned.replace(/[.,;!?:]+$/, "");
   }
   if (!cleaned) return null;
+
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(cleaned) && !cleaned.startsWith("file://")) return null;
 
   if (cleaned.startsWith("file://")) {
     cleaned = cleaned.slice("file://".length);
@@ -84,7 +94,7 @@ export function parseTargetReference(target: string): { path: string; line?: num
     }
   }
 
-  const cleanPath = cleaned.replace(/^[ab]\//, "");
+  const cleanPath = opts.diffHeader ? cleaned.replace(/^[ab]\//, "") : cleaned;
   const baseName = cleanPath.split("/").pop() ?? "";
   const dotIdx = baseName.lastIndexOf(".");
   const ext = dotIdx > 0 ? baseName.slice(dotIdx + 1).toLowerCase() : "";
@@ -97,6 +107,17 @@ export function parseTargetReference(target: string): { path: string; line?: num
 
   if (!isRecognized) return null;
   return { path: cleanPath, line, column: col };
+}
+
+/**
+ * True when the match at `startIndex` is the path of a real Git diff header
+ * (`--- a/…`, `+++ b/…`, or either side of `diff --git a/… b/…`) rather than
+ * an ordinary reference to a directory literally named `a` or `b`.
+ */
+function isDiffHeaderTarget(lineText: string, startIndex: number): boolean {
+  const before = lineText.slice(0, startIndex);
+  const prefix = before.slice(before.lastIndexOf("\n") + 1);
+  return /^(---|\+\+\+)\s+$/.test(prefix) || /^diff --git\s+(\S+\s+)?$/.test(prefix);
 }
 
 /**
@@ -214,7 +235,9 @@ export function parseTerminalFileLinks(lineText: string): ParsedTerminalFileLink
     const endIndex = startIndex + raw.length;
     if (isOverlapping(startIndex, endIndex)) continue;
 
-    const parsedTarget = parseTargetReference(raw);
+    // Only the unquoted site can be a diff header: Markdown, quoted, and
+    // file:// targets carry their own syntax, so their `a/` / `b/` stays literal.
+    const parsedTarget = parseTargetReference(raw, { diffHeader: isDiffHeaderTarget(lineText, startIndex) });
     if (!parsedTarget) continue;
 
     links.push({
@@ -228,6 +251,35 @@ export function parseTerminalFileLinks(lineText: string): ParsedTerminalFileLink
   }
 
   return links.sort((a, b) => a.startIndex - b.startIndex);
+}
+
+/**
+ * Maps each UTF-16 offset of a line's string (up to `textLength`) to its
+ * 0-based terminal cell, using only the supported buffer API.
+ *
+ * Wide characters occupy two cells but appear once in the string, combined
+ * marks share one cell, and empty cells stringify as a space — so string
+ * offsets and cell columns diverge after any non-trivial cell. The public
+ * `translateToString` takes only three arguments: the internal out-columns
+ * fourth argument is unreachable, and an `any` cast cannot change that.
+ */
+export function cellColumnsForLine(line: IBufferLine, textLength: number): number[] {
+  const columns: number[] = [];
+  let x = 0;
+  while (x < line.length && columns.length < textLength) {
+    const cell = line.getCell(x);
+    if (!cell) {
+      columns.push(x);
+      x++;
+      continue;
+    }
+    // Empty cells stringify as one space; wide cells advance past their placeholder.
+    const chars = cell.getChars() || " ";
+    const width = cell.getWidth() || 1;
+    for (let i = 0; i < chars.length; i++) columns.push(x);
+    x += width;
+  }
+  return columns;
 }
 
 /**
@@ -245,8 +297,7 @@ export function createTerminalLinkProvider(
         return;
       }
 
-      const outColumns: number[] = [];
-      const lineText = (line as any).translateToString(true, undefined, undefined, outColumns);
+      const lineText = line.translateToString(true);
       if (!lineText.trim()) {
         callback(undefined);
         return;
@@ -258,14 +309,14 @@ export function createTerminalLinkProvider(
         return;
       }
 
+      // Link ranges are terminal cells (1-based, end-inclusive), not string offsets.
+      const columns = cellColumnsForLine(line, lineText.length);
+      const cellOf = (offset: number): number => (offset < columns.length ? columns[offset]! : offset);
+
       const links: ILink[] = parsed.map((item) => {
-        const startX = outColumns.length > item.startIndex
-          ? outColumns[item.startIndex] + 1
-          : item.startIndex + 1;
+        const startX = cellOf(item.startIndex) + 1;
         const endCharIdx = Math.max(0, item.endIndex - 1);
-        const endX = outColumns.length > endCharIdx
-          ? outColumns[endCharIdx] + 1
-          : item.endIndex;
+        const endX = cellOf(endCharIdx) + 1;
 
         const range: IBufferRange = {
           start: { x: startX, y: bufferLineNumber },

@@ -145,6 +145,51 @@ test.describe("Diff Review Mode & Revert Lifecycle", () => {
     await expect(page.locator("#review-container")).toBeHidden();
   });
 
+  test("a failed load leaves the previous diff staged, not a mismatched label", async ({ page, projectRoot }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+
+    const changed = 'export const greeting = "hi there";\n';
+    writeFileSync(join(projectRoot, "greeting.ts"), changed);
+    // A plus an unloadable entry: opening a directory fails openFile while the
+    // baseline call succeeds, which is the non-throwing failure path in show().
+    await page.evaluate(() => {
+      const w = window as unknown as Record<string, unknown>;
+      const panes = w.__panes as Map<string, { error: boolean; exited: boolean; modified: unknown[] }>;
+      const pane = [...panes.values()].find((p) => !p.error && !p.exited) ?? [...panes.values()][0]!;
+      const root = document.querySelector<HTMLElement>("#explorer-tree [data-path]")!.dataset.path!;
+      pane.modified = [
+        { path: `${root}/greeting.ts`, relPath: "greeting.ts", status: "modified" },
+        { path: `${root}/src`, relPath: "src", status: "modified" },
+      ];
+    });
+    await page.locator(".terminal-tab").first().click();
+    await page.locator(".activity-tab[data-tab='modified']").click();
+
+    const rowA = page.locator("#modified-list li").filter({ hasText: "greeting.ts" });
+    const rowB = page.locator("#modified-list li").filter({ hasText: "src" });
+    await expect(rowA).toBeVisible();
+    await expect(rowB).toBeVisible();
+
+    await rowA.click();
+    await expect(page.locator("#review-container")).toBeVisible();
+    await expect(page.locator("#review-filename")).toHaveText("greeting.ts");
+    const sidesBefore = await page.evaluate(
+      () => (window as unknown as Record<string, unknown>).__reviewDebug as { original: string; modified: string },
+    );
+    expect(sidesBefore.modified).toContain("hi there");
+    const revertDisabledBefore = await page.locator("#review-revert").isDisabled();
+
+    // The unloadable entry fails to load: the pane must still show A's name,
+    // path, and diff sides — never B's label over A's diff.
+    await rowB.click();
+    await expect(page.locator("#review-filename")).toHaveText("greeting.ts");
+    const sidesAfter = await page.evaluate(
+      () => (window as unknown as Record<string, unknown>).__reviewDebug as { original: string; modified: string },
+    );
+    expect(sidesAfter).toEqual(sidesBefore);
+    expect(await page.locator("#review-revert").isDisabled()).toBe(revertDisabledBefore);
+  });
+
   test("revert is refused without a run-captured baseline and leaves the file alone", async ({ page, projectRoot }) => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
 

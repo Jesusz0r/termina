@@ -94,6 +94,34 @@ test.describe("Settings & Preferences E2E", () => {
     await modal.locator(".settings-close").click();
   });
 
+  test("traps Tab inside the settings modal", async ({ page }) => {
+    await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
+
+    await page.evaluate(() => (window as any).__openSettings());
+    const modal = page.locator(".settings-modal");
+    await expect(modal).toBeVisible();
+
+    const focusInsideModal = () => page.evaluate(() => {
+      const modalEl = document.querySelector(".settings-modal");
+      const active = document.activeElement;
+      return !!modalEl && !!active && modalEl.contains(active);
+    });
+
+    // Walk well past the focusable count in both directions: focus must never
+    // leave for the background tree or editor.
+    for (let i = 0; i < 30; i++) {
+      await page.keyboard.press("Tab");
+      expect(await focusInsideModal()).toBe(true);
+    }
+    for (let i = 0; i < 30; i++) {
+      await page.keyboard.press("Shift+Tab");
+      expect(await focusInsideModal()).toBe(true);
+    }
+
+    await modal.locator(".settings-close").click();
+    await expect(modal).toBeHidden();
+  });
+
   test("general section toggles agent file auto-open and persists it", async ({ page }) => {
     await expect(page.locator("#splash")).toBeHidden({ timeout: 15_000 });
 

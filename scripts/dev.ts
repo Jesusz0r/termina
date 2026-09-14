@@ -7,6 +7,8 @@ import { build } from "esbuild";
 import { createServer } from "vite";
 import { patchBundleName } from "./patch-bundle-name.ts";
 import { buildCore } from "./build-core.ts";
+import { generateThemeTokens } from "./theme-tokens.ts";
+import { TERMINA_BUNDLES, terminaBuildOptions } from "./bundle-defs.ts";
 
 const require = createRequire(import.meta.url);
 // Under plain Node, `require("electron")` resolves to the path of the Electron binary.
@@ -15,53 +17,14 @@ const electronPath = require("electron");
 patchBundleName();
 buildCore();
 
+// styles.css is the one place theme values are written; regenerate the module
+// the terminal and Monaco palettes import, exactly like the production build.
+// Without this, editing theme colors and restarting dev leaves the stylesheet
+// and the generated palette inconsistent.
+generateThemeTokens();
+
 const run = async () => {
-  await Promise.all([
-    build({
-      bundle: true,
-      sourcemap: true,
-      target: "node22",
-      external: ["electron", "electron-updater", "@lydell/node-pty", "@lydell/node-pty-darwin-arm64", "@lydell/node-pty-win32-x64", "@lydell/node-pty-linux-x64"],
-      logLevel: "info",
-      entryPoints: ["electron/main.ts"],
-      platform: "node",
-      format: "esm",
-      outfile: "dist-electron/main.mjs",
-    }),
-    build({
-      bundle: true,
-      sourcemap: true,
-      target: "node22",
-      external: ["electron", "electron-updater", "@lydell/node-pty", "@lydell/node-pty-darwin-arm64", "@lydell/node-pty-win32-x64", "@lydell/node-pty-linux-x64"],
-      logLevel: "info",
-      entryPoints: ["electron/preload.ts"],
-      platform: "node",
-      format: "cjs",
-      outfile: "dist-electron/preload.cjs",
-    }),
-    build({
-      bundle: true,
-      sourcemap: true,
-      target: "node22",
-      external: ["electron", "@lydell/node-pty", "@lydell/node-pty-darwin-arm64", "@lydell/node-pty-win32-x64", "@lydell/node-pty-linux-x64"],
-      logLevel: "info",
-      entryPoints: ["electron/session-worker.ts"],
-      platform: "node",
-      format: "esm",
-      outfile: "dist-electron/session-worker.mjs",
-    }),
-    build({
-      bundle: true,
-      sourcemap: true,
-      target: "node22",
-      external: ["electron", "@lydell/node-pty", "@lydell/node-pty-darwin-arm64", "@lydell/node-pty-win32-x64", "@lydell/node-pty-linux-x64"],
-      logLevel: "info",
-      entryPoints: ["agent-core/main.ts"],
-      platform: "node",
-      format: "esm",
-      outfile: "dist-electron/agent-core.mjs",
-    }),
-  ]);
+  await Promise.all(Object.values(TERMINA_BUNDLES).map((def) => build(terminaBuildOptions(def))));
 
   const server = await createServer({
     configFile: "vite.config.ts",

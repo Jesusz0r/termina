@@ -4,54 +4,23 @@
 import { build } from "esbuild";
 import { buildCore } from "./build-core.ts";
 import { generateThemeTokens } from "./theme-tokens.ts";
+import { TERMINA_BUNDLES, terminaBuildOptions } from "./bundle-defs.ts";
 
 // styles.css is the one place theme values are written; the terminal and
 // Monaco palettes import them from the generated module (fresh every build).
 generateThemeTokens();
 
-const shared = {
-  bundle: true,
-  sourcemap: true,
-  target: "node22",
-  external: ["electron", "electron-updater", "@lydell/node-pty", "@lydell/node-pty-darwin-arm64", "@lydell/node-pty-win32-x64", "@lydell/node-pty-linux-x64"],
-  logLevel: "info",
-};
-
-await build({
-  ...shared,
-  entryPoints: ["electron/main.ts"],
-  platform: "node",
-  format: "esm",
-  outfile: "dist-electron/main.mjs",
-});
+await build(terminaBuildOptions(TERMINA_BUNDLES.main));
 
 // The Rust snapshot core replaces the old snapshot worker thread.
 buildCore();
 
 // The session worker runs core session-bundle work off the main thread.
-await build({
-  ...shared,
-  entryPoints: ["electron/session-worker.ts"],
-  platform: "node",
-  format: "esm",
-  outfile: "dist-electron/session-worker.mjs",
-});
+await build(terminaBuildOptions(TERMINA_BUNDLES.sessionWorker));
 
-await build({
-  ...shared,
-  entryPoints: ["agent-core/main.ts"],
-  platform: "node",
-  format: "esm",
-  outfile: "dist-electron/agent-core.mjs",
-});
+await build(terminaBuildOptions(TERMINA_BUNDLES.agentCore));
 
 // Preload must be CommonJS: sandboxed preloads cannot load ESM.
-await build({
-  ...shared,
-  entryPoints: ["electron/preload.ts"],
-  platform: "node",
-  format: "cjs",
-  outfile: "dist-electron/preload.cjs",
-});
+await build(terminaBuildOptions(TERMINA_BUNDLES.preload));
 
 console.log("✓ main + preload built");

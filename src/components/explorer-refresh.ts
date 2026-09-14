@@ -8,6 +8,7 @@
  */
 import { isPathDescendant, parentPath } from "../explorer-file";
 import { pathBasename } from "../../shared/types";
+import { toast } from "./modals";
 import type { ExplorerEntry } from "../../shared/types";
 import type { DirState, DirView } from "./explorer-rows";
 
@@ -120,7 +121,11 @@ export class ExplorerRefresh {
       empty.type = "button";
       empty.className = "explorer-empty";
       empty.textContent = "Open folder";
-      empty.addEventListener("click", () => void window.termina.projectOpen());
+      empty.addEventListener("click", () => {
+        void window.termina.projectOpen().catch((err) => {
+          toast(`could not open a project: ${(err as Error).message}`, "warning");
+        });
+      });
       this.host.treeEl.appendChild(empty);
       return;
     }
