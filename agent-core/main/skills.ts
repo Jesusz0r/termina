@@ -14,8 +14,9 @@ const PROJECT_AGENTS_CAP = 24_576;
 export const SKILL_XML_CAP = 8_192;
 
 function parseFrontmatter(text: string): Record<string, string> {
-  if (!text.startsWith("---")) return {};
-  const rest = text.startsWith("---\n") || text.startsWith("---\r\n") ? text.slice(text.indexOf("\n") + 1) : text.slice(3);
+  const normalized = text.replace(/\r\n/g, "\n");
+  if (!normalized.startsWith("---")) return {};
+  const rest = normalized.startsWith("---\n") ? normalized.slice(normalized.indexOf("\n") + 1) : normalized.slice(3);
   const end = rest.search(/\n---(?:\n|$)/);
   if (end < 0) return {};
   const block = rest.slice(0, end);
