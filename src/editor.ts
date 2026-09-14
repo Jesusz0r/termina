@@ -7,6 +7,7 @@
  * when idle you can edit and save with Cmd+S.
  */
 import * as monaco from "monaco-editor";
+import { canonicalizePath } from "../shared/canonical-path";
 import { cssFontFamily, pathBasename, type ProjectWorkspaceRef, type ThemeId } from "../shared/types";
 import { decideUnsavedClose, unsavedCloseMessage } from "../shared/unsaved-close";
 import { languageForPath } from "./editor-language";
@@ -290,7 +291,7 @@ export class EditorManager {
     const preview = opts.preview ?? true;
     const owner = opts.owner ?? this.ownerProvider();
     if (!owner) throw new Error("file owner is unavailable");
-    const key = path;
+    const key = canonicalizePath(path);
     const existing = this.tabs.get(key);
     if (existing) {
       // Pin the preview when explicitly requested (for example double-click).
@@ -305,7 +306,7 @@ export class EditorManager {
     // Keep a replacement tab in the map before closing the previous preview.
     // Closing the last tab first would collapse the editor, then expand it again.
     const replacing = preview && this.previewKey && this.previewKey !== key ? this.previewKey : null;
-    const lease = acquireSharedFileModel(path, owner);
+    const lease = acquireSharedFileModel(key, owner);
     const model = lease.model;
     const tab = this.makeTab(key, model, owner, lease.release);
     if (preview) {
@@ -328,13 +329,9 @@ export class EditorManager {
     this.syncEmptyState();
 
     const initialVersionId = model.getAlternativeVersionId();
-    const res = await window.termina.openFile(path, owner);
+    const res = await window.termina.openFile(key, owner);
     if (res.ok) {
       const current = this.tabs.get(key);
-      // Learn the canonical alias whenever the tab still owns this model —
-      // above the version check, so the lost-race conflict branch learns it
-      // too and the tab keeps hearing canonical-path watcher pushes.
-      if (current?.model === model && res.path !== key) this.canonicalKeys.set(res.path, key);
       if (current?.model === model && model.getAlternativeVersionId() === initialVersionId) {
         model.setValue(res.content);
         tab.savedVersionId = model.getAlternativeVersionId();
@@ -382,16 +379,11 @@ export class EditorManager {
     this.previewKey = null;
   }
 
-  /** Canonical-path aliases per tab key. Main pushes canonical paths
-   *  (/private/tmp on macOS); tabs are keyed by the opened path. The open
-   *  response returns the canonical path, so every tab learns its alias. */
-  private canonicalKeys = new Map<string, string>();
-
-  /** The tab key for a pushed path: the path itself or its canonical alias. */
+  /** The tab key for a pushed path. Paths are canonicalized once so macOS
+   *  aliases (`/tmp` → `/private/tmp`) match the keys main already sends. */
   private resolveKey(path: string): string | null {
-    if (this.tabs.has(path)) return path;
-    const aliased = this.canonicalKeys.get(path);
-    return aliased !== undefined && this.tabs.has(aliased) ? aliased : null;
+    const key = canonicalizePath(path);
+    return this.tabs.has(key) ? key : null;
   }
 
   /** Update model content from the watcher (live edits). A model with
@@ -651,9 +643,6 @@ export class EditorManager {
   closeTab(key: string): void {
     const tab = this.tabs.get(key);
     if (!tab) return;
-    for (const [canonical, mapped] of this.canonicalKeys) {
-      if (mapped === key) this.canonicalKeys.delete(canonical);
-    }
     tab.contentListener?.dispose();
     tab.contentListener = null;
     tab.releaseModel();

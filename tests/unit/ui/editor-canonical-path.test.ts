@@ -21,32 +21,29 @@ function methodBody(source: string, signature: string): string {
   throw new Error(`unclosed ${signature}`);
 }
 
-describe("editor canonical alias on slow initial read (refs #209)", () => {
+describe("editor keys tabs by canonicalizePath (refs #273)", () => {
   const openFile = () =>
     methodBody(
       editor,
       "async openFile(path: string, opts: { preview?: boolean; owner?: ProjectWorkspaceRef; line?: number; column?: number } = {}): Promise<void>",
     );
 
-  it("learns the alias above the version check, so the lost-race branch learns it too", () => {
+  it("canonicalizes the opened path before the tab exists, not after the read", () => {
     const body = openFile();
-    const learn = body.indexOf("this.canonicalKeys.set(res.path, key)");
-    const versionCheck = body.indexOf("model.getAlternativeVersionId() === initialVersionId");
-    expect(learn).toBeGreaterThanOrEqual(0);
-    expect(versionCheck).toBeGreaterThanOrEqual(0);
-    expect(learn).toBeLessThan(versionCheck);
-    // The conflict branch itself is intact: the race still surfaces, minus the deaf tab.
-    expect(body).toContain("lost a race with a user edit");
+    expect(body).toContain("const key = canonicalizePath(path)");
+    expect(body.indexOf("const key = canonicalizePath(path)")).toBeLessThan(body.indexOf("this.tabs.get(key)"));
+    expect(body).toContain("acquireSharedFileModel(key, owner)");
+    expect(body).toContain("window.termina.openFile(key, owner)");
   });
 
-  it("learns only while the tab still owns the model", () => {
-    const body = openFile();
-    expect(body).toContain("if (current?.model === model && res.path !== key) this.canonicalKeys.set(res.path, key)");
+  it("has no alias table or learn-after-open path", () => {
+    expect(editor).not.toContain("canonicalKeys");
+    expect(editor).not.toContain("canonicalKeys.set");
+    expect(openFile()).not.toContain("res.path !== key");
   });
 
-  it("keeps openFile as the single learning site with resolveKey routing", () => {
-    expect(editor.match(/canonicalKeys\.set\(/g)?.length).toBe(1);
-    expect(methodBody(editor, "private resolveKey(path: string): string | null")).toContain("canonicalKeys.get(path)");
+  it("routes watcher and deletion pushes through canonicalizePath", () => {
+    expect(methodBody(editor, "private resolveKey(path: string): string | null")).toContain("canonicalizePath(path)");
     for (const signature of [
       "updateContent(path: string, content: string, changedLines?: number[]): void",
       "closeIfOpen(path: string): void",
